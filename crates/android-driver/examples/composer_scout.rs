@@ -93,19 +93,34 @@ async fn main() -> anyhow::Result<()> {
         say("usage: composer_scout <serial> --album \"<tên album>\" [--images 3]");
         return Ok(());
     };
+    // The value after a flag, unless that value is itself a flag — `--images --album x` used
+    // to read `--album` as the count and then default silently.
     let value = |flag: &str| -> Option<String> {
         args.iter()
             .position(|arg| arg == flag)
             .and_then(|at| args.get(at + 1))
+            .filter(|value| !value.starts_with("--"))
             .cloned()
     };
     let Some(album) = value("--album") else {
         say("--album is required: the name of an album this phone's picker already shows");
         return Ok(());
     };
-    let images: usize = value("--images")
-        .and_then(|raw| raw.parse().ok())
-        .unwrap_or(3);
+    // **A value this cannot read is refused, not defaulted.** `--images abc`, `--images -1`
+    // and `--images --album …` all became three, which is the wrong number silently — and the
+    // number decides how many cells get tapped on a real phone.
+    let images: usize = match value("--images") {
+        None => 3,
+        Some(raw) => match raw.parse::<usize>() {
+            Ok(count) if (1..=12).contains(&count) => count,
+            _ => {
+                say(&format!(
+                    "--images {raw:?} không đọc được; cần một số từ 1 đến 12"
+                ));
+                return Ok(());
+            }
+        },
+    };
 
     let driver = AndroidDriver::new(&common::repo_config())?;
     let package = driver.resolve_tiktok_package(serial).await?;

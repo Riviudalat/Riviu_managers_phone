@@ -1040,9 +1040,14 @@ async fn post_one_assignment(
             );
         }
     };
-    // **The one place the two composers meet**, and the partition is the same signal the
-    // interaction path uses. A device that reports element bounds is driven by measured
-    // labels; one that does not is driven by the pixel coordinates below.
+    if let Some(refusal) = refuse_when_the_route_authorities_disagree(
+        &assignment.udid,
+        control.reports_element_bounds(&assignment.udid),
+        session.supports_element_bounds(),
+    ) {
+        let cleanup = tidy_up_the_imported_media(control, context, &assignment.udid, &import).await;
+        return fold_cleanup_into(refusal, cleanup);
+    }
     let action_result = if session.supports_element_bounds() {
         post_through_the_composer(
             control,
@@ -1112,6 +1117,34 @@ fn fold_cleanup_into(
 /// refused before opening anything. The composer can tell those apart
 /// ([`riviu_core::tiktok_composer::ComposerVerdict::may_retry`]), so the loop must stop
 /// throwing that away.
+/// **The gate and the dispatch have to agree about which composer this is.**
+///
+/// Two authorities answer that question. [`DeviceControlPlane::reports_element_bounds`] is a
+/// *preflight* answer, given before any session exists, and it is what the campaign gate and
+/// the per-device image ceiling were decided from. [`riviu_core::UiSession::supports_element_bounds`]
+/// is the live session's own answer, and the driver contract says that one is authoritative.
+///
+/// The contract also allows them to differ, and nothing checked. A `true` preflight followed by
+/// a `false` session passed the measured-label gate and then pressed iOS pixel coordinates at a
+/// screen nobody had measured; the reverse transferred media to a phone whose build was never
+/// checked at all. Neither is a state to publish from.
+///
+/// `None` when they agree. Otherwise a refusal — **`NothingPublished`, deliberately**: nothing
+/// has reached the composer at this point, so the campaign stays retryable rather than becoming
+/// permanently unclaimable over a disagreement that a re-read may not repeat.
+fn refuse_when_the_route_authorities_disagree(
+    udid: &str,
+    preflight: bool,
+    session: bool,
+) -> Option<PostOutcome> {
+    (preflight != session).then(|| {
+        PostOutcome::NothingPublished(format!(
+            "{udid}: máy báo hai câu trả lời khác nhau về cách điều khiển (trước phiên: \
+             {preflight}, trong phiên: {session}) — không đăng khi chưa biết composer nào"
+        ))
+    })
+}
+
 fn state_for_outcome(
     outcome: &PostOutcome,
 ) -> (riviu_core::PublishCampaignState, Option<&'static str>) {
@@ -1295,6 +1328,32 @@ async fn wait_for_post_frame(
 /// A post leaving the composer is only a transport transition. TikTok can
 /// replace that transition with an account-status alert, which must remain an
 /// uncertain effect rather than being reported as a successful post.
+///
+/// # This screen is only ever read on macOS, and the caller's success is a colour guess
+///
+/// **Off macOS this returns `false` for every frame, including a frame that is an
+/// account-status alert.** The reader is Vision OCR, which exists on no other host, and there
+/// is no iOS hardware on this fleet to measure a replacement against. So on the Windows machine
+/// this project is developed and run on, the check is not a check.
+///
+/// That matters because of what the caller does with it. [`wait_for_post_frame`] decides a post
+/// succeeded from two signals — the frame changed, and the red of the Post button left the
+/// bottom-right corner — and an account-status alert satisfies both: it is a different screen,
+/// and it has no red Post button on it. With OCR unavailable, a blocked post is recorded as
+/// `Posted`, with a `frameSha256` of the alert.
+///
+/// Two things keep that from being silent rather than fixing it, and neither is a fix:
+///
+/// * The evidence written by the pixel route names how the verdict was reached
+///   (`postConfirmedBy`) and whether the alert was screened for at all
+///   (`accountLockScreened`), so a run on this host is distinguishable afterwards from a run on
+///   a host that could read the screen.
+/// * The route is unreachable for this fleet's twenty phones: they are Android, and
+///   [`route_of`] sends them through the measured composer, which confirms a post by locating
+///   controls rather than by counting red pixels.
+///
+/// Measuring a text-free signal for the alert — its layout, or a button label read through the
+/// element tree rather than OCR — is the real fix, and it needs an iOS device to measure on.
 async fn frame_reports_account_lock(frame: &[u8]) -> bool {
     #[cfg(target_os = "macos")]
     {
@@ -1616,6 +1675,11 @@ async fn post_through_the_pixel_grid(
             "captionSha256": bundle.caption_sha256,
             "frameSha256": frame_sha256(&posted),
             "postButtonRednessBefore": post_red_before,
+            // **Say what this verdict is made of.** It is not a located control; it is a frame
+            // that changed and lost its red corner, and on a host without OCR nothing screened
+            // out an account-status alert. See [`frame_reports_account_lock`].
+            "postConfirmedBy": "frame_change_and_redness_drop",
+            "accountLockScreened": cfg!(target_os = "macos"),
         }))
     }
     .await;
@@ -1734,6 +1798,7 @@ mod tests {
     use super::max_images_for;
     use super::refuse_assignments_whose_bundle_is_too_large;
     use super::refuse_devices_whose_composer_is_not_measured;
+    use super::refuse_when_the_route_authorities_disagree;
     use super::state_for_outcome;
     use super::PostOutcome;
     use super::IOS_PIXEL_GRID_MAX_IMAGES;
@@ -1742,6 +1807,59 @@ mod tests {
     use std::fs;
     use std::time::Duration;
     use uuid::Uuid;
+
+    /// **Two readings of the same phone, and the post waits until they agree.**
+    ///
+    /// The campaign gate reads `reports_element_bounds` before any session exists; the
+    /// dispatch reads `supports_element_bounds` off the live session. The driver contract
+    /// permits those to differ, and nothing compared them: a `true` preflight with a `false`
+    /// session cleared the measured-label gate and then pressed iOS pixel coordinates.
+    #[test]
+    fn a_phone_that_answers_the_route_question_twice_over_does_not_post() {
+        for (preflight, session) in [(true, false), (false, true)] {
+            let refusal = refuse_when_the_route_authorities_disagree("SN-1", preflight, session)
+                .expect("a disagreement is a refusal");
+            let PostOutcome::NothingPublished(reason) = &refusal else {
+                panic!("a disagreement reached no composer, so it published nothing");
+            };
+            assert!(
+                reason.contains("SN-1"),
+                "the operator has to know which phone: {reason}"
+            );
+            // Both readings, in the message. "They disagreed" without the two values sends
+            // whoever reads it back to the phone to take the measurement again.
+            assert!(
+                reason.contains(&format!("{preflight}")) && reason.contains(&format!("{session}")),
+                "both readings belong in the message: {reason}"
+            );
+        }
+    }
+
+    /// And a disagreement leaves the campaign runnable again.
+    ///
+    /// `Unknown` is the permanently-unclaimable state, kept for a phone that may have posted.
+    /// Nothing has reached the composer here, so spending it on a disagreement would strand a
+    /// campaign that a second run might drive perfectly well.
+    #[test]
+    fn a_route_disagreement_is_retryable_not_uncertain() {
+        let refusal =
+            refuse_when_the_route_authorities_disagree("SN-1", true, false).expect("refusal");
+        assert_eq!(
+            state_for_outcome(&refusal).0,
+            riviu_core::PublishCampaignState::FailedBeforeDispatch
+        );
+    }
+
+    /// Agreement — either way — is not a refusal.
+    #[test]
+    fn two_authorities_that_agree_let_the_post_through() {
+        for both in [true, false] {
+            assert!(
+                refuse_when_the_route_authorities_disagree("SN-1", both, both).is_none(),
+                "agreeing on {both} is the ordinary case"
+            );
+        }
+    }
 
     fn test_bundle(id: &str) -> riviu_core::PublishBundle {
         riviu_core::PublishBundle {
@@ -2021,6 +2139,40 @@ mod tests {
             .map(|line| line.trim())
             .filter(|line| !line.is_empty() && !line.starts_with("//"))
             .collect()
+    }
+
+    /// **And `post_one_assignment` actually asks, before it picks a composer.**
+    ///
+    /// The three tests above prove what the refusal says; none of them proves it is ever
+    /// reached. A pure decision nothing calls is the exact shape of the bug this replaced —
+    /// two readings existed, and no line compared them. So this reads the function's own body:
+    /// the check has to appear, and it has to appear **before** the branch on
+    /// `supports_element_bounds`, because after that branch the route is already chosen.
+    #[test]
+    fn the_post_path_reconciles_the_two_route_authorities_before_it_branches() {
+        let body = code_of("async fn post_one_assignment(");
+        let asks = body
+            .iter()
+            .position(|line| line.contains("refuse_when_the_route_authorities_disagree"))
+            .expect("post_one_assignment must reconcile the two readings");
+        let branches = body
+            .iter()
+            .position(|line| line.contains("if session.supports_element_bounds()"))
+            .expect("post_one_assignment must still branch on the session's answer");
+        assert!(
+            asks < branches,
+            "the check is at line {asks} of the body and the branch at {branches}; \
+             a check after the branch has nothing left to refuse"
+        );
+        // And the media is taken back off the phone on that path — it was imported before any
+        // of this ran, and a refusal that leaves the campaign's images in the gallery is a
+        // refusal the operator has to clean up by hand on twenty phones.
+        assert!(
+            body[asks..branches]
+                .iter()
+                .any(|line| line.contains("tidy_up_the_imported_media")),
+            "a route refusal still has to clear the imported media"
+        );
     }
 
     /// **The fan-out is bounded by the stream budget and staggered.**

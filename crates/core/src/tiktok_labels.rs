@@ -723,13 +723,34 @@ impl TikTokLabels {
 
 /// Labels that are unresolved Android resource references, keyed by app version.
 ///
-/// One entry means somebody opened that control on that exact `versionName` and copied
-/// the id out. A version with no entry makes those controls [`None`] — the flow refuses
+/// One entry means somebody opened that control on a build reporting that `versionName` and
+/// copied the id out. A version with no entry makes those controls [`None`] — the flow refuses
 /// rather than tapping an id that may since have been reassigned to another button.
+///
+/// **`versionName` is a weaker key than it looks, and this is deliberate.** The identity of an
+/// Android build is `versionName` *plus* `versionCode` — [`parse_version_code`] exists, and a
+/// [`crate::DeviceCapabilitySnapshot`] records both for exactly this reason: a hot fix can ship
+/// under an unchanged `versionName`. This table keys on the name alone, so a phone running a
+/// rebuild of `38.3.2` matches a row measured on a different `38.3.2` and is handed ids that may
+/// have moved.
+///
+/// The alternative was a `version_code` field on every row set to `None`, because the fleet's
+/// dumps were taken before the code was being recorded and nobody can now say which build each
+/// row came from. A field that is always `None` is not a check; it is the appearance of one. So
+/// the key stays as measured, and the exposure is written down here instead:
+///
+/// * The blast radius is one wrong tap on a control whose id moved, not a wrong post — every
+///   resource-keyed control today (`comment_send`, `picker_album_menu`) sits *before* anything
+///   irreversible, and the publish path confirms the album by reading it back.
+/// * Re-measuring is the fix, not a wider key: [`crate::tiktok_labels::parse_version_code`] is
+///   already called on the fleet, so a future row can record the code it was read on and this
+///   note can shrink to those rows that still cannot.
 #[derive(Debug, Clone, Copy)]
 pub struct TikTokResourceLabels {
     pub package: &'static str,
     /// Exact `versionName`, as `dumpsys package <pkg> | grep versionName` prints it.
+    ///
+    /// Not a build identity on its own — see the note on this struct.
     pub app_version: &'static str,
     pub measured_on: &'static str,
     comment_send: Option<LabelMatch>,

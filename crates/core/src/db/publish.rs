@@ -678,23 +678,49 @@ impl Database {
                 crate::publish::PublishCampaignState::Uncertain
             }
         };
-        let conn = self.conn()?;
-        conn.execute(
+        let error_code = match outcome {
+            PublishRunOutcome::AllPosted => None,
+            PublishRunOutcome::NothingPublished => Some("post_refused_before_dispatch"),
+            PublishRunOutcome::SomethingMayBeLive => Some("post_or_cleanup_failed"),
+        };
+        // **The event row goes in with the state, in one transaction.** Every other campaign
+        // transition records one; this wrote the row and bumped the revision without it, so a
+        // campaign's history stopped at `posting` while the campaign itself read `succeeded` —
+        // an audit gap on the one action in this project that cannot be undone.
+        let mut conn = self.conn()?;
+        let transaction = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let now = Utc::now().to_rfc3339();
+        let moved = transaction.execute(
             "UPDATE publish_campaigns
              SET state=?1,error_code=?2,revision=revision+1,updated_at=?3
              WHERE id=?4 AND state=?5",
             params![
                 wanted.as_str(),
-                match outcome {
-                    PublishRunOutcome::AllPosted => None,
-                    PublishRunOutcome::NothingPublished => Some("post_refused_before_dispatch"),
-                    PublishRunOutcome::SomethingMayBeLive => Some("post_or_cleanup_failed"),
-                },
-                Utc::now().to_rfc3339(),
+                error_code,
+                now,
                 id,
                 crate::publish::PublishCampaignState::Posting.as_str(),
             ],
         )?;
+        if moved > 0 {
+            let revision: i64 = transaction.query_row(
+                "SELECT revision FROM publish_campaigns WHERE id=?1",
+                params![id],
+                |row| row.get(0),
+            )?;
+            transaction.execute(
+                "INSERT INTO publish_events(campaign_id,revision,kind,payload_json,created_at) \
+                 VALUES (?1,?2,'state',?3,?4)",
+                params![
+                    id,
+                    revision,
+                    serde_json::json!({"state": wanted.as_str(), "errorCode": error_code})
+                        .to_string(),
+                    now
+                ],
+            )?;
+        }
+        transaction.commit()?;
         self.publish_campaign_state(id)
     }
 
@@ -1327,6 +1353,98 @@ mod claim_tests {
             db.claim_publish_campaign_for_posting(&record.id)
                 .expect("claim"),
             "a campaign that published nothing must be runnable again"
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// **The end of a run is in the history, not only in the row.**
+    ///
+    /// Every other transition on a campaign writes a `publish_events` row beside the state.
+    /// This one — the only transition that can follow an irreversible post — bumped the
+    /// revision and wrote nothing, so a campaign read `succeeded` while its own history
+    /// stopped at `posting`. The revision moving with no event behind it is worse than no
+    /// revision at all: a reader diffing revisions sees a change it cannot explain.
+    #[test]
+    fn finishing_a_run_records_the_event_that_ended_it() {
+        let (db, path) = fixture();
+        for (outcome, state, error_code) in [
+            (
+                PublishRunOutcome::AllPosted,
+                "succeeded",
+                serde_json::Value::Null,
+            ),
+            (
+                PublishRunOutcome::SomethingMayBeLive,
+                "uncertain",
+                serde_json::Value::String("post_or_cleanup_failed".into()),
+            ),
+        ] {
+            let record = campaign(&db, &[&format!("phone-{outcome:?}")]);
+            assert!(db
+                .claim_publish_campaign_for_posting(&record.id)
+                .expect("claim"));
+            db.finish_publish_campaign(&record.id, outcome)
+                .expect("finish");
+
+            let detail = db
+                .get_publish_campaign(&record.id)
+                .expect("read back")
+                .expect("present");
+            let last = detail.events.last().expect("a run always leaves an event");
+            assert_eq!(last.kind, "state", "{outcome:?}");
+            let payload: serde_json::Value =
+                serde_json::from_str(&last.payload_json).expect("payload is json");
+            assert_eq!(
+                payload["state"], state,
+                "{outcome:?} payload names the state"
+            );
+            assert_eq!(
+                payload["errorCode"], error_code,
+                "{outcome:?} payload carries the reason"
+            );
+            // The event has to sit at the revision the write produced, or a reader cannot
+            // line the two up.
+            assert_eq!(
+                last.revision,
+                db.publish_campaign_revision(&record.id).expect("revision"),
+                "{outcome:?} event revision matches the campaign"
+            );
+        }
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// **A finish that changes nothing writes nothing.**
+    ///
+    /// The `UPDATE` names `posting` in its `WHERE`, so a second finish — a retry, a task that
+    /// woke up twice — moves no row. If the event went in regardless, the history would grow a
+    /// second ending at a revision that never existed.
+    #[test]
+    fn a_finish_that_moves_no_row_adds_no_event() {
+        let (db, path) = fixture();
+        let record = campaign(&db, &["phone-a"]);
+        assert!(db
+            .claim_publish_campaign_for_posting(&record.id)
+            .expect("claim"));
+        db.finish_publish_campaign(&record.id, PublishRunOutcome::AllPosted)
+            .expect("finish");
+        let after_first = db
+            .get_publish_campaign(&record.id)
+            .expect("read back")
+            .expect("present")
+            .events
+            .len();
+
+        db.finish_publish_campaign(&record.id, PublishRunOutcome::AllPosted)
+            .expect("second finish is a no-op, not an error");
+
+        assert_eq!(
+            db.get_publish_campaign(&record.id)
+                .expect("read back")
+                .expect("present")
+                .events
+                .len(),
+            after_first,
+            "a no-op finish must not invent an ending"
         );
         let _ = std::fs::remove_file(path);
     }

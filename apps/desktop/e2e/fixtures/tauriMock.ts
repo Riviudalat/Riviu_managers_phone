@@ -762,6 +762,11 @@ export async function installTauriMock(
     commandHandlers.set("update_install", () => null);
     commandHandlers.set("list_installed_apps", () => []);
     commandHandlers.set("list_groups", () => []);
+    // The publish page reads its campaign list on mount, and now re-reads it on every
+    // `publishUpdated`. Unregistered, that rejected and the page carried a red
+    // `Unknown mock command: publish_list` through its own screenshot baseline — the same
+    // unfinished-fixture shape as the Settings block below, pinned into a committed png.
+    commandHandlers.set("publish_list", () => []);
     // Everything the Settings page asks for on mount. Absent, each of these rejected and the
     // page rendered `Unknown mock command: …` in red — and because five of them race, *which*
     // name landed in the banner varied, so the page's screenshot baseline was pinning a

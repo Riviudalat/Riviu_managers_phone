@@ -24,3 +24,11 @@ rand = "0.8"
 
 [lints]
 workspace = true
+
+# `probe` carries the one decision in the measuring tools that an operator acts on blind:
+# which unlabelled rectangle beside the shutter to tap. It got that order wrong, so the
+# ordering is a pure function with tests, and this makes `cargo test` run them.
+[[example]]
+name = "probe"
+path = "examples/probe.rs"
+test = true

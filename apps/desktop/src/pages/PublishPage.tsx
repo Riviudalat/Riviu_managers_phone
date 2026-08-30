@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { UnlistenFn } from "@tauri-apps/api/event";
 import {
   listenRiviuEvents,
@@ -31,7 +31,21 @@ export function PublishPage({ devices, selected, onSelectUdids }: SelProps) {
   const [msg, setMsg] = useState<string | null>(null);
   const targets = targetsOf(selected, devices);
 
-  const reload = () => publishList().then(setCampaigns).catch((e) => setMsg(describeError(e)));
+  // **Sequenced, because a run emits several events close together.** Each reload takes a
+  // ticket and only the newest ticket may write: without that, reload A (started while a
+  // campaign was `posting`) can resolve *after* reload B (started once it was `succeeded`) and
+  // put the older state back on screen, where it stays until the operator navigates away.
+  const reloadTicket = useRef(0);
+  const reload = () => {
+    const ticket = ++reloadTicket.current;
+    return publishList()
+      .then((next) => {
+        if (ticket === reloadTicket.current) setCampaigns(next);
+      })
+      .catch((e) => {
+        if (ticket === reloadTicket.current) setMsg(describeError(e));
+      });
+  };
   useEffect(() => {
     reload();
     // **Follow a run while it runs.** Publish emitted no event at all before, so a campaign

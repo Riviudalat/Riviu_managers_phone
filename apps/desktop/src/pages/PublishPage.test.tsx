@@ -2,9 +2,10 @@ import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import { listenRiviuEvents, publishList } from "../api";
 import { PublishPage } from "./PublishPage";
 import { resetToasts } from "../toastStore";
-import type { DeviceInfo, PublishBundle, PublishFolderManifest } from "../types";
+import type { AppEvent, DeviceInfo, PublishBundle, PublishFolderManifest } from "../types";
 
 function bundle(id: string, name: string): PublishBundle {
   return {
@@ -149,5 +150,89 @@ describe("publish, bundle to phone", () => {
       "the campaign pairs bundles with phones in a different order than the screen promised",
     ).toEqual(shown);
     expect(dispatchedTargets).toEqual(["PHONE-A", "PHONE-B", "PHONE-C"]);
+  });
+
+  /**
+   * **The last answer on screen has to be the newest one asked for.**
+   *
+   * A run emits `publishUpdated` several times in a few seconds — one per phone as its
+   * assignment moves — and each one started its own `publishList()` with nothing sequencing
+   * them. Two commands in flight over the same USB bus do not come back in the order they went
+   * out, so the reload started while the campaign was `posting` could resolve *after* the one
+   * started once it read `succeeded`, and put `posting` back on screen.
+   *
+   * That state then stays. Nothing else re-reads until the next event, and the last event of a
+   * run is the one that says it finished — so the page an operator is watching ends the run
+   * showing a campaign still working, on phones that are already idle.
+   */
+  it("keeps the newest reload when an older one answers late", async () => {
+    const listen = vi.mocked(listenRiviuEvents);
+    const list = vi.mocked(publishList);
+    // The earlier test in this file mounted the page too, and the mock counts calls
+    // across both. The sequencing question is about *which* call answers last, so the
+    // count has to start from this render.
+    list.mockReset();
+    let fire: (event: AppEvent) => void = () => {};
+    listen.mockImplementation(async (handler: (event: AppEvent) => void) => {
+      fire = handler;
+      return () => undefined;
+    });
+
+    const campaign = (state: string) => [
+      {
+        id: "campaign-1",
+        requestId: "req-1",
+        sourceRoot: "C:/carousels",
+        state,
+        runAt: null,
+        visibility: "public",
+        cleanupPolicy: "afterPost",
+        assignments: [],
+        createdAt: "2026-08-18T00:00:00.000Z",
+        updatedAt: "2026-08-18T00:00:00.000Z",
+        errorCode: null,
+      },
+    ];
+
+    // Mount reads an empty list; then two events, and the answers come back swapped.
+    let releasePosting = () => {};
+    let releaseSucceeded = () => {};
+    list.mockResolvedValueOnce([] as never);
+    list.mockReturnValueOnce(
+      new Promise((resolve) => {
+        releasePosting = () => resolve(campaign("posting") as never);
+      }) as never,
+    );
+    list.mockReturnValueOnce(
+      new Promise((resolve) => {
+        releaseSucceeded = () => resolve(campaign("succeeded") as never);
+      }) as never,
+    );
+
+    render(<PublishPage devices={devices} selected={[]} onSelectUdids={() => {}} />);
+    await waitFor(() => expect(list).toHaveBeenCalledTimes(1));
+
+    fire({ type: "publishUpdated", campaignId: "campaign-1", revision: 2 });
+    await waitFor(() => expect(list).toHaveBeenCalledTimes(2));
+    fire({ type: "publishUpdated", campaignId: "campaign-1", revision: 3 });
+    await waitFor(() => expect(list).toHaveBeenCalledTimes(3));
+
+    releaseSucceeded();
+    await waitFor(() => expect(screen.getByText("succeeded")).toBeTruthy());
+    releasePosting();
+
+    // The late answer is discarded rather than rendered. Waiting first would pass even
+    // without the guard, so this settles the microtask queue and then looks.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(
+      screen.queryByText("posting"),
+      "a reload that started earlier repainted the page over a newer one",
+    ).toBeNull();
+    expect(screen.getByText("succeeded")).toBeTruthy();
+
+    list.mockReset();
+    list.mockResolvedValue([] as never);
+    listen.mockReset();
+    listen.mockImplementation(async () => () => undefined);
   });
 });

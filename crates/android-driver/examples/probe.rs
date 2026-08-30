@@ -2347,7 +2347,6 @@ async fn measure_gallery_entry(
     labels: TikTokControls,
     which: usize,
 ) -> anyhow::Result<()> {
-    const KEYCODE_BACK: i64 = 4;
     let Some(opener) = labels.label(TikTokControl::ComposerOpen) else {
         anyhow::bail!("no measured composer opener on this build");
     };
@@ -2358,6 +2357,30 @@ async fn measure_gallery_entry(
     ui.tap(element.centre()).await?;
     tokio::time::sleep(Duration::from_millis(4_000)).await;
 
+    // **Past this line the composer is open, so every exit walks back out.**
+    //
+    // The reading below used to run in this function, with six `?` in it: an unreadable
+    // hierarchy, a screen with no anchor, a tap that failed to reach the phone. Each of those
+    // returned straight past the Back loop at the end, leaving the phone sitting in the
+    // composer — and the next command an operator runs starts from a screen it does not expect.
+    // Backing out is the one part that has to happen whatever the reading did.
+    let measured = read_the_gallery_candidates(session, ui, labels, which).await;
+    if let Err(error) = &measured {
+        println!("  ! {error:#}");
+    }
+    let out = back_out_to_the_feed(session, ui, labels).await;
+    out.and(measured)
+}
+
+/// Read and print the unlabelled candidates beside the shutter, tapping the one asked for.
+///
+/// Called only with the composer already open, and never responsible for closing it.
+async fn read_the_gallery_candidates(
+    session: &riviu_android_driver::AndroidUiSession,
+    ui: &dyn UiSession,
+    labels: TikTokControls,
+    which: usize,
+) -> anyhow::Result<()> {
     let source = session.agent().source().await?;
     let nodes = scan_source(&source);
     // **The catalogued shutter first, and a shape guess only when there is none.**
@@ -2421,40 +2444,37 @@ async fn measure_gallery_entry(
     let (sx, sy, sright, sbottom) = shutter;
     println!("  shutter anchor at {sx:.0},{sy:.0}..{sright:.0},{sbottom:.0}");
 
-    // Unlabelled, to the right of the shutter, on the shutter's row.
-    //
-    // **`clickable` is no longer required**, and the measurement is why: the gallery entry on
-    // `trill` 38.3.2 is a bare `FrameLayout` (`…:id/bos`), and a container whose parent carries
-    // the click is the ordinary shape for one. Requiring the flag dropped the very control
-    // this command exists to find. Clickable candidates are still listed first, because they
-    // are the likelier ones.
-    let mut candidates: Vec<(f64, f64, f64, f64)> = nodes
-        .iter()
-        .filter(|node| node.desc.trim().is_empty() && node.text.trim().is_empty())
-        .filter_map(|node| parse_bounds(&node.bounds))
-        // Filter on the *centre* being right of the shutter, not the left edge. The
-        // control immediately beside the shutter overlaps it by ~50 px, so a left-edge
-        // test silently drops the nearest — and the nearest is the interesting one.
-        .filter(|(x, y, right, bottom)| (x + right) / 2.0 >= sright && *bottom > sy && *y < sbottom)
-        .collect();
-    candidates.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let candidates = rank_gallery_candidates(shutter, &nodes);
     println!(
         "  {} unlabelled candidate(s) right of the shutter:",
         candidates.len()
     );
-    for (index, (x, y, right, bottom)) in candidates.iter().enumerate() {
+    for (
+        index,
+        &Candidate {
+            clickable,
+            x,
+            y,
+            right,
+            bottom,
+        },
+    ) in candidates.iter().enumerate()
+    {
         println!(
-            "    [{index}] {x:.0},{y:.0} {:.0}x{:.0}",
+            "    [{index}] {x:.0},{y:.0} {:.0}x{:.0} clickable={clickable}",
             right - x,
             bottom - y
         );
     }
-    let Some(&(x, y, right, bottom)) = candidates.get(which) else {
+    let Some(&Candidate {
+        x,
+        y,
+        right,
+        bottom,
+        ..
+    }) = candidates.get(which)
+    else {
         println!("  ! no candidate at index {which}; nothing tapped");
-        for _ in 0..4 {
-            session.agent().press_key(KEYCODE_BACK).await.ok();
-            tokio::time::sleep(Duration::from_millis(1_000)).await;
-        }
         return Ok(());
     };
     println!(
@@ -2499,10 +2519,26 @@ async fn measure_gallery_entry(
         );
     }
 
+    Ok(())
+}
+
+/// Press Back until the feed is back, and **say so when it is not**.
+///
+/// This used to print a warning and return `Ok(())`, so a phone left stranded in the composer
+/// exited zero, and a scripted run of several serials carried on to the next phone as if the
+/// last one were parked on the feed.
+async fn back_out_to_the_feed(
+    session: &riviu_android_driver::AndroidUiSession,
+    ui: &dyn UiSession,
+    labels: TikTokControls,
+) -> anyhow::Result<()> {
+    const KEYCODE_BACK: i64 = 4;
     let feed = labels.label(TikTokControl::FeedTab);
     for attempt in 1..=6 {
         if let Some(feed) = feed {
-            if ui.locate(feed.to_query()).await?.is_some() {
+            // A read that fails is not a reason to stop pressing Back — the whole point of
+            // this loop is that it runs when something has already gone wrong.
+            if ui.locate(feed.to_query()).await.ok().flatten().is_some() {
                 println!("  back on the feed after {} Back press(es)", attempt - 1);
                 return Ok(());
             }
@@ -2510,8 +2546,61 @@ async fn measure_gallery_entry(
         session.agent().press_key(KEYCODE_BACK).await.ok();
         tokio::time::sleep(Duration::from_millis(1_200)).await;
     }
-    println!("  ! still not on the feed — check the phone");
-    Ok(())
+    anyhow::bail!("still not on the feed after 6 Back presses — check the phone")
+}
+
+/// One unlabelled rectangle that could be the gallery entry.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Candidate {
+    clickable: bool,
+    x: f64,
+    y: f64,
+    right: f64,
+    bottom: f64,
+}
+
+/// Order the unlabelled rectangles beside the shutter, likeliest first.
+///
+/// # Why this is a function and not four lines of iterator inside the command
+///
+/// It is the only decision this command makes, an operator taps whatever it puts at index 0,
+/// and it was wrong. The comment beside it claimed clickable candidates came first; the code
+/// sorted by `x` and never read the flag. On the fleet's own dump (`target/composer-2s.xml`,
+/// `trill` 38.3.2) the real gallery entry `…:id/bos` came out at **index 4**, and index 0 was a
+/// `LinearLayout` spanning `[630,0][1080,2076]` — a container taller than the screen is high,
+/// whose centre sits a thousand pixels above the shutter row.
+///
+/// Three rules, in order:
+///
+/// * **The centre** must be right of the shutter, not the left edge: the control next to the
+///   shutter overlaps it by ~50 px, and a left-edge test drops the nearest one — the
+///   interesting one.
+/// * **The size** must be within twice the shutter's height in both directions. A rectangle
+///   the size of the screen is an ancestor, whatever its centre says.
+/// * **Clickable first**, then left to right.
+fn rank_gallery_candidates(shutter: (f64, f64, f64, f64), nodes: &[Node]) -> Vec<Candidate> {
+    let (_, sy, sright, sbottom) = shutter;
+    let ceiling = (sbottom - sy) * 2.0;
+    let mut candidates: Vec<Candidate> = nodes
+        .iter()
+        .filter(|node| node.desc.trim().is_empty() && node.text.trim().is_empty())
+        .filter_map(|node| {
+            parse_bounds(&node.bounds).map(|(x, y, right, bottom)| Candidate {
+                clickable: node.clickable,
+                x,
+                y,
+                right,
+                bottom,
+            })
+        })
+        .filter(|c| {
+            let (width, height) = (c.right - c.x, c.bottom - c.y);
+            width > 0.0 && height > 0.0 && width <= ceiling && height <= ceiling
+        })
+        .filter(|c| (c.x + c.right) / 2.0 >= sright && c.bottom > sy && c.y < sbottom)
+        .collect();
+    candidates.sort_by(|a, b| b.clickable.cmp(&a.clickable).then(a.x.total_cmp(&b.x)));
+    candidates
 }
 
 /// `[x,y][right,bottom]` as four numbers.
@@ -2608,4 +2697,106 @@ async fn measure_frames(serial: &str, apk: &std::path::Path) -> anyhow::Result<(
     frames::remove_forward(&adb, serial, port).await.ok();
     let _ = child.kill().await;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every unlabelled rectangle whose centre is right of the shutter, read off
+    /// `target/composer-2s.xml` — the camera screen of `com.ss.android.ugc.trill` 38.3.2,
+    /// dumped 29/08/2026 from SM-G950F `98895a3355424e484f`. The shutter is
+    /// `Record video` at `[375,1545][705,1875]`.
+    ///
+    /// `…:id/bos` is the gallery entry: it is the one this command exists to find, and the
+    /// only clickable rectangle in the list.
+    fn the_fleets_own_camera_screen() -> ((f64, f64, f64, f64), Vec<Node>) {
+        let node = |bounds: &str, clickable: bool, id: &str| Node {
+            class: "android.widget.FrameLayout".into(),
+            desc: String::new(),
+            text: String::new(),
+            resource_id: format!("com.ss.android.ugc.trill:id/{id}"),
+            bounds: bounds.into(),
+            clickable,
+            enabled: true,
+        };
+        (
+            (375.0, 1545.0, 705.0, 1875.0),
+            vec![
+                node("[630,0][1080,2076]", false, "nxg"),
+                node("[690,1575][1080,1875]", false, "unnamed"),
+                node("[690,1560][1080,1920]", false, "jzq"),
+                node("[741,1629][1029,1821]", false, "kl4"),
+                node("[765,1590][1005,1830]", true, "bos"),
+                node("[765,1590][1005,1830]", false, "unnamed2"),
+                node("[801,1626][969,1794]", false, "fdv"),
+                node("[801,1626][969,1794]", false, "i99"),
+            ],
+        )
+    }
+
+    /// The one an operator taps first has to be the gallery entry.
+    ///
+    /// Sorting by `x` alone put a screen-tall container there. Nothing about that container
+    /// looks wrong in a printed list of rectangles, which is why this is a test and not a
+    /// second reading of the code.
+    #[test]
+    fn the_gallery_entry_is_the_first_candidate_offered() {
+        let (shutter, nodes) = the_fleets_own_camera_screen();
+        let ranked = rank_gallery_candidates(shutter, &nodes);
+        let first = ranked.first().expect("the entry is in the dump");
+        assert_eq!(
+            (first.x, first.y, first.right, first.bottom),
+            (765.0, 1590.0, 1005.0, 1830.0),
+            "index 0 is what gets tapped; it must be …:id/bos"
+        );
+        assert!(first.clickable, "and the clickable one, not its twin");
+    }
+
+    /// A rectangle the size of the screen is an ancestor, not a control.
+    #[test]
+    fn a_screen_tall_container_is_not_a_candidate() {
+        let (shutter, nodes) = the_fleets_own_camera_screen();
+        let ranked = rank_gallery_candidates(shutter, &nodes);
+        assert_eq!(
+            ranked.len(),
+            7,
+            "the [630,0][1080,2076] container is dropped"
+        );
+        assert!(
+            !ranked.iter().any(|c| c.bottom - c.y > 660.0),
+            "nothing taller than twice the shutter survives"
+        );
+    }
+
+    /// The nearest neighbour overlaps the shutter, and a left-edge test would drop it.
+    #[test]
+    fn a_candidate_overlapping_the_shutter_is_kept() {
+        let (shutter, nodes) = the_fleets_own_camera_screen();
+        let ranked = rank_gallery_candidates(shutter, &nodes);
+        assert!(
+            ranked.iter().any(|c| c.x < shutter.2),
+            "690 is left of the shutter's right edge at 705, and it still counts"
+        );
+    }
+
+    /// Degenerate rectangles are not tappable points.
+    #[test]
+    fn an_empty_rectangle_is_not_a_candidate() {
+        let (shutter, mut nodes) = the_fleets_own_camera_screen();
+        nodes.push(Node {
+            class: "android.view.View".into(),
+            desc: String::new(),
+            text: String::new(),
+            resource_id: String::new(),
+            bounds: "[900,1700][900,1700]".into(),
+            clickable: true,
+            enabled: true,
+        });
+        let ranked = rank_gallery_candidates(shutter, &nodes);
+        assert!(
+            !ranked.iter().any(|c| c.right - c.x == 0.0),
+            "a zero-width rectangle would sort first on clickable and be tapped"
+        );
+    }
 }

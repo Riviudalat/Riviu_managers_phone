@@ -69,7 +69,7 @@ nếu một trích dẫn nêu số con.
 
 ## Nhật ký §9.x
 
-146 mục, trong 6 file dưới `diary/`. **Thứ tự trong file là thứ tự viết, không phải thứ
+147 mục, trong 6 file dưới `diary/`. **Thứ tự trong file là thứ tự viết, không phải thứ
 tự số và cũng không phải thứ tự thời gian** — trong bản gốc §9.43 nằm giữa §9.20 và
 §9.21, và §9.4 nằm sau §9.17. Đó là lý do bảng này sắp theo **số**: để tra được.
 
@@ -263,6 +263,7 @@ thật của việc các mục không được viết theo thứ tự, không ph
 | §9.126 | [Composer đo lần đầu trên build 16/20 máy: ô thư viện nằm ngược phía, và cờ "đã chọn đủ ảnh" là cái Eleme](diary/06-2408-2708.md#9126-composer-đo-lần-đầu-trên-build-1620-máy-ô-thư-viện-nằm-ngược-phía-và-cờ-đã-chọn-đủ-ảnh-là-cái-elementbox-không-nhìn-thấy-29082026) | `diary/06-2408-2708.md` |
 | §9.127 | [Codex bốn vùng cho đường đăng bài: 44 lỗi, và mười lăm test của tôi là test rỗng (29/08/2026)](diary/06-2408-2708.md#9127-codex-bốn-vùng-cho-đường-đăng-bài-44-lỗi-và-mười-lăm-test-của-tôi-là-test-rỗng-29082026) | `diary/06-2408-2708.md` |
 | §9.128 | [Đường đăng bài nối xong, và một lần tôi bác bỏ nhầm phát hiện của người review (30/08/2026)](diary/06-2408-2708.md#9128-đường-đăng-bài-nối-xong-và-một-lần-tôi-bác-bỏ-nhầm-phát-hiện-của-người-review-30082026) | `diary/06-2408-2708.md` |
+| §9.129 | [Tám chỗ còn nợ, và một cổng chưa ai chạy giấu một lỗi mock trong ảnh chụp (30/08/2026)](diary/06-2408-2708.md#9129-tám-chỗ-còn-nợ-và-một-cổng-chưa-ai-chạy-giấu-một-lỗi-mock-trong-ảnh-chụp-30082026) | `diary/06-2408-2708.md` |
 
 ---
 
