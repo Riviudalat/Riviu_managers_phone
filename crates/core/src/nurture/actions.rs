@@ -795,6 +795,12 @@ impl NurtureEngine {
         if !session.supports_text_input() {
             return Ok(CommentResult::TextChannelUnavailable);
         }
+        // What a failed preparation cost and why it failed. Filled by the error arm below
+        // and read by the skip row, so a billed draft the verifier refused is money the
+        // audit still sees — and a row an operator can read, the same two courtesies the
+        // hierarchy path's skip row has carried since its own review round.
+        let mut skip_spend: Option<crate::openai_client::CommentSpend> = None;
+        let mut skip_reason: Option<String> = None;
         let prepared = if settings.api_key.trim().is_empty() {
             // Unit fixtures still exercise the proven drawer sender with an
             // explicit pool entry. Production never passes a pool, so an empty
@@ -902,18 +908,28 @@ impl NurtureEngine {
                     if std::env::var_os("RIVIU_LIVE_NURTURE_VERBOSE").is_some() {
                         eprintln!("[nurture {udid}] comment semantic skip: {error}");
                     }
+                    // The failure may still carry a bill — a billed draft whose verifier
+                    // refused it, a malformed body after a charged call. Keep the price and
+                    // the (bounded) reason for the skip row below; dropping the error here
+                    // used to drop both.
+                    skip_spend = crate::openai_client::spend_of_failure(&error);
+                    skip_reason = Some(error.to_string().chars().take(160).collect());
                     None
                 }
             }
         };
         let Some(mut prepared) = prepared else {
+            let outcome = match skip_reason {
+                Some(reason) => format!("context_skipped: {reason}"),
+                None => "context_skipped".to_string(),
+            };
             self.record_context_skip_attempt(
                 udid,
                 settings,
                 context_source(settings),
-                "context_skipped",
+                &outcome,
                 0,
-                None,
+                skip_spend,
             );
             return Ok(CommentResult::ContextSkipped);
         };

@@ -275,6 +275,46 @@ impl CommentSpend {
             *self.cost_usd.get_or_insert(0.0) += cost;
         }
     }
+
+    fn is_zero(&self) -> bool {
+        self.prompt_tokens == 0 && self.completion_tokens == 0 && self.cost_usd.is_none()
+    }
+}
+
+/// Fold an extra, already-billed spend into whichever result will carry it.
+///
+/// The invariant every accounting decision in this file serves: **a sum over one target's
+/// attempts equals what the gateway billed.** A billed call whose result got discarded — a
+/// failed draft folded down to its message, a batch attributed to no accepted comment — still
+/// has to land on some row; this puts it on the row the caller names, success or failure
+/// alike, without double-counting what that row already carries.
+fn fold_spend_into(
+    result: anyhow::Result<GroundedCommentResult>,
+    extra: CommentSpend,
+) -> anyhow::Result<GroundedCommentResult> {
+    if extra.is_zero() {
+        return result;
+    }
+    match result {
+        Ok(mut comment) => {
+            comment.prompt_tokens = comment.prompt_tokens.saturating_add(extra.prompt_tokens);
+            comment.completion_tokens = comment
+                .completion_tokens
+                .saturating_add(extra.completion_tokens);
+            if let Some(cost) = extra.cost_usd {
+                *comment.cost_usd.get_or_insert(0.0) += cost;
+            }
+            Ok(comment)
+        }
+        Err(error) => {
+            let mut spend = spend_of_failure(&error).unwrap_or_default();
+            spend.add(extra.prompt_tokens, extra.completion_tokens, extra.cost_usd);
+            Err(anyhow!(FailedAttempt {
+                detail: format!("{error:#}"),
+                spend,
+            }))
+        }
+    }
 }
 
 pub fn host_of(base_url: &str) -> String {
@@ -520,6 +560,12 @@ pub async fn prepare_grounded_comment(
         {
             Ok(draft) => draft,
             Err(error) => {
+                // A failed draft was still a billed call: its price rides in the error
+                // (`billed_failure`), and reducing the error to its message here used to
+                // drop that price out of the run's books entirely.
+                if let Some(extra) = spend_of_failure(&error) {
+                    spend.add(extra.prompt_tokens, extra.completion_tokens, extra.cost_usd);
+                }
                 last_error = Some(error.to_string());
                 if attempt == 0 {
                     continue;
@@ -535,7 +581,22 @@ pub async fn prepare_grounded_comment(
             }
             break;
         };
-        let verification = grounded_verify(settings, &sheet, &candidate, direction, brief).await?;
+        // Not a `?`: the accumulated draft spend (this attempt's and a failed first one's)
+        // would leave with only the verifier's own price attached. The whole run's bill goes
+        // out with the error, whatever the error was.
+        let verification =
+            match grounded_verify(settings, &sheet, &candidate, direction, brief).await {
+                Ok(verification) => verification,
+                Err(error) => {
+                    if let Some(extra) = spend_of_failure(&error) {
+                        spend.add(extra.prompt_tokens, extra.completion_tokens, extra.cost_usd);
+                    }
+                    return Err(anyhow!(FailedAttempt {
+                        detail: format!("{error:#}"),
+                        spend,
+                    }));
+                }
+            };
         spend.add(
             verification.prompt_tokens,
             verification.completion_tokens,
@@ -644,8 +705,18 @@ pub async fn prepare_caption_comment(
         if let Some(cost) = draft_cost {
             *total_cost_usd.get_or_insert(0.0) += cost;
         }
-        let draft_value =
-            json_object(&draft_raw).ok_or_else(|| anyhow!("malformed_model_output"))?;
+        // Every exit past this point rides on calls the gateway already billed, so none of
+        // them may leave as a bare `anyhow!`: the totals accumulated above travel with the
+        // error, or `spend_of_failure` finds nothing and the attempt row records zero for
+        // calls that cost money.
+        let draft_value = json_object(&draft_raw).ok_or_else(|| {
+            billed_failure(
+                "malformed_model_output".to_string(),
+                total_prompt_tokens,
+                total_completion_tokens,
+                total_cost_usd,
+            )
+        })?;
         let candidate = sanitize_comment(
             draft_value
                 .get("comment")
@@ -653,12 +724,27 @@ pub async fn prepare_caption_comment(
                 .unwrap_or_default(),
             max_words,
         )
-        .ok_or_else(|| anyhow!("malformed_model_output"))?;
+        .ok_or_else(|| {
+            billed_failure(
+                "malformed_model_output".to_string(),
+                total_prompt_tokens,
+                total_completion_tokens,
+                total_cost_usd,
+            )
+        })?;
         let context_confidence = score(
             draft_value
                 .get("contextConfidence")
                 .or_else(|| draft_value.get("confidence")),
-        )?;
+        )
+        .map_err(|error| {
+            billed_failure(
+                format!("{error:#}"),
+                total_prompt_tokens,
+                total_completion_tokens,
+                total_cost_usd,
+            )
+        })?;
 
         let verify_prompt = format!(
             "Kiểm tra comment TikTok ứng viên dựa đúng trên caption OCR dưới đây.\n\
@@ -677,13 +763,26 @@ pub async fn prepare_caption_comment(
         if let Some(cost) = verify_cost {
             *total_cost_usd.get_or_insert(0.0) += cost;
         }
-        let value = json_object(&verify_raw).ok_or_else(|| anyhow!("malformed_model_output"))?;
-        let relevance = score(value.get("relevance"))?;
-        let evidence_support = score(value.get("evidenceSupport"))?;
+        let billed_here = |detail: String| {
+            billed_failure(
+                detail,
+                total_prompt_tokens,
+                total_completion_tokens,
+                total_cost_usd,
+            )
+        };
+        let value = json_object(&verify_raw)
+            .ok_or_else(|| billed_here("malformed_model_output".to_string()))?;
+        let relevance =
+            score(value.get("relevance")).map_err(|error| billed_here(format!("{error:#}")))?;
+        let evidence_support = score(value.get("evidenceSupport"))
+            .map_err(|error| billed_here(format!("{error:#}")))?;
         let gate = VerificationGate {
             overall: relevance.min(evidence_support),
-            instruction_fit: score(value.get("instructionFit"))?,
-            genericity: score(value.get("genericity"))?,
+            instruction_fit: score(value.get("instructionFit"))
+                .map_err(|error| billed_here(format!("{error:#}")))?,
+            genericity: score(value.get("genericity"))
+                .map_err(|error| billed_here(format!("{error:#}")))?,
             contradiction: value
                 .get("contradiction")
                 .and_then(|item| item.as_bool())
@@ -735,7 +834,15 @@ pub async fn prepare_caption_comment(
             )
         })
         .unwrap_or_else(|| "no_gate".to_string());
-    Err(anyhow!("comment_context_rejected: {detail}"))
+    // A gate rejection at the end of two billed rounds is still a billed failure — the pixel
+    // path's ending has carried its spend since the 27/08 review; this one had been left as
+    // the bare string.
+    Err(billed_failure(
+        format!("comment_context_rejected: {detail}"),
+        total_prompt_tokens,
+        total_completion_tokens,
+        total_cost_usd,
+    ))
 }
 
 /// Keep only likely caption lines from platform OCR. Bottom navigation and
@@ -1005,11 +1112,20 @@ pub async fn prepare_grounded_comments_batch(
             Ok(batch) => batch,
             Err(error) => {
                 tracing::warn!("gộp bản nháp thất bại, lùi về từng câu: {error}");
+                let failed_batch_spend = spend_of_failure(&error);
                 let mut out = Vec::with_capacity(count);
                 for _ in 0..count {
                     out.push(
                         prepare_grounded_comment(settings, frames, kind, direction, brief).await,
                     );
+                }
+                // The failed batch draft was billed; its price lands on the first phone's
+                // row so the sum over the target stays the real bill.
+                if let Some(extra) = failed_batch_spend {
+                    if let Some(first) = out.first_mut() {
+                        let carried = std::mem::replace(first, Err(anyhow!("carrier")));
+                        *first = fold_spend_into(carried, extra);
+                    }
                 }
                 return BatchedComments::all_individual(out);
             }
@@ -1053,6 +1169,7 @@ pub async fn prepare_grounded_comments_batch(
     let mut from_batch = Vec::with_capacity(count);
     let mut refusals = Vec::new();
     let mut needs_rewrite: Vec<usize> = Vec::new();
+    let mut batch_charged = false;
     for ((index, candidate), verdict) in candidates.iter().enumerate().zip(verdicts) {
         let verification = match verdict {
             Ok(verification) => verification,
@@ -1096,10 +1213,12 @@ pub async fn prepare_grounded_comments_batch(
             from_batch.push(false);
             continue;
         }
-        // The two batch calls are charged once. Attributing them to the first comment and zero
-        // to the rest keeps a sum over the target equal to the real bill; attributing the whole
-        // thing to each would report twenty times what was spent.
-        let first = index == 0;
+        // The batch draft is charged once, to the first comment it produced that was
+        // **accepted**. A flag rather than an index comparison, the same lesson the retry
+        // round below already carried: `index == 0` attached the draft to slot zero, and a
+        // run whose slot zero was refused reported the whole batch call as free.
+        let first = !batch_charged;
+        batch_charged = true;
         from_batch.push(true);
         out.push(Some(Ok(GroundedCommentResult {
             text: candidate.clone(),
@@ -1145,6 +1264,7 @@ pub async fn prepare_grounded_comments_batch(
     // Asking once more, for exactly the number still missing, keeps the property that makes the
     // batch work at all: the model sees the set it is writing. Only what fails twice is written
     // alone, and by then there are accepted comments to name as things not to repeat.
+    let mut second_leftover: Option<CommentSpend> = None;
     if needs_rewrite.len() >= 2 {
         let retry_note = format!(
             "{}; lượt trước bị chấm là chung chung hoặc nói quá — bám sát chi tiết nhìn thấy",
@@ -1243,6 +1363,15 @@ pub async fn prepare_grounded_comments_batch(
                 }));
                 second_charged = true;
             }
+            // A rescue round that rescued nothing was still a billed call; remember its
+            // price so the fold below can land it on a row instead of losing it.
+            if !second_charged {
+                second_leftover = Some(CommentSpend {
+                    prompt_tokens: second.prompt_tokens,
+                    completion_tokens: second.completion_tokens,
+                    cost_usd: second.cost_usd,
+                });
+            }
             needs_rewrite = still_missing;
         }
     }
@@ -1281,6 +1410,26 @@ pub async fn prepare_grounded_comments_batch(
             .zip(futures_util::future::join_all(pending).await)
         {
             out[*index] = Some(result);
+        }
+    }
+    // **What no accepted comment carried still gets billed to the target.** The first batch
+    // draft when every slot was refused, and the rescue draft when it rescued nothing — both
+    // were real calls, and before this fold their price simply vanished from the books. The
+    // first row carries them, success or failure alike, so a sum over the target stays equal
+    // to what the gateway billed.
+    let mut unattributed = CommentSpend::default();
+    if !batch_charged {
+        unattributed.add(batch.prompt_tokens, batch.completion_tokens, batch.cost_usd);
+    }
+    if let Some(extra) = second_leftover {
+        unattributed.add(extra.prompt_tokens, extra.completion_tokens, extra.cost_usd);
+    }
+    if !unattributed.is_zero() {
+        if let Some(first) = out.first_mut() {
+            let carried = first
+                .take()
+                .unwrap_or_else(|| Err(anyhow!("no_usable_evidence")));
+            *first = Some(fold_spend_into(carried, unattributed));
         }
     }
     let out: Vec<anyhow::Result<GroundedCommentResult>> = out
@@ -1396,11 +1545,19 @@ async fn grounded_generate_batch(
         })
         .unwrap_or_default();
     if comments.len() != count {
-        anyhow::bail!(
-            "draft_batch_incomplete: {} comments for {count} phones: {}",
-            comments.len(),
-            model_said(&raw)
-        );
+        // The truncated-array failure this file names as THE batch failure mode is a billed
+        // call like any other: 18 valid comments for 20 phones parsed fine, cost real money,
+        // and used to leave as a bare bail that `spend_of_failure` could not read.
+        return Err(billed_failure(
+            format!(
+                "draft_batch_incomplete: {} comments for {count} phones: {}",
+                comments.len(),
+                model_said(&raw)
+            ),
+            p,
+            c,
+            cost,
+        ));
     }
     let caption = value
         .get("caption")
@@ -2282,6 +2439,78 @@ pub async fn prepare_comment_for_frames(
 #[cfg(test)]
 mod tests {
     use super::VerificationGate;
+    use super::{
+        anyhow, billed_failure, fold_spend_into, spend_of_failure, CommentSpend,
+        GroundedCommentResult,
+    };
+
+    fn comment(prompt: u32, completion: u32, cost: Option<f64>) -> GroundedCommentResult {
+        GroundedCommentResult {
+            text: "đẹp quá".to_string(),
+            caption: None,
+            context_confidence: 80,
+            relevance: 80,
+            evidence_support: 80,
+            frame_sha256: "deadbeef".to_string(),
+            distinct_frames: 1,
+            prompt_tokens: prompt,
+            completion_tokens: completion,
+            cost_usd: cost,
+            model: "m".to_string(),
+            base_url_host: "h".to_string(),
+        }
+    }
+
+    fn extra() -> CommentSpend {
+        CommentSpend {
+            prompt_tokens: 100,
+            completion_tokens: 40,
+            cost_usd: Some(0.002),
+        }
+    }
+
+    /// **A folded bill lands once, wherever it lands.** The three shapes a batch's
+    /// unattributed spend can meet: a success (added to its totals), a failure that already
+    /// carries a price (merged, not replaced), and a bare failure (which becomes a
+    /// `FailedAttempt` so `spend_of_failure` can read it at all).
+    #[test]
+    fn folded_spend_lands_exactly_once_on_any_result_shape() {
+        let ok = fold_spend_into(Ok(comment(10, 5, Some(0.001))), extra()).expect("still ok");
+        assert_eq!(
+            (ok.prompt_tokens, ok.completion_tokens, ok.cost_usd),
+            (110, 45, Some(0.003))
+        );
+
+        let carried = fold_spend_into(
+            Err(billed_failure("draft died".to_string(), 7, 3, Some(0.0005))),
+            extra(),
+        )
+        .expect_err("still a failure");
+        let spend = spend_of_failure(&carried).expect("the price must stay readable");
+        assert_eq!(
+            (spend.prompt_tokens, spend.completion_tokens, spend.cost_usd),
+            (107, 43, Some(0.0025))
+        );
+        assert!(
+            carried.to_string().contains("draft died"),
+            "the reason survives the fold: {carried}"
+        );
+
+        let bare = fold_spend_into(Err(anyhow!("no_usable_evidence")), extra())
+            .expect_err("still a failure");
+        let spend = spend_of_failure(&bare)
+            .expect("a bare error leaves as a FailedAttempt, or the fold changed nothing");
+        assert_eq!(
+            (spend.prompt_tokens, spend.completion_tokens, spend.cost_usd),
+            (100, 40, Some(0.002))
+        );
+
+        // And a zero fold is a no-op, not a re-wrap: the bare error stays bare, so callers
+        // that fold conditionally do not manufacture FailedAttempts out of nothing.
+        let untouched = fold_spend_into(Err(anyhow!("plain")), CommentSpend::default())
+            .expect_err("still a failure");
+        assert!(spend_of_failure(&untouched).is_none());
+    }
 
     fn gate() -> VerificationGate {
         VerificationGate {

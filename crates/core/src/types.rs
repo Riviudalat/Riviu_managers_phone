@@ -2219,7 +2219,15 @@ mod wire_shape_tests {
                 let Some((field, ty)) = rest.split_once(':') else {
                     continue;
                 };
-                if ty.trim().starts_with("Option<") {
+                // The fully qualified spellings count too: `std::option::Option<T>` is the
+                // same wire shape, and a review pointed out the bare-prefix check read it
+                // as required — one rename away from a silent `undefined` on the frontend.
+                let ty = ty.trim();
+                let ty = ty
+                    .strip_prefix("std::option::")
+                    .or_else(|| ty.strip_prefix("core::option::"))
+                    .unwrap_or(ty);
+                if ty.starts_with("Option<") {
                     out.push((struct_name.clone(), field.trim().to_string()));
                 }
             }

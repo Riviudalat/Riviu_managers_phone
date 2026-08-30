@@ -1478,10 +1478,12 @@ async fn reserve_context(
     let reservation = match streams.complete_transfer(transfer, proof) {
         Ok(reservation) => reservation,
         Err(error) => {
-            // `complete_transfer` consumed the transfer, so the record has to be released
-            // by udid rather than by handing the transfer back. Same leak, same reason as
-            // the stop path above.
-            let _ = streams.release_reserved_by_udid(&udid);
+            // Nothing to release here: `complete_transfer` walks its own refusals back now
+            // (victim into backoff, fresh slot removed) for the same reason the stop path
+            // above calls `abandon_transfer`. The release-by-udid that used to sit here was
+            // dead on both of its branches — the wedged record lived under the *victim's*
+            // udid, and a fresh reservation still carried `pending_transfer`, which
+            // `release_reserved` refuses — so the slot leaked for the life of the process.
             return Err(ContextTransitionFailure {
                 error: error.into(),
                 context,

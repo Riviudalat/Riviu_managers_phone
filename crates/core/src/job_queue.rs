@@ -140,6 +140,12 @@ impl JobQueue {
         let task = tokio::spawn(async move {
             if let Err(err) = this.run_job(job_id, script_clone, udids).await {
                 tracing::error!("job {job_id} failed: {err:#}");
+                // The log line above is not a settle: every `?` inside `run_job` that fires
+                // between checkpoints — the `Running` write refused, a lease that could not
+                // be acquired — used to end here with the row still `queued` or `running`,
+                // and a row in either state looks like live work forever: the UI shows a
+                // job that never ends, and a `queued` one could be picked up again.
+                this.settle_job_after_error(job_id, &err);
             }
         });
         runtime.tasks.insert(job_id, task);
@@ -374,6 +380,34 @@ impl JobQueue {
     /// action is worse than reporting one the database is behind on.
     ///
     /// Found by an independent review on 27/08/2026.
+    /// Best-effort terminal write for a job whose runner died between checkpoints.
+    ///
+    /// Only a job still claiming to be in flight is settled: a row already terminal —
+    /// `run_on_device` failed and `persist_outcome` recorded it before the error bubbled —
+    /// keeps the more precise ending it has. Best-effort because this runs on the error
+    /// path of everything, including "the database refused a write": a second refusal here
+    /// leaves the log line as the only record, which is where this started — but the common
+    /// case (a transient lock during the `Running` checkpoint, a device that would not
+    /// lease) now ends as a `failed` row the operator can see and re-run.
+    fn settle_job_after_error(&self, job_id: Uuid, error: &anyhow::Error) {
+        let stranded = match self.db.list_jobs(200) {
+            Ok(jobs) => jobs.into_iter().find(|job| {
+                job.id == job_id && matches!(job.status, JobStatus::Queued | JobStatus::Running)
+            }),
+            Err(read_error) => {
+                tracing::error!("settle job {job_id}: không đọc được hàng ({read_error:#})");
+                return;
+            }
+        };
+        let Some(mut job) = stranded else {
+            return;
+        };
+        job.status = JobStatus::Failed;
+        job.error = Some(format!("{error:#}"));
+        job.updated_at = Utc::now();
+        self.persist_outcome(&mut job);
+    }
+
     fn persist(&self, job: &JobRecord) -> anyhow::Result<()> {
         self.db
             .save_job(job)
@@ -604,6 +638,84 @@ mod tests {
         async fn prepare_device(&self, _udid: &str) -> anyhow::Result<()> {
             Ok(())
         }
+    }
+
+    /// **A runner that dies between checkpoints leaves a terminal row, not a live one.**
+    ///
+    /// Every `?` in `run_job` used to end at a log line: the `Running` checkpoint refused,
+    /// or a device that would not lease, exited with the row still `queued`/`running` — a
+    /// job the UI shows as live forever, and a `queued` one that could be picked up again.
+    /// The settle only touches rows still claiming to be in flight: an ending
+    /// `persist_outcome` already recorded is more precise and must stay.
+    #[tokio::test]
+    async fn a_runner_error_between_checkpoints_settles_the_row_as_failed() {
+        let root = std::env::temp_dir().join(format!("riviu-job-settle-{}", Uuid::new_v4()));
+        let db = Arc::new(Database::open(root.join("jobs.db")).expect("test database"));
+        let events = EventBus::new(16);
+        let control = Arc::new(DeviceControlPlane::new(
+            Arc::new(QueueTestDriver::default()),
+            Arc::new(DeviceWorkCoordinator::new()),
+            Arc::new(StreamBudgetManager::new(1).expect("stream budget")),
+        ));
+        let queue = JobQueue::new(
+            db.clone(),
+            events.clone(),
+            DeviceRegistry::new(events),
+            control,
+            root.join("artifacts"),
+        );
+        let now = Utc::now();
+        let stranded = JobRecord {
+            id: Uuid::new_v4(),
+            script_name: "stranded fixture".to_string(),
+            udids: vec!["iphone-a".to_string()],
+            status: JobStatus::Queued,
+            created_at: now,
+            updated_at: now,
+            steps: Vec::new(),
+            error: None,
+        };
+        let finished = JobRecord {
+            id: Uuid::new_v4(),
+            script_name: "finished fixture".to_string(),
+            udids: vec!["iphone-b".to_string()],
+            status: JobStatus::Succeeded,
+            created_at: now,
+            updated_at: now,
+            steps: Vec::new(),
+            error: None,
+        };
+        db.save_job(&stranded).expect("seed stranded");
+        db.save_job(&finished).expect("seed finished");
+
+        let error = anyhow::anyhow!("không lấy được lease cho iphone-a");
+        queue.settle_job_after_error(stranded.id, &error);
+        queue.settle_job_after_error(finished.id, &error);
+
+        let read = |id: Uuid| {
+            queue
+                .list_jobs(10)
+                .expect("list")
+                .into_iter()
+                .find(|job| job.id == id)
+                .expect("row exists")
+        };
+        let settled = read(stranded.id);
+        assert_eq!(settled.status, JobStatus::Failed);
+        assert!(
+            settled
+                .error
+                .as_deref()
+                .is_some_and(|error| error.contains("không lấy được lease")),
+            "the reason must land in the row, not only in a log: {:?}",
+            settled.error
+        );
+        assert_eq!(
+            read(finished.id).status,
+            JobStatus::Succeeded,
+            "a job that already ended keeps its more precise ending"
+        );
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[tokio::test]

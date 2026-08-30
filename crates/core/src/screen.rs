@@ -1925,8 +1925,23 @@ mod tests {
                 sizes_read += 1;
                 // The whole point is that a failure must not become a value. `?`, `map_err`,
                 // an `else` arm and a `match` all keep the failure; `unwrap_or*` and
-                // `unwrap_or_default` do not.
-                if line.contains("unwrap_or") {
+                // `unwrap_or_default` do not. And rustfmt is allowed to wrap the chain — a
+                // review pointed out that `window_size().await` on one line with
+                // `.unwrap_or(...)` on the next passed the old same-line check — so the scan
+                // follows the chain across continuation lines (the ones rustfmt starts with
+                // a `.`), which is exactly where a wrapped `unwrap_or` can live and nowhere
+                // an unrelated expression can.
+                let mut chain_fabricates = line.contains("unwrap_or");
+                for follow in body.lines().skip(idx + 1) {
+                    let follow = follow.trim_start();
+                    if !follow.starts_with('.') {
+                        break;
+                    }
+                    if follow.contains("unwrap_or") {
+                        chain_fabricates = true;
+                    }
+                }
+                if chain_fabricates {
                     fabricated.push(format!("{rel}:{}", idx + 1));
                 }
             }

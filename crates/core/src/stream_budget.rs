@@ -431,15 +431,20 @@ impl StreamBudgetManager {
                 transfer_id: transfer.transfer_id,
             });
         }
+        // A refused proof abandons the transfer before the error leaves — same walk-back as
+        // `abandon_transfer`, because the caller cannot do it: the transfer was consumed by
+        // this call, and the wedged record sits under the *victim's* udid where a
+        // release-by-target-udid never finds it.
         if transfer.stop_required && !proof.confirms_stop() {
-            return Err(StreamBudgetError::StopNotConfirmed {
-                udid: transfer
-                    .revoked_udid
-                    .clone()
-                    .unwrap_or_else(|| transfer.target_udid.clone()),
-            });
+            let udid = transfer
+                .revoked_udid
+                .clone()
+                .unwrap_or_else(|| transfer.target_udid.clone());
+            state.abandon_pending_transfer(&transfer, self.failure_backoff, Instant::now());
+            return Err(StreamBudgetError::StopNotConfirmed { udid });
         }
         if !transfer.stop_required && !proof.is_not_required() {
+            state.abandon_pending_transfer(&transfer, self.failure_backoff, Instant::now());
             return Err(StreamBudgetError::UnexpectedStopProof);
         }
 
@@ -542,27 +547,7 @@ impl StreamBudgetManager {
     /// Found by an independent review on 27/08/2026.
     pub fn abandon_transfer(&self, transfer: ForegroundTransfer, now: Instant) {
         let mut state = self.inner.lock();
-        let Some(record) = state.records.get_mut(&transfer.slot_token) else {
-            return;
-        };
-        // Only undo *this* transfer. A newer one may already own the record.
-        if record
-            .pending_transfer
-            .as_ref()
-            .is_some_and(|pending| pending.transfer_id != transfer.transfer_id)
-        {
-            return;
-        }
-        record.pending_transfer = None;
-        if transfer.revoked_udid.is_none() {
-            state.remove(transfer.slot_token);
-            return;
-        }
-        record.state = ProducerState::FailedBackoff {
-            until: now + self.failure_backoff,
-        };
-        record.producer_running = false;
-        record.turn_deadline = None;
+        state.abandon_pending_transfer(&transfer, self.failure_backoff, now);
     }
 
     pub fn release_reserved(&self, token: Uuid) -> Result<(), StreamBudgetError> {
@@ -825,6 +810,49 @@ impl BudgetState {
             self.remove(token);
         }
     }
+
+    /// Walk one transfer back, whatever refused it.
+    ///
+    /// Shared by [`StreamBudgetManager::abandon_transfer`] (the caller could not even ask —
+    /// `stop_owned_stream` failed) and by `complete_transfer`'s own refusals (the caller
+    /// asked and the proof did not confirm). The two used to diverge: the driver-error path
+    /// abandoned into `FailedBackoff`, while a refused proof left the victim in `Revoking`
+    /// with its `pending_transfer` set — a state nothing could release (`release_reserved`
+    /// refuses `Revoking`, the transfer was consumed, and the caller's release-by-udid found
+    /// the record under the victim's udid, not the target's). One refused stop per producer
+    /// walked the fleet's capacity down to nothing, permanently, on a limit-1 budget.
+    ///
+    /// The stop outcome is equally unknown in both cases, so both get the same answer:
+    /// backoff on the victim's udid, capacity released, and the fresh slot — when there was
+    /// no victim — removed outright.
+    fn abandon_pending_transfer(
+        &mut self,
+        transfer: &ForegroundTransfer,
+        backoff: Duration,
+        now: Instant,
+    ) {
+        let Some(record) = self.records.get_mut(&transfer.slot_token) else {
+            return;
+        };
+        // Only undo *this* transfer. A newer one may already own the record.
+        if record
+            .pending_transfer
+            .as_ref()
+            .is_some_and(|pending| pending.transfer_id != transfer.transfer_id)
+        {
+            return;
+        }
+        record.pending_transfer = None;
+        if transfer.revoked_udid.is_none() {
+            self.remove(transfer.slot_token);
+            return;
+        }
+        record.state = ProducerState::FailedBackoff {
+            until: now + backoff,
+        };
+        record.producer_running = false;
+        record.turn_deadline = None;
+    }
 }
 
 struct ProducerRecord {
@@ -916,8 +944,18 @@ mod tests {
         assert_eq!(budget.running_producer_count(), 1);
     }
 
+    /// **A refused stop proof abandons the transfer; it must not wedge the slot.**
+    ///
+    /// The previous version of this test blessed the wedge as "fails closed": after
+    /// `StopNotConfirmed`, the victim stayed `Revoking` with its `pending_transfer` set — a
+    /// state `release_reserved` refuses, that the consumed transfer could no longer abandon,
+    /// and that the caller's release-by-target-udid could never find (the record sits under
+    /// the *victim's* udid). On a limit-1 budget one refused stop parked the whole fleet at
+    /// `CapacityExhausted` for the life of the process. The driver-error path one call
+    /// earlier already answered the same unknown with `abandon_transfer` — backoff on the
+    /// victim, capacity released — so a refused proof now gets the same answer.
     #[test]
-    fn failed_transfer_stop_keeps_capacity_occupied_and_fails_closed() {
+    fn a_refused_stop_proof_abandons_the_transfer_instead_of_wedging_the_slot() {
         let budget = StreamBudgetManager::new(1).unwrap();
         let bg = budget.reserve_background("tile-a").unwrap();
         budget.mark_running(bg.token()).unwrap();
@@ -929,11 +967,18 @@ mod tests {
             budget.complete_transfer(transfer, StreamStopProof::unconfirmed()),
             Err(StreamBudgetError::StopNotConfirmed { .. })
         ));
-        assert_eq!(budget.reserved_capacity(), 1);
-        assert_eq!(budget.running_producer_count(), 1);
+        // The victim sits in backoff — not occupying capacity, not silently forgotten.
+        assert_eq!(budget.reserved_capacity(), 0);
+        assert_eq!(budget.running_producer_count(), 0);
+        // Another device can stream: the fleet is not paying for the wedge any more.
+        budget
+            .reserve_background("tile-c")
+            .expect("capacity must be reservable after an abandoned transfer");
+        // The victim's own udid stays refused while its backoff runs — its stop really is
+        // unconfirmed, and that is what the backoff window is for.
         assert!(matches!(
-            budget.reserve_background("tile-c"),
-            Err(StreamBudgetError::CapacityExhausted { limit: 1 })
+            budget.reserve_background("tile-a"),
+            Err(StreamBudgetError::FailedBackoff { .. })
         ));
     }
 

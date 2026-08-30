@@ -1752,6 +1752,20 @@ mod tests {
             }
         }
 
+        /// Cut a `//` line comment, sparing the `//` of a `://` inside a string.
+        fn without_line_comment(line: &str) -> &str {
+            let mut search_from = 0;
+            while let Some(pos) = line[search_from..].find("//") {
+                let at = search_from + pos;
+                if at > 0 && line.as_bytes()[at - 1] == b':' {
+                    search_from = at + 2;
+                    continue;
+                }
+                return &line[..at];
+            }
+            line
+        }
+
         let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../..")
             .canonicalize()
@@ -1793,9 +1807,14 @@ mod tests {
                 }
                 builders += 1;
                 // A builder chain is short. Look ahead until it is built, and require the
-                // deadline to have been set by then.
+                // deadline to have been set by then — **on code lines only**. A review
+                // constructed the bypass this closes: `// TODO: add .timeout( here` inside
+                // the window satisfied the old check, which is the same comment-counts
+                // shape §9.128 catalogued for the function-body scanners. Trailing comments
+                // are cut too, sparing `://` so a URL in a string does not eat the line.
                 let mut has_timeout = false;
                 for follow in lines.iter().skip(idx).take(12) {
+                    let follow = without_line_comment(follow);
                     if follow.contains(".timeout(") {
                         has_timeout = true;
                     }
@@ -1891,16 +1910,26 @@ mod tests {
             );
         }
 
-        // And the borrow has to outlive the work, which is a scope, not a type.
+        // And the borrow has to outlive the work, which is a scope — so the assertion is
+        // about ORDER, not presence. A review constructed the bypass the old
+        // presence-check allowed: `let s = hold.session(); drop(hold); f(s).await` carries
+        // both tokens and is the original bug verbatim. Requiring the session to flow into
+        // `f` inside one expression, with the drop strictly after it, refuses that shape.
         let helper = commands
             .split("async fn with_manual_session")
             .nth(1)
             .and_then(|rest| rest.split("\nasync fn ").next())
             .expect("with_manual_session is still here");
+        let works = helper
+            .find("f(hold.session()).await")
+            .expect("the session must flow into `f` while the guard is still bound");
+        let dropped = helper
+            .find("drop(hold)")
+            .expect("the guard must be dropped explicitly, after the work");
         assert!(
-            helper.contains("hold.session()") && helper.contains("drop(hold)"),
-            "with_manual_session must keep the OverlayHold bound across `f` and drop it \
-             afterwards; taking the session and letting the guard go is the original bug"
+            works < dropped,
+            "with_manual_session drops the OverlayHold before the work runs — the lease is \
+             released out from under `f`, which is the original bug"
         );
     }
 }

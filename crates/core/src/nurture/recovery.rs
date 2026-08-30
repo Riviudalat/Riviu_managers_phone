@@ -16,7 +16,6 @@ use crate::screen_watch::SessionHandle;
 use crate::types::{InteractionSessionKind, NurturePhase, NurtureSessionStatus};
 
 use super::{NurtureEngine, TextCommentHealth};
-use crate::DeviceControlError;
 
 /// Soft recovery budget: drop the session and make a new one.
 pub(super) const SOFT_RECOVERY_BUDGET: Duration = Duration::from_secs(15);
@@ -151,9 +150,25 @@ impl NurtureEngine {
         .await
         {
             Ok(result) => result,
-            Err(_) => Err(DeviceControlError::InvalidContext {
-                reason: "soft recovery quá ngân sách",
-            }),
+            Err(_) => {
+                // **A timeout is not a worker answer, and the difference is the whole hard
+                // rung.** The ticket left with the command; an *answered* failure hands a
+                // rebuilt context back through the response, but a timeout dropped the
+                // receiver, so this context is consumed for good. Falling through to hard
+                // recovery here used to burn `budget.hard` on a `validate_stream` refusal
+                // that failed in microseconds — while the status bar promised a 150-second
+                // attempt and the device was then marked failed with a hard rescue "spent"
+                // that never ran. The worker still owns the in-flight stops and releases
+                // the lease behind us; the honest answer is to stop the ladder here.
+                budget.spent += started.elapsed();
+                status.last_message = format!(
+                    "soft recovery quá ngân sách {}s — worker vẫn đang dọn transport nền, \
+                     context đã tiêu nên phiên này không leo được lên hard recovery",
+                    SOFT_RECOVERY_BUDGET.as_secs()
+                );
+                on_status(status.clone());
+                return false;
+            }
         };
         let soft_failure = match soft {
             Ok(s) => {
@@ -219,9 +234,20 @@ impl NurtureEngine {
         .await
         {
             Ok(result) => result,
-            Err(_) => Err(DeviceControlError::InvalidContext {
-                reason: "hard recovery quá ngân sách",
-            }),
+            // Same shape as the soft rung: a timeout consumed the context and the worker is
+            // still cleaning behind us. There is no rung after this one, so only the message
+            // has to tell the truth — an `InvalidContext` here used to read as if the
+            // context had been bad all along rather than the budget having run out.
+            Err(_) => {
+                budget.spent += hard_started.elapsed();
+                status.last_message = format!(
+                    "hard recovery quá ngân sách {}s — worker vẫn đang dọn transport nền; \
+                     dừng thiết bị",
+                    HARD_RECOVERY_BUDGET.as_secs()
+                );
+                on_status(status.clone());
+                return false;
+            }
         };
         budget.spent += hard_started.elapsed();
         match hard {

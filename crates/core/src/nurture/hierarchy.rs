@@ -3048,24 +3048,38 @@ mod tests {
             .split_once("#[cfg(test)]")
             .map(|(before, _)| before)
             .unwrap_or(&source);
-        // **Counted, not merely present.** This loop swipes in two places -- the live-card
-        // shortcut and the main feed step -- and a gate that only asked whether the call appeared
-        // anywhere stayed green with one of the two sites stripped out. That is the failure mode a
-        // source scan invites, so the count is the assertion.
-        // `.swipe_next(` counts calls; a bare `swipe_next(` would also count the definition
-        // and quietly demand one more pause than there are swipes.
-        let swipes = production.matches(".swipe_next(").count();
+        // **Counted per site, not per file.** This loop swipes in two places -- the live-card
+        // shortcut and the main feed step -- and two gates fell to the same arithmetic in
+        // turn: presence stayed green with one site stripped, and then a whole-file COUNT
+        // stayed green with both pauses doubled at one site and removed from the other. So
+        // the assertion now stands at each swipe: within the lines around every
+        // `.swipe_next(` call, both pause calls must appear.
+        // `.swipe_next(` counts calls; a bare `swipe_next(` would also count the definition.
+        let lines: Vec<&str> = production.lines().collect();
+        let swipe_sites: Vec<usize> = lines
+            .iter()
+            .enumerate()
+            .filter(|(_, line)| line.contains(".swipe_next("))
+            .map(|(idx, _)| idx)
+            .collect();
         assert!(
-            swipes >= 2,
-            "expected at least two swipe sites in the hierarchy loop, found {swipes}"
+            swipe_sites.len() >= 2,
+            "expected at least two swipe sites in the hierarchy loop, found {}",
+            swipe_sites.len()
         );
-        for call in ["human.think_pause_ms()", "human.after_swipe_pause_ms()"] {
-            let found = production.matches(call).count();
-            assert!(
-                found >= swipes,
-                "{found} of {swipes} swipe sites consume {call}; the pixel loop consumes it at \
-                 every swipe, and this module's header claims the pacing is shared"
-            );
+        for site in swipe_sites {
+            let from = site.saturating_sub(20);
+            let to = (site + 21).min(lines.len());
+            let window = lines[from..to].join("\n");
+            for call in ["human.think_pause_ms()", "human.after_swipe_pause_ms()"] {
+                assert!(
+                    window.contains(call),
+                    "the swipe at line {} has no {call} within twenty lines; the pixel loop \
+                     consumes it at every swipe, and this module's header claims the pacing \
+                     is shared",
+                    site + 1
+                );
+            }
         }
         let pixel = include_str!("mod.rs").replace("\r\n", "\n");
         for call in ["human.think_pause_ms()", "human.after_swipe_pause_ms()"] {
