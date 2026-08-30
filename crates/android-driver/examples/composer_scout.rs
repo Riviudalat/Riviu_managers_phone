@@ -95,13 +95,22 @@ enum Flag {
     /// another flag. **Not the same as absent**, and the difference is the whole point of this
     /// enum: `--images --album x` collapsing into "absent" is how the silent default came back.
     Unusable,
+    /// The flag is there more than once. Two occurrences are two instructions, and picking
+    /// either silently is the same guess-shaped hole `Unusable` closes: first-wins let
+    /// `--images 7 --images --album x` tap seven cells while the malformed second `--images`
+    /// — the last thing the operator typed — was never read at all.
+    Repeated,
     Value(String),
 }
 
 fn flag_value(args: &[String], flag: &str) -> Flag {
-    let Some(at) = args.iter().position(|arg| arg == flag) else {
+    let mut occurrences = args.iter().enumerate().filter(|(_, arg)| *arg == flag);
+    let Some((at, _)) = occurrences.next() else {
         return Flag::Absent;
     };
+    if occurrences.next().is_some() {
+        return Flag::Repeated;
+    }
     match args.get(at + 1) {
         Some(value) if !value.starts_with("--") => Flag::Value(value.clone()),
         _ => Flag::Unusable,
@@ -124,6 +133,9 @@ fn how_many_images(args: &[String]) -> Result<usize, String> {
     match flag_value(args, "--images") {
         Flag::Absent => Ok(3),
         Flag::Unusable => Err("--images cần một số từ 1 đến 12 đi ngay sau nó".to_string()),
+        Flag::Repeated => {
+            Err("--images xuất hiện nhiều lần — không đoán lần nào là thật".to_string())
+        }
         Flag::Value(raw) => match raw.parse::<usize>() {
             Ok(count) if (1..=12).contains(&count) => Ok(count),
             _ => Err(format!(
@@ -148,6 +160,10 @@ async fn main() -> anyhow::Result<()> {
         }
         Flag::Unusable => {
             say("--album needs a name after it, not another flag");
+            return Ok(());
+        }
+        Flag::Repeated => {
+            say("--album appears more than once; pass it once — neither occurrence is guessed at");
             return Ok(());
         }
     };
@@ -311,6 +327,32 @@ mod tests {
             Flag::Unusable
         );
         assert_eq!(flag_value(&line(&["SN"]), "--album"), Flag::Absent);
+    }
+
+    /// **The same flag twice is two instructions, and neither is guessed at.**
+    ///
+    /// `flag_value` used to take the first occurrence, so `--images 7 --images --album x`
+    /// selected seven cells while the malformed second `--images` — the last thing the
+    /// operator typed — was silently ignored.
+    #[test]
+    fn a_repeated_flag_is_refused_not_first_wins() {
+        let twice = line(&[
+            "SN",
+            "--images",
+            "7",
+            "--images",
+            "--album",
+            "riviu-import-1",
+        ]);
+        assert_eq!(flag_value(&twice, "--images"), Flag::Repeated);
+        assert!(
+            how_many_images(&twice).is_err(),
+            "--images twice must refuse; taking the first is a silent guess"
+        );
+        assert_eq!(
+            flag_value(&line(&["SN", "--album", "a", "--album", "b"]), "--album"),
+            Flag::Repeated
+        );
     }
 
     /// An album name is taken whole, including one that looks like a sentence.

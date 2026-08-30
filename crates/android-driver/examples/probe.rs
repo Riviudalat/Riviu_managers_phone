@@ -319,6 +319,12 @@ async fn main() -> anyhow::Result<()> {
         println!("\n(skipping the swipe proof; pass --feed to move the feed one card)");
     }
 
+    // Every step below prints its own FAILED line the moment it happens; this only records
+    // that one happened at all. §9.129: a stuck phone must not exit 0, because a script
+    // running several serials reads this process's exit code as "parked on the feed" — and
+    // the FAILED println alone was exactly that exit-0.
+    let mut failed_steps = 0u32;
+
     // Measure the liked-state label, which cannot be read off a post that is not
     // liked. Opt-in and self-reverting: it taps like, reads the label the control
     // now carries, then taps again and checks the original label came back, so the
@@ -327,7 +333,10 @@ async fn main() -> anyhow::Result<()> {
         println!("\n== measuring the liked-state label ==");
         match measure_liked_label(ui, labels).await {
             Ok(()) => {}
-            Err(error) => println!("  FAILED: {error:#}"),
+            Err(error) => {
+                failed_steps += 1;
+                println!("  FAILED: {error:#}")
+            }
         }
     } else {
         println!("\n(skipping the liked-label measurement; pass --measure-liked — it likes and then unlikes one post)");
@@ -340,7 +349,10 @@ async fn main() -> anyhow::Result<()> {
         println!("\n== measuring the comment drawer ==");
         match measure_comment_drawer(&session, ui, labels).await {
             Ok(()) => {}
-            Err(error) => println!("  FAILED: {error:#}"),
+            Err(error) => {
+                failed_steps += 1;
+                println!("  FAILED: {error:#}")
+            }
         }
     } else {
         println!("\n(skipping the comment-drawer measurement; pass --measure-comment — it opens and closes the drawer, sends nothing)");
@@ -357,7 +369,10 @@ async fn main() -> anyhow::Result<()> {
         );
         match copy_post_link(&session, ui, labels).await {
             Ok(link) => println!("  link = {link}"),
-            Err(error) => println!("  FAILED: {error:#}"),
+            Err(error) => {
+                failed_steps += 1;
+                println!("  FAILED: {error:#}")
+            }
         }
     }
 
@@ -376,7 +391,10 @@ async fn main() -> anyhow::Result<()> {
         );
         match measure_mention_suggestions(&session, ui, labels, &prefix).await {
             Ok(()) => {}
-            Err(error) => println!("  FAILED: {error:#}"),
+            Err(error) => {
+                failed_steps += 1;
+                println!("  FAILED: {error:#}")
+            }
         }
     } else {
         println!(
@@ -393,7 +411,10 @@ async fn main() -> anyhow::Result<()> {
         println!("\n== comment list rows ==");
         match measure_comment_list(&session, ui, labels).await {
             Ok(()) => {}
-            Err(error) => println!("  FAILED: {error:#}"),
+            Err(error) => {
+                failed_steps += 1;
+                println!("  FAILED: {error:#}")
+            }
         }
     } else {
         println!("\n(skipping the comment-list measurement; pass --measure-comment-list)");
@@ -405,7 +426,10 @@ async fn main() -> anyhow::Result<()> {
         println!("\n== reply composer ==");
         match measure_reply_composer(&session, ui, labels).await {
             Ok(()) => {}
-            Err(error) => println!("  FAILED: {error:#}"),
+            Err(error) => {
+                failed_steps += 1;
+                println!("  FAILED: {error:#}")
+            }
         }
     } else {
         println!("\n(skipping the reply-composer measurement; pass --measure-reply — opens a reply box, sends nothing)");
@@ -422,7 +446,10 @@ async fn main() -> anyhow::Result<()> {
         println!("\n== post page opened from a link ==");
         match measure_target_open(ui, labels, url).await {
             Ok(()) => {}
-            Err(error) => println!("  FAILED: {error:#}"),
+            Err(error) => {
+                failed_steps += 1;
+                println!("  FAILED: {error:#}")
+            }
         }
     } else {
         println!(
@@ -443,7 +470,10 @@ async fn main() -> anyhow::Result<()> {
         println!("\n== photo carousel, swiped sideways ==");
         match measure_carousel(ui, labels, url).await {
             Ok(()) => {}
-            Err(error) => println!("  FAILED: {error:#}"),
+            Err(error) => {
+                failed_steps += 1;
+                println!("  FAILED: {error:#}")
+            }
         }
     } else {
         println!(
@@ -464,7 +494,10 @@ async fn main() -> anyhow::Result<()> {
         println!("\n== photo cards on the feed, {count} cards ==");
         match measure_feed_carousel(ui, labels, count).await {
             Ok(()) => {}
-            Err(error) => println!("  FAILED: {error:#}"),
+            Err(error) => {
+                failed_steps += 1;
+                println!("  FAILED: {error:#}")
+            }
         }
     } else {
         println!(
@@ -489,7 +522,10 @@ async fn main() -> anyhow::Result<()> {
         } else {
             match gate_standalone(ui, labels, size, &url, &text).await {
                 Ok(()) => {}
-                Err(error) => println!("  FAILED: {error:#}"),
+                Err(error) => {
+                    failed_steps += 1;
+                    println!("  FAILED: {error:#}")
+                }
             }
         }
     } else {
@@ -507,7 +543,10 @@ async fn main() -> anyhow::Result<()> {
         println!("\n== bottom tab bar (read-only) ==");
         match measure_tab_bar(&session, size).await {
             Ok(()) => {}
-            Err(error) => println!("  FAILED: {error:#}"),
+            Err(error) => {
+                failed_steps += 1;
+                println!("  FAILED: {error:#}")
+            }
         }
     } else {
         println!("\n(skipping the tab-bar measurement; pass --measure-tab-bar — reads only)");
@@ -515,19 +554,27 @@ async fn main() -> anyhow::Result<()> {
 
     // Step two: what the composer contains. Opens TikTok's camera, so it is opt-in and
     // backs out without granting anything.
-    if let Some(index) = args
-        .iter()
-        .position(|arg| arg == "--measure-gallery")
-        .and_then(|at| args.get(at + 1))
-        .and_then(|value| value.parse::<usize>().ok())
-    {
-        println!(
-            "
+    match gallery_candidate_request(&args) {
+        Ok(None) => {}
+        Ok(Some(index)) => {
+            println!(
+                "
 == gallery entry candidate {index} =="
-        );
-        match measure_gallery_entry(&session, ui, labels, index).await {
-            Ok(()) => {}
-            Err(error) => println!("  FAILED: {error:#}"),
+            );
+            match measure_gallery_entry(&session, ui, labels, index).await {
+                Ok(()) => {}
+                Err(error) => {
+                    failed_steps += 1;
+                    println!("  FAILED: {error:#}")
+                }
+            }
+        }
+        // Asked for and unreadable is a refusal that counts as a failed step, not a skip:
+        // the old parse turned `--measure-gallery abc` into no output at all — a requested
+        // tap silently not taken, the same D-10 hole `composer_scout --images` had.
+        Err(complaint) => {
+            failed_steps += 1;
+            println!("\n== gallery entry ==\n  FAILED: {complaint}");
         }
     }
 
@@ -545,7 +592,10 @@ async fn main() -> anyhow::Result<()> {
         );
         match measure_own_post_caption(&session, caption).await {
             Ok(()) => {}
-            Err(error) => println!("  FAILED: {error:#}"),
+            Err(error) => {
+                failed_steps += 1;
+                println!("  FAILED: {error:#}")
+            }
         }
     } else {
         println!("
@@ -556,7 +606,10 @@ async fn main() -> anyhow::Result<()> {
         println!("\n== composer contents ==");
         match measure_composer(&session, ui, labels, size).await {
             Ok(()) => {}
-            Err(error) => println!("  FAILED: {error:#}"),
+            Err(error) => {
+                failed_steps += 1;
+                println!("  FAILED: {error:#}")
+            }
         }
     } else {
         println!("\n(skipping the composer measurement; pass --measure-composer — opens the camera, grants nothing)");
@@ -603,7 +656,10 @@ async fn main() -> anyhow::Result<()> {
         println!("\n== minicap frames ==");
         match measure_frames(&serial, std::path::Path::new(&apk)).await {
             Ok(()) => {}
-            Err(error) => println!("  frames FAILED: {error:#}"),
+            Err(error) => {
+                failed_steps += 1;
+                println!("  frames FAILED: {error:#}")
+            }
         }
     } else {
         println!("\n(skipping minicap frames; set RIVIU_MINICAP_APK to the noarch minicap.apk)");
@@ -623,6 +679,14 @@ async fn main() -> anyhow::Result<()> {
         println!("\n(skipping terminate_app; pass --terminate to exercise it)");
     }
 
+    // The FAILED lines above already said *what*; this refuses the exit code a script would
+    // read as "nothing is wrong". After a failed composer step the phone may not even be on
+    // the feed, and §9.129's whole point is that a multi-serial loop must stop there.
+    anyhow::ensure!(
+        failed_steps == 0,
+        "{failed_steps} measurement step(s) FAILED — see the lines above; check the phone \
+         is back on the feed before running anything else against it"
+    );
     println!("\nG1 probe finished.");
     Ok(())
 }
@@ -2361,9 +2425,12 @@ async fn measure_gallery_entry(
     // had just become the composer, past every Back press below. That is the same stranded
     // phone the split was written to prevent, one line above where the protection starts.
     let opened = ui.tap(element.centre()).await;
-    if opened.is_ok() {
-        tokio::time::sleep(Duration::from_millis(4_000)).await;
-    }
+    // The settle covers **both** arms, because the `Err` arm is the delivered-but-
+    // unacknowledged tap: the composer may be opening right now. Backing out during that
+    // animation finds the old feed still rendered, presses nothing, and leaves the composer
+    // to finish opening after this function has exited — the exact stranding the back-out
+    // below exists to prevent.
+    tokio::time::sleep(Duration::from_millis(4_000)).await;
 
     // **Past this line the composer is open, so every exit walks back out.**
     //
@@ -2460,10 +2527,10 @@ async fn read_the_gallery_candidates(
     let (sx, sy, sright, sbottom) = shutter;
     println!("  shutter anchor at {sx:.0},{sy:.0}..{sright:.0},{sbottom:.0}");
 
-    let candidates = rank_gallery_candidates(shutter, &nodes);
+    let ranked = rank_gallery_candidates(shutter, &nodes);
     println!(
         "  {} unlabelled candidate(s) right of the shutter:",
-        candidates.len()
+        ranked.list().len()
     );
     for (
         index,
@@ -2474,7 +2541,7 @@ async fn read_the_gallery_candidates(
             right,
             bottom,
         },
-    ) in candidates.iter().enumerate()
+    ) in ranked.list().iter().enumerate()
     {
         println!(
             "    [{index}] {x:.0},{y:.0} {:.0}x{:.0} clickable={clickable}",
@@ -2482,6 +2549,16 @@ async fn read_the_gallery_candidates(
             bottom - y
         );
     }
+    // An unfiltered list is for the operator's eyes, never for `which`: the index was typed
+    // before they saw which list they would get, and on the unfiltered one the screen-tall
+    // clickable ancestors sort first — so index N lands on an arbitrary rectangle.
+    let GalleryCandidates::Filtered(candidates) = ranked else {
+        anyhow::bail!(
+            "the shape filters left nothing — this screen does not match the one they were \
+             measured on. The list above is every unlabelled rectangle, unranked; nothing \
+             was tapped. Read the rectangles, pick the index yourself, and re-run"
+        );
+    };
     let Some(&Candidate {
         x,
         y,
@@ -2575,6 +2652,55 @@ struct Candidate {
     bottom: f64,
 }
 
+/// What the ranking produced, and whether its shape filters actually held on this screen.
+///
+/// The split exists because the caller **taps** index N of a filtered list and must only
+/// **print** an unfiltered one. On a screen the filters were not measured on, N names an
+/// arbitrary rectangle — and the screen-tall clickable ancestors sort first there, so the
+/// arbitrary rectangle is the worst one.
+#[derive(Debug, Clone, PartialEq)]
+enum GalleryCandidates {
+    /// The shape filters recognised this screen; index 0 is the likeliest gallery entry.
+    Filtered(Vec<Candidate>),
+    /// The filters removed everything: this screen does not match the one they were measured
+    /// on, so the list is every unlabelled rectangle, for reading only.
+    Unfiltered(Vec<Candidate>),
+}
+
+impl GalleryCandidates {
+    fn list(&self) -> &[Candidate] {
+        match self {
+            Self::Filtered(list) | Self::Unfiltered(list) => list,
+        }
+    }
+}
+
+/// Which candidate `--measure-gallery` asked to tap: `None` when it was not asked for, a
+/// complaint when it was asked for and cannot be read.
+///
+/// The same three-way split `composer_scout --images` got in `8999d5b`, because this flag had
+/// the identical hole: `--measure-gallery abc` and `--measure-gallery --other-flag` failed the
+/// `parse().ok()` chain, became "not asked for", and the whole step was skipped with no output
+/// at all — a requested tap on a real phone, silently not taken.
+fn gallery_candidate_request(args: &[String]) -> Result<Option<usize>, String> {
+    let mut occurrences = args
+        .iter()
+        .enumerate()
+        .filter(|(_, arg)| *arg == "--measure-gallery");
+    let Some((at, _)) = occurrences.next() else {
+        return Ok(None);
+    };
+    if occurrences.next().is_some() {
+        return Err("--measure-gallery xuất hiện nhiều lần — không đoán lần nào là thật".into());
+    }
+    match args.get(at + 1) {
+        Some(value) if !value.starts_with("--") => value.parse::<usize>().map(Some).map_err(|_| {
+            format!("--measure-gallery {value:?} không đọc được; cần chỉ số ứng viên (0, 1, …)")
+        }),
+        _ => Err("--measure-gallery cần một chỉ số ứng viên đi ngay sau nó".into()),
+    }
+}
+
 /// Order the unlabelled rectangles beside the shutter, likeliest first.
 ///
 /// # Why this is a function and not four lines of iterator inside the command
@@ -2603,11 +2729,13 @@ struct Candidate {
 /// exceeds the size ceiling, and an entry left of or above the shutter fails the centre test.
 ///
 /// So a filter that removes **everything** is treated as a wrong filter rather than as an
-/// answer. The unfiltered list comes back with a printed warning, because on a screen nobody
-/// has measured the operator wants to see the rectangles and judge, not be told there are none.
-/// A filter that removes *some* candidates is still trusted — there is no way to tell a wrongly
-/// dropped entry from a correctly dropped ancestor without another measurement.
-fn rank_gallery_candidates(shutter: (f64, f64, f64, f64), nodes: &[Node]) -> Vec<Candidate> {
+/// answer — but a wrong filter is not a licence to tap. The full unlabelled list comes back
+/// **labelled as unfiltered**, the caller prints it and refuses the tap: on a screen nobody
+/// has measured the operator wants to see the rectangles and judge, and an index typed before
+/// they saw which list they would get names an arbitrary one. A filter that removes *some*
+/// candidates is still trusted — there is no way to tell a wrongly dropped entry from a
+/// correctly dropped ancestor without another measurement.
+fn rank_gallery_candidates(shutter: (f64, f64, f64, f64), nodes: &[Node]) -> GalleryCandidates {
     let (_, sy, sright, sbottom) = shutter;
     let ceiling = (sbottom - sy) * 2.0;
     let unlabelled: Vec<Candidate> = nodes
@@ -2635,16 +2763,16 @@ fn rank_gallery_candidates(shutter: (f64, f64, f64, f64), nodes: &[Node]) -> Vec
         })
         .filter(|c| (c.x + c.right) / 2.0 >= sright && c.bottom > sy && c.y < sbottom)
         .collect();
-    if candidates.is_empty() && !unlabelled.is_empty() {
-        println!(
-            "  ! the shape filters left nothing of {} unlabelled rectangle(s) — this screen does \
-             not match the one they were measured on; showing all of them",
-            unlabelled.len()
-        );
+    let filters_held = !candidates.is_empty() || unlabelled.is_empty();
+    if !filters_held {
         candidates = unlabelled;
     }
     candidates.sort_by(|a, b| b.clickable.cmp(&a.clickable).then(a.x.total_cmp(&b.x)));
-    candidates
+    if filters_held {
+        GalleryCandidates::Filtered(candidates)
+    } else {
+        GalleryCandidates::Unfiltered(candidates)
+    }
 }
 
 /// `[x,y][right,bottom]` as four numbers.
@@ -2787,7 +2915,9 @@ mod tests {
     #[test]
     fn the_gallery_entry_is_the_first_candidate_offered() {
         let (shutter, nodes) = the_fleets_own_camera_screen();
-        let ranked = rank_gallery_candidates(shutter, &nodes);
+        let GalleryCandidates::Filtered(ranked) = rank_gallery_candidates(shutter, &nodes) else {
+            panic!("the filters hold on the fleet's own screen");
+        };
         let first = ranked.first().expect("the entry is in the dump");
         assert_eq!(
             (first.x, first.y, first.right, first.bottom),
@@ -2801,7 +2931,9 @@ mod tests {
     #[test]
     fn a_screen_tall_container_is_not_a_candidate() {
         let (shutter, nodes) = the_fleets_own_camera_screen();
-        let ranked = rank_gallery_candidates(shutter, &nodes);
+        let GalleryCandidates::Filtered(ranked) = rank_gallery_candidates(shutter, &nodes) else {
+            panic!("the filters hold on the fleet's own screen");
+        };
         assert_eq!(
             ranked.len(),
             7,
@@ -2817,7 +2949,9 @@ mod tests {
     #[test]
     fn a_candidate_overlapping_the_shutter_is_kept() {
         let (shutter, nodes) = the_fleets_own_camera_screen();
-        let ranked = rank_gallery_candidates(shutter, &nodes);
+        let GalleryCandidates::Filtered(ranked) = rank_gallery_candidates(shutter, &nodes) else {
+            panic!("the filters hold on the fleet's own screen");
+        };
         assert!(
             ranked.iter().any(|c| c.x < shutter.2),
             "690 is left of the shutter's right edge at 705, and it still counts"
@@ -2846,9 +2980,16 @@ mod tests {
         }];
         let ranked = rank_gallery_candidates(shutter, &nodes);
         assert_eq!(
-            ranked.len(),
+            ranked.list().len(),
             1,
             "a filter that removes everything is a wrong filter, not an empty screen"
+        );
+        // And the list is *labelled* unfiltered, which is what makes the caller print it and
+        // refuse the tap: an index typed before the operator saw which list they would get
+        // names an arbitrary rectangle here.
+        assert!(
+            matches!(ranked, GalleryCandidates::Unfiltered(_)),
+            "an unfiltered list handed back as filtered is a tap on an arbitrary rectangle"
         );
     }
 
@@ -2866,7 +3007,7 @@ mod tests {
             enabled: true,
         }];
         assert!(
-            rank_gallery_candidates(shutter, &nodes).is_empty(),
+            rank_gallery_candidates(shutter, &nodes).list().is_empty(),
             "a zero-area rectangle is not a tap point on any screen"
         );
     }
@@ -2875,8 +3016,13 @@ mod tests {
     #[test]
     fn a_screen_the_filters_understand_does_not_get_the_fallback() {
         let (shutter, nodes) = the_fleets_own_camera_screen();
+        let ranked = rank_gallery_candidates(shutter, &nodes);
+        assert!(
+            matches!(ranked, GalleryCandidates::Filtered(_)),
+            "a screen the filters understand must stay tappable"
+        );
         assert_eq!(
-            rank_gallery_candidates(shutter, &nodes).len(),
+            ranked.list().len(),
             7,
             "the screen-tall container must still be dropped, not handed back by the fallback"
         );
@@ -2897,8 +3043,34 @@ mod tests {
         });
         let ranked = rank_gallery_candidates(shutter, &nodes);
         assert!(
-            !ranked.iter().any(|c| c.right - c.x == 0.0),
+            !ranked.list().iter().any(|c| c.right - c.x == 0.0),
             "a zero-width rectangle would sort first on clickable and be tapped"
         );
+    }
+
+    /// **Asked-for-and-unreadable is a complaint, not a silent skip.** (D-10, probe edition.)
+    ///
+    /// `--measure-gallery abc` used to fail `parse().ok()`, become "not asked for", and skip
+    /// the whole step with no output — a requested tap on a real phone, silently not taken.
+    #[test]
+    fn an_unreadable_gallery_index_is_refused_rather_than_skipped() {
+        let line =
+            |args: &[&str]| -> Vec<String> { args.iter().map(|arg| arg.to_string()).collect() };
+        assert_eq!(gallery_candidate_request(&line(&["SN"])), Ok(None));
+        assert_eq!(
+            gallery_candidate_request(&line(&["SN", "--measure-gallery", "4"])),
+            Ok(Some(4))
+        );
+        for bad in [
+            &["SN", "--measure-gallery", "abc"][..],
+            &["SN", "--measure-gallery", "--other-flag"],
+            &["SN", "--measure-gallery"],
+            &["SN", "--measure-gallery", "1", "--measure-gallery", "2"],
+        ] {
+            assert!(
+                gallery_candidate_request(&line(bad)).is_err(),
+                "{bad:?} must complain, not silently skip the step"
+            );
+        }
     }
 }
