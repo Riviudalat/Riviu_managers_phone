@@ -161,43 +161,57 @@ pub fn publish_get(
 #[tauri::command]
 pub fn publish_cancel(state: State<'_, AppState>, campaign_id: String) -> Result<(), CommandError> {
     let _admission = state.ensure_accepting_work()?;
-    state.db.cancel_publish_campaign(&campaign_id).map_err(err)
+    // The database refuses to cancel a terminal campaign (see
+    // `Database::cancel_publish_campaign` for the two release bugs that closes); this layer's
+    // job is to tell the operator which answer they got instead of pretending both are "done".
+    match state
+        .db
+        .cancel_publish_campaign(&campaign_id)
+        .map_err(err)?
+    {
+        Some(riviu_core::PublishCampaignState::Cancelled) => {
+            announce(&state.events, &state.db, &campaign_id);
+            Ok(())
+        }
+        Some(actual) => Err(err(format!(
+            "không huỷ được: chiến dịch đang ở {actual:?}. Một chiến dịch đã đăng xong hoặc \
+             không xác nhận được thì phải giữ nguyên trạng thái đó — huỷ nó là thả các bài \
+             đã lên ngược về kho chia tự động."
+        ))),
+        None => Err(err("publish campaign not found")),
+    }
 }
 
 /// Move a queued campaign into the explicit transfer state. The phone is not
 /// touched here; transfer and post are separate effect boundaries.
+///
+/// **The refusal list became an acceptance list, and it lives in SQL.** The old shape named
+/// the states prepare must not touch and let everything else through — which still let
+/// `imported` and `transferring` be walked back to `ready`, a state Transfer accepts. That
+/// was a back door around the transfer claim: an in-flight transfer restarted underneath
+/// itself, an imported campaign re-transferred. `Database::mark_publish_campaign_ready`
+/// accepts exactly `queued`/`scheduled`/`missed`, and a repeat on `ready` is a no-op.
 #[tauri::command]
 pub fn publish_prepare(
     state: State<'_, AppState>,
     campaign_id: String,
 ) -> Result<PublishCampaignDetail, CommandError> {
     let _admission = state.ensure_accepting_work()?;
-    let detail = state
+    match state
         .db
-        .get_publish_campaign(&campaign_id)
+        .mark_publish_campaign_ready(&campaign_id)
         .map_err(err)?
-        .ok_or_else(|| "publish campaign not found".to_string())?;
-    // **`Posting` and `Verifying` are in this list now.** Prepare walks a campaign back to
-    // `Ready`, which is a state Transfer accepts — so a campaign with phones currently inside
-    // TikTok's composer could be pushed back to the start of the pipeline and re-transferred
-    // underneath the run that was still going.
-    if matches!(
-        detail.campaign.state,
-        riviu_core::PublishCampaignState::Cancelled
-            | riviu_core::PublishCampaignState::Succeeded
-            | riviu_core::PublishCampaignState::Uncertain
-            | riviu_core::PublishCampaignState::Posting
-            | riviu_core::PublishCampaignState::Verifying
-    ) {
-        return Err(err(format!(
-            "campaign is already terminal or in flight: {:?}",
-            detail.campaign.state
-        )));
+    {
+        Some(riviu_core::PublishCampaignState::Ready) => {
+            announce(&state.events, &state.db, &campaign_id);
+        }
+        Some(actual) => {
+            return Err(err(format!(
+                "campaign is already terminal or in flight: {actual:?}"
+            )))
+        }
+        None => return Err(err("publish campaign not found")),
     }
-    state
-        .db
-        .update_publish_campaign_state(&campaign_id, riviu_core::PublishCampaignState::Ready, None)
-        .map_err(err)?;
     state
         .db
         .get_publish_campaign(&campaign_id)
@@ -222,6 +236,33 @@ pub async fn publish_transfer(
     .map_err(err)
 }
 
+/// Whether some phone may already hold this assignment's post — or the media that becomes one.
+///
+/// The set a transfer must leave alone: re-staging a `succeeded` row rebuilds nothing (the
+/// import is idempotent) but re-*preflighting* it can block the whole campaign, and touching
+/// `posting`/`verifying`/`uncertain` rows is how a retry walks into a run that may be live.
+/// The same four states the auto-deal pool reserves on, for the same reason.
+fn assignment_may_hold_the_post(state: &riviu_core::PublishCampaignState) -> bool {
+    matches!(
+        state,
+        riviu_core::PublishCampaignState::Succeeded
+            | riviu_core::PublishCampaignState::Posting
+            | riviu_core::PublishCampaignState::Verifying
+            | riviu_core::PublishCampaignState::Uncertain
+    )
+}
+
+/// Whether this assignment's carousel is already up, settled, done.
+///
+/// The post fan-out used to run every assignment and count the claim's "already succeeded"
+/// refusal as a failure — so a retry that finished the one remaining phone still ended the
+/// campaign `failed_before_dispatch`, the Transfer button came back, and the loop never
+/// closed. A settled row is not a participant: it is the part of the campaign that already
+/// went right.
+fn assignment_already_posted(state: &riviu_core::PublishCampaignState) -> bool {
+    matches!(state, riviu_core::PublishCampaignState::Succeeded)
+}
+
 pub(crate) async fn transfer_publish_campaign_inner(
     control: Arc<DeviceControlPlane>,
     db: Arc<Database>,
@@ -237,8 +278,16 @@ pub(crate) async fn transfer_publish_campaign_inner(
     }
     // Refused here too, not only before posting. Transferring first would push media onto a
     // phone that can never be posted from, and then leave it there.
+    //
+    // **Only the assignments this run will actually touch.** The loop below skips rows that
+    // may already hold the post, so preflighting them too meant a retry could be blocked by
+    // the one phone that already finished — its TikTok updated to an unmeasured build after
+    // it posted, and the campaign's *remaining* phones were refused on its behalf.
     let mut reports = Vec::new();
     for assignment in &detail.assignments {
+        if assignment_may_hold_the_post(&assignment.state) {
+            continue;
+        }
         reports.push((
             assignment.udid.as_str(),
             readiness_of(&control, &assignment.udid).await,
@@ -252,21 +301,25 @@ pub(crate) async fn transfer_publish_campaign_inner(
     // **Per device now, not one number for the campaign.** The two routes have different
     // ceilings — twelve tap points somebody wrote down, against however many grid cells fit on
     // the screen — and using the smaller for both refused Android bundles that post fine.
-    refuse_assignments_whose_bundle_is_too_large(detail.assignments.iter().filter_map(
-        |assignment| {
-            detail
-                .bundles
-                .iter()
-                .find(|bundle| bundle.id == assignment.bundle_id)
-                .map(|bundle| {
-                    (
-                        assignment.udid.as_str(),
-                        bundle,
-                        max_images_for(route_of(&control, &assignment.udid)),
-                    )
-                })
-        },
-    ))?;
+    refuse_assignments_whose_bundle_is_too_large(
+        detail
+            .assignments
+            .iter()
+            .filter(|assignment| !assignment_may_hold_the_post(&assignment.state))
+            .filter_map(|assignment| {
+                detail
+                    .bundles
+                    .iter()
+                    .find(|bundle| bundle.id == assignment.bundle_id)
+                    .map(|bundle| {
+                        (
+                            assignment.udid.as_str(),
+                            bundle,
+                            max_images_for(route_of(&control, &assignment.udid)),
+                        )
+                    })
+            }),
+    )?;
     // **Claimed, not written.** Transfer used to move the campaign to `Transferring`
     // unconditionally and then walk every assignment back to `Imported` — so a second Transfer
     // on a campaign that had already *succeeded* rebuilt exactly the state the posting claim
@@ -283,16 +336,39 @@ pub(crate) async fn transfer_publish_campaign_inner(
 
     for assignment in &detail.assignments {
         // An assignment that already reached a phone is not re-imported. The campaign claim
-        // above makes this unreachable today; it stays because the two guards answer different
-        // questions, and a path that claimed the campaign some other way would still need it.
-        if matches!(
-            assignment.state,
-            riviu_core::PublishCampaignState::Succeeded
-                | riviu_core::PublishCampaignState::Posting
-                | riviu_core::PublishCampaignState::Verifying
-                | riviu_core::PublishCampaignState::Uncertain
-        ) {
+        // above makes some of these unreachable today; the guard stays because the two answer
+        // different questions, and a retry of a partially posted campaign arrives here with
+        // `succeeded` rows it must step over.
+        if assignment_may_hold_the_post(&assignment.state) {
             continue;
+        }
+        // The operator's cancel is read **between phones**, the same place the post loop
+        // reads it. Transfer used to run to the end regardless, and its final write then
+        // erased the cancel (see `settle_publish_transfer`); stopping here costs nothing —
+        // every untouched assignment is still where a later run expects it. A read that
+        // fails is not "not cancelled": carrying on because the database did not answer is
+        // how a stopped transfer keeps pushing media.
+        match db.publish_campaign_state(&campaign_id) {
+            Ok(Some(riviu_core::PublishCampaignState::Transferring)) => {}
+            Ok(Some(riviu_core::PublishCampaignState::Cancelled)) | Ok(None) => break,
+            Ok(Some(other)) => {
+                anyhow::bail!(
+                    "campaign left the transfer underneath this run: {other:?} — dừng thay vì \
+                     chuyển tiếp"
+                );
+            }
+            Err(error) => {
+                let _ = db.settle_publish_transfer(
+                    &campaign_id,
+                    riviu_core::db::PublishTransferSettle::FailedBeforeDispatch {
+                        error_code: "campaign_state_unreadable",
+                    },
+                );
+                anyhow::bail!(
+                    "không đọc được trạng thái chiến dịch giữa lượt chuyển ({error}) — dừng \
+                     thay vì chuyển tiếp"
+                );
+            }
         }
         // **Each phone gets its own bundle, and only its own.**
         //
@@ -340,18 +416,26 @@ pub(crate) async fn transfer_publish_campaign_inner(
             .await
         {
             Ok(context) => context,
+            // **`failed_before_dispatch`, not `uncertain` — a transfer cannot publish.**
+            // Every failure in this loop used to settle both rows to `uncertain`, the one
+            // state no claim accepts, so a copy error or a busy phone parked the campaign
+            // (and this child) beyond every retry button for good. Nothing on this path can
+            // reach TikTok's composer; the name that keeps the work reachable is the true
+            // one. The campaign write is conditional on still being `transferring`, so a
+            // cancel that landed mid-loop is not overwritten.
             Err(error) => {
                 let message = error.to_string();
                 db.update_publish_assignment_state(
                     &assignment.id,
-                    riviu_core::PublishCampaignState::Uncertain,
+                    riviu_core::PublishCampaignState::FailedBeforeDispatch,
                     Some("media_transfer_context_failed"),
                     Some(&serde_json::json!({"message": message}).to_string()),
                 )?;
-                db.update_publish_campaign_state(
+                db.settle_publish_transfer(
                     &campaign_id,
-                    riviu_core::PublishCampaignState::Uncertain,
-                    Some("media_transfer_context_failed"),
+                    riviu_core::db::PublishTransferSettle::FailedBeforeDispatch {
+                        error_code: "media_transfer_context_failed",
+                    },
                 )?;
                 anyhow::bail!("media transfer context failed: {message}");
             }
@@ -396,45 +480,61 @@ pub(crate) async fn transfer_publish_campaign_inner(
                             Some(&evidence.to_string()),
                         )?;
                     }
+                    // Retryable for the same reason as the context arm: a half-finished
+                    // native import is re-run under the same deterministic import id, and
+                    // nothing here has touched a composer.
                     Err(error) => {
                         let message = error.to_string();
                         db.update_publish_assignment_state(
                             &assignment.id,
-                            riviu_core::PublishCampaignState::Uncertain,
+                            riviu_core::PublishCampaignState::FailedBeforeDispatch,
                             Some("media_transfer_native_failed"),
                             Some(&serde_json::json!({"message": message}).to_string()),
                         )?;
-                        db.update_publish_campaign_state(
+                        db.settle_publish_transfer(
                             &campaign_id,
-                            riviu_core::PublishCampaignState::Uncertain,
-                            Some("media_transfer_native_failed"),
+                            riviu_core::db::PublishTransferSettle::FailedBeforeDispatch {
+                                error_code: "media_transfer_native_failed",
+                            },
                         )?;
                         anyhow::bail!("native media import failed: {message}");
                     }
                 }
             }
+            // Same rule as the two arms above: nothing reached a composer, so the truthful
+            // settle is the retryable one, and the cancel — if one landed — wins.
             Err(error) => {
                 let message = error.to_string();
                 db.update_publish_assignment_state(
                     &assignment.id,
-                    riviu_core::PublishCampaignState::Uncertain,
+                    riviu_core::PublishCampaignState::FailedBeforeDispatch,
                     Some("media_transfer_failed"),
                     Some(&serde_json::json!({"message": message}).to_string()),
                 )?;
-                db.update_publish_campaign_state(
+                db.settle_publish_transfer(
                     &campaign_id,
-                    riviu_core::PublishCampaignState::Uncertain,
-                    Some("media_transfer_failed"),
+                    riviu_core::db::PublishTransferSettle::FailedBeforeDispatch {
+                        error_code: "media_transfer_failed",
+                    },
                 )?;
                 anyhow::bail!("media transfer failed: {message}");
             }
         }
     }
-    db.update_publish_campaign_state(
+    // Conditional on the campaign still being `transferring` — see
+    // `Database::settle_publish_transfer`. The unconditional write here is what used to walk
+    // a mid-transfer cancel back to `imported`, and the scheduler's very next line then
+    // posted the campaign the operator had stopped.
+    // A settle that moves nothing — the operator cancelled mid-transfer — is not an error:
+    // the phones that were staged, were staged, and the detail below reads `cancelled`,
+    // which is the answer the caller must see. A bail here would push the operator toward a
+    // retry the cancel exists to prevent. (The scheduler's follow-up Post is stopped by the
+    // posting claim, which does not accept `cancelled`.)
+    db.settle_publish_transfer(
         &campaign_id,
-        riviu_core::PublishCampaignState::Imported,
-        None,
+        riviu_core::db::PublishTransferSettle::Imported,
     )?;
+    announce(&events, &db, &campaign_id);
     db.get_publish_campaign(&campaign_id)?
         .ok_or_else(|| anyhow::anyhow!("campaign disappeared after transfer"))
 }
@@ -836,8 +936,19 @@ pub(crate) async fn post_publish_campaign_inner(
             detail.campaign.state
         );
     }
+    // **Only the assignments this run will post.** A `succeeded` row is not a participant:
+    // its phone is not opened, not preflighted, and — further down — its claim refusal is
+    // not a failure. Before this filter, a retry of a partially posted campaign was judged
+    // by the phones that had already finished: their "đã đăng — bỏ qua" refusals counted as
+    // failures, the campaign went back to `failed_before_dispatch` with every carousel
+    // live, and the screen offered another Transfer forever.
+    let participants: Vec<&riviu_core::PublishAssignmentRecord> = detail
+        .assignments
+        .iter()
+        .filter(|assignment| !assignment_already_posted(&assignment.state))
+        .collect();
     let mut reports = Vec::new();
-    for assignment in &detail.assignments {
+    for assignment in &participants {
         reports.push((
             assignment.udid.as_str(),
             readiness_of(&control, &assignment.udid).await,
@@ -848,8 +959,7 @@ pub(crate) async fn post_publish_campaign_inner(
     // phones and a fleet can be mixed, so a single fleet-wide answer would
     // report one device's agent on behalf of the rest. Still fails fast, before
     // any state is mutated, and now names the devices that are short.
-    let without_push_media: Vec<&str> = detail
-        .assignments
+    let without_push_media: Vec<&str> = participants
         .iter()
         .filter(|assignment| !control.supports_push_media(&assignment.udid))
         .map(|assignment| assignment.udid.as_str())
@@ -884,11 +994,22 @@ pub(crate) async fn post_publish_campaign_inner(
     // The permit count is `stream_capacity`, because each post holds a UI-with-stream context.
     // Running past it does not queue, it fails — which on this path means a phone with media
     // already in its gallery.
+    // A campaign whose every assignment already posted has nothing left to run — which is
+    // exactly the state the counting bug used to manufacture: children all `succeeded` under
+    // a parent stuck `failed_before_dispatch`. Settling it here is what lets one press of
+    // Post close that loop instead of reporting the finished phones as failures.
+    if participants.is_empty() {
+        db.finish_publish_campaign(&campaign_id, riviu_core::db::PublishRunOutcome::AllPosted)?;
+        announce(&events, &db, &campaign_id);
+        return db
+            .get_publish_campaign(&campaign_id)?
+            .ok_or_else(|| anyhow::anyhow!("campaign disappeared after post"));
+    }
     let gate = Arc::new(tokio::sync::Semaphore::new(
         control.stream_capacity().max(1),
     ));
-    let mut running = Vec::with_capacity(detail.assignments.len());
-    for (index, assignment) in detail.assignments.iter().enumerate() {
+    let mut running = Vec::with_capacity(participants.len());
+    for (index, assignment) in participants.iter().enumerate() {
         let Some(bundle) = detail
             .bundles
             .iter()
@@ -905,7 +1026,7 @@ pub(crate) async fn post_publish_campaign_inner(
             frames.clone(),
             events.clone(),
             campaign_id.clone(),
-            assignment.clone(),
+            (*assignment).clone(),
             bundle.clone(),
         )));
     }
@@ -916,7 +1037,7 @@ pub(crate) async fn post_publish_campaign_inner(
     // `uncertain` — permanently unclaimable — with children correctly marked retryable
     // underneath it.
     let mut may_be_live = false;
-    for (assignment, task) in detail.assignments.iter().zip(running) {
+    for (assignment, task) in participants.iter().zip(running) {
         match task.await {
             Ok(Ok(())) => {}
             Ok(Err(PhoneFailure::NoBundle)) => {
@@ -1298,23 +1419,32 @@ async fn wait_for_changed_frame(
     }
 }
 
+/// Wait for the frame that counts as "posted", and answer with **that frame's** screening.
+///
+/// The screening travels with the frame because the two were once separated: the evidence
+/// recorded the screening of `after_post_tap` while hashing the frame this loop accepted —
+/// so `accountLockScreened: "not_locked"` could describe a frame nobody kept, one or two
+/// screens before the one the verdict stands on, whose own OCR read had failed and been
+/// discarded right here. Returning the pair makes the association structural; a caller
+/// cannot hash one frame and report another's reading.
 async fn wait_for_post_frame(
     frames: &dyn FrameSource,
     udid: &str,
     baseline_sha: &str,
     before_redness: f64,
     timeout: Duration,
-) -> anyhow::Result<Arc<Vec<u8>>> {
+) -> anyhow::Result<(Arc<Vec<u8>>, LockScreening)> {
     let deadline = Instant::now() + timeout;
     loop {
         if let Some(frame) = frames.latest(udid) {
             if frame_sha256(&frame) != baseline_sha {
-                if frame_reports_account_lock(&frame).await.is_locked() {
+                let screening = frame_reports_account_lock(&frame).await;
+                if screening.is_locked() {
                     anyhow::bail!("TikTok account status blocked the post: account_locked");
                 }
                 let after_redness = bottom_right_redness(&frame);
                 if before_redness < 0.01 || after_redness < before_redness * 0.65 {
-                    return Ok(frame);
+                    return Ok((frame, screening));
                 }
             }
         }
@@ -1685,8 +1815,12 @@ async fn post_through_the_pixel_grid(
         session.tap_native(POST_BUTTON).await?;
         let after_post_tap =
             wait_for_changed_frame(frames, udid, &typed_sha, Duration::from_secs(8)).await?;
-        let screening = frame_reports_account_lock(&after_post_tap).await;
-        if screening.is_locked() {
+        // An early bail only — this reading describes `after_post_tap`, not the frame the
+        // verdict will hash, so it must not survive into the evidence.
+        if frame_reports_account_lock(&after_post_tap)
+            .await
+            .is_locked()
+        {
             anyhow::bail!("TikTok account status blocked the post: account_locked");
         }
         let confirmation_sha = if is_public_post_confirmation(&after_post_tap) {
@@ -1703,7 +1837,7 @@ async fn post_through_the_pixel_grid(
         } else {
             frame_sha256(&after_post_tap)
         };
-        let posted = wait_for_post_frame(
+        let (posted, screening) = wait_for_post_frame(
             frames,
             udid,
             &confirmation_sha,
@@ -1722,9 +1856,12 @@ async fn post_through_the_pixel_grid(
             "postButtonRednessBefore": post_red_before,
             // **Say what this verdict is made of.** It is not a located control; it is a frame
             // that changed and lost its red corner. `accountLockScreened` reports what the
-            // reader actually produced — `unavailable` covers both "no OCR on this host" and
-            // "OCR failed on this frame", and it used to be `cfg!(target_os = "macos")`, which
-            // answered a question about the build rather than about this run.
+            // reader actually produced **on the frame `frameSha256` names** — the pair comes
+            // back together from `wait_for_post_frame`, because recording an earlier frame's
+            // reading here once let a run claim "not_locked" for a frame nobody had read.
+            // `unavailable` covers both "no OCR on this host" and "OCR failed on this frame";
+            // it used to be `cfg!(target_os = "macos")`, which answered a question about the
+            // build rather than about this run.
             "postConfirmedBy": "frame_change_and_redness_drop",
             "accountLockScreened": screening.as_str(),
         }))
@@ -1840,6 +1977,8 @@ async fn post_through_the_composer(
 #[cfg(test)]
 mod tests {
     use super::account_status_text_is_locked;
+    use super::assignment_already_posted;
+    use super::assignment_may_hold_the_post;
     use super::bundle_for_assignment;
     use super::fold_cleanup_into;
     use super::max_images_for;
@@ -1939,10 +2078,66 @@ mod tests {
                 .any(|line| line.contains("\"accountLockScreened\": screening.as_str()")),
             "the evidence must carry this run's screening result"
         );
+        // And `screening` has to be the half of the pair `wait_for_post_frame` returned —
+        // the reading made on the very frame `frameSha256` hashes. A review found the
+        // previous version satisfied by `let screening = LockScreening::NotLocked;`, and the
+        // production code itself once recorded the `after_post_tap` reading here: right
+        // token, wrong frame.
+        assert!(
+            body.iter()
+                .any(|line| line.contains("let (posted, screening) = wait_for_post_frame(")),
+            "the recorded screening must arrive with the accepted frame, not from an \
+             earlier one or a local constant"
+        );
         assert!(
             !body.iter().any(|line| line.contains("cfg!(target_os")),
             "a compile-time constant cannot say whether this frame was read"
         );
+    }
+
+    /// The two participant filters, pinned variant by variant.
+    ///
+    /// Mostly a typo pin, but the relationship at the end is the real contract: everything
+    /// the post loop steps over, the transfer loop steps over too — a state the post side
+    /// considers settled while the transfer side re-stages it would rebuild exactly the
+    /// claimable-state hole `claim_publish_campaign_for_transfer` exists to close.
+    #[test]
+    fn the_participant_filters_step_over_exactly_the_settled_states() {
+        use riviu_core::PublishCampaignState as S;
+        let all = [
+            S::Queued,
+            S::Scheduled,
+            S::Preparing,
+            S::Ready,
+            S::Transferring,
+            S::Imported,
+            S::Posting,
+            S::Verifying,
+            S::Succeeded,
+            S::FailedBeforeDispatch,
+            S::Uncertain,
+            S::Cancelled,
+            S::Missed,
+        ];
+        for state in &all {
+            assert_eq!(
+                assignment_already_posted(state),
+                matches!(state, S::Succeeded),
+                "{state:?}"
+            );
+            assert_eq!(
+                assignment_may_hold_the_post(state),
+                matches!(
+                    state,
+                    S::Succeeded | S::Posting | S::Verifying | S::Uncertain
+                ),
+                "{state:?}"
+            );
+            assert!(
+                !assignment_already_posted(state) || assignment_may_hold_the_post(state),
+                "{state:?}: settled for posting must imply untouchable for transfer"
+            );
+        }
     }
 
     fn test_bundle(id: &str) -> riviu_core::PublishBundle {
@@ -2258,13 +2453,23 @@ mod tests {
         // let action_result = if session.supports_element_bounds() { /* still posts */ };
         // ```
         //
-        // Both tokens, in the right order, and the phone posts anyway. A `return` between the
-        // question and the branch is what makes the refusal a refusal.
+        // Both tokens, in the right order, and the phone posts anyway. And the next review
+        // found the second stub: keep a `return` in the window — inside some unrelated error
+        // branch — while the question's answer still goes to `_ignored`. So the assertion now
+        // follows the *answer*: the ask must bind through `if let Some(refusal)`, and a
+        // return in the window must carry that binding out. Asking and discarding the answer
+        // is not a check, and returning something else is not a refusal.
         assert!(
-            body[asks..branches].iter().any(
-                |line| line.starts_with("return ") || line.contains("return fold_cleanup_into")
-            ),
-            "the refusal has to return; asking and discarding the answer is not a check"
+            body[asks..branches]
+                .iter()
+                .any(|line| line.contains("if let Some(refusal) =")),
+            "the question's answer must be bound, not discarded"
+        );
+        assert!(
+            body[asks..branches]
+                .iter()
+                .any(|line| line.contains("return fold_cleanup_into(refusal")),
+            "the refusal has to return — and it has to be the refusal that returns"
         );
         // And the media is taken back off the phone on that path — it was imported before any
         // of this ran, and a refusal that leaves the campaign's images in the gallery is a
@@ -2340,10 +2545,52 @@ mod tests {
             "the unconditional write is back"
         );
         // A finished assignment is skipped, so the two guards do not depend on each other.
+        // The skip goes through the named predicate — whose variant set is pinned by
+        // `the_participant_filters_step_over_exactly_the_settled_states` — so this line and
+        // that test together are the chain: loop → predicate → the four states.
         assert!(
             body.iter()
-                .any(|line| line.contains("PublishCampaignState::Succeeded")),
+                .any(|line| line.contains("assignment_may_hold_the_post(&assignment.state)")),
             "the loop no longer skips assignments that already reached a phone"
+        );
+    }
+
+    /// **The fan-out runs the unposted participants, and judges only them.**
+    ///
+    /// The chain this pins: the participant set is built through
+    /// `assignment_already_posted` (whose variant set has its own test), the spawn loop and
+    /// the counting loop walk that same set, and a campaign with nothing left to run settles
+    /// as `AllPosted`. Before this, a retry of a partially posted campaign spawned a task
+    /// for every `succeeded` row, counted its claim refusal as a failure, and finished the
+    /// campaign `failed_before_dispatch` with every carousel live — the state whose parent
+    /// the pool used to read as releasing those bundles.
+    #[test]
+    fn the_post_fan_out_runs_only_the_unposted_participants() {
+        let body = code_of("pub(crate) async fn post_publish_campaign_inner(");
+        assert!(
+            body.iter().any(|line| line
+                .contains(".filter(|assignment| !assignment_already_posted(&assignment.state))")),
+            "the participant set is no longer filtered by what already posted"
+        );
+        assert!(
+            body.iter()
+                .any(|line| line.contains("for (index, assignment) in participants.iter()")),
+            "the fan-out spawns from the unfiltered assignment list again"
+        );
+        assert!(
+            body.iter()
+                .any(|line| line.contains("participants.iter().zip(running)")),
+            "the counting walks a different set than the one that spawned"
+        );
+        let empty = body
+            .iter()
+            .position(|line| line.contains("if participants.is_empty()"))
+            .expect("a campaign with nothing left to run must be settled, not judged");
+        assert!(
+            body[empty..(empty + 6).min(body.len())]
+                .iter()
+                .any(|line| line.contains("PublishRunOutcome::AllPosted")),
+            "an all-posted campaign must settle as what it is"
         );
     }
 

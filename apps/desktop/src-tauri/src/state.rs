@@ -1728,6 +1728,19 @@ impl AppState {
                     continue;
                 };
                 let now = chrono::Local::now().naive_local();
+                // Every settle in this loop is a state change the page should see — through
+                // one named path, because when this was three hand-written emits, two of the
+                // three were missing and a campaign that settled `missed` at startup stayed
+                // painted `scheduled` until a manual reload: these settles are terminal, so
+                // no later event ever corrected the screen.
+                let tell_the_page = |campaign_id: &str| {
+                    publish_events.emit(riviu_core::events::AppEvent::PublishUpdated {
+                        campaign_id: campaign_id.to_string(),
+                        revision: publish_db
+                            .publish_campaign_revision(campaign_id)
+                            .unwrap_or_default(),
+                    });
+                };
                 for (campaign_id, raw) in scheduled {
                     let Some(raw_run_at) = raw
                         .as_deref()
@@ -1739,13 +1752,7 @@ impl AppState {
                             riviu_core::PublishCampaignState::FailedBeforeDispatch,
                             Some("missing_run_at"),
                         );
-                        // Every settle in this loop is a state change the page should see.
-                        publish_events.emit(riviu_core::events::AppEvent::PublishUpdated {
-                            campaign_id: campaign_id.clone(),
-                            revision: publish_db
-                                .publish_campaign_revision(&campaign_id)
-                                .unwrap_or_default(),
-                        });
+                        tell_the_page(&campaign_id);
                         continue;
                     };
                     let Ok(run_at) =
@@ -1762,6 +1769,7 @@ impl AppState {
                             riviu_core::PublishCampaignState::FailedBeforeDispatch,
                             Some("invalid_run_at"),
                         );
+                        tell_the_page(&campaign_id);
                         continue;
                     };
                     if run_at < publish_started_at {
@@ -1771,6 +1779,7 @@ impl AppState {
                             Some("app_opened_after_deadline"),
                         );
                         let _ = publish_db.log_op("publish.missed", &campaign_id);
+                        tell_the_page(&campaign_id);
                         continue;
                     }
                     if run_at > now {
@@ -2186,9 +2195,17 @@ mod tests {
         let scheduler = &module[module
             .find("let publish_started_at")
             .expect("the publish scheduler is still in this file")..];
+        // Bound and iterated, not merely called: a review constructed the decorative-call
+        // bypass — `let _ = ...scheduled_publish_campaigns();` beside a paging wrapper
+        // defined above the scanned slice — so the assertion follows the rows from the call
+        // into the loop.
         assert!(
-            scheduler.contains("scheduled_publish_campaigns()"),
-            "the scheduler is back to filtering a page of recent campaigns"
+            scheduler.contains("let Ok(scheduled) = publish_db.scheduled_publish_campaigns()"),
+            "the scheduler no longer binds its rows from the by-state query"
+        );
+        assert!(
+            scheduler.contains("for (campaign_id, raw) in scheduled"),
+            "the scheduler no longer iterates the rows the by-state query returned"
         );
         assert!(
             !scheduler.contains("list_publish_campaigns("),

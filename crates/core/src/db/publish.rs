@@ -16,6 +16,21 @@ pub enum PublishRunOutcome {
     SomethingMayBeLive,
 }
 
+/// How a transfer run ended, as far as the **campaign** is concerned.
+///
+/// Two answers and only two, because a transfer cannot publish anything: media moves toward a
+/// phone, nothing irreversible happens. `Uncertain` is deliberately not one of the answers —
+/// a transfer that failed is always safe to run again, and writing `Uncertain` here is what
+/// used to park a campaign in the one state no claim accepts, over a failure that never
+/// touched TikTok.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PublishTransferSettle<'a> {
+    /// Every assignment that needed media has it.
+    Imported,
+    /// The transfer stopped early; nothing here prevents another attempt.
+    FailedBeforeDispatch { error_code: &'a str },
+}
+
 impl Database {
     pub fn create_publish_campaign(
         &self,
@@ -368,18 +383,37 @@ impl Database {
             // retry".
             //
             // So: `uncertain` when some phone may already have published — which needs a
-            // person, not a retry — and `failed_before_dispatch` when nothing did, which the
-            // claim accepts.
-            let anything_may_be_live: i64 = transaction.query_row(
-                "SELECT COUNT(*) FROM publish_assignments
-                 WHERE campaign_id=?1 AND state='uncertain'",
+            // person, not a retry. `succeeded` when **every** child already posted and only
+            // the campaign's own ending was lost with the process: counting only `uncertain`
+            // here used to settle that case to `failed_before_dispatch`, whose name promises
+            // "nothing reached a phone" over a campaign where *everything* had — and a state
+            // the pool once read as releasing every one of those live bundles for re-dealing.
+            // And `failed_before_dispatch` for the rest, which the claim accepts; when some
+            // children posted and others never started, the reason says so instead of
+            // pretending the desktop never dispatched anything.
+            let (uncertain, succeeded, total): (i64, i64, i64) = transaction.query_row(
+                "SELECT
+                   COUNT(*) FILTER (WHERE state='uncertain'),
+                   COUNT(*) FILTER (WHERE state='succeeded'),
+                   COUNT(*)
+                 FROM publish_assignments WHERE campaign_id=?1",
                 params![campaign_id],
-                |row| row.get(0),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )?;
-            let (state, reason) = if anything_may_be_live > 0 {
+            let (state, reason) = if uncertain > 0 {
                 (
                     "uncertain",
                     "publish_worker_lost: app đóng khi đang đăng — có máy không xác nhận được",
+                )
+            } else if total > 0 && succeeded == total {
+                (
+                    "succeeded",
+                    "publish_worker_lost: app đóng sau khi mọi máy đã đăng xong — chỉ dòng kết bị mất, đã ghi nốt",
+                )
+            } else if succeeded > 0 {
+                (
+                    "failed_before_dispatch",
+                    "publish_worker_lost: app đóng giữa chừng — có máy đã đăng xong, phần còn lại chạy lại được",
                 )
             } else {
                 (
@@ -393,6 +427,24 @@ impl Database {
                      error_code=COALESCE(error_code,?4)
                  WHERE id=?1",
                 params![campaign_id, now, state, reason],
+            )?;
+            // The event goes in beside the state, inside the same transaction — this was the
+            // one campaign transition left writing a revision with no event behind it, in
+            // the recovery path of all places, where the reader needs the history most.
+            let (revision, error_code): (i64, Option<String>) = transaction.query_row(
+                "SELECT revision,error_code FROM publish_campaigns WHERE id=?1",
+                params![campaign_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )?;
+            transaction.execute(
+                "INSERT INTO publish_events(campaign_id,revision,kind,payload_json,created_at) \
+                 VALUES (?1,?2,'state',?3,?4)",
+                params![
+                    campaign_id,
+                    revision,
+                    serde_json::json!({"state": state, "errorCode": error_code}).to_string(),
+                    now
+                ],
             )?;
         }
         transaction.commit()?;
@@ -512,13 +564,20 @@ impl Database {
     /// `Imported` is excluded on purpose too: the media is already on the phones and the next
     /// step is Post, not another transfer.
     pub fn claim_publish_campaign_for_transfer(&self, id: &str) -> anyhow::Result<bool> {
-        let conn = self.conn()?;
-        let changed = conn.execute(
+        let mut conn = self.conn()?;
+        // A transaction for the same reason `claim_publish_campaign_for_posting` has one:
+        // the claim bumps the revision, and a revision that moves without an event behind it
+        // is a gap in the history of the one pipeline that ends in something undeletable.
+        // This claim used to be the exception, found by three reviewers independently.
+        let transaction = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let now = Utc::now().to_rfc3339();
+        let transferring = crate::publish::PublishCampaignState::Transferring;
+        let changed = transaction.execute(
             "UPDATE publish_campaigns SET state=?1,error_code=NULL,revision=revision+1,\
              updated_at=?2 WHERE id=?3 AND state IN (?4,?5,?6,?7)",
             params![
-                crate::publish::PublishCampaignState::Transferring.as_str(),
-                Utc::now().to_rfc3339(),
+                transferring.as_str(),
+                now,
                 id,
                 crate::publish::PublishCampaignState::Queued.as_str(),
                 crate::publish::PublishCampaignState::Scheduled.as_str(),
@@ -526,7 +585,149 @@ impl Database {
                 crate::publish::PublishCampaignState::FailedBeforeDispatch.as_str(),
             ],
         )?;
-        Ok(changed > 0)
+        if changed == 0 {
+            transaction.rollback()?;
+            return Ok(false);
+        }
+        let revision: i64 = transaction.query_row(
+            "SELECT revision FROM publish_campaigns WHERE id=?1",
+            params![id],
+            |row| row.get(0),
+        )?;
+        transaction.execute(
+            "INSERT INTO publish_events(campaign_id,revision,kind,payload_json,created_at) \
+             VALUES (?1,?2,'state',?3,?4)",
+            params![
+                id,
+                revision,
+                serde_json::json!({"state": transferring.as_str(), "errorCode": null}).to_string(),
+                now
+            ],
+        )?;
+        transaction.commit()?;
+        Ok(true)
+    }
+
+    /// Move a campaign to `Ready` — from the states where "prepare" still means something.
+    ///
+    /// Conditional in SQL because the unconditional version was a back door around every
+    /// claim below it: prepare accepted `imported` and `transferring`, and walking either
+    /// back to `ready` manufactured a state `claim_publish_campaign_for_transfer` accepts —
+    /// an in-flight transfer could be restarted underneath itself, and an imported campaign
+    /// re-transferred, which is precisely what that claim's exclusion of `Imported` exists
+    /// to prevent. The accepted set is the operator's side of the pipeline: never started,
+    /// waiting for its hour, already prepared (a repeat is a no-op), or missed.
+    ///
+    /// Returns the state the campaign is actually in afterwards; `None` means it does not
+    /// exist.
+    pub fn mark_publish_campaign_ready(
+        &self,
+        id: &str,
+    ) -> anyhow::Result<Option<crate::publish::PublishCampaignState>> {
+        let mut conn = self.conn()?;
+        let transaction = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let now = Utc::now().to_rfc3339();
+        let ready = crate::publish::PublishCampaignState::Ready;
+        let moved = transaction.execute(
+            "UPDATE publish_campaigns
+             SET state=?1,error_code=NULL,revision=revision+1,updated_at=?2
+             WHERE id=?3 AND state IN (?4,?5,?6)",
+            params![
+                ready.as_str(),
+                now,
+                id,
+                crate::publish::PublishCampaignState::Queued.as_str(),
+                crate::publish::PublishCampaignState::Scheduled.as_str(),
+                crate::publish::PublishCampaignState::Missed.as_str(),
+            ],
+        )?;
+        if moved > 0 {
+            let revision: i64 = transaction.query_row(
+                "SELECT revision FROM publish_campaigns WHERE id=?1",
+                params![id],
+                |row| row.get(0),
+            )?;
+            transaction.execute(
+                "INSERT INTO publish_events(campaign_id,revision,kind,payload_json,created_at) \
+                 VALUES (?1,?2,'state',?3,?4)",
+                params![
+                    id,
+                    revision,
+                    serde_json::json!({"state": ready.as_str(), "errorCode": null}).to_string(),
+                    now
+                ],
+            )?;
+        }
+        transaction.commit()?;
+        self.publish_campaign_state(id)
+    }
+
+    /// Settle the transfer a campaign is in — **without overwriting a cancel that landed
+    /// while it ran.**
+    ///
+    /// The same conditional-in-SQL shape as [`Self::finish_publish_campaign`], one command
+    /// earlier in the pipeline, and it closes the worst race this path had: the scheduler
+    /// starts a transfer, the operator presses Huỷ, the transfer finishes staging and an
+    /// unconditional write walks `cancelled` back to `imported` — and the scheduler's next
+    /// line posts the campaign the operator just stopped.
+    ///
+    /// The write happens only while the campaign still reads `transferring` — the state the
+    /// claim put it in. And the failure arm settles to `failed_before_dispatch`, not
+    /// `uncertain`: a transfer moves media *toward* a phone and cannot publish anything, so
+    /// there is nothing a failed one could have made live. `uncertain` here used to park a
+    /// campaign in the one state no claim accepts, over a copy error.
+    ///
+    /// Returns the state the campaign actually ended in; the caller reports that rather than
+    /// assuming.
+    pub fn settle_publish_transfer(
+        &self,
+        id: &str,
+        settle: PublishTransferSettle<'_>,
+    ) -> anyhow::Result<Option<crate::publish::PublishCampaignState>> {
+        let (wanted, error_code) = match settle {
+            PublishTransferSettle::Imported => {
+                (crate::publish::PublishCampaignState::Imported, None)
+            }
+            PublishTransferSettle::FailedBeforeDispatch { error_code } => (
+                crate::publish::PublishCampaignState::FailedBeforeDispatch,
+                Some(error_code),
+            ),
+        };
+        let mut conn = self.conn()?;
+        let transaction = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let now = Utc::now().to_rfc3339();
+        let moved = transaction.execute(
+            "UPDATE publish_campaigns
+             SET state=?1,error_code=?2,revision=revision+1,updated_at=?3
+             WHERE id=?4 AND state=?5",
+            params![
+                wanted.as_str(),
+                error_code,
+                now,
+                id,
+                crate::publish::PublishCampaignState::Transferring.as_str(),
+            ],
+        )?;
+        if moved > 0 {
+            let revision: i64 = transaction.query_row(
+                "SELECT revision FROM publish_campaigns WHERE id=?1",
+                params![id],
+                |row| row.get(0),
+            )?;
+            transaction.execute(
+                "INSERT INTO publish_events(campaign_id,revision,kind,payload_json,created_at) \
+                 VALUES (?1,?2,'state',?3,?4)",
+                params![
+                    id,
+                    revision,
+                    serde_json::json!({"state": wanted.as_str(), "errorCode": error_code})
+                        .to_string(),
+                    now
+                ],
+            )?;
+        }
+        transaction.commit()?;
+        self.publish_campaign_state(id)
     }
     pub fn update_publish_assignment_state(
         &self,
@@ -585,16 +786,30 @@ impl Database {
     ///
     /// * `failed_before_dispatch` — the name is the guarantee, nothing reached a phone;
     /// * `cancelled` and `missed` — the operator stopped it, or its hour passed unrun.
+    ///
+    /// # And one release nothing may grant: a child that reached a phone
+    ///
+    /// The rule above is about the *parent* letting go. It once applied to every child too,
+    /// and that was the worst hole this table has had: cancelling a campaign mid-run — or a
+    /// crash settling the parent to `failed_before_dispatch` — released the bundles of
+    /// children already `succeeded`, and the next "Chia tự động" dealt carousels that were
+    /// **live on real accounts** into a new campaign. So a child in `succeeded`, `posting`,
+    /// `verifying` or `uncertain` reserves its bundle **no matter what happened to its
+    /// parent**: those are the four states in which some phone may hold the post, and there
+    /// is no delete path on Android to make re-dealing them safe.
     pub fn bundle_ids_already_dispatched(&self) -> anyhow::Result<Vec<String>> {
         let conn = self.conn()?;
         let mut statement = conn.prepare(
-            // **The parent counts too.** Cancelling a campaign changes only the campaign
-            // row, so its assignments keep whatever state they had — and reserving on the
-            // assignment alone would hold those bundles out of the pool forever.
+            // **The parent counts too — but only for children that never reached a phone.**
+            // Cancelling a campaign changes only the campaign row, so its assignments keep
+            // whatever state they had: reserving on the assignment alone would hold a
+            // *queued* bundle out of the pool forever, and reserving on the pair released
+            // *succeeded* ones. The OR keeps both answers straight.
             "SELECT DISTINCT a.bundle_id FROM publish_assignments a
              JOIN publish_campaigns c ON c.id = a.campaign_id
-             WHERE a.state NOT IN ('failed_before_dispatch','cancelled','missed')
-               AND c.state NOT IN ('failed_before_dispatch','cancelled','missed')",
+             WHERE a.state IN ('succeeded','posting','verifying','uncertain')
+                OR (a.state NOT IN ('failed_before_dispatch','cancelled','missed')
+                    AND c.state NOT IN ('failed_before_dispatch','cancelled','missed'))",
         )?;
         let ids = statement
             .query_map([], |row| row.get::<_, String>(0))?
@@ -724,12 +939,59 @@ impl Database {
         self.publish_campaign_state(id)
     }
 
-    pub fn cancel_publish_campaign(&self, id: &str) -> anyhow::Result<()> {
-        self.update_publish_campaign_state(
-            id,
-            crate::publish::PublishCampaignState::Cancelled,
-            None,
-        )
+    /// Cancel a campaign — where cancelling still means something — and answer with the state
+    /// the campaign is actually in afterwards.
+    ///
+    /// **Conditional in SQL, like every other transition that must not lie.** This used to be
+    /// an unconditional write, and unconditional cancel had two ways to release live posts:
+    /// a stale screen (or the local API) cancelling a campaign that had already **succeeded**
+    /// walked a terminal state back to `cancelled`, and `cancelled` is a state the auto-deal
+    /// pool reads as "the bundles are free again". The same for `uncertain` — a campaign that
+    /// needs a person looking at phones must not be filed away as "stopped on purpose".
+    ///
+    /// `None` means the campaign does not exist. Anything else is the state after the
+    /// attempt; the caller reads `Cancelled` as success (a second cancel is a no-op, not an
+    /// error) and everything else as the refusal it is.
+    pub fn cancel_publish_campaign(
+        &self,
+        id: &str,
+    ) -> anyhow::Result<Option<crate::publish::PublishCampaignState>> {
+        let mut conn = self.conn()?;
+        let transaction = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let now = Utc::now().to_rfc3339();
+        let cancelled = crate::publish::PublishCampaignState::Cancelled;
+        let moved = transaction.execute(
+            "UPDATE publish_campaigns
+             SET state=?1,error_code=NULL,revision=revision+1,updated_at=?2
+             WHERE id=?3 AND state NOT IN (?4,?5,?6)",
+            params![
+                cancelled.as_str(),
+                now,
+                id,
+                crate::publish::PublishCampaignState::Succeeded.as_str(),
+                crate::publish::PublishCampaignState::Uncertain.as_str(),
+                cancelled.as_str(),
+            ],
+        )?;
+        if moved > 0 {
+            let revision: i64 = transaction.query_row(
+                "SELECT revision FROM publish_campaigns WHERE id=?1",
+                params![id],
+                |row| row.get(0),
+            )?;
+            transaction.execute(
+                "INSERT INTO publish_events(campaign_id,revision,kind,payload_json,created_at) \
+                 VALUES (?1,?2,'state',?3,?4)",
+                params![
+                    id,
+                    revision,
+                    serde_json::json!({"state": cancelled.as_str(), "errorCode": null}).to_string(),
+                    now
+                ],
+            )?;
+        }
+        transaction.commit()?;
+        self.publish_campaign_state(id)
     }
     pub fn analytics_summary(
         &self,
@@ -1147,18 +1409,289 @@ mod claim_tests {
             "the pool still speaks the database's id namespace: {dispatched:?}"
         );
 
-        // **Cancelling the campaign gives every one of its bundles back.** Cancel touches only
-        // the campaign row, so reserving on the assignment alone would hold them out of the
-        // pool for good — the operator would stop a run and never be able to deal those posts
-        // again.
+        // **Cancelling the campaign releases only the bundles that never reached a phone.**
+        // Cancel touches only the campaign row, so reserving on the assignment alone would
+        // hold a *queued* bundle out of the pool for good — but the previous version of this
+        // assertion demanded the opposite extreme: it blessed the cancel releasing
+        // `p-succeeded`'s bundle too, and a released bundle is exactly what "Chia tự động"
+        // deals into a new campaign. That is a carousel already live on a real account,
+        // posted a second time. A child in `succeeded`/`posting`/`verifying`/`uncertain`
+        // keeps its bundle reserved no matter what happened to its parent.
         db.cancel_publish_campaign(&record.id).expect("cancel");
         let after_cancel = db.bundle_ids_already_dispatched().expect("read");
-        for udid in ["p-succeeded", "p-posting", "p-uncertain", "p-imported"] {
+        for udid in ["p-succeeded", "p-posting", "p-uncertain"] {
             assert!(
-                !after_cancel.contains(&source_of(udid)),
-                "{udid}: its campaign was cancelled and the bundle is still held"
+                after_cancel.contains(&source_of(udid)),
+                "{udid}: reached a phone, so cancelling the parent must not re-offer its bundle"
             );
         }
+        assert!(
+            !after_cancel.contains(&source_of("p-imported")),
+            "p-imported: nothing posted from it, so the operator's cancel frees the bundle"
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// **Cancel is a claim too, and terminal states refuse it.**
+    ///
+    /// The unconditional version had two ways to release live posts: a stale screen (or the
+    /// local API) cancelling a `succeeded` campaign walked it back to `cancelled`, and the
+    /// pool used to read `cancelled` as "every bundle here is free again". Same for
+    /// `uncertain`. Both must stay exactly what they are.
+    #[test]
+    fn cancel_refuses_to_overwrite_a_terminal_state() {
+        let (db, path) = fixture();
+        for (seed, expected) in [
+            (
+                crate::publish::PublishCampaignState::Succeeded,
+                crate::publish::PublishCampaignState::Succeeded,
+            ),
+            (
+                crate::publish::PublishCampaignState::Uncertain,
+                crate::publish::PublishCampaignState::Uncertain,
+            ),
+            (
+                crate::publish::PublishCampaignState::Posting,
+                crate::publish::PublishCampaignState::Cancelled,
+            ),
+        ] {
+            let record = campaign(&db, &["phone-a"]);
+            db.update_publish_campaign_state(&record.id, seed.clone(), None)
+                .expect("seed");
+            let after = db
+                .cancel_publish_campaign(&record.id)
+                .expect("cancel query")
+                .expect("campaign exists");
+            assert_eq!(after, expected, "cancel from {seed:?}");
+        }
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// A second cancel changes nothing and must not invent a second event.
+    #[test]
+    fn a_repeated_cancel_is_a_no_op_with_no_second_event() {
+        let (db, path) = fixture();
+        let record = campaign(&db, &["phone-a"]);
+        db.cancel_publish_campaign(&record.id).expect("cancel");
+        let events_after_first = db
+            .get_publish_campaign(&record.id)
+            .expect("read back")
+            .expect("present")
+            .events
+            .len();
+        assert_eq!(
+            db.cancel_publish_campaign(&record.id)
+                .expect("second cancel"),
+            Some(crate::publish::PublishCampaignState::Cancelled),
+            "a repeat cancel reports the state it finds, not an error"
+        );
+        assert_eq!(
+            db.get_publish_campaign(&record.id)
+                .expect("read back")
+                .expect("present")
+                .events
+                .len(),
+            events_after_first,
+            "a cancel that moved nothing must not write an event"
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// **A cancel that lands mid-transfer survives the transfer's own ending.**
+    ///
+    /// The scheduler runs Transfer and then Post in one breath. The old shape — transfer
+    /// finishing with an unconditional write of `imported` — erased a cancel pressed while
+    /// media was still copying, and the scheduler's next line posted the campaign the
+    /// operator had just stopped. `settle_publish_transfer` writes only while the campaign
+    /// still reads `transferring`.
+    #[test]
+    fn a_transfer_settle_does_not_overwrite_a_cancel() {
+        let (db, path) = fixture();
+        let record = campaign(&db, &["phone-a"]);
+        db.update_publish_campaign_state(
+            &record.id,
+            crate::publish::PublishCampaignState::Ready,
+            None,
+        )
+        .expect("seed");
+        assert!(db
+            .claim_publish_campaign_for_transfer(&record.id)
+            .expect("claim"));
+        db.cancel_publish_campaign(&record.id).expect("cancel");
+        let events_after_cancel = db
+            .get_publish_campaign(&record.id)
+            .expect("read back")
+            .expect("present")
+            .events
+            .len();
+
+        let after = db
+            .settle_publish_transfer(&record.id, PublishTransferSettle::Imported)
+            .expect("settle");
+        assert_eq!(
+            after,
+            Some(crate::publish::PublishCampaignState::Cancelled),
+            "the cancel is the operator's word and the settle must lose"
+        );
+        assert!(
+            !db.claim_publish_campaign_for_posting(&record.id)
+                .expect("claim query"),
+            "a cancelled campaign must not be postable after its transfer settles"
+        );
+        assert_eq!(
+            db.get_publish_campaign(&record.id)
+                .expect("read back")
+                .expect("present")
+                .events
+                .len(),
+            events_after_cancel,
+            "a settle that moved nothing must not write an event"
+        );
+
+        // And without a cancel in the way, the settle both moves the state and records it.
+        let normal = campaign(&db, &["phone-b"]);
+        db.update_publish_campaign_state(
+            &normal.id,
+            crate::publish::PublishCampaignState::Ready,
+            None,
+        )
+        .expect("seed");
+        assert!(db
+            .claim_publish_campaign_for_transfer(&normal.id)
+            .expect("claim"));
+        assert_eq!(
+            db.settle_publish_transfer(&normal.id, PublishTransferSettle::Imported)
+                .expect("settle"),
+            Some(crate::publish::PublishCampaignState::Imported)
+        );
+        let detail = db
+            .get_publish_campaign(&normal.id)
+            .expect("read back")
+            .expect("present");
+        let last = detail.events.last().expect("the settle left an event");
+        let payload: serde_json::Value =
+            serde_json::from_str(&last.payload_json).expect("payload is json");
+        assert_eq!(payload["state"], "imported");
+        assert_eq!(
+            last.revision,
+            db.publish_campaign_revision(&normal.id).expect("revision"),
+            "the settle event sits at the revision the write produced"
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// **Prepare cannot manufacture a claimable state.**
+    ///
+    /// The command layer used to refuse a short list and pass everything else to an
+    /// unconditional write — which still let `imported` and `transferring` walk back to
+    /// `ready`, the state the transfer claim accepts. Every arm here is one door that must
+    /// stay shut (or, for the operator's own three states, open).
+    #[test]
+    fn prepare_moves_only_the_states_where_it_means_something() {
+        let (db, path) = fixture();
+        for (seed, expected) in [
+            (
+                crate::publish::PublishCampaignState::Queued,
+                crate::publish::PublishCampaignState::Ready,
+            ),
+            (
+                crate::publish::PublishCampaignState::Scheduled,
+                crate::publish::PublishCampaignState::Ready,
+            ),
+            (
+                crate::publish::PublishCampaignState::Missed,
+                crate::publish::PublishCampaignState::Ready,
+            ),
+            // A repeat is a no-op, not an error — and not a second event either.
+            (
+                crate::publish::PublishCampaignState::Ready,
+                crate::publish::PublishCampaignState::Ready,
+            ),
+            // The two back doors around the transfer claim.
+            (
+                crate::publish::PublishCampaignState::Imported,
+                crate::publish::PublishCampaignState::Imported,
+            ),
+            (
+                crate::publish::PublishCampaignState::Transferring,
+                crate::publish::PublishCampaignState::Transferring,
+            ),
+            (
+                crate::publish::PublishCampaignState::Posting,
+                crate::publish::PublishCampaignState::Posting,
+            ),
+            (
+                crate::publish::PublishCampaignState::Succeeded,
+                crate::publish::PublishCampaignState::Succeeded,
+            ),
+        ] {
+            let record = campaign(&db, &["phone-a"]);
+            db.update_publish_campaign_state(&record.id, seed.clone(), None)
+                .expect("seed");
+            let events_before = db
+                .get_publish_campaign(&record.id)
+                .expect("read back")
+                .expect("present")
+                .events
+                .len();
+            let after = db
+                .mark_publish_campaign_ready(&record.id)
+                .expect("prepare query")
+                .expect("campaign exists");
+            assert_eq!(after, expected, "prepare from {seed:?}");
+            let events_after = db
+                .get_publish_campaign(&record.id)
+                .expect("read back")
+                .expect("present")
+                .events
+                .len();
+            if after == crate::publish::PublishCampaignState::Ready
+                && seed != crate::publish::PublishCampaignState::Ready
+            {
+                assert_eq!(events_after, events_before + 1, "a move records itself");
+            } else {
+                assert_eq!(
+                    events_after, events_before,
+                    "a refusal or no-op writes nothing"
+                );
+            }
+        }
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// **A failed transfer is retryable, never `uncertain`.**
+    ///
+    /// A transfer moves media toward a phone; it cannot publish anything. Settling its
+    /// failures to `uncertain` — as the command layer used to — parked the campaign in the
+    /// one state no claim accepts, over a copy error.
+    #[test]
+    fn a_failed_transfer_settles_retryable_not_uncertain() {
+        let (db, path) = fixture();
+        let record = campaign(&db, &["phone-a"]);
+        db.update_publish_campaign_state(
+            &record.id,
+            crate::publish::PublishCampaignState::Ready,
+            None,
+        )
+        .expect("seed");
+        assert!(db
+            .claim_publish_campaign_for_transfer(&record.id)
+            .expect("claim"));
+        assert_eq!(
+            db.settle_publish_transfer(
+                &record.id,
+                PublishTransferSettle::FailedBeforeDispatch {
+                    error_code: "media_transfer_failed"
+                }
+            )
+            .expect("settle"),
+            Some(crate::publish::PublishCampaignState::FailedBeforeDispatch)
+        );
+        assert!(
+            db.claim_publish_campaign_for_transfer(&record.id)
+                .expect("claim query"),
+            "the whole point of the state: the operator can run the transfer again"
+        );
         let _ = std::fs::remove_file(path);
     }
 
@@ -1510,6 +2043,183 @@ mod claim_tests {
                 .len(),
             after_first,
             "a no-op finish must not invent an ending"
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// **The other order fails too: an event cannot land without its state.**
+    ///
+    /// The trigger test above forces the *insert* to fail and proves the update rolls back.
+    /// An implementation that ran the two statements in the opposite order — insert the
+    /// event first on one connection, update the campaign on another — passes that test:
+    /// its insert aborts before it ever attempts the update, and everything looks rolled
+    /// back because nothing had happened yet. This one forces the *update* to fail instead.
+    /// The split implementation leaves a terminal event ahead of a still-`posting` campaign
+    /// — an ending in the history that never happened; the transactional one leaves nothing.
+    #[test]
+    fn a_finish_whose_state_cannot_be_written_leaves_no_event_behind() {
+        let (db, path) = fixture();
+        let record = campaign(&db, &["phone-a"]);
+        assert!(db
+            .claim_publish_campaign_for_posting(&record.id)
+            .expect("claim"));
+        let before = db.publish_campaign_revision(&record.id).expect("revision");
+        let events_before = db
+            .get_publish_campaign(&record.id)
+            .expect("read back")
+            .expect("present")
+            .events
+            .len();
+
+        db.conn()
+            .expect("conn")
+            .execute_batch(
+                "CREATE TRIGGER refuse_finish BEFORE UPDATE ON publish_campaigns \
+                 BEGIN SELECT RAISE(ABORT, 'no finishing today'); END;",
+            )
+            .expect("trigger");
+
+        assert!(
+            db.finish_publish_campaign(&record.id, PublishRunOutcome::AllPosted)
+                .is_err(),
+            "a finish that could not write its state must not report success"
+        );
+
+        db.conn()
+            .expect("conn")
+            .execute_batch("DROP TRIGGER refuse_finish;")
+            .expect("drop");
+
+        assert_eq!(
+            db.publish_campaign_state(&record.id).expect("state"),
+            Some(crate::publish::PublishCampaignState::Posting),
+            "the campaign moved even though its update was refused"
+        );
+        assert_eq!(
+            db.publish_campaign_revision(&record.id).expect("revision"),
+            before
+        );
+        assert_eq!(
+            db.get_publish_campaign(&record.id)
+                .expect("read back")
+                .expect("present")
+                .events
+                .len(),
+            events_before,
+            "an event landed without its state — the history now has an ending that never happened"
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// **A crash after every phone posted settles the campaign as what it is: succeeded.**
+    ///
+    /// Recovery used to ask one question — "is any child `uncertain`?" — and settle
+    /// everything else to `failed_before_dispatch`, whose name promises nothing reached a
+    /// phone. A run where **all** children had already posted, killed between the last
+    /// child's write and the campaign's finish, therefore came back up as "retry me". The
+    /// pool read that parent state as releasing every one of those live bundles, and the
+    /// next auto-deal could plan the same carousels again.
+    #[test]
+    fn recovery_settles_an_all_posted_campaign_as_succeeded() {
+        let (db, path) = fixture();
+        let record = campaign(&db, &["phone-a", "phone-b"]);
+        assert!(db
+            .claim_publish_campaign_for_posting(&record.id)
+            .expect("claim"));
+        for udid in ["phone-a", "phone-b"] {
+            db.update_publish_assignment_state(
+                &assignment_id(&db, &record.id, udid),
+                crate::publish::PublishCampaignState::Succeeded,
+                None,
+                Some(r#"{"state":"posted"}"#),
+            )
+            .expect("seed");
+        }
+
+        assert_eq!(
+            db.interrupt_orphaned_publish_campaigns().expect("settle"),
+            1
+        );
+
+        let detail = db
+            .get_publish_campaign(&record.id)
+            .expect("read back")
+            .expect("present");
+        assert_eq!(
+            detail.campaign.state,
+            crate::publish::PublishCampaignState::Succeeded,
+            "every child posted; calling that failed-before-dispatch releases live bundles"
+        );
+        assert!(
+            !db.claim_publish_campaign_for_transfer(&record.id)
+                .expect("claim query"),
+            "a succeeded campaign must not be transferable again"
+        );
+        // And the recovery transition itself is in the ledger — it was the one campaign
+        // write that bumped the revision with no event behind it.
+        let last = detail.events.last().expect("recovery left an event");
+        let payload: serde_json::Value =
+            serde_json::from_str(&last.payload_json).expect("payload is json");
+        assert_eq!(payload["state"], "succeeded");
+        assert_eq!(
+            last.revision,
+            db.publish_campaign_revision(&record.id).expect("revision"),
+            "the recovery event sits at the revision the write produced"
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// A crash that left some phones posted and some untouched stays retryable, and says so.
+    #[test]
+    fn recovery_keeps_a_partially_posted_campaign_retryable() {
+        let (db, path) = fixture();
+        let record = campaign(&db, &["phone-done", "phone-never-started"]);
+        assert!(db
+            .claim_publish_campaign_for_posting(&record.id)
+            .expect("claim"));
+        db.update_publish_assignment_state(
+            &assignment_id(&db, &record.id, "phone-done"),
+            crate::publish::PublishCampaignState::Succeeded,
+            None,
+            Some(r#"{"state":"posted"}"#),
+        )
+        .expect("seed");
+        // `phone-never-started` stays `imported`: the campaign claim touches no children,
+        // and the crash cost this one nothing but the run.
+
+        assert_eq!(
+            db.interrupt_orphaned_publish_campaigns().expect("settle"),
+            1
+        );
+
+        let detail = db
+            .get_publish_campaign(&record.id)
+            .expect("read back")
+            .expect("present");
+        assert_eq!(
+            detail.campaign.state,
+            crate::publish::PublishCampaignState::FailedBeforeDispatch,
+            "nothing here may be live, so the operator must be able to run the rest"
+        );
+        assert_eq!(
+            detail.campaign.error_code.as_deref(),
+            Some("publish_worker_lost: app đóng giữa chừng — có máy đã đăng xong, phần còn lại chạy lại được"),
+            "the reason must not pretend the desktop never dispatched anything"
+        );
+        // The posted phone's bundle stays out of the pool even under a retryable parent.
+        let dispatched = db.bundle_ids_already_dispatched().expect("pool");
+        let done_bundle = detail
+            .assignments
+            .iter()
+            .find(|assignment| assignment.udid == "phone-done")
+            .expect("assignment exists")
+            .bundle_id
+            .split_once(':')
+            .map(|(_, source)| source.to_string())
+            .expect("namespaced");
+        assert!(
+            dispatched.contains(&done_bundle),
+            "phone-done posted; its bundle must never be dealt again"
         );
         let _ = std::fs::remove_file(path);
     }

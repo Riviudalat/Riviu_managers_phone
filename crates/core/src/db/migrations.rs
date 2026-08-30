@@ -1066,6 +1066,14 @@ fn apply_migration_18(transaction: &Transaction<'_>) -> anyhow::Result<()> {
     // * **`post_url` becomes unique.** One URL is one post is one row. Without it, a restored
     //   campaign that hands a new assignment id to an already-captured link writes the same
     //   link into column D twice, and both rows look ordinary.
+    //   And when a v17 database really does hold two rows for one URL, the survivor is
+    //   **chosen, not left to `GROUP BY`'s whim**: a `sent` row beats an unsent one (keeping
+    //   the `failed` twin would make the sweep re-deliver a link the sheet already has —
+    //   the duplicate column D this index exists to prevent), then the newest `updated_at`,
+    //   then the highest rowid. A bare-column `GROUP BY` let SQLite pick any of them.
+    //   (Editing this migration in place was safe when it happened: the outbox is not yet
+    //   called by the publish path, so no fleet database had rows for the old copy to have
+    //   mangled — the only DBs past v18 were dev machines with empty outboxes.)
     // * **`revision`**, bumped whenever the row's content changes. A sweep that read version 3
     //   and delivered it must not mark version 4 sent — which is what "update by id" did, and
     //   the newer URL then never travelled.
@@ -1097,14 +1105,23 @@ INSERT INTO publish_sheet_outbox_new(
   assignment_id,campaign_id,post_url,poster,partners_json,state,attempts,revision,
   last_error,created_at,updated_at
 )
-SELECT assignment_id,campaign_id,post_url,poster,partners_json,state,attempts,0,
-       last_error,created_at,updated_at
-FROM publish_sheet_outbox
-WHERE length(trim(assignment_id)) > 0
-  AND length(trim(campaign_id)) > 0
-  AND length(trim(post_url)) > 0
-  AND length(trim(poster)) > 0
-GROUP BY post_url;
+SELECT o.assignment_id,o.campaign_id,o.post_url,o.poster,o.partners_json,o.state,o.attempts,0,
+       o.last_error,o.created_at,o.updated_at
+FROM publish_sheet_outbox o
+WHERE length(trim(o.assignment_id)) > 0
+  AND length(trim(o.campaign_id)) > 0
+  AND length(trim(o.post_url)) > 0
+  AND length(trim(o.poster)) > 0
+  AND o.rowid = (
+    SELECT o2.rowid FROM publish_sheet_outbox o2
+    WHERE o2.post_url = o.post_url
+      AND length(trim(o2.assignment_id)) > 0
+      AND length(trim(o2.campaign_id)) > 0
+      AND length(trim(o2.post_url)) > 0
+      AND length(trim(o2.poster)) > 0
+    ORDER BY (o2.state='sent') DESC, o2.updated_at DESC, o2.rowid DESC
+    LIMIT 1
+  );
 DROP TABLE publish_sheet_outbox;
 ALTER TABLE publish_sheet_outbox_new RENAME TO publish_sheet_outbox;
 CREATE UNIQUE INDEX publish_sheet_outbox_one_row_per_post
@@ -1724,6 +1741,66 @@ mod tests {
                  anything — remove the exemption"
             );
         }
+    }
+
+    #[test]
+    fn migration_18_keeps_the_sent_twin_when_a_url_was_owed_twice() {
+        let path = temp_db_path("outbox-dedupe");
+        let mut connection = Connection::open(&path).expect("fixture");
+        run_with_failpoint(&mut connection, Some(18)).expect_err("stop before the rebuild");
+        // The v17 rows reference publish parents through CASCADE FKs; the parents are not
+        // this test's subject, so enforcement is off while seeding — the rebuild itself
+        // drops those FKs, which is the whole point of migration 18.
+        connection
+            .pragma_update(None, "foreign_keys", "OFF")
+            .expect("seed without parents");
+        // Seed order is part of the assertion: group t/1 puts its correct survivor LAST and
+        // group t/2 puts its correct survivor FIRST, so no positional picker — "GROUP BY
+        // takes the first row it visits", or the last — can satisfy both groups. The first
+        // version of this test had both answers in the lucky position, and the reverted
+        // GROUP BY passed it.
+        connection
+            .execute_batch(
+                "INSERT INTO publish_sheet_outbox
+                   (assignment_id,campaign_id,post_url,poster,partners_json,state,attempts,last_error,created_at,updated_at)
+                 VALUES
+                   ('asg-failed','camp-1','https://t/1','poster-a','[]','failed',3,'webhook 500','2026-08-29T00:00:00Z','2026-08-29T02:00:00Z'),
+                   ('asg-sent','camp-1','https://t/1','poster-a','[]','sent',1,NULL,'2026-08-29T00:00:00Z','2026-08-29T01:00:00Z'),
+                   ('asg-newer','camp-2','https://t/2','poster-b','[]','pending',0,NULL,'2026-08-29T00:00:00Z','2026-08-29T03:00:00Z'),
+                   ('asg-older','camp-2','https://t/2','poster-b','[]','pending',0,NULL,'2026-08-29T00:00:00Z','2026-08-29T00:30:00Z');",
+            )
+            .expect("seed v17 duplicates");
+        connection
+            .pragma_update(None, "foreign_keys", "ON")
+            .expect("back to production posture");
+        run_with_failpoint(&mut connection, None).expect("finish the migrations");
+
+        // **A `sent` twin survives even when the `failed` one is newer.** Keeping the failed
+        // copy makes the sweep re-deliver a link the sheet already has — the duplicate
+        // column D the new unique index exists to prevent. A bare-column GROUP BY left this
+        // choice to SQLite.
+        let survivor: (String, String) = connection
+            .query_row(
+                "SELECT assignment_id,state FROM publish_sheet_outbox WHERE post_url='https://t/1'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("exactly one row per url");
+        assert_eq!(
+            survivor,
+            ("asg-sent".to_string(), "sent".to_string()),
+            "keeping the failed twin re-delivers a link the sheet already has"
+        );
+        // Two unsent twins: the newer write wins, deterministically.
+        let newest: String = connection
+            .query_row(
+                "SELECT assignment_id FROM publish_sheet_outbox WHERE post_url='https://t/2'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("exactly one row per url");
+        assert_eq!(newest, "asg-newer");
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]
