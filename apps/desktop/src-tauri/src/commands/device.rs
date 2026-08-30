@@ -926,3 +926,94 @@ pub async fn device_set_clipboard(
     )
     .await
 }
+
+/// One phone's health, in the terms every refusal in this app is written in.
+///
+/// **Read-only, no lease** — the model is `is_rooted`, not `prepare_device`: a diagnostics
+/// screen must be able to describe a phone it cannot drive, and must not change the thing
+/// it is describing. Every probe that fails becomes a note instead of an error, because
+/// "this section could not be asked" is itself the diagnosis the operator came for.
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct DeviceHealthReport {
+    pub udid: String,
+    /// The roster's current word for the phone, or `None` when it is not listed at all.
+    pub roster_status: Option<riviu_core::DeviceStatus>,
+    /// The cached agent status every tile already shows — no device I/O.
+    pub agent: riviu_core::AgentStatus,
+    /// A live `/status` probe, `None` when the active backend is not Android.
+    pub agent_ready_now: Option<bool>,
+    /// Riviu helper reachable right now (cached client answered).
+    pub helper_reachable: Option<bool>,
+    /// Helper APK installed; `None` means the question itself failed — not "absent" (§9.97).
+    pub helper_installed: Option<bool>,
+    pub root: Option<riviu_core::DeviceRootStatus>,
+    pub tiktok_package: Option<String>,
+    pub tiktok_version: Option<String>,
+    pub tiktok_locale: Option<String>,
+    /// Every section that could not be asked, named in the operator's language.
+    pub notes: Vec<String>,
+}
+
+#[tauri::command]
+pub async fn device_health(
+    state: State<'_, AppState>,
+    udid: String,
+) -> Result<DeviceHealthReport, CommandError> {
+    let _admission = state.ensure_accepting_work()?;
+    let roster_status = state
+        .registry
+        .list()
+        .into_iter()
+        .find(|device| device.udid == udid)
+        .map(|device| device.status);
+    let agent = state.control.cached_agent_status(&udid);
+    let mut report = DeviceHealthReport {
+        udid: udid.clone(),
+        roster_status,
+        agent,
+        agent_ready_now: None,
+        helper_reachable: None,
+        helper_installed: None,
+        root: None,
+        tiktok_package: None,
+        tiktok_version: None,
+        tiktok_locale: None,
+        notes: Vec::new(),
+    };
+    let Some(android) = &state.android else {
+        report.notes.push(
+            "Backend đang chạy không phải Android — chỉ đọc được roster và cache agent."
+                .to_string(),
+        );
+        return Ok(report);
+    };
+    report.agent_ready_now = Some(android.agent_ready(&udid).await);
+    let (helper_reachable, helper_installed) = android.helper_probe(&udid).await;
+    report.helper_reachable = Some(helper_reachable);
+    report.helper_installed = helper_installed;
+    if helper_installed.is_none() {
+        report.notes.push(
+            "Không hỏi được máy về Riviu helper — chưa với tới được, không phải chưa cài."
+                .to_string(),
+        );
+    }
+    // The same two questions `is_rooted` answers, and the same subtraction: name the
+    // route, not the union.
+    let has_su = android.is_rooted(&udid).await;
+    report.root = Some(riviu_core::DeviceRootStatus {
+        has_su,
+        shell_is_root: !has_su && android.can_run_privileged(&udid).await,
+    });
+    match android.tiktok_build(&udid).await {
+        Ok((package, version, locale)) => {
+            report.tiktok_package = Some(package);
+            report.tiktok_version = (!version.is_empty()).then_some(version);
+            report.tiktok_locale = (!locale.is_empty()).then_some(locale);
+        }
+        Err(error) => report
+            .notes
+            .push(format!("Không đọc được build TikTok: {error:#}")),
+    }
+    Ok(report)
+}

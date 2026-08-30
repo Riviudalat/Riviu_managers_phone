@@ -2,7 +2,13 @@ import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { listenRiviuEvents, publishList, publishTransfer } from "../api";
+import {
+  listenRiviuEvents,
+  publishGet,
+  publishList,
+  publishReadiness,
+  publishTransfer,
+} from "../api";
 import { PublishPage } from "./PublishPage";
 import { resetToasts } from "../toastStore";
 import type { AppEvent, DeviceInfo, PublishBundle, PublishFolderManifest } from "../types";
@@ -67,7 +73,11 @@ vi.mock("../api", () => ({
   listScripts: vi.fn(async () => []),
   publishCancel: vi.fn(async () => undefined),
   publishCreateCampaign: (...args: unknown[]) => createCampaign(...(args as [])),
+  publishGet: vi.fn(async () => null),
   publishList: vi.fn(async () => []),
+  publishReadiness: vi.fn(async () => []),
+  publishSheetGetConfig: vi.fn(async () => ({ webhookUrl: "", hasToken: false })),
+  publishSheetSaveConfig: vi.fn(async () => ({ webhookUrl: "", hasToken: false })),
   publishPrepare: vi.fn(async () => undefined),
   publishPost: vi.fn(async () => undefined),
   publishScanFolder: vi.fn(async () => manifest),
@@ -279,5 +289,117 @@ describe("publish, bundle to phone", () => {
 
     list.mockReset();
     list.mockResolvedValue([] as never);
+  });
+
+  /**
+   * The preflight's own answer, on the page BEFORE the refusal. `readiness_of` runs adb
+   * probes, so the fetch is keyed on the android udid set — an iOS-only roster (every
+   * other test in this file) must not fetch at all, which is also what keeps those tests
+   * free of act() noise.
+   */
+  it("shows each android phone's publish readiness, and only asks about android phones", async () => {
+    const ready = vi.mocked(publishReadiness);
+    ready.mockResolvedValueOnce([
+      { udid: "ANDROID-A", readiness: { kind: "hierarchyReady" } },
+      {
+        udid: "ANDROID-B",
+        readiness: { kind: "hierarchyMissing", labels: ["ComposerCaption", "PostButton"] },
+      },
+    ] as never);
+    const android = (udid: string) =>
+      ({ ...iphone(udid), platform: "android" }) as DeviceInfo;
+
+    render(
+      <PublishPage
+        devices={[android("ANDROID-A"), android("ANDROID-B"), iphone("PHONE-A")]}
+        selected={[]}
+        onSelectUdids={() => {}}
+      />,
+    );
+
+    await screen.findByText(/sẵn sàng/);
+    expect(screen.getByText(/thiếu ComposerCaption, PostButton/)).toBeTruthy();
+    expect(ready).toHaveBeenCalledWith(["ANDROID-A", "ANDROID-B"]);
+  });
+
+  /**
+   * `publishList` carries assignment PLANS, so per-phone state/errorCode were invisible
+   * here — a campaign could sit `failedBeforeDispatch` with the one refusing phone
+   * unnameable except by reading the backend log. The detail toggle is that read.
+   */
+  it("names the refusing phone when the operator opens a campaign's details", async () => {
+    const user = userEvent.setup();
+    const list = vi.mocked(publishList);
+    list.mockResolvedValue([
+      {
+        id: "campaign-9",
+        requestId: "req-9",
+        sourceRoot: "C:/carousels",
+        state: "failedBeforeDispatch",
+        runAt: null,
+        visibility: "public",
+        cleanupPolicy: "afterPost",
+        assignments: [],
+        createdAt: "2026-08-18T00:00:00.000Z",
+        updatedAt: "2026-08-18T00:00:00.000Z",
+        errorCode: "post_refused_before_dispatch",
+      },
+    ] as never);
+    vi.mocked(publishGet).mockResolvedValueOnce({
+      campaign: { id: "campaign-9" },
+      bundles: [],
+      assignments: [
+        {
+          id: "asg-1",
+          campaignId: "campaign-9",
+          bundleId: "req-9:b1",
+          ordinal: 0,
+          udid: "PHONE-A",
+          state: "failedBeforeDispatch",
+          errorCode: "route_authorities_disagree",
+        },
+      ],
+      events: [],
+    } as never);
+
+    render(<PublishPage devices={devices} selected={[]} onSelectUdids={() => {}} />);
+
+    await user.click(await screen.findByRole("button", { name: "Chi tiết máy" }));
+    await screen.findByText(/PHONE-A — failedBeforeDispatch · route_authorities_disagree/);
+
+    await user.click(screen.getByRole("button", { name: "Ẩn chi tiết máy" }));
+    expect(screen.queryByText(/route_authorities_disagree/)).toBeNull();
+
+    list.mockReset();
+    list.mockResolvedValue([] as never);
+  });
+
+  /**
+   * The unconfigured badge answers "why is my link still `pending`?" on the page where the
+   * operator is looking — and it must come from a real answer, not render as a flash while
+   * the config is still loading, and not linger once url + token are both set.
+   */
+  it("shows the Sheet-unconfigured badge only for a real unconfigured answer", async () => {
+    const getConfig = vi.mocked(
+      (await import("../api")).publishSheetGetConfig,
+    );
+
+    getConfig.mockResolvedValueOnce({ webhookUrl: "", hasToken: false });
+    render(<PublishPage devices={devices} selected={[]} onSelectUdids={() => {}} />);
+    await screen.findByRole("status");
+    expect(screen.getByRole("status").textContent).toContain("Sheet chưa cấu hình");
+    cleanup();
+
+    getConfig.mockResolvedValueOnce({
+      webhookUrl: "https://script.google.com/macros/s/x/exec",
+      hasToken: true,
+    });
+    render(<PublishPage devices={devices} selected={[]} onSelectUdids={() => {}} />);
+    // The configured answer has to have LANDED before the absence proves anything —
+    // asserting immediately would pass on the loading state too.
+    await waitFor(() => expect(getConfig).toHaveBeenCalled());
+    await waitFor(() =>
+      expect(screen.queryByText(/Sheet chưa cấu hình/)).toBeNull(),
+    );
   });
 });

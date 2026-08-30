@@ -34,6 +34,7 @@ import { useBoxSelection } from "./useBoxSelection";
 import { metaByUdid, orderDevicesByNumber, tileName, tileNumber } from "./deviceNaming";
 import { AdbConsole } from "./components/AdbConsole";
 import { DeviceSyslogPopup } from "./components/DeviceSyslogPopup";
+import { DeviceHealthPopup } from "./components/DeviceHealthPopup";
 import { ALL_DEVICES_TAB, devicesInTab, groupTabs, withDeviceAdded } from "./deviceGroups";
 import { FocusStream } from "./components/FocusStream";
 import { IconPhone, IconRefresh } from "./components/Icons";
@@ -157,6 +158,7 @@ function App() {
   const [tileMenu, setTileMenu] = useState<{ udid: string; x: number; y: number } | null>(null);
   const [adbFor, setAdbFor] = useDeviceSurface(devices, "bảng lệnh adb");
   const [syslogFor, setSyslogFor] = useDeviceSurface(devices, "log của máy");
+  const [healthFor, setHealthFor] = useDeviceSurface(devices, "bảng kiểm tra máy");
   /// Which phone's filesystem is open in the browser popup (xiaowei "Preview Mobile Files").
   const [filesFor, setFilesFor] = useDeviceSurface(devices, "trình quản lý tệp");
   const [groupMode, setGroupMode] = useState(false);
@@ -266,6 +268,10 @@ function App() {
     () => (syslogFor ? (devices.find((d) => d.udid === syslogFor) ?? null) : null),
     [syslogFor, devices],
   );
+  const menuHealthDevice = useMemo(
+    () => (healthFor ? (devices.find((d) => d.udid === healthFor) ?? null) : null),
+    [healthFor, devices],
+  );
   const menuDevice = useMemo(
     () => (tileMenu ? (devices.find((d) => d.udid === tileMenu.udid) ?? null) : null),
     [tileMenu, devices],
@@ -308,6 +314,7 @@ function App() {
         setFilesFor,
         setAdbFor,
         setSyslogFor,
+        setHealthFor,
       }),
     // Setters straight from `useState` are stable and stay out of the list. `setMetas` is
     // in it because it now arrives through `useFleet`'s return object, where the rule cannot
@@ -326,6 +333,7 @@ function App() {
       setMetas,
       setAdbFor,
       setSyslogFor,
+      setHealthFor,
       setFilesFor,
       setFocusUdid,
     ],
@@ -937,6 +945,9 @@ function App() {
           phone and read nothing but its udid and name. */}
       {syslogFor && menuSyslogDevice && (
         <DeviceSyslogPopup device={menuSyslogDevice} onClose={() => setSyslogFor(null)} />
+      )}
+      {healthFor && menuHealthDevice && (
+        <DeviceHealthPopup device={menuHealthDevice} onClose={() => setHealthFor(null)} />
       )}
       {adbFor && menuAdbDevice && (
         <AdbConsole device={menuAdbDevice} onClose={() => setAdbFor(null)} />

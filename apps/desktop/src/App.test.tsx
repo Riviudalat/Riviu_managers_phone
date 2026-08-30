@@ -22,6 +22,14 @@ vi.mock("./api", () => ({
   // `undefined` and calling it throws — the trap this file already documents three times.
   deviceControlBegin: vi.fn(async () => undefined),
   deviceControlEnd: vi.fn(async () => undefined),
+  // The health popup mounts on demand, but the doctrine above applies to every export
+  // this file's components can reach: unmocked is `undefined`, and the first click would
+  // throw synchronously instead of failing as the missing mock it is.
+  deviceHealth: vi.fn(async () => ({
+    udid: "fixture",
+    agent: { state: "unknown" },
+    notes: [],
+  })),
   driverDegradedReason: vi.fn(async () => null),
   exampleScript: vi.fn(async () => "{}"),
   getStreamSettings: vi.fn(async () => ({

@@ -365,7 +365,7 @@ pub fn api_docs() -> String {
     r#"# Riviu Manager local API (Tauri invoke)
 
 ## Devices
-- list_devices / refresh_devices / prepare_device / reboot_device
+- list_devices / refresh_devices / prepare_device / reboot_device / device_health
 - device_tap / device_swipe / device_type_text / device_home / group_input
 - resign_wda / bulk_resign_wda / screenshot / syslog
 
@@ -374,7 +374,8 @@ pub fn api_docs() -> String {
 - list_materials / add_material / delete_material / push_material
 - list_apps_library / add_app_library / delete_app_library / install_library_app / uninstall_app
 - list_schedules / save_schedule / delete_schedule
-- publish_scan_folder / publish_create_campaign / publish_list / publish_get
+- publish_scan_folder / publish_create_campaign / publish_list / publish_get / publish_readiness
+- publish_sheet_get_config / publish_sheet_save_config
 - publish_prepare / publish_transfer / publish_post / publish_cancel
 - list_op_logs / analytics_summary
 

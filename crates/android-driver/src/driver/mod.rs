@@ -571,6 +571,36 @@ impl AndroidDriver {
         Ok(Self::with_adb(adb, config))
     }
 
+    /// The TikTok build one read-only probe can name: `(package, versionName, locale)`.
+    ///
+    /// Exactly the three keys `controls_for` is asked with, read the way the measuring
+    /// sessions read them — package through the same resolver production uses, version
+    /// through `dumpsys` + the shared parser, locale from `persist.sys.locale`. No
+    /// session, no lease, no instrumentation: this exists for the diagnostics screen,
+    /// which must be able to describe a phone it cannot drive.
+    ///
+    /// Version and locale are best-effort empty strings on a phone that answers `pm`
+    /// but not `dumpsys`/`getprop` — the caller renders "không đọc được" from empty,
+    /// and an error here should not hide the package that DID resolve.
+    pub async fn tiktok_build(&self, serial: &str) -> anyhow::Result<(String, String, String)> {
+        let package = DeviceDriver::resolve_tiktok_package(self, serial).await?;
+        let checked = adb::validate_package_name(&package)?;
+        let version = self
+            .adb
+            .shell(serial, &format!("dumpsys package {checked}"))
+            .await
+            .ok()
+            .and_then(|out| riviu_core::tiktok_labels::parse_version_name(&out).map(str::to_string))
+            .unwrap_or_default();
+        let locale = self
+            .adb
+            .shell(serial, "getprop persist.sys.locale")
+            .await
+            .map(|out| out.trim().to_string())
+            .unwrap_or_default();
+        Ok((package, version, locale))
+    }
+
     /// Build around an `adb` that has already been chosen.
     ///
     /// Split out for [`detect_driver`], which proves a specific candidate answers

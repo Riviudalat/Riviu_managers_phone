@@ -47,7 +47,13 @@ impl AndroidDriver {
     /// re-forward brought `/status` straight back. Without this the tile would
     /// flap to not-ready every time the adb server bounces. The extra adb call
     /// only happens on the failing path.
-    pub(super) async fn agent_ready(&self, serial: &str) -> bool {
+    ///
+    /// `pub` since the diagnostics command ("Kiểm tra máy") took it up: it was already
+    /// the operator-tile answer, and a health screen must ask the same question the
+    /// tile does rather than invent a second, slightly different one. Still read-only —
+    /// the re-forward is tunnel bookkeeping, never an install or a restart; turning a
+    /// `false` into a repair stays `ensure_agent`'s job.
+    pub async fn agent_ready(&self, serial: &str) -> bool {
         if !self.forwarded.lock().contains(serial) {
             return false;
         }
@@ -388,6 +394,31 @@ impl AndroidDriver {
             .insert(serial.to_string(), helper.clone());
         Ok(Some(helper))
     }
+
+    /// One read-only look at the Riviu helper: `(reachable now, installed at all)`.
+    ///
+    /// The first two rungs of [`Self::try_attach_helper`] without its ensure/install
+    /// tail — a health check must not change the phone it is describing. `installed` is
+    /// `Option<bool>` because "I could not ask" is not "it is not installed" (§9.97):
+    /// `None` means the `pm path` question itself failed, and the caller says that
+    /// instead of guessing either way.
+    pub async fn helper_probe(&self, serial: &str) -> (bool, Option<bool>) {
+        let cached = self.helpers.lock().get(serial).cloned();
+        if let Some(helper) = cached {
+            if helper.is_alive().await {
+                return (true, Some(true));
+            }
+            self.helpers.lock().remove(serial);
+        }
+        let installed = self
+            .adb
+            .shell(serial, &format!("pm path {}", crate::riviu_agent::PACKAGE))
+            .await
+            .map(|out| out.contains("package:"))
+            .ok();
+        (false, installed)
+    }
+
     /// Make sure the agent is installed, running and forwarded.
     pub(super) async fn ensure_agent(&self, serial: &str) -> anyhow::Result<AgentClient> {
         let base = self.agent_base(serial);

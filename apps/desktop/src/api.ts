@@ -58,6 +58,9 @@ import type {
   ShellOutcome,
   UpdateStatus,
   DeviceRootStatus,
+  DeviceHealthReport,
+  DevicePublishReadiness,
+  PublishSheetConfig,
 } from "./types";
 import { asAppEvent } from "./types";
 
@@ -317,6 +320,11 @@ export async function stopMockLocation(udid: string) {
 /// specifically, so the panel has to show both rather than collapse them.
 export async function isRooted(udid: string) {
   return invoke<DeviceRootStatus>("is_rooted", { udid });
+}
+
+/** One phone's health, section by section — read-only, takes no lease. */
+export async function deviceHealth(udid: string) {
+  return invoke<DeviceHealthReport>("device_health", { udid });
 }
 
 /// Overwrite the app-visible device fingerprint (C, xiaowei 一键新机). `androidId` applies
@@ -874,6 +882,32 @@ export async function publishTransfer(campaignId: string) {
 
 export async function publishPost(campaignId: string) {
   return invoke<PublishCampaignDetail>("publish_post", { campaignId });
+}
+
+/** Why each phone can or cannot take the publish route — the preflight's answer, before the refusal. */
+export async function publishReadiness(udids: string[]) {
+  return invoke<DevicePublishReadiness[]>("publish_readiness", { udids });
+}
+
+/** One campaign with its bundles, per-phone assignments and event history. */
+export async function publishGet(campaignId: string) {
+  return invoke<PublishCampaignDetail | null>("publish_get", { campaignId });
+}
+
+/** The Sheet delivery config, minus the token itself (only whether one is set). */
+export async function publishSheetGetConfig() {
+  return invoke<PublishSheetConfig>("publish_sheet_get_config");
+}
+
+/**
+ * Save the webhook URL; `token` undefined keeps the stored one, an empty string clears it.
+ * The backend refuses a non-HTTPS URL — the token and every post link travel in the body.
+ */
+export async function publishSheetSaveConfig(webhookUrl: string, token?: string) {
+  return invoke<PublishSheetConfig>("publish_sheet_save_config", {
+    webhookUrl,
+    token: token ?? null,
+  });
 }
 
 /**

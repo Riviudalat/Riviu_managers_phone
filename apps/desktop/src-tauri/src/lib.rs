@@ -315,6 +315,7 @@ pub fn run() {
             commands::set_mock_location,
             commands::stop_mock_location,
             commands::is_rooted,
+            commands::device_health,
             commands::set_device_identity,
             commands::factory_reset,
             commands::root_shell,
@@ -429,6 +430,9 @@ pub fn run() {
             publish_commands::publish_prepare,
             publish_commands::publish_transfer,
             publish_commands::publish_post,
+            publish_commands::publish_readiness,
+            publish_commands::publish_sheet_get_config,
+            publish_commands::publish_sheet_save_config,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application");
@@ -654,6 +658,12 @@ mod tests {
         ("list_op_logs", "read: DB"),
         ("analytics_summary", "read: DB aggregate"),
         ("api_docs", "read: static text"),
+        (
+            "publish_readiness",
+            "read-only: per-device readiness cho trang Đăng bài — không lease, không \
+             admission, cùng posture với is_rooted",
+        ),
+        ("publish_sheet_get_config", "read: DB, và không bao giờ trả token"),
         ("flow_action_catalog", "read: static catalog"),
         ("flow_list", "read: DB"),
         ("flow_get", "read: DB"),
@@ -1081,11 +1091,6 @@ mod tests {
             "the last frame held in memory. The view hub superseded it; kept as the only \
              non-WebSocket way to get a frame out, which is worth having while the WebSocket \
              path is the one being changed",
-        ),
-        (
-            "publish_get",
-            "one campaign by id. `publish_list` carries every field the UI reads, so this is \
-             a narrower read nothing needs yet",
         ),
         (
             "interaction_open_on_device",

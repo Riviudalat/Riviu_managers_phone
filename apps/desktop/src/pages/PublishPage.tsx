@@ -5,10 +5,14 @@ import {
   publishAutoAssign,
   publishCancel,
   publishCreateCampaign,
+  publishGet,
   publishList,
   publishPrepare,
   publishPost,
+  publishReadiness,
   publishScanFolder,
+  publishSheetGetConfig,
+  publishSheetSaveConfig,
   publishTransfer,
 } from "../api";
 import { SelectionStrip } from "../components/SelectionStrip";
@@ -16,9 +20,37 @@ import { targetsOf } from "../selectionTargets";
 import { EmptyState } from "../components/States";
 import { IconRocket } from "../components/Icons";
 import { pickDirectory } from "../pickFile";
-import type { PublishBundle, PublishCampaignRecord, PublishFolderManifest } from "../types";
+import type {
+  DevicePublishReadiness,
+  PublishBundle,
+  PublishCampaignDetail,
+  PublishCampaignRecord,
+  PublishFolderManifest,
+  PublishReadinessInfo,
+  PublishSheetConfig,
+} from "../types";
 import { describeError } from "../describeError";
 import type { SelProps } from "./pageProps";
+
+/**
+ * One readiness answer as pill text. The `default` arm is deliberate wire-defence: this
+ * union mirrors a Rust enum, and a variant this page has not heard of must render as its
+ * raw JSON rather than as nothing — an empty chip would read as "fine".
+ */
+function readinessText(info: PublishReadinessInfo): string {
+  switch (info.kind) {
+    case "hierarchyReady":
+      return "sẵn sàng";
+    case "pixelGrid":
+      return "pixel route";
+    case "hierarchyMissing":
+      return `thiếu ${info.labels.join(", ")}`;
+    case "hierarchyUnknownBuild":
+      return `build chưa đo (${info.version || "?"})`;
+    default:
+      return JSON.stringify(info);
+  }
+}
 
 /** Publish campaigns: scan a folder, transfer, post, and watch the result. */
 export function PublishPage({ devices, selected, onSelectUdids }: SelProps) {
@@ -29,6 +61,16 @@ export function PublishPage({ devices, selected, onSelectUdids }: SelProps) {
   const [campaigns, setCampaigns] = useState<PublishCampaignRecord[]>([]);
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState<string | null>(null);
+  const [readiness, setReadiness] = useState<DevicePublishReadiness[]>([]);
+  const [readinessNote, setReadinessNote] = useState<string | null>(null);
+  // `null` means "not answered yet" — the unconfigured badge must not flash while the
+  // config is still loading, so it renders only from a real answer.
+  const [sheetConfig, setSheetConfig] = useState<PublishSheetConfig | null>(null);
+  const [sheetUrlDraft, setSheetUrlDraft] = useState("");
+  const [sheetTokenDraft, setSheetTokenDraft] = useState("");
+  const [sheetBusy, setSheetBusy] = useState(false);
+  /** Per-campaign detail, fetched on demand — `publishList` carries plans, not states. */
+  const [details, setDetails] = useState<Record<string, PublishCampaignDetail>>({});
   const targets = targetsOf(selected, devices);
 
   // **Sequenced, because a run emits several events close together.** Each reload takes a
@@ -72,6 +114,54 @@ export function PublishPage({ devices, selected, onSelectUdids }: SelProps) {
       unlisten?.();
     };
   }, []);
+
+  useEffect(() => {
+    let live = true;
+    publishSheetGetConfig()
+      .then((config) => {
+        if (!live) return;
+        setSheetConfig(config);
+        setSheetUrlDraft(config.webhookUrl);
+      })
+      .catch(() => {
+        // A page that cannot read the config still publishes fine; the sweeper is the
+        // one that cares, and it says so in its own log.
+        if (live) setSheetConfig(null);
+      });
+    return () => {
+      live = false;
+    };
+  }, []);
+
+  // **Keyed on the udid set, not on the `devices` array.** The roster identity churns on
+  // every 3-second scan, and `readiness_of` resolves each phone's TikTok package over adb —
+  // refetching that per scan would put twenty shell round-trips on a timer for an answer
+  // that only changes when a phone (or its TikTok) comes or goes.
+  const androidKey = devices
+    .filter((device) => device.platform === "android")
+    .map((device) => device.udid)
+    .sort()
+    .join(",");
+  useEffect(() => {
+    if (androidKey === "") {
+      setReadiness([]);
+      setReadinessNote(null);
+      return;
+    }
+    let live = true;
+    publishReadiness(androidKey.split(","))
+      .then((rows) => {
+        if (!live) return;
+        setReadiness(rows);
+        setReadinessNote(null);
+      })
+      .catch((error) => {
+        if (live) setReadinessNote(describeError(error));
+      });
+    return () => {
+      live = false;
+    };
+  }, [androidKey]);
 
   const selectedBundles =
     manifest?.bundles.filter((bundle) => bundleIds.includes(bundle.id)) ?? [];
@@ -253,6 +343,97 @@ export function PublishPage({ devices, selected, onSelectUdids }: SelProps) {
           trước khi ảnh rời máy tính. Đo bằng <code>composer_scout</code>.
         </p>
       )}
+      {readinessNote && (
+        <p className="hint" role="alert">
+          Không đọc được trạng thái sẵn sàng: {readinessNote}
+        </p>
+      )}
+      {readiness.length > 0 && (
+        <div className="row" style={{ flexWrap: "wrap", gap: 6 }}>
+          {/* The preflight's own answer, shown before the refusal instead of inside it. */}
+          {readiness.map(({ udid, readiness: info }) => (
+            <span key={udid} className="pill" title={udid}>
+              {devices.find((device) => device.udid === udid)?.name ?? udid.slice(0, 8)}:{" "}
+              {readinessText(info)}
+            </span>
+          ))}
+        </div>
+      )}
+      {sheetConfig && (!sheetConfig.webhookUrl || !sheetConfig.hasToken) && (
+        <p className="hint" role="status">
+          Sheet chưa cấu hình — bài đăng xong sẽ giữ link trong hàng chờ (`pending`) cho tới
+          khi điền webhook + token bên dưới.
+        </p>
+      )}
+      <details style={{ marginTop: 8 }}>
+        <summary>Cấu hình Sheet (Apps Script webhook)</summary>
+        <div className="row" style={{ flexWrap: "wrap", gap: 6, marginTop: 6 }}>
+          <input
+            type="text"
+            placeholder="https://script.google.com/…/exec"
+            value={sheetUrlDraft}
+            onChange={(event) => setSheetUrlDraft(event.target.value)}
+            style={{ minWidth: 320 }}
+            aria-label="Webhook URL"
+          />
+          <input
+            type="password"
+            placeholder={
+              sheetConfig?.hasToken ? "để trống = giữ token hiện tại" : "token của script"
+            }
+            value={sheetTokenDraft}
+            onChange={(event) => setSheetTokenDraft(event.target.value)}
+            aria-label="Webhook token"
+          />
+          <button
+            type="button"
+            className="ghost"
+            disabled={sheetBusy}
+            onClick={async () => {
+              setSheetBusy(true);
+              try {
+                // An untouched token field means "keep what is stored" — the operator can
+                // fix a URL without holding the credential; clearing is its own button.
+                const saved = await publishSheetSaveConfig(
+                  sheetUrlDraft,
+                  sheetTokenDraft === "" ? undefined : sheetTokenDraft,
+                );
+                setSheetConfig(saved);
+                setSheetUrlDraft(saved.webhookUrl);
+                setSheetTokenDraft("");
+                setMsg("Đã lưu cấu hình Sheet.");
+              } catch (e) {
+                setMsg(describeError(e));
+              } finally {
+                setSheetBusy(false);
+              }
+            }}
+          >
+            Lưu
+          </button>
+          {sheetConfig?.hasToken && (
+            <button
+              type="button"
+              className="ghost"
+              disabled={sheetBusy}
+              onClick={async () => {
+                setSheetBusy(true);
+                try {
+                  const saved = await publishSheetSaveConfig(sheetUrlDraft, "");
+                  setSheetConfig(saved);
+                  setMsg("Đã xoá token.");
+                } catch (e) {
+                  setMsg(describeError(e));
+                } finally {
+                  setSheetBusy(false);
+                }
+              }}
+            >
+              Xoá token
+            </button>
+          )}
+        </div>
+      </details>
       <button
         type="button"
         className="primary"
@@ -394,7 +575,46 @@ export function PublishPage({ devices, selected, onSelectUdids }: SelProps) {
                   Huỷ
                 </button>
               )}
+              <button
+                type="button"
+                className="ghost"
+                onClick={async () => {
+                  if (details[campaign.id]) {
+                    setDetails((current) => {
+                      const next = { ...current };
+                      delete next[campaign.id];
+                      return next;
+                    });
+                    return;
+                  }
+                  try {
+                    const detail = await publishGet(campaign.id);
+                    if (detail) setDetails((current) => ({ ...current, [campaign.id]: detail }));
+                    else setMsg("Chiến dịch không còn trong DB.");
+                  } catch (e) {
+                    setMsg(describeError(e));
+                  }
+                }}
+              >
+                {details[campaign.id] ? "Ẩn chi tiết máy" : "Chi tiết máy"}
+              </button>
             </div>
+            {details[campaign.id] && (
+              <ul className="hint" style={{ marginTop: 8 }}>
+                {/*
+                  `publishList` carries assignment PLANS (bundle↔udid), so per-phone state
+                  and errorCode were invisible on this page — a campaign could sit
+                  `failedBeforeDispatch` with the one refusing phone unnameable except by
+                  reading the backend log. This is the read the retry buttons act on.
+                */}
+                {details[campaign.id].assignments.map((assignment) => (
+                  <li key={assignment.id}>
+                    {assignment.udid} — {assignment.state}
+                    {assignment.errorCode ? ` · ${assignment.errorCode}` : ""}
+                  </li>
+                ))}
+              </ul>
+            )}
           </article>
         ))}
         {!campaigns.length && (

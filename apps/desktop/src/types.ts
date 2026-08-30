@@ -312,6 +312,8 @@ export interface PublishBundle {
   caption: string;
   captionSha256: string;
   totalBytes: number;
+  /** Partner names read from the bundle's `partner*.xlsx` at scan time; absent on old manifests. */
+  partners?: string[];
 }
 
 export interface PublishScanNotice {
@@ -1586,6 +1588,52 @@ export interface DeviceFileEntry {
 export interface DeviceRootStatus {
   hasSu: boolean;
   shellIsRoot: boolean;
+}
+
+/**
+ * One phone's health, section by section, from `device_health` — read-only, no lease.
+ *
+ * Every optional field is a section that could not be asked (or does not apply on this
+ * backend), and `notes` names each of those in the operator's language: "could not ask"
+ * rendered as its own answer is the whole reason the popup exists.
+ */
+export interface DeviceHealthReport {
+  udid: string;
+  rosterStatus?: DeviceStatus | null;
+  agent: AgentStatus;
+  agentReadyNow?: boolean | null;
+  helperReachable?: boolean | null;
+  /** `null` means the question failed — not "absent" (§9.97). */
+  helperInstalled?: boolean | null;
+  root?: DeviceRootStatus | null;
+  tiktokPackage?: string | null;
+  tiktokVersion?: string | null;
+  tiktokLocale?: string | null;
+  notes: string[];
+}
+
+/**
+ * Why one device can or cannot take the hierarchy publish route, from `publish_readiness`.
+ *
+ * Mirrors the backend's `PublishReadiness`: the same four answers the transfer/post
+ * preflight refuses on, made visible BEFORE the refusal so the operator reads the reason
+ * off the page instead of out of an error string.
+ */
+export type PublishReadinessInfo =
+  | { kind: "pixelGrid" }
+  | { kind: "hierarchyReady" }
+  | { kind: "hierarchyMissing"; labels: string[] }
+  | { kind: "hierarchyUnknownBuild"; version: string };
+
+export interface DevicePublishReadiness {
+  udid: string;
+  readiness: PublishReadinessInfo;
+}
+
+/** Sheet delivery config — the token itself never crosses the wire, only whether one is set. */
+export interface PublishSheetConfig {
+  webhookUrl: string;
+  hasToken: boolean;
 }
 
 export interface DeviceDirListing {

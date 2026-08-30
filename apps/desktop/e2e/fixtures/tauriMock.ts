@@ -767,6 +767,35 @@ export async function installTauriMock(
     // `Unknown mock command: publish_list` through its own screenshot baseline — the same
     // unfinished-fixture shape as the Settings block below, pinned into a committed png.
     commandHandlers.set("publish_list", () => []);
+    // Same lesson, next command: the publish page now asks each android phone's readiness
+    // on mount. The fixture roster is iOS-only so the page never fetches — but a later
+    // android fixture must not resurrect the red Unknown-mock line in a baseline.
+    commandHandlers.set("publish_readiness", () => []);
+    commandHandlers.set("publish_get", () => null);
+    // The page reads the Sheet config on mount; an unregistered mock here would put the red
+    // Unknown-mock line straight into the Đăng bài baseline (§9.129's exact shape).
+    commandHandlers.set("publish_sheet_get_config", () => ({
+      webhookUrl: "",
+      hasToken: false,
+    }));
+    commandHandlers.set("publish_sheet_save_config", () => ({
+      webhookUrl: "",
+      hasToken: false,
+    }));
+    // "Kiểm tra máy" opens on demand from the device menu; registered for the same reason.
+    commandHandlers.set("device_health", (args) => ({
+      udid: (args as { udid?: string })?.udid ?? "fixture",
+      rosterStatus: "ready",
+      agent: { state: "unknown" },
+      agentReadyNow: null,
+      helperReachable: null,
+      helperInstalled: null,
+      root: null,
+      tiktokPackage: null,
+      tiktokVersion: null,
+      tiktokLocale: null,
+      notes: ["fixture"],
+    }));
     // Everything the Settings page asks for on mount. Absent, each of these rejected and the
     // page rendered `Unknown mock command: …` in red — and because five of them race, *which*
     // name landed in the banner varied, so the page's screenshot baseline was pinning a

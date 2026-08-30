@@ -76,6 +76,7 @@ export interface DeviceActionDeps {
   setFilesFor: (udid: string | null) => void;
   setAdbFor: (udid: string | null) => void;
   setSyslogFor: (udid: string | null) => void;
+  setHealthFor: (udid: string | null) => void;
 }
 
 /**
@@ -101,6 +102,7 @@ export function buildDeviceActions(
     setFilesFor,
     setAdbFor,
     setSyslogFor,
+    setHealthFor,
   } = deps;
 
   const notifyRotation = (asked: number) => (observed: number) => {
@@ -597,6 +599,15 @@ export function buildDeviceActions(
           // implement it, which is the whole reason it is worth reading from here.
           keywords: "syslog logcat log nhat ky",
           run: () => setSyslogFor(device.udid),
+        },
+        {
+          id: "device-health",
+          label: "Kiểm tra máy…",
+          // The command itself answers on any backend (roster + agent cache come from
+          // memory), so the row is not `androidOnly` — on iOS the popup says which
+          // sections do not apply instead of hiding the whole diagnosis.
+          keywords: "health kiem tra chan doan diagnostics agent helper root tiktok",
+          run: () => setHealthFor(device.udid),
         },
         {
           id: "wifi-on",

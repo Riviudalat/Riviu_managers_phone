@@ -175,6 +175,15 @@ pub enum ComposerVerdict {
     MoreCellsThanTheGridShows,
     /// The cells were tapped and `Next` never armed, so **no** cell took.
     NeverArmed,
+    /// The first cell was tapped and `Next` did not arm, so `Select multiple` never engaged.
+    ///
+    /// Measured 30/08/2026 (§9.132), two of four walks: the toggle tap does not take, and the
+    /// first cell tap then opens the **single-photo editor** — a screen that also renders a
+    /// `Next` whose text node is not clickable, so the armed check reads it honestly as
+    /// unarmed. Distinct from [`Self::NeverArmed`] because the remaining cells were **not**
+    /// tapped: before this verdict existed they landed blind on the editor's own controls,
+    /// which is a real tap on an unknown screen for every image past the first.
+    MultiSelectDidNotEngage,
     /// The picker states how many images are selected, and it is not how many were asked for.
     ///
     /// Only reachable on a build whose `Next` renders a count. Where none is rendered the
@@ -228,6 +237,10 @@ impl ComposerVerdict {
             Self::NoTabsToAnchorTo => "không thấy hàng tab của picker — không có mốc cho lưới ảnh",
             Self::MoreCellsThanTheGridShows => "số ảnh cần nhiều hơn số ô lưới hiện ra",
             Self::NeverArmed => "đã bấm các ô ảnh nhưng nút Tiếp không sáng — không ô nào ăn",
+            Self::MultiSelectDidNotEngage => {
+                "bấm 'Chọn nhiều' không ăn — ô đầu tiên mở thẳng trình sửa đơn, nên không bấm \
+                 thêm ô nào vào màn hình lạ"
+            }
             Self::NotEnoughSelected => "picker báo số ảnh đã chọn khác số ảnh bài này cần",
             Self::EditStepDidNotOpen => "bấm Tiếp mà bước chỉnh sửa không mở",
             Self::PostScreenDidNotOpen => "bấm Tiếp ở bước chỉnh sửa mà màn đăng không mở",
@@ -640,6 +653,12 @@ impl PhotoGrid {
 /// `Posted` from the middle of the picker is one refactor away from a caller believing it.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Selection {
+    /// `Select multiple` never engaged: the very first cell tap failed to arm `Next`.
+    ///
+    /// Checked after cell one and before cells two onward, because the measured failure
+    /// (§9.132) is the first tap leaving the picker for the single-photo editor — every
+    /// further "cell" tap would land on that editor's own controls.
+    MultiSelectDidNotEngage,
     /// `Next` armed, which proves **at least one** cell took.
     ///
     /// Read that literally. There is no per-cell numeral on the measured build, so the
@@ -918,11 +937,20 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
         Ok(PhotoGrid::below_tabs(screen, tabs.y + tabs.height))
     }
 
-    /// Tap `count` cells, then check **once** that something took.
+    /// Tap `count` cells — proving the **first** one took before any more are sent — then
+    /// check once at the end that the whole set armed.
     ///
-    /// One check rather than one per cell because there is nothing per cell to check — see
-    /// [`Selection::Armed`] for exactly how weak that evidence is, and why it is still the
-    /// strongest available.
+    /// The first-cell proof exists because of a measured failure, not a preference
+    /// (§9.132, two of four walks): the `Select multiple` tap sometimes does not take, and
+    /// in single mode the first cell tap opens the single-photo **editor**. Every further
+    /// "cell" tap then lands blind on that editor's own controls — a real tap on an unknown
+    /// screen per image. `Next` arming after exactly one cell is the same signal
+    /// [`Self::await_armed`] already trusts (the editor's own `Next` renders its text on a
+    /// non-clickable node, so it reads honestly as unarmed there).
+    ///
+    /// Past the first cell there is nothing per cell to check — see [`Selection::Armed`]
+    /// for exactly how weak the end-of-set evidence is, and why it is still the strongest
+    /// available.
     ///
     /// Refuses a `count` past this screen's visible capacity instead of scrolling.
     async fn select(
@@ -946,6 +974,13 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
             };
             self.tap_inside(&cell).await?;
             sleep(POLL, stop).await;
+            if index == 0 && self.await_armed(stop).await?.is_none() {
+                return Ok(if stop.load(Ordering::Relaxed) {
+                    Selection::Stopped
+                } else {
+                    Selection::MultiSelectDidNotEngage
+                });
+            }
         }
         match self.await_armed(stop).await? {
             Some(next) => {
@@ -1470,6 +1505,7 @@ async fn drive<P: TapPlanner>(
             return Ok(ComposerVerdict::MoreCellsThanTheGridShows)
         }
         Selection::NeverArmed => return Ok(ComposerVerdict::NeverArmed),
+        Selection::MultiSelectDidNotEngage => return Ok(ComposerVerdict::MultiSelectDidNotEngage),
         Selection::Stopped => return Ok(ComposerVerdict::Stopped),
     };
     if !composer.advance_to_edit_step(&next, stop).await? {
@@ -2513,6 +2549,76 @@ mod tests {
         );
     }
 
+    /// **The first cell is its own proof, and its failure stops the walk before more taps.**
+    ///
+    /// The fixture is the failure §9.132 measured on a real phone, two of four walks: the
+    /// `Select multiple` tap does not take (the picker stays), and the first cell tap then
+    /// leaves for the single-photo **editor** — a screen that also renders a `Next`, on a
+    /// node that is not clickable, exactly like the real `id/kl_`. The old shape tapped the
+    /// remaining cells blind onto that editor and reported `NeverArmed` only at the end;
+    /// this pins that exactly one grid tap is sent and the verdict names the toggle.
+    #[tokio::test(start_paused = true)]
+    async fn a_toggle_that_did_not_take_stops_after_the_first_cell() {
+        // Everything below the tab row navigates (the grid); the toggle at y=1937 does not.
+        let grid_region = ElementBox {
+            description: None,
+            enabled: true,
+            clickable: false,
+            x: 0.0,
+            y: 320.0,
+            width: 1080.0,
+            height: 1500.0,
+        };
+        let single_editor = scene(
+            vec![
+                (
+                    "fixture-picker-next",
+                    ElementBox {
+                        clickable: false,
+                        ..box_at(755.0, 1985.0)
+                    },
+                ),
+                ("fixture-edit-next", box_at(545.0, 1954.0)),
+            ],
+            None,
+        );
+        let session = FakeSession::with(vec![
+            feed(),
+            camera(),
+            picker("All", Some("fixture-album-menu")),
+            picker("All", None).leaving_by(box_at(0.0, 400.0)),
+            // The toggle tap lands and does nothing: this scene leaves only through the
+            // grid region, which is what the first cell tap does — into the editor.
+            picker("riviu-abc", None).leaving_by(grid_region),
+            single_editor,
+        ])
+        .rows("riviu-abc", vec![box_at(0.0, 400.0)]);
+        let request = CarouselRequest {
+            album: "riviu-abc",
+            images: 3,
+            caption: "đi Đà Lạt thật đã",
+            screen: screen(),
+        };
+        let stop = AtomicBool::new(false);
+        let mut composer = Composer::new(&session, plan(), |element: &ElementBox| element.centre());
+        assert_eq!(
+            reach_edit_step(&mut composer, &request, &stop)
+                .await
+                .expect("no transport error"),
+            ComposerVerdict::MultiSelectDidNotEngage
+        );
+        // Counted as the whole journey, because a geometric filter also catches the album
+        // row and the gallery entry: Create, the entry, the album menu, the album row, the
+        // toggle, and exactly ONE cell — six. The old shape sent eight: two more "cells"
+        // straight into the editor.
+        assert_eq!(
+            session.taps.lock().len(),
+            6,
+            "exactly one cell tap may be spent proving the toggle; the rest were landing on \
+             an editor before this verdict existed"
+        );
+    }
+
     /// **A stop must never turn into a tap on Post.**
     ///
     /// `await_condition` used to check for a ready element *before* checking stop, so a Post
@@ -3240,6 +3346,7 @@ mod tests {
             ComposerVerdict::NoTabsToAnchorTo,
             ComposerVerdict::MoreCellsThanTheGridShows,
             ComposerVerdict::NeverArmed,
+            ComposerVerdict::MultiSelectDidNotEngage,
             ComposerVerdict::EditStepDidNotOpen,
             ComposerVerdict::PostScreenDidNotOpen,
             ComposerVerdict::PostUnmeasured,
