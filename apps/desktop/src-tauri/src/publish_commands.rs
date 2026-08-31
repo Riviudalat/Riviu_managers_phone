@@ -284,18 +284,27 @@ fn post_url_owed(evidence: &serde_json::Value) -> Option<&str> {
         .filter(|url| !url.is_empty())
 }
 
-/// Who the sheet says posted: the device's own handle when the fleet knows it, else `bot`.
+/// Who the sheet says posted. Always `bot`, and the sheet is why.
 ///
-/// `device_meta.handle` defaults to an empty string for every phone nobody typed a handle
-/// in for, and migration 18's CHECK refuses a blank poster — so the fallback lives here,
-/// beside the decision, rather than trusting twenty rows of operator data entry.
-fn poster_identity(handle: &str) -> &str {
-    let handle = handle.trim();
-    if handle.is_empty() {
-        "bot"
-    } else {
-        handle
-    }
+/// # This was the device's handle for one day, on a guess that the sheet refuted
+///
+/// The handle version shipped on 31/08 with a confident reason: "twenty accounts publish
+/// through this app, and a column that always reads `bot` cannot tell the operator whose
+/// post a row is." Then the operator's real sheet was read, and column B is **`Nhân Viên`** —
+/// a staff column, holding eleven people's names across 1892 rows (`Phúc`, `Lành`, `Quỳnh`,
+/// …). It answers *who did this*, not *which account*. So `bot` is not a placeholder there;
+/// it is the twelfth value, and it is the one that tells a human at a glance which rows a
+/// person posted and which the app did.
+///
+/// Which account a row belongs to is not lost by this: the canonical link in column D
+/// carries `@handle` in its own path. (Column E `Tên Kênh` exists and is empty on all 1892
+/// rows — filling it is the operator's call, not this function's.)
+///
+/// Kept as a named function rather than inlined so the decision has one home, and so the
+/// `.gs`'s own `payload.poster || 'bot'` fallback stays a second belt rather than the only
+/// one. Migration 18's CHECK refuses a blank poster; this can never produce one.
+const fn poster_identity() -> &'static str {
+    "bot"
 }
 
 /// Whether this assignment's carousel is already up, settled, done.
@@ -729,20 +738,14 @@ async fn post_one_phone(
         _ => None,
     };
     let written = match owed {
-        Some(post_url) => {
-            let handle = db
-                .get_device_meta(&assignment.udid)
-                .map(|meta| meta.handle)
-                .unwrap_or_default();
-            db.record_publish_success_with_sheet_row(
-                &assignment.id,
-                &evidence,
-                &campaign_id,
-                &post_url,
-                poster_identity(&handle),
-                &bundle.partners,
-            )
-        }
+        Some(post_url) => db.record_publish_success_with_sheet_row(
+            &assignment.id,
+            &evidence,
+            &campaign_id,
+            &post_url,
+            poster_identity(),
+            &bundle.partners,
+        ),
         None => db.update_publish_assignment_state(&assignment.id, state, code, Some(&evidence)),
     };
     if let Err(error) = written {
@@ -2566,13 +2569,23 @@ mod tests {
         );
     }
 
-    /// The poster fallback is migration 18's CHECK made visible at the decision point.
+    /// **`bot`, because column B is a staff column — measured, not assumed.**
+    ///
+    /// This test spent a day pinning the opposite: a device handle, falling back to `bot`.
+    /// The operator's real sheet settled it — column B is `Nhân Viên`, eleven people's names
+    /// over 1892 rows — so the app's rows say `bot` and a human can see at a glance which
+    /// rows a person posted. Whose account it was is still readable from the link itself.
+    ///
+    /// Non-empty is the other half, and migration 18's CHECK is why: a blank poster is
+    /// refused by the database, so the one thing this must never become is a value that can
+    /// be empty.
     #[test]
-    fn a_blank_handle_posts_as_bot_and_a_real_one_travels_verbatim() {
-        assert_eq!(poster_identity(""), "bot");
-        assert_eq!(poster_identity("   "), "bot");
-        assert_eq!(poster_identity("@cn.qut.lt4"), "@cn.qut.lt4");
-        assert_eq!(poster_identity(" @hi.m.lt "), "@hi.m.lt");
+    fn the_app_posts_as_bot_because_column_b_is_the_staff_column() {
+        assert_eq!(poster_identity(), "bot");
+        assert!(
+            !poster_identity().trim().is_empty(),
+            "migration 18's CHECK refuses a blank poster"
+        );
     }
 
     /// The two participant filters, pinned variant by variant.

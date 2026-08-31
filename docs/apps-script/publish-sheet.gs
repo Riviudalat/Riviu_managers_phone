@@ -80,10 +80,14 @@ const CONFIG = {
   LINK_COLUMN: 4,
 
   /**
-   * Cột người đăng.
+   * Cột người đăng — **B, đã đối chiếu sheet thật 31/08/2026 và anh chốt.**
    *
-   * **Con số duy nhất trong file này tôi phải tự chọn** — anh nói người đăng là
-   * `bot` nhưng không nói cột nào, nên tôi để B và tách nó ra đây để anh sửa một chỗ.
+   * B là cột `Nhân Viên`: 1892 dòng, 11 cái tên người (`Phúc`, `Lành`, `Quỳnh`, …). App ghi
+   * `bot` vào đó, thành giá trị thứ 12 — nhìn một cái là biết dòng nào người đăng, dòng nào
+   * máy đăng.
+   *
+   * Tài khoản nào đăng thì KHÔNG mất: link ở cột D mang sẵn `@handle` trong đường dẫn. Cột E
+   * `Tên Kênh` có tiêu đề nhưng trống cả 1892 dòng — script không đụng tới, để anh quyết.
    */
   POSTER_COLUMN: 2,
 

@@ -71,14 +71,17 @@ pub struct SheetRow {
     pub token: String,
     /// The link to the published post — column D.
     pub post_url: String,
-    /// Who posted it: the device account's handle when the fleet has one on file
-    /// (`device_meta.handle`, typed in by the operator), else the literal `bot`.
+    /// Who posted it — column B, and always `bot`.
     ///
-    /// Two legal values, not one, since 31/08/2026 — twenty accounts publish through this
-    /// app, and a column that always reads `bot` cannot tell the operator whose post a row
-    /// is. The script keeps its own `|| 'bot'` fallback, and migration 18's CHECK refuses an
-    /// empty poster, which is why the fallback lives on this side too rather than trusting
-    /// every handle to have been typed in.
+    /// **One legal value, and the operator's sheet is the reason.** For one day this carried
+    /// the device's handle, on the argument that a column always reading `bot` cannot say
+    /// whose post a row is. Reading the real sheet refuted it: column B is `Nhân Viên`, a
+    /// staff column holding eleven people's names, so `bot` is what distinguishes the app's
+    /// rows from a person's. The account is still identifiable — the canonical link in
+    /// column D carries `@handle`. See `publish_commands::poster_identity`.
+    ///
+    /// The script keeps its own `|| 'bot'` fallback, and migration 18's CHECK refuses an
+    /// empty poster, so this can never arrive blank from either side.
     pub poster: String,
     /// Partner names in workbook order, written from column K onward.
     pub partners: Vec<String>,
