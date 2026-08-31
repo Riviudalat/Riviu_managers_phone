@@ -411,6 +411,11 @@ impl TargetEvidence {
     fn brief(&self) -> crate::openai_client::PostBrief<'_> {
         crate::openai_client::PostBrief {
             caption: self.caption.as_deref(),
+            // Always, because of where this struct's caption comes from: `caption` here is
+            // only ever the post page's own text (see the field doc above) — the phone's
+            // truncated a11y read never reaches it. That standing is what lets the prompt
+            // rank it above the pictures.
+            caption_is_authoritative: self.caption.is_some(),
             transcript: self.transcript.as_deref(),
             coverage: self.coverage,
         }

@@ -385,31 +385,80 @@ pub async fn fetch_post_context(url: &str) -> Result<PostWebContext, WebLookupEr
     let normalized = normalize_for_ytdlp(url)
         .ok_or_else(|| WebLookupError::Unavailable(format!("không có post id trong {url:?}")))?;
 
-    // **One lookup per link, however many phones are about to comment on it.**
+    // **One lookup per link, however many phones are about to comment on it — but links do
+    // not queue behind each other.**
     //
     // A `Standalone` campaign gives every assignment its own task (§9.108), so twenty phones
-    // on one link are twenty tasks running this function at the same moment. Without the memo
-    // that is twenty identical requests to TikTok from one address inside a few seconds —
-    // which is the behaviour most likely to earn the address the very block that already
-    // costs this farm two targets in seven.
+    // on one link are twenty tasks running this function at the same moment. Twenty identical
+    // requests to TikTok from one address inside a few seconds is the behaviour most likely
+    // to earn the block that already costs this farm two targets in seven — so the same link
+    // must collapse to one request.
     //
-    // The lock is held across the lookup on purpose: the second caller waits for the first's
-    // answer instead of starting its own. It is a few seconds, off the device path entirely.
-    let mut memo = LOOKUP_MEMO.lock().await;
-    if let Some(entry) = memo.get(&normalized) {
-        if entry.at.elapsed() < LOOKUP_MEMO_TTL {
-            return entry.result.clone();
-        }
+    // The first version held the memo's single mutex across the whole lookup, which did
+    // collapse the same link — and serialised every *different* link behind it too: a
+    // campaign over three posts, the first timing out three times, made posts two and three
+    // wait ~180 s before they even started, each holding a device lease idle. So the memo
+    // lock is now held only long enough to read or write the map, and the "one request per
+    // link" guarantee moves to a **per-key** lock: same link waits, different links run at
+    // once.
+    if let Some(result) = fresh_memo(&normalized).await {
+        return result;
+    }
+    let key_lock = inflight_lock(&normalized).await;
+    let _guard = key_lock.lock().await;
+    // Re-check under the key lock: a concurrent caller for this same link may have just
+    // finished and filled the memo while we waited.
+    if let Some(result) = fresh_memo(&normalized).await {
+        remove_inflight_lock(&normalized, &key_lock).await;
+        return result;
     }
     let result = fetch_post_context_uncached(&normalized).await;
-    memo.insert(
-        normalized,
+    LOOKUP_MEMO.lock().await.insert(
+        normalized.clone(),
         MemoEntry {
             at: std::time::Instant::now(),
             result: result.clone(),
         },
     );
+    // The memo is visible before this removal, so a new caller does not start another lookup.
+    // Remove by identity rather than by `strong_count`: queued waiters necessarily hold Arcs,
+    // and counting them made every contended one-shot URL stay in this process-wide table.
+    remove_inflight_lock(&normalized, &key_lock).await;
     result
+}
+
+/// The memoised result for `normalized`, if one is present and still within TTL.
+///
+/// A separate function so the memo mutex is taken, read, and released — never held across a
+/// network call.
+async fn fresh_memo(normalized: &str) -> Option<Result<PostWebContext, WebLookupError>> {
+    let memo = LOOKUP_MEMO.lock().await;
+    memo.get(normalized)
+        .and_then(|entry| (entry.at.elapsed() < LOOKUP_MEMO_TTL).then(|| entry.result.clone()))
+}
+
+/// The single-flight lock for one link. Callers on the *same* link share it and so make one
+/// request; callers on *different* links get different locks and do not wait on each other.
+async fn inflight_lock(normalized: &str) -> std::sync::Arc<tokio::sync::Mutex<()>> {
+    let mut inflight = LOOKUP_INFLIGHT.lock().await;
+    inflight
+        .entry(normalized.to_string())
+        .or_insert_with(|| std::sync::Arc::new(tokio::sync::Mutex::new(())))
+        .clone()
+}
+
+/// Remove this completed generation without deleting a newer lock for the same key.
+async fn remove_inflight_lock(
+    normalized: &str,
+    completed: &std::sync::Arc<tokio::sync::Mutex<()>>,
+) {
+    let mut inflight = LOOKUP_INFLIGHT.lock().await;
+    if inflight
+        .get(normalized)
+        .is_some_and(|held| std::sync::Arc::ptr_eq(held, completed))
+    {
+        inflight.remove(normalized);
+    }
 }
 
 /// One remembered lookup. Both outcomes are kept: a target TikTok refuses is refused for every
@@ -429,6 +478,13 @@ const LOOKUP_MEMO_TTL: Duration = Duration::from_secs(300);
 
 static LOOKUP_MEMO: std::sync::LazyLock<
     tokio::sync::Mutex<std::collections::HashMap<String, MemoEntry>>,
+> = std::sync::LazyLock::new(|| tokio::sync::Mutex::new(std::collections::HashMap::new()));
+
+/// Per-link single-flight locks. Keyed by the normalised link, so two callers on one link
+/// share a lock and make one request, while two callers on different links do not queue.
+#[allow(clippy::type_complexity)]
+static LOOKUP_INFLIGHT: std::sync::LazyLock<
+    tokio::sync::Mutex<std::collections::HashMap<String, std::sync::Arc<tokio::sync::Mutex<()>>>>,
 > = std::sync::LazyLock::new(|| tokio::sync::Mutex::new(std::collections::HashMap::new()));
 
 async fn fetch_post_context_uncached(normalized: &str) -> Result<PostWebContext, WebLookupError> {
@@ -486,7 +542,13 @@ async fn run_lookup_in(
         .arg(normalized)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped());
+        .stderr(std::process::Stdio::piped())
+        // **Killed when the lookup future is dropped, which the timeout below does.** Without
+        // this, a `LOOKUP_TIMEOUT` firing drops `command.output()` but leaves yt-dlp running,
+        // and the next of three attempts spawns another — up to three extractor processes
+        // hitting one post from one IP at once, which is exactly how a fleet earns an IP
+        // block, plus the scratch dir each leaves behind.
+        .kill_on_drop(true);
     #[cfg(windows)]
     {
         // No console window for a background lookup: without it every target pops a
@@ -842,16 +904,40 @@ pub async fn fetch_slides(urls: &[String]) -> Vec<Vec<u8>> {
         return Vec::new();
     };
 
-    let mut out = Vec::with_capacity(urls.len());
+    let mut downloaded: Vec<Option<Vec<u8>>> = Vec::with_capacity(urls.len());
     for url in urls {
         match fetch_one_slide(&client, url).await {
-            Ok(bytes) => out.push(bytes),
+            Ok(bytes) => downloaded.push(Some(bytes)),
             Err(error) => {
                 tracing::warn!("tiktok_web: không tải được một ảnh của bài: {error}");
+                downloaded.push(None);
             }
         }
     }
-    out
+    slides_if_first_and_last_present(downloaded)
+}
+
+/// Keep the downloaded slides only when the **first and last** of them arrived; otherwise
+/// hand back nothing so the caller falls back to on-device capture.
+///
+/// The picked URLs are in slide order and always include the first and last slide — the
+/// contact-sheet prompt says so in as many words ("first and last are present"), because a
+/// carousel's payload is measured to live on the last slide. The old version compacted
+/// whatever downloaded into an unindexed vector, so a failed **last** slide vanished silently
+/// and the model wrote about the cover while the prompt still claimed the payload was there —
+/// a wrong-topic comment on a real account. A failed **middle** slide is harmless (first and
+/// last still frame the post), so it is dropped rather than discarding the whole set; only a
+/// missing bookend breaks the guarantee, and that returns empty to route to the phone, which
+/// shows the real current slides.
+fn slides_if_first_and_last_present(downloaded: Vec<Option<Vec<u8>>>) -> Vec<Vec<u8>> {
+    let bookends_present = matches!(
+        (downloaded.first(), downloaded.last()),
+        (Some(Some(_)), Some(Some(_)))
+    );
+    if !bookends_present {
+        return Vec::new();
+    }
+    downloaded.into_iter().flatten().collect()
 }
 
 /// The user-agent the CDN measurement was taken with.
@@ -1197,5 +1283,110 @@ mod tests {
         assert!(pick_slide_indices(0, 4).is_empty());
         assert!(pick_slide_indices(8, 0).is_empty());
         assert_eq!(pick_slide_indices(8, 1), vec![0]);
+    }
+
+    /// **A missing last slide routes to the phone; a missing middle does not.**
+    ///
+    /// The contact-sheet prompt promises the model the first and last slide are present,
+    /// because a carousel's payload lives on the last one. A failed last-slide download used
+    /// to vanish into a compacted vector and the model wrote about the cover — a wrong-topic
+    /// comment. Now a missing bookend hands back nothing, so the caller falls back to
+    /// on-device capture; a missing middle keeps the set, since first and last still frame it.
+    #[test]
+    fn a_missing_bookend_slide_discards_the_web_set_but_a_missing_middle_does_not() {
+        let s = |n: u8| Some(vec![n; MIN_SLIDE_BYTES]);
+        // Complete set: kept.
+        assert_eq!(
+            slides_if_first_and_last_present(vec![s(1), s(2), s(3)]).len(),
+            3
+        );
+        // Middle failed: first and last still frame the post, so keep both.
+        assert_eq!(
+            slides_if_first_and_last_present(vec![s(1), None, s(3)]).len(),
+            2
+        );
+        // Last (payload) failed: discard the whole web set → device fallback.
+        assert!(slides_if_first_and_last_present(vec![s(1), s(2), None]).is_empty());
+        // First failed: same.
+        assert!(slides_if_first_and_last_present(vec![None, s(2), s(3)]).is_empty());
+        // Nothing downloaded: empty, as before.
+        assert!(slides_if_first_and_last_present(vec![None, None]).is_empty());
+        assert!(slides_if_first_and_last_present(vec![]).is_empty());
+    }
+
+    /// **Same link shares one single-flight lock; different links get their own.**
+    ///
+    /// This is what stops the memo from serialising unrelated posts: one lock per link, held
+    /// only across that link's own lookup, so a slow post one never blocks post two. Same
+    /// link returns the same lock (pointer-equal), which is what collapses twenty phones on
+    /// one link to a single request.
+    #[tokio::test]
+    async fn the_single_flight_lock_is_per_link_not_global() {
+        let a1 = inflight_lock("riviu-test://link-a").await;
+        let a2 = inflight_lock("riviu-test://link-a").await;
+        let b = inflight_lock("riviu-test://link-b").await;
+        assert!(
+            std::sync::Arc::ptr_eq(&a1, &a2),
+            "the same link must reuse one lock so its callers single-flight"
+        );
+        assert!(
+            !std::sync::Arc::ptr_eq(&a1, &b),
+            "different links must NOT share a lock, or they serialise"
+        );
+        // A held lock on link A leaves link B free to be taken at once.
+        let _held_a = a1.lock().await;
+        assert!(
+            b.try_lock().is_ok(),
+            "link B's lookup must not wait on link A's"
+        );
+        let mut inflight = LOOKUP_INFLIGHT.lock().await;
+        inflight.remove("riviu-test://link-a");
+        inflight.remove("riviu-test://link-b");
+    }
+
+    /// A waiter holds its own `Arc` while the leader completes. Completion must still remove
+    /// the map entry; otherwise every contended one-shot URL remains there for the process life.
+    #[tokio::test]
+    async fn a_contended_single_flight_entry_is_removed_after_completion() {
+        let url = "https://www.tiktok.com/@cleanup/video/7668947001618320661";
+        let normalized = normalize_for_ytdlp(url).expect("fixture URL");
+        LOOKUP_MEMO.lock().await.remove(&normalized);
+        LOOKUP_INFLIGHT.lock().await.remove(&normalized);
+
+        let leader_lock = inflight_lock(&normalized).await;
+        let leader_guard = leader_lock.lock().await;
+        let waiter = tokio::spawn(async move { fetch_post_context(url).await });
+        for _ in 0..100 {
+            if std::sync::Arc::strong_count(&leader_lock) >= 3 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert!(
+            std::sync::Arc::strong_count(&leader_lock) >= 3,
+            "the waiter must be queued on the same per-key lock"
+        );
+
+        let memo_result = Err(WebLookupError::Unavailable("completion fixture".into()));
+        LOOKUP_MEMO.lock().await.insert(
+            normalized.clone(),
+            MemoEntry {
+                at: std::time::Instant::now(),
+                result: memo_result.clone(),
+            },
+        );
+        drop(leader_guard);
+        let observed = tokio::time::timeout(Duration::from_secs(1), waiter)
+            .await
+            .expect("waiter completes")
+            .expect("waiter task");
+        assert_eq!(observed, memo_result);
+        assert!(
+            !LOOKUP_INFLIGHT.lock().await.contains_key(&normalized),
+            "completion must remove the one-shot entry even while a waiter held an Arc"
+        );
+
+        LOOKUP_MEMO.lock().await.remove(&normalized);
+        LOOKUP_INFLIGHT.lock().await.remove(&normalized);
     }
 }

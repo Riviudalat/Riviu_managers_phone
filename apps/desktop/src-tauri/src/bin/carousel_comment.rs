@@ -40,6 +40,29 @@ struct KeyringSecrets {
     credentials: CredentialStore,
 }
 
+/// Whether the final caption came from a source the harness can name as authoritative.
+///
+/// `--link` reads the post page and `--caption` is an explicit fixture supplied by the
+/// operator. A replayed directory with neither has pixels only. The final text check matters
+/// because an empty lookup or `--caption "   "` is absence, not authoritative emptiness.
+fn caption_is_authoritative(
+    link: Option<&str>,
+    forced_caption: Option<&str>,
+    caption: Option<&str>,
+) -> bool {
+    let has_caption = caption.is_some_and(|caption| !caption.trim().is_empty());
+    let has_source =
+        link.is_some() || forced_caption.is_some_and(|caption| !caption.trim().is_empty());
+    has_caption && has_source
+}
+
+fn prefer_forced_caption(caption: Option<String>, forced_caption: Option<&str>) -> Option<String> {
+    forced_caption
+        .filter(|caption| !caption.trim().is_empty())
+        .map(str::to_owned)
+        .or(caption)
+}
+
 impl SecretStore for KeyringSecrets {
     fn get_secret(&self, name: &str) -> anyhow::Result<Option<String>> {
         self.credentials.app_secret(name)
@@ -179,11 +202,15 @@ async fn main() -> anyhow::Result<()> {
         }
         (frames, None, None, None, EvidenceKind::CarouselSlides)
     };
-    if forced_caption.is_some() {
-        caption = forced_caption;
-    }
+    caption = prefer_forced_caption(caption, forced_caption.as_deref());
+    let caption_is_authoritative = caption_is_authoritative(
+        link.as_deref(),
+        forced_caption.as_deref(),
+        caption.as_deref(),
+    );
     let brief = riviu_core::openai_client::PostBrief {
         caption: caption.as_deref(),
+        caption_is_authoritative,
         transcript: transcript.as_deref(),
         coverage,
     };
@@ -338,4 +365,54 @@ async fn main() -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{caption_is_authoritative, prefer_forced_caption};
+
+    /// A fetched or explicitly supplied caption is fixture/source data. A bare directory has
+    /// only pixels, and a link whose lookup found no caption must not manufacture authority.
+    #[test]
+    fn caption_authority_follows_the_source_and_requires_real_text() {
+        assert!(caption_is_authoritative(
+            Some("https://www.tiktok.com/@riviu/video/1"),
+            None,
+            Some("caption fetched from the post")
+        ));
+        assert!(caption_is_authoritative(
+            None,
+            Some("fixture caption"),
+            Some("fixture caption")
+        ));
+        assert!(caption_is_authoritative(
+            Some("https://www.tiktok.com/@riviu/video/1"),
+            Some("fixture overrides fetched text"),
+            Some("fixture overrides fetched text")
+        ));
+        assert!(!caption_is_authoritative(None, None, None));
+        assert!(!caption_is_authoritative(
+            None,
+            None,
+            Some("caption OCR cục bộ")
+        ));
+        assert!(!caption_is_authoritative(
+            Some("https://www.tiktok.com/@riviu/video/1"),
+            None,
+            None
+        ));
+        assert!(!caption_is_authoritative(None, Some("   "), Some("   ")));
+    }
+
+    #[test]
+    fn an_empty_fixture_does_not_erase_an_authoritative_web_caption() {
+        assert_eq!(
+            prefer_forced_caption(Some("caption from web".into()), Some("   ")),
+            Some("caption from web".into())
+        );
+        assert_eq!(
+            prefer_forced_caption(Some("caption from web".into()), Some("fixture caption")),
+            Some("fixture caption".into())
+        );
+    }
 }
