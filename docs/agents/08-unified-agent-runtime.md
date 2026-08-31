@@ -434,3 +434,26 @@
   target-photo run `live-comment-target-open-url-v6.jsonl` PASS: 3 video, 2
   comment có frame xác nhận, 0 recovery. Không quảng bá comment khi evidence gate
   fail; stock/RT-MMO vẫn giữ fail-closed contract.
+
+#### 14.5 Interaction/nurture stability contract (01/09/2026; xem §9.137)
+
+- Bằng chứng chữ có một thứ tự chung cho drafter, verifier và batch:
+  `transcript > caption web/source authoritative > pixels/OCR`. `--caption` của
+  binary là fixture authoritative; OCR/local caption không được tự nâng hạng.
+  Nurture không có URL thì không được bịa transcript, và brief rỗng phải giữ
+  prompt cũ byte-identical.
+- Root/reply và hierarchy/pixel đều trả lỗi theo effect phase. Chỉ lỗi đã chứng
+  minh xảy ra trước tap Send mới là `BeforeEffect` và retryable; lỗi tại hoặc sau
+  tap là `AfterEffect`/uncertain và không tự retry. Revision CAS giữ quyền sở hữu
+  assignment xuyên prepare/send; SQL không được hạ một delivery đã settled.
+- Follow/comment phải chụp và kiểm lại đúng author, card, rail/control ngay trước
+  gesture. Pixel identity bắt buộc author OCR; caption OCR chỉ bổ sung. Không dùng
+  lại rail cũ sau pause/model/audit, và folded-parent fact phải đi cùng evidence
+  tới operator.
+- `HumanSessionPolicy` reserve trước gesture: no-op đã chứng minh chưa effect thì
+  cancel, còn tap/type hoặc phase mơ hồ thì commit. Refresh live settings lỗi đặt
+  cả ba public-action rate về `0`, báo một lần mỗi chuỗi lỗi và phục hồi bằng lần
+  đọc thành công kế tiếp; không có live source thì giữ snapshot ban đầu.
+- Comment chỉ được mở UI sau khi audit write-ahead insert thành công; `attempt_id`
+  là bắt buộc. Lỗi update outcome sau Send chỉ được báo lớn, không được biến thành
+  một lần gửi lại.
