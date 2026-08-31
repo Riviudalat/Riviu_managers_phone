@@ -2201,29 +2201,30 @@ async fn post_through_the_composer(
     });
     match verdict {
         ComposerVerdict::Posted => {
-            // **No link capture here yet, on purpose — and not because the capture would
-            // refuse.** The first wiring called `capture_post_link` right on this arm, with
-            // the comment claiming it would fail closed until M7. It would not have: after
-            // Post, TikTok returns to the FEED and uploads in the background, and the
-            // capture taps whatever Share is on screen — on the fleet's own build Share IS
-            // measured (off a feed dump) and the copy row matches the English needles, so
-            // it would have read back a STRANGER'S post link, which passes
-            // `looks_like_a_post_link` because it is one. A wrong link is the one shape the
-            // outbox schema (UNIQUE `post_url`, non-empty CHECKs) cannot tell from a right
-            // one. `tiktok_share`'s own contract says the caller must already be standing
-            // ON the intended post; the route that gets there is exactly the unmeasured M7
-            // trip, so the capture and that route arrive together — see
-            // `no_link_is_read_off_the_feed_until_the_route_is_measured`, which is the
-            // tripwire against re-wiring this early.
+            // **Through the route, never off the feed.** The first wiring called
+            // `capture_post_link` straight here, on the claim it would fail closed until M7.
+            // It would not have: after Post the screen is the FEED, where Share belongs to
+            // whatever video is playing — a control this build HAS measured, over a copy row
+            // that matches the English needles — so it would have read back a stranger's
+            // post link, which passes `looks_like_a_post_link` because it is one. A wrong
+            // link is the single shape the outbox schema cannot tell from a right one.
             //
-            // `postUrl` therefore never appears yet; the downstream halves that consume it
-            // (`post_url_owed`, the one-transaction outbox write, the sweeper) are live and
-            // tested, waiting on a link that is really ours.
-            evidence["linkCaptureReason"] = serde_json::Value::String(
-                "đường từ bài vừa đăng về trang bài của nó chưa đo (M7) — không đọc link \
-                 từ feed, vì Share trên feed là của video người khác"
-                    .to_string(),
-            );
+            // `capture_own_post_link` is the measured answer (§9.136): Profile tab, skip the
+            // pinned tile, open tiles until one renders THIS run's caption, and only then
+            // open the share sheet. The caption is the identity proof, because ownership is
+            // not one — the pinned post is this account's too.
+            //
+            // Fail-closed all the way down, and it can never downgrade `Posted`: the
+            // carousel is out before this line runs, so every refusal below is a statement
+            // about the *link*. `postUrl` appears only for a link read off a page that
+            // proved itself ours; `linkCaptureReason` always says what happened.
+            let capture =
+                riviu_core::tiktok_share::capture_own_post_link(session, &labels, &bundle.caption)
+                    .await;
+            if let Some(link) = capture.link() {
+                evidence["postUrl"] = serde_json::Value::String(link.to_string());
+            }
+            evidence["linkCaptureReason"] = serde_json::Value::String(capture.reason());
             PostOutcome::Posted(evidence)
         }
         other if other.may_retry() => PostOutcome::NothingPublished(other.reason().to_string()),
@@ -2419,6 +2420,12 @@ mod tests {
     /// pixel route or `post_one_assignment`. The symbol is what matters, wherever it sits,
     /// so the scan is the module minus its own test text — the same `#[cfg(test)]` cut the
     /// fan-out gate uses, for the same reason: this assertion writes the needle out itself.
+    ///
+    /// **Flipped 31/08/2026 (§9.136), and the shape of the flip is the point.** The route
+    /// exists now, so the rule is no longer "never capture" — it is "capture only through
+    /// the route". `capture_own_post_link` opens the share sheet only after a page has
+    /// rendered this run's caption; the bare `capture_post_link` trusts whatever is on
+    /// screen, and on this path what is on screen after Post is the feed.
     #[test]
     fn no_link_is_read_off_the_feed_until_the_route_is_measured() {
         let source = include_str!("publish_commands.rs");
@@ -2436,21 +2443,25 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         let module = code.as_str();
+        // The bare capture, anywhere in the publish path. `capture_own_post_link` contains
+        // the substring, so the check is on the call shape: `capture_post_link(` preceded
+        // by nothing that makes it the routed one.
         assert!(
-            !module.contains("capture_post_link"),
-            "capture_post_link is back in the publish path without the M7 route in front of \
-             it — that reads a stranger's link off the feed and files it as ours"
+            !module.contains("::capture_post_link(") && !module.contains(" capture_post_link("),
+            "the BARE capture_post_link is back in the publish path — after Post the screen \
+             is the feed, and that reads a stranger's link and files it as ours. The routed \
+             capture_own_post_link is the only one allowed here"
         );
         assert!(
-            !module.contains("tiktok_share::"),
-            "something in the publish path reaches into tiktok_share again; the link capture \
-             and the measured route arrive together or not at all"
+            module.contains("capture_own_post_link("),
+            "the Posted arm no longer captures at all — a published carousel owes the sheet \
+             its link, and dropping the call loses it silently"
         );
         let body = code_of("async fn post_through_the_composer(");
         assert!(
-            !body.iter().any(|line| line.contains("capture_post_link")),
-            "capture_post_link is back on the Posted arm without the M7 route in front of \
-             it — that reads a stranger's link off the feed and files it as ours"
+            body.iter()
+                .any(|line| line.contains("capture_own_post_link(")),
+            "the routed capture left the Posted arm; the link is read there or nowhere"
         );
     }
 
@@ -2500,11 +2511,18 @@ mod tests {
             readiness_of_build("com.zhiliaoapp.musically", "en", "46.2.1"),
             PublishReadiness::HierarchyReady
         ));
-        // Its sibling version is the phone still behind the onboarding dialog: language
-        // strings serve it, but the version-keyed caption id was never read — so it names
-        // what is missing rather than refusing wholesale or borrowing 46.2.1's id.
+        // Its sibling version graduated the same evening (§9.135): the twentieth phone was
+        // measured once its onboarding dialog cleared, and its ids turned out to have
+        // MOVED — the shutter and both caption-screen ids differ from 46.2.1's — which is
+        // the whole reason this lookup is keyed by version and not by package.
         assert!(matches!(
             readiness_of_build("com.zhiliaoapp.musically", "en", "46.2.42"),
+            PublishReadiness::HierarchyReady
+        ));
+        // A version nobody has measured still names what it is missing rather than
+        // borrowing a measured sibling's ids.
+        assert!(matches!(
+            readiness_of_build("com.zhiliaoapp.musically", "en", "47.0.0"),
             PublishReadiness::HierarchyMissing(missing) if !missing.is_empty()
         ));
     }

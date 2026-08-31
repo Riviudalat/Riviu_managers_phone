@@ -203,9 +203,269 @@ pub fn looks_like_a_post_link(value: &str) -> bool {
         .any(|pair| matches!(pair[0], "video" | "photo") && !pair[1].is_empty())
 }
 
+/// How long the profile grid may take to render after its tab is tapped.
+pub const PROFILE_WINDOW: Duration = Duration::from_millis(8_000);
+/// How long a tapped tile may take to become a post page carrying its caption.
+pub const POST_PAGE_WINDOW: Duration = Duration::from_millis(6_000);
+/// How many tiles the route will open looking for the caption it was given.
+///
+/// Three, because the failure it must survive is a pinned post plus a badge this build does
+/// not carry an id for. Beyond that the answer is "the post is not here", and opening more
+/// of an operator's own grid to keep guessing is not a better answer.
+const TILES_TO_TRY: usize = 3;
+/// How much of the caption is demanded on the page.
+///
+/// A prefix, not the whole string: TikTok truncates a long caption in the grid page's own
+/// `TextView` and appends its own "more", so demanding the full text would refuse exactly
+/// the posts whose captions are worth checking. Short enough to survive truncation, long
+/// enough that two different bundles do not collide.
+const CAPTION_PROOF_CHARS: usize = 24;
+
+/// The result of routing to **our own** just-published post and reading its link.
+///
+/// Separate from [`LinkCapture`] because the route has failures the sheet does not, and
+/// because the important one is new: standing on the wrong post. Every variant is a
+/// statement about the *link*, never about the post — by the time this runs the carousel is
+/// already out, and nothing here can change that.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OwnPostLink {
+    /// A post carrying the expected caption was opened, and its link read.
+    Captured(String),
+    /// This build has no measured profile tab, so the route was never started.
+    ProfileTabUnmeasured,
+    /// The profile tab is measured and was not on screen.
+    ProfileTabMissing,
+    /// This build has no measured post tile, so the grid cannot be read.
+    TilesUnmeasured,
+    /// The profile opened and showed no tiles at all.
+    NoTiles,
+    /// The caller passed nothing to identify the post by.
+    ///
+    /// Refuses rather than trusting position: "the newest post is the first tile" is false
+    /// on any account with a pinned post, and this one has one.
+    CaptionUnusable,
+    /// Tiles were opened and none carried the expected caption.
+    CaptionNotFound,
+    /// The route reached our post; the sheet capture then said this.
+    Sheet(LinkCapture),
+    /// A tap or a read failed on the way. The post is unaffected.
+    ReadFailed(String),
+}
+
+impl OwnPostLink {
+    /// The link, if there is one.
+    pub fn link(&self) -> Option<&str> {
+        match self {
+            Self::Captured(link) => Some(link),
+            Self::Sheet(capture) => capture.link(),
+            _ => None,
+        }
+    }
+
+    pub fn reason(&self) -> String {
+        match self {
+            Self::Captured(link) => format!("đã lấy link bài của mình: {link}"),
+            Self::ProfileTabUnmeasured => "chưa đo tab Hồ sơ trên bản build này".into(),
+            Self::ProfileTabMissing => "không thấy tab Hồ sơ trên màn hình".into(),
+            Self::TilesUnmeasured => "chưa đo ô bài trên lưới hồ sơ của bản build này".into(),
+            Self::NoTiles => "lưới hồ sơ không có ô bài nào".into(),
+            Self::CaptionUnusable => {
+                "không có caption để nhận ra bài của lượt này — KHÔNG lấy link theo vị trí, \
+                 vì ô đầu tiên có thể là bài ghim"
+                    .into()
+            }
+            Self::CaptionNotFound => {
+                "mở các ô đầu lưới mà không ô nào mang caption của lượt này — có thể bài \
+                 chưa hiện xong, hoặc caption bị sửa"
+                    .into()
+            }
+            Self::Sheet(capture) => capture.reason(),
+            Self::ReadFailed(message) => {
+                format!("không đi được đường về bài ({message}) — bài vẫn ổn")
+            }
+        }
+    }
+}
+
+/// The prefix of a caption that a post page must render for the post to count as ours.
+///
+/// Cut on a **character** boundary, not a byte one: every caption this fleet writes is
+/// Vietnamese, and slicing `"Đà Lạt"` by bytes panics.
+fn caption_proof(caption: &str) -> Option<String> {
+    let trimmed = caption.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    Some(trimmed.chars().take(CAPTION_PROOF_CHARS).collect())
+}
+
+/// Whether a tile's rectangle contains a badge's — i.e. the badge belongs to that tile.
+fn contains(tile: &ElementBox, badge: &ElementBox) -> bool {
+    badge.x >= tile.x
+        && badge.y >= tile.y
+        && badge.x + badge.width <= tile.x + tile.width
+        && badge.y + badge.height <= tile.y + tile.height
+}
+
+/// Route from wherever the phone is to **our own** post, prove it is ours, and read its link.
+///
+/// # Why the caption is the proof
+///
+/// Measured 31/08/2026 (§9.136), on the fleet's own account: the first tile in the profile
+/// grid is a **pinned** post from months ago. "Newest is first" is simply false, and an
+/// account's own pinned post is still an account's own post — so ownership cannot separate
+/// them either. What separates them is what the operator just wrote: the caption of *this*
+/// run. It is checked on the page before the share sheet is opened, and a page that does not
+/// carry it is backed out of rather than copied from.
+///
+/// # It never returns `Err`, and it never changes the post
+///
+/// Same contract as [`capture_post_link`], for the same reason: the carousel is already
+/// published by the time this runs, and a failure to read its link must not read as a
+/// failure to publish. Every tap it makes is navigation — a tab, a tile, Share, a copy row —
+/// and it walks back out of every tile it opens.
+pub async fn capture_own_post_link(
+    session: &dyn UiSession,
+    labels: &TikTokControls,
+    caption: &str,
+) -> OwnPostLink {
+    let Some(proof) = caption_proof(caption) else {
+        return OwnPostLink::CaptionUnusable;
+    };
+    let Some(profile) = labels.label(TikTokControl::ProfileTab) else {
+        return OwnPostLink::ProfileTabUnmeasured;
+    };
+    let Some(tile_id) = labels.post_tile_id() else {
+        return OwnPostLink::TilesUnmeasured;
+    };
+
+    let tab = match session.locate(profile.to_query()).await {
+        Ok(Some(tab)) => tab,
+        Ok(None) => return OwnPostLink::ProfileTabMissing,
+        Err(error) => return OwnPostLink::ReadFailed(error.to_string()),
+    };
+    if let Err(error) = session.tap(tab.centre()).await {
+        return OwnPostLink::ReadFailed(error.to_string());
+    }
+
+    let tiles = match await_tiles(session, tile_id.to_query()).await {
+        Ok(tiles) if tiles.is_empty() => return OwnPostLink::NoTiles,
+        Ok(tiles) => tiles,
+        Err(error) => return OwnPostLink::ReadFailed(error.to_string()),
+    };
+    // Cheap skip, when this build's badge is measured: a pinned tile is a page load that
+    // can be known not to be ours before it is spent. Identity is still the caption.
+    let pinned = match labels.pinned_badge_id() {
+        Some(badge) => session
+            .locate_all(badge.to_query())
+            .await
+            .unwrap_or_default(),
+        None => Vec::new(),
+    };
+    let candidates: Vec<ElementBox> = tiles
+        .into_iter()
+        .filter(|tile| !pinned.iter().any(|badge| contains(tile, badge)))
+        .take(TILES_TO_TRY)
+        .collect();
+    if candidates.is_empty() {
+        return OwnPostLink::CaptionNotFound;
+    }
+
+    for tile in candidates {
+        if let Err(error) = session.tap(tile.centre()).await {
+            return OwnPostLink::ReadFailed(error.to_string());
+        }
+        match await_caption(session, &proof).await {
+            Ok(true) => {
+                let capture = capture_post_link(session, labels).await;
+                // Out of the post page whatever the sheet said, so the next thing to run
+                // does not start inside somebody's post.
+                leave_post_page(session, labels).await;
+                return match capture {
+                    LinkCapture::Captured(link) => OwnPostLink::Captured(link),
+                    other => OwnPostLink::Sheet(other),
+                };
+            }
+            Ok(false) => leave_post_page(session, labels).await,
+            Err(error) => {
+                leave_post_page(session, labels).await;
+                return OwnPostLink::ReadFailed(error);
+            }
+        }
+    }
+    OwnPostLink::CaptionNotFound
+}
+
+/// Wait for the profile grid to have tiles, and hand them back in hierarchy order.
+async fn await_tiles(
+    session: &dyn UiSession,
+    query: ElementQuery<'_>,
+) -> anyhow::Result<Vec<ElementBox>> {
+    let deadline = tokio::time::Instant::now() + PROFILE_WINDOW;
+    loop {
+        let tiles = session.locate_all(query).await?;
+        if !tiles.is_empty() {
+            return Ok(tiles);
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Ok(Vec::new());
+        }
+        tokio::time::sleep(POLL).await;
+    }
+}
+
+/// Whether the page now on screen renders the caption this run wrote.
+async fn await_caption(session: &dyn UiSession, proof: &str) -> Result<bool, String> {
+    let query = ElementQuery::Text {
+        value: proof,
+        exact: false,
+    };
+    let deadline = tokio::time::Instant::now() + POST_PAGE_WINDOW;
+    loop {
+        match session.locate(query).await {
+            Ok(Some(_)) => return Ok(true),
+            Ok(None) => {}
+            Err(error) => return Err(error.to_string()),
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Ok(false);
+        }
+        tokio::time::sleep(POLL).await;
+    }
+}
+
+/// Back out of a post page until the profile grid is under us again.
+///
+/// Proof is the grid's own tiles: the tab bar is on both screens, so "the tab bar is back"
+/// says nothing. Bounded, and a failure to get back is left to the caller's own walk-back —
+/// this function's job is not to be the last line of defence.
+async fn leave_post_page(session: &dyn UiSession, labels: &TikTokControls) {
+    let Some(tile) = labels.post_tile_id() else {
+        let _ = session.back().await;
+        return;
+    };
+    for _ in 0..3 {
+        if session
+            .locate_all(tile.to_query())
+            .await
+            .map(|tiles| !tiles.is_empty())
+            .unwrap_or(false)
+        {
+            return;
+        }
+        let _ = session.back().await;
+        tokio::time::sleep(POLL).await;
+    }
+}
+
 /// Tap Share, tap the copy row, and read the link back off the clipboard.
 ///
 /// Puts the share sheet away **only when it opened one**, and never returns `Err`.
+///
+/// **Standing on the intended post is the caller's job**, and on the publish path that
+/// caller is [`capture_own_post_link`] — never `post_through_the_composer` directly. After
+/// Post, TikTok is on the feed, where Share belongs to a stranger's video and the link it
+/// copies is a real post link that nothing downstream can tell from ours.
 pub async fn capture_post_link(session: &dyn UiSession, labels: &TikTokControls) -> LinkCapture {
     let Some(share) = labels.label(TikTokControl::Share) else {
         // Nothing was opened, so there is nothing to close.
