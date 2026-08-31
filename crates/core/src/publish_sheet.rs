@@ -236,6 +236,67 @@ pub async fn push_row(webhook_url: &str, row: &SheetRow) -> anyhow::Result<()> {
 mod tests {
     use super::*;
 
+    /// **The two halves of this wire are in different languages, and nothing else checks
+    /// they agree.**
+    ///
+    /// The payload is built in Rust and read in Apps Script. No compiler sees both, no type
+    /// spans them, and the failure mode is silent on the worst possible schedule: a renamed
+    /// field means the script writes a blank cell — or refuses every row — the first time a
+    /// real campaign publishes, which is exactly when nobody is watching a log.
+    ///
+    /// So the script itself is the fixture. Both directions are checked, and the second is
+    /// the one that catches drift: a field the script reads that this struct never sends
+    /// would be `undefined` on arrival, and `String(undefined || '')` is an empty string,
+    /// which the script happily writes into a cell.
+    #[test]
+    fn every_field_the_apps_script_reads_is_a_field_this_payload_sends() {
+        let script = include_str!("../../../docs/apps-script/publish-sheet.gs");
+        let sent = serde_json::to_value(SheetRow {
+            token: "t".into(),
+            post_url: "https://vt.tiktok.com/ZSVcq8mha/".into(),
+            poster: "@cn.qut.lt4".into(),
+            partners: vec!["Quán A".into()],
+            assignment_id: "a-1".into(),
+        })
+        .expect("the payload serialises");
+        let sent: Vec<String> = sent
+            .as_object()
+            .expect("a JSON object")
+            .keys()
+            .cloned()
+            .collect();
+
+        for field in &sent {
+            assert!(
+                script.contains(&format!("payload.{field}")),
+                "the app sends `{field}` and the Apps Script never reads it — the value is \
+                 dropped on arrival, silently"
+            );
+        }
+
+        // Every `payload.<name>` the script mentions, harvested from its own text.
+        let mut read: Vec<String> = script
+            .match_indices("payload.")
+            .map(|(at, _)| {
+                script[at + "payload.".len()..]
+                    .chars()
+                    .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+                    .collect::<String>()
+            })
+            .filter(|name| !name.is_empty())
+            .collect();
+        read.sort();
+        read.dedup();
+        assert!(!read.is_empty(), "the script fixture parsed to nothing");
+        for field in &read {
+            assert!(
+                sent.contains(field),
+                "the Apps Script reads `payload.{field}`, which this payload does not send — \
+                 it arrives `undefined` and lands in the sheet as an empty cell"
+            );
+        }
+    }
+
     /// **A credential never goes out over plaintext, and never follows a redirect.**
     ///
     /// The token, the post link and every partner name are in the body. Over `http://` they
