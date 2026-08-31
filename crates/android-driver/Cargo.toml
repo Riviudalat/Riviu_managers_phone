@@ -45,3 +45,8 @@ test = true
 name = "share_scout"
 path = "examples/share_scout.rs"
 test = true
+
+[[example]]
+name = "m7_post_once"
+path = "examples/m7_post_once.rs"
+test = true
