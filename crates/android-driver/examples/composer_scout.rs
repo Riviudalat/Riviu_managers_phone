@@ -36,8 +36,8 @@ use std::sync::atomic::AtomicBool;
 use riviu_android_driver::AndroidDriver;
 use riviu_core::driver::{DeviceDriver, UiSession};
 use riviu_core::tiktok_composer::{
-    reach_edit_step, CarouselRequest, Composer, ComposerPlan, ComposerVerdict, Screen,
-    REQUIRED_TO_PUBLISH,
+    enter_picker_for_measuring, reach_edit_step, reach_picker, CarouselRequest, Composer,
+    ComposerPlan, ComposerVerdict, Screen, REQUIRED_TO_PUBLISH,
 };
 use riviu_core::tiktok_labels::{controls_for, TikTokControl, TikTokControls};
 
@@ -163,7 +163,14 @@ fn how_many_images(args: &[String]) -> Result<usize, String> {
 /// multi-serial loop sailed past a typo and reported a measuring run that never ran.
 /// The same shape §9.129 fixed for a stranded phone, one layer earlier.
 /// Every flag this tool defines. A `--word` outside this list is refused.
-const KNOWN_FLAGS: &[&str] = &["--album", "--images", "--visit-caption-step"];
+const KNOWN_FLAGS: &[&str] = &[
+    "--album",
+    "--images",
+    "--visit-caption-step",
+    "--peek-multi-select",
+    "--dump-picker",
+    "--dump-exit-menu",
+];
 
 /// Refuse a flag this tool does not define, instead of running a different stage.
 ///
@@ -202,13 +209,11 @@ async fn main() -> anyhow::Result<()> {
     if let Err(complaint) = refuse_unknown_flags(&args) {
         return Err(refuse_usage(&complaint));
     }
+    // Parsed here, demanded later: the album is what the walk selects, and `--dump-picker`
+    // stops before any album exists to select — see below.
     let album = match flag_value(&args, "--album") {
-        Flag::Value(album) => album,
-        Flag::Absent => {
-            return Err(refuse_usage(
-                "--album is required: the name of an album this phone's picker already shows",
-            ));
-        }
+        Flag::Value(album) => Some(album),
+        Flag::Absent => None,
         Flag::Unusable => {
             return Err(refuse_usage(
                 "--album needs a name after it, not another flag",
@@ -228,6 +233,34 @@ async fn main() -> anyhow::Result<()> {
         Ok(on) => on,
         Err(complaint) => return Err(refuse_usage(&complaint)),
     };
+    let peek_multi_select = match switch(&args, "--peek-multi-select") {
+        Ok(on) => on,
+        Err(complaint) => return Err(refuse_usage(&complaint)),
+    };
+    let dump_picker = match switch(&args, "--dump-picker") {
+        Ok(on) => on,
+        Err(complaint) => return Err(refuse_usage(&complaint)),
+    };
+    let dump_exit_menu = match switch(&args, "--dump-exit-menu") {
+        Ok(on) => on,
+        Err(complaint) => return Err(refuse_usage(&complaint)),
+    };
+    if [
+        peek_multi_select,
+        visit_caption_step,
+        dump_picker,
+        dump_exit_menu,
+    ]
+    .iter()
+    .filter(|on| **on)
+    .count()
+        > 1
+    {
+        return Err(refuse_usage(
+            "--peek-multi-select / --visit-caption-step / --dump-picker / --dump-exit-menu \
+             là những chuyến khác nhau — chạy từng cái một",
+        ));
+    }
 
     let driver = AndroidDriver::new(&common::repo_config())?;
     let package = driver.resolve_tiktok_package(serial).await?;
@@ -256,6 +289,79 @@ async fn main() -> anyhow::Result<()> {
         still_missing
     ));
 
+    let (width, height) = riviu_core::screen::measured_screen_size(&session).await?;
+    let Some(screen) = Screen::new(width, height) else {
+        say(&format!("screen {width}x{height} is not a screen"));
+        anyhow::bail!("kích thước màn hình đọc ra không dùng được: {width}x{height}");
+    };
+    say(&format!("screen   {width}x{height}\n"));
+
+    // **The picker-harvest trip, for a build whose picker has never been read.** The normal
+    // walk cannot start here — `ComposerPlan::resolve` refuses while the picker labels are
+    // missing, and standing on the picker is the only way to measure them. This stage needs
+    // just the road TO it (Create, the shutter as proof the camera is up, and the measured
+    // gallery-entry id), dumps what it finds, and backs out. The dump is the harvest: the
+    // album pill's id, the tab strip, `Select multiple` and `Next` all live on this screen.
+    if dump_picker {
+        let plan = match ComposerPlan::resolve_for_picker_measuring(&labels) {
+            Ok(plan) => plan,
+            Err(refusal) => {
+                say(&format!("\nkhông đi được tới picker để đo: {refusal}"));
+                anyhow::bail!("thiếu nhãn cho chuyến đo picker: {refusal}");
+            }
+        };
+        driver.launch_app(serial, &package).await?;
+        tokio::time::sleep(std::time::Duration::from_secs(4)).await;
+        let stop = AtomicBool::new(false);
+        let mut composer = Composer::new(&session, plan, |element: &riviu_core::ElementBox| {
+            element.centre()
+        });
+        let arrived = enter_picker_for_measuring(&mut composer, screen, &stop).await;
+        let mut trip_failure: Option<String> = None;
+        if matches!(&arrived, Ok(ComposerVerdict::Stopped)) {
+            tokio::time::sleep(std::time::Duration::from_millis(2000)).await;
+            say("\n--- picker (chuyến đo nhãn) ---");
+            match session.agent().source().await {
+                Ok(source) => {
+                    let _ = std::fs::create_dir_all("target");
+                    let _ = std::fs::write("target/picker-measuring.xml", &source);
+                    dump_elements(&source);
+                    say("\n(XML đầy đủ: target/picker-measuring.xml)");
+                }
+                Err(error) => trip_failure = Some(format!("không dump được picker: {error:#}")),
+            }
+        } else {
+            trip_failure = Some(match &arrived {
+                Ok(refusal) => format!("không tới được picker: {}", refusal.reason()),
+                Err(error) => format!("lỗi giữa đường: {error:#}"),
+            });
+        }
+        let out = composer.leave().await;
+        say(&format!(
+            "\nlùi về feed: {}",
+            if out {
+                "xong"
+            } else {
+                "CHƯA — kiểm tra máy"
+            }
+        ));
+        arrived?;
+        anyhow::ensure!(
+            out,
+            "không lùi được về feed sau chuyến đo picker — kiểm tra máy"
+        );
+        if let Some(reason) = trip_failure {
+            anyhow::bail!("chuyến đo picker không trọn: {reason}");
+        }
+        return Ok(());
+    }
+
+    let Some(album) = album else {
+        return Err(refuse_usage(
+            "--album is required: the name of an album this phone's picker already shows",
+        ));
+    };
+
     let plan = match ComposerPlan::resolve(&labels) {
         Ok(plan) => plan,
         Err(refusal) => {
@@ -263,13 +369,6 @@ async fn main() -> anyhow::Result<()> {
             anyhow::bail!("thiếu nhãn để tới bước chỉnh sửa: {refusal}");
         }
     };
-
-    let (width, height) = riviu_core::screen::measured_screen_size(&session).await?;
-    let Some(screen) = Screen::new(width, height) else {
-        say(&format!("screen {width}x{height} is not a screen"));
-        anyhow::bail!("kích thước màn hình đọc ra không dùng được: {width}x{height}");
-    };
-    say(&format!("screen   {width}x{height}\n"));
 
     driver.launch_app(serial, &package).await?;
     tokio::time::sleep(std::time::Duration::from_secs(4)).await;
@@ -287,6 +386,72 @@ async fn main() -> anyhow::Result<()> {
     let mut composer = Composer::new(&session, plan, |element: &riviu_core::ElementBox| {
         element.centre()
     });
+
+    // **The toggle-state trip: two dumps around one production tap, nothing else.** The
+    // 31/08 twelve-run alternation proved `Select multiple` is a remembered two-way switch;
+    // writing a read-before-tap needs to know how the picker LOOKS in each state, and this
+    // is the instrument that goes and looks. It walks to the picker with the production
+    // walk (`reach_picker` — the same code `drive` runs), dumps, makes the one tap the
+    // publish path makes, dumps again, and backs out. Because the state is remembered,
+    // running this twice back-to-back photographs both directions: OFF→ON, then ON→OFF.
+    if peek_multi_select {
+        let arrived = reach_picker(&mut composer, &request, &stop).await;
+        let mut trip_failure: Option<String> = None;
+        if matches!(&arrived, Ok(ComposerVerdict::Stopped)) {
+            let _ = std::fs::create_dir_all("target");
+            say("\n--- picker TRƯỚC cú bấm 'Chọn nhiều' ---");
+            match session.agent().source().await {
+                Ok(source) => {
+                    let _ = std::fs::write("target/picker-before.xml", &source);
+                    dump_elements(&source);
+                    say("\n(XML đầy đủ: target/picker-before.xml)");
+                }
+                Err(error) => trip_failure = Some(format!("không dump được màn TRƯỚC: {error:#}")),
+            }
+            if trip_failure.is_none() {
+                match composer.tap_multi_select_once(&stop).await {
+                    Ok(true) => {
+                        tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+                        say("\n--- picker SAU cú bấm ---");
+                        match session.agent().source().await {
+                            Ok(source) => {
+                                let _ = std::fs::write("target/picker-after.xml", &source);
+                                dump_elements(&source);
+                                say("\n(XML đầy đủ: target/picker-after.xml)");
+                            }
+                            Err(error) => {
+                                trip_failure = Some(format!("không dump được màn SAU: {error:#}"))
+                            }
+                        }
+                    }
+                    Ok(false) => {
+                        trip_failure = Some("không thấy nút 'Chọn nhiều' trên picker".to_string())
+                    }
+                    Err(error) => trip_failure = Some(format!("cú bấm lỗi: {error:#}")),
+                }
+            }
+        } else {
+            trip_failure = Some(match &arrived {
+                Ok(refusal) => format!("không tới được picker: {}", refusal.reason()),
+                Err(error) => format!("lỗi giữa đường: {error:#}"),
+            });
+        }
+        let out = composer.leave().await;
+        say(&format!(
+            "\nlùi về feed: {}",
+            if out {
+                "xong"
+            } else {
+                "CHƯA — kiểm tra máy"
+            }
+        ));
+        arrived?;
+        anyhow::ensure!(out, "không lùi được về feed sau chuyến peek — kiểm tra máy");
+        if let Some(reason) = trip_failure {
+            anyhow::bail!("chuyến peek không trọn: {reason}");
+        }
+        return Ok(());
+    }
 
     let verdict = reach_edit_step(&mut composer, &request, &stop).await;
     match &verdict {
@@ -339,6 +504,44 @@ async fn main() -> anyhow::Result<()> {
                 }
             ));
         }
+    }
+
+    // **The exit-menu trip: one Back on the edit step, dump what appears, then a verified
+    // kill.** Measured need: on `musically` Back there opens a Discard / Save draft / Send
+    // to friends sheet instead of leaving, so every walk on that build ended stranded. The
+    // walk-back arm that will tap Discard needs that sheet's nodes measured first — and
+    // this trip cannot use `leave()` to get out (that is the thing that does not work), so
+    // it exits through `terminate_app`, which proves the kill instead of assuming it.
+    if dump_exit_menu {
+        let mut trip_failure: Option<String> = None;
+        if matches!(&verdict, Ok(ComposerVerdict::Stopped)) {
+            let _ = session.back().await;
+            tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+            say("\n--- màn hình sau MỘT cú Back trên bước chỉnh sửa ---");
+            match session.agent().source().await {
+                Ok(source) => {
+                    let _ = std::fs::write("target/exit-menu.xml", &source);
+                    dump_elements(&source);
+                    say("\n(XML đầy đủ: target/exit-menu.xml)");
+                }
+                Err(error) => trip_failure = Some(format!("không dump được menu thoát: {error:#}")),
+            }
+        } else {
+            trip_failure = Some("chưa đứng ở bước chỉnh sửa nên không có menu để đo".to_string());
+        }
+        match driver.terminate_app(serial, &package).await {
+            Ok(_proof) => say("\nđã force-stop TikTok (kill có kiểm chứng) — máy về launcher"),
+            Err(error) => {
+                say(&format!("\nforce-stop KHÔNG xác nhận được: {error:#}"));
+                trip_failure
+                    .get_or_insert_with(|| format!("force-stop không xác nhận được: {error:#}"));
+            }
+        }
+        verdict?;
+        if let Some(reason) = trip_failure {
+            anyhow::bail!("chuyến đo menu thoát không trọn: {reason}");
+        }
+        return Ok(());
     }
 
     // The caller owns the walk-back — see `reach_edit_step`.

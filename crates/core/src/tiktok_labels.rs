@@ -328,6 +328,16 @@ pub enum TikTokControl {
     /// **Not measured.** Absent means refuse before the sheet is even opened — reaching a
     /// confirmation dialog with no idea which button confirms is the worst place to stop.
     PostDeleteConfirm,
+    /// The **Discard** row on the sheet some builds raise when Back is pressed on the
+    /// composer's edit step.
+    ///
+    /// Measured 31/08/2026 on `musically` 46.2.1 (`composer_scout --dump-exit-menu`,
+    /// ce11171beb408a1501): Back there opens Discard / Save draft / Send to friends
+    /// instead of leaving, so every walk-back on that build ended stranded inside the
+    /// sheet. Discard is the safe row — it abandons a never-posted draft and nothing else.
+    /// `trill` 38.3.2's Back walks straight out (hundreds of measured walks), so its sets
+    /// keep this `None` and the walk-back never looks for it there.
+    ComposerDiscard,
 }
 
 impl TikTokControl {
@@ -352,7 +362,7 @@ impl TikTokControl {
     /// are here now, the ordinals run 0–28 with no holes, and `every_control_appears_in_all`
     /// is finally strong enough to notice: with `seen` sized from this array, a variant
     /// whose ordinal exceeds it now panics on the index instead of passing quietly.
-    pub const ALL: [Self; 33] = [
+    pub const ALL: [Self; 34] = [
         Self::FeedTab,
         Self::PhotoBadge,
         Self::Like,
@@ -386,6 +396,7 @@ impl TikTokControl {
         Self::FoldedComments,
         Self::JourneySkip,
         Self::JourneyDone,
+        Self::ComposerDiscard,
     ];
 
     /// A stable position per variant, matched exhaustively on purpose.
@@ -429,6 +440,7 @@ impl TikTokControl {
             Self::LikeCount => 30,
             Self::ComposerShutter => 31,
             Self::ComposerCaption => 32,
+            Self::ComposerDiscard => 33,
         }
     }
 }
@@ -663,6 +675,9 @@ pub struct TikTokLabels {
     post_delete_menu: Option<LabelMatch>,
     post_delete: Option<LabelMatch>,
     post_delete_confirm: Option<LabelMatch>,
+    /// See [`TikTokControl::ComposerDiscard`] — the walk-back's arm for a build whose Back
+    /// raises an exit sheet on the edit step.
+    composer_discard: Option<LabelMatch>,
 }
 
 impl TikTokLabels {
@@ -714,6 +729,7 @@ impl TikTokLabels {
             TikTokControl::PostDeleteMenu => self.post_delete_menu,
             TikTokControl::PostDelete => self.post_delete,
             TikTokControl::PostDeleteConfirm => self.post_delete_confirm,
+            TikTokControl::ComposerDiscard => self.composer_discard,
             // Only for a build that renders it as text; the `@2131…` builds carry it in
             // the version table and are resolved before this is ever reached.
             TikTokControl::CommentSend => self.comment_send,
@@ -778,6 +794,22 @@ pub struct TikTokResourceLabels {
     /// there publishes a carousel whose description — the thing the operator wrote — is
     /// empty. The id or nothing, keyed to the build like every other id.
     composer_caption: Option<LabelMatch>,
+    /// The camera screen's shutter, for a build that renders it as an unresolved `@2131…`
+    /// reference instead of a readable string — `musically` 46.2.1 shows `@2131823287`
+    /// where `trill` shows `Record video`. An unresolved reference is reassigned on every
+    /// app rebuild, so it can only ever be named by its resource id, keyed to the exact
+    /// version, like `comment_send` before it. A build that renders the string keeps this
+    /// `None` and `label()` falls through to the language set.
+    composer_shutter: Option<LabelMatch>,
+    /// The camera screen's gallery/upload entry, for a build whose entry is **not beside
+    /// the shutter**. Deliberately not a [`TikTokControl`]: the entry is an unlabelled
+    /// square — no text, no `content-desc`, on any build measured so far — so a language
+    /// set could never carry it, and pretending otherwise invites the cross-build string
+    /// guess this catalogue exists to refuse. A build without an id here uses the measured
+    /// `beside_shutter` geometry (`tiktok_composer::GalleryEntry`), which is itself a
+    /// `trill`-measured fact: on `musically` the same arithmetic lands on the effects rail,
+    /// which is exactly why this field exists.
+    gallery_entry: Option<LabelMatch>,
 }
 
 impl TikTokResourceLabels {
@@ -786,6 +818,7 @@ impl TikTokResourceLabels {
             TikTokControl::CommentSend => self.comment_send,
             TikTokControl::PickerAlbumMenu => self.picker_album_menu,
             TikTokControl::ComposerCaption => self.composer_caption,
+            TikTokControl::ComposerShutter => self.composer_shutter,
             _ => None,
         }
     }
@@ -834,14 +867,42 @@ pub const TIKTOK_RESOURCE_SETS: &[TikTokResourceLabels] = &[
         // that one first: the caption would land in the title and the description would
         // publish empty. See the field's doc on this struct.
         composer_caption: Some(LabelMatch::ResourceId(":id/eej")),
+        composer_shutter: None,
+        gallery_entry: None,
     },
     TikTokResourceLabels {
         package: "com.zhiliaoapp.musically",
         app_version: "46.2.1",
-        measured_on: "SM-G950F ce0517152c898c6f0d, Android 9, 18/08/2026 (probe --measure-comment)",
+        measured_on: "SM-G950F ce0517152c898c6f0d, Android 9, 18/08/2026 (probe --measure-comment); \
+                      composer 31/08/2026 trên ce11171beb408a1501 (label_scout --tap Create, m1-composer dump)",
         comment_send: Some(LabelMatch::Exact("@2131823247")),
-        picker_album_menu: None,
-        composer_caption: None,
+        // The album pill's TEXT carrier: `TextView …:id/tv_title` reading `Recents` at
+        // [438,100][594,150] inside the pill Button (`:id/dvc`, same bounds row). The
+        // TextView and not the Button, because one plan field does two jobs — the tap
+        // (tap-inside lands on the clickable parent) and the read-back that confirms the
+        // album took — and only this node carries the name. Same dual role as trill's
+        // `:id/snr`. An UNOBFUSCATED id, unlike every other entry in this table: `tv_title`
+        // is a name the app could reuse on another screen, so its claim to uniqueness is
+        // per-screen and measured — exactly one node on the whole picker dump
+        // (31/08/2026, ce11171beb408a1501, target/picker-measuring.xml).
+        picker_album_menu: Some(LabelMatch::ResourceId(":id/tv_title")),
+        // `EditText …:id/gx_ [42,618][1038,986]`, placeholder `Writing a long description
+        // can help get 3x more views on average.` — measured 31/08/2026 on
+        // ce11171beb408a1501 via `composer_scout --visit-caption-step`
+        // (target/composer-caption.xml). The same two-`EditText` trap as trill 38.3.2:
+        // the TITLE field (`…:id/gxd`, `Add a catchy title`, [42,511][1038,564]) sits
+        // directly above, so a class locator resolves the title and the description
+        // publishes empty. The id or nothing, keyed to this build.
+        composer_caption: Some(LabelMatch::ResourceId(":id/gx_")),
+        // `FrameLayout …:id/szp [395,1591][684,1880]`, whose only text child renders the
+        // unresolved `@2131823287` — the string moves on every rebuild, the id is the
+        // control. Read off the opened composer, nothing tapped past `Create`.
+        composer_shutter: Some(LabelMatch::ResourceId(":id/szp")),
+        // `FrameLayout …:id/upload_hot_area [0,1891][179,2070]` — BOTTOM-LEFT. The
+        // `beside_shutter` arithmetic (measured on `trill`) computes x≈765 on this layout,
+        // which is the effects rail: tapping "the entry" there opens filters. This id is
+        // what makes the composer walk possible on this build at all.
+        gallery_entry: Some(LabelMatch::ResourceId(":id/upload_hot_area")),
     },
     TikTokResourceLabels {
         package: "com.zhiliaoapp.musically",
@@ -854,6 +915,8 @@ pub const TIKTOK_RESOURCE_SETS: &[TikTokResourceLabels] = &[
         comment_send: Some(LabelMatch::Exact("@2131823247")),
         picker_album_menu: None,
         composer_caption: None,
+        composer_shutter: None,
+        gallery_entry: None,
     },
     TikTokResourceLabels {
         package: "com.ss.android.ugc.trill",
@@ -864,6 +927,8 @@ pub const TIKTOK_RESOURCE_SETS: &[TikTokResourceLabels] = &[
         comment_send: Some(LabelMatch::Exact("@2131823284")),
         picker_album_menu: None,
         composer_caption: None,
+        composer_shutter: None,
+        gallery_entry: None,
     },
     TikTokResourceLabels {
         package: "com.ss.android.ugc.trill",
@@ -877,6 +942,8 @@ pub const TIKTOK_RESOURCE_SETS: &[TikTokResourceLabels] = &[
         comment_send: Some(LabelMatch::Exact("@2131823293")),
         picker_album_menu: None,
         composer_caption: None,
+        composer_shutter: None,
+        gallery_entry: None,
     },
 ];
 
@@ -940,6 +1007,7 @@ pub(crate) fn nothing_measured() -> TikTokControls {
         post_delete_menu: None,
         post_delete: None,
         post_delete_confirm: None,
+        composer_discard: None,
     };
     TikTokControls {
         translated: &NOTHING,
@@ -992,6 +1060,7 @@ static ALL: TikTokLabels = TikTokLabels {
     post_delete_menu: None,
     post_delete: None,
     post_delete_confirm: None,
+    composer_discard: None,
 };
 
 /// A set where every control the publish path needs **is** measured.
@@ -1021,10 +1090,36 @@ pub(crate) fn every_publish_control_measured() -> TikTokControls {
         comment_send: None,
         picker_album_menu: Some(LabelMatch::ResourceId("fixture-album-menu")),
         composer_caption: None,
+        composer_shutter: None,
+        gallery_entry: None,
     };
     TikTokControls {
         translated: &ALL,
         resources: Some(&ALL_RESOURCES),
+    }
+}
+
+/// The fully-measured fixture with a **gallery-entry id** in its resource row.
+///
+/// Exists for one test: proving the walk taps a measured entry id instead of the
+/// `beside_shutter` arithmetic when a build carries one — the `musically` layout, where
+/// the arithmetic computes the effects rail. Everything else matches
+/// [`every_publish_control_measured`].
+#[cfg(test)]
+pub(crate) fn every_publish_control_measured_with_gallery_id() -> TikTokControls {
+    static GALLERY_RESOURCES: TikTokResourceLabels = TikTokResourceLabels {
+        package: "com.example.fully-measured",
+        app_version: "0",
+        measured_on: "nothing — this set exists so the measured-entry path has a fixture",
+        comment_send: None,
+        picker_album_menu: Some(LabelMatch::ResourceId("fixture-album-menu")),
+        composer_caption: None,
+        composer_shutter: None,
+        gallery_entry: Some(LabelMatch::ResourceId("fixture-gallery-entry")),
+    };
+    TikTokControls {
+        translated: &ALL,
+        resources: Some(&GALLERY_RESOURCES),
     }
 }
 
@@ -1091,6 +1186,7 @@ pub(crate) fn every_publish_control_but_post_measured() -> TikTokControls {
         post_delete_menu: None,
         post_delete: None,
         post_delete_confirm: None,
+        composer_discard: None,
     };
     static NO_POST_RESOURCES: TikTokResourceLabels = TikTokResourceLabels {
         package: "com.example.no-post-button",
@@ -1099,6 +1195,8 @@ pub(crate) fn every_publish_control_but_post_measured() -> TikTokControls {
         comment_send: None,
         picker_album_menu: Some(LabelMatch::ResourceId("fixture-album-menu")),
         composer_caption: None,
+        composer_shutter: None,
+        gallery_entry: None,
     };
     TikTokControls {
         translated: &NO_POST,
@@ -1154,6 +1252,7 @@ pub(crate) fn every_publish_control_but_caption_measured() -> TikTokControls {
         post_delete_menu: None,
         post_delete: None,
         post_delete_confirm: None,
+        composer_discard: None,
     };
     static NO_CAPTION_RESOURCES: TikTokResourceLabels = TikTokResourceLabels {
         package: "com.example.no-caption-field",
@@ -1162,6 +1261,8 @@ pub(crate) fn every_publish_control_but_caption_measured() -> TikTokControls {
         comment_send: None,
         picker_album_menu: Some(LabelMatch::ResourceId("fixture-album-menu")),
         composer_caption: None,
+        composer_shutter: None,
+        gallery_entry: None,
     };
     TikTokControls {
         translated: &NO_CAPTION,
@@ -1203,6 +1304,14 @@ impl TikTokControls {
                 .resources
                 .and_then(|set| set.resource(control))
                 .or_else(|| self.translated.translated(control)),
+            // The shutter follows `CommentSend`'s shape for `CommentSend`'s reason: some
+            // builds render it (`trill`: `Record video`, in the language set), some leave
+            // the unresolved `@2131…` reference (`musically` 46.2.1) — and a reference is
+            // per-rebuild, so it lives in the version table or nowhere.
+            TikTokControl::ComposerShutter => self
+                .resources
+                .and_then(|set| set.resource(control))
+                .or_else(|| self.translated.translated(control)),
             other => self.translated.translated(other),
         }
     }
@@ -1224,6 +1333,17 @@ impl TikTokControls {
     /// version has never been measured.
     pub fn resource_version(&self) -> Option<&'static str> {
         self.resources.map(|set| set.app_version)
+    }
+
+    /// The gallery/upload entry's resource id, when this build has one measured.
+    ///
+    /// Not a [`TikTokControl`], deliberately — see the field's doc on
+    /// [`TikTokResourceLabels`]: the entry is an unlabelled square on every build measured
+    /// so far, so a language set could never carry it. `None` means the walk falls back to
+    /// the `trill`-measured `beside_shutter` geometry, which is correct there and lands on
+    /// the effects rail on `musically` — the asymmetry this accessor exists to close.
+    pub fn gallery_entry_id(&self) -> Option<LabelMatch> {
+        self.resources.and_then(|set| set.gallery_entry)
     }
 
     /// One line of provenance for a session log, naming what actually resolved.
@@ -1375,9 +1495,13 @@ pub const TIKTOK_LABEL_SETS: &[TikTokLabels] = &[
     TikTokLabels {
         package: "com.zhiliaoapp.musically",
         language: "en",
-        measured_on: "Galaxy S8+ fleet, 09/08/2026 (docs/ANDROID_PROBE_REPORT_2026-08-09.md)",
-        // Not recorded at the time; that is the gap `measured_app_version` closes.
-        measured_app_version: "",
+        measured_on: "Galaxy S8+ fleet, 09/08/2026 (docs/ANDROID_PROBE_REPORT_2026-08-09.md); \
+                      composer + picker + tail 31/08/2026 trên ce11171beb408a1501 (46.2.1)",
+        // The original 09/08 sweep did not record it; the composer measurements that
+        // completed this set (31/08/2026) all ran on 46.2.1, which is also what three of
+        // the four musically phones run — and what lets the publish sweep exercise this
+        // set against its own version-table row.
+        measured_app_version: "46.2.1",
         feed_tab: Some(LabelMatch::Exact("For You")),
         // Read off the bottom bar on an SM-G950F on 18/08/2026, on a phone parked on its
         // Profile tab — the same `Home` the SEA build shows, which is why it is written
@@ -1493,27 +1617,39 @@ pub const TIKTOK_LABEL_SETS: &[TikTokLabels] = &[
         // (`label_scout`, m1-feed dump), the same string the `trill` set carries and now
         // measured here rather than borrowed from there.
         composer_open: Some(LabelMatch::Exact("Create")),
-        // Deliberately `None`, and **not yet catalogueable anywhere**: this build renders the
-        // shutter as an unresolved resource reference (`@2131823287` on 46.2.1), which is
-        // reassigned on every rebuild — so it must not go in this language set, which serves
-        // every version of the package. The version table is where a per-build id belongs,
-        // and it has **no field for this control**: `TikTokResourceLabels` carries
-        // `comment_send`, `picker_album_menu` and `composer_caption`, and
-        // `TikTokControls::label` routes only those three to it — `ComposerShutter` falls
-        // through to the language set. Measuring the shutter therefore starts by adding the
-        // field and its routing arm; writing `@2131823287` here instead is the cross-build
-        // id leak the version table exists to prevent.
+        // Deliberately `None` **here**: this build renders the shutter as an unresolved
+        // resource reference (`@2131823287` on 46.2.1), reassigned on every rebuild — so it
+        // must not go in this language set, which serves every version of the package. It
+        // lives in [`TIKTOK_RESOURCE_SETS`] instead (`composer_shutter: ":id/szp"` on the
+        // 46.2.1 row), where `label()` now reads first — the field and routing this comment
+        // used to say were missing exist since 31/08/2026.
         composer_shutter: None,
-        // The S8+ fleet work never opened the composer on this build; 30/08/2026 did, and
-        // stopped at the gallery entry: `beside_shutter` geometry is measured on `trill`,
-        // while this build keeps its upload entry BOTTOM-LEFT (`…:id/upload_hot_area`,
-        // [0,1891][179,2070]) — right of the shutter is the effects rail. The picker labels
-        // below stay unmeasured until the walk can reach the picker on this layout.
+        // The picker itself was reached on 31/08/2026 (composer_scout --dump-picker on
+        // ce11171beb408a1501, target/picker-measuring.xml) — the gallery-entry id in the
+        // version table is what made the trip possible; `beside_shutter` geometry computes
+        // the effects rail on this layout. The pill is version-keyed (`:id/tv_title` on
+        // 46.2.1); the four rendered strings below came off that same dump.
         picker_album_menu: None,
-        picker_tab_all: None,
-        picker_tab_photos: None,
-        picker_multi_select: None,
-        picker_next: None,
+        // The tab strip reads All | Videos | Photos | AI gallery, each a clickable
+        // `FrameLayout` carrying its name in `content-desc` ("All" at [42,189][254,307],
+        // selected on arrival). Exact, because "All" is one tap away from being an album
+        // name too — the trill set's pill/tab collision, avoided the same way.
+        picker_tab_all: Some(LabelMatch::Exact("All")),
+        // `content-desc="Photos"`, clickable FrameLayout at [501,189][752,307], its inner
+        // TextView rendering the same word.
+        picker_tab_photos: Some(LabelMatch::Exact("Photos")),
+        // `TextView text="Select multiple"`, `…:id/ovz`, [111,1971][354,2018],
+        // `clickable=false` — the wrapper is the tappable, the same shape as trill's
+        // `:id/k6p`. Rendered text, so it lives here and serves every version.
+        picker_multi_select: Some(LabelMatch::Text("Select multiple")),
+        // `Button text="Next"`, `…:id/wwo`, [550,1936][1048,2052], `clickable=false` on
+        // arrival with nothing selected — the same presence-is-mode / clickable-is-armed
+        // pair measured on trill 38.3.2 (§9.135). NOTE the arrival state: this picker
+        // already carried `Next` and the per-cell checkbox overlays (`:id/i9w`/`:id/kir`)
+        // with "Select multiple" still rendered beside them — multi mode was ON before
+        // anything was tapped, so the walk's read-before-tap probe is what keeps the
+        // toggle untouched on this build.
+        picker_next: Some(LabelMatch::Text("Next")),
         // Measured 24/08/2026 on `ce11171beb408a1501` (musically, en) standing on
         // `.../@.lt.gi.mang.v/photo/7668947001618320660`: the rail reads
         // `Đà Lạt Gói Mang Về profile`, identical in shape to the `trill`/en build.
@@ -1521,16 +1657,34 @@ pub const TIKTOK_LABEL_SETS: &[TikTokLabels] = &[
         // Measured 24/08/2026: `Like video. 22 likes`. `Contains("likes")` is unique on the
         // rail — `Like` and `Video liked` do not contain it.
         like_count: Some(LabelMatch::Contains("likes")),
-        // Publish tail and the whole delete path: declared, not measured. `None` here is
-        // the refusal — the composer stops before opening and the delete driver is not
-        // offered at all, which is the only safe order for an action with no undo.
         profile_tab: None,
         composer_caption: None,
-        composer_next: None,
-        post_button: None,
+        // `TextView text="Next"`, `…:id/pdd`, [753,1985][840,2038], `clickable=false` —
+        // measured 31/08/2026 on ce11171beb408a1501, standing on the edit step through the
+        // full walk (composer_scout, target/composer-scout.xml). Same shape as trill's
+        // `:id/kl7`: the text child renders, the wrapper takes the tap. And the same trap
+        // beside it: **Your Story** (`:id/tv_quick_publish`, [238,1985][430,2038]) shares
+        // the bar — one tap there publishes a story, which is why this is Text-exact and
+        // located, never a fraction of the bar.
+        composer_next: Some(LabelMatch::Text("Next")),
+        // `Button text="Post"`, `…:id/sml`, [550,1936][1048,2062] — measured 31/08/2026 on
+        // ce11171beb408a1501 via `composer_scout --visit-caption-step`
+        // (target/composer-caption.xml), standing on the post screen with three Camera
+        // photos and nothing tapped there. `Text`, not `Exact`: this build renders the word
+        // and leaves `content-desc` empty, the opposite attribute choice from trill's
+        // measured `Exact("Post")` — which is exactly why each build is read rather than
+        // assumed. The left half of the bar is **Drafts** (`:id/g8j`), same split as trill.
+        post_button: Some(LabelMatch::Text("Post")),
         post_delete_menu: None,
         post_delete: None,
         post_delete_confirm: None,
+        // Back on this build's edit step raises Discard / Save draft / Send to friends
+        // instead of leaving — measured 31/08/2026 (`composer_scout --dump-exit-menu`,
+        // ce11171beb408a1501): TextView text `Discard` [121,259][476,312], no
+        // `content-desc`, `clickable=false` (the row wrapper takes the tap). The walk-back
+        // taps this row when it sees the sheet; `trill` 38.3.2 backs straight out and its
+        // sets keep the field `None`.
+        composer_discard: Some(LabelMatch::Text("Discard")),
     },
     // SEA build, Vietnamese UI. Read off a Redmi Note 12 (Android 15) on
     // 10/08/2026; see `docs/re/genfarmer/README.md` and AGENTS.md §9.
@@ -1627,6 +1781,7 @@ pub const TIKTOK_LABEL_SETS: &[TikTokLabels] = &[
         post_delete_menu: None,
         post_delete: None,
         post_delete_confirm: None,
+        composer_discard: None,
     },
     // SEA build, **English** UI. Sixteen of the eighteen phones on this fleet, and a pair
     // that had never been read — so every one of them refused to nurture with
@@ -1875,6 +2030,7 @@ pub const TIKTOK_LABEL_SETS: &[TikTokLabels] = &[
         post_delete_menu: None,
         post_delete: None,
         post_delete_confirm: None,
+        composer_discard: None,
     },
 ];
 
@@ -2321,10 +2477,29 @@ mod tests {
                 "{control:?} was measured in `text`, not `content-desc`"
             );
         }
-        // And they are absent on the build nobody has opened the composer on, so the
-        // publish path refuses there rather than tapping an iPhone's coordinates.
+        // The musically picker was read on 31/08/2026 (§9.135) and carries the SAME
+        // attribute split — tabs described, buttons in text — measured on its own dump
+        // rather than borrowed from the Redmi's.
         let english = controls_for("com.zhiliaoapp.musically", "en", "").expect("set");
-        assert_eq!(english.label(TikTokControl::PickerNext), None);
+        assert_eq!(
+            english.label(TikTokControl::PickerNext),
+            Some(LabelMatch::Text("Next"))
+        );
+        assert_eq!(
+            english
+                .label(TikTokControl::PickerTabPhotos)
+                .unwrap()
+                .attribute(),
+            LabelAttribute::Description,
+            "the tab strip is described on this build too"
+        );
+        assert_eq!(
+            english
+                .label(TikTokControl::PickerMultiSelect)
+                .unwrap()
+                .attribute(),
+            LabelAttribute::Text
+        );
     }
 
     #[test]
@@ -2459,15 +2634,19 @@ mod tests {
         // them is a device task. If a future edit fills one in without a measurement in
         // AGENTS.md, this test is what fails.
         //
-        // **One build has now made the trip.** `trill` 38.3.2 `en` was measured on
-        // 30/08/2026 (`composer_scout`, then `--visit-caption-step`; AGENTS.md §9.132):
-        // `ComposerNext` and `PostButton` in this language set, `ComposerCaption` in the
-        // version table — see `publish_tail_is_version_keyed_except_where_the_build_renders_it`
-        // below for what pins those three. Everything else here stays refused.
+        // **Two builds have now made the trip.** `trill` 38.3.2 `en` on 30/08/2026
+        // (AGENTS.md §9.132) and `musically` 46.2.1 `en` on 31/08/2026 (§9.135): each with
+        // `ComposerNext` and `PostButton` in its language set and `ComposerCaption` in its
+        // own version-table row — see
+        // `publish_tail_is_version_keyed_except_where_the_build_renders_it` for what pins
+        // those. The delete path stays refused everywhere.
+        let measured_trips = [
+            ("com.ss.android.ugc.trill", "en", "38.3.2"),
+            ("com.zhiliaoapp.musically", "en", "46.2.1"),
+        ];
         for set in TIKTOK_LABEL_SETS {
-            let measured_trip = set.package == "com.ss.android.ugc.trill"
-                && set.language == "en"
-                && set.measured_app_version == "38.3.2";
+            let measured_trip =
+                measured_trips.contains(&(set.package, set.language, set.measured_app_version));
             for control in [
                 TikTokControl::ComposerNext,
                 TikTokControl::ComposerCaption,
@@ -2493,7 +2672,10 @@ mod tests {
         }
         // And the version table stays empty of the tail everywhere the trip has not gone.
         for set in TIKTOK_RESOURCE_SETS {
-            if set.package == "com.ss.android.ugc.trill" && set.app_version == "38.3.2" {
+            if measured_trips
+                .iter()
+                .any(|(package, _, version)| *package == set.package && *version == set.app_version)
+            {
                 continue;
             }
             assert!(
@@ -2535,6 +2717,33 @@ mod tests {
         let unmeasured = controls_for("com.ss.android.ugc.trill", "en", "39.9.9")
             .expect("language set still serves");
         assert_eq!(unmeasured.label(TikTokControl::ComposerCaption), None);
+
+        // The second measured build (31/08/2026, §9.135), pinning the same split — and one
+        // attribute difference that is the whole argument for measuring: musically renders
+        // `Post` in `text` where trill carries it in `content-desc`.
+        let musically = controls_for("com.zhiliaoapp.musically", "en", "46.2.1")
+            .expect("the musically build is catalogued");
+        assert_eq!(
+            musically.label(TikTokControl::ComposerNext),
+            Some(LabelMatch::Text("Next"))
+        );
+        assert_eq!(
+            musically.label(TikTokControl::PostButton),
+            Some(LabelMatch::Text("Post")),
+            "Text, not Exact: this build leaves the button's content-desc empty"
+        );
+        assert_eq!(
+            musically.label(TikTokControl::ComposerCaption),
+            Some(LabelMatch::ResourceId(":id/gx_")),
+            "the title field (:id/gxd) sits above the description on this build too"
+        );
+        let musically_unmeasured = controls_for("com.zhiliaoapp.musically", "en", "46.2.42")
+            .expect("language set still serves");
+        assert_eq!(
+            musically_unmeasured.label(TikTokControl::ComposerCaption),
+            None,
+            "46.2.42's caption id was never read (phone B is behind a permission dialog)"
+        );
     }
 
     /// A set that can *recognise* the feed must also be able to *reach* it.

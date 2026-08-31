@@ -87,6 +87,12 @@ pub const COMPOSER_WINDOW: Duration = Duration::from_millis(8_000);
 /// media store, and a phone this project has just pushed a carousel onto has a store that
 /// was written to seconds ago.
 pub const PICKER_WINDOW: Duration = Duration::from_millis(10_000);
+/// How long the picker gets to grow its multi-mode tree after one toggle tap.
+///
+/// Measured 31/08 on the fleet's build: the `Next` node and the per-cell overlays are in
+/// the dump well under 1.5s after the tap. Shorter than `ARM_WINDOW` because nothing here
+/// waits on a *selection* — only on the tree changing shape.
+const ENGAGE_WINDOW: Duration = Duration::from_millis(2_000);
 /// How long `Next` may take to arm after the last cell is tapped.
 pub const ARM_WINDOW: Duration = Duration::from_millis(4_000);
 /// How long to wait for the feed to come back after Post is tapped.
@@ -238,10 +244,9 @@ impl ComposerVerdict {
             Self::MoreCellsThanTheGridShows => "số ảnh cần nhiều hơn số ô lưới hiện ra",
             Self::NeverArmed => "đã bấm các ô ảnh nhưng nút Tiếp không sáng — không ô nào ăn",
             Self::MultiSelectDidNotEngage => {
-                "bấm 'Chọn nhiều' không ăn — ô đầu tiên mở thẳng trình sửa đơn, nên không bấm \
-                 thêm ô nào vào màn hình lạ. Nguyên nhân đã đo: nút đó là công tắc HAI CHIỀU và \
-                 TikTok nhớ trạng thái giữa các lượt, nên một cú bấm mù sẽ TẮT chế độ nhiều ảnh \
-                 khi lượt trước đã bật nó — chạy lại lượt nữa là vào đúng"
+                "bấm 'Chọn nhiều' mà cây picker không mọc nút Tiếp của chế độ nhiều ảnh — \
+                 không bấm ô nào cả. (Công tắc hai-chiều-có-nhớ đã được đọc trước khi bấm, \
+                 nên đây không còn là ca lật nhầm trạng thái; màn hình này đáng được dump.)"
             }
             Self::NotEnoughSelected => "picker báo số ảnh đã chọn khác số ảnh bài này cần",
             Self::EditStepDidNotOpen => "bấm Tiếp mà bước chỉnh sửa không mở",
@@ -359,6 +364,17 @@ pub struct ComposerPlan {
     ///
     /// Navigation and publication are different questions; this answers the first.
     edit_step_marker: Option<ElementQuery<'static>>,
+    /// The gallery/upload entry's own locator, when this build has one measured.
+    ///
+    /// `None` falls back to [`GalleryEntry::beside_shutter`] — arithmetic measured on
+    /// `trill`, where the entry sits right of the shutter. On `musically` the entry is
+    /// BOTTOM-LEFT (`:id/upload_hot_area`) and the same arithmetic lands on the effects
+    /// rail, which is why a measured id wins over geometry whenever one exists.
+    gallery_entry: Option<ElementQuery<'static>>,
+    /// The exit sheet's Discard row, for a build whose Back raises one on the edit step —
+    /// see [`crate::tiktok_labels::TikTokControl::ComposerDiscard`]. `None` on a build
+    /// whose Back walks straight out; the walk-back never looks for it there.
+    discard: Option<ElementQuery<'static>>,
     /// The publishing tail, resolved **all or nothing**.
     ///
     /// One `Option` around three locators rather than three `Option`s, and the difference is
@@ -371,6 +387,12 @@ pub struct ComposerPlan {
     /// With one `Option` the partial state does not exist.
     publish: Option<PublishTail>,
 }
+
+/// A locator nothing renders, for plan slots whose control is exactly what a measuring
+/// trip has gone out to read. `:id/` keeps it on a resource-id boundary like every real id;
+/// the name keeps it greppable and impossible to mistake for a measurement.
+const NEVER_MEASURED: ElementQuery<'static> =
+    ElementQuery::ResourceIdSuffix(":id/riviu_never_measured");
 
 /// The three locators that turn a reachable edit step into a published post.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -401,6 +423,8 @@ impl ComposerPlan {
             multi_select: query(TikTokControl::PickerMultiSelect),
             picker_next: query(TikTokControl::PickerNext),
             edit_step_marker: optional(TikTokControl::ComposerNext),
+            gallery_entry: labels.gallery_entry_id().map(|label| label.to_query()),
+            discard: optional(TikTokControl::ComposerDiscard),
             publish: match (
                 optional(TikTokControl::ComposerNext),
                 optional(TikTokControl::ComposerCaption),
@@ -413,6 +437,55 @@ impl ComposerPlan {
                 }),
                 _ => None,
             },
+        })
+    }
+
+    /// A plan that can reach the **picker** and nothing beyond it — the measuring trip's
+    /// bootstrap for a build whose picker is exactly what has never been read.
+    ///
+    /// The chicken-and-egg this exists to break: [`Self::resolve`] refuses while the picker
+    /// labels are unmeasured, and the picker labels can only be measured by standing on the
+    /// picker. This constructor demands just the road TO it — `ComposerOpen`,
+    /// `ComposerShutter`, and a **measured gallery-entry id** (a geometry-only build already
+    /// has a full catalogue; a new layout without its id is precisely the build whose
+    /// arithmetic tap lands on the wrong control, so geometry is refused here).
+    ///
+    /// Every later-stage locator is filled with [`NEVER_MEASURED`], a query nothing renders:
+    /// a caller that wanders past the picker locates nothing and refuses, structurally.
+    /// `can_publish()` is `false` by construction. The one legitimate consumer is the
+    /// measuring tool's dump-the-picker stage.
+    pub fn resolve_for_picker_measuring(labels: &TikTokControls) -> Result<Self, ComposerUnready> {
+        let mut missing: Vec<TikTokControl> =
+            [TikTokControl::ComposerOpen, TikTokControl::ComposerShutter]
+                .into_iter()
+                .filter(|control| labels.label(*control).is_none())
+                .collect();
+        let gallery = labels.gallery_entry_id();
+        if gallery.is_none() {
+            // Named by the nearest control the refusal is really about: there is no
+            // catalogue slot for "gallery entry" in the control enum, deliberately.
+            missing.push(TikTokControl::ComposerShutter);
+            missing.dedup();
+            return Err(ComposerUnready { missing });
+        }
+        if !missing.is_empty() {
+            return Err(ComposerUnready { missing });
+        }
+        let query =
+            |control: TikTokControl| labels.label(control).expect("checked above").to_query();
+        Ok(Self {
+            open: query(TikTokControl::ComposerOpen),
+            shutter: query(TikTokControl::ComposerShutter),
+            album_menu: NEVER_MEASURED,
+            tabs: NEVER_MEASURED,
+            multi_select: NEVER_MEASURED,
+            picker_next: NEVER_MEASURED,
+            edit_step_marker: None,
+            gallery_entry: gallery.map(|label| label.to_query()),
+            discard: labels
+                .label(TikTokControl::ComposerDiscard)
+                .map(|label| label.to_query()),
+            publish: None,
         })
     }
 
@@ -737,6 +810,18 @@ pub fn human_taps(screen: Screen) -> impl TapPlanner {
 /// `advance_to_edit_step` took a caller-supplied rectangle and tapped it before checking where
 /// it led, so handing it the Post button published too. Both made the claim on
 /// [`Composer::post`] that it is the only function here that can publish simply false.
+/// What [`Composer::enable_multi_select`] found and did with the remembered two-way toggle.
+enum MultiSelectMode {
+    /// The tree already carried the multi-mode nodes — the toggle was not touched.
+    AlreadyOn,
+    /// One tap, and the tree grew them inside the window.
+    TurnedOn,
+    /// The `Select multiple` control was not on the picker at all.
+    NoToggle,
+    /// Tapped, and the multi-mode nodes never appeared.
+    DidNotEngage,
+}
+
 pub struct Composer<'a, P: TapPlanner> {
     session: &'a dyn UiSession,
     plan: ComposerPlan,
@@ -785,6 +870,14 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
     /// Two steps in one call because they are one decision: without the anchor there is no
     /// entry to tap, and the alternative — remembered coordinates — is what puts a tap on the
     /// effects panel.
+    ///
+    /// # A measured id beats measured arithmetic
+    ///
+    /// The `beside_shutter` fallback is a `trill` fact: on that layout the entry sits right
+    /// of the shutter. On `musically` the entry is bottom-left (`:id/upload_hot_area`) and
+    /// the same arithmetic computes the effects rail — so a build that has its entry's id
+    /// in the version table is tapped by the id, and the shutter is still awaited first
+    /// either way: it is the proof the camera screen is up at all, id or no id.
     async fn tap_gallery_entry(
         &mut self,
         screen: Screen,
@@ -796,6 +889,16 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
         else {
             return Ok(false);
         };
+        if let Some(entry_query) = self.plan.gallery_entry {
+            let Some(entry) = self
+                .await_condition(COMPOSER_WINDOW, entry_query, stop, |_| true)
+                .await?
+            else {
+                return Ok(false);
+            };
+            self.tap_inside(&entry).await?;
+            return Ok(true);
+        }
         let Some(entry) = GalleryEntry::beside_shutter(screen, &shutter) else {
             return Ok(false);
         };
@@ -907,8 +1010,50 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
         }
     }
 
-    /// Turn on multi-selection, which a carousel needs.
-    async fn enable_multi_select(&mut self, stop: &AtomicBool) -> anyhow::Result<bool> {
+    /// Make sure multi-selection is ON — **reading before tapping, because the tap is a
+    /// flip, not a press.**
+    ///
+    /// Measured 31/08 (two peek trips, both directions, `ce051715ac247a3f01`): the toggle's
+    /// own node is byte-identical in both states — same text, `selected`/`checked` never
+    /// flip — so the button itself cannot be read. What flips is the **tree**: in multi
+    /// mode the picker's `Next` (`plan.picker_next`, already measured — it is the armed
+    /// signal's carrier) exists with `clickable=false` and every visible cell carries a
+    /// checkbox overlay; in single mode all of them are absent. And TikTok **remembers the
+    /// state between visits**: twelve consecutive walks alternated S,F,S,F without one
+    /// miss, because every "turn it on" tap was turning it off.
+    ///
+    /// So: `Next` present ⇒ already on, and the toggle must not be touched; absent ⇒ one
+    /// tap, then the tree has to grow the multi-mode nodes inside [`ENGAGE_WINDOW`].
+    /// Presence is the *mode* signal; `clickable` stays the *armed* signal — two different
+    /// facts read off the same node. The pre-probe is a single read (`Duration::ZERO`
+    /// window): the walk is standing still on a settled picker, and the failure cost of a
+    /// misread is one refused, retryable walk — never a wrong tap on cells.
+    async fn enable_multi_select(&mut self, stop: &AtomicBool) -> anyhow::Result<MultiSelectMode> {
+        if self
+            .await_condition(Duration::ZERO, self.plan.picker_next, stop, |_| true)
+            .await?
+            .is_some()
+        {
+            return Ok(MultiSelectMode::AlreadyOn);
+        }
+        if !self.tap_multi_select_once(stop).await? {
+            return Ok(MultiSelectMode::NoToggle);
+        }
+        if self
+            .await_condition(ENGAGE_WINDOW, self.plan.picker_next, stop, |_| true)
+            .await?
+            .is_some()
+        {
+            Ok(MultiSelectMode::TurnedOn)
+        } else {
+            Ok(MultiSelectMode::DidNotEngage)
+        }
+    }
+
+    /// Exactly one production tap on `Select multiple` — the tap `drive` makes, exposed for
+    /// the instrument measuring the toggle's two states (see [`reach_picker`]). `false`
+    /// means the control is not on screen; nothing was tapped.
+    pub async fn tap_multi_select_once(&mut self, stop: &AtomicBool) -> anyhow::Result<bool> {
         let Some(control) = self
             .await_condition(PICKER_WINDOW, self.plan.multi_select, stop, |_| true)
             .await?
@@ -1277,6 +1422,20 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
             {
                 return true;
             }
+            // **The exit sheet, on the build whose Back raises one.** Measured 31/08 on
+            // `musically` 46.2.1: Back on the edit step opens Discard / Save draft / Send
+            // to friends instead of leaving, so eight Backs bounced off the sheet and every
+            // walk on that build ended stranded inside it. When the plan carries the
+            // measured Discard row and it is on screen, tapping it IS this round's step
+            // back — it abandons a never-posted draft, nothing else. Centre-tapped, not
+            // planner-tapped: the walk-back is recovery, and jitter belongs to the walk.
+            if let Some(discard) = self.plan.discard {
+                if let Ok(Some(row)) = self.session.locate(discard).await {
+                    let _ = self.session.tap(row.centre()).await;
+                    tokio::time::sleep(POLL).await;
+                    continue;
+                }
+            }
             // A failed Back costs an attempt, not the attempt: one dropped request used to
             // end this loop and leave the composer open.
             let _ = self.session.back().await;
@@ -1460,17 +1619,44 @@ pub async fn reach_edit_step<P: TapPlanner>(
     drive(composer, request, stop, false).await
 }
 
-/// The steps that need an open composer, split out so both entry points close it on every
-/// exit without repeating the call at each early return.
+/// Open the composer and enter the gallery — the two taps that stand a phone on its
+/// picker — and stop there, for the trip that reads the picker's own labels.
 ///
-/// `publish` decides whether the last two steps happen at all. A parameter rather than two
-/// copies of the walk, because the walk is where the verification lives and two copies would
-/// drift — the measuring path would quietly lose a check the publishing path has.
-async fn drive<P: TapPlanner>(
+/// Exists for [`ComposerPlan::resolve_for_picker_measuring`]'s one consumer: a build whose
+/// picker is uncatalogued cannot run [`reach_picker`] (its album step needs the pill this
+/// trip is out to measure), and `await_picker`'s proof control is unmeasured too — so the
+/// arrival proof here is the caller's dump, read by a person. Same leave contract as every
+/// measuring entry point: the caller owns [`Composer::leave`] on every path.
+pub async fn enter_picker_for_measuring<P: TapPlanner>(
+    composer: &mut Composer<'_, P>,
+    screen: Screen,
+    stop: &AtomicBool,
+) -> anyhow::Result<ComposerVerdict> {
+    if !composer.open(stop).await? {
+        return Ok(ComposerVerdict::ComposerDidNotOpen);
+    }
+    if !composer.tap_gallery_entry(screen, stop).await? {
+        return Ok(ComposerVerdict::NoShutterToAnchorTo);
+    }
+    Ok(ComposerVerdict::Stopped)
+}
+
+/// The walk's first half, stopped **on the picker with the album chosen — before anything
+/// touches `Select multiple`.**
+///
+/// This is `drive`'s own opening (it calls this, so there is one copy of the walk, not a
+/// measuring copy that drifts), exposed for the instrument measuring the toggle's two
+/// states. The 31/08 twelve-run alternation proved that toggle is a remembered two-way
+/// switch — S,F,S,F without one miss — and the fix needs to know how the picker *looks* in
+/// each state before any read-before-tap can be written. That look is exactly what this
+/// stop exists to dump.
+///
+/// `Stopped` means standing on the picker; every other verdict is the refusal it names.
+/// Same contract as [`reach_edit_step`]: the caller owns [`Composer::leave`], on every path.
+pub async fn reach_picker<P: TapPlanner>(
     composer: &mut Composer<'_, P>,
     request: &CarouselRequest<'_>,
     stop: &AtomicBool,
-    publish: bool,
 ) -> anyhow::Result<ComposerVerdict> {
     if !composer.open(stop).await? {
         return Ok(ComposerVerdict::ComposerDidNotOpen);
@@ -1486,8 +1672,31 @@ async fn drive<P: TapPlanner>(
         AlbumChoice::NotFound => return Ok(ComposerVerdict::AlbumNotFound),
         AlbumChoice::NotConfirmed => return Ok(ComposerVerdict::AlbumNotConfirmed),
     }
-    if !composer.enable_multi_select(stop).await? {
-        return Ok(ComposerVerdict::PickerDidNotOpen);
+    Ok(ComposerVerdict::Stopped)
+}
+
+/// The steps that need an open composer, split out so both entry points close it on every
+/// exit without repeating the call at each early return.
+///
+/// `publish` decides whether the last two steps happen at all. A parameter rather than two
+/// copies of the walk, because the walk is where the verification lives and two copies would
+/// drift — the measuring path would quietly lose a check the publishing path has.
+async fn drive<P: TapPlanner>(
+    composer: &mut Composer<'_, P>,
+    request: &CarouselRequest<'_>,
+    stop: &AtomicBool,
+    publish: bool,
+) -> anyhow::Result<ComposerVerdict> {
+    match reach_picker(composer, request, stop).await? {
+        ComposerVerdict::Stopped => {}
+        refusal => return Ok(refusal),
+    }
+    match composer.enable_multi_select(stop).await? {
+        MultiSelectMode::AlreadyOn | MultiSelectMode::TurnedOn => {}
+        MultiSelectMode::NoToggle => return Ok(ComposerVerdict::PickerDidNotOpen),
+        // Refused BEFORE any cell is touched — the old shape found this out one tap later,
+        // standing in the single-photo editor.
+        MultiSelectMode::DidNotEngage => return Ok(ComposerVerdict::MultiSelectDidNotEngage),
     }
     // Built after the album is chosen, because that is when the grid this taps exists.
     let Some(grid) = composer.grid(request.screen, stop).await? else {
@@ -1549,8 +1758,8 @@ mod tests {
     use crate::driver::ElementBox;
     use crate::tiktok_labels::{
         controls_for, every_publish_control_but_caption_measured,
-        every_publish_control_but_post_measured, every_publish_control_measured, nothing_measured,
-        TIKTOK_LABEL_SETS,
+        every_publish_control_but_post_measured, every_publish_control_measured,
+        every_publish_control_measured_with_gallery_id, nothing_measured, TIKTOK_LABEL_SETS,
     };
     use crate::types::TapPoint;
     use parking_lot::Mutex;
@@ -1668,6 +1877,14 @@ mod tests {
         // exists to avoid — a fake where any tap navigates cannot see it.
         scene(vec![("fixture-shutter", shutter)], None).leaving_by(entry)
     }
+    /// The picker in **single mode — which is what `Next`'s absence means.**
+    ///
+    /// Measured 31/08 (peek trips, both directions): the multi-mode `Next` node and the
+    /// per-cell overlays exist only while multi-selection is on; the toggle's own node is
+    /// byte-identical in both states. The first version of this fixture carried a
+    /// `picker-next` (clickable, even) on every picker scene — a fake modelling the test's
+    /// expectation, and exactly the shape that let twelve real walks alternate S,F,S,F
+    /// while the suite stayed green.
     fn picker_elements() -> Vec<(&'static str, ElementBox)> {
         vec![
             ("fixture-multi-select", box_at(126.0, 1937.0)),
@@ -1684,18 +1901,30 @@ mod tests {
                     ..labelled("", 483.0, 115.0, 60.0, 57.0)
                 },
             ),
-            (
-                "fixture-picker-next",
-                ElementBox {
-                    clickable: true,
-                    ..box_at(552.0, 1896.0)
-                },
-            ),
         ]
     }
     /// The picker, with the album its pill currently names and the control that leaves it.
     fn picker(album: &str, exit: Option<&str>) -> Scene {
         scene(picker_elements(), exit).texted("fixture-album-menu", album)
+    }
+    /// The picker with multi-selection ON: the tree carries `Next`, `clickable` saying
+    /// whether anything is selected yet — presence is the mode signal, `clickable` the
+    /// armed signal, exactly as measured.
+    fn picker_on(album: &str, exit: Option<&str>, armed: bool) -> Scene {
+        let mut elements = picker_elements();
+        elements.push((
+            "fixture-picker-next",
+            ElementBox {
+                clickable: armed,
+                ..box_at(552.0, 1896.0)
+            },
+        ));
+        scene(elements, exit).texted("fixture-album-menu", album)
+    }
+    /// Where the grid's cells land on this screen: below the tab row, above the bottom bar.
+    /// A tap inside is a cell tap; the toggle (y≈1937) and `Next` (y≈1896) are outside.
+    fn grid_area() -> ElementBox {
+        labelled("", 0.0, 285.0, 1080.0, 1400.0)
     }
     fn edit_step() -> Scene {
         scene(
@@ -1778,7 +2007,9 @@ mod tests {
             Self::with(vec![
                 feed(),
                 camera(),
-                // Opening the album menu.
+                // Opening the album menu. The picker arrives in single mode — `Next`
+                // absent — which is what a fresh phone shows and what the pre-tap probe
+                // must read as "off".
                 picker("All", Some("fixture-album-menu")),
                 // The menu is open. Only a tap **on the matching row** leaves it — an
                 // `exit: None` that accepted any tap could not tell choosing the album from
@@ -1786,8 +2017,13 @@ mod tests {
                 picker("All", None).leaving_by(box_at(0.0, 400.0)),
                 // The album took: the pill now names it. Multi-select is what leaves.
                 picker(album, Some("fixture-multi-select")),
-                // Where the grid taps land, and none of them navigates.
-                picker(album, Some("fixture-picker-next")),
+                // The toggle took: the tree now carries `Next`, not yet armed. The first
+                // cell tap is what leaves this screen — the phone arms on the first
+                // selection, and the fixture models that as this transition.
+                picker_on(album, None, false).leaving_by(grid_area()),
+                // Armed: `Next` is clickable; the remaining cell taps land here without
+                // navigating, and `Next` itself is the exit.
+                picker_on(album, Some("fixture-picker-next"), true),
                 edit_step(),
                 post_screen(),
                 feed(),
@@ -1969,17 +2205,17 @@ mod tests {
 
     // ------------------------------------------------------------------ readiness
 
-    /// **Exactly one shipped build can publish, and it is the one that made the trip.**
+    /// **Only the builds that made their own trips can publish, and the list is exact.**
     ///
     /// The single most important assertion in this module, in both directions. Until
-    /// 30/08/2026 it said *no* build publishes, because `ComposerNext`, `ComposerCaption`
-    /// and `PostButton` had never been read off a phone. Two `composer_scout` trips on
-    /// `trill` 38.3.2 `en` closed that (AGENTS.md §9.132) — and only there: every other
-    /// catalogued set, and the same set on a version whose caption id nobody read, still
-    /// refuses before the first tap. A second build showing up publishable here without its
-    /// own trip is a copied id, which is exactly what this table exists to forbid.
+    /// 30/08/2026 it said *no* build publishes; `trill` 38.3.2 `en`'s two `composer_scout`
+    /// trips closed that (AGENTS.md §9.132), and `musically` 46.2.1 `en` made its own on
+    /// 31/08/2026 (§9.135) — the gallery-entry id was the unlock. Every other catalogued
+    /// set, and either package on a version whose caption id nobody read, still refuses
+    /// before the first tap. A build showing up publishable here without its own trip is a
+    /// copied id, which is exactly what this table exists to forbid.
     #[test]
-    fn exactly_one_catalogued_build_can_publish_and_the_rest_still_refuse() {
+    fn only_builds_with_their_own_trips_can_publish_and_the_rest_still_refuse() {
         let mut checked = 0;
         let mut publishable = Vec::new();
         for set in TIKTOK_LABEL_SETS {
@@ -2007,10 +2243,14 @@ mod tests {
                 checked += 1;
             }
         }
+        // In catalogue order: the musically set is declared before trill's.
         assert_eq!(
             publishable,
-            vec![r#"com.ss.android.ugc.trill / en (app "38.3.2")"#.to_string()],
-            "the measured trip covers exactly this build; anything else publishing here \
+            vec![
+                r#"com.zhiliaoapp.musically / en (app "46.2.1")"#.to_string(),
+                r#"com.ss.android.ugc.trill / en (app "38.3.2")"#.to_string(),
+            ],
+            "the measured trips cover exactly these builds; anything else publishing here \
              claims a measurement AGENTS.md does not record"
         );
         assert!(
@@ -2182,30 +2422,30 @@ mod tests {
 
         // Scenes keyed by what the **catalogue** says, not by fixture strings — and carrying
         // the album name in `text`, because that is where the measured picker puts it and
-        // nothing in it has a `content-desc` at all.
-        let picker_real = |album: &str, exit: Option<&str>| {
-            scene(
-                vec![
-                    ("Select multiple", box_at(126.0, 1937.0)),
-                    ("Photos", labelled("Photos", 824.0, 255.0, 152.0, 57.0)),
-                    (
-                        ":id/snr",
-                        ElementBox {
-                            description: None,
-                            ..labelled("", 483.0, 115.0, 60.0, 57.0)
-                        },
-                    ),
-                    (
-                        "Next",
-                        ElementBox {
-                            clickable: true,
-                            ..box_at(552.0, 1896.0)
-                        },
-                    ),
-                ],
-                exit,
-            )
-            .texted(":id/snr", album)
+        // nothing in it has a `content-desc` at all. `next` follows the 31/08 measurement:
+        // `None` is single mode (the node does not exist), `Some(armed)` is multi mode.
+        let picker_real = |album: &str, exit: Option<&str>, next: Option<bool>| {
+            let mut elements = vec![
+                ("Select multiple", box_at(126.0, 1937.0)),
+                ("Photos", labelled("Photos", 824.0, 255.0, 152.0, 57.0)),
+                (
+                    ":id/snr",
+                    ElementBox {
+                        description: None,
+                        ..labelled("", 483.0, 115.0, 60.0, 57.0)
+                    },
+                ),
+            ];
+            if let Some(armed) = next {
+                elements.push((
+                    "Next",
+                    ElementBox {
+                        clickable: armed,
+                        ..box_at(552.0, 1896.0)
+                    },
+                ));
+            }
+            scene(elements, exit).texted(":id/snr", album)
         };
         let shutter = labelled("Record video", 375.0, 1545.0, 330.0, 330.0);
         let entry = GalleryEntry::beside_shutter(screen(), &shutter)
@@ -2218,10 +2458,12 @@ mod tests {
             ),
             // Only a tap inside the gallery entry leaves the camera.
             scene(vec![("Record video", shutter)], None).leaving_by(entry),
-            picker_real("All", Some(":id/snr")),
-            picker_real("All", None).leaving_by(box_at(0.0, 400.0)),
-            picker_real("riviu-abc", Some("Select multiple")),
-            picker_real("riviu-abc", Some("Next")),
+            picker_real("All", Some(":id/snr"), None),
+            picker_real("All", None, None).leaving_by(box_at(0.0, 400.0)),
+            picker_real("riviu-abc", Some("Select multiple"), None),
+            // The toggle took: multi mode's `Next` exists, unarmed; the first cell arms it.
+            picker_real("riviu-abc", None, Some(false)).leaving_by(grid_area()),
+            picker_real("riviu-abc", Some("Next"), Some(true)),
             // The edit step, carrying exactly what the measured screen carries: its own
             // `Next` (`:id/kl7`, whose only text child reads `Next` — measured 30/08/2026).
             // With `composer_next` in the catalogue, `advance_to_edit_step` proves arrival
@@ -2257,7 +2499,7 @@ mod tests {
         );
         assert_eq!(
             session.on_screen(),
-            6,
+            7,
             "the phone did not end on the edit step"
         );
     }
@@ -2551,16 +2793,16 @@ mod tests {
         );
     }
 
-    /// **The first cell is its own proof, and its failure stops the walk before more taps.**
+    /// **A toggle that did not take is refused before ANY cell is touched.**
     ///
-    /// The fixture is the failure §9.132 measured on a real phone, two of four walks: the
-    /// `Select multiple` tap does not take (the picker stays), and the first cell tap then
-    /// leaves for the single-photo **editor** — a screen that also renders a `Next`, on a
-    /// node that is not clickable, exactly like the real `id/kl_`. The old shape tapped the
-    /// remaining cells blind onto that editor and reported `NeverArmed` only at the end;
-    /// this pins that exactly one grid tap is sent and the verdict names the toggle.
+    /// The fixture is the failure §9.132 measured on a real phone: the `Select multiple`
+    /// tap lands and the tree never grows multi mode's `Next`. The first version of this
+    /// walk found that out one tap later, standing in the single-photo editor; the second
+    /// spent exactly one cell proving it. Since the 31/08 peek measurement (`Next`'s
+    /// presence IS the mode), the refusal needs no cell at all: tap the toggle, demand the
+    /// tree change, and stop where the phone still is — on the picker, worth dumping.
     #[tokio::test(start_paused = true)]
-    async fn a_toggle_that_did_not_take_stops_after_the_first_cell() {
+    async fn a_toggle_that_did_not_take_refuses_before_any_cell() {
         // Everything below the tab row navigates (the grid); the toggle at y=1937 does not.
         let grid_region = ElementBox {
             description: None,
@@ -2571,6 +2813,8 @@ mod tests {
             width: 1080.0,
             height: 1500.0,
         };
+        // Still in the chain ON PURPOSE: if any cell tap goes out it lands in the grid
+        // region, the fake advances here, and the on-screen assertion below turns red.
         let single_editor = scene(
             vec![
                 (
@@ -2589,8 +2833,8 @@ mod tests {
             camera(),
             picker("All", Some("fixture-album-menu")),
             picker("All", None).leaving_by(box_at(0.0, 400.0)),
-            // The toggle tap lands and does nothing: this scene leaves only through the
-            // grid region, which is what the first cell tap does — into the editor.
+            // The toggle tap lands and does nothing: no scene change, and — because this
+            // is a `picker`, not a `picker_on` — the tree never grows `Next`.
             picker("riviu-abc", None).leaving_by(grid_region),
             single_editor,
         ])
@@ -2609,15 +2853,156 @@ mod tests {
                 .expect("no transport error"),
             ComposerVerdict::MultiSelectDidNotEngage
         );
-        // Counted as the whole journey, because a geometric filter also catches the album
-        // row and the gallery entry: Create, the entry, the album menu, the album row, the
-        // toggle, and exactly ONE cell — six. The old shape sent eight: two more "cells"
-        // straight into the editor.
+        // The whole journey: Create, the gallery entry, the album menu, the album row, the
+        // toggle — five, and NOT ONE cell. The previous shapes sent six (one proving cell)
+        // and eight (three cells blind into the editor).
         assert_eq!(
             session.taps.lock().len(),
-            6,
-            "exactly one cell tap may be spent proving the toggle; the rest were landing on \
-             an editor before this verdict existed"
+            5,
+            "no cell tap may be spent on a picker whose toggle did not take"
+        );
+        assert_eq!(
+            session.on_screen(),
+            4,
+            "the refusal must leave the phone standing on the picker it can dump"
+        );
+    }
+
+    /// **A measured entry id beats the measured arithmetic.**
+    ///
+    /// `beside_shutter` is a `trill` fact: right of the shutter. On `musically` the upload
+    /// entry is BOTTOM-LEFT (`:id/upload_hot_area`) and the same arithmetic lands on the
+    /// effects rail — measured 31/08, and the reason the whole musically family could not
+    /// be walked. The camera scene here leaves ONLY through the measured entry's own box:
+    /// a walk still tapping the arithmetic point never reaches the picker.
+    #[tokio::test(start_paused = true)]
+    async fn a_measured_gallery_entry_id_wins_over_beside_shutter_geometry() {
+        let labels = every_publish_control_measured_with_gallery_id();
+        let plan = ComposerPlan::resolve(&labels).expect("the fixture is complete");
+        let shutter = labelled("Record video", 375.0, 1545.0, 330.0, 330.0);
+        // Bottom-left, far from where `beside_shutter` computes (x≈765): the musically
+        // layout, scaled onto the fixture screen.
+        let entry_box = labelled("", 0.0, 1891.0, 179.0, 179.0);
+        let camera_with_id_entry = scene(
+            vec![
+                ("fixture-shutter", shutter),
+                ("fixture-gallery-entry", entry_box.clone()),
+            ],
+            None,
+        )
+        .leaving_by(entry_box);
+        let session = FakeSession::with(vec![
+            feed(),
+            camera_with_id_entry,
+            picker("All", Some("fixture-album-menu")),
+            picker("All", None).leaving_by(box_at(0.0, 400.0)),
+            picker("riviu-abc", Some("fixture-multi-select")),
+            picker_on("riviu-abc", None, false).leaving_by(grid_area()),
+            picker_on("riviu-abc", Some("fixture-picker-next"), true),
+            edit_step(),
+        ])
+        .rows("riviu-abc", vec![box_at(0.0, 400.0)]);
+        let request = CarouselRequest {
+            album: "riviu-abc",
+            images: 3,
+            caption: "",
+            screen: screen(),
+        };
+        let stop = AtomicBool::new(false);
+        let mut composer = Composer::new(&session, plan, |element: &ElementBox| element.centre());
+        assert_eq!(
+            reach_edit_step(&mut composer, &request, &stop)
+                .await
+                .expect("no transport error"),
+            ComposerVerdict::Stopped,
+            "the measured id is the only thing that opens this layout's picker"
+        );
+    }
+
+    /// **A Back that opens the exit sheet is answered with Discard, not with more Backs.**
+    ///
+    /// Measured 31/08 on `musically` 46.2.1: Back on the edit step raises
+    /// Discard / Save draft / Send to friends, and eight blind Backs bounced off it — every
+    /// walk on that build ended stranded inside the sheet. The plan resolved here is the
+    /// REAL musically catalogue, so this also pins that the catalogue carries the row.
+    #[tokio::test(start_paused = true)]
+    async fn a_back_that_opens_the_exit_sheet_is_answered_with_discard() {
+        let controls = controls_for("com.zhiliaoapp.musically", "en", "46.2.1")
+            .expect("the musically build is catalogued");
+        let plan = ComposerPlan::resolve(&controls).expect("its composer walk is measured");
+        let session = FakeSession::with(vec![
+            // The sheet is up (Back already happened); the composer opener is nowhere.
+            scene(
+                vec![("Discard", labelled("", 121.0, 259.0, 355.0, 53.0))],
+                Some("Discard"),
+            )
+            .texted("Discard", "Discard"),
+            // Tapping Discard lands back where the opener is visible again.
+            scene(
+                vec![("Create", labelled("Create", 432.0, 1929.0, 216.0, 147.0))],
+                None,
+            ),
+        ]);
+        let composer = Composer::new(&session, plan, |element: &ElementBox| element.centre());
+        assert!(
+            composer.leave().await,
+            "the walk-back must get out through the measured Discard row"
+        );
+        assert_eq!(
+            *session.backs.lock(),
+            0,
+            "a visible Discard is this round's step back — Back on the sheet just bounces"
+        );
+        assert_eq!(session.taps.lock().len(), 1, "one tap: the Discard row");
+    }
+
+    /// **An already-engaged picker is read, not toggled — the tap is a FLIP.**
+    ///
+    /// Twelve consecutive real walks alternated S,F,S,F because TikTok remembers the
+    /// toggle between visits and every blind "turn it on" tap was turning it off. Here the
+    /// walk arrives with multi mode already on (`Next` in the tree, unarmed) and must
+    /// proceed straight to the cells: zero taps on the toggle. Reverting to the blind tap
+    /// sends one extra tap and turns the mode off — both assertions catch it.
+    #[tokio::test(start_paused = true)]
+    async fn an_already_engaged_picker_is_not_toggled_again() {
+        let session = FakeSession::with(vec![
+            feed(),
+            camera(),
+            picker_on("All", Some("fixture-album-menu"), false),
+            picker_on("All", None, false).leaving_by(box_at(0.0, 400.0)),
+            // Arrived engaged: `Next` already in the tree. The first cell tap is what
+            // leaves — the toggle must never be touched.
+            picker_on("riviu-abc", None, false).leaving_by(grid_area()),
+            picker_on("riviu-abc", Some("fixture-picker-next"), true),
+            edit_step(),
+        ])
+        .rows("riviu-abc", vec![box_at(0.0, 400.0)]);
+        let request = CarouselRequest {
+            album: "riviu-abc",
+            images: 3,
+            caption: "",
+            screen: screen(),
+        };
+        let stop = AtomicBool::new(false);
+        let mut composer = Composer::new(&session, plan(), |element: &ElementBox| element.centre());
+        assert_eq!(
+            reach_edit_step(&mut composer, &request, &stop)
+                .await
+                .expect("no transport error"),
+            ComposerVerdict::Stopped,
+            "an engaged picker walks straight through"
+        );
+        let toggle = box_at(126.0, 1937.0);
+        let hit_toggle = |tap: &TapPoint| {
+            tap.x >= toggle.x
+                && tap.x <= toggle.x + toggle.width
+                && tap.y >= toggle.y
+                && tap.y <= toggle.y + toggle.height
+        };
+        assert!(
+            !session.taps.lock().iter().any(hit_toggle),
+            "the toggle was tapped on a picker that was already engaged — that tap TURNS \
+             MULTI MODE OFF"
         );
     }
 
@@ -2992,7 +3377,8 @@ mod tests {
             picker("All", Some("fixture-album-menu")),
             picker("All", None).leaving_by(box_at(0.0, 400.0)),
             picker("riviu-abc", Some("fixture-multi-select")),
-            picker("riviu-abc", Some("fixture-picker-next"))
+            picker_on("riviu-abc", None, false).leaving_by(grid_area()),
+            picker_on("riviu-abc", Some("fixture-picker-next"), true)
                 .texted("fixture-picker-next", "Next (2)"),
             edit_step(),
             post_screen(),
@@ -3083,7 +3469,8 @@ mod tests {
             picker("All", Some("fixture-album-menu")),
             picker("All", None).leaving_by(box_at(0.0, 400.0)),
             picker("riviu-abc", Some("fixture-multi-select")),
-            picker("riviu-abc", Some("fixture-picker-next")),
+            picker_on("riviu-abc", None, false).leaving_by(grid_area()),
+            picker_on("riviu-abc", Some("fixture-picker-next"), true),
             edit_step(),
             post_screen(),
             // Whatever is up after Post is not the feed.
