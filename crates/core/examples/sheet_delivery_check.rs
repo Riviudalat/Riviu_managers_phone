@@ -37,7 +37,18 @@ fn say(line: &str) {
     let _ = std::io::stdout().flush();
 }
 
-const KNOWN_FLAGS: &[&str] = &["--webhook", "--token", "--assignment"];
+const KNOWN_FLAGS: &[&str] = &["--webhook", "--token", "--assignment", "--twice"];
+
+/// A boolean switch: off, on, or passed twice — refused like every other repeat.
+fn switch(args: &[String], flag: &str) -> Result<bool, String> {
+    match args.iter().filter(|arg| *arg == flag).count() {
+        0 => Ok(false),
+        1 => Ok(true),
+        _ => Err(format!(
+            "{flag} xuất hiện nhiều lần — không đoán lần nào là thật"
+        )),
+    }
+}
 
 fn refuse_unknown_flags(args: &[String]) -> Result<(), String> {
     let unknown: Vec<&str> = args
@@ -113,6 +124,13 @@ async fn main() -> anyhow::Result<()> {
     };
     let token = match value_of(&args, "--token") {
         Ok(value) => value,
+        Err(complaint) => {
+            say(&complaint);
+            anyhow::bail!("{complaint}");
+        }
+    };
+    let twice = match switch(&args, "--twice") {
+        Ok(on) => on,
         Err(complaint) => {
             say(&complaint);
             anyhow::bail!("{complaint}");
@@ -205,6 +223,24 @@ async fn main() -> anyhow::Result<()> {
                             "revision đã đổi"
                         }
                     ));
+                    // **The guarantee that protects the operator's sheet, exercised rather
+                    // than trusted.** A sweeper that cannot record a delivery re-sends the
+                    // same assignment, and the script must answer `duplicate` and leave the
+                    // sheet alone — otherwise one post becomes two rows with the same link
+                    // and nobody can tell which to delete.
+                    if twice {
+                        say("\nGỬI LẠI ĐÚNG assignment ĐÓ (thử chống trùng)");
+                        match publish_sheet::push_row(url, &payload).await {
+                            Ok(()) => {
+                                say("gửi lần hai OK — script coi là trùng và KHÔNG thêm hàng \
+                                 (đếm lại số dòng trên sheet để xác nhận)")
+                            }
+                            Err(error) => {
+                                say(&format!("gửi lần hai HỎNG — {error:#}"));
+                                return Err(anyhow::anyhow!("lần gửi lại thất bại: {error:#}"));
+                            }
+                        }
+                    }
                     Ok(())
                 }
                 Err(error) => {

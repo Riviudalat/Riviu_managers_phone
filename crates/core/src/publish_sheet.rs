@@ -16,18 +16,27 @@
 //! the sheet. The layout it writes is theirs, verbatim: the post link in **column D**, the
 //! poster as `bot`, and the partner names from the workbook spread **from column K**.
 //!
-//! # Nothing calls this yet, and the reason is a measurement
+//! # Wired since 31/08/2026, and proved against a live sheet
 //!
-//! Stated here rather than left for a reader to discover: no production path constructs a
-//! [`SheetRow`] or calls [`push_row`]. The chain that would — publish, read the link back,
-//! queue the row, sweep — is complete except for its middle, and that middle is
-//! [`crate::tiktok_share::capture_post_link`], which needs the caller to be standing on the
-//! post it just published. **The route from a just-published carousel back to its own post
-//! page is not measured on any build.**
+//! This module spent a while as finished code waiting on a measurement: the chain — publish,
+//! read the link back, queue the row, sweep — was complete except for its middle, and that
+//! middle needed the caller to be standing on the post it had just published. That route is
+//! measured now ([`crate::tiktok_share::capture_own_post_link`], §9.136), the desktop's
+//! background sweeper carries the rows, and the whole path has been run end to end against a
+//! real deployed script: a row landed in the operator's sheet, and re-sending the same
+//! assignment left it at one row.
 //!
-//! So this is finished code waiting on a dump, not code somebody forgot to wire. What it must
-//! not become in the meantime is a path that reports a failed *sheet write* as a failed
+//! What it must never become is a path that reports a failed *sheet write* as a failed
 //! *post* — see [`crate::db::publish_sheet`] for the half that guarantees that.
+//!
+//! # The redirect is part of the protocol, and refusing it was a wrong answer
+//!
+//! Apps Script answers `POST /exec` with **302** to `script.googleusercontent.com`; the reply
+//! body lives only there. The first version of [`client`] refused every redirect to keep the
+//! token out of a stranger's hands, which sounded right and was measured wrong: the POST had
+//! already reached the script, the script had already written the row, and the client called
+//! it a failure. See the policy in [`client`] for what is allowed instead — one hop, one
+//! host, and never a body-preserving 307/308.
 //!
 //! # The secret is a real one
 //!
@@ -143,14 +152,56 @@ fn redact_token(body: &str, token: &str) -> String {
     cleaned.chars().take(200).collect()
 }
 
+/// Whether a redirect target is the content host Apps Script hands its answer to.
+///
+/// Measured 31/08/2026 against a live deployment: `POST /exec` on `script.google.com`
+/// answers **302** with `Location: https://script.googleusercontent.com/macros/echo?…`, and
+/// the answer only exists at that URL. The old policy refused every redirect, so the client
+/// could not talk to Apps Script *at all* — it read the 302 as the endpoint's reply and
+/// failed every row. The refusal was written from a belief about how Apps Script answers,
+/// and the belief was wrong; the endpoint being "direct" was never measured.
+///
+/// So the hop is allowed, and nothing else is: one host family, HTTPS only. `www.google.com`
+/// is not on it, and neither is anything that merely ends in `google.com` — the point is the
+/// single host the protocol names, not Google in general.
+fn is_script_content_host(host: &str) -> bool {
+    let host = host.trim_end_matches('.').to_ascii_lowercase();
+    host == "script.googleusercontent.com"
+}
+
 fn client() -> anyhow::Result<reqwest::Client> {
     Ok(reqwest::Client::builder()
         .timeout(WEBHOOK_TIMEOUT)
-        // **No redirects.** The token is a bearer credential in the body, and `reqwest`
-        // follows redirects with the body intact by default — so an endpoint that is later
-        // pointed somewhere else, or a mistyped host that redirects, hands the token to
-        // whoever answers. An Apps Script `/exec` endpoint answers directly.
-        .redirect(reqwest::redirect::Policy::none())
+        // **One measured hop, and it may not carry the body.**
+        //
+        // The token is a bearer credential in the body, so a redirect that *preserves* the
+        // method — 307 and 308 — would hand it to whoever answers. Those are refused
+        // outright. A 302/303 turns the follow-up into a GET with no body, which is exactly
+        // how Apps Script's own answer is fetched, and is why this hop costs the credential
+        // nothing.
+        //
+        // Bounded at one: `/exec` → content host is the whole protocol, and a chain longer
+        // than that is not Apps Script answering.
+        .redirect(reqwest::redirect::Policy::custom(|attempt| {
+            let body_preserving = matches!(attempt.status().as_u16(), 307 | 308);
+            let target_ok = attempt.url().scheme() == "https"
+                && attempt.url().host_str().is_some_and(is_script_content_host);
+            if attempt.previous().len() > 1 {
+                attempt.error("webhook Sheet chuyển hướng quá nhiều lần")
+            } else if body_preserving {
+                attempt.error(
+                    "webhook Sheet chuyển hướng kiểu giữ nguyên body (307/308) — token nằm \
+                     trong body nên KHÔNG đi theo",
+                )
+            } else if target_ok {
+                attempt.follow()
+            } else {
+                attempt.error(
+                    "webhook Sheet chuyển hướng ra ngoài script.googleusercontent.com — \
+                     không đi theo",
+                )
+            }
+        }))
         .build()?)
 }
 
@@ -293,6 +344,44 @@ mod tests {
                 sent.contains(field),
                 "the Apps Script reads `payload.{field}`, which this payload does not send — \
                  it arrives `undefined` and lands in the sheet as an empty cell"
+            );
+        }
+    }
+
+    /// **The one host the Apps Script protocol names, and nothing that merely looks like it.**
+    ///
+    /// Measured 31/08/2026 against the live deployment: `POST /exec` answers 302 to
+    /// `script.googleusercontent.com`, and the reply body exists only there. Refusing every
+    /// redirect meant refusing Apps Script itself — and worse than plainly: the POST had
+    /// already reached the script, which had already written the row, so the client reported
+    /// a failure for a delivery that succeeded. A wrong answer, not a missing one.
+    ///
+    /// The allowance is exactly one host. `googleusercontent.com` without the `script.`
+    /// prefix is user content on Google's domain, and `script.googleusercontent.com.evil.tld`
+    /// is somebody else's host that ends in the right characters — both refused.
+    #[test]
+    fn only_the_apps_script_content_host_is_followed() {
+        assert!(is_script_content_host("script.googleusercontent.com"));
+        assert!(
+            is_script_content_host("SCRIPT.GoogleUserContent.COM"),
+            "hosts are case-insensitive"
+        );
+        assert!(
+            is_script_content_host("script.googleusercontent.com."),
+            "a trailing dot is the same host in DNS"
+        );
+        for other in [
+            "googleusercontent.com",
+            "lh3.googleusercontent.com",
+            "script.googleusercontent.com.evil.tld",
+            "evil.tld",
+            "script.google.com",
+            "www.google.com",
+            "",
+        ] {
+            assert!(
+                !is_script_content_host(other),
+                "{other} must not be followed with the token's request"
             );
         }
     }
