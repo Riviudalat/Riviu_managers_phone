@@ -941,6 +941,11 @@ pub struct InteractionAssignmentRecord {
     /// What happened to the `@` tags — see [`Self::mention_note`]. Same shape, same reason.
     #[serde(default)]
     pub mention: Option<String>,
+    /// Whether this reply was posted below a parent TikTok had moved into its folded section.
+    /// Hydrated from evidence for the desktop; old evidence has no key and therefore reads
+    /// `false` rather than making an old campaign fail to load.
+    #[serde(default)]
+    pub parent_was_folded: bool,
 }
 
 impl InteractionAssignmentRecord {
@@ -973,6 +978,19 @@ impl InteractionAssignmentRecord {
             .get("mention")?
             .as_str()
             .map(str::to_string)
+    }
+
+    /// Whether the send evidence says the reply's parent lived in TikTok's folded section.
+    pub fn parent_was_folded_from_evidence(&self) -> bool {
+        self.evidence_json
+            .as_deref()
+            .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+            .and_then(|value| {
+                value
+                    .get("parentWasFolded")
+                    .and_then(|folded| folded.as_bool())
+            })
+            .unwrap_or(false)
     }
 
     pub fn posted_identity(&self) -> Option<CommentLocatorIdentity> {
@@ -2056,6 +2074,7 @@ mod tests {
             evidence_json: evidence.map(str::to_string),
             like: None,
             mention: None,
+            parent_was_folded: false,
         }
     }
 

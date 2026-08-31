@@ -939,6 +939,11 @@ export interface InteractionAssignmentRecord {
    * comment itself looks the same either way, which is why this is reported separately.
    */
   mention?: string | null;
+  /**
+   * The reply was posted beneath a parent in TikTok's folded section. Optional because
+   * campaign payloads produced before this field existed do not carry it.
+   */
+  parentWasFolded?: boolean;
 }
 
 export interface InteractionCampaignDetail {

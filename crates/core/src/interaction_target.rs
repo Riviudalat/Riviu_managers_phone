@@ -49,6 +49,15 @@ pub(crate) struct SendOutcome {
     /// never offered goes out as plain text, the account is not notified, and nothing else on
     /// screen would tell the operator that happened.
     pub mention_note: Option<String>,
+    /// Whether this reply was attached under a **folded** comment.
+    ///
+    /// Travels with the send for the same reason `mention_note` does, and it was being lost:
+    /// the hierarchy send set it, but `SendOutcome` had no slot and `finish` dropped it, so a
+    /// reply posted and confirmed under TikTok's folded section — one nobody will ever see —
+    /// was recorded as an ordinary success. "It went out" and "it is invisible" have to
+    /// arrive together, or the operator cannot tell the second from a normal reply. Always
+    /// `false` on the pixel/root paths, which have no folded concept.
+    pub parent_was_folded: bool,
 }
 
 /// A send that did not succeed, and **which side of the effect line it fell on**.

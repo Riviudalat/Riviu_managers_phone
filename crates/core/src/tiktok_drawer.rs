@@ -85,6 +85,17 @@ pub enum CommentVerdict {
     SendPreArmed,
     /// The text source had nothing worth saying about this post.
     ContextSkipped,
+    /// The agent stopped answering **before the Send tap** — while opening the drawer,
+    /// typing, or waiting for the arm.
+    ///
+    /// A verdict and not a transport error on purpose. The interaction path wraps a bare
+    /// transport error from the whole send flow as "a Send tap may have gone out", which
+    /// retires the assignment `Uncertain` — never retried. But a transport failure this
+    /// early proves nothing was posted (no Send tap happened), so it must stay retryable.
+    /// A transport failure *at or after* the Send tap is genuinely ambiguous and still
+    /// travels as an error, becoming `NotConfirmed`/`Uncertain` — this variant is only for
+    /// the provably-before-Send case.
+    SendFlowInterrupted,
 }
 
 impl CommentVerdict {
@@ -104,6 +115,10 @@ impl CommentVerdict {
                  hỏng và mặc định fail-open đang che nó. Chưa gõ gì, chưa bấm gì"
             }
             Self::ContextSkipped => "ngữ cảnh không đủ để nói gì",
+            Self::SendFlowInterrupted => {
+                "mất kết nối agent TRƯỚC khi bấm Gửi (đang mở drawer / gõ chữ / chờ nút sáng) \
+                 — chưa gõ xong, chưa bấm Gửi, nên thử lại được"
+            }
         }
     }
 

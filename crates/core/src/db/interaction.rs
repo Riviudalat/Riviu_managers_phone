@@ -169,6 +169,7 @@ impl Database {
                 // the same answer without parsing it again.
                 like: None,
                 mention: None,
+                parent_was_folded: false,
             })
         })?;
         let assignments = rows
@@ -177,6 +178,7 @@ impl Database {
             .map(|mut assignment| {
                 assignment.like = assignment.like_note();
                 assignment.mention = assignment.mention_note();
+                assignment.parent_was_folded = assignment.parent_was_folded_from_evidence();
                 assignment
             })
             .collect();
@@ -250,6 +252,89 @@ impl Database {
         Ok(())
     }
 
+    /// Atomically claim one assignment for a send, moving it to `preparing` **only if no
+    /// other worker already holds it**. Returns the new revision as an ownership token.
+    ///
+    /// Interaction retry starts a worker without any campaign-wide lock, and `run_cohort`
+    /// used to stamp the row `preparing` unconditionally — so two rapid retries of the same
+    /// manual assignment both proceeded and posted the same deterministic text twice, on a
+    /// real account, with no delete path. The claim is a CAS: it moves the row out of an
+    /// idle/retryable state (`queued`/`ready`/`failed`/`skipped_parent`) into `preparing`, and
+    /// a row already `preparing`/`sending`/`succeeded`/`uncertain` — i.e. one another worker
+    /// is on, or one already delivered — is refused. The revision matters even after this
+    /// state CAS: a target failure can move A's `preparing` to `failed`, then B can claim it
+    /// back to `preparing`; the state looks the same but only B's newer revision owns it.
+    pub fn claim_interaction_assignment_for_send(
+        &self,
+        assignment_id: &str,
+    ) -> anyhow::Result<Option<i64>> {
+        let conn = self.conn()?;
+        conn.query_row(
+            "UPDATE interaction_assignments \
+             SET state='preparing',revision=revision+1,updated_at=?1 \
+             WHERE id=?2 AND state IN ('queued','ready','failed','skipped_parent') \
+             RETURNING revision",
+            params![Utc::now().to_rfc3339(), assignment_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(Into::into)
+    }
+
+    /// Cross the public-effect boundary exactly once.
+    ///
+    /// Preparation holds the row in `preparing`; this CAS is the only transition that grants
+    /// permission to call the device driver's send path. It writes the intent in the same SQL
+    /// statement so startup recovery can conservatively classify a process lost after this
+    /// point. A concurrent worker sees zero changed rows and must not touch the device.
+    pub fn begin_interaction_assignment_send(
+        &self,
+        assignment_id: &str,
+        ownership_revision: i64,
+        effect_intent: &str,
+    ) -> anyhow::Result<bool> {
+        let conn = self.conn()?;
+        let changed = conn.execute(
+            "UPDATE interaction_assignments \
+             SET state='sending',error_code=NULL,effect_intent=?1,revision=revision+1,updated_at=?2 \
+             WHERE id=?3 AND state='preparing' AND revision=?4",
+            params![
+                effect_intent,
+                Utc::now().to_rfc3339(),
+                assignment_id,
+                ownership_revision
+            ],
+        )?;
+        Ok(changed > 0)
+    }
+
+    /// Stamp one assignment `failed` — **but never over a delivery that is settled or in
+    /// flight**, and say whether it actually changed.
+    ///
+    /// The guard is in the SQL, not in a caller's snapshot, and that is the whole point. A
+    /// target-wide failure (a shared evidence pass that could not photograph the post) used
+    /// to consult a `protected` set captured once when the task started; a sibling that
+    /// reached `succeeded` *after* that snapshot was not in it, so its public comment was
+    /// stamped `failed` — retryable — and the next retry posted it a second time. `sending`,
+    /// `succeeded` and `uncertain` are the three states `retryable_assignments` excludes
+    /// because tapping Send is not idempotent, and the `CASE` here refuses to lower any of
+    /// them regardless of what any snapshot believed. Returns `true` only when a row was
+    /// really moved to `failed`.
+    pub fn fail_interaction_assignment_unless_settled(
+        &self,
+        assignment_id: &str,
+        error_code: &str,
+    ) -> anyhow::Result<bool> {
+        let conn = self.conn()?;
+        let changed = conn.execute(
+            "UPDATE interaction_assignments \
+             SET state='failed',error_code=?1,revision=revision+1,updated_at=?2 \
+             WHERE id=?3 AND state NOT IN ('sending','succeeded','uncertain')",
+            params![error_code, Utc::now().to_rfc3339(), assignment_id],
+        )?;
+        Ok(changed > 0)
+    }
+
     /// Close out campaigns whose worker died with the process, and say so.
     ///
     /// An interaction worker is a `tokio::spawn` inside this process: it cannot outlive the
@@ -261,12 +346,13 @@ impl Database {
     ///
     /// Two different writes, and the difference is the safety-critical part:
     ///
-    /// * an assignment left `sending` had its Send tap go out with no confirmation coming
-    ///   back, which is exactly what `uncertain` means — and `uncertain` is permanently
-    ///   excluded from retry, so the comment can never be posted twice. Leaving it `sending`
-    ///   would claim an in-flight message that no longer exists.
-    /// * an assignment left `preparing` or `ready` never touched the device, so it stays
-    ///   retryable and is not rewritten at all.
+    /// * an assignment left `sending` crossed the write-ahead effect boundary. The process
+    ///   died before it could report whether the later Send tap happened, so delivery cannot
+    ///   be excluded; it becomes `uncertain`, permanently outside retry. Leaving it `sending`
+    ///   would claim an in-flight worker that no longer exists.
+    /// * an assignment left `preparing` or legacy `ready` never touched the device, so it is
+    ///   released to `failed`, an explicitly retryable state. Leaving `preparing` intact would
+    ///   preserve a claim whose worker died, while the claim CAS correctly refuses to steal it.
     ///
     /// The campaign itself becomes `cancelled`: it is the state that says "stopped before it
     /// finished" and it is retryable, so the operator's next action is one button.
@@ -281,6 +367,13 @@ impl Database {
             .query_map([], |row| row.get(0))?
             .collect::<Result<_, _>>()?;
         for campaign_id in &stranded {
+            transaction.execute(
+                "UPDATE interaction_assignments
+                 SET state='failed',revision=revision+1,updated_at=?2,
+                     error_code=COALESCE(error_code,'interaction_worker_lost_before_send: app đóng trước khi tin này bắt đầu gửi — có thể thử lại')
+                 WHERE campaign_id=?1 AND state IN ('preparing','ready')",
+                params![campaign_id, now],
+            )?;
             transaction.execute(
                 "UPDATE interaction_assignments
                  SET state='uncertain',revision=revision+1,updated_at=?2,
@@ -299,23 +392,36 @@ impl Database {
         transaction.commit()?;
         Ok(stranded.len())
     }
+    /// Persist the prepared text without releasing this worker's claim.
+    ///
+    /// `ready` remains claimable so databases written by an older build can recover, but the
+    /// live runner must not publish that state between preparation and Send: a concurrent retry
+    /// would claim the same assignment and both workers could post it. State alone is not
+    /// ownership because it can go `preparing -> failed -> preparing` (ABA), so the claim's
+    /// revision must match too. A winner gets the next revision for the effect CAS; the row
+    /// stays `preparing` until that CAS.
     pub fn prepare_interaction_assignment(
         &self,
         assignment_id: &str,
+        ownership_revision: i64,
         prepared: &crate::interaction::PreparedThreadMessage,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<Option<i64>> {
         let conn = self.conn()?;
-        conn.execute(
+        conn.query_row(
             "UPDATE interaction_assignments
-             SET prepared_json=?1,state='ready',revision=revision+1,updated_at=?2
-             WHERE id=?3 AND effect_intent IS NULL",
+             SET prepared_json=?1,revision=revision+1,updated_at=?2
+             WHERE id=?3 AND state='preparing' AND revision=?4
+             RETURNING revision",
             params![
                 serde_json::to_string(prepared)?,
                 Utc::now().to_rfc3339(),
-                assignment_id
+                assignment_id,
+                ownership_revision
             ],
-        )?;
-        Ok(())
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(Into::into)
     }
     /// Read back what the web lookup filed against each target of one campaign.
     ///

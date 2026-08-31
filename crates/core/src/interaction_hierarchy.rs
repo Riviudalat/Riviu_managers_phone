@@ -649,6 +649,17 @@ pub async fn open_target_by_hierarchy(
                 if since.elapsed() >= HANDLE_GRACE {
                     return Ok(TargetArrival::Structural);
                 }
+            } else {
+                // **The arm is cleared, not latched forever.** `post_page_since` used to be
+                // set once and never reset, so a single transient read — an adjacent feed
+                // card's author caught mid-transition, a rail that flickered on — armed the
+                // timeout's `Structural` fall-through below permanently, even if every later
+                // poll lost the rail or read the baseline author again. That is the measured
+                // signature of a *dead* link (the old post never left), and it must not pass
+                // as an arrival. So a poll that no longer sees a different post on a rail
+                // disarms it; `Structural` then requires the differing author to be the last
+                // thing actually seen, not the first thing glimpsed.
+                post_page_since = None;
             }
             last_author = author;
         }
@@ -717,6 +728,53 @@ pub struct HierarchySendOutcome {
     pub parent_was_folded: bool,
 }
 
+impl HierarchySendOutcome {
+    /// The outcome for a transport failure that happened **before the Send tap** — opening
+    /// the drawer, scrolling to the parent, tapping Reply, typing, or waiting for the arm.
+    ///
+    /// A verdict rather than a propagated error so the known, observed interruption travels
+    /// through the same finish path as the other pre-Send outcomes. The outer error type is
+    /// still phase-aware for unexpected transport failures. Nothing was posted this early,
+    /// so either route stays retryable; the tap itself and anything after it travel as
+    /// `AfterEffect`.
+    fn interrupted_before_send() -> Self {
+        Self {
+            verdict: crate::tiktok_drawer::CommentVerdict::SendFlowInterrupted,
+            armed_frame_sha256: String::new(),
+            cleared_frame_sha256: String::new(),
+            identity: None,
+            mention_note: None,
+            parent_was_folded: false,
+        }
+    }
+}
+
+/// A hierarchy send transport failure, with the Send tap as an explicit effect boundary.
+///
+/// There is deliberately no blanket `From<anyhow::Error>` implementation: every propagated
+/// transport error must name which side of the tap it came from. That makes a future pre-Send
+/// `?` fail to compile instead of silently becoming an unretryable after-effect failure at the
+/// campaign call site.
+#[derive(Debug, thiserror::Error)]
+pub enum HierarchySendFailure {
+    /// Nothing was sent, so the assignment remains retryable.
+    #[error("hierarchy send stopped before the Send tap: {0}")]
+    BeforeEffect(anyhow::Error),
+    /// The Send tap was attempted, so retrying could duplicate a public comment.
+    #[error("hierarchy send failed at or after the Send tap: {0}")]
+    AfterEffect(anyhow::Error),
+}
+
+impl HierarchySendFailure {
+    pub fn before(error: impl Into<anyhow::Error>) -> Self {
+        Self::BeforeEffect(error.into())
+    }
+
+    pub fn after(error: impl Into<anyhow::Error>) -> Self {
+        Self::AfterEffect(error.into())
+    }
+}
+
 /// The `locator_version` stamped on identities this module produces.
 ///
 /// Distinct from the OCR path's on purpose: a stored identity has to say which reader
@@ -742,7 +800,7 @@ pub async fn send_root_by_hierarchy<F>(
     mentions: &[String],
     stop: &AtomicBool,
     mut frame_sha: F,
-) -> anyhow::Result<HierarchySendOutcome>
+) -> Result<HierarchySendOutcome, HierarchySendFailure>
 where
     F: FnMut() -> String,
 {
@@ -773,19 +831,44 @@ where
             None,
         ));
     }
-    let Some(field) = drawer.open(stop).await? else {
-        return Ok(outcome(
-            CommentVerdict::NoDrawer,
-            String::new(),
-            String::new(),
-            None,
-        ));
+    // A transport error here is BEFORE the Send tap — the drawer is only opening — so it is
+    // a retryable verdict, not the `after`-tap error the campaign would settle `Uncertain`.
+    let field = match drawer.open(stop).await {
+        Ok(Some(field)) => field,
+        Ok(None) => {
+            return Ok(outcome(
+                CommentVerdict::NoDrawer,
+                String::new(),
+                String::new(),
+                None,
+            ))
+        }
+        Err(_) => {
+            return Ok(outcome(
+                CommentVerdict::SendFlowInterrupted,
+                String::new(),
+                String::new(),
+                None,
+            ))
+        }
     };
     // **A refusal here is settled as a verdict, never as a transport error.** Both answers
     // mean nothing was typed and nothing was tapped; routing either through `?` would send
     // it down the interaction path's after-effect channel, which retires the assignment
-    // `Uncertain` — unretryable — for a message that never reached the field.
-    let typed = drawer.focus_and_type(&field, text, stop).await?;
+    // `Uncertain` — unretryable — for a message that never reached the field. A transport
+    // error is the same story: still before the Send tap, still nothing posted.
+    let typed = match drawer.focus_and_type(&field, text, stop).await {
+        Ok(typed) => typed,
+        Err(_) => {
+            drawer.leave(stop).await;
+            return Ok(outcome(
+                CommentVerdict::SendFlowInterrupted,
+                String::new(),
+                String::new(),
+                None,
+            ));
+        }
+    };
     if typed != crate::tiktok_drawer::TypedInto::Typed {
         // Nothing to read back on a refusal, and a drawer left open with a lit draft makes
         // the next assignment on this phone refuse for the same reason. Interaction does
@@ -809,25 +892,54 @@ where
     let mention_note = if mentions.is_empty() {
         None
     } else {
-        let outcome = append_mentions_by_picker(session, screen, mentions, stop).await;
+        let mention_outcome = match append_mentions_by_picker(session, screen, mentions, stop).await
+        {
+            Ok(outcome) => outcome,
+            Err(_) => {
+                drawer.leave(stop).await;
+                return Ok(HierarchySendOutcome::interrupted_before_send());
+            }
+        };
         // Whatever is in the box now is what Send will publish, tags and spacing included.
         // Read rather than reconstructed: the token's exact spelling and trailing space are
         // TikTok's to decide, and guessing them is how the read-back missed the first time.
-        posted = composer_text(session)
-            .await
-            .filter(|value| value.contains(text));
-        outcome.note()
+        posted = match composer_text(session).await {
+            Ok(value) => value.filter(|value| value.contains(text)),
+            Err(_) => {
+                drawer.leave(stop).await;
+                return Ok(HierarchySendOutcome::interrupted_before_send());
+            }
+        };
+        mention_outcome.note()
     };
-    let Some(send) = drawer.await_armed(stop).await? else {
-        return Ok(outcome(
-            CommentVerdict::NotArmed,
-            String::new(),
-            String::new(),
-            None,
-        ));
+    // Still before the Send tap: a transport error waiting for the arm posted nothing.
+    let send = match drawer.await_armed(stop).await {
+        Ok(Some(send)) => send,
+        Ok(None) => {
+            return Ok(outcome(
+                CommentVerdict::NotArmed,
+                String::new(),
+                String::new(),
+                None,
+            ))
+        }
+        Err(_) => {
+            drawer.leave(stop).await;
+            return Ok(outcome(
+                CommentVerdict::SendFlowInterrupted,
+                String::new(),
+                String::new(),
+                None,
+            ));
+        }
     };
     let armed = frame_sha();
-    let confirmed = drawer.tap_send_and_confirm_disarm(&send, stop).await?;
+    // From here on a transport error is at or after the Send tap and stays an `Err` — the
+    // one genuinely-ambiguous case, which the campaign settles `NotConfirmed`/`Uncertain`.
+    let confirmed = drawer
+        .tap_send_and_confirm_disarm(&send, stop)
+        .await
+        .map_err(HierarchySendFailure::after)?;
     let cleared = frame_sha();
     if !confirmed {
         // `NotConfirmed` and never retried: the tap went out, so a retry is how a post
@@ -871,9 +983,10 @@ pub struct MentionOutcome {
     /// Typed into the comment, but no suggestion row ever arrived — so it posts as grey text
     /// and notifies nobody. The characters *are* in the comment.
     pub literal: Vec<String>,
-    /// Never reached the field at all: refused before the keystrokes, or the keystroke path
-    /// failed. **Not in the comment in any form** — which is why it cannot share a bucket with
-    /// `literal`, whose whole meaning is "it is in there, just as plain text".
+    /// Never reached the field at all because the handle was refused before the keystrokes.
+    /// **Not in the comment in any form** — which is why it cannot share a bucket with
+    /// `literal`, whose whole meaning is "it is in there, just as plain text". A transport
+    /// failure is not a handle outcome and aborts the send instead.
     pub untyped: Vec<String>,
     /// A row was tapped and the composer could not be read back afterwards, so whether the
     /// token landed is unknown — and the tap may have left the drawer entirely.
@@ -938,7 +1051,7 @@ pub async fn append_mentions_by_picker(
     screen: (f64, f64),
     handles: &[String],
     stop: &AtomicBool,
-) -> MentionOutcome {
+) -> anyhow::Result<MentionOutcome> {
     let mut outcome = MentionOutcome::default();
     let mut planner = crate::nurture::touch::TouchPointPlanner::new(screen);
     for handle in handles {
@@ -969,22 +1082,16 @@ pub async fn append_mentions_by_picker(
         // picker. The picker's container has never been measured, so the discrimination cannot
         // come from *where* a row sits; it comes from the fact that a suggestion row was not
         // there before typing.
-        let before = mention_rows(session, handle).await;
+        let before = mention_rows(session, handle).await?;
         // A leading space, or the tag runs into the last word of the comment — measured
         // 24/08/2026: the first real run posted `…đi được ngay@ghin.lt.sng.sng`. TikTok adds
         // its own trailing space when it inserts the token, so consecutive tags separate
         // themselves and only the first needs this.
-        if session.type_keys(&format!(" @{handle}")).await.is_err() {
-            outcome.untyped.push(handle.to_string());
-            continue;
-        }
-        match await_mention_row(session, handle, &before, stop).await {
+        session.type_keys(&format!(" @{handle}")).await?;
+        match await_mention_row(session, handle, &before, stop).await? {
             Some(row) => {
                 let point = planner.next(row.centre(), row.jitter_radius());
-                if session.tap(point).await.is_err() {
-                    outcome.literal.push(handle.to_string());
-                    continue;
-                }
+                session.tap(point).await?;
                 tokio::time::sleep(MENTION_PICKER_POLL).await;
                 // **Ask the field, not the list.** The old check read "the row is gone" as
                 // proof the pick landed — but a tap that misses the picker and opens somebody's
@@ -992,12 +1099,12 @@ pub async fn append_mentions_by_picker(
                 // with it. Those two outcomes were indistinguishable, and the wrong one was
                 // recorded as a real mention. The composer can only answer while the drawer is
                 // still on screen, so it is the one witness that separates them.
-                match composer_text(session).await {
+                match composer_text(session).await? {
                     None => {
                         // The field is gone, so that tap did not land in a suggestion list —
                         // and nothing after this can be typed into a drawer that is not there.
                         outcome.unverified.push(handle.to_string());
-                        return outcome;
+                        return Ok(outcome);
                     }
                     Some(field) if !field.to_lowercase().contains(&handle.to_lowercase()) => {
                         // Still a drawer, but the handle is no longer in it: the tap changed
@@ -1008,12 +1115,13 @@ pub async fn append_mentions_by_picker(
                         // `LT.GI` for `lt.gi` would otherwise have a real mention reported as
                         // unverified — and the pass abandoned with it.
                         outcome.unverified.push(handle.to_string());
-                        return outcome;
+                        return Ok(outcome);
                     }
                     Some(_) => {
                         // Drawer alive, handle still in the field. A fresh row that still
                         // offers the handle means the tap did nothing at all.
-                        let offered = new_mention_row(mention_rows(session, handle).await, &before);
+                        let offered =
+                            new_mention_row(mention_rows(session, handle).await?, &before);
                         if offered.is_some() {
                             outcome.literal.push(handle.to_string());
                         } else {
@@ -1025,7 +1133,7 @@ pub async fn append_mentions_by_picker(
             None => outcome.literal.push(handle.to_string()),
         }
     }
-    outcome
+    Ok(outcome)
 }
 
 /// What a post says about itself, read off the action rail.
@@ -1447,15 +1555,14 @@ const TILE_TAP_UP: f64 = 200.0;
 /// `locate_all_described` reads the rendered `text` into `description`, which for an
 /// `EditText` is its contents — the same read the drawer uses to tell a placeholder from a
 /// draft. `None` when there is no field or it is empty.
-async fn composer_text(session: &dyn UiSession) -> Option<String> {
-    session
+async fn composer_text(session: &dyn UiSession) -> anyhow::Result<Option<String>> {
+    Ok(session
         .locate_all_described(ElementQuery::ClassName(crate::tiktok_drawer::EDIT_TEXT))
-        .await
-        .ok()?
+        .await?
         .into_iter()
         .find_map(|field| field.description)
         .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
+        .filter(|value| !value.is_empty()))
 }
 
 /// Whether a handle can be sent as key events at all.
@@ -1477,22 +1584,22 @@ async fn await_mention_row(
     handle: &str,
     before: &[ElementBox],
     stop: &AtomicBool,
-) -> Option<ElementBox> {
+) -> anyhow::Result<Option<ElementBox>> {
     let deadline = Instant::now() + MENTION_PICKER_WAIT;
     loop {
         if stop.load(Ordering::Relaxed) {
-            return None;
+            return Ok(None);
         }
         // **Sleep before the first read, not after it.** The list is a network fetch, so at
         // t=0 it definitionally has not arrived — and the only thing a read taken then can
         // match is something that was already on screen, which is exactly the comment row
         // this must never tap.
         tokio::time::sleep(MENTION_PICKER_POLL).await;
-        if let Some(row) = new_mention_row(mention_rows(session, handle).await, before) {
-            return Some(row);
+        if let Some(row) = new_mention_row(mention_rows(session, handle).await?, before) {
+            return Ok(Some(row));
         }
         if Instant::now() >= deadline {
-            return None;
+            return Ok(None);
         }
     }
 }
@@ -1502,22 +1609,19 @@ async fn await_mention_row(
 /// Deliberately unscoped. The picker's own container has never been measured, and inventing a
 /// selector for it would be the kind of guess this file refuses everywhere else — so the
 /// sweep stays wide and [`new_mention_row`] supplies the discrimination instead.
-async fn mention_rows(session: &dyn UiSession, handle: &str) -> Vec<ElementBox> {
+async fn mention_rows(session: &dyn UiSession, handle: &str) -> anyhow::Result<Vec<ElementBox>> {
     let wanted = handle.trim_start_matches('@').to_lowercase();
-    session
+    Ok(session
         .locate_all_described(ElementQuery::ClassName("android.widget.TextView"))
-        .await
-        .map(|rows| {
-            rows.into_iter()
-                .filter(|row| {
-                    row.description
-                        .as_deref()
-                        .map(|text| text.trim().trim_start_matches('@').to_lowercase() == wanted)
-                        .unwrap_or(false)
-                })
-                .collect()
+        .await?
+        .into_iter()
+        .filter(|row| {
+            row.description
+                .as_deref()
+                .map(|text| text.trim().trim_start_matches('@').to_lowercase() == wanted)
+                .unwrap_or(false)
         })
-        .unwrap_or_default()
+        .collect())
 }
 
 /// The one row claiming this handle that was **not** there before the handle was typed.
@@ -1603,18 +1707,19 @@ const BASELINE_SETTLE: Duration = Duration::from_secs(4);
 /// Returns whether anything was expanded, so the caller can spend one more scroll budget on
 /// the newly-revealed rows and, more importantly, can tell the operator that the thread it is
 /// about to build lives in the folded section.
-async fn expand_folded_comments(session: &dyn UiSession, labels: TikTokControls) -> bool {
+async fn expand_folded_comments(
+    session: &dyn UiSession,
+    labels: TikTokControls,
+) -> anyhow::Result<bool> {
     let Some(label) = labels.label(TikTokControl::FoldedComments) else {
-        return false;
+        return Ok(false);
     };
-    let Ok(Some(control)) = session.locate(label.to_query()).await else {
-        return false;
+    let Some(control) = session.locate(label.to_query()).await? else {
+        return Ok(false);
     };
-    if session.tap(control.centre()).await.is_err() {
-        return false;
-    }
+    session.tap(control.centre()).await?;
     tokio::time::sleep(PARENT_SCROLL_SETTLE).await;
-    true
+    Ok(true)
 }
 const PARENT_SCROLL_DURATION_MS: u64 = 320;
 /// Time given to the comment list to stop moving before it is read again.
@@ -1733,7 +1838,7 @@ pub async fn send_reply_by_hierarchy<F>(
     text: &str,
     stop: &AtomicBool,
     mut frame_sha: F,
-) -> anyhow::Result<Result<HierarchySendOutcome, ReplyRefusal>>
+) -> Result<Result<HierarchySendOutcome, ReplyRefusal>, HierarchySendFailure>
 where
     F: FnMut() -> String,
 {
@@ -1759,8 +1864,12 @@ where
     // Opening the drawer also gives the field, whose top edge bounds the list — the
     // measured field jumps from y≈2127 to y≈1175 when the keyboard comes up, so a fixed
     // screen fraction can land inside the composer instead of the list.
-    let Some(field) = drawer.open(stop).await? else {
-        return Ok(Err(ReplyRefusal::NoDrawer));
+    // Before the Send tap: a transport error opening the drawer posted nothing, so it is
+    // the retryable interrupted verdict, not the `after`-tap error.
+    let field = match drawer.open(stop).await {
+        Ok(Some(field)) => field,
+        Ok(None) => return Ok(Err(ReplyRefusal::NoDrawer)),
+        Err(_) => return Ok(Ok(HierarchySendOutcome::interrupted_before_send())),
     };
 
     let mut scrolls = 0u32;
@@ -1768,8 +1877,10 @@ where
     // Whether the list was ever legible at all — see the `unreadable` branch below.
     let mut saw_rows = false;
     let target = loop {
-        if let Some(found) = find_parent(session, reply_label, parent).await {
-            break found;
+        match find_parent(session, reply_label, parent).await {
+            Ok(Some(found)) => break found,
+            Ok(None) => {}
+            Err(_) => return Ok(Ok(HierarchySendOutcome::interrupted_before_send())),
         }
         if scrolls >= PARENT_SCROLL_ATTEMPTS || stop.load(Ordering::Relaxed) {
             return Ok(Err(ReplyRefusal::ParentNotFound {
@@ -1780,24 +1891,35 @@ where
         }
         // Anchors before the swipe, so "the list did not move" is observable rather than
         // assumed. Reply controls are the cheapest anchor: geometry only, no text.
-        let before = anchor_positions(session, reply_label).await;
-        let rows_before = visible_rows(session).await;
-        scroll_comment_list(session, screen, &field).await?;
+        let before = match anchor_positions(session, reply_label).await {
+            Ok(before) => before,
+            Err(_) => return Ok(Ok(HierarchySendOutcome::interrupted_before_send())),
+        };
+        let rows_before = match visible_rows(session).await {
+            Ok(rows) => rows,
+            Err(_) => return Ok(Ok(HierarchySendOutcome::interrupted_before_send())),
+        };
+        // Still before the Send tap; a transport error scrolling is retryable, not ambiguous.
+        if scroll_comment_list(session, screen, &field).await.is_err() {
+            return Ok(Ok(HierarchySendOutcome::interrupted_before_send()));
+        }
         tokio::time::sleep(PARENT_SCROLL_SETTLE).await;
         scrolls += 1;
         // A swipe that closed the drawer is a different failure from one that hit the
         // end of the list, and the pixel path checks for exactly this.
-        if session
-            .locate(ElementQuery::ClassName(EDIT_TEXT))
-            .await
-            .ok()
-            .flatten()
-            .is_none()
-        {
-            return Ok(Err(ReplyRefusal::DrawerClosedByScroll));
+        match session.locate(ElementQuery::ClassName(EDIT_TEXT)).await {
+            Ok(Some(_)) => {}
+            Ok(None) => return Ok(Err(ReplyRefusal::DrawerClosedByScroll)),
+            Err(_) => return Ok(Ok(HierarchySendOutcome::interrupted_before_send())),
         }
-        let after = anchor_positions(session, reply_label).await;
-        let rows_after = visible_rows(session).await;
+        let after = match anchor_positions(session, reply_label).await {
+            Ok(after) => after,
+            Err(_) => return Ok(Ok(HierarchySendOutcome::interrupted_before_send())),
+        };
+        let rows_after = match visible_rows(session).await {
+            Ok(rows) => rows,
+            Err(_) => return Ok(Ok(HierarchySendOutcome::interrupted_before_send())),
+        };
         // **An empty read is not a stationary list.** Both anchors answer with an empty
         // vector when they cannot see anything, and empty compares equal to empty: zero
         // reply controls before and zero after satisfy `!moved`, zero rows before and zero
@@ -1832,10 +1954,18 @@ where
             //
             // The revealed rows get their own budget, once. `unfolded` latches, so a list
             // that keeps refusing to move still ends here.
-            if !unfolded && expand_folded_comments(session, labels).await {
-                unfolded = true;
-                scrolls = 0;
-                continue;
+            if !unfolded {
+                match expand_folded_comments(session, labels).await {
+                    Ok(true) => {
+                        unfolded = true;
+                        scrolls = 0;
+                        continue;
+                    }
+                    Ok(false) => {}
+                    Err(_) => {
+                        return Ok(Ok(HierarchySendOutcome::interrupted_before_send()));
+                    }
+                }
             }
             return Ok(Err(ReplyRefusal::ParentNotFound {
                 scrolls,
@@ -1849,20 +1979,28 @@ where
     // measured as `Thêm bình luận...`. So "wait for an EditText with some text in it" is
     // satisfied by the state we are already in, and would return instantly with the root
     // drawer's own hint. Read that hint first and wait for it to *change*.
-    let before = read_placeholder(session).await.unwrap_or_default();
+    let before = match read_placeholder(session).await {
+        Ok(before) => before.unwrap_or_default(),
+        Err(_) => return Ok(Ok(HierarchySendOutcome::interrupted_before_send())),
+    };
 
     // Tap this comment's own Reply control.
     let point = {
         let mut planner = crate::nurture::touch::TouchPointPlanner::new(screen);
         planner.next(target.reply.centre(), target.reply.jitter_radius())
     };
-    session.tap(point).await?;
+    // Tapping Reply to open the composer, still before anything is typed or sent.
+    if session.tap(point).await.is_err() {
+        return Ok(Ok(HierarchySendOutcome::interrupted_before_send()));
+    }
 
     // The composer replaces the field rather than stacking on it (measured: still
     // exactly one `EditText`), and its *text* is the placeholder — which `locate` cannot
     // see, because `content-desc` is empty there.
-    let Some(placeholder) = await_composer(session, &before, stop).await else {
-        return Ok(Err(ReplyRefusal::NoComposer));
+    let placeholder = match await_composer(session, &before, stop).await {
+        Ok(Some(placeholder)) => placeholder,
+        Ok(None) => return Ok(Err(ReplyRefusal::NoComposer)),
+        Err(_) => return Ok(Ok(HierarchySendOutcome::interrupted_before_send())),
     };
     // An empty stored author label is not a pass. It means the identity this reply is
     // aimed at carries no author, so the one independent check on this path cannot be
@@ -1876,12 +2014,21 @@ where
     }
 
     // Only now is anything typed.
-    let Some(field) = session.locate(ElementQuery::ClassName(EDIT_TEXT)).await? else {
-        return Ok(Err(ReplyRefusal::NoComposer));
+    let field = match session.locate(ElementQuery::ClassName(EDIT_TEXT)).await {
+        Ok(Some(field)) => field,
+        Ok(None) => return Ok(Err(ReplyRefusal::NoComposer)),
+        Err(_) => return Ok(Ok(HierarchySendOutcome::interrupted_before_send())),
     };
     // Same rule as the opening comment's path: a refusal is a verdict, not a transport
     // error, and a refused drawer is closed because there is nothing to read back out of it.
-    let typed = drawer.focus_and_type(&field, text, stop).await?;
+    // A transport error here is still before the Send tap, so it is retryable too.
+    let typed = match drawer.focus_and_type(&field, text, stop).await {
+        Ok(typed) => typed,
+        Err(_) => {
+            drawer.leave(stop).await;
+            return Ok(Ok(HierarchySendOutcome::interrupted_before_send()));
+        }
+    };
     if typed != crate::tiktok_drawer::TypedInto::Typed {
         drawer.leave(stop).await;
         return Ok(Ok(HierarchySendOutcome {
@@ -1897,19 +2044,28 @@ where
             identity: None,
         }));
     }
-    let Some(send) = drawer.await_armed(stop).await? else {
-        return Ok(Ok(HierarchySendOutcome {
-            verdict: CommentVerdict::NotArmed,
-            // Replies never re-tag: only the opening comment carries the mentions.
-            mention_note: None,
-            parent_was_folded: unfolded,
-            armed_frame_sha256: String::new(),
-            cleared_frame_sha256: String::new(),
-            identity: None,
-        }));
+    let send = match drawer.await_armed(stop).await {
+        Ok(Some(send)) => send,
+        Ok(None) => {
+            return Ok(Ok(HierarchySendOutcome {
+                verdict: CommentVerdict::NotArmed,
+                // Replies never re-tag: only the opening comment carries the mentions.
+                mention_note: None,
+                parent_was_folded: unfolded,
+                armed_frame_sha256: String::new(),
+                cleared_frame_sha256: String::new(),
+                identity: None,
+            }));
+        }
+        // Still before the Send tap: retryable, not the ambiguous `after` error.
+        Err(_) => return Ok(Ok(HierarchySendOutcome::interrupted_before_send())),
     };
     let armed = frame_sha();
-    let confirmed = drawer.tap_send_and_confirm_disarm(&send, stop).await?;
+    // From here on a transport error is at or after the Send tap and stays an `Err`.
+    let confirmed = drawer
+        .tap_send_and_confirm_disarm(&send, stop)
+        .await
+        .map_err(HierarchySendFailure::after)?;
     let cleared = frame_sha();
     if !confirmed {
         return Ok(Ok(HierarchySendOutcome {
@@ -1931,7 +2087,7 @@ where
     //
     // So ask first. The placeholder is the state: in the composer it names the parent, on
     // the list it is the generic hint. Only a composer gets a Back.
-    if let Some(placeholder) = read_placeholder(session).await {
+    if let Ok(Some(placeholder)) = read_placeholder(session).await {
         let wanted = parent.author_label.trim();
         if !wanted.is_empty() && placeholder.contains(wanted) {
             let _ = session.back().await;
@@ -1954,18 +2110,17 @@ async fn find_parent(
     session: &dyn UiSession,
     reply_label: crate::tiktok_labels::LabelMatch,
     parent: &CommentLocatorIdentity,
-) -> Option<ElementReplyTarget> {
+) -> anyhow::Result<Option<ElementReplyTarget>> {
     let wanted = parent.text.trim();
     if wanted.is_empty() {
-        return None;
+        return Ok(None);
     }
     let bodies: Vec<ElementBox> = session
         .locate_all(ElementQuery::Text {
             value: wanted,
             exact: true,
         })
-        .await
-        .ok()?
+        .await?
         .into_iter()
         .map(|mut body| {
             // Known exactly: it is what the query matched on.
@@ -1974,12 +2129,11 @@ async fn find_parent(
         })
         .collect();
     if bodies.is_empty() {
-        return None;
+        return Ok(None);
     }
     let replies: Vec<ElementBox> = session
         .locate_all(reply_label.to_query())
-        .await
-        .ok()?
+        .await?
         .into_iter()
         .map(|mut reply| {
             reply.description = Some(reply_label.value().to_string());
@@ -1989,21 +2143,21 @@ async fn find_parent(
     // The expensive read, and only reached once a candidate body is on screen.
     let authors = session
         .locate_all_described(ElementQuery::ClassName(COMMENT_AUTHOR_CLASS))
-        .await
-        .ok()?;
-    locate_parent_in_elements(&bodies, &replies, &authors, parent)
+        .await?;
+    Ok(locate_parent_in_elements(
+        &bodies, &replies, &authors, parent,
+    ))
 }
 
 /// Y positions of the reply controls, as a cheap "did the list move" fingerprint.
 async fn anchor_positions(
     session: &dyn UiSession,
     reply_label: crate::tiktok_labels::LabelMatch,
-) -> Vec<f64> {
+) -> anyhow::Result<Vec<f64>> {
     session
         .locate_all(reply_label.to_query())
         .await
         .map(|found| found.into_iter().map(|element| element.y).collect())
-        .unwrap_or_default()
 }
 
 /// What the list is showing, as text.
@@ -2016,16 +2170,15 @@ async fn anchor_positions(
 /// Measured 19/08/2026: a reply refused with `reply_parent_not_found` after **two** scrolls on
 /// a list of eighteen comments, having concluded it had reached the end. The text of the rows
 /// cannot alias that way — different comments say different things.
-async fn visible_rows(session: &dyn UiSession) -> Vec<String> {
-    session
+async fn visible_rows(session: &dyn UiSession) -> anyhow::Result<Vec<String>> {
+    Ok(session
         .locate_all_described(ElementQuery::ClassName("android.widget.TextView"))
-        .await
-        .unwrap_or_default()
+        .await?
         .into_iter()
         .filter_map(|element| element.description)
         .map(|text| text.trim().to_string())
         .filter(|text| !text.is_empty())
-        .collect()
+        .collect())
 }
 
 /// Whether the list actually shifted. An unchanged set means the end of the list.
@@ -2077,16 +2230,15 @@ async fn sleep_poll() {
 /// Read with `locate_all_described` because the string lives in `text`, and `locate`
 /// reports `content-desc` — measured empty on this field, so `locate` would answer
 /// "no placeholder" for a field that plainly has one.
-async fn read_placeholder(session: &dyn UiSession) -> Option<String> {
+async fn read_placeholder(session: &dyn UiSession) -> anyhow::Result<Option<String>> {
     let fields = session
         .locate_all_described(ElementQuery::ClassName(crate::tiktok_drawer::EDIT_TEXT))
-        .await
-        .ok()?;
-    fields
+        .await?;
+    Ok(fields
         .iter()
         .find_map(|field| field.description.as_deref())
         .map(|text| text.trim().to_string())
-        .filter(|text| !text.is_empty())
+        .filter(|text| !text.is_empty()))
 }
 
 /// Wait for the reply composer's placeholder, which names who is being replied to.
@@ -2100,19 +2252,19 @@ async fn await_composer(
     session: &dyn UiSession,
     before: &str,
     stop: &AtomicBool,
-) -> Option<String> {
+) -> anyhow::Result<Option<String>> {
     let deadline = Instant::now() + crate::tiktok_drawer::DRAWER_WINDOW;
     loop {
         if stop.load(Ordering::Relaxed) {
-            return None;
+            return Ok(None);
         }
-        if let Some(text) = read_placeholder(session).await {
+        if let Some(text) = read_placeholder(session).await? {
             if text != before {
-                return Some(text);
+                return Ok(Some(text));
             }
         }
         if Instant::now() >= deadline {
-            return None;
+            return Ok(None);
         }
         tokio::time::sleep(crate::tiktok_drawer::DRAWER_POLL).await;
     }
@@ -2595,7 +2747,14 @@ pub async fn photograph_photo_post(
 
     let mut frames = Vec::with_capacity(CAROUSEL_SLIDE_CAP);
     let mut counters = Vec::with_capacity(CAROUSEL_SLIDE_CAP);
+    // The digest of the last frame actually kept. A no-op swipe leaves the counter — and the
+    // picture — where they were, and without this the same slide is kept twice and the model
+    // sees a repeated slide as evidence. The video walk already dedupes this way (see below);
+    // the photo walk did not, which is the gap. `picture_digest_of` and not a byte hash, for
+    // the reason that walk documents: a JPEG re-encodes an unchanged screen into new bytes.
+    let mut last_kept_digest: Option<u64> = None;
     if let Some(frame) = camera.capture().await {
+        last_kept_digest = crate::nurture::picture_digest_of(&frame);
         frames.push(frame);
     }
 
@@ -2676,7 +2835,13 @@ pub async fn photograph_photo_post(
             break;
         }
         if let Some(frame) = camera.capture().await {
-            frames.push(frame);
+            // Keep it only if the picture actually changed. A swipe the pager ignored leaves
+            // the same slide on screen; keeping it would show the model a duplicate slide.
+            let digest = crate::nurture::picture_digest_of(&frame);
+            if digest.is_none() || digest != last_kept_digest {
+                last_kept_digest = digest;
+                frames.push(frame);
+            }
         }
 
         let Some((current, total)) = index else {
@@ -2852,6 +3017,8 @@ mod tests {
     use crate::driver::ElementQuery;
     use crate::tiktok_labels::controls_for;
     use crate::types::{SwipeGesture, TapPoint};
+    use image::codecs::png::{CompressionType, FilterType, PngEncoder};
+    use image::{ColorType, ImageEncoder, Rgb, RgbImage};
     use parking_lot::Mutex;
 
     const TIKTOK: &str = "com.ss.android.ugc.trill";
@@ -2901,6 +3068,10 @@ mod tests {
         open_url_fails: bool,
         /// Installed as the `Follow` label once the link has been opened.
         after_open: Mutex<Option<String>>,
+        /// One-shot `Follow` answers after the link opens, then the fixture falls back to
+        /// `present`. This models an adjacent card caught during the transition without
+        /// turning that transient into the screen's settled author.
+        after_open_follow_reads: Mutex<Vec<String>>,
         /// How many `Follow` reads to answer `None` for before the label appears.
         ///
         /// Models the transient the baseline retry exists for: `read_author_label` folds a
@@ -2933,6 +3104,14 @@ mod tests {
         /// nothing".
         fn landing_on(self, author_label: &str) -> Self {
             *self.after_open.lock() = Some(author_label.to_string());
+            self
+        }
+
+        /// Show one author read immediately after the open, then return to the settled card.
+        fn transiently_landing_on(self, author_label: &str) -> Self {
+            self.after_open_follow_reads
+                .lock()
+                .push(author_label.to_string());
             self
         }
 
@@ -3038,6 +3217,13 @@ mod tests {
                 *reads += 1;
                 if *reads <= *self.follow_hidden_for.lock() {
                     return Ok(None);
+                }
+                if !self.opened.lock().is_empty() {
+                    let mut scripted = self.after_open_follow_reads.lock();
+                    if !scripted.is_empty() {
+                        let author = scripted.remove(0);
+                        return Ok(Some(node(0.0, 0.0, 100.0, 100.0, &author)));
+                    }
                 }
             }
             let present = self.present.lock();
@@ -3243,6 +3429,35 @@ mod tests {
             }
         );
         assert_eq!(refusal.code(), "target_open_screen_unchanged");
+        assert!(session.typed.lock().is_empty());
+        assert!(session.taps.lock().is_empty(), "arrival must not tap");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_transient_different_author_that_reverts_does_not_latch_arrival() {
+        // The dead link settles back on Bich Van, but one poll catches an adjacent card while
+        // TikTok is transitioning. That glimpse is shorter than HANDLE_GRACE and therefore
+        // proves no arrival; every later poll sees the original post again.
+        let session = ArrivalSession::new(TIKTOK, &post_page(Some("Follow Bich Van")))
+            .transiently_landing_on("Follow Chớp Nhoáng");
+
+        let refusal = open_target_by_hierarchy(
+            &session,
+            vietnamese(),
+            TIKTOK,
+            "https://www.tiktok.com/@someone/photo/1",
+            "someone",
+            &AtomicBool::new(false),
+        )
+        .await
+        .expect_err("a reverted transient author is not a structural arrival");
+
+        assert_eq!(
+            refusal,
+            ArrivalRefusal::ScreenNeverChanged {
+                author_label: "Bich Van".into()
+            }
+        );
         assert!(session.typed.lock().is_empty());
         assert!(session.taps.lock().is_empty(), "arrival must not tap");
     }
@@ -3498,12 +3713,37 @@ mod tests {
         /// `locate` answers that change once: `first` for the initial read, `rest` ever
         /// after. Consulted before `singles`.
         single_thens: Mutex<Vec<(String, Option<ElementBox>, ElementBox)>>,
+        /// Successive `locate` answers for one key, with the last answer repeating.
+        ///
+        /// A confirmed send needs all three states: dark before typing, armed afterwards,
+        /// then dark again after the tap. `single_thens` can express only two of them.
+        single_queues: Mutex<Vec<(String, Vec<Option<ElementBox>>)>>,
         /// `locate_all` / `locate_all_described` answers, by query value.
         multiples: Mutex<Vec<(String, Vec<ElementBox>)>>,
         /// Replacement answers installed after the first read of a key.
         after_first: Mutex<Vec<(String, Vec<ElementBox>)>>,
         /// Successive answers for a key, one per read, last one repeating.
         queues: Mutex<Vec<(String, Vec<Vec<ElementBox>>)>>,
+        /// Keys whose `locate` stops answering after a budget of ordinary reads.
+        ///
+        /// `0` fails from the first read. The element tables above can say "present",
+        /// "absent" and "changed"; none of them can say "the agent stopped answering
+        /// mid-flow", and which side of the Send tap that happens on is exactly what the
+        /// transport-error tests below have to control.
+        failing_after: Mutex<Vec<(String, usize)>>,
+        /// Keys whose list read stops answering after a budget of ordinary reads.
+        ///
+        /// Separate from `failing_after` because `UiSession::locate` and
+        /// `UiSession::locate_all` are different transport calls. The reply parent hunt uses
+        /// the latter, and a fake that can only fail single-element reads cannot prove that a
+        /// broken list request is not mistaken for an empty comment list.
+        all_failing_after: Mutex<Vec<(String, usize)>>,
+        /// Number of successful taps left before the transport starts failing.
+        tap_failing_after: Mutex<Option<usize>>,
+        /// Number of successful key-event writes left before the transport starts failing.
+        keys_failing_after: Mutex<Option<usize>>,
+        /// Every tap request, including ones rejected by the transport.
+        tap_attempts: Mutex<Vec<TapPoint>>,
         taps: Mutex<Vec<TapPoint>>,
         typed: Mutex<Vec<String>>,
         /// What went in as **real key events**, which is a different channel from `typed`.
@@ -3515,6 +3755,36 @@ mod tests {
     impl DrawerSession {
         fn with_single(self, key: &str, element: ElementBox) -> Self {
             self.singles.lock().push((key.to_string(), element, None));
+            self
+        }
+        /// `locate(key)` answers a transport error from the very first read.
+        fn with_failing(self, key: &str) -> Self {
+            self.failing_after.lock().push((key.to_string(), 0));
+            self
+        }
+        /// `locate(key)` answers normally `times` times, then errors for ever.
+        fn with_failing_after(self, key: &str, times: usize) -> Self {
+            self.failing_after.lock().push((key.to_string(), times));
+            self
+        }
+        /// `locate_all(key)` answers a transport error from the first read.
+        fn with_all_failing(self, key: &str) -> Self {
+            self.all_failing_after.lock().push((key.to_string(), 0));
+            self
+        }
+        /// `locate_all(key)` answers normally `times` times, then errors for ever.
+        fn with_all_failing_after(self, key: &str, times: usize) -> Self {
+            self.all_failing_after.lock().push((key.to_string(), times));
+            self
+        }
+        /// `tap` answers normally `times` times, then errors for ever.
+        fn with_tap_failing_after(self, times: usize) -> Self {
+            *self.tap_failing_after.lock() = Some(times);
+            self
+        }
+        /// `type_keys` answers normally `times` times, then errors for ever.
+        fn with_keys_failing_after(self, times: usize) -> Self {
+            *self.keys_failing_after.lock() = Some(times);
             self
         }
         /// Answers `times` times, then reports the element absent.
@@ -3549,6 +3819,11 @@ mod tests {
                 .push((key.to_string(), Some(first), rest));
             self
         }
+        /// Answers each state in order, then repeats the last state.
+        fn with_single_queue(self, key: &str, answers: Vec<Option<ElementBox>>) -> Self {
+            self.single_queues.lock().push((key.to_string(), answers));
+            self
+        }
         /// Answers `first` once, then `rest` for ever after.
         ///
         /// The composer check needs this: the reply placeholder is only meaningful
@@ -3565,6 +3840,13 @@ mod tests {
     #[async_trait::async_trait]
     impl UiSession for DrawerSession {
         async fn tap(&self, point: TapPoint) -> anyhow::Result<()> {
+            self.tap_attempts.lock().push(point.clone());
+            if let Some(remaining) = self.tap_failing_after.lock().as_mut() {
+                if *remaining == 0 {
+                    anyhow::bail!("transport error: tap stopped answering");
+                }
+                *remaining -= 1;
+            }
             self.taps.lock().push(point);
             Ok(())
         }
@@ -3577,6 +3859,12 @@ mod tests {
             Ok(())
         }
         async fn type_keys(&self, text: &str) -> anyhow::Result<()> {
+            if let Some(remaining) = self.keys_failing_after.lock().as_mut() {
+                if *remaining == 0 {
+                    anyhow::bail!("transport error: key events stopped answering");
+                }
+                *remaining -= 1;
+            }
             self.keyed.lock().push(text.to_string());
             Ok(())
         }
@@ -3605,6 +3893,28 @@ mod tests {
         async fn locate(&self, query: ElementQuery<'_>) -> anyhow::Result<Option<ElementBox>> {
             let wanted = query_value(query);
             {
+                // Checked before every table: a key can answer normally for its budget and
+                // then stop answering at all, which is the difference between "absent" and
+                // "the agent died" every transport-error test turns on.
+                let mut failing = self.failing_after.lock();
+                if let Some((_, remaining)) = failing.iter_mut().find(|(key, _)| key == wanted) {
+                    if *remaining == 0 {
+                        anyhow::bail!("transport error: agent stopped answering");
+                    }
+                    *remaining -= 1;
+                }
+            }
+            {
+                let mut queues = self.single_queues.lock();
+                if let Some((_, answers)) = queues.iter_mut().find(|(key, _)| key == wanted) {
+                    let answer = answers.first().cloned().unwrap_or(None);
+                    if answers.len() > 1 {
+                        answers.remove(0);
+                    }
+                    return Ok(answer);
+                }
+            }
+            {
                 let mut thens = self.single_thens.lock();
                 if let Some((_, first, rest)) = thens.iter_mut().find(|(key, _, _)| key == wanted) {
                     return Ok(Some(first.take().unwrap_or_else(|| rest.clone())));
@@ -3627,6 +3937,15 @@ mod tests {
         }
         async fn locate_all(&self, query: ElementQuery<'_>) -> anyhow::Result<Vec<ElementBox>> {
             let wanted = query_value(query);
+            {
+                let mut failing = self.all_failing_after.lock();
+                if let Some((_, remaining)) = failing.iter_mut().find(|(key, _)| key == wanted) {
+                    if *remaining == 0 {
+                        anyhow::bail!("transport error: hierarchy list stopped answering");
+                    }
+                    *remaining -= 1;
+                }
+            }
             {
                 let mut queues = self.queues.lock();
                 if let Some((_, answers)) = queues.iter_mut().find(|(key, _)| key == wanted) {
@@ -3682,6 +4001,28 @@ mod tests {
             enabled,
             clickable: true,
         }
+    }
+
+    fn root_mention_session() -> DrawerSession {
+        DrawerSession::default()
+            .with_single("bình luận", node(880.0, 900.0, 120.0, 120.0, "bình luận"))
+            .with_single(EDIT, node(199.0, 1175.0, 700.0, 100.0, ""))
+            .with_single_then(SEND_ID, send_button(false), send_button(true))
+    }
+
+    async fn send_root_with_one_mention(
+        session: &DrawerSession,
+    ) -> Result<HierarchySendOutcome, HierarchySendFailure> {
+        send_root_by_hierarchy(
+            session,
+            vietnamese(),
+            (1080.0, 2400.0),
+            "hello",
+            &["lt.gi".to_string()],
+            &AtomicBool::new(false),
+            String::new,
+        )
+        .await
     }
 
     #[tokio::test(start_paused = true)]
@@ -3929,6 +4270,393 @@ mod tests {
             outcome.identity, None,
             "an unconfirmed send must not claim an identity"
         );
+    }
+
+    /// **A transport error before the Send tap is a retryable verdict, never an `Err`.**
+    ///
+    /// The public error boundary is phase-aware, and known pre-Send interruptions use this
+    /// named verdict so they share the ordinary hierarchy finish path. An agent that stops
+    /// answering while the drawer is still opening provably posted nothing, so this result
+    /// must remain retryable.
+    #[tokio::test(start_paused = true)]
+    async fn a_transport_error_before_the_send_tap_is_a_retryable_verdict() {
+        let session = DrawerSession::default().with_failing("bình luận");
+        let outcome = send_root_by_hierarchy(
+            &session,
+            vietnamese(),
+            (1080.0, 2400.0),
+            "hello",
+            &[],
+            &AtomicBool::new(false),
+            String::new,
+        )
+        .await
+        .expect("a pre-tap transport error must come back as a verdict, not an Err");
+        assert_eq!(
+            outcome.verdict,
+            crate::tiktok_drawer::CommentVerdict::SendFlowInterrupted
+        );
+        assert!(!outcome.verdict.is_sent());
+        assert!(session.typed.lock().is_empty(), "nothing was ever typed");
+        assert!(session.taps.lock().is_empty(), "nothing was ever tapped");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn root_mention_transport_type_keys_failure_stops_before_send() {
+        let session = root_mention_session().with_keys_failing_after(0);
+
+        let outcome = send_root_with_one_mention(&session)
+            .await
+            .expect("a pre-Send transport failure is a retryable outcome");
+
+        assert_eq!(
+            outcome.verdict,
+            crate::tiktok_drawer::CommentVerdict::SendFlowInterrupted
+        );
+        assert_eq!(
+            session.tap_attempts.lock().len(),
+            2,
+            "only the drawer opener and composer focus may be attempted"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn root_mention_transport_initial_list_failure_stops_before_send() {
+        let session = root_mention_session().with_all_failing("android.widget.TextView");
+
+        let outcome = send_root_with_one_mention(&session)
+            .await
+            .expect("a pre-Send transport failure is a retryable outcome");
+
+        assert_eq!(
+            outcome.verdict,
+            crate::tiktok_drawer::CommentVerdict::SendFlowInterrupted
+        );
+        assert_eq!(session.tap_attempts.lock().len(), 2, "Send was untouched");
+        assert!(
+            session.keyed.lock().is_empty(),
+            "the picker was not typed into"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn root_mention_transport_waiting_list_failure_stops_before_send() {
+        let session = root_mention_session().with_all_failing_after("android.widget.TextView", 1);
+
+        let outcome = send_root_with_one_mention(&session)
+            .await
+            .expect("a pre-Send transport failure is a retryable outcome");
+
+        assert_eq!(
+            outcome.verdict,
+            crate::tiktok_drawer::CommentVerdict::SendFlowInterrupted
+        );
+        assert_eq!(session.tap_attempts.lock().len(), 2, "Send was untouched");
+        assert_eq!(session.keyed.lock().as_slice(), [" @lt.gi"]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn root_mention_transport_suggestion_tap_failure_stops_before_send() {
+        let session = root_mention_session()
+            .with_many_queue(
+                "android.widget.TextView",
+                vec![Vec::new(), vec![node(179.0, 291.0, 223.0, 50.0, "lt.gi")]],
+            )
+            .with_tap_failing_after(2);
+
+        let outcome = send_root_with_one_mention(&session)
+            .await
+            .expect("a pre-Send transport failure is a retryable outcome");
+
+        assert_eq!(
+            outcome.verdict,
+            crate::tiktok_drawer::CommentVerdict::SendFlowInterrupted
+        );
+        assert_eq!(
+            session.tap_attempts.lock().len(),
+            3,
+            "the failed suggestion tap must be the final tap attempt"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn root_mention_transport_composer_read_failure_stops_before_send() {
+        let session = root_mention_session()
+            .with_many_queue(
+                "android.widget.TextView",
+                vec![Vec::new(), vec![node(179.0, 291.0, 223.0, 50.0, "lt.gi")]],
+            )
+            .with_all_failing(EDIT);
+
+        let outcome = send_root_with_one_mention(&session)
+            .await
+            .expect("a pre-Send transport failure is a retryable outcome");
+
+        assert_eq!(
+            outcome.verdict,
+            crate::tiktok_drawer::CommentVerdict::SendFlowInterrupted
+        );
+        assert_eq!(
+            session.tap_attempts.lock().len(),
+            3,
+            "the suggestion tap may occur, but Send must not"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn root_mention_transport_post_pick_list_failure_stops_before_send() {
+        let session = root_mention_session()
+            .with_many_queue(
+                "android.widget.TextView",
+                vec![Vec::new(), vec![node(179.0, 291.0, 223.0, 50.0, "lt.gi")]],
+            )
+            .with_all_failing_after("android.widget.TextView", 2)
+            .with_many(EDIT, vec![node(64.0, 1379.0, 800.0, 88.0, "hello @lt.gi ")]);
+
+        let outcome = send_root_with_one_mention(&session)
+            .await
+            .expect("a pre-Send transport failure is a retryable outcome");
+
+        assert_eq!(
+            outcome.verdict,
+            crate::tiktok_drawer::CommentVerdict::SendFlowInterrupted
+        );
+        assert_eq!(
+            session.tap_attempts.lock().len(),
+            3,
+            "the suggestion tap may occur, but Send must not"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn root_mention_transport_final_composer_read_failure_stops_before_send() {
+        let session = root_mention_session()
+            .with_many_queue(
+                "android.widget.TextView",
+                vec![
+                    Vec::new(),
+                    vec![node(179.0, 291.0, 223.0, 50.0, "lt.gi")],
+                    Vec::new(),
+                ],
+            )
+            .with_many(EDIT, vec![node(64.0, 1379.0, 800.0, 88.0, "hello @lt.gi ")])
+            .with_all_failing_after(EDIT, 1);
+
+        let outcome = send_root_with_one_mention(&session)
+            .await
+            .expect("a pre-Send transport failure is a retryable outcome");
+
+        assert_eq!(
+            outcome.verdict,
+            crate::tiktok_drawer::CommentVerdict::SendFlowInterrupted
+        );
+        assert_eq!(
+            session.tap_attempts.lock().len(),
+            3,
+            "the root's final composer read failed before Send"
+        );
+    }
+
+    /// **A transport error after the Send tap stays an `Err` — the one ambiguous case.**
+    ///
+    /// The tap went out and the disarm read died, so whether the comment posted is genuinely
+    /// unknown. That direction must keep travelling the `SendFailure::after` channel: settling
+    /// it retryable is how a post ends up with two identical comments from one account.
+    #[tokio::test(start_paused = true)]
+    async fn a_transport_error_after_the_send_tap_stays_the_ambiguous_error() {
+        let session = DrawerSession::default()
+            .with_single("bình luận", node(880.0, 900.0, 120.0, 120.0, "bình luận"))
+            .with_single(EDIT, node(199.0, 1175.0, 700.0, 100.0, ""))
+            // Dark for the pre-type check, armed for the arm wait — and then the agent
+            // dies exactly on the disarm read, the first read after the tap.
+            .with_single_then(SEND_ID, send_button(false), send_button(true))
+            .with_failing_after(SEND_ID, 2);
+
+        let result = send_root_by_hierarchy(
+            &session,
+            vietnamese(),
+            (1080.0, 2400.0),
+            "hello",
+            &[],
+            &AtomicBool::new(false),
+            String::new,
+        )
+        .await;
+        assert!(
+            result.is_err(),
+            "an error at or after the tap must stay an Err for the after-effect channel"
+        );
+        assert!(
+            !session.typed.lock().is_empty(),
+            "the text was typed before the line went dead — this is the post-type case"
+        );
+    }
+
+    /// A failed hierarchy list read is not an empty comment list.
+    ///
+    /// The parent lookup used to collapse `locate_all` errors to `None`, then spend the scroll
+    /// budget and report `reply_parent_not_found`. That happened before Send and was retryable,
+    /// but it lied about why: the agent had stopped answering, so no observation established
+    /// that the parent was absent. Preserve the transport classification all the way out.
+    #[tokio::test(start_paused = true)]
+    async fn a_reply_list_transport_error_before_send_is_an_interrupted_verdict() {
+        let parent = CommentLocatorIdentity {
+            author_label: "Tồi nhưng tử tế".into(),
+            text: "Vc cái phao câu".into(),
+            locator_version: HIERARCHY_LOCATOR_VERSION.into(),
+            frame_sha256: "sha".into(),
+        };
+        let session = DrawerSession::default()
+            .with_single("bình luận", node(880.0, 900.0, 120.0, 120.0, "bình luận"))
+            .with_single(EDIT, node(199.0, 1175.0, 700.0, 100.0, ""))
+            .with_single(SEND_ID, send_button(false))
+            .with_all_failing(&parent.text);
+
+        let outcome = send_reply_by_hierarchy(
+            &session,
+            vietnamese(),
+            (1080.0, 2400.0),
+            &parent,
+            "reply text",
+            &AtomicBool::new(false),
+            String::new,
+        )
+        .await
+        .expect("the transport phase must be represented by the outcome")
+        .expect("a pre-Send transport failure is a verdict, not a parent refusal");
+
+        assert_eq!(
+            outcome.verdict,
+            crate::tiktok_drawer::CommentVerdict::SendFlowInterrupted
+        );
+        assert!(session.typed.lock().is_empty(), "nothing was typed");
+        assert_eq!(
+            session.taps.lock().len(),
+            1,
+            "only the drawer opener may have been tapped; Send was untouched"
+        );
+    }
+
+    /// The same reply path must switch classification exactly at the Send tap.
+    #[tokio::test(start_paused = true)]
+    async fn a_reply_transport_error_after_send_stays_the_ambiguous_error() {
+        let (bodies, replies, authors) = measured_rows();
+        let parent = CommentLocatorIdentity {
+            author_label: "Tồi nhưng tử tế".into(),
+            text: "Vc cái phao câu".into(),
+            locator_version: HIERARCHY_LOCATOR_VERSION.into(),
+            frame_sha256: "sha".into(),
+        };
+        let session = DrawerSession::default()
+            .with_single("bình luận", node(880.0, 900.0, 120.0, 120.0, "bình luận"))
+            .with_single(EDIT, node(199.0, 1175.0, 700.0, 100.0, ""))
+            .with_single_then(SEND_ID, send_button(false), send_button(true))
+            .with_failing_after(SEND_ID, 2)
+            .with_many(&parent.text, vec![bodies[1].clone()])
+            .with_many("Trả lời", replies)
+            .with_many_then(
+                EDIT,
+                vec![node(199.0, 2127.0, 700.0, 100.0, "Thêm bình luận...")],
+                vec![node(199.0, 1175.0, 700.0, 100.0, "Trả lời Tồi nhưng tử tế")],
+            )
+            .with_many("android.widget.Button", authors);
+
+        let result = send_reply_by_hierarchy(
+            &session,
+            vietnamese(),
+            (1080.0, 2400.0),
+            &parent,
+            "reply text",
+            &AtomicBool::new(false),
+            String::new,
+        )
+        .await;
+
+        assert!(
+            result.is_err(),
+            "a transport error after Send must remain the ambiguous outer error"
+        );
+        assert_eq!(session.typed.lock().as_slice(), ["reply text"]);
+        assert_eq!(
+            session.taps.lock().len(),
+            4,
+            "drawer, Reply, composer and Send must all have been tapped"
+        );
+    }
+
+    /// Expanding the folded section is not merely a search detail: a confirmed reply under
+    /// that parent is invisible to everyone except the posting account, so the outcome must
+    /// retain the fact all the way to the campaign evidence.
+    #[tokio::test(start_paused = true)]
+    async fn a_reply_found_after_expanding_folded_comments_marks_the_sent_outcome() {
+        let (bodies, replies, authors) = measured_rows();
+        let parent = CommentLocatorIdentity {
+            author_label: "Tồi nhưng tử tế".into(),
+            text: "Vc cái phao câu".into(),
+            locator_version: HIERARCHY_LOCATOR_VERSION.into(),
+            frame_sha256: "sha".into(),
+        };
+        let controls = controls_for(TIKTOK, "en", "38.3.2").expect("measured English set");
+        let send_key = controls
+            .label(TikTokControl::CommentSend)
+            .expect("English build measures Send")
+            .value();
+        let session = DrawerSession::default()
+            .with_single("comments", node(880.0, 900.0, 120.0, 120.0, "comments"))
+            .with_single(EDIT, node(199.0, 1175.0, 700.0, 100.0, ""))
+            .with_single(
+                "View folded comments",
+                node(180.0, 1870.0, 620.0, 72.0, "View folded comments"),
+            )
+            .with_single_queue(
+                send_key,
+                vec![
+                    Some(send_button(false)),
+                    Some(send_button(true)),
+                    Some(send_button(false)),
+                ],
+            )
+            // The first parent lookup sees only the open list. After its stationary scroll
+            // triggers the folded control, the same lookup sees the parent's real row.
+            .with_many_then(&parent.text, Vec::new(), vec![bodies[1].clone()])
+            .with_many("Reply", replies)
+            .with_many("android.widget.Button", authors)
+            .with_many(
+                "android.widget.TextView",
+                vec![node(140.0, 300.0, 600.0, 60.0, "an open-list row")],
+            )
+            .with_many_then(
+                EDIT,
+                vec![node(199.0, 2127.0, 700.0, 100.0, "Add comment...")],
+                vec![node(
+                    199.0,
+                    1175.0,
+                    700.0,
+                    100.0,
+                    "Reply to Tồi nhưng tử tế",
+                )],
+            );
+
+        let outcome = send_reply_by_hierarchy(
+            &session,
+            controls,
+            (1080.0, 2400.0),
+            &parent,
+            "reply text",
+            &AtomicBool::new(false),
+            String::new,
+        )
+        .await
+        .expect("no transport error")
+        .expect("the revealed parent is found");
+
+        assert_eq!(outcome.verdict, crate::tiktok_drawer::CommentVerdict::Sent);
+        assert!(
+            outcome.parent_was_folded,
+            "the successful reply must retain that its parent was folded"
+        );
+        assert_eq!(session.typed.lock().as_slice(), ["reply text"]);
+        assert_eq!(*session.swipes.lock(), 1, "the open list was tested once");
     }
 
     #[tokio::test(start_paused = true)]
@@ -4352,7 +5080,8 @@ mod tests {
             &["lt.gi".to_string()],
             &AtomicBool::new(false),
         )
-        .await;
+        .await
+        .expect("no transport error");
 
         // Typed as real keys — that is the only channel the picker reacts to — and with a
         // leading space, or the tag runs into the last word of the comment.
@@ -4393,7 +5122,8 @@ mod tests {
             &["lt.gi".to_string()],
             &AtomicBool::new(false),
         )
-        .await;
+        .await
+        .expect("no transport error");
         assert!(session.taps.lock().is_empty());
         assert_eq!(outcome.literal, vec!["lt.gi".to_string()]);
     }
@@ -4416,7 +5146,8 @@ mod tests {
             &["ai đó".to_string()],
             &AtomicBool::new(false),
         )
-        .await;
+        .await
+        .expect("no transport error");
         assert!(session.taps.lock().is_empty());
         assert!(session.keyed.lock().is_empty(), "nothing reached the shell");
         assert_eq!(outcome.untyped, vec!["ai đó".to_string()]);
@@ -4454,7 +5185,8 @@ mod tests {
             &[".lt.gi.mang.v".to_string()],
             &AtomicBool::new(false),
         )
-        .await;
+        .await
+        .expect("no transport error");
 
         assert!(
             session.taps.lock().is_empty(),
@@ -4486,7 +5218,8 @@ mod tests {
             &[".lt.gi.mang.v".to_string(), "lt.gi".to_string()],
             &AtomicBool::new(false),
         )
-        .await;
+        .await
+        .expect("no transport error");
 
         assert_eq!(session.taps.lock().len(), 1);
         assert_eq!(outcome.linked, Vec::<String>::new());
@@ -4525,7 +5258,8 @@ mod tests {
             &[".lt.gi.mang.v".to_string()],
             &AtomicBool::new(false),
         )
-        .await;
+        .await
+        .expect("no transport error");
 
         assert_eq!(session.taps.lock().len(), 1);
         assert_eq!(outcome.linked, vec![".lt.gi.mang.v".to_string()]);
@@ -4565,7 +5299,8 @@ mod tests {
             &[".LT.GI.MANG.V".to_string()],
             &AtomicBool::new(false),
         )
-        .await;
+        .await
+        .expect("no transport error");
 
         assert_eq!(outcome.linked, vec![".LT.GI.MANG.V".to_string()]);
         assert!(outcome.unverified.is_empty(), "the mention did land");
@@ -5163,6 +5898,23 @@ mod tests {
     const VIDEO_CAPTION: &str = "một ngày ở Đà Lạt của mình, đi đâu ăn gì cho đủ";
     const OTHER_CAPTION: &str = "một bài hoàn toàn khác, cũng đủ dài để là một caption";
 
+    fn png_picture(tone: u8, compression: CompressionType, filter: FilterType) -> Vec<u8> {
+        let image = RgbImage::from_fn(64, 128, |x, y| {
+            let value = tone.wrapping_add((x * 3 + y * 5) as u8);
+            Rgb([value, value.wrapping_add(17), value.wrapping_add(43)])
+        });
+        let mut encoded = Vec::new();
+        PngEncoder::new_with_quality(&mut encoded, compression, filter)
+            .write_image(
+                image.as_raw(),
+                image.width(),
+                image.height(),
+                ColorType::Rgb8.into(),
+            )
+            .expect("encode fixture PNG");
+        encoded
+    }
+
     #[async_trait::async_trait]
     impl UiSession for VideoSession {
         async fn tap(&self, _point: crate::types::TapPoint) -> anyhow::Result<()> {
@@ -5411,6 +6163,28 @@ mod tests {
         }
     }
 
+    /// A camera whose successive frames are already encoded. This is distinct from
+    /// `CountingCamera`: sentinel bytes cannot exercise `picture_digest_of`, because decoding
+    /// them returns `None` and the walk deliberately retains undecodable evidence.
+    struct EncodedCamera {
+        frames: Vec<Vec<u8>>,
+        taken: Mutex<usize>,
+    }
+
+    #[async_trait::async_trait]
+    impl SlideCamera for EncodedCamera {
+        async fn capture(&self) -> Option<Vec<u8>> {
+            let mut taken = self.taken.lock();
+            let frame = self
+                .frames
+                .get(*taken)
+                .or_else(|| self.frames.last())?
+                .clone();
+            *taken += 1;
+            Some(frame)
+        }
+    }
+
     async fn walk(session: &CarouselSession) -> (PhotoWalk, usize, usize) {
         let camera = CountingCamera {
             taken: Mutex::new(0),
@@ -5427,6 +6201,48 @@ mod tests {
         let swipes = *session.swipes.lock();
         let backs = *session.backs.lock();
         (result, swipes, backs)
+    }
+
+    /// A no-op carousel swipe can still produce a new encoded byte stream and a stale-looking
+    /// `2 / 2` counter. Evidence is the decoded picture, not those bytes: the repeated slide
+    /// must stay one frame even though the walk performed its single authorised swipe.
+    #[tokio::test]
+    async fn two_png_encodings_of_one_stuck_slide_are_one_evidence_frame() {
+        let fast = png_picture(21, CompressionType::Fast, FilterType::NoFilter);
+        let compact = png_picture(21, CompressionType::Best, FilterType::Paeth);
+        assert_ne!(fast, compact, "the stream encodings must really differ");
+        assert_eq!(
+            crate::nurture::picture_digest_of(&fast),
+            crate::nurture::picture_digest_of(&compact),
+            "the decoded picture is the same"
+        );
+
+        let session = CarouselSession::new(vec![Some((2, 2))]);
+        let camera = EncodedCamera {
+            frames: vec![fast, compact],
+            taken: Mutex::new(0),
+        };
+        let gestures = tokio::sync::Mutex::new(());
+        let result = photograph_photo_post(
+            &session,
+            &camera,
+            "com.ss.android.ugc.trill",
+            &gestures,
+            Duration::from_millis(0),
+        )
+        .await;
+
+        assert_eq!(
+            result.frames.len(),
+            1,
+            "one decoded slide, one evidence frame"
+        );
+        assert_eq!(
+            *session.swipes.lock(),
+            1,
+            "the 2 / 2 counter permits one swipe"
+        );
+        assert_eq!(result.counters, vec![Some((2, 2))]);
     }
 
     /// A three-slide post is walked to its end and no further.

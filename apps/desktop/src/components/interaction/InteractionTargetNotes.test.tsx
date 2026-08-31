@@ -55,10 +55,10 @@ function note(over: Partial<InteractionTargetNote>): InteractionTargetNote {
   };
 }
 
-function show(notes: InteractionTargetNote[]) {
+function show(notes: InteractionTargetNote[], shownDetail = detail) {
   render(
     <InteractionCampaignDetailView
-      detail={detail}
+      detail={shownDetail}
       artifacts={[]}
       notes={notes}
       devices={[]}
@@ -141,5 +141,29 @@ describe("web lookup panel", () => {
   it("renders nothing at all when there are no targets to describe", () => {
     show([]);
     expect(screen.queryByText(/bài tra được/)).not.toBeInTheDocument();
+  });
+});
+
+describe("assignment evidence", () => {
+  it("warns when a successful reply lives under a folded parent", () => {
+    const foldedAssignment = {
+      id: "assignment-folded",
+      targetKey: "content:1",
+      ordinal: 1,
+      actorUdid: "actor-a",
+      parentAssignmentId: "assignment-root",
+      state: "succeeded" as const,
+      preparedText: "Mình cũng thấy vậy",
+      errorCode: null,
+      parentWasFolded: true,
+    };
+
+    show([], { ...detail, assignments: [foldedAssignment] });
+
+    expect(
+      screen.getByText(
+        "Bình luận cha bị TikTok gấp; phản hồi này đã gửi nhưng người khác không nhìn thấy.",
+      ),
+    ).toBeInTheDocument();
   });
 });

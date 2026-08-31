@@ -1068,6 +1068,321 @@ mod interaction_tests {
         std::fs::remove_file(path).expect("remove fixture database");
     }
 
+    /// A reply can succeed under TikTok's folded section, which means it posted but nobody
+    /// else can see it. The runner stores that distinction in evidence; loading a campaign
+    /// must turn it into a typed desktop field without exposing the evidence blob itself.
+    #[test]
+    fn a_folded_parent_survives_database_hydration_and_desktop_serialization() {
+        let (db, path) = fixture();
+        let request = request();
+        let plan = plan_threads(&request).expect("plan");
+        let campaign = db
+            .create_interaction_campaign(&request, &plan)
+            .expect("create");
+        let ids: Vec<String> = db
+            .get_interaction_campaign(&campaign)
+            .expect("read")
+            .expect("present")
+            .assignments
+            .iter()
+            .map(|assignment| assignment.id.clone())
+            .collect();
+        assert!(ids.len() >= 2, "need a current and a legacy evidence row");
+
+        db.update_interaction_assignment_state(
+            &ids[0],
+            ThreadMessageState::Succeeded,
+            None,
+            None,
+            Some(r#"{"parentWasFolded":true}"#),
+        )
+        .expect("store folded evidence");
+        db.update_interaction_assignment_state(
+            &ids[1],
+            ThreadMessageState::Succeeded,
+            None,
+            None,
+            Some(r#"{"send":{"verdict":"sent"}}"#),
+        )
+        .expect("store legacy evidence");
+
+        let detail = db
+            .get_interaction_campaign(&campaign)
+            .expect("read")
+            .expect("present");
+        let folded = detail
+            .assignments
+            .iter()
+            .find(|assignment| assignment.id == ids[0])
+            .expect("folded row");
+        let legacy = detail
+            .assignments
+            .iter()
+            .find(|assignment| assignment.id == ids[1])
+            .expect("legacy row");
+        let folded_wire = serde_json::to_value(folded).expect("serialize folded row");
+        let legacy_wire = serde_json::to_value(legacy).expect("serialize legacy row");
+
+        assert_eq!(folded_wire["parentWasFolded"], true);
+        assert_eq!(legacy_wire["parentWasFolded"], false);
+        assert!(
+            folded_wire.get("evidenceJson").is_none(),
+            "desktop still must not receive internal evidence"
+        );
+
+        std::fs::remove_file(path).expect("remove fixture database");
+    }
+
+    /// **A target-wide failure cannot lower a sibling that already succeeded.**
+    ///
+    /// A shared evidence pass that could not photograph the post used to fail the whole
+    /// target through a `protected` set snapshotted once when the task began. A sibling that
+    /// reached `Succeeded` — its comment public — *after* that snapshot was not in the set,
+    /// so it was stamped `Failed`, which is retryable, and the next retry posted the same
+    /// comment a second time. The guard is now in the SQL, so the stale snapshot cannot
+    /// matter.
+    #[test]
+    fn a_target_failure_cannot_lower_a_sibling_that_already_succeeded() {
+        use crate::interaction::ThreadMessageState;
+        let (db, path) = fixture();
+        let request = request();
+        let plan = plan_threads(&request).expect("plan");
+        let campaign = db
+            .create_interaction_campaign(&request, &plan)
+            .expect("create");
+        let ids: Vec<String> = db
+            .get_interaction_campaign(&campaign)
+            .expect("read")
+            .expect("present")
+            .assignments
+            .iter()
+            .map(|assignment| assignment.id.clone())
+            .collect();
+        assert!(ids.len() >= 2, "need two assignments to model the race");
+
+        // One sibling's comment is public.
+        db.update_interaction_assignment_state(
+            &ids[0],
+            ThreadMessageState::Succeeded,
+            None,
+            None,
+            None,
+        )
+        .expect("succeed one");
+
+        // A later, stale target-wide failure tries to lower it, and is refused; the idle
+        // sibling IS failed.
+        assert!(
+            !db.fail_interaction_assignment_unless_settled(&ids[0], "evidence chết")
+                .expect("guarded write"),
+            "a public comment must never be lowered to failed — a retry would repost it"
+        );
+        assert!(
+            db.fail_interaction_assignment_unless_settled(&ids[1], "evidence chết")
+                .expect("guarded write"),
+            "the still-idle sibling is failed as expected"
+        );
+
+        let after = db
+            .get_interaction_campaign(&campaign)
+            .expect("read")
+            .expect("present");
+        let state_of = |id: &str| {
+            after
+                .assignments
+                .iter()
+                .find(|assignment| assignment.id == id)
+                .expect("assignment present")
+                .state
+        };
+        assert_eq!(state_of(&ids[0]), ThreadMessageState::Succeeded);
+        assert_eq!(state_of(&ids[1]), ThreadMessageState::Failed);
+
+        std::fs::remove_file(path).expect("remove fixture database");
+    }
+
+    /// **An assignment stays claimed through preparation, and a settled one never.**
+    ///
+    /// Retry starts a worker with no campaign-wide lock, and `run_cohort` used to move the
+    /// row to `preparing` unconditionally — so two rapid retries of the same manual
+    /// assignment both proceeded and posted the same deterministic text twice, on a real
+    /// account with no delete path. The claim is a CAS out of an idle state.
+    #[test]
+    fn an_assignment_stays_claimed_through_preparation_and_a_settled_one_never() {
+        use crate::interaction::ThreadMessageState;
+        let (db, path) = fixture();
+        let request = request();
+        let plan = plan_threads(&request).expect("plan");
+        let campaign = db
+            .create_interaction_campaign(&request, &plan)
+            .expect("create");
+        let ids: Vec<String> = db
+            .get_interaction_campaign(&campaign)
+            .expect("read")
+            .expect("present")
+            .assignments
+            .iter()
+            .map(|assignment| assignment.id.clone())
+            .collect();
+        assert!(ids.len() >= 2, "need two assignments");
+
+        // First claim wins. Persisting its prepared text must keep that claim held: publishing
+        // `ready` here re-opens the exact row to a concurrent retry before either worker sends.
+        let ownership_revision = db
+            .claim_interaction_assignment_for_send(&ids[0])
+            .expect("claim")
+            .expect("the first worker claims the assignment");
+        let prepared = PreparedThreadMessage::new(&plan.assignments[0], "nội dung đã soạn");
+        db.prepare_interaction_assignment(&ids[0], ownership_revision, &prepared)
+            .expect("persist prepared text while holding the claim")
+            .expect("the same worker still owns preparation");
+        assert!(
+            db.claim_interaction_assignment_for_send(&ids[0])
+                .expect("claim")
+                .is_none(),
+            "preparation must not publish a claimable state — two workers would post twice"
+        );
+
+        // A public comment can never be re-claimed for a send.
+        db.update_interaction_assignment_state(
+            &ids[1],
+            ThreadMessageState::Succeeded,
+            None,
+            None,
+            None,
+        )
+        .expect("succeed one");
+        assert!(
+            db.claim_interaction_assignment_for_send(&ids[1])
+                .expect("claim")
+                .is_none(),
+            "a succeeded assignment must never be re-claimed"
+        );
+
+        std::fs::remove_file(path).expect("remove fixture database");
+    }
+
+    /// **Only one worker may cross the public-effect boundary.**
+    ///
+    /// Holding `preparing` through drafting closes the first race, but the actual Send still
+    /// needs its own CAS. The winner records both `sending` and the exact intent atomically;
+    /// every loser must stop before it calls the device driver.
+    #[test]
+    fn only_one_worker_can_begin_sending_an_assignment() {
+        let (db, path) = fixture();
+        let request = request();
+        let plan = plan_threads(&request).expect("plan");
+        let campaign = db
+            .create_interaction_campaign(&request, &plan)
+            .expect("create");
+        let assignment_id = db
+            .get_interaction_campaign(&campaign)
+            .expect("read")
+            .expect("present")
+            .assignments[0]
+            .id
+            .clone();
+        let ownership_revision = db
+            .claim_interaction_assignment_for_send(&assignment_id)
+            .expect("claim")
+            .expect("claim won");
+        let prepared = PreparedThreadMessage::new(&plan.assignments[0], "nội dung đã soạn");
+        let send_revision = db
+            .prepare_interaction_assignment(&assignment_id, ownership_revision, &prepared)
+            .expect("prepare")
+            .expect("preparation retains ownership");
+
+        assert!(
+            db.begin_interaction_assignment_send(&assignment_id, send_revision, "post_comment")
+                .expect("first effect claim"),
+            "the worker holding `preparing` crosses the effect boundary"
+        );
+        assert!(
+            !db.begin_interaction_assignment_send(&assignment_id, send_revision, "reply_comment")
+                .expect("second effect claim"),
+            "a second worker must stop before touching the device"
+        );
+
+        let (state, intent): (String, Option<String>) = db
+            .conn()
+            .expect("connection")
+            .query_row(
+                "SELECT state,effect_intent FROM interaction_assignments WHERE id=?1",
+                params![assignment_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("read effect claim");
+        assert_eq!(state, "sending");
+        assert_eq!(intent.as_deref(), Some("post_comment"));
+
+        std::fs::remove_file(path).expect("remove fixture database");
+    }
+
+    /// A stale worker must not steal a row that failed and was claimed again (the ABA race).
+    #[test]
+    fn an_old_ownership_revision_cannot_prepare_or_send_after_a_new_claim() {
+        let (db, path) = fixture();
+        let request = request();
+        let plan = plan_threads(&request).expect("plan");
+        let campaign = db
+            .create_interaction_campaign(&request, &plan)
+            .expect("create");
+        let assignment_id = db
+            .get_interaction_campaign(&campaign)
+            .expect("read")
+            .expect("present")
+            .assignments[0]
+            .id
+            .clone();
+        let stale_revision = db
+            .claim_interaction_assignment_for_send(&assignment_id)
+            .expect("first claim")
+            .expect("the first worker owns the row");
+        assert!(db
+            .fail_interaction_assignment_unless_settled(&assignment_id, "target failed")
+            .expect("take the row out of preparing"));
+        let current_revision = db
+            .claim_interaction_assignment_for_send(&assignment_id)
+            .expect("replacement claim")
+            .expect("the replacement worker owns the row");
+
+        let stale = PreparedThreadMessage::new(&plan.assignments[0], "stale draft");
+        assert!(
+            db.prepare_interaction_assignment(&assignment_id, stale_revision, &stale)
+                .expect("stale conditional prepare")
+                .is_none(),
+            "state returned to `preparing`, but it belongs to the replacement worker"
+        );
+        assert!(
+            !db.begin_interaction_assignment_send(&assignment_id, stale_revision, "post_comment")
+                .expect("stale effect claim"),
+            "the stale worker must not cross the effect boundary after ABA"
+        );
+
+        let current = PreparedThreadMessage::new(&plan.assignments[0], "current draft");
+        let send_revision = db
+            .prepare_interaction_assignment(&assignment_id, current_revision, &current)
+            .expect("current conditional prepare")
+            .expect("the replacement worker keeps ownership");
+        assert!(db
+            .begin_interaction_assignment_send(&assignment_id, send_revision, "post_comment")
+            .expect("current effect claim"));
+        let prepared_json: Option<String> = db
+            .conn()
+            .expect("connection")
+            .query_row(
+                "SELECT prepared_json FROM interaction_assignments WHERE id=?1",
+                params![assignment_id],
+                |row| row.get(0),
+            )
+            .expect("read prepared payload");
+        assert!(prepared_json
+            .as_deref()
+            .is_some_and(|json| json.contains("current draft") && !json.contains("stale draft")));
+
+        std::fs::remove_file(path).expect("remove fixture database");
+    }
+
     /// A thread across the whole farm has to fit the schema, and until migration 14 it did
     /// not.
     ///
@@ -1200,7 +1515,14 @@ mod interaction_tests {
     #[test]
     fn a_campaign_whose_worker_died_is_closed_out_and_stays_safe_to_retry() {
         let (db, path) = fixture();
-        let request = request();
+        let mut request = request();
+        request.actor_udids = vec![
+            "actor-a".into(),
+            "actor-b".into(),
+            "actor-c".into(),
+            "actor-d".into(),
+        ];
+        request.message_count = 4;
         let plan = plan_threads(&request).expect("plan");
         let campaign_id = db
             .create_interaction_campaign(&request, &plan)
@@ -1211,7 +1533,12 @@ mod interaction_tests {
             .get_interaction_campaign(&campaign_id)
             .expect("get")
             .expect("exists");
-        let (sending, waiting) = (&detail.assignments[0], &detail.assignments[1]);
+        let (sending, preparing, ready, waiting) = (
+            &detail.assignments[0],
+            &detail.assignments[1],
+            &detail.assignments[2],
+            &detail.assignments[3],
+        );
         db.update_interaction_assignment_state(
             &sending.id,
             ThreadMessageState::Sending,
@@ -1220,6 +1547,20 @@ mod interaction_tests {
             None,
         )
         .expect("one message was in flight");
+        assert!(db
+            .claim_interaction_assignment_for_send(&preparing.id)
+            .expect("one worker held its preparation claim")
+            .is_some());
+        // `ready` is retained in the schema for rows written by older builds. New runtime
+        // preparation holds `preparing`, but startup must still recover this legacy state.
+        db.update_interaction_assignment_state(
+            &ready.id,
+            ThreadMessageState::Ready,
+            None,
+            None,
+            None,
+        )
+        .expect("model a legacy ready row");
 
         assert_eq!(
             db.interrupt_orphaned_interaction_campaigns()
@@ -1258,7 +1599,17 @@ mod interaction_tests {
                 .contains(&sending.id),
             "an interrupted send must never become retryable"
         );
-        // A message that never touched the device is untouched, and still repairable.
+        // A worker claim died with the process. Both pre-effect states become explicit Failed,
+        // which releases them back to retry without pretending a worker still owns them.
+        for stranded in [preparing, ready] {
+            assert_eq!(by_id(&stranded.id), ThreadMessageState::Failed);
+            assert!(
+                crate::interaction_campaign::retryable_assignments(&after.assignments, None)
+                    .contains(&stranded.id),
+                "a pre-effect orphan must be retryable"
+            );
+        }
+        // Work no worker had claimed stays queued and repairable too.
         assert_eq!(by_id(&waiting.id), ThreadMessageState::Queued);
         assert!(
             crate::interaction_campaign::retryable_assignments(&after.assignments, None)
@@ -1394,16 +1745,25 @@ mod interaction_tests {
         assert_eq!(detail.assignments.len(), 2);
         let first = &plan.assignments[0];
         let prepared = PreparedThreadMessage::new(first, "  món này   nhìn ngon quá ");
-        db.prepare_interaction_assignment(&detail.assignments[0].id, &prepared)
-            .expect("prepare");
-        db.update_interaction_assignment_state(
-            &detail.assignments[0].id,
-            ThreadMessageState::Sending,
-            None,
-            Some("post_comment"),
-            None,
-        )
-        .expect("intent");
+        let ownership_revision = db
+            .claim_interaction_assignment_for_send(&detail.assignments[0].id)
+            .expect("claim")
+            .expect("claim won");
+        let send_revision = db
+            .prepare_interaction_assignment(
+                &detail.assignments[0].id,
+                ownership_revision,
+                &prepared,
+            )
+            .expect("prepare")
+            .expect("preparation retained ownership");
+        assert!(db
+            .begin_interaction_assignment_send(
+                &detail.assignments[0].id,
+                send_revision,
+                "post_comment",
+            )
+            .expect("intent"));
         db.update_interaction_assignment_state(
             &detail.assignments[0].id,
             ThreadMessageState::Succeeded,

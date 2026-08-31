@@ -2528,7 +2528,7 @@ struct EngineCommentSource<'a> {
 #[derive(Default)]
 struct SlideEvidence {
     /// The first slide offered, with its digest so a repeat can be recognised.
-    first: Option<(u64, Vec<u8>)>,
+    first: Option<(SlideDigest, Vec<u8>)>,
     /// The most recent slide whose picture differed from the first.
     last: Option<Vec<u8>>,
     /// How many slides were offered, duplicates included.
@@ -2548,7 +2548,7 @@ impl SlideEvidence {
     /// one frame here, and the sheet then says "one khung" instead of pasting it twice.
     fn offer(&mut self, frame: Vec<u8>) {
         self.offered = self.offered.saturating_add(1);
-        let digest = frame_digest(&frame);
+        let digest = SlideDigest::of(&frame);
         match &self.first {
             None => self.first = Some((digest, frame)),
             Some((seen, _)) if *seen == digest => {}
@@ -2570,6 +2570,22 @@ impl SlideEvidence {
             .chain(taken.last)
             .collect();
         (frames, taken.offered)
+    }
+}
+
+/// Identity for one slide frame. Live frames compare decoded picture pixels and ignore the
+/// status bar; malformed fixture bytes retain deterministic encoded-byte behavior.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SlideDigest {
+    Picture(u64),
+    EncodedFrame(u64),
+}
+
+impl SlideDigest {
+    fn of(frame: &[u8]) -> Self {
+        picture_digest_of(frame)
+            .map(Self::Picture)
+            .unwrap_or_else(|| Self::EncodedFrame(frame_digest(frame)))
     }
 }
 
@@ -3022,13 +3038,67 @@ mod tests {
 
 #[cfg(test)]
 mod slide_evidence_tests {
-    use super::SlideEvidence;
+    use super::{frame_digest, picture_digest_of, SlideEvidence};
+    use image::codecs::png::{CompressionType, FilterType, PngEncoder};
+    use image::{ColorType, ImageEncoder, Rgb, RgbImage};
 
     fn frame(byte: u8) -> Vec<u8> {
         // Long enough that `frame_digest`'s 512-point stride actually samples the difference.
         let mut bytes = vec![7u8; 4096];
         bytes[2048] = byte;
         bytes
+    }
+
+    fn png_frame(tone: u8, compression: CompressionType, filter: FilterType) -> Vec<u8> {
+        let image = RgbImage::from_fn(48, 48, |x, y| {
+            let value = tone.wrapping_add((x * 3 + y * 5) as u8);
+            Rgb([value, value.wrapping_add(17), value.wrapping_add(43)])
+        });
+        let mut encoded = Vec::new();
+        PngEncoder::new_with_quality(&mut encoded, compression, filter)
+            .write_image(
+                image.as_raw(),
+                image.width(),
+                image.height(),
+                ColorType::Rgb8.into(),
+            )
+            .expect("encode fixture PNG");
+        encoded
+    }
+
+    /// The stream can encode the same decoded picture into different bytes. Evidence is about
+    /// what was visible on the slide, so those encodings must collapse to one frame.
+    #[test]
+    fn two_encodings_of_the_same_picture_are_one_slide_frame() {
+        let fast = png_frame(21, CompressionType::Fast, FilterType::NoFilter);
+        let compact = png_frame(21, CompressionType::Best, FilterType::Paeth);
+        assert_ne!(frame_digest(&fast), frame_digest(&compact));
+        assert_eq!(picture_digest_of(&fast), picture_digest_of(&compact));
+
+        let mut evidence = SlideEvidence::default();
+        evidence.offer(fast);
+        evidence.offer(compact);
+        assert_eq!(evidence.drain().0.len(), 1);
+    }
+
+    /// Distinct decoded pictures stay distinct, while undecodable fixtures retain the old,
+    /// deterministic byte-hash fallback instead of all collapsing into an `unknown` bucket.
+    #[test]
+    fn different_pictures_and_undecodable_fallbacks_stay_distinct() {
+        let mut pictures = SlideEvidence::default();
+        pictures.offer(png_frame(21, CompressionType::Fast, FilterType::NoFilter));
+        pictures.offer(png_frame(88, CompressionType::Best, FilterType::Paeth));
+        assert_eq!(pictures.drain().0.len(), 2);
+
+        let invalid_a = frame(1);
+        let invalid_b = frame(2);
+        assert_eq!(picture_digest_of(&invalid_a), None);
+        assert_eq!(picture_digest_of(&invalid_b), None);
+        let mut fallback = SlideEvidence::default();
+        fallback.offer(invalid_a.clone());
+        fallback.offer(invalid_a);
+        fallback.offer(invalid_b);
+        assert_eq!(fallback.drain().0.len(), 2);
     }
 
     /// First and last, and the reason it is two rather than one per slide is arithmetic: the

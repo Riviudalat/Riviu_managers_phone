@@ -17,6 +17,7 @@ use uuid::Uuid;
 use crate::driver::UiSession;
 use crate::human_behavior::pick_direction_seeded;
 use crate::interaction::{PreparedThreadMessage, ThreadSendEvidence};
+use crate::interaction_target::SendFailure;
 #[cfg(test)]
 use crate::openai_client::pick_from_pool;
 use crate::openai_client::{
@@ -176,32 +177,34 @@ impl NurtureEngine {
     /// prepared text/hash before invoking this method. This deliberately keeps
     /// the same frame-confirmed drawer contract as nurture comments, but does
     /// not call an AI provider while the composer is open.
-    pub async fn send_prepared_thread_comment(
+    pub(crate) async fn send_prepared_thread_comment(
         &self,
         udid: &str,
         session: &dyn UiSession,
         gestures: &tokio::sync::Mutex<()>,
         prepared: &PreparedThreadMessage,
         stop: &AtomicBool,
-    ) -> anyhow::Result<ThreadSendEvidence> {
+    ) -> Result<ThreadSendEvidence, SendFailure> {
         if !session.supports_text_input() {
-            return Err(anyhow!("text_channel_unavailable"));
+            return Err(SendFailure::before(anyhow!("text_channel_unavailable")));
         }
         let Some(open_bytes) = self.frames.latest(udid) else {
-            return Err(anyhow!("frame_unavailable"));
+            return Err(SendFailure::before(anyhow!("frame_unavailable")));
         };
         let open_image = image::load_from_memory(&open_bytes)
-            .map_err(|_| anyhow!("frame_decode_failed"))?
+            .map_err(|_| SendFailure::before(anyhow!("frame_decode_failed")))?
             .to_rgb8();
         // Refuse rather than fabricate: this path taps composer and Send, so a wrong
         // multiplier publishes a comment somewhere nobody chose.
-        let screen_size = crate::screen::measured_screen_size(session).await?;
+        let screen_size = crate::screen::measured_screen_size(session)
+            .await
+            .map_err(SendFailure::before)?;
         // Locate the rail per frame (handles already-followed cards where the
         // red badge is hidden). Fail the attempt rather than tapping the
         // layout-2 fallback constants blind — on a layout-1 card that lands on
         // the Save icon and silently bookmarks the video.
         let rail = screen::locate_action_rail(&open_image)
-            .ok_or_else(|| anyhow!("action_rail_not_located"))?;
+            .ok_or_else(|| SendFailure::before(anyhow!("action_rail_not_located")))?;
         let point = |x: f64, y: f64| {
             self.next_touch_point(
                 udid,
@@ -219,7 +222,7 @@ impl NurtureEngine {
             session
                 .tap(point(rail.x, rail.comment_y))
                 .await
-                .map_err(|e| anyhow!("open_comment_drawer: {e}"))?;
+                .map_err(|e| SendFailure::before(anyhow!("open_comment_drawer: {e}")))?;
         }
         let drawer = self
             .wait_for_frame(udid, Duration::from_secs(6), stop, |img| {
@@ -229,21 +232,23 @@ impl NurtureEngine {
                 )
             })
             .await
-            .ok_or_else(|| anyhow!("comment_drawer_not_confirmed"))?;
+            .ok_or_else(|| SendFailure::before(anyhow!("comment_drawer_not_confirmed")))?;
         if screen::comment_drawer_state(&drawer).0 != CommentDrawer::Open {
-            return Err(anyhow!("comment_drawer_has_existing_draft"));
+            return Err(SendFailure::before(anyhow!(
+                "comment_drawer_has_existing_draft"
+            )));
         }
         sleep_interruptible(COMMENT_DRAWER_SETTLE, stop).await;
         let before_typing = self
             .frames
             .latest(udid)
-            .ok_or_else(|| anyhow!("frame_unavailable_before_typing"))?;
+            .ok_or_else(|| SendFailure::before(anyhow!("frame_unavailable_before_typing")))?;
         {
             let _guard = gestures.lock().await;
             session
                 .tap(point(screen::COMMENT_INPUT.0, screen::COMMENT_INPUT.1))
                 .await
-                .map_err(|e| anyhow!("focus_comment_input: {e}"))?;
+                .map_err(|e| SendFailure::before(anyhow!("focus_comment_input: {e}")))?;
             sleep_interruptible(COMMENT_INPUT_SETTLE, stop).await;
             session
                 // The literal prefix, because this path cannot reach TikTok's suggestion list
@@ -256,7 +261,7 @@ impl NurtureEngine {
                     prepared.text
                 ))
                 .await
-                .map_err(|e| anyhow!("type_comment: {e}"))?;
+                .map_err(|e| SendFailure::before(anyhow!("type_comment: {e}")))?;
         }
         let changed = self
             .wait_for_new_frame(
@@ -277,9 +282,9 @@ impl NurtureEngine {
         let armed_bytes = self
             .frames
             .latest(udid)
-            .ok_or_else(|| anyhow!("armed_frame_missing"))?;
+            .ok_or_else(|| SendFailure::before(anyhow!("armed_frame_missing")))?;
         if armed_frame.is_none() {
-            return Err(anyhow!("send_not_armed"));
+            return Err(SendFailure::before(anyhow!("send_not_armed")));
         }
         let before_send = frame_digest(&armed_bytes);
         {
@@ -287,7 +292,7 @@ impl NurtureEngine {
             session
                 .tap(point(screen::SEND_BUTTON.0, screen::SEND_BUTTON.1))
                 .await
-                .map_err(|e| anyhow!("tap_send: {e}"))?;
+                .map_err(|e| SendFailure::after(anyhow!("tap_send: {e}")))?;
         }
         // "Ready to type" and "sent" are the same classification — an open,
         // unarmed drawer — separated only by when they were observed. So the
@@ -309,7 +314,7 @@ impl NurtureEngine {
                 |img| screen::comment_drawer_state(img).0 == CommentDrawer::Open,
             )
             .await
-            .ok_or_else(|| anyhow!("send_clear_not_confirmed"))?;
+            .ok_or_else(|| SendFailure::after(anyhow!("send_clear_not_confirmed")))?;
         self.close_comment_ui(udid, session, gestures, screen_size, stop)
             .await;
         Ok(ThreadSendEvidence {
@@ -322,7 +327,7 @@ impl NurtureEngine {
     /// Continue a comment drawer after the locator has identified the exact
     /// parent and its Reply control. The caller owns the identity proof; this
     /// method only performs the same armed/cleared composer checks.
-    pub async fn send_prepared_thread_reply(
+    pub(crate) async fn send_prepared_thread_reply(
         &self,
         udid: &str,
         session: &dyn UiSession,
@@ -330,20 +335,22 @@ impl NurtureEngine {
         reply_point: TapPoint,
         prepared: &PreparedThreadMessage,
         stop: &AtomicBool,
-    ) -> anyhow::Result<ThreadSendEvidence> {
+    ) -> Result<ThreadSendEvidence, SendFailure> {
         if !session.supports_text_input() {
-            return Err(anyhow!("text_channel_unavailable"));
+            return Err(SendFailure::before(anyhow!("text_channel_unavailable")));
         }
         // Refuse rather than fabricate — the reply point, composer and Send are all
         // derived from this.
-        let screen_size = crate::screen::measured_screen_size(session).await?;
+        let screen_size = crate::screen::measured_screen_size(session)
+            .await
+            .map_err(SendFailure::before)?;
         let reply_point = self.next_touch_point(udid, screen_size, reply_point, (8.0, 8.0));
         {
             let _guard = gestures.lock().await;
             session
                 .tap(reply_point)
                 .await
-                .map_err(|e| anyhow!("tap_reply: {e}"))?;
+                .map_err(|e| SendFailure::before(anyhow!("tap_reply: {e}")))?;
         }
         self.wait_for_frame(udid, Duration::from_secs(5), stop, |img| {
             !matches!(
@@ -352,12 +359,12 @@ impl NurtureEngine {
             )
         })
         .await
-        .ok_or_else(|| anyhow!("reply_composer_not_confirmed"))?;
+        .ok_or_else(|| SendFailure::before(anyhow!("reply_composer_not_confirmed")))?;
         sleep_interruptible(COMMENT_INPUT_SETTLE, stop).await;
         let before_typing = self
             .frames
             .latest(udid)
-            .ok_or_else(|| anyhow!("frame_unavailable_before_reply"))?;
+            .ok_or_else(|| SendFailure::before(anyhow!("frame_unavailable_before_reply")))?;
         {
             let _guard = gestures.lock().await;
             session
@@ -371,7 +378,7 @@ impl NurtureEngine {
                     (24.0, 10.0),
                 ))
                 .await
-                .map_err(|e| anyhow!("focus_reply_input: {e}"))?;
+                .map_err(|e| SendFailure::before(anyhow!("focus_reply_input: {e}")))?;
             sleep_interruptible(COMMENT_INPUT_SETTLE, stop).await;
             session
                 // The literal prefix, because this path cannot reach TikTok's suggestion list
@@ -384,7 +391,7 @@ impl NurtureEngine {
                     prepared.text
                 ))
                 .await
-                .map_err(|e| anyhow!("type_reply: {e}"))?;
+                .map_err(|e| SendFailure::before(anyhow!("type_reply: {e}")))?;
         }
         let changed = self
             .wait_for_new_frame(
@@ -404,9 +411,9 @@ impl NurtureEngine {
         let armed_bytes = self
             .frames
             .latest(udid)
-            .ok_or_else(|| anyhow!("reply_armed_frame_missing"))?;
+            .ok_or_else(|| SendFailure::before(anyhow!("reply_armed_frame_missing")))?;
         if !armed {
-            return Err(anyhow!("reply_send_not_armed"));
+            return Err(SendFailure::before(anyhow!("reply_send_not_armed")));
         }
         let before_send = frame_digest(&armed_bytes);
         {
@@ -422,7 +429,7 @@ impl NurtureEngine {
                     (8.0, 8.0),
                 ))
                 .await
-                .map_err(|e| anyhow!("tap_reply_send: {e}"))?;
+                .map_err(|e| SendFailure::after(anyhow!("tap_reply_send: {e}")))?;
         }
         // Same rule as the top-level comment: a frame already seen cannot be
         // the proof, and this one is persisted as evidence.
@@ -436,7 +443,7 @@ impl NurtureEngine {
                 |img| screen::comment_drawer_state(img).0 == CommentDrawer::Open,
             )
             .await
-            .ok_or_else(|| anyhow!("reply_clear_not_confirmed"))?;
+            .ok_or_else(|| SendFailure::after(anyhow!("reply_clear_not_confirmed")))?;
         {
             let _guard = gestures.lock().await;
             let _ = session
@@ -1852,6 +1859,7 @@ mod tests {
                 anyhow::bail!("emoji fallback reached");
             }
             if self.send_error && Self::near(&point, screen::SEND_BUTTON) {
+                self.send_taps.fetch_add(1, Ordering::Relaxed);
                 anyhow::bail!("send failed after touch");
             }
             if Self::near(&point, screen::DRAWER_DISMISS) {
@@ -2539,7 +2547,7 @@ mod tests {
     async fn thread_comment_on(
         stale_replay: bool,
     ) -> (
-        anyhow::Result<crate::interaction::ThreadSendEvidence>,
+        Result<crate::interaction::ThreadSendEvidence, SendFailure>,
         Arc<TestFrames>,
     ) {
         let frames = Arc::new(TestFrames::with_stale_replay(stale_replay));
@@ -2573,7 +2581,10 @@ mod tests {
     async fn a_thread_comment_is_confirmed_from_a_frame_that_postdates_the_send() {
         let (result, _) = thread_comment_on(false).await;
 
-        let evidence = result.expect("thread comment");
+        let evidence = match result {
+            Ok(evidence) => evidence,
+            Err(failure) => panic!("thread comment failed: {}", failure.into_error()),
+        };
         assert_eq!(evidence.text_sha256, "deadbeef");
         assert_ne!(
             evidence.cleared_frame_sha256, evidence.armed_frame_sha256,
@@ -2586,6 +2597,11 @@ mod tests {
         let (result, _) = thread_comment_on(true).await;
 
         let error = result.expect_err("a replayed frame must not confirm the send");
+        assert!(
+            error.effect_may_have_gone_out(),
+            "the replay is after the Send tap and must stay unretryable"
+        );
+        let error = error.into_error();
         assert!(
             error.to_string().contains("send_clear_not_confirmed"),
             "unexpected error: {error}"
@@ -2770,6 +2786,163 @@ mod tests {
             "typing errors must not leave the drawer open"
         );
 
+        drop(engine);
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[tokio::test]
+    async fn a_thread_transport_error_before_send_stays_retryable() {
+        let frames = Arc::new(TestFrames::new());
+        let stop = Arc::new(AtomicBool::new(false));
+        let session =
+            RecordingSession::new(frames.clone(), stop.clone(), true, false).failing_type();
+        let (engine, db_path) = test_engine(frames);
+        let prepared = PreparedThreadMessage {
+            ordinal: 1,
+            actor_udid: UDID.to_string(),
+            text: COMMENT.to_string(),
+            text_sha256: "before".into(),
+            parent_ordinal: None,
+            mentions: Vec::new(),
+        };
+
+        let failure = engine
+            .send_prepared_thread_comment(
+                UDID,
+                &session,
+                &tokio::sync::Mutex::new(()),
+                &prepared,
+                stop.as_ref(),
+            )
+            .await
+            .expect_err("type transport error");
+        assert!(!failure.effect_may_have_gone_out());
+        assert_eq!(session.send_taps.load(Ordering::Relaxed), 0);
+        drop(engine);
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[tokio::test]
+    async fn a_thread_transport_error_at_send_stays_unretryable() {
+        let frames = Arc::new(TestFrames::new());
+        let stop = Arc::new(AtomicBool::new(false));
+        let session =
+            RecordingSession::new(frames.clone(), stop.clone(), true, false).failing_send();
+        let (engine, db_path) = test_engine(frames);
+        let prepared = PreparedThreadMessage {
+            ordinal: 1,
+            actor_udid: UDID.to_string(),
+            text: COMMENT.to_string(),
+            text_sha256: "after".into(),
+            parent_ordinal: None,
+            mentions: Vec::new(),
+        };
+
+        let failure = engine
+            .send_prepared_thread_comment(
+                UDID,
+                &session,
+                &tokio::sync::Mutex::new(()),
+                &prepared,
+                stop.as_ref(),
+            )
+            .await
+            .expect_err("Send transport error");
+        assert!(failure.effect_may_have_gone_out());
+        assert_eq!(session.send_taps.load(Ordering::Relaxed), 1);
+        drop(engine);
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    fn prepared_thread_reply() -> PreparedThreadMessage {
+        PreparedThreadMessage {
+            ordinal: 2,
+            actor_udid: UDID.to_string(),
+            text: COMMENT.to_string(),
+            text_sha256: "reply-sha".into(),
+            parent_ordinal: Some(1),
+            mentions: Vec::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_thread_reply_transport_error_before_send_stays_retryable() {
+        let frames = Arc::new(TestFrames::new());
+        let stop = Arc::new(AtomicBool::new(false));
+        let session =
+            RecordingSession::new(frames.clone(), stop.clone(), true, false).failing_type();
+        let (engine, db_path) = test_engine(frames);
+
+        let failure = engine
+            .send_prepared_thread_reply(
+                UDID,
+                &session,
+                &tokio::sync::Mutex::new(()),
+                TapPoint { x: 120.0, y: 300.0 },
+                &prepared_thread_reply(),
+                stop.as_ref(),
+            )
+            .await
+            .expect_err("reply type transport error");
+
+        assert!(!failure.effect_may_have_gone_out());
+        assert_eq!(session.send_taps.load(Ordering::Relaxed), 0);
+        drop(engine);
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[tokio::test]
+    async fn a_thread_reply_transport_error_at_send_stays_unretryable() {
+        let frames = Arc::new(TestFrames::new());
+        let stop = Arc::new(AtomicBool::new(false));
+        let session =
+            RecordingSession::new(frames.clone(), stop.clone(), true, false).failing_send();
+        let (engine, db_path) = test_engine(frames);
+
+        let failure = engine
+            .send_prepared_thread_reply(
+                UDID,
+                &session,
+                &tokio::sync::Mutex::new(()),
+                TapPoint { x: 120.0, y: 300.0 },
+                &prepared_thread_reply(),
+                stop.as_ref(),
+            )
+            .await
+            .expect_err("reply Send transport error");
+
+        assert!(failure.effect_may_have_gone_out());
+        assert_eq!(session.send_taps.load(Ordering::Relaxed), 1);
+        drop(engine);
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[tokio::test]
+    async fn a_thread_reply_clear_failure_after_send_stays_unretryable() {
+        let frames = Arc::new(TestFrames::with_stale_replay(true));
+        let stop = Arc::new(AtomicBool::new(false));
+        let session = RecordingSession::new(frames.clone(), stop.clone(), true, false);
+        let (engine, db_path) = test_engine(frames);
+
+        let failure = engine
+            .send_prepared_thread_reply(
+                UDID,
+                &session,
+                &tokio::sync::Mutex::new(()),
+                TapPoint { x: 120.0, y: 300.0 },
+                &prepared_thread_reply(),
+                stop.as_ref(),
+            )
+            .await
+            .expect_err("a replayed pre-typing frame must not confirm the reply");
+
+        assert!(failure.effect_may_have_gone_out());
+        assert_eq!(session.send_taps.load(Ordering::Relaxed), 1);
+        let error = failure.into_error();
+        assert!(
+            error.to_string().contains("reply_clear_not_confirmed"),
+            "unexpected error: {error}"
+        );
         drop(engine);
         let _ = std::fs::remove_file(db_path);
     }

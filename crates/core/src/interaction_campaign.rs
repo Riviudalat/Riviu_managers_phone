@@ -631,17 +631,16 @@ fn fail_whole_target(
             continue;
         };
         if protected.contains(id) {
-            // Whatever went wrong with this target, it did not un-post a comment that is
-            // already live. Leaving the state alone is what keeps it out of a retry.
+            // Fast path: the snapshot already knew this one was settled. Cheap and keeps the
+            // common case out of a write — but it is NOT the guard. The snapshot is stale by
+            // construction (a sibling can settle after it was taken), so the real guard is in
+            // the SQL below, which refuses to lower a settled row whatever the snapshot said.
             continue;
         }
-        db.update_interaction_assignment_state(
-            id,
-            ThreadMessageState::Failed,
-            Some(error_code),
-            None,
-            None,
-        )?;
+        // Conditional-in-SQL: never stamp `failed` over a `sending`/`succeeded`/`uncertain`
+        // row, even one that reached that state after `protected` was captured. That race is
+        // exactly how a public comment used to be re-posted on retry.
+        db.fail_interaction_assignment_unless_settled(id, error_code)?;
     }
     Ok(())
 }
@@ -1533,13 +1532,16 @@ async fn run_cohort(
             {
                 continue;
             }
-            db.update_interaction_assignment_state(
-                id,
-                ThreadMessageState::Preparing,
-                None,
-                None,
-                None,
-            )?;
+            // **Claim it atomically, or leave it to whoever already has it.** Retry starts a
+            // worker with no campaign-wide lock, and this write used to move the row to
+            // `preparing` unconditionally — so two rapid retries of the same manual
+            // assignment both proceeded and posted the same deterministic text twice. The CAS
+            // moves it out of an idle state into `preparing` only if no other worker is on it
+            // or has already delivered it; a lost claim means someone else owns this
+            // assignment, so skip it rather than race.
+            let Some(ownership_revision) = db.claim_interaction_assignment_for_send(id)? else {
+                continue;
+            };
             // Skipped in manual mode on purpose: there, Preparing and Ready are microseconds
             // apart because the text is already written, and two events per message would be
             // a burst that says nothing the Ready one does not.
@@ -1632,9 +1634,17 @@ async fn run_cohort(
             let mentions = mentions_for(assignment.ordinal, &request, parent_handle.as_deref());
             let prepared = PreparedThreadMessage::with_mentions(assignment, text, mentions);
             previous = Some(prepared.text.clone());
-            db.prepare_interaction_assignment(id, &prepared)?;
+            // The conditional write is the ownership check carried out of the DB. A stale
+            // target-wide failure can take the row out of `preparing` while this worker is
+            // drafting; in that case do not emit Ready and, most importantly, do not enqueue
+            // text that this worker no longer owns for a later device send.
+            let Some(ownership_revision) =
+                db.prepare_interaction_assignment(id, ownership_revision, &prepared)?
+            else {
+                continue;
+            };
             notify(&events, &campaign_id);
-            prepared_messages.push((id.clone(), prepared));
+            prepared_messages.push((id.clone(), prepared, ownership_revision));
         }
 
         // A root comment is sent with full frame evidence. Each subsequent
@@ -1647,7 +1657,7 @@ async fn run_cohort(
             .map(|((_, ordinal), identity)| (*ordinal, identity.clone()))
             .collect();
         let mut chain_broken_at: Option<u8> = None;
-        for (id, prepared) in prepared_messages {
+        for (id, prepared, ownership_revision) in prepared_messages {
             // A retry runs the same plan but must not re-send anything already
             // posted; the caller decides which assignments are in scope.
             if only_assignments
@@ -1807,24 +1817,26 @@ async fn run_cohort(
                     None
                 };
 
-                // `effect_intent` decides `Uncertain` versus `Failed` on the error path,
-                // and `Uncertain` is permanently unretryable. So it is **not** set before
-                // the call: only the driver knows whether a Send tap actually went out,
-                // and the steps that locate a parent can fail with nothing typed. Setting
-                // it optimistically is exactly the bug this shape exists to prevent — it
-                // made a never-posted reply impossible to retry.
+                // The local bool `effect_intent` decides `Uncertain` versus `Failed` on the
+                // error path. It is **not** set before the call: only the driver knows whether
+                // a Send tap actually went out, and the steps that locate a parent can fail
+                // with nothing typed. Setting that proof optimistically made a never-posted
+                // reply impossible to retry.
                 //
-                // The DB `Sending` write still happens first: it is the audit record that
-                // this assignment is about to act, and it must survive a crash mid-send.
+                // The DB intent string is different: it is a write-ahead audit record, not
+                // proof that the tap landed. Its CAS is also the one permit to call a device
+                // sender. If another worker crossed it first, stop here and leave its state
+                // untouched.
+                let send_intent = if parent_identity.is_some() {
+                    "reply_comment"
+                } else {
+                    "post_comment"
+                };
+                if !db.begin_interaction_assignment_send(&id, ownership_revision, send_intent)? {
+                    return Ok::<Option<serde_json::Value>, anyhow::Error>(None);
+                }
+                notify(&events, &campaign_id);
                 if let Some(parent) = parent_identity.as_ref() {
-                    db.update_interaction_assignment_state(
-                        &id,
-                        ThreadMessageState::Sending,
-                        None,
-                        Some("reply_comment"),
-                        None,
-                    )?;
-                    notify(&events, &campaign_id);
                     // Strictly the frame that was current when Send was tapped, so
                     // anything published afterwards has to be newer than the comment.
                     watermark = frame_source
@@ -1840,7 +1852,7 @@ async fn run_cohort(
                             return Err(failure.into_error());
                         }
                     };
-                    Ok::<serde_json::Value, anyhow::Error>(serde_json::json!({
+                    Ok::<Option<serde_json::Value>, anyhow::Error>(Some(serde_json::json!({
                         "send": sent.evidence,
                         "parent": parent,
                         "postedIdentity": sent.identity,
@@ -1851,16 +1863,12 @@ async fn run_cohort(
                         // reply — filed beside the like note because both are outcomes the
                         // comment's own text cannot show.
                         "mention": sent.mention_note,
-                    }))
+                        // A reply posted under a folded comment is confirmed but invisible.
+                        // Recorded so the operator can tell it from a normal reply — the one
+                        // outcome the comment's own text and the thread view cannot show.
+                        "parentWasFolded": sent.parent_was_folded,
+                    })))
                 } else {
-                    db.update_interaction_assignment_state(
-                        &id,
-                        ThreadMessageState::Sending,
-                        None,
-                        Some("post_comment"),
-                        None,
-                    )?;
-                    notify(&events, &campaign_id);
                     // Strictly the frame that was current when Send was tapped, so
                     // anything published afterwards has to be newer than the comment.
                     watermark = frame_source
@@ -1873,7 +1881,7 @@ async fn run_cohort(
                             return Err(failure.into_error());
                         }
                     };
-                    Ok::<serde_json::Value, anyhow::Error>(serde_json::json!({
+                    Ok::<Option<serde_json::Value>, anyhow::Error>(Some(serde_json::json!({
                         "send": sent.evidence,
                         "postedIdentity": sent.identity,
                         "reader": driver.kind(),
@@ -1883,10 +1891,11 @@ async fn run_cohort(
                         // reply — filed beside the like note because both are outcomes the
                         // comment's own text cannot show.
                         "mention": sent.mention_note,
-                    }))
+                    })))
                 }
             }
             .await;
+            let effect_claim_lost = matches!(&result, Ok(None));
             // Before the teardown, not after. `close_ui_context` stops the stream and
             // removes this device's cached frame, which is why every artefact row until
             // now was filed with a NULL path.
@@ -1897,8 +1906,14 @@ async fn run_cohort(
                 watermark,
             );
             let cleanup = control.close_ui_context(context).await;
+            if effect_claim_lost {
+                if let Err(error) = &cleanup {
+                    tracing::warn!("interaction cleanup {}: {}", prepared.actor_udid, error);
+                }
+                continue;
+            }
             match result {
-                Ok(evidence_json) => {
+                Ok(Some(evidence_json)) => {
                     let evidence_text = evidence_json.to_string();
                     db.update_interaction_assignment_state(
                         &id,
@@ -1944,6 +1959,7 @@ async fn run_cohort(
                     }
                     succeeded += 1;
                 }
+                Ok(None) => unreachable!("effect-claim loser left above"),
                 Err(error) => {
                     let state = if effect_intent {
                         ThreadMessageState::Uncertain
@@ -2277,16 +2293,12 @@ impl TargetDriver for PixelTargetDriver<'_> {
         prepared: &PreparedThreadMessage,
         stop: &AtomicBool,
     ) -> Result<SendOutcome, SendFailure> {
-        // `AfterEffect` for the whole call, which is exactly what this path did before
-        // the trait existed: the caller used to set `effect_intent = true` immediately
-        // before it. `send_prepared_thread_comment` can also fail *before* tapping Send,
-        // but distinguishing that would change iOS behaviour, and the safe direction for
-        // a comment that may have posted is to refuse the retry.
+        // The sender owns the exact phase boundary: every gate through arming is
+        // `BeforeEffect`, while the Send tap and its clear confirmation are `AfterEffect`.
         let evidence = self
             .engine
             .send_prepared_thread_comment(self.udid, session, self.gestures, prepared, stop)
-            .await
-            .map_err(SendFailure::after)?;
+            .await?;
         let identity = discover_after_send(
             self.engine,
             self.udid,
@@ -2302,6 +2314,8 @@ impl TargetDriver for PixelTargetDriver<'_> {
             evidence,
             identity,
             mention_note: None,
+            // The pixel path never opens a folded section.
+            parent_was_folded: false,
         })
     }
 
@@ -2351,8 +2365,7 @@ impl TargetDriver for PixelTargetDriver<'_> {
                 prepared,
                 stop,
             )
-            .await
-            .map_err(SendFailure::after)?;
+            .await?;
         let identity = discover_after_send(
             self.engine,
             self.udid,
@@ -2368,6 +2381,8 @@ impl TargetDriver for PixelTargetDriver<'_> {
             evidence,
             identity,
             mention_note: None,
+            // The pixel path never opens a folded section.
+            parent_was_folded: false,
         })
     }
 }
@@ -2406,8 +2421,10 @@ impl HierarchyTargetDriver<'_> {
     /// The classification comes from the verdict, and `CommentVerdict`'s own contract is
     /// what makes it sound: **every variant except `Sent` means nothing was posted, and
     /// `NotConfirmed` is the only one where a Send tap went out**. So `NotConfirmed` is
-    /// the single `AfterEffect` case; `SendUnmeasured`, `NoDrawer`, `NoSendControl` and
-    /// `NotArmed` all provably never tapped Send and must stay retryable.
+    /// the single `AfterEffect` case, and every other refusal — deliberately not listed
+    /// here one by one, because two additions have already outgrown such a list — provably
+    /// never tapped Send and must stay retryable. A new verdict that CAN follow a Send tap
+    /// belongs beside `NotConfirmed` above, not in the `_` arm.
     fn finish(
         outcome: crate::interaction_hierarchy::HierarchySendOutcome,
         prepared: &PreparedThreadMessage,
@@ -2429,7 +2446,23 @@ impl HierarchyTargetDriver<'_> {
             },
             identity: outcome.identity,
             mention_note: outcome.mention_note,
+            // Carried out, not dropped: a reply confirmed under a folded comment is invisible,
+            // and that fact has to reach the evidence row beside "it was posted".
+            parent_was_folded: outcome.parent_was_folded,
         })
+    }
+}
+
+fn map_hierarchy_send_failure(
+    failure: crate::interaction_hierarchy::HierarchySendFailure,
+) -> SendFailure {
+    match failure {
+        crate::interaction_hierarchy::HierarchySendFailure::BeforeEffect(error) => {
+            SendFailure::before(error)
+        }
+        crate::interaction_hierarchy::HierarchySendFailure::AfterEffect(error) => {
+            SendFailure::after(error)
+        }
     }
 }
 
@@ -2537,9 +2570,7 @@ impl TargetDriver for HierarchyTargetDriver<'_> {
             || self.frame_sha(),
         )
         .await
-        // A transport error out of the send flow itself: the agent stopped answering, and
-        // whether the tap landed is genuinely unknown.
-        .map_err(SendFailure::after)?;
+        .map_err(map_hierarchy_send_failure)?;
         Self::finish(outcome, prepared)
     }
 
@@ -2560,7 +2591,7 @@ impl TargetDriver for HierarchyTargetDriver<'_> {
             || self.frame_sha(),
         )
         .await
-        .map_err(SendFailure::after)?;
+        .map_err(map_hierarchy_send_failure)?;
         match outcome {
             Ok(outcome) => Self::finish(outcome, prepared),
             // Every `ReplyRefusal` variant means nothing was typed — that is its
@@ -2777,6 +2808,82 @@ fn campaign_is_cancelled(db: &crate::db::Database, campaign_id: &str) -> anyhow:
 mod tests {
     use super::*;
 
+    fn classification_fixture(
+        verdict: crate::tiktok_drawer::CommentVerdict,
+    ) -> (
+        crate::interaction_hierarchy::HierarchySendOutcome,
+        PreparedThreadMessage,
+    ) {
+        (
+            crate::interaction_hierarchy::HierarchySendOutcome {
+                verdict,
+                armed_frame_sha256: "armed".into(),
+                cleared_frame_sha256: "cleared".into(),
+                identity: None,
+                mention_note: None,
+                parent_was_folded: false,
+            },
+            PreparedThreadMessage {
+                ordinal: 0,
+                actor_udid: "phone-a".into(),
+                text: "hello".into(),
+                text_sha256: "text-sha".into(),
+                parent_ordinal: None,
+                mentions: Vec::new(),
+            },
+        )
+    }
+
+    /// A named pre-Send interruption must settle as `Failed`, which retry includes.
+    #[test]
+    fn hierarchy_finish_maps_a_pre_send_interruption_to_before_effect() {
+        let (outcome, prepared) =
+            classification_fixture(crate::tiktok_drawer::CommentVerdict::SendFlowInterrupted);
+        let result = HierarchyTargetDriver::finish(outcome, &prepared);
+        let Err(failure) = result else {
+            panic!("an interrupted send is not a successful outcome");
+        };
+        assert!(
+            !failure.effect_may_have_gone_out(),
+            "the campaign must write Failed so this assignment remains retryable"
+        );
+    }
+
+    /// `NotConfirmed` is the only hierarchy verdict on the far side of the effect line.
+    #[test]
+    fn hierarchy_finish_maps_an_unconfirmed_send_to_after_effect() {
+        let (outcome, prepared) =
+            classification_fixture(crate::tiktok_drawer::CommentVerdict::NotConfirmed);
+        let result = HierarchyTargetDriver::finish(outcome, &prepared);
+        let Err(failure) = result else {
+            panic!("an unconfirmed send is not a successful outcome");
+        };
+        assert!(
+            failure.effect_may_have_gone_out(),
+            "the campaign must write Uncertain and must never retry the tap"
+        );
+    }
+
+    #[test]
+    fn hierarchy_transport_before_effect_mapping_stays_retryable() {
+        let failure =
+            map_hierarchy_send_failure(crate::interaction_hierarchy::HierarchySendFailure::before(
+                anyhow::anyhow!("drawer read failed"),
+            ));
+
+        assert!(!failure.effect_may_have_gone_out());
+    }
+
+    #[test]
+    fn hierarchy_transport_after_effect_mapping_stays_ambiguous() {
+        let failure =
+            map_hierarchy_send_failure(crate::interaction_hierarchy::HierarchySendFailure::after(
+                anyhow::anyhow!("disarm read failed"),
+            ));
+
+        assert!(failure.effect_may_have_gone_out());
+    }
+
     /// Who actually needs the AI key.
     mod ai_key {
         use super::*;
@@ -2844,6 +2951,7 @@ mod tests {
                 evidence_json: None,
                 like: None,
                 mention: None,
+                parent_was_folded: false,
             }
         }
 
@@ -2987,6 +3095,7 @@ mod tests {
             evidence_json: None,
             like: None,
             mention: None,
+            parent_was_folded: false,
         }
     }
 
@@ -3345,11 +3454,10 @@ mod boundary_tests {
         // it: they are the two arms of one attempt and the emit after the teardown covers
         // whichever ran, so demanding one each would double every send.
         let mut silent = Vec::new();
-        for marker in [
-            "update_interaction_assignment_state",
-            "prepare_interaction_assignment",
-            "fail_whole_target(",
-        ] {
+        // `prepare_interaction_assignment` is conditional now: its `None` branch performed no
+        // write and correctly emits nothing. The dedicated ownership test below pins that it
+        // leaves before enqueue; only unconditional transitions belong in this scan.
+        for marker in ["update_interaction_assignment_state", "fail_whole_target("] {
             let mut from = 0;
             while let Some(offset) = runner[from..].find(marker) {
                 let at = from + offset;
@@ -3367,6 +3475,61 @@ mod boundary_tests {
             silent.is_empty(),
             "these writes change an assignment and then leave without telling the \
              frontend: {silent:?}"
+        );
+    }
+
+    /// A worker that loses `preparing` between claim and persistence must not reach Send.
+    ///
+    /// `run_cohort` needs real devices, so pin the small but safety-critical wiring here: the
+    /// conditional DB write is checked and its losing branch leaves before enqueueing the
+    /// prepared message.
+    #[test]
+    fn the_runner_does_not_enqueue_a_draft_after_losing_its_prepare_claim() {
+        let source = include_str!("interaction_campaign.rs");
+        let start = source
+            .find("async fn run_cohort(")
+            .expect("the runner still exists");
+        let runner = &source[start..];
+        let prepare = runner
+            .find("db.prepare_interaction_assignment")
+            .expect("the runner persists prepared text");
+        let enqueue = runner[prepare..]
+            .find("prepared_messages.push")
+            .map(|offset| prepare + offset)
+            .expect("the runner enqueues prepared text");
+        let boundary = &runner[prepare..enqueue];
+        assert!(
+            boundary.contains("db.prepare_interaction_assignment")
+                && boundary.contains("else {")
+                && boundary.contains("continue;"),
+            "a conditional prepare loser currently falls through into the send queue:\n{boundary}"
+        );
+    }
+
+    /// The DB effect CAS is the permit to call a non-idempotent device sender.
+    #[test]
+    fn the_runner_checks_the_effect_claim_before_calling_a_send_driver() {
+        let source = include_str!("interaction_campaign.rs");
+        let start = source
+            .find("async fn run_cohort(")
+            .expect("the runner still exists");
+        let runner = &source[start..];
+        let first_send = [
+            runner.find("driver.send_reply"),
+            runner.find("driver.send_root"),
+        ]
+        .into_iter()
+        .flatten()
+        .min()
+        .expect("the runner calls a send driver");
+        let before_send = &runner[..first_send];
+        let claim = before_send
+            .rfind("db.begin_interaction_assignment_send")
+            .expect("the runner must claim the effect boundary before a device send");
+        assert!(
+            before_send[claim.saturating_sub(8)..]
+                .contains("if !db.begin_interaction_assignment_send"),
+            "the begin-send result must be checked, not merely recorded"
         );
     }
 

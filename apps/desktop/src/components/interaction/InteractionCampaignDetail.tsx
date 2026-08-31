@@ -288,6 +288,12 @@ export function InteractionCampaignDetailView({
                       {assignment.mention}
                     </small>
                   )}
+                  {assignment.parentWasFolded && (
+                    <small className="interaction-error">
+                      Bình luận cha bị TikTok gấp; phản hồi này đã gửi nhưng người khác không nhìn
+                      thấy.
+                    </small>
+                  )}
                 </span>
                 {shotRecord && (
                   <button
