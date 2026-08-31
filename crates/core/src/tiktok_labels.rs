@@ -810,6 +810,22 @@ pub struct TikTokResourceLabels {
     /// `trill`-measured fact: on `musically` the same arithmetic lands on the effects rail,
     /// which is exactly why this field exists.
     gallery_entry: Option<LabelMatch>,
+    /// One tile in the profile grid — the cover image of a post this account owns.
+    ///
+    /// Id-only for the same reason as [`Self::gallery_entry`]: measured 31/08/2026 on
+    /// `trill` 38.3.2 the tile is an `ImageView` with **no `text` and no `content-desc`**,
+    /// so no language set could ever carry it. The route back to a just-published carousel
+    /// locates every tile and works down them; which tile is *ours* is settled by reading
+    /// the caption on the page, never by position — see [`Self::pinned_badge`].
+    post_tile: Option<LabelMatch>,
+    /// The `Pinned` badge that sits inside a pinned tile's rectangle.
+    ///
+    /// Measured in the same trip, and it is why "the newest post is the first tile" is
+    /// false: this account's first tile is a pinned video from months ago, 22.5K views. The
+    /// badge renders a **translated** string (`Pinned`), so the id is the locator and the
+    /// string is not; a tile whose rectangle contains one of these is skipped before it
+    /// costs a page load.
+    pinned_badge: Option<LabelMatch>,
 }
 
 impl TikTokResourceLabels {
@@ -869,6 +885,14 @@ pub const TIKTOK_RESOURCE_SETS: &[TikTokResourceLabels] = &[
         composer_caption: Some(LabelMatch::ResourceId(":id/eej")),
         composer_shutter: None,
         gallery_entry: None,
+        // `ImageView …:id/cover`, six on the first screenful, e.g. [0,1270][358,1747] —
+        // no `text`, no `content-desc`, which is why this is an id and lives here.
+        // Measured 31/08/2026 on ce051715ac247a3f01 (`share_scout`, M7 trip, §9.136).
+        post_tile: Some(LabelMatch::ResourceId(":id/cover")),
+        // `TextView …:id/so6` reading `Pinned`, [16,1286][143,1325] — INSIDE the first
+        // tile's rectangle on this account. The string is translated and the id is not, so
+        // the id is the locator. Same trip.
+        pinned_badge: Some(LabelMatch::ResourceId(":id/so6")),
     },
     TikTokResourceLabels {
         package: "com.zhiliaoapp.musically",
@@ -903,20 +927,41 @@ pub const TIKTOK_RESOURCE_SETS: &[TikTokResourceLabels] = &[
         // which is the effects rail: tapping "the entry" there opens filters. This id is
         // what makes the composer walk possible on this build at all.
         gallery_entry: Some(LabelMatch::ResourceId(":id/upload_hot_area")),
+        post_tile: None,
+        pinned_badge: None,
     },
     TikTokResourceLabels {
         package: "com.zhiliaoapp.musically",
         app_version: "46.2.42",
-        measured_on: "SM-G950F ce0517155ab38c390d, Android 9, 18/08/2026 (probe --measure-comment)",
+        measured_on: "SM-G950F ce0517155ab38c390d, Android 9, 18/08/2026 (probe --measure-comment); \
+                      composer 31/08/2026 cùng máy (label_scout --tap Create --raw)",
         // The same id as 46.2.1, measured separately rather than assumed — and worth an
         // entry of its own even so. The id moving between 46.3.3 and 46.4.3 is what this
         // table exists for; the id *not* moving between two other versions is not evidence
         // that it never does, and a lookup keyed by version cannot guess.
         comment_send: Some(LabelMatch::Exact("@2131823247")),
-        picker_album_menu: None,
-        composer_caption: None,
-        composer_shutter: None,
-        gallery_entry: None,
+        // `TextView …:id/tv_title [431,100][601,150]`, reading `Recents` at the moment of
+        // measurement (`composer_scout --dump-picker`, 31/08/2026) — the same id as 46.2.1,
+        // measured on this build rather than carried over. The text is the album currently
+        // showing, which is why the id and never the string.
+        picker_album_menu: Some(LabelMatch::ResourceId(":id/tv_title")),
+        // `EditText …:id/gwp [42,614][1038,986]`, placeholder `Writing a long description
+        // can help get 3x more views…` — measured 31/08/2026 via `--visit-caption-step`,
+        // nothing tapped on that screen. The title trap sits directly above as on every
+        // build so far (`:id/gwt`, `Add a catchy title`), and BOTH ids moved from 46.2.1
+        // (`:id/gx_`/`:id/gxd`) — the version keying earns its keep a second time in one
+        // row. Post renders `Post` (`:id/skm`), served by the shared language set.
+        composer_caption: Some(LabelMatch::ResourceId(":id/gwp")),
+        // `Button …:id/sxq [395,1591][684,1880]`, desc still the unresolved `@2131823287`.
+        // **The id MOVED between 46.2.1 (`:id/szp`) and 46.2.42 — same rectangle, same
+        // reference string, different id** — the strongest proof yet that this control can
+        // only ever live version-keyed, exactly the doctrine the comment above states.
+        composer_shutter: Some(LabelMatch::ResourceId(":id/sxq")),
+        // `FrameLayout …:id/upload_hot_area [0,1891][179,2070]`, bottom-left — the same id
+        // as 46.2.1, measured on this build rather than borrowed from that one.
+        gallery_entry: Some(LabelMatch::ResourceId(":id/upload_hot_area")),
+        post_tile: None,
+        pinned_badge: None,
     },
     TikTokResourceLabels {
         package: "com.ss.android.ugc.trill",
@@ -929,6 +974,8 @@ pub const TIKTOK_RESOURCE_SETS: &[TikTokResourceLabels] = &[
         composer_caption: None,
         composer_shutter: None,
         gallery_entry: None,
+        post_tile: None,
+        pinned_badge: None,
     },
     TikTokResourceLabels {
         package: "com.ss.android.ugc.trill",
@@ -944,6 +991,8 @@ pub const TIKTOK_RESOURCE_SETS: &[TikTokResourceLabels] = &[
         composer_caption: None,
         composer_shutter: None,
         gallery_entry: None,
+        post_tile: None,
+        pinned_badge: None,
     },
 ];
 
@@ -1092,6 +1141,8 @@ pub(crate) fn every_publish_control_measured() -> TikTokControls {
         composer_caption: None,
         composer_shutter: None,
         gallery_entry: None,
+        post_tile: None,
+        pinned_badge: None,
     };
     TikTokControls {
         translated: &ALL,
@@ -1116,6 +1167,8 @@ pub(crate) fn every_publish_control_measured_with_gallery_id() -> TikTokControls
         composer_caption: None,
         composer_shutter: None,
         gallery_entry: Some(LabelMatch::ResourceId("fixture-gallery-entry")),
+        post_tile: None,
+        pinned_badge: None,
     };
     TikTokControls {
         translated: &ALL,
@@ -1197,6 +1250,8 @@ pub(crate) fn every_publish_control_but_post_measured() -> TikTokControls {
         composer_caption: None,
         composer_shutter: None,
         gallery_entry: None,
+        post_tile: None,
+        pinned_badge: None,
     };
     TikTokControls {
         translated: &NO_POST,
@@ -1263,6 +1318,8 @@ pub(crate) fn every_publish_control_but_caption_measured() -> TikTokControls {
         composer_caption: None,
         composer_shutter: None,
         gallery_entry: None,
+        post_tile: None,
+        pinned_badge: None,
     };
     TikTokControls {
         translated: &NO_CAPTION,
@@ -1344,6 +1401,19 @@ impl TikTokControls {
     /// the effects rail on `musically` — the asymmetry this accessor exists to close.
     pub fn gallery_entry_id(&self) -> Option<LabelMatch> {
         self.resources.and_then(|set| set.gallery_entry)
+    }
+
+    /// The profile grid's post tile — see [`TikTokResourceLabels::post_tile`]. `None` means
+    /// this build's route back to an own post is unmeasured, and the caller must refuse.
+    pub fn post_tile_id(&self) -> Option<LabelMatch> {
+        self.resources.and_then(|set| set.post_tile)
+    }
+
+    /// The `Pinned` badge inside a pinned tile — see
+    /// [`TikTokResourceLabels::pinned_badge`]. `None` costs a page load per pinned tile
+    /// rather than a wrong post: identity is settled by the caption either way.
+    pub fn pinned_badge_id(&self) -> Option<LabelMatch> {
+        self.resources.and_then(|set| set.pinned_badge)
     }
 
     /// One line of provenance for a session log, naming what actually resolved.
@@ -2634,15 +2704,28 @@ mod tests {
         // them is a device task. If a future edit fills one in without a measurement in
         // AGENTS.md, this test is what fails.
         //
-        // **Two builds have now made the trip.** `trill` 38.3.2 `en` on 30/08/2026
-        // (AGENTS.md §9.132) and `musically` 46.2.1 `en` on 31/08/2026 (§9.135): each with
-        // `ComposerNext` and `PostButton` in its language set and `ComposerCaption` in its
-        // own version-table row — see
+        // **Three builds have now made the trip.** `trill` 38.3.2 `en` on 30/08/2026
+        // (AGENTS.md §9.132), `musically` 46.2.1 `en` on 31/08/2026 (§9.135), and
+        // `musically` 46.2.42 `en` later the same day, on the phone that had been behind
+        // the Facebook-permission dialog — its caption ids MOVED from 46.2.1
+        // (`:id/gwp`/`:id/gwt` vs `:id/gx_`/`:id/gxd`), which is the version keying doing
+        // its job twice in one row. Each trip leaves `ComposerNext` and `PostButton` in
+        // the language set and `ComposerCaption` in its own version-table row — see
         // `publish_tail_is_version_keyed_except_where_the_build_renders_it` for what pins
         // those. The delete path stays refused everywhere.
+        //
+        // The language-set half of the exemption is keyed by `measured_app_version`, which
+        // records the version the STRINGS were read on — both musically versions share the
+        // one `en` set, so its row here names 46.2.1 and the 46.2.42 measurement lives in
+        // the version-table half below.
         let measured_trips = [
             ("com.ss.android.ugc.trill", "en", "38.3.2"),
             ("com.zhiliaoapp.musically", "en", "46.2.1"),
+        ];
+        let measured_caption_rows = [
+            ("com.ss.android.ugc.trill", "38.3.2"),
+            ("com.zhiliaoapp.musically", "46.2.1"),
+            ("com.zhiliaoapp.musically", "46.2.42"),
         ];
         for set in TIKTOK_LABEL_SETS {
             let measured_trip =
@@ -2672,10 +2755,7 @@ mod tests {
         }
         // And the version table stays empty of the tail everywhere the trip has not gone.
         for set in TIKTOK_RESOURCE_SETS {
-            if measured_trips
-                .iter()
-                .any(|(package, _, version)| *package == set.package && *version == set.app_version)
-            {
+            if measured_caption_rows.contains(&(set.package, set.app_version)) {
                 continue;
             }
             assert!(
@@ -2737,12 +2817,32 @@ mod tests {
             Some(LabelMatch::ResourceId(":id/gx_")),
             "the title field (:id/gxd) sits above the description on this build too"
         );
-        let musically_unmeasured = controls_for("com.zhiliaoapp.musically", "en", "46.2.42")
+        // The third trip (31/08/2026, later the same day — the dialog cleared and phone B
+        // was measured after all). Same split, same strings — and BOTH caption-screen ids
+        // moved between 46.2.1 and 46.2.42, so the version keying is what keeps this row
+        // from silently typing into 46.2.1's field handle.
+        let musically_b = controls_for("com.zhiliaoapp.musically", "en", "46.2.42")
+            .expect("the 46.2.42 build is catalogued");
+        assert_eq!(
+            musically_b.label(TikTokControl::PostButton),
+            Some(LabelMatch::Text("Post"))
+        );
+        assert_eq!(
+            musically_b.label(TikTokControl::ComposerCaption),
+            Some(LabelMatch::ResourceId(":id/gwp")),
+            "46.2.42's own id — :id/gx_ belongs to 46.2.1 and does not exist on this build"
+        );
+        assert_eq!(
+            musically_b.label(TikTokControl::ComposerShutter),
+            Some(LabelMatch::ResourceId(":id/sxq")),
+            "the shutter id also moved between the two musically versions"
+        );
+        // And a version nobody measured still refuses — the refusal is the table's job.
+        let musically_unmeasured = controls_for("com.zhiliaoapp.musically", "en", "47.0.0")
             .expect("language set still serves");
         assert_eq!(
             musically_unmeasured.label(TikTokControl::ComposerCaption),
-            None,
-            "46.2.42's caption id was never read (phone B is behind a permission dialog)"
+            None
         );
     }
 

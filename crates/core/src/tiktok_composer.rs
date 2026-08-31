@@ -1345,7 +1345,7 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
     /// expected to raise between the tap and the feed. If it appears, the feed does not come
     /// back, and this returns `PostNotConfirmed` — the safe answer, not a correct one.
     /// Closing that is a measurement, not a code change.
-    async fn post(&mut self, stop: &AtomicBool) -> anyhow::Result<ComposerVerdict> {
+    async fn post(&mut self, caption: &str, stop: &AtomicBool) -> anyhow::Result<ComposerVerdict> {
         let Some(query) = self.plan.publish.map(|tail| tail.post_button) else {
             return Ok(ComposerVerdict::PostUnmeasured);
         };
@@ -1366,6 +1366,33 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
             // The tap may have reached the phone before the transport died.
             return Ok(ComposerVerdict::PostNotConfirmed);
         }
+        // **One retry, and only against proof that nothing was published.**
+        //
+        // Measured 31/08/2026 on the M7 trip (§9.136): the very first run that ever *typed*
+        // a caption had its Post tap do nothing. The button's rectangle comes from the
+        // hierarchy, which reports it whether or not the soft keyboard — up since
+        // `type_caption` — is drawn on top of it, so the finger landed on a key. Every
+        // earlier measuring trip stopped before typing and never met this.
+        //
+        // A blind second tap is the one thing this module must never do. This one is gated
+        // on the post screen being **untouched**: TikTok leaves that screen the instant a
+        // post commits, so a Post button still on it, above a caption field still holding
+        // this run's caption, is proof the carousel did not go out. The wait before the
+        // re-read is also the fix: by then the keyboard has retracted, which is why the
+        // second tap lands where the first did not.
+        if !self.await_feed(POST_CONFIRM_WINDOW).await
+            && self.post_screen_untouched(caption, query).await
+        {
+            let Some(again) = self
+                .await_condition(COMPOSER_WINDOW, query, stop, |_| true)
+                .await?
+            else {
+                return Ok(ComposerVerdict::PostNotConfirmed);
+            };
+            if self.tap_inside(&again).await.is_err() {
+                return Ok(ComposerVerdict::PostNotConfirmed);
+            }
+        }
         // **Deliberately not passing `stop`.** Cancelling cannot un-publish, and a stop set
         // here would end the wait early and downgrade a good post to `PostNotConfirmed`,
         // which is permanently unclaimable.
@@ -1380,6 +1407,40 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
         } else {
             ComposerVerdict::PostNotConfirmed
         })
+    }
+
+    /// Whether the post screen is still exactly as it was before the Post tap — which is
+    /// the proof that nothing was published.
+    ///
+    /// TikTok leaves this screen the instant a post commits, so two things still being on
+    /// it says the tap did not land: the Post button, and — when this run wrote one — the
+    /// caption field still holding **this run's** caption, compared for equality on exactly
+    /// one node, the same rule [`Self::type_caption`]'s readback settled on and for the same
+    /// reason (a placeholder that merely starts with the right words must not count).
+    ///
+    /// An empty caption leaves only the button to go on, and that is said plainly rather
+    /// than papered over: nothing was typed, so there is nothing to recognise the screen by
+    /// beyond the control itself.
+    async fn post_screen_untouched(&self, caption: &str, post_button: ElementQuery<'_>) -> bool {
+        if !matches!(self.session.locate(post_button).await, Ok(Some(_))) {
+            return false;
+        }
+        let wanted = caption.trim();
+        if wanted.is_empty() {
+            return true;
+        }
+        let Some(field) = self.plan.publish.map(|tail| tail.caption) else {
+            return false;
+        };
+        let rows = self
+            .session
+            .locate_all_described(field)
+            .await
+            .unwrap_or_default();
+        matches!(rows.as_slice(), [only] if only
+            .description
+            .as_deref()
+            .is_some_and(|text| text.trim() == wanted))
     }
 
     /// Back out until the bottom tab bar is visible again.
@@ -1737,7 +1798,7 @@ async fn drive<P: TapPlanner>(
         CaptionOutcome::NoField => return Ok(ComposerVerdict::NoCaptionField),
         CaptionOutcome::NotConfirmed => return Ok(ComposerVerdict::CaptionNotConfirmed),
     }
-    composer.post(stop).await
+    composer.post(request.caption, stop).await
 }
 
 /// Sleep unless the caller has asked to stop.
@@ -2167,7 +2228,14 @@ mod tests {
             };
             // The caption field reports the text it holds, the way a real one does — or the
             // placeholder it kept, when the write did not land.
-            if wanted == "fixture-caption" {
+            //
+            // **Only while the screen actually carries it.** This branch used to answer from
+            // `typed` on every scene, so a caption field appeared to be on screens that have
+            // none — a fake modelling the test's expectation instead of the phone, and the
+            // exact shape that hid the retry proof's real value: the proof asks "is the post
+            // screen still here", and a caption that follows the phone everywhere makes the
+            // answer yes on screens that are not it.
+            if wanted == "fixture-caption" && self.current().contains_key(wanted) {
                 let held = match (self.caption_never_takes, self.typed.lock().clone()) {
                     (true, _) => self.caption_placeholder.clone(),
                     (false, typed) => typed,
@@ -2219,7 +2287,17 @@ mod tests {
         let mut checked = 0;
         let mut publishable = Vec::new();
         for set in TIKTOK_LABEL_SETS {
-            for version in ["", set.measured_app_version] {
+            // The version axis lives in the RESOURCE table, so the sweep walks it from
+            // there — probing only `measured_app_version` let a second version of the same
+            // package (46.2.42, whose caption id is version-keyed) become publishable
+            // without this list noticing: the gate passed by omission, not by verification.
+            let mut versions = vec!["", set.measured_app_version];
+            for resources in crate::tiktok_labels::TIKTOK_RESOURCE_SETS {
+                if resources.package == set.package && !versions.contains(&resources.app_version) {
+                    versions.push(resources.app_version);
+                }
+            }
+            for version in versions {
                 let Some(controls) = controls_for(set.package, set.language, version) else {
                     continue;
                 };
@@ -2243,18 +2321,21 @@ mod tests {
                 checked += 1;
             }
         }
-        // In catalogue order: the musically set is declared before trill's.
+        // In catalogue order: the musically set is declared before trill's, and within one
+        // language set the versions walk `measured_app_version` first, then the resource
+        // table's rows.
         assert_eq!(
             publishable,
             vec![
                 r#"com.zhiliaoapp.musically / en (app "46.2.1")"#.to_string(),
+                r#"com.zhiliaoapp.musically / en (app "46.2.42")"#.to_string(),
                 r#"com.ss.android.ugc.trill / en (app "38.3.2")"#.to_string(),
             ],
             "the measured trips cover exactly these builds; anything else publishing here \
              claims a measurement AGENTS.md does not record"
         );
         assert!(
-            checked >= 4,
+            checked >= 6,
             "only {checked} sets scanned; the sweep is broken"
         );
     }
@@ -3006,6 +3087,169 @@ mod tests {
         );
     }
 
+    /// How many taps landed on the post screen's Post button.
+    ///
+    /// Counted by rectangle rather than by total journey length, because the whole-journey
+    /// count is brittle against any navigation tap added anywhere earlier — and the number
+    /// that matters here is exactly one: how many times Post was pressed.
+    fn post_button_taps(session: &FakeSession) -> usize {
+        let button = box_at(900.0, 2000.0);
+        session
+            .taps
+            .lock()
+            .iter()
+            .filter(|tap| {
+                tap.x >= button.x
+                    && tap.x <= button.x + button.width
+                    && tap.y >= button.y
+                    && tap.y <= button.y + button.height
+            })
+            .count()
+    }
+
+    /// **A Post tap that did not land is pressed again; one that did is never pressed twice.**
+    ///
+    /// Measured 31/08/2026 (§9.136): the first run that ever typed a caption had its Post
+    /// tap swallowed by the soft keyboard, which the hierarchy does not mention — the
+    /// button's rectangle is reported whether or not a keyboard is drawn over it.
+    ///
+    /// The fixture models the phone exactly as it behaved: the screen after the missed tap
+    /// is **indistinguishable** from the screen before it — same Post button, same caption
+    /// still in the field — which is what makes the retry's proof both necessary and sound.
+    #[tokio::test(start_paused = true)]
+    async fn a_post_tap_that_did_not_land_is_retried_against_proof() {
+        let session = FakeSession::with(vec![
+            feed(),
+            camera(),
+            picker("All", Some("fixture-album-menu")),
+            picker("All", None).leaving_by(box_at(0.0, 400.0)),
+            picker("riviu-abc", Some("fixture-multi-select")),
+            picker_on("riviu-abc", None, false).leaving_by(grid_area()),
+            picker_on("riviu-abc", Some("fixture-picker-next"), true),
+            edit_step(),
+            // The Post tap misses: the next screen is the same post screen.
+            post_screen(),
+            post_screen(),
+            feed(),
+        ])
+        .rows("riviu-abc", vec![box_at(0.0, 400.0)]);
+        let request = CarouselRequest {
+            album: "riviu-abc",
+            images: 3,
+            caption: "đi Đà Lạt thật đã",
+            screen: screen(),
+        };
+        let stop = AtomicBool::new(false);
+        assert_eq!(
+            publish_carousel(
+                &session,
+                plan(),
+                |element: &ElementBox| element.centre(),
+                &request,
+                &stop
+            )
+            .await
+            .expect("no transport error"),
+            ComposerVerdict::Posted,
+            "a swallowed first tap must not settle as PostNotConfirmed — that state is \
+             permanently unclaimable"
+        );
+        assert_eq!(
+            post_button_taps(&session),
+            2,
+            "exactly one retry, against the proof that the first tap published nothing"
+        );
+    }
+
+    /// **The other direction, which is the one that must never break.**
+    ///
+    /// A post that went out leaves the post screen immediately, so the proof cannot hold and
+    /// the retry cannot fire. If it ever did, a carousel would go out twice on a real
+    /// account, with no delete path on Android to undo either.
+    #[tokio::test(start_paused = true)]
+    async fn a_post_that_landed_is_never_tapped_twice() {
+        let session = FakeSession::full_walk("riviu-abc");
+        let request = CarouselRequest {
+            album: "riviu-abc",
+            images: 3,
+            caption: "đi Đà Lạt thật đã",
+            screen: screen(),
+        };
+        let stop = AtomicBool::new(false);
+        assert_eq!(
+            publish_carousel(
+                &session,
+                plan(),
+                |element: &ElementBox| element.centre(),
+                &request,
+                &stop
+            )
+            .await
+            .expect("no transport error"),
+            ComposerVerdict::Posted
+        );
+        assert_eq!(
+            post_button_taps(&session),
+            1,
+            "the post went out on the first tap; a second one would publish it again"
+        );
+    }
+
+    /// **The retry's proof, on the screen where it is the only thing standing between one
+    /// post and two.**
+    ///
+    /// The dangerous shape is not "the feed did not come back" — it is a screen that came
+    /// back *carrying something the Post locator matches*. This module's own notes name the
+    /// candidate: the public/private confirmation sheet, which is the thing that commits the
+    /// post. A blind retry there taps confirm on a carousel that already went out.
+    ///
+    /// The caption is what separates that sheet from the post screen, and the sheet does not
+    /// carry one. So: Post button present, caption absent, feed never returns — no retry,
+    /// and the honest `PostNotConfirmed` an operator can act on.
+    #[tokio::test(start_paused = true)]
+    async fn a_screen_that_merely_matches_the_post_locator_is_not_tapped_again() {
+        let session = FakeSession::with(vec![
+            feed(),
+            camera(),
+            picker("All", Some("fixture-album-menu")),
+            picker("All", None).leaving_by(box_at(0.0, 400.0)),
+            picker("riviu-abc", Some("fixture-multi-select")),
+            picker_on("riviu-abc", None, false).leaving_by(grid_area()),
+            picker_on("riviu-abc", Some("fixture-picker-next"), true),
+            edit_step(),
+            post_screen(),
+            // After Post: a sheet that still renders a node the Post locator matches, and
+            // no caption field. Nothing here leaves, so the feed never comes back.
+            scene(vec![("fixture-post", box_at(900.0, 2000.0))], None),
+        ])
+        .rows("riviu-abc", vec![box_at(0.0, 400.0)]);
+        let request = CarouselRequest {
+            album: "riviu-abc",
+            images: 3,
+            caption: "đi Đà Lạt thật đã",
+            screen: screen(),
+        };
+        let stop = AtomicBool::new(false);
+        assert_eq!(
+            publish_carousel(
+                &session,
+                plan(),
+                |element: &ElementBox| element.centre(),
+                &request,
+                &stop
+            )
+            .await
+            .expect("no transport error"),
+            ComposerVerdict::PostNotConfirmed
+        );
+        assert_eq!(
+            post_button_taps(&session),
+            1,
+            "the caption is gone, so the post screen is gone — a second tap here lands on \
+             whatever that sheet's button does"
+        );
+    }
+
     /// **A stop must never turn into a tap on Post.**
     ///
     /// `await_condition` used to check for a ready element *before* checking stop, so a Post
@@ -3017,7 +3261,7 @@ mod tests {
         let mut composer = Composer::new(&session, plan(), |element: &ElementBox| element.centre());
         let stop = AtomicBool::new(true);
         assert_eq!(
-            composer.post(&stop).await.expect("no error"),
+            composer.post("", &stop).await.expect("no error"),
             ComposerVerdict::Stopped
         );
         assert!(session.taps.lock().is_empty(), "a stopped run tapped Post");
@@ -3067,7 +3311,7 @@ mod tests {
         };
         let mut composer = Composer::new(&session, plan(), |element: &ElementBox| element.centre());
         let stop = AtomicBool::new(false);
-        let verdict = composer.post(&stop).await.expect("must not be an Err");
+        let verdict = composer.post("", &stop).await.expect("must not be an Err");
         assert_eq!(verdict, ComposerVerdict::PostNotConfirmed);
         assert!(
             !verdict.may_retry(),
@@ -3089,7 +3333,7 @@ mod tests {
         let mut composer = Composer::new(&session, plan(), |element: &ElementBox| element.centre());
         let stop = AtomicBool::new(false);
         assert_eq!(
-            composer.post(&stop).await.expect("no error"),
+            composer.post("", &stop).await.expect("no error"),
             ComposerVerdict::PostNotConfirmed
         );
     }
@@ -3101,7 +3345,7 @@ mod tests {
         let mut composer = Composer::new(&session, plan(), |element: &ElementBox| element.centre());
         let stop = AtomicBool::new(false);
         assert_eq!(
-            composer.post(&stop).await.expect("no error"),
+            composer.post("", &stop).await.expect("no error"),
             ComposerVerdict::Posted
         );
     }
@@ -3450,7 +3694,7 @@ mod tests {
         // The first read fails; the Post button is found on the retry, tapped, and the feed
         // comes back.
         assert_eq!(
-            composer.post(&stop).await.expect("no error"),
+            composer.post("", &stop).await.expect("no error"),
             ComposerVerdict::Posted
         );
     }
