@@ -2494,10 +2494,17 @@ mod tests {
             readiness_of_build("com.example.never-measured", "en", "1.0"),
             PublishReadiness::HierarchyUnknownBuild(_)
         ));
-        // A build whose reach-the-picker labels are measured but whose tail is not names
-        // what is missing rather than refusing wholesale.
+        // The second measured build answers ready — it graduated between this test being
+        // written (morning of 31/08, tail unmeasured) and first run (evening, §9.135).
         assert!(matches!(
             readiness_of_build("com.zhiliaoapp.musically", "en", "46.2.1"),
+            PublishReadiness::HierarchyReady
+        ));
+        // Its sibling version is the phone still behind the onboarding dialog: language
+        // strings serve it, but the version-keyed caption id was never read — so it names
+        // what is missing rather than refusing wholesale or borrowing 46.2.1's id.
+        assert!(matches!(
+            readiness_of_build("com.zhiliaoapp.musically", "en", "46.2.42"),
             PublishReadiness::HierarchyMissing(missing) if !missing.is_empty()
         ));
     }

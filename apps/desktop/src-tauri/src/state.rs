@@ -1950,14 +1950,29 @@ impl AppState {
                         Ok(()) => {
                             // Marked by the revision that was DELIVERED — a row edited
                             // between read and send keeps owing its newer content.
-                            if let Err(error) =
-                                sheet_db.mark_publish_sheet_sent(&row.assignment_id, row.revision)
+                            match sheet_db.mark_publish_sheet_sent(&row.assignment_id, row.revision)
                             {
-                                log::warn!(
+                                Ok(true) => {}
+                                // The CAS said no: the row moved between read and send, so
+                                // what reached the sheet is a version the outbox no longer
+                                // owes. Said out loud rather than swallowed, because the
+                                // script dedupes by assignment id — the NEWER content will
+                                // be answered `duplicate` and never reach column D without
+                                // a person clearing the old row. Two reviews flagged the
+                                // silent shape; it is narrow (needs a requeue mid-send) and
+                                // the log line is what makes it findable when it happens.
+                                Ok(false) => log::warn!(
+                                    "outbox Sheet: đã gửi bản cũ của {} (revision {} đã bị \
+                                     thay giữa lúc đọc và gửi) — bản mới sẽ bị script trả \
+                                     duplicate; cần xoá dòng cũ trên sheet rồi gửi lại",
+                                    row.assignment_id,
+                                    row.revision
+                                ),
+                                Err(error) => log::warn!(
                                     "outbox Sheet: gửi được nhưng không ghi được 'sent' cho {} \
                                      ({error:#}) — lượt sau sẽ gửi lại và script sẽ trả duplicate",
                                     row.assignment_id
-                                );
+                                ),
                             }
                         }
                         Err(error) => {
