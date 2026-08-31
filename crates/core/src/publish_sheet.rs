@@ -382,8 +382,11 @@ mod tests {
         let last = first + max - 1;
 
         assert!(max >= 1, "PARTNERS_MAX must be at least one column");
-        for (name, column) in [("KEY_COLUMN", key), ("LINK_COLUMN", link), ("POSTER_COLUMN", poster)]
-        {
+        for (name, column) in [
+            ("KEY_COLUMN", key),
+            ("LINK_COLUMN", link),
+            ("POSTER_COLUMN", poster),
+        ] {
             assert!(
                 column < first || column > last,
                 "{name} = {column} sits inside the partner block {first}..={last}; every \
