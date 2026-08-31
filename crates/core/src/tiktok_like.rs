@@ -15,6 +15,7 @@ use crate::driver::{ElementBox, UiSession};
 use crate::nurture::sleep_interruptible;
 use crate::tiktok_labels::{TikTokControl, TikTokControls};
 use crate::types::TapPoint;
+use crate::ActionFailure;
 
 /// How long the like state gets to flip after the tap, and how often to look.
 const LIKE_CONFIRM_WINDOW: Duration = Duration::from_millis(2_500);
@@ -31,6 +32,14 @@ pub enum LikeVerdict {
     NoControl,
     /// The tap was delivered and nothing observable changed.
     NotConfirmed,
+    /// The already-liked state could not be read, so **nothing was tapped**.
+    ///
+    /// This is the fail-closed answer to a query error on the pre-tap `Liked` check. It
+    /// exists because the alternative — treating an unreadable state as "not liked" and
+    /// tapping — is the one mistake this whole module must never make: on the fleet build
+    /// the `Like` node is present in both states, so a tap on an already-liked post
+    /// **removes** the like. "I could not tell" must not become "so I tapped".
+    StateUnreadable,
 }
 
 impl LikeVerdict {
@@ -49,6 +58,9 @@ impl LikeVerdict {
             Self::AlreadyLiked => "bài này đã tim từ trước",
             Self::NoControl => "thẻ này không có nút tim",
             Self::NotConfirmed => "tap gửi được nhưng nhãn không đổi — không tính là đã tim",
+            Self::StateUnreadable => {
+                "không đọc được trạng thái đã-tim — KHÔNG tap, vì tap nhầm lên bài đã tim là gỡ mất tim"
+            }
         }
     }
 }
@@ -71,18 +83,27 @@ pub async fn like_post(
     // compile. The same bound is on the report callback for the same reason.
     place: &mut (dyn FnMut(&ElementBox) -> TapPoint + Send),
     stop: &AtomicBool,
-) -> anyhow::Result<LikeVerdict> {
-    if present(session, labels, TikTokControl::Liked).await {
-        return Ok(LikeVerdict::AlreadyLiked);
+) -> Result<LikeVerdict, ActionFailure> {
+    // **Fail closed on the pre-tap read.** `present` folds a query error to `false`, which
+    // here would mean "not liked, go ahead and tap" — and a tap on an already-liked post
+    // removes the like. So the already-liked check reads the three states apart: liked
+    // (stop, already ours), genuinely not liked (proceed), and unreadable (refuse to tap).
+    match locate(session, labels, TikTokControl::Liked).await {
+        Ok(Some(_)) => return Ok(LikeVerdict::AlreadyLiked),
+        Ok(None) => {}
+        Err(_) => return Ok(LikeVerdict::StateUnreadable),
     }
-    let Some(element) = locate(session, labels, TikTokControl::Like).await? else {
+    let Some(element) = locate(session, labels, TikTokControl::Like)
+        .await
+        .map_err(ActionFailure::before)?
+    else {
         return Ok(LikeVerdict::NoControl);
     };
     // Placement is the caller's — a sync closure, so it can hold the touch planner mutably
     // while the session stays borrowed here. The tap itself belongs to this routine, because
     // the proof that follows only means anything if the tap it is proving happened first.
     let point = place(&element);
-    session.tap(point).await?;
+    session.tap(point).await.map_err(ActionFailure::after)?;
 
     let deadline = Instant::now() + LIKE_CONFIRM_WINDOW;
     while Instant::now() < deadline {
@@ -94,7 +115,8 @@ pub async fn like_post(
             return Ok(LikeVerdict::Liked);
         }
         let not_liked_gone = locate(session, labels, TikTokControl::Like)
-            .await?
+            .await
+            .map_err(ActionFailure::after)?
             .is_none();
         let rail_still_here = present(session, labels, TikTokControl::Comments).await;
         if not_liked_gone && rail_still_here {
@@ -163,6 +185,7 @@ mod tests {
             LikeVerdict::AlreadyLiked,
             LikeVerdict::NoControl,
             LikeVerdict::NotConfirmed,
+            LikeVerdict::StateUnreadable,
         ] {
             let reason = verdict.reason();
             assert!(!reason.is_empty());
@@ -171,5 +194,187 @@ mod tests {
                 "{verdict:?} should read as Vietnamese, got {reason:?}"
             );
         }
+    }
+
+    #[test]
+    fn the_unreadable_state_is_not_a_like() {
+        assert!(!LikeVerdict::StateUnreadable.is_liked());
+    }
+
+    use crate::driver::ElementQuery;
+    use crate::tiktok_labels::controls_for;
+    use crate::types::SwipeGesture;
+    use parking_lot::Mutex as PlMutex;
+
+    /// A phone whose `Liked` query can be made to error, with the `Like` node present in
+    /// both states — the exact fleet shape where a mis-read removes a like.
+    struct FlakyLikePhone {
+        controls: TikTokControls,
+        liked_present: bool,
+        liked_errors: bool,
+        like_errors: bool,
+        tap_errors: bool,
+        taps: PlMutex<usize>,
+    }
+
+    #[async_trait::async_trait]
+    impl UiSession for FlakyLikePhone {
+        async fn tap(&self, _point: TapPoint) -> anyhow::Result<()> {
+            *self.taps.lock() += 1;
+            if self.tap_errors {
+                anyhow::bail!("agent dropped the tap response");
+            }
+            Ok(())
+        }
+        async fn swipe(&self, _gesture: SwipeGesture) -> anyhow::Result<()> {
+            Ok(())
+        }
+        async fn type_text(&self, _text: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+        async fn home(&self) -> anyhow::Result<()> {
+            Ok(())
+        }
+        async fn find_and_tap(&self, _accessibility_id: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+        async fn assert_visible(&self, _accessibility_id: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn stream_url(&self) -> Option<String> {
+            None
+        }
+        async fn locate(&self, query: ElementQuery<'_>) -> anyhow::Result<Option<ElementBox>> {
+            let liked_q = self
+                .controls
+                .label(TikTokControl::Liked)
+                .map(|l| l.to_query());
+            let like_q = self
+                .controls
+                .label(TikTokControl::Like)
+                .map(|l| l.to_query());
+            let here = ElementBox {
+                description: None,
+                enabled: true,
+                clickable: true,
+                x: 500.0,
+                y: 1900.0,
+                width: 80.0,
+                height: 80.0,
+            };
+            if Some(query) == liked_q {
+                if self.liked_errors {
+                    anyhow::bail!("agent không trả lời khi hỏi trạng thái đã-tim");
+                }
+                return Ok(self.liked_present.then(|| here.clone()));
+            }
+            if Some(query) == like_q {
+                if self.like_errors {
+                    anyhow::bail!("agent failed before returning the Like control");
+                }
+                // Present in BOTH states on this build — the whole reason a mis-read is
+                // dangerous.
+                return Ok(Some(here));
+            }
+            Ok(None)
+        }
+    }
+
+    fn fleet_controls() -> TikTokControls {
+        controls_for("com.ss.android.ugc.trill", "en", "38.3.2")
+            .expect("the fleet build is catalogued")
+    }
+
+    /// **A query error on the already-liked check must NOT tap.** Reading it as "not liked"
+    /// and tapping removes a real like on this build — the one mistake the module exists to
+    /// avoid. Measured shape: `Like` present in both states.
+    #[tokio::test]
+    async fn an_unreadable_liked_state_refuses_to_tap() {
+        let phone = FlakyLikePhone {
+            controls: fleet_controls(),
+            liked_present: true,
+            liked_errors: true,
+            like_errors: false,
+            tap_errors: false,
+            taps: PlMutex::new(0),
+        };
+        let stop = AtomicBool::new(false);
+        let verdict = like_post(&phone, fleet_controls(), &mut centre_of, &stop)
+            .await
+            .expect("no transport error out of like_post");
+        assert_eq!(verdict, LikeVerdict::StateUnreadable);
+        assert_eq!(
+            *phone.taps.lock(),
+            0,
+            "an unreadable like state was tapped anyway"
+        );
+    }
+
+    /// The other direction stays intact: a genuinely not-liked post is tapped once.
+    #[tokio::test]
+    async fn a_genuinely_unliked_post_is_tapped() {
+        let phone = FlakyLikePhone {
+            controls: fleet_controls(),
+            liked_present: false,
+            liked_errors: false,
+            like_errors: false,
+            tap_errors: false,
+            taps: PlMutex::new(0),
+        };
+        let stop = AtomicBool::new(false);
+        let _ = like_post(&phone, fleet_controls(), &mut centre_of, &stop).await;
+        assert_eq!(
+            *phone.taps.lock(),
+            1,
+            "a not-liked post should be tapped exactly once"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_like_control_read_failure_is_before_effect() {
+        let phone = FlakyLikePhone {
+            controls: fleet_controls(),
+            liked_present: false,
+            liked_errors: false,
+            like_errors: true,
+            tap_errors: false,
+            taps: PlMutex::new(0),
+        };
+
+        let failure = like_post(
+            &phone,
+            fleet_controls(),
+            &mut centre_of,
+            &AtomicBool::new(false),
+        )
+        .await
+        .expect_err("the scripted locate must fail");
+
+        assert!(!failure.effect_may_have_gone_out());
+        assert_eq!(*phone.taps.lock(), 0);
+    }
+
+    #[tokio::test]
+    async fn an_ambiguous_like_tap_failure_is_after_effect() {
+        let phone = FlakyLikePhone {
+            controls: fleet_controls(),
+            liked_present: false,
+            liked_errors: false,
+            like_errors: false,
+            tap_errors: true,
+            taps: PlMutex::new(0),
+        };
+
+        let failure = like_post(
+            &phone,
+            fleet_controls(),
+            &mut centre_of,
+            &AtomicBool::new(false),
+        )
+        .await
+        .expect_err("the scripted tap response must fail");
+
+        assert!(failure.effect_may_have_gone_out());
+        assert_eq!(*phone.taps.lock(), 1);
     }
 }

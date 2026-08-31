@@ -35,10 +35,11 @@ mod recovery;
 // caller.
 pub mod touch;
 
-use actions::{CommentResult, LikeResult, SwipeOutcome};
+use actions::{CommentResult, FollowResult, LikeResult, SwipeOutcome};
+pub use hierarchy::CommentSourceError;
 pub use hierarchy::{run_hierarchy_session, CommentTextSource, HierarchySession, PreparedComment};
 pub use live::LiveSettings;
-use live::{apply_live_settings, video_target};
+use live::{apply_live_settings, video_target, LiveSettingsRefresh};
 pub use recovery::Outcome;
 use recovery::{session_verdict, Budget};
 
@@ -602,18 +603,17 @@ impl NurtureEngine {
     /// sync — "Lưu" in the UI *is* the live-tuning mechanism. One SQLite read of one row per
     /// post, against a loop whose posts take seconds.
     ///
-    /// A read that fails is ignored on purpose: the session already holds a complete, valid
-    /// snapshot, and stopping a run because the settings row was momentarily unreadable
-    /// would trade a working session for nothing. Which fields are picked up, and why the
-    /// rest are not, is [`NurtureSettings::absorb_live_changes`].
-    fn absorb_live_settings(&self, settings: &mut NurtureSettings) {
-        let Ok(fresh) = self.db.get_nurture_settings() else {
-            return;
-        };
+    /// A read failure is returned to `apply_live_settings`, which fail-closes the three public
+    /// action rates to zero for this pass. A later successful read applies the new row and
+    /// reopens those rates; only `NoSource` keeps the initial snapshot. Which fields are picked
+    /// up, and why the rest are not, is [`NurtureSettings::absorb_live_changes`].
+    fn absorb_live_settings(&self, settings: &mut NurtureSettings) -> anyhow::Result<()> {
+        let fresh = self.db.get_nurture_settings()?;
         settings.absorb_live_changes(&fresh);
         // Re-fold the switches: `absorb_live_changes` copies the stored probabilities, which
         // are the operator's numbers rather than the effective ones.
         *settings = std::mem::take(settings).into_effective();
+        Ok(())
     }
 
     /// Open one phone and measure it, or give up with the reason already reported.
@@ -1185,10 +1185,7 @@ impl NurtureEngine {
                     progress.hit_video_cap = false;
                     return Ok((FeedStep::Stop, comment_recovery_action));
                 }
-                policy.record_attempt(PolicyAction::Like);
-                policy.mark_post_interacted();
-                progress.status.like_attempts += 1;
-                ctx.push(&progress.status);
+                let reservation = policy.reserve_attempt(PolicyAction::Like);
                 ctx.report(&mut progress.status, "thả tim".into());
                 match self
                     .do_like(
@@ -1201,21 +1198,34 @@ impl NurtureEngine {
                     .await
                 {
                     Ok(LikeResult::Liked) => {
+                        policy.commit_attempt(reservation);
+                        progress.status.like_attempts += 1;
+                        ctx.push(&progress.status);
                         progress.status.likes += 1;
                         ctx.report(
                             &mut progress.status,
                             "tim thành công (xác nhận icon đỏ)".into(),
                         );
                     }
-                    Ok(LikeResult::AlreadyLiked) => ctx.report(
-                        &mut progress.status,
-                        "video đã tim từ trước — bỏ qua".into(),
-                    ),
-                    Ok(LikeResult::NotOnFeed) => ctx.report(
-                        &mut progress.status,
-                        "bỏ qua tim: khung hiện tại không phải thẻ feed có thanh hành động".into(),
-                    ),
+                    Ok(LikeResult::AlreadyLiked) => {
+                        policy.cancel_no_effect(reservation);
+                        ctx.report(
+                            &mut progress.status,
+                            "video đã tim từ trước — bỏ qua".into(),
+                        )
+                    }
+                    Ok(LikeResult::NotOnFeed) => {
+                        policy.cancel_no_effect(reservation);
+                        ctx.report(
+                            &mut progress.status,
+                            "bỏ qua tim: khung hiện tại không phải thẻ feed có thanh hành động"
+                                .into(),
+                        )
+                    }
                     Ok(LikeResult::NotConfirmed { before, best }) => {
+                        policy.commit_attempt(reservation);
+                        progress.status.like_attempts += 1;
+                        ctx.push(&progress.status);
                         ctx.report(
                             &mut progress.status,
                             format!(
@@ -1229,6 +1239,9 @@ impl NurtureEngine {
                         )
                     }
                     Err(e) => {
+                        policy.commit_attempt(reservation);
+                        progress.status.like_attempts += 1;
+                        ctx.push(&progress.status);
                         let msg = format!("tim thất bại: {}", describe(&e));
                         ctx.report(&mut progress.status, msg.clone());
                         progress.last_error = Some(msg);
@@ -1271,10 +1284,7 @@ impl NurtureEngine {
                     progress.hit_video_cap = false;
                     return Ok((FeedStep::Stop, comment_recovery_action));
                 }
-                policy.record_attempt(PolicyAction::Comment);
-                policy.mark_post_interacted();
-                progress.status.comment_attempts += 1;
-                ctx.push(&progress.status);
+                let reservation = policy.reserve_attempt(PolicyAction::Comment);
                 ctx.report(&mut progress.status, "bình luận".into());
                 suppress.store(true, Ordering::Relaxed);
                 let res = self
@@ -1292,6 +1302,13 @@ impl NurtureEngine {
                 suppress.store(false, Ordering::Relaxed);
                 match res {
                     Ok(result) => {
+                        if result.did_act() {
+                            policy.commit_attempt(reservation);
+                            progress.status.comment_attempts += 1;
+                            ctx.push(&progress.status);
+                        } else {
+                            policy.cancel_no_effect(reservation);
+                        }
                         comment_recovery_action = text_health.observe(result);
                         match result {
                             CommentResult::TextSent {
@@ -1354,6 +1371,9 @@ impl NurtureEngine {
                         }
                     }
                     Err(e) => {
+                        policy.commit_attempt(reservation);
+                        progress.status.comment_attempts += 1;
+                        ctx.push(&progress.status);
                         let msg = format!("bình luận thất bại: {}", describe(&e));
                         ctx.report(&mut progress.status, msg.clone());
                         progress.last_error = Some(msg);
@@ -1639,10 +1659,7 @@ impl NurtureEngine {
             progress.hit_video_cap = false;
             return Ok(FeedStep::Stop);
         } else {
-            policy.record_attempt(PolicyAction::Follow);
-            policy.mark_post_interacted();
-            progress.status.follow_attempts += 1;
-            ctx.push(&progress.status);
+            let reservation = policy.reserve_attempt(PolicyAction::Follow);
             ctx.report(&mut progress.status, "follow".into());
             match self
                 .do_follow(
@@ -1655,12 +1672,36 @@ impl NurtureEngine {
                 )
                 .await
             {
-                Ok(true) => {
-                    progress.status.follows += 1;
-                    ctx.report(&mut progress.status, "follow thành công".into());
+                Ok(verdict) => {
+                    if verdict.did_act() {
+                        policy.commit_attempt(reservation);
+                        progress.status.follow_attempts += 1;
+                        ctx.push(&progress.status);
+                    } else {
+                        policy.cancel_no_effect(reservation);
+                    }
+                    match verdict {
+                        FollowResult::Followed => {
+                            progress.status.follows += 1;
+                            ctx.report(&mut progress.status, "follow thành công".into());
+                        }
+                        FollowResult::NoControl => ctx.report(
+                            &mut progress.status,
+                            "bỏ qua follow: thẻ không có nút Follow".into(),
+                        ),
+                        FollowResult::CardChanged => ctx.report(
+                            &mut progress.status,
+                            "bỏ qua follow: thẻ hoặc tác giả đã đổi trước cú tap".into(),
+                        ),
+                        FollowResult::NotConfirmed => {
+                            ctx.report(&mut progress.status, "follow không đổi trạng thái".into())
+                        }
+                    }
                 }
-                Ok(false) => ctx.report(&mut progress.status, "follow không đổi trạng thái".into()),
                 Err(e) => {
+                    policy.commit_attempt(reservation);
+                    progress.status.follow_attempts += 1;
+                    ctx.push(&progress.status);
                     let msg = format!("follow thất bại: {}", describe(&e));
                     ctx.report(&mut progress.status, msg.clone());
                     progress.last_error = Some(msg);
@@ -1775,6 +1816,7 @@ impl NurtureEngine {
             slides: parking_lot::Mutex::new(SlideEvidence::default()),
         };
         let live_source = EngineLiveSettings { engine: self };
+        let mut said_live_settings_failed = false;
         let attempt = hierarchy::run_hierarchy_session(
             device.session.as_ref(),
             device.screen_size,
@@ -2027,13 +2069,25 @@ impl NurtureEngine {
             // with no extra plumbing. Per *post* on purpose: a probability that changed
             // between rolling an action and confirming it would make that action's own
             // record unexplainable.
-            apply_live_settings(
+            match apply_live_settings(
                 Some(&live_source),
                 &mut settings,
                 &mut human,
                 &mut policy,
                 &mut moods,
-            );
+            ) {
+                LiveSettingsRefresh::Applied => said_live_settings_failed = false,
+                LiveSettingsRefresh::Failed(error) if !said_live_settings_failed => {
+                    said_live_settings_failed = true;
+                    ctx.report(
+                        &mut progress.status,
+                        format!(
+                            "không đọc được cài đặt mới ({error}) — khóa like/comment/follow ở lượt này"
+                        ),
+                    );
+                }
+                LiveSettingsRefresh::NoSource | LiveSettingsRefresh::Failed(_) => {}
+            }
             if stop.load(Ordering::Relaxed) {
                 progress.outcome = Outcome::Stopped;
                 progress.hit_video_cap = false;
@@ -2600,8 +2654,8 @@ struct EngineLiveSettings<'a> {
 }
 
 impl LiveSettings for EngineLiveSettings<'_> {
-    fn refresh(&self, settings: &mut NurtureSettings) {
-        self.engine.absorb_live_settings(settings);
+    fn refresh(&self, settings: &mut NurtureSettings) -> anyhow::Result<()> {
+        self.engine.absorb_live_settings(settings)
     }
 }
 
@@ -2610,7 +2664,7 @@ impl hierarchy::CommentTextSource for EngineCommentSource<'_> {
     async fn comment_for_post(
         &self,
         settings: &NurtureSettings,
-    ) -> Option<hierarchy::PreparedComment> {
+    ) -> Result<Option<hierarchy::PreparedComment>, hierarchy::CommentSourceError> {
         let (slides, offered) = self.slides.lock().drain();
         self.engine
             .prepare_hierarchy_comment(self.udid, settings, slides, offered, self.stop)
@@ -2619,7 +2673,7 @@ impl hierarchy::CommentTextSource for EngineCommentSource<'_> {
 
     async fn record_outcome(&self, prepared: &hierarchy::PreparedComment, outcome: &str) {
         self.engine
-            .finish_hierarchy_comment(prepared.attempt_id.as_deref(), outcome);
+            .finish_hierarchy_comment(&prepared.attempt_id, outcome);
     }
 
     fn note_slide(&self) {

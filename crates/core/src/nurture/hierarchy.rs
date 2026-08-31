@@ -37,17 +37,18 @@ use std::time::{Duration, Instant};
 // Settings an operator changed after this session started, and the two objects that have
 // to be told. Both feed loops go through the same function; [`super::live`] says why that
 // is load-bearing rather than tidiness.
-use super::live::{apply_live_settings, video_target, LiveSettings};
+use super::live::{apply_live_settings, video_target, LiveSettings, LiveSettingsRefresh};
 use crate::driver::{ElementBox, ElementQuery, UiSession};
 use crate::feed_ladder::{self, LadderSpend, LadderStep};
 use crate::human_behavior::{
-    in_night_window, roll_bool, roll_feed_action_in_mood, roll_follow_in_mood, FeedAction,
-    HumanBehavior, HumanSessionPolicy, MoodCycle, PolicyAction,
+    in_night_window, roll_bool, roll_feed_action_in_mood, roll_follow_in_mood, AttemptReservation,
+    FeedAction, HumanBehavior, HumanSessionPolicy, MoodCycle, PolicyAction,
 };
 use crate::tiktok_drawer::CommentVerdict;
 use crate::tiktok_labels::{controls_for, TikTokControl, TikTokControls};
 use crate::tiktok_like::LikeVerdict;
 use crate::types::{NurturePhase, NurtureSessionStatus, NurtureSettings, TapPoint};
+use crate::ActionFailure;
 
 use super::recovery::Outcome;
 use super::sleep_interruptible;
@@ -163,6 +164,9 @@ const CAROUSEL_SETTLE: Duration = Duration::from_millis(900);
 /// same honesty the pixel engine's `SwipeOutcome` keeps.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 struct PostFingerprint {
+    /// Stable author link beside the card. Counts can change after our own comment; the
+    /// author is therefore the proof a later follow still targets the card we selected.
+    author: Option<String>,
     comments: Option<String>,
     share: Option<String>,
     /// The sound strip's whole description, which is the only part of this that reliably
@@ -190,6 +194,87 @@ impl PostFingerprint {
     fn is_empty(&self) -> bool {
         self.comments.is_none() && self.share.is_none()
     }
+
+    fn has_same_author(&self, other: &Self) -> bool {
+        self.author.is_some() && self.author == other.author
+    }
+
+    /// Whether two reads conservatively describe the card that already received an action.
+    ///
+    /// Comment/share counts are intentionally absent: our own comment changes one of them,
+    /// and either can move between hierarchy reads while the feed stays on the same card.
+    /// Author plus sound is the strongest stable identity this hierarchy exposes. When sound
+    /// disappears transiently but the author still agrees, treating the card as the same costs
+    /// at most one skipped action; treating it as new can post a duplicate that cannot be
+    /// undone. Full [`PartialEq`] remains the swipe-change proof elsewhere.
+    fn same_card_for_duplicate_guard(&self, other: &Self) -> bool {
+        if self.is_empty() || other.is_empty() {
+            return false;
+        }
+        match (self.author.as_deref(), other.author.as_deref()) {
+            (Some(left), Some(right)) if left != right => false,
+            (Some(_), Some(_)) => match (self.sound.as_deref(), other.sound.as_deref()) {
+                (Some(left), Some(right)) => left == right,
+                _ => true,
+            },
+            _ => match (self.sound.as_deref(), other.sound.as_deref()) {
+                (Some(left), Some(right)) => left == right,
+                _ => self == other,
+            },
+        }
+    }
+}
+
+/// Extract the author embedded around a measured control needle. Vietnamese profile labels
+/// put the name after `Hồ sơ `, English profile labels put it before ` profile`, and Follow
+/// puts it after `Follow `. Removing the catalogued needle rather than guessing a language
+/// keeps all three shapes on one comparison.
+fn embedded_author(description: &str, label: crate::tiktok_labels::LabelMatch) -> Option<String> {
+    let observed = crate::interaction::normalize_locator_text(description);
+    let needle = crate::interaction::normalize_locator_text(label.value());
+    let at = observed.find(&needle)?;
+    let author = crate::interaction::normalize_locator_text(&format!(
+        "{} {}",
+        &observed[..at],
+        &observed[at + needle.len()..]
+    ));
+    (!author.is_empty()).then_some(author)
+}
+
+fn follow_control_matches_author(
+    labels: TikTokControls,
+    expected: &PostFingerprint,
+    follow: &ElementBox,
+) -> bool {
+    let Some(expected_description) = expected.author.as_deref() else {
+        return false;
+    };
+    let Some(follow_description) = follow.description.as_deref() else {
+        return false;
+    };
+    let Some(profile_label) = labels.label(TikTokControl::AuthorProfileLink) else {
+        return false;
+    };
+    let Some(follow_label) = labels.label(TikTokControl::Follow) else {
+        return false;
+    };
+    embedded_author(expected_description, profile_label)
+        .zip(embedded_author(follow_description, follow_label))
+        .is_some_and(|(expected, actual)| expected == actual)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FollowVerdict {
+    Followed,
+    NoControl,
+    CardChanged,
+    NotConfirmed,
+}
+
+impl FollowVerdict {
+    fn did_act(self) -> bool {
+        matches!(self, Self::Followed | Self::NotConfirmed)
+    }
 }
 
 /// A comment the caller has already decided to post, and what it cost.
@@ -204,7 +289,15 @@ pub struct PreparedComment {
     pub completion_tokens: u32,
     /// Opaque id for the caller's own audit row, echoed back to
     /// [`CommentTextSource::record_outcome`].
-    pub attempt_id: Option<String>,
+    pub attempt_id: String,
+}
+
+/// A comment source can decline ordinary context with `Ok(None)`, but failure to persist the
+/// required write-ahead row is a different, operator-actionable result. Keeping it typed stops
+/// the hierarchy loop from reporting a broken audit store as an AI/context skip.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CommentSourceError {
+    AuditUnavailable,
 }
 
 /// Where this loop gets the words for a comment.
@@ -227,7 +320,10 @@ pub trait CommentTextSource: Send + Sync {
     /// It is passed in rather than held by the implementor because the loop owns the
     /// only live copy; a borrow captured at session start would be a second, stale
     /// answer to the same question.
-    async fn comment_for_post(&self, settings: &NurtureSettings) -> Option<PreparedComment>;
+    async fn comment_for_post(
+        &self,
+        settings: &NurtureSettings,
+    ) -> Result<Option<PreparedComment>, CommentSourceError>;
 
     /// Record how the attempt ended. Default does nothing, for callers with no
     /// audit trail to keep.
@@ -309,6 +405,7 @@ async fn fingerprint(session: &dyn UiSession, labels: TikTokControls) -> PostFin
             .and_then(|element| element.description)
     };
     PostFingerprint {
+        author: read(TikTokControl::AuthorProfileLink).await,
         comments: read(TikTokControl::Comments).await,
         share: read(TikTokControl::Share).await,
         sound: read(TikTokControl::SoundLink).await,
@@ -436,7 +533,7 @@ impl<'a> HierarchyRun<'a> {
     /// liked label appearing is the evidence" would drift into reporting different things.
     /// The tap placement stays here: the touch history and this device's hand belong to the
     /// run, not to the like.
-    async fn like(&mut self, stop: &AtomicBool) -> anyhow::Result<LikeVerdict> {
+    async fn like(&mut self, stop: &AtomicBool) -> Result<LikeVerdict, ActionFailure> {
         // The session reference is copied out before the planner is borrowed mutably: they
         // are disjoint fields, and taking them in this order is what lets both be held.
         let session = self.session;
@@ -477,7 +574,11 @@ impl<'a> HierarchyRun<'a> {
     /// A step without its evidence returns the matching [`CommentVerdict`] and does
     /// **not** retry: a tapped Send whose result cannot be read is ambiguous, and
     /// re-sending an ambiguous comment is how a post ends up with two of them.
-    async fn comment(&mut self, text: &str, stop: &AtomicBool) -> anyhow::Result<CommentVerdict> {
+    async fn comment(
+        &mut self,
+        text: &str,
+        stop: &AtomicBool,
+    ) -> Result<CommentVerdict, ActionFailure> {
         // Delegated to `crate::tiktok_drawer`, which owns the measured flow. The
         // planner is threaded through so the taps keep this loop's jitter history —
         // the drawer module deliberately has no opinion about where inside a control
@@ -492,17 +593,46 @@ impl<'a> HierarchyRun<'a> {
     }
 
     /// Follow the author, proved by the Follow control leaving the card.
-    async fn follow(&mut self, stop: &AtomicBool) -> anyhow::Result<bool> {
-        let Some(element) = locate(self.session, self.labels, TikTokControl::Follow).await? else {
-            return Ok(false);
+    async fn follow(
+        &mut self,
+        expected: &PostFingerprint,
+        stop: &AtomicBool,
+    ) -> Result<FollowVerdict, ActionFailure> {
+        if !self.on_feed().await {
+            return Ok(FollowVerdict::CardChanged);
+        }
+        let current = fingerprint(self.session, self.labels).await;
+        if !current.has_same_author(expected) {
+            return Ok(FollowVerdict::CardChanged);
+        }
+        let Some(element) = locate(self.session, self.labels, TikTokControl::Follow)
+            .await
+            .map_err(ActionFailure::before)?
+        else {
+            return Ok(FollowVerdict::NoControl);
         };
-        self.tap_inside(&element).await?;
+        // A mixed/stale hierarchy can briefly expose AuthorProfileLink from card A beside a
+        // Follow node from card B. Geometry alone cannot bind those nodes; the embedded names
+        // must agree before the tap leaves this process.
+        if !follow_control_matches_author(self.labels, expected, &element) {
+            return Ok(FollowVerdict::CardChanged);
+        }
+        self.tap_inside(&element)
+            .await
+            .map_err(ActionFailure::after)?;
         sleep_interruptible(Duration::from_millis(1_200), stop).await;
         // Following removes the button; its continued presence means the tap did
         // not take, and reporting that as a follow would inflate every count.
-        Ok(locate(self.session, self.labels, TikTokControl::Follow)
-            .await?
-            .is_none())
+        let follow_gone = locate(self.session, self.labels, TikTokControl::Follow)
+            .await
+            .map_err(ActionFailure::after)?
+            .is_none();
+        let after = fingerprint(self.session, self.labels).await;
+        Ok(if follow_gone && after.has_same_author(expected) {
+            FollowVerdict::Followed
+        } else {
+            FollowVerdict::NotConfirmed
+        })
     }
 
     /// Where we are inside a photo post: `(current, total)`, or `None` when this card is
@@ -1141,31 +1271,104 @@ async fn await_feed(
 /// ended.
 ///
 /// Lifted verbatim out of the `FeedAction::Comment` arm when the deferral gave it a second
-/// caller. Returns whether the drawer reported `Sent`, which is the one thing the caller needs
-/// afterwards: a comment that landed changes the card's own comment count, so the fingerprint
-/// the next vertical swipe is judged against has to be retaken.
+/// caller. The outcome distinguishes a real gesture from a refusal before any UI was touched,
+/// so the caller can refund only a provable no-op.
 ///
-/// It deliberately does **not** spend any policy budget — `wait_gap`, `record_attempt`,
-/// `mark_post_interacted` and `comment_attempts` all stay at the roll site, so a deferred
-/// comment paces exactly like an immediate one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RolledCommentOutcome {
+    sent: bool,
+    did_act: bool,
+}
+
+fn settle_attempt(
+    policy: &mut HumanSessionPolicy,
+    reservation: AttemptReservation,
+    did_act: bool,
+    attempt_counter: &mut u32,
+) -> bool {
+    if did_act {
+        policy.commit_attempt(reservation);
+        *attempt_counter += 1;
+        true
+    } else {
+        policy.cancel_no_effect(reservation);
+        false
+    }
+}
+
+fn settle_action_failure(
+    policy: &mut HumanSessionPolicy,
+    reservation: AttemptReservation,
+    failure: &ActionFailure,
+    attempt_counter: &mut u32,
+) -> bool {
+    settle_attempt(
+        policy,
+        reservation,
+        failure.effect_may_have_gone_out(),
+        attempt_counter,
+    )
+}
+
 async fn post_rolled_comment(
     run: &mut HierarchyRun<'_>,
     source: &dyn CommentTextSource,
     settings: &NurtureSettings,
+    grounded_on: &PostFingerprint,
     stop: &AtomicBool,
     status: &mut NurtureSessionStatus,
     report: &(dyn Fn(&mut NurtureSessionStatus, String) + Send + Sync),
-) -> bool {
-    let Some(prepared) = source.comment_for_post(settings).await else {
+) -> RolledCommentOutcome {
+    let prepared = match source.comment_for_post(settings).await {
+        Ok(Some(prepared)) => prepared,
+        Err(CommentSourceError::AuditUnavailable) => {
+            report(
+                status,
+                "bỏ qua bình luận: không ghi được audit trước hành động".into(),
+            );
+            return RolledCommentOutcome {
+                sent: false,
+                did_act: false,
+            };
+        }
+        Ok(None) => {
+            report(
+                status,
+                format!(
+                    "bỏ qua bình luận: {}",
+                    CommentVerdict::ContextSkipped.reason()
+                ),
+            );
+            return RolledCommentOutcome {
+                sent: false,
+                did_act: false,
+            };
+        }
+    };
+    // **The comment is grounded on the card that was on screen when we started; only that
+    // card may receive it.** Drafting collects frames and then calls a vision model, which
+    // takes seconds, and a feed can advance underneath a slow draft — so a comment written
+    // about card A would otherwise be typed into card B's drawer, publicly and undoably, on
+    // a real account. The deferred (photo) path has re-read the card for exactly this reason
+    // since the carousel work; the immediate path drafted and typed without ever looking
+    // again. `is_empty()` (no rail — mid-transition or a LIVE card) is treated as "changed":
+    // if we cannot see the card we grounded on, we do not type. Found by the 31/08/2026
+    // whole-file review; the deferred path's guard is the sibling of this one.
+    let now = fingerprint(run.session, run.labels).await;
+    if now.is_empty() || now != *grounded_on {
         report(
             status,
-            format!(
-                "bỏ qua bình luận: {}",
-                CommentVerdict::ContextSkipped.reason()
-            ),
+            "bỏ qua bình luận: thẻ đã đổi giữa lúc soạn và lúc gõ — không bình luận nhầm bài"
+                .into(),
         );
-        return false;
-    };
+        source
+            .record_outcome(&prepared, "skipped: card_changed")
+            .await;
+        return RolledCommentOutcome {
+            sent: false,
+            did_act: false,
+        };
+    }
     match run.comment(&prepared.text, stop).await {
         Ok(CommentVerdict::Sent) => {
             status.comments += 1;
@@ -1173,7 +1376,10 @@ async fn post_rolled_comment(
             status.session_completion_tokens += prepared.completion_tokens;
             report(status, "đã gửi bình luận (nút Gửi tắt lại)".into());
             source.record_outcome(&prepared, "sent").await;
-            true
+            RolledCommentOutcome {
+                sent: true,
+                did_act: true,
+            }
         }
         Ok(verdict) => {
             report(status, format!("bỏ qua bình luận: {}", verdict.reason()));
@@ -1186,14 +1392,26 @@ async fn post_rolled_comment(
             source
                 .record_outcome(&prepared, &format!("skipped: {verdict:?}"))
                 .await;
-            false
+            RolledCommentOutcome {
+                sent: false,
+                did_act: !matches!(
+                    verdict,
+                    CommentVerdict::SendUnmeasured
+                        | CommentVerdict::NoControl
+                        | CommentVerdict::ContextSkipped
+                ),
+            }
         }
         Err(error) => {
             report(status, format!("bình luận thất bại: {error}"));
             source
                 .record_outcome(&prepared, &format!("failed: {error}"))
                 .await;
-            false
+            // A transport error does not prove the drawer or Send were untouched.
+            RolledCommentOutcome {
+                sent: false,
+                did_act: error.effect_may_have_gone_out(),
+            }
         }
     }
 }
@@ -1282,10 +1500,17 @@ pub(super) async fn run_feed(
     let mut stuck_swipes = 0u32;
     let mut restarted = false;
     let mut last_interaction_at: Option<Instant> = None;
+    // The card an interaction was last spent on. A swallowed swipe leaves that same card on
+    // screen, and the next pass would `begin_post()` and comment/like/follow it a SECOND
+    // time — a duplicate public action, on a real account, with no delete path. So a pass
+    // whose card fingerprint matches this one spends no interaction; it only tries to leave.
+    // Cleared the moment a swipe is proven to have changed the card.
+    let mut last_acted_fingerprint: Option<PostFingerprint> = None;
     let mut outcome = Outcome::Done;
     // Latched so an operator who switches comments on mid-run is told once why nothing
     // happens, instead of watching a switch that reports nothing at all.
     let mut said_comments_impossible = settings.comment_prob > 0 && !comment_capable;
+    let mut said_live_settings_failed = false;
 
     // The feed loop proper. Set once outside the loop, for the same reason the pixel path
     // does it: a phase that flickered per post would be noise, not signal.
@@ -1296,7 +1521,22 @@ pub(super) async fn run_feed(
     'feed: for _video in 0..total_videos {
         // Live tuning, once per post — same place, same function, same reason as the pixel
         // loop.
-        if apply_live_settings(live, &mut settings, &mut human, &mut policy, &mut moods)
+        let live_refresh =
+            apply_live_settings(live, &mut settings, &mut human, &mut policy, &mut moods);
+        match &live_refresh {
+            LiveSettingsRefresh::Applied => said_live_settings_failed = false,
+            LiveSettingsRefresh::Failed(error) if !said_live_settings_failed => {
+                said_live_settings_failed = true;
+                report(
+                    status,
+                    format!(
+                        "không đọc được cài đặt mới ({error}) — khóa like/comment/follow ở lượt này"
+                    ),
+                );
+            }
+            LiveSettingsRefresh::NoSource | LiveSettingsRefresh::Failed(_) => {}
+        }
+        if matches!(live_refresh, LiveSettingsRefresh::Applied)
             && settings.comment_prob > 0
             && !comment_capable
             && !said_comments_impossible
@@ -1411,13 +1651,40 @@ pub(super) async fn run_feed(
         // is the same value the carousel block below would have read.
         let ceiling = settings.carousel_ceiling();
         // Set when the comment was charged for but held until the slides have been paged.
-        let mut deferred_comment = false;
+        let mut deferred_comment: Option<AttemptReservation> = None;
 
         // Whether this post's comment went out on the *immediate* path. The deferred path
         // refreshes `before` itself; this one could not, because `before` is not mutable until
         // the shadow below.
         let mut comment_sent = false;
-        match roll_feed_action_in_mood(settings.like_prob, settings.comment_prob, mood) {
+
+        // **Do not interact with a card we already interacted with.** A swallowed swipe
+        // leaves the acted card on screen, and this pass would otherwise `begin_post()` and
+        // spend a fresh like/comment/follow on it — a duplicate public action on a real
+        // account, undoable by nobody. The fingerprint match is deliberately conservative:
+        // on the rare chance two different cards read identically it costs one skipped
+        // interaction, never a second comment. `is_empty()` cards (no rail) are excluded so
+        // a LIVE/transition card never latches this.
+        let still_on_acted_card = last_acted_fingerprint
+            .as_ref()
+            .is_some_and(|acted| acted.same_card_for_duplicate_guard(&before));
+        if still_on_acted_card {
+            report(
+                status,
+                "vẫn ở thẻ vừa tương tác (vuốt trước chưa ăn) — KHÔNG tương tác lại, chỉ tìm cách rời đi"
+                    .into(),
+            );
+        }
+        // Set by any arm that actually spends an interaction on this card, so the card's
+        // post-action fingerprint can be remembered before the swipe.
+        let mut acted_this_pass = false;
+
+        let rolled_action = if still_on_acted_card {
+            FeedAction::None
+        } else {
+            roll_feed_action_in_mood(settings.like_prob, settings.comment_prob, mood)
+        };
+        match rolled_action {
             FeedAction::Like
                 if !policy.can_interact_with_post() || !policy.can_attempt(PolicyAction::Like) =>
             {
@@ -1428,26 +1695,48 @@ pub(super) async fn run_feed(
                     outcome = Outcome::Stopped;
                     break 'feed;
                 }
-                policy.record_attempt(PolicyAction::Like);
-                policy.mark_post_interacted();
-                status.like_attempts += 1;
+                let reservation = policy.reserve_attempt(PolicyAction::Like);
                 report(status, "thả tim".into());
                 match run.like(stop).await {
                     Ok(LikeVerdict::Liked) => {
+                        policy.commit_attempt(reservation);
+                        acted_this_pass = true;
+                        status.like_attempts += 1;
                         status.likes += 1;
                         report(status, "tim thành công (nhãn đổi trạng thái)".into());
                     }
                     Ok(LikeVerdict::AlreadyLiked) => {
+                        policy.cancel_no_effect(reservation);
                         report(status, "video đã tim từ trước — bỏ qua".into())
                     }
                     Ok(LikeVerdict::NoControl) => {
+                        policy.cancel_no_effect(reservation);
                         report(status, "bỏ qua tim: thẻ này không có nút tim".into())
                     }
-                    Ok(LikeVerdict::NotConfirmed) => report(
-                        status,
-                        "tim: tap gửi được nhưng nhãn không đổi — không tính là đã tim".into(),
-                    ),
+                    Ok(LikeVerdict::NotConfirmed) => {
+                        policy.commit_attempt(reservation);
+                        acted_this_pass = true;
+                        status.like_attempts += 1;
+                        report(
+                            status,
+                            "tim: tap gửi được nhưng nhãn không đổi — không tính là đã tim".into(),
+                        )
+                    }
+                    Ok(LikeVerdict::StateUnreadable) => {
+                        policy.cancel_no_effect(reservation);
+                        report(
+                            status,
+                            "bỏ qua tim: không đọc được trạng thái đã-tim (không tap để khỏi gỡ tim)"
+                                .into(),
+                        )
+                    }
                     Err(error) => {
+                        acted_this_pass |= settle_action_failure(
+                            &mut policy,
+                            reservation,
+                            &error,
+                            &mut status.like_attempts,
+                        );
                         report(status, format!("tim thất bại: {error}"));
                     }
                 }
@@ -1468,9 +1757,7 @@ pub(super) async fn run_feed(
                     outcome = Outcome::Stopped;
                     break 'feed;
                 }
-                policy.record_attempt(PolicyAction::Comment);
-                policy.mark_post_interacted();
-                status.comment_attempts += 1;
+                let reservation = policy.reserve_attempt(PolicyAction::Comment);
                 report(status, "bình luận".into());
                 let source = comments.expect("comment_capable implies a text source");
                 // **Wait for the slides on a post that has them.** The comment used to be
@@ -1489,11 +1776,19 @@ pub(super) async fn run_feed(
                         status,
                         "bài ảnh — soạn bình luận sau khi xem hết ảnh".into(),
                     );
-                    deferred_comment = true;
+                    deferred_comment = Some(reservation);
                 } else {
-                    comment_sent =
-                        post_rolled_comment(&mut run, source, &settings, stop, status, report)
-                            .await;
+                    let comment = post_rolled_comment(
+                        &mut run, source, &settings, &before, stop, status, report,
+                    )
+                    .await;
+                    comment_sent = comment.sent;
+                    acted_this_pass |= settle_attempt(
+                        &mut policy,
+                        reservation,
+                        comment.did_act,
+                        &mut status.comment_attempts,
+                    );
                 }
             }
             FeedAction::None => {}
@@ -1511,26 +1806,66 @@ pub(super) async fn run_feed(
         // `mark_post_interacted` first, so a roll that could never do anything still used
         // up the human-pacing budget for that post and blocked the like that might have
         // followed it.
-        if can_follow(run.labels)
+        if !still_on_acted_card
+            && can_follow(run.labels)
             && roll_follow_in_mood(settings.follow_prob, mood)
             && policy.can_interact_with_post()
             && policy.can_attempt(PolicyAction::Follow)
             && wait_gap(&mut last_interaction_at, policy.min_action_gap(), stop).await
         {
-            policy.record_attempt(PolicyAction::Follow);
-            policy.mark_post_interacted();
-            status.follow_attempts += 1;
-            report(status, "follow tác giả".into());
-            match run.follow(stop).await {
-                Ok(true) => {
-                    status.follows += 1;
-                    report(status, "follow thành công (nút Follow mất khỏi thẻ)".into());
-                }
-                Ok(false) => report(
+            // **Confirm the feed is still under us before following.** A like a moment ago
+            // could have opened another screen, and that screen exposes its own
+            // `Follow <author>` — following it would follow a stranger the roll never chose.
+            // `on_feed` is the same cheap rail read the swipe-recovery below trusts.
+            if !run.on_feed().await {
+                report(
                     status,
-                    "bỏ qua follow: nút Follow vẫn còn — chưa xác nhận".into(),
-                ),
-                Err(error) => report(status, format!("follow thất bại: {error}")),
+                    "bỏ qua follow: không còn ở feed (hành động trước đã rời thẻ) — không follow nhầm tác giả"
+                        .into(),
+                );
+            } else {
+                let reservation = policy.reserve_attempt(PolicyAction::Follow);
+                report(status, "follow tác giả".into());
+                match run.follow(&before, stop).await {
+                    Ok(verdict) => {
+                        if verdict.did_act() {
+                            policy.commit_attempt(reservation);
+                            acted_this_pass = true;
+                            status.follow_attempts += 1;
+                        } else {
+                            policy.cancel_no_effect(reservation);
+                        }
+                        match verdict {
+                            FollowVerdict::Followed => {
+                                status.follows += 1;
+                                report(
+                                    status,
+                                    "follow thành công (nút Follow mất khỏi thẻ)".into(),
+                                );
+                            }
+                            FollowVerdict::NoControl => {
+                                report(status, "bỏ qua follow: thẻ không có nút Follow".into())
+                            }
+                            FollowVerdict::CardChanged => report(
+                                status,
+                                "bỏ qua follow: thẻ hoặc tác giả đã đổi trước cú tap".into(),
+                            ),
+                            FollowVerdict::NotConfirmed => report(
+                                status,
+                                "bỏ qua follow: nút Follow vẫn còn — chưa xác nhận".into(),
+                            ),
+                        }
+                    }
+                    Err(error) => {
+                        acted_this_pass |= settle_action_failure(
+                            &mut policy,
+                            reservation,
+                            &error,
+                            &mut status.follow_attempts,
+                        );
+                        report(status, format!("follow thất bại: {error}"));
+                    }
+                }
             }
         }
 
@@ -1574,22 +1909,24 @@ pub(super) async fn run_feed(
                     // Only a deferred comment has a use for the slides. Handing the sink over
                     // on every photo post would fill it on posts nobody is going to comment
                     // on, and the next comment would then be grounded on the wrong card.
-                    deferred_comment.then_some(comments).flatten(),
+                    deferred_comment.is_some().then_some(comments).flatten(),
                 )
                 .await;
             // **The deferred comment, before the stop check below.** A session told to stop
             // mid-traversal has already spent this post's comment budget, so the row has to
             // be written either way — that is the same hole `no_api_key` used to leave, and
             // the reason `record_skip` exists.
-            if deferred_comment {
+            if let Some(reservation) = deferred_comment.take() {
                 let source = comments.expect("deferred implies a text source");
                 // Let the pager finish, then re-read the card. `before` was taken at the top
                 // of the post, several sideways gestures ago.
                 sleep_interruptible(SWIPE_SETTLE, stop).await;
                 let after = fingerprint(run.session, run.labels).await;
                 if stop.load(Ordering::Relaxed) {
+                    policy.cancel_no_effect(reservation);
                     source.record_skip(&settings, "deferred_stopped").await;
                 } else if after.is_empty() {
+                    policy.cancel_no_effect(reservation);
                     // No rail at all: either the follow above navigated off the feed —
                     // measured on 18/08/2026 and the reason the walk-back below exists — or
                     // the card is mid-transition. Either way the drawer would open on the
@@ -1597,6 +1934,7 @@ pub(super) async fn run_feed(
                     report(status, "bỏ qua bình luận: không còn thấy thẻ bài".into());
                     source.record_skip(&settings, "deferred_no_rail").await;
                 } else if after != before {
+                    policy.cancel_no_effect(reservation);
                     // The card changed underneath the traversal. Posting now would comment on
                     // whatever arrived, which is worse than not commenting.
                     report(
@@ -1604,21 +1942,31 @@ pub(super) async fn run_feed(
                         "bỏ qua bình luận: thẻ đã đổi khi đang xem ảnh".into(),
                     );
                     source.record_skip(&settings, "deferred_card_changed").await;
-                } else if post_rolled_comment(&mut run, source, &settings, stop, status, report)
-                    .await
-                {
-                    // A sent comment changes this card's own comment count, and that count is
-                    // part of the fingerprint the next vertical swipe is judged against.
-                    before = fingerprint(run.session, run.labels).await;
                 } else {
-                    before = after;
+                    let comment = post_rolled_comment(
+                        &mut run, source, &settings, &after, stop, status, report,
+                    )
+                    .await;
+                    acted_this_pass |= settle_attempt(
+                        &mut policy,
+                        reservation,
+                        comment.did_act,
+                        &mut status.comment_attempts,
+                    );
+                    if comment.sent {
+                        // A sent comment changes this card's own comment count, and that count
+                        // is part of the next vertical swipe proof.
+                        before = fingerprint(run.session, run.labels).await;
+                    } else {
+                        before = after;
+                    }
                 }
             }
             if stop.load(Ordering::Relaxed) {
                 outcome = Outcome::Stopped;
                 break 'feed;
             }
-            if slides > 1 && !deferred_comment {
+            if slides > 1 && deferred_comment.is_none() {
                 // Re-read the card we are about to leave, and let the pager finish.
                 //
                 // `before` was taken at the top of the post, several sideways gestures ago,
@@ -1646,6 +1994,13 @@ pub(super) async fn run_feed(
         // counts. The fingerprint is retaken because the walk back is a navigation: the
         // card in front of us afterwards is not necessarily the one `before` describes,
         // and judging a swipe against a stale card is how a working swipe reads as stuck.
+        // Remember the card we just acted on, while still standing on it — before any
+        // walk-back navigation re-reads `before`. If the swipe below is swallowed, the next
+        // pass will read this same fingerprint and decline to act on it a second time.
+        if acted_this_pass {
+            last_acted_fingerprint = Some(before.clone());
+        }
+
         if !run.on_feed().await {
             if !await_feed(&run, stop, status, report).await {
                 report(status, "không quay lại được feed — dừng".into());
@@ -1680,6 +2035,10 @@ pub(super) async fn run_feed(
         sleep_interruptible(Duration::from_millis(human.after_swipe_pause_ms()), stop).await;
         if advanced {
             stuck_swipes = 0;
+            // Keep the duplicate guard until the next pass reads a different stable identity.
+            // Full fingerprint inequality proves enough to count a swipe, but our own delayed
+            // comment-count update can also create that inequality on a swallowed swipe.
+            // Clearing here would turn that useful full proof into permission to comment twice.
             status.videos_done += 1;
             if let Some(rest) = policy.rest_after_video() {
                 report(status, format!("nghỉ tự nhiên {}s", rest.as_secs()));
@@ -1713,6 +2072,13 @@ pub(super) async fn run_feed(
                     // No need to re-fingerprint: the loop reads the card it is about to
                     // leave at the top of each pass, and after a restart that is a
                     // different card anyway.
+                    //
+                    // `last_acted_fingerprint` is deliberately NOT cleared here: a restart is
+                    // only *supposed* to change the card, and when it does not (the card is
+                    // genuinely stuck) clearing it would let the next pass act on the same
+                    // post again. The next pass re-reads the card and the fingerprint guard
+                    // decides — a real new card differs and is acted on, a stuck one matches
+                    // and is left alone. Only a proven swipe clears it.
                     stuck_swipes = 0;
                     continue;
                 }
@@ -1760,6 +2126,390 @@ mod tests {
 
     fn texts(items: &[&str]) -> Vec<String> {
         items.iter().map(|s| (*s).to_string()).collect()
+    }
+
+    struct FollowCardPhone {
+        author: &'static str,
+        follow_author: &'static str,
+        taps: std::sync::atomic::AtomicUsize,
+        followed: std::sync::atomic::AtomicBool,
+    }
+
+    #[async_trait::async_trait]
+    impl UiSession for FollowCardPhone {
+        async fn tap(&self, _point: TapPoint) -> anyhow::Result<()> {
+            self.taps.fetch_add(1, Ordering::Relaxed);
+            self.followed.store(true, Ordering::Relaxed);
+            Ok(())
+        }
+
+        async fn swipe(&self, _gesture: crate::types::SwipeGesture) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn type_text(&self, _text: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn home(&self) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn find_and_tap(&self, _accessibility_id: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn assert_visible(&self, _accessibility_id: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        fn stream_url(&self) -> Option<String> {
+            None
+        }
+
+        async fn locate(&self, query: ElementQuery<'_>) -> anyhow::Result<Option<ElementBox>> {
+            let ElementQuery::Description { value, .. } = query else {
+                return Ok(None);
+            };
+            let card = |description: String| {
+                Some(ElementBox {
+                    x: 900.0,
+                    y: 1_000.0,
+                    width: 80.0,
+                    height: 80.0,
+                    description: Some(description),
+                    enabled: true,
+                    clickable: true,
+                })
+            };
+            Ok(match value {
+                "Đề xuất" => card("Đề xuất".into()),
+                "Hồ sơ " => card(format!("Hồ sơ {}", self.author)),
+                "bình luận" => card("12 bình luận".into()),
+                "Chia sẻ video" => card("Chia sẻ video. 3".into()),
+                "Follow " if !self.followed.load(Ordering::Relaxed) => {
+                    card(format!("Follow {}", self.follow_author))
+                }
+                _ => None,
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn hierarchy_follow_refuses_author_b_when_roll_was_for_author_a() {
+        let phone = FollowCardPhone {
+            author: "author_b",
+            follow_author: "author_b",
+            taps: std::sync::atomic::AtomicUsize::new(0),
+            followed: std::sync::atomic::AtomicBool::new(false),
+        };
+        let screen = (1_080.0, 2_220.0);
+        let mut run = HierarchyRun {
+            session: &phone,
+            labels: vietnamese(),
+            screen,
+            planner: TouchPointPlanner::new(screen),
+        };
+        let expected = PostFingerprint {
+            author: Some("Hồ sơ author_a".into()),
+            comments: Some("12 bình luận".into()),
+            share: Some("Chia sẻ video. 3".into()),
+            sound: None,
+        };
+
+        assert_eq!(
+            run.follow(&expected, &AtomicBool::new(false))
+                .await
+                .expect("classified follow"),
+            FollowVerdict::CardChanged
+        );
+        assert_eq!(phone.taps.load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test]
+    async fn hierarchy_follow_refuses_a_follow_control_for_another_author() {
+        let phone = FollowCardPhone {
+            author: "author_a",
+            follow_author: "author_b",
+            taps: std::sync::atomic::AtomicUsize::new(0),
+            followed: std::sync::atomic::AtomicBool::new(false),
+        };
+        let screen = (1_080.0, 2_220.0);
+        let mut run = HierarchyRun {
+            session: &phone,
+            labels: vietnamese(),
+            screen,
+            planner: TouchPointPlanner::new(screen),
+        };
+        let expected = PostFingerprint {
+            author: Some("Hồ sơ author_a".into()),
+            comments: Some("12 bình luận".into()),
+            share: Some("Chia sẻ video. 3".into()),
+            sound: None,
+        };
+
+        assert_eq!(
+            run.follow(&expected, &AtomicBool::new(false))
+                .await
+                .expect("classified follow"),
+            FollowVerdict::CardChanged
+        );
+        assert_eq!(phone.taps.load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test]
+    async fn hierarchy_follow_taps_once_when_author_stays_the_same() {
+        let phone = FollowCardPhone {
+            author: "author_a",
+            follow_author: "author_a",
+            taps: std::sync::atomic::AtomicUsize::new(0),
+            followed: std::sync::atomic::AtomicBool::new(false),
+        };
+        let screen = (1_080.0, 2_220.0);
+        let mut run = HierarchyRun {
+            session: &phone,
+            labels: vietnamese(),
+            screen,
+            planner: TouchPointPlanner::new(screen),
+        };
+        let expected = PostFingerprint {
+            author: Some("Hồ sơ author_a".into()),
+            comments: Some("12 bình luận".into()),
+            share: Some("Chia sẻ video. 3".into()),
+            sound: None,
+        };
+
+        assert_eq!(
+            run.follow(&expected, &AtomicBool::new(false))
+                .await
+                .expect("follow"),
+            FollowVerdict::Followed
+        );
+        assert_eq!(phone.taps.load(Ordering::Relaxed), 1);
+    }
+
+    struct PhaseFailurePhone {
+        fail_locate: Option<TikTokControl>,
+        comments_absent: bool,
+        tap_fails: bool,
+        taps: std::sync::atomic::AtomicUsize,
+        typed: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl UiSession for PhaseFailurePhone {
+        async fn tap(&self, _point: TapPoint) -> anyhow::Result<()> {
+            self.taps.fetch_add(1, Ordering::Relaxed);
+            if self.tap_fails {
+                anyhow::bail!("tap response was lost");
+            }
+            Ok(())
+        }
+
+        async fn swipe(&self, _gesture: crate::types::SwipeGesture) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn type_text(&self, _text: &str) -> anyhow::Result<()> {
+            self.typed.fetch_add(1, Ordering::Relaxed);
+            Ok(())
+        }
+
+        async fn home(&self) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn find_and_tap(&self, _accessibility_id: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn assert_visible(&self, _accessibility_id: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        fn stream_url(&self) -> Option<String> {
+            None
+        }
+
+        async fn locate(&self, query: ElementQuery<'_>) -> anyhow::Result<Option<ElementBox>> {
+            let labels = vietnamese();
+            let matches = |control| {
+                labels
+                    .label(control)
+                    .is_some_and(|label| label.to_query() == query)
+            };
+            if self.fail_locate.is_some_and(matches) {
+                anyhow::bail!("scripted locate failed before its control was returned");
+            }
+            let element = |description: &str| {
+                Some(ElementBox {
+                    x: 900.0,
+                    y: 1_000.0,
+                    width: 80.0,
+                    height: 80.0,
+                    description: Some(description.into()),
+                    enabled: true,
+                    clickable: true,
+                })
+            };
+            Ok(if matches(TikTokControl::Liked) {
+                None
+            } else if matches(TikTokControl::Like) {
+                element("Thích")
+            } else if matches(TikTokControl::FeedTab) {
+                element("Đề xuất")
+            } else if matches(TikTokControl::AuthorProfileLink) {
+                element("Hồ sơ author_a")
+            } else if matches(TikTokControl::Comments) && !self.comments_absent {
+                element("12 bình luận")
+            } else if matches(TikTokControl::Share) {
+                element("Chia sẻ video. 3")
+            } else if matches(TikTokControl::Follow) {
+                element("Follow author_a")
+            } else {
+                None
+            })
+        }
+    }
+
+    fn phase_failure_run(phone: &PhaseFailurePhone) -> HierarchyRun<'_> {
+        let screen = (1_080.0, 2_220.0);
+        HierarchyRun {
+            session: phone,
+            labels: vietnamese(),
+            screen,
+            planner: TouchPointPlanner::new(screen),
+        }
+    }
+
+    fn one_attempt_policy(action: PolicyAction) -> HumanSessionPolicy {
+        let mut policy = HumanSessionPolicy::new(100, 100, 100, true);
+        policy.pin_cap_for_test(action, 1);
+        policy.begin_post();
+        policy
+    }
+
+    fn assert_before_effect_refunds(
+        action: PolicyAction,
+        failure: &ActionFailure,
+        taps: usize,
+        typed: usize,
+    ) {
+        let mut policy = one_attempt_policy(action);
+        let reservation = policy.reserve_attempt(action);
+        let mut attempts = 0;
+        assert!(!settle_action_failure(
+            &mut policy,
+            reservation,
+            failure,
+            &mut attempts,
+        ));
+        assert_eq!(taps, 0);
+        assert_eq!(typed, 0);
+        assert_eq!(attempts, 0);
+        assert!(policy.can_attempt(action));
+        assert!(policy.can_interact_with_post());
+    }
+
+    #[tokio::test]
+    async fn hierarchy_like_locate_failure_refunds_before_effect() {
+        let phone = PhaseFailurePhone {
+            fail_locate: Some(TikTokControl::Like),
+            comments_absent: false,
+            tap_fails: false,
+            taps: 0.into(),
+            typed: 0.into(),
+        };
+        let failure = phase_failure_run(&phone)
+            .like(&AtomicBool::new(false))
+            .await
+            .expect_err("scripted Like locate must fail");
+        assert_before_effect_refunds(
+            PolicyAction::Like,
+            &failure,
+            phone.taps.load(Ordering::Relaxed),
+            phone.typed.load(Ordering::Relaxed),
+        );
+    }
+
+    #[tokio::test]
+    async fn hierarchy_comment_locate_failure_refunds_before_effect() {
+        let phone = PhaseFailurePhone {
+            fail_locate: Some(TikTokControl::Comments),
+            comments_absent: false,
+            tap_fails: false,
+            taps: 0.into(),
+            typed: 0.into(),
+        };
+        let failure = phase_failure_run(&phone)
+            .comment("không được gõ", &AtomicBool::new(false))
+            .await
+            .expect_err("scripted comment opener locate must fail");
+        assert_before_effect_refunds(
+            PolicyAction::Comment,
+            &failure,
+            phone.taps.load(Ordering::Relaxed),
+            phone.typed.load(Ordering::Relaxed),
+        );
+    }
+
+    #[tokio::test]
+    async fn hierarchy_follow_locate_failure_refunds_before_effect() {
+        let phone = PhaseFailurePhone {
+            fail_locate: Some(TikTokControl::Follow),
+            comments_absent: false,
+            tap_fails: false,
+            taps: 0.into(),
+            typed: 0.into(),
+        };
+        let expected = PostFingerprint {
+            author: Some("Hồ sơ author_a".into()),
+            comments: Some("12 bình luận".into()),
+            share: Some("Chia sẻ video. 3".into()),
+            sound: None,
+        };
+        let failure = phase_failure_run(&phone)
+            .follow(&expected, &AtomicBool::new(false))
+            .await
+            .expect_err("scripted Follow locate must fail");
+        assert_before_effect_refunds(
+            PolicyAction::Follow,
+            &failure,
+            phone.taps.load(Ordering::Relaxed),
+            phone.typed.load(Ordering::Relaxed),
+        );
+    }
+
+    #[tokio::test]
+    async fn an_ambiguous_hierarchy_tap_failure_closes_the_cap() {
+        let phone = PhaseFailurePhone {
+            fail_locate: None,
+            comments_absent: false,
+            tap_fails: true,
+            taps: 0.into(),
+            typed: 0.into(),
+        };
+        let failure = phase_failure_run(&phone)
+            .like(&AtomicBool::new(false))
+            .await
+            .expect_err("scripted tap response must fail");
+        let mut policy = one_attempt_policy(PolicyAction::Like);
+        let reservation = policy.reserve_attempt(PolicyAction::Like);
+        let mut attempts = 0;
+
+        assert!(settle_action_failure(
+            &mut policy,
+            reservation,
+            &failure,
+            &mut attempts,
+        ));
+        assert_eq!(phone.taps.load(Ordering::Relaxed), 1);
+        assert_eq!(attempts, 1);
+        assert!(!policy.can_attempt(PolicyAction::Like));
+        policy.begin_post();
+        policy.mark_post_interacted();
+        policy.begin_post();
+        assert!(!policy.can_interact_with_post());
     }
 
     #[test]
@@ -1903,11 +2653,13 @@ mod tests {
     #[test]
     fn fingerprints_differ_when_the_counts_differ() {
         let first = PostFingerprint {
+            author: None,
             comments: Some("Đọc hoặc viết bình luận. 697 bình luận".into()),
             share: Some("Chia sẻ video. 45,4K lượt chia sẻ".into()),
             sound: None,
         };
         let second = PostFingerprint {
+            author: None,
             comments: Some("Đọc hoặc viết bình luận. 12 bình luận".into()),
             share: first.share.clone(),
             sound: None,
@@ -1917,12 +2669,53 @@ mod tests {
     }
 
     #[test]
+    fn duplicate_guard_uses_stable_identity_without_weakening_swipe_equality() {
+        let acted = PostFingerprint {
+            author: Some("author_a profile".into()),
+            comments: Some("12 comments".into()),
+            share: Some("Share video. 3".into()),
+            sound: Some("Sound: track_a".into()),
+        };
+        let counts_changed = PostFingerprint {
+            comments: Some("13 comments".into()),
+            share: Some("Share video. 4".into()),
+            ..acted.clone()
+        };
+        assert_ne!(
+            acted, counts_changed,
+            "full equality remains the sensitive swipe/card-change proof"
+        );
+        assert!(acted.same_card_for_duplicate_guard(&counts_changed));
+
+        let different_sound = PostFingerprint {
+            sound: Some("Sound: track_b".into()),
+            ..counts_changed.clone()
+        };
+        assert!(!acted.same_card_for_duplicate_guard(&different_sound));
+
+        let author_only = PostFingerprint {
+            sound: None,
+            ..acted.clone()
+        };
+        let author_only_with_new_counts = PostFingerprint {
+            comments: Some("99 comments".into()),
+            share: Some("Share video. 100".into()),
+            ..author_only.clone()
+        };
+        assert!(
+            author_only.same_card_for_duplicate_guard(&author_only_with_new_counts),
+            "only-author identity must fail closed: one skipped action is cheaper than a duplicate"
+        );
+    }
+
+    #[test]
     fn two_zero_engagement_posts_are_still_told_apart() {
         // Verbatim from two phones on 18/08/2026. Counts alone are identical on a
         // low-engagement feed, so a fingerprint without the sound strip reported every
         // swipe as unproven: no video was counted, and the session stopped at
         // `STUCK_SWIPE_LIMIT` while it was in fact watching and swiping correctly.
         let counts_only = |sound: Option<&str>| PostFingerprint {
+            author: None,
             comments: Some("Read or add comments. 0 comments".into()),
             share: Some("Share video.  shares".into()),
             sound: sound.map(str::to_string),
@@ -2505,6 +3298,324 @@ mod tests {
         );
     }
 
+    /// A card that never changes and never registers the like — the exact shape where a
+    /// swallowed swipe would let the same post be acted on twice.
+    ///
+    /// The `Like` control is present and `Video liked` never appears, so the already-liked
+    /// guard cannot self-limit; only the duplicate-action guard can. Every query answers
+    /// with the SAME card, and the swipe changes nothing, so without the guard the loop
+    /// would like this one post once per pass.
+    #[derive(Default)]
+    struct StuckCardPhone {
+        likes: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl UiSession for StuckCardPhone {
+        async fn tap(&self, _point: TapPoint) -> anyhow::Result<()> {
+            Ok(())
+        }
+        async fn swipe(&self, _gesture: crate::types::SwipeGesture) -> anyhow::Result<()> {
+            Ok(())
+        }
+        async fn type_text(&self, _text: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+        async fn home(&self) -> anyhow::Result<()> {
+            Ok(())
+        }
+        async fn find_and_tap(&self, _accessibility_id: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+        async fn assert_visible(&self, _accessibility_id: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn stream_url(&self) -> Option<String> {
+            None
+        }
+        async fn restart_app(&self, _bundle_id: &str) -> anyhow::Result<()> {
+            // A restart does not unstick this card, so the session simply ends — after the
+            // guard has already capped the likes at one.
+            Ok(())
+        }
+        async fn locate(&self, query: ElementQuery<'_>) -> anyhow::Result<Option<ElementBox>> {
+            let ElementQuery::Description { value, .. } = query else {
+                return Ok(None);
+            };
+            let card = |desc: &str| {
+                Some(ElementBox {
+                    x: 900.0,
+                    y: 1_000.0,
+                    width: 80.0,
+                    height: 80.0,
+                    description: Some(desc.to_string()),
+                    enabled: true,
+                    clickable: true,
+                })
+            };
+            Ok(match value {
+                "For You" => card("For You"),
+                "comments" => card("one steady card"),
+                "Share video" => card("one steady card"),
+                "Sound:" => card("one steady card"),
+                "Like" => {
+                    self.likes.fetch_add(1, Ordering::Relaxed);
+                    card("Like")
+                }
+                // Never becomes liked, so `AlreadyLiked` can never be the thing that stops a
+                // second like — the duplicate-action guard has to.
+                "Video liked" => None,
+                _ => None,
+            })
+        }
+    }
+
+    /// **A card the swipe cannot leave is liked at most once.** Without the
+    /// duplicate-action guard, `begin_post()` runs every pass and the same post is liked
+    /// again and again from a real account. The `Like` node is present in both states here,
+    /// so a re-tap would toggle a real like off — irreversibly, publicly.
+    #[tokio::test]
+    async fn a_card_a_swallowed_swipe_cannot_leave_is_acted_on_once() {
+        let phone = StuckCardPhone::default();
+        let screen = (1_080.0, 2_220.0);
+        let run = HierarchyRun {
+            session: &phone,
+            labels: controls_for("com.ss.android.ugc.trill", "en", "38.3.2").expect("measured set"),
+            screen,
+            planner: TouchPointPlanner::new(screen),
+        };
+        let settings = NurtureSettings {
+            num_videos: 6,
+            num_rounds: 1,
+            like_prob: 100,
+            comment_prob: 0,
+            follow_prob: 0,
+            frenzy_prob: 0,
+            watch_min: 0.1,
+            watch_max: 0.1,
+            ..Default::default()
+        };
+        let stop = AtomicBool::new(false);
+        let mut status = NurtureSessionStatus {
+            running: true,
+            last_message: String::new(),
+            ..NurtureSessionStatus::new("stuck-card")
+        };
+        let report = |status: &mut NurtureSessionStatus, message: String| {
+            status.last_message = message;
+        };
+        run_feed(
+            run,
+            "com.ss.android.ugc.trill",
+            &settings,
+            Instant::now(),
+            Some(Duration::from_secs(120)),
+            &stop,
+            &mut status,
+            &report,
+            None,
+            None,
+        )
+        .await;
+        assert_eq!(
+            status.like_attempts, 1,
+            "a stuck card must be liked exactly once; got {} — the swallowed swipe let the \
+             same post be acted on again",
+            status.like_attempts
+        );
+    }
+
+    /// A stuck feed card whose own comment count becomes visible one hierarchy read after Send.
+    /// The delayed count is the important part: the immediate refresh still sees the old value,
+    /// then the swallowed swipe sees the increment and the full swipe fingerprint calls that an
+    /// advance. The duplicate-action identity must nevertheless remember this is the same card.
+    #[derive(Default)]
+    struct StuckCommentCardPhone {
+        pending_text: std::sync::atomic::AtomicBool,
+        sent_comments: std::sync::atomic::AtomicUsize,
+        comment_reads_after_send: std::sync::atomic::AtomicUsize,
+    }
+
+    impl StuckCommentCardPhone {
+        fn element(description: Option<String>, x: f64, y: f64, enabled: bool) -> ElementBox {
+            ElementBox {
+                x,
+                y,
+                width: 80.0,
+                height: 80.0,
+                description,
+                enabled,
+                clickable: true,
+            }
+        }
+
+        fn comments_description(&self) -> String {
+            let sent = self.sent_comments.load(Ordering::Relaxed);
+            let visible = if sent == 0 {
+                0
+            } else if self
+                .comment_reads_after_send
+                .fetch_add(1, Ordering::Relaxed)
+                == 0
+            {
+                sent - 1
+            } else {
+                sent
+            };
+            format!("{} comments", 12 + visible)
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl UiSession for StuckCommentCardPhone {
+        async fn tap(&self, point: TapPoint) -> anyhow::Result<()> {
+            // The fake gives Send its own lower-right rectangle. Opener and field taps do not
+            // cross this boundary; a Send tap consumes the pending text and arms the delayed
+            // count update described above.
+            if point.x > 800.0
+                && point.y > 1_500.0
+                && self.pending_text.swap(false, Ordering::Relaxed)
+            {
+                self.sent_comments.fetch_add(1, Ordering::Relaxed);
+                self.comment_reads_after_send.store(0, Ordering::Relaxed);
+            }
+            Ok(())
+        }
+
+        async fn swipe(&self, _gesture: crate::types::SwipeGesture) -> anyhow::Result<()> {
+            // Swallowed: the same author, sound and post remain on screen.
+            Ok(())
+        }
+
+        async fn type_text(&self, _text: &str) -> anyhow::Result<()> {
+            self.pending_text.store(true, Ordering::Relaxed);
+            Ok(())
+        }
+
+        async fn home(&self) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn find_and_tap(&self, _accessibility_id: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn assert_visible(&self, _accessibility_id: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        fn stream_url(&self) -> Option<String> {
+            None
+        }
+
+        async fn restart_app(&self, _bundle_id: &str) -> anyhow::Result<()> {
+            // A restart is not proof of movement; this fixture deliberately comes back to the
+            // same card so the duplicate guard remains the only thing preventing another send.
+            Ok(())
+        }
+
+        async fn locate(&self, query: ElementQuery<'_>) -> anyhow::Result<Option<ElementBox>> {
+            let element = match query {
+                ElementQuery::Description { value, .. } => match value {
+                    "For You" => Some(Self::element(Some("For You".into()), 100.0, 2_000.0, true)),
+                    "comments" => Some(Self::element(
+                        Some(self.comments_description()),
+                        900.0,
+                        1_000.0,
+                        true,
+                    )),
+                    "Share video" => Some(Self::element(
+                        Some("Share video. 3".into()),
+                        900.0,
+                        1_150.0,
+                        true,
+                    )),
+                    "Sound:" => Some(Self::element(
+                        Some("Sound: one steady card".into()),
+                        300.0,
+                        1_500.0,
+                        true,
+                    )),
+                    " profile" => Some(Self::element(
+                        Some("author_a profile".into()),
+                        300.0,
+                        300.0,
+                        true,
+                    )),
+                    "Post comment" => Some(Self::element(
+                        Some("Post comment".into()),
+                        900.0,
+                        1_800.0,
+                        self.pending_text.load(Ordering::Relaxed),
+                    )),
+                    _ => None,
+                },
+                ElementQuery::ClassName(crate::tiktok_drawer::EDIT_TEXT) => {
+                    Some(Self::element(None, 100.0, 1_800.0, true))
+                }
+                _ => None,
+            };
+            Ok(element)
+        }
+    }
+
+    /// A sent comment may update the mutable count after the immediate refresh. Even when the
+    /// full swipe proof mistakes that late update for a new card, a swallowed swipe must not let
+    /// the loop type a second public comment into the same author+sound identity.
+    #[tokio::test]
+    async fn a_delayed_comment_count_cannot_reopen_a_stuck_card_for_another_comment() {
+        let phone = StuckCommentCardPhone::default();
+        let screen = (1_080.0, 2_220.0);
+        let run = HierarchyRun {
+            session: &phone,
+            labels: controls_for("com.ss.android.ugc.trill", "en", "38.3.2").expect("measured set"),
+            screen,
+            planner: TouchPointPlanner::new(screen),
+        };
+        let settings = NurtureSettings {
+            num_videos: 6,
+            num_rounds: 1,
+            like_prob: 0,
+            comment_prob: 100,
+            follow_prob: 0,
+            frenzy_prob: 0,
+            watch_min: 0.1,
+            watch_max: 0.1,
+            human_limits: false,
+            ..Default::default()
+        };
+        let stop = AtomicBool::new(false);
+        let mut status = NurtureSessionStatus {
+            running: true,
+            last_message: String::new(),
+            ..NurtureSessionStatus::new("stuck-comment-card")
+        };
+        let report = |status: &mut NurtureSessionStatus, message: String| {
+            status.last_message = message;
+        };
+
+        run_feed(
+            run,
+            "com.ss.android.ugc.trill",
+            &settings,
+            Instant::now(),
+            Some(Duration::from_secs(120)),
+            &stop,
+            &mut status,
+            &report,
+            Some(&AlwaysHasWords),
+            None,
+        )
+        .await;
+
+        assert_eq!(
+            phone.sent_comments.load(Ordering::Relaxed),
+            1,
+            "the delayed count made the same stuck card look new and receive another comment"
+        );
+        assert_eq!(status.comment_attempts, 1);
+    }
+
     /// A phone that keeps falling off the feed, and comes back only via the Home tab.
     ///
     /// Measured on ce0717171c2a64d50d, 18/08/2026: it started cleanly, watched, liked, and
@@ -2870,8 +3981,11 @@ mod tests {
 
     #[async_trait::async_trait]
     impl CommentTextSource for SlideCounter {
-        async fn comment_for_post(&self, _settings: &NurtureSettings) -> Option<PreparedComment> {
-            None
+        async fn comment_for_post(
+            &self,
+            _settings: &NurtureSettings,
+        ) -> Result<Option<PreparedComment>, CommentSourceError> {
+            Ok(None)
         }
 
         fn note_slide(&self) {
@@ -3091,6 +4205,321 @@ mod tests {
         }
     }
 
+    /// A card that reads as one post, plus a source that always has words ready. The card
+    /// the phone shows differs from the one the caller says it grounded on, which is the
+    /// state a feed advancing during a slow draft leaves behind.
+    #[derive(Default)]
+    struct DifferentCardPhone {
+        type_texts: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl UiSession for DifferentCardPhone {
+        async fn tap(&self, _point: TapPoint) -> anyhow::Result<()> {
+            Ok(())
+        }
+        async fn swipe(&self, _gesture: crate::types::SwipeGesture) -> anyhow::Result<()> {
+            Ok(())
+        }
+        async fn type_text(&self, _text: &str) -> anyhow::Result<()> {
+            self.type_texts.fetch_add(1, Ordering::Relaxed);
+            Ok(())
+        }
+        async fn home(&self) -> anyhow::Result<()> {
+            Ok(())
+        }
+        async fn find_and_tap(&self, _accessibility_id: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+        async fn assert_visible(&self, _accessibility_id: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn stream_url(&self) -> Option<String> {
+            None
+        }
+        async fn restart_app(&self, _bundle_id: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+        async fn locate(&self, query: ElementQuery<'_>) -> anyhow::Result<Option<ElementBox>> {
+            let ElementQuery::Description { value, .. } = query else {
+                return Ok(None);
+            };
+            let card = |desc: &str| {
+                Some(ElementBox {
+                    x: 900.0,
+                    y: 1_000.0,
+                    width: 80.0,
+                    height: 80.0,
+                    description: Some(desc.to_string()),
+                    enabled: true,
+                    clickable: true,
+                })
+            };
+            // A rail is present — so the card is not "gone", it is a *different* card. Its
+            // comment count differs from the one the draft was grounded on.
+            Ok(match value {
+                "comments" => card("Xem hoặc thêm bình luận. 87 bình luận"),
+                "Chia sẻ video" => card("Chia sẻ video. 12"),
+                _ => None,
+            })
+        }
+    }
+
+    /// A source that always hands back a real comment, so the only thing that can stop a
+    /// send is the caller's own card check.
+    struct AlwaysHasWords;
+
+    #[async_trait::async_trait]
+    impl CommentTextSource for AlwaysHasWords {
+        async fn comment_for_post(
+            &self,
+            _settings: &NurtureSettings,
+        ) -> Result<Option<PreparedComment>, CommentSourceError> {
+            Ok(Some(PreparedComment {
+                text: "một bình luận đã soạn".into(),
+                prompt_tokens: 10,
+                completion_tokens: 10,
+                attempt_id: "test-attempt".into(),
+            }))
+        }
+    }
+
+    #[derive(Default)]
+    struct RecordingWords {
+        outcomes: std::sync::Mutex<Vec<String>>,
+    }
+
+    #[async_trait::async_trait]
+    impl CommentTextSource for RecordingWords {
+        async fn comment_for_post(
+            &self,
+            settings: &NurtureSettings,
+        ) -> Result<Option<PreparedComment>, CommentSourceError> {
+            AlwaysHasWords.comment_for_post(settings).await
+        }
+
+        async fn record_outcome(&self, _prepared: &PreparedComment, outcome: &str) {
+            self.outcomes
+                .lock()
+                .expect("recorded outcome lock")
+                .push(outcome.to_string());
+        }
+    }
+
+    struct AuditUnavailableSource;
+
+    #[async_trait::async_trait]
+    impl CommentTextSource for AuditUnavailableSource {
+        async fn comment_for_post(
+            &self,
+            _settings: &NurtureSettings,
+        ) -> Result<Option<PreparedComment>, CommentSourceError> {
+            Err(CommentSourceError::AuditUnavailable)
+        }
+    }
+
+    fn phase_card() -> PostFingerprint {
+        PostFingerprint {
+            author: Some("Hồ sơ author_a".into()),
+            comments: None,
+            share: Some("Chia sẻ video. 3".into()),
+            sound: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn rolled_comment_opener_failure_refunds_attempt_and_cap() {
+        let phone = PhaseFailurePhone {
+            fail_locate: Some(TikTokControl::Comments),
+            comments_absent: false,
+            tap_fails: false,
+            taps: 0.into(),
+            typed: 0.into(),
+        };
+        let mut run = phase_failure_run(&phone);
+        let mut status = NurtureSessionStatus::new("comment-before-effect");
+        let report = |status: &mut NurtureSessionStatus, message: String| {
+            status.last_message = message;
+        };
+        let outcome = post_rolled_comment(
+            &mut run,
+            &AlwaysHasWords,
+            &NurtureSettings::default(),
+            &phase_card(),
+            &AtomicBool::new(false),
+            &mut status,
+            &report,
+        )
+        .await;
+        let mut policy = one_attempt_policy(PolicyAction::Comment);
+        let reservation = policy.reserve_attempt(PolicyAction::Comment);
+
+        assert!(!settle_attempt(
+            &mut policy,
+            reservation,
+            outcome.did_act,
+            &mut status.comment_attempts,
+        ));
+        assert_eq!(phone.taps.load(Ordering::Relaxed), 0);
+        assert_eq!(phone.typed.load(Ordering::Relaxed), 0);
+        assert_eq!(status.comment_attempts, 0);
+        assert!(policy.can_attempt(PolicyAction::Comment));
+        assert!(policy.can_interact_with_post());
+    }
+
+    #[tokio::test]
+    async fn rolled_comment_without_a_control_refunds_attempt_and_cap() {
+        let phone = PhaseFailurePhone {
+            fail_locate: None,
+            comments_absent: true,
+            tap_fails: false,
+            taps: 0.into(),
+            typed: 0.into(),
+        };
+        let mut run = phase_failure_run(&phone);
+        let mut status = NurtureSessionStatus::new("comment-no-control");
+        let report = |status: &mut NurtureSessionStatus, message: String| {
+            status.last_message = message;
+        };
+        let outcome = post_rolled_comment(
+            &mut run,
+            &AlwaysHasWords,
+            &NurtureSettings::default(),
+            &phase_card(),
+            &AtomicBool::new(false),
+            &mut status,
+            &report,
+        )
+        .await;
+        let mut policy = one_attempt_policy(PolicyAction::Comment);
+        let reservation = policy.reserve_attempt(PolicyAction::Comment);
+
+        assert!(!settle_attempt(
+            &mut policy,
+            reservation,
+            outcome.did_act,
+            &mut status.comment_attempts,
+        ));
+        assert_eq!(phone.taps.load(Ordering::Relaxed), 0);
+        assert_eq!(phone.typed.load(Ordering::Relaxed), 0);
+        assert_eq!(status.comment_attempts, 0);
+        assert!(policy.can_attempt(PolicyAction::Comment));
+        assert!(policy.can_interact_with_post());
+    }
+
+    /// **A comment grounded on card A is never typed into card B.** Drafting takes seconds and
+    /// the feed can advance under it; typing the words anyway posts them, publicly and
+    /// undoably, on whatever card arrived. The guard re-reads the card after the draft and
+    /// declines when it does not match — here the phone shows a card whose comment count is
+    /// not the one we grounded on, and no `type_text` may go out.
+    #[tokio::test]
+    async fn a_comment_is_not_typed_when_the_card_changed_during_drafting() {
+        let phone = DifferentCardPhone::default();
+        let source = RecordingWords::default();
+        let screen = (1_080.0, 2_220.0);
+        let mut run = HierarchyRun {
+            session: &phone,
+            labels: vietnamese(),
+            screen,
+            planner: TouchPointPlanner::new(screen),
+        };
+        let settings = NurtureSettings::default();
+        let stop = AtomicBool::new(false);
+        let mut status = NurtureSessionStatus {
+            running: true,
+            last_message: String::new(),
+            ..NurtureSessionStatus::new("card-changed")
+        };
+        let report = |status: &mut NurtureSessionStatus, message: String| {
+            status.last_message = message;
+        };
+        // The card the draft was grounded on: a different comment count from what the phone
+        // now shows.
+        let grounded_on = PostFingerprint {
+            author: None,
+            comments: Some("Xem hoặc thêm bình luận. 3 bình luận".into()),
+            share: None,
+            sound: None,
+        };
+        let outcome = post_rolled_comment(
+            &mut run,
+            &source,
+            &settings,
+            &grounded_on,
+            &stop,
+            &mut status,
+            &report,
+        )
+        .await;
+        assert!(
+            !outcome.sent,
+            "a changed card must not be reported as commented"
+        );
+        assert!(
+            !outcome.did_act,
+            "a changed card must refund its no-effect reservation"
+        );
+        assert_eq!(
+            phone.type_texts.load(Ordering::Relaxed),
+            0,
+            "not one character may be typed into a card we did not ground on: {}",
+            status.last_message
+        );
+        assert!(
+            status.last_message.contains("thẻ đã đổi"),
+            "the operator is told why the comment was withheld: {}",
+            status.last_message
+        );
+        assert_eq!(
+            source
+                .outcomes
+                .lock()
+                .expect("recorded outcome lock")
+                .as_slice(),
+            ["skipped: card_changed"],
+            "the durable attempt must explain why no UI action followed"
+        );
+    }
+
+    #[tokio::test]
+    async fn audit_unavailable_is_typed_and_never_reaches_comment_ui() {
+        let phone = DifferentCardPhone::default();
+        let screen = (1_080.0, 2_220.0);
+        let mut run = HierarchyRun {
+            session: &phone,
+            labels: vietnamese(),
+            screen,
+            planner: TouchPointPlanner::new(screen),
+        };
+        let settings = NurtureSettings::default();
+        let stop = AtomicBool::new(false);
+        let mut status = NurtureSessionStatus {
+            running: true,
+            last_message: String::new(),
+            ..NurtureSessionStatus::new("audit-unavailable")
+        };
+        let report = |status: &mut NurtureSessionStatus, message: String| {
+            status.last_message = message;
+        };
+
+        let outcome = post_rolled_comment(
+            &mut run,
+            &AuditUnavailableSource,
+            &settings,
+            &PostFingerprint::default(),
+            &stop,
+            &mut status,
+            &report,
+        )
+        .await;
+
+        assert!(!outcome.sent);
+        assert!(!outcome.did_act);
+        assert_eq!(status.comment_attempts, 0);
+        assert_eq!(phone.type_texts.load(Ordering::Relaxed), 0);
+        assert!(status.last_message.contains("audit"));
+    }
+
     /// A sink that hands back a fixed comment and remembers when it was asked.
     struct OrderedComment {
         slides_when_asked: std::sync::Mutex<Option<usize>>,
@@ -3099,10 +4528,13 @@ mod tests {
 
     #[async_trait::async_trait]
     impl CommentTextSource for OrderedComment {
-        async fn comment_for_post(&self, _settings: &NurtureSettings) -> Option<PreparedComment> {
+        async fn comment_for_post(
+            &self,
+            _settings: &NurtureSettings,
+        ) -> Result<Option<PreparedComment>, CommentSourceError> {
             *self.slides_when_asked.lock().expect("asked") =
                 Some(self.slides.load(Ordering::Relaxed));
-            None
+            Ok(None)
         }
 
         fn note_slide(&self) {
@@ -3143,7 +4575,17 @@ mod tests {
         run.traverse_carousel(100, 20, &stop, &mut status, &report, Some(&source))
             .await;
         let settings = NurtureSettings::default();
-        post_rolled_comment(&mut run, &source, &settings, &stop, &mut status, &report).await;
+        let grounded_on = fingerprint(run.session, run.labels).await;
+        post_rolled_comment(
+            &mut run,
+            &source,
+            &settings,
+            &grounded_on,
+            &stop,
+            &mut status,
+            &report,
+        )
+        .await;
 
         assert_eq!(
             *source.slides_when_asked.lock().expect("asked"),

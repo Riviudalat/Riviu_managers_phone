@@ -1,5 +1,6 @@
 //! Riviu core types, device registry, job queue, and persistence.
 
+pub mod action_failure;
 pub mod db;
 pub mod device_capabilities;
 pub mod device_control;
@@ -40,6 +41,7 @@ pub mod tiktok_target;
 pub mod tiktok_web;
 pub mod types;
 
+pub use action_failure::ActionFailure;
 pub use device_capabilities::*;
 pub use device_control::{
     ContextReleaseProof, DeviceControlError, DeviceControlPlane, DeviceExclusiveContext,

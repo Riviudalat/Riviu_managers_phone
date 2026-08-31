@@ -2,9 +2,13 @@
 //!
 //! G1 (`examples/probe.rs`) proves the primitives. This proves the *loop* — the
 //! one in `riviu_core::nurture::run_hierarchy_session`, reached through the same
-//! public entry point the desktop app uses, with no control plane, database, or
-//! stream in the way. Nothing here reimplements the session: if the pacing or the
+//! public entry point the desktop app uses, with no control plane or stream in the
+//! way. Nothing here reimplements the session: if the pacing or the
 //! like confirmation changes in core, this run changes with it.
+//!
+//! `--comment` opens its own audit SQLite file because the production invariant is stronger
+//! than the loop isolation: no comment may enter the UI unless its prepared row exists. This
+//! file is not a live-settings source and is printed before the run for later inspection.
 //!
 //! **What this gate deliberately does not cover**, and where to find it: the
 //! control-plane handoff. Bypassing it is this gate's value — the loop is tested in
@@ -32,11 +36,13 @@ use std::sync::LazyLock;
 use std::time::{Duration, Instant};
 
 use riviu_android_driver::AndroidDriver;
+use riviu_core::db::Database;
 use riviu_core::driver::DeviceDriver;
 use riviu_core::nurture::{
-    run_hierarchy_session, CommentTextSource, HierarchySession, PreparedComment,
+    run_hierarchy_session, CommentSourceError, CommentTextSource, HierarchySession, PreparedComment,
 };
-use riviu_core::types::{NurtureSessionStatus, NurtureSettings};
+use riviu_core::types::{NurtureCommentAttempt, NurtureSessionStatus, NurtureSettings};
+use uuid::Uuid;
 
 #[path = "common/mod.rs"]
 mod common;
@@ -104,22 +110,83 @@ async fn main() -> anyhow::Result<()> {
 
     // A source that always says the same thing. `comment_prob` has to be non-zero
     // as well, or the action roll never selects a comment.
-    struct FixedComment(String);
+    struct FixedComment {
+        text: String,
+        udid: String,
+        audit: Database,
+    }
     #[async_trait::async_trait]
     impl CommentTextSource for FixedComment {
         async fn comment_for_post(
             &self,
             _settings: &riviu_core::types::NurtureSettings,
-        ) -> Option<PreparedComment> {
-            Some(PreparedComment {
-                text: self.0.clone(),
+        ) -> Result<Option<PreparedComment>, CommentSourceError> {
+            let attempt = NurtureCommentAttempt {
+                id: Uuid::new_v4().to_string(),
+                udid: self.udid.clone(),
+                outcome: "prepared".into(),
+                source: "g2-fixed-fixture".into(),
+                model: "none".into(),
+                base_url_host: "local".into(),
                 prompt_tokens: 0,
                 completion_tokens: 0,
-                attempt_id: None,
-            })
+                cost_usd: None,
+                preview: self.text.chars().take(160).collect(),
+                caption_preview: String::new(),
+                frame_sha256: String::new(),
+                context_confidence: None,
+                relevance: None,
+                evidence_support: None,
+                distinct_frames: None,
+                carousel_slides: Some(0),
+                created_at: chrono::Utc::now().to_rfc3339(),
+            };
+            if let Err(error) = self.audit.add_nurture_comment_attempt(&attempt) {
+                eprintln!(
+                    "AUDIT UNAVAILABLE before comment UI for {}: {error}",
+                    self.udid
+                );
+                return Err(CommentSourceError::AuditUnavailable);
+            }
+            Ok(Some(PreparedComment {
+                text: self.text.clone(),
+                prompt_tokens: 0,
+                completion_tokens: 0,
+                attempt_id: attempt.id,
+            }))
+        }
+
+        async fn record_outcome(&self, prepared: &PreparedComment, outcome: &str) {
+            if let Err(error) = self
+                .audit
+                .update_nurture_comment_attempt_outcome(&prepared.attempt_id, outcome)
+            {
+                // The public effect may already exist. Report loudly; never ask the loop to
+                // retry a Send just because closing the audit row failed.
+                eprintln!(
+                    "AUDIT OUTCOME UPDATE FAILED after comment {}: {error}",
+                    prepared.attempt_id
+                );
+            }
         }
     }
-    let comment_source = comment_text.clone().map(FixedComment);
+    let comment_source = match comment_text.clone() {
+        Some(text) => {
+            let audit_path = std::env::var_os("RIVIU_G2_AUDIT_DB")
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|| {
+                    std::env::temp_dir().join(format!("riviu-g2-nurture-{}.db", Uuid::new_v4()))
+                });
+            let audit = Database::open(&audit_path)?;
+            println!("comment audit: {}", audit_path.display());
+            Some(FixedComment {
+                text,
+                udid: serial.clone(),
+                audit,
+            })
+        }
+        None => None,
+    };
     let comment_prob = if comment_text.is_some() { 100 } else { 0 };
     if let Some(text) = &comment_text {
         println!("comment text: {text:?} (will be POSTED)");

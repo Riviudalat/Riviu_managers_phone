@@ -31,7 +31,15 @@ pub trait LiveSettings: Send + Sync {
     /// Implementors must go through [`NurtureSettings::absorb_live_changes`] so that
     /// which fields are live, and which need a restart, is decided in exactly one
     /// place.
-    fn refresh(&self, settings: &mut NurtureSettings);
+    fn refresh(&self, settings: &mut NurtureSettings) -> anyhow::Result<()>;
+}
+
+/// What happened when a feed pass tried to refresh its rate controls.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum LiveSettingsRefresh {
+    NoSource,
+    Applied,
+    Failed(String),
 }
 
 /// How many posts a session is aiming for.
@@ -64,19 +72,27 @@ pub(super) fn video_target(settings: &NurtureSettings) -> u32 {
 /// Call once per post, not per action. A probability that changed between rolling an
 /// action and confirming it would make that action's own record unexplainable.
 ///
-/// Returns whether a live source was wired at all, so a caller can tell "nothing
-/// changed" from "nobody is listening".
+/// A failed read closes only the three public-action rates for this pass. Keeping their stale
+/// nonzero values would let a saved zero be outlived by an unreadable database row.
 pub(super) fn apply_live_settings(
     live: Option<&dyn LiveSettings>,
     settings: &mut NurtureSettings,
     human: &mut HumanBehavior,
     policy: &mut HumanSessionPolicy,
     moods: &mut MoodCycle,
-) -> bool {
+) -> LiveSettingsRefresh {
     let Some(live) = live else {
-        return false;
+        return LiveSettingsRefresh::NoSource;
     };
-    live.refresh(settings);
+    let result = match live.refresh(settings) {
+        Ok(()) => LiveSettingsRefresh::Applied,
+        Err(error) => {
+            settings.like_prob = 0;
+            settings.comment_prob = 0;
+            settings.follow_prob = 0;
+            LiveSettingsRefresh::Failed(error.to_string())
+        }
+    };
     // `refresh` has already folded the per-feature switches into the probabilities, so
     // these two see the effective numbers rather than the operator's raw ones.
     human.retune(settings.fatigue, settings.time_of_day, settings.pause_swipe);
@@ -90,7 +106,7 @@ pub(super) fn apply_live_settings(
     // probability outright, so leaving the cycle alone would keep a 100 % setting at zero
     // for most posts even with every ceiling lifted.
     moods.retune(settings.human_limits);
-    true
+    result
 }
 
 #[cfg(test)]
@@ -102,13 +118,22 @@ mod tests {
     /// A live source that hands over a whole row, the way the database does.
     struct Saved(NurtureSettings);
 
+    struct Broken;
+
     impl LiveSettings for Saved {
-        fn refresh(&self, settings: &mut NurtureSettings) {
+        fn refresh(&self, settings: &mut NurtureSettings) -> anyhow::Result<()> {
             settings.absorb_live_changes(&self.0);
             // The engine re-folds the switches after absorbing, because
             // `absorb_live_changes` copies the operator's raw numbers. Mirrored here so
             // the test exercises the same two steps the app performs.
             *settings = std::mem::take(settings).into_effective();
+            Ok(())
+        }
+    }
+
+    impl LiveSettings for Broken {
+        fn refresh(&self, _settings: &mut NurtureSettings) -> anyhow::Result<()> {
+            anyhow::bail!("settings row unreadable")
         }
     }
 
@@ -344,13 +369,16 @@ mod tests {
             like_enabled: true,
             ..off_at_start()
         });
-        assert!(apply_live_settings(
-            Some(&saved),
-            &mut settings,
-            &mut human,
-            &mut policy,
-            &mut moods,
-        ));
+        assert_eq!(
+            apply_live_settings(
+                Some(&saved),
+                &mut settings,
+                &mut human,
+                &mut policy,
+                &mut moods,
+            ),
+            LiveSettingsRefresh::Applied
+        );
 
         assert_eq!(settings.like_prob, 60, "the row reached the settings");
         assert!(
@@ -448,15 +476,104 @@ mod tests {
         let mut policy = HumanSessionPolicy::new(25, 0, 0, true);
         let mut moods = MoodCycle::new();
 
-        assert!(!apply_live_settings(
-            None,
+        assert_eq!(
+            apply_live_settings(None, &mut settings, &mut human, &mut policy, &mut moods,),
+            LiveSettingsRefresh::NoSource
+        );
+        assert_eq!(settings.like_prob, 25);
+        assert!(human.fatigue_is_on());
+    }
+
+    #[test]
+    fn a_failed_refresh_closes_public_action_rates_for_this_pass() {
+        let mut settings = NurtureSettings {
+            like_prob: 100,
+            comment_prob: 100,
+            follow_prob: 100,
+            human_limits: true,
+            ..NurtureSettings::default()
+        }
+        .into_effective();
+        let mut human = HumanBehavior::new("casual", false, false, false);
+        let mut policy = HumanSessionPolicy::new(100, 100, 100, true);
+        let mut moods = MoodCycle::new();
+
+        let result = apply_live_settings(
+            Some(&Broken),
             &mut settings,
             &mut human,
             &mut policy,
             &mut moods,
+        );
+
+        assert!(matches!(result, LiveSettingsRefresh::Failed(_)));
+        assert_eq!(
+            (
+                settings.like_prob,
+                settings.comment_prob,
+                settings.follow_prob
+            ),
+            (0, 0, 0)
+        );
+        assert!(!policy.can_attempt(PolicyAction::Like));
+        assert!(!policy.can_attempt(PolicyAction::Comment));
+        assert!(!policy.can_attempt(PolicyAction::Follow));
+    }
+
+    #[test]
+    fn a_later_success_recovers_rates_after_a_failed_refresh() {
+        let mut settings = NurtureSettings {
+            like_prob: 100,
+            comment_prob: 100,
+            follow_prob: 100,
+            human_limits: true,
+            ..NurtureSettings::default()
+        }
+        .into_effective();
+        let mut human = HumanBehavior::new("casual", false, false, false);
+        let mut policy = HumanSessionPolicy::new(100, 100, 100, true);
+        let mut moods = MoodCycle::new();
+
+        assert!(matches!(
+            apply_live_settings(
+                Some(&Broken),
+                &mut settings,
+                &mut human,
+                &mut policy,
+                &mut moods,
+            ),
+            LiveSettingsRefresh::Failed(_)
         ));
-        assert_eq!(settings.like_prob, 25);
-        assert!(human.fatigue_is_on());
+        assert!(!policy.can_attempt(PolicyAction::Like));
+
+        let saved = Saved(NurtureSettings {
+            like_prob: 100,
+            comment_prob: 100,
+            follow_prob: 100,
+            human_limits: true,
+            ..NurtureSettings::default()
+        });
+        assert_eq!(
+            apply_live_settings(
+                Some(&saved),
+                &mut settings,
+                &mut human,
+                &mut policy,
+                &mut moods,
+            ),
+            LiveSettingsRefresh::Applied
+        );
+        assert_eq!(
+            (
+                settings.like_prob,
+                settings.comment_prob,
+                settings.follow_prob
+            ),
+            (100, 100, 100)
+        );
+        assert!(policy.can_attempt(PolicyAction::Like));
+        assert!(policy.can_attempt(PolicyAction::Comment));
+        assert!(policy.can_attempt(PolicyAction::Follow));
     }
 
     #[test]

@@ -546,6 +546,14 @@ pub enum PolicyAction {
     Follow,
 }
 
+/// A write-ahead policy charge that can be returned only when the action proves it touched
+/// nothing. The id binds a refund to its own row even when a deferred comment overlaps a
+/// later follow reservation on the same card.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AttemptReservation {
+    id: u64,
+}
+
 /// The gap left between two actions when the human pacing is switched off.
 ///
 /// Not zero, and not a policy either — it is a **settle**. Every action here proves itself
@@ -560,9 +568,13 @@ pub struct HumanSessionPolicy {
     like_cap: u32,
     comment_cap: u32,
     follow_cap: u32,
-    attempts: VecDeque<(Instant, PolicyAction)>,
+    attempts: VecDeque<(Instant, PolicyAction, u64)>,
+    next_attempt_id: u64,
     last_action_at: Option<Instant>,
-    recent_posts: VecDeque<bool>,
+    /// Number of committed or outstanding reservations on each recent card. A count rather
+    /// than a bool lets one no-op reservation be refunded without erasing another real action
+    /// performed on the same card.
+    recent_posts: VecDeque<u32>,
     videos_since_break: u32,
     next_rest_at: u32,
     block_started: Instant,
@@ -609,6 +621,7 @@ impl HumanSessionPolicy {
             comment_cap: cap(comment_prob, 1, 3, &mut rng),
             follow_cap: cap(follow_prob, 1, 2, &mut rng),
             attempts: VecDeque::new(),
+            next_attempt_id: 1,
             last_action_at: None,
             recent_posts: VecDeque::with_capacity(5),
             videos_since_break: 0,
@@ -666,19 +679,19 @@ impl HumanSessionPolicy {
         if self.recent_posts.len() == 5 {
             self.recent_posts.pop_front();
         }
-        self.recent_posts.push_back(false);
+        self.recent_posts.push_back(0);
     }
 
     pub fn can_interact_with_post(&self) -> bool {
         if !self.limits {
             return true;
         }
-        self.recent_posts.iter().filter(|&&used| used).count() < 2
+        self.recent_posts.iter().filter(|&&used| used > 0).count() < 2
     }
 
     pub fn mark_post_interacted(&mut self) {
         if let Some(last) = self.recent_posts.back_mut() {
-            *last = true;
+            *last = last.saturating_add(1);
         }
     }
 
@@ -687,7 +700,7 @@ impl HumanSessionPolicy {
         while self
             .attempts
             .front()
-            .is_some_and(|(at, _)| now.duration_since(*at) >= window)
+            .is_some_and(|(at, _, _)| now.duration_since(*at) >= window)
         {
             self.attempts.pop_front();
         }
@@ -709,7 +722,7 @@ impl HumanSessionPolicy {
         }
         self.attempts
             .iter()
-            .filter(|(_, kind)| *kind == action)
+            .filter(|(_, kind, _)| *kind == action)
             .count()
             < cap as usize
     }
@@ -719,8 +732,53 @@ impl HumanSessionPolicy {
     pub fn record_attempt(&mut self, action: PolicyAction) {
         let now = Instant::now();
         self.prune(now);
-        self.attempts.push_back((now, action));
+        let id = self.next_attempt_id;
+        self.next_attempt_id = self.next_attempt_id.wrapping_add(1).max(1);
+        self.attempts.push_back((now, action, id));
         self.last_action_at = Some(now);
+    }
+
+    /// Reserve one rate slot and mark the current card before any gesture can leave the
+    /// process. Call [`Self::cancel_no_effect`] only for a verdict that proves no tap or text
+    /// injection occurred; an unconfirmed or transport-ambiguous gesture must be committed.
+    pub fn reserve_attempt(&mut self, action: PolicyAction) -> AttemptReservation {
+        let now = Instant::now();
+        self.prune(now);
+        let id = self.next_attempt_id;
+        self.next_attempt_id = self.next_attempt_id.wrapping_add(1).max(1);
+        let reservation = AttemptReservation { id };
+        self.attempts.push_back((now, action, id));
+        self.last_action_at = Some(now);
+        self.mark_post_interacted();
+        reservation
+    }
+
+    /// Keep a reservation. Consuming the token makes the call-site's decision explicit; the
+    /// write-ahead attempt already lives in the rolling window and needs no second mutation.
+    pub fn commit_attempt(&mut self, _reservation: AttemptReservation) {}
+
+    /// Return a reservation whose action proved it touched nothing.
+    pub fn cancel_no_effect(&mut self, reservation: AttemptReservation) {
+        if let Some(index) = self
+            .attempts
+            .iter()
+            .position(|(_, _, id)| *id == reservation.id)
+        {
+            self.attempts.remove(index);
+            if let Some(last) = self.recent_posts.back_mut() {
+                *last = last.saturating_sub(1);
+            }
+            self.last_action_at = self.attempts.back().map(|(at, _, _)| *at);
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn pin_cap_for_test(&mut self, action: PolicyAction, cap: u32) {
+        match action {
+            PolicyAction::Like => self.like_cap = cap,
+            PolicyAction::Comment => self.comment_cap = cap,
+            PolicyAction::Follow => self.follow_cap = cap,
+        }
     }
 
     /// Return the next gap after the previous action. The selected range is
@@ -889,6 +947,84 @@ mod mood_tests {
         policy.mark_post_interacted();
         policy.begin_post();
         assert!(!policy.can_interact_with_post());
+    }
+
+    #[test]
+    fn a_cancelled_no_effect_reservation_spends_no_hourly_or_post_budget() {
+        let mut policy = HumanSessionPolicy::new(100, 100, 100, true);
+        policy.begin_post();
+        let cap = policy.like_ceiling();
+
+        for _ in 0..=cap {
+            let reservation = policy.reserve_attempt(PolicyAction::Like);
+            policy.cancel_no_effect(reservation);
+        }
+
+        assert!(
+            policy.can_attempt(PolicyAction::Like),
+            "a missing control or unchanged card must not close the hourly ceiling"
+        );
+        assert!(
+            policy.can_interact_with_post(),
+            "a no-op must not mark the card as publicly interacted"
+        );
+    }
+
+    #[test]
+    fn one_ambiguous_effect_closes_a_one_attempt_cap() {
+        let mut policy = HumanSessionPolicy::new(100, 100, 100, true);
+        // Pin a deliberately small cap: the production cap is randomized, while this test
+        // needs one ambiguous tap/type to prove that a retained reservation closes it.
+        policy.comment_cap = 1;
+        policy.begin_post();
+
+        let ambiguous = policy.reserve_attempt(PolicyAction::Comment);
+        policy.commit_attempt(ambiguous);
+
+        assert!(
+            !policy.can_attempt(PolicyAction::Comment),
+            "an unconfirmed gesture must retain its reservation and close the cap"
+        );
+        policy.begin_post();
+        policy.mark_post_interacted();
+        policy.begin_post();
+        assert!(
+            !policy.can_interact_with_post(),
+            "the ambiguous gesture must remain a real interaction on its card"
+        );
+    }
+
+    #[test]
+    fn cancelling_one_reservation_keeps_another_real_action_on_the_post() {
+        let mut policy = HumanSessionPolicy::new(100, 100, 100, true);
+        policy.begin_post();
+        let real = policy.reserve_attempt(PolicyAction::Like);
+        policy.commit_attempt(real);
+        let no_effect = policy.reserve_attempt(PolicyAction::Follow);
+        policy.cancel_no_effect(no_effect);
+
+        policy.begin_post();
+        policy.mark_post_interacted();
+        policy.begin_post();
+        assert!(
+            !policy.can_interact_with_post(),
+            "refunding follow must not erase the like already performed on that card"
+        );
+    }
+
+    #[test]
+    fn cancelling_overlapping_reservations_cannot_restore_a_cancelled_timestamp() {
+        let mut policy = HumanSessionPolicy::new(100, 100, 100, true);
+        policy.begin_post();
+        let first = policy.reserve_attempt(PolicyAction::Like);
+        let second = policy.reserve_attempt(PolicyAction::Comment);
+
+        policy.cancel_no_effect(first);
+        policy.cancel_no_effect(second);
+
+        assert!(policy.attempts.is_empty());
+        assert_eq!(policy.last_action_at, None);
+        assert!(policy.can_interact_with_post());
     }
 
     #[test]

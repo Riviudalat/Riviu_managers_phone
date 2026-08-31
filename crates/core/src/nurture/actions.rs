@@ -16,7 +16,7 @@ use uuid::Uuid;
 
 use crate::driver::UiSession;
 use crate::human_behavior::pick_direction_seeded;
-use crate::interaction::{PreparedThreadMessage, ThreadSendEvidence};
+use crate::interaction::{CommentOcrObservation, PreparedThreadMessage, ThreadSendEvidence};
 use crate::interaction_target::SendFailure;
 #[cfg(test)]
 use crate::openai_client::pick_from_pool;
@@ -109,6 +109,20 @@ pub(super) enum LikeResult {
     },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum FollowResult {
+    Followed,
+    NoControl,
+    CardChanged,
+    NotConfirmed,
+}
+
+impl FollowResult {
+    pub(super) fn did_act(self) -> bool {
+        matches!(self, Self::Followed | Self::NotConfirmed)
+    }
+}
+
 /// Where a text-comment attempt stopped. A transport ACK from `/wda/keys` is not
 /// success: TikTok may accept the request without putting anything in the field,
 /// so arming and disarming Send remain separate, frame-confirmed outcomes.
@@ -128,6 +142,10 @@ pub(super) enum CommentResult {
     TextChannelUnavailable,
     /// Contextual preparation was rejected before any drawer gesture.
     ContextSkipped,
+    /// The write-ahead audit row could not be persisted, so no UI was touched.
+    AuditUnavailable,
+    /// The card used to prepare the text was no longer under the gesture.
+    CardChanged,
     /// The comment icon did not open the drawer.
     NoDrawer,
     /// The drawer already contained text before this attempt started.
@@ -146,12 +164,99 @@ impl CommentResult {
                 "Riviu Agent chưa sẵn sàng cho bình luận chữ — chạy Agent Repair"
             }
             CommentResult::ContextSkipped => "bỏ qua: AI không xác nhận được comment bám nội dung",
+            CommentResult::AuditUnavailable => "không ghi được audit trước hành động",
+            CommentResult::CardChanged => "thẻ đã đổi giữa lúc soạn và lúc gõ",
             CommentResult::NoDrawer => "không mở được khay bình luận",
             CommentResult::ExistingDraft => "khay bình luận đang có bản nháp cũ",
             CommentResult::TextNotArmed => "đã gõ bình luận chữ nhưng nút gửi không sáng",
             CommentResult::TextNotSent => "đã bấm gửi bình luận chữ nhưng nút không tắt",
         }
     }
+
+    pub(super) fn did_act(self) -> bool {
+        matches!(
+            self,
+            Self::TextSent { .. }
+                | Self::NoDrawer
+                | Self::ExistingDraft
+                | Self::TextNotArmed
+                | Self::TextNotSent
+        )
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PixelCardIdentity {
+    author: String,
+    caption: Option<String>,
+}
+
+impl PixelCardIdentity {
+    fn same_card(&self, other: &Self) -> bool {
+        // `None` is an observed OCR miss, not a wildcard. Treating it as one lets a first
+        // sample with no caption bless later, conflicting captions from adjacent cards by the
+        // same author. Exact `Option` equality is conservative: when the evidence gained or
+        // lost a caption we cannot prove it stayed on one card, so no public action follows.
+        self.author == other.author && self.caption == other.caption
+    }
+}
+
+struct CommentEvidence {
+    frames: Vec<Vec<u8>>,
+    identity: PixelCardIdentity,
+}
+
+fn normalize_card_text(value: &str) -> String {
+    value
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase()
+}
+
+/// Pick the highest credible left-side profile/header line, immediately above the caption.
+/// Without that author line a changing video frame is not a card identity, so callers fail
+/// closed instead of substituting a whole-frame digest.
+fn pixel_card_identity_from_observations(
+    observations: &[CommentOcrObservation],
+) -> Option<PixelCardIdentity> {
+    let mut authors = observations
+        .iter()
+        .filter(|observation| {
+            observation.confidence >= 0.6
+                // Caption extraction starts at 0.67. Keeping this band strictly above it
+                // prevents a caption-only frame from being mistaken for an author proof.
+                && (0.60..0.67).contains(&observation.y)
+                && observation.x <= 0.45
+                && observation.width >= 0.04
+        })
+        .filter_map(|observation| {
+            let text = normalize_card_text(&observation.text);
+            let sensible = (2..=64).contains(&text.chars().count())
+                && text.chars().any(char::is_alphabetic)
+                && !matches!(
+                    text.as_str(),
+                    "follow"
+                        | "đã follow"
+                        | "like"
+                        | "comments"
+                        | "share"
+                        | "trang chủ"
+                        | "cửa hàng"
+                        | "hộp thư"
+                        | "hồ sơ"
+                );
+            sensible.then_some((observation.y, observation.x, text))
+        })
+        .collect::<Vec<_>>();
+    authors.sort_by(|left, right| {
+        left.0
+            .total_cmp(&right.0)
+            .then_with(|| left.1.total_cmp(&right.1))
+    });
+    let author = authors.into_iter().next()?.2;
+    let caption = ocr_caption(observations).map(|caption| normalize_card_text(&caption));
+    Some(PixelCardIdentity { author, caption })
 }
 
 struct PreparedTextComment {
@@ -169,7 +274,8 @@ struct PreparedTextComment {
     relevance: Option<u8>,
     evidence_support: Option<u8>,
     distinct_frames: Option<u8>,
-    attempt_id: Option<String>,
+    grounded_on: Option<PixelCardIdentity>,
+    attempt_id: String,
 }
 
 impl NurtureEngine {
@@ -564,44 +670,96 @@ impl NurtureEngine {
         udid: &str,
         session: &dyn UiSession,
         gestures: &tokio::sync::Mutex<()>,
-        rail: &ActionRail,
+        _rail: &ActionRail,
         screen_size: (f64, f64),
         stop: &AtomicBool,
-    ) -> anyhow::Result<bool> {
-        let Some(img) = self.latest_image(udid) else {
-            return Ok(false);
+    ) -> anyhow::Result<FollowResult> {
+        let Some(baseline_frame) = self.frames.latest(udid) else {
+            return Ok(FollowResult::CardChanged);
         };
-        // No badge means this author is already followed.
-        if !screen::follow_badge_present(&img, rail) {
-            return Ok(false);
+        let Some(baseline_image) = image::load_from_memory(&baseline_frame)
+            .ok()
+            .map(|image| image.to_rgb8())
+        else {
+            return Ok(FollowResult::CardChanged);
+        };
+        if !screen::feed_ready(&baseline_image, Some(screen_size.0)) {
+            return Ok(FollowResult::CardChanged);
         }
+        let Some(expected) = self.read_card_identity(&baseline_frame).await else {
+            return Ok(FollowResult::CardChanged);
+        };
 
         let mut rng = StdRng::from_entropy();
-        let point = self.next_touch_point(
-            udid,
-            screen_size,
-            TapPoint {
-                x: screen_size.0 * rail.x,
-                y: screen_size.1 * rail.follow_y,
-            },
-            (10.0, 10.0),
-        );
         sleep_interruptible(Duration::from_millis(rng.gen_range(300..700)), stop).await;
-        {
+        let watermark = {
             let _guard = gestures.lock().await;
+            // Re-prove identity and geometry while no competing gesture can move the card.
+            let Some(fresh_frame) = self.frames.latest(udid) else {
+                return Ok(FollowResult::CardChanged);
+            };
+            let Some(fresh_image) = image::load_from_memory(&fresh_frame)
+                .ok()
+                .map(|image| image.to_rgb8())
+            else {
+                return Ok(FollowResult::CardChanged);
+            };
+            let Some(actual) = self.read_card_identity(&fresh_frame).await else {
+                return Ok(FollowResult::CardChanged);
+            };
+            if !screen::feed_ready(&fresh_image, Some(screen_size.0))
+                || !expected.same_card(&actual)
+            {
+                return Ok(FollowResult::CardChanged);
+            }
+            let Some(fresh_rail) = screen::locate_action_rail(&fresh_image) else {
+                return Ok(FollowResult::NoControl);
+            };
+            if !screen::follow_badge_present(&fresh_image, &fresh_rail) {
+                return Ok(FollowResult::NoControl);
+            }
+            let point = self.next_touch_point(
+                udid,
+                screen_size,
+                TapPoint {
+                    x: screen_size.0 * fresh_rail.x,
+                    y: screen_size.1 * fresh_rail.follow_y,
+                },
+                (10.0, 10.0),
+            );
             session.tap(point).await?;
-        }
+            frame_digest(&fresh_frame)
+        };
         // Require the confirming frame to still be an actionable feed: a system
         // alert dims the whole screen, which reads as "badge gone" at the rail
         // and would otherwise count a follow the alert actually swallowed.
-        let gone = self
-            .wait_for_frame(udid, Duration::from_millis(2_500), stop, |img| {
-                !screen::follow_badge_present(img, rail)
-                    && screen::feed_ready(img, Some(screen_size.0))
-            })
+        let confirmed = self
+            .wait_for_frame_after(
+                udid,
+                Duration::from_millis(2_500),
+                stop,
+                &[watermark],
+                |img| {
+                    let Some(rail) = screen::locate_action_rail(img) else {
+                        return false;
+                    };
+                    !screen::follow_badge_present(img, &rail)
+                        && screen::feed_ready(img, Some(screen_size.0))
+                },
+            )
+            .await;
+        let Some((confirmed_frame, _)) = confirmed else {
+            return Ok(FollowResult::NotConfirmed);
+        };
+        let same_author = self
+            .read_card_identity(&confirmed_frame)
             .await
-            .is_some();
-        Ok(gone)
+            .is_some_and(|actual| expected.same_card(&actual));
+        Ok(if same_author {
+            FollowResult::Followed
+        } else {
+            FollowResult::NotConfirmed
+        })
     }
 
     /// Swipe to the next video, proving from the stream that the feed actually
@@ -779,6 +937,59 @@ impl NurtureEngine {
         false
     }
 
+    /// Re-prove the evidence card and rail under the gesture lock, then open its drawer.
+    /// `Some(CardChanged)` means no tap occurred; `None` means the open tap was delivered.
+    async fn open_grounded_comment_drawer(
+        &self,
+        udid: &str,
+        session: &dyn UiSession,
+        gestures: &tokio::sync::Mutex<()>,
+        screen_size: (f64, f64),
+        prepared: &PreparedTextComment,
+    ) -> anyhow::Result<Option<CommentResult>> {
+        let _guard = gestures.lock().await;
+        let Some(active_frame) = self.frames.latest(udid) else {
+            self.update_comment_attempt(prepared, "skipped: card_changed");
+            return Ok(Some(CommentResult::CardChanged));
+        };
+        let Some(active_image) = image::load_from_memory(&active_frame)
+            .ok()
+            .map(|image| image.to_rgb8())
+        else {
+            self.update_comment_attempt(prepared, "skipped: card_changed");
+            return Ok(Some(CommentResult::CardChanged));
+        };
+        let fresh_identity = if prepared.grounded_on.is_some() {
+            self.read_card_identity(&active_frame).await
+        } else {
+            None
+        };
+        let identity_matches = match (&prepared.grounded_on, &fresh_identity) {
+            (Some(expected), Some(actual)) => expected.same_card(actual),
+            (Some(_), None) => false,
+            (None, _) => true,
+        };
+        let Some(active_rail) = screen::locate_action_rail(&active_image) else {
+            self.update_comment_attempt(prepared, "skipped: card_changed");
+            return Ok(Some(CommentResult::CardChanged));
+        };
+        if !screen::feed_ready(&active_image, Some(screen_size.0)) || !identity_matches {
+            self.update_comment_attempt(prepared, "skipped: card_changed");
+            return Ok(Some(CommentResult::CardChanged));
+        }
+        let point = self.next_touch_point(
+            udid,
+            screen_size,
+            TapPoint {
+                x: screen_size.0 * active_rail.x,
+                y: screen_size.1 * active_rail.comment_y,
+            },
+            (8.0, 8.0),
+        );
+        session.tap(point).await?;
+        Ok(None)
+    }
+
     /// Post a text comment on the current video.
     ///
     /// Context collection and the two AI passes happen before opening the drawer
@@ -793,7 +1004,7 @@ impl NurtureEngine {
         udid: &str,
         session: &dyn UiSession,
         gestures: &tokio::sync::Mutex<()>,
-        rail: &ActionRail,
+        _rail: &ActionRail,
         screen_size: (f64, f64),
         settings: &NurtureSettings,
         _pool: &[String],
@@ -828,7 +1039,8 @@ impl NurtureEngine {
                     relevance: None,
                     evidence_support: None,
                     distinct_frames: None,
-                    attempt_id: None,
+                    grounded_on: None,
+                    attempt_id: String::new(),
                 })
             }
             #[cfg(not(test))]
@@ -836,7 +1048,7 @@ impl NurtureEngine {
                 None
             }
         } else {
-            let Some(frames) = self.collect_comment_frames(udid, screen_size, stop).await else {
+            let Some(evidence) = self.collect_comment_frames(udid, screen_size, stop).await else {
                 self.record_context_skip_attempt(
                     udid,
                     settings,
@@ -847,6 +1059,7 @@ impl NurtureEngine {
                 );
                 return Ok(CommentResult::ContextSkipped);
             };
+            let frames = &evidence.frames;
             let direction = pick_direction_seeded(
                 &settings.ai_directions,
                 frames
@@ -857,7 +1070,7 @@ impl NurtureEngine {
             let prepared_result = if provider_supports_vision(settings) {
                 prepare_grounded_comment(
                     settings,
-                    &frames,
+                    frames,
                     EvidenceKind::Moments,
                     direction.as_deref(),
                     // Empty on purpose: this loop meets a post by scrolling onto it, so there
@@ -908,7 +1121,8 @@ impl NurtureEngine {
                     relevance: Some(comment.relevance),
                     evidence_support: Some(comment.evidence_support),
                     distinct_frames: Some(comment.distinct_frames),
-                    attempt_id: None,
+                    grounded_on: Some(evidence.identity.clone()),
+                    attempt_id: String::new(),
                 }),
                 Err(error) => {
                     tracing::info!("[nurture {udid}] bỏ qua comment semantic: {error}");
@@ -962,31 +1176,20 @@ impl NurtureEngine {
             carousel_slides: None,
             created_at: Utc::now().to_rfc3339(),
         };
-        // **An id is only handed out when the row exists.** This used to warn and then set
-        // `attempt_id` regardless, so the completion path later updated a row that had never
-        // been inserted -- a zero-row `UPDATE` that reported success. The comment still gets
-        // posted, deliberately: the model call is already paid for and the operator asked for
-        // the comment, so refusing over a failed audit write would waste both. What must not
-        // happen is the code believing an audit row is there.
+        // The audit row is a write-ahead gate: a public comment without its prepared text,
+        // evidence and outcome cannot be reconstructed afterwards. Do not touch the drawer
+        // unless the row exists.
         prepared.attempt_id = match self.db.add_nurture_comment_attempt(&attempt) {
-            Ok(()) => Some(attempt.id),
+            Ok(()) => attempt.id,
             Err(error) => {
                 tracing::warn!(
-                    "[nurture {udid}] KHÔNG ghi được comment attempt ({error}) — bình luận vẫn \
-                     đăng, nhưng lượt này sẽ không có dòng audit, không có token và không có \
-                     giá tiền"
+                    "[nurture {udid}] KHÔNG ghi được comment attempt ({error}) — bỏ qua trước \
+                     khi mở khay bình luận"
                 );
-                None
+                return Ok(CommentResult::AuditUnavailable);
             }
         };
 
-        // AI/OCR preparation can take several seconds; reacquire the rail from
-        // the newest frame before opening the drawer so we never tap a stale
-        // card's comment coordinate.
-        let active_rail = self
-            .latest_image(udid)
-            .and_then(|img| screen::locate_action_rail(&img))
-            .unwrap_or(*rail);
         let tap = |x: f64, y: f64| {
             self.next_touch_point(
                 udid,
@@ -1000,16 +1203,18 @@ impl NurtureEngine {
         };
 
         // 1. open the comment drawer
-        let open_result = async {
-            let _guard = gestures.lock().await;
-            session.tap(tap(active_rail.x, active_rail.comment_y)).await
-        }
-        .await;
-        if let Err(error) = open_result {
-            self.update_comment_attempt(&prepared, "open_error");
-            self.close_comment_ui(udid, session, gestures, screen_size, stop)
-                .await;
-            return Err(error);
+        match self
+            .open_grounded_comment_drawer(udid, session, gestures, screen_size, &prepared)
+            .await
+        {
+            Ok(Some(result)) => return Ok(result),
+            Ok(None) => {}
+            Err(error) => {
+                self.update_comment_attempt(&prepared, "open_error");
+                self.close_comment_ui(udid, session, gestures, screen_size, stop)
+                    .await;
+                return Err(error);
+            }
         }
         let drawer = self
             .wait_for_frame(udid, Duration::from_secs(5), stop, |img| {
@@ -1169,8 +1374,9 @@ impl NurtureEngine {
         udid: &str,
         screen_size: (f64, f64),
         stop: &AtomicBool,
-    ) -> Option<Vec<Vec<u8>>> {
+    ) -> Option<CommentEvidence> {
         let mut frames = Vec::with_capacity(3);
+        let mut grounded_on: Option<PixelCardIdentity> = None;
         for sample in 0..3 {
             if stop.load(std::sync::atomic::Ordering::Relaxed) {
                 return None;
@@ -1180,12 +1386,21 @@ impl NurtureEngine {
             if !screen::feed_ready(&image, Some(screen_size.0)) {
                 return None;
             }
+            let identity = self.read_card_identity(&frame).await?;
+            match &grounded_on {
+                Some(expected) if !expected.same_card(&identity) => return None,
+                None => grounded_on = Some(identity),
+                Some(_) => {}
+            }
             frames.push((*frame).clone());
             if sample < 2 {
                 sleep_interruptible(Duration::from_millis(600), stop).await;
             }
         }
-        Some(frames)
+        Some(CommentEvidence {
+            frames,
+            identity: grounded_on?,
+        })
     }
 
     /// Frames for grounding a comment, without the iPhone pixel gate.
@@ -1233,7 +1448,8 @@ impl NurtureEngine {
         slides: Vec<Vec<u8>>,
         slides_offered: u32,
         stop: &AtomicBool,
-    ) -> Option<super::hierarchy::PreparedComment> {
+    ) -> Result<Option<super::hierarchy::PreparedComment>, super::hierarchy::CommentSourceError>
+    {
         if settings.api_key.trim().is_empty() {
             // **The one skip that used to leave no trace at all.** Every other reason a post
             // goes uncommented writes a row, so the operator can read `nurture_comment_attempts`
@@ -1248,7 +1464,7 @@ impl NurtureEngine {
                 slides_offered,
                 None,
             );
-            return None;
+            return Ok(None);
         }
         // **Slides first, and they cost nothing extra.** The traversal was already paying for
         // every flick, its 900 ms settle and a hierarchy dump per slide, and the comment never
@@ -1279,7 +1495,7 @@ impl NurtureEngine {
                         slides_offered,
                         None,
                     );
-                    return None;
+                    return Ok(None);
                 }
             }
         } else {
@@ -1308,7 +1524,7 @@ impl NurtureEngine {
                     slides_offered,
                     None,
                 );
-                return None;
+                return Ok(None);
             };
             let fingerprint = format!(
                 "{:016x}",
@@ -1339,7 +1555,7 @@ impl NurtureEngine {
                     slides_offered,
                     crate::openai_client::spend_of_failure(&error),
                 );
-                return None;
+                return Ok(None);
             }
         };
         let attempt = NurtureCommentAttempt {
@@ -1366,40 +1582,59 @@ impl NurtureEngine {
             carousel_slides: Some(slides_offered),
             created_at: Utc::now().to_rfc3339(),
         };
-        // Same rule as the pixel path: the id travels only if the row does.
-        let attempt_id = match self.db.add_nurture_comment_attempt(&attempt) {
-            Ok(()) => Some(attempt.id.clone()),
-            Err(error) => {
-                tracing::warn!(
-                    "[nurture {udid}] KHÔNG ghi được comment attempt ({error}) — bình luận vẫn \
-                     đăng, nhưng lượt này sẽ không có dòng audit, không có token và không có \
-                     giá tiền"
-                );
-                None
-            }
-        };
-        Some(super::hierarchy::PreparedComment {
-            text: comment.text,
-            prompt_tokens: comment.prompt_tokens,
-            completion_tokens: comment.completion_tokens,
-            attempt_id,
+        self.persist_hierarchy_comment(
+            attempt,
+            comment.text,
+            comment.prompt_tokens,
+            comment.completion_tokens,
+        )
+        .map(Some)
+    }
+
+    fn persist_hierarchy_comment(
+        &self,
+        attempt: NurtureCommentAttempt,
+        text: String,
+        prompt_tokens: u32,
+        completion_tokens: u32,
+    ) -> Result<super::hierarchy::PreparedComment, super::hierarchy::CommentSourceError> {
+        // Same write-ahead rule as the pixel path: without a durable row, return no text to
+        // the hierarchy driver, so it cannot possibly reach `run.comment`.
+        if let Err(error) = self.db.add_nurture_comment_attempt(&attempt) {
+            tracing::warn!(
+                "[nurture {}] KHÔNG ghi được comment attempt ({error}) — bỏ qua trước khi mở \
+                 khay bình luận",
+                attempt.udid
+            );
+            return Err(super::hierarchy::CommentSourceError::AuditUnavailable);
+        }
+        Ok(super::hierarchy::PreparedComment {
+            text,
+            prompt_tokens,
+            completion_tokens,
+            attempt_id: attempt.id,
         })
     }
 
     /// Close out a hierarchy comment's audit row.
-    pub(super) fn finish_hierarchy_comment(&self, attempt_id: Option<&str>, outcome: &str) {
-        let Some(id) = attempt_id else { return };
-        if let Err(error) = self.db.update_nurture_comment_attempt_outcome(id, outcome) {
-            tracing::warn!("không cập nhật outcome comment attempt {id}: {error}");
+    pub(super) fn finish_hierarchy_comment(&self, attempt_id: &str, outcome: &str) {
+        if let Err(error) = self
+            .db
+            .update_nurture_comment_attempt_outcome(attempt_id, outcome)
+        {
+            tracing::warn!("không cập nhật outcome comment attempt {attempt_id}: {error}");
         }
     }
 
     fn update_comment_attempt(&self, prepared: &PreparedTextComment, outcome: &str) {
-        let Some(id) = prepared.attempt_id.as_deref() else {
-            return;
-        };
-        if let Err(error) = self.db.update_nurture_comment_attempt_outcome(id, outcome) {
-            tracing::warn!("không cập nhật outcome comment attempt {id}: {error}");
+        if let Err(error) = self
+            .db
+            .update_nurture_comment_attempt_outcome(&prepared.attempt_id, outcome)
+        {
+            tracing::warn!(
+                "không cập nhật outcome comment attempt {}: {error}",
+                prepared.attempt_id
+            );
         }
     }
 
@@ -1407,6 +1642,11 @@ impl NurtureEngine {
     async fn read_caption(&self, frame: Option<&Vec<u8>>) -> Option<String> {
         let observations = self.frame_text.recognize(frame?).await.ok()?;
         ocr_caption(&observations)
+    }
+
+    async fn read_card_identity(&self, frame: &[u8]) -> Option<PixelCardIdentity> {
+        let observations = self.frame_text.recognize(frame).await.ok()?;
+        pixel_card_identity_from_observations(&observations)
     }
 
     /// One row for a comment the post's budget was charged for that never reached the drawer.
@@ -1499,6 +1739,157 @@ mod tests {
     const UDID: &str = "comment-test-device";
     const COMMENT: &str = "dep qua ban oi";
 
+    struct FixedCardText;
+
+    #[async_trait]
+    impl crate::FrameTextSource for FixedCardText {
+        async fn recognize(&self, _frame: &[u8]) -> anyhow::Result<Vec<CommentOcrObservation>> {
+            Ok(vec![CommentOcrObservation {
+                text: "creator_a".into(),
+                confidence: 0.98,
+                x: 0.08,
+                y: 0.63,
+                width: 0.22,
+                height: 0.03,
+            }])
+        }
+    }
+
+    struct SequenceCardText {
+        calls: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl crate::FrameTextSource for SequenceCardText {
+        async fn recognize(&self, _frame: &[u8]) -> anyhow::Result<Vec<CommentOcrObservation>> {
+            let author = if self.calls.fetch_add(1, Ordering::Relaxed) == 0 {
+                "creator_a"
+            } else {
+                "creator_b"
+            };
+            Ok(vec![CommentOcrObservation {
+                text: author.into(),
+                confidence: 0.98,
+                x: 0.08,
+                y: 0.63,
+                width: 0.22,
+                height: 0.03,
+            }])
+        }
+    }
+
+    struct CaptionSequenceCardText {
+        calls: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl crate::FrameTextSource for CaptionSequenceCardText {
+        async fn recognize(&self, _frame: &[u8]) -> anyhow::Result<Vec<CommentOcrObservation>> {
+            let call = self.calls.fetch_add(1, Ordering::Relaxed);
+            let mut observations = vec![CommentOcrObservation {
+                text: "creator_a".into(),
+                confidence: 0.98,
+                x: 0.08,
+                y: 0.63,
+                width: 0.22,
+                height: 0.03,
+            }];
+            if call > 0 {
+                observations.push(CommentOcrObservation {
+                    text: if call == 1 { "caption a" } else { "caption b" }.into(),
+                    confidence: 0.98,
+                    x: 0.08,
+                    y: 0.82,
+                    width: 0.30,
+                    height: 0.03,
+                });
+            }
+            Ok(observations)
+        }
+    }
+
+    struct CaptionedCardText;
+
+    #[async_trait]
+    impl crate::FrameTextSource for CaptionedCardText {
+        async fn recognize(&self, _frame: &[u8]) -> anyhow::Result<Vec<CommentOcrObservation>> {
+            Ok(vec![
+                CommentOcrObservation {
+                    text: "creator_a".into(),
+                    confidence: 0.98,
+                    x: 0.08,
+                    y: 0.63,
+                    width: 0.22,
+                    height: 0.03,
+                },
+                CommentOcrObservation {
+                    text: "caption b".into(),
+                    confidence: 0.98,
+                    x: 0.08,
+                    y: 0.82,
+                    width: 0.30,
+                    height: 0.03,
+                },
+            ])
+        }
+    }
+
+    #[test]
+    fn pixel_card_identity_requires_author_and_normalizes_ocr_text() {
+        let observations = vec![
+            CommentOcrObservation {
+                text: "  Creator_A  ".into(),
+                confidence: 0.98,
+                x: 0.08,
+                y: 0.63,
+                width: 0.22,
+                height: 0.03,
+            },
+            CommentOcrObservation {
+                text: "  Một   caption  ".into(),
+                confidence: 0.90,
+                x: 0.08,
+                y: 0.82,
+                width: 0.40,
+                height: 0.03,
+            },
+        ];
+        let identity = pixel_card_identity_from_observations(&observations).expect("author");
+        assert_eq!(identity.author, "creator_a");
+        assert_eq!(identity.caption.as_deref(), Some("một caption"));
+        assert!(pixel_card_identity_from_observations(&observations[1..]).is_none());
+        assert!(!identity.same_card(&PixelCardIdentity {
+            author: "creator_b".into(),
+            caption: identity.caption.clone(),
+        }));
+        assert!(!PixelCardIdentity {
+            author: "creator_a".into(),
+            caption: None,
+        }
+        .same_card(&PixelCardIdentity {
+            author: "creator_a".into(),
+            caption: Some("another card".into()),
+        }));
+    }
+
+    #[tokio::test]
+    async fn comment_evidence_rejects_caption_a_to_b_after_an_initial_ocr_miss() {
+        let frames = Arc::new(TestFrames::new());
+        let (engine, db_path) = test_engine(frames);
+        let engine = engine.with_frame_text_source(Arc::new(CaptionSequenceCardText {
+            calls: AtomicUsize::new(0),
+        }));
+
+        assert!(
+            engine
+                .collect_comment_frames(UDID, (375.0, 667.0), &AtomicBool::new(false))
+                .await
+                .is_none(),
+            "a missing first caption must not turn all later captions into a wildcard"
+        );
+        let _ = std::fs::remove_file(db_path);
+    }
+
     struct EmptyStream;
 
     #[async_trait]
@@ -1525,6 +1916,7 @@ mod tests {
     struct TestFrames {
         current: Mutex<Frame>,
         feed: Frame,
+        followed: Frame,
         open: Frame,
         armed: Frame,
         posted: Frame,
@@ -1540,6 +1932,22 @@ mod tests {
 
         fn with_stale_replay(replay_stale_drawer: bool) -> Self {
             let feed = Arc::new(include_bytes!("../../tests/fixtures/feed-iphone8.jpg").to_vec());
+            let mut followed_image = image::load_from_memory(&feed)
+                .expect("decode feed fixture")
+                .to_rgb8();
+            let rail = screen::locate_action_rail(&followed_image).expect("fixture rail");
+            let (width, height) = followed_image.dimensions();
+            let x0 = ((rail.x - 0.045) * f64::from(width)).max(0.0) as u32;
+            let x1 = ((rail.x + 0.045) * f64::from(width)).min(f64::from(width - 1)) as u32;
+            let y0 = ((rail.follow_y - 0.028) * f64::from(height)).max(0.0) as u32;
+            let y1 =
+                ((rail.follow_y + 0.028) * f64::from(height)).min(f64::from(height - 1)) as u32;
+            for y in y0..=y1 {
+                for x in x0..=x1 {
+                    followed_image.put_pixel(x, y, Rgb([24, 24, 24]));
+                }
+            }
+            let followed = encode_frame(followed_image);
             let open = encode_frame(drawer_frame(false, false));
             let armed = encode_frame(drawer_frame(true, false));
             // The drawer after a send is not the drawer before typing: the
@@ -1550,6 +1958,7 @@ mod tests {
             Self {
                 current: Mutex::new(feed.clone()),
                 feed,
+                followed,
                 open,
                 armed,
                 posted,
@@ -1563,6 +1972,10 @@ mod tests {
 
         fn show_open(&self) {
             *self.current.lock() = self.open.clone();
+        }
+
+        fn show_followed(&self) {
+            *self.current.lock() = self.followed.clone();
         }
 
         fn show_armed(&self) {
@@ -1774,6 +2187,7 @@ mod tests {
         open_with_existing_draft: bool,
         type_error: bool,
         send_error: bool,
+        follow_success: bool,
         ordinary_taps: AtomicUsize,
         send_taps: AtomicUsize,
         native_taps: Mutex<Vec<TapPoint>>,
@@ -1796,6 +2210,7 @@ mod tests {
                 open_with_existing_draft: false,
                 type_error: false,
                 send_error: false,
+                follow_success: false,
                 ordinary_taps: AtomicUsize::new(0),
                 send_taps: AtomicUsize::new(0),
                 native_taps: Mutex::new(Vec::new()),
@@ -1810,6 +2225,11 @@ mod tests {
 
         fn with_existing_draft(mut self) -> Self {
             self.open_with_existing_draft = true;
+            self
+        }
+
+        fn following_succeeds(mut self) -> Self {
+            self.follow_success = true;
             self
         }
 
@@ -1867,6 +2287,9 @@ mod tests {
             } else if Self::near(&point, screen::SEND_BUTTON) {
                 self.send_taps.fetch_add(1, Ordering::Relaxed);
                 self.frames.show_posted();
+            } else if self.follow_success {
+                self.ordinary_taps.fetch_add(1, Ordering::Relaxed);
+                self.frames.show_followed();
             } else if self.ordinary_taps.fetch_add(1, Ordering::Relaxed) == 0 {
                 if self.open_with_existing_draft {
                     self.frames.show_armed();
@@ -2382,6 +2805,59 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn follow_refuses_when_author_changes_immediately_before_tap() {
+        let frames = Arc::new(TestFrames::new());
+        let stop = Arc::new(AtomicBool::new(false));
+        let session = RecordingSession::new(frames.clone(), stop.clone(), false, false);
+        let (engine, db_path) = test_engine(frames);
+        let engine = engine.with_frame_text_source(Arc::new(SequenceCardText {
+            calls: AtomicUsize::new(0),
+        }));
+
+        let verdict = engine
+            .do_follow(
+                UDID,
+                &session,
+                &tokio::sync::Mutex::new(()),
+                &ActionRail::fallback(),
+                (375.0, 667.0),
+                stop.as_ref(),
+            )
+            .await
+            .expect("classified follow");
+
+        assert_eq!(verdict, FollowResult::CardChanged);
+        assert_eq!(session.ordinary_taps.load(Ordering::Relaxed), 0);
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[tokio::test]
+    async fn follow_taps_once_when_author_stays_the_same() {
+        let frames = Arc::new(TestFrames::new());
+        let stop = Arc::new(AtomicBool::new(false));
+        let session =
+            RecordingSession::new(frames.clone(), stop.clone(), false, false).following_succeeds();
+        let (engine, db_path) = test_engine(frames);
+        let engine = engine.with_frame_text_source(Arc::new(FixedCardText));
+
+        let verdict = engine
+            .do_follow(
+                UDID,
+                &session,
+                &tokio::sync::Mutex::new(()),
+                &ActionRail::fallback(),
+                (375.0, 667.0),
+                stop.as_ref(),
+            )
+            .await
+            .expect("follow");
+
+        assert_eq!(verdict, FollowResult::Followed);
+        assert_eq!(session.ordinary_taps.load(Ordering::Relaxed), 1);
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[tokio::test]
     async fn a_follow_is_not_confirmed_on_a_non_feed_frame() {
         // The real feed fixture shows a red follow badge; tapping follow flips
         // the mock to a grey drawer frame — badge gone but NOT an actionable
@@ -2400,6 +2876,7 @@ mod tests {
         let stop = Arc::new(AtomicBool::new(false));
         let session = RecordingSession::new(frames.clone(), stop.clone(), false, false);
         let (engine, db_path) = test_engine(frames);
+        let engine = engine.with_frame_text_source(Arc::new(FixedCardText));
 
         let confirmed = engine
             .do_follow(
@@ -2413,10 +2890,241 @@ mod tests {
             .await
             .expect("follow");
 
-        assert!(
-            !confirmed,
+        assert_eq!(
+            confirmed,
+            FollowResult::NotConfirmed,
             "a badge that vanished on a non-feed (dimmed) frame must not count as a follow"
         );
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[tokio::test]
+    async fn audit_insert_failure_stops_before_opening_comment_ui() {
+        let frames = Arc::new(TestFrames::new());
+        let stop = Arc::new(AtomicBool::new(false));
+        let session = RecordingSession::new(frames.clone(), stop.clone(), true, false);
+        let (engine, db_path) = test_engine(frames);
+        rusqlite::Connection::open(&db_path)
+            .expect("open audit database")
+            .execute_batch(
+                "CREATE TRIGGER fail_nurture_comment_attempt_insert \
+                 BEFORE INSERT ON nurture_comment_attempts \
+                 BEGIN SELECT RAISE(FAIL, 'forced'); END;",
+            )
+            .expect("install failing audit trigger");
+
+        let result = engine
+            .do_comment(
+                UDID,
+                &session,
+                &tokio::sync::Mutex::new(()),
+                &ActionRail::fallback(),
+                (375.0, 667.0),
+                &NurtureSettings::default(),
+                &[COMMENT.to_string()],
+                stop.as_ref(),
+            )
+            .await
+            .expect("audit failure is a classified no-op");
+
+        assert_eq!(result, CommentResult::AuditUnavailable);
+        assert!(!result.did_act());
+        assert_eq!(session.ordinary_taps.load(Ordering::Relaxed), 0);
+        assert_eq!(session.send_taps.load(Ordering::Relaxed), 0);
+        assert!(session.typed.lock().is_empty());
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[tokio::test]
+    async fn hierarchy_source_returns_no_text_when_write_ahead_audit_fails() {
+        let frames = Arc::new(TestFrames::new());
+        let (engine, db_path) = test_engine(frames);
+        rusqlite::Connection::open(&db_path)
+            .expect("open audit database")
+            .execute_batch(
+                "CREATE TRIGGER fail_nurture_comment_attempt_insert \
+                 BEFORE INSERT ON nurture_comment_attempts \
+                 BEGIN SELECT RAISE(FAIL, 'forced'); END;",
+            )
+            .expect("install failing audit trigger");
+        let attempt = NurtureCommentAttempt {
+            id: "hierarchy-audit-test".into(),
+            udid: UDID.into(),
+            outcome: "prepared".into(),
+            source: "test-fixture".into(),
+            model: "test".into(),
+            base_url_host: "localhost".into(),
+            prompt_tokens: 1,
+            completion_tokens: 1,
+            cost_usd: None,
+            preview: COMMENT.into(),
+            caption_preview: String::new(),
+            frame_sha256: String::new(),
+            context_confidence: None,
+            relevance: None,
+            evidence_support: None,
+            distinct_frames: None,
+            carousel_slides: Some(0),
+            created_at: Utc::now().to_rfc3339(),
+        };
+
+        assert!(
+            engine
+                .persist_hierarchy_comment(attempt, COMMENT.into(), 1, 1)
+                .is_err(),
+            "the hierarchy source must return no PreparedComment unless the audit row exists"
+        );
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[tokio::test]
+    async fn grounded_comment_refuses_card_b_after_preparing_on_card_a() {
+        let frames = Arc::new(TestFrames::new());
+        let stop = Arc::new(AtomicBool::new(false));
+        let session = RecordingSession::new(frames.clone(), stop, true, false);
+        let (engine, db_path) = test_engine(frames);
+        let engine = engine.with_frame_text_source(Arc::new(SequenceCardText {
+            // Any nonzero initial value makes the fresh read identify creator_b.
+            calls: AtomicUsize::new(1),
+        }));
+        let attempt_id = "grounded-card-test".to_string();
+        engine
+            .db
+            .add_nurture_comment_attempt(&NurtureCommentAttempt {
+                id: attempt_id.clone(),
+                udid: UDID.into(),
+                outcome: "prepared".into(),
+                source: "test-fixture".into(),
+                model: "test".into(),
+                base_url_host: "localhost".into(),
+                prompt_tokens: 0,
+                completion_tokens: 0,
+                cost_usd: None,
+                preview: COMMENT.into(),
+                caption_preview: String::new(),
+                frame_sha256: String::new(),
+                context_confidence: None,
+                relevance: None,
+                evidence_support: None,
+                distinct_frames: None,
+                carousel_slides: None,
+                created_at: Utc::now().to_rfc3339(),
+            })
+            .expect("write prepared audit row");
+        let prepared = PreparedTextComment {
+            text: COMMENT.into(),
+            model: "test".into(),
+            base_url_host: "localhost".into(),
+            prompt_tokens: 0,
+            completion_tokens: 0,
+            cost_usd: None,
+            source: "test-fixture",
+            frame_sha256: None,
+            caption_preview: None,
+            context_confidence: None,
+            relevance: None,
+            evidence_support: None,
+            distinct_frames: None,
+            grounded_on: Some(PixelCardIdentity {
+                author: "creator_a".into(),
+                caption: None,
+            }),
+            attempt_id,
+        };
+
+        let result = engine
+            .open_grounded_comment_drawer(
+                UDID,
+                &session,
+                &tokio::sync::Mutex::new(()),
+                (375.0, 667.0),
+                &prepared,
+            )
+            .await
+            .expect("classified card change");
+
+        assert_eq!(result, Some(CommentResult::CardChanged));
+        assert_eq!(session.ordinary_taps.load(Ordering::Relaxed), 0);
+        assert_eq!(session.send_taps.load(Ordering::Relaxed), 0);
+        assert!(session.typed.lock().is_empty());
+        let attempts = engine
+            .db
+            .list_nurture_comment_attempts(10)
+            .expect("read audit");
+        assert_eq!(attempts[0].outcome, "skipped: card_changed");
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[tokio::test]
+    async fn grounded_comment_refuses_a_new_caption_after_the_baseline_missed_it() {
+        let frames = Arc::new(TestFrames::new());
+        let stop = Arc::new(AtomicBool::new(false));
+        let session = RecordingSession::new(frames.clone(), stop, true, false);
+        let (engine, db_path) = test_engine(frames);
+        let engine = engine.with_frame_text_source(Arc::new(CaptionedCardText));
+        let attempt_id = "grounded-caption-test".to_string();
+        engine
+            .db
+            .add_nurture_comment_attempt(&NurtureCommentAttempt {
+                id: attempt_id.clone(),
+                udid: UDID.into(),
+                outcome: "prepared".into(),
+                source: "test-fixture".into(),
+                model: "test".into(),
+                base_url_host: "localhost".into(),
+                prompt_tokens: 0,
+                completion_tokens: 0,
+                cost_usd: None,
+                preview: COMMENT.into(),
+                caption_preview: String::new(),
+                frame_sha256: String::new(),
+                context_confidence: None,
+                relevance: None,
+                evidence_support: None,
+                distinct_frames: None,
+                carousel_slides: None,
+                created_at: Utc::now().to_rfc3339(),
+            })
+            .expect("write prepared audit row");
+        let prepared = PreparedTextComment {
+            text: COMMENT.into(),
+            model: "test".into(),
+            base_url_host: "localhost".into(),
+            prompt_tokens: 0,
+            completion_tokens: 0,
+            cost_usd: None,
+            source: "test-fixture",
+            frame_sha256: None,
+            caption_preview: None,
+            context_confidence: None,
+            relevance: None,
+            evidence_support: None,
+            distinct_frames: None,
+            grounded_on: Some(PixelCardIdentity {
+                author: "creator_a".into(),
+                caption: None,
+            }),
+            attempt_id,
+        };
+
+        let result = engine
+            .open_grounded_comment_drawer(
+                UDID,
+                &session,
+                &tokio::sync::Mutex::new(()),
+                (375.0, 667.0),
+                &prepared,
+            )
+            .await
+            .expect("classified changed identity");
+
+        assert_eq!(result, Some(CommentResult::CardChanged));
+        assert_eq!(session.ordinary_taps.load(Ordering::Relaxed), 0);
+        let attempts = engine
+            .db
+            .list_nurture_comment_attempts(10)
+            .expect("read audit");
+        assert_eq!(attempts[0].outcome, "skipped: card_changed");
         let _ = std::fs::remove_file(db_path);
     }
 
@@ -2609,6 +3317,163 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_thread_transport_error_before_send_stays_retryable() {
+        let frames = Arc::new(TestFrames::new());
+        let stop = Arc::new(AtomicBool::new(false));
+        let session =
+            RecordingSession::new(frames.clone(), stop.clone(), true, false).failing_type();
+        let (engine, db_path) = test_engine(frames);
+        let prepared = PreparedThreadMessage {
+            ordinal: 1,
+            actor_udid: UDID.to_string(),
+            text: COMMENT.to_string(),
+            text_sha256: "before".into(),
+            parent_ordinal: None,
+            mentions: Vec::new(),
+        };
+
+        let failure = engine
+            .send_prepared_thread_comment(
+                UDID,
+                &session,
+                &tokio::sync::Mutex::new(()),
+                &prepared,
+                stop.as_ref(),
+            )
+            .await
+            .expect_err("type transport error");
+        assert!(!failure.effect_may_have_gone_out());
+        assert_eq!(session.send_taps.load(Ordering::Relaxed), 0);
+        drop(engine);
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[tokio::test]
+    async fn a_thread_transport_error_at_send_stays_unretryable() {
+        let frames = Arc::new(TestFrames::new());
+        let stop = Arc::new(AtomicBool::new(false));
+        let session =
+            RecordingSession::new(frames.clone(), stop.clone(), true, false).failing_send();
+        let (engine, db_path) = test_engine(frames);
+        let prepared = PreparedThreadMessage {
+            ordinal: 1,
+            actor_udid: UDID.to_string(),
+            text: COMMENT.to_string(),
+            text_sha256: "after".into(),
+            parent_ordinal: None,
+            mentions: Vec::new(),
+        };
+
+        let failure = engine
+            .send_prepared_thread_comment(
+                UDID,
+                &session,
+                &tokio::sync::Mutex::new(()),
+                &prepared,
+                stop.as_ref(),
+            )
+            .await
+            .expect_err("Send transport error");
+        assert!(failure.effect_may_have_gone_out());
+        assert_eq!(session.send_taps.load(Ordering::Relaxed), 1);
+        drop(engine);
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    fn prepared_thread_reply() -> PreparedThreadMessage {
+        PreparedThreadMessage {
+            ordinal: 2,
+            actor_udid: UDID.to_string(),
+            text: COMMENT.to_string(),
+            text_sha256: "reply-sha".into(),
+            parent_ordinal: Some(1),
+            mentions: Vec::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_thread_reply_transport_error_before_send_stays_retryable() {
+        let frames = Arc::new(TestFrames::new());
+        let stop = Arc::new(AtomicBool::new(false));
+        let session =
+            RecordingSession::new(frames.clone(), stop.clone(), true, false).failing_type();
+        let (engine, db_path) = test_engine(frames);
+
+        let failure = engine
+            .send_prepared_thread_reply(
+                UDID,
+                &session,
+                &tokio::sync::Mutex::new(()),
+                TapPoint { x: 120.0, y: 300.0 },
+                &prepared_thread_reply(),
+                stop.as_ref(),
+            )
+            .await
+            .expect_err("reply type transport error");
+
+        assert!(!failure.effect_may_have_gone_out());
+        assert_eq!(session.send_taps.load(Ordering::Relaxed), 0);
+        drop(engine);
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[tokio::test]
+    async fn a_thread_reply_transport_error_at_send_stays_unretryable() {
+        let frames = Arc::new(TestFrames::new());
+        let stop = Arc::new(AtomicBool::new(false));
+        let session =
+            RecordingSession::new(frames.clone(), stop.clone(), true, false).failing_send();
+        let (engine, db_path) = test_engine(frames);
+
+        let failure = engine
+            .send_prepared_thread_reply(
+                UDID,
+                &session,
+                &tokio::sync::Mutex::new(()),
+                TapPoint { x: 120.0, y: 300.0 },
+                &prepared_thread_reply(),
+                stop.as_ref(),
+            )
+            .await
+            .expect_err("reply Send transport error");
+
+        assert!(failure.effect_may_have_gone_out());
+        assert_eq!(session.send_taps.load(Ordering::Relaxed), 1);
+        drop(engine);
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[tokio::test]
+    async fn a_thread_reply_clear_failure_after_send_stays_unretryable() {
+        let frames = Arc::new(TestFrames::with_stale_replay(true));
+        let stop = Arc::new(AtomicBool::new(false));
+        let session = RecordingSession::new(frames.clone(), stop.clone(), true, false);
+        let (engine, db_path) = test_engine(frames);
+
+        let failure = engine
+            .send_prepared_thread_reply(
+                UDID,
+                &session,
+                &tokio::sync::Mutex::new(()),
+                TapPoint { x: 120.0, y: 300.0 },
+                &prepared_thread_reply(),
+                stop.as_ref(),
+            )
+            .await
+            .expect_err("a replayed pre-typing frame must not confirm the reply");
+
+        assert!(failure.effect_may_have_gone_out());
+        assert_eq!(session.send_taps.load(Ordering::Relaxed), 1);
+        let error = failure.into_error();
+        assert!(
+            error.to_string().contains("reply_clear_not_confirmed"),
+            "unexpected error: {error}"
+        );
+        drop(engine);
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[tokio::test]
     async fn missing_context_is_skipped_and_audited_before_opening_the_drawer() {
         let frames = Arc::new(TestFrames::new());
         let stop = Arc::new(AtomicBool::new(false));
@@ -2786,163 +3651,6 @@ mod tests {
             "typing errors must not leave the drawer open"
         );
 
-        drop(engine);
-        let _ = std::fs::remove_file(db_path);
-    }
-
-    #[tokio::test]
-    async fn a_thread_transport_error_before_send_stays_retryable() {
-        let frames = Arc::new(TestFrames::new());
-        let stop = Arc::new(AtomicBool::new(false));
-        let session =
-            RecordingSession::new(frames.clone(), stop.clone(), true, false).failing_type();
-        let (engine, db_path) = test_engine(frames);
-        let prepared = PreparedThreadMessage {
-            ordinal: 1,
-            actor_udid: UDID.to_string(),
-            text: COMMENT.to_string(),
-            text_sha256: "before".into(),
-            parent_ordinal: None,
-            mentions: Vec::new(),
-        };
-
-        let failure = engine
-            .send_prepared_thread_comment(
-                UDID,
-                &session,
-                &tokio::sync::Mutex::new(()),
-                &prepared,
-                stop.as_ref(),
-            )
-            .await
-            .expect_err("type transport error");
-        assert!(!failure.effect_may_have_gone_out());
-        assert_eq!(session.send_taps.load(Ordering::Relaxed), 0);
-        drop(engine);
-        let _ = std::fs::remove_file(db_path);
-    }
-
-    #[tokio::test]
-    async fn a_thread_transport_error_at_send_stays_unretryable() {
-        let frames = Arc::new(TestFrames::new());
-        let stop = Arc::new(AtomicBool::new(false));
-        let session =
-            RecordingSession::new(frames.clone(), stop.clone(), true, false).failing_send();
-        let (engine, db_path) = test_engine(frames);
-        let prepared = PreparedThreadMessage {
-            ordinal: 1,
-            actor_udid: UDID.to_string(),
-            text: COMMENT.to_string(),
-            text_sha256: "after".into(),
-            parent_ordinal: None,
-            mentions: Vec::new(),
-        };
-
-        let failure = engine
-            .send_prepared_thread_comment(
-                UDID,
-                &session,
-                &tokio::sync::Mutex::new(()),
-                &prepared,
-                stop.as_ref(),
-            )
-            .await
-            .expect_err("Send transport error");
-        assert!(failure.effect_may_have_gone_out());
-        assert_eq!(session.send_taps.load(Ordering::Relaxed), 1);
-        drop(engine);
-        let _ = std::fs::remove_file(db_path);
-    }
-
-    fn prepared_thread_reply() -> PreparedThreadMessage {
-        PreparedThreadMessage {
-            ordinal: 2,
-            actor_udid: UDID.to_string(),
-            text: COMMENT.to_string(),
-            text_sha256: "reply-sha".into(),
-            parent_ordinal: Some(1),
-            mentions: Vec::new(),
-        }
-    }
-
-    #[tokio::test]
-    async fn a_thread_reply_transport_error_before_send_stays_retryable() {
-        let frames = Arc::new(TestFrames::new());
-        let stop = Arc::new(AtomicBool::new(false));
-        let session =
-            RecordingSession::new(frames.clone(), stop.clone(), true, false).failing_type();
-        let (engine, db_path) = test_engine(frames);
-
-        let failure = engine
-            .send_prepared_thread_reply(
-                UDID,
-                &session,
-                &tokio::sync::Mutex::new(()),
-                TapPoint { x: 120.0, y: 300.0 },
-                &prepared_thread_reply(),
-                stop.as_ref(),
-            )
-            .await
-            .expect_err("reply type transport error");
-
-        assert!(!failure.effect_may_have_gone_out());
-        assert_eq!(session.send_taps.load(Ordering::Relaxed), 0);
-        drop(engine);
-        let _ = std::fs::remove_file(db_path);
-    }
-
-    #[tokio::test]
-    async fn a_thread_reply_transport_error_at_send_stays_unretryable() {
-        let frames = Arc::new(TestFrames::new());
-        let stop = Arc::new(AtomicBool::new(false));
-        let session =
-            RecordingSession::new(frames.clone(), stop.clone(), true, false).failing_send();
-        let (engine, db_path) = test_engine(frames);
-
-        let failure = engine
-            .send_prepared_thread_reply(
-                UDID,
-                &session,
-                &tokio::sync::Mutex::new(()),
-                TapPoint { x: 120.0, y: 300.0 },
-                &prepared_thread_reply(),
-                stop.as_ref(),
-            )
-            .await
-            .expect_err("reply Send transport error");
-
-        assert!(failure.effect_may_have_gone_out());
-        assert_eq!(session.send_taps.load(Ordering::Relaxed), 1);
-        drop(engine);
-        let _ = std::fs::remove_file(db_path);
-    }
-
-    #[tokio::test]
-    async fn a_thread_reply_clear_failure_after_send_stays_unretryable() {
-        let frames = Arc::new(TestFrames::with_stale_replay(true));
-        let stop = Arc::new(AtomicBool::new(false));
-        let session = RecordingSession::new(frames.clone(), stop.clone(), true, false);
-        let (engine, db_path) = test_engine(frames);
-
-        let failure = engine
-            .send_prepared_thread_reply(
-                UDID,
-                &session,
-                &tokio::sync::Mutex::new(()),
-                TapPoint { x: 120.0, y: 300.0 },
-                &prepared_thread_reply(),
-                stop.as_ref(),
-            )
-            .await
-            .expect_err("a replayed pre-typing frame must not confirm the reply");
-
-        assert!(failure.effect_may_have_gone_out());
-        assert_eq!(session.send_taps.load(Ordering::Relaxed), 1);
-        let error = failure.into_error();
-        assert!(
-            error.to_string().contains("reply_clear_not_confirmed"),
-            "unexpected error: {error}"
-        );
         drop(engine);
         let _ = std::fs::remove_file(db_path);
     }

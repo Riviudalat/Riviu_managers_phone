@@ -33,6 +33,8 @@ use std::time::Duration;
 // 5-second send window taking 5 seconds and taking none.
 use tokio::time::Instant;
 
+use crate::ActionFailure;
+
 use crate::driver::{ElementBox, ElementQuery, UiSession};
 use crate::tiktok_labels::{TikTokControl, TikTokControls};
 
@@ -68,6 +70,8 @@ pub enum CommentVerdict {
     /// This build's Send control has never been measured, so there is nothing to
     /// aim at. Refuse rather than tap where it was on another build.
     SendUnmeasured,
+    /// This card has no comment control. Nothing was tapped.
+    NoControl,
     /// The drawer never produced an input field.
     NoDrawer,
     /// The drawer opened but the Send control was not in it.
@@ -99,6 +103,27 @@ pub enum CommentVerdict {
 }
 
 impl CommentVerdict {
+    /// The currently known variants for table-driven behavioural checks.
+    ///
+    /// A hand-written list in the test omitted `SendPreArmed` — the one verdict added to
+    /// keep a never-typed refusal retryable — so nothing checked it had an operator-facing
+    /// reason, and an edit returning `""` for it would have passed. This array does not make
+    /// Rust discover future variants; compile-time coverage comes from the exhaustive match in
+    /// [`Self::reason`]. Keep this table in step so the behavioural assertions also run on each
+    /// reason and `is_sent` result.
+    pub const ALL: [Self; 10] = [
+        Self::Sent,
+        Self::NotConfirmed,
+        Self::SendUnmeasured,
+        Self::NoControl,
+        Self::NoDrawer,
+        Self::NoSendControl,
+        Self::NotArmed,
+        Self::SendPreArmed,
+        Self::ContextSkipped,
+        Self::SendFlowInterrupted,
+    ];
+
     pub fn reason(self) -> &'static str {
         match self {
             Self::Sent => "đã gửi",
@@ -106,6 +131,7 @@ impl CommentVerdict {
                 "đã bấm Gửi nhưng không xác nhận được; không retry vì trạng thái giao nhận mơ hồ"
             }
             Self::SendUnmeasured => "chưa đo nút Gửi trên bản build này",
+            Self::NoControl => "thẻ này không có nút bình luận",
             Self::NoDrawer => "drawer bình luận không mở ra ô nhập",
             Self::NoSendControl => "không thấy nút Gửi trong drawer",
             Self::NotArmed => "đã nhập chữ nhưng nút Gửi không sáng",
@@ -163,6 +189,12 @@ pub struct CommentDrawer<'a, P: TapPlanner> {
     plan_tap: P,
 }
 
+enum OpenForPost {
+    NoControl,
+    NoDrawer,
+    Field(ElementBox),
+}
+
 impl<'a, P: TapPlanner> CommentDrawer<'a, P> {
     pub fn new(session: &'a dyn UiSession, labels: TikTokControls, plan_tap: P) -> Self {
         Self {
@@ -204,6 +236,38 @@ impl<'a, P: TapPlanner> CommentDrawer<'a, P> {
         // comments over the network and can take noticeably longer than the animation.
         self.await_element(DRAWER_WINDOW, ElementQuery::ClassName(EDIT_TEXT), stop)
             .await
+    }
+
+    /// Open for the all-in-one posting flow while retaining the first tap boundary.
+    async fn open_for_post(&mut self, stop: &AtomicBool) -> Result<OpenForPost, ActionFailure> {
+        let Some(opener) = self
+            .labels
+            .label(TikTokControl::Comments)
+            .map(|label| label.to_query())
+        else {
+            return Ok(OpenForPost::NoControl);
+        };
+        let Some(opener) = self
+            .session
+            .locate(opener)
+            .await
+            .map_err(ActionFailure::before)?
+        else {
+            return Ok(OpenForPost::NoControl);
+        };
+        self.tap_inside(&opener)
+            .await
+            .map_err(ActionFailure::after)?;
+        Ok(
+            match self
+                .await_element(DRAWER_WINDOW, ElementQuery::ClassName(EDIT_TEXT), stop)
+                .await
+                .map_err(ActionFailure::after)?
+            {
+                Some(field) => OpenForPost::Field(field),
+                None => OpenForPost::NoDrawer,
+            },
+        )
     }
 
     /// Focus the field and set the text.
@@ -381,7 +445,7 @@ pub async fn post_comment(
     plan_tap: impl TapPlanner,
     text: &str,
     stop: &AtomicBool,
-) -> anyhow::Result<CommentVerdict> {
+) -> Result<CommentVerdict, ActionFailure> {
     let mut drawer = CommentDrawer::new(session, labels, plan_tap);
     if drawer.send_query().is_none() {
         // Nothing was opened, so there is nothing to close.
@@ -405,23 +469,39 @@ async fn post_into_drawer<P: TapPlanner>(
     drawer: &mut CommentDrawer<'_, P>,
     text: &str,
     stop: &AtomicBool,
-) -> anyhow::Result<CommentVerdict> {
-    let Some(field) = drawer.open(stop).await? else {
-        return Ok(CommentVerdict::NoDrawer);
+) -> Result<CommentVerdict, ActionFailure> {
+    let field = match drawer.open_for_post(stop).await? {
+        OpenForPost::NoControl => return Ok(CommentVerdict::NoControl),
+        OpenForPost::NoDrawer => return Ok(CommentVerdict::NoDrawer),
+        OpenForPost::Field(field) => field,
     };
-    match drawer.focus_and_type(&field, text, stop).await? {
+    match drawer
+        .focus_and_type(&field, text, stop)
+        .await
+        .map_err(ActionFailure::after)?
+    {
         TypedInto::Typed => {}
         TypedInto::NoSendControl => return Ok(CommentVerdict::NoSendControl),
         TypedInto::SendPreArmed => return Ok(CommentVerdict::SendPreArmed),
     }
-    let Some(send) = drawer.await_armed(stop).await? else {
+    let Some(send) = drawer
+        .await_armed(stop)
+        .await
+        .map_err(ActionFailure::after)?
+    else {
         return Ok(CommentVerdict::NotArmed);
     };
-    Ok(if drawer.tap_send_and_confirm_disarm(&send, stop).await? {
-        CommentVerdict::Sent
-    } else {
-        CommentVerdict::NotConfirmed
-    })
+    Ok(
+        if drawer
+            .tap_send_and_confirm_disarm(&send, stop)
+            .await
+            .map_err(ActionFailure::after)?
+        {
+            CommentVerdict::Sent
+        } else {
+            CommentVerdict::NotConfirmed
+        },
+    )
 }
 
 /// Sleep unless the caller has asked to stop.
@@ -486,6 +566,7 @@ mod tests {
         taps: Mutex<Vec<TapPoint>>,
         typed: Mutex<Vec<String>>,
         backs: Mutex<usize>,
+        fail_locates: Mutex<Vec<String>>,
         /// Make the typing step fail, so the error path can be exercised. A transport
         /// error here is the realistic one: the agent is reached, the drawer is open, and
         /// the request dies mid-gesture.
@@ -507,6 +588,11 @@ mod tests {
 
         fn sticking(mut self, key: &str, element: ElementBox) -> Self {
             self.sticky = Mutex::new(vec![(key.to_string(), element)]);
+            self
+        }
+
+        fn failing_locate(mut self, key: &str) -> Self {
+            self.fail_locates = Mutex::new(vec![key.to_string()]);
             self
         }
     }
@@ -555,6 +641,9 @@ mod tests {
                 // suffix without this double having to model resource ids.
                 ElementQuery::ResourceIdSuffix(value) => value,
             };
+            if self.fail_locates.lock().iter().any(|key| key == wanted) {
+                anyhow::bail!("agent failed before returning {wanted}");
+            }
             let mut answers = self.answers.lock();
             if let Some(index) = answers.iter().position(|(key, _)| key == wanted) {
                 return Ok(answers.remove(index).1);
@@ -587,6 +676,46 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn a_comment_opener_read_failure_is_before_effect() {
+        let session = FakeSession::default().failing_locate("bình luận");
+        let mut planner = centre_planner();
+
+        let failure = post_comment(
+            &session,
+            vietnamese(),
+            &mut planner,
+            "không được gõ",
+            &AtomicBool::new(false),
+        )
+        .await
+        .expect_err("the scripted opener read must fail");
+
+        assert!(!failure.effect_may_have_gone_out());
+        assert!(session.taps.lock().is_empty());
+        assert!(session.typed.lock().is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_missing_comment_control_is_a_zero_effect_no_control() {
+        let session = FakeSession::default();
+        let mut planner = centre_planner();
+
+        let verdict = post_comment(
+            &session,
+            vietnamese(),
+            &mut planner,
+            "không được gõ",
+            &AtomicBool::new(false),
+        )
+        .await
+        .expect("absence is a verdict");
+
+        assert_eq!(verdict, CommentVerdict::NoControl);
+        assert!(session.taps.lock().is_empty());
+        assert!(session.typed.lock().is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn a_drawer_that_never_shows_a_field_is_not_a_comment() {
         let session = FakeSession::with(vec![("bình luận", Some(element(true)))]);
         let mut planner = centre_planner();
@@ -598,6 +727,11 @@ mod tests {
             .await
             .expect("verdict");
         assert_eq!(verdict, CommentVerdict::NoDrawer);
+        assert_eq!(
+            session.taps.lock().len(),
+            1,
+            "the opener was already tapped"
+        );
         assert!(
             session.typed.lock().is_empty(),
             "must not type into nothing"
@@ -757,15 +891,9 @@ mod tests {
 
     #[test]
     fn every_verdict_has_an_operator_facing_reason() {
-        for verdict in [
-            CommentVerdict::Sent,
-            CommentVerdict::NotConfirmed,
-            CommentVerdict::SendUnmeasured,
-            CommentVerdict::NoDrawer,
-            CommentVerdict::NoSendControl,
-            CommentVerdict::NotArmed,
-            CommentVerdict::ContextSkipped,
-        ] {
+        // `reason` itself is an exhaustive match, so a new variant cannot compile without an
+        // operator-facing mapping. `ALL` then applies the behavioural checks to today's set.
+        for verdict in CommentVerdict::ALL {
             assert!(!verdict.reason().trim().is_empty(), "{verdict:?}");
             assert_eq!(verdict.is_sent(), verdict == CommentVerdict::Sent);
         }
