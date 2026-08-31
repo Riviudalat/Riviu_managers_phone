@@ -69,7 +69,7 @@ nếu một trích dẫn nêu số con.
 
 ## Nhật ký §9.x
 
-153 mục, trong 6 file dưới `diary/`. **Thứ tự trong file là thứ tự viết, không phải thứ
+154 mục, trong 6 file dưới `diary/`. **Thứ tự trong file là thứ tự viết, không phải thứ
 tự số và cũng không phải thứ tự thời gian** — trong bản gốc §9.43 nằm giữa §9.20 và
 §9.21, và §9.4 nằm sau §9.17. Đó là lý do bảng này sắp theo **số**: để tra được.
 
@@ -270,6 +270,7 @@ thật của việc các mục không được viết theo thứ tự, không ph
 | §9.133 | [Đợt cải thiện toàn hệ thống: nối đường Sheet, dọn nợ, và hai chỗ máy thật bác lại kế hoạch (31/08/2026)](diary/06-2408-2708.md#9133-đợt-cải-thiện-toàn-hệ-thống-nối-đường-sheet-dọn-nợ-và-hai-chỗ-máy-thật-bác-lại-kế-hoạch-31082026) | `diary/06-2408-2708.md` |
 | §9.134 | [Vòng review mười người lần hai: cái tôi vừa viết hôm nay sai ở đâu (31/08/2026)](diary/06-2408-2708.md#9134-vòng-review-mười-người-lần-hai-cái-tôi-vừa-viết-hôm-nay-sai-ở-đâu-31082026) | `diary/06-2408-2708.md` |
 | §9.135 | [Công tắc hai chiều được đọc trước khi bấm, và musically thông toàn tuyến (31/08/2026)](diary/06-2408-2708.md#9135-công-tắc-hai-chiều-được-đọc-trước-khi-bấm-và-musically-thông-toàn-tuyến-31082026) | `diary/06-2408-2708.md` |
+| §9.136 | [M7: một bài thật, một cú tap hụt, và cái link đầu tiên đọc về bằng mã production (31/08/2026)](diary/06-2408-2708.md#9136-m7-một-bài-thật-một-cú-tap-hụt-và-cái-link-đầu-tiên-đọc-về-bằng-mã-production-31082026) | `diary/06-2408-2708.md` |
 
 ---
 
