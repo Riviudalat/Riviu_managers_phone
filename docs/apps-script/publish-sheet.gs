@@ -57,7 +57,23 @@ const CONFIG = {
    */
   TOKEN: 'DOI-CHUOI-NAY-DI',
 
-  /** Tên tab trong spreadsheet. Để trống thì dùng tab đầu tiên. */
+  /**
+   * Tab đích, chọn theo **gid** — con số trong URL sau `#gid=`.
+   *
+   * Đo 31/08/2026 trên sheet thật và đây là lý do trường này tồn tại: tab đầu tiên của
+   * workbook KHÔNG phải tab đăng bài. Tab đầu có cột B trống, tab đăng bài có B là
+   * `Nhân Viên` — hai bố cục khác nhau. Với `SHEET_NAME: ''` (dùng tab đầu) script sẽ ghi
+   * vào nhầm tab, và ghi rất im lặng.
+   *
+   * gid thay vì tên vì gid nằm sẵn trong URL anh đang mở, và **đổi tên tab không đổi gid** —
+   * còn một cái tên gõ sai thì `getSheetByName` trả null và script từ chối, một cái tên gõ
+   * đúng-nhưng-của-tab-khác thì nó ghi vào đó.
+   *
+   * `0` = bỏ qua, dùng SHEET_NAME (rồi mới tới tab đầu tiên).
+   */
+  SHEET_GID: 588430161,
+
+  /** Tên tab, chỉ dùng khi SHEET_GID = 0. Để trống thì dùng tab đầu tiên. */
   SHEET_NAME: '',
 
   /** Cột link bài đăng. Anh chốt cột D. */
@@ -82,13 +98,29 @@ const CONFIG = {
    * Bản trước chỉ ghi đè đúng số ô mới cần, nên một hàng đang có A,B,C mà nhận đúng
    * một tên X sẽ thành X,B,C — ba đối tác cho một bài chỉ có một.
    */
-  PARTNERS_MAX: 12,
+  /**
+   * **23, đếm trên sheet thật ngày 31/08/2026** — tiêu đề chạy `Đối tác` … `Đối tác 23`
+   * từ cột K tới AG, và đã có dòng dùng đủ cả 23.
+   *
+   * Con số cũ là **12**, một phỏng đoán, và nó sai hai đường cùng lúc: script chỉ ghi 12
+   * tên đầu (mất 11 tên), và phép "xoá tên cũ" chỉ quét K..V nên tên đối tác cũ ở W..AG
+   * của dòng đó **nằm lại** — 12 tên mới trộn với tên cũ, không ai nhìn ra.
+   */
+  PARTNERS_MAX: 23,
 
   /**
    * Cột giữ assignmentId. Xem mục 2 — đây là thứ làm cho một lần gửi lại không
    * thành hai hàng.
+   *
+   * **34 = AH, ô trống đầu tiên sau khối đối tác.** Con số cũ là 26 = **cột Z**, và trên
+   * sheet thật Z là `Đối tác 16` — mỗi lần ghi khoá là **đè mất tên đối tác thứ 16**. Đó
+   * là lý do `assertConfigIsSane` bên dưới tồn tại: ba con số này phụ thuộc nhau, và khi
+   * chúng lệch thì hậu quả là dữ liệu sai chứ không phải một lỗi.
+   *
+   * Lưới sheet thật rộng tới AQ (43 cột), nên AH nằm trong lưới — script không phải chèn
+   * cột, và không bao giờ nên tự chèn.
    */
-  KEY_COLUMN: 26,
+  KEY_COLUMN: 34,
 
   /**
    * Dòng đầu tiên chứa dữ liệu (bỏ qua dòng tiêu đề).
@@ -123,6 +155,11 @@ function doPost(request) {
 
     // Khoá theo script: hai request đồng thời của cùng một assignment nối đuôi nhau,
     // nên request thứ hai đọc lại cột khoá và thấy hàng đã ghi.
+    const unsound = assertConfigIsSane();
+    if (unsound) {
+      return reply({ ok: false, error: unsound });
+    }
+
     const lock = LockService.getScriptLock();
     lock.waitLock(30000);
     try {
@@ -185,7 +222,56 @@ function targetSheet() {
   if (!book) {
     return null;
   }
+  // gid trước, vì nó là thứ nằm trong URL và không đổi khi tab bị đổi tên. Không tìm thấy
+  // thì trả null để `doPost` từ chối — KHÔNG lặng lẽ rơi về tab đầu tiên, vì "tab đầu tiên"
+  // chính là cái tab sai mà trường này sinh ra để tránh.
+  if (CONFIG.SHEET_GID) {
+    const sheets = book.getSheets();
+    for (let index = 0; index < sheets.length; index += 1) {
+      if (sheets[index].getSheetId() === CONFIG.SHEET_GID) {
+        return sheets[index];
+      }
+    }
+    return null;
+  }
   return CONFIG.SHEET_NAME ? book.getSheetByName(CONFIG.SHEET_NAME) : book.getSheets()[0];
+}
+
+/**
+ * Ba con số cột phụ thuộc nhau, và khi chúng lệch thì hậu quả là **dữ liệu sai**, không
+ * phải một lỗi ai đó nhìn thấy.
+ *
+ * Đo được 31/08/2026: `KEY_COLUMN: 26` đặt khoá vào cột Z, và trên sheet thật Z là
+ * `Đối tác 16` — mỗi hàng ghi ra là một tên đối tác bị đè. Không có gì trong script cũ
+ * nhận ra, vì mỗi con số một mình đều hợp lệ.
+ *
+ * Trả chuỗi lý do khi cấu hình không dùng được, `''` khi dùng được. Chạy trước cả khoá, để
+ * một cấu hình hỏng không kịp chạm vào sheet.
+ */
+function assertConfigIsSane() {
+  const first = CONFIG.PARTNERS_START_COLUMN;
+  const last = CONFIG.PARTNERS_START_COLUMN + CONFIG.PARTNERS_MAX - 1;
+  const inside = (column) => column >= first && column <= last;
+
+  if (CONFIG.PARTNERS_MAX < 1) {
+    return 'PARTNERS_MAX phải >= 1';
+  }
+  if (inside(CONFIG.KEY_COLUMN)) {
+    return (
+      'KEY_COLUMN ' + CONFIG.KEY_COLUMN + ' nằm TRONG khối đối tác (' + first + '..' + last +
+      ') — ghi khoá vào đó là đè mất một tên đối tác. Đổi KEY_COLUMN sang cột trống sau ' + last
+    );
+  }
+  if (inside(CONFIG.LINK_COLUMN)) {
+    return 'LINK_COLUMN ' + CONFIG.LINK_COLUMN + ' nằm trong khối đối tác';
+  }
+  if (inside(CONFIG.POSTER_COLUMN)) {
+    return 'POSTER_COLUMN ' + CONFIG.POSTER_COLUMN + ' nằm trong khối đối tác';
+  }
+  if (CONFIG.KEY_COLUMN === CONFIG.LINK_COLUMN || CONFIG.KEY_COLUMN === CONFIG.POSTER_COLUMN) {
+    return 'KEY_COLUMN trùng với LINK_COLUMN hoặc POSTER_COLUMN';
+  }
+  return '';
 }
 
 /**

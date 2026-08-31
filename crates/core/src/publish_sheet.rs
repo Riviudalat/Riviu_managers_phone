@@ -348,6 +348,59 @@ mod tests {
         }
     }
 
+    /// **The shipped script's column numbers depend on each other, and nothing else checks
+    /// they agree.**
+    ///
+    /// Measured 31/08/2026 against the operator's real sheet: the template shipped
+    /// `KEY_COLUMN: 26`, which is column Z, which on that sheet is `Đối tác 16`. Every
+    /// delivery would have overwritten a partner name — and each number was individually
+    /// legal, so nothing anywhere said so. `PARTNERS_MAX: 12` was wrong the same way
+    /// (23 partner columns exist, and rows use all 23).
+    ///
+    /// The script grew its own runtime guard (`assertConfigIsSane`). This is the build-time
+    /// half: the file is data, not code, so the only way to hold it is to read it.
+    #[test]
+    fn the_shipped_apps_script_config_cannot_overwrite_a_partner_column() {
+        let script = include_str!("../../../docs/apps-script/publish-sheet.gs");
+        let number = |key: &str| -> i64 {
+            let at = script
+                .find(&format!("{key}:"))
+                .unwrap_or_else(|| panic!("the script still defines {key}"));
+            script[at + key.len() + 1..]
+                .trim_start()
+                .chars()
+                .take_while(char::is_ascii_digit)
+                .collect::<String>()
+                .parse()
+                .unwrap_or_else(|_| panic!("{key} is not a plain number"))
+        };
+        let first = number("PARTNERS_START_COLUMN");
+        let max = number("PARTNERS_MAX");
+        let key = number("KEY_COLUMN");
+        let link = number("LINK_COLUMN");
+        let poster = number("POSTER_COLUMN");
+        let last = first + max - 1;
+
+        assert!(max >= 1, "PARTNERS_MAX must be at least one column");
+        for (name, column) in [("KEY_COLUMN", key), ("LINK_COLUMN", link), ("POSTER_COLUMN", poster)]
+        {
+            assert!(
+                column < first || column > last,
+                "{name} = {column} sits inside the partner block {first}..={last}; every \
+                 delivery would overwrite a partner name, and the sheet cannot say which"
+            );
+        }
+        assert_ne!(key, link, "the key and the link cannot share a column");
+        assert_ne!(key, poster, "the key and the poster cannot share a column");
+
+        // The runtime guard has to still be wired, or the script ships without the check
+        // this test is the twin of.
+        assert!(
+            script.contains("assertConfigIsSane()"),
+            "the script's own config guard is no longer called from doPost"
+        );
+    }
+
     /// **The one host the Apps Script protocol names, and nothing that merely looks like it.**
     ///
     /// Measured 31/08/2026 against the live deployment: `POST /exec` answers 302 to
