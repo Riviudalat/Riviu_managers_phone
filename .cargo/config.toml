@@ -6,3 +6,23 @@
 # reporting can run.
 [target.x86_64-pc-windows-msvc]
 rustflags = ["-C", "target-feature=+crt-static"]
+
+# Incremental compilation off, because in this repo it costs a great deal and buys
+# almost nothing.
+#
+# Measured 31/08/2026: `target/` had grown to 331 GB, of which **199.9 GB was
+# `debug/incremental`** across 2490 session directories — the two big crates write
+# roughly 1.6 GB per session, and cargo never garbage-collects any of it.
+#
+# It buys little here because of how this repo is worked: the verification ritual is
+# revert-a-fix, rebuild, restore, rebuild, and every one of those edits lands in
+# `riviu-core` or the desktop crate — which is precisely the crate incremental would have
+# had to recompile from scratch anyway. A measuring session runs dozens of those.
+#
+# The trade is real and small: one changed crate now recompiles whole rather than in
+# parts. On the box that keeps this repo that is tens of seconds, against ~200 GB and a
+# disk that was at 77%.
+#
+# CI wants this too — a one-shot builder gains nothing from a cache it will never reuse.
+[build]
+incremental = false
