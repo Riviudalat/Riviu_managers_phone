@@ -604,7 +604,7 @@ pub async fn prepare_grounded_comment(
         // would leave with only the verifier's own price attached. The whole run's bill goes
         // out with the error, whatever the error was.
         let verification =
-            match grounded_verify(settings, &sheet, &candidate, direction, brief).await {
+            match grounded_verify(settings, &sheet, &candidate, direction, brief, false).await {
                 Ok(verification) => verification,
                 Err(error) => {
                     if let Some(extra) = spend_of_failure(&error) {
@@ -1208,12 +1208,72 @@ async fn grounded_generate(
 ///
 /// One result per phone, in order. Errors are per comment so that one refusal is one phone
 /// staying quiet, never the whole target failing.
+#[derive(Debug)]
+struct TextBatchEvidence {
+    caption: Option<String>,
+    caption_is_authoritative: bool,
+    transcript: Option<String>,
+    coverage: Option<PostCoverage>,
+}
+
+impl TextBatchEvidence {
+    fn brief(&self) -> PostBrief<'_> {
+        PostBrief {
+            caption: self.caption.as_deref(),
+            caption_is_authoritative: self.caption_is_authoritative,
+            transcript: self.transcript.as_deref(),
+            coverage: self.coverage,
+        }
+    }
+}
+
+/// Select text evidence in the same order as the single-comment route. OCR is the last resort:
+/// a transcript is richer than caption text, and a caption fetched from the post is clearer than
+/// a local OCR read of a JPEG.
+async fn text_batch_evidence(
+    frame_text: Option<&dyn crate::FrameTextSource>,
+    frames: &[Vec<u8>],
+    brief: PostBrief<'_>,
+) -> anyhow::Result<TextBatchEvidence> {
+    let transcript = nonempty_text(brief.transcript).map(str::to_owned);
+    let authoritative_caption = brief
+        .caption_is_authoritative
+        .then(|| nonempty_text(brief.caption))
+        .flatten()
+        .map(str::to_owned);
+    let supplied_ocr = (!brief.caption_is_authoritative)
+        .then(|| nonempty_text(brief.caption))
+        .flatten()
+        .map(str::to_owned);
+    let caption = match (authoritative_caption, supplied_ocr) {
+        (Some(caption), _) => Some(caption),
+        (None, Some(caption)) => Some(caption),
+        (None, None) if transcript.is_none() => {
+            let frame = frames.last().ok_or_else(|| anyhow!("no_usable_evidence"))?;
+            let source = frame_text.ok_or_else(|| anyhow!("no_usable_evidence"))?;
+            let observations = source.recognize(frame).await?;
+            Some(ocr_caption(&observations).ok_or_else(|| anyhow!("no_usable_evidence"))?)
+        }
+        (None, None) => None,
+    };
+    Ok(TextBatchEvidence {
+        caption,
+        // An OCR fallback is local evidence, never a source caption merely because the brief
+        // carried an empty authoritative field.
+        caption_is_authoritative: brief.caption_is_authoritative
+            && nonempty_text(brief.caption).is_some(),
+        transcript,
+        coverage: brief.coverage,
+    })
+}
+
 pub async fn prepare_grounded_comments_batch(
     settings: &NurtureSettings,
     frames: &[Vec<u8>],
     kind: EvidenceKind,
     direction: Option<&str>,
     count: usize,
+    frame_text: Option<&dyn crate::FrameTextSource>,
     brief: PostBrief<'_>,
 ) -> BatchedComments {
     if count == 0 {
@@ -1224,7 +1284,25 @@ pub async fn prepare_grounded_comments_batch(
             (0..count).map(|_| Err(anyhow!("ai_unavailable"))).collect(),
         );
     }
-    if count > VERIFY_BATCH_MAX {
+    let text_evidence = if provider_supports_vision(settings) {
+        None
+    } else {
+        match text_batch_evidence(frame_text, frames, brief).await {
+            Ok(evidence) => Some(evidence),
+            Err(error) => {
+                let detail = error.to_string();
+                return BatchedComments::all_individual(
+                    (0..count).map(|_| Err(anyhow!("{detail}"))).collect(),
+                );
+            }
+        }
+    };
+    let text_only = text_evidence.is_some();
+    let brief = text_evidence
+        .as_ref()
+        .map(TextBatchEvidence::brief)
+        .unwrap_or(brief);
+    if count > VERIFY_BATCH_MAX && !text_only {
         // Above the batch ceiling there is nothing to decide: the per-comment path is correct
         // and merely more expensive, and splitting into several batches would need a second
         // set of measurements nobody has taken.
@@ -1249,31 +1327,64 @@ pub async fn prepare_grounded_comments_batch(
     let max_words = settings.max_comment_words.clamp(4, 30) as usize;
     let lang = language_label(&settings.comment_lang);
 
-    let batch =
-        match grounded_generate_batch(settings, &sheet, &lang, max_words, direction, count, brief)
-            .await
-        {
-            Ok(batch) => batch,
-            Err(error) => {
-                tracing::warn!("gộp bản nháp thất bại, lùi về từng câu: {error}");
+    let batch = match grounded_generate_batch(
+        settings,
+        &sheet,
+        GroundedBatchRequest {
+            lang: &lang,
+            max_words,
+            direction,
+            count,
+            text: brief,
+            text_only,
+        },
+    )
+    .await
+    {
+        Ok(batch) => batch,
+        Err(error) => {
+            // `chat` learns an image refusal before returning the error. Re-enter once through
+            // the now-text-only route so this target keeps one shared draft instead of sending
+            // the same rejected image again for every phone. The guard makes the recursion
+            // one-way: the next invocation observes the cache and cannot take this branch.
+            if !text_only && !provider_supports_vision(settings) {
+                tracing::warn!(
+                    "gộp ảnh bị endpoint từ chối, chuyển ngay sang một bản nháp gộp bằng chữ"
+                );
                 let failed_batch_spend = spend_of_failure(&error);
-                let mut out = Vec::with_capacity(count);
-                for _ in 0..count {
-                    out.push(
-                        prepare_grounded_comment(settings, frames, kind, direction, brief).await,
-                    );
-                }
-                // The failed batch draft was billed; its price lands on the first phone's
-                // row so the sum over the target stays the real bill.
+                let mut retried = Box::pin(prepare_grounded_comments_batch(
+                    settings, frames, kind, direction, count, frame_text, brief,
+                ))
+                .await;
                 if let Some(extra) = failed_batch_spend {
-                    if let Some(first) = out.first_mut() {
+                    if let Some(first) = retried.results.first_mut() {
                         let carried = std::mem::replace(first, Err(anyhow!("carrier")));
                         *first = fold_spend_into(carried, extra);
                     }
                 }
-                return BatchedComments::all_individual(out);
+                return retried;
             }
-        };
+            tracing::warn!("gộp bản nháp thất bại, lùi về từng câu: {error}");
+            let failed_batch_spend = spend_of_failure(&error);
+            let mut out = Vec::with_capacity(count);
+            for _ in 0..count {
+                out.push(if text_only {
+                    prepare_text_evidence_comment(settings, brief, &frame_sha256, direction).await
+                } else {
+                    prepare_grounded_comment(settings, frames, kind, direction, brief).await
+                });
+            }
+            // The failed batch draft was billed; its price lands on the first phone's
+            // row so the sum over the target stays the real bill.
+            if let Some(extra) = failed_batch_spend {
+                if let Some(first) = out.first_mut() {
+                    let carried = std::mem::replace(first, Err(anyhow!("carrier")));
+                    *first = fold_spend_into(carried, extra);
+                }
+            }
+            return BatchedComments::all_individual(out);
+        }
+    };
 
     // Sanitised before verification, so the gate judges exactly the string that would be typed.
     let candidates: Vec<String> = batch
@@ -1299,9 +1410,9 @@ pub async fn prepare_grounded_comments_batch(
     // candidate's verdict depends on another's, so waiting for each in turn was pure latency.
     let mut verdicts: Vec<anyhow::Result<GroundedVerification>> = Vec::with_capacity(count);
     for group in candidates.chunks(VERIFY_CONCURRENCY) {
-        let pending = group
-            .iter()
-            .map(|candidate| grounded_verify(settings, &sheet, candidate, direction, brief));
+        let pending = group.iter().map(|candidate| {
+            grounded_verify(settings, &sheet, candidate, direction, brief, text_only)
+        });
         verdicts.extend(futures_util::future::join_all(pending).await);
     }
 
@@ -1313,6 +1424,9 @@ pub async fn prepare_grounded_comments_batch(
     let mut from_batch = Vec::with_capacity(count);
     let mut refusals = Vec::new();
     let mut needs_rewrite: Vec<usize> = Vec::new();
+    // A verdict is a real, billed request whether it accepts, rejects, or cannot be parsed.
+    // Keep the spend beside its candidate until that candidate has a result to carry it.
+    let mut carried_verification_spend = vec![CommentSpend::default(); count];
     let mut batch_charged = false;
     for ((index, candidate), verdict) in candidates.iter().enumerate().zip(verdicts) {
         let verification = match verdict {
@@ -1321,6 +1435,13 @@ pub async fn prepare_grounded_comments_batch(
                 // A verification that could not be read is not a refusal: hand this one comment
                 // to the path that knows how to try again.
                 tracing::warn!("gộp: không kiểm chứng được câu #{index}: {error}");
+                if let Some(spend) = spend_of_failure(&error) {
+                    carried_verification_spend[index].add(
+                        spend.prompt_tokens,
+                        spend.completion_tokens,
+                        spend.cost_usd,
+                    );
+                }
                 out.push(None);
                 needs_rewrite.push(index);
                 from_batch.push(false);
@@ -1343,7 +1464,12 @@ pub async fn prepare_grounded_comments_batch(
             ui_text_confusion: verification.ui_text_confusion,
             formal_style: sounds_like_report(candidate),
         };
-        if candidate.is_empty() || !gate.accepts() {
+        let accepted = if text_only {
+            gate.accepts_caption(batch.context_confidence)
+        } else {
+            gate.accepts()
+        };
+        if candidate.is_empty() || !accepted {
             // One refusal is one phone going the slow way, not twenty.
             refusals.push(format!(
                 "#{index} overall={} instruction={} genericity={}{}",
@@ -1352,6 +1478,11 @@ pub async fn prepare_grounded_comments_batch(
                 gate.genericity,
                 gate.blocking_flags()
             ));
+            carried_verification_spend[index].add(
+                verification.prompt_tokens,
+                verification.completion_tokens,
+                verification.cost_usd,
+            );
             out.push(None);
             needs_rewrite.push(index);
             from_batch.push(false);
@@ -1371,7 +1502,7 @@ pub async fn prepare_grounded_comments_batch(
             relevance: verification.relevance,
             evidence_support: verification.evidence_support,
             frame_sha256: frame_sha256.clone(),
-            distinct_frames: sheet.distinct_frames,
+            distinct_frames: if text_only { 0 } else { sheet.distinct_frames },
             // The one draft call is charged to the first comment and the verification to the
             // comment it judged, so a sum over the target is the real bill. Charging the draft
             // to every comment would report twenty times what was spent.
@@ -1424,17 +1555,23 @@ pub async fn prepare_grounded_comments_batch(
                  nhìn thấy"
             )
         };
-        if let Ok(second) = grounded_generate_batch(
+        let second = grounded_generate_batch(
             settings,
             &sheet,
-            &lang,
-            max_words,
-            Some(&retry_note),
-            needs_rewrite.len(),
-            brief,
+            GroundedBatchRequest {
+                lang: &lang,
+                max_words,
+                direction: Some(&retry_note),
+                count: needs_rewrite.len(),
+                text: brief,
+                text_only,
+            },
         )
-        .await
-        {
+        .await;
+        if let Err(error) = &second {
+            second_leftover = spend_of_failure(error);
+        }
+        if let Ok(second) = second {
             let retry_candidates: Vec<String> = second
                 .comments
                 .iter()
@@ -1443,7 +1580,7 @@ pub async fn prepare_grounded_comments_batch(
             let mut retry_verdicts = Vec::with_capacity(retry_candidates.len());
             for group in retry_candidates.chunks(VERIFY_CONCURRENCY) {
                 let pending = group.iter().map(|candidate| {
-                    grounded_verify(settings, &sheet, candidate, direction, brief)
+                    grounded_verify(settings, &sheet, candidate, direction, brief, text_only)
                 });
                 retry_verdicts.extend(futures_util::future::join_all(pending).await);
             }
@@ -1457,9 +1594,19 @@ pub async fn prepare_grounded_comments_batch(
                 .zip(retry_candidates.iter())
                 .zip(retry_verdicts)
             {
-                let Ok(verification) = verdict else {
-                    still_missing.push(*slot);
-                    continue;
+                let verification = match verdict {
+                    Ok(verification) => verification,
+                    Err(error) => {
+                        if let Some(spend) = spend_of_failure(&error) {
+                            carried_verification_spend[*slot].add(
+                                spend.prompt_tokens,
+                                spend.completion_tokens,
+                                spend.cost_usd,
+                            );
+                        }
+                        still_missing.push(*slot);
+                        continue;
+                    }
                 };
                 let gate = VerificationGate {
                     overall: second
@@ -1473,19 +1620,29 @@ pub async fn prepare_grounded_comments_batch(
                     ui_text_confusion: verification.ui_text_confusion,
                     formal_style: sounds_like_report(candidate),
                 };
-                if candidate.is_empty() || !gate.accepts() {
+                let accepted = if text_only {
+                    gate.accepts_caption(second.context_confidence)
+                } else {
+                    gate.accepts()
+                };
+                if candidate.is_empty() || !accepted {
+                    carried_verification_spend[*slot].add(
+                        verification.prompt_tokens,
+                        verification.completion_tokens,
+                        verification.cost_usd,
+                    );
                     still_missing.push(*slot);
                     continue;
                 }
                 from_batch[*slot] = true;
-                out[*slot] = Some(Ok(GroundedCommentResult {
+                let result = Ok(GroundedCommentResult {
                     text: candidate.clone(),
                     caption: second.caption.clone(),
                     context_confidence: second.context_confidence,
                     relevance: verification.relevance,
                     evidence_support: verification.evidence_support,
                     frame_sha256: frame_sha256.clone(),
-                    distinct_frames: sheet.distinct_frames,
+                    distinct_frames: if text_only { 0 } else { sheet.distinct_frames },
                     // The second draft is charged to the first comment it rescued, and each
                     // verification to the comment it judged — the same rule as the first round,
                     // so a sum over the target is still what the gateway billed.
@@ -1514,7 +1671,9 @@ pub async fn prepare_grounded_comments_batch(
                     },
                     model: verification.model.clone(),
                     base_url_host: host_of(&settings.base_url),
-                }));
+                });
+                let spend = std::mem::take(&mut carried_verification_spend[*slot]);
+                out[*slot] = Some(fold_spend_into(result, spend));
                 second_charged = true;
             }
             // A rescue round that rescued nothing was still a billed call; remember its
@@ -1556,14 +1715,19 @@ pub async fn prepare_grounded_comments_batch(
 
     // Every remaining refusal rewritten at once, in the same bounded groups the verifications use.
     for group in needs_rewrite.chunks(VERIFY_CONCURRENCY) {
-        let pending = group
-            .iter()
-            .map(|_| prepare_grounded_comment(settings, frames, kind, lone_direction, brief));
+        let pending = group.iter().map(|_| async {
+            if text_only {
+                prepare_text_evidence_comment(settings, brief, &frame_sha256, lone_direction).await
+            } else {
+                prepare_grounded_comment(settings, frames, kind, lone_direction, brief).await
+            }
+        });
         for (index, result) in group
             .iter()
             .zip(futures_util::future::join_all(pending).await)
         {
-            out[*index] = Some(result);
+            let spend = std::mem::take(&mut carried_verification_spend[*index]);
+            out[*index] = Some(fold_spend_into(result, spend));
         }
     }
     // **What no accepted comment carried still gets billed to the target.** The first batch
@@ -1652,19 +1816,33 @@ impl BatchedComments {
 ///
 /// A short answer is an error, not a partial success: the caller must never hand out fewer
 /// comments than it has phones and let the rest fall back to silence.
+#[derive(Debug, Clone, Copy)]
+struct GroundedBatchRequest<'a> {
+    lang: &'a str,
+    max_words: usize,
+    direction: Option<&'a str>,
+    count: usize,
+    text: PostBrief<'a>,
+    text_only: bool,
+}
+
 async fn grounded_generate_batch(
     settings: &NurtureSettings,
     sheet: &ContactSheet,
-    lang: &str,
-    max_words: usize,
-    direction: Option<&str>,
-    count: usize,
-    text: PostBrief<'_>,
+    request: GroundedBatchRequest<'_>,
 ) -> anyhow::Result<GroundedDraftBatch> {
+    let GroundedBatchRequest {
+        lang,
+        max_words,
+        direction,
+        count,
+        text,
+        text_only,
+    } = request;
     let direction = direction.unwrap_or("tự nhiên");
     let priority = evidence_priority(text);
     let layout = sheet.layout_note();
-    let prompt = format!(
+    let vision_prompt = format!(
         "Bạn phân tích một contact sheet của một bài TikTok: {layout}.\n\
          Trả về JSON duy nhất, không markdown, theo schema: {{\"caption\":string|null,\"captionConfidence\":0..100,\"visualFacts\":[string],\"contextConfidence\":0..100,\"comments\":[string]}}.\n\
          Caption chỉ là phần chữ caption/chữ trong video nhìn thấy; loại username, tên nhạc, nút UI. Nếu caption bị cắt, giữ phần nhìn thấy và giảm confidence. Giữ \"caption\" tối đa 100 ký tự và \"visualFacts\" tối đa 3 mục, mỗi mục dưới 8 từ.\n\
@@ -1675,8 +1853,22 @@ async fn grounded_generate_batch(
     // number this file paid for twice; the per-comment slack is deliberately generous because a
     // truncated array is the failure that loses every comment at once, not just the last.
     let budget = 1_200 + 90 * count as u32;
-    let prompt = format!("{}{prompt}", post_text_note(text));
-    let body = vision_body(settings, &sheet.jpeg, prompt, 0.9, budget);
+    let prompt = if text_only {
+        let scope = caption_route_evidence_scope(text);
+        format!(
+            "{}Bạn viết {count} comment TikTok ngắn từ dữ liệu chữ của một bài.\n\
+             Trả về JSON duy nhất, không markdown, theo schema: {{\"caption\":string|null,\"contextConfidence\":0..100,\"comments\":[string]}}.\n\
+             \"comments\" phải có ĐÚNG {count} câu tiếng {lang}, mỗi câu tối đa {max_words} từ, khác nhau rõ rệt. Viết tự nhiên như người vừa xem xong; không tóm tắt, quảng cáo hay khen rỗng. Chỉ phản hồi chi tiết có trong {scope}. Định hướng chỉ chỉnh giọng điệu ({direction}), không được thêm sự kiện chưa có trong dữ liệu.",
+            post_text_note(text),
+        )
+    } else {
+        format!("{}{vision_prompt}", post_text_note(text))
+    };
+    let body = if text_only {
+        text_body(settings, prompt, 0.9, budget)
+    } else {
+        vision_body(settings, &sheet.jpeg, prompt, 0.9, budget)
+    };
     let (raw, p, c, cost, _) = chat(settings, body).await?;
     let value = json_object(&raw).ok_or_else(|| {
         billed_failure(
@@ -1780,6 +1972,7 @@ async fn grounded_verify(
     // detail visible?" about a comment written from a caption or a transcript it cannot see
     // refuses good comments, and every refusal costs a full draft-and-verify pair.
     text: PostBrief<'_>,
+    text_only: bool,
 ) -> anyhow::Result<GroundedVerification> {
     let direction = direction.unwrap_or("tự nhiên");
     let layout = sheet.layout_note();
@@ -1792,8 +1985,24 @@ async fn grounded_verify(
          Đọc lại trực tiếp các frame, không tin facts từ lượt trước. Trả về JSON duy nhất: {{\"relevance\":0..100,\"evidenceSupport\":0..100,\"instructionFit\":0..100,\"genericity\":0..100,\"contradiction\":boolean,\"unsupportedClaim\":boolean,\"uiTextConfusion\":boolean}}.\n\
          relevance đo comment có nói đúng bài này không; {evidence_support_definition}; genericity cao nếu chỉ là lời khen rỗng. instructionFit phải thấp nếu câu nghe như báo cáo, tóm tắt hoặc quá trang trọng thay vì phản ứng đời thường. Caption, hình và hướng dẫn mâu thuẫn thì đánh cờ contradiction.{text_evidence_instruction}"
     );
-    let prompt = format!("{}{prompt}", post_text_note(text));
-    let body = vision_body(settings, &sheet.jpeg, prompt, 0.0, 300);
+    let prompt = if text_only {
+        let scope = caption_route_evidence_scope(text);
+        format!(
+            "{}Kiểm tra comment TikTok ứng viên dựa đúng trên dữ liệu chữ dưới đây.\n\
+             Comment chính xác là: {candidate:?}.\n\
+             Định hướng giọng điệu là: {direction:?}.\n\
+             Trả về JSON duy nhất: {{\"relevance\":0..100,\"evidenceSupport\":0..100,\"instructionFit\":0..100,\"genericity\":0..100,\"contradiction\":boolean,\"unsupportedClaim\":boolean,\"uiTextConfusion\":boolean}}.\n\
+             relevance/evidenceSupport chỉ chấm điều có thể đối chiếu với {scope}; genericity cao nếu chỉ là lời khen rỗng. instructionFit thấp nếu câu nghe như báo cáo, tóm tắt hoặc quá trang trọng. Caption và hướng dẫn mâu thuẫn thì đánh cờ contradiction.{text_evidence_instruction}",
+            post_text_note(text),
+        )
+    } else {
+        format!("{}{prompt}", post_text_note(text))
+    };
+    let body = if text_only {
+        text_body(settings, prompt, 0.0, 300)
+    } else {
+        vision_body(settings, &sheet.jpeg, prompt, 0.0, 300)
+    };
     let (raw, p, c, cost, model) = chat(settings, body).await?;
     // Wrapped so that **every** way this body can fail to parse -- a malformed object or any
     // of the four `score` fields -- carries the price of the call that produced it. Written as
@@ -1964,21 +2173,23 @@ enum ScoreScale {
 /// fail closed — it scaled `evidenceSupport: 1` up to 100 and passed a comment grounded in
 /// nothing, which is exactly the gate's job to stop.
 ///
-/// The scale is therefore taken once, from every score the object carries: if anything
-/// exceeds 1, the response is 0..100 and nothing is scaled — which is what a lone `1` beside
-/// an `85` plainly is. Only when **every** score is `<= 1` is it read as a fraction, the case
-/// a genuine 0..1 model produces.
+/// The scale is therefore taken once, from every score the object carries. Percent is the
+/// default promised by the schema. Only an explicit non-integral value strictly between zero
+/// and one proves a fractional response; an all-integral `0/1` object remains percent and
+/// fails closed instead of turning one percent evidence into a perfect score.
 fn score_scale(value: &serde_json::Value, keys: &[&str]) -> ScoreScale {
-    let any_over_one = keys.iter().any(|key| {
+    let has_explicit_fraction = keys.iter().any(|key| {
         value
             .get(key)
             .and_then(serde_json::Value::as_f64)
-            .is_some_and(|number| number.is_finite() && number > 1.0)
+            .is_some_and(|number| {
+                number.is_finite() && number > 0.0 && number < 1.0 && number.fract() != 0.0
+            })
     });
-    if any_over_one {
-        ScoreScale::Percent
-    } else {
+    if has_explicit_fraction {
         ScoreScale::Fraction
+    } else {
+        ScoreScale::Percent
     }
 }
 
@@ -3206,6 +3417,42 @@ mod tests {",
         assert_eq!(score(fraction.get("evidenceSupport"), fscale).unwrap(), 85);
     }
 
+    /// A schema-compliant all-integral `0/1` response is still 0..100. There is no
+    /// fractional evidence in it, so treating it as 0..1 would turn a failed gate into a pass.
+    #[test]
+    fn all_integral_zero_one_scores_stay_on_the_percent_scale_and_fail_closed() {
+        let verdict = json!({
+            "relevance": 1,
+            "evidenceSupport": 1,
+            "instructionFit": 1,
+            "genericity": 0,
+        });
+        let keys = [
+            "relevance",
+            "evidenceSupport",
+            "instructionFit",
+            "genericity",
+        ];
+        let scale = score_scale(&verdict, &keys);
+        assert_eq!(scale, ScoreScale::Percent);
+        assert_eq!(score(verdict.get("evidenceSupport"), scale).unwrap(), 1);
+        let gate = VerificationGate {
+            overall: score(verdict.get("relevance"), scale)
+                .unwrap()
+                .min(score(verdict.get("evidenceSupport"), scale).unwrap()),
+            instruction_fit: score(verdict.get("instructionFit"), scale).unwrap(),
+            genericity: score(verdict.get("genericity"), scale).unwrap(),
+            contradiction: false,
+            unsupported_claim: false,
+            ui_text_confusion: false,
+            formal_style: false,
+        };
+        assert!(
+            !gate.accepts(),
+            "one percent evidence must not pass the gate"
+        );
+    }
+
     #[test]
     fn grounded_gate_has_strict_boundaries_and_hard_flags_win() {
         let accepted = VerificationGate {
@@ -3634,7 +3881,10 @@ mod tests {",
             "invalid image data",
             "image size exceeds the limit",
         ] {
-            assert!(!error_refuses_images(message), "should not refuse: {message}");
+            assert!(
+                !error_refuses_images(message),
+                "should not refuse: {message}"
+            );
         }
         // Everything unrelated stays unrelated.
         for message in [
@@ -4193,12 +4443,9 @@ mod tests {",
     #[test]
     fn verifier_evidence_support_respects_source_provenance_matrix() {
         let legacy = "evidenceSupport đo mọi chi tiết cụ thể có nhìn thấy không";
-        let transcript =
-            "evidenceSupport đo mọi chi tiết cụ thể có bằng chứng trong LỜI THOẠI hoặc frame; chi tiết được nói tới không cần xuất hiện trong ảnh";
-        let transcript_and_source_caption =
-            "evidenceSupport đo mọi chi tiết cụ thể có bằng chứng trong LỜI THOẠI, CAPTION đầy đủ hoặc frame; chi tiết được nói tới hoặc có trong caption nguồn không cần xuất hiện trong ảnh";
-        let source_caption =
-            "evidenceSupport đo mọi chi tiết cụ thể có bằng chứng trong CAPTION đầy đủ hoặc frame; chi tiết trong caption không cần xuất hiện trong ảnh";
+        let transcript = "evidenceSupport đo mọi chi tiết cụ thể có bằng chứng trong LỜI THOẠI hoặc frame; chi tiết được nói tới không cần xuất hiện trong ảnh";
+        let transcript_and_source_caption = "evidenceSupport đo mọi chi tiết cụ thể có bằng chứng trong LỜI THOẠI, CAPTION đầy đủ hoặc frame; chi tiết được nói tới hoặc có trong caption nguồn không cần xuất hiện trong ảnh";
+        let source_caption = "evidenceSupport đo mọi chi tiết cụ thể có bằng chứng trong CAPTION đầy đủ hoặc frame; chi tiết trong caption không cần xuất hiện trong ảnh";
 
         let cases = [
             ("none", PostBrief::default(), legacy),
@@ -4714,9 +4961,22 @@ mod tests {",
         listener: tokio::net::TcpListener,
         responses: Vec<serde_json::Value>,
     ) -> tokio::task::JoinHandle<Vec<String>> {
+        serve_mock_gateway_capturing_statuses(
+            listener,
+            responses
+                .into_iter()
+                .map(|response| (200, response))
+                .collect(),
+        )
+    }
+
+    fn serve_mock_gateway_capturing_statuses(
+        listener: tokio::net::TcpListener,
+        responses: Vec<(u16, serde_json::Value)>,
+    ) -> tokio::task::JoinHandle<Vec<String>> {
         tokio::spawn(async move {
             let mut bodies = Vec::new();
-            for response in responses {
+            for (status, response) in responses {
                 let (mut socket, _) = listener.accept().await.expect("mock request");
                 let mut request = Vec::new();
                 let mut chunk = [0u8; 8192];
@@ -4747,8 +5007,13 @@ mod tests {",
                     }
                 }
                 let body = response.to_string();
+                let status = match status {
+                    200 => "200 OK",
+                    400 => "400 Bad Request",
+                    other => panic!("unsupported mock status {other}"),
+                };
                 let head = format!(
-                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
                     body.len()
                 );
                 socket
@@ -4902,6 +5167,7 @@ mod tests {",
             EvidenceKind::CarouselSlides,
             Some("tự nhiên"),
             3,
+            None,
             PostBrief {
                 caption: Some("Lịch trình Đà Lạt ba ngày từ nguồn"),
                 caption_is_authoritative: true,
@@ -4973,6 +5239,543 @@ mod tests {",
         );
     }
 
+    /// A provider already known to reject image parts still gets the shared draft and its
+    /// per-candidate verification, but every request remains text-only.
+    #[tokio::test]
+    async fn a_text_only_provider_batches_source_text_without_any_image_requests() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("mock gateway bind");
+        let address = listener.local_addr().expect("mock gateway address");
+        let draft = serde_json::json!({
+            "choices": [{"message": {"content": "{\"caption\":\"Lịch trình Đà Lạt ba ngày từ nguồn\",\"contextConfidence\":95,\"comments\":[\"Có cả bảng chi phí luôn\",\"Ngày đầu lịch hơi dày\",\"Hai triệu ba nghe ổn áp\"]}"}}],
+            "usage": {"prompt_tokens": 80, "completion_tokens": 30},
+            "model": "mock-text-draft"
+        });
+        let pass = serde_json::json!({
+            "choices": [{"message": {"content": "{\"relevance\":96,\"evidenceSupport\":95,\"instructionFit\":92,\"genericity\":15,\"contradiction\":false,\"unsupportedClaim\":false,\"uiTextConfusion\":false}"}}],
+            "usage": {"prompt_tokens": 25, "completion_tokens": 8},
+            "model": "mock-text-verifier"
+        });
+        let server =
+            serve_mock_gateway_capturing(listener, vec![draft, pass.clone(), pass.clone(), pass]);
+        let settings = NurtureSettings {
+            api_key: "test-key".into(),
+            base_url: format!("http://{address}/v1"),
+            model: "text-batch-model".into(),
+            ..NurtureSettings::default()
+        };
+        note_vision_refused(&settings);
+
+        let frame = include_bytes!("../tests/fixtures/feed-iphone8.jpg").to_vec();
+        let batched = prepare_grounded_comments_batch(
+            &settings,
+            &[frame],
+            EvidenceKind::CarouselSlides,
+            Some("tự nhiên"),
+            3,
+            None,
+            PostBrief {
+                caption: Some("Lịch trình Đà Lạt ba ngày từ nguồn"),
+                caption_is_authoritative: true,
+                transcript: Some("ngày cuối ghé Pink Valley chơi thuyền đụng"),
+                ..PostBrief::default()
+            },
+        )
+        .await;
+        let bodies = server.await.expect("mock gateway task");
+
+        assert_eq!(
+            bodies.len(),
+            4,
+            "one text draft and three text verifications"
+        );
+        assert_eq!(batched.accepted_from_batch(), 3, "{:#?}", batched.refusals);
+        for (index, body) in bodies.iter().enumerate() {
+            assert!(
+                !body.contains("image_url"),
+                "text-only call {index} carried an image payload: {body}"
+            );
+            assert!(
+                body.contains("Pink Valley"),
+                "call {index} lost the transcript"
+            );
+            assert!(
+                body.contains("Lịch trình Đà Lạt ba ngày từ nguồn"),
+                "call {index} lost the authoritative caption"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn regression_cold_start_vision_refusal_switches_to_exactly_one_text_batch() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("mock gateway bind");
+        let address = listener.local_addr().expect("mock gateway address");
+        let refusal = serde_json::json!({
+            "error": {"message": "This model does not support image input"}
+        });
+        let draft = serde_json::json!({
+            "choices": [{"message": {"content": "{\"caption\":\"\",\"contextConfidence\":95,\"comments\":[\"Pink Valley có thuyền đụng vui ghê\"]}"}}],
+            "usage": {"prompt_tokens": 20, "completion_tokens": 5},
+            "model": "mock-text-batch"
+        });
+        let pass = serde_json::json!({
+            "choices": [{"message": {"content": "{\"relevance\":96,\"evidenceSupport\":95,\"instructionFit\":92,\"genericity\":15,\"contradiction\":false,\"unsupportedClaim\":false,\"uiTextConfusion\":false}"}}],
+            "usage": {"prompt_tokens": 15, "completion_tokens": 4},
+            "model": "mock-text-verifier"
+        });
+        let server = serve_mock_gateway_capturing_statuses(
+            listener,
+            vec![(400, refusal), (200, draft), (200, pass)],
+        );
+        let settings = NurtureSettings {
+            api_key: "test-key".into(),
+            base_url: format!("http://{address}/v1"),
+            model: "cold-start-text-batch-model".into(),
+            ..NurtureSettings::default()
+        };
+
+        let frame = include_bytes!("../tests/fixtures/feed-iphone8.jpg").to_vec();
+        let batched = prepare_grounded_comments_batch(
+            &settings,
+            &[frame],
+            EvidenceKind::Moments,
+            Some("tự nhiên"),
+            1,
+            None,
+            PostBrief {
+                transcript: Some("Pink Valley có khu chơi thuyền đụng"),
+                ..PostBrief::default()
+            },
+        )
+        .await;
+        let bodies = server.await.expect("mock gateway task");
+
+        assert_eq!(bodies.len(), 3, "one refusal, one text batch, one verifier");
+        assert!(bodies[0].contains("image_url"), "cold start probes vision");
+        assert!(
+            bodies[1..].iter().all(|body| !body.contains("image_url")),
+            "the refusal must end image traffic immediately: {bodies:#?}"
+        );
+        assert_eq!(
+            bodies[1..]
+                .iter()
+                .filter(|body| body.contains("ĐÚNG 1 câu"))
+                .count(),
+            1,
+            "the retry remains one shared text batch"
+        );
+        assert_eq!(batched.accepted_from_batch(), 1);
+        assert!(batched.results[0].is_ok(), "{:#?}", batched.refusals);
+    }
+
+    #[tokio::test]
+    async fn regression_text_only_batch_reports_zero_distinct_frames() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("mock gateway bind");
+        let address = listener.local_addr().expect("mock gateway address");
+        let draft = serde_json::json!({
+            "choices": [{"message": {"content": "{\"caption\":\"\",\"contextConfidence\":95,\"comments\":[\"Có bảng chi phí rõ ghê\"]}"}}],
+            "usage": {"prompt_tokens": 20, "completion_tokens": 5},
+            "model": "mock-text-batch"
+        });
+        let pass = serde_json::json!({
+            "choices": [{"message": {"content": "{\"relevance\":96,\"evidenceSupport\":95,\"instructionFit\":92,\"genericity\":15,\"contradiction\":false,\"unsupportedClaim\":false,\"uiTextConfusion\":false}"}}],
+            "usage": {"prompt_tokens": 15, "completion_tokens": 4},
+            "model": "mock-text-verifier"
+        });
+        let server = serve_mock_gateway(listener, vec![draft, pass]);
+        let settings = NurtureSettings {
+            api_key: "test-key".into(),
+            base_url: format!("http://{address}/v1"),
+            model: "text-batch-zero-frames-model".into(),
+            ..NurtureSettings::default()
+        };
+        note_vision_refused(&settings);
+
+        let frame = include_bytes!("../tests/fixtures/feed-iphone8.jpg").to_vec();
+        let batched = prepare_grounded_comments_batch(
+            &settings,
+            &[frame],
+            EvidenceKind::CarouselSlides,
+            Some("tự nhiên"),
+            1,
+            None,
+            PostBrief {
+                transcript: Some("bảng chi phí cho chuyến đi"),
+                ..PostBrief::default()
+            },
+        )
+        .await;
+        server.await.expect("mock gateway task");
+
+        let result = batched.results[0].as_ref().expect("batched comment");
+        assert_eq!(
+            result.distinct_frames, 0,
+            "a text-only API call must not claim image evidence"
+        );
+    }
+
+    #[tokio::test]
+    async fn regression_text_batch_uses_the_caption_acceptance_gate() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("mock gateway bind");
+        let address = listener.local_addr().expect("mock gateway address");
+        let draft = serde_json::json!({
+            "choices": [{"message": {"content": "{\"caption\":\"\",\"contextConfidence\":70,\"comments\":[\"Bảng giá chia kỹ ghê\",\"Hai triệu ba cũng ổn\"]}"}}],
+            "usage": {"prompt_tokens": 20, "completion_tokens": 5},
+            "model": "mock-text-batch"
+        });
+        let caption_pass = serde_json::json!({
+            "choices": [{"message": {"content": "{\"relevance\":65,\"evidenceSupport\":65,\"instructionFit\":70,\"genericity\":35,\"contradiction\":false,\"unsupportedClaim\":false,\"uiTextConfusion\":false}"}}],
+            "usage": {"prompt_tokens": 15, "completion_tokens": 4},
+            "model": "mock-text-verifier"
+        });
+        let server =
+            serve_mock_gateway_capturing(listener, vec![draft, caption_pass.clone(), caption_pass]);
+        let settings = NurtureSettings {
+            api_key: "test-key".into(),
+            base_url: format!("http://{address}/v1"),
+            model: "text-batch-caption-gate-model".into(),
+            ..NurtureSettings::default()
+        };
+        note_vision_refused(&settings);
+
+        let frame = include_bytes!("../tests/fixtures/feed-iphone8.jpg").to_vec();
+        let batched = prepare_grounded_comments_batch(
+            &settings,
+            &[frame],
+            EvidenceKind::Moments,
+            Some("tự nhiên"),
+            2,
+            None,
+            PostBrief {
+                transcript: Some("bảng giá ghi tổng chi phí hai triệu ba"),
+                ..PostBrief::default()
+            },
+        )
+        .await;
+        let bodies = server.await.expect("mock gateway task");
+
+        assert_eq!(bodies.len(), 3, "one text draft and two verifiers");
+        assert_eq!(
+            batched.accepted_from_batch(),
+            2,
+            "caption-valid scores must not fall through the vision threshold: {:#?}",
+            batched.refusals
+        );
+        assert!(batched.results.iter().all(Result::is_ok));
+    }
+
+    /// A malformed shared text draft retries with the same text evidence. It must not turn into
+    /// one rejected image request followed by text singletons for each target.
+    #[tokio::test]
+    async fn a_failed_text_batch_reuses_text_evidence_without_image_fallbacks() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("mock gateway bind");
+        let address = listener.local_addr().expect("mock gateway address");
+        let incomplete = serde_json::json!({
+            "choices": [{"message": {"content": "{\"comments\":[]}"}}],
+            "usage": {"prompt_tokens": 8, "completion_tokens": 1},
+            "model": "mock-text-batch"
+        });
+        let draft = serde_json::json!({
+            "choices": [{"message": {"content": "{\"caption\":\"\",\"contextConfidence\":95,\"comment\":\"Thuyền đụng Pink Valley vui thật\"}"}}],
+            "usage": {"prompt_tokens": 20, "completion_tokens": 5},
+            "model": "mock-text-single"
+        });
+        let pass = serde_json::json!({
+            "choices": [{"message": {"content": "{\"relevance\":96,\"evidenceSupport\":95,\"instructionFit\":92,\"genericity\":15,\"contradiction\":false,\"unsupportedClaim\":false,\"uiTextConfusion\":false}"}}],
+            "usage": {"prompt_tokens": 15, "completion_tokens": 4},
+            "model": "mock-text-verifier"
+        });
+        let server = serve_mock_gateway_capturing(
+            listener,
+            vec![incomplete, draft.clone(), pass.clone(), draft, pass],
+        );
+        let settings = NurtureSettings {
+            api_key: "test-key".into(),
+            base_url: format!("http://{address}/v1"),
+            model: "text-batch-fallback-model".into(),
+            ..NurtureSettings::default()
+        };
+        note_vision_refused(&settings);
+
+        let frame = include_bytes!("../tests/fixtures/feed-iphone8.jpg").to_vec();
+        let batched = prepare_grounded_comments_batch(
+            &settings,
+            &[frame],
+            EvidenceKind::Moments,
+            Some("tự nhiên"),
+            2,
+            None,
+            PostBrief {
+                transcript: Some("ngày cuối ghé Pink Valley chơi thuyền đụng"),
+                ..PostBrief::default()
+            },
+        )
+        .await;
+        let bodies = server.await.expect("mock gateway task");
+
+        assert_eq!(bodies.len(), 5, "one failed batch and two text retry pairs");
+        assert!(batched.results.iter().all(Result::is_ok));
+        assert!(
+            bodies.iter().all(|body| !body.contains("image_url")),
+            "a text-only retry sent image data: {bodies:#?}"
+        );
+    }
+
+    /// Text-only providers retain one shared draft above the vision ceiling too. Splitting this
+    /// into singletons would discard the deduplication context and multiply text requests.
+    #[tokio::test]
+    async fn a_text_only_batch_above_the_vision_ceiling_still_reuses_one_text_draft() {
+        let count = VERIFY_BATCH_MAX + 1;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("mock gateway bind");
+        let address = listener.local_addr().expect("mock gateway address");
+        let comments = (0..count)
+            .map(|index| format!("Bảng chi phí dòng số {index}"))
+            .collect::<Vec<_>>();
+        let draft_content = serde_json::json!({
+            "caption": "",
+            "contextConfidence": 95,
+            "comments": comments,
+        })
+        .to_string();
+        let draft = serde_json::json!({
+            "choices": [{"message": {"content": draft_content}}],
+            "usage": {"prompt_tokens": 80, "completion_tokens": 30},
+            "model": "mock-text-draft"
+        });
+        let pass = serde_json::json!({
+            "choices": [{"message": {"content": "{\"relevance\":96,\"evidenceSupport\":95,\"instructionFit\":92,\"genericity\":15,\"contradiction\":false,\"unsupportedClaim\":false,\"uiTextConfusion\":false}"}}],
+            "usage": {"prompt_tokens": 25, "completion_tokens": 8},
+            "model": "mock-text-verifier"
+        });
+        let mut responses = vec![draft];
+        responses.extend(std::iter::repeat_n(pass, count));
+        let server = serve_mock_gateway_capturing(listener, responses);
+        let settings = NurtureSettings {
+            api_key: "test-key".into(),
+            base_url: format!("http://{address}/v1"),
+            model: "text-over-cap-model".into(),
+            ..NurtureSettings::default()
+        };
+        note_vision_refused(&settings);
+
+        let frame = include_bytes!("../tests/fixtures/feed-iphone8.jpg").to_vec();
+        let batched = prepare_grounded_comments_batch(
+            &settings,
+            &[frame],
+            EvidenceKind::Moments,
+            Some("tự nhiên"),
+            count,
+            None,
+            PostBrief {
+                transcript: Some("Pink Valley có bảng chi phí rõ ràng"),
+                ..PostBrief::default()
+            },
+        )
+        .await;
+        let bodies = server.await.expect("mock gateway task");
+
+        assert_eq!(bodies.len(), count + 1, "one draft plus one verifier each");
+        assert_eq!(batched.accepted_from_batch(), count);
+        assert!(bodies.iter().all(|body| !body.contains("image_url")));
+        assert!(bodies[0].contains("ĐÚNG 21 câu"), "{}", bodies[0]);
+    }
+
+    /// A verifier that received and parsed a billed response can still fail to produce a
+    /// verdict. Its spend belongs on the one fallback result, exactly once.
+    #[tokio::test]
+    async fn a_batched_verification_parse_failure_is_charged_once_to_its_fallback() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("mock gateway bind");
+        let address = listener.local_addr().expect("mock gateway address");
+        let batch = serde_json::json!({
+            "choices": [{"message": {"content": "{\"caption\":\"x\",\"captionConfidence\":90,\"visualFacts\":[\"bảng lịch\"],\"contextConfidence\":95,\"comments\":[\"Có cả bảng chi phí luôn\"]}"}}],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 1, "cost": 0.001},
+            "model": "mock-batch"
+        });
+        let malformed_verdict = serde_json::json!({
+            "choices": [{"message": {"content": "không phải JSON"}}],
+            "usage": {"prompt_tokens": 20, "completion_tokens": 2, "cost": 0.002},
+            "model": "mock-batch-verifier"
+        });
+        let single = serde_json::json!({
+            "choices": [{"message": {"content": "{\"caption\":\"x\",\"captionConfidence\":90,\"visualFacts\":[\"bảng lịch\"],\"contextConfidence\":95,\"comment\":\"Có cả bảng chi phí luôn\"}"}}],
+            "usage": {"prompt_tokens": 30, "completion_tokens": 3, "cost": 0.003},
+            "model": "mock-single"
+        });
+        let pass = serde_json::json!({
+            "choices": [{"message": {"content": "{\"relevance\":96,\"evidenceSupport\":95,\"instructionFit\":92,\"genericity\":15,\"contradiction\":false,\"unsupportedClaim\":false,\"uiTextConfusion\":false}"}}],
+            "usage": {"prompt_tokens": 40, "completion_tokens": 4, "cost": 0.004},
+            "model": "mock-single-verifier"
+        });
+        let server = serve_mock_gateway(listener, vec![batch, malformed_verdict, single, pass]);
+        let settings = NurtureSettings {
+            api_key: "test-key".into(),
+            base_url: format!("http://{address}/v1"),
+            ..NurtureSettings::default()
+        };
+        let frame = include_bytes!("../tests/fixtures/feed-iphone8.jpg").to_vec();
+        let batched = prepare_grounded_comments_batch(
+            &settings,
+            &[frame],
+            EvidenceKind::CarouselSlides,
+            Some("tự nhiên"),
+            1,
+            None,
+            Default::default(),
+        )
+        .await;
+        server.await.expect("mock gateway task");
+
+        let result = batched
+            .results
+            .into_iter()
+            .next()
+            .unwrap()
+            .expect("fallback comment");
+        assert_eq!(
+            (result.prompt_tokens, result.completion_tokens),
+            (100, 10),
+            "batch draft + failed verifier + fallback draft + fallback verifier"
+        );
+        assert!(
+            (result.cost_usd.unwrap_or_default() - 0.01).abs() < 1e-12,
+            "the billed cost is carried exactly once: {:?}",
+            result.cost_usd
+        );
+    }
+
+    /// A cleanly parsed rejection is billed too. Its verifier spend must follow the fallback
+    /// result once, just like a parse failure, rather than disappearing between batch rounds.
+    #[tokio::test]
+    async fn a_batched_verification_rejection_is_charged_once_to_its_fallback() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("mock gateway bind");
+        let address = listener.local_addr().expect("mock gateway address");
+        let batch = serde_json::json!({
+            "choices": [{"message": {"content": "{\"caption\":\"x\",\"captionConfidence\":90,\"visualFacts\":[\"bảng lịch\"],\"contextConfidence\":95,\"comments\":[\"Hay quá\"]}"}}],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 1, "cost": 0.001},
+            "model": "mock-batch"
+        });
+        let reject = serde_json::json!({
+            "choices": [{"message": {"content": "{\"relevance\":30,\"evidenceSupport\":20,\"instructionFit\":40,\"genericity\":95,\"contradiction\":false,\"unsupportedClaim\":false,\"uiTextConfusion\":false}"}}],
+            "usage": {"prompt_tokens": 20, "completion_tokens": 2, "cost": 0.002},
+            "model": "mock-batch-verifier"
+        });
+        let single = serde_json::json!({
+            "choices": [{"message": {"content": "{\"caption\":\"x\",\"captionConfidence\":90,\"visualFacts\":[\"bảng lịch\"],\"contextConfidence\":95,\"comment\":\"Có cả bảng chi phí luôn\"}"}}],
+            "usage": {"prompt_tokens": 30, "completion_tokens": 3, "cost": 0.003},
+            "model": "mock-single"
+        });
+        let pass = serde_json::json!({
+            "choices": [{"message": {"content": "{\"relevance\":96,\"evidenceSupport\":95,\"instructionFit\":92,\"genericity\":15,\"contradiction\":false,\"unsupportedClaim\":false,\"uiTextConfusion\":false}"}}],
+            "usage": {"prompt_tokens": 40, "completion_tokens": 4, "cost": 0.004},
+            "model": "mock-single-verifier"
+        });
+        let server = serve_mock_gateway(listener, vec![batch, reject, single, pass]);
+        let settings = NurtureSettings {
+            api_key: "test-key".into(),
+            base_url: format!("http://{address}/v1"),
+            ..NurtureSettings::default()
+        };
+        let frame = include_bytes!("../tests/fixtures/feed-iphone8.jpg").to_vec();
+        let batched = prepare_grounded_comments_batch(
+            &settings,
+            &[frame],
+            EvidenceKind::CarouselSlides,
+            Some("tự nhiên"),
+            1,
+            None,
+            Default::default(),
+        )
+        .await;
+        server.await.expect("mock gateway task");
+
+        let result = batched
+            .results
+            .into_iter()
+            .next()
+            .unwrap()
+            .expect("fallback comment");
+        assert_eq!((result.prompt_tokens, result.completion_tokens), (100, 10));
+        assert!((result.cost_usd.unwrap_or_default() - 0.01).abs() < 1e-12);
+    }
+
+    #[tokio::test]
+    async fn regression_failed_second_rescue_batch_keeps_its_billed_spend() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("mock gateway bind");
+        let address = listener.local_addr().expect("mock gateway address");
+        let first = serde_json::json!({
+            "choices": [{"message": {"content": "{\"caption\":\"x\",\"captionConfidence\":90,\"visualFacts\":[],\"contextConfidence\":95,\"comments\":[\"Hay quá\",\"Tuyệt vời\"]}"}}],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 1, "cost": 0.001},
+            "model": "mock-batch"
+        });
+        let reject = serde_json::json!({
+            "choices": [{"message": {"content": "{\"relevance\":30,\"evidenceSupport\":20,\"instructionFit\":40,\"genericity\":95,\"contradiction\":false,\"unsupportedClaim\":false,\"uiTextConfusion\":false}"}}],
+            "usage": {"prompt_tokens": 20, "completion_tokens": 2, "cost": 0.002},
+            "model": "mock-verifier"
+        });
+        let malformed_second = serde_json::json!({
+            "choices": [{"message": {"content": "not JSON"}}],
+            "usage": {"prompt_tokens": 30, "completion_tokens": 3, "cost": 0.003},
+            "model": "mock-rescue"
+        });
+        let server = serve_mock_gateway(
+            listener,
+            vec![first, reject.clone(), reject, malformed_second],
+        );
+        let settings = NurtureSettings {
+            api_key: "test-key".into(),
+            base_url: format!("http://{address}/v1"),
+            model: "failed-rescue-spend-model".into(),
+            ..NurtureSettings::default()
+        };
+        let frame = include_bytes!("../tests/fixtures/feed-iphone8.jpg").to_vec();
+        let batched = prepare_grounded_comments_batch(
+            &settings,
+            &[frame],
+            EvidenceKind::CarouselSlides,
+            Some("tự nhiên"),
+            2,
+            None,
+            Default::default(),
+        )
+        .await;
+        server.await.expect("mock gateway task");
+
+        let mut total = CommentSpend::default();
+        for result in &batched.results {
+            let error = result
+                .as_ref()
+                .expect_err("closed mock forces fallback failure");
+            let spend = spend_of_failure(error).expect("every billed call remains auditable");
+            total.add(spend.prompt_tokens, spend.completion_tokens, spend.cost_usd);
+        }
+        assert_eq!(
+            (total.prompt_tokens, total.completion_tokens),
+            (80, 8),
+            "first draft + two verdicts + malformed rescue"
+        );
+        assert!(
+            (total.cost_usd.unwrap_or_default() - 0.008).abs() < 1e-12,
+            "the failed rescue's charge must be counted exactly once: {total:?}"
+        );
+    }
+
     /// A draft that comes back with the wrong number of comments does not hand out silence.
     ///
     /// Three phones asked for, two comments offered. The batch must not fill the gap with an
@@ -5025,6 +5828,7 @@ mod tests {",
             EvidenceKind::CarouselSlides,
             Some("tự nhiên"),
             3,
+            None,
             Default::default(),
         )
         .await;
@@ -5100,6 +5904,7 @@ mod tests {",
             EvidenceKind::CarouselSlides,
             Some("tự nhiên"),
             3,
+            None,
             PostBrief {
                 caption: Some("Lịch trình Đà Lạt ba ngày từ nguồn"),
                 caption_is_authoritative: true,
@@ -5156,7 +5961,7 @@ mod tests {",
             .filter(|result| {
                 result
                     .as_ref()
-                    .is_ok_and(|comment| comment.completion_tokens > 44)
+                    .is_ok_and(|comment| comment.completion_tokens > 64)
             })
             .count();
         assert_eq!(

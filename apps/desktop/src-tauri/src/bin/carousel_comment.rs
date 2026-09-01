@@ -313,6 +313,7 @@ async fn main() -> anyhow::Result<()> {
             kind,
             direction.as_deref(),
             count,
+            Some(&ocr),
             brief,
         )
         .await;

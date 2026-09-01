@@ -1069,6 +1069,7 @@ async fn pre_prepare_standalone_texts(
             evidence_kind,
             Some(&request.instruction),
             wanted.len(),
+            Some(engine.frame_text.as_ref()),
             evidence.brief(),
         )
         .await;
