@@ -763,6 +763,8 @@ pub enum HierarchySendFailure {
     /// The Send tap was attempted, so retrying could duplicate a public comment.
     #[error("hierarchy send failed at or after the Send tap: {0}")]
     AfterEffect(anyhow::Error),
+    #[error("hierarchy send lost assignment ownership before the Send tap: {0}")]
+    OwnershipLost(anyhow::Error),
 }
 
 impl HierarchySendFailure {
@@ -773,6 +775,22 @@ impl HierarchySendFailure {
     pub fn after(error: impl Into<anyhow::Error>) -> Self {
         Self::AfterEffect(error.into())
     }
+
+    pub fn ownership_lost(&self) -> bool {
+        matches!(self, Self::OwnershipLost(_))
+    }
+
+    fn from_gate(failure: crate::interaction_target::SendFailure) -> Self {
+        match failure {
+            crate::interaction_target::SendFailure::OwnershipLost(error) => {
+                Self::OwnershipLost(error)
+            }
+            crate::interaction_target::SendFailure::BeforeEffect(error) => {
+                Self::BeforeEffect(error)
+            }
+            crate::interaction_target::SendFailure::AfterEffect(error) => Self::AfterEffect(error),
+        }
+    }
 }
 
 /// The `locator_version` stamped on identities this module produces.
@@ -781,6 +799,45 @@ impl HierarchySendFailure {
 /// created it, because the two read the author label from different places and only one
 /// of them can find it again.
 pub const HIERARCHY_LOCATOR_VERSION: &str = "android-hierarchy-v1";
+
+/// Clear an armed composer left by a process that died before crossing its effect gate.
+///
+/// The caller must reopen and re-prove the target after this returns `Ok`: cleanup ends on
+/// the feed, so every pre-cleanup field, row and Reply rectangle is invalid by construction.
+pub(crate) async fn clear_stale_hierarchy_comment_ui(
+    session: &dyn UiSession,
+    labels: TikTokControls,
+    stop: &AtomicBool,
+) -> Result<(), HierarchySendFailure> {
+    use crate::tiktok_drawer::CommentDrawer;
+
+    let drawer = CommentDrawer::new(session, labels, |element: &ElementBox| element.centre());
+    let Some(send_query) = drawer.send_query() else {
+        return Ok(());
+    };
+    let stale = session
+        .locate(send_query)
+        .await
+        .map_err(HierarchySendFailure::before)?
+        .is_some_and(|send| send.enabled);
+    if !stale {
+        return Ok(());
+    }
+
+    let feed_verified = drawer.leave(stop).await;
+    let drawer_closed = session
+        .locate(send_query)
+        .await
+        .map(|send| send.is_none())
+        .unwrap_or(false);
+    if feed_verified && drawer_closed {
+        Ok(())
+    } else {
+        Err(HierarchySendFailure::after(anyhow::anyhow!(
+            "crash-stale hierarchy comment composer cleanup was not verified"
+        )))
+    }
+}
 
 /// Post a root comment by hierarchy and read it back, leaving the drawer open.
 ///
@@ -799,7 +856,41 @@ pub async fn send_root_by_hierarchy<F>(
     text: &str,
     mentions: &[String],
     stop: &AtomicBool,
+    frame_sha: F,
+) -> Result<HierarchySendOutcome, HierarchySendFailure>
+where
+    F: FnMut() -> String,
+{
+    let mut effect_gate = crate::interaction_target::EffectGate::allow();
+    send_root_by_hierarchy_with_gate(
+        session,
+        labels,
+        screen,
+        text,
+        mentions,
+        stop,
+        frame_sha,
+        &mut effect_gate,
+    )
+    .await
+}
+
+// This effect-boundary entry point intentionally mirrors the public sender's independent
+// inputs and adds only the one-shot gate; grouping them would hide which values are re-proved
+// immediately before the public tap.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "effect boundary keeps independently proved send inputs explicit"
+)]
+pub(crate) async fn send_root_by_hierarchy_with_gate<F>(
+    session: &dyn UiSession,
+    labels: TikTokControls,
+    screen: (f64, f64),
+    text: &str,
+    mentions: &[String],
+    stop: &AtomicBool,
     mut frame_sha: F,
+    effect_gate: &mut crate::interaction_target::EffectGate<'_>,
 ) -> Result<HierarchySendOutcome, HierarchySendFailure>
 where
     F: FnMut() -> String,
@@ -934,12 +1025,25 @@ where
         }
     };
     let armed = frame_sha();
-    // From here on a transport error is at or after the Send tap and stays an `Err` — the
-    // one genuinely-ambiguous case, which the campaign settles `NotConfirmed`/`Uncertain`.
-    let confirmed = drawer
-        .tap_send_and_confirm_disarm(&send, stop)
-        .await
-        .map_err(HierarchySendFailure::after)?;
+    // Keep the successful gate-to-Send path adjacent: no await or other device operation may
+    // enter between the durable CAS and the public tap.
+    let confirmed = match effect_gate.cross() {
+        Ok(()) => drawer
+            .tap_send_and_confirm_disarm(&send, stop)
+            .await
+            .map_err(HierarchySendFailure::after)?,
+        Err(failure) => {
+            let cleaned = drawer.leave(stop).await;
+            return Err(if cleaned || failure.ownership_lost() {
+                HierarchySendFailure::from_gate(failure)
+            } else {
+                HierarchySendFailure::after(anyhow::anyhow!(
+                    "effect gate failed after typing and comment UI cleanup was not verified: {}",
+                    failure.into_error()
+                ))
+            });
+        }
+    };
     let cleared = frame_sha();
     if !confirmed {
         // `NotConfirmed` and never retried: the tap went out, so a retry is how a post
@@ -1837,7 +1941,40 @@ pub async fn send_reply_by_hierarchy<F>(
     parent: &CommentLocatorIdentity,
     text: &str,
     stop: &AtomicBool,
+    frame_sha: F,
+) -> Result<Result<HierarchySendOutcome, ReplyRefusal>, HierarchySendFailure>
+where
+    F: FnMut() -> String,
+{
+    let mut effect_gate = crate::interaction_target::EffectGate::allow();
+    send_reply_by_hierarchy_with_gate(
+        session,
+        labels,
+        screen,
+        parent,
+        text,
+        stop,
+        frame_sha,
+        &mut effect_gate,
+    )
+    .await
+}
+
+// As with the root sender, these arguments are separate proof inputs at the effect boundary;
+// retaining that shape makes the parent identity and one-shot gate impossible to conflate.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "effect boundary keeps independently proved reply inputs explicit"
+)]
+pub(crate) async fn send_reply_by_hierarchy_with_gate<F>(
+    session: &dyn UiSession,
+    labels: TikTokControls,
+    screen: (f64, f64),
+    parent: &CommentLocatorIdentity,
+    text: &str,
+    stop: &AtomicBool,
     mut frame_sha: F,
+    effect_gate: &mut crate::interaction_target::EffectGate<'_>,
 ) -> Result<Result<HierarchySendOutcome, ReplyRefusal>, HierarchySendFailure>
 where
     F: FnMut() -> String,
@@ -2061,11 +2198,23 @@ where
         Err(_) => return Ok(Ok(HierarchySendOutcome::interrupted_before_send())),
     };
     let armed = frame_sha();
-    // From here on a transport error is at or after the Send tap and stays an `Err`.
-    let confirmed = drawer
-        .tap_send_and_confirm_disarm(&send, stop)
-        .await
-        .map_err(HierarchySendFailure::after)?;
+    let confirmed = match effect_gate.cross() {
+        Ok(()) => drawer
+            .tap_send_and_confirm_disarm(&send, stop)
+            .await
+            .map_err(HierarchySendFailure::after)?,
+        Err(failure) => {
+            let cleaned = drawer.leave(stop).await;
+            return Err(if cleaned || failure.ownership_lost() {
+                HierarchySendFailure::from_gate(failure)
+            } else {
+                HierarchySendFailure::after(anyhow::anyhow!(
+                    "effect gate failed after typing and reply UI cleanup was not verified: {}",
+                    failure.into_error()
+                ))
+            });
+        }
+    };
     let cleared = frame_sha();
     if !confirmed {
         return Ok(Ok(HierarchySendOutcome {
@@ -4008,6 +4157,294 @@ mod tests {
             .with_single("bình luận", node(880.0, 900.0, 120.0, 120.0, "bình luận"))
             .with_single(EDIT, node(199.0, 1175.0, 700.0, 100.0, ""))
             .with_single_then(SEND_ID, send_button(false), send_button(true))
+    }
+
+    fn crash_stale_root_retry_session() -> DrawerSession {
+        DrawerSession::default()
+            .with_single("bình luận", node(880.0, 900.0, 120.0, 120.0, "bình luận"))
+            .with_single(EDIT, node(199.0, 1175.0, 700.0, 100.0, ""))
+            .with_single_queue(
+                SEND_ID,
+                vec![
+                    Some(send_button(true)),
+                    None,
+                    Some(send_button(false)),
+                    Some(send_button(true)),
+                    Some(send_button(false)),
+                ],
+            )
+            .with_single_queue(
+                "Đề xuất",
+                vec![None, Some(node(0.0, 0.0, 100.0, 50.0, "Đề xuất"))],
+            )
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_crash_stale_hierarchy_root_draft_is_discarded_before_the_fresh_retry() {
+        let session = crash_stale_root_retry_session();
+        let stop = AtomicBool::new(false);
+
+        clear_stale_hierarchy_comment_ui(&session, vietnamese(), &stop)
+            .await
+            .expect("verified cleanup lets the caller reopen and re-prove the target");
+        let outcome = send_root_by_hierarchy(
+            &session,
+            vietnamese(),
+            (1080.0, 2400.0),
+            "fresh root",
+            &[],
+            &stop,
+            String::new,
+        )
+        .await
+        .expect("fresh hierarchy root retry");
+
+        assert!(outcome.verdict.is_sent());
+        assert_eq!(session.typed.lock().as_slice(), &["fresh root"]);
+        assert_eq!(
+            *session.backs.lock(),
+            1,
+            "stale composer was discarded once"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_unverified_crash_stale_hierarchy_root_cleanup_is_after_effect() {
+        let session = DrawerSession::default().with_single(SEND_ID, send_button(true));
+
+        let failure =
+            clear_stale_hierarchy_comment_ui(&session, vietnamese(), &AtomicBool::new(false))
+                .await
+                .expect_err("an armed draft that cannot be cleared is ambiguous");
+
+        assert!(matches!(failure, HierarchySendFailure::AfterEffect(_)));
+        assert!(session.typed.lock().is_empty());
+        assert!(
+            session.taps.lock().is_empty(),
+            "no Send or fresh control was tapped"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_visible_feed_tab_does_not_verify_an_open_disarmed_hierarchy_drawer() {
+        let session = DrawerSession::default()
+            .with_single_queue(
+                SEND_ID,
+                vec![Some(send_button(true)), Some(send_button(false))],
+            )
+            .with_single("Đề xuất", node(0.0, 0.0, 100.0, 50.0, "Đề xuất"));
+
+        let failure =
+            clear_stale_hierarchy_comment_ui(&session, vietnamese(), &AtomicBool::new(false))
+                .await
+                .expect_err("the drawer must disappear, not merely expose the feed tab behind it");
+
+        assert!(matches!(failure, HierarchySendFailure::AfterEffect(_)));
+        assert!(session.typed.lock().is_empty());
+        assert!(session.taps.lock().is_empty());
+    }
+
+    fn crash_stale_reply_retry_session() -> (DrawerSession, CommentLocatorIdentity) {
+        let (bodies, replies, authors) = measured_rows();
+        let parent = CommentLocatorIdentity {
+            author_label: "Tồi nhưng tử tế".into(),
+            text: "Vc cái phao câu".into(),
+            locator_version: HIERARCHY_LOCATOR_VERSION.into(),
+            frame_sha256: "sha".into(),
+        };
+        let session = DrawerSession::default()
+            .with_single("bình luận", node(880.0, 900.0, 120.0, 120.0, "bình luận"))
+            .with_single(EDIT, node(199.0, 1175.0, 700.0, 100.0, ""))
+            .with_single_queue(
+                SEND_ID,
+                vec![
+                    Some(send_button(true)),
+                    None,
+                    Some(send_button(false)),
+                    Some(send_button(true)),
+                    Some(send_button(false)),
+                ],
+            )
+            .with_single_queue(
+                "Đề xuất",
+                vec![None, Some(node(0.0, 0.0, 100.0, 50.0, "Đề xuất"))],
+            )
+            .with_many("Vc cái phao câu", vec![bodies[1].clone()])
+            .with_many("Trả lời", replies)
+            .with_many_then(
+                EDIT,
+                vec![node(199.0, 2127.0, 700.0, 100.0, "Thêm bình luận...")],
+                vec![node(199.0, 1175.0, 700.0, 100.0, "Trả lời Tồi nhưng tử tế")],
+            )
+            .with_many("android.widget.Button", authors);
+        (session, parent)
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_crash_stale_hierarchy_reply_draft_is_discarded_before_the_fresh_retry() {
+        let (session, parent) = crash_stale_reply_retry_session();
+        let stop = AtomicBool::new(false);
+
+        clear_stale_hierarchy_comment_ui(&session, vietnamese(), &stop)
+            .await
+            .expect("verified cleanup lets the caller reopen and re-prove the parent");
+        let outcome = send_reply_by_hierarchy(
+            &session,
+            vietnamese(),
+            (1080.0, 2400.0),
+            &parent,
+            "fresh reply",
+            &stop,
+            String::new,
+        )
+        .await
+        .expect("fresh hierarchy reply retry")
+        .expect("parent is re-proved");
+
+        assert!(outcome.verdict.is_sent());
+        assert_eq!(session.typed.lock().as_slice(), &["fresh reply"]);
+        assert_eq!(
+            *session.backs.lock(),
+            2,
+            "one Back discards the stale composer and one collapses the freshly sent reply"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_unverified_crash_stale_hierarchy_reply_cleanup_is_after_effect() {
+        let session = DrawerSession::default().with_single(SEND_ID, send_button(true));
+
+        let failure =
+            clear_stale_hierarchy_comment_ui(&session, vietnamese(), &AtomicBool::new(false))
+                .await
+                .expect_err("the reply path must not enter a dirty composer");
+
+        assert!(matches!(failure, HierarchySendFailure::AfterEffect(_)));
+        assert!(session.typed.lock().is_empty());
+        assert!(
+            session.taps.lock().is_empty(),
+            "no Send or Reply control was tapped"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_denied_effect_gate_aborts_immediately_before_root_send() {
+        let session = root_mention_session().with_single_queue(
+            "Đề xuất",
+            vec![None, Some(node(0.0, 0.0, 100.0, 50.0, "Đề xuất"))],
+        );
+        let calls = std::sync::atomic::AtomicUsize::new(0);
+        let mut gate = crate::interaction_target::EffectGate::new(|| {
+            calls.fetch_add(1, Ordering::Relaxed);
+            Ok(false)
+        });
+
+        let failure = send_root_by_hierarchy_with_gate(
+            &session,
+            vietnamese(),
+            (1080.0, 2400.0),
+            "hello",
+            &[],
+            &AtomicBool::new(false),
+            String::new,
+            &mut gate,
+        )
+        .await
+        .expect_err("lost ownership must abort the send");
+
+        assert!(failure.ownership_lost());
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+        assert_eq!(session.taps.lock().len(), 2, "opener + field, never Send");
+        assert_eq!(session.typed.lock().as_slice(), &["hello"]);
+        assert_eq!(*session.backs.lock(), 1, "the typed composer is closed");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_unverified_hierarchy_gate_cleanup_is_after_effect() {
+        let session = root_mention_session();
+        let mut gate = crate::interaction_target::EffectGate::new(|| {
+            Err(anyhow::anyhow!("effect gate database failure"))
+        });
+
+        let failure = send_root_by_hierarchy_with_gate(
+            &session,
+            vietnamese(),
+            (1080.0, 2400.0),
+            "hello",
+            &[],
+            &AtomicBool::new(false),
+            String::new,
+            &mut gate,
+        )
+        .await
+        .expect_err("unverified cleanup cannot stay retryable");
+
+        assert!(matches!(failure, HierarchySendFailure::AfterEffect(_)));
+        assert_eq!(session.taps.lock().len(), 2, "opener + field, never Send");
+        assert_eq!(*session.backs.lock(), 3, "all cleanup attempts were used");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_denied_effect_gate_cleans_a_typed_reply_without_sending() {
+        let (bodies, replies, authors) = measured_rows();
+        let parent = CommentLocatorIdentity {
+            author_label: "Tồi nhưng tử tế".into(),
+            text: "Vc cái phao câu".into(),
+            locator_version: HIERARCHY_LOCATOR_VERSION.into(),
+            frame_sha256: "sha".into(),
+        };
+        let session = DrawerSession::default()
+            .with_single("bình luận", node(880.0, 900.0, 120.0, 120.0, "bình luận"))
+            .with_single(EDIT, node(199.0, 1175.0, 700.0, 100.0, ""))
+            .with_single_then(SEND_ID, send_button(false), send_button(true))
+            .with_many("Vc cái phao câu", vec![bodies[1].clone()])
+            .with_many("Trả lời", replies)
+            .with_many_then(
+                EDIT,
+                vec![node(199.0, 2127.0, 700.0, 100.0, "Thêm bình luận...")],
+                vec![node(199.0, 1175.0, 700.0, 100.0, "Trả lời Tồi nhưng tử tế")],
+            )
+            .with_many("android.widget.Button", authors)
+            .with_single_queue(
+                "Đề xuất",
+                vec![None, Some(node(0.0, 0.0, 100.0, 50.0, "Đề xuất"))],
+            );
+        let mut gate = crate::interaction_target::EffectGate::new(|| Ok(false));
+
+        let failure = send_reply_by_hierarchy_with_gate(
+            &session,
+            vietnamese(),
+            (1080.0, 2400.0),
+            &parent,
+            "reply text",
+            &AtomicBool::new(false),
+            String::new,
+            &mut gate,
+        )
+        .await
+        .expect_err("lost ownership aborts before reply Send");
+
+        assert!(failure.ownership_lost());
+        assert_eq!(
+            session.taps.lock().len(),
+            3,
+            "drawer + Reply + field, never Send"
+        );
+        assert_eq!(session.typed.lock().as_slice(), &["reply text"]);
+        assert_eq!(*session.backs.lock(), 1, "the reply composer is closed");
+    }
+
+    #[test]
+    fn an_effect_gate_is_one_shot_even_when_called_twice() {
+        let calls = std::sync::atomic::AtomicUsize::new(0);
+        let mut gate = crate::interaction_target::EffectGate::new(|| {
+            calls.fetch_add(1, Ordering::Relaxed);
+            Ok(true)
+        });
+
+        assert!(gate.cross().is_ok());
+        assert!(gate.cross().is_err());
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
     }
 
     async fn send_root_with_one_mention(

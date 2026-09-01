@@ -372,14 +372,14 @@ impl<'a, P: TapPlanner> CommentDrawer<'a, P> {
 
     /// Back out until the feed tab is visible again.
     ///
-    /// Best effort by design: this runs on failure paths, where returning an error
-    /// would replace a precise verdict with a vague one. What it must not do is leave
-    /// the session inside the drawer, so it presses Back several times and the
-    /// caller's next check catches anything it missed.
+    /// It presses Back several times and returns true only when the feed is visible.
+    /// Callers at a retry boundary must distinguish a cleared draft from a cleanup they
+    /// merely attempted, because retrying with an armed composer still on screen can post
+    /// stale text during the next workflow.
     ///
     /// **The caller decides when to call this.** Interaction deliberately does not,
     /// until it has read its posted comment back out of the still-open list.
-    pub async fn leave(&self, stop: &AtomicBool) {
+    pub async fn leave(&self, stop: &AtomicBool) -> bool {
         let feed = self
             .labels
             .label(TikTokControl::FeedTab)
@@ -387,14 +387,18 @@ impl<'a, P: TapPlanner> CommentDrawer<'a, P> {
         for _ in 0..3 {
             if let Some(feed) = feed {
                 if self.session.locate(feed).await.ok().flatten().is_some() {
-                    return;
+                    return true;
                 }
             }
             if self.session.back().await.is_err() {
-                return;
+                return false;
             }
             sleep(DRAWER_POLL, stop).await;
         }
+        if let Some(feed) = feed {
+            return self.session.locate(feed).await.ok().flatten().is_some();
+        }
+        false
     }
 
     async fn await_element(

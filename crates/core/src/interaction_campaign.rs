@@ -13,7 +13,7 @@
 
 use crate::discover_comment_identity;
 use crate::interaction_hierarchy::PARENT_SCROLL_ATTEMPTS;
-use crate::interaction_target::{SendFailure, SendOutcome, TargetDriver};
+use crate::interaction_target::{EffectGate, SendFailure, SendOutcome, TargetDriver};
 use crate::locate_parent_comment;
 use crate::AppEvent;
 use crate::CommentLocatorIdentity;
@@ -637,18 +637,20 @@ fn fail_whole_target(
             // the SQL below, which refuses to lower a settled row whatever the snapshot said.
             continue;
         }
-        // Conditional-in-SQL: never stamp `failed` over a `sending`/`succeeded`/`uncertain`
-        // row, even one that reached that state after `protected` was captured. That race is
-        // exactly how a public comment used to be re-posted on retry.
-        db.fail_interaction_assignment_unless_settled(id, error_code)?;
+        // Conditional-in-SQL: never stamp `failed` over a sibling's live `preparing` claim or
+        // a `sending`/`succeeded`/`uncertain` delivery, even when it changed after `protected`
+        // was captured. The former steals another standalone worker's assignment; the latter
+        // is exactly how a public comment used to be re-posted on retry.
+        db.fail_interaction_assignment_unless_active_or_settled(id, error_code)?;
     }
     Ok(())
 }
 
-/// Assignments a failure must not overwrite, because their delivery is settled or in flight.
+/// Assignments a target-wide failure must not overwrite because they are settled, in flight,
+/// or actively claimed by a sibling worker.
 ///
-/// The same three states `retryable_assignments` excludes, for the same reason: tapping Send
-/// is not idempotent. Built once from the campaign detail rather than re-queried per target.
+/// `Preparing` belongs here even though it is retryable after process recovery: while the
+/// process is alive it is another worker's assignment, not evidence failure's collateral.
 fn protected_assignment_ids(
     assignments: &[crate::InteractionAssignmentRecord],
 ) -> std::collections::HashSet<String> {
@@ -657,13 +659,59 @@ fn protected_assignment_ids(
         .filter(|assignment| {
             matches!(
                 assignment.state,
-                ThreadMessageState::Sending
+                ThreadMessageState::Preparing
+                    | ThreadMessageState::Sending
                     | ThreadMessageState::Succeeded
                     | ThreadMessageState::Uncertain
             )
         })
         .map(|assignment| assignment.id.clone())
         .collect()
+}
+
+type ClaimedPreparedMessage = (String, PreparedThreadMessage, i64);
+
+/// Return only the pre-Send claims this worker still owns after an operator cancellation.
+///
+/// `Prepared` messages are held in `preparing` until the effect CAS. Returning from the send
+/// loop without releasing the unsent tail strands those rows: the campaign is already
+/// `cancelled`, so startup recovery does not own it, while retry's claim CAS correctly refuses
+/// to steal a live-looking `preparing` row. The revision-qualified DB update makes cleanup
+/// harmless if a sibling replaced or settled one of these claims in the meantime.
+fn release_cancelled_preparations(
+    db: &crate::db::Database,
+    pending: &[ClaimedPreparedMessage],
+) -> anyhow::Result<usize> {
+    let claims = pending
+        .iter()
+        .map(|(id, _, revision)| (id.clone(), *revision))
+        .collect::<Vec<_>>();
+    db.release_owned_interaction_preparations(
+        &claims,
+        "interaction_cancelled_before_send: operator dừng trước khi tin bắt đầu gửi — có thể thử lại",
+    )
+}
+
+fn release_cancelled_preparations_if_needed(
+    db: &crate::db::Database,
+    campaign_id: &str,
+    pending: &[ClaimedPreparedMessage],
+) -> anyhow::Result<Option<usize>> {
+    if !campaign_is_cancelled(db, campaign_id)? {
+        return Ok(None);
+    }
+    release_cancelled_preparations(db, pending).map(Some)
+}
+
+fn send_attempt_has_effect_intent(
+    gate_crossed: bool,
+    send_result: &Result<SendOutcome, SendFailure>,
+) -> bool {
+    gate_crossed
+        || send_result
+            .as_ref()
+            .err()
+            .is_some_and(SendFailure::effect_may_have_gone_out)
 }
 
 /// What a campaign's own rows say happened, counted once.
@@ -1658,12 +1706,13 @@ async fn run_cohort(
             .map(|((_, ordinal), identity)| (*ordinal, identity.clone()))
             .collect();
         let mut chain_broken_at: Option<u8> = None;
-        for (id, prepared, ownership_revision) in prepared_messages {
+        for index in 0..prepared_messages.len() {
+            let (id, prepared, ownership_revision) = &prepared_messages[index];
             // A retry runs the same plan but must not re-send anything already
             // posted; the caller decides which assignments are in scope.
             if only_assignments
                 .as_ref()
-                .is_some_and(|only| !only.contains(&id))
+                .is_some_and(|only| !only.contains(id))
             {
                 continue;
             }
@@ -1675,7 +1724,14 @@ async fn run_cohort(
             // already gone out, and aborting between it and its confirmation
             // would manufacture `Uncertain`, which blocks retry. One in-flight
             // message finishing is the correct cost of stopping.
-            if campaign_is_cancelled(&db, &campaign_id)? {
+            if let Some(released) = release_cancelled_preparations_if_needed(
+                &db,
+                &campaign_id,
+                &prepared_messages[index..],
+            )? {
+                if released > 0 {
+                    notify(&events, &campaign_id);
+                }
                 return Ok((succeeded, failed));
             }
             let parent_identity = prepared
@@ -1701,7 +1757,7 @@ async fn run_cohort(
                 }
                 let broke_at = chain_broken_at.unwrap_or(parent_ordinal);
                 db.update_interaction_assignment_state(
-                    &id,
+                    id,
                     ThreadMessageState::SkippedParent,
                     Some(&format!(
                         "parent_identity_not_confirmed_at_ordinal_{broke_at}"
@@ -1717,7 +1773,7 @@ async fn run_cohort(
                 Ok(context) => context,
                 Err(error) => {
                     db.update_interaction_assignment_state(
-                        &id,
+                        id,
                         ThreadMessageState::Failed,
                         Some(&format!("{error}")),
                         None,
@@ -1756,6 +1812,15 @@ async fn run_cohort(
                     &gestures,
                 )
                 .await?;
+                // A process can die after arming a composer but before the durable effect
+                // gate. The database correctly makes that assignment retryable, but the
+                // phone keeps the draft. Clear that state before opening anything for this
+                // attempt; cleanup returns to the feed, and `open_target` below rebuilds the
+                // target proof (and, for replies, the parent proof) from fresh UI.
+                if let Err(failure) = driver.clear_stale_comment_ui(session.as_ref(), &stop).await {
+                    effect_intent = failure.effect_may_have_gone_out();
+                    return Err(failure.into_error());
+                }
                 // Nothing is typed until the target is on screen: an
                 // unconfirmed open posts the campaign's comment to whichever
                 // video the phone happens to be showing.
@@ -1818,41 +1883,53 @@ async fn run_cohort(
                     None
                 };
 
-                // The local bool `effect_intent` decides `Uncertain` versus `Failed` on the
-                // error path. It is **not** set before the call: only the driver knows whether
-                // a Send tap actually went out, and the steps that locate a parent can fail
-                // with nothing typed. Setting that proof optimistically made a never-posted
-                // reply impossible to retry.
-                //
-                // The DB intent string is different: it is a write-ahead audit record, not
-                // proof that the tap landed. Its CAS is also the one permit to call a device
-                // sender. If another worker crossed it first, stop here and leave its state
-                // untouched.
+                // The driver calls this gate only after the composer is armed, at the final
+                // instruction before Send. Before it crosses, failures stay retryable. After
+                // its CAS succeeds, both process loss and any driver failure are conservatively
+                // uncertain: the durable record cannot distinguish a crash immediately before
+                // the tap from one immediately after it. A CAS loser leaves the winning worker's
+                // row untouched and never taps Send.
                 let send_intent = if parent_identity.is_some() {
                     "reply_comment"
                 } else {
                     "post_comment"
                 };
-                if !db.begin_interaction_assignment_send(&id, ownership_revision, send_intent)? {
-                    return Ok::<Option<serde_json::Value>, anyhow::Error>(None);
-                }
-                notify(&events, &campaign_id);
-                if let Some(parent) = parent_identity.as_ref() {
-                    // Strictly the frame that was current when Send was tapped, so
-                    // anything published afterwards has to be newer than the comment.
-                    watermark = frame_source
-                        .latest_in_generation(&prepared.actor_udid, generation)
-                        .map(|frame| frame.sequence);
-                    let sent = match driver
-                        .send_reply(session.as_ref(), parent, &prepared, &stop)
+                let mut effect_gate = EffectGate::new(|| {
+                    let won =
+                        db.begin_interaction_assignment_send(id, *ownership_revision, send_intent)?;
+                    if won {
+                        // Sample at the boundary itself: the next device operation is Send.
+                        watermark = frame_source
+                            .latest_in_generation(&prepared.actor_udid, generation)
+                            .map(|frame| frame.sequence);
+                        notify(&events, &campaign_id);
+                    }
+                    Ok(won)
+                });
+                let send_result = if let Some(parent) = parent_identity.as_ref() {
+                    driver
+                        .send_reply(session.as_ref(), parent, prepared, &stop, &mut effect_gate)
                         .await
-                    {
-                        Ok(sent) => sent,
-                        Err(failure) => {
-                            effect_intent = failure.effect_may_have_gone_out();
-                            return Err(failure.into_error());
-                        }
-                    };
+                } else {
+                    driver
+                        .send_root(session.as_ref(), prepared, &stop, &mut effect_gate)
+                        .await
+                };
+                // A driver can prove that retry is unsafe even when the CAS itself failed:
+                // after typing, an unverified composer cleanup leaves the next attempt able
+                // to publish stale text. Preserve the driver's AfterEffect classification so
+                // that path settles Uncertain. OwnershipLost is deliberately not included;
+                // its sibling owns the row and the match below leaves it untouched.
+                effect_intent = send_attempt_has_effect_intent(effect_gate.crossed(), &send_result);
+                drop(effect_gate);
+                let sent = match send_result {
+                    Ok(sent) => sent,
+                    Err(failure) if failure.ownership_lost() => {
+                        return Ok::<Option<serde_json::Value>, anyhow::Error>(None);
+                    }
+                    Err(failure) => return Err(failure.into_error()),
+                };
+                if let Some(parent) = parent_identity.as_ref() {
                     Ok::<Option<serde_json::Value>, anyhow::Error>(Some(serde_json::json!({
                         "send": sent.evidence,
                         "parent": parent,
@@ -1870,18 +1947,6 @@ async fn run_cohort(
                         "parentWasFolded": sent.parent_was_folded,
                     })))
                 } else {
-                    // Strictly the frame that was current when Send was tapped, so
-                    // anything published afterwards has to be newer than the comment.
-                    watermark = frame_source
-                        .latest_in_generation(&prepared.actor_udid, generation)
-                        .map(|frame| frame.sequence);
-                    let sent = match driver.send_root(session.as_ref(), &prepared, &stop).await {
-                        Ok(sent) => sent,
-                        Err(failure) => {
-                            effect_intent = failure.effect_may_have_gone_out();
-                            return Err(failure.into_error());
-                        }
-                    };
                     Ok::<Option<serde_json::Value>, anyhow::Error>(Some(serde_json::json!({
                         "send": sent.evidence,
                         "postedIdentity": sent.identity,
@@ -1917,7 +1982,7 @@ async fn run_cohort(
                 Ok(Some(evidence_json)) => {
                     let evidence_text = evidence_json.to_string();
                     db.update_interaction_assignment_state(
-                        &id,
+                        id,
                         ThreadMessageState::Succeeded,
                         None,
                         None,
@@ -1936,7 +2001,7 @@ async fn run_cohort(
                         &artifacts,
                         evidence.clone(),
                         &campaign_id,
-                        &id,
+                        id,
                         &prepared.actor_udid,
                     );
                     // No fallback sha. It used to borrow `postedIdentity.frameSha256` when
@@ -1947,7 +2012,7 @@ async fn run_cohort(
                     let _ = db.add_interaction_artifact(
                         &campaign_id,
                         &target.target_key,
-                        Some(&id),
+                        Some(id),
                         artifact_kind,
                         &evidence_text,
                         artifact_sha,
@@ -1968,7 +2033,7 @@ async fn run_cohort(
                         ThreadMessageState::Failed
                     };
                     db.update_interaction_assignment_state(
-                        &id,
+                        id,
                         state,
                         Some(&error.to_string()),
                         None,
@@ -1982,13 +2047,13 @@ async fn run_cohort(
                         &artifacts,
                         evidence,
                         &campaign_id,
-                        &id,
+                        id,
                         &prepared.actor_udid,
                     ) {
                         let _ = db.add_interaction_artifact(
                             &campaign_id,
                             &target.target_key,
-                            Some(&id),
+                            Some(id),
                             "comment-failure-evidence",
                             &serde_json::json!({ "error": error.to_string() }).to_string(),
                             &sha,
@@ -2280,6 +2345,16 @@ impl TargetDriver for PixelTargetDriver<'_> {
         "pixel"
     }
 
+    async fn clear_stale_comment_ui(
+        &self,
+        session: &dyn crate::UiSession,
+        stop: &AtomicBool,
+    ) -> Result<(), SendFailure> {
+        self.engine
+            .clear_stale_pixel_comment_ui(self.udid, session, self.gestures, stop)
+            .await
+    }
+
     async fn open_target(
         &self,
         session: &dyn crate::UiSession,
@@ -2293,12 +2368,20 @@ impl TargetDriver for PixelTargetDriver<'_> {
         session: &dyn crate::UiSession,
         prepared: &PreparedThreadMessage,
         stop: &AtomicBool,
+        effect_gate: &mut EffectGate<'_>,
     ) -> Result<SendOutcome, SendFailure> {
         // The sender owns the exact phase boundary: every gate through arming is
         // `BeforeEffect`, while the Send tap and its clear confirmation are `AfterEffect`.
         let evidence = self
             .engine
-            .send_prepared_thread_comment(self.udid, session, self.gestures, prepared, stop)
+            .send_prepared_thread_comment_with_gate(
+                self.udid,
+                session,
+                self.gestures,
+                prepared,
+                stop,
+                effect_gate,
+            )
             .await?;
         let identity = discover_after_send(
             self.engine,
@@ -2326,6 +2409,7 @@ impl TargetDriver for PixelTargetDriver<'_> {
         parent: &CommentLocatorIdentity,
         prepared: &PreparedThreadMessage,
         stop: &AtomicBool,
+        effect_gate: &mut EffectGate<'_>,
     ) -> Result<SendOutcome, SendFailure> {
         // Everything down to the reply tap is `BeforeEffect`: it opens the drawer,
         // scrolls, and reads frames. Nothing is typed and no Send tap goes out, so a
@@ -2358,13 +2442,14 @@ impl TargetDriver for PixelTargetDriver<'_> {
         };
         let evidence = self
             .engine
-            .send_prepared_thread_reply(
+            .send_prepared_thread_reply_with_gate(
                 self.udid,
                 session,
                 self.gestures,
                 reply_point,
                 prepared,
                 stop,
+                effect_gate,
             )
             .await?;
         let identity = discover_after_send(
@@ -2464,6 +2549,9 @@ fn map_hierarchy_send_failure(
         crate::interaction_hierarchy::HierarchySendFailure::AfterEffect(error) => {
             SendFailure::after(error)
         }
+        crate::interaction_hierarchy::HierarchySendFailure::OwnershipLost(error) => {
+            SendFailure::lost_ownership(error)
+        }
     }
 }
 
@@ -2471,6 +2559,16 @@ fn map_hierarchy_send_failure(
 impl TargetDriver for HierarchyTargetDriver<'_> {
     fn kind(&self) -> &'static str {
         "hierarchy"
+    }
+
+    async fn clear_stale_comment_ui(
+        &self,
+        session: &dyn crate::UiSession,
+        stop: &AtomicBool,
+    ) -> Result<(), SendFailure> {
+        crate::interaction_hierarchy::clear_stale_hierarchy_comment_ui(session, self.labels, stop)
+            .await
+            .map_err(map_hierarchy_send_failure)
     }
 
     /// Like the open post, through the same measured contract the nurture loop uses.
@@ -2560,8 +2658,9 @@ impl TargetDriver for HierarchyTargetDriver<'_> {
         session: &dyn crate::UiSession,
         prepared: &PreparedThreadMessage,
         stop: &AtomicBool,
+        effect_gate: &mut EffectGate<'_>,
     ) -> Result<SendOutcome, SendFailure> {
-        let outcome = crate::interaction_hierarchy::send_root_by_hierarchy(
+        let outcome = crate::interaction_hierarchy::send_root_by_hierarchy_with_gate(
             session,
             self.labels,
             self.screen,
@@ -2569,6 +2668,7 @@ impl TargetDriver for HierarchyTargetDriver<'_> {
             &prepared.mentions,
             stop,
             || self.frame_sha(),
+            effect_gate,
         )
         .await
         .map_err(map_hierarchy_send_failure)?;
@@ -2581,8 +2681,9 @@ impl TargetDriver for HierarchyTargetDriver<'_> {
         parent: &CommentLocatorIdentity,
         prepared: &PreparedThreadMessage,
         stop: &AtomicBool,
+        effect_gate: &mut EffectGate<'_>,
     ) -> Result<SendOutcome, SendFailure> {
-        let outcome = crate::interaction_hierarchy::send_reply_by_hierarchy(
+        let outcome = crate::interaction_hierarchy::send_reply_by_hierarchy_with_gate(
             session,
             self.labels,
             self.screen,
@@ -2590,6 +2691,7 @@ impl TargetDriver for HierarchyTargetDriver<'_> {
             &prepared.text,
             stop,
             || self.frame_sha(),
+            effect_gate,
         )
         .await
         .map_err(map_hierarchy_send_failure)?;
@@ -2885,6 +2987,27 @@ mod tests {
         assert!(failure.effect_may_have_gone_out());
     }
 
+    #[test]
+    fn unverified_post_typing_cleanup_marks_the_assignment_uncertain() {
+        let cleanup_failed = Err::<SendOutcome, _>(SendFailure::after(anyhow::anyhow!(
+            "typed composer cleanup was not verified"
+        )));
+        assert!(
+            send_attempt_has_effect_intent(false, &cleanup_failed),
+            "AfterEffect must settle Uncertain even when the gate CAS never crossed"
+        );
+
+        let retryable = Err::<SendOutcome, _>(SendFailure::before(anyhow::anyhow!(
+            "typed composer was verified clean"
+        )));
+        assert!(!send_attempt_has_effect_intent(false, &retryable));
+
+        let sibling_owned = Err::<SendOutcome, _>(SendFailure::lost_ownership(anyhow::anyhow!(
+            "another worker owns the row"
+        )));
+        assert!(!send_attempt_has_effect_intent(false, &sibling_owned));
+    }
+
     /// Who actually needs the AI key.
     mod ai_key {
         use super::*;
@@ -2967,13 +3090,14 @@ mod tests {
                 assignment("done", ThreadMessageState::Succeeded),
                 assignment("in-flight", ThreadMessageState::Sending),
                 assignment("unproven", ThreadMessageState::Uncertain),
+                assignment("sibling-worker", ThreadMessageState::Preparing),
                 assignment("waiting", ThreadMessageState::Queued),
                 assignment("broken", ThreadMessageState::Failed),
             ];
             let protected = protected_assignment_ids(&assignments);
 
-            // The same three `retryable_assignments` excludes, for the same reason.
-            for settled in ["done", "in-flight", "unproven"] {
+            // Settled effects and a live sibling claim are outside this worker's failure.
+            for settled in ["done", "in-flight", "unproven", "sibling-worker"] {
                 assert!(
                     protected.contains(settled),
                     "{settled} must survive a target-level failure"
@@ -2987,6 +3111,179 @@ mod tests {
                     "{retryable} must stay writable"
                 );
             }
+        }
+
+        #[test]
+        fn whole_target_failure_uses_the_active_claim_guard_in_sql() {
+            let campaign = include_str!("interaction_campaign.rs");
+            assert!(campaign
+                .contains("fail_interaction_assignment_unless_active_or_settled(id, error_code)"));
+
+            let db = include_str!("db/interaction.rs");
+            let start = db
+                .find("pub fn fail_interaction_assignment_unless_active_or_settled")
+                .expect("target-wide guarded update exists");
+            let body = &db[start..];
+            assert!(body.contains("state NOT IN ('preparing','sending','succeeded','uncertain')"));
+        }
+    }
+
+    mod cancelled_preparations {
+        use super::*;
+        use crate::interaction::{plan_threads, ResolvedTikTokTarget, ThreadMode, TikTokPostKind};
+        use uuid::Uuid;
+
+        fn request() -> ThreadCampaignRequest {
+            ThreadCampaignRequest {
+                request_id: "cancelled-preparations".into(),
+                targets: vec![ResolvedTikTokTarget {
+                    original_url: "https://www.tiktok.com/@creator/video/1".into(),
+                    normalized_url: "https://www.tiktok.com/@creator/video/1".into(),
+                    target_key: "content:1".into(),
+                    content_id: "1".into(),
+                    author: "creator".into(),
+                    kind: TikTokPostKind::Video,
+                }],
+                actor_udids: vec!["phone-a".into(), "phone-b".into(), "phone-c".into()],
+                message_count: 3,
+                instruction: "tu nhien".into(),
+                max_words: 12,
+                manual_comments: vec!["a".into(), "b".into(), "c".into()],
+                like_target: false,
+                mode: ThreadMode::Threaded,
+                shape: crate::interaction::ThreadShape::Chain,
+                cohort_size: None,
+                mentions: Vec::new(),
+                mention_parent: false,
+            }
+        }
+
+        #[test]
+        fn cancelling_before_send_releases_only_preparations_owned_by_this_worker() {
+            let path = std::env::temp_dir().join(format!(
+                "riviu-cancelled-preparations-{}.db",
+                Uuid::new_v4()
+            ));
+            let db = crate::db::Database::open(&path).expect("open fixture database");
+            let request = request();
+            let plan = plan_threads(&request).expect("plan");
+            let campaign = db
+                .create_interaction_campaign(&request, &plan)
+                .expect("create campaign");
+            let rows = db
+                .get_interaction_campaign(&campaign)
+                .expect("read campaign")
+                .expect("campaign exists")
+                .assignments;
+
+            let mut pending = Vec::new();
+            for (row, assignment) in rows.iter().zip(&plan.assignments) {
+                let claim = db
+                    .claim_interaction_assignment_for_send(&row.id)
+                    .expect("claim assignment")
+                    .expect("claim won");
+                let prepared =
+                    PreparedThreadMessage::new(assignment, assignment.ordinal.to_string());
+                let revision = db
+                    .prepare_interaction_assignment(&row.id, claim, &prepared)
+                    .expect("persist prepared message")
+                    .expect("preparation retained ownership");
+                pending.push((row.id.clone(), prepared, revision));
+            }
+
+            let stale_sibling_revision = pending[1].2;
+            assert!(db
+                .fail_interaction_assignment_unless_settled(&pending[1].0, "replacement")
+                .expect("release stale sibling claim"));
+            let sibling_claim = db
+                .claim_interaction_assignment_for_send(&pending[1].0)
+                .expect("replacement claim")
+                .expect("replacement won");
+            let sibling_revision = db
+                .prepare_interaction_assignment(&pending[1].0, sibling_claim, &pending[1].1)
+                .expect("replacement prepare")
+                .expect("replacement retained ownership");
+            assert_ne!(sibling_revision, stale_sibling_revision);
+
+            assert!(db
+                .begin_interaction_assignment_send(&pending[2].0, pending[2].2, "post_comment")
+                .expect("cross settled effect boundary"));
+            db.update_interaction_assignment_state(
+                &pending[2].0,
+                ThreadMessageState::Succeeded,
+                None,
+                None,
+                None,
+            )
+            .expect("settle public comment");
+
+            assert_eq!(
+                release_cancelled_preparations_if_needed(&db, &campaign, &pending)
+                    .expect("live campaign check"),
+                None,
+                "preparations remain claimed while the campaign is still live"
+            );
+            db.update_interaction_campaign_state(
+                &campaign,
+                crate::interaction::ThreadCampaignState::Cancelled,
+                None,
+            )
+            .expect("operator cancellation");
+            assert_eq!(
+                release_cancelled_preparations_if_needed(&db, &campaign, &pending)
+                    .expect("release cancelled claims"),
+                Some(1),
+                "only the still-owned pre-Send claim is released"
+            );
+
+            let after = db
+                .get_interaction_campaign(&campaign)
+                .expect("read after cancellation")
+                .expect("campaign exists");
+            let state = |ordinal| {
+                after
+                    .assignments
+                    .iter()
+                    .find(|row| row.ordinal == ordinal)
+                    .expect("assignment exists")
+                    .state
+            };
+            assert_eq!(state(0), ThreadMessageState::Failed);
+            assert_eq!(state(1), ThreadMessageState::Preparing);
+            assert_eq!(state(2), ThreadMessageState::Succeeded);
+            assert!(db
+                .claim_interaction_assignment_for_send(&rows[0].id)
+                .expect("cancelled campaign blocks retry claim")
+                .is_none());
+            assert!(db
+                .claim_interaction_assignment_for_send(&rows[1].id)
+                .expect("do not steal sibling row")
+                .is_none());
+            assert!(db
+                .claim_interaction_assignment_for_send(&rows[2].id)
+                .expect("do not reopen settled row")
+                .is_none());
+            db.update_interaction_campaign_state(
+                &campaign,
+                crate::interaction::ThreadCampaignState::Running,
+                None,
+            )
+            .expect("operator starts Retry");
+            assert!(db
+                .claim_interaction_assignment_for_send(&rows[0].id)
+                .expect("retry released row")
+                .is_some());
+            assert!(db
+                .claim_interaction_assignment_for_send(&rows[1].id)
+                .expect("retry must still not steal sibling row")
+                .is_none());
+            assert!(db
+                .claim_interaction_assignment_for_send(&rows[2].id)
+                .expect("retry must still not reopen settled row")
+                .is_none());
+
+            drop(db);
+            std::fs::remove_file(path).expect("remove fixture database");
         }
     }
 
@@ -3507,7 +3804,8 @@ mod boundary_tests {
         );
     }
 
-    /// The DB effect CAS is the permit to call a non-idempotent device sender.
+    /// The DB effect CAS travels into the driver and is crossed at the final instruction
+    /// before the non-idempotent Send tap.
     #[test]
     fn the_runner_checks_the_effect_claim_before_calling_a_send_driver() {
         let source = include_str!("interaction_campaign.rs");
@@ -3515,23 +3813,49 @@ mod boundary_tests {
             .find("async fn run_cohort(")
             .expect("the runner still exists");
         let runner = &source[start..];
-        let first_send = [
-            runner.find("driver.send_reply"),
-            runner.find("driver.send_root"),
-        ]
-        .into_iter()
-        .flatten()
-        .min()
-        .expect("the runner calls a send driver");
-        let before_send = &runner[..first_send];
-        let claim = before_send
-            .rfind("db.begin_interaction_assignment_send")
-            .expect("the runner must claim the effect boundary before a device send");
+        let gate = runner
+            .find("let mut effect_gate = EffectGate::new")
+            .expect("the runner builds a one-shot effect gate");
+        let claim = runner[gate..]
+            .find("db.begin_interaction_assignment_send")
+            .map(|offset| gate + offset)
+            .expect("the gate performs the effect CAS");
         assert!(
-            before_send[claim.saturating_sub(8)..]
-                .contains("if !db.begin_interaction_assignment_send"),
-            "the begin-send result must be checked, not merely recorded"
+            runner[claim..].contains("send_reply(") && runner[claim..].contains("send_root("),
+            "both drivers must receive the CAS-bearing gate"
         );
+        assert!(runner[claim..].contains("&mut effect_gate"));
+    }
+
+    #[test]
+    fn every_interaction_send_crosses_the_gate_immediately_before_tap() {
+        let hierarchy = include_str!("interaction_hierarchy.rs");
+        let pixel = include_str!("nurture/actions.rs");
+        for (source, function) in [
+            (hierarchy, "send_root_by_hierarchy_with_gate"),
+            (hierarchy, "send_reply_by_hierarchy_with_gate"),
+            (pixel, "send_prepared_thread_comment_with_gate"),
+            (pixel, "send_prepared_thread_reply_with_gate"),
+        ] {
+            let declaration = format!("async fn {function}");
+            let body = &source[source.find(&declaration).expect("send function exists")..];
+            let cross = body
+                .find("effect_gate.cross()")
+                .or_else(|| body.find("effect_gate\n        .cross()"))
+                .expect("send crosses its effect gate");
+            let tap = [
+                body[cross..].find(".tap("),
+                body[cross..].find("tap_send_and_confirm_disarm"),
+            ]
+            .into_iter()
+            .flatten()
+            .min()
+            .expect("Send tap follows gate");
+            assert!(
+                tap < 500,
+                "{function} must cross the gate at the final boundary before its Send tap"
+            );
+        }
     }
 
     /// A retry that is going to be refused must leave the campaign exactly as it found it.

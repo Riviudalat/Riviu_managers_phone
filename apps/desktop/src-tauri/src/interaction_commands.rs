@@ -434,7 +434,7 @@ pub fn interaction_cancel(
     let _admission = state.ensure_accepting_work()?;
     state
         .db
-        .update_interaction_campaign_state(&campaign_id, ThreadCampaignState::Cancelled, None)
+        .cancel_interaction_campaign(&campaign_id)
         .map_err(CommandError::operation)?;
     state.events.emit(AppEvent::InteractionUpdated {
         campaign_id,

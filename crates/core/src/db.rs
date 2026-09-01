@@ -1626,6 +1626,98 @@ mod interaction_tests {
         let _ = std::fs::remove_file(&path);
     }
 
+    /// Cancelling is itself the recovery boundary for pre-Send work.
+    ///
+    /// The desktop command used to flip only the campaign row. If the process stopped before
+    /// the worker next observed that flag, its `preparing` ownership survived under a terminal
+    /// campaign: startup recovery deliberately ignores cancelled campaigns and the claim CAS
+    /// refuses to steal `preparing`, so Retry could never make progress. The campaign transition
+    /// and release must therefore commit together. A worker racing after cancellation must also
+    /// lose its claim, while rows that crossed the public-effect boundary remain untouched.
+    #[test]
+    fn cancelling_in_db_atomically_releases_pre_send_claims_and_blocks_late_claims() {
+        let (db, path) = fixture();
+        let mut request = request();
+        request.actor_udids = (0..5).map(|index| format!("actor-{index}")).collect();
+        request.message_count = 5;
+        let plan = plan_threads(&request).expect("plan");
+        let campaign_id = db
+            .create_interaction_campaign(&request, &plan)
+            .expect("create campaign");
+        db.update_interaction_campaign_state(&campaign_id, ThreadCampaignState::Running, None)
+            .expect("start campaign");
+        let before = db
+            .get_interaction_campaign(&campaign_id)
+            .expect("read campaign")
+            .expect("campaign exists");
+        let preparing = &before.assignments[0];
+        let sending = &before.assignments[1];
+        let succeeded = &before.assignments[2];
+        let uncertain = &before.assignments[3];
+        let still_queued = &before.assignments[4];
+
+        let stale_revision = db
+            .claim_interaction_assignment_for_send(&preparing.id)
+            .expect("claim pre-Send row")
+            .expect("claim won");
+        for (assignment, state) in [
+            (sending, ThreadMessageState::Sending),
+            (succeeded, ThreadMessageState::Succeeded),
+            (uncertain, ThreadMessageState::Uncertain),
+        ] {
+            db.update_interaction_assignment_state(&assignment.id, state, None, None, None)
+                .expect("model an effect-boundary state");
+        }
+
+        assert_eq!(
+            db.cancel_interaction_campaign(&campaign_id)
+                .expect("cancel and release atomically"),
+            1,
+            "only the pre-Send ownership is released"
+        );
+        let cancelled = db
+            .get_interaction_campaign(&campaign_id)
+            .expect("read cancelled campaign")
+            .expect("campaign survives");
+        assert_eq!(cancelled.summary.state, ThreadCampaignState::Cancelled);
+        let state_of = |id: &str| {
+            cancelled
+                .assignments
+                .iter()
+                .find(|assignment| assignment.id == id)
+                .expect("assignment survives")
+                .state
+        };
+        assert_eq!(state_of(&preparing.id), ThreadMessageState::Failed);
+        assert_eq!(state_of(&sending.id), ThreadMessageState::Sending);
+        assert_eq!(state_of(&succeeded.id), ThreadMessageState::Succeeded);
+        assert_eq!(state_of(&uncertain.id), ThreadMessageState::Uncertain);
+        assert_eq!(state_of(&still_queued.id), ThreadMessageState::Queued);
+
+        assert!(
+            !db.begin_interaction_assignment_send(&preparing.id, stale_revision, "post_comment")
+                .expect("stale worker loses effect CAS"),
+            "the released worker must perform zero Send taps"
+        );
+        assert_eq!(
+            db.claim_interaction_assignment_for_send(&still_queued.id)
+                .expect("late claim checks campaign state"),
+            None,
+            "a worker arriving after cancellation must not acquire new pre-Send work"
+        );
+
+        db.update_interaction_campaign_state(&campaign_id, ThreadCampaignState::Running, None)
+            .expect("operator starts Retry");
+        assert!(
+            db.claim_interaction_assignment_for_send(&preparing.id)
+                .expect("retry claim")
+                .is_some(),
+            "the released row becomes claimable once Retry owns a running campaign"
+        );
+        drop(db);
+        let _ = std::fs::remove_file(&path);
+    }
+
     /// A campaign with live comments under it must never be filed as a total loss.
     ///
     /// The final state used to be decided from the counters of the pass that had just run,

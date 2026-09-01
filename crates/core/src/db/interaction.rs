@@ -225,6 +225,38 @@ impl Database {
         )?;
         Ok(())
     }
+
+    /// Cancel a campaign and release every pre-Send claim in the same transaction.
+    ///
+    /// A cancelled campaign is outside startup orphan recovery. Leaving even one assignment in
+    /// `preparing` would therefore preserve ownership for a worker that may have died immediately
+    /// after this commit, and the normal claim CAS would correctly refuse every later retry. An
+    /// immediate transaction also closes the race with a live worker: a claim that commits first
+    /// is released here, while a claim attempted after this commit is rejected by
+    /// `claim_interaction_assignment_for_send`'s campaign-state guard.
+    pub fn cancel_interaction_campaign(&self, campaign_id: &str) -> anyhow::Result<usize> {
+        let mut conn = self.conn()?;
+        let transaction = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let now = Utc::now().to_rfc3339();
+        transaction.execute(
+            "UPDATE interaction_campaigns \
+             SET state='cancelled',revision=revision+1,error_code=NULL,updated_at=?1 \
+             WHERE id=?2",
+            params![now, campaign_id],
+        )?;
+        let released = transaction.execute(
+            "UPDATE interaction_assignments \
+             SET state='failed',error_code=?1,effect_intent=NULL,revision=revision+1,updated_at=?2 \
+             WHERE campaign_id=?3 AND state='preparing'",
+            params![
+                "interaction_cancelled_before_send: operator dừng trước khi tin bắt đầu gửi — có thể thử lại",
+                now,
+                campaign_id
+            ],
+        )?;
+        transaction.commit()?;
+        Ok(released)
+    }
     /// Record a failure reason **without** overwriting a verdict that is already terminal.
     ///
     /// `execute_thread_campaign` reads the campaign's own totals, writes `Partial` when some
@@ -273,6 +305,11 @@ impl Database {
             "UPDATE interaction_assignments \
              SET state='preparing',revision=revision+1,updated_at=?1 \
              WHERE id=?2 AND state IN ('queued','ready','failed','skipped_parent') \
+               AND EXISTS ( \
+                   SELECT 1 FROM interaction_campaigns AS campaign \
+                   WHERE campaign.id=interaction_assignments.campaign_id \
+                     AND campaign.state!='cancelled' \
+               ) \
              RETURNING revision",
             params![Utc::now().to_rfc3339(), assignment_id],
             |row| row.get(0),
@@ -283,10 +320,10 @@ impl Database {
 
     /// Cross the public-effect boundary exactly once.
     ///
-    /// Preparation holds the row in `preparing`; this CAS is the only transition that grants
-    /// permission to call the device driver's send path. It writes the intent in the same SQL
-    /// statement so startup recovery can conservatively classify a process lost after this
-    /// point. A concurrent worker sees zero changed rows and must not touch the device.
+    /// Preparation holds the row in `preparing`; this CAS is the one-shot callback the driver
+    /// invokes after typing and arming, immediately before its Send tap. It writes the intent
+    /// in the same SQL statement so startup recovery can conservatively classify a process
+    /// lost after this point. A concurrent worker sees zero changed rows and must not tap Send.
     pub fn begin_interaction_assignment_send(
         &self,
         assignment_id: &str,
@@ -308,8 +345,36 @@ impl Database {
         Ok(changed > 0)
     }
 
+    /// Release this worker's pre-Send claims when the operator cancels the campaign.
+    ///
+    /// Every row is guarded by both `preparing` and the revision returned from preparation.
+    /// That is what keeps a stale cancelling worker from lowering a replacement sibling's
+    /// claim after an ABA transition, and keeps a delivery that already crossed into
+    /// `sending`/`succeeded`/`uncertain` outside this cleanup. The batch is transactional so a
+    /// database failure cannot leave half of one worker's remaining queue stranded.
+    pub fn release_owned_interaction_preparations(
+        &self,
+        claims: &[(String, i64)],
+        error_code: &str,
+    ) -> anyhow::Result<usize> {
+        let mut conn = self.conn()?;
+        let transaction = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let now = Utc::now().to_rfc3339();
+        let mut released = 0usize;
+        for (assignment_id, ownership_revision) in claims {
+            released += transaction.execute(
+                "UPDATE interaction_assignments \
+                 SET state='failed',error_code=?1,effect_intent=NULL,revision=revision+1,updated_at=?2 \
+                 WHERE id=?3 AND state='preparing' AND revision=?4",
+                params![error_code, now, assignment_id, ownership_revision],
+            )?;
+        }
+        transaction.commit()?;
+        Ok(released)
+    }
+
     /// Stamp one assignment `failed` — **but never over a delivery that is settled or in
-    /// flight**, and say whether it actually changed.
+    /// flight** — and say whether it actually changed.
     ///
     /// The guard is in the SQL, not in a caller's snapshot, and that is the whole point. A
     /// target-wide failure (a shared evidence pass that could not photograph the post) used
@@ -330,6 +395,26 @@ impl Database {
             "UPDATE interaction_assignments \
              SET state='failed',error_code=?1,revision=revision+1,updated_at=?2 \
              WHERE id=?3 AND state NOT IN ('sending','succeeded','uncertain')",
+            params![error_code, Utc::now().to_rfc3339(), assignment_id],
+        )?;
+        Ok(changed > 0)
+    }
+
+    /// Target-wide evidence failure may only lower idle assignments.
+    ///
+    /// Unlike a worker-local failure, it does not own every row it visits. In Standalone mode
+    /// a sibling task can already hold one in `preparing`; excluding active claims here keeps
+    /// the target sweep from stealing that row while preserving normal startup recovery.
+    pub fn fail_interaction_assignment_unless_active_or_settled(
+        &self,
+        assignment_id: &str,
+        error_code: &str,
+    ) -> anyhow::Result<bool> {
+        let conn = self.conn()?;
+        let changed = conn.execute(
+            "UPDATE interaction_assignments \
+             SET state='failed',error_code=?1,revision=revision+1,updated_at=?2 \
+             WHERE id=?3 AND state NOT IN ('preparing','sending','succeeded','uncertain')",
             params![error_code, Utc::now().to_rfc3339(), assignment_id],
         )?;
         Ok(changed > 0)

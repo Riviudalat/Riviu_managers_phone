@@ -79,17 +79,25 @@ pub(crate) enum SendFailure {
     /// A Send tap went out and its result could not be confirmed. **Not** retryable —
     /// a retry is how a post ends up with two identical comments on it.
     AfterEffect(anyhow::Error),
+    /// This worker no longer owns the assignment. The winning worker owns the row, so the
+    /// loser must leave without changing it and without tapping Send.
+    OwnershipLost(anyhow::Error),
 }
 
 impl SendFailure {
-    /// Whether the caller must treat this as `Uncertain` rather than `Failed`.
     pub fn effect_may_have_gone_out(&self) -> bool {
         matches!(self, Self::AfterEffect(_))
     }
 
+    pub fn ownership_lost(&self) -> bool {
+        matches!(self, Self::OwnershipLost(_))
+    }
+
     pub fn into_error(self) -> anyhow::Error {
         match self {
-            Self::BeforeEffect(error) | Self::AfterEffect(error) => error,
+            Self::BeforeEffect(error) | Self::AfterEffect(error) | Self::OwnershipLost(error) => {
+                error
+            }
         }
     }
 
@@ -102,11 +110,69 @@ impl SendFailure {
     }
 }
 
+/// A one-shot permit placed at the last instruction before a non-idempotent Send tap.
+///
+/// The callback normally performs the assignment's `preparing -> sending` CAS. Keeping it
+/// here, instead of in the campaign before entering a driver, leaves drawer setup, parent
+/// lookup, typing, and Send arming on the retryable side of the persisted effect boundary.
+pub(crate) struct EffectGate<'a> {
+    callback: Option<Box<dyn FnOnce() -> anyhow::Result<bool> + Send + 'a>>,
+    crossed: bool,
+}
+
+impl<'a> EffectGate<'a> {
+    pub fn new(callback: impl FnOnce() -> anyhow::Result<bool> + Send + 'a) -> Self {
+        Self {
+            callback: Some(Box::new(callback)),
+            crossed: false,
+        }
+    }
+
+    pub fn allow() -> Self {
+        Self::new(|| Ok(true))
+    }
+
+    pub fn cross(&mut self) -> Result<(), SendFailure> {
+        let callback = self.callback.take().ok_or_else(|| {
+            SendFailure::lost_ownership(anyhow::anyhow!("effect gate was already consumed"))
+        })?;
+        match callback().map_err(SendFailure::before)? {
+            true => {
+                self.crossed = true;
+                Ok(())
+            }
+            false => Err(SendFailure::lost_ownership(anyhow::anyhow!(
+                "assignment ownership was lost before Send"
+            ))),
+        }
+    }
+
+    pub fn crossed(&self) -> bool {
+        self.crossed
+    }
+}
+
+impl SendFailure {
+    pub fn lost_ownership(error: impl Into<anyhow::Error>) -> Self {
+        Self::OwnershipLost(error.into())
+    }
+}
+
 /// The three device-specific steps of an Interaction assignment.
 #[async_trait::async_trait]
 pub(crate) trait TargetDriver: Send + Sync {
     /// A short name for logs and refusal messages.
     fn kind(&self) -> &'static str;
+
+    /// Remove a composer left armed by a process that died before its effect gate.
+    ///
+    /// A successful cleanup returns to the feed. The campaign therefore calls this before
+    /// `open_target`, which recreates the target and reply-parent proof from fresh state.
+    async fn clear_stale_comment_ui(
+        &self,
+        session: &dyn UiSession,
+        stop: &AtomicBool,
+    ) -> Result<(), SendFailure>;
 
     /// Open the target post and prove the device landed on *that* post.
     ///
@@ -127,6 +193,7 @@ pub(crate) trait TargetDriver: Send + Sync {
         session: &dyn UiSession,
         prepared: &PreparedThreadMessage,
         stop: &AtomicBool,
+        effect_gate: &mut EffectGate<'_>,
     ) -> Result<SendOutcome, SendFailure>;
 
     /// Like the post that is already open, if this backend can.
@@ -154,5 +221,6 @@ pub(crate) trait TargetDriver: Send + Sync {
         parent: &CommentLocatorIdentity,
         prepared: &PreparedThreadMessage,
         stop: &AtomicBool,
+        effect_gate: &mut EffectGate<'_>,
     ) -> Result<SendOutcome, SendFailure>;
 }

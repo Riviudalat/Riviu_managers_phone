@@ -278,11 +278,71 @@ struct PreparedTextComment {
     attempt_id: String,
 }
 
+fn classify_pixel_gate_cleanup(failure: SendFailure, cleaned: bool, surface: &str) -> SendFailure {
+    if cleaned || failure.ownership_lost() {
+        failure
+    } else {
+        SendFailure::after(anyhow!(
+            "effect gate failed after typing and {surface} UI cleanup was not verified: {}",
+            failure.into_error()
+        ))
+    }
+}
+
 impl NurtureEngine {
+    /// Clear a draft left armed by a process that died before its effect gate.
+    ///
+    /// This runs before the target is opened again. Returning to a verified feed is
+    /// intentional: any locator captured before cleanup is invalid, so the campaign must
+    /// reopen the post and re-prove a reply parent before it can type.
+    pub(crate) async fn clear_stale_pixel_comment_ui(
+        &self,
+        udid: &str,
+        session: &dyn UiSession,
+        gestures: &tokio::sync::Mutex<()>,
+        stop: &AtomicBool,
+    ) -> Result<(), SendFailure> {
+        let Some(frame) = self.frames.latest(udid) else {
+            return Ok(());
+        };
+        let image = image::load_from_memory(&frame)
+            .map_err(|_| SendFailure::before(anyhow!("stale_comment_frame_decode_failed")))?
+            .to_rgb8();
+        if screen::comment_drawer_state(&image).0 != CommentDrawer::SendArmed {
+            return Ok(());
+        }
+
+        let screen_size = crate::screen::measured_screen_size(session)
+            .await
+            .map_err(SendFailure::before)?;
+        let cleaned = self
+            .close_comment_ui(udid, session, gestures, screen_size, stop)
+            .await;
+        let verified = cleaned
+            && self
+                .frames
+                .latest(udid)
+                .and_then(|frame| image::load_from_memory(&frame).ok())
+                .map(|image| {
+                    let image = image.to_rgb8();
+                    screen::feed_ready(&image, Some(screen_size.0))
+                        && screen::comment_drawer_state(&image).0 != CommentDrawer::SendArmed
+                })
+                .unwrap_or(false);
+        if verified {
+            Ok(())
+        } else {
+            Err(SendFailure::after(anyhow!(
+                "crash-stale pixel comment composer cleanup was not verified"
+            )))
+        }
+    }
+
     /// Send one already-prepared campaign message. The caller must persist the
     /// prepared text/hash before invoking this method. This deliberately keeps
     /// the same frame-confirmed drawer contract as nurture comments, but does
     /// not call an AI provider while the composer is open.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) async fn send_prepared_thread_comment(
         &self,
         udid: &str,
@@ -290,6 +350,27 @@ impl NurtureEngine {
         gestures: &tokio::sync::Mutex<()>,
         prepared: &PreparedThreadMessage,
         stop: &AtomicBool,
+    ) -> Result<ThreadSendEvidence, SendFailure> {
+        let mut effect_gate = crate::interaction_target::EffectGate::allow();
+        self.send_prepared_thread_comment_with_gate(
+            udid,
+            session,
+            gestures,
+            prepared,
+            stop,
+            &mut effect_gate,
+        )
+        .await
+    }
+
+    pub(crate) async fn send_prepared_thread_comment_with_gate(
+        &self,
+        udid: &str,
+        session: &dyn UiSession,
+        gestures: &tokio::sync::Mutex<()>,
+        prepared: &PreparedThreadMessage,
+        stop: &AtomicBool,
+        effect_gate: &mut crate::interaction_target::EffectGate<'_>,
     ) -> Result<ThreadSendEvidence, SendFailure> {
         if !session.supports_text_input() {
             return Err(SendFailure::before(anyhow!("text_channel_unavailable")));
@@ -393,12 +474,24 @@ impl NurtureEngine {
             return Err(SendFailure::before(anyhow!("send_not_armed")));
         }
         let before_send = frame_digest(&armed_bytes);
-        {
+        let gate_failure = {
             let _guard = gestures.lock().await;
-            session
-                .tap(point(screen::SEND_BUTTON.0, screen::SEND_BUTTON.1))
-                .await
-                .map_err(|e| SendFailure::after(anyhow!("tap_send: {e}")))?;
+            match effect_gate.cross() {
+                Ok(()) => {
+                    session
+                        .tap(point(screen::SEND_BUTTON.0, screen::SEND_BUTTON.1))
+                        .await
+                        .map_err(|e| SendFailure::after(anyhow!("tap_send: {e}")))?;
+                    None
+                }
+                Err(failure) => Some(failure),
+            }
+        };
+        if let Some(failure) = gate_failure {
+            let cleaned = self
+                .close_comment_ui(udid, session, gestures, screen_size, stop)
+                .await;
+            return Err(classify_pixel_gate_cleanup(failure, cleaned, "comment"));
         }
         // "Ready to type" and "sent" are the same classification — an open,
         // unarmed drawer — separated only by when they were observed. So the
@@ -433,6 +526,7 @@ impl NurtureEngine {
     /// Continue a comment drawer after the locator has identified the exact
     /// parent and its Reply control. The caller owns the identity proof; this
     /// method only performs the same armed/cleared composer checks.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) async fn send_prepared_thread_reply(
         &self,
         udid: &str,
@@ -441,6 +535,35 @@ impl NurtureEngine {
         reply_point: TapPoint,
         prepared: &PreparedThreadMessage,
         stop: &AtomicBool,
+    ) -> Result<ThreadSendEvidence, SendFailure> {
+        let mut effect_gate = crate::interaction_target::EffectGate::allow();
+        self.send_prepared_thread_reply_with_gate(
+            udid,
+            session,
+            gestures,
+            reply_point,
+            prepared,
+            stop,
+            &mut effect_gate,
+        )
+        .await
+    }
+
+    // The public-effect boundary deliberately exposes each independently established proof
+    // (session, gesture lock, reply point, prepared text, stop token and durable gate).
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "effect boundary keeps independently proved reply inputs explicit"
+    )]
+    pub(crate) async fn send_prepared_thread_reply_with_gate(
+        &self,
+        udid: &str,
+        session: &dyn UiSession,
+        gestures: &tokio::sync::Mutex<()>,
+        reply_point: TapPoint,
+        prepared: &PreparedThreadMessage,
+        stop: &AtomicBool,
+        effect_gate: &mut crate::interaction_target::EffectGate<'_>,
     ) -> Result<ThreadSendEvidence, SendFailure> {
         if !session.supports_text_input() {
             return Err(SendFailure::before(anyhow!("text_channel_unavailable")));
@@ -522,20 +645,32 @@ impl NurtureEngine {
             return Err(SendFailure::before(anyhow!("reply_send_not_armed")));
         }
         let before_send = frame_digest(&armed_bytes);
-        {
+        let gate_failure = {
             let _guard = gestures.lock().await;
-            session
-                .tap(self.next_touch_point(
-                    udid,
-                    screen_size,
-                    TapPoint {
-                        x: screen_size.0 * screen::SEND_BUTTON.0,
-                        y: screen_size.1 * screen::SEND_BUTTON.1,
-                    },
-                    (8.0, 8.0),
-                ))
-                .await
-                .map_err(|e| SendFailure::after(anyhow!("tap_reply_send: {e}")))?;
+            match effect_gate.cross() {
+                Ok(()) => {
+                    session
+                        .tap(self.next_touch_point(
+                            udid,
+                            screen_size,
+                            TapPoint {
+                                x: screen_size.0 * screen::SEND_BUTTON.0,
+                                y: screen_size.1 * screen::SEND_BUTTON.1,
+                            },
+                            (8.0, 8.0),
+                        ))
+                        .await
+                        .map_err(|e| SendFailure::after(anyhow!("tap_reply_send: {e}")))?;
+                    None
+                }
+                Err(failure) => Some(failure),
+            }
+        };
+        if let Some(failure) = gate_failure {
+            let cleaned = self
+                .close_comment_ui(udid, session, gestures, screen_size, stop)
+                .await;
+            return Err(classify_pixel_gate_cleanup(failure, cleaned, "reply"));
         }
         // Same rule as the top-level comment: a frame already seen cannot be
         // the proof, and this one is persisted as evidence.
@@ -2187,6 +2322,7 @@ mod tests {
         open_with_existing_draft: bool,
         type_error: bool,
         send_error: bool,
+        dismiss_succeeds: bool,
         follow_success: bool,
         ordinary_taps: AtomicUsize,
         send_taps: AtomicUsize,
@@ -2210,6 +2346,7 @@ mod tests {
                 open_with_existing_draft: false,
                 type_error: false,
                 send_error: false,
+                dismiss_succeeds: true,
                 follow_success: false,
                 ordinary_taps: AtomicUsize::new(0),
                 send_taps: AtomicUsize::new(0),
@@ -2240,6 +2377,11 @@ mod tests {
 
         fn failing_send(mut self) -> Self {
             self.send_error = true;
+            self
+        }
+
+        fn with_unverified_dismiss(mut self) -> Self {
+            self.dismiss_succeeds = false;
             self
         }
 
@@ -2283,7 +2425,9 @@ mod tests {
                 anyhow::bail!("send failed after touch");
             }
             if Self::near(&point, screen::DRAWER_DISMISS) {
-                self.frames.show_feed();
+                if self.dismiss_succeeds {
+                    self.frames.show_feed();
+                }
             } else if Self::near(&point, screen::SEND_BUTTON) {
                 self.send_taps.fetch_add(1, Ordering::Relaxed);
                 self.frames.show_posted();
@@ -3380,6 +3524,83 @@ mod tests {
         let _ = std::fs::remove_file(db_path);
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn a_denied_pixel_root_gate_cleans_the_typed_composer_without_sending() {
+        let frames = Arc::new(TestFrames::new());
+        let stop = Arc::new(AtomicBool::new(false));
+        let session = RecordingSession::new(frames.clone(), stop.clone(), true, false);
+        let (engine, db_path) = test_engine(frames.clone());
+        let prepared = PreparedThreadMessage {
+            ordinal: 1,
+            actor_udid: UDID.to_string(),
+            text: COMMENT.to_string(),
+            text_sha256: "denied-root".into(),
+            parent_ordinal: None,
+            mentions: Vec::new(),
+        };
+        let mut gate = crate::interaction_target::EffectGate::new(|| Ok(false));
+
+        let failure = engine
+            .send_prepared_thread_comment_with_gate(
+                UDID,
+                &session,
+                &tokio::sync::Mutex::new(()),
+                &prepared,
+                stop.as_ref(),
+                &mut gate,
+            )
+            .await
+            .expect_err("lost ownership aborts before Send");
+
+        assert!(failure.ownership_lost());
+        assert_eq!(session.send_taps.load(Ordering::Relaxed), 0);
+        assert_eq!(session.typed.lock().as_slice(), &[COMMENT.to_string()]);
+        let frame = frames.latest(UDID).expect("cleanup frame");
+        let image = image::load_from_memory(&frame)
+            .expect("decode cleanup frame")
+            .to_rgb8();
+        assert!(screen::feed_ready(&image, Some(MOCK_SCREEN.0)));
+        drop(engine);
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_unverified_pixel_gate_cleanup_is_after_effect() {
+        let frames = Arc::new(TestFrames::new());
+        let stop = Arc::new(AtomicBool::new(false));
+        let session = RecordingSession::new(frames.clone(), stop.clone(), true, false)
+            .with_unverified_dismiss();
+        let (engine, db_path) = test_engine(frames);
+        let prepared = PreparedThreadMessage {
+            ordinal: 1,
+            actor_udid: UDID.to_string(),
+            text: COMMENT.to_string(),
+            text_sha256: "dirty-root".into(),
+            parent_ordinal: None,
+            mentions: Vec::new(),
+        };
+        let mut gate = crate::interaction_target::EffectGate::new(|| {
+            Err(anyhow!("effect gate database failure"))
+        });
+
+        let failure = engine
+            .send_prepared_thread_comment_with_gate(
+                UDID,
+                &session,
+                &tokio::sync::Mutex::new(()),
+                &prepared,
+                stop.as_ref(),
+                &mut gate,
+            )
+            .await
+            .expect_err("unverified cleanup cannot stay retryable");
+
+        assert!(failure.effect_may_have_gone_out());
+        assert_eq!(session.send_taps.load(Ordering::Relaxed), 0);
+        drop(engine);
+        let _ = std::fs::remove_file(db_path);
+    }
+
     fn prepared_thread_reply() -> PreparedThreadMessage {
         PreparedThreadMessage {
             ordinal: 2,
@@ -3389,6 +3610,184 @@ mod tests {
             parent_ordinal: Some(1),
             mentions: Vec::new(),
         }
+    }
+
+    fn prepared_thread_root() -> PreparedThreadMessage {
+        PreparedThreadMessage {
+            ordinal: 1,
+            actor_udid: UDID.to_string(),
+            text: COMMENT.to_string(),
+            text_sha256: "root-sha".into(),
+            parent_ordinal: None,
+            mentions: Vec::new(),
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_crash_stale_pixel_root_draft_is_discarded_before_the_fresh_retry() {
+        let frames = Arc::new(TestFrames::new());
+        frames.show_armed();
+        let stop = Arc::new(AtomicBool::new(false));
+        let session = RecordingSession::new(frames.clone(), stop.clone(), true, false);
+        let (engine, db_path) = test_engine(frames.clone());
+        let gestures = tokio::sync::Mutex::new(());
+
+        if let Err(failure) = engine
+            .clear_stale_pixel_comment_ui(UDID, &session, &gestures, stop.as_ref())
+            .await
+        {
+            panic!(
+                "verified cleanup should let the assignment reopen and retry: {}",
+                failure.into_error()
+            );
+        }
+        let evidence = match engine
+            .send_prepared_thread_comment(
+                UDID,
+                &session,
+                &gestures,
+                &prepared_thread_root(),
+                stop.as_ref(),
+            )
+            .await
+        {
+            Ok(evidence) => evidence,
+            Err(failure) => panic!("fresh root retry failed: {}", failure.into_error()),
+        };
+
+        assert_eq!(evidence.text_sha256, "root-sha");
+        assert_eq!(session.typed.lock().as_slice(), &[COMMENT.to_string()]);
+        assert_eq!(session.send_taps.load(Ordering::Relaxed), 1);
+        drop(engine);
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_unverified_crash_stale_pixel_root_cleanup_is_after_effect() {
+        let frames = Arc::new(TestFrames::new());
+        frames.show_armed();
+        let stop = Arc::new(AtomicBool::new(false));
+        let session = RecordingSession::new(frames.clone(), stop.clone(), true, false)
+            .with_unverified_dismiss();
+        let (engine, db_path) = test_engine(frames);
+
+        let failure = engine
+            .clear_stale_pixel_comment_ui(
+                UDID,
+                &session,
+                &tokio::sync::Mutex::new(()),
+                stop.as_ref(),
+            )
+            .await
+            .expect_err("an armed draft that cannot be cleared is ambiguous");
+
+        assert!(failure.effect_may_have_gone_out());
+        assert!(session.typed.lock().is_empty());
+        assert_eq!(session.send_taps.load(Ordering::Relaxed), 0);
+        drop(engine);
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_crash_stale_pixel_reply_draft_is_not_appended_to_on_retry() {
+        let frames = Arc::new(TestFrames::new());
+        frames.show_armed();
+        let stop = Arc::new(AtomicBool::new(false));
+        let session = RecordingSession::new(frames.clone(), stop.clone(), true, false);
+        let (engine, db_path) = test_engine(frames);
+        let gestures = tokio::sync::Mutex::new(());
+
+        if let Err(failure) = engine
+            .clear_stale_pixel_comment_ui(UDID, &session, &gestures, stop.as_ref())
+            .await
+        {
+            panic!(
+                "verified cleanup should let the caller re-prove the parent: {}",
+                failure.into_error()
+            );
+        }
+        match engine
+            .send_prepared_thread_reply(
+                UDID,
+                &session,
+                &gestures,
+                TapPoint { x: 120.0, y: 300.0 },
+                &prepared_thread_reply(),
+                stop.as_ref(),
+            )
+            .await
+        {
+            Ok(_) => {}
+            Err(failure) => panic!("fresh reply retry failed: {}", failure.into_error()),
+        }
+
+        assert_eq!(
+            session.typed.lock().as_slice(),
+            &[COMMENT.to_string()],
+            "the fresh payload is the only text request; stale text is never appended"
+        );
+        assert_eq!(session.send_taps.load(Ordering::Relaxed), 1);
+        drop(engine);
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_unverified_crash_stale_pixel_reply_cleanup_is_after_effect() {
+        let frames = Arc::new(TestFrames::new());
+        frames.show_armed();
+        let stop = Arc::new(AtomicBool::new(false));
+        let session = RecordingSession::new(frames.clone(), stop.clone(), true, false)
+            .with_unverified_dismiss();
+        let (engine, db_path) = test_engine(frames);
+
+        let failure = engine
+            .clear_stale_pixel_comment_ui(
+                UDID,
+                &session,
+                &tokio::sync::Mutex::new(()),
+                stop.as_ref(),
+            )
+            .await
+            .expect_err("the reply path must not enter a dirty composer");
+
+        assert!(failure.effect_may_have_gone_out());
+        assert!(session.typed.lock().is_empty());
+        assert_eq!(session.send_taps.load(Ordering::Relaxed), 0);
+        drop(engine);
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_denied_pixel_reply_gate_cleans_the_typed_composer_without_sending() {
+        let frames = Arc::new(TestFrames::new());
+        let stop = Arc::new(AtomicBool::new(false));
+        let session = RecordingSession::new(frames.clone(), stop.clone(), true, false);
+        let (engine, db_path) = test_engine(frames.clone());
+        let mut gate = crate::interaction_target::EffectGate::new(|| Ok(false));
+
+        let failure = engine
+            .send_prepared_thread_reply_with_gate(
+                UDID,
+                &session,
+                &tokio::sync::Mutex::new(()),
+                TapPoint { x: 120.0, y: 300.0 },
+                &prepared_thread_reply(),
+                stop.as_ref(),
+                &mut gate,
+            )
+            .await
+            .expect_err("lost ownership aborts before reply Send");
+
+        assert!(failure.ownership_lost());
+        assert_eq!(session.send_taps.load(Ordering::Relaxed), 0);
+        assert_eq!(session.typed.lock().as_slice(), &[COMMENT.to_string()]);
+        let frame = frames.latest(UDID).expect("cleanup frame");
+        let image = image::load_from_memory(&frame)
+            .expect("decode cleanup frame")
+            .to_rgb8();
+        assert!(screen::feed_ready(&image, Some(MOCK_SCREEN.0)));
+        drop(engine);
+        let _ = std::fs::remove_file(db_path);
     }
 
     #[tokio::test]
