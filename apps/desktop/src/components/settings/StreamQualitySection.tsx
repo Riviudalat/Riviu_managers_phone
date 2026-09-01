@@ -56,16 +56,14 @@ export function StreamQualitySection() {
     <section className="settings-section">
       <h3>Chất lượng stream</h3>
       <p className="hint">
-        Áp cho Android. Lưới và overlay mã hoá riêng — overlay là một máy chiếm cả cửa sổ
-        nên để cao hơn được. Đổi xong sẽ khởi động lại các tile đang chạy, mất khoảng một
-        giây hình đen mỗi máy.
+        Đổi chất lượng sẽ khởi động lại hình Android đang chạy; Tile trong lưới bị chặn ở {TILE_FPS_CEILING} hình/giây, còn FPS bên dưới áp cho máy đang mở lớn.
       </p>
-      <p className="hint">
-        FPS ở đây là của overlay. Tile trong lưới bị chặn ở {TILE_FPS_CEILING} hình/giây:
-        hai mươi tile giải mã cùng một chỗ với overlay, và đo trên dàn máy này thì 24
-        hình/giây tốn 135% một nhân CPU, còn 5 hình/giây tốn 85%. Chặn tile lại là để
-        máy đang điều khiển được mượt.
-      </p>
+      <details className="settings-details" aria-label="Phạm vi chất lượng hình">
+        <summary>Phạm vi chất lượng hình</summary>
+        <p className="hint">
+          Lưới và máy mở lớn mã hoá riêng. Thiết lập này không đổi stream iOS và có thể làm hình Android tối trong lúc khởi động lại.
+        </p>
+      </details>
       <div className="row">
         <label>
           Chất lượng lưới

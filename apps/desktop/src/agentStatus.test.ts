@@ -21,15 +21,15 @@ function status(state: AgentState, message: string | null = null): AgentStatus {
 }
 
 describe("agentStatusView", () => {
-  it("maps ready to San sang and enables text comments", () => {
+  it("maps ready to Sẵn sàng and enables text comments", () => {
     const view = agentStatusView(status("ready"));
 
-    expect(view.label).toBe("San sang");
+    expect(view.label).toBe("Sẵn sàng");
     expect(view.textCommentsEnabled).toBe(true);
   });
 
-  it("maps repairRequired to Can sua Agent", () => {
-    expect(agentStatusView(status("repairRequired")).label).toBe("Can sua Agent");
+  it("maps repairRequired to Cần khôi phục Agent", () => {
+    expect(agentStatusView(status("repairRequired")).label).toBe("Cần khôi phục Agent");
   });
 
   it("preserves a concise error message", () => {

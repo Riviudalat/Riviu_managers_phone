@@ -15,12 +15,9 @@ import type { NurtureSessionStatus, NurtureSettings } from "../types";
 /**
  * A note on the label queries below.
  *
- * Several captions are followed by the `!` explanation glyph, which is `aria-hidden` — a
- * browser's accessible-name computation skips `aria-hidden` subtrees, so the field's real
- * name is unchanged. Testing Library's `getByLabelText` is simpler than that: for a
- * wrapping `<label>` it matches raw `textContent`, glyph included. Hence the anchored
- * regexes. The property that matters in a browser is asserted directly instead, in
- * "explains every control behind a `!`".
+ * Several captions are followed by an accessible `!` explanation button. Queries for the
+ * actual input therefore specify its element type where the help button deliberately shares
+ * the subject words. The help control has its own name and is exercised independently below.
  */
 const saved = vi.hoisted(() => ({ saveSettings: vi.fn() }));
 
@@ -210,7 +207,7 @@ describe("NurturePopup", () => {
     expect(screen.getByRole("tab", { name: "Hành vi" })).toHaveAttribute("aria-selected", "true");
     expect(screen.getByRole("tab", { name: "AI" })).toHaveAttribute("aria-selected", "false");
     expect(screen.queryByRole("tab", { name: "Lịch" })).toBeNull();
-    expect(screen.getByLabelText(/Lịch tự chạy/)).toBeVisible();
+    expect(screen.getByLabelText(/Lịch tự chạy/, { selector: "input" })).toBeVisible();
     // The AI group is not merely collapsed, it is not rendered — which is the point of
     // tabs over the three stacked collapsibles this replaced.
     expect(screen.queryByLabelText(/^Base URL/)).toBeNull();
@@ -264,20 +261,20 @@ describe("NurturePopup", () => {
     expect(screen.getByLabelText(/^Mỏi dần/)).toBeChecked();
     expect(screen.getByLabelText(/^Theo giờ trong ngày/)).toBeChecked();
     expect(screen.getByLabelText(/^Ngập ngừng khi vuốt/)).toBeChecked();
-    expect(screen.getByLabelText(/^Nghỉ đêm từ/)).toHaveValue(0);
-    expect(screen.getByLabelText("đến")).toHaveValue(0);
-    expect(screen.getByLabelText(/Bundle TikTok/)).toHaveValue("com.ss.iphone.ugc.Ame");
+    expect(screen.getByLabelText(/^Nghỉ đêm từ/, { selector: "input" })).toHaveValue(0);
+    expect(screen.getByLabelText("đến", { selector: "input" })).toHaveValue(0);
+    expect(screen.getByLabelText(/Bundle TikTok/, { selector: "input" })).toHaveValue("com.ss.iphone.ugc.Ame");
   });
 
-  it("explains every control behind a `!` instead of a wall of hint text", async () => {
+  it("explains every control through accessible help instead of a wall of hint text", async () => {
     // The explanations used to be permanent paragraphs under the fields and were removed
     // for making a settings form read as documentation. They came back as one glyph per
     // control, so the assertion is that each control has one and that it says something
-    // specific — a `!` with an empty or generic tooltip would be worse than none.
+    // specific — an unlabeled icon with an empty or generic tooltip would be worse than none.
     await open();
     const info = (of: string) => {
       const el = document.querySelector<HTMLElement>(`[data-info="${of}"]`);
-      expect(el, `no ! for ${of}`).not.toBeNull();
+      expect(el, `no help control for ${of}`).not.toBeNull();
       return el!;
     };
     for (const name of [
@@ -296,14 +293,14 @@ describe("NurturePopup", () => {
       "Vuốt ngang",
       "Bundle TikTok",
     ]) {
-      expect(info(name)).toHaveTextContent("!");
-      // A `!` with a generic tooltip would be worse than none.
+      expect(info(name)).toHaveAttribute("aria-label", `Giải thích ${name}`);
+      expect(info(name).querySelector("svg[aria-hidden='true']")).not.toBeNull();
+      // A generic tooltip would be worse than none.
       expect(info(name).getAttribute("data-tip")!.length).toBeGreaterThan(30);
     }
-    // Decorative, and this is the assertion that keeps it so. A label's accessible name is
-    // its text content, so a glyph visible to the accessibility tree renames every field it
-    // sits beside — "Base URL" became "Base URL !" before this attribute was added.
-    expect(info("Mỏi dần")).toHaveAttribute("aria-hidden", "true");
+    // Help is operable, not decorative: screen-reader and keyboard users receive its explicit
+    // name while the adjacent input retains its own label.
+    expect(screen.getByRole("button", { name: "Giải thích Mỏi dần" })).toBe(info("Mỏi dần"));
     for (const name of ["Thích", "Bình luận", "Follow", "Vuốt nhanh"]) {
       // The four feature rows name their switch explicitly, so their names are provably
       // untouched by the glyph rather than merely matched loosely.
@@ -353,6 +350,17 @@ describe("NurturePopup", () => {
     for (const badge of badges) {
       expect(badge).toHaveAttribute("data-tip", expect.stringContaining("Bắt đầu lại"));
     }
+
+    fireEvent.focus(badges[0]);
+    const tooltip = screen.getByRole("tooltip");
+    expect(badges[0]).toHaveAttribute("aria-describedby", tooltip.id);
+    fireEvent.keyDown(badges[0], { key: "Escape" });
+    expect(screen.queryByRole("tooltip")).not.toBeInTheDocument();
+
+    fireEvent.click(badges[0]);
+    expect(screen.getByRole("tooltip")).toHaveTextContent("Bắt đầu lại");
+    fireEvent.click(badges[0]);
+    expect(screen.queryByRole("tooltip")).not.toBeInTheDocument();
   });
 
   it("tests the API against the frames the WebView already decoded", async () => {
@@ -654,7 +662,7 @@ describe("a rate the operator switched off", () => {
 
     const row = await screen.findByRole("button", { name: /iPhone Mock 01/ });
     // No counters: it never ran a session, and "0/0v" would read as a run that did nothing.
-    expect(screen.getByText("tự dọn")).toBeVisible();
+    expect(screen.getByText("tự khôi phục")).toBeVisible();
     expect(screen.getByText("bỏ qua trang mời kết bạn của TikTok")).toBeVisible();
 
     fireEvent.click(row);
@@ -780,7 +788,7 @@ describe("a rate the operator switched off", () => {
     ] as never);
     await open();
 
-    await waitFor(() => expect(screen.getByText("tự dọn")).toBeVisible());
+    await waitFor(() => expect(screen.getByText("tự khôi phục")).toBeVisible());
     expect(screen.queryByRole("progressbar")).toBeNull();
   });
 });

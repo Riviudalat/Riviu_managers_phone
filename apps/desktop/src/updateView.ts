@@ -50,8 +50,7 @@ export function updateView(
     return {
       tone: "info",
       headline: "Chưa kiểm bản mới",
-      detail:
-        "App không tự gọi mạng lúc mở — máy farm thường offline, và không ai yêu cầu nó gọi về.",
+      detail: 'Bấm "Kiểm bản mới" để kiểm tra theo yêu cầu.',
       canInstall: false,
     };
   }

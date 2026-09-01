@@ -18,6 +18,7 @@ vi.mock("./api", () => ({
   // took six interaction tests down at once.
   androidToolProblems: vi.fn(async () => [] as string[]),
   androidUnavailableReason: vi.fn(async () => null),
+  appLogDirectory: vi.fn(async () => String.raw`D:\RiviuData\logs`),
   // The zoom overlay takes a control lease as it mounts. Missing from this mock, the import is
   // `undefined` and calling it throws — the trap this file already documents three times.
   deviceControlBegin: vi.fn(async () => undefined),
@@ -31,6 +32,7 @@ vi.mock("./api", () => ({
     notes: [],
   })),
   driverDegradedReason: vi.fn(async () => null),
+  deploymentFrontendReady: vi.fn(async () => false),
   exampleScript: vi.fn(async () => "{}"),
   getStreamSettings: vi.fn(async () => ({
     fps: 24,
@@ -114,6 +116,20 @@ const iphone: DeviceInfo = {
 };
 
 describe("toolbar Start", () => {
+  it("signals deployment readiness only after the first fleet load settles", async () => {
+    const api = await import("./api");
+    let resolveDevices: (devices: DeviceInfo[]) => void = () => undefined;
+    vi.mocked(api.listDevices).mockImplementationOnce(
+      () => new Promise((resolve) => { resolveDevices = resolve; }),
+    );
+    render(<App />);
+    await waitFor(() => expect(api.startupError).toHaveBeenCalled());
+    expect(api.deploymentFrontendReady).not.toHaveBeenCalled();
+
+    resolveDevices([]);
+    await waitFor(() => expect(api.deploymentFrontendReady).toHaveBeenCalledTimes(1));
+  });
+
   it("uses viewEnsure on Android and does not call prepareDevice", async () => {
     const api = await import("./api");
     vi.mocked(api.listDevices).mockResolvedValue([androidPhone]);
@@ -331,8 +347,9 @@ describe("fleet health banners", () => {
     // The sentence that matters: not "no phones", which is the other banner and the wrong
     // answer — it sends the operator to look at adb, the one file that did work.
     expect(screen.getByText(/điều khiển sẽ không chạy/)).toBeInTheDocument();
-    // And where to send the evidence from, since the whole failure was invisible before.
-    expect(screen.getByText(/com\.riviu\.manager/)).toBeInTheDocument();
+    // The path comes from Tauri's active identifier, so Full and base builds cannot drift.
+    expect(screen.getByText(String.raw`D:\RiviuData\logs`)).toBeInTheDocument();
+    expect(screen.queryByText(/com\.riviu\.manager/)).not.toBeInTheDocument();
   });
 
   it("shows no bundled-tools banner when the bundle verifies", async () => {
@@ -350,21 +367,34 @@ describe("fleet health banners", () => {
     await waitFor(() => expect(screen.queryByText(/adb/i)).not.toBeInTheDocument());
   });
 
-  it("keeps the iOS sidecar failure a separate, louder message", async () => {
-    // Two different facts with two different fixes. Collapsing them into one string sends
-    // the operator looking in the wrong place; the iOS one is an `error` banner because an
-    // empty fleet there really is broken.
+  it("keeps an iOS failure scoped without claiming the Android fleet is empty", async () => {
+    // Android startup is independent. A broken iOS sidecar may explain absent iPhones, but
+    // it must not turn a healthy Android-only install into a global backend failure.
     const api = await import("./api");
+    vi.mocked(api.listDevices).mockResolvedValue([androidPhone]);
     vi.mocked(api.driverDegradedReason).mockResolvedValueOnce("sidecar iOS bị suy giảm");
     render(<App />);
     await waitFor(() =>
       expect(screen.getByText(/sidecar iOS bị suy giảm/)).toBeInTheDocument(),
     );
+    await waitFor(() => expect(screen.getByText("Redmi")).toBeInTheDocument());
+    expect(screen.queryByText(/danh sách sẽ luôn trống/)).not.toBeInTheDocument();
+    expect(screen.getByText(/Nhánh iOS không sẵn sàng/)).toBeInTheDocument();
     expect(screen.queryByText(/khởi động lại app/)).not.toBeInTheDocument();
   });
 });
 
 describe("Flow page integration", () => {
+  it("uses the topbar as the one semantic page heading", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+
+    expect(screen.getByRole("heading", { level: 1, name: "Quản lý cửa sổ" })).toBeVisible();
+    await user.click(screen.getByRole("button", { name: "Dữ liệu" }));
+    expect(screen.getByRole("heading", { level: 1, name: "Dữ liệu" })).toBeVisible();
+    expect(screen.getAllByRole("heading", { level: 1 })).toHaveLength(1);
+  });
+
   it("prompts once before leaving a dirty Flow draft", async () => {
     const user = userEvent.setup();
     render(<App />);

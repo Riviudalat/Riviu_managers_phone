@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import {
   agentGetSettings,
   agentListStatuses,
@@ -8,7 +8,7 @@ import {
 } from "../../api";
 import { agentStatusView } from "../../agentStatus";
 import { describeError } from "../../describeError";
-import { EmptyState } from "../States";
+import { EmptyState, StatusNotice } from "../States";
 import { IconPhone } from "../Icons";
 import type { AgentRuntimeView, AgentStatus, DeviceInfo } from "../../types";
 
@@ -19,29 +19,45 @@ export function AgentSection({ connectedDevices, connectedUdids }: {
   connectedDevices: DeviceInfo[];
   connectedUdids: string[];
 }) {
-  const [runtime, setRuntime] = useState<AgentRuntimeView | null>(null);
+  const [runtime, setRuntime] = useState<AgentRuntimeView | null>();
   const [statuses, setStatuses] = useState<Record<string, AgentStatus>>({});
+  const [statusesLoading, setStatusesLoading] = useState(false);
   const [busy, setBusy] = useState<Record<string, AgentAction>>({});
   const [savingSettings, setSavingSettings] = useState(false);
   const [agentMessage, setAgentMessage] = useState<string | null>(null);
+  const [runtimeError, setRuntimeError] = useState<string | null>(null);
+  const [statusesError, setStatusesError] = useState<string | null>(null);
 
-  useEffect(() => {
+  const loadRuntime = useCallback(() => {
+    setRuntime(undefined);
+    setRuntimeError(null);
     agentGetSettings()
-      .then(setRuntime)
-      .catch((error) => setAgentMessage(describeError(error)));
+      .then((next) => setRuntime(next))
+      .catch((error) => {
+        setRuntime(null);
+        setRuntimeError(describeError(error));
+      });
   }, []);
 
-  useEffect(() => {
+  useEffect(loadRuntime, [loadRuntime]);
+
+  const loadStatuses = useCallback(() => {
     if (!connectedUdids.length) {
       setStatuses({});
+      setStatusesError(null);
       return;
     }
+    setStatusesLoading(true);
+    setStatusesError(null);
     agentListStatuses(connectedUdids)
       .then((items) => {
         setStatuses(Object.fromEntries(items.map((status) => [status.udid, status])));
       })
-      .catch((error) => setAgentMessage(describeError(error)));
+      .catch((error) => setStatusesError(describeError(error)))
+      .finally(() => setStatusesLoading(false));
   }, [connectedUdids]);
+
+  useEffect(loadStatuses, [loadStatuses]);
 
   const runAgentAction = async (udid: string, action: AgentAction) => {
     setBusy((current) => ({ ...current, [udid]: action }));
@@ -68,31 +84,43 @@ export function AgentSection({ connectedDevices, connectedUdids }: {
       <div className="settings-section-heading">
         <div>
           <h3>Riviu Agent</h3>
-          <p className="hint">Runtime chính cho stream, gesture và bình luận chữ.</p>
+          <p className="hint">Giữ kết nối hình ảnh, thao tác và bình luận chữ trên từng điện thoại.</p>
         </div>
-        <span className={`chip ${runtime?.tokenConfigured ? "ok" : "warn"}`}>
-          {runtime?.tokenConfigured ? "Credential stored" : "Credential missing"}
+        <span
+          className={`chip ${runtime === undefined ? "info" : runtime?.tokenConfigured ? "ok" : "warn"}`}
+        >
+          {runtime === undefined
+            ? "Đang đọc thông tin xác thực"
+            : runtime === null
+              ? "Chưa rõ trạng thái xác thực"
+              : runtime.tokenConfigured
+                ? "Đã lưu thông tin xác thực"
+                : "Chưa cấu hình thông tin xác thực"}
         </span>
       </div>
 
       <dl className="agent-runtime-meta">
         <div>
-          <dt>Active artifact</dt>
+          <dt>Gói đang dùng</dt>
           <dd>
-            <code>{runtime?.activeArtifactId ?? "..."}</code>
+            <code>{runtime === undefined ? "…" : runtime?.activeArtifactId ?? "Chưa rõ"}</code>
             {runtime?.activeArtifactVersion ? ` v${runtime.activeArtifactVersion}` : ""}
           </dd>
         </div>
         <div>
-          <dt>Protocol</dt>
+          <dt>Giao thức</dt>
           <dd>{protocolVersion ?? "-"}</dd>
         </div>
         <div>
-          <dt>Credential</dt>
+          <dt>Thông tin xác thực</dt>
           <dd>
-            {runtime?.tokenConfigured
-              ? "Stored in OS credential store"
-              : "Not configured"}
+            {runtime === undefined
+              ? "Đang đọc…"
+              : runtime === null
+                ? "Chưa rõ"
+                : runtime.tokenConfigured
+                  ? "Đã lưu trong kho thông tin xác thực Windows"
+                  : "Chưa cấu hình"}
           </dd>
         </div>
       </dl>
@@ -116,10 +144,34 @@ export function AgentSection({ connectedDevices, connectedUdids }: {
             }
           }}
         />
-        Auto repair
+        Tự khôi phục Agent
       </label>
 
-      {agentMessage && <p className="error">{agentMessage}</p>}
+      {runtimeError && (
+        <StatusNotice
+          tone="error"
+          action={
+            <button type="button" className="secondary" onClick={loadRuntime}>
+              Thử lại cấu hình
+            </button>
+          }
+        >
+          {runtimeError}
+        </StatusNotice>
+      )}
+      {statusesError && (
+        <StatusNotice
+          tone="error"
+          action={
+            <button type="button" className="secondary" onClick={loadStatuses}>
+              Thử lại trạng thái
+            </button>
+          }
+        >
+          {statusesError}
+        </StatusNotice>
+      )}
+      {agentMessage && <StatusNotice tone="error">{agentMessage}</StatusNotice>}
 
       {!connectedDevices.length ? (
         <EmptyState
@@ -129,22 +181,22 @@ export function AgentSection({ connectedDevices, connectedUdids }: {
           hint="Cắm máy qua USB rồi làm mới ở Quản lý cửa sổ."
         />
       ) : (
-        <div className="agent-status-table" role="table" aria-label="Agent readiness">
+        <div className="agent-status-table" role="table" aria-label="Trạng thái Agent">
           <div className="agent-status-head" role="row">
-            <span>Device</span>
-            <span>State</span>
-            <span>Build</span>
-            <span>Auth</span>
-            <span>MJPEG</span>
-            <span>Session</span>
-            <span>Actions</span>
+            <span role="columnheader">Thiết bị</span>
+            <span role="columnheader">Trạng thái</span>
+            <span role="columnheader">Bản dựng</span>
+            <span role="columnheader">Xác thực</span>
+            <span role="columnheader">Hình ảnh</span>
+            <span role="columnheader">Phiên</span>
+            <span role="columnheader">Thao tác</span>
           </div>
           {connectedDevices.map((device) => {
             const status = statuses[device.udid];
             const view = status
               ? agentStatusView(status)
               : {
-                  label: "Chua kiem tra",
+                  label: statusesLoading ? "Đang đọc…" : "Chưa kiểm tra",
                   tone: "info" as const,
                   textCommentsEnabled: false,
                   message: null,
@@ -152,30 +204,36 @@ export function AgentSection({ connectedDevices, connectedUdids }: {
             const action = busy[device.udid];
             return (
               <div className="agent-status-row" role="row" key={device.udid}>
-                <span className="agent-device-name" title={device.udid}>
+                <span className="agent-device-name" title={device.udid} role="cell">
                   <strong>{device.name}</strong>
                   <small>{device.model}</small>
                 </span>
-                <span>
+                <span role="cell">
                   <span className={`chip ${view.tone}`} title={view.message ?? undefined}>
                     {view.label}
                   </span>
                 </span>
-                <span className="mono">
+                <span className="mono" role="cell">
                   {status?.installedVersion ?? "-"}
                   {status?.installedBuild ? ` (${status.installedBuild})` : ""}
                 </span>
-                <span>{status?.authReady ? "Yes" : "No"}</span>
-                <span>{status?.mjpegReady ? "Yes" : "No"}</span>
-                <span>{status?.sessionReady ? "Yes" : "No"}</span>
-                <span className="agent-status-actions">
+                <span className="agent-readiness" role="cell">
+                  {readinessValue(status, status?.authReady)}
+                </span>
+                <span className="agent-readiness" role="cell">
+                  {readinessValue(status, status?.mjpegReady)}
+                </span>
+                <span className="agent-readiness" role="cell">
+                  {readinessValue(status, status?.sessionReady)}
+                </span>
+                <div className="agent-status-actions" role="cell">
                   <button
                     type="button"
                     className="ghost"
                     disabled={Boolean(action)}
                     onClick={() => void runAgentAction(device.udid, "check")}
                   >
-                    {action === "check" ? "Checking..." : "Check"}
+                    {action === "check" ? "Đang kiểm tra…" : "Kiểm tra"}
                   </button>
                   <button
                     type="button"
@@ -183,9 +241,17 @@ export function AgentSection({ connectedDevices, connectedUdids }: {
                     disabled={Boolean(action)}
                     onClick={() => void runAgentAction(device.udid, "repair")}
                   >
-                    {action === "repair" ? "Repairing..." : "Repair"}
+                    {action === "repair" ? "Đang khôi phục…" : "Khôi phục"}
                   </button>
-                </span>
+                  <details className="agent-readiness-details">
+                    <summary>Chi tiết sẵn sàng</summary>
+                    <span>
+                      Xác thực: {readinessValue(status, status?.authReady)} · Hình ảnh:{" "}
+                      {readinessValue(status, status?.mjpegReady)} · Phiên:{" "}
+                      {readinessValue(status, status?.sessionReady)}
+                    </span>
+                  </details>
+                </div>
               </div>
             );
           })}
@@ -193,4 +259,9 @@ export function AgentSection({ connectedDevices, connectedUdids }: {
       )}
     </section>
   );
+}
+
+function readinessValue(status: AgentStatus | undefined, value: boolean | undefined): string {
+  if (!status || status.state === "unknown" || status.state === "starting") return "Chưa rõ";
+  return value ? "Có" : "Không";
 }

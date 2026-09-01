@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { exampleScript, listScripts, saveScript } from "../api";
 import { describeError } from "../describeError";
+import { EmptyState, LoadingState, StatusNotice } from "./States";
 
 interface Props {
   onUseInJobs: (json: string) => void;
@@ -11,14 +12,24 @@ export function ScriptsPanel({ onUseInJobs }: Props) {
   const [body, setBody] = useState("");
   const [saved, setSaved] = useState<[string, string][]>([]);
   const [message, setMessage] = useState<string | null>(null);
+  const [listLoading, setListLoading] = useState(true);
+  const [listError, setListError] = useState<string | null>(null);
 
   const reload = async () => {
-    setSaved(await listScripts());
+    setListLoading(true);
+    setListError(null);
+    try {
+      setSaved(await listScripts());
+    } catch (error) {
+      setListError(describeError(error));
+    } finally {
+      setListLoading(false);
+    }
   };
 
   useEffect(() => {
     exampleScript().then(setBody).catch(() => undefined);
-    reload().catch(() => undefined);
+    void reload();
   }, []);
 
   return (
@@ -30,13 +41,13 @@ export function ScriptsPanel({ onUseInJobs }: Props) {
           className="ghost"
           onClick={async () => setBody(await exampleScript())}
         >
-          Load example
+          Tải mẫu
         </button>
       </header>
       <div className="panel-grid">
         <section>
           <label>
-            Name
+            Tên
             <input value={name} onChange={(e) => setName(e.target.value)} />
           </label>
           <textarea rows={18} value={body} onChange={(e) => setBody(e.target.value)} />
@@ -58,7 +69,7 @@ export function ScriptsPanel({ onUseInJobs }: Props) {
                 }
               }}
             >
-              Save
+              Lưu
             </button>
             <button type="button" className="ghost" onClick={() => onUseInJobs(body)}>
               Dùng ở Tác vụ
@@ -67,23 +78,46 @@ export function ScriptsPanel({ onUseInJobs }: Props) {
         </section>
         <section>
           <h3>Đã lưu</h3>
-          <ul className="script-list">
-            {saved.map(([n, json]) => (
-              <li key={n}>
-                <button
-                  type="button"
-                  className="linkish"
-                  onClick={() => {
-                    setName(n);
-                    setBody(json);
-                  }}
-                >
-                  {n}
+          {listLoading && !saved.length && (
+            <LoadingState label="Đang tải kịch bản đã lưu…" />
+          )}
+          {listError && (
+            <StatusNotice
+              tone="error"
+              action={
+                <button type="button" onClick={() => void reload()}>
+                  Thử lại danh sách
                 </button>
-              </li>
-            ))}
-            {!saved.length && <p className="hint">No saved scripts.</p>}
-          </ul>
+              }
+            >
+              Không đọc được danh sách: {listError}
+            </StatusNotice>
+          )}
+          {!listLoading && !listError && !saved.length && (
+            <EmptyState
+              compact
+              title="Chưa có kịch bản đã lưu"
+              hint="Lưu kịch bản hiện tại để dùng lại ở lần sau."
+            />
+          )}
+          {saved.length > 0 && (
+            <ul className="script-list">
+              {saved.map(([n, json]) => (
+                <li key={n}>
+                  <button
+                    type="button"
+                    className="linkish"
+                    onClick={() => {
+                      setName(n);
+                      setBody(json);
+                    }}
+                  >
+                    {n}
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
         </section>
       </div>
     </div>

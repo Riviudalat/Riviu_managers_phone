@@ -15,6 +15,7 @@ vi.mock("./api", () => ({
   // and `.catch` on that throws synchronously inside the boot effect — the same silence that
   // took six interaction tests down at once.
   androidToolProblems: vi.fn(async () => [] as string[]),
+  appLogDirectory: vi.fn(async () => String.raw`C:\fixture\logs`),
   androidUnavailableReason: vi.fn(async () => null),
   startupError: vi.fn(async () => null),
   retryStartup: vi.fn(async () => null),
@@ -49,9 +50,10 @@ describe("useFleet", () => {
   });
 
   it("subscribes once and loads the fleet when startup is clean", async () => {
-    renderHook(() => useFleet());
+    const { result } = renderHook(() => useFleet());
     await waitFor(() => expect(mocked.listenRiviuEvents).toHaveBeenCalledTimes(1));
     expect(mocked.listDevices).toHaveBeenCalled();
+    expect(result.current.fleetSettled).toBe(true);
   });
 
   it("subscribes to nothing while startup is blocked", async () => {

@@ -616,18 +616,18 @@
   min-height: 0;
 }
 
-/* The `!` after a control's name. Quiet by default so twelve of them do not read as
-   twelve warnings, and it only takes the accent on hover — at which point the tooltip is
-   about to appear anyway. `cursor: help` is the affordance; there is nothing to click. */
+/* The help icon after a control's name. It is a real button so keyboard, pointer and touch users
+   receive the same tooltip without adding the glyph to a surrounding label's name. */
 .nu-info {
   display: inline-flex;
   align-items: center;
   justify-content: center;
   flex: 0 0 auto;
-  width: 13px;
-  height: 13px;
+  width: 16px;
+  height: 16px;
   margin-left: 0.28rem;
-  border: 1px solid var(--line-strong);
+  padding: 0;
+  border: 0;
   border-radius: 50%;
   color: var(--text-3);
   font-size: var(--text-2xs);
@@ -638,12 +638,14 @@
   text-transform: none;
   cursor: help;
   transition: color 0.12s ease, border-color 0.12s ease;
+  background: transparent;
 }
-.nu-info:hover {
+.nu-info:hover,
+.nu-info:focus-visible {
   border-color: var(--primary);
   color: var(--primary);
 }
-/* Instant, styled hover tooltip for the `!` glyph and the "cần chạy lại" badge.
+/* Instant, styled hover tooltip for the help icon and the "cần chạy lại" badge.
    `position: fixed` (coordinates from the trigger's getBoundingClientRect) so it is not
    clipped by the panel's scroll container and needs no hover delay — it renders the moment
    the pointer enters, unlike the native `title` it replaces. */
@@ -680,9 +682,12 @@
 }
 
 .nurture-restart-badge {
+  width: auto;
+  min-height: 0;
   padding: 0 0.26rem;
   border: 1px solid var(--warn);
   border-radius: 3px;
+  background: transparent;
   color: var(--warn);
   font-size: var(--text-2xs);
   font-weight: 600;

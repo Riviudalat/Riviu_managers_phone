@@ -5,14 +5,17 @@ import { SelectionStrip } from "./SelectionStrip";
 import { flash } from "../farmToast";
 import { targetsOf } from "../selectionTargets";
 import { describeError } from "../describeError";
+import { EmptyState, LoadingState, StatusNotice } from "./States";
 
 interface Props {
   jobs: JobRecord[];
   devices: DeviceInfo[];
   selectedUdids: string[];
   onSelectUdids: (udids: string[]) => void;
-  onRefresh: () => void;
+  onRefresh: () => void | Promise<void>;
   initialScript?: string | null;
+  loading?: boolean;
+  loadError?: string | null;
 }
 
 export function JobsPanel({
@@ -22,6 +25,8 @@ export function JobsPanel({
   onSelectUdids,
   onRefresh,
   initialScript,
+  loading = false,
+  loadError = null,
 }: Props) {
   const [scriptJson, setScriptJson] = useState(initialScript ?? "");
   const [busy, setBusy] = useState(false);
@@ -43,12 +48,11 @@ export function JobsPanel({
 
   return (
     <div className="panel">
-      <header className="panel-header">
-        <h2>Jobs</h2>
+      <div className="panel-header" style={{ justifyContent: "flex-end" }}>
         <button type="button" className="ghost" onClick={onRefresh}>
-          Refresh
+          Làm mới
         </button>
-      </header>
+      </div>
       <SelectionStrip
         devices={devices}
         selected={selectedUdids}
@@ -76,7 +80,7 @@ export function JobsPanel({
                 try {
                   await runScript(scriptJson, targets);
                   onRefresh();
-                  flash(`Job queued · ${targets.length} máy`);
+                  flash(`Đã xếp tác vụ cho ${targets.length} máy`);
                 } catch (e) {
                   setError(describeError(e));
                 } finally {
@@ -84,20 +88,33 @@ export function JobsPanel({
                 }
               }}
             >
-              Run ({targets.length})
+              Chạy ({targets.length})
             </button>
             <button
               type="button"
               className="ghost"
               onClick={async () => setScriptJson(await exampleScript())}
             >
-              Load example
+              Tải mẫu
             </button>
           </div>
         </section>
         <section>
           <h3>Lịch sử</h3>
           <div className="job-list">
+            {loading && !jobs.length && <LoadingState label="Đang tải lịch sử tác vụ…" />}
+            {loadError && (
+              <StatusNotice
+                tone="error"
+                action={
+                  <button type="button" onClick={() => void onRefresh()}>
+                    Thử lại lịch sử
+                  </button>
+                }
+              >
+                Không đọc được lịch sử: {loadError}
+              </StatusNotice>
+            )}
             {jobs.map((job) => (
               <article key={job.id} className="job-card">
                 <div>
@@ -124,12 +141,18 @@ export function JobsPanel({
                       onRefresh();
                     }}
                   >
-                    Cancel
+                    Huỷ
                   </button>
                 ) : null}
               </article>
             ))}
-            {!jobs.length && <p className="hint">No jobs yet.</p>}
+            {!loading && !loadError && !jobs.length && (
+              <EmptyState
+                compact
+                title="Chưa có tác vụ"
+                hint="Chọn máy và chạy một kịch bản để tạo tác vụ đầu tiên."
+              />
+            )}
           </div>
         </section>
       </div>

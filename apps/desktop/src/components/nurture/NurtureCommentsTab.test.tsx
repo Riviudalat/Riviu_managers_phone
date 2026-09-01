@@ -1,4 +1,4 @@
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { NurtureCommentsTab } from "./NurtureCommentsTab";
@@ -123,6 +123,24 @@ describe("the comment audit", () => {
     );
   });
 
+  it("maps card-changed audit outcomes without exposing the raw code as primary copy", async () => {
+    listCommentAttempts.mockResolvedValue([
+      row({ outcome: "skipped: card_changed", preview: "" }),
+      row({ id: "a3", outcome: "engine_future_state", preview: "" }),
+    ]);
+
+    render(<NurtureCommentsTab live={false} />);
+
+    await waitFor(() =>
+      expect(screen.getByText("bỏ — thẻ đã đổi trước thao tác")).toBeInTheDocument(),
+    );
+    expect(screen.getByText("trạng thái chưa nhận diện")).toHaveAttribute(
+      "title",
+      "engine_future_state",
+    );
+    expect(screen.queryByText("engine_future_state")).not.toBeInTheDocument();
+  });
+
   it("says nothing was recorded rather than showing an empty list", async () => {
     listCommentAttempts.mockResolvedValue([]);
     render(<NurtureCommentsTab live={false} />);
@@ -160,6 +178,17 @@ describe("the comment audit", () => {
     listCommentAttempts.mockRejectedValue(new Error("database is locked"));
     render(<NurtureCommentsTab live={false} />);
     await waitFor(() => expect(screen.getByText(/database is locked/)).toBeInTheDocument());
+  });
+
+  it("offers a retry after a list failure", async () => {
+    listCommentAttempts
+      .mockRejectedValueOnce(new Error("database is locked"))
+      .mockResolvedValueOnce([row({ preview: "đã đọc lại" })]);
+    render(<NurtureCommentsTab live={false} />);
+
+    await waitFor(() => expect(screen.getByRole("alert")).toHaveTextContent("database is locked"));
+    fireEvent.click(screen.getByRole("button", { name: "Thử lại" }));
+    await waitFor(() => expect(screen.getByText(/đã đọc lại/)).toBeInTheDocument());
   });
 
   /**
@@ -203,6 +232,7 @@ describe("the comment audit", () => {
 
     await waitFor(() => expect(screen.getByText(/quán này ngon/)).toBeInTheDocument());
     expect(screen.queryByText("Hôm nay")).toBeNull();
+    expect(screen.getByRole("alert")).toHaveTextContent(/chưa đọc được tổng chi phí/i);
   });
 
   /**

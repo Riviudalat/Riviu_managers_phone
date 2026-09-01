@@ -10,6 +10,7 @@ import {
 import {
   agentBulkRepair,
   agentListStatuses,
+  deploymentFrontendReady,
   refreshDevices,
   saveGroup,
   viewSetPreset,
@@ -147,9 +148,11 @@ function App() {
     reload,
     startupIssue,
     bootError,
+    fleetSettled,
     driverIssue,
     androidIssue,
     androidToolProblems,
+    logDirectory,
     retryingStartup,
     retry: retryStartupAndResubscribe,
   } = useFleet();
@@ -180,6 +183,11 @@ function App() {
   const [flowDirty, setFlowDirty] = useState(false);
   const [automationView, setAutomationView] = useState<"flow" | "legacy">("flow");
   useViewClient();
+
+  useEffect(() => {
+    if (startupIssue !== null || !fleetSettled || bootError) return;
+    void deploymentFrontendReady();
+  }, [bootError, fleetSettled, startupIssue]);
 
   const confirmDiscardFlow = useCallback(
     () =>
@@ -460,9 +468,9 @@ function App() {
 
       <div className="main-col">
         <header className="topbar">
-          <div className="topbar-title" data-testid="page-title">
+          <h1 className="topbar-title" data-testid="page-title">
             {title}
-          </div>
+          </h1>
           <div className="topbar-drag" />
           <div className="topbar-actions">
             {groupMode && <span className="chip primary">Sync</span>}
@@ -503,10 +511,9 @@ function App() {
             </Banner>
           )}
 
-          {driverIssue && (
-            <Banner tone="error">
-              Không đọc được thiết bị thật — danh sách sẽ luôn trống cho tới khi
-              sửa xong. Nguyên nhân: {driverIssue}
+          {driverIssue && page === "control" && (
+            <Banner tone="warn">
+              Nhánh iOS không sẵn sàng; các máy Android vẫn hoạt động độc lập. Nguyên nhân: {driverIssue}
             </Banner>
           )}
 
@@ -537,7 +544,7 @@ function App() {
             <Banner tone="warn">
               Bộ công cụ Android trong bản cài không khớp bản kê — máy vẫn hiện trong
               danh sách nhưng <strong>điều khiển sẽ không chạy</strong>. Cài lại app;
-              nếu vẫn vậy, gửi file log ở <code>%LOCALAPPDATA%\com.riviu.manager\logs</code>.
+              nếu vẫn vậy, gửi file log ở <code>{logDirectory ?? "thư mục log của bản cài"}</code>.
               Nguyên nhân: {androidToolProblems.join("; ")}
             </Banner>
           )}
@@ -918,6 +925,8 @@ function App() {
               onSelectUdids={setSelected}
               onRefresh={reload}
               initialScript={jobsScriptSeed}
+              loading={!fleetSettled}
+              loadError={bootError}
             />
           )}
           {page === "publish" && (

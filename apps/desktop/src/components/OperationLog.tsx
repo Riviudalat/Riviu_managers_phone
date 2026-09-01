@@ -3,6 +3,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { listOpLogs } from "../api";
 import { describeError } from "../describeError";
 import type { OpLog } from "../types";
+import { EmptyState, LoadingState, StatusNotice } from "./States";
 
 /** How many rows to ask for. `analytics_summary` fetches twenty; this is the whole point. */
 const LIMIT = 200;
@@ -29,15 +30,19 @@ const LIMIT = 200;
 export function OperationLog() {
   const [rows, setRows] = useState<OpLog[] | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
   const [needle, setNeedle] = useState("");
 
   const load = useCallback(() => {
+    setLoading(true);
+    setError(null);
     void listOpLogs(LIMIT)
       .then((next) => {
         setRows(next);
         setError(null);
       })
-      .catch((cause) => setError(describeError(cause)));
+      .catch((cause) => setError(describeError(cause)))
+      .finally(() => setLoading(false));
   }, []);
 
   useEffect(load, [load]);
@@ -69,16 +74,24 @@ export function OperationLog() {
       </header>
 
       {error && (
-        <p className="hint" role="alert">
-          {error}
-        </p>
+        <StatusNotice
+          tone="error"
+          action={
+            <button type="button" onClick={load}>
+              Thử lại nhật ký
+            </button>
+          }
+        >
+          Không đọc được nhật ký: {error}
+        </StatusNotice>
       )}
-      {!error && !rows && <p className="hint">Đang đọc…</p>}
-      {!error && rows?.length === 0 && (
-        <p className="hint">
-          Chưa có dòng nào. Bảng này được ghi mỗi khi app làm một việc lên máy, nên trống nghĩa
-          là chưa có thao tác nào chạy qua kể từ khi DB được tạo.
-        </p>
+      {!error && loading && !rows && <LoadingState label="Đang đọc nhật ký…" />}
+      {!error && !loading && rows?.length === 0 && (
+        <EmptyState
+          compact
+          title="Chưa có dòng nào"
+          hint="Nhật ký sẽ xuất hiện sau khi app thực hiện một thao tác trên máy."
+        />
       )}
       {!error && rows !== null && rows.length > 0 && shown.length === 0 && (
         <p className="hint">Không dòng nào khớp “{needle.trim()}”.</p>

@@ -19,16 +19,16 @@ export function LegacyAgentSection() {
   }, []);
   return (
     <section className="settings-section">
-      <h3>Legacy stock agent</h3>
+      <h3>Khôi phục agent iOS cũ</h3>
       <p className="hint">
-        Apple ID signing chỉ dành cho rollback/debug stock WDA; không phải đường bình luận chữ.
+        Thông tin này chỉ dùng khi cần quay lại agent iOS dự phòng; đường điều khiển chính không đọc nó.
       </p>
       <label>
         Email
         <input value={email} onChange={(event) => setEmail(event.target.value)} />
       </label>
       <label>
-        Password {hasPassword ? "(saved)" : ""}
+        Mật khẩu {hasPassword ? "(đã lưu)" : ""}
         <input
           type="password"
           value={password}
@@ -46,13 +46,13 @@ export function LegacyAgentSection() {
               await setAppleId(email, password);
               setHasPassword(true);
               setPassword("");
-              setLegacyMessage("Saved to OS credential store");
+              setLegacyMessage("Đã lưu trong kho thông tin xác thực của Windows");
             } catch (error) {
               setLegacyMessage(describeError(error));
             }
           }}
         >
-          Save
+          Lưu
         </button>
         <button
           type="button"
@@ -63,13 +63,13 @@ export function LegacyAgentSection() {
               setEmail("");
               setPassword("");
               setHasPassword(false);
-              setLegacyMessage("Cleared");
+              setLegacyMessage("Đã xóa");
             } catch (error) {
               setLegacyMessage(describeError(error));
             }
           }}
         >
-          Clear
+          Xóa
         </button>
       </div>
     </section>

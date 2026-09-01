@@ -15,12 +15,16 @@ export function LocalApiSection() {
   }, []);
   return (
     <section className="settings-section">
-      <h3>API tự động hoá cục bộ (openapi)</h3>
+      <h3>API tự động hoá cục bộ</h3>
       <p className="hint">
-        Máy chủ HTTP chỉ chạy trên loopback (127.0.0.1) để script bên ngoài điều khiển fleet
-        — bật/tắt màn, chạm, vuốt, gõ, phím. Mặc định TẮT, luôn cần token Bearer. Đổi cấu
-        hình có hiệu lực sau khi khởi động lại ứng dụng.
+        Khi bật, script trên chính máy tính có thể điều khiển fleet; thay đổi chỉ có hiệu lực sau khi khởi động lại app.
       </p>
+      <details className="settings-details" aria-label="Phạm vi API cục bộ">
+        <summary>Phạm vi API cục bộ</summary>
+        <p className="hint">
+          Máy chủ chỉ nghe tại 127.0.0.1 và mọi lệnh đều cần token Bearer. Mặc định API tắt.
+        </p>
+      </details>
       {localApi && (
         <>
           <label className="agent-toggle" style={{ marginBottom: "0.5rem" }}>
@@ -85,9 +89,12 @@ export function LocalApiSection() {
             </button>
           </div>
           {localApi.token && (
-            <pre className="group-tools-log" style={{ marginTop: "0.5rem" }}>
+            <details className="settings-details" aria-label="Ví dụ gọi API">
+              <summary>Ví dụ gọi API</summary>
+              <pre className="group-tools-log">
               {`# ví dụ: liệt kê máy\ncurl -H "Authorization: Bearer ${localApi.token}" http://127.0.0.1:${localApi.port}/v1/devices\n\n# chạm toạ độ trên một máy\ncurl -X POST -H "Authorization: Bearer ${localApi.token}" \\\n  -d '{"udid":"<udid>","x":540,"y":1200}' http://127.0.0.1:${localApi.port}/v1/tap`}
-            </pre>
+              </pre>
+            </details>
           )}
         </>
       )}

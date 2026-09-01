@@ -739,6 +739,10 @@ export async function installTauriMock(
     // is the point: the registry is the contract, not a convenience.
     commandHandlers.set("driver_degraded_reason", () => null);
     commandHandlers.set("android_unavailable_reason", () => null);
+    // Production returns true only for the installed-package smoke process. E2E is a normal
+    // session, so the frontend handshake is an inert false rather than an unknown command.
+    commandHandlers.set("deployment_frontend_ready", () => false);
+    commandHandlers.set("app_log_directory", () => "C:\\Users\\fixture\\AppData\\Local\\com.riviu.managersphone\\logs");
     commandHandlers.set("view_endpoint", () => null);
     commandHandlers.set("view_ensure", () => null);
     commandHandlers.set("view_set_preset", () => null);
@@ -762,6 +766,42 @@ export async function installTauriMock(
     commandHandlers.set("update_install", () => null);
     commandHandlers.set("list_installed_apps", () => []);
     commandHandlers.set("list_groups", () => []);
+    commandHandlers.set("list_materials", () => [{
+      id: "fixture-material",
+      name: "video-san-pham.mp4",
+      path: "C:\\fixture\\media\\video-san-pham.mp4",
+      kind: "video",
+      size: 4_096,
+      createdAt: "2026-09-01T08:00:00.000Z",
+    }]);
+    commandHandlers.set("list_apps_library", () => [{
+      id: "fixture-app",
+      name: "TikTok.ipa",
+      path: "C:\\fixture\\apps\\TikTok.ipa",
+      bundleId: "com.ss.iphone.ugc.Ame",
+      version: "35.0.0",
+      createdAt: "2026-09-01T08:00:00.000Z",
+    }]);
+    commandHandlers.set("analytics_summary", () => ({
+      deviceTotal: 2,
+      deviceReady: 2,
+      jobsTotal: 4,
+      jobsSucceeded: 4,
+      jobsFailed: 0,
+      jobsRunning: 0,
+      scriptsTotal: 1,
+      materialsTotal: 1,
+      appsTotal: 1,
+      schedulesEnabled: 0,
+      recentLogs: [],
+    }));
+    commandHandlers.set("list_op_logs", () => [{
+      id: "fixture-log",
+      action: "deployment.ready",
+      detail: "Dữ liệu fixture đã sẵn sàng",
+      createdAt: "2026-09-01T08:00:00.000Z",
+    }]);
+    commandHandlers.set("api_docs", () => "GET /v1/devices\nGET /v1/jobs");
     // The publish page reads its campaign list on mount, and now re-reads it on every
     // `publishUpdated`. Unregistered, that rejected and the page carried a red
     // `Unknown mock command: publish_list` through its own screenshot baseline — the same

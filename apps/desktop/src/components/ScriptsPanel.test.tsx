@@ -3,16 +3,28 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { ScriptsPanel } from "./ScriptsPanel";
 
+const listScripts = vi.hoisted(() => vi.fn());
+
 vi.mock("../api", () => ({
   exampleScript: vi.fn(async () => '{"steps":[]}'),
-  listScripts: vi.fn(async () => [] as [string, string][]),
+  listScripts,
   saveScript: vi.fn(async () => undefined),
 }));
 
 afterEach(cleanup);
-beforeEach(() => vi.clearAllMocks());
+beforeEach(() => {
+  vi.clearAllMocks();
+  listScripts.mockReset();
+  listScripts.mockResolvedValue([] as [string, string][]);
+});
 
 describe("ScriptsPanel Save", () => {
+  it("keeps the legacy-script scope under the broader Flow topbar", () => {
+    render(<ScriptsPanel onUseInJobs={() => undefined} />);
+
+    expect(screen.getByRole("heading", { level: 2, name: "Kịch bản" })).toBeVisible();
+  });
+
   it("says why a script was not saved instead of leaving the panel silent", async () => {
     // `await saveScript(...)` had no guard, and the backend parses a script before storing
     // it — so this rejects on exactly the input an operator most needs told about, a
@@ -24,7 +36,7 @@ describe("ScriptsPanel Save", () => {
     );
     render(<ScriptsPanel onUseInJobs={() => undefined} />);
 
-    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    fireEvent.click(screen.getByRole("button", { name: "Lưu" }));
 
     expect(
       await screen.findByText(/Không lưu được: expected `steps` to be an array at line 3/),
@@ -35,9 +47,38 @@ describe("ScriptsPanel Save", () => {
     const api = await import("../api");
     render(<ScriptsPanel onUseInJobs={() => undefined} />);
 
-    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    fireEvent.click(screen.getByRole("button", { name: "Lưu" }));
 
     expect(await screen.findByText("Đã lưu")).toBeInTheDocument();
     await waitFor(() => expect(api.listScripts).toHaveBeenCalledTimes(2));
+  });
+
+  it("shows loading, a retryable read error, then the saved data", async () => {
+    const api = await import("../api");
+    let rejectFirst!: (reason: unknown) => void;
+    vi.mocked(api.listScripts)
+      .mockImplementationOnce(
+        () => new Promise((_, reject) => {
+          rejectFirst = reject;
+        }),
+      )
+      .mockResolvedValueOnce([["daily", '{"steps":[]}']]);
+
+    render(<ScriptsPanel onUseInJobs={() => undefined} />);
+    expect(screen.getByRole("status")).toHaveTextContent("Đang tải kịch bản đã lưu");
+
+    rejectFirst(new Error("database is locked"));
+    expect(await screen.findByRole("alert")).toHaveTextContent("database is locked");
+
+    fireEvent.click(screen.getByRole("button", { name: "Thử lại danh sách" }));
+    expect(await screen.findByRole("button", { name: "daily" })).toBeInTheDocument();
+    expect(api.listScripts).toHaveBeenCalledTimes(2);
+  });
+
+  it("distinguishes a successful empty list from loading and failure", async () => {
+    render(<ScriptsPanel onUseInJobs={() => undefined} />);
+
+    expect(await screen.findByText("Chưa có kịch bản đã lưu")).toBeInTheDocument();
+    expect(screen.queryByRole("alert")).toBeNull();
   });
 });

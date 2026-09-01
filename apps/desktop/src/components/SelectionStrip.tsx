@@ -78,8 +78,8 @@ export function SelectionStrip({
         <span className="hint">Chưa có thiết bị — về Quản lý cửa sổ rồi làm mới</span>
       )}
       {!!devices.length && (
-        <span className="hint mono" title={selected.join(", ") || devices.map((d) => d.udid).join(", ")}>
-          target×{n}
+        <span className="hint" title={selected.join(", ") || devices.map((d) => d.udid).join(", ")}>
+          Phạm vi: {n} máy
         </span>
       )}
     </div>

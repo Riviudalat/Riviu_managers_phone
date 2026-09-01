@@ -18,12 +18,12 @@ export interface BulkRepairSummary {
 }
 
 const STATE_VIEW: Record<AgentState, Pick<AgentStatusView, "label" | "tone">> = {
-  unknown: { label: "Chua kiem tra", tone: "info" },
-  missing: { label: "Chua cai Agent", tone: "warn" },
-  repairRequired: { label: "Can sua Agent", tone: "warn" },
-  starting: { label: "Dang khoi dong", tone: "info" },
-  ready: { label: "San sang", tone: "ok" },
-  error: { label: "Loi Agent", tone: "danger" },
+  unknown: { label: "Chưa kiểm tra", tone: "info" },
+  missing: { label: "Chưa cài Agent", tone: "warn" },
+  repairRequired: { label: "Cần khôi phục Agent", tone: "warn" },
+  starting: { label: "Đang khởi động", tone: "info" },
+  ready: { label: "Sẵn sàng", tone: "ok" },
+  error: { label: "Lỗi Agent", tone: "danger" },
 };
 
 function concise(message: string | null): string | null {
@@ -53,7 +53,7 @@ export function summarizeBulkRepair(statuses: AgentStatus[]): BulkRepairSummary 
     readyCount,
     errorCount,
     attentionCount,
-    heading: `Agent: ${readyCount} san sang, ${attentionCount} can xu ly`,
-    message: `${readyCount} may san sang; ${attentionCount} may can xu ly.`,
+    heading: `Agent: ${readyCount} sẵn sàng, ${attentionCount} cần xử lý`,
+    message: `${readyCount} máy sẵn sàng; ${attentionCount} máy cần xử lý.`,
   };
 }

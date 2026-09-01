@@ -103,11 +103,17 @@ describe("the operation log", () => {
 
   /** A read failure is reported, not swallowed into an empty list. */
   it("reports a failed read rather than looking empty", async () => {
-    listLogs.mockRejectedValue({ code: "OperationFailed", message: "database is locked" });
+    listLogs
+      .mockRejectedValueOnce({ code: "OperationFailed", message: "database is locked" })
+      .mockResolvedValueOnce([row({ action: "publish.retry" })]);
     render(<OperationLog />);
 
     await waitFor(() => expect(screen.getByRole("alert")).toBeInTheDocument());
     expect(screen.getByRole("alert").textContent).toContain("database is locked");
     expect(screen.queryByText(/Chưa có dòng nào/)).toBeNull();
+
+    await userEvent.click(screen.getByRole("button", { name: "Thử lại nhật ký" }));
+    expect(await screen.findByText("publish.retry")).toBeInTheDocument();
+    expect(listLogs).toHaveBeenCalledTimes(2);
   });
 });

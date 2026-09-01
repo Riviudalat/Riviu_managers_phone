@@ -532,15 +532,15 @@ describe("InteractionPopup", () => {
     fireEvent.change(screen.getByLabelText(/Nội dung bình luận/), {
       target: { value: "manual" },
     });
-    fireEvent.change(screen.getByLabelText(/Danh sách bình luận/), {
+    fireEvent.change(screen.getByLabelText(/Danh sách bình luận/, { selector: "textarea" }), {
       target: { value: "đẹp quá" },
     });
     await waitFor(() =>
-      expect(screen.getByText(/đang có 1 câu, cần ≥ 2/)).toBeVisible(),
+      expect(screen.getByText(/1 câu · cần ≥ 2/)).toBeVisible(),
     );
     expect(screen.getByRole("button", { name: "Chạy ngay" })).toBeDisabled();
 
-    fireEvent.change(screen.getByLabelText(/Danh sách bình luận/), {
+    fireEvent.change(screen.getByLabelText(/Danh sách bình luận/, { selector: "textarea" }), {
       target: { value: "đẹp quá\nchỗ này ở đâu ạ" },
     });
     await clickRun();
@@ -613,7 +613,7 @@ describe("InteractionPopup", () => {
     fireEvent.change(screen.getByLabelText(/Nội dung bình luận/), {
       target: { value: "manual" },
     });
-    fireEvent.change(screen.getByLabelText(/Danh sách bình luận/), {
+    fireEvent.change(screen.getByLabelText(/Danh sách bình luận/, { selector: "textarea" }), {
       target: { value: "đẹp quá\nchỗ này ở đâu ạ\nxin info với" },
     });
 

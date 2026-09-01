@@ -32,12 +32,16 @@ export function WifiAdbSection() {
   };
   return (
     <section className="settings-section">
-      <h3>Kết nối không dây (WIFI adb)</h3>
+      <h3>Kết nối Android qua Wi-Fi</h3>
       <p className="hint">
-        Kết nối điện thoại Android qua Wi-Fi thay vì cáp. Bật từ máy đang cắm USB bằng
-        menu chuột phải → "Chuyển sang WIFI", hoặc nhập trực tiếp host bên dưới. Máy phải
-        cùng mạng LAN với PC.
+        Kết nối này thay cáp cho lệnh Android và sẽ mất khi điện thoại hoặc mạng đổi địa chỉ.
       </p>
+      <details className="settings-details" aria-label="Điều kiện kết nối Wi-Fi">
+        <summary>Điều kiện kết nối Wi-Fi</summary>
+        <p className="hint">
+          Bật từ menu của máy đang cắm USB hoặc nhập địa chỉ bên dưới; điện thoại và PC phải cùng mạng LAN.
+        </p>
+      </details>
       <div className="row">
         <label style={{ flex: 1 }}>
           Host (ip hoặc ip:cổng)

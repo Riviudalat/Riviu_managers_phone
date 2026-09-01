@@ -43,10 +43,6 @@ export function SettingsPanel({ devices }: Props) {
 
   return (
     <div className="panel">
-      <header className="panel-header">
-        <h2>Settings</h2>
-      </header>
-
       <AgentSection connectedDevices={connectedDevices} connectedUdids={connectedUdids} />
       <StreamQualitySection />
       <GroupSyncSection />

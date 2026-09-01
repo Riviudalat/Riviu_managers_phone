@@ -1,5 +1,5 @@
 import type { ReactNode } from "react";
-import { IconInfo, IconWarning } from "./Icons";
+import { IconCheck, IconInfo, IconWarning } from "./Icons";
 
 /**
  * Nothing-here state. Every list and page reports emptiness the same way:
@@ -36,6 +36,40 @@ export function EmptyState({
  * Inline notice pinned to the surface it describes — for conditions the
  * operator must keep seeing, unlike a toast that reports a finished action.
  */
+export type NoticeTone = "info" | "success" | "warning" | "error";
+
+export function StatusNotice({
+  tone,
+  children,
+  action,
+}: {
+  tone: NoticeTone;
+  children: ReactNode;
+  action?: ReactNode;
+}) {
+  const urgent = tone === "warning" || tone === "error";
+  return (
+    <div
+      className={`banner banner-${tone}`}
+      role={urgent ? "alert" : "status"}
+      aria-live={urgent ? "assertive" : "polite"}
+    >
+      <span className="banner-icon" aria-hidden="true">
+        {tone === "info" ? (
+          <IconInfo size={16} />
+        ) : tone === "success" ? (
+          <IconCheck size={16} />
+        ) : (
+          <IconWarning size={16} />
+        )}
+      </span>
+      <div className="banner-copy">{children}</div>
+      {action && <div className="banner-action">{action}</div>}
+    </div>
+  );
+}
+
+/** Compatibility wrapper while existing call sites migrate to the typed notice names. */
 export function Banner({
   tone = "warn",
   children,
@@ -46,13 +80,9 @@ export function Banner({
   action?: ReactNode;
 }) {
   return (
-    <div className={`banner banner-${tone}`} role={tone === "error" ? "alert" : undefined}>
-      <span className="banner-icon">
-        {tone === "info" ? <IconInfo size={16} /> : <IconWarning size={16} />}
-      </span>
-      <div className="banner-copy">{children}</div>
-      {action && <div className="banner-action">{action}</div>}
-    </div>
+    <StatusNotice tone={tone === "warn" ? "warning" : tone} action={action}>
+      {children}
+    </StatusNotice>
   );
 }
 

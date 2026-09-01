@@ -10,13 +10,16 @@ export function GroupSyncSection() {
   const gsMaxPx = groupSync.offset?.maxPx ?? 0;
   return (
     <section className="settings-section">
-      <h3>Đồng bộ nhóm (Delay &amp; Offset)</h3>
+      <h3>Đồng bộ nhóm</h3>
       <p className="hint">
-        Khi một thao tác (chạm/vuốt/gõ/phím) phát ra cả nhóm máy, thêm độ trễ và lệch toạ độ
-        ngẫu nhiên cho từng máy để cả nhóm không bấm y hệt cùng lúc, cùng chỗ. Tắt cả hai =
-        phát đồng loạt như cũ. Chỉ áp cho điều khiển nhóm (≥2 máy), không áp khi điều khiển
-        một máy.
+        Độ trễ và lệch toạ độ chỉ áp khi điều khiển ít nhất hai máy; đặt cả hai về tắt để phát đồng loạt.
       </p>
+      <details className="settings-details" aria-label="Cách đồng bộ nhóm">
+        <summary>Cách đồng bộ nhóm</summary>
+        <p className="hint">
+          Chạm, vuốt, gõ và phím được phát tới từng máy theo chính sách đã chọn. Điều khiển một máy không dùng các giá trị này.
+        </p>
+      </details>
       <div className="row">
         <label>
           Độ trễ mỗi máy

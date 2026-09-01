@@ -3,6 +3,7 @@ import { useCallback, useEffect, useState } from "react";
 import {
   androidToolProblems,
   androidUnavailableReason,
+  appLogDirectory,
   driverDegradedReason,
   listDeviceMetas,
   listDevices,
@@ -48,11 +49,14 @@ export interface Fleet {
   startupIssue: string | null | undefined;
   /// The backend is up but a call failed.
   bootError: string | null;
+  /// True after the first complete fleet read, including a failed read.
+  fleetSettled: boolean;
   /// The device sidecar is degraded, so an empty fleet has a cause worth naming.
   driverIssue: string | null;
   /// Android specifically is unavailable; asked apart because the two halves fail apart.
   androidIssue: string | null;
   androidToolProblems: string[];
+  logDirectory: string | null;
   retryingStartup: boolean;
   /// Ask the backend to start again, and resubscribe if it does.
   retry: () => Promise<void>;
@@ -64,11 +68,13 @@ export function useFleet(): Fleet {
   const [metas, setMetas] = useState<DeviceMeta[]>([]);
   const [jobs, setJobs] = useState<JobRecord[]>([]);
   const [bootError, setBootError] = useState<string | null>(null);
+  const [fleetSettled, setFleetSettled] = useState(false);
   const [driverIssue, setDriverIssue] = useState<string | null>(null);
   const [androidIssue, setAndroidIssue] = useState<string | null>(null);
   // Named apart from the imported command on purpose: calling the state variable the same
   // thing shadows it, and `await androidToolProblems()` then calls an array instead.
   const [toolProblems, setToolProblems] = useState<string[]>([]);
+  const [logDirectory, setLogDirectory] = useState<string | null>(null);
   const [startupIssue, setStartupIssue] = useState<string | null | undefined>(undefined);
   const [retryingStartup, setRetryingStartup] = useState(false);
   /// Bumped by the retry button, and read by the boot effect below as a reason to run
@@ -79,6 +85,7 @@ export function useFleet(): Fleet {
   const [startupAttempt, setStartupAttempt] = useState(0);
 
   const reload = useCallback(async () => {
+    setFleetSettled(false);
     try {
       const [d, j] = await Promise.all([listDevices(), listJobs()]);
       setDevices(d);
@@ -102,8 +109,11 @@ export function useFleet(): Fleet {
       // Asked here too, because a bundle that lost a file lists phones normally and only
       // fails when one is driven — so nothing else in this hook would ever notice.
       setToolProblems(await androidToolProblems().catch(() => []));
+      setLogDirectory(await appLogDirectory().catch(() => null));
     } catch (e) {
       setBootError(describeError(e));
+    } finally {
+      setFleetSettled(true);
     }
   }, []);
 
@@ -203,9 +213,11 @@ export function useFleet(): Fleet {
     reload,
     startupIssue,
     bootError,
+    fleetSettled,
     driverIssue,
     androidIssue,
     androidToolProblems: toolProblems,
+    logDirectory,
     retryingStartup,
     retry,
   };

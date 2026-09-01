@@ -110,6 +110,15 @@ beforeEach(() => {
 afterEach(cleanup);
 
 describe("publish, bundle to phone", () => {
+  it("keeps carousel scope under the broader publish topbar", () => {
+    render(<PublishPage devices={devices} selected={[]} onSelectUdids={() => {}} />);
+
+    expect(screen.getByRole("heading", { level: 2, name: "Đăng carousel" })).toBeVisible();
+    expect(screen.getByText(/dọn ảnh đã chuyển khỏi điện thoại/)).toBeInTheDocument();
+    expect(screen.getByText(/kể cả khi bị từ chối/)).toBeInTheDocument();
+    expect(screen.queryByText(/chi tiết chiến dịch/)).toBeNull();
+  });
+
   /**
    * The pairing is positional all the way down — `validate_publish_mapping` zips
    * `bundle_ids[i]` with `udids[i]` — so the order of the array that is *sent* is the
@@ -325,6 +334,21 @@ describe("publish, bundle to phone", () => {
     expect(screen.getByText(/chưa đối chiếu build máy/)).toBeTruthy();
     expect(screen.getByText(/thiếu ComposerCaption, PostButton/)).toBeTruthy();
     expect(ready).toHaveBeenCalledWith(["ANDROID-A", "ANDROID-B"]);
+    expect(screen.getByText(/bị từ chối trước khi chuyển ảnh/)).toBeInTheDocument();
+    expect(screen.queryByText(/composer_scout/)).toBeNull();
+  });
+
+  it("renders a future readiness variant as unknown and keeps its raw code in details", async () => {
+    vi.mocked(publishReadiness).mockResolvedValueOnce([
+      { udid: "ANDROID-A", readiness: { kind: "futureProbe", raw: 7 } },
+    ] as never);
+    const android = ({ ...iphone("ANDROID-A"), platform: "android" }) as DeviceInfo;
+
+    render(<PublishPage devices={[android]} selected={[]} onSelectUdids={() => {}} />);
+
+    const label = await screen.findByText(/trạng thái chưa nhận diện/);
+    expect(label.closest(".pill")).toHaveAttribute("title", expect.stringContaining("futureProbe"));
+    expect(screen.queryByText(/futureProbe/)).not.toBeInTheDocument();
   });
 
   /**
@@ -394,6 +418,10 @@ describe("publish, bundle to phone", () => {
           udid: "PHONE-A",
           state: "failedBeforeDispatch",
           errorCode: "route_authorities_disagree",
+          evidenceJson: JSON.stringify({
+            post: { state: "posted" },
+            cleanup: { state: "not_cleaned", message: "adb disconnected" },
+          }),
         },
       ],
       events: [],
@@ -403,6 +431,7 @@ describe("publish, bundle to phone", () => {
 
     await user.click(await screen.findByRole("button", { name: "Chi tiết máy" }));
     await screen.findByText(/PHONE-A — failedBeforeDispatch · route_authorities_disagree/);
+    expect(screen.getByText(/chưa dọn được ảnh tạm: adb disconnected/)).toBeVisible();
 
     await user.click(screen.getByRole("button", { name: "Ẩn chi tiết máy" }));
     expect(screen.queryByText(/route_authorities_disagree/)).toBeNull();

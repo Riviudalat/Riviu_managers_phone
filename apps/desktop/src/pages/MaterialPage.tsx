@@ -1,11 +1,12 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { addMaterial, deleteMaterial, listMaterials, pushMaterial } from "../api";
 import { SelectionStrip } from "../components/SelectionStrip";
 import { flash, flashError } from "../farmToast";
 import { targetsOf } from "../selectionTargets";
-import { EmptyState } from "../components/States";
+import { EmptyState, LoadingState, StatusNotice } from "../components/States";
 import { IconImage } from "../components/Icons";
 import { pickMaterial } from "../pickFile";
+import { describeError } from "../describeError";
 import type { MaterialItem } from "../types";
 import type { SelProps } from "./pageProps";
 
@@ -14,19 +15,34 @@ export function MaterialPage({ devices, selected, onSelectUdids }: SelProps) {
   const [items, setItems] = useState<MaterialItem[]>([]);
   const [path, setPath] = useState("");
   const [busy, setBusy] = useState(false);
+  const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const loadTicket = useRef(0);
   const targets = targetsOf(selected, devices);
   const target = targets[0];
 
-  const reload = () => listMaterials().then(setItems).catch((e) => flashError(e));
+  const reload = async () => {
+    const ticket = ++loadTicket.current;
+    setLoading(true);
+    setLoadError(null);
+    try {
+      const next = await listMaterials();
+      if (ticket === loadTicket.current) setItems(next);
+    } catch (error) {
+      if (ticket === loadTicket.current) setLoadError(describeError(error));
+    } finally {
+      if (ticket === loadTicket.current) setLoading(false);
+    }
+  };
   useEffect(() => {
-    reload();
+    void reload();
+    return () => {
+      loadTicket.current += 1;
+    };
   }, []);
 
   return (
     <div className="panel">
-      <header className="panel-header">
-        <h2>Kho nội dung</h2>
-      </header>
       <SelectionStrip
         devices={devices}
         selected={selected}
@@ -73,6 +89,19 @@ export function MaterialPage({ devices, selected, onSelectUdids }: SelProps) {
         </button>
       </div>
       <div className="job-list" style={{ marginTop: 12 }}>
+        {loadError && (
+          <StatusNotice
+            tone="error"
+            action={(
+              <button type="button" className="ghost" onClick={() => void reload()}>
+                Thử lại
+              </button>
+            )}
+          >
+            Không tải được kho nội dung: {loadError}
+          </StatusNotice>
+        )}
+        {loading && !items.length && <LoadingState label="Đang tải kho nội dung…" />}
         {items.map((m) => (
           <article key={m.id} className="job-card">
             <div>
@@ -113,7 +142,7 @@ export function MaterialPage({ devices, selected, onSelectUdids }: SelProps) {
             </div>
           </article>
         ))}
-        {!items.length && (
+        {!loading && !loadError && !items.length && (
           <EmptyState
             compact
             icon={<IconImage size={15} />}

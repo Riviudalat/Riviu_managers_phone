@@ -1,8 +1,10 @@
+import { StrictMode } from "react";
 import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { AppsPage } from "./AppsPage";
+import { listAppsLibrary, listGroups } from "../api";
 import { resetToasts } from "../toastStore";
 import type { AppLibraryItem, DeviceInfo } from "../types";
 
@@ -77,7 +79,11 @@ afterEach(() => {
   cleanup();
   resetToasts();
 });
-beforeEach(() => vi.clearAllMocks());
+beforeEach(() => {
+  vi.clearAllMocks();
+  vi.mocked(listAppsLibrary).mockResolvedValue(library);
+  vi.mocked(listGroups).mockResolvedValue([]);
+});
 
 function renderApps(devices: DeviceInfo[], selected: string[] = []) {
   return render(
@@ -124,5 +130,77 @@ describe("AppsPage install targets", () => {
     await waitFor(() => expect(api.installLibraryApp).toHaveBeenCalledTimes(2));
     expect(api.installLibraryApp).toHaveBeenCalledWith(iphone.udid, "app-1");
     expect(api.installLibraryApp).toHaveBeenCalledWith("second-iphone", "app-1");
+  });
+});
+
+describe("AppsPage list states", () => {
+  it("does not render an empty library before its first answer", async () => {
+    renderApps([iphone]);
+
+    expect(screen.getByRole("status")).toHaveTextContent("Đang tải thư viện IPA");
+    expect(screen.queryByText("Chưa có IPA")).toBeNull();
+    expect(screen.queryByRole("heading", { level: 2 })).toBeNull();
+    expect(await screen.findByText("TikTok.ipa")).toBeInTheDocument();
+  });
+
+  it("shows a failed library load inline and retries it", async () => {
+    vi.mocked(listAppsLibrary)
+      .mockRejectedValueOnce(new Error("Không đọc được thư viện IPA"))
+      .mockResolvedValueOnce(library);
+
+    renderApps([iphone]);
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("Không đọc được thư viện IPA");
+    expect(screen.queryByText("Chưa có IPA")).toBeNull();
+
+    await userEvent.click(screen.getByRole("button", { name: "Thử lại thư viện IPA" }));
+
+    await waitFor(() => expect(listAppsLibrary).toHaveBeenCalledTimes(2));
+    expect(await screen.findByText("TikTok.ipa")).toBeInTheDocument();
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+
+  it("reports group loading, empty, and error independently from the IPA library", async () => {
+    vi.mocked(listAppsLibrary).mockRejectedValueOnce(new Error("library down"));
+    vi.mocked(listGroups).mockRejectedValue(new Error("groups down"));
+
+    renderApps([iphone]);
+
+    expect(screen.getByText("Đang tải danh sách nhóm…")).toBeInTheDocument();
+    expect(await screen.findByText(/Không tải được danh sách nhóm: groups down/)).toBeInTheDocument();
+    expect(screen.getByText(/Không tải được thư viện IPA: library down/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Thử lại danh sách nhóm" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Thử lại thư viện IPA" })).toBeEnabled();
+    expect(screen.queryByText("Chưa có nhóm thiết bị")).toBeNull();
+    expect(screen.getByText("Danh sách nhóm chưa tải được")).toBeInTheDocument();
+
+    const callsBeforeRetry = vi.mocked(listGroups).mock.calls.length;
+    vi.mocked(listGroups).mockResolvedValue([]);
+    await userEvent.click(screen.getByRole("button", { name: "Thử lại danh sách nhóm" }));
+    await waitFor(() => expect(listGroups).toHaveBeenCalledTimes(callsBeforeRetry + 1));
+    expect(await screen.findByText("Chưa có nhóm thiết bị")).toBeInTheDocument();
+    expect(screen.queryByText(/Không tải được danh sách nhóm/)).toBeNull();
+  });
+
+  it("keeps the newest IPA list when StrictMode responses arrive out of order", async () => {
+    let resolveFirst!: (value: AppLibraryItem[]) => void;
+    let resolveSecond!: (value: AppLibraryItem[]) => void;
+    vi.mocked(listAppsLibrary)
+      .mockReturnValueOnce(new Promise((resolve) => { resolveFirst = resolve; }))
+      .mockReturnValueOnce(new Promise((resolve) => { resolveSecond = resolve; }));
+
+    render(
+      <StrictMode>
+        <AppsPage devices={[iphone]} selected={[]} onSelectUdids={() => undefined} />
+      </StrictMode>,
+    );
+    await waitFor(() => expect(listAppsLibrary).toHaveBeenCalledTimes(2));
+    resolveSecond(library);
+    expect(await screen.findByText("TikTok.ipa")).toBeInTheDocument();
+    resolveFirst([{ ...library[0], id: "old", name: "Old.ipa" }]);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(screen.getByText("TikTok.ipa")).toBeInTheDocument();
+    expect(screen.queryByText("Old.ipa")).toBeNull();
   });
 });

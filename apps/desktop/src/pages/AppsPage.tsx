@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { describeError } from "../describeError";
 import {
   addAppLibrary,
@@ -11,7 +11,7 @@ import {
 import { SelectionStrip } from "../components/SelectionStrip";
 import { flash, flashError } from "../farmToast";
 import { targetsOf } from "../selectionTargets";
-import { EmptyState } from "../components/States";
+import { EmptyState, LoadingState, StatusNotice } from "../components/States";
 import { IconApp } from "../components/Icons";
 import { pickIpa } from "../pickFile";
 import type { AppLibraryItem, DeviceGroup, GroupInstallResult } from "../types";
@@ -26,6 +26,12 @@ export function AppsPage({ devices, selected, onSelectUdids }: SelProps) {
   const [groups, setGroups] = useState<DeviceGroup[]>([]);
   const [groupId, setGroupId] = useState("");
   const [groupResults, setGroupResults] = useState<GroupInstallResult[]>([]);
+  const [itemsLoading, setItemsLoading] = useState(true);
+  const [itemsError, setItemsError] = useState<string | null>(null);
+  const [groupsLoading, setGroupsLoading] = useState(true);
+  const [groupsError, setGroupsError] = useState<string | null>(null);
+  const libraryTicket = useRef(0);
+  const groupsTicket = useRef(0);
   // **iPhones only, and never the whole fleet by default.** This library holds `.ipa`
   // files; `targetsOf` falls back to every connected device when nothing is selected, so
   // an unselected click used to push an iOS app at every Android serial in the room and
@@ -39,10 +45,41 @@ export function AppsPage({ devices, selected, onSelectUdids }: SelProps) {
     devices.some((device) => device.udid === udid && device.platform === "android"),
   ).length;
 
-  const reload = () => listAppsLibrary().then(setItems).catch((e) => flashError(e));
+  const reloadLibrary = async () => {
+    const ticket = ++libraryTicket.current;
+    setItemsLoading(true);
+    setItemsError(null);
+    try {
+      const next = await listAppsLibrary();
+      if (ticket === libraryTicket.current) setItems(next);
+    } catch (error) {
+      if (ticket === libraryTicket.current) setItemsError(describeError(error));
+    } finally {
+      if (ticket === libraryTicket.current) setItemsLoading(false);
+    }
+  };
+
+  const reloadGroups = async () => {
+    const ticket = ++groupsTicket.current;
+    setGroupsLoading(true);
+    setGroupsError(null);
+    try {
+      const next = await listGroups();
+      if (ticket === groupsTicket.current) setGroups(next);
+    } catch (error) {
+      if (ticket === groupsTicket.current) setGroupsError(describeError(error));
+    } finally {
+      if (ticket === groupsTicket.current) setGroupsLoading(false);
+    }
+  };
+
   useEffect(() => {
-    reload();
-    listGroups().then(setGroups).catch((e) => flashError(e));
+    void reloadLibrary();
+    void reloadGroups();
+    return () => {
+      libraryTicket.current += 1;
+      groupsTicket.current += 1;
+    };
   }, []);
 
   const installToGroup = async (ipaPath: string) => {
@@ -70,9 +107,6 @@ export function AppsPage({ devices, selected, onSelectUdids }: SelProps) {
 
   return (
     <div className="panel">
-      <header className="panel-header">
-        <h2>Trung tâm ứng dụng</h2>
-      </header>
       <SelectionStrip
         devices={devices}
         selected={selected}
@@ -86,11 +120,35 @@ export function AppsPage({ devices, selected, onSelectUdids }: SelProps) {
           lên iPhone. Cài APK cho Android trong menu điều khiển của từng máy.
         </p>
       )}
+      {groupsError && (
+        <StatusNotice
+          tone="error"
+          action={(
+            <button type="button" className="ghost" onClick={() => void reloadGroups()}>
+              Thử lại danh sách nhóm
+            </button>
+          )}
+        >
+          Không tải được danh sách nhóm: {groupsError}
+        </StatusNotice>
+      )}
       <div className="row" style={{ marginTop: 8 }}>
         <label style={{ flex: 1 }}>
           Cài hàng loạt theo nhóm
-          <select value={groupId} onChange={(e) => setGroupId(e.target.value)}>
-            <option value="">— chọn nhóm —</option>
+          <select
+            value={groupId}
+            disabled={groupsLoading || !!groupsError}
+            onChange={(e) => setGroupId(e.target.value)}
+          >
+            <option value="">
+              {groupsLoading
+                ? "Đang tải danh sách nhóm…"
+                : groupsError
+                  ? "Danh sách nhóm chưa tải được"
+                  : groups.length
+                  ? "— chọn nhóm —"
+                  : "Chưa có nhóm thiết bị"}
+            </option>
             {groups.map((g) => (
               <option key={g.id} value={g.id}>
                 {g.name} ({g.udids.length} máy)
@@ -118,7 +176,7 @@ export function AppsPage({ devices, selected, onSelectUdids }: SelProps) {
         </button>
       </div>
       <label>
-        Bundle ID (optional)
+        Bundle ID (không bắt buộc)
         <input value={bundleId} onChange={(e) => setBundleId(e.target.value)} />
       </label>
       <button
@@ -130,7 +188,7 @@ export function AppsPage({ devices, selected, onSelectUdids }: SelProps) {
           try {
             await addAppLibrary(path.trim(), undefined, bundleId || undefined);
             setPath("");
-            await reload();
+            await reloadLibrary();
             flash("Đã thêm IPA vào thư viện");
           } catch (e) {
             flashError(e);
@@ -142,11 +200,24 @@ export function AppsPage({ devices, selected, onSelectUdids }: SelProps) {
         Thêm vào thư viện
       </button>
       <div className="job-list" style={{ marginTop: 12 }}>
+        {itemsError && (
+          <StatusNotice
+            tone="error"
+            action={(
+              <button type="button" className="ghost" onClick={() => void reloadLibrary()}>
+                Thử lại thư viện IPA
+              </button>
+            )}
+          >
+            Không tải được thư viện IPA: {itemsError}
+          </StatusNotice>
+        )}
+        {itemsLoading && !items.length && <LoadingState label="Đang tải thư viện IPA…" />}
         {items.map((a) => (
           <article key={a.id} className="job-card">
             <div>
               <strong>{a.name}</strong>
-              <span className="pill">{a.bundleId || "no bundle"}</span>
+              <span className="pill">{a.bundleId || "chưa có bundle ID"}</span>
             </div>
             <p className="hint">{a.path}</p>
             <div className="row">
@@ -186,7 +257,7 @@ export function AppsPage({ devices, selected, onSelectUdids }: SelProps) {
                 type="button"
                 className="primary"
                 disabled={!groupId || busy}
-                title="Cài lên toàn bộ máy trong nhóm đã chọn (chạy phía backend)"
+                title="Cài lên toàn bộ máy trong nhóm đã chọn"
                 onClick={() => installToGroup(a.path)}
               >
                 Cài → nhóm
@@ -196,7 +267,7 @@ export function AppsPage({ devices, selected, onSelectUdids }: SelProps) {
                 className="ghost"
                 onClick={async () => {
                   await deleteAppLibrary(a.id);
-                  await reload();
+                  await reloadLibrary();
                 }}
               >
                 Xóa
@@ -204,7 +275,7 @@ export function AppsPage({ devices, selected, onSelectUdids }: SelProps) {
             </div>
           </article>
         ))}
-        {!items.length && (
+        {!itemsLoading && !itemsError && !items.length && (
           <EmptyState
             compact
             icon={<IconApp size={15} />}

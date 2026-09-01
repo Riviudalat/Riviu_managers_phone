@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
+import { useCallback, useEffect, useId, useMemo, useRef, useState, type CSSProperties } from "react";
 import { createPortal } from "react-dom";
 
 import { InfoDot as Info } from "./InfoDot";
@@ -194,27 +194,59 @@ export function FeatureRow({
  */
 export function RestartBadge({ field }: { field: RestartRequiredField }) {
   const [tip, setTip] = useState<{ left: number; top: number } | null>(null);
+  const [pinned, setPinned] = useState(false);
+  const tooltipId = useId();
   const reason = RESTART_REQUIRED_REASONS[field];
   const what = `${reason}. Đang chạy mà đổi thì phải bấm Dừng rồi Bắt đầu lại mới áp dụng.`;
+  const open = (element: HTMLElement) => {
+    const rect = element.getBoundingClientRect();
+    setTip({ left: Math.round(rect.left + rect.width / 2), top: Math.round(rect.top) });
+  };
   return (
-    <span
+    <button
+      type="button"
       className="nurture-restart-badge"
+      aria-label={`Giải thích yêu cầu chạy lại: ${reason}`}
+      aria-describedby={tip ? tooltipId : undefined}
       data-tip={what}
-      onMouseEnter={(event) => {
-        const rect = event.currentTarget.getBoundingClientRect();
-        setTip({ left: Math.round(rect.left + rect.width / 2), top: Math.round(rect.top) });
+      onMouseEnter={(event) => open(event.currentTarget)}
+      onMouseLeave={(event) => {
+        if (!pinned && document.activeElement !== event.currentTarget) setTip(null);
       }}
-      onMouseLeave={() => setTip(null)}
+      onFocus={(event) => open(event.currentTarget)}
+      onBlur={() => {
+        if (!pinned) setTip(null);
+      }}
+      onClick={(event) => {
+        const element = event.currentTarget;
+        setPinned((current) => {
+          if (current) setTip(null);
+          else open(element);
+          return !current;
+        });
+      }}
+      onKeyDown={(event) => {
+        if (event.key === "Escape") {
+          event.stopPropagation();
+          setPinned(false);
+          setTip(null);
+        }
+      }}
     >
       cần chạy lại
       {tip &&
         createPortal(
-          <span className="nu-tip" role="tooltip" style={{ left: tip.left, top: tip.top }}>
+          <span
+            id={tooltipId}
+            className="nu-tip"
+            role="tooltip"
+            style={{ left: tip.left, top: tip.top }}
+          >
             {what}
           </span>,
           document.body,
         )}
-    </span>
+    </button>
   );
 }
 
@@ -663,8 +695,8 @@ export function NurturePopup({ devices, selected, onClose }: Props) {
                               <em>+</em>
                             </span>
                           ) : (
-                            <span className="nurture-metrics is-idle" title="chưa chạy phiên nào — dòng này do bộ tự dọn popup ghi">
-                              tự dọn
+                            <span className="nurture-metrics is-idle" title="chưa chạy phiên nào — dòng này do bộ tự khôi phục popup ghi">
+                              tự khôi phục
                             </span>
                           )}
                           <span className="nurture-log-chevron" aria-hidden="true">

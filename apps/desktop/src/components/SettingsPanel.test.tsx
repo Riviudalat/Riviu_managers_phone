@@ -56,6 +56,7 @@ describe("SettingsPanel update section", () => {
     render(<SettingsPanel devices={[]} />);
     await waitFor(() => expect(screen.getByText("Chưa kiểm bản mới")).toBeTruthy());
 
+    expect(screen.queryByRole("heading", { level: 2 })).toBeNull();
     expect(checkMock).not.toHaveBeenCalled();
   });
 
@@ -181,5 +182,25 @@ describe("stream quality", () => {
     await waitFor(() => expect(screen.getByLabelText("FPS overlay")).toBeTruthy());
     expect(screen.queryByLabelText("FPS")).toBeNull();
     expect(screen.getByText(/Tile trong lưới bị chặn ở 10 hình\/giây/)).toBeTruthy();
+    expect(screen.getByRole("group", { name: "Phạm vi chất lượng hình" })).toBeTruthy();
+    expect(screen.queryByText(/135% một nhân CPU/)).toBeNull();
+  });
+
+  it("keeps consequences visible and implementation detail in disclosures", async () => {
+    render(<SettingsPanel devices={[]} />);
+    await waitFor(() => expect(screen.getByLabelText("Chất lượng lưới")).toBeTruthy());
+
+    for (const name of [
+      "Phạm vi chất lượng hình",
+      "Cách đồng bộ nhóm",
+      "Điều kiện kết nối Wi-Fi",
+      "Phạm vi API cục bộ",
+      "Chi tiết kết nối thiết bị",
+    ]) {
+      expect(screen.getByRole("group", { name })).not.toHaveAttribute("open");
+    }
+    expect(screen.queryByText("Desktop bridge")).toBeNull();
+    expect(screen.queryByText("Legacy stock agent")).toBeNull();
+    expect(screen.queryByText(/Mock chỉ dùng khi phát triển/)).toBeNull();
   });
 });

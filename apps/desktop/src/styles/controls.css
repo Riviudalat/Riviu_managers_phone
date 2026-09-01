@@ -119,6 +119,16 @@ button:disabled {
   background: var(--primary-50);
   color: var(--primary-deep);
 }
+.banner-success {
+  border-color: #b8dfca;
+  background: #f0faf4;
+  color: #22633c;
+}
+.banner-warning {
+  border-color: var(--warn-line);
+  background: var(--warn-soft);
+  color: #8a5a00;
+}
 .banner-error {
   border-color: #fadcdc;
   background: #fef4f4;
@@ -371,4 +381,18 @@ button:disabled {
     animation: none;
     opacity: 0.85;
   }
+}
+.settings-details {
+  margin: 6px 0 10px;
+}
+
+.settings-details > summary {
+  color: var(--text-2);
+  cursor: pointer;
+  font-size: var(--text-sm);
+}
+
+.settings-details > .hint,
+.settings-details > pre {
+  margin: 6px 0 0;
 }

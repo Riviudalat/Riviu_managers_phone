@@ -47,6 +47,15 @@ async function open(page: Page, name: string): Promise<void> {
   // Fonts before pixels: a screenshot taken while a face is still loading captures the
   // fallback, which is what made the two Flow baselines racy before they were bundled.
   await page.evaluate(() => document.fonts.ready);
+  await expect(page.locator(".toast-error")).toHaveCount(0);
+  await expect(page.getByText(/Unknown mock command/i)).toHaveCount(0);
+  if (name === "Đăng bài") {
+    await expect(page.getByText("Phạm vi: 2 máy", { exact: true })).toBeVisible();
+  }
+}
+
+function screenshotName(name: string): string {
+  return name.normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[đĐ]/g, "d").replace(/\s+/g, "-").toLowerCase();
 }
 
 test.describe("every page in the sidebar", () => {
@@ -60,7 +69,7 @@ test.describe("every page in the sidebar", () => {
       await open(page, name);
       await expect(page.locator(".riviu-shell, #root")).toBeVisible();
       await expect(page).toHaveScreenshot(
-        `page-${name.normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[đĐ]/g, "d").replace(/\s+/g, "-").toLowerCase()}.png`,
+        `page-${screenshotName(name)}.png`,
         {
           fullPage: false,
           // The same tolerance the Flow baselines use: antialiasing differs by a few
@@ -69,6 +78,19 @@ test.describe("every page in the sidebar", () => {
           animations: "disabled",
         },
       );
+    });
+  }
+
+  for (const name of PAGES) {
+    test(`renders ${name} in the narrow operator viewport`, async ({ page }) => {
+      await page.setViewportSize({ width: 900, height: 900 });
+      await open(page, name);
+      await expect(page.locator(".riviu-shell, #root")).toBeVisible();
+      await expect(page).toHaveScreenshot(`page-narrow-${screenshotName(name)}.png`, {
+        fullPage: false,
+        maxDiffPixelRatio: 0.002,
+        animations: "disabled",
+      });
     });
   }
 });

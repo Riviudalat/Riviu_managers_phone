@@ -4,6 +4,7 @@ import { nurtureCostSummary, nurtureListCommentAttempts } from "../../api";
 import { evidenceLabel } from "../../commentEvidence";
 import { describeError } from "../../describeError";
 import type { NurtureCommentAttempt, NurtureCostSummary } from "../../types";
+import { EmptyState, LoadingState, StatusNotice } from "../States";
 
 /** How many rows to keep on screen. Beyond this the list stops being readable. */
 const LIMIT = 60;
@@ -71,6 +72,7 @@ export function NurtureCommentsTab({ live }: {
    * panel. Kept `null` on error for that reason.
    */
   const [totals, setTotals] = useState<NurtureCostSummary | null>(null);
+  const [totalsError, setTotalsError] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const load = useCallback(() => {
@@ -81,8 +83,14 @@ export function NurtureCommentsTab({ live }: {
       })
       .catch((cause) => setError(describeError(cause)));
     void nurtureCostSummary()
-      .then(setTotals)
-      .catch(() => setTotals(null));
+      .then((next) => {
+        setTotals(next);
+        setTotalsError(null);
+      })
+      .catch((cause) => {
+        setTotals(null);
+        setTotalsError(describeError(cause));
+      });
   }, []);
 
   useEffect(load, [load]);
@@ -95,19 +103,32 @@ export function NurtureCommentsTab({ live }: {
   }, [live, load]);
 
   if (error) {
-    return <p className="nurture-float-err">{error}</p>;
+    return (
+      <StatusNotice
+        tone="error"
+        action={
+          <button type="button" className="secondary" onClick={load}>
+            Thử lại
+          </button>
+        }
+      >
+        {error}
+      </StatusNotice>
+    );
   }
   if (!rows) {
-    return <p className="hint">Đang đọc…</p>;
+    return <LoadingState label="Đang đọc lịch sử bình luận…" />;
   }
   if (!rows.length) {
     return (
       <div className="nurture-attempts">
         {totals && <CostStrip totals={totals} />}
-        <p className="hint">
-          Chưa có lượt bình luận nào được ghi. Bảng này ghi cả lượt bị bỏ, nên một phiên đã chạy
-          mà vẫn trống nghĩa là chưa lần nào tới bước soạn bình luận.
-        </p>
+        {totalsError && <TotalsError onRetry={load} />}
+        <EmptyState
+          compact
+          title="Chưa có lượt bình luận nào được ghi"
+          hint="Lịch sử sẽ xuất hiện khi một phiên đi tới bước soạn bình luận."
+        />
       </div>
     );
   }
@@ -115,6 +136,7 @@ export function NurtureCommentsTab({ live }: {
   return (
     <div className="nurture-attempts">
       {totals && <CostStrip totals={totals} />}
+      {totalsError && <TotalsError onRetry={load} />}
       <p className="hint">
         {rows.length} lượt gần nhất · gồm cả lượt bị gate chặn và lượt bỏ qua
       </p>
@@ -123,7 +145,9 @@ export function NurtureCommentsTab({ live }: {
           <li key={row.id} className={`nurture-attempt${outcomeClass(row.outcome)}`}>
             <div className="nurture-attempt-head">
               <code>{row.udid.slice(-6)}</code>
-              <span className="nurture-attempt-outcome">{outcomeLabel(row.outcome)}</span>
+              <span className="nurture-attempt-outcome" title={row.outcome}>
+                {outcomeLabel(row.outcome)}
+              </span>
               <span className="grow" />
               <span className="nurture-attempt-when">{shortTime(row.createdAt)}</span>
             </div>
@@ -148,6 +172,21 @@ export function NurtureCommentsTab({ live }: {
   );
 }
 
+function TotalsError({ onRetry }: { onRetry: () => void }) {
+  return (
+    <StatusNotice
+      tone="warning"
+      action={
+        <button type="button" className="secondary" onClick={onRetry}>
+          Thử lại
+        </button>
+      }
+    >
+      Chưa đọc được tổng chi phí. Danh sách lượt vẫn đầy đủ.
+    </StatusNotice>
+  );
+}
+
 /**
  * How many slides the traversal paged, when it paged any.
  *
@@ -169,13 +208,14 @@ function slidesNote(row: NurtureCommentAttempt): string {
 function outcomeLabel(outcome: string): string {
   if (outcome === "sent") return "đã gửi";
   if (outcome === "prepared") return "đã soạn, chưa rõ kết quả";
+  if (outcome === "skipped: card_changed") return "bỏ — thẻ đã đổi trước thao tác";
   if (outcome === "deferred_card_changed") return "bỏ — thẻ đổi khi đang xem ảnh";
   if (outcome === "deferred_no_rail") return "bỏ — rời khỏi thẻ trước khi kịp gửi";
   if (outcome === "deferred_stopped") return "bỏ — phiên dừng khi đang xem ảnh";
   if (outcome.startsWith("context_skipped")) return "bỏ — bằng chứng không dùng được";
   if (outcome.startsWith("skipped")) return "bỏ — gate chặn";
   if (outcome.startsWith("failed")) return "lỗi khi gửi";
-  return outcome;
+  return "trạng thái chưa nhận diện";
 }
 
 function outcomeClass(outcome: string): string {

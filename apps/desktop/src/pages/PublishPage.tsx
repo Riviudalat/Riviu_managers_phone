@@ -44,18 +44,40 @@ import type { SelProps } from "./pageProps";
  * refused at the first tap. Until the command reads the phone's own version and locale
  * (see the note on the refresh button), the wording says what was really checked.
  */
-function readinessText(info: PublishReadinessInfo): string {
+function readinessView(info: PublishReadinessInfo): { label: string; raw?: string } {
   switch (info.kind) {
     case "hierarchyReady":
-      return "bản đo có đủ nhãn (chưa đối chiếu build máy)";
+      return { label: "bản đo có đủ nhãn (chưa đối chiếu build máy)" };
     case "pixelGrid":
-      return "pixel route";
+      return { label: "đường pixel" };
     case "hierarchyMissing":
-      return `thiếu ${info.labels.join(", ")}`;
+      return { label: `thiếu ${info.labels.join(", ")}` };
     case "hierarchyUnknownBuild":
-      return `build chưa đo (${info.version || "?"})`;
+      return { label: `build chưa đo (${info.version || "?"})` };
     default:
-      return JSON.stringify(info);
+      return { label: "trạng thái chưa nhận diện", raw: JSON.stringify(info) };
+  }
+}
+
+function cleanupEvidence(evidenceJson?: string | null): { label: string; raw: string } | null {
+  if (!evidenceJson) return null;
+  try {
+    const evidence = JSON.parse(evidenceJson) as unknown;
+    if (!evidence || typeof evidence !== "object" || !("cleanup" in evidence)) return null;
+    const cleanup = (evidence as { cleanup?: unknown }).cleanup;
+    if (!cleanup || typeof cleanup !== "object") return null;
+    const state = "state" in cleanup ? String((cleanup as { state?: unknown }).state ?? "") : "";
+    const message = "message" in cleanup
+      ? String((cleanup as { message?: unknown }).message ?? "").trim()
+      : "";
+    const raw = JSON.stringify(cleanup);
+    if (state === "cleaned") return { label: "ảnh tạm đã dọn", raw };
+    if (state === "not_cleaned") {
+      return { label: `chưa dọn được ảnh tạm${message ? `: ${message}` : ""}`, raw };
+    }
+    return { label: "trạng thái dọn ảnh chưa nhận diện", raw };
+  } catch {
+    return null;
   }
 }
 
@@ -310,7 +332,7 @@ export function PublishPage({ devices, selected, onSelectUdids }: SelProps) {
         </>
       )}
       <section style={{ marginTop: 12 }}>
-        <h3>Mapping tuần tự</h3>
+        <h3>Ghép bài với máy</h3>
         <div className="job-list">
           {selectedBundles.map((bundle, index) => (
             <article key={bundle.id} className="job-card">
@@ -318,7 +340,7 @@ export function PublishPage({ devices, selected, onSelectUdids }: SelProps) {
               <span className="hint mono">→ {targets[index] ?? "Chưa có máy"}</span>
             </article>
           ))}
-          {!selectedBundles.length && <p className="hint">Chọn bundle để tạo mapping.</p>}
+          {!selectedBundles.length && <p className="hint">Chọn bài để ghép với máy.</p>}
         </div>
         {/*
           Ticking twenty-one checkboxes against twenty phones is a pairing done by hand every
@@ -351,12 +373,14 @@ export function PublishPage({ devices, selected, onSelectUdids }: SelProps) {
         Lịch chạy một lần (để trống = chạy ngay)
         <input type="datetime-local" value={runAt} onChange={(e) => setRunAt(e.target.value)} />
       </label>
-      <p className="hint">Public · âm thanh mặc định · xoá asset sau khi có bằng chứng đăng thành công.</p>
+      <p className="hint">
+        Đăng công khai · dùng âm thanh mặc định · sau bước đăng, app dọn ảnh đã chuyển khỏi
+        điện thoại, kể cả khi bị từ chối sau khi nhập ảnh. Ảnh vẫn còn nếu không mở được phiên.
+      </p>
       {androidTargets.length > 0 && (
         <p className="hint">
-          {androidTargets.length} máy Android trong danh sách. Composer Android điều khiển
-          theo nhãn đã đo, nên máy nào chạy bản TikTok chưa đo sẽ bị từ chối kèm tên —
-          trước khi ảnh rời máy tính. Đo bằng <code>composer_scout</code>.
+          {androidTargets.length} máy Android. Máy chạy bản TikTok chưa được hỗ trợ sẽ bị từ
+          chối trước khi chuyển ảnh, kèm tên máy.
         </p>
       )}
       {readinessNote && (
@@ -367,12 +391,19 @@ export function PublishPage({ devices, selected, onSelectUdids }: SelProps) {
       {readiness.length > 0 && (
         <div className="row" style={{ flexWrap: "wrap", gap: 6 }}>
           {/* The preflight's own answer, shown before the refusal instead of inside it. */}
-          {readiness.map(({ udid, readiness: info }) => (
-            <span key={udid} className="pill" title={udid}>
-              {devices.find((device) => device.udid === udid)?.name ?? udid.slice(0, 8)}:{" "}
-              {readinessText(info)}
-            </span>
-          ))}
+          {readiness.map(({ udid, readiness: info }) => {
+            const view = readinessView(info);
+            return (
+              <span
+                key={udid}
+                className="pill"
+                title={view.raw ? `${udid} · ${view.raw}` : udid}
+              >
+                {devices.find((device) => device.udid === udid)?.name ?? udid.slice(0, 8)}:{" "}
+                {view.label}
+              </span>
+            );
+          })}
           {/*
             A phone that updates TikTok in place keeps its udid, so nothing re-asks on its
             own. This is the operator's way to say "I just changed that phone".
@@ -634,12 +665,16 @@ export function PublishPage({ devices, selected, onSelectUdids }: SelProps) {
                   `failedBeforeDispatch` with the one refusing phone unnameable except by
                   reading the backend log. This is the read the retry buttons act on.
                 */}
-                {details[campaign.id].assignments.map((assignment) => (
-                  <li key={assignment.id}>
-                    {assignment.udid} — {assignment.state}
-                    {assignment.errorCode ? ` · ${assignment.errorCode}` : ""}
-                  </li>
-                ))}
+                {details[campaign.id].assignments.map((assignment) => {
+                  const cleanup = cleanupEvidence(assignment.evidenceJson);
+                  return (
+                    <li key={assignment.id}>
+                      {assignment.udid} — {assignment.state}
+                      {assignment.errorCode ? ` · ${assignment.errorCode}` : ""}
+                      {cleanup && <span title={cleanup.raw}> · {cleanup.label}</span>}
+                    </li>
+                  );
+                })}
               </ul>
             )}
           </article>

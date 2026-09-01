@@ -50,7 +50,7 @@ describe("updateView", () => {
 
     expect(view.tone).toBe("info");
     expect(view.canInstall).toBe(false);
-    expect(view.detail).toContain("offline");
+    expect(view.detail).toBe('Bấm "Kiểm bản mới" để kiểm tra theo yêu cầu.');
   });
 
   it("reports being current with the running version named", () => {

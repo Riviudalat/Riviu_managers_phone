@@ -107,7 +107,9 @@ describe("NurtureWindows", () => {
   /// so turning it on changes nothing until the operator changes something.
   it("seeds a per-window override from the panel rather than from zero", () => {
     const patch = setup([window8to11]);
-    fireEvent.click(screen.getByLabelText(/Cấu hình riêng cho khung này/));
+    fireEvent.click(
+      screen.getByLabelText(/Cấu hình riêng cho khung này/, { selector: "input" }),
+    );
     expect(patch).toHaveBeenCalledWith("scheduleWindows", [
       {
         ...window8to11,
