@@ -457,3 +457,45 @@
 - Comment chỉ được mở UI sau khi audit write-ahead insert thành công; `attempt_id`
   là bắt buộc. Lỗi update outcome sau Send chỉ được báo lớn, không được biến thành
   một lần gửi lại.
+
+#### 14.6 Windows clean-host và effect closure (01/09/2026; xem §9.138)
+
+- Provider text-only dùng đúng một text batch cho cả cold-start refusal, giữ
+  dedup/reuse và không ghi số frame ảnh giả. Verifier mặc định đọc `0..100`; chỉ
+  dùng `0..1` khi payload có số thập phân rõ ràng. Draft/reject/error đều cộng
+  verification spend đúng một lần.
+- Comment chuyển `preparing -> sending` bằng callback one-shot ở lệnh cuối ngay
+  trước tap Send. Huỷ campaign và nhả mọi claim `preparing` là một transaction;
+  claim tới sau bị chặn, còn `sending`/`succeeded`/`uncertain` không bị hạ. Nếu
+  gate thất bại sau khi đã gõ, composer phải được đóng có kiểm chứng; cleanup
+  không chứng minh được thì assignment là uncertain, không tự retry.
+- Pixel author được lấy từ cụm metadata thấp bên trái, không từ một ROI hàng cố
+  định và không được nhận caption hai dòng làm author. Audit token comment không
+  `Clone`, buộc vào SHA-256 của text đã ghi write-ahead và bị consume đúng một
+  lần ngay trước lời gọi gõ bình luận.
+- `riviu-deployment-check.exe --profile internal --report <path>` là cổng
+  cài đặt Windows; `--device-check [serial]` chỉ đọc. JSON schema 1 dùng đúng
+  `pass | warning | fail | not_applicable`; exit `0` khi profile đạt, `2` khi
+  check/prerequisite fail, `3` khi checker lỗi nội bộ. Profile internal cho bộ
+  cài chưa ký thành warning; production đòi installer hash và Authenticode hợp
+  lệ.
+- Checker chỉ gọi `adb.exe` trong bundle, migrate DB production trên thư mục tạm,
+  thử set/get/delete Credential Manager tạm và luôn cleanup. MSI/NSIS đều cài
+  theo current user, mang `NOTICE` và checker; collector phải cài thật, chạy
+  checker rồi khởi động app ở mock smoke tới `tauriReady && frontendReady` trước
+  khi gỡ cài đặt.
+- Scratch DB của startup smoke do collector sở hữu. App xóa best-effort, nhưng
+  collector phải xóa lại sau khi tiến trình con đã thoát hẳn vì Windows có thể
+  giữ handle SQLite tới process teardown; lỗi startup vẫn là lỗi chính nếu
+  cleanup cũng lỗi. NSIS `/S` có tiến trình self-delete riêng, nên collector chờ
+  bounded tới khi checker và install root cùng biến mất thay vì đọc hậu điều
+  kiện ngay khi launcher uninstaller trả về.
+- Android được khởi tạo độc lập với iOS: thiếu/hỏng runtime iOS chỉ làm backend
+  iOS degraded, không chặn Android và không tạo banner lỗi toàn cục sai. Headless
+  ở đây là automation trong user session; Windows Session 0/service không thuộc
+  contract. Enrollment Android vẫn cần OEM driver và một lần duyệt `Allow USB
+  debugging`; không chuyển `adbkey` giữa máy.
+- UI dùng notice typed `info/success/warning/error`, unknown không được hiển thị
+  như `No`, tooltip trợ giúp phải dùng được bằng hover/focus/click/Escape. Danh
+  sách phải tách Loading/Error/Empty/Data và cho retry; raw outcome/code chỉ nằm
+  trong tooltip hoặc disclosure/chi tiết, gồm mapping `skipped: card_changed`.
