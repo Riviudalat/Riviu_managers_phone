@@ -39,7 +39,8 @@ use riviu_android_driver::AndroidDriver;
 use riviu_core::db::Database;
 use riviu_core::driver::DeviceDriver;
 use riviu_core::nurture::{
-    run_hierarchy_session, CommentSourceError, CommentTextSource, HierarchySession, PreparedComment,
+    run_hierarchy_session, CommentAuditToken, CommentSourceError, CommentTextSource,
+    HierarchySession, PreparedComment,
 };
 use riviu_core::types::{NurtureCommentAttempt, NurtureSessionStatus, NurtureSettings};
 use uuid::Uuid;
@@ -141,31 +142,34 @@ async fn main() -> anyhow::Result<()> {
                 carousel_slides: Some(0),
                 created_at: chrono::Utc::now().to_rfc3339(),
             };
-            if let Err(error) = self.audit.add_nurture_comment_attempt(&attempt) {
-                eprintln!(
-                    "AUDIT UNAVAILABLE before comment UI for {}: {error}",
-                    self.udid
-                );
-                return Err(CommentSourceError::AuditUnavailable);
-            }
+            let audit_attempt = match CommentAuditToken::persist(&self.audit, &attempt) {
+                Ok(token) => token,
+                Err(error) => {
+                    eprintln!(
+                        "AUDIT UNAVAILABLE before comment UI for {}: {error}",
+                        self.udid
+                    );
+                    return Err(CommentSourceError::AuditUnavailable);
+                }
+            };
             Ok(Some(PreparedComment {
                 text: self.text.clone(),
                 prompt_tokens: 0,
                 completion_tokens: 0,
-                attempt_id: attempt.id,
+                audit_attempt,
             }))
         }
 
         async fn record_outcome(&self, prepared: &PreparedComment, outcome: &str) {
             if let Err(error) = self
                 .audit
-                .update_nurture_comment_attempt_outcome(&prepared.attempt_id, outcome)
+                .update_nurture_comment_attempt_outcome(prepared.audit_attempt.id(), outcome)
             {
                 // The public effect may already exist. Report loudly; never ask the loop to
                 // retry a Send just because closing the audit row failed.
                 eprintln!(
                     "AUDIT OUTCOME UPDATE FAILED after comment {}: {error}",
-                    prepared.attempt_id
+                    prepared.audit_attempt.id()
                 );
             }
         }

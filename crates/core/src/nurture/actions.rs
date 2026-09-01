@@ -214,20 +214,31 @@ fn normalize_card_text(value: &str) -> String {
         .to_lowercase()
 }
 
-/// Pick the highest credible left-side profile/header line, immediately above the caption.
-/// Without that author line a changing video frame is not a card identity, so callers fail
-/// closed instead of substituting a whole-frame digest.
+/// Find the lower-left metadata cluster and use its first line as the author.
+///
+/// Canonical captures put the author and caption near the bottom of the card, but videos can
+/// also paint large headline text immediately above them. A fixed author row therefore either
+/// misses real metadata or mistakes the headline for the account. Grouping vertically adjacent,
+/// left-aligned OCR lines keeps the account/caption block together and leaves the inset overlay
+/// in its own cluster. Without a credible author line callers fail closed instead of substituting
+/// a whole-frame digest.
 fn pixel_card_identity_from_observations(
     observations: &[CommentOcrObservation],
 ) -> Option<PixelCardIdentity> {
-    let mut authors = observations
+    #[derive(Clone)]
+    struct MetadataLine {
+        y: f64,
+        x: f64,
+        width: f64,
+        text: String,
+    }
+
+    let mut lines = observations
         .iter()
         .filter(|observation| {
             observation.confidence >= 0.6
-                // Caption extraction starts at 0.67. Keeping this band strictly above it
-                // prevents a caption-only frame from being mistaken for an author proof.
-                && (0.60..0.67).contains(&observation.y)
-                && observation.x <= 0.45
+                && (0.68..=0.91).contains(&observation.y)
+                && observation.x <= 0.70
                 && observation.width >= 0.04
         })
         .filter_map(|observation| {
@@ -246,16 +257,81 @@ fn pixel_card_identity_from_observations(
                         | "hộp thư"
                         | "hồ sơ"
                 );
-            sensible.then_some((observation.y, observation.x, text))
+            sensible.then_some(MetadataLine {
+                y: observation.y,
+                x: observation.x,
+                width: observation.width,
+                text,
+            })
         })
         .collect::<Vec<_>>();
-    authors.sort_by(|left, right| {
-        left.0
-            .total_cmp(&right.0)
-            .then_with(|| left.1.total_cmp(&right.1))
+    lines.sort_by(|left, right| {
+        left.y
+            .total_cmp(&right.y)
+            .then_with(|| left.x.total_cmp(&right.x))
     });
-    let author = authors.into_iter().next()?.2;
-    let caption = ocr_caption(observations).map(|caption| normalize_card_text(&caption));
+
+    let mut clusters: Vec<Vec<MetadataLine>> = Vec::new();
+    for line in lines {
+        let joins_last = clusters.last().is_some_and(|cluster| {
+            let first = &cluster[0];
+            let previous = cluster.last().expect("metadata cluster is nonempty");
+            line.y - previous.y <= 0.065 && (line.x - first.x).abs() <= 0.065
+        });
+        if joins_last {
+            clusters
+                .last_mut()
+                .expect("metadata cluster is nonempty")
+                .push(line);
+        } else {
+            clusters.push(vec![line]);
+        }
+    }
+
+    // An isolated line below the author row is caption/overlay evidence, not an account
+    // identity. Require the canonical author-plus-caption block; otherwise a shared caption
+    // such as "#fyp" can impersonate an author on two adjacent cards. Within the author range,
+    // the bottommost multi-line cluster wins: headline overlays are above it.
+    let cluster = clusters
+        .into_iter()
+        .filter(|cluster| {
+            let first = &cluster[0];
+            if cluster.len() < 2 || !(0.70..=0.85).contains(&first.y) || first.x > 0.30 {
+                return false;
+            }
+
+            let author_chars = first.text.chars().count();
+            let handle = first.text.strip_prefix('@').is_some_and(|handle| {
+                (2..=32).contains(&handle.chars().count())
+                    && handle
+                        .chars()
+                        .all(|ch| ch.is_alphanumeric() || matches!(ch, '.' | '_' | '-'))
+            });
+            let widest_caption = cluster
+                .iter()
+                .skip(1)
+                .map(|line| line.width)
+                .fold(0.0_f64, f64::max);
+            let display_name = (2..=32).contains(&author_chars)
+                && first.text.split_whitespace().count() <= 4
+                && !first
+                    .text
+                    .chars()
+                    .last()
+                    .is_some_and(|ch| matches!(ch, '.' | ',' | '!' | '?' | ':' | ';'))
+                && first.width <= widest_caption * 0.85;
+
+            handle || display_name
+        })
+        .max_by(|left, right| left[0].y.total_cmp(&right[0].y))?;
+    let author = cluster[0].text.clone();
+    let mut caption_lines = Vec::new();
+    for line in cluster.into_iter().skip(1) {
+        if caption_lines.iter().all(|known| known != &line.text) {
+            caption_lines.push(line.text);
+        }
+    }
+    let caption = (!caption_lines.is_empty()).then(|| caption_lines.join(" "));
     Some(PixelCardIdentity { author, caption })
 }
 
@@ -1735,19 +1811,24 @@ impl NurtureEngine {
     ) -> Result<super::hierarchy::PreparedComment, super::hierarchy::CommentSourceError> {
         // Same write-ahead rule as the pixel path: without a durable row, return no text to
         // the hierarchy driver, so it cannot possibly reach `run.comment`.
-        if let Err(error) = self.db.add_nurture_comment_attempt(&attempt) {
-            tracing::warn!(
-                "[nurture {}] KHÔNG ghi được comment attempt ({error}) — bỏ qua trước khi mở \
-                 khay bình luận",
-                attempt.udid
-            );
-            return Err(super::hierarchy::CommentSourceError::AuditUnavailable);
-        }
+        let audit_attempt = match super::hierarchy::CommentAuditToken::persist_for_text(
+            &self.db, &attempt, &text,
+        ) {
+            Ok(token) => token,
+            Err(error) => {
+                tracing::warn!(
+                    "[nurture {}] KHÔNG ghi được comment attempt ({error}) — bỏ qua trước \
+                         khi mở khay bình luận",
+                    attempt.udid
+                );
+                return Err(super::hierarchy::CommentSourceError::AuditUnavailable);
+            }
+        };
         Ok(super::hierarchy::PreparedComment {
             text,
             prompt_tokens,
             completion_tokens,
-            attempt_id: attempt.id,
+            audit_attempt,
         })
     }
 
@@ -1879,14 +1960,24 @@ mod tests {
     #[async_trait]
     impl crate::FrameTextSource for FixedCardText {
         async fn recognize(&self, _frame: &[u8]) -> anyhow::Result<Vec<CommentOcrObservation>> {
-            Ok(vec![CommentOcrObservation {
-                text: "creator_a".into(),
-                confidence: 0.98,
-                x: 0.08,
-                y: 0.63,
-                width: 0.22,
-                height: 0.03,
-            }])
+            Ok(vec![
+                CommentOcrObservation {
+                    text: "creator_a".into(),
+                    confidence: 0.98,
+                    x: 0.04,
+                    y: 0.81,
+                    width: 0.22,
+                    height: 0.03,
+                },
+                CommentOcrObservation {
+                    text: "caption chung".into(),
+                    confidence: 0.98,
+                    x: 0.04,
+                    y: 0.86,
+                    width: 0.30,
+                    height: 0.03,
+                },
+            ])
         }
     }
 
@@ -1902,14 +1993,24 @@ mod tests {
             } else {
                 "creator_b"
             };
-            Ok(vec![CommentOcrObservation {
-                text: author.into(),
-                confidence: 0.98,
-                x: 0.08,
-                y: 0.63,
-                width: 0.22,
-                height: 0.03,
-            }])
+            Ok(vec![
+                CommentOcrObservation {
+                    text: author.into(),
+                    confidence: 0.98,
+                    x: 0.04,
+                    y: 0.81,
+                    width: 0.22,
+                    height: 0.03,
+                },
+                CommentOcrObservation {
+                    text: "caption chung".into(),
+                    confidence: 0.98,
+                    x: 0.04,
+                    y: 0.86,
+                    width: 0.30,
+                    height: 0.03,
+                },
+            ])
         }
     }
 
@@ -1921,25 +2022,24 @@ mod tests {
     impl crate::FrameTextSource for CaptionSequenceCardText {
         async fn recognize(&self, _frame: &[u8]) -> anyhow::Result<Vec<CommentOcrObservation>> {
             let call = self.calls.fetch_add(1, Ordering::Relaxed);
-            let mut observations = vec![CommentOcrObservation {
-                text: "creator_a".into(),
-                confidence: 0.98,
-                x: 0.08,
-                y: 0.63,
-                width: 0.22,
-                height: 0.03,
-            }];
-            if call > 0 {
-                observations.push(CommentOcrObservation {
-                    text: if call == 1 { "caption a" } else { "caption b" }.into(),
+            Ok(vec![
+                CommentOcrObservation {
+                    text: "creator_a".into(),
                     confidence: 0.98,
-                    x: 0.08,
-                    y: 0.82,
+                    x: 0.04,
+                    y: 0.81,
+                    width: 0.22,
+                    height: 0.03,
+                },
+                CommentOcrObservation {
+                    text: if call < 2 { "caption a" } else { "caption b" }.into(),
+                    confidence: 0.98,
+                    x: 0.04,
+                    y: 0.86,
                     width: 0.30,
                     height: 0.03,
-                });
-            }
-            Ok(observations)
+                },
+            ])
         }
     }
 
@@ -1952,16 +2052,16 @@ mod tests {
                 CommentOcrObservation {
                     text: "creator_a".into(),
                     confidence: 0.98,
-                    x: 0.08,
-                    y: 0.63,
+                    x: 0.04,
+                    y: 0.81,
                     width: 0.22,
                     height: 0.03,
                 },
                 CommentOcrObservation {
                     text: "caption b".into(),
                     confidence: 0.98,
-                    x: 0.08,
-                    y: 0.82,
+                    x: 0.04,
+                    y: 0.86,
                     width: 0.30,
                     height: 0.03,
                 },
@@ -1975,16 +2075,16 @@ mod tests {
             CommentOcrObservation {
                 text: "  Creator_A  ".into(),
                 confidence: 0.98,
-                x: 0.08,
-                y: 0.63,
+                x: 0.04,
+                y: 0.81,
                 width: 0.22,
                 height: 0.03,
             },
             CommentOcrObservation {
                 text: "  Một   caption  ".into(),
                 confidence: 0.90,
-                x: 0.08,
-                y: 0.82,
+                x: 0.04,
+                y: 0.86,
                 width: 0.40,
                 height: 0.03,
             },
@@ -2007,8 +2107,97 @@ mod tests {
         }));
     }
 
+    #[test]
+    fn pixel_card_identity_rejects_a_single_caption_or_overlay_as_author() {
+        let caption_only = [CommentOcrObservation {
+            text: "một caption đứng một mình".into(),
+            confidence: 0.98,
+            x: 0.04,
+            y: 0.81,
+            width: 0.46,
+            height: 0.03,
+        }];
+
+        assert!(
+            pixel_card_identity_from_observations(&caption_only).is_none(),
+            "one lower-left text line is not proof that OCR found the author"
+        );
+    }
+
+    #[test]
+    fn pixel_card_identity_rejects_a_two_line_caption_without_author_metadata() {
+        let caption_only = [
+            CommentOcrObservation {
+                text: "một caption đứng thành hai dòng".into(),
+                confidence: 0.98,
+                x: 0.04,
+                y: 0.81,
+                width: 0.52,
+                height: 0.03,
+            },
+            CommentOcrObservation {
+                text: "nhưng không có dòng tác giả".into(),
+                confidence: 0.97,
+                x: 0.04,
+                y: 0.86,
+                width: 0.48,
+                height: 0.03,
+            },
+        ];
+
+        assert!(
+            pixel_card_identity_from_observations(&caption_only).is_none(),
+            "two left-aligned prose lines are caption wrapping, not author metadata"
+        );
+    }
+
+    #[test]
+    fn pixel_card_identity_uses_metadata_cluster_below_overlay_headline() {
+        let observations = vec![
+            CommentOcrObservation {
+                text: "VIỆT NAM THẮNG LỚN".into(),
+                confidence: 0.99,
+                x: 0.12,
+                y: 0.69,
+                width: 0.68,
+                height: 0.05,
+            },
+            CommentOcrObservation {
+                text: "TRONG TRẬN CHUNG KẾT".into(),
+                confidence: 0.99,
+                x: 0.12,
+                y: 0.75,
+                width: 0.72,
+                height: 0.05,
+            },
+            CommentOcrObservation {
+                text: "Thể Thao 247".into(),
+                confidence: 0.98,
+                x: 0.03,
+                y: 0.82,
+                width: 0.25,
+                height: 0.03,
+            },
+            CommentOcrObservation {
+                text: "Một caption của bài đăng".into(),
+                confidence: 0.96,
+                x: 0.03,
+                y: 0.86,
+                width: 0.52,
+                height: 0.03,
+            },
+        ];
+
+        let identity = pixel_card_identity_from_observations(&observations).expect("metadata");
+        assert_eq!(identity.author, "thể thao 247");
+        assert_eq!(
+            identity.caption.as_deref(),
+            Some("một caption của bài đăng")
+        );
+    }
+
     #[tokio::test]
-    async fn comment_evidence_rejects_caption_a_to_b_after_an_initial_ocr_miss() {
+    async fn comment_evidence_rejects_caption_a_to_b_across_canonical_samples() {
         let frames = Arc::new(TestFrames::new());
         let (engine, db_path) = test_engine(frames);
         let engine = engine.with_frame_text_source(Arc::new(CaptionSequenceCardText {
@@ -3171,7 +3360,7 @@ mod tests {
             distinct_frames: None,
             grounded_on: Some(PixelCardIdentity {
                 author: "creator_a".into(),
-                caption: None,
+                caption: Some("caption chung".into()),
             }),
             attempt_id,
         };
@@ -3196,6 +3385,52 @@ mod tests {
             .list_nurture_comment_attempts(10)
             .expect("read audit");
         assert_eq!(attempts[0].outcome, "skipped: card_changed");
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[tokio::test]
+    async fn grounded_comment_opens_card_a_after_reproving_card_a() {
+        let frames = Arc::new(TestFrames::new());
+        let stop = Arc::new(AtomicBool::new(false));
+        let session = RecordingSession::new(frames.clone(), stop, true, false);
+        let (engine, db_path) = test_engine(frames);
+        let engine = engine.with_frame_text_source(Arc::new(FixedCardText));
+        let prepared = PreparedTextComment {
+            text: COMMENT.into(),
+            model: "test".into(),
+            base_url_host: "localhost".into(),
+            prompt_tokens: 0,
+            completion_tokens: 0,
+            cost_usd: None,
+            source: "test-fixture",
+            frame_sha256: None,
+            caption_preview: None,
+            context_confidence: None,
+            relevance: None,
+            evidence_support: None,
+            distinct_frames: None,
+            grounded_on: Some(PixelCardIdentity {
+                author: "creator_a".into(),
+                caption: Some("caption chung".into()),
+            }),
+            attempt_id: "same-card-test".into(),
+        };
+
+        let result = engine
+            .open_grounded_comment_drawer(
+                UDID,
+                &session,
+                &tokio::sync::Mutex::new(()),
+                (375.0, 667.0),
+                &prepared,
+            )
+            .await
+            .expect("re-prove same card");
+
+        assert_eq!(result, None);
+        assert_eq!(session.ordinary_taps.load(Ordering::Relaxed), 1);
+        assert_eq!(session.send_taps.load(Ordering::Relaxed), 0);
+        assert!(session.typed.lock().is_empty());
         let _ = std::fs::remove_file(db_path);
     }
 

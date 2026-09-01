@@ -37,7 +37,9 @@ pub mod touch;
 
 use actions::{CommentResult, FollowResult, LikeResult, SwipeOutcome};
 pub use hierarchy::CommentSourceError;
-pub use hierarchy::{run_hierarchy_session, CommentTextSource, HierarchySession, PreparedComment};
+pub use hierarchy::{
+    run_hierarchy_session, CommentAuditToken, CommentTextSource, HierarchySession, PreparedComment,
+};
 pub use live::LiveSettings;
 use live::{apply_live_settings, video_target, LiveSettingsRefresh};
 pub use recovery::Outcome;
@@ -2673,7 +2675,7 @@ impl hierarchy::CommentTextSource for EngineCommentSource<'_> {
 
     async fn record_outcome(&self, prepared: &hierarchy::PreparedComment, outcome: &str) {
         self.engine
-            .finish_hierarchy_comment(&prepared.attempt_id, outcome);
+            .finish_hierarchy_comment(prepared.audit_attempt.id(), outcome);
     }
 
     fn note_slide(&self) {

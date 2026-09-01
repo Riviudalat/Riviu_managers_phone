@@ -4,6 +4,7 @@ use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -547,12 +548,33 @@ pub enum PolicyAction {
 }
 
 /// A write-ahead policy charge that can be returned only when the action proves it touched
-/// nothing. The id binds a refund to its own row even when a deferred comment overlaps a
-/// later follow reservation on the same card.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// nothing. It is deliberately neither `Copy` nor `Clone`: settling it consumes the only
+/// token a caller can hold. The policy identity prevents an id from another session matching
+/// by accident, while the post generation keeps a delayed refund attached to its original
+/// card after the feed advances.
+#[derive(Debug, PartialEq, Eq)]
 pub struct AttemptReservation {
-    id: u64,
+    policy_id: u64,
+    attempt_id: u64,
+    post_generation: Option<u64>,
 }
+
+#[derive(Debug, Clone)]
+struct AttemptRecord {
+    at: Instant,
+    action: PolicyAction,
+    attempt_id: u64,
+    post_generation: Option<u64>,
+    outstanding: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RecentPost {
+    generation: u64,
+    interactions: u32,
+}
+
+static NEXT_POLICY_ID: AtomicU64 = AtomicU64::new(1);
 
 /// The gap left between two actions when the human pacing is switched off.
 ///
@@ -563,18 +585,20 @@ pub struct AttemptReservation {
 /// would ask for and above the frame or two a transition needs.
 const UNPACED_ACTION_GAP: Duration = Duration::from_millis(800);
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct HumanSessionPolicy {
+    policy_id: u64,
     like_cap: u32,
     comment_cap: u32,
     follow_cap: u32,
-    attempts: VecDeque<(Instant, PolicyAction, u64)>,
+    attempts: VecDeque<AttemptRecord>,
     next_attempt_id: u64,
+    next_post_generation: u64,
     last_action_at: Option<Instant>,
     /// Number of committed or outstanding reservations on each recent card. A count rather
     /// than a bool lets one no-op reservation be refunded without erasing another real action
     /// performed on the same card.
-    recent_posts: VecDeque<u32>,
+    recent_posts: VecDeque<RecentPost>,
     videos_since_break: u32,
     next_rest_at: u32,
     block_started: Instant,
@@ -617,11 +641,13 @@ impl HumanSessionPolicy {
         };
         let next_rest_at = rng.gen_range(7..=13);
         Self {
+            policy_id: NEXT_POLICY_ID.fetch_add(1, Ordering::Relaxed),
             like_cap: cap(like_prob, 8, 16, &mut rng),
             comment_cap: cap(comment_prob, 1, 3, &mut rng),
             follow_cap: cap(follow_prob, 1, 2, &mut rng),
             attempts: VecDeque::new(),
             next_attempt_id: 1,
+            next_post_generation: 1,
             last_action_at: None,
             recent_posts: VecDeque::with_capacity(5),
             videos_since_break: 0,
@@ -679,19 +705,28 @@ impl HumanSessionPolicy {
         if self.recent_posts.len() == 5 {
             self.recent_posts.pop_front();
         }
-        self.recent_posts.push_back(0);
+        let generation = self.next_post_generation;
+        self.next_post_generation = self.next_post_generation.wrapping_add(1).max(1);
+        self.recent_posts.push_back(RecentPost {
+            generation,
+            interactions: 0,
+        });
     }
 
     pub fn can_interact_with_post(&self) -> bool {
         if !self.limits {
             return true;
         }
-        self.recent_posts.iter().filter(|&&used| used > 0).count() < 2
+        self.recent_posts
+            .iter()
+            .filter(|post| post.interactions > 0)
+            .count()
+            < 2
     }
 
     pub fn mark_post_interacted(&mut self) {
         if let Some(last) = self.recent_posts.back_mut() {
-            *last = last.saturating_add(1);
+            last.interactions = last.interactions.saturating_add(1);
         }
     }
 
@@ -700,7 +735,7 @@ impl HumanSessionPolicy {
         while self
             .attempts
             .front()
-            .is_some_and(|(at, _, _)| now.duration_since(*at) >= window)
+            .is_some_and(|attempt| now.duration_since(attempt.at) >= window)
         {
             self.attempts.pop_front();
         }
@@ -722,7 +757,7 @@ impl HumanSessionPolicy {
         }
         self.attempts
             .iter()
-            .filter(|(_, kind, _)| *kind == action)
+            .filter(|attempt| attempt.action == action)
             .count()
             < cap as usize
     }
@@ -734,7 +769,13 @@ impl HumanSessionPolicy {
         self.prune(now);
         let id = self.next_attempt_id;
         self.next_attempt_id = self.next_attempt_id.wrapping_add(1).max(1);
-        self.attempts.push_back((now, action, id));
+        self.attempts.push_back(AttemptRecord {
+            at: now,
+            action,
+            attempt_id: id,
+            post_generation: self.recent_posts.back().map(|post| post.generation),
+            outstanding: false,
+        });
         self.last_action_at = Some(now);
     }
 
@@ -746,29 +787,67 @@ impl HumanSessionPolicy {
         self.prune(now);
         let id = self.next_attempt_id;
         self.next_attempt_id = self.next_attempt_id.wrapping_add(1).max(1);
-        let reservation = AttemptReservation { id };
-        self.attempts.push_back((now, action, id));
+        let post_generation = self.recent_posts.back().map(|post| post.generation);
+        let reservation = AttemptReservation {
+            policy_id: self.policy_id,
+            attempt_id: id,
+            post_generation,
+        };
+        self.attempts.push_back(AttemptRecord {
+            at: now,
+            action,
+            attempt_id: id,
+            post_generation,
+            outstanding: true,
+        });
         self.last_action_at = Some(now);
         self.mark_post_interacted();
         reservation
     }
 
-    /// Keep a reservation. Consuming the token makes the call-site's decision explicit; the
-    /// write-ahead attempt already lives in the rolling window and needs no second mutation.
-    pub fn commit_attempt(&mut self, _reservation: AttemptReservation) {}
+    /// Keep a reservation. Returns `false` for a stale, already-settled, or foreign token.
+    /// The write-ahead attempt remains in the rolling window; only its outstanding marker is
+    /// cleared so even a forged replay cannot later refund it.
+    pub fn commit_attempt(&mut self, reservation: AttemptReservation) -> bool {
+        if reservation.policy_id != self.policy_id {
+            return false;
+        }
+        let Some(attempt) = self.attempts.iter_mut().find(|attempt| {
+            attempt.outstanding
+                && attempt.attempt_id == reservation.attempt_id
+                && attempt.post_generation == reservation.post_generation
+        }) else {
+            return false;
+        };
+        attempt.outstanding = false;
+        true
+    }
 
-    /// Return a reservation whose action proved it touched nothing.
-    pub fn cancel_no_effect(&mut self, reservation: AttemptReservation) {
-        if let Some(index) = self
-            .attempts
-            .iter()
-            .position(|(_, _, id)| *id == reservation.id)
-        {
+    /// Return a reservation whose action proved it touched nothing. Returns `false` and makes
+    /// no state change when the token is stale, already settled, or belongs to another policy.
+    pub fn cancel_no_effect(&mut self, reservation: AttemptReservation) -> bool {
+        if reservation.policy_id != self.policy_id {
+            return false;
+        }
+        if let Some(index) = self.attempts.iter().position(|attempt| {
+            attempt.outstanding
+                && attempt.attempt_id == reservation.attempt_id
+                && attempt.post_generation == reservation.post_generation
+        }) {
             self.attempts.remove(index);
-            if let Some(last) = self.recent_posts.back_mut() {
-                *last = last.saturating_sub(1);
+            if let Some(post_generation) = reservation.post_generation {
+                if let Some(post) = self
+                    .recent_posts
+                    .iter_mut()
+                    .find(|post| post.generation == post_generation)
+                {
+                    post.interactions = post.interactions.saturating_sub(1);
+                }
             }
-            self.last_action_at = self.attempts.back().map(|(at, _, _)| *at);
+            self.last_action_at = self.attempts.back().map(|attempt| attempt.at);
+            true
+        } else {
+            false
         }
     }
 
@@ -1025,6 +1104,76 @@ mod mood_tests {
         assert!(policy.attempts.is_empty());
         assert_eq!(policy.last_action_at, None);
         assert!(policy.can_interact_with_post());
+    }
+
+    #[test]
+    fn reservation_from_another_policy_cannot_cancel_a_local_attempt() {
+        let mut source = HumanSessionPolicy::new(100, 100, 100, true);
+        source.begin_post();
+        let foreign = source.reserve_attempt(PolicyAction::Like);
+
+        let mut target = HumanSessionPolicy::new(100, 100, 100, true);
+        target.begin_post();
+        let local = target.reserve_attempt(PolicyAction::Like);
+
+        target.cancel_no_effect(foreign);
+        assert_eq!(
+            target.attempts.len(),
+            1,
+            "a reservation from another policy must not match the same local id"
+        );
+        assert_eq!(
+            target.recent_posts.back().map(|post| post.interactions),
+            Some(1)
+        );
+
+        target.cancel_no_effect(local);
+        assert!(target.attempts.is_empty());
+        assert_eq!(
+            target.recent_posts.back().map(|post| post.interactions),
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn cancellation_after_feed_advance_refunds_the_original_post() {
+        let mut policy = HumanSessionPolicy::new(100, 100, 100, true);
+        policy.begin_post();
+        let first_post = policy.reserve_attempt(PolicyAction::Like);
+
+        policy.begin_post();
+        policy.mark_post_interacted();
+        policy.cancel_no_effect(first_post);
+
+        assert_eq!(
+            policy
+                .recent_posts
+                .iter()
+                .map(|post| post.interactions)
+                .collect::<Vec<_>>(),
+            vec![0, 1],
+            "the refund must follow its post instead of decrementing the current card"
+        );
+    }
+
+    #[test]
+    fn a_settled_reservation_cannot_be_replayed() {
+        let mut policy = HumanSessionPolicy::new(100, 100, 100, true);
+        policy.begin_post();
+        let reservation = policy.reserve_attempt(PolicyAction::Like);
+        let replay = AttemptReservation {
+            policy_id: reservation.policy_id,
+            attempt_id: reservation.attempt_id,
+            post_generation: reservation.post_generation,
+        };
+
+        assert!(policy.commit_attempt(reservation));
+        assert!(!policy.cancel_no_effect(replay));
+        assert_eq!(policy.attempts.len(), 1);
+        assert_eq!(
+            policy.recent_posts.back().map(|post| post.interactions),
+            Some(1)
+        );
     }
 
     #[test]

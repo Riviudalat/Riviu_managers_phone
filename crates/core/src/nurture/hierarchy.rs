@@ -38,6 +38,7 @@ use std::time::{Duration, Instant};
 // to be told. Both feed loops go through the same function; [`super::live`] says why that
 // is load-bearing rather than tidiness.
 use super::live::{apply_live_settings, video_target, LiveSettings, LiveSettingsRefresh};
+use crate::db::Database;
 use crate::driver::{ElementBox, ElementQuery, UiSession};
 use crate::feed_ladder::{self, LadderSpend, LadderStep};
 use crate::human_behavior::{
@@ -47,8 +48,12 @@ use crate::human_behavior::{
 use crate::tiktok_drawer::CommentVerdict;
 use crate::tiktok_labels::{controls_for, TikTokControl, TikTokControls};
 use crate::tiktok_like::LikeVerdict;
-use crate::types::{NurturePhase, NurtureSessionStatus, NurtureSettings, TapPoint};
+use crate::types::{
+    NurtureCommentAttempt, NurturePhase, NurtureSessionStatus, NurtureSettings, TapPoint,
+};
 use crate::ActionFailure;
+use sha2::{Digest, Sha256};
+use uuid::Uuid;
 
 use super::recovery::Outcome;
 use super::sleep_interruptible;
@@ -277,8 +282,99 @@ impl FollowVerdict {
     }
 }
 
+/// Proof that the comment's write-ahead audit row exists.
+///
+/// The field is private and the only public constructor performs the INSERT itself. A source
+/// therefore cannot hand the hierarchy driver a bare string and claim it is durable. The
+/// boundary checks the marker again immediately before any comment UI is touched.
+#[derive(Debug, PartialEq, Eq)]
+pub struct CommentAuditToken {
+    id: String,
+    text_sha256: String,
+    persisted: bool,
+    consumed: bool,
+}
+
+impl CommentAuditToken {
+    pub fn persist(database: &Database, attempt: &NurtureCommentAttempt) -> anyhow::Result<Self> {
+        Self::persist_for_text(database, attempt, &attempt.preview)
+    }
+
+    pub fn persist_for_text(
+        database: &Database,
+        attempt: &NurtureCommentAttempt,
+        text: &str,
+    ) -> anyhow::Result<Self> {
+        anyhow::ensure!(
+            !attempt.id.trim().is_empty(),
+            "comment audit attempt id is empty"
+        );
+        anyhow::ensure!(
+            attempt.id.trim() == attempt.id,
+            "comment audit attempt id has surrounding whitespace"
+        );
+        Uuid::parse_str(&attempt.id)
+            .map_err(|error| anyhow::anyhow!("comment audit attempt id is not a UUID: {error}"))?;
+        anyhow::ensure!(
+            attempt.preview == text.chars().take(160).collect::<String>(),
+            "comment audit preview does not match the persisted payload"
+        );
+        database.add_nurture_comment_attempt(attempt)?;
+        Ok(Self {
+            id: attempt.id.clone(),
+            text_sha256: comment_text_sha256(text),
+            persisted: true,
+            consumed: false,
+        })
+    }
+
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+
+    fn is_verified(&self) -> bool {
+        self.persisted
+            && !self.consumed
+            && !self.id.trim().is_empty()
+            && self.id.trim() == self.id
+            && Uuid::parse_str(&self.id).is_ok()
+    }
+
+    fn consume_for(&mut self, text: &str) -> bool {
+        if !self.is_verified() {
+            return false;
+        }
+        self.consumed = true;
+        self.text_sha256 == comment_text_sha256(text)
+    }
+
+    #[cfg(test)]
+    fn verified_fixture(text: &str) -> Self {
+        Self {
+            id: "00000000-0000-4000-8000-000000000001".into(),
+            text_sha256: comment_text_sha256(text),
+            persisted: true,
+            consumed: false,
+        }
+    }
+
+    #[cfg(test)]
+    fn unverified_fixture(id: impl Into<String>, text: &str) -> Self {
+        Self {
+            id: id.into(),
+            text_sha256: comment_text_sha256(text),
+            persisted: false,
+            consumed: false,
+        }
+    }
+}
+
+fn comment_text_sha256(text: &str) -> String {
+    format!("{:x}", Sha256::digest(text.as_bytes()))
+}
+
 /// A comment the caller has already decided to post, and what it cost.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, PartialEq)]
 pub struct PreparedComment {
     pub text: String,
     /// What the API reported spending to generate it, added to the session total.
@@ -287,9 +383,9 @@ pub struct PreparedComment {
     /// the app multiplied itself, and they matched no configured model.
     pub prompt_tokens: u32,
     pub completion_tokens: u32,
-    /// Opaque id for the caller's own audit row, echoed back to
+    /// Typed proof of the caller's durable audit row, echoed back to
     /// [`CommentTextSource::record_outcome`].
-    pub attempt_id: String,
+    pub audit_attempt: CommentAuditToken,
 }
 
 /// A comment source can decline ordinary context with `Ok(None)`, but failure to persist the
@@ -305,7 +401,7 @@ pub enum CommentSourceError {
 /// A trait rather than the AI call itself, for two reasons. It keeps provider
 /// plumbing — frames, OpenAI, pricing, audit rows — out of a module whose job is
 /// driving a hierarchy; and it lets the G2 probe exercise the whole drawer flow
-/// with a fixed string, no database or control plane behind it. The desktop app
+/// with a fixed string and its own audit database, no control plane behind it. The desktop app
 /// supplies the *same* grounded generator the iOS engine uses, so both backends
 /// comment from the same evidence and write the same audit trail.
 #[async_trait::async_trait]
@@ -325,9 +421,9 @@ pub trait CommentTextSource: Send + Sync {
         settings: &NurtureSettings,
     ) -> Result<Option<PreparedComment>, CommentSourceError>;
 
-    /// Record how the attempt ended. Default does nothing, for callers with no
-    /// audit trail to keep.
-    async fn record_outcome(&self, _prepared: &PreparedComment, _outcome: &str) {}
+    /// Record how the attempt ended. There is deliberately no default: every source capable of
+    /// returning prepared public text must make an explicit outcome decision.
+    async fn record_outcome(&self, prepared: &PreparedComment, outcome: &str);
 
     /// Offer whatever is on screen right now as evidence for the comment that follows.
     ///
@@ -1049,6 +1145,8 @@ pub async fn run_hierarchy_session(
     if !session.supports_element_bounds() {
         return HierarchySession::NotSupported;
     }
+    let effective_settings = settings.clone().into_effective();
+    let settings = &effective_settings;
     match ensure_tiktok_foreground(session, bundle_id, stop).await {
         Ok(true) => report(status, "đã đưa TikTok lên foreground".into()),
         Ok(false) => {}
@@ -1319,7 +1417,7 @@ async fn post_rolled_comment(
     status: &mut NurtureSessionStatus,
     report: &(dyn Fn(&mut NurtureSessionStatus, String) + Send + Sync),
 ) -> RolledCommentOutcome {
-    let prepared = match source.comment_for_post(settings).await {
+    let mut prepared = match source.comment_for_post(settings).await {
         Ok(Some(prepared)) => prepared,
         Err(CommentSourceError::AuditUnavailable) => {
             report(
@@ -1345,6 +1443,16 @@ async fn post_rolled_comment(
             };
         }
     };
+    if !prepared.audit_attempt.is_verified() {
+        report(
+            status,
+            "bỏ qua bình luận: audit attempt không có bằng chứng đã ghi bền trước hành động".into(),
+        );
+        return RolledCommentOutcome {
+            sent: false,
+            did_act: false,
+        };
+    }
     // **The comment is grounded on the card that was on screen when we started; only that
     // card may receive it.** Drafting collects frames and then calls a vision model, which
     // takes seconds, and a feed can advance underneath a slow draft — so a comment written
@@ -1364,6 +1472,16 @@ async fn post_rolled_comment(
         source
             .record_outcome(&prepared, "skipped: card_changed")
             .await;
+        return RolledCommentOutcome {
+            sent: false,
+            did_act: false,
+        };
+    }
+    if !prepared.audit_attempt.consume_for(&prepared.text) {
+        report(
+            status,
+            "bỏ qua bình luận: audit attempt đã dùng hoặc không khớp nội dung đã ghi bền".into(),
+        );
         return RolledCommentOutcome {
             sent: false,
             did_act: false,
@@ -3988,6 +4106,10 @@ mod tests {
             Ok(None)
         }
 
+        async fn record_outcome(&self, _prepared: &PreparedComment, _outcome: &str) {
+            panic!("a source that returns no prepared comment has no outcome to record");
+        }
+
         fn note_slide(&self) {
             self.slides.fetch_add(1, Ordering::Relaxed);
         }
@@ -4159,7 +4281,7 @@ mod tests {
     fn the_hierarchy_loop_consumes_the_same_human_pauses_as_the_pixel_loop() {
         let source = include_str!("hierarchy.rs").replace("\r\n", "\n");
         let production = source
-            .split_once("#[cfg(test)]")
+            .split_once("\n#[cfg(test)]\nmod tests {")
             .map(|(before, _)| before)
             .unwrap_or(&source);
         // **Counted per site, not per file.** This loop swipes in two places -- the live-card
@@ -4210,12 +4332,14 @@ mod tests {
     /// state a feed advancing during a slow draft leaves behind.
     #[derive(Default)]
     struct DifferentCardPhone {
+        taps: std::sync::atomic::AtomicUsize,
         type_texts: std::sync::atomic::AtomicUsize,
     }
 
     #[async_trait::async_trait]
     impl UiSession for DifferentCardPhone {
         async fn tap(&self, _point: TapPoint) -> anyhow::Result<()> {
+            self.taps.fetch_add(1, Ordering::Relaxed);
             Ok(())
         }
         async fn swipe(&self, _gesture: crate::types::SwipeGesture) -> anyhow::Result<()> {
@@ -4241,8 +4365,11 @@ mod tests {
             Ok(())
         }
         async fn locate(&self, query: ElementQuery<'_>) -> anyhow::Result<Option<ElementBox>> {
-            let ElementQuery::Description { value, .. } = query else {
-                return Ok(None);
+            let labels = vietnamese();
+            let matches = |control| {
+                labels
+                    .label(control)
+                    .is_some_and(|label| label.to_query() == query)
             };
             let card = |desc: &str| {
                 Some(ElementBox {
@@ -4256,11 +4383,15 @@ mod tests {
                 })
             };
             // A rail is present — so the card is not "gone", it is a *different* card. Its
-            // comment count differs from the one the draft was grounded on.
-            Ok(match value {
-                "comments" => card("Xem hoặc thêm bình luận. 87 bình luận"),
-                "Chia sẻ video" => card("Chia sẻ video. 12"),
-                _ => None,
+            // author and comment count both differ from the one the draft was grounded on.
+            Ok(if matches(TikTokControl::AuthorProfileLink) {
+                card("Hồ sơ author_b")
+            } else if matches(TikTokControl::Comments) {
+                card("Xem hoặc thêm bình luận. 87 bình luận")
+            } else if matches(TikTokControl::Share) {
+                card("Chia sẻ video. 12")
+            } else {
+                None
             })
         }
     }
@@ -4279,9 +4410,11 @@ mod tests {
                 text: "một bình luận đã soạn".into(),
                 prompt_tokens: 10,
                 completion_tokens: 10,
-                attempt_id: "test-attempt".into(),
+                audit_attempt: CommentAuditToken::verified_fixture("một bình luận đã soạn"),
             }))
         }
+
+        async fn record_outcome(&self, _prepared: &PreparedComment, _outcome: &str) {}
     }
 
     #[derive(Default)]
@@ -4316,6 +4449,140 @@ mod tests {
         ) -> Result<Option<PreparedComment>, CommentSourceError> {
             Err(CommentSourceError::AuditUnavailable)
         }
+
+        async fn record_outcome(&self, _prepared: &PreparedComment, _outcome: &str) {
+            panic!("an unavailable audit source cannot have an outcome");
+        }
+    }
+
+    struct InvalidAuditWords(&'static str);
+
+    #[async_trait::async_trait]
+    impl CommentTextSource for InvalidAuditWords {
+        async fn comment_for_post(
+            &self,
+            _settings: &NurtureSettings,
+        ) -> Result<Option<PreparedComment>, CommentSourceError> {
+            Ok(Some(PreparedComment {
+                text: "không được chạm UI".into(),
+                prompt_tokens: 0,
+                completion_tokens: 0,
+                audit_attempt: CommentAuditToken::unverified_fixture(self.0, "không được chạm UI"),
+            }))
+        }
+
+        async fn record_outcome(&self, _prepared: &PreparedComment, _outcome: &str) {
+            panic!("an unverified audit attempt must be rejected before outcome handling");
+        }
+    }
+
+    struct MismatchedAuditWords;
+
+    #[async_trait::async_trait]
+    impl CommentTextSource for MismatchedAuditWords {
+        async fn comment_for_post(
+            &self,
+            _settings: &NurtureSettings,
+        ) -> Result<Option<PreparedComment>, CommentSourceError> {
+            Ok(Some(PreparedComment {
+                text: "payload đã bị thay đổi".into(),
+                prompt_tokens: 0,
+                completion_tokens: 0,
+                audit_attempt: CommentAuditToken::verified_fixture("payload đã ghi bền"),
+            }))
+        }
+
+        async fn record_outcome(&self, _prepared: &PreparedComment, _outcome: &str) {
+            panic!("a mismatched audit token must be rejected before outcome handling");
+        }
+    }
+
+    struct ReplayedAuditWords;
+
+    #[async_trait::async_trait]
+    impl CommentTextSource for ReplayedAuditWords {
+        async fn comment_for_post(
+            &self,
+            _settings: &NurtureSettings,
+        ) -> Result<Option<PreparedComment>, CommentSourceError> {
+            let text = "payload chỉ được dùng một lần";
+            let mut token = CommentAuditToken::verified_fixture(text);
+            assert!(token.consume_for(text));
+            Ok(Some(PreparedComment {
+                text: text.into(),
+                prompt_tokens: 0,
+                completion_tokens: 0,
+                audit_attempt: token,
+            }))
+        }
+
+        async fn record_outcome(&self, _prepared: &PreparedComment, _outcome: &str) {
+            panic!("a replayed audit token must be rejected before outcome handling");
+        }
+    }
+
+    fn audit_attempt_row(id: &str) -> NurtureCommentAttempt {
+        NurtureCommentAttempt {
+            id: id.into(),
+            udid: "audit-token-test".into(),
+            outcome: "prepared".into(),
+            source: "test".into(),
+            model: "none".into(),
+            base_url_host: "local".into(),
+            prompt_tokens: 0,
+            completion_tokens: 0,
+            cost_usd: None,
+            preview: "fixture".into(),
+            caption_preview: String::new(),
+            frame_sha256: String::new(),
+            context_confidence: None,
+            relevance: None,
+            evidence_support: None,
+            distinct_frames: None,
+            carousel_slides: None,
+            created_at: chrono::Utc::now().to_rfc3339(),
+        }
+    }
+
+    #[test]
+    fn comment_audit_token_exists_only_after_a_valid_row_is_persisted() {
+        let path =
+            std::env::temp_dir().join(format!("riviu-comment-audit-token-{}.db", Uuid::new_v4()));
+        let database = Database::open(&path).expect("open audit fixture");
+
+        for invalid in ["", "fabricated-not-persisted"] {
+            assert!(CommentAuditToken::persist(&database, &audit_attempt_row(invalid)).is_err());
+        }
+        assert!(database
+            .list_nurture_comment_attempts(10)
+            .expect("list after invalid attempts")
+            .is_empty());
+
+        let valid_id = Uuid::new_v4().to_string();
+        let mut attempt = audit_attempt_row(&valid_id);
+        attempt.preview = "payload đã ghi bền".into();
+        let mut token =
+            CommentAuditToken::persist_for_text(&database, &attempt, "payload đã ghi bền")
+                .expect("persisted row produces token");
+        assert_eq!(token.id(), valid_id);
+        assert!(token.is_verified());
+        assert!(token.consume_for("payload đã ghi bền"));
+        assert!(
+            !token.consume_for("payload đã ghi bền"),
+            "a persisted capability is one-shot"
+        );
+        assert_eq!(
+            database
+                .list_nurture_comment_attempts(10)
+                .expect("list persisted attempt")
+                .len(),
+            1
+        );
+
+        drop(database);
+        for suffix in ["", "-wal", "-shm"] {
+            let _ = std::fs::remove_file(format!("{}{}", path.display(), suffix));
+        }
     }
 
     fn phase_card() -> PostFingerprint {
@@ -4325,6 +4592,71 @@ mod tests {
             share: Some("Chia sẻ video. 3".into()),
             sound: None,
         }
+    }
+
+    fn fully_read_phase_card() -> PostFingerprint {
+        PostFingerprint {
+            author: Some("Hồ sơ author_a".into()),
+            comments: Some("12 bình luận".into()),
+            share: Some("Chia sẻ video. 3".into()),
+            sound: None,
+        }
+    }
+
+    async fn assert_invalid_audit_attempt_is_refused(attempt_id: &'static str) {
+        assert_audit_source_is_refused(&InvalidAuditWords(attempt_id)).await;
+    }
+
+    async fn assert_audit_source_is_refused(source: &dyn CommentTextSource) {
+        let phone = PhaseFailurePhone {
+            fail_locate: None,
+            comments_absent: false,
+            tap_fails: false,
+            taps: 0.into(),
+            typed: 0.into(),
+        };
+        let mut run = phase_failure_run(&phone);
+        let mut status = NurtureSessionStatus::new("invalid-audit-token");
+        let report = |status: &mut NurtureSessionStatus, message: String| {
+            status.last_message = message;
+        };
+
+        let outcome = post_rolled_comment(
+            &mut run,
+            source,
+            &NurtureSettings::default(),
+            &fully_read_phase_card(),
+            &AtomicBool::new(false),
+            &mut status,
+            &report,
+        )
+        .await;
+
+        assert!(!outcome.sent);
+        assert!(!outcome.did_act);
+        assert_eq!(phone.taps.load(Ordering::Relaxed), 0);
+        assert_eq!(phone.typed.load(Ordering::Relaxed), 0);
+        assert!(status.last_message.contains("audit"));
+    }
+
+    #[tokio::test]
+    async fn hierarchy_rejects_an_empty_audit_attempt_before_comment_ui() {
+        assert_invalid_audit_attempt_is_refused("").await;
+    }
+
+    #[tokio::test]
+    async fn hierarchy_rejects_a_fabricated_audit_attempt_before_comment_ui() {
+        assert_invalid_audit_attempt_is_refused("fabricated-not-persisted").await;
+    }
+
+    #[tokio::test]
+    async fn hierarchy_rejects_a_text_mismatch_before_comment_ui() {
+        assert_audit_source_is_refused(&MismatchedAuditWords).await;
+    }
+
+    #[tokio::test]
+    async fn hierarchy_rejects_an_audit_token_replay_before_comment_ui() {
+        assert_audit_source_is_refused(&ReplayedAuditWords).await;
     }
 
     #[tokio::test]
@@ -4436,7 +4768,7 @@ mod tests {
         // The card the draft was grounded on: a different comment count from what the phone
         // now shows.
         let grounded_on = PostFingerprint {
-            author: None,
+            author: Some("Hồ sơ author_a".into()),
             comments: Some("Xem hoặc thêm bình luận. 3 bình luận".into()),
             share: None,
             sound: None,
@@ -4460,6 +4792,11 @@ mod tests {
             "a changed card must refund its no-effect reservation"
         );
         assert_eq!(
+            phone.taps.load(Ordering::Relaxed),
+            0,
+            "no control may be tapped on a card we did not ground on"
+        );
+        assert_eq!(
             phone.type_texts.load(Ordering::Relaxed),
             0,
             "not one character may be typed into a card we did not ground on: {}",
@@ -4479,6 +4816,28 @@ mod tests {
             ["skipped: card_changed"],
             "the durable attempt must explain why no UI action followed"
         );
+    }
+
+    #[test]
+    fn public_hierarchy_entry_applies_effective_settings_before_prepare_and_feed() {
+        let source = include_str!("hierarchy.rs").replace("\r\n", "\n");
+        let entry = source
+            .split("pub async fn run_hierarchy_session(")
+            .nth(1)
+            .expect("public hierarchy entry")
+            .split("\n}\n\n/// How long the feed gets to appear")
+            .next()
+            .expect("public hierarchy entry body");
+        let effective = entry
+            .find("settings.clone().into_effective()")
+            .expect("entrypoint must fold disabled public actions");
+        let prepare = entry
+            .find("HierarchyRun::prepare")
+            .expect("hierarchy prepare call");
+        let feed = entry.find("run_feed(").expect("hierarchy feed call");
+
+        assert!(effective < prepare);
+        assert!(effective < feed);
     }
 
     #[tokio::test]
@@ -4535,6 +4894,10 @@ mod tests {
             *self.slides_when_asked.lock().expect("asked") =
                 Some(self.slides.load(Ordering::Relaxed));
             Ok(None)
+        }
+
+        async fn record_outcome(&self, _prepared: &PreparedComment, _outcome: &str) {
+            panic!("a source that returns no prepared comment has no outcome to record");
         }
 
         fn note_slide(&self) {
