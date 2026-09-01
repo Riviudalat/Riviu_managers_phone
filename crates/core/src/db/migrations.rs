@@ -145,6 +145,10 @@ const MIGRATIONS: &[Migration] = &[
     },
 ];
 
+pub(super) fn latest_version() -> i64 {
+    MIGRATIONS.last().map_or(0, |migration| migration.version)
+}
+
 const LEDGER_SQL: &str = r#"
 CREATE TABLE schema_migrations (
   version INTEGER PRIMARY KEY CHECK (version >= 1),

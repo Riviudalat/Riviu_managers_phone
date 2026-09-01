@@ -664,6 +664,16 @@ export async function androidUnavailableReason() {
   return invoke<string | null>("android_unavailable_reason");
 }
 
+/** Complete the installed-package smoke only after the React fleet has settled. */
+export async function deploymentFrontendReady() {
+  return invoke<boolean>("deployment_frontend_ready");
+}
+
+/** Log folder derived by Tauri from the identifier of the running build. */
+export async function appLogDirectory() {
+  return invoke<string>("app_log_directory");
+}
+
 /**
  * Ask GitHub whether a newer release exists, and whether taking it now is safe.
  *

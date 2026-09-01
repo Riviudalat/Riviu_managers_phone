@@ -7,7 +7,7 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from scripts import build_desktop_sidecar as sidecar_builder
 from scripts import collect_desktop_ci_artifacts as artifacts
@@ -34,6 +34,152 @@ def active_dependency_closure() -> dict[str, str]:
 
 
 class ArtifactContractTests(unittest.TestCase):
+    @staticmethod
+    def _materialize_windows_install(command: list[str]) -> Path:
+        if command[0] == "msiexec.exe":
+            install_root = Path(
+                next(value for value in command if value.startswith("INSTALLDIR=")).split(
+                    "=", 1
+                )[1]
+            )
+        else:
+            install_root = Path(
+                next(value for value in command if value.startswith("/D=")).split(
+                    "=", 1
+                )[1]
+            )
+        sidecars = install_root / "sidecars" / "pymobiledevice3"
+        sidecars.mkdir(parents=True)
+        (sidecars / "riviu_pmd.py").write_text("fixture", encoding="utf-8")
+        (install_root / "riviu-deployment-check.exe").write_bytes(b"MZ")
+        return install_root
+
+    def test_msi_verify_failure_still_uninstalls_and_removes_the_install_root(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            msi = root / "Riviu.msi"
+            nsis = root / "Riviu-setup.exe"
+            msi.write_bytes(b"msi")
+            nsis.write_bytes(b"nsis")
+            commands: list[list[str]] = []
+            installed_root: Path | None = None
+
+            def fake_run(command: list[str], *, timeout: int = 120):
+                nonlocal installed_root
+                commands.append(command)
+                if command[0] == "msiexec.exe" and "/i" in command:
+                    installed_root = self._materialize_windows_install(command)
+                elif command[0] == "msiexec.exe" and "/x" in command:
+                    assert installed_root is not None
+                    artifacts.shutil.rmtree(installed_root)
+                return subprocess.CompletedProcess(command, 0, "", "")
+
+            with (
+                patch.object(artifacts, "run_checked", side_effect=fake_run),
+                patch.object(
+                    artifacts,
+                    "verify_packaged_resources",
+                    side_effect=artifacts.ArtifactError("MSI verification failed"),
+                ),
+            ):
+                with self.assertRaisesRegex(
+                    artifacts.ArtifactError, "MSI verification failed"
+                ):
+                    artifacts.verify_windows_package(
+                        [msi, nsis], root / "bundle", root / "runtime", {}
+                    )
+
+            self.assertTrue(any("/x" in command for command in commands), commands)
+            self.assertIsNotNone(installed_root)
+            self.assertFalse(installed_root.exists())
+
+    def test_nsis_verify_failure_still_uninstalls_and_removes_the_install_root(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            msi = root / "Riviu.msi"
+            nsis = root / "Riviu-setup.exe"
+            msi.write_bytes(b"msi")
+            nsis.write_bytes(b"nsis")
+            commands: list[list[str]] = []
+            nsis_root: Path | None = None
+
+            def fake_run(command: list[str], *, timeout: int = 120):
+                nonlocal nsis_root
+                commands.append(command)
+                if command[0] == "msiexec.exe" and "/i" in command:
+                    self._materialize_windows_install(command)
+                elif command[0] == "msiexec.exe" and "/x" in command:
+                    install_root = Path(
+                        next(
+                            value
+                            for prior in commands
+                            for value in prior
+                            if value.startswith("INSTALLDIR=")
+                        ).split("=", 1)[1]
+                    )
+                    artifacts.shutil.rmtree(install_root)
+                elif command[0] == str(nsis):
+                    nsis_root = self._materialize_windows_install(command)
+                    (nsis_root / "uninstall.exe").write_bytes(b"MZ")
+                elif Path(command[0]).name == "uninstall.exe":
+                    assert nsis_root is not None
+                    artifacts.shutil.rmtree(nsis_root)
+                return subprocess.CompletedProcess(command, 0, "", "")
+
+            with (
+                patch.object(artifacts, "run_checked", side_effect=fake_run),
+                patch.object(
+                    artifacts, "verify_packaged_resources", return_value={"tree": "ok"}
+                ),
+                patch.object(
+                    artifacts,
+                    "verify_windows_desktop_executable",
+                    return_value={
+                        "name": "riviu-managers-phone.exe",
+                        "architecture": "x86_64",
+                        "bytes": 1,
+                        "sha256": "0" * 64,
+                    },
+                ),
+                patch.object(
+                    artifacts,
+                    "run_installed_deployment_check",
+                    side_effect=[
+                        {"schemaVersion": 1, "overall": "pass"},
+                        artifacts.ArtifactError("NSIS verification failed"),
+                    ],
+                ),
+                patch.object(artifacts, "run_installed_app_smoke"),
+            ):
+                with self.assertRaisesRegex(
+                    artifacts.ArtifactError, "NSIS verification failed"
+                ):
+                    artifacts.verify_windows_package(
+                        [msi, nsis], root / "bundle", root / "runtime", {}
+                    )
+
+            self.assertTrue(
+                any(Path(command[0]).name == "uninstall.exe" for command in commands),
+                commands,
+            )
+            self.assertIsNotNone(nsis_root)
+            self.assertFalse(nsis_root.exists())
+
+    def test_cleanup_failure_is_chained_below_the_primary_failure(self):
+        def operation():
+            raise artifacts.ArtifactError("primary verification failure")
+
+        def cleanup():
+            raise artifacts.ArtifactError("cleanup failure")
+
+        with self.assertRaisesRegex(
+            artifacts.ArtifactError, "primary verification failure"
+        ) as raised:
+            artifacts.run_with_cleanup_preserving_primary(operation, cleanup)
+
+        self.assertIsNotNone(raised.exception.__cause__)
+        self.assertIn("cleanup failure", str(raised.exception.__cause__))
+
     def test_sidecar_build_failure_keeps_bounded_child_diagnostics(self):
         child_error = subprocess.CalledProcessError(
             1,
@@ -1028,6 +1174,330 @@ class DeclaredResourcesAreVerified(unittest.TestCase):
         self.assertEqual(
             stale, [], "these are named as verified but no longer declared in bundle.resources"
         )
+
+    def test_windows_bundle_declares_the_deployment_checker_and_notice(self):
+        config = artifacts.load_json(artifacts.TAURI_FULL_CONFIG)
+        bundle = config.get("bundle", {})
+
+        self.assertEqual(
+            bundle.get("externalBin"),
+            ["binaries/riviu-deployment-check"],
+        )
+        self.assertEqual(
+            artifacts.load_json(artifacts.TAURI_CONFIG)["bundle"]["resources"].get(
+                "../../../NOTICE"
+            ),
+            "NOTICE",
+        )
+
+    def test_windows_installers_are_scoped_to_the_current_user(self):
+        config = artifacts.load_json(artifacts.TAURI_CONFIG)
+        windows = config["bundle"]["windows"]
+        self.assertEqual(windows["nsis"]["installMode"], "currentUser")
+
+        template_path = artifacts.TAURI_CONFIG.parent / windows["wix"]["template"]
+        template = template_path.read_text(encoding="utf-8")
+        self.assertIn('InstallScope="perUser"', template)
+        self.assertIn('InstallPrivileges="limited"', template)
+        self.assertIn('<Directory Id="LocalAppDataFolder">', template)
+        self.assertNotIn('InstallScope="perMachine"', template)
+        self.assertNotIn('Root="HKLM" Key="Software\\Classes', template)
+
+    def test_windows_msi_is_installed_not_administratively_extracted(self):
+        command = artifacts.windows_msi_install_command(
+            Path("Riviu.msi"), Path(r"C:\clean\Riviu"), Path("install.log")
+        )
+
+        self.assertIn("/i", command)
+        self.assertNotIn("/a", command)
+        self.assertIn(r"INSTALLDIR=C:\clean\Riviu", command)
+
+    def test_deployment_checker_command_is_headless_and_records_the_installer(self):
+        command = artifacts.deployment_checker_command(
+            Path("riviu-deployment-check.exe"),
+            Path("report.json"),
+            Path("Riviu.msi"),
+            "production",
+        )
+
+        self.assertEqual(
+            command,
+            [
+                "riviu-deployment-check.exe",
+                "--profile",
+                "production",
+                "--report",
+                "report.json",
+                "--installer",
+                "Riviu.msi",
+            ],
+        )
+
+    def test_installed_app_smoke_uses_mock_data_and_exits_by_itself(self):
+        command = artifacts.installed_app_smoke_command(
+            Path("riviu-managers-phone.exe"),
+            Path("startup.json"),
+            Path(r"C:\clean\data"),
+        )
+
+        self.assertEqual(
+            command,
+            [
+                "riviu-managers-phone.exe",
+                "--deployment-smoke",
+                "startup.json",
+                "--data-dir",
+                r"C:\clean\data",
+            ],
+        )
+
+    def test_installed_app_smoke_requires_tauri_and_frontend_readiness(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            report = root / "startup.json"
+            data_dir = root / "data"
+            with (
+                patch.object(
+                    artifacts,
+                    "verify_windows_desktop_executable",
+                    return_value={"name": "riviu-managers-phone.exe"},
+                ),
+                patch.object(artifacts, "run_checked"),
+            ):
+                (root / "riviu-managers-phone.exe").write_bytes(b"fixture")
+                report.write_text(
+                    json.dumps({
+                        "schemaVersion": 1,
+                        "status": "ready",
+                        "mode": "mock",
+                        "databaseVersion": 18,
+                    }),
+                    encoding="utf-8",
+                )
+                with self.assertRaisesRegex(
+                    artifacts.ArtifactError, "did not become ready"
+                ):
+                    artifacts.run_installed_app_smoke(root, report, data_dir)
+
+    def test_installed_app_smoke_parent_removes_child_scratch_after_exit(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            report = root / "startup.json"
+            data_dir = root / "data"
+
+            def run_child(_command, *, timeout):
+                self.assertEqual(timeout, 180)
+                data_dir.mkdir()
+                (data_dir / "riviu.db").write_bytes(b"fixture")
+                report.write_text(
+                    json.dumps(
+                        {
+                            "schemaVersion": 1,
+                            "status": "ready",
+                            "mode": "mock",
+                            "tauriReady": True,
+                            "frontendReady": True,
+                            "databaseVersion": 18,
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+
+            with (
+                patch.object(
+                    artifacts,
+                    "verify_windows_desktop_executable",
+                    return_value={"name": "riviu-managers-phone.exe"},
+                ),
+                patch.object(artifacts, "run_checked", side_effect=run_child),
+            ):
+                (root / "riviu-managers-phone.exe").write_bytes(b"fixture")
+                payload = artifacts.run_installed_app_smoke(root, report, data_dir)
+
+            self.assertEqual(payload["status"], "ready")
+            self.assertFalse(data_dir.exists())
+
+    def test_nsis_uninstall_waits_for_its_self_delete_child(self):
+        install_root = Mock()
+        install_root.exists.side_effect = [True, False]
+        checker = Path("riviu-deployment-check.exe")
+        with (
+            patch.object(
+                artifacts,
+                "find_deployment_checker_if_present",
+                side_effect=[[checker], []],
+            ),
+            patch.object(artifacts.time, "sleep") as sleep,
+        ):
+            artifacts.wait_for_nsis_uninstall(
+                install_root, timeout_seconds=1.0, poll_seconds=0.01
+            )
+
+        sleep.assert_called_once_with(0.01)
+
+    def test_windows_deployment_reports_survive_temporary_install_cleanup(self):
+        packaged = {
+            "_deploymentReportPayloads": {
+                "msi": {
+                    "schemaVersion": 1,
+                    "profile": "internal",
+                    "host": {"build": "22631"},
+                    "overall": "warning",
+                },
+                "nsis": {
+                    "schemaVersion": 1,
+                    "profile": "internal",
+                    "host": {"build": "19045"},
+                    "overall": "pass",
+                },
+            }
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary)
+            records = artifacts.write_deployment_reports(
+                packaged, output, "windows-x64"
+            )
+
+            self.assertNotIn("_deploymentReportPayloads", packaged)
+            self.assertEqual(set(records), {"msi", "nsis"})
+            for kind, record in records.items():
+                report = artifacts.load_json(output / record["file"])
+                self.assertEqual(report["overall"], records[kind]["overall"])
+                self.assertEqual(report["profile"], records[kind]["profile"])
+                self.assertEqual(
+                    artifacts.sha256_file(output / record["file"]),
+                    record["sha256"],
+                )
+
+    def test_windows_release_contract_requires_actual_install_checker_and_smoke_gates(self):
+        packaged = {
+            "msiSilentInstall": "PASS",
+            "msiDeploymentCheck": "PASS",
+            "msiStartupSmoke": "PASS",
+            "nsisSilentInstall": "PASS",
+            "nsisDeploymentCheck": "PASS",
+            "nsisStartupSmoke": "PASS",
+            "embeddedSignerErrorJson": "PASS",
+            "desktopExecutable": "PASS",
+            "desktopArchitecture": "x86_64",
+            "deploymentReports": {
+                "msi": {"profile": "production", "overall": "pass"},
+                "nsis": {"profile": "production", "overall": "pass"},
+            },
+        }
+
+        artifacts.require_windows_package_gates(packaged, Path("artifact-manifest.json"))
+
+        production_warning = dict(packaged)
+        production_warning["deploymentReports"] = {
+            "msi": {"profile": "production", "overall": "warning"},
+            "nsis": {"profile": "production", "overall": "warning"},
+        }
+        artifacts.require_windows_package_gates(
+            production_warning, Path("artifact-manifest.json")
+        )
+
+        for missing in (
+            "msiSilentInstall",
+            "msiDeploymentCheck",
+            "msiStartupSmoke",
+            "nsisSilentInstall",
+            "nsisDeploymentCheck",
+            "nsisStartupSmoke",
+        ):
+            with self.subTest(missing=missing):
+                drifted = dict(packaged)
+                drifted.pop(missing)
+                with self.assertRaisesRegex(
+                    artifacts.ArtifactError,
+                    "Windows installer verification gate is missing",
+                ):
+                    artifacts.require_windows_package_gates(
+                        drifted, Path("artifact-manifest.json")
+                    )
+
+        internal = dict(packaged)
+        internal["deploymentReports"] = {
+            "msi": {"profile": "internal", "overall": "warning"},
+            "nsis": {"profile": "internal", "overall": "warning"},
+        }
+        with self.assertRaisesRegex(
+            artifacts.ArtifactError, "production deployment report"
+        ):
+            artifacts.require_windows_package_gates(
+                internal, Path("artifact-manifest.json")
+            )
+
+    def test_release_tags_collect_with_the_production_deployment_profile(self):
+        workflow = (artifacts.REPOSITORY_ROOT / ".github/workflows/desktop-ci-cd.yml").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn("--deployment-profile", workflow)
+        self.assertIn(
+            "startsWith(github.ref, 'refs/tags/v') && 'production' || 'internal'",
+            workflow,
+        )
+        self.assertIn("snapshot-yt-dlp", workflow)
+
+    def test_ytdlp_manifest_is_generated_from_the_downloaded_binary(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            binary = root / "yt-dlp.exe"
+            binary.write_bytes(b"downloaded yt-dlp")
+            completed = subprocess.CompletedProcess(
+                [str(binary), "--version"], 0, "2026.09.01\n", ""
+            )
+            with patch.object(artifacts, "run_checked", return_value=completed):
+                manifest = artifacts.ytdlp_manifest(binary)
+
+            self.assertEqual(manifest["schemaVersion"], 1)
+            self.assertEqual(manifest["path"], "yt-dlp.exe")
+            self.assertEqual(manifest["bytes"], binary.stat().st_size)
+            self.assertEqual(manifest["sha256"], artifacts.sha256_file(binary))
+            self.assertEqual(manifest["version"], "2026.09.01")
+
+    def test_release_verifier_reads_the_deployment_report_instead_of_trusting_its_summary(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            manifest_path = root / "windows-x64-artifact-manifest.json"
+            manifest_path.write_text("{}", encoding="utf-8")
+            reports = {}
+            for kind in ("msi", "nsis"):
+                report_path = root / f"{kind}-deployment-check.json"
+                report_path.write_text(
+                    json.dumps(
+                        {
+                            "schemaVersion": 1,
+                            "profile": "internal" if kind == "msi" else "production",
+                            "overall": "warning" if kind == "msi" else "pass",
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+                reports[kind] = {
+                    "file": report_path.name,
+                    "sha256": artifacts.sha256_file(report_path),
+                    "profile": "production",
+                    "overall": "pass",
+                }
+            packaged = {
+                "msiSilentInstall": "PASS",
+                "msiDeploymentCheck": "PASS",
+                "msiStartupSmoke": "PASS",
+                "nsisSilentInstall": "PASS",
+                "nsisDeploymentCheck": "PASS",
+                "nsisStartupSmoke": "PASS",
+                "embeddedSignerErrorJson": "PASS",
+                "desktopExecutable": "PASS",
+                "desktopArchitecture": "x86_64",
+                "deploymentReports": reports,
+            }
+
+            with self.assertRaisesRegex(
+                artifacts.ArtifactError, "production deployment report"
+            ):
+                artifacts.require_windows_package_gates(packaged, manifest_path)
 
 if __name__ == "__main__":
     unittest.main()

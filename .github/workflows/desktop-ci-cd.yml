@@ -97,10 +97,10 @@ jobs:
       - name: Check Python tooling
         shell: pwsh
         run: |
-          python -m py_compile scripts/build_desktop_sidecar.py scripts/collect_desktop_ci_artifacts.py scripts/test_collect_desktop_ci_artifacts.py sidecars/pymobiledevice3/pyinstaller_runtime_hook.py sidecars/signer/riviu_signer.py sidecars/wda/build_and_install.py sidecars/wda/test_build_and_install.py tools/interaction-gate0/probe.py tools/interaction-gate0/test_probe.py scripts/build_agents_index.py
+          python -m py_compile scripts/build_desktop_sidecar.py scripts/build_per_user_wix_resources.py scripts/collect_desktop_ci_artifacts.py scripts/test_build_per_user_wix_resources.py scripts/test_collect_desktop_ci_artifacts.py scripts/stage_deployment_checker.py scripts/test_stage_deployment_checker.py sidecars/pymobiledevice3/pyinstaller_runtime_hook.py sidecars/signer/riviu_signer.py sidecars/wda/build_and_install.py sidecars/wda/test_build_and_install.py tools/interaction-gate0/probe.py tools/interaction-gate0/test_probe.py scripts/build_agents_index.py
           node scripts/run_python.mjs scripts/build_desktop_sidecar.py --help
           python scripts/collect_desktop_ci_artifacts.py verify-version
-          python -m unittest -v scripts.test_collect_desktop_ci_artifacts sidecars.pymobiledevice3.test_app_control sidecars.pymobiledevice3.test_rtmmo_lifecycle sidecars.signer.test_riviu_signer sidecars.wda.test_build_and_install
+          python -m unittest -v scripts.test_build_per_user_wix_resources scripts.test_collect_desktop_ci_artifacts scripts.test_stage_deployment_checker sidecars.pymobiledevice3.test_app_control sidecars.pymobiledevice3.test_rtmmo_lifecycle sidecars.pymobiledevice3.test_media_stage sidecars.signer.test_riviu_signer sidecars.wda.test_build_and_install
           # The Gate 0 probe: 37 tests over the iOS interaction transport contract -- auth
           # 401/401/200 on every control route and on MJPEG, the exact `POST /url` bodies for
           # direct-video, short-link and photo, and the action-completion boundary that stops a
@@ -301,6 +301,9 @@ jobs:
           chmod +x "$out"
           test -s "$out"
           "$out" --version
+          python scripts/collect_desktop_ci_artifacts.py snapshot-yt-dlp \
+            --binary "$out" \
+            --output sidecars/yt-dlp/yt-dlp-manifest.json
 
       - name: Snapshot production WDA inputs
         shell: bash
@@ -341,6 +344,26 @@ jobs:
             --work target/pyinstaller-work \
             --tauri-config target/tauri-sidecar.conf.json
 
+      - name: Build and stage deployment checker sidecar
+        shell: bash
+        env:
+          RIVIU_DEFAULT_AGENT_MODE: full
+        run: |
+          set -euo pipefail
+          cargo build --release --locked \
+            --target "${{ matrix.target }}" \
+            -p riviu-managers-phone \
+            --bin riviu-deployment-check
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            checker="target/${{ matrix.target }}/release/riviu-deployment-check.exe"
+          else
+            checker="target/${{ matrix.target }}/release/riviu-deployment-check"
+          fi
+          python scripts/stage_deployment_checker.py \
+            --input "$checker" \
+            --output-dir apps/desktop/src-tauri/binaries \
+            --target "${{ matrix.target }}"
+
       # The updater signing key is the one secret that must never reach a build anyone with
       # push access can start. `build:` has no ref filter, so it runs on every PR and every
       # branch push — and a build executes arbitrary repository code (`build.rs`, npm lifecycle
@@ -369,6 +392,17 @@ jobs:
           echo "THROWAWAY_SIGNING_KEY=$(cat "${RUNNER_TEMP}/updater-throwaway.key")" >> "$GITHUB_ENV"
           rm -f "${RUNNER_TEMP}/updater-throwaway.key" "${RUNNER_TEMP}/updater-throwaway.key.pub"
 
+      - name: Generate per-user MSI resource fragment
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          python scripts/build_per_user_wix_resources.py `
+            --config apps/desktop/src-tauri/tauri.conf.json `
+            --config target/tauri-sidecar.conf.json `
+            --fragment-output target/per-user-wix-resources.wxs `
+            --config-output target/tauri-per-user-msi.conf.json `
+            --target "${{ matrix.target }}"
+
       - name: Build Tauri installers
         working-directory: apps/desktop
         env:
@@ -389,12 +423,28 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          npm run tauri -- build --ci \
-            --target "${{ matrix.target }}" \
-            --bundles "${{ matrix.bundles }}" \
-            --config "${{ github.workspace }}/apps/desktop/src-tauri/tauri.full.conf.json" \
-            --config "${{ github.workspace }}/target/tauri-sidecar.conf.json" \
-            -- --locked
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            npm run tauri -- build --ci \
+              --target "${{ matrix.target }}" \
+              --bundles nsis \
+              --config "${{ github.workspace }}/apps/desktop/src-tauri/tauri.full.conf.json" \
+              --config "${{ github.workspace }}/target/tauri-sidecar.conf.json" \
+              -- --locked
+            npm run tauri -- build --ci \
+              --target "${{ matrix.target }}" \
+              --bundles msi \
+              --config "${{ github.workspace }}/apps/desktop/src-tauri/tauri.full.conf.json" \
+              --config "${{ github.workspace }}/target/tauri-sidecar.conf.json" \
+              --config "${{ github.workspace }}/target/tauri-per-user-msi.conf.json" \
+              -- --locked
+          else
+            npm run tauri -- build --ci \
+              --target "${{ matrix.target }}" \
+              --bundles "${{ matrix.bundles }}" \
+              --config "${{ github.workspace }}/apps/desktop/src-tauri/tauri.full.conf.json" \
+              --config "${{ github.workspace }}/target/tauri-sidecar.conf.json" \
+              -- --locked
+          fi
 
       - name: Verify and collect release artifacts
         shell: bash
@@ -408,6 +458,7 @@ jobs:
             --tauri-config target/tauri-sidecar.conf.json \
             --production-baseline target/production-wda-inputs.json \
             --source-commit "${GITHUB_SHA}" \
+            --deployment-profile "${{ startsWith(github.ref, 'refs/tags/v') && 'production' || 'internal' }}" \
             --output "target/desktop-ci/${{ matrix.label }}"
           git diff --exit-code -- \
             sidecars/wda/RiviuAgent.ipa \

@@ -11,6 +11,58 @@ pub struct ResolvedAgentRuntime {
     pub token_configured: bool,
 }
 
+/// The desktop can run an Android fleet even when its independent iOS runtime
+/// cannot be resolved. Database failures remain fatal; iOS-only token,
+/// manifest, artifact, and checksum failures are carried as a degraded result.
+pub struct BootstrapAgentRuntimeResolution {
+    pub runtime: Option<ResolvedAgentRuntime>,
+    pub settings: AgentSettings,
+    pub degraded_reason: Option<String>,
+    pub degraded_driver_config: DriverConfig,
+}
+
+pub fn resolve_desktop_agent_runtime_for_bootstrap_with_candidate(
+    sidecar_root: PathBuf,
+    state_dir: PathBuf,
+    database: &Database,
+    credentials: &CredentialStore,
+    legacy_token: Option<&str>,
+    mock_requested: bool,
+    prefer_candidate: bool,
+) -> anyhow::Result<BootstrapAgentRuntimeResolution> {
+    // Settings belong to the desktop, not to either platform. Read them before
+    // attempting the iOS-only artifact path so an Android-only boot retains the
+    // operator's configuration.
+    let settings = database.get_agent_settings()?;
+    let degraded_driver_config = DriverConfig {
+        sidecar_root: sidecar_root.clone(),
+        state_dir: state_dir.clone(),
+        target: DriverTarget::LegacyStock,
+    };
+    match resolve_desktop_agent_runtime_with_candidate(
+        sidecar_root,
+        state_dir,
+        database,
+        credentials,
+        legacy_token,
+        mock_requested,
+        prefer_candidate,
+    ) {
+        Ok(runtime) => Ok(BootstrapAgentRuntimeResolution {
+            settings,
+            runtime: Some(runtime),
+            degraded_reason: None,
+            degraded_driver_config,
+        }),
+        Err(error) => Ok(BootstrapAgentRuntimeResolution {
+            runtime: None,
+            settings,
+            degraded_reason: Some(format!("iOS agent runtime unavailable: {error:#}")),
+            degraded_driver_config,
+        }),
+    }
+}
+
 /// Convenience wrapper that pins `candidate = false`. Production resolves the
 /// candidate explicitly through `..._with_candidate`, so this exists for tests.
 #[cfg(test)]

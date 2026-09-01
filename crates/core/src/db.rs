@@ -84,6 +84,24 @@ impl Database {
         conn.pragma_update(None, "journal_mode", "WAL")?;
         migrations::run(&mut conn)
     }
+
+    /// Schema version recorded by the production migration ledger.
+    ///
+    /// Deployment diagnostics use this instead of opening SQLite independently, so the
+    /// checker exercises the same connection options and migration path as the application.
+    pub fn schema_version(&self) -> anyhow::Result<i64> {
+        self.conn()?
+            .query_row("SELECT MAX(version) FROM schema_migrations", [], |row| {
+                row.get::<_, Option<i64>>(0)
+            })
+            .map(|version| version.unwrap_or(0))
+            .context("read schema migration version")
+    }
+
+    /// Version a newly created database must reach in this build.
+    pub fn latest_schema_version() -> i64 {
+        migrations::latest_version()
+    }
 }
 
 /// A value in the database does not fit the type the row is read into.

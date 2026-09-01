@@ -8,17 +8,19 @@ use anyhow::Context;
 use parking_lot::{Mutex, RwLock};
 use riviu_core::db::Database;
 use riviu_core::{
-    AppEvent, BackgroundStreamLease, DeviceControlPlane, DeviceExclusiveContext, DeviceRegistry,
-    DeviceWorkCoordinator, DeviceWorkOwner, EventBus, FlowArtifactStore, FlowId, FlowRuntime,
-    FlowRuntimeDeps, Frame, JobQueue, JobStatus, NurtureEngine, StreamBudgetManager,
-    StreamSettings, UiSession, UiSessionContext, STREAM_FPS,
+    AgentSettings, AppEvent, BackgroundStreamLease, DeviceCapabilityRegistry, DeviceControlPlane,
+    DeviceExclusiveContext, DeviceRegistry, DeviceWorkCoordinator, DeviceWorkOwner, EventBus,
+    FlowArtifactStore, FlowId, FlowRuntime, FlowRuntimeDeps, Frame, JobQueue, JobStatus,
+    NurtureEngine, StreamBudgetManager, StreamSettings, UiSession, UiSessionContext, STREAM_FPS,
 };
-use riviu_ios_driver::{create_driver, DriverMode, DriverTarget, StreamHub};
+use riviu_ios_driver::{create_driver, DriverMode, DriverTarget, PmdIosDriver, StreamHub};
 use riviu_signing::{CredentialStore, SigningService};
 use tauri::{AppHandle, Emitter};
 use tokio::sync::{Mutex as AsyncMutex, Notify};
 
-use crate::agent_runtime::{resolve_desktop_agent_runtime_with_candidate, ResolvedAgentRuntime};
+use crate::agent_runtime::{
+    resolve_desktop_agent_runtime_for_bootstrap_with_candidate, BootstrapAgentRuntimeResolution,
+};
 use crate::android_tools::SidecarOrigin;
 use crate::command_error::CommandError;
 use crate::nurture_commands::NurtureRuntime;
@@ -47,6 +49,144 @@ const VIEW_EVIDENCE_LOG_EVERY: Duration = Duration::from_secs(30);
 /// window and be missed. Left bounded rather than unbounded because this runs on every
 /// update check.
 const BUSY_JOB_SCAN_LIMIT: usize = 500;
+
+struct IosBootstrapRuntime {
+    driver: Arc<dyn riviu_core::driver::DeviceDriver>,
+    streams: StreamHub,
+    mode: DriverMode,
+    interaction_capabilities: Arc<DeviceCapabilityRegistry>,
+    degraded_reason: Option<String>,
+    list_error: Option<Arc<dyn Fn() -> Option<String> + Send + Sync>>,
+    token_configured: bool,
+    artifact_id: String,
+    artifact_version: String,
+    bundle_id: String,
+}
+
+struct IosRuntimeIdentity {
+    token_configured: bool,
+    artifact_id: String,
+    artifact_version: String,
+    bundle_id: String,
+}
+
+impl IosBootstrapRuntime {
+    fn degraded(
+        reason: String,
+        settings: AgentSettings,
+        degraded_driver_config: riviu_ios_driver::DriverConfig,
+        mode: DriverMode,
+        identity: IosRuntimeIdentity,
+    ) -> Self {
+        log::error!("{reason}");
+        // `LegacyStock` makes this constructor infallible: it needs neither a
+        // token nor an artifact. With no sidecar it lists an empty iOS fleet,
+        // while retaining the shared settings as the multiplexer's first backend.
+        let driver = PmdIosDriver::degraded(&degraded_driver_config)
+            .expect("the degraded LegacyStock iOS placeholder has no fallible input");
+        riviu_core::driver::DeviceDriver::set_agent_settings(&driver, settings);
+        let streams = driver.stream_hub();
+        Self {
+            driver: Arc::new(driver),
+            streams,
+            mode,
+            interaction_capabilities: Arc::new(DeviceCapabilityRegistry::empty()),
+            degraded_reason: Some(reason),
+            list_error: None,
+            token_configured: identity.token_configured,
+            artifact_id: identity.artifact_id,
+            artifact_version: identity.artifact_version,
+            bundle_id: identity.bundle_id,
+        }
+    }
+}
+
+async fn bootstrap_ios_runtime(resolution: BootstrapAgentRuntimeResolution) -> IosBootstrapRuntime {
+    let BootstrapAgentRuntimeResolution {
+        runtime,
+        settings,
+        degraded_reason,
+        degraded_driver_config,
+    } = resolution;
+    let Some(runtime) = runtime else {
+        return IosBootstrapRuntime::degraded(
+            degraded_reason.unwrap_or_else(|| "iOS agent runtime unavailable".to_string()),
+            settings,
+            degraded_driver_config,
+            DriverMode::Pymobiledevice3,
+            IosRuntimeIdentity {
+                token_configured: false,
+                artifact_id: "ios-agent-unavailable".to_string(),
+                artifact_version: String::new(),
+                bundle_id: String::new(),
+            },
+        );
+    };
+
+    let mode = if matches!(&runtime.driver_config.target, DriverTarget::Mock) {
+        DriverMode::Mock
+    } else {
+        DriverMode::Pymobiledevice3
+    };
+    let (artifact_id, artifact_version, bundle_id) = match &runtime.driver_config.target {
+        DriverTarget::Real(config) => (
+            config.artifact.manifest.artifact_id.clone(),
+            config.artifact.manifest.artifact_version.clone(),
+            config.artifact.manifest.bundle_id.clone(),
+        ),
+        DriverTarget::Mock => (
+            "riviu-agent-mock".to_string(),
+            "1.0.0".to_string(),
+            "com.riviu.managersphone.agent.xctrunner".to_string(),
+        ),
+        DriverTarget::LegacyStock => (
+            "legacy-stock-wda".to_string(),
+            String::new(),
+            "com.riviu.managersphone.agent.xctrunner".to_string(),
+        ),
+    };
+    let identity = IosRuntimeIdentity {
+        token_configured: runtime.token_configured,
+        artifact_id,
+        artifact_version,
+        bundle_id,
+    };
+    match create_driver(runtime.driver_config).await {
+        Ok(bundle) => {
+            bundle.driver.set_agent_settings(settings);
+            IosBootstrapRuntime {
+                driver: bundle.driver,
+                streams: bundle.streams,
+                mode: bundle.mode,
+                interaction_capabilities: bundle.interaction_capabilities,
+                degraded_reason: bundle.degraded_reason,
+                list_error: bundle.list_error,
+                token_configured: identity.token_configured,
+                artifact_id: identity.artifact_id,
+                artifact_version: identity.artifact_version,
+                bundle_id: identity.bundle_id,
+            }
+        }
+        Err(error) => IosBootstrapRuntime::degraded(
+            format!("iOS driver unavailable: {error:#}"),
+            settings,
+            degraded_driver_config,
+            mode,
+            identity,
+        ),
+    }
+}
+
+fn platform_fleet(
+    ios: Arc<dyn riviu_core::driver::DeviceDriver>,
+    android: Option<Arc<dyn riviu_core::driver::DeviceDriver>>,
+) -> Arc<dyn riviu_core::driver::DeviceDriver> {
+    let mut backends = vec![("ios".to_string(), ios)];
+    if let Some(android) = android {
+        backends.push(("android".to_string(), android));
+    }
+    Arc::new(riviu_core::driver_multiplex::MultiplexDriver::new(backends))
+}
 
 /// Why the Sheet sweeper is standing still, or `None` when it may deliver.
 ///
@@ -634,46 +774,22 @@ impl AppState {
                 .with_secrets(Arc::new(KeyringSecrets::new(credentials.clone()))),
         );
         let legacy_token = std::env::var("RIVIU_RTMMO_TOKEN").ok();
-        let ResolvedAgentRuntime {
-            driver_config,
-            settings: resolved_agent_settings,
-            token_configured: agent_token_configured,
-        } = resolve_desktop_agent_runtime_with_candidate(
-            sidecar_root.clone(),
-            data.clone(),
-            &db,
-            &credentials,
-            legacy_token.as_deref(),
-            mock_requested,
-            true,
-        )?;
-        let (active_agent_artifact_id, active_agent_artifact_version, active_agent_bundle_id) =
-            match &driver_config.target {
-                DriverTarget::Real(config) => (
-                    config.artifact.manifest.artifact_id.clone(),
-                    config.artifact.manifest.artifact_version.clone(),
-                    config.artifact.manifest.bundle_id.clone(),
-                ),
-                DriverTarget::Mock => (
-                    "riviu-agent-mock".to_string(),
-                    "1.0.0".to_string(),
-                    "com.riviu.managersphone.agent.xctrunner".to_string(),
-                ),
-                DriverTarget::LegacyStock => (
-                    "legacy-stock-wda".to_string(),
-                    String::new(),
-                    "com.riviu.managersphone.agent.xctrunner".to_string(),
-                ),
-            };
-        let bundle = create_driver(driver_config).await?;
-        bundle.driver.set_agent_settings(resolved_agent_settings);
+        let ios =
+            bootstrap_ios_runtime(resolve_desktop_agent_runtime_for_bootstrap_with_candidate(
+                sidecar_root.clone(),
+                data.clone(),
+                &db,
+                &credentials,
+                legacy_token.as_deref(),
+                mock_requested,
+                true,
+            )?)
+            .await;
 
         // One plane over both platforms. The Android backend joins only when
         // `adb` is actually usable, so a machine with no Android tooling gets
         // no backend rather than one that is permanently degraded — and the
         // reason is kept so the UI can say which it is.
-        let mut backends: Vec<(String, Arc<dyn riviu_core::driver::DeviceDriver>)> =
-            vec![("ios".to_string(), bundle.driver.clone())];
         // Verified bundled tools, offered at the **lowest** priority so an operator's
         // own adb or `RIVIU_MINICAP_APK` still wins. A corrupt bundle costs its own
         // tool and nothing else; see `android_tools`.
@@ -726,7 +842,7 @@ impl AppState {
                 Ok(driver) => {
                     // JPEG evidence still lands in StreamHub. H.264 view samples
                     // go to ViewHub and never become a Frame.
-                    driver.set_frame_sink(Arc::new(bundle.streams.clone()));
+                    driver.set_frame_sink(Arc::new(ios.streams.clone()));
                     driver.set_view_sink(
                         Arc::clone(&view_hub) as Arc<dyn riviu_android_driver::ViewSink>
                     );
@@ -740,13 +856,16 @@ impl AppState {
                         stream_settings.focus_quality.clone(),
                         stream_settings.fps,
                     );
-                    backends.push(("android".to_string(), driver.clone()));
                     (Some(driver), None)
                 }
                 Err(reason) => (None, Some(reason)),
             };
-        let fleet: Arc<dyn riviu_core::driver::DeviceDriver> =
-            Arc::new(riviu_core::driver_multiplex::MultiplexDriver::new(backends));
+        let fleet = platform_fleet(
+            ios.driver.clone(),
+            android
+                .as_ref()
+                .map(|driver| driver.clone() as Arc<dyn riviu_core::driver::DeviceDriver>),
+        );
 
         // **How many phones may hold a producer at once — sized from the fleet that is
         // actually plugged in.**
@@ -772,7 +891,7 @@ impl AppState {
             fleet,
             Arc::new(DeviceWorkCoordinator::new()),
             Arc::new(desktop_stream_budget(initial_devices.len())),
-            bundle.interaction_capabilities.clone(),
+            ios.interaction_capabilities.clone(),
         ));
         let signing =
             SigningService::with_credentials(sidecar_root.join("signer"), credentials.clone());
@@ -794,7 +913,7 @@ impl AppState {
         let nurture_engine = NurtureEngine::new(
             db.clone(),
             control.clone(),
-            Arc::new(bundle.streams.clone()),
+            Arc::new(ios.streams.clone()),
             artifacts_dir.clone(),
         )
         .with_frame_text_source(Arc::new(crate::interaction_ocr::DesktopFrameTextSource));
@@ -821,7 +940,7 @@ impl AppState {
             events: events.clone(),
             registry: registry.clone(),
             control: control.clone(),
-            frames: Arc::new(bundle.streams.clone()),
+            frames: Arc::new(ios.streams.clone()),
             artifacts: flow_artifacts.clone(),
         });
         flows.recover_startup().await?;
@@ -863,10 +982,10 @@ impl AppState {
             registry,
             events,
             control,
-            streams: bundle.streams,
-            driver_mode: bundle.mode,
-            driver_degraded_reason: bundle.degraded_reason,
-            driver_list_error: bundle.list_error,
+            streams: ios.streams,
+            driver_mode: ios.mode,
+            driver_degraded_reason: ios.degraded_reason,
+            driver_list_error: ios.list_error,
             android_unavailable_reason: android_unavailable,
             android_tool_problems: android_tools.problems.clone(),
             android,
@@ -880,10 +999,10 @@ impl AppState {
             db,
             signing,
             secrets: credentials,
-            agent_token_configured,
-            active_agent_artifact_id,
-            active_agent_artifact_version,
-            active_agent_bundle_id,
+            agent_token_configured: ios.token_configured,
+            active_agent_artifact_id: ios.artifact_id,
+            active_agent_artifact_version: ios.artifact_version,
+            active_agent_bundle_id: ios.bundle_id,
             stream_settings: Arc::new(RwLock::new(stream_settings)),
             artifacts_dir,
             legacy_wda_bundle: sidecar_root.join("wda").join("Riviumanagersphone.ipa"),
@@ -2393,6 +2512,171 @@ mod tests {
 
     use super::*;
 
+    #[derive(Clone, Default)]
+    struct BootstrapCredentialBackend {
+        values: Arc<Mutex<HashMap<String, String>>>,
+    }
+
+    impl riviu_signing::CredentialBackend for BootstrapCredentialBackend {
+        fn get(&self, account: &str) -> anyhow::Result<Option<String>> {
+            Ok(self.values.lock().get(account).cloned())
+        }
+
+        fn set(&self, account: &str, value: &str) -> anyhow::Result<()> {
+            self.values
+                .lock()
+                .insert(account.to_string(), value.to_string());
+            Ok(())
+        }
+
+        fn delete(&self, account: &str) -> anyhow::Result<()> {
+            self.values.lock().remove(account);
+            Ok(())
+        }
+    }
+
+    struct AndroidBootstrapFixture;
+
+    #[async_trait::async_trait]
+    impl riviu_core::driver::DeviceDriver for AndroidBootstrapFixture {
+        async fn list_devices(&self) -> anyhow::Result<Vec<riviu_core::DeviceInfo>> {
+            Ok(vec![riviu_core::DeviceInfo {
+                udid: "android-bootstrap-fixture".to_string(),
+                name: "Android bootstrap fixture".to_string(),
+                model: "fixture".to_string(),
+                platform: riviu_core::DevicePlatform::Android,
+                os_version: "fixture".to_string(),
+                connection: riviu_core::ConnectionKind::Usb,
+                status: riviu_core::DeviceStatus::Connected,
+                battery: None,
+                wda_ready: false,
+                wda_expires_at: None,
+                stream_url: None,
+                tile_stream_state: riviu_core::TileStreamState::default(),
+                last_error: None,
+            }])
+        }
+
+        async fn refresh_device(&self, _udid: &str) -> anyhow::Result<riviu_core::DeviceInfo> {
+            Ok(self.list_devices().await?.remove(0))
+        }
+
+        async fn install_app(&self, _udid: &str, _path: &Path) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn uninstall_app(&self, _udid: &str, _bundle_id: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn screenshot(&self, _udid: &str, dest: &Path) -> anyhow::Result<PathBuf> {
+            Ok(dest.to_path_buf())
+        }
+
+        async fn syslog_tail(&self, _udid: &str, _lines: usize) -> anyhow::Result<String> {
+            Ok(String::new())
+        }
+
+        async fn launch_app(&self, _udid: &str, _bundle_id: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn terminate_app(
+            &self,
+            _udid: &str,
+            bundle_id: &str,
+        ) -> anyhow::Result<riviu_core::driver::ProcessAbsenceProof> {
+            Ok(riviu_core::driver::ProcessAbsenceProof {
+                bundle_id: bundle_id.to_string(),
+                old_pid: None,
+            })
+        }
+
+        async fn reboot(&self, _udid: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn start_ui_session(
+            &self,
+            _udid: &str,
+        ) -> anyhow::Result<Box<dyn riviu_core::UiSession>> {
+            anyhow::bail!("fixture has no UI session")
+        }
+
+        async fn ensure_stream(&self, _udid: &str) -> anyhow::Result<String> {
+            Ok(String::new())
+        }
+
+        async fn prepare_device(&self, _udid: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn broken_ios_fixture(checksum_mismatch: bool) -> PathBuf {
+        let root = std::env::temp_dir().join(format!(
+            "riviu-ios-bootstrap-fixture-{}",
+            uuid::Uuid::new_v4()
+        ));
+        if checksum_mismatch {
+            let wda = root.join("wda");
+            std::fs::create_dir_all(&wda).expect("create broken iOS fixture");
+            std::fs::copy(
+                Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("../../../sidecars/wda/candidate-manifest.json"),
+                wda.join("candidate-manifest.json"),
+            )
+            .expect("copy valid manifest shape");
+            std::fs::write(wda.join("RiviuAgent-candidate.ipa"), b"wrong fixture bytes")
+                .expect("write checksum-mismatched IPA");
+        }
+        root
+    }
+
+    #[tokio::test]
+    async fn missing_or_corrupt_ios_manifest_keeps_valid_android_backend() {
+        for checksum_mismatch in [false, true] {
+            let root = broken_ios_fixture(checksum_mismatch);
+            let db_path = root.join("bootstrap.db");
+            std::fs::create_dir_all(&root).expect("create fixture root");
+            let db = Database::open(&db_path).expect("open fixture database");
+            let credentials = CredentialStore::new(Arc::new(BootstrapCredentialBackend::default()));
+            let resolution =
+                crate::agent_runtime::resolve_desktop_agent_runtime_for_bootstrap_with_candidate(
+                    root.clone(),
+                    root.join("state"),
+                    &db,
+                    &credentials,
+                    Some("fixture-token"),
+                    false,
+                    true,
+                )
+                .expect("iOS failures must become a degraded resolution");
+            let ios = bootstrap_ios_runtime(resolution).await;
+            let reason = ios
+                .degraded_reason
+                .as_deref()
+                .expect("the iOS failure must remain observable");
+            let expected = if checksum_mismatch {
+                "checksum mismatch"
+            } else {
+                "failed to read agent manifest"
+            };
+            assert!(reason.contains(expected), "unexpected reason: {reason}");
+
+            let fleet = platform_fleet(ios.driver.clone(), Some(Arc::new(AndroidBootstrapFixture)));
+            let devices = fleet
+                .list_devices()
+                .await
+                .expect("the valid Android fixture remains usable");
+            assert_eq!(devices.len(), 1);
+            assert_eq!(devices[0].udid, "android-bootstrap-fixture");
+            assert_eq!(devices[0].platform, riviu_core::DevicePlatform::Android);
+
+            drop(db);
+            std::fs::remove_dir_all(root).expect("remove bootstrap fixture");
+        }
+    }
+
     /// How far past the five-second bookkeeping deadline these tests step.
     ///
     /// **The virtual clock works here now, and the doc that said otherwise is why this one
@@ -3293,6 +3577,7 @@ mod tests {
             // at the bundler. What stops it shipping empty is
             // `the_ytdlp_sidecar_is_fetched_bundled_and_pointed_at`.
             ("../../../sidecars/yt-dlp/", "sidecars/yt-dlp/"),
+            ("../../../NOTICE", "NOTICE"),
         ];
 
         assert_eq!(resources.len(), expected.len());
@@ -3301,18 +3586,22 @@ mod tests {
             assert!(!target.contains("_up_"));
         }
 
-        // Every resource lands under `sidecars/`, which is the whole point of the
+        // Every runtime resource lands under `sidecars/`, which is the whole point of the
         // source-to-target map: Tauri's default for a `../..` source is a mangled `_up_`
         // path, and `resolve_sidecar_root` only knows how to find things under this one
-        // prefix. A target that escaped it would be shipped and never found.
+        // prefix. NOTICE is the one deliberate bundle-root document.
         for (source, target) in resources {
             let target = target
                 .as_str()
                 .unwrap_or_else(|| panic!("target for {source} must be a string"));
-            assert!(
-                target.starts_with("sidecars/"),
-                "{source} -> {target} escapes the sidecar root"
-            );
+            if source == "../../../NOTICE" {
+                assert_eq!(target, "NOTICE");
+            } else {
+                assert!(
+                    target.starts_with("sidecars/"),
+                    "{source} -> {target} escapes the sidecar root"
+                );
+            }
         }
     }
 }

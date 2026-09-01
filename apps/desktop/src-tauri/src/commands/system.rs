@@ -2,6 +2,7 @@
 //! signing identity, which driver mode came up, and the updater.
 
 use super::*;
+use tauri::Manager;
 
 #[tauri::command]
 pub fn get_apple_id(state: State<'_, AppState>) -> Result<riviu_core::AppleIdConfig, CommandError> {
@@ -144,6 +145,15 @@ pub fn android_unavailable_reason(state: State<'_, AppState>) -> Option<String> 
 #[tauri::command]
 pub fn android_tool_problems(state: State<'_, AppState>) -> Vec<String> {
     state.android_tool_problems.clone()
+}
+
+/// The actual log folder for the active Tauri identifier (base or Full build).
+#[tauri::command]
+pub fn app_log_directory(app: tauri::AppHandle) -> Result<String, CommandError> {
+    app.path()
+        .app_log_dir()
+        .map(|path| path.display().to_string())
+        .map_err(CommandError::operation)
 }
 
 /// How long one repeating frontend error stays quiet after it has reached the log once.

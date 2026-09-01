@@ -187,33 +187,50 @@ Mọi mục §9 trong [nhật ký](docs/agents/README.md#nhật-ký-9x) kết th
 nên một người mới không tái hiện được một cổng nào từ README.
 
 ```powershell
-# Rust: format, lint, test. Workspace nếu máy chạy được; nếu Smart App Control chặn
-# binary vừa link thì chạy từng crate — xem AGENTS.md, mục về Smart App Control.
+# Rust cục bộ: format, lint và test từng crate. Không dùng whole-workspace trên máy
+# bị Smart App Control chặn binary vừa link; CI vẫn chạy whole-workspace có --locked.
 cargo fmt --all -- --check
-cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace
+cargo test --locked -p riviu-core -- --test-threads=1
+cargo clippy --locked -p riviu-core --all-targets -- -D warnings
+cargo test --locked -p riviu-managers-phone -- --test-threads=1
+cargo clippy --locked -p riviu-managers-phone --all-targets -- -D warnings
+cargo test --locked -p riviu-android-driver -- --test-threads=1
+cargo clippy --locked -p riviu-android-driver --all-targets -- -D warnings
 
 # Frontend: kiểu, lint, test, build. `tsc -b` bắt những thứ vitest không thấy, vì
 # vitest xoá kiểu — nên nó phải chạy sau MỖI file mới, không phải sau mỗi đợt.
 cd apps/desktop
+npm ci
 npx tsc -b
 npx oxlint --deny-warnings
 npx vitest run
 npx vite build
 npx playwright test        # cần `npx playwright install chromium` một lần
+npm audit --audit-level=high
 
-# Python: sidecar, script đóng gói, và probe Gate 0
+# Python 3.12: sidecar, media-stage, script đóng gói và probe Gate 0
 cd ../..
-python -m unittest scripts.test_collect_desktop_ci_artifacts `
-                  sidecars.pymobiledevice3.test_app_control `
-                  sidecars.pymobiledevice3.test_rtmmo_lifecycle `
-                  sidecars.signer.test_riviu_signer `
-                  sidecars.wda.test_build_and_install
-python -m unittest discover -s tools/interaction-gate0 -p "test_probe.py"
+python3 -m py_compile scripts/build_desktop_sidecar.py `
+  scripts/collect_desktop_ci_artifacts.py scripts/test_collect_desktop_ci_artifacts.py `
+  scripts/stage_deployment_checker.py scripts/test_stage_deployment_checker.py `
+  sidecars/pymobiledevice3/pyinstaller_runtime_hook.py sidecars/signer/riviu_signer.py `
+  sidecars/wda/build_and_install.py sidecars/wda/test_build_and_install.py `
+  tools/interaction-gate0/probe.py tools/interaction-gate0/test_probe.py `
+  scripts/build_agents_index.py
+python3 -m unittest -v scripts.test_collect_desktop_ci_artifacts `
+  scripts.test_stage_deployment_checker sidecars.pymobiledevice3.test_app_control `
+  sidecars.pymobiledevice3.test_rtmmo_lifecycle `
+  sidecars.pymobiledevice3.test_media_stage sidecars.signer.test_riviu_signer `
+  sidecars.wda.test_build_and_install
+python3 -m unittest discover -s tools/interaction-gate0 -p "test_probe.py" -v
+python3 scripts/collect_desktop_ci_artifacts.py verify-version
+python3 scripts/collect_desktop_ci_artifacts.py verify-android-tools
+python3 scripts/build_agents_index.py --check
+python3 -m pip check
 
 # Phụ thuộc: advisory + giấy phép
 cargo deny check
-cd apps/desktop && npm audit --audit-level=high
+git diff --check
 ```
 
 Trên máy này `python` là 3.14 còn CI dùng **3.12.10**; nếu một test Python báo thiếu
@@ -222,7 +239,7 @@ module (`tidevice`), chạy bằng `python3` — đó là bản 3.12 khớp CI.
 ### Nghiệm thu trên máy thật
 
 Một số thứ không test nào bắt được — ROM in `ls` kiểu khác, một lease bị lấy trên serial thật.
-Chạy **headless**, gọi thậng hàm production, không lái UI bằng chuột (một lần lái chuột đã
+Chạy **headless**, gọi thẳng hàm production, không lái UI bằng chuột (một lần lái chuột đã
 đăng nhầm một bình luận thật):
 
 ```powershell

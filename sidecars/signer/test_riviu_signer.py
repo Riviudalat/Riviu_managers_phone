@@ -3,6 +3,7 @@ from __future__ import annotations
 import io
 import json
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -131,6 +132,16 @@ class AppleCredentialTests(unittest.TestCase):
         self.assertNotIn("RIVIU_APPLE_ID", child_environment)
         # And nothing smuggled it into argv on the way.
         self.assertNotIn("hunter2", " ".join(run.call_args.args[0]))
+
+    def test_repository_smoke_keeps_credentials_out_of_signer_argv(self):
+        smoke = (
+            Path(__file__).resolve().parents[2] / "scripts" / "smoke.sh"
+        ).read_text(encoding="utf-8")
+
+        self.assertNotIn("--apple-id", smoke)
+        self.assertNotIn("--password", smoke)
+        self.assertIn("RIVIU_APPLE_ID=", smoke)
+        self.assertIn("RIVIU_APPLE_PASSWORD=", smoke)
 
 
 if __name__ == "__main__":

@@ -20,11 +20,14 @@ import tempfile
 import time
 import tomllib
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable, TypeVar
 
 from packaging.markers import default_environment
 from packaging.requirements import Requirement
 from packaging.utils import canonicalize_name
+
+
+T = TypeVar("T")
 
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
@@ -233,6 +236,32 @@ def production_sha256(path: Path) -> str:
         return sha256_file(path)
     canonical_lf = path.read_bytes().replace(b"\r\n", b"\n")
     return hashlib.sha256(canonical_lf).hexdigest()
+
+
+def ytdlp_manifest(binary: Path) -> dict[str, Any]:
+    if not binary.is_file() or binary.stat().st_size == 0:
+        raise ArtifactError(f"yt-dlp binary is missing or empty: {binary}")
+    version = run_checked([str(binary), "--version"], timeout=120).stdout.strip()
+    if not version:
+        raise ArtifactError("yt-dlp --version returned an empty version")
+    return {
+        "schemaVersion": 1,
+        "path": binary.name,
+        "bytes": binary.stat().st_size,
+        "sha256": sha256_file(binary),
+        "version": version,
+    }
+
+
+def snapshot_ytdlp_command(args: argparse.Namespace) -> dict[str, Any]:
+    manifest = ytdlp_manifest(args.binary.resolve())
+    write_json(args.output.resolve(), manifest)
+    return {
+        "ok": True,
+        "command": "snapshot-yt-dlp",
+        "output": str(args.output.resolve()),
+        **manifest,
+    }
 
 
 def load_json(path: Path) -> dict[str, Any]:
@@ -722,6 +751,31 @@ def run_checked(command: list[str], *, timeout: int = 120) -> subprocess.Complet
         ) from error
 
 
+def run_with_cleanup_preserving_primary(
+    operation: Callable[[], T], cleanup: Callable[[], None]
+) -> T:
+    """Run cleanup exactly once and keep an operation failure as the primary error."""
+
+    primary_error: BaseException | None = None
+    cleanup_error: BaseException | None = None
+    try:
+        result = operation()
+    except BaseException as error:
+        primary_error = error
+    try:
+        cleanup()
+    except BaseException as error:
+        cleanup_error = error
+
+    if primary_error is not None:
+        if cleanup_error is not None:
+            raise primary_error.with_traceback(primary_error.__traceback__) from cleanup_error
+        raise primary_error.with_traceback(primary_error.__traceback__)
+    if cleanup_error is not None:
+        raise cleanup_error
+    return result
+
+
 def assert_same_tree(source: Path, packaged: Path, label: str) -> None:
     if not source.is_dir() or not packaged.is_dir():
         raise ArtifactError(f"{label} tree is missing: {source} -> {packaged}")
@@ -881,6 +935,10 @@ def verify_packaged_resources(
     packaged_wda_root = sidecars_root / "wda"
     packaged_build_install = packaged_wda_root / "build_and_install.py"
 
+    # Root attribution is a shipped resource too. It lives beside `sidecars/` on every
+    # platform, and NOTICE itself says it must travel with binary distributions.
+    assert_same_file(REPOSITORY_ROOT / "NOTICE", sidecars_root.parent / "NOTICE")
+
     assert_same_file(SIDECAR_SOURCE, packaged_pmd_root / "riviu_pmd.py")
     assert_same_file(
         SIDECAR_REQUIREMENTS,
@@ -924,18 +982,17 @@ def verify_packaged_resources(
     ):
         assert_same_file(REPOSITORY_ROOT / "sidecars" / relative, sidecars_root / relative)
 
-    # **yt-dlp: the one bundled binary that cannot be byte-pinned, so it is run instead.**
+    # **yt-dlp: pinned to the bytes fetched for this build, not to a committed release.**
     #
     # Everything else here is compared against a committed copy. yt-dlp deliberately is not:
     # TikTok breaks extractors on its own schedule and the only fix is a newer yt-dlp, so a
     # pinned copy is a pinned failure (`sidecars/yt-dlp/README.md`). CI fetches the latest
     # release per platform at build time, and the binary is gitignored.
     #
-    # That leaves nothing to diff -- but it leaves something better to do: **run the copy that
-    # is actually in the package.** The fetch step already ran `--version` on the download; this
-    # runs it on what shipped, which is the difference that matters. This feature shipped inert
-    # once already, with the binary fetched by nobody and the app returning `NoBinary` for every
-    # lookup in silence.
+    # The fetch step writes `yt-dlp-manifest.json` from the exact downloaded bytes and version.
+    # Here both that staged manifest and the installed binary are checked, then the installed
+    # binary is executed. This keeps "latest per build" without leaving post-install corruption
+    # invisible.
     #
     # Found by `assert_every_sidecar_resource_is_verified` rather than by review: the resource
     # was added to `bundle.resources` and no check here was, so the completeness gate failed all
@@ -954,6 +1011,17 @@ def verify_packaged_resources(
     if packaged_ytdlp.stat().st_size == 0:
         raise ArtifactError(f"{packaged_ytdlp} is empty")
     ytdlp_version = run_checked([str(packaged_ytdlp), "--version"], timeout=120).stdout.strip()
+    ytdlp_manifest_path = packaged_ytdlp_root / "yt-dlp-manifest.json"
+    assert_same_file(
+        REPOSITORY_ROOT / "sidecars" / "yt-dlp" / "yt-dlp-manifest.json",
+        ytdlp_manifest_path,
+    )
+    packaged_ytdlp_manifest = load_json(ytdlp_manifest_path)
+    expected_ytdlp_manifest = ytdlp_manifest(packaged_ytdlp)
+    if packaged_ytdlp_manifest != expected_ytdlp_manifest:
+        raise ArtifactError(
+            f"packaged yt-dlp differs from its staged manifest: {ytdlp_manifest_path}"
+        )
 
     # The bundled Android tools: the tree is compared whole, then each file is checked
     # against its own manifest. The tree comparison is what gives completeness — a
@@ -1083,6 +1151,7 @@ def verify_packaged_resources(
         "resourceTree": "PASS",
         "androidTools": android_tools["files"],
         "ytDlpVersion": ytdlp_version,
+        "ytDlpSha256": packaged_ytdlp_manifest["sha256"],
         "ping": "PASS",
         "embeddedTidevice": "PASS",
         "embeddedSigner": "PASS",
@@ -1147,8 +1216,196 @@ def verify_windows_desktop_executable(
     }
 
 
+def windows_msi_install_command(
+    installer: Path, install_root: Path, log_path: Path
+) -> list[str]:
+    """Install the MSI product, rather than merely extracting its archive."""
+
+    return [
+        "msiexec.exe",
+        "/i",
+        str(installer),
+        "/qn",
+        "/norestart",
+        f"INSTALLDIR={install_root}",
+        "/L*v",
+        str(log_path),
+    ]
+
+
+def windows_msi_uninstall_command(installer: Path, log_path: Path) -> list[str]:
+    return [
+        "msiexec.exe",
+        "/x",
+        str(installer),
+        "/qn",
+        "/norestart",
+        "/L*v",
+        str(log_path),
+    ]
+
+
+def deployment_checker_command(
+    checker: Path, report: Path, installer: Path, profile: str
+) -> list[str]:
+    return [
+        str(checker),
+        "--profile",
+        profile,
+        "--report",
+        str(report),
+        "--installer",
+        str(installer),
+    ]
+
+
+def installed_app_smoke_command(
+    executable: Path, report: Path, data_dir: Path
+) -> list[str]:
+    return [
+        str(executable),
+        "--deployment-smoke",
+        str(report),
+        "--data-dir",
+        str(data_dir),
+    ]
+
+
+def remove_child_scratch_after_exit(data_dir: Path) -> None:
+    """Delete mock app state from the parent after Windows releases child handles.
+
+    The app also attempts this from a Drop guard. On Windows its SQLite/background
+    handles can remain live until the executable has fully terminated, so an in-process
+    delete may legitimately lose that race. The collector owns the scratch path and
+    runs only after run_checked has reaped the child; retry sharing violations briefly
+    rather than either leaking state or weakening the postcondition.
+    """
+
+    last_error: OSError | None = None
+    for attempt in range(20):
+        try:
+            shutil.rmtree(data_dir)
+        except FileNotFoundError:
+            return
+        except OSError as error:
+            last_error = error
+            if attempt < 19:
+                time.sleep(0.1)
+        else:
+            return
+    raise ArtifactError(
+        f"installed app mock startup left its scratch data directory behind: "
+        f"{data_dir}: {last_error}"
+    )
+
+
+def run_installed_app_smoke(
+    install_root: Path, report: Path, data_dir: Path
+) -> dict[str, Any]:
+    desktop = verify_windows_desktop_executable(
+        install_root, "x86_64-pc-windows-msvc"
+    )
+    executable = next(
+        path
+        for path in install_root.rglob(desktop["name"])
+        if path.is_file()
+    )
+
+    def verify_startup() -> dict[str, Any]:
+        run_checked(installed_app_smoke_command(executable, report, data_dir), timeout=180)
+        payload = load_json(report)
+        if not (
+            payload.get("schemaVersion") == 1
+            and payload.get("status") == "ready"
+            and payload.get("mode") == "mock"
+            and payload.get("tauriReady") is True
+            and payload.get("frontendReady") is True
+            and payload.get("databaseVersion") == 18
+        ):
+            raise ArtifactError(
+                f"installed app mock startup did not become ready: {payload!r}"
+            )
+        return payload
+
+    return run_with_cleanup_preserving_primary(
+        verify_startup, lambda: remove_child_scratch_after_exit(data_dir)
+    )
+
+
+def find_deployment_checker(install_root: Path) -> Path:
+    candidates = sorted(
+        path
+        for path in install_root.rglob("riviu-deployment-check.exe")
+        if path.is_file()
+    )
+    if len(candidates) != 1:
+        raise ArtifactError(
+            "installed package must contain exactly one riviu-deployment-check.exe, "
+            f"found {len(candidates)}"
+        )
+    return candidates[0]
+
+
+def find_deployment_checker_if_present(install_root: Path) -> list[Path]:
+    if not install_root.exists():
+        return []
+    return sorted(
+        path
+        for path in install_root.rglob("riviu-deployment-check.exe")
+        if path.is_file()
+    )
+
+
+def wait_for_nsis_uninstall(
+    install_root: Path,
+    *,
+    timeout_seconds: float = 30.0,
+    poll_seconds: float = 0.1,
+) -> None:
+    """Wait for the NSIS self-delete child to remove the per-user install tree."""
+
+    deadline = time.monotonic() + timeout_seconds
+    while True:
+        checkers = find_deployment_checker_if_present(install_root)
+        root_exists = install_root.exists()
+        if not checkers and not root_exists:
+            return
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            if checkers:
+                raise ArtifactError(
+                    "NSIS uninstall left the deployment checker installed: "
+                    + ", ".join(str(path) for path in checkers)
+                )
+            raise ArtifactError(f"NSIS uninstall left install root behind: {install_root}")
+        time.sleep(min(poll_seconds, remaining))
+
+
+def run_installed_deployment_check(
+    install_root: Path, installer: Path, report: Path, profile: str
+) -> dict[str, Any]:
+    checker = find_deployment_checker(install_root)
+    run_checked(
+        deployment_checker_command(checker, report, installer, profile), timeout=180
+    )
+    payload = load_json(report)
+    if payload.get("schemaVersion") != 1:
+        raise ArtifactError("installed deployment checker wrote an unsupported report schema")
+    if payload.get("overall") not in {"pass", "warning"}:
+        raise ArtifactError(
+            f"installed deployment checker did not pass internal profile: {payload!r}"
+        )
+    if payload.get("adbOrigin") != "Bundled":
+        raise ArtifactError("installed deployment checker did not execute the bundled adb")
+    return payload
+
+
 def verify_windows_package(
-    installers: list[Path], bundle_dir: Path, runtime_dir: Path, runtime: dict[str, Any]
+    installers: list[Path],
+    bundle_dir: Path,
+    runtime_dir: Path,
+    runtime: dict[str, Any],
+    deployment_profile: str = "internal",
 ) -> dict[str, Any]:
     msi_installers = [path for path in installers if path.suffix.lower() == ".msi"]
     nsis_installers = [path for path in installers if path.suffix.lower() == ".exe"]
@@ -1161,75 +1418,129 @@ def verify_windows_package(
 
     bundle_dir.parent.mkdir(parents=True, exist_ok=True)
     with shallow_temp_dir("rv-msi-", bundle_dir.parent) as temporary:
-        extract_root = temporary.resolve()
-        # msiexec prints nothing; /L*v is the only way to learn why it refused.
-        msi_log = extract_root / "msiexec-administrative.log"
-        command = [
-            "msiexec.exe",
-            "/a",
-            str(msi_installers[0]),
-            "/qn",
-            f"TARGETDIR={extract_root}",
-            "/L*v",
-            str(msi_log),
-        ]
-        try:
-            run_checked(command, timeout=300)
-        except ArtifactError as error:
-            raise ArtifactError(
-                f"{error}; msiexec log={read_msi_log(msi_log)}"
-            ) from error
-        sidecars_roots = [
-            path
-            for path in extract_root.rglob("sidecars")
-            if (path / "pymobiledevice3" / "riviu_pmd.py").is_file()
-        ]
-        if len(sidecars_roots) != 1:
-            raise ArtifactError(
-                "administratively extracted MSI must contain exactly one sidecars resource root"
+        temporary = temporary.resolve()
+        install_root = temporary / "i"
+        msi_log = temporary / "msiexec-install.log"
+        uninstall_log = temporary / "msiexec-uninstall.log"
+
+        def verify_msi() -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+            command = windows_msi_install_command(
+                msi_installers[0], install_root, msi_log
             )
-        evidence = verify_packaged_resources(sidecars_roots[0], runtime_dir, runtime)
-        msi_desktop = verify_windows_desktop_executable(
-            extract_root, "x86_64-pc-windows-msvc"
+            try:
+                run_checked(command, timeout=300)
+            except ArtifactError as error:
+                raise ArtifactError(
+                    f"{error}; msiexec log={read_msi_log(msi_log)}"
+                ) from error
+            sidecars_roots = [
+                path
+                for path in install_root.rglob("sidecars")
+                if (path / "pymobiledevice3" / "riviu_pmd.py").is_file()
+            ]
+            if len(sidecars_roots) != 1:
+                raise ArtifactError(
+                    "installed MSI must contain exactly one sidecars resource root"
+                )
+            msi_evidence = verify_packaged_resources(
+                sidecars_roots[0], runtime_dir, runtime
+            )
+            desktop = verify_windows_desktop_executable(
+                install_root, "x86_64-pc-windows-msvc"
+            )
+            report = run_installed_deployment_check(
+                install_root,
+                msi_installers[0],
+                temporary / "deployment-check.json",
+                deployment_profile,
+            )
+            run_installed_app_smoke(
+                install_root,
+                temporary / "startup-smoke.json",
+                temporary / "startup-data",
+            )
+            return msi_evidence, desktop, report
+
+        def cleanup_msi() -> None:
+            try:
+                run_checked(
+                    windows_msi_uninstall_command(msi_installers[0], uninstall_log),
+                    timeout=300,
+                )
+            except ArtifactError as error:
+                raise ArtifactError(
+                    f"{error}; msiexec uninstall log={read_msi_log(uninstall_log)}"
+                ) from error
+            if find_deployment_checker_if_present(install_root):
+                raise ArtifactError("MSI uninstall left the deployment checker installed")
+            if install_root.exists():
+                raise ArtifactError(f"MSI uninstall left install root behind: {install_root}")
+
+        evidence, msi_desktop, msi_deployment_report = (
+            run_with_cleanup_preserving_primary(verify_msi, cleanup_msi)
         )
-    evidence["msiAdministrativeExtract"] = "PASS"
+    evidence["msiSilentInstall"] = "PASS"
+    evidence["msiDeploymentCheck"] = "PASS"
+    evidence["msiStartupSmoke"] = "PASS"
 
     # Same MAX_PATH exposure as the MSI extraction above.
     with shallow_temp_dir("rv-nsis-", bundle_dir.parent) as temporary:
         install_root = (temporary / "i").resolve()
-        run_checked(
-            [str(nsis_installers[0]), "/S", f"/D={install_root}"], timeout=300
-        )
-        sidecars_roots = [
-            path
-            for path in install_root.rglob("sidecars")
-            if (path / "pymobiledevice3" / "riviu_pmd.py").is_file()
-        ]
-        if len(sidecars_roots) != 1:
-            raise ArtifactError(
-                "silently installed NSIS must contain exactly one sidecars resource root"
+
+        def verify_nsis() -> tuple[dict[str, Any], dict[str, Any]]:
+            run_checked(
+                [str(nsis_installers[0]), "/S", f"/D={install_root}"], timeout=300
             )
-        nsis_evidence = verify_packaged_resources(
-            sidecars_roots[0], runtime_dir, runtime
-        )
-        nsis_desktop = verify_windows_desktop_executable(
-            install_root, "x86_64-pc-windows-msvc"
-        )
-        if nsis_evidence != {
-            key: evidence[key]
-            for key in nsis_evidence
-        }:
-            raise ArtifactError("MSI and NSIS packaged resource evidence diverged")
-        for field in ("name", "architecture"):
-            if nsis_desktop[field] != msi_desktop[field]:
+            sidecars_roots = [
+                path
+                for path in install_root.rglob("sidecars")
+                if (path / "pymobiledevice3" / "riviu_pmd.py").is_file()
+            ]
+            if len(sidecars_roots) != 1:
                 raise ArtifactError(
-                    f"MSI and NSIS desktop executable {field} values diverged"
+                    "silently installed NSIS must contain exactly one sidecars resource root"
                 )
-        uninstallers = sorted(install_root.rglob("uninstall*.exe"))
-        if len(uninstallers) != 1:
-            raise ArtifactError("NSIS silent install did not produce one uninstaller")
-        run_checked([str(uninstallers[0]), "/S"], timeout=300)
+            nsis_evidence = verify_packaged_resources(
+                sidecars_roots[0], runtime_dir, runtime
+            )
+            desktop = verify_windows_desktop_executable(
+                install_root, "x86_64-pc-windows-msvc"
+            )
+            report = run_installed_deployment_check(
+                install_root,
+                nsis_installers[0],
+                temporary / "deployment-check.json",
+                deployment_profile,
+            )
+            run_installed_app_smoke(
+                install_root,
+                temporary / "startup-smoke.json",
+                temporary / "startup-data",
+            )
+            if nsis_evidence != {key: evidence[key] for key in nsis_evidence}:
+                raise ArtifactError("MSI and NSIS packaged resource evidence diverged")
+            for field in ("name", "architecture"):
+                if desktop[field] != msi_desktop[field]:
+                    raise ArtifactError(
+                        f"MSI and NSIS desktop executable {field} values diverged"
+                    )
+            return desktop, report
+
+        def cleanup_nsis() -> None:
+            uninstallers = sorted(install_root.rglob("uninstall*.exe"))
+            if len(uninstallers) != 1:
+                raise ArtifactError(
+                    "NSIS silent install did not produce one uninstaller for cleanup"
+                )
+            run_checked([str(uninstallers[0]), "/S"], timeout=300)
+            wait_for_nsis_uninstall(install_root)
+
+        nsis_desktop, nsis_deployment_report = run_with_cleanup_preserving_primary(
+            verify_nsis, cleanup_nsis
+        )
     evidence["nsisSilentInstall"] = "PASS"
+    evidence["nsisDeploymentCheck"] = "PASS"
+    evidence["nsisStartupSmoke"] = "PASS"
     evidence["desktopExecutable"] = "PASS"
     evidence["desktopArchitecture"] = msi_desktop["architecture"]
     evidence["desktopExecutableBytes"] = {
@@ -1239,6 +1550,10 @@ def verify_windows_package(
     evidence["desktopExecutableSha256"] = {
         "msi": msi_desktop["sha256"],
         "nsis": nsis_desktop["sha256"],
+    }
+    evidence["_deploymentReportPayloads"] = {
+        "msi": msi_deployment_report,
+        "nsis": nsis_deployment_report,
     }
     return evidence
 
@@ -1509,9 +1824,12 @@ def verify_packaged_bundle(
     target: str,
     runtime_dir: Path,
     runtime: dict[str, Any],
+    deployment_profile: str,
 ) -> dict[str, Any]:
     if target == "x86_64-pc-windows-msvc":
-        return verify_windows_package(installers, bundle_dir, runtime_dir, runtime)
+        return verify_windows_package(
+            installers, bundle_dir, runtime_dir, runtime, deployment_profile
+        )
     return verify_macos_package(bundle_dir, target, runtime_dir, runtime)
 
 
@@ -1526,6 +1844,36 @@ def copy_release_file(source: Path, output_dir: Path, name: str) -> dict[str, An
         "bytes": destination.stat().st_size,
         "sha256": sha256_file(destination),
     }
+
+
+def write_deployment_reports(
+    packaged: dict[str, Any], output_dir: Path, label: str
+) -> dict[str, dict[str, Any]]:
+    payloads = packaged.pop("_deploymentReportPayloads", {})
+    if not payloads:
+        return {}
+    if set(payloads) != {"msi", "nsis"}:
+        raise ArtifactError(
+            f"Windows deployment reports must cover MSI and NSIS: {sorted(payloads)!r}"
+        )
+
+    records: dict[str, dict[str, Any]] = {}
+    for installer_kind, payload in sorted(payloads.items()):
+        if not isinstance(payload, dict):
+            raise ArtifactError(f"invalid {installer_kind} deployment report payload")
+        build = str(payload.get("host", {}).get("build", "unknown"))
+        safe_build = re.sub(r"[^A-Za-z0-9._-]", "-", build)
+        report_name = f"{label}-build-{safe_build}-{installer_kind}-deployment-check.json"
+        report_path = output_dir / report_name
+        write_json(report_path, payload)
+        records[installer_kind] = {
+            "file": report_name,
+            "sha256": sha256_file(report_path),
+            "profile": payload.get("profile"),
+            "overall": payload.get("overall"),
+            "osBuild": build,
+        }
+    return records
 
 
 def validate_source_commit(value: str) -> str:
@@ -1557,12 +1905,20 @@ def collect_command(args: argparse.Namespace) -> dict[str, Any]:
     verify_overlay(overlay_path, requested_runtime_dir, target)
     installers = find_installers(bundle_dir, target)
     packaged = verify_packaged_bundle(
-        installers, bundle_dir, target, runtime_dir, runtime
+        installers,
+        bundle_dir,
+        target,
+        runtime_dir,
+        runtime,
+        args.deployment_profile,
     )
 
     if output_dir.exists():
         shutil.rmtree(output_dir)
     output_dir.mkdir(parents=True)
+    deployment_reports = write_deployment_reports(packaged, output_dir, args.label)
+    if deployment_reports:
+        packaged["deploymentReports"] = deployment_reports
 
     copied_installers = []
     for installer in installers:
@@ -1839,6 +2195,68 @@ def build_updater_manifest_command(args: argparse.Namespace) -> dict[str, Any]:
     }
 
 
+def require_windows_package_gates(
+    packaged: dict[str, Any], manifest_path: Path
+) -> None:
+    required_passes = (
+        "msiSilentInstall",
+        "msiDeploymentCheck",
+        "msiStartupSmoke",
+        "nsisSilentInstall",
+        "nsisDeploymentCheck",
+        "nsisStartupSmoke",
+        "embeddedSignerErrorJson",
+        "desktopExecutable",
+    )
+    if (
+        any(packaged.get(gate) != "PASS" for gate in required_passes)
+        or packaged.get("desktopArchitecture") != "x86_64"
+    ):
+        raise ArtifactError(
+            f"Windows installer verification gate is missing in {manifest_path}"
+        )
+    reports = packaged.get("deploymentReports")
+    if not isinstance(reports, dict) or set(reports) != {"msi", "nsis"}:
+        raise ArtifactError(
+            f"Windows release lacks MSI/NSIS production deployment reports in {manifest_path}"
+        )
+    for kind, report in reports.items():
+        if (
+            not isinstance(report, dict)
+            or report.get("profile") != "production"
+            or report.get("overall") not in {"pass", "warning"}
+        ):
+            raise ArtifactError(
+                f"Windows {kind} lacks an accepted production deployment report in {manifest_path}"
+            )
+        if not manifest_path.is_file():
+            continue
+        report_name = report.get("file")
+        if not isinstance(report_name, str) or Path(report_name).name != report_name:
+            raise ArtifactError(
+                f"Windows {kind} production deployment report path is invalid in {manifest_path}"
+            )
+        report_path = manifest_path.parent / report_name
+        if (
+            not report_path.is_file()
+            or report.get("sha256") != sha256_file(report_path)
+        ):
+            raise ArtifactError(
+                f"Windows {kind} production deployment report hash is invalid in {manifest_path}"
+            )
+        payload = load_json(report_path)
+        if (
+            payload.get("schemaVersion") != 1
+            or payload.get("profile") != "production"
+            or payload.get("overall") not in {"pass", "warning"}
+            or payload.get("profile") != report.get("profile")
+            or payload.get("overall") != report.get("overall")
+        ):
+            raise ArtifactError(
+                f"Windows {kind} production deployment report differs from its manifest record in {manifest_path}"
+            )
+
+
 def verify_release_command(args: argparse.Namespace) -> dict[str, Any]:
     root = args.root.resolve()
     source_commit = validate_source_commit(args.source_commit)
@@ -1896,16 +2314,7 @@ def verify_release_command(args: argparse.Namespace) -> dict[str, Any]:
                 f"artifact manifest lacks packaged resource verification: {manifest_path}"
             )
         if expected_target == "x86_64-pc-windows-msvc":
-            if (
-                packaged.get("msiAdministrativeExtract") != "PASS"
-                or packaged.get("nsisSilentInstall") != "PASS"
-                or packaged.get("embeddedSignerErrorJson") != "PASS"
-                or packaged.get("desktopExecutable") != "PASS"
-                or packaged.get("desktopArchitecture") != "x86_64"
-            ):
-                raise ArtifactError(
-                    f"Windows installer verification gate is missing in {manifest_path}"
-                )
+            require_windows_package_gates(packaged, manifest_path)
         else:
             expected_architecture = (
                 "arm64" if expected_target.startswith("aarch64-") else "x86_64"
@@ -2002,6 +2411,11 @@ def parse_args() -> argparse.Namespace:
     snapshot.add_argument("--require-canonical-production", action="store_true")
     snapshot.set_defaults(handler=snapshot_command)
 
+    snapshot_ytdlp = subparsers.add_parser("snapshot-yt-dlp")
+    snapshot_ytdlp.add_argument("--binary", type=Path, required=True)
+    snapshot_ytdlp.add_argument("--output", type=Path, required=True)
+    snapshot_ytdlp.set_defaults(handler=snapshot_ytdlp_command)
+
     verify_version = subparsers.add_parser("verify-version")
     verify_version.add_argument("--tag")
     verify_version.set_defaults(handler=verify_version_command)
@@ -2015,6 +2429,11 @@ def parse_args() -> argparse.Namespace:
     collect.add_argument("--production-baseline", type=Path, required=True)
     collect.add_argument("--output", type=Path, required=True)
     collect.add_argument("--source-commit", required=True)
+    collect.add_argument(
+        "--deployment-profile",
+        choices=("internal", "production"),
+        default="internal",
+    )
     collect.set_defaults(handler=collect_command)
 
     # Repo-side only: no build inputs, so the quality job can run it in seconds. A PR

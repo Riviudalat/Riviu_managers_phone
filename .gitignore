@@ -3,6 +3,8 @@
 .DS_Store
 apps/desktop/dist
 apps/desktop/src-tauri/target
+# Target-specific deployment checker binaries staged for Tauri packaging.
+apps/desktop/src-tauri/binaries/
 # Any level, not just apps/desktop: running `npx vitest` from the repo root writes a cache to
 # `./node_modules/.vite/`, which then shows up as untracked at the root and is easy to commit by
 # accident during a `git add -A`.
@@ -40,6 +42,7 @@ sidecars/riviu-android-agent/local.properties
 # sidecars/yt-dlp/README.md for the one-line curl and for why the lookup is optional.
 sidecars/yt-dlp/*.exe
 sidecars/yt-dlp/yt-dlp
+sidecars/yt-dlp/yt-dlp-manifest.json
 # Agent tooling's own copy of the skills tree, written per session. `.claude/skills/` is the
 # versioned one (see the `!.claude/skills/` rule above); this is a rewritten duplicate of it,
 # and committing an agent's scratch copy beside the real one is how two skill files with the

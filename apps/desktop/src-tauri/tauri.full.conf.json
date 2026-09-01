@@ -20,5 +20,10 @@
         "fullscreen": false
       }
     ]
+  },
+  "bundle": {
+    "externalBin": [
+      "binaries/riviu-deployment-check"
+    ]
   }
 }

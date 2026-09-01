@@ -6,6 +6,7 @@ pub mod agent_runtime;
 mod android_tools;
 mod command_error;
 mod commands;
+pub mod deployment_check;
 mod farm_commands;
 mod flow_commands;
 mod idle_sweeper;
@@ -19,6 +20,9 @@ mod publish_commands;
 mod state;
 mod view_hub;
 mod view_watchdog;
+
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::command_error::CommandError;
 use state::AppState;
@@ -74,9 +78,68 @@ struct StartupState {
     attempt: tokio::sync::Mutex<()>,
 }
 
+struct DeploymentSmokeState {
+    args: Option<deployment_check::DeploymentSmokeArgs>,
+    completed: AtomicBool,
+}
+
+impl DeploymentSmokeState {
+    fn from_process_args() -> Self {
+        Self {
+            args: deployment_check::parse_deployment_smoke_args(std::env::args_os())
+                .ok()
+                .flatten(),
+            completed: AtomicBool::new(false),
+        }
+    }
+
+    fn active(&self) -> bool {
+        self.args.is_some()
+    }
+}
+
 #[tauri::command]
 fn startup_error(state: tauri::State<'_, StartupState>) -> Option<String> {
     state.error.lock().clone()
+}
+
+#[tauri::command]
+fn deployment_frontend_ready(
+    app: tauri::AppHandle,
+    smoke: tauri::State<'_, DeploymentSmokeState>,
+    startup: tauri::State<'_, StartupState>,
+) -> Result<bool, CommandError> {
+    let Some(args) = smoke.args.as_ref() else {
+        return Ok(false);
+    };
+    if smoke.completed.swap(true, Ordering::AcqRel) {
+        return Ok(true);
+    }
+    if let Some(error) = startup.error.lock().clone() {
+        app.exit(3);
+        return Err(CommandError::code(
+            "DeploymentStartupBlocked",
+            format!("installed app bootstrap is blocked: {error}"),
+        ));
+    }
+    let state = app.try_state::<AppState>().ok_or_else(|| {
+        app.exit(3);
+        CommandError::code(
+            "DeploymentStateMissing",
+            "installed app has no runtime state after frontend mount",
+        )
+    })?;
+    let database_version = state.db.schema_version().map_err(|error| {
+        app.exit(3);
+        CommandError::operation(error)
+    })?;
+    deployment_check::write_startup_smoke_report(&args.report, &args.data_dir, database_version)
+        .map_err(|error| {
+            app.exit(3);
+            CommandError::operation(error)
+        })?;
+    app.exit(0);
+    Ok(true)
 }
 
 /// Try the bootstrap again, and answer with whatever is wrong *now*.
@@ -197,6 +260,8 @@ pub fn run() {
         // action — see `update_check`.
         .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
+            let deployment_smoke = DeploymentSmokeState::from_process_args();
+            let smoke_active = deployment_smoke.active();
             let window = if let Some(window) = app.get_webview_window("main") {
                 window
             } else {
@@ -205,11 +270,15 @@ pub fn run() {
                     .inner_size(1440.0, 900.0)
                     .min_inner_size(1100.0, 700.0)
                     .resizable(true)
-                    .visible(true)
+                    .visible(!smoke_active)
                     .build()?
             };
-            window.show()?;
-            window.set_focus()?;
+            if smoke_active {
+                window.hide()?;
+            } else {
+                window.show()?;
+                window.set_focus()?;
+            }
             // Registered in release too, at Warn. It used to be debug-only, which meant
             // an operator hitting a driver failure had no record of it anywhere -- and
             // the driver's warnings are exactly the ones worth keeping: a scrcpy server
@@ -260,12 +329,14 @@ pub fn run() {
                 };
 
             handle.manage(startup_state);
+            handle.manage(deployment_smoke);
 
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
             startup_error,
             retry_startup,
+            deployment_frontend_ready,
             agent_commands::agent_get_settings,
             agent_commands::agent_save_settings,
             agent_commands::agent_list_statuses,
@@ -359,6 +430,7 @@ pub fn run() {
             commands::driver_degraded_reason,
             commands::android_unavailable_reason,
             commands::android_tool_problems,
+            commands::app_log_directory,
             commands::log_frontend_error,
             commands::update_check,
             commands::update_install,
@@ -455,6 +527,35 @@ pub fn run() {
         }
         graceful_shutdown(handle);
     });
+}
+
+/// Exercise the installed Tauri/WebView/React/IPC path with mock devices, then exit.
+///
+/// The hidden WebView must mount React, finish the first mock fleet load and call
+/// `deployment_frontend_ready`; that command writes the report and exits the event loop. A
+/// missing frontend, WebView2 failure or broken IPC therefore cannot manufacture `ready`.
+pub fn run_deployment_smoke(args: deployment_check::DeploymentSmokeArgs) -> anyhow::Result<()> {
+    struct ScratchCleanup(PathBuf);
+    impl Drop for ScratchCleanup {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    std::env::set_var("RIVIU_MOCK_DEVICES", "1");
+    std::env::set_var("RIVIU_MOCK_DATA_DIR", &args.data_dir);
+    let _scratch_cleanup = ScratchCleanup(args.data_dir.clone());
+    run();
+    let report = deployment_check::read_startup_smoke_report(&args.report)?;
+    if report.get("status").and_then(serde_json::Value::as_str) != Some("ready")
+        || report
+            .get("frontendReady")
+            .and_then(serde_json::Value::as_bool)
+            != Some(true)
+    {
+        anyhow::bail!("installed app did not report frontend readiness: {report}");
+    }
+    Ok(())
 }
 
 /// Stop taking work, let what is in flight finish, then release every device.
@@ -644,6 +745,7 @@ mod tests {
         ("driver_degraded_reason", "read: health probe"),
         ("android_unavailable_reason", "read: health probe"),
         ("android_tool_problems", "read: boot snapshot"),
+        ("app_log_directory", "read: path resolved from the active app identifier"),
         (
             "log_frontend_error",
             "the frontend's only path to the log; refusing it during drain would silence              exactly the errors that explain the drain",
@@ -717,6 +819,12 @@ mod tests {
         (
             "retry_startup",
             "re-runs bootstrap; there may be no admission gate yet to hold",
+        ),
+        (
+            "deployment_frontend_ready",
+            "deployment-only readiness callback: writes the scratch smoke report and exits; \
+             it touches no device and must run even when the normal work admission lifecycle \
+             is not available",
         ),
         ("startup_error", "read: why bootstrap failed"),
     ];

@@ -16,8 +16,9 @@ echo "== frontend build =="
 
 echo "== sidecar ping =="
 python3 sidecars/pymobiledevice3/riviu_pmd.py ping || true
-python3 sidecars/signer/riviu_signer.py sign-install-wda \
-  --udid SMOKE --apple-id smoke@example.com --password x --wda /tmp/wda.ipa >/dev/null
+RIVIU_APPLE_ID=smoke@example.com RIVIU_APPLE_PASSWORD=x \
+  python3 sidecars/signer/riviu_signer.py sign-install-wda \
+    --udid SMOKE --wda /tmp/wda.ipa >/dev/null
 
 echo "== bundle resources present =="
 test -f sidecars/pymobiledevice3/riviu_pmd.py

@@ -62,12 +62,12 @@ pub enum DriverMode {
 }
 
 pub async fn create_driver(config: DriverConfig) -> anyhow::Result<DriverBundle> {
-    let interaction_capabilities = Arc::new(load_production_registry(
+    let interaction_capabilities = load_startup_capabilities(
         &config
             .sidecar_root
             .join("wda")
             .join("interaction-capabilities.json"),
-    )?);
+    );
     if matches!(&config.target, DriverTarget::Mock) {
         tracing::info!("using mock iOS driver");
         let mock = MockIosDriver::new();
@@ -129,5 +129,38 @@ pub async fn create_driver(config: DriverConfig) -> anyhow::Result<DriverBundle>
                 list_error: None,
             })
         }
+    }
+}
+
+/// An iOS-only capability catalog cannot decide whether the Android backend starts.
+/// Missing or corrupt qualifications disable protected iOS interaction routes fail-closed,
+/// while basic device discovery and the independently initialized Android backend remain usable.
+fn load_startup_capabilities(path: &std::path::Path) -> Arc<DeviceCapabilityRegistry> {
+    match load_production_registry(path) {
+        Ok(registry) => Arc::new(registry),
+        Err(error) => {
+            tracing::error!(
+                "iOS interaction capability catalog unavailable ({}): {error:#}; protected iOS routes are disabled",
+                path.display()
+            );
+            Arc::new(DeviceCapabilityRegistry::empty())
+        }
+    }
+}
+
+#[cfg(test)]
+mod startup_tests {
+    use super::*;
+
+    #[test]
+    fn missing_ios_capability_catalog_does_not_block_other_platforms() {
+        let missing = std::env::temp_dir().join(format!(
+            "riviu-missing-ios-capabilities-{}.json",
+            std::process::id()
+        ));
+
+        let registry = load_startup_capabilities(&missing);
+
+        assert!(registry.qualifications().is_empty());
     }
 }
