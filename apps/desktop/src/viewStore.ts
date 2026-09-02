@@ -1,5 +1,6 @@
 import { useEffect, useSyncExternalStore } from "react";
 import { viewEndpoint, viewReportPaint, type ViewPaintReport } from "./api";
+import { SILENT_DECODER_MIN_FEEDS } from "./viewProtocol";
 
 export interface ViewSize {
   width: number;
@@ -159,7 +160,7 @@ export function collectStalledViews(
     if (now - painted.at <= stallMs) continue;
     // The whole point: only a stream whose packets kept coming is broken. A static screen
     // stops producing packets too, and restarting it fixes nothing while costing ~45 s.
-    if (now_.received <= painted.received) continue;
+    if (now_.received - painted.received < SILENT_DECODER_MIN_FEEDS) continue;
     stalled.push(udid);
   }
   return stalled;
@@ -186,6 +187,7 @@ export function collectPaintReports(
       generation: beat.generation,
       received: beat.received,
       frames: beat.frames,
+      packetsSincePaint: Math.max(0, beat.received - (painted?.received ?? 0)),
       // Never painted: report the age of the stream itself, and let `frames === 0` be what
       // tells the host this is a device starting up rather than one that stopped.
       sincePaintMs: Math.max(0, now - (painted?.at ?? beat.at)),

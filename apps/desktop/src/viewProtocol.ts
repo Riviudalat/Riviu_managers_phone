@@ -146,6 +146,72 @@ export function shouldDecodeH264Sample(
   return decodeQueueSize <= 2;
 }
 
+export const SILENT_DECODER_GRACE_MS = 1500;
+export const SILENT_DECODER_MIN_FEEDS = 8;
+
+/**
+ * Some WebView2 H.264 decoders accept configuration and input without raising an error, but
+ * never produce a first frame when the whole fleet starts at once. That is different from a
+ * static phone: packets have already been fed to a configured decoder. Give the asynchronous
+ * output callback time to run, then let the worker try its next local acceleration mode.
+ */
+export function shouldRetrySilentDecoder(
+  now: number,
+  configuredAt: number,
+  feedsSinceConfigure: number,
+  outputsSinceConfigure: number,
+): boolean {
+  return (
+    outputsSinceConfigure === 0 &&
+    feedsSinceConfigure >= SILENT_DECODER_MIN_FEEDS &&
+    now - configuredAt >= SILENT_DECODER_GRACE_MS
+  );
+}
+
+/**
+ * Keep the last SPS-bearing packet for the current producer generation.
+ *
+ * The latest sync sample is not enough to bootstrap a new WebCodecs decoder: scrcpy often
+ * sends later IDRs without repeating SPS/PPS. A canvas remount therefore needs the older
+ * configuration packet even when a newer keyframe is available.
+ */
+export function rememberDecoderBootstrap(
+  previous: ViewEnvelope | null,
+  envelope: ViewEnvelope,
+): ViewEnvelope | null {
+  if (envelope.kind !== "h264") return null;
+  if (annexBHasSps(envelope.payload)) return envelope;
+  return previous?.kind === "h264" && previous.generation === envelope.generation
+    ? previous
+    : null;
+}
+
+/** Select a generation-matched SPS packet for a newly attached canvas, if one exists. */
+export function selectDecoderBootstrap(
+  held: ViewEnvelope,
+  bootstrap: ViewEnvelope | null,
+): ViewEnvelope {
+  return held.kind === "h264" &&
+    bootstrap?.kind === "h264" &&
+    bootstrap.generation === held.generation
+    ? bootstrap
+    : held;
+}
+
+/** Feed decoder configuration first and the newest IDR second after a canvas remount. */
+export function decoderBootstrapSequence(
+  held: ViewEnvelope,
+  bootstrap: ViewEnvelope | null,
+): ViewEnvelope[] {
+  const selected = selectDecoderBootstrap(held, bootstrap);
+  return selected === held ? [held] : [selected, held];
+}
+
+/** A worker-wide paint count must not jump backwards when a per-canvas slot is recreated. */
+export function nextPaintedFrameCount(previous: number | undefined): number {
+  return (previous ?? 0) + 1;
+}
+
 /// Whether this blob carries an SPS (NAL 7), i.e. whether it can say anything at all about
 /// which codec the stream is.
 ///

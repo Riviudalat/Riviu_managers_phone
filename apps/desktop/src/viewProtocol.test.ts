@@ -4,9 +4,14 @@ import {
   annexBIsSyncSample,
   codecCandidatesFromAnnexB,
   codecFromAnnexB,
+  decoderBootstrapSequence,
   decodeViewEnvelope,
   encodeViewEnvelope,
+  nextPaintedFrameCount,
+  rememberDecoderBootstrap,
+  selectDecoderBootstrap,
   shouldDecodeH264Sample,
+  shouldRetrySilentDecoder,
   VIEW_KIND_H264,
   VIEW_MAGIC,
 } from "./viewProtocol";
@@ -94,6 +99,56 @@ describe("the sample gate refuses keyframes too, which is why callers need an es
   it("keeps feeding a decoder that is keeping up", () => {
     expect(shouldDecodeH264Sample(true, 0, false)).toBe(true);
     expect(shouldDecodeH264Sample(true, 2, false)).toBe(true);
+  });
+});
+
+describe("a decoder that accepts packets but never produces its first frame", () => {
+  it("moves to the next local decoder mode only after both time and feed evidence", () => {
+    expect(shouldRetrySilentDecoder(1_499, 1_000, 100, 0)).toBe(false);
+    expect(shouldRetrySilentDecoder(3_000, 1_000, 7, 0)).toBe(false);
+    expect(shouldRetrySilentDecoder(3_000, 1_000, 8, 0)).toBe(true);
+    expect(shouldRetrySilentDecoder(30_000, 1_000, 100, 1)).toBe(false);
+  });
+});
+
+describe("decoder bootstrap survives a canvas remount", () => {
+  const packet = (generation: number, payload: Uint8Array) => ({
+    kind: "h264" as const,
+    key: true,
+    generation,
+    width: 176,
+    height: 392,
+    udid: "device-1",
+    payload,
+  });
+  const sps = new Uint8Array([0, 0, 0, 1, 0x67, 0x42, 0x00, 0x15, 0xaa]);
+  const idr = new Uint8Array([0, 0, 0, 1, 0x65, 0x88, 0x84]);
+
+  it("keeps the SPS-bearing packet when a newer same-generation IDR arrives", () => {
+    const bootstrap = rememberDecoderBootstrap(null, packet(7, sps));
+    expect(rememberDecoderBootstrap(bootstrap, packet(7, idr))).toBe(bootstrap);
+    expect(selectDecoderBootstrap(packet(7, idr), bootstrap)).toBe(bootstrap);
+    expect(decoderBootstrapSequence(packet(7, idr), bootstrap)).toEqual([
+      bootstrap,
+      packet(7, idr),
+    ]);
+  });
+
+  it("never reuses bootstrap bytes from an older producer generation", () => {
+    const bootstrap = rememberDecoderBootstrap(null, packet(7, sps));
+    expect(rememberDecoderBootstrap(bootstrap, packet(8, idr))).toBeNull();
+    expect(selectDecoderBootstrap(packet(8, idr), bootstrap)).toEqual(packet(8, idr));
+    expect(decoderBootstrapSequence(packet(8, idr), bootstrap)).toEqual([packet(8, idr)]);
+  });
+
+  it("does not feed the same SPS-bearing keyframe twice", () => {
+    const bootstrap = packet(7, sps);
+    expect(decoderBootstrapSequence(bootstrap, bootstrap)).toEqual([bootstrap]);
+  });
+
+  it("keeps the painted counter monotonic when the worker creates a new slot", () => {
+    expect(nextPaintedFrameCount(undefined)).toBe(1);
+    expect(nextPaintedFrameCount(500)).toBe(501);
   });
 });
 

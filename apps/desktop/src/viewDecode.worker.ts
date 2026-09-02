@@ -2,8 +2,12 @@ import {
   annexBHasSps,
   annexBIsSyncSample,
   codecCandidatesFromAnnexB,
+  decoderBootstrapSequence,
   decodeViewEnvelope,
+  nextPaintedFrameCount,
+  rememberDecoderBootstrap,
   shouldDecodeH264Sample,
+  shouldRetrySilentDecoder,
   type ViewEnvelope,
 } from "./viewProtocol";
 
@@ -69,6 +73,13 @@ interface Slot {
   /// only moved `accelIndex`, and when that ran out it returned, so the fallback strings
   /// written for a decoder that rejects a valid config could never be reached.
   codecIndex: number;
+  /// Candidate order learned from the last SPS in this producer generation. Scrcpy keyframes
+  /// often omit the SPS, so a local decoder retry must not replace the measured codec with a
+  /// fabricated default.
+  codecCandidates: string[];
+  decoderConfiguredAt: number;
+  feedsSinceConfigure: number;
+  outputsSinceConfigure: number;
   lastNotifiedW: number;
   lastNotifiedH: number;
   lastNotifiedGen: number;
@@ -113,6 +124,9 @@ const PAINT_BEAT_MS = 1000;
 /// The signal that does mean broken is packets arriving that produce no paint, which needs
 /// both counts side by side.
 const received = new Map<string, number>();
+// Paint beats are compared by the main thread. Keep this counter outside `Slot`, because a
+// route change destroys every canvas/slot without restarting the stream generation.
+const paintedFrames = new Map<string, number>();
 
 /// Per-envelope diagnostics, dev builds only.
 ///
@@ -187,6 +201,10 @@ function diagReport(udid: string, note: string) {
 
 const slots = new Map<string, Slot>();
 const pending = new Map<string, ViewEnvelope>();
+// `pending` deliberately keeps the newest IDR, but that packet commonly has no SPS/PPS.
+// Keep the most recent configuration packet separately so a canvas destroyed by page
+// navigation can build a fresh decoder without restarting the phone-side producer.
+const decoderBootstraps = new Map<string, ViewEnvelope>();
 const queued = new Map<string, ViewEnvelope>();
 const decoding = new Set<string>();
 
@@ -225,10 +243,23 @@ function closeDecoder(slot: Slot) {
   }
   slot.decoder = null;
   slot.codec = null;
+  slot.decoderConfiguredAt = 0;
+  slot.feedsSinceConfigure = 0;
+  slot.outputsSinceConfigure = 0;
+}
+
+function advanceDecoderAttempt(slot: Slot) {
+  if (slot.accelIndex + 1 < ACCELS.length) {
+    slot.accelIndex += 1;
+  } else {
+    slot.accelIndex = 0;
+    slot.codecIndex += 1;
+  }
 }
 
 function beatPainted(slot: Slot) {
-  slot.framesPainted += 1;
+  slot.framesPainted = nextPaintedFrameCount(paintedFrames.get(slot.udid));
+  paintedFrames.set(slot.udid, slot.framesPainted);
   const now = performance.now();
   if (now - slot.lastBeatAt < PAINT_BEAT_MS) return;
   slot.lastBeatAt = now;
@@ -274,12 +305,15 @@ const lastArrivalBeatAt = new Map<string, number>();
 function beatArrival(udid: string) {
   received.set(udid, (received.get(udid) ?? 0) + 1);
   if (DIAG) diagFor(udid).received += 1;
+  const slot = slots.get(udid);
+  // No canvas is mounted on this route. Reporting a synthetic zero-paint beat here makes the
+  // host restart healthy producers while the user is simply looking at another page.
+  if (!slot) return;
   const now = performance.now();
   const last = lastArrivalBeatAt.get(udid) ?? 0;
   if (now - last < PAINT_BEAT_MS) return;
   lastArrivalBeatAt.set(udid, now);
-  const slot = slots.get(udid);
-  emitBeat(udid, slot?.generation ?? 0, slot?.framesPainted ?? 0);
+  emitBeat(udid, slot.generation, slot.framesPainted);
 }
 
 function notifyPainted(udid: string, slot: Slot) {
@@ -314,6 +348,7 @@ async function configureDecoder(slot: Slot, codec: string): Promise<VideoDecoder
       drawFrame(slot, frame);
       notifyPainted(slot.udid, slot);
       beatPainted(slot);
+      slot.outputsSinceConfigure += 1;
       if (DIAG) diagFor(slot.udid).output += 1;
     } finally {
       frame.close();
@@ -360,19 +395,14 @@ async function configureDecoder(slot: Slot, codec: string): Promise<VideoDecoder
           // syntactically and then rejects asynchronously — were unreachable. Three
           // accels later the slot had no decoder, nothing was reported, and every
           // surface on that udid stayed black while packets kept arriving.
-          if (slot.accelIndex + 1 < ACCELS.length) {
-            slot.accelIndex += 1;
-          } else {
-            slot.accelIndex = 0;
-            slot.codecIndex += 1;
-            // Clears the "already configured for this codec" check in `handleH264` so
-            // the candidate loop runs again from the new cursor.
-            slot.codec = null;
-          }
+          advanceDecoderAttempt(slot);
           void handleH264(slot, held);
         },
       });
       decoder.configure(config);
+      slot.decoderConfiguredAt = performance.now();
+      slot.feedsSinceConfigure = 0;
+      slot.outputsSinceConfigure = 0;
       return decoder;
     } catch {
       return null;
@@ -395,6 +425,7 @@ async function handleH264(slot: Slot, envelope: ViewEnvelope) {
     slot.generation = envelope.generation;
     slot.accelIndex = 0;
     slot.codecIndex = 0;
+    slot.codecCandidates = [];
   }
   paintSize(slot, envelope.width, envelope.height);
   const isSync = annexBIsSyncSample(envelope.payload, envelope.key);
@@ -433,6 +464,23 @@ async function handleH264(slot: Slot, envelope: ViewEnvelope) {
   } else {
     slot.queueRefusals = 0;
   }
+  if (
+    slot.decoder &&
+    shouldRetrySilentDecoder(
+      performance.now(),
+      slot.decoderConfiguredAt,
+      slot.feedsSinceConfigure,
+      slot.outputsSinceConfigure,
+    )
+  ) {
+    console.warn(
+      `view decoder for ${slot.udid} accepted ${slot.feedsSinceConfigure} packets without ` +
+        `a first frame; trying the next local decoder mode`,
+    );
+    closeDecoder(slot);
+    advanceDecoderAttempt(slot);
+    if (!isSync) return;
+  }
   // Only a sample that CARRIES an SPS can say anything about which codec is right. A delta
   // has none, so `codecFromAnnexB` falls back to the literal "avc1.42E01E" and the candidate
   // list it produces is fiction -- if `slot.codec` was derived from a real SPS, that fiction
@@ -447,13 +495,16 @@ async function handleH264(slot: Slot, envelope: ViewEnvelope) {
   // not. Measured across a 20-device fleet: `codec=avc1.420015` versus
   // `cands=avc1.42E01E,avc1.42001E,avc1.4D401E`, and output stopped at ~50 frames each.
   const canJudgeCodec = annexBHasSps(envelope.payload);
+  if (canJudgeCodec) slot.codecCandidates = codecCandidatesFromAnnexB(envelope.payload);
   if (!slot.decoder) {
     // Nothing to keep; fall through and build one.
   } else if (!canJudgeCodec) {
     // Live decoder and no evidence about the codec: feed it.
   }
   if (!slot.decoder || (canJudgeCodec && !codecCandidatesFromAnnexB(envelope.payload).includes(slot.codec ?? ""))) {
-    const codecs = codecCandidatesFromAnnexB(envelope.payload);
+    const codecs = slot.codecCandidates.length > 0
+      ? slot.codecCandidates
+      : codecCandidatesFromAnnexB(envelope.payload);
     if (DIAG) {
       const d = diagFor(slot.udid);
       d.rebuilds += 1;
@@ -513,6 +564,7 @@ async function handleH264(slot: Slot, envelope: ViewEnvelope) {
     diagFor(slot.udid).fed += 1;
     diagReport(slot.udid, `queue=${slot.decoder.decodeQueueSize}`);
   }
+  slot.feedsSinceConfigure += 1;
   slot.decoder.decode(
     new Chunk({
       type: envelope.key ? "key" : "delta",
@@ -553,7 +605,11 @@ self.onmessage = (event: MessageEvent<InMessage>) => {
       height: 0,
       accelIndex: 0,
       codecIndex: 0,
-      framesPainted: 0,
+      codecCandidates: [],
+      decoderConfiguredAt: 0,
+      feedsSinceConfigure: 0,
+      outputsSinceConfigure: 0,
+      framesPainted: paintedFrames.get(message.udid) ?? 0,
       lastBeatAt: 0,
       lastBeatFrames: 0,
       queueRefusals: 0,
@@ -571,7 +627,12 @@ self.onmessage = (event: MessageEvent<InMessage>) => {
     const held = pending.get(message.udid);
     if (held) {
       if (held.kind === "h264") {
-        pumpH264(slot, held);
+        for (const packet of decoderBootstrapSequence(
+          held,
+          decoderBootstraps.get(message.udid) ?? null,
+        )) {
+          pumpH264(slot, packet);
+        }
       } else {
         void handleJpeg(message.udid, slot, held);
       }
@@ -617,6 +678,15 @@ self.onmessage = (event: MessageEvent<InMessage>) => {
   if (message.type !== "packet") return;
   const envelope = decodeViewEnvelope(message.buffer);
   if (!envelope) return;
+  const bootstrap = rememberDecoderBootstrap(
+    decoderBootstraps.get(envelope.udid) ?? null,
+    envelope,
+  );
+  if (bootstrap) {
+    decoderBootstraps.set(envelope.udid, bootstrap);
+  } else {
+    decoderBootstraps.delete(envelope.udid);
+  }
   beatArrival(envelope.udid);
   const previous = pending.get(envelope.udid);
   if (previous && previous.generation !== envelope.generation) {

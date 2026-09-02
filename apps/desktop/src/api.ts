@@ -501,6 +501,8 @@ export interface ViewPaintReport {
   generation: number;
   received: number;
   frames: number;
+  /** Envelopes received since the last frame; isolated codec packets are not a video stall. */
+  packetsSincePaint: number;
   /**
    * Age of the last drawn frame, in ms, by *this* clock.
    *

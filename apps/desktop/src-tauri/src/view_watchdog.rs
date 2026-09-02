@@ -69,6 +69,10 @@ pub(crate) const ANDROID_VIEW_SILENCE: Duration = Duration::from_secs(45);
 /// arrival, so anything this long is not merely a slow decoder.
 pub(crate) const VIEW_PAINT_STALL: Duration = Duration::from_secs(12);
 
+/// A lone SPS/PPS packet legitimately produces no frame. Require a short run of input before
+/// declaring that the decoder is accepting video without painting it.
+const MIN_PACKETS_WITHOUT_PAINT: u64 = 8;
+
 /// How old a paint report may be before it stops counting as evidence of anything.
 ///
 /// The frontend reports on its own 2 s tick. Anything past this means the window is closed,
@@ -252,6 +256,8 @@ pub struct PaintReport {
     pub received: u64,
     /// Frames the worker has actually drawn for this device.
     pub frames: u64,
+    /// Envelopes received after the most recent painted frame.
+    pub packets_since_paint: u64,
     /// Milliseconds since a frame was last drawn, as measured by the reporter's own clock.
     ///
     /// Sent as an age rather than a timestamp deliberately: the WebView's `Date.now()` and
@@ -266,6 +272,7 @@ pub(crate) struct PaintRecord {
     pub(crate) generation: u64,
     pub(crate) received: u64,
     pub(crate) frames: u64,
+    pub(crate) packets_since_paint: u64,
     pub(crate) since_paint: Duration,
     /// When the host recorded it — host clock, so staleness is measurable.
     pub(crate) reported_at: Instant,
@@ -302,6 +309,7 @@ impl ViewPaintLedger {
                 generation: report.generation,
                 received: report.received,
                 frames: report.frames,
+                packets_since_paint: report.packets_since_paint,
                 since_paint: Duration::from_millis(report.since_paint_ms),
                 reported_at: now,
             },
@@ -401,7 +409,9 @@ pub(crate) fn view_verdict(
     }
     // The whole point: only a stream whose packets kept coming is broken. A static screen
     // stops producing packets too, and restarting it fixes nothing while costing ~45 s.
-    if paint.since_paint > VIEW_PAINT_STALL && paint.received > paint.frames {
+    if paint.since_paint > VIEW_PAINT_STALL
+        && paint.packets_since_paint >= MIN_PACKETS_WITHOUT_PAINT
+    {
         return ViewVerdict::Restart(ViewFault::PaintStalled);
     }
     ViewVerdict::Healthy
@@ -706,6 +716,7 @@ mod tests {
             generation: 1,
             received,
             frames,
+            packets_since_paint: received.saturating_sub(frames),
             since_paint,
             reported_at: Instant::now(),
         }
@@ -767,6 +778,22 @@ mod tests {
     }
 
     #[test]
+    fn one_isolated_codec_packet_is_not_a_stalled_video() {
+        let byte_age = Some(Duration::from_secs(1));
+        let mut config_only = record(500, 501, VIEW_PAINT_STALL + Duration::from_secs(1));
+        config_only.packets_since_paint = 1;
+        assert_eq!(
+            view_verdict(false, byte_age, Some(&config_only), Some(Duration::ZERO)),
+            ViewVerdict::Healthy
+        );
+        config_only.packets_since_paint = MIN_PACKETS_WITHOUT_PAINT;
+        assert_eq!(
+            view_verdict(false, byte_age, Some(&config_only), Some(Duration::ZERO)),
+            ViewVerdict::Restart(ViewFault::PaintStalled)
+        );
+    }
+
+    #[test]
     fn a_device_that_has_never_painted_is_starting_up_not_stalled() {
         let byte_age = Some(Duration::from_secs(1));
         let never = record(0, 40, Duration::from_secs(120));
@@ -816,6 +843,7 @@ mod tests {
             generation: 3,
             received: 900,
             frames: 200,
+            packets_since_paint: 700,
             since_paint_ms: 30_000,
         };
         // The hub has moved on to generation 4.

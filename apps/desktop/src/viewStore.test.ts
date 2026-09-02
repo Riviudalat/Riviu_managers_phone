@@ -65,6 +65,12 @@ describe("stalled view detection", () => {
     expect(collectStalledViews(now, ["stale"], painted, latest)).toEqual(["stale"]);
   });
 
+  it("does not call one isolated codec packet a stalled video", () => {
+    const painted = new Map([["config", beat(now - PAINT_STALL_MS - 1, 100, 50)]]);
+    const latest = new Map([["config", beat(now, 101, 50)]]);
+    expect(collectStalledViews(now, ["config"], painted, latest)).toEqual([]);
+  });
+
   it("leaves a static screen alone even though it has drawn nothing for ages", () => {
     // The mistake the first version of this rule made, and the expensive one: scrcpy only
     // encodes when the screen changes, so a phone parked on a lock screen sends nothing and
@@ -140,6 +146,7 @@ describe("paint reports sent to the host watchdog", () => {
       generation: 7,
       received: 900,
       frames: 200,
+      packetsSincePaint: 700,
       sincePaintMs: 30_000,
     });
   });
