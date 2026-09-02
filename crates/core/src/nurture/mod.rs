@@ -384,6 +384,32 @@ impl NurtureEngine {
         self.control.start_reserved_stream(session, capacity).await
     }
 
+    /// Stop TikTok before releasing the session and stream that prove which device and app
+    /// this nurture run owns. Closing the UI context first loses the only safe termination
+    /// route and leaves TikTok alive in the background after the row says the run is done.
+    /// Both operations are attempted so a failed terminate never leaks the control-plane
+    /// capacity as a second problem.
+    async fn shutdown_tiktok(
+        &self,
+        ui_context: UiWithStreamContext,
+        bundle_id: &str,
+    ) -> Result<(), String> {
+        let terminate = self
+            .control
+            .terminate_streaming_app(&ui_context, bundle_id)
+            .await
+            .map(|_| ());
+        let close = self.control.close_ui_context(ui_context).await;
+        match (terminate, close) {
+            (Ok(()), Ok(_)) => Ok(()),
+            (Err(terminate), Ok(_)) => Err(format!("không tắt được TikTok: {terminate}")),
+            (Ok(()), Err(close)) => Err(format!("không đóng được phiên điều khiển: {close}")),
+            (Err(terminate), Err(close)) => Err(format!(
+                "không tắt được TikTok: {terminate}; không đóng được phiên điều khiển: {close}"
+            )),
+        }
+    }
+
     pub(super) fn tiktok_bundle(settings: &NurtureSettings) -> &str {
         if settings.bundle_id.trim().is_empty() {
             crate::tiktok_target::IOS_TIKTOK_BUNDLE
@@ -718,7 +744,17 @@ impl NurtureEngine {
                 }
             }
         };
-        let session = self.control.streaming_session(&ui_context)?;
+        let session = match self.control.streaming_session(&ui_context) {
+            Ok(session) => session,
+            Err(error) => {
+                let cleanup = self.shutdown_tiktok(ui_context, &bundle_id).await;
+                let detail = cleanup
+                    .err()
+                    .map(|cleanup| format!("; lỗi dọn TikTok: {cleanup}"))
+                    .unwrap_or_default();
+                return Err(anyhow::anyhow!("{error}{detail}"));
+            }
+        };
 
         // Two refusals here, both closing holes rather than adding caution.
         //
@@ -740,6 +776,12 @@ impl NurtureEngine {
                     format!("failed — máy báo kích thước màn hình không dùng được {size:?}"),
                 );
                 status.finish(Outcome::Failed);
+                if let Err(error) = self.shutdown_tiktok(ui_context, &bundle_id).await {
+                    ctx.report(
+                        status,
+                        format!("{}; lỗi dọn TikTok: {error}", status.last_message),
+                    );
+                }
                 return Ok(None);
             }
             Err(error) => {
@@ -748,6 +790,12 @@ impl NurtureEngine {
                     format!("failed — không đọc được kích thước màn hình: {error}"),
                 );
                 status.finish(Outcome::Failed);
+                if let Err(error) = self.shutdown_tiktok(ui_context, &bundle_id).await {
+                    ctx.report(
+                        status,
+                        format!("{}; lỗi dọn TikTok: {error}", status.last_message),
+                    );
+                }
                 return Ok(None);
             }
         };
@@ -1793,6 +1841,11 @@ impl NurtureEngine {
         else {
             return Ok(progress.status);
         };
+        // Every return and every `?` after this point is captured here. The only exit from an
+        // opened phone then runs `shutdown_tiktok`, so adding a new failure branch cannot
+        // accidentally leave the app alive in the background.
+        let mut popup_watch_task: Option<tokio::task::JoinHandle<()>> = None;
+        let session_result: anyhow::Result<NurtureSessionStatus> = async {
         // The session exists; from here to the first counted video the phone is being
         // steered onto a usable feed — dialogs declined, the onboarding journey skipped,
         // the action rail found. That can legitimately take a minute, and it is the window
@@ -1840,17 +1893,8 @@ impl NurtureEngine {
                 if ran_outcome == Outcome::Done && progress.status.videos_done == 0 {
                     ran_outcome = Outcome::Failed;
                 }
-                let mut cleanup_error = None;
-                if let Err(error) = self.control.close_ui_context(device.ui_context).await {
-                    ran_outcome = if progress.status.videos_done == 0 {
-                        Outcome::Failed
-                    } else {
-                        Outcome::Partial
-                    };
-                    cleanup_error = Some(format!("device cleanup failed: {error}"));
-                }
                 let summary = format!(
-                    "{} — {}/{} video, {} tim, {} bình luận, {} follow, {:.0}s (hierarchy){}",
+                    "{} — {}/{} video, {} tim, {} bình luận, {} follow, {:.0}s (hierarchy)",
                     ran_outcome.as_str(),
                     progress.status.videos_done,
                     progress.status.swipe_attempts,
@@ -1858,23 +1902,10 @@ impl NurtureEngine {
                     progress.status.comments,
                     progress.status.follows,
                     started.elapsed().as_secs_f64(),
-                    cleanup_error
-                        .as_ref()
-                        .map(|error| format!(", lỗi cuối: {error}"))
-                        .unwrap_or_default(),
                 );
                 progress.status.finish(ran_outcome);
                 progress.status.last_message = summary.clone();
                 ctx.push(&progress.status);
-                let _ = self.db.log_op(
-                    "nurture.session",
-                    &format!(
-                        "{udid} {summary} tokens={}/{}",
-                        progress.status.session_prompt_tokens,
-                        progress.status.session_completion_tokens
-                    ),
-                );
-                self.clear_touch_points(udid);
                 return Ok(progress.status);
             }
             // The ordinary iOS case: no geometry, so use pixels.
@@ -1884,7 +1915,6 @@ impl NurtureEngine {
             // iPhone 8. The reason is already in `progress.status.last_message`.
             hierarchy::HierarchySession::Refused => {
                 progress.status.finish(Outcome::Failed);
-                let _ = self.control.close_ui_context(device.ui_context).await;
                 ctx.push(&progress.status);
                 return Ok(progress.status);
             }
@@ -1989,7 +2019,9 @@ impl NurtureEngine {
         let watcher_state = watcher.state.clone();
         let live_owned = watcher.live_owned.clone();
         let watcher_suppress = suppress.clone();
-        let watch_task = tokio::spawn(watcher.run_suppressible(watcher_suppress));
+        popup_watch_task = Some(tokio::spawn(
+            watcher.run_suppressible(watcher_suppress),
+        ));
 
         // The watcher normally runs in parallel with nurture. At startup we
         // add one small gate so a notification/sheet that appeared during app
@@ -2338,20 +2370,11 @@ impl NurtureEngine {
 
         // Stop the watcher and collect its numbers before reporting.
         stop.store(true, Ordering::Relaxed);
-        let _ = tokio::time::timeout(Duration::from_secs(3), watch_task).await;
+        if let Some(task) = popup_watch_task.take() {
+            let _ = tokio::time::timeout(Duration::from_secs(3), task).await;
+        }
         let watch = watcher_stats.snapshot();
         let _ = watcher_state;
-
-        // Do not park the app blindly: only note where we ended up. TikTok
-        // hides its chrome for a moment during a swipe, so a single frame is
-        // not evidence — sample a couple of seconds and accept any feed frame.
-        let never = AtomicBool::new(false);
-        let ended_on_tiktok = self
-            .wait_for_frame(udid, Duration::from_millis(2_500), &never, |img| {
-                screen::feed_ready(img, Some(device.screen_size.0))
-            })
-            .await
-            .is_some();
 
         progress.outcome = session_verdict(
             progress.outcome,
@@ -2361,18 +2384,9 @@ impl NurtureEngine {
             progress.last_error.is_some(),
         );
 
-        if let Err(error) = self.control.close_ui_context(device.ui_context).await {
-            progress.outcome = if progress.status.videos_done == 0 {
-                Outcome::Failed
-            } else {
-                Outcome::Partial
-            };
-            progress.last_error = Some(format!("device cleanup failed: {error}"));
-        }
-
         let elapsed = started.elapsed();
         let summary = format!(
-            "{} — {}/{} video, {} tim, {} bình luận, {} follow, {} popup đóng, {} recovery, {:.0}s{}{}",
+            "{} — {}/{} video, {} tim, {} bình luận, {} follow, {} popup đóng, {} recovery, {:.0}s{}",
             progress.outcome.as_str(),
             progress.status.videos_done,
             progress.status.swipe_attempts,
@@ -2382,11 +2396,6 @@ impl NurtureEngine {
             watch.popups_closed,
             budget.soft + budget.hard,
             elapsed.as_secs_f64(),
-            if ended_on_tiktok {
-                ", kết thúc ở TikTok"
-            } else {
-                ", KHÔNG ở TikTok lúc kết thúc"
-            },
             progress.last_error
                 .as_ref()
                 .map(|e| format!(", lỗi cuối: {e}"))
@@ -2396,15 +2405,57 @@ impl NurtureEngine {
         progress.status.last_message = summary.clone();
         ctx.push(&progress.status);
 
-        let _ = self.db.log_op(
-            "nurture.session",
-            &format!(
-                "{udid} {summary} tokens={}/{}",
-                progress.status.session_prompt_tokens, progress.status.session_completion_tokens
-            ),
-        );
-        self.clear_touch_points(udid);
         Ok(progress.status)
+        }
+        .await;
+
+        // Some error exits happen after the popup watcher has been spawned. Stopping here is
+        // unconditional so dropping its JoinHandle cannot leave the watcher detached after
+        // TikTok itself has been force-stopped.
+        stop.store(true, Ordering::Release);
+        if let Some(task) = popup_watch_task.take() {
+            let _ = tokio::time::timeout(Duration::from_secs(3), task).await;
+        }
+        let OpenedDevice {
+            ui_context,
+            bundle_id,
+            ..
+        } = device;
+        let shutdown = self.shutdown_tiktok(ui_context, &bundle_id).await;
+        self.clear_touch_points(udid);
+        match session_result {
+            Ok(mut status) => {
+                match shutdown {
+                    Ok(()) => status.last_message.push_str(", đã tắt sạch TikTok"),
+                    Err(error) => {
+                        let outcome = if status.videos_done == 0 {
+                            Outcome::Failed
+                        } else {
+                            Outcome::Partial
+                        };
+                        status.finish(outcome);
+                        status
+                            .last_message
+                            .push_str(&format!(", lỗi dọn TikTok: {error}"));
+                    }
+                }
+                ctx.push(&status);
+                let _ = self.db.log_op(
+                    "nurture.session",
+                    &format!(
+                        "{udid} {} tokens={}/{}",
+                        status.last_message,
+                        status.session_prompt_tokens,
+                        status.session_completion_tokens
+                    ),
+                );
+                Ok(status)
+            }
+            Err(error) => match shutdown {
+                Ok(()) => Err(error),
+                Err(cleanup) => Err(anyhow::anyhow!("{error}; lỗi dọn TikTok: {cleanup}")),
+            },
+        }
     }
 
     /// Bring TikTok forward. Prefers WDA activate, which does not restart a
@@ -2988,6 +3039,59 @@ mod tests {
         assert_eq!(Outcome::Partial.as_str(), "partial");
         assert_eq!(Outcome::Done.as_str(), "done");
         assert_eq!(Outcome::Stopped.as_str(), "stopped");
+    }
+
+    #[test]
+    fn every_opened_nurture_session_has_one_shutdown_boundary() {
+        let whole = include_str!("mod.rs").replace("\r\n", "\n");
+        let source = whole
+            .split("#[cfg(test)]\nmod tests")
+            .next()
+            .expect("production source before tests");
+        assert!(
+            source.contains("let session_result: anyhow::Result<NurtureSessionStatus> = async"),
+            "all post-open exits must be captured before cleanup"
+        );
+        assert!(
+            source.contains("shutdown_tiktok(ui_context, &bundle_id).await"),
+            "the single post-open boundary must terminate TikTok"
+        );
+        let final_boundary = source
+            .split("let session_result: anyhow::Result<NurtureSessionStatus> = async")
+            .nth(1)
+            .expect("post-open session boundary");
+        let stop_watcher = final_boundary
+            .find("stop.store(true, Ordering::Release)")
+            .expect("stop the popup watcher on every exit");
+        let join_watcher = stop_watcher
+            + final_boundary[stop_watcher..]
+                .find("popup_watch_task.take()")
+                .expect("join the popup watcher on every exit");
+        let final_shutdown = final_boundary
+            .find("shutdown_tiktok(ui_context, &bundle_id).await")
+            .expect("terminate TikTok at the final boundary");
+        assert!(
+            stop_watcher < join_watcher && join_watcher < final_shutdown,
+            "the popup watcher must stop and join before TikTok is terminated"
+        );
+        assert!(
+            !source.contains("KHÔNG ở TikTok") && !source.contains("kết thúc ở TikTok"),
+            "screen location is not proof that the TikTok process was terminated"
+        );
+        let helper = source
+            .split("async fn shutdown_tiktok")
+            .nth(1)
+            .expect("shutdown helper");
+        let terminate = helper
+            .find("terminate_streaming_app")
+            .expect("terminate TikTok first");
+        let close = helper
+            .find("close_ui_context")
+            .expect("then release the UI context");
+        assert!(
+            terminate < close,
+            "TikTok must stop before its session is released"
+        );
     }
 
     /// The bug this guards: a timed run that stopped on the clock with its

@@ -5,11 +5,8 @@ import { LIVE_TUNABLE_FIELDS, RESTART_REQUIRED_REASONS } from "./types";
  * **The two lists that answer the same question have to disagree about nothing.**
  *
  * `LIVE_TUNABLE_FIELDS` says which settings a running session picks up on its next post.
- * `RESTART_REQUIRED_REASONS` says which ones it will not, with the sentence to show. They are
- * written independently, and nothing connected them — so a field could appear in both, and the
- * operator would get a badge saying "restart to apply this" on a value the loop had already
- * absorbed. That is not a cosmetic contradiction: it is the app telling somebody to stop twenty
- * phones for no reason.
+ * `RESTART_REQUIRED_REASONS` says which ones it will not. They are written independently, so a
+ * field could otherwise appear in both and make the runtime contract contradict itself.
  *
  * This also gives `LIVE_TUNABLE_FIELDS` a second reader, which matters for a reason that has
  * nothing to do with correctness. It had exactly one — a Rust test that `include_str!`s
@@ -24,7 +21,7 @@ describe("what a running nurture session absorbs", () => {
     );
     expect(
       contradictory,
-      "these would show a restart badge for a value the loop already picks up",
+      "these would mark a value restart-required even though the loop picks it up",
     ).toEqual([]);
   });
 
@@ -35,7 +32,7 @@ describe("what a running nurture session absorbs", () => {
   });
 
   /**
-   * Every restart reason is a sentence an operator can act on, not a field name echoed back.
+   * Every restart reason remains meaningful contract metadata, not a field name echoed back.
    *
    * Cheap to assert and it catches the one way this map rots: a field added with a placeholder.
    */

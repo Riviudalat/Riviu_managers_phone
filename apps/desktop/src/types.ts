@@ -509,14 +509,9 @@ export interface NurtureSettings {
 /// The same split as `NurtureSettings::absorb_live_changes` on the Rust side, and it has to stay
 /// the same split: this list is the declaration, that one is the behaviour.
 ///
-/// **Read by two tests and by no component, and that is worth stating plainly** — an earlier
-/// version of this comment said the badges read it, and they do not:
-/// `NurturePopup` renders from `RESTART_REQUIRED_REASONS`, which is the other half of the same
-/// split, written independently. So this constant looks unused from inside TypeScript while
-/// `crates/core/src/types.rs` asserts on it via `include_str!` — delete it and `cargo test`
-/// goes red from a change made entirely here. `nurtureLiveFields.test.ts` reads it from this
-/// side too, both to make that visible and to keep the two lists from ever naming the same
-/// field.
+/// **Read by two tests and by no component.** This constant looks unused from inside
+/// TypeScript while `crates/core/src/types.rs` asserts on it via `include_str!`; deleting it
+/// therefore makes `cargo test` fail from a change made entirely here.
 export const LIVE_TUNABLE_FIELDS = new Set<keyof NurtureSettings>([
   "likeProb",
   "commentProb",
@@ -547,7 +542,7 @@ export const LIVE_TUNABLE_FIELDS = new Set<keyof NurtureSettings>([
   "maxCommentWords",
 ]);
 
-/// Fields a running session will **not** pick up, with the reason to show the operator.
+/// Fields a running session will **not** pick up, with the reason retained for contract tests.
 ///
 /// Each reason is a fact about the session, not a policy: it built something out of the
 /// value and cannot rebuild it mid-run.
@@ -564,15 +559,6 @@ export const RESTART_REQUIRED_REASONS = {
   scheduleDurationMinutes: "Lịch tác động giữa các phiên",
   scheduleUdids: "Lịch tác động giữa các phiên",
 } satisfies Partial<Record<keyof NurtureSettings, string>>;
-
-/**
- * A field that needs a restart, i.e. one this map has a reason for.
- *
- * `satisfies` rather than a type annotation keeps the literal keys, so `RestartBadge` can
- * only be pointed at a field there is actually a sentence for — a badge on anything else is
- * a compile error instead of the word "undefined" in a tooltip.
- */
-export type RestartRequiredField = keyof typeof RESTART_REQUIRED_REASONS;
 
 export interface NurtureApiTestResult {
   udid: string;

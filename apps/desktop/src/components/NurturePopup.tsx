@@ -1,5 +1,4 @@
-import { useCallback, useEffect, useId, useMemo, useRef, useState, type CSSProperties } from "react";
-import { createPortal } from "react-dom";
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 
 import { InfoDot as Info } from "./InfoDot";
 import {
@@ -20,6 +19,7 @@ import {
   type BudgetKey,
 } from "../nurtureBudget";
 import { targetsOf } from "../selectionTargets";
+import { orderDevicesByNumber, tileName, tileNumber } from "../deviceNaming";
 import { useTickWhile } from "../useTickWhile";
 import { NurtureAiTab } from "./nurture/NurtureAiTab";
 import { NurtureCommentsTab } from "./nurture/NurtureCommentsTab";
@@ -30,12 +30,11 @@ import { IconClose, IconHeart } from "./Icons";
 import { LoadingState } from "./States";
 import type {
   DeviceInfo,
+  DeviceMeta,
   NurtureSessionStatus,
   NurtureSettings,
-  RestartRequiredField,
   SessionLogSummary,
 } from "../types";
-import { RESTART_REQUIRED_REASONS } from "../types";
 import { describeError } from "../describeError";
 
 /**
@@ -57,6 +56,7 @@ type NurtureRow = {
 type Props = {
   devices: DeviceInfo[];
   selected: string[];
+  metas: Map<string, DeviceMeta>;
   onClose: () => void;
 };
 
@@ -184,72 +184,6 @@ export function FeatureRow({
   );
 }
 
-/**
- * Marks a field a running session will not pick up, with the reason.
- *
- * Takes the field, not the sentence: the sentences live in `RESTART_REQUIRED_REASONS`, which
- * is pinned against `absorb_live_changes` on the Rust side. Passing prose here is how the
- * three badges came to hold their own copies of two of those sentences while the list itself
- * went unread — a field could be made live-tunable in the loop and still carry a badge.
- */
-export function RestartBadge({ field }: { field: RestartRequiredField }) {
-  const [tip, setTip] = useState<{ left: number; top: number } | null>(null);
-  const [pinned, setPinned] = useState(false);
-  const tooltipId = useId();
-  const reason = RESTART_REQUIRED_REASONS[field];
-  const what = `${reason}. Đang chạy mà đổi thì phải bấm Dừng rồi Bắt đầu lại mới áp dụng.`;
-  const open = (element: HTMLElement) => {
-    const rect = element.getBoundingClientRect();
-    setTip({ left: Math.round(rect.left + rect.width / 2), top: Math.round(rect.top) });
-  };
-  return (
-    <button
-      type="button"
-      className="nurture-restart-badge"
-      aria-label={`Giải thích yêu cầu chạy lại: ${reason}`}
-      aria-describedby={tip ? tooltipId : undefined}
-      data-tip={what}
-      onMouseEnter={(event) => open(event.currentTarget)}
-      onMouseLeave={(event) => {
-        if (!pinned && document.activeElement !== event.currentTarget) setTip(null);
-      }}
-      onFocus={(event) => open(event.currentTarget)}
-      onBlur={() => {
-        if (!pinned) setTip(null);
-      }}
-      onClick={(event) => {
-        const element = event.currentTarget;
-        setPinned((current) => {
-          if (current) setTip(null);
-          else open(element);
-          return !current;
-        });
-      }}
-      onKeyDown={(event) => {
-        if (event.key === "Escape") {
-          event.stopPropagation();
-          setPinned(false);
-          setTip(null);
-        }
-      }}
-    >
-      cần chạy lại
-      {tip &&
-        createPortal(
-          <span
-            id={tooltipId}
-            className="nu-tip"
-            role="tooltip"
-            style={{ left: tip.left, top: tip.top }}
-          >
-            {what}
-          </span>,
-          document.body,
-        )}
-    </button>
-  );
-}
-
 /** Map engine status English → short Vietnamese for the live log. */
 function statusVi(raw: string): string {
   const s = raw.trim();
@@ -297,13 +231,22 @@ function statusVi(raw: string): string {
   return s;
 }
 
-function deviceLabel(devices: DeviceInfo[], udid: string): string {
+function deviceLabel(
+  devices: DeviceInfo[],
+  metas: Map<string, DeviceMeta>,
+  udid: string,
+): string {
   const d = devices.find((x) => x.udid === udid);
-  if (d?.name?.trim()) return d.name.trim();
-  return udid.slice(0, 8);
+  const meta = metas.get(udid);
+  if (!d) {
+    return `Máy ${meta?.number ?? "?"} · ${meta?.alias?.trim() || udid.slice(0, 8)}`;
+  }
+  const ordered = orderDevicesByNumber(devices, metas);
+  const position = ordered.findIndex((device) => device.udid === udid) + 1;
+  return `Máy ${tileNumber(position || 1, meta)} · ${tileName(d, meta)}`;
 }
 
-export function NurturePopup({ devices, selected, onClose }: Props) {
+export function NurturePopup({ devices, selected, metas, onClose }: Props) {
   const [settings, setSettings] = useState<NurtureSettings | null>(null);
   const [statuses, setStatuses] = useState<NurtureSessionStatus[]>([]);
   const [msg, setMsg] = useState<string | null>(null);
@@ -312,8 +255,8 @@ export function NurturePopup({ devices, selected, onClose }: Props) {
   // and the schedule one under another in a column narrow enough that each of them had to
   // be folded away, so tuning two related numbers meant scrolling past a closed section —
   // and opening two at once pushed the live log off the bottom, which is the one thing the
-  // panel is open to watch. One group at a time, full width, log pinned above.
-  const [tab, setTab] = useState<"behaviour" | "ai" | "comments">("behaviour");
+  // panel is open to watch. One group at a time, full width, with the log in the same tab row.
+  const [tab, setTab] = useState<"behaviour" | "ai" | "comments" | "log">("behaviour");
   /**
    * Which device's history is open, or `null`.
    *
@@ -513,6 +456,7 @@ export function NurturePopup({ devices, selected, onClose }: Props) {
       if (settings && !(await save({ ...settings, scheduleUdids: targets }))) return;
       await nurtureStart(targets);
       await reload();
+      setTab("log");
     } catch (e) {
       setMsg(describeError(e));
     } finally {
@@ -602,8 +546,32 @@ export function NurturePopup({ devices, selected, onClose }: Props) {
                 </button>
               </div>
 
-              {rows.length > 0 && (
-                <div className="nurture-live">
+              <div className="nurture-tabs" role="tablist" aria-label="Nuôi TikTok">
+                {(
+                  [
+                    ["behaviour", "Hành vi"],
+                    ["ai", "AI"],
+                    ["comments", "Bình luận"],
+                    ["log", "Log"],
+                  ] as const
+                ).map(([key, label]) => (
+                  <button
+                    key={key}
+                    type="button"
+                    role="tab"
+                    aria-selected={tab === key}
+                    className={`nurture-tab${tab === key ? " is-on" : ""}`}
+                    onClick={() => setTab(key)}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
+
+              {tab === "log" && (
+                <div className="nurture-live" role="tabpanel">
+                  {rows.length > 0 ? (
+                    <>
                   <div className="nurture-float-stats">
                     <div>
                       <span>Video</span>
@@ -666,7 +634,7 @@ export function NurturePopup({ devices, selected, onClose }: Props) {
                               row.status?.outcome === "failed" ? " bad" : ""
                             }`}
                           />
-                          <strong title={row.udid}>{deviceLabel(devices, row.udid)}</strong>
+                          <strong title={row.udid}>{deviceLabel(devices, metas, row.udid)}</strong>
                           <div className="grow" />
                           {/* The same four numbers as before, but as labelled cells: the old
                               single string ("12/34v · ♥5/6 · BL1/1 · +0/0") packed done-vs-
@@ -717,36 +685,13 @@ export function NurturePopup({ devices, selected, onClose }: Props) {
                       </div>
                     ))}
                   </div>
+                    </>
+                  ) : (
+                    <p className="nurture-log-empty">Chưa có log nuôi TikTok.</p>
+                  )}
                 </div>
               )}
               {msg && <p className="nurture-float-err">{msg}</p>}
-
-              <div className="nurture-tabs" role="tablist" aria-label="Cấu hình">
-                {(
-                  [
-                    ["behaviour", "Hành vi"],
-                    ["ai", "AI"],
-                    ["comments", "Bình luận"],
-                  ] as const
-                ).map(([key, label]) => (
-                  <button
-                    key={key}
-                    type="button"
-                    role="tab"
-                    aria-selected={tab === key}
-                    className={`nurture-tab${tab === key ? " is-on" : ""}`}
-                    onClick={() => setTab(key)}
-                  >
-                    {label}
-                  </button>
-                ))}
-                <div className="grow" />
-                {anyRunning && (
-                  <span className="nurture-live-flag" title="Bấm Lưu là áp ngay từ bài kế tiếp">
-                    đang chạy · Lưu để áp ngay
-                  </span>
-                )}
-              </div>
 
               {tab === "ai" && (
                 <NurtureAiTab

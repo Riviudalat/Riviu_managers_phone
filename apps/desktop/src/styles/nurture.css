@@ -313,22 +313,11 @@
   color: var(--primary);
   box-shadow: 0 1px 2px rgba(0, 0, 0, 0.06);
 }
-.nurture-live-flag {
-  flex: 0 0 auto;
-  padding: 0 0.4rem;
-  color: var(--primary);
-  font-size: var(--text-2xs);
-  font-weight: 500;
-  white-space: nowrap;
-  cursor: help;
-}
-
-/* The live block stays above the tabs: it is what the panel is open to watch, and putting
-   it behind a tab would hide it exactly while settings are being tuned. */
 .nurture-live {
   display: flex;
   flex-direction: column;
   gap: 0.35rem;
+  margin-top: 0.35rem;
 }
 
 /* done / attempted, four times over. `b` is confirmed, `i` attempted, `em` the unit. */
@@ -645,7 +634,7 @@
   border-color: var(--primary);
   color: var(--primary);
 }
-/* Instant, styled hover tooltip for the help icon and the "cần chạy lại" badge.
+/* Instant, styled hover tooltip for the help icon.
    `position: fixed` (coordinates from the trigger's getBoundingClientRect) so it is not
    clipped by the panel's scroll container and needs no hover delay — it renders the moment
    the pointer enters, unlike the native `title` it replaces. */
@@ -679,22 +668,6 @@
 .nu-inline {
   display: inline-flex;
   align-items: center;
-}
-
-.nurture-restart-badge {
-  width: auto;
-  min-height: 0;
-  padding: 0 0.26rem;
-  border: 1px solid var(--warn);
-  border-radius: 3px;
-  background: transparent;
-  color: var(--warn);
-  font-size: var(--text-2xs);
-  font-weight: 600;
-  letter-spacing: 0;
-  text-transform: none;
-  white-space: nowrap;
-  cursor: help;
 }
 
 .nurture-sched {

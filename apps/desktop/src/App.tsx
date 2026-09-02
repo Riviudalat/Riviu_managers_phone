@@ -987,6 +987,7 @@ function App() {
         <NurturePopup
           devices={devices}
           selected={selected}
+          metas={metaMap}
           onClose={() => setNurtureOpen(false)}
         />
       )}

@@ -499,3 +499,20 @@
   như `No`, tooltip trợ giúp phải dùng được bằng hover/focus/click/Escape. Danh
   sách phải tách Loading/Error/Empty/Data và cho retry; raw outcome/code chỉ nằm
   trong tooltip hoặc disclosure/chi tiết, gồm mapping `skipped: card_changed`.
+
+#### 14.7 Nurture session shutdown và log theo số máy (02/09/2026; xem §9.139)
+
+- Sau khi `open_for_session` trả một `OpenedDevice`, mọi nhánh `return` và `?`
+  phải nằm trong cùng một result boundary. Hậu xử lý luôn dừng và join popup watcher,
+  gọi `terminate_streaming_app` khi stream lease còn hợp lệ, rồi mới
+  `close_ui_context`; đảo thứ tự sẽ mất đường force-stop được buộc vào đúng máy.
+- Chỉ `ProcessAbsenceProof` từ driver mới cho phép ghi `đã tắt sạch TikTok`.
+  Việc frame cuối không ở feed TikTok không phải process proof. Terminate hoặc
+  release lỗi phải hiện trong terminal status; phiên chưa xử lý video nào là
+  `failed`, phiên đã có video là `partial`.
+- Log nurture nằm trong tab `Log` cạnh `Hành vi / AI / Bình luận`. Tên dòng dùng
+  cùng `DeviceMeta` và quy tắc số/tên của tile: `Máy N · tên`; model chỉ còn là
+  fallback sau số máy, không được đứng một mình.
+- `RIVIU_MOCK_DEVICES=1` là một fleet fixture cô lập. Bootstrap không được probe
+  hoặc ghép Android thật vào mock fleet; làm vậy sẽ tự mở preview và health-repair
+  trên các máy USB dù operator chỉ yêu cầu headless mock.

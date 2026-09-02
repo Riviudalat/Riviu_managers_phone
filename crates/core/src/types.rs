@@ -1695,16 +1695,10 @@ mod nurture_tuning_tests {
     fn the_form_promises_exactly_what_a_running_session_absorbs() {
         // `absorb_live_changes` is documented as "this list and that list are the same
         // list". They were not: this function copies `human_limits`, and the frontend's
-        // LIVE_TUNABLE_FIELDS had never listed it. Nothing showed, because nothing read the
-        // frontend list -- three restart badges hardcoded their reason strings instead.
-        //
-        // **The old version of this comment then claimed "now the badges read the list", and
-        // that is not what happened.** The badges read `RESTART_REQUIRED_REASONS`, a separate
-        // map keyed by field. So this test is still the *only* consumer of
-        // LIVE_TUNABLE_FIELDS on the Rust side, which is exactly why it looks deletable from
-        // TypeScript. `nurtureLiveFields.test.ts` now reads it from that side as well, and
-        // asserts the two frontend lists never name the same field -- a field in both would
-        // show a restart badge for a value this function had already absorbed.
+        // LIVE_TUNABLE_FIELDS had never listed it. This test is still the only consumer of
+        // that declaration on the Rust side, which is exactly why it looks deletable from
+        // TypeScript. `nurtureLiveFields.test.ts` reads it from that side as well and asserts
+        // that the live and restart-required field sets never overlap.
         let types_ts = include_str!("../../../apps/desktop/src/types.ts");
         let declared: std::collections::BTreeSet<String> = types_ts
             .lines()
@@ -1735,8 +1729,8 @@ mod nurture_tuning_tests {
 
     #[test]
     fn a_field_needing_a_restart_is_never_also_promised_as_live() {
-        // The two lists are shown to the operator as opposites; an overlap would put a
-        // "needs restart" badge on a field that does take effect immediately.
+        // The two declarations are semantic opposites; an overlap would mark a field as both
+        // restart-required and effective immediately.
         let types_ts = include_str!("../../../apps/desktop/src/types.ts");
         let restart: Vec<&str> = types_ts
             .lines()

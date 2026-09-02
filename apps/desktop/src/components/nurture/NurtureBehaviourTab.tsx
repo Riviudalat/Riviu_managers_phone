@@ -9,7 +9,7 @@ import {
 import type { NurtureSettings } from "../../types";
 import { InfoDot as Info } from "../InfoDot";
 import { NurtureWindows } from "./NurtureWindows";
-import { Switch, FeatureRow, RestartBadge } from "../NurturePopup";
+import { Switch, FeatureRow } from "../NurturePopup";
 
 /**
  * How the session behaves: the four rates that share one 100% budget, the watch window,
@@ -41,7 +41,6 @@ export function NurtureBehaviourTab({
               of="Giới hạn video"
               what="Phiên dừng sau đúng số video này (nhân với số vòng). Thời lượng phiên vẫn là trần riêng: cái nào tới trước thì dừng."
             />
-            <RestartBadge field="numVideos" />
           </span>
           <input
             type="number"
@@ -58,7 +57,6 @@ export function NurtureBehaviourTab({
               of="Vòng"
               what="Nhân với giới hạn video để ra tổng số video của phiên: 15 video × 2 vòng = 30 video."
             />
-            <RestartBadge field="numRounds" />
           </span>
           <input
             type="number"
@@ -277,7 +275,6 @@ export function NurtureBehaviourTab({
             of="Bundle TikTok"
             what="App id của TikTok. Trên Android app tự tìm package đã cài trên từng máy nên thường không cần sửa ô này; nó chủ yếu dành cho iPhone."
           />
-          <RestartBadge field="bundleId" />
         </span>
         <input value={settings.bundleId} onChange={(e) => patch("bundleId", e.target.value)} />
       </label>

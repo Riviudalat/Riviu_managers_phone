@@ -209,6 +209,13 @@ fn preview_fps_for_device_count(count: usize) -> u32 {
     (PREVIEW_TOTAL_FPS / count.max(1) as u32).clamp(1, PREVIEW_MAX_FPS_PER_DEVICE)
 }
 
+/// Mock mode is an isolated desktop fixture, not an extra platform beside the live fleet.
+/// Probing Android here used to start preview producers and agent health repair on every USB
+/// phone even though the operator launched the app explicitly for a headless mock check.
+fn should_bootstrap_android(mock_requested: bool) -> bool {
+    !mock_requested
+}
+
 /// Keep the current two-phone behavior as the default while allowing a farm
 /// deployment to opt into one producer per connected phone. Invalid values
 /// fail closed to the default instead of creating an accidental USB storm.
@@ -837,7 +844,7 @@ impl AppState {
             settings
         };
 
-        let (android, android_unavailable) =
+        let (android, android_unavailable) = if should_bootstrap_android(mock_requested) {
             match riviu_android_driver::detect_driver(&android_config).await {
                 Ok(driver) => {
                     // JPEG evidence still lands in StreamHub. H.264 view samples
@@ -859,7 +866,10 @@ impl AppState {
                     (Some(driver), None)
                 }
                 Err(reason) => (None, Some(reason)),
-            };
+            }
+        } else {
+            (None, None)
+        };
         let fleet = platform_fleet(
             ios.driver.clone(),
             android
@@ -2771,6 +2781,12 @@ mod tests {
         let relative_error = resolve_desktop_data_dir(true, Some(PathBuf::from("fixture")))
             .expect_err("relative override is rejected");
         assert!(relative_error.to_string().contains("must be absolute"));
+    }
+
+    #[test]
+    fn mock_startup_never_probes_the_real_android_fleet() {
+        assert!(!should_bootstrap_android(true));
+        assert!(should_bootstrap_android(false));
     }
 
     #[tokio::test]

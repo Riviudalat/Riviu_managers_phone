@@ -2,7 +2,7 @@ import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/re
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { NurturePopup } from "./NurturePopup";
-import type { NurtureSessionStatus, NurtureSettings } from "../types";
+import type { DeviceMeta, NurtureSessionStatus, NurtureSettings } from "../types";
 
 /**
  * Render tests for the redesigned panel, and they exist because a screenshot could not
@@ -129,7 +129,11 @@ const blankStatus: NurtureSessionStatus = {
  * `runId` and `videoTarget` are set because the run bar and the per-device bar only render
  * for a row that belongs to a run and has a denominator — a row without them is the
  * idle-sweep case, which deliberately draws no bar. */
-async function openWithRow(running = true, over: Partial<NurtureSessionStatus> = {}) {
+async function openWithRow(
+  running = true,
+  over: Partial<NurtureSessionStatus> = {},
+  showLog = true,
+) {
   const api = await import("../api");
   vi.mocked(api.nurtureSessionStatus).mockResolvedValueOnce([
     {
@@ -157,8 +161,10 @@ async function openWithRow(running = true, over: Partial<NurtureSessionStatus> =
     },
   ]);
   await open();
+  if (!showLog) return;
+  fireEvent.click(screen.getByRole("tab", { name: "Log" }));
   return waitFor(() =>
-    expect(screen.getByRole("button", { name: /iPhone Mock 01/ })).toBeVisible(),
+    expect(screen.getByRole("button", { name: /Máy 1 · iPhone Mock 01/ })).toBeVisible(),
   );
 }
 
@@ -175,8 +181,15 @@ const devices = [
   },
 ] as never[];
 
-function open() {
-  render(<NurturePopup devices={devices} selected={[]} onClose={() => undefined} />);
+function open(metas: Map<string, DeviceMeta> = new Map()) {
+  render(
+    <NurturePopup
+      devices={devices}
+      selected={[]}
+      metas={metas}
+      onClose={() => undefined}
+    />,
+  );
   return waitFor(() => expect(screen.getByRole("tab", { name: "Hành vi" })).toBeVisible());
 }
 
@@ -197,9 +210,46 @@ const slider = (name: string) => screen.getByLabelText(`${name} thanh kéo phầ
 const box = (name: string) => screen.getByLabelText(`${name} phần trăm`);
 
 describe("NurturePopup", () => {
+  it("puts the device log in its own tab beside the three settings tabs", async () => {
+    await openWithRow(true, {}, false);
+
+    const tabs = screen.getAllByRole("tab").map((tab) => tab.textContent);
+    expect(tabs).toEqual(["Hành vi", "AI", "Bình luận", "Log"]);
+    expect(screen.queryByText("feed đã lên")).toBeNull();
+
+    fireEvent.click(screen.getByRole("tab", { name: "Log" }));
+    expect(screen.getByText("feed đã lên")).toBeVisible();
+    expect(screen.queryByText("đang chạy · Lưu để áp ngay")).toBeNull();
+  });
+
+  it("labels a log row with the operator's device number and name, never only the model", async () => {
+    const api = await import("../api");
+    vi.mocked(api.nurtureSessionStatus).mockResolvedValueOnce([
+      { ...blankStatus, udid: "mock-1", lastMessage: "failed — ONE-01", outcome: "failed" },
+    ]);
+    const metas = new Map<string, DeviceMeta>([
+      [
+        "mock-1",
+        {
+          udid: "mock-1",
+          notes: "",
+          tags: [],
+          alias: "ONE-01",
+          number: 7,
+        },
+      ],
+    ]);
+
+    await open(metas);
+    fireEvent.click(screen.getByRole("tab", { name: "Log" }));
+
+    expect(screen.getByRole("button", { name: /Máy 7 · ONE-01/ })).toBeVisible();
+    expect(screen.queryByText("iPhone10,1")).toBeNull();
+  });
+
   it("groups the settings into tabs and shows one group at a time", async () => {
     await open();
-    // Three tabs, "Hành vi" selected first because it is what an operator tunes.
+    // The settings tabs keep "Hành vi" selected first; Log is the fourth operational view.
     //
     // The schedule used to be a fourth tab. It now lives at the bottom of Hành vi, because a
     // window overrides the rates in that pane and the two were a tab apart — so this asserts
@@ -341,26 +391,9 @@ describe("NurturePopup", () => {
     expect(pacing).toBeChecked();
   });
 
-  it("marks the fields a running session cannot pick up", async () => {
-    // The badge is the UI half of `NurtureSettings::absorb_live_changes`: everything else
-    // in this tab applies on the next post, and these three do not.
+  it("does not clutter the form with restart badges", async () => {
     await open();
-    const badges = screen.getAllByText("cần chạy lại");
-    expect(badges).toHaveLength(3);
-    for (const badge of badges) {
-      expect(badge).toHaveAttribute("data-tip", expect.stringContaining("Bắt đầu lại"));
-    }
-
-    fireEvent.focus(badges[0]);
-    const tooltip = screen.getByRole("tooltip");
-    expect(badges[0]).toHaveAttribute("aria-describedby", tooltip.id);
-    fireEvent.keyDown(badges[0], { key: "Escape" });
-    expect(screen.queryByRole("tooltip")).not.toBeInTheDocument();
-
-    fireEvent.click(badges[0]);
-    expect(screen.getByRole("tooltip")).toHaveTextContent("Bắt đầu lại");
-    fireEvent.click(badges[0]);
-    expect(screen.queryByRole("tooltip")).not.toBeInTheDocument();
+    expect(screen.queryByText("cần chạy lại")).toBeNull();
   });
 
   it("tests the API against the frames the WebView already decoded", async () => {
@@ -659,6 +692,7 @@ describe("a rate the operator switched off", () => {
       entry("đã đưa máy về feed"),
     ]);
     await open();
+    fireEvent.click(screen.getByRole("tab", { name: "Log" }));
 
     const row = await screen.findByRole("button", { name: /iPhone Mock 01/ });
     // No counters: it never ran a session, and "0/0v" would read as a run that did nothing.
@@ -701,6 +735,7 @@ describe("a rate the operator switched off", () => {
       },
     ]);
     await open();
+    fireEvent.click(screen.getByRole("tab", { name: "Log" }));
 
     const bar = await screen.findByRole("progressbar", {
       name: "Tiến trình cả lượt chạy",
@@ -767,6 +802,7 @@ describe("a rate the operator switched off", () => {
       },
     ]);
     await open();
+    fireEvent.click(screen.getByRole("tab", { name: "Log" }));
 
     await waitFor(() => expect(screen.getByText("✕ 1 lỗi")).toBeVisible());
     const rows = document.querySelectorAll(".nurture-float-log-row");
@@ -787,6 +823,7 @@ describe("a rate the operator switched off", () => {
       { udid: "mock-1", lines: 1, last: entry("đã đưa máy về feed") },
     ] as never);
     await open();
+    fireEvent.click(screen.getByRole("tab", { name: "Log" }));
 
     await waitFor(() => expect(screen.getByText("tự khôi phục")).toBeVisible());
     expect(screen.queryByRole("progressbar")).toBeNull();
