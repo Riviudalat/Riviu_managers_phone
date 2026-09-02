@@ -115,6 +115,7 @@ fn report_schema_uses_stable_contract_status_values() {
     assert!(value["appSha256"].is_string());
     assert!(value["checkerSha256"].is_string());
     assert_eq!(value["checks"]["authenticode"]["status"], "pass");
+    assert_eq!(value["checks"]["androidPackageTools"]["status"], "pass");
     assert_eq!(value["checks"]["deviceState"]["status"], "not_applicable");
     assert!(value["checks"]["databaseMigration"]["detail"].is_string());
 }

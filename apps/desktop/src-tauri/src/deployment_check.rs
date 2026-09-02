@@ -7,6 +7,7 @@
 use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -85,11 +86,12 @@ pub struct DeploymentChecks {
     pub credential_manager: CheckResult,
     pub environment_overrides: CheckResult,
     pub adb_version: CheckResult,
+    pub android_package_tools: CheckResult,
     pub device_state: CheckResult,
 }
 
 impl DeploymentChecks {
-    fn values(&self) -> [&CheckResult; 10] {
+    fn values(&self) -> [&CheckResult; 11] {
         [
             &self.operating_system,
             &self.architecture,
@@ -100,6 +102,7 @@ impl DeploymentChecks {
             &self.credential_manager,
             &self.environment_overrides,
             &self.adb_version,
+            &self.android_package_tools,
             &self.device_state,
         ]
     }
@@ -190,6 +193,7 @@ impl DeploymentReport {
                 credential_manager: pass(),
                 environment_overrides: CheckResult::new(CheckStatus::NotApplicable, "fixture"),
                 adb_version: pass(),
+                android_package_tools: pass(),
                 device_state: CheckResult::new(CheckStatus::NotApplicable, "fixture"),
             },
             overall: CheckStatus::Pass,
@@ -385,7 +389,10 @@ pub fn run(args: &DeploymentArgs) -> anyhow::Result<DeploymentReport> {
     let checker = std::env::current_exe().context("resolve deployment checker path")?;
     let layout = resolve_install_layout(&checker)?;
     let checker_sha256 = sha256_file(&checker).context("hash deployment checker")?;
-    let app_sha256 = sha256_file(&layout.main_executable).context("hash installed app")?;
+    let (app_sha256, app_hash_error) = match sha256_file(&layout.main_executable) {
+        Ok(digest) => (digest, None),
+        Err(error) => (String::new(), Some(format!("{error:#}"))),
+    };
     let installer_sha256 = args
         .installer
         .as_deref()
@@ -396,6 +403,15 @@ pub fn run(args: &DeploymentArgs) -> anyhow::Result<DeploymentReport> {
     let architecture = check_architecture();
     let mut authenticode =
         check_authenticode(&checker, &layout.main_executable, args.installer.as_deref());
+    if let Some(error) = app_hash_error {
+        authenticode = CheckResult::new(
+            CheckStatus::Fail,
+            format!(
+                "installed app is missing or unreadable at {}: {error:#}",
+                layout.main_executable.display()
+            ),
+        );
+    }
     if let Some(installer) = args.installer.as_deref() {
         if installer_sha256.is_none() {
             authenticode = CheckResult::new(
@@ -413,6 +429,7 @@ pub fn run(args: &DeploymentArgs) -> anyhow::Result<DeploymentReport> {
     let credential_manager = check_credential_manager();
     let environment_overrides = check_environment_overrides(&layout.adb);
     let adb_version = check_adb_version(&layout.adb, adb_verified);
+    let android_package_tools = check_android_package_tools(&layout.sidecars_root);
     let device_state = if args.device_check {
         check_devices(&layout.adb, args.device_serial.as_deref(), adb_verified)
     } else {
@@ -447,6 +464,7 @@ pub fn run(args: &DeploymentArgs) -> anyhow::Result<DeploymentReport> {
             credential_manager,
             environment_overrides,
             adb_version,
+            android_package_tools,
             device_state,
         },
         overall: CheckStatus::Pass,
@@ -572,6 +590,33 @@ fn check_architecture() -> CheckResult {
     CheckResult::new(status, format!("process architecture: {architecture}"))
 }
 
+fn classify_authenticode_statuses(
+    statuses: &BTreeMap<String, String>,
+) -> (CheckStatus, &'static str) {
+    if statuses.is_empty() {
+        return (CheckStatus::Fail, "no Authenticode targets were checked");
+    }
+    if statuses.values().all(|value| value == "Valid") {
+        return (
+            CheckStatus::Pass,
+            "installer and installed executables have valid Authenticode signatures",
+        );
+    }
+    if statuses
+        .values()
+        .all(|value| matches!(value.as_str(), "Valid" | "NotSigned"))
+    {
+        return (
+            CheckStatus::Warning,
+            "one or more files are unsigned; internal profile requires the documented SmartScreen confirmation",
+        );
+    }
+    (
+        CheckStatus::Fail,
+        "one or more Authenticode targets are missing, damaged, untrusted, or unverifiable",
+    )
+}
+
 fn check_authenticode(checker: &Path, app: &Path, installer: Option<&Path>) -> CheckResult {
     if !cfg!(windows) {
         return CheckResult::new(CheckStatus::NotApplicable, "Authenticode is Windows-only");
@@ -607,26 +652,8 @@ fn check_authenticode(checker: &Path, app: &Path, installer: Option<&Path>) -> C
             .unwrap_or_else(|| "Unknown".to_string());
         statuses.insert(target.display().to_string(), value);
     }
-    let any_missing = statuses.values().any(|value| value == "Missing");
-    let all_valid = !statuses.is_empty() && statuses.values().all(|value| value == "Valid");
-    let status = if any_missing {
-        CheckStatus::Fail
-    } else if all_valid {
-        CheckStatus::Pass
-    } else {
-        CheckStatus::Warning
-    };
-    CheckResult::new(
-        status,
-        if any_missing {
-            "one or more Authenticode targets are missing"
-        } else if all_valid {
-            "installer and installed executables have valid Authenticode signatures"
-        } else {
-            "one or more files are unsigned; internal profile requires the documented SmartScreen confirmation"
-        },
-    )
-    .with_data(json!(statuses))
+    let (status, detail) = classify_authenticode_statuses(&statuses);
+    CheckResult::new(status, detail).with_data(json!(statuses))
 }
 
 fn check_webview2() -> CheckResult {
@@ -1093,7 +1120,14 @@ impl Drop for CredentialCleanup {
 
 fn check_environment_overrides(packaged_adb: &Path) -> CheckResult {
     let mut overrides = BTreeMap::new();
-    for key in ["RIVIU_ADB_PATH", "ANDROID_SDK_ROOT", "ANDROID_HOME"] {
+    for key in [
+        "RIVIU_ADB_PATH",
+        "RIVIU_JAVA_PATH",
+        "RIVIU_BUNDLETOOL_PATH",
+        "ANDROID_SDK_ROOT",
+        "ANDROID_HOME",
+        "JAVA_HOME",
+    ] {
         if let Ok(value) = std::env::var(key) {
             if !value.trim().is_empty() {
                 overrides.insert(key.to_string(), value);
@@ -1155,6 +1189,219 @@ fn check_adb_version(adb: &Path, resource_verified: bool) -> CheckResult {
             format!("could not start bundled adb {}: {error}", adb.display()),
         ),
     }
+}
+
+pub(crate) fn check_android_package_tools(sidecars_root: &Path) -> CheckResult {
+    const EXPECTED_BUNDLETOOL: &str = "1.18.3";
+    const EXPECTED_JRE: &str = "21.0.12.1+1";
+    const EXPECTED_BUNDLETOOL_BYTES: u64 = 32_520_401;
+    const EXPECTED_JRE_SOURCE_BYTES: u64 = 48_999_141;
+    const EXPECTED_BUNDLETOOL_SHA256: &str =
+        "a099cfa1543f55593bc2ed16a70a7c67fe54b1747bb7301f37fdfd6d91028e29";
+    const EXPECTED_JRE_SOURCE_SHA256: &str =
+        "d35f31e712f0fcf6ac5a093edc90204fbff22f720ba3950bd09d331d5e621636";
+    const EXPECTED_BUNDLETOOL_SOURCE: &str =
+        "https://github.com/google/bundletool/releases/download/1.18.3/bundletool-all-1.18.3.jar";
+    const EXPECTED_JRE_SOURCE: &str = "https://github.com/adoptium/temurin21-binaries/releases/download/jdk-21.0.12.1%2B1/OpenJDK21U-jre_x64_windows_hotspot_21.0.12.1_1.zip";
+    const EXPECTED_TREE_SHA256: &str =
+        "f24951701beb69fe74ef073196c249d6df153749722f82260d79fc6687a7d57f";
+
+    let root = sidecars_root.join("android-package-tools");
+    let manifest_path = root.join("android-package-tools-manifest.json");
+    let result = (|| -> anyhow::Result<Value> {
+        let bytes = fs::read(&manifest_path)
+            .with_context(|| format!("read {}", manifest_path.display()))?;
+        let manifest: Value = serde_json::from_slice(&bytes)
+            .with_context(|| format!("parse {}", manifest_path.display()))?;
+        if manifest.get("schemaVersion").and_then(Value::as_u64) != Some(1) {
+            return Err(anyhow!("unsupported Android package-tools manifest schema"));
+        }
+        let bundletool = manifest
+            .get("bundletool")
+            .and_then(Value::as_object)
+            .context("manifest lacks Bundletool provenance")?;
+        let jre = manifest
+            .get("jre")
+            .and_then(Value::as_object)
+            .context("manifest lacks JRE provenance")?;
+        if bundletool.get("path").and_then(Value::as_str) != Some("bundletool.jar")
+            || bundletool.get("version").and_then(Value::as_str) != Some(EXPECTED_BUNDLETOOL)
+            || bundletool.get("sourceBytes").and_then(Value::as_u64)
+                != Some(EXPECTED_BUNDLETOOL_BYTES)
+            || bundletool.get("source").and_then(Value::as_str) != Some(EXPECTED_BUNDLETOOL_SOURCE)
+            || bundletool.get("sourceSha256").and_then(Value::as_str)
+                != Some(EXPECTED_BUNDLETOOL_SHA256)
+            || jre.get("javaPath").and_then(Value::as_str) != Some("jre/bin/java.exe")
+            || jre.get("version").and_then(Value::as_str) != Some(EXPECTED_JRE)
+            || jre.get("sourceBytes").and_then(Value::as_u64) != Some(EXPECTED_JRE_SOURCE_BYTES)
+            || jre.get("source").and_then(Value::as_str) != Some(EXPECTED_JRE_SOURCE)
+            || jre.get("sourceSha256").and_then(Value::as_str) != Some(EXPECTED_JRE_SOURCE_SHA256)
+        {
+            return Err(anyhow!("Android package-tools provenance pin mismatch"));
+        }
+        let entries = manifest
+            .get("files")
+            .and_then(Value::as_array)
+            .filter(|entries| !entries.is_empty())
+            .context("manifest has no package-tool files")?;
+        let mut declared = std::collections::BTreeSet::new();
+        let mut manifest_files = Vec::new();
+        for entry in entries {
+            let relative = entry
+                .get("path")
+                .and_then(Value::as_str)
+                .context("package-tool file has no path")?;
+            let relative_path = Path::new(relative);
+            if relative_path.is_absolute()
+                || relative_path.components().any(|component| {
+                    matches!(
+                        component,
+                        std::path::Component::ParentDir
+                            | std::path::Component::RootDir
+                            | std::path::Component::Prefix(_)
+                    )
+                })
+                || !declared.insert(relative.replace('\\', "/").to_ascii_lowercase())
+            {
+                return Err(anyhow!(
+                    "unsafe or duplicate package-tool path: {relative:?}"
+                ));
+            }
+            let path = root.join(relative_path);
+            let expected_size = entry
+                .get("bytes")
+                .and_then(Value::as_u64)
+                .context("package-tool file has no byte count")?;
+            let expected_sha = entry
+                .get("sha256")
+                .and_then(Value::as_str)
+                .context("package-tool file has no SHA-256")?;
+            if fs::metadata(&path)?.len() != expected_size || sha256_file(&path)? != expected_sha {
+                return Err(anyhow!(
+                    "package-tool bytes differ from manifest: {}",
+                    path.display()
+                ));
+            }
+            manifest_files.push((
+                relative.replace('\\', "/"),
+                expected_size,
+                expected_sha.to_string(),
+            ));
+        }
+        let mut on_disk = std::collections::BTreeSet::new();
+        collect_regular_relative_files(&root, &root, &mut on_disk)?;
+        on_disk.remove("android-package-tools-manifest.json");
+        if on_disk != declared {
+            return Err(anyhow!(
+                "package-tools manifest does not cover the complete tree"
+            ));
+        }
+
+        manifest_files.sort_by(|left, right| left.0.cmp(&right.0));
+        let payload_bytes: u64 = manifest_files.iter().map(|entry| entry.1).sum();
+        let mut tree = Sha256::new();
+        for (relative, size, digest) in &manifest_files {
+            tree.update(relative.as_bytes());
+            tree.update(b"\0");
+            tree.update(size.to_string().as_bytes());
+            tree.update(b"\0");
+            tree.update(digest.as_bytes());
+            tree.update(b"\n");
+        }
+        let tree_digest = format!("{:x}", tree.finalize());
+        if manifest.get("fileCount").and_then(Value::as_u64) != Some(manifest_files.len() as u64)
+            || manifest.get("payloadBytes").and_then(Value::as_u64) != Some(payload_bytes)
+            || manifest.get("treeSha256").and_then(Value::as_str) != Some(tree_digest.as_str())
+            || tree_digest != EXPECTED_TREE_SHA256
+        {
+            return Err(anyhow!(
+                "Android package-tools tree attestation mismatch: {tree_digest}"
+            ));
+        }
+
+        let java = root.join("jre").join("bin").join("java.exe");
+        let jar = root.join("bundletool.jar");
+        if fs::metadata(&jar)?.len() != EXPECTED_BUNDLETOOL_BYTES
+            || sha256_file(&jar)? != EXPECTED_BUNDLETOOL_SHA256
+        {
+            return Err(anyhow!(
+                "packaged Bundletool does not match the pinned release bytes"
+            ));
+        }
+        let java_output = Command::new(&java).arg("-version").output()?;
+        let java_version = format!(
+            "{}{}",
+            String::from_utf8_lossy(&java_output.stdout),
+            String::from_utf8_lossy(&java_output.stderr)
+        );
+        if !java_output.status.success() || !java_version.contains("21.0.12.1+1") {
+            return Err(anyhow!("packaged java -version mismatch: {java_version:?}"));
+        }
+        let bundle_output = Command::new(&java)
+            .args(["-jar"])
+            .arg(&jar)
+            .arg("version")
+            .output()?;
+        let bundle_version = String::from_utf8_lossy(&bundle_output.stdout)
+            .trim()
+            .to_string();
+        if !bundle_output.status.success() || bundle_version != EXPECTED_BUNDLETOOL {
+            return Err(anyhow!(
+                "packaged Bundletool version mismatch: {bundle_version:?}"
+            ));
+        }
+        Ok(json!({
+            "manifest": manifest_path,
+            "manifestSha256": sha256_file(&manifest_path)?,
+            "fileCount": declared.len(),
+            "payloadBytes": payload_bytes,
+            "treeSha256": tree_digest,
+            "java": java,
+            "bundletool": jar,
+            "javaVersion": EXPECTED_JRE,
+            "bundletoolVersion": EXPECTED_BUNDLETOOL,
+        }))
+    })();
+
+    match result {
+        Ok(data) => CheckResult::new(
+            CheckStatus::Pass,
+            "bundled Temurin JRE and Bundletool match their complete pinned manifest",
+        )
+        .with_data(data),
+        Err(error) => CheckResult::new(
+            CheckStatus::Fail,
+            format!("Android package tools failed verification: {error:#}"),
+        ),
+    }
+}
+
+fn collect_regular_relative_files(
+    root: &Path,
+    current: &Path,
+    files: &mut std::collections::BTreeSet<String>,
+) -> anyhow::Result<()> {
+    for entry in fs::read_dir(current)? {
+        let path = entry?.path();
+        let metadata = fs::symlink_metadata(&path)?;
+        if metadata.file_type().is_symlink() {
+            return Err(anyhow!(
+                "package-tools tree contains a symlink: {}",
+                path.display()
+            ));
+        }
+        if metadata.is_dir() {
+            collect_regular_relative_files(root, &path, files)?;
+        } else if metadata.is_file() {
+            files.insert(
+                path.strip_prefix(root)?
+                    .to_string_lossy()
+                    .replace('\\', "/")
+                    .to_ascii_lowercase(),
+            );
+        }
+    }
+    Ok(())
 }
 
 fn check_devices(adb: &Path, serial: Option<&str>, resource_verified: bool) -> CheckResult {
@@ -1223,8 +1470,20 @@ fn check_devices(adb: &Path, serial: Option<&str>, resource_verified: bool) -> C
 }
 
 fn sha256_file(path: &Path) -> anyhow::Result<String> {
-    let bytes = std::fs::read(path).with_context(|| format!("read {}", path.display()))?;
-    Ok(format!("{:x}", Sha256::digest(bytes)))
+    let file = std::fs::File::open(path).with_context(|| format!("open {}", path.display()))?;
+    let mut reader = std::io::BufReader::new(file);
+    let mut digest = Sha256::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let read = reader
+            .read(&mut buffer)
+            .with_context(|| format!("read {}", path.display()))?;
+        if read == 0 {
+            break;
+        }
+        digest.update(&buffer[..read]);
+    }
+    Ok(format!("{:x}", digest.finalize()))
 }
 
 #[cfg(test)]
@@ -1328,6 +1587,35 @@ mod tests {
     }
 
     #[test]
+    fn internal_authenticode_warns_only_for_unsigned_files() {
+        let statuses = BTreeMap::from([
+            ("app.exe".to_string(), "Valid".to_string()),
+            ("installer.msi".to_string(), "NotSigned".to_string()),
+        ]);
+        assert_eq!(
+            classify_authenticode_statuses(&statuses).0,
+            CheckStatus::Warning
+        );
+        for invalid in [
+            "HashMismatch",
+            "NotTrusted",
+            "UnknownError",
+            "Unknown",
+            "Missing",
+        ] {
+            let statuses = BTreeMap::from([
+                ("app.exe".to_string(), "Valid".to_string()),
+                ("installer.msi".to_string(), invalid.to_string()),
+            ]);
+            assert_eq!(
+                classify_authenticode_statuses(&statuses).0,
+                CheckStatus::Fail,
+                "{invalid} cannot be downgraded to an unsigned warning"
+            );
+        }
+    }
+
+    #[test]
     fn runtime_manifest_detects_a_changed_installed_payload() {
         let root = std::env::temp_dir().join(format!(
             "riviu-runtime-resource-test-{}",
@@ -1390,6 +1678,78 @@ mod tests {
         let error = verify_ytdlp_manifest(&root, false).expect_err("changed yt-dlp must fail");
         assert!(error.to_string().contains("SHA-256"));
         std::fs::remove_dir_all(root).expect("remove yt-dlp fixture");
+    }
+
+    #[test]
+    fn package_tools_manifest_detects_an_extra_installed_payload() {
+        let source = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join("..")
+            .join("target")
+            .join("android-package-tools");
+        if !source.is_dir() {
+            return;
+        }
+        let sidecars = std::env::temp_dir().join(format!(
+            "riviu-package-tools-resource-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        copy_directory(&source, &sidecars.join("android-package-tools"))
+            .expect("copy package-tools fixture");
+        assert_eq!(
+            check_android_package_tools(&sidecars).status,
+            CheckStatus::Pass
+        );
+        std::fs::write(
+            sidecars
+                .join("android-package-tools")
+                .join("unmanifested.dll"),
+            b"extra",
+        )
+        .expect("write unmanifested package tool");
+        assert_eq!(
+            check_android_package_tools(&sidecars).status,
+            CheckStatus::Fail
+        );
+        std::fs::remove_file(
+            sidecars
+                .join("android-package-tools")
+                .join("unmanifested.dll"),
+        )
+        .expect("remove unmanifested package tool");
+        let manifest_path = sidecars
+            .join("android-package-tools")
+            .join("android-package-tools-manifest.json");
+        let mut manifest: Value = serde_json::from_slice(
+            &std::fs::read(&manifest_path).expect("read package-tools manifest"),
+        )
+        .expect("parse package-tools manifest");
+        manifest["jre"]["sourceBytes"] = json!(1);
+        std::fs::write(
+            &manifest_path,
+            serde_json::to_vec_pretty(&manifest).expect("encode changed package-tools manifest"),
+        )
+        .expect("write changed package-tools manifest");
+        assert_eq!(
+            check_android_package_tools(&sidecars).status,
+            CheckStatus::Fail
+        );
+        std::fs::remove_dir_all(sidecars).expect("remove package-tools fixture");
+    }
+
+    fn copy_directory(source: &Path, destination: &Path) -> anyhow::Result<()> {
+        std::fs::create_dir_all(destination)?;
+        for entry in std::fs::read_dir(source)? {
+            let path = entry?.path();
+            let target = destination.join(path.file_name().context("fixture file name")?);
+            if path.is_dir() {
+                copy_directory(&path, &target)?;
+            } else {
+                std::fs::copy(&path, &target)?;
+            }
+        }
+        Ok(())
     }
 
     #[test]

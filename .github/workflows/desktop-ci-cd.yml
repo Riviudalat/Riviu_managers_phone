@@ -97,10 +97,10 @@ jobs:
       - name: Check Python tooling
         shell: pwsh
         run: |
-          python -m py_compile scripts/build_desktop_sidecar.py scripts/build_per_user_wix_resources.py scripts/collect_desktop_ci_artifacts.py scripts/test_build_per_user_wix_resources.py scripts/test_collect_desktop_ci_artifacts.py scripts/stage_deployment_checker.py scripts/test_stage_deployment_checker.py sidecars/pymobiledevice3/pyinstaller_runtime_hook.py sidecars/signer/riviu_signer.py sidecars/wda/build_and_install.py sidecars/wda/test_build_and_install.py tools/interaction-gate0/probe.py tools/interaction-gate0/test_probe.py scripts/build_agents_index.py
+          python -m py_compile scripts/build_desktop_sidecar.py scripts/build_per_user_wix_resources.py scripts/collect_desktop_ci_artifacts.py scripts/test_build_per_user_wix_resources.py scripts/test_collect_desktop_ci_artifacts.py scripts/stage_deployment_checker.py scripts/test_stage_deployment_checker.py scripts/stage_android_package_tools.py scripts/test_stage_android_package_tools.py scripts/build_xiaowei_parity_matrix.py scripts/check_xiaowei_provenance.py scripts/test_xiaowei_provenance.py sidecars/pymobiledevice3/pyinstaller_runtime_hook.py sidecars/signer/riviu_signer.py sidecars/wda/build_and_install.py sidecars/wda/test_build_and_install.py tools/interaction-gate0/probe.py tools/interaction-gate0/test_probe.py scripts/build_agents_index.py
           node scripts/run_python.mjs scripts/build_desktop_sidecar.py --help
           python scripts/collect_desktop_ci_artifacts.py verify-version
-          python -m unittest -v scripts.test_build_per_user_wix_resources scripts.test_collect_desktop_ci_artifacts scripts.test_stage_deployment_checker sidecars.pymobiledevice3.test_app_control sidecars.pymobiledevice3.test_rtmmo_lifecycle sidecars.pymobiledevice3.test_media_stage sidecars.signer.test_riviu_signer sidecars.wda.test_build_and_install
+          python -m unittest -v scripts.test_build_per_user_wix_resources scripts.test_collect_desktop_ci_artifacts scripts.test_stage_deployment_checker scripts.test_stage_android_package_tools scripts.test_xiaowei_provenance sidecars.pymobiledevice3.test_app_control sidecars.pymobiledevice3.test_rtmmo_lifecycle sidecars.pymobiledevice3.test_media_stage sidecars.signer.test_riviu_signer sidecars.wda.test_build_and_install
           # The Gate 0 probe: 37 tests over the iOS interaction transport contract -- auth
           # 401/401/200 on every control route and on MJPEG, the exact `POST /url` bodies for
           # direct-video, short-link and photo, and the action-completion boundary that stops a
@@ -152,6 +152,10 @@ jobs:
       - name: Build frontend
         working-directory: apps/desktop
         run: npm run build
+
+      - name: Enforce clean-room runtime provenance
+        shell: pwsh
+        run: python scripts/check_xiaowei_provenance.py --runtime crates --runtime apps/desktop/src-tauri/src --runtime sidecars --frontend apps/desktop/dist
 
       # The e2e suite drives the real UI against a mocked Tauri bridge. It was
       # absent here, so it rotted unnoticed until every test but one failed.
@@ -305,6 +309,16 @@ jobs:
             --binary "$out" \
             --output sidecars/yt-dlp/yt-dlp-manifest.json
 
+      - name: Stage pinned Android package tools
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/stage_android_package_tools.py \
+            --output target/android-package-tools \
+            --cache "${RUNNER_TEMP}/riviu-android-package-tools" \
+            --tauri-config target/tauri-android-package-tools.conf.json
+
       - name: Snapshot production WDA inputs
         shell: bash
         run: |
@@ -399,6 +413,7 @@ jobs:
           python scripts/build_per_user_wix_resources.py `
             --config apps/desktop/src-tauri/tauri.conf.json `
             --config target/tauri-sidecar.conf.json `
+            --config target/tauri-android-package-tools.conf.json `
             --fragment-output target/per-user-wix-resources.wxs `
             --config-output target/tauri-per-user-msi.conf.json `
             --target "${{ matrix.target }}"
@@ -429,12 +444,14 @@ jobs:
               --bundles nsis \
               --config "${{ github.workspace }}/apps/desktop/src-tauri/tauri.full.conf.json" \
               --config "${{ github.workspace }}/target/tauri-sidecar.conf.json" \
+              --config "${{ github.workspace }}/target/tauri-android-package-tools.conf.json" \
               -- --locked
             npm run tauri -- build --ci \
               --target "${{ matrix.target }}" \
               --bundles msi \
               --config "${{ github.workspace }}/apps/desktop/src-tauri/tauri.full.conf.json" \
               --config "${{ github.workspace }}/target/tauri-sidecar.conf.json" \
+              --config "${{ github.workspace }}/target/tauri-android-package-tools.conf.json" \
               --config "${{ github.workspace }}/target/tauri-per-user-msi.conf.json" \
               -- --locked
           else
@@ -450,16 +467,23 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          android_package_tools_args=()
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            android_package_tools_args=(--android-package-tools target/android-package-tools)
+          fi
           python scripts/collect_desktop_ci_artifacts.py collect \
             --target "${{ matrix.target }}" \
             --label "${{ matrix.label }}" \
             --bundle-dir "target/${{ matrix.target }}/release/bundle" \
             --runtime target/desktop-sidecar/riviu-pmd \
             --tauri-config target/tauri-sidecar.conf.json \
+            "${android_package_tools_args[@]}" \
             --production-baseline target/production-wda-inputs.json \
             --source-commit "${GITHUB_SHA}" \
             --deployment-profile "${{ startsWith(github.ref, 'refs/tags/v') && 'production' || 'internal' }}" \
             --output "target/desktop-ci/${{ matrix.label }}"
+          python scripts/check_xiaowei_provenance.py \
+            --installer "target/${{ matrix.target }}/release/bundle"
           git diff --exit-code -- \
             sidecars/wda/RiviuAgent.ipa \
             sidecars/wda/Riviumanagersphone.ipa \

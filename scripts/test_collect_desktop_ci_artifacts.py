@@ -34,6 +34,69 @@ def active_dependency_closure() -> dict[str, str]:
 
 
 class ArtifactContractTests(unittest.TestCase):
+    def test_windows_collection_requires_staged_android_package_tools(self):
+        with self.assertRaisesRegex(
+            artifacts.ArtifactError, "Windows collection requires"
+        ):
+            artifacts.android_package_tools_for_target(
+                "x86_64-pc-windows-msvc", None
+            )
+
+        self.assertIsNone(
+            artifacts.android_package_tools_for_target("aarch64-apple-darwin", None)
+        )
+
+    def test_windows_workflow_stages_tools_into_both_installers_and_collector(self):
+        workflow = (
+            artifacts.REPOSITORY_ROOT / ".github" / "workflows" / "desktop-ci-cd.yml"
+        ).read_text(encoding="utf-8")
+        self.assertIn("Stage pinned Android package tools", workflow)
+        self.assertIn("if: runner.os == 'Windows'", workflow)
+        self.assertGreaterEqual(
+            workflow.count("target/tauri-android-package-tools.conf.json"), 4
+        )
+        self.assertIn(
+            "android_package_tools_args=(--android-package-tools target/android-package-tools)",
+            workflow,
+        )
+
+    def test_expected_database_version_tracks_the_latest_migration(self):
+        source = (
+            artifacts.REPOSITORY_ROOT / "crates" / "core" / "src" / "db" / "migrations.rs"
+        ).read_text(encoding="utf-8")
+        versions = [int(value) for value in artifacts.re.findall(r"version:\s*(\d+),", source)]
+        self.assertEqual(artifacts.EXPECTED_DATABASE_VERSION, max(versions))
+
+    def test_android_package_tools_verify_complete_tree_and_pins(self):
+        source = artifacts.REPOSITORY_ROOT / "target" / "android-package-tools"
+        if not source.is_dir():
+            self.skipTest("local staged package tools are not present")
+        evidence = artifacts.verify_android_package_tools(source)
+        self.assertEqual(evidence["bundletoolVersion"], "1.18.3")
+        self.assertEqual(evidence["jreVersion"], "21.0.12.1+1")
+        self.assertGreater(evidence["fileCount"], 100)
+        self.assertEqual(
+            evidence["treeSha256"], artifacts.ANDROID_PACKAGE_TOOLS_TREE_SHA256
+        )
+
+    def test_android_package_tools_reject_an_extra_unmanifested_file(self):
+        source = artifacts.REPOSITORY_ROOT / "target" / "android-package-tools"
+        if not source.is_dir():
+            self.skipTest("local staged package tools are not present")
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "tools"
+            artifacts.shutil.copytree(source, root)
+            (root / "extra.dll").write_bytes(b"extra")
+            with self.assertRaisesRegex(artifacts.ArtifactError, "manifest is incomplete"):
+                artifacts.verify_android_package_tools(root, execute=False)
+            (root / "extra.dll").unlink()
+            manifest_path = root / artifacts.ANDROID_PACKAGE_TOOLS_MANIFEST_NAME
+            manifest = artifacts.load_json(manifest_path)
+            manifest["treeSha256"] = "0" * 64
+            manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+            with self.assertRaisesRegex(artifacts.ArtifactError, "tree attestation"):
+                artifacts.verify_android_package_tools(root, execute=False)
+
     @staticmethod
     def _materialize_windows_install(command: list[str]) -> Path:
         if command[0] == "msiexec.exe":
@@ -1233,6 +1296,59 @@ class DeclaredResourcesAreVerified(unittest.TestCase):
             ],
         )
 
+    def test_deployment_report_is_bound_to_profile_installer_and_installed_files(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            install_root = root / "installed"
+            install_root.mkdir()
+            installer = root / "Riviu.msi"
+            checker = install_root / "riviu-deployment-check.exe"
+            app = install_root / "riviu-managers-phone.exe"
+            installer.write_bytes(b"installer")
+            checker.write_bytes(b"checker")
+            app.write_bytes(b"app")
+            payload = {
+                "schemaVersion": 1,
+                "profile": "internal",
+                "overall": "pass",
+                "adbOrigin": "Bundled",
+                "installDir": str(install_root),
+                "installerPath": str(installer),
+                "installerSha256": artifacts.sha256_file(installer),
+                "checkerSha256": artifacts.sha256_file(checker),
+                "appSha256": artifacts.sha256_file(app),
+            }
+            artifacts.validate_deployment_report_binding(
+                payload, install_root, installer, checker, app, "internal"
+            )
+
+            corruptions = {
+                "profile": "production",
+                "installDir": str(root / "other-install"),
+                "installerPath": str(root / "other.msi"),
+                "installerSha256": "0" * 64,
+                "checkerSha256": "1" * 64,
+                "appSha256": "2" * 64,
+            }
+            for field, wrong_value in corruptions.items():
+                with self.subTest(field=field):
+                    bad = dict(payload)
+                    bad[field] = wrong_value
+                    with self.assertRaises(artifacts.ArtifactError):
+                        artifacts.validate_deployment_report_binding(
+                            bad, install_root, installer, checker, app, "internal"
+                        )
+
+    def test_installed_tree_provenance_scan_reads_extracted_payloads(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            payload = root / "renamed-helper.bin"
+            payload.write_bytes(b"connect api.xiaowei.xin")
+            with self.assertRaisesRegex(artifacts.ArtifactError, "clean-room"):
+                artifacts.verify_clean_room_installed_tree(root)
+            payload.write_bytes(b"Riviu packaged fixture")
+            artifacts.verify_clean_room_installed_tree(root)
+
     def test_installed_app_smoke_uses_mock_data_and_exits_by_itself(self):
         command = artifacts.installed_app_smoke_command(
             Path("riviu-managers-phone.exe"),
@@ -1279,6 +1395,38 @@ class DeclaredResourcesAreVerified(unittest.TestCase):
                 ):
                     artifacts.run_installed_app_smoke(root, report, data_dir)
 
+    def test_installed_app_smoke_rejects_the_previous_database_schema(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            report = root / "startup.json"
+            data_dir = root / "data"
+            (root / "riviu-managers-phone.exe").write_bytes(b"fixture")
+            report.write_text(
+                json.dumps(
+                    {
+                        "schemaVersion": 1,
+                        "status": "ready",
+                        "mode": "mock",
+                        "tauriReady": True,
+                        "frontendReady": True,
+                        "databaseVersion": 18,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            with (
+                patch.object(
+                    artifacts,
+                    "verify_windows_desktop_executable",
+                    return_value={"name": "riviu-managers-phone.exe"},
+                ),
+                patch.object(artifacts, "run_checked"),
+            ):
+                with self.assertRaisesRegex(
+                    artifacts.ArtifactError, "did not become ready"
+                ):
+                    artifacts.run_installed_app_smoke(root, report, data_dir)
+
     def test_installed_app_smoke_parent_removes_child_scratch_after_exit(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -1297,7 +1445,7 @@ class DeclaredResourcesAreVerified(unittest.TestCase):
                             "mode": "mock",
                             "tauriReady": True,
                             "frontendReady": True,
-                            "databaseVersion": 18,
+                            "databaseVersion": artifacts.EXPECTED_DATABASE_VERSION,
                         }
                     ),
                     encoding="utf-8",

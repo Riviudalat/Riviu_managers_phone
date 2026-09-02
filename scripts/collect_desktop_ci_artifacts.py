@@ -19,7 +19,7 @@ import sys
 import tempfile
 import time
 import tomllib
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Callable, TypeVar
 
 from packaging.markers import default_environment
@@ -55,6 +55,25 @@ LEGACY_WDA_SOURCE = REPOSITORY_ROOT / "sidecars" / "wda" / "WebDriverAgent"
 LEGACY_WDA_ICONSET = REPOSITORY_ROOT / "sidecars" / "wda" / "AppIcon.appiconset"
 ANDROID_TOOLS_ROOT = REPOSITORY_ROOT / "sidecars" / "android"
 ANDROID_TOOLS_MANIFEST_NAME = "android-tools-manifest.json"
+ANDROID_PACKAGE_TOOLS_MANIFEST_NAME = "android-package-tools-manifest.json"
+BUNDLETOOL_VERSION = "1.18.3"
+BUNDLETOOL_BYTES = 32_520_401
+BUNDLETOOL_SHA256 = "a099cfa1543f55593bc2ed16a70a7c67fe54b1747bb7301f37fdfd6d91028e29"
+BUNDLETOOL_SOURCE = (
+    "https://github.com/google/bundletool/releases/download/1.18.3/"
+    "bundletool-all-1.18.3.jar"
+)
+TEMURIN_VERSION = "21.0.12.1+1"
+TEMURIN_SOURCE_BYTES = 48_999_141
+TEMURIN_SOURCE_SHA256 = "d35f31e712f0fcf6ac5a093edc90204fbff22f720ba3950bd09d331d5e621636"
+TEMURIN_SOURCE = (
+    "https://github.com/adoptium/temurin21-binaries/releases/download/"
+    "jdk-21.0.12.1%2B1/OpenJDK21U-jre_x64_windows_hotspot_21.0.12.1_1.zip"
+)
+ANDROID_PACKAGE_TOOLS_TREE_SHA256 = (
+    "f24951701beb69fe74ef073196c249d6df153749722f82260d79fc6687a7d57f"
+)
+EXPECTED_DATABASE_VERSION = 19
 BRANDING_LOGO = REPOSITORY_ROOT / "logo.jpg"
 TAURI_CONFIG = REPOSITORY_ROOT / "apps" / "desktop" / "src-tauri" / "tauri.conf.json"
 # The release build runs with this overlay, so *this* is the version the shipped binary
@@ -864,6 +883,158 @@ def verify_android_tools(root: Path) -> dict[str, Any]:
     return {"root": str(root), "files": verified}
 
 
+def verify_android_package_tools(root: Path, *, execute: bool = True) -> dict[str, Any]:
+    """Verify the complete pinned JRE/Bundletool tree staged for Windows."""
+
+    manifest_path = root / ANDROID_PACKAGE_TOOLS_MANIFEST_NAME
+    manifest = load_json(manifest_path)
+    if manifest.get("schemaVersion") != 1:
+        raise ArtifactError(
+            f"{manifest_path} has unsupported schemaVersion {manifest.get('schemaVersion')!r}"
+        )
+    bundletool = manifest.get("bundletool")
+    jre = manifest.get("jre")
+    if not isinstance(bundletool, dict) or not isinstance(jre, dict):
+        raise ArtifactError(f"{manifest_path} lacks Bundletool or JRE provenance")
+    for key, expected in {
+        "path": "bundletool.jar",
+        "version": BUNDLETOOL_VERSION,
+        "source": BUNDLETOOL_SOURCE,
+        "sourceBytes": BUNDLETOOL_BYTES,
+        "sourceSha256": BUNDLETOOL_SHA256,
+    }.items():
+        if bundletool.get(key) != expected:
+            raise ArtifactError(
+                f"{manifest_path} Bundletool {key} mismatch: expected {expected!r}, "
+                f"got {bundletool.get(key)!r}"
+            )
+    for key, expected in {
+        "javaPath": "jre/bin/java.exe",
+        "version": TEMURIN_VERSION,
+        "source": TEMURIN_SOURCE,
+        "sourceBytes": TEMURIN_SOURCE_BYTES,
+        "sourceSha256": TEMURIN_SOURCE_SHA256,
+    }.items():
+        if jre.get(key) != expected:
+            raise ArtifactError(
+                f"{manifest_path} JRE {key} mismatch: expected {expected!r}, "
+                f"got {jre.get(key)!r}"
+            )
+
+    entries = manifest.get("files")
+    if not isinstance(entries, list) or not entries:
+        raise ArtifactError(f"{manifest_path} lists no files")
+    declared: set[str] = set()
+    normalized_entries: list[dict[str, object]] = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            raise ArtifactError(f"{manifest_path} has a non-object file entry")
+        relative = entry.get("path")
+        if not isinstance(relative, str) or not relative:
+            raise ArtifactError(f"{manifest_path} has a file entry without a path")
+        candidate = PurePosixPath(relative.replace("\\", "/"))
+        canonical = candidate.as_posix().casefold()
+        if (
+            candidate.is_absolute()
+            or ".." in candidate.parts
+            or any(
+                ":" in part or part.endswith((" ", "."))
+                for part in candidate.parts
+            )
+            or canonical in declared
+        ):
+            raise ArtifactError(f"{manifest_path} has an unsafe or duplicate path: {relative!r}")
+        declared.add(canonical)
+        path = root.joinpath(*candidate.parts)
+        if not path.is_file():
+            raise ArtifactError(f"Android package tool is missing: {path}")
+        if path.stat().st_size != entry.get("bytes"):
+            raise ArtifactError(f"Android package tool size differs from manifest: {path}")
+        if sha256_file(path) != entry.get("sha256"):
+            raise ArtifactError(f"Android package tool SHA-256 differs from manifest: {path}")
+        normalized_entries.append(
+            {
+                "path": candidate.as_posix(),
+                "bytes": entry.get("bytes"),
+                "sha256": entry.get("sha256"),
+            }
+        )
+
+    on_disk = {
+        path.relative_to(root).as_posix().casefold()
+        for path in root.rglob("*")
+        if path.is_file()
+    } - {ANDROID_PACKAGE_TOOLS_MANIFEST_NAME}
+    if on_disk != declared:
+        raise ArtifactError(
+            "Android package-tools manifest is incomplete: "
+            f"missing={sorted(on_disk - declared)!r}, stale={sorted(declared - on_disk)!r}"
+        )
+
+    tree = hashlib.sha256()
+    for entry in sorted(normalized_entries, key=lambda item: str(item["path"])):
+        tree.update(str(entry["path"]).encode("utf-8"))
+        tree.update(b"\0")
+        tree.update(str(entry["bytes"]).encode("ascii"))
+        tree.update(b"\0")
+        tree.update(str(entry["sha256"]).encode("ascii"))
+        tree.update(b"\n")
+    tree_digest = tree.hexdigest()
+    payload_bytes = sum(int(entry["bytes"]) for entry in normalized_entries)
+    if (
+        manifest.get("fileCount") != len(normalized_entries)
+        or manifest.get("payloadBytes") != payload_bytes
+        or manifest.get("treeSha256") != tree_digest
+        or tree_digest != ANDROID_PACKAGE_TOOLS_TREE_SHA256
+    ):
+        raise ArtifactError(
+            f"Android package-tools tree attestation mismatch: {tree_digest}"
+        )
+
+    java = root.joinpath(*PurePosixPath(jre["javaPath"]).parts)
+    jar = root.joinpath(*PurePosixPath(bundletool["path"]).parts)
+    if jar.stat().st_size != BUNDLETOOL_BYTES or sha256_file(jar) != BUNDLETOOL_SHA256:
+        raise ArtifactError("packaged Bundletool does not match the pinned release bytes")
+    if execute:
+        java_result = run_checked([str(java), "-version"], timeout=120)
+        rendered_java = (java_result.stdout + java_result.stderr).strip()
+        if "21.0.12.1+1" not in rendered_java:
+            raise ArtifactError(f"packaged Java version mismatch: {rendered_java!r}")
+        rendered_bundletool = run_checked(
+            [str(java), "-jar", str(jar), "version"], timeout=120
+        ).stdout.strip()
+        if rendered_bundletool != BUNDLETOOL_VERSION:
+            raise ArtifactError(
+                f"packaged Bundletool version mismatch: {rendered_bundletool!r}"
+            )
+    return {
+        "manifest": str(manifest_path),
+        "manifestSha256": sha256_file(manifest_path),
+        "fileCount": len(declared),
+        "payloadBytes": payload_bytes,
+        "treeSha256": tree_digest,
+        "bundletoolVersion": BUNDLETOOL_VERSION,
+        "jreVersion": TEMURIN_VERSION,
+    }
+
+
+def android_package_tools_for_target(
+    target: str, requested: Path | None
+) -> Path | None:
+    if TARGETS[target]["platform"] == "windows":
+        if requested is None:
+            raise ArtifactError(
+                "Windows collection requires --android-package-tools from the pinned staging step"
+            )
+        root = requested.resolve()
+        if not root.is_dir():
+            raise ArtifactError(f"staged Android package tools are missing: {root}")
+        return root
+    if requested is not None:
+        raise ArtifactError("Android package tools are a Windows-only packaged resource")
+    return None
+
+
 # Every `bundle.resources` target a check in `verify_packaged_resources` actually looks at.
 #
 # **Hand-written on purpose, and hoisted here so a test can read it.** The value of the
@@ -926,7 +1097,10 @@ def assert_every_sidecar_resource_is_verified(checked_targets: set[str]) -> None
 
 
 def verify_packaged_resources(
-    sidecars_root: Path, runtime_dir: Path, runtime_manifest: dict[str, Any]
+    sidecars_root: Path,
+    runtime_dir: Path,
+    runtime_manifest: dict[str, Any],
+    android_package_tools_root: Path | None = None,
 ) -> dict[str, Any]:
     packaged_pmd_root = sidecars_root / "pymobiledevice3"
     packaged_runtime = packaged_pmd_root / "runtime"
@@ -1029,6 +1203,16 @@ def verify_packaged_resources(
     packaged_android_root = sidecars_root / "android"
     assert_same_tree(ANDROID_TOOLS_ROOT, packaged_android_root, "bundled Android tools")
     android_tools = verify_android_tools(packaged_android_root)
+
+    android_package_tools = None
+    if android_package_tools_root is not None:
+        packaged_package_tools = sidecars_root / "android-package-tools"
+        assert_same_tree(
+            android_package_tools_root,
+            packaged_package_tools,
+            "pinned Android package tools",
+        )
+        android_package_tools = verify_android_package_tools(packaged_package_tools)
 
     assert_same_tree(runtime_dir, packaged_runtime, "frozen runtime")
 
@@ -1150,6 +1334,7 @@ def verify_packaged_resources(
     return {
         "resourceTree": "PASS",
         "androidTools": android_tools["files"],
+        "androidPackageTools": android_package_tools,
         "ytDlpVersion": ytdlp_version,
         "ytDlpSha256": packaged_ytdlp_manifest["sha256"],
         "ping": "PASS",
@@ -1320,7 +1505,7 @@ def run_installed_app_smoke(
             and payload.get("mode") == "mock"
             and payload.get("tauriReady") is True
             and payload.get("frontendReady") is True
-            and payload.get("databaseVersion") == 18
+            and payload.get("databaseVersion") == EXPECTED_DATABASE_VERSION
         ):
             raise ArtifactError(
                 f"installed app mock startup did not become ready: {payload!r}"
@@ -1381,6 +1566,56 @@ def wait_for_nsis_uninstall(
         time.sleep(min(poll_seconds, remaining))
 
 
+def validate_deployment_report_binding(
+    payload: dict[str, Any],
+    install_root: Path,
+    installer: Path,
+    checker: Path,
+    app: Path,
+    profile: str,
+) -> None:
+    def canonical(value: object, field: str) -> str:
+        if not isinstance(value, str) or not value:
+            raise ArtifactError(f"deployment report lacks {field}")
+        return os.path.normcase(str(Path(value).resolve()))
+
+    expected_paths = {
+        "installDir": install_root.resolve(),
+        "installerPath": installer.resolve(),
+    }
+    for field, expected in expected_paths.items():
+        if canonical(payload.get(field), field) != os.path.normcase(str(expected)):
+            raise ArtifactError(
+                f"deployment report {field} does not match this install invocation"
+            )
+    if payload.get("profile") != profile:
+        raise ArtifactError("deployment report profile does not match the requested profile")
+    expected_hashes = {
+        "installerSha256": sha256_file(installer),
+        "checkerSha256": sha256_file(checker),
+        "appSha256": sha256_file(app),
+    }
+    for field, expected in expected_hashes.items():
+        if payload.get(field) != expected:
+            raise ArtifactError(
+                f"deployment report {field} does not match the installed artifact"
+            )
+
+
+def verify_clean_room_installed_tree(install_root: Path) -> None:
+    try:
+        from scripts import check_xiaowei_provenance as provenance
+    except ModuleNotFoundError:
+        import check_xiaowei_provenance as provenance
+
+    findings = provenance.inspect([("installer", install_root)])
+    if findings:
+        raise ArtifactError(
+            "installed tree violates the clean-room provenance gate: "
+            + json.dumps(findings, ensure_ascii=False)
+        )
+
+
 def run_installed_deployment_check(
     install_root: Path, installer: Path, report: Path, profile: str
 ) -> dict[str, Any]:
@@ -1397,6 +1632,19 @@ def run_installed_deployment_check(
         )
     if payload.get("adbOrigin") != "Bundled":
         raise ArtifactError("installed deployment checker did not execute the bundled adb")
+    desktop = verify_windows_desktop_executable(
+        install_root, "x86_64-pc-windows-msvc"
+    )
+    apps = sorted(
+        path
+        for path in install_root.rglob(desktop["name"])
+        if path.is_file()
+    )
+    if len(apps) != 1:
+        raise ArtifactError("installed deployment report cannot be bound to one desktop app")
+    validate_deployment_report_binding(
+        payload, install_root, installer, checker, apps[0], profile
+    )
     return payload
 
 
@@ -1406,6 +1654,7 @@ def verify_windows_package(
     runtime_dir: Path,
     runtime: dict[str, Any],
     deployment_profile: str = "internal",
+    android_package_tools_root: Path | None = None,
 ) -> dict[str, Any]:
     msi_installers = [path for path in installers if path.suffix.lower() == ".msi"]
     nsis_installers = [path for path in installers if path.suffix.lower() == ".exe"]
@@ -1443,11 +1692,12 @@ def verify_windows_package(
                     "installed MSI must contain exactly one sidecars resource root"
                 )
             msi_evidence = verify_packaged_resources(
-                sidecars_roots[0], runtime_dir, runtime
+                sidecars_roots[0], runtime_dir, runtime, android_package_tools_root
             )
             desktop = verify_windows_desktop_executable(
                 install_root, "x86_64-pc-windows-msvc"
             )
+            verify_clean_room_installed_tree(install_root)
             report = run_installed_deployment_check(
                 install_root,
                 msi_installers[0],
@@ -1501,11 +1751,12 @@ def verify_windows_package(
                     "silently installed NSIS must contain exactly one sidecars resource root"
                 )
             nsis_evidence = verify_packaged_resources(
-                sidecars_roots[0], runtime_dir, runtime
+                sidecars_roots[0], runtime_dir, runtime, android_package_tools_root
             )
             desktop = verify_windows_desktop_executable(
                 install_root, "x86_64-pc-windows-msvc"
             )
+            verify_clean_room_installed_tree(install_root)
             report = run_installed_deployment_check(
                 install_root,
                 nsis_installers[0],
@@ -1825,10 +2076,16 @@ def verify_packaged_bundle(
     runtime_dir: Path,
     runtime: dict[str, Any],
     deployment_profile: str,
+    android_package_tools_root: Path | None = None,
 ) -> dict[str, Any]:
     if target == "x86_64-pc-windows-msvc":
         return verify_windows_package(
-            installers, bundle_dir, runtime_dir, runtime, deployment_profile
+            installers,
+            bundle_dir,
+            runtime_dir,
+            runtime,
+            deployment_profile,
+            android_package_tools_root,
         )
     return verify_macos_package(bundle_dir, target, runtime_dir, runtime)
 
@@ -1904,6 +2161,9 @@ def collect_command(args: argparse.Namespace) -> dict[str, Any]:
     runtime = verify_runtime(runtime_dir, target)
     verify_overlay(overlay_path, requested_runtime_dir, target)
     installers = find_installers(bundle_dir, target)
+    android_package_tools_root = android_package_tools_for_target(
+        target, args.android_package_tools
+    )
     packaged = verify_packaged_bundle(
         installers,
         bundle_dir,
@@ -1911,6 +2171,7 @@ def collect_command(args: argparse.Namespace) -> dict[str, Any]:
         runtime_dir,
         runtime,
         args.deployment_profile,
+        android_package_tools_root,
     )
 
     if output_dir.exists():
@@ -2426,6 +2687,7 @@ def parse_args() -> argparse.Namespace:
     collect.add_argument("--bundle-dir", type=Path, required=True)
     collect.add_argument("--runtime", type=Path, required=True)
     collect.add_argument("--tauri-config", type=Path, required=True)
+    collect.add_argument("--android-package-tools", type=Path)
     collect.add_argument("--production-baseline", type=Path, required=True)
     collect.add_argument("--output", type=Path, required=True)
     collect.add_argument("--source-commit", required=True)

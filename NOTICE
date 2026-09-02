@@ -291,3 +291,32 @@ Riviu Manager installer" — which a bundled dependency is, as much as a `.apk`
 is. Added for the same reason as 2d: a permissive licence still asks for the
 notice, and a notice nobody wrote is not made true by the licence being
 permissive.
+
+
+9. Android package inspection and split selection
+-------------------------------------------------
+
+    apk-info 1.0.12       https://github.com/delvinru/apk-info
+
+The desktop uses this pure-Rust Apache-2.0 library to inspect APK package,
+version and signing metadata offline before a file enters the application
+library. The exact version is pinned in `Cargo.lock`.
+
+Windows installers also carry two build-time-downloaded, byte-pinned tools:
+
+    bundletool-all-1.18.3.jar
+      32,520,401 bytes
+      sha256 a099cfa1543f55593bc2ed16a70a7c67fe54b1747bb7301f37fdfd6d91028e29
+      https://github.com/google/bundletool (Apache-2.0)
+
+    Eclipse Temurin JRE 21.0.12.1+1, Windows x64
+      source ZIP 48,999,141 bytes
+      sha256 d35f31e712f0fcf6ac5a093edc90204fbff22f720ba3950bd09d331d5e621636
+      https://github.com/adoptium/temurin21-binaries (GPL-2.0 with Classpath Exception)
+
+CI downloads both release artifacts, verifies size and SHA-256 before any
+extraction, and generates `android-package-tools-manifest.json` over the entire
+installed tree. The canonical 316-file extracted-tree SHA-256 is
+`f24951701beb69fe74ef073196c249d6df153749722f82260d79fc6687a7d57f`.
+Bundletool is used only to select/extract device-compatible APKs
+from an existing `.apks` archive; Riviu's own control plane performs installation.
