@@ -636,14 +636,25 @@ fn check_authenticode(checker: &Path, app: &Path, installer: Option<&Path>) -> C
             "(Get-AuthenticodeSignature -LiteralPath '{}').Status.ToString()",
             escaped
         );
-        let value = Command::new("powershell.exe")
-            .args([
-                "-NoLogo",
-                "-NoProfile",
-                "-NonInteractive",
-                "-Command",
-                &script,
-            ])
+        let mut command = Command::new("powershell.exe");
+        command.args([
+            "-NoLogo",
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            &script,
+        ]);
+        if let Some(system_root) = std::env::var_os("SystemRoot") {
+            command.env(
+                "PSModulePath",
+                PathBuf::from(system_root)
+                    .join("System32")
+                    .join("WindowsPowerShell")
+                    .join("v1.0")
+                    .join("Modules"),
+            );
+        }
+        let value = command
             .output()
             .ok()
             .filter(|output| output.status.success())
@@ -1613,6 +1624,58 @@ mod tests {
                 "{invalid} cannot be downgraded to an unsigned warning"
             );
         }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn authenticode_ignores_an_inherited_non_system_module_path() {
+        const CHILD_MARKER: &str = "RIVIU_AUTHENTICODE_POISONED_CHILD";
+        if std::env::var_os(CHILD_MARKER).is_some() {
+            let current_exe = std::env::current_exe().expect("resolve test executable");
+            let result = check_authenticode(&current_exe, &current_exe, None);
+            println!("AUTHENTICODE_POISONED_CHILD_RAN");
+            assert_ne!(
+                result.status,
+                CheckStatus::Fail,
+                "system Authenticode module must remain available: {:?}",
+                result.data
+            );
+            return;
+        }
+
+        let poison = std::env::temp_dir().join(format!(
+            "riviu-poisoned-psmodulepath-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let shadow_module = poison.join("Microsoft.PowerShell.Security");
+        std::fs::create_dir_all(&shadow_module).expect("create poisoned module path");
+        std::fs::write(
+            shadow_module.join("Microsoft.PowerShell.Security.psd1"),
+            "@{ RootModule = 'missing-security-module.dll'; ModuleVersion = '99.0.0'; CmdletsToExport = @('Get-AuthenticodeSignature') }",
+        )
+        .expect("write poisoned module manifest");
+        let current_exe = std::env::current_exe().expect("resolve test executable");
+        let output = Command::new(current_exe)
+            .args([
+                "--exact",
+                "deployment_check::tests::authenticode_ignores_an_inherited_non_system_module_path",
+                "--nocapture",
+            ])
+            .env(CHILD_MARKER, "1")
+            .env("PSModulePath", &poison)
+            .output()
+            .expect("run poisoned Authenticode child");
+        let _ = std::fs::remove_dir_all(&poison);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stdout.contains("AUTHENTICODE_POISONED_CHILD_RAN"),
+            "child regression did not execute:\nstdout={stdout}\nstderr={stderr}"
+        );
+        assert!(
+            output.status.success(),
+            "poisoned Authenticode child failed:\nstdout={stdout}\nstderr={stderr}"
+        );
     }
 
     #[test]
