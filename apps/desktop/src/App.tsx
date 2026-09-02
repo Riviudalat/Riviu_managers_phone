@@ -36,6 +36,7 @@ import { metaByUdid, orderDevicesByNumber, tileName, tileNumber } from "./device
 import { AdbConsole } from "./components/AdbConsole";
 import { DeviceSyslogPopup } from "./components/DeviceSyslogPopup";
 import { DeviceHealthPopup } from "./components/DeviceHealthPopup";
+import { FleetDiagnosticsPage } from "./components/FleetDiagnosticsPage";
 import { ALL_DEVICES_TAB, devicesInTab, groupTabs, withDeviceAdded } from "./deviceGroups";
 import { FocusStream } from "./components/FocusStream";
 import { IconPhone, IconRefresh } from "./components/Icons";
@@ -73,6 +74,7 @@ const PAGE_TITLE: Partial<Record<PageId, string>> = {
   scripts: "Flow",
   jobs: "Tác vụ",
   publish: "Đăng bài",
+  diagnostics: "Chẩn đoán",
   data: "Dữ liệu",
   api: "API",
   settings: "Cài đặt",
@@ -933,6 +935,7 @@ function App() {
               onSelectUdids={setSelected}
             />
           )}
+          {page === "diagnostics" && <FleetDiagnosticsPage devices={devices} metas={metas} />}
           {page === "data" && <DataPage />}
           {page === "api" && <ApiPage />}
           {page === "settings" && <SettingsPanel devices={devices} />}

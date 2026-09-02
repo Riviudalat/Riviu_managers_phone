@@ -941,8 +941,18 @@ pub struct DeviceHealthReport {
     pub roster_status: Option<riviu_core::DeviceStatus>,
     /// The cached agent status every tile already shows — no device I/O.
     pub agent: riviu_core::AgentStatus,
-    /// A live `/status` probe, `None` when the active backend is not Android.
+    /// A `/status` probe through an already-existing forward. It never creates a forward;
+    /// `None` means no endpoint had been established in this process.
     pub agent_ready_now: Option<bool>,
+    /// Agent capabilities and authorization are cache evidence only. An unknown agent does
+    /// not turn an empty feature list or `false` into a negative answer.
+    pub agent_features: Option<Vec<String>>,
+    pub agent_auth_ready: Option<bool>,
+    /// The adb selected by the active Android driver and its observed version. `adb version`
+    /// has no device target and does not mutate the adb/device state.
+    pub adb_path: Option<String>,
+    pub adb_origin: Option<String>,
+    pub adb_version: Option<String>,
     /// Riviu helper reachable right now. `None` means **nobody has asked this phone yet**
     /// — no session has attached it this run — which is neither "reachable" nor "not
     /// reachable", and rendering it as the latter accused a healthy helper of a transport
@@ -956,8 +966,22 @@ pub struct DeviceHealthReport {
     pub tiktok_package: Option<String>,
     pub tiktok_version: Option<String>,
     pub tiktok_locale: Option<String>,
+    /// Rendered display dimensions and rotation, from a read-only `dumpsys display` probe.
+    pub geometry: Option<DeviceHealthGeometry>,
+    /// The view hub generation already owned by the desktop. `None` means no hub/backend;
+    /// zero remains a real answer: no stream generation has been created yet.
+    pub stream_generation: Option<u64>,
     /// Every section that could not be asked, named in the operator's language.
     pub notes: Vec<String>,
+}
+
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct DeviceHealthGeometry {
+    pub width: u32,
+    pub height: u32,
+    pub density: u32,
+    pub rotation: u8,
 }
 
 #[tauri::command]
@@ -966,26 +990,50 @@ pub async fn device_health(
     udid: String,
 ) -> Result<DeviceHealthReport, CommandError> {
     let _admission = state.ensure_accepting_work()?;
-    let roster_status = state
+    let roster = state
         .registry
         .list()
         .into_iter()
-        .find(|device| device.udid == udid)
-        .map(|device| device.status);
+        .find(|device| device.udid == udid);
+    let roster_status = roster.as_ref().map(|device| device.status.clone());
+    let target_is_android = matches!(
+        roster.as_ref().map(|device| device.platform),
+        Some(riviu_core::DevicePlatform::Android)
+    );
     let agent = state.control.cached_agent_status(&udid);
+    let agent_known = agent.state != riviu_core::AgentState::Unknown;
     let mut report = DeviceHealthReport {
         udid: udid.clone(),
         roster_status,
-        agent,
         agent_ready_now: None,
+        agent_features: agent_known.then(|| report_agent_features(&agent)),
+        agent_auth_ready: agent_known.then_some(agent.auth_ready),
+        agent,
+        adb_path: None,
+        adb_origin: None,
+        adb_version: None,
         helper_reachable: None,
         helper_installed: None,
         root: None,
         tiktok_package: None,
         tiktok_version: None,
         tiktok_locale: None,
+        geometry: None,
+        // ViewHub is desktop-owned and read-only. It is meaningful for any backend, not
+        // only Android, so expose its current generation before the Android-only return.
+        stream_generation: Some(state.view_hub.current_generation(&udid)),
         notes: Vec::new(),
     };
+    // A global Android backend only means some Android phones exist. It says nothing about
+    // this UDID: probing it for an iOS row would issue Android shell commands to the wrong
+    // device. An unlisted target is likewise unknown, not permission to guess Android.
+    if !target_is_android {
+        report.notes.push(
+            "Máy này không được roster xác nhận là Android — chỉ đọc cache và luồng xem."
+                .to_string(),
+        );
+        return Ok(report);
+    }
     let Some(android) = &state.android else {
         report.notes.push(
             "Backend đang chạy không phải Android — chỉ đọc được roster và cache agent."
@@ -993,42 +1041,138 @@ pub async fn device_health(
         );
         return Ok(report);
     };
-    report.agent_ready_now = Some(android.agent_ready(&udid).await);
-    let helper = android.helper_probe(&udid).await;
-    report.helper_reachable = helper.reachable;
-    report.helper_installed = helper.installed;
-    if helper.installed.is_none() {
-        report.notes.push(
-            "Không hỏi được máy về Riviu helper — chưa với tới được, không phải chưa cài."
-                .to_string(),
-        );
-    }
-    if helper.reachable.is_none() {
-        report.notes.push(
-            "Chưa phiên nào gắn Riviu helper trên máy này từ lúc mở app, nên chưa ai hỏi nó \
-             — đây không phải 'với tới không được'."
-                .to_string(),
-        );
-    }
-    // "Could not ask" is kept out of the answer: `is_rooted` collapses an offline phone to
-    // `false`, which is the safe default where a command is about to run and the wrong one
-    // here — a panel that says `không root` sends the operator to re-root a phone whose
-    // only problem is a cable.
-    report.root = android.root_status_or_unknown(&udid).await;
-    if report.root.is_none() {
-        report
-            .notes
-            .push("Không hỏi được máy về quyền root (máy không trả lời).".to_string());
-    }
-    match android.tiktok_build(&udid).await {
-        Ok((package, version, locale)) => {
-            report.tiktok_package = Some(package);
-            report.tiktok_version = (!version.is_empty()).then_some(version);
-            report.tiktok_locale = (!locale.is_empty()).then_some(locale);
+    let probes = async {
+        // `cached_agent_ready`, unlike `agent_ready`, never creates an adb forward or performs
+        // agent recovery. Diagnostics intentionally does not alter the device it names.
+        report.agent_ready_now = android.cached_agent_ready(&udid).await;
+        report.adb_path = Some(android.adb_path());
+        report.adb_origin = Some(android.adb_origin().to_string());
+        report.adb_version = android.adb_version().await;
+        let helper = android.helper_probe(&udid).await;
+        report.helper_reachable = helper.reachable;
+        report.helper_installed = helper.installed;
+        if helper.installed.is_none() {
+            report.notes.push(
+                "Không hỏi được máy về Riviu helper — chưa với tới được, không phải chưa cài."
+                    .to_string(),
+            );
         }
-        Err(error) => report
-            .notes
-            .push(format!("Không đọc được build TikTok: {error:#}")),
+        if helper.reachable.is_none() {
+            report.notes.push(
+                "Chưa phiên nào gắn Riviu helper trên máy này từ lúc mở app, nên chưa ai hỏi nó \
+                 — đây không phải 'với tới không được'."
+                    .to_string(),
+            );
+        }
+        // "Could not ask" is kept out of the answer: `is_rooted` collapses an offline phone to
+        // `false`, which is the safe default where a command is about to run and the wrong one
+        // here — a panel that says `không root` sends the operator to re-root a phone whose
+        // only problem is a cable.
+        report.root = android.root_status_or_unknown(&udid).await;
+        if report.root.is_none() {
+            report
+                .notes
+                .push("Không hỏi được máy về quyền root (máy không trả lời).".to_string());
+        }
+        match android.tiktok_build(&udid).await {
+            Ok((package, version, locale)) => {
+                report.tiktok_package = Some(package);
+                report.tiktok_version = (!version.is_empty()).then_some(version);
+                report.tiktok_locale = (!locale.is_empty()).then_some(locale);
+            }
+            Err(error) => report
+                .notes
+                .push(format!("Không đọc được build TikTok: {error:#}")),
+        }
+        match android.display_geometry(&udid).await {
+            Ok(value) => {
+                report.geometry = Some(DeviceHealthGeometry {
+                    width: value.width,
+                    height: value.height,
+                    density: value.density,
+                    rotation: value.rotation,
+                });
+            }
+            Err(error) => report.notes.push(format!(
+                "Không đọc được kích thước/hướng màn hình: {error:#}"
+            )),
+        }
+    };
+    if tokio::time::timeout(std::time::Duration::from_secs(30), probes)
+        .await
+        .is_err()
+    {
+        report.notes.push(
+            "Chẩn đoán đã dừng sau 30 giây; các mục chưa có câu trả lời giữ trạng thái Chưa rõ."
+                .to_string(),
+        );
     }
     Ok(report)
+}
+
+fn report_agent_features(agent: &riviu_core::AgentStatus) -> Vec<String> {
+    agent.features.clone()
+}
+
+#[cfg(test)]
+mod health_tests {
+    use super::report_agent_features;
+
+    #[test]
+    fn diagnostics_source_never_uses_a_mutating_agent_path() {
+        let source = include_str!("device.rs");
+        let health = source
+            .split("pub async fn device_health")
+            .nth(1)
+            .expect("health command")
+            .split("fn report_agent_features")
+            .next()
+            .expect("health command end");
+        assert!(!health.contains(".agent_ready("));
+        assert!(!health.contains("ensure_agent("));
+        assert!(!health.contains("repair_agent("));
+        assert!(health.contains("cached_agent_ready"));
+    }
+
+    #[test]
+    fn diagnostics_has_one_deadline_for_the_whole_device_probe() {
+        let source = include_str!("device.rs");
+        let health = source
+            .split("pub async fn device_health")
+            .nth(1)
+            .expect("health command")
+            .split("fn report_agent_features")
+            .next()
+            .expect("health command end");
+        assert!(health.contains("tokio::time::timeout"));
+        assert!(health.contains("Duration::from_secs(30)"));
+        assert!(health.contains("các mục chưa có câu trả lời giữ trạng thái Chưa rõ"));
+    }
+
+    #[test]
+    fn android_probes_are_gated_by_the_target_platform_not_backend_presence() {
+        let source = include_str!("device.rs");
+        let health = source
+            .split("pub async fn device_health")
+            .nth(1)
+            .expect("health command")
+            .split("fn report_agent_features")
+            .next()
+            .expect("health command end");
+        let gate = health.find("if !target_is_android").expect("target gate");
+        let probe = health
+            .find("cached_agent_ready")
+            .expect("android-only probe");
+        assert!(
+            gate < probe,
+            "target platform gate must precede Android probes"
+        );
+    }
+
+    #[test]
+    fn cached_agent_metadata_is_reported_without_inventing_features() {
+        let mut status = riviu_core::AgentStatus::unknown("fixture");
+        status.features = vec!["tap".to_string(), "swipe".to_string()];
+        assert_eq!(report_agent_features(&status), ["tap", "swipe"]);
+    }
 }

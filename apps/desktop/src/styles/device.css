@@ -544,3 +544,96 @@
   overflow-wrap: anywhere;
   tab-size: 2;
 }
+.fleet-diagnostics {
+  display: grid;
+  gap: 0.85rem;
+  max-width: 980px;
+}
+
+.fleet-diagnostics-rows {
+  display: grid;
+  gap: 0.65rem;
+}
+
+.fleet-diagnostics-row {
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--bg-elevated);
+  padding: 0.75rem 0.9rem;
+}
+
+.fleet-diagnostics-row > header {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.fleet-diagnostics-row > header strong {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.fleet-diagnostics-row > header .link {
+  margin-left: auto;
+  flex: 0 0 auto;
+}
+
+.fleet-diagnostics-row details {
+  margin-top: 0.65rem;
+}
+
+.fleet-diagnostics-row .health-check-overview {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(145px, 1fr));
+  gap: 0.3rem 1rem;
+  margin: 0.7rem 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.fleet-diagnostics-row .health-check-overview li {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.5rem;
+  min-width: 0;
+  border-bottom: 1px solid var(--line);
+  padding: 0.25rem 0;
+}
+
+.fleet-diagnostics-row .health-check-overview span:first-child {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.fleet-diagnostics-row summary {
+  cursor: pointer;
+  color: var(--text-2);
+}
+
+.fleet-diagnostics-row details ul {
+  display: grid;
+  gap: 0.35rem;
+  margin: 0.65rem 0 0;
+  padding-left: 1.1rem;
+}
+
+.fleet-diagnostics-row li {
+  overflow-wrap: anywhere;
+}
+
+.fleet-diagnostics-row li small {
+  display: block;
+  margin-top: 0.15rem;
+  color: var(--text-3);
+}
+
+.health-status {
+  font-weight: 650;
+  flex: 0 0 auto;
+}
+
+.health-pass { color: var(--ok); }
+.health-warning { color: var(--warn); }
+.health-fail { color: var(--danger); }
+.health-unknown,
+.health-notApplicable { color: var(--text-3); }

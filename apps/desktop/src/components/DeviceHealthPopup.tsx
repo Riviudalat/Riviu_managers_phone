@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 
 import { deviceHealth } from "../api";
 import { describeError } from "../describeError";
+import { normalizeDeviceHealth } from "../diagnostics";
 import type { DeviceHealthReport, DeviceInfo } from "../types";
 
 /**
@@ -36,12 +37,6 @@ export function DeviceHealthPopup({
 
   useEffect(load, [load]);
 
-  const mark = (ok: boolean | null | undefined, yes: string, no: string, unknown: string) => {
-    if (ok === true) return `✓ ${yes}`;
-    if (ok === false) return `✗ ${no}`;
-    return `? ${unknown}`;
-  };
-
   return (
     <div className="modal-backdrop" onClick={onClose}>
       <div
@@ -68,82 +63,27 @@ export function DeviceHealthPopup({
         </p>
 
         {error && (
-          <p className="hint" role="alert">
-            {error}
-          </p>
+          <>
+            <p className="hint" role="alert">Không đọc được trạng thái máy. Hãy kiểm lại.</p>
+            <details aria-label="Chi tiết lỗi kiểm tra máy">
+              <summary>Chi tiết lỗi</summary>
+              <pre>{error}</pre>
+            </details>
+          </>
         )}
         {!error && report === null && <p className="hint">Đang hỏi máy…</p>}
         {!error && report !== null && (
-          <ul className="health-rows">
-            <li>
-              <strong>Roster:</strong>{" "}
-              {report.rosterStatus ? report.rosterStatus : "không có trong danh sách"}
-            </li>
-            <li>
-              <strong>Agent (cache):</strong> {report.agent.state}
-              {report.agent.message ? ` — ${report.agent.message}` : ""}
-            </li>
-            <li>
-              <strong>Agent (hỏi ngay):</strong>{" "}
-              {mark(
-                report.agentReadyNow,
-                "đang trả lời /status",
-                "không trả lời — nút Agent trên thanh công cụ là chỗ sửa",
-                "backend không phải Android",
-              )}
-            </li>
-            <li>
-              <strong>Riviu helper:</strong>{" "}
-              {/*
-                Three states, not two. `null` here is "chưa ai hỏi" — the client cache is
-                only written when a session attaches, so on a freshly opened app every
-                phone is unasked, and calling that "chưa với tới được" accused a healthy
-                helper of a transport fault. What is installed is still worth saying in
-                that case, because it is the half that WAS asked.
-              */}
-              {mark(
-                report.helperReachable,
-                "đang chạy",
-                report.helperInstalled === true
-                  ? "đã cài nhưng chưa với tới được"
-                  : report.helperInstalled === false
-                    ? "chưa cài"
-                    : "chưa với tới được (không hỏi được là đã cài hay chưa)",
-                report.helperInstalled === true
-                  ? "chưa ai hỏi (đã cài) — mở một phiên rồi kiểm lại"
-                  : report.helperInstalled === false
-                    ? "chưa ai hỏi, và máy chưa cài helper"
-                    : "chưa ai hỏi, và cũng không hỏi được là đã cài hay chưa",
-              )}
-            </li>
-            <li>
-              <strong>Root:</strong>{" "}
-              {/*
-                `null` is "máy không trả lời", never "không root": the driver's own
-                `is_rooted` collapses an offline phone to false because refusing a
-                privileged command is the safe default there, and a panel that repeats
-                that collapse sends the operator to re-root a phone with a cable problem.
-              */}
-              {report.root
-                ? report.root.hasSu
-                  ? "✓ có su (Magisk)"
-                  : report.root.shellIsRoot
-                    ? "✓ adb shell là root (không có su)"
-                    : "✗ không root"
-                : "? không hỏi được (máy không trả lời hoặc backend không phải Android)"}
-            </li>
-            <li>
-              <strong>TikTok:</strong>{" "}
-              {report.tiktokPackage
-                ? `${report.tiktokPackage} ${report.tiktokVersion ?? "(không đọc được version)"} · ${report.tiktokLocale ?? "(không đọc được locale)"}`
-                : "không đọc được build"}
-            </li>
-            {report.notes.map((note) => (
-              <li key={note} className="hint">
-                {note}
-              </li>
-            ))}
-          </ul>
+          <details className="health-rows" open>
+            <summary>Chi tiết kiểm tra</summary>
+            <ul>
+              {normalizeDeviceHealth(device, report).map((check) => (
+                <li key={check.id} data-health-status={check.status}>
+                  <strong>{check.label}:</strong> {check.summary}
+                  {check.detail && <small>{check.detail}</small>}
+                </li>
+              ))}
+            </ul>
+          </details>
         )}
       </div>
     </div>

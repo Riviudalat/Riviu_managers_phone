@@ -1,6 +1,6 @@
 import { expect, test, type Page } from "@playwright/test";
 
-import { installTauriMock } from "./fixtures/tauriMock";
+import { installTauriMock, mockCommandCalls } from "./fixtures/tauriMock";
 
 /**
  * One baseline per page in the sidebar.
@@ -21,12 +21,16 @@ const PAGES = [
   "Flow",
   "Tác vụ",
   "Đăng bài",
+  "Chẩn đoán",
   "Dữ liệu",
   "API",
   "Cài đặt",
 ] as const;
 
 async function open(page: Page, name: string): Promise<void> {
+  await installTauriMock(page, {
+    androidRoster: name === "Chẩn đoán" || name === "Trung tâm ứng dụng",
+  });
   await page.goto("/");
   // Wait for the fleet the mock serves, so no page is captured mid-bootstrap.
   await expect(page.locator("[data-testid='device-tile']")).toHaveCount(2);
@@ -58,9 +62,46 @@ function screenshotName(name: string): string {
   return name.normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[đĐ]/g, "d").replace(/\s+/g, "-").toLowerCase();
 }
 
+test("the Android app library dispatches and renders one fleet batch", async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await open(page, "Trung tâm ứng dụng");
+
+  await page.getByRole("button", { name: "Cài → 2 Android" }).click();
+
+  await expect(page.getByRole("heading", { name: "Kết quả cài đặt" })).toBeVisible();
+  await expect(page.getByText("Đã xác nhận")).toHaveCount(2);
+  const install = (await mockCommandCalls(page)).find(
+    (call) => call.command === "install_library_app_batch",
+  );
+  expect(install?.args).toMatchObject({
+    request: {
+      appId: "fixture-app",
+      udids: ["MOCK-ANDROID-01", "MOCK-ANDROID-02"],
+      allowDowngrade: false,
+    },
+  });
+});
+
+test("fleet diagnostics probes each Android and retries only the chosen row", async ({ page }) => {
+  await page.setViewportSize({ width: 900, height: 900 });
+  await open(page, "Chẩn đoán");
+
+  const healthCalls = () => mockCommandCalls(page).then((calls) =>
+    calls.filter((call) => call.command === "device_health")
+  );
+  const beforeRetry = await healthCalls();
+  expect(new Set(beforeRetry.map((call) => call.args.udid))).toEqual(
+    new Set(["MOCK-ANDROID-01", "MOCK-ANDROID-02"]),
+  );
+  await page.getByRole("button", { name: /Kiểm lại Máy 1/ }).click();
+  await expect.poll(async () => (await healthCalls()).length).toBe(beforeRetry.length + 1);
+  expect((await healthCalls()).slice(beforeRetry.length)).toEqual([
+    expect.objectContaining({ args: { udid: "MOCK-ANDROID-01" } }),
+  ]);
+});
+
 test.describe("every page in the sidebar", () => {
   test.beforeEach(async ({ page }) => {
-    await installTauriMock(page);
     await page.setViewportSize({ width: 1440, height: 900 });
   });
 

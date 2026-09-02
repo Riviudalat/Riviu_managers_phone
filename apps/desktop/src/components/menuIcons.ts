@@ -26,6 +26,7 @@ export const MENU_ICONS: Record<string, (p: IconProps) => ReactElement> = {
   scripts: IconScript,
   jobs: IconClock,
   publish: IconRocket,
+  diagnostics: IconChart,
   data: IconChart,
   api: IconApi,
   settings: IconSettings,

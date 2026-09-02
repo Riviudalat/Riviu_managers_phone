@@ -20,6 +20,7 @@ const MENU: { id: PageId; label: string }[] = [
   { id: "scripts", label: "Flow" },
   { id: "jobs", label: "Tác vụ" },
   { id: "publish", label: "Đăng bài" },
+  { id: "diagnostics", label: "Chẩn đoán" },
   { id: "data", label: "Dữ liệu" },
   { id: "api", label: "API" },
   { id: "settings", label: "Cài đặt" },

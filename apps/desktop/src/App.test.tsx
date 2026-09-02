@@ -463,6 +463,21 @@ describe("Flow page integration", () => {
   });
 });
 
+describe("fleet diagnostics page integration", () => {
+  it("opens the read-only diagnostics surface from navigation", async () => {
+    const api = await import("./api");
+    vi.mocked(api.listDevices).mockResolvedValue([androidPhone]);
+    render(<App />);
+    await waitFor(() => expect(screen.getByText("Redmi")).toBeInTheDocument());
+
+    await userEvent.click(screen.getByRole("button", { name: "Chẩn đoán" }));
+
+    expect(screen.getByRole("heading", { level: 1, name: "Chẩn đoán" })).toBeVisible();
+    expect(await screen.findByRole("region", { name: "Chẩn đoán fleet" })).toBeVisible();
+    expect(api.deviceHealth).toHaveBeenCalledWith(androidPhone.udid);
+  });
+});
+
 describe("buttons that used to fail in silence", () => {
   it("says why Refresh did not refresh", async () => {
     // The toolbar's Refresh had no failure path at all: `onClick={() => void onRefresh()}`

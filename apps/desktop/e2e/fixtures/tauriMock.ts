@@ -4,6 +4,8 @@ export type MockRunMode = "succeeded" | "uncertainTap" | "runningWait";
 
 export interface TauriMockOptions {
   initialRunMode?: MockRunMode;
+  /** Dedicated Android roster for Android-specific operator surfaces. */
+  androidRoster?: boolean;
 }
 
 export interface MockCommandCall {
@@ -49,7 +51,7 @@ export async function installTauriMock(
     const fixtureDocument = () => ({
       schemaVersion: 2,
       id: FLOW_ID,
-      name: "Fixture flow",
+      name: "Cuộn nội dung",
       revision: 1,
       entryNodeId: START_ID,
       nodes: [
@@ -65,7 +67,7 @@ export async function installTauriMock(
           id: TAP_ID,
           kind: "tap",
           position: { x: 480, y: 80 },
-          config: { accessibilityId: "like-button" },
+          config: { accessibilityId: "menu-button" },
           postcondition: { kind: "frameDigestChanged", minimumDistance: 8 },
         },
         { id: END_ID, kind: "end", position: { x: 720, y: 80 }, config: {}, postcondition: null },
@@ -198,7 +200,7 @@ export async function installTauriMock(
       }
     }
 
-    const devices = [
+    const iosDevices = [
       {
         udid: "MOCK-IPHONE-01",
         name: "Fixture iPhone 01",
@@ -224,6 +226,33 @@ export async function installTauriMock(
         tileStreamState: "parked",
       },
     ];
+    const androidDevices = [
+      {
+        udid: "MOCK-ANDROID-01",
+        name: "Máy Android 01",
+        model: "Pixel 7",
+        platform: "android",
+        osVersion: "15",
+        connection: "mock",
+        status: "ready",
+        battery: 82,
+        wdaReady: false,
+        tileStreamState: "parked",
+      },
+      {
+        udid: "MOCK-ANDROID-02",
+        name: "Máy Android 02",
+        model: "Pixel 7",
+        platform: "android",
+        osVersion: "15",
+        connection: "mock",
+        status: "ready",
+        battery: 76,
+        wdaReady: false,
+        tileStreamState: "parked",
+      },
+    ];
+    const devices = fixtureOptions.androidRoster ? androidDevices : iosDevices;
 
     const port = (required = true) => [{ name: "flow", valueType: "flow", required }];
     const definition = (
@@ -776,12 +805,39 @@ export async function installTauriMock(
     }]);
     commandHandlers.set("list_apps_library", () => [{
       id: "fixture-app",
-      name: "TikTok.ipa",
-      path: "C:\\fixture\\apps\\TikTok.ipa",
-      bundleId: "com.ss.iphone.ugc.Ame",
+      name: "Riviu Cuộn thử.apk",
+      path: "C:\\Riviu\\Apps\\riviu-scroll.apk",
+      bundleId: "com.riviu.scrollsample",
       version: "35.0.0",
+      platform: "android",
+      packageFormat: "apk",
+      artifactKind: "apk",
+      applicationId: "com.riviu.scrollsample",
+      versionName: "35.0.0",
+      versionCode: 35,
+      sha256: "a".repeat(64),
+      sizeBytes: 4096,
+      signerSha256: "b".repeat(64),
+      iconPngBase64: null,
+      metadataStatus: "complete",
+      metadataError: null,
       createdAt: "2026-09-01T08:00:00.000Z",
     }]);
+    commandHandlers.set("install_library_app_batch", (args) => {
+      const request = (args as { request?: { batchId?: string; udids?: string[] } })?.request;
+      return {
+        batchId: request?.batchId ?? "fixture-batch",
+        progress: [],
+        results: (request?.udids ?? []).map((udid) => ({
+          udid,
+          status: "succeeded",
+          effectStarted: true,
+          observedVersionName: "35.0.0",
+          observedVersionCode: null,
+        })),
+      };
+    });
+    commandHandlers.set("cancel_app_install_batch", () => null);
     commandHandlers.set("analytics_summary", () => ({
       deviceTotal: 2,
       deviceReady: 2,
@@ -822,19 +878,75 @@ export async function installTauriMock(
       webhookUrl: "",
       hasToken: false,
     }));
-    // "Kiểm tra máy" opens on demand from the device menu; registered for the same reason.
-    commandHandlers.set("device_health", (args) => ({
+    // Diagnostics is a happy-path fixture: every normalized check has affirmative evidence.
+    // It intentionally carries no notes, unknowns, or errors so screenshots catch a real
+    // regression instead of preserving mock scaffolding on an operator surface.
+    commandHandlers.set("device_health", (args) => fixtureOptions.androidRoster ? ({
       udid: (args as { udid?: string })?.udid ?? "fixture",
       rosterStatus: "ready",
-      agent: { state: "unknown" },
+      agent: {
+        udid: (args as { udid?: string })?.udid ?? "fixture",
+        state: "ready",
+        artifactId: "riviu-agent-android",
+        artifactVersion: "1.0.0",
+        bundleId: "com.riviu.agent",
+        protocolVersion: 1,
+        features: ["stream", "tap", "swipe", "text"],
+        installedVersion: "1.0.0",
+        installedBuild: "1",
+        authReady: true,
+        mjpegReady: true,
+        sessionReady: true,
+        message: null,
+      },
+      agentReadyNow: true,
+      agentFeatures: ["stream", "tap", "swipe", "text"],
+      agentAuthReady: true,
+      adbPath: "C:\\Program Files\\Riviu\\resources\\android-tools\\adb.exe",
+      adbOrigin: "bản đóng gói trong bộ cài",
+      adbVersion: "Android Debug Bridge version 1.0.41",
+      helperReachable: true,
+      helperInstalled: true,
+      root: { hasSu: true, shellIsRoot: true },
+      tiktokPackage: "com.zhiliaoapp.musically",
+      tiktokVersion: "40.1.3",
+      tiktokLocale: "vi-VN",
+      geometry: { width: 1080, height: 2220, density: 420, rotation: 0 },
+      streamGeneration: 3,
+      notes: [],
+    }) : ({
+      udid: (args as { udid?: string })?.udid ?? "fixture",
+      rosterStatus: "ready",
+      agent: {
+        udid: (args as { udid?: string })?.udid ?? "fixture",
+        state: "ready",
+        artifactId: "riviu-agent-ios",
+        artifactVersion: "1.0.0",
+        bundleId: "com.riviu.agent.ios",
+        protocolVersion: 1,
+        features: ["stream", "tap", "swipe", "text"],
+        installedVersion: "1.0.0",
+        installedBuild: "1",
+        authReady: true,
+        mjpegReady: true,
+        sessionReady: true,
+        message: null,
+      },
       agentReadyNow: null,
+      agentFeatures: null,
+      agentAuthReady: null,
+      adbPath: null,
+      adbOrigin: null,
+      adbVersion: null,
       helperReachable: null,
       helperInstalled: null,
       root: null,
       tiktokPackage: null,
       tiktokVersion: null,
       tiktokLocale: null,
-      notes: ["fixture"],
+      geometry: null,
+      streamGeneration: 3,
+      notes: [],
     }));
     // Everything the Settings page asks for on mount. Absent, each of these rejected and the
     // page rendered `Unknown mock command: …` in red — and because five of them race, *which*
