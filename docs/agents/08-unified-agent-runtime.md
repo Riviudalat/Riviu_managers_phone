@@ -516,3 +516,41 @@
 - `RIVIU_MOCK_DEVICES=1` là một fleet fixture cô lập. Bootstrap không được probe
   hoặc ghép Android thật vào mock fleet; làm vậy sẽ tự mở preview và health-repair
   trên các máy USB dù operator chỉ yêu cầu headless mock.
+
+#### 14.8 Android package, AutoSwipe và fleet diagnostics (03/09/2026; xem §9.140)
+
+- Tích hợp parity từ báo cáo bên ngoài là clean-room theo hành vi. Ma trận 158
+  năng lực phải phân loại một trong `existing`, `implement`,
+  `commercial-excluded`, `security-excluded`, `not-applicable`; binary, endpoint,
+  package, branding, command thương mại và transport đặc thù nguồn tham khảo không
+  được đi vào runtime, frontend build hoặc installer.
+- App library schema 19 giữ artifact Android bất biến theo SHA-256 và nhận APK,
+  XAPK, APKM, APKS. AAB, OBB, Play Asset Delivery, ZIP traversal/symlink/entry
+  trùng, thiếu base, sai package/version hoặc signer phải fail closed. Metadata
+  package/version/signer là bắt buộc; label/icon chỉ best-effort. IPA tiếp tục đi
+  đường iOS cũ.
+- Split chỉ được materialize từ artifact đã kiểm hash. Device spec được chụp lại
+  ngay trước install; đổi spec A→B dừng trước effect, A→A mới được gọi một argv
+  `adb install-multiple -r -g`. Từ lúc spawn Package Manager, timeout/lỗi phải
+  reconcile bằng readback thành `Succeeded`, `FailedVerified` hoặc `Uncertain`;
+  không tự uninstall, xóa dữ liệu hay retry một effect mơ hồ.
+- `AutoSwipe` là node Flow typed dùng cho mọi app, không phải script/shell. Cấu
+  hình có count hoặc duration hữu hạn, tọa độ đã hiệu chuẩn, gesture/pause/jitter
+  bị giới hạn và seed được lưu theo attempt. Cancel trước gesture đầu là
+  `FailedBeforeDispatch`; sau gesture đầu là partial effect `Uncertain`.
+- Chẩn đoán fleet chỉ đọc và chuẩn hóa `pass | warning | fail | unknown |
+  notApplicable`; `unknown` không được render thành “Không”. UI phải hiện số máy,
+  alias, model, từng check, đủ Loading/Error/Empty/Data, retry từng dòng và export
+  JSON. Mỗi probe backend có deadline toàn luồng 30 giây và IPC UI có deadline 35
+  giây; hết hạn phải trả hàng lỗi/`unknown`, không được giữ spinner vô hạn. Polling
+  roster chỉ được khởi động lại lượt chẩn đoán khi tập UDID đổi, không phải khi
+  object trạng thái của cùng máy được refresh. Repair vẫn là effect riêng có
+  confirm, lease và audit.
+- Bundle production chỉ dùng ADB, Bundletool và JRE nhúng đã kiểm manifest/hash;
+  không lấy `adb`/`java` từ PATH. Bundletool chỉ chọn split bằng
+  `extract-apks --device-spec`; cú install thật vẫn thuộc `DeviceControlPlane`.
+  Android enrollment không mang `adbkey`: máy mới cần OEM driver và người dùng
+  duyệt USB debugging một lần.
+- Shutdown desktop phải đóng mọi agent client, reap instrumentation process, gỡ
+  đúng forward mà phiên sở hữu và force-stop đúng helper package. Không để host
+  child đã chết che việc process/forward trên điện thoại còn sống.

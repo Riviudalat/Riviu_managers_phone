@@ -51,15 +51,15 @@ Hai cổng CI giữ điều này, cả hai trong `apps/desktop/src-tauri/src/lib
 | §5 | Trạng thái bình luận | [`05-trang-thai-binh-luan.md`](05-trang-thai-binh-luan.md) | 464 |
 | §6 | Cách hiệu chỉnh detector | [`06-hieu-chinh-detector.md`](06-hieu-chinh-detector.md) | 12 |
 | §7 | Nguyên tắc khi sửa code này | [`07-nguyen-tac.md`](07-nguyen-tac.md) | 18 |
-| §8 | Unified Agent Runtime | [`08-unified-agent-runtime.md`](08-unified-agent-runtime.md) | 518 |
-| §9 | Fleet Android | [`08-unified-agent-runtime.md`](08-unified-agent-runtime.md) | 518 |
+| §8 | Unified Agent Runtime | [`08-unified-agent-runtime.md`](08-unified-agent-runtime.md) | 556 |
+| §9 | Fleet Android | [`08-unified-agent-runtime.md`](08-unified-agent-runtime.md) | 556 |
 | §9 | Fleet Android | [`09-fleet-android.md`](09-fleet-android.md) | 214 |
-| §10 | Mở đường cho thiết bị mới | [`08-unified-agent-runtime.md`](08-unified-agent-runtime.md) | 518 |
+| §10 | Mở đường cho thiết bị mới | [`08-unified-agent-runtime.md`](08-unified-agent-runtime.md) | 556 |
 | §10 | Mở đường cho thiết bị mới | [`10-thiet-bi-moi.md`](10-thiet-bi-moi.md) | 64 |
-| §11 | API comment preview (05/08/2026) | [`08-unified-agent-runtime.md`](08-unified-agent-runtime.md) | 518 |
-| §12 | Stream preview scaling (05/08/2026) | [`08-unified-agent-runtime.md`](08-unified-agent-runtime.md) | 518 |
-| §13 | Standalone Riviu Agent full interaction install (05/08/2026) | [`08-unified-agent-runtime.md`](08-unified-agent-runtime.md) | 518 |
-| §14 | Photo carousel publish campaign (05/08/2026) | [`08-unified-agent-runtime.md`](08-unified-agent-runtime.md) | 518 |
+| §11 | API comment preview (05/08/2026) | [`08-unified-agent-runtime.md`](08-unified-agent-runtime.md) | 556 |
+| §12 | Stream preview scaling (05/08/2026) | [`08-unified-agent-runtime.md`](08-unified-agent-runtime.md) | 556 |
+| §13 | Standalone Riviu Agent full interaction install (05/08/2026) | [`08-unified-agent-runtime.md`](08-unified-agent-runtime.md) | 556 |
+| §14 | Photo carousel publish campaign (05/08/2026) | [`08-unified-agent-runtime.md`](08-unified-agent-runtime.md) | 556 |
 
 **§2 là mục phải đọc trước khi sửa bất cứ thứ gì liên quan tới WDA.** Nó là mục duy nhất
 trong tài liệu này mà bỏ qua có thể làm hỏng thiết bị thật.
@@ -69,7 +69,7 @@ nếu một trích dẫn nêu số con.
 
 ## Nhật ký §9.x
 
-157 mục, trong 6 file dưới `diary/`. **Thứ tự trong file là thứ tự viết, không phải thứ
+158 mục, trong 6 file dưới `diary/`. **Thứ tự trong file là thứ tự viết, không phải thứ
 tự số và cũng không phải thứ tự thời gian** — trong bản gốc §9.43 nằm giữa §9.20 và
 §9.21, và §9.4 nằm sau §9.17. Đó là lý do bảng này sắp theo **số**: để tra được.
 
@@ -274,6 +274,7 @@ thật của việc các mục không được viết theo thứ tự, không ph
 | §9.137 | [Ổn định interaction/nurture: bằng chứng, effect và ngân sách được buộc cùng một card (01/09/2026)](diary/06-2408-2708.md#9137-ổn-định-interactionnurture-bằng-chứng-effect-và-ngân-sách-được-buộc-cùng-một-card-01092026) | `diary/06-2408-2708.md` |
 | §9.138 | [Windows sạch, effect-boundary và UI vận hành (02/09/2026)](diary/06-2408-2708.md#9138-windows-sạch-effect-boundary-và-ui-vận-hành-02092026) | `diary/06-2408-2708.md` |
 | §9.139 | [Nuôi TikTok: kill app ở cuối phiên và tách log theo số máy (02/09/2026)](diary/06-2408-2708.md#9139-nuôi-tiktok-kill-app-ở-cuối-phiên-và-tách-log-theo-số-máy-02092026) | `diary/06-2408-2708.md` |
+| §9.140 | [Parity clean-room: thư viện Android, AutoSwipe và chẩn đoán fleet (03/09/2026)](diary/06-2408-2708.md#9140-parity-clean-room-thư-viện-android-autoswipe-và-chẩn-đoán-fleet-03092026) | `diary/06-2408-2708.md` |
 
 ---
 
