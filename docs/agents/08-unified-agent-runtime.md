@@ -554,3 +554,19 @@
 - Shutdown desktop phải đóng mọi agent client, reap instrumentation process, gỡ
   đúng forward mà phiên sở hữu và force-stop đúng helper package. Không để host
   child đã chết che việc process/forward trên điện thoại còn sống.
+
+#### 14.9 Remount canvas không được làm mất bootstrap H.264 (03/09/2026; xem §9.141)
+
+- `pending` giữ IDR mới nhất để vẽ nhanh, còn worker phải giữ riêng packet có SPS/PPS
+  theo đúng `UDID + generation`. Canvas mới được nạp packet cấu hình trước rồi IDR
+  mới nhất; bootstrap của generation cũ tuyệt đối không được dùng lại.
+- Bộ đếm frame là trạng thái của stream trong worker, không phải của một `Slot`
+  canvas. Unmount/remount không được đưa counter về 0. Khi không có surface, worker
+  không phát heartbeat giả `0 frame`; host phải coi đó là không có viewer chứ không
+  phải decoder chết.
+- Decoder đã nhận ít nhất 8 sample trong ít nhất 1,5 giây mà chưa xuất frame nào
+  mới được thử mode acceleration/codec kế tiếp. Danh sách codec đo từ SPS phải sống
+  xuyên lần thử; keyframe không có SPS không được nâng default codec thành sự thật.
+- Paint-stall cần ít nhất 8 packet kể từ frame cuối, ngoài cửa sổ 12 giây. Frontend
+  gửi `packetsSincePaint` cho host; một packet SPS/PPS lẻ không được tắt trạng thái
+  Live, xin keyframe hoặc kích hoạt recovery.
