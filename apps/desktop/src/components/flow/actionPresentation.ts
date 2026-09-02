@@ -34,6 +34,7 @@ export const ACTION_PRESENTATION: Partial<
   wait: { label: "Chờ", icon: Timer },
   tap: { label: "Chạm", icon: MousePointerClick },
   swipe: { label: "Vuốt", icon: MoveUp },
+  autoSwipe: { label: "Tự động vuốt", icon: MoveUp },
   typeText: { label: "Gõ chữ", icon: Keyboard },
   screenshot: { label: "Chụp màn hình", icon: Camera },
   home: { label: "Về màn hình chính", icon: House },
@@ -63,6 +64,12 @@ export function summarizeAction(kind: ActionKind, config: JsonObject): string {
       return `Swipe${
         typeof config.durationMs === "number" ? ` ${config.durationMs} ms` : ""
       }`;
+    case "autoSwipe":
+      return typeof config.count === "number"
+        ? `${config.count} lần`
+        : typeof config.durationMs === "number"
+          ? `${config.durationMs} ms`
+          : "chưa chọn giới hạn";
     case "typeText":
       return `${text("text").length} characters`;
     case "screenshot":

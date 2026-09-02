@@ -870,7 +870,7 @@ impl Database {
             validate_attempt_claim(&transaction, attempt_id, &identity)?;
         }
         validate_attempt_error_context(&identity, patch.error.as_ref())?;
-        validate_transition_proof(&identity, expected, next, &patch)?;
+        validate_transition_proof(attempt_id, &identity, expected, next, &patch)?;
 
         let canonical_input = encode_optional_json(patch.canonical_input.as_ref())?;
         let evidence_baseline = encode_optional_json(patch.evidence_baseline.as_ref())?;
@@ -1851,6 +1851,7 @@ fn state_owns_active_context(state: FlowAttemptState) -> bool {
 }
 
 fn validate_transition_proof(
+    attempt_id: Uuid,
     identity: &AttemptIdentity,
     from: FlowAttemptState,
     to: FlowAttemptState,
@@ -1875,6 +1876,7 @@ fn validate_transition_proof(
             .evidence_baseline
             .as_ref()
             .context("StateConflict: intent requires an evidence baseline")?;
+        validate_canonical_input(attempt_id, identity, canonical_input)?;
         validate_evidence_baseline(identity, evidence_baseline)?;
         if let Some(existing) = &identity.canonical_input {
             ensure!(
@@ -1983,6 +1985,28 @@ fn ensure_effect_device_ready(identity: &AttemptIdentity) -> anyhow::Result<()> 
     Ok(())
 }
 
+fn validate_canonical_input(
+    attempt_id: Uuid,
+    identity: &AttemptIdentity,
+    value: &Value,
+) -> anyhow::Result<()> {
+    if identity.action_kind != crate::ActionKind::AutoSwipe {
+        return Ok(());
+    }
+    let object = value
+        .as_object()
+        .context("AutoSwipe canonical input must be an object")?;
+    let expected_config = serde_json::to_value(&identity.node.config)?;
+    ensure!(
+        object.len() == 2
+            && object.get("config") == Some(&expected_config)
+            && object.get("attemptSeed").and_then(Value::as_u64)
+                == Some(crate::flow::model::auto_swipe_attempt_seed(attempt_id)),
+        "AutoSwipe canonical input must contain its exact compiled config and attempt seed"
+    );
+    Ok(())
+}
+
 fn validate_evidence_baseline(identity: &AttemptIdentity, value: &Value) -> anyhow::Result<()> {
     let object = value
         .as_object()
@@ -2076,6 +2100,9 @@ fn validate_success_evidence(
     postcondition: &EvidenceSpec,
     value: &Value,
 ) -> anyhow::Result<()> {
+    if identity.action_kind == crate::ActionKind::AutoSwipe {
+        return validate_auto_swipe_success_evidence(identity, postcondition, value);
+    }
     validate_evidence_envelope(value)?;
     let object = value.as_object().expect("validated evidence object");
     let expected_kind = evidence_kind(postcondition);
@@ -2100,10 +2127,98 @@ fn validate_success_evidence(
     Ok(())
 }
 
+fn validate_auto_swipe_success_evidence(
+    identity: &AttemptIdentity,
+    postcondition: &EvidenceSpec,
+    value: &Value,
+) -> anyhow::Result<()> {
+    validate_auto_swipe_evidence(identity, postcondition, value, true)
+}
+
+fn validate_auto_swipe_failed_evidence(
+    identity: &AttemptIdentity,
+    postcondition: &EvidenceSpec,
+    value: &Value,
+) -> anyhow::Result<()> {
+    validate_auto_swipe_evidence(identity, postcondition, value, false)
+}
+
+fn validate_auto_swipe_evidence(
+    identity: &AttemptIdentity,
+    postcondition: &EvidenceSpec,
+    value: &Value,
+    expected_match: bool,
+) -> anyhow::Result<()> {
+    let object = value
+        .as_object()
+        .context("AutoSwipe evidence must be an object")?;
+    ensure!(
+        object.get("kind").and_then(Value::as_str) == Some("frameDigestChanged")
+            && object.get("matched") == Some(&Value::Bool(expected_match))
+            && object
+                .get("observedSha256")
+                .and_then(Value::as_str)
+                .is_some_and(is_lower_sha256),
+        "AutoSwipe evidence has an invalid frame result"
+    );
+    let measurement = object
+        .get("measurement")
+        .and_then(Value::as_object)
+        .context("AutoSwipe evidence has no frame measurement")?;
+    let observed_sha256 = object
+        .get("observedSha256")
+        .and_then(Value::as_str)
+        .expect("validated hash");
+    if expected_match {
+        validate_success_measurement(identity, postcondition, measurement, observed_sha256)?;
+    } else {
+        validate_failed_measurement(identity, postcondition, measurement, observed_sha256)?;
+    }
+    let requested = object.get("requested");
+    let dispatched = object.get("dispatched").and_then(Value::as_u64);
+    let attempts = object.get("attempts").and_then(Value::as_array);
+    let requested_matches_config = match &identity.node.config {
+        CompiledActionConfig::AutoSwipe {
+            count: Some(expected),
+            duration_ms: None,
+            ..
+        } => {
+            requested.and_then(Value::as_u64) == Some(u64::from(*expected))
+                && dispatched == Some(u64::from(*expected))
+        }
+        CompiledActionConfig::AutoSwipe {
+            count: None,
+            duration_ms: Some(_),
+            ..
+        } => requested.is_some_and(Value::is_null),
+        _ => false,
+    };
+    ensure!(
+        requested_matches_config
+            && dispatched.is_some_and(|value| value > 0)
+            && object.get("elapsedMs").and_then(Value::as_u64).is_some()
+            && attempts.is_some_and(|attempts| !attempts.is_empty())
+            && attempts.is_some_and(|attempts| Some(attempts.len() as u64) == dispatched)
+            && requested
+                .and_then(Value::as_u64)
+                .is_none_or(|count| Some(count) == dispatched),
+        "AutoSwipe evidence progress is invalid"
+    );
+    Ok(())
+}
+
 fn validate_failed_verification_evidence(
     identity: &AttemptIdentity,
     value: &Value,
 ) -> anyhow::Result<()> {
+    if identity.action_kind == crate::ActionKind::AutoSwipe {
+        let postcondition = identity
+            .node
+            .postcondition
+            .as_ref()
+            .context("failed verification evidence requires a compiled postcondition")?;
+        return validate_auto_swipe_failed_evidence(identity, postcondition, value);
+    }
     validate_evidence_envelope(value)?;
     let object = value.as_object().expect("validated evidence object");
     let postcondition = identity
@@ -3695,18 +3810,20 @@ mod tests {
     use chrono::Utc;
     use rusqlite::params;
     use serde_json::json;
+    use sha2::{Digest, Sha256};
     use uuid::Uuid;
 
     use super::super::Database;
     use super::*;
     use crate::{
-        compiled_plan_sha256, ActionKind, ActiveTransport, CompiledActionConfig, CompiledFlowNode,
-        CompiledFlowPlanV2, ContextPlan, DeviceCapabilitySnapshot, DeviceWorkOwner,
-        EvidenceBaseline, FlowAggregateState, FlowArtifactRecord, FlowAttemptState,
-        FlowCapabilitySnapshot, FlowContextReleaseProof, FlowDeviceRunState, FlowDocumentV2,
-        FlowErrorRecord, FlowPreflightScope, FlowSelectionSnapshot, FlowTargetSelection,
-        InstalledAgentIdentity, InstalledTargetIdentity, QualifiedGeometry, ScreenOrientation,
-        SideEffectClass, FLOW_SCHEMA_VERSION,
+        compiled_plan_sha256, ActionKind, ActiveTransport, AutoSwipePoint, AutoSwipePreset,
+        CompiledActionConfig, CompiledFlowNode, CompiledFlowPlanV2, ContextPlan,
+        DeviceCapabilitySnapshot, DeviceWorkOwner, EvidenceBaseline, FlowAggregateState,
+        FlowArtifactRecord, FlowAttemptState, FlowCapabilitySnapshot, FlowContextReleaseProof,
+        FlowDeviceRunState, FlowDocumentV2, FlowErrorRecord, FlowPreflightScope,
+        FlowSelectionSnapshot, FlowTargetSelection, InstalledAgentIdentity,
+        InstalledTargetIdentity, QualifiedGeometry, ScreenOrientation, SideEffectClass,
+        FLOW_SCHEMA_VERSION,
     };
 
     fn database_fixture() -> (Database, PathBuf) {
@@ -3739,6 +3856,9 @@ mod tests {
                 bundle_id: bundle_id.clone(),
             }),
             CompiledActionConfig::Screenshot { .. } => Some(EvidenceSpec::ArtifactDecodedAndHashed),
+            CompiledActionConfig::AutoSwipe { .. } => Some(EvidenceSpec::FrameDigestChanged {
+                minimum_distance: 1,
+            }),
             CompiledActionConfig::Tap { .. } | CompiledActionConfig::Empty
                 if kind == ActionKind::Tap =>
             {
@@ -5636,6 +5756,166 @@ mod tests {
             .expect("frame proof matches committed generation");
         cleanup(&process_path);
         cleanup(&frame_path);
+    }
+
+    #[test]
+    fn auto_swipe_intent_requires_a_durable_seed() {
+        let config = CompiledActionConfig::AutoSwipe {
+            preset: AutoSwipePreset::Custom,
+            count: Some(2),
+            duration_ms: None,
+            from: AutoSwipePoint { x: 0.4, y: 0.8 },
+            to: AutoSwipePoint { x: 0.6, y: 0.2 },
+            gesture_duration_ms: 350,
+            pause_min_ms: 500,
+            pause_max_ms: 900,
+            jitter_percent: 2,
+        };
+        let (database, path, _, attempt_id, _) = attempt_fixture(
+            ActionKind::AutoSwipe,
+            config.clone(),
+            SideEffectClass::AmbiguousUi,
+        );
+        let baseline = json!({
+            "kind":"frame",
+            "generation":1,
+            "jpegSha256":"a".repeat(64),
+            "imageWidth":1,
+            "imageHeight":1,
+            "rgbBase64":"AAAA"
+        });
+
+        let missing_seed = database
+            .transition_attempt(
+                attempt_id,
+                FlowAttemptState::Queued,
+                FlowAttemptState::IntentCommitted,
+                AttemptTransitionPatch {
+                    canonical_input: Some(json!({"config": &config})),
+                    evidence_baseline: Some(baseline.clone()),
+                    ..Default::default()
+                },
+            )
+            .expect_err("AutoSwipe replay needs a durable per-attempt seed");
+        assert!(missing_seed
+            .to_string()
+            .contains("AutoSwipe canonical input"));
+
+        let hash = Sha256::digest(attempt_id.as_bytes());
+        let expected_seed = u64::from_be_bytes(hash[..8].try_into().expect("SHA-256 prefix"));
+        let wrong_seed = database
+            .transition_attempt(
+                attempt_id,
+                FlowAttemptState::Queued,
+                FlowAttemptState::IntentCommitted,
+                AttemptTransitionPatch {
+                    canonical_input: Some(json!({
+                        "config": &config,
+                        "attemptSeed": expected_seed ^ 1,
+                    })),
+                    evidence_baseline: Some(baseline),
+                    ..Default::default()
+                },
+            )
+            .expect_err("the persisted seed must belong to this exact attempt");
+        assert!(wrong_seed.to_string().contains("AutoSwipe canonical input"));
+        cleanup(&path);
+    }
+
+    #[test]
+    fn auto_swipe_success_progress_is_bound_to_the_committed_count() {
+        let config = CompiledActionConfig::AutoSwipe {
+            preset: AutoSwipePreset::Custom,
+            count: Some(2),
+            duration_ms: None,
+            from: AutoSwipePoint { x: 0.4, y: 0.8 },
+            to: AutoSwipePoint { x: 0.6, y: 0.2 },
+            gesture_duration_ms: 350,
+            pause_min_ms: 500,
+            pause_max_ms: 900,
+            jitter_percent: 2,
+        };
+        let (database, path, _, attempt_id, _) = attempt_fixture(
+            ActionKind::AutoSwipe,
+            config.clone(),
+            SideEffectClass::AmbiguousUi,
+        );
+        let attempt_seed = crate::flow::model::auto_swipe_attempt_seed(attempt_id);
+        let baseline = json!({
+            "kind":"frame",
+            "generation":1,
+            "jpegSha256":"a".repeat(64),
+            "imageWidth":1,
+            "imageHeight":1,
+            "rgbBase64":"AAAA"
+        });
+        database
+            .transition_attempt(
+                attempt_id,
+                FlowAttemptState::Queued,
+                FlowAttemptState::IntentCommitted,
+                AttemptTransitionPatch {
+                    canonical_input: Some(json!({
+                        "config": serde_json::to_value(&config).expect("compiled config"),
+                        "attemptSeed": attempt_seed,
+                    })),
+                    evidence_baseline: Some(baseline),
+                    ..Default::default()
+                },
+            )
+            .expect("commit AutoSwipe intent");
+        database
+            .transition_attempt(
+                attempt_id,
+                FlowAttemptState::IntentCommitted,
+                FlowAttemptState::EffectDispatched,
+                AttemptTransitionPatch::default(),
+            )
+            .expect("record first gesture boundary");
+        database
+            .transition_attempt(
+                attempt_id,
+                FlowAttemptState::EffectDispatched,
+                FlowAttemptState::Verifying,
+                AttemptTransitionPatch::default(),
+            )
+            .expect("enter verification");
+        let frame_result = json!({
+            "kind":"frameDigestChanged",
+            "matched":true,
+            "observedSha256":"b".repeat(64),
+            "measurement":{
+                "generation":1,
+                "baselineSha256":"a".repeat(64),
+                "distance":1
+            }
+        });
+        let refused = database
+            .transition_attempt(
+                attempt_id,
+                FlowAttemptState::Verifying,
+                FlowAttemptState::Succeeded,
+                AttemptTransitionPatch {
+                    evidence_result: Some(json!({
+                        "kind":"frameDigestChanged",
+                        "matched":true,
+                        "observedSha256":"b".repeat(64),
+                        "measurement":{
+                            "generation":1,
+                            "baselineSha256":"a".repeat(64),
+                            "distance":1
+                        },
+                        "requested":1,
+                        "dispatched":1,
+                        "elapsedMs":1,
+                        "attempts":[frame_result]
+                    })),
+                    ..Default::default()
+                },
+            )
+            .expect_err("success progress cannot contradict the committed count of two");
+        assert!(refused.to_string().contains("AutoSwipe evidence progress"));
+        cleanup(&path);
     }
 
     #[test]

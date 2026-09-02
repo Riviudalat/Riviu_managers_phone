@@ -148,6 +148,23 @@ function compiled(document: FlowDocumentV2): CompiledRevision {
 }
 
 describe("FlowInspector", () => {
+  it("keeps the technical node id behind accessible help", () => {
+    render(
+      <InspectorHarness
+        initialNode={node("wait", { durationMs: 1_000 })}
+        action={definition("wait", {
+          type: "object",
+          properties: { durationMs: { type: "integer" } },
+        })}
+      />,
+    );
+
+    expect(screen.queryByText("node-wait")).not.toBeInTheDocument();
+    const help = screen.getByRole("button", { name: "Giải thích ID bước" });
+    fireEvent.focus(help);
+    expect(screen.getByRole("tooltip")).toHaveTextContent("node-wait");
+  });
+
   it("edits Launch App bundle IDs and exposes only backend-allowed evidence", () => {
     const action = definition(
       "launchApp",
@@ -344,6 +361,57 @@ describe("FlowInspector", () => {
     expect(onConfig).toHaveBeenCalledTimes(1);
     expect(within(from).getByLabelText("Profile ID")).toHaveAttribute("readonly");
     expect(within(from).getByLabelText("Hướng màn hình")).toHaveValue("portrait");
+  });
+
+  it("switches Auto Swipe between bounded count and duration without keeping both limits", () => {
+    render(
+      <InspectorHarness
+        initialNode={node("autoSwipe", {
+          preset: "tiktokFeed",
+          count: 10,
+          from: { x: 0.5, y: 0.78 },
+          to: { x: 0.5, y: 0.28 },
+          gestureDurationMs: 350,
+          pauseMinMs: 1_200,
+          pauseMaxMs: 2_500,
+          jitterPercent: 2,
+        })}
+        action={definition("autoSwipe", {
+          type: "object",
+          properties: {
+            preset: { type: "string", enum: ["custom", "tiktokFeed"] },
+            count: { type: "integer", minimum: 1, maximum: 500 },
+            durationMs: { type: "integer", minimum: 1_000, maximum: 3_600_000 },
+            from: { type: "object", properties: {
+              x: { type: "number", minimum: 0, maximum: 1 },
+              y: { type: "number", minimum: 0, maximum: 1 },
+            } },
+            to: { type: "object", properties: {
+              x: { type: "number", minimum: 0, maximum: 1 },
+              y: { type: "number", minimum: 0, maximum: 1 },
+            } },
+            gestureDurationMs: { type: "integer", minimum: 100, maximum: 2_000 },
+            pauseMinMs: { type: "integer", minimum: 250, maximum: 60_000 },
+            pauseMaxMs: { type: "integer", minimum: 250, maximum: 60_000 },
+            jitterPercent: { type: "integer", minimum: 0, maximum: 3 },
+          },
+        })}
+      />,
+    );
+
+    expect(screen.getByRole("option", { name: "TikTok" })).toBeInTheDocument();
+    expect(screen.getByRole("option", { name: "Tùy chỉnh" })).toBeInTheDocument();
+    expect(screen.getByLabelText("Số lần vuốt")).toHaveValue(10);
+    fireEvent.click(screen.getByRole("button", { name: "Thời lượng" }));
+    expect(screen.getByLabelText("Tổng thời lượng (ms)")).toHaveValue(60_000);
+    expect(JSON.parse(screen.getByTestId("config").textContent ?? "null")).toMatchObject({
+      durationMs: 60_000,
+    });
+    expect(screen.getByTestId("config")).not.toHaveTextContent('"count"');
+
+    fireEvent.click(screen.getByRole("button", { name: "Số lần" }));
+    expect(screen.getByLabelText("Số lần vuốt")).toHaveValue(10);
+    expect(screen.getByTestId("config")).not.toHaveTextContent('"durationMs"');
   });
 
   it("uses a two-option Type Text read-back locator and synchronizes its evidence", () => {

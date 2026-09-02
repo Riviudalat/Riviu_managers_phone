@@ -195,12 +195,10 @@
   font-size: var(--text-base);
 }
 
-.flow-inspector > header span {
-  overflow: hidden;
-  color: var(--text-3);
-  font: 0.68rem var(--font-mono);
-  text-overflow: ellipsis;
-  white-space: nowrap;
+.flow-inspector-heading {
+  display: flex;
+  align-items: center;
+  gap: 4px;
 }
 
 .flow-field {
@@ -698,7 +696,7 @@
   .flow-layout,
   .flow-layout[data-palette-open="false"],
   .flow-layout[data-inspector-open="false"] {
-    grid-template-columns: minmax(420px, 1fr) minmax(260px, 300px);
+    grid-template-columns: minmax(420px, 1fr) minmax(210px, 240px);
   }
 
   .flow-layout[data-inspector-open="false"],

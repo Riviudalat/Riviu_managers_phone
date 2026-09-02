@@ -1,4 +1,5 @@
 import { useRef, useState } from "react";
+import { InfoDot } from "../InfoDot";
 import type {
   ActionDefinition,
   EvidenceKind,
@@ -82,14 +83,20 @@ function titleFor(name: string): string {
     accessibilityId: "Accessibility ID",
     bundleId: "Bundle ID",
     detectorId: "Detector ID",
-    profileId: "Profile ID",
     durationMs: "Thời lượng (ms)",
+    gestureDurationMs: "Thời lượng mỗi lần vuốt (ms)",
+    jitterPercent: "Độ lệch (%)",
+    profileId: "Profile ID",
     format: "Định dạng",
     from: "Từ điểm",
     imageHeight: "Chiều cao ảnh",
     imageWidth: "Chiều rộng ảnh",
     label: "Nhãn",
     minimumDistance: "Khoảng cách tối thiểu",
+    count: "Số lần vuốt",
+    pauseMinMs: "Nghỉ tối thiểu giữa các lần vuốt (ms)",
+    pauseMaxMs: "Nghỉ tối đa giữa các lần vuốt (ms)",
+    preset: "Mẫu thao tác",
     point: "Điểm",
     readBackLocator: "Locator đọc lại",
     strategy: "Cách định vị",
@@ -98,6 +105,14 @@ function titleFor(name: string): string {
     value: "Giá trị locator",
   };
   return known[name] ?? name.replace(/([a-z])([A-Z])/g, "$1 $2");
+}
+
+function optionLabel(name: string, option: string): string {
+  if (name === "preset") {
+    if (option === "custom") return "Tùy chỉnh";
+    if (option === "tiktokFeed") return "TikTok";
+  }
+  return option;
 }
 
 function issuesForField(
@@ -160,7 +175,7 @@ function SchemaField({ name, schema, value, onChange, issues }: SchemaFieldProps
           >
             {schema.enum.map((option) => (
               <option key={option} value={option}>
-                {option}
+                {optionLabel(name, option)}
               </option>
             ))}
           </select>
@@ -885,6 +900,54 @@ export function FlowInspector({
       );
     }
 
+    if (node.kind === "autoSwipe") {
+      const durationMode = typeof node.config.durationMs === "number";
+      const changeLimitMode = (nextDurationMode: boolean) => {
+        const next: JsonObject = { ...node.config };
+        if (nextDurationMode) {
+          delete next.count;
+          next.durationMs = typeof next.durationMs === "number" ? next.durationMs : 60_000;
+        } else {
+          delete next.durationMs;
+          next.count = typeof next.count === "number" ? next.count : 10;
+        }
+        commitConfig(next);
+      };
+      const field = (name: string) => (
+        <SchemaField
+          name={name}
+          schema={
+            name === "durationMs"
+              ? { ...(schema.properties?.[name] ?? { type: "integer" }), title: "Tổng thời lượng (ms)" }
+              : (schema.properties?.[name] ?? { type: "integer" })
+          }
+          value={node.config[name]}
+          issues={issuesForField(nodeIssues, name)}
+          onChange={(value) => updateConfigField(name, value)}
+        />
+      );
+      return (
+        <>
+          {field("preset")}
+          <div role="group" aria-label="Giới hạn tự động vuốt" className="flow-segmented-control">
+            <button type="button" aria-pressed={!durationMode} onClick={() => changeLimitMode(false)}>
+              Số lần
+            </button>
+            <button type="button" aria-pressed={durationMode} onClick={() => changeLimitMode(true)}>
+              Thời lượng
+            </button>
+          </div>
+          {field(durationMode ? "durationMs" : "count")}
+          {field("from")}
+          {field("to")}
+          {field("gestureDurationMs")}
+          {field("pauseMinMs")}
+          {field("pauseMaxMs")}
+          {field("jitterPercent")}
+        </>
+      );
+    }
+
     return Object.entries(schema.properties ?? {}).map(([name, child]) => {
       if (name === "point" || name === "from" || name === "to") {
         return renderCoordinate(name, node.config[name], (value) =>
@@ -917,8 +980,10 @@ export function FlowInspector({
     <aside className="flow-inspector" aria-label="Bảng thuộc tính Flow" data-testid="flow-inspector">
       <header>
         {/* Same display name as the palette and the canvas node. */}
-        <strong>{ACTION_PRESENTATION[node.kind]?.label ?? definition.label}</strong>
-        <span>{node.id}</span>
+        <div className="flow-inspector-heading">
+          <strong>{ACTION_PRESENTATION[node.kind]?.label ?? definition.label}</strong>
+          <InfoDot of="ID bước" what={node.id} />
+        </div>
       </header>
       {definition.disabledReason && <p role="alert">{definition.disabledReason}</p>}
       <FieldIssues issues={nodeIssues.filter((issue) => !issue.field)} />

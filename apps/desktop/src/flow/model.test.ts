@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { duplicateDocument, newFlowDocument, type IdFactory } from "./model";
+import {
+  defaultConfigForAction,
+  duplicateDocument,
+  newFlowDocument,
+  type IdFactory,
+} from "./model";
 
 function sequentialIds(prefix: string): IdFactory {
   let next = 0;
@@ -7,6 +12,19 @@ function sequentialIds(prefix: string): IdFactory {
 }
 
 describe("Flow model", () => {
+  it("starts Auto Swipe with the editable TikTok feed preset", () => {
+    expect(defaultConfigForAction("autoSwipe")).toEqual({
+      preset: "tiktokFeed",
+      count: 10,
+      from: { x: 0.5, y: 0.78 },
+      to: { x: 0.5, y: 0.28 },
+      gestureDurationMs: 350,
+      pauseMinMs: 1_200,
+      pauseMaxMs: 2_500,
+      jitterPercent: 2,
+    });
+  });
+
   it("creates a linear Start to End document", () => {
     const document = newFlowDocument("Fixture", sequentialIds("new"));
 

@@ -126,6 +126,7 @@ pub enum ActionKind {
     Wait,
     Tap,
     Swipe,
+    AutoSwipe,
     TypeText,
     Screenshot,
     Home,
@@ -656,6 +657,17 @@ pub enum CompiledActionConfig {
         to: ImageCoordinateTarget,
         duration_ms: u64,
     },
+    AutoSwipe {
+        preset: AutoSwipePreset,
+        count: Option<u32>,
+        duration_ms: Option<u64>,
+        from: AutoSwipePoint,
+        to: AutoSwipePoint,
+        gesture_duration_ms: u64,
+        pause_min_ms: u64,
+        pause_max_ms: u64,
+        jitter_percent: u8,
+    },
     TypeText {
         text: String,
         read_back_locator: QualifiedElementLocator,
@@ -683,6 +695,27 @@ pub enum CompiledActionConfig {
         /// Optional search region (screen fractions) to speed up and disambiguate.
         region: Option<VisionRegion>,
     },
+}
+
+/// A product-owned, bounded gesture recipe. Coordinates resolve from the owned stream frame.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum AutoSwipePreset {
+    Custom,
+    #[serde(rename = "tiktokFeed")]
+    TikTokFeed,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AutoSwipePoint {
+    pub x: f64,
+    pub y: f64,
+}
+
+pub(crate) fn auto_swipe_attempt_seed(attempt_id: Uuid) -> u64 {
+    let hash = Sha256::digest(attempt_id.as_bytes());
+    u64::from_be_bytes(hash[..8].try_into().expect("SHA-256 has eight bytes"))
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

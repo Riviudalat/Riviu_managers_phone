@@ -62,6 +62,18 @@ fn coordinate_schema() -> Value {
     })
 }
 
+fn normalized_point_schema() -> Value {
+    serde_json::json!({
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["x", "y"],
+        "properties": {
+            "x": { "type": "number", "minimum": 0.0, "maximum": 1.0 },
+            "y": { "type": "number", "minimum": 0.0, "maximum": 1.0 }
+        }
+    })
+}
+
 fn read_back_locator_schema() -> Value {
     serde_json::json!({
         "type": "object",
@@ -119,6 +131,26 @@ pub fn config_schema(kind: ActionKind) -> Value {
                 "durationMs": { "type": "integer", "minimum": 1, "maximum": 5000 }
             }
         }),
+        ActionKind::AutoSwipe => serde_json::json!({
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["preset", "from", "to", "gestureDurationMs", "pauseMinMs", "pauseMaxMs", "jitterPercent"],
+            "properties": {
+                "preset": { "type": "string", "enum": ["custom", "tiktokFeed"] },
+                "count": { "type": "integer", "minimum": 1, "maximum": 500 },
+                "durationMs": { "type": "integer", "minimum": 1000, "maximum": 3600000 },
+                "from": normalized_point_schema(),
+                "to": normalized_point_schema(),
+                "gestureDurationMs": { "type": "integer", "minimum": 100, "maximum": 2000 },
+                "pauseMinMs": { "type": "integer", "minimum": 250, "maximum": 60000 },
+                "pauseMaxMs": { "type": "integer", "minimum": 250, "maximum": 60000 },
+                "jitterPercent": { "type": "integer", "minimum": 0, "maximum": 3 }
+            },
+            "oneOf": [
+                { "required": ["count"], "not": { "required": ["durationMs"] } },
+                { "required": ["durationMs"], "not": { "required": ["count"] } }
+            ]
+        }),
         ActionKind::TypeText => serde_json::json!({
             "type": "object",
             "additionalProperties": false,
@@ -175,7 +207,7 @@ pub fn required_capabilities(kind: ActionKind) -> Vec<String> {
         ActionKind::LaunchApp => &["app.launch"],
         ActionKind::TerminateApp => &["app.terminate"],
         ActionKind::Tap | ActionKind::TapVision => &["ui.tap", "stream"],
-        ActionKind::Swipe => &["ui.swipe", "stream"],
+        ActionKind::Swipe | ActionKind::AutoSwipe => &["ui.swipe", "stream"],
         ActionKind::TypeText => &["ui.text", "stream", "accessibility.readText"],
         ActionKind::Screenshot | ActionKind::IfVision => &["stream"],
         ActionKind::Home => &["ui.home"],
@@ -235,7 +267,7 @@ pub fn contracts(
             ReconciliationPolicy::ReadActiveApp,
             RetryPolicy::IdempotentAfterRead,
         ),
-        ActionKind::Tap | ActionKind::Swipe | ActionKind::TapVision => (
+        ActionKind::Tap | ActionKind::Swipe | ActionKind::AutoSwipe | ActionKind::TapVision => (
             ResourceClass::UiWithStream,
             SideEffectClass::AmbiguousUi,
             EvidenceRequirement::Frame,
@@ -282,6 +314,7 @@ pub fn release_one_catalog() -> Vec<ActionDefinition> {
         ActionKind::Wait,
         ActionKind::Tap,
         ActionKind::Swipe,
+        ActionKind::AutoSwipe,
         ActionKind::TypeText,
         ActionKind::Screenshot,
         ActionKind::Home,
@@ -356,6 +389,7 @@ fn label(kind: ActionKind) -> &'static str {
         ActionKind::Wait => "Wait",
         ActionKind::Tap => "Tap",
         ActionKind::Swipe => "Swipe",
+        ActionKind::AutoSwipe => "Auto Swipe",
         ActionKind::TypeText => "Type Text",
         ActionKind::Screenshot => "Screenshot",
         ActionKind::Home => "Home",
@@ -377,9 +411,11 @@ fn category(kind: ActionKind) -> ActionCategory {
         | ActionKind::RawWda
         | ActionKind::Shell => ActionCategory::Control,
         ActionKind::LaunchApp | ActionKind::TerminateApp | ActionKind::Home => ActionCategory::App,
-        ActionKind::Tap | ActionKind::Swipe | ActionKind::TypeText | ActionKind::TapVision => {
-            ActionCategory::Input
-        }
+        ActionKind::Tap
+        | ActionKind::Swipe
+        | ActionKind::AutoSwipe
+        | ActionKind::TypeText
+        | ActionKind::TapVision => ActionCategory::Input,
         ActionKind::Wait => ActionCategory::Timing,
         ActionKind::Screenshot | ActionKind::AssertVisible => ActionCategory::Evidence,
     }
@@ -390,7 +426,7 @@ fn allowed_evidence(kind: ActionKind) -> Vec<EvidenceKind> {
         ActionKind::LaunchApp | ActionKind::Home => vec![EvidenceKind::ActiveAppEquals],
         ActionKind::TerminateApp => vec![EvidenceKind::ProcessAbsent],
         ActionKind::Tap | ActionKind::TapVision => vec![EvidenceKind::FrameRegionChanged],
-        ActionKind::Swipe => vec![EvidenceKind::FrameDigestChanged],
+        ActionKind::Swipe | ActionKind::AutoSwipe => vec![EvidenceKind::FrameDigestChanged],
         ActionKind::TypeText => vec![EvidenceKind::TextReadBackEquals],
         ActionKind::Screenshot => vec![EvidenceKind::ArtifactDecodedAndHashed],
         ActionKind::Start
@@ -412,6 +448,7 @@ fn default_timeout_ms(kind: ActionKind) -> u32 {
         ActionKind::Tap | ActionKind::Swipe | ActionKind::Screenshot | ActionKind::TapVision => {
             5_000
         }
+        ActionKind::AutoSwipe => 3_600_000,
         ActionKind::TypeText => 10_000,
         ActionKind::AssertVisible | ActionKind::IfVision => 4_000,
         ActionKind::RawHttp | ActionKind::RawWda | ActionKind::Shell => 10_000,

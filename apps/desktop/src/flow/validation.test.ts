@@ -51,7 +51,7 @@ describe("the local document shape knows every action kind", () => {
   // it -- a `Set<ActionKind>` built from a subset is well typed -- and the cost was that adding a
   // Tap Vision or If Vision node made `isFlowDocumentV2` reject the document, which made
   // `FlowDraftWriter.schedule` throw out of the autosave effect, which unmounted the editor.
-  it.each(["tapVision", "ifVision", "assertVisible", "shell", "rawWda"] as ActionKind[])(
+  it.each(["autoSwipe", "tapVision", "ifVision", "assertVisible", "shell", "rawWda"] as ActionKind[])(
     "accepts a document whose node kind is %s",
     (kind) => {
       const document = newFlowDocument("Vision");
@@ -76,6 +76,7 @@ describe("the local document shape knows every action kind", () => {
       "wait",
       "tap",
       "swipe",
+      "autoSwipe",
       "typeText",
       "screenshot",
       "home",

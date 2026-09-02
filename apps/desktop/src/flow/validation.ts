@@ -27,6 +27,7 @@ const ACTION_KIND_MEMBERS: Record<ActionKind, true> = {
   wait: true,
   tap: true,
   swipe: true,
+  autoSwipe: true,
   typeText: true,
   screenshot: true,
   home: true,

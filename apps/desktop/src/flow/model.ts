@@ -30,6 +30,17 @@ export function defaultConfigForAction(kind: ActionKind): JsonObject {
       return { accessibilityId: "" };
     case "swipe":
       return { durationMs: 280 };
+    case "autoSwipe":
+      return {
+        preset: "tiktokFeed",
+        count: 10,
+        from: { x: 0.5, y: 0.78 },
+        to: { x: 0.5, y: 0.28 },
+        gestureDurationMs: 350,
+        pauseMinMs: 1_200,
+        pauseMaxMs: 2_500,
+        jitterPercent: 2,
+      };
     case "typeText":
       return {
         text: "",

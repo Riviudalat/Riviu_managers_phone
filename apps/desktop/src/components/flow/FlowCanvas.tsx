@@ -279,7 +279,8 @@ function FlowCanvasInner(props: FlowCanvasProps) {
       return;
     }
     const node = createFlowNode(kind, position);
-    const exact = selectedEdges.size === 1 ? [...selectedEdges][0] : null;
+    const selectedNow = selectedEdgesRef.current;
+    const exact = selectedNow.size === 1 ? [...selectedNow][0] : null;
     const edgeId = exact ?? nearestEdge(position, nodes, edges);
     const [only] = offered.outputPorts;
     if (edgeId !== null && offered.outputPorts.length !== 1) {

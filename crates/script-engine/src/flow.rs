@@ -3,10 +3,11 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use riviu_core::{
     canonical_compiled_plan_json, compiled_plan_sha256, contracts, decode_vision_template,
     release_one_catalog, validate_artifact_label, validate_vision_region, ActionDefinition,
-    ActionKind, AutomationScript, CanvasPoint, CompiledActionConfig, CompiledFlowNode,
-    CompiledFlowPlanV2, CompiledTapTarget, ContextPlan, EvidenceKind, EvidenceRequirement,
-    EvidenceSpec, FlowDocumentV2, FlowEdge, FlowNode, FlowViewport, ImageCoordinateTarget, NodeId,
-    QualifiedElementLocator, ResourceClass, ScriptAction, VisionRegion, FLOW_SCHEMA_VERSION,
+    ActionKind, AutoSwipePoint, AutoSwipePreset, AutomationScript, CanvasPoint,
+    CompiledActionConfig, CompiledFlowNode, CompiledFlowPlanV2, CompiledTapTarget, ContextPlan,
+    EvidenceKind, EvidenceRequirement, EvidenceSpec, FlowDocumentV2, FlowEdge, FlowNode,
+    FlowViewport, ImageCoordinateTarget, NodeId, QualifiedElementLocator, ResourceClass,
+    ScriptAction, VisionRegion, FLOW_SCHEMA_VERSION,
 };
 use serde::Deserialize;
 use serde_json::Value;
@@ -89,6 +90,20 @@ struct SwipeConfig {
     from: ImageCoordinateTarget,
     to: ImageCoordinateTarget,
     duration_ms: u64,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct AutoSwipeConfig {
+    preset: AutoSwipePreset,
+    count: Option<u32>,
+    duration_ms: Option<u64>,
+    from: AutoSwipePoint,
+    to: AutoSwipePoint,
+    gesture_duration_ms: u64,
+    pause_min_ms: u64,
+    pause_max_ms: u64,
+    jitter_percent: u8,
 }
 
 #[derive(Deserialize)]
@@ -552,6 +567,43 @@ fn compile_config(kind: ActionKind, value: &Value) -> Result<CompiledActionConfi
                 duration_ms: config.duration_ms,
             })
         }
+        ActionKind::AutoSwipe => {
+            let config = decode::<AutoSwipeConfig>(value)?;
+            match (config.count, config.duration_ms) {
+                (Some(count), None) => validate_u64("count", u64::from(count), 1, 500)?,
+                (None, Some(duration_ms)) => {
+                    validate_u64("durationMs", duration_ms, 1_000, 3_600_000)?
+                }
+                _ => {
+                    return Err(ConfigError::invalid(
+                        "AutoSwipe requires exactly one of count or durationMs",
+                    ))
+                }
+            }
+            validate_auto_swipe_point("from", config.from)?;
+            validate_auto_swipe_point("to", config.to)?;
+            validate_u64("gestureDurationMs", config.gesture_duration_ms, 100, 2_000)?;
+            validate_u64("pauseMinMs", config.pause_min_ms, 250, 60_000)?;
+            validate_u64("pauseMaxMs", config.pause_max_ms, 250, 60_000)?;
+            if config.pause_min_ms > config.pause_max_ms {
+                return Err(ConfigError::range(
+                    "pauseMaxMs",
+                    "pauseMaxMs must be at least pauseMinMs",
+                ));
+            }
+            validate_u64("jitterPercent", u64::from(config.jitter_percent), 0, 3)?;
+            Ok(CompiledActionConfig::AutoSwipe {
+                preset: config.preset,
+                count: config.count,
+                duration_ms: config.duration_ms,
+                from: config.from,
+                to: config.to,
+                gesture_duration_ms: config.gesture_duration_ms,
+                pause_min_ms: config.pause_min_ms,
+                pause_max_ms: config.pause_max_ms,
+                jitter_percent: config.jitter_percent,
+            })
+        }
         ActionKind::TypeText => {
             reject_unsupported_selector(value)?;
             let config = decode::<TypeTextConfig>(value)?;
@@ -737,6 +789,22 @@ fn validate_coordinate(
     Ok(())
 }
 
+fn validate_auto_swipe_point(
+    field: &'static str,
+    point: AutoSwipePoint,
+) -> Result<(), ConfigError> {
+    if !point.x.is_finite() || !point.y.is_finite() {
+        return Err(ConfigError::range(field, "coordinates must be finite"));
+    }
+    if !(0.0..=1.0).contains(&point.x) || !(0.0..=1.0).contains(&point.y) {
+        return Err(ConfigError::range(
+            field,
+            "coordinates must be within 0..=1",
+        ));
+    }
+    Ok(())
+}
+
 fn reject_unsupported_selector(value: &Value) -> Result<(), ConfigError> {
     let Some(strategy) = value
         .get("readBackLocator")
@@ -837,7 +905,9 @@ fn validate_evidence(
         (ActionKind::Screenshot, _, EvidenceSpec::ArtifactDecodedAndHashed)
         | (ActionKind::Tap, _, EvidenceSpec::FrameRegionChanged { .. })
         | (ActionKind::TapVision, _, EvidenceSpec::FrameRegionChanged { .. })
-        | (ActionKind::Swipe, _, EvidenceSpec::FrameDigestChanged { .. }) => true,
+        | (ActionKind::Swipe | ActionKind::AutoSwipe, _, EvidenceSpec::FrameDigestChanged { .. }) => {
+            true
+        }
         _ => false,
     };
     if !matches_config {
@@ -1391,8 +1461,181 @@ mod tests {
         node
     }
 
+    fn auto_swipe_with_evidence(config: Value) -> FlowNode {
+        let mut node = FlowNode::new(ActionKind::AutoSwipe, config);
+        node.postcondition = Some(EvidenceSpec::FrameDigestChanged {
+            minimum_distance: 8,
+        });
+        node
+    }
+
     fn compile(document: &FlowDocumentV2) -> Result<CompiledRevision, Vec<FlowCompileError>> {
         compile_flow(document, &release_one_catalog())
+    }
+
+    #[test]
+    fn auto_swipe_compiles_the_tiktok_preset_and_rejects_unbounded_runs() {
+        let valid = linear_document(vec![
+            start(),
+            launch("com.zhiliaoapp.musically"),
+            auto_swipe_with_evidence(json!({
+                "preset": "tiktokFeed",
+                "count": 3,
+                "from": { "x": 0.5, "y": 0.78 },
+                "to": { "x": 0.5, "y": 0.28 },
+                "gestureDurationMs": 350,
+                "pauseMinMs": 1200,
+                "pauseMaxMs": 2500,
+                "jitterPercent": 2,
+            })),
+            end(),
+        ]);
+        let compiled = compile(&valid).expect("TikTok AutoSwipe compiles");
+        let node = compiled
+            .plan
+            .nodes
+            .values()
+            .find(|node| node.kind == ActionKind::AutoSwipe)
+            .expect("compiled AutoSwipe node");
+        assert!(matches!(
+            node.config,
+            CompiledActionConfig::AutoSwipe {
+                preset: AutoSwipePreset::TikTokFeed,
+                count: Some(3),
+                duration_ms: None,
+                from: AutoSwipePoint { x: 0.5, y: 0.78 },
+                to: AutoSwipePoint { x: 0.5, y: 0.28 },
+                gesture_duration_ms: 350,
+                pause_min_ms: 1200,
+                pause_max_ms: 2500,
+                jitter_percent: 2,
+            }
+        ));
+
+        let duration_limited = linear_document(vec![
+            start(),
+            launch("com.zhiliaoapp.musically"),
+            auto_swipe_with_evidence(json!({
+                "preset": "tiktokFeed", "durationMs": 1_000,
+                "from": { "x": 0.5, "y": 0.78 }, "to": { "x": 0.5, "y": 0.28 },
+                "gestureDurationMs": 350, "pauseMinMs": 1_200, "pauseMaxMs": 2_500,
+                "jitterPercent": 2,
+            })),
+            end(),
+        ]);
+        assert!(matches!(
+            compile(&duration_limited)
+                .expect("duration-limited AutoSwipe compiles")
+                .plan
+                .nodes
+                .values()
+                .find(|node| node.kind == ActionKind::AutoSwipe)
+                .expect("AutoSwipe")
+                .config,
+            CompiledActionConfig::AutoSwipe {
+                count: None,
+                duration_ms: Some(1_000),
+                ..
+            }
+        ));
+
+        let custom = linear_document(vec![
+            start(),
+            launch("com.example.reader"),
+            auto_swipe_with_evidence(json!({
+                "preset": "custom", "count": 2,
+                "from": { "x": 0.2, "y": 0.9 }, "to": { "x": 0.8, "y": 0.1 },
+                "gestureDurationMs": 500, "pauseMinMs": 300, "pauseMaxMs": 900,
+                "jitterPercent": 1,
+            })),
+            end(),
+        ]);
+        assert!(matches!(
+            compile(&custom)
+                .expect("custom AutoSwipe compiles")
+                .plan
+                .nodes
+                .values()
+                .find(|node| node.kind == ActionKind::AutoSwipe)
+                .expect("AutoSwipe")
+                .config,
+            CompiledActionConfig::AutoSwipe {
+                preset: AutoSwipePreset::Custom,
+                count: Some(2),
+                from: AutoSwipePoint { x: 0.2, y: 0.9 },
+                to: AutoSwipePoint { x: 0.8, y: 0.1 },
+                ..
+            }
+        ));
+
+        let valid_config = || {
+            json!({
+                "preset": "tiktokFeed",
+                "count": 1,
+                "from": { "x": 0.5, "y": 0.78 },
+                "to": { "x": 0.5, "y": 0.28 },
+                "gestureDurationMs": 350,
+                "pauseMinMs": 1_200,
+                "pauseMaxMs": 2_500,
+                "jitterPercent": 2,
+            })
+        };
+        for (config, field) in [
+            (("count", json!(0)), "count"),
+            (("count", json!(501)), "count"),
+            (("durationMs", json!(999)), "durationMs"),
+            (("durationMs", json!(3_600_001)), "durationMs"),
+            (("gestureDurationMs", json!(99)), "gestureDurationMs"),
+            (("pauseMinMs", json!(249)), "pauseMinMs"),
+            (("pauseMaxMs", json!(60_001)), "pauseMaxMs"),
+            (("jitterPercent", json!(4)), "jitterPercent"),
+        ] {
+            let (name, value) = config;
+            let mut config = valid_config();
+            let object = config.as_object_mut().expect("AutoSwipe fixture object");
+            if name == "durationMs" {
+                object.remove("count");
+            }
+            object.insert(name.to_string(), value);
+            let invalid = linear_document(vec![
+                start(),
+                launch("com.zhiliaoapp.musically"),
+                auto_swipe_with_evidence(config),
+                end(),
+            ]);
+            let errors = compile(&invalid).expect_err("invalid AutoSwipe boundary");
+            assert!(
+                errors.iter().any(|error| error.code == "ConfigOutOfRange"
+                    && error.field.as_deref() == Some(field)),
+                "missing range error for {field}: {errors:?}"
+            );
+        }
+
+        for config in [
+            {
+                let mut config = valid_config();
+                config["durationMs"] = json!(1_000);
+                config
+            },
+            {
+                let mut config = valid_config();
+                config.as_object_mut().unwrap().remove("count");
+                config
+            },
+            {
+                let mut config = valid_config();
+                config["shell"] = json!("input swipe 0 0 1 1");
+                config
+            },
+        ] {
+            let invalid = linear_document(vec![
+                start(),
+                launch("com.zhiliaoapp.musically"),
+                auto_swipe_with_evidence(config),
+                end(),
+            ]);
+            assert_error(&invalid, "ConfigInvalid");
+        }
     }
 
     fn assert_error(document: &FlowDocumentV2, code: &str) {
@@ -2632,7 +2875,7 @@ mod tests {
                 });
                 linear_document(vec![start(), launch("com.apple.Preferences"), node, end()])
             }
-            ActionKind::Swipe => {
+            ActionKind::Swipe | ActionKind::AutoSwipe => {
                 node.postcondition = Some(EvidenceSpec::FrameDigestChanged {
                     minimum_distance: 1,
                 });

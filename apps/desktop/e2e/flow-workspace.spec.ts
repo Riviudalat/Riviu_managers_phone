@@ -31,7 +31,7 @@ async function openFlow(page: Page, selectDevices = false): Promise<void> {
     "data-loading",
     "false",
   );
-  await expect(page.getByLabel("Tên Flow")).toHaveValue("Fixture flow");
+  await expect(page.getByLabel("Tên Flow")).toHaveValue("Cuộn nội dung");
   await expect(page.getByTestId("flow-canvas")).toBeVisible();
 }
 
@@ -410,6 +410,9 @@ for (const viewport of [
     expect(canvas).not.toBeNull();
     expect(canvas?.width).toBeGreaterThanOrEqual(420);
     expect(await page.locator("[data-testid='flow-node']").count()).toBeGreaterThan(0);
+    const inspector = await page.getByTestId("flow-inspector").boundingBox();
+    expect(inspector).not.toBeNull();
+    expect((inspector?.x ?? 0) + (inspector?.width ?? 0)).toBeLessThanOrEqual(viewport.width);
     const regionBoxes = (await Promise.all([
       page.getByTestId("flow-toolbar").boundingBox(),
       page.getByTestId("flow-palette").boundingBox(),

@@ -9,11 +9,12 @@ use uuid::Uuid;
 use super::{
     capture_baseline, capture_process_baseline, compiled_plan_sha256, contracts,
     decode_and_hash_artifact, decode_vision_template, evaluate_postcondition,
-    qualified_geometry_profile_id, verify_process_absence, ActionKind, CompiledActionConfig,
-    CompiledFlowNode, CompiledFlowPlanV2, CompiledTapTarget, EvidenceBaseline, EvidenceError,
-    EvidenceSpec, FlowArtifactRecord, FlowArtifactStore, FlowAttemptState, FlowCancellation,
-    FlowCapabilitySnapshot, FlowContextReleaseProof, FlowDeviceContext, FlowDeviceRunState,
-    FlowErrorRecord, FlowPreflightScope, NodeId, SideEffectClass,
+    qualified_geometry_profile_id, verify_process_absence, ActionKind, AutoSwipePoint,
+    CompiledActionConfig, CompiledFlowNode, CompiledFlowPlanV2, CompiledTapTarget,
+    EvidenceBaseline, EvidenceError, EvidenceResult, EvidenceSpec, FlowArtifactRecord,
+    FlowArtifactStore, FlowAttemptState, FlowCancellation, FlowCapabilitySnapshot,
+    FlowContextReleaseProof, FlowDeviceContext, FlowDeviceRunState, FlowErrorRecord,
+    FlowPreflightScope, NodeId, SideEffectClass,
 };
 use crate::db::{AttemptTransitionPatch, Database};
 use crate::{
@@ -143,6 +144,12 @@ enum ActionOutput {
     Branch {
         port: String,
     },
+    AutoSwipe {
+        requested: Option<u32>,
+        dispatched: u32,
+        elapsed_ms: u64,
+        results: Vec<EvidenceResult>,
+    },
 }
 
 struct ActionDispatchFailure {
@@ -150,6 +157,7 @@ struct ActionDispatchFailure {
     stream_upgrade: Option<super::FlowDeviceUpgradeFailure>,
     request_reached_device: Option<bool>,
     deterministic_read_failure: bool,
+    evidence_result: Option<serde_json::Value>,
 }
 
 impl ActionDispatchFailure {
@@ -159,6 +167,7 @@ impl ActionDispatchFailure {
             stream_upgrade: None,
             request_reached_device: Some(false),
             deterministic_read_failure: false,
+            evidence_result: None,
         }
     }
 
@@ -168,6 +177,17 @@ impl ActionDispatchFailure {
             stream_upgrade: None,
             request_reached_device: None,
             deterministic_read_failure: true,
+            evidence_result: None,
+        }
+    }
+
+    fn partial_effect(error: FlowExecutionError, evidence_result: serde_json::Value) -> Self {
+        Self {
+            error,
+            stream_upgrade: None,
+            request_reached_device: None,
+            deterministic_read_failure: false,
+            evidence_result: Some(evidence_result),
         }
     }
 }
@@ -179,6 +199,7 @@ impl From<FlowExecutionError> for ActionDispatchFailure {
             stream_upgrade: None,
             request_reached_device: None,
             deterministic_read_failure: false,
+            evidence_result: None,
         }
     }
 }
@@ -942,9 +963,7 @@ impl FlowExecutor {
                 FlowAttemptState::Queued,
                 FlowAttemptState::IntentCommitted,
                 AttemptTransitionPatch {
-                    canonical_input: Some(
-                        serde_json::to_value(&node.config).map_err(FlowExecutionError::other)?,
-                    ),
+                    canonical_input: Some(canonical_input(node, attempt_id)?),
                     evidence_baseline: Some(
                         serde_json::to_value(&baseline).map_err(FlowExecutionError::other)?,
                     ),
@@ -967,19 +986,41 @@ impl FlowExecutor {
             self.fail_before_dispatch(attempt_id, &error)?;
             return Err(error);
         }
+        if self.deps.cancellation.is_cancelled() {
+            let error = FlowExecutionError::new("Cancelled", "flow was cancelled")
+                .attributed(node.id, attempt_id);
+            self.fail_before_dispatch(attempt_id, &error)?;
+            return Err(error);
+        }
 
-        self.deps
-            .database
-            .transition_attempt(
-                attempt_id,
-                FlowAttemptState::IntentCommitted,
-                FlowAttemptState::EffectDispatched,
-                AttemptTransitionPatch::default(),
-            )
-            .map_err(FlowExecutionError::other)?;
+        // AutoSwipe has substantial session/frame/cancellation work inside its dispatch
+        // implementation. Keep its durable state at IntentCommitted through that work and let
+        // the action cross this one-shot boundary immediately before its first gesture.
+        let mut effect_dispatched = node.kind != ActionKind::AutoSwipe;
+        if effect_dispatched {
+            self.deps
+                .database
+                .transition_attempt(
+                    attempt_id,
+                    FlowAttemptState::IntentCommitted,
+                    FlowAttemptState::EffectDispatched,
+                    AttemptTransitionPatch::default(),
+                )
+                .map_err(FlowExecutionError::other)?;
+        }
 
         let output = match self
-            .dispatch_action(node, plan, preflight, context, reservation, special_launch)
+            .dispatch_action(
+                node,
+                plan,
+                preflight,
+                context,
+                reservation,
+                special_launch,
+                attempt_id,
+                &baseline,
+                &mut effect_dispatched,
+            )
             .await
         {
             Ok(output) => output,
@@ -989,18 +1030,26 @@ impl FlowExecutor {
                     FlowExecutionError::new("FlowExecution", "dispatch failure was consumed"),
                 )
                 .attributed(node.id, attempt_id);
-                if failure.request_reached_device == Some(false) {
+                if !effect_dispatched || failure.request_reached_device == Some(false) {
+                    let from = if effect_dispatched {
+                        FlowAttemptState::EffectDispatched
+                    } else {
+                        FlowAttemptState::IntentCommitted
+                    };
+                    let evidence_result = effect_dispatched.then(|| {
+                        serde_json::json!({
+                            "kind": "transportNonDelivery",
+                            "requestReachedDevice": false,
+                        })
+                    });
                     self.deps
                         .database
                         .transition_attempt(
                             attempt_id,
-                            FlowAttemptState::EffectDispatched,
+                            from,
                             FlowAttemptState::FailedBeforeDispatch,
                             AttemptTransitionPatch {
-                                evidence_result: Some(serde_json::json!({
-                                    "kind": "transportNonDelivery",
-                                    "requestReachedDevice": false,
-                                })),
+                                evidence_result,
                                 error: Some(error.record(&self.deps.udid)),
                                 ..Default::default()
                             },
@@ -1009,6 +1058,7 @@ impl FlowExecutor {
                     return Err(error);
                 }
                 if failure.deterministic_read_failure {
+                    debug_assert!(effect_dispatched);
                     self.deps
                         .database
                         .transition_attempt(
@@ -1033,6 +1083,7 @@ impl FlowExecutor {
                     return Err(error);
                 }
                 if special_launch {
+                    debug_assert!(effect_dispatched);
                     return self
                         .reconcile_initial_launch_failure(
                             attempt_id,
@@ -1058,6 +1109,7 @@ impl FlowExecutor {
                         FlowAttemptState::EffectDispatched,
                         next,
                         AttemptTransitionPatch {
+                            evidence_result: failure.evidence_result,
                             error: Some(error.record(&self.deps.udid)),
                             ..Default::default()
                         },
@@ -1066,6 +1118,7 @@ impl FlowExecutor {
                 return Err(error);
             }
         };
+        debug_assert!(effect_dispatched);
         let deadline = tokio::time::Instant::now() + EVIDENCE_TIMEOUT;
 
         // A branch predicate carries its chosen port; persist it alongside the
@@ -1300,6 +1353,7 @@ impl FlowExecutor {
                 target: CompiledTapTarget::Point { target },
             } => vec![target],
             CompiledActionConfig::Swipe { from, to, .. } => vec![from, to],
+            CompiledActionConfig::AutoSwipe { .. } => Vec::new(),
             _ => return Ok(()),
         };
         let generation = context.generation();
@@ -1316,17 +1370,22 @@ impl FlowExecutor {
         let image = image::load_from_memory(&frame.bytes).map_err(|error| {
             FlowExecutionError::new("GeometryMismatch", format!("decode live frame: {error}"))
         })?;
-        if self
+        let latest = self
             .deps
             .frames
             .latest_in_generation(&self.deps.udid, generation)
-            .is_none()
-        {
-            return Err(FlowExecutionError::new(
-                "StaleGeneration",
-                "stream generation changed while decoding the geometry frame",
-            ));
-        }
+            .ok_or_else(|| {
+                FlowExecutionError::new(
+                    "StaleGeneration",
+                    "stream generation changed while decoding the geometry frame",
+                )
+            })?;
+        let latest_image = image::load_from_memory(&latest.bytes).map_err(|error| {
+            FlowExecutionError::new(
+                "GeometryMismatch",
+                format!("decode latest geometry frame: {error}"),
+            )
+        })?;
         let geometry = preflight
             .device_snapshot
             .as_ref()
@@ -1334,7 +1393,11 @@ impl FlowExecutor {
             .ok_or_else(|| {
                 FlowExecutionError::new("GeometryMismatch", "runtime geometry is unavailable")
             })?;
-        if image.width() != geometry.pixel_width || image.height() != geometry.pixel_height {
+        if image.width() != geometry.pixel_width
+            || image.height() != geometry.pixel_height
+            || latest_image.width() != geometry.pixel_width
+            || latest_image.height() != geometry.pixel_height
+        {
             return Err(FlowExecutionError::new(
                 "GeometryMismatch",
                 "decoded frame dimensions do not match qualified runtime geometry",
@@ -1363,6 +1426,7 @@ impl FlowExecutor {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn dispatch_action(
         &self,
         node: &CompiledFlowNode,
@@ -1371,6 +1435,9 @@ impl FlowExecutor {
         context: &mut FlowDeviceContext,
         reservation: &mut Option<UiCapacityReservation>,
         special_launch: bool,
+        attempt_id: Uuid,
+        baseline: &EvidenceBaseline,
+        effect_dispatched: &mut bool,
     ) -> Result<ActionOutput, ActionDispatchFailure> {
         match (&node.kind, &node.config) {
             (ActionKind::Start | ActionKind::End, CompiledActionConfig::Empty) => {
@@ -1408,6 +1475,7 @@ impl FlowExecutor {
                                 stream_upgrade: Some(failure),
                                 request_reached_device: None,
                                 deterministic_read_failure: false,
+                                evidence_result: None,
                             });
                         }
                     }
@@ -1486,6 +1554,194 @@ impl FlowExecutor {
                     .await
                     .map_err(FlowExecutionError::other)?;
                 Ok(ActionOutput::None)
+            }
+            (
+                ActionKind::AutoSwipe,
+                CompiledActionConfig::AutoSwipe {
+                    preset: _,
+                    count,
+                    duration_ms,
+                    from,
+                    to,
+                    gesture_duration_ms,
+                    pause_min_ms,
+                    pause_max_ms,
+                    jitter_percent,
+                },
+            ) => {
+                let session = context
+                    .session(&self.deps.control)
+                    .map_err(FlowExecutionError::device)?;
+                let EvidenceBaseline::Frame { image, .. } = baseline else {
+                    return Err(ActionDispatchFailure::non_delivery(
+                        FlowExecutionError::new(
+                            "EvidenceInvalid",
+                            "AutoSwipe requires a frame evidence baseline",
+                        ),
+                    ));
+                };
+                let specification = node.postcondition.as_ref().ok_or_else(|| {
+                    ActionDispatchFailure::non_delivery(FlowExecutionError::new(
+                        "EvidenceInvalid",
+                        "AutoSwipe requires a frame postcondition",
+                    ))
+                })?;
+                let seed = auto_swipe_seed(attempt_id);
+                let requested = *count;
+                let started = tokio::time::Instant::now();
+                let max_dispatches = match count {
+                    Some(count) => *count,
+                    None => duration_ms
+                        .expect("compiler requires duration when count is absent")
+                        .div_ceil(gesture_duration_ms.saturating_add(*pause_min_ms))
+                        .max(1)
+                        .try_into()
+                        .expect("configured duration bounds fit u32"),
+                };
+                let mut results = Vec::with_capacity(max_dispatches as usize);
+                let mut dispatched = 0_u32;
+                for ordinal in 0..max_dispatches {
+                    if ordinal > 0
+                        && duration_ms.is_some_and(|limit| {
+                            started
+                                .elapsed()
+                                .saturating_add(Duration::from_millis(*gesture_duration_ms))
+                                > Duration::from_millis(limit)
+                        })
+                    {
+                        break;
+                    }
+                    if let Err(error) = self.validate_geometry(node, preflight, context) {
+                        return Err(if dispatched == 0 {
+                            ActionDispatchFailure::non_delivery(error)
+                        } else {
+                            ActionDispatchFailure::partial_effect(
+                                error,
+                                auto_swipe_progress(
+                                    *count,
+                                    dispatched,
+                                    started.elapsed(),
+                                    &results,
+                                ),
+                            )
+                        });
+                    }
+                    if self.deps.cancellation.is_cancelled() {
+                        let error = FlowExecutionError::new("Cancelled", "AutoSwipe was cancelled");
+                        return Err(if dispatched == 0 {
+                            ActionDispatchFailure::non_delivery(error)
+                        } else {
+                            ActionDispatchFailure::partial_effect(
+                                error,
+                                auto_swipe_progress(
+                                    *count,
+                                    dispatched,
+                                    started.elapsed(),
+                                    &results,
+                                ),
+                            )
+                        });
+                    }
+                    let (from, to) = auto_swipe_points(
+                        *from,
+                        *to,
+                        image.width(),
+                        image.height(),
+                        seed,
+                        ordinal,
+                        *jitter_percent,
+                    );
+                    if !*effect_dispatched {
+                        self.deps
+                            .database
+                            .transition_attempt(
+                                attempt_id,
+                                FlowAttemptState::IntentCommitted,
+                                FlowAttemptState::EffectDispatched,
+                                AttemptTransitionPatch::default(),
+                            )
+                            .map_err(FlowExecutionError::other)
+                            .map_err(ActionDispatchFailure::non_delivery)?;
+                        *effect_dispatched = true;
+                    }
+                    dispatched = ordinal + 1;
+                    if let Err(error) = session
+                        .swipe_image(
+                            from,
+                            to,
+                            f64::from(image.width()),
+                            f64::from(image.height()),
+                            *gesture_duration_ms,
+                        )
+                        .await
+                    {
+                        return Err(ActionDispatchFailure::partial_effect(
+                            FlowExecutionError::other(error),
+                            auto_swipe_progress(*count, dispatched, started.elapsed(), &results),
+                        ));
+                    }
+                    let result = match evaluate_postcondition(
+                        self.deps.frames.as_ref(),
+                        Some(session.as_ref()),
+                        &self.deps.udid,
+                        context.generation(),
+                        specification,
+                        baseline,
+                        tokio::time::Instant::now() + EVIDENCE_TIMEOUT,
+                        &self.deps.cancellation,
+                    )
+                    .await
+                    {
+                        Ok(result) => result,
+                        Err(error) => {
+                            return Err(ActionDispatchFailure::partial_effect(
+                                FlowExecutionError::evidence(error),
+                                auto_swipe_progress(
+                                    *count,
+                                    dispatched,
+                                    started.elapsed(),
+                                    &results,
+                                ),
+                            ));
+                        }
+                    };
+                    results.push(result);
+                    if ordinal + 1 < max_dispatches {
+                        let pause_ms =
+                            auto_swipe_pause(seed, ordinal, *pause_min_ms, *pause_max_ms);
+                        let pause_ms = duration_ms.map_or(pause_ms, |limit| {
+                            pause_ms.min(
+                                u64::try_from(
+                                    Duration::from_millis(limit)
+                                        .saturating_sub(started.elapsed())
+                                        .as_millis(),
+                                )
+                                .unwrap_or(u64::MAX),
+                            )
+                        });
+                        if pause_ms > 0 {
+                            if let Err(error) =
+                                cancellable_wait(pause_ms, &self.deps.cancellation).await
+                            {
+                                return Err(ActionDispatchFailure::partial_effect(
+                                    error,
+                                    auto_swipe_progress(
+                                        *count,
+                                        dispatched,
+                                        started.elapsed(),
+                                        &results,
+                                    ),
+                                ));
+                            }
+                        }
+                    }
+                }
+                Ok(ActionOutput::AutoSwipe {
+                    requested,
+                    dispatched,
+                    elapsed_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+                    results,
+                })
             }
             (ActionKind::TypeText, CompiledActionConfig::TypeText { text, .. }) => {
                 context
@@ -1833,6 +2089,68 @@ impl FlowExecutor {
             };
         }
 
+        if let ActionOutput::AutoSwipe {
+            requested,
+            dispatched,
+            elapsed_ms,
+            results,
+        } = output
+        {
+            let matched = dispatched > 0 && results.iter().all(|result| result.matched);
+            let representative = if matched {
+                results.last()
+            } else {
+                results.iter().find(|result| !result.matched)
+            }
+            .ok_or_else(|| {
+                FlowExecutionError::new("EvidenceMismatch", "AutoSwipe dispatched no gestures")
+            })?;
+            let result_value = serde_json::json!({
+                "kind": "frameDigestChanged",
+                "matched": matched,
+                "observedSha256": representative.observed_sha256,
+                "measurement": representative.measurement,
+                "requested": requested,
+                "dispatched": dispatched,
+                "elapsedMs": elapsed_ms,
+                "attempts": results,
+            });
+            if matched {
+                self.deps
+                    .database
+                    .transition_attempt(
+                        attempt_id,
+                        FlowAttemptState::Verifying,
+                        FlowAttemptState::Succeeded,
+                        AttemptTransitionPatch {
+                            evidence_result: Some(result_value),
+                            ..Default::default()
+                        },
+                    )
+                    .map_err(FlowExecutionError::other)?;
+                return Ok(());
+            }
+            let error = FlowExecutionError::new(
+                "EvidenceMismatch",
+                "AutoSwipe frame evidence did not match",
+            )
+            .attributed(node.id, attempt_id);
+            self.deps
+                .database
+                .transition_attempt(
+                    attempt_id,
+                    FlowAttemptState::Verifying,
+                    FlowAttemptState::FailedVerified,
+                    AttemptTransitionPatch {
+                        evidence_result: Some(result_value),
+                        error: Some(error.record(&self.deps.udid)),
+                        ..Default::default()
+                    },
+                )
+                .map_err(FlowExecutionError::other)?;
+            return Err(error);
+        }
+
         let Some(specification) = node.postcondition.as_ref() else {
             self.deps
                 .database
@@ -1884,6 +2202,7 @@ impl FlowExecutor {
                 }
             }
             ActionOutput::Screenshot { .. } => unreachable!("handled above"),
+            ActionOutput::AutoSwipe { .. } => unreachable!("handled above"),
             ActionOutput::Branch { .. } => {
                 unreachable!("branch nodes carry no postcondition and succeed before this point")
             }
@@ -2174,6 +2493,7 @@ fn compiled_config_matches(node: &CompiledFlowNode) -> bool {
         ActionKind::Wait => matches!(node.config, CompiledActionConfig::Wait { .. }),
         ActionKind::Tap => matches!(node.config, CompiledActionConfig::Tap { .. }),
         ActionKind::Swipe => matches!(node.config, CompiledActionConfig::Swipe { .. }),
+        ActionKind::AutoSwipe => matches!(node.config, CompiledActionConfig::AutoSwipe { .. }),
         ActionKind::TypeText => matches!(node.config, CompiledActionConfig::TypeText { .. }),
         ActionKind::Screenshot => matches!(node.config, CompiledActionConfig::Screenshot { .. }),
         ActionKind::AssertVisible => {
@@ -2291,6 +2611,85 @@ fn exact_identifier(value: &str) -> bool {
         && !value.chars().any(char::is_control)
 }
 
+fn canonical_input(
+    node: &CompiledFlowNode,
+    attempt_id: Uuid,
+) -> Result<serde_json::Value, FlowExecutionError> {
+    let config = serde_json::to_value(&node.config).map_err(FlowExecutionError::other)?;
+    if node.kind == ActionKind::AutoSwipe {
+        Ok(serde_json::json!({
+            "config": config,
+            "attemptSeed": auto_swipe_seed(attempt_id),
+        }))
+    } else {
+        Ok(config)
+    }
+}
+
+fn auto_swipe_seed(attempt_id: Uuid) -> u64 {
+    super::model::auto_swipe_attempt_seed(attempt_id)
+}
+
+fn auto_swipe_points(
+    from: AutoSwipePoint,
+    to: AutoSwipePoint,
+    width: u32,
+    height: u32,
+    seed: u64,
+    ordinal: u32,
+    jitter_percent: u8,
+) -> (TapPoint, TapPoint) {
+    let draw = |salt: u64, span: u32| {
+        let mixed = seed
+            .wrapping_add(u64::from(ordinal).wrapping_mul(0x9e37_79b9_7f4a_7c15))
+            .wrapping_add(salt)
+            .rotate_left(17)
+            ^ 0xa076_1d64_78bd_642f;
+        let unit = (mixed % 10_001) as f64 / 10_000.0;
+        (unit * 2.0 - 1.0) * f64::from(span) * f64::from(jitter_percent) / 100.0
+    };
+    let max_x = f64::from(width.saturating_sub(1));
+    let max_y = f64::from(height.saturating_sub(1));
+    let point = |x: f64, y: f64| TapPoint {
+        x: x.clamp(0.0, max_x),
+        y: y.clamp(0.0, max_y),
+    };
+    (
+        point(
+            f64::from(width) * from.x + draw(1, width),
+            f64::from(height) * from.y + draw(2, height),
+        ),
+        point(
+            f64::from(width) * to.x + draw(3, width),
+            f64::from(height) * to.y + draw(4, height),
+        ),
+    )
+}
+
+fn auto_swipe_pause(seed: u64, ordinal: u32, minimum: u64, maximum: u64) -> u64 {
+    let span = maximum.saturating_sub(minimum);
+    minimum
+        + seed
+            .wrapping_add(u64::from(ordinal).wrapping_mul(0x9e37_79b9_7f4a_7c15))
+            .rotate_left(29)
+            % span.saturating_add(1)
+}
+
+fn auto_swipe_progress(
+    requested: Option<u32>,
+    dispatched: u32,
+    elapsed: Duration,
+    results: &[EvidenceResult],
+) -> serde_json::Value {
+    serde_json::json!({
+        "kind": "autoSwipeProgress",
+        "requested": requested,
+        "dispatched": dispatched,
+        "elapsedMs": u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX),
+        "attempts": results,
+    })
+}
+
 fn flow_release_proof(proof: ContextReleaseProof) -> FlowContextReleaseProof {
     FlowContextReleaseProof {
         udid: proof.udid,
@@ -2342,7 +2741,7 @@ mod tests {
     use std::io::Cursor;
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-    use std::sync::Arc;
+    use std::sync::{Arc, Barrier};
     use std::time::Duration;
 
     use async_trait::async_trait;
@@ -2355,16 +2754,17 @@ mod tests {
     use crate::db::Database;
     use crate::{
         compiled_plan_sha256, qualified_geometry_profile_id, ActionKind, ActiveTransport,
-        AgentState, AgentStatus, AppProcessState, AttemptArtifactInspection, CompiledActionConfig,
-        CompiledFlowNode, CompiledFlowPlanV2, CompiledTapTarget, ConnectionKind, ContextPlan,
-        DeviceCapabilitySnapshot, DeviceControlPlane, DeviceDriver, DeviceInfo, DeviceStatus,
-        DeviceWorkCoordinator, DeviceWorkOwner, EvidenceSpec, FlowArtifactStore, FlowAttemptState,
-        FlowCancellation, FlowDocumentV2, FlowSelectionSnapshot, FlowTargetSelection, Frame,
-        FrameSource, FrameStream, GenerationFrame, GenerationFrameEvent, GenerationFrameSource,
-        GenerationFrameStream, ImageCoordinateTarget, InstalledAgentIdentity,
-        InstalledTargetIdentity, InteractionSessionKind, ProcessAbsenceProof, QualifiedGeometry,
-        ScreenOrientation, StreamBudgetManager, StreamHandoffProof, StreamStartProof,
-        StreamStopProof, SwipeGesture, TapPoint, UiSession, FLOW_SCHEMA_VERSION,
+        AgentState, AgentStatus, AppProcessState, AttemptArtifactInspection, AutoSwipePreset,
+        CompiledActionConfig, CompiledFlowNode, CompiledFlowPlanV2, CompiledTapTarget,
+        ConnectionKind, ContextPlan, DeviceCapabilitySnapshot, DeviceControlPlane, DeviceDriver,
+        DeviceInfo, DeviceStatus, DeviceWorkCoordinator, DeviceWorkOwner, EvidenceSpec,
+        FlowArtifactStore, FlowAttemptState, FlowCancellation, FlowDocumentV2,
+        FlowSelectionSnapshot, FlowTargetSelection, Frame, FrameSource, FrameStream,
+        GenerationFrame, GenerationFrameEvent, GenerationFrameSource, GenerationFrameStream,
+        ImageCoordinateTarget, InstalledAgentIdentity, InstalledTargetIdentity,
+        InteractionSessionKind, ProcessAbsenceProof, QualifiedGeometry, ScreenOrientation,
+        StreamBudgetManager, StreamHandoffProof, StreamStartProof, StreamStopProof, SwipeGesture,
+        TapPoint, UiSession, FLOW_SCHEMA_VERSION,
     };
 
     const UDID: &str = "fixture-udid";
@@ -2396,6 +2796,9 @@ mod tests {
         inspection_calls: AtomicUsize,
         launch_calls: Arc<AtomicUsize>,
         tap_calls: Arc<AtomicUsize>,
+        swipe_calls: Arc<AtomicUsize>,
+        cancel_after_swipe: Arc<AtomicUsize>,
+        cancellation: FlowCancellation,
         active_app_reads: Arc<AtomicUsize>,
         screenshot_png_calls: Arc<AtomicUsize>,
         close_session_calls: Arc<AtomicUsize>,
@@ -2409,6 +2812,7 @@ mod tests {
             work: Arc<DeviceWorkCoordinator>,
             streams: Arc<StreamBudgetManager>,
             snapshot: DeviceCapabilitySnapshot,
+            cancellation: FlowCancellation,
         ) -> Self {
             Self {
                 operations: Arc::new(Mutex::new(Vec::new())),
@@ -2436,6 +2840,9 @@ mod tests {
                 inspection_calls: AtomicUsize::new(0),
                 launch_calls: Arc::new(AtomicUsize::new(0)),
                 tap_calls: Arc::new(AtomicUsize::new(0)),
+                swipe_calls: Arc::new(AtomicUsize::new(0)),
+                cancel_after_swipe: Arc::new(AtomicUsize::new(0)),
+                cancellation,
                 active_app_reads: Arc::new(AtomicUsize::new(0)),
                 screenshot_png_calls: Arc::new(AtomicUsize::new(0)),
                 close_session_calls: Arc::new(AtomicUsize::new(0)),
@@ -2488,6 +2895,9 @@ mod tests {
         typed_text: Arc<Mutex<String>>,
         fail_tap: Arc<AtomicBool>,
         tap_calls: Arc<AtomicUsize>,
+        swipe_calls: Arc<AtomicUsize>,
+        cancel_after_swipe: Arc<AtomicUsize>,
+        cancellation: FlowCancellation,
         active_app_reads: Arc<AtomicUsize>,
         screenshot_png_calls: Arc<AtomicUsize>,
         assert_visible_calls: Arc<AtomicUsize>,
@@ -2515,7 +2925,11 @@ mod tests {
         }
 
         async fn swipe(&self, _gesture: SwipeGesture) -> anyhow::Result<()> {
+            let call = self.swipe_calls.fetch_add(1, Ordering::SeqCst) + 1;
             self.push("swipe");
+            if self.cancel_after_swipe.load(Ordering::SeqCst) == call {
+                self.cancellation.cancel();
+            }
             Ok(())
         }
 
@@ -2669,6 +3083,9 @@ mod tests {
                 typed_text: self.typed_text.clone(),
                 fail_tap: self.fail_tap.clone(),
                 tap_calls: self.tap_calls.clone(),
+                swipe_calls: self.swipe_calls.clone(),
+                cancel_after_swipe: self.cancel_after_swipe.clone(),
+                cancellation: self.cancellation.clone(),
                 active_app_reads: self.active_app_reads.clone(),
                 screenshot_png_calls: self.screenshot_png_calls.clone(),
                 assert_visible_calls: self.assert_visible_calls.clone(),
@@ -2825,6 +3242,12 @@ mod tests {
         subscriptions: AtomicUsize,
         latest_calls: AtomicUsize,
         invalidate_on_latest_call: AtomicUsize,
+        cancel_on_latest_call: AtomicUsize,
+        block_on_latest_call: AtomicUsize,
+        latest_call_barriers: Mutex<Option<(Arc<Barrier>, Arc<Barrier>)>>,
+        override_on_latest_call: AtomicUsize,
+        latest_override: Mutex<Option<Frame>>,
+        cancellation: Mutex<Option<FlowCancellation>>,
         frames: Vec<Frame>,
     }
 
@@ -2835,12 +3258,36 @@ mod tests {
                 subscriptions: AtomicUsize::new(0),
                 latest_calls: AtomicUsize::new(0),
                 invalidate_on_latest_call: AtomicUsize::new(0),
+                cancel_on_latest_call: AtomicUsize::new(0),
+                block_on_latest_call: AtomicUsize::new(0),
+                latest_call_barriers: Mutex::new(None),
+                override_on_latest_call: AtomicUsize::new(0),
+                latest_override: Mutex::new(None),
+                cancellation: Mutex::new(None),
                 frames: colors.iter().map(|color| jpeg(*color)).collect(),
             }
         }
 
         fn invalidate_on_latest_call(&self, call: usize) {
             self.invalidate_on_latest_call.store(call, Ordering::SeqCst);
+        }
+
+        fn cancel_on_latest_call(&self, call: usize, cancellation: FlowCancellation) {
+            self.cancel_on_latest_call.store(call, Ordering::SeqCst);
+            *self.cancellation.lock() = Some(cancellation);
+        }
+
+        fn block_on_latest_call(&self, call: usize) -> (Arc<Barrier>, Arc<Barrier>) {
+            let entered = Arc::new(Barrier::new(2));
+            let release = Arc::new(Barrier::new(2));
+            self.block_on_latest_call.store(call, Ordering::SeqCst);
+            *self.latest_call_barriers.lock() = Some((entered.clone(), release.clone()));
+            (entered, release)
+        }
+
+        fn override_on_latest_call(&self, call: usize, frame: Frame) {
+            self.override_on_latest_call.store(call, Ordering::SeqCst);
+            *self.latest_override.lock() = Some(frame);
         }
     }
 
@@ -2889,9 +3336,36 @@ mod tests {
 
         fn latest_in_generation(&self, _udid: &str, generation: u64) -> Option<GenerationFrame> {
             let call = self.latest_calls.fetch_add(1, Ordering::SeqCst) + 1;
+            if self.block_on_latest_call.load(Ordering::SeqCst) == call {
+                let (entered, release) = self
+                    .latest_call_barriers
+                    .lock()
+                    .take()
+                    .expect("fixture latest-call barriers configured");
+                entered.wait();
+                release.wait();
+            }
+            if self.cancel_on_latest_call.load(Ordering::SeqCst) == call {
+                self.cancellation
+                    .lock()
+                    .as_ref()
+                    .expect("fixture cancellation configured")
+                    .cancel();
+            }
             if self.invalidate_on_latest_call.load(Ordering::SeqCst) == call {
                 self.generation.fetch_add(1, Ordering::SeqCst);
                 return None;
+            }
+            if self.override_on_latest_call.load(Ordering::SeqCst) == call {
+                return Some(GenerationFrame {
+                    generation,
+                    sequence: u64::try_from(self.frames.len() + call).expect("fixture sequence"),
+                    bytes: self
+                        .latest_override
+                        .lock()
+                        .take()
+                        .expect("fixture latest override configured"),
+                });
             }
             (self.generation.load(Ordering::SeqCst) == generation).then(|| GenerationFrame {
                 generation,
@@ -2943,10 +3417,12 @@ mod tests {
 
             let work = Arc::new(DeviceWorkCoordinator::new());
             let streams = Arc::new(StreamBudgetManager::new(1).expect("stream budget"));
+            let cancellation = FlowCancellation::default();
             let driver = Arc::new(RecordingFlowDriver::new(
                 work.clone(),
                 streams.clone(),
                 capability_snapshot(),
+                cancellation.clone(),
             ));
             let control = Arc::new(DeviceControlPlane::new(
                 driver.clone(),
@@ -2955,7 +3431,6 @@ mod tests {
             ));
             let artifact_root = std::env::temp_dir()
                 .join(format!("riviu-flow-executor-artifacts-{}", Uuid::new_v4()));
-            let cancellation = FlowCancellation::default();
             let executor = FlowExecutor::new(FlowExecutorDeps {
                 run_id: run.id,
                 udid: UDID.to_string(),
@@ -3614,6 +4089,282 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn auto_swipe_dispatches_a_bounded_count_and_persists_seed_and_progress() {
+        let fixture = ExecutorFixture::new(
+            auto_swipe_plan(2),
+            Arc::new(FixtureFrames::new(&[40, 90, 140, 190])),
+        );
+        let result = fixture
+            .executor
+            .run_device(fixture.device_run_id, fixture.plan.clone())
+            .await;
+        result.expect("two AutoSwipe gestures complete with frame evidence");
+
+        let attempt = fixture
+            .detail()
+            .attempts
+            .into_iter()
+            .find(|attempt| attempt.action_kind == ActionKind::AutoSwipe)
+            .expect("AutoSwipe attempt");
+        assert_eq!(attempt.state, FlowAttemptState::Succeeded);
+        let input = attempt.canonical_input.expect("durable AutoSwipe input");
+        assert_eq!(input["attemptSeed"], auto_swipe_seed(attempt.id));
+        assert_eq!(input["config"]["count"], 2);
+        let progress = attempt.evidence_result.expect("progress evidence");
+        assert_eq!(progress["requested"], 2);
+        assert_eq!(progress["dispatched"], 2);
+        assert!(progress["elapsedMs"].as_u64().is_some());
+        assert_eq!(
+            fixture
+                .driver
+                .operations()
+                .iter()
+                .filter(|operation| operation.as_str() == "swipe")
+                .count(),
+            2,
+        );
+        fixture.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn duration_limited_auto_swipe_dispatches_once_when_one_gesture_exceeds_the_limit() {
+        let fixture = ExecutorFixture::new(
+            auto_swipe_duration_plan(1_000, 2_000),
+            Arc::new(FixtureFrames::new(&[40, 90, 140])),
+        );
+
+        fixture
+            .executor
+            .run_device(fixture.device_run_id, fixture.plan.clone())
+            .await
+            .expect("a valid duration limit must dispatch at least one gesture");
+
+        let attempt = fixture
+            .detail()
+            .attempts
+            .into_iter()
+            .find(|attempt| attempt.action_kind == ActionKind::AutoSwipe)
+            .expect("AutoSwipe attempt");
+        assert_eq!(attempt.state, FlowAttemptState::Succeeded);
+        assert_eq!(attempt.evidence_result.as_ref().unwrap()["dispatched"], 1);
+        assert_eq!(fixture.driver.swipe_calls.load(Ordering::SeqCst), 1);
+        fixture.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn mixed_auto_swipe_frame_results_settle_as_failed_verified() {
+        let fixture = ExecutorFixture::new(
+            auto_swipe_plan(2),
+            Arc::new(FixtureFrames::new(&[40, 40, 90])),
+        );
+
+        let error = fixture
+            .executor
+            .run_device(fixture.device_run_id, fixture.plan.clone())
+            .await
+            .expect_err("one mismatched frame must fail the bounded action");
+
+        assert_eq!(error.code(), "EvidenceMismatch");
+        let attempt = fixture
+            .detail()
+            .attempts
+            .into_iter()
+            .find(|attempt| attempt.action_kind == ActionKind::AutoSwipe)
+            .expect("AutoSwipe attempt");
+        assert_eq!(attempt.state, FlowAttemptState::FailedVerified);
+        assert_eq!(attempt.evidence_result.as_ref().unwrap()["matched"], false);
+        assert_eq!(attempt.evidence_result.as_ref().unwrap()["dispatched"], 2);
+        fixture.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn auto_swipe_generation_advance_before_first_gesture_proves_non_delivery() {
+        let frames = Arc::new(FixtureFrames::new(&[40, 90, 140]));
+        frames.invalidate_on_latest_call(3);
+        let fixture = ExecutorFixture::new(auto_swipe_plan(2), frames);
+
+        let error = fixture
+            .executor
+            .run_device(fixture.device_run_id, fixture.plan.clone())
+            .await
+            .expect_err("a stale owned generation must stop the first gesture");
+
+        assert_eq!(error.code(), "StaleGeneration");
+        assert_eq!(fixture.driver.swipe_calls.load(Ordering::SeqCst), 0);
+        let attempt = fixture
+            .detail()
+            .attempts
+            .into_iter()
+            .find(|attempt| attempt.action_kind == ActionKind::AutoSwipe)
+            .expect("AutoSwipe attempt");
+        assert_eq!(attempt.state, FlowAttemptState::FailedBeforeDispatch);
+        fixture.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn auto_swipe_stays_intent_committed_during_last_reproof_before_first_gesture() {
+        let frames = Arc::new(FixtureFrames::new(&[40, 90, 140]));
+        let (reproof_entered, release_reproof) = frames.block_on_latest_call(5);
+        let fixture = Arc::new(ExecutorFixture::new(auto_swipe_plan(1), frames));
+        let run_fixture = fixture.clone();
+        let run = tokio::spawn(async move {
+            run_fixture
+                .executor
+                .run_device(run_fixture.device_run_id, run_fixture.plan.clone())
+                .await
+        });
+
+        reproof_entered.wait();
+        let attempt = fixture
+            .detail()
+            .attempts
+            .into_iter()
+            .find(|attempt| attempt.action_kind == ActionKind::AutoSwipe)
+            .expect("AutoSwipe attempt");
+        let state_during_reproof = attempt.state;
+        let swipes_during_reproof = fixture.driver.swipe_calls.load(Ordering::SeqCst);
+        release_reproof.wait();
+        run.await
+            .expect("executor task")
+            .expect("AutoSwipe completes after re-proof is released");
+        assert_eq!(
+            state_during_reproof,
+            FlowAttemptState::IntentCommitted,
+            "re-proof and cancellation checks happen before the first gesture boundary"
+        );
+        assert_eq!(swipes_during_reproof, 0);
+        fixture.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn auto_swipe_rejects_geometry_change_during_last_reproof() {
+        let frames = Arc::new(FixtureFrames::new(&[40, 90, 140]));
+        frames.override_on_latest_call(6, jpeg_sized(8, 2, 140));
+        let fixture = ExecutorFixture::new(auto_swipe_plan(1), frames);
+
+        let error = fixture
+            .executor
+            .run_device(fixture.device_run_id, fixture.plan.clone())
+            .await
+            .expect_err("the last frame before dispatch rotated away from qualified geometry");
+
+        assert_eq!(error.code(), "GeometryMismatch");
+        assert_eq!(fixture.driver.swipe_calls.load(Ordering::SeqCst), 0);
+        let attempt = fixture
+            .detail()
+            .attempts
+            .into_iter()
+            .find(|attempt| attempt.action_kind == ActionKind::AutoSwipe)
+            .expect("AutoSwipe attempt");
+        assert_eq!(attempt.state, FlowAttemptState::FailedBeforeDispatch);
+        fixture.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn auto_swipe_cancel_before_first_gesture_proves_non_delivery() {
+        let frames = Arc::new(FixtureFrames::new(&[40, 90, 140]));
+        let fixture = ExecutorFixture::new(auto_swipe_plan(2), frames.clone());
+        frames.cancel_on_latest_call(3, fixture.cancellation.clone());
+
+        let error = fixture
+            .executor
+            .run_device(fixture.device_run_id, fixture.plan.clone())
+            .await
+            .expect_err("cancellation before the first gesture must stop dispatch");
+
+        assert_eq!(error.code(), "Cancelled");
+        assert_eq!(fixture.driver.swipe_calls.load(Ordering::SeqCst), 0);
+        let attempt = fixture
+            .detail()
+            .attempts
+            .into_iter()
+            .find(|attempt| attempt.action_kind == ActionKind::AutoSwipe)
+            .expect("AutoSwipe attempt");
+        assert_eq!(attempt.state, FlowAttemptState::FailedBeforeDispatch);
+        fixture.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn auto_swipe_cancel_after_first_gesture_is_uncertain_with_progress() {
+        let fixture = ExecutorFixture::new(
+            auto_swipe_plan(2),
+            Arc::new(FixtureFrames::new(&[40, 90, 140])),
+        );
+        fixture.driver.cancel_after_swipe.store(1, Ordering::SeqCst);
+
+        let error = fixture
+            .executor
+            .run_device(fixture.device_run_id, fixture.plan.clone())
+            .await
+            .expect_err("cancellation after dispatch must not resume the action");
+
+        assert_eq!(error.code(), "Cancelled");
+        assert_eq!(fixture.driver.swipe_calls.load(Ordering::SeqCst), 1);
+        let attempt = fixture
+            .detail()
+            .attempts
+            .into_iter()
+            .find(|attempt| attempt.action_kind == ActionKind::AutoSwipe)
+            .expect("AutoSwipe attempt");
+        assert_eq!(attempt.state, FlowAttemptState::Uncertain);
+        let progress = attempt.evidence_result.expect("partial dispatch progress");
+        assert_eq!(progress["requested"], 2);
+        assert_eq!(progress["dispatched"], 1);
+        assert!(progress["elapsedMs"].as_u64().is_some());
+        fixture.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn auto_swipe_rejects_runtime_geometry_mismatch_before_dispatch() {
+        let fixture =
+            ExecutorFixture::new(auto_swipe_plan(1), Arc::new(FixtureFrames::new(&[40, 90])));
+        fixture
+            .driver
+            .snapshot
+            .lock()
+            .geometry
+            .as_mut()
+            .unwrap()
+            .pixel_width = 8;
+
+        let error = fixture
+            .executor
+            .run_device(fixture.device_run_id, fixture.plan.clone())
+            .await
+            .expect_err("the calibrated frame must match runtime geometry");
+
+        assert_eq!(error.code(), "GeometryMismatch");
+        assert_eq!(fixture.driver.swipe_calls.load(Ordering::SeqCst), 0);
+        let attempt = fixture
+            .detail()
+            .attempts
+            .into_iter()
+            .find(|attempt| attempt.action_kind == ActionKind::AutoSwipe)
+            .expect("AutoSwipe attempt");
+        assert_eq!(attempt.state, FlowAttemptState::FailedBeforeDispatch);
+        fixture.shutdown().await;
+    }
+
+    #[test]
+    fn auto_swipe_seed_drives_repeatable_bounded_jitter_and_pause() {
+        let attempt = Uuid::from_u128(0x1234);
+        let seed = auto_swipe_seed(attempt);
+        let from = AutoSwipePoint { x: 0.5, y: 0.78 };
+        let to = AutoSwipePoint { x: 0.5, y: 0.28 };
+        let first = auto_swipe_points(from, to, 375, 667, seed, 0, 2);
+        let repeated = auto_swipe_points(from, to, 375, 667, seed, 0, 2);
+        assert_eq!(first.0.x, repeated.0.x);
+        assert_eq!(first.0.y, repeated.0.y);
+        assert_eq!(first.1.x, repeated.1.x);
+        assert_eq!(first.1.y, repeated.1.y);
+        assert!((0.0..375.0).contains(&first.0.x) && (0.0..667.0).contains(&first.0.y));
+        assert!((0.0..375.0).contains(&first.1.x) && (0.0..667.0).contains(&first.1.y));
+        let pause = auto_swipe_pause(seed, 4, 1_200, 2_500);
+        assert!((1_200..=2_500).contains(&pause));
+        assert_eq!(pause, auto_swipe_pause(seed, 4, 1_200, 2_500));
+    }
+
+    #[tokio::test]
     async fn geometry_mismatch_fails_before_the_tap_device_call() {
         let fixture = ExecutorFixture::new(tap_plan(8, 4), Arc::new(FixtureFrames::new(&[40, 90])));
         let error = fixture
@@ -4133,6 +4884,65 @@ mod tests {
         )
     }
 
+    fn auto_swipe_plan(count: u32) -> CompiledFlowPlanV2 {
+        let swipe = CompiledFlowNode {
+            id: Uuid::new_v4(),
+            kind: ActionKind::AutoSwipe,
+            config: CompiledActionConfig::AutoSwipe {
+                preset: AutoSwipePreset::TikTokFeed,
+                count: Some(count),
+                duration_ms: None,
+                from: AutoSwipePoint { x: 0.5, y: 0.78 },
+                to: AutoSwipePoint { x: 0.5, y: 0.28 },
+                gesture_duration_ms: 100,
+                pause_min_ms: 250,
+                pause_max_ms: 250,
+                jitter_percent: 3,
+            },
+            postcondition: Some(EvidenceSpec::FrameDigestChanged {
+                minimum_distance: 1,
+            }),
+        };
+        let mut plan = plan(
+            vec![launch_node(), swipe],
+            ContextPlan {
+                requires_exclusive: true,
+                requires_ui_session: true,
+                requires_stream: true,
+                requires_fresh_text_session: false,
+                initial_bundle_id: Some(TARGET.to_string()),
+            },
+            &["app.launch", "ui.swipe", "stream"],
+        );
+        let launch = plan.execution_order[0];
+        let swipe = plan.execution_order[1];
+        plan.successors
+            .insert(launch, BTreeMap::from([("flow".to_string(), swipe)]));
+        plan
+    }
+
+    fn auto_swipe_duration_plan(duration_ms: u64, gesture_duration_ms: u64) -> CompiledFlowPlanV2 {
+        let mut plan = auto_swipe_plan(1);
+        let node = plan
+            .nodes
+            .values_mut()
+            .find(|node| node.kind == ActionKind::AutoSwipe)
+            .expect("AutoSwipe node");
+        let CompiledActionConfig::AutoSwipe {
+            count,
+            duration_ms: configured_duration,
+            gesture_duration_ms: configured_gesture,
+            ..
+        } = &mut node.config
+        else {
+            unreachable!("AutoSwipe node/config pair")
+        };
+        *count = None;
+        *configured_duration = Some(duration_ms);
+        *configured_gesture = gesture_duration_ms;
+        plan
+    }
+
     fn launch_node() -> CompiledFlowNode {
         CompiledFlowNode {
             id: Uuid::new_v4(),
@@ -4211,7 +5021,11 @@ mod tests {
     }
 
     fn jpeg(color: u8) -> Frame {
-        let image = RgbImage::from_pixel(4, 4, Rgb([color, color, color]));
+        jpeg_sized(4, 4, color)
+    }
+
+    fn jpeg_sized(width: u32, height: u32, color: u8) -> Frame {
+        let image = RgbImage::from_pixel(width, height, Rgb([color, color, color]));
         let mut bytes = Cursor::new(Vec::new());
         DynamicImage::ImageRgb8(image)
             .write_to(&mut bytes, ImageFormat::Jpeg)

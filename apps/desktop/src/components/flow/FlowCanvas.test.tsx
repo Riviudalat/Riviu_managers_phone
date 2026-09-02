@@ -4,6 +4,7 @@ import type { EdgeChange, NodeChange } from "@xyflow/react";
 import { FlowCanvas } from "./FlowCanvas";
 import { createFlowNode, newFlowDocument, type IdFactory } from "../../flow/model";
 import type { FlowCanvasEdge, FlowCanvasNode } from "../../flow/graph";
+import type { ActionDefinition } from "../../types";
 
 // The real `applyNodeChanges`/`applyEdgeChanges`/`addEdge` stay — they are the pure
 // arithmetic under test. Only the rendering half is stubbed, because the point of these
@@ -96,6 +97,70 @@ function twoEdgeDocument() {
 }
 
 describe("FlowCanvas batched node changes", () => {
+  it("inserts on an edge selected in the same tick as the drop", () => {
+    const { document } = twoEdgeDocument();
+    const onInsertNode = vi.fn();
+    const waitAction: ActionDefinition = {
+      kind: "wait",
+      schemaVersion: 1,
+      label: "Chờ",
+      disabledReason: null,
+      category: "timing",
+      configSchema: { type: "object", properties: {} },
+      inputPorts: [{ name: "flow", valueType: "flow", required: true }],
+      outputPorts: [{ name: "flow", valueType: "flow", required: true }],
+      requiredCapabilities: [],
+      resourceClass: "pureDesktop",
+      sideEffectClass: "none",
+      evidenceRequirement: "none",
+      allowedEvidence: [],
+      qualifiedDetectorIds: [],
+      reconciliationPolicy: "none",
+      defaultTimeoutMs: 1_000,
+      retryPolicy: "beforeDispatchOnly",
+    };
+    render(
+      <FlowCanvas
+        document={document}
+        catalog={[waitAction]}
+        issues={[]}
+        selectedNodeId={null}
+        onSelectNode={vi.fn()}
+        onReplaceCanvas={vi.fn()}
+        onInsertNode={onInsertNode}
+        onAppendNode={vi.fn()}
+        onDeleteSelection={vi.fn()}
+        onViewport={vi.fn()}
+      />,
+    );
+    const onEdgesChange = canvasProps.onEdgesChange as (
+      changes: EdgeChange<FlowCanvasEdge>[],
+    ) => void;
+    const onDrop = canvasProps.onDrop as (event: {
+      preventDefault: () => void;
+      dataTransfer: { getData: () => string };
+      clientX: number;
+      clientY: number;
+    }) => void;
+
+    act(() => {
+      onEdgesChange([{ type: "select", id: "edge-a", selected: true }]);
+      onDrop({
+        preventDefault: vi.fn(),
+        dataTransfer: { getData: () => "wait" },
+        clientX: 800,
+        clientY: 800,
+      });
+    });
+
+    expect(onInsertNode).toHaveBeenCalledOnce();
+    expect(onInsertNode).toHaveBeenCalledWith(
+      "edge-a",
+      expect.objectContaining({ kind: "wait" }),
+      "flow",
+    );
+  });
+
   /// Two `onNodesChange` calls in one React tick — a keyboard move landing beside another
   /// change — must BOTH survive into the commit. The captured-state version of the handler
   /// computed each call from last render's array, so the second call silently discarded
