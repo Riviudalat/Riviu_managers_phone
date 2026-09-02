@@ -100,7 +100,7 @@ def matched_excluded_command_tokens(path: Path) -> list[tuple[bytes, str]]:
                 right_ok = end == len(payload) or not _token_character(payload[end])
                 wire_literal = True
                 if token == b"activate":
-                    delimiters = b"\"'\0"
+                    delimiters = b"\"'"
                     wire_literal = (
                         index > 0
                         and end < len(payload)

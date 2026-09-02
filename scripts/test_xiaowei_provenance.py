@@ -66,6 +66,8 @@ class XiaoweiProvenanceTests(unittest.TestCase):
             self.assertIn("security-excluded command", reasons)
             binary.write_bytes(b"reactivate activate_window")
             self.assertEqual(gate.matched_needles(binary), [])
+            binary.write_bytes(b"\0activate\0")
+            self.assertEqual(gate.matched_needles(binary), [])
 
     def test_checked_in_matrix_is_exact_generator_output(self):
         with tempfile.TemporaryDirectory() as temporary:
