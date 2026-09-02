@@ -15,12 +15,28 @@ const library: AppLibraryItem[] = [
     path: "C:/ipa/tiktok.ipa",
     bundleId: "com.ss.iphone.ugc.Ame",
     version: "35.0.0",
+    platform: "ios",
+    packageFormat: "ipa",
     createdAt: "2026-08-17T00:00:00.000Z",
+  },
+];
+
+const androidLibrary: AppLibraryItem[] = [
+  {
+    id: "android-app-1",
+    name: "TikTok.apkm",
+    path: "C:/apk/tiktok.apkm",
+    bundleId: "com.zhiliaoapp.musically",
+    version: "36.0.0",
+    platform: "android",
+    packageFormat: "apkm",
+    createdAt: "2026-09-02T00:00:00.000Z",
   },
 ];
 
 vi.mock("../api", () => ({
   addAppLibrary: vi.fn(async () => undefined),
+  cancelAppInstallBatch: vi.fn(async () => undefined),
   addMaterial: vi.fn(async () => undefined),
   analyticsSummary: vi.fn(async () => ({})),
   apiDocs: vi.fn(async () => ""),
@@ -28,8 +44,15 @@ vi.mock("../api", () => ({
   deleteMaterial: vi.fn(async () => undefined),
   deleteSchedule: vi.fn(async () => undefined),
   exampleScript: vi.fn(async () => "{}"),
-  installIpaToGroup: vi.fn(async () => []),
-  installLibraryApp: vi.fn(async () => undefined),
+  installLibraryAppBatch: vi.fn(async (request: { batchId: string; udids: string[] }) => ({
+    batchId: request.batchId,
+    progress: [],
+    results: request.udids.map((udid) => ({
+      udid,
+      status: "succeeded" as const,
+      effectStarted: true,
+    })),
+  })),
   listAppsLibrary: vi.fn(async () => library),
   listGroups: vi.fn(async () => []),
   listMaterials: vi.fn(async () => []),
@@ -48,6 +71,7 @@ vi.mock("../api", () => ({
 }));
 
 vi.mock("../pickFile", () => ({
+  pickFile: vi.fn(async () => null),
   pickDirectory: vi.fn(async () => null),
   pickIpa: vi.fn(async () => null),
   pickMaterial: vi.fn(async () => null),
@@ -92,6 +116,20 @@ function renderApps(devices: DeviceInfo[], selected: string[] = []) {
 }
 
 describe("AppsPage install targets", () => {
+  it("routes an Android split package only to selected Android devices", async () => {
+    const api = await import("../api");
+    vi.mocked(listAppsLibrary).mockResolvedValue(androidLibrary);
+    renderApps([iphone, android], [iphone.udid, android.udid]);
+
+    await userEvent.click(await screen.findByRole("button", { name: "Cài → 1 Android" }));
+
+    expect(api.installLibraryAppBatch).toHaveBeenCalledOnce();
+    expect(api.installLibraryAppBatch).toHaveBeenCalledWith(expect.objectContaining({
+      appId: "android-app-1",
+      udids: [android.udid],
+      allowDowngrade: false,
+    }));
+  });
   it("never counts an Android phone as a target for an IPA", async () => {
     // `targetsOf` falls back to *every connected device* when nothing is selected, so an
     // unselected click pushed an iOS app at every Android serial in the room and collected
@@ -99,20 +137,20 @@ describe("AppsPage install targets", () => {
     // whose label said it was about to install on twenty machines.
     renderApps([iphone, android, { ...android, udid: "ce0617", name: "Note 8" }]);
 
-    expect(await screen.findByRole("button", { name: "Install → 1 iPhone" })).toBeEnabled();
+    expect(await screen.findByRole("button", { name: "Cài → 1 iPhone" })).toBeEnabled();
   });
 
-  it("says which selected phones it is leaving out, rather than dropping them silently", async () => {
+  it("keeps platform filtering in the command label without a persistent explanatory note", async () => {
     renderApps([iphone, android], [iphone.udid, android.udid]);
 
-    expect(await screen.findByText(/Bỏ qua 1 máy Android đang chọn/)).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Install → 1 iPhone" })).toBeEnabled();
+    expect(await screen.findByRole("button", { name: "Cài → 1 iPhone" })).toBeEnabled();
+    expect(screen.queryByText(/Bỏ qua .* Android/)).toBeNull();
   });
 
   it("disables the install on an Android-only fleet and explains why", async () => {
     renderApps([android]);
 
-    const button = await screen.findByRole("button", { name: "Install → 0 iPhone" });
+    const button = await screen.findByRole("button", { name: "Cài → 0 iPhone" });
     expect(button).toBeDisabled();
     expect(button).toHaveAttribute(
       "title",
@@ -125,11 +163,57 @@ describe("AppsPage install targets", () => {
     const second = { ...iphone, udid: "second-iphone", name: "iPhone 8 (2)" };
     renderApps([iphone, android, second]);
 
-    await userEvent.click(await screen.findByRole("button", { name: "Install → 2 iPhone" }));
+    await userEvent.click(await screen.findByRole("button", { name: "Cài → 2 iPhone" }));
 
-    await waitFor(() => expect(api.installLibraryApp).toHaveBeenCalledTimes(2));
-    expect(api.installLibraryApp).toHaveBeenCalledWith(iphone.udid, "app-1");
-    expect(api.installLibraryApp).toHaveBeenCalledWith("second-iphone", "app-1");
+    await waitFor(() => expect(api.installLibraryAppBatch).toHaveBeenCalledOnce());
+    expect(api.installLibraryAppBatch).toHaveBeenCalledWith(expect.objectContaining({
+      appId: "app-1",
+      udids: [iphone.udid, "second-iphone"],
+    }));
+  });
+
+  it("requires explicit confirmation before requesting downgrade and renders typed outcomes", async () => {
+    const api = await import("../api");
+    vi.mocked(api.installLibraryAppBatch).mockResolvedValueOnce({
+      batchId: "batch-1",
+      progress: [],
+      results: [{
+        udid: iphone.udid,
+        status: "uncertain",
+        effectStarted: true,
+        detail: "readback timed out",
+      }],
+    });
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+    renderApps([iphone]);
+
+    await userEvent.click(await screen.findByRole("checkbox", { name: "Cho phép hạ phiên bản" }));
+    await userEvent.click(screen.getByRole("button", { name: "Cài → 1 iPhone" }));
+
+    expect(confirm).toHaveBeenCalledOnce();
+    expect(api.installLibraryAppBatch).toHaveBeenCalledWith(expect.objectContaining({
+      allowDowngrade: true,
+    }));
+    expect(await screen.findByText("Cần kiểm lại")).toBeVisible();
+    expect(screen.getByText("readback timed out")).toBeVisible();
+  });
+
+  it("cancels only the active batch while the backend owns in-flight installs", async () => {
+    const api = await import("../api");
+    let finish!: (value: Awaited<ReturnType<typeof api.installLibraryAppBatch>>) => void;
+    vi.mocked(api.installLibraryAppBatch).mockReturnValueOnce(new Promise((resolve) => {
+      finish = resolve;
+    }));
+    renderApps([iphone]);
+
+    await userEvent.click(await screen.findByRole("button", { name: "Cài → 1 iPhone" }));
+    const cancel = await screen.findByRole("button", { name: "Hủy máy chưa bắt đầu" });
+    await userEvent.click(cancel);
+
+    const request = vi.mocked(api.installLibraryAppBatch).mock.calls[0][0];
+    expect(api.cancelAppInstallBatch).toHaveBeenCalledWith(request.batchId);
+    finish({ batchId: request.batchId, progress: [], results: [] });
+    await waitFor(() => expect(cancel).not.toBeInTheDocument());
   });
 });
 
@@ -137,23 +221,23 @@ describe("AppsPage list states", () => {
   it("does not render an empty library before its first answer", async () => {
     renderApps([iphone]);
 
-    expect(screen.getByRole("status")).toHaveTextContent("Đang tải thư viện IPA");
-    expect(screen.queryByText("Chưa có IPA")).toBeNull();
+    expect(screen.getByRole("status")).toHaveTextContent("Đang tải thư viện ứng dụng");
+    expect(screen.queryByText("Chưa có ứng dụng")).toBeNull();
     expect(screen.queryByRole("heading", { level: 2 })).toBeNull();
     expect(await screen.findByText("TikTok.ipa")).toBeInTheDocument();
   });
 
   it("shows a failed library load inline and retries it", async () => {
     vi.mocked(listAppsLibrary)
-      .mockRejectedValueOnce(new Error("Không đọc được thư viện IPA"))
+      .mockRejectedValueOnce(new Error("Không đọc được thư viện ứng dụng"))
       .mockResolvedValueOnce(library);
 
     renderApps([iphone]);
 
-    expect(await screen.findByRole("alert")).toHaveTextContent("Không đọc được thư viện IPA");
-    expect(screen.queryByText("Chưa có IPA")).toBeNull();
+    expect(await screen.findByRole("alert")).toHaveTextContent("Không đọc được thư viện ứng dụng");
+    expect(screen.queryByText("Chưa có ứng dụng")).toBeNull();
 
-    await userEvent.click(screen.getByRole("button", { name: "Thử lại thư viện IPA" }));
+    await userEvent.click(screen.getByRole("button", { name: "Thử lại thư viện ứng dụng" }));
 
     await waitFor(() => expect(listAppsLibrary).toHaveBeenCalledTimes(2));
     expect(await screen.findByText("TikTok.ipa")).toBeInTheDocument();
@@ -168,9 +252,9 @@ describe("AppsPage list states", () => {
 
     expect(screen.getByText("Đang tải danh sách nhóm…")).toBeInTheDocument();
     expect(await screen.findByText(/Không tải được danh sách nhóm: groups down/)).toBeInTheDocument();
-    expect(screen.getByText(/Không tải được thư viện IPA: library down/)).toBeInTheDocument();
+    expect(screen.getByText(/Không tải được thư viện ứng dụng: library down/)).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Thử lại danh sách nhóm" })).toBeEnabled();
-    expect(screen.getByRole("button", { name: "Thử lại thư viện IPA" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Thử lại thư viện ứng dụng" })).toBeEnabled();
     expect(screen.queryByText("Chưa có nhóm thiết bị")).toBeNull();
     expect(screen.getByText("Danh sách nhóm chưa tải được")).toBeInTheDocument();
 

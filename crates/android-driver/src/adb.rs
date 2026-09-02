@@ -288,6 +288,27 @@ pub enum AdbOrigin {
     Bundled,
 }
 
+/// Which adb sources a driver build is allowed to trust.
+///
+/// Developer builds keep the explicit and environment overrides needed by probes and
+/// fixture binaries. Packaged production builds use only the executable whose installer
+/// resource manifest was verified before it reached [`crate::AndroidDriverConfig`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AdbResolutionPolicy {
+    Development,
+    PackagedOnly,
+}
+
+impl AdbResolutionPolicy {
+    pub(crate) const fn current_build() -> Self {
+        if cfg!(debug_assertions) {
+            Self::Development
+        } else {
+            Self::PackagedOnly
+        }
+    }
+}
+
 impl AdbOrigin {
     /// How this source reads to an operator, in the language the UI uses.
     pub fn label(&self) -> &'static str {
@@ -303,7 +324,7 @@ impl AdbOrigin {
 }
 
 impl AdbProgram {
-    /// Every place to look for `adb`, best first.
+    /// Every place a developer build may look for `adb`, best first.
     ///
     /// `configured -> RIVIU_ADB_PATH -> ANDROID_SDK_ROOT -> ANDROID_HOME -> PATH ->
     /// bundled`. One implementation, because two callers need the same order and
@@ -369,6 +390,66 @@ impl AdbProgram {
         candidates
     }
 
+    /// Candidate set constrained by the build's trust policy.
+    ///
+    /// Production does not merely put the packaged binary first: it omits every other
+    /// source, so a missing or corrupt installation cannot silently start an unrelated adb
+    /// from app config, an SDK variable, or `PATH`.
+    pub(crate) fn candidates_for_policy(
+        policy: AdbResolutionPolicy,
+        configured: Option<&Path>,
+        bundled: Option<&Path>,
+    ) -> anyhow::Result<Vec<AdbCandidate>> {
+        match policy {
+            AdbResolutionPolicy::Development => Ok(Self::candidates(configured, bundled)),
+            AdbResolutionPolicy::PackagedOnly => {
+                let path = bundled.ok_or_else(|| {
+                    anyhow!("packaged adb path is missing from the production configuration")
+                })?;
+                if !path.is_file() {
+                    return Err(anyhow!("packaged adb is missing at {}", path.display()));
+                }
+                Ok(vec![AdbCandidate {
+                    path: path.to_path_buf(),
+                    origin: AdbOrigin::Bundled,
+                }])
+            }
+        }
+    }
+
+    /// Resolve a binary and retain the source that supplied it.
+    pub(crate) fn resolve_for_policy(
+        policy: AdbResolutionPolicy,
+        configured: Option<&Path>,
+        bundled: Option<&Path>,
+    ) -> anyhow::Result<(Self, AdbOrigin)> {
+        let candidates = Self::candidates_for_policy(policy, configured, bundled)?;
+        for candidate in &candidates {
+            if candidate.origin != AdbOrigin::Path && candidate.path.is_file() {
+                return Ok((
+                    Self {
+                        path: candidate.path.clone(),
+                    },
+                    candidate.origin,
+                ));
+            }
+        }
+        if let Some(candidate) = candidates
+            .into_iter()
+            .find(|candidate| candidate.origin == AdbOrigin::Path)
+        {
+            return Ok((
+                Self {
+                    path: candidate.path,
+                },
+                candidate.origin,
+            ));
+        }
+        Err(anyhow!(
+            "adb resolution policy produced no usable candidate"
+        ))
+    }
+
     /// Pick a binary without running anything.
     ///
     /// First candidate that exists on disk, else the bare name for the OS to search.
@@ -377,20 +458,8 @@ impl AdbProgram {
     /// probing version is [`crate::detect_driver`], which is the one that decides
     /// whether the backend joins the fleet.
     pub fn resolve(configured: Option<&Path>, bundled: Option<&Path>) -> anyhow::Result<Self> {
-        let candidates = Self::candidates(configured, bundled);
-        for candidate in &candidates {
-            if candidate.origin == AdbOrigin::Path {
-                continue;
-            }
-            if candidate.path.is_file() {
-                return Ok(Self {
-                    path: candidate.path.clone(),
-                });
-            }
-        }
-        Ok(Self {
-            path: PathBuf::from(exe_name()),
-        })
+        Self::resolve_for_policy(AdbResolutionPolicy::Development, configured, bundled)
+            .map(|(program, _)| program)
     }
 
     /// Use exactly this binary, no searching.
@@ -584,6 +653,62 @@ impl AdbProgram {
         let mut full: Vec<&str> = vec!["-s", serial];
         full.extend_from_slice(args);
         self.run(&full, timeout).await
+    }
+
+    /// Run one device command while preserving the only retry boundary that
+    /// matters for an external effect: whether the OS process was created.
+    /// A timeout or wait error after `spawn` is never folded back into a
+    /// before-effect error, even when adb produced no output.
+    pub async fn device_effect(
+        &self,
+        serial: &str,
+        args: &[&str],
+        timeout: Duration,
+    ) -> Result<AdbEffectOutput, AdbEffectFailure> {
+        self.device_effect_with_before_spawn(serial, args, timeout, || true)
+            .await
+    }
+
+    /// Run an effectful device command with one final, synchronous admission
+    /// check after all adb queues have been acquired and immediately before
+    /// process creation.
+    pub async fn device_effect_with_before_spawn<F>(
+        &self,
+        serial: &str,
+        args: &[&str],
+        timeout: Duration,
+        before_spawn: F,
+    ) -> Result<AdbEffectOutput, AdbEffectFailure>
+    where
+        F: FnOnce() -> bool + Send,
+    {
+        let mut command = self.command();
+        command.args(["-s", serial]);
+        command.args(args);
+        let verb = args.first().copied().unwrap_or("adb");
+        let _slot = enter_adb_slot(Some(serial), verb, adb_lane(Some(verb))).await;
+        if !before_spawn() {
+            return Err(AdbEffectFailure::CancelledBeforeSpawn);
+        }
+        let child = command
+            .spawn()
+            .map_err(|error| AdbEffectFailure::BeforeSpawn {
+                detail: format!("spawn adb {verb}: {error}"),
+            })?;
+        let output = tokio::time::timeout(timeout, child.wait_with_output())
+            .await
+            .map_err(|_| AdbEffectFailure::AfterSpawn {
+                detail: format!("adb {verb} timed out after {timeout:?}"),
+            })?
+            .map_err(|error| AdbEffectFailure::AfterSpawn {
+                detail: format!("wait for adb {verb}: {error}"),
+            })?;
+        Ok(AdbEffectOutput {
+            success: output.status.success(),
+            exit_code: output.status.code(),
+            stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+        })
     }
 
     /// Run a shell command on the device.
@@ -1089,6 +1214,21 @@ pub struct ShellOutput {
     pub exit_code: i32,
     pub stdout: String,
     pub stderr: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AdbEffectOutput {
+    pub success: bool,
+    pub exit_code: Option<i32>,
+    pub stdout: String,
+    pub stderr: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AdbEffectFailure {
+    CancelledBeforeSpawn,
+    BeforeSpawn { detail: String },
+    AfterSpawn { detail: String },
 }
 
 /// The rotation the device reports, from `dumpsys window`.
@@ -1903,6 +2043,79 @@ mod tests {
     }
 
     use super::*;
+
+    #[tokio::test]
+    async fn effect_command_distinguishes_spawn_from_every_later_failure() {
+        let missing = AdbProgram::at(PathBuf::from(format!(
+            "definitely-missing-adb-{}",
+            uuid::Uuid::new_v4()
+        )));
+        let before = missing
+            .device_effect("fixture", &["install", "base.apk"], Duration::from_secs(1))
+            .await
+            .expect_err("missing executable must fail before spawn");
+        assert!(matches!(before, AdbEffectFailure::BeforeSpawn { .. }));
+
+        let executable = if cfg!(windows) {
+            PathBuf::from("cmd.exe")
+        } else {
+            PathBuf::from("/bin/false")
+        };
+        let spawned = AdbProgram::at(executable)
+            .device_effect("fixture", &["install", "base.apk"], Duration::from_secs(5))
+            .await;
+        assert!(
+            !matches!(spawned, Err(AdbEffectFailure::BeforeSpawn { .. })),
+            "once the process exists, no result may become retryable: {spawned:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn effect_gate_is_checked_after_the_adb_queue_and_immediately_before_spawn() {
+        let _serial_guard = slot_tests_run_one_at_a_time().lock().await;
+        let serial = "queued-effect-cancel";
+        let held = enter_adb_slot(Some(serial), "install-multiple", AdbLane::Interactive).await;
+        let cancelled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let callback_count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let task_cancelled = cancelled.clone();
+        let task_callback_count = callback_count.clone();
+        let missing = AdbProgram::at(PathBuf::from(format!(
+            "definitely-missing-adb-{}",
+            uuid::Uuid::new_v4()
+        )));
+
+        let queued = tokio::spawn(async move {
+            missing
+                .device_effect_with_before_spawn(
+                    serial,
+                    &["install-multiple", "-r", "-g", "base.apk"],
+                    Duration::from_secs(1),
+                    move || {
+                        task_callback_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        !task_cancelled.load(std::sync::atomic::Ordering::SeqCst)
+                    },
+                )
+                .await
+        });
+        tokio::task::yield_now().await;
+        assert_eq!(
+            callback_count.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "the effect callback must not run while adb is still queued"
+        );
+        cancelled.store(true, std::sync::atomic::Ordering::SeqCst);
+        drop(held);
+
+        assert!(matches!(
+            queued.await.expect("queued task"),
+            Err(AdbEffectFailure::CancelledBeforeSpawn)
+        ));
+        assert_eq!(
+            callback_count.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "the one-shot callback is evaluated exactly at the dispatch boundary"
+        );
+    }
 
     #[test]
     fn parse_wlan_ipv4_pulls_the_usable_address() {
@@ -3309,6 +3522,70 @@ drwxr-xr-x  32 root   root       788 2009-01-01 07:00 ..\n";
                 "resolve returned {:?}, which is neither an existing file nor the bare name",
                 resolved.path()
             );
+        }
+
+        #[test]
+        fn packaged_only_resolution_ignores_override_environment_and_path() {
+            let dir = std::env::temp_dir().join(format!(
+                "riviu-packaged-adb-policy-{}",
+                uuid::Uuid::new_v4()
+            ));
+            std::fs::create_dir_all(&dir).expect("temp dir");
+            let configured = dir.join(format!("configured-{}", exe_name()));
+            let bundled = dir.join(format!("bundled-{}", exe_name()));
+            std::fs::write(&configured, b"developer override").expect("configured adb");
+            std::fs::write(&bundled, b"packaged adb").expect("bundled adb");
+
+            let candidates = AdbProgram::candidates_for_policy(
+                AdbResolutionPolicy::PackagedOnly,
+                Some(&configured),
+                Some(&bundled),
+            )
+            .expect("packaged candidates");
+            assert_eq!(
+                candidates,
+                [AdbCandidate {
+                    path: bundled.clone(),
+                    origin: AdbOrigin::Bundled,
+                }],
+                "release policy must not include the configured path, environment, or PATH"
+            );
+
+            let (resolved, origin) = AdbProgram::resolve_for_policy(
+                AdbResolutionPolicy::PackagedOnly,
+                Some(&configured),
+                Some(&bundled),
+            )
+            .expect("packaged resolution");
+            assert_eq!(resolved.path(), bundled.as_path());
+            assert_eq!(origin, AdbOrigin::Bundled);
+            std::fs::remove_dir_all(dir).ok();
+        }
+
+        #[test]
+        fn packaged_only_resolution_fails_closed_when_bundle_is_missing() {
+            let dir = std::env::temp_dir().join(format!(
+                "riviu-missing-packaged-adb-{}",
+                uuid::Uuid::new_v4()
+            ));
+            std::fs::create_dir_all(&dir).expect("temp dir");
+            let configured = dir.join(format!("configured-{}", exe_name()));
+            let missing_bundle = dir.join(format!("missing-{}", exe_name()));
+            std::fs::write(&configured, b"valid developer override").expect("configured adb");
+
+            let error = AdbProgram::resolve_for_policy(
+                AdbResolutionPolicy::PackagedOnly,
+                Some(&configured),
+                Some(&missing_bundle),
+            )
+            .expect_err("a release build must not fall back when its adb is missing");
+            let message = format!("{error:#}");
+            assert!(message.contains("packaged adb"), "{message}");
+            assert!(
+                message.contains(&missing_bundle.display().to_string()),
+                "{message}"
+            );
+            std::fs::remove_dir_all(dir).ok();
         }
 
         #[test]

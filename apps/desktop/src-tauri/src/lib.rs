@@ -3,6 +3,7 @@ mod agent_commands;
 /// Public so the live harness binaries resolve the agent exactly as the app
 /// does. Duplicating the token/manifest choice is how the two drift apart.
 pub mod agent_runtime;
+pub mod android_package_tools;
 mod android_tools;
 mod command_error;
 mod commands;
@@ -448,6 +449,9 @@ pub fn run() {
             farm_commands::add_app_library,
             farm_commands::delete_app_library,
             farm_commands::install_library_app,
+            farm_commands::install_library_app_to_group,
+            farm_commands::install_library_app_batch,
+            farm_commands::cancel_app_install_batch,
             farm_commands::list_schedules,
             farm_commands::save_schedule,
             farm_commands::delete_schedule,

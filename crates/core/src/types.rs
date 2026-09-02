@@ -1,3 +1,7 @@
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::Arc;
+
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -713,6 +717,23 @@ pub struct InstalledApp {
     pub icon_png_base64: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AppLibraryPlatform {
+    Ios,
+    Android,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AppPackageFormat {
+    Ipa,
+    Apk,
+    Xapk,
+    Apkm,
+    Apks,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AppLibraryItem {
@@ -721,7 +742,157 @@ pub struct AppLibraryItem {
     pub path: String,
     pub bundle_id: String,
     pub version: String,
+    pub platform: AppLibraryPlatform,
+    pub package_format: AppPackageFormat,
+    /// Canonical artifact classification for new callers. `package_format` remains the
+    /// compatibility spelling used by the first library UI.
+    pub artifact_kind: AppPackageFormat,
+    pub application_id: String,
+    pub version_name: String,
+    pub version_code: Option<String>,
+    pub sha256: String,
+    pub size_bytes: u64,
+    pub signer_sha256: String,
+    pub icon_png_base64: Option<String>,
+    pub metadata_status: String,
+    pub metadata_error: Option<String>,
     pub created_at: String,
+}
+
+/// Public request for installing one library artifact on one or more devices.
+///
+/// `batch_id` is supplied by the caller so a later cancel command can stop only
+/// devices which have not crossed the install boundary yet. An install already
+/// dispatched to Android's Package Manager is deliberately allowed to finish.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AppInstallRequest {
+    pub batch_id: String,
+    pub app_id: String,
+    pub udids: Vec<String>,
+    #[serde(default)]
+    pub allow_downgrade: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum AppInstallProgressPhase {
+    Pending,
+    Preparing,
+    Installing,
+    Reconciling,
+    Complete,
+    CancelledBeforeDispatch,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AppInstallProgress {
+    pub udid: String,
+    pub phase: AppInstallProgressPhase,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
+/// Effect-aware terminal state for one device.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum AppInstallStatus {
+    Succeeded,
+    BeforeEffect,
+    FailedVerified,
+    Uncertain,
+    CancelledBeforeDispatch,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AppInstallResult {
+    pub udid: String,
+    pub status: AppInstallStatus,
+    pub effect_started: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub observed_version_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub observed_version_code: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AppInstallBatchResponse {
+    pub batch_id: String,
+    pub progress: Vec<AppInstallProgress>,
+    pub results: Vec<AppInstallResult>,
+}
+
+/// Host paths and immutable identity passed to a platform driver after the
+/// library/container layer has verified every APK in the set.
+#[derive(Debug, Clone)]
+pub struct DeviceAppInstallRequest {
+    pub apk_paths: Vec<PathBuf>,
+    pub application_id: String,
+    pub version_name: String,
+    pub version_code: Option<String>,
+    pub allow_downgrade: bool,
+    /// One-shot boundary shared with the batch cancel path. The driver consumes it
+    /// immediately before spawning the installer process.
+    pub effect_gate: Option<InstallEffectGate>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct InstallEffectGate(Arc<AtomicU8>);
+
+impl InstallEffectGate {
+    const PREPARING: u8 = 0;
+    const CLAIMED: u8 = 1;
+    const CANCELLED: u8 = 2;
+
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn claim_effect(&self) -> bool {
+        self.0
+            .compare_exchange(
+                Self::PREPARING,
+                Self::CLAIMED,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .is_ok()
+    }
+
+    pub fn cancel_before_effect(&self) -> bool {
+        self.0
+            .compare_exchange(
+                Self::PREPARING,
+                Self::CANCELLED,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .is_ok()
+    }
+
+    pub fn effect_claimed(&self) -> bool {
+        self.0.load(Ordering::Acquire) == Self::CLAIMED
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.0.load(Ordering::Acquire) == Self::CANCELLED
+    }
+}
+
+/// The fields Bundletool uses to select one compatible split set. Sorted and
+/// normalized by the Android driver so equality is a stable fleet grouping key.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "camelCase")]
+pub struct AndroidInstallDeviceSpec {
+    pub sdk_version: u32,
+    pub supported_abis: Vec<String>,
+    pub screen_density: u32,
+    pub supported_locales: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

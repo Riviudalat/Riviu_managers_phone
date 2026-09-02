@@ -11,11 +11,15 @@ use anyhow::{anyhow, Context};
 use async_trait::async_trait;
 use parking_lot::Mutex;
 use riviu_core::driver::{AppProcessState, DeviceDriver, ProcessAbsenceProof, UiSession};
-use riviu_core::{ConnectionKind, DeviceInfo, DeviceStatus};
+use riviu_core::{
+    AndroidInstallDeviceSpec, AppInstallResult, AppInstallStatus, ConnectionKind,
+    DeviceAppInstallRequest, DeviceInfo, DeviceStatus,
+};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use crate::adb::{self, AdbDeviceState, AdbProgram};
 use crate::agent::AgentClient;
+use crate::frames;
 use crate::session::AndroidUiSession;
 
 /// Package names of the agent halves, as published by Appium.
@@ -207,8 +211,9 @@ impl Drop for StartClaim<'_> {
 
 #[derive(Debug, Clone, Default)]
 pub struct AndroidDriverConfig {
-    /// Explicit path to `adb`. Falls back to `RIVIU_ADB_PATH`,
-    /// `ANDROID_SDK_ROOT`/`ANDROID_HOME`, `PATH`, then [`Self::bundled_adb_path`].
+    /// Explicit developer-build path to `adb`. Debug builds fall back to
+    /// `RIVIU_ADB_PATH`, `ANDROID_SDK_ROOT`/`ANDROID_HOME`, `PATH`, then
+    /// [`Self::bundled_adb_path`]. Production builds ignore this field.
     pub adb_path: Option<PathBuf>,
     /// DeviceFarmer's `noarch/minicap.apk`, the JPEG frame source. Falls back to
     /// `RIVIU_MINICAP_APK`, then [`Self::bundled_minicap_apk`].
@@ -216,11 +221,9 @@ pub struct AndroidDriverConfig {
     /// The `adb` shipped inside our own installer, verified against
     /// `android-tools-manifest.json` before it gets here.
     ///
-    /// **Lowest priority of all**, and a separate field for exactly that reason:
-    /// putting the bundled path into [`Self::adb_path`] would make it outrank
-    /// `RIVIU_ADB_PATH` and every SDK variable, because those are only consulted when
-    /// the configured field is empty. A field the operator cannot outrank is not a
-    /// safety net, it is a hijack.
+    /// This is the only adb source accepted by a production build. Debug builds keep it
+    /// last so local probes may use an explicitly selected SDK without switching the adb
+    /// server already holding port 5037.
     pub bundled_adb_path: Option<PathBuf>,
     /// The `minicap.apk` shipped inside our own installer, same precedence rule.
     ///
@@ -229,6 +232,10 @@ pub struct AndroidDriverConfig {
     /// configured value is preferred over `RIVIU_MINICAP_APK`. See AGENTS.md 9.27 —
     /// keeping that env override working is part of the decision to bundle at all.
     pub bundled_minicap_apk: Option<PathBuf>,
+    /// JRE used only for Bundletool's `.apks` device-specific extraction.
+    pub package_java: Option<PathBuf>,
+    /// Pinned Bundletool JAR paired with [`Self::package_java`].
+    pub bundletool_jar: Option<PathBuf>,
     /// Explicit path to the scrcpy 3.3.4 server JAR. Falls back to
     /// `RIVIU_SCRCPY_SERVER`, then [`Self::bundled_scrcpy_server`].
     pub scrcpy_server: Option<PathBuf>,
@@ -425,10 +432,292 @@ fn apply_app_descriptions(
     }
 }
 
+/// Every set is installed by one explicit Package Manager transaction, including
+/// singleton APKs. This keeps the effect boundary identical for all library formats.
+fn install_set_args(paths: &[PathBuf]) -> anyhow::Result<Vec<String>> {
+    install_set_args_with_downgrade(paths, false)
+}
+
+fn install_set_args_with_downgrade(
+    paths: &[PathBuf],
+    allow_downgrade: bool,
+) -> anyhow::Result<Vec<String>> {
+    anyhow::ensure!(
+        !paths.is_empty(),
+        "an Android install set must contain at least one APK"
+    );
+    let mut args = vec![
+        "install-multiple".to_string(),
+        "-r".to_string(),
+        "-g".to_string(),
+    ];
+    if allow_downgrade {
+        args.push("-d".to_string());
+    }
+    for path in paths {
+        let path = path
+            .to_str()
+            .ok_or_else(|| anyhow!("the APK path is not UTF-8"))?;
+        anyhow::ensure!(
+            path.to_ascii_lowercase().ends_with(".apk"),
+            "install set contains a non-APK path: {path}"
+        );
+        args.push(path.to_string());
+    }
+    Ok(args)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ObservedPackageVersion {
+    version_name: Option<String>,
+    version_code: Option<String>,
+}
+
+fn parse_package_version(dumpsys: &str) -> ObservedPackageVersion {
+    let mut observed = ObservedPackageVersion {
+        version_name: None,
+        version_code: None,
+    };
+    for line in dumpsys.lines().map(str::trim) {
+        if let Some(value) = line.strip_prefix("versionName=") {
+            let value = value.trim();
+            if !value.is_empty() && value != "null" {
+                observed.version_name = Some(value.to_string());
+            }
+        }
+        if let Some(value) = line.strip_prefix("versionCode=") {
+            let value = value.split_whitespace().next().unwrap_or_default().trim();
+            if !value.is_empty() {
+                observed.version_code = Some(value.to_string());
+            }
+        }
+    }
+    observed
+}
+
+fn observed_install_matches(
+    request: &DeviceAppInstallRequest,
+    observed: &ObservedPackageVersion,
+) -> bool {
+    if observed.version_name.as_deref() != Some(request.version_name.as_str()) {
+        return false;
+    }
+    request
+        .version_code
+        .as_deref()
+        .is_none_or(|expected| observed.version_code.as_deref() == Some(expected))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum InstallProcessResult {
+    Completed(Result<(), String>),
+    Interrupted(String),
+}
+
+fn classify_post_spawn_install(
+    udid: &str,
+    request: &DeviceAppInstallRequest,
+    effect: InstallProcessResult,
+    readback: Result<ObservedPackageVersion, String>,
+) -> AppInstallResult {
+    let observed = match readback {
+        Ok(observed) => observed,
+        Err(error) => {
+            let mut details = Vec::new();
+            match effect {
+                InstallProcessResult::Completed(Err(effect_error))
+                | InstallProcessResult::Interrupted(effect_error) => details.push(effect_error),
+                InstallProcessResult::Completed(Ok(())) => {}
+            }
+            details.push(format!("package readback failed: {error}"));
+            return AppInstallResult {
+                udid: udid.to_string(),
+                status: AppInstallStatus::Uncertain,
+                effect_started: true,
+                observed_version_name: None,
+                observed_version_code: None,
+                detail: Some(details.join("; ")),
+            };
+        }
+    };
+    let matches = observed_install_matches(request, &observed);
+    let status = match (&effect, matches) {
+        (InstallProcessResult::Completed(Ok(())), true) => AppInstallStatus::Succeeded,
+        (InstallProcessResult::Interrupted(_), _) => AppInstallStatus::Uncertain,
+        (InstallProcessResult::Completed(_), _) => AppInstallStatus::FailedVerified,
+    };
+    let detail = match (matches, effect) {
+        (true, InstallProcessResult::Completed(Ok(()))) => None,
+        (true, InstallProcessResult::Completed(Err(error))) => Some(format!(
+            "installer reported an error, but package/version readback matched: {error}"
+        )),
+        (true, InstallProcessResult::Interrupted(error)) => Some(format!(
+            "installer was interrupted, but package/version readback matched: {error}"
+        )),
+        (false, InstallProcessResult::Completed(Ok(()))) => Some(
+            "installer exited successfully, but package/version readback did not match".to_string(),
+        ),
+        (false, InstallProcessResult::Completed(Err(error))) => Some(format!(
+            "installer failed and package/version readback did not match: {error}"
+        )),
+        (false, InstallProcessResult::Interrupted(error)) => Some(format!(
+            "installer was interrupted and readback does not prove a terminal state: {error}"
+        )),
+    };
+    AppInstallResult {
+        udid: udid.to_string(),
+        status,
+        effect_started: true,
+        observed_version_name: observed.version_name,
+        observed_version_code: observed.version_code,
+        detail,
+    }
+}
+
+fn apks_extraction_paths(root: &Path) -> anyhow::Result<Vec<PathBuf>> {
+    fn collect(root: &Path, paths: &mut Vec<PathBuf>) -> anyhow::Result<()> {
+        for entry in std::fs::read_dir(root)
+            .with_context(|| format!("read Bundletool output {}", root.display()))?
+        {
+            let path = entry?.path();
+            if path.is_dir() {
+                collect(&path, paths)?;
+            } else if path
+                .extension()
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("apk"))
+            {
+                paths.push(path);
+            }
+        }
+        Ok(())
+    }
+    let mut paths = Vec::new();
+    collect(root, &mut paths)?;
+    paths.sort();
+    anyhow::ensure!(!paths.is_empty(), "Bundletool extracted no APK files");
+    Ok(paths)
+}
+
+async fn bounded_command_output(
+    command: &mut tokio::process::Command,
+    deadline: Duration,
+) -> anyhow::Result<std::process::Output> {
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    let mut child = command.spawn().context("spawn package tool")?;
+    let mut stdout = child.stdout.take().context("capture package-tool stdout")?;
+    let mut stderr = child.stderr.take().context("capture package-tool stderr")?;
+    let stdout_task = tokio::spawn(async move {
+        let mut bytes = Vec::new();
+        stdout.read_to_end(&mut bytes).await?;
+        Ok::<_, std::io::Error>(bytes)
+    });
+    let stderr_task = tokio::spawn(async move {
+        let mut bytes = Vec::new();
+        stderr.read_to_end(&mut bytes).await?;
+        Ok::<_, std::io::Error>(bytes)
+    });
+    let status = match tokio::time::timeout(deadline, child.wait()).await {
+        Ok(status) => status.context("wait for package tool")?,
+        Err(_) => {
+            let _ = child.start_kill();
+            let _ = child.wait().await;
+            let _ = stdout_task.await;
+            let _ = stderr_task.await;
+            return Err(anyhow!("package tool timed out after {deadline:?}"));
+        }
+    };
+    let stdout = stdout_task
+        .await
+        .context("join package-tool stdout reader")?
+        .context("read package-tool stdout")?;
+    let stderr = stderr_task
+        .await
+        .context("join package-tool stderr reader")?
+        .context("read package-tool stderr")?;
+    Ok(std::process::Output {
+        status,
+        stdout,
+        stderr,
+    })
+}
+
+fn device_spec_from_probe(probe: &str) -> anyhow::Result<AndroidInstallDeviceSpec> {
+    let fields = probe
+        .split(FIELD_SEPARATOR)
+        .map(str::trim)
+        .collect::<Vec<_>>();
+    anyhow::ensure!(
+        fields.len() >= 4,
+        "ADB returned an incomplete Android device-spec probe"
+    );
+    let sdk_version = fields[0]
+        .parse::<u32>()
+        .context("parse Android SDK version")?;
+    let primary_abis = fields[1];
+    let fallback_abi = fields.get(4).copied().unwrap_or_default();
+    let mut supported_abis =
+        if primary_abis.trim().is_empty() || primary_abis.trim().eq_ignore_ascii_case("null") {
+            fallback_abi
+        } else {
+            primary_abis
+        }
+        .split(',')
+        .filter(|abi| !abi.trim().is_empty())
+        .map(str::trim)
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    anyhow::ensure!(
+        !supported_abis.is_empty(),
+        "Android device reported no supported ABI"
+    );
+    let density_line = fields[2]
+        .lines()
+        .map(str::trim)
+        .rfind(|line| line.to_ascii_lowercase().contains("density"))
+        .context("Android device reported no screen density")?;
+    let screen_density = density_line
+        .split(|ch: char| !ch.is_ascii_digit())
+        .rfind(|token| !token.is_empty())
+        .unwrap_or_default()
+        .parse::<u32>()
+        .context("parse Android screen density")?;
+    let primary_locales = fields[3];
+    let fallback_locale = fields.get(5).copied().unwrap_or_default();
+    let mut supported_locales = if primary_locales.trim().is_empty()
+        || primary_locales.trim().eq_ignore_ascii_case("null")
+    {
+        fallback_locale
+    } else {
+        primary_locales
+    }
+    .split(',')
+    .filter(|locale| !locale.trim().is_empty() && *locale != "null")
+    .map(str::trim)
+    .map(str::to_string)
+    .collect::<Vec<_>>();
+    let mut seen_abis = HashSet::new();
+    supported_abis.retain(|abi| seen_abis.insert(abi.clone()));
+    let mut seen_locales = HashSet::new();
+    supported_locales.retain(|locale| seen_locales.insert(locale.clone()));
+    Ok(AndroidInstallDeviceSpec {
+        sdk_version,
+        supported_abis,
+        screen_density,
+        supported_locales,
+    })
+}
+
 pub struct AndroidDriver {
     adb: AdbProgram,
+    adb_origin: adb::AdbOrigin,
     minicap_apk: Option<PathBuf>,
     scrcpy_server: Option<PathBuf>,
+    package_java: Option<PathBuf>,
+    bundletool_jar: Option<PathBuf>,
     /// Where frames go. Injected by the composition root, which owns the hub —
     /// this crate must not depend on whichever crate that is.
     frame_sink: Mutex<Option<Arc<dyn riviu_core::FrameSink>>>,
@@ -489,6 +778,9 @@ pub struct AndroidDriver {
     /// reads exactly like a wrong locator. Force-stopping the instrumentation
     /// restored 118–425 ms immediately. See [`AgentClient::close`].
     agents: Mutex<HashMap<String, AgentClient>>,
+    /// Exact host children for our long-running `adb shell am instrument -w` calls.
+    /// Drained through `DeviceDriver::shutdown_owned_processes`; never kill adb by name.
+    instrumentation_children: agent::InstrumentationChildren,
     /// serial -> when this device's instrumentation was last restarted for blindness.
     ///
     /// The restart itself is already bounded *within* one call: it happens once, and a
@@ -564,11 +856,42 @@ mod stream;
 
 impl AndroidDriver {
     pub fn new(config: &AndroidDriverConfig) -> anyhow::Result<Self> {
-        let adb = AdbProgram::resolve(
+        let (adb, origin) = AdbProgram::resolve_for_policy(
+            adb::AdbResolutionPolicy::current_build(),
             config.adb_path.as_deref(),
             config.bundled_adb_path.as_deref(),
         )?;
-        Ok(Self::with_adb(adb, config))
+        Ok(Self::with_adb(adb, origin, config))
+    }
+
+    /// The exact adb executable that this driver selected. This is diagnostics evidence,
+    /// not a second resolver, so a fleet panel can never report a different binary from the
+    /// one that controls the phone.
+    pub fn adb_path(&self) -> String {
+        self.adb.path().display().to_string()
+    }
+
+    /// The origin retained at driver selection time. Re-resolving it later would let a
+    /// changed environment make diagnostics describe a binary this driver never used.
+    pub fn adb_origin(&self) -> &'static str {
+        self.adb_origin.label()
+    }
+
+    /// Read `adb version` without targeting a device. Failure is an unanswered diagnostic
+    /// field, not a reason to restart the adb server or touch a phone.
+    pub async fn adb_version(&self) -> Option<String> {
+        self.adb
+            .run(&["version"], adb::DEFAULT_TIMEOUT)
+            .await
+            .ok()
+            .and_then(|output| {
+                output
+                    .lines()
+                    .next()
+                    .map(str::trim)
+                    .filter(|line| !line.is_empty())
+                    .map(str::to_string)
+            })
     }
 
     /// The TikTok build one read-only probe can name: `(package, versionName, locale)`.
@@ -608,7 +931,7 @@ impl AndroidDriver {
     /// and re-derived by `resolve`, which picks the first candidate that merely
     /// *exists* — so a broken adb earlier in the order would win over the working one
     /// the probe just found.
-    fn with_adb(adb: AdbProgram, config: &AndroidDriverConfig) -> Self {
+    fn with_adb(adb: AdbProgram, adb_origin: adb::AdbOrigin, config: &AndroidDriverConfig) -> Self {
         // config -> env -> bundled. The bundled path is last so neither override is
         // taken away by the act of shipping a copy; see `AndroidDriverConfig`.
         let minicap_apk = config
@@ -653,8 +976,11 @@ impl AndroidDriver {
         ));
         Self {
             adb,
+            adb_origin,
             minicap_apk,
             scrcpy_server,
+            package_java: config.package_java.clone(),
+            bundletool_jar: config.bundletool_jar.clone(),
             agent_apks,
             frame_sink: Mutex::new(None),
             view_sink: Mutex::new(None),
@@ -674,6 +1000,7 @@ impl AndroidDriver {
             starting: Mutex::new(HashSet::new()),
             interaction: riviu_core::InteractionLifecycleRegistry::default(),
             agents: Mutex::new(HashMap::new()),
+            instrumentation_children: agent::InstrumentationChildren::default(),
             instrumentation_restarts: Mutex::new(HashMap::new()),
             tiktok_packages: Mutex::new(HashMap::new()),
             screens: Mutex::new(HashMap::new()),
@@ -914,6 +1241,75 @@ fn trust_reading_for_roster(reading: &crate::adb::DeviceListReading) -> Result<(
 
 #[async_trait]
 impl DeviceDriver for AndroidDriver {
+    async fn shutdown_owned_processes(&self) -> anyhow::Result<()> {
+        let agents = self
+            .agents
+            .lock()
+            .drain()
+            .map(|(_, agent)| agent)
+            .collect::<Vec<_>>();
+        let helpers = self
+            .helpers
+            .lock()
+            .drain()
+            .map(|(_, helper)| helper)
+            .collect::<Vec<_>>();
+        let forwarded = self.forwarded.lock().drain().collect::<Vec<_>>();
+        let ports = self.ports.lock().clone();
+        let mut failures = Vec::new();
+
+        for agent in agents {
+            if let Err(error) = agent.close().await {
+                failures.push(format!("close UIAutomator session: {error}"));
+            }
+        }
+
+        let instrumented = match self.instrumentation_children.shutdown().await {
+            Ok(serials) => serials,
+            Err(error) => {
+                failures.push(error.to_string());
+                Vec::new()
+            }
+        };
+        for serial in &instrumented {
+            if let Err(error) = self.stop_instrumentation(serial).await {
+                failures.push(format!("stop UIAutomator on {serial}: {error}"));
+            }
+        }
+
+        for serial in forwarded {
+            let Some(port) = ports.get(&serial) else {
+                failures.push(format!(
+                    "owned agent forward on {serial} has no retained port"
+                ));
+                continue;
+            };
+            if let Err(error) = frames::remove_forward(&self.adb, &serial, *port).await {
+                failures.push(format!(
+                    "remove agent forward tcp:{port} on {serial}: {error}"
+                ));
+            }
+        }
+        self.ports.lock().clear();
+
+        for helper in helpers {
+            if let Err(error) = helper.shutdown().await {
+                failures.push(error.to_string());
+            }
+        }
+
+        tracing::debug!(
+            reaped = instrumented.len(),
+            "reaped owned Android instrumentation children"
+        );
+        anyhow::ensure!(
+            failures.is_empty(),
+            "Android owned-resource shutdown failed: {}",
+            failures.join("; ")
+        );
+        Ok(())
+    }
+
     async fn list_devices(&self) -> anyhow::Result<Vec<DeviceInfo>> {
         // Read until two consecutive `adb devices` agree. A single reading is
         // not evidence: a server that is restarting answers one call and reports
@@ -1027,6 +1423,183 @@ impl DeviceDriver for AndroidDriver {
             )
             .await
             .map(|_| ())
+    }
+
+    async fn install_app_set(&self, udid: &str, paths: &[PathBuf]) -> anyhow::Result<()> {
+        let args = install_set_args(paths)?;
+        let refs = args.iter().map(String::as_str).collect::<Vec<_>>();
+        self.adb
+            .device(udid, &refs, Duration::from_secs(300))
+            .await
+            .map(|_| ())
+    }
+
+    async fn android_install_device_spec(
+        &self,
+        udid: &str,
+    ) -> anyhow::Result<AndroidInstallDeviceSpec> {
+        let probe = self
+            .adb
+            .shell(
+                udid,
+                &format!(
+                    "getprop ro.build.version.sdk; echo {FIELD_SEPARATOR}; getprop ro.product.cpu.abilist; echo {FIELD_SEPARATOR}; wm density; echo {FIELD_SEPARATOR}; settings get system system_locales; echo {FIELD_SEPARATOR}; getprop ro.product.cpu.abi; echo {FIELD_SEPARATOR}; getprop persist.sys.locale"
+                ),
+            )
+            .await?;
+        device_spec_from_probe(&probe)
+    }
+
+    async fn install_app_set_checked(
+        &self,
+        udid: &str,
+        request: &DeviceAppInstallRequest,
+    ) -> anyhow::Result<AppInstallResult> {
+        let failed_before = |detail: String| AppInstallResult {
+            udid: udid.to_string(),
+            status: AppInstallStatus::BeforeEffect,
+            effect_started: false,
+            observed_version_name: None,
+            observed_version_code: None,
+            detail: Some(detail),
+        };
+        if let Err(error) = adb::validate_package_name(&request.application_id) {
+            return Ok(failed_before(error.to_string()));
+        }
+        if request.version_name.trim().is_empty() {
+            return Ok(failed_before(
+                "checked install requires an expected version name".to_string(),
+            ));
+        }
+        let args =
+            match install_set_args_with_downgrade(&request.apk_paths, request.allow_downgrade) {
+                Ok(args) => args,
+                Err(error) => return Ok(failed_before(error.to_string())),
+            };
+        let refs = args.iter().map(String::as_str).collect::<Vec<_>>();
+        let effect = match self
+            .adb
+            .device_effect_with_before_spawn(udid, &refs, Duration::from_secs(300), || {
+                request
+                    .effect_gate
+                    .as_ref()
+                    .is_none_or(riviu_core::InstallEffectGate::claim_effect)
+            })
+            .await
+        {
+            Err(adb::AdbEffectFailure::CancelledBeforeSpawn) => {
+                return Ok(AppInstallResult {
+                    udid: udid.to_string(),
+                    status: AppInstallStatus::CancelledBeforeDispatch,
+                    effect_started: false,
+                    observed_version_name: None,
+                    observed_version_code: None,
+                    detail: Some("install cancelled before process spawn".to_string()),
+                });
+            }
+            Err(adb::AdbEffectFailure::BeforeSpawn { detail }) => {
+                return Ok(AppInstallResult {
+                    udid: udid.to_string(),
+                    status: AppInstallStatus::BeforeEffect,
+                    effect_started: false,
+                    observed_version_name: None,
+                    observed_version_code: None,
+                    detail: Some(detail),
+                });
+            }
+            Err(adb::AdbEffectFailure::AfterSpawn { detail }) => {
+                InstallProcessResult::Interrupted(detail)
+            }
+            Ok(output) if output.success => InstallProcessResult::Completed(Ok(())),
+            Ok(output) => {
+                let detail = if output.stderr.trim().is_empty() {
+                    output.stdout.trim().to_string()
+                } else {
+                    output.stderr.trim().to_string()
+                };
+                InstallProcessResult::Completed(Err(format!(
+                    "adb install exited with {}: {detail}",
+                    output
+                        .exit_code
+                        .map_or_else(|| "no exit code".to_string(), |code| code.to_string())
+                )))
+            }
+        };
+
+        let package = request.application_id.as_str();
+        let readback = self
+            .adb
+            .shell(udid, &format!("dumpsys package {package}"))
+            .await
+            .map(|stdout| parse_package_version(&stdout))
+            .map_err(|error| error.to_string());
+        Ok(classify_post_spawn_install(udid, request, effect, readback))
+    }
+
+    async fn install_app_container(&self, udid: &str, path: &Path) -> anyhow::Result<()> {
+        if !path
+            .extension()
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("apks"))
+        {
+            return self.install_app(udid, path).await;
+        }
+        let root = std::env::temp_dir().join(format!("riviu-apks-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).with_context(|| format!("create {}", root.display()))?;
+        let run = async {
+            let selected = self.android_install_device_spec(udid).await?;
+            let paths = self
+                .extract_app_container_for_spec(udid, path, &selected, &root.join("selected"))
+                .await?;
+            self.install_app_set(udid, &paths).await
+        }
+        .await;
+        let _ = std::fs::remove_dir_all(&root);
+        run
+    }
+
+    async fn extract_app_container_for_spec(
+        &self,
+        _udid: &str,
+        path: &Path,
+        selected: &AndroidInstallDeviceSpec,
+        destination: &Path,
+    ) -> anyhow::Result<Vec<PathBuf>> {
+        let java = self.package_java.as_ref().ok_or_else(|| {
+            anyhow!("the packaged JRE required for .apks extraction is unavailable")
+        })?;
+        let bundletool = self.bundletool_jar.as_ref().ok_or_else(|| {
+            anyhow!("the packaged Bundletool JAR required for .apks extraction is unavailable")
+        })?;
+        anyhow::ensure!(
+            path.extension()
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("apks")),
+            "Bundletool selection only accepts .apks containers"
+        );
+        if destination.exists() {
+            std::fs::remove_dir_all(destination)
+                .with_context(|| format!("remove stale {}", destination.display()))?;
+        }
+        std::fs::create_dir_all(destination)
+            .with_context(|| format!("create {}", destination.display()))?;
+        let spec = destination.join("device-spec.json");
+        let output_dir = destination.join("extracted");
+        std::fs::write(&spec, serde_json::to_vec_pretty(selected)?)
+            .with_context(|| format!("write {}", spec.display()))?;
+        let mut command = tokio::process::Command::new(java);
+        command
+            .arg("-jar")
+            .arg(bundletool)
+            .arg("extract-apks")
+            .arg(format!("--apks={}", path.display()))
+            .arg(format!("--output-dir={}", output_dir.display()))
+            .arg(format!("--device-spec={}", spec.display()));
+        let extract = bounded_command_output(&mut command, INSTALL_TIMEOUT).await?;
+        anyhow::ensure!(
+            extract.status.success(),
+            "bundletool extract-apks failed: {}",
+            String::from_utf8_lossy(&extract.stderr).trim()
+        );
+        apks_extraction_paths(&output_dir)
     }
 
     async fn uninstall_app(&self, udid: &str, bundle_id: &str) -> anyhow::Result<()> {
@@ -1826,34 +2399,36 @@ pub fn create_driver(config: &AndroidDriverConfig) -> anyhow::Result<Arc<dyn Dev
 
 /// Build the driver only when `adb` is actually usable on this host.
 ///
-/// `AdbProgram::resolve` always succeeds — it falls back to the bare name and
-/// lets the OS search `PATH` — so construction alone proves nothing. A machine
-/// with no Android tooling should not carry a permanently degraded Android
-/// backend in every fleet listing; the honest report is that there is no
-/// backend, and why.
+/// A debug build probes every developer source in order. A production build probes only
+/// the packaged executable and fails closed when that installer resource is absent. A
+/// machine with no usable Android tooling should not carry a permanently degraded Android
+/// backend in every fleet listing; the honest report is that there is no backend, and why.
 ///
 /// Returns the concrete driver rather than `Arc<dyn DeviceDriver>` so the caller
 /// can still hand it a frame sink; it coerces to the trait object at the point it
 /// is put in a fleet.
 ///
-/// Every candidate in [`AdbProgram::candidates`] is tried in order and the first one
-/// that answers `adb version` wins. It used to resolve a single path and probe only
-/// that, which had a real bug in it: `resolve` picks the first candidate that merely
-/// **exists**, so a stale `ANDROID_HOME` pointing at a deleted SDK — or, once we ship
-/// one, any earlier entry that happens to be broken — made this report that Android
-/// was unavailable on a machine with a perfectly good adb one position further down.
-/// Trying each is also what makes the bundled copy reachable at all, since it sits
-/// last on purpose.
+/// In debug, every candidate in [`AdbProgram::candidates`] is tried and the first one
+/// that answers `adb version` wins. Production's candidate set contains only the bundled
+/// binary, so neither a config override nor environment/PATH can take control of the fleet.
 pub async fn detect_driver(config: &AndroidDriverConfig) -> Result<Arc<AndroidDriver>, String> {
-    let candidates = AdbProgram::candidates(
+    let candidates = AdbProgram::candidates_for_policy(
+        adb::AdbResolutionPolicy::current_build(),
         config.adb_path.as_deref(),
         config.bundled_adb_path.as_deref(),
-    );
+    )
+    .map_err(|error| format!("{error:#}"))?;
     let mut refusals: Vec<String> = Vec::new();
     for candidate in candidates {
         let adb = AdbProgram::at(candidate.path.clone());
         match adb.run(&["version"], Duration::from_secs(10)).await {
-            Ok(_) => return Ok(Arc::new(AndroidDriver::with_adb(adb, config))),
+            Ok(_) => {
+                return Ok(Arc::new(AndroidDriver::with_adb(
+                    adb,
+                    candidate.origin,
+                    config,
+                )))
+            }
             Err(error) => refusals.push(format!(
                 "{} ({}): {error}",
                 candidate.path.display(),
@@ -1861,8 +2436,7 @@ pub async fn detect_driver(config: &AndroidDriverConfig) -> Result<Arc<AndroidDr
             )),
         }
     }
-    // Every candidate named, with where it came from. The operator needs to see that
-    // their `RIVIU_ADB_PATH` was read and rejected, not wonder whether it was read.
+    // Every candidate permitted by this build is named with its origin.
     Err(format!(
         "không có adb nào chạy được. Đã thử: {}",
         refusals.join("; ")
@@ -1874,6 +2448,207 @@ mod tests {
     use super::*;
 
     use std::sync::atomic::{AtomicU64, Ordering};
+
+    #[test]
+    fn every_checked_install_set_uses_one_install_multiple_argv() {
+        let singleton = install_set_args(&[PathBuf::from("base.apk")]).expect("singleton args");
+        assert_eq!(&singleton[..3], ["install-multiple", "-r", "-g"]);
+        let split = install_set_args(&[PathBuf::from("base.apk"), PathBuf::from("config.en.apk")])
+            .expect("split args");
+        assert_eq!(&split[..3], ["install-multiple", "-r", "-g"]);
+    }
+
+    #[test]
+    fn downgrade_flag_exists_only_after_explicit_confirmation() {
+        let paths = [PathBuf::from("C:/gói thử/base.apk")];
+        let ordinary = install_set_args_with_downgrade(&paths, false).expect("ordinary args");
+        let confirmed = install_set_args_with_downgrade(&paths, true).expect("downgrade args");
+        assert!(!ordinary.iter().any(|arg| arg == "-d"));
+        assert_eq!(confirmed.iter().filter(|arg| *arg == "-d").count(), 1);
+        assert_eq!(
+            confirmed.last().map(String::as_str),
+            Some("C:/gói thử/base.apk")
+        );
+    }
+
+    #[test]
+    fn package_readback_must_match_every_expected_version_field() {
+        let request = DeviceAppInstallRequest {
+            apk_paths: vec![PathBuf::from("base.apk")],
+            application_id: "com.example.fixture".to_string(),
+            version_name: "9.4.1".to_string(),
+            version_code: Some("941".to_string()),
+            allow_downgrade: false,
+            effect_gate: None,
+        };
+        let observed = parse_package_version(
+            "Packages:\n  versionCode=941 minSdk=26 targetSdk=35\n  versionName=9.4.1\n",
+        );
+        assert!(observed_install_matches(&request, &observed));
+
+        let wrong = parse_package_version("versionCode=940 minSdk=26\nversionName=9.4.1\n");
+        assert!(!observed_install_matches(&request, &wrong));
+        let unreadable = parse_package_version("Package [com.example.fixture] was not found");
+        assert!(!observed_install_matches(&request, &unreadable));
+    }
+
+    #[test]
+    fn device_spec_parser_keeps_preference_order_and_uses_override_density() {
+        let probe = format!(
+            "35\n{sep}\narm64-v8a,armeabi-v7a,arm64-v8a\n{sep}\nPhysical density: 420\nOverride density: 480\n{sep}\nvi-VN,en-US,vi-VN\n",
+            sep = FIELD_SEPARATOR
+        );
+        let spec = device_spec_from_probe(&probe).expect("device spec");
+        assert_eq!(spec.sdk_version, 35);
+        assert_eq!(spec.supported_abis, ["arm64-v8a", "armeabi-v7a"]);
+        assert_eq!(spec.screen_density, 480);
+        assert_eq!(spec.supported_locales, ["vi-VN", "en-US"]);
+    }
+
+    #[test]
+    fn device_spec_parser_uses_single_abi_and_persisted_locale_fallbacks() {
+        let probe = format!(
+            "35\n{sep}\n\n{sep}\nPhysical density: 420\n{sep}\nnull\n{sep}\narm64-v8a\n{sep}\nvi-VN\n",
+            sep = FIELD_SEPARATOR
+        );
+        let spec = device_spec_from_probe(&probe).expect("fallback device spec");
+        assert_eq!(spec.supported_abis, ["arm64-v8a"]);
+        assert_eq!(spec.supported_locales, ["vi-VN"]);
+    }
+
+    #[tokio::test]
+    async fn bounded_package_tool_process_is_killed_and_reaped_on_timeout() {
+        let marker = std::env::temp_dir().join(format!(
+            "riviu-bounded-package-tool-{}.txt",
+            uuid::Uuid::new_v4()
+        ));
+        let mut command =
+            tokio::process::Command::new(if cfg!(windows) { "cmd.exe" } else { "sh" });
+        if cfg!(windows) {
+            command.args([
+                "/C",
+                &format!(
+                    "echo started>{} & ping -n 4 127.0.0.1 >nul & echo leaked>>{}",
+                    marker.display(),
+                    marker.display()
+                ),
+            ]);
+        } else {
+            command.args([
+                "-c",
+                &format!(
+                    "printf started > '{}'; sleep 2; printf leaked >> '{}'",
+                    marker.display(),
+                    marker.display()
+                ),
+            ]);
+        }
+
+        let error = bounded_command_output(&mut command, Duration::from_millis(300))
+            .await
+            .expect_err("slow package tool must time out");
+        assert!(error.to_string().contains("timed out"));
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        let contents = std::fs::read_to_string(&marker).expect("startup marker");
+        assert!(contents.contains("started"), "{contents:?}");
+        assert!(!contents.contains("leaked"), "{contents:?}");
+        let _ = std::fs::remove_file(marker);
+    }
+
+    #[test]
+    fn post_spawn_timeout_is_reconciled_instead_of_retried() {
+        let request = DeviceAppInstallRequest {
+            apk_paths: vec![PathBuf::from("base.apk")],
+            application_id: "com.example.fixture".to_string(),
+            version_name: "9.4.1".to_string(),
+            version_code: Some("941".to_string()),
+            allow_downgrade: false,
+            effect_gate: None,
+        };
+        let installed = ObservedPackageVersion {
+            version_name: Some("9.4.1".to_string()),
+            version_code: Some("941".to_string()),
+        };
+        let reconciled = classify_post_spawn_install(
+            "fixture",
+            &request,
+            InstallProcessResult::Interrupted("adb install timed out".to_string()),
+            Ok(installed),
+        );
+        assert_eq!(reconciled.status, AppInstallStatus::Uncertain);
+        assert!(reconciled.effect_started);
+
+        let rejected_over_matching_version = classify_post_spawn_install(
+            "fixture",
+            &request,
+            InstallProcessResult::Completed(Err(
+                "INSTALL_FAILED_UPDATE_INCOMPATIBLE: signer mismatch".to_string(),
+            )),
+            Ok(ObservedPackageVersion {
+                version_name: Some("9.4.1".to_string()),
+                version_code: Some("941".to_string()),
+            }),
+        );
+        assert_eq!(
+            rejected_over_matching_version.status,
+            AppInstallStatus::FailedVerified
+        );
+        assert!(rejected_over_matching_version.effect_started);
+
+        let verified_failure = classify_post_spawn_install(
+            "fixture",
+            &request,
+            InstallProcessResult::Completed(Err("Package Manager rejected signer".to_string())),
+            Ok(ObservedPackageVersion {
+                version_name: Some("9.4.0".to_string()),
+                version_code: Some("940".to_string()),
+            }),
+        );
+        assert_eq!(verified_failure.status, AppInstallStatus::FailedVerified);
+        assert!(verified_failure.effect_started);
+
+        let timeout_with_old_version = classify_post_spawn_install(
+            "fixture",
+            &request,
+            InstallProcessResult::Interrupted("adb install timed out".to_string()),
+            Ok(ObservedPackageVersion {
+                version_name: Some("9.4.0".to_string()),
+                version_code: Some("940".to_string()),
+            }),
+        );
+        assert_eq!(timeout_with_old_version.status, AppInstallStatus::Uncertain);
+        assert!(timeout_with_old_version.effect_started);
+
+        let unknown = classify_post_spawn_install(
+            "fixture",
+            &request,
+            InstallProcessResult::Interrupted("adb install timed out".to_string()),
+            Err("device offline".to_string()),
+        );
+        assert_eq!(unknown.status, AppInstallStatus::Uncertain);
+        assert!(unknown.effect_started);
+    }
+
+    #[tokio::test]
+    async fn install_spawn_failure_is_before_effect_and_retryable() {
+        let driver = driver_with_unrunnable_adb();
+        let result = driver
+            .install_app_set_checked(
+                "fixture",
+                &DeviceAppInstallRequest {
+                    apk_paths: vec![PathBuf::from("C:/gói thử/base.apk")],
+                    application_id: "com.example.fixture".to_string(),
+                    version_name: "1.0".to_string(),
+                    version_code: Some("1".to_string()),
+                    allow_downgrade: false,
+                    effect_gate: None,
+                },
+            )
+            .await
+            .expect("typed result");
+        assert_eq!(result.status, AppInstallStatus::BeforeEffect);
+        assert!(!result.effect_started);
+    }
 
     /// **One transient blank must not empty the roster.**
     ///

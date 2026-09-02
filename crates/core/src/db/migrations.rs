@@ -143,6 +143,12 @@ const MIGRATIONS: &[Migration] = &[
         apply: apply_migration_18,
         rebuilds_tables: true,
     },
+    Migration {
+        version: 19,
+        name: "app-library-artifact-metadata",
+        apply: apply_migration_19,
+        rebuilds_tables: false,
+    },
 ];
 
 pub(super) fn latest_version() -> i64 {
@@ -1137,6 +1143,31 @@ CREATE INDEX publish_sheet_outbox_pending
     Ok(())
 }
 
+fn apply_migration_19(transaction: &Transaction<'_>) -> anyhow::Result<()> {
+    // Existing rows are IPA files. Defaults preserve their old meaning instead of
+    // classifying historical entries from a mutable filename extension.
+    transaction.execute_batch(
+        "ALTER TABLE apps_library ADD COLUMN platform TEXT NOT NULL DEFAULT 'ios' CHECK (platform IN ('ios','android'));
+         ALTER TABLE apps_library ADD COLUMN package_format TEXT NOT NULL DEFAULT 'ipa' CHECK (package_format IN ('ipa','apk','xapk','apkm','apks'));
+         ALTER TABLE apps_library ADD COLUMN artifact_kind TEXT NOT NULL DEFAULT 'ipa' CHECK (artifact_kind IN ('ipa','apk','xapk','apkm','apks'));
+         ALTER TABLE apps_library ADD COLUMN application_id TEXT NOT NULL DEFAULT '';
+         ALTER TABLE apps_library ADD COLUMN version_name TEXT NOT NULL DEFAULT '';
+         ALTER TABLE apps_library ADD COLUMN version_code TEXT;
+         ALTER TABLE apps_library ADD COLUMN sha256 TEXT NOT NULL DEFAULT '';
+         ALTER TABLE apps_library ADD COLUMN size_bytes INTEGER NOT NULL DEFAULT 0;
+         ALTER TABLE apps_library ADD COLUMN signer_sha256 TEXT NOT NULL DEFAULT '';
+         ALTER TABLE apps_library ADD COLUMN icon_png_base64 TEXT;
+         ALTER TABLE apps_library ADD COLUMN metadata_status TEXT NOT NULL DEFAULT 'legacy';
+         ALTER TABLE apps_library ADD COLUMN metadata_error TEXT;
+         UPDATE apps_library SET application_id=bundle_id WHERE application_id='';
+         UPDATE apps_library SET version_name=version WHERE version_name='';
+         CREATE UNIQUE INDEX apps_library_verified_sha256_unique
+           ON apps_library(sha256)
+           WHERE sha256 <> '' AND metadata_status = 'verified';",
+    )?;
+    Ok(())
+}
+
 fn apply_migration_11(transaction: &Transaction<'_>) -> anyhow::Result<()> {
     // **Dropping a column that was always a guess.** The `usd` in both comment tables was
     // `prompt_tokens * input_price_per_1m + completion_tokens * output_price_per_1m`, over two
@@ -1466,6 +1497,63 @@ mod tests {
 
     use super::super::Database;
     use super::{apply_v1_schema, run, run_with_failpoint, MIGRATIONS};
+
+    #[test]
+    fn app_library_metadata_migration_is_version_nineteen() {
+        let migration = MIGRATIONS.last().expect("app-library migration");
+        assert_eq!(migration.version, 19);
+        assert_eq!(migration.name, "app-library-artifact-metadata");
+    }
+
+    #[test]
+    fn app_library_migration_limits_sha_uniqueness_to_new_verified_rows() {
+        let path = temp_db_path("app-library-sha-index");
+        let database = Database::open(&path).expect("migrated database");
+        let connection = database.conn().expect("inspect app-library schema");
+        let index_sql: String = connection
+            .query_row(
+                "SELECT sql FROM sqlite_master
+                 WHERE type='index' AND name='apps_library_verified_sha256_unique'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("verified SHA index");
+        assert!(index_sql.contains("metadata_status = 'verified'"));
+
+        for id in ["legacy-a", "legacy-b"] {
+            connection
+                .execute(
+                    "INSERT INTO apps_library(
+                        id,name,path,bundle_id,version,sha256,metadata_status,created_at
+                     ) VALUES(?1,?1,?1,'com.example.legacy','1','same-sha','legacy','now')",
+                    [id],
+                )
+                .expect("historical duplicates remain valid");
+        }
+        connection
+            .execute(
+                "INSERT INTO apps_library(
+                    id,name,path,bundle_id,version,sha256,metadata_status,created_at
+                 ) VALUES('verified-a','A','A','com.example.app','1','verified-sha','verified','now')",
+                [],
+            )
+            .expect("first verified row");
+        let duplicate = connection
+            .execute(
+                "INSERT INTO apps_library(
+                    id,name,path,bundle_id,version,sha256,metadata_status,created_at
+                 ) VALUES('verified-b','B','B','com.example.app','1','verified-sha','verified','now')",
+                [],
+            )
+            .expect_err("new verified duplicate must fail closed");
+        assert_eq!(
+            duplicate.sqlite_error_code(),
+            Some(ErrorCode::ConstraintViolation)
+        );
+        drop(connection);
+        drop(database);
+        cleanup(&path);
+    }
 
     type Blob = Vec<u8>;
     type ScriptRowBytes = (Blob, Blob, Blob, Blob);

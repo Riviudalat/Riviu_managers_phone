@@ -119,6 +119,7 @@ pub struct HelperClient {
     adb: AdbProgram,
     serial: String,
     base: String,
+    host_port: u16,
 }
 
 impl HelperClient {
@@ -210,7 +211,30 @@ impl HelperClient {
             adb,
             serial: serial.to_string(),
             base: format!("http://127.0.0.1:{host_port}"),
+            host_port,
         })
+    }
+
+    /// Stop only the helper transport this client established.
+    pub async fn shutdown(self) -> anyhow::Result<()> {
+        let mut failures = Vec::new();
+        if let Err(error) = frames::remove_forward(&self.adb, &self.serial, self.host_port).await {
+            failures.push(format!("remove tcp:{} forward: {error}", self.host_port));
+        }
+        if let Err(error) = self
+            .adb
+            .shell(&self.serial, &format!("am force-stop {PACKAGE}"))
+            .await
+        {
+            failures.push(format!("force-stop {PACKAGE}: {error}"));
+        }
+        anyhow::ensure!(
+            failures.is_empty(),
+            "could not shut down Riviu helper transport on {}: {}",
+            self.serial,
+            failures.join("; ")
+        );
+        Ok(())
     }
 
     pub async fn is_alive(&self) -> bool {

@@ -7,6 +7,8 @@ import type {
   AgentSettings,
   AgentStatus,
   AppLibraryItem,
+  AppInstallBatchResponse,
+  AppInstallRequest,
   AppleIdConfig,
   ClipboardRead,
   DeviceDirListing,
@@ -827,6 +829,18 @@ export async function deleteAppLibrary(id: string) {
 
 export async function installLibraryApp(udid: string, appId: string) {
   return invoke<void>("install_library_app", { udid, appId });
+}
+
+export async function installLibraryAppToGroup(groupId: string, appId: string) {
+  return invoke<GroupInstallResult[]>("install_library_app_to_group", { groupId, appId });
+}
+
+export async function installLibraryAppBatch(request: AppInstallRequest) {
+  return invoke<AppInstallBatchResponse>("install_library_app_batch", { request });
+}
+
+export async function cancelAppInstallBatch(batchId: string) {
+  return invoke<void>("cancel_app_install_batch", { batchId });
 }
 
 export async function listSchedules() {

@@ -2,9 +2,9 @@ import { useEffect, useRef, useState } from "react";
 import { describeError } from "../describeError";
 import {
   addAppLibrary,
+  cancelAppInstallBatch,
   deleteAppLibrary,
-  installIpaToGroup,
-  installLibraryApp,
+  installLibraryAppBatch,
   listAppsLibrary,
   listGroups,
 } from "../api";
@@ -13,8 +13,8 @@ import { flash, flashError } from "../farmToast";
 import { targetsOf } from "../selectionTargets";
 import { EmptyState, LoadingState, StatusNotice } from "../components/States";
 import { IconApp } from "../components/Icons";
-import { pickIpa } from "../pickFile";
-import type { AppLibraryItem, DeviceGroup, GroupInstallResult } from "../types";
+import { pickFile } from "../pickFile";
+import type { AppInstallResult, AppInstallStatus, AppLibraryItem, DeviceGroup } from "../types";
 import type { SelProps } from "./pageProps";
 
 /** The app library and installing from it across a selection. */
@@ -25,25 +25,17 @@ export function AppsPage({ devices, selected, onSelectUdids }: SelProps) {
   const [busy, setBusy] = useState(false);
   const [groups, setGroups] = useState<DeviceGroup[]>([]);
   const [groupId, setGroupId] = useState("");
-  const [groupResults, setGroupResults] = useState<GroupInstallResult[]>([]);
+  const [batchResults, setBatchResults] = useState<AppInstallResult[]>([]);
+  const [activeBatch, setActiveBatch] = useState<{ id: string; appId: string } | null>(null);
+  const [allowDowngrade, setAllowDowngrade] = useState(false);
   const [itemsLoading, setItemsLoading] = useState(true);
   const [itemsError, setItemsError] = useState<string | null>(null);
   const [groupsLoading, setGroupsLoading] = useState(true);
   const [groupsError, setGroupsError] = useState<string | null>(null);
   const libraryTicket = useRef(0);
   const groupsTicket = useRef(0);
-  // **iPhones only, and never the whole fleet by default.** This library holds `.ipa`
-  // files; `targetsOf` falls back to every connected device when nothing is selected, so
-  // an unselected click used to push an iOS app at every Android serial in the room and
-  // collect one failure per phone. Android apps are installed from the device overlay's
-  // "Cài APK", which is a different file and a different command.
   const iosDevices = devices.filter((device) => device.platform !== "android");
-  const targets = targetsOf(selected, iosDevices).filter((udid) =>
-    iosDevices.some((device) => device.udid === udid),
-  );
-  const androidSelected = selected.filter((udid) =>
-    devices.some((device) => device.udid === udid && device.platform === "android"),
-  ).length;
+  const androidDevices = devices.filter((device) => device.platform === "android");
 
   const reloadLibrary = async () => {
     const ticket = ++libraryTicket.current;
@@ -82,27 +74,61 @@ export function AppsPage({ devices, selected, onSelectUdids }: SelProps) {
     };
   }, []);
 
-  const installToGroup = async (ipaPath: string) => {
-    if (!groupId) {
-      flash("Chọn một nhóm trước");
-      return;
-    }
+  const runBatch = async (app: AppLibraryItem, udids: string[]) => {
+    if (!udids.length) return;
+    if (allowDowngrade && !window.confirm(
+      `Cho phép cài phiên bản ${app.versionName || app.version || "đã chọn"} thấp hơn bản đang có?`,
+    )) return;
+    const batchId = `app-install-${Date.now()}-${Math.random().toString(16).slice(2)}`;
     setBusy(true);
-    setGroupResults([]);
+    setBatchResults([]);
+    setActiveBatch({ id: batchId, appId: app.id });
     try {
-      const results = await installIpaToGroup(groupId, ipaPath);
-      setGroupResults(results);
-      const failed = results.filter((r) => !r.ok).length;
+      const response = await installLibraryAppBatch({
+        batchId,
+        appId: app.id,
+        udids,
+        allowDowngrade,
+      });
+      setBatchResults(response.results);
+      const succeeded = response.results.filter((result) => result.status === "succeeded").length;
+      const uncertain = response.results.filter((result) => result.status === "uncertain").length;
+      const failed = response.results.length - succeeded - uncertain;
       flash(
-        failed
-          ? `Cài xong: ${results.length - failed} OK, ${failed} lỗi`
-          : `Đã cài lên ${results.length} máy trong nhóm`,
+        uncertain
+          ? `Đã cài: ${succeeded} xác nhận, ${failed} thất bại, ${uncertain} cần kiểm lại`
+          : `Đã cài: ${succeeded} xác nhận, ${failed} thất bại`,
       );
     } catch (e) {
       flashError(e);
     } finally {
+      setActiveBatch(null);
       setBusy(false);
     }
+  };
+
+  const installToGroup = async (app: AppLibraryItem) => {
+    const group = groups.find((candidate) => candidate.id === groupId);
+    if (!group) {
+      flash("Chọn một nhóm trước");
+      return;
+    }
+    const platform = app.platform === "ios" ? iosDevices : androidDevices;
+    const connected = new Set(platform.map((device) => device.udid));
+    const targets = group.udids.filter((udid) => connected.has(udid));
+    if (!targets.length) {
+      flash(`Nhóm không có máy ${app.platform === "ios" ? "iPhone" : "Android"} đang kết nối`);
+      return;
+    }
+    await runBatch(app, targets);
+  };
+
+  const installStatus: Record<AppInstallStatus, string> = {
+    succeeded: "Đã xác nhận",
+    beforeEffect: "Chưa cài",
+    failedVerified: "Cài thất bại",
+    uncertain: "Cần kiểm lại",
+    cancelledBeforeDispatch: "Đã hủy trước khi cài",
   };
 
   return (
@@ -114,12 +140,6 @@ export function AppsPage({ devices, selected, onSelectUdids }: SelProps) {
         onClear={() => onSelectUdids([])}
         onSelectUdids={onSelectUdids}
       />
-      {androidSelected > 0 && (
-        <p className="hint" role="status">
-          Bỏ qua {androidSelected} máy Android đang chọn — thư viện này là IPA, chỉ cài được
-          lên iPhone. Cài APK cho Android trong menu điều khiển của từng máy.
-        </p>
-      )}
       {groupsError && (
         <StatusNotice
           tone="error"
@@ -157,26 +177,38 @@ export function AppsPage({ devices, selected, onSelectUdids }: SelProps) {
           </select>
         </label>
       </div>
+      <label className="row" style={{ marginTop: 8 }}>
+        <input
+          type="checkbox"
+          checked={allowDowngrade}
+          disabled={busy}
+          onChange={(event) => setAllowDowngrade(event.target.checked)}
+        />
+        Cho phép hạ phiên bản
+      </label>
       <div className="row" style={{ marginTop: 8 }}>
         <input
           style={{ flex: 1 }}
           value={path}
           onChange={(e) => setPath(e.target.value)}
-          placeholder="Đường dẫn .ipa…"
+          placeholder="Đường dẫn .ipa, .apk, .xapk, .apkm hoặc .apks…"
         />
         <button
           type="button"
           className="ghost"
           onClick={async () => {
-            const p = await pickIpa();
+            const p = await pickFile({
+              title: "Chọn ứng dụng",
+              filters: [{ name: "Ứng dụng", extensions: ["ipa", "apk", "xapk", "apkm", "apks"] }],
+            });
             if (p) setPath(p);
           }}
         >
-          Chọn IPA…
+          Chọn ứng dụng…
         </button>
       </div>
       <label>
-        Bundle ID (không bắt buộc)
+        Mã ứng dụng (không bắt buộc)
         <input value={bundleId} onChange={(e) => setBundleId(e.target.value)} />
       </label>
       <button
@@ -189,7 +221,7 @@ export function AppsPage({ devices, selected, onSelectUdids }: SelProps) {
             await addAppLibrary(path.trim(), undefined, bundleId || undefined);
             setPath("");
             await reloadLibrary();
-            flash("Đã thêm IPA vào thư viện");
+            flash("Đã thêm ứng dụng vào thư viện");
           } catch (e) {
             flashError(e);
           } finally {
@@ -205,63 +237,61 @@ export function AppsPage({ devices, selected, onSelectUdids }: SelProps) {
             tone="error"
             action={(
               <button type="button" className="ghost" onClick={() => void reloadLibrary()}>
-                Thử lại thư viện IPA
+                Thử lại thư viện ứng dụng
               </button>
             )}
           >
-            Không tải được thư viện IPA: {itemsError}
+          Không tải được thư viện ứng dụng: {itemsError}
           </StatusNotice>
         )}
-        {itemsLoading && !items.length && <LoadingState label="Đang tải thư viện IPA…" />}
-        {items.map((a) => (
-          <article key={a.id} className="job-card">
+        {itemsLoading && !items.length && <LoadingState label="Đang tải thư viện ứng dụng…" />}
+        {items.map((a) => {
+          const platformDevices = a.platform === "ios" ? iosDevices : androidDevices;
+          const installTargets = targetsOf(selected, platformDevices).filter((udid) =>
+            platformDevices.some((device) => device.udid === udid),
+          );
+          const platformName = a.platform === "ios" ? "iPhone" : "Android";
+          return <article key={a.id} className="job-card">
             <div>
               <strong>{a.name}</strong>
               <span className="pill">{a.bundleId || "chưa có bundle ID"}</span>
+              <span className="pill">{a.packageFormat.toUpperCase()}</span>
             </div>
             <p className="hint">{a.path}</p>
             <div className="row">
               <button
                 type="button"
                 className="primary"
-                disabled={!targets.length || busy}
+                disabled={!installTargets.length || busy}
                 title={
-                  targets.length
-                    ? `Cài lên ${targets.length} iPhone`
-                    : "Không có iPhone nào để cài — IPA chỉ cài được lên iOS"
+                  installTargets.length
+                    ? `Cài lên ${installTargets.length} ${platformName}`
+                    : a.platform === "ios"
+                      ? "Không có iPhone nào để cài — IPA chỉ cài được lên iOS"
+                      : "Không có Android nào để cài — gói Android chỉ cài được lên Android"
                 }
-                onClick={async () => {
-                  setBusy(true);
-                  try {
-                    const errors: string[] = [];
-                    for (const u of targets) {
-                      try {
-                        await installLibraryApp(u, a.id);
-                      } catch (e) {
-                        // `${e}` on a Tauri rejection ({ code, message }) renders as
-                        // "[object Object]", which loses the only actionable half of the
-                        // message. `describeError` exists for exactly this.
-                        errors.push(`${u.slice(0, 8)}: ${describeError(e)}`);
-                      }
-                    }
-                    if (errors.length) flash(`Một số máy lỗi:\n${errors.join("\n")}`);
-                    else flash(`Đã cài lên ${targets.length} iPhone`);
-                  } finally {
-                    setBusy(false);
-                  }
-                }}
+                onClick={() => void runBatch(a, installTargets)}
               >
-                Install → {targets.length} iPhone
+                Cài → {installTargets.length} {platformName}
               </button>
               <button
                 type="button"
                 className="primary"
                 disabled={!groupId || busy}
                 title="Cài lên toàn bộ máy trong nhóm đã chọn"
-                onClick={() => installToGroup(a.path)}
+                onClick={() => installToGroup(a)}
               >
                 Cài → nhóm
               </button>
+              {activeBatch?.appId === a.id && (
+                <button
+                  type="button"
+                  className="ghost"
+                  onClick={() => void cancelAppInstallBatch(activeBatch.id)}
+                >
+                  Hủy máy chưa bắt đầu
+                </button>
+              )}
               <button
                 type="button"
                 className="ghost"
@@ -273,29 +303,30 @@ export function AppsPage({ devices, selected, onSelectUdids }: SelProps) {
                 Xóa
               </button>
             </div>
-          </article>
-        ))}
+          </article>;
+        })}
         {!itemsLoading && !itemsError && !items.length && (
           <EmptyState
             compact
             icon={<IconApp size={15} />}
-            title="Chưa có IPA"
-            hint="Bấm «Chọn IPA…» để thêm ứng dụng vào thư viện."
+            title="Chưa có ứng dụng"
+            hint="Bấm «Chọn ứng dụng…» để thêm gói iOS hoặc Android vào thư viện."
           />
         )}
       </div>
-      {groupResults.length > 0 && (
+      {batchResults.length > 0 && (
         <div className="job-list" style={{ marginTop: 12 }}>
-          <h4>Kết quả cài theo nhóm</h4>
-          {groupResults.map((r) => (
-            <article key={r.udid} className="job-card">
+          <h4>Kết quả cài đặt</h4>
+          {batchResults.map((result) => {
+            const device = devices.find((candidate) => candidate.udid === result.udid);
+            return <article key={result.udid} className="job-card">
               <div>
-                <span className="pill">{r.ok ? "✅ OK" : "❌ Lỗi"}</span>
-                <span className="mono">{r.udid.slice(0, 12)}</span>
+                <span className="pill">{installStatus[result.status]}</span>
+                <strong>{device?.name || result.udid.slice(0, 12)}</strong>
               </div>
-              {r.error && <p className="hint">{r.error}</p>}
-            </article>
-          ))}
+              {result.detail && <p className="hint">{result.detail}</p>}
+            </article>;
+          })}
         </div>
       )}
     </div>

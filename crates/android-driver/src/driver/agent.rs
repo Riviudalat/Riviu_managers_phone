@@ -6,6 +6,68 @@
 
 use super::*;
 
+/// Host-side `adb shell am instrument -w` children this driver started and still owns.
+///
+/// Retaining the exact handles is what makes teardown selective: shutdown can terminate and
+/// reap these PIDs without touching another app's adb client or the shared adb server.
+#[derive(Default)]
+pub(super) struct InstrumentationChildren {
+    children: tokio::sync::Mutex<HashMap<String, tokio::process::Child>>,
+}
+
+impl InstrumentationChildren {
+    pub(super) async fn retain(&self, serial: &str, child: tokio::process::Child) {
+        let previous = self.children.lock().await.insert(serial.to_string(), child);
+        if let Some(mut previous) = previous {
+            if let Err(error) = terminate_instrumentation_child(&mut previous).await {
+                tracing::warn!(serial, %error, "could not reap the replaced instrumentation child");
+            }
+        }
+    }
+
+    pub(super) async fn shutdown(&self) -> anyhow::Result<Vec<String>> {
+        let children = std::mem::take(&mut *self.children.lock().await);
+        let mut serials = Vec::with_capacity(children.len());
+        let mut failures = Vec::new();
+        for (serial, mut child) in children {
+            if let Err(error) = terminate_instrumentation_child(&mut child).await {
+                failures.push(format!("{serial}: {error}"));
+            } else {
+                serials.push(serial);
+            }
+        }
+        anyhow::ensure!(
+            failures.is_empty(),
+            "could not terminate owned instrumentation children: {}",
+            failures.join("; ")
+        );
+        serials.sort();
+        Ok(serials)
+    }
+
+    #[cfg(test)]
+    async fn len(&self) -> usize {
+        self.children.lock().await.len()
+    }
+}
+
+async fn terminate_instrumentation_child(child: &mut tokio::process::Child) -> anyhow::Result<()> {
+    if child
+        .try_wait()
+        .context("inspect instrumentation child")?
+        .is_none()
+    {
+        child
+            .start_kill()
+            .context("terminate instrumentation child")?;
+    }
+    child
+        .wait()
+        .await
+        .context("wait for instrumentation child")?;
+    Ok(())
+}
+
 impl AndroidDriver {
     pub(super) fn host_port(&self, serial: &str) -> u16 {
         let mut ports = self.ports.lock();
@@ -65,6 +127,20 @@ impl AndroidDriver {
             return false;
         }
         AgentClient::is_ready(&base).await
+    }
+
+    /// Probe only an already-established agent forward.
+    ///
+    /// Diagnostics must describe the current state, not make it better: unlike
+    /// [`Self::agent_ready`], this never calls `adb forward`, installs an agent, starts an
+    /// instrumentation runner, or opens a UI session. `None` is deliberately distinct from
+    /// `Some(false)`: no forward has existed in this process, so there is no current agent
+    /// endpoint to ask.
+    pub async fn cached_agent_ready(&self, serial: &str) -> Option<bool> {
+        if !self.forwarded.lock().contains(serial) {
+            return None;
+        }
+        Some(AgentClient::is_ready(&self.agent_base(serial)).await)
     }
     /// The pid of a package, or `None` when it is not running.
     ///
@@ -159,10 +235,7 @@ impl AndroidDriver {
     /// configuration, which has no orientation in it, so a landscape phone answers with its
     /// portrait dimensions and every coordinate derived from them is wrong (AGENTS.md
     /// §9.59, and the doc on [`adb::parse_display_geometry`]).
-    pub(super) async fn display_geometry(
-        &self,
-        serial: &str,
-    ) -> anyhow::Result<adb::DisplayGeometry> {
+    pub async fn display_geometry(&self, serial: &str) -> anyhow::Result<adb::DisplayGeometry> {
         let stdout = self.adb.shell(serial, "dumpsys display").await?;
         adb::parse_display_geometry(&stdout).ok_or_else(|| {
             anyhow!(
@@ -633,6 +706,7 @@ impl AndroidDriver {
             if AgentClient::is_ready(base).await {
                 let agent = self.open_and_cache_agent(serial, base).await?;
                 if agent.is_alive().await {
+                    self.instrumentation_children.retain(serial, child).await;
                     return Ok(agent);
                 }
                 // Bound to the port but blind. Reported rather than retried forever: a
@@ -704,7 +778,7 @@ impl AndroidDriver {
         );
         Ok(())
     }
-    async fn restart_instrumentation(&self, serial: &str) -> anyhow::Result<()> {
+    pub(super) async fn stop_instrumentation(&self, serial: &str) -> anyhow::Result<()> {
         for package in [AGENT_PACKAGE, AGENT_TEST_PACKAGE] {
             if let Err(error) = self
                 .adb
@@ -714,6 +788,11 @@ impl AndroidDriver {
                 tracing::warn!(serial, package, %error, "could not stop the agent half");
             }
         }
+        Ok(())
+    }
+
+    async fn restart_instrumentation(&self, serial: &str) -> anyhow::Result<()> {
+        self.stop_instrumentation(serial).await?;
         // The port stays bound for a moment after the process goes.
         tokio::time::sleep(Duration::from_millis(600)).await;
         Ok(())
@@ -755,7 +834,10 @@ impl AndroidDriver {
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             // Piped, not null: this is where `am instrument` says what it refused.
-            .stderr(Stdio::piped());
+            .stderr(Stdio::piped())
+            // A cancelled startup has not transferred the child into
+            // `instrumentation_children`; dropping it must not detach it.
+            .kill_on_drop(true);
         #[cfg(windows)]
         command.creation_flags(0x0800_0000);
         command
@@ -791,7 +873,63 @@ pub struct HelperProbe {
 
 #[cfg(test)]
 mod instrumentation_tests {
+    use std::process::Stdio;
+    use std::time::Duration;
+
     use super::super::AndroidDriver;
+    use super::InstrumentationChildren;
+
+    fn fixture_child() -> tokio::process::Child {
+        let mut command = tokio::process::Command::new(
+            std::env::current_exe().expect("resolve the current test executable"),
+        );
+        command
+            .args([
+                "--exact",
+                "driver::agent::instrumentation_tests::instrumentation_process_fixture",
+                "--nocapture",
+            ])
+            .env("RIVIU_INSTRUMENTATION_PROCESS_FIXTURE", "sleep")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
+        command.spawn().expect("spawn process fixture")
+    }
+
+    #[test]
+    fn instrumentation_process_fixture() {
+        if std::env::var("RIVIU_INSTRUMENTATION_PROCESS_FIXTURE").as_deref() == Ok("sleep") {
+            std::thread::sleep(Duration::from_secs(30));
+        }
+    }
+
+    #[tokio::test]
+    async fn shutdown_reaps_only_retained_instrumentation_children() {
+        let children = InstrumentationChildren::default();
+        let owned = fixture_child();
+        let mut unrelated = fixture_child();
+        children.retain("owned-device", owned).await;
+        assert_eq!(children.len().await, 1);
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        let reaped = tokio::time::timeout(Duration::from_secs(5), children.shutdown())
+            .await
+            .expect("owned child teardown must be bounded")
+            .expect("owned child teardown");
+
+        assert_eq!(reaped, vec!["owned-device"]);
+        assert_eq!(children.len().await, 0);
+        assert!(
+            unrelated
+                .try_wait()
+                .expect("inspect unrelated child")
+                .is_none(),
+            "shutdown must not kill a process whose handle the driver does not own"
+        );
+        unrelated.start_kill().expect("stop unrelated fixture");
+        unrelated.wait().await.expect("reap unrelated fixture");
+    }
 
     /// The real shape of `pm list instrumentation`, and the one line that matters in it.
     ///

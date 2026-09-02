@@ -10,12 +10,13 @@ use tokio::task::JoinHandle;
 use uuid::Uuid;
 
 use crate::{
-    AgentInstallProof, AgentSettings, AgentStatus, AppProcessState, BackgroundStreamLease,
-    ClipboardAccessMode, DeviceBusy, DeviceCapabilityRegistry, DeviceCapabilitySnapshot,
-    DeviceControllerCapabilities, DeviceDriver, DeviceInfo, DeviceWorkCoordinator, DeviceWorkLease,
-    DeviceWorkOwner, ForegroundStreamReservation, GuardedClipboardOperation,
-    GuardedClipboardOutput, GuardedClipboardProgress, InteractionSessionKind, ProcessAbsenceProof,
-    StreamBudgetError, StreamBudgetManager, StreamStartProof, StreamStopProof, UiSession,
+    AgentInstallProof, AgentSettings, AgentStatus, AndroidInstallDeviceSpec, AppInstallResult,
+    AppProcessState, BackgroundStreamLease, ClipboardAccessMode, DeviceAppInstallRequest,
+    DeviceBusy, DeviceCapabilityRegistry, DeviceCapabilitySnapshot, DeviceControllerCapabilities,
+    DeviceDriver, DeviceInfo, DeviceWorkCoordinator, DeviceWorkLease, DeviceWorkOwner,
+    ForegroundStreamReservation, GuardedClipboardOperation, GuardedClipboardOutput,
+    GuardedClipboardProgress, InteractionSessionKind, ProcessAbsenceProof, StreamBudgetError,
+    StreamBudgetManager, StreamStartProof, StreamStopProof, UiSession,
 };
 
 #[derive(Debug, Error)]
@@ -1975,6 +1976,7 @@ mod tests {
     const QUICK_WAIT: Duration = Duration::from_millis(25);
 
     struct TestDriver {
+        shutdown_owned_process_calls: AtomicUsize,
         session_starts: AtomicUsize,
         stream_starts: AtomicUsize,
         first_frame_observed: AtomicBool,
@@ -2014,6 +2016,7 @@ mod tests {
     impl Default for TestDriver {
         fn default() -> Self {
             Self {
+                shutdown_owned_process_calls: AtomicUsize::new(0),
                 session_starts: AtomicUsize::new(0),
                 stream_starts: AtomicUsize::new(0),
                 first_frame_observed: AtomicBool::new(true),
@@ -2217,6 +2220,12 @@ mod tests {
 
     #[async_trait]
     impl crate::DeviceDriver for TestDriver {
+        async fn shutdown_owned_processes(&self) -> anyhow::Result<()> {
+            self.shutdown_owned_process_calls
+                .fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+
         fn supports_verified_app_termination(&self, _udid: &str) -> bool {
             true
         }
@@ -2521,6 +2530,24 @@ mod tests {
             Arc::new(crate::DeviceWorkCoordinator::new()),
             Arc::new(crate::StreamBudgetManager::new(limit).expect("valid test stream limit")),
         )
+    }
+
+    #[tokio::test]
+    async fn shutdown_cleanup_waits_for_driver_owned_processes_once() {
+        let driver = Arc::new(TestDriver::default());
+        let control = control_plane(Arc::clone(&driver), 1);
+
+        control.shutdown_cleanup().await.expect("first shutdown");
+        control
+            .shutdown_cleanup()
+            .await
+            .expect("idempotent shutdown");
+
+        assert_eq!(
+            driver.shutdown_owned_process_calls.load(Ordering::SeqCst),
+            1,
+            "the backend teardown runs once before shutdown reports completion"
+        );
     }
 
     fn capability_fixture() -> (DeviceCapabilitySnapshot, DeviceCapabilityQualification) {

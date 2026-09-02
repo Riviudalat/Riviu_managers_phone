@@ -776,10 +776,20 @@ impl AppState {
         // The database gets somewhere to put secrets that is not the SQLite file. Opened after
         // the credential store precisely so it can be handed one: the AI API key used to sit in
         // the settings blob in cleartext, readable by any process running as the operator.
-        let db = Arc::new(
-            Database::open(data.join("riviu.db"))?
-                .with_secrets(Arc::new(KeyringSecrets::new(credentials.clone()))),
-        );
+        let database = Database::open(data.join("riviu.db"))?;
+        let (backfilled_apps, app_backfill_failures) = database.backfill_app_library_hashes()?;
+        if backfilled_apps > 0 {
+            log::info!("đã bổ sung định danh nội dung cho {backfilled_apps} ứng dụng cũ");
+        }
+        if !app_backfill_failures.is_empty() {
+            log::warn!(
+                "{} ứng dụng cũ chưa đọc được metadata: {}",
+                app_backfill_failures.len(),
+                app_backfill_failures.join("; ")
+            );
+        }
+        let db =
+            Arc::new(database.with_secrets(Arc::new(KeyringSecrets::new(credentials.clone()))));
         let legacy_token = std::env::var("RIVIU_RTMMO_TOKEN").ok();
         let ios =
             bootstrap_ios_runtime(resolve_desktop_agent_runtime_for_bootstrap_with_candidate(
@@ -814,6 +824,8 @@ impl AppState {
         ));
         let android_tools =
             crate::android_tools::AndroidTools::load_from(&sidecar_root, sidecar_origin);
+        let android_package_tools =
+            crate::android_package_tools::resolve_android_package_tools(&sidecar_root);
         for problem in &android_tools.problems {
             log::warn!("bundled Android tools: {problem}");
         }
@@ -825,6 +837,8 @@ impl AppState {
             bundled_riviu_agent_apk: android_tools.riviu_agent_apk.clone(),
             bundled_agent_server_apk: android_tools.agent_server_apk.clone(),
             bundled_agent_test_apk: android_tools.agent_test_apk.clone(),
+            package_java: android_package_tools.java.clone(),
+            bundletool_jar: android_package_tools.bundletool.clone(),
             ..Default::default()
         };
         // Restored from the database rather than rebuilt from `Default`, which is what made

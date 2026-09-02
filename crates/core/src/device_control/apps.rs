@@ -14,6 +14,62 @@ impl DeviceControlPlane {
             .await
             .map_err(|error| driver_error(lease.udid(), "installApp", error))
     }
+    pub async fn install_app_set<'a>(
+        &self,
+        context: impl Into<DeviceLeaseRef<'a>>,
+        paths: &[PathBuf],
+    ) -> Result<(), DeviceControlError> {
+        let lease = self.validate_leased(context.into())?;
+        self.driver
+            .install_app_set(lease.udid(), paths)
+            .await
+            .map_err(|error| driver_error(lease.udid(), "installAppSet", error))
+    }
+    pub async fn android_install_device_spec<'a>(
+        &self,
+        context: impl Into<DeviceLeaseRef<'a>>,
+    ) -> Result<AndroidInstallDeviceSpec, DeviceControlError> {
+        let lease = self.validate_leased(context.into())?;
+        self.driver
+            .android_install_device_spec(lease.udid())
+            .await
+            .map_err(|error| driver_error(lease.udid(), "androidInstallDeviceSpec", error))
+    }
+    pub async fn extract_app_container_for_spec<'a>(
+        &self,
+        context: impl Into<DeviceLeaseRef<'a>>,
+        path: &Path,
+        spec: &AndroidInstallDeviceSpec,
+        destination: &Path,
+    ) -> Result<Vec<PathBuf>, DeviceControlError> {
+        let lease = self.validate_leased(context.into())?;
+        self.driver
+            .extract_app_container_for_spec(lease.udid(), path, spec, destination)
+            .await
+            .map_err(|error| driver_error(lease.udid(), "extractAppContainerForSpec", error))
+    }
+    pub async fn install_app_set_checked<'a>(
+        &self,
+        context: impl Into<DeviceLeaseRef<'a>>,
+        request: &DeviceAppInstallRequest,
+    ) -> Result<AppInstallResult, DeviceControlError> {
+        let lease = self.validate_leased(context.into())?;
+        self.driver
+            .install_app_set_checked(lease.udid(), request)
+            .await
+            .map_err(|error| driver_error(lease.udid(), "installAppSetChecked", error))
+    }
+    pub async fn install_app_container<'a>(
+        &self,
+        context: impl Into<DeviceLeaseRef<'a>>,
+        path: &Path,
+    ) -> Result<(), DeviceControlError> {
+        let lease = self.validate_leased(context.into())?;
+        self.driver
+            .install_app_container(lease.udid(), path)
+            .await
+            .map_err(|error| driver_error(lease.udid(), "installAppContainer", error))
+    }
     pub async fn stage_publish_media<'a>(
         &self,
         context: impl Into<DeviceLeaseRef<'a>>,

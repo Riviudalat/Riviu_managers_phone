@@ -12,7 +12,8 @@ use crate::device_capabilities::{
 use crate::flow::QualifiedElementLocator;
 use crate::stream_budget::StreamStopProof;
 use crate::types::{
-    ActiveAppIdentity, AgentSettings, AgentStatus, DeviceInfo, HardwareKey, InstalledApp,
+    ActiveAppIdentity, AgentSettings, AgentStatus, AndroidInstallDeviceSpec, AppInstallResult,
+    AppInstallStatus, DeviceAppInstallRequest, DeviceInfo, HardwareKey, InstalledApp,
     InteractionSessionKind, ShellOutcome, StreamHandoffProof, StreamStartProof, SwipeGesture,
     SwipePath, TapPoint,
 };
@@ -403,6 +404,74 @@ pub trait DeviceDriver: Send + Sync {
     async fn list_devices(&self) -> anyhow::Result<Vec<DeviceInfo>>;
     async fn refresh_device(&self, udid: &str) -> anyhow::Result<DeviceInfo>;
     async fn install_app(&self, udid: &str, path: &Path) -> anyhow::Result<()>;
+    /// Install one Android package set. A one-member set is intentionally distinct from
+    /// `install_app`: iOS continues to receive IPA files through that established path.
+    async fn install_app_set(&self, _udid: &str, _paths: &[PathBuf]) -> anyhow::Result<()> {
+        unsupported("installAppSet")
+    }
+    async fn android_install_device_spec(
+        &self,
+        _udid: &str,
+    ) -> anyhow::Result<AndroidInstallDeviceSpec> {
+        unsupported("androidInstallDeviceSpec")
+    }
+    /// Materialize one `.apks` selection for a normalized device spec. The
+    /// caller groups equal specs, so this host-only Bundletool operation runs
+    /// once per group rather than once per phone.
+    async fn extract_app_container_for_spec(
+        &self,
+        _udid: &str,
+        _path: &Path,
+        _spec: &AndroidInstallDeviceSpec,
+        _destination: &Path,
+    ) -> anyhow::Result<Vec<PathBuf>> {
+        unsupported("extractAppContainerForSpec")
+    }
+    /// Install a verified Android package set and classify the result at the
+    /// process-spawn boundary. Android overrides this method with Package
+    /// Manager readback; the default preserves compatibility for third-party
+    /// drivers while refusing to describe an unverified failure as retryable.
+    async fn install_app_set_checked(
+        &self,
+        udid: &str,
+        request: &DeviceAppInstallRequest,
+    ) -> anyhow::Result<AppInstallResult> {
+        if let Some(gate) = &request.effect_gate {
+            if !gate.claim_effect() {
+                return Ok(AppInstallResult {
+                    udid: udid.to_string(),
+                    status: AppInstallStatus::CancelledBeforeDispatch,
+                    effect_started: false,
+                    observed_version_name: None,
+                    observed_version_code: None,
+                    detail: Some("install cancelled before process spawn".to_string()),
+                });
+            }
+        }
+        match self.install_app_set(udid, &request.apk_paths).await {
+            Ok(()) => Ok(AppInstallResult {
+                udid: udid.to_string(),
+                status: AppInstallStatus::Uncertain,
+                effect_started: true,
+                observed_version_name: None,
+                observed_version_code: None,
+                detail: Some("driver did not provide package/version readback".to_string()),
+            }),
+            Err(error) => Ok(AppInstallResult {
+                udid: udid.to_string(),
+                status: AppInstallStatus::Uncertain,
+                effect_started: true,
+                observed_version_name: None,
+                observed_version_code: None,
+                detail: Some(error.to_string()),
+            }),
+        }
+    }
+    /// Install a platform-specific app container. Android uses this for `.apks`, where
+    /// extracting device-compatible splits requires the connected device's specification.
+    async fn install_app_container(&self, _udid: &str, _path: &Path) -> anyhow::Result<()> {
+        unsupported("installAppContainer")
+    }
     /// Stage a verified publish tree in the Agent sandbox. This is deliberately
     /// separate from `install_app`; media must never be sent through installd.
     async fn stage_publish_media(
@@ -515,6 +584,14 @@ pub trait DeviceDriver: Send + Sync {
     /// Legacy preparation hook. This must remain install/auth-only and must not
     /// create a control session or MJPEG producer.
     async fn prepare_device(&self, udid: &str) -> anyhow::Result<()>;
+    /// Terminate and reap every host process spawned and still owned by this backend.
+    ///
+    /// DeviceControlPlane invokes this only after active contexts and its cleanup worker have
+    /// drained. The default owns no persistent process. Implementations must target retained
+    /// child handles, never a process name or a fleet-wide kill command.
+    async fn shutdown_owned_processes(&self) -> anyhow::Result<()> {
+        Ok(())
+    }
 }
 
 #[async_trait]

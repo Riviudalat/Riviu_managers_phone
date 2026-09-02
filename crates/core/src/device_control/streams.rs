@@ -662,6 +662,15 @@ impl DeviceControlPlane {
                 message: error.to_string(),
             })?;
         }
+        let driver_shutdown = self
+            .driver
+            .shutdown_owned_processes()
+            .await
+            .map_err(|error| DeviceControlError::Driver {
+                udid: "control-plane".to_string(),
+                operation: "shutdownOwnedProcesses",
+                message: error.to_string(),
+            });
         self.lifecycle.mark_stopped();
         let count = self.cleanup_quarantine_count();
         if count > 0 {
@@ -670,6 +679,6 @@ impl DeviceControlPlane {
         if worker_closed {
             return Err(DeviceControlError::CleanupWorkerClosed);
         }
-        Ok(())
+        driver_shutdown
     }
 }

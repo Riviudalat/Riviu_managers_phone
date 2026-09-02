@@ -34,7 +34,8 @@ use crate::driver::{
 };
 use crate::stream_budget::StreamStopProof;
 use crate::types::{
-    AgentSettings, AgentStatus, DeviceInfo, InstalledApp, InteractionSessionKind, ShellOutcome,
+    AgentSettings, AgentStatus, AndroidInstallDeviceSpec, AppInstallResult,
+    DeviceAppInstallRequest, DeviceInfo, InstalledApp, InteractionSessionKind, ShellOutcome,
     StreamHandoffProof, StreamStartProof,
 };
 
@@ -110,6 +111,23 @@ impl MultiplexDriver {
 
 #[async_trait]
 impl DeviceDriver for MultiplexDriver {
+    async fn shutdown_owned_processes(&self) -> anyhow::Result<()> {
+        let mut failures = Vec::new();
+        for backend in &self.backends {
+            if let Err(error) = backend.driver.shutdown_owned_processes().await {
+                failures.push(format!("{}: {error}", backend.name));
+            }
+        }
+        if failures.is_empty() {
+            Ok(())
+        } else {
+            anyhow::bail!(
+                "one or more device backends failed to stop owned processes: {}",
+                failures.join("; ")
+            )
+        }
+    }
+
     async fn list_devices(&self) -> anyhow::Result<Vec<DeviceInfo>> {
         let mut devices = Vec::new();
         let mut routes = HashMap::new();
@@ -360,6 +378,43 @@ impl DeviceDriver for MultiplexDriver {
         self.route(udid)?.install_app(udid, path).await
     }
 
+    async fn install_app_set(&self, udid: &str, paths: &[PathBuf]) -> anyhow::Result<()> {
+        self.route(udid)?.install_app_set(udid, paths).await
+    }
+
+    async fn android_install_device_spec(
+        &self,
+        udid: &str,
+    ) -> anyhow::Result<AndroidInstallDeviceSpec> {
+        self.route(udid)?.android_install_device_spec(udid).await
+    }
+
+    async fn extract_app_container_for_spec(
+        &self,
+        udid: &str,
+        path: &Path,
+        spec: &AndroidInstallDeviceSpec,
+        destination: &Path,
+    ) -> anyhow::Result<Vec<PathBuf>> {
+        self.route(udid)?
+            .extract_app_container_for_spec(udid, path, spec, destination)
+            .await
+    }
+
+    async fn install_app_set_checked(
+        &self,
+        udid: &str,
+        request: &DeviceAppInstallRequest,
+    ) -> anyhow::Result<AppInstallResult> {
+        self.route(udid)?
+            .install_app_set_checked(udid, request)
+            .await
+    }
+
+    async fn install_app_container(&self, udid: &str, path: &Path) -> anyhow::Result<()> {
+        self.route(udid)?.install_app_container(udid, path).await
+    }
+
     async fn stage_publish_media(
         &self,
         udid: &str,
@@ -495,6 +550,7 @@ mod tests {
         udids: Vec<String>,
         text_comments: bool,
         fail_listing: bool,
+        checked_installs: Arc<parking_lot::Mutex<Vec<String>>>,
     }
 
     impl StubDriver {
@@ -503,6 +559,7 @@ mod tests {
                 udids: udids.iter().map(|value| value.to_string()).collect(),
                 text_comments,
                 fail_listing: false,
+                checked_installs: Arc::new(parking_lot::Mutex::new(Vec::new())),
             })
         }
 
@@ -511,6 +568,7 @@ mod tests {
                 udids: Vec::new(),
                 text_comments: false,
                 fail_listing: true,
+                checked_installs: Arc::new(parking_lot::Mutex::new(Vec::new())),
             })
         }
     }
@@ -582,6 +640,38 @@ mod tests {
         }
         async fn install_app(&self, _udid: &str, _path: &Path) -> anyhow::Result<()> {
             Ok(())
+        }
+        async fn install_app_set_checked(
+            &self,
+            udid: &str,
+            _request: &DeviceAppInstallRequest,
+        ) -> anyhow::Result<AppInstallResult> {
+            self.checked_installs.lock().push(udid.to_string());
+            Ok(AppInstallResult {
+                udid: udid.to_string(),
+                status: crate::AppInstallStatus::Succeeded,
+                effect_started: true,
+                observed_version_name: Some("1.0".to_string()),
+                observed_version_code: Some("1".to_string()),
+                detail: None,
+            })
+        }
+        async fn android_install_device_spec(
+            &self,
+            _udid: &str,
+        ) -> anyhow::Result<AndroidInstallDeviceSpec> {
+            if !self.text_comments {
+                return Err(crate::driver::UnsupportedCapability {
+                    capability: "androidInstallDeviceSpec",
+                }
+                .into());
+            }
+            Ok(AndroidInstallDeviceSpec {
+                sdk_version: 35,
+                supported_abis: vec!["arm64-v8a".to_string()],
+                screen_density: 480,
+                supported_locales: vec!["vi-VN".to_string()],
+            })
         }
         async fn uninstall_app(&self, _udid: &str, _bundle_id: &str) -> anyhow::Result<()> {
             Ok(())
@@ -706,6 +796,50 @@ mod tests {
             refused.to_string().contains("pullMedia"),
             "the refusal must name the capability: {refused}"
         );
+    }
+
+    #[tokio::test]
+    async fn checked_app_install_reaches_the_owning_backend() {
+        let log = Arc::new(parking_lot::Mutex::new(Vec::new()));
+        let android: Arc<dyn DeviceDriver> = Arc::new(StubDriver {
+            udids: vec!["droid-a".to_string()],
+            text_comments: true,
+            fail_listing: false,
+            checked_installs: Arc::clone(&log),
+        });
+        let driver = MultiplexDriver::new(vec![("android".to_string(), android)]);
+        driver.list_devices().await.expect("list");
+        let result = driver
+            .install_app_set_checked(
+                "droid-a",
+                &DeviceAppInstallRequest {
+                    apk_paths: vec![PathBuf::from("C:/gói thử/base.apk")],
+                    application_id: "com.example.fixture".to_string(),
+                    version_name: "1.0".to_string(),
+                    version_code: Some("1".to_string()),
+                    allow_downgrade: false,
+                    effect_gate: None,
+                },
+            )
+            .await
+            .expect("checked install");
+
+        assert_eq!(result.status, crate::AppInstallStatus::Succeeded);
+        assert_eq!(&*log.lock(), &["droid-a".to_string()]);
+        assert_eq!(
+            driver
+                .android_install_device_spec("droid-a")
+                .await
+                .expect("spec")
+                .sdk_version,
+            35
+        );
+        assert!(driver
+            .android_install_device_spec("never-listed")
+            .await
+            .expect_err("unrouted spec")
+            .to_string()
+            .contains("not connected"));
     }
 
     #[tokio::test]

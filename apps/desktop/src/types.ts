@@ -208,6 +208,7 @@ export type PageId =
   | "scripts"
   | "jobs"
   | "publish"
+  | "diagnostics"
   | "data"
   | "api"
   | "settings";
@@ -261,7 +262,54 @@ export interface AppLibraryItem {
   path: string;
   bundleId: string;
   version: string;
+  platform: "ios" | "android";
+  packageFormat: "ipa" | "apk" | "xapk" | "apkm" | "apks";
+  artifactKind?: "ipa" | "apk" | "xapk" | "apkm" | "apks";
+  applicationId?: string;
+  versionName?: string;
+  versionCode?: string | null;
+  sha256?: string;
+  sizeBytes?: number;
+  signerSha256?: string;
+  iconPngBase64?: string | null;
+  metadataStatus?: string;
+  metadataError?: string | null;
   createdAt: string;
+}
+
+export type AppInstallStatus =
+  | "succeeded"
+  | "beforeEffect"
+  | "failedVerified"
+  | "uncertain"
+  | "cancelledBeforeDispatch";
+
+export interface AppInstallRequest {
+  batchId: string;
+  appId: string;
+  udids: string[];
+  allowDowngrade: boolean;
+}
+
+export interface AppInstallProgress {
+  udid: string;
+  phase: "pending" | "preparing" | "installing" | "reconciling" | "complete" | "cancelledBeforeDispatch";
+  detail?: string;
+}
+
+export interface AppInstallResult {
+  udid: string;
+  status: AppInstallStatus;
+  effectStarted: boolean;
+  observedVersionName?: string;
+  observedVersionCode?: string;
+  detail?: string;
+}
+
+export interface AppInstallBatchResponse {
+  batchId: string;
+  progress: AppInstallProgress[];
+  results: AppInstallResult[];
 }
 
 export interface ScheduleItem {
@@ -1024,6 +1072,7 @@ export type ActionKind =
   | "wait"
   | "tap"
   | "swipe"
+  | "autoSwipe"
   | "typeText"
   | "screenshot"
   | "home"
@@ -1593,6 +1642,14 @@ export interface DeviceHealthReport {
   rosterStatus?: DeviceStatus | null;
   agent: AgentStatus;
   agentReadyNow?: boolean | null;
+  /** Cached, known agent capability evidence. `null` means no agent state has been observed. */
+  agentFeatures?: string[] | null;
+  /** Cached helper authorization evidence, never inferred from an unknown agent. */
+  agentAuthReady?: boolean | null;
+  /** The actual adb executable selected by the Android driver, not a path re-resolved for UI. */
+  adbPath?: string | null;
+  adbOrigin?: string | null;
+  adbVersion?: string | null;
   /**
    * `null` means **nobody has asked this phone yet** — no session has attached it this run
    * — which is neither reachable nor unreachable. Rendering it as unreachable accused a
@@ -1606,6 +1663,14 @@ export interface DeviceHealthReport {
   tiktokPackage?: string | null;
   tiktokVersion?: string | null;
   tiktokLocale?: string | null;
+  geometry?: {
+    width: number;
+    height: number;
+    density: number;
+    rotation: number;
+  } | null;
+  /** `0` means the view hub has not made a stream generation for this device yet. */
+  streamGeneration?: number | null;
   notes: string[];
 }
 
