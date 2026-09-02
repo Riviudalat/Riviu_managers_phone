@@ -1,0 +1,159 @@
+index,provenanceCommand,status,riviuMapping,decision
+1,action_act,existing,Flow and macro runtime,typed local automation; AutoSwipe extends this surface
+2,action_play,existing,Flow and macro runtime,typed local automation; AutoSwipe extends this surface
+3,activate,commercial-excluded,none,"commercial account, branding, telemetry, or updater surface"
+4,adb_command,security-excluded,none,"unsafe vendor transport, privilege, key, script, or HID surface"
+5,app_install,implement,Android app library,clean-room package metadata and controlled install
+6,button2_qrcode,commercial-excluded,none,"commercial account, branding, telemetry, or updater surface"
+7,button3_qrcode,commercial-excluded,none,"commercial account, branding, telemetry, or updater surface"
+8,calibrate_mouse,security-excluded,none,"unsafe vendor transport, privilege, key, script, or HID surface"
+9,check_adb_device,existing,Riviu device control,equivalent typed capability already exists
+10,check_auto_update,commercial-excluded,none,"commercial account, branding, telemetry, or updater surface"
+11,check_brand_stop,commercial-excluded,none,"commercial account, branding, telemetry, or updater surface"
+12,check_client_token,commercial-excluded,none,"commercial account, branding, telemetry, or updater surface"
+13,check_hid_app_installed,security-excluded,none,"unsafe vendor transport, privilege, key, script, or HID surface"
+14,check_serial_number,existing,Riviu device control,equivalent typed capability already exists
+15,check_service,commercial-excluded,none,"commercial account, branding, telemetry, or updater surface"
+16,client_event_reporting,commercial-excluded,none,"commercial account, branding, telemetry, or updater surface"
+17,client_login,commercial-excluded,none,"commercial account, branding, telemetry, or updater surface"
+18,client_logout,commercial-excluded,none,"commercial account, branding, telemetry, or updater surface"
+19,client_pwd_reset,commercial-excluded,none,"commercial account, branding, telemetry, or updater surface"
+20,client_refund,commercial-excluded,none,"commercial account, branding, telemetry, or updater surface"
+21,client_refund_reason,commercial-excluded,none,"commercial account, branding, telemetry, or updater surface"
+22,client_register,commercial-excluded,none,"commercial account, branding, telemetry, or updater surface"
+23,close_device,existing,Riviu device control,equivalent typed capability already exists
+24,cloud_phone_active_page,commercial-excluded,none,"account, payment, or cloud-phone surface"
+25,cloud_phone_connect,commercial-excluded,none,"account, payment, or cloud-phone surface"
+26,cloud_phone_get_renew_order_info,commercial-excluded,none,"account, payment, or cloud-phone surface"
+27,cloud_phone_lease_record_page,commercial-excluded,none,"account, payment, or cloud-phone surface"
+28,cloud_phone_my_phones,commercial-excluded,none,"account, payment, or cloud-phone surface"
+29,cloud_phone_pay_record_page,commercial-excluded,none,"account, payment, or cloud-phone surface"
+30,cloud_phone_renew_prepay,commercial-excluded,none,"account, payment, or cloud-phone surface"
+31,cloud_phone_tag_add,commercial-excluded,none,"account, payment, or cloud-phone surface"
+32,cloud_phone_tag_del,commercial-excluded,none,"account, payment, or cloud-phone surface"
+33,cloud_phone_tag_edit,commercial-excluded,none,"account, payment, or cloud-phone surface"
+34,cloud_phone_tag_list,commercial-excluded,none,"account, payment, or cloud-phone surface"
+35,cloud_phone_tag_sort,commercial-excluded,none,"account, payment, or cloud-phone surface"
+36,cloud_virtual_active_page,commercial-excluded,none,"account, payment, or cloud-phone surface"
+37,cloud_virtual_ali_command,commercial-excluded,none,"account, payment, or cloud-phone surface"
+38,cloud_virtual_auth_device_page,commercial-excluded,none,"account, payment, or cloud-phone surface"
+39,cloud_virtual_baidu_command,commercial-excluded,none,"account, payment, or cloud-phone surface"
+40,cloud_virtual_blade_command,commercial-excluded,none,"account, payment, or cloud-phone surface"
+41,cloud_virtual_create_ali_lease_device,commercial-excluded,none,"account, payment, or cloud-phone surface"
+42,cloud_virtual_lease_record_page,commercial-excluded,none,"account, payment, or cloud-phone surface"
+43,cloud_virtual_model_first_list,commercial-excluded,none,"account, payment, or cloud-phone surface"
+44,cloud_virtual_new_brand_product_list,commercial-excluded,none,"account, payment, or cloud-phone surface"
+45,cloud_virtual_pay_record_device_page,commercial-excluded,none,"account, payment, or cloud-phone surface"
+46,cloud_virtual_pay_record_page,commercial-excluded,none,"account, payment, or cloud-phone surface"
+47,cloud_virtual_pay_record_renew_info,commercial-excluded,none,"account, payment, or cloud-phone surface"
+48,cloud_virtual_voucher_record_page,commercial-excluded,none,"account, payment, or cloud-phone surface"
+49,common_request,commercial-excluded,none,"commercial account, branding, telemetry, or updater surface"
+50,copy,existing,Riviu device control,equivalent typed capability already exists
+51,cur_env,existing,Riviu device control,equivalent typed capability already exists
+52,device_is_accessible,security-excluded,none,"unsafe vendor transport, privilege, key, script, or HID surface"
+53,disconnect,existing,Riviu device control,equivalent typed capability already exists
+54,download_image,not-applicable,none,host shell detail with no product-level parity requirement
+55,exec_autojs_check,security-excluded,none,"unsafe vendor transport, privilege, key, script, or HID surface"
+56,gather_coord,existing,Riviu device control,equivalent typed capability already exists
+57,get_activation_pay_list,commercial-excluded,none,"commercial account, branding, telemetry, or updater surface"
+58,get_apk_info,implement,Android app library,clean-room package metadata and controlled install
+59,get_apk_list,implement,Android app library,clean-room package metadata and controlled install
+60,get_arp_out,existing,Riviu device control,equivalent typed capability already exists
+61,get_brand_cloud_service,commercial-excluded,none,"commercial account, branding, telemetry, or updater surface"
+62,get_brand_owner,commercial-excluded,none,"commercial account, branding, telemetry, or updater surface"
+63,get_brand_price_list,commercial-excluded,none,"commercial account, branding, telemetry, or updater surface"
+64,get_clipboard,existing,Riviu device control,equivalent typed capability already exists
+65,get_computer_id,not-applicable,none,host shell detail with no product-level parity requirement
+66,get_computer_name,not-applicable,none,host shell detail with no product-level parity requirement
+67,get_cs_qr_code_list,commercial-excluded,none,"commercial account, branding, telemetry, or updater surface"
+68,get_cur_time,commercial-excluded,none,"commercial account, branding, telemetry, or updater surface"
+69,get_density,existing,Riviu device control,equivalent typed capability already exists
+70,get_device_info,existing,Riviu device control,equivalent typed capability already exists
+71,get_device_list,existing,Riviu device control,equivalent typed capability already exists
+72,get_device_mode,existing,Riviu device control,equivalent typed capability already exists
+73,get_ime_info,existing,Riviu device control,equivalent typed capability already exists
+74,get_ime_list,existing,Riviu device control,equivalent typed capability already exists
+75,get_ip_serial,existing,Riviu device control,equivalent typed capability already exists
+76,get_pay_result,commercial-excluded,none,"commercial account, branding, telemetry, or updater surface"
+77,get_root,existing,Riviu device control,equivalent typed capability already exists
+78,get_serial_ip,existing,Riviu device control,equivalent typed capability already exists
+79,get_size,existing,Riviu device control,equivalent typed capability already exists
+80,get_system_config,existing,Riviu device control,equivalent typed capability already exists
+81,get_usb_devices,existing,Riviu device control,equivalent typed capability already exists
+82,get_windows_language,not-applicable,none,host shell detail with no product-level parity requirement
+83,get_ws_port,not-applicable,none,host shell detail with no product-level parity requirement
+84,has_hid_devices,security-excluded,none,"unsafe vendor transport, privilege, key, script, or HID surface"
+85,id2_verify,commercial-excluded,none,"commercial account, branding, telemetry, or updater surface"
+86,input_enter,existing,Riviu device control,equivalent typed capability already exists
+87,input_text,existing,Riviu device control,equivalent typed capability already exists
+88,install_apk,implement,Android app library,clean-room package metadata and controlled install
+89,install_hid_app,security-excluded,none,"unsafe vendor transport, privilege, key, script, or HID surface"
+90,install_input,security-excluded,none,"unsafe vendor transport, privilege, key, script, or HID surface"
+91,install_magisk,security-excluded,none,"unsafe vendor transport, privilege, key, script, or HID surface"
+92,install_xwdb,security-excluded,none,"unsafe vendor transport, privilege, key, script, or HID surface"
+93,is_duration_greater_than_24_hours,commercial-excluded,none,"commercial account, branding, telemetry, or updater surface"
+94,is_hid_model,security-excluded,none,"unsafe vendor transport, privilege, key, script, or HID surface"
+95,launch_app,existing,Riviu device control,equivalent typed capability already exists
+96,lock_screen,existing,Riviu device control,equivalent typed capability already exists
+97,merge_adb_auth_key,security-excluded,none,"unsafe vendor transport, privilege, key, script, or HID surface"
+98,mouse_button2,security-excluded,none,"unsafe vendor transport, privilege, key, script, or HID surface"
+99,mouse_button3,security-excluded,none,"unsafe vendor transport, privilege, key, script, or HID surface"
+100,mouse_reset,security-excluded,none,"unsafe vendor transport, privilege, key, script, or HID surface"
+101,oem_adv_config,commercial-excluded,none,"commercial account, branding, telemetry, or updater surface"
+102,open_api_ws_connect,security-excluded,none,"unsafe vendor transport, privilege, key, script, or HID surface"
+103,otg_all_scanning,security-excluded,none,"unsafe vendor transport, privilege, key, script, or HID surface"
+104,otg_scanning,security-excluded,none,"unsafe vendor transport, privilege, key, script, or HID surface"
+105,paste,existing,Riviu device control,equivalent typed capability already exists
+106,paste_pwd,existing,Riviu device control,equivalent typed capability already exists
+107,paste_text,existing,Riviu device control,equivalent typed capability already exists
+108,pay_receipt,commercial-excluded,none,"commercial account, branding, telemetry, or updater surface"
+109,pull_clipboard,existing,Riviu device control,equivalent typed capability already exists
+110,pull_pasteboard,existing,Riviu device control,equivalent typed capability already exists
+111,push_file,existing,Riviu device control,equivalent typed capability already exists
+112,push_pasteboard,existing,Riviu device control,equivalent typed capability already exists
+113,push_scan_ips,existing,Riviu device control,equivalent typed capability already exists
+114,put_clipboard,existing,Riviu device control,equivalent typed capability already exists
+115,query_virtual_voucher,commercial-excluded,none,"account, payment, or cloud-phone surface"
+116,query_virtual_voucher_renew_device,commercial-excluded,none,"account, payment, or cloud-phone surface"
+117,read_config,not-applicable,none,host shell detail with no product-level parity requirement
+118,read_sys_config,not-applicable,none,host shell detail with no product-level parity requirement
+119,reboot,existing,Riviu device control,equivalent typed capability already exists
+120,reboot_ext,existing,Riviu device control,equivalent typed capability already exists
+121,reconnect_device,existing,Riviu device control,equivalent typed capability already exists
+122,remove_hid_driver,security-excluded,none,"unsafe vendor transport, privilege, key, script, or HID surface"
+123,replace_device,commercial-excluded,none,"commercial account, branding, telemetry, or updater surface"
+124,replace_record_detail_page,commercial-excluded,none,"commercial account, branding, telemetry, or updater surface"
+125,replace_record_page,commercial-excluded,none,"commercial account, branding, telemetry, or updater surface"
+126,restart,existing,Riviu device control,equivalent typed capability already exists
+127,restart_adb,existing,Riviu device control,equivalent typed capability already exists
+128,save_uploaded_file,not-applicable,none,host shell detail with no product-level parity requirement
+129,send_sms_verify_code,commercial-excluded,none,"commercial account, branding, telemetry, or updater surface"
+130,send_transfer_sms_verify_code,commercial-excluded,none,"commercial account, branding, telemetry, or updater surface"
+131,send_verify_code,commercial-excluded,none,"commercial account, branding, telemetry, or updater surface"
+132,set_activation,commercial-excluded,none,"commercial account, branding, telemetry, or updater surface"
+133,set_auto_mirror,existing,Riviu device control,equivalent typed capability already exists
+134,set_state,not-applicable,none,host shell detail with no product-level parity requirement
+135,start_updater,commercial-excluded,none,"commercial account, branding, telemetry, or updater surface"
+136,stop_autojs,security-excluded,none,"unsafe vendor transport, privilege, key, script, or HID surface"
+137,stop_gather_coord,existing,Riviu device control,equivalent typed capability already exists
+138,switch_accessible_mode,security-excluded,none,"unsafe vendor transport, privilege, key, script, or HID surface"
+139,switch_adb_mode,existing,Riviu device control,equivalent typed capability already exists
+140,switch_all_device_mode,existing,Riviu device control,equivalent typed capability already exists
+141,switch_direction,existing,Riviu device control,equivalent typed capability already exists
+142,switch_hid_model,security-excluded,none,"unsafe vendor transport, privilege, key, script, or HID surface"
+143,switch_ime,existing,Riviu device control,equivalent typed capability already exists
+144,sync_client_stat,commercial-excluded,none,"commercial account, branding, telemetry, or updater surface"
+145,transfer_device,commercial-excluded,none,"commercial account, branding, telemetry, or updater surface"
+146,transfer_record_detail_page,commercial-excluded,none,"commercial account, branding, telemetry, or updater surface"
+147,transfer_record_page,commercial-excluded,none,"commercial account, branding, telemetry, or updater surface"
+148,un_pre_lock,existing,Riviu device control,equivalent typed capability already exists
+149,uninstall_apk,existing,Riviu device control,equivalent typed capability already exists
+150,upload_pre_sign_list,commercial-excluded,none,"commercial account, branding, telemetry, or updater surface"
+151,usb_to_tcp,security-excluded,none,"unsafe vendor transport, privilege, key, script, or HID surface"
+152,verify_sms_code,commercial-excluded,none,"commercial account, branding, telemetry, or updater surface"
+153,version_notice,commercial-excluded,none,"commercial account, branding, telemetry, or updater surface"
+154,virtual_replace_status,commercial-excluded,none,"commercial account, branding, telemetry, or updater surface"
+155,voucher_bind_new_virtual,commercial-excluded,none,"commercial account, branding, telemetry, or updater surface"
+156,voucher_renew_virtual,commercial-excluded,none,"commercial account, branding, telemetry, or updater surface"
+157,wallpapers_device,existing,Riviu device control,equivalent typed capability already exists
+158,write_config,not-applicable,none,host shell detail with no product-level parity requirement

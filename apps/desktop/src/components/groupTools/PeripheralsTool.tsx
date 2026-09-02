@@ -214,8 +214,7 @@ export function PeripheralsTool({ targets, scopeLabel }: { targets: string[]; sc
   return (
     <>
       <p className="hint">
-        Ngoại vi vật lý cho {scopeLabel} (xiaowei "外设"). Relay USB để bật/tắt nguồn hoặc khởi
-        động cứng máy kẹt; tay cầm (Gamepad) điều khiển cả nhóm.
+        Ngoại vi cho {scopeLabel}: relay USB khôi phục nguồn; tay cầm điều khiển cả nhóm.
       </p>
 
       <fieldset className="group-tools-fieldset">

@@ -301,12 +301,9 @@ function App() {
    * DPI/resolution, power off, open the phone's Settings, wake the screen, screenshot into
    * the phone's own gallery, and browse its filesystem.
    *
-   * Three of its rows are still deliberately elsewhere rather than here, because they are
-   * fleet-shaped rather than phone-shaped and this app already had a better place for them:
-   * text/file distribution and the macro recorder live in the group Tools popup, task
-   * lists live in the Flow panel, and agent repair lives in Settings. One is genuinely not
-   * built: a gesture *recorder* per phone (xiaowei "Action Record"), as distinct from the
-   * macro replay that Tools already has.
+   * Fleet-shaped actions stay in their purpose-built surfaces: text/file distribution and
+   * macro recording live in Group Tools, task lists live in Flow, and agent repair lives in
+   * Settings.
    */
   const tileActions = useCallback(
     (device: DeviceInfo): DeviceMenuNode[] =>
