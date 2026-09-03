@@ -149,6 +149,48 @@ const MIGRATIONS: &[Migration] = &[
         apply: apply_migration_19,
         rebuilds_tables: false,
     },
+    Migration {
+        version: 20,
+        name: "versioned-automation-definitions",
+        apply: apply_migration_20,
+        rebuilds_tables: false,
+    },
+    Migration {
+        version: 21,
+        name: "interaction-public-action-runs",
+        apply: apply_migration_21,
+        rebuilds_tables: false,
+    },
+    Migration {
+        version: 22,
+        name: "orchestration-v1",
+        apply: apply_migration_22,
+        rebuilds_tables: false,
+    },
+    Migration {
+        version: 23,
+        name: "orchestration-cancelled-child-proof",
+        apply: apply_migration_23,
+        rebuilds_tables: true,
+    },
+    Migration {
+        version: 24,
+        name: "orchestration-confirmed-targets-and-nurture-children",
+        apply: apply_migration_24,
+        rebuilds_tables: false,
+    },
+    Migration {
+        version: 25,
+        name: "automation-schedule-occurrences",
+        apply: apply_migration_25,
+        rebuilds_tables: false,
+    },
+    Migration {
+        version: 26,
+        name: "interaction-action-only-message-count",
+        apply: apply_migration_26,
+        rebuilds_tables: true,
+    },
 ];
 
 pub(super) fn latest_version() -> i64 {
@@ -1168,6 +1210,411 @@ fn apply_migration_19(transaction: &Transaction<'_>) -> anyhow::Result<()> {
     Ok(())
 }
 
+fn apply_migration_20(transaction: &Transaction<'_>) -> anyhow::Result<()> {
+    transaction.execute_batch(
+        r#"
+CREATE TABLE automation_definitions (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL CHECK (length(trim(name)) > 0),
+  kind TEXT NOT NULL CHECK (kind IN ('nurture','interaction','publish')),
+  latest_revision INTEGER NOT NULL CHECK (latest_revision >= 1),
+  archived INTEGER NOT NULL DEFAULT 0 CHECK (archived IN (0,1)),
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE TABLE automation_definition_revisions (
+  definition_id TEXT NOT NULL,
+  revision INTEGER NOT NULL CHECK (revision >= 1),
+  target_json TEXT NOT NULL CHECK (json_valid(target_json)),
+  config_json TEXT NOT NULL CHECK (json_valid(config_json)),
+  created_at TEXT NOT NULL,
+  PRIMARY KEY (definition_id, revision),
+  FOREIGN KEY (definition_id) REFERENCES automation_definitions(id) ON DELETE RESTRICT
+);
+
+CREATE TABLE automation_schedules (
+  id TEXT PRIMARY KEY,
+  revision INTEGER NOT NULL DEFAULT 1 CHECK (revision >= 1),
+  name TEXT NOT NULL CHECK (length(trim(name)) > 0),
+  definition_id TEXT NOT NULL,
+  definition_revision INTEGER NOT NULL CHECK (definition_revision >= 1),
+  enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0,1)),
+  schedule_json TEXT NOT NULL CHECK (json_valid(schedule_json)),
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  FOREIGN KEY (definition_id, definition_revision)
+    REFERENCES automation_definition_revisions(definition_id, revision) ON DELETE RESTRICT
+);
+
+CREATE TRIGGER automation_definition_revisions_no_update
+BEFORE UPDATE ON automation_definition_revisions
+BEGIN
+  SELECT RAISE(ABORT, 'automation definition revisions are immutable');
+END;
+
+CREATE TRIGGER automation_definition_revisions_no_delete
+BEFORE DELETE ON automation_definition_revisions
+BEGIN
+  SELECT RAISE(ABORT, 'automation definition revisions are immutable');
+END;
+
+CREATE INDEX automation_definitions_active_updated
+  ON automation_definitions(archived, updated_at DESC);
+CREATE INDEX automation_schedules_enabled_updated
+  ON automation_schedules(enabled, updated_at DESC);
+"#,
+    )?;
+    Ok(())
+}
+
+fn apply_migration_21(transaction: &Transaction<'_>) -> anyhow::Result<()> {
+    transaction.execute_batch(
+        r#"
+CREATE TABLE tiktok_action_runs (
+  id TEXT PRIMARY KEY,
+  owner_kind TEXT NOT NULL CHECK (owner_kind IN ('interaction','nurture')),
+  owner_id TEXT NOT NULL CHECK (length(trim(owner_id)) > 0),
+  device_udid TEXT NOT NULL CHECK (length(trim(device_udid)) > 0),
+  card_identity_json TEXT CHECK (
+    card_identity_json IS NULL OR json_valid(card_identity_json)
+  ),
+  campaign_id TEXT,
+  assignment_id TEXT,
+  action_kind TEXT NOT NULL CHECK (action_kind IN ('like','save','comment','follow')),
+  state TEXT NOT NULL DEFAULT 'planned'
+    CHECK (state IN (
+      'planned','preparing','armed','confirmed','no_op','failed_before_effect','uncertain'
+    )),
+  revision INTEGER NOT NULL DEFAULT 0 CHECK (revision >= 0),
+  effect_intent TEXT CHECK (effect_intent IS NULL OR length(trim(effect_intent)) > 0),
+  evidence_json TEXT CHECK (evidence_json IS NULL OR json_valid(evidence_json)),
+  error_code TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  UNIQUE (owner_kind, owner_id, device_udid, action_kind),
+  CHECK (
+    (owner_kind='interaction' AND campaign_id IS NOT NULL AND assignment_id IS NOT NULL
+      AND owner_id=assignment_id)
+    OR
+    (owner_kind='nurture' AND campaign_id IS NULL AND assignment_id IS NULL)
+  ),
+  FOREIGN KEY (campaign_id) REFERENCES interaction_campaigns(id) ON DELETE CASCADE,
+  FOREIGN KEY (assignment_id) REFERENCES interaction_assignments(id) ON DELETE CASCADE
+);
+
+CREATE INDEX tiktok_action_runs_campaign_assignment
+  ON tiktok_action_runs(campaign_id, assignment_id, action_kind);
+CREATE INDEX tiktok_action_runs_owner
+  ON tiktok_action_runs(owner_kind, owner_id, device_udid, action_kind);
+CREATE INDEX tiktok_action_runs_recovery
+  ON tiktok_action_runs(state, updated_at)
+  WHERE state IN ('preparing','armed');
+"#,
+    )?;
+    Ok(())
+}
+
+fn apply_migration_22(transaction: &Transaction<'_>) -> anyhow::Result<()> {
+    transaction.execute_batch(
+        r#"
+CREATE TABLE orchestration_documents (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL CHECK (length(trim(name)) > 0),
+  latest_revision INTEGER NOT NULL CHECK (latest_revision >= 1),
+  archived INTEGER NOT NULL DEFAULT 0 CHECK (archived IN (0,1)),
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE TABLE orchestration_revisions (
+  document_id TEXT NOT NULL,
+  revision INTEGER NOT NULL CHECK (revision >= 1),
+  compiled_json TEXT NOT NULL CHECK (json_valid(compiled_json)),
+  canonical_json TEXT NOT NULL CHECK (json_valid(canonical_json)),
+  document_sha256 TEXT NOT NULL CHECK (length(document_sha256) = 64),
+  created_at TEXT NOT NULL,
+  PRIMARY KEY (document_id,revision),
+  FOREIGN KEY (document_id) REFERENCES orchestration_documents(id) ON DELETE RESTRICT
+);
+
+CREATE TRIGGER orchestration_revisions_no_update
+BEFORE UPDATE ON orchestration_revisions
+BEGIN
+  SELECT RAISE(ABORT, 'orchestration revisions are immutable');
+END;
+
+CREATE TRIGGER orchestration_revisions_no_delete
+BEFORE DELETE ON orchestration_revisions
+BEGIN
+  SELECT RAISE(ABORT, 'orchestration revisions are immutable');
+END;
+
+CREATE TABLE orchestration_runs (
+  id TEXT PRIMARY KEY,
+  document_id TEXT NOT NULL,
+  document_revision INTEGER NOT NULL CHECK (document_revision >= 1),
+  document_sha256 TEXT NOT NULL CHECK (length(document_sha256) = 64),
+  target_json TEXT NOT NULL CHECK (json_valid(target_json)),
+  state TEXT NOT NULL CHECK (state IN (
+    'queued','running','done','partial','failed','uncertain','cancelled'
+  )),
+  current_node_id TEXT,
+  error_code TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  FOREIGN KEY (document_id,document_revision)
+    REFERENCES orchestration_revisions(document_id,revision) ON DELETE RESTRICT
+);
+
+CREATE TABLE orchestration_attempts (
+  id TEXT PRIMARY KEY,
+  run_id TEXT NOT NULL,
+  node_id TEXT NOT NULL,
+  attempt_no INTEGER NOT NULL CHECK (attempt_no >= 1),
+  idempotency_key TEXT NOT NULL UNIQUE CHECK (length(idempotency_key) = 64),
+  snapshot_json TEXT NOT NULL CHECK (json_valid(snapshot_json)),
+  state TEXT NOT NULL CHECK (state IN (
+    'queued','dispatching','waiting_child','done','partial','failed','uncertain','cancelled'
+  )),
+  child_kind TEXT CHECK (child_kind IS NULL OR child_kind IN ('nurture','interaction','publish')),
+  child_campaign_id TEXT,
+  branch TEXT CHECK (branch IS NULL OR branch IN ('done','partial','failed','uncertain')),
+  error_code TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  UNIQUE (run_id,node_id,attempt_no),
+  CHECK ((child_kind IS NULL) = (child_campaign_id IS NULL)),
+  CHECK (
+    (state IN ('queued','cancelled') AND child_campaign_id IS NULL) OR
+    (state IN ('dispatching','waiting_child') AND child_campaign_id IS NOT NULL AND branch IS NULL) OR
+    (state IN ('done','partial','failed','uncertain') AND branch IS NOT NULL)
+  ),
+  FOREIGN KEY (run_id) REFERENCES orchestration_runs(id) ON DELETE CASCADE
+);
+
+CREATE INDEX orchestration_documents_active_updated
+  ON orchestration_documents(archived,updated_at DESC);
+CREATE INDEX orchestration_runs_state_updated
+  ON orchestration_runs(state,updated_at DESC);
+CREATE INDEX orchestration_attempts_recovery
+  ON orchestration_attempts(state,updated_at)
+  WHERE state IN ('dispatching','waiting_child');
+"#,
+    )?;
+    Ok(())
+}
+
+fn apply_migration_23(transaction: &Transaction<'_>) -> anyhow::Result<()> {
+    transaction.execute_batch(
+        r#"
+CREATE TABLE orchestration_attempts_v23 (
+  id TEXT PRIMARY KEY,
+  run_id TEXT NOT NULL,
+  node_id TEXT NOT NULL,
+  attempt_no INTEGER NOT NULL CHECK (attempt_no >= 1),
+  idempotency_key TEXT NOT NULL UNIQUE CHECK (length(idempotency_key) = 64),
+  snapshot_json TEXT NOT NULL CHECK (json_valid(snapshot_json)),
+  state TEXT NOT NULL CHECK (state IN (
+    'queued','dispatching','waiting_child','done','partial','failed','uncertain','cancelled'
+  )),
+  child_kind TEXT CHECK (child_kind IS NULL OR child_kind IN ('nurture','interaction','publish')),
+  child_campaign_id TEXT,
+  branch TEXT CHECK (branch IS NULL OR branch IN ('done','partial','failed','uncertain')),
+  error_code TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  UNIQUE (run_id,node_id,attempt_no),
+  CHECK ((child_kind IS NULL) = (child_campaign_id IS NULL)),
+  CHECK (
+    (state='queued' AND child_campaign_id IS NULL AND branch IS NULL) OR
+    (state='cancelled' AND branch IS NULL) OR
+    (state IN ('dispatching','waiting_child') AND child_campaign_id IS NOT NULL AND branch IS NULL) OR
+    (state IN ('done','partial','failed','uncertain') AND branch IS NOT NULL)
+  ),
+  FOREIGN KEY (run_id) REFERENCES orchestration_runs(id) ON DELETE CASCADE
+);
+
+INSERT INTO orchestration_attempts_v23(
+  id,run_id,node_id,attempt_no,idempotency_key,snapshot_json,state,
+  child_kind,child_campaign_id,branch,error_code,created_at,updated_at
+)
+SELECT
+  id,run_id,node_id,attempt_no,idempotency_key,snapshot_json,state,
+  child_kind,child_campaign_id,branch,error_code,created_at,updated_at
+FROM orchestration_attempts;
+
+DROP TABLE orchestration_attempts;
+ALTER TABLE orchestration_attempts_v23 RENAME TO orchestration_attempts;
+CREATE INDEX orchestration_attempts_recovery
+  ON orchestration_attempts(state,updated_at)
+  WHERE state IN ('dispatching','waiting_child');
+"#,
+    )?;
+    Ok(())
+}
+
+fn apply_migration_24(transaction: &Transaction<'_>) -> anyhow::Result<()> {
+    transaction.execute_batch(
+        r#"
+ALTER TABLE orchestration_runs
+  ADD COLUMN node_targets_json TEXT NOT NULL DEFAULT '{}'
+  CHECK (json_valid(node_targets_json) AND json_type(node_targets_json)='object');
+
+CREATE TABLE orchestration_nurture_children (
+  id TEXT PRIMARY KEY,
+  attempt_id TEXT NOT NULL UNIQUE,
+  idempotency_key TEXT NOT NULL UNIQUE CHECK (length(idempotency_key) = 64),
+  run_id TEXT,
+  requested_udids_json TEXT NOT NULL
+    CHECK (json_valid(requested_udids_json) AND json_type(requested_udids_json)='array'),
+  started_udids_json TEXT NOT NULL DEFAULT '[]'
+    CHECK (json_valid(started_udids_json) AND json_type(started_udids_json)='array'),
+  state TEXT NOT NULL CHECK (state IN (
+    'dispatching','running','done','partial','failed','uncertain'
+  )),
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  CHECK (
+    (state='dispatching' AND run_id IS NULL) OR
+    (state='running' AND run_id IS NOT NULL) OR
+    state IN ('done','partial','failed','uncertain')
+  ),
+  FOREIGN KEY (attempt_id) REFERENCES orchestration_attempts(id) ON DELETE CASCADE
+);
+
+CREATE INDEX orchestration_nurture_children_recovery
+  ON orchestration_nurture_children(state,updated_at)
+  WHERE state IN ('dispatching','running');
+"#,
+    )?;
+    Ok(())
+}
+
+fn apply_migration_25(transaction: &Transaction<'_>) -> anyhow::Result<()> {
+    transaction.execute_batch(
+        r#"
+ALTER TABLE automation_schedules ADD COLUMN next_due_at TEXT;
+ALTER TABLE automation_schedules ADD COLUMN last_error_code TEXT;
+
+UPDATE automation_schedules
+SET enabled=0,next_due_at=NULL,last_error_code='unsupported_schedule_schema'
+WHERE NOT (
+  json_type(schedule_json)='object' AND
+  json_extract(schedule_json,'$.schemaVersion')=1 AND
+  json_extract(schedule_json,'$.kind')='interval' AND
+  json_type(schedule_json,'$.everyMinutes')='integer' AND
+  json_extract(schedule_json,'$.everyMinutes') BETWEEN 15 AND 1440 AND
+  (SELECT COUNT(*) FROM json_each(schedule_json))=3
+);
+
+UPDATE automation_schedules
+SET next_due_at=strftime(
+      '%Y-%m-%dT%H:%M:%fZ',
+      'now',
+      '+' || json_extract(schedule_json,'$.everyMinutes') || ' minutes'
+    ),
+    last_error_code=NULL
+WHERE enabled=1 AND last_error_code IS NULL;
+
+DROP INDEX automation_schedules_enabled_updated;
+CREATE INDEX automation_schedules_due
+  ON automation_schedules(enabled,next_due_at,id);
+
+CREATE TABLE automation_schedule_occurrences (
+  id TEXT PRIMARY KEY,
+  schedule_id TEXT NOT NULL,
+  schedule_revision INTEGER NOT NULL CHECK (schedule_revision >= 1),
+  scheduled_for TEXT NOT NULL,
+  definition_id TEXT NOT NULL,
+  definition_revision INTEGER NOT NULL CHECK (definition_revision >= 1),
+  kind TEXT NOT NULL CHECK (kind IN ('nurture','interaction','publish')),
+  target_json TEXT CHECK (target_json IS NULL OR json_valid(target_json)),
+  child_campaign_id TEXT NOT NULL UNIQUE,
+  idempotency_key TEXT NOT NULL UNIQUE CHECK (length(idempotency_key)=64),
+  state TEXT NOT NULL CHECK (state IN (
+    'queued','dispatching','running','done','partial','failed','uncertain'
+  )),
+  nurture_run_id TEXT,
+  nurture_started_udids_json TEXT NOT NULL DEFAULT '[]'
+    CHECK (
+      json_valid(nurture_started_udids_json) AND
+      json_type(nurture_started_udids_json)='array'
+    ),
+  error_code TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  UNIQUE (schedule_id,scheduled_for),
+  CHECK (state='failed' OR target_json IS NOT NULL),
+  CHECK (kind='nurture' OR (nurture_run_id IS NULL AND nurture_started_udids_json='[]')),
+  FOREIGN KEY (schedule_id) REFERENCES automation_schedules(id) ON DELETE RESTRICT,
+  FOREIGN KEY (definition_id,definition_revision)
+    REFERENCES automation_definition_revisions(definition_id,revision) ON DELETE RESTRICT
+);
+
+CREATE UNIQUE INDEX automation_schedule_occurrences_one_active
+  ON automation_schedule_occurrences(schedule_id)
+  WHERE state IN ('queued','dispatching','running');
+CREATE INDEX automation_schedule_occurrences_recovery
+  ON automation_schedule_occurrences(state,updated_at)
+  WHERE state IN ('queued','dispatching','running');
+"#,
+    )?;
+    Ok(())
+}
+
+fn apply_migration_26(transaction: &Transaction<'_>) -> anyhow::Result<()> {
+    // Comment campaigns still validate at 2..=64. Like/Save-only campaigns deliberately
+    // carry zero comments, though, and the immutable request stores that as `message_count=0`.
+    // Migration 14's table CHECK predated action-only Interaction and rejected those otherwise
+    // valid requests at persistence time. SQLite cannot alter a CHECK in place, so preserve the
+    // exact row and rebuild only its parent table under the guarded foreign-key window.
+    transaction.execute_batch(
+        r#"
+CREATE TABLE interaction_campaigns_new (
+  id TEXT PRIMARY KEY,
+  request_id TEXT NOT NULL UNIQUE,
+  request_json TEXT NOT NULL,
+  state TEXT NOT NULL CHECK (state IN ('queued','running','succeeded','partial','failed','cancelled')),
+  message_count INTEGER NOT NULL CHECK (message_count BETWEEN 0 AND 64),
+  revision INTEGER NOT NULL DEFAULT 0 CHECK (revision >= 0),
+  error_code TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+INSERT INTO interaction_campaigns_new
+  (id,request_id,request_json,state,message_count,revision,error_code,created_at,updated_at)
+  SELECT id,request_id,request_json,state,message_count,revision,error_code,created_at,updated_at
+  FROM interaction_campaigns;
+
+DROP TABLE interaction_campaigns;
+ALTER TABLE interaction_campaigns_new RENAME TO interaction_campaigns;
+CREATE INDEX idx_interaction_campaigns_updated ON interaction_campaigns(updated_at DESC);
+"#,
+    )?;
+
+    for table in [
+        "interaction_campaign_actors",
+        "interaction_targets",
+        "interaction_assignments",
+        "interaction_artifacts",
+        "tiktok_action_runs",
+    ] {
+        let orphans = transaction
+            .prepare(&format!("PRAGMA foreign_key_check({table})"))?
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()?
+            .len();
+        if orphans > 0 {
+            anyhow::bail!(
+                "InteractionActionOnlyRebuildLostReferences: {orphans} row(s) in {table} no longer resolve to a parent"
+            );
+        }
+    }
+    Ok(())
+}
+
 fn apply_migration_11(transaction: &Transaction<'_>) -> anyhow::Result<()> {
     // **Dropping a column that was always a guess.** The `usd` in both comment tables was
     // `prompt_tokens * input_price_per_1m + completion_tokens * output_price_per_1m`, over two
@@ -1496,11 +1943,14 @@ mod tests {
     use uuid::Uuid;
 
     use super::super::Database;
-    use super::{apply_v1_schema, run, run_with_failpoint, MIGRATIONS};
+    use super::{apply_v1_schema, run, run_with_failpoint, LEDGER_SQL, MIGRATIONS};
 
     #[test]
     fn app_library_metadata_migration_is_version_nineteen() {
-        let migration = MIGRATIONS.last().expect("app-library migration");
+        let migration = MIGRATIONS
+            .iter()
+            .find(|migration| migration.version == 19)
+            .expect("app-library migration");
         assert_eq!(migration.version, 19);
         assert_eq!(migration.name, "app-library-artifact-metadata");
     }
@@ -1713,6 +2163,493 @@ mod tests {
                 |row| row.get(0),
             )
             .expect("table existence")
+    }
+
+    #[test]
+    fn migration_from_v19_adds_empty_versioned_automation_tables() {
+        let path = temp_db_path("automation-v19-upgrade");
+        let mut connection = Connection::open(&path).expect("fixture");
+        run_with_failpoint(&mut connection, Some(20)).expect_err("stop at v19");
+        assert_eq!(migration_rows(&connection).last().unwrap().0, 19);
+        assert!(!table_exists(&connection, "automation_definitions"));
+
+        connection
+            .execute(
+                "INSERT INTO settings(key,value) VALUES('v19-fixture','preserved')",
+                [],
+            )
+            .expect("seed v19 row");
+        run_with_failpoint(&mut connection, None).expect("upgrade to latest");
+
+        assert_eq!(
+            migration_rows(&connection).last().unwrap().0,
+            super::latest_version()
+        );
+        assert!(table_exists(&connection, "automation_definitions"));
+        assert!(table_exists(&connection, "automation_definition_revisions"));
+        assert!(table_exists(&connection, "automation_schedules"));
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT value FROM settings WHERE key='v19-fixture'",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+                .expect("preserved fixture row"),
+            "preserved"
+        );
+        let counts: (i64, i64, i64) = (
+            connection
+                .query_row("SELECT COUNT(*) FROM automation_definitions", [], |row| {
+                    row.get(0)
+                })
+                .expect("definition count"),
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM automation_definition_revisions",
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("revision count"),
+            connection
+                .query_row("SELECT COUNT(*) FROM automation_schedules", [], |row| {
+                    row.get(0)
+                })
+                .expect("schedule count"),
+        );
+        assert_eq!(
+            counts,
+            (0, 0, 0),
+            "migration must not backfill a profile or schedule"
+        );
+        drop(connection);
+        cleanup(&path);
+    }
+
+    #[test]
+    fn migration_from_v20_adds_an_empty_interaction_action_ledger() {
+        let path = temp_db_path("interaction-actions-v20-upgrade");
+        let mut connection = Connection::open(&path).expect("fixture");
+        run_with_failpoint(&mut connection, Some(21)).expect_err("stop at v20");
+        assert_eq!(migration_rows(&connection).last().unwrap().0, 20);
+        assert!(!table_exists(&connection, "tiktok_action_runs"));
+        connection
+            .execute(
+                "INSERT INTO settings(key,value) VALUES('v20-fixture','preserved')",
+                [],
+            )
+            .expect("seed v20 row");
+
+        run_with_failpoint(&mut connection, None).expect("upgrade to latest");
+
+        assert_eq!(
+            migration_rows(&connection).last().unwrap().0,
+            super::latest_version()
+        );
+        assert!(table_exists(&connection, "tiktok_action_runs"));
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT value FROM settings WHERE key='v20-fixture'",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+                .expect("preserved fixture row"),
+            "preserved"
+        );
+        assert_eq!(
+            connection
+                .query_row("SELECT COUNT(*) FROM tiktok_action_runs", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .expect("action count"),
+            0
+        );
+        drop(connection);
+        cleanup(&path);
+    }
+
+    #[test]
+    fn migration_from_v21_adds_empty_orchestration_tables_without_backfill() {
+        let path = temp_db_path("orchestration-v21-upgrade");
+        let mut connection = Connection::open(&path).expect("fixture");
+        run_with_failpoint(&mut connection, Some(22)).expect_err("stop at v21");
+        assert_eq!(migration_rows(&connection).last().unwrap().0, 21);
+        assert!(!table_exists(&connection, "orchestration_documents"));
+        connection
+            .execute(
+                "INSERT INTO settings(key,value) VALUES('v21-fixture','preserved')",
+                [],
+            )
+            .expect("seed v21 row");
+
+        run_with_failpoint(&mut connection, None).expect("upgrade to latest");
+
+        assert_eq!(
+            migration_rows(&connection).last().unwrap().0,
+            super::latest_version()
+        );
+        for table in [
+            "orchestration_documents",
+            "orchestration_revisions",
+            "orchestration_runs",
+            "orchestration_attempts",
+        ] {
+            assert!(table_exists(&connection, table), "missing {table}");
+            assert_eq!(
+                connection
+                    .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                        row.get::<_, i64>(0)
+                    })
+                    .expect("orchestration table count"),
+                0,
+                "migration must not fabricate {table} rows"
+            );
+        }
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT value FROM settings WHERE key='v21-fixture'",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+                .expect("preserved fixture"),
+            "preserved"
+        );
+        drop(connection);
+        cleanup(&path);
+    }
+
+    #[test]
+    fn migration_from_v22_preserves_an_armed_child_id_when_cancellation_is_proven() {
+        let path = temp_db_path("orchestration-v22-cancel-proof");
+        let mut connection = Connection::open(&path).expect("fixture");
+        run_with_failpoint(&mut connection, Some(23)).expect_err("stop at v22");
+        assert_eq!(migration_rows(&connection).last().unwrap().0, 22);
+
+        let document_id = Uuid::from_u128(10).to_string();
+        let run_id = Uuid::from_u128(2).to_string();
+        connection
+            .execute(
+                "INSERT INTO orchestration_documents(
+                    id,name,latest_revision,archived,created_at,updated_at
+                 ) VALUES(?1,'fixture',1,0,'now','now')",
+                [&document_id],
+            )
+            .expect("seed v22 document");
+        connection
+            .execute(
+                "INSERT INTO orchestration_revisions(
+                    document_id,revision,compiled_json,canonical_json,document_sha256,created_at
+                 ) VALUES(?1,1,'{}','{}',?2,'now')",
+                params![document_id, "b".repeat(64)],
+            )
+            .expect("seed v22 revision");
+        connection
+            .execute(
+                "INSERT INTO orchestration_runs(
+                    id,document_id,document_revision,document_sha256,target_json,state,
+                    current_node_id,created_at,updated_at
+                 ) VALUES(?1,?2,1,?3,'{}','running',?4,'now','now')",
+                params![
+                    run_id,
+                    Uuid::from_u128(10).to_string(),
+                    "b".repeat(64),
+                    Uuid::from_u128(3).to_string(),
+                ],
+            )
+            .expect("seed v22 run");
+
+        connection
+            .execute(
+                "INSERT INTO orchestration_attempts(
+                    id,run_id,node_id,attempt_no,idempotency_key,snapshot_json,state,
+                    child_kind,child_campaign_id,created_at,updated_at
+                 ) VALUES(?1,?2,?3,1,?4,'{}','waiting_child','interaction',?5,'now','now')",
+                params![
+                    Uuid::from_u128(1).to_string(),
+                    Uuid::from_u128(2).to_string(),
+                    Uuid::from_u128(3).to_string(),
+                    "a".repeat(64),
+                    Uuid::from_u128(4).to_string(),
+                ],
+            )
+            .expect("seed an armed v22 attempt");
+        assert!(connection
+            .execute(
+                "UPDATE orchestration_attempts SET state='cancelled' WHERE id=?1",
+                [Uuid::from_u128(1).to_string()],
+            )
+            .is_err());
+
+        run_with_failpoint(&mut connection, None).expect("upgrade to latest");
+        connection
+            .execute(
+                "UPDATE orchestration_attempts SET state='cancelled' WHERE id=?1",
+                [Uuid::from_u128(1).to_string()],
+            )
+            .expect("cancel with durable child proof");
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT state,child_campaign_id FROM orchestration_attempts WHERE id=?1",
+                    [Uuid::from_u128(1).to_string()],
+                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+                )
+                .expect("read upgraded attempt"),
+            ("cancelled".into(), Uuid::from_u128(4).to_string())
+        );
+        assert_eq!(
+            migration_rows(&connection).last().unwrap().0,
+            super::latest_version()
+        );
+        let violations = connection
+            .prepare("PRAGMA foreign_key_check")
+            .expect("prepare foreign-key check")
+            .query_map([], |_| Ok(()))
+            .expect("run foreign-key check")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("read foreign-key check");
+        assert!(
+            violations.is_empty(),
+            "migration left foreign-key violations"
+        );
+        drop(connection);
+        cleanup(&path);
+    }
+
+    #[test]
+    fn migration_from_v23_pins_node_targets_and_owns_nurture_children() {
+        let path = temp_db_path("orchestration-v23-runtime-proof");
+        let mut connection = Connection::open(&path).expect("fixture");
+        run_with_failpoint(&mut connection, Some(24)).expect_err("stop at v23");
+        assert_eq!(migration_rows(&connection).last().unwrap().0, 23);
+
+        run_with_failpoint(&mut connection, None).expect("upgrade to latest");
+
+        let run_columns = connection
+            .prepare("PRAGMA table_info(orchestration_runs)")
+            .expect("prepare run columns")
+            .query_map([], |row| row.get::<_, String>(1))
+            .expect("query run columns")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("collect run columns");
+        assert!(
+            run_columns
+                .iter()
+                .any(|column| column == "node_targets_json"),
+            "run confirmation must persist every node target snapshot"
+        );
+        assert!(table_exists(&connection, "orchestration_nurture_children"));
+        assert_eq!(
+            migration_rows(&connection).last().unwrap().0,
+            super::latest_version()
+        );
+
+        drop(connection);
+        cleanup(&path);
+    }
+
+    #[test]
+    fn migration_from_v24_adds_durable_schedule_occurrences() {
+        let path = temp_db_path("automation-schedule-v24-runtime");
+        let mut connection = Connection::open(&path).expect("fixture");
+        run_with_failpoint(&mut connection, Some(25)).expect_err("stop at v24");
+        assert_eq!(migration_rows(&connection).last().unwrap().0, 24);
+
+        run_with_failpoint(&mut connection, None).expect("upgrade to latest");
+
+        assert!(table_exists(&connection, "automation_schedule_occurrences"));
+        let schedule_columns = connection
+            .prepare("PRAGMA table_info(automation_schedules)")
+            .expect("prepare schedule columns")
+            .query_map([], |row| row.get::<_, String>(1))
+            .expect("query schedule columns")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("collect schedule columns");
+        assert!(schedule_columns
+            .iter()
+            .any(|column| column == "next_due_at"));
+        assert!(schedule_columns
+            .iter()
+            .any(|column| column == "last_error_code"));
+        assert_eq!(
+            migration_rows(&connection).last().unwrap().0,
+            super::latest_version()
+        );
+
+        drop(connection);
+        cleanup(&path);
+    }
+
+    #[test]
+    fn migration_26_allows_action_only_zero_without_rewriting_interaction_rows() {
+        let path = temp_db_path("interaction-action-only-message-count");
+        let mut connection = Connection::open(&path).expect("fixture");
+        connection
+            .pragma_update(None, "foreign_keys", "ON")
+            .expect("production foreign-key posture");
+        run_with_failpoint(&mut connection, Some(26)).expect_err("stop at v25");
+        assert_eq!(migration_rows(&connection).last().unwrap().0, 25);
+
+        connection
+            .execute_batch(
+                r#"
+INSERT INTO interaction_campaigns
+  (id,request_id,request_json,state,message_count,revision,error_code,created_at,updated_at)
+  VALUES('camp-v25','req-v25','{"requestId":"req-v25"}','partial',2,7,'kept','t0','t1');
+INSERT INTO interaction_campaign_actors(campaign_id,actor_ordinal,udid,state,error_code)
+  VALUES('camp-v25',0,'phone-a','active','kept-actor');
+INSERT INTO interaction_targets
+  (id,campaign_id,line_no,original_url,normalized_url,target_key,content_id,kind,state,
+   context_json,error_code,created_at)
+  VALUES('target-v25','camp-v25',1,'https://x/1','https://x/1','content:1','1','video',
+         'ready','{"kept":true}','kept-target','t0');
+INSERT INTO interaction_assignments
+  (id,campaign_id,target_id,message_ordinal,actor_udid,prepared_json,state,effect_intent,
+   evidence_json,error_code,revision,created_at,updated_at)
+  VALUES('assignment-v25','camp-v25','target-v25',0,'phone-a','{"text":"kept"}',
+         'sending','post_comment','{"kept":true}','kept-assignment',9,'t0','t1');
+INSERT INTO interaction_artifacts
+  (id,campaign_id,target_id,assignment_id,kind,metadata_json,relative_path,sha256,created_at)
+  VALUES('artifact-v25','camp-v25','target-v25','assignment-v25','comment-root-evidence',
+         '{"kept":true}','a/b.jpg','beef','t1');
+INSERT INTO tiktok_action_runs
+  (id,owner_kind,owner_id,device_udid,campaign_id,assignment_id,action_kind,state,
+   revision,effect_intent,evidence_json,error_code,created_at,updated_at)
+  VALUES('action-v25','interaction','assignment-v25','phone-a','camp-v25','assignment-v25',
+         'like','armed',4,'like_desired_state','{"kept":true}','kept-action','t0','t1');
+"#,
+            )
+            .expect("seed populated v25 interaction graph");
+        let before = read_interaction_rows(&connection);
+        let read_action = |connection: &Connection| {
+            connection
+                .query_row(
+                    "SELECT CAST(id AS BLOB),CAST(owner_id AS BLOB),CAST(campaign_id AS BLOB),
+                            CAST(assignment_id AS BLOB),CAST(action_kind AS BLOB),CAST(state AS BLOB),
+                            CAST(revision AS BLOB),CAST(effect_intent AS BLOB),CAST(evidence_json AS BLOB)
+                     FROM tiktok_action_runs WHERE id='action-v25'",
+                    [],
+                    |row| {
+                        (0..9)
+                            .map(|index| row.get::<_, Option<Vec<u8>>>(index))
+                            .collect::<Result<Vec<_>, _>>()
+                    },
+                )
+                .expect("read action row")
+        };
+        let action_before = read_action(&connection);
+
+        run(&mut connection).expect("apply migration 26");
+
+        assert_eq!(read_interaction_rows(&connection), before);
+        assert_eq!(read_action(&connection), action_before);
+        assert_eq!(migration_rows(&connection).last().unwrap().0, 26);
+        let index_sql: String = connection
+            .query_row(
+                "SELECT sql FROM sqlite_master WHERE type='index' AND name='idx_interaction_campaigns_updated'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("campaign updated index survives rebuild");
+        assert!(index_sql.contains("updated_at DESC"));
+
+        for (label, message_count, allowed) in [
+            ("negative", -1_i64, false),
+            ("zero", 0, true),
+            ("max", 64, true),
+            ("above-max", 65, false),
+        ] {
+            let inserted = connection.execute(
+                "INSERT INTO interaction_campaigns
+                 (id,request_id,request_json,state,message_count,created_at,updated_at)
+                 VALUES(?1,?2,'{}','queued',?3,'t','t')",
+                params![
+                    format!("campaign-{label}"),
+                    format!("request-{label}"),
+                    message_count
+                ],
+            );
+            assert_eq!(inserted.is_ok(), allowed, "message_count {message_count}");
+        }
+
+        connection
+            .execute("DELETE FROM interaction_campaigns WHERE id='camp-v25'", [])
+            .expect("campaign cascade remains enforced");
+        for table in [
+            "interaction_campaign_actors",
+            "interaction_targets",
+            "interaction_assignments",
+            "interaction_artifacts",
+            "tiktok_action_runs",
+        ] {
+            let count: i64 = connection
+                .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                    row.get(0)
+                })
+                .expect("count cascade survivors");
+            assert_eq!(count, 0, "{table} did not cascade after rebuild");
+        }
+        let violations = connection
+            .prepare("PRAGMA foreign_key_check")
+            .expect("prepare foreign-key check")
+            .query_map([], |_| Ok(()))
+            .expect("run foreign-key check")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("collect foreign-key violations");
+        assert!(violations.is_empty());
+
+        drop(connection);
+        cleanup(&path);
+    }
+
+    #[test]
+    fn interaction_action_ledger_has_one_row_per_assignment_and_kind() {
+        let mut connection = Connection::open_in_memory().expect("fixture");
+        connection.execute_batch(LEDGER_SQL).expect("ledger");
+        {
+            let transaction = connection.transaction().expect("tx");
+            for migration in MIGRATIONS {
+                (migration.apply)(&transaction).expect("apply migration");
+            }
+            transaction.commit().expect("commit schema");
+        }
+        // Foreign keys are intentionally off for this schema-only fixture; this test pins the
+        // uniqueness and enum checks without constructing an entire campaign graph.
+        connection
+            .execute_batch("PRAGMA foreign_keys = OFF;")
+            .expect("disable foreign keys for schema-only fixture");
+        connection
+            .execute(
+                "INSERT INTO tiktok_action_runs
+                 (id,owner_kind,owner_id,device_udid,campaign_id,assignment_id,
+                  action_kind,state,created_at,updated_at)
+                 VALUES('run-1','interaction','assignment','device','campaign','assignment',
+                        'save','planned','now','now')",
+                [],
+            )
+            .expect("first action");
+        assert!(connection
+            .execute(
+                "INSERT INTO tiktok_action_runs
+                 (id,owner_kind,owner_id,device_udid,campaign_id,assignment_id,
+                  action_kind,state,created_at,updated_at)
+                 VALUES('run-2','interaction','assignment','device','campaign','assignment',
+                        'save','planned','now','now')",
+                [],
+            )
+            .is_err());
+        assert!(connection
+            .execute(
+                "INSERT INTO tiktok_action_runs
+                 (id,owner_kind,owner_id,device_udid,campaign_id,assignment_id,
+                  action_kind,state,created_at,updated_at)
+                 VALUES('run-3','interaction','assignment','device','campaign','assignment',
+                        'share','planned','now','now')",
+                [],
+            )
+            .is_err());
     }
 
     fn column_exists(connection: &Connection, table: &str, column: &str) -> bool {
