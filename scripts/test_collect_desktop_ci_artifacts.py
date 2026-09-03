@@ -4,6 +4,7 @@ import argparse
 import json
 import os
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -1348,6 +1349,18 @@ class DeclaredResourcesAreVerified(unittest.TestCase):
                 artifacts.verify_clean_room_installed_tree(root)
             payload.write_bytes(b"Riviu packaged fixture")
             artifacts.verify_clean_room_installed_tree(root)
+
+    def test_direct_script_entrypoint_can_load_the_provenance_gate(self):
+        script = artifacts.REPOSITORY_ROOT / "scripts" / "collect_desktop_ci_artifacts.py"
+        completed = subprocess.run(
+            [sys.executable, str(script), "verify-version"],
+            cwd=artifacts.REPOSITORY_ROOT,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
 
     def test_installed_app_smoke_uses_mock_data_and_exits_by_itself(self):
         command = artifacts.installed_app_smoke_command(

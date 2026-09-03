@@ -1605,7 +1605,7 @@ def validate_deployment_report_binding(
 def verify_clean_room_installed_tree(install_root: Path) -> None:
     try:
         from scripts import check_xiaowei_provenance as provenance
-    except ModuleNotFoundError:
+    except ImportError:
         import check_xiaowei_provenance as provenance
 
     findings = provenance.inspect([("installer", install_root)])
