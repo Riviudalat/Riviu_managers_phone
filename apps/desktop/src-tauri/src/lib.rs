@@ -167,8 +167,9 @@ async fn retry_startup(
     let resource_dir = app.path().resource_dir().ok();
     match AppState::bootstrap(resource_dir).await {
         Ok(fresh) => {
-            fresh.spawn_background_tasks(app.clone());
-            if !app.manage(fresh) {
+            if app.manage(fresh) {
+                app.state::<AppState>().spawn_background_tasks(app.clone());
+            } else {
                 // Lost a race this lock exists to prevent. Whoever won is the live state.
                 log::warn!("a concurrent startup retry had already installed the app state");
             }
@@ -320,8 +321,14 @@ pub fn run() {
             let startup_state =
                 match tauri::async_runtime::block_on(AppState::bootstrap(resource_dir)) {
                     Ok(state) => {
-                        state.spawn_background_tasks(handle.clone());
-                        handle.manage(state);
+                        if !handle.manage(state) {
+                            return Err(
+                                "desktop app state was already registered during setup".into()
+                            );
+                        }
+                        handle
+                            .state::<AppState>()
+                            .spawn_background_tasks(handle.clone());
                         StartupState::default()
                     }
                     Err(error) => {
@@ -782,6 +789,43 @@ mod tests {
         assert!(orchestration.contains("execute_automation_schedule_occurrence("));
         assert!(orchestration.contains("resolve_target_snapshot("));
         assert!(orchestration.contains("wait_for_schedule_occurrences().await"));
+    }
+
+    #[test]
+    fn app_state_is_managed_before_any_background_worker_is_spawned() {
+        let source = include_str!("lib.rs");
+
+        let retry = source
+            .split("async fn retry_startup")
+            .nth(1)
+            .and_then(|rest| rest.split("fn panic_message").next())
+            .expect("retry_startup body remains available");
+        let retry_manage = retry
+            .find("if app.manage(fresh)")
+            .expect("retry must register the fresh state");
+        let retry_spawn = retry
+            .find("spawn_background_tasks(app.clone())")
+            .expect("retry must start background workers after registration");
+        assert!(
+            retry_manage < retry_spawn,
+            "startup retry spawned a worker before AppState was registered"
+        );
+
+        let setup = source
+            .split("let startup_state =")
+            .nth(1)
+            .and_then(|rest| rest.split("handle.manage(startup_state)").next())
+            .expect("desktop setup body remains available");
+        let setup_manage = setup
+            .find("handle.manage(state)")
+            .expect("setup must register AppState");
+        let setup_spawn = setup
+            .find("spawn_background_tasks(handle.clone())")
+            .expect("setup must start background workers after registration");
+        assert!(
+            setup_manage < setup_spawn,
+            "desktop setup spawned a worker before AppState was registered"
+        );
     }
 
     /// Every command source file. Adding one and forgetting it here is the failure mode the
