@@ -84,6 +84,24 @@ pub async fn like_post(
     place: &mut (dyn FnMut(&ElementBox) -> TapPoint + Send),
     stop: &AtomicBool,
 ) -> Result<LikeVerdict, ActionFailure> {
+    like_post_with_gate(session, labels, place, stop, |_| Ok(())).await
+}
+
+/// Like with a durable callback at the last instruction before the public-effect tap.
+///
+/// All state/control reads happen before `durable_intent`. There is no await between a
+/// successful callback and [`UiSession::tap`], so a callback error is a before-effect failure
+/// with zero tap while process loss after the callback is conservatively reconcilable.
+pub async fn like_post_with_gate<F>(
+    session: &dyn UiSession,
+    labels: TikTokControls,
+    place: &mut (dyn FnMut(&ElementBox) -> TapPoint + Send),
+    stop: &AtomicBool,
+    durable_intent: F,
+) -> Result<LikeVerdict, ActionFailure>
+where
+    F: FnOnce(&ElementBox) -> anyhow::Result<()> + Send,
+{
     // **Fail closed on the pre-tap read.** `present` folds a query error to `false`, which
     // here would mean "not liked, go ahead and tap" — and a tap on an already-liked post
     // removes the like. So the already-liked check reads the three states apart: liked
@@ -103,6 +121,7 @@ pub async fn like_post(
     // while the session stays borrowed here. The tap itself belongs to this routine, because
     // the proof that follows only means anything if the tap it is proving happened first.
     let point = place(&element);
+    durable_intent(&element).map_err(ActionFailure::before)?;
     session.tap(point).await.map_err(ActionFailure::after)?;
 
     let deadline = Instant::now() + LIKE_CONFIRM_WINDOW;
@@ -376,5 +395,89 @@ mod tests {
 
         assert!(failure.effect_may_have_gone_out());
         assert_eq!(*phone.taps.lock(), 1);
+    }
+
+    #[tokio::test]
+    async fn durable_intent_is_written_immediately_before_the_like_tap() {
+        let phone = FlakyLikePhone {
+            controls: fleet_controls(),
+            liked_present: false,
+            liked_errors: false,
+            like_errors: false,
+            tap_errors: false,
+            taps: PlMutex::new(0),
+        };
+        let boundary_taps = &phone.taps;
+        let mut callbacks = 0;
+
+        let _ = like_post_with_gate(
+            &phone,
+            fleet_controls(),
+            &mut centre_of,
+            &AtomicBool::new(false),
+            |_| {
+                callbacks += 1;
+                assert_eq!(
+                    *boundary_taps.lock(),
+                    0,
+                    "the callback must be the final instruction before tap"
+                );
+                Ok(())
+            },
+        )
+        .await;
+
+        assert_eq!(callbacks, 1);
+        assert_eq!(*phone.taps.lock(), 1);
+    }
+
+    #[tokio::test]
+    async fn like_intent_write_failure_is_before_effect_and_zero_tap() {
+        let phone = FlakyLikePhone {
+            controls: fleet_controls(),
+            liked_present: false,
+            liked_errors: false,
+            like_errors: false,
+            tap_errors: false,
+            taps: PlMutex::new(0),
+        };
+
+        let failure = like_post_with_gate(
+            &phone,
+            fleet_controls(),
+            &mut centre_of,
+            &AtomicBool::new(false),
+            |_| anyhow::bail!("interaction action ledger unavailable"),
+        )
+        .await
+        .expect_err("the intent callback must fail closed");
+
+        assert!(!failure.effect_may_have_gone_out());
+        assert_eq!(*phone.taps.lock(), 0);
+    }
+
+    #[tokio::test]
+    async fn already_liked_never_arms_an_effect_intent() {
+        let phone = FlakyLikePhone {
+            controls: fleet_controls(),
+            liked_present: true,
+            liked_errors: false,
+            like_errors: false,
+            tap_errors: false,
+            taps: PlMutex::new(0),
+        };
+
+        let verdict = like_post_with_gate(
+            &phone,
+            fleet_controls(),
+            &mut centre_of,
+            &AtomicBool::new(false),
+            |_| panic!("an already-liked card must not arm a tap"),
+        )
+        .await
+        .expect("already liked");
+
+        assert_eq!(verdict, LikeVerdict::AlreadyLiked);
+        assert_eq!(*phone.taps.lock(), 0);
     }
 }

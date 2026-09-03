@@ -199,7 +199,7 @@ async fn main() -> anyhow::Result<()> {
         shape: ThreadShape::default(),
         cohort_size: None,
         manual_comments: Vec::new(),
-        like_target: false,
+        actions: riviu_core::InteractionActionSet::default(),
         mentions: Vec::new(),
         mention_parent: false,
     };

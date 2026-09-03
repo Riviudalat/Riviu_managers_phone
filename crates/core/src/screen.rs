@@ -187,6 +187,10 @@ pub const RAIL_X: f64 = 0.919;
 /// the difference and hit either way.
 const FOLLOW_TO_LIKE: f64 = 51.0 / 667.0;
 const FOLLOW_TO_COMMENT: f64 = 113.0 / 667.0;
+/// Save is one measured rail pitch below Comment. The known layout offsets derive targets at
+/// 403 and 439 logical points; the layout-2 capture's actual white glyph was centred at 443,
+/// four points from the derived target and well inside the same 23-point control.
+const FOLLOW_TO_SAVE: f64 = 180.0 / 667.0;
 
 /// Follow-badge centre for each known layout, as screen fractions.
 const FOLLOW_Y_LAYOUT1: f64 = 223.0 / 667.0;
@@ -235,6 +239,9 @@ pub struct ActionRail {
     pub follow_y: f64,
     pub like_y: f64,
     pub comment_y: f64,
+    /// Save centre when this rail was located from the current frame. Fallback geometry never
+    /// fills this field because an unproved coordinate must not authorize a toggle.
+    pub save_y: Option<f64>,
     /// True when the follow badge was actually found in this frame; false when
     /// these are the fallback constants.
     pub located: bool,
@@ -252,6 +259,7 @@ impl ActionRail {
             follow_y,
             like_y: follow_y + FOLLOW_TO_LIKE,
             comment_y: follow_y + FOLLOW_TO_COMMENT,
+            save_y: located.then_some(follow_y + FOLLOW_TO_SAVE),
             located,
         }
     }
@@ -452,6 +460,7 @@ fn rail_from_icon_chain(img: &RgbImage) -> Option<RailReading> {
             follow_y: like_y - FOLLOW_TO_LIKE,
             like_y,
             comment_y,
+            save_y: Some(comment_y + pitch),
             located: true,
         },
         pitch,
@@ -1641,6 +1650,40 @@ mod tests {
             "comment target at {} px, expected ~764",
             rail.comment_y * H as f64
         );
+    }
+
+    #[test]
+    fn both_measured_rail_layouts_derive_the_save_coordinate() {
+        const RED: [u8; 3] = [254, 44, 85];
+        for (follow_y, expected_layout, expected_save) in
+            [(FOLLOW_Y_LAYOUT1, 1, 403.0), (FOLLOW_Y_LAYOUT2, 2, 439.0)]
+        {
+            let mut frame = feed_backdrop();
+            let centre = follow_y * H as f64;
+            paint_rail_block(
+                &mut frame,
+                (centre - 20.0) as u32,
+                (centre + 20.0) as u32,
+                RED,
+            );
+            let rail = find_action_rail(&frame).expect("the fresh frame locates its rail");
+            assert!(rail.located);
+            assert_eq!(rail.layout(), expected_layout);
+            assert!((rail.save_y.expect("located Save") * 667.0 - expected_save).abs() <= 5.0);
+        }
+
+        let layout_2 = ActionRail::from_follow(FOLLOW_Y_LAYOUT2, true);
+        assert!(
+            (layout_2.save_y.expect("layout 2 Save") * 667.0 - 443.0).abs() < 12.0,
+            "derived layout-2 target must land inside the captured Save glyph centred at 443pt"
+        );
+    }
+
+    #[test]
+    fn fallback_rail_never_authorizes_save() {
+        let fallback = ActionRail::fallback();
+        assert!(!fallback.located);
+        assert_eq!(fallback.save_y, None);
     }
 
     /// Feed with a white sheet covering everything below `sheet_top`, the shape

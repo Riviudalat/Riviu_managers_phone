@@ -106,6 +106,12 @@ pub fn interaction_preview_thread(
     state: State<'_, AppState>,
     request: ThreadCampaignRequest,
 ) -> Result<ThreadPreview, CommandError> {
+    require_parent_locator(
+        &state.control,
+        request.mode,
+        request.actions,
+        &request.actor_udids,
+    )?;
     let lines = request
         .targets
         .iter()
@@ -131,9 +137,14 @@ pub fn interaction_preview_thread(
     })
 }
 
-/// Refuse a Threaded campaign the actors cannot actually carry out.
+/// Refuse an Interaction campaign the actors cannot actually carry out.
 ///
-/// Two separate reasons, and the OCR one used to be the only one — stated as a
+/// Save is desired-state, so it may only run on an actor that reports element bounds: that is
+/// the preflight signal for the hierarchy adapter which reads `checked`/`selected`. A pixel actor
+/// cannot distinguish Saved from Unsaved yet. Refusing it here is a zero-effect failure rather
+/// than letting a worker discover the missing proof after the campaign was persisted/dispatched.
+///
+/// Threaded comments have two separate reasons, and the OCR one used to be the only one — stated as a
 /// property of the *desktop host*, which it is not. It is a property of the
 /// **actors**: a device that reads the accessibility tree never calls
 /// `interaction_ocr` at all, so the host's OCR language is irrelevant to it.
@@ -149,11 +160,32 @@ pub fn interaction_preview_thread(
 /// because nobody is running mixed campaigns, and it is far cheaper than a chain that
 /// breaks halfway with no explanation. Standalone is unaffected: it has no parent to
 /// find.
-fn require_parent_locator(
+pub(crate) fn require_parent_locator(
     control: &DeviceControlPlane,
     mode: riviu_core::ThreadMode,
+    actions: riviu_core::InteractionActionSet,
     actor_udids: &[String],
 ) -> Result<(), CommandError> {
+    if actions.save {
+        let unsupported = actor_udids
+            .iter()
+            .filter(|udid| !control.reports_element_bounds(udid))
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+        if !unsupported.is_empty() {
+            return Err(CommandError::code(
+                "SaveUnsupportedDevice",
+                format!(
+                    "Lưu bài cần đọc trạng thái Saved/Unsaved từ hierarchy; các máy chưa hỗ trợ: {}. Bỏ chọn Lưu hoặc chỉ chọn máy Android có hierarchy.",
+                    unsupported.join(", ")
+                ),
+            ));
+        }
+    }
+
+    if !actions.comment {
+        return Ok(());
+    }
     // Standalone comments never look for a parent, so nothing has to be read back off
     // the screen and neither reason applies.
     if mode == riviu_core::ThreadMode::Standalone {
@@ -211,7 +243,12 @@ pub async fn interaction_start_thread(
     request: ThreadCampaignRequest,
 ) -> Result<InteractionStartResult, CommandError> {
     let admission = state.ensure_accepting_work()?;
-    require_parent_locator(&state.control, request.mode, &request.actor_udids)?;
+    require_parent_locator(
+        &state.control,
+        request.mode,
+        request.actions,
+        &request.actor_udids,
+    )?;
     let plan = plan_threads(&request).map_err(interaction_error)?;
     // Asked before anything is persisted. The engine checks this too, but by then the row
     // exists and the operator's history fills with campaigns that were Running for a second
@@ -486,7 +523,12 @@ pub fn interaction_retry(
         })?;
     // The mode is whatever the campaign was created with, so the reader
     // requirement has to be judged against that rather than a fresh choice.
-    require_parent_locator(&state.control, request.mode, &request.actor_udids)?;
+    require_parent_locator(
+        &state.control,
+        request.mode,
+        request.actions,
+        &request.actor_udids,
+    )?;
     // A manual campaign never calls the AI, so only an AI one needs the key — and asking here
     // rather than inside the worker means the refusal reaches the operator as a refusal
     // instead of as a campaign that flipped to Failed a second after they pressed retry.
@@ -659,4 +701,91 @@ pub async fn interaction_open_on_device(
     let cleanup = state.control.close_ui_context(context).await;
     result.map_err(CommandError::operation)?;
     cleanup.map(|_| ()).map_err(CommandError::from)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use riviu_core::{
+        DeviceDriver, DeviceWorkCoordinator, InteractionActionSet, StreamBudgetManager, ThreadMode,
+    };
+    use riviu_ios_driver::MockIosDriver;
+
+    fn pixel_control() -> DeviceControlPlane {
+        let driver: Arc<dyn DeviceDriver> = Arc::new(MockIosDriver::new());
+        DeviceControlPlane::new(
+            driver,
+            Arc::new(DeviceWorkCoordinator::new()),
+            Arc::new(StreamBudgetManager::default()),
+        )
+    }
+
+    #[tokio::test]
+    async fn save_preflight_rejects_every_pixel_actor_with_a_typed_zero_effect_error() {
+        let control = pixel_control();
+        let actors = vec!["iphone-02".to_string(), "iphone-07".to_string()];
+        let error = require_parent_locator(
+            &control,
+            ThreadMode::Standalone,
+            InteractionActionSet {
+                like: true,
+                comment: false,
+                save: true,
+            },
+            &actors,
+        )
+        .expect_err("pixel Save must fail before a campaign can be dispatched");
+
+        assert_eq!(error.code, "SaveUnsupportedDevice");
+        assert!(error.message.contains("iphone-02"));
+        assert!(error.message.contains("iphone-07"));
+        assert!(error.message.contains("Saved/Unsaved"));
+    }
+
+    #[tokio::test]
+    async fn save_gate_is_inert_when_save_is_not_requested() {
+        let control = pixel_control();
+        require_parent_locator(
+            &control,
+            ThreadMode::Standalone,
+            InteractionActionSet {
+                like: true,
+                comment: false,
+                save: false,
+            },
+            &["iphone-02".to_string()],
+        )
+        .expect("a Like-only campaign does not require hierarchy Save state");
+    }
+
+    #[test]
+    fn preview_start_and_retry_all_gate_save_before_their_first_effectful_step() {
+        let source = include_str!("interaction_commands.rs");
+        for (command, effect_marker) in [
+            ("interaction_preview_thread", "plan_threads(&request)"),
+            (
+                "interaction_start_thread",
+                "create_interaction_campaign(&request, &plan)",
+            ),
+            (
+                "interaction_retry",
+                "update_interaction_campaign_state(&campaign_id",
+            ),
+        ] {
+            let start = source
+                .find(&format!("fn {command}("))
+                .expect("command remains registered");
+            let body = &source[start..];
+            let gate = body
+                .find("require_parent_locator(")
+                .expect("command must call capability gate");
+            let effect = body
+                .find(effect_marker)
+                .unwrap_or_else(|| panic!("{command} must retain {effect_marker}"));
+            assert!(
+                gate < effect,
+                "{command} must reject unsupported Save before {effect_marker}"
+            );
+        }
+    }
 }

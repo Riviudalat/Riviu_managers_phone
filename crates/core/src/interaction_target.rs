@@ -34,6 +34,38 @@ use crate::{
 
 use crate::interaction_campaign::TargetProof;
 
+/// One-shot durable boundary for Like/Save effects.
+pub(crate) struct ActionEffectGate<'a> {
+    callback: Option<Box<dyn FnOnce() -> anyhow::Result<bool> + Send + 'a>>,
+    crossed: bool,
+}
+
+impl<'a> ActionEffectGate<'a> {
+    pub fn new(callback: impl FnOnce() -> anyhow::Result<bool> + Send + 'a) -> Self {
+        Self {
+            callback: Some(Box::new(callback)),
+            crossed: false,
+        }
+    }
+
+    pub fn cross(&mut self) -> Result<(), crate::ActionFailure> {
+        let callback = self.callback.take().ok_or_else(|| {
+            crate::ActionFailure::before(anyhow::anyhow!("action effect gate already consumed"))
+        })?;
+        if !callback().map_err(crate::ActionFailure::before)? {
+            return Err(crate::ActionFailure::before(anyhow::anyhow!(
+                "action ownership was lost before effect"
+            )));
+        }
+        self.crossed = true;
+        Ok(())
+    }
+
+    pub fn crossed(&self) -> bool {
+        self.crossed
+    }
+}
+
 /// What one send produced: the evidence row, and the posted comment if it could be read
 /// back.
 ///
@@ -97,6 +129,14 @@ impl SendFailure {
         match self {
             Self::BeforeEffect(error) | Self::AfterEffect(error) | Self::OwnershipLost(error) => {
                 error
+            }
+        }
+    }
+
+    pub fn detail(&self) -> String {
+        match self {
+            Self::BeforeEffect(error) | Self::AfterEffect(error) | Self::OwnershipLost(error) => {
+                format!("{error:#}")
             }
         }
     }
@@ -203,11 +243,43 @@ pub(crate) trait TargetDriver: Send + Sync {
     /// pixel driver does not, since a like on a post page there would need calibrated
     /// coordinates nobody has measured — and inventing them is what `screen.rs` refuses to
     /// do for uncalibrated screens.
-    async fn like_target(&self, _session: &dyn UiSession) -> anyhow::Result<String> {
-        anyhow::bail!(
+    async fn like_target(
+        &self,
+        _session: &dyn UiSession,
+        _effect_gate: &mut ActionEffectGate<'_>,
+    ) -> Result<crate::tiktok_like::LikeVerdict, crate::ActionFailure> {
+        Err(crate::ActionFailure::before(anyhow::anyhow!(
             "{} không thả tim được: đường nhận dạng ảnh chưa đo toạ độ nút tim trên trang bài.              Bỏ chọn Thả tim, hoặc dùng máy Android",
             self.kind()
-        )
+        )))
+    }
+
+    async fn save_target(
+        &self,
+        _session: &dyn UiSession,
+        effect_gate: &mut ActionEffectGate<'_>,
+    ) -> crate::SaveEvidence {
+        struct UnmeasuredPixelSave;
+        #[async_trait::async_trait]
+        impl crate::SaveAdapter for UnmeasuredPixelSave {
+            async fn observe(&mut self) -> anyhow::Result<crate::SaveObservation> {
+                Ok(crate::SaveObservation {
+                    identity: None,
+                    sequence: 1,
+                    state: crate::BookmarkState::Unreadable,
+                    tap_point: None,
+                })
+            }
+            async fn tap(&mut self, _point: crate::TapPoint) -> anyhow::Result<()> {
+                anyhow::bail!("unmeasured pixel Save cannot tap")
+            }
+        }
+        crate::tiktok_save(&mut UnmeasuredPixelSave, |_| {
+            effect_gate
+                .cross()
+                .map_err(|error| anyhow::anyhow!(error.to_string()))
+        })
+        .await
     }
 
     /// Send a reply under `parent`.

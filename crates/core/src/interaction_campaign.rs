@@ -13,7 +13,9 @@
 
 use crate::discover_comment_identity;
 use crate::interaction_hierarchy::PARENT_SCROLL_ATTEMPTS;
-use crate::interaction_target::{EffectGate, SendFailure, SendOutcome, TargetDriver};
+use crate::interaction_target::{
+    ActionEffectGate, EffectGate, SendFailure, SendOutcome, TargetDriver,
+};
 use crate::locate_parent_comment;
 use crate::AppEvent;
 use crate::CommentLocatorIdentity;
@@ -772,6 +774,22 @@ fn settle_state(tally: CampaignTally, had_error: bool) -> ThreadCampaignState {
     }
 }
 
+fn settle_campaign_state(
+    tally: CampaignTally,
+    had_error: bool,
+    action_aggregate: Option<crate::InteractionRunAggregate>,
+) -> ThreadCampaignState {
+    match action_aggregate {
+        Some(crate::InteractionRunAggregate::Uncertain)
+        | Some(crate::InteractionRunAggregate::Partial) => ThreadCampaignState::Partial,
+        Some(crate::InteractionRunAggregate::Failed) if tally.succeeded == 0 => {
+            ThreadCampaignState::Failed
+        }
+        Some(crate::InteractionRunAggregate::Failed) => ThreadCampaignState::Partial,
+        Some(crate::InteractionRunAggregate::Done) | None => settle_state(tally, had_error),
+    }
+}
+
 /// The handles a message opens with, decided without a database in the room.
 ///
 /// Two different tags and never both. The **opening** comment carries the accounts the
@@ -824,6 +842,13 @@ static CAMPAIGNS_RUNNING: std::sync::atomic::AtomicUsize = std::sync::atomic::At
 /// See [`CAMPAIGNS_RUNNING`].
 pub fn any_campaign_running() -> bool {
     CAMPAIGNS_RUNNING.load(Ordering::Relaxed) > 0
+}
+
+fn fans_out_per_assignment(
+    mode: crate::interaction::ThreadMode,
+    actions: crate::InteractionActionSet,
+) -> bool {
+    mode == crate::interaction::ThreadMode::Standalone || !actions.comment
 }
 
 /// Holds the claim for as long as it lives, and gives it back however the campaign ends.
@@ -910,7 +935,7 @@ pub async fn execute_thread_campaign(
     // each task owns exactly one row and no two tasks can reach the same one. That is the
     // property that keeps a double post impossible, and it is a property of the sets being
     // disjoint rather than of anyone being careful.
-    let per_assignment = if request.mode == crate::interaction::ThreadMode::Standalone {
+    let per_assignment = if fans_out_per_assignment(request.mode, request.actions) {
         let detail = db
             .get_interaction_campaign(&campaign_id)?
             .context("campaign không tồn tại")?;
@@ -1277,7 +1302,11 @@ async fn join_campaign(
         },
     };
     if !cancelled {
-        let final_state = settle_state(tally, first_error.is_some());
+        let final_state = settle_campaign_state(
+            tally,
+            first_error.is_some(),
+            detail.as_ref().and_then(|detail| detail.action_aggregate),
+        );
         // **`Partial` has to say why.** The SQL sets `error_code=?2` unconditionally, so `None`
         // wrote NULL rather than preserving anything — and `Partial` is the state most in need
         // of an explanation and the one guaranteed not to have had one. The counts are the
@@ -1290,7 +1319,11 @@ async fn join_campaign(
             )),
             _ => first_error.as_ref().map(|error| format!("{error:#}")),
         };
-        db.update_interaction_campaign_state(&campaign_id, final_state, reason.as_deref())?;
+        let _ = db.settle_interaction_campaign_if_running(
+            &campaign_id,
+            final_state,
+            reason.as_deref(),
+        )?;
     }
     events.emit(AppEvent::InteractionUpdated {
         campaign_id,
@@ -1344,6 +1377,359 @@ async fn gated_cohort(
     .await
 }
 
+fn existing_action_result(
+    db: &crate::db::Database,
+    assignment_id: &str,
+    kind: crate::InteractionActionKind,
+) -> anyhow::Result<Option<crate::PublicActionResult>> {
+    Ok(db
+        .list_interaction_action_runs(assignment_id)?
+        .into_iter()
+        .find(|run| run.kind == kind)
+        .map(|run| crate::PublicActionResult {
+            kind: run.kind,
+            state: run.state,
+            revision: run.revision,
+            effect_intent: run.effect_intent,
+            evidence: run.evidence,
+            error: run.error,
+        }))
+}
+
+enum ActionClaim {
+    Owned(i64),
+    Reused(crate::PublicActionResult),
+}
+
+fn claim_action_or_reuse_terminal(
+    db: &crate::db::Database,
+    assignment_id: &str,
+    kind: crate::InteractionActionKind,
+) -> anyhow::Result<ActionClaim> {
+    if let Some(revision) = db.claim_interaction_action(assignment_id, kind)? {
+        return Ok(ActionClaim::Owned(revision));
+    }
+    let existing = existing_action_result(db, assignment_id, kind)?
+        .with_context(|| format!("{kind:?} action is owned by another worker"))?;
+    anyhow::ensure!(
+        existing.state.is_terminal(),
+        "{kind:?} action cannot start and has no reusable terminal result ({:?})",
+        existing.state
+    );
+    Ok(ActionClaim::Reused(existing))
+}
+
+struct ActionSettlement {
+    state: crate::InteractionActionState,
+    evidence: serde_json::Value,
+    error: Option<String>,
+}
+
+fn settle_claimed_action(
+    db: &crate::db::Database,
+    assignment_id: &str,
+    kind: crate::InteractionActionKind,
+    claim_revision: i64,
+    armed_revision: Option<i64>,
+    settlement: ActionSettlement,
+) -> anyhow::Result<crate::PublicActionResult> {
+    let ActionSettlement {
+        state,
+        evidence,
+        error,
+    } = settlement;
+    let revision = match state {
+        crate::InteractionActionState::Confirmed | crate::InteractionActionState::Uncertain => {
+            armed_revision.context("public action crossed no durable effect boundary")?
+        }
+        _ => claim_revision,
+    };
+    let evidence_json = evidence.to_string();
+    match db.settle_interaction_action(
+        assignment_id,
+        kind,
+        revision,
+        state,
+        Some(&evidence_json),
+        error.as_deref(),
+    ) {
+        Ok(true) => {}
+        Ok(false) => {
+            if let Some(existing) = existing_action_result(db, assignment_id, kind)? {
+                if existing.state.is_terminal() {
+                    return Ok(existing);
+                }
+            }
+            anyhow::bail!("lost {kind:?} action ownership while settling")
+        }
+        Err(primary) if state.effect_may_have_gone_out() => {
+            // The device effect is already past its one-shot gate. A failed audit update must
+            // never make the surrounding assignment look retryable, so immediately retry the
+            // same armed revision with the conservative terminal verdict.
+            let primary = format!("{primary:#}");
+            let uncertain_evidence = serde_json::json!({
+                "phase": "settlementFailureAfterEffect",
+                "intendedState": state,
+                "actionEvidence": evidence,
+                "settlementError": primary,
+            })
+            .to_string();
+            match db.settle_interaction_action(
+                assignment_id,
+                kind,
+                revision,
+                crate::InteractionActionState::Uncertain,
+                Some(&uncertain_evidence),
+                Some(&primary),
+            ) {
+                Ok(true) => {}
+                Ok(false) => {
+                    if let Some(existing) = existing_action_result(db, assignment_id, kind)? {
+                        if existing.state.effect_may_have_gone_out() {
+                            return Ok(existing);
+                        }
+                    }
+                    anyhow::bail!(
+                        "lost {kind:?} action ownership while repairing failed settlement: {primary}"
+                    )
+                }
+                Err(repair) => anyhow::bail!(
+                    "could not mark {kind:?} uncertain after settlement failed ({primary}): {repair:#}"
+                ),
+            }
+        }
+        Err(error) => return Err(error),
+    }
+    existing_action_result(db, assignment_id, kind)?
+        .context("interaction action disappeared after settlement")
+}
+
+fn failed_action_may_have_crossed_effect(
+    db: &crate::db::Database,
+    assignment_id: &str,
+    kind: crate::InteractionActionKind,
+) -> bool {
+    match existing_action_result(db, assignment_id, kind) {
+        Ok(Some(result)) => result.state.effect_may_have_gone_out(),
+        // Losing the audit read at the same time as action execution is not proof that the
+        // device stayed untouched. Fail closed so the legacy assignment cannot reopen it.
+        Ok(None) | Err(_) => true,
+    }
+}
+
+fn action_requires_uncertain_assignment(result: &crate::PublicActionResult) -> bool {
+    result.state == crate::InteractionActionState::Uncertain
+}
+
+fn assignment_state_after_failure(effect_intent: bool) -> ThreadMessageState {
+    if effect_intent {
+        ThreadMessageState::Uncertain
+    } else {
+        ThreadMessageState::Failed
+    }
+}
+
+fn action_lost_target_proof(result: &crate::PublicActionResult) -> bool {
+    result.state == crate::InteractionActionState::FailedBeforeEffect
+        && result
+            .evidence
+            .as_deref()
+            .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+            .and_then(|value| {
+                value
+                    .get("phase")
+                    .and_then(|phase| phase.as_str())
+                    .map(str::to_owned)
+            })
+            .as_deref()
+            == Some("targetProof")
+}
+
+fn action_stops_assignment(result: &crate::PublicActionResult) -> bool {
+    result.state == crate::InteractionActionState::Uncertain || action_lost_target_proof(result)
+}
+
+fn like_result_note(result: &crate::PublicActionResult) -> String {
+    let verdict = result
+        .evidence
+        .as_deref()
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+        .and_then(|value| {
+            value
+                .get("verdict")
+                .and_then(|value| value.as_str())
+                .map(str::to_owned)
+        });
+    match (result.state, verdict.as_deref()) {
+        (crate::InteractionActionState::Confirmed, _) => "đã tim và xác nhận".into(),
+        (crate::InteractionActionState::NoOp, Some("alreadyLiked")) => {
+            "bài đã được tim từ trước".into()
+        }
+        (crate::InteractionActionState::NoOp, _) => "không đổi trạng thái tim".into(),
+        (crate::InteractionActionState::FailedBeforeEffect, _) => {
+            "không tim; chưa phát sinh thao tác".into()
+        }
+        (crate::InteractionActionState::Uncertain, _) => {
+            "đã tap nhưng chưa xác nhận được trạng thái tim".into()
+        }
+        (state, _) => format!("trạng thái tim: {state:?}"),
+    }
+}
+
+async fn execute_like_action(
+    db: &crate::db::Database,
+    assignment_id: &str,
+    driver: &dyn TargetDriver,
+    session: &dyn crate::UiSession,
+    target: &crate::ResolvedTikTokTarget,
+) -> anyhow::Result<crate::PublicActionResult> {
+    use crate::tiktok_like::LikeVerdict;
+    use crate::{InteractionActionKind as Kind, InteractionActionState as State};
+    let claim_revision = match claim_action_or_reuse_terminal(db, assignment_id, Kind::Like)? {
+        ActionClaim::Owned(revision) => revision,
+        ActionClaim::Reused(result) => return Ok(result),
+    };
+    let proof = match driver.open_target(session, target).await {
+        Ok(proof) => proof,
+        Err(error) => {
+            let detail = format!("target re-proof before Like failed: {error:#}");
+            return settle_claimed_action(
+                db,
+                assignment_id,
+                Kind::Like,
+                claim_revision,
+                None,
+                ActionSettlement {
+                    state: State::FailedBeforeEffect,
+                    evidence: serde_json::json!({"phase":"targetProof"}),
+                    error: Some(detail),
+                },
+            );
+        }
+    };
+    let armed_revision = std::sync::Mutex::new(None);
+    let mut gate = ActionEffectGate::new(|| {
+        let armed = db.arm_interaction_action(
+            assignment_id,
+            Kind::Like,
+            claim_revision,
+            "like_desired_state",
+        )?;
+        *armed_revision.lock().expect("action revision mutex") = armed;
+        Ok(armed.is_some())
+    });
+    let result = driver.like_target(session, &mut gate).await;
+    let crossed = gate.crossed();
+    drop(gate);
+    let armed = *armed_revision.lock().expect("action revision mutex");
+    let (state, verdict, error) = match result {
+        Ok(LikeVerdict::Liked) => (State::Confirmed, "liked", None),
+        Ok(LikeVerdict::AlreadyLiked) => (State::NoOp, "alreadyLiked", None),
+        Ok(LikeVerdict::NoControl) => (State::NoOp, "noControl", None),
+        Ok(LikeVerdict::StateUnreadable) => (State::NoOp, "stateUnreadable", None),
+        Ok(LikeVerdict::NotConfirmed) => (State::Uncertain, "notConfirmed", None),
+        Err(error) => {
+            let state = if crossed || error.effect_may_have_gone_out() {
+                State::Uncertain
+            } else {
+                State::FailedBeforeEffect
+            };
+            (state, "failed", Some(error.to_string()))
+        }
+    };
+    settle_claimed_action(
+        db,
+        assignment_id,
+        Kind::Like,
+        claim_revision,
+        armed,
+        ActionSettlement {
+            state,
+            evidence: serde_json::json!({"verdict":verdict,"arrival":proof.as_str()}),
+            error,
+        },
+    )
+}
+
+async fn execute_save_action(
+    db: &crate::db::Database,
+    assignment_id: &str,
+    driver: &dyn TargetDriver,
+    session: &dyn crate::UiSession,
+    target: &crate::ResolvedTikTokTarget,
+) -> anyhow::Result<crate::PublicActionResult> {
+    use crate::{InteractionActionKind as Kind, InteractionActionState as State, SaveVerdict};
+    let claim_revision = match claim_action_or_reuse_terminal(db, assignment_id, Kind::Save)? {
+        ActionClaim::Owned(revision) => revision,
+        ActionClaim::Reused(result) => return Ok(result),
+    };
+    let proof = match driver.open_target(session, target).await {
+        Ok(proof) => proof,
+        Err(error) => {
+            let detail = format!("target re-proof before Save failed: {error:#}");
+            return settle_claimed_action(
+                db,
+                assignment_id,
+                Kind::Save,
+                claim_revision,
+                None,
+                ActionSettlement {
+                    state: State::FailedBeforeEffect,
+                    evidence: serde_json::json!({"phase":"targetProof"}),
+                    error: Some(detail),
+                },
+            );
+        }
+    };
+    let armed_revision = std::sync::Mutex::new(None);
+    let mut gate = ActionEffectGate::new(|| {
+        let armed =
+            db.arm_interaction_action(assignment_id, Kind::Save, claim_revision, "bookmark_saved")?;
+        *armed_revision.lock().expect("action revision mutex") = armed;
+        Ok(armed.is_some())
+    });
+    let evidence = driver.save_target(session, &mut gate).await;
+    let crossed = gate.crossed();
+    drop(gate);
+    let armed = *armed_revision.lock().expect("action revision mutex");
+    let state = match evidence.verdict {
+        SaveVerdict::Saved => State::Confirmed,
+        SaveVerdict::AlreadySaved
+        | SaveVerdict::NoControl
+        | SaveVerdict::StateUnreadable
+        | SaveVerdict::CardChangedBeforeEffect => State::NoOp,
+        SaveVerdict::FailedBeforeEffect => State::FailedBeforeEffect,
+        SaveVerdict::CardChangedAfterEffect
+        | SaveVerdict::NotConfirmed
+        | SaveVerdict::UncertainAfterEffect => State::Uncertain,
+    };
+    let error = evidence.error.clone();
+    settle_claimed_action(
+        db,
+        assignment_id,
+        Kind::Save,
+        claim_revision,
+        armed,
+        ActionSettlement {
+            state,
+            evidence: save_action_evidence(evidence.verdict, proof, crossed),
+            error,
+        },
+    )
+}
+
+fn save_action_evidence(
+    verdict: crate::SaveVerdict,
+    proof: TargetProof,
+    effect_boundary_crossed: bool,
+) -> serde_json::Value {
+    serde_json::json!({
+        "verdict": verdict,
+        "arrival": proof.as_str(),
+        "effectBoundaryCrossed": effect_boundary_crossed,
+    })
+}
+
 /// Run one cohort's share of a campaign: its links, its phones, its own identity map.
 ///
 /// Renamed from `execute_thread_campaign` when cohorts arrived, and the body is unchanged
@@ -1388,6 +1774,11 @@ async fn run_cohort(
     let detail = db
         .get_interaction_campaign(&campaign_id)?
         .context("campaign không tồn tại")?;
+    // Backfill action rows lazily for campaigns created before migration 21. New campaigns
+    // already have them; INSERT OR IGNORE keeps this restart-safe.
+    for assignment in &detail.assignments {
+        db.ensure_interaction_action_runs(&campaign_id, &assignment.id, request.actions)?;
+    }
     let protected = protected_assignment_ids(&detail.assignments);
     // Who posted each message, so a reply can tag the account it answers.
     //
@@ -1591,6 +1982,17 @@ async fn run_cohort(
             let Some(ownership_revision) = db.claim_interaction_assignment_for_send(id)? else {
                 continue;
             };
+            if !request.actions.comment {
+                // This assignment carries only desired-state actions. Keep the legacy envelope
+                // claimed for aggregate/retry ownership, but do not invent or persist comment
+                // text that no caller requested.
+                prepared_messages.push((
+                    id.clone(),
+                    PreparedThreadMessage::new(assignment, ""),
+                    ownership_revision,
+                ));
+                continue;
+            }
             // Skipped in manual mode on purpose: there, Preparing and Ready are microseconds
             // apart because the text is already written, and two events per message would be
             // a burst that says nothing the Ready one does not.
@@ -1737,38 +2139,26 @@ async fn run_cohort(
             let parent_identity = prepared
                 .parent_ordinal
                 .and_then(|ordinal| identities.get(&ordinal).cloned());
-            if let Some(parent_ordinal) = prepared
+            let skipped_parent_at = prepared
                 .parent_ordinal
                 .filter(|_| parent_identity.is_none())
-            {
-                // An identity is only ever learned by sending, so a message whose parent
-                // never posted has nothing to reply to. Naming the ordinal that broke it
-                // is the difference between "5 messages skipped" and knowing which one to
-                // look at.
-                //
-                // **How far that spreads is the shape's business, not this block's.** In a
-                // chain every later message names the one before it, so one gap does end
-                // the target — each of them arrives here in turn. In a star they all name
-                // ordinal 0, so a reply that fails costs only itself and its siblings carry
-                // on. Nothing here needs to know which it is: the lookup is by the parent
-                // this message actually has.
-                if chain_broken_at.is_none() {
-                    chain_broken_at = Some(parent_ordinal);
-                }
-                let broke_at = chain_broken_at.unwrap_or(parent_ordinal);
-                db.update_interaction_assignment_state(
-                    id,
-                    ThreadMessageState::SkippedParent,
-                    Some(&format!(
-                        "parent_identity_not_confirmed_at_ordinal_{broke_at}"
-                    )),
-                    None,
-                    None,
-                )?;
-                notify(&events, &campaign_id);
-                failed += 1;
-                continue;
-            }
+                .map(|parent_ordinal| {
+                    // An identity is only ever learned by sending, so a message whose parent
+                    // never posted has nothing to reply to. Naming the ordinal that broke it
+                    // is the difference between "5 messages skipped" and knowing which one to
+                    // look at.
+                    //
+                    // **How far that spreads is the shape's business, not this block's.** In a
+                    // chain every later message names the one before it, so one gap does end
+                    // the target — each of them arrives here in turn. In a star they all name
+                    // ordinal 0, so a reply that fails costs only itself and its siblings carry
+                    // on. Nothing here needs to know which it is: the lookup is by the parent
+                    // this message actually has.
+                    if chain_broken_at.is_none() {
+                        chain_broken_at = Some(parent_ordinal);
+                    }
+                    chain_broken_at.unwrap_or(parent_ordinal)
+                });
             let opened = match open_interaction_context(&control, &prepared.actor_udid).await {
                 Ok(context) => context,
                 Err(error) => {
@@ -1817,13 +2207,123 @@ async fn run_cohort(
                 // phone keeps the draft. Clear that state before opening anything for this
                 // attempt; cleanup returns to the feed, and `open_target` below rebuilds the
                 // target proof (and, for replies, the parent proof) from fresh UI.
-                if let Err(failure) = driver.clear_stale_comment_ui(session.as_ref(), &stop).await {
-                    effect_intent = failure.effect_may_have_gone_out();
-                    return Err(failure.into_error());
+                if request.actions.comment {
+                    if let Err(failure) =
+                        driver.clear_stale_comment_ui(session.as_ref(), &stop).await
+                    {
+                        effect_intent = failure.effect_may_have_gone_out();
+                        return Err(failure.into_error());
+                    }
                 }
-                // Nothing is typed until the target is on screen: an
-                // unconfirmed open posts the campaign's comment to whichever
-                // video the phone happens to be showing.
+
+                // Public effects are independent and each action opens/re-proves the target
+                // immediately before its own state read. A proven no-op or a failure after a
+                // valid proof does not cost a later action; uncertainty, or losing the proof
+                // itself, stops only this assignment.
+                let mut action_results = Vec::with_capacity(3);
+                if request.actions.like {
+                    let action = match execute_like_action(
+                        db.as_ref(),
+                        id,
+                        driver.as_ref(),
+                        session.as_ref(),
+                        target,
+                    )
+                    .await
+                    {
+                        Ok(action) => action,
+                        Err(error) => {
+                            effect_intent |= failed_action_may_have_crossed_effect(
+                                db.as_ref(),
+                                id,
+                                crate::InteractionActionKind::Like,
+                            );
+                            return Err(error);
+                        }
+                    };
+                    let stops = action_stops_assignment(&action);
+                    effect_intent |= action_requires_uncertain_assignment(&action);
+                    action_results.push(action);
+                    if stops {
+                        anyhow::bail!("Like không an toàn để tiếp tục assignment");
+                    }
+                }
+                if request.actions.save {
+                    let action = match execute_save_action(
+                        db.as_ref(),
+                        id,
+                        driver.as_ref(),
+                        session.as_ref(),
+                        target,
+                    )
+                    .await
+                    {
+                        Ok(action) => action,
+                        Err(error) => {
+                            effect_intent |= failed_action_may_have_crossed_effect(
+                                db.as_ref(),
+                                id,
+                                crate::InteractionActionKind::Save,
+                            );
+                            return Err(error);
+                        }
+                    };
+                    let stops = action_stops_assignment(&action);
+                    effect_intent |= action_requires_uncertain_assignment(&action);
+                    action_results.push(action);
+                    if stops {
+                        anyhow::bail!("Save không an toàn để tiếp tục assignment");
+                    }
+                }
+
+                // A missing reply parent prevents only Comment. Like and Save above remain
+                // independent desired-state actions and retain their own outcomes.
+                if let Some(broke_at) = skipped_parent_at {
+                    let comment_claim = db
+                        .claim_interaction_action(id, crate::InteractionActionKind::Comment)?
+                        .context("Comment action không còn ở trạng thái có thể claim")?;
+                    let comment_result = settle_claimed_action(
+                        db.as_ref(),
+                        id,
+                        crate::InteractionActionKind::Comment,
+                        comment_claim,
+                        None,
+                        ActionSettlement {
+                            state: crate::InteractionActionState::FailedBeforeEffect,
+                            evidence: serde_json::json!({
+                                "phase":"parentProof",
+                                "parentOrdinal": broke_at,
+                            }),
+                            error: Some(format!(
+                                "parent_identity_not_confirmed_at_ordinal_{broke_at}"
+                            )),
+                        },
+                    )?;
+                    action_results.push(comment_result);
+                    return Ok::<Option<serde_json::Value>, anyhow::Error>(Some(
+                        serde_json::json!({
+                            "actions": action_results,
+                            "aggregate": crate::aggregate_interaction_actions(&action_results),
+                            "skippedParentAt": broke_at,
+                        }),
+                    ));
+                }
+
+                if !request.actions.comment {
+                    let aggregate = crate::aggregate_interaction_actions(&action_results);
+                    if aggregate == crate::InteractionRunAggregate::Failed {
+                        anyhow::bail!("mọi public action đều thất bại trước effect");
+                    }
+                    return Ok::<Option<serde_json::Value>, anyhow::Error>(Some(
+                        serde_json::json!({
+                            "actions": action_results,
+                            "aggregate": aggregate,
+                        }),
+                    ));
+                }
+
+                // Nothing is typed until a fresh comment-specific proof is on screen. The
+                // preceding Like/Save action may have changed the hierarchy or card rail.
                 let proof = driver.open_target(session.as_ref(), target).await?;
                 if proof == TargetProof::Structural {
                     // Worth saying out loud: the post is open but unidentified, so nothing
@@ -1861,26 +2361,15 @@ async fn run_cohort(
                 // watching the Monitor tab saw a message succeed and had no way to learn the
                 // like had been refused. A failure nobody is shown is the same shape as the
                 // ones this project has spent its time removing.
-                let like_note = if request.like_target {
-                    match driver.like_target(session.as_ref()).await {
-                        Ok(reason) => {
-                            tracing::info!(
-                                "interaction {}: {} — {reason}",
-                                target.target_key,
-                                prepared.actor_udid
-                            );
-                            Some(format!("đã tim: {reason}"))
-                        }
-                        Err(error) => {
-                            tracing::warn!(
-                                "interaction {}: không thả tim được ({error:#})",
-                                target.target_key
-                            );
-                            Some(format!("không tim được: {error:#}"))
-                        }
-                    }
-                } else {
-                    None
+                let like_note = action_results
+                    .iter()
+                    .find(|action| action.kind == crate::InteractionActionKind::Like)
+                    .map(like_result_note);
+
+                let Some(comment_claim_revision) = db
+                    .claim_interaction_action(id, crate::InteractionActionKind::Comment)?
+                else {
+                    anyhow::bail!("Comment action không còn ở trạng thái có thể claim");
                 };
 
                 // The driver calls this gate only after the composer is armed, at the final
@@ -1894,17 +2383,25 @@ async fn run_cohort(
                 } else {
                     "post_comment"
                 };
+                let comment_armed_revision = std::sync::Mutex::new(None);
                 let mut effect_gate = EffectGate::new(|| {
-                    let won =
-                        db.begin_interaction_assignment_send(id, *ownership_revision, send_intent)?;
-                    if won {
+                    let armed = db.begin_interaction_comment_action_effect(
+                        id,
+                        *ownership_revision,
+                        comment_claim_revision,
+                        send_intent,
+                    )?;
+                    *comment_armed_revision
+                        .lock()
+                        .expect("comment action revision mutex") = armed;
+                    if armed.is_some() {
                         // Sample at the boundary itself: the next device operation is Send.
                         watermark = frame_source
                             .latest_in_generation(&prepared.actor_udid, generation)
                             .map(|frame| frame.sequence);
                         notify(&events, &campaign_id);
                     }
-                    Ok(won)
+                    Ok(armed.is_some())
                 });
                 let send_result = if let Some(parent) = parent_identity.as_ref() {
                     driver
@@ -1921,14 +2418,86 @@ async fn run_cohort(
                 // that path settles Uncertain. OwnershipLost is deliberately not included;
                 // its sibling owns the row and the match below leaves it untouched.
                 effect_intent = send_attempt_has_effect_intent(effect_gate.crossed(), &send_result);
+                let comment_crossed = effect_gate.crossed();
                 drop(effect_gate);
+                let mut comment_armed = *comment_armed_revision
+                    .lock()
+                    .expect("comment action revision mutex");
                 let sent = match send_result {
                     Ok(sent) => sent,
                     Err(failure) if failure.ownership_lost() => {
+                        let _ = settle_claimed_action(
+                            db.as_ref(),
+                            id,
+                            crate::InteractionActionKind::Comment,
+                            comment_claim_revision,
+                            None,
+                            ActionSettlement {
+                                state: crate::InteractionActionState::FailedBeforeEffect,
+                                evidence: serde_json::json!({"phase":"effectGate","verdict":"ownershipLost"}),
+                                error: Some("comment ownership lost before Send".to_owned()),
+                            },
+                        );
                         return Ok::<Option<serde_json::Value>, anyhow::Error>(None);
                     }
-                    Err(failure) => return Err(failure.into_error()),
+                    Err(failure) => {
+                        let detail = failure.detail();
+                        // Typing is itself an effect for retry accounting: when the driver
+                        // cannot prove that typed text was cleared, the next automatic retry
+                        // could publish stale text even though the Send gate never ran. Keep
+                        // the durable action row aligned with the assignment's Uncertain state.
+                        if effect_intent && comment_armed.is_none() {
+                            comment_armed = db.arm_interaction_action(
+                                id,
+                                crate::InteractionActionKind::Comment,
+                                comment_claim_revision,
+                                "typed_comment_cleanup_unverified",
+                            )?;
+                            anyhow::ensure!(
+                                comment_armed.is_some(),
+                                "lost Comment action ownership while recording typed effect"
+                            );
+                        }
+                        let state = if effect_intent {
+                            crate::InteractionActionState::Uncertain
+                        } else {
+                            crate::InteractionActionState::FailedBeforeEffect
+                        };
+                        settle_claimed_action(
+                            db.as_ref(),
+                            id,
+                            crate::InteractionActionKind::Comment,
+                            comment_claim_revision,
+                            comment_armed,
+                            ActionSettlement {
+                                state,
+                                evidence: serde_json::json!({
+                                    "phase": if comment_crossed { "afterSendBoundary" } else if effect_intent { "typedCleanupUnverified" } else { "beforeSendBoundary" },
+                                    "arrival": proof.as_str(),
+                                }),
+                                error: Some(detail),
+                            },
+                        )?;
+                        return Err(failure.into_error());
+                    }
                 };
+                let comment_result = settle_claimed_action(
+                    db.as_ref(),
+                    id,
+                    crate::InteractionActionKind::Comment,
+                    comment_claim_revision,
+                    comment_armed,
+                    ActionSettlement {
+                        state: crate::InteractionActionState::Confirmed,
+                        evidence: serde_json::json!({
+                            "verdict":"sent",
+                            "arrival": proof.as_str(),
+                            "postedIdentity": sent.identity,
+                        }),
+                        error: None,
+                    },
+                )?;
+                action_results.push(comment_result);
                 if let Some(parent) = parent_identity.as_ref() {
                     Ok::<Option<serde_json::Value>, anyhow::Error>(Some(serde_json::json!({
                         "send": sent.evidence,
@@ -1937,6 +2506,8 @@ async fn run_cohort(
                         "reader": driver.kind(),
                         "arrival": proof.as_str(),
                         "like": like_note,
+                        "actions": action_results,
+                        "aggregate": crate::aggregate_interaction_actions(&action_results),
                         // Only the opening comment can carry tags, so this is `None` on every
                         // reply — filed beside the like note because both are outcomes the
                         // comment's own text cannot show.
@@ -1953,6 +2524,8 @@ async fn run_cohort(
                         "reader": driver.kind(),
                         "arrival": proof.as_str(),
                         "like": like_note,
+                        "actions": action_results,
+                        "aggregate": crate::aggregate_interaction_actions(&action_results),
                         // Only the opening comment can carry tags, so this is `None` on every
                         // reply — filed beside the like note because both are outcomes the
                         // comment's own text cannot show.
@@ -1981,14 +2554,36 @@ async fn run_cohort(
             match result {
                 Ok(Some(evidence_json)) => {
                     let evidence_text = evidence_json.to_string();
-                    db.update_interaction_assignment_state(
+                    let skipped_parent_at = evidence_json
+                        .get("skippedParentAt")
+                        .and_then(|value| value.as_u64());
+                    let settled = db.settle_owned_interaction_assignment(
                         id,
-                        ThreadMessageState::Succeeded,
-                        None,
-                        None,
+                        *ownership_revision,
+                        if skipped_parent_at.is_some() {
+                            ThreadMessageState::SkippedParent
+                        } else {
+                            ThreadMessageState::Succeeded
+                        },
+                        skipped_parent_at
+                            .as_ref()
+                            .map(|ordinal| {
+                                format!("parent_identity_not_confirmed_at_ordinal_{ordinal}")
+                            })
+                            .as_deref(),
                         Some(&evidence_text),
                     )?;
-                    let artifact_kind = if prepared.parent_ordinal.is_some() {
+                    if !settled {
+                        tracing::warn!(
+                            "interaction assignment {id}: terminal settlement lost ownership"
+                        );
+                        failed += 1;
+                        notify(&events, &campaign_id);
+                        continue;
+                    }
+                    let artifact_kind = if !request.actions.comment || skipped_parent_at.is_some() {
+                        "public-action-evidence"
+                    } else if prepared.parent_ordinal.is_some() {
                         "comment-reply-evidence"
                     } else {
                         "comment-root-evidence"
@@ -2018,25 +2613,27 @@ async fn run_cohort(
                         artifact_sha,
                         saved.as_ref().map(|(path, _)| path.as_str()),
                     )?;
-                    if let Some(identity) = evidence_json.get("postedIdentity").and_then(|value| {
-                        serde_json::from_value::<CommentLocatorIdentity>(value.clone()).ok()
-                    }) {
-                        identities.insert(prepared.ordinal, identity);
+                    if skipped_parent_at.is_none() {
+                        if let Some(identity) =
+                            evidence_json.get("postedIdentity").and_then(|value| {
+                                serde_json::from_value::<CommentLocatorIdentity>(value.clone()).ok()
+                            })
+                        {
+                            identities.insert(prepared.ordinal, identity);
+                        }
+                        succeeded += 1;
+                    } else {
+                        failed += 1;
                     }
-                    succeeded += 1;
                 }
                 Ok(None) => unreachable!("effect-claim loser left above"),
                 Err(error) => {
-                    let state = if effect_intent {
-                        ThreadMessageState::Uncertain
-                    } else {
-                        ThreadMessageState::Failed
-                    };
-                    db.update_interaction_assignment_state(
+                    let state = assignment_state_after_failure(effect_intent);
+                    let _ = db.settle_owned_interaction_assignment(
                         id,
+                        *ownership_revision,
                         state,
                         Some(&error.to_string()),
-                        None,
                         None,
                     )?;
                     // Especially here. `Uncertain` means the Send tap went out
@@ -2539,6 +3136,57 @@ impl HierarchyTargetDriver<'_> {
     }
 }
 
+struct InteractionHierarchySaveAdapter<'a> {
+    session: &'a dyn crate::UiSession,
+    labels: crate::tiktok_labels::TikTokControls,
+    sequence: u64,
+}
+
+#[async_trait::async_trait]
+impl crate::SaveAdapter for InteractionHierarchySaveAdapter<'_> {
+    async fn observe(&mut self) -> anyhow::Result<crate::SaveObservation> {
+        self.sequence = self.sequence.saturating_add(1);
+        let author = crate::interaction_hierarchy::read_author_label(self.session, self.labels)
+            .await
+            .filter(|author| !author.trim().is_empty());
+        let sound = match self
+            .labels
+            .label(crate::tiktok_labels::TikTokControl::SoundLink)
+        {
+            Some(label) => self
+                .session
+                .locate(label.to_query())
+                .await?
+                .and_then(|element| element.description),
+            None => None,
+        };
+        let control = match self
+            .labels
+            .label(crate::tiktok_labels::TikTokControl::Bookmark)
+        {
+            Some(label) => self.session.locate_stateful(label.to_query()).await?,
+            None => None,
+        };
+        let Some(author) = author else {
+            return Ok(crate::SaveObservation {
+                identity: None,
+                sequence: self.sequence,
+                state: crate::BookmarkState::Unreadable,
+                tap_point: None,
+            });
+        };
+        Ok(crate::hierarchy_save_observation(
+            crate::SaveCardIdentity::Hierarchy { author, sound },
+            self.sequence,
+            control,
+        ))
+    }
+
+    async fn tap(&mut self, point: crate::TapPoint) -> anyhow::Result<()> {
+        self.session.tap(point).await
+    }
+}
+
 fn map_hierarchy_send_failure(
     failure: crate::interaction_hierarchy::HierarchySendFailure,
 ) -> SendFailure {
@@ -2581,20 +3229,42 @@ impl TargetDriver for HierarchyTargetDriver<'_> {
     /// planner on this path — a campaign taps a given post once, so there is no history to
     /// vary against, and the alternative would be a planner constructed per assignment whose
     /// "history" is a single entry.
-    async fn like_target(&self, session: &dyn crate::UiSession) -> anyhow::Result<String> {
+    async fn like_target(
+        &self,
+        session: &dyn crate::UiSession,
+        effect_gate: &mut ActionEffectGate<'_>,
+    ) -> Result<crate::tiktok_like::LikeVerdict, crate::ActionFailure> {
         let stop = std::sync::atomic::AtomicBool::new(false);
-        let verdict = crate::tiktok_like::like_post(
+        crate::tiktok_like::like_post_with_gate(
             session,
             self.labels,
             &mut crate::tiktok_like::centre_of,
             &stop,
+            |_| {
+                effect_gate
+                    .cross()
+                    .map_err(|error| anyhow::anyhow!(error.to_string()))
+            },
         )
-        .await?;
-        if verdict.is_liked() {
-            Ok(verdict.reason().to_string())
-        } else {
-            anyhow::bail!("{}", verdict.reason())
-        }
+        .await
+    }
+
+    async fn save_target(
+        &self,
+        session: &dyn crate::UiSession,
+        effect_gate: &mut ActionEffectGate<'_>,
+    ) -> crate::SaveEvidence {
+        let mut adapter = InteractionHierarchySaveAdapter {
+            session,
+            labels: self.labels,
+            sequence: 0,
+        };
+        crate::tiktok_save(&mut adapter, |_| {
+            effect_gate
+                .cross()
+                .map_err(|error| anyhow::anyhow!(error.to_string()))
+        })
+        .await
     }
 
     async fn open_target(
@@ -3029,7 +3699,7 @@ mod tests {
                 instruction: "tự nhiên".into(),
                 max_words: 12,
                 manual_comments,
-                like_target: false,
+                actions: crate::interaction::InteractionActionSet::default(),
                 mode: ThreadMode::Standalone,
                 shape: crate::interaction::ThreadShape::Star,
                 cohort_size: None,
@@ -3076,6 +3746,7 @@ mod tests {
                 like: None,
                 mention: None,
                 parent_was_folded: false,
+                actions: Vec::new(),
             }
         }
 
@@ -3149,7 +3820,7 @@ mod tests {
                 instruction: "tu nhien".into(),
                 max_words: 12,
                 manual_comments: vec!["a".into(), "b".into(), "c".into()],
-                like_target: false,
+                actions: crate::interaction::InteractionActionSet::default(),
                 mode: ThreadMode::Threaded,
                 shape: crate::interaction::ThreadShape::Chain,
                 cohort_size: None,
@@ -3287,6 +3958,283 @@ mod tests {
         }
     }
 
+    mod action_settlement_recovery {
+        use super::*;
+        use crate::interaction::{
+            plan_threads, InteractionActionKind, InteractionActionSet, InteractionActionState,
+            ResolvedTikTokTarget, ThreadMode, ThreadShape, TikTokPostKind,
+        };
+        use uuid::Uuid;
+
+        #[test]
+        fn failed_confirmed_settlement_is_repaired_to_uncertain_and_closes_the_assignment() {
+            let path = std::env::temp_dir().join(format!(
+                "riviu-interaction-settlement-recovery-{}.db",
+                Uuid::new_v4()
+            ));
+            let db = crate::db::Database::open(&path).expect("open fixture database");
+            let request = ThreadCampaignRequest {
+                request_id: "settlement-recovery".into(),
+                targets: vec![ResolvedTikTokTarget {
+                    original_url: "https://www.tiktok.com/@creator/video/1".into(),
+                    normalized_url: "https://www.tiktok.com/@creator/video/1".into(),
+                    target_key: "content:1".into(),
+                    content_id: "1".into(),
+                    author: "creator".into(),
+                    kind: TikTokPostKind::Video,
+                }],
+                actor_udids: vec!["phone-a".into()],
+                message_count: 0,
+                instruction: String::new(),
+                max_words: 0,
+                manual_comments: Vec::new(),
+                actions: InteractionActionSet {
+                    like: true,
+                    comment: false,
+                    save: false,
+                },
+                mode: ThreadMode::Standalone,
+                shape: ThreadShape::Star,
+                cohort_size: None,
+                mentions: Vec::new(),
+                mention_parent: false,
+            };
+            let plan = plan_threads(&request).expect("plan");
+            let campaign = db
+                .create_interaction_campaign(&request, &plan)
+                .expect("create campaign");
+            db.update_interaction_campaign_state(
+                &campaign,
+                crate::interaction::ThreadCampaignState::Running,
+                None,
+            )
+            .expect("mark campaign running");
+            let assignment = db
+                .get_interaction_campaign(&campaign)
+                .expect("read campaign")
+                .expect("campaign")
+                .assignments[0]
+                .id
+                .clone();
+            db.claim_interaction_assignment_for_send(&assignment)
+                .expect("claim assignment")
+                .expect("assignment owner");
+            let claim = db
+                .claim_interaction_action(&assignment, InteractionActionKind::Like)
+                .expect("claim Like")
+                .expect("Like owner");
+            let armed = db
+                .arm_interaction_action(
+                    &assignment,
+                    InteractionActionKind::Like,
+                    claim,
+                    "like_desired_state",
+                )
+                .expect("arm Like")
+                .expect("Like gate owner");
+
+            rusqlite::Connection::open(&path)
+                .expect("open failure injector")
+                .execute_batch(&format!(
+                    "CREATE TRIGGER fail_confirmed_action_settlement \
+                     BEFORE UPDATE OF state ON tiktok_action_runs \
+                     WHEN OLD.assignment_id='{assignment}' AND NEW.state='confirmed' \
+                     BEGIN SELECT RAISE(FAIL, 'forced confirmed settlement failure'); END;"
+                ))
+                .expect("install settlement failure trigger");
+
+            let repaired = settle_claimed_action(
+                &db,
+                &assignment,
+                InteractionActionKind::Like,
+                claim,
+                Some(armed),
+                ActionSettlement {
+                    state: InteractionActionState::Confirmed,
+                    evidence: serde_json::json!({"verdict":"liked"}),
+                    error: None,
+                },
+            )
+            .expect("after-effect settlement is repaired conservatively");
+            assert_eq!(repaired.state, InteractionActionState::Uncertain);
+            assert!(repaired
+                .evidence
+                .as_deref()
+                .is_some_and(|evidence| evidence.contains("settlementFailureAfterEffect")));
+
+            let mut effect_intent = false;
+            effect_intent |= action_requires_uncertain_assignment(&repaired);
+            assert_eq!(
+                assignment_state_after_failure(effect_intent),
+                ThreadMessageState::Uncertain,
+                "the legacy envelope must not advertise an after-effect audit failure as retryable"
+            );
+            db.update_interaction_assignment_state(
+                &assignment,
+                assignment_state_after_failure(effect_intent),
+                Some("forced confirmed settlement failure"),
+                None,
+                None,
+            )
+            .expect("close legacy assignment");
+            let detail = db
+                .get_interaction_campaign(&campaign)
+                .expect("read repaired campaign")
+                .expect("campaign");
+            assert_eq!(detail.assignments[0].state, ThreadMessageState::Uncertain);
+            assert_eq!(
+                detail.assignments[0].actions[0].state,
+                InteractionActionState::Uncertain
+            );
+            assert_eq!(
+                detail.action_aggregate,
+                Some(crate::InteractionRunAggregate::Uncertain)
+            );
+            assert_eq!(
+                settle_campaign_state(
+                    tally_assignments(&detail.assignments),
+                    true,
+                    detail.action_aggregate,
+                ),
+                crate::interaction::ThreadCampaignState::Partial,
+                "an after-effect settlement failure must not close the campaign as a retryable total failure"
+            );
+            assert!(db
+                .claim_interaction_action(&assignment, InteractionActionKind::Like)
+                .expect("retry claim")
+                .is_none());
+
+            drop(db);
+            std::fs::remove_file(path).expect("remove fixture database");
+        }
+    }
+
+    #[test]
+    fn cancellation_between_like_and_save_cannot_reuse_a_planned_save_as_success() {
+        use crate::interaction::{
+            plan_threads, InteractionActionKind, InteractionActionSet, InteractionActionState,
+            ResolvedTikTokTarget, ThreadMode, ThreadShape, TikTokPostKind,
+        };
+        use uuid::Uuid;
+
+        let path = std::env::temp_dir().join(format!(
+            "riviu-interaction-cancel-between-actions-{}.db",
+            Uuid::new_v4()
+        ));
+        let db = crate::db::Database::open(&path).expect("open fixture database");
+        let request = ThreadCampaignRequest {
+            request_id: "cancel-between-actions".into(),
+            targets: vec![ResolvedTikTokTarget {
+                original_url: "https://www.tiktok.com/@creator/video/2".into(),
+                normalized_url: "https://www.tiktok.com/@creator/video/2".into(),
+                target_key: "content:2".into(),
+                content_id: "2".into(),
+                author: "creator".into(),
+                kind: TikTokPostKind::Video,
+            }],
+            actor_udids: vec!["phone-a".into()],
+            message_count: 0,
+            instruction: String::new(),
+            max_words: 0,
+            manual_comments: Vec::new(),
+            actions: InteractionActionSet {
+                like: true,
+                comment: false,
+                save: true,
+            },
+            mode: ThreadMode::Standalone,
+            shape: ThreadShape::Star,
+            cohort_size: None,
+            mentions: Vec::new(),
+            mention_parent: false,
+        };
+        let plan = plan_threads(&request).expect("plan");
+        let campaign = db
+            .create_interaction_campaign(&request, &plan)
+            .expect("create campaign");
+        db.update_interaction_campaign_state(
+            &campaign,
+            crate::interaction::ThreadCampaignState::Running,
+            None,
+        )
+        .expect("mark campaign running");
+        let assignment = db
+            .get_interaction_campaign(&campaign)
+            .expect("read campaign")
+            .expect("campaign")
+            .assignments[0]
+            .id
+            .clone();
+        db.claim_interaction_assignment_for_send(&assignment)
+            .expect("claim assignment")
+            .expect("assignment owner");
+        let like_claim =
+            match claim_action_or_reuse_terminal(&db, &assignment, InteractionActionKind::Like)
+                .expect("claim Like")
+            {
+                ActionClaim::Owned(revision) => revision,
+                ActionClaim::Reused(_) => panic!("new Like row cannot already be terminal"),
+            };
+        let like_armed = db
+            .arm_interaction_action(
+                &assignment,
+                InteractionActionKind::Like,
+                like_claim,
+                "like_desired_state",
+            )
+            .expect("arm Like")
+            .expect("Like gate owner");
+        assert!(db
+            .settle_interaction_action(
+                &assignment,
+                InteractionActionKind::Like,
+                like_armed,
+                InteractionActionState::Confirmed,
+                Some(r#"{"verdict":"liked"}"#),
+                None,
+            )
+            .expect("settle Like"));
+
+        db.cancel_interaction_campaign(&campaign)
+            .expect("cancel between Like and Save");
+        let mut save_taps = 0_u8;
+        if let Ok(ActionClaim::Owned(_)) =
+            claim_action_or_reuse_terminal(&db, &assignment, InteractionActionKind::Save)
+        {
+            save_taps += 1;
+        }
+        assert_eq!(
+            save_taps, 0,
+            "Save must not reach its effect gate after Cancel"
+        );
+
+        let detail = db
+            .get_interaction_campaign(&campaign)
+            .expect("read cancelled campaign")
+            .expect("campaign");
+        assert_eq!(detail.assignments[0].state, ThreadMessageState::Failed);
+        let state_of = |kind| {
+            detail.assignments[0]
+                .actions
+                .iter()
+                .find(|action| action.kind == kind)
+                .expect("action result")
+                .state
+        };
+        assert_eq!(
+            state_of(InteractionActionKind::Like),
+            InteractionActionState::Confirmed
+        );
+        assert_eq!(
+            state_of(InteractionActionKind::Save),
+            InteractionActionState::Planned,
+            "an action that never started remains retryable rather than masquerading as done"
+        );
+
+        drop(db);
+        std::fs::remove_file(path).expect("remove fixture database");
+    }
+
     /// The two conditions an evidence frame has to satisfy, pinned without a device.
     mod evidence_frames {
         use super::*;
@@ -3394,6 +4342,7 @@ mod tests {
             like: None,
             mention: None,
             parent_was_folded: false,
+            actions: Vec::new(),
         }
     }
 
@@ -3557,7 +4506,7 @@ mod mention_tests {
             max_words: 12,
             cohort_size: None,
             manual_comments: Vec::new(),
-            like_target: false,
+            actions: crate::interaction::InteractionActionSet::default(),
             mentions: mentions.iter().map(|m| (*m).to_string()).collect(),
             mention_parent,
         }
@@ -3606,70 +4555,76 @@ mod mention_tests {
 
 #[cfg(test)]
 mod boundary_tests {
-    /// **Every `Standalone` task owns exactly one assignment, and no two own the same one.**
-    ///
-    /// The fan-out gives each spawned task a singleton `only_assignments`, which is the same
-    /// scoping the retry path uses to keep a rerun off rows it must not touch. Two tasks
-    /// holding the same id would be two phones preparing and sending the same message — the
-    /// double post this whole layer exists to make impossible — so the property that matters
-    /// is that the sets are *disjoint*, and that is a property of how they are built.
-    ///
-    /// A source scan because the split happens in `execute_thread_campaign`, which needs a
-    /// database, a control plane, a nurture engine, an event bus and a frame source to call.
-    #[test]
-    fn the_standalone_fan_out_gives_each_task_one_assignment() {
-        let source = include_str!("interaction_campaign.rs");
-        let split = {
-            let start = source
-                .find("let per_assignment = if request.mode")
-                .expect("the standalone fan-out still exists");
-            let rest = &source[start..];
-            let end = rest
-                .find("// `None` for a single cohort")
-                .unwrap_or(rest.len());
-            &rest[..end]
-        };
-        assert!(
-            split.contains("HashSet::from([assignment_id])"),
-            "each task has to be scoped to one assignment id, or two tasks can share a row"
-        );
-        assert!(
-            split.contains("HashSet::from([target_key])"),
-            "and to that assignment's own target, or it would walk every link"
-        );
-        // One row in, one task out. Asserted as "nothing batches the rows" rather than as the
-        // loop's exact spelling: the first version pinned the literal
-        // `for (assignment_id, target_key) in rows`, and adding the stagger renamed the
-        // binding — so it failed for a change that kept the property it was guarding. A test
-        // that breaks on rephrasing teaches the next person to edit the test.
-        assert!(
-            split.contains("in rows"),
-            "the spawn loop still has to walk the rows: {split}"
-        );
-        for batching in ["chunks(", "chunks_exact(", "windows(", "step_by("] {
-            assert!(
-                !split.contains(batching),
-                "`{batching}` would put more than one assignment in a task"
-            );
+    use crate::{InteractionActionKind, InteractionActionState, PublicActionResult};
+
+    fn action(state: InteractionActionState, evidence: Option<&str>) -> PublicActionResult {
+        PublicActionResult {
+            kind: InteractionActionKind::Save,
+            state,
+            revision: 1,
+            effect_intent: None,
+            evidence: evidence.map(str::to_owned),
+            error: None,
         }
     }
 
-    /// `Standalone` is the only shape that may fan out.
-    ///
-    /// `Chain` has message N reply to N-1 and `Star` has every reply answer ordinal 0, so both
-    /// need the root to have landed before the replies start. Running their assignments at once
-    /// would have replies looking for a parent that has not been posted.
     #[test]
-    fn only_the_shape_without_parents_fans_out() {
-        let source = include_str!("interaction_campaign.rs");
-        let start = source
-            .find("let per_assignment = if request.mode")
-            .expect("the fan-out still exists");
-        let condition = &source[start..start + 200];
-        assert!(
-            condition.contains("ThreadMode::Standalone"),
-            "the fan-out must be gated on the shape that has no parents: {condition}"
+    fn proven_no_op_and_local_failure_continue_but_uncertainty_or_lost_proof_stop() {
+        assert!(!super::action_stops_assignment(&action(
+            InteractionActionState::NoOp,
+            Some(r#"{"verdict":"alreadySaved"}"#),
+        )));
+        assert!(!super::action_stops_assignment(&action(
+            InteractionActionState::FailedBeforeEffect,
+            Some(r#"{"arrival":"identified","verdict":"failed"}"#),
+        )));
+        assert!(super::action_stops_assignment(&action(
+            InteractionActionState::FailedBeforeEffect,
+            Some(r#"{"phase":"targetProof"}"#),
+        )));
+        assert!(super::action_stops_assignment(&action(
+            InteractionActionState::Uncertain,
+            Some(r#"{"phase":"afterEffect"}"#),
+        )));
+    }
+
+    /// Every plan without reply dependencies may fan out, while a reply graph stays ordered.
+    #[test]
+    fn only_work_without_comment_parents_fans_out() {
+        use crate::interaction::{InteractionActionSet, ThreadMode};
+
+        let action_only = InteractionActionSet {
+            like: true,
+            comment: false,
+            save: true,
+        };
+        let comments = InteractionActionSet::default();
+
+        assert!(super::fans_out_per_assignment(
+            ThreadMode::Standalone,
+            comments
+        ));
+        assert!(super::fans_out_per_assignment(
+            ThreadMode::Threaded,
+            action_only
+        ));
+        assert!(!super::fans_out_per_assignment(
+            ThreadMode::Threaded,
+            comments
+        ));
+    }
+
+    #[test]
+    fn save_action_evidence_uses_the_public_camel_case_verdict() {
+        let evidence = super::save_action_evidence(
+            crate::SaveVerdict::AlreadySaved,
+            super::TargetProof::Identified,
+            false,
         );
+
+        assert_eq!(evidence["verdict"], "alreadySaved");
+        assert_eq!(evidence["arrival"], "identified");
+        assert_eq!(evidence["effectBoundaryCrossed"], false);
     }
 
     /// The body of one `#[tauri::command]` in the desktop wrapper, for the two tests below.
@@ -3812,14 +4767,15 @@ mod boundary_tests {
         let start = source
             .find("async fn run_cohort(")
             .expect("the runner still exists");
-        let runner = &source[start..];
+        let rest = &source[start..];
+        let runner = &rest[..rest.find("\n#[cfg(test)]").unwrap_or(rest.len())];
         let gate = runner
             .find("let mut effect_gate = EffectGate::new")
             .expect("the runner builds a one-shot effect gate");
         let claim = runner[gate..]
-            .find("db.begin_interaction_assignment_send")
+            .find("db.begin_interaction_comment_action_effect")
             .map(|offset| gate + offset)
-            .expect("the gate performs the effect CAS");
+            .expect("the gate atomically arms the assignment and Comment action");
         assert!(
             runner[claim..].contains("send_reply(") && runner[claim..].contains("send_root("),
             "both drivers must receive the CAS-bearing gate"

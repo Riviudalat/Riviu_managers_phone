@@ -195,7 +195,46 @@ pub enum ThreadShape {
     Star,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// Independent public actions requested for each target/actor assignment.
+///
+/// Keeping this as one typed value prevents the UI and runner from growing three unrelated
+/// booleans whose defaults drift. Legacy payloads are normalized by
+/// [`ThreadCampaignRequestWire`] below.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InteractionActionSet {
+    pub like: bool,
+    pub comment: bool,
+    pub save: bool,
+}
+
+impl InteractionActionSet {
+    pub fn any(self) -> bool {
+        self.like || self.comment || self.save
+    }
+
+    pub fn ordered(self) -> impl Iterator<Item = InteractionActionKind> {
+        [
+            self.like.then_some(InteractionActionKind::Like),
+            self.save.then_some(InteractionActionKind::Save),
+            self.comment.then_some(InteractionActionKind::Comment),
+        ]
+        .into_iter()
+        .flatten()
+    }
+}
+
+impl Default for InteractionActionSet {
+    fn default() -> Self {
+        Self {
+            like: false,
+            comment: true,
+            save: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ThreadCampaignRequest {
     pub request_id: String,
@@ -234,11 +273,7 @@ pub struct ThreadCampaignRequest {
     /// empty pool, which is the AI mode it was created with.
     #[serde(default)]
     pub manual_comments: Vec<String>,
-    /// Also like each target, once per actor that comments on it.
-    ///
-    /// Off by default, and off is also what a stored campaign from before this reads as.
-    #[serde(default)]
-    pub like_target: bool,
+    pub actions: InteractionActionSet,
     /// @-handles to tag at the front of every comment, without the leading `@`.
     ///
     /// Inserted as **plain text** (`@name`), which TikTok does not turn into a linked
@@ -266,12 +301,72 @@ pub struct ThreadCampaignRequest {
     pub mention_parent: bool,
 }
 
+/// Deserialize-only compatibility shape. New serialization always emits `actions` and never
+/// writes the retired `likeTarget` field; old stored rows still map it into the same behavior.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ThreadCampaignRequestWire {
+    request_id: String,
+    targets: Vec<ResolvedTikTokTarget>,
+    actor_udids: Vec<String>,
+    message_count: u8,
+    instruction: String,
+    max_words: u8,
+    #[serde(default)]
+    mode: ThreadMode,
+    #[serde(default)]
+    shape: ThreadShape,
+    #[serde(default)]
+    cohort_size: Option<u8>,
+    #[serde(default)]
+    manual_comments: Vec<String>,
+    #[serde(default)]
+    actions: Option<InteractionActionSet>,
+    #[serde(default)]
+    like_target: bool,
+    #[serde(default)]
+    mentions: Vec<String>,
+    #[serde(default)]
+    mention_parent: bool,
+}
+
+impl<'de> Deserialize<'de> for ThreadCampaignRequest {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let wire = ThreadCampaignRequestWire::deserialize(deserializer)?;
+        let actions = wire.actions.unwrap_or(InteractionActionSet {
+            like: wire.like_target,
+            comment: true,
+            save: false,
+        });
+        Ok(Self {
+            request_id: wire.request_id,
+            targets: wire.targets,
+            actor_udids: wire.actor_udids,
+            message_count: wire.message_count,
+            instruction: wire.instruction,
+            max_words: wire.max_words,
+            mode: wire.mode,
+            shape: wire.shape,
+            cohort_size: wire.cohort_size,
+            manual_comments: wire.manual_comments,
+            actions,
+            mentions: wire.mentions,
+            mention_parent: wire.mention_parent,
+        })
+    }
+}
+
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum ThreadValidationError {
     #[error("request id is empty")]
     EmptyRequestId,
     #[error("at least one target is required")]
     NoTargets,
+    #[error("at least one interaction action is required")]
+    NoActions,
     #[error("message count must be between two and sixty-four")]
     InvalidMessageCount,
     #[error("actor count must be between two and sixty-four, and every actor distinct")]
@@ -300,14 +395,16 @@ impl ThreadCampaignRequest {
         if self.targets.is_empty() {
             return Err(ThreadValidationError::NoTargets);
         }
-        if !(MIN_MESSAGE_COUNT..=MAX_MESSAGE_COUNT).contains(&self.message_count) {
-            return Err(ThreadValidationError::InvalidMessageCount);
+        if !self.actions.any() {
+            return Err(ThreadValidationError::NoActions);
         }
-        if !(MIN_ACTOR_COUNT..=MAX_ACTOR_COUNT).contains(&self.actor_udids.len()) {
+        let minimum_actors = if self.actions.comment {
+            MIN_ACTOR_COUNT
+        } else {
+            1
+        };
+        if !(minimum_actors..=MAX_ACTOR_COUNT).contains(&self.actor_udids.len()) {
             return Err(ThreadValidationError::InvalidActorCount);
-        }
-        if self.cohort_size.is_some_and(|size| size < MIN_COHORT_SIZE) {
-            return Err(ThreadValidationError::InvalidCohortSize);
         }
         let mut actors = HashSet::new();
         if self
@@ -324,6 +421,17 @@ impl ThreadCampaignRequest {
             .any(|target| !targets.insert(target.target_key.as_str()))
         {
             return Err(ThreadValidationError::DuplicateTarget);
+        }
+        // Like/Save-only campaigns do not consume or validate comment configuration. This
+        // keeps hidden stale UI fields from making an otherwise valid desired-state action fail.
+        if !self.actions.comment {
+            return Ok(());
+        }
+        if !(MIN_MESSAGE_COUNT..=MAX_MESSAGE_COUNT).contains(&self.message_count) {
+            return Err(ThreadValidationError::InvalidMessageCount);
+        }
+        if self.cohort_size.is_some_and(|size| size < MIN_COHORT_SIZE) {
+            return Err(ThreadValidationError::InvalidCohortSize);
         }
         // **Per cohort, not per fleet.** The rule is that every actor gets a turn, and a
         // cohort is where turns are taken: twenty phones in cohorts of three need three
@@ -364,7 +472,7 @@ impl ThreadCampaignRequest {
     /// asks for — and those two disagreeing is how a campaign gets validated as manual and
     /// then run as AI.
     pub fn is_manual(&self) -> bool {
-        !self.manual_comments.is_empty()
+        self.actions.comment && !self.manual_comments.is_empty()
     }
 
     /// Which of the operator's comments this message uses.
@@ -401,7 +509,206 @@ impl ThreadCampaignRequest {
     /// was refused `target_open_screen_unchanged` on the exact link the Note 8 commented
     /// on successfully minutes later.
     pub fn needs_ai_evidence_frames(&self) -> bool {
-        !self.is_manual()
+        self.actions.comment && !self.is_manual()
+    }
+}
+
+/// Stable ledger key for one independently persisted action.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum InteractionActionKind {
+    Like,
+    Save,
+    Comment,
+    Follow,
+}
+
+impl InteractionActionKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Like => "like",
+            Self::Save => "save",
+            Self::Comment => "comment",
+            Self::Follow => "follow",
+        }
+    }
+}
+
+/// Durable state of one action, with the effect boundary explicit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum InteractionActionState {
+    Planned,
+    Preparing,
+    Armed,
+    Confirmed,
+    NoOp,
+    FailedBeforeEffect,
+    Uncertain,
+}
+
+impl InteractionActionState {
+    pub fn is_terminal(self) -> bool {
+        matches!(
+            self,
+            Self::Confirmed | Self::NoOp | Self::FailedBeforeEffect | Self::Uncertain
+        )
+    }
+
+    pub fn effect_may_have_gone_out(self) -> bool {
+        matches!(self, Self::Armed | Self::Confirmed | Self::Uncertain)
+    }
+}
+
+/// Public wire and DB projection of one action result.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PublicActionResult {
+    pub kind: InteractionActionKind,
+    pub state: InteractionActionState,
+    #[serde(default)]
+    pub revision: i64,
+    #[serde(default)]
+    pub effect_intent: Option<String>,
+    #[serde(default)]
+    pub evidence: Option<String>,
+    #[serde(default)]
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InteractionActionRunRecord {
+    pub id: String,
+    pub owner_kind: TikTokActionOwnerKind,
+    pub owner_id: String,
+    pub device_udid: String,
+    pub card_identity: Option<String>,
+    pub campaign_id: Option<String>,
+    pub assignment_id: Option<String>,
+    pub kind: InteractionActionKind,
+    pub state: InteractionActionState,
+    pub revision: i64,
+    pub effect_intent: Option<String>,
+    pub evidence: Option<String>,
+    pub error: Option<String>,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum TikTokActionOwnerKind {
+    Interaction,
+    Nurture,
+}
+
+impl TikTokActionOwnerKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Interaction => "interaction",
+            Self::Nurture => "nurture",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TikTokActionOwner {
+    pub kind: TikTokActionOwnerKind,
+    pub owner_id: String,
+    pub device_udid: String,
+    #[serde(default)]
+    pub card_identity: Option<String>,
+}
+
+impl PublicActionResult {
+    pub fn new(kind: InteractionActionKind, state: InteractionActionState) -> Self {
+        Self {
+            kind,
+            state,
+            revision: 0,
+            effect_intent: None,
+            evidence: None,
+            error: None,
+        }
+    }
+}
+
+/// Operator-facing counts derived from the durable action ledger.
+///
+/// `attempted` starts only at the effect boundary. Preparing a row, finding an already
+/// satisfied desired state, or failing before a tap/type therefore never inflates it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InteractionActionCounters {
+    pub planned: u32,
+    pub attempted: u32,
+    pub confirmed: u32,
+    pub no_op: u32,
+    pub uncertain: u32,
+}
+
+pub fn count_interaction_actions(results: &[PublicActionResult]) -> InteractionActionCounters {
+    use InteractionActionState::{Armed, Confirmed, NoOp, Uncertain};
+
+    let mut counters = InteractionActionCounters {
+        planned: results.len() as u32,
+        ..InteractionActionCounters::default()
+    };
+    for result in results {
+        if result.effect_intent.is_some() || matches!(result.state, Armed | Confirmed | Uncertain) {
+            counters.attempted += 1;
+        }
+        match result.state {
+            Confirmed => counters.confirmed += 1,
+            NoOp => counters.no_op += 1,
+            Armed | Uncertain => counters.uncertain += 1,
+            _ => {}
+        }
+    }
+    counters
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum InteractionRunAggregate {
+    Done,
+    Partial,
+    Failed,
+    Uncertain,
+}
+
+/// Aggregate only typed terminal outcomes. Error text is deliberately not interpreted.
+pub fn aggregate_interaction_actions(results: &[PublicActionResult]) -> InteractionRunAggregate {
+    if results.iter().any(|result| {
+        matches!(
+            result.state,
+            InteractionActionState::Armed | InteractionActionState::Uncertain
+        )
+    }) {
+        return InteractionRunAggregate::Uncertain;
+    }
+    let completed_count = results
+        .iter()
+        .filter(|result| {
+            matches!(
+                result.state,
+                InteractionActionState::Confirmed | InteractionActionState::NoOp
+            )
+        })
+        .count();
+    let incomplete = results.iter().any(|result| {
+        matches!(
+            result.state,
+            InteractionActionState::Planned
+                | InteractionActionState::Preparing
+                | InteractionActionState::FailedBeforeEffect
+        )
+    });
+    match (completed_count, incomplete) {
+        (_, false) => InteractionRunAggregate::Done,
+        (0, true) => InteractionRunAggregate::Failed,
+        (_, true) => InteractionRunAggregate::Partial,
     }
 }
 
@@ -479,6 +786,29 @@ pub fn partition_actors(actors: &[String], cohort_size: Option<u8>) -> Vec<Vec<S
 /// actor than link one.
 pub fn plan_threads(request: &ThreadCampaignRequest) -> Result<ThreadPlan, ThreadValidationError> {
     request.validate()?;
+    if !request.actions.comment {
+        let assignments = request
+            .targets
+            .iter()
+            .flat_map(|target| {
+                request
+                    .actor_udids
+                    .iter()
+                    .enumerate()
+                    .map(move |(ordinal, actor_udid)| ThreadMessagePlan {
+                        target_key: target.target_key.clone(),
+                        ordinal: ordinal as u8,
+                        actor_udid: actor_udid.clone(),
+                        parent_ordinal: None,
+                        cohort: 0,
+                    })
+            })
+            .collect();
+        return Ok(ThreadPlan {
+            request_id: request.request_id.clone(),
+            assignments,
+        });
+    }
     let cohorts = partition_actors(&request.actor_udids, request.cohort_size);
     let mut assignments =
         Vec::with_capacity(request.targets.len() * request.message_count as usize);
@@ -871,6 +1201,9 @@ pub struct InteractionCampaignSummary {
     /// survivable — a corrupt request is a reason to show a row plainly, not to hide it.
     #[serde(default)]
     pub brief: Option<InteractionCampaignBrief>,
+    /// Typed public-action totals. All zero for campaigns created before the action ledger.
+    #[serde(default)]
+    pub action_counters: InteractionActionCounters,
 }
 
 /// The human-readable shape of a campaign, read back out of its stored request.
@@ -888,6 +1221,8 @@ pub struct InteractionCampaignBrief {
     /// Whether the operator wrote the comments, rather than the AI.
     pub manual: bool,
     pub like_target: bool,
+    #[serde(default)]
+    pub actions: InteractionActionSet,
 }
 
 impl InteractionCampaignBrief {
@@ -902,7 +1237,8 @@ impl InteractionCampaignBrief {
             cohort_size: request.cohort_size,
             actor_count: request.actor_udids.len() as u32,
             manual: request.is_manual(),
-            like_target: request.like_target,
+            like_target: request.actions.like,
+            actions: request.actions,
         }
     }
 }
@@ -946,6 +1282,10 @@ pub struct InteractionAssignmentRecord {
     /// `false` rather than making an old campaign fail to load.
     #[serde(default)]
     pub parent_was_folded: bool,
+    /// Independently persisted Like/Save/Comment outcomes. Empty for campaigns created before
+    /// the action ledger migration.
+    #[serde(default)]
+    pub actions: Vec<PublicActionResult>,
 }
 
 impl InteractionAssignmentRecord {
@@ -1190,6 +1530,9 @@ impl InteractionTargetNote {
 pub struct InteractionCampaignDetail {
     pub summary: InteractionCampaignSummary,
     pub assignments: Vec<InteractionAssignmentRecord>,
+    /// Fleet-wide verdict derived exclusively from the durable action rows.
+    #[serde(default)]
+    pub action_aggregate: Option<InteractionRunAggregate>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1282,7 +1625,11 @@ mod tests {
                 shape: ThreadShape::Star,
                 cohort_size: Some(3),
                 manual_comments: Vec::new(),
-                like_target: true,
+                actions: InteractionActionSet {
+                    like: true,
+                    comment: true,
+                    save: false,
+                },
                 mentions: Vec::new(),
                 mention_parent: false,
             };
@@ -1334,7 +1681,7 @@ mod tests {
                 shape: ThreadShape::Chain,
                 cohort_size: None,
                 manual_comments: pool.into_iter().map(str::to_string).collect(),
-                like_target: false,
+                actions: InteractionActionSet::default(),
                 mentions: Vec::new(),
                 mention_parent: false,
             }
@@ -1434,7 +1781,7 @@ mod tests {
                 serde_json::from_value(stored).expect("an older payload must still decode");
             assert!(decoded.manual_comments.is_empty());
             assert!(!decoded.is_manual());
-            assert!(!decoded.like_target);
+            assert_eq!(decoded.actions, InteractionActionSet::default());
         }
     }
 
@@ -1466,13 +1813,215 @@ mod tests {
             // Both default on the wire; a fixture spells them out so the shape stays
             // visible and a new field cannot be forgotten silently.
             manual_comments: Vec::new(),
-            like_target: false,
+            actions: InteractionActionSet::default(),
             mode: ThreadMode::Threaded,
             shape: ThreadShape::Chain,
             cohort_size: None,
             mentions: Vec::new(),
             mention_parent: false,
         }
+    }
+
+    fn action_request_json(like: bool, comment: bool, save: bool) -> serde_json::Value {
+        serde_json::json!({
+            "requestId": "actions-1",
+            "targets": [target("1")],
+            "actorUdids": ["actor-a"],
+            "messageCount": 0,
+            "instruction": "",
+            "maxWords": 0,
+            "mode": "threaded",
+            "actions": { "like": like, "comment": comment, "save": save }
+        })
+    }
+
+    #[test]
+    fn every_non_empty_like_comment_save_combination_is_valid() {
+        for mask in 1_u8..=7 {
+            let comment = mask & 0b010 != 0;
+            let actors = if comment {
+                serde_json::json!(["actor-a", "actor-b"])
+            } else {
+                serde_json::json!(["actor-a"])
+            };
+            let mut raw = action_request_json(mask & 0b001 != 0, comment, mask & 0b100 != 0);
+            raw["actorUdids"] = actors;
+            if comment {
+                raw["messageCount"] = serde_json::json!(2);
+                raw["maxWords"] = serde_json::json!(12);
+            }
+            let request: ThreadCampaignRequest =
+                serde_json::from_value(raw).expect("action request decodes");
+            assert_eq!(request.validate(), Ok(()), "mask {mask:03b}");
+        }
+
+        let empty: ThreadCampaignRequest =
+            serde_json::from_value(action_request_json(false, false, false))
+                .expect("empty action request still decodes for typed validation");
+        assert_eq!(empty.validate(), Err(ThreadValidationError::NoActions));
+    }
+
+    #[test]
+    fn legacy_like_target_normalizes_to_like_and_comment_without_save() {
+        let legacy = serde_json::json!({
+            "requestId": "legacy",
+            "targets": [target("1")],
+            "actorUdids": ["actor-a", "actor-b"],
+            "messageCount": 2,
+            "instruction": "tu nhien",
+            "maxWords": 12,
+            "likeTarget": true
+        });
+        let request: ThreadCampaignRequest = serde_json::from_value(legacy).expect("legacy read");
+        assert_eq!(
+            request.actions,
+            InteractionActionSet {
+                like: true,
+                comment: true,
+                save: false,
+            }
+        );
+
+        let encoded = serde_json::to_value(&request).expect("new wire shape");
+        assert_eq!(encoded["actions"]["like"], true);
+        assert_eq!(encoded["actions"]["comment"], true);
+        assert_eq!(encoded["actions"]["save"], false);
+        assert!(encoded.get("likeTarget").is_none());
+    }
+
+    #[test]
+    fn comment_disabled_ignores_comment_fields_and_plans_each_target_actor_once() {
+        let mut raw = action_request_json(true, false, true);
+        raw["targets"] = serde_json::json!([target("1"), target("2")]);
+        raw["actorUdids"] = serde_json::json!(["actor-a", "actor-b"]);
+        raw["messageCount"] = serde_json::json!(255);
+        raw["maxWords"] = serde_json::json!(255);
+        raw["manualComments"] = serde_json::json!([""]);
+        raw["cohortSize"] = serde_json::json!(1);
+        let request: ThreadCampaignRequest = serde_json::from_value(raw).expect("decode");
+
+        assert_eq!(request.validate(), Ok(()));
+        assert!(!request.needs_ai_evidence_frames());
+        let plan = plan_threads(&request).expect("non-comment plan");
+        assert_eq!(plan.assignments.len(), 4);
+        assert!(plan
+            .assignments
+            .iter()
+            .all(|assignment| assignment.parent_ordinal.is_none()));
+        let pairs: std::collections::BTreeSet<_> = plan
+            .assignments
+            .iter()
+            .map(|assignment| (&assignment.target_key, &assignment.actor_udid))
+            .collect();
+        assert_eq!(pairs.len(), 4);
+    }
+
+    #[test]
+    fn comment_enabled_keeps_the_existing_two_actor_validation() {
+        let mut raw = action_request_json(false, true, false);
+        raw["messageCount"] = serde_json::json!(2);
+        raw["maxWords"] = serde_json::json!(12);
+        let request: ThreadCampaignRequest = serde_json::from_value(raw).expect("decode");
+        assert_eq!(
+            request.validate(),
+            Err(ThreadValidationError::InvalidActorCount)
+        );
+    }
+
+    #[test]
+    fn action_outcomes_aggregate_without_free_form_error_inference() {
+        use InteractionActionKind::{Comment, Like, Save};
+        use InteractionActionState::{Confirmed, FailedBeforeEffect, NoOp, Uncertain};
+
+        assert_eq!(
+            aggregate_interaction_actions(&[
+                PublicActionResult::new(Like, Confirmed),
+                PublicActionResult::new(Save, NoOp),
+                PublicActionResult::new(Comment, Confirmed),
+            ]),
+            InteractionRunAggregate::Done
+        );
+        assert_eq!(
+            aggregate_interaction_actions(&[
+                PublicActionResult::new(Like, Confirmed),
+                PublicActionResult::new(Save, FailedBeforeEffect),
+                PublicActionResult::new(Comment, Confirmed),
+            ]),
+            InteractionRunAggregate::Partial
+        );
+        assert_eq!(
+            aggregate_interaction_actions(&[
+                PublicActionResult::new(Like, FailedBeforeEffect),
+                PublicActionResult::new(Save, FailedBeforeEffect),
+            ]),
+            InteractionRunAggregate::Failed
+        );
+        assert_eq!(
+            aggregate_interaction_actions(&[
+                PublicActionResult::new(Like, Confirmed),
+                PublicActionResult::new(Save, Uncertain),
+            ]),
+            InteractionRunAggregate::Uncertain
+        );
+        assert_eq!(
+            aggregate_interaction_actions(&[
+                PublicActionResult::new(Like, Confirmed),
+                PublicActionResult::new(Save, InteractionActionState::Planned),
+            ]),
+            InteractionRunAggregate::Partial
+        );
+        assert_eq!(
+            aggregate_interaction_actions(&[
+                PublicActionResult::new(Like, InteractionActionState::Planned),
+                PublicActionResult::new(Save, InteractionActionState::Preparing),
+            ]),
+            InteractionRunAggregate::Failed
+        );
+    }
+
+    #[test]
+    fn action_counters_follow_the_effect_boundary_instead_of_row_state_changes() {
+        use InteractionActionKind::{Comment, Like, Save};
+        use InteractionActionState::{Armed, Confirmed, FailedBeforeEffect, NoOp, Uncertain};
+
+        let mut armed = PublicActionResult::new(Like, Armed);
+        armed.effect_intent = Some("like-intent".into());
+        let results = [
+            armed,
+            PublicActionResult::new(Save, NoOp),
+            PublicActionResult::new(Comment, FailedBeforeEffect),
+            PublicActionResult::new(Like, Confirmed),
+            PublicActionResult::new(Save, Uncertain),
+        ];
+
+        assert_eq!(
+            count_interaction_actions(&results),
+            InteractionActionCounters {
+                planned: 5,
+                attempted: 3,
+                confirmed: 1,
+                no_op: 1,
+                uncertain: 2,
+            }
+        );
+    }
+
+    #[test]
+    fn public_actions_have_one_canonical_execution_order() {
+        assert_eq!(
+            InteractionActionSet {
+                like: true,
+                comment: true,
+                save: true,
+            }
+            .ordered()
+            .collect::<Vec<_>>(),
+            vec![
+                InteractionActionKind::Like,
+                InteractionActionKind::Save,
+                InteractionActionKind::Comment,
+            ]
+        );
     }
 
     #[test]
@@ -2075,6 +2624,7 @@ mod tests {
             like: None,
             mention: None,
             parent_was_folded: false,
+            actions: Vec::new(),
         }
     }
 

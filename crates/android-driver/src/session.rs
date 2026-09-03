@@ -719,6 +719,58 @@ impl UiSession for AndroidUiSession {
         )))
     }
 
+    /// The stateful sibling of `locate`, used only by controls whose boolean state is itself
+    /// the proof. Keeping it separate preserves the old locate path and its round-trip count.
+    async fn locate_stateful(
+        &self,
+        query: riviu_core::ElementQuery<'_>,
+    ) -> anyhow::Result<Option<riviu_core::driver::StatefulElementBox>> {
+        let locator = to_agent_locator(query);
+        let Some(element) = self.agent.find(&locator).await? else {
+            return Ok(None);
+        };
+        let rect = self.agent.rect(&element).await?;
+        let description = self
+            .agent
+            .attribute(&element, "content-desc")
+            .await
+            .ok()
+            .flatten();
+        let enabled = enabled_from_attribute(
+            self.agent
+                .attribute(&element, "enabled")
+                .await
+                .ok()
+                .flatten(),
+        );
+        let clickable = clickable_from_attribute(
+            self.agent
+                .attribute(&element, "clickable")
+                .await
+                .ok()
+                .flatten(),
+        );
+        let checked = state_from_attribute(
+            self.agent
+                .attribute(&element, "checked")
+                .await
+                .ok()
+                .flatten(),
+        );
+        let selected = state_from_attribute(
+            self.agent
+                .attribute(&element, "selected")
+                .await
+                .ok()
+                .flatten(),
+        );
+        Ok(Some(riviu_core::driver::StatefulElementBox {
+            element: located_box(rect, description, ArmedFlags { enabled, clickable }),
+            checked,
+            selected,
+        }))
+    }
+
     /// Bounds for **every** match, geometry only.
     ///
     /// Deliberately skips the `content-desc`, `enabled` and `clickable` read-backs that
@@ -949,6 +1001,15 @@ fn clickable_from_attribute(raw: Option<String>) -> bool {
     raw.map(|value| value == "true").unwrap_or(false)
 }
 
+/// Parse an optional hierarchy boolean without turning absence or malformed XML into `false`.
+fn state_from_attribute(raw: Option<String>) -> Option<bool> {
+    match raw.as_deref() {
+        Some("true") => Some(true),
+        Some("false") => Some(false),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -985,6 +1046,30 @@ mod tests {
         assert!(enabled_from_attribute(Some("TRUE".into())));
         assert!(!clickable_from_attribute(Some("TRUE".into())));
         assert!(!clickable_from_attribute(Some(String::new())));
+    }
+
+    #[test]
+    fn checked_and_selected_xml_attributes_keep_true_false_and_absent_distinct() {
+        assert_eq!(state_from_attribute(Some("true".to_owned())), Some(true));
+        assert_eq!(state_from_attribute(Some("false".to_owned())), Some(false));
+        assert_eq!(state_from_attribute(None), None);
+        assert_eq!(state_from_attribute(Some("unexpected".to_owned())), None);
+    }
+
+    #[test]
+    fn locate_stateful_reads_checked_and_selected_from_the_same_hierarchy_node() {
+        let source = include_str!("session.rs").replace("\r\n", "\n");
+        let start = source
+            .find("    async fn locate_stateful(")
+            .expect("Android must override `locate_stateful`");
+        let body = &source[start
+            ..source[start..]
+                .find("    async fn locate_all(")
+                .map(|offset| start + offset)
+                .expect("the next method")];
+        assert!(body.contains(r#"attribute(&element, "checked")"#));
+        assert!(body.contains(r#"attribute(&element, "selected")"#));
+        assert!(body.contains("state_from_attribute("));
     }
 
     /// **Each flag lands in its own field.**

@@ -829,6 +829,21 @@ pub trait UiSession: Send + Sync {
     async fn locate(&self, _query: ElementQuery<'_>) -> anyhow::Result<Option<ElementBox>> {
         unsupported("locate")
     }
+    /// Locate one element together with optional boolean state exposed by its hierarchy node.
+    ///
+    /// Existing callers deliberately stay on [`Self::locate`], so adding Save state does not add
+    /// two attribute round trips to Like, Comment, Follow, or list scans. Backends without such
+    /// attributes preserve the geometry and report both states as unknown.
+    async fn locate_stateful(
+        &self,
+        query: ElementQuery<'_>,
+    ) -> anyhow::Result<Option<StatefulElementBox>> {
+        Ok(self.locate(query).await?.map(|element| StatefulElementBox {
+            element,
+            checked: None,
+            selected: None,
+        }))
+    }
     /// **Every** element matching the query, not just the first.
     ///
     /// Exists because some controls are deliberately not unique: a comment drawer has
@@ -1016,6 +1031,18 @@ pub struct ElementBox {
     /// "armed" from a failed attribute read would tap `Next` with nothing selected —
     /// or, further along, publish. Unknown therefore refuses.
     pub clickable: bool,
+}
+
+/// One hierarchy element plus the optional selection signals carried by its XML node.
+///
+/// `None` is materially different from `false`: absent means the backend did not measure a
+/// state and cannot authorize a toggle. Kept beside, rather than inside, [`ElementBox`] so the
+/// existing element contract and every Like/Comment/Follow fixture remain unchanged.
+#[derive(Debug, Clone, PartialEq)]
+pub struct StatefulElementBox {
+    pub element: ElementBox,
+    pub checked: Option<bool>,
+    pub selected: Option<bool>,
 }
 
 impl ElementBox {

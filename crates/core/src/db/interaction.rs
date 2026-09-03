@@ -9,10 +9,45 @@ impl Database {
         request: &crate::interaction::ThreadCampaignRequest,
         plan: &crate::interaction::ThreadPlan,
     ) -> anyhow::Result<String> {
+        self.create_interaction_campaign_with_id(&Uuid::new_v4().to_string(), request, plan)
+            .map(|(id, _created)| id)
+    }
+
+    /// Create the exact child an orchestration attempt armed, or prove that an identical
+    /// retry already created it. A matching request ID under any other campaign ID is a
+    /// conflict: reconciliation addresses the persisted child ID, never a substitute.
+    pub fn create_interaction_campaign_with_id(
+        &self,
+        campaign_id: &str,
+        request: &crate::interaction::ThreadCampaignRequest,
+        plan: &crate::interaction::ThreadPlan,
+    ) -> anyhow::Result<(String, bool)> {
         request.validate().map_err(|error| anyhow::anyhow!(error))?;
+        let expected_plan =
+            crate::interaction::plan_threads(request).map_err(|error| anyhow::anyhow!(error))?;
+        anyhow::ensure!(
+            &expected_plan == plan,
+            "interaction plan does not match its immutable request"
+        );
         let mut conn = self.conn()?;
         let transaction = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let campaign_id = Uuid::new_v4().to_string();
+        let request_json = serde_json::to_string(request)?;
+        let existing = transaction
+            .query_row(
+                "SELECT id,request_json FROM interaction_campaigns \
+                 WHERE id=?1 OR request_id=?2 LIMIT 1",
+                params![campaign_id, request.request_id],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .optional()?;
+        if let Some((existing_id, existing_request)) = existing {
+            anyhow::ensure!(
+                existing_id == campaign_id && existing_request == request_json,
+                "interaction child idempotency conflict"
+            );
+            transaction.commit()?;
+            return Ok((existing_id, false));
+        }
         let now = Utc::now().to_rfc3339();
         transaction.execute(
             "INSERT INTO interaction_campaigns
@@ -21,7 +56,7 @@ impl Database {
             params![
                 campaign_id,
                 request.request_id,
-                serde_json::to_string(request)?,
+                request_json,
                 i64::from(request.message_count),
                 now,
             ],
@@ -85,6 +120,14 @@ impl Database {
                     now,
                 ],
             )?;
+            super::interaction_actions::insert_interaction_action_runs(
+                &transaction,
+                campaign_id,
+                &assignment_id,
+                &assignment.actor_udid,
+                request.actions,
+                &now,
+            )?;
             assignment_ids.insert(
                 (assignment.target_key.clone(), assignment.ordinal),
                 assignment_id,
@@ -95,7 +138,7 @@ impl Database {
         // row proved nothing while looking like proof. If two app instances over one data
         // directory ever becomes possible, the guard belongs here — it never was one.
         transaction.commit()?;
-        Ok(campaign_id)
+        Ok((campaign_id.to_string(), true))
     }
     pub fn list_interaction_campaigns(
         &self,
@@ -107,7 +150,12 @@ impl Database {
                     (SELECT COUNT(*) FROM interaction_targets t WHERE t.campaign_id=c.id),
                     (SELECT COUNT(*) FROM interaction_assignments a WHERE a.campaign_id=c.id AND a.state='succeeded'),
                     (SELECT COUNT(*) FROM interaction_assignments a WHERE a.campaign_id=c.id AND a.state IN ('failed','uncertain','skipped_parent')),
-                    c.request_json
+                    c.request_json,
+                    (SELECT COUNT(*) FROM tiktok_action_runs r WHERE r.owner_kind='interaction' AND r.campaign_id=c.id),
+                    (SELECT COUNT(*) FROM tiktok_action_runs r WHERE r.owner_kind='interaction' AND r.campaign_id=c.id AND (r.effect_intent IS NOT NULL OR r.state IN ('armed','confirmed','uncertain'))),
+                    (SELECT COUNT(*) FROM tiktok_action_runs r WHERE r.owner_kind='interaction' AND r.campaign_id=c.id AND r.state='confirmed'),
+                    (SELECT COUNT(*) FROM tiktok_action_runs r WHERE r.owner_kind='interaction' AND r.campaign_id=c.id AND r.state='no_op'),
+                    (SELECT COUNT(*) FROM tiktok_action_runs r WHERE r.owner_kind='interaction' AND r.campaign_id=c.id AND r.state IN ('armed','uncertain'))
              FROM interaction_campaigns c ORDER BY c.updated_at DESC LIMIT ?1",
         )?;
         let rows = statement.query_map(params![limit as i64], interaction_summary_from_row)?;
@@ -124,13 +172,18 @@ impl Database {
                         (SELECT COUNT(*) FROM interaction_targets t WHERE t.campaign_id=c.id),
                         (SELECT COUNT(*) FROM interaction_assignments a WHERE a.campaign_id=c.id AND a.state='succeeded'),
                         (SELECT COUNT(*) FROM interaction_assignments a WHERE a.campaign_id=c.id AND a.state IN ('failed','uncertain','skipped_parent')),
-                        c.request_json
+                        c.request_json,
+                        (SELECT COUNT(*) FROM tiktok_action_runs r WHERE r.owner_kind='interaction' AND r.campaign_id=c.id),
+                        (SELECT COUNT(*) FROM tiktok_action_runs r WHERE r.owner_kind='interaction' AND r.campaign_id=c.id AND (r.effect_intent IS NOT NULL OR r.state IN ('armed','confirmed','uncertain'))),
+                        (SELECT COUNT(*) FROM tiktok_action_runs r WHERE r.owner_kind='interaction' AND r.campaign_id=c.id AND r.state='confirmed'),
+                        (SELECT COUNT(*) FROM tiktok_action_runs r WHERE r.owner_kind='interaction' AND r.campaign_id=c.id AND r.state='no_op'),
+                        (SELECT COUNT(*) FROM tiktok_action_runs r WHERE r.owner_kind='interaction' AND r.campaign_id=c.id AND r.state IN ('armed','uncertain'))
                  FROM interaction_campaigns c WHERE c.id=?1",
                 params![campaign_id],
                 interaction_summary_from_row,
             )
             .optional()?;
-        let Some(summary) = summary else {
+        let Some(mut summary) = summary else {
             return Ok(None);
         };
         let mut statement = conn.prepare(
@@ -170,9 +223,10 @@ impl Database {
                 like: None,
                 mention: None,
                 parent_was_folded: false,
+                actions: Vec::new(),
             })
         })?;
-        let assignments = rows
+        let mut assignments: Vec<crate::interaction::InteractionAssignmentRecord> = rows
             .collect::<Result<Vec<_>, _>>()?
             .into_iter()
             .map(|mut assignment| {
@@ -182,9 +236,33 @@ impl Database {
                 assignment
             })
             .collect();
+        for assignment in &mut assignments {
+            assignment.actions = self
+                .list_interaction_action_runs(&assignment.id)?
+                .into_iter()
+                .map(|run| crate::interaction::PublicActionResult {
+                    kind: run.kind,
+                    state: run.state,
+                    revision: run.revision,
+                    effect_intent: run.effect_intent,
+                    evidence: run.evidence,
+                    error: run.error,
+                })
+                .collect();
+        }
+        let action_results = assignments
+            .iter()
+            .flat_map(|assignment| assignment.actions.iter().cloned())
+            .collect::<Vec<_>>();
+        let action_aggregate = (!action_results.is_empty())
+            .then(|| crate::interaction::aggregate_interaction_actions(&action_results));
+        // The detail already has the exact rows in memory. Re-derive through the canonical
+        // helper so the row-level projection and the summary cannot drift.
+        summary.action_counters = crate::interaction::count_interaction_actions(&action_results);
         Ok(Some(crate::interaction::InteractionCampaignDetail {
             summary,
             assignments,
+            action_aggregate,
         }))
     }
     pub fn get_interaction_campaign_request(
@@ -226,30 +304,90 @@ impl Database {
         Ok(())
     }
 
-    /// Cancel a campaign and release every pre-Send claim in the same transaction.
+    /// Settle a live campaign without overwriting an operator cancellation that committed first.
+    pub fn settle_interaction_campaign_if_running(
+        &self,
+        campaign_id: &str,
+        state: crate::interaction::ThreadCampaignState,
+        error_code: Option<&str>,
+    ) -> anyhow::Result<bool> {
+        use crate::interaction::ThreadCampaignState;
+        anyhow::ensure!(
+            matches!(
+                state,
+                ThreadCampaignState::Succeeded
+                    | ThreadCampaignState::Partial
+                    | ThreadCampaignState::Failed
+            ),
+            "interaction campaign settlement requires a terminal non-cancelled state"
+        );
+        let conn = self.conn()?;
+        let changed = conn.execute(
+            "UPDATE interaction_campaigns
+             SET state=?1,revision=revision+1,error_code=?2,updated_at=?3
+             WHERE id=?4 AND state='running'",
+            params![
+                interaction_campaign_state_label(state),
+                error_code,
+                Utc::now().to_rfc3339(),
+                campaign_id
+            ],
+        )?;
+        Ok(changed > 0)
+    }
+
+    /// Cancel a campaign and classify every claimed assignment in the same transaction.
     ///
     /// A cancelled campaign is outside startup orphan recovery. Leaving even one assignment in
     /// `preparing` would therefore preserve ownership for a worker that may have died immediately
-    /// after this commit, and the normal claim CAS would correctly refuse every later retry. An
-    /// immediate transaction also closes the race with a live worker: a claim that commits first
-    /// is released here, while a claim attempted after this commit is rejected by
+    /// after this commit, and the normal claim CAS would correctly refuse every later retry.
+    /// Claims with no action effect become retryable failures; any action already armed or
+    /// uncertain makes the legacy envelope uncertain too. An immediate transaction also closes
+    /// the race with a live worker: a claim that commits first is classified here, while a claim
+    /// attempted after this commit is rejected by
     /// `claim_interaction_assignment_for_send`'s campaign-state guard.
     pub fn cancel_interaction_campaign(&self, campaign_id: &str) -> anyhow::Result<usize> {
         let mut conn = self.conn()?;
         let transaction = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let now = Utc::now().to_rfc3339();
-        transaction.execute(
+        let cancelled = transaction.execute(
             "UPDATE interaction_campaigns \
              SET state='cancelled',revision=revision+1,error_code=NULL,updated_at=?1 \
-             WHERE id=?2",
+             WHERE id=?2 AND state IN ('queued','running')",
             params![now, campaign_id],
         )?;
+        if cancelled == 0 {
+            transaction.commit()?;
+            return Ok(0);
+        }
         let released = transaction.execute(
             "UPDATE interaction_assignments \
-             SET state='failed',error_code=?1,effect_intent=NULL,revision=revision+1,updated_at=?2 \
-             WHERE campaign_id=?3 AND state='preparing'",
+             SET state=CASE WHEN EXISTS ( \
+                   SELECT 1 FROM tiktok_action_runs AS action \
+                   WHERE action.assignment_id=interaction_assignments.id \
+                     AND action.state IN ('armed','uncertain') \
+                 ) THEN 'uncertain' ELSE 'failed' END, \
+                 error_code=CASE WHEN EXISTS ( \
+                   SELECT 1 FROM tiktok_action_runs AS action \
+                   WHERE action.assignment_id=interaction_assignments.id \
+                     AND action.state IN ('armed','uncertain') \
+                 ) THEN ?1 ELSE ?2 END, \
+                 effect_intent=NULL,revision=revision+1,updated_at=?3 \
+             WHERE campaign_id=?4 AND state='preparing'",
             params![
+                "interaction_cancelled_after_action_effect_intent",
                 "interaction_cancelled_before_send: operator dừng trước khi tin bắt đầu gửi — có thể thử lại",
+                now,
+                campaign_id
+            ],
+        )?;
+        transaction.execute(
+            "UPDATE tiktok_action_runs
+             SET state='failed_before_effect',effect_intent=NULL,
+                 error_code=?1,revision=revision+1,updated_at=?2
+             WHERE owner_kind='interaction' AND campaign_id=?3 AND state='preparing'",
+            params![
+                "interaction_cancelled_before_action_effect",
                 now,
                 campaign_id
             ],
@@ -423,8 +561,9 @@ impl Database {
     /// Close out campaigns whose worker died with the process, and say so.
     ///
     /// An interaction worker is a `tokio::spawn` inside this process: it cannot outlive the
-    /// app, and nothing restarts it. So a campaign left `running` or `queued` at startup is
-    /// not running — it is a campaign the app was killed in the middle of, and the Monitor
+    /// app. Durable orchestration attempts and schedule occurrences restart their exact child,
+    /// so this sweep excludes them. Every other campaign left `running` or `queued` at startup
+    /// is not running — it is a campaign the app was killed in the middle of, and the Monitor
     /// tab draws it as "Đang chạy" for ever. That state also draws no Retry button (partial /
     /// failed / cancelled only), so the campaign becomes unreachable from the UI by the same
     /// route it became stuck.
@@ -448,10 +587,37 @@ impl Database {
         let transaction = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let now = Utc::now().to_rfc3339();
         let stranded: Vec<String> = transaction
-            .prepare("SELECT id FROM interaction_campaigns WHERE state IN ('running','queued')")?
+            .prepare(
+                "SELECT c.id FROM interaction_campaigns c
+                 WHERE c.state IN ('running','queued')
+                   AND NOT EXISTS (
+                     SELECT 1 FROM orchestration_attempts a
+                     WHERE a.child_campaign_id=c.id
+                       AND a.state IN ('dispatching','waiting_child')
+                   )
+                   AND NOT EXISTS (
+                     SELECT 1 FROM automation_schedule_occurrences o
+                     WHERE o.child_campaign_id=c.id
+                       AND o.state IN ('dispatching','running')
+                   )",
+            )?
             .query_map([], |row| row.get(0))?
             .collect::<Result<_, _>>()?;
         for campaign_id in &stranded {
+            transaction.execute(
+                "UPDATE tiktok_action_runs
+                 SET state='failed_before_effect',revision=revision+1,updated_at=?2,
+                     error_code=COALESCE(error_code,'interaction_worker_lost_before_effect')
+                 WHERE campaign_id=?1 AND state='preparing'",
+                params![campaign_id, now],
+            )?;
+            transaction.execute(
+                "UPDATE tiktok_action_runs
+                 SET state='uncertain',revision=revision+1,updated_at=?2,
+                     error_code=COALESCE(error_code,'interaction_worker_lost_after_effect_intent')
+                 WHERE campaign_id=?1 AND state='armed'",
+                params![campaign_id, now],
+            )?;
             transaction.execute(
                 "UPDATE interaction_assignments
                  SET state='failed',revision=revision+1,updated_at=?2,
@@ -476,6 +642,78 @@ impl Database {
         }
         transaction.commit()?;
         Ok(stranded.len())
+    }
+
+    /// Recover the row-level effect ledger for a campaign whose durable orchestration or
+    /// schedule owner will restart it. Manual or detached campaigns are deliberately rejected:
+    /// those still belong to [`Self::interrupt_orphaned_interaction_campaigns`].
+    pub fn recover_owned_interaction_campaign(&self, campaign_id: &str) -> anyhow::Result<bool> {
+        let mut conn = self.conn()?;
+        let transaction = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let owned: bool = transaction.query_row(
+            "SELECT EXISTS(
+               SELECT 1 FROM orchestration_attempts a
+               WHERE a.child_campaign_id=?1 AND a.state IN ('dispatching','waiting_child')
+               UNION ALL
+               SELECT 1 FROM automation_schedule_occurrences o
+               WHERE o.child_campaign_id=?1 AND o.state IN ('dispatching','running')
+             )",
+            params![campaign_id],
+            |row| row.get(0),
+        )?;
+        anyhow::ensure!(
+            owned,
+            "interaction campaign has no active durable automation owner"
+        );
+        let running: bool = transaction.query_row(
+            "SELECT EXISTS(
+               SELECT 1 FROM interaction_campaigns WHERE id=?1 AND state IN ('running','queued')
+             )",
+            params![campaign_id],
+            |row| row.get(0),
+        )?;
+        if !running {
+            transaction.commit()?;
+            return Ok(false);
+        }
+        let now = Utc::now().to_rfc3339();
+        transaction.execute(
+            "UPDATE tiktok_action_runs
+             SET state='failed_before_effect',revision=revision+1,updated_at=?2,
+                 error_code=COALESCE(error_code,'interaction_worker_lost_before_effect')
+             WHERE campaign_id=?1 AND state='preparing'",
+            params![campaign_id, now],
+        )?;
+        transaction.execute(
+            "UPDATE tiktok_action_runs
+             SET state='uncertain',revision=revision+1,updated_at=?2,
+                 error_code=COALESCE(error_code,'interaction_worker_lost_after_effect_intent')
+             WHERE campaign_id=?1 AND state='armed'",
+            params![campaign_id, now],
+        )?;
+        transaction.execute(
+            "UPDATE interaction_assignments
+             SET state='failed',revision=revision+1,updated_at=?2,
+                 error_code=COALESCE(error_code,'interaction_worker_lost_before_send')
+             WHERE campaign_id=?1 AND state IN ('preparing','ready')",
+            params![campaign_id, now],
+        )?;
+        transaction.execute(
+            "UPDATE interaction_assignments
+             SET state='uncertain',revision=revision+1,updated_at=?2,
+                 error_code=COALESCE(error_code,'interaction_worker_lost_after_send_intent')
+             WHERE campaign_id=?1 AND state='sending'",
+            params![campaign_id, now],
+        )?;
+        transaction.execute(
+            "UPDATE interaction_campaigns
+             SET state='running',revision=revision+1,updated_at=?2,
+                 error_code='automation_worker_resumed'
+             WHERE id=?1 AND state IN ('running','queued')",
+            params![campaign_id, now],
+        )?;
+        transaction.commit()?;
+        Ok(true)
     }
     /// Persist the prepared text without releasing this worker's claim.
     ///
@@ -591,6 +829,58 @@ impl Database {
             ],
         )?;
         Ok(())
+    }
+
+    /// Settle only the assignment this worker still owns.
+    ///
+    /// Before a public effect, the preparation revision is the ownership token and a success
+    /// additionally requires the campaign to remain running. After Comment crosses Send, the
+    /// non-retryable `sending` state is itself exclusive and may still be confirmed after Cancel.
+    pub fn settle_owned_interaction_assignment(
+        &self,
+        assignment_id: &str,
+        ownership_revision: i64,
+        state: crate::interaction::ThreadMessageState,
+        error_code: Option<&str>,
+        evidence_json: Option<&str>,
+    ) -> anyhow::Result<bool> {
+        use crate::interaction::ThreadMessageState;
+        anyhow::ensure!(
+            matches!(
+                state,
+                ThreadMessageState::Succeeded
+                    | ThreadMessageState::Failed
+                    | ThreadMessageState::Uncertain
+                    | ThreadMessageState::SkippedParent
+            ),
+            "interaction assignment settlement requires a terminal state"
+        );
+        let conn = self.conn()?;
+        let state = interaction_message_state_label(state);
+        let changed = conn.execute(
+            "UPDATE interaction_assignments
+             SET state=?1,error_code=?2,evidence_json=COALESCE(?3,evidence_json),
+                 revision=revision+1,updated_at=?4
+             WHERE id=?5 AND (
+               (state='sending' AND ?1 IN ('succeeded','uncertain')) OR
+               (state='preparing' AND revision=?6 AND (
+                 ?1 IN ('failed','uncertain') OR EXISTS (
+                   SELECT 1 FROM interaction_campaigns AS campaign
+                   WHERE campaign.id=interaction_assignments.campaign_id
+                     AND campaign.state='running'
+                 )
+               ))
+             )",
+            params![
+                state,
+                error_code,
+                evidence_json,
+                Utc::now().to_rfc3339(),
+                assignment_id,
+                ownership_revision,
+            ],
+        )?;
+        Ok(changed > 0)
     }
     /// Saved frames for a campaign, newest first. Rows without a
     /// `relative_path` predate evidence storage and have no file behind them.
