@@ -37,6 +37,18 @@ impl Database {
         request: &crate::publish::PublishCampaignRequest,
         bundles: &[crate::publish::PublishBundle],
     ) -> anyhow::Result<crate::publish::PublishCampaignRecord> {
+        self.create_publish_campaign_with_id(&Uuid::new_v4().to_string(), request, bundles)
+            .map(|(record, _created)| record)
+    }
+
+    /// Create the exact child ID persisted by orchestration, with an idempotent repeat that
+    /// accepts only the byte-equivalent request and bundle manifests from the first call.
+    pub fn create_publish_campaign_with_id(
+        &self,
+        campaign_id: &str,
+        request: &crate::publish::PublishCampaignRequest,
+        bundles: &[crate::publish::PublishBundle],
+    ) -> anyhow::Result<(crate::publish::PublishCampaignRecord, bool)> {
         let assignments =
             crate::publish::validate_publish_mapping(&request.bundle_ids, &request.udids)
                 .map_err(|error| anyhow::anyhow!(error))?;
@@ -51,14 +63,47 @@ impl Database {
 
         let mut conn = self.conn()?;
         let transaction = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let campaign_id = Uuid::new_v4().to_string();
+        let request_json = serde_json::to_string(request)?;
+        let existing = transaction
+            .query_row(
+                "SELECT id,request_json FROM publish_campaigns \
+                 WHERE id=?1 OR request_id=?2 LIMIT 1",
+                params![campaign_id, request.request_id],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .optional()?;
+        if let Some((existing_id, existing_request)) = existing {
+            anyhow::ensure!(
+                existing_id == campaign_id && existing_request == request_json,
+                "publish child idempotency conflict"
+            );
+            let stored = {
+                let mut statement = transaction.prepare(
+                    "SELECT manifest_json FROM publish_bundles \
+                     WHERE campaign_id=?1 ORDER BY ordinal",
+                )?;
+                let raw = statement
+                    .query_map([campaign_id], |row| row.get::<_, String>(0))?
+                    .collect::<Result<Vec<_>, _>>()?;
+                raw.into_iter()
+                    .map(|raw| serde_json::from_str(&raw).context("parse publish bundle manifest"))
+                    .collect::<anyhow::Result<Vec<crate::publish::PublishBundle>>>()?
+            };
+            anyhow::ensure!(stored == bundles, "publish child bundle conflict");
+            transaction.commit()?;
+            drop(conn);
+            let record = self
+                .get_publish_campaign(campaign_id)?
+                .context("idempotent publish child disappeared")?
+                .campaign;
+            return Ok((record, false));
+        }
         let now = Utc::now().to_rfc3339();
         let state = if request.run_at.is_some() {
             crate::publish::PublishCampaignState::Scheduled
         } else {
             crate::publish::PublishCampaignState::Queued
         };
-        let request_json = serde_json::to_string(request)?;
         transaction.execute(
             "INSERT INTO publish_campaigns
              (id, request_id, source_root, request_json, state, run_at, revision, error_code, created_at, updated_at)
@@ -119,19 +164,22 @@ impl Database {
         )?;
         transaction.commit()?;
 
-        Ok(crate::publish::PublishCampaignRecord {
-            id: campaign_id,
-            request_id: request.request_id.clone(),
-            source_root: request.source_root.clone(),
-            state,
-            run_at: request.run_at.clone(),
-            visibility: request.visibility.clone(),
-            cleanup_policy: request.cleanup_policy.clone(),
-            assignments,
-            created_at: now.clone(),
-            updated_at: now,
-            error_code: None,
-        })
+        Ok((
+            crate::publish::PublishCampaignRecord {
+                id: campaign_id.to_string(),
+                request_id: request.request_id.clone(),
+                source_root: request.source_root.clone(),
+                state,
+                run_at: request.run_at.clone(),
+                visibility: request.visibility.clone(),
+                cleanup_policy: request.cleanup_policy.clone(),
+                assignments,
+                created_at: now.clone(),
+                updated_at: now,
+                error_code: None,
+            },
+            true,
+        ))
     }
     pub fn list_publish_campaigns(
         &self,
@@ -764,6 +812,28 @@ impl Database {
         Ok(state.as_deref().map(publish_state_from_str))
     }
 
+    /// The immutable execution contract captured when the campaign was created.
+    ///
+    /// The scheduler reads this instead of reconstructing approval or sound selection from
+    /// defaults at fire time. Legacy JSON remains readable through the serde defaults on
+    /// [`crate::publish::PublishCampaignRequest`].
+    pub fn publish_campaign_request(
+        &self,
+        id: &str,
+    ) -> anyhow::Result<Option<crate::publish::PublishCampaignRequest>> {
+        let conn = self.conn()?;
+        let request_json: Option<String> = conn
+            .query_row(
+                "SELECT request_json FROM publish_campaigns WHERE id=?1",
+                params![id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        request_json
+            .map(|raw| serde_json::from_str(&raw).map_err(anyhow::Error::from))
+            .transpose()
+    }
+
     /// Source bundle ids that some campaign has already **spoken for**.
     ///
     /// The input to [`crate::publish::auto_assign_bundles`], and the reason it needs no cursor.
@@ -1043,6 +1113,7 @@ mod claim_tests {
             name: id.to_string(),
             media_kind: crate::publish::PublishMediaKind::Image,
             images: Vec::new(),
+            video: None,
             caption_path: format!("C:/fixture/{id}/caption.txt"),
             caption: "caption".into(),
             caption_sha256: "0".repeat(64),
@@ -1071,6 +1142,8 @@ mod claim_tests {
             run_at: None,
             visibility: crate::publish::PublishVisibility::Public,
             cleanup_policy: crate::publish::PublishCleanupPolicy::DeleteImportedAssetsAfterVerified,
+            sound_policy: crate::publish::PublishSoundPolicy::Default,
+            execution_confirmed: false,
         };
         let record = db
             .create_publish_campaign(&request, &bundles)
@@ -1101,6 +1174,45 @@ mod claim_tests {
             .expect("assignments are imported with their campaign");
         }
         record
+    }
+
+    #[test]
+    fn orchestration_publish_creation_is_idempotent_on_the_armed_child_id() {
+        let (db, path) = fixture();
+        let child_id = Uuid::from_u128(0x5678).to_string();
+        let bundle_id = format!("{child_id}:bundle");
+        let bundles = vec![bundle(&bundle_id)];
+        let request = crate::publish::PublishCampaignRequest {
+            request_id: "attempt-key".into(),
+            source_root: "C:/fixture".into(),
+            bundle_ids: vec![bundle_id],
+            udids: vec!["phone-1".into()],
+            run_at: None,
+            visibility: crate::publish::PublishVisibility::Public,
+            cleanup_policy: crate::publish::PublishCleanupPolicy::DeleteImportedAssetsAfterVerified,
+            sound_policy: crate::publish::PublishSoundPolicy::Default,
+            execution_confirmed: true,
+        };
+
+        let first = db
+            .create_publish_campaign_with_id(&child_id, &request, &bundles)
+            .expect("create exact child");
+        let second = db
+            .create_publish_campaign_with_id(&child_id, &request, &bundles)
+            .expect("repeat exact child");
+
+        assert!(first.1);
+        assert!(!second.1);
+        assert_eq!(first.0.id, child_id);
+        assert_eq!(second.0.id, first.0.id);
+        assert_eq!(db.list_publish_campaigns(10).expect("list").len(), 1);
+
+        let mut conflicting = request;
+        conflicting.source_root = "C:/different".into();
+        assert!(db
+            .create_publish_campaign_with_id(&first.0.id, &conflicting, &bundles)
+            .is_err());
+        std::fs::remove_file(path).expect("remove fixture database");
     }
 
     use super::PublishRunOutcome;

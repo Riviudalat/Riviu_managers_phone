@@ -100,6 +100,7 @@ fn bundle(id: &str) -> PublishBundle {
             width: 1080,
             height: 1350,
         }],
+        video: None,
         caption_path: "/fixture/root/bo1/caption.txt".into(),
         caption: "Đà Lạt chiều nay.".into(),
         caption_sha256: "617f8871d042f285fcdcc5a2a4acf690f222d0b1d51ce788001783981a4bf8d0".into(),
@@ -158,6 +159,8 @@ async fn main() -> anyhow::Result<()> {
         run_at: None,
         visibility: PublishVisibility::Public,
         cleanup_policy: PublishCleanupPolicy::DeleteImportedAssetsAfterVerified,
+        sound_policy: riviu_core::PublishSoundPolicy::Default,
+        execution_confirmed: false,
     };
     let campaign = db.create_publish_campaign(&request, &[bundle(&bundle_id)])?;
     let assignment_id = db

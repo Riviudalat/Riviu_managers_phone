@@ -2030,7 +2030,7 @@ pub fn api_docs() -> String {
 - list_schedules / save_schedule / delete_schedule
 - publish_scan_folder / publish_create_campaign / publish_list / publish_get / publish_readiness
 - publish_sheet_get_config / publish_sheet_save_config
-- publish_prepare / publish_transfer / publish_post / publish_cancel
+- publish_execute / publish_cancel
 - list_op_logs / analytics_summary
 
 ## Sidecar

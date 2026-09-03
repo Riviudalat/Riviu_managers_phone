@@ -1345,7 +1345,27 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
     /// expected to raise between the tap and the feed. If it appears, the feed does not come
     /// back, and this returns `PostNotConfirmed` — the safe answer, not a correct one.
     /// Closing that is a measurement, not a code change.
+    #[cfg(test)]
     async fn post(&mut self, caption: &str, stop: &AtomicBool) -> anyhow::Result<ComposerVerdict> {
+        self.post_with_effect_intent(caption, stop, &mut || Ok(()))
+            .await
+    }
+
+    /// The effect-aware Post entrypoint.
+    ///
+    /// `before_post` is called exactly once, on the last synchronous line before the first
+    /// Post gesture. A failure means no Post gesture was dispatched and is therefore returned
+    /// as an ordinary pre-effect error. The measured retry for a keyboard-swallowed tap does
+    /// not call it again: the durable intent names the assignment, not individual gestures.
+    async fn post_with_effect_intent<F>(
+        &mut self,
+        caption: &str,
+        stop: &AtomicBool,
+        before_post: &mut F,
+    ) -> anyhow::Result<ComposerVerdict>
+    where
+        F: FnMut() -> anyhow::Result<()>,
+    {
         let Some(query) = self.plan.publish.map(|tail| tail.post_button) else {
             return Ok(ComposerVerdict::PostUnmeasured);
         };
@@ -1362,6 +1382,7 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
         if stop.load(Ordering::Relaxed) {
             return Ok(ComposerVerdict::Stopped);
         }
+        before_post()?;
         if self.tap_inside(&button).await.is_err() {
             // The tap may have reached the phone before the transport died.
             return Ok(ComposerVerdict::PostNotConfirmed);
@@ -1616,12 +1637,31 @@ pub async fn publish_carousel(
     request: &CarouselRequest<'_>,
     stop: &AtomicBool,
 ) -> anyhow::Result<ComposerVerdict> {
+    publish_carousel_with_effect_intent(session, plan, plan_tap, request, stop, || Ok(())).await
+}
+
+/// [`publish_carousel`] with a durable one-shot transition immediately before Post.
+///
+/// This is the production entrypoint for callers that persist an effect boundary. Existing
+/// measuring and compatibility callers use [`publish_carousel`], whose callback is a no-op.
+pub async fn publish_carousel_with_effect_intent<F>(
+    session: &dyn UiSession,
+    plan: ComposerPlan,
+    plan_tap: impl TapPlanner,
+    request: &CarouselRequest<'_>,
+    stop: &AtomicBool,
+    mut before_post: F,
+) -> anyhow::Result<ComposerVerdict>
+where
+    F: FnMut() -> anyhow::Result<()>,
+{
     if !plan.can_publish() {
         // Nothing was opened, so there is nothing to close.
         return Ok(ComposerVerdict::PostUnmeasured);
     }
     let mut composer = Composer::new(session, plan, plan_tap);
-    let outcome = drive(&mut composer, request, stop, true).await;
+    let outcome =
+        drive_with_effect_intent(&mut composer, request, stop, true, &mut before_post).await;
     // Closed on the way out whatever happened, including on an error: every step can fail with
     // `?`, and each of those failures would otherwise leave the phone standing in a composer
     // with a campaign's images selected.
@@ -1748,6 +1788,20 @@ async fn drive<P: TapPlanner>(
     stop: &AtomicBool,
     publish: bool,
 ) -> anyhow::Result<ComposerVerdict> {
+    drive_with_effect_intent(composer, request, stop, publish, &mut || Ok(())).await
+}
+
+async fn drive_with_effect_intent<P, F>(
+    composer: &mut Composer<'_, P>,
+    request: &CarouselRequest<'_>,
+    stop: &AtomicBool,
+    publish: bool,
+    before_post: &mut F,
+) -> anyhow::Result<ComposerVerdict>
+where
+    P: TapPlanner,
+    F: FnMut() -> anyhow::Result<()>,
+{
     match reach_picker(composer, request, stop).await? {
         ComposerVerdict::Stopped => {}
         refusal => return Ok(refusal),
@@ -1798,7 +1852,9 @@ async fn drive<P: TapPlanner>(
         CaptionOutcome::NoField => return Ok(ComposerVerdict::NoCaptionField),
         CaptionOutcome::NotConfirmed => return Ok(ComposerVerdict::CaptionNotConfirmed),
     }
-    composer.post(request.caption, stop).await
+    composer
+        .post_with_effect_intent(request.caption, stop, before_post)
+        .await
 }
 
 /// Sleep unless the caller has asked to stop.
@@ -3105,6 +3161,87 @@ mod tests {
                     && tap.y <= button.y + button.height
             })
             .count()
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn effect_intent_failure_happens_before_post_and_keeps_the_attempt_retryable() {
+        let session = FakeSession::full_walk("riviu-abc");
+        let request = CarouselRequest {
+            album: "riviu-abc",
+            images: 3,
+            caption: "fixture caption",
+            screen: screen(),
+        };
+        let stop = AtomicBool::new(false);
+        let error = publish_carousel_with_effect_intent(
+            &session,
+            plan(),
+            |element: &ElementBox| element.centre(),
+            &request,
+            &stop,
+            || anyhow::bail!("intent store unavailable"),
+        )
+        .await
+        .expect_err("the durable transition refused");
+        assert!(error.to_string().contains("intent store unavailable"));
+        assert_eq!(
+            post_button_taps(&session),
+            0,
+            "a failed write-ahead transition must prevent the Post gesture"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn effect_intent_is_one_shot_even_when_a_proven_missed_tap_is_retried() {
+        let session = FakeSession::with(vec![
+            feed(),
+            camera(),
+            picker("All", Some("fixture-album-menu")),
+            picker("All", None).leaving_by(box_at(0.0, 400.0)),
+            picker("riviu-abc", Some("fixture-multi-select")),
+            picker_on("riviu-abc", None, false).leaving_by(grid_area()),
+            picker_on("riviu-abc", Some("fixture-picker-next"), true),
+            edit_step(),
+            post_screen(),
+            post_screen(),
+            feed(),
+        ])
+        .rows("riviu-abc", vec![box_at(0.0, 400.0)]);
+        let request = CarouselRequest {
+            album: "riviu-abc",
+            images: 3,
+            caption: "fixture caption",
+            screen: screen(),
+        };
+        let stop = AtomicBool::new(false);
+        let intent_calls = std::sync::atomic::AtomicUsize::new(0);
+        assert_eq!(
+            publish_carousel_with_effect_intent(
+                &session,
+                plan(),
+                |element: &ElementBox| element.centre(),
+                &request,
+                &stop,
+                || {
+                    assert_eq!(
+                        post_button_taps(&session),
+                        0,
+                        "effect intent must be the last step before the first Post gesture"
+                    );
+                    intent_calls.fetch_add(1, Ordering::Relaxed);
+                    Ok(())
+                },
+            )
+            .await
+            .expect("no transport error"),
+            ComposerVerdict::Posted
+        );
+        assert_eq!(intent_calls.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            post_button_taps(&session),
+            2,
+            "one proven missed tap was retried"
+        );
     }
 
     /// **A Post tap that did not land is pressed again; one that did is never pressed twice.**

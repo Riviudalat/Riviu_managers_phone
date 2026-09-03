@@ -188,6 +188,36 @@ impl Database {
         Ok(rows)
     }
 
+    /// Read one still-owed row without depending on the global sweep window.
+    pub fn pending_publish_sheet_row(
+        &self,
+        assignment_id: &str,
+    ) -> anyhow::Result<Option<SheetOutboxRow>> {
+        let conn = self.conn()?;
+        conn.query_row(
+            "SELECT assignment_id,campaign_id,post_url,poster,partners_json,attempts,revision,\
+                    last_error
+             FROM publish_sheet_outbox
+             WHERE assignment_id=?1 AND state <> 'sent'",
+            params![assignment_id],
+            |row| {
+                let partners: String = row.get(4)?;
+                Ok(SheetOutboxRow {
+                    assignment_id: row.get(0)?,
+                    campaign_id: row.get(1)?,
+                    post_url: row.get(2)?,
+                    poster: row.get(3)?,
+                    partners: serde_json::from_str(&partners).unwrap_or_default(),
+                    attempts: row.get::<_, i64>(5)?.max(0) as u32,
+                    revision: row.get(6)?,
+                    last_error: row.get(7)?,
+                })
+            },
+        )
+        .optional()
+        .map_err(anyhow::Error::from)
+    }
+
     /// The sheet has this **version** of the row. Terminal — nothing re-sends a `sent` row.
     ///
     /// `revision` is not decoration: a completion that matched on id alone marked whatever the
@@ -298,6 +328,7 @@ mod tests {
                 width: 1,
                 height: 1,
             }],
+            video: None,
             caption_path: format!("/fixture/{id}/caption.txt"),
             caption: "caption".into(),
             caption_sha256: "b".repeat(64),
@@ -319,6 +350,8 @@ mod tests {
             run_at: None,
             visibility: PublishVisibility::Public,
             cleanup_policy: PublishCleanupPolicy::DeleteImportedAssetsAfterVerified,
+            sound_policy: crate::publish::PublishSoundPolicy::Default,
+            execution_confirmed: false,
         };
         let campaign = db
             .create_publish_campaign(&request, &[bundle(&bundle_id)])
@@ -388,6 +421,12 @@ mod tests {
             owed(&db).is_empty(),
             "a sent row must not come back out of the queue"
         );
+        assert!(
+            db.pending_publish_sheet_row(&assignment)
+                .expect("exact lookup")
+                .is_none(),
+            "an exact retry lookup must not resurrect a sent row"
+        );
 
         // Route 1: the post path runs again and re-queues.
         db.queue_publish_sheet_row(&assignment, &campaign, "https://a/2", "bot", &[])
@@ -405,6 +444,25 @@ mod tests {
             owed(&db).is_empty(),
             "a late failure reopened a row the sheet already has"
         );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn an_exact_retry_lookup_reads_only_the_named_assignment() {
+        let (db, path) = fixture();
+        let (campaign, first) = seed(&db);
+        let (other_campaign, second) = seed(&db);
+        db.queue_publish_sheet_row(&first, &campaign, "https://a/1", "bot", &[])
+            .expect("first row");
+        db.queue_publish_sheet_row(&second, &other_campaign, "https://a/2", "bot", &[])
+            .expect("second row");
+
+        let row = db
+            .pending_publish_sheet_row(&second)
+            .expect("exact lookup")
+            .expect("second row remains owed");
+        assert_eq!(row.assignment_id, second);
+        assert_eq!(row.post_url, "https://a/2");
         let _ = std::fs::remove_file(path);
     }
 

@@ -1,4 +1,4 @@
-//! Deterministic input planning for image publishing campaigns.
+//! Deterministic input planning for image and video publishing campaigns.
 //!
 //! This module deliberately stops at a validated, hashed manifest. Device
 //! transfer and TikTok UI work consume this manifest later, so importing a
@@ -27,11 +27,190 @@ use sha2::{Digest, Sha256};
 /// (`publish_commands::IOS_PIXEL_GRID_MAX_IMAGES`), and is checked before media leaves the
 /// desktop rather than after it has been imported onto a phone.
 const DEFAULT_MAX_IMAGES: usize = 35;
+const MAX_VIDEO_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+const MAX_VIDEO_DURATION_MS: u64 = 10 * 60 * 1_000;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub enum PublishMediaKind {
     Image,
+    Video,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum PublishVideoCodec {
+    H264Avc,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum PublishAudioCodec {
+    Aac,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct PublishVideo {
+    pub path: String,
+    pub file_name: String,
+    pub sha256: String,
+    pub byte_len: u64,
+    pub duration_ms: u64,
+    pub video_codec: PublishVideoCodec,
+    pub audio_codec: Option<PublishAudioCodec>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum SoundSectionKind {
+    Recommended,
+    Trending,
+    Popular,
+}
+
+impl SoundSectionKind {
+    fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "recommended" => Some(Self::Recommended),
+            "trending" => Some(Self::Trending),
+            "popular" => Some(Self::Popular),
+            _ => None,
+        }
+    }
+
+    fn digest_tag(&self) -> u8 {
+        match self {
+            Self::Recommended => 0,
+            Self::Trending => 1,
+            Self::Popular => 2,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase",
+    tag = "kind"
+)]
+pub enum PublishSoundPolicy {
+    #[default]
+    Default,
+    TrendingAny {
+        pool_size: usize,
+        seed: u64,
+    },
+}
+
+impl PublishSoundPolicy {
+    pub fn pool_size(&self) -> Result<usize, PublishSoundError> {
+        let pool_size = match self {
+            Self::Default => 5,
+            Self::TrendingAny { pool_size, .. } => *pool_size,
+        };
+        if !(1..=10).contains(&pool_size) {
+            return Err(PublishSoundError::InvalidPoolSize { pool_size });
+        }
+        Ok(pool_size)
+    }
+
+    fn seed(&self) -> u64 {
+        match self {
+            Self::Default => 0,
+            Self::TrendingAny { seed, .. } => *seed,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SoundCandidate {
+    /// The observer's section label, normalized and allowlisted by selection.
+    pub section: String,
+    pub title: String,
+    pub artist: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SoundSelectionEvidence {
+    pub section: SoundSectionKind,
+    pub title: String,
+    pub artist: String,
+    pub index: usize,
+    pub candidates_digest: String,
+    pub confirmed: bool,
+}
+
+#[derive(Debug, Clone, thiserror::Error, PartialEq, Eq)]
+pub enum PublishSoundError {
+    #[error("sound candidate pool size {pool_size} is outside 1..=10")]
+    InvalidPoolSize { pool_size: usize },
+    #[error("sound section is not recognized: {0:?}")]
+    UnrecognizedSection(String),
+    #[error("sound candidate title is empty at index {index}")]
+    EmptyTitle { index: usize },
+    #[error("no sound candidates were observed")]
+    NoCandidates,
+}
+
+/// Select from the first bounded set reported by the in-app observer.
+///
+/// The digest and index are stable across runs. Selection deliberately consumes only the
+/// observer's labelled sections; it neither scrapes a catalogue nor assigns a meaning to an
+/// unknown heading.
+pub fn select_sound_candidate(
+    policy: &PublishSoundPolicy,
+    candidates: &[SoundCandidate],
+) -> Result<SoundSelectionEvidence, PublishSoundError> {
+    let pool_size = policy.pool_size()?;
+    if candidates.is_empty() {
+        return Err(PublishSoundError::NoCandidates);
+    }
+
+    let mut normalized = Vec::with_capacity(candidates.len().min(pool_size));
+    for (index, candidate) in candidates.iter().take(pool_size).enumerate() {
+        let section = SoundSectionKind::parse(&candidate.section)
+            .ok_or_else(|| PublishSoundError::UnrecognizedSection(candidate.section.clone()))?;
+        let title = candidate.title.trim();
+        if title.is_empty() {
+            return Err(PublishSoundError::EmptyTitle { index });
+        }
+        normalized.push((
+            section,
+            title.to_string(),
+            candidate.artist.trim().to_string(),
+        ));
+    }
+    if normalized.is_empty() {
+        return Err(PublishSoundError::NoCandidates);
+    }
+
+    let mut candidate_hasher = Sha256::new();
+    for (section, title, artist) in &normalized {
+        candidate_hasher.update([section.digest_tag()]);
+        for value in [title, artist] {
+            candidate_hasher.update((value.len() as u64).to_be_bytes());
+            candidate_hasher.update(value.as_bytes());
+        }
+    }
+    let candidates_digest = format!("{:x}", candidate_hasher.finalize());
+    let mut choice_hasher = Sha256::new();
+    choice_hasher.update(policy.seed().to_be_bytes());
+    choice_hasher.update(candidates_digest.as_bytes());
+    let choice = choice_hasher.finalize();
+    let index = (u64::from_be_bytes(choice[..8].try_into().expect("eight digest bytes"))
+        % normalized.len() as u64) as usize;
+    let (section, title, artist) = normalized[index].clone();
+    Ok(SoundSelectionEvidence {
+        section,
+        title,
+        artist,
+        index,
+        candidates_digest,
+        confirmed: false,
+    })
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -94,6 +273,12 @@ pub struct PublishCampaignRequest {
     pub run_at: Option<String>,
     pub visibility: PublishVisibility,
     pub cleanup_policy: PublishCleanupPolicy,
+    /// The exact deterministic sound policy approved for this run.
+    #[serde(default)]
+    pub sound_policy: PublishSoundPolicy,
+    /// One confirmation covers the whole future execution, including a scheduled run.
+    #[serde(default)]
+    pub execution_confirmed: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -369,6 +554,9 @@ pub struct PublishBundle {
     pub name: String,
     pub media_kind: PublishMediaKind,
     pub images: Vec<PublishImage>,
+    /// Absent on image bundles and manifests written before video publishing existed.
+    #[serde(default)]
+    pub video: Option<PublishVideo>,
     pub caption_path: String,
     pub caption: String,
     pub caption_sha256: String,
@@ -430,7 +618,7 @@ pub enum PublishScanError {
     MissingRoot(String),
     #[error("publish path is not a directory: {0}")]
     RootNotDirectory(String),
-    #[error("bundle {bundle} has no supported images")]
+    #[error("bundle {bundle} has no supported images or MP4 video")]
     EmptyBundle { bundle: String },
     #[error("publish folder has no bundle directories")]
     NoBundles,
@@ -440,6 +628,14 @@ pub enum PublishScanError {
     MissingCaption { bundle: String },
     #[error("bundle {bundle} has more than one caption*.txt file")]
     MultipleCaptions { bundle: String },
+    #[error("bundle {bundle} has an empty caption: {path}")]
+    EmptyCaption { bundle: String, path: String },
+    #[error("bundle {bundle} mixes images and MP4 video")]
+    MixedMedia { bundle: String },
+    #[error("bundle {bundle} has {count} MP4 videos; exactly one is allowed")]
+    MultipleVideos { bundle: String, count: usize },
+    #[error("bundle {bundle} has {count} partner workbooks; at most one is allowed")]
+    MultiplePartnerFiles { bundle: String, count: usize },
     #[error("bundle {bundle} has {count} images; maximum is {max}")]
     TooManyImages {
         bundle: String,
@@ -470,6 +666,31 @@ pub enum PublishScanError {
     },
     #[error("caption is not valid UTF-8: {path}")]
     InvalidCaptionEncoding { path: String },
+    #[error("invalid publish video {path}: {source}")]
+    Video {
+        path: String,
+        source: PublishVideoError,
+    },
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum PublishVideoError {
+    #[error("video is {actual} bytes; maximum is {max}")]
+    TooLarge { actual: u64, max: u64 },
+    #[error("invalid ISO-BMFF container: {0}")]
+    InvalidContainer(String),
+    #[error("MP4 has no video track")]
+    MissingVideoTrack,
+    #[error("unsupported video codec {0}; H.264/AVC is required")]
+    UnsupportedVideoCodec(String),
+    #[error("unsupported audio codec {0}; AAC or no audio is required")]
+    UnsupportedAudioCodec(String),
+    #[error("video duration is invalid")]
+    InvalidDuration,
+    #[error("video duration {actual_ms}ms exceeds {max_ms}ms")]
+    TooLong { actual_ms: u64, max_ms: u64 },
+    #[error("cannot read MP4: {0}")]
+    Io(#[from] std::io::Error),
 }
 
 /// Scan one folder level and produce a stable, side-effect-free manifest.
@@ -552,6 +773,7 @@ fn scan_bundle(
         .unwrap_or_else(|| path.display().to_string());
     let mut files = read_dir_sorted(path)?;
     let mut images = Vec::new();
+    let mut videos = Vec::new();
     let mut captions = Vec::new();
     let mut partner_files: Vec<std::path::PathBuf> = Vec::new();
     let mut notices = Vec::new();
@@ -581,6 +803,8 @@ fn scan_bundle(
             captions.push(file_path);
         } else if is_supported_image(&file_name) {
             images.push(file_path);
+        } else if is_supported_video(&file_name) {
+            videos.push(file_path);
         } else {
             notices.push(PublishScanNotice {
                 severity: PublishScanSeverity::Warning,
@@ -590,16 +814,28 @@ fn scan_bundle(
         }
     }
 
-    if images.is_empty() {
+    if images.is_empty() && videos.is_empty() {
         return Err(PublishScanError::EmptyBundle {
             bundle: bundle_name,
         });
     }
-    if images.len() > options.max_images_per_bundle {
+    if !images.is_empty() && !videos.is_empty() {
+        return Err(PublishScanError::MixedMedia {
+            bundle: bundle_name,
+        });
+    }
+    if videos.len() > 1 {
+        return Err(PublishScanError::MultipleVideos {
+            bundle: bundle_name,
+            count: videos.len(),
+        });
+    }
+    let max_images_per_bundle = options.max_images_per_bundle.min(DEFAULT_MAX_IMAGES);
+    if images.len() > max_images_per_bundle {
         return Err(PublishScanError::TooManyImages {
             bundle: bundle_name,
             count: images.len(),
-            max: options.max_images_per_bundle,
+            max: max_images_per_bundle,
         });
     }
     if captions.is_empty() {
@@ -610,6 +846,12 @@ fn scan_bundle(
     if captions.len() > 1 {
         return Err(PublishScanError::MultipleCaptions {
             bundle: bundle_name,
+        });
+    }
+    if partner_files.len() > 1 {
+        return Err(PublishScanError::MultiplePartnerFiles {
+            bundle: bundle_name,
+            count: partner_files.len(),
         });
     }
 
@@ -665,14 +907,42 @@ fn scan_bundle(
         .trim_end_matches('\n')
         .to_string();
     if caption.trim().is_empty() {
-        notices.push(PublishScanNotice {
-            severity: PublishScanSeverity::Warning,
+        return Err(PublishScanError::EmptyCaption {
+            bundle: bundle_name,
             path: caption_path.display().to_string(),
-            message: "caption rỗng; bài sẽ bị chặn ở bước preview".into(),
         });
     }
-    let total_bytes = ordered.iter().map(|image| image.byte_len).sum();
-    let bundle_id = format!("{}-{}", slug(&bundle_name), short_hash(&ordered, &caption));
+
+    let video = match videos.pop() {
+        Some(video_path) => {
+            Some(
+                scan_video(&video_path).map_err(|source| PublishScanError::Video {
+                    path: video_path.display().to_string(),
+                    source,
+                })?,
+            )
+        }
+        None => None,
+    };
+    let media_kind = if video.is_some() {
+        PublishMediaKind::Video
+    } else {
+        PublishMediaKind::Image
+    };
+    let total_bytes = video
+        .as_ref()
+        .map(|video| video.byte_len)
+        .unwrap_or_else(|| ordered.iter().map(|image| image.byte_len).sum());
+    let media_hash = video
+        .as_ref()
+        .map(|video| video.sha256.as_str())
+        .unwrap_or_default();
+    let hash = if video.is_some() {
+        short_hash_parts(std::iter::once(media_hash), &caption)
+    } else {
+        short_hash(&ordered, &caption)
+    };
+    let bundle_id = format!("{}-{hash}", slug(&bundle_name));
 
     // **Partner names are read here or never.** Exactly one workbook is believed; two is a
     // question for the operator, not a guess (the sheet writes these names across live
@@ -693,17 +963,7 @@ fn scan_bundle(
                 Vec::new()
             }
         },
-        many => {
-            notices.push(PublishScanNotice {
-                severity: PublishScanSeverity::Warning,
-                path: path.display().to_string(),
-                message: format!(
-                    "{} file đối tác trong một bundle — không đoán file nào là thật, bỏ qua cả",
-                    many.len()
-                ),
-            });
-            Vec::new()
-        }
+        _ => unreachable!("multiple partner files refused above"),
     };
 
     Ok((
@@ -711,8 +971,9 @@ fn scan_bundle(
             id: bundle_id,
             source_path: path.display().to_string(),
             name: bundle_name,
-            media_kind: PublishMediaKind::Image,
+            media_kind,
             images: ordered,
+            video,
             caption_path: caption_path.display().to_string(),
             caption_sha256: sha256_bytes(caption.as_bytes()),
             caption,
@@ -847,6 +1108,13 @@ fn is_supported_image(name: &str) -> bool {
     )
 }
 
+fn is_supported_video(name: &str) -> bool {
+    Path::new(name)
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("mp4"))
+}
+
 fn is_caption_file(name: &str) -> bool {
     let lower = name.to_ascii_lowercase();
     lower.starts_with("caption") && lower.ends_with(".txt")
@@ -864,13 +1132,144 @@ fn sha256_bytes(bytes: &[u8]) -> String {
 }
 
 fn short_hash(images: &[PublishImage], caption: &str) -> String {
+    short_hash_parts(images.iter().map(|image| image.sha256.as_str()), caption)
+}
+
+fn short_hash_parts<'a>(hashes: impl IntoIterator<Item = &'a str>, caption: &str) -> String {
     let mut hasher = Sha256::new();
-    for image in images {
-        hasher.update(image.sha256.as_bytes());
+    for hash in hashes {
+        hasher.update(hash.as_bytes());
     }
     hasher.update(caption.as_bytes());
     let digest = format!("{:x}", hasher.finalize());
     digest[..12].to_string()
+}
+
+fn invalid_container(message: impl Into<String>) -> PublishVideoError {
+    PublishVideoError::InvalidContainer(message.into())
+}
+
+fn validate_video_size(byte_len: u64) -> Result<(), PublishVideoError> {
+    if byte_len > MAX_VIDEO_BYTES {
+        return Err(PublishVideoError::TooLarge {
+            actual: byte_len,
+            max: MAX_VIDEO_BYTES,
+        });
+    }
+    Ok(())
+}
+
+fn validate_mp4_reader<R: std::io::Read + std::io::Seek>(
+    reader: R,
+    byte_len: u64,
+) -> Result<(u64, Option<PublishAudioCodec>), PublishVideoError> {
+    validate_video_size(byte_len)?;
+    let parsed = mp4::Mp4Reader::read_header(reader, byte_len)
+        .map_err(|error| invalid_container(error.to_string()))?;
+
+    let timescale = parsed.moov.mvhd.timescale as u64;
+    let duration = parsed.moov.mvhd.duration;
+    if timescale == 0 || duration == 0 {
+        return Err(PublishVideoError::InvalidDuration);
+    }
+    let duration_numerator = u128::from(duration) * 1_000;
+    let max_numerator = u128::from(MAX_VIDEO_DURATION_MS) * u128::from(timescale);
+    if duration_numerator > max_numerator {
+        let actual_ms =
+            u64::try_from(duration_numerator.div_ceil(u128::from(timescale))).unwrap_or(u64::MAX);
+        return Err(PublishVideoError::TooLong {
+            actual_ms,
+            max_ms: MAX_VIDEO_DURATION_MS,
+        });
+    }
+    let duration_ms = u64::try_from(duration_numerator / u128::from(timescale))
+        .map_err(|_| PublishVideoError::InvalidDuration)?;
+
+    let mut video_seen = false;
+    let mut audio_seen = false;
+    for (track_id, track) in parsed.tracks() {
+        let track_type = track
+            .track_type()
+            .map_err(|error| invalid_container(format!("track {track_id}: {error}")))?;
+        match track_type {
+            mp4::TrackType::Video => {
+                video_seen = true;
+                let media_type = track
+                    .media_type()
+                    .map_err(|error| PublishVideoError::UnsupportedVideoCodec(error.to_string()))?;
+                if media_type != mp4::MediaType::H264 {
+                    return Err(PublishVideoError::UnsupportedVideoCodec(
+                        media_type.to_string(),
+                    ));
+                }
+            }
+            mp4::TrackType::Audio => {
+                audio_seen = true;
+                let media_type = track
+                    .media_type()
+                    .map_err(|error| PublishVideoError::UnsupportedAudioCodec(error.to_string()))?;
+                if media_type != mp4::MediaType::AAC {
+                    return Err(PublishVideoError::UnsupportedAudioCodec(
+                        media_type.to_string(),
+                    ));
+                }
+                let object_type = track
+                    .trak
+                    .mdia
+                    .minf
+                    .stbl
+                    .stsd
+                    .mp4a
+                    .as_ref()
+                    .and_then(|entry| entry.esds.as_ref())
+                    .map(|esds| esds.es_desc.dec_config.object_type_indication)
+                    .ok_or_else(|| {
+                        PublishVideoError::UnsupportedAudioCodec(
+                            "mp4a without decoder configuration".into(),
+                        )
+                    })?;
+                if !matches!(object_type, 0x40 | 0x66 | 0x67 | 0x68) {
+                    return Err(PublishVideoError::UnsupportedAudioCodec(format!(
+                        "mp4a/0x{object_type:02x}"
+                    )));
+                }
+            }
+            mp4::TrackType::Subtitle => {
+                return Err(invalid_container(format!(
+                    "unsupported subtitle track {track_id}"
+                )));
+            }
+        }
+    }
+    if !video_seen {
+        return Err(PublishVideoError::MissingVideoTrack);
+    }
+    Ok((duration_ms, audio_seen.then_some(PublishAudioCodec::Aac)))
+}
+
+fn scan_video(path: &Path) -> Result<PublishVideo, PublishVideoError> {
+    let byte_len = fs::metadata(path)?.len();
+    validate_video_size(byte_len)?;
+    let file = fs::File::open(path)?;
+    let (duration_ms, audio_codec) = validate_mp4_reader(std::io::BufReader::new(file), byte_len)?;
+    let mut file = fs::File::open(path)?;
+    let mut hasher = Sha256::new();
+    let copied = std::io::copy(&mut file, &mut hasher)?;
+    if copied != byte_len {
+        return Err(invalid_container("video size changed while scanning"));
+    }
+    Ok(PublishVideo {
+        path: path.display().to_string(),
+        file_name: path
+            .file_name()
+            .map(|name| name.to_string_lossy().to_string())
+            .unwrap_or_default(),
+        sha256: format!("{:x}", hasher.finalize()),
+        byte_len,
+        duration_ms,
+        video_codec: PublishVideoCodec::H264Avc,
+        audio_codec,
+    })
 }
 
 fn slug(value: &str) -> String {
@@ -904,6 +1303,24 @@ pub fn copy_bundle_to_managed(
             bail!("managed copy verification failed for {}", target.display());
         }
     }
+    let managed_video = match &bundle.video {
+        Some(video) => {
+            let source = Path::new(&video.path);
+            let target = destination.join(&video.file_name);
+            fs::copy(source, &target).with_context(|| format!("copy {}", source.display()))?;
+            let mut copied = fs::File::open(&target)
+                .with_context(|| format!("read copied {}", target.display()))?;
+            let mut hasher = Sha256::new();
+            let byte_len = std::io::copy(&mut copied, &mut hasher)?;
+            if format!("{:x}", hasher.finalize()) != video.sha256 || byte_len != video.byte_len {
+                bail!("managed copy verification failed for {}", target.display());
+            }
+            let mut managed = video.clone();
+            managed.path = target.display().to_string();
+            Some(managed)
+        }
+        None => None,
+    };
     let caption_target = destination.join("caption.txt");
     fs::write(&caption_target, bundle.caption.as_bytes())
         .with_context(|| format!("write managed caption {}", caption_target.display()))?;
@@ -920,6 +1337,7 @@ pub fn copy_bundle_to_managed(
     for image in &mut managed.images {
         image.path = destination.join(&image.file_name).display().to_string();
     }
+    managed.video = managed_video;
     Ok(managed)
 }
 
@@ -952,6 +1370,105 @@ mod tests {
     fn write_png(path: &Path, color: [u8; 3]) {
         let image = image::RgbImage::from_pixel(8, 10, image::Rgb(color));
         image.save(path).expect("png");
+    }
+
+    #[derive(Clone, Copy)]
+    enum FixtureVideoCodec {
+        H264,
+        H265,
+    }
+
+    #[derive(Clone, Copy)]
+    enum FixtureAudioCodec {
+        None,
+        Aac,
+        Unsupported,
+    }
+
+    fn mp4_fixture(
+        duration_ms: u64,
+        video_codec: FixtureVideoCodec,
+        audio_codec: FixtureAudioCodec,
+    ) -> Vec<u8> {
+        let config = mp4::Mp4Config {
+            major_brand: "isom".parse().expect("fixture brand"),
+            minor_version: 512,
+            compatible_brands: ["isom", "iso2", "avc1", "mp41"]
+                .into_iter()
+                .map(|brand| brand.parse().expect("fixture brand"))
+                .collect(),
+            timescale: 1_000,
+        };
+        let cursor = std::io::Cursor::new(Vec::new());
+        let mut writer = mp4::Mp4Writer::write_start(cursor, &config).expect("start MP4");
+        let video_track = match video_codec {
+            FixtureVideoCodec::H264 => mp4::TrackConfig::from(mp4::AvcConfig {
+                width: 720,
+                height: 1_280,
+                seq_param_set: vec![0x67, 0x42, 0x00, 0x1e, 0xe9, 0x01, 0x40, 0x7b, 0x20],
+                pic_param_set: vec![0x68, 0xce, 0x06, 0xe2],
+            }),
+            FixtureVideoCodec::H265 => mp4::TrackConfig::from(mp4::HevcConfig {
+                width: 720,
+                height: 1_280,
+            }),
+        };
+        writer.add_track(&video_track).expect("video track");
+        if !matches!(audio_codec, FixtureAudioCodec::None) {
+            writer
+                .add_track(&mp4::TrackConfig::from(mp4::AacConfig::default()))
+                .expect("audio track");
+        }
+
+        let duration = u32::try_from(duration_ms).expect("fixture duration fits u32");
+        writer
+            .write_sample(
+                1,
+                &mp4::Mp4Sample {
+                    start_time: 0,
+                    duration,
+                    rendering_offset: 0,
+                    is_sync: true,
+                    bytes: vec![0, 0, 0, 1].into(),
+                },
+            )
+            .expect("video sample");
+        if !matches!(audio_codec, FixtureAudioCodec::None) {
+            writer
+                .write_sample(
+                    2,
+                    &mp4::Mp4Sample {
+                        start_time: 0,
+                        duration,
+                        rendering_offset: 0,
+                        is_sync: true,
+                        bytes: vec![0x21, 0x10].into(),
+                    },
+                )
+                .expect("audio sample");
+        }
+        writer.write_end().expect("finish MP4");
+        let mut bytes = writer.into_writer().into_inner();
+        if matches!(audio_codec, FixtureAudioCodec::Unsupported) {
+            let esds = bytes
+                .windows(4)
+                .position(|window| window == b"esds")
+                .expect("AAC descriptor box");
+            let relative = bytes[esds + 4..]
+                .windows(3)
+                .position(|window| window[0] == 0x04 && window[2] == 0x40)
+                .expect("AAC DecoderConfigDescriptor");
+            bytes[esds + 4 + relative + 2] = 0x6b;
+        }
+        bytes
+    }
+
+    fn write_video_bundle(root: &Path, bytes: &[u8], caption: &str) -> std::path::PathBuf {
+        let bundle = root.join("video-post");
+        fs::create_dir(&bundle).expect("bundle");
+        fs::write(bundle.join("clip.mp4"), bytes).expect("video");
+        fs::write(bundle.join("caption.txt"), caption).expect("caption");
+        bundle
     }
 
     fn ids(prefix: &str, count: usize) -> Vec<String> {
@@ -1153,6 +1670,8 @@ mod tests {
         let manifest =
             scan_publish_folder(root.path(), PublishScanOptions::default()).expect("scan");
         assert_eq!(manifest.bundles.len(), 1);
+        assert_eq!(manifest.bundles[0].media_kind, PublishMediaKind::Image);
+        assert_eq!(manifest.bundles[0].video, None);
         assert_eq!(manifest.bundles[0].images[0].file_name, "01-cover.png");
         assert_eq!(manifest.bundles[0].images[1].file_name, "02-two.png");
         assert_eq!(manifest.bundles[0].caption, "Mở bài\n\n#tag");
@@ -1160,12 +1679,11 @@ mod tests {
         assert_eq!(manifest.ignored_hidden_files, 1);
     }
 
-    /// **Partner names ride the bundle out of the scan, or degrade loudly — never block.**
+    /// **One partner workbook rides the bundle out of the scan, or degrades loudly.**
     ///
-    /// Three folders in one scan: a real workbook (both names arrive, workbook order), a
-    /// corrupt one (empty list plus a notice, scan survives), and two workbooks in one
-    /// folder (a guess the sheet would print live, so: empty list plus a notice naming the
-    /// count). `ignored_partner_files` keeps its old meaning — counted, not vanished.
+    /// A readable workbook carries names in workbook order. A corrupt workbook cannot supply
+    /// names, but remains visible as a notice. Multiple workbooks are refused by a separate
+    /// ambiguity guard below.
     #[test]
     fn partner_names_ride_the_bundle_and_bad_workbooks_degrade_loudly() {
         fn write_workbook(path: &Path, first_name: &str) {
@@ -1206,10 +1724,6 @@ mod tests {
         write_workbook(&good.join("partners-set1.xlsx"), "Quán A");
         let corrupt = folder(root.path(), "bo2 file hong");
         fs::write(corrupt.join("partners-set1.xlsx"), b"not a workbook").expect("corrupt");
-        let doubled = folder(root.path(), "bo3 hai file");
-        write_workbook(&doubled.join("partners-set1.xlsx"), "Quán C");
-        write_workbook(&doubled.join("partners-set2.xlsx"), "Quán D");
-
         let manifest =
             scan_publish_folder(root.path(), PublishScanOptions::default()).expect("scan");
         let by_name = |name: &str| {
@@ -1237,20 +1751,7 @@ mod tests {
             "and it degrades LOUDLY: {:?}",
             manifest.notices
         );
-        assert_eq!(
-            by_name("bo3 hai file").partners,
-            Vec::<String>::new(),
-            "two workbooks are a question, not a guess"
-        );
-        assert!(
-            manifest
-                .notices
-                .iter()
-                .any(|notice| notice.message.contains("2 file đối tác")),
-            "{:?}",
-            manifest.notices
-        );
-        assert_eq!(manifest.ignored_partner_files, 4, "counted, not vanished");
+        assert_eq!(manifest.ignored_partner_files, 2, "counted, not vanished");
     }
 
     /// **One over-sized folder used to make every other folder unscannable.**
@@ -1319,6 +1820,18 @@ mod tests {
             scan_publish_folder(one_past.path(), PublishScanOptions::default()),
             Err(PublishScanError::TooManyImages { .. })
         ));
+        assert!(matches!(
+            scan_publish_folder(
+                one_past.path(),
+                PublishScanOptions {
+                    max_images_per_bundle: DEFAULT_MAX_IMAGES + 100,
+                },
+            ),
+            Err(PublishScanError::TooManyImages {
+                max: DEFAULT_MAX_IMAGES,
+                ..
+            })
+        ));
 
         // And the cap is TikTok's, not the iOS tap grid's. The 11 below is the number that
         // made a single 13-slide folder refuse all twenty-one.
@@ -1367,6 +1880,405 @@ mod tests {
         );
         assert_eq!(managed.caption_sha256, manifest.bundles[0].caption_sha256);
         assert!(Path::new(&managed.images[0].path).is_file());
+    }
+
+    #[test]
+    fn legacy_image_manifest_deserializes_without_video_metadata() {
+        let json = r#"{
+            "id":"legacy", "sourcePath":"C:/old", "name":"old",
+            "mediaKind":"image", "images":[], "captionPath":"caption.txt",
+            "caption":"legacy caption", "captionSha256":"abc", "totalBytes":0
+        }"#;
+        let bundle: PublishBundle = serde_json::from_str(json).expect("legacy manifest");
+        assert_eq!(bundle.media_kind, PublishMediaKind::Image);
+        assert_eq!(bundle.video, None);
+        assert!(bundle.partners.is_empty());
+    }
+
+    #[test]
+    fn valid_mp4_bundle_is_typed_h264_aac_media() {
+        let root = TempDir::new();
+        write_video_bundle(
+            root.path(),
+            &mp4_fixture(90_000, FixtureVideoCodec::H264, FixtureAudioCodec::Aac),
+            "video",
+        );
+
+        let manifest = scan_publish_folder(root.path(), PublishScanOptions::default())
+            .expect("valid MP4 bundle");
+        let bundle = &manifest.bundles[0];
+        assert_eq!(bundle.media_kind, PublishMediaKind::Video);
+        assert!(bundle.images.is_empty());
+        assert_eq!(
+            bundle.video.as_ref().map(|video| (
+                video.duration_ms,
+                &video.video_codec,
+                video.audio_codec.as_ref()
+            )),
+            Some((
+                90_000,
+                &PublishVideoCodec::H264Avc,
+                Some(&PublishAudioCodec::Aac)
+            ))
+        );
+    }
+
+    #[test]
+    fn a_silent_h264_mp4_is_valid() {
+        let root = TempDir::new();
+        write_video_bundle(
+            root.path(),
+            &mp4_fixture(1_000, FixtureVideoCodec::H264, FixtureAudioCodec::None),
+            "silent",
+        );
+        let manifest =
+            scan_publish_folder(root.path(), PublishScanOptions::default()).expect("silent MP4");
+        assert_eq!(
+            manifest.bundles[0].video.as_ref().unwrap().audio_codec,
+            None
+        );
+    }
+
+    #[test]
+    fn mixed_images_and_video_or_two_videos_are_refused() {
+        let mixed_root = TempDir::new();
+        let mixed = write_video_bundle(
+            mixed_root.path(),
+            &mp4_fixture(1_000, FixtureVideoCodec::H264, FixtureAudioCodec::None),
+            "mixed",
+        );
+        write_png(&mixed.join("01-cover.png"), [1, 2, 3]);
+        assert!(matches!(
+            scan_publish_folder(mixed_root.path(), PublishScanOptions::default()),
+            Err(PublishScanError::MixedMedia { .. })
+        ));
+
+        let doubled_root = TempDir::new();
+        let doubled = write_video_bundle(
+            doubled_root.path(),
+            &mp4_fixture(1_000, FixtureVideoCodec::H264, FixtureAudioCodec::None),
+            "two",
+        );
+        fs::write(
+            doubled.join("second.mp4"),
+            mp4_fixture(1_000, FixtureVideoCodec::H264, FixtureAudioCodec::None),
+        )
+        .expect("second video");
+        assert!(matches!(
+            scan_publish_folder(doubled_root.path(), PublishScanOptions::default()),
+            Err(PublishScanError::MultipleVideos { count: 2, .. })
+        ));
+    }
+
+    #[test]
+    fn caption_must_be_exactly_one_non_empty_file() {
+        let missing_root = TempDir::new();
+        let missing = missing_root.path().join("image-post");
+        fs::create_dir(&missing).expect("bundle");
+        write_png(&missing.join("01.png"), [1, 2, 3]);
+        assert!(matches!(
+            scan_publish_folder(missing_root.path(), PublishScanOptions::default()),
+            Err(PublishScanError::MissingCaption { .. })
+        ));
+
+        let empty_root = TempDir::new();
+        write_video_bundle(
+            empty_root.path(),
+            &mp4_fixture(1_000, FixtureVideoCodec::H264, FixtureAudioCodec::None),
+            "  \r\n",
+        );
+        assert!(matches!(
+            scan_publish_folder(empty_root.path(), PublishScanOptions::default()),
+            Err(PublishScanError::EmptyCaption { .. })
+        ));
+
+        let multiple_root = TempDir::new();
+        let bundle = write_video_bundle(
+            multiple_root.path(),
+            &mp4_fixture(1_000, FixtureVideoCodec::H264, FixtureAudioCodec::None),
+            "one",
+        );
+        fs::write(bundle.join("caption-second.txt"), "two").expect("second caption");
+        assert!(matches!(
+            scan_publish_folder(multiple_root.path(), PublishScanOptions::default()),
+            Err(PublishScanError::MultipleCaptions { .. })
+        ));
+    }
+
+    #[test]
+    fn more_than_one_partner_workbook_is_refused() {
+        let root = TempDir::new();
+        let bundle = root.path().join("image-post");
+        fs::create_dir(&bundle).expect("bundle");
+        write_png(&bundle.join("01.png"), [1, 2, 3]);
+        fs::write(bundle.join("caption.txt"), "caption").expect("caption");
+        fs::write(bundle.join("partner-a.xlsx"), "a").expect("partner");
+        fs::write(bundle.join("partner-b.xlsx"), "b").expect("partner");
+        assert!(matches!(
+            scan_publish_folder(root.path(), PublishScanOptions::default()),
+            Err(PublishScanError::MultiplePartnerFiles { count: 2, .. })
+        ));
+    }
+
+    #[test]
+    fn malformed_non_mp4_and_wrong_video_codec_are_refused() {
+        let malformed_root = TempDir::new();
+        write_video_bundle(malformed_root.path(), b"not an mp4", "caption");
+        assert!(matches!(
+            scan_publish_folder(malformed_root.path(), PublishScanOptions::default()),
+            Err(PublishScanError::Video {
+                source: PublishVideoError::InvalidContainer(_),
+                ..
+            })
+        ));
+
+        let hevc_root = TempDir::new();
+        write_video_bundle(
+            hevc_root.path(),
+            &mp4_fixture(1_000, FixtureVideoCodec::H265, FixtureAudioCodec::None),
+            "caption",
+        );
+        assert!(matches!(
+            scan_publish_folder(hevc_root.path(), PublishScanOptions::default()),
+            Err(PublishScanError::Video {
+                source: PublishVideoError::UnsupportedVideoCodec(_),
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn non_aac_audio_is_refused_even_inside_an_mp4a_entry() {
+        let root = TempDir::new();
+        write_video_bundle(
+            root.path(),
+            &mp4_fixture(
+                1_000,
+                FixtureVideoCodec::H264,
+                FixtureAudioCodec::Unsupported,
+            ),
+            "audio",
+        );
+        assert!(matches!(
+            scan_publish_folder(root.path(), PublishScanOptions::default()),
+            Err(PublishScanError::Video {
+                source: PublishVideoError::UnsupportedAudioCodec(_),
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn video_duration_and_declared_byte_boundaries_are_inclusive() {
+        let at_duration = mp4_fixture(
+            MAX_VIDEO_DURATION_MS,
+            FixtureVideoCodec::H264,
+            FixtureAudioCodec::None,
+        );
+        let metadata =
+            validate_mp4_reader(std::io::Cursor::new(&at_duration), at_duration.len() as u64)
+                .expect("exact duration limit is valid");
+        assert_eq!(metadata.0, MAX_VIDEO_DURATION_MS);
+
+        let over_duration = mp4_fixture(
+            MAX_VIDEO_DURATION_MS + 1,
+            FixtureVideoCodec::H264,
+            FixtureAudioCodec::None,
+        );
+        assert!(matches!(
+            validate_mp4_reader(
+                std::io::Cursor::new(&over_duration),
+                over_duration.len() as u64
+            ),
+            Err(PublishVideoError::TooLong { .. })
+        ));
+        assert!(validate_video_size(MAX_VIDEO_BYTES).is_ok());
+        assert!(matches!(
+            validate_video_size(MAX_VIDEO_BYTES + 1),
+            Err(PublishVideoError::TooLarge { .. })
+        ));
+    }
+}
+
+#[cfg(test)]
+mod sound_tests {
+    use super::*;
+
+    fn candidates() -> Vec<SoundCandidate> {
+        vec![
+            SoundCandidate {
+                section: " Recommended ".into(),
+                title: "Morning Market".into(),
+                artist: "A".into(),
+            },
+            SoundCandidate {
+                section: "trending".into(),
+                title: "City Lights".into(),
+                artist: "B".into(),
+            },
+            SoundCandidate {
+                section: "POPULAR".into(),
+                title: "Quiet Table".into(),
+                artist: "C".into(),
+            },
+        ]
+    }
+
+    #[test]
+    fn sound_policy_validates_the_pool_and_defaults_to_five() {
+        assert_eq!(PublishSoundPolicy::Default.pool_size().unwrap(), 5);
+        for pool_size in [1, 10] {
+            assert!(PublishSoundPolicy::TrendingAny { pool_size, seed: 7 }
+                .pool_size()
+                .is_ok());
+        }
+        for pool_size in [0, 11] {
+            assert!(matches!(
+                PublishSoundPolicy::TrendingAny { pool_size, seed: 7 }.pool_size(),
+                Err(PublishSoundError::InvalidPoolSize { .. })
+            ));
+        }
+    }
+
+    #[test]
+    fn a_seed_selects_deterministically_from_only_the_bounded_pool() {
+        let policy = PublishSoundPolicy::TrendingAny {
+            pool_size: 2,
+            seed: 0x1234,
+        };
+        let first = select_sound_candidate(&policy, &candidates()).expect("selection");
+        let second = select_sound_candidate(&policy, &candidates()).expect("selection");
+        assert_eq!(first, second);
+        assert!(first.index < 2);
+        assert_ne!(first.title, "Quiet Table");
+        assert!(!first.confirmed, "observer read-back has not happened yet");
+    }
+
+    #[test]
+    fn rows_after_the_bounded_pool_do_not_change_or_invalidate_the_selection() {
+        let policy = PublishSoundPolicy::TrendingAny {
+            pool_size: 2,
+            seed: 0x1234,
+        };
+        let first_two = candidates()[..2].to_vec();
+        let expected = select_sound_candidate(&policy, &first_two).expect("bounded selection");
+        let mut observer_overflow = first_two;
+        observer_overflow.push(SoundCandidate {
+            section: "unlabelled overflow".into(),
+            title: String::new(),
+            artist: "must be ignored".into(),
+        });
+
+        assert_eq!(
+            select_sound_candidate(&policy, &observer_overflow)
+                .expect("only the first two rows are eligible"),
+            expected
+        );
+    }
+
+    #[test]
+    fn unrecognized_or_unlabelled_sections_fail_closed() {
+        for section in ["For you", "", "recommended sounds"] {
+            let rows = vec![SoundCandidate {
+                section: section.into(),
+                title: "Song".into(),
+                artist: "Artist".into(),
+            }];
+            assert!(matches!(
+                select_sound_candidate(
+                    &PublishSoundPolicy::TrendingAny {
+                        pool_size: 1,
+                        seed: 1
+                    },
+                    &rows
+                ),
+                Err(PublishSoundError::UnrecognizedSection(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn candidate_digest_is_stable_over_observer_case_and_edge_whitespace() {
+        let policy = PublishSoundPolicy::TrendingAny {
+            pool_size: 3,
+            seed: 9,
+        };
+        let evidence = select_sound_candidate(&policy, &candidates()).expect("selection");
+        assert_eq!(
+            evidence.candidates_digest,
+            "0dc684a7417824dbe8b4fe33e7e13daf0f5bdd94bcf4cf3b6a12fca6ebe5afe1"
+        );
+
+        let normalized = vec![
+            SoundCandidate {
+                section: "recommended".into(),
+                title: "Morning Market".into(),
+                artist: "A".into(),
+            },
+            SoundCandidate {
+                section: "TRENDING".into(),
+                title: "City Lights".into(),
+                artist: "B".into(),
+            },
+            SoundCandidate {
+                section: "popular".into(),
+                title: "Quiet Table".into(),
+                artist: "C".into(),
+            },
+        ];
+        assert_eq!(
+            evidence.candidates_digest,
+            select_sound_candidate(&policy, &normalized)
+                .expect("normalized selection")
+                .candidates_digest
+        );
+    }
+}
+
+#[cfg(test)]
+mod execution_contract_tests {
+    use super::*;
+
+    #[test]
+    fn legacy_campaign_requests_default_to_unconfirmed_default_sound() {
+        let request: PublishCampaignRequest = serde_json::from_value(serde_json::json!({
+            "requestId": "request-1",
+            "sourceRoot": "C:/fixture",
+            "bundleIds": ["bundle-1"],
+            "udids": ["phone-1"],
+            "runAt": null,
+            "visibility": "public",
+            "cleanupPolicy": "deleteImportedAssetsAfterVerified"
+        }))
+        .expect("legacy request remains readable");
+
+        assert_eq!(request.sound_policy, PublishSoundPolicy::Default);
+        assert!(!request.execution_confirmed);
+    }
+
+    #[test]
+    fn scheduled_request_keeps_the_exact_seed_and_confirmation() {
+        let request = PublishCampaignRequest {
+            request_id: "request-1".into(),
+            source_root: "C:/fixture".into(),
+            bundle_ids: vec!["bundle-1".into()],
+            udids: vec!["phone-1".into()],
+            run_at: Some("2026-09-03T12:00".into()),
+            visibility: PublishVisibility::Public,
+            cleanup_policy: PublishCleanupPolicy::DeleteImportedAssetsAfterVerified,
+            sound_policy: PublishSoundPolicy::TrendingAny {
+                pool_size: 5,
+                seed: 0x00fe_dcba,
+            },
+            execution_confirmed: true,
+        };
+        let restored: PublishCampaignRequest = serde_json::from_str(
+            &serde_json::to_string(&request).expect("serialize the approved request"),
+        )
+        .expect("restore the approved request");
+
+        assert_eq!(restored.sound_policy, request.sound_policy);
+        assert!(restored.execution_confirmed);
     }
 }
 
