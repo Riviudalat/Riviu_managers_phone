@@ -272,6 +272,10 @@ button:disabled {
 .dev-phone:hover {
   border-color: #58627a;
 }
+.dev-phone:focus-visible {
+  outline: 3px solid var(--primary-ring);
+  outline-offset: 2px;
+}
 .dev-phone.selected,
 .dev-phone.focused {
   border-color: var(--primary);
@@ -289,6 +293,27 @@ button:disabled {
   display: flex;
   align-items: center;
   justify-content: center;
+}
+.dev-phone-open {
+  position: absolute;
+  right: 6px;
+  bottom: 6px;
+  z-index: 4;
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 1px solid rgb(255 255 255 / 42%);
+  border-radius: 4px;
+  background: rgb(10 14 22 / 78%);
+  color: var(--text-inverse);
+  opacity: 0.76;
+}
+.dev-phone-open:hover,
+.dev-phone-open:focus-visible {
+  opacity: 1;
+  background: rgb(10 14 22 / 94%);
 }
 .dev-phone-screen img,
 .dev-phone-screen .phone-canvas {

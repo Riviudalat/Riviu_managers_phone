@@ -5,8 +5,10 @@ import {
   IconApi,
   IconApp,
   IconChart,
+  IconChat,
   IconClock,
   IconGrid,
+  IconHeart,
   IconImage,
   IconRocket,
   IconScript,
@@ -21,6 +23,8 @@ import {
  */
 export const MENU_ICONS: Record<string, (p: IconProps) => ReactElement> = {
   control: IconGrid,
+  nurture: IconHeart,
+  interaction: IconChat,
   material: IconImage,
   apps: IconApp,
   scripts: IconScript,

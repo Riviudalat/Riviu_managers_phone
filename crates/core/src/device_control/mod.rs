@@ -184,6 +184,12 @@ impl DeviceControlPlane {
         }
     }
 
+    /// Returns the task that currently owns the device without probing or waking it.
+    /// Fleet UI may poll this read without consuming stream capacity or contending for a lease.
+    pub fn current_work_owner(&self, udid: &str) -> Option<DeviceWorkOwner> {
+        self.work.current_owner(udid)
+    }
+
     pub(crate) async fn try_reserve_ui_capacity(
         &self,
         context: DeviceExclusiveContext,
@@ -2530,6 +2536,25 @@ mod tests {
             Arc::new(crate::DeviceWorkCoordinator::new()),
             Arc::new(crate::StreamBudgetManager::new(limit).expect("valid test stream limit")),
         )
+    }
+
+    #[tokio::test]
+    async fn current_work_owner_reports_the_active_lease_without_device_io() {
+        let driver = Arc::new(TestDriver::default());
+        let control = control_plane(Arc::clone(&driver), 1);
+
+        assert_eq!(control.current_work_owner("device-a"), None);
+        let lease = control
+            .try_acquire_exclusive_keeping_stream("device-a", DeviceWorkOwner::Nurture)
+            .await
+            .expect("lease");
+        assert_eq!(
+            control.current_work_owner("device-a"),
+            Some(DeviceWorkOwner::Nurture)
+        );
+        drop(lease);
+        assert_eq!(control.current_work_owner("device-a"), None);
+        assert_eq!(driver.session_starts.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test]

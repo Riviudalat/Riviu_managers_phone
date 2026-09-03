@@ -83,20 +83,29 @@ export function FlowImportDialog({
           onChange={(event) => setRaw(event.currentTarget.value)}
         />
       </label>
-      {error && <p role="alert">{error}</p>}
+      {error && (
+        <div role="alert">
+          <details>
+            <summary>Không thể nhập Flow.</summary>
+            <code>{error}</code>
+          </details>
+        </div>
+      )}
       {result && result.diagnostics.length > 0 && (
         <section aria-label="Chẩn đoán nhập">
-          <strong>{result.diagnostics.length} diagnostics</strong>
+          <strong>{result.diagnostics.length} lỗi nhập</strong>
           <ul>
             {result.diagnostics.map((diagnostic, index) => (
               <li key={`${diagnostic.stepIndex}-${diagnostic.code}-${index}`}>
-                <strong>{diagnostic.code}</strong>
-                <span>
+                <details>
                   {/* `step_index` comes from `enumerate()`, so it is zero-based. Printing it raw
                       sent the operator to the step before the broken one. */}
-                  Step {diagnostic.stepIndex + 1}: {diagnostic.message}
-                  {diagnostic.field ? ` (${diagnostic.field})` : ""}
-                </span>
+                  <summary>Bước {diagnostic.stepIndex + 1}: Không thể nhập hành động này.</summary>
+                  <code>
+                    {diagnostic.code}: {diagnostic.message}
+                    {diagnostic.field ? ` (${diagnostic.field})` : ""}
+                  </code>
+                </details>
               </li>
             ))}
           </ul>
@@ -106,7 +115,7 @@ export function FlowImportDialog({
         <button type="button" onClick={close}>Hủy</button>
         <button type="button" disabled={busy || raw.trim() === ""} onClick={() => void submit()}>
           <Upload aria-hidden="true" size={15} />
-          {busy ? "Importing..." : "Import"}
+          {busy ? "Đang nhập…" : "Nhập"}
         </button>
       </footer>
     </section>

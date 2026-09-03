@@ -44,6 +44,8 @@ function behaviourFrom(settings: NurtureSettings): NurtureWindowBehaviour {
     numRounds: settings.numRounds,
     likeProb: settings.likeProb,
     commentProb: settings.commentProb,
+    saveProb: settings.saveProb ?? 0,
+    saveEnabled: settings.saveEnabled ?? false,
     followProb: settings.followProb,
   };
 }
@@ -262,20 +264,35 @@ export function NurtureWindows({
                 Cấu hình riêng cho khung này
                 <Info
                   of="Cấu hình riêng cho khung này"
-                  what="Tắt thì khung dùng đúng số video và tỉ lệ ở phần trên. Bật thì khung mang bộ số riêng — cả năm giá trị, không phải một nửa, để tổng tỉ lệ vẫn đọc được trên một màn hình."
+                  what="Tắt thì khung dùng đúng số video, công tắc và tỉ lệ ở phần trên. Bật thì khung mang trọn bộ riêng, không âm thầm nhận thay đổi toàn cục về sau."
                 />
               </span>
             </label>
 
             {behaviour && (
-              <div className="nurture-row nu-window-behaviour">
+              <>
+                <label className="check">
+                  <input
+                    type="checkbox"
+                    aria-label={`Bật Lưu trong khung ${index + 1}`}
+                    checked={behaviour.saveEnabled ?? false}
+                    onChange={(e) =>
+                      editWindow(index, {
+                        behaviour: { ...behaviour, saveEnabled: e.target.checked },
+                      })
+                    }
+                  />
+                  <span>Lưu trong khung này</span>
+                </label>
+                <div className="nurture-row nu-window-behaviour">
                 {(
                   [
                     ["numVideos", "Video", 1, 10000],
                     ["numRounds", "Vòng", 1, 100],
                     ["likeProb", "Tim %", 0, 100],
+                    ["saveProb", "Lưu %", 0, 100],
                     ["commentProb", "Bình luận %", 0, 100],
-                    ["followProb", "Follow %", 0, 100],
+                    ["followProb", "Theo dõi %", 0, 100],
                   ] as const
                 ).map(([key, label, min, max]) => (
                   <label key={key}>
@@ -284,7 +301,7 @@ export function NurtureWindows({
                       type="number"
                       min={min}
                       max={max}
-                      value={behaviour[key]}
+                      value={key === "saveProb" ? (behaviour.saveProb ?? 0) : behaviour[key]}
                       onChange={(e) =>
                         editWindow(index, {
                           behaviour: { ...behaviour, [key]: Number(e.target.value) || 0 },
@@ -293,7 +310,8 @@ export function NurtureWindows({
                     />
                   </label>
                 ))}
-              </div>
+                </div>
+              </>
             )}
           </div>
         );

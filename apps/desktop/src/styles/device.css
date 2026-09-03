@@ -216,6 +216,91 @@
   gap: 0.6rem;
 }
 
+.device-detail-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: var(--z-modal-backdrop);
+  display: flex;
+  justify-content: flex-end;
+  background: rgb(15 23 42 / 28%);
+}
+
+.device-detail-drawer {
+  width: min(420px, 100vw);
+  height: 100%;
+  padding: 1.1rem;
+  border-left: 1px solid var(--line-strong);
+  background: var(--bg-elevated);
+  box-shadow: -16px 0 42px rgb(15 23 42 / 18%);
+  overflow-y: auto;
+}
+
+.device-detail-drawer > header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+  padding-bottom: 1rem;
+  border-bottom: 1px solid var(--line);
+}
+
+.device-detail-drawer h2,
+.device-detail-drawer p {
+  margin: 0;
+}
+
+.device-detail-drawer header span,
+.device-detail-kicker {
+  color: var(--text-3);
+  font-size: var(--text-sm);
+}
+
+.device-detail-kicker {
+  margin-bottom: 0.25rem !important;
+  font-weight: 600;
+  text-transform: uppercase;
+}
+
+.device-detail-list {
+  display: grid;
+  gap: 0;
+  margin: 1rem 0;
+}
+
+.device-detail-list > div {
+  display: grid;
+  grid-template-columns: minmax(120px, 0.8fr) minmax(0, 1.2fr);
+  gap: 0.8rem;
+  padding: 0.65rem 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.device-detail-list dt {
+  color: var(--text-3);
+}
+
+.device-detail-list dd {
+  min-width: 0;
+  margin: 0;
+  color: var(--text-1);
+  overflow-wrap: anywhere;
+}
+
+.device-detail-evidence {
+  padding-top: 0.25rem;
+}
+
+.device-detail-evidence h3 {
+  margin: 0 0 0.55rem;
+  font-size: var(--text-base);
+}
+
+.device-detail-evidence p,
+.device-detail-evidence pre {
+  margin: 0;
+  color: var(--text-2);
+}
+
 /* The phone's own filesystem (xiaowei "Preview Mobile Files"). Wide, because a listing has
    four columns and a filename on this fleet can be sixty characters of Vietnamese. */
 .device-files {
@@ -371,6 +456,42 @@
 }
 .device-toolrow .filter-toolbar .grow {
   display: none;
+}
+.device-filters {
+  display: flex;
+  flex: 0 1 390px;
+  align-items: center;
+  gap: 0.4rem;
+  min-width: 240px;
+}
+.device-filters input,
+.device-filters select {
+  min-width: 0;
+  border: 1px solid var(--line-strong);
+  border-radius: 4px;
+  background: var(--bg-elevated);
+  color: var(--text-1);
+  font-size: var(--text-sm);
+}
+.device-filters input {
+  flex: 1 1 180px;
+  padding: 0.38rem 0.5rem;
+}
+.device-filters select {
+  flex: 0 0 auto;
+  padding: 0.38rem 1.7rem 0.38rem 0.5rem;
+}
+@media (max-width: 1100px) {
+  .device-toolrow {
+    flex-wrap: wrap;
+    padding-bottom: 0.5rem;
+  }
+  .device-toolrow .group-tabs {
+    flex-basis: 100%;
+  }
+  .device-filters {
+    flex: 1 1 280px;
+  }
 }
 
 /* Group Tools popup (feature A2+) — reuses the .nurture-float shell, a touch wider for the

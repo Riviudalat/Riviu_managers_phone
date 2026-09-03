@@ -1,4 +1,5 @@
 import type { FlowValidationIssue } from "../../types";
+import { flowValidationMessage } from "./validationPresentation";
 
 export function FlowDiagnostics({
   issues,
@@ -34,8 +35,9 @@ export function FlowDiagnostics({
                 disabled={!issue.nodeId || !onSelectNode}
                 onClick={() => issue.nodeId && onSelectNode?.(issue.nodeId)}
               >
-                <strong>{issue.code}</strong>
-                <span>{issue.message}</span>
+                <span title={`${issue.code}: ${issue.message}`}>
+                  {flowValidationMessage(issue)}
+                </span>
               </button>
             </li>
           ))}

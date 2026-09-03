@@ -6,9 +6,32 @@
 
 use super::*;
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeviceWorkState {
+    pub udid: String,
+    pub current_owner: Option<DeviceWorkOwner>,
+}
+
 #[tauri::command]
 pub async fn list_devices(state: State<'_, AppState>) -> Result<Vec<DeviceInfo>, CommandError> {
     Ok(state.registry.list())
+}
+
+/// Reads in-memory ownership only; it never probes, wakes, or leases a phone.
+#[tauri::command]
+pub async fn list_device_work_states(
+    state: State<'_, AppState>,
+) -> Result<Vec<DeviceWorkState>, CommandError> {
+    Ok(state
+        .registry
+        .list()
+        .into_iter()
+        .map(|device| DeviceWorkState {
+            current_owner: state.control.current_work_owner(&device.udid),
+            udid: device.udid,
+        })
+        .collect())
 }
 
 #[tauri::command]

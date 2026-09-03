@@ -1,10 +1,17 @@
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { InteractionPopup } from "./InteractionPopup";
-import type { DeviceMeta, ThreadCampaignRequest, ThreadPlanAssignment } from "../types";
+import type {
+  DeviceInfo,
+  DeviceMeta,
+  ThreadCampaignRequest,
+  ThreadPlanAssignment,
+  ThreadPreview,
+  TikTokLinkLine,
+} from "../types";
 
-const { parseLinks, startThread, previewThread, measurePost } = vi.hoisted(() => ({
+const { parseLinks, resolveLinks, startThread, previewThread, measurePost } = vi.hoisted(() => ({
   measurePost: vi.fn(async () => ({
     now: { views: 1353, likes: 22, comments: 26 },
     plan: {
@@ -19,7 +26,7 @@ const { parseLinks, startThread, previewThread, measurePost } = vi.hoisted(() =>
     },
     viewsRead: true,
   })),
-  parseLinks: vi.fn(async () => [
+  parseLinks: vi.fn(async (): Promise<TikTokLinkLine[]> => [
     {
       lineNo: 1,
       original: "https://www.tiktok.com/@creator/video/123",
@@ -34,6 +41,7 @@ const { parseLinks, startThread, previewThread, measurePost } = vi.hoisted(() =>
       error: null,
     },
   ]),
+  resolveLinks: vi.fn(async (): Promise<TikTokLinkLine[]> => []),
   startThread: vi.fn(async () => ({
     queued: true,
     campaign: {
@@ -52,7 +60,7 @@ const { parseLinks, startThread, previewThread, measurePost } = vi.hoisted(() =>
   // draft reaches for it. The stand-in splits actors the way `partition_actors` does —
   // spreading the remainder — because the popup reads `largestCohort` off this answer and a
   // mock that always returns one team would validate against the wrong number.
-  previewThread: vi.fn(async (request: ThreadCampaignRequest) => {
+  previewThread: vi.fn(async (request: ThreadCampaignRequest): Promise<ThreadPreview> => {
     // `plan_threads` runs the same `validate()` the dispatch will, so a preview carrying a
     // comment list shorter than its own message count is refused — `TooFewManualComments`.
     // Modelled here because leaving it out is what hid a deadlock: the panel guessed the fleet
@@ -93,13 +101,17 @@ const { parseLinks, startThread, previewThread, measurePost } = vi.hoisted(() =>
 }));
 
 vi.mock("../api", () => ({
+  automationArchive: vi.fn(async () => undefined),
+  automationCreate: vi.fn(),
+  automationList: vi.fn(async () => []),
+  automationRevise: vi.fn(),
   interactionCancel: vi.fn(async () => undefined),
   interactionGet: vi.fn(async () => null),
   interactionList: vi.fn(async () => []),
   interactionParseLinks: parseLinks,
   interactionPreviewThread: previewThread,
   interactionMeasurePost: measurePost,
-  interactionResolveLinks: vi.fn(async () => []),
+  interactionResolveLinks: resolveLinks,
   interactionStartThread: startThread,
   listenRiviuEvents: vi.fn(async () => () => undefined),
   listGroups: vi.fn(async () => []),
@@ -132,7 +144,7 @@ afterEach(() => {
  */
 const noMeta = new Map<string, DeviceMeta>();
 
-const devices = [
+const devices: DeviceInfo[] = [
   {
     udid: "actor-a",
     name: "Phone A",
@@ -163,7 +175,74 @@ const devices = [
     status: "ready",
     wdaReady: true,
   },
-] as never[];
+];
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((next) => {
+    resolve = next;
+  });
+  return { promise, resolve };
+}
+
+function parsedLine(id: string): TikTokLinkLine {
+  const url = `https://www.tiktok.com/@creator/video/${id}`;
+  return {
+    lineNo: 1,
+    original: url,
+    target: {
+      originalUrl: url,
+      normalizedUrl: url,
+      targetKey: `content:${id}`,
+      contentId: id,
+      author: "creator",
+      kind: "video",
+    },
+    error: null,
+  };
+}
+
+function previewOf(request: ThreadCampaignRequest): ThreadPreview {
+  return {
+    lines: [],
+    validTargetCount: request.targets.length,
+    cohortCount: 1,
+    streamCapacity: 8,
+    plan: {
+      requestId: request.requestId,
+      assignments: request.actorUdids.map((actorUdid, ordinal) => ({
+        targetKey: request.targets[0]?.targetKey ?? "content:123",
+        ordinal,
+        actorUdid,
+        parentOrdinal: ordinal === 0 ? null : 0,
+        cohort: 0,
+      })),
+    },
+  };
+}
+
+it("shows target-bound automation profiles only on the dedicated page", async () => {
+  const { rerender } = render(
+    <InteractionPopup
+      metas={noMeta}
+      devices={devices}
+      selected={[]}
+      surface="page"
+      targetRef={{ type: "group", groupId: "morning" }}
+    />,
+  );
+  expect(await screen.findByRole("region", { name: "Quản lý hồ sơ Tương tác" })).toBeVisible();
+
+  rerender(
+    <InteractionPopup
+      metas={noMeta}
+      devices={devices}
+      selected={[]}
+      onClose={() => undefined}
+    />,
+  );
+  expect(screen.queryByRole("region", { name: "Quản lý hồ sơ Tương tác" })).not.toBeInTheDocument();
+});
 
 /**
  * Paste the one link the parse mock knows, and wait until it has actually been parsed.
@@ -199,6 +278,145 @@ function openAdvanced() {
 }
 
 describe("InteractionPopup", () => {
+  it("does not let an old short-link resolution replace links parsed from newer input", async () => {
+    const oldResolution = deferred<TikTokLinkLine[]>();
+    const oldUrl = "https://vt.tiktok.com/old";
+    const newUrl = "https://www.tiktok.com/@creator/video/222";
+    parseLinks
+      .mockResolvedValueOnce([
+        { lineNo: 1, original: oldUrl, target: null, error: "unresolvedShortLink" },
+      ])
+      .mockResolvedValueOnce([parsedLine("222")]);
+    resolveLinks.mockReturnValueOnce(oldResolution.promise);
+    render(<InteractionPopup metas={noMeta} devices={devices} selected={[]} onClose={() => undefined} />);
+    const input = screen.getByPlaceholderText("https://www.tiktok.com/@creator/video/123");
+
+    fireEvent.change(input, { target: { value: oldUrl } });
+    fireEvent.click(await screen.findByRole("button", { name: "Gỡ link rút gọn" }));
+    fireEvent.change(input, { target: { value: newUrl } });
+    await waitFor(() =>
+      expect(document.querySelector(".interaction-link-list")?.textContent).toContain(newUrl),
+    );
+
+    await act(async () => {
+      oldResolution.resolve([parsedLine("111")]);
+      await oldResolution.promise;
+    });
+    expect(document.querySelector(".interaction-link-list")?.textContent).toContain(newUrl);
+    expect(document.querySelector(".interaction-link-list")?.textContent).not.toContain("111");
+  });
+
+  it("keeps the newest preview and run gate when an older preview resolves last", async () => {
+    const oldPreview = deferred<ThreadPreview>();
+    previewThread
+      .mockReturnValueOnce(oldPreview.promise)
+      .mockImplementationOnce(async (request) => previewOf(request));
+    const allHierarchy: DeviceInfo[] = devices.map((device) => ({
+      ...device,
+      platform: "android",
+    }));
+    render(
+      <InteractionPopup
+        metas={noMeta}
+        devices={allHierarchy}
+        selected={[]}
+        onClose={() => undefined}
+      />,
+    );
+    await pasteLink();
+    await waitFor(() => expect(previewThread).toHaveBeenCalledTimes(1));
+
+    fireEvent.click(screen.getByLabelText("Phone C"));
+    await waitFor(() => expect(previewThread).toHaveBeenCalledTimes(2));
+    expect(await screen.findByText(/Cụm 1 · 2 máy/)).toBeVisible();
+    await waitFor(() => expect(screen.getByRole("button", { name: "Chạy ngay" })).toBeEnabled());
+
+    const firstRequest = previewThread.mock.calls[0][0];
+    await act(async () => {
+      oldPreview.resolve(previewOf(firstRequest));
+      await oldPreview.promise;
+    });
+    expect(screen.getByText(/Cụm 1 · 2 máy/)).toBeVisible();
+    expect(screen.queryByText(/Cụm 1 · 3 máy/)).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Chạy ngay" })).toBeEnabled();
+    expect(screen.queryByText(/Đang tính lại kế hoạch/)).not.toBeInTheDocument();
+  });
+
+  it("configures independent actions and runs a one-actor like/save campaign without comment fields", async () => {
+    render(<InteractionPopup metas={noMeta} devices={devices} selected={[]} onClose={() => undefined} />);
+    await pasteLink();
+
+    fireEvent.click(screen.getByRole("checkbox", { name: /^Tim$/ }));
+    fireEvent.click(screen.getByRole("checkbox", { name: /^Lưu$/ }));
+    fireEvent.click(screen.getByRole("checkbox", { name: /^Bình luận$/ }));
+    fireEvent.click(screen.getByLabelText("Phone B"));
+
+    expect(screen.getByText("Thực hiện theo thứ tự: Tim → Lưu.")).toBeVisible();
+    expect(screen.queryByRole("radiogroup", { name: "Kiểu tương tác" })).toBeNull();
+    expect(screen.queryByLabelText(/Nội dung bình luận/)).toBeNull();
+    expect(screen.queryByLabelText(/Hướng dẫn giọng điệu/)).toBeNull();
+    expect(screen.queryByText(/Tag thêm acc/)).toBeNull();
+    expect(screen.queryAllByPlaceholderText("@handle")).toHaveLength(0);
+    expect(screen.getByLabelText("Phone A")).toBeChecked();
+
+    await clickRun();
+    await waitFor(() => expect(startThread).toHaveBeenCalledTimes(1));
+    const request = (startThread.mock.calls as unknown as Array<[ThreadCampaignRequest]>)[0][0];
+    expect(request.actorUdids).toEqual(["actor-a"]);
+    expect(request.actions).toEqual({ like: true, comment: false, save: true });
+    expect(request).not.toHaveProperty("likeTarget");
+  });
+
+  it("renders as an embedded workspace without popup chrome", () => {
+    render(
+      <InteractionPopup
+        metas={noMeta}
+        devices={devices}
+        selected={[]}
+        surface="page"
+      />,
+    );
+
+    const workspace = screen.getByRole("region", { name: "Không gian Tương tác" });
+    expect(workspace).toHaveClass("interaction-workspace");
+    expect(workspace.querySelector("[style*='translate']")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Đóng" })).toBeNull();
+    expect(screen.getByRole("tab", { name: "Thiết lập" })).toBeVisible();
+    expect(screen.getByRole("tab", { name: "Theo dõi" })).toBeVisible();
+  });
+
+  it("moves and activates workspace tabs with the complete horizontal keyboard pattern", () => {
+    render(
+      <InteractionPopup
+        metas={noMeta}
+        devices={devices}
+        selected={[]}
+        surface="page"
+      />,
+    );
+
+    const setup = screen.getByRole("tab", { name: "Thiết lập" });
+    const monitor = screen.getByRole("tab", { name: "Theo dõi" });
+    for (const tab of [setup, monitor]) {
+      const panel = document.getElementById(tab.getAttribute("aria-controls")!);
+      expect(panel).toHaveAttribute("role", "tabpanel");
+      expect(panel).toHaveAttribute("aria-labelledby", tab.id);
+    }
+    setup.focus();
+    fireEvent.keyDown(setup, { key: "ArrowRight" });
+    expect(monitor).toHaveFocus();
+    expect(monitor).toHaveAttribute("aria-selected", "true");
+
+    fireEvent.keyDown(monitor, { key: "Home" });
+    expect(setup).toHaveFocus();
+    expect(setup).toHaveAttribute("aria-selected", "true");
+
+    fireEvent.keyDown(setup, { key: "End" });
+    expect(monitor).toHaveFocus();
+    fireEvent.keyDown(monitor, { key: "ArrowLeft" });
+    expect(setup).toHaveFocus();
+  });
+
   it("parses multiline links and submits every selected actor", async () => {
     render(<InteractionPopup metas={noMeta} devices={devices} selected={[]} onClose={() => undefined} />);
     await pasteLink();
@@ -300,6 +518,8 @@ describe("InteractionPopup", () => {
         ?.querySelector(".tile-num")?.textContent;
     expect(numberOn("Máy kho")).toBe("3");
     expect(numberOn("Phone A")).toBe("11");
+    expect(screen.getByRole("textbox", { name: "Tài khoản TikTok của Máy kho" })).toBeVisible();
+    expect(screen.getByRole("textbox", { name: "Tài khoản TikTok của Phone A" })).toBeVisible();
     // And no model string anywhere in the panel.
     for (const model of ["iPhone 8", "Redmi Note 12"]) {
       expect(screen.queryByText(model)).toBeNull();
@@ -687,7 +907,8 @@ describe("InteractionPopup", () => {
       { views: number | null; likes: number | null; comments: number | null },
       number,
       boolean,
-    ];
+];
+
     // One phone answers a question about the post; the fleet size is what bounds a like target.
     expect(call[0]).toBe("actor-a");
     expect(call[2]).toEqual({ views: 1500, likes: 50, comments: null });

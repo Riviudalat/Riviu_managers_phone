@@ -25,6 +25,7 @@ import type {
 import { createFlowNode } from "../../flow/model";
 import { toCanvas, type FlowCanvasEdge, type FlowCanvasNode } from "../../flow/graph";
 import { FlowActionNode } from "./FlowActionNode";
+import { ACTION_PRESENTATION } from "./actionPresentation";
 import { FLOW_ACTION_MIME } from "./FlowPalette";
 import { pushToast } from "../../toastStore";
 
@@ -257,13 +258,17 @@ function FlowCanvasInner(props: FlowCanvasProps) {
     }
     const offered = props.catalog.find((action) => action.kind === kind);
     if (!offered) {
-      pushToast("warn", "Hành động không có trong danh mục", `Kind: ${kind}`);
+      pushToast("warn", "Hành động không có trong danh mục", "Flow này chứa một loại hành động chưa được hỗ trợ.");
       return;
     }
     if (offered.disabledReason !== null) {
       // The palette already sets `disabled` and shows this text as a tooltip, but a tooltip is
       // not an answer to a gesture that just failed.
-      pushToast("warn", `Chưa dùng được: ${offered.label}`, offered.disabledReason);
+      pushToast(
+        "warn",
+        `Chưa dùng được: ${ACTION_PRESENTATION[kind]?.label ?? "Hành động"}`,
+        "Thiết bị đã chọn chưa đáp ứng điều kiện của hành động này.",
+      );
       return;
     }
     const position = screenToFlowPosition({ x: event.clientX, y: event.clientY });

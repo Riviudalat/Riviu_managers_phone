@@ -1,8 +1,8 @@
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { NurturePopup } from "./NurturePopup";
-import type { DeviceMeta, NurtureSessionStatus, NurtureSettings } from "../types";
+import type { DeviceInfo, DeviceMeta, NurtureSessionStatus, NurtureSettings } from "../types";
 
 /**
  * Render tests for the redesigned panel, and they exist because a screenshot could not
@@ -20,6 +20,14 @@ import type { DeviceMeta, NurtureSessionStatus, NurtureSettings } from "../types
  * the subject words. The help control has its own name and is exercised independently below.
  */
 const saved = vi.hoisted(() => ({ saveSettings: vi.fn() }));
+const profileControl = vi.hoisted(() => ({ render: vi.fn() }));
+
+vi.mock("./AutomationProfileControl", () => ({
+  AutomationProfileControl: (props: unknown) => {
+    profileControl.render(props);
+    return <div data-testid="nurture-profile-control" />;
+  },
+}));
 
 /** The per-device ring, faked. Hoisted so the `../api` factory below can close over it. */
 const logBook = vi.hoisted(() => ({
@@ -36,6 +44,7 @@ const settings: NurtureSettings = {
   numVideos: 120,
   numRounds: 1,
   likeProb: 35,
+  saveProb: 0,
   commentProb: 0,
   followProb: 3,
   frenzyProb: 6,
@@ -59,6 +68,7 @@ const settings: NurtureSettings = {
   scheduleDurationMinutes: 150,
   scheduleUdids: [],
   likeEnabled: true,
+  saveEnabled: false,
   commentEnabled: true,
   followEnabled: true,
   frenzyEnabled: true,
@@ -85,6 +95,15 @@ vi.mock("../api", () => ({
   nurtureStart: vi.fn(async () => undefined),
   nurtureStop: vi.fn(async () => undefined),
   nurtureTestApi: vi.fn(async () => null),
+  nurtureListCommentAttempts: vi.fn(async () => []),
+  nurtureCostSummary: vi.fn(async () => ({
+    todayComments: 0,
+    todayPromptTokens: 0,
+    todayCompletionTokens: 0,
+    totalComments: 0,
+    totalPromptTokens: 0,
+    totalCompletionTokens: 0,
+  })),
   listenRiviuEvents: vi.fn(async () => () => undefined),
 }));
 
@@ -107,9 +126,13 @@ const blankStatus: NurtureSessionStatus = {
   videosDone: 0,
   swipeAttempts: 0,
   likeAttempts: 0,
+  saveAttempts: 0,
+  saveNoops: 0,
+  saveUncertain: 0,
   commentAttempts: 0,
   followAttempts: 0,
   likes: 0,
+  saves: 0,
   comments: 0,
   follows: 0,
   lastMessage: "",
@@ -168,7 +191,7 @@ async function openWithRow(
   );
 }
 
-const devices = [
+const devices: DeviceInfo[] = [
   {
     udid: "mock-1",
     name: "iPhone Mock 01",
@@ -179,7 +202,7 @@ const devices = [
     status: "ready",
     wdaReady: true,
   },
-] as never[];
+];
 
 function open(metas: Map<string, DeviceMeta> = new Map()) {
   render(
@@ -210,6 +233,318 @@ const slider = (name: string) => screen.getByLabelText(`${name} thanh kéo phầ
 const box = (name: string) => screen.getByLabelText(`${name} phần trăm`);
 
 describe("NurturePopup", () => {
+  it("shows a typed bootstrap error and retries without remounting the workspace", async () => {
+    const api = await import("../api");
+    vi.mocked(api.nurtureGetSettings)
+      .mockRejectedValueOnce(new Error("settings database unavailable"))
+      .mockResolvedValue(settings);
+
+    render(
+      <NurturePopup
+        devices={devices}
+        selected={[]}
+        metas={new Map()}
+        surface="page"
+      />,
+    );
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("settings database unavailable");
+    expect(screen.queryByRole("tab", { name: "Thiết lập" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Thử tải lại Nuôi TikTok" }));
+
+    expect(await screen.findByRole("tab", { name: "Thiết lập" })).toBeVisible();
+    expect(api.nurtureGetSettings).toHaveBeenCalledTimes(2);
+  });
+
+  it("renders as an embedded workspace without popup chrome", async () => {
+    render(
+      <NurturePopup
+        devices={devices}
+        selected={[]}
+        metas={new Map()}
+        surface="page"
+      />,
+    );
+
+    const workspace = screen.getByRole("region", { name: "Không gian Nuôi TikTok" });
+    expect(workspace).toHaveClass("nurture-workspace");
+    expect(workspace.querySelector("[style*='translate']")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Đóng" })).toBeNull();
+    await waitFor(() => expect(screen.getByRole("tab", { name: "Thiết lập" })).toBeVisible());
+  });
+
+  it("offers a target-bound Nurture profile only on page setup", async () => {
+    const targetRef = { type: "group", groupId: "group-a" } as const;
+    render(
+      <NurturePopup
+        devices={devices}
+        selected={[]}
+        targetUdids={["mock-1"]}
+        targetRef={targetRef}
+        metas={new Map()}
+        surface="page"
+      />,
+    );
+
+    await screen.findByTestId("nurture-profile-control");
+    const props = profileControl.render.mock.calls.at(-1)?.[0];
+    expect(props).toMatchObject({
+      kind: "nurture",
+      target: targetRef,
+      defaultName: "Hồ sơ Nuôi TikTok",
+      config: {
+        schemaVersion: 1,
+        durationMinutes: settings.scheduleDurationMinutes,
+        settings: { saveEnabled: false, saveProb: 0 },
+      },
+    });
+    expect(JSON.stringify(props)).not.toContain("apiKey");
+
+    fireEvent.click(screen.getByRole("tab", { name: "Theo dõi" }));
+    expect(screen.queryByTestId("nurture-profile-control")).toBeNull();
+  });
+
+  it("keeps automation profiles out of the legacy popup surface", async () => {
+    render(
+      <NurturePopup
+        devices={devices}
+        selected={[]}
+        targetRef={{ type: "all" }}
+        metas={new Map()}
+        onClose={() => undefined}
+      />,
+    );
+
+    await screen.findByRole("tab", { name: "Hành vi" });
+    expect(screen.queryByTestId("nurture-profile-control")).toBeNull();
+  });
+
+  it("separates page settings from monitoring while keeping all three settings groups", async () => {
+    const api = await import("../api");
+    vi.mocked(api.nurtureSessionStatus).mockResolvedValueOnce([
+      { ...blankStatus, udid: "mock-1", running: true, lastMessage: "feed đã lên" },
+    ]);
+    render(
+      <NurturePopup
+        devices={devices}
+        selected={[]}
+        metas={new Map()}
+        surface="page"
+      />,
+    );
+
+    const workspace = screen.getByRole("region", { name: "Không gian Nuôi TikTok" });
+    const modes = await within(workspace).findByRole("tablist", {
+      name: "Chế độ Nuôi TikTok",
+    });
+    expect(within(modes).getAllByRole("tab").map((tab) => tab.textContent)).toEqual([
+      "Thiết lập",
+      "Theo dõi",
+    ]);
+    expect(within(modes).getByRole("tab", { name: "Thiết lập" })).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
+
+    const settingsTabs = within(workspace).getByRole("tablist", {
+      name: "Nhóm thiết lập Nuôi TikTok",
+    });
+    expect(within(settingsTabs).getAllByRole("tab").map((tab) => tab.textContent)).toEqual([
+      "Hành vi",
+      "AI",
+      "Bình luận",
+    ]);
+    expect(screen.queryByText("feed đã lên")).toBeNull();
+
+    fireEvent.click(within(modes).getByRole("tab", { name: "Theo dõi" }));
+    expect(within(modes).getByRole("tab", { name: "Theo dõi" })).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
+    const monitor = within(workspace).getByRole("tabpanel", { name: "Theo dõi" });
+    expect(monitor).toBeVisible();
+    expect(monitor).toHaveAttribute("aria-labelledby", "nurture-page-tab-monitor");
+    expect(within(workspace).queryByRole("tab", { name: "Hành vi" })).toBeNull();
+    expect(screen.getByText("feed đã lên")).toBeVisible();
+
+    fireEvent.click(within(modes).getByRole("tab", { name: "Thiết lập" }));
+    expect(within(workspace).getByRole("tab", { name: "Hành vi" })).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
+    expect(screen.queryByText("feed đã lên")).toBeNull();
+  });
+
+  it("provides complete keyboard and panel semantics for both Nurture tab levels", async () => {
+    render(
+      <NurturePopup
+        devices={devices}
+        selected={[]}
+        metas={new Map()}
+        surface="page"
+      />,
+    );
+
+    const workspace = screen.getByRole("region", { name: "Không gian Nuôi TikTok" });
+    const modes = await within(workspace).findByRole("tablist", {
+      name: "Chế độ Nuôi TikTok",
+    });
+    const setup = within(modes).getByRole("tab", { name: "Thiết lập" });
+    const monitor = within(modes).getByRole("tab", { name: "Theo dõi" });
+    expect(setup).toHaveAttribute("tabindex", "0");
+    expect(monitor).toHaveAttribute("tabindex", "-1");
+    for (const mode of [setup, monitor]) {
+      expect(document.getElementById(mode.getAttribute("aria-controls")!)).toHaveAttribute(
+        "role",
+        "tabpanel",
+      );
+    }
+
+    setup.focus();
+    fireEvent.keyDown(setup, { key: "ArrowRight" });
+    expect(monitor).toHaveFocus();
+    expect(monitor).toHaveAttribute("aria-selected", "true");
+    const monitorPanel = document.getElementById(monitor.getAttribute("aria-controls")!);
+    expect(monitorPanel).toHaveAttribute("role", "tabpanel");
+    expect(monitorPanel).toHaveAttribute("aria-labelledby", monitor.id);
+
+    fireEvent.keyDown(monitor, { key: "Home" });
+    expect(setup).toHaveFocus();
+    expect(setup).toHaveAttribute("aria-selected", "true");
+    fireEvent.keyDown(setup, { key: "End" });
+    expect(monitor).toHaveFocus();
+    fireEvent.keyDown(monitor, { key: "ArrowLeft" });
+    expect(setup).toHaveFocus();
+
+    const settingsTabs = within(workspace).getByRole("tablist", {
+      name: "Nhóm thiết lập Nuôi TikTok",
+    });
+    const behaviour = within(settingsTabs).getByRole("tab", { name: "Hành vi" });
+    const ai = within(settingsTabs).getByRole("tab", { name: "AI" });
+    const comments = within(settingsTabs).getByRole("tab", { name: "Bình luận" });
+    expect(behaviour).toHaveAttribute("tabindex", "0");
+    expect(ai).toHaveAttribute("tabindex", "-1");
+    expect(comments).toHaveAttribute("tabindex", "-1");
+    for (const settingsTab of [behaviour, ai, comments]) {
+      expect(document.getElementById(settingsTab.getAttribute("aria-controls")!)).toHaveAttribute(
+        "aria-labelledby",
+        settingsTab.id,
+      );
+    }
+
+    behaviour.focus();
+    fireEvent.keyDown(behaviour, { key: "ArrowRight" });
+    expect(ai).toHaveFocus();
+    expect(ai).toHaveAttribute("aria-selected", "true");
+    fireEvent.keyDown(ai, { key: "End" });
+    expect(comments).toHaveFocus();
+    fireEvent.keyDown(comments, { key: "ArrowRight" });
+    expect(behaviour).toHaveFocus();
+    fireEvent.keyDown(behaviour, { key: "ArrowLeft" });
+    expect(comments).toHaveFocus();
+    fireEvent.keyDown(comments, { key: "Home" });
+    expect(behaviour).toHaveFocus();
+  });
+
+  it("opens page monitoring after a nurture run starts", async () => {
+    const api = await import("../api");
+    saved.saveSettings.mockResolvedValueOnce(settings);
+    render(
+      <NurturePopup
+        devices={devices}
+        selected={[]}
+        metas={new Map()}
+        surface="page"
+      />,
+    );
+
+    const monitor = await screen.findByRole("tab", { name: "Theo dõi" });
+    expect(monitor).toHaveAttribute("aria-selected", "false");
+    fireEvent.click(screen.getByRole("button", { name: "Bắt đầu" }));
+
+    await waitFor(() => expect(api.nurtureStart).toHaveBeenCalledWith(["mock-1"]));
+    await waitFor(() => expect(monitor).toHaveAttribute("aria-selected", "true"));
+    expect(screen.getByRole("tabpanel", { name: "Theo dõi" })).toBeVisible();
+  });
+
+  it("keeps Start disabled when the resolved page target group is empty", async () => {
+    const api = await import("../api");
+    render(
+      <NurturePopup
+        devices={devices}
+        selected={[]}
+        targetUdids={[]}
+        metas={new Map()}
+        surface="page"
+      />,
+    );
+
+    const start = await screen.findByRole("button", { name: "Bắt đầu" });
+    expect(start).toBeDisabled();
+    fireEvent.click(start);
+    expect(api.nurtureStart).not.toHaveBeenCalled();
+  });
+
+  it("stops the devices captured by Start even after the page target changes", async () => {
+    const api = await import("../api");
+    const second = { ...devices[0], udid: "mock-2", name: "iPhone Mock 02" };
+    vi.mocked(api.nurtureSessionStatus).mockResolvedValue([
+      { ...blankStatus, udid: "mock-2", running: true },
+    ]);
+    saved.saveSettings.mockResolvedValue(settings);
+    const { rerender } = render(
+      <NurturePopup
+        devices={[devices[0], second]}
+        selected={[]}
+        targetUdids={["mock-1"]}
+        metas={new Map()}
+        surface="page"
+      />,
+    );
+
+    await screen.findByRole("button", { name: "Bắt đầu" });
+    fireEvent.click(screen.getByRole("button", { name: "Bắt đầu" }));
+    await waitFor(() => expect(api.nurtureStart).toHaveBeenCalledWith(["mock-1"]));
+
+    rerender(
+      <NurturePopup
+        devices={[devices[0], second]}
+        selected={[]}
+        targetUdids={["mock-2"]}
+        metas={new Map()}
+        surface="page"
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Dừng" }));
+
+    await waitFor(() => expect(api.nurtureStop).toHaveBeenCalledTimes(1));
+    expect(api.nurtureStop).toHaveBeenCalledWith(["mock-1"]);
+  });
+
+  it("keeps Stop available from the Start snapshot while live status is still empty", async () => {
+    const api = await import("../api");
+    vi.mocked(api.nurtureSessionStatus).mockResolvedValue([]);
+    saved.saveSettings.mockResolvedValue(settings);
+    render(
+      <NurturePopup
+        devices={devices}
+        selected={[]}
+        targetUdids={["mock-1"]}
+        metas={new Map()}
+        surface="page"
+      />,
+    );
+
+    const start = await screen.findByRole("button", { name: "Bắt đầu" });
+    expect(screen.getByRole("button", { name: "Dừng" })).toBeDisabled();
+    fireEvent.click(start);
+    await waitFor(() => expect(api.nurtureStart).toHaveBeenCalledWith(["mock-1"]));
+    const stop = screen.getByRole("button", { name: "Dừng" });
+    expect(stop).toBeEnabled();
+    fireEvent.click(stop);
+    await waitFor(() => expect(api.nurtureStop).toHaveBeenCalledWith(["mock-1"]));
+  });
+
   it("puts the device log in its own tab beside the three settings tabs", async () => {
     await openWithRow(true, {}, false);
 
@@ -220,6 +555,16 @@ describe("NurturePopup", () => {
     fireEvent.click(screen.getByRole("tab", { name: "Log" }));
     expect(screen.getByText("feed đã lên")).toBeVisible();
     expect(screen.queryByText("đang chạy · Lưu để áp ngay")).toBeNull();
+  });
+
+  it.each([
+    ["save", "Đang lưu"],
+    ["save skip: state unreadable", "Bỏ lưu: không đọc được trạng thái"],
+    ["save fail: audit unavailable", "Lưu lỗi: không ghi được nhật ký"],
+    ["save uncertain: card changed", "Lưu chưa chắc chắn: thẻ đã đổi"],
+  ])("localizes the Save status %s", async (raw, translated) => {
+    await openWithRow(true, { lastMessage: raw });
+    expect(screen.getByText(translated)).toBeVisible();
   });
 
   it("labels a log row with the operator's device number and name, never only the model", async () => {
@@ -260,15 +605,15 @@ describe("NurturePopup", () => {
     expect(screen.getByLabelText(/Lịch tự chạy/, { selector: "input" })).toBeVisible();
     // The AI group is not merely collapsed, it is not rendered — which is the point of
     // tabs over the three stacked collapsibles this replaced.
-    expect(screen.queryByLabelText(/^Base URL/)).toBeNull();
+    expect(screen.queryByLabelText(/^Địa chỉ API/)).toBeNull();
 
     fireEvent.click(screen.getByRole("tab", { name: "AI" }));
-    expect(screen.getByLabelText(/^Base URL/)).toBeVisible();
-    expect(screen.getByLabelText(/^Model/)).toBeVisible();
-    expect(screen.getByLabelText(/^API key/)).toBeVisible();
+    expect(screen.getByLabelText(/^Địa chỉ API/)).toBeVisible();
+    expect(screen.getByLabelText(/^Mô hình/)).toBeVisible();
+    expect(screen.getByLabelText(/^Khóa API/)).toBeVisible();
     expect(screen.getByLabelText(/^Tối đa từ/)).toBeVisible();
     expect(screen.getByLabelText(/^Định hướng giọng điệu/)).toBeVisible();
-    expect(screen.getByRole("button", { name: /Test API/ })).toBeVisible();
+    expect(screen.getByRole("button", { name: /Kiểm tra API/ })).toBeVisible();
 
     // Back to Hành vi: the schedule's own fields are the empty-window fallback, which is
     // still a real mode — no windows means one cadence, all day.
@@ -277,13 +622,23 @@ describe("NurturePopup", () => {
     expect(screen.getByLabelText(/^Thời lượng \(phút\)/)).toBeVisible();
   });
 
+  it("keeps dated model benchmarks and farm anecdotes out of the operator UI", async () => {
+    await open();
+    fireEvent.click(screen.getByRole("tab", { name: "AI" }));
+
+    expect(screen.queryByText(/19\/08\/2026/)).toBeNull();
+    expect(screen.queryByText(/14 comment gửi/)).toBeNull();
+    expect(screen.queryByText(/max_tokens/)).toBeNull();
+  });
+
   it("gives every feature its own switch, separate from its percentage", async () => {
     await open();
     // The switch and the number are two controls, not one: turning a feature off must not
     // destroy the tuned percentage.
-    for (const name of ["Thích", "Bình luận", "Follow", "Vuốt nhanh"]) {
+    for (const name of ["Thích", "Bình luận", "Theo dõi", "Vuốt nhanh"]) {
       expect(screen.getByLabelText(`Bật ${name}`)).toBeChecked();
     }
+    expect(screen.getByLabelText("Bật Lưu")).not.toBeChecked();
     const like = screen.getByLabelText("Bật Thích");
     fireEvent.click(like);
     expect(like).not.toBeChecked();
@@ -331,8 +686,9 @@ describe("NurturePopup", () => {
       "Giới hạn video",
       "Vòng",
       "Thích",
+      "Lưu",
       "Bình luận",
-      "Follow",
+      "Theo dõi",
       "Vuốt nhanh",
       "Xem min",
       "Xem max",
@@ -351,18 +707,18 @@ describe("NurturePopup", () => {
     // Help is operable, not decorative: screen-reader and keyboard users receive its explicit
     // name while the adjacent input retains its own label.
     expect(screen.getByRole("button", { name: "Giải thích Mỏi dần" })).toBe(info("Mỏi dần"));
-    for (const name of ["Thích", "Bình luận", "Follow", "Vuốt nhanh"]) {
-      // The four feature rows name their switch explicitly, so their names are provably
+    for (const name of ["Thích", "Lưu", "Bình luận", "Theo dõi", "Vuốt nhanh"]) {
+      // The feature rows name their switch explicitly, so their names are provably
       // untouched by the glyph rather than merely matched loosely.
       expect(screen.getByLabelText(`Bật ${name}`)).toBeInTheDocument();
       expect(screen.getByLabelText(`${name} phần trăm`)).toBeInTheDocument();
     }
 
     fireEvent.click(screen.getByRole("tab", { name: "AI" }));
-    for (const name of ["Base URL", "Model", "API key", "Ngôn ngữ", "Tối đa từ", "Định hướng giọng điệu"]) {
+    for (const name of ["Địa chỉ API", "Mô hình", "Khóa API", "Ngôn ngữ", "Tối đa từ", "Định hướng giọng điệu"]) {
       expect(info(name)).toBeVisible();
     }
-    expect(screen.getByLabelText(/^Base URL/)).toBeVisible();
+    expect(screen.getByLabelText(/^Địa chỉ API/)).toBeVisible();
 
     fireEvent.click(screen.getByRole("tab", { name: "Hành vi" }));
     for (const name of ["Lịch tự chạy", "Mỗi (phút)", "Thời lượng (phút)"]) {
@@ -404,7 +760,7 @@ describe("NurturePopup", () => {
     const api = await import("../api");
     await open();
     fireEvent.click(screen.getByRole("tab", { name: "AI" }));
-    fireEvent.click(screen.getByRole("button", { name: /Test API/ }));
+    fireEvent.click(screen.getByRole("button", { name: /Kiểm tra API/ }));
 
     await waitFor(() => expect(api.nurtureTestApi).toHaveBeenCalled());
     expect(burst).toHaveBeenCalledWith("mock-1");
@@ -415,162 +771,38 @@ describe("NurturePopup", () => {
   });
 });
 
-/**
- * The four interaction rates share one 100% budget, dragged rather than typed.
- *
- * The arithmetic itself is proved in `nurtureBudget.test.ts` against the pure module. What
- * needs a render is the wiring: that each row got a slider, that a slider's `max` is that
- * row's ceiling and not a flat 100, that dragging clamps instead of stealing from a
- * neighbour, and that a config already over the budget can still be brought back.
- */
-describe("the shared 100% budget", () => {
-  it("tells every rate what the other three leave free, without rescaling it", async () => {
-    // 35 + 0 + 3 + 6 = 44 spent, so Thích may reach 100 - 9 = 91 and no further.
+describe("independent nurture rates", () => {
+  it("gives every public action and pacing rate its own complete 0..100 range", async () => {
     await open();
-    expect(slider("Thích")).toHaveAttribute("data-ceiling", "91");
-    expect(slider("Bình luận")).toHaveAttribute("data-ceiling", "56");
-    expect(slider("Follow")).toHaveAttribute("data-ceiling", "59");
-    expect(slider("Vuốt nhanh")).toHaveAttribute("data-ceiling", "62");
-    expect(screen.getByText("Còn 56% / 100%")).toBeVisible();
-
-    // The ceiling is drawn on the track and enforced on change; it is NOT the slider's `max`.
-    // With `max` set to the ceiling, dragging one row rescaled the others and their thumbs
-    // slid across the track while their numbers never moved — see "one row's thumb" below.
-    for (const name of ["Thích", "Bình luận", "Follow", "Vuốt nhanh"]) {
+    for (const name of ["Thích", "Lưu", "Bình luận", "Theo dõi", "Vuốt nhanh"]) {
+      expect(slider(name)).toHaveAttribute("min", "0");
       expect(slider(name)).toHaveAttribute("max", "100");
+      expect(slider(name)).toHaveAttribute("data-ceiling", "100");
     }
+    expect(screen.queryByText(/Còn .*\/ 100%/)).toBeNull();
   });
 
-  it("lets the other three share what one leaves, to the last point", async () => {
-    // The operator's own example: one at 90 leaves 10, three at 3 leaves one able to reach 4.
-    await openWithRates(90, 3, 3, 0);
-    expect(slider("Vuốt nhanh")).toHaveAttribute("data-ceiling", "4");
-
-    fireEvent.change(slider("Vuốt nhanh"), { target: { value: "4" } });
-    expect(box("Vuốt nhanh")).toHaveValue(4);
-    expect(screen.getByText("Còn 0% / 100%")).toBeVisible();
-    // One point further is refused, which is the clamp and not the input's own range.
-    fireEvent.change(slider("Vuốt nhanh"), { target: { value: "5" } });
-    expect(box("Vuốt nhanh")).toHaveValue(4);
-  });
-
-  it("moves one row's thumb only when that row's own number moves", async () => {
-    // The bug the operator reported: "kéo thanh thứ 2 thì thanh 1 cũng bị kéo theo". Follow
-    // sat at 3 on a scale of 0..3, so its thumb was hard right; freeing 49 points rescaled it
-    // to 0..52 and the thumb slid left on its own. The number was right the whole time, which
-    // is what made it a lie rather than an error — the control moved without being edited.
-    await openWithRates(97, 0, 3, 0);
-    const followThumb = () => slider("Follow").style.getPropertyValue("--fill");
-    const before = followThumb();
-    expect(before).toBe("0.03");
-
-    fireEvent.change(slider("Thích"), { target: { value: "48" } });
-    expect(box("Thích")).toHaveValue(48);
-    // Follow's ceiling grew — that is real and it is drawn — but its own position did not.
-    expect(slider("Follow")).toHaveAttribute("data-ceiling", "52");
-    expect(followThumb()).toBe(before);
-    expect(box("Follow")).toHaveValue(3);
-  });
-
-  it("clamps a drag past the free amount instead of taking it off a neighbour", async () => {
+  it("lets all public actions and frenzy be 100 without changing neighbours", async () => {
     await open();
-    fireEvent.change(slider("Thích"), { target: { value: "95" } });
-    // Stopped at its ceiling…
-    expect(box("Thích")).toHaveValue(91);
-    // …and the three the operator did not touch are exactly as they were. A budget that
-    // rebalances neighbours behind the operator's back destroys numbers they tuned.
-    expect(box("Bình luận")).toHaveValue(0);
-    expect(box("Follow")).toHaveValue(3);
-    expect(box("Vuốt nhanh")).toHaveValue(6);
-  });
-
-  it("keeps the slider and the number box showing the same value", async () => {
-    // Two controls over one number: either may move it, and neither may lie about it.
-    await open();
-    fireEvent.change(slider("Follow"), { target: { value: "20" } });
-    expect(box("Follow")).toHaveValue(20);
-    fireEvent.change(box("Follow"), { target: { value: "12" } });
-    expect(slider("Follow")).toHaveValue("12");
-  });
-
-  it("offers a way back for a config saved before the budget existed", async () => {
-    // The measured shape of the operator's own settings: 100 + 28 + 3 + 0 = 131. Every
-    // ceiling is 0 in that state, so without the button below no slider moves and the panel
-    // is a dead end.
-    await openWithRates(100, 28, 3, 0);
-    expect(screen.getByRole("alert")).toHaveTextContent("cộng lại đang là 131%");
-    expect(screen.getByText("Đang dùng 131% / 100%")).toBeVisible();
-
-    fireEvent.click(screen.getByRole("button", { name: "đưa về 100%" }));
-    // Taken off the largest, so the two small tuned rates survive.
-    expect(box("Thích")).toHaveValue(69);
-    expect(box("Bình luận")).toHaveValue(28);
-    expect(box("Follow")).toHaveValue(3);
+    for (const name of ["Thích", "Lưu", "Bình luận", "Theo dõi", "Vuốt nhanh"]) {
+      fireEvent.change(slider(name), { target: { value: "100" } });
+      expect(box(name)).toHaveValue(100);
+    }
     expect(screen.queryByRole("alert")).toBeNull();
-    expect(screen.getByText("Còn 0% / 100%")).toBeVisible();
+    expect(box("Thích")).toHaveValue(100);
+    expect(box("Lưu")).toHaveValue(100);
+    expect(box("Bình luận")).toHaveValue(100);
+    expect(box("Theo dõi")).toHaveValue(100);
+    expect(box("Vuốt nhanh")).toHaveValue(100);
   });
 
-  it("refuses to save an over-budget config, and says by how much", async () => {
-    const api = await import("../api");
-    await openWithRates(100, 28, 3, 0);
-    fireEvent.click(screen.getByRole("button", { name: "Lưu" }));
-
-    await waitFor(() =>
-      expect(screen.getByText(/dùng chung 100%, đang là 131%/)).toBeVisible(),
-    );
-    expect(api.nurtureSaveSettings).not.toHaveBeenCalled();
-  });
-});
-
-/**
- * A feature the operator switched off.
- *
- * The engine folds the switch into the probability — `into_effective` zeroes `like_prob` when
- * `like_enabled` is false — so a switched-off rate produces nothing and must therefore cost
- * nothing. Charging it would reserve budget for posts that provably never happen.
- */
-describe("a rate the operator switched off", () => {
-  it("gives its percent back to the other three the moment it is switched off", async () => {
+  it("keeps a switched-off rate editable and preserves its tuned number", async () => {
     await open();
-    // 35 + 0 + 3 + 6 = 44.
-    expect(screen.getByText("Còn 56% / 100%")).toBeVisible();
-
-    fireEvent.click(screen.getByLabelText("Bật Vuốt nhanh"));
-    expect(screen.getByText("Còn 62% / 100%")).toBeVisible();
-    // Its 6 is kept, not zeroed — that is the whole point of a switch beside a number.
-    expect(box("Vuốt nhanh")).toHaveValue(6);
-    // And the freed 6 is now reachable by a rate that is on.
-    expect(slider("Thích")).toHaveAttribute("data-ceiling", "97");
-  });
-
-  it("stays draggable while off, past what is left free", async () => {
-    // 100 spent by Thích alone, so switching Follow off leaves nothing for it. Held to the
-    // budget it would be frozen at 0, and an operator who switched a feature off to come back
-    // to it later would find the number they were protecting taken away.
-    await openWithRates(100, 0, 3, 0);
-    fireEvent.click(screen.getByLabelText("Bật Follow"));
-    expect(screen.getByText("Còn 0% / 100%")).toBeVisible();
-    expect(slider("Follow")).toHaveAttribute("data-ceiling", "0");
-
-    fireEvent.change(slider("Follow"), { target: { value: "40" } });
-    expect(box("Follow")).toHaveValue(40);
-    // It is parked, not spent: the readout does not move and nothing is over budget.
-    expect(screen.getByText("Còn 0% / 100%")).toBeVisible();
-    expect(screen.queryByRole("alert")).toBeNull();
-  });
-
-  it("says so when switching it back on no longer fits, instead of trimming it", async () => {
-    await openWithRates(97, 0, 3, 0);
-    const followSwitch = screen.getByLabelText("Bật Follow");
-    fireEvent.click(followSwitch);
-    fireEvent.change(slider("Follow"), { target: { value: "40" } });
-    fireEvent.click(followSwitch);
-
-    expect(screen.getByRole("alert")).toHaveTextContent("cộng lại đang là 137%");
-    // The number the operator just parked is still 40. Trimming the row they had only asked
-    // to *enable* would be the panel editing a tuned number behind them.
-    expect(box("Follow")).toHaveValue(40);
-    expect(box("Thích")).toHaveValue(97);
+    const saveSwitch = screen.getByLabelText("Bật Lưu");
+    expect(saveSwitch).not.toBeChecked();
+    fireEvent.change(slider("Lưu"), { target: { value: "73" } });
+    expect(box("Lưu")).toHaveValue(73);
+    expect(saveSwitch).not.toBeChecked();
   });
 
   it("does not demand an API key for comments it will never post", async () => {
@@ -592,6 +824,25 @@ describe("a rate the operator switched off", () => {
       commentProb: 20,
       commentEnabled: false,
     });
+  });
+
+  it("renders every typed Save outcome counter for each device", async () => {
+    await openWithRow(true, {
+      saveAttempts: 3,
+      saves: 2,
+      saveNoops: 4,
+      saveUncertain: 1,
+    });
+    const metrics = document.querySelector<HTMLElement>(".nurture-metrics");
+    expect(metrics).not.toBeNull();
+    expect(metrics).toHaveAttribute(
+      "title",
+      "đã xác nhận / đã thử — video · tim · lưu · bình luận · theo dõi",
+    );
+    expect(metrics!.textContent).toContain("2/3L");
+    expect(
+      screen.getByText("Lưu: 2 xác nhận · 3 lần chạm · 4 bỏ qua · 1 chưa chắc chắn"),
+    ).toBeVisible();
   });
 
   /**

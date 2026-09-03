@@ -40,7 +40,7 @@ function open(importLegacy: (scriptJson: string) => Promise<LegacyImportResult>,
   return onImport;
 }
 
-const importButton = () => screen.getByRole("button", { name: /Import/ });
+const importButton = () => screen.getByRole("button", { name: /Nhập/ });
 
 describe("FlowImportDialog", () => {
   it("refuses an oversized paste before it ever reaches the backend", async () => {
@@ -96,8 +96,12 @@ describe("FlowImportDialog", () => {
     fireEvent.click(importButton());
 
     await waitFor(() => expect(screen.getByLabelText("Chẩn đoán nhập")).toBeVisible());
-    expect(screen.getByText(/UnsupportedAction/)).toBeVisible();
-    expect(screen.getByText(/action 'shell' không có bản v2/)).toBeVisible();
+    const summary = screen.getByText("Bước 3: Không thể nhập hành động này.");
+    expect(summary).toBeVisible();
+    expect(summary.closest("details")).not.toHaveAttribute("open");
+    expect(summary.closest("details")).toHaveTextContent(
+      "UnsupportedAction: action 'shell' không có bản v2",
+    );
     expect(onImport).not.toHaveBeenCalled();
   });
 });
@@ -123,7 +127,7 @@ describe("an import the operator cancelled", () => {
     fireEvent.change(screen.getByLabelText("JSON script cũ"), {
       target: { value: '{"version":1,"steps":[]}' },
     });
-    fireEvent.click(screen.getByRole("button", { name: /Import/ }));
+    fireEvent.click(screen.getByRole("button", { name: /Nhập/ }));
     await waitFor(() => expect(importLegacy).toHaveBeenCalledTimes(1));
 
     fireEvent.click(screen.getByRole("button", { name: "Hủy" }));
@@ -144,8 +148,11 @@ describe("an import the operator cancelled", () => {
       ],
     }));
     open(importLegacy);
-    fireEvent.click(screen.getByRole("button", { name: /Import/ }));
-    expect(await screen.findByText(/Step 2: không nhập được/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /Nhập/ }));
+    const summary = await screen.findByText("Bước 2: Không thể nhập hành động này.");
+    expect(summary.closest("details")).toHaveTextContent(
+      "LegacyShapeUnsupported: không nhập được",
+    );
   });
 });
 
@@ -173,7 +180,7 @@ describe("the lifetime guard survives a StrictMode remount", () => {
     fireEvent.change(screen.getByLabelText("JSON script cũ"), {
       target: { value: '{"version":1,"steps":[]}' },
     });
-    fireEvent.click(screen.getByRole("button", { name: /Import/ }));
+    fireEvent.click(screen.getByRole("button", { name: /Nhập/ }));
 
     await waitFor(() => expect(onImport).toHaveBeenCalledWith(document));
   });

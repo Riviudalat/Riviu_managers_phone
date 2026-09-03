@@ -32,6 +32,21 @@
   min-width: 150px;
 }
 
+.flow-toolbar-group {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 4px;
+}
+
+.flow-toolbar-primary {
+  flex: 1 1 auto;
+}
+
+.flow-toolbar-actions {
+  margin-left: auto;
+}
+
 .flow-toolbar select,
 .flow-toolbar input,
 .flow-field input,
@@ -495,10 +510,8 @@
   white-space: nowrap;
 }
 
-/* Which output port an If Vision node took, and which node the row is -- both next to the action
- * name, both muted, because the action kind is what the eye scans for. */
-.flow-monitor-branch,
-.flow-monitor-node {
+/* The output port an If Vision node took stays muted because the action kind is what the eye scans for. */
+.flow-monitor-branch {
   color: var(--text-3);
 }
 
@@ -684,12 +697,28 @@
 
 @media (max-width: 1100px) {
   .flow-toolbar {
-    flex-wrap: wrap;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-rows: repeat(2, 32px);
+    min-height: 80px;
     overflow-x: visible;
     white-space: normal;
   }
 
-  .flow-run-command {
+  .flow-toolbar-primary {
+    grid-column: 1 / -1;
+  }
+
+  .flow-toolbar-primary .flow-name-input {
+    flex: 1 1 120px;
+    width: auto;
+  }
+
+  .flow-toolbar-separator {
+    display: none;
+  }
+
+  .flow-toolbar-actions {
     margin-left: 0;
   }
 

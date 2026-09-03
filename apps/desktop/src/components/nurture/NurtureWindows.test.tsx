@@ -15,8 +15,10 @@ const base = {
   numVideos: 30,
   numRounds: 1,
   likeProb: 20,
+  saveProb: 7,
   commentProb: 4,
   followProb: 2,
+  saveEnabled: true,
   scheduleEnabled: true,
   scheduleEveryMinutes: 240,
   scheduleDurationMinutes: 150,
@@ -50,6 +52,12 @@ const window8to11: NurtureWindow = {
 };
 
 describe("NurtureWindows", () => {
+  it("uses a Vietnamese label for the follow rate", () => {
+    setup([{ ...window8to11, behaviour: base }]);
+    expect(screen.getByText("Theo dõi %")).toBeVisible();
+    expect(screen.queryByText("Follow %")).toBeNull();
+  });
+
   /// With no windows the schedule runs all day, and that is a mode, not an unconfigured one.
   ///
   /// Every settings row written before this editor existed lands here, so the empty state has
@@ -117,11 +125,49 @@ describe("NurtureWindows", () => {
           numVideos: 30,
           numRounds: 1,
           likeProb: 20,
+          saveProb: 7,
+          saveEnabled: true,
           commentProb: 4,
           followProb: 2,
         },
       },
     ]);
+  });
+
+  it("defaults a legacy window Save switch off and persists an explicit revision", () => {
+    const legacy = {
+      numVideos: 30,
+      numRounds: 1,
+      likeProb: 20,
+      saveProb: 73,
+      commentProb: 4,
+      followProb: 2,
+    };
+    const patch = setup([{ ...window8to11, behaviour: legacy }]);
+
+    const save = screen.getByLabelText("Bật Lưu trong khung 1");
+    expect(save).not.toBeChecked();
+    fireEvent.click(save);
+    expect(patch).toHaveBeenCalledWith("scheduleWindows", [
+      {
+        ...window8to11,
+        behaviour: { ...legacy, saveEnabled: true },
+      },
+    ]);
+  });
+
+  it("renders a legacy window with no Save fields as disabled at zero percent", () => {
+    const legacy = {
+      numVideos: 30,
+      numRounds: 1,
+      likeProb: 20,
+      commentProb: 4,
+      followProb: 2,
+    };
+    setup([{ ...window8to11, behaviour: legacy }]);
+
+    expect(screen.getByLabelText("Bật Lưu trong khung 1")).not.toBeChecked();
+    expect(screen.getByLabelText("Lưu %")).toHaveValue(0);
   });
 
   /// A new window starts where the last one ended.

@@ -60,7 +60,7 @@ export function FlowPalette({
         );
         if (actions.length === 0) return null;
         return (
-          <section key={category} aria-label={category}>
+          <section key={category} aria-label={CATEGORY_LABELS[category]}>
             <h3>{CATEGORY_LABELS[category]}</h3>
             {actions.map((action) => {
               const presentation = ACTION_PRESENTATION[action.kind];

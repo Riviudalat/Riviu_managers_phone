@@ -9,6 +9,7 @@
  */
 import { interactionErrorVi } from "./interactionErrors";
 import type {
+  InteractionActionSet,
   ResolvedTikTokTarget,
   ThreadCampaignRequest,
   ThreadPlan,
@@ -41,7 +42,8 @@ export interface InteractionDraft {
   textSource: "ai" | "manual";
   instruction: string;
   manualText: string;
-  likeTarget: boolean;
+  /** Actions requested for each actor. At least one stays selected in the form. */
+  actions: InteractionActionSet;
   /** Each reply tags the account it answers — the fleet talking to itself. */
   mentionParent: boolean;
   mentionText: string;
@@ -58,7 +60,7 @@ export const DEFAULT_DRAFT: InteractionDraft = {
   textSource: "ai",
   instruction: "tự nhiên, ngắn, nói như người vừa xem xong",
   manualText: "",
-  likeTarget: false,
+  actions: { like: false, comment: true, save: false },
   mentionParent: false,
   mentionText: "",
   actors: [],
@@ -102,7 +104,7 @@ export function wholeNumber(value: string): number {
 
 /** Comments the operator typed: one per non-blank line, in order. */
 export function manualCommentsOf(draft: InteractionDraft): string[] {
-  if (draft.textSource !== "manual") return [];
+  if (!draft.actions.comment || draft.textSource !== "manual") return [];
   return draft.manualText
     .split(/\r?\n/)
     .map((line) => line.trim())
@@ -162,7 +164,7 @@ export function buildRequest(
     messageCount: effectiveMessageCount(draft, context.largestCohort),
     instruction: draft.instruction,
     maxWords: draft.maxWords,
-    ...requestShapeOf(draft.threadKind),
+    ...requestShapeOf(draft.actions.comment ? draft.threadKind : "standalone"),
     // **No cohort size is sent, so the actor list is always one cohort.**
     //
     // It used to be an advanced field, and it quietly outranked the thing above it: load a
@@ -173,9 +175,10 @@ export function buildRequest(
     // a single cohort: the group, whole.
     cohortSize: undefined,
     manualComments: context.purpose === "preview" ? [] : manualCommentsOf(draft),
-    likeTarget: draft.likeTarget,
-    mentionParent: draft.threadKind === "standalone" ? false : draft.mentionParent,
-    mentions: context.mentions,
+    actions: draft.actions,
+    mentionParent:
+      draft.actions.comment && draft.threadKind !== "standalone" ? draft.mentionParent : false,
+    mentions: draft.actions.comment ? context.mentions : [],
   };
 }
 
@@ -235,14 +238,15 @@ export function validateDraft(
   }
 
   const actors = context.actorUdids.length;
-  if (actors < 2 || actors > 64) {
+  const minimumActors = draft.actions.comment ? 2 : 1;
+  if (actors < minimumActors || actors > 64) {
     issues.push({
       field: "actors",
-      message: `Chọn từ 2 đến 64 máy làm actor (kể cả acc được tag) — đang chọn ${actors}`,
+      message: `Chọn từ ${minimumActors} đến 64 máy làm actor (kể cả acc được tag) — đang chọn ${actors}`,
     });
   }
 
-  if (draft.threadKind !== "standalone" && context.mixedThread) {
+  if (draft.actions.comment && draft.threadKind !== "standalone" && context.mixedThread) {
     issues.push({ field: "actors", message: MIXED_THREAD_REASON });
   }
 
@@ -259,7 +263,7 @@ export function validateDraft(
 
   // Advertised in a hint since the feature shipped and enforced nowhere, so the run started
   // and the backend refused it — `TooFewManualComments`, after the campaign row existed.
-  if (draft.textSource === "manual") {
+  if (draft.actions.comment && draft.textSource === "manual") {
     const pool = manualCommentsOf(draft).length;
     if (pool < messages) {
       issues.push({
@@ -269,7 +273,7 @@ export function validateDraft(
     }
   }
 
-  if (draft.messageCount !== null) {
+  if (draft.actions.comment && draft.messageCount !== null) {
     if (draft.messageCount < 2 || draft.messageCount > 64) {
       issues.push({
         field: "messageCount",
@@ -290,7 +294,7 @@ export function validateDraft(
     }
   }
 
-  if (draft.maxWords < 4 || draft.maxWords > 20) {
+  if (draft.actions.comment && (draft.maxWords < 4 || draft.maxWords > 20)) {
     issues.push({ field: "maxWords", message: "Số từ tối đa mỗi câu phải từ 4 đến 20" });
   }
 
@@ -330,7 +334,7 @@ const AI_COMMENTS_PER_LINK_ADVISORY = 8;
 export function draftWarnings(draft: InteractionDraft, context: ValidateContext): string[] {
   const warnings: string[] = [];
   const messages = effectiveMessageCount(draft, context.largestCohort);
-  if (draft.textSource === "ai" && messages >= AI_COMMENTS_PER_LINK_ADVISORY) {
+  if (draft.actions.comment && draft.textSource === "ai" && messages >= AI_COMMENTS_PER_LINK_ADVISORY) {
     warnings.push(
       `${messages} bình luận cho mỗi link là nhiều: AI phải nghĩ ra ${messages} câu khác nhau về cùng một bài, ` +
         "và cổng chất lượng sẽ loại bớt những câu chung chung. Bớt máy, thêm link, " +

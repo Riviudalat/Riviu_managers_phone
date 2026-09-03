@@ -39,14 +39,14 @@ export function FlowActionNode({ data, selected }: NodeProps<FlowCanvasNode>) {
       <div className="flow-node-summary">{summarizeAction(data.kind, data.config)}</div>
       {data.kind === "ifVision" ? (
         <>
-          <span className="flow-node-port-label flow-node-port-matched">matched</span>
+          <span className="flow-node-port-label flow-node-port-matched">khớp</span>
           <Handle
             type="source"
             position={Position.Right}
             id="matched"
             style={{ top: "38%" }}
           />
-          <span className="flow-node-port-label flow-node-port-unmatched">no match</span>
+          <span className="flow-node-port-label flow-node-port-unmatched">không khớp</span>
           <Handle
             type="source"
             position={Position.Right}

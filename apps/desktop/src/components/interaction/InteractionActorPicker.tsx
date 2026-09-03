@@ -14,6 +14,7 @@ export function InteractionActorPicker({
   hierarchyActors,
   deviceNumber,
   deviceLabel,
+  commentEnabled,
   threadsByGroup,
   actors,
   onToggle,
@@ -32,6 +33,8 @@ export function InteractionActorPicker({
   deviceNumber: Map<string, number>;
   /** What the operator calls it — `tileName`, so a rename lands here too. */
   deviceLabel: Map<string, string>;
+  /** Comment-only metadata stays out of Like/Save-only campaigns. */
+  commentEnabled: boolean;
   /**
    * Whether loading a group means anything for the campaign being set up.
    *
@@ -65,6 +68,10 @@ export function InteractionActorPicker({
   /// meaning everything. Borrowing it would have put a sentence on screen that is false.
   const [groups, setGroups] = useState<DeviceGroup[]>([]);
   useEffect(() => {
+    if (!commentEnabled) {
+      setGroups([]);
+      return;
+    }
     let alive = true;
     listGroups()
       .then((next) => {
@@ -75,31 +82,33 @@ export function InteractionActorPicker({
     return () => {
       alive = false;
     };
-  }, []);
+  }, [commentEnabled]);
 
   const choices = [...pixelActors, ...hierarchyActors];
 
   return (
     <div className="interaction-actors">
-      <label className="nu-field interaction-mention">
-        <span className="nu-label">
-          Tag thêm acc (@handle) — cách nhau bằng dấu cách hoặc phẩy
-        </span>
-        <input
-          type="text"
-          placeholder="@ann @bob"
-          spellCheck={false}
-          value={mentionText}
-          onChange={(event) => onMentionText(event.target.value)}
-        />
-      </label>
+      {commentEnabled && (
+        <label className="nu-field interaction-mention">
+          <span className="nu-label">
+            Tag thêm acc (@handle) — cách nhau bằng dấu cách hoặc phẩy
+          </span>
+          <input
+            type="text"
+            placeholder="@ann @bob"
+            spellCheck={false}
+            value={mentionText}
+            onChange={(event) => onMentionText(event.target.value)}
+          />
+        </label>
+      )}
       {/* What the tag actually does, and it is not one thing. Measured 24/08/2026: TikTok only
           links a mention that was picked from its own suggestion list, so the Android path
           types the handle as real key events, waits for the list and taps the exact row —
           which produces a real mention. A handle TikTok does not offer stays literal, and the
           iPhone path cannot reach that list at all. Saying "it becomes a link" flatly would be
           a promise the second and third cases break. */}
-      {mentions.length > 0 && (
+      {commentEnabled && mentions.length > 0 && (
         <p className="hint">
           {`Máy Android sẽ chọn ${mentions.map((m) => `@${m}`).join(" ")} từ danh sách gợi ý của TikTok để thành tag thật; handle nào TikTok không gợi ý ra thì chỉ còn là chữ (không báo cho acc đó). Máy iPhone luôn chỉ chèn chữ. Kết quả ghi lại ở từng dòng trong tab Theo dõi. `}
           {mentionActorCount > 0
@@ -107,7 +116,7 @@ export function InteractionActorPicker({
             : "Chưa có máy nào trong fleet khớp @handle, nên không máy nào được kéo vào bài."}
         </p>
       )}
-      {threadsByGroup && groups.length > 0 && (
+      {commentEnabled && threadsByGroup && groups.length > 0 && (
         <label className="nu-field">
           <span className="nu-label">Lấy từ nhóm</span>
           <select
@@ -196,16 +205,19 @@ export function InteractionActorPicker({
                   {/* The @handle this phone is logged into. Kept next to the phone so an
                       operator sets it once, here, and tagging it later pulls this phone into
                       the post. Blurring saves it to the device meta. */}
-                  <input
-                    type="text"
-                    className="interaction-handle"
+                  {commentEnabled && (
+                    <input
+                      type="text"
+                      className="interaction-handle"
                     placeholder="@handle"
                     spellCheck={false}
+                    aria-label={`Tài khoản TikTok của ${name}`}
                     title="Nick TikTok máy này đang đăng nhập — để tag thì máy này tự vào comment"
-                    value={handles[device.udid] ?? ""}
-                    onChange={(event) => onHandleChange(device.udid, event.target.value)}
-                    onBlur={(event) => onHandleBlur(device.udid, event.target.value)}
-                  />
+                      value={handles[device.udid] ?? ""}
+                      onChange={(event) => onHandleChange(device.udid, event.target.value)}
+                      onBlur={(event) => onHandleBlur(device.udid, event.target.value)}
+                    />
+                  )}
                 </div>
               );
             })}

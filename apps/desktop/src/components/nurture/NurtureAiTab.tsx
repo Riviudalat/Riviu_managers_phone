@@ -24,14 +24,6 @@ export function NurtureAiTab({ settings, patch, devices, targets, save, onMessag
   save: (next?: NurtureSettings) => Promise<boolean>;
   onMessage: (text: string | null) => void;
 }) {
-  /// What this project measured about the model currently typed in, if anything.
-  ///
-  /// Matched on the model string alone, not the pair: an operator pointing a proxy at the
-  /// same model is still running that model, and refusing to show the note because the host
-  /// differs would be withholding the one useful thing here.
-  const measured = COMMENT_MODEL_SUGGESTIONS.find(
-    (s) => s.model.toLowerCase() === settings.model.trim().toLowerCase(),
-  );
   const [apiTesting, setApiTesting] = useState(false);
   const [apiTest, setApiTest] = useState<NurtureApiTestResult | null>(null);
   const [testUdid, setTestUdid] = useState("");
@@ -66,12 +58,12 @@ export function NurtureAiTab({ settings, patch, devices, targets, save, onMessag
   };
 
   return (
-    <div className="nurture-sect" role="tabpanel">
+    <div className="nurture-sect">
       <label>
         <span className="nu-inline">
-          Base URL
+          Địa chỉ API
           <Info
-            of="Base URL"
+            of="Địa chỉ API"
             what="Endpoint tương thích OpenAI dùng để sinh bình luận. Đổi được trong lúc phiên đang chạy, áp từ bình luận kế tiếp."
           />
         </span>
@@ -88,9 +80,9 @@ export function NurtureAiTab({ settings, patch, devices, targets, save, onMessag
       </label>
       <label>
         <span className="nu-inline">
-          Model
+          Mô hình
           <Info
-            of="Model"
+            of="Mô hình"
             what="Tên model gửi kèm mỗi lần gọi endpoint ở trên. Bất kỳ endpoint tương thích OpenAI nào cũng chạy — danh sách gợi ý bên dưới chỉ là những cái dự án này đã đo thật."
           />
         </span>
@@ -107,16 +99,12 @@ export function NurtureAiTab({ settings, patch, devices, targets, save, onMessag
             <option key={s.model} value={s.model} />
           ))}
         </datalist>
-        {/* The measurement behind the currently-typed model, when there is one. Nothing is
-            gated on it — the vision capability is detected at runtime now, because the old
-            hardcoded host check went stale and blocked a provider that had shipped it. */}
-        {measured && <span className="hint">{measured.note}</span>}
       </label>
       <label>
         <span className="nu-inline">
-          API key
+          Khóa API
           <Info
-            of="API key"
+            of="Khóa API"
             what="Khoá của endpoint ở trên. Khoá được cất trong kho mật khẩu của hệ điều hành, không nằm trong file dữ liệu — nên panel này không hiện lại khoá đã lưu, chỉ báo là đã có. Gõ khoá mới để thay, xoá trắng ô rồi lưu để bỏ hẳn."
           />
         </span>
@@ -139,7 +127,7 @@ export function NurtureAiTab({ settings, patch, devices, targets, save, onMessag
             onChange={(e) => patch("commentLang", e.target.value)}
           >
             <option value="vi">Tiếng Việt</option>
-            <option value="en">English</option>
+            <option value="en">Tiếng Anh</option>
           </select>
         </label>
         <label>
@@ -176,7 +164,7 @@ export function NurtureAiTab({ settings, patch, devices, targets, save, onMessag
       <div className="nurture-api-test">
         <div className="nurture-api-test-row">
           <label>
-            Thiết bị test
+            Thiết bị kiểm thử
             <select
               value={testUdid || fallbackTestUdid}
               onChange={(event) => setTestUdid(event.target.value)}
@@ -195,23 +183,23 @@ export function NurtureAiTab({ settings, patch, devices, targets, save, onMessag
             className="primary nurture-api-test-button"
             disabled={!devices.length || apiTesting}
             onClick={() => void runApiTest()}
-            title="Gọi API trên frame hiện tại, không gửi comment"
+            title="Kiểm tra bằng khung hình hiện tại, không gửi bình luận"
           >
             <IconApi size={14} />
-            {apiTesting ? "Đang test…" : "Test API"}
+            {apiTesting ? "Đang kiểm tra…" : "Kiểm tra API"}
           </button>
         </div>
-        <p className="hint">Preview comment từ frame hiện tại · không gửi lên TikTok</p>
+        <p className="hint">Xem trước từ khung hình hiện tại · không gửi lên TikTok</p>
         {apiTest && (
           <div className="nurture-api-result" aria-live="polite">
-            <strong>Comment trả về</strong>
+            <strong>Bình luận đề xuất</strong>
             <p className="nurture-api-result-comment">“{apiTest.comment}”</p>
             <p className="nurture-api-result-meta">
               {apiTest.model} · {apiTest.baseUrlHost} · {evidenceLabel(apiTest)} · {apiTest.promptTokens} token vào / {apiTest.completionTokens} ra
             </p>
             <p className="hint">
-              Context {apiTest.contextConfidence}/100 · liên quan {apiTest.relevance}/100 · bằng chứng {apiTest.evidenceSupport}/100
-              {apiTest.caption ? ` · caption: ${apiTest.caption}` : ""}
+              Ngữ cảnh {apiTest.contextConfidence}/100 · liên quan {apiTest.relevance}/100 · bằng chứng {apiTest.evidenceSupport}/100
+              {apiTest.caption ? ` · chú thích: ${apiTest.caption}` : ""}
             </p>
           </div>
         )}

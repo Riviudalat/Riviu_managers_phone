@@ -268,16 +268,16 @@ describe("the compile preview has three answers, not two", () => {
     fireEvent.click(screen.getByRole("button", { name: "Kiểm tra Flow" }));
     const preview = screen.getByRole("dialog", { name: "Xem trước biên dịch" });
     await waitFor(() => expect(within(preview).getByText("Đang kiểm…")).toBeInTheDocument());
-    expect(within(preview).queryByText("Invalid")).toBeNull();
+    expect(within(preview).queryByText("Chưa hợp lệ")).toBeNull();
 
     // Deliberately not asserting the settled state through this same pending promise: the reducer
     // binds a validation result to the document epoch it was requested for, so a hand-resolved
     // fixture promise is not a faithful stand-in. The settled reading gets its own case below.
     release?.(compiled(savedDocument));
-    expect(within(preview).queryByText("Invalid")).toBeNull();
+    expect(within(preview).queryByText("Chưa hợp lệ")).toBeNull();
   });
 
-  it("says Valid once a clean document has actually been checked", async () => {
+  it("reports a valid document in Vietnamese and keeps the raw context inside details", async () => {
     render(<FlowWorkspace devices={[device]} selectedUdids={[]} onDirtyChange={vi.fn()} />);
     await waitFor(() =>
       expect(screen.getByRole("region", { name: "Không gian Flow" })).toHaveAttribute(
@@ -289,6 +289,8 @@ describe("the compile preview has three answers, not two", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Kiểm tra Flow" }));
     const preview = screen.getByRole("dialog", { name: "Xem trước biên dịch" });
-    await waitFor(() => expect(within(preview).getByText("Valid")).toBeInTheDocument());
+    await waitFor(() => expect(within(preview).getByText("Hợp lệ")).toBeInTheDocument());
+    expect(within(preview).queryByText("Valid")).toBeNull();
+    expect(within(preview).getByText("Chi tiết kỹ thuật").closest("details")).not.toBeNull();
   });
 });

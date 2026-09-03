@@ -1,17 +1,24 @@
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
+  automationCreate,
   listenRiviuEvents,
   publishGet,
   publishList,
   publishReadiness,
-  publishTransfer,
 } from "../api";
 import { PublishPage } from "./PublishPage";
+import { requestConfirm } from "../confirmStore";
 import { resetToasts } from "../toastStore";
-import type { AppEvent, DeviceInfo, PublishBundle, PublishFolderManifest } from "../types";
+import type {
+  AppEvent,
+  DeviceInfo,
+  DeviceMeta,
+  PublishBundle,
+  PublishFolderManifest,
+} from "../types";
 
 function bundle(id: string, name: string): PublishBundle {
   return {
@@ -45,16 +52,51 @@ const createCampaign = vi.fn(async () => ({
   createdAt: "2026-08-18T00:00:00.000Z",
 }));
 
+const executeCampaign = vi.fn(async () => ({
+  campaignId: "campaign-1",
+  status: "complete",
+  retryScope: "none",
+  issues: [],
+  detail: { campaign: { id: "campaign-1" }, bundles: [], assignments: [], events: [] },
+}));
+
 vi.mock("../pickFile", () => ({
   pickDirectory: vi.fn(async () => "C:/carousels"),
   pickIpa: vi.fn(async () => null),
   pickMaterial: vi.fn(async () => null),
 }));
 
+vi.mock("../confirmStore", () => ({
+  requestConfirm: vi.fn(async () => true),
+}));
+
 vi.mock("../api", () => ({
   addAppLibrary: vi.fn(async () => undefined),
   addMaterial: vi.fn(async () => undefined),
   analyticsSummary: vi.fn(async () => ({})),
+  automationArchive: vi.fn(async () => undefined),
+  automationCreate: vi.fn(async () => ({
+    definition: {
+      id: "publish-profile-1",
+      name: "Đăng bài theo thư mục",
+      kind: "publish",
+      latestRevision: 1,
+      archived: false,
+      createdAt: "2026-09-03T00:00:00Z",
+      updatedAt: "2026-09-03T00:00:00Z",
+    },
+    revision: {
+      definitionId: "publish-profile-1",
+      revision: 1,
+      target: { type: "group", groupId: "group-a" },
+      config: {},
+      canonicalJson: "{}",
+      sha256: "aa".repeat(32),
+      createdAt: "2026-09-03T00:00:00Z",
+    },
+  })),
+  automationList: vi.fn(async () => []),
+  automationRevise: vi.fn(),
   apiDocs: vi.fn(async () => ""),
   deleteAppLibrary: vi.fn(async () => undefined),
   deleteMaterial: vi.fn(async () => undefined),
@@ -73,15 +115,13 @@ vi.mock("../api", () => ({
   listScripts: vi.fn(async () => []),
   publishCancel: vi.fn(async () => undefined),
   publishCreateCampaign: (...args: unknown[]) => createCampaign(...(args as [])),
+  publishExecute: (...args: unknown[]) => executeCampaign(...(args as [])),
   publishGet: vi.fn(async () => null),
   publishList: vi.fn(async () => []),
   publishReadiness: vi.fn(async () => []),
   publishSheetGetConfig: vi.fn(async () => ({ webhookUrl: "", hasToken: false })),
   publishSheetSaveConfig: vi.fn(async () => ({ webhookUrl: "", hasToken: false })),
-  publishPrepare: vi.fn(async () => undefined),
-  publishPost: vi.fn(async () => undefined),
   publishScanFolder: vi.fn(async () => manifest),
-  publishTransfer: vi.fn(async () => undefined),
   pushMaterial: vi.fn(async () => undefined),
   saveSchedule: vi.fn(async () => undefined),
   saveScript: vi.fn(async () => undefined),
@@ -104,19 +144,148 @@ const devices = [iphone("PHONE-A"), iphone("PHONE-B"), iphone("PHONE-C")];
 
 beforeEach(() => {
   createCampaign.mockClear();
+  executeCampaign.mockClear();
+  vi.mocked(requestConfirm).mockReset().mockResolvedValue(true);
   resetToasts();
 });
 
 afterEach(cleanup);
 
 describe("publish, bundle to phone", () => {
-  it("keeps carousel scope under the broader publish topbar", () => {
+  it("distinguishes loading, load failure with retry, and a genuinely empty monitor", async () => {
+    const user = userEvent.setup();
+    const list = vi.mocked(publishList);
+    let rejectFirst!: (reason: Error) => void;
+    list.mockImplementationOnce(
+      () => new Promise((_, reject) => {
+        rejectFirst = reject;
+      }),
+    );
+
+    render(<PublishPage devices={devices} selected={[]} onSelectUdids={() => {}} />);
+    await user.click(screen.getByRole("tab", { name: "Theo dõi" }));
+    expect(screen.getByText("Đang tải chiến dịch…")).toBeVisible();
+    expect(screen.queryByText("Chưa có chiến dịch")).toBeNull();
+
+    rejectFirst(new Error("không đọc được chiến dịch"));
+    expect(await screen.findByRole("alert")).toHaveTextContent("không đọc được chiến dịch");
+    expect(screen.queryByText("Chưa có chiến dịch")).toBeNull();
+
+    list.mockResolvedValueOnce([] as never);
+    await user.click(screen.getByRole("button", { name: "Thử lại" }));
+    expect(await screen.findByText("Chưa có chiến dịch")).toBeVisible();
+  });
+
+  it("presents one publish workspace for photos and video", () => {
     render(<PublishPage devices={devices} selected={[]} onSelectUdids={() => {}} />);
 
-    expect(screen.getByRole("heading", { level: 2, name: "Đăng carousel" })).toBeVisible();
-    expect(screen.getByText(/dọn ảnh đã chuyển khỏi điện thoại/)).toBeInTheDocument();
-    expect(screen.getByText(/kể cả khi bị từ chối/)).toBeInTheDocument();
-    expect(screen.queryByText(/chi tiết chiến dịch/)).toBeNull();
+    expect(screen.getByRole("heading", { level: 2, name: "Đăng bài" })).toBeVisible();
+    expect(screen.getByText(/ảnh hoặc video/i)).toBeInTheDocument();
+    expect(screen.queryByText(/dùng âm thanh mặc định/i)).toBeNull();
+  });
+
+  it("provides a roving keyboard tablist linked to named publish panels", () => {
+    render(<PublishPage devices={devices} selected={[]} onSelectUdids={() => {}} />);
+
+    const setup = screen.getByRole("tab", { name: "Thiết lập" });
+    const monitor = screen.getByRole("tab", { name: "Theo dõi" });
+    expect(setup).toHaveAttribute("tabindex", "0");
+    expect(monitor).toHaveAttribute("tabindex", "-1");
+    expect(document.getElementById(setup.getAttribute("aria-controls")!)).toHaveAttribute(
+      "aria-labelledby",
+      setup.id,
+    );
+
+    setup.focus();
+    fireEvent.keyDown(setup, { key: "ArrowRight" });
+    expect(monitor).toHaveFocus();
+    expect(monitor).toHaveAttribute("aria-selected", "true");
+    const monitorPanel = document.getElementById(monitor.getAttribute("aria-controls")!);
+    expect(monitorPanel).toHaveAttribute("role", "tabpanel");
+    expect(monitorPanel).toHaveAttribute("aria-labelledby", monitor.id);
+
+    fireEvent.keyDown(monitor, { key: "Home" });
+    expect(setup).toHaveFocus();
+    expect(setup).toHaveAttribute("aria-selected", "true");
+    fireEvent.keyDown(setup, { key: "End" });
+    expect(monitor).toHaveFocus();
+    fireEvent.keyDown(monitor, { key: "ArrowLeft" });
+    expect(setup).toHaveFocus();
+  });
+
+  it("separates setup from monitoring and saves a target-bound publish profile", async () => {
+    const user = userEvent.setup();
+    render(
+      <PublishPage
+        devices={[devices[0]]}
+        selected={["PHONE-A"]}
+        targetUdids={["PHONE-A"]}
+        targetRef={{ type: "group", groupId: "group-a" }}
+        onSelectUdids={() => {}}
+      />,
+    );
+
+    expect(screen.getByRole("tab", { name: "Thiết lập" })).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
+    await user.click(screen.getByRole("button", { name: "Chọn thư mục" }));
+    await user.click(await screen.findByRole("button", { name: "Tạo hồ sơ" }));
+
+    await waitFor(() => {
+      expect(automationCreate).toHaveBeenCalledWith(
+        "Đăng bài theo thư mục",
+        "publish",
+        { type: "group", groupId: "group-a" },
+        expect.objectContaining({
+          schemaVersion: 1,
+          sourceRoot: "C:/carousels",
+          bundleIds: ["b1"],
+          executionConfirmed: true,
+          soundPolicy: expect.objectContaining({ kind: "trendingAny", poolSize: 5 }),
+        }),
+      );
+    });
+    expect(requestConfirm).toHaveBeenCalledWith(expect.objectContaining({
+      title: "Cho phép hồ sơ đăng công khai?",
+      confirmLabel: "Cho phép và lưu",
+    }));
+
+    await user.click(screen.getByRole("tab", { name: "Theo dõi" }));
+    expect(screen.getByText("Chưa có chiến dịch")).toBeVisible();
+    expect(screen.queryByRole("button", { name: "Chọn thư mục" })).not.toBeInTheDocument();
+  });
+
+  it("snapshots an edited caption and starts the confirmed trending-sound pipeline", async () => {
+    const user = userEvent.setup();
+    render(
+      <PublishPage
+        devices={[devices[0]]}
+        selected={["PHONE-A"]}
+        onSelectUdids={() => {}}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "Chọn thư mục" }));
+    const caption = await screen.findByRole("textbox", { name: "Chú thích cho bo1" });
+    await user.clear(caption);
+    await user.type(caption, "Caption đã duyệt");
+    await user.click(screen.getByRole("button", { name: /Xác nhận và đăng/ }));
+
+    await waitFor(() => expect(createCampaign).toHaveBeenCalledTimes(1));
+    expect(createCampaign.mock.calls[0]).toEqual([
+      "C:/carousels",
+      ["b1"],
+      ["PHONE-A"],
+      null,
+      { b1: "Caption đã duyệt" },
+      expect.objectContaining({ kind: "trendingAny", poolSize: 5, seed: expect.any(Number) }),
+      true,
+    ]);
+    expect(executeCampaign).toHaveBeenCalledWith("campaign-1", true);
+    expect(screen.queryByRole("button", { name: "Post" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Prepare" })).toBeNull();
+    expect(screen.queryByRole("button", { name: /Transfer media/ })).toBeNull();
   });
 
   /**
@@ -155,7 +324,7 @@ describe("publish, bundle to phone", () => {
       .map((node) => node.textContent!.replace(/^\d+\.\s*/, ""));
     expect(shown).toEqual(["bo1", "bo2", "bo3"]);
 
-    await user.click(screen.getByRole("button", { name: /Tạo & chuẩn bị/ }));
+    await user.click(screen.getByRole("button", { name: /Xác nhận và đăng/ }));
     await waitFor(() => expect(createCampaign).toHaveBeenCalled());
 
     const [, dispatchedIds, dispatchedTargets] = createCampaign.mock.calls[0] as unknown as [
@@ -237,17 +406,17 @@ describe("publish, bundle to phone", () => {
     await waitFor(() => expect(list).toHaveBeenCalledTimes(3));
 
     releaseSucceeded();
-    await waitFor(() => expect(screen.getByText("succeeded")).toBeTruthy());
+    await waitFor(() => expect(screen.getByText("Hoàn tất")).toBeTruthy());
     releasePosting();
 
     // The late answer is discarded rather than rendered. Waiting first would pass even
     // without the guard, so this settles the microtask queue and then looks.
     await new Promise((resolve) => setTimeout(resolve, 0));
     expect(
-      screen.queryByText("posting"),
+      screen.queryByText("Đang đăng"),
       "a reload that started earlier repainted the page over a newer one",
     ).toBeNull();
-    expect(screen.getByText("succeeded")).toBeTruthy();
+    expect(screen.getByText("Hoàn tất")).toBeTruthy();
 
     list.mockReset();
     list.mockResolvedValue([] as never);
@@ -268,12 +437,11 @@ describe("publish, bundle to phone", () => {
    * backend was built to let an operator retry had no button at all: the campaign was
    * retryable in the database and finished on the screen.
    */
-  it("offers a re-transfer for a campaign that failed before dispatch", async () => {
+  it("offers a full-pipeline retry for a campaign that failed before dispatch", async () => {
     const user = userEvent.setup();
     const list = vi.mocked(publishList);
-    const transfer = vi.mocked(publishTransfer);
     list.mockReset();
-    transfer.mockClear();
+    executeCampaign.mockClear();
     list.mockResolvedValue([
       {
         id: "campaign-1",
@@ -292,9 +460,11 @@ describe("publish, bundle to phone", () => {
 
     render(<PublishPage devices={devices} selected={[]} onSelectUdids={() => {}} />);
 
-    const retry = await screen.findByRole("button", { name: "Chuyển lại media" });
+    await user.click(screen.getByRole("tab", { name: "Theo dõi" }));
+    const retry = await screen.findByRole("button", { name: "Chạy lại từ đầu" });
     await user.click(retry);
-    await waitFor(() => expect(transfer).toHaveBeenCalledWith("campaign-1"));
+    await waitFor(() => expect(executeCampaign).toHaveBeenCalled());
+    expect(executeCampaign).toHaveBeenCalledWith("campaign-1", true);
 
     list.mockReset();
     list.mockResolvedValue([] as never);
@@ -332,9 +502,15 @@ describe("publish, bundle to phone", () => {
     // made, and the phone would still be refused at the first tap after a TikTok update.
     await screen.findByText(/bản đo có đủ nhãn/);
     expect(screen.getByText(/chưa đối chiếu build máy/)).toBeTruthy();
-    expect(screen.getByText(/thiếu ComposerCaption, PostButton/)).toBeTruthy();
+    const missing = screen.getByText(/thiếu ô chú thích, nút Đăng/);
+    expect(missing).toBeTruthy();
+    expect(missing.closest(".pill")).toHaveAttribute(
+      "title",
+      expect.stringContaining("ComposerCaption"),
+    );
+    expect(screen.queryByText(/ComposerCaption|PostButton/)).not.toBeInTheDocument();
     expect(ready).toHaveBeenCalledWith(["ANDROID-A", "ANDROID-B"]);
-    expect(screen.getByText(/bị từ chối trước khi chuyển ảnh/)).toBeInTheDocument();
+    expect(screen.getByText(/bị từ chối trước khi chuyển nội dung/)).toBeInTheDocument();
     expect(screen.queryByText(/composer_scout/)).toBeNull();
   });
 
@@ -427,10 +603,33 @@ describe("publish, bundle to phone", () => {
       events: [],
     } as never);
 
-    render(<PublishPage devices={devices} selected={[]} onSelectUdids={() => {}} />);
+    const namedDevices = [{ ...devices[0], name: "SM-G950F" }, ...devices.slice(1)];
+    const metas = new Map<string, DeviceMeta>([
+      [
+        "PHONE-A",
+        { udid: "PHONE-A", notes: "", tags: [], alias: "Máy quay sản phẩm", number: 17 },
+      ],
+    ]);
+    render(
+      <PublishPage
+        devices={namedDevices}
+        selected={[]}
+        metas={metas}
+        onSelectUdids={() => {}}
+      />,
+    );
 
+    await user.click(screen.getByRole("tab", { name: "Theo dõi" }));
     await user.click(await screen.findByRole("button", { name: "Chi tiết máy" }));
-    await screen.findByText(/PHONE-A — failedBeforeDispatch · route_authorities_disagree/);
+    const row = await screen.findByTitle(/UDID: PHONE-A/);
+    expect(row).toHaveTextContent("Máy 17 · Máy quay sản phẩm — Dừng trước khi đăng");
+    expect(row).not.toHaveTextContent("PHONE-A");
+    expect(row).not.toHaveTextContent("failedBeforeDispatch");
+    expect(row).not.toHaveTextContent("route_authorities_disagree");
+    expect(row).toHaveAttribute(
+      "title",
+      expect.stringContaining("route_authorities_disagree"),
+    );
     expect(screen.getByText(/chưa dọn được ảnh tạm: adb disconnected/)).toBeVisible();
 
     await user.click(screen.getByRole("button", { name: "Ẩn chi tiết máy" }));

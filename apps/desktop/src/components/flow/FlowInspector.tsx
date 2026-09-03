@@ -15,9 +15,10 @@ import type {
 } from "../../types";
 import { flowCoordinateFrame } from "../../api";
 import { acceptFiniteValueAsNumber } from "../../flow/validation";
-import { ACTION_PRESENTATION } from "./actionPresentation";
+import { ACTION_PRESENTATION, SCREEN_ORIENTATION_LABELS } from "./actionPresentation";
 import { FlowCoordinatePicker } from "./FlowCoordinatePicker";
 import { FlowVisionCapture } from "./FlowVisionCapture";
+import { flowValidationMessage } from "./validationPresentation";
 import { describeError } from "../../describeError";
 
 interface JsonSchema {
@@ -78,15 +79,13 @@ function isJsonObject(value: JsonValue | undefined): value is JsonObject {
 
 function titleFor(name: string): string {
   const known: Record<string, string> = {
-    // Identifiers keep their platform spelling — they name a WDA/iOS concept,
-    // not an English word the operator is meant to read.
-    accessibilityId: "Accessibility ID",
-    bundleId: "Bundle ID",
-    detectorId: "Detector ID",
+    accessibilityId: "Mã trợ năng",
+    bundleId: "Mã ứng dụng",
+    detectorId: "Mã bộ dò",
     durationMs: "Thời lượng (ms)",
     gestureDurationMs: "Thời lượng mỗi lần vuốt (ms)",
     jitterPercent: "Độ lệch (%)",
-    profileId: "Profile ID",
+    profileId: "Mã hồ sơ",
     format: "Định dạng",
     from: "Từ điểm",
     imageHeight: "Chiều cao ảnh",
@@ -98,11 +97,11 @@ function titleFor(name: string): string {
     pauseMaxMs: "Nghỉ tối đa giữa các lần vuốt (ms)",
     preset: "Mẫu thao tác",
     point: "Điểm",
-    readBackLocator: "Locator đọc lại",
+    readBackLocator: "Cách đọc lại",
     strategy: "Cách định vị",
     text: "Nội dung",
     to: "Đến điểm",
-    value: "Giá trị locator",
+    value: "Giá trị nhận diện",
   };
   return known[name] ?? name.replace(/([a-z])([A-Z])/g, "$1 $2");
 }
@@ -131,8 +130,12 @@ function FieldIssues({ issues }: { issues: FlowValidationIssue[] }) {
   return (
     <ul className="flow-field-errors">
       {issues.map((issue, index) => (
-        <li role="alert" key={`${issue.code}-${index}`}>
-          {issue.message}
+        <li
+          role="alert"
+          key={`${issue.code}-${index}`}
+          title={`${issue.code}: ${issue.message}`}
+        >
+          {flowValidationMessage(issue)}
         </li>
       ))}
     </ul>
@@ -294,7 +297,7 @@ function ReadBackLocatorFields({
   const locator = locatorFromValue(value as JsonValue | undefined);
   return (
     <fieldset className="flow-field-group">
-      <legend>Locator đọc lại</legend>
+      <legend>Cách đọc lại</legend>
       <div role="group" aria-label="Cách định vị" className="flow-segmented-control">
         {(["accessibilityId", "className"] as const).map((strategy) => (
           <button
@@ -303,12 +306,12 @@ function ReadBackLocatorFields({
             aria-pressed={locator.strategy === strategy}
             onClick={() => onChange({ ...locator, strategy })}
           >
-            {strategy === "accessibilityId" ? "Accessibility ID" : "Class name"}
+            {strategy === "accessibilityId" ? "Mã trợ năng" : "Tên lớp"}
           </button>
         ))}
       </div>
       <label className="flow-field">
-        <span>Giá trị locator</span>
+        <span>Giá trị nhận diện</span>
         <input
           type="text"
           value={locator.value}
@@ -407,8 +410,8 @@ function CoordinateFields({
         {numericField("y", "Y", false, 0, Math.max(0, coordinate.imageHeight - 1))}
       </div>
       <div className="flow-coordinate-pair">
-        {numericField("imageWidth", "Image width", true, 1)}
-        {numericField("imageHeight", "Image height", true, 1)}
+        {numericField("imageWidth", "Chiều rộng ảnh", true, 1)}
+        {numericField("imageHeight", "Chiều cao ảnh", true, 1)}
       </div>
       <label className="flow-field">
         <span>Hướng màn hình</span>
@@ -420,13 +423,13 @@ function CoordinateFields({
         >
           {ORIENTATIONS.map((orientation) => (
             <option key={orientation} value={orientation}>
-              {orientation}
+              {SCREEN_ORIENTATION_LABELS[orientation]}
             </option>
           ))}
         </select>
       </label>
       <label className="flow-field">
-        <span>Profile ID</span>
+        <span>Mã hồ sơ</span>
         <input type="text" value={coordinate.profileId} readOnly />
       </label>
       <button type="button" disabled={!canPick} onClick={() => onPick(field)}>
@@ -528,7 +531,7 @@ function EvidenceFields({
       </label>
       {postcondition?.kind === "activeAppEquals" && (
         <label className="flow-field">
-          <span>Bundle ID mong đợi</span>
+          <span>Mã ứng dụng mong đợi</span>
           <input
             type="text"
             readOnly={typeof node.config.bundleId === "string"}
@@ -541,7 +544,7 @@ function EvidenceFields({
       )}
       {postcondition?.kind === "processAbsent" && (
         <label className="flow-field">
-          <span>Bundle ID phải vắng mặt</span>
+          <span>Mã ứng dụng phải vắng mặt</span>
           <input type="text" readOnly value={postcondition.bundleId} />
         </label>
       )}
@@ -569,7 +572,7 @@ function EvidenceFields({
       )}
       {postcondition?.kind === "qualifiedFramePredicate" && (
         <label className="flow-field">
-          <span>Detector ID</span>
+          <span>Mã bộ dò</span>
           <select
             value={postcondition.detectorId}
             onChange={(event) =>
@@ -584,7 +587,7 @@ function EvidenceFields({
       )}
       {postcondition?.kind === "accessibilityVisible" && (
         <label className="flow-field">
-          <span>Accessibility ID</span>
+          <span>Mã trợ năng</span>
           <input
             type="text"
             value={postcondition.accessibilityId}
@@ -608,7 +611,7 @@ function EvidenceFields({
         </>
       )}
       {postcondition?.kind === "artifactDecodedAndHashed" && (
-        <p>Decoded image and SHA-256 required</p>
+        <p>Ảnh phải giải mã được và có mã kiểm SHA-256.</p>
       )}
       <FieldIssues issues={issues.filter((issue) => issue.field?.startsWith("postcondition"))} />
     </fieldset>
@@ -693,7 +696,7 @@ export function FlowInspector({
   if (node === null || definition === null) {
     return (
       <aside className="flow-inspector" aria-label="Bảng thuộc tính Flow" data-testid="flow-inspector">
-        <p>Select an action to edit it.</p>
+        <p>Chọn một hành động để chỉnh sửa.</p>
       </aside>
     );
   }
@@ -804,7 +807,7 @@ export function FlowInspector({
   );
 
   const renderConfigFields = () => {
-    if (schema === null) return <p>This action has no editable schema.</p>;
+    if (schema === null) return <p>Hành động này không có trường cấu hình.</p>;
     if (schema.type !== "object") throw new Error("UnsupportedFieldSchema");
 
     if (node.kind === "tapVision" || node.kind === "ifVision") {
@@ -818,7 +821,7 @@ export function FlowInspector({
               <img
                 className="flow-vision-template-preview"
                 src={`data:image/png;base64,${template}`}
-                alt="Template preview"
+                alt="Xem trước ảnh mẫu"
               />
             ) : (
               <p className="flow-inspector-empty">Chưa có mẫu — chụp từ thiết bị hoặc tải PNG.</p>
@@ -872,7 +875,7 @@ export function FlowInspector({
               aria-pressed={!pointMode}
               onClick={() => commitConfig({ accessibilityId: "" })}
             >
-              Accessibility ID
+              Mã trợ năng
             </button>
             <button
               type="button"
@@ -985,7 +988,11 @@ export function FlowInspector({
           <InfoDot of="ID bước" what={node.id} />
         </div>
       </header>
-      {definition.disabledReason && <p role="alert">{definition.disabledReason}</p>}
+      {definition.disabledReason && (
+        <p role="alert" title={definition.disabledReason}>
+          Hành động này chưa dùng được với thiết bị đã chọn.
+        </p>
+      )}
       <FieldIssues issues={nodeIssues.filter((issue) => !issue.field)} />
       <section aria-label="Cấu hình hành động">{renderConfigFields()}</section>
       <EvidenceFields
@@ -995,8 +1002,15 @@ export function FlowInspector({
         launchBundleId={launchBundleId}
         onChange={onPostconditionChange}
       />
-      {pickerLoading === node.id && <p role="status">Loading device frame...</p>}
-      {pickerError?.nodeId === node.id && <p role="alert">{pickerError.message}</p>}
+      {pickerLoading === node.id && <p role="status">Đang tải khung hình thiết bị…</p>}
+      {pickerError?.nodeId === node.id && (
+        <div role="alert">
+          <details>
+            <summary>Không tải được khung hình thiết bị.</summary>
+            <code>{pickerError.message}</code>
+          </details>
+        </div>
+      )}
       {visionFrame?.nodeId === node.id && (
         <section className="flow-coordinate-popover" aria-label="Chụp ảnh mẫu">
           <FlowVisionCapture
@@ -1014,7 +1028,7 @@ export function FlowInspector({
         </section>
       )}
       {picker?.nodeId === node.id && (
-        <section className="flow-coordinate-popover" aria-label={`Pick ${picker.field}`}>
+        <section className="flow-coordinate-popover" aria-label={`Chọn tọa độ ${titleFor(picker.field)}`}>
           <FlowCoordinatePicker
             frame={picker.frame}
             onPick={(value) => {

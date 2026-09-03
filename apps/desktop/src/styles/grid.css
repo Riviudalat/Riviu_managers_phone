@@ -25,7 +25,7 @@
   white-space: nowrap;
   text-shadow: 0 1px 6px rgb(0 0 0 / 70%);
 }
-.dev-phone-model {
+.dev-phone-status {
   max-width: 100%;
   font-size: clamp(9px, 5.2cqw, 12px);
   color: rgb(255 255 255 / 82%);
@@ -33,6 +33,16 @@
   text-overflow: ellipsis;
   white-space: nowrap;
   text-shadow: 0 1px 4px rgb(0 0 0 / 70%);
+}
+.dev-phone-status.is-ready {
+  color: #bbf7d0;
+}
+.dev-phone-status.is-warning,
+.dev-phone-status.is-busy {
+  color: #fde68a;
+}
+.dev-phone-status.is-offline {
+  color: #cbd5e1;
 }
 
 .dev-phone-conn {
@@ -97,6 +107,18 @@
   padding: 0.55rem 0.75rem;
   border-bottom: 1px solid #f0f0f0;
   color: var(--text-2);
+}
+.device-table-alias {
+  display: block;
+  margin-top: 2px;
+  color: var(--text-3);
+  font-size: var(--text-sm);
+}
+.device-row-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 0.25rem;
 }
 .device-table tr {
   cursor: pointer;

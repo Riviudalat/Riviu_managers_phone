@@ -108,6 +108,35 @@ afterEach(() => {
 });
 
 describe("FlowRunMonitor retry policy", () => {
+  it("uses Vietnamese operator labels and keeps device/node identifiers out of visible text", () => {
+    render(
+      <FlowRunMonitor
+        run={detail({
+          state: "succeeded",
+          attempts: [attempt("attempt-a", "succeeded", false, "autoSwipe")],
+        })}
+        devices={[{
+          udid: "device-a",
+          name: "ONE-01",
+          model: "SM-G955U1",
+          platform: "android",
+          osVersion: "9",
+          connection: "usb",
+          status: "ready",
+          wdaReady: false,
+        }]}
+        onCancel={vi.fn()}
+        onRetry={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText("Máy 1 · ONE-01")).toBeInTheDocument();
+    expect(screen.getByText("Tự động vuốt")).toBeInTheDocument();
+    expect(screen.getAllByText("Thành công")).toHaveLength(2);
+    expect(screen.queryByText("device-a")).not.toBeInTheDocument();
+    expect(screen.queryByText(/node-attempt/)).not.toBeInTheDocument();
+  });
+
   it("never offers retry for an uncertain attempt and still honors an explicit safe retry", () => {
     const onRetry = vi.fn();
     render(
@@ -123,14 +152,17 @@ describe("FlowRunMonitor retry policy", () => {
       />,
     );
 
-    const uncertainRow = screen.getByText("Uncertain").closest("tr");
+    const uncertainRow = screen.getByText("Chưa chắc chắn").closest("tr");
     if (uncertainRow === null) throw new Error("uncertain row missing");
-    expect(within(uncertainRow).queryByRole("button", { name: /Retry/ })).not.toBeInTheDocument();
+    expect(within(uncertainRow).queryByRole("button", { name: /Chạy lại/ })).not.toBeInTheDocument();
     // The cell reads `code: message` now -- the code alone was not enough to tell a timeout from
     // a dead session, because the backend maps several device failures onto one code.
-    expect(within(uncertainRow).getByText(/^EffectUncertain:/)).toBeInTheDocument();
+    const technicalError = within(uncertainRow)
+      .getByText("Không xác nhận được kết quả thao tác.")
+      .closest("details");
+    expect(technicalError).toHaveTextContent("EffectUncertain: Effect cannot be proven");
 
-    const safeRetry = screen.getByRole("button", { name: "Retry Wait" });
+    const safeRetry = screen.getByRole("button", { name: "Chạy lại Chờ" });
     fireEvent.click(safeRetry);
     expect(onRetry).toHaveBeenCalledWith("safe-a");
   });
@@ -166,7 +198,7 @@ describe("FlowRunMonitor refresh", () => {
       handler?.({ type: "flowRunUpdated", runId: "run-a", revision: 2 });
       await Promise.resolve();
     });
-    await waitFor(() => expect(screen.getAllByText("Succeeded")).toHaveLength(2));
+    await waitFor(() => expect(screen.getAllByText("Thành công")).toHaveLength(2));
     expect(api.flowGetRun).toHaveBeenCalledWith("run-a");
     expect(screen.getByText("250 ms")).toBeInTheDocument();
 
@@ -201,7 +233,7 @@ describe("FlowRunMonitor refresh", () => {
       await Promise.resolve();
     });
     expect(api.flowGetRun).toHaveBeenCalledTimes(1);
-    expect(screen.getAllByText("Succeeded")).toHaveLength(2);
+    expect(screen.getAllByText("Thành công")).toHaveLength(2);
 
     await act(async () => {
       vi.advanceTimersByTime(3_000);
@@ -224,14 +256,14 @@ describe("FlowRunMonitor keeps a terminal projection monotonic", () => {
       attempts: [attempt("attempt-a", "succeeded", false)],
     });
     const view = render(<FlowRunMonitor run={terminal} onCancel={vi.fn()} onRetry={vi.fn()} />);
-    expect(screen.getAllByText("Succeeded")).toHaveLength(2);
+    expect(screen.getAllByText("Thành công")).toHaveLength(2);
 
     view.rerender(
       <FlowRunMonitor run={detail({ revision: 2, state: "running" })} onCancel={vi.fn()} onRetry={vi.fn()} />,
     );
 
-    expect(screen.getAllByText("Succeeded")).toHaveLength(2);
-    expect(screen.queryByText("Running")).not.toBeInTheDocument();
+    expect(screen.getAllByText("Thành công")).toHaveLength(2);
+    expect(screen.queryByText("Đang chạy")).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: /Hủy/ })).toBeDisabled();
     // And polling stays stopped: a terminal state must not start the 750 ms interval.
     await act(async () => {
@@ -269,8 +301,8 @@ describe("FlowRunMonitor keeps a terminal projection monotonic", () => {
     });
 
     expect(api.flowGetRun).toHaveBeenCalledTimes(1);
-    expect(screen.getAllByText("Succeeded")).toHaveLength(2);
-    expect(screen.queryByText("Running")).not.toBeInTheDocument();
+    expect(screen.getAllByText("Thành công")).toHaveLength(2);
+    expect(screen.queryByText("Đang chạy")).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: /Hủy/ })).toBeDisabled();
   });
 });
@@ -295,8 +327,10 @@ describe("FlowRunMonitor says when it stopped being able to read the run", () =>
     await act(async () => {
       await Promise.resolve();
     });
-    const alerts = screen.getAllByRole("alert").map((node) => node.textContent ?? "");
-    expect(alerts.some((text) => text.includes("Không đọc được tiến trình"))).toBe(true);
+    expect(screen.getByRole("alert")).toHaveTextContent("Không đọc được tiến trình mới.");
+    expect(screen.getByText("Không đọc được tiến trình mới.").closest("details")).toHaveTextContent(
+      "DeviceControl: bridge gone",
+    );
   });
 
   it("shows the message behind a run error, not only its code", () => {
@@ -317,6 +351,8 @@ describe("FlowRunMonitor says when it stopped being able to read the run", () =>
       },
     };
     render(<FlowRunMonitor run={stalled} onCancel={vi.fn()} onRetry={vi.fn()} />);
-    expect(screen.getByText(/DeviceControl: phiên WDA đã chết/)).toBeInTheDocument();
+    expect(screen.getByText("Lượt chạy gặp lỗi.").closest("details")).toHaveTextContent(
+      "DeviceControl: phiên WDA đã chết",
+    );
   });
 });

@@ -128,14 +128,14 @@ describe("a template capture belongs to the node it was started on", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Chụp mẫu từ thiết bị" }));
     // The capture opened for node A.
-    expect(await screen.findByRole("img", { name: "Device frame" })).toBeInTheDocument();
+    expect(await screen.findByRole("img", { name: "Khung hình thiết bị" })).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "chọn node B" }));
 
     // Node B is not offered a capture that was never started on it. Before this, the popover
     // stayed open and the next crop wrote A's template into B's config.
     await waitFor(() =>
-      expect(screen.queryByRole("img", { name: "Device frame" })).toBeNull(),
+      expect(screen.queryByRole("img", { name: "Khung hình thiết bị" })).toBeNull(),
     );
     expect(onConfigFor).not.toHaveBeenCalled();
   });
@@ -160,7 +160,7 @@ describe("a template capture belongs to the node it was started on", () => {
 
     gate.release?.(FRAME);
     await waitFor(() => expect(gate.release).toBeDefined());
-    expect(screen.queryByRole("img", { name: "Device frame" })).toBeNull();
+    expect(screen.queryByRole("img", { name: "Khung hình thiết bị" })).toBeNull();
     expect(onConfigFor).not.toHaveBeenCalled();
   });
 });
@@ -207,7 +207,7 @@ describe("FlowVisionCapture", () => {
     const onCapture = vi.fn();
     const onCancel = vi.fn();
     render(<FlowVisionCapture frame={FRAME} onCapture={onCapture} onCancel={onCancel} />);
-    const image = screen.getByRole("img", { name: "Device frame" });
+    const image = screen.getByRole("img", { name: "Khung hình thiết bị" });
 
     pick(image, 10, 10);
     pick(image, 200, 400);
@@ -227,7 +227,7 @@ describe("FlowVisionCapture", () => {
   it("captures once when the crop completes and the capture is still live", async () => {
     const onCapture = vi.fn();
     render(<FlowVisionCapture frame={FRAME} onCapture={onCapture} onCancel={vi.fn()} />);
-    const image = screen.getByRole("img", { name: "Device frame" });
+    const image = screen.getByRole("img", { name: "Khung hình thiết bị" });
 
     pick(image, 10, 10);
     pick(image, 200, 400);
@@ -246,7 +246,7 @@ describe("FlowVisionCapture", () => {
     // further clicks each started another decode and whichever resolved last decided the template.
     const onCapture = vi.fn();
     render(<FlowVisionCapture frame={FRAME} onCapture={onCapture} onCancel={vi.fn()} />);
-    const image = screen.getByRole("img", { name: "Device frame" });
+    const image = screen.getByRole("img", { name: "Khung hình thiết bị" });
 
     pick(image, 10, 10);
     pick(image, 200, 400);
@@ -258,6 +258,24 @@ describe("FlowVisionCapture", () => {
       await Promise.resolve();
     });
     expect(onCapture).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps crop failures out of the operator-facing message", async () => {
+    HTMLCanvasElement.prototype.getContext = vi.fn(() => null);
+    render(<FlowVisionCapture frame={FRAME} onCapture={vi.fn()} onCancel={vi.fn()} />);
+    const image = screen.getByRole("img", { name: "Khung hình thiết bị" });
+
+    pick(image, 10, 10);
+    pick(image, 200, 400);
+    await act(async () => {
+      decode?.();
+      await Promise.resolve();
+    });
+
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent("Không thể tạo ảnh mẫu từ vùng đã chọn.");
+    expect(screen.getByText("Chi tiết lỗi").closest("details"))
+      .toHaveTextContent("canvas 2d context unavailable");
   });
 });
 
@@ -273,6 +291,19 @@ describe("FlowDiagnostics", () => {
   it("says valid once the answer is in", () => {
     render(<FlowDiagnostics issues={[]} />);
     expect(screen.getByText("Hợp lệ")).toBeInTheDocument();
+  });
+
+  it("keeps a raw diagnostic code in technical details instead of the main copy", () => {
+    render(<FlowDiagnostics issues={[{
+      code: "WaitOutOfRange",
+      message: "wait duration exceeds the supported range",
+      field: "config.durationMs",
+    }]} />);
+    expect(screen.queryByText("WaitOutOfRange")).not.toBeInTheDocument();
+    expect(screen.getByText("Thời lượng chờ vượt giới hạn.")).toHaveAttribute(
+      "title",
+      "WaitOutOfRange: wait duration exceeds the supported range",
+    );
   });
 });
 
@@ -326,6 +357,12 @@ describe("the canvas summary of a vision node", () => {
       .toContain("0.854");
     expect(summarizeAction("tapVision", { templatePngBase64: "AA", threshold: 0.85 }))
       .toContain("0.85");
+  });
+
+  it("uses Vietnamese summaries for operator-visible node data", () => {
+    expect(summarizeAction("swipe", { durationMs: 350 })).toBe("Vuốt 350 ms");
+    expect(summarizeAction("typeText", { text: "xin chào" })).toBe("8 ký tự");
+    expect(summarizeAction("tapVision", { threshold: 0.85 })).toBe("chưa có ảnh mẫu");
   });
 });
 

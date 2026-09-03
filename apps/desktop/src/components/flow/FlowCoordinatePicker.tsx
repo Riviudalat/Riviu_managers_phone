@@ -1,4 +1,5 @@
 import type { FlowCoordinateFrame, ImageCoordinateTarget } from "../../types";
+import { SCREEN_ORIENTATION_LABELS } from "./actionPresentation";
 import { projectContainedImageClick } from "./projectImageClick";
 
 export function FlowCoordinatePicker({
@@ -12,7 +13,7 @@ export function FlowCoordinatePicker({
     <div className="flow-coordinate-picker">
       <img
         src={`data:image/jpeg;base64,${frame.jpegBase64}`}
-        alt="Device frame"
+        alt="Khung hình thiết bị"
         draggable={false}
         onClick={(event) => {
           const point = projectContainedImageClick(
@@ -25,7 +26,7 @@ export function FlowCoordinatePicker({
         }}
       />
       <output>
-        {frame.imageWidth} x {frame.imageHeight} / {frame.orientation}
+        {frame.imageWidth} x {frame.imageHeight} / {SCREEN_ORIENTATION_LABELS[frame.orientation]}
       </output>
     </div>
   );

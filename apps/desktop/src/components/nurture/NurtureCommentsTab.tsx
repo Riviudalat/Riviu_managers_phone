@@ -59,9 +59,13 @@ function CostStrip({ totals }: { totals: NurtureCostSummary }) {
   );
 }
 
-export function NurtureCommentsTab({ live }: {
+export function NurtureCommentsTab({
+  live,
+  deviceLabel = () => "Máy chưa xác định",
+}: {
   /// Poll only while something is running: a finished table does not change on its own.
   live: boolean;
+  deviceLabel?: (udid: string) => string;
 }) {
   const [rows, setRows] = useState<NurtureCommentAttempt[] | null>(null);
   /**
@@ -144,7 +148,7 @@ export function NurtureCommentsTab({ live }: {
         {rows.map((row) => (
           <li key={row.id} className={`nurture-attempt${outcomeClass(row.outcome)}`}>
             <div className="nurture-attempt-head">
-              <code>{row.udid.slice(-6)}</code>
+              <strong title={row.udid}>{deviceLabel(row.udid)}</strong>
               <span className="nurture-attempt-outcome" title={row.outcome}>
                 {outcomeLabel(row.outcome)}
               </span>
@@ -155,7 +159,7 @@ export function NurtureCommentsTab({ live }: {
               <p className="nurture-attempt-text">“{row.preview}”</p>
             ) : (
               row.captionPreview && (
-                <p className="nurture-attempt-text is-caption">caption: {row.captionPreview}</p>
+                <p className="nurture-attempt-text is-caption">chú thích: {row.captionPreview}</p>
               )
             )}
             <p className="hint">

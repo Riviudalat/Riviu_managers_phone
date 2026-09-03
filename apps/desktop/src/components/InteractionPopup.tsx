@@ -1,4 +1,11 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type KeyboardEvent as ReactKeyboardEvent,
+} from "react";
 import {
   getDeviceMeta,
   interactionParseLinks,
@@ -20,21 +27,28 @@ import {
   validateDraft,
   type InteractionDraft,
 } from "../interactionPlan";
+import { interactionProfileConfig } from "../automationProfileConfig";
 import type {
   DeviceInfo,
   DeviceMeta,
   InteractionPostReading,
   PostTargets,
+  TargetRef,
   ThreadPreview,
   TikTokLinkLine,
 } from "../types";
 import { IconChat, IconClose } from "./Icons";
 import { InteractionMonitorTab } from "./interaction/InteractionMonitorTab";
 import { InteractionSetupTab } from "./interaction/InteractionSetupTab";
+import { AutomationProfileControl } from "./AutomationProfileControl";
 
 type Props = {
   devices: DeviceInfo[];
   selected: string[];
+  /** Already resolved from All/Group/Explicit; an empty array remains an empty scope. */
+  targetUdids?: string[];
+  /** Semantic scope stored with an automation profile; groups resolve again at execution. */
+  targetRef?: TargetRef;
   /**
    * The operator's own records for each phone — the name and the number they assigned.
    *
@@ -42,7 +56,8 @@ type Props = {
    * one source for `tileName`/`tileNumber`, and a rename shows up in both at once.
    */
   metas: Map<string, DeviceMeta>;
-  onClose: () => void;
+  onClose?: () => void;
+  surface?: "popup" | "page";
 };
 
 function newRequestId() {
@@ -68,10 +83,24 @@ function newRequestId() {
  */
 const DRAG_KEEP = 64;
 
-export function InteractionPopup({ devices, selected, metas, onClose }: Props) {
+export function InteractionPopup({
+  devices,
+  selected,
+  targetUdids,
+  targetRef,
+  metas,
+  onClose,
+  surface = "popup",
+}: Props) {
   const inScope = useMemo(
-    () => devices.filter((device) => (selected.length ? selected.includes(device.udid) : true)),
-    [devices, selected],
+    () => devices.filter((device) =>
+      targetUdids !== undefined
+        ? targetUdids.includes(device.udid)
+        : selected.length
+          ? selected.includes(device.udid)
+          : true,
+    ),
+    [devices, selected, targetUdids],
   );
   // **The number the operator wrote on the phone, not this list's index.**
   //
@@ -143,6 +172,7 @@ export function InteractionPopup({ devices, selected, metas, onClose }: Props) {
   const [linkError, setLinkError] = useState<string | null>(null);
   const [runBusy, setRunBusy] = useState(false);
   const [runError, setRunError] = useState<string | null>(null);
+  const pageSurface = surface === "page";
 
   /// One id per attempt, not one per keystroke.
   ///
@@ -219,7 +249,10 @@ export function InteractionPopup({ devices, selected, metas, onClose }: Props) {
     }
   }, []);
 
-  const mentions = useMemo(() => parseMentions(draft.mentionText), [draft.mentionText]);
+  const mentions = useMemo(
+    () => (draft.actions.comment ? parseMentions(draft.mentionText) : []),
+    [draft.actions.comment, draft.mentionText],
+  );
   /// The phones a tag names, by matching each tag to a phone's @handle. These join the actor
   /// set so the tagged account comments on the post itself.
   const mentionActors = useMemo(() => {
@@ -289,9 +322,12 @@ export function InteractionPopup({ devices, selected, metas, onClose }: Props) {
   /// silently throw the resolved links away — the operator pressed the button, watched the list
   /// change, and then watched it change back.
   const cancelParse = useRef<() => void>(() => undefined);
+  const linkRequestGeneration = useRef(0);
 
   // Debounced: this used to fire one IPC round trip per keystroke.
   useEffect(() => {
+    const generation = ++linkRequestGeneration.current;
+    setLinkBusy(false);
     const raw = draft.rawLinks;
     if (!raw.trim()) {
       setLines([]);
@@ -305,12 +341,12 @@ export function InteractionPopup({ devices, selected, metas, onClose }: Props) {
     const timer = setTimeout(() => {
       void interactionParseLinks(raw)
         .then((next) => {
-          if (!live) return;
+          if (!live || linkRequestGeneration.current !== generation) return;
           setLines(next);
           setLinkError(null);
         })
         .catch((e) => {
-          if (!live) return;
+          if (!live || linkRequestGeneration.current !== generation) return;
           setLinkError(describeError(e));
         });
     }, 300);
@@ -334,7 +370,8 @@ export function InteractionPopup({ devices, selected, metas, onClose }: Props) {
     [validTargets, effectiveActors],
   );
   const [previewFor, setPreviewFor] = useState<string | null>(null);
-  const previewStale = previewFor !== previewKey;
+  const previewGeneration = useRef(0);
+  const previewStale = draft.actions.comment && previewFor !== previewKey;
 
   const cohorts = useMemo(() => groupPlanByCohort(preview?.plan), [preview]);
   const largestCohort = largestCohortOf(cohorts, effectiveActors.length);
@@ -345,12 +382,20 @@ export function InteractionPopup({ devices, selected, metas, onClose }: Props) {
   /// banner, because `plan_threads` runs the same `validate()` the dispatch will and its
   /// complaint is about the form, not about the request having failed.
   useEffect(() => {
+    const generation = ++previewGeneration.current;
+    if (!draft.actions.comment) {
+      setPreview(null);
+      setPlanError(null);
+      setPreviewFor(previewKey);
+      return;
+    }
     if (validTargets.length === 0 || effectiveActors.length < 2) {
       setPreview(null);
       setPlanError(null);
       return;
     }
     const key = previewKey;
+    let live = true;
     const timer = setTimeout(() => {
       void interactionPreviewThread(
         buildRequest(draft, {
@@ -366,17 +411,22 @@ export function InteractionPopup({ devices, selected, metas, onClose }: Props) {
         }),
       )
         .then((next) => {
+          if (!live || previewGeneration.current !== generation) return;
           setPreview(next);
           setPreviewFor(key);
           setPlanError(null);
         })
         .catch((e) => {
+          if (!live || previewGeneration.current !== generation) return;
           setPreview(null);
           setPreviewFor(key);
           setPlanError(describeError(e));
         });
     }, 350);
-    return () => clearTimeout(timer);
+    return () => {
+      live = false;
+      clearTimeout(timer);
+    };
   }, [draft, validTargets, effectiveActors, mentions, previewKey]);
 
   const mixedThread =
@@ -412,19 +462,36 @@ export function InteractionPopup({ devices, selected, metas, onClose }: Props) {
     () => draftWarnings(draft, validationContext),
     [draft, validationContext],
   );
+  const profileConfig = useMemo(
+    () =>
+      interactionProfileConfig(
+        buildRequest(draft, {
+          requestId: requestIdRef.current,
+          targets: validTargets,
+          actorUdids: effectiveActors,
+          mentions,
+          largestCohort,
+        }),
+      ),
+    [draft, effectiveActors, largestCohort, mentions, validTargets],
+  );
 
   const resolveShortLinks = useCallback(async () => {
     if (!draft.rawLinks.trim()) return;
     // Drop any parse still in flight for the same text; see `cancelParse`.
     cancelParse.current();
+    const generation = ++linkRequestGeneration.current;
     setLinkBusy(true);
     try {
-      setLines(await interactionResolveLinks(draft.rawLinks));
+      const next = await interactionResolveLinks(draft.rawLinks);
+      if (linkRequestGeneration.current !== generation) return;
+      setLines(next);
       setLinkError(null);
     } catch (e) {
+      if (linkRequestGeneration.current !== generation) return;
       setLinkError(describeError(e));
     } finally {
-      setLinkBusy(false);
+      if (linkRequestGeneration.current === generation) setLinkBusy(false);
     }
   }, [draft.rawLinks]);
 
@@ -522,38 +589,46 @@ export function InteractionPopup({ devices, selected, metas, onClose }: Props) {
     drag.current = null;
   };
 
+  const onTabKeyDown = (event: ReactKeyboardEvent<HTMLButtonElement>) => {
+    let next: "setup" | "monitor" | null = null;
+    if (event.key === "ArrowRight" || event.key === "End") next = "monitor";
+    if (event.key === "ArrowLeft" || event.key === "Home") next = "setup";
+    if (!next) return;
+    event.preventDefault();
+    document.getElementById(`interaction-tab-${next}`)?.focus();
+    setTab(next);
+  };
+
   return (
-    <div className="interaction-float-layer">
+    <div
+      className={pageSurface ? "interaction-workspace" : "interaction-float-layer"}
+      role={pageSurface ? "region" : undefined}
+      aria-label={pageSurface ? "Không gian Tương tác" : undefined}
+    >
       <section
-        className="interaction-float"
-        aria-label="Tương tác comment"
-        style={{ transform: `translate(${pos.x}px, ${pos.y}px)` }}
+        className={pageSurface ? "interaction-workspace-inner" : "interaction-float"}
+        aria-label={pageSurface ? undefined : "Tương tác comment"}
+        style={pageSurface ? undefined : { transform: `translate(${pos.x}px, ${pos.y}px)` }}
       >
-        <header
-          className="interaction-title"
-          onPointerDown={onTitleDown}
-          onPointerMove={onTitleMove}
-          onPointerUp={onTitleUp}
-          // A pointer sequence can end without an `up` — the browser cancels it, or capture is
-          // lost. Without these, `drag.current` stayed set and the panel then followed the
-          // cursor on plain hover, because `onPointerMove` fires whether or not a button is
-          // down.
-          onPointerCancel={onTitleUp}
-          onLostPointerCapture={onTitleUp}
-        >
-          <IconChat size={15} />
-          <strong>Tương tác</strong>
-          <span className="hint">{inScope.length} thiết bị</span>
-          <div className="grow" />
-          <button type="button" className="close" title="Đóng" onClick={onClose}>
-            <IconClose size={14} />
-          </button>
-        </header>
-        {/* A `role="tab"` with no `aria-controls` and no `role="tabpanel"` to point at is a
-            tablist in name only: nothing tells the reader which region the tab governs, and
-            `tabIndex` stays on both buttons instead of roving. `NurtureBehaviourTab` next door
-            already does this properly. */}
-        <div className="interaction-tabs" role="tablist">
+        {!pageSurface && (
+          <header
+            className="interaction-title"
+            onPointerDown={onTitleDown}
+            onPointerMove={onTitleMove}
+            onPointerUp={onTitleUp}
+            onPointerCancel={onTitleUp}
+            onLostPointerCapture={onTitleUp}
+          >
+            <IconChat size={15} />
+            <strong>Tương tác</strong>
+            <span className="hint">{inScope.length} thiết bị</span>
+            <div className="grow" />
+            <button type="button" className="close" title="Đóng" onClick={onClose}>
+              <IconClose size={14} />
+            </button>
+          </header>
+        )}
+        <div className="interaction-tabs" role="tablist" aria-label="Chế độ Tương tác">
           <button
             type="button"
             role="tab"
@@ -562,6 +637,7 @@ export function InteractionPopup({ devices, selected, metas, onClose }: Props) {
             aria-selected={tab === "setup"}
             tabIndex={tab === "setup" ? 0 : -1}
             onClick={() => setTab("setup")}
+            onKeyDown={onTabKeyDown}
           >
             Thiết lập
           </button>
@@ -573,6 +649,7 @@ export function InteractionPopup({ devices, selected, metas, onClose }: Props) {
             aria-selected={tab === "monitor"}
             tabIndex={tab === "monitor" ? 0 : -1}
             onClick={() => setTab("monitor")}
+            onKeyDown={onTabKeyDown}
           >
             Theo dõi
           </button>
@@ -580,51 +657,73 @@ export function InteractionPopup({ devices, selected, metas, onClose }: Props) {
         <div
           className="interaction-float-body"
           role="tabpanel"
-          id={tab === "setup" ? "interaction-panel-setup" : "interaction-panel-monitor"}
-          aria-labelledby={tab === "setup" ? "interaction-tab-setup" : "interaction-tab-monitor"}
+          id="interaction-panel-setup"
+          aria-labelledby="interaction-tab-setup"
+          hidden={tab !== "setup"}
         >
-          {tab === "setup" ? (
-            <InteractionSetupTab
-              threshold={{
-                wanted,
-                setWanted,
-                readViews,
-                setReadViews,
-                reading,
-                busy: measureBusy,
-                error: measureError,
-                onMeasure: () => void measure(),
-                canMeasure: validTargets.length > 0 && effectiveActors.length > 0,
-              }}
-              advancedOpen={advancedOpen}
-              setAdvancedOpen={setAdvancedOpen}
-              draft={draft}
-              patch={patch}
-              lines={lines}
-              preview={preview}
-              issues={issues}
-              warnings={warnings}
-              devices={devices}
-              deviceNumber={deviceNumber}
-              deviceLabel={deviceLabel}
-              pixelActors={pixelActors}
-              hierarchyActors={hierarchyActors}
-              largestCohort={largestCohort}
-              handles={handles}
-              onHandleChange={(udid, value) =>
-                setHandles((prev) => ({ ...prev, [udid]: value }))
-              }
-              onHandleBlur={(udid, value) => void persistHandle(udid, value)}
-              mentions={mentions}
-              mentionActorCount={mentionActors.length}
-              linkBusy={linkBusy}
-              linkError={linkError}
-              runError={runError}
-              busy={runBusy}
-              onResolveShortLinks={() => void resolveShortLinks()}
-              onRun={() => void run()}
-            />
-          ) : (
+          {tab === "setup" && (
+            <>
+              {pageSurface && targetRef && (
+                <AutomationProfileControl
+                  kind="interaction"
+                  target={targetRef}
+                  config={profileConfig}
+                  defaultName="Hồ sơ Tương tác"
+                  disabled={issues.length > 0}
+                  disabledReason={issues[0]?.message}
+                />
+              )}
+              <InteractionSetupTab
+                threshold={{
+                  wanted,
+                  setWanted,
+                  readViews,
+                  setReadViews,
+                  reading,
+                  busy: measureBusy,
+                  error: measureError,
+                  onMeasure: () => void measure(),
+                  canMeasure: validTargets.length > 0 && effectiveActors.length > 0,
+                }}
+                advancedOpen={advancedOpen}
+                setAdvancedOpen={setAdvancedOpen}
+                draft={draft}
+                patch={patch}
+                lines={lines}
+                preview={preview}
+                issues={issues}
+                warnings={warnings}
+                devices={devices}
+                deviceNumber={deviceNumber}
+                deviceLabel={deviceLabel}
+                pixelActors={pixelActors}
+                hierarchyActors={hierarchyActors}
+                largestCohort={largestCohort}
+                handles={handles}
+                onHandleChange={(udid, value) =>
+                  setHandles((prev) => ({ ...prev, [udid]: value }))
+                }
+                onHandleBlur={(udid, value) => void persistHandle(udid, value)}
+                mentions={mentions}
+                mentionActorCount={mentionActors.length}
+                linkBusy={linkBusy}
+                linkError={linkError}
+                runError={runError}
+                busy={runBusy}
+                onResolveShortLinks={() => void resolveShortLinks()}
+                onRun={() => void run()}
+              />
+            </>
+          )}
+        </div>
+        <div
+          className="interaction-float-body"
+          role="tabpanel"
+          id="interaction-panel-monitor"
+          aria-labelledby="interaction-tab-monitor"
+          hidden={tab !== "monitor"}
+        >
+          {tab === "monitor" && (
             <InteractionMonitorTab
               devices={devices}
               deviceNumber={deviceNumber}

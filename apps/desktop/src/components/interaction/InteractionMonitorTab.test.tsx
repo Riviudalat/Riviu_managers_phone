@@ -125,6 +125,28 @@ function renderTab(openCampaignId: string | null = null, onOpen = vi.fn()) {
 }
 
 describe("InteractionMonitorTab", () => {
+  it("distinguishes loading, load failure with retry, and a genuinely empty list", async () => {
+    const api = await import("../../api");
+    let rejectFirst!: (reason: Error) => void;
+    vi.mocked(api.interactionList).mockImplementationOnce(
+      () => new Promise((_, reject) => {
+        rejectFirst = reject;
+      }),
+    );
+
+    renderTab();
+    expect(screen.getByText("Đang tải chiến dịch…")).toBeVisible();
+    expect(screen.queryByText("Chưa có chiến dịch nào")).toBeNull();
+
+    rejectFirst(new Error("không đọc được tương tác"));
+    expect(await screen.findByRole("alert")).toHaveTextContent("không đọc được tương tác");
+    expect(screen.queryByText("Chưa có chiến dịch nào")).toBeNull();
+
+    vi.mocked(api.interactionList).mockResolvedValueOnce([]);
+    fireEvent.click(screen.getByRole("button", { name: "Thử lại" }));
+    expect(await screen.findByText("Chưa có chiến dịch nào")).toBeVisible();
+  });
+
   it("names a campaign by its post instead of a slice of its UUID", async () => {
     const api = await import("../../api");
     vi.mocked(api.interactionList).mockResolvedValue([summary] as never);
@@ -147,8 +169,8 @@ describe("InteractionMonitorTab", () => {
 
     expect(await screen.findByText("link 111")).toBeVisible();
     expect(screen.getByText("link 222")).toBeVisible();
-    expect(screen.getByText("2/2 message")).toBeVisible();
-    expect(screen.getByText("0/1 message")).toBeVisible();
+    expect(screen.getByText("2/2 lượt")).toBeVisible();
+    expect(screen.getByText("0/1 lượt")).toBeVisible();
     expect(screen.getByText("không tim được: nhãn nút tim chưa đo")).toBeVisible();
 
     fireEvent.click(screen.getByRole("button", { name: "Thử lại phần hỏng" }));
@@ -162,10 +184,10 @@ describe("InteractionMonitorTab", () => {
     vi.mocked(api.interactionGet).mockResolvedValue(detail as never);
     renderTab("campaign-1");
     expect(await screen.findByText("7 · Máy Một · @mangv")).toBeVisible();
-    // A phone that ran the campaign and has since been unplugged says so, rather than
-    // showing a udid the operator cannot find on the wall.
-    expect(screen.getByText("android-1 (đã rời fleet)")).toBeVisible();
-    expect(screen.getByText("android-3 (đã rời fleet)")).toBeVisible();
+    // Departed phones keep stable positions in this campaign without putting a raw serial on
+    // the main surface. The serial remains available as technical hover/detail evidence.
+    expect(screen.getByText("Máy đã rời fleet 1/2")).toHaveAttribute("title", "android-1");
+    expect(screen.getByText("Máy đã rời fleet 2/2")).toHaveAttribute("title", "android-3");
   });
 
   it("translates a refusal and still keeps the raw code for a bug report", async () => {

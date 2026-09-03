@@ -104,6 +104,12 @@ export function InteractionSetupTab({
 }) {
   const messages = effectiveMessageCount(draft, largestCohort);
   const manualCount = manualCommentsOf(draft).length;
+  const selectedActionCount = Object.values(draft.actions).filter(Boolean).length;
+  const actionOrder = [
+    draft.actions.like && "Tim",
+    draft.actions.save && "Lưu",
+    draft.actions.comment && "Bình luận",
+  ].filter(Boolean);
 
   return (
     <div className="interaction-body nu-pane">
@@ -139,6 +145,37 @@ export function InteractionSetupTab({
         </button>
       )}
 
+      <div className="nu-group-head">Hành động</div>
+      <div className="interaction-action-controls" role="group" aria-label="Hành động">
+        {([
+          ["like", "Tim"],
+          ["comment", "Bình luận"],
+          ["save", "Lưu"],
+        ] as const).map(([action, label]) => {
+          const checked = draft.actions[action];
+          return (
+            <label key={action} className="nu-switch">
+              <input
+                type="checkbox"
+                checked={checked}
+                disabled={checked && selectedActionCount === 1}
+                onChange={(event) =>
+                  patch("actions", { ...draft.actions, [action]: event.target.checked })
+                }
+                aria-label={label}
+              />
+              <span className="nu-switch-track" aria-hidden="true" />
+              <span className="nu-switch-label">{label}</span>
+            </label>
+          );
+        })}
+      </div>
+      <p className="hint interaction-action-consequence">
+        Thực hiện theo thứ tự: {actionOrder.join(" → ")}.
+      </p>
+
+      {draft.actions.comment && (
+        <>
       <div className="nu-group-head">
         Kiểu tương tác
         <Info
@@ -186,23 +223,6 @@ export function InteractionSetupTab({
           </span>
         </label>
       )}
-      <label className="nu-switch">
-        <input
-          type="checkbox"
-          checked={draft.likeTarget}
-          onChange={(event) => patch("likeTarget", event.target.checked)}
-          aria-label="Thả tim bài"
-        />
-        <span className="nu-switch-track" aria-hidden="true" />
-        <span className="nu-switch-label">
-          Thả tim bài
-          <Info
-            of="Thả tim bài"
-            what="Mỗi actor thả tim bài trước khi bình luận, xác nhận bằng nhãn nút tim đổi trạng thái. Android làm được; iPhone bị từ chối vì chưa đo toạ độ nút tim. Thả tim hỏng không làm mất bình luận."
-          />
-        </span>
-      </label>
-
       <div className="nu-group-head">Nội dung</div>
       <label className="nu-field">
         <span className="nu-label">Nội dung bình luận</span>
@@ -246,33 +266,40 @@ export function InteractionSetupTab({
       )}
 
       <InteractionThreshold controls={threshold} />
+        </>
+      )}
 
-      <div className="nu-group-head">Thiết bị &amp; tag</div>
-      <InteractionActorPicker
-        pixelActors={pixelActors}
-        hierarchyActors={hierarchyActors}
-        deviceNumber={deviceNumber}
-        deviceLabel={deviceLabel}
-        threadsByGroup={draft.threadKind !== "standalone"}
-        actors={draft.actors}
-        onToggle={(udid) =>
-          // The updater form, not a value computed from the rendered prop: see `patch`.
-          patch("actors", (previous) =>
-            previous.includes(udid)
-              ? previous.filter((id) => id !== udid)
-              : [...previous, udid],
-          )
-        }
-        onReplace={(udids) => patch("actors", udids)}
-        handles={handles}
-        onHandleChange={onHandleChange}
-        onHandleBlur={onHandleBlur}
-        mentionText={draft.mentionText}
-        onMentionText={(value) => patch("mentionText", value)}
-        mentions={mentions}
-        mentionActorCount={mentionActorCount}
-      />
+      <div className="nu-group-head">{draft.actions.comment ? "Thiết bị & tag" : "Thiết bị"}</div>
+      <div className={draft.actions.comment ? undefined : "interaction-comment-free"}>
+        <InteractionActorPicker
+          pixelActors={pixelActors}
+          hierarchyActors={hierarchyActors}
+          deviceNumber={deviceNumber}
+          deviceLabel={deviceLabel}
+          commentEnabled={draft.actions.comment}
+          threadsByGroup={draft.actions.comment && draft.threadKind !== "standalone"}
+          actors={draft.actors}
+          onToggle={(udid) =>
+            // The updater form, not a value computed from the rendered prop: see `patch`.
+            patch("actors", (previous) =>
+              previous.includes(udid)
+                ? previous.filter((id) => id !== udid)
+                : [...previous, udid],
+            )
+          }
+          onReplace={(udids) => patch("actors", udids)}
+          handles={handles}
+          onHandleChange={onHandleChange}
+          onHandleBlur={onHandleBlur}
+          mentionText={draft.mentionText}
+          onMentionText={(value) => patch("mentionText", value)}
+          mentions={mentions}
+          mentionActorCount={mentionActorCount}
+        />
+      </div>
 
+      {draft.actions.comment && (
+        <>
       <button
         type="button"
         className="ghost interaction-advanced-toggle"
@@ -335,6 +362,8 @@ export function InteractionSetupTab({
           {warning}
         </Banner>
       ))}
+        </>
+      )}
       {runError && <Banner tone="error">{runError}</Banner>}
       {issues.length > 0 && (
         <ul className="interaction-reasons">

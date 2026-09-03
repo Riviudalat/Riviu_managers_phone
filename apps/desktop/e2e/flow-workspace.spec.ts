@@ -40,12 +40,33 @@ async function insertActionOnFirstEdge(page: Page, action: string): Promise<Loca
     "Chụp màn hình": "screenshot",
     "Chạm": "tap",
     "Chờ": "wait",
+    "Tự động vuốt": "autoSwipe",
   };
   const kind = actionKinds[action];
   if (!kind) throw new Error(`Unsupported E2E action: ${action}`);
   const before = await page.locator(FLOW_NODE_TITLE).filter({ hasText: action }).count();
-  await page.locator(".react-flow__edge-interaction").first().evaluate((edge) => {
-    edge.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, composed: true }));
+  // Select the exact edge before dropping. This test is about structural insertion/deletion, not
+  // viewport measurement; geometric nearest-edge behaviour has its own component regression.
+  // Re-resolve and click the path inside `toPass` because React Flow can replace its SVG once
+  // while the initial ResizeObserver measurement settles under parallel browser load.
+  const edgeInteraction = page.locator(".react-flow__edge-interaction").first();
+  const selectedEdge = page.locator(".react-flow__edge.selected");
+  await expect(async () => {
+    if (await selectedEdge.count() === 0) {
+      const edgePoint = await edgeInteraction.evaluate((node) => {
+        const path = node as SVGPathElement;
+        const matrix = path.getScreenCTM();
+        if (!matrix) throw new Error("Flow edge has no screen transform");
+        const point = path.getPointAtLength(path.getTotalLength() / 2).matrixTransform(matrix);
+        return { x: point.x, y: point.y };
+      });
+      await page.mouse.click(edgePoint.x, edgePoint.y);
+    }
+    await expect(selectedEdge).toHaveCount(1, { timeout: 500 });
+  }).toPass({ intervals: [50, 100, 250], timeout: 5_000 });
+  const dropPoint = await page.getByTestId("flow-canvas").evaluate((canvas) => {
+    const bounds = canvas.getBoundingClientRect();
+    return { x: bounds.left + bounds.width / 2, y: bounds.top + bounds.height / 2 };
   });
   const source = page.getByTestId("flow-palette").getByRole("button", {
     name: action,
@@ -55,7 +76,6 @@ async function insertActionOnFirstEdge(page: Page, action: string): Promise<Loca
     const target = document.querySelector<HTMLElement>("[data-testid='flow-canvas'] .react-flow");
     if (!target) throw new Error("Flow canvas drop target is missing");
     const transfer = new DataTransfer();
-    const targetRect = target.getBoundingClientRect();
     const sourceRect = element.getBoundingClientRect();
     // **Set the payload before `dragstart`, not after, and check it survived.**
     //
@@ -90,8 +110,8 @@ async function insertActionOnFirstEdge(page: Page, action: string): Promise<Loca
         bubbles: true,
         cancelable: true,
         composed: true,
-        clientX: targetRect.left + Math.min(360, targetRect.width / 2),
-        clientY: targetRect.top + Math.min(220, targetRect.height / 2),
+        clientX: payload.dropPoint.x,
+        clientY: payload.dropPoint.y,
         dataTransfer: transfer,
       }));
     }
@@ -101,7 +121,7 @@ async function insertActionOnFirstEdge(page: Page, action: string): Promise<Loca
       composed: true,
       dataTransfer: transfer,
     }));
-  }, { kind });
+  }, { kind, dropPoint });
   const titles = page.locator(FLOW_NODE_TITLE).filter({ hasText: action });
   await expect(titles).toHaveCount(before + 1);
   const inserted = titles.last();
@@ -256,7 +276,7 @@ test("authors, saves, runs, and reloads a selected-device flow", async ({ page }
   const save = page.getByRole("button", { name: "Lưu bản" });
   await waitForEnabled(save);
   await page.getByRole("button", { name: "Kiểm tra Flow" }).click();
-  await expect(page.getByRole("dialog", { name: "Xem trước biên dịch" })).toContainText("Valid");
+  await expect(page.getByRole("dialog", { name: "Xem trước biên dịch" })).toContainText("Hợp lệ");
   await page.getByRole("dialog", { name: "Xem trước biên dịch" }).getByRole("button", {
     name: "Đóng",
   }).click();
@@ -267,11 +287,11 @@ test("authors, saves, runs, and reloads a selected-device flow", async ({ page }
   await run.click();
   const runDialog = page.getByRole("dialog", { name: "Chạy Flow" });
   await runDialog.getByRole("radio", { name: "Đã chọn" }).check();
-  await expect(runDialog.getByText("2 selected")).toBeVisible();
+  await expect(runDialog.getByText("2 máy đã chọn")).toBeVisible();
   await runDialog.getByRole("button", { name: "Chạy trên thiết bị" }).click();
 
-  await expect(page.getByRole("row", { name: /MOCK-IPHONE-01.*Wait.*Succeeded/ })).toBeVisible();
-  await expect(page.getByRole("row", { name: /MOCK-IPHONE-02.*Wait.*Succeeded/ })).toBeVisible();
+  await expect(page.getByRole("row", { name: /Máy 1.*Chờ.*Thành công/ })).toBeVisible();
+  await expect(page.getByRole("row", { name: /Máy 2.*Chờ.*Thành công/ })).toBeVisible();
   await page.getByRole("button", { name: "Fixture screenshot 1" }).click();
   const artifact = page.getByRole("dialog", { name: "Tệp kết quả" });
   await expect(artifact).toContainText("Fixture screenshot");
@@ -314,7 +334,7 @@ test("keeps uncertain Tap non-retryable and cancels a running Wait", async ({ pa
   ).toBeGreaterThan(0);
   await page.getByRole("button", { name: "Kiểm tra Flow" }).click();
   const preview = page.getByRole("dialog", { name: "Xem trước biên dịch" });
-  await expect(preview).toContainText("Valid");
+  await expect(preview).toContainText("Hợp lệ");
   await preview.getByRole("button", { name: "Đóng" }).click();
   const run = page.getByRole("button", { name: "Chạy Flow" });
   await waitForEnabled(run);
@@ -322,19 +342,19 @@ test("keeps uncertain Tap non-retryable and cancels a running Wait", async ({ pa
   await page.getByRole("dialog", { name: "Chạy Flow" })
     .getByRole("button", { name: "Chạy trên thiết bị" })
     .click();
-  await expect(page.getByTestId("flow-monitor")).toContainText("Uncertain");
-  await expect(page.getByRole("button", { name: /Retry Tap/ })).toHaveCount(0);
+  await expect(page.getByTestId("flow-monitor")).toContainText("Chưa chắc chắn");
+  await expect(page.getByRole("button", { name: /Chạy lại Chạm/ })).toHaveCount(0);
 
   await setNextRunMode(page, "runningWait");
   await run.click();
   await page.getByRole("dialog", { name: "Chạy Flow" })
     .getByRole("button", { name: "Chạy trên thiết bị" })
     .click();
-  await expect(page.getByTestId("flow-monitor")).toContainText("Running");
+  await expect(page.getByTestId("flow-monitor")).toContainText("Đang chạy");
   const runId = await page.locator("[data-testid='flow-run-history'] select").inputValue();
   await page.getByRole("button", { name: "Hủy", exact: true }).click();
   await emitRiviuEvent(page, { type: "flowRunUpdated", runId, revision: 2 });
-  await expect(page.getByTestId("flow-monitor")).toContainText("Cancelled");
+  await expect(page.getByTestId("flow-monitor")).toContainText("Đã hủy");
   await expect(page.getByRole("button", { name: "Hủy", exact: true })).toBeDisabled();
 });
 
@@ -347,7 +367,7 @@ test("imports supported legacy JSON and preserves the draft on diagnostics", asy
     name: "supported",
     steps: [{ action: "wait", milliseconds: 250 }],
   }));
-  await dialog.getByRole("button", { name: "Import", exact: true }).click();
+  await dialog.getByRole("button", { name: "Nhập", exact: true }).click();
   await expect(dialog).toBeHidden();
   await expect(page.getByLabel("Tên Flow")).toHaveValue("Imported legacy flow");
   const nodeCount = await page.locator("[data-testid='flow-node']").count();
@@ -363,18 +383,103 @@ test("imports supported legacy JSON and preserves the draft on diagnostics", asy
     name: "unsupported",
     steps: [{ action: "wait", milliseconds: 60_001 }],
   }));
-  await dialog.getByRole("button", { name: "Import", exact: true }).click();
-  await expect(dialog.getByText("WaitOutOfRange")).toBeVisible();
+  await dialog.getByRole("button", { name: "Nhập", exact: true }).click();
+  await expect(dialog.getByText("Bước 1: Không thể nhập hành động này.")).toBeVisible();
+  await expect(dialog.getByText(/WaitOutOfRange/)).toBeHidden();
   await expect(page.locator("[data-testid='flow-node']")).toHaveCount(nodeCount);
 });
 
-test("legacy scripts and jobs remain reachable", async ({ page }) => {
+test("keeps device Flow separate from fleet orchestration", async ({ page }) => {
   await openFlow(page);
-  await page.getByRole("tab", { name: "Legacy" }).click();
-  await expect(page.getByRole("heading", { name: "Kịch bản" })).toBeVisible();
-  await page.getByRole("button", { name: "Dùng ở Tác vụ" }).first().click();
-  await expect(page.locator("[data-testid='page-title']", { hasText: "Tác vụ" })).toBeVisible();
-  await expect(page.getByRole("heading", { name: "Chạy kịch bản" })).toBeVisible();
+  await expect(page.getByRole("tab", { name: "Flow thiết bị" })).toHaveAttribute(
+    "aria-selected",
+    "true",
+  );
+  await page.getByRole("tab", { name: "Điều phối" }).click();
+  await expect(page.getByRole("region", { name: "Không gian Điều phối" })).toBeVisible();
+  await expect(page.getByText("Chưa có điều phối nào")).toBeVisible();
+  await page.getByRole("button", { name: "Tạo điều phối", exact: true }).click();
+  await expect(page.getByLabel("Tên điều phối")).toHaveValue("Điều phối mới");
+});
+
+test("authors a bounded TikTok AutoSwipe node without a script surface", async ({ page }) => {
+  await openFlow(page);
+  await insertActionOnFirstEdge(page, "Tự động vuốt");
+
+  await expect(page.getByLabel("Mẫu thao tác")).toHaveValue("tiktokFeed");
+  await expect(page.getByLabel("Số lần vuốt")).toHaveValue("10");
+  await expect(page.getByLabel("Thời lượng mỗi lần vuốt (ms)")).toHaveValue("350");
+  await expect(page.getByLabel("Nghỉ tối thiểu giữa các lần vuốt (ms)")).toHaveValue("1200");
+  await expect(page.getByLabel("Nghỉ tối đa giữa các lần vuốt (ms)")).toHaveValue("2500");
+  await expect(page.getByLabel("Độ lệch (%)")).toHaveValue("2");
+
+  // Both modes are finite. Switching mode removes count rather than leaving two competing
+  // limits in the document, and the browser exercises the same inspector users operate.
+  await page.getByRole("button", { name: "Thời lượng" }).click();
+  await page.getByLabel("Tổng thời lượng (ms)").fill("60000");
+  await page.getByLabel("Loại bằng chứng").selectOption("frameDigestChanged");
+  await page.getByLabel("Khoảng cách tối thiểu").fill("8");
+
+  expect(await page.getByLabel(/script|shell/i).count()).toBe(0);
+  await page.getByRole("button", { name: "Kiểm tra Flow" }).click();
+  const preview = page.getByRole("dialog", { name: "Xem trước biên dịch" });
+  await expect(preview).toContainText("Hợp lệ");
+
+  const calls = await mockCommandCalls(page);
+  const validation = [...calls].reverse().find((call) => call.command === "flow_validate");
+  expect(validation).toBeDefined();
+  const document = validation!.args.document as { nodes: Array<Record<string, unknown>> };
+  expect(document.nodes).toContainEqual(expect.objectContaining({
+    kind: "autoSwipe",
+    config: expect.objectContaining({
+      preset: "tiktokFeed",
+      durationMs: 60_000,
+      gestureDurationMs: 350,
+      pauseMinMs: 1_200,
+      pauseMaxMs: 2_500,
+      jitterPercent: 2,
+    }),
+  }));
+  expect(
+    document.nodes.find((node) => node.kind === "autoSwipe")?.config,
+  ).not.toHaveProperty("count");
+
+  await preview.getByRole("button", { name: "Đóng" }).click();
+  const save = page.getByRole("button", { name: "Lưu bản" });
+  await waitForEnabled(save);
+  await save.click();
+
+  // The persisted revision, rather than the live React state, must carry the same bounded
+  // config. Reloading also exercises the fixture's command catalog: a missing AutoSwipe wire
+  // command used to surface only as an operator-facing `Unknown mock command` toast.
+  await page.reload();
+  await page.locator("[data-testid='nav-item']").getByText("Flow", { exact: true }).click();
+  await expect(page.getByRole("region", { name: "Không gian Flow" })).toHaveAttribute(
+    "data-loading",
+    "false",
+  );
+  await page.locator(FLOW_NODE_TITLE).filter({ hasText: "Tự động vuốt" }).evaluate((title) => {
+    title.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, composed: true }));
+  });
+  await expect(page.getByRole("button", { name: "Thời lượng" })).toHaveAttribute(
+    "aria-pressed",
+    "true",
+  );
+  await expect(page.getByLabel("Tổng thời lượng (ms)")).toHaveValue("60000");
+
+  const run = page.getByRole("button", { name: "Chạy Flow" });
+  await waitForEnabled(run);
+  await run.click();
+  const runDialog = page.getByRole("dialog", { name: "Chạy Flow" });
+  await runDialog.getByText("Tất cả máy hợp lệ", { exact: true }).click();
+  await expect(runDialog.getByRole("radio", { name: "Tất cả máy hợp lệ" })).toBeChecked();
+  await runDialog.getByRole("button", { name: "Chạy trên thiết bị" }).click();
+  await expect(page.getByRole("row", { name: /Máy 1.*Tự động vuốt.*Thành công/ }))
+    .toBeVisible();
+  await expect(page.getByRole("row", { name: /Máy 2.*Tự động vuốt.*Thành công/ }))
+    .toBeVisible();
+  await expect(page.getByText(/Unknown mock command/i)).toHaveCount(0);
+  await expect(page.getByRole("region", { name: "Thông báo" })).toHaveCount(0);
 });
 
 interface Box {
@@ -431,6 +536,58 @@ for (const viewport of [
     )).toBe(true);
     await expect(page).toHaveScreenshot(
       `fixture-only-flow-${viewport.width}x${viewport.height}.png`,
+      {
+        fullPage: true,
+        animations: "disabled",
+        maxDiffPixelRatio: 0.002,
+      },
+    );
+  });
+}
+
+for (const viewport of [
+  { width: 1440, height: 900 },
+  { width: 900, height: 700 },
+]) {
+  test(`contains the FIXTURE_ONLY orchestration workspace at ${viewport.width}x${viewport.height}`, async ({
+    page,
+  }) => {
+    await page.setViewportSize(viewport);
+    await openFlow(page);
+    await page.getByRole("tab", { name: "Điều phối" }).click();
+
+    const workspace = page.getByRole("region", { name: "Không gian Điều phối" });
+    await expect(workspace).toBeVisible();
+    await expect(page.getByText("Chưa có điều phối nào")).toBeVisible();
+    await page.getByRole("button", { name: "Tạo điều phối", exact: true }).click();
+    await expect(page.getByLabel("Tên điều phối")).toHaveValue("Điều phối mới");
+    await page.getByRole("button", { name: "Thêm Chờ" }).click();
+    await expect(page.getByRole("strong").filter({ hasText: "Chờ" })).toHaveCount(1);
+
+    await expect(page.getByText(/Unknown mock command/i)).toHaveCount(0);
+    await expect(page.getByRole("region", { name: "Thông báo" })).toHaveCount(0);
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+
+    const workspaceBox = await workspace.boundingBox();
+    expect(workspaceBox).not.toBeNull();
+    expect(workspaceBox?.x).toBeGreaterThanOrEqual(0);
+    expect((workspaceBox?.x ?? 0) + (workspaceBox?.width ?? 0)).toBeLessThanOrEqual(viewport.width);
+
+    const libraryBox = await page.getByRole("complementary", { name: "Danh sách điều phối" }).boundingBox();
+    const editor = page.locator(".orchestration-editor");
+    const editorBox = await editor.boundingBox();
+    expect(libraryBox).not.toBeNull();
+    expect(editorBox).not.toBeNull();
+    expect(overlaps(libraryBox!, editorBox!)).toBe(false);
+    expect(await editor.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
+    await expect(page.getByRole("button", { name: "Chạy điều phối" })).toBeInViewport();
+    await expect(page.getByRole("button", { name: "Lưu bản" })).toBeInViewport();
+    expect(await workspace.locator("button:visible, input:visible").evaluateAll((elements) =>
+      elements.every((element) => element.scrollWidth <= element.clientWidth)
+    )).toBe(true);
+
+    await expect(page).toHaveScreenshot(
+      `fixture-only-orchestration-${viewport.width}x${viewport.height}.png`,
       {
         fullPage: true,
         animations: "disabled",

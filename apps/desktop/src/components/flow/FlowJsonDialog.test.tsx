@@ -47,9 +47,15 @@ function open(overrides: Partial<Parameters<typeof FlowJsonDialog>[0]> = {}) {
   );
 }
 
-const applyButton = () => screen.getByRole("button", { name: /Validate and apply/ });
+const applyButton = () => screen.getByRole("button", { name: /Kiểm tra và áp dụng/ });
 
 describe("FlowJsonDialog", () => {
+  it("uses Vietnamese operator actions", () => {
+    open();
+    expect(screen.getByRole("button", { name: "Tải bản đã lưu" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Kiểm tra và áp dụng" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Load saved export" })).toBeNull();
+  });
   it("names the failing nodes when validation rejects with a list of issues", async () => {
     open({
       validate: async () => {
@@ -116,7 +122,7 @@ describe("FlowJsonDialog", () => {
       },
     });
 
-    fireEvent.click(screen.getByRole("button", { name: /Load saved export/ }));
+    fireEvent.click(screen.getByRole("button", { name: /Tải bản đã lưu/ }));
 
     const alert = await screen.findByRole("alert");
     expect(alert).toHaveTextContent("NotFound: revision 3 không còn trong DB");

@@ -1,38 +1,29 @@
-import {
-  BUDGET_TOTAL,
-  budgetCeiling,
-  budgetFree,
-  budgetUsed,
-  fitToBudget,
-  type BudgetKey,
-} from "../../nurtureBudget";
 import type { NurtureSettings } from "../../types";
 import { InfoDot as Info } from "../InfoDot";
 import { NurtureWindows } from "./NurtureWindows";
 import { Switch, FeatureRow } from "../NurturePopup";
 
 /**
- * How the session behaves: the four rates that share one 100% budget, the watch window,
+ * How the session behaves: four independent public-action rates, the watch window,
  * fatigue, night hours and the carousel.
  */
 export function NurtureBehaviourTab({
   settings,
   patch,
   patchRate,
-  setSettings,
-  overBudget,
   targets,
 }: {
   settings: NurtureSettings;
   patch: <K extends keyof NurtureSettings>(key: K, value: NurtureSettings[K]) => void;
-  patchRate: (key: BudgetKey, value: number) => void;
-  setSettings: React.Dispatch<React.SetStateAction<NurtureSettings | null>>;
-  overBudget: boolean;
+  patchRate: (
+    key: "likeProb" | "saveProb" | "commentProb" | "followProb" | "frenzyProb",
+    value: number,
+  ) => void;
   /** The phones selected on the grid, for a window that wants only some of them. */
   targets: string[];
 }) {
   return (
-    <div className="nurture-sect nu-pane" role="tabpanel">
+    <div className="nurture-sect nu-pane">
       <div className="nu-grid">
         <label className="nu-field">
           <span className="nu-label">
@@ -69,78 +60,51 @@ export function NurtureBehaviourTab({
       </div>
 
       <div className="nu-group">
-        <div className="nu-group-head">
-          Tương tác
-          {/* The budget, stated where it is spent: four rates sharing a hundred
-              need the remainder on screen or every drag is a guess. */}
-          <span className={`nu-budget${overBudget ? " is-over" : ""}`}>
-            {overBudget
-              ? `Đang dùng ${budgetUsed(settings)}% / ${BUDGET_TOTAL}%`
-              : `Còn ${budgetFree(settings)}% / ${BUDGET_TOTAL}%`}
-          </span>
-        </div>
-        {overBudget && (
-          /* Two ways to get here: a config saved before the budget existed, and a
-             switch turned back on over a number that no longer fits. Both leave
-             every ceiling at or below where its rate already is, so no slider can
-             be dragged up. Said out loud with a one-press fix rather than rewritten
-             on load or on the switch click: these are the operator's tuned numbers,
-             and something silently editing them is worse than a sentence asking. */
-          <p className="nu-budget-warn" role="alert">
-            Các tỉ lệ đang bật dùng chung {BUDGET_TOTAL}%, mà cộng lại đang là{" "}
-            {budgetUsed(settings)}%. Kéo xuống cho vừa, hoặc{" "}
-            <button
-              type="button"
-              className="link"
-              onClick={() =>
-                setSettings((prev) => (prev ? { ...prev, ...fitToBudget(prev) } : prev))
-              }
-            >
-              đưa về {BUDGET_TOTAL}%
-            </button>{" "}
-            (trừ dần từ tỉ lệ lớn nhất).
-          </p>
-        )}
+        <div className="nu-group-head">Tương tác</div>
         <FeatureRow
           label="Thích"
           what="Tỉ lệ post được thả tim. Chỉ tính thành công khi nhãn nút tim đổi trạng thái, không phải khi tap xong — nên số 'đã tim' luôn nhỏ hơn hoặc bằng số lần thử."
           percent={settings.likeProb}
-          ceiling={budgetCeiling(settings, "likeProb")}
           enabled={settings.likeEnabled ?? true}
           onPercent={(v) => patchRate("likeProb", v)}
           onEnabled={(v) => patch("likeEnabled", v)}
         />
         <FeatureRow
+          label="Lưu"
+          what="Tỉ lệ post được lưu. Chỉ tap khi engine vừa xác nhận lại đúng thẻ, đúng nút Lưu và trạng thái chưa lưu; thiếu bằng chứng thì bỏ qua."
+          percent={settings.saveProb ?? 0}
+          enabled={settings.saveEnabled ?? false}
+          onPercent={(v) => patchRate("saveProb", v)}
+          onEnabled={(v) => patch("saveEnabled", v)}
+        />
+        <FeatureRow
           label="Bình luận"
           what="Tỉ lệ post được bình luận. AI đọc nội dung post rồi tự viết; chỉ tính là đã gửi khi nút Gửi tắt lại. Cần API key ở tab AI."
           percent={settings.commentProb}
-          ceiling={budgetCeiling(settings, "commentProb")}
           enabled={settings.commentEnabled ?? true}
           onPercent={(v) => patchRate("commentProb", v)}
           onEnabled={(v) => patch("commentEnabled", v)}
         />
         <FeatureRow
-          label="Follow"
-          what="Tỉ lệ post được follow tác giả, tính riêng chứ không kèm thích hay bình luận. Xác nhận bằng việc nút Follow mất khỏi thẻ."
+          label="Theo dõi"
+          what="Tỉ lệ bài viết được theo dõi tác giả, tính riêng chứ không kèm thích hay bình luận. Xác nhận bằng việc nút Theo dõi mất khỏi thẻ."
           percent={settings.followProb}
-          ceiling={budgetCeiling(settings, "followProb")}
           enabled={settings.followEnabled ?? true}
           onPercent={(v) => patchRate("followProb", v)}
           onEnabled={(v) => patch("followEnabled", v)}
-        />
-        <FeatureRow
-          label="Vuốt nhanh"
-          what="Tỉ lệ post bị vuốt qua nhanh, không xem hết — giống lúc người ta lướt cho qua mấy bài không quan tâm."
-          percent={settings.frenzyProb}
-          ceiling={budgetCeiling(settings, "frenzyProb")}
-          enabled={settings.frenzyEnabled ?? true}
-          onPercent={(v) => patchRate("frenzyProb", v)}
-          onEnabled={(v) => patch("frenzyEnabled", v)}
         />
       </div>
 
       <div className="nu-group">
         <div className="nu-group-head">Nhịp</div>
+        <FeatureRow
+          label="Vuốt nhanh"
+          what="Xác suất chọn nhịp vuốt nhanh cho post; đây là pacing, không phải hành động công khai và không chia ngân sách với các tỉ lệ tương tác."
+          percent={settings.frenzyProb}
+          enabled={settings.frenzyEnabled ?? true}
+          onPercent={(v) => patchRate("frenzyProb", v)}
+          onEnabled={(v) => patch("frenzyEnabled", v)}
+        />
         <div className="nu-grid">
           <label className="nu-field">
             <span className="nu-label">
@@ -199,7 +163,7 @@ export function NurtureBehaviourTab({
           checked={settings.humanLimits ?? false}
           onChange={(v) => patch("humanLimits", v)}
           label="Giới hạn nhịp người"
-          what="Tắt (mặc định): các tỉ lệ bạn đặt ở trên là tỉ lệ thực. Bật: engine tự áp thêm trần 8–16 tim / 1–3 bình luản / 1–2 follow mỗi giờ, chỉ cho tương tác 2 trong 5 bài gần nhất, chờ 12–35 giây sau mỗi hành động và nghỉ 15–90 giây mỗi 7–13 bài — phiên trông giống người hơn nhưng chạy ít hơn nhiều so với số bạn đặt."
+          what="Tắt (mặc định): các tỉ lệ bạn đặt ở trên là tỉ lệ thực. Bật: hệ thống tự áp thêm trần 8–16 tim / 1–3 bình luận / 1–2 lượt theo dõi mỗi giờ, chỉ cho tương tác 2 trong 5 bài gần nhất, chờ 12–35 giây sau mỗi hành động và nghỉ 15–90 giây mỗi 7–13 bài — phiên trông giống người hơn nhưng chạy ít hơn nhiều so với số bạn đặt."
         />
         <div className="nu-grid">
           <label className="nu-field">

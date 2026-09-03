@@ -15,7 +15,7 @@ import { campaignStateVi, interactionErrorVi, stateTone } from "../../interactio
 import { timeAgoVi } from "../../timeAgo";
 import { useTickWhile } from "../../useTickWhile";
 import { ProgressBar } from "../ProgressBar";
-import { Banner, EmptyState } from "../States";
+import { Banner, EmptyState, LoadingState } from "../States";
 import { InteractionCampaignDetailView } from "./InteractionCampaignDetail";
 import type {
   DeviceInfo,
@@ -55,6 +55,10 @@ export function InteractionMonitorTab({
   onOpenCampaign: (id: string | null) => void;
 }) {
   const [campaigns, setCampaigns] = useState<InteractionCampaignSummary[]>([]);
+  const [campaignLoadState, setCampaignLoadState] = useState<"loading" | "ready" | "error">(
+    "loading",
+  );
+  const [campaignLoadError, setCampaignLoadError] = useState<string | null>(null);
   const [detail, setDetail] = useState<InteractionCampaignDetail | null>(null);
   const [artifacts, setArtifacts] = useState<InteractionArtifactRecord[]>([]);
   const [notes, setNotes] = useState<InteractionTargetNote[]>([]);
@@ -63,13 +67,17 @@ export function InteractionMonitorTab({
   const [error, setError] = useState<string | null>(null);
 
   const reloadCampaigns = useCallback(async () => {
+    setCampaignLoadState((current) => (current === "ready" ? current : "loading"));
+    setCampaignLoadError(null);
     try {
       setCampaigns(await interactionList());
+      setCampaignLoadState("ready");
       // Cleared on success. Only `guard()` ever reset this, so one transient failure pinned a
       // red banner over a panel that had been working again for an hour.
       setError(null);
     } catch (e) {
-      setError(describeError(e));
+      setCampaignLoadError(describeError(e));
+      setCampaignLoadState("error");
     }
   }, []);
 
@@ -251,10 +259,28 @@ export function InteractionMonitorTab({
         </button>
       </div>
       {error && <Banner tone="error">{error}</Banner>}
-      <div className="interaction-campaign-list">
+      {campaignLoadState === "loading" && <LoadingState label="Đang tải chiến dịch…" />}
+      {campaignLoadState === "error" && (
+        <Banner
+          tone="error"
+          action={(
+            <button type="button" className="ghost" onClick={() => void reloadCampaigns()}>
+              Thử lại
+            </button>
+          )}
+        >
+          {campaignLoadError ?? "Không tải được chiến dịch."}
+        </Banner>
+      )}
+      {campaignLoadState === "ready" && <div className="interaction-campaign-list">
         {campaigns.map((campaign) => {
           const total = campaign.messageCount * campaign.targetCount;
           const settled = campaign.succeededMessages + campaign.failedMessages;
+          const actionCounters = campaign.actionCounters;
+          const hasActionCounters = Boolean(actionCounters?.planned);
+          const actionSettled = actionCounters
+            ? actionCounters.confirmed + actionCounters.noOp + actionCounters.uncertain
+            : 0;
           // The brief is what makes one row tell itself apart from the next. Before it, the
           // only name a row had was fourteen characters of a UUID.
           const title = campaign.brief?.firstAuthor
@@ -282,7 +308,9 @@ export function InteractionMonitorTab({
                     </span>
                   </span>
                   <small>
-                    {campaign.succeededMessages}/{total} bình luận
+                    {hasActionCounters
+                      ? `${actionSettled}/${actionCounters!.planned} hành động · ${actionCounters!.confirmed} xác nhận · ${actionCounters!.noOp} không cần làm${actionCounters!.uncertain > 0 ? ` · ${actionCounters!.uncertain} chưa chắc` : ""}`
+                      : `${campaign.succeededMessages}/${total} bình luận`}
                     {campaign.failedMessages > 0 && ` · ${campaign.failedMessages} lỗi`}
                     {campaign.updatedAt && ` · ${timeAgoVi(campaign.updatedAt)}`}
                   </small>
@@ -294,8 +322,16 @@ export function InteractionMonitorTab({
                 </span>
               </button>
               <ProgressBar
-                fraction={total > 0 ? settled / total : null}
-                failedFraction={total > 0 ? campaign.failedMessages / total : 0}
+                fraction={
+                  hasActionCounters
+                    ? actionSettled / actionCounters!.planned
+                    : total > 0
+                      ? settled / total
+                      : null
+                }
+                failedFraction={
+                  hasActionCounters ? 0 : total > 0 ? campaign.failedMessages / total : 0
+                }
                 tone={
                   campaign.state === "running"
                     ? "run"
@@ -311,7 +347,7 @@ export function InteractionMonitorTab({
         {!campaigns.length && (
           <EmptyState compact title="Chưa có chiến dịch nào" />
         )}
-      </div>
+      </div>}
     </div>
   );
 }

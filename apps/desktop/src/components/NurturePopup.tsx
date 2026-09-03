@@ -1,6 +1,15 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type CSSProperties,
+  type KeyboardEvent as ReactKeyboardEvent,
+} from "react";
 
 import { InfoDot as Info } from "./InfoDot";
+import { AutomationProfileControl } from "./AutomationProfileControl";
 import {
   listenRiviuEvents,
   nurtureGetSettings,
@@ -10,15 +19,8 @@ import {
   nurtureStart,
   nurtureStop,
 } from "../api";
-import {
-  BUDGET_TOTAL,
-  budgetUsed,
-  clampToBudget,
-  isOverBudget,
-  isRateEnabled,
-  type BudgetKey,
-} from "../nurtureBudget";
 import { targetsOf } from "../selectionTargets";
+import { nurtureProfileConfig } from "../automationProfileConfig";
 import { orderDevicesByNumber, tileName, tileNumber } from "../deviceNaming";
 import { useTickWhile } from "../useTickWhile";
 import { NurtureAiTab } from "./nurture/NurtureAiTab";
@@ -26,14 +28,15 @@ import { NurtureCommentsTab } from "./nurture/NurtureCommentsTab";
 import { NurtureDeviceLog } from "./nurture/NurtureDeviceLog";
 import { NurtureDeviceProgress, NurtureRunProgress } from "./nurture/NurtureProgress";
 import { NurtureBehaviourTab } from "./nurture/NurtureBehaviourTab";
-import { IconClose, IconHeart } from "./Icons";
-import { LoadingState } from "./States";
+import { IconClose, IconHeart, IconRefresh } from "./Icons";
+import { LoadingState, StatusNotice } from "./States";
 import type {
   DeviceInfo,
   DeviceMeta,
   NurtureSessionStatus,
   NurtureSettings,
   SessionLogSummary,
+  TargetRef,
 } from "../types";
 import { describeError } from "../describeError";
 
@@ -56,8 +59,12 @@ type NurtureRow = {
 type Props = {
   devices: DeviceInfo[];
   selected: string[];
+  /** Already resolved from All/Group/Explicit at this render; an empty array means no target. */
+  targetUdids?: string[];
+  targetRef?: TargetRef;
   metas: Map<string, DeviceMeta>;
-  onClose: () => void;
+  onClose?: () => void;
+  surface?: "popup" | "page";
 };
 
 /**
@@ -101,7 +108,6 @@ export function FeatureRow({
   label,
   what,
   percent,
-  ceiling,
   enabled,
   onPercent,
   onEnabled,
@@ -109,11 +115,6 @@ export function FeatureRow({
   label: string;
   what: string;
   percent: number;
-  /**
-   * The highest this rate may reach: whatever the other three leave of the shared 100%.
-   * Computed by `nurtureBudget`, never here.
-   */
-  ceiling: number;
   enabled: boolean;
   onPercent: (value: number) => void;
   onEnabled: (value: boolean) => void;
@@ -133,37 +134,22 @@ export function FeatureRow({
         {label}
         <Info of={label} what={what} />
       </span>
-      {/* Every slider runs 0..100, always — the ceiling is enforced by `onPercent` clamping
-          and *shown* as the pale part of the track, it is NOT the slider's `max`.
-          Measured why: with `max` set to the ceiling, dragging row 2 up rescaled row 1,
-          so row 1's thumb slid across the track while its number never changed (Follow at
-          3 sat hard right on a max of 3, then jumped left when Thích freed 49 points). A
-          thumb that moves on its own is a control lying about which row the operator is
-          editing. A fixed scale also means 48% is the same distance along on all four rows,
-          which is the only way four sliders read as shares of one thing.
-
-          `--fill` / `--ceil` are fractions, turned into track positions in App.css. They are
-          inset by half a thumb there, so the colour boundaries line up with the thumb centre
-          instead of drifting up to 7px away from it at the ends. */}
+      {/* Every action is its own 0..100 roll. */}
       <input
         className="nu-feature-slider"
         type="range"
         min={0}
-        max={BUDGET_TOTAL}
+        max={100}
         step={1}
         value={percent}
-        data-ceiling={ceiling}
+        data-ceiling={100}
         style={
           {
-            "--fill": Math.min(percent, BUDGET_TOTAL) / BUDGET_TOTAL,
-            "--ceil": Math.max(Math.min(percent, BUDGET_TOTAL), ceiling) / BUDGET_TOTAL,
+            "--fill": Math.min(percent, 100) / 100,
+            "--ceil": 1,
           } as CSSProperties
         }
-        title={
-          enabled
-            ? `Kéo được tới ${ceiling}% — ba tỉ lệ kia đang dùng ${BUDGET_TOTAL - ceiling}%`
-            : `Đang tắt nên không tiêu ngân sách. Bật lại thì nó chiếm ${percent}%, mà hiện chỉ còn ${ceiling}% trống`
-        }
+        title={`${label}: ${percent}%`}
         onChange={(e) => onPercent(Number(e.target.value) || 0)}
         aria-label={`${label} thanh kéo phần trăm`}
       />
@@ -171,9 +157,7 @@ export function FeatureRow({
         <input
           type="number"
           min={0}
-          // A switched-off row spends nothing, so the budget does not bound it — only 0..100
-          // does. Same rule as `clampToBudget`, which is what actually holds either way.
-          max={enabled ? ceiling : BUDGET_TOTAL}
+          max={100}
           value={percent}
           onChange={(e) => onPercent(Number(e.target.value) || 0)}
           aria-label={`${label} phần trăm`}
@@ -198,7 +182,8 @@ function statusVi(raw: string): string {
     "ui session: timeout": "Phiên điều khiển quá hạn — thử lại",
     "clear popups": "Đóng popup",
     like: "Đang thích",
-    follow: "Đang follow",
+    save: "Đang lưu",
+    follow: "Đang theo dõi tác giả",
     "comment (vision)": "Đang bình luận (AI)",
     "comment (grounded)": "Đang bình luận (AI đọc nội dung)",
     "swipe next": "Vuốt video tiếp",
@@ -211,6 +196,16 @@ function statusVi(raw: string): string {
     "off TikTok — relaunch": "Lệch TikTok — mở lại",
     "night window — paused": "Giờ đêm — tạm dừng",
   };
+  const saveReasonVi = (reason: string): string => {
+    const normalized = reason.trim();
+    const reasons: Record<string, string> = {
+      "state unreadable": "không đọc được trạng thái",
+      "audit unavailable": "không ghi được nhật ký",
+      "card changed": "thẻ đã đổi",
+      "no control": "không tìm thấy nút Lưu",
+    };
+    return reasons[normalized] ?? normalized;
+  };
   if (exact[s]) return exact[s];
   if (s.startsWith("watching ")) return `Đang xem ${s.slice("watching ".length)}`;
   if (s.startsWith("round ") && s.includes("ensure TikTok")) return s.replace("round ", "Vòng ").replace(" — ensure TikTok", " — kiểm tra TikTok");
@@ -221,6 +216,10 @@ function statusVi(raw: string): string {
   if (s.startsWith("recover wait ")) return s.replace("recover wait ", "Khôi phục chờ ").replace("(", " (");
   if (s.startsWith("ensure failed:")) return `Mở TikTok lỗi: ${s.slice("ensure failed:".length).trim()}`;
   if (s.startsWith("like fail:")) return `Thích lỗi: ${s.slice("like fail:".length).trim()}`;
+  if (s.startsWith("save skip:")) return `Bỏ lưu: ${saveReasonVi(s.slice("save skip:".length))}`;
+  if (s.startsWith("save fail:")) return `Lưu lỗi: ${saveReasonVi(s.slice("save fail:".length))}`;
+  if (s.startsWith("save uncertain:"))
+    return `Lưu chưa chắc chắn: ${saveReasonVi(s.slice("save uncertain:".length))}`;
   if (s.startsWith("comment skip:")) return `Bỏ bình luận: ${s.slice("comment skip:".length).trim()}`;
   // Not "WDA": that is the iOS agent, and thirteen of the fourteen phones on this
   // desk are Android. The status stream is shared by both platforms, so the word has
@@ -246,9 +245,18 @@ function deviceLabel(
   return `Máy ${tileNumber(position || 1, meta)} · ${tileName(d, meta)}`;
 }
 
-export function NurturePopup({ devices, selected, metas, onClose }: Props) {
+export function NurturePopup({
+  devices,
+  selected,
+  targetUdids,
+  targetRef,
+  metas,
+  onClose,
+  surface = "popup",
+}: Props) {
   const [settings, setSettings] = useState<NurtureSettings | null>(null);
   const [statuses, setStatuses] = useState<NurtureSessionStatus[]>([]);
+  const [startedTargets, setStartedTargets] = useState<string[]>([]);
   const [msg, setMsg] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   // Tabs rather than a stack of collapsibles. The old panel put "Cấu hình AI", "Hành vi"
@@ -257,6 +265,7 @@ export function NurturePopup({ devices, selected, metas, onClose }: Props) {
   // and opening two at once pushed the live log off the bottom, which is the one thing the
   // panel is open to watch. One group at a time, full width, with the log in the same tab row.
   const [tab, setTab] = useState<"behaviour" | "ai" | "comments" | "log">("behaviour");
+  const [pageMode, setPageMode] = useState<"setup" | "monitor">("setup");
   /**
    * Which device's history is open, or `null`.
    *
@@ -276,14 +285,26 @@ export function NurturePopup({ devices, selected, metas, onClose }: Props) {
   const [logged, setLogged] = useState<SessionLogSummary[]>([]);
   const [pos, setPos] = useState({ x: 0, y: 0 });
   const drag = useRef<{ ox: number; oy: number; sx: number; sy: number } | null>(null);
-  const targets = targetsOf(selected, devices);
+  const targets = targetUdids ?? targetsOf(selected, devices);
   const anyRunning = statuses.some((s) => s.running);
+  const runningTargets = useMemo(
+    () => [...new Set(statuses.filter((status) => status.running).map((status) => status.udid))],
+    [statuses],
+  );
+  const stopTargets = startedTargets.length > 0 ? startedTargets : runningTargets;
+  const pageSurface = surface === "page";
+  const profileConfig = useMemo(
+    () =>
+      settings ? nurtureProfileConfig(settings, settings.scheduleDurationMinutes) : null,
+    [settings],
+  );
 
   const totals = useMemo(() => {
     return statuses.reduce(
       (acc, s) => {
         acc.videos += s.videosDone;
         acc.likes += s.likes;
+        acc.saves += s.saves ?? 0;
         acc.comments += s.comments;
         acc.follows += s.follows;
         // Tokens, not money. The USD that used to sit here was two hand-typed per-million
@@ -294,7 +315,15 @@ export function NurturePopup({ devices, selected, metas, onClose }: Props) {
         acc.completionTokens += s.sessionCompletionTokens;
         return acc;
       },
-      { videos: 0, likes: 0, comments: 0, follows: 0, promptTokens: 0, completionTokens: 0 },
+      {
+        videos: 0,
+        likes: 0,
+        saves: 0,
+        comments: 0,
+        follows: 0,
+        promptTokens: 0,
+        completionTokens: 0,
+      },
     );
   }, [statuses]);
 
@@ -335,6 +364,7 @@ export function NurturePopup({ devices, selected, metas, onClose }: Props) {
   }, [statuses, logged]);
 
   const reload = useCallback(async () => {
+    setMsg(null);
     try {
       const [s, st, summary] = await Promise.all([
         nurtureGetSettings(),
@@ -388,31 +418,15 @@ export function NurturePopup({ devices, selected, metas, onClose }: Props) {
     setSettings((prev) => (prev ? { ...prev, [key]: value } : prev));
   };
 
-  /// One of the four rates that share the 100% budget.
-  ///
-  /// Clamped against the *current* settings inside the updater rather than against a
-  /// captured copy: a slider fires many times a second while dragging, and a ceiling
-  /// computed from a stale render lets the sum drift past the budget between two frames.
-  const patchRate = (key: BudgetKey, value: number) => {
-    setSettings((prev) => (prev ? { ...prev, [key]: clampToBudget(prev, key, value) } : prev));
+  type RateKey = "likeProb" | "saveProb" | "commentProb" | "followProb" | "frenzyProb";
+  const patchRate = (key: RateKey, value: number) => {
+    const bounded = Number.isFinite(value) ? Math.max(0, Math.min(100, Math.floor(value))) : 0;
+    setSettings((prev) => (prev ? { ...prev, [key]: bounded } : prev));
   };
-
-  /// A saved config can spend more than the budget, because nothing added the four rates
-  /// up before today. The panel says so and offers the fix rather than editing it silently.
-  const overBudget = settings ? isOverBudget(settings) : false;
 
   const save = async (next?: NurtureSettings): Promise<boolean> => {
     const s = next ?? settings;
     if (!s) return false;
-    // The four rates share one budget, so the check is over all four. It replaces a pair
-    // of narrower ones ("Thích + Bình luận > 100" and "Follow/vuốt nhanh phải 0..100")
-    // that could both pass while the four together spent 131.
-    if (isOverBudget(s)) {
-      setMsg(
-        `Bốn tỉ lệ tương tác dùng chung ${BUDGET_TOTAL}%, đang là ${budgetUsed(s)}% — kéo xuống cho vừa`,
-      );
-      return false;
-    }
     if (s.maxCommentWords < 4 || s.maxCommentWords > 30) {
       setMsg(`Giới hạn comment phải từ 4 đến 30 từ`);
       return false;
@@ -433,7 +447,7 @@ export function NurturePopup({ devices, selected, metas, onClose }: Props) {
     // cannot produce a comment — `NurtureSettings::into_effective` zeroes it before the loop
     // ever sees it — so demanding an API key for it was refusing a save over a feature that
     // provably will not run.
-    if (isRateEnabled(s, "commentProb") && s.commentProb > 0 && !s.apiKey.trim()) {
+    if ((s.commentEnabled ?? true) && s.commentProb > 0 && !s.apiKey.trim()) {
       setMsg(`Đã bật bình luận: điền API key trong Cấu hình AI`);
       return false;
     }
@@ -451,12 +465,15 @@ export function NurturePopup({ devices, selected, metas, onClose }: Props) {
       setMsg("Chọn máy trên lưới trước");
       return;
     }
+    const runTargets = [...targets];
     setBusy(true);
     try {
-      if (settings && !(await save({ ...settings, scheduleUdids: targets }))) return;
-      await nurtureStart(targets);
+      if (settings && !(await save({ ...settings, scheduleUdids: runTargets }))) return;
+      await nurtureStart(runTargets);
+      setStartedTargets((current) => [...new Set([...current, ...runTargets])]);
       await reload();
-      setTab("log");
+      if (pageSurface) setPageMode("monitor");
+      else setTab("log");
     } catch (e) {
       setMsg(describeError(e));
     } finally {
@@ -467,7 +484,8 @@ export function NurturePopup({ devices, selected, metas, onClose }: Props) {
   const stop = async () => {
     setBusy(true);
     try {
-      await nurtureStop(targets.length ? targets : []);
+      await nurtureStop(stopTargets);
+      setStartedTargets([]);
       await reload();
     } catch (e) {
       setMsg(describeError(e));
@@ -492,39 +510,172 @@ export function NurturePopup({ devices, selected, metas, onClose }: Props) {
     drag.current = null;
   };
 
-  return (
-    <div className="nurture-float-layer" aria-label="Nuôi TikTok">
-      <div
-        className="nurture-float"
-        style={{ transform: `translate(${pos.x}px, ${pos.y}px)` }}
-      >
-        <div
-          className="nurture-float-title"
-          onPointerDown={onTitleDown}
-          onPointerMove={onTitleMove}
-          onPointerUp={onTitleUp}
-        >
-          <IconHeart size={14} />
-          <strong>Nuôi TikTok</strong>
-          <span className="hint">
-            {selected.length ? `${selected.length} máy` : `Tất cả ${devices.length}`}
-          </span>
-          <div className="grow" />
-          <button type="button" className="close" title="Đóng" onClick={onClose}>
-            <IconClose size={14} />
-          </button>
-        </div>
+  type PageMode = "setup" | "monitor";
+  type SettingsTab = "behaviour" | "ai" | "comments" | "log";
+  const visibleSettingsTabs: ReadonlyArray<readonly [SettingsTab, string]> = pageSurface
+    ? [
+        ["behaviour", "Hành vi"],
+        ["ai", "AI"],
+        ["comments", "Bình luận"],
+      ]
+    : [
+        ["behaviour", "Hành vi"],
+        ["ai", "AI"],
+        ["comments", "Bình luận"],
+        ["log", "Log"],
+      ];
 
-        <div className="nurture-float-body">
+  const activatePageMode = (next: PageMode) => {
+    setPageMode(next);
+    document.getElementById(`nurture-page-tab-${next}`)?.focus();
+  };
+  const onPageTabKeyDown = (event: ReactKeyboardEvent<HTMLButtonElement>) => {
+    let next: PageMode | null = null;
+    if (event.key === "ArrowRight" || event.key === "End") next = "monitor";
+    if (event.key === "ArrowLeft" || event.key === "Home") next = "setup";
+    if (!next) return;
+    event.preventDefault();
+    activatePageMode(next);
+  };
+  const activateSettingsTab = (next: SettingsTab) => {
+    setTab(next);
+    document.getElementById(`nurture-settings-tab-${next}`)?.focus();
+  };
+  const onSettingsTabKeyDown = (
+    event: ReactKeyboardEvent<HTMLButtonElement>,
+    current: SettingsTab,
+  ) => {
+    const currentIndex = visibleSettingsTabs.findIndex(([key]) => key === current);
+    let nextIndex: number | null = null;
+    if (event.key === "Home") nextIndex = 0;
+    if (event.key === "End") nextIndex = visibleSettingsTabs.length - 1;
+    if (event.key === "ArrowRight") nextIndex = (currentIndex + 1) % visibleSettingsTabs.length;
+    if (event.key === "ArrowLeft") {
+      nextIndex = (currentIndex - 1 + visibleSettingsTabs.length) % visibleSettingsTabs.length;
+    }
+    if (nextIndex === null) return;
+    event.preventDefault();
+    activateSettingsTab(visibleSettingsTabs[nextIndex][0]);
+  };
+
+  const renderSettings = () => {
+    if (!settings) return null;
+    return (
+      <>
+        <div
+          className="nurture-tabs"
+          role="tablist"
+          aria-label={pageSurface ? "Nhóm thiết lập Nuôi TikTok" : "Nuôi TikTok"}
+        >
+          {visibleSettingsTabs.map(([key, label]) => (
+            <button
+              key={key}
+              id={`nurture-settings-tab-${key}`}
+              type="button"
+              role="tab"
+              aria-selected={tab === key}
+              aria-controls={`nurture-settings-panel-${key}`}
+              tabIndex={tab === key ? 0 : -1}
+              className={`nurture-tab${tab === key ? " is-on" : ""}`}
+              onClick={() => setTab(key)}
+              onKeyDown={(event) => onSettingsTabKeyDown(event, key)}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+        {visibleSettingsTabs
+          .filter(([key]) => key !== "log")
+          .map(([key]) => (
+            <div
+              key={key}
+              id={`nurture-settings-panel-${key}`}
+              role="tabpanel"
+              aria-labelledby={`nurture-settings-tab-${key}`}
+              hidden={tab !== key}
+            >
+              {tab === key && key === "ai" && (
+                <NurtureAiTab
+                  settings={settings}
+                  patch={patch}
+                  devices={devices}
+                  targets={targets}
+                  save={save}
+                  onMessage={setMsg}
+                />
+              )}
+              {tab === key && key === "behaviour" && (
+                <NurtureBehaviourTab
+                  settings={settings}
+                  patch={patch}
+                  patchRate={patchRate}
+                  targets={targets}
+                />
+              )}
+              {tab === key && key === "comments" && (
+                <NurtureCommentsTab
+                  live={anyRunning}
+                  deviceLabel={(udid) => deviceLabel(devices, metas, udid)}
+                />
+              )}
+            </div>
+          ))}
+      </>
+    );
+  };
+
+  return (
+    <div
+      className={pageSurface ? "nurture-workspace" : "nurture-float-layer"}
+      role={pageSurface ? "region" : undefined}
+      aria-label={pageSurface ? "Không gian Nuôi TikTok" : "Nuôi TikTok"}
+    >
+      <div
+        className={pageSurface ? "nurture-workspace-inner" : "nurture-float"}
+        style={pageSurface ? undefined : { transform: `translate(${pos.x}px, ${pos.y}px)` }}
+      >
+        {!pageSurface && (
+          <div
+            className="nurture-float-title"
+            onPointerDown={onTitleDown}
+            onPointerMove={onTitleMove}
+            onPointerUp={onTitleUp}
+          >
+            <IconHeart size={14} />
+            <strong>Nuôi TikTok</strong>
+            <span className="hint">
+              {selected.length ? `${selected.length} máy` : `Tất cả ${devices.length}`}
+            </span>
+            <div className="grow" />
+            <button type="button" className="close" title="Đóng" onClick={onClose}>
+              <IconClose size={14} />
+            </button>
+          </div>
+        )}
+
+        <div className={pageSurface ? "nurture-float-body nurture-workspace-body" : "nurture-float-body"}>
           {!settings ? (
-            msg ? <p className="hint">{msg}</p> : <LoadingState />
+            msg ? (
+              <StatusNotice
+                tone="error"
+                action={(
+                  <button type="button" onClick={() => void reload()}>
+                    <IconRefresh size={15} /> Thử tải lại Nuôi TikTok
+                  </button>
+                )}
+              >
+                {msg}
+              </StatusNotice>
+            ) : (
+              <LoadingState label="Đang tải Nuôi TikTok…" />
+            )
           ) : (
             <>
               <div className="nurture-float-actions">
-                <button type="button" className="primary" disabled={busy || !devices.length} onClick={start}>
+                <button type="button" className="primary" disabled={busy || !targets.length} onClick={start}>
                   Bắt đầu
                 </button>
-                <button type="button" className="danger" disabled={busy || !anyRunning} onClick={stop}>
+                <button type="button" className="danger" disabled={busy || !stopTargets.length} onClick={stop}>
                   Dừng
                 </button>
                 <button
@@ -546,30 +697,71 @@ export function NurturePopup({ devices, selected, metas, onClose }: Props) {
                 </button>
               </div>
 
-              <div className="nurture-tabs" role="tablist" aria-label="Nuôi TikTok">
-                {(
-                  [
-                    ["behaviour", "Hành vi"],
-                    ["ai", "AI"],
-                    ["comments", "Bình luận"],
-                    ["log", "Log"],
-                  ] as const
-                ).map(([key, label]) => (
+              {pageSurface && (
+                <div className="nurture-page-tabs" role="tablist" aria-label="Chế độ Nuôi TikTok">
                   <button
-                    key={key}
+                    id="nurture-page-tab-setup"
                     type="button"
                     role="tab"
-                    aria-selected={tab === key}
-                    className={`nurture-tab${tab === key ? " is-on" : ""}`}
-                    onClick={() => setTab(key)}
+                    aria-selected={pageMode === "setup"}
+                    aria-controls="nurture-page-panel-setup"
+                    tabIndex={pageMode === "setup" ? 0 : -1}
+                    onClick={() => setPageMode("setup")}
+                    onKeyDown={onPageTabKeyDown}
                   >
-                    {label}
+                    Thiết lập
                   </button>
-                ))}
-              </div>
+                  <button
+                    id="nurture-page-tab-monitor"
+                    type="button"
+                    role="tab"
+                    aria-selected={pageMode === "monitor"}
+                    aria-controls="nurture-page-panel-monitor"
+                    tabIndex={pageMode === "monitor" ? 0 : -1}
+                    onClick={() => setPageMode("monitor")}
+                    onKeyDown={onPageTabKeyDown}
+                  >
+                    Theo dõi
+                  </button>
+                </div>
+              )}
 
-              {tab === "log" && (
-                <div className="nurture-live" role="tabpanel">
+              {pageSurface && (
+                <div
+                  id="nurture-page-panel-setup"
+                  role="tabpanel"
+                  aria-labelledby="nurture-page-tab-setup"
+                  hidden={pageMode !== "setup"}
+                >
+                  {pageMode === "setup" && (
+                    <>
+                      {targetRef && profileConfig && (
+                        <AutomationProfileControl
+                          kind="nurture"
+                          target={targetRef}
+                          config={profileConfig}
+                          defaultName="Hồ sơ Nuôi TikTok"
+                        />
+                      )}
+                      {renderSettings()}
+                    </>
+                  )}
+                </div>
+              )}
+
+              {!pageSurface && renderSettings()}
+
+              <div
+                id={pageSurface ? "nurture-page-panel-monitor" : "nurture-settings-panel-log"}
+                className="nurture-live"
+                role="tabpanel"
+                aria-labelledby={
+                  pageSurface ? "nurture-page-tab-monitor" : "nurture-settings-tab-log"
+                }
+                hidden={pageSurface ? pageMode !== "monitor" : tab !== "log"}
+              >
+                {((pageSurface && pageMode === "monitor") || (!pageSurface && tab === "log")) && (
+                  <>
                   {rows.length > 0 ? (
                     <>
                   <div className="nurture-float-stats">
@@ -582,9 +774,9 @@ export function NurturePopup({ devices, selected, metas, onClose }: Props) {
                       <strong>{totals.likes}</strong>
                     </div>
                     <div>
-                      <span>BL / Follow</span>
+                      <span>Lưu / BL / Theo dõi</span>
                       <strong>
-                        {totals.comments}/{totals.follows}
+                        {totals.saves}/{totals.comments}/{totals.follows}
                       </strong>
                     </div>
                     {/* Rendered at all, which is the point: the AI spend was recorded for
@@ -636,7 +828,7 @@ export function NurturePopup({ devices, selected, metas, onClose }: Props) {
                           />
                           <strong title={row.udid}>{deviceLabel(devices, metas, row.udid)}</strong>
                           <div className="grow" />
-                          {/* The same four numbers as before, but as labelled cells: the old
+                          {/* The session numbers as labelled cells: the old
                               single string ("12/34v · ♥5/6 · BL1/1 · +0/0") packed done-vs-
                               attempted for four different things into one line, and the only
                               way to read it was the tooltip. The tooltip stays. */}
@@ -647,7 +839,7 @@ export function NurturePopup({ devices, selected, metas, onClose }: Props) {
                           {row.status ? (
                             <span
                               className="nurture-metrics"
-                              title="đã xác nhận / đã thử — video · tim · bình luận · follow"
+                              title="đã xác nhận / đã thử — video · tim · lưu · bình luận · theo dõi"
                             >
                               <b>{row.status.videosDone}</b>
                               <i>/{row.status.swipeAttempts}</i>
@@ -655,6 +847,9 @@ export function NurturePopup({ devices, selected, metas, onClose }: Props) {
                               <b>{row.status.likes}</b>
                               <i>/{row.status.likeAttempts}</i>
                               <em>♥</em>
+                              <b>{row.status.saves ?? 0}</b>
+                              <i>/{row.status.saveAttempts ?? 0}</i>
+                              <em>L</em>
                               <b>{row.status.comments}</b>
                               <i>/{row.status.commentAttempts}</i>
                               <em>BL</em>
@@ -672,6 +867,13 @@ export function NurturePopup({ devices, selected, metas, onClose }: Props) {
                           </span>
                         </button>
                         <p className="nurture-float-log-msg">{statusVi(row.message)}</p>
+                        {row.status && (
+                          <p className="nurture-save-audit">
+                            Lưu: {row.status.saves ?? 0} xác nhận · {row.status.saveAttempts ?? 0}{" "}
+                            lần chạm · {row.status.saveNoops ?? 0} bỏ qua ·{" "}
+                            {row.status.saveUncertain ?? 0} chưa chắc chắn
+                          </p>
+                        )}
                         {/* Outside the head `<button>` on purpose: a `progressbar` nested in a
                             button is neither, and the row head has to stay a plain control.
                             Gated on `row.status` so an idle-sweep row — which never ran a
@@ -680,7 +882,11 @@ export function NurturePopup({ devices, selected, metas, onClose }: Props) {
                           <NurtureDeviceProgress status={row.status} now={nowTick} />
                         )}
                         {openLog === row.udid && (
-                          <NurtureDeviceLog udid={row.udid} running={row.running} />
+                          <NurtureDeviceLog
+                            udid={row.udid}
+                            running={row.running}
+                            presentStatus={statusVi}
+                          />
                         )}
                       </div>
                     ))}
@@ -689,32 +895,10 @@ export function NurturePopup({ devices, selected, metas, onClose }: Props) {
                   ) : (
                     <p className="nurture-log-empty">Chưa có log nuôi TikTok.</p>
                   )}
-                </div>
-              )}
+                  </>
+                )}
+              </div>
               {msg && <p className="nurture-float-err">{msg}</p>}
-
-              {tab === "ai" && (
-                <NurtureAiTab
-                  settings={settings}
-                  patch={patch}
-                  devices={devices}
-                  targets={targets}
-                  save={save}
-                  onMessage={setMsg}
-                />
-              )}
-              {tab === "behaviour" && (
-                <NurtureBehaviourTab
-                  settings={settings}
-                  patch={patch}
-                  patchRate={patchRate}
-                  setSettings={setSettings}
-                  overBudget={overBudget}
-                  targets={targets}
-                />
-              )}
-
-              {tab === "comments" && <NurtureCommentsTab live={anyRunning} />}
             </>
           )}
         </div>

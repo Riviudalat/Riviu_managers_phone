@@ -6,11 +6,13 @@ import {
   useMemo,
   useRef,
   useState,
+  type KeyboardEvent as ReactKeyboardEvent,
 } from "react";
 import {
   agentBulkRepair,
   agentListStatuses,
   deploymentFrontendReady,
+  listDeviceWorkStates,
   refreshDevices,
   saveGroup,
   viewSetPreset,
@@ -36,6 +38,7 @@ import { metaByUdid, orderDevicesByNumber, tileName, tileNumber } from "./device
 import { AdbConsole } from "./components/AdbConsole";
 import { DeviceSyslogPopup } from "./components/DeviceSyslogPopup";
 import { DeviceHealthPopup } from "./components/DeviceHealthPopup";
+import { DeviceDetailsDrawer } from "./components/DeviceDetailsDrawer";
 import { FleetDiagnosticsPage } from "./components/FleetDiagnosticsPage";
 import { ALL_DEVICES_TAB, devicesInTab, groupTabs, withDeviceAdded } from "./deviceGroups";
 import { FocusStream } from "./components/FocusStream";
@@ -47,18 +50,23 @@ import { NurturePopup } from "./components/NurturePopup";
 import { GroupManagerPopup } from "./components/GroupManagerPopup";
 import { GroupToolsPopup } from "./components/GroupToolsPopup";
 import { ProfileToolbar } from "./components/ProfileToolbar";
-import { ScriptsPanel } from "./components/ScriptsPanel";
 import { SettingsPanel } from "./components/SettingsPanel";
 import { Sidebar } from "./components/Sidebar";
+import { TargetSelector } from "./components/TargetSelector";
+import { resolveAutomationTarget } from "./automationTargets";
+import {
+  deviceMatchesFleetFilter,
+  deviceOperationalView,
+} from "./deviceWork";
+import type { DeviceOperationalFilter, DeviceWorkOwnerReadState } from "./deviceWork";
 import { forgetDepartedViews, useViewClient } from "./viewStore";
 import { ApiPage } from "./pages/ApiPage";
 import { AppsPage } from "./pages/AppsPage";
 import { DataPage } from "./pages/DataPage";
 import { MaterialPage } from "./pages/MaterialPage";
 import { PublishPage } from "./pages/PublishPage";
-import { ScheduleBlock } from "./pages/ScheduleBlock";
-import type { DeviceInfo, PageId } from "./types";
-import { deviceModelOsLabel } from "./types";
+import type { DeviceInfo, DeviceWorkOwner, PageId, TargetRef } from "./types";
+import { MoreHorizontal } from "lucide-react";
 import { loadZoom, stepZoom, storeZoom, TILE_ZOOM, wheelWantsZoom } from "./zoom";
 import "./App.css";
 
@@ -67,8 +75,15 @@ const FlowWorkspace = lazy(async () => {
   return { default: module.FlowWorkspace };
 });
 
+const OrchestrationWorkspace = lazy(async () => {
+  const module = await import("./components/orchestration/OrchestrationWorkspace");
+  return { default: module.OrchestrationWorkspace };
+});
+
 const PAGE_TITLE: Partial<Record<PageId, string>> = {
-  control: "Quản lý cửa sổ",
+  control: "Thiết bị",
+  nurture: "Nuôi TikTok",
+  interaction: "Tương tác",
   material: "Kho nội dung",
   apps: "Trung tâm ứng dụng",
   scripts: "Flow",
@@ -79,6 +94,11 @@ const PAGE_TITLE: Partial<Record<PageId, string>> = {
   api: "API",
   settings: "Cài đặt",
 };
+
+type DeviceWorkOwnerProjection =
+  | { state: "loading" }
+  | { state: "known"; owners: Map<string, DeviceWorkOwner | null> }
+  | { state: "error"; message: string };
 
 /**
  * State for a surface opened against **one phone**, that closes itself — out loud — when that
@@ -164,6 +184,7 @@ function App() {
   const [adbFor, setAdbFor] = useDeviceSurface(devices, "bảng lệnh adb");
   const [syslogFor, setSyslogFor] = useDeviceSurface(devices, "log của máy");
   const [healthFor, setHealthFor] = useDeviceSurface(devices, "bảng kiểm tra máy");
+  const [detailsFor, setDetailsFor] = useDeviceSurface(devices, "chi tiết thiết bị");
   /// Which phone's filesystem is open in the browser popup (xiaowei "Preview Mobile Files").
   const [filesFor, setFilesFor] = useDeviceSurface(devices, "trình quản lý tệp");
   const [groupMode, setGroupMode] = useState(false);
@@ -175,16 +196,63 @@ function App() {
   /// It is a property of the grid, set from the tile's own menu, and it lives here.
   const [controlCenter, setControlCenter] = useState<string | null>(null);
   const [focusUdid, setFocusUdid] = useDeviceSurface(devices, "màn phóng to");
-  const [jobsScriptSeed, setJobsScriptSeed] = useState<string | null>(null);
   const [viewMode, setViewMode] = useState<ViewMode>("window");
   const [tileWidth, setTileWidth] = useState(() => loadZoom(TILE_ZOOM));
-  const [nurtureOpen, setNurtureOpen] = useState(false);
-  const [interactionOpen, setInteractionOpen] = useState(false);
   const [groupToolsOpen, setGroupToolsOpen] = useState(false);
   const [groupsOpen, setGroupsOpen] = useState(false);
   const [flowDirty, setFlowDirty] = useState(false);
-  const [automationView, setAutomationView] = useState<"flow" | "legacy">("flow");
+  const [automationView, setAutomationView] = useState<"device" | "orchestration">("device");
+  const [automationTargetRef, setAutomationTargetRef] = useState<TargetRef>({ type: "all" });
+  const [deviceWorkOwners, setDeviceWorkOwners] = useState<DeviceWorkOwnerProjection>({
+    state: "loading",
+  });
+  const [deviceWorkOwnerRetry, setDeviceWorkOwnerRetry] = useState(0);
+  const [deviceSearch, setDeviceSearch] = useState("");
+  const [deviceStatusFilter, setDeviceStatusFilter] = useState<DeviceOperationalFilter>("all");
   useViewClient();
+
+  const rosterKey = devices.map((device) => device.udid).join("\u0000");
+  useEffect(() => {
+    if (page !== "control" || !fleetSettled) return;
+    let active = true;
+    let reading = false;
+    setDeviceWorkOwners({ state: "loading" });
+    const readOwners = () => {
+      if (reading) return;
+      reading = true;
+      void listDeviceWorkStates()
+        .then((states) => {
+          if (!active) return;
+          setDeviceWorkOwners({
+            state: "known",
+            owners: new Map(states.map((state) => [state.udid, state.currentOwner])),
+          });
+        })
+        .catch((error) => {
+          if (active) {
+            setDeviceWorkOwners({ state: "error", message: describeError(error) });
+          }
+        })
+        .finally(() => {
+          reading = false;
+        });
+    };
+    readOwners();
+    const timer = window.setInterval(readOwners, 2_000);
+    return () => {
+      active = false;
+      window.clearInterval(timer);
+    };
+  }, [deviceWorkOwnerRetry, fleetSettled, page, rosterKey]);
+
+  const deviceWorkOwnerReadState: DeviceWorkOwnerReadState = deviceWorkOwners.state;
+  const currentDeviceWorkOwner = useCallback(
+    (udid: string): DeviceWorkOwner | null =>
+      deviceWorkOwners.state === "known"
+        ? (deviceWorkOwners.owners.get(udid) ?? null)
+        : null,
+    [deviceWorkOwners],
+  );
 
   useEffect(() => {
     if (startupIssue !== null || !fleetSettled || bootError) return;
@@ -194,7 +262,7 @@ function App() {
   const confirmDiscardFlow = useCallback(
     () =>
       requestConfirm({
-        title: "Bỏ thay đổi Flow chưa lưu?",
+        title: "Bỏ thay đổi chưa lưu?",
         message: "Bản nháp hiện tại chưa được lưu và sẽ mất khi rời khỏi trang.",
         confirmLabel: "Bỏ thay đổi",
         cancelLabel: "Ở lại",
@@ -213,13 +281,27 @@ function App() {
   );
 
   const requestAutomationView = useCallback(
-    async (next: "flow" | "legacy") => {
-      if (next === automationView) return;
-      if (flowDirty && !(await confirmDiscardFlow())) return;
+    async (next: "device" | "orchestration") => {
+      if (next === automationView) return true;
+      if (flowDirty && !(await confirmDiscardFlow())) return false;
       setAutomationView(next);
+      return true;
     },
     [automationView, confirmDiscardFlow, flowDirty],
   );
+
+  const onAutomationTabKeyDown = (
+    event: ReactKeyboardEvent<HTMLButtonElement>,
+  ) => {
+    let next: "device" | "orchestration" | null = null;
+    if (event.key === "ArrowRight" || event.key === "End") next = "orchestration";
+    if (event.key === "ArrowLeft" || event.key === "Home") next = "device";
+    if (!next) return;
+    event.preventDefault();
+    void requestAutomationView(next).then((activated) => {
+      if (activated) document.getElementById(`flow-mode-tab-${next}`)?.focus();
+    });
+  };
 
   useEffect(() => {
     if (!flowDirty) return;
@@ -236,12 +318,59 @@ function App() {
 
   const tabs = useMemo(() => groupTabs(devices, groups), [devices, groups]);
   const metaMap = useMemo(() => metaByUdid(metas), [metas]);
+  const orderedDevices = useMemo(
+    () => orderDevicesByNumber(devices, metaMap),
+    [devices, metaMap],
+  );
+  const fleetNumberByUdid = useMemo(() => {
+    const numbers = new Map<string, number>();
+    orderedDevices.forEach((device, index) => {
+      numbers.set(device.udid, tileNumber(index + 1, metaMap.get(device.udid)));
+    });
+    return numbers;
+  }, [metaMap, orderedDevices]);
+  const automationDeviceLabels = useMemo(() => {
+    const labels = new Map<string, string>();
+    orderedDevices.forEach((device, index) => {
+      const meta = metaMap.get(device.udid);
+      labels.set(
+        device.udid,
+        `Máy ${tileNumber(index + 1, meta)} · ${tileName(device, meta)}`,
+      );
+    });
+    return labels;
+  }, [metaMap, orderedDevices]);
+  const automationTargetUdids = useMemo(
+    () => resolveAutomationTarget(automationTargetRef, devices, groups),
+    [automationTargetRef, devices, groups],
+  );
   // Numbered phones lead, in number order; an unnumbered fleet is left exactly as the
   // driver listed it. That is the point of a number — a grid position moves when a phone
   // drops off USB, a number does not.
   const visibleDevices = useMemo(
-    () => orderDevicesByNumber(devicesInTab(devices, groups, groupTab), metaMap),
-    [devices, groups, groupTab, metaMap],
+    () =>
+      devicesInTab(orderedDevices, groups, groupTab).filter((device) =>
+        deviceMatchesFleetFilter(
+          device,
+          currentDeviceWorkOwner(device.udid),
+          fleetNumberByUdid.get(device.udid) ?? 1,
+          tileName(device, metaMap.get(device.udid)),
+          deviceSearch,
+          deviceStatusFilter,
+          deviceWorkOwnerReadState,
+        ),
+      ),
+    [
+      deviceSearch,
+      deviceStatusFilter,
+      deviceWorkOwnerReadState,
+      currentDeviceWorkOwner,
+      fleetNumberByUdid,
+      groupTab,
+      groups,
+      metaMap,
+      orderedDevices,
+    ],
   );
 
   const {
@@ -281,6 +410,10 @@ function App() {
   const menuHealthDevice = useMemo(
     () => (healthFor ? (devices.find((d) => d.udid === healthFor) ?? null) : null),
     [healthFor, devices],
+  );
+  const detailsDevice = useMemo(
+    () => (detailsFor ? (devices.find((device) => device.udid === detailsFor) ?? null) : null),
+    [detailsFor, devices],
   );
   const menuDevice = useMemo(
     () => (tileMenu ? (devices.find((d) => d.udid === tileMenu.udid) ?? null) : null),
@@ -553,30 +686,13 @@ function App() {
               <ProfileToolbar
                 selected={selectedDevices}
                 syncOn={groupMode}
-                nurtureOpen={nurtureOpen}
-                onNurture={() => {
-                  setInteractionOpen(false);
-                  setGroupToolsOpen(false);
-                  setNurtureOpen((v) => !v);
-                }}
-                interactionOpen={interactionOpen}
-                onInteraction={() => {
-                  setNurtureOpen(false);
-                  setGroupToolsOpen(false);
-                  setGroupsOpen(false);
-                  setInteractionOpen((v) => !v);
-                }}
                 groupsOpen={groupsOpen}
                 onGroups={() => {
-                  setNurtureOpen(false);
-                  setInteractionOpen(false);
                   setGroupToolsOpen(false);
                   setGroupsOpen((v) => !v);
                 }}
                 groupToolsOpen={groupToolsOpen}
                 onGroupTools={() => {
-                  setNurtureOpen(false);
-                  setInteractionOpen(false);
                   setGroupsOpen(false);
                   setGroupToolsOpen((v) => !v);
                 }}
@@ -659,11 +775,50 @@ function App() {
                 }}
               />
 
+              {deviceWorkOwners.state === "error" && (
+                <Banner
+                  tone="error"
+                  action={
+                    <button
+                      type="button"
+                      onClick={() => setDeviceWorkOwnerRetry((value) => value + 1)}
+                    >
+                      Thử lại
+                    </button>
+                  }
+                >
+                  <strong>Không đọc được tác vụ đang chạy trên thiết bị</strong>
+                  <span>{deviceWorkOwners.message}</span>
+                </Banner>
+              )}
+
               {/* One row, not two: tabs on the left, size and view mode on the right.
                   The tab strip keeps its own horizontal scroll and the controls do not
                   join it — otherwise the slider scrolls away with the tabs. */}
               <div className="device-toolrow">
                 <GroupTabs tabs={tabs} active={groupTab} onSelect={setGroupTab} />
+                <div className="device-filters" role="search" aria-label="Lọc thiết bị">
+                  <input
+                    type="search"
+                    aria-label="Tìm thiết bị"
+                    placeholder="Tìm số máy hoặc tên"
+                    value={deviceSearch}
+                    onChange={(event) => setDeviceSearch(event.target.value)}
+                  />
+                  <select
+                    aria-label="Trạng thái thiết bị"
+                    value={deviceStatusFilter}
+                    onChange={(event) =>
+                      setDeviceStatusFilter(event.target.value as DeviceOperationalFilter)
+                    }
+                  >
+                    <option value="all">Mọi trạng thái</option>
+                    <option value="ready">Sẵn sàng</option>
+                    <option value="busy">Bận</option>
+                    <option value="warning">Cần xem</option>
+                    <option value="offline">Ngoại tuyến</option>
+                  </select>
+                </div>
                 {/* **Selects what is on screen, and says how many.**
                     `visibleDevices`, not `devices`: this sits beside the group tabs, so
                     "tất cả" has to mean the tab the operator is looking at. Saying the
@@ -694,23 +849,31 @@ function App() {
                 <FilterToolbar viewMode={viewMode} onViewMode={setViewMode} />
               </div>
 
-              {viewMode === "list" && (
+              {visibleDevices.length > 0 && viewMode === "list" && (
                 <table className="device-table">
                   <thead>
                     <tr>
                       <th />
-                      <th>Name</th>
-                      <th>Status</th>
-                      <th>Code</th>
-                      <th>Model</th>
-                      <th>Link</th>
+                      <th>Máy</th>
+                      <th>Trạng thái</th>
+                      <th>Kết nối</th>
                       <th />
                     </tr>
                   </thead>
                   <tbody>
-                    {devices.map((device) => {
+                    {visibleDevices.map((device) => {
                       const sel = selected.includes(device.udid);
-                      const running = device.wdaReady || device.status === "ready";
+                      const machineNumber = fleetNumberByUdid.get(device.udid) ?? 1;
+                      const meta = metaMap.get(device.udid);
+                      const currentOwner = currentDeviceWorkOwner(device.udid);
+                      const status = deviceOperationalView(
+                        device,
+                        currentOwner,
+                        deviceWorkOwnerReadState,
+                      );
+                      const statusLabel = status.ownerLabel
+                        ? `${status.label} · ${status.ownerLabel}`
+                        : status.label;
                       return (
                         <tr
                           key={device.udid}
@@ -726,26 +889,41 @@ function App() {
                               onClick={(e) => e.stopPropagation()}
                             />
                           </td>
-                          <td>{device.name}</td>
                           <td>
-                            <span className={`chip ${running ? "ok" : "info"}`}>
-                              {running ? "Running" : device.status}
+                            <strong>Máy {machineNumber}</strong>
+                            <span className="device-table-alias">{tileName(device, meta)}</span>
+                          </td>
+                          <td>
+                            <span className={`chip ${status.tone}`}>
+                              {statusLabel}
                             </span>
                           </td>
-                          <td className="mono">{device.udid.slice(0, 12)}…</td>
-                          <td>{deviceModelOsLabel(device)}</td>
                           <td>{device.connection.toUpperCase()}</td>
                           <td>
-                            <button
-                              type="button"
-                              className="link"
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                setFocusUdid(device.udid);
-                              }}
-                            >
-                              Open
-                            </button>
+                            <div className="device-row-actions">
+                              <button
+                                type="button"
+                                className="link"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  setFocusUdid(device.udid);
+                                }}
+                              >
+                                Mở
+                              </button>
+                              <button
+                                type="button"
+                                className="icon-button"
+                                aria-label={`Xem chi tiết Máy ${machineNumber}`}
+                                title="Xem chi tiết"
+                                onClick={(event) => {
+                                  event.stopPropagation();
+                                  setDetailsFor(device.udid);
+                                }}
+                              >
+                                <MoreHorizontal size={18} />
+                              </button>
+                            </div>
                           </td>
                         </tr>
                       );
@@ -754,7 +932,7 @@ function App() {
                 </table>
               )}
 
-              {viewMode === "window" && (
+              {visibleDevices.length > 0 && viewMode === "window" && (
                 <div
                   className="window-canvas"
                   ref={canvasRef}
@@ -772,13 +950,18 @@ function App() {
                       }}
                     />
                   )}
-                  {visibleDevices.map((device, i) => (
+                  {visibleDevices.map((device) => (
                     <DeviceTile
                       key={device.udid}
                       device={device}
                       width={tileWidth}
-                      index={tileNumber(i + 1, metaMap.get(device.udid))}
+                      index={fleetNumberByUdid.get(device.udid) ?? 1}
                       name={tileName(device, metaMap.get(device.udid))}
+                      operational={deviceOperationalView(
+                        device,
+                        currentDeviceWorkOwner(device.udid),
+                        deviceWorkOwnerReadState,
+                      )}
                       onContextMenu={(udid, x, y) => setTileMenu({ udid, x, y })}
                       selected={selected.includes(device.udid)}
                       focused={focusUdid === device.udid}
@@ -799,6 +982,14 @@ function App() {
                     />
                   ))}
                 </div>
+              )}
+
+              {devices.length > 0 && visibleDevices.length === 0 && (
+                <EmptyState
+                  icon={<IconPhone size={20} />}
+                  title="Không có thiết bị phù hợp"
+                  hint="Đổi nhóm, từ khóa hoặc trạng thái để xem thiết bị khác."
+                />
               )}
 
               {tileMenu && menuDevice && (
@@ -867,53 +1058,81 @@ function App() {
           )}
           {page === "scripts" && (
             <section className="automation-surface">
-              <div role="tablist" aria-label="Automation view" className="automation-tabs">
+              <div role="tablist" aria-label="Chế độ Flow" className="automation-tabs">
                 <button
+                  id="flow-mode-tab-device"
                   type="button"
                   role="tab"
-                  aria-selected={automationView === "flow"}
-                  onClick={() => void requestAutomationView("flow")}
+                  aria-selected={automationView === "device"}
+                  aria-controls="flow-mode-panel-device"
+                  tabIndex={automationView === "device" ? 0 : -1}
+                  onClick={() => void requestAutomationView("device")}
+                  onKeyDown={onAutomationTabKeyDown}
                 >
-                  Flow
+                  Flow thiết bị
                 </button>
                 <button
+                  id="flow-mode-tab-orchestration"
                   type="button"
                   role="tab"
-                  aria-selected={automationView === "legacy"}
-                  onClick={() => void requestAutomationView("legacy")}
+                  aria-selected={automationView === "orchestration"}
+                  aria-controls="flow-mode-panel-orchestration"
+                  tabIndex={automationView === "orchestration" ? 0 : -1}
+                  onClick={() => void requestAutomationView("orchestration")}
+                  onKeyDown={onAutomationTabKeyDown}
                 >
-                  Legacy
+                  Điều phối
                 </button>
               </div>
-              {automationView === "flow" ? (
-                <Suspense
-                  fallback={(
-                    <LoadingState label="Đang tải Flow…" />
-                  )}
-                >
-                  <FlowWorkspace
-                    devices={devices}
-                    selectedUdids={selected}
-                    onDirtyChange={setFlowDirty}
-                  />
-                </Suspense>
-              ) : (
-                <div className="automation-legacy">
-                  <ScriptsPanel
-                    onUseInJobs={(json) => {
-                      setJobsScriptSeed(json);
-                      void requestPage("jobs");
-                    }}
-                  />
-                  <div className="panel automation-legacy-schedule">
-                    <ScheduleBlock
+              <div
+                id="flow-mode-panel-device"
+                className="automation-mode-panel"
+                role="tabpanel"
+                aria-labelledby="flow-mode-tab-device"
+                hidden={automationView !== "device"}
+              >
+                {automationView === "device" && (
+                  <Suspense fallback={<LoadingState label="Đang tải Flow…" />}>
+                    <FlowWorkspace
                       devices={devices}
-                      selected={selected}
-                      onSelectUdids={setSelected}
+                      deviceLabel={(device) =>
+                        automationDeviceLabels.get(device.udid) ?? device.name
+                      }
+                      selectedUdids={selected}
+                      onDirtyChange={setFlowDirty}
                     />
+                  </Suspense>
+                )}
+              </div>
+              <div
+                id="flow-mode-panel-orchestration"
+                className="automation-mode-panel"
+                role="tabpanel"
+                aria-labelledby="flow-mode-tab-orchestration"
+                hidden={automationView !== "orchestration"}
+              >
+                {automationView === "orchestration" && (
+                  <div className="automation-page-stack">
+                    <TargetSelector
+                      devices={devices}
+                      groups={groups}
+                      selected={selected}
+                      onChange={setSelected}
+                      targetRef={automationTargetRef}
+                      onTargetRefChange={setAutomationTargetRef}
+                      deviceLabel={(device) =>
+                        automationDeviceLabels.get(device.udid) ?? device.name
+                      }
+                    />
+                    <Suspense fallback={<LoadingState label="Đang tải Điều phối…" />}>
+                      <OrchestrationWorkspace
+                        onDirtyChange={setFlowDirty}
+                        targetRef={automationTargetRef}
+                      />
+                    </Suspense>
                   </div>
-                </div>
-              )}
+                )}
+              </div>
             </section>
           )}
           {page === "jobs" && (
@@ -923,17 +1142,73 @@ function App() {
               selectedUdids={selected}
               onSelectUdids={setSelected}
               onRefresh={reload}
-              initialScript={jobsScriptSeed}
+              initialScript={null}
               loading={!fleetSettled}
               loadError={bootError}
             />
           )}
           {page === "publish" && (
-            <PublishPage
-              devices={devices}
-              selected={selected}
-              onSelectUdids={setSelected}
-            />
+            <div className="automation-page-stack">
+              <TargetSelector
+                devices={devices}
+                groups={groups}
+                selected={selected}
+                onChange={setSelected}
+                targetRef={automationTargetRef}
+                onTargetRefChange={setAutomationTargetRef}
+                deviceLabel={(device) => automationDeviceLabels.get(device.udid) ?? device.name}
+              />
+              <PublishPage
+                devices={devices}
+                selected={selected}
+                targetUdids={automationTargetUdids}
+                targetRef={automationTargetRef}
+                metas={metaMap}
+                onSelectUdids={setSelected}
+              />
+            </div>
+          )}
+          {page === "nurture" && (
+            <div className="automation-page-stack">
+              <TargetSelector
+                devices={devices}
+                groups={groups}
+                selected={selected}
+                onChange={setSelected}
+                targetRef={automationTargetRef}
+                onTargetRefChange={setAutomationTargetRef}
+                deviceLabel={(device) => automationDeviceLabels.get(device.udid) ?? device.name}
+              />
+              <NurturePopup
+                devices={devices}
+                selected={selected}
+                targetUdids={automationTargetUdids}
+                targetRef={automationTargetRef}
+                metas={metaMap}
+                surface="page"
+              />
+            </div>
+          )}
+          {page === "interaction" && (
+            <div className="automation-page-stack">
+              <TargetSelector
+                devices={devices}
+                groups={groups}
+                selected={selected}
+                onChange={setSelected}
+                targetRef={automationTargetRef}
+                onTargetRefChange={setAutomationTargetRef}
+                deviceLabel={(device) => automationDeviceLabels.get(device.udid) ?? device.name}
+              />
+              <InteractionPopup
+                devices={devices}
+                selected={selected}
+                targetUdids={automationTargetUdids}
+                targetRef={automationTargetRef}
+                metas={metaMap}
+                surface="page"
+              />
+            </div>
           )}
           {page === "diagnostics" && <FleetDiagnosticsPage devices={devices} metas={metas} />}
           {page === "data" && <DataPage />}
@@ -958,6 +1233,15 @@ function App() {
       {healthFor && menuHealthDevice && (
         <DeviceHealthPopup device={menuHealthDevice} onClose={() => setHealthFor(null)} />
       )}
+      {detailsFor && detailsDevice && (
+        <DeviceDetailsDrawer
+          device={detailsDevice}
+          machineLabel={`Máy ${fleetNumberByUdid.get(detailsDevice.udid) ?? 1}`}
+          currentOwner={currentDeviceWorkOwner(detailsDevice.udid)}
+          ownerReadFailed={deviceWorkOwners.state !== "known"}
+          onClose={() => setDetailsFor(null)}
+        />
+      )}
       {adbFor && menuAdbDevice && (
         <AdbConsole device={menuAdbDevice} onClose={() => setAdbFor(null)} />
       )}
@@ -980,24 +1264,6 @@ function App() {
           // The same catalog the tile's right-click menu gets. Zooming into a phone is a
           // different *view* of it, not a smaller set of things you can do to it.
           functions={tileActions(focusDevice)}
-        />
-      )}
-
-      {page === "control" && nurtureOpen && (
-        <NurturePopup
-          devices={devices}
-          selected={selected}
-          metas={metaMap}
-          onClose={() => setNurtureOpen(false)}
-        />
-      )}
-
-      {page === "control" && interactionOpen && (
-        <InteractionPopup
-          devices={devices}
-          selected={selected}
-          metas={metaMap}
-          onClose={() => setInteractionOpen(false)}
         />
       )}
 

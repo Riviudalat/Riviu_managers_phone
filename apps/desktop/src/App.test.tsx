@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import App from "./App";
@@ -41,6 +41,7 @@ vi.mock("./api", () => ({
   })),
   listenRiviuEvents: vi.fn(async () => () => undefined),
   listDevices: vi.fn(async () => []),
+  listDeviceWorkStates: vi.fn(async () => []),
   // The grid reads the operator's own records (alias, number) on every reload. Mocked for
   // the reason the comment above gives, and this one bit: an unmocked export is `undefined`,
   // so the call threw *synchronously* inside `reload`'s try block — past the `.catch` that
@@ -80,6 +81,45 @@ vi.mock("./components/flow/FlowWorkspace", () => ({
       <button type="button" onClick={() => onDirtyChange(true)}>Mark fixture dirty</button>
       <button type="button" onClick={() => onDirtyChange(false)}>Mark fixture clean</button>
     </section>
+  ),
+}));
+
+vi.mock("./components/orchestration/OrchestrationWorkspace", () => ({
+  OrchestrationWorkspace: ({
+    onDirtyChange,
+    targetRef,
+  }: {
+    onDirtyChange: (dirty: boolean) => void;
+    targetRef?: { type: string };
+  }) => (
+    <section aria-label="Điều phối fixture" data-target-type={targetRef?.type}>
+      <button type="button" onClick={() => onDirtyChange(true)}>Mark orchestration dirty</button>
+    </section>
+  ),
+}));
+
+vi.mock("./components/NurturePopup", () => ({
+  NurturePopup: ({
+    surface,
+    targetUdids,
+    targetRef,
+  }: {
+    surface?: string;
+    targetUdids?: string[];
+    targetRef?: { type: string };
+  }) => (
+    <section
+      aria-label="Không gian Nuôi TikTok"
+      data-surface={surface}
+      data-targets={targetUdids?.join(",")}
+      data-target-type={targetRef?.type}
+    />
+  ),
+}));
+
+vi.mock("./components/InteractionPopup", () => ({
+  InteractionPopup: ({ surface }: { surface?: string }) => (
+    <section aria-label="Không gian Tương tác" data-surface={surface} />
   ),
 }));
 
@@ -136,7 +176,7 @@ describe("toolbar Start", () => {
     render(<App />);
     await waitFor(() => expect(screen.getByText("Redmi")).toBeInTheDocument());
     await userEvent.click(
-      screen.getByTitle("Prepare / start stream (selected hoặc tất cả)"),
+      screen.getByTitle("Mở luồng xem cho các máy đã chọn hoặc toàn bộ danh sách"),
     );
     await waitFor(() => expect(api.viewEnsure).toHaveBeenCalledWith("10969614"));
     expect(api.prepareDevice).not.toHaveBeenCalled();
@@ -148,10 +188,157 @@ describe("toolbar Start", () => {
     render(<App />);
     await waitFor(() => expect(screen.getByText("iPhone 8")).toBeInTheDocument());
     await userEvent.click(
-      screen.getByTitle("Prepare / start stream (selected hoặc tất cả)"),
+      screen.getByTitle("Mở luồng xem cho các máy đã chọn hoặc toàn bộ danh sách"),
     );
     await waitFor(() => expect(api.prepareDevice).toHaveBeenCalledWith(iphone.udid));
     expect(api.viewEnsure).not.toHaveBeenCalled();
+  });
+});
+
+describe("device group scope", () => {
+  it("filters the table with the same active group as the stream grid", async () => {
+    const api = await import("./api");
+    const other: DeviceInfo = {
+      ...androidPhone,
+      udid: "ce0617",
+      name: "Note 8",
+      model: "SM-N950F",
+    };
+    vi.mocked(api.listDevices).mockResolvedValue([androidPhone, other]);
+    vi.mocked(api.listGroups).mockResolvedValue([
+      {
+        id: "group-redmi",
+        name: "Máy Redmi",
+        color: "#22c55e",
+        udids: [androidPhone.udid],
+        createdAt: "2026-09-03T00:00:00Z",
+      },
+    ]);
+
+    render(<App />);
+    await waitFor(() => expect(screen.getByText("Note 8")).toBeInTheDocument());
+    await userEvent.click(screen.getByRole("tab", { name: /Máy Redmi/ }));
+    await userEvent.click(screen.getByTitle("Danh sách"));
+
+    expect(screen.getByRole("cell", { name: /Máy 1.*Redmi/ })).toBeInTheDocument();
+    expect(screen.queryByRole("cell", { name: /Note 8/ })).toBeNull();
+  });
+});
+
+describe("device operational identity", () => {
+  it("shows the active work owner in the summary and keeps technical identity in details", async () => {
+    const api = await import("./api");
+    vi.mocked(api.listDevices).mockResolvedValue([androidPhone]);
+    vi.mocked(api.listDeviceWorkStates).mockResolvedValue([
+      { udid: androidPhone.udid, currentOwner: "interaction" },
+    ]);
+
+    render(<App />);
+    await waitFor(() => expect(screen.getByText("Redmi")).toBeInTheDocument());
+    await userEvent.click(screen.getByTitle("Danh sách"));
+
+    expect(screen.getByText("Bận · Tương tác")).toBeVisible();
+    expect(screen.queryByText(androidPhone.model)).toBeNull();
+    expect(screen.queryByText(androidPhone.udid)).toBeNull();
+
+    await userEvent.click(screen.getByRole("button", { name: "Xem chi tiết Máy 1" }));
+    const details = screen.getByRole("dialog", { name: "Chi tiết Máy 1" });
+    expect(within(details).getByText(androidPhone.model)).toBeVisible();
+    expect(within(details).getByText(androidPhone.udid)).toBeVisible();
+    expect(within(details).getByText("Tương tác")).toBeVisible();
+    expect(within(details).getByText("ready")).toBeVisible();
+  });
+
+  it("never calls a ready phone idle when owner lookup fails and retries in place", async () => {
+    const api = await import("./api");
+    vi.mocked(api.listDevices).mockResolvedValue([androidPhone]);
+    vi.mocked(api.listDeviceWorkStates).mockRejectedValue(new Error("owner projection offline"));
+
+    render(<App />);
+
+    expect(await screen.findByText("Chưa đọc được tác vụ")).toBeVisible();
+    const tile = screen.getByTestId("device-tile");
+    expect(within(tile).queryByText("Sẵn sàng")).toBeNull();
+    const alert = screen.getByRole("alert");
+    expect(within(alert).getByText("Không đọc được tác vụ đang chạy trên thiết bị")).toBeVisible();
+    expect(within(alert).getByText("owner projection offline")).toBeVisible();
+
+    vi.mocked(api.listDeviceWorkStates).mockResolvedValue([]);
+    await userEvent.click(within(alert).getByRole("button", { name: "Thử lại" }));
+
+    expect(await within(tile).findByText("Sẵn sàng")).toBeVisible();
+    await waitFor(() =>
+      expect(screen.queryByText("Chưa đọc được tác vụ")).not.toBeInTheDocument(),
+    );
+  });
+
+  it("uses one search and status filter for grid and list without renumbering the fleet", async () => {
+    const api = await import("./api");
+    const warningPhone: DeviceInfo = {
+      ...androidPhone,
+      udid: "warning-phone",
+      name: "Kệ giữa",
+      status: "error",
+    };
+    const busyPhone: DeviceInfo = {
+      ...androidPhone,
+      udid: "busy-phone",
+      name: "Kệ cuối",
+    };
+    vi.mocked(api.listDevices).mockResolvedValue([androidPhone, warningPhone, busyPhone]);
+    vi.mocked(api.listDeviceWorkStates).mockResolvedValue([
+      { udid: busyPhone.udid, currentOwner: "nurture" },
+    ]);
+
+    render(<App />);
+    await waitFor(() => expect(screen.getAllByTestId("device-tile")).toHaveLength(3));
+    await waitFor(() => expect(screen.getByText("Bận · Nuôi TikTok")).toBeVisible());
+
+    await userEvent.type(screen.getByRole("searchbox", { name: "Tìm thiết bị" }), "ke cuoi");
+    expect(screen.getAllByTestId("device-tile")).toHaveLength(1);
+    expect(screen.getByText("Máy 3")).toBeVisible();
+    expect(screen.getAllByText("Kệ cuối").length).toBeGreaterThan(0);
+
+    await userEvent.click(screen.getByTitle("Danh sách"));
+    expect(screen.getByRole("cell", { name: /Máy 3.*Kệ cuối/ })).toBeVisible();
+    expect(screen.queryByRole("cell", { name: /Máy 1.*Redmi/ })).toBeNull();
+
+    await userEvent.clear(screen.getByRole("searchbox", { name: "Tìm thiết bị" }));
+    await userEvent.selectOptions(screen.getByRole("combobox", { name: "Trạng thái thiết bị" }), "warning");
+    expect(screen.getByRole("cell", { name: /Máy 2.*Kệ giữa/ })).toBeVisible();
+    expect(screen.queryByRole("cell", { name: /Máy 3.*Kệ cuối/ })).toBeNull();
+
+    await userEvent.click(screen.getByTitle("Cửa sổ stream"));
+    const [visibleTile] = screen.getAllByTestId("device-tile");
+    expect(screen.getAllByTestId("device-tile")).toHaveLength(1);
+    expect(screen.getByText("Máy 2")).toBeVisible();
+    expect(within(visibleTile).getByText("Cần xem")).toBeVisible();
+  });
+});
+
+describe("automation target resolution", () => {
+  it("keeps an empty group at zero targets instead of expanding it to the fleet", async () => {
+    const api = await import("./api");
+    vi.mocked(api.listDevices).mockResolvedValue([androidPhone]);
+    vi.mocked(api.listGroups).mockResolvedValue([
+      {
+        id: "empty",
+        name: "Ca trống",
+        color: "#888888",
+        udids: ["departed"],
+        createdAt: "2026-09-03T00:00:00Z",
+      },
+    ]);
+    render(<App />);
+
+    await waitFor(() => expect(screen.getByText("Redmi")).toBeInTheDocument());
+    await userEvent.click(screen.getByRole("button", { name: "Nuôi TikTok" }));
+    await userEvent.click(screen.getByRole("radio", { name: "Nhóm" }));
+
+    const workspace = screen.getByRole("region", { name: "Không gian Nuôi TikTok" });
+    expect(workspace).toHaveAttribute("data-targets", "");
+    expect(workspace).toHaveAttribute("data-target-type", "group");
+    expect(screen.getByRole("status")).toHaveTextContent("Ca trống · 0 máy");
   });
 });
 
@@ -389,7 +576,7 @@ describe("Flow page integration", () => {
     const user = userEvent.setup();
     render(<App />);
 
-    expect(screen.getByRole("heading", { level: 1, name: "Quản lý cửa sổ" })).toBeVisible();
+    expect(screen.getByRole("heading", { level: 1, name: "Thiết bị" })).toBeVisible();
     await user.click(screen.getByRole("button", { name: "Dữ liệu" }));
     expect(screen.getByRole("heading", { level: 1, name: "Dữ liệu" })).toBeVisible();
     expect(screen.getAllByRole("heading", { level: 1 })).toHaveLength(1);
@@ -419,21 +606,53 @@ describe("Flow page integration", () => {
     );
   });
 
-  it("keeps the legacy automation surface reachable", async () => {
+  it("switches between device Flow and orchestration", async () => {
     const user = userEvent.setup();
     render(<App />);
 
     await user.click(screen.getByRole("button", { name: "Flow" }));
-    expect(screen.getByRole("tab", { name: "Flow" })).toHaveAttribute(
+    expect(screen.getByRole("tab", { name: "Flow thiết bị" })).toHaveAttribute(
       "aria-selected",
       "true",
     );
-    await user.click(screen.getByRole("tab", { name: "Legacy" }));
-    expect(screen.getByRole("tab", { name: "Legacy" })).toHaveAttribute(
+    await user.click(screen.getByRole("tab", { name: "Điều phối" }));
+    expect(screen.getByRole("tab", { name: "Điều phối" })).toHaveAttribute(
       "aria-selected",
       "true",
     );
-    expect(screen.getByRole("heading", { name: "Kịch bản" })).toBeVisible();
+    expect(screen.getByRole("group", { name: "Phạm vi thiết bị" })).toBeVisible();
+    expect(await screen.findByRole("region", { name: "Điều phối fixture" })).toHaveAttribute(
+      "data-target-type",
+      "all",
+    );
+  });
+
+  it("links both Flow modes to panels and activates them with the horizontal keyboard pattern", async () => {
+    render(<App />);
+    await userEvent.click(screen.getByRole("button", { name: "Flow" }));
+
+    const device = screen.getByRole("tab", { name: "Flow thiết bị" });
+    const orchestration = screen.getByRole("tab", { name: "Điều phối" });
+    expect(device).toHaveAttribute("tabindex", "0");
+    expect(orchestration).toHaveAttribute("tabindex", "-1");
+    for (const tab of [device, orchestration]) {
+      const panel = document.getElementById(tab.getAttribute("aria-controls")!);
+      expect(panel).toHaveAttribute("role", "tabpanel");
+      expect(panel).toHaveAttribute("aria-labelledby", tab.id);
+    }
+
+    device.focus();
+    fireEvent.keyDown(device, { key: "ArrowRight" });
+    await waitFor(() => expect(orchestration).toHaveAttribute("aria-selected", "true"));
+    expect(orchestration).toHaveFocus();
+
+    fireEvent.keyDown(orchestration, { key: "Home" });
+    await waitFor(() => expect(device).toHaveAttribute("aria-selected", "true"));
+    expect(device).toHaveFocus();
+    fireEvent.keyDown(device, { key: "End" });
+    await waitFor(() => expect(orchestration).toHaveFocus());
+    fireEvent.keyDown(orchestration, { key: "ArrowLeft" });
+    await waitFor(() => expect(device).toHaveFocus());
   });
 
   it("registers a close guard only while the Flow draft is dirty", async () => {
@@ -476,6 +695,32 @@ describe("fleet diagnostics page integration", () => {
     expect(await screen.findByRole("region", { name: "Chẩn đoán fleet" })).toBeVisible();
     expect(api.deviceHealth).toHaveBeenCalledWith(androidPhone.udid);
   });
+
+  it("opens nurture and interaction as dedicated workspaces", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+
+    const deviceToolbar = document.querySelector(".profile-toolbar");
+    expect(deviceToolbar).not.toBeNull();
+    expect(deviceToolbar).not.toHaveTextContent("Nuôi TT");
+    expect(deviceToolbar).not.toHaveTextContent("Tương tác");
+
+    await user.click(screen.getByRole("button", { name: "Nuôi TikTok" }));
+    expect(screen.getByRole("heading", { level: 1, name: "Nuôi TikTok" })).toBeVisible();
+    expect(screen.getByRole("region", { name: "Không gian Nuôi TikTok" })).toHaveAttribute(
+      "data-surface",
+      "page",
+    );
+    expect(screen.getByRole("group", { name: "Phạm vi thiết bị" })).toBeVisible();
+
+    await user.click(screen.getByRole("button", { name: "Tương tác" }));
+    expect(screen.getByRole("heading", { level: 1, name: "Tương tác" })).toBeVisible();
+    expect(screen.getByRole("region", { name: "Không gian Tương tác" })).toHaveAttribute(
+      "data-surface",
+      "page",
+    );
+    expect(screen.getByRole("group", { name: "Phạm vi thiết bị" })).toBeVisible();
+  });
 });
 
 describe("buttons that used to fail in silence", () => {
@@ -509,7 +754,7 @@ describe("buttons that used to fail in silence", () => {
     await waitFor(() => expect(screen.getByText("Note 8")).toBeInTheDocument());
 
     await userEvent.click(
-      screen.getByTitle("Prepare / start stream (selected hoặc tất cả)"),
+      screen.getByTitle("Mở luồng xem cho các máy đã chọn hoặc toàn bộ danh sách"),
     );
 
     expect(await screen.findByText("Khởi động 1/2 máy")).toBeInTheDocument();

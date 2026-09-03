@@ -174,18 +174,25 @@ export function FlowJsonDialog({
       {stale && (
         <p role="alert">
           Flow đã được cập nhật ở nơi khác trong lúc anh sửa. Văn bản dưới đây vẫn là của anh — bấm
-          “Load saved export” nếu muốn lấy bản mới nhất.
+          “Tải bản đã lưu” nếu muốn lấy bản mới nhất.
         </p>
       )}
-      {error && <p role="alert">{error}</p>}
+      {error && (
+        <div role="alert">
+          <details>
+            <summary>Không thể xử lý tài liệu JSON.</summary>
+            <code>{error}</code>
+          </details>
+        </div>
+      )}
       <footer>
         <button type="button" disabled={busy !== null} onClick={() => void loadExport()}>
           <Download aria-hidden="true" size={15} />
-          {busy === "export" ? "Loading..." : "Load saved export"}
+          {busy === "export" ? "Đang tải…" : "Tải bản đã lưu"}
         </button>
         <button type="button" disabled={busy !== null} onClick={() => void apply()}>
           <Check aria-hidden="true" size={15} />
-          {busy === "apply" ? "Validating..." : "Validate and apply"}
+          {busy === "apply" ? "Đang kiểm tra…" : "Kiểm tra và áp dụng"}
         </button>
       </footer>
     </section>

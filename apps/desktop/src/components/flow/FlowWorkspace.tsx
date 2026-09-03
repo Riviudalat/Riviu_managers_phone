@@ -55,14 +55,17 @@ import { FlowRunDialog } from "./FlowRunDialog";
 import { FlowRunMonitor } from "./FlowRunMonitor";
 import { FlowToolbar } from "./FlowToolbar";
 import { describeError } from "../../describeError";
+import { LoadingState, StatusNotice } from "../States";
 
 export interface FlowWorkspaceProps {
   devices: DeviceInfo[];
+  deviceLabel?: (device: DeviceInfo, index: number) => string;
   selectedUdids: string[];
   onDirtyChange: (dirty: boolean) => void;
 }
 
 type OpenDialog = "import" | "json" | "run" | null;
+type WorkspaceLoadState = "loading" | "error" | "empty" | "data";
 
 function savedSummary(document: FlowDocumentV2, createdAt: string): FlowSummary {
   return {
@@ -88,8 +91,21 @@ function detailForRun(run: FlowRunRecord): FlowRunDetail {
   return { run, deviceRuns: [], attempts: [], artifacts: [] };
 }
 
+function runStateLabel(state: FlowRunRecord["state"]): string {
+  const labels: Record<FlowRunRecord["state"], string> = {
+    queued: "Đang chờ",
+    running: "Đang chạy",
+    succeeded: "Thành công",
+    partial: "Một phần",
+    failed: "Thất bại",
+    cancelled: "Đã hủy",
+  };
+  return labels[state] ?? "Trạng thái chưa nhận diện";
+}
+
 export function FlowWorkspace({
   devices,
+  deviceLabel,
   selectedUdids,
   onDirtyChange,
 }: FlowWorkspaceProps) {
@@ -106,7 +122,9 @@ export function FlowWorkspace({
   const [dialog, setDialog] = useState<OpenDialog>(null);
   const [paletteOpen, setPaletteOpen] = useState(true);
   const [inspectorOpen, setInspectorOpen] = useState(true);
-  const [loading, setLoading] = useState(true);
+  const [loadState, setLoadState] = useState<WorkspaceLoadState>("loading");
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [loadAttempt, setLoadAttempt] = useState(0);
   const [operationError, setOperationError] = useState<string | null>(null);
   const validationSequence = useRef(0);
   const invalidationSequence = useRef(0);
@@ -172,6 +190,8 @@ export function FlowWorkspace({
 
   useEffect(() => {
     let disposed = false;
+    setLoadState("loading");
+    setLoadError(null);
     void (async () => {
       try {
         const [nextCatalog, nextFlows, nextRuns] = await Promise.all([
@@ -180,36 +200,43 @@ export function FlowWorkspace({
           flowListRuns(100),
         ]);
         if (disposed) return;
-        setCatalog(nextCatalog);
-        setFlows(nextFlows);
-        setRuns(nextRuns);
+        let initialRecord: FlowRevisionRecord | null = null;
         if (nextFlows.length > 0) {
           const ticket = ++openSequence.current;
           const epochAtIssue = invalidationState.current.epoch;
           const record = await flowGet(nextFlows[0].id);
+          if (record === null) throw new Error("FlowNotFound");
           // The workspace is already editable while this first request runs, so it obeys
           // the same two rules as any open: newest ticket wins, and typing that happened
           // during the fetch must not be replaced away.
           if (
             !disposed &&
-            record !== null &&
             ticket === openSequence.current &&
             invalidationState.current.epoch === epochAtIssue
           ) {
-            replaceFromRecord(record);
+            initialRecord = record;
           }
         }
+        if (disposed) return;
+        // Publish the projections together. A partial catalog/list/runs snapshot must never look
+        // like a valid editor, because it can make valid actions disappear or hide a live run.
+        setCatalog(nextCatalog);
+        setFlows(nextFlows);
+        setRuns(nextRuns);
+        if (initialRecord) replaceFromRecord(initialRecord);
+        setLoadState(nextFlows.length === 0 ? "empty" : "data");
       } catch (error) {
-        if (!disposed) setOperationError(describeError(error));
-      } finally {
-        if (!disposed) setLoading(false);
+        if (!disposed) {
+          setLoadError(describeError(error));
+          setLoadState("error");
+        }
       }
     })();
     return () => {
       disposed = true;
       draftWriter.current?.flush();
     };
-  }, [replaceFromRecord]);
+  }, [loadAttempt, replaceFromRecord]);
 
   useEffect(() => {
     onDirtyChange(state.dirty);
@@ -486,8 +513,54 @@ export function FlowWorkspace({
     });
   }, []);
 
+  if (loadState === "loading") {
+    return (
+      <section
+        className="flow-workspace"
+        aria-label="Không gian Flow"
+        data-loading="true"
+        data-state="loading"
+      >
+        <LoadingState label="Đang tải Flow…" />
+      </section>
+    );
+  }
+
+  if (loadState === "error") {
+    return (
+      <section
+        className="flow-workspace"
+        aria-label="Không gian Flow"
+        data-loading="false"
+        data-state="error"
+      >
+        <StatusNotice
+          tone="error"
+          action={(
+            <button type="button" onClick={() => setLoadAttempt((attempt) => attempt + 1)}>
+              Thử lại
+            </button>
+          )}
+        >
+          <strong>Không tải được Flow.</strong>
+          {loadError && (
+            <details>
+              <summary>Chi tiết lỗi</summary>
+              <code>{loadError}</code>
+            </details>
+          )}
+        </StatusNotice>
+      </section>
+    );
+  }
+
   return (
-    <section className="flow-workspace" aria-label="Không gian Flow" data-loading={loading}>
+    <section
+      className="flow-workspace"
+      aria-label="Không gian Flow"
+      data-loading="false"
+      data-state={loadState}
+    >
       <FlowToolbar
         flows={flows}
         currentFlowId={saved ? state.document.id : null}
@@ -538,21 +611,33 @@ export function FlowWorkspace({
       />
 
       <div className="flow-notices" aria-live="polite">
+        {loadState === "empty" && (
+          <StatusNotice tone="info">
+            <strong>Chưa có Flow đã lưu.</strong> Bản nháp mới đã sẵn sàng để chỉnh sửa.
+          </StatusNotice>
+        )}
         {operationError && (
           <div className="flow-operation-error" role="alert">
-            <span>{operationError}</span>
+            <details>
+              <summary>Không hoàn tất thao tác Flow.</summary>
+              <code>{operationError}</code>
+            </details>
             <button type="button" onClick={() => setOperationError(null)}>Bỏ qua</button>
           </div>
         )}
         {draftError && (
           <div className="flow-operation-error" role="alert">
-            <span>Bản nháp cục bộ không lưu được: {draftError} — Lưu lên máy chủ trước khi đóng.</span>
+            <span>Không lưu được bản nháp cục bộ. Hãy lưu một bản trước khi đóng.</span>
+            <details>
+              <summary>Chi tiết lỗi</summary>
+              <code>{draftError}</code>
+            </details>
             <button type="button" onClick={() => setDraftError(null)}>Bỏ qua</button>
           </div>
         )}
         {state.notice && (
           <div className="flow-operation-error" role="status">
-            Revision {state.notice.savedRevision} saved; the newer local draft remains open.
+            Đã lưu bản {state.notice.savedRevision}; bản nháp mới hơn vẫn đang mở.
             <button type="button" onClick={() => dispatch({ type: "dismissNotice" })}>Bỏ qua</button>
           </div>
         )}
@@ -625,7 +710,7 @@ export function FlowWorkspace({
               <option value="">Chưa chọn lượt chạy</option>
               {runs.map((run) => (
                 <option key={run.id} value={run.id}>
-                  {run.state} / {run.id.slice(0, 8)}
+                  {runStateLabel(run.state)}
                 </option>
               ))}
             </select>
@@ -634,6 +719,8 @@ export function FlowWorkspace({
         {activeRun ? (
           <FlowRunMonitor
             run={activeRun}
+            devices={devices}
+            deviceLabel={deviceLabel}
             onCancel={cancelRun}
             onRetry={retryAttempt}
             onOpenArtifact={openArtifact}

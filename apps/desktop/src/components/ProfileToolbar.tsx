@@ -1,5 +1,5 @@
 import type { DeviceInfo } from "../types";
-import { IconChat, IconHeart, IconPhone, IconRefresh } from "./Icons";
+import { IconPhone, IconRefresh } from "./Icons";
 import { toastError } from "../toastStore";
 
 interface Props {
@@ -9,10 +9,6 @@ interface Props {
   onInstall: () => void | Promise<void>;
   onSync: () => void;
   onRefresh: () => void | Promise<void>;
-  onNurture: () => void;
-  nurtureOpen: boolean;
-  onInteraction: () => void;
-  interactionOpen: boolean;
   onGroupTools: () => void;
   onGroups: () => void;
   groupsOpen: boolean;
@@ -27,10 +23,6 @@ export function ProfileToolbar({
   onInstall,
   onSync,
   onRefresh,
-  onNurture,
-  nurtureOpen,
-  onInteraction,
-  interactionOpen,
   onGroupTools,
   onGroups,
   groupsOpen,
@@ -61,10 +53,10 @@ export function ProfileToolbar({
             toastError("Khởi động thất bại", e);
           }
         }}
-        title="Prepare / start stream (selected hoặc tất cả)"
+        title="Mở luồng xem cho các máy đã chọn hoặc toàn bộ danh sách"
       >
         <IconPhone size={16} />
-        Start{startable.length ? `(${startable.length})` : any ? `(${any})` : ""}
+        Mở{startable.length ? ` (${startable.length})` : any ? ` (${any})` : ""}
       </button>
       <button
         type="button"
@@ -86,35 +78,17 @@ export function ProfileToolbar({
             toastError("Sửa agent thất bại", e);
           }
         }}
-        title="Cài / re-sign agent"
+        title="Cài hoặc khôi phục Riviu Agent"
       >
-        Agent{any ? `(${any})` : ""}
+        Khôi phục{any ? ` (${any})` : ""}
       </button>
       <button
         type="button"
         className={`tb-btn ${syncOn ? "active" : ""}`}
         onClick={onSync}
-        title="Group sync"
+        title="Đồng bộ thao tác trên nhóm máy đã chọn"
       >
-        Sync{syncOn ? " · ON" : ""}
-      </button>
-      <button
-        type="button"
-        className={`tb-btn ${nurtureOpen ? "active" : ""}`}
-        onClick={onNurture}
-        title="Nuôi TikTok"
-      >
-        <IconHeart size={15} />
-        Nuôi TT
-      </button>
-      <button
-        type="button"
-        className={`tb-btn ${interactionOpen ? "active" : ""}`}
-        onClick={onInteraction}
-        title="Tương tác comment theo link TikTok"
-      >
-        <IconChat size={15} />
-        Tương tác
+        Đồng bộ{syncOn ? " · Bật" : ""}
       </button>
       <button
         type="button"

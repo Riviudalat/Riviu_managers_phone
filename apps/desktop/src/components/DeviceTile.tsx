@@ -1,5 +1,7 @@
 import { memo } from "react";
-import { deviceTileSubtitle } from "../types";
+import { Maximize2 } from "lucide-react";
+import { deviceOperationalView } from "../deviceWork";
+import type { DeviceOperationalView } from "../deviceWork";
 import type { DeviceInfo } from "../types";
 import { streamPlaceholder } from "../streamPlaceholder";
 import { useViewDecodeFailed, useViewLive, useViewSize } from "../viewStore";
@@ -20,9 +22,11 @@ interface Props {
   index: number;
   /**
    * What to call this phone: the operator's alias, or the name the phone reports. Resolved
-   * by `deviceNaming.tileName`. The udid is still the tooltip and the identity.
+   * by `deviceNaming.tileName`. Technical identity stays in the details drawer.
    */
   name?: string;
+  /** Shared operator-facing status; omitted only by isolated legacy/test callers. */
+  operational?: DeviceOperationalView;
   selected: boolean;
   focused?: boolean;
   /// This phone is the one the overlay drives while Sync is on; the rest follow it.
@@ -40,6 +44,7 @@ function DeviceTileInner({
   width,
   index,
   name,
+  operational: providedOperational,
   selected,
   focused,
   controlCenter,
@@ -47,6 +52,11 @@ function DeviceTileInner({
   onOpen,
   onPrepare,
 }: Props) {
+  const operational = providedOperational ?? deviceOperationalView(device, null);
+  const displayName = name ?? device.name;
+  const operationalLabel = operational.ownerLabel
+    ? `${operational.label} · ${operational.ownerLabel}`
+    : operational.label;
   const hasView = useViewLive(device.udid);
   const viewSize = useViewSize(device.udid);
   // Read at last. This existed the whole time and nothing consulted it, so a stream every
@@ -65,8 +75,17 @@ function DeviceTileInner({
       className={`dev-phone ${selected ? "selected" : ""} ${focused ? "focused" : ""}`}
       data-testid="device-tile"
       data-udid={device.udid}
+      role="group"
+      tabIndex={0}
+      aria-label={`Máy ${index}, ${displayName}, ${operationalLabel}${selected ? ", đã chọn" : ""}`}
       style={{ width, height: width * 2 }}
       onClick={(e) => onSelect(device.udid, e.metaKey || e.ctrlKey || e.shiftKey)}
+      onKeyDown={(event) => {
+        if (event.target !== event.currentTarget) return;
+        if (event.key !== "Enter" && event.key !== " ") return;
+        event.preventDefault();
+        onSelect(device.udid, event.metaKey || event.ctrlKey || event.shiftKey);
+      }}
       onContextMenu={(e) => {
         if (!onContextMenu) return;
         e.preventDefault();
@@ -81,9 +100,23 @@ function DeviceTileInner({
         <PhoneCanvas udid={device.udid} surfaceId="tile" />
         <StreamPlaceholder
           view={view}
-          deviceName={name ?? device.name}
+          deviceName={displayName}
           onRetry={() => onPrepare(device.udid)}
         />
+
+        <button
+          type="button"
+          className="dev-phone-open"
+          aria-label={`Mở màn hình Máy ${index}`}
+          title="Mở màn hình"
+          onClick={(event) => {
+            event.stopPropagation();
+            onOpen(device.udid);
+          }}
+          onDoubleClick={(event) => event.stopPropagation()}
+        >
+          <Maximize2 size={14} aria-hidden="true" />
+        </button>
 
         <span className="dev-phone-conn">{device.connection.toUpperCase()}</span>
 
@@ -100,22 +133,19 @@ function DeviceTileInner({
         )}
 
         <div className="dev-phone-info">
-          <span className="dev-phone-index">{index}</span>
-          {/* The alias when there is one, and the phone's own name in the tooltip beside
-              the udid — renaming a tile must not hide which phone it is. */}
-          <span className="dev-phone-name" title={`${device.name} · ${device.udid}`}>
-            {name ?? device.name}
+          <span className="dev-phone-index">Máy {index}</span>
+          <span className="dev-phone-name" title={displayName}>
+            {displayName}
           </span>
-          <span className="dev-phone-model">{deviceTileSubtitle(device)}</span>
+          <span className={`dev-phone-status is-${operational.kind}`}>
+            {operationalLabel}
+          </span>
         </div>
       </div>
 
-      {/* No corner checkbox and no expand button. Both were removed rather than restyled,
-          because the tile already carries every gesture they duplicated: a click selects
-          (Ctrl/Shift/Cmd extends), a drag across the grid box-selects, Ctrl+A takes the tab,
-          and a double-click opens the overlay. A 15 px control over a live video frame that
-          does what clicking the frame does is one more thing to aim at and one more thing to
-          hit by accident. Selection is still visible — the tile's own border. */}
+      {/* Selection stays on the tile itself. The small open action is intentionally separate:
+          double-click remains efficient for pointer users, while keyboard and touch users get
+          one unambiguous, named control for opening the focused stream. */}
     </article>
   );
 }

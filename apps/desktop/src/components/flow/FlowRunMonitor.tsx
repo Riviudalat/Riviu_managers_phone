@@ -3,12 +3,14 @@ import { useEffect, useMemo, useState } from "react";
 import { flowGetRun, listenRiviuEvents } from "../../api";
 import { describeError } from "../../describeError";
 import type {
+  DeviceInfo,
   FlowAggregateState,
   FlowDeviceRunRecord,
   FlowNodeAttemptRecord,
   FlowRunDetail,
   JsonValue,
 } from "../../types";
+import { ACTION_PRESENTATION } from "./actionPresentation";
 
 function attemptDurationMs(attempt: FlowNodeAttemptRecord): number {
   if (!attempt.startedAt || !attempt.finishedAt) return 0;
@@ -25,11 +27,64 @@ function formatEvidence(value: JsonValue | null): string {
   return encoded.length <= 160 ? encoded : `${encoded.slice(0, 157)}...`;
 }
 
+const FLOW_STATE_LABELS: Record<string, string> = {
+  queued: "Đang chờ",
+  intentCommitted: "Đã ghi ý định",
+  effectDispatched: "Đã gửi thao tác",
+  verifying: "Đang xác nhận",
+  succeeded: "Thành công",
+  failedBeforeDispatch: "Lỗi trước thao tác",
+  failedVerified: "Lỗi đã xác minh",
+  uncertain: "Chưa chắc chắn",
+  cancelled: "Đã hủy",
+  interrupted: "Bị gián đoạn",
+  running: "Đang chạy",
+  partial: "Một phần",
+  failed: "Thất bại",
+  preflight: "Đang tiền kiểm",
+  skipped: "Đã bỏ qua",
+};
+
 function displayFlowState(value: string): string {
-  if (value.length === 0) return value;
-  return value
-    .replace(/([a-z])([A-Z])/g, "$1 $2")
-    .replace(/^./, (letter) => letter.toUpperCase());
+  return FLOW_STATE_LABELS[value] ?? ACTION_PRESENTATION[value as keyof typeof ACTION_PRESENTATION]?.label ?? "Trạng thái chưa xác định";
+}
+
+function attemptFailureLabel(attempt: FlowNodeAttemptRecord): string {
+  switch (attempt.state) {
+    case "uncertain":
+      return "Không xác nhận được kết quả thao tác.";
+    case "failedBeforeDispatch":
+      return "Không thể bắt đầu thao tác.";
+    case "failedVerified":
+      return "Thao tác không đạt kết quả yêu cầu.";
+    case "interrupted":
+      return "Thao tác bị gián đoạn.";
+    default:
+      return "Bước này gặp lỗi.";
+  }
+}
+
+function ErrorDetails({
+  summary,
+  code,
+  message,
+  role,
+  className,
+}: {
+  summary: string;
+  code?: string;
+  message: string;
+  role?: "alert";
+  className?: string;
+}) {
+  return (
+    <div role={role} className={className}>
+      <details>
+        <summary>{summary}</summary>
+        <code>{code ? `${code}: ${message}` : message}</code>
+      </details>
+    </div>
+  );
 }
 
 function terminal(state: FlowAggregateState): boolean {
@@ -38,11 +93,15 @@ function terminal(state: FlowAggregateState): boolean {
 
 export function FlowRunMonitor({
   run,
+  devices = [],
+  deviceLabel = (device, index) => `Máy ${index + 1} · ${device.name}`,
   onCancel,
   onRetry,
   onOpenArtifact = () => undefined,
 }: {
   run: FlowRunDetail;
+  devices?: DeviceInfo[];
+  deviceLabel?: (device: DeviceInfo, index: number) => string;
   onCancel: (runId: string) => void;
   onRetry: (attemptId: string) => void;
   onOpenArtifact?: (artifactId: string) => void;
@@ -124,6 +183,10 @@ export function FlowRunMonitor({
     () => new Map(detail.artifacts.map((item) => [item.attemptId, item])),
     [detail.artifacts],
   );
+  const deviceLabels = useMemo(
+    () => new Map(devices.map((device, index) => [device.udid, deviceLabel(device, index)])),
+    [deviceLabel, devices],
+  );
   const rows = detail.deviceRuns.flatMap<{
     device: FlowDeviceRunRecord;
     attempt: FlowNodeAttemptRecord | null;
@@ -139,16 +202,23 @@ export function FlowRunMonitor({
       <header>
         <div>
           <strong>{displayFlowState(detail.run.state)}</strong>
-          <span>{detail.run.selection.targetUdids.length} devices</span>
+          <span>{detail.run.selection.targetUdids.length} thiết bị</span>
           {stallReason && (
-            <span role="alert" className="flow-monitor-stalled">
-              Không đọc được tiến trình: {stallReason}
-            </span>
+            <ErrorDetails
+              role="alert"
+              className="flow-monitor-stalled"
+              summary="Không đọc được tiến trình mới."
+              message={stallReason}
+            />
           )}
           {detail.run.error && (
-            <span role="alert" className="flow-monitor-error" title={detail.run.error.message}>
-              {detail.run.error.code}: {detail.run.error.message}
-            </span>
+            <ErrorDetails
+              role="alert"
+              className="flow-monitor-error"
+              summary="Lượt chạy gặp lỗi."
+              code={detail.run.error.code}
+              message={detail.run.error.message}
+            />
           )}
         </div>
         <button
@@ -165,7 +235,7 @@ export function FlowRunMonitor({
         <thead>
           <tr>
             <th>Thiết bị</th>
-            <th>Node</th>
+            <th>Bước</th>
             <th>Lượt thử</th>
             <th>Trạng thái</th>
             <th>Thời lượng</th>
@@ -180,7 +250,7 @@ export function FlowRunMonitor({
             if (!attempt) {
               return (
                 <tr key={device.id}>
-                  <td>{device.udid}</td>
+                  <td title={device.udid}>{deviceLabels.get(device.udid) ?? "Máy chưa kết nối"}</td>
                   <td />
                   <td />
                   <td>{displayFlowState(device.state)}</td>
@@ -191,8 +261,14 @@ export function FlowRunMonitor({
                       device failures onto `DeviceControl` and keeps what separates them in the
                       message. Showing only the code hid the difference between a timeout, a dead
                       session, and the wrong app in the foreground. */}
-                  <td title={device.error?.message ?? ""}>
-                    {device.error ? `${device.error.code}: ${device.error.message}` : ""}
+                  <td>
+                    {device.error && (
+                      <ErrorDetails
+                        summary="Thiết bị gặp lỗi."
+                        code={device.error.code}
+                        message={device.error.message}
+                      />
+                    )}
                   </td>
                   <td />
                 </tr>
@@ -201,24 +277,34 @@ export function FlowRunMonitor({
             const artifact = artifacts.get(attempt.id);
             return (
               <tr key={attempt.id}>
-                <td>{device.udid}</td>
+                <td title={device.udid}>{deviceLabels.get(device.udid) ?? "Máy chưa kết nối"}</td>
                 {/* The action kind alone made two Tap nodes indistinguishable -- both read
                     "Tap / attempt 1", so the row that failed named no node on the canvas. */}
                 <td title={attempt.nodeId}>
                   {displayFlowState(attempt.actionKind)}
-                  <span className="flow-monitor-node"> {attempt.nodeId.slice(0, 8)}</span>
                   {/* Which branch an If Vision picked is the whole question when a vision flow
                       does the wrong thing, and it was on the wire all along -- TypeScript just
                       had no field for it. */}
                   {attempt.chosenPort && (
-                    <span className="flow-monitor-branch"> → {attempt.chosenPort}</span>
+                    <span className="flow-monitor-branch">
+                      {attempt.chosenPort === "true"
+                        ? " → nhánh Đúng"
+                        : attempt.chosenPort === "false"
+                          ? " → nhánh Sai"
+                          : " → nhánh đã chọn"}
+                    </span>
                   )}
                 </td>
                 <td>{attempt.attemptNo}</td>
                 <td>{displayFlowState(attempt.state)}</td>
                 <td>{attemptDurationMs(attempt)} ms</td>
-                <td title={formatEvidence(attempt.evidenceResult)}>
-                  {formatEvidence(attempt.evidenceResult)}
+                <td>
+                  {attempt.evidenceResult !== null && (
+                    <details>
+                      <summary>Xem bằng chứng</summary>
+                      <code>{formatEvidence(attempt.evidenceResult)}</code>
+                    </details>
+                  )}
                 </td>
                 <td>
                   {artifact ? (
@@ -227,18 +313,24 @@ export function FlowRunMonitor({
                     </button>
                   ) : null}
                 </td>
-                <td title={attempt.error?.message ?? ""}>
-                  {attempt.error ? `${attempt.error.code}: ${attempt.error.message}` : ""}
+                <td>
+                  {attempt.error && (
+                    <ErrorDetails
+                      summary={attemptFailureLabel(attempt)}
+                      code={attempt.error.code}
+                      message={attempt.error.message}
+                    />
+                  )}
                 </td>
                 <td>
                   {attempt.retryAllowed && (
                     <button
                       type="button"
                       onClick={() => onRetry(attempt.id)}
-                      title={`Retry ${displayFlowState(attempt.actionKind)}`}
+                      title={`Chạy lại ${displayFlowState(attempt.actionKind)}`}
                     >
                       <RotateCcw size={14} />
-                      Retry {displayFlowState(attempt.actionKind)}
+                      Chạy lại {displayFlowState(attempt.actionKind)}
                     </button>
                   )}
                 </td>

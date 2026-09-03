@@ -181,6 +181,24 @@ describe("draftWarnings", () => {
 });
 
 describe("buildRequest", () => {
+  it("sends every non-empty action combination through actions, never the legacy flag", () => {
+    const combinations = [
+      { like: true, comment: false, save: false },
+      { like: false, comment: true, save: false },
+      { like: false, comment: false, save: true },
+      { like: true, comment: true, save: false },
+      { like: true, comment: false, save: true },
+      { like: false, comment: true, save: true },
+      { like: true, comment: true, save: true },
+    ];
+
+    for (const actions of combinations) {
+      const request = buildRequest(draft({ actions }), buildContext());
+      expect(request.actions).toEqual(actions);
+      expect(request).not.toHaveProperty("likeTarget");
+    }
+  });
+
   /// **`Riêng lẻ` cannot tag a parent, because it has none.**
   ///
   /// The switch is hidden for that shape, but a draft can still carry `true` from before the
@@ -215,6 +233,25 @@ describe("buildRequest", () => {
     });
     // Zero is "one cohort", and the backend spells that as absent.
     expect(request.cohortSize).toBeUndefined();
+  });
+});
+
+describe("comment-free campaigns", () => {
+  it("permits one actor for a like or save-only campaign", () => {
+    const issues = validateDraft(
+      draft({ actions: { like: true, comment: false, save: true } }),
+      context({ actorUdids: ["a"], largestCohort: 1 }),
+    );
+    expect(issues).toEqual([]);
+  });
+
+  it("keeps the two-actor minimum when a campaign includes comments", () => {
+    const issues = validateDraft(
+      draft({ actions: { like: false, comment: true, save: false } }),
+      context({ actorUdids: ["a"], largestCohort: 1 }),
+    );
+    expect(issues).toHaveLength(1);
+    expect(issues[0]?.field).toBe("actors");
   });
 });
 

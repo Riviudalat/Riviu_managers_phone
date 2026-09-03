@@ -303,7 +303,7 @@ describe("FlowWorkspace startup", () => {
     expect(screen.queryByRole("button", { name: "Kết thúc" })).not.toBeInTheDocument();
   });
 
-  it("leaves loading state and reports a saved-revision fetch failure", async () => {
+  it("keeps the editor closed after a startup failure and retries the complete projection", async () => {
     api.flowGet.mockRejectedValueOnce(new Error("revision read failed"));
 
     render(
@@ -314,10 +314,50 @@ describe("FlowWorkspace startup", () => {
       />,
     );
 
-    expect(await screen.findByRole("alert")).toHaveTextContent("revision read failed");
-    await waitFor(() => expect(
-      screen.getByRole("region", { name: "Không gian Flow" }),
-    ).toHaveAttribute("data-loading", "false"));
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent("Không tải được Flow");
+    expect(screen.getByText("Chi tiết lỗi").closest("details")).toHaveTextContent(
+      "revision read failed",
+    );
+    expect(screen.getByRole("region", { name: "Không gian Flow" })).toHaveAttribute(
+      "data-state",
+      "error",
+    );
+    expect(screen.queryByTestId("flow-toolbar")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("flow-canvas")).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Thử lại" }));
+
+    expect(await screen.findByDisplayValue("Saved flow")).toBeInTheDocument();
+    expect(api.flowActionCatalog).toHaveBeenCalledTimes(2);
+    expect(api.flowList).toHaveBeenCalledTimes(2);
+    expect(api.flowListRuns).toHaveBeenCalledTimes(2);
+    expect(api.flowGet).toHaveBeenCalledTimes(2);
+    expect(screen.getByRole("region", { name: "Không gian Flow" })).toHaveAttribute(
+      "data-state",
+      "data",
+    );
+  });
+
+  it("distinguishes a valid empty library from a failed read", async () => {
+    api.flowList.mockResolvedValue([]);
+
+    render(
+      <FlowWorkspace
+        devices={[device]}
+        selectedUdids={[device.udid]}
+        onDirtyChange={vi.fn()}
+      />,
+    );
+
+    expect(await screen.findByText("Chưa có Flow đã lưu.")).toBeInTheDocument();
+    expect(screen.getByRole("region", { name: "Không gian Flow" })).toHaveAttribute(
+      "data-state",
+      "empty",
+    );
+    expect(screen.getByTestId("flow-toolbar")).toBeInTheDocument();
+    expect(screen.getByTestId("flow-canvas")).toBeInTheDocument();
+    expect(api.flowGet).not.toHaveBeenCalled();
   });
 });
 
@@ -502,12 +542,13 @@ describe("FlowWorkspace editing", () => {
     // something the operator can see. It has to reach the history and then the monitor.
     const history = screen.getByTestId("flow-run-history");
     await waitFor(() =>
-      expect(within(history).getByRole("option", { name: /run-a/ })).toBeInTheDocument(),
+      expect(within(history).getByRole("option", { name: "Đang chờ" })).toHaveValue("run-a"),
     );
     fireEvent.change(within(history).getByRole("combobox"), { target: { value: "run-a" } });
     await waitFor(() => expect(api.flowGetRun).toHaveBeenCalledWith("run-a"));
     const monitor = screen.getByTestId("flow-monitor");
-    await waitFor(() => expect(within(monitor).getByText(device.udid)).toBeInTheDocument());
+    await waitFor(() => expect(within(monitor).getByText("Máy 1 · Device A")).toBeInTheDocument());
+    expect(within(monitor).queryByText(device.udid)).toBeNull();
     expect(within(monitor).queryByText("Chưa có lượt chạy")).toBeNull();
   });
 });

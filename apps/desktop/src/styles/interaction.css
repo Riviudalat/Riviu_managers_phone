@@ -37,6 +37,24 @@
    changed nothing measurable — proved by reverting it against `e2e/float-panels.spec.ts` —
    so it is not here pretending to. */
 .interaction-float-body { overflow: auto; }
+.interaction-workspace,
+.interaction-workspace-inner {
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  flex: 1;
+  flex-direction: column;
+}
+.interaction-workspace-inner {
+  overflow: clip;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--bg-elevated);
+}
+.interaction-workspace .interaction-float-body {
+  min-height: 0;
+  flex: 1;
+}
 .interaction-title {
   min-height: 42px;
   flex: 0 0 auto;
@@ -104,6 +122,8 @@
    wrapping was not, so the tag field's label ellipsised inside a 460px card the moment it grew
    from "Tag / nhắc (@)" to "Tag thêm acc (@handle) - cách nhau bằng dấu cách hoặc phẩy". */
 .interaction-actors > .interaction-mention { flex-direction: column; align-items: stretch; overflow: visible; white-space: normal; }
+.interaction-comment-free .interaction-mention,
+.interaction-comment-free .interaction-handle { display: none; }
 /* The device pickers are a wall of small tiles — the same shape as the phone grid, so a
    number here means the same phone as that number on the wall. Section label spans the row. */
 .interaction-actor-group { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0.3rem; }
@@ -214,6 +234,18 @@
 .interaction-back { align-self: flex-start; }
 .interaction-campaign-head { display: flex; align-items: center; gap: 0.4rem; }
 .interaction-campaign-head .chip { margin-left: auto; }
+.interaction-action-counters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem 0.7rem;
+  padding: 0.4rem 0;
+  color: var(--text-2);
+  font-size: var(--text-xs);
+}
+.interaction-action-counters strong { color: var(--text-1); font-variant-numeric: tabular-nums; }
+.interaction-action-counters .is-uncertain,
+.interaction-action-counters .is-uncertain strong { color: var(--warn); }
+.interaction-action-results { display: flex; flex-wrap: wrap; gap: 0.25rem; margin-top: 0.25rem; }
 
 /* A refusal in the detail view: the Vietnamese headline, the engine's own sentence under it,
    and the code folded away. A `<span>` rather than the `<small>` the campaign rows use, so it

@@ -15,7 +15,14 @@ import {
   Timer,
 } from "lucide-react";
 
-import type { ActionKind, JsonObject, JsonValue } from "../../types";
+import type { ActionKind, JsonObject, JsonValue, ScreenOrientation } from "../../types";
+
+export const SCREEN_ORIENTATION_LABELS: Record<ScreenOrientation, string> = {
+  portrait: "Dọc",
+  portraitUpsideDown: "Dọc đảo ngược",
+  landscapeLeft: "Ngang trái",
+  landscapeRight: "Ngang phải",
+};
 
 /**
  * How each action kind is labelled and drawn, and how one summarises itself.
@@ -61,7 +68,7 @@ export function summarizeAction(kind: ActionKind, config: JsonObject): string {
       return text("accessibilityId") || coordinates;
     }
     case "swipe":
-      return `Swipe${
+      return `Vuốt${
         typeof config.durationMs === "number" ? ` ${config.durationMs} ms` : ""
       }`;
     case "autoSwipe":
@@ -71,7 +78,7 @@ export function summarizeAction(kind: ActionKind, config: JsonObject): string {
           ? `${config.durationMs} ms`
           : "chưa chọn giới hạn";
     case "typeText":
-      return `${text("text").length} characters`;
+      return `${text("text").length} ký tự`;
     case "screenshot":
       return text("label");
     case "assertVisible":
@@ -84,7 +91,7 @@ export function summarizeAction(kind: ActionKind, config: JsonObject): string {
       // passes. Print what is stored.
       const threshold =
         typeof config.threshold === "number" ? String(config.threshold) : "?";
-      return hasTemplate ? `vision ≥ ${threshold}` : "no template";
+      return hasTemplate ? `ảnh khớp ≥ ${threshold}` : "chưa có ảnh mẫu";
     }
     default:
       return "";

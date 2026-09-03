@@ -190,6 +190,14 @@
   line-height: 1.35;
   word-break: break-word;
 }
+.nurture-save-audit {
+  margin: 0.12rem 0 0;
+  color: var(--text-3);
+  font-size: var(--text-xs);
+  line-height: 1.35;
+  font-variant-numeric: tabular-nums;
+  word-break: break-word;
+}
 .nurture-float-err {
   margin: 0 0 0.45rem;
   font-size: var(--text-sm);
@@ -320,6 +328,66 @@
   margin-top: 0.35rem;
 }
 
+.nurture-workspace,
+.nurture-workspace-inner {
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  flex: 1;
+  flex-direction: column;
+}
+
+.nurture-workspace-inner {
+  overflow: clip;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--bg-elevated);
+}
+
+.nurture-workspace-body {
+  min-height: 0;
+  flex: 1;
+}
+
+.nurture-page-tabs {
+  display: flex;
+  gap: 1.25rem;
+  border-bottom: 1px solid var(--line);
+  margin-bottom: 0.65rem;
+}
+
+.nurture-page-tabs button {
+  border: 0;
+  border-bottom: 2px solid transparent;
+  padding: 0.45rem 0.1rem;
+  background: transparent;
+  color: var(--text-2);
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.nurture-page-tabs button:hover {
+  color: var(--text-1);
+}
+
+.nurture-page-tabs button[aria-selected="true"] {
+  border-bottom-color: var(--primary);
+  color: var(--primary);
+}
+
+.nurture-page-tabs button:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--primary) 65%, transparent);
+  outline-offset: 2px;
+}
+
+.nurture-workspace .nurture-live {
+  min-height: 0;
+}
+
+.nurture-workspace .nurture-float-log {
+  max-height: none;
+}
+
 /* done / attempted, four times over. `b` is confirmed, `i` attempted, `em` the unit. */
 .nurture-metrics {
   display: flex;
@@ -397,37 +465,6 @@
   flex: 1;
   height: 1px;
   background: var(--line);
-}
-
-/* How much of the shared 100% the four rates below have left. `order: 1` puts it after the
-   group's rule, so it sits at the right edge of the divider instead of crowding the title. */
-.nu-budget {
-  order: 1;
-  color: var(--text-2);
-  font-variant-numeric: tabular-nums;
-  letter-spacing: 0;
-  text-transform: none;
-}
-.nu-budget.is-over {
-  color: var(--danger-strong);
-}
-/* Said in a box rather than in passing: it blocks saving until the operator acts on it. */
-.nu-budget-warn {
-  margin: 0 0 0.15rem;
-  padding: 0.4rem 0.5rem;
-  border: 1px solid var(--danger-line);
-  border-radius: var(--radius-sm);
-  background: var(--danger-soft);
-  color: var(--text-1);
-  font-size: var(--text-2xs);
-  line-height: 1.5;
-}
-/* Inline in a sentence, so it drops the button padding that would otherwise open a gap
-   in the middle of the line. */
-.nu-budget-warn button.link {
-  padding: 0;
-  font-size: inherit;
-  text-decoration: underline;
 }
 
 /* One feature per row: switch, name, percentage. Aligned so the four read as a list of

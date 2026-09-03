@@ -45,9 +45,10 @@ type Props = {
   udid: string;
   /** Shown in the empty state, because "nothing yet" means different things either way. */
   running: boolean;
+  presentStatus?: (raw: string) => string;
 };
 
-export function NurtureDeviceLog({ udid, running }: Props) {
+export function NurtureDeviceLog({ udid, running, presentStatus = (raw) => raw }: Props) {
   const [entries, setEntries] = useState<SessionLogEntry[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const bottom = useRef<HTMLDivElement | null>(null);
@@ -124,12 +125,18 @@ export function NurtureDeviceLog({ udid, running }: Props) {
           <>
             {entries.map((entry, index) => {
               const span = spanOf(entry);
+              const presented = presentStatus(entry.text);
               return (
                 <div className="nurture-log-line" key={`${entry.at}-${index}`}>
                   <time className="nurture-log-at" dateTime={entry.at}>
                     {clockOf(entry.at)}
                   </time>
-                  <span className="nurture-log-text">{entry.text}</span>
+                  <span
+                    className="nurture-log-text"
+                    title={presented === entry.text ? undefined : entry.text}
+                  >
+                    {presented}
+                  </span>
                   {entry.repeats > 1 && (
                     <span
                       className="nurture-log-repeats"

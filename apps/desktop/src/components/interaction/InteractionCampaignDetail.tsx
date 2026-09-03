@@ -10,9 +10,50 @@ import { timeAgoVi } from "../../timeAgo";
 import type { InteractionArtifactRecord } from "../../api";
 import type {
   DeviceInfo,
+  InteractionActionCounters,
+  InteractionActionKind,
+  InteractionActionState,
   InteractionCampaignDetail,
   InteractionTargetNote,
 } from "../../types";
+
+const ACTION_KIND_VI: Record<InteractionActionKind, string> = {
+  like: "Tim",
+  save: "Lưu",
+  comment: "Bình luận",
+  follow: "Theo dõi",
+};
+
+const ACTION_STATE_VI: Record<InteractionActionState, string> = {
+  planned: "Đang chờ",
+  preparing: "Đang chuẩn bị",
+  armed: "Đã phát lệnh, đang xác nhận",
+  confirmed: "Đã xác nhận",
+  noOp: "Không cần làm",
+  failedBeforeEffect: "Chưa thực hiện",
+  uncertain: "Chưa chắc kết quả",
+};
+
+function actionTone(state: InteractionActionState): "ok" | "warn" | "danger" | "info" {
+  if (state === "confirmed" || state === "noOp") return "ok";
+  if (state === "armed" || state === "uncertain") return "warn";
+  if (state === "failedBeforeEffect") return "danger";
+  return "info";
+}
+
+function ActionCounters({ counters }: { counters: InteractionActionCounters }) {
+  return (
+    <section className="interaction-action-counters" aria-label="Tổng hợp hành động">
+      <span aria-label={`${counters.planned} dự kiến`}><strong>{counters.planned}</strong> dự kiến</span>
+      <span aria-label={`${counters.attempted} đã thao tác`}><strong>{counters.attempted}</strong> đã thao tác</span>
+      <span aria-label={`${counters.confirmed} xác nhận`}><strong>{counters.confirmed}</strong> xác nhận</span>
+      <span aria-label={`${counters.noOp} không cần làm`}><strong>{counters.noOp}</strong> không cần làm</span>
+      {counters.uncertain > 0 && (
+        <span className="is-uncertain" aria-label={`${counters.uncertain} chưa chắc`}><strong>{counters.uncertain}</strong> chưa chắc</span>
+      )}
+    </section>
+  );
+}
 
 /** One recorded reason, in Vietnamese, with the code kept for whoever needs it. */
 function Reason({ code }: { code: string }) {
@@ -76,7 +117,7 @@ function TargetNotesPanel({ notes }: { notes: InteractionTargetNote[] }) {
           <tr>
             <th>#</th>
             <th>Loại</th>
-            <th>Caption</th>
+            <th>Chú thích</th>
             <th>Ảnh</th>
             <th>Dài</th>
             <th>Lời thoại</th>
@@ -168,6 +209,11 @@ export function InteractionCampaignDetailView({
   const { summary } = detail;
   const total = summary.messageCount * summary.targetCount;
   const settled = summary.succeededMessages + summary.failedMessages;
+  const actionCounters = summary.actionCounters;
+  const hasActionCounters = Boolean(actionCounters?.planned);
+  const actionSettled = actionCounters
+    ? actionCounters.confirmed + actionCounters.noOp + actionCounters.uncertain
+    : 0;
 
   /// A phone by the number on its tile, not by eight characters of its udid.
   ///
@@ -175,14 +221,24 @@ export function InteractionCampaignDetailView({
   /// characters, but an Android serial can be shorter than the cut, and truncating
   /// `android-1` to `android-` removes the only part that identifies it.
   const shortUdid = (udid: string) => (udid.length > 12 ? `${udid.slice(0, 8)}…` : udid);
+  const departedUdids = Array.from(
+    new Set(
+      detail.assignments
+        .map((assignment) => assignment.actorUdid)
+        .filter(
+          (udid) =>
+            !devices.some((device) => device.udid === udid) && !deviceNumber.has(udid),
+        ),
+    ),
+  );
+  const departedNumber = new Map(departedUdids.map((udid, index) => [udid, index + 1]));
   const actorLabel = (udid: string) => {
     const number = deviceNumber.get(udid);
     const device = devices.find((entry) => entry.udid === udid);
     const handle = handles[udid];
     if (!device && number === undefined) {
-      // Ran on a phone that has since left the fleet. Saying so beats a bare udid that looks
-      // like a phone the operator should be able to find on the wall.
-      return `${shortUdid(udid)} (đã rời fleet)`;
+      const departed = departedNumber.get(udid) ?? 1;
+      return `Máy đã rời fleet ${departed}/${departedUdids.length}`;
     }
     const name = device?.name || device?.model || shortUdid(udid);
     return `${number ? `${number} · ` : ""}${name}${handle ? ` · @${handle}` : ""}`;
@@ -207,7 +263,9 @@ export function InteractionCampaignDetailView({
           {campaignStateVi(summary.state)}
         </span>
         <small>
-          {summary.succeededMessages}/{total} bình luận
+          {hasActionCounters
+            ? `${actionSettled}/${actionCounters!.planned} hành động đã có kết quả`
+            : `${summary.succeededMessages}/${total} bình luận`}
           {summary.failedMessages > 0 && ` · ${summary.failedMessages} lỗi`}
           {summary.updatedAt && ` · ${timeAgoVi(summary.updatedAt)}`}
         </small>
@@ -225,9 +283,16 @@ export function InteractionCampaignDetailView({
           </button>
         )}
       </div>
+      {hasActionCounters && <ActionCounters counters={actionCounters!} />}
       <ProgressBar
-        fraction={total > 0 ? settled / total : null}
-        failedFraction={total > 0 ? summary.failedMessages / total : 0}
+        fraction={
+          hasActionCounters
+            ? actionSettled / actionCounters!.planned
+            : total > 0
+              ? settled / total
+              : null
+        }
+        failedFraction={hasActionCounters ? 0 : total > 0 ? summary.failedMessages / total : 0}
         tone={summary.state === "running" ? "run" : stateTone(summary.state) === "ok" ? "done" : "failed"}
         label={`Tiến trình chiến dịch ${summary.id}`}
       />
@@ -245,7 +310,7 @@ export function InteractionCampaignDetailView({
           <div className="interaction-thread-head">
             <strong>{targetKey.replace(/^content:/, "link ")}</strong>
             <small>
-              {rows.filter((row) => row.state === "succeeded").length}/{rows.length} message
+              {rows.filter((row) => row.state === "succeeded").length}/{rows.length} lượt
             </small>
           </div>
           {rows.map((assignment) => {
@@ -264,8 +329,23 @@ export function InteractionCampaignDetailView({
               <div key={assignment.id} className="interaction-assignment">
                 <span>#{assignment.ordinal + 1}</span>
                 <span className="grow">
-                  <strong>{actorLabel(assignment.actorUdid)}</strong>
-                  <small>{assignment.preparedText ?? "Chưa chuẩn bị"}</small>
+                  <strong title={assignment.actorUdid}>{actorLabel(assignment.actorUdid)}</strong>
+                  {(assignment.preparedText || !assignment.actions?.length) && (
+                    <small>{assignment.preparedText ?? "Chưa chuẩn bị"}</small>
+                  )}
+                  {Boolean(assignment.actions?.length) && (
+                    <div className="interaction-action-results" aria-label="Kết quả hành động">
+                      {assignment.actions!.map((action) => (
+                        <span
+                          key={action.kind}
+                          className={`chip ${actionTone(action.state)}`}
+                          title={action.error ?? action.evidence ?? undefined}
+                        >
+                          {ACTION_KIND_VI[action.kind]} · {ACTION_STATE_VI[action.state]}
+                        </span>
+                      ))}
+                    </div>
+                  )}
                   {assignment.errorCode && <Reason code={assignment.errorCode} />}
                   {assignment.like && (
                     <small

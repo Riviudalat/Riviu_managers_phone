@@ -145,6 +145,62 @@ describe("web lookup panel", () => {
 });
 
 describe("assignment evidence", () => {
+  it("summarizes typed actions instead of calling a Like and Save run comments", () => {
+    show([], {
+      summary: {
+        ...detail.summary,
+        messageCount: 0,
+        succeededMessages: 0,
+        actionCounters: {
+          planned: 2,
+          attempted: 1,
+          confirmed: 1,
+          noOp: 1,
+          uncertain: 0,
+        },
+      },
+      assignments: [
+        {
+          id: "assignment-actions",
+          targetKey: "content:1",
+          ordinal: 0,
+          actorUdid: "actor-a",
+          parentAssignmentId: null,
+          state: "succeeded",
+          preparedText: null,
+          errorCode: null,
+          actions: [
+            {
+              kind: "like",
+              state: "confirmed",
+              revision: 2,
+              effectIntent: "intent-like",
+              evidence: "same-card-liked",
+              error: null,
+            },
+            {
+              kind: "save",
+              state: "noOp",
+              revision: 1,
+              effectIntent: null,
+              evidence: "already-saved",
+              error: null,
+            },
+          ],
+        },
+      ],
+      actionAggregate: "done",
+    });
+
+    expect(screen.getByLabelText("2 dự kiến")).toBeVisible();
+    expect(screen.getByLabelText("1 đã thao tác")).toBeVisible();
+    expect(screen.getByLabelText("1 xác nhận")).toBeVisible();
+    expect(screen.getByLabelText("1 không cần làm")).toBeVisible();
+    expect(screen.getByText("Tim · Đã xác nhận")).toBeVisible();
+    expect(screen.getByText("Lưu · Không cần làm")).toBeVisible();
+    expect(screen.queryByText(/0\/0 bình luận/)).not.toBeInTheDocument();
+  });
+
   it("warns when a successful reply lives under a folded parent", () => {
     const foldedAssignment = {
       id: "assignment-folded",

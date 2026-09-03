@@ -73,6 +73,20 @@ describe("the comment audit", () => {
     );
   });
 
+  it("uses the fleet machine label and keeps the raw UDID out of primary copy", async () => {
+    listCommentAttempts.mockResolvedValue([row({})]);
+    render(
+      <NurtureCommentsTab
+        live={false}
+        deviceLabel={() => "Máy 7 · ONE-01"}
+      />,
+    );
+
+    const label = await screen.findByText("Máy 7 · ONE-01");
+    expect(label).toHaveAttribute("title", "ce0717171c2a64d50d");
+    expect(screen.queryByText("a64d50d")).toBeNull();
+  });
+
   it("shows a skip as a skip, with the caption it did read", async () => {
     // A skip is the more interesting row — it says the evidence was unusable or the verifier
     // refused the draft — and it carries no comment text at all.
@@ -89,7 +103,7 @@ describe("the comment audit", () => {
     await waitFor(() =>
       expect(screen.getByText("bỏ — bằng chứng không dùng được")).toBeInTheDocument(),
     );
-    expect(screen.getByText("caption: chào buổi sáng")).toBeInTheDocument();
+    expect(screen.getByText("chú thích: chào buổi sáng")).toBeInTheDocument();
     expect(screen.getByText(/3 khung khác nhau/)).toBeInTheDocument();
   });
 

@@ -203,6 +203,8 @@ export interface AgentRuntimeView {
 
 export type PageId =
   | "control"
+  | "nurture"
+  | "interaction"
   | "material"
   | "apps"
   | "scripts"
@@ -350,12 +352,24 @@ export interface PublishImage {
   height: number;
 }
 
+export interface PublishVideo {
+  path: string;
+  fileName: string;
+  sha256: string;
+  byteLen: number;
+  durationMs: number;
+  videoCodec: "h264Avc";
+  audioCodec?: "aac" | null;
+}
+
 export interface PublishBundle {
   id: string;
   sourcePath: string;
   name: string;
-  mediaKind: "image";
+  mediaKind: "image" | "video";
   images: PublishImage[];
+  /** Present only for a validated single-MP4 bundle; absent on legacy image manifests. */
+  video?: PublishVideo | null;
   captionPath: string;
   caption: string;
   captionSha256: string;
@@ -363,6 +377,9 @@ export interface PublishBundle {
   /** Partner names read from the bundle's `partner*.xlsx` at scan time; absent on old manifests. */
   partners?: string[];
 }
+
+/** Campaign-owned caption snapshots, keyed by the bundle id returned by folder scan. */
+export type PublishCaptionOverrides = Record<string, string>;
 
 export interface PublishScanNotice {
   severity: "warning" | "error";
@@ -425,6 +442,29 @@ export interface PublishCampaignDetail {
   events: PublishEventRecord[];
 }
 
+export type PublishSoundPolicy =
+  | { kind: "default" }
+  | { kind: "trendingAny"; poolSize: number; seed: number };
+
+export type PublishExecutionStatus = "complete" | "partial" | "uncertain";
+export type PublishRetryScope = "fullPipeline" | "linkAndSheet" | "sheetOnly" | "none";
+
+export interface PublishExecutionIssue {
+  code: string;
+  assignmentId?: string;
+  udid?: string;
+  bundleId?: string;
+  message: string;
+}
+
+export interface PublishCampaignExecutionResult {
+  campaignId: string;
+  status: PublishExecutionStatus;
+  retryScope: PublishRetryScope;
+  issues: PublishExecutionIssue[];
+  detail: PublishCampaignDetail;
+}
+
 export interface OpLog {
   id: string;
   action: string;
@@ -449,14 +489,17 @@ export interface AnalyticsSummary {
 /**
  * The part of a window that overrides how a session behaves, when it overrides it at all.
  *
- * All five or none: the three rates share the panel's one 100% budget, and a budget assembled
- * from two sources is one nobody can read off the screen.
+ * All seven or none, so a window cannot combine stale global rates/switches with only part of
+ * an override.
  */
 export interface NurtureWindowBehaviour {
   numVideos: number;
   numRounds: number;
   likeProb: number;
   commentProb: number;
+  saveProb?: number;
+  /** Missing on legacy window revisions and therefore treated as disabled. */
+  saveEnabled?: boolean;
   followProb: number;
 }
 
@@ -497,6 +540,7 @@ export interface NurtureSettings {
   numRounds: number;
   likeProb: number;
   commentProb: number;
+  saveProb?: number;
   followProb: number;
   frenzyProb: number;
   watchMin: number;
@@ -535,6 +579,8 @@ export interface NurtureSettings {
   // the Rust side defaults every one to `true`.
   likeEnabled?: boolean;
   commentEnabled?: boolean;
+  /** Additive feature: absent means disabled for a legacy profile. */
+  saveEnabled?: boolean;
   followEnabled?: boolean;
   frenzyEnabled?: boolean;
   carouselEnabled?: boolean;
@@ -563,10 +609,12 @@ export interface NurtureSettings {
 export const LIVE_TUNABLE_FIELDS = new Set<keyof NurtureSettings>([
   "likeProb",
   "commentProb",
+  "saveProb",
   "followProb",
   "frenzyProb",
   "likeEnabled",
   "commentEnabled",
+  "saveEnabled",
   "followEnabled",
   "frenzyEnabled",
   "watchMin",
@@ -693,9 +741,13 @@ export interface NurtureSessionStatus {
   swipeAttempts: number;
   likeAttempts: number;
   commentAttempts: number;
+  saveAttempts?: number;
   followAttempts: number;
   likes: number;
   comments: number;
+  saves?: number;
+  saveNoops?: number;
+  saveUncertain?: number;
   follows: number;
   lastMessage: string;
   /// What the comment model reported spending on this device, in tokens.
@@ -806,6 +858,54 @@ export type ThreadMode = "threaded" | "standalone";
 /** Chain: message N answers N-1. Star: every message answers message 0. */
 export type ThreadShape = "chain" | "star";
 
+export interface InteractionActionSet {
+  like: boolean;
+  comment: boolean;
+  save: boolean;
+}
+
+/** Desired state read from TikTok's bookmark control. */
+export type BookmarkState = "saved" | "unsaved" | "unreadable";
+
+/** Strongest durable conclusion returned by one desired-state Save attempt. */
+export type SaveVerdict =
+  | "saved"
+  | "alreadySaved"
+  | "noControl"
+  | "stateUnreadable"
+  | "cardChangedBeforeEffect"
+  | "failedBeforeEffect"
+  | "cardChangedAfterEffect"
+  | "notConfirmed"
+  | "uncertainAfterEffect";
+
+export type InteractionActionKind = "like" | "save" | "comment" | "follow";
+export type InteractionActionState =
+  | "planned"
+  | "preparing"
+  | "armed"
+  | "confirmed"
+  | "noOp"
+  | "failedBeforeEffect"
+  | "uncertain";
+
+export interface PublicActionResult {
+  kind: InteractionActionKind;
+  state: InteractionActionState;
+  revision: number;
+  effectIntent: string | null;
+  evidence: string | null;
+  error: string | null;
+}
+
+export interface InteractionActionCounters {
+  planned: number;
+  attempted: number;
+  confirmed: number;
+  noOp: number;
+  uncertain: number;
+}
+
 export interface ThreadCampaignRequest {
   requestId: string;
   targets: ResolvedTikTokTarget[];
@@ -837,8 +937,8 @@ export interface ThreadCampaignRequest {
    * `#[serde(default)]`. The backend deals them out across (target, ordinal).
    */
   manualComments?: string[];
-  /** Also like each target, once per actor that comments on it. */
-  likeTarget?: boolean;
+  /** Independent public actions, executed Like -> Save -> Comment. */
+  actions?: InteractionActionSet;
   /**
    * @-handles (without the leading `@`) tagged at the front of each thread's opening
    * comment, as plain text. A handle that belongs to a fleet phone is also added to
@@ -934,6 +1034,8 @@ export interface InteractionCampaignSummary {
    * its UUID, so runs against different posts were indistinguishable.
    */
   brief: InteractionCampaignBrief | null;
+  /** Typed totals from durable public-action rows; absent on legacy payloads. */
+  actionCounters?: InteractionActionCounters;
 }
 
 export interface InteractionCampaignBrief {
@@ -946,6 +1048,7 @@ export interface InteractionCampaignBrief {
   /** The operator wrote the comments rather than the AI. */
   manual: boolean;
   likeTarget: boolean;
+  actions: InteractionActionSet;
 }
 
 export interface InteractionAssignmentRecord {
@@ -978,11 +1081,14 @@ export interface InteractionAssignmentRecord {
    * campaign payloads produced before this field existed do not carry it.
    */
   parentWasFolded?: boolean;
+  /** Durable outcomes for each requested public action. */
+  actions?: PublicActionResult[];
 }
 
 export interface InteractionCampaignDetail {
   summary: InteractionCampaignSummary;
   assignments: InteractionAssignmentRecord[];
+  actionAggregate?: "done" | "partial" | "failed" | "uncertain" | null;
 }
 
 /**
@@ -1056,6 +1162,227 @@ export type JsonValue = string | number | boolean | null | JsonObject | JsonValu
 
 export interface JsonObject {
   [key: string]: JsonValue;
+}
+
+export type AutomationKind = "nurture" | "interaction" | "publish";
+
+export type TargetRef =
+  | { type: "all" }
+  | { type: "group"; groupId: string }
+  | { type: "explicit"; udids: string[] };
+
+export interface AutomationDefinition {
+  id: string;
+  name: string;
+  kind: AutomationKind;
+  latestRevision: number;
+  archived: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface AutomationDefinitionRevision {
+  definitionId: string;
+  revision: number;
+  targetRef: TargetRef;
+  config: JsonValue;
+  createdAt: string;
+}
+
+export interface AutomationDefinitionRecord {
+  definition: AutomationDefinition;
+  revision: AutomationDefinitionRevision;
+}
+
+export interface AutomationScheduleV1 extends JsonObject {
+  schemaVersion: 1;
+  kind: "interval";
+  everyMinutes: number;
+}
+
+export interface AutomationSchedule {
+  id: string;
+  revision: number;
+  name: string;
+  definitionId: string;
+  definitionRevision: number;
+  enabled: boolean;
+  schedule: JsonValue;
+  nextDueAt: string | null;
+  lastErrorCode: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export type OrchestrationBranch = "done" | "partial" | "failed" | "uncertain";
+
+export interface AutomationProfileRef {
+  definitionId: string;
+  revision: number;
+}
+
+export type OrchestrationNodeAction =
+  | { kind: "start" }
+  | { kind: "delay"; durationMs: number }
+  | { kind: "runNurture"; profile: AutomationProfileRef; targetOverride?: TargetRef | null }
+  | { kind: "runInteraction"; profile: AutomationProfileRef; targetOverride?: TargetRef | null }
+  | { kind: "runPublish"; profile: AutomationProfileRef; targetOverride?: TargetRef | null }
+  | { kind: "end" };
+
+export type OrchestrationNode = {
+  id: string;
+  position: CanvasPoint;
+} & OrchestrationNodeAction;
+
+export interface OrchestrationEdge {
+  sourceNodeId: string;
+  sourcePort: OrchestrationBranch;
+  targetNodeId: string;
+}
+
+export interface OrchestrationDocumentV1 {
+  schemaVersion: 1;
+  id: string;
+  revision: number;
+  name: string;
+  entryNodeId: string;
+  nodes: OrchestrationNode[];
+  edges: OrchestrationEdge[];
+}
+
+export interface OrchestrationIssue {
+  code: string;
+  nodeId: string | null;
+  message: string;
+}
+
+export interface CompiledOrchestrationV1 {
+  document: OrchestrationDocumentV1;
+  executionOrder: string[];
+  canonicalJson: string;
+  sha256: string;
+  profiles: Record<string, AutomationProfileRef>;
+}
+
+export interface OrchestrationSummary {
+  id: string;
+  name: string;
+  latestRevision: number;
+  archived: boolean;
+  updatedAt: string;
+}
+
+export interface OrchestrationRevisionRecord {
+  compiled: CompiledOrchestrationV1;
+  createdAt: string;
+}
+
+export type ExcludedDeviceReason = "not_in_roster" | "duplicate_explicit";
+
+export interface ResolvedTargetDevice {
+  udid: string;
+  alias: string;
+  number: number | null;
+}
+
+export interface ResolvedTargetExclusion {
+  device: ResolvedTargetDevice;
+  reason: ExcludedDeviceReason;
+}
+
+export interface ResolvedTargetSnapshot {
+  targetRef: TargetRef;
+  included: ResolvedTargetDevice[];
+  excluded: ResolvedTargetExclusion[];
+  rosterSha256: string;
+}
+
+export type OrchestrationRunState =
+  | "queued"
+  | "running"
+  | "done"
+  | "partial"
+  | "failed"
+  | "uncertain"
+  | "cancelled";
+
+export type OrchestrationAttemptState =
+  | "queued"
+  | "dispatching"
+  | "waitingChild"
+  | "done"
+  | "partial"
+  | "failed"
+  | "uncertain"
+  | "cancelled";
+
+export interface OrchestrationAttemptSnapshot {
+  documentId: string;
+  documentRevision: number;
+  documentSha256: string;
+  canonicalDocumentJson: string;
+  nodeId: string;
+  attemptId: string;
+  idempotencyKey: string;
+  profile: AutomationProfileRef | null;
+  target: ResolvedTargetSnapshot;
+}
+
+export interface OrchestrationRunRecord {
+  id: string;
+  documentId: string;
+  documentRevision: number;
+  documentSha256: string;
+  target: ResolvedTargetSnapshot;
+  nodeTargets: Record<string, ResolvedTargetSnapshot>;
+  state: OrchestrationRunState;
+  currentNodeId: string | null;
+  errorCode: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface OrchestrationAttemptRecord {
+  snapshot: OrchestrationAttemptSnapshot;
+  runId: string;
+  attemptNo: number;
+  state: OrchestrationAttemptState;
+  childKind: AutomationKind | null;
+  childCampaignId: string | null;
+  branch: OrchestrationBranch | null;
+  errorCode: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface OrchestrationRunDetail {
+  run: OrchestrationRunRecord;
+  attempts: OrchestrationAttemptRecord[];
+}
+
+export interface NurtureAutomationProfileConfigV1 {
+  schemaVersion: 1;
+  settings: Omit<NurtureSettings, "apiKey" | "hasApiKey">;
+  durationMinutes?: number | null;
+}
+
+export type InteractionCampaignTemplateV1 = Omit<
+  ThreadCampaignRequest,
+  "requestId" | "actorUdids"
+>;
+
+export interface InteractionAutomationProfileConfigV1 {
+  schemaVersion: 1;
+  request: InteractionCampaignTemplateV1;
+}
+
+export interface PublishAutomationProfileConfigV1 {
+  schemaVersion: 1;
+  sourceRoot: string;
+  bundleIds: string[];
+  captionOverrides?: Record<string, string>;
+  soundPolicy: PublishSoundPolicy;
+  executionConfirmed: boolean;
 }
 
 export type ScreenOrientation =
@@ -1224,6 +1551,18 @@ export type CompiledActionConfig =
   | { kind: "wait"; durationMs: number }
   | { kind: "tap"; target: CompiledTapTarget }
   | { kind: "swipe"; from: ImageCoordinateTarget; to: ImageCoordinateTarget; durationMs: number }
+  | {
+      kind: "autoSwipe";
+      preset: "custom" | "tiktokFeed";
+      count: number | null;
+      durationMs: number | null;
+      from: { x: number; y: number };
+      to: { x: number; y: number };
+      gestureDurationMs: number;
+      pauseMinMs: number;
+      pauseMaxMs: number;
+      jitterPercent: number;
+    }
   | { kind: "typeText"; text: string; readBackLocator: QualifiedElementLocator }
   | { kind: "screenshot"; label: string; format: string }
   | { kind: "assertVisible"; accessibilityId: string }
@@ -1308,6 +1647,12 @@ export type DeviceWorkOwner =
   | "manualControl"
   | "groupSync"
   | "idleSweep";
+
+export interface DeviceWorkState {
+  udid: string;
+  /** `null` means the coordinator confirms that this device is idle. */
+  currentOwner: DeviceWorkOwner | null;
+}
 
 export interface CommandError {
   code: string;

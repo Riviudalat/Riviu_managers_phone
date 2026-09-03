@@ -253,6 +253,35 @@ export async function installTauriMock(
       },
     ];
     const devices = fixtureOptions.androidRoster ? androidDevices : iosDevices;
+    let orchestrationDetail: JsonRecord | null = null;
+
+    function orchestrationRunDetail(args: JsonRecord): JsonRecord {
+      const runId = uuid(900 + state.nextRunNumber++);
+      return {
+        run: {
+          id: runId,
+          documentId: String(args.documentId),
+          documentRevision: Number(args.revision),
+          documentSha256: "66".repeat(32),
+          target: {
+            targetRef: clone(args.target),
+            included: devices.map((device, index) => ({
+              udid: device.udid,
+              alias: device.name,
+              number: index + 1,
+            })),
+            excluded: [],
+            rosterSha256: "77".repeat(32),
+          },
+          state: "running",
+          currentNodeId: null,
+          errorCode: null,
+          createdAt: AT,
+          updatedAt: AT,
+        },
+        attempts: [],
+      };
+    }
 
     const port = (required = true) => [{ name: "flow", valueType: "flow", required }];
     const definition = (
@@ -367,6 +396,54 @@ export async function installTauriMock(
         evidenceRequirement: "frame",
         allowedEvidence: ["frameDigestChanged", "frameRegionChanged"],
         reconciliationPolicy: "readFrame",
+        retryPolicy: "beforeDispatchOnly",
+      }),
+      definition("autoSwipe", "Auto Swipe", "input", {
+        type: "object",
+        additionalProperties: false,
+        required: [
+          "preset",
+          "from",
+          "to",
+          "gestureDurationMs",
+          "pauseMinMs",
+          "pauseMaxMs",
+          "jitterPercent",
+        ],
+        properties: {
+          preset: { type: "string", enum: ["custom", "tiktokFeed"] },
+          count: { type: "integer", minimum: 1, maximum: 500 },
+          durationMs: { type: "integer", minimum: 1_000, maximum: 3_600_000 },
+          from: {
+            type: "object",
+            properties: {
+              x: { type: "number", minimum: 0, maximum: 1 },
+              y: { type: "number", minimum: 0, maximum: 1 },
+            },
+          },
+          to: {
+            type: "object",
+            properties: {
+              x: { type: "number", minimum: 0, maximum: 1 },
+              y: { type: "number", minimum: 0, maximum: 1 },
+            },
+          },
+          gestureDurationMs: { type: "integer", minimum: 100, maximum: 2_000 },
+          pauseMinMs: { type: "integer", minimum: 250, maximum: 60_000 },
+          pauseMaxMs: { type: "integer", minimum: 250, maximum: 60_000 },
+          jitterPercent: { type: "integer", minimum: 0, maximum: 3 },
+        },
+        oneOf: [
+          { required: ["count"], not: { required: ["durationMs"] } },
+          { required: ["durationMs"], not: { required: ["count"] } },
+        ],
+      }, {
+        resourceClass: "uiWithStream",
+        sideEffectClass: "ambiguousUi",
+        evidenceRequirement: "frame",
+        allowedEvidence: ["frameDigestChanged"],
+        reconciliationPolicy: "readFrame",
+        defaultTimeoutMs: 3_600_000,
         retryPolicy: "beforeDispatchOnly",
       }),
       definition("typeText", "Type Text", "input", {
@@ -617,8 +694,97 @@ export async function installTauriMock(
     });
 
     commandHandlers.set("list_devices", () => clone(devices));
+    commandHandlers.set("list_device_work_states", () =>
+      devices.map((device) => ({ udid: device.udid, currentOwner: null })),
+    );
     commandHandlers.set("refresh_devices", () => clone(devices));
     commandHandlers.set("list_jobs", () => []);
+    commandHandlers.set("nurture_get_settings", () => ({
+      baseUrl: "https://api.openai.com/v1",
+      model: "gpt-5-mini",
+      apiKey: "",
+      hasApiKey: false,
+      bundleId: "com.zhiliaoapp.musically",
+      numVideos: 3,
+      numRounds: 1,
+      likeProb: 25,
+      commentProb: 10,
+      saveProb: 10,
+      followProb: 5,
+      frenzyProb: 15,
+      watchMin: 8,
+      watchMax: 20,
+      persona: "Tự nhiên",
+      fatigue: true,
+      timeOfDay: true,
+      pauseSwipe: true,
+      nightStart: 23,
+      nightEnd: 7,
+      recoverDelayMin: 2,
+      recoverDelayMax: 5,
+      staggerDelayMin: 1,
+      staggerDelayMax: 3,
+      commentLang: "vi",
+      aiDirections: "",
+      maxCommentWords: 15,
+      scheduleEnabled: false,
+      scheduleEveryMinutes: 120,
+      scheduleDurationMinutes: 30,
+      scheduleUdids: [],
+      scheduleWindows: [],
+      likeEnabled: true,
+      commentEnabled: true,
+      saveEnabled: false,
+      followEnabled: true,
+      frenzyEnabled: true,
+      carouselEnabled: true,
+      carouselMaxSlides: 12,
+      carouselPortionPercent: 100,
+      humanLimits: false,
+    }));
+    commandHandlers.set("nurture_session_status", () => []);
+    commandHandlers.set("nurture_session_log_summary", () => []);
+    commandHandlers.set("nurture_list_comment_attempts", () => []);
+    commandHandlers.set("nurture_cost_summary", () => ({
+      todayPromptTokens: 0,
+      todayCompletionTokens: 0,
+      totalPromptTokens: 0,
+      totalCompletionTokens: 0,
+      todayComments: 0,
+      totalComments: 0,
+    }));
+    commandHandlers.set("automation_list", () => []);
+    commandHandlers.set("orchestration_list", () => []);
+    commandHandlers.set("orchestration_list_runs", () => {
+      if (!orchestrationDetail) return [];
+      return [clone(orchestrationDetail.run)];
+    });
+    commandHandlers.set("orchestration_get_run", (args) => {
+      if (!orchestrationDetail) return null;
+      const run = orchestrationDetail.run as JsonRecord;
+      return run.id === args.runId ? clone(orchestrationDetail) : null;
+    });
+    commandHandlers.set("orchestration_run", (args) => {
+      orchestrationDetail = orchestrationRunDetail(args);
+      return clone(orchestrationDetail);
+    });
+    commandHandlers.set("orchestration_reconcile", (args) => {
+      if (!orchestrationDetail ||
+        (orchestrationDetail.run as JsonRecord).id !== args.runId) {
+        throw { code: "orchestration_run_not_found", message: "Không tìm thấy lượt điều phối." };
+      }
+      return clone(orchestrationDetail);
+    });
+    commandHandlers.set("orchestration_cancel_run", (args) => {
+      if (!orchestrationDetail ||
+        (orchestrationDetail.run as JsonRecord).id !== args.runId) {
+        throw { code: "orchestration_run_not_found", message: "Không tìm thấy lượt điều phối." };
+      }
+      const run = orchestrationDetail.run as JsonRecord;
+      run.state = "cancelled";
+      run.updatedAt = AT;
+      return clone(orchestrationDetail);
+    });
     commandHandlers.set("get_stream_settings", () => ({
       fps: 24,
       gridQuality: "medium",

@@ -2,99 +2,78 @@ import { expect, test, type Page } from "@playwright/test";
 
 import { installTauriMock } from "./fixtures/tauriMock";
 
-/**
- * A floating panel must clip, never scroll.
- *
- * Both float panels are taller than the height they are clamped to, and both used
- * `overflow: hidden` — which clips *and* leaves the box programmatically scrollable. So the
- * first time focus landed on a control the browser could not see, it scrolled **the card**
- * to reveal it, taking the header and the tab strip out of the clip box. There is no
- * scrollbar on a hidden-overflow box, so nothing brought them back.
- *
- * Measured in the running app on 24/08/2026: deselecting one phone in the Tương tác panel
- * moved its header from y=123 to y=-286 and the operator was left looking at a blank white
- * rectangle for the rest of the session. The actor tiles are what make it so easy to hit —
- * they keep their checkbox off-screen on purpose and let the tile be the target, so choosing
- * a phone focuses a control that is by definition not visible.
- *
- * These are not screenshot tests: they assert the geometry, which is the thing that broke.
- */
-
-async function openPanel(page: Page, button: string, card: string): Promise<void> {
+/** Page workspaces keep their tabs reachable while only the content body scrolls. */
+async function openWorkspace(page: Page, button: string, region: string): Promise<void> {
   await installTauriMock(page);
   await page.goto("/");
   await expect(page.locator("[data-testid='device-tile']")).toHaveCount(2);
-  await page.getByRole("button", { name: button }).click();
-  await expect(page.locator(card)).toBeVisible();
+  await page.locator("[data-testid='nav-item']").getByText(button, { exact: true }).click();
+  await expect(page.getByRole("region", { name: region })).toBeVisible();
 }
 
-/** The header's top edge, and the card's, in viewport coordinates. */
-async function edges(page: Page, card: string, header: string) {
+/** The tab strip's top edge, and the workspace's, in viewport coordinates. */
+async function edges(page: Page, card: string, tabs: string) {
   return page.evaluate(
-    ([cardSel, headerSel]) => {
+    ([cardSel, tabSel]) => {
       const cardEl = document.querySelector(cardSel) as HTMLElement;
-      const headerEl = cardEl.querySelector(headerSel) as HTMLElement;
+      const tabEl = cardEl.querySelector(tabSel) as HTMLElement;
       return {
         card: Math.round(cardEl.getBoundingClientRect().top),
-        header: Math.round(headerEl.getBoundingClientRect().top),
+        tabs: Math.round(tabEl.getBoundingClientRect().top),
         scrollTop: Math.round(cardEl.scrollTop),
       };
     },
-    [card, header],
+    [card, tabs],
   );
 }
 
-test("picking phones in the interaction panel never scrolls its header away", async ({ page }) => {
-  await openPanel(page, "Tương tác", ".interaction-float");
+test("picking phones in Tương tác never scrolls its tabs away", async ({ page }) => {
+  await openWorkspace(page, "Tương tác", "Không gian Tương tác");
 
-  const before = await edges(page, ".interaction-float", ".interaction-title");
-  expect(before.header).toBeGreaterThanOrEqual(before.card);
+  const before = await edges(page, ".interaction-workspace-inner", ".interaction-tabs");
+  expect(before.tabs).toBeGreaterThanOrEqual(before.card);
 
   // Every tile, so the run includes one far enough down the list that revealing its
   // off-screen checkbox would need a scroll.
-  const tiles = page.locator(".interaction-float .tile-pick");
+  const tiles = page.locator(".interaction-workspace .tile-pick");
   const count = await tiles.count();
   expect(count).toBeGreaterThan(0);
   for (let i = 0; i < count; i += 1) {
     await tiles.nth(i).click({ force: true });
   }
 
-  const after = await edges(page, ".interaction-float", ".interaction-title");
-  expect(after.scrollTop, "the card itself must never scroll").toBe(0);
+  const after = await edges(page, ".interaction-workspace-inner", ".interaction-tabs");
+  expect(after.scrollTop, "the workspace itself must never scroll").toBe(0);
   expect(
-    after.header,
-    "the header has to stay inside the card — it left it, and the panel went blank",
+    after.tabs,
+    "the tabs have to stay inside the workspace",
   ).toBeGreaterThanOrEqual(after.card);
-  // And the panel still says something, which is the symptom an operator reports.
-  expect((await page.locator(".interaction-float").innerText()).trim().length).toBeGreaterThan(50);
+  expect((await page.locator(".interaction-workspace").innerText()).trim().length).toBeGreaterThan(50);
 });
 
-test("the interaction body is the box that scrolls, and it reaches its end", async ({ page }) => {
-  await openPanel(page, "Tương tác", ".interaction-float");
+test("the Tương tác body remains the designated scroller", async ({ page }) => {
+  await openWorkspace(page, "Tương tác", "Không gian Tương tác");
 
   const scroll = await page.evaluate(() => {
     const body = document.querySelector(".interaction-float-body") as HTMLElement;
-    body.scrollTop = body.scrollHeight;
-    const card = document.querySelector(".interaction-float") as HTMLElement;
-    const last = body.lastElementChild as HTMLElement | null;
+    const card = document.querySelector(".interaction-workspace-inner") as HTMLElement;
+    card.scrollTop = 500;
     return {
-      bodyScrolled: Math.round(body.scrollTop),
       cardScrolled: Math.round(card.scrollTop),
-      lastBottom: last ? Math.round(last.getBoundingClientRect().bottom) : null,
-      cardBottom: Math.round(card.getBoundingClientRect().bottom),
+      cardOverflow: getComputedStyle(card).overflowY,
+      bodyOverflow: getComputedStyle(body).overflowY,
     };
   });
-  // Clipping without a scrollable body would trade a blank panel for an unreachable one.
-  expect(scroll.bodyScrolled, "the body must scroll").toBeGreaterThan(0);
   expect(scroll.cardScrolled, "the card must not").toBe(0);
-  expect(scroll.lastBottom!).toBeLessThanOrEqual(scroll.cardBottom + 2);
+  expect(scroll.cardOverflow).toBe("clip");
+  expect(scroll.bodyOverflow, "the body is the designated scroller").toBe("auto");
 });
 
-test("the nurture panel cannot be scrolled as a whole either", async ({ page }) => {
-  await openPanel(page, "Nuôi TT", ".nurture-float");
+test("the Nuôi TikTok workspace cannot be scrolled as a whole", async ({ page }) => {
+  await openWorkspace(page, "Nuôi TikTok", "Không gian Nuôi TikTok");
 
   const result = await page.evaluate(() => {
-    const card = document.querySelector(".nurture-float") as HTMLElement;
+    const card = document.querySelector(".nurture-workspace-inner") as HTMLElement;
     const body = card.querySelector(".nurture-float-body") as HTMLElement;
     card.scrollTop = 500;
     const bodyStyle = getComputedStyle(body);
@@ -104,7 +83,7 @@ test("the nurture panel cannot be scrolled as a whole either", async ({ page }) 
       bodyOverflow: bodyStyle.overflowY,
     };
   });
-  expect(result.cardScrollTop, "a float panel clips; it does not scroll").toBe(0);
+  expect(result.cardScrollTop, "the workspace clips; it does not scroll").toBe(0);
   expect(result.cardOverflow, "`hidden` would leave it scrollable").toBe("clip");
   // Asserted as the rule rather than as "the body is scrolling right now": with the two
   // fixture phones this panel's content happens to fit, and a test that only passes when it

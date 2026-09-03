@@ -148,6 +148,31 @@ function compiled(document: FlowDocumentV2): CompiledRevision {
 }
 
 describe("FlowInspector", () => {
+  it("uses Vietnamese for empty and non-editable inspector states", () => {
+    const view = render(
+      <FlowInspector
+        node={null}
+        definition={null}
+        issues={[]}
+        onConfigChange={vi.fn()}
+        onPostconditionChange={vi.fn()}
+      />,
+    );
+    expect(screen.getByText("Chọn một hành động để chỉnh sửa.")).toBeInTheDocument();
+    expect(screen.queryByText("Select an action to edit it.")).toBeNull();
+
+    view.rerender(
+      <FlowInspector
+        node={node("wait", {})}
+        definition={definition("wait", null)}
+        issues={[]}
+        onConfigChange={vi.fn()}
+        onPostconditionChange={vi.fn()}
+      />,
+    );
+    expect(screen.getByText("Hành động này không có trường cấu hình.")).toBeInTheDocument();
+  });
+
   it("keeps the technical node id behind accessible help", () => {
     render(
       <InspectorHarness
@@ -185,7 +210,7 @@ describe("FlowInspector", () => {
       />,
     );
 
-    fireEvent.change(screen.getByLabelText("Bundle ID"), {
+    fireEvent.change(screen.getByLabelText("Mã ứng dụng"), {
       target: { value: "com.fixture.new" },
     });
     expect(screen.getByTestId("config")).toHaveTextContent('"bundleId":"com.fixture.new"');
@@ -215,14 +240,14 @@ describe("FlowInspector", () => {
         onEvidence={onEvidence}
       />,
     );
-    fireEvent.change(screen.getByLabelText("Bundle ID"), {
+    fireEvent.change(screen.getByLabelText("Mã ứng dụng"), {
       target: { value: "com.fixture.target" },
     });
     expect(onEvidence).toHaveBeenLastCalledWith({
       kind: "processAbsent",
       bundleId: "com.fixture.target",
     });
-    expect(screen.getByLabelText("Bundle ID phải vắng mặt")).toHaveValue(
+    expect(screen.getByLabelText("Mã ứng dụng phải vắng mặt")).toHaveValue(
       "com.fixture.target",
     );
   });
@@ -284,7 +309,7 @@ describe("FlowInspector", () => {
     fireEvent.click(screen.getByRole("button", { name: "Toạ độ" }));
     expect(screen.getByTestId("config")).not.toHaveTextContent("accessibilityId");
     fireEvent.click(screen.getByRole("button", { name: "Chọn điểm trên thiết bị" }));
-    const image = await screen.findByRole("img", { name: "Device frame" });
+    const image = await screen.findByRole("img", { name: "Khung hình thiết bị" });
     vi.spyOn(image, "getBoundingClientRect").mockReturnValue({
       x: 100,
       y: 50,
@@ -313,7 +338,7 @@ describe("FlowInspector", () => {
       name: "Vị ngữ khung có kiểm định",
     })).not.toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole("button", { name: "Accessibility ID" }));
+    fireEvent.click(screen.getByRole("button", { name: "Mã trợ năng" }));
     expect(JSON.parse(screen.getByTestId("config").textContent ?? "null")).toEqual({
       accessibilityId: "",
     });
@@ -359,8 +384,11 @@ describe("FlowInspector", () => {
     expect(onConfig).toHaveBeenCalledTimes(1);
     fireEvent.change(x, { target: { value: "Infinity" } });
     expect(onConfig).toHaveBeenCalledTimes(1);
-    expect(within(from).getByLabelText("Profile ID")).toHaveAttribute("readonly");
+    expect(within(from).getByLabelText("Mã hồ sơ")).toHaveAttribute("readonly");
+    expect(within(from).getByLabelText("Chiều rộng ảnh")).toHaveValue(375);
+    expect(within(from).getByLabelText("Chiều cao ảnh")).toHaveValue(667);
     expect(within(from).getByLabelText("Hướng màn hình")).toHaveValue("portrait");
+    expect(within(from).getByRole("option", { name: "Dọc" })).toHaveValue("portrait");
   });
 
   it("switches Auto Swipe between bounded count and duration without keeping both limits", () => {
@@ -450,7 +478,7 @@ describe("FlowInspector", () => {
     );
     const configLocator = screen.getAllByRole("group", { name: "Cách định vị" })[0];
     expect(within(configLocator).getAllByRole("button")).toHaveLength(2);
-    fireEvent.click(within(configLocator).getByRole("button", { name: "Class name" }));
+    fireEvent.click(within(configLocator).getByRole("button", { name: "Tên lớp" }));
     expect(screen.getByTestId("config")).toHaveTextContent('"strategy":"className"');
     expect(screen.getByTestId("evidence")).toHaveTextContent('"strategy":"className"');
     fireEvent.change(screen.getByLabelText("Nội dung"), { target: { value: "updated" } });
@@ -485,8 +513,14 @@ describe("FlowInspector", () => {
     );
     expect(screen.getByLabelText("Nhãn")).toHaveAttribute("maxlength", "96");
     expect(screen.getByLabelText("Định dạng")).toHaveValue("jpeg");
-    expect(screen.getByText("Label is invalid")).toHaveAttribute("role", "alert");
-    expect(screen.getByText("Node is invalid")).toHaveAttribute("role", "alert");
+    expect(screen.getByText("Giá trị cấu hình chưa hợp lệ.")).toHaveAttribute(
+      "title",
+      "LabelInvalid: Label is invalid",
+    );
+    expect(screen.getByText("Bước này chưa hợp lệ.")).toHaveAttribute(
+      "title",
+      "NodeInvalid: Node is invalid",
+    );
     fireEvent.change(screen.getByLabelText("Nhãn"), { target: { value: "x".repeat(97) } });
     expect(onConfig).not.toHaveBeenCalled();
   });
@@ -503,7 +537,7 @@ describe("FlowCoordinatePicker", () => {
       profileId: "11".repeat(32),
     };
     render(<FlowCoordinatePicker frame={frame} onPick={onPick} />);
-    const image = screen.getByRole("img", { name: "Device frame" });
+    const image = screen.getByRole("img", { name: "Khung hình thiết bị" });
     vi.spyOn(image, "getBoundingClientRect").mockReturnValue({
       x: 0,
       y: 0,
@@ -546,12 +580,14 @@ describe("FlowImportDialog", () => {
     fireEvent.change(screen.getByLabelText("JSON script cũ"), {
       target: { value: '{"steps":[]}' },
     });
-    fireEvent.click(screen.getByRole("button", { name: "Import" }));
-    expect(await screen.findByText("UnsupportedStep")).toBeInTheDocument();
-    expect(screen.getByText("InvalidValue")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Nhập" }));
+    const summaries = await screen.findAllByText(/Không thể nhập hành động này/);
+    expect(summaries).toHaveLength(2);
+    expect(summaries[0].closest("details")).toHaveTextContent("UnsupportedStep: First");
+    expect(summaries[1].closest("details")).toHaveTextContent("InvalidValue: Second");
     expect(onImport).not.toHaveBeenCalled();
 
-    fireEvent.click(screen.getByRole("button", { name: "Import" }));
+    fireEvent.click(screen.getByRole("button", { name: "Nhập" }));
     await waitFor(() => expect(onImport).toHaveBeenCalledWith(document));
   });
 });
@@ -571,13 +607,13 @@ describe("FlowJsonDialog", () => {
     );
     const editor = screen.getByLabelText("JSON tài liệu");
     fireEvent.change(editor, { target: { value: "{" } });
-    fireEvent.click(screen.getByRole("button", { name: "Validate and apply" }));
+    fireEvent.click(screen.getByRole("button", { name: "Kiểm tra và áp dụng" }));
     expect(await screen.findByRole("alert")).not.toHaveTextContent(/^$/);
     expect(validate).not.toHaveBeenCalled();
     expect(onApply).not.toHaveBeenCalled();
 
     fireEvent.change(editor, { target: { value: JSON.stringify(document) } });
-    fireEvent.click(screen.getByRole("button", { name: "Validate and apply" }));
+    fireEvent.click(screen.getByRole("button", { name: "Kiểm tra và áp dụng" }));
     expect(await screen.findByRole("alert")).toHaveTextContent("BackendValidationFailed");
     expect(validate).toHaveBeenCalledWith(document);
     expect(onApply).not.toHaveBeenCalled();
@@ -598,10 +634,10 @@ describe("FlowJsonDialog", () => {
         exportFlow={exportFlow}
       />,
     );
-    fireEvent.click(screen.getByRole("button", { name: "Validate and apply" }));
+    fireEvent.click(screen.getByRole("button", { name: "Kiểm tra và áp dụng" }));
     await waitFor(() => expect(onApply).toHaveBeenCalledWith(document));
 
-    fireEvent.click(screen.getByRole("button", { name: "Load saved export" }));
+    fireEvent.click(screen.getByRole("button", { name: "Tải bản đã lưu" }));
     await waitFor(() => expect(screen.getByLabelText("JSON tài liệu")).toHaveValue(exported));
     expect(exportFlow).toHaveBeenCalledWith(document.id, document.revision);
   });
@@ -621,7 +657,7 @@ describe("FlowJsonDialog", () => {
     fireEvent.change(screen.getByLabelText("JSON tài liệu"), {
       target: { value: " ".repeat(1_048_577) },
     });
-    fireEvent.click(screen.getByRole("button", { name: "Validate and apply" }));
+    fireEvent.click(screen.getByRole("button", { name: "Kiểm tra và áp dụng" }));
     expect(await screen.findByRole("alert")).toHaveTextContent("FlowImportTooLarge");
     expect(validate).not.toHaveBeenCalled();
     expect(onApply).not.toHaveBeenCalled();

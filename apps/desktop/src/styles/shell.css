@@ -102,6 +102,19 @@
   padding: 0.15rem 0.5rem 0.75rem;
 }
 
+.menu-group + .menu-group {
+  margin-top: 0.65rem;
+}
+
+.menu-group h2 {
+  margin: 0 0.55rem 0.2rem;
+  color: var(--text-3);
+  font-size: var(--text-xs);
+  font-weight: 700;
+  line-height: 1.5;
+  text-transform: uppercase;
+}
+
 .menu-item {
   display: flex;
   align-items: center;
@@ -168,8 +181,13 @@
 }
 
 .aside-collapse {
+  width: 100%;
   height: 40px;
+  padding: 0;
+  border: 0;
   border-top: 1px solid var(--line);
+  border-radius: 0;
+  background: transparent;
   display: grid;
   place-items: center;
   cursor: pointer;
@@ -182,6 +200,7 @@
 }
 
 .aside.collapsed .aside-logo strong,
+.aside.collapsed .menu-group h2,
 .aside.collapsed .menu-item span:not(.mi),
 .aside.collapsed .aside-stats {
   display: none;
@@ -261,6 +280,167 @@
   gap: 0.55rem;
 }
 
+.automation-page-stack {
+  display: grid;
+  min-width: 0;
+  gap: 12px;
+}
+
+.automation-profile-control {
+  display: grid;
+  gap: 8px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--bg-elevated);
+}
+
+.automation-profile-fields {
+  display: flex;
+  min-width: 0;
+  align-items: end;
+  gap: 8px;
+}
+
+.automation-profile-fields label {
+  display: grid;
+  min-width: 0;
+  gap: 4px;
+  color: var(--text-2);
+  font-size: var(--text-xs);
+  font-weight: 600;
+}
+
+.automation-profile-fields select {
+  min-width: 190px;
+}
+
+.automation-profile-name {
+  flex: 1;
+}
+
+.automation-profile-name input {
+  width: 100%;
+}
+
+.automation-schedule-control {
+  display: grid;
+  gap: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--line);
+}
+
+.automation-schedule-heading,
+.automation-schedule-title,
+.automation-schedule-row-meta {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.automation-schedule-heading {
+  justify-content: space-between;
+}
+
+.automation-schedule-title {
+  color: var(--text-1);
+  font-size: var(--text-sm);
+  font-weight: 700;
+}
+
+.automation-schedule-list {
+  display: grid;
+  gap: 7px;
+}
+
+.automation-schedule-row {
+  display: grid;
+  gap: 7px;
+  padding: 8px 0;
+  border-top: 1px solid var(--line);
+}
+
+.automation-schedule-row-main,
+.automation-schedule-create {
+  display: grid;
+  grid-template-columns: minmax(150px, 1fr) minmax(116px, 0.35fr) auto auto auto;
+  align-items: end;
+  gap: 8px;
+}
+
+.automation-schedule-row-main label,
+.automation-schedule-create label {
+  display: grid;
+  min-width: 0;
+  gap: 4px;
+  color: var(--text-2);
+  font-size: var(--text-xs);
+  font-weight: 600;
+}
+
+.automation-schedule-row-main input,
+.automation-schedule-create input {
+  width: 100%;
+}
+
+.automation-schedule-create {
+  grid-template-columns: minmax(160px, 1fr) minmax(116px, 0.35fr) auto;
+}
+
+.automation-schedule-state {
+  align-self: center;
+  color: var(--text-2);
+  font-size: var(--text-xs);
+  font-weight: 700;
+}
+
+.automation-schedule-state.enabled {
+  color: var(--ok);
+}
+
+.automation-schedule-row-meta {
+  flex-wrap: wrap;
+  color: var(--text-2);
+  font-size: var(--text-xs);
+}
+
+.automation-schedule-row-meta details {
+  margin-left: auto;
+}
+
+.automation-schedule-row-meta details[open] {
+  display: grid;
+  gap: 3px;
+  width: 100%;
+  padding-top: 5px;
+}
+
+.automation-schedule-row-meta code {
+  overflow-wrap: anywhere;
+}
+
+@media (max-width: 760px) {
+  .automation-profile-fields {
+    align-items: stretch;
+    flex-wrap: wrap;
+  }
+
+  .automation-profile-fields label {
+    flex: 1 1 190px;
+  }
+
+  .automation-schedule-row-main,
+  .automation-schedule-create {
+    grid-template-columns: minmax(0, 1fr) minmax(108px, 0.45fr);
+  }
+
+  .automation-schedule-row-main > button,
+  .automation-schedule-create > button,
+  .automation-schedule-state {
+    justify-self: start;
+  }
+}
+
 /* Flow V2 work surface */
 .content-flow {
   overflow: hidden;
@@ -274,6 +454,14 @@
   min-height: 0;
   flex-direction: column;
   gap: 6px;
+}
+
+.automation-mode-panel {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  flex-direction: column;
 }
 
 .automation-tabs {
@@ -297,13 +485,4 @@
 .automation-tabs button[aria-selected="true"] {
   border-bottom-color: var(--primary);
   color: var(--primary);
-}
-
-.automation-legacy {
-  min-height: 0;
-  overflow: auto;
-}
-
-.automation-legacy-schedule {
-  margin-top: 12px;
 }

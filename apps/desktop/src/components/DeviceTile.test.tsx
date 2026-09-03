@@ -1,7 +1,9 @@
 import { cleanup, render, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { DeviceTile } from "./DeviceTile";
+import { deviceOperationalView } from "../deviceWork";
 import type { DeviceInfo, TileStreamState } from "../types";
 
 // The canvas does real OffscreenCanvas work and talks to the decode worker; none of that is
@@ -33,15 +35,24 @@ function device(overrides: Partial<DeviceInfo> = {}): DeviceInfo {
   };
 }
 
-function renderTile(overrides: Partial<DeviceInfo> = {}) {
+function renderTile(
+  overrides: Partial<DeviceInfo> = {},
+  owner: "nurture" | "interaction" | null = null,
+  callbacks: {
+    onSelect?: (udid: string, additive: boolean) => void;
+    onOpen?: (udid: string) => void;
+  } = {},
+) {
+  const renderedDevice = device(overrides);
   return render(
     <DeviceTile
-      device={device(overrides)}
+      device={renderedDevice}
       width={120}
       index={1}
+      operational={deviceOperationalView(renderedDevice, owner)}
       selected={false}
-      onSelect={() => {}}
-      onOpen={() => {}}
+      onSelect={callbacks.onSelect ?? (() => {})}
+      onOpen={callbacks.onOpen ?? (() => {})}
       onPrepare={() => {}}
     />,
   );
@@ -53,8 +64,19 @@ afterEach(() => {
 });
 
 describe("device tile, before any frame arrives", () => {
+  it("leads with the fleet number and alias, then shows status and current owner", () => {
+    renderTile({ name: "Điện thoại gốc", model: "SM-G955F" }, "nurture");
+
+    expect(screen.getByText("Máy 1")).toBeVisible();
+    expect(screen.getAllByText("Điện thoại gốc").length).toBeGreaterThan(0);
+    expect(screen.getByText("Bận · Nuôi TikTok")).toBeVisible();
+    expect(screen.queryByText("SM-G955F")).toBeNull();
+    expect(screen.queryByText("device-1")).toBeNull();
+    expect(screen.queryByText("ready")).toBeNull();
+  });
+
   it.each<TileStreamState | undefined>([undefined, "parked", "sampling", "stale"])(
-    "shows the loading mark and nothing to press for %s",
+    "shows the loading mark without offering a stream retry for %s",
     (tileStreamState) => {
       // `parked` is the DEFAULT a device is listed with, not a decision to leave it stopped,
       // and the keeper starts a producer for every device it sees. Offering "Start" during
@@ -62,7 +84,7 @@ describe("device tile, before any frame arrives", () => {
       renderTile({ tileStreamState });
 
       expect(screen.getByRole("status")).toBeTruthy();
-      expect(screen.queryByRole("button")).toBeNull();
+      expect(screen.queryByRole("button", { name: "Thử lại" })).toBeNull();
       expect(screen.queryByText(/No stream/i)).toBeNull();
     },
   );
@@ -84,7 +106,7 @@ describe("device tile, before any frame arrives", () => {
     renderTile({ tileStreamState: "sampling" });
 
     expect(screen.queryByRole("status")).toBeNull();
-    expect(screen.queryByRole("button")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Thử lại" })).toBeNull();
     expect(screen.getByText(/không đọc được luồng này/i)).toBeTruthy();
   });
 
@@ -118,5 +140,25 @@ describe("device tile, before any frame arrives", () => {
 
     expect(screen.getByRole("button", { name: "Thử lại" })).toBeTruthy();
     expect(screen.queryByRole("status")).toBeNull();
+  });
+
+  it("selects with Enter and Space and opens through a keyboard-operable action", async () => {
+    const user = userEvent.setup();
+    const onSelect = vi.fn();
+    const onOpen = vi.fn();
+    renderTile({ name: "Kệ trên" }, null, { onSelect, onOpen });
+
+    const tile = screen.getByRole("group", { name: /Máy 1.*Kệ trên/i });
+    tile.focus();
+    await user.keyboard("{Enter}");
+    await user.keyboard(" ");
+    expect(onSelect).toHaveBeenNthCalledWith(1, "device-1", false);
+    expect(onSelect).toHaveBeenNthCalledWith(2, "device-1", false);
+
+    await user.tab();
+    expect(screen.getByRole("button", { name: "Mở màn hình Máy 1" })).toHaveFocus();
+    await user.keyboard("{Enter}");
+    expect(onOpen).toHaveBeenCalledOnce();
+    expect(onOpen).toHaveBeenCalledWith("device-1");
   });
 });

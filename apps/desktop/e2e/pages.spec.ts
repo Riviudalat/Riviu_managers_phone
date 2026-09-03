@@ -15,13 +15,15 @@ import { installTauriMock, mockCommandCalls } from "./fixtures/tauriMock";
  * it *is*, so the next change to it is reviewable.
  */
 const PAGES = [
-  "Quản lý cửa sổ",
-  "Kho nội dung",
-  "Trung tâm ứng dụng",
+  "Thiết bị",
+  "Chẩn đoán",
+  "Nuôi TikTok",
+  "Tương tác",
+  "Đăng bài",
   "Flow",
   "Tác vụ",
-  "Đăng bài",
-  "Chẩn đoán",
+  "Kho nội dung",
+  "Trung tâm ứng dụng",
   "Dữ liệu",
   "API",
   "Cài đặt",
@@ -34,7 +36,7 @@ async function open(page: Page, name: string): Promise<void> {
   await page.goto("/");
   // Wait for the fleet the mock serves, so no page is captured mid-bootstrap.
   await expect(page.locator("[data-testid='device-tile']")).toHaveCount(2);
-  if (name !== "Quản lý cửa sổ") {
+  if (name !== "Thiết bị") {
     await page.locator("[data-testid='nav-item']").getByText(name, { exact: true }).click();
   }
   // **Loaded before pixels, and the Flow baseline is why this line exists.** Waiting for
@@ -54,7 +56,36 @@ async function open(page: Page, name: string): Promise<void> {
   await expect(page.locator(".toast-error")).toHaveCount(0);
   await expect(page.getByText(/Unknown mock command/i)).toHaveCount(0);
   if (name === "Đăng bài") {
-    await expect(page.getByText("Phạm vi: 2 máy", { exact: true })).toBeVisible();
+    await expect(page.getByRole("status").filter({ hasText: "Toàn bộ 2" })).toBeVisible();
+  }
+  if (name === "Flow") {
+    const runButton = page.getByRole("button", { name: "Chạy Flow" });
+    await expect(runButton).toBeVisible();
+    const box = await runButton.boundingBox();
+    expect(box).not.toBeNull();
+    expect(box!.x).toBeGreaterThanOrEqual(0);
+    expect(box!.x + box!.width).toBeLessThanOrEqual(page.viewportSize()!.width);
+    const geometry = await page.getByTestId("flow-toolbar").evaluate((toolbar) => {
+      const layout = document.querySelector<HTMLElement>(".flow-layout");
+      if (!layout) throw new Error("Flow layout is missing");
+      const toolbarRect = toolbar.getBoundingClientRect();
+      const layoutRect = layout.getBoundingClientRect();
+      const childBottom = Math.max(
+        ...Array.from(toolbar.children, (child) => child.getBoundingClientRect().bottom),
+      );
+      return {
+        toolbarBottom: toolbarRect.bottom,
+        toolbarHeight: toolbarRect.height,
+        childBottom,
+        layoutTop: layoutRect.top,
+      };
+    });
+    expect(geometry.toolbarBottom, JSON.stringify(geometry)).toBeGreaterThanOrEqual(
+      geometry.childBottom,
+    );
+    expect(geometry.layoutTop, JSON.stringify(geometry)).toBeGreaterThanOrEqual(
+      geometry.toolbarBottom,
+    );
   }
 }
 
@@ -98,6 +129,21 @@ test("fleet diagnostics probes each Android and retries only the chosen row", as
   expect((await healthCalls()).slice(beforeRetry.length)).toEqual([
     expect.objectContaining({ args: { udid: "MOCK-ANDROID-01" } }),
   ]);
+});
+
+test("publish keeps setup separate from campaign monitoring", async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await open(page, "Đăng bài");
+
+  await expect(page.getByRole("tabpanel", { name: "Thiết lập" })).toBeVisible();
+  await expect(page.getByRole("tabpanel", { name: "Theo dõi" })).toBeHidden();
+
+  await page.getByRole("tab", { name: "Theo dõi" }).click();
+  await expect(page.getByRole("tabpanel", { name: "Thiết lập" })).toBeHidden();
+  await expect(page.getByRole("tabpanel", { name: "Theo dõi" })).toBeVisible();
+  await expect(page.getByText("Chưa có chiến dịch")).toBeVisible();
+  await expect(page.locator(".toast-error")).toHaveCount(0);
+  await expect(page.getByText(/Unknown mock command/i)).toHaveCount(0);
 });
 
 test.describe("every page in the sidebar", () => {

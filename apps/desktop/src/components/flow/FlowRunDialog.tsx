@@ -83,7 +83,7 @@ export function FlowRunDialog({
           ))}
         </select>
       )}
-      {mode === "selected" && <output>{selectedUdids.length} selected</output>}
+      {mode === "selected" && <output>{selectedUdids.length} máy đã chọn</output>}
       {mode === "allEligible" && <output>Đang tiền kiểm</output>}
       <footer>
         <button

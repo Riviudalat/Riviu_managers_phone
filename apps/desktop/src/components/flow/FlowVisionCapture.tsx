@@ -118,7 +118,7 @@ export function FlowVisionCapture({
     <div className="flow-vision-capture">
       <img
         src={`data:image/jpeg;base64,${frame.jpegBase64}`}
-        alt="Device frame"
+        alt="Khung hình thiết bị"
         draggable={false}
         onClick={handleClick}
       />
@@ -128,7 +128,15 @@ export function FlowVisionCapture({
           : "Bấm góc dưới-phải của mẫu"}{" "}
         ({frame.imageWidth} x {frame.imageHeight})
       </output>
-      {error && <p role="alert">{error}</p>}
+      {error && (
+        <div role="alert">
+          <span>Không thể tạo ảnh mẫu từ vùng đã chọn.</span>
+          <details>
+            <summary>Chi tiết lỗi</summary>
+            <code>{error}</code>
+          </details>
+        </div>
+      )}
       <button type="button" onClick={cancel}>
         Hủy
       </button>

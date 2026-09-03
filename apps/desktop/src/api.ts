@@ -14,6 +14,7 @@ import type {
   DeviceDirListing,
   DeviceGroup,
   DeviceInfo,
+  DeviceWorkState,
   GroupInputReport,
   GroupSyncPolicy,
   DeviceMeta,
@@ -34,9 +35,12 @@ import type {
   JobRecord,
   MaterialItem,
   PublishCampaignDetail,
+  PublishCampaignExecutionResult,
   PublishCampaignRecord,
+  PublishCaptionOverrides,
   PublishAssignmentPlan,
   PublishFolderManifest,
+  PublishSoundPolicy,
   ScheduleItem,
   StreamSettings,
   NurtureApiTestResult,
@@ -63,6 +67,19 @@ import type {
   DeviceHealthReport,
   DevicePublishReadiness,
   PublishSheetConfig,
+  AutomationDefinition,
+  AutomationDefinitionRecord,
+  AutomationKind,
+  AutomationSchedule,
+  AutomationScheduleV1,
+  JsonValue,
+  CompiledOrchestrationV1,
+  OrchestrationDocumentV1,
+  OrchestrationRunDetail,
+  OrchestrationRunRecord,
+  OrchestrationRevisionRecord,
+  OrchestrationSummary,
+  TargetRef,
 } from "./types";
 import { asAppEvent } from "./types";
 
@@ -84,6 +101,10 @@ export async function retryStartup() {
 
 export async function listDevices() {
   return invoke<DeviceInfo[]>("list_devices");
+}
+
+export async function listDeviceWorkStates() {
+  return invoke<DeviceWorkState[]>("list_device_work_states");
 }
 
 export async function refreshDevices() {
@@ -881,12 +902,18 @@ export async function publishCreateCampaign(
   bundleIds: string[],
   udids: string[],
   runAt?: string | null,
+  captionOverrides?: PublishCaptionOverrides | null,
+  soundPolicy: PublishSoundPolicy = { kind: "default" },
+  confirmed = false,
 ) {
   return invoke<PublishCampaignRecord>("publish_create_campaign", {
     sourceRoot,
     bundleIds,
     udids,
     runAt: runAt ?? null,
+    captionOverrides: captionOverrides ?? null,
+    soundPolicy,
+    confirmed,
   });
 }
 
@@ -898,16 +925,21 @@ export async function publishCancel(campaignId: string) {
   return invoke<void>("publish_cancel", { campaignId });
 }
 
-export async function publishPrepare(campaignId: string) {
-  return invoke<PublishCampaignDetail>("publish_prepare", { campaignId });
-}
-
-export async function publishTransfer(campaignId: string) {
-  return invoke<PublishCampaignDetail>("publish_transfer", { campaignId });
-}
-
-export async function publishPost(campaignId: string) {
-  return invoke<PublishCampaignDetail>("publish_post", { campaignId });
+/**
+ * One operator confirmation for preflight through Sheet completion.
+ *
+ * A typed partial response means no public retry should be inferred from an exception. When a
+ * post is already confirmed, the backend limits retry to link capture and/or the idempotent
+ * Sheet outbox.
+ */
+export async function publishExecute(
+  campaignId: string,
+  confirmed: boolean,
+) {
+  return invoke<PublishCampaignExecutionResult>("publish_execute", {
+    campaignId,
+    confirmed,
+  });
 }
 
 /** Why each phone can or cannot take the publish route — the preflight's answer, before the refusal. */
@@ -1157,6 +1189,136 @@ export function listenRiviuEvents(handler: (event: AppEvent) => void): Promise<U
     const parsed = asAppEvent(event.payload);
     if (parsed) handler(parsed);
   });
+}
+
+export async function automationList(includeArchived = false) {
+  return invoke<AutomationDefinition[]>("automation_list", { includeArchived });
+}
+
+export async function automationGet(definitionId: string, revision: number) {
+  return invoke<AutomationDefinitionRecord | null>("automation_get", {
+    definitionId,
+    revision,
+  });
+}
+
+export async function automationCreate(
+  name: string,
+  kind: AutomationKind,
+  target: TargetRef,
+  config: JsonValue,
+) {
+  return invoke<AutomationDefinitionRecord>("automation_create", { name, kind, target, config });
+}
+
+export async function automationRevise(
+  definitionId: string,
+  expectedRevision: number,
+  target: TargetRef,
+  config: JsonValue,
+) {
+  return invoke<AutomationDefinitionRecord>("automation_revise", {
+    definitionId,
+    expectedRevision,
+    target,
+    config,
+  });
+}
+
+export async function automationArchive(definitionId: string) {
+  return invoke<void>("automation_archive", { definitionId });
+}
+
+export async function automationScheduleList() {
+  return invoke<AutomationSchedule[]>("automation_schedule_list");
+}
+
+export async function automationScheduleCreate(
+  name: string,
+  definitionId: string,
+  definitionRevision: number,
+  enabled: boolean,
+  schedule: AutomationScheduleV1,
+) {
+  return invoke<AutomationSchedule>("automation_schedule_create", {
+    name,
+    definitionId,
+    definitionRevision,
+    enabled,
+    schedule,
+  });
+}
+
+export async function automationScheduleUpdate(
+  scheduleId: string,
+  expectedRevision: number,
+  name: string,
+  definitionId: string,
+  definitionRevision: number,
+  enabled: boolean,
+  schedule: AutomationScheduleV1,
+) {
+  return invoke<AutomationSchedule>("automation_schedule_update", {
+    scheduleId,
+    expectedRevision,
+    name,
+    definitionId,
+    definitionRevision,
+    enabled,
+    schedule,
+  });
+}
+
+export async function orchestrationList(includeArchived = false) {
+  return invoke<OrchestrationSummary[]>("orchestration_list", { includeArchived });
+}
+
+export async function orchestrationGet(id: string, revision: number | null = null) {
+  return invoke<OrchestrationRevisionRecord | null>("orchestration_get", { id, revision });
+}
+
+export async function orchestrationValidate(document: OrchestrationDocumentV1) {
+  return invoke<CompiledOrchestrationV1>("orchestration_validate", { document });
+}
+
+export async function orchestrationSaveRevision(
+  document: OrchestrationDocumentV1,
+  expectedRevision: number | null,
+) {
+  return invoke<OrchestrationRevisionRecord>("orchestration_save_revision", {
+    document,
+    expectedRevision,
+  });
+}
+
+export async function orchestrationArchive(id: string) {
+  return invoke<void>("orchestration_archive", { id });
+}
+
+export async function orchestrationRun(
+  documentId: string,
+  revision: number,
+  target: TargetRef,
+) {
+  return invoke<OrchestrationRunDetail>("orchestration_run", { documentId, revision, target });
+}
+
+export async function orchestrationListRuns(limit?: number) {
+  return invoke<OrchestrationRunRecord[]>("orchestration_list_runs", {
+    limit: limit ?? null,
+  });
+}
+
+export async function orchestrationGetRun(runId: string) {
+  return invoke<OrchestrationRunDetail | null>("orchestration_get_run", { runId });
+}
+
+export async function orchestrationReconcile(runId: string) {
+  return invoke<OrchestrationRunDetail>("orchestration_reconcile", { runId });
+}
+
+export async function orchestrationCancelRun(runId: string) {
+  return invoke<OrchestrationRunDetail>("orchestration_cancel_run", { runId });
 }
 
 export async function flowActionCatalog() {
