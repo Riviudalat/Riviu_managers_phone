@@ -72,7 +72,7 @@ pub(super) fn video_target(settings: &NurtureSettings) -> u32 {
 /// Call once per post, not per action. A probability that changed between rolling an
 /// action and confirming it would make that action's own record unexplainable.
 ///
-/// A failed read closes only the three public-action rates for this pass. Keeping their stale
+/// A failed read closes all four public-action rates for this pass. Keeping their stale
 /// nonzero values would let a saved zero be outlived by an unreadable database row.
 pub(super) fn apply_live_settings(
     live: Option<&dyn LiveSettings>,
@@ -89,6 +89,7 @@ pub(super) fn apply_live_settings(
         Err(error) => {
             settings.like_prob = 0;
             settings.comment_prob = 0;
+            settings.save_prob = 0;
             settings.follow_prob = 0;
             LiveSettingsRefresh::Failed(error.to_string())
         }
@@ -96,9 +97,10 @@ pub(super) fn apply_live_settings(
     // `refresh` has already folded the per-feature switches into the probabilities, so
     // these two see the effective numbers rather than the operator's raw ones.
     human.retune(settings.fatigue, settings.time_of_day, settings.pause_swipe);
-    policy.retune(
+    policy.retune_with_save(
         settings.like_prob,
         settings.comment_prob,
+        settings.save_prob,
         settings.follow_prob,
         settings.human_limits,
     );
@@ -150,6 +152,83 @@ mod tests {
             human_limits: true,
             ..NurtureSettings::default()
         }
+    }
+
+    #[test]
+    fn failed_refresh_closes_all_public_actions_and_successful_refresh_reopens_them() {
+        let mut settings = NurtureSettings {
+            like_prob: 11,
+            comment_prob: 12,
+            save_prob: 13,
+            follow_prob: 14,
+            save_enabled: true,
+            human_limits: true,
+            ..NurtureSettings::default()
+        }
+        .into_effective();
+        let mut human = HumanBehavior::new("casual", false, false, false);
+        let mut policy = HumanSessionPolicy::new_with_save(11, 12, 13, 14, true);
+        let mut moods = MoodCycle::new();
+
+        assert!(matches!(
+            apply_live_settings(
+                Some(&Broken),
+                &mut settings,
+                &mut human,
+                &mut policy,
+                &mut moods,
+            ),
+            LiveSettingsRefresh::Failed(_)
+        ));
+        assert_eq!(
+            [
+                settings.like_prob,
+                settings.comment_prob,
+                settings.save_prob,
+                settings.follow_prob,
+            ],
+            [0, 0, 0, 0]
+        );
+        assert!(!policy.can_attempt(PolicyAction::Like));
+        assert!(!policy.can_attempt(PolicyAction::Comment));
+        assert!(!policy.can_attempt(PolicyAction::Save));
+        assert!(!policy.can_attempt(PolicyAction::Follow));
+
+        let saved = Saved(NurtureSettings {
+            like_prob: 51,
+            comment_prob: 52,
+            save_prob: 53,
+            follow_prob: 54,
+            like_enabled: true,
+            comment_enabled: true,
+            save_enabled: true,
+            follow_enabled: true,
+            human_limits: true,
+            ..NurtureSettings::default()
+        });
+        assert_eq!(
+            apply_live_settings(
+                Some(&saved),
+                &mut settings,
+                &mut human,
+                &mut policy,
+                &mut moods,
+            ),
+            LiveSettingsRefresh::Applied
+        );
+        assert_eq!(
+            [
+                settings.like_prob,
+                settings.comment_prob,
+                settings.save_prob,
+                settings.follow_prob,
+            ],
+            [51, 52, 53, 54]
+        );
+        assert!(policy.can_attempt(PolicyAction::Like));
+        assert!(policy.can_attempt(PolicyAction::Comment));
+        assert!(policy.can_attempt(PolicyAction::Save));
+        assert!(policy.can_attempt(PolicyAction::Follow));
     }
 
     #[test]

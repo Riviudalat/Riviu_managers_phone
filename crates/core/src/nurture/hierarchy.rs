@@ -42,12 +42,16 @@ use crate::db::Database;
 use crate::driver::{ElementBox, ElementQuery, UiSession};
 use crate::feed_ladder::{self, LadderSpend, LadderStep};
 use crate::human_behavior::{
-    in_night_window, roll_bool, roll_feed_action_in_mood, roll_follow_in_mood, AttemptReservation,
-    FeedAction, HumanBehavior, HumanSessionPolicy, MoodCycle, PolicyAction,
+    in_night_window, roll_bool, roll_feed_actions_in_mood, AttemptReservation, FeedAction,
+    HumanBehavior, HumanSessionPolicy, MoodCycle, PolicyAction,
 };
 use crate::tiktok_drawer::CommentVerdict;
 use crate::tiktok_labels::{controls_for, TikTokControl, TikTokControls};
 use crate::tiktok_like::LikeVerdict;
+use crate::tiktok_save::{
+    hierarchy_save_observation, tiktok_save, SaveAdapter, SaveCardIdentity, SaveEvidence,
+    SaveObservation,
+};
 use crate::types::{
     NurtureCommentAttempt, NurturePhase, NurtureSessionStatus, NurtureSettings, TapPoint,
 };
@@ -56,8 +60,8 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use super::recovery::Outcome;
-use super::sleep_interruptible;
 use super::touch::TouchPointPlanner;
+use super::{sleep_interruptible, NurtureSaveJournal, NurtureSaveLease};
 
 /// How many consecutive cards may lack the feed tab before the loop gives up.
 ///
@@ -508,6 +512,61 @@ async fn fingerprint(session: &dyn UiSession, labels: TikTokControls) -> PostFin
     }
 }
 
+struct HierarchyNurtureSaveAdapter<'a> {
+    session: &'a dyn UiSession,
+    labels: TikTokControls,
+    sequence: u64,
+}
+
+#[async_trait::async_trait]
+impl SaveAdapter for HierarchyNurtureSaveAdapter<'_> {
+    async fn observe(&mut self) -> anyhow::Result<SaveObservation> {
+        self.sequence = self.sequence.saturating_add(1);
+        let before = fingerprint(self.session, self.labels).await;
+        let control = match self.labels.label(TikTokControl::Bookmark) {
+            Some(label) => self.session.locate_stateful(label.to_query()).await?,
+            None => None,
+        };
+        let card = fingerprint(self.session, self.labels).await;
+        if !before.same_card_for_duplicate_guard(&card) {
+            let mut observation = hierarchy_save_observation(
+                SaveCardIdentity::Hierarchy {
+                    author: String::new(),
+                    sound: None,
+                },
+                self.sequence,
+                control,
+            );
+            observation.identity = None;
+            return Ok(observation);
+        }
+        let Some(author) = card.author else {
+            let mut observation = hierarchy_save_observation(
+                SaveCardIdentity::Hierarchy {
+                    author: String::new(),
+                    sound: card.sound,
+                },
+                self.sequence,
+                control,
+            );
+            observation.identity = None;
+            return Ok(observation);
+        };
+        Ok(hierarchy_save_observation(
+            SaveCardIdentity::Hierarchy {
+                author,
+                sound: card.sound,
+            },
+            self.sequence,
+            control,
+        ))
+    }
+
+    async fn tap(&mut self, point: TapPoint) -> anyhow::Result<()> {
+        self.session.tap(point).await
+    }
+}
+
 /// One hierarchy-driven nurture session.
 ///
 /// Takes the session by reference and owns nothing the caller needs back, so it
@@ -650,6 +709,28 @@ impl<'a> HierarchyRun<'a> {
             stop,
         )
         .await
+    }
+
+    async fn save(
+        &mut self,
+        journal: Option<&dyn NurtureSaveJournal>,
+        card_key: &str,
+    ) -> (SaveEvidence, Option<NurtureSaveLease>) {
+        let mut adapter = HierarchyNurtureSaveAdapter {
+            session: self.session,
+            labels: self.labels,
+            sequence: 0,
+        };
+        let mut lease = None;
+        let evidence = tiktok_save(&mut adapter, |observation| match journal {
+            Some(journal) => {
+                lease = Some(journal.arm(card_key, observation)?);
+                Ok(())
+            }
+            None => anyhow::bail!("nurture Save has no durable journal"),
+        })
+        .await;
+        (evidence, lease)
     }
 
     /// Post a comment, or say precisely which step could not be proved.
@@ -1142,6 +1223,70 @@ pub async fn run_hierarchy_session(
     comments: Option<&dyn CommentTextSource>,
     live: Option<&dyn LiveSettings>,
 ) -> HierarchySession {
+    run_hierarchy_session_inner(
+        session,
+        screen,
+        settings,
+        bundle_id,
+        started,
+        max_duration,
+        stop,
+        status,
+        report,
+        comments,
+        live,
+        None,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn run_hierarchy_session_with_save_intent(
+    session: &dyn UiSession,
+    screen: (f64, f64),
+    settings: &NurtureSettings,
+    bundle_id: &str,
+    started: Instant,
+    max_duration: Option<Duration>,
+    stop: &AtomicBool,
+    status: &mut NurtureSessionStatus,
+    report: &(dyn Fn(&mut NurtureSessionStatus, String) + Send + Sync),
+    comments: Option<&dyn CommentTextSource>,
+    live: Option<&dyn LiveSettings>,
+    save_journal: &dyn NurtureSaveJournal,
+) -> HierarchySession {
+    run_hierarchy_session_inner(
+        session,
+        screen,
+        settings,
+        bundle_id,
+        started,
+        max_duration,
+        stop,
+        status,
+        report,
+        comments,
+        live,
+        Some(save_journal),
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_hierarchy_session_inner(
+    session: &dyn UiSession,
+    screen: (f64, f64),
+    settings: &NurtureSettings,
+    bundle_id: &str,
+    started: Instant,
+    max_duration: Option<Duration>,
+    stop: &AtomicBool,
+    status: &mut NurtureSessionStatus,
+    report: &(dyn Fn(&mut NurtureSessionStatus, String) + Send + Sync),
+    comments: Option<&dyn CommentTextSource>,
+    live: Option<&dyn LiveSettings>,
+    save_journal: Option<&dyn NurtureSaveJournal>,
+) -> HierarchySession {
     if !session.supports_element_bounds() {
         return HierarchySession::NotSupported;
     }
@@ -1179,6 +1324,7 @@ pub async fn run_hierarchy_session(
         report,
         comments,
         live,
+        save_journal,
     )
     .await;
     HierarchySession::Ran(outcome)
@@ -1550,6 +1696,7 @@ pub(super) async fn run_feed(
     report: &(dyn Fn(&mut NurtureSessionStatus, String) + Send + Sync),
     comments: Option<&dyn CommentTextSource>,
     live: Option<&dyn LiveSettings>,
+    save_journal: Option<&dyn NurtureSaveJournal>,
 ) -> Outcome {
     // The loop's own copy, because from here on the operator can change it. Everything
     // below reads `settings` per post already, so owning it is all that was missing.
@@ -1560,9 +1707,10 @@ pub(super) async fn run_feed(
         settings.time_of_day,
         settings.pause_swipe,
     );
-    let mut policy = HumanSessionPolicy::new(
+    let mut policy = HumanSessionPolicy::new_with_save(
         settings.like_prob,
         settings.comment_prob,
+        settings.save_prob,
         settings.follow_prob,
         settings.human_limits,
     );
@@ -1648,7 +1796,7 @@ pub(super) async fn run_feed(
                 report(
                     status,
                     format!(
-                        "không đọc được cài đặt mới ({error}) — khóa like/comment/follow ở lượt này"
+                        "không đọc được cài đặt mới ({error}) — khóa like/comment/save/follow ở lượt này"
                     ),
                 );
             }
@@ -1797,193 +1945,172 @@ pub(super) async fn run_feed(
         // post-action fingerprint can be remembered before the swipe.
         let mut acted_this_pass = false;
 
-        let rolled_action = if still_on_acted_card {
-            FeedAction::None
+        let plan = if still_on_acted_card {
+            crate::human_behavior::FeedActionPlan::default()
         } else {
-            roll_feed_action_in_mood(settings.like_prob, settings.comment_prob, mood)
+            roll_feed_actions_in_mood(
+                settings.like_prob,
+                settings.comment_prob,
+                settings.save_prob,
+                settings.follow_prob,
+                mood,
+            )
         };
-        match rolled_action {
-            FeedAction::Like
-                if !policy.can_interact_with_post() || !policy.can_attempt(PolicyAction::Like) =>
-            {
-                report(status, "bỏ qua tim: nhịp phiên hiện tại đã đủ".into());
-            }
-            FeedAction::Like => {
-                if !wait_gap(&mut last_interaction_at, policy.min_action_gap(), stop).await {
-                    outcome = Outcome::Stopped;
-                    break 'feed;
+        for selected in [
+            plan.like.then_some(FeedAction::Like),
+            plan.save.then_some(FeedAction::Save),
+            plan.comment.then_some(FeedAction::Comment),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            match selected {
+                FeedAction::Like
+                    if !policy.can_interact_with_post()
+                        || !policy.can_attempt(PolicyAction::Like) =>
+                {
+                    report(status, "bỏ qua tim: nhịp phiên hiện tại đã đủ".into());
                 }
-                let reservation = policy.reserve_attempt(PolicyAction::Like);
-                report(status, "thả tim".into());
-                match run.like(stop).await {
-                    Ok(LikeVerdict::Liked) => {
-                        policy.commit_attempt(reservation);
-                        acted_this_pass = true;
-                        status.like_attempts += 1;
-                        status.likes += 1;
-                        report(status, "tim thành công (nhãn đổi trạng thái)".into());
+                FeedAction::Like => {
+                    if !wait_gap(&mut last_interaction_at, policy.min_action_gap(), stop).await {
+                        outcome = Outcome::Stopped;
+                        break 'feed;
                     }
-                    Ok(LikeVerdict::AlreadyLiked) => {
-                        policy.cancel_no_effect(reservation);
-                        report(status, "video đã tim từ trước — bỏ qua".into())
-                    }
-                    Ok(LikeVerdict::NoControl) => {
-                        policy.cancel_no_effect(reservation);
-                        report(status, "bỏ qua tim: thẻ này không có nút tim".into())
-                    }
-                    Ok(LikeVerdict::NotConfirmed) => {
-                        policy.commit_attempt(reservation);
-                        acted_this_pass = true;
-                        status.like_attempts += 1;
-                        report(
-                            status,
-                            "tim: tap gửi được nhưng nhãn không đổi — không tính là đã tim".into(),
-                        )
-                    }
-                    Ok(LikeVerdict::StateUnreadable) => {
-                        policy.cancel_no_effect(reservation);
-                        report(
+                    let reservation = policy.reserve_attempt(PolicyAction::Like);
+                    report(status, "thả tim".into());
+                    match run.like(stop).await {
+                        Ok(LikeVerdict::Liked) => {
+                            policy.commit_attempt(reservation);
+                            acted_this_pass = true;
+                            status.like_attempts += 1;
+                            status.likes += 1;
+                            report(status, "tim thành công (nhãn đổi trạng thái)".into());
+                        }
+                        Ok(LikeVerdict::AlreadyLiked) => {
+                            policy.cancel_no_effect(reservation);
+                            report(status, "video đã tim từ trước — bỏ qua".into())
+                        }
+                        Ok(LikeVerdict::NoControl) => {
+                            policy.cancel_no_effect(reservation);
+                            report(status, "bỏ qua tim: thẻ này không có nút tim".into())
+                        }
+                        Ok(LikeVerdict::NotConfirmed) => {
+                            policy.commit_attempt(reservation);
+                            acted_this_pass = true;
+                            status.like_attempts += 1;
+                            report(
+                                status,
+                                "tim: tap gửi được nhưng nhãn không đổi — không tính là đã tim"
+                                    .into(),
+                            )
+                        }
+                        Ok(LikeVerdict::StateUnreadable) => {
+                            policy.cancel_no_effect(reservation);
+                            report(
                             status,
                             "bỏ qua tim: không đọc được trạng thái đã-tim (không tap để khỏi gỡ tim)"
                                 .into(),
                         )
+                        }
+                        Err(error) => {
+                            acted_this_pass |= settle_action_failure(
+                                &mut policy,
+                                reservation,
+                                &error,
+                                &mut status.like_attempts,
+                            );
+                            report(status, format!("tim thất bại: {error}"));
+                        }
                     }
-                    Err(error) => {
-                        acted_this_pass |= settle_action_failure(
-                            &mut policy,
-                            reservation,
-                            &error,
-                            &mut status.like_attempts,
-                        );
-                        report(status, format!("tim thất bại: {error}"));
-                    }
                 }
-            }
-            FeedAction::Comment
-                if !comment_capable
-                    || !policy.can_interact_with_post()
-                    || !policy.can_attempt(PolicyAction::Comment) =>
-            {
-                // The startup line already said why comments are off for the whole
-                // session; per-post silence there is deliberate.
-                if comment_capable {
-                    report(status, "bỏ qua bình luận: nhịp phiên hiện tại đã đủ".into());
-                }
-            }
-            FeedAction::Comment => {
-                if !wait_gap(&mut last_interaction_at, policy.min_action_gap(), stop).await {
-                    outcome = Outcome::Stopped;
-                    break 'feed;
-                }
-                let reservation = policy.reserve_attempt(PolicyAction::Comment);
-                report(status, "bình luận".into());
-                let source = comments.expect("comment_capable implies a text source");
-                // **Wait for the slides on a post that has them.** The comment used to be
-                // written right here, before a single sideways gesture existed, so a
-                // six-image post was commented on from image one — and because a still card
-                // publishes the same picture on every sample, from one picture sampled three
-                // times. The traversal below already pays for every flick, its settle and a
-                // hierarchy dump per slide; the comment simply never saw any of it.
-                //
-                // A video keeps this exact order. There is nothing to wait for, and the
-                // follow block below can navigate off the feed — which a deferred comment has
-                // to survive, and an immediate one never meets.
-                if ceiling > 0 && can_page_carousel(run.labels) && run.looks_like_photo_post().await
+                FeedAction::Save
+                    if !policy.can_interact_with_post()
+                        || !policy.can_attempt(PolicyAction::Save) =>
                 {
-                    report(
-                        status,
-                        "bài ảnh — soạn bình luận sau khi xem hết ảnh".into(),
-                    );
-                    deferred_comment = Some(reservation);
-                } else {
-                    let comment = post_rolled_comment(
-                        &mut run, source, &settings, &before, stop, status, report,
-                    )
-                    .await;
-                    comment_sent = comment.sent;
-                    acted_this_pass |= settle_attempt(
+                    report(status, "bỏ qua lưu: nhịp phiên hiện tại đã đủ".into());
+                }
+                FeedAction::Save => {
+                    if !wait_gap(&mut last_interaction_at, policy.min_action_gap(), stop).await {
+                        outcome = Outcome::Stopped;
+                        break 'feed;
+                    }
+                    let reservation = policy.reserve_attempt(PolicyAction::Save);
+                    report(status, "lưu video".into());
+                    let card_key = format!("card-{}", status.videos_done);
+                    let (evidence, lease) = run.save(save_journal, &card_key).await;
+                    match super::settle_journaled_save(
                         &mut policy,
                         reservation,
-                        comment.did_act,
-                        &mut status.comment_attempts,
-                    );
-                }
-            }
-            FeedAction::None => {}
-        }
-
-        // **An action with no measured label is not an action this phone can attempt.**
-        //
-        // `follow` finds nothing when `Follow` was never measured for this build, returns
-        // false, and the arm below reports "nút Follow vẫn còn — chưa xác nhận" — blaming a
-        // button that was never looked for, on a screen where nothing was tapped. Sixteen
-        // of the eighteen phones on this fleet run `com.ss.android.ugc.trill`, whose set has
-        // no `follow` label, so that is the majority case rather than an edge one.
-        //
-        // Worse than the wrong sentence: the block above it spends `record_attempt` and
-        // `mark_post_interacted` first, so a roll that could never do anything still used
-        // up the human-pacing budget for that post and blocked the like that might have
-        // followed it.
-        if !still_on_acted_card
-            && can_follow(run.labels)
-            && roll_follow_in_mood(settings.follow_prob, mood)
-            && policy.can_interact_with_post()
-            && policy.can_attempt(PolicyAction::Follow)
-            && wait_gap(&mut last_interaction_at, policy.min_action_gap(), stop).await
-        {
-            // **Confirm the feed is still under us before following.** A like a moment ago
-            // could have opened another screen, and that screen exposes its own
-            // `Follow <author>` — following it would follow a stranger the roll never chose.
-            // `on_feed` is the same cheap rail read the swipe-recovery below trusts.
-            if !run.on_feed().await {
-                report(
-                    status,
-                    "bỏ qua follow: không còn ở feed (hành động trước đã rời thẻ) — không follow nhầm tác giả"
-                        .into(),
-                );
-            } else {
-                let reservation = policy.reserve_attempt(PolicyAction::Follow);
-                report(status, "follow tác giả".into());
-                match run.follow(&before, stop).await {
-                    Ok(verdict) => {
-                        if verdict.did_act() {
-                            policy.commit_attempt(reservation);
-                            acted_this_pass = true;
-                            status.follow_attempts += 1;
-                        } else {
-                            policy.cancel_no_effect(reservation);
-                        }
-                        match verdict {
-                            FollowVerdict::Followed => {
-                                status.follows += 1;
-                                report(
-                                    status,
-                                    "follow thành công (nút Follow mất khỏi thẻ)".into(),
-                                );
-                            }
-                            FollowVerdict::NoControl => {
-                                report(status, "bỏ qua follow: thẻ không có nút Follow".into())
-                            }
-                            FollowVerdict::CardChanged => report(
+                        status,
+                        save_journal,
+                        lease,
+                        &evidence,
+                    ) {
+                        Ok(acted) => acted_this_pass |= acted,
+                        Err(error) => {
+                            report(
                                 status,
-                                "bỏ qua follow: thẻ hoặc tác giả đã đổi trước cú tap".into(),
-                            ),
-                            FollowVerdict::NotConfirmed => report(
-                                status,
-                                "bỏ qua follow: nút Follow vẫn còn — chưa xác nhận".into(),
-                            ),
+                                format!("lưu: không chốt được sổ hành động ({error})"),
+                            );
+                            outcome = Outcome::Failed;
+                            break 'feed;
                         }
                     }
-                    Err(error) => {
-                        acted_this_pass |= settle_action_failure(
+                    report(status, super::save_verdict_message(&evidence));
+                }
+                FeedAction::Comment
+                    if !comment_capable
+                        || !policy.can_interact_with_post()
+                        || !policy.can_attempt(PolicyAction::Comment) =>
+                {
+                    // The startup line already said why comments are off for the whole
+                    // session; per-post silence there is deliberate.
+                    if comment_capable {
+                        report(status, "bỏ qua bình luận: nhịp phiên hiện tại đã đủ".into());
+                    }
+                }
+                FeedAction::Comment => {
+                    if !wait_gap(&mut last_interaction_at, policy.min_action_gap(), stop).await {
+                        outcome = Outcome::Stopped;
+                        break 'feed;
+                    }
+                    let reservation = policy.reserve_attempt(PolicyAction::Comment);
+                    report(status, "bình luận".into());
+                    let source = comments.expect("comment_capable implies a text source");
+                    // **Wait for the slides on a post that has them.** The comment used to be
+                    // written right here, before a single sideways gesture existed, so a
+                    // six-image post was commented on from image one — and because a still card
+                    // publishes the same picture on every sample, from one picture sampled three
+                    // times. The traversal below already pays for every flick, its settle and a
+                    // hierarchy dump per slide; the comment simply never saw any of it.
+                    //
+                    // A video keeps this exact order. There is nothing to wait for, and the
+                    // follow block below can navigate off the feed — which a deferred comment has
+                    // to survive, and an immediate one never meets.
+                    if ceiling > 0
+                        && can_page_carousel(run.labels)
+                        && run.looks_like_photo_post().await
+                    {
+                        report(
+                            status,
+                            "bài ảnh — soạn bình luận sau khi xem hết ảnh".into(),
+                        );
+                        deferred_comment = Some(reservation);
+                    } else {
+                        let comment = post_rolled_comment(
+                            &mut run, source, &settings, &before, stop, status, report,
+                        )
+                        .await;
+                        comment_sent = comment.sent;
+                        acted_this_pass |= settle_attempt(
                             &mut policy,
                             reservation,
-                            &error,
-                            &mut status.follow_attempts,
+                            comment.did_act,
+                            &mut status.comment_attempts,
                         );
-                        report(status, format!("follow thất bại: {error}"));
                     }
                 }
+                FeedAction::None => {}
             }
         }
 
@@ -2045,10 +2172,8 @@ pub(super) async fn run_feed(
                     source.record_skip(&settings, "deferred_stopped").await;
                 } else if after.is_empty() {
                     policy.cancel_no_effect(reservation);
-                    // No rail at all: either the follow above navigated off the feed —
-                    // measured on 18/08/2026 and the reason the walk-back below exists — or
-                    // the card is mid-transition. Either way the drawer would open on the
-                    // wrong screen.
+                    // No rail at all means the card is gone or mid-transition. Either way
+                    // the drawer would open on the wrong screen.
                     report(status, "bỏ qua bình luận: không còn thấy thẻ bài".into());
                     source.record_skip(&settings, "deferred_no_rail").await;
                 } else if after != before {
@@ -2096,6 +2221,68 @@ pub(super) async fn run_feed(
                 // traversal it had just finished.
                 sleep_interruptible(SWIPE_SETTLE, stop).await;
                 before = fingerprint(run.session, run.labels).await;
+            }
+        }
+
+        // Follow is last in the public-action order. On photo cards the selected comment is
+        // deliberately delayed until carousel evidence is collected, so this block belongs
+        // after that delay rather than beside the initial rolls.
+        if !still_on_acted_card
+            && can_follow(run.labels)
+            && plan.follow
+            && policy.can_interact_with_post()
+            && policy.can_attempt(PolicyAction::Follow)
+            && wait_gap(&mut last_interaction_at, policy.min_action_gap(), stop).await
+        {
+            if !run.on_feed().await {
+                report(
+                    status,
+                    "bỏ qua follow: không còn ở feed (hành động trước đã rời thẻ) — không follow nhầm tác giả"
+                        .into(),
+                );
+            } else {
+                let reservation = policy.reserve_attempt(PolicyAction::Follow);
+                report(status, "follow tác giả".into());
+                match run.follow(&before, stop).await {
+                    Ok(verdict) => {
+                        if verdict.did_act() {
+                            policy.commit_attempt(reservation);
+                            acted_this_pass = true;
+                            status.follow_attempts += 1;
+                        } else {
+                            policy.cancel_no_effect(reservation);
+                        }
+                        match verdict {
+                            FollowVerdict::Followed => {
+                                status.follows += 1;
+                                report(
+                                    status,
+                                    "follow thành công (nút Follow mất khỏi thẻ)".into(),
+                                );
+                            }
+                            FollowVerdict::NoControl => {
+                                report(status, "bỏ qua follow: thẻ không có nút Follow".into())
+                            }
+                            FollowVerdict::CardChanged => report(
+                                status,
+                                "bỏ qua follow: thẻ hoặc tác giả đã đổi trước cú tap".into(),
+                            ),
+                            FollowVerdict::NotConfirmed => report(
+                                status,
+                                "bỏ qua follow: nút Follow vẫn còn — chưa xác nhận".into(),
+                            ),
+                        }
+                    }
+                    Err(error) => {
+                        acted_this_pass |= settle_action_failure(
+                            &mut policy,
+                            reservation,
+                            &error,
+                            &mut status.follow_attempts,
+                        );
+                        report(status, format!("follow thất bại: {error}"));
+                    }
+                }
             }
         }
 
@@ -3395,6 +3582,7 @@ mod tests {
             &report,
             None,
             None,
+            None,
         )
         .await;
 
@@ -3531,6 +3719,7 @@ mod tests {
             &stop,
             &mut status,
             &report,
+            None,
             None,
             None,
         )
@@ -3723,6 +3912,7 @@ mod tests {
             &report,
             Some(&AlwaysHasWords),
             None,
+            None,
         )
         .await;
 
@@ -3900,6 +4090,7 @@ mod tests {
             &stop,
             &mut status,
             &report,
+            None,
             None,
             None,
         )

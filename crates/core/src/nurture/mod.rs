@@ -25,6 +25,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use parking_lot::Mutex;
+use sha2::{Digest, Sha256};
 mod actions;
 mod hierarchy;
 mod live;
@@ -51,8 +52,11 @@ use crate::driver::{ui_error_kind, UiError, UiErrorKind, UiSession};
 use crate::frame_source::FrameSource;
 use crate::frame_text::{FrameTextSource, NullFrameTextSource};
 use crate::human_behavior::{
-    in_night_window, roll_bool, roll_feed_action_in_mood, roll_follow_in_mood, FeedAction,
-    HumanBehavior, HumanSessionPolicy, Mood, MoodCycle, PolicyAction,
+    in_night_window, roll_bool, roll_feed_actions_in_mood, FeedAction, HumanBehavior,
+    HumanSessionPolicy, Mood, MoodCycle, PolicyAction,
+};
+use crate::interaction::{
+    InteractionActionKind, InteractionActionState, TikTokActionOwner, TikTokActionOwnerKind,
 };
 use crate::screen::{self, ActionRail, ScreenKind};
 use crate::screen_watch::{ScreenWatcher, SessionHandle};
@@ -61,6 +65,11 @@ use crate::types::{
 };
 use crate::DeviceWorkOwner;
 use touch::TouchPointPlanner;
+
+use crate::tiktok_save::{
+    pixel_save_observation, tiktok_save, SaveAdapter, SaveCardIdentity, SaveEvidence,
+    SaveObservation, SaveVerdict,
+};
 
 /// How long to wait for a new card to settle before calling a swipe blocked.
 ///
@@ -178,6 +187,258 @@ pub struct NurtureEngine {
     touch_points: Arc<Mutex<HashMap<String, TouchPointPlanner>>>,
 }
 
+struct PixelNurtureSaveAdapter<'a> {
+    frames: &'a dyn FrameSource,
+    session: &'a dyn UiSession,
+    udid: &'a str,
+    screen_size: (f64, f64),
+    sequence: u64,
+}
+
+#[derive(Debug, Clone)]
+struct NurtureSaveLease {
+    owner: TikTokActionOwner,
+    armed_revision: i64,
+}
+
+trait NurtureSaveJournal: Sync {
+    fn arm(
+        &self,
+        card_key: &str,
+        observation: &SaveObservation,
+    ) -> anyhow::Result<NurtureSaveLease>;
+
+    fn settle(
+        &self,
+        lease: Option<NurtureSaveLease>,
+        evidence: &SaveEvidence,
+    ) -> anyhow::Result<()>;
+}
+
+struct NurtureSaveLedger<'a> {
+    db: &'a Database,
+    session_id: &'a str,
+    udid: &'a str,
+}
+
+impl<'a> NurtureSaveLedger<'a> {
+    fn new(db: &'a Database, session_id: &'a str, udid: &'a str) -> Self {
+        Self {
+            db,
+            session_id,
+            udid,
+        }
+    }
+}
+
+fn save_identity_json(identity: &SaveCardIdentity) -> serde_json::Value {
+    match identity {
+        SaveCardIdentity::Hierarchy { author, sound } => serde_json::json!({
+            "source": "hierarchy",
+            "author": author,
+            "sound": sound,
+        }),
+        SaveCardIdentity::Pixel { author, caption } => serde_json::json!({
+            "source": "pixel",
+            "author": author,
+            "caption": caption,
+        }),
+    }
+}
+
+fn save_observation_json(observation: &SaveObservation) -> serde_json::Value {
+    serde_json::json!({
+        "identity": observation.identity.as_ref().map(save_identity_json),
+        "sequence": observation.sequence,
+        "state": format!("{:?}", observation.state).to_ascii_lowercase(),
+        "tapPoint": observation.tap_point.as_ref().map(|point| serde_json::json!({
+            "x": point.x,
+            "y": point.y,
+        })),
+    })
+}
+
+fn save_evidence_json(evidence: &SaveEvidence) -> String {
+    serde_json::json!({
+        "verdict": format!("{:?}", evidence.verdict).to_ascii_lowercase(),
+        "effectBoundaryCrossed": evidence.effect_boundary_crossed,
+        "initial": evidence.initial.as_ref().map(save_observation_json),
+        "final": evidence.final_observation.as_ref().map(save_observation_json),
+        "error": evidence.error,
+    })
+    .to_string()
+}
+
+impl NurtureSaveJournal for NurtureSaveLedger<'_> {
+    fn arm(
+        &self,
+        card_key: &str,
+        observation: &SaveObservation,
+    ) -> anyhow::Result<NurtureSaveLease> {
+        let identity = observation
+            .identity
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Save identity disappeared before durable arm"))?;
+        let identity_json = save_identity_json(identity).to_string();
+        let identity_hash = format!("{:x}", Sha256::digest(identity_json.as_bytes()));
+        let owner = TikTokActionOwner {
+            kind: TikTokActionOwnerKind::Nurture,
+            owner_id: format!("{}:{card_key}:{}", self.session_id, &identity_hash[..16]),
+            device_udid: self.udid.to_owned(),
+            card_identity: Some(identity_json),
+        };
+        self.db
+            .ensure_tiktok_action_run(&owner, InteractionActionKind::Save)?;
+        let claim_revision = self
+            .db
+            .claim_tiktok_action(&owner, InteractionActionKind::Save)?
+            .ok_or_else(|| anyhow::anyhow!("Nurture Save ledger row is not claimable"))?;
+        let effect_intent = serde_json::json!({
+            "intent": "set bookmark state to saved",
+            "sequence": observation.sequence,
+            "identity": save_identity_json(identity),
+        })
+        .to_string();
+        let armed_revision = self
+            .db
+            .arm_tiktok_action(
+                &owner,
+                InteractionActionKind::Save,
+                claim_revision,
+                &effect_intent,
+            )?
+            .ok_or_else(|| anyhow::anyhow!("Nurture Save ledger arm lost ownership"))?;
+        Ok(NurtureSaveLease {
+            owner,
+            armed_revision,
+        })
+    }
+
+    fn settle(
+        &self,
+        lease: Option<NurtureSaveLease>,
+        evidence: &SaveEvidence,
+    ) -> anyhow::Result<()> {
+        let Some(lease) = lease else {
+            if evidence.effect_boundary_crossed {
+                anyhow::bail!("Save crossed effect boundary without an armed ledger row");
+            }
+            return Ok(());
+        };
+        let state = match evidence.verdict {
+            SaveVerdict::Saved => InteractionActionState::Confirmed,
+            SaveVerdict::CardChangedAfterEffect
+            | SaveVerdict::NotConfirmed
+            | SaveVerdict::UncertainAfterEffect => InteractionActionState::Uncertain,
+            _ => anyhow::bail!(
+                "armed Save returned a pre-effect verdict: {:?}",
+                evidence.verdict
+            ),
+        };
+        let evidence_json = save_evidence_json(evidence);
+        let error_code = evidence.error.as_deref().or_else(|| {
+            (state == InteractionActionState::Uncertain).then_some("save_not_confirmed")
+        });
+        if !self.db.settle_tiktok_action(
+            &lease.owner,
+            InteractionActionKind::Save,
+            lease.armed_revision,
+            state,
+            Some(&evidence_json),
+            error_code,
+        )? {
+            anyhow::bail!("Nurture Save ledger settlement lost ownership");
+        }
+        Ok(())
+    }
+}
+
+#[async_trait::async_trait]
+impl SaveAdapter for PixelNurtureSaveAdapter<'_> {
+    async fn observe(&mut self) -> anyhow::Result<SaveObservation> {
+        self.sequence = self.sequence.saturating_add(1);
+        let Some(frame) = self.frames.latest(self.udid) else {
+            anyhow::bail!("pixel Save cannot read a fresh frame")
+        };
+        let image = image::load_from_memory(&frame)?.to_rgb8();
+        let rail = screen::locate_action_rail(&image);
+        let mut observation = pixel_save_observation(
+            SaveCardIdentity::Pixel {
+                author: String::new(),
+                caption: None,
+            },
+            self.sequence,
+            rail,
+            self.screen_size,
+            // No calibrated Saved-vs-Unsaved detector exists for the pixel path. Geometry
+            // alone must never authorize a toggle, so this is deliberately fail-closed.
+            None,
+        );
+        // A frame digest changes while a video plays and therefore is not a card identity.
+        // Until calibrated OCR supplies author/caption, record the missing proof honestly.
+        observation.identity = None;
+        Ok(observation)
+    }
+
+    async fn tap(&mut self, point: TapPoint) -> anyhow::Result<()> {
+        self.session.tap(point).await
+    }
+}
+
+fn settle_save_evidence(
+    policy: &mut HumanSessionPolicy,
+    reservation: crate::human_behavior::AttemptReservation,
+    status: &mut NurtureSessionStatus,
+    evidence: &SaveEvidence,
+) -> bool {
+    if evidence.effect_boundary_crossed {
+        policy.commit_attempt(reservation);
+        status.save_attempts = status.save_attempts.saturating_add(1);
+        if evidence.verdict == SaveVerdict::Saved {
+            status.saves = status.saves.saturating_add(1);
+        } else {
+            status.save_uncertain = status.save_uncertain.saturating_add(1);
+        }
+        true
+    } else {
+        policy.cancel_no_effect(reservation);
+        status.save_noops = status.save_noops.saturating_add(1);
+        false
+    }
+}
+
+fn settle_journaled_save(
+    policy: &mut HumanSessionPolicy,
+    reservation: crate::human_behavior::AttemptReservation,
+    status: &mut NurtureSessionStatus,
+    journal: Option<&dyn NurtureSaveJournal>,
+    lease: Option<NurtureSaveLease>,
+    evidence: &SaveEvidence,
+) -> anyhow::Result<bool> {
+    // The gesture result owns the in-memory reservation. Settle it first so a durable audit
+    // failure after the effect boundary cannot reopen the cap and invite a duplicate retry.
+    let acted = settle_save_evidence(policy, reservation, status, evidence);
+    if let Some(journal) = journal {
+        journal.settle(lease, evidence)?;
+    }
+    Ok(acted)
+}
+
+fn save_verdict_message(evidence: &SaveEvidence) -> String {
+    let label = match evidence.verdict {
+        SaveVerdict::Saved => "đã lưu và xác nhận trạng thái",
+        SaveVerdict::AlreadySaved => "video đã được lưu từ trước",
+        SaveVerdict::NoControl => "không có nút Lưu mới đo được",
+        SaveVerdict::StateUnreadable => "không đọc được trạng thái Lưu",
+        SaveVerdict::CardChangedBeforeEffect => "thẻ đã đổi trước cú chạm",
+        SaveVerdict::FailedBeforeEffect => "dừng trước cú chạm vì thiếu bằng chứng",
+        SaveVerdict::CardChangedAfterEffect => "thẻ đổi sau cú chạm, kết quả chưa chắc chắn",
+        SaveVerdict::NotConfirmed => "đã chạm nhưng chưa xác nhận được trạng thái",
+        SaveVerdict::UncertainAfterEffect => "phản hồi bị gián đoạn sau cú chạm",
+    };
+    format!("lưu: {label} (details: verdict={:?})", evidence.verdict)
+}
+
 /// What every phase of a session needs, and none of them changes.
 ///
 /// Four values with one lifetime — the whole session. They were four parameters repeated on
@@ -189,6 +450,7 @@ pub struct NurtureEngine {
 /// yet at the point the context does.
 struct SessionCtx<'a, F: Fn(NurtureSessionStatus) + Send + Sync> {
     udid: &'a str,
+    session_id: &'a str,
     /// Set when the operator ends the session; every wait in every phase checks it.
     stop: &'a AtomicBool,
     /// Held for the length of one gesture, so two phases never drive the screen at once.
@@ -631,7 +893,7 @@ impl NurtureEngine {
     /// sync — "Lưu" in the UI *is* the live-tuning mechanism. One SQLite read of one row per
     /// post, against a loop whose posts take seconds.
     ///
-    /// A read failure is returned to `apply_live_settings`, which fail-closes the three public
+    /// A read failure is returned to `apply_live_settings`, which fail-closes all four public
     /// action rates to zero for this pass. A later successful read applies the new row and
     /// reopens those rates; only `NoSource` keeps the initial snapshot. Which fields are picked
     /// up, and why the rest are not, is [`NurtureSettings::absorb_live_changes`].
@@ -1218,67 +1480,83 @@ impl NurtureEngine {
         pool: &[String],
     ) -> anyhow::Result<(FeedStep, CommentRecoveryAction)> {
         let mut comment_recovery_action = CommentRecoveryAction::None;
-        match roll_feed_action_in_mood(settings.like_prob, settings.comment_prob, mood) {
-            FeedAction::Like
-                if !policy.can_interact_with_post() || !policy.can_attempt(PolicyAction::Like) =>
-            {
-                ctx.report(
-                    &mut progress.status,
-                    "bỏ qua tim: nhịp phiên hiện tại đã đủ".into(),
-                );
-            }
-            FeedAction::Like => {
-                if !wait_for_action_gap(last_interaction_at, policy.min_action_gap(), ctx.stop)
-                    .await
+        let plan = roll_feed_actions_in_mood(
+            settings.like_prob,
+            settings.comment_prob,
+            settings.save_prob,
+            settings.follow_prob,
+            mood,
+        );
+        for selected in [
+            plan.like.then_some(FeedAction::Like),
+            plan.save.then_some(FeedAction::Save),
+            plan.comment.then_some(FeedAction::Comment),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            match selected {
+                FeedAction::Like
+                    if !policy.can_interact_with_post()
+                        || !policy.can_attempt(PolicyAction::Like) =>
                 {
-                    progress.outcome = Outcome::Stopped;
-                    progress.hit_video_cap = false;
-                    return Ok((FeedStep::Stop, comment_recovery_action));
+                    ctx.report(
+                        &mut progress.status,
+                        "bỏ qua tim: nhịp phiên hiện tại đã đủ".into(),
+                    );
                 }
-                let reservation = policy.reserve_attempt(PolicyAction::Like);
-                ctx.report(&mut progress.status, "thả tim".into());
-                match self
-                    .do_like(
-                        ctx.udid,
-                        device.session.as_ref(),
-                        ctx.gestures,
-                        device.screen_size,
-                        ctx.stop,
-                    )
-                    .await
-                {
-                    Ok(LikeResult::Liked) => {
-                        policy.commit_attempt(reservation);
-                        progress.status.like_attempts += 1;
-                        ctx.push(&progress.status);
-                        progress.status.likes += 1;
-                        ctx.report(
-                            &mut progress.status,
-                            "tim thành công (xác nhận icon đỏ)".into(),
-                        );
+                FeedAction::Like => {
+                    if !wait_for_action_gap(last_interaction_at, policy.min_action_gap(), ctx.stop)
+                        .await
+                    {
+                        progress.outcome = Outcome::Stopped;
+                        progress.hit_video_cap = false;
+                        return Ok((FeedStep::Stop, comment_recovery_action));
                     }
-                    Ok(LikeResult::AlreadyLiked) => {
-                        policy.cancel_no_effect(reservation);
-                        ctx.report(
-                            &mut progress.status,
-                            "video đã tim từ trước — bỏ qua".into(),
+                    let reservation = policy.reserve_attempt(PolicyAction::Like);
+                    ctx.report(&mut progress.status, "thả tim".into());
+                    match self
+                        .do_like(
+                            ctx.udid,
+                            device.session.as_ref(),
+                            ctx.gestures,
+                            device.screen_size,
+                            ctx.stop,
                         )
-                    }
-                    Ok(LikeResult::NotOnFeed) => {
-                        policy.cancel_no_effect(reservation);
-                        ctx.report(
-                            &mut progress.status,
-                            "bỏ qua tim: khung hiện tại không phải thẻ feed có thanh hành động"
-                                .into(),
-                        )
-                    }
-                    Ok(LikeResult::NotConfirmed { before, best }) => {
-                        policy.commit_attempt(reservation);
-                        progress.status.like_attempts += 1;
-                        ctx.push(&progress.status);
-                        ctx.report(
-                            &mut progress.status,
-                            format!(
+                        .await
+                    {
+                        Ok(LikeResult::Liked) => {
+                            policy.commit_attempt(reservation);
+                            progress.status.like_attempts += 1;
+                            ctx.push(&progress.status);
+                            progress.status.likes += 1;
+                            ctx.report(
+                                &mut progress.status,
+                                "tim thành công (xác nhận icon đỏ)".into(),
+                            );
+                        }
+                        Ok(LikeResult::AlreadyLiked) => {
+                            policy.cancel_no_effect(reservation);
+                            ctx.report(
+                                &mut progress.status,
+                                "video đã tim từ trước — bỏ qua".into(),
+                            )
+                        }
+                        Ok(LikeResult::NotOnFeed) => {
+                            policy.cancel_no_effect(reservation);
+                            ctx.report(
+                                &mut progress.status,
+                                "bỏ qua tim: khung hiện tại không phải thẻ feed có thanh hành động"
+                                    .into(),
+                            )
+                        }
+                        Ok(LikeResult::NotConfirmed { before, best }) => {
+                            policy.commit_attempt(reservation);
+                            progress.status.like_attempts += 1;
+                            ctx.push(&progress.status);
+                            ctx.report(
+                                &mut progress.status,
+                                format!(
                             "tim: tap gửi được nhưng icon không đổi (đỏ {before:.0}→{best:.0}, \
                              cần >{:.0}; rail layout {}{}, tim y={:.0}pt)",
                             screen::LIKE_FILLED_REDNESS,
@@ -1286,81 +1564,132 @@ impl NurtureEngine {
                             if rail.located { "" } else { ", dùng mặc định" },
                             rail.like_y * 667.0
                         ),
-                        )
-                    }
-                    Err(e) => {
-                        policy.commit_attempt(reservation);
-                        progress.status.like_attempts += 1;
-                        ctx.push(&progress.status);
-                        let msg = format!("tim thất bại: {}", describe(&e));
-                        ctx.report(&mut progress.status, msg.clone());
-                        progress.last_error = Some(msg);
-                        if !self
-                            .recover(
-                                ctx.udid,
-                                &device.bundle_id,
-                                device.fresh_text_session,
-                                &mut device.ui_context,
-                                &mut device.session,
-                                handle,
-                                budget,
-                                text_health,
-                                &e,
-                                &mut progress.status,
-                                ctx.on_status,
                             )
-                            .await
-                        {
-                            progress.outcome = Outcome::Failed;
-                            return Ok((FeedStep::Stop, comment_recovery_action));
+                        }
+                        Err(e) => {
+                            policy.commit_attempt(reservation);
+                            progress.status.like_attempts += 1;
+                            ctx.push(&progress.status);
+                            let msg = format!("tim thất bại: {}", describe(&e));
+                            ctx.report(&mut progress.status, msg.clone());
+                            progress.last_error = Some(msg);
+                            if !self
+                                .recover(
+                                    ctx.udid,
+                                    &device.bundle_id,
+                                    device.fresh_text_session,
+                                    &mut device.ui_context,
+                                    &mut device.session,
+                                    handle,
+                                    budget,
+                                    text_health,
+                                    &e,
+                                    &mut progress.status,
+                                    ctx.on_status,
+                                )
+                                .await
+                            {
+                                progress.outcome = Outcome::Failed;
+                                return Ok((FeedStep::Stop, comment_recovery_action));
+                            }
                         }
                     }
                 }
-            }
-            FeedAction::Comment
-                if !policy.can_interact_with_post()
-                    || !policy.can_attempt(PolicyAction::Comment) =>
-            {
-                ctx.report(
-                    &mut progress.status,
-                    "bỏ qua bình luận: nhịp phiên hiện tại đã đủ".into(),
-                );
-            }
-            FeedAction::Comment => {
-                if !wait_for_action_gap(last_interaction_at, policy.min_action_gap(), ctx.stop)
-                    .await
+                FeedAction::Save
+                    if !policy.can_interact_with_post()
+                        || !policy.can_attempt(PolicyAction::Save) =>
                 {
-                    progress.outcome = Outcome::Stopped;
-                    progress.hit_video_cap = false;
-                    return Ok((FeedStep::Stop, comment_recovery_action));
+                    ctx.report(
+                        &mut progress.status,
+                        "bỏ qua lưu: nhịp phiên hiện tại đã đủ".into(),
+                    );
                 }
-                let reservation = policy.reserve_attempt(PolicyAction::Comment);
-                ctx.report(&mut progress.status, "bình luận".into());
-                suppress.store(true, Ordering::Relaxed);
-                let res = self
-                    .do_comment(
-                        ctx.udid,
-                        device.session.as_ref(),
-                        ctx.gestures,
-                        rail,
-                        device.screen_size,
-                        settings,
-                        pool,
-                        ctx.stop,
-                    )
+                FeedAction::Save => {
+                    if !wait_for_action_gap(last_interaction_at, policy.min_action_gap(), ctx.stop)
+                        .await
+                    {
+                        progress.outcome = Outcome::Stopped;
+                        progress.hit_video_cap = false;
+                        return Ok((FeedStep::Stop, comment_recovery_action));
+                    }
+                    let reservation = policy.reserve_attempt(PolicyAction::Save);
+                    ctx.report(&mut progress.status, "lưu video".into());
+                    let mut adapter = PixelNurtureSaveAdapter {
+                        frames: self.frames.as_ref(),
+                        session: device.session.as_ref(),
+                        udid: ctx.udid,
+                        screen_size: device.screen_size,
+                        sequence: 0,
+                    };
+                    let ledger = NurtureSaveLedger::new(self.db.as_ref(), ctx.session_id, ctx.udid);
+                    let card_key = format!("card-{}", progress.status.videos_done);
+                    let mut lease = None;
+                    let evidence = tiktok_save(&mut adapter, |observation| {
+                        lease = Some(ledger.arm(&card_key, observation)?);
+                        Ok(())
+                    })
                     .await;
-                suppress.store(false, Ordering::Relaxed);
-                match res {
-                    Ok(result) => {
-                        if result.did_act() {
-                            policy.commit_attempt(reservation);
-                            progress.status.comment_attempts += 1;
-                            ctx.push(&progress.status);
-                        } else {
-                            policy.cancel_no_effect(reservation);
-                        }
-                        comment_recovery_action = text_health.observe(result);
-                        match result {
+                    if let Err(error) = settle_journaled_save(
+                        policy,
+                        reservation,
+                        &mut progress.status,
+                        Some(&ledger),
+                        lease,
+                        &evidence,
+                    ) {
+                        let message = format!("lưu: không chốt được sổ hành động ({error})");
+                        ctx.report(&mut progress.status, message.clone());
+                        progress.last_error = Some(message);
+                        progress.hit_video_cap = false;
+                        progress.outcome = Outcome::Failed;
+                        return Ok((FeedStep::Stop, comment_recovery_action));
+                    }
+                    ctx.report(&mut progress.status, save_verdict_message(&evidence));
+                }
+                FeedAction::Comment
+                    if !policy.can_interact_with_post()
+                        || !policy.can_attempt(PolicyAction::Comment) =>
+                {
+                    ctx.report(
+                        &mut progress.status,
+                        "bỏ qua bình luận: nhịp phiên hiện tại đã đủ".into(),
+                    );
+                }
+                FeedAction::Comment => {
+                    if !wait_for_action_gap(last_interaction_at, policy.min_action_gap(), ctx.stop)
+                        .await
+                    {
+                        progress.outcome = Outcome::Stopped;
+                        progress.hit_video_cap = false;
+                        return Ok((FeedStep::Stop, comment_recovery_action));
+                    }
+                    let reservation = policy.reserve_attempt(PolicyAction::Comment);
+                    ctx.report(&mut progress.status, "bình luận".into());
+                    suppress.store(true, Ordering::Relaxed);
+                    let res = self
+                        .do_comment(
+                            ctx.udid,
+                            device.session.as_ref(),
+                            ctx.gestures,
+                            rail,
+                            device.screen_size,
+                            settings,
+                            pool,
+                            ctx.stop,
+                        )
+                        .await;
+                    suppress.store(false, Ordering::Relaxed);
+                    match res {
+                        Ok(result) => {
+                            if result.did_act() {
+                                policy.commit_attempt(reservation);
+                                progress.status.comment_attempts += 1;
+                                ctx.push(&progress.status);
+                            } else {
+                                policy.cancel_no_effect(reservation);
+                            }
+                            comment_recovery_action = text_health.observe(result);
+                            match result {
                             CommentResult::TextSent {
                                 prompt_tokens,
                                 completion_tokens,
@@ -1384,73 +1713,94 @@ impl NurtureEngine {
                             }
                         }
 
-                        if comment_recovery_action == CommentRecoveryAction::RefreshFreshSession {
-                            ctx.report(
+                            if comment_recovery_action == CommentRecoveryAction::RefreshFreshSession
+                            {
+                                ctx.report(
                                 &mut progress.status,
                                 "nút Gửi không sáng 2 lượt liên tiếp — làm mới text device.session"
                                     .into(),
                             );
-                            let error = anyhow::Error::new(UiError::new(
-                                UiErrorKind::Session,
-                                "comment.text_not_armed",
-                                "two consecutive frame-confirmed non-arming results",
-                            ));
-                            if !self
-                                .recover(
-                                    ctx.udid,
-                                    &device.bundle_id,
-                                    true,
-                                    &mut device.ui_context,
-                                    &mut device.session,
-                                    handle,
-                                    budget,
-                                    text_health,
-                                    &error,
-                                    &mut progress.status,
-                                    ctx.on_status,
-                                )
-                                .await
-                            {
-                                progress.last_error = Some(
+                                let error = anyhow::Error::new(UiError::new(
+                                    UiErrorKind::Session,
+                                    "comment.text_not_armed",
+                                    "two consecutive frame-confirmed non-arming results",
+                                ));
+                                if !self
+                                    .recover(
+                                        ctx.udid,
+                                        &device.bundle_id,
+                                        true,
+                                        &mut device.ui_context,
+                                        &mut device.session,
+                                        handle,
+                                        budget,
+                                        text_health,
+                                        &error,
+                                        &mut progress.status,
+                                        ctx.on_status,
+                                    )
+                                    .await
+                                {
+                                    progress.last_error = Some(
                                     "không làm mới được text device.session sau 2 lượt không armed"
                                         .into(),
                                 );
+                                    progress.outcome = Outcome::Failed;
+                                    return Ok((FeedStep::Stop, comment_recovery_action));
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            policy.commit_attempt(reservation);
+                            progress.status.comment_attempts += 1;
+                            ctx.push(&progress.status);
+                            let msg = format!("bình luận thất bại: {}", describe(&e));
+                            ctx.report(&mut progress.status, msg.clone());
+                            progress.last_error = Some(msg);
+                            if ui_error_kind(&e) != UiErrorKind::Other
+                                && !self
+                                    .recover(
+                                        ctx.udid,
+                                        &device.bundle_id,
+                                        device.fresh_text_session,
+                                        &mut device.ui_context,
+                                        &mut device.session,
+                                        handle,
+                                        budget,
+                                        text_health,
+                                        &e,
+                                        &mut progress.status,
+                                        ctx.on_status,
+                                    )
+                                    .await
+                            {
                                 progress.outcome = Outcome::Failed;
                                 return Ok((FeedStep::Stop, comment_recovery_action));
                             }
                         }
                     }
-                    Err(e) => {
-                        policy.commit_attempt(reservation);
-                        progress.status.comment_attempts += 1;
-                        ctx.push(&progress.status);
-                        let msg = format!("bình luận thất bại: {}", describe(&e));
-                        ctx.report(&mut progress.status, msg.clone());
-                        progress.last_error = Some(msg);
-                        if ui_error_kind(&e) != UiErrorKind::Other
-                            && !self
-                                .recover(
-                                    ctx.udid,
-                                    &device.bundle_id,
-                                    device.fresh_text_session,
-                                    &mut device.ui_context,
-                                    &mut device.session,
-                                    handle,
-                                    budget,
-                                    text_health,
-                                    &e,
-                                    &mut progress.status,
-                                    ctx.on_status,
-                                )
-                                .await
-                        {
-                            progress.outcome = Outcome::Failed;
-                            return Ok((FeedStep::Stop, comment_recovery_action));
-                        }
-                    }
                 }
+                FeedAction::None => {}
             }
-            FeedAction::None => {}
+        }
+        if plan.follow
+            && matches!(
+                self.roll_and_execute_follow(
+                    ctx,
+                    progress,
+                    device,
+                    policy,
+                    budget,
+                    rail,
+                    text_health,
+                    last_interaction_at,
+                    handle,
+                )
+                .await?,
+                FeedStep::Stop
+            )
+        {
+            return Ok((FeedStep::Stop, comment_recovery_action));
         }
         Ok((FeedStep::Proceed, comment_recovery_action))
     }
@@ -1797,8 +2147,10 @@ impl NurtureEngine {
         // does, so the context has to exist by then. The gesture lock came up with it — it
         // is one of the four values every phase needs, and it depends on nothing.
         let gestures = Arc::new(tokio::sync::Mutex::new(()));
+        let nurture_session_id = uuid::Uuid::new_v4().to_string();
         let ctx = SessionCtx {
             udid,
+            session_id: &nurture_session_id,
             stop: &stop,
             gestures: &gestures,
             on_status: &on_status,
@@ -1872,7 +2224,8 @@ impl NurtureEngine {
         };
         let live_source = EngineLiveSettings { engine: self };
         let mut said_live_settings_failed = false;
-        let attempt = hierarchy::run_hierarchy_session(
+        let save_ledger = NurtureSaveLedger::new(self.db.as_ref(), &nurture_session_id, udid);
+        let attempt = hierarchy::run_hierarchy_session_with_save_intent(
             device.session.as_ref(),
             device.screen_size,
             &settings,
@@ -1884,6 +2237,7 @@ impl NurtureEngine {
             &|into: &mut NurtureSessionStatus, msg: String| ctx.report(into, msg),
             Some(&comment_source),
             Some(&live_source),
+            &save_ledger,
         )
         .await;
         match attempt {
@@ -1894,11 +2248,12 @@ impl NurtureEngine {
                     ran_outcome = Outcome::Failed;
                 }
                 let summary = format!(
-                    "{} — {}/{} video, {} tim, {} bình luận, {} follow, {:.0}s (hierarchy)",
+                    "{} — {}/{} video, {} tim, {} lưu, {} bình luận, {} follow, {:.0}s (hierarchy)",
                     ran_outcome.as_str(),
                     progress.status.videos_done,
                     progress.status.swipe_attempts,
                     progress.status.likes,
+                    progress.status.saves,
                     progress.status.comments,
                     progress.status.follows,
                     started.elapsed().as_secs_f64(),
@@ -2061,9 +2416,10 @@ impl NurtureEngine {
         );
         let mut budget = Budget::new();
         let mut text_health = TextCommentHealth::default();
-        let mut policy = HumanSessionPolicy::new(
+        let mut policy = HumanSessionPolicy::new_with_save(
             settings.like_prob,
             settings.comment_prob,
+            settings.save_prob,
             settings.follow_prob,
             settings.human_limits,
         );
@@ -2116,7 +2472,7 @@ impl NurtureEngine {
                     ctx.report(
                         &mut progress.status,
                         format!(
-                            "không đọc được cài đặt mới ({error}) — khóa like/comment/follow ở lượt này"
+                            "không đọc được cài đặt mới ({error}) — khóa like/comment/save/follow ở lượt này"
                         ),
                     );
                 }
@@ -2296,26 +2652,6 @@ impl NurtureEngine {
                 FeedStep::Proceed | FeedStep::NextVideo => {}
             }
 
-            if roll_follow_in_mood(settings.follow_prob, mood) {
-                match self
-                    .roll_and_execute_follow(
-                        &ctx,
-                        &mut progress,
-                        &mut device,
-                        &mut policy,
-                        &mut budget,
-                        &rail,
-                        &mut text_health,
-                        &mut last_interaction_at,
-                        &handle,
-                    )
-                    .await?
-                {
-                    FeedStep::Stop => break 'feed,
-                    FeedStep::Proceed | FeedStep::NextVideo => {}
-                }
-            }
-
             sleep_interruptible(Duration::from_millis(human.think_pause_ms()), &stop).await;
 
             let (swipe_step, advanced_to_next_video) = self
@@ -2386,11 +2722,12 @@ impl NurtureEngine {
 
         let elapsed = started.elapsed();
         let summary = format!(
-            "{} — {}/{} video, {} tim, {} bình luận, {} follow, {} popup đóng, {} recovery, {:.0}s{}",
+            "{} — {}/{} video, {} tim, {} lưu, {} bình luận, {} follow, {} popup đóng, {} recovery, {:.0}s{}",
             progress.outcome.as_str(),
             progress.status.videos_done,
             progress.status.swipe_attempts,
             progress.status.likes,
+            progress.status.saves,
             progress.status.comments,
             progress.status.follows,
             watch.popups_closed,
@@ -3092,6 +3429,184 @@ mod tests {
             terminate < close,
             "TikTok must stop before its session is released"
         );
+    }
+
+    #[test]
+    fn save_evidence_updates_exactly_one_typed_counter_branch() {
+        let mut policy = HumanSessionPolicy::new_with_save(0, 0, 100, 0, false);
+        let mut status = NurtureSessionStatus::new("fixture");
+        policy.begin_post();
+
+        let no_effect = policy.reserve_attempt(PolicyAction::Save);
+        let no_effect_evidence = SaveEvidence {
+            verdict: SaveVerdict::StateUnreadable,
+            initial: None,
+            final_observation: None,
+            effect_boundary_crossed: false,
+            error: None,
+        };
+        assert!(!settle_save_evidence(
+            &mut policy,
+            no_effect,
+            &mut status,
+            &no_effect_evidence,
+        ));
+        assert_eq!((status.save_attempts, status.saves), (0, 0));
+        assert_eq!((status.save_noops, status.save_uncertain), (1, 0));
+
+        let ambiguous = policy.reserve_attempt(PolicyAction::Save);
+        let ambiguous_evidence = SaveEvidence {
+            verdict: SaveVerdict::NotConfirmed,
+            effect_boundary_crossed: true,
+            ..no_effect_evidence.clone()
+        };
+        assert!(settle_save_evidence(
+            &mut policy,
+            ambiguous,
+            &mut status,
+            &ambiguous_evidence,
+        ));
+        assert_eq!((status.save_attempts, status.saves), (1, 0));
+        assert_eq!((status.save_noops, status.save_uncertain), (1, 1));
+
+        let saved = policy.reserve_attempt(PolicyAction::Save);
+        let saved_evidence = SaveEvidence {
+            verdict: SaveVerdict::Saved,
+            effect_boundary_crossed: true,
+            ..no_effect_evidence
+        };
+        assert!(settle_save_evidence(
+            &mut policy,
+            saved,
+            &mut status,
+            &saved_evidence,
+        ));
+        assert_eq!((status.save_attempts, status.saves), (2, 1));
+        assert_eq!((status.save_noops, status.save_uncertain), (1, 1));
+    }
+
+    #[test]
+    fn durable_settle_failure_after_effect_keeps_the_cap_consumed_and_status_uncertain() {
+        struct BrokenSettle;
+
+        impl NurtureSaveJournal for BrokenSettle {
+            fn arm(
+                &self,
+                _card_key: &str,
+                _observation: &SaveObservation,
+            ) -> anyhow::Result<NurtureSaveLease> {
+                unreachable!("the test starts after the effect boundary")
+            }
+
+            fn settle(
+                &self,
+                _lease: Option<NurtureSaveLease>,
+                _evidence: &SaveEvidence,
+            ) -> anyhow::Result<()> {
+                anyhow::bail!("audit unavailable")
+            }
+        }
+
+        let mut policy = HumanSessionPolicy::new_with_save(0, 0, 100, 0, true);
+        policy.pin_cap_for_test(PolicyAction::Save, 1);
+        policy.begin_post();
+        let reservation = policy.reserve_attempt(PolicyAction::Save);
+        let mut status = NurtureSessionStatus::new("fixture");
+        let evidence = SaveEvidence {
+            verdict: SaveVerdict::UncertainAfterEffect,
+            initial: None,
+            final_observation: None,
+            effect_boundary_crossed: true,
+            error: Some("tap acknowledgement unavailable".into()),
+        };
+
+        let error = settle_journaled_save(
+            &mut policy,
+            reservation,
+            &mut status,
+            Some(&BrokenSettle),
+            None,
+            &evidence,
+        )
+        .expect_err("durable settle must remain a fatal session error");
+
+        assert_eq!(error.to_string(), "audit unavailable");
+        assert!(!policy.can_attempt(PolicyAction::Save));
+        assert_eq!((status.save_attempts, status.saves), (1, 0));
+        assert_eq!((status.save_noops, status.save_uncertain), (0, 1));
+    }
+
+    #[test]
+    fn task4_save_ledger_is_armed_before_effect_and_settled_from_evidence() {
+        use crate::interaction::{
+            InteractionActionKind, InteractionActionState, TikTokActionOwnerKind,
+        };
+        use crate::tiktok_save::{BookmarkState, SaveCardIdentity, SaveObservation};
+
+        let path = std::env::temp_dir().join(format!(
+            "riviu-task4-save-ledger-{}.db",
+            uuid::Uuid::new_v4()
+        ));
+        let db = Database::open(&path).expect("test database");
+        let ledger = NurtureSaveLedger::new(&db, "session-a", "device-a");
+        let observation = SaveObservation {
+            identity: Some(SaveCardIdentity::Hierarchy {
+                author: "author-a".into(),
+                sound: Some("sound-a".into()),
+            }),
+            sequence: 2,
+            state: BookmarkState::Unsaved,
+            tap_point: Some(TapPoint { x: 20.0, y: 30.0 }),
+        };
+        let lease = Some(
+            ledger
+                .arm("card-7", &observation)
+                .expect("durable arm before tap"),
+        );
+
+        let owner = lease.as_ref().expect("arm returns lease").owner.clone();
+        assert_eq!(owner.kind, TikTokActionOwnerKind::Nurture);
+        assert_eq!(owner.device_udid, "device-a");
+        assert!(owner.owner_id.starts_with("session-a:card-7:"));
+        assert_eq!(
+            owner.card_identity.as_deref(),
+            Some(r#"{"author":"author-a","sound":"sound-a","source":"hierarchy"}"#)
+        );
+        let armed = db
+            .get_tiktok_action_run(&owner, InteractionActionKind::Save)
+            .expect("read armed row")
+            .expect("armed row exists");
+        assert_eq!(armed.state, InteractionActionState::Armed);
+        assert!(armed.effect_intent.as_deref().is_some_and(|intent| {
+            intent.contains("set bookmark state to saved") && intent.contains("sequence")
+        }));
+
+        let evidence = SaveEvidence {
+            verdict: SaveVerdict::Saved,
+            initial: Some(observation.clone()),
+            final_observation: Some(SaveObservation {
+                sequence: 3,
+                state: BookmarkState::Saved,
+                ..observation
+            }),
+            effect_boundary_crossed: true,
+            error: None,
+        };
+        ledger
+            .settle(lease, &evidence)
+            .expect("settle confirmed evidence");
+        let confirmed = db
+            .get_tiktok_action_run(&owner, InteractionActionKind::Save)
+            .expect("read confirmed row")
+            .expect("confirmed row exists");
+        assert_eq!(confirmed.state, InteractionActionState::Confirmed);
+        assert!(confirmed
+            .evidence
+            .as_deref()
+            .is_some_and(|raw| raw.contains("saved")));
+
+        drop(db);
+        let _ = std::fs::remove_file(path);
     }
 
     /// The bug this guards: a timed run that stopped on the clock with its

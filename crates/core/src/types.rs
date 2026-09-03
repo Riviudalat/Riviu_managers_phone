@@ -942,10 +942,9 @@ pub struct AnalyticsSummary {
 
 /// The part of a window that overrides how a session behaves, when it overrides it at all.
 ///
-/// **All five or none**, rather than five independent `Option`s. A window that carries a
+/// **All seven or none**, rather than seven independent `Option`s. A window that carries a
 /// half-set of rates would leave the other half inheriting a global the operator edited
-/// later, and the four rates here share one 100% budget (`nurtureBudget.ts`) — a budget
-/// assembled from two sources is a budget nobody can read off the screen. One switch, one
+/// later. One switch, one
 /// complete block: either this window behaves like the panel above it, or it behaves like
 /// exactly what is written in it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -955,6 +954,10 @@ pub struct NurtureWindowBehaviour {
     pub num_rounds: u32,
     pub like_prob: u32,
     pub comment_prob: u32,
+    pub save_prob: u32,
+    /// Additive for compatibility: a window written before Save existed must not start
+    /// saving merely because the global switch is enabled later.
+    pub save_enabled: bool,
     pub follow_prob: u32,
 }
 
@@ -966,8 +969,24 @@ impl Default for NurtureWindowBehaviour {
             num_rounds: base.num_rounds,
             like_prob: base.like_prob,
             comment_prob: base.comment_prob,
+            save_prob: base.save_prob,
+            save_enabled: base.save_enabled,
             follow_prob: base.follow_prob,
         }
+    }
+}
+
+impl NurtureWindowBehaviour {
+    /// Replace the complete per-window behaviour block before schedule preflight and start.
+    pub fn apply_to(&self, mut settings: NurtureSettings) -> NurtureSettings {
+        settings.num_videos = self.num_videos;
+        settings.num_rounds = self.num_rounds;
+        settings.like_prob = self.like_prob;
+        settings.comment_prob = self.comment_prob;
+        settings.save_prob = self.save_prob;
+        settings.save_enabled = self.save_enabled;
+        settings.follow_prob = self.follow_prob;
+        settings
     }
 }
 
@@ -1029,6 +1048,8 @@ pub struct NurtureSettings {
     pub num_rounds: u32,
     pub like_prob: u32,
     pub comment_prob: u32,
+    #[serde(default)]
+    pub save_prob: u32,
     pub follow_prob: u32,
     pub frenzy_prob: u32,
     pub watch_min: f64,
@@ -1079,6 +1100,9 @@ pub struct NurtureSettings {
     pub like_enabled: bool,
     #[serde(default = "yes")]
     pub comment_enabled: bool,
+    /// Save is additive and therefore defaults off for stored profiles that predate it.
+    #[serde(default)]
+    pub save_enabled: bool,
     #[serde(default = "yes")]
     pub follow_enabled: bool,
     #[serde(default = "yes")]
@@ -1162,6 +1186,7 @@ impl Default for NurtureSettings {
             // Comments are opt-in because a fresh install has no AI key. Once
             // a key is configured, the operator can enable a small comment rate.
             comment_prob: 0,
+            save_prob: 0,
             follow_prob: 3,
             frenzy_prob: 6,
             watch_min: 3.0,
@@ -1189,6 +1214,7 @@ impl Default for NurtureSettings {
             steady_mood: String::new(),
             like_enabled: true,
             comment_enabled: true,
+            save_enabled: false,
             follow_enabled: true,
             frenzy_enabled: true,
             carousel_enabled: true,
@@ -1217,6 +1243,9 @@ impl NurtureSettings {
         }
         if !self.comment_enabled {
             self.comment_prob = 0;
+        }
+        if !self.save_enabled {
+            self.save_prob = 0;
         }
         if !self.follow_enabled {
             self.follow_prob = 0;
@@ -1288,10 +1317,12 @@ impl NurtureSettings {
         // Behaviour knobs.
         self.like_prob = fresh.like_prob;
         self.comment_prob = fresh.comment_prob;
+        self.save_prob = fresh.save_prob;
         self.follow_prob = fresh.follow_prob;
         self.frenzy_prob = fresh.frenzy_prob;
         self.like_enabled = fresh.like_enabled;
         self.comment_enabled = fresh.comment_enabled;
+        self.save_enabled = fresh.save_enabled;
         self.follow_enabled = fresh.follow_enabled;
         self.frenzy_enabled = fresh.frenzy_enabled;
         self.watch_min = fresh.watch_min;
@@ -1578,9 +1609,17 @@ pub struct NurtureSessionStatus {
     #[serde(default)]
     pub comment_attempts: u32,
     #[serde(default)]
+    pub save_attempts: u32,
+    #[serde(default)]
     pub follow_attempts: u32,
     pub likes: u32,
     pub comments: u32,
+    #[serde(default)]
+    pub saves: u32,
+    #[serde(default)]
+    pub save_noops: u32,
+    #[serde(default)]
+    pub save_uncertain: u32,
     pub follows: u32,
     pub last_message: String,
     /// What the comment model actually reported spending on this device, in tokens.
@@ -1649,9 +1688,13 @@ impl Default for NurtureSessionStatus {
             swipe_attempts: 0,
             like_attempts: 0,
             comment_attempts: 0,
+            save_attempts: 0,
             follow_attempts: 0,
             likes: 0,
             comments: 0,
+            saves: 0,
+            save_noops: 0,
+            save_uncertain: 0,
             follows: 0,
             last_message: String::new(),
             session_prompt_tokens: 0,
@@ -2716,5 +2759,81 @@ mod progress_tests {
         assert!(!status.running);
         assert!(status.phase.is_terminal());
         assert_eq!(status.outcome, Some(crate::Outcome::Done));
+    }
+}
+
+#[cfg(test)]
+mod task4_nurture_save_wire_tests {
+    use super::*;
+
+    #[test]
+    fn legacy_nurture_settings_disable_save_and_use_zero_probability() {
+        let settings: NurtureSettings = serde_json::from_str("{}").expect("legacy row");
+        assert!(!settings.save_enabled);
+        assert_eq!(settings.save_prob, 0);
+
+        let defaults = NurtureSettings::default();
+        assert!(!defaults.save_enabled);
+        assert_eq!(defaults.save_prob, 0);
+        assert_eq!(NurtureWindowBehaviour::default().save_prob, 0);
+    }
+
+    #[test]
+    fn legacy_window_override_disables_save_and_a_revision_can_enable_it() {
+        let legacy: NurtureWindowBehaviour = serde_json::from_value(serde_json::json!({
+            "numVideos": 30,
+            "numRounds": 1,
+            "likeProb": 20,
+            "commentProb": 4,
+            "followProb": 2
+        }))
+        .expect("legacy window override");
+        assert!(!legacy.save_enabled);
+        assert_eq!(legacy.save_prob, 0);
+
+        let revised: NurtureWindowBehaviour = serde_json::from_value(serde_json::json!({
+            "numVideos": 30,
+            "numRounds": 1,
+            "likeProb": 20,
+            "commentProb": 4,
+            "saveProb": 73,
+            "saveEnabled": true,
+            "followProb": 2
+        }))
+        .expect("revised window override");
+        assert!(revised.save_enabled);
+
+        let inherited = NurtureSettings {
+            save_enabled: true,
+            save_prob: 99,
+            ..NurtureSettings::default()
+        };
+        let applied_legacy = legacy.apply_to(inherited);
+        assert!(!applied_legacy.save_enabled);
+        assert_eq!(applied_legacy.save_prob, 0);
+
+        let applied_revised = revised.apply_to(NurtureSettings::default());
+        assert!(applied_revised.save_enabled);
+        assert_eq!(applied_revised.save_prob, 73);
+    }
+
+    #[test]
+    fn disabled_save_is_folded_to_zero_without_destroying_the_stored_value() {
+        let stored = NurtureSettings {
+            save_enabled: false,
+            save_prob: 73,
+            ..NurtureSettings::default()
+        };
+        assert_eq!(stored.clone().into_effective().save_prob, 0);
+        assert_eq!(stored.save_prob, 73);
+    }
+
+    #[test]
+    fn save_status_counters_are_typed_and_default_to_zero() {
+        let status = NurtureSessionStatus::new("fixture");
+        assert_eq!(status.save_attempts, 0);
+        assert_eq!(status.saves, 0);
+        assert_eq!(status.save_noops, 0);
+        assert_eq!(status.save_uncertain, 0);
     }
 }

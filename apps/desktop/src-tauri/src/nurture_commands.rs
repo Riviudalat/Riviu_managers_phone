@@ -39,24 +39,26 @@ pub struct NurtureApiTestResult {
     pub completion_tokens: u32,
 }
 
-fn validate_nurture_settings(settings: &NurtureSettings) -> Result<(), String> {
+pub(crate) fn validate_nurture_settings(settings: &NurtureSettings) -> Result<(), String> {
     if !(1..=10_000).contains(&settings.num_videos) {
         return Err("num_videos phải nằm trong khoảng 1..=10000".into());
     }
     if !(1..=100).contains(&settings.num_rounds) {
         return Err("num_rounds phải nằm trong khoảng 1..=100".into());
     }
-    if settings.like_prob.saturating_add(settings.comment_prob) > 100 {
-        return Err(format!(
-            "like_prob ({}) + comment_prob ({}) > 100",
-            settings.like_prob, settings.comment_prob
-        ));
+    for (label, value) in [
+        ("like_prob", settings.like_prob),
+        ("comment_prob", settings.comment_prob),
+        ("save_prob", settings.save_prob),
+        ("follow_prob", settings.follow_prob),
+        ("frenzy_prob", settings.frenzy_prob),
+    ] {
+        if value > 100 {
+            return Err(format!("{label} phải nằm trong khoảng 0..=100"));
+        }
     }
     if !(4..=30).contains(&settings.max_comment_words) {
         return Err("max_comment_words phải nằm trong khoảng 4..=30".into());
-    }
-    if settings.follow_prob > 100 || settings.frenzy_prob > 100 {
-        return Err("follow_prob và frenzy_prob phải nằm trong khoảng 0..=100".into());
     }
     if settings.comment_prob > 0 && settings.api_key.trim().is_empty() {
         return Err("Đã bật bình luận nhưng API key còn trống".into());
@@ -125,23 +127,16 @@ fn validate_nurture_settings(settings: &NurtureSettings) -> Result<(), String> {
             if behaviour.num_rounds == 0 || behaviour.num_rounds > 100 {
                 return Err(format!("khung {id:?}: số vòng phải trong 1..=100"));
             }
-            // Each rate on its own, and their sum: the four rates share one 100% budget in
-            // the panel (`nurtureBudget.ts`), and a window that ignores that would be a way
-            // to smuggle past the ceiling the panel refuses to let anyone type.
+            // Public actions are independent; each rate is bounded on its own.
             for (label, value) in [
                 ("tỉ lệ tim", behaviour.like_prob),
                 ("tỉ lệ bình luận", behaviour.comment_prob),
+                ("tỉ lệ lưu", behaviour.save_prob),
                 ("tỉ lệ follow", behaviour.follow_prob),
             ] {
                 if value > 100 {
                     return Err(format!("khung {id:?}: {label} phải trong 0..=100"));
                 }
-            }
-            let total = behaviour.like_prob + behaviour.comment_prob + behaviour.follow_prob;
-            if total > 100 {
-                return Err(format!(
-                    "khung {id:?}: tổng tim + bình luận + follow là {total}%, vượt 100%"
-                ));
             }
         }
     }
@@ -974,6 +969,19 @@ mod tests {
     }
 
     #[test]
+    fn independent_public_action_probabilities_can_all_be_hundred_percent() {
+        let settings = NurtureSettings {
+            like_prob: 100,
+            comment_prob: 100,
+            save_prob: 100,
+            follow_prob: 100,
+            api_key: "fixture".into(),
+            ..NurtureSettings::default()
+        };
+        assert!(validate_nurture_settings(&settings).is_ok());
+    }
+
+    #[test]
     fn nurture_validation_rejects_unbounded_session_values() {
         let settings = NurtureSettings {
             num_videos: 10_001,
@@ -998,6 +1006,14 @@ mod tests {
         assert!(validate_nurture_settings(&settings)
             .expect_err("watch duration must be bounded")
             .contains("thời gian xem"));
+
+        let settings = NurtureSettings {
+            save_prob: 101,
+            ..NurtureSettings::default()
+        };
+        assert!(validate_nurture_settings(&settings)
+            .expect_err("save probability must be bounded independently")
+            .contains("save_prob"));
     }
 
     /// The smallest thing that is a JPEG to every reader that matters.

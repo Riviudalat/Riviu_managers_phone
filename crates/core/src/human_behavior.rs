@@ -288,8 +288,31 @@ impl HumanBehavior {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FeedAction {
     Like,
+    Save,
     Comment,
     None,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct FeedActionPlan {
+    pub like: bool,
+    pub save: bool,
+    pub comment: bool,
+    pub follow: bool,
+}
+
+impl FeedActionPlan {
+    pub fn ordered(self) -> Vec<PolicyAction> {
+        [
+            (self.like, PolicyAction::Like),
+            (self.save, PolicyAction::Save),
+            (self.comment, PolicyAction::Comment),
+            (self.follow, PolicyAction::Follow),
+        ]
+        .into_iter()
+        .filter_map(|(selected, action)| selected.then_some(action))
+        .collect()
+    }
 }
 
 pub fn roll_feed_action(like_prob: u32, comment_prob: u32) -> FeedAction {
@@ -400,6 +423,10 @@ impl Mood {
             Mood::Liking => 1.18,
             Mood::Chatty => 7.07,
         }
+    }
+
+    fn save_mult(self) -> f64 {
+        self.like_mult()
     }
 
     fn follow_mult(self) -> f64 {
@@ -537,12 +564,58 @@ pub fn roll_follow_in_mood(follow_prob: u32, mood: Mood) -> bool {
     roll_bool(p)
 }
 
+fn scaled_probability(probability: u32, multiplier: f64) -> u32 {
+    ((probability as f64) * multiplier)
+        .round()
+        .clamp(0.0, 100.0) as u32
+}
+
+pub fn feed_action_plan_from_rolls(
+    like_prob: u32,
+    comment_prob: u32,
+    save_prob: u32,
+    follow_prob: u32,
+    mood: Mood,
+    rolls: [u32; 4],
+) -> FeedActionPlan {
+    FeedActionPlan {
+        like: rolls[0].min(99) < scaled_probability(like_prob, mood.like_mult()),
+        save: rolls[1].min(99) < scaled_probability(save_prob, mood.save_mult()),
+        comment: rolls[2].min(99) < scaled_probability(comment_prob, mood.comment_mult()),
+        follow: rolls[3].min(99) < scaled_probability(follow_prob, mood.follow_mult()),
+    }
+}
+
+pub fn roll_feed_actions_in_mood(
+    like_prob: u32,
+    comment_prob: u32,
+    save_prob: u32,
+    follow_prob: u32,
+    mood: Mood,
+) -> FeedActionPlan {
+    let mut rng = rand::thread_rng();
+    feed_action_plan_from_rolls(
+        like_prob,
+        comment_prob,
+        save_prob,
+        follow_prob,
+        mood,
+        [
+            rng.gen_range(0..100),
+            rng.gen_range(0..100),
+            rng.gen_range(0..100),
+            rng.gen_range(0..100),
+        ],
+    )
+}
+
 /// Internal pacing policy. It is deliberately not exposed as a user setting:
 /// configured probabilities still decide whether an action is desired, while
 /// this policy keeps the resulting session inside a human-sized rolling rate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PolicyAction {
     Like,
+    Save,
     Comment,
     Follow,
 }
@@ -589,6 +662,7 @@ const UNPACED_ACTION_GAP: Duration = Duration::from_millis(800);
 pub struct HumanSessionPolicy {
     policy_id: u64,
     like_cap: u32,
+    save_cap: u32,
     comment_cap: u32,
     follow_cap: u32,
     attempts: VecDeque<AttemptRecord>,
@@ -618,7 +692,7 @@ impl HumanSessionPolicy {
     /// `limits` decides whether anything in this type is allowed to bind.
     ///
     /// **What it holds back, measured against what an operator sets:** a per-hour ceiling
-    /// of 8–16 likes / 1–3 comments / 1–2 follows; a rule that at most **two of the last
+    /// of 8–16 likes / 8–16 saves / 1–3 comments / 1–2 follows; a rule that at most **two of the last
     /// five** cards may be interacted with at all; a **12–35 s** wait after every action;
     /// a 15–90 s rest every 7–13 videos; and 20–45 minute block breaks. Together those
     /// meant that "Thích 100%" produced likes on well under half the posts — the ceiling
@@ -630,6 +704,16 @@ impl HumanSessionPolicy {
     /// person, so a run without it is faster, denser and more distinguishable. The
     /// operator asked for the numbers to mean what they say and owns that trade.
     pub fn new(like_prob: u32, comment_prob: u32, follow_prob: u32, limits: bool) -> Self {
+        Self::new_with_save(like_prob, comment_prob, 0, follow_prob, limits)
+    }
+
+    pub fn new_with_save(
+        like_prob: u32,
+        comment_prob: u32,
+        save_prob: u32,
+        follow_prob: u32,
+        limits: bool,
+    ) -> Self {
         let seed = rand::thread_rng().gen::<u64>();
         let mut rng = StdRng::seed_from_u64(seed);
         let cap = |prob: u32, low: u32, high: u32, rng: &mut StdRng| {
@@ -643,6 +727,7 @@ impl HumanSessionPolicy {
         Self {
             policy_id: NEXT_POLICY_ID.fetch_add(1, Ordering::Relaxed),
             like_cap: cap(like_prob, 8, 16, &mut rng),
+            save_cap: cap(save_prob, 8, 16, &mut rng),
             comment_cap: cap(comment_prob, 1, 3, &mut rng),
             follow_cap: cap(follow_prob, 1, 2, &mut rng),
             attempts: VecDeque::new(),
@@ -674,8 +759,20 @@ impl HumanSessionPolicy {
     /// number it was given, so this is safe to call once per post: re-rolling the ceiling
     /// every post would make "at most 8–16 an hour" mean nothing.
     pub fn retune(&mut self, like_prob: u32, comment_prob: u32, follow_prob: u32, limits: bool) {
+        self.retune_with_save(like_prob, comment_prob, 0, follow_prob, limits);
+    }
+
+    pub fn retune_with_save(
+        &mut self,
+        like_prob: u32,
+        comment_prob: u32,
+        save_prob: u32,
+        follow_prob: u32,
+        limits: bool,
+    ) {
         self.limits = limits;
         Self::retune_cap(&mut self.like_cap, like_prob, 8, 16, &mut self.rng);
+        Self::retune_cap(&mut self.save_cap, save_prob, 8, 16, &mut self.rng);
         Self::retune_cap(&mut self.comment_cap, comment_prob, 1, 3, &mut self.rng);
         Self::retune_cap(&mut self.follow_cap, follow_prob, 1, 2, &mut self.rng);
     }
@@ -717,6 +814,13 @@ impl HumanSessionPolicy {
         if !self.limits {
             return true;
         }
+        if self
+            .recent_posts
+            .back()
+            .is_some_and(|post| post.interactions > 0)
+        {
+            return true;
+        }
         self.recent_posts
             .iter()
             .filter(|post| post.interactions > 0)
@@ -749,6 +853,7 @@ impl HumanSessionPolicy {
         self.prune(now);
         let cap = match action {
             PolicyAction::Like => self.like_cap,
+            PolicyAction::Save => self.save_cap,
             PolicyAction::Comment => self.comment_cap,
             PolicyAction::Follow => self.follow_cap,
         };
@@ -855,9 +960,23 @@ impl HumanSessionPolicy {
     pub(crate) fn pin_cap_for_test(&mut self, action: PolicyAction, cap: u32) {
         match action {
             PolicyAction::Like => self.like_cap = cap,
+            PolicyAction::Save => self.save_cap = cap,
             PolicyAction::Comment => self.comment_cap = cap,
             PolicyAction::Follow => self.follow_cap = cap,
         }
+    }
+
+    #[cfg(test)]
+    fn current_post_interactions(&self) -> u32 {
+        self.recent_posts.back().map_or(0, |post| post.interactions)
+    }
+
+    #[cfg(test)]
+    fn interacted_card_count(&self) -> usize {
+        self.recent_posts
+            .iter()
+            .filter(|post| post.interactions > 0)
+            .count()
     }
 
     /// Return the next gap after the previous action. The selected range is
@@ -1208,5 +1327,79 @@ mod mood_tests {
             }
         }
         assert!(rests >= 10, "policy did not schedule enough rests: {rests}");
+    }
+}
+
+#[cfg(test)]
+mod task4_independent_action_tests {
+    use super::*;
+
+    #[test]
+    fn zero_and_hundred_percent_are_exact_and_all_actions_keep_order() {
+        let none = feed_action_plan_from_rolls(0, 0, 0, 0, Mood::Neutral, [0; 4]);
+        assert!(none.ordered().is_empty());
+
+        let all = feed_action_plan_from_rolls(100, 100, 100, 100, Mood::Neutral, [99; 4]);
+        assert_eq!(
+            all.ordered(),
+            vec![
+                PolicyAction::Like,
+                PolicyAction::Save,
+                PolicyAction::Comment,
+                PolicyAction::Follow,
+            ]
+        );
+    }
+
+    #[test]
+    fn each_roll_is_independent_instead_of_sharing_one_probability_budget() {
+        let plan = feed_action_plan_from_rolls(40, 40, 40, 40, Mood::Neutral, [39, 40, 1, 99]);
+        assert_eq!(
+            plan.ordered(),
+            vec![PolicyAction::Like, PolicyAction::Comment]
+        );
+    }
+
+    #[test]
+    fn save_has_its_own_cap_and_noops_refund_without_marking_the_card() {
+        let mut policy = HumanSessionPolicy::new_with_save(0, 0, 100, 0, true);
+        policy.save_cap = 1;
+        policy.begin_post();
+
+        for _ in 0..10 {
+            let no_effect = policy.reserve_attempt(PolicyAction::Save);
+            assert!(policy.cancel_no_effect(no_effect));
+            assert!(policy.can_attempt(PolicyAction::Save));
+            assert!(policy.can_interact_with_post());
+        }
+
+        let ambiguous = policy.reserve_attempt(PolicyAction::Save);
+        assert!(policy.commit_attempt(ambiguous));
+        assert!(!policy.can_attempt(PolicyAction::Save));
+        assert_eq!(policy.current_post_interactions(), 1);
+    }
+
+    #[test]
+    fn multiple_actions_on_one_card_use_independent_caps_but_one_density_marker() {
+        let mut policy = HumanSessionPolicy::new_with_save(100, 100, 100, 100, true);
+        policy.begin_post();
+        let prior = policy.reserve_attempt(PolicyAction::Like);
+        assert!(policy.commit_attempt(prior));
+
+        policy.begin_post();
+        for action in [
+            PolicyAction::Like,
+            PolicyAction::Save,
+            PolicyAction::Comment,
+            PolicyAction::Follow,
+        ] {
+            let reservation = policy.reserve_attempt(action);
+            assert!(policy.commit_attempt(reservation));
+        }
+        assert_eq!(policy.current_post_interactions(), 4);
+        assert_eq!(policy.interacted_card_count(), 2);
+
+        policy.begin_post();
+        assert!(!policy.can_interact_with_post());
     }
 }

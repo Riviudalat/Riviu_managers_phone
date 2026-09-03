@@ -596,6 +596,8 @@ mod tests {
             num_rounds: 2,
             like_prob: 25,
             comment_prob: 5,
+            save_prob: 7,
+            save_enabled: true,
             follow_prob: 0,
         };
         let mut evening = window("evening", 20, 22);
