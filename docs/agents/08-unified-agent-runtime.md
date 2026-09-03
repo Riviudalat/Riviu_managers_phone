@@ -570,3 +570,42 @@
 - Paint-stall cần ít nhất 8 packet kể từ frame cuối, ngoài cửa sổ 12 giây. Frontend
   gửi `packetsSincePaint` cho host; một packet SPS/PPS lẻ không được tắt trạng thái
   Live, xin keyframe hoặc kích hoạt recovery.
+
+#### 14.10 Profile automation, Save và điều phối TikTok (04/09/2026; xem §9.142)
+
+- `AutomationDefinition` có revision bất biến; schedule luôn ghim đúng revision
+  cho tới khi operator xác nhận chuyển. `TargetRef` được resolve lúc bắt đầu và
+  snapshot giữ roster hash, alias, số máy, UDID cùng lý do loại máy. Không đưa
+  secret vào profile hoặc Flow JSON.
+- Interaction chuẩn hóa action set theo thứ tự `Like -> Save -> Comment`. Payload
+  cũ tương đương Like tùy `likeTarget`, Comment bật và Save tắt. Mỗi action có
+  claim/intent/settlement riêng; no-op đã chứng minh được đi tiếp, còn uncertain
+  dừng assignment nhưng không hạ sibling đã settled. Comment tắt thì một actor là
+  hợp lệ và UI ẩn toàn bộ AI/thread/@handle.
+- Save là desired-state operation: đọc `Saved/Unsaved/Unreadable`, buộc identity
+  đúng card, re-proof ngay trước tap, ghi effect intent one-shot, tap tối đa một
+  lần và chỉ confirmed khi cùng card đọc lại là Saved. Không có control, không
+  đọc được state hoặc card A đổi thành B đều là zero-tap typed result.
+- Nurture roll Like/Save/Comment/Follow độc lập và reserve ngân sách theo từng
+  action. No-op hoàn tiền reservation; tap/type hoặc effect phase mơ hồ tiêu cap.
+  Refresh settings lỗi đóng cả bốn public-action rate về 0. Kết thúc phiên vẫn
+  force-stop TikTok và chỉ ghi đã tắt sạch khi có `ProcessAbsenceProof`.
+- `OrchestrationDocumentV1` tách khỏi `FlowDocumentV2` và chỉ chứa Start, Delay,
+  RunNurture, RunInteraction, RunPublish, End. Node campaign ghim profile revision,
+  resolve một target snapshot cho fleet, persist child id trước dispatch và khi
+  restart chỉ reconcile child đó. Node orchestration không được trộn với node
+  thiết bị hoặc tự giữ device lease thay child runtime.
+- Publish dùng một confirmation pipeline `Preflight -> Transfer -> Sound -> Post
+  -> Confirm -> Link -> Sheet -> Cleanup`; legacy command từng bước không còn ở
+  Tauri/API registry. Trước Post có thể retry, từ effect intent trở đi là
+  uncertain và không tự đăng lại. Bài đã confirmed chỉ được retry Link/Sheet;
+  thiếu Sheet config giữ canonical link trong outbox pending thay vì đăng lại.
+- Production fresh-publish hiện fail closed trước device work với
+  `sound_picker_unmeasured` (và video picker chưa đo). Chỉ mở live canary sau khi
+  đo locator theo package/build/locale trên một Android được duyệt; headless gate
+  không phải bằng chứng bài, tim, bình luận, lưu hoặc follow công khai đã chạy.
+- Desktop có workspace riêng cho Thiết bị, Nuôi TikTok, Tương tác, Đăng bài và
+  Flow/Điều phối. Số máy + alias là nhãn chính; raw model/UDID/code nằm trong
+  details. Mọi request thay theo profile/run/input phải có generation guard để
+  response cũ không ghi đè lựa chọn mới; tab/panel và state Loading/Error/Empty/
+  Data phải giữ contract ARIA và retry.
