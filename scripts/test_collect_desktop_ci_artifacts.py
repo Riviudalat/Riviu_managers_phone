@@ -73,6 +73,9 @@ class ArtifactContractTests(unittest.TestCase):
         if not source.is_dir():
             self.skipTest("local staged package tools are not present")
         evidence = artifacts.verify_android_package_tools(source)
+        self.assertEqual(
+            evidence["manifest"], artifacts.ANDROID_PACKAGE_TOOLS_MANIFEST_NAME
+        )
         self.assertEqual(evidence["bundletoolVersion"], "1.18.3")
         self.assertEqual(evidence["jreVersion"], "21.0.12.1+1")
         self.assertGreater(evidence["fileCount"], 100)

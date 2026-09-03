@@ -1008,7 +1008,11 @@ def verify_android_package_tools(root: Path, *, execute: bool = True) -> dict[st
                 f"packaged Bundletool version mismatch: {rendered_bundletool!r}"
             )
     return {
-        "manifest": str(manifest_path),
+        # Evidence is copied into the release report after the temporary install tree is
+        # removed. An absolute path is both stale and different for MSI versus NSIS even
+        # when the manifest bytes are identical. The digest and tree attestation below bind
+        # the content; this field identifies the stable packaged location.
+        "manifest": ANDROID_PACKAGE_TOOLS_MANIFEST_NAME,
         "manifestSha256": sha256_file(manifest_path),
         "fileCount": len(declared),
         "payloadBytes": payload_bytes,
