@@ -7,14 +7,17 @@ use uuid::Uuid;
 
 use crate::types::{JobRecord, JobStatus, JobStepRecord};
 
+mod automation;
 mod fleet;
 mod flow_runs;
 mod flows;
 mod interaction;
+mod interaction_actions;
 mod inventory;
 mod jobs;
 mod migrations;
 mod nurture;
+mod orchestration;
 mod publish;
 mod publish_sheet;
 
@@ -290,6 +293,13 @@ fn interaction_summary_from_row(
                 serde_json::from_str::<crate::interaction::ThreadCampaignRequest>(&json).ok()
             })
             .map(|request| crate::interaction::InteractionCampaignBrief::from_request(&request)),
+        action_counters: crate::interaction::InteractionActionCounters {
+            planned: narrow(row.get::<_, i64>(10)?, "planned_actions")?,
+            attempted: narrow(row.get::<_, i64>(11)?, "attempted_actions")?,
+            confirmed: narrow(row.get::<_, i64>(12)?, "confirmed_actions")?,
+            no_op: narrow(row.get::<_, i64>(13)?, "no_op_actions")?,
+            uncertain: narrow(row.get::<_, i64>(14)?, "uncertain_actions")?,
+        },
     })
 }
 
@@ -1023,7 +1033,7 @@ mod interaction_tests {
             // Both default on the wire; a fixture spells them out so the shape stays
             // visible and a new field cannot be forgotten silently.
             manual_comments: Vec::new(),
-            like_target: false,
+            actions: crate::interaction::InteractionActionSet::default(),
 
             mode: ThreadMode::Threaded,
             shape: crate::interaction::ThreadShape::Chain,
@@ -1031,6 +1041,32 @@ mod interaction_tests {
             mentions: Vec::new(),
             mention_parent: false,
         }
+    }
+
+    #[test]
+    fn orchestration_interaction_creation_is_idempotent_on_the_armed_child_id() {
+        let (db, path) = fixture();
+        let request = request();
+        let plan = plan_threads(&request).expect("plan");
+        let child_id = Uuid::from_u128(0x1234).to_string();
+
+        let first = db
+            .create_interaction_campaign_with_id(&child_id, &request, &plan)
+            .expect("create exact child");
+        let second = db
+            .create_interaction_campaign_with_id(&child_id, &request, &plan)
+            .expect("repeat exact child");
+
+        assert_eq!(first, (child_id.clone(), true));
+        assert_eq!(second, (child_id.clone(), false));
+        assert_eq!(db.list_interaction_campaigns(10).expect("list").len(), 1);
+
+        let mut conflicting = request;
+        conflicting.instruction = "different immutable request".into();
+        assert!(db
+            .create_interaction_campaign_with_id(&child_id, &conflicting, &plan)
+            .is_err());
+        std::fs::remove_file(path).expect("remove fixture database");
     }
 
     /// A failure reported after the fact never erases a verdict the engine already reached.
@@ -1644,6 +1680,104 @@ mod interaction_tests {
         let _ = std::fs::remove_file(&path);
     }
 
+    #[test]
+    fn startup_keeps_an_owned_interaction_child_for_exact_resume() {
+        let (db, path) = fixture();
+        let mut request = request();
+
+        let profile = db
+            .create_automation_definition(
+                "Interaction",
+                crate::AutomationKind::Interaction,
+                &crate::TargetRef::All,
+                &serde_json::json!({
+                    "schemaVersion": 1,
+                    "request": {
+                        "targets": request.targets.clone(),
+                        "messageCount": request.message_count,
+                        "instruction": request.instruction.clone(),
+                        "maxWords": request.max_words,
+                        "actions": request.actions
+                    }
+                }),
+            )
+            .expect("create owner profile");
+        let schedule = db
+            .create_automation_schedule(
+                "Every hour",
+                profile.definition.id,
+                profile.revision.revision,
+                true,
+                &crate::AutomationScheduleV1 {
+                    schema_version: 1,
+                    kind: crate::AutomationScheduleKind::Interval,
+                    every_minutes: 60,
+                },
+            )
+            .expect("create schedule");
+        let due = schedule.next_due_at.clone().expect("due");
+        let target = crate::ResolvedTargetSnapshot {
+            target_ref: crate::TargetRef::All,
+            included: vec![crate::ResolvedTargetDevice {
+                udid: "actor-a".into(),
+                alias: "Actor A".into(),
+                number: Some(1),
+            }],
+            excluded: Vec::new(),
+            roster_sha256: "a".repeat(64),
+        };
+        let occurrence = db
+            .claim_automation_schedule_occurrence(
+                schedule.id,
+                schedule.revision,
+                &due,
+                &due,
+                Some(&target),
+                None,
+            )
+            .expect("claim occurrence")
+            .expect("claim winner");
+        db.mark_automation_schedule_occurrence_dispatching(occurrence.id)
+            .expect("arm occurrence")
+            .expect("queued occurrence");
+        request.request_id = occurrence.idempotency_key.clone();
+        let plan = plan_threads(&request).expect("plan");
+        let campaign_id = occurrence.child_campaign_id.to_string();
+        db.create_interaction_campaign_with_id(&campaign_id, &request, &plan)
+            .expect("create exact interaction child");
+        db.update_interaction_campaign_state(&campaign_id, ThreadCampaignState::Running, None)
+            .expect("start exact child");
+        db.mark_automation_schedule_occurrence_running(occurrence.id)
+            .expect("record running child")
+            .expect("dispatching occurrence");
+
+        assert_eq!(
+            db.interrupt_orphaned_interaction_campaigns()
+                .expect("manual orphan sweep"),
+            0,
+            "the generic startup sweep must leave durable automation children alone"
+        );
+        assert!(db
+            .recover_owned_interaction_campaign(&campaign_id)
+            .expect("recover owned child"));
+        let (persisted_request, persisted_plan) = db
+            .get_interaction_campaign_request(&campaign_id)
+            .expect("read persisted request")
+            .expect("request exists");
+        assert_eq!(persisted_request, request);
+        assert_eq!(persisted_plan, plan);
+        assert_eq!(
+            db.get_interaction_campaign(&campaign_id)
+                .expect("read child")
+                .expect("child exists")
+                .summary
+                .state,
+            ThreadCampaignState::Running
+        );
+        drop(db);
+        let _ = std::fs::remove_file(&path);
+    }
+
     /// Cancelling is itself the recovery boundary for pre-Send work.
     ///
     /// The desktop command used to flip only the campaign row. If the process stopped before
@@ -2000,6 +2134,7 @@ mod publish_tests {
                 width: 1,
                 height: 1,
             }],
+            video: None,
             caption_path: format!("/fixture/{id}/caption.txt"),
             caption: format!("caption {ordinal}"),
             caption_sha256: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
@@ -2020,6 +2155,11 @@ mod publish_tests {
             run_at: None,
             visibility: PublishVisibility::Public,
             cleanup_policy: PublishCleanupPolicy::DeleteImportedAssetsAfterVerified,
+            sound_policy: crate::publish::PublishSoundPolicy::TrendingAny {
+                pool_size: 5,
+                seed: 77,
+            },
+            execution_confirmed: true,
         };
         let campaign = db
             .create_publish_campaign(&request, &[bundle("bundle-a", 0), bundle("bundle-b", 1)])
@@ -2041,6 +2181,12 @@ mod publish_tests {
         assert_eq!(detail.bundles[0].caption_sha256.len(), 64);
         assert_eq!(detail.assignments.len(), 2);
         assert_eq!(detail.events.len(), 1);
+        let stored_request = db
+            .publish_campaign_request(&campaign.id)
+            .expect("read approved execution contract")
+            .expect("request exists");
+        assert_eq!(stored_request.sound_policy, request.sound_policy);
+        assert!(stored_request.execution_confirmed);
 
         db.update_publish_campaign_state(
             &campaign.id,
@@ -2071,6 +2217,8 @@ mod publish_tests {
             run_at: None,
             visibility: PublishVisibility::Public,
             cleanup_policy: PublishCleanupPolicy::DeleteImportedAssetsAfterVerified,
+            sound_policy: crate::publish::PublishSoundPolicy::Default,
+            execution_confirmed: false,
         };
         let error = db
             .create_publish_campaign(&request, &[bundle("bundle-a", 0), bundle("bundle-b", 1)])

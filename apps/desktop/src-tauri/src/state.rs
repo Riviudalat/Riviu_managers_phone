@@ -369,6 +369,7 @@ pub struct AppState {
     pub legacy_wda_bundle: PathBuf,
     pub nurture: NurtureRuntime,
     pub nurture_engine: NurtureEngine,
+    pub(crate) orchestration: crate::orchestration_commands::OrchestrationChildRuntime,
     pub(crate) flow_mutations: FlowMutationCoordinator,
     /// One ManualControl session per UDID while the overlay is open.
     /// Gestures reuse it; closing the overlay is the only release.
@@ -968,10 +969,10 @@ impl AppState {
             artifacts: flow_artifacts.clone(),
         });
         flows.recover_startup().await?;
-        // Interaction workers are `tokio::spawn`s inside this process, so a campaign the DB
-        // still calls `running` is one the app was killed in the middle of. Closed here for
-        // the same reason Flow recovers here: the alternative is a row that says "Đang chạy"
-        // for ever and offers no button that would move it.
+        // Interaction workers are `tokio::spawn`s inside this process. Durable orchestration
+        // attempts and schedule occurrences are excluded here and restart their exact child;
+        // detached/manual campaigns cannot resume and are closed so they do not remain stuck
+        // at "Đang chạy" without an available recovery action.
         match db.interrupt_orphaned_interaction_campaigns() {
             Ok(0) => {}
             Ok(count) => log::warn!(
@@ -1032,6 +1033,7 @@ impl AppState {
             legacy_wda_bundle: sidecar_root.join("wda").join("Riviumanagersphone.ipa"),
             nurture: NurtureRuntime::new(),
             nurture_engine,
+            orchestration: crate::orchestration_commands::OrchestrationChildRuntime::new(),
             flow_mutations: FlowMutationCoordinator::default(),
             overlay_sessions: AsyncMutex::new(HashMap::new()),
             overlay_gates: AsyncMutex::new(HashMap::new()),
@@ -1289,6 +1291,9 @@ impl AppState {
     }
 
     pub fn spawn_background_tasks(&self, app: AppHandle) {
+        crate::orchestration_commands::resume_orchestration_runs(app.clone(), self);
+        crate::orchestration_commands::start_automation_schedule_runner(app.clone(), self);
+
         let view_hub = self.view_hub.clone();
         tauri::async_runtime::spawn(async move {
             if let Err(error) = view_hub.listen().await {
@@ -1862,12 +1867,11 @@ impl AppState {
         // One-time publish schedules are intentionally conservative: opening
         // the desktop after the deadline marks the campaign missed instead
         // of surprise-posting. A campaign that is due while this process is
-        // open runs the same transfer -> native composer -> frame verification
-        // transaction as the manual Post button.
+        // open runs the same typed one-confirm runtime as the manual command,
+        // using the sound policy and approval captured in request_json.
         let publish_db = self.db.clone();
         let publish_control = self.control.clone();
-        let publish_frames = Arc::new(self.streams.clone());
-        let publish_agent_bundle = self.active_agent_bundle_id.clone();
+        let publish_registry = self.registry.clone();
         let publish_events = self.events.clone();
         let publish_admission = self.command_admission.clone();
         let publish_background_stop = self.background_stop.clone();
@@ -1948,33 +1952,20 @@ impl AppState {
                     let Ok(_admission) = publish_admission.ensure_accepting_work() else {
                         break;
                     };
-                    if let Err(error) = crate::publish_commands::transfer_publish_campaign_inner(
-                        publish_control.clone(),
-                        publish_db.clone(),
-                        publish_events.clone(),
-                        publish_agent_bundle.clone(),
-                        campaign_id.clone(),
-                    )
-                    .await
+                    if let Err(error) =
+                        crate::publish_commands::execute_scheduled_publish_campaign_inner(
+                            publish_control.clone(),
+                            publish_registry.clone(),
+                            publish_db.clone(),
+                            publish_events.clone(),
+                            campaign_id.clone(),
+                        )
+                        .await
                     {
                         let _ = publish_db
                             .log_op("publish.schedule.error", &format!("{campaign_id}: {error}"));
-                        continue;
                     }
-                    if let Err(error) = crate::publish_commands::post_publish_campaign_inner(
-                        publish_control.clone(),
-                        publish_db.clone(),
-                        publish_frames.clone(),
-                        publish_events.clone(),
-                        campaign_id.clone(),
-                    )
-                    .await
-                    {
-                        let _ = publish_db.log_op(
-                            "publish.schedule.post_error",
-                            &format!("{campaign_id}: {error}"),
-                        );
-                    }
+                    tell_the_page(&campaign_id);
                 }
             }
         });
@@ -2221,14 +2212,7 @@ impl AppState {
                 // by a missing API key.
                 let settings = match &behaviour {
                     None => settings,
-                    Some(over) => riviu_core::NurtureSettings {
-                        num_videos: over.num_videos,
-                        num_rounds: over.num_rounds,
-                        like_prob: over.like_prob,
-                        comment_prob: over.comment_prob,
-                        follow_prob: over.follow_prob,
-                        ..settings
-                    },
+                    Some(over) => over.apply_to(settings),
                 };
                 let Ok(_admission) = command_admission.ensure_accepting_work() else {
                     break;

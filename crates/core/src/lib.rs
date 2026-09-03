@@ -1,6 +1,8 @@
 //! Riviu core types, device registry, job queue, and persistence.
 
 pub mod action_failure;
+pub mod automation;
+pub mod automation_schedule_runtime;
 pub mod db;
 pub mod device_capabilities;
 pub mod device_control;
@@ -23,8 +25,11 @@ pub mod interaction_threshold;
 pub mod job_queue;
 pub mod nurture;
 pub mod openai_client;
+pub mod orchestration;
+pub mod orchestration_runtime;
 pub mod publish;
 pub mod publish_partners;
+pub mod publish_runtime;
 pub mod publish_sheet;
 pub mod registry;
 pub mod screen;
@@ -36,12 +41,15 @@ pub mod tiktok_composer;
 pub mod tiktok_drawer;
 pub mod tiktok_labels;
 pub mod tiktok_like;
+pub mod tiktok_save;
 pub mod tiktok_share;
 pub mod tiktok_target;
 pub mod tiktok_web;
 pub mod types;
 
 pub use action_failure::ActionFailure;
+pub use automation::*;
+pub use automation_schedule_runtime::*;
 pub use device_capabilities::*;
 pub use device_control::{
     ContextReleaseProof, DeviceControlError, DeviceControlPlane, DeviceExclusiveContext,
@@ -76,7 +84,10 @@ pub use interaction_lifecycle::{
 };
 pub use job_queue::JobQueue;
 pub use nurture::{NurtureEngine, Outcome};
+pub use orchestration::*;
+pub use orchestration_runtime::*;
 pub use publish::*;
+pub use publish_runtime::*;
 pub use registry::DeviceRegistry;
 pub use screen::{ScreenKind, ScreenObservation};
 pub use screen_watch::{ScreenWatcher, WatchStats};
@@ -85,6 +96,7 @@ pub use stream_budget::{
     BackgroundStreamLease, ForegroundStreamReservation, ForegroundTransfer, StreamBudgetError,
     StreamBudgetManager, StreamStopRequest,
 };
+pub use tiktok_save::*;
 pub use types::*;
 
 /// Every tuned number carries its reason, and the reason is checked.

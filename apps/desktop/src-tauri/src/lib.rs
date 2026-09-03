@@ -5,6 +5,7 @@ mod agent_commands;
 pub mod agent_runtime;
 pub mod android_package_tools;
 mod android_tools;
+mod automation_commands;
 mod command_error;
 mod commands;
 pub mod deployment_check;
@@ -16,7 +17,11 @@ pub mod interaction_ocr;
 mod local_api;
 mod nurture_commands;
 mod nurture_schedule;
+mod orchestration_commands;
 mod peripherals;
+// The measured legacy composer remains as calibration/reference code, but its three stepwise
+// commands are deliberately absent from the invoke registry. Only `publish_execute` is live.
+#[allow(dead_code)]
 mod publish_commands;
 mod state;
 mod view_hub;
@@ -345,6 +350,7 @@ pub fn run() {
             agent_commands::agent_repair,
             agent_commands::agent_bulk_repair,
             commands::list_devices,
+            commands::list_device_work_states,
             commands::refresh_devices,
             commands::prepare_device,
             commands::install_ipa,
@@ -458,6 +464,14 @@ pub fn run() {
             farm_commands::list_op_logs,
             farm_commands::analytics_summary,
             farm_commands::api_docs,
+            automation_commands::automation_list,
+            automation_commands::automation_get,
+            automation_commands::automation_create,
+            automation_commands::automation_revise,
+            automation_commands::automation_archive,
+            automation_commands::automation_schedule_list,
+            automation_commands::automation_schedule_create,
+            automation_commands::automation_schedule_update,
             flow_commands::flow_action_catalog,
             flow_commands::flow_list,
             flow_commands::flow_get,
@@ -473,6 +487,16 @@ pub fn run() {
             flow_commands::flow_get_run,
             flow_commands::flow_coordinate_frame,
             flow_commands::flow_read_artifact,
+            orchestration_commands::orchestration_list,
+            orchestration_commands::orchestration_get,
+            orchestration_commands::orchestration_validate,
+            orchestration_commands::orchestration_save_revision,
+            orchestration_commands::orchestration_archive,
+            orchestration_commands::orchestration_run,
+            orchestration_commands::orchestration_list_runs,
+            orchestration_commands::orchestration_get_run,
+            orchestration_commands::orchestration_reconcile,
+            orchestration_commands::orchestration_cancel_run,
             interaction_commands::interaction_parse_links,
             interaction_commands::interaction_resolve_links,
             interaction_commands::interaction_preview_thread,
@@ -503,9 +527,7 @@ pub fn run() {
             publish_commands::publish_list,
             publish_commands::publish_get,
             publish_commands::publish_cancel,
-            publish_commands::publish_prepare,
-            publish_commands::publish_transfer,
-            publish_commands::publish_post,
+            publish_commands::publish_execute,
             publish_commands::publish_readiness,
             publish_commands::publish_sheet_get_config,
             publish_commands::publish_sheet_save_config,
@@ -583,9 +605,16 @@ pub(crate) fn graceful_shutdown(handle: &tauri::AppHandle) {
     };
     {
         state.reject_new_work();
+        tauri::async_runtime::block_on(
+            orchestration_commands::shutdown_automation_schedule_runner(&state),
+        );
         state.nurture.begin_shutdown();
         state.flows.stop_all();
         state.jobs.stop_all();
+        tauri::async_runtime::block_on(orchestration_commands::shutdown_orchestration_runs(
+            handle.clone(),
+            &state,
+        ));
         tauri::async_runtime::block_on(state.wait_for_mutating_commands());
         tauri::async_runtime::block_on(state.close_all_overlay_sessions());
         tauri::async_runtime::block_on(state.shutdown_android_views());
@@ -660,7 +689,15 @@ mod tests {
             ("commands/view.rs", include_str!("commands/view.rs")),
             ("farm_commands.rs", include_str!("farm_commands.rs")),
             ("agent_commands.rs", include_str!("agent_commands.rs")),
+            (
+                "automation_commands.rs",
+                include_str!("automation_commands.rs"),
+            ),
             ("flow_commands.rs", include_str!("flow_commands.rs")),
+            (
+                "orchestration_commands.rs",
+                include_str!("orchestration_commands.rs"),
+            ),
             ("nurture_commands.rs", include_str!("nurture_commands.rs")),
             ("publish_commands.rs", include_str!("publish_commands.rs")),
             (
@@ -692,10 +729,69 @@ mod tests {
         );
     }
 
+    #[test]
+    fn orchestration_delegates_device_leases_to_each_child_runtime() {
+        let source = include_str!("orchestration_commands.rs");
+        assert!(
+            source.contains(".start_many("),
+            "Nurture must use its fleet runtime"
+        );
+        assert!(
+            source.contains("execute_thread_campaign("),
+            "Interaction must use its campaign runtime"
+        );
+        assert!(
+            source.contains("execute_scheduled_publish_campaign_inner("),
+            "Publish must use its typed execution runtime"
+        );
+        assert!(
+            !source.contains(".acquire_exclusive(")
+                && !source.contains(".try_acquire_exclusive(")
+                && !source.contains("DeviceWorkOwner::"),
+            "orchestration must not add a second lease owner around child runtimes"
+        );
+    }
+
+    #[test]
+    fn orchestration_cancel_serializes_with_child_dispatch_for_the_same_run() {
+        let source = include_str!("orchestration_commands.rs");
+        assert!(
+            source.matches("run_operation(run_id)").count() >= 2,
+            "the worker and cancel command must share one per-run operation lock"
+        );
+        assert!(
+            source.matches("operation.lock().await").count() >= 2,
+            "dispatch/reconcile and cancellation must take the shared per-run lock"
+        );
+        assert!(
+            source.contains("run_cancellation(run_id)"),
+            "cancel must address the worker's per-run delay wake-up signal"
+        );
+        assert!(
+            source.contains("tokio::select!"),
+            "an orchestration delay must be interruptible instead of blocking cancel"
+        );
+    }
+
+    #[test]
+    fn automation_schedule_runner_is_bootstrapped_and_stopped_before_child_runtimes() {
+        let state = include_str!("state.rs");
+        let orchestration = include_str!("orchestration_commands.rs");
+        assert!(state.contains("start_automation_schedule_runner(app.clone(), self)"));
+        assert!(orchestration.contains("resume_automation_schedule_occurrences(app.clone())"));
+        assert!(orchestration.contains("execute_automation_schedule_occurrence("));
+        assert!(orchestration.contains("resolve_target_snapshot("));
+        assert!(orchestration.contains("wait_for_schedule_occurrences().await"));
+    }
+
     /// Every command source file. Adding one and forgetting it here is the failure mode the
     /// list below is written to make loud, so it is asserted against the directory listing.
     const COMMAND_SOURCES: &[(&str, &str)] = &[
         ("agent_commands.rs", include_str!("agent_commands.rs")),
+        (
+            "automation_commands.rs",
+            include_str!("automation_commands.rs"),
+        ),
         ("commands/mod.rs", include_str!("commands/mod.rs")),
         (
             "commands/android_ops.rs",
@@ -707,6 +803,10 @@ mod tests {
         ("commands/view.rs", include_str!("commands/view.rs")),
         ("farm_commands.rs", include_str!("farm_commands.rs")),
         ("flow_commands.rs", include_str!("flow_commands.rs")),
+        (
+            "orchestration_commands.rs",
+            include_str!("orchestration_commands.rs"),
+        ),
         (
             "interaction_commands.rs",
             include_str!("interaction_commands.rs"),
@@ -734,6 +834,10 @@ mod tests {
             "read: cached_agent_status, probes nothing",
         ),
         ("list_devices", "read: cached roster"),
+        (
+            "list_device_work_states",
+            "read: current in-memory lease owners, probes nothing",
+        ),
         ("get_stream_settings", "read: KV config"),
         ("latest_frame", "read: last frame already in memory"),
         ("view_endpoint", "read: the loopback URL"),
@@ -764,6 +868,9 @@ mod tests {
         ("list_op_logs", "read: DB"),
         ("analytics_summary", "read: DB aggregate"),
         ("api_docs", "read: static text"),
+        ("automation_list", "read: DB"),
+        ("automation_get", "read: DB"),
+        ("automation_schedule_list", "read: DB"),
         (
             "publish_readiness",
             "read-only: per-device readiness cho trang Đăng bài — không lease, không \
@@ -782,6 +889,11 @@ mod tests {
         ("flow_list_runs", "read: DB"),
         ("flow_get_run", "read: DB"),
         ("flow_read_artifact", "read: DB-keyed bytes, hash-verified"),
+        ("orchestration_list", "read: DB"),
+        ("orchestration_get", "read: DB"),
+        ("orchestration_validate", "pure compiler over DB profile revisions"),
+        ("orchestration_list_runs", "read: DB"),
+        ("orchestration_get_run", "read: DB"),
         ("interaction_parse_links", "pure: string parsing"),
         (
             "interaction_resolve_links",
@@ -1276,6 +1388,36 @@ mod tests {
         }
     }
 
+    #[test]
+    fn legacy_publish_steps_are_not_exposed_to_the_frontend() {
+        let lib = include_str!("lib.rs");
+        let at = lib
+            .find("generate_handler!")
+            .expect("lib.rs registers its commands with generate_handler!");
+        let tail = &lib[at..];
+        let open = tail.find('[').expect("generate_handler![ ... ]");
+        let close = tail.find(']').expect("generate_handler![ ... ]");
+        let handler = &tail[open + 1..close];
+        let api = include_str!("../../src/api.ts");
+        let catalog = include_str!("farm_commands.rs");
+
+        for command in ["publish_prepare", "publish_transfer", "publish_post"] {
+            assert!(
+                !handler.contains(command),
+                "legacy `{command}` still bypasses the one-confirm publish pipeline"
+            );
+            assert!(
+                !api.contains(&format!("\"{command}\"")),
+                "api.ts still exposes legacy `{command}`"
+            );
+            assert!(
+                !catalog.contains(&format!("- {command}"))
+                    && !catalog.contains(&format!("/ {command}")),
+                "local API catalog still advertises legacy `{command}`"
+            );
+        }
+    }
+
     /// **Every Android-only command holds the phone, or names itself and says why not.**
     ///
     /// The hole this closes: `commands/android_ops.rs` held admission on all twenty-four of its
@@ -1358,9 +1500,11 @@ mod tests {
         let exit_flow = &source[run_start..run_end];
         let ordered = [
             "state.reject_new_work()",
+            "orchestration_commands::shutdown_automation_schedule_runner",
             "state.nurture.begin_shutdown()",
             "state.flows.stop_all()",
             "state.jobs.stop_all()",
+            "orchestration_commands::shutdown_orchestration_runs",
             "state.wait_for_mutating_commands()",
             "state.close_all_overlay_sessions()",
             "state.shutdown_android_views()",

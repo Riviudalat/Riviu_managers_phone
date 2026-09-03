@@ -1,6 +1,8 @@
 use riviu_core::{
+    AutomationConfigSecret, AutomationDefinitionArchived, AutomationDefinitionNotFound,
+    AutomationRevisionConflict, AutomationScheduleConflict, AutomationScheduleNotFound,
     DeviceControlError, DeviceWorkOwner, FlowNotFound, FlowRetryError, FlowRuntimeError,
-    FlowSelectionError, RevisionConflict,
+    FlowSelectionError, OrchestrationNotFound, OrchestrationRevisionConflict, RevisionConflict,
 };
 use riviu_script_engine::FlowCompileError;
 use serde::Serialize;
@@ -76,6 +78,30 @@ impl CommandError {
     }
 
     pub fn from_service(error: anyhow::Error) -> Self {
+        if let Some(secret) = error.downcast_ref::<AutomationConfigSecret>() {
+            return Self::code("SecretFieldRejected", secret.to_string());
+        }
+        if let Some(not_found) = error.downcast_ref::<AutomationDefinitionNotFound>() {
+            return Self::code("AutomationDefinitionNotFound", not_found.to_string());
+        }
+        if let Some(archived) = error.downcast_ref::<AutomationDefinitionArchived>() {
+            return Self::code("AutomationDefinitionArchived", archived.to_string());
+        }
+        if let Some(conflict) = error.downcast_ref::<AutomationRevisionConflict>() {
+            return Self::code("AutomationRevisionConflict", conflict.to_string());
+        }
+        if let Some(not_found) = error.downcast_ref::<AutomationScheduleNotFound>() {
+            return Self::code("AutomationScheduleNotFound", not_found.to_string());
+        }
+        if let Some(conflict) = error.downcast_ref::<AutomationScheduleConflict>() {
+            return Self::code("AutomationScheduleConflict", conflict.to_string());
+        }
+        if let Some(not_found) = error.downcast_ref::<OrchestrationNotFound>() {
+            return Self::code("OrchestrationNotFound", not_found.to_string());
+        }
+        if let Some(conflict) = error.downcast_ref::<OrchestrationRevisionConflict>() {
+            return Self::code("OrchestrationRevisionConflict", conflict.to_string());
+        }
         if let Some(conflict) = error.downcast_ref::<RevisionConflict>() {
             return Self::code("RevisionConflict", conflict.to_string());
         }
