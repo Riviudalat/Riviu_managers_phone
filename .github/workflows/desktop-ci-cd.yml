@@ -278,6 +278,14 @@ jobs:
           python -m pip check
           npm ci --prefix apps/desktop
 
+      - name: Verify Mobile MCP canary integration
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm --prefix apps/desktop run test:mobile-mcp
+          npm --prefix apps/desktop run mobile-mcp:check
+          npm --prefix apps/desktop run mobile-mcp:probe
+
       - name: Fetch yt-dlp sidecar
         shell: bash
         run: |

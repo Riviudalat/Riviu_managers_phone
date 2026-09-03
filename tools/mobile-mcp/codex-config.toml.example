@@ -1,0 +1,6 @@
+[mcp_servers.riviu-mobile-canary]
+command = "npm"
+args = ["--prefix", "apps/desktop", "run", "mobile-mcp"]
+cwd = "C:/absolute/path/to/Riviu_managers_phone"
+startup_timeout_sec = 30
+tool_timeout_sec = 120

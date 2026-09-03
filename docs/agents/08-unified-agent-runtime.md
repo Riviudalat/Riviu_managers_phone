@@ -609,3 +609,21 @@
   details. Mọi request thay theo profile/run/input phải có generation guard để
   response cũ không ghi đè lựa chọn mới; tab/panel và state Loading/Error/Empty/
   Data phải giữ contract ARIA và retry.
+
+#### 14.11 Mobile MCP chỉ là dụng cụ canary, không phải control plane (04/09/2026; xem §9.143)
+
+- `@mobilenext/mobile-mcp` được pin chính xác trong `devDependencies` và lockfile,
+  không nằm trong Tauri resource, MSI hoặc NSIS. Máy cài Riviu không cần Node hoặc
+  Mobile MCP; công cụ này chỉ phục vụ agent phát triển đọc accessibility tree, chụp
+  màn hình, quay màn hình, đọc crash và thu fixture trên một máy bỏ được.
+- Chỉ khởi động qua `scripts/run_mobile_mcp.mjs` bằng stdio. Wrapper cấm `--listen`,
+  tắt Mobile MCP/Mobilewright telemetry, bỏ unsafe URL scheme và dùng local legacy
+  robot. Không dùng remote/cloud tool trong dự án này.
+- Wrapper chọn adb theo thứ tự development của Riviu: `RIVIU_ADB_PATH ->
+  ANDROID_SDK_ROOT -> ANDROID_HOME -> PATH -> bundled`, probe binary rồi đặt nó
+  trong SDK shim content-addressed ở `target/`. Không ghi đè một `adb.exe` đang bị
+  server giữ handle và không để hai bản adb âm thầm giết server của nhau.
+- Mobile MCP không có lease, effect intent, audit hoặc reconciliation của Riviu.
+  Dừng desktop trước khi dùng cùng thiết bị; không chạy Like, Save, Comment, Follow
+  hay Post qua MCP. Fixture đã đo phải được mã hóa lại trong adapter Riviu và action
+  production vẫn đi qua `DeviceControlPlane`.
