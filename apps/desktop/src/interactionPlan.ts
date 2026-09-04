@@ -76,6 +76,8 @@ export interface DraftIssue {
     | "maxWords"
     | "plan";
   message: string;
+  /** Backend refusal retained for diagnostics, but never shown as the operator-facing title. */
+  technicalDetail?: string;
   /** A value that would resolve it, when there is exactly one obvious value. */
   fix?: { label: string; messageCount: number };
 }
@@ -306,7 +308,12 @@ export function validateDraft(
   // visibly wrong. A refusal the panel has no field for is still worth showing: that one is a
   // rule this copy does not know about.
   if (context.planError && issues.length === 0) {
-    issues.push({ field: "plan", message: interactionErrorVi(context.planError).title });
+    const view = interactionErrorVi(context.planError);
+    issues.push({
+      field: "plan",
+      message: view.title,
+      technicalDetail: view.raw,
+    });
   }
 
   return issues;

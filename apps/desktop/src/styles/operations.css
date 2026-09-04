@@ -1,0 +1,398 @@
+.operations-page {
+  display: grid;
+  gap: 0.9rem;
+  min-width: 0;
+}
+
+.operations-toolbar {
+  display: grid;
+  grid-template-columns: minmax(240px, 1fr) auto auto;
+  align-items: end;
+  gap: 0.6rem;
+  padding: 0.8rem;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--bg-elevated);
+}
+
+.operations-file-field {
+  display: grid;
+  gap: 0.35rem;
+  min-width: 0;
+  color: var(--text-2);
+  font-size: var(--text-sm);
+}
+
+.operations-file-field input {
+  width: 100%;
+}
+
+.operations-toolbar button,
+.operations-card-actions button,
+.operations-results button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.35rem;
+}
+
+.operations-list-section,
+.operations-results {
+  display: grid;
+  gap: 0.65rem;
+  min-width: 0;
+}
+
+.operations-list-section > header,
+.operations-results > header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.65rem;
+}
+
+.operations-list-section > header > div,
+.operations-results > header > div {
+  display: grid;
+  gap: 0.1rem;
+}
+
+.operations-list-section > header span,
+.operations-results > header span,
+.operations-card-title > div > span {
+  color: var(--text-3);
+  font-size: var(--text-sm);
+}
+
+.operations-card-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 0.65rem;
+}
+
+.operations-card,
+.operations-result-list article {
+  min-width: 0;
+  padding: 0.8rem;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--bg-elevated);
+}
+
+.operations-card-title,
+.operations-card-actions,
+.operations-result-list article > div:first-child {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.55rem;
+}
+
+.operations-card-title > div {
+  display: grid;
+  gap: 0.1rem;
+  min-width: 0;
+}
+
+.operations-card-title strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.operations-card-actions {
+  margin-top: 0.75rem;
+}
+
+.operations-card details,
+.operations-result-list details {
+  margin-top: 0.55rem;
+  color: var(--text-2);
+  font-size: var(--text-sm);
+}
+
+.operations-card code,
+.operations-result-list code {
+  display: block;
+  margin-top: 0.35rem;
+  overflow-wrap: anywhere;
+}
+
+.operations-result-list {
+  display: grid;
+  gap: 0.4rem;
+}
+
+.operations-result-list article {
+  padding: 0.65rem 0.75rem;
+}
+
+.operations-summary {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(120px, 1fr)) auto;
+  gap: 0.55rem;
+  align-items: stretch;
+}
+
+.operations-summary > div {
+  display: grid;
+  gap: 0.15rem;
+  padding: 0.65rem 0.75rem;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--bg-elevated);
+}
+
+.operations-summary span {
+  color: var(--text-3);
+  font-size: var(--text-sm);
+}
+
+.operations-summary strong {
+  color: var(--text-1);
+  font-size: var(--text-xl);
+  font-variant-numeric: tabular-nums;
+}
+
+.operations-monitor {
+  display: grid;
+  grid-template-columns: minmax(290px, 0.8fr) minmax(360px, 1.2fr);
+  min-height: 380px;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--bg-elevated);
+}
+
+.operations-monitor-list {
+  min-width: 0;
+  padding: 0.7rem;
+  border-right: 1px solid var(--line);
+}
+
+.operations-filterbar {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 0.45rem;
+  margin-bottom: 0.6rem;
+}
+
+.operations-filterbar label {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  min-width: 0;
+  padding-left: 0.5rem;
+  border: 1px solid var(--line-strong);
+  border-radius: 5px;
+}
+
+.operations-filterbar label:focus-within {
+  border-color: var(--primary);
+  box-shadow: 0 0 0 2px var(--primary-100);
+}
+
+.operations-filterbar input {
+  min-width: 0;
+  width: 100%;
+  border: 0;
+  outline: 2px solid transparent;
+  outline-offset: 2px;
+}
+
+.operations-run-list {
+  display: grid;
+  gap: 0.25rem;
+  max-height: 52vh;
+  overflow: auto;
+}
+
+.operations-run-list > button {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.6rem;
+  width: 100%;
+  padding: 0.6rem;
+  border-color: transparent;
+  background: transparent;
+  color: var(--text-1);
+  text-align: left;
+}
+
+.operations-run-list > button:hover,
+.operations-run-list > button.is-active {
+  border-color: var(--line);
+  background: var(--primary-50);
+}
+
+.operations-run-list > button > span:first-child {
+  display: grid;
+  min-width: 0;
+}
+
+.operations-run-list strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.operations-run-list small,
+.operations-monitor-detail header span,
+.operations-timeline small {
+  color: var(--text-3);
+}
+
+.operations-monitor-detail {
+  min-width: 0;
+  padding: 0.9rem;
+  overflow: auto;
+}
+
+.operations-monitor-detail > header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.65rem;
+  margin-bottom: 0.8rem;
+}
+
+.operations-monitor-detail > header > div {
+  display: grid;
+  gap: 0.1rem;
+}
+
+.operations-timeline {
+  display: grid;
+  gap: 0;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.operations-timeline li {
+  display: grid;
+  grid-template-columns: 14px minmax(0, 1fr);
+  gap: 0.6rem;
+  padding: 0.55rem 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.operations-timeline li > span {
+  width: 10px;
+  height: 10px;
+  margin-top: 0.3rem;
+  border: 2px solid var(--line-strong);
+  border-radius: 50%;
+}
+
+.operations-timeline li.succeeded > span {
+  border-color: var(--ok);
+  background: var(--ok);
+}
+
+.operations-timeline li.failed > span {
+  border-color: var(--danger);
+  background: var(--danger);
+}
+
+.operations-timeline li.running > span {
+  border-color: var(--primary);
+  background: var(--primary);
+}
+
+.operations-timeline li > div {
+  display: grid;
+  gap: 0.1rem;
+}
+
+.operations-timeline details,
+.operations-technical-details {
+  margin-top: 0.35rem;
+  color: var(--text-2);
+  font-size: var(--text-sm);
+}
+
+.operations-timeline code,
+.operations-technical-details code {
+  display: block;
+  margin-top: 0.25rem;
+  overflow-wrap: anywhere;
+}
+
+.operations-advanced {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--bg-elevated);
+}
+
+.operations-advanced > summary {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.7rem 0.8rem;
+  cursor: pointer;
+  color: var(--text-2);
+  font-weight: 600;
+}
+
+.operations-advanced > div {
+  display: grid;
+  gap: 0.65rem;
+  padding: 0 0.8rem 0.8rem;
+}
+
+.operations-advanced label {
+  display: grid;
+  gap: 0.3rem;
+  color: var(--text-2);
+  font-size: var(--text-sm);
+}
+
+.pill.succeeded {
+  background: var(--ok-soft);
+  color: var(--ok);
+}
+
+.pill.failed {
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+
+@media (max-width: 820px) {
+  .operations-toolbar {
+    grid-template-columns: 1fr;
+    align-items: stretch;
+  }
+
+  .operations-toolbar button,
+  .operations-card-actions .primary {
+    width: 100%;
+  }
+
+  .operations-list-section > header,
+  .operations-results > header {
+    align-items: flex-start;
+  }
+
+  .operations-summary {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .operations-summary > button {
+    grid-column: 1 / -1;
+  }
+
+  .operations-monitor {
+    grid-template-columns: 1fr;
+  }
+
+  .operations-monitor-list {
+    border-right: 0;
+    border-bottom: 1px solid var(--line);
+  }
+
+  .operations-run-list {
+    max-height: 220px;
+  }
+}

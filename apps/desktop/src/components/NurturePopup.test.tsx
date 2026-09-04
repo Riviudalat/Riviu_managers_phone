@@ -145,6 +145,9 @@ const blankStatus: NurtureSessionStatus = {
   videoTarget: 0,
   startedAt: null,
   deadlineAt: null,
+  cleanupState: "pending",
+  cleanupProof: null,
+  cleanupError: null,
 };
 
 /** Opens the panel with one device already reporting a status, so a row exists to click.
@@ -180,6 +183,11 @@ async function openWithRow(
       videoTarget: 12,
       startedAt: new Date(Date.now() - 60_000).toISOString(),
       deadlineAt: new Date(Date.now() + 3_600_000).toISOString(),
+      cleanupState: running ? "pending" : "processAbsent",
+      cleanupProof: running
+        ? null
+        : { bundleId: "com.ss.iphone.ugc.Ame", oldPid: 741 },
+      cleanupError: null,
       ...over,
     },
   ]);
@@ -233,6 +241,24 @@ const slider = (name: string) => screen.getByLabelText(`${name} thanh kéo phầ
 const box = (name: string) => screen.getByLabelText(`${name} phần trăm`);
 
 describe("NurturePopup", () => {
+  it("unsubscribes when the async event subscription resolves after unmount", async () => {
+    const api = await import("../api");
+    let resolveListen!: (unlisten: () => void) => void;
+    const unlisten = vi.fn();
+    vi.mocked(api.listenRiviuEvents).mockImplementationOnce(
+      () => new Promise((resolve) => { resolveListen = resolve; }),
+    );
+    const view = render(
+      <NurturePopup devices={devices} selected={[]} metas={new Map()} surface="page" />,
+    );
+    await waitFor(() => expect(api.listenRiviuEvents).toHaveBeenCalledTimes(1));
+
+    view.unmount();
+    resolveListen(unlisten);
+
+    await waitFor(() => expect(unlisten).toHaveBeenCalledTimes(1));
+  });
+
   it("shows a typed bootstrap error and retries without remounting the workspace", async () => {
     const api = await import("../api");
     vi.mocked(api.nurtureGetSettings)
@@ -1002,7 +1028,9 @@ describe("independent nurture rates", () => {
 
   it("gives each running device its own bar, labelled by the bound that governs it", async () => {
     await openWithRow(true, { videosDone: 3, videoTarget: 12 });
-    const bar = await screen.findByRole("progressbar", { name: "Tiến trình mock-1" });
+    const bar = await screen.findByRole("progressbar", {
+      name: "Tiến trình Máy 1 · iPhone Mock 01",
+    });
     expect(bar).toHaveAttribute("aria-valuenow", "25");
     // The video count is ahead of one minute out of an hour, so the label names videos.
     expect(screen.getByText("3/12 video")).toBeVisible();
@@ -1019,7 +1047,9 @@ describe("independent nurture rates", () => {
       startedAt: new Date(Date.now() - 110 * 60_000).toISOString(),
       deadlineAt: new Date(Date.now() + 10 * 60_000).toISOString(),
     });
-    const bar = await screen.findByRole("progressbar", { name: "Tiến trình mock-1" });
+    const bar = await screen.findByRole("progressbar", {
+      name: "Tiến trình Máy 1 · iPhone Mock 01",
+    });
     expect(Number(bar.getAttribute("aria-valuenow"))).toBeGreaterThan(80);
     expect(screen.getByText(/còn ~10 phút/)).toBeVisible();
   });
@@ -1078,5 +1108,59 @@ describe("independent nurture rates", () => {
 
     await waitFor(() => expect(screen.getByText("tự khôi phục")).toBeVisible());
     expect(screen.queryByRole("progressbar")).toBeNull();
+  });
+
+  it("shows a typed process-absence proof only in the selected device detail", async () => {
+    const api = await import("../api");
+    vi.mocked(api.nurtureSessionStatus).mockResolvedValueOnce([{
+      ...blankStatus,
+      udid: "mock-1",
+      phase: "finished",
+      outcome: "done",
+      lastMessage: "done — 12/12 video",
+      cleanupState: "processAbsent",
+      cleanupProof: { bundleId: "com.ss.iphone.ugc.Ame", oldPid: 741 },
+      cleanupError: null,
+    }]);
+    render(
+      <NurturePopup devices={devices} selected={[]} metas={new Map()} surface="page" />,
+    );
+
+    fireEvent.click(await screen.findByRole("tab", { name: "Theo dõi" }));
+    expect(screen.queryByText("TikTok đã tắt")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: /Máy 1 · iPhone Mock 01/ }));
+
+    expect(screen.getByText("TikTok đã tắt")).toBeVisible();
+    const deviceDetails = screen.getByRole("group", { name: "Chi tiết kỹ thuật thiết bị" });
+    const rawUdid = within(deviceDetails).getByText("mock-1");
+    expect(rawUdid).not.toBeVisible();
+    fireEvent.click(within(deviceDetails).getByText("Chi tiết thiết bị"));
+    expect(rawUdid).toBeVisible();
+    fireEvent.click(screen.getByText("Chứng cứ tiến trình"));
+    expect(screen.getByText("com.ss.iphone.ugc.Ame")).toBeVisible();
+    expect(screen.getByText("741")).toBeVisible();
+  });
+
+  it("fails closed when cleanup has no process-absence proof", async () => {
+    const api = await import("../api");
+    vi.mocked(api.nurtureSessionStatus).mockResolvedValueOnce([{
+      ...blankStatus,
+      udid: "mock-1",
+      phase: "finished",
+      outcome: "partial",
+      lastMessage: "partial — lỗi dọn TikTok",
+      cleanupState: "failed",
+      cleanupProof: null,
+      cleanupError: "không đọc được trạng thái tiến trình",
+    }]);
+    render(
+      <NurturePopup devices={devices} selected={[]} metas={new Map()} surface="page" />,
+    );
+
+    fireEvent.click(await screen.findByRole("tab", { name: "Theo dõi" }));
+    fireEvent.click(screen.getByRole("button", { name: /Máy 1 · iPhone Mock 01/ }));
+    expect(screen.getByText("Chưa xác nhận được TikTok đã tắt")).toBeVisible();
+    fireEvent.click(screen.getByText("Chi tiết lỗi"));
+    expect(screen.getByRole("alert")).toHaveTextContent("không đọc được trạng thái tiến trình");
   });
 });

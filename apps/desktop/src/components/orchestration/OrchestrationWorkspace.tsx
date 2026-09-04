@@ -133,6 +133,7 @@ function rebuildDocument(document: OrchestrationDocumentV1): OrchestrationDocume
     ...node,
     position: { x: 40 + index * 240, y: 80 },
   }));
+  const nodeIndex = new Map(nodes.map((node, index) => [node.id, index]));
   const edges = nodes.slice(0, -1).flatMap((source, index) => {
     const target = nodes[index + 1];
     const branches: OrchestrationBranch[] = isCampaign(source)
@@ -141,7 +142,12 @@ function rebuildDocument(document: OrchestrationDocumentV1): OrchestrationDocume
     return branches.map((sourcePort) => ({
       sourceNodeId: source.id,
       sourcePort,
-      targetNodeId: target.id,
+      targetNodeId: document.edges.find((edge) =>
+        edge.sourceNodeId === source.id
+        && edge.sourcePort === sourcePort
+        && nodeIndex.has(edge.targetNodeId)
+        && (nodeIndex.get(edge.targetNodeId) ?? 0) > index
+      )?.targetNodeId ?? target.id,
     }));
   });
   return { ...document, entryNodeId: start.id, nodes, edges };
@@ -178,6 +184,11 @@ export function OrchestrationWorkspace({
   const [mode, setMode] = useState<"setup" | "monitor">("setup");
   const [runs, setRuns] = useState<OrchestrationRunRecord[]>([]);
   const [selectedRun, setSelectedRun] = useState<OrchestrationRunDetail | null>(null);
+  const [profileChoice, setProfileChoice] = useState<Record<AutomationKind, string>>({
+    nurture: "",
+    interaction: "",
+    publish: "",
+  });
   const selectedRunId = useRef<string | null>(null);
   const selectedDocumentId = useRef<string | null>(null);
 
@@ -252,7 +263,9 @@ export function OrchestrationWorkspace({
   }, [dirty]);
 
   const addCampaign = useCallback((kind: AutomationKind) => {
-    const profile = profiles.find((candidate) => candidate.kind === kind);
+    const profile = profiles.find((candidate) =>
+      candidate.kind === kind && candidate.id === profileChoice[kind]
+    );
     if (!profile) return;
     edit((current) => {
       const endIndex = current.nodes.findIndex((node) => node.kind === "end");
@@ -263,22 +276,39 @@ export function OrchestrationWorkspace({
         position: { x: 0, y: 0 },
       };
       const nodes = [...current.nodes];
+      const predecessor = endIndex > 0 ? nodes[endIndex - 1] : null;
       nodes.splice(endIndex < 0 ? nodes.length : endIndex, 0, node);
-      return { ...current, nodes };
+      const edges = predecessor
+        ? current.edges.map((edge) =>
+            edge.sourceNodeId === predecessor.id && edge.sourcePort === "done"
+              ? { ...edge, targetNodeId: node.id }
+              : edge
+          )
+        : current.edges;
+      return { ...current, nodes, edges };
     });
-  }, [edit, profiles]);
+  }, [edit, profileChoice, profiles]);
 
   const addDelay = useCallback(() => {
     edit((current) => {
       const endIndex = current.nodes.findIndex((node) => node.kind === "end");
       const nodes = [...current.nodes];
-      nodes.splice(endIndex < 0 ? nodes.length : endIndex, 0, {
+      const predecessor = endIndex > 0 ? nodes[endIndex - 1] : null;
+      const node: OrchestrationNode = {
         id: randomId(),
         kind: "delay",
         durationMs: 5_000,
         position: { x: 0, y: 0 },
-      });
-      return { ...current, nodes };
+      };
+      nodes.splice(endIndex < 0 ? nodes.length : endIndex, 0, node);
+      const edges = predecessor
+        ? current.edges.map((edge) =>
+            edge.sourceNodeId === predecessor.id && edge.sourcePort === "done"
+              ? { ...edge, targetNodeId: node.id }
+              : edge
+          )
+        : current.edges;
+      return { ...current, nodes, edges };
     });
   }, [edit]);
 
@@ -459,7 +489,18 @@ export function OrchestrationWorkspace({
   }, [document, savedRevision]);
 
   const campaignCount = document?.nodes.filter(isCampaign).length ?? 0;
-  const canSave = Boolean(document?.name.trim()) && campaignCount > 0 && !busy;
+  const routesComplete = document?.nodes.every((node) => {
+    if (node.kind === "end") return true;
+    const branches: OrchestrationBranch[] = isCampaign(node)
+      ? ["done", "partial", "failed", "uncertain"]
+      : ["done"];
+    return branches.every((branch) =>
+      document.edges.some((edge) =>
+        edge.sourceNodeId === node.id && edge.sourcePort === branch
+      )
+    );
+  }) ?? false;
+  const canSave = Boolean(document?.name.trim()) && campaignCount > 0 && routesComplete && !busy;
   const profilesByKind = useMemo(
     () => ({
       nurture: profiles.filter((profile) => profile.kind === "nurture"),
@@ -614,15 +655,37 @@ export function OrchestrationWorkspace({
 
             <div className="orchestration-add" aria-label="Thêm bước">
               <button type="button" onClick={addDelay}><Clock3 size={15} /> Thêm Chờ</button>
-              <button type="button" disabled={!profilesByKind.nurture.length} onClick={() => addCampaign("nurture")}>
-                <Heart size={15} /> Thêm Nuôi TikTok
-              </button>
-              <button type="button" disabled={!profilesByKind.interaction.length} onClick={() => addCampaign("interaction")}>
-                <MessageCircle size={15} /> Thêm Tương tác
-              </button>
-              <button type="button" disabled={!profilesByKind.publish.length} onClick={() => addCampaign("publish")}>
-                <Send size={15} /> Thêm Đăng bài
-              </button>
+              {(["nurture", "interaction", "publish"] as const).map((kind) => {
+                const Icon = kind === "nurture" ? Heart : kind === "interaction" ? MessageCircle : Send;
+                return (
+                  <div className="orchestration-add-campaign" key={kind}>
+                    <select
+                      aria-label={`Chọn hồ sơ ${CAMPAIGN_LABEL[kind]} để thêm`}
+                      value={profileChoice[kind]}
+                      disabled={!profilesByKind[kind].length}
+                      onChange={(event) => setProfileChoice((current) => ({
+                        ...current,
+                        [kind]: event.target.value,
+                      }))}
+                    >
+                      <option value="">Chọn hồ sơ {CAMPAIGN_LABEL[kind]}</option>
+                      {profilesByKind[kind].map((profile) => (
+                        <option key={profile.id} value={profile.id}>
+                          {profile.name} · bản {profile.latestRevision}
+                        </option>
+                      ))}
+                    </select>
+                    <button
+                      type="button"
+                      aria-label={`Thêm ${CAMPAIGN_LABEL[kind]}`}
+                      disabled={!profileChoice[kind]}
+                      onClick={() => addCampaign(kind)}
+                    >
+                      <Icon size={15} /> Thêm
+                    </button>
+                  </div>
+                );
+              })}
             </div>
 
             {profiles.length === 0 && (
@@ -698,7 +761,47 @@ export function OrchestrationWorkspace({
                           <strong>Bản {node.profile.revision}</strong>
                         </div>
                         <div className="orchestration-branches" aria-label="Nhánh kết quả">
-                          {OUTCOMES.map((outcome) => <span key={outcome.branch}>{outcome.label}</span>)}
+                          {OUTCOMES.map((outcome) => {
+                            const sourceIndex = document.nodes.findIndex((candidate) => candidate.id === node.id);
+                            const destinations = document.nodes.slice(sourceIndex + 1);
+                            const edge = document.edges.find((candidate) =>
+                              candidate.sourceNodeId === node.id
+                              && candidate.sourcePort === outcome.branch
+                            );
+                            return (
+                              <label key={outcome.branch}>
+                                <span>{outcome.label}</span>
+                                <select
+                                  aria-label={`Đích khi ${outcome.label} của bước ${index}`}
+                                  value={edge?.targetNodeId ?? ""}
+                                  onChange={(event) => edit((current) => ({
+                                    ...current,
+                                    edges: [
+                                      ...current.edges.filter((candidate) =>
+                                        candidate.sourceNodeId !== node.id
+                                        || candidate.sourcePort !== outcome.branch
+                                      ),
+                                      {
+                                        sourceNodeId: node.id,
+                                        sourcePort: outcome.branch,
+                                        targetNodeId: event.target.value,
+                                      },
+                                    ],
+                                  }))}
+                                >
+                                  {destinations.map((destination, destinationIndex) => (
+                                    <option key={destination.id} value={destination.id}>
+                                      {destination.kind === "end"
+                                        ? "Kết thúc"
+                                        : `Bước ${sourceIndex + destinationIndex + 1} · ${destination.kind === "delay"
+                                            ? "Chờ"
+                                            : CAMPAIGN_LABEL[nodeKind(destination)!]}`}
+                                    </option>
+                                  ))}
+                                </select>
+                              </label>
+                            );
+                          })}
                         </div>
                       </>
                     ) : null}

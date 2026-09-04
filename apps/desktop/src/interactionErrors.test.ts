@@ -57,7 +57,7 @@ describe("interactionErrorVi", () => {
     const view = interactionErrorVi(
       "parent_identity_not_confirmed_at_ordinal_99999999999999999999",
     );
-    expect(view.title).toBe("parent_identity_not_confirmed_at_ordinal_99999999999999999999");
+    expect(view.title).toBe("Lỗi tương tác chưa xác định");
     // …while a real one still reads as a one-based position.
     expect(
       interactionErrorVi("parent_identity_not_confirmed_at_ordinal_2").title,
@@ -89,10 +89,12 @@ describe("interactionErrorVi", () => {
     expect(interactionErrorVi("target_open_something_new").title).toBe("Không mở được bài");
   });
 
-  it("passes an unrecognised reason through rather than replacing it with a guess", () => {
-    // The campaign-level code is a free-text anyhow chain and is often already Vietnamese.
+  it("gives an unrecognised reason a Vietnamese headline and retains the raw diagnostic", () => {
     const raw = "AI API key chưa được cấu hình cho Interaction";
-    expect(interactionErrorVi(raw)).toEqual({ title: raw, raw });
+    expect(interactionErrorVi(raw)).toEqual({
+      title: "Lỗi tương tác chưa xác định",
+      raw,
+    });
   });
 
   it("always carries the raw code, because that is what a bug report is written from", () => {

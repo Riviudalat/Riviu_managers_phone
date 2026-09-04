@@ -1,4 +1,4 @@
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -58,16 +58,17 @@ describe("FleetDiagnosticsPage", () => {
     expect(screen.getAllByRole("status")[0]).toHaveTextContent("Đang kiểm tra 1 máy");
     resolve(report());
 
-    expect(await screen.findByText("Máy 7 · R12 · 23021RAAEG")).toBeVisible();
-    const overview = screen.getByRole("list", { name: "Trạng thái kiểm tra Máy 7 · R12 · 23021RAAEG" });
+    const row = await screen.findByRole("row", { name: "Máy 7 · R12 · 23021RAAEG" });
+    expect(row).toHaveTextContent("Máy 7 · R12");
+    expect(row).toHaveTextContent("23021RAAEG");
+    await userEvent.click(screen.getByRole("button", { name: "Xem chi tiết Máy 7 · R12 · 23021RAAEG" }));
+    const drawer = screen.getByRole("dialog", { name: "Máy 7 · R12 · 23021RAAEG" });
+    const overview = within(drawer).getByRole("list", { name: "Trạng thái kiểm tra Máy 7 · R12 · 23021RAAEG" });
     expect(overview).toHaveTextContent("Agent đã ghi nhận");
     expect(overview).toHaveTextContent("Đạt");
-    const details = screen.getByRole("group", { name: "Bằng chứng kỹ thuật Máy 7 · R12 · 23021RAAEG" });
-    expect(details).not.toHaveAttribute("open");
-    await userEvent.click(screen.getByText("Bằng chứng kỹ thuật"));
-    expect(details).toHaveAttribute("open");
-    expect(details).toHaveTextContent("Agent đã ghi nhận");
-    expect(details).toHaveTextContent("Probe answered from cache");
+    const evidence = within(drawer).getAllByText("Bằng chứng kỹ thuật");
+    await userEvent.click(evidence[0]);
+    expect(drawer).toHaveTextContent("Probe answered from cache");
   });
 
   it("shows an explicit unknown label, never a negative answer, when a probe was not answered", async () => {
@@ -79,6 +80,8 @@ describe("FleetDiagnosticsPage", () => {
     }));
     render(<FleetDiagnosticsPage devices={[device]} metas={metas} />);
 
+    await screen.findByRole("row", { name: "Máy 7 · R12 · 23021RAAEG" });
+    await userEvent.click(screen.getByRole("button", { name: "Xem chi tiết Máy 7 · R12 · 23021RAAEG" }));
     await waitFor(() => expect(screen.getAllByText("Chưa hỏi được").length).toBeGreaterThan(0));
     expect(screen.queryByText("No")).toBeNull();
     expect(screen.queryByText("Không")).toBeNull();
@@ -88,7 +91,9 @@ describe("FleetDiagnosticsPage", () => {
     readHealth.mockRejectedValueOnce(new Error("cable disconnected"));
     render(<FleetDiagnosticsPage devices={[device]} metas={metas} />);
 
-    expect(await screen.findByText("Không đọc được trạng thái máy. Hãy kiểm lại.")).toBeVisible();
+    await waitFor(() => expect(screen.getAllByText("Không đọc được")).toHaveLength(4));
+    await userEvent.click(screen.getByRole("button", { name: "Xem chi tiết Máy 7 · R12 · 23021RAAEG" }));
+    expect(screen.getByText("Không đọc được trạng thái máy. Hãy kiểm lại.")).toBeVisible();
     expect(screen.getByText("cable disconnected")).not.toBeVisible();
     await userEvent.click(screen.getByText("Chi tiết lỗi"));
     expect(await screen.findByText("cable disconnected")).toBeVisible();
@@ -96,7 +101,6 @@ describe("FleetDiagnosticsPage", () => {
     await userEvent.click(screen.getByRole("button", { name: "Kiểm lại Máy 7 · R12 · 23021RAAEG" }));
 
     await waitFor(() => expect(readHealth).toHaveBeenCalledTimes(2));
-    await userEvent.click(screen.getByText("Bằng chứng kỹ thuật"));
     expect(await screen.findByText("Sẵn sàng trong cache")).toBeVisible();
   });
 
@@ -114,6 +118,28 @@ describe("FleetDiagnosticsPage", () => {
     await waitFor(() => expect(screen.getByText("1/1 máy đã có kết quả")).toBeVisible());
   });
 
+  it("drops a row retry response after the roster generation changes", async () => {
+    let resolveRetry!: (value: DeviceHealthReport) => void;
+    const replacement = { ...device, udid: "redmi-2", name: "Redmi 13C" };
+    readHealth
+      .mockResolvedValueOnce(report())
+      .mockImplementationOnce(() => new Promise<DeviceHealthReport>((resolve) => { resolveRetry = resolve; }))
+      .mockResolvedValueOnce({ ...report(), udid: "redmi-2", tiktokVersion: "current-roster" });
+    const { rerender } = render(<FleetDiagnosticsPage devices={[device]} metas={metas} />);
+    await screen.findByRole("row", { name: "Máy 7 · R12 · 23021RAAEG" });
+    await userEvent.click(screen.getByRole("button", { name: "Kiểm lại Máy 7 · R12 · 23021RAAEG" }));
+    await waitFor(() => expect(readHealth).toHaveBeenCalledTimes(2));
+
+    rerender(<FleetDiagnosticsPage devices={[replacement]} metas={[]} />);
+    await waitFor(() => expect(readHealth).toHaveBeenCalledTimes(3));
+    expect(await screen.findByRole("row", { name: /Máy 1 · Redmi 13C/ })).toBeVisible();
+
+    resolveRetry(report({ tiktokVersion: "stale-retry" }));
+    await Promise.resolve();
+    expect(screen.queryByText("stale-retry")).toBeNull();
+    expect(screen.getByRole("row", { name: /Máy 1 · Redmi 13C/ })).toBeVisible();
+  });
+
   it("shows the empty state without starting any device command", () => {
     render(<FleetDiagnosticsPage devices={[]} metas={[]} />);
 
@@ -125,7 +151,7 @@ describe("FleetDiagnosticsPage", () => {
     readHealth.mockResolvedValueOnce(report());
     const onExport = vi.fn();
     render(<FleetDiagnosticsPage devices={[device]} metas={metas} onExport={onExport} />);
-    await screen.findByText("Máy 7 · R12 · 23021RAAEG");
+    await screen.findByRole("row", { name: "Máy 7 · R12 · 23021RAAEG" });
 
     await userEvent.click(screen.getByRole("button", { name: "Xuất JSON" }));
     expect(onExport).toHaveBeenCalledWith(expect.stringContaining('"rows"'));

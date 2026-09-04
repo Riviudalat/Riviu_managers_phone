@@ -53,6 +53,7 @@ import { ProfileToolbar } from "./components/ProfileToolbar";
 import { SettingsPanel } from "./components/SettingsPanel";
 import { Sidebar } from "./components/Sidebar";
 import { TargetSelector } from "./components/TargetSelector";
+import { PageHeader, StatusChip } from "./components/WorkspacePrimitives";
 import { resolveAutomationTarget } from "./automationTargets";
 import {
   deviceMatchesFleetFilter,
@@ -100,6 +101,14 @@ type DeviceWorkOwnerProjection =
   | { state: "loading" }
   | { state: "known"; owners: Map<string, DeviceWorkOwner | null> }
   | { state: "error"; message: string };
+
+type PendingNavigation =
+  | { kind: "page"; value: PageId; settle: (activated: boolean) => void }
+  | {
+      kind: "automationView";
+      value: "device" | "orchestration";
+      settle: (activated: boolean) => void;
+    };
 
 /**
  * State for a surface opened against **one phone**, that closes itself — out loud — when that
@@ -162,6 +171,8 @@ function useDeviceSurface(
 
 function App() {
   const [page, setPage] = useState<PageId>("control");
+  const pageRef = useRef(page);
+  pageRef.current = page;
   const {
     devices,
     groups,
@@ -204,7 +215,12 @@ function App() {
   const [groupToolsOpen, setGroupToolsOpen] = useState(false);
   const [groupsOpen, setGroupsOpen] = useState(false);
   const [flowDirty, setFlowDirty] = useState(false);
+  const flowDirtyRef = useRef(false);
   const [automationView, setAutomationView] = useState<"device" | "orchestration">("device");
+  const automationViewRef = useRef(automationView);
+  automationViewRef.current = automationView;
+  const pendingNavigationRef = useRef<PendingNavigation | null>(null);
+  const navigationDrainRef = useRef<Promise<void> | null>(null);
   const [automationTargetRef, setAutomationTargetRef] = useState<TargetRef>({ type: "all" });
   const [deviceWorkOwners, setDeviceWorkOwners] = useState<DeviceWorkOwnerProjection>({
     state: "loading",
@@ -274,31 +290,79 @@ function App() {
     [],
   );
 
+  const updateFlowDirty = useCallback((dirty: boolean) => {
+    flowDirtyRef.current = dirty;
+    setFlowDirty(dirty);
+  }, []);
+
+  const queueNavigation = useCallback(
+    (intent: Omit<PendingNavigation, "settle">): Promise<boolean> =>
+      new Promise<boolean>((settle) => {
+        // One pending destination is enough. A later click supersedes the destination but
+        // shares the open discard dialog, so a stale page cannot open after it is answered.
+        pendingNavigationRef.current?.settle(false);
+        pendingNavigationRef.current = { ...intent, settle } as PendingNavigation;
+        if (navigationDrainRef.current) return;
+
+        const drain = (async () => {
+          while (pendingNavigationRef.current) {
+            if (flowDirtyRef.current) {
+              const confirmed = await confirmDiscardFlow();
+              // Dirty state can change while the dialog awaits an answer. Read it again rather
+              // than deciding from the render that opened the dialog.
+              if (!pendingNavigationRef.current) return;
+              if (!confirmed && flowDirtyRef.current) {
+                const abandoned = pendingNavigationRef.current;
+                pendingNavigationRef.current = null;
+                abandoned.settle(false);
+                return;
+              }
+              if (flowDirtyRef.current) updateFlowDirty(false);
+            }
+
+            const latest = pendingNavigationRef.current;
+            pendingNavigationRef.current = null;
+            if (!latest) return;
+            if (latest.kind === "page") {
+              pageRef.current = latest.value;
+              setPage(latest.value);
+            } else {
+              automationViewRef.current = latest.value;
+              setAutomationView(latest.value);
+            }
+            latest.settle(true);
+          }
+        })();
+        navigationDrainRef.current = drain;
+        void drain.finally(() => {
+          if (navigationDrainRef.current === drain) navigationDrainRef.current = null;
+        });
+      }),
+    [confirmDiscardFlow, updateFlowDirty],
+  );
+
   const requestPage = useCallback(
     async (next: PageId) => {
-      if (next === page) return;
-      if (flowDirty) {
-        if (!(await confirmDiscardFlow())) return;
-        // The workspace is about to unmount, so it cannot publish a later `false` value.
-        // Leaving this latched made every subsequent sidebar click ask about the same draft.
-        setFlowDirty(false);
+      if (next === pageRef.current) {
+        pendingNavigationRef.current?.settle(false);
+        pendingNavigationRef.current = null;
+        return;
       }
-      setPage(next);
+      await queueNavigation({ kind: "page", value: next });
     },
-    [confirmDiscardFlow, flowDirty, page],
+    [queueNavigation],
   );
 
   const requestAutomationView = useCallback(
     async (next: "device" | "orchestration") => {
-      if (next === automationView) return true;
-      if (flowDirty) {
-        if (!(await confirmDiscardFlow())) return false;
-        setFlowDirty(false);
+      if (next === automationViewRef.current) {
+        pendingNavigationRef.current?.settle(false);
+        pendingNavigationRef.current = null;
+        return true;
       }
-      setAutomationView(next);
-      return true;
+      return queueNavigation({ kind: "automationView", value: next });
     },
-    [automationView, confirmDiscardFlow, flowDirty],
+    [queueNavigation],
   );
 
   const onAutomationTabKeyDown = (
@@ -577,12 +641,14 @@ function App() {
         <div className="startup-state-card">
           <h1>Riviu Manager</h1>
           <h2>Chưa sẵn sàng khởi động</h2>
-          <p>{startupIssue}</p>
           <p>
-            Kiểm tra cấu hình agent và Keychain của bản đang chạy, sau đó mở lại
-            app. Bản Full tự tạo credential cục bộ; bản production yêu cầu token
-            RT-MMO được cấu hình một lần.
+            Mở Cài đặt và kiểm tra thông tin đăng nhập trong Windows Credential Manager,
+            sau đó thử lại.
           </p>
+          <details aria-label="Chi tiết lỗi khởi động">
+            <summary>Chi tiết lỗi</summary>
+            <code>{startupIssue}</code>
+          </details>
           <button
             type="button"
             className="primary"
@@ -610,19 +676,28 @@ function App() {
       />
 
       <div className="main-col">
-        <header className="topbar">
-          <h1 className="topbar-title" data-testid="page-title">
-            {title}
-          </h1>
-          <div className="topbar-drag" />
-          <div className="topbar-actions">
-            {groupMode && <span className="chip primary">Sync</span>}
-            {readyCount > 0 && <span className="chip ok">{readyCount} sẵn sàng</span>}
-            {runningJobs > 0 && <span className="chip warn">{runningJobs} job</span>}
+        <PageHeader
+          title={title}
+          titleTestId="page-title"
+          dragRegion
+          density={page === "control" ? "compact" : "default"}
+          meta={
+            <>
+              {groupMode && <StatusChip tone="info">Sync</StatusChip>}
+              {readyCount > 0 && (
+                <StatusChip tone="success">{readyCount} sẵn sàng</StatusChip>
+              )}
+              {runningJobs > 0 && (
+                <StatusChip tone="warning">{runningJobs} tác vụ</StatusChip>
+              )}
+            </>
+          }
+          actions={
             <button
               type="button"
               className="icon-btn"
               title="Làm mới danh sách máy"
+              aria-label="Làm mới danh sách máy"
               onClick={async () => {
                 // Same missing failure path as the toolbar's copy. Both are guarded now;
                 // the titles differ so the two are distinguishable to a reader and to a
@@ -635,12 +710,12 @@ function App() {
                 }
               }}
             >
-              <IconRefresh size={16} />
+              <IconRefresh size={16} aria-hidden="true" />
             </button>
-          </div>
-        </header>
+          }
+        />
 
-        <div className={`content ${page === "scripts" ? "content-flow" : ""}`}>
+        <div className={`content content-${page} ${page === "scripts" ? "content-flow" : ""}`}>
           {bootError && (
             <Banner
               tone="error"
@@ -861,14 +936,19 @@ function App() {
               </div>
 
               {visibleDevices.length > 0 && viewMode === "list" && (
-                <table className="device-table">
+                <table className="device-table" aria-label="Danh sách thiết bị">
+                  <caption className="visually-hidden">Danh sách thiết bị đang hiển thị</caption>
                   <thead>
                     <tr>
-                      <th />
-                      <th>Máy</th>
-                      <th>Trạng thái</th>
-                      <th>Kết nối</th>
-                      <th />
+                      <th scope="col">
+                        <span className="visually-hidden">Chọn</span>
+                      </th>
+                      <th scope="col">Máy</th>
+                      <th scope="col">Trạng thái</th>
+                      <th scope="col">Kết nối</th>
+                      <th scope="col">
+                        <span className="visually-hidden">Thao tác</span>
+                      </th>
                     </tr>
                   </thead>
                   <tbody>
@@ -889,12 +969,21 @@ function App() {
                         <tr
                           key={device.udid}
                           className={sel ? "selected" : ""}
+                          tabIndex={0}
+                          aria-label={`Máy ${machineNumber}, ${tileName(device, meta)}, ${statusLabel}${sel ? ", đã chọn" : ""}`}
                           onClick={(e) => onSelect(device.udid, e.metaKey || e.ctrlKey)}
+                          onKeyDown={(event) => {
+                            if (event.target !== event.currentTarget) return;
+                            if (event.key !== "Enter" && event.key !== " ") return;
+                            event.preventDefault();
+                            onSelect(device.udid, event.metaKey || event.ctrlKey || event.shiftKey);
+                          }}
                           onDoubleClick={() => setFocusUdid(device.udid)}
                         >
                           <td>
                             <input
                               type="checkbox"
+                              aria-label={`Chọn Máy ${machineNumber}`}
                               checked={sel}
                               onChange={() => onSelect(device.udid, true)}
                               onClick={(e) => e.stopPropagation()}
@@ -1110,7 +1199,7 @@ function App() {
                         automationDeviceLabels.get(device.udid) ?? device.name
                       }
                       selectedUdids={selected}
-                      onDirtyChange={setFlowDirty}
+                      onDirtyChange={updateFlowDirty}
                     />
                   </Suspense>
                 )}
@@ -1137,7 +1226,7 @@ function App() {
                     />
                     <Suspense fallback={<LoadingState label="Đang tải Điều phối…" />}>
                       <OrchestrationWorkspace
-                        onDirtyChange={setFlowDirty}
+                        onDirtyChange={updateFlowDirty}
                         targetRef={automationTargetRef}
                       />
                     </Suspense>
@@ -1148,14 +1237,11 @@ function App() {
           )}
           {page === "jobs" && (
             <JobsPanel
-              jobs={jobs}
               devices={devices}
               selectedUdids={selected}
               onSelectUdids={setSelected}
-              onRefresh={reload}
               initialScript={null}
-              loading={!fleetSettled}
-              loadError={bootError}
+              deviceLabels={automationDeviceLabels}
             />
           )}
           {page === "publish" && (
@@ -1224,7 +1310,9 @@ function App() {
           {page === "diagnostics" && <FleetDiagnosticsPage devices={devices} metas={metas} />}
           {page === "data" && <DataPage />}
           {page === "api" && <ApiPage />}
-          {page === "settings" && <SettingsPanel devices={devices} />}
+          {page === "settings" && (
+            <SettingsPanel devices={devices} deviceLabels={automationDeviceLabels} />
+          )}
         </div>
       </div>
 

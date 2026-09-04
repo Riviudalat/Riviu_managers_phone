@@ -52,6 +52,8 @@ vi.mock("./api", () => ({
   saveDeviceMeta: vi.fn(async () => undefined),
   listGroups: vi.fn(async () => []),
   listJobs: vi.fn(async () => []),
+  operationListRuns: vi.fn(async () => []),
+  operationGetRun: vi.fn(async () => null),
   listSchedules: vi.fn(async () => []),
   listScripts: vi.fn(async () => [["fixture", "{}"]]),
   prepareDevice: vi.fn(async () => undefined),
@@ -222,6 +224,23 @@ describe("device group scope", () => {
 
     expect(screen.getByRole("cell", { name: /Máy 1.*Redmi/ })).toBeInTheDocument();
     expect(screen.queryByRole("cell", { name: /Note 8/ })).toBeNull();
+  });
+
+  it("keeps list selection keyboard-operable without changing the open action", async () => {
+    const api = await import("./api");
+    vi.mocked(api.listDevices).mockResolvedValue([androidPhone]);
+    render(<App />);
+    await waitFor(() => expect(screen.getByText("Redmi")).toBeInTheDocument());
+    await userEvent.click(screen.getByTitle("Danh sách"));
+
+    const row = screen.getByRole("row", { name: /Máy 1, Redmi, Sẵn sàng/ });
+    row.focus();
+    await userEvent.keyboard("{Enter}");
+    expect(screen.getByRole("checkbox", { name: "Chọn Máy 1" })).toBeChecked();
+    expect(screen.queryByRole("dialog", { name: /Máy 1/ })).toBeNull();
+
+    await userEvent.click(screen.getByRole("button", { name: "Mở" }));
+    expect(await screen.findByRole("dialog")).toBeVisible();
   });
 });
 
@@ -572,7 +591,7 @@ describe("fleet health banners", () => {
 });
 
 describe("Flow page integration", () => {
-  it("uses the topbar as the one semantic page heading", async () => {
+  it("uses the page header as the one semantic page heading", async () => {
     const user = userEvent.setup();
     render(<App />);
 
@@ -623,6 +642,43 @@ describe("Flow page integration", () => {
     await user.click(screen.getByRole("button", { name: "Dữ liệu" }));
     expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument();
     expect(screen.getByText("Dữ liệu", { selector: "[data-testid='page-title']" })).toBeVisible();
+  });
+
+  it("coalesces repeated navigation while the dirty-draft confirmation is open", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+
+    await user.click(screen.getByRole("button", { name: "Flow" }));
+    await user.click(await screen.findByRole("button", { name: "Mark fixture dirty" }));
+    await user.click(screen.getByRole("button", { name: "Tác vụ" }));
+    await user.click(screen.getByRole("button", { name: "Dữ liệu" }));
+
+    expect(screen.getAllByRole("alertdialog")).toHaveLength(1);
+    await user.click(screen.getByRole("button", { name: "Bỏ thay đổi" }));
+    await waitFor(() =>
+      expect(screen.getByText("Dữ liệu", { selector: "[data-testid='page-title']" })).toBeVisible(),
+    );
+    expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument();
+    expect(screen.queryByText("Tác vụ", { selector: "[data-testid='page-title']" })).toBeNull();
+  });
+
+  it("rechecks the draft after the confirmation resolves", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+
+    await user.click(screen.getByRole("button", { name: "Flow" }));
+    await user.click(await screen.findByRole("button", { name: "Mark fixture dirty" }));
+    await user.click(screen.getByRole("button", { name: "Tác vụ" }));
+    expect(screen.getByRole("alertdialog")).toBeVisible();
+
+    // Simulate the editor finishing its save while the modal is awaiting the operator. A stale
+    // `flowDirty` closure would keep the page pinned even though there is no work left to lose.
+    fireEvent.click(screen.getByRole("button", { name: "Mark fixture clean" }));
+    await user.click(screen.getByRole("button", { name: "Ở lại" }));
+    await waitFor(() =>
+      expect(screen.getByText("Tác vụ", { selector: "[data-testid='page-title']" })).toBeVisible(),
+    );
+    expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument();
   });
 
   it("switches between device Flow and orchestration", async () => {
@@ -736,7 +792,7 @@ describe("fleet diagnostics page integration", () => {
     await userEvent.click(screen.getByRole("button", { name: "Chẩn đoán" }));
 
     expect(screen.getByRole("heading", { level: 1, name: "Chẩn đoán" })).toBeVisible();
-    expect(await screen.findByRole("region", { name: "Chẩn đoán fleet" })).toBeVisible();
+    expect(await screen.findByRole("region", { name: "Chẩn đoán thiết bị" })).toBeVisible();
     expect(api.deviceHealth).toHaveBeenCalledWith(androidPhone.udid);
   });
 
@@ -824,6 +880,22 @@ describe("buttons that used to fail in silence", () => {
 });
 
 describe("the startup failure screen", () => {
+  it("keeps deployment jargon in an accessible error disclosure", async () => {
+    const api = await import("./api");
+    const raw = "Keychain Bản Full production RT-MMO";
+    vi.mocked(api.startupError).mockResolvedValueOnce(raw);
+    render(<App />);
+
+    expect(await screen.findByText(/Windows Credential Manager/)).toBeVisible();
+    expect(screen.getByText(/Mở Cài đặt/)).toBeVisible();
+    expect(screen.queryByText(/Bản Full tự tạo/)).toBeNull();
+    const disclosure = screen.getByRole("group", { name: "Chi tiết lỗi khởi động" });
+    const diagnostic = within(disclosure).getByText(raw);
+    expect(diagnostic).not.toBeVisible();
+    await userEvent.click(within(disclosure).getByText("Chi tiết lỗi"));
+    expect(diagnostic).toBeVisible();
+  });
+
   it("actually retries the bootstrap instead of reloading the same stored error", async () => {
     // The button called `window.location.reload()`. The WebView came back, asked
     // `startup_error` again, and was handed the sentence stored at setup -- `bootstrap` had

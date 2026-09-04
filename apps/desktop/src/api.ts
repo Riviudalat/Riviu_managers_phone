@@ -34,13 +34,21 @@ import type {
   LegacyImportResult,
   JobRecord,
   MaterialItem,
+  MaterialPushBatchRequest,
+  MaterialPushBatchResult,
   PublishCampaignDetail,
   PublishCampaignExecutionResult,
   PublishCampaignRecord,
   PublishCaptionOverrides,
+  PublishExecutionSnapshot,
   PublishAssignmentPlan,
   PublishFolderManifest,
+  PublishPreflightReport,
+  PublishPreflightRequest,
   PublishSoundPolicy,
+  PublicCleanupCapability,
+  PublicCleanupExecutionReport,
+  PublicCleanupKind,
   ScheduleItem,
   StreamSettings,
   NurtureApiTestResult,
@@ -48,6 +56,8 @@ import type {
   NurtureCostSummary,
   OpLog,
   NurtureSessionStatus,
+  OperationRunDetail,
+  OperationRunSummary,
   SessionLogEntry,
   SessionLogSummary,
   NurtureSettings,
@@ -581,6 +591,14 @@ export async function listJobs() {
   return invoke<JobRecord[]>("list_jobs");
 }
 
+export async function operationListRuns(limit = 100) {
+  return invoke<OperationRunSummary[]>("operation_list_runs", { limit });
+}
+
+export async function operationGetRun(operationId: string) {
+  return invoke<OperationRunDetail | null>("operation_get_run", { operationId });
+}
+
 export async function runScript(scriptJson: string, udids: string[]) {
   return invoke<JobRecord>("run_script", { scriptJson, udids });
 }
@@ -828,6 +846,10 @@ export async function pushMaterial(udid: string, materialId: string) {
   return invoke<string>("push_material", { udid, materialId });
 }
 
+export async function pushMaterialBatch(request: MaterialPushBatchRequest) {
+  return invoke<MaterialPushBatchResult>("push_material_batch", { request });
+}
+
 export async function listAppsLibrary() {
   return invoke<AppLibraryItem[]>("list_apps_library");
 }
@@ -897,14 +919,21 @@ export async function publishScanFolder(sourceRoot: string) {
   return invoke<PublishFolderManifest>("publish_scan_folder", { sourceRoot });
 }
 
+/** Read-only validation of the exact input that will be allowed to create a campaign. */
+export async function publishPreflight(request: PublishPreflightRequest) {
+  return invoke<PublishPreflightReport>("publish_preflight", { request });
+}
+
 export async function publishCreateCampaign(
   sourceRoot: string,
   bundleIds: string[],
   udids: string[],
-  runAt?: string | null,
-  captionOverrides?: PublishCaptionOverrides | null,
-  soundPolicy: PublishSoundPolicy = { kind: "default" },
-  confirmed = false,
+  runAt: string | null,
+  captionOverrides: PublishCaptionOverrides | null,
+  soundPolicy: PublishSoundPolicy,
+  targetRef: TargetRef,
+  confirmed: boolean,
+  approvedInputDigest: string,
 ) {
   return invoke<PublishCampaignRecord>("publish_create_campaign", {
     sourceRoot,
@@ -913,7 +942,9 @@ export async function publishCreateCampaign(
     runAt: runAt ?? null,
     captionOverrides: captionOverrides ?? null,
     soundPolicy,
+    targetRef,
     confirmed,
+    approvedInputDigest,
   });
 }
 
@@ -950,6 +981,11 @@ export async function publishReadiness(udids: string[]) {
 /** One campaign with its bundles, per-phone assignments and event history. */
 export async function publishGet(campaignId: string) {
   return invoke<PublishCampaignDetail | null>("publish_get", { campaignId });
+}
+
+/** Rebuild the retry boundary from durable state before an operator resumes a campaign. */
+export async function publishReconcile(campaignId: string) {
+  return invoke<PublishExecutionSnapshot>("publish_reconcile", { campaignId });
 }
 
 /** The Sheet delivery config, minus the token itself (only whether one is set). */
@@ -1175,6 +1211,27 @@ export async function interactionListArtifacts(campaignId: string) {
 
 export async function interactionReadArtifact(artifactId: string) {
   return invoke<InteractionArtifactPayload>("interaction_read_artifact", { artifactId });
+}
+
+export async function publicCleanupPreflight(
+  campaignId: string,
+  assignmentId: string | null,
+  kind: PublicCleanupKind,
+) {
+  return invoke<PublicCleanupCapability>("public_cleanup_preflight", {
+    request: { campaignId, assignmentId, kind },
+  });
+}
+
+export async function publicCleanupExecute(
+  requestId: string,
+  campaignId: string,
+  assignmentId: string,
+  kind: PublicCleanupKind,
+) {
+  return invoke<PublicCleanupExecutionReport>("public_cleanup_execute", {
+    request: { requestId, campaignId, assignmentId, kind },
+  });
 }
 
 /**

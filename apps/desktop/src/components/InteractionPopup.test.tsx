@@ -1,4 +1,4 @@
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { InteractionPopup } from "./InteractionPopup";
@@ -242,6 +242,30 @@ it("shows target-bound automation profiles only on the dedicated page", async ()
     />,
   );
   expect(screen.queryByRole("region", { name: "Quản lý hồ sơ Tương tác" })).not.toBeInTheDocument();
+});
+
+it("renders the production action workflow and a live review rail on the page", async () => {
+  render(
+    <InteractionPopup
+      metas={noMeta}
+      devices={devices}
+      selected={[]}
+      surface="page"
+      targetRef={{ type: "all" }}
+    />,
+  );
+
+  const workflow = await screen.findByRole("list", { name: "Quy trình Tương tác" });
+  expect(within(workflow).getAllByRole("listitem").map((item) => item.textContent)).toEqual([
+    "1Phạm vi",
+    "2Hành động",
+    "3Kiểm tra",
+    "4Theo dõi",
+  ]);
+  const review = screen.getByRole("complementary", { name: "Kiểm tra chiến dịch" });
+  expect(within(review).getByText("Link hợp lệ")).toBeVisible();
+  expect(within(review).getByText("Thiết bị chạy")).toBeVisible();
+  expect(within(review).getByText("Hành động")).toBeVisible();
 });
 
 /**
@@ -520,6 +544,11 @@ describe("InteractionPopup", () => {
     expect(numberOn("Phone A")).toBe("11");
     expect(screen.getByRole("textbox", { name: "Tài khoản TikTok của Máy kho" })).toBeVisible();
     expect(screen.getByRole("textbox", { name: "Tài khoản TikTok của Phone A" })).toBeVisible();
+    const technical = screen.getByRole("group", { name: "Chi tiết kỹ thuật Máy kho" });
+    const rawId = within(technical).getByText("actor-android");
+    expect(rawId).not.toBeVisible();
+    fireEvent.click(within(technical).getByText("Chi tiết"));
+    expect(rawId).toBeVisible();
     // And no model string anywhere in the panel.
     for (const model of ["iPhone 8", "Redmi Note 12"]) {
       expect(screen.queryByText(model)).toBeNull();

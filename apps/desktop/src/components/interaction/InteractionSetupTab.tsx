@@ -369,7 +369,15 @@ export function InteractionSetupTab({
         <ul className="interaction-reasons">
           {issues.map((issue) => (
             <li key={`${issue.field}:${issue.message}`}>
-              <span>{issue.message}</span>
+              <span>
+                {issue.message}
+                {issue.technicalDetail && (
+                  <details className="interaction-raw-code" aria-label="Chi tiết lỗi lập kế hoạch">
+                    <summary>Chi tiết kỹ thuật</summary>
+                    <code>{issue.technicalDetail}</code>
+                  </details>
+                )}
+              </span>
               {issue.fix && (
                 <button
                   type="button"

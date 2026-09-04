@@ -221,9 +221,9 @@ describe("AppsPage list states", () => {
   it("does not render an empty library before its first answer", async () => {
     renderApps([iphone]);
 
-    expect(screen.getByRole("status")).toHaveTextContent("Đang tải thư viện ứng dụng");
+    expect(screen.getByText("Đang tải thư viện ứng dụng…")).toBeInTheDocument();
     expect(screen.queryByText("Chưa có ứng dụng")).toBeNull();
-    expect(screen.queryByRole("heading", { level: 2 })).toBeNull();
+    expect(screen.getAllByRole("heading", { level: 2 })).toHaveLength(3);
     expect(await screen.findByText("TikTok.ipa")).toBeInTheDocument();
   });
 

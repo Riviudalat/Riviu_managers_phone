@@ -1,4 +1,4 @@
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { InteractionCampaignDetailView } from "./InteractionCampaignDetail";
@@ -145,6 +145,21 @@ describe("web lookup panel", () => {
 });
 
 describe("assignment evidence", () => {
+  it("uses a generic Vietnamese heading for an unknown error and folds the raw value", () => {
+    const raw = "future_transport_code: opaque detail";
+    show([], {
+      ...detail,
+      summary: { ...detail.summary, state: "failed", errorCode: raw },
+    });
+
+    expect(screen.getByText("Lỗi tương tác chưa xác định")).toBeVisible();
+    const technical = screen.getByRole("group", { name: "Chi tiết mã lỗi tương tác" });
+    const rawValue = within(technical).getByText(raw);
+    expect(rawValue).not.toBeVisible();
+    fireEvent.click(within(technical).getByText("mã lỗi"));
+    expect(rawValue).toBeVisible();
+  });
+
   it("summarizes typed actions instead of calling a Like and Save run comments", () => {
     show([], {
       summary: {

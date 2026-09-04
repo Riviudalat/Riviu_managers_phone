@@ -59,13 +59,13 @@ export function Sidebar({
   onToggleCollapse,
 }: Props) {
   return (
-    <aside className={`aside ${collapsed ? "collapsed" : ""}`}>
+    <aside className={`aside ${collapsed ? "collapsed" : ""}`} aria-label="Riviu Manager">
       <div className="aside-logo">
         <img src="/logo.jpg" alt="" />
         {!collapsed && <strong>Riviu Manager</strong>}
       </div>
 
-      <nav className="aside-scroll" aria-label="Điều hướng chính">
+      <nav id="primary-navigation" className="aside-scroll" aria-label="Điều hướng chính">
         {MENU.map((group) => (
           <section className="menu-group" key={group.label} aria-label={group.label}>
             <h2>{group.label}</h2>
@@ -79,6 +79,7 @@ export function Sidebar({
                   data-testid="nav-item"
                   title={item.label}
                   aria-label={collapsed ? item.label : undefined}
+                  aria-current={page === item.id ? "page" : undefined}
                   onClick={() => onPage(item.id)}
                 >
                   <span className="mi">{Icon ? <Icon size={16} /> : "›"}</span>
@@ -119,6 +120,8 @@ export function Sidebar({
         onClick={onToggleCollapse}
         title={collapsed ? "Mở rộng" : "Thu gọn"}
         aria-label={collapsed ? "Mở rộng thanh điều hướng" : "Thu gọn thanh điều hướng"}
+        aria-expanded={!collapsed}
+        aria-controls="primary-navigation"
       >
         {collapsed ? <PanelLeftOpen size={17} /> : <PanelLeftClose size={17} />}
       </button>

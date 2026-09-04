@@ -1,7 +1,9 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import type { DeviceGroup, DeviceInfo } from "../types";
 import { listGroups } from "../api";
+import { describeError } from "../describeError";
+import { LoadingState, StatusNotice } from "./States";
 
 /** Shared selection strip so Publish/Apps/Jobs/etc. are usable without mystery disabled buttons. */
 export function SelectionStrip({
@@ -19,20 +21,39 @@ export function SelectionStrip({
   onSelectUdids?: (udids: string[]) => void;
 }) {
   const [groups, setGroups] = useState<DeviceGroup[]>([]);
-  useEffect(() => {
+  const [groupState, setGroupState] = useState<"idle" | "loading" | "ready" | "error">("idle");
+  const [groupError, setGroupError] = useState<string | null>(null);
+  const groupLoadTicket = useRef(0);
+  const loadGroups = useCallback(async () => {
     if (!onSelectUdids) return;
-    let alive = true;
-    listGroups()
-      .then((next) => {
-        if (alive) setGroups(next);
-      })
-      .catch(() => {
-        /* groups are a convenience; ignore load failures here */
-      });
-    return () => {
-      alive = false;
-    };
+    const ticket = ++groupLoadTicket.current;
+    setGroupState("loading");
+    setGroupError(null);
+    try {
+      const next = await listGroups();
+      if (ticket !== groupLoadTicket.current) return;
+      setGroups(next);
+      setGroupState("ready");
+    } catch (error) {
+      if (ticket !== groupLoadTicket.current) return;
+      setGroups([]);
+      setGroupError(describeError(error));
+      setGroupState("error");
+    }
   }, [onSelectUdids]);
+
+  useEffect(() => {
+    if (!onSelectUdids) {
+      groupLoadTicket.current += 1;
+      setGroups([]);
+      setGroupState("idle");
+      return;
+    }
+    void loadGroups();
+    return () => {
+      groupLoadTicket.current += 1;
+    };
+  }, [loadGroups, onSelectUdids]);
 
   const n = selected.length || devices.length;
   const usingAll = selected.length === 0 && devices.length > 0;
@@ -68,6 +89,15 @@ export function SelectionStrip({
           ))}
         </select>
       )}
+      {onSelectUdids && groupState === "loading" && <LoadingState label="Đang tải nhóm…" />}
+      {onSelectUdids && groupState === "error" && (
+        <StatusNotice
+          tone="error"
+          action={<button type="button" className="ghost" onClick={() => void loadGroups()}>Thử lại nhóm</button>}
+        >
+          {groupError ?? "Không tải được nhóm thiết bị."}
+        </StatusNotice>
+      )}
       <button type="button" className="ghost" disabled={!devices.length} onClick={onSelectAll}>
         Chọn tất cả
       </button>
@@ -78,9 +108,7 @@ export function SelectionStrip({
         <span className="hint">Chưa có thiết bị — về Quản lý cửa sổ rồi làm mới</span>
       )}
       {!!devices.length && (
-        <span className="hint" title={selected.join(", ") || devices.map((d) => d.udid).join(", ")}>
-          Phạm vi: {n} máy
-        </span>
+        <span className="hint">Phạm vi: {n} máy</span>
       )}
     </div>
   );

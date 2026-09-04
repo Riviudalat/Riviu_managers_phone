@@ -15,9 +15,10 @@ import type { AgentRuntimeView, AgentStatus, DeviceInfo } from "../../types";
 type AgentAction = "check" | "repair";
 
 /** The Riviu agent on each phone: its version, its status, and repairing it. */
-export function AgentSection({ connectedDevices, connectedUdids }: {
+export function AgentSection({ connectedDevices, connectedUdids, deviceLabels }: {
   connectedDevices: DeviceInfo[];
   connectedUdids: string[];
+  deviceLabels?: ReadonlyMap<string, string>;
 }) {
   const [runtime, setRuntime] = useState<AgentRuntimeView | null>();
   const [statuses, setStatuses] = useState<Record<string, AgentStatus>>({});
@@ -101,15 +102,12 @@ export function AgentSection({ connectedDevices, connectedUdids }: {
 
       <dl className="agent-runtime-meta">
         <div>
-          <dt>Gói đang dùng</dt>
-          <dd>
-            <code>{runtime === undefined ? "…" : runtime?.activeArtifactId ?? "Chưa rõ"}</code>
-            {runtime?.activeArtifactVersion ? ` v${runtime.activeArtifactVersion}` : ""}
-          </dd>
+          <dt>Kết nối</dt>
+          <dd>{connectedDevices.length} thiết bị</dd>
         </div>
         <div>
-          <dt>Giao thức</dt>
-          <dd>{protocolVersion ?? "-"}</dd>
+          <dt>Agent đang dùng</dt>
+          <dd>{runtime === undefined ? "Đang đọc…" : runtime === null ? "Chưa rõ" : "Đã xác định"}</dd>
         </div>
         <div>
           <dt>Thông tin xác thực</dt>
@@ -124,6 +122,24 @@ export function AgentSection({ connectedDevices, connectedUdids }: {
           </dd>
         </div>
       </dl>
+
+      <details className="settings-details" aria-label="Chi tiết Riviu Agent">
+        <summary>Chi tiết Riviu Agent</summary>
+        <dl className="agent-runtime-meta">
+          <div>
+            <dt>Mã gói</dt>
+            <dd><code>{runtime?.activeArtifactId ?? "Chưa rõ"}</code></dd>
+          </div>
+          <div>
+            <dt>Phiên bản gói</dt>
+            <dd>{runtime?.activeArtifactVersion ?? "Chưa rõ"}</dd>
+          </div>
+          <div>
+            <dt>Giao thức</dt>
+            <dd>{protocolVersion ?? "Chưa rõ"}</dd>
+          </div>
+        </dl>
+      </details>
 
       <label className="agent-toggle">
         <input
@@ -204,14 +220,26 @@ export function AgentSection({ connectedDevices, connectedUdids }: {
             const action = busy[device.udid];
             return (
               <div className="agent-status-row" role="row" key={device.udid}>
-                <span className="agent-device-name" title={device.udid} role="cell">
-                  <strong>{device.name}</strong>
-                  <small>{device.model}</small>
-                </span>
+                <div className="agent-device-name" role="cell">
+                  <strong>{deviceLabels?.get(device.udid) ?? device.name}</strong>
+                  <details className="agent-device-details">
+                    <summary>Chi tiết thiết bị</summary>
+                    <dl>
+                      <div><dt>Model</dt><dd>{device.model}</dd></div>
+                      <div><dt>Serial</dt><dd><code>{device.udid}</code></dd></div>
+                    </dl>
+                  </details>
+                </div>
                 <span role="cell">
-                  <span className={`chip ${view.tone}`} title={view.message ?? undefined}>
+                  <span className={`chip ${view.tone}`}>
                     {view.label}
                   </span>
+                  {view.message && (
+                    <details className="agent-status-details">
+                      <summary>Chi tiết trạng thái</summary>
+                      <span>{view.message}</span>
+                    </details>
+                  )}
                 </span>
                 <span className="mono" role="cell">
                   {status?.installedVersion ?? "-"}

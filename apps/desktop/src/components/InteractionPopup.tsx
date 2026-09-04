@@ -41,6 +41,7 @@ import { IconChat, IconClose } from "./Icons";
 import { InteractionMonitorTab } from "./interaction/InteractionMonitorTab";
 import { InteractionSetupTab } from "./interaction/InteractionSetupTab";
 import { AutomationProfileControl } from "./AutomationProfileControl";
+import { StatusChip, SummaryRail, WorkflowStepper } from "./WorkspacePrimitives";
 
 type Props = {
   devices: DeviceInfo[];
@@ -628,6 +629,26 @@ export function InteractionPopup({
             </button>
           </header>
         )}
+        {pageSurface && (
+          <WorkflowStepper
+            label="Quy trình Tương tác"
+            current={
+              tab === "monitor"
+                ? "monitor"
+                : !effectiveActors.length || !validTargets.length
+                  ? "scope"
+                  : issues.length
+                    ? "actions"
+                    : "review"
+            }
+            steps={[
+              { id: "scope", label: "Phạm vi" },
+              { id: "actions", label: "Hành động" },
+              { id: "review", label: "Kiểm tra" },
+              { id: "monitor", label: "Theo dõi" },
+            ]}
+          />
+        )}
         <div className="interaction-tabs" role="tablist" aria-label="Chế độ Tương tác">
           <button
             type="button"
@@ -662,18 +683,19 @@ export function InteractionPopup({
           hidden={tab !== "setup"}
         >
           {tab === "setup" && (
-            <>
-              {pageSurface && targetRef && (
-                <AutomationProfileControl
-                  kind="interaction"
-                  target={targetRef}
-                  config={profileConfig}
-                  defaultName="Hồ sơ Tương tác"
-                  disabled={issues.length > 0}
-                  disabledReason={issues[0]?.message}
-                />
-              )}
-              <InteractionSetupTab
+            <div className={pageSurface ? "interaction-setup-grid" : undefined}>
+              <div className="interaction-setup-main">
+                {pageSurface && targetRef && (
+                  <AutomationProfileControl
+                    kind="interaction"
+                    target={targetRef}
+                    config={profileConfig}
+                    defaultName="Hồ sơ Tương tác"
+                    disabled={issues.length > 0}
+                    disabledReason={issues[0]?.message}
+                  />
+                )}
+                <InteractionSetupTab
                 threshold={{
                   wanted,
                   setWanted,
@@ -712,8 +734,35 @@ export function InteractionPopup({
                 busy={runBusy}
                 onResolveShortLinks={() => void resolveShortLinks()}
                 onRun={() => void run()}
-              />
-            </>
+                />
+              </div>
+              {pageSurface && (
+                <SummaryRail
+                  title="Kiểm tra chiến dịch"
+                  actions={(
+                    <StatusChip tone={issues.length ? "warning" : "success"}>
+                      {issues.length ? `${issues.length} mục cần xử lý` : "Sẵn sàng"}
+                    </StatusChip>
+                  )}
+                >
+                  <dl className="interaction-review-list">
+                    <div><dt>Link hợp lệ</dt><dd>{validTargets.length}</dd></div>
+                    <div><dt>Thiết bị chạy</dt><dd>{effectiveActors.length}</dd></div>
+                    <div><dt>Hành động</dt><dd>{[
+                      draft.actions.like && "Tim",
+                      draft.actions.save && "Lưu",
+                      draft.actions.comment && "Bình luận",
+                    ].filter(Boolean).join(" → ")}</dd></div>
+                    {draft.actions.comment && (
+                      <div><dt>Bình luận/link</dt><dd>{draft.messageCount ?? largestCohort}</dd></div>
+                    )}
+                  </dl>
+                  {warnings.length > 0 && (
+                    <StatusChip tone="warning">{warnings.length} cảnh báo</StatusChip>
+                  )}
+                </SummaryRail>
+              )}
+            </div>
           )}
         </div>
         <div
@@ -730,6 +779,7 @@ export function InteractionPopup({
               handles={handles}
               openCampaignId={openCampaignId}
               onOpenCampaign={setOpenCampaignId}
+              masterDetail={pageSurface}
             />
           )}
         </div>

@@ -267,6 +267,15 @@
 .selection-strip .grow {
   flex: 1;
 }
+.selection-strip .loading-state {
+  min-height: 0;
+  padding: 0 0.25rem;
+  font-size: var(--text-sm);
+}
+.selection-strip .banner {
+  flex: 1 1 100%;
+  order: 10;
+}
 
 .row {
   display: flex;
@@ -299,23 +308,6 @@ button.linkish,
   width: 100%;
 }
 
-.stats-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
-  gap: 0.75rem;
-}
-
-.api-docs {
-  white-space: pre-wrap;
-  background: var(--bg-muted);
-  padding: 16px;
-  border-radius: 8px;
-  font-size: var(--text-base);
-  font-family: var(--font-mono);
-  max-height: 70vh;
-  overflow: auto;
-}
-
 .script-list {
   list-style: none;
   padding: 0;
@@ -341,7 +333,7 @@ button.linkish,
   color: var(--text-1);
   font-size: var(--text-lg);
   font-weight: 650;
-  letter-spacing: -0.01em;
+  letter-spacing: 0;
 }
 .panel-header .hint {
   margin: 0;
@@ -436,8 +428,7 @@ button.linkish,
   color: var(--danger-strong);
 }
 
-/* The operation log on the data page. Sits under the stat tiles, which is why it lives here
-   beside `.stats-grid` rather than in its own stylesheet. */
+/* The operation log on the data page. */
 .op-log {
   margin-top: var(--space-3);
   display: flex;
@@ -478,9 +469,6 @@ button.linkish,
 }
 .op-log-list li:nth-child(odd) {
   background: var(--primary-50);
-}
-.op-log-action {
-  font-size: var(--text-xs);
 }
 .op-log-detail {
   font-size: var(--text-sm);

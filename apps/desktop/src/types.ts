@@ -161,6 +161,59 @@ export interface JobRecord {
   error?: string | null;
 }
 
+export type OperationRunKind =
+  | "script"
+  | "flow"
+  | "orchestration"
+  | "nurture"
+  | "interaction"
+  | "publish";
+
+export type OperationRunState =
+  | "queued"
+  | "running"
+  | "succeeded"
+  | "partial"
+  | "failed"
+  | "uncertain"
+  | "cancelled"
+  | "skipped";
+
+export type OperationRunItemKind = "step" | "device" | "attempt" | "assignment";
+
+export interface OperationRunSummary {
+  id: string;
+  sourceId: string;
+  kind: OperationRunKind;
+  title: string;
+  state: OperationRunState;
+  targetCount: number;
+  totalItems: number;
+  completedItems: number;
+  issueCount: number;
+  retryableCount: number;
+  retryScope: PublishRetryScope | null;
+  createdAt: string | null;
+  updatedAt: string | null;
+}
+
+export interface OperationRunItem {
+  id: string;
+  kind: OperationRunItemKind;
+  label: string;
+  state: OperationRunState;
+  udid: string | null;
+  errorCode: string | null;
+  detail: string | null;
+  evidence: string | null;
+  retryable: boolean;
+}
+
+export interface OperationRunDetail {
+  summary: OperationRunSummary;
+  items: OperationRunItem[];
+}
+
 export interface AppleIdConfig {
   email: string;
   hasPassword: boolean;
@@ -256,6 +309,28 @@ export interface MaterialItem {
   kind: string;
   size: number;
   createdAt: string;
+}
+
+export interface MaterialPushBatchRequest {
+  materialId: string;
+  target: TargetRef;
+}
+
+export type MaterialPushStatus = "succeeded" | "failed";
+
+export interface MaterialPushDeviceResult {
+  udid: string;
+  status: MaterialPushStatus;
+  evidence?: string;
+  errorCode?: string;
+  error?: string;
+}
+
+export interface MaterialPushBatchResult {
+  batchId: string;
+  materialId: string;
+  target: ResolvedTargetSnapshot;
+  results: MaterialPushDeviceResult[];
 }
 
 export interface AppLibraryItem {
@@ -446,6 +521,44 @@ export type PublishSoundPolicy =
   | { kind: "default" }
   | { kind: "trendingAny"; poolSize: number; seed: number };
 
+export interface PublishPreflightRequest {
+  sourceRoot: string;
+  bundleIds: string[];
+  udids: string[];
+  /** Semantic selection retained in the immutable target snapshot. */
+  targetRef?: TargetRef;
+  runAt?: string | null;
+  captionOverrides: PublishCaptionOverrides;
+  soundPolicy: PublishSoundPolicy;
+}
+
+export type PublishPreflightCheck = "pass" | "fail";
+
+export interface PublishPreflightAssignmentReport {
+  ordinal: number;
+  bundleId: string;
+  udid: string;
+  packageName?: string;
+  version?: string;
+  locale?: string;
+  media: PublishPreflightCheck;
+  composer: PublishPreflightCheck;
+  soundPicker: PublishPreflightCheck;
+  storage: PublishPreflightCheck;
+  requiredBytes: number;
+  availableBytes?: number;
+  issues: PublishExecutionIssue[];
+}
+
+export interface PublishPreflightReport {
+  inputDigest: string;
+  targetSnapshot: ResolvedTargetSnapshot;
+  canExecute: boolean;
+  assignments: PublishPreflightAssignmentReport[];
+  issues: PublishExecutionIssue[];
+  sheetConfigured: boolean;
+}
+
 export type PublishExecutionStatus = "complete" | "partial" | "uncertain";
 export type PublishRetryScope = "fullPipeline" | "linkAndSheet" | "sheetOnly" | "none";
 
@@ -463,6 +576,16 @@ export interface PublishCampaignExecutionResult {
   retryScope: PublishRetryScope;
   issues: PublishExecutionIssue[];
   detail: PublishCampaignDetail;
+}
+
+/** Restart-safe projection calculated from durable campaign and assignment state. */
+export interface PublishExecutionSnapshot {
+  campaignId: string;
+  inputDigest: string;
+  status: PublishExecutionStatus;
+  retryScope: PublishRetryScope;
+  reportJson: JsonValue;
+  updatedAt: string;
 }
 
 export interface OpLog {
@@ -734,6 +857,13 @@ export type NurturePhase =
 /// failed to open the app, and rendered both as the same grey row.
 export type NurtureOutcome = "done" | "partial" | "failed" | "stopped";
 
+export type NurtureCleanupState = "pending" | "processAbsent" | "failed";
+
+export interface ProcessAbsenceProof {
+  bundleId: string;
+  oldPid: number | null;
+}
+
 export interface NurtureSessionStatus {
   udid: string;
   running: boolean;
@@ -781,12 +911,18 @@ export interface NurtureSessionStatus {
   videoTarget: number;
   /// ISO timestamp: when this device's session began, after its stagger.
   startedAt: string | null;
+  /** ISO timestamp: when the desktop last accepted this run's device status. */
+  updatedAt?: string | null;
   /// ISO timestamp: when the wall clock ends this session regardless of the video count.
   ///
   /// A run ends at **whichever bound arrives first**, and for a manual start this is a
   /// randomised 2–3 hour horizon. A bar drawn from the video count alone stalls at 40% on a
   /// run that is minutes from finishing on time, and reads as hung.
   deadlineAt: string | null;
+  /** Never infer app cleanup from `lastMessage`; only this typed state can certify it. */
+  cleanupState?: NurtureCleanupState;
+  cleanupProof?: ProcessAbsenceProof | null;
+  cleanupError?: string | null;
 }
 
 /// One line a phone said, with the moment it first said it.
@@ -880,6 +1016,67 @@ export type SaveVerdict =
   | "uncertainAfterEffect";
 
 export type InteractionActionKind = "like" | "save" | "comment" | "follow";
+
+export type PublicCleanupKind = "like" | "save" | "comment" | "follow" | "post";
+export type PublicCleanupCapabilityStatus =
+  | "readyForTargetProof"
+  | "sourceNotConfirmed"
+  | "hierarchyRequired"
+  | "unsupportedUnmeasured";
+export interface PublicCleanupCapability {
+  kind: PublicCleanupKind;
+  status: PublicCleanupCapabilityStatus;
+  reason: string;
+  deviceUdid: string | null;
+  effectBoundaryCrossed: boolean;
+}
+export type PublicCleanupRunState =
+  | "planned"
+  | "preparing"
+  | "armed"
+  | "cleared"
+  | "alreadyClear"
+  | "failedBeforeEffect"
+  | "uncertain";
+export interface PublicCleanupRunRecord {
+  id: string;
+  requestId: string;
+  sourceActionRunId: string;
+  campaignId: string;
+  assignmentId: string;
+  deviceUdid: string;
+  kind: PublicCleanupKind;
+  targetJson: string;
+  state: PublicCleanupRunState;
+  revision: number;
+  effectIntent: string | null;
+  evidence: string | null;
+  error: string | null;
+  updatedAt: string;
+}
+export interface ToggleCleanupEvidence {
+  verdict:
+    | "cleared"
+    | "alreadyClear"
+    | "noControl"
+    | "stateUnreadable"
+    | "targetChangedBeforeEffect"
+    | "failedBeforeEffect"
+    | "targetChangedAfterEffect"
+    | "notConfirmed"
+    | "uncertainAfterEffect";
+  initial: unknown | null;
+  finalObservation: unknown | null;
+  effectBoundaryCrossed: boolean;
+  error: string | null;
+}
+export interface PublicCleanupExecutionReport {
+  capability: PublicCleanupCapability;
+  run: PublicCleanupRunRecord | null;
+  evidence: ToggleCleanupEvidence | null;
+  sessionCleanupWarning: string | null;
+}
+
 export type InteractionActionState =
   | "planned"
   | "preparing"

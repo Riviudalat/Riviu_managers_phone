@@ -62,6 +62,24 @@ describe("AgentSection states", () => {
     expect(row).not.toHaveTextContent("No");
   });
 
+  it("uses the fleet number and alias as the primary label, with model and serial in details", async () => {
+    render(
+      <AgentSection
+        connectedDevices={[device]}
+        connectedUdids={[device.udid]}
+        deviceLabels={new Map([[device.udid, "Máy 2 · Canary"]])}
+      />,
+    );
+
+    expect(await screen.findByText("Máy 2 · Canary")).toBeVisible();
+    const model = screen.getByText("Pixel");
+    const serial = screen.getByText("android-01");
+    expect(model).not.toBeVisible();
+    expect(serial).not.toBeVisible();
+    expect(model.closest("details")).not.toHaveAttribute("open");
+    expect(serial.closest("details")).not.toHaveAttribute("open");
+  });
+
   it("shows a retryable error when status loading fails", async () => {
     api.agentListStatuses
       .mockRejectedValueOnce(new Error("adb inventory unavailable"))

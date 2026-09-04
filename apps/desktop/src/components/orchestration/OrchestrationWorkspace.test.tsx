@@ -147,12 +147,68 @@ describe("OrchestrationWorkspace", () => {
     render(<OrchestrationWorkspace onDirtyChange={vi.fn()} />);
 
     await user.click(await screen.findByRole("button", { name: "Tạo điều phối" }));
-    await user.click(screen.getByRole("button", { name: "Thêm Tương tác" }));
+    const add = screen.getByRole("button", { name: "Thêm Tương tác" });
+    expect(add).toBeDisabled();
+    await user.selectOptions(
+      screen.getByRole("combobox", { name: "Chọn hồ sơ Tương tác để thêm" }),
+      profile.id,
+    );
+    await user.click(add);
 
     expect(screen.getByText("Tương tác nhẹ")).toBeVisible();
     expect(screen.getByText("Bản 4")).toBeVisible();
-    expect(screen.getByText("Hoàn tất")).toBeVisible();
-    expect(screen.getByText("Chưa chắc chắn")).toBeVisible();
+    expect(screen.getByRole("combobox", { name: "Đích khi Hoàn tất của bước 1" })).not.toHaveValue("");
+    expect(screen.getByRole("combobox", { name: "Đích khi Chưa chắc chắn của bước 1" })).not.toHaveValue("");
+  });
+
+  it("does not silently select the first profile and persists an explicit outcome route", async () => {
+    vi.mocked(api.automationList).mockResolvedValue([profile]);
+    vi.mocked(api.orchestrationValidate).mockResolvedValue({
+      document,
+      executionOrder: ["start", "interaction", "end"],
+      canonicalJson: "{}",
+      sha256: "a".repeat(64),
+      profiles: { interaction: { definitionId: profile.id, revision: 4 } },
+    });
+    vi.mocked(api.orchestrationSaveRevision).mockImplementation(async (draft) => ({
+      compiled: {
+        document: { ...draft, revision: 1 },
+        executionOrder: draft.nodes.map((node) => node.id),
+        canonicalJson: "{}",
+        sha256: "a".repeat(64),
+        profiles: {},
+      },
+      createdAt: "2026-09-03T00:00:00Z",
+    }));
+    const user = userEvent.setup();
+    render(<OrchestrationWorkspace onDirtyChange={vi.fn()} />);
+
+    await user.click(await screen.findByRole("button", { name: "Tạo điều phối" }));
+    const profileSelect = screen.getByRole("combobox", {
+      name: "Chọn hồ sơ Tương tác để thêm",
+    });
+    expect(profileSelect).toHaveValue("");
+    await user.selectOptions(profileSelect, profile.id);
+    await user.click(screen.getByRole("button", { name: "Thêm Tương tác" }));
+    await user.click(screen.getByRole("button", { name: "Thêm Tương tác" }));
+
+    const interactionNodes = screen.getAllByText("Tương tác nhẹ");
+    expect(interactionNodes).toHaveLength(2);
+    const partialRoutes = screen.getAllByRole("combobox", { name: /Đích khi Một phần của bước/ });
+    const secondInteractionId = partialRoutes[0].querySelectorAll("option")[0]?.value;
+    expect(secondInteractionId).toBeTruthy();
+    await user.selectOptions(partialRoutes[0], secondInteractionId!);
+    await user.click(screen.getByRole("button", { name: "Lưu bản" }));
+
+    const saved = vi.mocked(api.orchestrationSaveRevision).mock.calls[0][0];
+    const campaignIds = saved.nodes
+      .filter((node) => node.kind === "runInteraction")
+      .map((node) => node.id);
+    expect(saved.edges).toContainEqual({
+      sourceNodeId: campaignIds[0],
+      sourcePort: "partial",
+      targetNodeId: campaignIds[1],
+    });
   });
 
   it("keeps the newest document when an earlier open resolves last", async () => {

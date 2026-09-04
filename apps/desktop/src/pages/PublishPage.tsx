@@ -1,10 +1,7 @@
-import {
-  useEffect,
-  useRef,
-  useState,
-  type KeyboardEvent as ReactKeyboardEvent,
-} from "react";
+import { useCallback, useEffect, useRef, useState, type Dispatch, type SetStateAction } from "react";
 import type { UnlistenFn } from "@tauri-apps/api/event";
+import { CalendarClock, FolderOpen, RefreshCw, Rocket, ShieldCheck } from "lucide-react";
+
 import {
   listenRiviuEvents,
   publishAutoAssign,
@@ -13,44 +10,48 @@ import {
   publishExecute,
   publishGet,
   publishList,
+  publishPreflight,
   publishReadiness,
+  publishReconcile,
   publishScanFolder,
   publishSheetGetConfig,
   publishSheetSaveConfig,
 } from "../api";
-import { targetsOf } from "../selectionTargets";
 import { publishProfileConfig } from "../automationProfileConfig";
 import { AutomationProfileControl } from "../components/AutomationProfileControl";
-import { EmptyState, LoadingState, StatusNotice, type NoticeTone } from "../components/States";
 import { IconRocket } from "../components/Icons";
+import { EmptyState, LoadingState, StatusNotice, type NoticeTone } from "../components/States";
+import {
+  FormSection,
+  ResponsiveTable,
+  StatusChip,
+  SummaryRail,
+  WorkflowStepper,
+  WorkspaceTabs,
+  type StatusTone,
+} from "../components/WorkspacePrimitives";
 import { requestConfirm } from "../confirmStore";
+import { describeError } from "../describeError";
+import { orderDevicesByNumber, tileName, tileNumber } from "../deviceNaming";
 import { pickDirectory } from "../pickFile";
+import { targetsOf } from "../selectionTargets";
 import type {
   DevicePublishReadiness,
+  PublishAssignmentRecord,
   PublishBundle,
   PublishCampaignDetail,
   PublishCampaignRecord,
   PublishFolderManifest,
+  PublishExecutionSnapshot,
+  PublishPreflightAssignmentReport,
+  PublishPreflightReport,
+  PublishPreflightRequest,
   PublishReadinessInfo,
   PublishSheetConfig,
   TargetRef,
 } from "../types";
-import { describeError } from "../describeError";
-import { orderDevicesByNumber, tileName, tileNumber } from "../deviceNaming";
 import type { SelProps } from "./pageProps";
 
-/**
- * One readiness answer as pill text. The `default` arm is deliberate wire-defence: this
- * union mirrors a Rust enum, and a variant this page has not heard of must render as its
- * raw JSON rather than as nothing — an empty chip would read as "fine".
- *
- * **`hierarchyReady` is not a promise about this phone.** The backend answers it from the
- * shortest gap across every catalogued (language, version) set for the package, without
- * reading the build the phone is actually running — while Post refuses unless that exact
- * pair is catalogued. So a phone whose TikTok updated itself keeps a green chip and is
- * refused at the first tap. Until the command reads the phone's own version and locale
- * (see the note on the refresh button), the wording says what was really checked.
- */
 const LOCATOR_LABELS: Record<string, string> = {
   ComposerOpen: "nút Tạo",
   ComposerShutter: "mốc màn quay",
@@ -62,46 +63,6 @@ const LOCATOR_LABELS: Record<string, string> = {
   ComposerCaption: "ô chú thích",
   PostButton: "nút Đăng",
 };
-
-function readinessView(info: PublishReadinessInfo): { label: string; raw?: string } {
-  switch (info.kind) {
-    case "hierarchyReady":
-      return { label: "bản đo có đủ nhãn (chưa đối chiếu build máy)" };
-    case "pixelGrid":
-      return { label: "đường pixel" };
-    case "hierarchyMissing":
-      return {
-        label: `thiếu ${info.labels.map((label) => LOCATOR_LABELS[label] ?? "một điều khiển chưa nhận diện").join(", ")}`,
-        raw: info.labels.join(", "),
-      };
-    case "hierarchyUnknownBuild":
-      return { label: `build chưa đo (${info.version || "?"})` };
-    default:
-      return { label: "trạng thái chưa nhận diện", raw: JSON.stringify(info) };
-  }
-}
-
-function cleanupEvidence(evidenceJson?: string | null): { label: string; raw: string } | null {
-  if (!evidenceJson) return null;
-  try {
-    const evidence = JSON.parse(evidenceJson) as unknown;
-    if (!evidence || typeof evidence !== "object" || !("cleanup" in evidence)) return null;
-    const cleanup = (evidence as { cleanup?: unknown }).cleanup;
-    if (!cleanup || typeof cleanup !== "object") return null;
-    const state = "state" in cleanup ? String((cleanup as { state?: unknown }).state ?? "") : "";
-    const message = "message" in cleanup
-      ? String((cleanup as { message?: unknown }).message ?? "").trim()
-      : "";
-    const raw = JSON.stringify(cleanup);
-    if (state === "cleaned") return { label: "ảnh tạm đã dọn", raw };
-    if (state === "not_cleaned") {
-      return { label: `chưa dọn được ảnh tạm${message ? `: ${message}` : ""}`, raw };
-    }
-    return { label: "trạng thái dọn ảnh chưa nhận diện", raw };
-  } catch {
-    return null;
-  }
-}
 
 const PUBLISH_STATE_LABELS: Record<PublishCampaignRecord["state"], string> = {
   queued: "Đang chờ",
@@ -119,26 +80,88 @@ const PUBLISH_STATE_LABELS: Record<PublishCampaignRecord["state"], string> = {
   missed: "Lỡ lịch",
 };
 
-function stableSoundSeed(approvedInput: string): number {
-  let value = 0x811c9dc5;
-  for (const char of approvedInput) {
-    value ^= char.charCodeAt(0);
-    value = Math.imul(value, 0x01000193);
+const RETRYABLE_STATES: PublishCampaignRecord["state"][] = [
+  "queued",
+  "ready",
+  "imported",
+  "failedBeforeDispatch",
+];
+const CANCELLABLE_STATES: PublishCampaignRecord["state"][] = [
+  "queued",
+  "scheduled",
+  "preparing",
+  "ready",
+  "failedBeforeDispatch",
+];
+
+function campaignTone(state: PublishCampaignRecord["state"]): StatusTone {
+  if (state === "succeeded") return "success";
+  if (state === "uncertain" || state === "missed") return "warning";
+  if (state === "failedBeforeDispatch" || state === "cancelled") return "error";
+  return state === "queued" || state === "scheduled" ? "neutral" : "info";
+}
+
+function readinessView(info: PublishReadinessInfo): { label: string; raw?: string } {
+  switch (info.kind) {
+    case "hierarchyReady":
+      return { label: "bản đo có đủ nhãn (chưa đối chiếu build máy)" };
+    case "pixelGrid":
+      return { label: "đường pixel" };
+    case "hierarchyMissing":
+      return {
+        label: `thiếu ${info.labels
+          .map((label) => LOCATOR_LABELS[label] ?? "một điều khiển chưa nhận diện")
+          .join(", ")}`,
+        raw: info.labels.join(", "),
+      };
+    case "hierarchyUnknownBuild":
+      return { label: `build chưa đo (${info.version || "?"})` };
+    default:
+      return { label: "trạng thái chưa nhận diện", raw: JSON.stringify(info) };
   }
-  return value >>> 0;
+}
+
+function cleanupEvidence(evidenceJson?: string | null): { label: string; raw: string } | null {
+  if (!evidenceJson) return null;
+  try {
+    const evidence = JSON.parse(evidenceJson) as unknown;
+    if (!evidence || typeof evidence !== "object" || !("cleanup" in evidence)) return null;
+    const cleanup = (evidence as { cleanup?: unknown }).cleanup;
+    if (!cleanup || typeof cleanup !== "object") return null;
+    const state = "state" in cleanup ? String((cleanup as { state?: unknown }).state ?? "") : "";
+    const message =
+      "message" in cleanup ? String((cleanup as { message?: unknown }).message ?? "").trim() : "";
+    const raw = JSON.stringify(cleanup);
+    if (state === "cleaned") return { label: "ảnh tạm đã dọn", raw };
+    if (state === "not_cleaned") {
+      return { label: `chưa dọn được ảnh tạm${message ? `: ${message}` : ""}`, raw };
+    }
+    return { label: "trạng thái dọn ảnh chưa nhận diện", raw };
+  } catch {
+    return null;
+  }
+}
+
+function stableSoundSeed(value: string): number {
+  let seed = 0x811c9dc5;
+  for (const char of value) {
+    seed ^= char.charCodeAt(0);
+    seed = Math.imul(seed, 0x01000193);
+  }
+  return seed >>> 0;
 }
 
 function mediaSummary(bundle: PublishBundle): string {
   if (bundle.mediaKind === "video" && bundle.video) {
     const seconds = Math.round(bundle.video.durationMs / 1000);
-    const minutes = Math.floor(seconds / 60);
-    const rest = String(seconds % 60).padStart(2, "0");
-    return `Video · ${minutes}:${rest} · ${(bundle.video.byteLen / 1024 / 1024).toFixed(1)} MB`;
+    return `Video · ${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")} · ${(
+      bundle.video.byteLen / 1024 / 1024
+    ).toFixed(1)} MB`;
   }
   return `${bundle.images.length} ảnh`;
 }
 
-function deviceLabel(
+function deviceDisplayName(
   devices: SelProps["devices"],
   metas: Map<string, import("../types").DeviceMeta>,
   udid: string,
@@ -157,16 +180,15 @@ type PublishPageProps = SelProps & {
   targetRef?: TargetRef;
   metas?: Map<string, import("../types").DeviceMeta>;
 };
+type AsyncState = "idle" | "loading" | "ready" | "error";
 
-/** Publish campaigns: scan a folder, transfer, post, and watch the result. */
-export function PublishPage(props: PublishPageProps) {
-  const {
-    devices,
-    selected,
-    targetUdids,
-    targetRef = { type: "all" },
-    metas = new Map(),
-  } = props;
+export function PublishPage({
+  devices,
+  selected,
+  targetUdids,
+  targetRef = { type: "all" },
+  metas = new Map(),
+}: PublishPageProps) {
   const [workspaceTab, setWorkspaceTab] = useState<"setup" | "monitor">("setup");
   const [sourceRoot, setSourceRoot] = useState("");
   const [manifest, setManifest] = useState<PublishFolderManifest | null>(null);
@@ -174,28 +196,74 @@ export function PublishPage(props: PublishPageProps) {
   const [captionDrafts, setCaptionDrafts] = useState<Record<string, string>>({});
   const [runAt, setRunAt] = useState("");
   const [campaigns, setCampaigns] = useState<PublishCampaignRecord[]>([]);
-  const [campaignLoadState, setCampaignLoadState] = useState<"loading" | "ready" | "error">(
-    "loading",
-  );
+  const [campaignLoadState, setCampaignLoadState] = useState<"loading" | "ready" | "error">("loading");
   const [campaignLoadError, setCampaignLoadError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState<{ tone: NoticeTone; text: string } | null>(null);
   const [readiness, setReadiness] = useState<DevicePublishReadiness[]>([]);
   const [readinessNote, setReadinessNote] = useState<string | null>(null);
-  // `null` means "not answered yet" — the unconfigured badge must not flash while the
-  // config is still loading, so it renders only from a real answer.
+  const [readinessNonce, setReadinessNonce] = useState(0);
   const [sheetConfig, setSheetConfig] = useState<PublishSheetConfig | null>(null);
+  const [sheetLoadState, setSheetLoadState] = useState<"loading" | "ready" | "error">("loading");
+  const [sheetLoadError, setSheetLoadError] = useState<string | null>(null);
   const [sheetUrlDraft, setSheetUrlDraft] = useState("");
   const [sheetTokenDraft, setSheetTokenDraft] = useState("");
   const [sheetBusy, setSheetBusy] = useState(false);
-  /** Per-campaign detail, fetched on demand — `publishList` carries plans, not states. */
   const [details, setDetails] = useState<Record<string, PublishCampaignDetail>>({});
-  const targets = targetUdids ?? targetsOf(selected, devices);
+  const [detailErrors, setDetailErrors] = useState<Record<string, string>>({});
+  const [detailLoading, setDetailLoading] = useState<Record<string, boolean>>({});
+  const [executionSnapshots, setExecutionSnapshots] = useState<Record<string, PublishExecutionSnapshot>>({});
+  const [preflightState, setPreflightState] = useState<AsyncState>("idle");
+  const [preflightError, setPreflightError] = useState<string | null>(null);
+  const [preflightSnapshot, setPreflightSnapshot] = useState<{
+    inputKey: string;
+    report: PublishPreflightReport;
+  } | null>(null);
 
-  // **Sequenced, because a run emits several events close together.** Each reload takes a
-  // ticket and only the newest ticket may write: without that, reload A (started while a
-  // campaign was `posting`) can resolve *after* reload B (started once it was `succeeded`) and
-  // put the older state back on screen, where it stays until the operator navigates away.
+  const targets = targetUdids ?? targetsOf(selected, devices);
+  const selectedBundles = manifest?.bundles.filter((bundle) => bundleIds.includes(bundle.id)) ?? [];
+  const orderedBundleIds = selectedBundles.map((bundle) => bundle.id);
+  const currentCaptionOverrides = Object.fromEntries(
+    selectedBundles.map((bundle) => [bundle.id, (captionDrafts[bundle.id] ?? bundle.caption).trim()]),
+  );
+  const currentSoundPolicy = {
+    kind: "trendingAny" as const,
+    poolSize: 5,
+    seed: stableSoundSeed(
+      JSON.stringify({
+        sourceRoot: sourceRoot.trim(),
+        bundleIds: orderedBundleIds,
+        targets,
+        runAt: runAt || null,
+        captions: orderedBundleIds.map((id) => currentCaptionOverrides[id]),
+      }),
+    ),
+  };
+  const preflightRequest: PublishPreflightRequest = {
+    sourceRoot: sourceRoot.trim(),
+    bundleIds: orderedBundleIds,
+    udids: targets,
+    targetRef,
+    runAt: runAt || null,
+    captionOverrides: currentCaptionOverrides,
+    soundPolicy: currentSoundPolicy,
+  };
+  const inputKey = JSON.stringify(preflightRequest);
+  const mappingReady = selectedBundles.length > 0 && selectedBundles.length === targets.length;
+  const captionsReady = Object.values(currentCaptionOverrides).every((caption) => caption.length > 0);
+  const profileReady = mappingReady && captionsReady;
+  const currentPreflight = preflightSnapshot?.inputKey === inputKey ? preflightSnapshot.report : null;
+  const canExecute = currentPreflight?.canExecute === true;
+  const androidTargets = targets.filter(
+    (udid) => devices.find((device) => device.udid === udid)?.platform === "android",
+  );
+
+  const invalidatePreflight = () => {
+    setPreflightSnapshot(null);
+    setPreflightState("idle");
+    setPreflightError(null);
+  };
+
   const reloadTicket = useRef(0);
   const reload = () => {
     const ticket = ++reloadTicket.current;
@@ -203,35 +271,25 @@ export function PublishPage(props: PublishPageProps) {
     setCampaignLoadError(null);
     return publishList()
       .then((next) => {
-        if (ticket === reloadTicket.current) {
-          setCampaigns(next);
-          setCampaignLoadState("ready");
-        }
+        if (ticket !== reloadTicket.current) return;
+        setCampaigns(next);
+        setCampaignLoadState("ready");
       })
-      .catch((e) => {
-        if (ticket === reloadTicket.current) {
-          setCampaignLoadError(describeError(e));
-          setCampaignLoadState("error");
-        }
+      .catch((error) => {
+        if (ticket !== reloadTicket.current) return;
+        setCampaignLoadError(describeError(error));
+        setCampaignLoadState("error");
       });
   };
+
   useEffect(() => {
-    reload();
-    // **Follow a run while it runs.** Publish emitted no event at all before, so a campaign
-    // that took twenty minutes across five phones left this page frozen at the moment the
-    // button was pressed — the only way to see progress was to navigate away and back.
-    //
-    // The payload carries an id and a revision and this re-reads the list rather than
-    // trusting it: a broadcast that lost a race would otherwise render a state the database
-    // has already moved past.
+    void reload();
     let unlisten: UnlistenFn | undefined;
     let live = true;
     listenRiviuEvents((event) => {
-      if (event.type === "publishUpdated") reload();
+      if (event.type === "publishUpdated") void reload();
     })
       .then((off) => {
-        // StrictMode double-invokes effects, so the cleanup of the first run can arrive
-        // before this resolves; without the flag that listener is never detached.
         if (live) unlisten = off;
         else off();
       })
@@ -242,39 +300,39 @@ export function PublishPage(props: PublishPageProps) {
     };
   }, []);
 
-  useEffect(() => {
-    let live = true;
-    publishSheetGetConfig()
-      .then((config) => {
-        if (!live) return;
-        setSheetConfig(config);
-        setSheetUrlDraft(config.webhookUrl);
-      })
-      .catch(() => {
-        // A page that cannot read the config still publishes fine; the sweeper is the
-        // one that cares, and it says so in its own log.
-        if (live) setSheetConfig(null);
-      });
-    return () => {
-      live = false;
-    };
+  const sheetLoadTicket = useRef(0);
+  const reloadSheetConfig = useCallback(async () => {
+    const ticket = ++sheetLoadTicket.current;
+    setSheetLoadState("loading");
+    setSheetLoadError(null);
+    try {
+      const config = await publishSheetGetConfig();
+      if (ticket !== sheetLoadTicket.current) return;
+      setSheetConfig(config);
+      setSheetUrlDraft(config.webhookUrl);
+      setSheetLoadState("ready");
+    } catch (error) {
+      if (ticket !== sheetLoadTicket.current) return;
+      setSheetConfig(null);
+      setSheetLoadError(describeError(error));
+      setSheetLoadState("error");
+    }
   }, []);
 
-  // **Keyed on the udid set, not on the `devices` array.** The roster identity churns on
-  // every 3-second scan, and `readiness_of` resolves each phone's TikTok package over adb —
-  // refetching that per scan would put twenty shell round-trips on a timer for an answer
-  // that only changes when a phone (or its TikTok) comes or goes.
+  useEffect(() => {
+    void reloadSheetConfig();
+    return () => {
+      sheetLoadTicket.current += 1;
+    };
+  }, [reloadSheetConfig]);
+
   const androidKey = devices
     .filter((device) => device.platform === "android")
     .map((device) => device.udid)
     .sort()
     .join(",");
-  // Bumped by the refresh button. A phone whose TikTok updates in place keeps the same
-  // udid, so the key above cannot notice it — and that is exactly the change readiness is
-  // keyed on a build for. Without a way to re-ask, the only cure was to unplug the phone.
-  const [readinessNonce, setReadinessNonce] = useState(0);
   useEffect(() => {
-    if (androidKey === "") {
+    if (!androidKey) {
       setReadiness([]);
       setReadinessNote(null);
       return;
@@ -288,9 +346,6 @@ export function PublishPage(props: PublishPageProps) {
       })
       .catch((error) => {
         if (!live) return;
-        // The rows that are on screen described the fleet at the last successful answer;
-        // leaving them up beside an error is the same "stale answer shown as current"
-        // shape the chips' own wording is being fixed for.
         setReadiness([]);
         setReadinessNote(describeError(error));
       });
@@ -299,136 +354,414 @@ export function PublishPage(props: PublishPageProps) {
     };
   }, [androidKey, readinessNonce]);
 
-  const selectedBundles =
-    manifest?.bundles.filter((bundle) => bundleIds.includes(bundle.id)) ?? [];
-  // **The order that is shown is the order that is sent.**
-  //
-  // `bundleIds` is checkbox history: the handler appends on tick, so unticking bo2 and
-  // reconsidering it leaves [bo1, bo3, bo2] while `selectedBundles` — which the preview
-  // below iterates — is still scanned-folder order. Sending `bundleIds` therefore paired
-  // each phone with a different bundle than the operator had just read, and the pairing is
-  // positional the whole way down (`validate_publish_mapping` zips `bundle_ids[i]` with
-  // `udids[i]`), so nothing downstream could notice. Every phone is a different live
-  // TikTok account: the cost is one account posting another's photographs under another's
-  // caption, with no error, no discrepancy in the evidence, and no delete path to undo it.
-  const orderedBundleIds = selectedBundles.map((bundle) => bundle.id);
-  // **Android is no longer refused here, and the reason is that this is the wrong place to
-  // ask.** The old gate refused every Android target outright, correctly, because there was
-  // no composer for them. There is one now — driven by measured labels — so the real question
-  // is per *build*: has this phone's TikTok had the publish controls read off it? That needs
-  // the device's package, language and app version, which only the backend can read, so the
-  // backend refuses by name and this page reports what it said.
-  //
-  // Nothing is silently dropped either way: the bundle -> device mapping is positional
-  // (`targets[index]` below), so removing a target would re-index the rest and post the wrong
-  // caption to the wrong account.
-  const androidTargets = targets.filter(
-    (udid) => devices.find((device) => device.udid === udid)?.platform === "android",
-  );
-  const mappingReady =
-    selectedBundles.length > 0 && selectedBundles.length === targets.length;
-  const currentCaptionOverrides = Object.fromEntries(
-    selectedBundles.map((bundle) => [
-      bundle.id,
-      (captionDrafts[bundle.id] ?? bundle.caption).trim(),
-    ]),
-  );
-  const currentSoundPolicy = {
-    kind: "trendingAny" as const,
-    poolSize: 5,
-    seed: stableSoundSeed(JSON.stringify({
-      sourceRoot: sourceRoot.trim(),
-      bundleIds: orderedBundleIds,
-      targets,
-      runAt: runAt || null,
-      captions: orderedBundleIds.map((id) => currentCaptionOverrides[id]),
-    })),
-  };
-  const profileReady =
-    mappingReady && Object.values(currentCaptionOverrides).every((caption) => caption.length > 0);
-
   const scan = async (path: string) => {
     setBusy(true);
     setNotice(null);
+    invalidatePreflight();
     try {
       const next = await publishScanFolder(path);
       setSourceRoot(path);
       setManifest(next);
       setBundleIds(next.bundles.slice(0, targets.length).map((bundle) => bundle.id));
       setCaptionDrafts(Object.fromEntries(next.bundles.map((bundle) => [bundle.id, bundle.caption])));
-    } catch (e) {
+    } catch (error) {
       setManifest(null);
       setBundleIds([]);
-      setNotice({ tone: "error", text: describeError(e) });
+      setCaptionDrafts({});
+      setNotice({ tone: "error", text: describeError(error) });
     } finally {
       setBusy(false);
     }
   };
 
-  const activateWorkspaceTab = (next: "setup" | "monitor") => {
-    setWorkspaceTab(next);
-    document.getElementById(`publish-tab-${next}`)?.focus();
-  };
-  const onWorkspaceTabKeyDown = (event: ReactKeyboardEvent<HTMLButtonElement>) => {
-    let next: "setup" | "monitor" | null = null;
-    if (event.key === "ArrowRight" || event.key === "End") next = "monitor";
-    if (event.key === "ArrowLeft" || event.key === "Home") next = "setup";
-    if (!next) return;
-    event.preventDefault();
-    activateWorkspaceTab(next);
+  const runPreflight = async () => {
+    if (!profileReady) {
+      setPreflightState("error");
+      setPreflightError("Chọn đủ nội dung, máy đích và chú thích trước khi kiểm tra.");
+      return;
+    }
+    setPreflightState("loading");
+    setPreflightError(null);
+    try {
+      const request = preflightRequest;
+      const requestKey = JSON.stringify(request);
+      const report = await publishPreflight(request);
+      setPreflightSnapshot({ inputKey: requestKey, report });
+      setPreflightState("ready");
+    } catch (error) {
+      setPreflightSnapshot(null);
+      setPreflightError(describeError(error));
+      setPreflightState("error");
+    }
   };
 
+  const executeNewCampaign = async () => {
+    if (!currentPreflight?.canExecute) return;
+    const confirmed = await requestConfirm({
+      title: runAt ? "Xác nhận lập lịch đăng bài?" : "Xác nhận đăng công khai?",
+      message: runAt
+        ? `${selectedBundles.length} bài sẽ chạy trên ${targets.length} máy vào lịch đã chọn.`
+        : `${selectedBundles.length} bài sẽ được đăng công khai trên ${targets.length} máy với âm thanh đã kiểm tra.`,
+      confirmLabel: runAt ? "Lập lịch" : "Đăng bài",
+      cancelLabel: "Huỷ",
+      danger: true,
+    });
+    if (!confirmed) return;
+    setBusy(true);
+    setNotice(null);
+    try {
+      const campaign = await publishCreateCampaign(
+        sourceRoot.trim(),
+        orderedBundleIds,
+        targets,
+        runAt || null,
+        currentCaptionOverrides,
+        currentSoundPolicy,
+        targetRef,
+        true,
+        currentPreflight.inputDigest,
+      );
+      setWorkspaceTab("monitor");
+      if (!runAt) {
+        const result = await publishExecute(campaign.id, true);
+        setDetails((current) => ({ ...current, [campaign.id]: result.detail }));
+        setNotice({
+          tone: result.status === "complete" ? "success" : result.status === "uncertain" ? "warning" : "info",
+          text:
+            result.status === "complete"
+              ? "Đã đăng, lấy liên kết và ghi Sheet."
+              : result.status === "uncertain"
+                ? "Có máy chưa xác định được kết quả sau thao tác Đăng. Quy trình đã dừng."
+                : "Bài đã xử lý nhưng còn bước cần hoàn tất. Mở chi tiết để xem phạm vi retry.",
+        });
+      } else {
+        setNotice({ tone: "success", text: `Đã lập lịch ${selectedBundles.length} bài cho ${targets.length} máy.` });
+      }
+      await reload();
+    } catch (error) {
+      setNotice({ tone: "error", text: describeError(error) });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const retryCampaign = async (campaign: PublishCampaignRecord) => {
+    setBusy(true);
+    setNotice(null);
+    let snapshot: PublishExecutionSnapshot;
+    try {
+      snapshot = await publishReconcile(campaign.id);
+      setExecutionSnapshots((current) => ({ ...current, [campaign.id]: snapshot }));
+      if (snapshot.retryScope === "none") {
+        setNotice({
+          tone: "warning",
+          text: "Trạng thái đã được đối chiếu và không có bước nào được phép tự chạy lại.",
+        });
+        return;
+      }
+    } catch (error) {
+      setNotice({ tone: "error", text: `Không đối chiếu được chiến dịch: ${describeError(error)}` });
+      return;
+    } finally {
+      setBusy(false);
+    }
+    const confirmed = await requestConfirm({
+      title: "Xác nhận tiếp tục đăng bài?",
+      message: `${retryScopeLabel(snapshot.retryScope)}. Trạng thái chưa chắc chắn không được tự đăng lại.`,
+      confirmLabel: "Tiếp tục",
+    });
+    if (!confirmed) return;
+    setBusy(true);
+    setNotice(null);
+    try {
+      const result = await publishExecute(campaign.id, true);
+      setDetails((current) => ({ ...current, [campaign.id]: result.detail }));
+      await reload();
+      setNotice({
+        tone: result.status === "complete" ? "success" : result.status === "uncertain" ? "warning" : "info",
+        text:
+          result.status === "complete"
+            ? "Đã hoàn tất đăng bài và ghi Sheet."
+            : result.status === "uncertain"
+              ? "Kết quả sau thao tác Đăng chưa chắc chắn; app không tự đăng lại."
+              : "Quy trình còn bước chưa hoàn tất. Xem chi tiết để xử lý tiếp.",
+      });
+    } catch (error) {
+      setNotice({ tone: "error", text: describeError(error) });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const toggleCampaignDetail = async (campaign: PublishCampaignRecord) => {
+    if (details[campaign.id]) {
+      setDetails((current) => {
+        const next = { ...current };
+        delete next[campaign.id];
+        return next;
+      });
+      setExecutionSnapshots((current) => {
+        const next = { ...current };
+        delete next[campaign.id];
+        return next;
+      });
+      return;
+    }
+    setDetailErrors((current) => {
+      const next = { ...current };
+      delete next[campaign.id];
+      return next;
+    });
+    setDetailLoading((current) => ({ ...current, [campaign.id]: true }));
+    try {
+      const snapshot = await publishReconcile(campaign.id);
+      const detail = await publishGet(campaign.id);
+      if (detail) {
+        setExecutionSnapshots((current) => ({ ...current, [campaign.id]: snapshot }));
+        setDetails((current) => ({ ...current, [campaign.id]: detail }));
+      }
+      else setDetailErrors((current) => ({ ...current, [campaign.id]: "Chiến dịch không còn trong dữ liệu." }));
+    } catch (error) {
+      setDetailErrors((current) => ({ ...current, [campaign.id]: describeError(error) }));
+    } finally {
+      setDetailLoading((current) => ({ ...current, [campaign.id]: false }));
+    }
+  };
+
+  const setupStep = !manifest ? "source" : !profileReady ? "mapping" : !canExecute ? "preflight" : "confirm";
+  const currentStep = workspaceTab === "monitor" ? "monitor" : setupStep;
+  const stepper = (
+    <div className="publish-stepper-scroll">
+      <WorkflowStepper
+        current={currentStep}
+        label="Quy trình đăng bài"
+        steps={[
+          { id: "source", label: "Nguồn" },
+          { id: "mapping", label: "Ghép bài/máy" },
+          { id: "preflight", label: "Preflight" },
+          { id: "confirm", label: "Xác nhận công khai" },
+          { id: "monitor", label: "Theo dõi" },
+        ]}
+      />
+    </div>
+  );
+
   return (
-    <div className="panel">
-      <header className="panel-header">
-        <div>
-          <h2>Đăng bài</h2>
-          <p className="hint">Chuẩn bị, đăng và ghi nhận Sheet cho gói ảnh hoặc video.</p>
-        </div>
-        <button type="button" className="ghost" onClick={reload} disabled={busy}>
-          Làm mới
-        </button>
-      </header>
-      <div className="automation-tabs" role="tablist" aria-label="Không gian Đăng bài">
-        <button
-          id="publish-tab-setup"
-          type="button"
-          role="tab"
-          aria-selected={workspaceTab === "setup"}
-          aria-controls="publish-panel-setup"
-          tabIndex={workspaceTab === "setup" ? 0 : -1}
-          onClick={() => setWorkspaceTab("setup")}
-          onKeyDown={onWorkspaceTabKeyDown}
-        >
-          Thiết lập
-        </button>
-        <button
-          id="publish-tab-monitor"
-          type="button"
-          role="tab"
-          aria-selected={workspaceTab === "monitor"}
-          aria-controls="publish-panel-monitor"
-          tabIndex={workspaceTab === "monitor" ? 0 : -1}
-          onClick={() => setWorkspaceTab("monitor")}
-          onKeyDown={onWorkspaceTabKeyDown}
-        >
-          Theo dõi
-        </button>
-      </div>
-      <section
-        id="publish-panel-setup"
-        className="publish-workspace-section"
-        role="tabpanel"
-        aria-labelledby="publish-tab-setup"
-        hidden={workspaceTab !== "setup"}
-      >
-      <div className="row" style={{ marginTop: 8 }}>
-        <input
-          style={{ flex: 1 }}
-          value={sourceRoot}
-          onChange={(e) => setSourceRoot(e.target.value)}
-          placeholder="Thư mục chứa bo1, bo2…"
+    <main className="panel publish-page">
+      <div className="publish-page-tabs">
+        <WorkspaceTabs
+          label="Không gian Đăng bài"
+          value={workspaceTab}
+          onChange={(value) => setWorkspaceTab(value as "setup" | "monitor")}
+          tabs={[
+            { id: "setup", label: "Thiết lập", panelId: "publish-panel-setup" },
+            { id: "monitor", label: "Theo dõi", panelId: "publish-panel-monitor" },
+          ]}
         />
+      </div>
+
+      {notice && (
+        <div className="publish-global-notice">
+          <StatusNotice tone={notice.tone}>{notice.text}</StatusNotice>
+        </div>
+      )}
+
+      <section id="publish-panel-setup" className="publish-workspace-section" role="tabpanel" aria-label="Thiết lập" hidden={workspaceTab !== "setup"}>
+        {stepper}
+        <div className="publish-workspace-grid">
+          <div className="publish-workspace-main">
+            <SourceSection
+              busy={busy}
+              sourceRoot={sourceRoot}
+              manifest={manifest}
+              bundleIds={bundleIds}
+              captionDrafts={captionDrafts}
+              setSourceRoot={setSourceRoot}
+              setManifest={setManifest}
+              setBundleIds={setBundleIds}
+              setCaptionDrafts={setCaptionDrafts}
+              invalidate={invalidatePreflight}
+              scan={scan}
+            />
+            <MappingSection
+              busy={busy}
+              manifest={manifest}
+              sourceRoot={sourceRoot}
+              targets={targets}
+              devices={devices}
+              metas={metas}
+              selectedBundles={selectedBundles}
+              mappingReady={mappingReady}
+              setBusy={setBusy}
+              setNotice={setNotice}
+              setBundleIds={setBundleIds}
+              invalidate={invalidatePreflight}
+            />
+            <PreflightSection
+              profileReady={profileReady}
+              busy={busy}
+              preflightState={preflightState}
+              preflightError={preflightError}
+              snapshot={preflightSnapshot}
+              current={currentPreflight}
+              run={runPreflight}
+              androidTargets={androidTargets}
+              readiness={readiness}
+              readinessNote={readinessNote}
+              refreshReadiness={() => setReadinessNonce((value) => value + 1)}
+              devices={devices}
+              metas={metas}
+            />
+            <FormSection title="Xác nhận công khai" description="Nút chạy chỉ mở cho đúng digest vừa vượt qua preflight.">
+              <div className="publish-confirm-grid">
+                <label>
+                  <span>Lịch chạy một lần</span>
+                  <span className="publish-input-with-icon">
+                    <CalendarClock size={16} aria-hidden="true" />
+                    <input
+                      type="datetime-local"
+                      value={runAt}
+                      onChange={(event) => {
+                        setRunAt(event.target.value);
+                        invalidatePreflight();
+                      }}
+                    />
+                  </span>
+                </label>
+                <button type="button" className="primary publish-submit" disabled={!canExecute || busy} onClick={() => void executeNewCampaign()}>
+                  <Rocket size={17} aria-hidden="true" />
+                  {runAt ? "Xác nhận và lập lịch" : "Xác nhận và đăng"} ({selectedBundles.length} → {targets.length})
+                </button>
+              </div>
+              {!canExecute && <p className="publish-muted">Hoàn tất preflight của đầu vào hiện tại để mở nút xác nhận.</p>}
+            </FormSection>
+          </div>
+          <PublishAside
+            manifest={manifest}
+            selectedCount={selectedBundles.length}
+            targetCount={targets.length}
+            currentPreflight={currentPreflight}
+            preflightState={preflightState}
+            sheetConfig={sheetConfig}
+            sheetLoadState={sheetLoadState}
+            sheetLoadError={sheetLoadError}
+            sheetUrlDraft={sheetUrlDraft}
+            sheetTokenDraft={sheetTokenDraft}
+            sheetBusy={sheetBusy}
+            sourceRoot={sourceRoot}
+            orderedBundleIds={orderedBundleIds}
+            captionOverrides={currentCaptionOverrides}
+            soundPolicy={currentSoundPolicy}
+            targetRef={targetRef}
+            profileReady={profileReady}
+            busy={busy}
+            setSheetUrlDraft={setSheetUrlDraft}
+            setSheetTokenDraft={setSheetTokenDraft}
+            setSheetConfig={setSheetConfig}
+            reloadSheetConfig={reloadSheetConfig}
+            setSheetBusy={setSheetBusy}
+            setNotice={setNotice}
+          />
+        </div>
+      </section>
+
+      <section id="publish-panel-monitor" className="publish-workspace-section" role="tabpanel" aria-label="Theo dõi" hidden={workspaceTab !== "monitor"}>
+        {stepper}
+        <div className="publish-monitor-head">
+          <div>
+            <h2>Tiến độ chiến dịch</h2>
+            <p>Theo dõi trạng thái, bằng chứng theo máy và phạm vi có thể chạy tiếp.</p>
+          </div>
+          <button type="button" className="ghost" onClick={() => void reload()} disabled={busy}>
+            <RefreshCw size={16} aria-hidden="true" /> Làm mới
+          </button>
+        </div>
+        {campaignLoadState === "loading" && <LoadingState label="Đang tải chiến dịch…" />}
+        {campaignLoadState === "error" && (
+          <StatusNotice tone="error" action={<button type="button" className="ghost" onClick={() => void reload()}>Thử lại</button>}>
+            {campaignLoadError ?? "Không tải được chiến dịch."}
+          </StatusNotice>
+        )}
+        {campaignLoadState === "ready" && campaigns.length === 0 && (
+          <EmptyState compact icon={<IconRocket size={17} />} title="Chưa có chiến dịch" hint="Tạo chiến dịch ở thẻ Thiết lập để bắt đầu đăng bài." />
+        )}
+        {campaignLoadState === "ready" && campaigns.length > 0 && (
+          <CampaignMonitor
+            campaigns={campaigns}
+            busy={busy}
+            details={details}
+            detailErrors={detailErrors}
+            detailLoading={detailLoading}
+            executionSnapshots={executionSnapshots}
+            devices={devices}
+            metas={metas}
+            retryCampaign={retryCampaign}
+            toggleDetail={toggleCampaignDetail}
+            cancel={async (campaign) => {
+              setBusy(true);
+              try {
+                await publishCancel(campaign.id);
+                await reload();
+              } catch (error) {
+                setNotice({ tone: "error", text: describeError(error) });
+              } finally {
+                setBusy(false);
+              }
+            }}
+          />
+        )}
+      </section>
+    </main>
+  );
+}
+
+type NoticeSetter = (notice: { tone: NoticeTone; text: string } | null) => void;
+
+function SourceSection({
+  busy,
+  sourceRoot,
+  manifest,
+  bundleIds,
+  captionDrafts,
+  setSourceRoot,
+  setManifest,
+  setBundleIds,
+  setCaptionDrafts,
+  invalidate,
+  scan,
+}: {
+  busy: boolean;
+  sourceRoot: string;
+  manifest: PublishFolderManifest | null;
+  bundleIds: string[];
+  captionDrafts: Record<string, string>;
+  setSourceRoot: (value: string) => void;
+  setManifest: (value: PublishFolderManifest | null) => void;
+  setBundleIds: Dispatch<SetStateAction<string[]>>;
+  setCaptionDrafts: Dispatch<SetStateAction<Record<string, string>>>;
+  invalidate: () => void;
+  scan: (path: string) => Promise<void>;
+}) {
+  return (
+    <FormSection title="Nguồn nội dung" description="Mỗi thư mục con chứa một video hoặc một bộ ảnh cùng chú thích.">
+      <div className="publish-source-row">
+        <label className="publish-path-field">
+          <span>Thư mục nguồn</span>
+          <input
+            value={sourceRoot}
+            onChange={(event) => {
+              const next = event.target.value;
+              setSourceRoot(next);
+              if (next !== manifest?.sourceRoot) {
+                setManifest(null);
+                setBundleIds([]);
+                setCaptionDrafts({});
+              }
+              invalidate();
+            }}
+            placeholder="Chọn thư mục nội dung"
+          />
+        </label>
         <button
           type="button"
           className="ghost"
@@ -438,202 +771,439 @@ export function PublishPage(props: PublishPageProps) {
             if (path) await scan(path);
           }}
         >
-          Chọn thư mục
+          <FolderOpen size={16} aria-hidden="true" /> Chọn thư mục
         </button>
-        <button
-          type="button"
-          className="primary"
-          disabled={!sourceRoot.trim() || busy}
-          onClick={() => scan(sourceRoot.trim())}
-        >
-          Quét
+        <button type="button" className="primary" disabled={!sourceRoot.trim() || busy} onClick={() => void scan(sourceRoot.trim())}>
+          Quét nguồn
         </button>
       </div>
+      {!manifest && !busy && (
+        <EmptyState compact icon={<FolderOpen size={17} />} title="Chưa có nội dung" hint="Chọn thư mục để đọc các gói bài thật." />
+      )}
+      {busy && !manifest && <LoadingState label="Đang quét nội dung…" />}
       {manifest && (
-        <>
-          <div className="row" style={{ marginTop: 10, justifyContent: "space-between" }}>
-            <strong>{manifest.bundles.length} gói nội dung</strong>
-            <details className="publish-scan-details">
+        <div className="publish-bundle-list" aria-label="Gói nội dung">
+          <div className="publish-section-summary">
+            <strong>{manifest.bundles.length} gói hợp lệ</strong>
+            <details>
               <summary>Chi tiết quét</summary>
-              <span className="hint">
-                {manifest.ignoredPartnerFiles} tệp đối tác và {manifest.ignoredHiddenFiles} tệp ẩn được bỏ qua
-              </span>
+              <span>{manifest.ignoredPartnerFiles} tệp đối tác và {manifest.ignoredHiddenFiles} tệp ẩn được bỏ qua</span>
             </details>
           </div>
-          <div className="job-list" style={{ marginTop: 8, maxHeight: 330, overflow: "auto" }}>
-            {manifest.bundles.map((bundle: PublishBundle) => {
-              const checked = bundleIds.includes(bundle.id);
-              return (
-                <article key={bundle.id} className="job-card publish-bundle-card">
-                  <div className="row" style={{ alignItems: "flex-start" }}>
-                    <input
-                      type="checkbox"
-                      aria-label={`Chọn ${bundle.name}`}
-                      checked={checked}
-                      onChange={(e) => {
-                        setBundleIds((current) =>
-                          e.target.checked
-                            ? [...current, bundle.id]
-                            : current.filter((id) => id !== bundle.id),
-                        );
-                      }}
-                    />
-                    <div style={{ flex: 1 }}>
-                      <strong>{bundle.name}</strong>
-                      <span className="pill">{mediaSummary(bundle)}</span>
-                      <label className="publish-caption-field">
-                      <span>Chú thích</span>
-                      <textarea
-                          aria-label={`Chú thích cho ${bundle.name}`}
-                          value={captionDrafts[bundle.id] ?? bundle.caption}
-                          onChange={(event) => {
-                            const caption = event.target.value;
-                            setCaptionDrafts((current) => ({ ...current, [bundle.id]: caption }));
-                          }}
-                          rows={3}
-                        />
-                      </label>
-                    </div>
-                  </div>
-                </article>
-              );
-            })}
-          </div>
+          {manifest.bundles.map((bundle) => {
+            const checked = bundleIds.includes(bundle.id);
+            return (
+              <article key={bundle.id} className={`publish-bundle-row ${checked ? "is-selected" : ""}`}>
+                <label className="publish-bundle-choice">
+                  <input
+                    type="checkbox"
+                    aria-label={`Chọn ${bundle.name}`}
+                    checked={checked}
+                    onChange={(event) => {
+                      setBundleIds((current) =>
+                        event.target.checked ? [...current, bundle.id] : current.filter((id) => id !== bundle.id),
+                      );
+                      invalidate();
+                    }}
+                  />
+                  <span>
+                    <strong>{bundle.name}</strong>
+                    <small>{mediaSummary(bundle)}</small>
+                  </span>
+                </label>
+                <label className="publish-caption-field">
+                  <span>Chú thích</span>
+                  <textarea
+                    aria-label={`Chú thích cho ${bundle.name}`}
+                    value={captionDrafts[bundle.id] ?? bundle.caption}
+                    onChange={(event) => {
+                      const caption = event.target.value;
+                      setCaptionDrafts((current) => ({ ...current, [bundle.id]: caption }));
+                      invalidate();
+                    }}
+                    rows={2}
+                  />
+                </label>
+              </article>
+            );
+          })}
           {manifest.notices.length > 0 && (
-            <p className="hint" style={{ whiteSpace: "pre-wrap" }}>
-              {manifest.notices.map((notice) => notice.message).join("\n")}
-            </p>
+            <StatusNotice tone={manifest.notices.some((row) => row.severity === "error") ? "error" : "warning"}>
+              {manifest.notices.map((row) => row.message).join(" ")}
+            </StatusNotice>
           )}
-        </>
-      )}
-      <section style={{ marginTop: 12 }}>
-        <h3>Ghép bài với máy</h3>
-        <div className="job-list">
-          {selectedBundles.map((bundle, index) => (
-            <article key={bundle.id} className="job-card">
-              <strong>{index + 1}. {bundle.name}</strong>
-              <span className="hint">→ {targets[index] ? deviceLabel(devices, metas, targets[index]) : "Chưa có máy"}</span>
-            </article>
-          ))}
-          {!selectedBundles.length && <p className="hint">Chọn bài để ghép với máy.</p>}
         </div>
-        {/*
-          Ticking twenty-one checkboxes against twenty phones is a pairing done by hand every
-          run, and the pairing is positional all the way down — a slip there posts one
-          account's photographs under another's caption, with no delete. This asks the
-          database which bundles have not gone out yet and fills the boxes in that order.
-        */}
+      )}
+    </FormSection>
+  );
+}
+
+function MappingSection({
+  busy,
+  manifest,
+  sourceRoot,
+  targets,
+  devices,
+  metas,
+  selectedBundles,
+  mappingReady,
+  setBusy,
+  setNotice,
+  setBundleIds,
+  invalidate,
+}: {
+  busy: boolean;
+  manifest: PublishFolderManifest | null;
+  sourceRoot: string;
+  targets: string[];
+  devices: SelProps["devices"];
+  metas: Map<string, import("../types").DeviceMeta>;
+  selectedBundles: PublishBundle[];
+  mappingReady: boolean;
+  setBusy: (value: boolean) => void;
+  setNotice: NoticeSetter;
+  setBundleIds: (value: string[]) => void;
+  invalidate: () => void;
+}) {
+  return (
+    <FormSection
+      title="Ghép bài với máy"
+      description="Thứ tự hiển thị bên dưới cũng là thứ tự được gửi tới backend."
+      actions={
         <button
           type="button"
+          className="ghost"
           disabled={busy || !manifest || targets.length === 0}
           onClick={async () => {
             if (!manifest) return;
             setBusy(true);
             setNotice(null);
+            invalidate();
             try {
-              const deal = await publishAutoAssign(sourceRoot.trim(), targets, targets.length);
-              setBundleIds(deal.plan.map((row) => row.bundleId));
-              setNotice({
-                tone: "success",
-                text: `Đã chia ${deal.plan.length} bài chưa đăng cho ${targets.length} máy.`,
-              });
-            } catch (e) {
-              setNotice({ tone: "error", text: describeError(e) });
+              const result = await publishAutoAssign(sourceRoot.trim(), targets, targets.length);
+              setBundleIds(result.plan.map((row) => row.bundleId));
+              setNotice({ tone: "success", text: `Đã chia ${result.plan.length} bài cho ${targets.length} máy.` });
+            } catch (error) {
+              setNotice({ tone: "error", text: describeError(error) });
             } finally {
               setBusy(false);
             }
           }}
         >
-          Chia tự động ({targets.length} máy)
+          Chia tự động
         </button>
-      </section>
-      <label style={{ marginTop: 12 }}>
-        Lịch chạy một lần (để trống = chạy ngay)
-        <input type="datetime-local" value={runAt} onChange={(e) => setRunAt(e.target.value)} />
-      </label>
-      <details className="publish-operation-details">
-        <summary>Quy trình thực hiện</summary>
-        <p className="hint">
-          App kiểm tra nội dung, chuyển sang máy, chọn một âm thanh đang được TikTok đề xuất,
-          đăng công khai, lấy liên kết, ghi Sheet rồi dọn nội dung tạm. Nếu trạng thái sau nút
-          Đăng không chắc chắn, app dừng để tránh đăng trùng.
-        </p>
-      </details>
+      }
+    >
+      {selectedBundles.length ? (
+        <ResponsiveTable
+          label="Ghép bài với máy"
+          rows={selectedBundles}
+          keyForRow={(bundle) => bundle.id}
+          columns={[
+            { id: "bundle", label: "Bài", render: (bundle) => `${selectedBundles.indexOf(bundle) + 1}. ${bundle.name}` },
+            { id: "media", label: "Nội dung", render: mediaSummary },
+            {
+              id: "device",
+              label: "Máy đích",
+              render: (bundle) => {
+                const index = selectedBundles.indexOf(bundle);
+                return targets[index] ? deviceDisplayName(devices, metas, targets[index]) : "Chưa có máy";
+              },
+            },
+          ]}
+        />
+      ) : (
+        <EmptyState compact title="Chưa có cặp bài-máy" hint="Chọn nội dung và máy đích để tạo ánh xạ." />
+      )}
+      {!mappingReady && selectedBundles.length > 0 && (
+        <StatusNotice tone="warning">Số bài ({selectedBundles.length}) phải bằng số máy đích ({targets.length}).</StatusNotice>
+      )}
+    </FormSection>
+  );
+}
+
+function PreflightSection({
+  profileReady,
+  busy,
+  preflightState,
+  preflightError,
+  snapshot,
+  current,
+  run,
+  androidTargets,
+  readiness,
+  readinessNote,
+  refreshReadiness,
+  devices,
+  metas,
+}: {
+  profileReady: boolean;
+  busy: boolean;
+  preflightState: AsyncState;
+  preflightError: string | null;
+  snapshot: { inputKey: string; report: PublishPreflightReport } | null;
+  current: PublishPreflightReport | null;
+  run: () => Promise<void>;
+  androidTargets: string[];
+  readiness: DevicePublishReadiness[];
+  readinessNote: string | null;
+  refreshReadiness: () => void;
+  devices: SelProps["devices"];
+  metas: Map<string, import("../types").DeviceMeta>;
+}) {
+  return (
+    <FormSection
+      title="Preflight"
+      description="Kiểm tra đúng digest nguồn, máy, media, composer và bộ chọn nhạc trước khi mở quyền đăng."
+      actions={
+        <button type="button" className="primary" disabled={!profileReady || preflightState === "loading" || busy} onClick={() => void run()}>
+          <ShieldCheck size={16} aria-hidden="true" /> {current ? "Kiểm tra lại" : "Chạy preflight"}
+        </button>
+      }
+    >
       {androidTargets.length > 0 && (
-        <p className="hint">
-          {androidTargets.length} máy Android. Máy chạy bản TikTok chưa được hỗ trợ sẽ bị từ
-          chối trước khi chuyển nội dung, kèm tên máy.
-        </p>
-      )}
-      {readinessNote && (
-        <p className="hint" role="alert">
-          Không đọc được trạng thái sẵn sàng: {readinessNote}
-        </p>
-      )}
-      {readiness.length > 0 && (
-        <div className="row" style={{ flexWrap: "wrap", gap: 6 }}>
-          {/* The preflight's own answer, shown before the refusal instead of inside it. */}
-          {readiness.map(({ udid, readiness: info }) => {
-            const view = readinessView(info);
-            return (
-              <span
-                key={udid}
-                className="pill"
-                title={view.raw ? `${udid} · ${view.raw}` : udid}
-              >
-                {deviceLabel(devices, metas, udid)}:{" "}
-                {view.label}
-              </span>
-            );
-          })}
-          {/*
-            A phone that updates TikTok in place keeps its udid, so nothing re-asks on its
-            own. This is the operator's way to say "I just changed that phone".
-          */}
-          <button
-            type="button"
-            className="ghost"
-            onClick={() => setReadinessNonce((nonce) => nonce + 1)}
-          >
-            Hỏi lại
-          </button>
+        <div className="publish-readiness-block">
+          <div className="publish-inline-heading">
+            <strong>Khả năng tương thích Android</strong>
+            <button type="button" className="ghost" onClick={refreshReadiness}>Hỏi lại</button>
+          </div>
+          {readinessNote && <StatusNotice tone="error">Không đọc được trạng thái sẵn sàng: {readinessNote}</StatusNotice>}
+          <div className="publish-readiness-list">
+            {readiness.map(({ udid, readiness: info }) => {
+              const view = readinessView(info);
+              return (
+                <span key={udid} className="pill">
+                  {deviceDisplayName(devices, metas, udid)}: {view.label}
+                </span>
+              );
+            })}
+          </div>
+          {readiness.length > 0 && (
+            <details className="publish-technical-details">
+              <summary>Chi tiết khả năng tương thích</summary>
+              <ul>
+                {readiness.map(({ udid, readiness: info }) => (
+                  <li key={`readiness-detail-${udid}`}>
+                    <strong>{deviceDisplayName(devices, metas, udid)}</strong>
+                    <code>{udid}</code>
+                    <code>{readinessView(info).raw}</code>
+                  </li>
+                ))}
+              </ul>
+            </details>
+          )}
+          <p className="publish-muted">Máy có build chưa được đo sẽ bị từ chối trước khi chuyển nội dung.</p>
         </div>
       )}
-      {sheetConfig && (!sheetConfig.webhookUrl || !sheetConfig.hasToken) && (
-        <p className="hint" role="status">
-          Sheet chưa cấu hình — bài đăng xong sẽ giữ link trong hàng chờ (`pending`) cho tới
-          khi điền webhook + token bên dưới.
-        </p>
+      {preflightState === "idle" && !current && !snapshot && (
+        <EmptyState compact title="Chưa kiểm tra" hint="Preflight phải đạt trên chính đầu vào hiện tại." />
       )}
-      <details style={{ marginTop: 8 }}>
-        <summary>Cấu hình Sheet (Apps Script webhook)</summary>
-        <div className="row" style={{ flexWrap: "wrap", gap: 6, marginTop: 6 }}>
+      {preflightState === "loading" && <LoadingState label="Đang kiểm tra từng máy…" />}
+      {preflightState === "error" && (
+        <StatusNotice tone="error" action={<button type="button" className="ghost" onClick={() => void run()}>Thử lại</button>}>
+          {preflightError ?? "Không chạy được preflight."}
+        </StatusNotice>
+      )}
+      {snapshot && !current && <StatusNotice tone="warning">Đầu vào đã thay đổi. Kết quả kiểm tra trước không còn hiệu lực.</StatusNotice>}
+      {current && (
+        <div className="publish-preflight-report">
+          <StatusNotice tone={current.canExecute ? "success" : "error"}>
+            {current.canExecute
+              ? `Đạt trên ${current.targetSnapshot.included.length} máy. Có thể chuyển sang xác nhận công khai.`
+              : "Preflight chưa đạt. Không thể tạo chiến dịch từ đầu vào này."}
+          </StatusNotice>
+          <div className="publish-target-snapshot">
+            <span>
+              Phạm vi đã khóa: {current.targetSnapshot.included.length} máy
+              {current.targetSnapshot.excluded.length > 0
+                ? ` · ${current.targetSnapshot.excluded.length} máy bị loại`
+                : ""}
+            </span>
+            <details
+              className="publish-technical-details"
+              aria-label="Chi tiết kỹ thuật phạm vi"
+            >
+              <summary>Chi tiết phạm vi</summary>
+              <code>Roster SHA-256: {current.targetSnapshot.rosterSha256}</code>
+              <ul>
+                {current.targetSnapshot.included.map((device) => (
+                  <li key={`included-${device.udid}`}>
+                    {device.number != null ? `Máy ${device.number}` : device.alias || "Máy chưa đặt số"}
+                    {device.alias && device.number != null ? ` · ${device.alias}` : ""}
+                    <code>{device.udid}</code>
+                  </li>
+                ))}
+                {current.targetSnapshot.excluded.map(({ device, reason }, index) => (
+                  <li key={`excluded-${device.udid}-${index}`}>
+                    {device.number != null ? `Máy ${device.number}` : device.alias || "Máy chưa đặt số"}
+                    {`: ${reason === "not_in_roster" ? "không còn kết nối" : "bị lặp trong phạm vi"}`}
+                    <code>{device.udid} · {reason}</code>
+                  </li>
+                ))}
+              </ul>
+            </details>
+          </div>
+          <PreflightTable rows={current.assignments} devices={devices} metas={metas} />
+          {current.issues.length > 0 && (
+            <ul className="publish-issue-list">
+              {current.issues.map((issue, index) => (
+                <li key={`${issue.code}-${index}`}>
+                  {issue.message}
+                  <details className="publish-technical-details" aria-label="Chi tiết lỗi preflight">
+                    <summary>Mã lỗi</summary>
+                    <code>{issue.code}</code>
+                  </details>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      )}
+    </FormSection>
+  );
+}
+
+function PublishAside({
+  manifest,
+  selectedCount,
+  targetCount,
+  currentPreflight,
+  preflightState,
+  sheetConfig,
+  sheetLoadState,
+  sheetLoadError,
+  sheetUrlDraft,
+  sheetTokenDraft,
+  sheetBusy,
+  sourceRoot,
+  orderedBundleIds,
+  captionOverrides,
+  soundPolicy,
+  targetRef,
+  profileReady,
+  busy,
+  setSheetUrlDraft,
+  setSheetTokenDraft,
+  setSheetConfig,
+  reloadSheetConfig,
+  setSheetBusy,
+  setNotice,
+}: {
+  manifest: PublishFolderManifest | null;
+  selectedCount: number;
+  targetCount: number;
+  currentPreflight: PublishPreflightReport | null;
+  preflightState: AsyncState;
+  sheetConfig: PublishSheetConfig | null;
+  sheetLoadState: "loading" | "ready" | "error";
+  sheetLoadError: string | null;
+  sheetUrlDraft: string;
+  sheetTokenDraft: string;
+  sheetBusy: boolean;
+  sourceRoot: string;
+  orderedBundleIds: string[];
+  captionOverrides: Record<string, string>;
+  soundPolicy: PublishPreflightRequest["soundPolicy"];
+  targetRef: TargetRef;
+  profileReady: boolean;
+  busy: boolean;
+  setSheetUrlDraft: (value: string) => void;
+  setSheetTokenDraft: (value: string) => void;
+  setSheetConfig: (value: PublishSheetConfig) => void;
+  reloadSheetConfig: () => Promise<void>;
+  setSheetBusy: (value: boolean) => void;
+  setNotice: NoticeSetter;
+}) {
+  const canExecute = currentPreflight?.canExecute === true;
+  return (
+    <div className="publish-workspace-aside">
+      <SummaryRail title="Tóm tắt lượt chạy">
+        <dl className="publish-summary-list">
+          <div><dt>Nguồn</dt><dd>{manifest ? `${manifest.bundles.length} gói hợp lệ` : "Chưa quét"}</dd></div>
+          <div><dt>Đã chọn</dt><dd>{selectedCount} bài</dd></div>
+          <div><dt>Máy đích</dt><dd>{targetCount} máy</dd></div>
+          <div><dt>Âm thanh</dt><dd>Ngẫu nhiên trong tối đa 5 đề xuất</dd></div>
+        </dl>
+        <div className="publish-summary-status">
+          <StatusChip tone={canExecute ? "success" : preflightState === "error" ? "error" : "neutral"}>
+            {canExecute ? "Preflight đạt" : "Chưa có preflight hợp lệ"}
+          </StatusChip>
+          {sheetLoadState === "error" ? (
+            <StatusChip tone="error">Không đọc được Sheet</StatusChip>
+          ) : sheetConfig ? (
+            <StatusChip tone={sheetConfig.webhookUrl && sheetConfig.hasToken ? "success" : "warning"}>
+              {sheetConfig.webhookUrl && sheetConfig.hasToken ? "Sheet sẵn sàng" : "Sheet chờ cấu hình"}
+            </StatusChip>
+          ) : null}
+        </div>
+        {currentPreflight && (
+          <details className="publish-technical-details">
+            <summary>Chi tiết lần kiểm tra</summary>
+            <code>{currentPreflight.inputDigest}</code>
+          </details>
+        )}
+        <AutomationProfileControl
+          kind="publish"
+          target={targetRef}
+          config={publishProfileConfig(sourceRoot.trim(), orderedBundleIds, captionOverrides, soundPolicy, true)}
+          defaultName="Đăng bài theo thư mục"
+          disabled={!profileReady || busy}
+          disabledReason="Chọn đủ nội dung, máy đích và chú thích trước khi lưu hồ sơ."
+          confirmSave={() => requestConfirm({
+            title: "Cho phép hồ sơ đăng công khai?",
+            message: "Mỗi lần chạy hồ sơ, app có thể chuyển nội dung, chọn nhạc và đăng công khai trên các máy đích.",
+            confirmLabel: "Cho phép và lưu",
+            cancelLabel: "Hủy",
+            danger: true,
+          })}
+        />
+      </SummaryRail>
+      <details className="publish-sheet-panel">
+        <summary>Cấu hình Sheet</summary>
+        {sheetLoadState === "loading" && <LoadingState label="Đang đọc cấu hình Sheet…" />}
+        {sheetLoadState === "error" && (
+          <StatusNotice
+            tone="error"
+            action={(
+              <button type="button" className="ghost" onClick={() => void reloadSheetConfig()}>
+                Thử lại
+              </button>
+            )}
+          >
+            {sheetLoadError ?? "Không đọc được cấu hình Sheet."}
+          </StatusNotice>
+        )}
+        {sheetConfig && (!sheetConfig.webhookUrl || !sheetConfig.hasToken) && (
+          <StatusNotice tone="warning">Sheet chưa cấu hình. Link đã xác nhận sẽ nằm trong hàng chờ.</StatusNotice>
+        )}
+        <label>
+          <span>Webhook URL</span>
           <input
-            type="text"
-            placeholder="https://script.google.com/…/exec"
+            type="url"
+            aria-label="Webhook URL"
             value={sheetUrlDraft}
             onChange={(event) => setSheetUrlDraft(event.target.value)}
-            style={{ minWidth: 320 }}
-            aria-label="Webhook URL"
+            placeholder="https://script.google.com/.../exec"
           />
+        </label>
+        <label>
+          <span>Webhook token</span>
           <input
             type="password"
-            placeholder={
-              sheetConfig?.hasToken ? "để trống = giữ token hiện tại" : "token của script"
-            }
+            aria-label="Webhook token"
             value={sheetTokenDraft}
             onChange={(event) => setSheetTokenDraft(event.target.value)}
-            aria-label="Webhook token"
+            placeholder={sheetConfig?.hasToken ? "Để trống để giữ token" : "Nhập token"}
           />
+        </label>
+        <div className="publish-sheet-actions">
           <button
             type="button"
-            className="ghost"
-            disabled={sheetBusy}
+            className="primary"
+            disabled={sheetBusy || sheetLoadState !== "ready"}
             onClick={async () => {
               setSheetBusy(true);
               try {
-                // An untouched token field means "keep what is stored" — the operator can
-                // fix a URL without holding the credential; clearing is its own button.
                 const saved = await publishSheetSaveConfig(
                   sheetUrlDraft,
                   sheetTokenDraft === "" ? undefined : sheetTokenDraft,
@@ -641,29 +1211,29 @@ export function PublishPage(props: PublishPageProps) {
                 setSheetConfig(saved);
                 setSheetUrlDraft(saved.webhookUrl);
                 setSheetTokenDraft("");
-            setNotice({ tone: "success", text: "Đã lưu cấu hình Sheet." });
-          } catch (e) {
-            setNotice({ tone: "error", text: describeError(e) });
+                setNotice({ tone: "success", text: "Đã lưu cấu hình Sheet." });
+              } catch (error) {
+                setNotice({ tone: "error", text: describeError(error) });
               } finally {
                 setSheetBusy(false);
               }
             }}
           >
-            Lưu
+            Lưu cấu hình
           </button>
           {sheetConfig?.hasToken && (
             <button
               type="button"
               className="ghost"
-              disabled={sheetBusy}
+              disabled={sheetBusy || sheetLoadState !== "ready"}
               onClick={async () => {
                 setSheetBusy(true);
                 try {
                   const saved = await publishSheetSaveConfig(sheetUrlDraft, "");
                   setSheetConfig(saved);
                   setNotice({ tone: "success", text: "Đã xoá token." });
-                } catch (e) {
-                  setNotice({ tone: "error", text: describeError(e) });
+                } catch (error) {
+                  setNotice({ tone: "error", text: describeError(error) });
                 } finally {
                   setSheetBusy(false);
                 }
@@ -674,252 +1244,270 @@ export function PublishPage(props: PublishPageProps) {
           )}
         </div>
       </details>
-      <button
-        type="button"
-        className="primary"
-        disabled={!mappingReady || busy}
-        onClick={async () => {
-          if (Object.values(currentCaptionOverrides).some((caption) => caption.length === 0)) {
-            setNotice({ tone: "error", text: "Mỗi bài phải có chú thích trước khi chạy." });
-            return;
-          }
-          const confirmed = await requestConfirm({
-            title: runAt ? "Xác nhận lập lịch đăng bài?" : "Xác nhận đăng công khai?",
-            message: runAt
-              ? `${selectedBundles.length} bài sẽ chạy trên ${targets.length} máy vào lịch đã chọn.`
-              : `${selectedBundles.length} bài sẽ được đăng công khai trên ${targets.length} máy. App sẽ chọn âm thanh từ danh sách TikTok đang hiển thị.`,
-            confirmLabel: runAt ? "Lập lịch" : "Đăng bài",
-          });
-          if (!confirmed) return;
-          setBusy(true);
-          setNotice(null);
-          try {
-            const campaign = await publishCreateCampaign(
-              sourceRoot.trim(),
-              orderedBundleIds,
-              targets,
-              runAt || null,
-              currentCaptionOverrides,
-              currentSoundPolicy,
-              true,
-            );
-            setWorkspaceTab("monitor");
-            if (!runAt) {
-              const result = await publishExecute(campaign.id, true);
-              setDetails((current) => ({ ...current, [campaign.id]: result.detail }));
-              setNotice({
-                tone:
-                  result.status === "complete"
-                    ? "success"
-                    : result.status === "uncertain"
-                      ? "warning"
-                      : "info",
-                text:
-                  result.status === "complete"
-                    ? "Đã đăng, lấy liên kết và ghi Sheet."
-                    : result.status === "uncertain"
-                      ? "Có máy chưa xác định được kết quả sau thao tác Đăng. App đã dừng để tránh đăng trùng."
-                      : "Quy trình đã dừng ở bước chưa hoàn tất. Mở chi tiết để xử lý phần còn lại.",
-              });
-            } else {
-              setNotice({
-                tone: "success",
-                text: `Đã lập lịch ${selectedBundles.length} bài cho ${targets.length} máy.`,
-              });
-            }
-            await reload();
-          } catch (e) {
-            setNotice({ tone: "error", text: describeError(e) });
-          } finally {
-            setBusy(false);
-          }
-        }}
-      >
-        {runAt ? "Xác nhận và lập lịch" : "Xác nhận và đăng"} ({bundleIds.length} → {targets.length})
-      </button>
-      <AutomationProfileControl
-        kind="publish"
-        target={targetRef}
-        config={publishProfileConfig(
-          sourceRoot.trim(),
-          orderedBundleIds,
-          currentCaptionOverrides,
-          currentSoundPolicy,
-          true,
-        )}
-        defaultName="Đăng bài theo thư mục"
-        disabled={!profileReady || busy}
-        disabledReason="Chọn đủ nội dung, máy đích và chú thích trước khi lưu hồ sơ."
-        confirmSave={() => requestConfirm({
-          title: "Cho phép hồ sơ đăng công khai?",
-          message:
-            "Mỗi lần hồ sơ này được chạy, app có thể chuyển nội dung, chọn nhạc và bấm Đăng công khai trên các máy đích. Kiểm tra an toàn trước/sau nút Đăng vẫn được giữ để tránh đăng trùng.",
-          confirmLabel: "Cho phép và lưu",
-          cancelLabel: "Hủy",
-          danger: true,
-        })}
-      />
-      </section>
-      {notice && <StatusNotice tone={notice.tone}>{notice.text}</StatusNotice>}
-      <section
-        id="publish-panel-monitor"
-        className="publish-workspace-section"
-        role="tabpanel"
-        aria-labelledby="publish-tab-monitor"
-        hidden={workspaceTab !== "monitor"}
-      >
-      {campaignLoadState === "loading" && <LoadingState label="Đang tải chiến dịch…" />}
-      {campaignLoadState === "error" && (
-        <StatusNotice
-          tone="error"
-          action={(
-            <button type="button" className="ghost" onClick={() => void reload()}>
-              Thử lại
-            </button>
-          )}
-        >
-          {campaignLoadError ?? "Không tải được chiến dịch."}
-        </StatusNotice>
-      )}
-      {campaignLoadState === "ready" && <div className="job-list" style={{ marginTop: 12 }}>
-        {campaigns.map((campaign, campaignIndex) => (
-          <article key={campaign.id} className="job-card">
-            <div className="row publish-campaign-title">
-              <strong>Chiến dịch {campaignIndex + 1}</strong>
-              <span className={`pill ${campaign.state}`}>
-                {PUBLISH_STATE_LABELS[campaign.state] ?? "Trạng thái chưa nhận diện"}
+    </div>
+  );
+}
+
+function PreflightTable({
+  rows,
+  devices,
+  metas,
+}: {
+  rows: PublishPreflightAssignmentReport[];
+  devices: SelProps["devices"];
+  metas: Map<string, import("../types").DeviceMeta>;
+}) {
+  const check = (value: "pass" | "fail") => (
+    <StatusChip tone={value === "pass" ? "success" : "error"}>{value === "pass" ? "Đạt" : "Không đạt"}</StatusChip>
+  );
+  return (
+    <ResponsiveTable
+      label="Kết quả preflight theo máy"
+      rows={rows}
+      keyForRow={(row) => `${row.ordinal}-${row.bundleId}-${row.udid}`}
+      columns={[
+        { id: "device", label: "Máy", render: (row) => deviceDisplayName(devices, metas, row.udid) },
+        {
+          id: "bundle",
+          label: "Bài",
+          render: (row) => (
+            <span>
+              Bài {row.ordinal + 1}
+              <details className="publish-technical-details" aria-label="Chi tiết kỹ thuật bài">
+                <summary>Chi tiết</summary>
+                <code>{row.bundleId}</code>
+              </details>
+            </span>
+          ),
+        },
+        {
+          id: "environment",
+          label: "TikTok",
+          render: (row) => row.packageName && row.version && row.locale
+            ? `${row.version} · ${row.locale}`
+            : "Không đọc được",
+        },
+        { id: "media", label: "Media", render: (row) => check(row.media) },
+        {
+          id: "storage",
+          label: "Dung lượng",
+          render: (row) => (
+            <span>
+              {check(row.storage)}
+              <details className="publish-technical-details" aria-label="Chi tiết dung lượng">
+                <summary>Chi tiết</summary>
+                <code>{row.availableBytes ?? 0} / {row.requiredBytes} byte</code>
+              </details>
+            </span>
+          ),
+        },
+        { id: "composer", label: "Composer", render: (row) => check(row.composer) },
+        { id: "sound", label: "Nhạc", render: (row) => check(row.soundPicker) },
+      ]}
+    />
+  );
+}
+
+function CampaignMonitor({
+  campaigns,
+  busy,
+  details,
+  detailErrors,
+  detailLoading,
+  executionSnapshots,
+  devices,
+  metas,
+  retryCampaign,
+  toggleDetail,
+  cancel,
+}: {
+  campaigns: PublishCampaignRecord[];
+  busy: boolean;
+  details: Record<string, PublishCampaignDetail>;
+  detailErrors: Record<string, string>;
+  detailLoading: Record<string, boolean>;
+  executionSnapshots: Record<string, PublishExecutionSnapshot>;
+  devices: SelProps["devices"];
+  metas: Map<string, import("../types").DeviceMeta>;
+  retryCampaign: (campaign: PublishCampaignRecord) => Promise<void>;
+  toggleDetail: (campaign: PublishCampaignRecord) => Promise<void>;
+  cancel: (campaign: PublishCampaignRecord) => Promise<void>;
+}) {
+  return (
+    <div className="publish-campaigns">
+      <ResponsiveTable
+        label="Chiến dịch đăng bài"
+        rows={campaigns}
+        keyForRow={(campaign) => campaign.id}
+        columns={[
+          {
+            id: "campaign",
+            label: "Chiến dịch",
+            render: (campaign) => (
+              <span className="publish-campaign-name">
+                <strong>Chiến dịch {campaigns.indexOf(campaign) + 1}</strong>
+                <small>{new Date(campaign.createdAt).toLocaleString()}</small>
               </span>
-            </div>
-            <p className="hint">
-              {campaign.assignments.length} bài · {new Date(campaign.createdAt).toLocaleString()}
-              {campaign.runAt ? ` · ${campaign.runAt}` : ""}
-            </p>
-            <div className="row">
-              {(["queued", "ready", "imported", "failedBeforeDispatch"] as const).includes(
-                campaign.state as "queued" | "ready" | "imported" | "failedBeforeDispatch",
-              ) && (
-                <button
-                  type="button"
-                  className="primary"
-                  disabled={busy}
-                  onClick={async () => {
-                    const confirmed = await requestConfirm({
-                      title: "Xác nhận tiếp tục đăng bài?",
-                      message: "App sẽ chỉ tiếp tục từ ranh giới hiệu ứng đã được lưu. Trạng thái chưa chắc chắn sẽ không tự đăng lại.",
-                      confirmLabel: "Tiếp tục",
-                    });
-                    if (!confirmed) return;
-                    setBusy(true);
-                    setNotice(null);
-                    try {
-                      const result = await publishExecute(campaign.id, true);
-                      setDetails((current) => ({ ...current, [campaign.id]: result.detail }));
-                      await reload();
-                      setNotice({
-                        tone: result.status === "complete" ? "success" : result.status === "uncertain" ? "warning" : "info",
-                        text:
-                          result.status === "complete"
-                            ? "Đã hoàn tất đăng bài và ghi Sheet."
-                            : result.status === "uncertain"
-                              ? "Kết quả sau thao tác Đăng chưa chắc chắn; app không tự đăng lại."
-                              : "Quy trình còn bước chưa hoàn tất. Xem chi tiết để xử lý tiếp.",
-                      });
-                    } catch (e) {
-                      setNotice({ tone: "error", text: describeError(e) });
-                    } finally {
-                      setBusy(false);
-                    }
-                  }}
-                >
-                  {campaign.state === "failedBeforeDispatch" ? "Chạy lại từ đầu" : "Tiếp tục quy trình"}
-                </button>
-              )}
-              {(["queued", "scheduled", "preparing", "ready", "failedBeforeDispatch"] as const).includes(
-                campaign.state as "queued" | "scheduled" | "preparing" | "ready" | "failedBeforeDispatch",
-              ) && (
+            ),
+          },
+          { id: "scope", label: "Phạm vi", render: (campaign) => `${campaign.assignments.length} bài` },
+          {
+            id: "state",
+            label: "Trạng thái",
+            render: (campaign) => (
+              <StatusChip tone={campaignTone(campaign.state)}>
+                {PUBLISH_STATE_LABELS[campaign.state] ?? "Trạng thái chưa nhận diện"}
+              </StatusChip>
+            ),
+          },
+          {
+            id: "actions",
+            label: "Thao tác",
+            render: (campaign) => (
+              <div className="publish-row-actions">
+                {RETRYABLE_STATES.includes(campaign.state) && (
+                  <button type="button" className="primary" disabled={busy} onClick={() => void retryCampaign(campaign)}>
+                    {campaign.state === "failedBeforeDispatch" ? "Chạy lại từ đầu" : "Tiếp tục"}
+                  </button>
+                )}
+                {CANCELLABLE_STATES.includes(campaign.state) && (
+                  <button type="button" className="ghost" disabled={busy} onClick={() => void cancel(campaign)}>Huỷ</button>
+                )}
                 <button
                   type="button"
                   className="ghost"
-                  disabled={busy}
-                  onClick={async () => {
-                    setBusy(true);
-                    try {
-                      await publishCancel(campaign.id);
-                      await reload();
-                    } catch (e) {
-                      setNotice({ tone: "error", text: describeError(e) });
-                    } finally {
-                      setBusy(false);
-                    }
-                  }}
+                  disabled={detailLoading[campaign.id] === true}
+                  onClick={() => void toggleDetail(campaign)}
                 >
-                  Huỷ
+                  {details[campaign.id] ? "Ẩn chi tiết máy" : "Chi tiết máy"}
                 </button>
-              )}
-              <button
-                type="button"
-                className="ghost"
-                onClick={async () => {
-                  if (details[campaign.id]) {
-                    setDetails((current) => {
-                      const next = { ...current };
-                      delete next[campaign.id];
-                      return next;
-                    });
-                    return;
-                  }
-                  try {
-                    const detail = await publishGet(campaign.id);
-                    if (detail) setDetails((current) => ({ ...current, [campaign.id]: detail }));
-                    else setNotice({ tone: "warning", text: "Chiến dịch không còn trong dữ liệu." });
-                  } catch (e) {
-                    setNotice({ tone: "error", text: describeError(e) });
-                  }
-                }}
-              >
-                {details[campaign.id] ? "Ẩn chi tiết máy" : "Chi tiết máy"}
-              </button>
-            </div>
-            {details[campaign.id] && (
-              <ul className="hint" style={{ marginTop: 8 }}>
-                {/*
-                  `publishList` carries assignment PLANS (bundle↔udid), so per-phone state
-                  and errorCode were invisible on this page — a campaign could sit
-                  `failedBeforeDispatch` with the one refusing phone unnameable except by
-                  reading the backend log. This is the read the retry buttons act on.
-                */}
-                {details[campaign.id].assignments.map((assignment) => {
-                  const cleanup = cleanupEvidence(assignment.evidenceJson);
-                  const rawDetail = [
-                    `UDID: ${assignment.udid}`,
-                    `state: ${assignment.state}`,
-                    assignment.errorCode ? `error: ${assignment.errorCode}` : null,
-                  ]
-                    .filter(Boolean)
-                    .join(" · ");
-                  return (
-                    <li key={assignment.id} title={rawDetail}>
-                      {deviceLabel(devices, metas, assignment.udid)}
-                      {" — "}
-                      {PUBLISH_STATE_LABELS[assignment.state] ?? "Trạng thái chưa nhận diện"}
-                      {cleanup && <span title={cleanup.raw}> · {cleanup.label}</span>}
-                    </li>
-                  );
-                })}
-              </ul>
-            )}
-          </article>
-        ))}
-        {!campaigns.length && (
-          <EmptyState
-            compact
-            icon={<IconRocket size={15} />}
-            title="Chưa có chiến dịch"
-            hint="Tạo chiến dịch ở khung bên trên để bắt đầu đăng bài."
-          />
-        )}
-      </div>}
-      </section>
+              </div>
+            ),
+          },
+        ]}
+      />
+      {campaigns.map((campaign) => (
+        <CampaignDetail
+          key={campaign.id}
+          detail={details[campaign.id]}
+          error={detailErrors[campaign.id]}
+          loading={detailLoading[campaign.id] === true}
+          snapshot={executionSnapshots[campaign.id]}
+          devices={devices}
+          metas={metas}
+          retry={() => void toggleDetail(campaign)}
+        />
+      ))}
     </div>
   );
+}
+
+function CampaignDetail({
+  detail,
+  error,
+  loading,
+  snapshot,
+  devices,
+  metas,
+  retry,
+}: {
+  detail?: PublishCampaignDetail;
+  error?: string;
+  loading: boolean;
+  snapshot?: PublishExecutionSnapshot;
+  devices: SelProps["devices"];
+  metas: Map<string, import("../types").DeviceMeta>;
+  retry: () => void;
+}) {
+  if (!detail && !error && !loading) return null;
+  return (
+    <section className="publish-campaign-detail" aria-label="Chi tiết chiến dịch đang chọn">
+      {loading && <LoadingState label="Đang đối chiếu trạng thái chiến dịch…" />}
+      {error && (
+        <StatusNotice tone="error" action={<button type="button" className="ghost" onClick={retry}>Thử lại</button>}>
+          {error}
+        </StatusNotice>
+      )}
+      {detail && (
+        <>
+          {snapshot && (
+            <div className="publish-reconcile-summary">
+              <StatusChip tone={snapshot.status === "complete" ? "success" : snapshot.status === "uncertain" ? "warning" : "info"}>
+                {snapshot.status === "complete" ? "Đã hoàn tất" : snapshot.status === "uncertain" ? "Kết quả chưa chắc chắn" : "Còn bước cần hoàn tất"}
+              </StatusChip>
+              <span>{retryScopeLabel(snapshot.retryScope)}</span>
+            </div>
+          )}
+          <ResponsiveTable
+            label="Kết quả theo máy"
+            rows={detail.assignments}
+            keyForRow={(assignment) => assignment.id}
+            columns={[
+            {
+              id: "device",
+              label: "Máy",
+              render: (assignment: PublishAssignmentRecord) => {
+                const raw = assignmentRaw(assignment);
+                return (
+                  <span>
+                    {deviceDisplayName(devices, metas, assignment.udid)}
+                    <details className="publish-technical-details" aria-label="Chi tiết kỹ thuật máy">
+                      <summary>Chi tiết</summary>
+                      <code>{raw}</code>
+                    </details>
+                  </span>
+                );
+              },
+            },
+            {
+              id: "state",
+              label: "Kết quả",
+              render: (assignment: PublishAssignmentRecord) =>
+                PUBLISH_STATE_LABELS[assignment.state] ?? "Trạng thái chưa nhận diện",
+            },
+            {
+              id: "cleanup",
+              label: "Dọn nội dung tạm",
+              render: (assignment: PublishAssignmentRecord) => {
+                const cleanup = cleanupEvidence(assignment.evidenceJson);
+                return cleanup ? (
+                  <span>
+                    {cleanup.label}
+                    <details className="publish-technical-details" aria-label="Chi tiết dọn nội dung">
+                      <summary>Chi tiết</summary>
+                      <code>{cleanup.raw}</code>
+                    </details>
+                  </span>
+                ) : "Chưa có bằng chứng";
+              },
+            },
+            ]}
+          />
+        </>
+      )}
+    </section>
+  );
+}
+
+function retryScopeLabel(scope: PublishExecutionSnapshot["retryScope"]): string {
+  switch (scope) {
+    case "fullPipeline":
+      return "Có thể chạy lại từ đầu";
+    case "linkAndSheet":
+      return "Chỉ tiếp tục lấy liên kết và ghi Sheet";
+    case "sheetOnly":
+      return "Chỉ tiếp tục ghi Sheet";
+    case "none":
+      return "Không có bước được phép tự chạy lại";
+  }
+}
+
+function assignmentRaw(assignment: PublishAssignmentRecord): string {
+  return [
+    `UDID: ${assignment.udid}`,
+    `state: ${assignment.state}`,
+    assignment.errorCode ? `error: ${assignment.errorCode}` : null,
+  ]
+    .filter(Boolean)
+    .join(" · ");
 }

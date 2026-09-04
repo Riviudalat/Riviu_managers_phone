@@ -178,8 +178,8 @@ export function InteractionActorPicker({
               // **No model here.** Twenty phones on this fleet report `SM-G950F`, so the model
               // told the operator nothing while taking the width that the name needed. What
               // identifies a phone is the number written on it and whatever they renamed it
-              // to; the udid stays in the tooltip as the identity.
-              const name = deviceLabel.get(device.udid) || device.name || device.udid.slice(0, 8);
+              // to; the udid stays in the explicit technical disclosure.
+              const name = deviceLabel.get(device.udid) || device.name || "Máy chưa đặt tên";
               return (
                 <div
                   key={device.udid}
@@ -189,7 +189,7 @@ export function InteractionActorPicker({
                       the "chosen" signal. The checkbox is still here, only moved off-screen —
                       it keeps the label clickable and lets the tests (and a screen reader)
                       read the picked state by the device name. */}
-                  <label className="tile-pick" title={device.udid}>
+                  <label className="tile-pick">
                     <input
                       type="checkbox"
                       className="tile-check"
@@ -202,6 +202,13 @@ export function InteractionActorPicker({
                     </span>
                     <span className="tile-name">{name}</span>
                   </label>
+                  <details
+                    className="interaction-raw-code"
+                    aria-label={`Chi tiết kỹ thuật ${name}`}
+                  >
+                    <summary>Chi tiết</summary>
+                    <code>{device.udid}</code>
+                  </details>
                   {/* The @handle this phone is logged into. Kept next to the phone so an
                       operator sets it once, here, and tagging it later pulls this phone into
                       the post. Blurring saves it to the device meta. */}

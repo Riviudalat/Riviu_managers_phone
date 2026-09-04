@@ -77,6 +77,7 @@ function DeviceTileInner({
       data-udid={device.udid}
       role="group"
       tabIndex={0}
+      aria-roledescription="thẻ thiết bị"
       aria-label={`Máy ${index}, ${displayName}, ${operationalLabel}${selected ? ", đã chọn" : ""}`}
       style={{ width, height: width * 2 }}
       onClick={(e) => onSelect(device.udid, e.metaKey || e.ctrlKey || e.shiftKey)}

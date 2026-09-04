@@ -4,22 +4,24 @@ import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { MaterialPage } from "./MaterialPage";
-import type { MaterialItem } from "../types";
+import type { DeviceInfo, MaterialItem, MaterialPushBatchResult } from "../types";
 
 const listMaterials = vi.hoisted(() => vi.fn());
 const listGroups = vi.hoisted(() => vi.fn());
 const flashError = vi.hoisted(() => vi.fn());
+const pushMaterialBatch = vi.hoisted(() => vi.fn());
 
 vi.mock("../api", () => ({
   addMaterial: vi.fn(async () => undefined),
   deleteMaterial: vi.fn(async () => undefined),
   listGroups,
   listMaterials,
-  pushMaterial: vi.fn(async () => "Đã chuyển"),
+  pushMaterialBatch,
 }));
 
 vi.mock("../pickFile", () => ({ pickMaterial: vi.fn(async () => null) }));
 vi.mock("../farmToast", () => ({ flash: vi.fn(), flashError }));
+vi.mock("../confirmStore", () => ({ requestConfirm: vi.fn(async () => true) }));
 
 const material: MaterialItem = {
   id: "material-1",
@@ -34,6 +36,7 @@ beforeEach(() => {
   listMaterials.mockReset();
   listGroups.mockReset();
   listGroups.mockResolvedValue([]);
+  pushMaterialBatch.mockReset();
 });
 
 function renderPage() {
@@ -46,7 +49,7 @@ describe("MaterialPage list states", () => {
 
     renderPage();
 
-    expect(screen.getByRole("status")).toHaveTextContent("Đang tải kho nội dung");
+    expect(screen.getByText("Đang tải kho nội dung…")).toBeInTheDocument();
     expect(screen.queryByText("Chưa có nội dung")).toBeNull();
     expect(screen.queryByRole("heading", { level: 2 })).toBeNull();
     expect(await screen.findByText("Chưa có nội dung")).toBeInTheDocument();
@@ -88,5 +91,103 @@ describe("MaterialPage list states", () => {
 
     expect(screen.getByText("video-01.mp4")).toBeInTheDocument();
     expect(screen.queryByText("old.mp4")).toBeNull();
+  });
+
+  it("sends the whole selected target and renders isolated device results", async () => {
+    listMaterials.mockResolvedValue([material]);
+    const devices = [
+      { udid: "phone-1", name: "Galaxy A", model: "A", platform: "android" },
+      { udid: "phone-2", name: "Galaxy B", model: "B", platform: "android" },
+    ] as DeviceInfo[];
+    const result: MaterialPushBatchResult = {
+      batchId: "batch-1",
+      materialId: material.id,
+      target: {
+        targetRef: { type: "explicit", udids: ["phone-1", "phone-2"] },
+        included: [
+          { udid: "phone-1", alias: "", number: null },
+          { udid: "phone-2", alias: "", number: null },
+        ],
+        excluded: [],
+        rosterSha256: "a".repeat(64),
+      },
+      results: [
+        { udid: "phone-1", status: "succeeded", evidence: "sha256=ok" },
+        { udid: "phone-2", status: "failed", error: "device busy" },
+      ],
+    };
+    pushMaterialBatch.mockResolvedValueOnce(result).mockResolvedValueOnce({
+      ...result,
+      batchId: "batch-2",
+      target: {
+        ...result.target,
+        targetRef: { type: "explicit", udids: ["phone-2"] },
+        included: [{ udid: "phone-2", alias: "Ca chiều", number: 2 }],
+        excluded: [],
+        rosterSha256: "c".repeat(64),
+      },
+      results: [{ udid: "phone-2", status: "succeeded", evidence: "sha256=ok" }],
+    });
+    const user = userEvent.setup();
+    render(
+      <MaterialPage
+        devices={devices}
+        selected={["phone-1", "phone-2"]}
+        onSelectUdids={() => undefined}
+      />,
+    );
+
+    await user.click(await screen.findByRole("button", { name: "Chuyển tới 2 máy" }));
+    expect(pushMaterialBatch).toHaveBeenNthCalledWith(1, {
+      materialId: material.id,
+      target: { type: "explicit", udids: ["phone-1", "phone-2"] },
+    });
+    expect(await screen.findByText("Máy 1 · Galaxy A")).toBeVisible();
+    expect(screen.getByText("Máy 2 · Galaxy B")).toBeVisible();
+    expect(screen.getByText("Thất bại")).toBeVisible();
+
+    await user.click(screen.getByRole("button", { name: "Thử lại 1 máy lỗi" }));
+    expect(pushMaterialBatch).toHaveBeenNthCalledWith(2, {
+      materialId: material.id,
+      target: { type: "explicit", udids: ["phone-2"] },
+    });
+    expect(await screen.findByText("Ca chiều")).toBeVisible();
+    expect(screen.queryByText("Máy 1 · Galaxy A")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Thử lại 1 máy lỗi" })).toBeNull();
+  });
+
+  it("resolves an empty selection as the whole fleet instead of one device", async () => {
+    listMaterials.mockResolvedValue([material]);
+    const devices = [
+      { udid: "phone-1", name: "Galaxy A", model: "A", platform: "android" },
+      { udid: "phone-2", name: "Galaxy B", model: "B", platform: "android" },
+    ] as DeviceInfo[];
+    pushMaterialBatch.mockResolvedValue({
+      batchId: "batch-all",
+      materialId: material.id,
+      target: {
+        targetRef: { type: "all" },
+        included: [
+          { udid: "phone-1", alias: "", number: null },
+          { udid: "phone-2", alias: "", number: null },
+        ],
+        excluded: [],
+        rosterSha256: "b".repeat(64),
+      },
+      results: [
+        { udid: "phone-1", status: "succeeded" },
+        { udid: "phone-2", status: "succeeded" },
+      ],
+    } satisfies MaterialPushBatchResult);
+
+    render(
+      <MaterialPage devices={devices} selected={[]} onSelectUdids={() => undefined} />,
+    );
+
+    await userEvent.click(await screen.findByRole("button", { name: "Chuyển tới 2 máy" }));
+    expect(pushMaterialBatch).toHaveBeenCalledWith({
+      materialId: material.id,
+      target: { type: "all" },
+    });
   });
 });

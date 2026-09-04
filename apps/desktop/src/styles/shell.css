@@ -61,8 +61,8 @@
   flex-shrink: 0;
   display: flex;
   flex-direction: column;
-  background: var(--bg-elevated);
-  border-right: 1px solid var(--line);
+  background: var(--nav-bg);
+  border-right: 1px solid var(--nav-line);
   position: relative;
   transition: width 0.25s ease;
   user-select: none;
@@ -84,16 +84,16 @@
   border-radius: 8px;
   object-fit: contain;
   background: var(--bg-elevated);
-  border: 1px solid var(--line);
+  border: 1px solid var(--nav-line);
   flex-shrink: 0;
 }
 .aside-logo strong {
   font-size: var(--text-base);
   font-weight: 700;
-  letter-spacing: -0.02em;
+  letter-spacing: 0;
   white-space: nowrap;
   overflow: hidden;
-  color: var(--text-1);
+  color: var(--nav-active);
 }
 
 .aside-scroll {
@@ -108,7 +108,7 @@
 
 .menu-group h2 {
   margin: 0 0.55rem 0.2rem;
-  color: var(--text-3);
+  color: var(--nav-muted);
   font-size: var(--text-xs);
   font-weight: 700;
   line-height: 1.5;
@@ -122,7 +122,7 @@
   width: 100%;
   border: none;
   background: transparent;
-  color: var(--text-2);
+  color: var(--nav-text);
   /* Flush left: the old 2.15rem indent existed to sit under a group title. */
   padding: 0.48rem 0.55rem;
   border-radius: 6px;
@@ -133,12 +133,13 @@
   height: 36px;
 }
 .menu-item:hover {
-  background: var(--bg-muted);
-  color: var(--primary);
+  background: var(--nav-bg-hover);
+  color: var(--nav-active);
 }
 .menu-item.active {
-  background: var(--primary-50);
-  color: var(--primary);
+  background: var(--nav-bg-hover);
+  color: var(--nav-active);
+  box-shadow: inset 3px 0 0 var(--primary);
 }
 .aside.collapsed .menu-item {
   padding-left: 0.35rem;
@@ -155,15 +156,15 @@
 .aside-stats {
   margin: 0.65rem 0.35rem 0.35rem;
   padding: 0.65rem 0.75rem;
-  border: 1px solid var(--primary);
+  border: 1px solid var(--nav-line);
   border-radius: var(--radius);
-  background: var(--bg-elevated);
+  background: var(--nav-panel);
 }
 .aside-stats h4 {
   margin: 0 0 0.4rem;
   font-size: var(--text-md);
   font-weight: 700;
-  color: var(--text-1);
+  color: var(--nav-active);
 }
 .aside-stat-row {
   display: grid;
@@ -171,11 +172,11 @@
   gap: 0.35rem;
   align-items: center;
   font-size: var(--text-sm);
-  color: var(--text-2);
+  color: var(--nav-muted);
   margin: 0.15rem 0;
 }
 .aside-stat-row strong {
-  color: var(--primary);
+  color: var(--nav-text);
   font-variant-numeric: tabular-nums;
   font-size: var(--text-sm);
 }
@@ -185,18 +186,18 @@
   height: 40px;
   padding: 0;
   border: 0;
-  border-top: 1px solid var(--line);
+  border-top: 1px solid var(--nav-line);
   border-radius: 0;
   background: transparent;
   display: grid;
   place-items: center;
   cursor: pointer;
-  color: var(--text-3);
+  color: var(--nav-muted);
   flex-shrink: 0;
 }
 .aside-collapse:hover {
-  color: var(--primary);
-  background: var(--primary-soft);
+  color: var(--nav-active);
+  background: var(--nav-bg-hover);
 }
 
 .aside.collapsed .aside-logo strong,
@@ -220,40 +221,6 @@
   background: var(--bg-content);
 }
 
-.topbar {
-  height: 48px;
-  flex-shrink: 0;
-  display: flex;
-  align-items: center;
-  gap: 0.65rem;
-  padding: 0 1.25rem 0 0.5rem;
-  background: var(--bg-elevated);
-  border-bottom: 1px solid var(--line);
-}
-.topbar-drag {
-  flex: 1;
-  height: 100%;
-  min-width: 40px;
-  -webkit-app-region: drag;
-}
-.topbar-title {
-  margin: 0;
-  font-weight: 600;
-  font-size: var(--text-base);
-  color: var(--text-1);
-  padding-left: 0.5rem;
-  white-space: nowrap;
-}
-.topbar-actions {
-  display: flex;
-  align-items: center;
-  gap: 0.35rem;
-  -webkit-app-region: no-drag;
-}
-.topbar-actions .icon-btn {
-  color: var(--primary);
-}
-
 .icon-btn {
   width: 32px;
   height: 32px;
@@ -274,10 +241,14 @@
   flex: 1;
   min-height: 0;
   overflow: auto;
-  padding: 0.65rem 1rem 1rem;
+  padding: var(--space-4) var(--space-5) var(--space-5);
   display: flex;
   flex-direction: column;
   gap: 0.55rem;
+}
+
+.content-control {
+  padding: 0.65rem 1rem 1rem;
 }
 
 .automation-page-stack {

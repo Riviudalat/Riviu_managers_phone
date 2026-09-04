@@ -133,8 +133,14 @@ describe("FlowRunMonitor retry policy", () => {
     expect(screen.getByText("Máy 1 · ONE-01")).toBeInTheDocument();
     expect(screen.getByText("Tự động vuốt")).toBeInTheDocument();
     expect(screen.getAllByText("Thành công")).toHaveLength(2);
-    expect(screen.queryByText("device-a")).not.toBeInTheDocument();
-    expect(screen.queryByText(/node-attempt/)).not.toBeInTheDocument();
+    const deviceId = screen.getByText("device-a");
+    const nodeId = screen.getByText("node-attempt-a");
+    expect(deviceId).not.toBeVisible();
+    expect(nodeId).not.toBeVisible();
+    fireEvent.click(screen.getByRole("group", { name: "Chi tiết kỹ thuật thiết bị" }).querySelector("summary")!);
+    fireEvent.click(screen.getByRole("group", { name: "Chi tiết kỹ thuật bước" }).querySelector("summary")!);
+    expect(deviceId).toBeVisible();
+    expect(nodeId).toBeVisible();
   });
 
   it("never offers retry for an uncertain attempt and still honors an explicit safe retry", () => {

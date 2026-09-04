@@ -2,7 +2,7 @@ import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/re
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { InteractionMonitorTab } from "./InteractionMonitorTab";
-import type { AppEvent } from "../../types";
+import type { AppEvent, InteractionCampaignSummary } from "../../types";
 
 const { listeners } = vi.hoisted(() => ({ listeners: [] as ((event: AppEvent) => void)[] }));
 
@@ -22,6 +22,8 @@ vi.mock("../../api", () => ({
     mimeType: "image/jpeg",
     base64: "AAAA",
   })),
+  publicCleanupExecute: vi.fn(),
+  publicCleanupPreflight: vi.fn(),
   interactionRetry: vi.fn(async () => undefined),
   listenRiviuEvents: vi.fn(async (handler: (event: AppEvent) => void) => {
     listeners.push(handler);
@@ -124,7 +126,113 @@ function renderTab(openCampaignId: string | null = null, onOpen = vi.fn()) {
   return onOpen;
 }
 
+function renderMasterDetail(openCampaignId: string | null = null, onOpen = vi.fn()) {
+  render(
+    <InteractionMonitorTab
+      devices={devices}
+      deviceNumber={deviceNumber}
+      handles={{ "android-0": "mangv" }}
+      openCampaignId={openCampaignId}
+      onOpenCampaign={onOpen}
+      masterDetail
+    />,
+  );
+  return onOpen;
+}
+
 describe("InteractionMonitorTab", () => {
+  it.each([
+    ["missing", null, "Chiến dịch không còn trong dữ liệu."],
+    ["rejected", new Error("database read failed"), "database read failed"],
+  ])("shows a retryable detail error when the campaign is %s", async (_, outcome, message) => {
+    const api = await import("../../api");
+    if (outcome instanceof Error) {
+      vi.mocked(api.interactionGet).mockRejectedValueOnce(outcome);
+    } else {
+      vi.mocked(api.interactionGet).mockResolvedValueOnce(outcome);
+    }
+    vi.mocked(api.interactionGet).mockResolvedValueOnce(detail as never);
+    renderMasterDetail("campaign-1");
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(message);
+    expect(screen.queryByText("Đang mở chiến dịch…")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Thử lại" }));
+    expect(await screen.findByText("link 111")).toBeVisible();
+  });
+
+  it("keeps the newest campaign-list response when an older request finishes later", async () => {
+    const api = await import("../../api");
+    let resolveOld!: (value: InteractionCampaignSummary[]) => void;
+    vi.mocked(api.interactionList)
+      .mockImplementationOnce(() => new Promise((resolve) => { resolveOld = resolve; }))
+      .mockResolvedValueOnce([{ ...summary, id: "campaign-new", brief: { ...summary.brief, firstAuthor: "new.author" } }] as never);
+
+    renderTab();
+    await waitFor(() => expect(listeners).toHaveLength(1));
+    listeners[0]({ type: "interactionUpdated", campaignId: "campaign-new", revision: 2 } as AppEvent);
+    expect(await screen.findByText("@new.author +1 link")).toBeVisible();
+
+    resolveOld([{ ...summary, id: "campaign-old", brief: { ...summary.brief, firstAuthor: "old.author" } }] as InteractionCampaignSummary[]);
+    await Promise.resolve();
+    expect(screen.getByText("@new.author +1 link")).toBeVisible();
+    expect(screen.queryByText("@old.author +1 link")).toBeNull();
+  });
+
+  it("counts failed-before-effect actions as terminal and renders the typed aggregate", async () => {
+    const api = await import("../../api");
+    vi.mocked(api.interactionGet).mockResolvedValue({
+      ...detail,
+      summary: {
+        ...summary,
+        actionCounters: { planned: 3, attempted: 1, confirmed: 1, noOp: 0, uncertain: 0 },
+      },
+      actionAggregate: "partial",
+      assignments: [{
+        ...detail.assignments[0],
+        actions: [
+          { kind: "like", state: "confirmed", revision: 1, effectIntent: "tap", evidence: null, error: null },
+          { kind: "save", state: "failedBeforeEffect", revision: 1, effectIntent: null, evidence: null, error: "card changed" },
+          { kind: "comment", state: "failedBeforeEffect", revision: 1, effectIntent: null, evidence: null, error: "audit unavailable" },
+        ],
+      }],
+    } as never);
+    renderMasterDetail("campaign-1");
+
+    expect(await screen.findByText("Hành động xong một phần")).toBeVisible();
+    expect(screen.getByText(/3\/3 hành động đã có kết quả/)).toBeVisible();
+    expect(screen.getByLabelText("2 chưa thực hiện")).toBeVisible();
+    expect(screen.getByRole("progressbar", { name: "Tiến trình chiến dịch đang xem" }))
+      .toHaveAttribute("aria-valuenow", "100");
+    expect(screen.getByRole("button", { name: "Kiểm tra bỏ tim" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Bỏ Lưu" })).toBeDisabled();
+    expect(screen.queryByRole("button", { name: /hoàn tác.*bình luận/i })).toBeNull();
+  });
+
+  it("closes list progress for terminal actions that failed before effect", async () => {
+    const api = await import("../../api");
+    vi.mocked(api.interactionList).mockResolvedValue([{
+      ...summary,
+      actionCounters: { planned: 4, attempted: 1, confirmed: 1, noOp: 1, uncertain: 0 },
+    }] as never);
+    renderTab();
+
+    expect(await screen.findByText(/4\/4 hành động/)).toHaveTextContent("2 chưa thực hiện");
+    expect(screen.getByRole("progressbar", { name: /Tiến trình/ }))
+      .toHaveAttribute("aria-valuenow", "100");
+  });
+
+  it("keeps the campaign list beside the selected campaign on the page workspace", async () => {
+    const api = await import("../../api");
+    vi.mocked(api.interactionList).mockResolvedValue([summary] as never);
+    vi.mocked(api.interactionGet).mockResolvedValue(detail as never);
+    renderMasterDetail("campaign-1");
+
+    expect(await screen.findByRole("region", { name: "Danh sách chiến dịch" })).toBeVisible();
+    expect(screen.getByRole("complementary", { name: "Chi tiết chiến dịch" })).toBeVisible();
+    expect(await screen.findByText("@.lt.gi.mang.v +1 link")).toBeVisible();
+    expect(await screen.findByText("link 111")).toBeVisible();
+  });
+
   it("distinguishes loading, load failure with retry, and a genuinely empty list", async () => {
     const api = await import("../../api");
     let rejectFirst!: (reason: Error) => void;
@@ -186,8 +294,10 @@ describe("InteractionMonitorTab", () => {
     expect(await screen.findByText("7 · Máy Một · @mangv")).toBeVisible();
     // Departed phones keep stable positions in this campaign without putting a raw serial on
     // the main surface. The serial remains available as technical hover/detail evidence.
-    expect(screen.getByText("Máy đã rời fleet 1/2")).toHaveAttribute("title", "android-1");
-    expect(screen.getByText("Máy đã rời fleet 2/2")).toHaveAttribute("title", "android-3");
+    expect(screen.getByText("Máy đã rời fleet 1/2")).not.toHaveAttribute("title");
+    expect(screen.getByText("Máy đã rời fleet 2/2")).not.toHaveAttribute("title");
+    expect(screen.getByText("android-1").closest("details")).not.toHaveAttribute("open");
+    expect(screen.getByText("android-3").closest("details")).not.toHaveAttribute("open");
   });
 
   it("translates a refusal and still keeps the raw code for a bug report", async () => {
@@ -195,7 +305,9 @@ describe("InteractionMonitorTab", () => {
     vi.mocked(api.interactionGet).mockResolvedValue(detail as never);
     renderTab("campaign-1");
     expect(await screen.findByText("Không thấy trang bài viết")).toBeVisible();
-    expect(screen.getByText("mở link xong không thấy trang bài")).toBeVisible();
+    const errorDetail = screen.getByText("mở link xong không thấy trang bài");
+    expect(errorDetail).not.toBeVisible();
+    expect(errorDetail.closest("details")).not.toHaveAttribute("open");
     // Behind a closed disclosure — present for whoever needs it, not competing with the
     // Vietnamese for the operator's attention.
     const rawCode = screen.getByText(/^target_open_no_post_page:/);

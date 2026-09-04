@@ -44,9 +44,11 @@ const PHASE_WORDS: Record<string, string> = {
 export function NurtureDeviceProgress({
   status,
   now,
+  deviceName = "thiết bị",
 }: {
   status: NurtureSessionStatus;
   now: number;
+  deviceName?: string;
 }) {
   const fraction = deviceProgress(status, now);
   const phaseWord = PHASE_WORDS[status.phase];
@@ -55,7 +57,7 @@ export function NurtureDeviceProgress({
       <ProgressBar
         fraction={fraction}
         tone={toneOf(status)}
-        label={`Tiến trình ${status.udid}`}
+        label={`Tiến trình ${deviceName}`}
       />
       <div className="nu-device-progress-meta">
         {phaseWord && <span className="nu-phase">{phaseWord}</span>}

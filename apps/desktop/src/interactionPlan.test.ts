@@ -129,7 +129,8 @@ describe("validateDraft", () => {
   it("surfaces the planner's own refusal instead of swallowing it", () => {
     const [issue] = validateDraft(draft(), context({ planError: "DuplicateActor" }));
     expect(issue.field).toBe("plan");
-    expect(issue.message).toBe("DuplicateActor");
+    expect(issue.message).toBe("Lỗi tương tác chưa xác định");
+    expect(issue.technicalDetail).toBe("DuplicateActor");
   });
 
   /// **The actor list is always one cohort, so nothing can split a group behind the screen.**

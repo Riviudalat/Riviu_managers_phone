@@ -30,6 +30,7 @@ import { NurtureDeviceProgress, NurtureRunProgress } from "./nurture/NurtureProg
 import { NurtureBehaviourTab } from "./nurture/NurtureBehaviourTab";
 import { IconClose, IconHeart, IconRefresh } from "./Icons";
 import { LoadingState, StatusNotice } from "./States";
+import { StatusChip, SummaryRail, WorkflowStepper } from "./WorkspacePrimitives";
 import type {
   DeviceInfo,
   DeviceMeta,
@@ -238,11 +239,48 @@ function deviceLabel(
   const d = devices.find((x) => x.udid === udid);
   const meta = metas.get(udid);
   if (!d) {
-    return `Máy ${meta?.number ?? "?"} · ${meta?.alias?.trim() || udid.slice(0, 8)}`;
+    return `Máy ${meta?.number ?? "?"} · ${meta?.alias?.trim() || "đã rời danh sách"}`;
   }
   const ordered = orderDevicesByNumber(devices, metas);
   const position = ordered.findIndex((device) => device.udid === udid) + 1;
   return `Máy ${tileNumber(position || 1, meta)} · ${tileName(d, meta)}`;
+}
+
+function CleanupStatus({ status }: { status: NurtureSessionStatus }) {
+  const state = status.cleanupState ?? "pending";
+  if (state === "processAbsent" && status.cleanupProof) {
+    return (
+      <div className="nurture-cleanup-status">
+        <StatusChip tone="success">TikTok đã tắt</StatusChip>
+        <details>
+          <summary>Chứng cứ tiến trình</summary>
+          <dl>
+            <div><dt>Gói ứng dụng</dt><dd>{status.cleanupProof.bundleId}</dd></div>
+            <div><dt>PID trước khi tắt</dt><dd>{status.cleanupProof.oldPid ?? "Không chạy"}</dd></div>
+          </dl>
+          {status.cleanupError && <p role="alert">{status.cleanupError}</p>}
+        </details>
+      </div>
+    );
+  }
+  if (state === "failed") {
+    return (
+      <div className="nurture-cleanup-status">
+        <StatusChip tone="error">Chưa xác nhận được TikTok đã tắt</StatusChip>
+        {status.cleanupError && (
+          <details>
+            <summary>Chi tiết lỗi</summary>
+            <p role="alert">{status.cleanupError}</p>
+          </details>
+        )}
+      </div>
+    );
+  }
+  return (
+    <StatusChip tone={status.running ? "info" : "warning"}>
+      {status.running ? "Dọn ứng dụng khi kết thúc" : "Chưa có chứng cứ tắt ứng dụng"}
+    </StatusChip>
+  );
 }
 
 export function NurturePopup({
@@ -362,6 +400,7 @@ export function NurturePopup({
       (a, b) => rank(a) - rank(b) || a.udid.localeCompare(b.udid),
     );
   }, [statuses, logged]);
+  const selectedRow = rows.find((row) => row.udid === openLog) ?? null;
 
   const reload = useCallback(async () => {
     setMsg(null);
@@ -399,19 +438,30 @@ export function NurturePopup({
   }, []);
 
   useEffect(() => {
-    let un: (() => void) | undefined;
-    listenRiviuEvents((event) => {
+    let alive = true;
+    let unlisten: (() => void) | undefined;
+    void listenRiviuEvents((event) => {
       if (event.type !== "nurtureStatus") return;
+      if (!alive) return;
       const st = event.status;
       setStatuses((prev) => {
         const next = prev.filter((x) => x.udid !== st.udid);
         next.push(st);
         return next;
       });
-    }).then((fn) => {
-      un = fn;
-    });
-    return () => un?.();
+    })
+      .then((fn) => {
+        if (!alive) {
+          fn();
+          return;
+        }
+        unlisten = fn;
+      })
+      .catch(() => undefined);
+    return () => {
+      alive = false;
+      unlisten?.();
+    };
   }, []);
 
   const patch = <K extends keyof NurtureSettings>(key: K, value: NurtureSettings[K]) => {
@@ -624,6 +674,34 @@ export function NurturePopup({
     );
   };
 
+  const actionControls = (
+    <div className="nurture-float-actions">
+      <button type="button" className="primary" disabled={busy || !targets.length} onClick={start}>
+        Bắt đầu
+      </button>
+      <button type="button" className="danger" disabled={busy || !stopTargets.length} onClick={stop}>
+        Dừng
+      </button>
+      <button
+        type="button"
+        className="ghost"
+        disabled={busy}
+        onClick={async () => {
+          setBusy(true);
+          try {
+            if (await save()) setMsg(null);
+          } catch (e) {
+            setMsg(describeError(e));
+          } finally {
+            setBusy(false);
+          }
+        }}
+      >
+        Lưu
+      </button>
+    </div>
+  );
+
   return (
     <div
       className={pageSurface ? "nurture-workspace" : "nurture-float-layer"}
@@ -671,31 +749,20 @@ export function NurturePopup({
             )
           ) : (
             <>
-              <div className="nurture-float-actions">
-                <button type="button" className="primary" disabled={busy || !targets.length} onClick={start}>
-                  Bắt đầu
-                </button>
-                <button type="button" className="danger" disabled={busy || !stopTargets.length} onClick={stop}>
-                  Dừng
-                </button>
-                <button
-                  type="button"
-                  className="ghost"
-                  disabled={busy}
-                  onClick={async () => {
-                    setBusy(true);
-                    try {
-                      if (await save()) setMsg(null);
-                    } catch (e) {
-                      setMsg(describeError(e));
-                    } finally {
-                      setBusy(false);
-                    }
-                  }}
-                >
-                  Lưu
-                </button>
-              </div>
+              {!pageSurface && actionControls}
+
+              {pageSurface && (
+                <WorkflowStepper
+                  label="Quy trình Nuôi TikTok"
+                  current={pageMode === "monitor" ? "monitor" : targets.length ? "review" : "scope"}
+                  steps={[
+                    { id: "scope", label: "Phạm vi" },
+                    { id: "setup", label: "Thiết lập" },
+                    { id: "review", label: "Kiểm tra" },
+                    { id: "monitor", label: "Theo dõi" },
+                  ]}
+                />
+              )}
 
               {pageSurface && (
                 <div className="nurture-page-tabs" role="tablist" aria-label="Chế độ Nuôi TikTok">
@@ -726,6 +793,8 @@ export function NurturePopup({
                 </div>
               )}
 
+              {pageSurface && <div className="nurture-page-actions">{actionControls}</div>}
+
               {pageSurface && (
                 <div
                   id="nurture-page-panel-setup"
@@ -734,17 +803,36 @@ export function NurturePopup({
                   hidden={pageMode !== "setup"}
                 >
                   {pageMode === "setup" && (
-                    <>
-                      {targetRef && profileConfig && (
-                        <AutomationProfileControl
-                          kind="nurture"
-                          target={targetRef}
-                          config={profileConfig}
-                          defaultName="Hồ sơ Nuôi TikTok"
-                        />
-                      )}
-                      {renderSettings()}
-                    </>
+                    <div className="nurture-setup-grid">
+                      <div className="nurture-setup-main">
+                        {targetRef && profileConfig && (
+                          <AutomationProfileControl
+                            kind="nurture"
+                            target={targetRef}
+                            config={profileConfig}
+                            defaultName="Hồ sơ Nuôi TikTok"
+                          />
+                        )}
+                        {renderSettings()}
+                      </div>
+                      <SummaryRail
+                        title="Kiểm tra trước khi chạy"
+                        actions={(
+                          <StatusChip tone={targets.length ? "success" : "warning"}>
+                            {targets.length ? "Sẵn sàng" : "Thiếu phạm vi"}
+                          </StatusChip>
+                        )}
+                      >
+                        <dl className="nurture-review-list">
+                          <div><dt>Thiết bị</dt><dd>{targets.length} máy</dd></div>
+                          <div><dt>Khối lượng</dt><dd>{settings.numVideos * settings.numRounds} video/máy</dd></div>
+                          <div><dt>Thích</dt><dd>{settings.likeEnabled === false ? "Tắt" : `${settings.likeProb}%`}</dd></div>
+                          <div><dt>Lưu</dt><dd>{settings.saveEnabled === false ? "Tắt" : `${settings.saveProb}%`}</dd></div>
+                          <div><dt>Bình luận</dt><dd>{settings.commentEnabled === false ? "Tắt" : `${settings.commentProb}%`}</dd></div>
+                          <div><dt>Theo dõi</dt><dd>{settings.followEnabled === false ? "Tắt" : `${settings.followProb}%`}</dd></div>
+                        </dl>
+                      </SummaryRail>
+                    </div>
                   )}
                 </div>
               )}
@@ -796,10 +884,12 @@ export function NurturePopup({
                       operator asks first. Renders nothing until a row carries a run id, so a
                       panel showing only idle-sweep rows is unchanged. */}
                   <NurtureRunProgress statuses={statuses} now={nowTick} />
-                  <div
-                    className={`nurture-float-log${openLog ? " is-expanded" : ""}`}
-                    aria-live="polite"
-                  >
+                  <div className="nurture-monitor-grid">
+                    <div
+                      className={`nurture-float-log${openLog ? " is-expanded" : ""}`}
+                      aria-live="polite"
+                      aria-label="Danh sách thiết bị Nuôi TikTok"
+                    >
                     {rows.map((row) => (
                       <div
                         key={row.udid}
@@ -826,7 +916,7 @@ export function NurturePopup({
                               row.status?.outcome === "failed" ? " bad" : ""
                             }`}
                           />
-                          <strong title={row.udid}>{deviceLabel(devices, metas, row.udid)}</strong>
+                          <strong>{deviceLabel(devices, metas, row.udid)}</strong>
                           <div className="grow" />
                           {/* The session numbers as labelled cells: the old
                               single string ("12/34v · ♥5/6 · BL1/1 · +0/0") packed done-vs-
@@ -879,17 +969,83 @@ export function NurturePopup({
                             Gated on `row.status` so an idle-sweep row — which never ran a
                             session and has no target — does not draw a bar stuck at 0%. */}
                         {row.status && (
-                          <NurtureDeviceProgress status={row.status} now={nowTick} />
-                        )}
-                        {openLog === row.udid && (
-                          <NurtureDeviceLog
-                            udid={row.udid}
-                            running={row.running}
-                            presentStatus={statusVi}
+                          <NurtureDeviceProgress
+                            status={row.status}
+                            now={nowTick}
+                            deviceName={deviceLabel(devices, metas, row.udid)}
                           />
+                        )}
+                        {!pageSurface && openLog === row.udid && (
+                          <>
+                            <details
+                              className="nurture-technical-details"
+                              aria-label="Chi tiết kỹ thuật thiết bị"
+                            >
+                              <summary>Chi tiết thiết bị</summary>
+                              <code>{row.udid}</code>
+                            </details>
+                            <NurtureDeviceLog
+                              udid={row.udid}
+                              running={row.running}
+                              presentStatus={statusVi}
+                            />
+                          </>
                         )}
                       </div>
                     ))}
+                    </div>
+                    {pageSurface && (
+                      <aside className="nurture-device-detail" aria-label="Chi tiết thiết bị">
+                        {selectedRow ? (
+                          <>
+                            <div className="nurture-device-detail-head">
+                              <div>
+                                <span>Thiết bị đang xem</span>
+                                <strong>
+                                  {deviceLabel(devices, metas, selectedRow.udid)}
+                                </strong>
+                              </div>
+                              {selectedRow.status && <CleanupStatus status={selectedRow.status} />}
+                            </div>
+                            <p className="nurture-device-current">
+                              {statusVi(selectedRow.message)}
+                            </p>
+                            <details
+                              className="nurture-technical-details"
+                              aria-label="Chi tiết kỹ thuật thiết bị"
+                            >
+                              <summary>Chi tiết thiết bị</summary>
+                              <code>{selectedRow.udid}</code>
+                            </details>
+                            {selectedRow.status && (
+                              <>
+                                <NurtureDeviceProgress
+                                  status={selectedRow.status}
+                                  now={nowTick}
+                                  deviceName={deviceLabel(devices, metas, selectedRow.udid)}
+                                />
+                                <dl className="nurture-device-counters">
+                                  <div><dt>Video</dt><dd>{selectedRow.status.videosDone}/{selectedRow.status.swipeAttempts}</dd></div>
+                                  <div><dt>Thích</dt><dd>{selectedRow.status.likes}/{selectedRow.status.likeAttempts}</dd></div>
+                                  <div><dt>Lưu</dt><dd>{selectedRow.status.saves ?? 0}/{selectedRow.status.saveAttempts ?? 0}</dd></div>
+                                  <div><dt>Bình luận</dt><dd>{selectedRow.status.comments}/{selectedRow.status.commentAttempts}</dd></div>
+                                  <div><dt>Theo dõi</dt><dd>{selectedRow.status.follows}/{selectedRow.status.followAttempts}</dd></div>
+                                </dl>
+                              </>
+                            )}
+                            <NurtureDeviceLog
+                              udid={selectedRow.udid}
+                              running={selectedRow.running}
+                              presentStatus={statusVi}
+                            />
+                          </>
+                        ) : (
+                          <div className="nurture-device-detail-empty">
+                            Chọn một máy để xem nhật ký và chứng cứ.
+                          </div>
+                        )}
+                      </aside>
+                    )}
                   </div>
                     </>
                   ) : (

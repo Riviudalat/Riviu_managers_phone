@@ -100,7 +100,8 @@ test("the Android app library dispatches and renders one fleet batch", async ({ 
   await page.getByRole("button", { name: "Cài → 2 Android" }).click();
 
   await expect(page.getByRole("heading", { name: "Kết quả cài đặt" })).toBeVisible();
-  await expect(page.getByText("Đã xác nhận")).toHaveCount(2);
+  await expect(page.getByRole("table", { name: "Kết quả cài đặt gần nhất" })
+    .getByText("Đã xác nhận", { exact: true })).toHaveCount(2);
   const install = (await mockCommandCalls(page)).find(
     (call) => call.command === "install_library_app_batch",
   );
@@ -109,6 +110,25 @@ test("the Android app library dispatches and renders one fleet batch", async ({ 
       appId: "fixture-app",
       udids: ["MOCK-ANDROID-01", "MOCK-ANDROID-02"],
       allowDowngrade: false,
+    },
+  });
+});
+
+test("the material library dispatches one bounded fleet batch", async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await open(page, "Kho nội dung");
+
+  await page.getByRole("button", { name: "Chuyển tới 2 máy" }).click();
+
+  await expect(page.getByRole("region", { name: "Kết quả chuyển gần nhất" })).toBeVisible();
+  await expect(page.getByText("Đã chuyển")).toHaveCount(2);
+  const push = (await mockCommandCalls(page)).find(
+    (call) => call.command === "push_material_batch",
+  );
+  expect(push?.args).toEqual({
+    request: {
+      materialId: "fixture-material",
+      target: { type: "all" },
     },
   });
 });
@@ -146,6 +166,30 @@ test("publish keeps setup separate from campaign monitoring", async ({ page }) =
   await expect(page.getByText(/Unknown mock command/i)).toHaveCount(0);
 });
 
+test("publish workflow stays inside the viewport at supported widths", async ({ page }) => {
+  for (const viewport of [
+    { width: 1440, height: 900 },
+    { width: 900, height: 900 },
+    { width: 820, height: 560 },
+  ]) {
+    await page.setViewportSize(viewport);
+    await open(page, "Đăng bài");
+    await expect(page.getByRole("heading", { level: 1, name: "Đăng bài" })).toHaveCount(1);
+    const workflow = page.getByRole("list", { name: "Quy trình đăng bài" });
+    for (const label of ["Nguồn", "Ghép bài/máy", "Preflight", "Xác nhận công khai", "Theo dõi"]) {
+      await expect(workflow).toContainText(label);
+    }
+    const overflow = await page.evaluate(() => ({
+      viewport: document.documentElement.clientWidth,
+      document: document.documentElement.scrollWidth,
+      page: document.querySelector<HTMLElement>(".publish-page")?.scrollWidth ?? 0,
+      pageClient: document.querySelector<HTMLElement>(".publish-page")?.clientWidth ?? 0,
+    }));
+    expect(overflow.document, JSON.stringify(overflow)).toBeLessThanOrEqual(overflow.viewport);
+    expect(overflow.page, JSON.stringify(overflow)).toBeLessThanOrEqual(overflow.pageClient);
+  }
+});
+
 test.describe("every page in the sidebar", () => {
   test.beforeEach(async ({ page }) => {
     await page.setViewportSize({ width: 1440, height: 900 });
@@ -174,6 +218,37 @@ test.describe("every page in the sidebar", () => {
       await open(page, name);
       await expect(page.locator(".riviu-shell, #root")).toBeVisible();
       await expect(page).toHaveScreenshot(`page-narrow-${screenshotName(name)}.png`, {
+        fullPage: false,
+        maxDiffPixelRatio: 0.002,
+        animations: "disabled",
+      });
+    });
+  }
+
+  for (const name of PAGES) {
+    test(`renders ${name} in the compact operator viewport`, async ({ page }) => {
+      await page.setViewportSize({ width: 820, height: 560 });
+      await open(page, name);
+
+      await expect(page.getByRole("heading", { level: 1 })).toHaveCount(1);
+      const widths = await page.evaluate(() => {
+        const root = document.documentElement;
+        const main = document.querySelector<HTMLElement>(".main-col");
+        const content = document.querySelector<HTMLElement>(".content");
+        return {
+          viewport: root.clientWidth,
+          document: root.scrollWidth,
+          main: main?.scrollWidth ?? 0,
+          mainClient: main?.clientWidth ?? 0,
+          content: content?.scrollWidth ?? 0,
+          contentClient: content?.clientWidth ?? 0,
+        };
+      });
+      expect(widths.document, JSON.stringify(widths)).toBeLessThanOrEqual(widths.viewport);
+      expect(widths.main, JSON.stringify(widths)).toBeLessThanOrEqual(widths.mainClient);
+      expect(widths.content, JSON.stringify(widths)).toBeLessThanOrEqual(widths.contentClient);
+
+      await expect(page).toHaveScreenshot(`page-compact-${screenshotName(name)}.png`, {
         fullPage: false,
         maxDiffPixelRatio: 0.002,
         animations: "disabled",

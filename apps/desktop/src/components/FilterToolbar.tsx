@@ -1,4 +1,4 @@
-import { IconGrid } from "./Icons";
+import { LayoutGrid, List } from "lucide-react";
 
 export type ViewMode = "list" | "window";
 
@@ -20,22 +20,26 @@ export function FilterToolbar({ viewMode, onViewMode }: Props) {
   return (
     <div className="filter-toolbar">
       <div className="grow" />
-      <div className="view-seg" role="group" aria-label="View mode">
+      <div className="view-seg" role="group" aria-label="Chế độ hiển thị">
         <button
           type="button"
           className={viewMode === "list" ? "active" : ""}
           title="Danh sách"
+          aria-label="Hiển thị dạng danh sách"
+          aria-pressed={viewMode === "list"}
           onClick={() => onViewMode("list")}
         >
-          ≡
+          <List size={15} aria-hidden="true" />
         </button>
         <button
           type="button"
           className={viewMode === "window" ? "active" : ""}
           title="Cửa sổ stream"
+          aria-label="Hiển thị dạng lưới stream"
+          aria-pressed={viewMode === "window"}
           onClick={() => onViewMode("window")}
         >
-          <IconGrid size={15} />
+          <LayoutGrid size={15} aria-hidden="true" />
         </button>
       </div>
     </div>

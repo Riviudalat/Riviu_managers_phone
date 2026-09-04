@@ -1,7 +1,8 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { getStreamSettings, setStreamSettings } from "../../api";
 import { describeError } from "../../describeError";
 import type { StreamSettings } from "../../types";
+import { LoadingState, StatusNotice } from "../States";
 
 /// Pinned to `MIN_VIEW_FPS` and `MAX_SETTABLE_VIEW_FPS` on the Rust side by
 /// `the_fps_field_offers_exactly_the_range_this_file_clamps_to` in `commands.rs`, which
@@ -30,11 +31,15 @@ export function StreamQualitySection() {
   const [savingStream, setSavingStream] = useState(false);
   const [streamMessage, setStreamMessage] = useState<string | null>(null);
 
-  useEffect(() => {
+  const load = useCallback(() => {
+    setStreamSettingsState(null);
+    setStreamMessage(null);
     getStreamSettings()
       .then(setStreamSettingsState)
       .catch((error) => setStreamMessage(describeError(error)));
   }, []);
+
+  useEffect(load, [load]);
 
   /// Send the whole row, not the one field that changed: the command takes a complete
   /// `StreamSettings` and a partial one would reset the fields it omitted to their defaults.
@@ -64,6 +69,7 @@ export function StreamQualitySection() {
           Lưới và máy mở lớn mã hoá riêng. Thiết lập này không đổi stream iOS và có thể làm hình Android tối trong lúc khởi động lại.
         </p>
       </details>
+      {!streamSettings && !streamMessage && <LoadingState label="Đang đọc chất lượng hình…" />}
       <div className="row">
         <label>
           Chất lượng lưới
@@ -119,7 +125,14 @@ export function StreamQualitySection() {
           />
         </label>
       </div>
-      {streamMessage && <p className="error">{streamMessage}</p>}
+      {streamMessage && (
+        <StatusNotice
+          tone="error"
+          action={<button type="button" className="ghost" onClick={load}>Đọc lại</button>}
+        >
+          {streamMessage}
+        </StatusNotice>
+      )}
     </section>
   );
 }

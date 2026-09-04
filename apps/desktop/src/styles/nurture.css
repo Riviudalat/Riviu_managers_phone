@@ -349,6 +349,184 @@
   flex: 1;
 }
 
+.nurture-workspace-body > .workflow-stepper {
+  margin-bottom: var(--space-4);
+}
+
+.nurture-setup-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(250px, 320px);
+  align-items: start;
+  gap: var(--space-5);
+}
+
+.nurture-setup-main {
+  min-width: 0;
+}
+
+.nurture-review-list,
+.nurture-device-counters,
+.nurture-cleanup-status dl {
+  display: grid;
+  gap: var(--space-2);
+  margin: 0;
+}
+
+.nurture-review-list > div,
+.nurture-device-counters > div,
+.nurture-cleanup-status dl > div {
+  display: flex;
+  min-width: 0;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-3);
+}
+
+.nurture-review-list dt,
+.nurture-device-counters dt,
+.nurture-cleanup-status dt {
+  color: var(--text-3);
+  font-size: var(--text-sm);
+}
+
+.nurture-review-list dd,
+.nurture-device-counters dd,
+.nurture-cleanup-status dd {
+  margin: 0;
+  color: var(--text-1);
+  font-size: var(--text-sm);
+  font-weight: var(--weight-semibold);
+  text-align: right;
+  overflow-wrap: anywhere;
+}
+
+.nurture-setup-grid .summary-rail .nurture-float-actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  margin: var(--space-2) 0 0;
+}
+
+.nurture-setup-grid .summary-rail .nurture-float-actions .ghost {
+  grid-column: 1 / -1;
+}
+
+.nurture-monitor-grid {
+  display: grid;
+  grid-template-columns: minmax(320px, 0.9fr) minmax(360px, 1.1fr);
+  min-height: 0;
+  gap: var(--space-4);
+}
+
+.nurture-workspace .nurture-float-log {
+  align-content: start;
+  margin: 0;
+  padding-right: var(--space-1);
+}
+
+.nurture-device-detail {
+  min-width: 0;
+  padding: var(--space-4);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--bg-elevated);
+  box-shadow: var(--shadow-sm);
+}
+
+.nurture-device-detail-head {
+  display: flex;
+  min-width: 0;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-3);
+  padding-bottom: var(--space-3);
+  border-bottom: 1px solid var(--line);
+}
+
+.nurture-device-detail-head > div:first-child {
+  display: grid;
+  min-width: 0;
+  gap: var(--space-1);
+}
+
+.nurture-device-detail-head > div:first-child span {
+  color: var(--text-3);
+  font-size: var(--text-xs);
+}
+
+.nurture-device-detail-head > div:first-child strong {
+  overflow: hidden;
+  color: var(--text-1);
+  font-size: var(--text-base);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.nurture-device-current {
+  margin: var(--space-3) 0;
+  color: var(--text-2);
+  line-height: var(--leading-normal);
+}
+
+.nurture-technical-details {
+  margin: var(--space-2) 0;
+  color: var(--text-3);
+  font-size: var(--text-xs);
+}
+
+.nurture-technical-details summary {
+  cursor: pointer;
+}
+
+.nurture-technical-details code {
+  display: block;
+  margin-top: var(--space-1);
+  overflow-wrap: anywhere;
+}
+
+.nurture-device-counters {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  margin: var(--space-3) 0;
+}
+
+.nurture-device-counters > div {
+  padding: var(--space-2);
+  border-radius: var(--radius-sm);
+  background: var(--bg-muted);
+}
+
+.nurture-cleanup-status {
+  display: grid;
+  justify-items: end;
+  gap: var(--space-2);
+}
+
+.nurture-cleanup-status details {
+  max-width: 100%;
+  color: var(--text-3);
+  font-size: var(--text-xs);
+}
+
+.nurture-cleanup-status summary {
+  cursor: pointer;
+  text-align: right;
+}
+
+.nurture-cleanup-status dl,
+.nurture-cleanup-status p {
+  margin-top: var(--space-2);
+  padding: var(--space-2);
+  border-radius: var(--radius-sm);
+  background: var(--bg-muted);
+}
+
+.nurture-device-detail-empty {
+  min-height: 180px;
+  display: grid;
+  place-items: center;
+  color: var(--text-3);
+  text-align: center;
+}
+
 .nurture-page-tabs {
   display: flex;
   gap: 1.25rem;
@@ -378,6 +556,17 @@
 .nurture-page-tabs button:focus-visible {
   outline: 2px solid color-mix(in srgb, var(--primary) 65%, transparent);
   outline-offset: 2px;
+}
+
+.nurture-page-actions {
+  display: flex;
+  justify-content: flex-end;
+  margin: 0 0 var(--space-4);
+}
+
+.nurture-page-actions .nurture-float-actions {
+  width: min(100%, 360px);
+  margin: 0;
 }
 
 .nurture-workspace .nurture-live {
@@ -428,8 +617,7 @@
   color: var(--text-3);
   font-size: var(--text-2xs);
   font-weight: 600;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
+  letter-spacing: 0;
 }
 .nu-pane .nu-field {
   display: flex;
@@ -457,8 +645,7 @@
   color: var(--text-2);
   font-size: var(--text-2xs);
   font-weight: 600;
-  letter-spacing: 0.05em;
-  text-transform: uppercase;
+  letter-spacing: 0;
 }
 .nu-group-head::after {
   content: "";
@@ -640,6 +827,40 @@
 .nu-pane .nu-switch-bare {
   gap: 0;
   min-height: 0;
+}
+
+@media (max-width: 980px) {
+  .nurture-setup-grid,
+  .nurture-monitor-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .nurture-device-detail {
+    min-height: 0;
+  }
+}
+
+@media (max-width: 560px) {
+  .nurture-workspace-body {
+    padding-inline: var(--space-3);
+  }
+
+  .nurture-device-detail-head {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .nurture-cleanup-status {
+    justify-items: start;
+  }
+
+  .nurture-cleanup-status summary {
+    text-align: left;
+  }
+
+  .nurture-device-counters {
+    grid-template-columns: 1fr;
+  }
 }
 
 /* The help icon after a control's name. It is a real button so keyboard, pointer and touch users

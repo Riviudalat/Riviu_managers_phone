@@ -101,6 +101,27 @@ describe("SettingsPanel update section", () => {
     expect(installMock).toHaveBeenCalledTimes(1);
   });
 
+  it("reports a surviving macOS install as success instead of an update error", async () => {
+    checkMock.mockResolvedValue({
+      available: true,
+      version: "0.1.2",
+      current: "0.1.1",
+      busyReason: null,
+    });
+    installMock.mockResolvedValue(undefined);
+    render(<SettingsPanel devices={[]} />);
+    await userEvent.click(screen.getByRole("button", { name: "Kiểm bản mới" }));
+    await waitFor(() => expect(installButton()).not.toBeDisabled());
+
+    await userEvent.click(installButton());
+
+    expect(await screen.findByRole("status")).toHaveTextContent(
+      "Đã cài xong — mở lại app để dùng bản mới.",
+    );
+    expect(screen.queryByText("Không kiểm được bản mới")).toBeNull();
+    expect(installButton()).toBeDisabled();
+  });
+
   it("shows a failed check instead of leaving the panel looking current", async () => {
     checkMock.mockRejectedValue(new Error("dns error"));
     render(<SettingsPanel devices={[]} />);

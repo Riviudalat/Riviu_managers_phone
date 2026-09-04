@@ -551,7 +551,8 @@ describe("FlowWorkspace editing", () => {
     await waitFor(() => expect(api.flowGetRun).toHaveBeenCalledWith("run-a"));
     const monitor = screen.getByTestId("flow-monitor");
     await waitFor(() => expect(within(monitor).getByText("Máy 1 · Device A")).toBeInTheDocument());
-    expect(within(monitor).queryByText(device.udid)).toBeNull();
+    const technicalUdid = within(monitor).getByText(device.udid);
+    expect(technicalUdid.closest("details")).not.toHaveAttribute("open");
     expect(within(monitor).queryByText("Chưa có lượt chạy")).toBeNull();
   });
 });

@@ -699,6 +699,8 @@ export async function installTauriMock(
     );
     commandHandlers.set("refresh_devices", () => clone(devices));
     commandHandlers.set("list_jobs", () => []);
+    commandHandlers.set("operation_list_runs", () => []);
+    commandHandlers.set("operation_get_run", () => null);
     commandHandlers.set("nurture_get_settings", () => ({
       baseUrl: "https://api.openai.com/v1",
       model: "gpt-5-mini",
@@ -989,6 +991,36 @@ export async function installTauriMock(
       metadataError: null,
       createdAt: "2026-09-01T08:00:00.000Z",
     }]);
+    commandHandlers.set("push_material_batch", (args) => {
+      const request = (args as {
+        request?: {
+          materialId?: string;
+          target?: { type?: string; udids?: string[] };
+        };
+      })?.request;
+      const requested = request?.target?.type === "explicit"
+        ? request.target.udids ?? []
+        : devices.map((device) => device.udid);
+      return {
+        batchId: "fixture-material-batch",
+        materialId: request?.materialId ?? "fixture-material",
+        target: {
+          targetRef: request?.target ?? { type: "all" },
+          included: requested.map((udid, index) => ({
+            udid,
+            alias: `Máy ${index + 1}`,
+            number: index + 1,
+          })),
+          excluded: [],
+          rosterSha256: "c".repeat(64),
+        },
+        results: requested.map((udid) => ({
+          udid,
+          status: "succeeded",
+          evidence: "sha256=verified",
+        })),
+      };
+    });
     commandHandlers.set("install_library_app_batch", (args) => {
       const request = (args as { request?: { batchId?: string; udids?: string[] } })?.request;
       return {

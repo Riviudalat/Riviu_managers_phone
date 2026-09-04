@@ -3,7 +3,7 @@ export function DesktopBridgeSection({ mode }: { mode: string }) {
   const label = mode === "full"
     ? "Agent hợp nhất"
     : mode === "mock"
-      ? "Dữ liệu mô phỏng"
+      ? "Kết nối cục bộ"
       : mode === "stock"
         ? "Agent iOS dự phòng"
         : "Trạng thái chưa nhận diện";

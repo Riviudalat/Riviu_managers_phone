@@ -1,41 +1,49 @@
 @import "./assets/fonts/fonts.css";
 
-/* Swarmote shell tokens · Riviu orange primary (was #3C79F7) */
+/* Production shell: cool light workspace, restrained Riviu orange actions. */
 :root {
-  --primary: #ff6a00;
-  --primary-deep: #e35c00;
-  --primary-50: #fff8f2;
-  --primary-100: #ffeedd;
-  --primary-soft: rgba(255, 106, 0, 0.08);
-  --primary-ring: rgba(255, 106, 0, 0.35);
+  --primary: #c2410c;
+  --primary-deep: #9a3412;
+  --primary-50: #fff7ed;
+  --primary-100: #ffedd5;
+  --primary-200: #fed7aa;
+  --primary-soft: rgb(194 65 12 / 8%);
+  --primary-ring: rgb(194 65 12 / 32%);
   --orange: var(--primary);
   --orange-deep: var(--primary-deep);
   --orange-soft: var(--primary-100);
   --orange-ring: var(--primary-ring);
 
-  --bg: #ffffff;
-  /* The page behind the panels. A hair of the brand rather than the hair of blue it used to
-     be (`#f8faff`); see `--link` for the decision. */
-  --bg-content: var(--primary-50);
+  --nav-bg: #111827;
+  --nav-bg-hover: #1f2937;
+  --nav-panel: #182234;
+  --nav-line: #334155;
+  --nav-text: #dbe4f0;
+  --nav-muted: #94a3b8;
+  --nav-active: #ffffff;
+
+  --bg: #f4f7fb;
+  --bg-canvas: #f4f7fb;
+  --bg-content: #f4f7fb;
   --bg-elevated: #ffffff;
   --bg-panel: #ffffff;
-  --bg-aside: #ffffff;
-  --bg-muted: #f5f7fa;
-  --line: #e6e6e6;
-  --line-strong: #dcdfe6;
-  --text: #303133;
-  --text-1: #303133;
-  --text-2: #606266;
-  --text-3: #909399;
+  --bg-aside: #f8fafc;
+  --bg-muted: #f1f5f9;
+  --line: #e2e8f0;
+  --line-strong: #cbd5e1;
+  --text: #172033;
+  --text-1: #172033;
+  --text-2: #475569;
+  --text-3: #64748b;
   --muted: var(--text-3);
   --accent: var(--primary);
   --accent-dim: var(--primary-deep);
-  --warn: #e6a23c;
-  --danger: #f56c6c;
-  --ok: #67c23a;
-  --info: #909399;
+  --warn: #b45309;
+  --danger: #dc2626;
+  --ok: #15803d;
+  --info: #2563eb;
   --tile: #ffffff;
-  --shadow: 0 4px 16px rgba(0, 0, 0, 0.06);
+  --shadow: 0 4px 16px rgb(15 23 42 / 7%);
   --radius: 8px;
   /* ---- Scales -------------------------------------------------------------
      Added 18/08/2026. Everything above this point is the palette the app already
@@ -54,25 +62,31 @@
   /* Text and icons drawn on a filled control — primary, danger, the stage. */
   --text-inverse: #ffffff;
   /* A hair off white: zebra rows and inset wells. */
-  --bg-subtle: #fafafa;
+  --bg-subtle: #f8fafc;
   /* Behind a phone's video. Black on purpose, so letterboxing is invisible. */
   --bg-stage: #000000;
   /* Chrome floating over the stage — overlay bars, menus. */
   --bg-stage-elevated: #151515;
   /* Danger fill. */
-  --danger-soft: #fef0f0;
+  --danger-soft: #fef2f2;
   /* Danger border. */
-  --danger-line: #fde2e2;
+  --danger-line: #fecaca;
   /* Danger text on a danger fill, where --danger itself is too light to read. */
-  --danger-strong: #c45656;
+  --danger-strong: #b91c1c;
   /* The heaviest danger text, for a destructive confirmation. */
   --danger-deep: #b91c1c;
   /* Warning fill. */
-  --warn-soft: #fdf6ec;
+  --warn-soft: #fffbeb;
   /* Warning border. */
-  --warn-line: #faecd8;
+  --warn-line: #fde68a;
+  --warn-strong: #92400e;
   /* Success fill. */
-  --ok-soft: #f0f9eb;
+  --ok-soft: #f0fdf4;
+  --ok-line: #bbf7d0;
+  --ok-strong: #166534;
+  --info-soft: #eff6ff;
+  --info-line: #bfdbfe;
+  --info-strong: #1d4ed8;
   /* An interactive text colour: a link in body copy, and the hover colour of a menu row.
      It was a blue (`#2b6cb0`) on the reasoning that the orange primary reads as a button in
      running text. Changed to the deep orange on 21/08/2026 because the operator asked for it
@@ -110,6 +124,7 @@
   --leading-loose: 1.7;
 
   --weight-regular: 400;
+  --weight-normal: 400;
   --weight-medium: 500;
   --weight-semibold: 600;
   --weight-bold: 700;
@@ -181,6 +196,18 @@
   box-sizing: border-box;
 }
 
+.visually-hidden {
+  position: absolute !important;
+  width: 1px !important;
+  height: 1px !important;
+  padding: 0 !important;
+  margin: -1px !important;
+  overflow: hidden !important;
+  clip: rect(0, 0, 0, 0) !important;
+  white-space: nowrap !important;
+  border: 0 !important;
+}
+
 html,
 body,
 #root {
@@ -222,7 +249,7 @@ button {
 }
 
 /* A dark surface swallows the ring's own colour, so lift it there. */
-:where(.focus-shell, .focus-stage, .tile-zoom) :where(a, button, input, [tabindex]):focus-visible {
+:where(.aside, .focus-shell, .focus-stage, .tile-zoom) :where(a, button, input, [tabindex]):focus-visible {
   outline-color: var(--primary);
 }
 
@@ -348,6 +375,37 @@ button {
 
 .agent-device-name small {
   color: var(--text-3);
+}
+
+.agent-device-details,
+.agent-status-details {
+  color: var(--text-3);
+  font-size: var(--text-xs);
+}
+
+.agent-device-details summary,
+.agent-status-details summary {
+  width: fit-content;
+  cursor: pointer;
+  color: var(--text-2);
+}
+
+.agent-device-details dl {
+  display: grid;
+  gap: 0.2rem;
+  margin: 0.35rem 0 0;
+}
+
+.agent-device-details dl > div {
+  display: grid;
+  grid-template-columns: 42px minmax(0, 1fr);
+  gap: 0.35rem;
+}
+
+.agent-device-details dt,
+.agent-device-details dd {
+  margin: 0;
+  overflow-wrap: anywhere;
 }
 
 .agent-status-actions {

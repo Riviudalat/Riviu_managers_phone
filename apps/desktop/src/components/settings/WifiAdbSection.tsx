@@ -1,21 +1,23 @@
 import { useState } from "react";
 import { arpScan, wifiAdbConnect, type ArpEntry } from "../../api";
 import { describeError } from "../../describeError";
+import { EmptyState, LoadingState, StatusNotice, type NoticeTone } from "../States";
 
 /** Connecting a phone over Wi-Fi adb, and scanning ARP to find one. */
 export function WifiAdbSection() {
   const [wifiHost, setWifiHost] = useState("");
   const [arp, setArp] = useState<ArpEntry[]>([]);
   const [arpBusy, setArpBusy] = useState(false);
-  const [wifiMessage, setWifiMessage] = useState<string | null>(null);
+  const [arpScanned, setArpScanned] = useState(false);
+  const [wifiMessage, setWifiMessage] = useState<{ tone: NoticeTone; text: string } | null>(null);
 
   const connectWifi = async (host: string) => {
     const target = host.includes(":") ? host : `${host}:5555`;
     try {
       await wifiAdbConnect(target);
-      setWifiMessage(`Đã kết nối ${target}. Bấm "Làm mới" ở Quản lý cửa sổ để thấy máy.`);
+      setWifiMessage({ tone: "success", text: `Đã kết nối ${target}. Làm mới trang Thiết bị để thấy máy.` });
     } catch (error) {
-      setWifiMessage(describeError(error));
+      setWifiMessage({ tone: "error", text: describeError(error) });
     }
   };
 
@@ -24,8 +26,10 @@ export function WifiAdbSection() {
     setWifiMessage(null);
     try {
       setArp(await arpScan());
+      setArpScanned(true);
     } catch (error) {
-      setWifiMessage(describeError(error));
+      setArpScanned(false);
+      setWifiMessage({ tone: "error", text: describeError(error) });
     } finally {
       setArpBusy(false);
     }
@@ -64,8 +68,12 @@ export function WifiAdbSection() {
           {arpBusy ? "Đang quét…" : "Quét mạng (ARP)"}
         </button>
       </div>
+      {arpBusy && <LoadingState label="Đang quét mạng…" />}
+      {!arpBusy && arpScanned && arp.length === 0 && (
+        <EmptyState compact title="Không thấy thiết bị trong bảng mạng" hint="Kiểm tra điện thoại và máy tính đang ở cùng mạng rồi quét lại." />
+      )}
       {arp.length > 0 && (
-        <div className="group-tools-preview" style={{ marginTop: "0.4rem" }}>
+        <div className="group-tools-preview">
           {arp.map((entry) => (
             <div className="row-item" key={entry.ip}>
               <span className="who mono">{entry.ip}</span>
@@ -78,7 +86,7 @@ export function WifiAdbSection() {
           ))}
         </div>
       )}
-      {wifiMessage && <p className="hint">{wifiMessage}</p>}
+      {wifiMessage && <StatusNotice tone={wifiMessage.tone}>{wifiMessage.text}</StatusNotice>}
     </section>
   );
 }

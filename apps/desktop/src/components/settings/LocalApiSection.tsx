@@ -1,18 +1,24 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { localApiGetConfig, localApiSetConfig, type LocalApiConfig } from "../../api";
 import { describeError } from "../../describeError";
+import { LoadingState, StatusNotice, type NoticeTone } from "../States";
 
 /** The loopback HTTP API: whether it listens, on what port, behind what token. */
 export function LocalApiSection() {
   const [localApi, setLocalApi] = useState<LocalApiConfig | null>(null);
   const [savingApi, setSavingApi] = useState(false);
-  const [apiMessage, setApiMessage] = useState<string | null>(null);
+  const [apiMessage, setApiMessage] = useState<{ tone: NoticeTone; text: string } | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
 
-  useEffect(() => {
+  const load = useCallback(() => {
+    setLocalApi(null);
+    setLoadError(null);
     localApiGetConfig()
       .then(setLocalApi)
-      .catch((error) => setApiMessage(describeError(error)));
+      .catch((error) => setLoadError(describeError(error)));
   }, []);
+
+  useEffect(load, [load]);
   return (
     <section className="settings-section">
       <h3>API tự động hoá cục bộ</h3>
@@ -25,6 +31,12 @@ export function LocalApiSection() {
           Máy chủ chỉ nghe tại 127.0.0.1 và mọi lệnh đều cần token Bearer. Mặc định API tắt.
         </p>
       </details>
+      {!localApi && !loadError && <LoadingState label="Đang đọc cấu hình API…" />}
+      {loadError && (
+        <StatusNotice tone="error" action={<button type="button" className="ghost" onClick={load}>Thử lại</button>}>
+          {loadError}
+        </StatusNotice>
+      )}
       {localApi && (
         <>
           <label className="agent-toggle" style={{ marginBottom: "0.5rem" }}>
@@ -73,13 +85,14 @@ export function LocalApiSection() {
                 try {
                   const saved = await localApiSetConfig(localApi);
                   setLocalApi(saved);
-                  setApiMessage(
-                    saved.enabled
+                  setApiMessage({
+                    tone: "success",
+                    text: saved.enabled
                       ? `Đã lưu. API sẽ chạy ở 127.0.0.1:${saved.port} sau khi khởi động lại ứng dụng.`
                       : "Đã lưu (API đang tắt).",
-                  );
+                  });
                 } catch (error) {
-                  setApiMessage(describeError(error));
+                  setApiMessage({ tone: "error", text: describeError(error) });
                 } finally {
                   setSavingApi(false);
                 }
@@ -98,7 +111,7 @@ export function LocalApiSection() {
           )}
         </>
       )}
-      {apiMessage && <p className="hint">{apiMessage}</p>}
+      {apiMessage && <StatusNotice tone={apiMessage.tone}>{apiMessage.text}</StatusNotice>}
     </section>
   );
 }

@@ -8,6 +8,7 @@ import type { UpdateStatus } from "../../types";
 export function UpdateSection() {
   const [update, setUpdate] = useState<UpdateStatus | null>(null);
   const [updateError, setUpdateError] = useState<string | null>(null);
+  const [updateSuccess, setUpdateSuccess] = useState<string | null>(null);
   const [checkingUpdate, setCheckingUpdate] = useState(false);
   const [installingUpdate, setInstallingUpdate] = useState(false);
 
@@ -19,6 +20,7 @@ export function UpdateSection() {
         <span className={`chip ${updateStatusView.tone}`}>{updateStatusView.headline}</span>
       </p>
       {updateStatusView.detail && <p className="hint">{updateStatusView.detail}</p>}
+      {updateSuccess && <p className="hint" role="status">{updateSuccess}</p>}
       <div className="row">
         <button
           type="button"
@@ -27,6 +29,7 @@ export function UpdateSection() {
           onClick={async () => {
             setCheckingUpdate(true);
             setUpdateError(null);
+            setUpdateSuccess(null);
             try {
               setUpdate(await updateCheck());
             } catch (error) {
@@ -42,15 +45,16 @@ export function UpdateSection() {
         <button
           type="button"
           className="primary"
-          disabled={!updateStatusView.canInstall}
+          disabled={!updateStatusView.canInstall || updateSuccess !== null}
           onClick={async () => {
             setInstallingUpdate(true);
             setUpdateError(null);
+            setUpdateSuccess(null);
             try {
               await updateInstall();
               // Reached on macOS only: the archive is unpacked in place and the app has
               // to be reopened. On Windows the process is gone before this line.
-              setUpdateError("Đã cài xong — mở lại app để dùng bản mới.");
+              setUpdateSuccess("Đã cài xong — mở lại app để dùng bản mới.");
             } catch (error) {
               setUpdateError(describeError(error));
             } finally {

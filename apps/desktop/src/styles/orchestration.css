@@ -118,6 +118,23 @@
   margin-bottom: 0.75rem;
 }
 
+.orchestration-add-campaign {
+  display: flex;
+  min-width: min(100%, 270px);
+}
+
+.orchestration-add-campaign select {
+  min-width: 0;
+  max-width: 210px;
+  border-radius: 5px 0 0 5px;
+}
+
+.orchestration-add-campaign button {
+  flex: none;
+  border-left: 0;
+  border-radius: 0 5px 5px 0;
+}
+
 .orchestration-add button,
 .orchestration-toolbar button {
   display: inline-flex;
@@ -195,18 +212,27 @@
 
 .orchestration-branches {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: 1fr;
   gap: 0.25rem;
   margin-top: 0.65rem;
 }
 
-.orchestration-branches span {
-  padding: 0.25rem 0.35rem;
+.orchestration-branches label {
+  display: grid;
+  grid-template-columns: minmax(78px, 0.7fr) minmax(0, 1.3fr);
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.25rem;
   border: 1px solid var(--line);
   border-radius: 4px;
   color: var(--text-3);
   font-size: var(--text-xs);
-  text-align: center;
+}
+
+.orchestration-branches select {
+  min-width: 0;
+  padding: 0.25rem 0.35rem;
+  font-size: var(--text-xs);
 }
 
 .orchestration-duration {
@@ -296,5 +322,14 @@
 
   .orchestration-toolbar .grow {
     display: none;
+  }
+
+  .orchestration-add-campaign {
+    width: 100%;
+  }
+
+  .orchestration-add-campaign select {
+    flex: 1;
+    max-width: none;
   }
 }

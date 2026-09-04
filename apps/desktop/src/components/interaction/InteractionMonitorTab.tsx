@@ -47,12 +47,14 @@ export function InteractionMonitorTab({
   handles,
   openCampaignId,
   onOpenCampaign,
+  masterDetail = false,
 }: {
   devices: DeviceInfo[];
   deviceNumber: Map<string, number>;
   handles: Record<string, string>;
   openCampaignId: string | null;
   onOpenCampaign: (id: string | null) => void;
+  masterDetail?: boolean;
 }) {
   const [campaigns, setCampaigns] = useState<InteractionCampaignSummary[]>([]);
   const [campaignLoadState, setCampaignLoadState] = useState<"loading" | "ready" | "error">(
@@ -60,22 +62,31 @@ export function InteractionMonitorTab({
   );
   const [campaignLoadError, setCampaignLoadError] = useState<string | null>(null);
   const [detail, setDetail] = useState<InteractionCampaignDetail | null>(null);
+  const [detailLoadState, setDetailLoadState] = useState<"idle" | "loading" | "ready" | "error">(
+    "idle",
+  );
+  const [detailLoadError, setDetailLoadError] = useState<string | null>(null);
   const [artifacts, setArtifacts] = useState<InteractionArtifactRecord[]>([]);
   const [notes, setNotes] = useState<InteractionTargetNote[]>([]);
   const [shot, setShot] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  const campaignReloadTicket = useRef(0);
   const reloadCampaigns = useCallback(async () => {
+    const ticket = ++campaignReloadTicket.current;
     setCampaignLoadState((current) => (current === "ready" ? current : "loading"));
     setCampaignLoadError(null);
     try {
-      setCampaigns(await interactionList());
+      const next = await interactionList();
+      if (ticket !== campaignReloadTicket.current) return;
+      setCampaigns(next);
       setCampaignLoadState("ready");
       // Cleared on success. Only `guard()` ever reset this, so one transient failure pinned a
       // red banner over a panel that had been working again for an hour.
       setError(null);
     } catch (e) {
+      if (ticket !== campaignReloadTicket.current) return;
       setCampaignLoadError(describeError(e));
       setCampaignLoadState("error");
     }
@@ -93,7 +104,11 @@ export function InteractionMonitorTab({
     openRef.current = openCampaignId;
   }, [openCampaignId]);
 
+  const detailLoadTicket = useRef(0);
   const loadDetail = useCallback(async (campaignId: string) => {
+    const ticket = ++detailLoadTicket.current;
+    setDetailLoadState("loading");
+    setDetailLoadError(null);
     try {
       const loaded = await interactionGet(campaignId);
       // Saved frames are what makes a campaign result checkable rather than just asserted; a
@@ -106,14 +121,27 @@ export function InteractionMonitorTab({
       // — used to settle out of order and leave B open while A was on screen, and then Dừng
       // cancelled A. Cancelling the wrong live campaign is not recoverable, and the same hole
       // was open on the event path, where every `interactionUpdated` fired an unsequenced load.
-      if (openRef.current !== campaignId) return;
+      if (openRef.current !== campaignId || ticket !== detailLoadTicket.current) return;
+      if (!loaded) {
+        setDetail(null);
+        setArtifacts([]);
+        setNotes([]);
+        setDetailLoadError("Chiến dịch không còn trong dữ liệu.");
+        setDetailLoadState("error");
+        return;
+      }
       setDetail(loaded);
       setArtifacts(frames);
       setNotes(targetNotes);
+      setDetailLoadState("ready");
       setError(null);
     } catch (e) {
-      if (openRef.current !== campaignId) return;
-      setError(describeError(e));
+      if (openRef.current !== campaignId || ticket !== detailLoadTicket.current) return;
+      setDetail(null);
+      setArtifacts([]);
+      setNotes([]);
+      setDetailLoadError(describeError(e));
+      setDetailLoadState("error");
     }
   }, []);
 
@@ -123,9 +151,12 @@ export function InteractionMonitorTab({
 
   useEffect(() => {
     if (!openCampaignId) {
+      detailLoadTicket.current += 1;
       setDetail(null);
       setArtifacts([]);
       setShot(null);
+      setDetailLoadState("idle");
+      setDetailLoadError(null);
       return;
     }
     void loadDetail(openCampaignId);
@@ -142,13 +173,15 @@ export function InteractionMonitorTab({
         // so an evidence frame saved mid-run only appeared after closing and reopening it.
         void loadDetail(event.campaignId);
       }
-    }).then((fn) => {
-      if (!alive) {
-        fn();
-        return;
-      }
-      unlisten = fn;
-    });
+    })
+      .then((fn) => {
+        if (!alive) {
+          fn();
+          return;
+        }
+        unlisten = fn;
+      })
+      .catch(() => undefined);
     return () => {
       alive = false;
       unlisten?.();
@@ -192,7 +225,7 @@ export function InteractionMonitorTab({
   // **Driven by the open id, not by `detail`.** With `detail` in charge, a load that
   // resolved after Back re-showed the panel, and the second Back was a no-op on an already
   // null id — so the effect never ran again and the detail view could not be left at all.
-  if (openCampaignId && (!detail || detail.summary.id !== openCampaignId)) {
+  if (!masterDetail && openCampaignId && (!detail || detail.summary.id !== openCampaignId)) {
     return (
       <div className="interaction-body">
         <button
@@ -202,13 +235,25 @@ export function InteractionMonitorTab({
         >
           ← Chiến dịch gần đây
         </button>
-        {error && <Banner tone="error">{error}</Banner>}
-        <EmptyState compact title="Đang mở chiến dịch…" />
+        {detailLoadState === "error" ? (
+          <Banner
+            tone="error"
+            action={(
+              <button type="button" className="ghost" onClick={() => void loadDetail(openCampaignId)}>
+                Thử lại
+              </button>
+            )}
+          >
+            {detailLoadError ?? "Không mở được chiến dịch."}
+          </Banner>
+        ) : (
+          <LoadingState label="Đang mở chiến dịch…" />
+        )}
       </div>
     );
   }
 
-  if (openCampaignId && detail) {
+  if (!masterDetail && openCampaignId && detail) {
     return (
       <div className="interaction-body">
         <InteractionCampaignDetailView
@@ -251,7 +296,8 @@ export function InteractionMonitorTab({
   }
 
   return (
-    <div className="interaction-body">
+    <div className={`interaction-body${masterDetail ? " interaction-monitor-master" : ""}`}>
+      <section className="interaction-monitor-list" aria-label="Danh sách chiến dịch">
       <div className="interaction-monitor-head">
         <strong>Chiến dịch gần đây</strong>
         <button type="button" className="ghost" onClick={() => void reloadCampaigns()}>
@@ -278,8 +324,21 @@ export function InteractionMonitorTab({
           const settled = campaign.succeededMessages + campaign.failedMessages;
           const actionCounters = campaign.actionCounters;
           const hasActionCounters = Boolean(actionCounters?.planned);
+          const actionFailedBeforeEffect = actionCounters &&
+            ["succeeded", "partial", "failed", "cancelled"].includes(campaign.state)
+            ? Math.max(
+                0,
+                actionCounters.planned -
+                  actionCounters.confirmed -
+                  actionCounters.noOp -
+                  actionCounters.uncertain,
+              )
+            : 0;
           const actionSettled = actionCounters
-            ? actionCounters.confirmed + actionCounters.noOp + actionCounters.uncertain
+            ? actionCounters.confirmed +
+              actionCounters.noOp +
+              actionCounters.uncertain +
+              actionFailedBeforeEffect
             : 0;
           // The brief is what makes one row tell itself apart from the next. Before it, the
           // only name a row had was fourteen characters of a UUID.
@@ -309,7 +368,7 @@ export function InteractionMonitorTab({
                   </span>
                   <small>
                     {hasActionCounters
-                      ? `${actionSettled}/${actionCounters!.planned} hành động · ${actionCounters!.confirmed} xác nhận · ${actionCounters!.noOp} không cần làm${actionCounters!.uncertain > 0 ? ` · ${actionCounters!.uncertain} chưa chắc` : ""}`
+                      ? `${actionSettled}/${actionCounters!.planned} hành động · ${actionCounters!.confirmed} xác nhận · ${actionCounters!.noOp} không cần làm${actionFailedBeforeEffect > 0 ? ` · ${actionFailedBeforeEffect} chưa thực hiện` : ""}${actionCounters!.uncertain > 0 ? ` · ${actionCounters!.uncertain} chưa chắc` : ""}`
                       : `${campaign.succeededMessages}/${total} bình luận`}
                     {campaign.failedMessages > 0 && ` · ${campaign.failedMessages} lỗi`}
                     {campaign.updatedAt && ` · ${timeAgoVi(campaign.updatedAt)}`}
@@ -330,7 +389,11 @@ export function InteractionMonitorTab({
                       : null
                 }
                 failedFraction={
-                  hasActionCounters ? 0 : total > 0 ? campaign.failedMessages / total : 0
+                  hasActionCounters
+                    ? actionFailedBeforeEffect / actionCounters!.planned
+                    : total > 0
+                      ? campaign.failedMessages / total
+                      : 0
                 }
                 tone={
                   campaign.state === "running"
@@ -348,6 +411,63 @@ export function InteractionMonitorTab({
           <EmptyState compact title="Chưa có chiến dịch nào" />
         )}
       </div>}
+      </section>
+      {masterDetail && (
+        <aside className="interaction-monitor-detail" aria-label="Chi tiết chiến dịch">
+          {openCampaignId && detail?.summary.id === openCampaignId ? (
+            <InteractionCampaignDetailView
+              detail={detail}
+              artifacts={artifacts}
+              notes={notes}
+              devices={devices}
+              deviceNumber={deviceNumber}
+              handles={handles}
+              busy={busy}
+              error={error}
+              onBack={() => onOpenCampaign(null)}
+              onCancel={() =>
+                void guard(async () => {
+                  await interactionCancel(detail.summary.id);
+                  await loadDetail(detail.summary.id);
+                  await reloadCampaigns();
+                })
+              }
+              onRetry={(assignmentIds) =>
+                void guard(async () => {
+                  await interactionRetry(detail.summary.id, assignmentIds);
+                  await loadDetail(detail.summary.id);
+                  await reloadCampaigns();
+                })
+              }
+              onShowShot={(artifactId) =>
+                void guard(async () => {
+                  const payload = await interactionReadArtifact(artifactId);
+                  setShot(`data:${payload.mimeType};base64,${payload.base64}`);
+                })
+              }
+              shot={shot}
+              onDismissShot={() => setShot(null)}
+            />
+          ) : openCampaignId ? (
+            detailLoadState === "error" ? (
+              <Banner
+                tone="error"
+                action={(
+                  <button type="button" className="ghost" onClick={() => void loadDetail(openCampaignId)}>
+                    Thử lại
+                  </button>
+                )}
+              >
+                {detailLoadError ?? "Không mở được chiến dịch."}
+              </Banner>
+            ) : (
+              <LoadingState label="Đang mở chiến dịch…" />
+            )
+          ) : (
+            <EmptyState compact title="Chọn một chiến dịch để xem thiết bị, log và chứng cứ" />
+          )}
+        </aside>
+      )}
     </div>
   );
 }

@@ -1,4 +1,6 @@
 import { useEffect, useRef, useState } from "react";
+import { AppWindow, FolderOpen, RefreshCw, Trash2 } from "lucide-react";
+
 import { describeError } from "../describeError";
 import {
   addAppLibrary,
@@ -13,11 +15,30 @@ import { flash, flashError } from "../farmToast";
 import { targetsOf } from "../selectionTargets";
 import { EmptyState, LoadingState, StatusNotice } from "../components/States";
 import { IconApp } from "../components/Icons";
+import {
+  FormSection,
+  ResponsiveTable,
+  StatusChip,
+  SummaryRail,
+  type StatusTone,
+} from "../components/WorkspacePrimitives";
 import { pickFile } from "../pickFile";
 import type { AppInstallResult, AppInstallStatus, AppLibraryItem, DeviceGroup } from "../types";
 import type { SelProps } from "./pageProps";
 
-/** The app library and installing from it across a selection. */
+const INSTALL_STATUS: Record<AppInstallStatus, { label: string; tone: StatusTone }> = {
+  succeeded: { label: "Đã xác nhận", tone: "success" },
+  beforeEffect: { label: "Chưa cài", tone: "warning" },
+  failedVerified: { label: "Cài thất bại", tone: "error" },
+  uncertain: { label: "Cần kiểm lại", tone: "warning" },
+  cancelledBeforeDispatch: { label: "Đã hủy trước khi cài", tone: "neutral" },
+};
+
+function appVersion(app: AppLibraryItem): string {
+  return app.versionName || app.version || "Chưa đọc được phiên bản";
+}
+
+/** The real app library and bounded, per-device installation results. */
 export function AppsPage({ devices, selected, onSelectUdids }: SelProps) {
   const [items, setItems] = useState<AppLibraryItem[]>([]);
   const [path, setPath] = useState("");
@@ -77,7 +98,7 @@ export function AppsPage({ devices, selected, onSelectUdids }: SelProps) {
   const runBatch = async (app: AppLibraryItem, udids: string[]) => {
     if (!udids.length) return;
     if (allowDowngrade && !window.confirm(
-      `Cho phép cài phiên bản ${app.versionName || app.version || "đã chọn"} thấp hơn bản đang có?`,
+      `Cho phép cài phiên bản ${appVersion(app)} thấp hơn bản đang có?`,
     )) return;
     const batchId = `app-install-${Date.now()}-${Math.random().toString(16).slice(2)}`;
     setBusy(true);
@@ -99,8 +120,8 @@ export function AppsPage({ devices, selected, onSelectUdids }: SelProps) {
           ? `Đã cài: ${succeeded} xác nhận, ${failed} thất bại, ${uncertain} cần kiểm lại`
           : `Đã cài: ${succeeded} xác nhận, ${failed} thất bại`,
       );
-    } catch (e) {
-      flashError(e);
+    } catch (error) {
+      flashError(error);
     } finally {
       setActiveBatch(null);
       setBusy(false);
@@ -123,212 +144,270 @@ export function AppsPage({ devices, selected, onSelectUdids }: SelProps) {
     await runBatch(app, targets);
   };
 
-  const installStatus: Record<AppInstallStatus, string> = {
-    succeeded: "Đã xác nhận",
-    beforeEffect: "Chưa cài",
-    failedVerified: "Cài thất bại",
-    uncertain: "Cần kiểm lại",
-    cancelledBeforeDispatch: "Đã hủy trước khi cài",
-  };
+  const selectedCount = selected.length || devices.length;
+  const confirmedCount = batchResults.filter((result) => result.status === "succeeded").length;
 
   return (
-    <div className="panel">
+    <div className="admin-workspace apps-workspace">
       <SelectionStrip
         devices={devices}
         selected={selected}
-        onSelectAll={() => onSelectUdids(devices.map((d) => d.udid))}
+        onSelectAll={() => onSelectUdids(devices.map((device) => device.udid))}
         onClear={() => onSelectUdids([])}
         onSelectUdids={onSelectUdids}
       />
-      {groupsError && (
-        <StatusNotice
-          tone="error"
-          action={(
-            <button type="button" className="ghost" onClick={() => void reloadGroups()}>
-              Thử lại danh sách nhóm
-            </button>
-          )}
-        >
-          Không tải được danh sách nhóm: {groupsError}
-        </StatusNotice>
-      )}
-      <div className="row" style={{ marginTop: 8 }}>
-        <label style={{ flex: 1 }}>
-          Cài hàng loạt theo nhóm
-          <select
-            value={groupId}
-            disabled={groupsLoading || !!groupsError}
-            onChange={(e) => setGroupId(e.target.value)}
+
+      <div className="admin-split">
+        <main className="admin-main">
+          <FormSection
+            title="Thêm gói cài đặt"
+            description="Đọc metadata và lưu một bản quản lý trước khi phân phối tới thiết bị."
           >
-            <option value="">
-              {groupsLoading
-                ? "Đang tải danh sách nhóm…"
-                : groupsError
-                  ? "Danh sách nhóm chưa tải được"
-                  : groups.length
-                  ? "— chọn nhóm —"
-                  : "Chưa có nhóm thiết bị"}
-            </option>
-            {groups.map((g) => (
-              <option key={g.id} value={g.id}>
-                {g.name} ({g.udids.length} máy)
-              </option>
-            ))}
-          </select>
-        </label>
-      </div>
-      <label className="row" style={{ marginTop: 8 }}>
-        <input
-          type="checkbox"
-          checked={allowDowngrade}
-          disabled={busy}
-          onChange={(event) => setAllowDowngrade(event.target.checked)}
-        />
-        Cho phép hạ phiên bản
-      </label>
-      <div className="row" style={{ marginTop: 8 }}>
-        <input
-          style={{ flex: 1 }}
-          value={path}
-          onChange={(e) => setPath(e.target.value)}
-          placeholder="Đường dẫn .ipa, .apk, .xapk, .apkm hoặc .apks…"
-        />
-        <button
-          type="button"
-          className="ghost"
-          onClick={async () => {
-            const p = await pickFile({
-              title: "Chọn ứng dụng",
-              filters: [{ name: "Ứng dụng", extensions: ["ipa", "apk", "xapk", "apkm", "apks"] }],
-            });
-            if (p) setPath(p);
-          }}
-        >
-          Chọn ứng dụng…
-        </button>
-      </div>
-      <label>
-        Mã ứng dụng (không bắt buộc)
-        <input value={bundleId} onChange={(e) => setBundleId(e.target.value)} />
-      </label>
-      <button
-        type="button"
-        className="primary"
-        disabled={!path.trim() || busy}
-        onClick={async () => {
-          setBusy(true);
-          try {
-            await addAppLibrary(path.trim(), undefined, bundleId || undefined);
-            setPath("");
-            await reloadLibrary();
-            flash("Đã thêm ứng dụng vào thư viện");
-          } catch (e) {
-            flashError(e);
-          } finally {
-            setBusy(false);
-          }
-        }}
-      >
-        Thêm vào thư viện
-      </button>
-      <div className="job-list" style={{ marginTop: 12 }}>
-        {itemsError && (
-          <StatusNotice
-            tone="error"
-            action={(
-              <button type="button" className="ghost" onClick={() => void reloadLibrary()}>
-                Thử lại thư viện ứng dụng
+            <div className="admin-field-grid">
+              <label className="is-wide">
+                Tệp ứng dụng
+                <input
+                  value={path}
+                  onChange={(event) => setPath(event.target.value)}
+                  placeholder="Chọn .ipa, .apk, .xapk, .apkm hoặc .apks"
+                />
+              </label>
+              <button
+                type="button"
+                className="ghost admin-field-action"
+                onClick={async () => {
+                  const selectedPath = await pickFile({
+                    title: "Chọn ứng dụng",
+                    filters: [{ name: "Ứng dụng", extensions: ["ipa", "apk", "xapk", "apkm", "apks"] }],
+                  });
+                  if (selectedPath) setPath(selectedPath);
+                }}
+              >
+                <FolderOpen size={15} aria-hidden="true" />
+                Chọn tệp
+              </button>
+              <label className="is-wide">
+                Mã ứng dụng nếu metadata không có
+                <input value={bundleId} onChange={(event) => setBundleId(event.target.value)} />
+              </label>
+              <div className="admin-actions admin-field-action">
+                <button
+                  type="button"
+                  className="primary"
+                  disabled={!path.trim() || busy}
+                  onClick={async () => {
+                    setBusy(true);
+                    try {
+                      await addAppLibrary(path.trim(), undefined, bundleId || undefined);
+                      setPath("");
+                      setBundleId("");
+                      await reloadLibrary();
+                      flash("Đã thêm ứng dụng vào thư viện");
+                    } catch (error) {
+                      flashError(error);
+                    } finally {
+                      setBusy(false);
+                    }
+                  }}
+                >
+                  <AppWindow size={15} aria-hidden="true" />
+                  {busy ? "Đang xử lý…" : "Thêm vào thư viện"}
+                </button>
+              </div>
+            </div>
+          </FormSection>
+
+          <FormSection
+            title="Thư viện ứng dụng"
+            description={items.length ? `${items.length} gói sẵn sàng phân phối` : undefined}
+            actions={(
+              <button type="button" className="icon-btn" onClick={() => void reloadLibrary()} disabled={itemsLoading} aria-label="Làm mới thư viện ứng dụng" title="Làm mới thư viện ứng dụng">
+                <RefreshCw size={16} aria-hidden="true" />
               </button>
             )}
           >
-          Không tải được thư viện ứng dụng: {itemsError}
-          </StatusNotice>
-        )}
-        {itemsLoading && !items.length && <LoadingState label="Đang tải thư viện ứng dụng…" />}
-        {items.map((a) => {
-          const platformDevices = a.platform === "ios" ? iosDevices : androidDevices;
-          const installTargets = targetsOf(selected, platformDevices).filter((udid) =>
-            platformDevices.some((device) => device.udid === udid),
-          );
-          const platformName = a.platform === "ios" ? "iPhone" : "Android";
-          return <article key={a.id} className="job-card">
-            <div>
-              <strong>{a.name}</strong>
-              <span className="pill">{a.bundleId || "chưa có bundle ID"}</span>
-              <span className="pill">{a.packageFormat.toUpperCase()}</span>
-            </div>
-            <p className="hint">{a.path}</p>
-            <div className="row">
-              <button
-                type="button"
-                className="primary"
-                disabled={!installTargets.length || busy}
-                title={
-                  installTargets.length
-                    ? `Cài lên ${installTargets.length} ${platformName}`
-                    : a.platform === "ios"
-                      ? "Không có iPhone nào để cài — IPA chỉ cài được lên iOS"
-                      : "Không có Android nào để cài — gói Android chỉ cài được lên Android"
-                }
-                onClick={() => void runBatch(a, installTargets)}
+            {itemsError && (
+              <StatusNotice
+                tone="error"
+                action={<button type="button" className="ghost" onClick={() => void reloadLibrary()}>Thử lại thư viện ứng dụng</button>}
               >
-                Cài → {installTargets.length} {platformName}
-              </button>
-              <button
-                type="button"
-                className="primary"
-                disabled={!groupId || busy}
-                title="Cài lên toàn bộ máy trong nhóm đã chọn"
-                onClick={() => installToGroup(a)}
-              >
-                Cài → nhóm
-              </button>
-              {activeBatch?.appId === a.id && (
-                <button
-                  type="button"
-                  className="ghost"
-                  onClick={() => void cancelAppInstallBatch(activeBatch.id)}
-                >
-                  Hủy máy chưa bắt đầu
-                </button>
-              )}
-              <button
-                type="button"
-                className="ghost"
-                onClick={async () => {
-                  await deleteAppLibrary(a.id);
-                  await reloadLibrary();
-                }}
-              >
-                Xóa
-              </button>
-            </div>
-          </article>;
-        })}
-        {!itemsLoading && !itemsError && !items.length && (
-          <EmptyState
-            compact
-            icon={<IconApp size={15} />}
-            title="Chưa có ứng dụng"
-            hint="Bấm «Chọn ứng dụng…» để thêm gói iOS hoặc Android vào thư viện."
-          />
-        )}
+                Không tải được thư viện ứng dụng: {itemsError}
+              </StatusNotice>
+            )}
+            {itemsLoading && !items.length && <LoadingState label="Đang tải thư viện ứng dụng…" />}
+            {!itemsLoading && !itemsError && !items.length && (
+              <EmptyState
+                compact
+                icon={<IconApp size={15} />}
+                title="Chưa có ứng dụng"
+                hint="Chọn một gói cài đặt ở phần trên để bắt đầu."
+              />
+            )}
+            {items.length > 0 && (
+              <ResponsiveTable
+                label="Thư viện ứng dụng"
+                rows={items}
+                keyForRow={(app) => app.id}
+                columns={[
+                  {
+                    id: "app",
+                    label: "Ứng dụng",
+                    render: (app) => (
+                      <span className="apps-library-name">
+                        <strong>{app.name}</strong>
+                        <small>{appVersion(app)}</small>
+                      </span>
+                    ),
+                  },
+                  {
+                    id: "format",
+                    label: "Nền tảng",
+                    render: (app) => <StatusChip>{app.platform === "ios" ? "iPhone" : "Android"} · {app.packageFormat.toUpperCase()}</StatusChip>,
+                  },
+                  {
+                    id: "metadata",
+                    label: "Metadata",
+                    render: (app) => (
+                      <StatusChip tone={app.metadataError ? "warning" : "success"}>
+                        {app.metadataError ? "Cần xem" : "Đã đọc"}
+                      </StatusChip>
+                    ),
+                  },
+                  {
+                    id: "actions",
+                    label: "Cài đặt",
+                    render: (app) => {
+                      const platformDevices = app.platform === "ios" ? iosDevices : androidDevices;
+                      const installTargets = targetsOf(selected, platformDevices).filter((udid) =>
+                        platformDevices.some((device) => device.udid === udid),
+                      );
+                      const platformName = app.platform === "ios" ? "iPhone" : "Android";
+                      return (
+                        <span className="admin-actions">
+                          <button
+                            type="button"
+                            className="primary"
+                            disabled={!installTargets.length || busy}
+                            title={installTargets.length
+                              ? `Cài lên ${installTargets.length} ${platformName}`
+                              : app.platform === "ios"
+                                ? "Không có iPhone nào để cài — IPA chỉ cài được lên iOS"
+                                : "Không có Android nào để cài — gói Android chỉ cài được lên Android"}
+                            onClick={() => void runBatch(app, installTargets)}
+                          >
+                            Cài → {installTargets.length} {platformName}
+                          </button>
+                          <button
+                            type="button"
+                            className="ghost"
+                            disabled={!groupId || busy}
+                            title="Cài lên toàn bộ máy trong nhóm đã chọn"
+                            onClick={() => void installToGroup(app)}
+                          >
+                            Cài → nhóm
+                          </button>
+                          {activeBatch?.appId === app.id && (
+                            <button type="button" className="ghost" onClick={() => void cancelAppInstallBatch(activeBatch.id)}>
+                              Hủy máy chưa bắt đầu
+                            </button>
+                          )}
+                          <details className="admin-detail">
+                            <summary>Chi tiết</summary>
+                            <dl>
+                              <dt>Mã ứng dụng</dt><dd><code>{app.applicationId || app.bundleId || "Chưa có"}</code></dd>
+                              <dt>Đường dẫn</dt><dd><code>{app.path}</code></dd>
+                              {app.sha256 && <><dt>SHA-256</dt><dd><code>{app.sha256}</code></dd></>}
+                              {app.metadataError && <><dt>Lỗi metadata</dt><dd>{app.metadataError}</dd></>}
+                            </dl>
+                          </details>
+                          <button
+                            type="button"
+                            className="icon-btn"
+                            aria-label={`Xóa ${app.name}`}
+                            title={`Xóa ${app.name}`}
+                            onClick={async () => {
+                              if (!window.confirm(`Xóa ${app.name} khỏi thư viện?`)) return;
+                              await deleteAppLibrary(app.id);
+                              await reloadLibrary();
+                            }}
+                          >
+                            <Trash2 size={15} aria-hidden="true" />
+                          </button>
+                        </span>
+                      );
+                    },
+                  },
+                ]}
+              />
+            )}
+          </FormSection>
+
+          {batchResults.length > 0 && (
+            <FormSection title="Kết quả cài đặt" description={`${confirmedCount}/${batchResults.length} máy đã xác nhận phiên bản`}>
+              <ResponsiveTable
+                label="Kết quả cài đặt gần nhất"
+                rows={batchResults}
+                keyForRow={(result) => result.udid}
+                columns={[
+                  {
+                    id: "device",
+                    label: "Thiết bị",
+                    render: (result) => devices.find((device) => device.udid === result.udid)?.name || "Thiết bị không còn trong danh sách",
+                  },
+                  {
+                    id: "status",
+                    label: "Kết quả",
+                    render: (result) => <StatusChip tone={INSTALL_STATUS[result.status].tone}>{INSTALL_STATUS[result.status].label}</StatusChip>,
+                  },
+                  {
+                    id: "version",
+                    label: "Phiên bản đọc lại",
+                    render: (result) => result.observedVersionName || "Chưa có",
+                  },
+                  {
+                    id: "detail",
+                    label: "Chi tiết",
+                    render: (result) => result.detail ? <p className="admin-result-detail">{result.detail}</p> : "—",
+                  },
+                ]}
+              />
+            </FormSection>
+          )}
+        </main>
+
+        <SummaryRail title="Phạm vi cài đặt">
+          <dl className="admin-metric-grid">
+            <div className="admin-metric"><dt>Đang nhắm tới</dt><dd>{selectedCount}</dd></div>
+            <div className="admin-metric"><dt>Android kết nối</dt><dd>{androidDevices.length}</dd></div>
+            <div className="admin-metric"><dt>iPhone kết nối</dt><dd>{iosDevices.length}</dd></div>
+          </dl>
+          {groupsError && (
+            <StatusNotice tone="error" action={<button type="button" className="ghost" onClick={() => void reloadGroups()}>Thử lại danh sách nhóm</button>}>
+              Không tải được danh sách nhóm: {groupsError}
+            </StatusNotice>
+          )}
+          <label>
+            Cài hàng loạt theo nhóm
+            <select value={groupId} disabled={groupsLoading || !!groupsError} onChange={(event) => setGroupId(event.target.value)}>
+              <option value="">
+                {groupsLoading
+                  ? "Đang tải danh sách nhóm…"
+                  : groupsError
+                    ? "Danh sách nhóm chưa tải được"
+                    : groups.length
+                      ? "Chọn nhóm"
+                      : "Chưa có nhóm thiết bị"}
+              </option>
+              {groups.map((group) => <option key={group.id} value={group.id}>{group.name} ({group.udids.length} máy)</option>)}
+            </select>
+          </label>
+          <label className="agent-toggle">
+            <input type="checkbox" checked={allowDowngrade} disabled={busy} onChange={(event) => setAllowDowngrade(event.target.checked)} />
+            Cho phép hạ phiên bản
+          </label>
+          <p className="hint">Hạ phiên bản luôn yêu cầu xác nhận riêng trước khi cài.</p>
+        </SummaryRail>
       </div>
-      {batchResults.length > 0 && (
-        <div className="job-list" style={{ marginTop: 12 }}>
-          <h4>Kết quả cài đặt</h4>
-          {batchResults.map((result) => {
-            const device = devices.find((candidate) => candidate.udid === result.udid);
-            return <article key={result.udid} className="job-card">
-              <div>
-                <span className="pill">{installStatus[result.status]}</span>
-                <strong>{device?.name || result.udid.slice(0, 12)}</strong>
-              </div>
-              {result.detail && <p className="hint">{result.detail}</p>}
-            </article>;
-          })}
-        </div>
-      )}
     </div>
   );
 }

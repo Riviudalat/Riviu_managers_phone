@@ -57,6 +57,24 @@ describe("Sidebar information architecture", () => {
     expect(onPage).toHaveBeenNthCalledWith(2, "interaction");
   });
 
+  it("marks only the current page and exposes collapse state", () => {
+    renderSidebar();
+
+    expect(screen.getByRole("button", { name: "Thiết bị" })).toHaveAttribute(
+      "aria-current",
+      "page",
+    );
+    expect(screen.getByRole("button", { name: "Đăng bài" })).not.toHaveAttribute("aria-current");
+    expect(screen.getByRole("button", { name: "Thu gọn thanh điều hướng" })).toHaveAttribute(
+      "aria-expanded",
+      "true",
+    );
+    expect(screen.getByRole("button", { name: "Thu gọn thanh điều hướng" })).toHaveAttribute(
+      "aria-controls",
+      "primary-navigation",
+    );
+  });
+
   it("keeps icon-only navigation and collapse controls named", async () => {
     const { onToggleCollapse } = renderSidebar(true);
     const user = userEvent.setup();

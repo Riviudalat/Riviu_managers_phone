@@ -539,6 +539,23 @@
   font-weight: 600;
 }
 
+.flow-technical-details {
+  color: var(--text-3);
+  font-size: var(--text-xs);
+  white-space: normal;
+}
+
+.flow-technical-details summary {
+  cursor: pointer;
+}
+
+.flow-technical-details code {
+  display: block;
+  max-width: 32ch;
+  overflow-wrap: anywhere;
+  white-space: normal;
+}
+
 .flow-monitor-empty {
   display: grid;
   place-items: center;

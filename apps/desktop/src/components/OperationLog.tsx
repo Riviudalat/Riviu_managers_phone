@@ -1,32 +1,33 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { RefreshCw, Search } from "lucide-react";
 
 import { listOpLogs } from "../api";
 import { describeError } from "../describeError";
 import type { OpLog } from "../types";
 import { EmptyState, LoadingState, StatusNotice } from "./States";
 
-/** How many rows to ask for. `analytics_summary` fetches twenty; this is the whole point. */
 const LIMIT = 200;
 
-/**
- * Everything the app has recorded itself doing.
- *
- * **`op_logs` had fifteen writers and no reader.** `log_op` is called from the nurture engine,
- * the publish path, the farm commands, the agent install and eight places in `state.rs`, so a
- * working farm writes to this table constantly. `analytics_summary` did select the last twenty
- * rows into `recentLogs` — and `DataPage` rendered eight stat tiles and threw that field away.
- * So the one durable record of what the app did to which phone was, in the app itself,
- * invisible.
- *
- * That is the same failure the repo already wrote down about `nurture_list_comment_attempts`:
- * *"a number nobody reads cannot be checked."* Here it was not even a number — it was the
- * answer to "what happened before it broke".
- *
- * The filter is a substring over action and detail rather than a dropdown of actions: the
- * actions are free-text strings written at fifteen call sites (`proxy.save`, `publish.create`,
- * `agent.install`…), so a fixed list would be a list that goes stale. Typing `nurture` or a
- * udid is what an operator actually reaches for.
- */
+const ACTION_LABELS: Array<[string, string]> = [
+  ["nurture", "Nuôi TikTok"],
+  ["interaction", "Tương tác"],
+  ["publish", "Đăng bài"],
+  ["flow", "Flow thiết bị"],
+  ["orchestration", "Điều phối"],
+  ["agent", "Riviu Agent"],
+  ["material", "Kho nội dung"],
+  ["app", "Trung tâm ứng dụng"],
+  ["proxy", "Kết nối thiết bị"],
+  ["deployment", "Khởi động ứng dụng"],
+];
+
+function operationLabel(action: string): string {
+  const normalized = action.trim().toLowerCase();
+  return ACTION_LABELS.find(([prefix]) => normalized === prefix || normalized.startsWith(`${prefix}.`))?.[1]
+    ?? "Thao tác hệ thống";
+}
+
+/** Durable application operations, with raw codes kept in the row's detail disclosure. */
 export function OperationLog() {
   const [rows, setRows] = useState<OpLog[] | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -53,22 +54,28 @@ export function OperationLog() {
     if (!term) return rows;
     return rows.filter(
       (row) =>
-        row.action.toLowerCase().includes(term) || row.detail.toLowerCase().includes(term),
+        row.action.toLowerCase().includes(term)
+        || row.detail.toLowerCase().includes(term)
+        || operationLabel(row.action).toLowerCase().includes(term),
     );
   }, [rows, needle]);
 
   return (
-    <section className="op-log">
-      <header className="row">
-        <h3>Việc app đã làm</h3>
-        <input
-          type="search"
-          value={needle}
-          onChange={(event) => setNeedle(event.target.value)}
-          placeholder="Lọc theo hành động hoặc chi tiết…"
-          aria-label="Lọc nhật ký thao tác"
-        />
-        <button type="button" className="ghost" onClick={load}>
+    <section className="op-log" aria-label="Nhật ký thao tác">
+      <header className="admin-toolbar">
+        <label className="search-field">
+          <Search size={15} aria-hidden="true" />
+          <span className="visually-hidden">Lọc nhật ký thao tác</span>
+          <input
+            type="search"
+            value={needle}
+            onChange={(event) => setNeedle(event.target.value)}
+            placeholder="Tìm theo thao tác hoặc chi tiết…"
+            aria-label="Lọc nhật ký thao tác"
+          />
+        </label>
+        <button type="button" className="ghost" onClick={load} disabled={loading}>
+          <RefreshCw size={15} aria-hidden="true" />
           Làm mới
         </button>
       </header>
@@ -76,11 +83,7 @@ export function OperationLog() {
       {error && (
         <StatusNotice
           tone="error"
-          action={
-            <button type="button" onClick={load}>
-              Thử lại nhật ký
-            </button>
-          }
+          action={<button type="button" className="ghost" onClick={load}>Thử lại nhật ký</button>}
         >
           Không đọc được nhật ký: {error}
         </StatusNotice>
@@ -89,23 +92,29 @@ export function OperationLog() {
       {!error && !loading && rows?.length === 0 && (
         <EmptyState
           compact
-          title="Chưa có dòng nào"
-          hint="Nhật ký sẽ xuất hiện sau khi app thực hiện một thao tác trên máy."
+          title="Chưa có thao tác nào"
+          hint="Nhật ký sẽ xuất hiện sau khi ứng dụng thực hiện công việc trên thiết bị."
         />
       )}
       {!error && rows !== null && rows.length > 0 && shown.length === 0 && (
-        <p className="hint">Không dòng nào khớp “{needle.trim()}”.</p>
+        <EmptyState compact title="Không tìm thấy kết quả" hint={`Không có thao tác nào khớp “${needle.trim()}”.`} />
       )}
 
       {shown.length > 0 && (
         <ul className="op-log-list">
           {shown.map((row) => (
             <li key={row.id}>
-              <code className="op-log-action">{row.action}</code>
-              <span className="op-log-detail">{row.detail || "—"}</span>
+              <strong className="op-log-label">
+                <span>{operationLabel(row.action)}</span>
+                <code className="visually-hidden">{row.action}</code>
+              </strong>
               <time className="op-log-when" dateTime={row.createdAt}>
                 {row.createdAt.replace("T", " ").slice(0, 19)}
               </time>
+              <details className="admin-detail op-log-detail">
+                <summary>Chi tiết</summary>
+                <p>{row.detail || "Không có chi tiết bổ sung."}</p>
+              </details>
             </li>
           ))}
         </ul>

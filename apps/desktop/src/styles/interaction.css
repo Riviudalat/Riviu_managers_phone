@@ -51,9 +51,73 @@
   border-radius: 6px;
   background: var(--bg-elevated);
 }
+.interaction-workspace-inner > .workflow-stepper {
+  margin: var(--space-4) var(--space-4) 0;
+}
 .interaction-workspace .interaction-float-body {
   min-height: 0;
   flex: 1;
+}
+
+.interaction-setup-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(260px, 330px);
+  align-items: start;
+  gap: var(--space-5);
+}
+
+.interaction-setup-main {
+  min-width: 0;
+}
+
+.interaction-review-list {
+  display: grid;
+  gap: var(--space-2);
+  margin: 0;
+}
+
+.interaction-review-list > div {
+  display: flex;
+  min-width: 0;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-3);
+}
+
+.interaction-review-list dt {
+  color: var(--text-3);
+  font-size: var(--text-sm);
+}
+
+.interaction-review-list dd {
+  margin: 0;
+  color: var(--text-1);
+  font-size: var(--text-sm);
+  font-weight: var(--weight-semibold);
+  text-align: right;
+  overflow-wrap: anywhere;
+}
+
+.interaction-review-issues,
+.interaction-review-warnings ul {
+  display: grid;
+  gap: var(--space-2);
+  margin: 0;
+  padding-left: var(--space-4);
+  color: var(--danger-deep);
+  font-size: var(--text-sm);
+}
+
+.interaction-review-warnings summary {
+  cursor: pointer;
+  color: var(--warn-strong);
+  font-size: var(--text-sm);
+  font-weight: var(--weight-semibold);
+}
+
+.interaction-review-warnings ul {
+  margin-top: var(--space-2);
+  color: var(--text-2);
 }
 .interaction-title {
   min-height: 42px;
@@ -245,7 +309,24 @@
 .interaction-action-counters strong { color: var(--text-1); font-variant-numeric: tabular-nums; }
 .interaction-action-counters .is-uncertain,
 .interaction-action-counters .is-uncertain strong { color: var(--warn); }
-.interaction-action-results { display: flex; flex-wrap: wrap; gap: 0.25rem; margin-top: 0.25rem; }
+.interaction-action-counters .is-failed,
+.interaction-action-counters .is-failed strong { color: var(--danger); }
+.interaction-action-results { display: flex; flex-direction: column; align-items: flex-start; gap: 0.3rem; margin-top: 0.25rem; }
+.interaction-action-result { display: flex; flex-wrap: wrap; align-items: center; gap: 0.35rem; width: 100%; }
+.public-cleanup-control { display: flex; flex: 1 1 100%; flex-direction: column; align-items: flex-start; gap: 0.35rem; min-width: 0; }
+.public-cleanup-control > button { display: inline-flex; align-items: center; gap: 0.3rem; min-height: 30px; }
+.public-cleanup-control > small { color: var(--text-3); white-space: normal; line-height: 1.4; }
+.public-cleanup-control .banner { width: 100%; margin: 0; }
+.public-cleanup-control .banner-copy { min-width: 0; }
+.public-cleanup-control .banner-copy > strong:first-child { display: inline; }
+.public-cleanup-evidence { margin-top: 0.35rem; color: var(--text-2); }
+.public-cleanup-evidence summary { cursor: pointer; font-weight: 600; }
+.public-cleanup-evidence dl { display: grid; gap: 0.2rem; margin: 0.45rem 0; }
+.public-cleanup-evidence dl > div { display: grid; grid-template-columns: minmax(7rem, auto) minmax(0, 1fr); gap: 0.5rem; }
+.public-cleanup-evidence dt { color: var(--text-3); }
+.public-cleanup-evidence dd { min-width: 0; margin: 0; }
+.public-cleanup-evidence code { display: block; max-width: 100%; margin: 0.2rem 0 0.45rem; white-space: pre-wrap; overflow-wrap: anywhere; }
+.public-cleanup-session-warning { display: block; margin-top: 0.35rem; color: var(--warn); }
 
 /* A refusal in the detail view: the Vietnamese headline, the engine's own sentence under it,
    and the code folded away. A `<span>` rather than the `<small>` the campaign rows use, so it
@@ -270,6 +351,24 @@ span.interaction-error > small { color: var(--text-2); white-space: pre-wrap; ov
 
 .interaction-monitor-head { display: flex; align-items: center; gap: 0.5rem; }
 .interaction-monitor-head .ghost { margin-left: auto; }
+.interaction-monitor-master {
+  display: grid;
+  grid-template-columns: minmax(300px, 0.82fr) minmax(420px, 1.18fr);
+  align-items: start;
+  gap: var(--space-4);
+}
+.interaction-monitor-list,
+.interaction-monitor-detail {
+  min-width: 0;
+}
+.interaction-monitor-detail {
+  min-height: 260px;
+  padding: var(--space-4);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--bg-elevated);
+  box-shadow: var(--shadow-sm);
+}
 .interaction-campaign-list { display: flex; flex-direction: column; gap: 0.25rem; }
 .interaction-campaign { display: flex; align-items: center; gap: 0.45rem; width: 100%; border: 0; background: none; padding: 0; text-align: left; cursor: pointer; }
 .interaction-campaign strong, .interaction-assignment strong { display: block; font-size: var(--text-sm); color: var(--text-1); }
@@ -371,3 +470,28 @@ span.interaction-error > small { color: var(--text-2); white-space: pre-wrap; ov
 .interaction-note-refused { color: var(--danger-deep); }
 /* "chưa tra" and "nhạc nền" are answers, not absences — dimmed, but not hidden. */
 .interaction-note-blank { color: var(--text-3); font-style: italic; }
+
+@media (max-width: 980px) {
+  .interaction-setup-grid,
+  .interaction-monitor-master {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 560px) {
+  .interaction-workspace-inner > .workflow-stepper {
+    margin-inline: var(--space-3);
+  }
+
+  .interaction-workspace .interaction-float-body,
+  .interaction-workspace .interaction-body {
+    padding-inline: var(--space-3);
+  }
+
+  .interaction-mode-cards,
+  .interaction-actor-group,
+  .interaction-actors,
+  .interaction-grid-3 {
+    grid-template-columns: 1fr;
+  }
+}

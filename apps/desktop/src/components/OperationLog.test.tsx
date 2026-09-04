@@ -91,14 +91,14 @@ describe("the operation log", () => {
 
     await userEvent.type(screen.getByLabelText("Lọc nhật ký thao tác"), "khong-co-gi");
 
-    expect(screen.getByText(/Không dòng nào khớp/)).toBeInTheDocument();
-    expect(screen.queryByText(/Chưa có dòng nào/)).toBeNull();
+    expect(screen.getByText(/Không có thao tác nào khớp/)).toBeInTheDocument();
+    expect(screen.queryByText(/Chưa có thao tác nào/)).toBeNull();
   });
 
   it("says the table is empty when it is", async () => {
     listLogs.mockResolvedValue([]);
     render(<OperationLog />);
-    await waitFor(() => expect(screen.getByText(/Chưa có dòng nào/)).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText(/Chưa có thao tác nào/)).toBeInTheDocument());
   });
 
   /** A read failure is reported, not swallowed into an empty list. */
@@ -110,7 +110,7 @@ describe("the operation log", () => {
 
     await waitFor(() => expect(screen.getByRole("alert")).toBeInTheDocument());
     expect(screen.getByRole("alert").textContent).toContain("database is locked");
-    expect(screen.queryByText(/Chưa có dòng nào/)).toBeNull();
+    expect(screen.queryByText(/Chưa có thao tác nào/)).toBeNull();
 
     await userEvent.click(screen.getByRole("button", { name: "Thử lại nhật ký" }));
     expect(await screen.findByText("publish.retry")).toBeInTheDocument();

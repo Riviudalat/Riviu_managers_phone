@@ -12,10 +12,9 @@
  * - **It never throws the raw code away.** Every result carries it, and the UI keeps it
  *   behind a disclosure. The codes are what a bug report is written from, and the operator
  *   is not the only reader of this panel.
- * - **It never invents a translation for something it does not recognise.** The
- *   campaign-level `errorCode` is a free-text anyhow chain — much of it already Vietnamese,
- *   written by the engine — so an unknown string is passed through as the title rather than
- *   replaced by a guess.
+ * - **It never promotes an unknown technical string to the headline.** The campaign-level
+ *   `errorCode` is a free-text anyhow chain, so an unknown value gets one stable Vietnamese
+ *   headline while the original remains available in the disclosure.
  * - **It does not re-translate the detail.** The hierarchy refusals are stored by the engine
  *   as `code: câu tiếng Việt`, and that sentence is better than anything this file could
  *   write: it was authored next to the measurement it describes. The code becomes the title,
@@ -151,9 +150,7 @@ export function interactionErrorVi(raw: string): InteractionErrorView {
     return { title, detail: detail || undefined, raw };
   }
 
-  // Unknown: the campaign-level reason is free text and often already Vietnamese. Showing it
-  // beats replacing it with "Lỗi".
-  return { title: trimmed, raw };
+  return { title: "Lỗi tương tác chưa xác định", raw };
 }
 
 /** Why one pasted line is not a usable link. */

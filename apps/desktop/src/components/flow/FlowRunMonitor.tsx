@@ -250,7 +250,16 @@ export function FlowRunMonitor({
             if (!attempt) {
               return (
                 <tr key={device.id}>
-                  <td title={device.udid}>{deviceLabels.get(device.udid) ?? "Máy chưa kết nối"}</td>
+                  <td>
+                    {deviceLabels.get(device.udid) ?? "Máy chưa kết nối"}
+                    <details
+                      className="flow-technical-details"
+                      aria-label="Chi tiết kỹ thuật thiết bị"
+                    >
+                      <summary>Chi tiết</summary>
+                      <code>{device.udid}</code>
+                    </details>
+                  </td>
                   <td />
                   <td />
                   <td>{displayFlowState(device.state)}</td>
@@ -277,10 +286,19 @@ export function FlowRunMonitor({
             const artifact = artifacts.get(attempt.id);
             return (
               <tr key={attempt.id}>
-                <td title={device.udid}>{deviceLabels.get(device.udid) ?? "Máy chưa kết nối"}</td>
+                <td>
+                  {deviceLabels.get(device.udid) ?? "Máy chưa kết nối"}
+                  <details
+                    className="flow-technical-details"
+                    aria-label="Chi tiết kỹ thuật thiết bị"
+                  >
+                    <summary>Chi tiết</summary>
+                    <code>{device.udid}</code>
+                  </details>
+                </td>
                 {/* The action kind alone made two Tap nodes indistinguishable -- both read
                     "Tap / attempt 1", so the row that failed named no node on the canvas. */}
-                <td title={attempt.nodeId}>
+                <td>
                   {displayFlowState(attempt.actionKind)}
                   {/* Which branch an If Vision picked is the whole question when a vision flow
                       does the wrong thing, and it was on the wire all along -- TypeScript just
@@ -305,6 +323,13 @@ export function FlowRunMonitor({
                       <code>{formatEvidence(attempt.evidenceResult)}</code>
                     </details>
                   )}
+                  <details
+                    className="flow-technical-details"
+                    aria-label="Chi tiết kỹ thuật bước"
+                  >
+                    <summary>Chi tiết</summary>
+                    <code>{attempt.nodeId}</code>
+                  </details>
                 </td>
                 <td>
                   {artifact ? (

@@ -8,6 +8,7 @@ import {
 } from "../../interactionErrors";
 import { timeAgoVi } from "../../timeAgo";
 import type { InteractionArtifactRecord } from "../../api";
+import { PublicCleanupControl } from "./PublicCleanupControl";
 import type {
   DeviceInfo,
   InteractionActionCounters,
@@ -41,13 +42,47 @@ function actionTone(state: InteractionActionState): "ok" | "warn" | "danger" | "
   return "info";
 }
 
-function ActionCounters({ counters }: { counters: InteractionActionCounters }) {
+function actionAggregateVi(
+  aggregate: NonNullable<InteractionCampaignDetail["actionAggregate"]>,
+): string {
+  switch (aggregate) {
+    case "done":
+      return "Hành động hoàn tất";
+    case "partial":
+      return "Hành động xong một phần";
+    case "failed":
+      return "Hành động chưa thực hiện";
+    case "uncertain":
+      return "Hành động chưa chắc kết quả";
+  }
+}
+
+function actionAggregateTone(
+  aggregate: NonNullable<InteractionCampaignDetail["actionAggregate"]>,
+): "ok" | "warn" | "danger" {
+  if (aggregate === "done") return "ok";
+  if (aggregate === "failed") return "danger";
+  return "warn";
+}
+
+function ActionCounters({
+  counters,
+  failedBeforeEffect,
+}: {
+  counters: InteractionActionCounters;
+  failedBeforeEffect: number;
+}) {
   return (
     <section className="interaction-action-counters" aria-label="Tổng hợp hành động">
       <span aria-label={`${counters.planned} dự kiến`}><strong>{counters.planned}</strong> dự kiến</span>
       <span aria-label={`${counters.attempted} đã thao tác`}><strong>{counters.attempted}</strong> đã thao tác</span>
       <span aria-label={`${counters.confirmed} xác nhận`}><strong>{counters.confirmed}</strong> xác nhận</span>
       <span aria-label={`${counters.noOp} không cần làm`}><strong>{counters.noOp}</strong> không cần làm</span>
+      {failedBeforeEffect > 0 && (
+        <span className="is-failed" aria-label={`${failedBeforeEffect} chưa thực hiện`}>
+          <strong>{failedBeforeEffect}</strong> chưa thực hiện
+        </span>
+      )}
       {counters.uncertain > 0 && (
         <span className="is-uncertain" aria-label={`${counters.uncertain} chưa chắc`}><strong>{counters.uncertain}</strong> chưa chắc</span>
       )}
@@ -61,12 +96,12 @@ function Reason({ code }: { code: string }) {
   return (
     <span className="interaction-error">
       <strong>{view.title}</strong>
-      {view.detail && <small>{view.detail}</small>}
       {/* Never thrown away. The Vietnamese is for the operator; the code is what a bug
           report is written from, and this panel has both kinds of reader. */}
       {view.title !== view.raw && (
-        <details className="interaction-raw-code">
+        <details className="interaction-raw-code" aria-label="Chi tiết mã lỗi tương tác">
           <summary>mã lỗi</summary>
+          {view.detail && <small>{view.detail}</small>}
           <code>{view.raw}</code>
         </details>
       )}
@@ -211,16 +246,20 @@ export function InteractionCampaignDetailView({
   const settled = summary.succeededMessages + summary.failedMessages;
   const actionCounters = summary.actionCounters;
   const hasActionCounters = Boolean(actionCounters?.planned);
+  const actionFailedBeforeEffect = detail.assignments.reduce(
+    (count, assignment) =>
+      count + (assignment.actions ?? []).filter((action) => action.state === "failedBeforeEffect").length,
+    0,
+  );
   const actionSettled = actionCounters
-    ? actionCounters.confirmed + actionCounters.noOp + actionCounters.uncertain
+    ? actionCounters.confirmed +
+      actionCounters.noOp +
+      actionCounters.uncertain +
+      actionFailedBeforeEffect
     : 0;
 
   /// A phone by the number on its tile, not by eight characters of its udid.
   ///
-  /// The shortening only applies to a udid long enough to need it: an iOS udid is 40
-  /// characters, but an Android serial can be shorter than the cut, and truncating
-  /// `android-1` to `android-` removes the only part that identifies it.
-  const shortUdid = (udid: string) => (udid.length > 12 ? `${udid.slice(0, 8)}…` : udid);
   const departedUdids = Array.from(
     new Set(
       detail.assignments
@@ -240,7 +279,7 @@ export function InteractionCampaignDetailView({
       const departed = departedNumber.get(udid) ?? 1;
       return `Máy đã rời fleet ${departed}/${departedUdids.length}`;
     }
-    const name = device?.name || device?.model || shortUdid(udid);
+    const name = device?.name || device?.model || "Thiết bị chưa đặt tên";
     return `${number ? `${number} · ` : ""}${name}${handle ? ` · @${handle}` : ""}`;
   };
 
@@ -262,6 +301,11 @@ export function InteractionCampaignDetailView({
         <span className={`chip ${stateTone(summary.state)}`}>
           {campaignStateVi(summary.state)}
         </span>
+        {detail.actionAggregate && (
+          <span className={`chip ${actionAggregateTone(detail.actionAggregate)}`}>
+            {actionAggregateVi(detail.actionAggregate)}
+          </span>
+        )}
         <small>
           {hasActionCounters
             ? `${actionSettled}/${actionCounters!.planned} hành động đã có kết quả`
@@ -283,7 +327,12 @@ export function InteractionCampaignDetailView({
           </button>
         )}
       </div>
-      {hasActionCounters && <ActionCounters counters={actionCounters!} />}
+      {hasActionCounters && (
+        <ActionCounters
+          counters={actionCounters!}
+          failedBeforeEffect={actionFailedBeforeEffect}
+        />
+      )}
       <ProgressBar
         fraction={
           hasActionCounters
@@ -292,9 +341,15 @@ export function InteractionCampaignDetailView({
               ? settled / total
               : null
         }
-        failedFraction={hasActionCounters ? 0 : total > 0 ? summary.failedMessages / total : 0}
+        failedFraction={
+          hasActionCounters
+            ? actionFailedBeforeEffect / actionCounters!.planned
+            : total > 0
+              ? summary.failedMessages / total
+              : 0
+        }
         tone={summary.state === "running" ? "run" : stateTone(summary.state) === "ok" ? "done" : "failed"}
-        label={`Tiến trình chiến dịch ${summary.id}`}
+        label="Tiến trình chiến dịch đang xem"
       />
       {summary.errorCode && <Reason code={summary.errorCode} />}
 
@@ -329,20 +384,45 @@ export function InteractionCampaignDetailView({
               <div key={assignment.id} className="interaction-assignment">
                 <span>#{assignment.ordinal + 1}</span>
                 <span className="grow">
-                  <strong title={assignment.actorUdid}>{actorLabel(assignment.actorUdid)}</strong>
+                  <strong>{actorLabel(assignment.actorUdid)}</strong>
+                  <details
+                    className="interaction-raw-code"
+                    aria-label={`Chi tiết kỹ thuật ${actorLabel(assignment.actorUdid)}`}
+                  >
+                    <summary>Thiết bị kỹ thuật</summary>
+                    <code>{assignment.actorUdid}</code>
+                  </details>
                   {(assignment.preparedText || !assignment.actions?.length) && (
                     <small>{assignment.preparedText ?? "Chưa chuẩn bị"}</small>
                   )}
                   {Boolean(assignment.actions?.length) && (
                     <div className="interaction-action-results" aria-label="Kết quả hành động">
                       {assignment.actions!.map((action) => (
-                        <span
-                          key={action.kind}
-                          className={`chip ${actionTone(action.state)}`}
-                          title={action.error ?? action.evidence ?? undefined}
-                        >
-                          {ACTION_KIND_VI[action.kind]} · {ACTION_STATE_VI[action.state]}
-                        </span>
+                        <div key={action.kind} className="interaction-action-result">
+                          <span className={`chip ${actionTone(action.state)}`}>
+                            {ACTION_KIND_VI[action.kind]} · {ACTION_STATE_VI[action.state]}
+                          </span>
+                          {(action.error || action.evidence) && (
+                            <details
+                              className="interaction-raw-code"
+                              aria-label={`Chi tiết ${ACTION_KIND_VI[action.kind]}`}
+                            >
+                              <summary>Chi tiết</summary>
+                              <code>{action.error ?? action.evidence}</code>
+                            </details>
+                          )}
+                          {(action.kind === "like" || action.kind === "save") && (
+                            <PublicCleanupControl
+                              campaignId={summary.id}
+                              assignmentId={assignment.id}
+                              targetKey={assignment.targetKey}
+                              actorLabel={actorLabel(assignment.actorUdid)}
+                              kind={action.kind}
+                              sourceState={action.state}
+                              sourceEvidence={action.evidence}
+                            />
+                          )}
+                        </div>
                       ))}
                     </div>
                   )}

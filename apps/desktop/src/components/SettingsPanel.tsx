@@ -13,6 +13,7 @@ import { WifiAdbSection } from "./settings/WifiAdbSection";
 
 interface Props {
   devices: DeviceInfo[];
+  deviceLabels?: ReadonlyMap<string, string>;
 }
 
 /**
@@ -23,7 +24,7 @@ interface Props {
  * one independent load per section stacked into a single callback. The only value genuinely
  * shared is the driver mode, which one section reads and none writes, so it stays here.
  */
-export function SettingsPanel({ devices }: Props) {
+export function SettingsPanel({ devices, deviceLabels }: Props) {
   const [mode, setMode] = useState("...");
 
   useEffect(() => {
@@ -42,8 +43,14 @@ export function SettingsPanel({ devices }: Props) {
   );
 
   return (
-    <div className="panel">
-      <AgentSection connectedDevices={connectedDevices} connectedUdids={connectedUdids} />
+    <div className="settings-page">
+      <div className="settings-span-full">
+        <AgentSection
+          connectedDevices={connectedDevices}
+          connectedUdids={connectedUdids}
+          deviceLabels={deviceLabels}
+        />
+      </div>
       <StreamQualitySection />
       <GroupSyncSection />
       <WifiAdbSection />
