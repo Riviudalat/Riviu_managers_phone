@@ -586,54 +586,87 @@ pub fn publish_reconcile(
     campaign_id: String,
 ) -> Result<riviu_core::PublishExecutionSnapshot, CommandError> {
     let _admission = state.ensure_accepting_work()?;
-    let previous = state
-        .db
-        .get_publish_execution_snapshot(&campaign_id)
-        .map_err(err)?;
-    let request = state
-        .db
-        .publish_campaign_request(&campaign_id)
-        .map_err(err)?
-        .ok_or_else(|| err("publish campaign request not found"))?;
-    let detail = state
-        .db
-        .get_publish_campaign(&campaign_id)
-        .map_err(err)?
-        .ok_or_else(|| err("publish campaign not found"))?;
+    reconcile_publish_execution_and_announce(&state.db, &state.events, &campaign_id).map_err(err)
+}
+
+/// Commit one terminal projection before telling subscribers to re-read it.
+///
+/// The event is deliberately inside this helper rather than at its call sites. A failed save
+/// therefore cannot advertise a state that does not exist yet, and every successful subscriber
+/// wake-up observes at least the projection that caused it.
+fn persist_publish_snapshot_then_announce<T>(
+    db: &Database,
+    events: &riviu_core::events::EventBus,
+    campaign_id: &str,
+    persist: impl FnOnce() -> anyhow::Result<T>,
+) -> anyhow::Result<T> {
+    let persisted = persist()?;
+    announce(events, db, campaign_id);
+    Ok(persisted)
+}
+
+fn persist_reconciled_publish_execution(
+    db: &Database,
+    campaign_id: &str,
+) -> anyhow::Result<riviu_core::PublishExecutionSnapshot> {
+    let previous = db.get_publish_execution_snapshot(campaign_id)?;
+    let request = db
+        .publish_campaign_request(campaign_id)?
+        .context("publish campaign request not found")?;
+    let detail = db
+        .get_publish_campaign(campaign_id)?
+        .context("publish campaign not found")?;
     // A campaign transition may happen after the last projection was written (for example, the
     // process can die after the Post effect-intent CAS). Never return that old snapshot blindly:
     // the typed campaign/assignment states are the durable authority after restart.
     let input_digest = previous
         .as_ref()
         .map(|snapshot| snapshot.input_digest.clone())
-        .unwrap_or(stored_campaign_input_digest(&request, &detail).map_err(err)?);
+        .unwrap_or(stored_campaign_input_digest(&request, &detail)?);
     let mut sheet_states = HashMap::new();
     for assignment in &detail.assignments {
-        if let Some(sheet_state) = state
-            .db
-            .publish_sheet_outbox_state(&assignment.id)
-            .map_err(err)?
-        {
+        if let Some(sheet_state) = db.publish_sheet_outbox_state(&assignment.id)? {
             sheet_states.insert(assignment.id.clone(), sheet_state);
         }
     }
     let (status, retry_scope) = reconciled_publish_status(&detail, &sheet_states);
-    state
-        .db
-        .save_publish_execution_snapshot(
-            &campaign_id,
-            &input_digest,
-            status,
-            retry_scope,
-            &serde_json::json!({
-                "campaignId": campaign_id,
-                "status": status,
-                "retryScope": retry_scope,
-                "source": "typed_state_reconciliation",
-                "targetSnapshot": request.target_snapshot,
-            }),
-        )
-        .map_err(err)
+    db.save_publish_execution_snapshot(
+        campaign_id,
+        &input_digest,
+        status,
+        retry_scope,
+        &serde_json::json!({
+            "campaignId": campaign_id,
+            "status": status,
+            "retryScope": retry_scope,
+            "source": "typed_state_reconciliation",
+            "targetSnapshot": request.target_snapshot,
+        }),
+    )
+}
+
+pub(crate) fn reconcile_publish_execution_and_announce(
+    db: &Database,
+    events: &riviu_core::events::EventBus,
+    campaign_id: &str,
+) -> anyhow::Result<riviu_core::PublishExecutionSnapshot> {
+    persist_publish_snapshot_then_announce(db, events, campaign_id, || {
+        persist_reconciled_publish_execution(db, campaign_id)
+    })
+}
+
+/// Finish the exact Sheet revision that was delivered, then converge the durable operation view.
+/// A stale CAS is an ordinary refusal and emits nothing because a newer row is still owed.
+pub(crate) fn mark_publish_sheet_sent_and_reconcile(
+    db: &Database,
+    events: &riviu_core::events::EventBus,
+    row: &riviu_core::db::SheetOutboxRow,
+) -> anyhow::Result<bool> {
+    if !db.mark_publish_sheet_sent(&row.assignment_id, row.revision)? {
+        return Ok(false);
+    }
+    reconcile_publish_execution_and_announce(db, events, &row.campaign_id)?;
+    Ok(true)
 }
 
 fn reconciled_publish_status(
@@ -762,7 +795,8 @@ pub fn publish_cancel(state: State<'_, AppState>, campaign_id: String) -> Result
         .map_err(err)?
     {
         Some(riviu_core::PublishCampaignState::Cancelled) => {
-            announce(&state.events, &state.db, &campaign_id);
+            reconcile_publish_execution_and_announce(&state.db, &state.events, &campaign_id)
+                .map_err(err)?;
             Ok(())
         }
         Some(actual) => Err(err(format!(
@@ -2140,12 +2174,6 @@ pub(crate) async fn execute_publish_campaign_inner(
     let detail = db
         .get_publish_campaign(&campaign_id)?
         .ok_or_else(|| anyhow::anyhow!("publish campaign disappeared during execution"))?;
-    events.emit(riviu_core::events::AppEvent::PublishUpdated {
-        campaign_id: campaign_id.clone(),
-        revision: db
-            .publish_campaign_revision(&campaign_id)
-            .unwrap_or_default(),
-    });
     let status = if ambiguous
         || results
             .iter()
@@ -2170,13 +2198,15 @@ pub(crate) async fn execute_publish_campaign_inner(
         issues,
         detail,
     };
-    db.save_publish_execution_snapshot(
-        &output.campaign_id,
-        &input_digest,
-        output.status,
-        output.retry_scope,
-        &publish_execution_report(&request, &output)?,
-    )?;
+    persist_publish_snapshot_then_announce(&db, &events, &output.campaign_id, || {
+        db.save_publish_execution_snapshot(
+            &output.campaign_id,
+            &input_digest,
+            output.status,
+            output.retry_scope,
+            &publish_execution_report(&request, &output)?,
+        )
+    })?;
     Ok(output)
 }
 
@@ -2221,21 +2251,18 @@ pub(crate) async fn execute_scheduled_publish_campaign_inner(
         result.detail = db
             .get_publish_campaign(&campaign_id)?
             .ok_or_else(|| anyhow::anyhow!("scheduled publish disappeared while settling"))?;
-        events.emit(riviu_core::events::AppEvent::PublishUpdated {
-            campaign_id: campaign_id.clone(),
-            revision: db
-                .publish_campaign_revision(&campaign_id)
-                .unwrap_or_default(),
-        });
-    }
-    if let Some(snapshot) = db.get_publish_execution_snapshot(&campaign_id)? {
-        db.save_publish_execution_snapshot(
-            &campaign_id,
-            &snapshot.input_digest,
-            result.status,
-            result.retry_scope,
-            &publish_execution_report(&request, &result)?,
-        )?;
+        let snapshot = db
+            .get_publish_execution_snapshot(&campaign_id)?
+            .context("scheduled publish execution snapshot disappeared while settling")?;
+        persist_publish_snapshot_then_announce(&db, &events, &campaign_id, || {
+            db.save_publish_execution_snapshot(
+                &campaign_id,
+                &snapshot.input_digest,
+                result.status,
+                result.retry_scope,
+                &publish_execution_report(&request, &result)?,
+            )
+        })?;
     }
     Ok(result)
 }
@@ -2792,7 +2819,6 @@ pub(crate) async fn post_publish_campaign_inner(
     // Post close that loop instead of reporting the finished phones as failures.
     if participants.is_empty() {
         db.finish_publish_campaign(&campaign_id, riviu_core::db::PublishRunOutcome::AllPosted)?;
-        announce(&events, &db, &campaign_id);
         return db
             .get_publish_campaign(&campaign_id)?
             .ok_or_else(|| anyhow::anyhow!("campaign disappeared after post"));
@@ -2867,7 +2893,6 @@ pub(crate) async fn post_publish_campaign_inner(
             (false, true) => riviu_core::db::PublishRunOutcome::SomethingMayBeLive,
         },
     )?;
-    announce(&events, &db, &campaign_id);
     let output = db
         .get_publish_campaign(&campaign_id)?
         .ok_or_else(|| anyhow::anyhow!("campaign disappeared after post"))?;
@@ -3974,8 +3999,10 @@ mod tests {
     use super::evidence_with_post_url;
     use super::fold_cleanup_into;
     use super::fresh_publish_preflight_issues;
+    use super::mark_publish_sheet_sent_and_reconcile;
     use super::max_images_for;
     use super::missing_link_locators;
+    use super::persist_publish_snapshot_then_announce;
     use super::post_url_owed;
     use super::poster_identity;
     use super::publish_preflight_digest;
@@ -4499,6 +4526,148 @@ mod tests {
             reconciled_publish_status(&cancelled, &empty),
             (Status::Partial, Scope::None)
         );
+    }
+
+    #[test]
+    fn sheet_delivery_reconciles_the_operation_before_emitting_and_rejects_a_stale_revision() {
+        let path = std::env::temp_dir().join(format!(
+            "riviu-publish-sheet-convergence-{}.db",
+            Uuid::new_v4()
+        ));
+        let db = super::Database::open(&path).expect("open fixture database");
+        let mut bundle = test_bundle("bundle-sheet-convergence");
+        bundle.caption = "caption".into();
+        bundle.caption_sha256 = super::frame_sha256(bundle.caption.as_bytes());
+        let request = riviu_core::PublishCampaignRequest {
+            request_id: Uuid::new_v4().to_string(),
+            source_root: "C:/fixture".into(),
+            bundle_ids: vec![bundle.id.clone()],
+            udids: vec!["phone-1".into()],
+            run_at: None,
+            visibility: riviu_core::PublishVisibility::Public,
+            cleanup_policy: riviu_core::PublishCleanupPolicy::DeleteImportedAssetsAfterVerified,
+            sound_policy: riviu_core::PublishSoundPolicy::Default,
+            execution_confirmed: true,
+            target_snapshot: None,
+        };
+        let initial = riviu_core::PublishExecutionSnapshotDraft {
+            input_digest: "a".repeat(64),
+            status: riviu_core::PublishExecutionStatus::Partial,
+            retry_scope: riviu_core::PublishRetryScope::SheetOnly,
+            report_json: serde_json::json!({"state": "sheet_pending"}),
+        };
+        let campaign = db
+            .create_publish_campaign_with_snapshot(&request, &[bundle], &initial)
+            .expect("create campaign and projection");
+        let assignment = db
+            .get_publish_campaign(&campaign.id)
+            .expect("read campaign")
+            .expect("campaign exists")
+            .assignments
+            .into_iter()
+            .next()
+            .expect("assignment exists");
+        let link = "https://www.tiktok.com/@fixture/video/7400000000000000001";
+        db.record_publish_success_with_sheet_row(
+            &assignment.id,
+            &serde_json::json!({"postUrl": link}).to_string(),
+            &campaign.id,
+            link,
+            "bot",
+            &[],
+        )
+        .expect("record post and outbox");
+        db.update_publish_campaign_state(
+            &campaign.id,
+            riviu_core::PublishCampaignState::Succeeded,
+            None,
+        )
+        .expect("settle campaign");
+
+        let stale = db
+            .pending_publish_sheet_row(&assignment.id)
+            .expect("read pending row")
+            .expect("pending row exists");
+        db.queue_publish_sheet_row(&assignment.id, &campaign.id, link, "bot", &[])
+            .expect("replace the in-flight row");
+        let current = db
+            .pending_publish_sheet_row(&assignment.id)
+            .expect("read replacement row")
+            .expect("replacement exists");
+        assert!(current.revision > stale.revision);
+
+        let events = riviu_core::events::EventBus::new(8);
+        let mut receiver = events.subscribe();
+        assert!(
+            !mark_publish_sheet_sent_and_reconcile(&db, &events, &stale)
+                .expect("stale CAS is an ordinary refusal"),
+            "an old delivery must not settle newer Sheet content"
+        );
+        assert!(receiver.try_recv().is_err(), "a refused CAS emits nothing");
+        assert_eq!(
+            db.get_publish_execution_snapshot(&campaign.id)
+                .expect("read projection")
+                .expect("projection exists")
+                .status,
+            riviu_core::PublishExecutionStatus::Partial
+        );
+
+        assert!(
+            mark_publish_sheet_sent_and_reconcile(&db, &events, &current)
+                .expect("current delivery settles"),
+            "the current revision must settle"
+        );
+        let event = receiver.try_recv().expect("durable settle emits an event");
+        let riviu_core::events::AppEvent::PublishUpdated { campaign_id, .. } = event else {
+            panic!("sheet settlement emitted the wrong event")
+        };
+        assert_eq!(campaign_id, campaign.id);
+
+        // Read only after receiving the event. This is the frontend race: an event that can
+        // overtake the snapshot makes the operations page repaint the old Partial forever.
+        let snapshot = db
+            .get_publish_execution_snapshot(&campaign.id)
+            .expect("read projection after event")
+            .expect("projection exists after event");
+        assert_eq!(
+            snapshot.status,
+            riviu_core::PublishExecutionStatus::Complete
+        );
+        assert_eq!(snapshot.retry_scope, riviu_core::PublishRetryScope::None);
+        let detail = db
+            .get_publish_campaign(&campaign.id)
+            .expect("read campaign after event")
+            .expect("campaign exists after event");
+        assert_eq!(
+            riviu_core::project_publish_summary(&detail, Some(&snapshot)).state,
+            riviu_core::OperationRunState::Succeeded,
+            "the same event must expose a completed operation projection"
+        );
+
+        drop(db);
+        std::fs::remove_file(path).expect("remove fixture database");
+    }
+
+    #[test]
+    fn a_failed_final_snapshot_write_emits_no_completion_event() {
+        let path = std::env::temp_dir().join(format!(
+            "riviu-publish-save-before-event-{}.db",
+            Uuid::new_v4()
+        ));
+        let db = super::Database::open(&path).expect("open fixture database");
+        let events = riviu_core::events::EventBus::new(4);
+        let mut receiver = events.subscribe();
+        let result: anyhow::Result<()> =
+            persist_publish_snapshot_then_announce(&db, &events, "campaign-fixture", || {
+                anyhow::bail!("fixture snapshot failure")
+            });
+        assert!(result.is_err());
+        assert!(
+            receiver.try_recv().is_err(),
+            "an event must never announce a snapshot that did not commit"
+        );
+        drop(db);
+        std::fs::remove_file(path).expect("remove fixture database");
     }
 
     #[test]

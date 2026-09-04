@@ -1926,18 +1926,21 @@ impl AppState {
                     continue;
                 };
                 let now = chrono::Local::now().naive_local();
-                // Every settle in this loop is a state change the page should see — through
-                // one named path, because when this was three hand-written emits, two of the
-                // three were missing and a campaign that settled `missed` at startup stayed
-                // painted `scheduled` until a manual reload: these settles are terminal, so
-                // no later event ever corrected the screen.
-                let tell_the_page = |campaign_id: &str| {
-                    publish_events.emit(riviu_core::events::AppEvent::PublishUpdated {
-                        campaign_id: campaign_id.to_string(),
-                        revision: publish_db
-                            .publish_campaign_revision(campaign_id)
-                            .unwrap_or_default(),
-                    });
+                // Every settle in this loop first refreshes the durable execution projection,
+                // then wakes the page. Emitting only the campaign revision left Operations
+                // reading the previous snapshot forever when no later event followed.
+                let settle_projection = |campaign_id: &str| {
+                    if let Err(error) =
+                        crate::publish_commands::reconcile_publish_execution_and_announce(
+                            &publish_db,
+                            &publish_events,
+                            campaign_id,
+                        )
+                    {
+                        log::warn!(
+                            "publish schedule: không hội tụ được snapshot của {campaign_id} ({error:#})"
+                        );
+                    }
                 };
                 for (campaign_id, raw) in scheduled {
                     let Some(raw_run_at) = raw
@@ -1950,7 +1953,7 @@ impl AppState {
                             riviu_core::PublishCampaignState::FailedBeforeDispatch,
                             Some("missing_run_at"),
                         );
-                        tell_the_page(&campaign_id);
+                        settle_projection(&campaign_id);
                         continue;
                     };
                     let Ok(run_at) =
@@ -1967,7 +1970,7 @@ impl AppState {
                             riviu_core::PublishCampaignState::FailedBeforeDispatch,
                             Some("invalid_run_at"),
                         );
-                        tell_the_page(&campaign_id);
+                        settle_projection(&campaign_id);
                         continue;
                     };
                     if run_at < publish_started_at {
@@ -1977,7 +1980,7 @@ impl AppState {
                             Some("app_opened_after_deadline"),
                         );
                         let _ = publish_db.log_op("publish.missed", &campaign_id);
-                        tell_the_page(&campaign_id);
+                        settle_projection(&campaign_id);
                         continue;
                     }
                     if run_at > now {
@@ -2000,8 +2003,8 @@ impl AppState {
                     {
                         let _ = publish_db
                             .log_op("publish.schedule.error", &format!("{campaign_id}: {error}"));
+                        settle_projection(&campaign_id);
                     }
-                    tell_the_page(&campaign_id);
                 }
             }
         });
@@ -2058,6 +2061,7 @@ impl AppState {
         // on the next tick, no restart. The one-time log line is so an operator staring at
         // a stuck `pending` row finds the reason without grepping.
         let sheet_db = self.db.clone();
+        let sheet_events = self.events.clone();
         tauri::async_runtime::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_secs(45));
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -2120,8 +2124,11 @@ impl AppState {
                         Ok(()) => {
                             // Marked by the revision that was DELIVERED — a row edited
                             // between read and send keeps owing its newer content.
-                            match sheet_db.mark_publish_sheet_sent(&row.assignment_id, row.revision)
-                            {
+                            match crate::publish_commands::mark_publish_sheet_sent_and_reconcile(
+                                &sheet_db,
+                                &sheet_events,
+                                &row,
+                            ) {
                                 Ok(true) => {}
                                 // The CAS said no: the row moved between read and send, so
                                 // what reached the sheet is a version the outbox no longer
@@ -2139,8 +2146,8 @@ impl AppState {
                                     row.revision
                                 ),
                                 Err(error) => log::warn!(
-                                    "outbox Sheet: gửi được nhưng không ghi được 'sent' cho {} \
-                                     ({error:#}) — lượt sau sẽ gửi lại và script sẽ trả duplicate",
+                                    "outbox Sheet: đã gửi nhưng không hoàn tất được settlement \
+                                     bền vững cho {} ({error:#}); chưa phát event hoàn tất",
                                     row.assignment_id
                                 ),
                             }
@@ -2539,7 +2546,7 @@ mod tests {
     fn the_publish_scheduler_queries_by_state_rather_than_paging() {
         let source = include_str!("state.rs");
         let module = &source[..source
-            .rfind("#[cfg(test)]")
+            .find("#[cfg(test)]")
             .expect("this file still has a test module")];
         let scheduler = &module[module
             .find("let publish_started_at")
@@ -2559,6 +2566,30 @@ mod tests {
         assert!(
             !scheduler.contains("list_publish_campaigns("),
             "the scheduler still pages through recent campaigns, which loses old scheduled rows"
+        );
+    }
+
+    #[test]
+    fn scheduled_publish_settlements_refresh_the_snapshot_before_the_event() {
+        let source = include_str!("state.rs");
+        let module = &source[..source
+            .find("#[cfg(test)]")
+            .expect("this file still has a test module")];
+        let start = module
+            .find("let publish_started_at")
+            .expect("the publish scheduler is still in this file");
+        let end = module[start..]
+            .find("// Flow orphan sweep")
+            .map(|offset| start + offset)
+            .expect("the publish scheduler still has a bounded section");
+        let scheduler = &module[start..end];
+        assert!(
+            scheduler.contains("reconcile_publish_execution_and_announce"),
+            "scheduled terminal states must persist their typed projection before waking the UI"
+        );
+        assert!(
+            !scheduler.contains("AppEvent::PublishUpdated"),
+            "the scheduler bypasses the save-before-event helper with a raw completion event"
         );
     }
 
