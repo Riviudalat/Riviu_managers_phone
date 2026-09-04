@@ -76,8 +76,12 @@ use std::time::Duration;
 use tokio::time::Instant;
 
 use crate::driver::{ElementBox, ElementQuery, UiSession};
+use crate::publish::{select_sound_candidate, PublishSoundPolicy, SoundSelectionEvidence};
 use crate::tiktok_drawer::TapPlanner;
 use crate::tiktok_labels::{TikTokControl, TikTokControls};
+use crate::tiktok_sound::{
+    choose_and_confirm_sound, confirm_sound, open_and_observe_sounds, SoundPickerPlan,
+};
 
 /// How long the composer may take to appear after its tab is tapped.
 pub const COMPOSER_WINDOW: Duration = Duration::from_millis(8_000);
@@ -826,6 +830,7 @@ pub struct Composer<'a, P: TapPlanner> {
     session: &'a dyn UiSession,
     plan: ComposerPlan,
     plan_tap: P,
+    pending_sound_proof: Option<(SoundPickerPlan, String)>,
 }
 
 impl<'a, P: TapPlanner> Composer<'a, P> {
@@ -834,6 +839,7 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
             session,
             plan,
             plan_tap,
+            pending_sound_proof: None,
         }
     }
 
@@ -1353,13 +1359,13 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
 
     /// The effect-aware Post entrypoint.
     ///
-    /// `before_post` is called exactly once, on the last synchronous line before the first
+    /// `before_post` is called exactly once, on the last synchronous line before the only
     /// Post gesture. A failure means no Post gesture was dispatched and is therefore returned
-    /// as an ordinary pre-effect error. The measured retry for a keyboard-swallowed tap does
-    /// not call it again: the durable intent names the assignment, not individual gestures.
+    /// as an ordinary pre-effect error. Once that gesture is attempted, any failure to observe
+    /// the feed is uncertain and this routine never taps Post again.
     async fn post_with_effect_intent<F>(
         &mut self,
-        caption: &str,
+        _caption: &str,
         stop: &AtomicBool,
         before_post: &mut F,
     ) -> anyhow::Result<ComposerVerdict>
@@ -1372,12 +1378,23 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
         if stop.load(Ordering::Relaxed) {
             return Ok(ComposerVerdict::Stopped);
         }
-        let Some(button) = self
+        let Some(mut button) = self
             .await_condition(COMPOSER_WINDOW, query, stop, |_| true)
             .await?
         else {
             return Ok(ComposerVerdict::NoPostButton);
         };
+        if let Some((sound_plan, expected_title)) = self.pending_sound_proof.clone() {
+            confirm_sound(self.session, sound_plan, &expected_title).await?;
+            // `confirm_sound` is the final device round-trip before the effect boundary. Refresh
+            // the Post rectangle once after it so an old coordinate cannot survive a layout
+            // change while the sound was being proved. Ambiguity is a pre-effect refusal.
+            let buttons = self.session.locate_all(query).await?;
+            let [current] = buttons.as_slice() else {
+                return Ok(ComposerVerdict::NoPostButton);
+            };
+            button = current.clone();
+        }
         // The last point at which stopping is still free.
         if stop.load(Ordering::Relaxed) {
             return Ok(ComposerVerdict::Stopped);
@@ -1386,33 +1403,6 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
         if self.tap_inside(&button).await.is_err() {
             // The tap may have reached the phone before the transport died.
             return Ok(ComposerVerdict::PostNotConfirmed);
-        }
-        // **One retry, and only against proof that nothing was published.**
-        //
-        // Measured 31/08/2026 on the M7 trip (§9.136): the very first run that ever *typed*
-        // a caption had its Post tap do nothing. The button's rectangle comes from the
-        // hierarchy, which reports it whether or not the soft keyboard — up since
-        // `type_caption` — is drawn on top of it, so the finger landed on a key. Every
-        // earlier measuring trip stopped before typing and never met this.
-        //
-        // A blind second tap is the one thing this module must never do. This one is gated
-        // on the post screen being **untouched**: TikTok leaves that screen the instant a
-        // post commits, so a Post button still on it, above a caption field still holding
-        // this run's caption, is proof the carousel did not go out. The wait before the
-        // re-read is also the fix: by then the keyboard has retracted, which is why the
-        // second tap lands where the first did not.
-        if !self.await_feed(POST_CONFIRM_WINDOW).await
-            && self.post_screen_untouched(caption, query).await
-        {
-            let Some(again) = self
-                .await_condition(COMPOSER_WINDOW, query, stop, |_| true)
-                .await?
-            else {
-                return Ok(ComposerVerdict::PostNotConfirmed);
-            };
-            if self.tap_inside(&again).await.is_err() {
-                return Ok(ComposerVerdict::PostNotConfirmed);
-            }
         }
         // **Deliberately not passing `stop`.** Cancelling cannot un-publish, and a stop set
         // here would end the wait early and downgrade a good post to `PostNotConfirmed`,
@@ -1428,40 +1418,6 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
         } else {
             ComposerVerdict::PostNotConfirmed
         })
-    }
-
-    /// Whether the post screen is still exactly as it was before the Post tap — which is
-    /// the proof that nothing was published.
-    ///
-    /// TikTok leaves this screen the instant a post commits, so two things still being on
-    /// it says the tap did not land: the Post button, and — when this run wrote one — the
-    /// caption field still holding **this run's** caption, compared for equality on exactly
-    /// one node, the same rule [`Self::type_caption`]'s readback settled on and for the same
-    /// reason (a placeholder that merely starts with the right words must not count).
-    ///
-    /// An empty caption leaves only the button to go on, and that is said plainly rather
-    /// than papered over: nothing was typed, so there is nothing to recognise the screen by
-    /// beyond the control itself.
-    async fn post_screen_untouched(&self, caption: &str, post_button: ElementQuery<'_>) -> bool {
-        if !matches!(self.session.locate(post_button).await, Ok(Some(_))) {
-            return false;
-        }
-        let wanted = caption.trim();
-        if wanted.is_empty() {
-            return true;
-        }
-        let Some(field) = self.plan.publish.map(|tail| tail.caption) else {
-            return false;
-        };
-        let rows = self
-            .session
-            .locate_all_described(field)
-            .await
-            .unwrap_or_default();
-        matches!(rows.as_slice(), [only] if only
-            .description
-            .as_deref()
-            .is_some_and(|text| text.trim() == wanted))
     }
 
     /// Back out until the bottom tab bar is visible again.
@@ -1620,6 +1576,68 @@ pub struct CarouselRequest<'a> {
     pub screen: Screen,
 }
 
+/// One measured MP4 selection: an exact import album, one video, and its later caption.
+///
+/// Video deliberately has its own request instead of passing `images = 1` through
+/// [`CarouselRequest`]. The picker gestures currently match, but their measurement and
+/// readiness do not: a build whose photo grid is known must not silently inherit video support.
+pub struct VideoRequest<'a> {
+    /// The `importId` whose MediaStore album contains exactly one verified video row.
+    pub album: &'a str,
+    /// The bundle's caption, verbatim. Empty is allowed and types nothing.
+    pub caption: &'a str,
+    pub screen: Screen,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VideoPickerPlan {
+    provenance: &'static str,
+}
+
+impl VideoPickerPlan {
+    /// Resolve only tuples whose one-video album was observed through the editor boundary.
+    ///
+    /// The initial measurement selected the isolated MediaStore album on canary
+    /// `9889db374744474635`, reached the video editor, and stopped before editor Next, sound,
+    /// caption and Post. Back did not fully leave that editor, so the trip force-stopped
+    /// TikTok and read back both process absence and exact MediaStore cleanup.
+    pub fn resolve(package: &str, language: &str, version: &str) -> Option<Self> {
+        (package == "com.ss.android.ugc.trill" && language == "en" && version == "38.3.2")
+            .then_some(Self {
+                provenance: "SM-G955F 9889db374744474635 / Android 9 / trill 38.3.2 en / one MP4 album -> editor / 05-09-2026",
+            })
+    }
+
+    pub const fn provenance(self) -> &'static str {
+        self.provenance
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PickerSelection<'a> {
+    album: &'a str,
+    count: usize,
+    screen: Screen,
+}
+
+impl<'a> PickerSelection<'a> {
+    fn carousel(request: &'a CarouselRequest<'_>) -> Self {
+        Self {
+            album: request.album,
+            count: request.images,
+            screen: request.screen,
+        }
+    }
+
+    fn video(request: &'a VideoRequest<'_>) -> Self {
+        Self {
+            album: request.album,
+            count: 1,
+            screen: request.screen,
+        }
+    }
+}
+
 /// Drive one carousel from the feed to published, and close the composer behind it.
 ///
 /// **Refuses before the first tap** on a build whose Post button was never measured. That
@@ -1678,6 +1696,125 @@ where
     outcome
 }
 
+/// Publish a carousel after choosing one bounded, seed-stable sound from TikTok's visible
+/// recommendation panel.
+///
+/// Sound selection happens on the edit step, between media selection and caption entry. The
+/// candidate pool is read from hierarchy rows on that screen, the chosen row is tapped once,
+/// and the editor title must read back exactly before this function advances. Unknown builds
+/// never receive their first composer tap because the caller cannot construct a plan for them.
+#[allow(clippy::too_many_arguments)] // The public boundary mirrors the measured composer inputs.
+pub async fn publish_carousel_with_sound_effect_intent<F>(
+    session: &dyn UiSession,
+    plan: ComposerPlan,
+    sound_plan: SoundPickerPlan,
+    sound_policy: &PublishSoundPolicy,
+    plan_tap: impl TapPlanner,
+    request: &CarouselRequest<'_>,
+    stop: &AtomicBool,
+    before_post: F,
+) -> anyhow::Result<(ComposerVerdict, Option<SoundSelectionEvidence>)>
+where
+    F: FnMut(&SoundSelectionEvidence) -> anyhow::Result<()>,
+{
+    publish_selected_media_with_sound_effect_intent(
+        session,
+        plan,
+        sound_plan,
+        sound_policy,
+        plan_tap,
+        PickerSelection::carousel(request),
+        request.caption,
+        stop,
+        before_post,
+    )
+    .await
+}
+
+/// Publish one MP4 through a picker tuple measured independently from the carousel path.
+///
+/// [`VideoPickerPlan`] is deliberately required even though the measured picker gestures are
+/// currently the same as a one-item multi-select. This prevents a photo-ready TikTok build
+/// from acquiring video support by implication. Sound selection, its final readback and the
+/// Post effect boundary all remain in the same [`Composer`] instance.
+#[allow(clippy::too_many_arguments)]
+pub async fn publish_video_with_sound_effect_intent<F>(
+    session: &dyn UiSession,
+    plan: ComposerPlan,
+    video_plan: VideoPickerPlan,
+    sound_plan: SoundPickerPlan,
+    sound_policy: &PublishSoundPolicy,
+    plan_tap: impl TapPlanner,
+    request: &VideoRequest<'_>,
+    stop: &AtomicBool,
+    before_post: F,
+) -> anyhow::Result<(ComposerVerdict, Option<SoundSelectionEvidence>)>
+where
+    F: FnMut(&SoundSelectionEvidence) -> anyhow::Result<()>,
+{
+    let _measured_video_tuple = video_plan.provenance();
+    publish_selected_media_with_sound_effect_intent(
+        session,
+        plan,
+        sound_plan,
+        sound_policy,
+        plan_tap,
+        PickerSelection::video(request),
+        request.caption,
+        stop,
+        before_post,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn publish_selected_media_with_sound_effect_intent<P, F>(
+    session: &dyn UiSession,
+    plan: ComposerPlan,
+    sound_plan: SoundPickerPlan,
+    sound_policy: &PublishSoundPolicy,
+    plan_tap: P,
+    requested_media: PickerSelection<'_>,
+    caption: &str,
+    stop: &AtomicBool,
+    mut before_post: F,
+) -> anyhow::Result<(ComposerVerdict, Option<SoundSelectionEvidence>)>
+where
+    P: TapPlanner,
+    F: FnMut(&SoundSelectionEvidence) -> anyhow::Result<()>,
+{
+    if !plan.can_publish() {
+        return Ok((ComposerVerdict::PostUnmeasured, None));
+    }
+    let mut composer = Composer::new(session, plan, plan_tap);
+    let outcome = async {
+        match reach_selected_media_edit_step(&mut composer, requested_media, stop).await? {
+            ComposerVerdict::Stopped => {}
+            refusal => return Ok((refusal, None)),
+        }
+        let visible_pool = sound_policy.pool_size()?.min(5);
+        let pool = open_and_observe_sounds(session, sound_plan, visible_pool).await?;
+        let mut selection = select_sound_candidate(sound_policy, &pool.candidates)?;
+        choose_and_confirm_sound(session, sound_plan, &pool, selection.index).await?;
+        selection.confirmed = true;
+        composer.pending_sound_proof = Some((sound_plan, selection.title.clone()));
+        let mut record_selected_sound = || before_post(&selection);
+        let verdict = continue_from_edit_step_with_effect_intent(
+            &mut composer,
+            caption,
+            stop,
+            &mut record_selected_sound,
+        )
+        .await?;
+        Ok((verdict, Some(selection)))
+    }
+    .await;
+    if !matches!(outcome, Ok((ComposerVerdict::PostNotConfirmed, _))) {
+        composer.leave().await;
+    }
+    outcome
+}
+
 /// Drive as far as the edit step and stop there, publishing nothing.
 ///
 /// **The instrument for the measurement that is still missing.** `ComposerNext` and
@@ -1720,6 +1857,58 @@ pub async fn reach_edit_step<P: TapPlanner>(
     drive(composer, request, stop, false).await
 }
 
+/// Drive one measured video album to its editor and stop before editor Next.
+///
+/// This is the non-public measurement boundary used by the Android scout. The required
+/// [`VideoPickerPlan`] prevents the tool from projecting the canary's video behavior onto an
+/// otherwise photo-ready build.
+pub async fn reach_video_edit_step<P: TapPlanner>(
+    composer: &mut Composer<'_, P>,
+    video_plan: VideoPickerPlan,
+    request: &VideoRequest<'_>,
+    stop: &AtomicBool,
+) -> anyhow::Result<ComposerVerdict> {
+    let _measured_video_tuple = video_plan.provenance();
+    reach_selected_media_edit_step(composer, PickerSelection::video(request), stop).await
+}
+
+/// Continue a measured carousel from its edit step to Post.
+///
+/// The Android publish adapter pauses on the edit step to open TikTok's sound picker, bind a
+/// selected row to its title/artist evidence, and read that title back. Re-running the whole
+/// carousel after that would discard the selected sound and repeat every media-selection tap.
+/// This continuation keeps the same screen and retains the same effect boundary as
+/// [`publish_carousel_with_effect_intent`].
+///
+/// The caller owns [`Composer::leave`] on every pre-effect outcome. It must leave an
+/// unconfirmed post screen untouched so an operator can reconcile the public/private sheet.
+pub async fn continue_from_edit_step_with_effect_intent<P, F>(
+    composer: &mut Composer<'_, P>,
+    caption: &str,
+    stop: &AtomicBool,
+    before_post: &mut F,
+) -> anyhow::Result<ComposerVerdict>
+where
+    P: TapPlanner,
+    F: FnMut() -> anyhow::Result<()>,
+{
+    if !composer.plan.can_publish() {
+        return Ok(ComposerVerdict::PostUnmeasured);
+    }
+    if !composer.advance_to_post_screen(stop).await? {
+        return Ok(ComposerVerdict::PostScreenDidNotOpen);
+    }
+    match composer.type_caption(caption, stop).await? {
+        CaptionOutcome::Typed | CaptionOutcome::NothingToSay => {}
+        CaptionOutcome::Unmeasured => return Ok(ComposerVerdict::PostUnmeasured),
+        CaptionOutcome::NoField => return Ok(ComposerVerdict::NoCaptionField),
+        CaptionOutcome::NotConfirmed => return Ok(ComposerVerdict::CaptionNotConfirmed),
+    }
+    composer
+        .post_with_effect_intent(caption, stop, before_post)
+        .await
+}
+
 /// Open the composer and enter the gallery — the two taps that stand a phone on its
 /// picker — and stop there, for the trip that reads the picker's own labels.
 ///
@@ -1757,6 +1946,14 @@ pub async fn enter_picker_for_measuring<P: TapPlanner>(
 pub async fn reach_picker<P: TapPlanner>(
     composer: &mut Composer<'_, P>,
     request: &CarouselRequest<'_>,
+    stop: &AtomicBool,
+) -> anyhow::Result<ComposerVerdict> {
+    reach_picker_for_media(composer, PickerSelection::carousel(request), stop).await
+}
+
+async fn reach_picker_for_media<P: TapPlanner>(
+    composer: &mut Composer<'_, P>,
+    request: PickerSelection<'_>,
     stop: &AtomicBool,
 ) -> anyhow::Result<ComposerVerdict> {
     if !composer.open(stop).await? {
@@ -1802,7 +1999,33 @@ where
     P: TapPlanner,
     F: FnMut() -> anyhow::Result<()>,
 {
-    match reach_picker(composer, request, stop).await? {
+    match reach_selected_edit_step(composer, request, stop).await? {
+        ComposerVerdict::Stopped => {}
+        refusal => return Ok(refusal),
+    }
+    if !publish {
+        // The measuring path stops here, on the screen it came to read.
+        return Ok(ComposerVerdict::Stopped);
+    }
+    continue_from_edit_step_with_effect_intent(composer, request.caption, stop, before_post).await
+}
+
+/// Select the campaign media and stop on the editor. `Stopped` is the success value because
+/// no public effect exists at this point; every other variant names the exact refusal.
+async fn reach_selected_edit_step<P: TapPlanner>(
+    composer: &mut Composer<'_, P>,
+    request: &CarouselRequest<'_>,
+    stop: &AtomicBool,
+) -> anyhow::Result<ComposerVerdict> {
+    reach_selected_media_edit_step(composer, PickerSelection::carousel(request), stop).await
+}
+
+async fn reach_selected_media_edit_step<P: TapPlanner>(
+    composer: &mut Composer<'_, P>,
+    request: PickerSelection<'_>,
+    stop: &AtomicBool,
+) -> anyhow::Result<ComposerVerdict> {
+    match reach_picker_for_media(composer, request, stop).await? {
         ComposerVerdict::Stopped => {}
         refusal => return Ok(refusal),
     }
@@ -1817,7 +2040,7 @@ where
     let Some(grid) = composer.grid(request.screen, stop).await? else {
         return Ok(ComposerVerdict::NoTabsToAnchorTo);
     };
-    let next = match composer.select(&grid, request.images, stop).await? {
+    let next = match composer.select(&grid, request.count, stop).await? {
         // **A stated count is believed, and a mismatch stops the run.** `Next` arming proves
         // only that *something* is selected; a build that also renders the number is the one
         // chance to prove the rest, and taking it is the difference between publishing five
@@ -1825,7 +2048,7 @@ where
         Selection::Armed {
             counted: Some(counted),
             ..
-        } if counted != request.images => return Ok(ComposerVerdict::NotEnoughSelected),
+        } if counted != request.count => return Ok(ComposerVerdict::NotEnoughSelected),
         Selection::Armed { next, .. } => next,
         Selection::MoreCellsThanTheGridShows => {
             return Ok(ComposerVerdict::MoreCellsThanTheGridShows)
@@ -1837,24 +2060,7 @@ where
     if !composer.advance_to_edit_step(&next, stop).await? {
         return Ok(ComposerVerdict::EditStepDidNotOpen);
     }
-    if !publish {
-        // The measuring path stops here, on the screen it came to read.
-        return Ok(ComposerVerdict::Stopped);
-    }
-    if !composer.advance_to_post_screen(stop).await? {
-        return Ok(ComposerVerdict::PostScreenDidNotOpen);
-    }
-    // **Before Post, and its failures stop the run.** A carousel that goes out with the wrong
-    // caption — or none — cannot be corrected from here.
-    match composer.type_caption(request.caption, stop).await? {
-        CaptionOutcome::Typed | CaptionOutcome::NothingToSay => {}
-        CaptionOutcome::Unmeasured => return Ok(ComposerVerdict::PostUnmeasured),
-        CaptionOutcome::NoField => return Ok(ComposerVerdict::NoCaptionField),
-        CaptionOutcome::NotConfirmed => return Ok(ComposerVerdict::CaptionNotConfirmed),
-    }
-    composer
-        .post_with_effect_intent(request.caption, stop, before_post)
-        .await
+    Ok(ComposerVerdict::Stopped)
 }
 
 /// Sleep unless the caller has asked to stop.
@@ -1889,6 +2095,44 @@ mod tests {
     fn measuring_plan() -> ComposerPlan {
         ComposerPlan::resolve(&every_publish_control_but_post_measured())
             .expect("everything up to the edit step is measured")
+    }
+
+    #[test]
+    fn selected_sound_is_reproved_after_caption_and_before_the_post_boundary() {
+        let source = include_str!("tiktok_composer.rs");
+        let start = source
+            .find("async fn post_with_effect_intent")
+            .expect("effect-aware Post routine");
+        let end = source[start..]
+            .find("\n    }\n\n    /// Back out until")
+            .map(|offset| start + offset)
+            .expect("Post routine boundary");
+        let body = &source[start..end];
+        let button = body
+            .find("await_condition(COMPOSER_WINDOW, query")
+            .expect("initial Post locator");
+        let sound = body
+            .find("confirm_sound(self.session")
+            .expect("final sound readback");
+        let refreshed_button = body[sound..]
+            .find("self.session.locate_all(query)")
+            .map(|offset| sound + offset)
+            .expect("post rectangle refresh");
+        let boundary = body.find("before_post()?").expect("write-ahead boundary");
+        let post = body.find("self.tap_inside(&button)").expect("Post gesture");
+        assert!(button < sound && sound < refreshed_button);
+        assert!(refreshed_button < boundary && boundary < post);
+        assert_eq!(
+            body.matches("self.tap_inside(&button)").count(),
+            1,
+            "nothing after the effect-intent boundary may retry Post"
+        );
+
+        let wrapper = &source[start..];
+        assert!(wrapper.contains(
+            "composer.pending_sound_proof = Some((sound_plan, selection.title.clone()))"
+        ));
+        assert!(wrapper.contains("before_post(&selection)"));
     }
 
     fn screen() -> Screen {
@@ -2535,6 +2779,51 @@ mod tests {
         );
     }
 
+    #[test]
+    fn video_picker_readiness_is_exactly_the_live_measured_tuple() {
+        let measured = VideoPickerPlan::resolve("com.ss.android.ugc.trill", "en", "38.3.2")
+            .expect("the canary MP4 reached its editor");
+        assert!(measured.provenance().contains("9889db374744474635"));
+        for (package, language, version) in [
+            ("com.ss.android.ugc.trill", "vi", "38.3.2"),
+            ("com.ss.android.ugc.trill", "en", "38.3.3"),
+            ("com.zhiliaoapp.musically", "en", "46.2.1"),
+        ] {
+            assert!(
+                VideoPickerPlan::resolve(package, language, version).is_none(),
+                "an unmeasured tuple inherited the canary's video picker"
+            );
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn measured_video_selects_exactly_one_cell_and_stops_on_the_editor() {
+        let session = FakeSession::full_walk("riviu-video");
+        let request = VideoRequest {
+            album: "riviu-video",
+            caption: "fixture video",
+            screen: screen(),
+        };
+        let stop = AtomicBool::new(false);
+        let mut composer = Composer::new(&session, plan(), |element: &ElementBox| element.centre());
+        let video_plan = VideoPickerPlan::resolve("com.ss.android.ugc.trill", "en", "38.3.2")
+            .expect("measured video tuple");
+
+        assert_eq!(
+            reach_video_edit_step(&mut composer, video_plan, &request, &stop)
+                .await
+                .expect("no transport error"),
+            ComposerVerdict::Stopped
+        );
+        assert_eq!(session.on_screen(), 7, "the video editor, before its Next");
+        assert_eq!(post_button_taps(&session), 0, "the scout cannot reach Post");
+        assert_eq!(
+            session.taps.lock().len(),
+            7,
+            "Create, gallery, album menu, album row, multi-select, one cell, picker Next"
+        );
+    }
+
     /// **The fleet's real labels walk to the edit step and STOP, tail measured or not.**
     ///
     /// Every other walk test runs on a fixture set. This one runs on
@@ -2585,16 +2874,18 @@ mod tests {
             scene(elements, exit).texted(":id/snr", album)
         };
         let shutter = labelled("Record video", 375.0, 1545.0, 330.0, 330.0);
-        let entry = GalleryEntry::beside_shutter(screen(), &shutter)
-            .expect("the measured entry is on screen")
-            .rect();
+        let entry = labelled("", 770.0, 1635.0, 210.0, 210.0);
         let session = FakeSession::with(vec![
             scene(
                 vec![("Create", labelled("Create", 432.0, 1929.0, 216.0, 147.0))],
                 Some("Create"),
             ),
             // Only a tap inside the gallery entry leaves the camera.
-            scene(vec![("Record video", shutter)], None).leaving_by(entry),
+            scene(
+                vec![("Record video", shutter), (":id/bos", entry.clone())],
+                None,
+            )
+            .leaving_by(entry),
             picker_real("All", Some(":id/snr"), None),
             picker_real("All", None, None).leaving_by(box_at(0.0, 400.0)),
             picker_real("riviu-abc", Some("Select multiple"), None),
@@ -3164,6 +3455,37 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn changed_sound_stops_before_effect_intent_and_post() {
+        let session = FakeSession::with(vec![post_screen().texted(":id/so9", "Sound B")]);
+        let stop = AtomicBool::new(false);
+        let intent_calls = std::sync::atomic::AtomicUsize::new(0);
+        let mut composer = Composer::new(&session, plan(), |element: &ElementBox| element.centre());
+        composer.pending_sound_proof = Some((
+            SoundPickerPlan::resolve("com.ss.android.ugc.trill", "en", "38.3.2")
+                .expect("the canary sound picker is measured"),
+            "Sound A".to_string(),
+        ));
+
+        let error = composer
+            .post_with_effect_intent("", &stop, &mut || {
+                intent_calls.fetch_add(1, Ordering::Relaxed);
+                Ok(())
+            })
+            .await
+            .expect_err("a changed sound must fail closed");
+
+        assert!(error
+            .to_string()
+            .contains("selected sound was not confirmed"));
+        assert_eq!(intent_calls.load(Ordering::Relaxed), 0);
+        assert_eq!(
+            post_button_taps(&session),
+            0,
+            "sound mismatch must be detected before the write-ahead boundary and Post gesture"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn effect_intent_failure_happens_before_post_and_keeps_the_attempt_retryable() {
         let session = FakeSession::full_walk("riviu-abc");
         let request = CarouselRequest {
@@ -3192,7 +3514,7 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn effect_intent_is_one_shot_even_when_a_proven_missed_tap_is_retried() {
+    async fn effect_intent_and_post_are_one_shot_when_the_first_tap_is_not_confirmed() {
         let session = FakeSession::with(vec![
             feed(),
             camera(),
@@ -3234,27 +3556,28 @@ mod tests {
             )
             .await
             .expect("no transport error"),
-            ComposerVerdict::Posted
+            ComposerVerdict::PostNotConfirmed
         );
         assert_eq!(intent_calls.load(Ordering::Relaxed), 1);
         assert_eq!(
             post_button_taps(&session),
-            2,
-            "one proven missed tap was retried"
+            1,
+            "the write-ahead boundary permits exactly one Post gesture"
         );
     }
 
-    /// **A Post tap that did not land is pressed again; one that did is never pressed twice.**
+    /// **A Post tap that is not confirmed is never pressed again.**
     ///
     /// Measured 31/08/2026 (§9.136): the first run that ever typed a caption had its Post
     /// tap swallowed by the soft keyboard, which the hierarchy does not mention — the
     /// button's rectangle is reported whether or not a keyboard is drawn over it.
     ///
     /// The fixture models the phone exactly as it behaved: the screen after the missed tap
-    /// is **indistinguishable** from the screen before it — same Post button, same caption
-    /// still in the field — which is what makes the retry's proof both necessary and sound.
+    /// is indistinguishable from the screen before it. That visual state does not prove the
+    /// gesture never reached a confirmation overlay or server, so the effect boundary owns
+    /// one tap and returns `PostNotConfirmed` for reconciliation.
     #[tokio::test(start_paused = true)]
-    async fn a_post_tap_that_did_not_land_is_retried_against_proof() {
+    async fn a_post_tap_that_did_not_land_is_not_retried_after_the_effect_boundary() {
         let session = FakeSession::with(vec![
             feed(),
             camera(),
@@ -3287,14 +3610,13 @@ mod tests {
             )
             .await
             .expect("no transport error"),
-            ComposerVerdict::Posted,
-            "a swallowed first tap must not settle as PostNotConfirmed — that state is \
-             permanently unclaimable"
+            ComposerVerdict::PostNotConfirmed,
+            "an unchanged screen after the effect boundary is uncertain"
         );
         assert_eq!(
             post_button_taps(&session),
-            2,
-            "exactly one retry, against the proof that the first tap published nothing"
+            1,
+            "no observation after the effect boundary may dispatch Post again"
         );
     }
 

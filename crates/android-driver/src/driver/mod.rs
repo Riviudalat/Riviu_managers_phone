@@ -711,6 +711,21 @@ fn device_spec_from_probe(probe: &str) -> anyhow::Result<AndroidInstallDeviceSpe
     })
 }
 
+fn parse_available_storage_bytes(output: &str) -> anyhow::Result<u64> {
+    let available_kib = output
+        .lines()
+        .skip(1)
+        .filter_map(|line| {
+            let fields = line.split_whitespace().collect::<Vec<_>>();
+            (fields.len() >= 4).then(|| fields[3])
+        })
+        .find_map(|value| value.parse::<u64>().ok())
+        .ok_or_else(|| anyhow::anyhow!("adb df did not report available storage"))?;
+    available_kib
+        .checked_mul(1024)
+        .ok_or_else(|| anyhow::anyhow!("adb df available storage overflowed bytes"))
+}
+
 pub struct AndroidDriver {
     adb: AdbProgram,
     adb_origin: adb::AdbOrigin,
@@ -922,6 +937,11 @@ impl AndroidDriver {
             .map(|out| out.trim().to_string())
             .unwrap_or_default();
         Ok((package, version, locale))
+    }
+
+    async fn available_storage_bytes_for(&self, serial: &str) -> anyhow::Result<u64> {
+        let output = self.adb.shell(serial, "df -k /data/local/tmp").await?;
+        parse_available_storage_bytes(&output)
     }
 
     /// Build around an `adb` that has already been chosen.
@@ -2023,6 +2043,10 @@ impl DeviceDriver for AndroidDriver {
     /// phone's real (package, version, locale) instead of on the package alone.
     async fn tiktok_build(&self, udid: &str) -> anyhow::Result<(String, String, String)> {
         AndroidDriver::tiktok_build(self, udid).await
+    }
+
+    async fn available_storage_bytes(&self, udid: &str) -> anyhow::Result<u64> {
+        self.available_storage_bytes_for(udid).await
     }
 
     async fn resolve_tiktok_package(&self, udid: &str) -> anyhow::Result<String> {
@@ -3224,6 +3248,17 @@ mod tests {
                 battery: None,
             }
         );
+    }
+
+    #[test]
+    fn android_df_reports_available_bytes_from_the_usage_column() {
+        let output = "Filesystem 1K-blocks Used Available Use% Mounted on\n\
+/dev/block/dm-8 57683632 123456 48234432 1% /data\n";
+        assert_eq!(
+            parse_available_storage_bytes(output).expect("parse df"),
+            48_234_432 * 1024
+        );
+        assert!(parse_available_storage_bytes("Filesystem unavailable").is_err());
     }
 
     #[tokio::test]

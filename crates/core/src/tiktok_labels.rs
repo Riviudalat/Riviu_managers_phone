@@ -884,7 +884,15 @@ pub const TIKTOK_RESOURCE_SETS: &[TikTokResourceLabels] = &[
         // publish empty. See the field's doc on this struct.
         composer_caption: Some(LabelMatch::ResourceId(":id/eej")),
         composer_shutter: None,
-        gallery_entry: None,
+        // Re-measured on the canary SM-G955F `9889db374744474635`, Android 9,
+        // 05/09/2026. `probe --measure-gallery 0` anchored on the rendered
+        // `Record video` shutter and found exactly one clickable candidate to its right:
+        // `FrameLayout …:id/bos [770,1635][980,1845]`. Tapping it produced the picker
+        // (`All / Videos / Photos / Select multiple / Next`), then the probe backed to the
+        // feed and force-stopped TikTok with `ProcessAbsenceProof`. The id therefore names
+        // the gallery entry on this exact build; using it also removes the need to borrow
+        // the older phone's arithmetic rectangle.
+        gallery_entry: Some(LabelMatch::ResourceId(":id/bos")),
         // `ImageView …:id/cover`, six on the first screenful, e.g. [0,1270][358,1747] —
         // no `text`, no `content-desc`, which is why this is an id and lives here.
         // Measured 31/08/2026 on ce051715ac247a3f01 (`share_scout`, M7 trip, §9.136).

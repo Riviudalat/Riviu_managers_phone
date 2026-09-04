@@ -36,8 +36,9 @@ use std::sync::atomic::AtomicBool;
 use riviu_android_driver::AndroidDriver;
 use riviu_core::driver::{DeviceDriver, UiSession};
 use riviu_core::tiktok_composer::{
-    enter_picker_for_measuring, reach_edit_step, reach_picker, CarouselRequest, Composer,
-    ComposerPlan, ComposerVerdict, Screen, REQUIRED_TO_PUBLISH,
+    enter_picker_for_measuring, reach_edit_step, reach_picker, reach_video_edit_step,
+    CarouselRequest, Composer, ComposerPlan, ComposerVerdict, Screen, VideoPickerPlan,
+    VideoRequest, REQUIRED_TO_PUBLISH,
 };
 use riviu_core::tiktok_labels::{controls_for, TikTokControl, TikTokControls};
 
@@ -48,6 +49,34 @@ fn say(line: &str) {
     use std::io::Write;
     println!("{line}");
     let _ = std::io::stdout().flush();
+}
+
+async fn force_stop_and_confirm(
+    driver: &AndroidDriver,
+    serial: &str,
+    package: &str,
+) -> anyhow::Result<()> {
+    let first = driver.terminate_app(serial, package).await?;
+    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    let mut after = driver.inspect_app_process(serial, package).await?;
+    if after.running {
+        // Observed on the video-editor scout: the first force-stop proved PID 13794 absent,
+        // then the still-open automation session caused TikTok to appear as PID 17793. A
+        // second force-stop plus delayed readback closes that lifecycle race.
+        driver.terminate_app(serial, package).await?;
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        after = driver.inspect_app_process(serial, package).await?;
+    }
+    anyhow::ensure!(
+        !after.running,
+        "{package} tự chạy lại sau force-stop; PID hiện tại {:?}",
+        after.pid
+    );
+    say(&format!(
+        "\nđã force-stop TikTok và kiểm tra PID vắng (PID cũ {:?}) — không Post",
+        first.old_pid
+    ));
+    Ok(())
 }
 
 /// Every `content-desc`, `text` and `resource-id` on the screen, with its bounds.
@@ -166,7 +195,10 @@ fn how_many_images(args: &[String]) -> Result<usize, String> {
 const KNOWN_FLAGS: &[&str] = &[
     "--album",
     "--images",
+    "--video",
     "--visit-caption-step",
+    "--dump-sound-picker",
+    "--sound-entry-id",
     "--peek-multi-select",
     "--dump-picker",
     "--dump-exit-menu",
@@ -203,7 +235,7 @@ async fn main() -> anyhow::Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let Some(serial) = args.first().filter(|arg| !arg.starts_with("--")) else {
         return Err(refuse_usage(
-            "usage: composer_scout <serial> --album \"<tên album>\" [--images 3] [--visit-caption-step]",
+            "usage: composer_scout <serial> --album \"<tên album>\" [--images 3 | --video] [--visit-caption-step]",
         ));
     };
     if let Err(complaint) = refuse_unknown_flags(&args) {
@@ -225,14 +257,50 @@ async fn main() -> anyhow::Result<()> {
             ));
         }
     };
-    let images = match how_many_images(&args) {
-        Ok(images) => images,
+    let video = match switch(&args, "--video") {
+        Ok(on) => on,
         Err(complaint) => return Err(refuse_usage(&complaint)),
+    };
+    if video && !matches!(flag_value(&args, "--images"), Flag::Absent) {
+        return Err(refuse_usage(
+            "--video luôn chọn đúng một MP4; không đi cùng --images",
+        ));
+    }
+    let images = if video {
+        1
+    } else {
+        match how_many_images(&args) {
+            Ok(images) => images,
+            Err(complaint) => return Err(refuse_usage(&complaint)),
+        }
     };
     let visit_caption_step = match switch(&args, "--visit-caption-step") {
         Ok(on) => on,
         Err(complaint) => return Err(refuse_usage(&complaint)),
     };
+    let dump_sound_picker = match switch(&args, "--dump-sound-picker") {
+        Ok(on) => on,
+        Err(complaint) => return Err(refuse_usage(&complaint)),
+    };
+    let sound_entry_id = match flag_value(&args, "--sound-entry-id") {
+        Flag::Value(value) => Some(value),
+        Flag::Absent => None,
+        Flag::Unusable => {
+            return Err(refuse_usage(
+                "--sound-entry-id cần suffix resource-id đọc từ dump bước chỉnh sửa",
+            ));
+        }
+        Flag::Repeated => {
+            return Err(refuse_usage(
+                "--sound-entry-id xuất hiện nhiều lần — không đoán lần nào là thật",
+            ));
+        }
+    };
+    if dump_sound_picker != sound_entry_id.is_some() {
+        return Err(refuse_usage(
+            "--dump-sound-picker và --sound-entry-id phải đi cùng nhau",
+        ));
+    }
     let peek_multi_select = match switch(&args, "--peek-multi-select") {
         Ok(on) => on,
         Err(complaint) => return Err(refuse_usage(&complaint)),
@@ -248,6 +316,7 @@ async fn main() -> anyhow::Result<()> {
     if [
         peek_multi_select,
         visit_caption_step,
+        dump_sound_picker,
         dump_picker,
         dump_exit_menu,
     ]
@@ -261,6 +330,11 @@ async fn main() -> anyhow::Result<()> {
              là những chuyến khác nhau — chạy từng cái một",
         ));
     }
+    if video && (peek_multi_select || dump_picker || visit_caption_step || dump_sound_picker) {
+        return Err(refuse_usage(
+            "--video chỉ đo tới editor (có thể đi cùng --dump-exit-menu); không mở caption, sound hay chuyến picker khác",
+        ));
+    }
 
     let driver = AndroidDriver::new(&common::repo_config())?;
     let package = driver.resolve_tiktok_package(serial).await?;
@@ -268,7 +342,8 @@ async fn main() -> anyhow::Result<()> {
     let language = session.ui_language().await.unwrap_or_default();
     let version = session.app_version(&package).await.unwrap_or_default();
     say(&format!(
-        "serial   {serial}\npackage  {package}\nlanguage {language}\nversion  {version}\nalbum    {album:?}\nimages   {images}\n"
+        "serial   {serial}\npackage  {package}\nlanguage {language}\nversion  {version}\nalbum    {album:?}\nmedia    {}\ncount    {images}\n",
+        if video { "video" } else { "images" }
     ));
 
     let Some(labels) = controls_for(&package, &language, &version) else {
@@ -337,6 +412,7 @@ async fn main() -> anyhow::Result<()> {
             });
         }
         let out = composer.leave().await;
+        let stopped = force_stop_and_confirm(&driver, serial, &package).await;
         say(&format!(
             "\nlùi về feed: {}",
             if out {
@@ -350,6 +426,7 @@ async fn main() -> anyhow::Result<()> {
             out,
             "không lùi được về feed sau chuyến đo picker — kiểm tra máy"
         );
+        stopped?;
         if let Some(reason) = trip_failure {
             anyhow::bail!("chuyến đo picker không trọn: {reason}");
         }
@@ -368,6 +445,17 @@ async fn main() -> anyhow::Result<()> {
             say(&format!("\nkhông đi được tới bước chỉnh sửa: {refusal}"));
             anyhow::bail!("thiếu nhãn để tới bước chỉnh sửa: {refusal}");
         }
+    };
+    let video_plan = if video {
+        Some(
+            VideoPickerPlan::resolve(&package, &language, &version).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "video picker chưa đo cho ({package}, {language}, {version}); không mở composer"
+                )
+            })?,
+        )
+    } else {
+        None
     };
 
     driver.launch_app(serial, &package).await?;
@@ -437,6 +525,7 @@ async fn main() -> anyhow::Result<()> {
             });
         }
         let out = composer.leave().await;
+        let stopped = force_stop_and_confirm(&driver, serial, &package).await;
         say(&format!(
             "\nlùi về feed: {}",
             if out {
@@ -447,13 +536,23 @@ async fn main() -> anyhow::Result<()> {
         ));
         arrived?;
         anyhow::ensure!(out, "không lùi được về feed sau chuyến peek — kiểm tra máy");
+        stopped?;
         if let Some(reason) = trip_failure {
             anyhow::bail!("chuyến peek không trọn: {reason}");
         }
         return Ok(());
     }
 
-    let verdict = reach_edit_step(&mut composer, &request, &stop).await;
+    let verdict = if let Some(video_plan) = video_plan {
+        let video_request = VideoRequest {
+            album: &album,
+            caption: "",
+            screen,
+        };
+        reach_video_edit_step(&mut composer, video_plan, &video_request, &stop).await
+    } else {
+        reach_edit_step(&mut composer, &request, &stop).await
+    };
     match &verdict {
         Ok(reached) => say(&format!("\nđi tới: {reached:?} — {}", reached.reason())),
         Err(error) => say(&format!("\nlỗi giữa đường: {error}")),
@@ -486,6 +585,66 @@ async fn main() -> anyhow::Result<()> {
     // vanish: the operator asked for this stage, and exiting 0 without it tells a script the
     // measurement happened.
     let mut peek_failure: Option<String> = None;
+    if dump_sound_picker {
+        let mut trip_failure: Option<String> = None;
+        if matches!(&verdict, Ok(ComposerVerdict::Stopped)) {
+            let suffix = sound_entry_id
+                .as_deref()
+                .expect("paired flag was validated");
+            match session
+                .locate(riviu_core::ElementQuery::ResourceIdSuffix(suffix))
+                .await
+            {
+                Ok(Some(entry)) if entry.enabled && entry.clickable => {
+                    if let Err(error) = session.tap(entry.centre()).await {
+                        trip_failure = Some(format!("không mở được sound picker: {error:#}"));
+                    } else {
+                        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                        say("\n--- sound picker (tool chỉ mở và đọc, không chọn nhạc) ---");
+                        match session.agent().source().await {
+                            Ok(source) => {
+                                let path = std::path::Path::new("target").join("sound-picker.xml");
+                                let _ = std::fs::create_dir_all("target");
+                                let _ = std::fs::write(&path, &source);
+                                dump_elements(&source);
+                                say(&format!("\n(XML đầy đủ: {})", path.display()));
+                            }
+                            Err(error) => {
+                                trip_failure =
+                                    Some(format!("không dump được sound picker: {error:#}"));
+                            }
+                        }
+                    }
+                }
+                Ok(Some(_)) => {
+                    trip_failure = Some(format!(
+                        "node sound {suffix:?} có mặt nhưng chưa enabled/clickable"
+                    ));
+                }
+                Ok(None) => {
+                    trip_failure = Some(format!("không thấy node sound {suffix:?}"));
+                }
+                Err(error) => {
+                    trip_failure = Some(format!("không đọc được node sound {suffix:?}: {error:#}"));
+                }
+            }
+        } else {
+            trip_failure = Some("chưa đứng ở bước chỉnh sửa nên không mở sound picker".to_string());
+        }
+        match force_stop_and_confirm(&driver, serial, &package).await {
+            Ok(()) => {}
+            Err(error) => {
+                say(&format!("\nforce-stop KHÔNG xác nhận được: {error:#}"));
+                trip_failure
+                    .get_or_insert_with(|| format!("force-stop không xác nhận được: {error:#}"));
+            }
+        }
+        verdict?;
+        if let Some(reason) = trip_failure {
+            anyhow::bail!("chuyến đo sound picker không trọn: {reason}");
+        }
+        return Ok(());
+    }
     if visit_caption_step {
         if matches!(&verdict, Ok(ComposerVerdict::Stopped)) {
             // `stop` is never set in this tool, so `Stopped` here can only be the measuring
@@ -529,8 +688,8 @@ async fn main() -> anyhow::Result<()> {
         } else {
             trip_failure = Some("chưa đứng ở bước chỉnh sửa nên không có menu để đo".to_string());
         }
-        match driver.terminate_app(serial, &package).await {
-            Ok(_proof) => say("\nđã force-stop TikTok (kill có kiểm chứng) — máy về launcher"),
+        match force_stop_and_confirm(&driver, serial, &package).await {
+            Ok(()) => {}
             Err(error) => {
                 say(&format!("\nforce-stop KHÔNG xác nhận được: {error:#}"));
                 trip_failure
@@ -546,6 +705,7 @@ async fn main() -> anyhow::Result<()> {
 
     // The caller owns the walk-back — see `reach_edit_step`.
     let out = composer.leave().await;
+    let stopped = force_stop_and_confirm(&driver, serial, &package).await;
     say(&format!(
         "\nlùi về feed: {}",
         if out {
@@ -555,6 +715,7 @@ async fn main() -> anyhow::Result<()> {
         }
     ));
     verdict?;
+    stopped?;
     // **Not backing out is a failure of this run**, even when the walk itself went fine. It
     // used to print the warning and exit 0, so a script saw success while the phone sat on the
     // edit step with a carousel selected — and the next thing to run started from there.

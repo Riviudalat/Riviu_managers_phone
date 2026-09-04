@@ -31,14 +31,72 @@ pub enum PublishTransferSettle<'a> {
     FailedBeforeDispatch { error_code: &'a str },
 }
 
+fn serialize_wire_enum(value: impl serde::Serialize) -> anyhow::Result<String> {
+    serde_json::to_value(value)?
+        .as_str()
+        .map(str::to_owned)
+        .context("publish enum did not serialize as a string")
+}
+
+fn deserialize_wire_enum<T: serde::de::DeserializeOwned>(value: &str) -> anyhow::Result<T> {
+    serde_json::from_value(serde_json::Value::String(value.to_owned())).map_err(anyhow::Error::from)
+}
+
+fn prepare_publish_execution_snapshot(
+    snapshot: &crate::publish_runtime::PublishExecutionSnapshotDraft,
+) -> anyhow::Result<(String, String, String, String)> {
+    anyhow::ensure!(
+        snapshot.input_digest.len() == 64
+            && snapshot
+                .input_digest
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)),
+        "publish execution input digest must be 64 lowercase hexadecimal characters"
+    );
+    anyhow::ensure!(
+        snapshot.report_json.is_object(),
+        "publish execution report must be a JSON object"
+    );
+    Ok((
+        snapshot.input_digest.clone(),
+        serialize_wire_enum(snapshot.status)?,
+        serialize_wire_enum(snapshot.retry_scope)?,
+        serde_json::to_string(&snapshot.report_json)?,
+    ))
+}
+
 impl Database {
     pub fn create_publish_campaign(
         &self,
         request: &crate::publish::PublishCampaignRequest,
         bundles: &[crate::publish::PublishBundle],
     ) -> anyhow::Result<crate::publish::PublishCampaignRecord> {
-        self.create_publish_campaign_with_id(&Uuid::new_v4().to_string(), request, bundles)
-            .map(|(record, _created)| record)
+        self.create_publish_campaign_with_id_and_snapshot(
+            &Uuid::new_v4().to_string(),
+            request,
+            bundles,
+            None,
+        )
+        .map(|(record, _created)| record)
+    }
+
+    /// Create a campaign and its first restart projection in the same SQLite transaction.
+    ///
+    /// This is the production command path after preflight. A projection failure therefore
+    /// cannot leave a queued campaign behind for a second button press to duplicate.
+    pub fn create_publish_campaign_with_snapshot(
+        &self,
+        request: &crate::publish::PublishCampaignRequest,
+        bundles: &[crate::publish::PublishBundle],
+        snapshot: &crate::publish_runtime::PublishExecutionSnapshotDraft,
+    ) -> anyhow::Result<crate::publish::PublishCampaignRecord> {
+        self.create_publish_campaign_with_id_and_snapshot(
+            &Uuid::new_v4().to_string(),
+            request,
+            bundles,
+            Some(snapshot),
+        )
+        .map(|(record, _created)| record)
     }
 
     /// Create the exact child ID persisted by orchestration, with an idempotent repeat that
@@ -48,6 +106,16 @@ impl Database {
         campaign_id: &str,
         request: &crate::publish::PublishCampaignRequest,
         bundles: &[crate::publish::PublishBundle],
+    ) -> anyhow::Result<(crate::publish::PublishCampaignRecord, bool)> {
+        self.create_publish_campaign_with_id_and_snapshot(campaign_id, request, bundles, None)
+    }
+
+    fn create_publish_campaign_with_id_and_snapshot(
+        &self,
+        campaign_id: &str,
+        request: &crate::publish::PublishCampaignRequest,
+        bundles: &[crate::publish::PublishBundle],
+        initial_snapshot: Option<&crate::publish_runtime::PublishExecutionSnapshotDraft>,
     ) -> anyhow::Result<(crate::publish::PublishCampaignRecord, bool)> {
         let assignments =
             crate::publish::validate_publish_mapping(&request.bundle_ids, &request.udids)
@@ -60,6 +128,9 @@ impl Database {
         {
             anyhow::bail!("selected bundle manifest does not match the campaign request");
         }
+        let prepared_snapshot = initial_snapshot
+            .map(prepare_publish_execution_snapshot)
+            .transpose()?;
 
         let mut conn = self.conn()?;
         let transaction = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -162,6 +233,21 @@ impl Database {
             "UPDATE publish_campaigns SET revision=1 WHERE id=?1",
             params![campaign_id],
         )?;
+        if let Some((input_digest, status, retry_scope, report_json)) = prepared_snapshot {
+            transaction.execute(
+                "INSERT INTO publish_execution_snapshots
+                 (campaign_id,input_digest,status,retry_scope,report_json,updated_at)
+                 VALUES (?1,?2,?3,?4,?5,?6)",
+                params![
+                    campaign_id,
+                    input_digest,
+                    status,
+                    retry_scope,
+                    report_json,
+                    now,
+                ],
+            )?;
+        }
         transaction.commit()?;
 
         Ok((
@@ -834,6 +920,95 @@ impl Database {
             .transpose()
     }
 
+    /// Replace the restart projection for one campaign with the latest typed outcome.
+    ///
+    /// The public enum strings are produced through serde rather than duplicated here. This
+    /// keeps SQLite, the command boundary and the frontend on the same `camelCase` contract.
+    pub fn save_publish_execution_snapshot(
+        &self,
+        campaign_id: &str,
+        input_digest: &str,
+        status: crate::publish_runtime::PublishExecutionStatus,
+        retry_scope: crate::publish_runtime::PublishRetryScope,
+        report_json: &serde_json::Value,
+    ) -> anyhow::Result<crate::publish_runtime::PublishExecutionSnapshot> {
+        let draft = crate::publish_runtime::PublishExecutionSnapshotDraft {
+            input_digest: input_digest.to_owned(),
+            status,
+            retry_scope,
+            report_json: report_json.clone(),
+        };
+        let (input_digest, status, retry_scope, report_json) =
+            prepare_publish_execution_snapshot(&draft)?;
+        let updated_at = Utc::now().to_rfc3339();
+        let conn = self.conn()?;
+        conn.execute(
+            "INSERT INTO publish_execution_snapshots
+             (campaign_id,input_digest,status,retry_scope,report_json,updated_at)
+             VALUES (?1,?2,?3,?4,?5,?6)
+             ON CONFLICT(campaign_id) DO UPDATE SET
+               input_digest=excluded.input_digest,
+               status=excluded.status,
+               retry_scope=excluded.retry_scope,
+               report_json=excluded.report_json,
+               updated_at=excluded.updated_at",
+            params![
+                campaign_id,
+                &input_digest,
+                status,
+                retry_scope,
+                report_json,
+                updated_at
+            ],
+        )?;
+        drop(conn);
+
+        self.get_publish_execution_snapshot(campaign_id)?
+            .context("publish execution snapshot disappeared after save")
+    }
+
+    /// Load the last persisted execution projection without inferring retryability from text.
+    pub fn get_publish_execution_snapshot(
+        &self,
+        campaign_id: &str,
+    ) -> anyhow::Result<Option<crate::publish_runtime::PublishExecutionSnapshot>> {
+        let conn = self.conn()?;
+        let row = conn
+            .query_row(
+                "SELECT campaign_id,input_digest,status,retry_scope,report_json,updated_at
+                 FROM publish_execution_snapshots WHERE campaign_id=?1",
+                [campaign_id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, String>(4)?,
+                        row.get::<_, String>(5)?,
+                    ))
+                },
+            )
+            .optional()?;
+
+        row.map(
+            |(campaign_id, input_digest, status, retry_scope, report_json, updated_at)| {
+                Ok(crate::publish_runtime::PublishExecutionSnapshot {
+                    campaign_id,
+                    input_digest,
+                    status: deserialize_wire_enum(&status)
+                        .context("parse publish execution status")?,
+                    retry_scope: deserialize_wire_enum(&retry_scope)
+                        .context("parse publish retry scope")?,
+                    report_json: serde_json::from_str(&report_json)
+                        .context("parse publish execution report")?,
+                    updated_at,
+                })
+            },
+        )
+        .transpose()
+    }
+
     /// Source bundle ids that some campaign has already **spoken for**.
     ///
     /// The input to [`crate::publish::auto_assign_bundles`], and the reason it needs no cursor.
@@ -1144,6 +1319,7 @@ mod claim_tests {
             cleanup_policy: crate::publish::PublishCleanupPolicy::DeleteImportedAssetsAfterVerified,
             sound_policy: crate::publish::PublishSoundPolicy::Default,
             execution_confirmed: false,
+            target_snapshot: None,
         };
         let record = db
             .create_publish_campaign(&request, &bundles)
@@ -1192,6 +1368,7 @@ mod claim_tests {
             cleanup_policy: crate::publish::PublishCleanupPolicy::DeleteImportedAssetsAfterVerified,
             sound_policy: crate::publish::PublishSoundPolicy::Default,
             execution_confirmed: true,
+            target_snapshot: None,
         };
 
         let first = db
@@ -2449,6 +2626,231 @@ mod claim_tests {
                 if claimable { "" } else { "not" }
             );
         }
+        let _ = std::fs::remove_file(path);
+    }
+}
+
+#[cfg(test)]
+mod execution_snapshot_tests {
+    use super::*;
+    use crate::publish::{
+        PublishBundle, PublishCampaignRequest, PublishCleanupPolicy, PublishMediaKind,
+        PublishSoundPolicy, PublishVisibility,
+    };
+    use crate::publish_runtime::{
+        PublishExecutionSnapshotDraft, PublishExecutionStatus, PublishRetryScope,
+    };
+
+    fn campaign_input() -> (PublishCampaignRequest, PublishBundle) {
+        let bundle = PublishBundle {
+            id: format!("bundle-snapshot-{}", Uuid::new_v4()),
+            source_path: "C:/fixture/bundle-snapshot".into(),
+            name: "snapshot".into(),
+            media_kind: PublishMediaKind::Image,
+            images: Vec::new(),
+            video: None,
+            caption_path: "C:/fixture/bundle-snapshot/caption.txt".into(),
+            caption: "caption".into(),
+            caption_sha256: "b".repeat(64),
+            total_bytes: 0,
+            partners: Vec::new(),
+        };
+        let request = PublishCampaignRequest {
+            request_id: Uuid::new_v4().to_string(),
+            source_root: "C:/fixture".into(),
+            bundle_ids: vec![bundle.id.clone()],
+            udids: vec!["phone-snapshot".into()],
+            run_at: None,
+            visibility: PublishVisibility::Public,
+            cleanup_policy: PublishCleanupPolicy::DeleteImportedAssetsAfterVerified,
+            sound_policy: PublishSoundPolicy::Default,
+            execution_confirmed: true,
+            target_snapshot: None,
+        };
+        (request, bundle)
+    }
+
+    fn fixture() -> (Database, std::path::PathBuf, String) {
+        let path = std::env::temp_dir().join(format!(
+            "riviu-publish-execution-snapshot-{}.db",
+            Uuid::new_v4()
+        ));
+        let db = Database::open(&path).expect("open fixture database");
+        let (request, bundle) = campaign_input();
+        let campaign = db
+            .create_publish_campaign(&request, &[bundle])
+            .expect("create campaign");
+        (db, path, campaign.id)
+    }
+
+    #[test]
+    fn campaign_and_initial_snapshot_commit_or_roll_back_together() {
+        let path = std::env::temp_dir().join(format!(
+            "riviu-publish-atomic-snapshot-{}.db",
+            Uuid::new_v4()
+        ));
+        let db = Database::open(&path).expect("open fixture database");
+        let (request, bundle) = campaign_input();
+        let invalid = PublishExecutionSnapshotDraft {
+            input_digest: "a".repeat(64),
+            status: PublishExecutionStatus::Partial,
+            retry_scope: PublishRetryScope::FullPipeline,
+            report_json: serde_json::json!([]),
+        };
+        let error = db
+            .create_publish_campaign_with_snapshot(
+                &request,
+                std::slice::from_ref(&bundle),
+                &invalid,
+            )
+            .expect_err("an invalid snapshot must reject the whole creation");
+        assert!(error.to_string().contains("must be a JSON object"));
+        assert!(db
+            .list_publish_campaigns(10)
+            .expect("list campaigns")
+            .is_empty());
+
+        let valid = PublishExecutionSnapshotDraft {
+            report_json: serde_json::json!({"targetSnapshot": {"rosterSha256": "fleet"}}),
+            ..invalid
+        };
+        db.conn()
+            .expect("open trigger connection")
+            .execute_batch(
+                "CREATE TRIGGER fail_initial_publish_snapshot
+                 BEFORE INSERT ON publish_execution_snapshots
+                 BEGIN SELECT RAISE(ABORT, 'fixture snapshot write failed'); END;",
+            )
+            .expect("install snapshot failpoint");
+        let error = db
+            .create_publish_campaign_with_snapshot(&request, std::slice::from_ref(&bundle), &valid)
+            .expect_err("snapshot insert failure rolls back the campaign transaction");
+        assert!(error.to_string().contains("fixture snapshot write failed"));
+        assert!(db
+            .list_publish_campaigns(10)
+            .expect("list campaigns")
+            .is_empty());
+        db.conn()
+            .expect("open trigger connection")
+            .execute_batch("DROP TRIGGER fail_initial_publish_snapshot")
+            .expect("remove snapshot failpoint");
+        let campaign = db
+            .create_publish_campaign_with_snapshot(&request, &[bundle], &valid)
+            .expect("commit campaign and projection");
+        let snapshot = db
+            .get_publish_execution_snapshot(&campaign.id)
+            .expect("read snapshot")
+            .expect("snapshot exists with campaign");
+        assert_eq!(snapshot.input_digest, "a".repeat(64));
+        assert_eq!(snapshot.report_json, valid.report_json);
+
+        drop(db);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn latest_publish_execution_snapshot_round_trips_and_replaces_one_row() {
+        let (db, path, campaign_id) = fixture();
+        assert_eq!(
+            db.get_publish_execution_snapshot(&campaign_id)
+                .expect("read absent snapshot"),
+            None
+        );
+
+        let first_report = serde_json::json!({
+            "campaignId": campaign_id,
+            "status": "partial",
+            "retryScope": "linkAndSheet"
+        });
+        let first = db
+            .save_publish_execution_snapshot(
+                &campaign_id,
+                &"a".repeat(64),
+                PublishExecutionStatus::Partial,
+                PublishRetryScope::LinkAndSheet,
+                &first_report,
+            )
+            .expect("save first snapshot");
+        assert_eq!(first.status, PublishExecutionStatus::Partial);
+        assert_eq!(first.retry_scope, PublishRetryScope::LinkAndSheet);
+        assert_eq!(first.report_json, first_report);
+
+        drop(db);
+        let db = Database::open(&path).expect("reopen migrated fixture");
+        assert_eq!(
+            db.get_publish_execution_snapshot(&campaign_id)
+                .expect("load persisted snapshot")
+                .expect("snapshot exists"),
+            first
+        );
+
+        let final_report = serde_json::json!({
+            "campaignId": campaign_id,
+            "status": "complete",
+            "retryScope": "none"
+        });
+        let final_snapshot = db
+            .save_publish_execution_snapshot(
+                &campaign_id,
+                &"c".repeat(64),
+                PublishExecutionStatus::Complete,
+                PublishRetryScope::None,
+                &final_report,
+            )
+            .expect("replace snapshot");
+        assert_eq!(final_snapshot.input_digest, "c".repeat(64));
+        assert_eq!(final_snapshot.status, PublishExecutionStatus::Complete);
+        assert_eq!(final_snapshot.retry_scope, PublishRetryScope::None);
+        assert_eq!(final_snapshot.report_json, final_report);
+
+        let conn = db.conn().expect("inspect table");
+        let rows: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM publish_execution_snapshots WHERE campaign_id=?1",
+                [&campaign_id],
+                |row| row.get(0),
+            )
+            .expect("count snapshots");
+        assert_eq!(rows, 1, "the projection accumulated stale rows");
+        drop(conn);
+        drop(db);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn publish_execution_snapshot_rejects_untyped_inputs_and_orphans() {
+        let (db, path, campaign_id) = fixture();
+        for digest in ["short".to_string(), "A".repeat(64)] {
+            assert!(db
+                .save_publish_execution_snapshot(
+                    &campaign_id,
+                    &digest,
+                    PublishExecutionStatus::Uncertain,
+                    PublishRetryScope::None,
+                    &serde_json::json!({}),
+                )
+                .is_err());
+        }
+        assert!(db
+            .save_publish_execution_snapshot(
+                &campaign_id,
+                &"d".repeat(64),
+                PublishExecutionStatus::Uncertain,
+                PublishRetryScope::None,
+                &serde_json::json!([]),
+            )
+            .is_err());
+        assert!(db
+            .save_publish_execution_snapshot(
+                "missing-campaign",
+                &"d".repeat(64),
+                PublishExecutionStatus::Partial,
+                PublishRetryScope::FullPipeline,
+                &serde_json::json!({}),
+            )
+            .is_err());
+
+        drop(db);
         let _ = std::fs::remove_file(path);
     }
 }

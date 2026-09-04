@@ -42,6 +42,13 @@ impl DeviceControlPlane {
             .await
             .map_err(|error| driver_error(udid, "tiktokBuild", error))
     }
+    /// Read-only storage check used by publish preflight; it never evicts active work.
+    pub async fn available_storage_bytes(&self, udid: &str) -> Result<u64, DeviceControlError> {
+        self.driver
+            .available_storage_bytes(udid)
+            .await
+            .map_err(|error| driver_error(udid, "availableStorageBytes", error))
+    }
     /// Every app the phone reports as present.
     ///
     /// Lease-free on purpose, following `resolve_tiktok_package` directly above: this

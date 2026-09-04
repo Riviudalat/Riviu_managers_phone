@@ -36,7 +36,35 @@ pub struct SheetOutboxRow {
     pub last_error: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SheetOutboxState {
+    Pending,
+    Failed,
+    Sent,
+}
+
 impl Database {
+    /// Read the durable delivery state without conflating a sent row with a missing row.
+    pub fn publish_sheet_outbox_state(
+        &self,
+        assignment_id: &str,
+    ) -> anyhow::Result<Option<SheetOutboxState>> {
+        let conn = self.conn()?;
+        conn.query_row(
+            "SELECT state FROM publish_sheet_outbox WHERE assignment_id=?1",
+            [assignment_id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?
+        .map(|state| match state.as_str() {
+            "pending" => Ok(SheetOutboxState::Pending),
+            "failed" => Ok(SheetOutboxState::Failed),
+            "sent" => Ok(SheetOutboxState::Sent),
+            other => anyhow::bail!("invalid publish Sheet outbox state: {other}"),
+        })
+        .transpose()
+    }
+
     /// Record that a published post owes the sheet a row.
     ///
     /// Called in the same breath as the post's own success, and **never** in a way that can
@@ -352,6 +380,7 @@ mod tests {
             cleanup_policy: PublishCleanupPolicy::DeleteImportedAssetsAfterVerified,
             sound_policy: crate::publish::PublishSoundPolicy::Default,
             execution_confirmed: false,
+            target_snapshot: None,
         };
         let campaign = db
             .create_publish_campaign(&request, &[bundle(&bundle_id)])
@@ -399,6 +428,45 @@ mod tests {
         assert_eq!(rows[0].partners, partners);
         assert_eq!(rows[0].attempts, 0);
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn outbox_state_distinguishes_missing_pending_failed_and_sent() {
+        let (db, path) = fixture();
+        let (campaign, assignment) = seed(&db);
+        assert_eq!(
+            db.publish_sheet_outbox_state(&assignment)
+                .expect("missing state"),
+            None
+        );
+
+        db.queue_publish_sheet_row(&assignment, &campaign, "https://a/1", "bot", &[])
+            .expect("queue");
+        assert_eq!(
+            db.publish_sheet_outbox_state(&assignment)
+                .expect("pending state"),
+            Some(SheetOutboxState::Pending)
+        );
+        let revision = owed(&db)[0].revision;
+        assert!(db
+            .mark_publish_sheet_failed(&assignment, revision, "offline")
+            .expect("fail row"));
+        assert_eq!(
+            db.publish_sheet_outbox_state(&assignment)
+                .expect("failed state"),
+            Some(SheetOutboxState::Failed)
+        );
+        assert!(db
+            .mark_publish_sheet_sent(&assignment, revision)
+            .expect("send row"));
+        assert_eq!(
+            db.publish_sheet_outbox_state(&assignment)
+                .expect("sent state"),
+            Some(SheetOutboxState::Sent)
+        );
+
+        drop(db);
+        std::fs::remove_file(path).expect("remove fixture database");
     }
 
     /// **A row the sheet already has is never re-opened, by any route.**

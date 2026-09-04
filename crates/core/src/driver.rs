@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use parking_lot::Mutex;
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::device_capabilities::{
@@ -24,7 +25,8 @@ pub struct UnsupportedCapability {
     pub capability: &'static str,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ProcessAbsenceProof {
     pub bundle_id: String,
     pub old_pid: Option<u64>,
@@ -348,6 +350,10 @@ pub trait DeviceDriver: Send + Sync {
     /// treat as "unmeasured" — the two are different answers and only the device knows.
     async fn tiktok_build(&self, _udid: &str) -> anyhow::Result<(String, String, String)> {
         anyhow::bail!("backend này không đọc được (gói, versionName, locale) của TikTok")
+    }
+    /// Bytes available on the filesystem used to stage publish media.
+    async fn available_storage_bytes(&self, _udid: &str) -> anyhow::Result<u64> {
+        unsupported("availableStorageBytes")
     }
     fn supports_verified_app_termination(&self, _udid: &str) -> bool {
         false

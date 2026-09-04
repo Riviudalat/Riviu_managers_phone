@@ -279,6 +279,13 @@ pub struct PublishCampaignRequest {
     /// One confirmation covers the whole future execution, including a scheduled run.
     #[serde(default)]
     pub execution_confirmed: bool,
+    /// Immutable fleet identity covered by the approved preflight digest.
+    ///
+    /// Legacy campaigns predate target snapshots, so absence remains readable. New production
+    /// campaigns always persist this value in the request itself; execution projections may be
+    /// replaced after restart without losing the roster, aliases or exclusions that were approved.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_snapshot: Option<crate::ResolvedTargetSnapshot>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -2254,10 +2261,20 @@ mod execution_contract_tests {
 
         assert_eq!(request.sound_policy, PublishSoundPolicy::Default);
         assert!(!request.execution_confirmed);
+        assert!(request.target_snapshot.is_none());
     }
 
     #[test]
     fn scheduled_request_keeps_the_exact_seed_and_confirmation() {
+        let target_snapshot = crate::resolve_target(
+            &crate::TargetRef::Explicit {
+                udids: vec!["phone-1".into()],
+            },
+            &["phone-1".into()],
+            &[],
+            &[],
+        )
+        .expect("resolve pinned target");
         let request = PublishCampaignRequest {
             request_id: "request-1".into(),
             source_root: "C:/fixture".into(),
@@ -2271,6 +2288,7 @@ mod execution_contract_tests {
                 seed: 0x00fe_dcba,
             },
             execution_confirmed: true,
+            target_snapshot: Some(target_snapshot.clone()),
         };
         let restored: PublishCampaignRequest = serde_json::from_str(
             &serde_json::to_string(&request).expect("serialize the approved request"),
@@ -2279,6 +2297,7 @@ mod execution_contract_tests {
 
         assert_eq!(restored.sound_policy, request.sound_policy);
         assert!(restored.execution_confirmed);
+        assert_eq!(restored.target_snapshot, Some(target_snapshot));
     }
 }
 

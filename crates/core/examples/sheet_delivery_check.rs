@@ -161,6 +161,7 @@ async fn main() -> anyhow::Result<()> {
         cleanup_policy: PublishCleanupPolicy::DeleteImportedAssetsAfterVerified,
         sound_policy: riviu_core::PublishSoundPolicy::Default,
         execution_confirmed: false,
+        target_snapshot: None,
     };
     let campaign = db.create_publish_campaign(&request, &[bundle(&bundle_id)])?;
     let assignment_id = db

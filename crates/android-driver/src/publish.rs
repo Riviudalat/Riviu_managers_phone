@@ -1,4 +1,4 @@
-//! Getting a publish campaign's images onto an Android device and into its media
+//! Getting a publish campaign's images or video onto an Android device and into its media
 //! library.
 //!
 //! The iOS contract this implements has four steps with distinct meanings — stage the
@@ -60,6 +60,9 @@ const STAGE_ROOT: &str = "/sdcard/Pictures/.riviu-publish";
 const IMPORT_PARENT: &str = "/sdcard/Pictures";
 /// MediaStore's images table.
 const IMAGES_URI: &str = "content://media/external/images/media";
+/// MediaStore's video table. `_id` values are scoped to their table, so every row below
+/// retains its collection and every mutation reconstructs the URI from that collection.
+const VIDEOS_URI: &str = "content://media/external/video/media";
 /// Generous: `pm`/`content` calls on this fleet are 1–2 s, and a push is bounded by
 /// file size.
 const PUSH_TIMEOUT: Duration = Duration::from_secs(120);
@@ -163,9 +166,38 @@ pub struct StagedFile {
     pub sha256: String,
 }
 
-/// A MediaStore row, reduced to what a cleanup needs.
+/// The MediaStore collection which owns a row.
+///
+/// The collection is part of the row's identity: an image and a video may legally carry
+/// the same numeric `_id`, while their update/delete URIs are different.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum MediaCollection {
+    Images,
+    Videos,
+}
+
+impl MediaCollection {
+    const ALL: [Self; 2] = [Self::Images, Self::Videos];
+
+    const fn uri(self) -> &'static str {
+        match self {
+            Self::Images => IMAGES_URI,
+            Self::Videos => VIDEOS_URI,
+        }
+    }
+
+    const fn evidence_name(self) -> &'static str {
+        match self {
+            Self::Images => "images",
+            Self::Videos => "videos",
+        }
+    }
+}
+
+/// A MediaStore row, reduced to what visibility and cleanup need.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MediaRow {
+    pub collection: MediaCollection,
     pub id: String,
     pub data: String,
 }
@@ -183,6 +215,10 @@ pub struct MediaRow {
 /// just because the device said it first. MediaStore's `_id` is an integer; anything else
 /// is output this module must not act on (and [`unreadable_query_line`] reports it).
 pub fn parse_media_rows(stdout: &str) -> Vec<MediaRow> {
+    parse_media_rows_in(MediaCollection::Images, stdout)
+}
+
+fn parse_media_rows_in(collection: MediaCollection, stdout: &str) -> Vec<MediaRow> {
     stdout
         .lines()
         .filter_map(|line| {
@@ -195,7 +231,11 @@ pub fn parse_media_rows(stdout: &str) -> Vec<MediaRow> {
             let id = field("_id=")?;
             let data = field("_data=")?;
             (!id.is_empty() && id.bytes().all(|byte| byte.is_ascii_digit()) && !data.is_empty())
-                .then_some(MediaRow { id, data })
+                .then_some(MediaRow {
+                    collection,
+                    id,
+                    data,
+                })
         })
         .collect()
 }
@@ -278,11 +318,94 @@ pub fn reports_pending_column(stdout: &str) -> bool {
 /// is a line test applied before the shared row parser — the projection has to ask for
 /// the column, and asking for it everywhere would widen every other query for nothing.
 pub fn parse_pending_rows(stdout: &str) -> Vec<MediaRow> {
+    parse_pending_rows_in(MediaCollection::Images, stdout)
+}
+
+fn parse_pending_rows_in(collection: MediaCollection, stdout: &str) -> Vec<MediaRow> {
     stdout
         .lines()
         .filter(|line| line.contains("is_pending=1"))
-        .flat_map(parse_media_rows)
+        .flat_map(|line| parse_media_rows_in(collection, line))
         .collect()
+}
+
+fn media_query(collection: MediaCollection, projection: &str) -> String {
+    format!(
+        "content query --uri {} --projection {projection} 2>&1",
+        collection.uri()
+    )
+}
+
+fn clear_pending_command(row: &MediaRow) -> String {
+    format!(
+        "content update --uri {}/{} --bind is_pending:i:0 2>&1",
+        row.collection.uri(),
+        row.id
+    )
+}
+
+fn delete_media_command(row: &MediaRow) -> String {
+    format!(
+        "content delete --uri {}/{} 2>&1",
+        row.collection.uri(),
+        row.id
+    )
+}
+
+fn canonical_media_path(path: &str) -> String {
+    path.replacen("/sdcard", "/storage/emulated/0", 1)
+}
+
+/// Require one collection-qualified row for every file which the device listed after the
+/// move. A non-empty subset is not enough: TikTok would silently publish fewer items, while
+/// a duplicate path in both collections would leave selection and cleanup ambiguous.
+fn validate_imported_rows(
+    rows: &[MediaRow],
+    directory: &str,
+    names: &[&str],
+) -> anyhow::Result<()> {
+    let root = canonical_media_path(directory);
+    let mut expected = names
+        .iter()
+        .map(|name| format!("{root}/{name}"))
+        .collect::<Vec<_>>();
+    expected.sort();
+
+    let mut actual = rows
+        .iter()
+        .map(|row| canonical_media_path(&row.data))
+        .collect::<Vec<_>>();
+    actual.sort();
+    let unique = actual.iter().collect::<std::collections::BTreeSet<_>>();
+    anyhow::ensure!(
+        unique.len() == actual.len(),
+        "MediaStore lists the same imported path in more than one collection; row identity \
+         is ambiguous"
+    );
+    anyhow::ensure!(
+        actual == expected,
+        "MediaStore path readback does not match the {} file(s) moved into {directory}: \
+         expected {expected:?}, got {actual:?}",
+        names.len()
+    );
+    Ok(())
+}
+
+fn checked_pending_column(stdout: &str) -> anyhow::Result<bool> {
+    if stdout.contains("no such column: is_pending") {
+        return Ok(false);
+    }
+    if let Some(detail) = content_error(stdout) {
+        anyhow::bail!("pending-column query failed while exiting 0: {detail}");
+    }
+    anyhow::ensure!(
+        !stdout.trim().is_empty(),
+        "pending-column query returned no readable result"
+    );
+    if let Some(line) = unreadable_query_line(stdout) {
+        anyhow::bail!("pending-column query answered in an unreadable shape: {line}");
+    }
+    Ok(true)
 }
 
 /// `<sha256>  <path>` from `sha256sum`.
@@ -499,7 +622,7 @@ pub async fn pull_media(
 /// this guards is a genuinely big video, not a hang.
 const PULL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
 
-/// The images to stage, from the root and from one level under it.
+/// The publish media to stage, from the root and from one level under it.
 ///
 /// **The managed layout is the reason for the second level.** The desktop stages a campaign
 /// as `<scratch>/<ordinal>/<bundle-name>/<images>`: the bundle keeps its own directory
@@ -516,6 +639,11 @@ const PULL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
 /// sweeping up whatever an operator happens to have nested inside a source folder. Dot
 /// entries stay skipped, which is the convention `publish_commands::stage_one_bundle` relies
 /// on to keep its `.transfer` scratch directory from ever being read as a bundle.
+///
+/// Caption and partner files deliberately stay on the desktop. The managed bundle directory
+/// contains `caption.txt` beside its media, but MediaStore cannot index that file. Including it
+/// in the device listing made the exact import readback wait for a row that can never exist and
+/// then reject every otherwise valid image or video bundle as incomplete.
 fn collect_source_files(source_root: &Path) -> anyhow::Result<Vec<std::path::PathBuf>> {
     fn hidden(entry: &std::fs::DirEntry) -> bool {
         entry.file_name().to_string_lossy().starts_with('.')
@@ -528,20 +656,51 @@ fn collect_source_files(source_root: &Path) -> anyhow::Result<Vec<std::path::Pat
             continue;
         }
         let kind = entry.file_type()?;
-        if kind.is_file() {
+        if kind.is_file() && is_publish_media_file(&entry.path()) {
             entries.push(entry.path());
         } else if kind.is_dir() {
             for nested in std::fs::read_dir(entry.path())
                 .with_context(|| format!("read the bundle directory {}", entry.path().display()))?
             {
                 let nested = nested?;
-                if !hidden(&nested) && nested.file_type()?.is_file() {
+                if !hidden(&nested)
+                    && nested.file_type()?.is_file()
+                    && is_publish_media_file(&nested.path())
+                {
                     entries.push(nested.path());
                 }
             }
         }
     }
     Ok(entries)
+}
+
+fn is_publish_media_file(path: &Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| {
+            matches!(
+                extension.to_ascii_lowercase().as_str(),
+                "jpg" | "jpeg" | "png" | "mp4"
+            )
+        })
+}
+
+fn validate_publish_media_shape(entries: &[std::path::PathBuf]) -> anyhow::Result<()> {
+    let videos = entries
+        .iter()
+        .filter(|path| {
+            path.extension()
+                .and_then(|extension| extension.to_str())
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("mp4"))
+        })
+        .count();
+    let images = entries.len().saturating_sub(videos);
+    anyhow::ensure!(
+        (videos == 0 && images > 0) || (videos == 1 && images == 0),
+        "publish source must contain either images or exactly one MP4, not {images} image(s) and {videos} video(s)"
+    );
+    Ok(())
 }
 
 pub async fn stage(
@@ -571,6 +730,7 @@ pub async fn stage(
     let mut entries = collect_source_files(source_root)?;
     // Deterministic order, so the manifest hash does not depend on directory order.
     entries.sort();
+    validate_publish_media_shape(&entries)?;
 
     let mut staged: Vec<StagedFile> = Vec::new();
     for path in &entries {
@@ -761,9 +921,9 @@ pub async fn import(
 
     // Give the scanner a moment, then ask it — `mv`'s exit code says nothing about
     // whether another app can see the result.
-    let mut rows = poll_media_rows(adb, serial, &visible).await?;
+    let mut rows = poll_media_rows(adb, serial, &visible, names.len()).await?;
     let mut scanned = false;
-    if rows.is_empty() {
+    if rows.len() != names.len() {
         // Measured divergence, and the reason this is a fallback rather than a version
         // check: on Android 15 (Redmi Note 12) the rename alone reaches MediaStore in
         // ~1.5 s, on Android 8.0 (SM-N950F) it never does. The broadcast fixes the
@@ -781,7 +941,7 @@ pub async fn import(
                 .await;
         }
         scanned = true;
-        rows = poll_media_rows(adb, serial, &visible).await?;
+        rows = poll_media_rows(adb, serial, &visible, names.len()).await?;
     }
     anyhow::ensure!(
         !rows.is_empty(),
@@ -789,6 +949,7 @@ pub async fn import(
          MediaStore lists none, so the composer cannot pick them",
         names.len()
     );
+    validate_imported_rows(&rows, &visible, &names)?;
     // By path, which is `01.png`, `02.png`, … so that the `is_pending` updates below and
     // the `mediaIds` in the evidence are in a stable, meaningful order rather than
     // whatever `content query` happened to return.
@@ -797,7 +958,11 @@ pub async fn import(
     // album newest-first, and what a carousel actually uses is the order the cells are
     // *tapped*. Establishing that is the post path's job, and the post path does not
     // exist yet — so no claim is made here beyond determinism.
-    rows.sort_by(|left, right| left.data.cmp(&right.data));
+    rows.sort_by(|left, right| {
+        left.data
+            .cmp(&right.data)
+            .then(left.collection.cmp(&right.collection))
+    });
 
     // Clear `is_pending`, which is the whole difference between an import the composer
     // can use and one it cannot.
@@ -817,13 +982,24 @@ pub async fn import(
     // `datetaken=NULL`.
     // Asked, not assumed: pre-scoped-storage MediaStore has no such column, and a
     // device that has no pending concept has nothing to clear.
-    let pending_model = if device_reports_pending_column(adb, serial).await {
+    let relevant_collections = MediaCollection::ALL
+        .into_iter()
+        .filter(|collection| rows.iter().any(|row| row.collection == *collection))
+        .collect::<Vec<_>>();
+    let mut pending_collections = Vec::new();
+    for collection in &relevant_collections {
+        if device_reports_pending_column(adb, serial, *collection).await? {
+            pending_collections.push(*collection);
+        }
+    }
+    let pending_model = if !pending_collections.is_empty() {
         let mut cleared = 0usize;
-        for row in &rows {
-            let command = format!(
-                "content update --uri {IMAGES_URI}/{id} --bind is_pending:i:0 2>&1",
-                id = row.id
-            );
+        let pending_rows = rows
+            .iter()
+            .filter(|row| pending_collections.contains(&row.collection))
+            .collect::<Vec<_>>();
+        for row in &pending_rows {
+            let command = clear_pending_command(row);
             // Worth reporting loudly in either failure branch, because the file is on
             // the device and invisible: the operator would otherwise see a successful
             // import and an empty picker.
@@ -840,22 +1016,26 @@ pub async fn import(
             }
         }
         anyhow::ensure!(
-            cleared == rows.len(),
+            cleared == pending_rows.len(),
             "cleared is_pending on {cleared} of {} imported row(s); the rest stay \
              invisible to the composer",
-            rows.len()
+            pending_rows.len()
         );
         // `content update` exiting 0 is not evidence, for the same reason `am broadcast`
         // returning `result=0` was not: read the flag back from MediaStore.
         tokio::time::sleep(Duration::from_millis(400)).await;
-        let still_pending = pending_rows_under(adb, serial, &visible).await?;
+        let still_pending = pending_rows_under(adb, serial, &visible, &pending_collections).await?;
         anyhow::ensure!(
             still_pending.is_empty(),
             "{} row(s) under {visible} are still is_pending=1 after the update, so they \
              stay invisible to the composer",
             still_pending.len()
         );
-        "cleared"
+        if pending_collections.len() == relevant_collections.len() {
+            "cleared"
+        } else {
+            "mixed"
+        }
     } else {
         "absent"
     };
@@ -874,6 +1054,19 @@ pub async fn import(
         // closest Android has to the iOS `Riviu-<importId>` album.
         "albumId": visible,
         "mediaIds": rows.iter().map(|row| row.id.clone()).collect::<Vec<_>>(),
+        "mediaRefs": rows.iter().map(|row| json!({
+            "collection": row.collection.evidence_name(),
+            "id": row.id,
+            "path": row.data,
+        })).collect::<Vec<_>>(),
+        "mediaCounts": {
+            "images": rows.iter().filter(|row| row.collection == MediaCollection::Images).count(),
+            "videos": rows.iter().filter(|row| row.collection == MediaCollection::Videos).count(),
+        },
+        "pendingByCollection": relevant_collections.iter().map(|collection| json!({
+            "collection": collection.evidence_name(),
+            "model": if pending_collections.contains(collection) { "cleared" } else { "absent" },
+        })).collect::<Vec<_>>(),
     }))
 }
 
@@ -904,13 +1097,7 @@ pub async fn cleanup(adb: &AdbProgram, serial: &str, import_id: &str) -> anyhow:
     // read-back below is the real gate: without it a provider failure is invisible, and
     // the operator sees only "N row(s) still point into …" with no idea why.
     for row in &rows {
-        match adb
-            .shell(
-                serial,
-                &format!("content delete --uri {IMAGES_URI}/{} 2>&1", row.id),
-            )
-            .await
-        {
+        match adb.shell(serial, &delete_media_command(row)).await {
             Ok(output) => {
                 if let Some(detail) = content_error(&output) {
                     tracing::warn!(id = %row.id, detail, "content delete reported a failure while exiting 0");
@@ -939,6 +1126,11 @@ pub async fn cleanup(adb: &AdbProgram, serial: &str, import_id: &str) -> anyhow:
         "importId": id,
         "state": "cleaned",
         "files": rows.len(),
+        "mediaRefs": rows.iter().map(|row| json!({
+            "collection": row.collection.evidence_name(),
+            "id": row.id,
+            "path": row.data,
+        })).collect::<Vec<_>>(),
     }))
 }
 
@@ -953,7 +1145,13 @@ async fn media_rows_under(
     serial: &str,
     directory: &str,
 ) -> anyhow::Result<Vec<MediaRow>> {
-    rows_under(adb, serial, directory, "_id:_data", parse_media_rows).await
+    let mut rows = Vec::new();
+    for collection in MediaCollection::ALL {
+        rows.extend(
+            rows_under_collection(adb, serial, directory, collection, "_id:_data", false).await?,
+        );
+    }
+    Ok(rows)
 }
 
 /// Wait for MediaStore to catch up, then answer with what it holds.
@@ -968,32 +1166,45 @@ async fn poll_media_rows(
     adb: &AdbProgram,
     serial: &str,
     directory: &str,
+    expected: usize,
 ) -> anyhow::Result<Vec<MediaRow>> {
     let mut last: Option<anyhow::Error> = None;
+    let mut best = Vec::new();
+    let mut saw_success = false;
     for _ in 0..8 {
         tokio::time::sleep(Duration::from_millis(600)).await;
         match media_rows_under(adb, serial, directory).await {
-            Ok(rows) if !rows.is_empty() => return Ok(rows),
-            Ok(_) => {}
+            Ok(rows) if rows.len() >= expected => return Ok(rows),
+            Ok(rows) => {
+                saw_success = true;
+                if rows.len() > best.len() {
+                    best = rows;
+                }
+            }
             Err(error) => last = Some(error),
         }
     }
-    match last {
-        Some(error) => Err(error),
-        None => Ok(Vec::new()),
+    match (saw_success, last) {
+        (true, _) => Ok(best),
+        (false, Some(error)) => Err(error),
+        (false, None) => Ok(Vec::new()),
     }
 }
 
 /// Ask the device whether its MediaStore has the scoped-storage `is_pending` column.
-async fn device_reports_pending_column(adb: &AdbProgram, serial: &str) -> bool {
-    let query = format!("content query --uri {IMAGES_URI} --projection _id:is_pending 2>&1");
-    match adb.shell(serial, &query).await {
-        Ok(stdout) => reports_pending_column(&stdout),
-        // A query that could not run at all is not evidence either way; assume the
-        // column is there so the import fails loudly rather than skipping a step that
-        // decides whether the picker can see anything.
-        Err(_) => true,
-    }
+async fn device_reports_pending_column(
+    adb: &AdbProgram,
+    serial: &str,
+    collection: MediaCollection,
+) -> anyhow::Result<bool> {
+    let query = media_query(collection, "_id:is_pending");
+    let stdout = adb.shell(serial, &query).await.with_context(|| {
+        format!(
+            "query {} MediaStore pending model",
+            collection.evidence_name()
+        )
+    })?;
+    checked_pending_column(&stdout)
 }
 
 /// Rows under `directory` that MediaStore still marks `is_pending=1`, i.e. still
@@ -1002,25 +1213,34 @@ async fn pending_rows_under(
     adb: &AdbProgram,
     serial: &str,
     directory: &str,
+    collections: &[MediaCollection],
 ) -> anyhow::Result<Vec<MediaRow>> {
-    rows_under(
-        adb,
-        serial,
-        directory,
-        "_id:_data:is_pending",
-        parse_pending_rows,
-    )
-    .await
+    let mut rows = Vec::new();
+    for collection in collections {
+        rows.extend(
+            rows_under_collection(
+                adb,
+                serial,
+                directory,
+                *collection,
+                "_id:_data:is_pending",
+                true,
+            )
+            .await?,
+        );
+    }
+    Ok(rows)
 }
 
-async fn rows_under(
+async fn rows_under_collection(
     adb: &AdbProgram,
     serial: &str,
     directory: &str,
+    collection: MediaCollection,
     projection: &str,
-    parse: fn(&str) -> Vec<MediaRow>,
+    pending_only: bool,
 ) -> anyhow::Result<Vec<MediaRow>> {
-    let query = format!("content query --uri {IMAGES_URI} --projection {projection} 2>&1");
+    let query = media_query(collection, projection);
     let stdout = adb
         .shell(serial, &query)
         .await
@@ -1047,7 +1267,12 @@ async fn rows_under(
         directory.replacen("/sdcard", "/storage/emulated/0", 1)
     );
     let literal = format!("{directory}/");
-    Ok(parse(&stdout)
+    let parsed = if pending_only {
+        parse_pending_rows_in(collection, &stdout)
+    } else {
+        parse_media_rows_in(collection, &stdout)
+    };
+    Ok(parsed
         .into_iter()
         .filter(|row| row.data.starts_with(&resolved) || row.data.starts_with(&literal))
         .collect())
@@ -1112,6 +1337,31 @@ mod tests {
     }
 
     #[test]
+    fn only_media_leaves_a_managed_bundle_and_video_is_a_one_file_shape() {
+        let root = std::env::temp_dir().join(format!("riviu-stage-video-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("bundle-a")).expect("bundle directory");
+        std::fs::write(root.join("bundle-a").join("clip.MP4"), b"video").expect("video");
+        std::fs::write(root.join("bundle-a").join("caption.txt"), b"caption").expect("caption");
+        std::fs::write(root.join("bundle-a").join("partner.xlsx"), b"sheet").expect("partner");
+
+        let found = collect_source_files(&root).expect("collect");
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].file_name().unwrap(), "clip.MP4");
+        validate_publish_media_shape(&found).expect("one MP4 is the video contract");
+
+        let mixed = vec![found[0].clone(), root.join("bundle-a").join("still.jpg")];
+        assert!(validate_publish_media_shape(&mixed)
+            .expect_err("mixed media must never reach MediaStore")
+            .to_string()
+            .contains("not 1 image(s) and 1 video(s)"));
+        let two_videos = vec![found[0].clone(), root.join("bundle-a").join("second.mp4")];
+        assert!(validate_publish_media_shape(&two_videos).is_err());
+
+        std::fs::remove_dir_all(&root).expect("clean up");
+    }
+
+    #[test]
     fn a_namespaced_campaign_id_becomes_a_usable_directory_name() {
         // Campaign ids are `<request-id>:<bundle-id>`; `:` is not a filename character
         // and not something to hand a shell.
@@ -1171,6 +1421,98 @@ mod tests {
         assert_eq!(rows[0].id, "1000011139");
         assert_eq!(rows[0].data, "/storage/emulated/0/DCIM/Camera/a.png");
         assert_eq!(rows[1].id, "1000011140");
+        assert!(rows
+            .iter()
+            .all(|row| row.collection == MediaCollection::Images));
+    }
+
+    #[test]
+    fn video_rows_keep_their_collection_and_never_reuse_the_image_uri() {
+        let stdout = "Row: 0 _id=7, \
+                      _data=/storage/emulated/0/Pictures/riviu-one/clip.mp4\n";
+        let video = parse_media_rows_in(MediaCollection::Videos, stdout)
+            .into_iter()
+            .next()
+            .expect("one video row");
+        let image = MediaRow {
+            collection: MediaCollection::Images,
+            id: "7".to_string(),
+            data: "/storage/emulated/0/Pictures/riviu-one/still.jpg".to_string(),
+        };
+
+        assert_eq!(video.collection, MediaCollection::Videos);
+        assert_eq!(
+            clear_pending_command(&video),
+            "content update --uri content://media/external/video/media/7 --bind \
+             is_pending:i:0 2>&1"
+        );
+        assert_eq!(
+            delete_media_command(&video),
+            "content delete --uri content://media/external/video/media/7 2>&1"
+        );
+        assert_eq!(
+            clear_pending_command(&image),
+            "content update --uri content://media/external/images/media/7 --bind \
+             is_pending:i:0 2>&1"
+        );
+        assert_ne!(delete_media_command(&video), delete_media_command(&image));
+        assert!(media_query(MediaCollection::Videos, "_id:_data")
+            .contains("content://media/external/video/media"));
+    }
+
+    #[test]
+    fn imported_video_requires_exact_collection_qualified_path_readback() {
+        let directory = "/sdcard/Pictures/riviu-video-abc";
+        let video = MediaRow {
+            collection: MediaCollection::Videos,
+            id: "41".to_string(),
+            data: "/storage/emulated/0/Pictures/riviu-video-abc/clip.mp4".to_string(),
+        };
+        assert!(
+            validate_imported_rows(std::slice::from_ref(&video), directory, &["clip.mp4"]).is_ok()
+        );
+
+        assert!(validate_imported_rows(
+            std::slice::from_ref(&video),
+            directory,
+            &["clip.mp4", "other.mp4"]
+        )
+        .expect_err("a partial MediaStore import must fail")
+        .to_string()
+        .contains("does not match"));
+        assert!(validate_imported_rows(std::slice::from_ref(&video), directory, &[]).is_err());
+
+        let duplicate_path = MediaRow {
+            collection: MediaCollection::Images,
+            id: "41".to_string(),
+            data: video.data.clone(),
+        };
+        assert!(
+            validate_imported_rows(&[video, duplicate_path], directory, &["clip.mp4"])
+                .expect_err("the same path in two collections must fail")
+                .to_string()
+                .contains("more than one collection")
+        );
+    }
+
+    #[test]
+    fn pending_capability_is_fail_closed_except_for_the_measured_absent_column() {
+        let absent = "Error while accessing provider:media\nandroid.database.sqlite.\
+                      SQLiteException: no such column: is_pending (code 1)";
+        assert!(!checked_pending_column(absent).expect("measured old-Android answer"));
+        assert!(checked_pending_column("No result found.\n").expect("empty table has schema"));
+        assert!(checked_pending_column("Row: 0 _id=7, is_pending=1\n")
+            .expect("readable pending result"));
+        for unreadable in [
+            "",
+            "Permission denied\n",
+            "Unsupported argument: projection\n",
+        ] {
+            assert!(
+                checked_pending_column(unreadable).is_err(),
+                "must fail closed for {unreadable:?}"
+            );
+        }
     }
 
     #[test]

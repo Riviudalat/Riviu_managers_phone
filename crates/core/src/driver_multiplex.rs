@@ -328,6 +328,14 @@ impl DeviceDriver for MultiplexDriver {
         self.route(udid)?.resolve_tiktok_package(udid).await
     }
 
+    async fn tiktok_build(&self, udid: &str) -> anyhow::Result<(String, String, String)> {
+        self.route(udid)?.tiktok_build(udid).await
+    }
+
+    async fn available_storage_bytes(&self, udid: &str) -> anyhow::Result<u64> {
+        self.route(udid)?.available_storage_bytes(udid).await
+    }
+
     fn supports_push_media(&self, udid: &str) -> bool {
         self.try_route(udid)
             .is_some_and(|driver| driver.supports_push_media(udid))

@@ -1,4 +1,5 @@
 use crate::command_error::CommandError;
+use anyhow::Context;
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -30,6 +31,360 @@ pub fn publish_scan_folder(
 ) -> Result<PublishFolderManifest, CommandError> {
     let _admission = state.ensure_accepting_work()?;
     scan_publish_folder(PathBuf::from(source_root), PublishScanOptions::default()).map_err(err)
+}
+
+struct PreparedPublishPreflight {
+    report: riviu_core::PublishPreflightReport,
+    bundles: Vec<riviu_core::PublishBundle>,
+}
+
+fn resolve_preflight_target(
+    request: &riviu_core::PublishPreflightRequest,
+    fleet_order: &[String],
+    metas: &[riviu_core::DeviceMeta],
+    groups: &[riviu_core::DeviceGroup],
+) -> anyhow::Result<riviu_core::ResolvedTargetSnapshot> {
+    let target_ref =
+        request
+            .target_ref
+            .clone()
+            .unwrap_or_else(|| riviu_core::TargetRef::Explicit {
+                udids: request.udids.clone(),
+            });
+    let snapshot = riviu_core::resolve_target(&target_ref, fleet_order, metas, groups)?;
+    let resolved_udids = snapshot
+        .included
+        .iter()
+        .map(|device| device.udid.as_str())
+        .collect::<Vec<_>>();
+    let assignment_udids = request.udids.iter().map(String::as_str).collect::<Vec<_>>();
+    anyhow::ensure!(
+        resolved_udids == assignment_udids,
+        "phạm vi semantic đã đổi so với danh sách ghép bài; resolve lại trước preflight"
+    );
+    Ok(snapshot)
+}
+
+#[tauri::command]
+pub async fn publish_preflight(
+    state: State<'_, AppState>,
+    request: riviu_core::PublishPreflightRequest,
+) -> Result<riviu_core::PublishPreflightReport, CommandError> {
+    let _admission = state.ensure_accepting_work()?;
+    build_publish_preflight(&state.control, &state.registry, &state.db, request)
+        .await
+        .map(|prepared| prepared.report)
+        .map_err(err)
+}
+
+async fn build_publish_preflight(
+    control: &DeviceControlPlane,
+    registry: &riviu_core::DeviceRegistry,
+    db: &Database,
+    mut request: riviu_core::PublishPreflightRequest,
+) -> anyhow::Result<PreparedPublishPreflight> {
+    request.source_root = request.source_root.trim().to_string();
+    anyhow::ensure!(!request.source_root.is_empty(), "thư mục nguồn đang trống");
+    if let Some(run_at) = request.run_at.as_deref() {
+        parse_run_at(run_at).map_err(anyhow::Error::msg)?;
+        request.run_at = Some(run_at.trim().to_string());
+    }
+    request.sound_policy.pool_size()?;
+    riviu_core::publish::validate_publish_mapping(&request.bundle_ids, &request.udids)
+        .map_err(anyhow::Error::new)?;
+
+    let manifest = scan_publish_folder(&request.source_root, PublishScanOptions::default())?;
+    let mut bundles = request
+        .bundle_ids
+        .iter()
+        .map(|bundle_id| {
+            manifest
+                .bundles
+                .iter()
+                .find(|bundle| bundle.id == *bundle_id)
+                .cloned()
+                .with_context(|| format!("bundle không còn trong thư mục: {bundle_id}"))
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    let overrides: HashMap<_, _> = request
+        .caption_overrides
+        .iter()
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .collect();
+    apply_caption_overrides(&mut bundles, Some(&overrides))?;
+
+    let metas = db.list_device_metas()?;
+    let groups = db.list_groups()?;
+    let fleet_order = registry
+        .list()
+        .into_iter()
+        .map(|device| device.udid)
+        .collect::<Vec<_>>();
+    let target_snapshot = resolve_preflight_target(&request, &fleet_order, &metas, &groups)?;
+    let mut assignments = Vec::with_capacity(bundles.len());
+    let mut observations = Vec::with_capacity(bundles.len());
+    let mut issues = Vec::new();
+    for (ordinal, (bundle, udid)) in bundles.iter().zip(&request.udids).enumerate() {
+        let mut row_issues = Vec::new();
+        // Android keeps the managed import and a MediaStore copy during composition. Reserve
+        // both plus fixed working headroom, rather than discovering a full phone after transfer.
+        let required_bytes = bundle
+            .total_bytes
+            .saturating_mul(2)
+            .saturating_add(64 * 1024 * 1024);
+        let route = route_of(control, udid);
+        let media_ok =
+            bundle_media_shape_is_ready(bundle, route) && !bundle.caption.trim().is_empty();
+        if !media_ok {
+            let message = if bundle.caption.trim().is_empty() {
+                "caption rỗng nên không thể khóa đúng bài khi lấy link"
+            } else if matches!(bundle.media_kind, riviu_core::PublishMediaKind::Video) {
+                "bundle video phải có đúng một MP4 đã preflight và không được trộn ảnh"
+            } else {
+                "số ảnh không nằm trong giới hạn đã đo của composer trên máy"
+            };
+            row_issues.push(preflight_issue("media_unready", udid, &bundle.id, message));
+        }
+
+        let device = registry.get(udid);
+        if device.is_none() {
+            row_issues.push(preflight_issue(
+                "device_missing",
+                udid,
+                &bundle.id,
+                "máy không còn trong roster hiện tại",
+            ));
+        }
+        let android = device
+            .as_ref()
+            .is_some_and(|device| matches!(device.platform, riviu_core::DevicePlatform::Android));
+        if !android {
+            row_issues.push(preflight_issue(
+                "android_required",
+                udid,
+                &bundle.id,
+                "đợt đăng có chọn nhạc này chỉ chứng nhận trên Android",
+            ));
+        }
+        if !control.supports_push_media(udid) {
+            row_issues.push(preflight_issue(
+                "push_media_unavailable",
+                udid,
+                &bundle.id,
+                "Riviu helper trên máy chưa quảng bá khả năng chuyển media",
+            ));
+        }
+
+        let available_bytes = if android {
+            match control.available_storage_bytes(udid).await {
+                Ok(available) => {
+                    if available < required_bytes {
+                        row_issues.push(preflight_issue(
+                            "storage_insufficient",
+                            udid,
+                            &bundle.id,
+                            &format!(
+                                "máy còn {available} byte nhưng lượt đăng cần tối thiểu {required_bytes} byte"
+                            ),
+                        ));
+                    }
+                    Some(available)
+                }
+                Err(error) => {
+                    row_issues.push(preflight_issue(
+                        "storage_unreadable",
+                        udid,
+                        &bundle.id,
+                        &format!("không đọc được dung lượng trống của máy: {error}"),
+                    ));
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
+        let (package_name, version, locale, composer_ok, sound_picker_ok) = if android {
+            match control.tiktok_build(udid).await {
+                Ok((package, version, locale)) => {
+                    let base_composer_ok = matches!(
+                        readiness_of_build(&package, &locale, &version),
+                        PublishReadiness::HierarchyReady
+                    );
+                    let video_picker_ok =
+                        !matches!(bundle.media_kind, riviu_core::PublishMediaKind::Video)
+                            || (matches!(route, PublishRoute::Hierarchy)
+                                && video_plan_for_build(&package, &locale, &version).is_ok());
+                    let composer_ok = base_composer_ok && video_picker_ok;
+                    let sound_picker_ok = sound_plan_for_build(&package, &locale, &version).is_ok();
+                    if !composer_ok {
+                        row_issues.push(preflight_issue(
+                            if base_composer_ok {
+                                "video_composer_unmeasured"
+                            } else {
+                                "composer_unmeasured"
+                            },
+                            udid,
+                            &bundle.id,
+                            if base_composer_ok {
+                                "video picker chưa được đo tới editor cho đúng package/build/locale này"
+                            } else {
+                                "composer chưa đủ locator cho đúng package/build/locale này"
+                            },
+                        ));
+                    }
+                    if !sound_picker_ok {
+                        row_issues.push(preflight_issue(
+                            "sound_picker_unmeasured",
+                            udid,
+                            &bundle.id,
+                            "sound picker chưa được đo cho đúng package/build/locale này",
+                        ));
+                    }
+                    (
+                        Some(package),
+                        Some(version),
+                        Some(locale),
+                        composer_ok,
+                        sound_picker_ok,
+                    )
+                }
+                Err(error) => {
+                    row_issues.push(preflight_issue(
+                        "tiktok_build_unreadable",
+                        udid,
+                        &bundle.id,
+                        &format!("không đọc được package/build/locale TikTok: {error}"),
+                    ));
+                    (None, None, None, false, false)
+                }
+            }
+        } else {
+            (None, None, None, false, false)
+        };
+
+        let meta = metas.iter().find(|meta| meta.udid == *udid);
+        let storage_ok = available_bytes.is_some_and(|available| available >= required_bytes);
+        observations.push(serde_json::json!({
+            "ordinal": ordinal,
+            "udid": udid,
+            "number": meta.and_then(|meta| meta.number),
+            "alias": meta.map(|meta| meta.alias.trim()).unwrap_or_default(),
+            "packageName": package_name,
+            "version": version,
+            "locale": locale,
+            "requiredBytes": required_bytes,
+            "storage": if storage_ok { "pass" } else { "fail" },
+            "availableBytes": available_bytes,
+        }));
+        issues.extend(row_issues.iter().cloned());
+        assignments.push(riviu_core::PublishPreflightAssignmentReport {
+            ordinal: u32::try_from(ordinal)?,
+            bundle_id: bundle.id.clone(),
+            udid: udid.clone(),
+            package_name,
+            version,
+            locale,
+            media: if media_ok {
+                riviu_core::PublishPreflightCheck::Pass
+            } else {
+                riviu_core::PublishPreflightCheck::Fail
+            },
+            composer: if composer_ok {
+                riviu_core::PublishPreflightCheck::Pass
+            } else {
+                riviu_core::PublishPreflightCheck::Fail
+            },
+            sound_picker: if sound_picker_ok {
+                riviu_core::PublishPreflightCheck::Pass
+            } else {
+                riviu_core::PublishPreflightCheck::Fail
+            },
+            storage: if storage_ok {
+                riviu_core::PublishPreflightCheck::Pass
+            } else {
+                riviu_core::PublishPreflightCheck::Fail
+            },
+            required_bytes,
+            available_bytes,
+            issues: row_issues,
+        });
+    }
+
+    let input_digest =
+        publish_preflight_digest(&request, &bundles, &target_snapshot, &observations)?;
+    let webhook = db
+        .get_setting(riviu_core::publish_sheet::WEBHOOK_URL_SETTING)?
+        .unwrap_or_default();
+    let token = db
+        .get_setting(riviu_core::publish_sheet::WEBHOOK_TOKEN_SETTING)?
+        .unwrap_or_default();
+    let sheet_configured = riviu_core::publish_sheet::is_acceptable_webhook(webhook.trim())
+        && !token.trim().is_empty();
+    let report = riviu_core::PublishPreflightReport {
+        input_digest,
+        target_snapshot,
+        can_execute: issues.is_empty(),
+        assignments,
+        issues,
+        sheet_configured,
+    };
+    Ok(PreparedPublishPreflight { report, bundles })
+}
+
+fn publish_preflight_digest(
+    request: &riviu_core::PublishPreflightRequest,
+    bundles: &[riviu_core::PublishBundle],
+    target_snapshot: &riviu_core::ResolvedTargetSnapshot,
+    observations: &[serde_json::Value],
+) -> anyhow::Result<String> {
+    let stable_observations = observations
+        .iter()
+        .cloned()
+        .map(|mut observation| {
+            if let serde_json::Value::Object(fields) = &mut observation {
+                // Free space changes while the confirmation screen is open. The approval
+                // binds the required threshold and its pass/fail verdict, while the exact
+                // observed byte count remains available in the report for the operator.
+                fields.remove("availableBytes");
+            }
+            observation
+        })
+        .collect::<Vec<_>>();
+    let payload = serde_json::json!({
+        "schemaVersion": 1,
+        "request": request,
+        "bundles": bundles,
+        "targetSnapshot": target_snapshot,
+        "targets": stable_observations,
+    });
+    Ok(frame_sha256(&serde_json::to_vec(&payload)?))
+}
+
+fn require_current_preflight_digest(
+    report: &riviu_core::PublishPreflightReport,
+    approved_input_digest: &str,
+) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        report.input_digest == approved_input_digest.trim(),
+        "preflight đã cũ: nguồn, caption, máy hoặc build TikTok đã đổi; kiểm tra lại trước khi tạo chiến dịch"
+    );
+    Ok(())
+}
+
+fn preflight_issue(
+    code: &str,
+    udid: &str,
+    bundle_id: &str,
+    message: &str,
+) -> riviu_core::PublishExecutionIssue {
+    riviu_core::PublishExecutionIssue {
+        code: code.to_string(),
+        assignment_id: None,
+        udid: Some(udid.to_string()),
+        bundle_id: Some(bundle_id.to_string()),
+        message: message.to_string(),
+    }
 }
 
 /// Deal `wanted` not-yet-published bundles onto the first `wanted` selected phones.
@@ -66,42 +421,57 @@ pub fn publish_auto_assign(
 
 #[tauri::command]
 #[allow(clippy::too_many_arguments)] // Tauri exposes each wire field as a named command argument.
-pub fn publish_create_campaign(
+pub async fn publish_create_campaign(
     state: State<'_, AppState>,
-    source_root: String,
+    mut source_root: String,
     bundle_ids: Vec<String>,
     udids: Vec<String>,
     run_at: Option<String>,
     caption_overrides: Option<HashMap<String, String>>,
     sound_policy: Option<riviu_core::PublishSoundPolicy>,
+    target_ref: Option<riviu_core::TargetRef>,
     confirmed: Option<bool>,
+    approved_input_digest: String,
 ) -> Result<PublishCampaignRecord, CommandError> {
     let _admission = state.ensure_accepting_work()?;
-    if let Some(raw) = run_at.as_deref() {
-        parse_run_at(raw)?;
-    }
+    source_root = source_root.trim().to_string();
     let sound_policy = sound_policy.unwrap_or_default();
     let confirmed = confirmed.unwrap_or(false);
-    sound_policy.pool_size().map_err(err)?;
-    for udid in &udids {
-        if state.registry.get(udid).is_none() {
-            return Err(err(format!("device is not connected: {udid}")));
-        }
-    }
-
-    let manifest = scan_publish_folder(&source_root, PublishScanOptions::default()).map_err(err)?;
-    let mut selected = bundle_ids
-        .iter()
-        .map(|id| {
-            manifest
-                .bundles
+    let preflight_request = riviu_core::PublishPreflightRequest {
+        source_root: source_root.clone(),
+        bundle_ids: bundle_ids.clone(),
+        udids: udids.clone(),
+        target_ref,
+        run_at: run_at.clone(),
+        caption_overrides: caption_overrides
+            .clone()
+            .unwrap_or_default()
+            .into_iter()
+            .collect(),
+        sound_policy: sound_policy.clone(),
+    };
+    let prepared = build_publish_preflight(
+        &state.control,
+        &state.registry,
+        &state.db,
+        preflight_request,
+    )
+    .await
+    .map_err(err)?;
+    require_current_preflight_digest(&prepared.report, &approved_input_digest).map_err(err)?;
+    if !prepared.report.can_execute {
+        return Err(err(format!(
+            "preflight từ chối chiến dịch: {}",
+            prepared
+                .report
+                .issues
                 .iter()
-                .find(|bundle| bundle.id == *id)
-                .cloned()
-                .ok_or_else(|| format!("bundle not found in manifest: {id}"))
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    apply_caption_overrides(&mut selected, caption_overrides.as_ref()).map_err(err)?;
+                .map(|issue| issue.message.as_str())
+                .collect::<Vec<_>>()
+                .join("; ")
+        )));
+    }
+    let selected = prepared.bundles;
     let request_id = Uuid::new_v4().to_string();
     let staging_root = state.artifacts_dir.join("publish").join(&request_id);
     let mut managed = Vec::with_capacity(selected.len());
@@ -137,8 +507,18 @@ pub fn publish_create_campaign(
         cleanup_policy: PublishCleanupPolicy::DeleteImportedAssetsAfterVerified,
         sound_policy,
         execution_confirmed: confirmed,
+        target_snapshot: Some(prepared.report.target_snapshot.clone()),
     };
-    match state.db.create_publish_campaign(&request, &managed) {
+    let initial_snapshot = riviu_core::PublishExecutionSnapshotDraft {
+        input_digest: prepared.report.input_digest.clone(),
+        status: riviu_core::PublishExecutionStatus::Partial,
+        retry_scope: riviu_core::PublishRetryScope::FullPipeline,
+        report_json: serde_json::to_value(&prepared.report).map_err(err)?,
+    };
+    match state
+        .db
+        .create_publish_campaign_with_snapshot(&request, &managed, &initial_snapshot)
+    {
         Ok(campaign) => {
             let _ = state.db.log_op("publish.campaign.create", &campaign.id);
             Ok(campaign)
@@ -198,6 +578,176 @@ pub fn publish_get(
     campaign_id: String,
 ) -> Result<Option<PublishCampaignDetail>, CommandError> {
     state.db.get_publish_campaign(&campaign_id).map_err(err)
+}
+
+#[tauri::command]
+pub fn publish_reconcile(
+    state: State<'_, AppState>,
+    campaign_id: String,
+) -> Result<riviu_core::PublishExecutionSnapshot, CommandError> {
+    let _admission = state.ensure_accepting_work()?;
+    let previous = state
+        .db
+        .get_publish_execution_snapshot(&campaign_id)
+        .map_err(err)?;
+    let request = state
+        .db
+        .publish_campaign_request(&campaign_id)
+        .map_err(err)?
+        .ok_or_else(|| err("publish campaign request not found"))?;
+    let detail = state
+        .db
+        .get_publish_campaign(&campaign_id)
+        .map_err(err)?
+        .ok_or_else(|| err("publish campaign not found"))?;
+    // A campaign transition may happen after the last projection was written (for example, the
+    // process can die after the Post effect-intent CAS). Never return that old snapshot blindly:
+    // the typed campaign/assignment states are the durable authority after restart.
+    let input_digest = previous
+        .as_ref()
+        .map(|snapshot| snapshot.input_digest.clone())
+        .unwrap_or(stored_campaign_input_digest(&request, &detail).map_err(err)?);
+    let mut sheet_states = HashMap::new();
+    for assignment in &detail.assignments {
+        if let Some(sheet_state) = state
+            .db
+            .publish_sheet_outbox_state(&assignment.id)
+            .map_err(err)?
+        {
+            sheet_states.insert(assignment.id.clone(), sheet_state);
+        }
+    }
+    let (status, retry_scope) = reconciled_publish_status(&detail, &sheet_states);
+    state
+        .db
+        .save_publish_execution_snapshot(
+            &campaign_id,
+            &input_digest,
+            status,
+            retry_scope,
+            &serde_json::json!({
+                "campaignId": campaign_id,
+                "status": status,
+                "retryScope": retry_scope,
+                "source": "typed_state_reconciliation",
+                "targetSnapshot": request.target_snapshot,
+            }),
+        )
+        .map_err(err)
+}
+
+fn reconciled_publish_status(
+    detail: &PublishCampaignDetail,
+    sheet_states: &HashMap<String, riviu_core::db::SheetOutboxState>,
+) -> (
+    riviu_core::PublishExecutionStatus,
+    riviu_core::PublishRetryScope,
+) {
+    if matches!(
+        detail.campaign.state,
+        riviu_core::PublishCampaignState::Cancelled | riviu_core::PublishCampaignState::Missed
+    ) {
+        return (
+            riviu_core::PublishExecutionStatus::Partial,
+            riviu_core::PublishRetryScope::None,
+        );
+    }
+    let uncertain = detail.assignments.iter().any(|assignment| {
+        matches!(
+            assignment.state,
+            riviu_core::PublishCampaignState::Posting
+                | riviu_core::PublishCampaignState::Verifying
+                | riviu_core::PublishCampaignState::Uncertain
+        )
+    });
+    if uncertain {
+        return (
+            riviu_core::PublishExecutionStatus::Uncertain,
+            riviu_core::PublishRetryScope::None,
+        );
+    }
+
+    let all_succeeded = !detail.assignments.is_empty()
+        && detail.assignments.iter().all(|assignment| {
+            matches!(
+                assignment.state,
+                riviu_core::PublishCampaignState::Succeeded
+            )
+        });
+    if !all_succeeded {
+        return (
+            riviu_core::PublishExecutionStatus::Partial,
+            riviu_core::PublishRetryScope::FullPipeline,
+        );
+    }
+
+    let all_links_known = detail.assignments.iter().all(|assignment| {
+        assignment
+            .evidence_json
+            .as_deref()
+            .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+            .as_ref()
+            .and_then(post_url_owed)
+            .is_some()
+    });
+    // A confirmed post never re-enters the composer. When its canonical links are already
+    // durable and an outbox row is owed, only that idempotent Sheet write may resume.
+    let sheet_owed = detail.assignments.iter().any(|assignment| {
+        matches!(
+            sheet_states.get(&assignment.id),
+            Some(
+                riviu_core::db::SheetOutboxState::Pending
+                    | riviu_core::db::SheetOutboxState::Failed
+            )
+        )
+    });
+    let every_sheet_row_sent = detail.assignments.iter().all(|assignment| {
+        matches!(
+            sheet_states.get(&assignment.id),
+            Some(riviu_core::db::SheetOutboxState::Sent)
+        )
+    });
+    if all_links_known && every_sheet_row_sent {
+        return (
+            riviu_core::PublishExecutionStatus::Complete,
+            riviu_core::PublishRetryScope::None,
+        );
+    }
+    (
+        riviu_core::PublishExecutionStatus::Partial,
+        if sheet_owed && all_links_known {
+            riviu_core::PublishRetryScope::SheetOnly
+        } else {
+            riviu_core::PublishRetryScope::LinkAndSheet
+        },
+    )
+}
+
+fn stored_campaign_input_digest(
+    request: &PublishCampaignRequest,
+    detail: &PublishCampaignDetail,
+) -> anyhow::Result<String> {
+    let stable = serde_json::json!({
+        "schemaVersion": 1,
+        "request": request,
+        "bundles": detail.bundles,
+        "targets": detail.assignments.iter().map(|assignment| serde_json::json!({
+            "ordinal": assignment.ordinal,
+            "bundleId": assignment.bundle_id,
+            "udid": assignment.udid,
+        })).collect::<Vec<_>>(),
+    });
+    Ok(frame_sha256(&serde_json::to_vec(&stable)?))
+}
+
+fn publish_execution_report(
+    request: &PublishCampaignRequest,
+    result: &riviu_core::PublishCampaignExecutionResult,
+) -> anyhow::Result<serde_json::Value> {
+    Ok(serde_json::json!({
+        "targetSnapshot": request.target_snapshot,
+        "result": serde_json::to_value(result)?,
+    }))
 }
 
 #[tauri::command]
@@ -354,6 +904,16 @@ fn assignment_already_posted(state: &riviu_core::PublishCampaignState) -> bool {
     matches!(state, riviu_core::PublishCampaignState::Succeeded)
 }
 
+fn record_transfer_write_ahead(db: &Database, assignment_id: &str) -> anyhow::Result<()> {
+    db.update_publish_assignment_state(
+        assignment_id,
+        riviu_core::PublishCampaignState::Transferring,
+        None,
+        None,
+    )
+    .with_context(|| format!("record transfer write-ahead for {assignment_id}"))
+}
+
 pub(crate) async fn transfer_publish_campaign_inner(
     control: Arc<DeviceControlPlane>,
     db: Arc<Database>,
@@ -367,18 +927,7 @@ pub(crate) async fn transfer_publish_campaign_inner(
     if detail.bundles.is_empty() || detail.assignments.is_empty() {
         anyhow::bail!("publish campaign has no staged bundle or assignment");
     }
-    refuse_unmeasured_media_before_transfer(
-        detail
-            .assignments
-            .iter()
-            .filter(|assignment| !assignment_may_hold_the_post(&assignment.state))
-            .filter_map(|assignment| {
-                detail
-                    .bundles
-                    .iter()
-                    .find(|bundle| bundle.id == assignment.bundle_id)
-            }),
-    )?;
+    refuse_unmeasured_video_assignments_before_transfer(&control, &detail).await?;
     // Refused here too, not only before posting. Transferring first would push media onto a
     // phone that can never be posted from, and then leave it there.
     //
@@ -397,6 +946,12 @@ pub(crate) async fn transfer_publish_campaign_inner(
         ));
     }
     refuse_devices_whose_composer_is_not_measured(reports)?;
+    let sound_participants: Vec<_> = detail
+        .assignments
+        .iter()
+        .filter(|assignment| !assignment_may_hold_the_post(&assignment.state))
+        .collect();
+    refuse_devices_whose_sound_picker_is_not_measured(&control, &sound_participants).await?;
     // And the same argument for the bundle rather than the device: an image count this
     // composer's grid cannot reach fails at `post_one_assignment`, which is *after* the media
     // is on the phone and visible to TikTok.
@@ -501,16 +1056,19 @@ pub(crate) async fn transfer_publish_campaign_inner(
         // was the campaign. A crash mid-transfer left a child nobody would settle, under a
         // campaign that got cancelled, and the media on the phone with no record of it.
         //
-        // A failure to write it is not a reason to abandon the transfer: the row is for
-        // recovery, and losing recovery is better than losing the run.
-        if let Err(error) = db.update_publish_assignment_state(
-            &assignment.id,
-            riviu_core::PublishCampaignState::Transferring,
-            None,
-            None,
-        ) {
-            log::warn!(
-                "could not mark {} in flight before its transfer: {error}",
+        // The write-ahead row is the durable owner of any bytes that leave the desktop.
+        // If it cannot be committed, no lease, copy, MediaStore insert or device command may
+        // follow: after a crash startup can only reconcile children that are actually marked
+        // `transferring`.
+        if let Err(error) = record_transfer_write_ahead(&db, &assignment.id) {
+            let _ = db.settle_publish_transfer(
+                &campaign_id,
+                riviu_core::db::PublishTransferSettle::FailedBeforeDispatch {
+                    error_code: "transfer_write_ahead_failed",
+                },
+            );
+            anyhow::bail!(
+                "không ghi được transfer write-ahead cho {} ({error}); chưa chạm thiết bị",
                 assignment.udid
             );
         }
@@ -703,6 +1261,7 @@ async fn post_one_phone(
     campaign_id: String,
     assignment: riviu_core::PublishAssignmentRecord,
     bundle: riviu_core::PublishBundle,
+    sound_policy: riviu_core::PublishSoundPolicy,
 ) -> Result<(), PhoneFailure> {
     tokio::time::sleep(stagger).await;
     let _permit = gate.acquire().await.map_err(|error| {
@@ -738,6 +1297,7 @@ async fn post_one_phone(
         &campaign_id,
         &assignment,
         &bundle,
+        &sound_policy,
     )
     .await;
     if attempt.claim_refused {
@@ -932,6 +1492,121 @@ async fn readiness_of(control: &DeviceControlPlane, udid: &str) -> PublishReadin
     }
 }
 
+fn sound_plan_for_build(
+    package: &str,
+    locale: &str,
+    version: &str,
+) -> anyhow::Result<riviu_core::tiktok_sound::SoundPickerPlan> {
+    riviu_core::tiktok_sound::SoundPickerPlan::resolve(package, locale, version).ok_or_else(|| {
+        anyhow::anyhow!("sound picker chưa được đo cho {package} / {locale} / {version}")
+    })
+}
+
+fn video_plan_for_build(
+    package: &str,
+    locale: &str,
+    version: &str,
+) -> anyhow::Result<riviu_core::tiktok_composer::VideoPickerPlan> {
+    riviu_core::tiktok_composer::VideoPickerPlan::resolve(package, locale, version).ok_or_else(
+        || {
+            anyhow::anyhow!(
+                "video picker chưa được đo tới editor cho {package} / {locale} / {version}"
+            )
+        },
+    )
+}
+
+/// Refuse an unmeasured video tuple before any campaign media leaves the desktop.
+async fn refuse_unmeasured_video_assignments_before_transfer(
+    control: &DeviceControlPlane,
+    detail: &PublishCampaignDetail,
+) -> anyhow::Result<()> {
+    let mut refusals = Vec::new();
+    for assignment in detail
+        .assignments
+        .iter()
+        .filter(|assignment| !assignment_may_hold_the_post(&assignment.state))
+    {
+        let Some(bundle) = detail
+            .bundles
+            .iter()
+            .find(|bundle| bundle.id == assignment.bundle_id)
+        else {
+            continue;
+        };
+        if !matches!(bundle.media_kind, riviu_core::PublishMediaKind::Video) {
+            continue;
+        }
+        if !bundle_media_shape_is_ready(bundle, route_of(control, &assignment.udid)) {
+            refusals.push(format!(
+                "{}: bundle video không còn đúng snapshot",
+                assignment.udid
+            ));
+            continue;
+        }
+        if !matches!(route_of(control, &assignment.udid), PublishRoute::Hierarchy) {
+            refusals.push(format!(
+                "{}: video picker chỉ được đo trên đường hierarchy Android",
+                assignment.udid
+            ));
+            continue;
+        }
+        match control.tiktok_build(&assignment.udid).await {
+            Ok((package, version, locale)) => {
+                if let Err(error) = video_plan_for_build(&package, &locale, &version) {
+                    refusals.push(format!("{}: {error}", assignment.udid));
+                }
+            }
+            Err(error) => refusals.push(format!(
+                "{}: không đọc được package/version/locale TikTok ({error})",
+                assignment.udid
+            )),
+        }
+    }
+    anyhow::ensure!(
+        refusals.is_empty(),
+        "không thể chọn video trên {} máy trước khi chuyển media: {}",
+        refusals.len(),
+        refusals.join("; ")
+    );
+    Ok(())
+}
+
+/// Refuse an unknown picker before any campaign media leaves the desktop.
+async fn refuse_devices_whose_sound_picker_is_not_measured(
+    control: &DeviceControlPlane,
+    assignments: &[&riviu_core::PublishAssignmentRecord],
+) -> anyhow::Result<()> {
+    let mut refusals = Vec::new();
+    for assignment in assignments {
+        if !control.reports_element_bounds(&assignment.udid) {
+            refusals.push(format!(
+                "{}: sound picker cho đường pixel chưa được đo",
+                assignment.udid
+            ));
+            continue;
+        }
+        match control.tiktok_build(&assignment.udid).await {
+            Ok((package, version, locale)) => {
+                if let Err(error) = sound_plan_for_build(&package, &locale, &version) {
+                    refusals.push(format!("{}: {error}", assignment.udid));
+                }
+            }
+            Err(error) => refusals.push(format!(
+                "{}: không đọc được package/version/locale TikTok ({error})",
+                assignment.udid
+            )),
+        }
+    }
+    anyhow::ensure!(
+        refusals.is_empty(),
+        "không thể chọn và xác nhận nhạc trên {} máy: {}",
+        refusals.len(),
+        refusals.join("; ")
+    );
+    Ok(())
+}
+
 /// The readiness verdict for one measured build triple.
 ///
 /// Pure and named, because the decision was otherwise reachable only through three adb round
@@ -960,6 +1635,27 @@ fn route_of(control: &DeviceControlPlane, udid: &str) -> PublishRoute {
         PublishRoute::Hierarchy
     } else {
         PublishRoute::PixelGrid
+    }
+}
+
+fn bundle_media_shape_is_ready(bundle: &riviu_core::PublishBundle, route: PublishRoute) -> bool {
+    match bundle.media_kind {
+        riviu_core::PublishMediaKind::Image => {
+            bundle.video.is_none()
+                && !bundle.images.is_empty()
+                && bundle.images.len() <= max_images_for(route)
+        }
+        riviu_core::PublishMediaKind::Video => {
+            bundle.images.is_empty()
+                && bundle.video.as_ref().is_some_and(|video| {
+                    video.byte_len > 0
+                        && video.duration_ms > 0
+                        && !video.path.trim().is_empty()
+                        && !video.file_name.trim().is_empty()
+                        && video.sha256.len() == 64
+                        && video.sha256.bytes().all(|byte| byte.is_ascii_hexdigit())
+                })
+        }
     }
 }
 
@@ -1010,27 +1706,6 @@ fn refuse_assignments_whose_bundle_is_too_large<'a>(
          khỏi chiến dịch, hoặc gán vào máy điều khiển theo cây giao diện — composer đó định vị \
          từng ô nên lưới của nó rộng hơn.",
         oversized.join("; ")
-    );
-    Ok(())
-}
-
-/// Keep validated MP4s off devices until a video picker has been measured end to end.
-///
-/// Scanning and snapshotting video is supported, and the typed core runtime is media-agnostic.
-/// The legacy production adapter still opens the image grid, however, so accepting a video here
-/// would transfer a file that no downstream step can select.
-fn refuse_unmeasured_media_before_transfer<'a>(
-    bundles: impl IntoIterator<Item = &'a riviu_core::PublishBundle>,
-) -> anyhow::Result<()> {
-    let videos: Vec<&str> = bundles
-        .into_iter()
-        .filter(|bundle| matches!(bundle.media_kind, riviu_core::PublishMediaKind::Video))
-        .map(|bundle| bundle.name.as_str())
-        .collect();
-    anyhow::ensure!(
-        videos.is_empty(),
-        "video picker chưa có locator đã đo; chưa chuyển MP4 cho bundle: {}",
-        videos.join(", ")
     );
     Ok(())
 }
@@ -1191,10 +1866,10 @@ pub fn publish_sheet_save_config(
 
 /// Execute the approved publish contract or resume only the obligations after a confirmed post.
 ///
-/// The current measured composer has no sound-picker or video controls. Fresh requests therefore
-/// return typed preflight issues without touching a device. A succeeded campaign is different:
-/// its public effect is already durable, so this command may safely retry own-post link capture
-/// and the idempotent Sheet outbox, and it never enters the composer again.
+/// Fresh requests use only an exact measured sound-picker tuple; video remains fail-closed until
+/// its picker is measured. A succeeded campaign is different: its public effect is already
+/// durable, so this command may safely retry own-post link capture and the idempotent Sheet
+/// outbox, and it never enters the composer again.
 #[tauri::command]
 pub async fn publish_execute(
     state: State<'_, AppState>,
@@ -1207,6 +1882,8 @@ pub async fn publish_execute(
         state.registry.clone(),
         state.db.clone(),
         state.events.clone(),
+        state.active_agent_bundle_id.clone(),
+        Arc::new(state.streams.clone()),
         campaign_id,
         confirmed,
     )
@@ -1215,20 +1892,30 @@ pub async fn publish_execute(
 }
 
 /// Non-Tauri entry point shared by the manual command, scheduled runs and fleet orchestration.
+// These arguments are the independently owned runtime authorities passed by each caller. Keeping
+// them explicit makes it possible to audit that the effect boundary uses the same DB, event bus,
+// control plane and frame source instead of hiding one behind a partially initialized context.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn execute_publish_campaign_inner(
     control: Arc<DeviceControlPlane>,
     registry: riviu_core::DeviceRegistry,
     db: Arc<Database>,
     events: riviu_core::events::EventBus,
+    agent_bundle_id: String,
+    frames: Arc<dyn FrameSource>,
     campaign_id: String,
     confirmed: bool,
 ) -> anyhow::Result<riviu_core::PublishCampaignExecutionResult> {
     let request = db
         .publish_campaign_request(&campaign_id)?
         .ok_or_else(|| anyhow::anyhow!("publish campaign request not found"))?;
-    let detail = db
+    let mut detail = db
         .get_publish_campaign(&campaign_id)?
         .ok_or_else(|| anyhow::anyhow!("publish campaign not found"))?;
+    let input_digest = db
+        .get_publish_execution_snapshot(&campaign_id)?
+        .map(|snapshot| snapshot.input_digest)
+        .unwrap_or(stored_campaign_input_digest(&request, &detail)?);
     let fresh_confirmed = confirmed && request.execution_confirmed;
     let fresh_issues =
         fresh_publish_preflight_issues(&detail, &request.sound_policy, fresh_confirmed);
@@ -1247,6 +1934,88 @@ pub(crate) async fn execute_publish_campaign_inner(
     });
     if has_fresh_assignment || detail.assignments.is_empty() {
         issues.extend(fresh_issues.iter().cloned());
+    }
+
+    // The production command owns the complete phone-side transaction. The typed core
+    // runtime remains the reconciler for an already-confirmed post, but its desktop adapter
+    // cannot split the legacy import/composer context across trait calls without dropping the
+    // lease between phases. Run the proven transfer + composer path once, then feed only the
+    // durable `Succeeded` rows through link/Sheet reconciliation below.
+    if has_fresh_assignment && issues.is_empty() {
+        let fresh_assignments: Vec<_> = detail
+            .assignments
+            .iter()
+            .filter(|assignment| {
+                matches!(
+                    assignment.state,
+                    riviu_core::PublishCampaignState::Queued
+                        | riviu_core::PublishCampaignState::Scheduled
+                        | riviu_core::PublishCampaignState::Ready
+                        | riviu_core::PublishCampaignState::Imported
+                        | riviu_core::PublishCampaignState::FailedBeforeDispatch
+                )
+            })
+            .collect();
+        if let Err(error) =
+            refuse_devices_whose_sound_picker_is_not_measured(&control, &fresh_assignments).await
+        {
+            issues.push(publish_issue(
+                "sound_picker_unmeasured",
+                None,
+                &error.to_string(),
+            ));
+        }
+    }
+    if has_fresh_assignment && issues.is_empty() {
+        if !matches!(
+            detail.campaign.state,
+            riviu_core::PublishCampaignState::Imported
+        ) {
+            if let Err(error) = transfer_publish_campaign_inner(
+                control.clone(),
+                db.clone(),
+                events.clone(),
+                agent_bundle_id,
+                campaign_id.clone(),
+            )
+            .await
+            {
+                issues.push(publish_issue(
+                    "transfer_failed_before_post",
+                    None,
+                    &error.to_string(),
+                ));
+            }
+            detail = db
+                .get_publish_campaign(&campaign_id)?
+                .ok_or_else(|| anyhow::anyhow!("publish campaign disappeared after transfer"))?;
+        }
+        if issues.is_empty()
+            && matches!(
+                detail.campaign.state,
+                riviu_core::PublishCampaignState::Imported
+                    | riviu_core::PublishCampaignState::FailedBeforeDispatch
+            )
+        {
+            if let Err(error) = post_publish_campaign_inner(
+                control.clone(),
+                db.clone(),
+                frames,
+                events.clone(),
+                campaign_id.clone(),
+            )
+            .await
+            {
+                issues.push(publish_issue(
+                    "publish_phone_failed",
+                    None,
+                    &error.to_string(),
+                ));
+            }
+            detail = db
+                .get_publish_campaign(&campaign_id)?
+                .ok_or_else(|| anyhow::anyhow!("publish campaign disappeared after post"))?;
+        }
     }
 
     for assignment in detail.assignments.clone() {
@@ -1312,32 +2081,17 @@ pub(crate) async fn execute_publish_campaign_inner(
                 ));
                 continue;
             }
-            _ => riviu_core::PublishResumePoint::Full,
+            _ => {
+                issues.push(publish_issue(
+                    "assignment_not_confirmed",
+                    Some(&assignment),
+                    "assignment chưa có bằng chứng bài đã đăng; chỉ đường full pipeline được phép xử lý trạng thái này",
+                ));
+                continue;
+            }
         };
 
-        let assignment_issues: Vec<_> = fresh_issues
-            .iter()
-            .filter(|issue| {
-                issue.assignment_id.is_none()
-                    || issue.assignment_id.as_deref() == Some(assignment.id.as_str())
-            })
-            .cloned()
-            .collect();
         let is_resume = matches!(resume, riviu_core::PublishResumePoint::ConfirmedPost { .. });
-        let preflight_error = (!is_resume).then(|| {
-            assignment_issues
-                .iter()
-                .map(|issue| format!("{}: {}", issue.code, issue.message))
-                .collect::<Vec<_>>()
-                .join("; ")
-        });
-        let preflight_error = preflight_error
-            .filter(|reason| !reason.is_empty())
-            .or_else(|| {
-                (!is_resume).then(|| {
-                    "sound_picker_unmeasured: production sound selection is not measured".into()
-                })
-            });
         let mut port = DesktopPublishRuntimePort {
             control: control.clone(),
             registry: registry.clone(),
@@ -1345,7 +2099,6 @@ pub(crate) async fn execute_publish_campaign_inner(
             campaign_id: campaign_id.clone(),
             assignment: assignment.clone(),
             current_evidence,
-            preflight_error,
         };
         let effect_db = db.clone();
         let effect_assignment_id = assignment.id.clone();
@@ -1410,13 +2163,21 @@ pub(crate) async fn execute_publish_campaign_inner(
         riviu_core::PublishExecutionStatus::Partial
     };
     let retry_scope = campaign_retry_scope(status, &results, &issues);
-    Ok(riviu_core::PublishCampaignExecutionResult {
+    let output = riviu_core::PublishCampaignExecutionResult {
         campaign_id,
         status,
         retry_scope,
         issues,
         detail,
-    })
+    };
+    db.save_publish_execution_snapshot(
+        &output.campaign_id,
+        &input_digest,
+        output.status,
+        output.retry_scope,
+        &publish_execution_report(&request, &output)?,
+    )?;
+    Ok(output)
 }
 
 /// Run one due schedule from its immutable request snapshot, then leave a retryable terminal
@@ -1426,6 +2187,8 @@ pub(crate) async fn execute_scheduled_publish_campaign_inner(
     registry: riviu_core::DeviceRegistry,
     db: Arc<Database>,
     events: riviu_core::events::EventBus,
+    agent_bundle_id: String,
+    frames: Arc<dyn FrameSource>,
     campaign_id: String,
 ) -> anyhow::Result<riviu_core::PublishCampaignExecutionResult> {
     let request = db
@@ -1436,6 +2199,8 @@ pub(crate) async fn execute_scheduled_publish_campaign_inner(
         registry,
         db.clone(),
         events.clone(),
+        agent_bundle_id,
+        frames,
         campaign_id.clone(),
         request.execution_confirmed,
     )
@@ -1463,6 +2228,15 @@ pub(crate) async fn execute_scheduled_publish_campaign_inner(
                 .unwrap_or_default(),
         });
     }
+    if let Some(snapshot) = db.get_publish_execution_snapshot(&campaign_id)? {
+        db.save_publish_execution_snapshot(
+            &campaign_id,
+            &snapshot.input_digest,
+            result.status,
+            result.retry_scope,
+            &publish_execution_report(&request, &result)?,
+        )?;
+    }
     Ok(result)
 }
 
@@ -1473,15 +2247,11 @@ struct DesktopPublishRuntimePort {
     campaign_id: String,
     assignment: riviu_core::PublishAssignmentRecord,
     current_evidence: Option<serde_json::Value>,
-    preflight_error: Option<String>,
 }
 
 #[async_trait::async_trait]
 impl riviu_core::PublishRuntimePort for DesktopPublishRuntimePort {
     async fn preflight(&mut self, input: &riviu_core::PublishExecutionInput) -> Result<(), String> {
-        if let Some(reason) = self.preflight_error.take() {
-            return Err(reason);
-        }
         if matches!(
             input.resume,
             riviu_core::PublishResumePoint::ConfirmedPost {
@@ -1630,6 +2400,21 @@ fn campaign_retry_scope(
         })
     {
         return riviu_core::PublishRetryScope::None;
+    }
+    if issues.iter().any(|issue| {
+        matches!(
+            issue.code.as_str(),
+            "transfer_failed_before_post"
+                | "publish_phone_failed"
+                | "assignment_not_confirmed"
+                | "sound_picker_unmeasured"
+                | "video_composer_unmeasured"
+                | "confirmation_required"
+                | "campaign_empty"
+                | "bundle_missing"
+        )
+    }) {
+        return riviu_core::PublishRetryScope::FullPipeline;
     }
     for scope in [
         riviu_core::PublishRetryScope::FullPipeline,
@@ -1785,18 +2570,6 @@ fn fresh_publish_preflight_issues(
                 "caption rỗng không thể chứng minh bài của chính lượt này khi lấy link",
             ));
         }
-        if matches!(bundle.media_kind, riviu_core::PublishMediaKind::Video) {
-            issues.push(publish_issue(
-                "video_composer_unmeasured",
-                Some(assignment),
-                "MP4 đã được validate nhưng picker video chưa có locator đã đo",
-            ));
-        }
-        issues.push(publish_issue(
-            "sound_picker_unmeasured",
-            Some(assignment),
-            "chưa có locator đã đo để đọc tối đa năm bài nhạc, chọn và re-confirm trước Post",
-        ));
     }
     issues
 }
@@ -1931,6 +2704,9 @@ pub(crate) async fn post_publish_campaign_inner(
     events: riviu_core::events::EventBus,
     campaign_id: String,
 ) -> anyhow::Result<PublishCampaignDetail> {
+    let request = db
+        .publish_campaign_request(&campaign_id)?
+        .ok_or_else(|| anyhow::anyhow!("publish campaign request not found"))?;
     let detail = db
         .get_publish_campaign(&campaign_id)?
         .ok_or_else(|| anyhow::anyhow!("publish campaign not found"))?;
@@ -1970,6 +2746,7 @@ pub(crate) async fn post_publish_campaign_inner(
         ));
     }
     refuse_devices_whose_composer_is_not_measured(reports)?;
+    refuse_devices_whose_sound_picker_is_not_measured(&control, &participants).await?;
     // Asked per device, not once for the campaign. A campaign spans several
     // phones and a fleet can be mixed, so a single fleet-wide answer would
     // report one device's agent on behalf of the rest. Still fails fast, before
@@ -2043,6 +2820,7 @@ pub(crate) async fn post_publish_campaign_inner(
             campaign_id.clone(),
             (*assignment).clone(),
             bundle.clone(),
+            request.sound_policy.clone(),
         )));
     }
 
@@ -2134,6 +2912,7 @@ async fn post_one_assignment(
     campaign_id: &str,
     assignment: &riviu_core::PublishAssignmentRecord,
     bundle: &riviu_core::PublishBundle,
+    sound_policy: &riviu_core::PublishSoundPolicy,
 ) -> AssignmentPostAttempt {
     let finish = |outcome| AssignmentPostAttempt {
         outcome,
@@ -2143,19 +2922,23 @@ async fn post_one_assignment(
     // `bail!`s that the caller turned into `uncertain` — permanently unclaimable — for a
     // caption nobody could have posted and a phone nobody had touched.
     match bundle.media_kind {
-        riviu_core::PublishMediaKind::Image if bundle.images.is_empty() => {
+        riviu_core::PublishMediaKind::Image
+            if !bundle_media_shape_is_ready(bundle, PublishRoute::Hierarchy) =>
+        {
             return finish(PostOutcome::NothingPublished(format!(
-                "bundle {} has no images",
+                "bundle {} has an invalid image snapshot",
                 bundle.id
             )))
         }
-        riviu_core::PublishMediaKind::Video => {
+        riviu_core::PublishMediaKind::Video
+            if !bundle_media_shape_is_ready(bundle, PublishRoute::Hierarchy) =>
+        {
             return finish(PostOutcome::NothingPublished(format!(
-                "bundle {} is video but the production video picker is not measured",
+                "bundle {} has an invalid video snapshot",
                 bundle.id
             )))
         }
-        riviu_core::PublishMediaKind::Image => {}
+        riviu_core::PublishMediaKind::Image | riviu_core::PublishMediaKind::Video => {}
     }
     if bundle.caption.chars().count() > 2200 {
         return finish(PostOutcome::NothingPublished(format!(
@@ -2205,38 +2988,52 @@ async fn post_one_assignment(
         let cleanup = tidy_up_the_imported_media(control, context, &assignment.udid, &import).await;
         return finish(fold_cleanup_into(refusal, cleanup));
     }
-    let intent = serde_json::json!({
-        "effectIntent": "post",
-        "mediaKind": bundle.media_kind,
-        "bundleId": bundle.id,
-        "captionSha256": bundle.caption_sha256,
-    })
-    .to_string();
+    if matches!(bundle.media_kind, riviu_core::PublishMediaKind::Video)
+        && !session.supports_element_bounds()
+    {
+        let cleanup = tidy_up_the_imported_media(control, context, &assignment.udid, &import).await;
+        return finish(fold_cleanup_into(
+            PostOutcome::NothingPublished(format!(
+                "{}: video picker is measured only on the Android hierarchy route",
+                assignment.udid
+            )),
+            cleanup,
+        ));
+    }
     let mut effect_claimed = false;
     let mut claim_refused = false;
     let action_result = {
-        let mut before_post = || -> anyhow::Result<()> {
-            if effect_claimed {
-                anyhow::bail!("effect-intent callback invoked more than once");
-            }
-            match db.claim_publish_assignment_for_posting(&assignment.id, &intent) {
-                Ok(true) => {
-                    effect_claimed = true;
-                    Ok(())
+        let mut before_post =
+            |sound_selection: Option<&riviu_core::SoundSelectionEvidence>| -> anyhow::Result<()> {
+                if effect_claimed {
+                    anyhow::bail!("effect-intent callback invoked more than once");
                 }
-                Ok(false) => {
-                    claim_refused = true;
-                    anyhow::bail!(
-                        "{} đã đăng, đang được đăng, hoặc chiến dịch đã dừng — không tap Post",
-                        assignment.udid
-                    )
+                let intent = serde_json::json!({
+                    "effectIntent": "post",
+                    "mediaKind": bundle.media_kind,
+                    "bundleId": bundle.id,
+                    "captionSha256": bundle.caption_sha256,
+                    "soundSelection": sound_selection,
+                })
+                .to_string();
+                match db.claim_publish_assignment_for_posting(&assignment.id, &intent) {
+                    Ok(true) => {
+                        effect_claimed = true;
+                        Ok(())
+                    }
+                    Ok(false) => {
+                        claim_refused = true;
+                        anyhow::bail!(
+                            "{} đã đăng, đang được đăng, hoặc chiến dịch đã dừng — không tap Post",
+                            assignment.udid
+                        )
+                    }
+                    Err(error) => {
+                        claim_refused = true;
+                        Err(error)
+                    }
                 }
-                Err(error) => {
-                    claim_refused = true;
-                    Err(error)
-                }
-            }
-        };
+            };
         if session.supports_element_bounds() {
             post_through_the_composer(
                 control,
@@ -2245,10 +3042,12 @@ async fn post_one_assignment(
                 &assignment.udid,
                 bundle,
                 &import,
+                sound_policy,
                 &mut before_post,
             )
             .await
         } else {
+            let mut before_pixel_post = || before_post(None);
             post_through_the_pixel_grid(
                 frames,
                 session.as_ref(),
@@ -2256,7 +3055,7 @@ async fn post_one_assignment(
                 &assignment.udid,
                 bundle,
                 &import,
-                &mut before_post,
+                &mut before_pixel_post,
             )
             .await
         }
@@ -2809,7 +3608,7 @@ fn import_id_from_evidence(raw: &str) -> Option<String> {
         .map(str::to_string)
 }
 
-fn parse_run_at(raw: &str) -> Result<NaiveDateTime, CommandError> {
+fn parse_run_at(raw: &str) -> Result<NaiveDateTime, String> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
         return Err("runAt cannot be empty".into());
@@ -2977,6 +3776,9 @@ async fn post_through_the_pixel_grid(
 /// second time because the two checks answer at different moments and the phone can change in
 /// between: an app that updated between transfer and post has a `versionName` this catalogue
 /// may not know, and the resource ids it keys on are reassigned on every rebuild.
+// The request fields remain explicit because the source-order regression tests verify that the
+// immutable campaign/card identity and the one-shot callback reach the same measured composer.
+#[allow(clippy::too_many_arguments)]
 async fn post_through_the_composer(
     control: &DeviceControlPlane,
     session: &dyn riviu_core::driver::UiSession,
@@ -2984,10 +3786,13 @@ async fn post_through_the_composer(
     udid: &str,
     bundle: &riviu_core::PublishBundle,
     import: &str,
-    before_post: &mut (dyn FnMut() -> anyhow::Result<()> + Send),
+    sound_policy: &riviu_core::PublishSoundPolicy,
+    before_post: &mut (dyn FnMut(Option<&riviu_core::SoundSelectionEvidence>) -> anyhow::Result<()>
+              + Send),
 ) -> PostOutcome {
     use riviu_core::tiktok_composer::{
-        publish_carousel_with_effect_intent, CarouselRequest, ComposerPlan, ComposerVerdict, Screen,
+        publish_carousel_with_sound_effect_intent, CarouselRequest, ComposerPlan, ComposerVerdict,
+        Screen,
     };
 
     // **Every refusal in this block happens before the first tap**, so each is
@@ -3016,6 +3821,18 @@ async fn post_through_the_composer(
             ComposerPlan::missing_to_publish(&labels)
         ));
     }
+    let sound_plan = match sound_plan_for_build(&package, &language, &version) {
+        Ok(plan) => plan,
+        Err(error) => return refuse(error.to_string()),
+    };
+    let video_plan = if matches!(bundle.media_kind, riviu_core::PublishMediaKind::Video) {
+        match video_plan_for_build(&package, &language, &version) {
+            Ok(plan) => Some(plan),
+            Err(error) => return refuse(error.to_string()),
+        }
+    } else {
+        None
+    };
 
     let (width, height) = match riviu_core::screen::measured_screen_size(session).await {
         Ok(size) => size,
@@ -3029,29 +3846,64 @@ async fn post_through_the_composer(
     // owns the policy rather than assembled here.
     let plan_tap = riviu_core::tiktok_composer::human_taps(screen);
 
-    let request = CarouselRequest {
-        album: import,
-        images: bundle.images.len(),
-        caption: &bundle.caption,
-        screen,
-    };
     let stop = std::sync::atomic::AtomicBool::new(false);
     // The callback divides a transport error into the provably pre-Post and may-be-live halves.
     let mut crossed_effect_boundary = false;
-    let verdict =
-        match publish_carousel_with_effect_intent(session, plan, plan_tap, &request, &stop, || {
-            before_post()?;
-            crossed_effect_boundary = true;
-            Ok(())
-        })
-        .await
-        {
-            Ok(verdict) => verdict,
-            Err(error) if crossed_effect_boundary => {
-                return PostOutcome::Unknown(format!("{udid}: {error}"))
-            }
-            Err(error) => return PostOutcome::NothingPublished(format!("{udid}: {error}")),
-        };
+    let mut record_effect_intent = |selection: &riviu_core::SoundSelectionEvidence| {
+        before_post(Some(selection))?;
+        crossed_effect_boundary = true;
+        Ok(())
+    };
+    let result = match bundle.media_kind {
+        riviu_core::PublishMediaKind::Image => {
+            let request = CarouselRequest {
+                album: import,
+                images: bundle.images.len(),
+                caption: &bundle.caption,
+                screen,
+            };
+            publish_carousel_with_sound_effect_intent(
+                session,
+                plan,
+                sound_plan,
+                sound_policy,
+                plan_tap,
+                &request,
+                &stop,
+                &mut record_effect_intent,
+            )
+            .await
+        }
+        riviu_core::PublishMediaKind::Video => {
+            use riviu_core::tiktok_composer::{
+                publish_video_with_sound_effect_intent, VideoRequest,
+            };
+            let request = VideoRequest {
+                album: import,
+                caption: &bundle.caption,
+                screen,
+            };
+            publish_video_with_sound_effect_intent(
+                session,
+                plan,
+                video_plan.expect("video branch resolves its tuple before the first tap"),
+                sound_plan,
+                sound_policy,
+                plan_tap,
+                &request,
+                &stop,
+                &mut record_effect_intent,
+            )
+            .await
+        }
+    };
+    let (verdict, sound_selection) = match result {
+        Ok(verdict) => verdict,
+        Err(error) if crossed_effect_boundary => {
+            return PostOutcome::Unknown(format!("{udid}: {error}"))
+        }
+        Err(error) => return PostOutcome::NothingPublished(format!("{udid}: {error}")),
+    };
     let mut evidence = serde_json::json!({
         "state": if verdict.is_posted() { "posted" } else { "not_posted" },
         "route": "hierarchy",
@@ -3059,10 +3911,24 @@ async fn post_through_the_composer(
         "campaignId": campaign_id,
         "bundleId": bundle.id,
         "importId": import,
+        "mediaKind": bundle.media_kind,
         "imageCount": bundle.images.len(),
         "captionSha256": bundle.caption_sha256,
         "labels": labels.provenance(),
+        "soundPickerProvenance": sound_plan.provenance(),
+        "soundSelection": sound_selection,
     });
+    if let Some(video) = bundle.video.as_ref() {
+        evidence["videoSha256"] = serde_json::Value::String(video.sha256.clone());
+        evidence["videoFileName"] = serde_json::Value::String(video.file_name.clone());
+        evidence["videoDurationMs"] = serde_json::Value::from(video.duration_ms);
+        evidence["videoPickerProvenance"] = serde_json::Value::String(
+            video_plan
+                .expect("video evidence follows a resolved video tuple")
+                .provenance()
+                .to_string(),
+        );
+    }
     match verdict {
         ComposerVerdict::Posted => {
             // **Through the route, never off the feed.** The first wiring called
@@ -3103,6 +3969,7 @@ mod tests {
     use super::assignment_already_posted;
     use super::assignment_may_hold_the_post;
     use super::bundle_for_assignment;
+    use super::bundle_media_shape_is_ready;
     use super::deliver_assignment_sheet_row;
     use super::evidence_with_post_url;
     use super::fold_cleanup_into;
@@ -3111,13 +3978,18 @@ mod tests {
     use super::missing_link_locators;
     use super::post_url_owed;
     use super::poster_identity;
+    use super::publish_preflight_digest;
     use super::readiness_of_build;
+    use super::reconciled_publish_status;
+    use super::record_transfer_write_ahead;
     use super::refuse_assignments_whose_bundle_is_too_large;
     use super::refuse_devices_whose_composer_is_not_measured;
-    use super::refuse_unmeasured_media_before_transfer;
     use super::refuse_when_the_route_authorities_disagree;
+    use super::require_current_preflight_digest;
+    use super::resolve_preflight_target;
     use super::state_for_outcome;
     use super::token_must_be_restated;
+    use super::video_plan_for_build;
     use super::LockScreening;
     use super::PostOutcome;
     use super::IOS_PIXEL_GRID_MAX_IMAGES;
@@ -3519,6 +4391,22 @@ mod tests {
         }
     }
 
+    fn test_video_bundle(id: &str) -> riviu_core::PublishBundle {
+        let mut bundle = test_bundle(id);
+        bundle.media_kind = riviu_core::PublishMediaKind::Video;
+        bundle.video = Some(riviu_core::PublishVideo {
+            path: format!("/managed/req-7/{id}/clip.mp4"),
+            file_name: "clip.mp4".into(),
+            sha256: "a".repeat(64),
+            byte_len: 1_583_537,
+            duration_ms: 8_000,
+            video_codec: riviu_core::PublishVideoCodec::H264Avc,
+            audio_codec: Some(riviu_core::PublishAudioCodec::Aac),
+        });
+        bundle.total_bytes = 1_583_537;
+        bundle
+    }
+
     fn test_assignment(
         id: &str,
         bundle_id: &str,
@@ -3535,6 +4423,253 @@ mod tests {
             evidence_json: None,
             error_code: None,
         }
+    }
+
+    #[test]
+    fn restart_reconciliation_never_reposts_an_ambiguous_or_confirmed_assignment() {
+        use riviu_core::PublishCampaignState as CampaignState;
+        use riviu_core::{PublishExecutionStatus as Status, PublishRetryScope as Scope};
+
+        let detail_for = |state: CampaignState, evidence: Option<serde_json::Value>| {
+            let bundle = test_bundle("bundle-1");
+            let mut assignment = test_assignment("assignment-1", &bundle.id, "phone-1");
+            assignment.state = state.clone();
+            assignment.evidence_json = evidence.map(|value| value.to_string());
+            riviu_core::PublishCampaignDetail {
+                campaign: riviu_core::PublishCampaignRecord {
+                    id: "campaign-1".into(),
+                    request_id: "request-1".into(),
+                    source_root: "C:/fixture".into(),
+                    state,
+                    run_at: None,
+                    visibility: riviu_core::PublishVisibility::Public,
+                    cleanup_policy:
+                        riviu_core::PublishCleanupPolicy::DeleteImportedAssetsAfterVerified,
+                    assignments: Vec::new(),
+                    created_at: "2026-09-04T00:00:00Z".into(),
+                    updated_at: "2026-09-04T00:00:01Z".into(),
+                    error_code: None,
+                },
+                bundles: vec![bundle],
+                assignments: vec![assignment],
+                events: Vec::new(),
+            }
+        };
+
+        let empty = HashMap::new();
+        assert_eq!(
+            reconciled_publish_status(&detail_for(CampaignState::Posting, None), &empty),
+            (Status::Uncertain, Scope::None)
+        );
+        assert_eq!(
+            reconciled_publish_status(&detail_for(CampaignState::Succeeded, None), &empty),
+            (Status::Partial, Scope::LinkAndSheet)
+        );
+
+        let linked = detail_for(
+            CampaignState::Succeeded,
+            Some(serde_json::json!({
+                "post": {"postUrl": "https://www.tiktok.com/@fixture/video/7400000000000000001"}
+            })),
+        );
+        assert_eq!(
+            reconciled_publish_status(
+                &linked,
+                &HashMap::from([(
+                    "assignment-1".to_string(),
+                    riviu_core::db::SheetOutboxState::Pending,
+                )])
+            ),
+            (Status::Partial, Scope::SheetOnly)
+        );
+        assert_eq!(
+            reconciled_publish_status(
+                &linked,
+                &HashMap::from([(
+                    "assignment-1".to_string(),
+                    riviu_core::db::SheetOutboxState::Sent,
+                )])
+            ),
+            (Status::Complete, Scope::None)
+        );
+
+        let mut cancelled = detail_for(CampaignState::Cancelled, None);
+        cancelled.assignments[0].state = CampaignState::Ready;
+        assert_eq!(
+            reconciled_publish_status(&cancelled, &empty),
+            (Status::Partial, Scope::None)
+        );
+    }
+
+    #[test]
+    fn preflight_digest_binds_caption_target_and_observed_tiktok_build() {
+        let request = riviu_core::PublishPreflightRequest {
+            source_root: "C:/source".into(),
+            bundle_ids: vec!["bundle-1".into()],
+            udids: vec!["phone-1".into()],
+            target_ref: Some(riviu_core::TargetRef::Explicit {
+                udids: vec!["phone-1".into()],
+            }),
+            run_at: None,
+            caption_overrides: Default::default(),
+            sound_policy: riviu_core::PublishSoundPolicy::Default,
+        };
+        let mut bundle = test_bundle("bundle-1");
+        bundle.caption = "caption-a".into();
+        bundle.caption_sha256 = super::frame_sha256(bundle.caption.as_bytes());
+        let observations = vec![serde_json::json!({
+            "ordinal": 0,
+            "udid": "phone-1",
+            "number": 1,
+            "alias": "Máy 1",
+            "packageName": "com.ss.android.ugc.trill",
+            "version": "38.3.2",
+            "locale": "en",
+            "requiredBytes": 1024,
+            "storage": "pass",
+            "availableBytes": 4096
+        })];
+        let target_snapshot = riviu_core::resolve_target(
+            &riviu_core::TargetRef::Explicit {
+                udids: request.udids.clone(),
+            },
+            &["phone-1".into()],
+            &[],
+            &[],
+        )
+        .expect("target snapshot");
+        let approved = publish_preflight_digest(
+            &request,
+            std::slice::from_ref(&bundle),
+            &target_snapshot,
+            &observations,
+        )
+        .expect("digest");
+        let report = riviu_core::PublishPreflightReport {
+            input_digest: approved.clone(),
+            target_snapshot: target_snapshot.clone(),
+            can_execute: true,
+            assignments: Vec::new(),
+            issues: Vec::new(),
+            sheet_configured: false,
+        };
+        require_current_preflight_digest(&report, &approved).expect("same snapshot is approved");
+
+        let mut changed_free_space = observations.clone();
+        changed_free_space[0]["availableBytes"] = serde_json::json!(8192);
+        let changed_free_space_digest = publish_preflight_digest(
+            &request,
+            std::slice::from_ref(&bundle),
+            &target_snapshot,
+            &changed_free_space,
+        )
+        .expect("free-space digest");
+        assert_eq!(
+            approved, changed_free_space_digest,
+            "exact free space may move while the stable threshold verdict stays approved"
+        );
+
+        let mut failed_storage = changed_free_space;
+        failed_storage[0]["storage"] = serde_json::json!("fail");
+        failed_storage[0]["availableBytes"] = serde_json::json!(512);
+        let failed_storage_digest = publish_preflight_digest(
+            &request,
+            std::slice::from_ref(&bundle),
+            &target_snapshot,
+            &failed_storage,
+        )
+        .expect("storage verdict digest");
+        assert_ne!(
+            approved, failed_storage_digest,
+            "crossing the required threshold must invalidate approval"
+        );
+
+        let mut changed_caption = bundle.clone();
+        changed_caption.caption = "caption-b".into();
+        changed_caption.caption_sha256 = super::frame_sha256(changed_caption.caption.as_bytes());
+        let caption_digest = publish_preflight_digest(
+            &request,
+            &[changed_caption],
+            &target_snapshot,
+            &observations,
+        )
+        .expect("caption digest");
+        assert_ne!(approved, caption_digest);
+
+        let mut changed_target = request.clone();
+        changed_target.udids[0] = "phone-2".into();
+        let target_digest = publish_preflight_digest(
+            &changed_target,
+            &[bundle.clone()],
+            &target_snapshot,
+            &observations,
+        )
+        .expect("target digest");
+        assert_ne!(approved, target_digest);
+
+        let mut changed_roster = target_snapshot.clone();
+        changed_roster.roster_sha256 = "f".repeat(64);
+        let roster_digest =
+            publish_preflight_digest(&request, &[bundle.clone()], &changed_roster, &observations)
+                .expect("roster digest");
+        assert_ne!(approved, roster_digest);
+
+        let changed_build = vec![serde_json::json!({
+            "ordinal": 0,
+            "udid": "phone-1",
+            "number": 1,
+            "alias": "Máy 1",
+            "packageName": "com.ss.android.ugc.trill",
+            "version": "38.3.3",
+            "locale": "en"
+        })];
+        let build_digest =
+            publish_preflight_digest(&request, &[bundle], &target_snapshot, &changed_build)
+                .expect("build digest");
+        assert_ne!(approved, build_digest);
+
+        let stale = riviu_core::PublishPreflightReport {
+            input_digest: build_digest,
+            ..report
+        };
+        let error = require_current_preflight_digest(&stale, &approved)
+            .expect_err("changed observed build must invalidate approval");
+        assert!(error.to_string().contains("preflight đã cũ"));
+    }
+
+    #[test]
+    fn semantic_publish_target_keeps_disconnected_group_members_in_the_snapshot() {
+        let request = riviu_core::PublishPreflightRequest {
+            source_root: "C:/source".into(),
+            bundle_ids: vec!["bundle-1".into()],
+            udids: vec!["phone-a".into()],
+            target_ref: Some(riviu_core::TargetRef::Group {
+                group_id: "morning".into(),
+            }),
+            run_at: None,
+            caption_overrides: Default::default(),
+            sound_policy: riviu_core::PublishSoundPolicy::Default,
+        };
+        let groups = vec![riviu_core::DeviceGroup {
+            id: "morning".into(),
+            name: "Ca sáng".into(),
+            color: "#ff6a00".into(),
+            udids: vec!["phone-a".into(), "phone-offline".into()],
+            created_at: "2026-09-05T00:00:00Z".into(),
+        }];
+        let snapshot = resolve_preflight_target(&request, &["phone-a".into()], &[], &groups)
+            .expect("resolve group");
+        assert_eq!(snapshot.target_ref, request.target_ref.clone().unwrap());
+        assert_eq!(snapshot.included[0].udid, "phone-a");
+        assert_eq!(snapshot.excluded[0].device.udid, "phone-offline");
+        assert_eq!(
+            snapshot.excluded[0].reason,
+            riviu_core::ExcludedDeviceReason::NotInRoster
+        );
+
+        let mut stale = request;
+        stale.udids.clear();
+        assert!(resolve_preflight_target(&stale, &["phone-a".into()], &[], &groups).is_err());
     }
 
     #[test]
@@ -3592,18 +4727,53 @@ mod tests {
     }
 
     #[test]
-    fn video_is_refused_before_the_legacy_transfer_path_touches_a_phone() {
+    fn video_snapshot_is_validated_and_picker_readiness_is_tuple_scoped() {
         let mut image = test_bundle("image");
+        image.images.push(riviu_core::PublishImage {
+            path: "/managed/image/01.jpg".into(),
+            file_name: "01.jpg".into(),
+            order: 0,
+            sha256: "b".repeat(64),
+            byte_len: 100,
+            width: 1080,
+            height: 1920,
+        });
         image.caption = "caption".into();
         image.caption_sha256 = super::frame_sha256(image.caption.as_bytes());
-        let mut video = test_bundle("video");
+        let mut video = test_video_bundle("video");
         video.caption = "caption".into();
         video.caption_sha256 = super::frame_sha256(video.caption.as_bytes());
-        video.media_kind = riviu_core::PublishMediaKind::Video;
-        let error = refuse_unmeasured_media_before_transfer([&image, &video])
-            .expect_err("the legacy composer has no measured video picker");
-        assert!(error.to_string().contains("video"), "{error:#}");
-        refuse_unmeasured_media_before_transfer([&image]).expect("image route remains compatible");
+        assert!(bundle_media_shape_is_ready(&image, PublishRoute::Hierarchy));
+        assert!(bundle_media_shape_is_ready(&video, PublishRoute::Hierarchy));
+        assert!(video_plan_for_build("com.ss.android.ugc.trill", "en", "38.3.2").is_ok());
+        assert!(video_plan_for_build("com.zhiliaoapp.musically", "en", "46.2.1").is_err());
+
+        video.video = None;
+        assert!(!bundle_media_shape_is_ready(
+            &video,
+            PublishRoute::Hierarchy
+        ));
+        video.video = test_video_bundle("video").video;
+        video.images = image.images;
+        assert!(
+            !bundle_media_shape_is_ready(&video, PublishRoute::Hierarchy),
+            "mixed media must fail before transfer"
+        );
+    }
+
+    #[test]
+    fn hierarchy_video_uses_the_typed_sound_and_one_shot_post_state_machine() {
+        let body = code_of("async fn post_through_the_composer(");
+        let joined = body.join("\n");
+        assert!(joined.contains("publish_video_with_sound_effect_intent("));
+        assert!(joined.contains("video_plan_for_build(&package, &language, &version)"));
+        assert!(joined.contains("&mut record_effect_intent"));
+        assert!(joined.contains("crossed_effect_boundary = true"));
+        assert!(joined.contains("videoPickerProvenance"));
+        assert!(
+            !joined.contains("reach_video_edit_step("),
+            "production must continue through sound/readback/effect intent, not stop at the scout boundary"
+        );
     }
 
     #[test]
@@ -3642,14 +4812,13 @@ mod tests {
     }
 
     #[test]
-    fn fresh_executor_refuses_unmeasured_sound_and_video_before_device_work() {
+    fn fresh_executor_accepts_structurally_valid_video_and_defers_to_the_live_tuple_gate() {
         let mut image = test_bundle("image");
         image.caption = "caption".into();
         image.caption_sha256 = super::frame_sha256(image.caption.as_bytes());
-        let mut video = test_bundle("video");
+        let mut video = test_video_bundle("video");
         video.caption = "caption".into();
         video.caption_sha256 = super::frame_sha256(video.caption.as_bytes());
-        video.media_kind = riviu_core::PublishMediaKind::Video;
         let detail = |bundle: riviu_core::PublishBundle| {
             let assignment = test_assignment("assignment-1", &bundle.id, "phone-1");
             riviu_core::PublishCampaignDetail {
@@ -3680,13 +4849,7 @@ mod tests {
             },
             true,
         );
-        assert_eq!(
-            image_issues
-                .iter()
-                .map(|issue| issue.code.as_str())
-                .collect::<Vec<_>>(),
-            ["sound_picker_unmeasured"]
-        );
+        assert!(image_issues.is_empty());
 
         let mut sheet_pending = test_bundle("sheet-pending");
         sheet_pending.caption = "caption".into();
@@ -3696,12 +4859,8 @@ mod tests {
             &riviu_core::PublishSoundPolicy::Default,
             true,
         );
-        assert_eq!(
-            missing_sheet_issues
-                .iter()
-                .map(|issue| issue.code.as_str())
-                .collect::<Vec<_>>(),
-            ["sound_picker_unmeasured"],
+        assert!(
+            missing_sheet_issues.is_empty(),
             "missing Sheet config is a downstream Partial, not a reason to block Post"
         );
 
@@ -3710,12 +4869,9 @@ mod tests {
             &riviu_core::PublishSoundPolicy::Default,
             true,
         );
-        assert_eq!(
-            video_issues
-                .iter()
-                .map(|issue| issue.code.as_str())
-                .collect::<Vec<_>>(),
-            ["video_composer_unmeasured", "sound_picker_unmeasured"]
+        assert!(
+            video_issues.is_empty(),
+            "the live preflight and deep composer gate own tuple readiness: {video_issues:?}"
         );
 
         let mut cancelled = detail(test_bundle("cancelled"));
@@ -3749,6 +4905,7 @@ mod tests {
             cleanup_policy: riviu_core::PublishCleanupPolicy::DeleteImportedAssetsAfterVerified,
             sound_policy: riviu_core::PublishSoundPolicy::Default,
             execution_confirmed: true,
+            target_snapshot: None,
         };
         let campaign = db
             .create_publish_campaign(&request, &[bundle])
@@ -3783,6 +4940,62 @@ mod tests {
         assert_eq!(pending.attempts, 0, "no HTTP attempt was made");
         assert_eq!(pending.last_error, None);
 
+        drop(db);
+        std::fs::remove_file(path).expect("remove fixture database");
+    }
+
+    #[test]
+    fn transfer_write_ahead_failure_stops_before_any_device_call() {
+        let path =
+            std::env::temp_dir().join(format!("riviu-transfer-write-ahead-{}.db", Uuid::new_v4()));
+        let backup = path.with_extension("db.fixture-backup");
+        let db = super::Database::open(&path).expect("open fixture database");
+        let mut bundle = test_bundle("bundle-write-ahead");
+        bundle.caption = "caption".into();
+        bundle.caption_sha256 = super::frame_sha256(bundle.caption.as_bytes());
+        let request = riviu_core::PublishCampaignRequest {
+            request_id: Uuid::new_v4().to_string(),
+            source_root: "C:/fixture".into(),
+            bundle_ids: vec![bundle.id.clone()],
+            udids: vec!["phone-1".into()],
+            run_at: None,
+            visibility: riviu_core::PublishVisibility::Public,
+            cleanup_policy: riviu_core::PublishCleanupPolicy::DeleteImportedAssetsAfterVerified,
+            sound_policy: riviu_core::PublishSoundPolicy::Default,
+            execution_confirmed: true,
+            target_snapshot: None,
+        };
+        let campaign = db
+            .create_publish_campaign(&request, &[bundle])
+            .expect("create campaign");
+        let assignment = db
+            .get_publish_campaign(&campaign.id)
+            .expect("read campaign")
+            .expect("campaign exists")
+            .assignments
+            .into_iter()
+            .next()
+            .expect("assignment exists");
+
+        // Database opens are per operation. Replacing the file with a directory injects a
+        // deterministic connection failure without exposing a production SQL backdoor.
+        std::fs::rename(&path, &backup).expect("move fixture database");
+        std::fs::create_dir(&path).expect("install write failpoint");
+        let device_calls = std::sync::atomic::AtomicUsize::new(0);
+        let result = (|| -> anyhow::Result<()> {
+            record_transfer_write_ahead(&db, &assignment.id)?;
+            device_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(())
+        })();
+        assert!(result.is_err(), "the injected write failure must propagate");
+        assert_eq!(
+            device_calls.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "no device operation may run without durable transfer ownership"
+        );
+
+        std::fs::remove_dir(&path).expect("remove failpoint");
+        std::fs::rename(&backup, &path).expect("restore fixture database");
         drop(db);
         std::fs::remove_file(path).expect("remove fixture database");
     }
@@ -4041,13 +5254,22 @@ mod tests {
             .position(|line| line.contains("post_through_the_pixel_grid("))
             .expect("pixel route missing");
         assert!(claim < hierarchy && claim < pixel);
-        assert!(
+        assert_eq!(
             assignment
                 .iter()
                 .filter(|line| line.contains("&mut before_post"))
-                .count()
-                >= 2,
-            "both routes must receive the same one-shot claim callback"
+                .count(),
+            1,
+            "the hierarchy route must receive the one-shot claim callback directly"
+        );
+        assert!(
+            assignment
+                .iter()
+                .any(|line| line.contains("before_pixel_post = || before_post(None)"))
+                && assignment
+                    .iter()
+                    .any(|line| line.contains("&mut before_pixel_post")),
+            "the pixel adapter must erase only sound evidence while preserving the same claim"
         );
     }
 
