@@ -12,11 +12,11 @@ use super::*;
 /// reap these PIDs without touching another app's adb client or the shared adb server.
 #[derive(Default)]
 pub(super) struct InstrumentationChildren {
-    children: tokio::sync::Mutex<HashMap<String, tokio::process::Child>>,
+    children: tokio::sync::Mutex<HashMap<String, InstrumentationProcess>>,
 }
 
 impl InstrumentationChildren {
-    pub(super) async fn retain(&self, serial: &str, child: tokio::process::Child) {
+    async fn retain(&self, serial: &str, child: InstrumentationProcess) {
         let previous = self.children.lock().await.insert(serial.to_string(), child);
         if let Some(mut previous) = previous {
             if let Err(error) = terminate_instrumentation_child(&mut previous).await {
@@ -51,21 +51,122 @@ impl InstrumentationChildren {
     }
 }
 
-async fn terminate_instrumentation_child(child: &mut tokio::process::Child) -> anyhow::Result<()> {
+async fn terminate_instrumentation_child(child: &mut InstrumentationProcess) -> anyhow::Result<()> {
     if child
+        .child
         .try_wait()
         .context("inspect instrumentation child")?
         .is_none()
     {
         child
+            .child
             .start_kill()
             .context("terminate instrumentation child")?;
     }
     child
+        .child
         .wait()
         .await
         .context("wait for instrumentation child")?;
+    child.finish_output().await;
     Ok(())
+}
+
+const INSTRUMENTATION_DIAGNOSTIC_LIMIT: u64 = 64 * 1024;
+
+struct InstrumentationProcess {
+    child: tokio::process::Child,
+    stdout: Option<tokio::task::JoinHandle<String>>,
+    stderr: Option<tokio::task::JoinHandle<String>>,
+}
+
+impl InstrumentationProcess {
+    fn new(mut child: tokio::process::Child) -> Self {
+        let stdout = child
+            .stdout
+            .take()
+            .map(|pipe| tokio::spawn(drain_instrumentation_pipe(pipe)));
+        let stderr = child
+            .stderr
+            .take()
+            .map(|pipe| tokio::spawn(drain_instrumentation_pipe(pipe)));
+        Self {
+            child,
+            stdout,
+            stderr,
+        }
+    }
+
+    async fn finish_output(&mut self) -> (String, String) {
+        async fn finish(handle: Option<tokio::task::JoinHandle<String>>) -> String {
+            match handle {
+                Some(handle) => handle
+                    .await
+                    .unwrap_or_else(|error| format!("[output reader failed: {error}]")),
+                None => String::new(),
+            }
+        }
+
+        let stdout = self.stdout.take();
+        let stderr = self.stderr.take();
+        tokio::join!(finish(stdout), finish(stderr))
+    }
+}
+
+/// Give `adb shell am instrument` real output handles for its entire lifetime.
+///
+/// Android's instrumentation protocol reports runner status on stdout, including some
+/// refusals that still return exit code zero. More importantly, the Windows adb shipped with
+/// the app has been measured to end this long-running shell immediately when stdout is bound
+/// to `NUL`, while the exact same argv remains attached when stdout is captured. Both channels
+/// therefore stay piped; an early exit consumes them below, and the retained child continues
+/// to own them until selective shutdown.
+fn configure_instrumentation_stdio(command: &mut tokio::process::Command) {
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        // A cancelled startup has not transferred the child into
+        // `instrumentation_children`; dropping it must not detach it.
+        .kill_on_drop(true);
+}
+
+async fn drain_instrumentation_pipe<R>(mut reader: R) -> String
+where
+    R: tokio::io::AsyncRead + Unpin,
+{
+    let mut bytes = Vec::new();
+    let mut chunk = [0_u8; 8192];
+    let mut truncated = false;
+    loop {
+        match reader.read(&mut chunk).await {
+            Ok(0) => break,
+            Ok(read) => {
+                let room = INSTRUMENTATION_DIAGNOSTIC_LIMIT as usize - bytes.len();
+                bytes.extend_from_slice(&chunk[..read.min(room)]);
+                truncated |= read > room;
+            }
+            Err(error) => {
+                return format!("[output read failed: {error}]");
+            }
+        }
+    }
+    let mut output = String::from_utf8_lossy(&bytes).trim().to_string();
+    if truncated {
+        output.push_str("\n[output truncated after 65536 bytes]");
+    }
+    output
+}
+
+/// Drain both status channels after a short-lived runner has closed them.
+async fn instrumentation_exit_diagnostics(child: &mut InstrumentationProcess) -> String {
+    let (stdout, stderr) = child.finish_output().await;
+    match (stdout.is_empty(), stderr.is_empty()) {
+        (false, false) => format!("stdout: {stdout}; stderr: {stderr}"),
+        (false, true) => format!("stdout: {stdout}"),
+        (true, false) => format!("stderr: {stderr}"),
+        (true, true) => String::new(),
+    }
 }
 
 impl AndroidDriver {
@@ -737,13 +838,8 @@ impl AndroidDriver {
             // A runner or package `am instrument` refuses exits at once and says why on
             // stderr. Ten seconds of polling a port nothing will ever bind is the slow way to
             // find that out, and it loses the reason.
-            if let Ok(Some(status)) = child.try_wait() {
-                let mut said = String::new();
-                if let Some(mut stderr) = child.stderr.take() {
-                    use tokio::io::AsyncReadExt;
-                    let _ = stderr.read_to_string(&mut said).await;
-                }
-                let said = said.trim();
+            if let Ok(Some(status)) = child.child.try_wait() {
+                let said = instrumentation_exit_diagnostics(&mut child).await;
                 anyhow::bail!(
                     "`am instrument` trên {serial} thoát ngay ({status}){}",
                     if said.is_empty() {
@@ -858,41 +954,33 @@ impl AndroidDriver {
     /// `am instrument -w` blocks for the life of the server, so the child is
     /// detached deliberately rather than awaited.
     ///
-    /// **Returns the child, and keeps its stderr, because a refusal used to be thrown away.**
-    /// `stderr(Stdio::null())` meant that `am instrument` rejecting the runner or the package
-    /// -- the two things most likely to be wrong on a phone that has just been re-imaged --
-    /// produced an immediate process exit with the reason on stderr, and the caller learned
-    /// nothing until ten seconds of HTTP polling ran out and reported "did not answer /status".
-    /// The actual sentence explaining why was discarded.
+    /// **Returns the child, and keeps both output channels.** Instrumentation status and some
+    /// refusals are written to stdout even when adb returns code zero; stderr carries the rest.
+    /// Piping stdout also matches the measured Windows adb lifecycle -- sending it to `NUL`
+    /// made this long-running shell exit immediately while captured stdout stayed attached.
     ///
     /// Found by an independent review on 27/08/2026.
-    fn spawn_instrumentation(&self, serial: &str) -> anyhow::Result<tokio::process::Child> {
+    fn spawn_instrumentation(&self, serial: &str) -> anyhow::Result<InstrumentationProcess> {
         let mut command = tokio::process::Command::new(self.adb.path());
-        command
-            .args([
-                "-s",
-                serial,
-                "shell",
-                "am",
-                "instrument",
-                "-w",
-                "-e",
-                "disableAnalytics",
-                "true",
-                &format!("{AGENT_TEST_PACKAGE}/{AGENT_RUNNER}"),
-            ])
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            // Piped, not null: this is where `am instrument` says what it refused.
-            .stderr(Stdio::piped())
-            // A cancelled startup has not transferred the child into
-            // `instrumentation_children`; dropping it must not detach it.
-            .kill_on_drop(true);
+        command.args([
+            "-s",
+            serial,
+            "shell",
+            "am",
+            "instrument",
+            "-w",
+            "-e",
+            "disableAnalytics",
+            "true",
+            &format!("{AGENT_TEST_PACKAGE}/{AGENT_RUNNER}"),
+        ]);
+        configure_instrumentation_stdio(&mut command);
         #[cfg(windows)]
         command.creation_flags(0x0800_0000);
-        command
+        let child = command
             .spawn()
-            .with_context(|| format!("start the agent on {serial}"))
+            .with_context(|| format!("start the agent on {serial}"))?;
+        Ok(InstrumentationProcess::new(child))
     }
 }
 
@@ -923,13 +1011,15 @@ pub struct HelperProbe {
 
 #[cfg(test)]
 mod instrumentation_tests {
-    use std::process::Stdio;
     use std::time::Duration;
 
     use super::super::AndroidDriver;
-    use super::InstrumentationChildren;
+    use super::{
+        configure_instrumentation_stdio, instrumentation_exit_diagnostics, InstrumentationChildren,
+        InstrumentationProcess,
+    };
 
-    fn fixture_child() -> tokio::process::Child {
+    fn fixture_child(mode: &str) -> InstrumentationProcess {
         let mut command = tokio::process::Command::new(
             std::env::current_exe().expect("resolve the current test executable"),
         );
@@ -939,26 +1029,77 @@ mod instrumentation_tests {
                 "driver::agent::instrumentation_tests::instrumentation_process_fixture",
                 "--nocapture",
             ])
-            .env("RIVIU_INSTRUMENTATION_PROCESS_FIXTURE", "sleep")
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .kill_on_drop(true);
-        command.spawn().expect("spawn process fixture")
+            .env("RIVIU_INSTRUMENTATION_PROCESS_FIXTURE", mode);
+        configure_instrumentation_stdio(&mut command);
+        InstrumentationProcess::new(command.spawn().expect("spawn process fixture"))
     }
 
     #[test]
     fn instrumentation_process_fixture() {
-        if std::env::var("RIVIU_INSTRUMENTATION_PROCESS_FIXTURE").as_deref() == Ok("sleep") {
-            std::thread::sleep(Duration::from_secs(30));
+        match std::env::var("RIVIU_INSTRUMENTATION_PROCESS_FIXTURE").as_deref() {
+            Ok("sleep") => std::thread::sleep(Duration::from_secs(30)),
+            Ok("diagnostics") => {
+                println!("INSTRUMENTATION_STATUS: runner refused");
+                eprintln!("INSTRUMENTATION_FAILED: package missing");
+            }
+            Ok("flood") => {
+                use std::io::Write;
+                let block = vec![b'x'; 256 * 1024];
+                std::io::stdout().write_all(&block).expect("write stdout");
+                std::io::stderr().write_all(&block).expect("write stderr");
+            }
+            _ => {}
         }
+    }
+
+    #[tokio::test]
+    async fn early_exit_preserves_stdout_status_and_stderr_reason() {
+        let mut child = fixture_child("diagnostics");
+        let status = tokio::time::timeout(Duration::from_secs(5), child.child.wait())
+            .await
+            .expect("diagnostic fixture exit must be bounded")
+            .expect("wait for diagnostic fixture");
+        assert!(status.success(), "adb may return zero for runner refusal");
+
+        let diagnostics = instrumentation_exit_diagnostics(&mut child).await;
+        assert!(
+            diagnostics.contains("stdout: ")
+                && diagnostics.contains("INSTRUMENTATION_STATUS: runner refused"),
+            "stdout is an instrumentation status channel: {diagnostics}"
+        );
+        assert!(
+            diagnostics.contains("stderr: ")
+                && diagnostics.contains("INSTRUMENTATION_FAILED: package missing"),
+            "stderr must remain available too: {diagnostics}"
+        );
+    }
+
+    #[tokio::test]
+    async fn retained_output_is_drained_past_the_capture_limit() {
+        let mut child = fixture_child("flood");
+        let status = tokio::time::timeout(Duration::from_secs(5), child.child.wait())
+            .await
+            .expect("a runner producing more than the pipe capacity must not block")
+            .expect("wait for flood fixture");
+        assert!(status.success());
+
+        let diagnostics = instrumentation_exit_diagnostics(&mut child).await;
+        assert!(diagnostics.contains("stdout: "));
+        assert!(diagnostics.contains("stderr: "));
+        assert_eq!(
+            diagnostics
+                .matches("[output truncated after 65536 bytes]")
+                .count(),
+            2,
+            "both pipes must be drained while capture remains bounded"
+        );
     }
 
     #[tokio::test]
     async fn shutdown_reaps_only_retained_instrumentation_children() {
         let children = InstrumentationChildren::default();
-        let owned = fixture_child();
-        let mut unrelated = fixture_child();
+        let owned = fixture_child("sleep");
+        let mut unrelated = fixture_child("sleep");
         children.retain("owned-device", owned).await;
         assert_eq!(children.len().await, 1);
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -972,13 +1113,22 @@ mod instrumentation_tests {
         assert_eq!(children.len().await, 0);
         assert!(
             unrelated
+                .child
                 .try_wait()
                 .expect("inspect unrelated child")
                 .is_none(),
             "shutdown must not kill a process whose handle the driver does not own"
         );
-        unrelated.start_kill().expect("stop unrelated fixture");
-        unrelated.wait().await.expect("reap unrelated fixture");
+        unrelated
+            .child
+            .start_kill()
+            .expect("stop unrelated fixture");
+        unrelated
+            .child
+            .wait()
+            .await
+            .expect("reap unrelated fixture");
+        unrelated.finish_output().await;
     }
 
     /// The real shape of `pm list instrumentation`, and the one line that matters in it.
