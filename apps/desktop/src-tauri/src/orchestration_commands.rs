@@ -289,6 +289,7 @@ struct ProductionOrchestrationPort {
     registry: riviu_core::DeviceRegistry,
     control: Arc<riviu_core::DeviceControlPlane>,
     streams: riviu_ios_driver::StreamHub,
+    agent_bundle_id: String,
     events: riviu_core::EventBus,
     interaction_artifacts: riviu_core::FlowArtifactStore,
     nurture: crate::nurture_commands::NurtureRuntime,
@@ -306,6 +307,7 @@ impl ProductionOrchestrationPort {
             registry: state.registry.clone(),
             control: state.control.clone(),
             streams: state.streams.clone(),
+            agent_bundle_id: state.active_agent_bundle_id.clone(),
             events: state.events.clone(),
             interaction_artifacts: state.interaction_artifacts.clone(),
             nurture: state.nurture.clone(),
@@ -323,6 +325,7 @@ impl ProductionOrchestrationPort {
             registry: state.registry.clone(),
             control: state.control.clone(),
             streams: state.streams.clone(),
+            agent_bundle_id: state.active_agent_bundle_id.clone(),
             events: state.events.clone(),
             interaction_artifacts: state.interaction_artifacts.clone(),
             nurture: state.nurture.clone(),
@@ -445,7 +448,8 @@ impl ProductionOrchestrationPort {
                 settings,
                 duration,
             )
-            .await;
+            .await
+            .map_err(|error| OrchestrationChildFailure::before_effect(error.to_string()))?;
         if started_udids.is_empty() {
             self.db
                 .settle_orchestration_nurture_child(
@@ -658,6 +662,7 @@ impl ProductionOrchestrationPort {
             cleanup_policy: PublishCleanupPolicy::DeleteImportedAssetsAfterVerified,
             sound_policy: config.sound_policy.clone(),
             execution_confirmed: true,
+            target_snapshot: Some(request.target.clone()),
         };
         let (_record, created) = self
             .db
@@ -796,7 +801,8 @@ impl ProductionOrchestrationPort {
                 settings,
                 duration,
             )
-            .await;
+            .await
+            .map_err(|error| OrchestrationChildFailure::before_effect(error.to_string()))?;
         if started_udids.is_empty() {
             return Err(OrchestrationChildFailure::before_effect(
                 "no nurture session could reserve its device",
@@ -1791,6 +1797,8 @@ fn spawn_publish_child(port: &ProductionOrchestrationPort, child_id: Uuid) {
     let registry = port.registry.clone();
     let db = port.db.clone();
     let events = port.events.clone();
+    let agent_bundle_id = port.agent_bundle_id.clone();
+    let frames: Arc<dyn riviu_core::FrameSource> = Arc::new(port.streams.clone());
     let runtime = port.runtime.clone();
     tauri::async_runtime::spawn(async move {
         if let Err(error) = crate::publish_commands::execute_scheduled_publish_campaign_inner(
@@ -1798,6 +1806,8 @@ fn spawn_publish_child(port: &ProductionOrchestrationPort, child_id: Uuid) {
             registry,
             db,
             events,
+            agent_bundle_id,
+            frames,
             campaign_id.clone(),
         )
         .await
