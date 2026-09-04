@@ -73,7 +73,7 @@ TEMURIN_SOURCE = (
 ANDROID_PACKAGE_TOOLS_TREE_SHA256 = (
     "f24951701beb69fe74ef073196c249d6df153749722f82260d79fc6687a7d57f"
 )
-EXPECTED_DATABASE_VERSION = 26
+EXPECTED_DATABASE_VERSION = 29
 BRANDING_LOGO = REPOSITORY_ROOT / "logo.jpg"
 TAURI_CONFIG = REPOSITORY_ROOT / "apps" / "desktop" / "src-tauri" / "tauri.conf.json"
 # The release build runs with this overlay, so *this* is the version the shipped binary
