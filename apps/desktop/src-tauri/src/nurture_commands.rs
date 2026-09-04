@@ -4,6 +4,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use parking_lot::Mutex;
+use riviu_core::db::Database;
 use riviu_core::{
     DeviceControlPlane, DeviceWorkOwner, FrameSource, NurtureEngine, NurtureSessionStatus,
     NurtureSettings, SessionLogBook, SessionLogEntry, SessionLogSummary,
@@ -430,7 +431,8 @@ pub async fn nurture_start(
             settings,
             run_duration,
         )
-        .await;
+        .await
+        .map_err(err)?;
     Ok(started)
 }
 
@@ -523,6 +525,7 @@ pub struct NurtureRuntime {
 struct NurtureRuntimeInner {
     runs: Mutex<NurtureRuns>,
     status: Mutex<HashMap<String, NurtureSessionStatus>>,
+    database: Option<Arc<Database>>,
     /// Every line these sessions ever said, per device.
     ///
     /// Shared with the idle sweeper, which writes into the same book — from the operator's
@@ -538,6 +541,14 @@ struct NurtureRuns {
 
 impl NurtureRuntime {
     pub fn new() -> Self {
+        Self::build(None)
+    }
+
+    pub fn with_database(database: Arc<Database>) -> Self {
+        Self::build(Some(database))
+    }
+
+    fn build(database: Option<Arc<Database>>) -> Self {
         Self {
             inner: Arc::new(NurtureRuntimeInner {
                 runs: Mutex::new(NurtureRuns {
@@ -545,6 +556,7 @@ impl NurtureRuntime {
                     stops: HashMap::new(),
                 }),
                 status: Mutex::new(HashMap::new()),
+                database,
                 log: SessionLogBook::new(),
             }),
         }
@@ -565,7 +577,24 @@ impl NurtureRuntime {
     /// the queued one, each update from the engine, the final one and the error one —
     /// already funnels through this method. A second write anywhere else would be the
     /// line that goes missing when somebody adds a third call site.
-    pub fn set_status(&self, st: NurtureSessionStatus) {
+    pub fn set_status(&self, mut st: NurtureSessionStatus) {
+        st.updated_at = Some(chrono::Utc::now());
+        if st.run_id.is_some() {
+            if let Some(database) = &self.inner.database {
+                if let Err(error) = database.append_nurture_status(&st) {
+                    // A public-action worker must not continue indefinitely after its durable
+                    // history disappeared. The current callback cannot return an error through
+                    // NurtureEngine, so signal its existing stop token and keep the in-memory
+                    // row visible while the last durable row is reconciled on restart.
+                    log::error!("không ghi được trạng thái Nuôi cho {}: {error:#}", st.udid);
+                    self.stop(&st.udid);
+                }
+            }
+        }
+        self.store_live_status(st);
+    }
+
+    fn store_live_status(&self, st: NurtureSessionStatus) {
         self.inner.log.record(&st.udid, &st.last_message);
         self.inner.status.lock().insert(st.udid.clone(), st);
     }
@@ -632,7 +661,7 @@ impl NurtureRuntime {
         udids: Vec<String>,
         settings: NurtureSettings,
         max_duration: Option<Duration>,
-    ) -> Vec<String> {
+    ) -> anyhow::Result<Vec<String>> {
         // **The identity of this run, and the only place it exists.**
         //
         // `set_status` inserts by udid and nothing ever removes an entry, so the status list
@@ -649,29 +678,59 @@ impl NurtureRuntime {
         // that was two phones short.
         let run_id = uuid::Uuid::new_v4();
         let run_size = udids.len() as u32;
+        anyhow::ensure!(run_size > 0, "nurture target list is empty");
+        let now = chrono::Utc::now();
+        let deadline_at = max_duration.and_then(|window| {
+            chrono::Duration::from_std(window)
+                .ok()
+                .map(|window| now + window)
+        });
+        let reservations = udids
+            .iter()
+            .map(|udid| (udid.clone(), self.reserve_start(udid)))
+            .collect::<Vec<_>>();
+        let initial_statuses = reservations
+            .iter()
+            .map(|(udid, reservation)| {
+                let mut status = NurtureSessionStatus {
+                    running: reservation.is_some(),
+                    last_message: if reservation.is_some() {
+                        "queued".into()
+                    } else {
+                        "Không bắt đầu: thiết bị đang chạy một phiên Nuôi khác".into()
+                    },
+                    run_id: Some(run_id),
+                    run_size,
+                    phase: riviu_core::NurturePhase::Queued,
+                    video_target: settings.num_videos.max(1) * settings.num_rounds.max(1),
+                    deadline_at,
+                    updated_at: Some(now),
+                    ..NurtureSessionStatus::new(udid)
+                };
+                if reservation.is_none() {
+                    status.finish(riviu_core::Outcome::Failed);
+                }
+                status
+            })
+            .collect::<Vec<_>>();
+        if let Some(database) = &self.inner.database {
+            if let Err(error) = database.create_nurture_run(run_id, &udids, &initial_statuses) {
+                for (udid, reservation) in &reservations {
+                    if let Some(stop) = reservation {
+                        self.finish_start(udid, stop);
+                    }
+                }
+                return Err(error.context("persist nurture run before worker dispatch"));
+            }
+        }
+        for status in &initial_statuses {
+            self.store_live_status(status.clone());
+        }
         let mut started = Vec::new();
-        for (idx, udid) in udids.into_iter().enumerate() {
-            let Some(stop) = self.reserve_start(&udid) else {
+        for (idx, (udid, reservation)) in reservations.into_iter().enumerate() {
+            let Some(stop) = reservation else {
                 continue;
             };
-            let initial = NurtureSessionStatus {
-                running: true,
-                last_message: "queued".into(),
-                run_id: Some(run_id),
-                run_size,
-                phase: riviu_core::NurturePhase::Queued,
-                // The whole fleet's target and horizon are known before any session starts,
-                // so a queued row can already draw an honest empty bar with a real
-                // denominator instead of an unknown one.
-                video_target: settings.num_videos.max(1) * settings.num_rounds.max(1),
-                deadline_at: max_duration.and_then(|window| {
-                    chrono::Duration::from_std(window)
-                        .ok()
-                        .map(|window| chrono::Utc::now() + window)
-                }),
-                ..NurtureSessionStatus::new(&udid)
-            };
-            self.set_status(initial);
 
             let runtime = self.clone();
             let engine = engine.clone();
@@ -763,7 +822,7 @@ impl NurtureRuntime {
             });
             started.push(udid);
         }
-        started
+        Ok(started)
     }
 }
 
@@ -780,6 +839,17 @@ mod tests {
         AgentState, DeviceControlPlane, DeviceDriver, DeviceWorkCoordinator, StreamBudgetManager,
     };
     use riviu_ios_driver::MockIosDriver;
+
+    fn database_fixture() -> (Arc<Database>, std::path::PathBuf) {
+        let path = std::env::temp_dir().join(format!(
+            "riviu-desktop-nurture-history-{}.db",
+            uuid::Uuid::new_v4()
+        ));
+        (
+            Arc::new(Database::open(&path).expect("open fixture database")),
+            path,
+        )
+    }
 
     #[test]
     fn concurrent_starts_reserve_exactly_one_stop_token_per_device() {
@@ -815,6 +885,64 @@ mod tests {
 
         assert!(active.load(Ordering::Relaxed));
         assert!(runtime.reserve_start("late").is_none());
+    }
+
+    #[test]
+    fn accepting_a_status_stamps_its_latest_observed_time() {
+        let runtime = NurtureRuntime::new();
+        let before = chrono::Utc::now();
+
+        runtime.set_status(NurtureSessionStatus::new("phone-a"));
+
+        let status = runtime
+            .list_status()
+            .into_iter()
+            .next()
+            .expect("stored status");
+        let updated = status.updated_at.expect("latest status timestamp");
+        assert!(updated >= before);
+        assert!(updated <= chrono::Utc::now());
+    }
+
+    #[test]
+    fn runtime_status_transition_is_appended_to_the_durable_run() {
+        let (database, path) = database_fixture();
+        let runtime = NurtureRuntime::with_database(database.clone());
+        let run_id = uuid::Uuid::new_v4();
+        let targets = vec!["phone-a".to_string()];
+        let initial = NurtureSessionStatus {
+            running: true,
+            run_id: Some(run_id),
+            run_size: 1,
+            last_message: "queued".into(),
+            updated_at: Some(chrono::Utc::now()),
+            ..NurtureSessionStatus::new("phone-a")
+        };
+        database
+            .create_nurture_run(run_id, &targets, std::slice::from_ref(&initial))
+            .expect("create durable run");
+        runtime.store_live_status(initial);
+
+        let mut watching = runtime.list_status().remove(0);
+        watching.phase = riviu_core::NurturePhase::Watching;
+        watching.videos_done = 4;
+        watching.last_message = "watching".into();
+        runtime.set_status(watching);
+
+        let restored = database
+            .get_nurture_run(run_id)
+            .expect("read run")
+            .expect("run exists")
+            .statuses
+            .into_iter()
+            .next()
+            .expect("device status");
+        assert_eq!(restored.videos_done, 4);
+        assert_eq!(restored.phase, riviu_core::NurturePhase::Watching);
+
+        drop(runtime);
+        drop(database);
+        std::fs::remove_file(path).expect("remove fixture database");
     }
 
     #[tokio::test]
