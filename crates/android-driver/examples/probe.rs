@@ -11,9 +11,9 @@
 //!   cargo run -p riviu-android-driver --example probe -- <serial>
 //! ```
 //!
-//! Read-only by default. It launches TikTok, reads labels, and captures a
-//! screenshot. Pass `--terminate` to also exercise the force-stop path, which
-//! closes the app on the device.
+//! Read-only by default. It launches TikTok, reads labels, and captures a screenshot. Pass
+//! `--no-launch` when the exact screen was prepared manually and must not be reset, or
+//! `--terminate` to also exercise the force-stop path, which closes the app on the device.
 
 use std::sync::LazyLock;
 use std::time::{Duration, Instant};
@@ -74,6 +74,7 @@ macro_rules! timed {
 
 /// Every flag this probe defines. A `--word` outside this list is refused.
 const KNOWN_FLAGS: &[&str] = &[
+    "--no-launch",
     "--terminate",
     "--feed",
     "--measure-liked",
@@ -88,6 +89,7 @@ const KNOWN_FLAGS: &[&str] = &[
     "--gate-standalone",
     "--measure-tab-bar",
     "--measure-own-post",
+    "--measure-own-comment",
     "--measure-composer",
     "--measure-gallery",
 ];
@@ -155,11 +157,15 @@ async fn main() -> anyhow::Result<()> {
     println!("\n== device {serial} ==");
     println!("  target package: {}", TIKTOK.as_str());
 
-    timed!(
-        "launch_app(tiktok)",
-        driver.launch_app(&serial, TIKTOK.as_str()).await
-    )?;
-    tokio::time::sleep(Duration::from_secs(8)).await;
+    if args.iter().any(|arg| arg == "--no-launch") {
+        println!("  keeping the currently prepared screen (--no-launch)");
+    } else {
+        timed!(
+            "launch_app(tiktok)",
+            driver.launch_app(&serial, TIKTOK.as_str()).await
+        )?;
+        tokio::time::sleep(Duration::from_secs(8)).await;
+    }
 
     println!("\n== open_session (starts the agent if needed) ==");
     let session = timed!("open_session", driver.open_session(&serial).await)?;
@@ -645,7 +651,7 @@ async fn main() -> anyhow::Result<()> {
             "
 == our own post: is the caption readable verbatim? =="
         );
-        match measure_own_post_caption(&session, caption).await {
+        match measure_own_post_caption(&session, labels, caption).await {
             Ok(()) => {}
             Err(error) => {
                 failed_steps += 1;
@@ -655,6 +661,39 @@ async fn main() -> anyhow::Result<()> {
     } else {
         println!("
 (skipping the own-post caption measurement; open one of your own posts and pass --measure-own-post \"<caption>\" — reads only)");
+    }
+
+    // Reads the already-open drawer only. The operator opens the drawer and scrolls the
+    // campaign's own comment into view before launching the probe; this branch sends no input.
+    if let Some(at) = args.iter().position(|arg| arg == "--measure-own-comment") {
+        let author = args
+            .get(at + 1)
+            .filter(|value| !value.starts_with("--"))
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "--measure-own-comment cần hai giá trị: <author chính xác> <comment chính xác>"
+                )
+            })?;
+        let comment = args
+            .get(at + 2)
+            .filter(|value| !value.starts_with("--"))
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "--measure-own-comment cần hai giá trị: <author chính xác> <comment chính xác>"
+                )
+            })?;
+        println!("\n== own comment cleanup inventory (read-only) ==");
+        match measure_own_comment_cleanup(&session, author, comment).await {
+            Ok(()) => {}
+            Err(error) => {
+                failed_steps += 1;
+                println!("  FAILED: {error:#}")
+            }
+        }
+    } else {
+        println!(
+            "\n(skipping own-comment cleanup inventory; open the comment drawer with the exact row visible, then pass --measure-own-comment \"<author>\" \"<comment>\" — reads only)"
+        );
     }
 
     if args.iter().any(|arg| arg == "--measure-composer") {
@@ -2245,6 +2284,7 @@ async fn measure_target_open(
 /// Read-only. It dumps the tree and reports; it taps nothing.
 async fn measure_own_post_caption(
     session: &riviu_android_driver::AndroidUiSession,
+    labels: TikTokControls,
     caption: &str,
 ) -> anyhow::Result<()> {
     let source = session.agent().source().await?;
@@ -2303,7 +2343,217 @@ async fn measure_own_post_caption(
             "absent"
         }
     );
+    for control in [
+        TikTokControl::PostDeleteMenu,
+        TikTokControl::PostDelete,
+        TikTokControl::PostDeleteConfirm,
+    ] {
+        println!(
+            "    catalog {control:?} = {:?}",
+            labels.label(control).map(|label| label.value())
+        );
+    }
+    report_public_cleanup_inventory(&source, Some(&wanted), None);
     Ok(())
+}
+
+/// Read-only inventory for deleting one campaign comment.
+///
+/// The drawer and exact row must already be visible. This intentionally does not open the
+/// drawer or long-press the row: those are UI effects, and this command's purpose is to learn
+/// whether a production locator exists before any adapter is allowed to send them.
+async fn measure_own_comment_cleanup(
+    session: &riviu_android_driver::AndroidUiSession,
+    author: &str,
+    comment: &str,
+) -> anyhow::Result<()> {
+    let author = author.trim();
+    let comment = comment.trim();
+    anyhow::ensure!(!author.is_empty(), "own-comment author is empty");
+    anyhow::ensure!(!comment.is_empty(), "own-comment text is empty");
+
+    let source = session.agent().source().await?;
+    let dump = std::path::Path::new("target").join("own-comment-cleanup.xml");
+    std::fs::write(&dump, &source)?;
+    println!(
+        "  tree dumped to {} ({} bytes)",
+        dump.display(),
+        source.len()
+    );
+    println!(
+        "  catalog comment-delete controls = absent (measurement output only; production refuses)"
+    );
+    report_public_cleanup_inventory(&source, Some(comment), Some(author));
+    Ok(())
+}
+
+fn normalized_label(node: &Node) -> String {
+    if !node.text.trim().is_empty() {
+        node.text.trim().to_lowercase()
+    } else {
+        node.desc.trim().to_lowercase()
+    }
+}
+
+fn has_delete_word(label: &str) -> bool {
+    [
+        "delete",
+        "remove",
+        "xóa",
+        "xoá",
+        "gỡ",
+        "manage posts",
+        "quản lý bài",
+    ]
+    .iter()
+    .any(|word| label.contains(word))
+}
+
+/// Print only facts that can become a locator. An unlabelled clickable rectangle is still
+/// reported for investigation, but explicitly remains unusable by production code.
+fn report_public_cleanup_inventory(
+    source: &str,
+    exact_body: Option<&str>,
+    exact_author: Option<&str>,
+) {
+    let nodes = scan_source(source);
+    let exact_body = exact_body.map(str::trim).filter(|value| !value.is_empty());
+    let exact_author = exact_author
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let body_hits: Vec<&Node> = exact_body
+        .map(|wanted| {
+            nodes
+                .iter()
+                .filter(|node| node.text.trim() == wanted || node.desc.trim() == wanted)
+                .collect()
+        })
+        .unwrap_or_default();
+    let author_hits: Vec<&Node> = exact_author
+        .map(|wanted| {
+            nodes
+                .iter()
+                .filter(|node| node.text.trim() == wanted || node.desc.trim() == wanted)
+                .collect()
+        })
+        .unwrap_or_default();
+
+    println!("  exact body hits   = {}", body_hits.len());
+    if exact_author.is_some() {
+        println!("  exact author hits = {}", author_hits.len());
+    }
+    let labels: Vec<String> = nodes.iter().map(normalized_label).collect();
+    let positive_owner_markers: Vec<&str> = [
+        ("privacy settings", "privacySettings"),
+        ("cài đặt quyền riêng tư", "privacySettings"),
+        ("lượt xem", "viewCount"),
+        (" views", "viewCount"),
+    ]
+    .iter()
+    .filter_map(|(needle, marker)| {
+        labels
+            .iter()
+            .any(|label| label.contains(needle))
+            .then_some(*marker)
+    })
+    .collect();
+    println!("  positive own-post markers = {positive_owner_markers:?}");
+
+    let foreign_follow = labels.iter().any(|label| {
+        let label = label.trim();
+        label.starts_with("follow ") || label.starts_with("theo dõi ")
+    });
+    println!("  foreign-author Follow marker = {foreign_follow}");
+
+    let destructive: Vec<&Node> = nodes
+        .iter()
+        .filter(|node| has_delete_word(&normalized_label(node)))
+        .collect();
+    println!(
+        "  labelled delete/remove candidates = {}",
+        destructive.len()
+    );
+    for node in destructive {
+        println!(
+            "    class={} id={:?} clickable={} enabled={} bounds={} desc={:?} text={:?}",
+            node.class,
+            node.resource_id,
+            node.clickable,
+            node.enabled,
+            node.bounds,
+            node.desc,
+            node.text
+        );
+    }
+
+    // The row pitch measured on the comment drawer is roughly 300 px. This is diagnostic
+    // output only: these rectangles are never promoted to locators or tapped by the probe.
+    let body_band = body_hits
+        .iter()
+        .filter_map(|node| parse_bounds(&node.bounds))
+        .next()
+        .map(|(_, y, _, bottom)| (y - 300.0, bottom + 300.0));
+    let unlabelled_clickable: Vec<&Node> = nodes
+        .iter()
+        .filter(|node| node.clickable && node.desc.trim().is_empty() && node.text.trim().is_empty())
+        .filter(|node| {
+            let Some((top, bottom)) = body_band else {
+                return true;
+            };
+            parse_bounds(&node.bounds)
+                .is_some_and(|(_, y, _, node_bottom)| node_bottom >= top && y <= bottom)
+        })
+        .collect();
+    println!(
+        "  unlabelled clickable candidates{} = {} (diagnostic only; never tappable)",
+        if body_band.is_some() {
+            " near body"
+        } else {
+            ""
+        },
+        unlabelled_clickable.len()
+    );
+    for node in unlabelled_clickable {
+        println!(
+            "    class={} id={:?} bounds={}",
+            node.class, node.resource_id, node.bounds
+        );
+    }
+
+    let machine_proof = cleanup_identity_precondition(
+        body_hits.len(),
+        exact_author.is_some(),
+        author_hits.len(),
+        positive_owner_markers.len(),
+        foreign_follow,
+    );
+    println!(
+        "  identity/ownership precondition = {}",
+        if machine_proof {
+            "candidate (delete menu + confirm still require separate measured locators)"
+        } else {
+            "REFUSED"
+        }
+    );
+}
+
+fn cleanup_identity_precondition(
+    body_hits: usize,
+    author_was_requested: bool,
+    author_hits: usize,
+    positive_owner_markers: usize,
+    foreign_follow: bool,
+) -> bool {
+    if body_hits != 1 || foreign_follow {
+        return false;
+    }
+    if author_was_requested {
+        author_hits == 1
+    } else {
+        // A caption alone can be copied by another account. Own-post cleanup additionally
+        // needs a positive ownership marker; absence of Follow is never ownership proof.
+        positive_owner_markers > 0
+    }
 }
 
 async fn measure_tab_bar(
@@ -3125,6 +3375,16 @@ mod tests {
             refuse_unknown_flags(&line(&["SERIAL", "--measure-gallery", "4", "--terminate"])),
             Ok(())
         );
+        assert_eq!(
+            refuse_unknown_flags(&line(&[
+                "SERIAL",
+                "--no-launch",
+                "--measure-own-comment",
+                "@riviu_canary",
+                "comment exact"
+            ])),
+            Ok(())
+        );
         // A flag's value is never mistaken for a flag.
         assert_eq!(
             refuse_unknown_flags(&line(&[
@@ -3147,6 +3407,34 @@ mod tests {
                 "{typo} must be refused by name, not ignored: {refused:?}"
             );
         }
+    }
+
+    #[test]
+    fn cleanup_inventory_requires_positive_ownership_not_only_an_absent_follow() {
+        assert!(!cleanup_identity_precondition(1, false, 0, 0, false));
+        assert!(cleanup_identity_precondition(1, false, 0, 1, false));
+        assert!(!cleanup_identity_precondition(1, false, 0, 1, true));
+
+        // A campaign comment is bound to an exact author and exact body instead of an
+        // own-post privacy/views marker, which the open drawer may not expose.
+        assert!(cleanup_identity_precondition(1, true, 1, 0, false));
+        assert!(!cleanup_identity_precondition(1, true, 2, 0, false));
+        assert!(!cleanup_identity_precondition(2, true, 1, 0, false));
+    }
+
+    #[test]
+    fn cleanup_keyword_scan_includes_both_locales_and_excludes_unrelated_labels() {
+        for label in [
+            "Delete",
+            "Remove comment",
+            "Xóa bình luận",
+            "Xoá bài viết",
+            "Gỡ bài",
+        ] {
+            assert!(has_delete_word(&label.to_lowercase()), "{label}");
+        }
+        assert!(!has_delete_word("Copy link"));
+        assert!(!has_delete_word("Save post"));
     }
 
     /// **Asked-for-and-unreadable is a complaint, not a silent skip.** (D-10, probe edition.)

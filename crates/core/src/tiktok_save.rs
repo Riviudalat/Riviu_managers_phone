@@ -1,9 +1,15 @@
 //! Desired-state Save primitive shared by hierarchy and pixel callers.
 
-use crate::driver::StatefulElementBox;
+use crate::driver::{StatefulElementBox, UiSession};
 use crate::screen::ActionRail;
+use crate::tiktok_labels::{TikTokControl, TikTokControls};
+use crate::tiktok_public_cleanup::{
+    clear_public_toggle, PublicCleanupIdentity, PublicEffectState, PublicToggle,
+    ToggleCleanupAdapter, ToggleCleanupEvidence, ToggleCleanupObservation,
+};
 use crate::types::TapPoint;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 /// The measured state of TikTok's bookmark toggle.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -270,6 +276,148 @@ pub fn pixel_save_observation(
             y: y * screen_size.1,
         }),
     }
+}
+
+struct SaveCleanupBridge<'a, A: ?Sized> {
+    inner: &'a mut A,
+}
+
+fn add_identity_field(hasher: &mut Sha256, value: &[u8]) {
+    hasher.update((value.len() as u64).to_le_bytes());
+    hasher.update(value);
+}
+
+fn save_cleanup_identity(identity: &SaveCardIdentity) -> PublicCleanupIdentity {
+    let (kind, author, second) = match identity {
+        SaveCardIdentity::Hierarchy { author, sound } => {
+            ("hierarchy", author.as_str(), sound.as_deref())
+        }
+        SaveCardIdentity::Pixel { author, caption } => {
+            ("pixel", author.as_str(), caption.as_deref())
+        }
+    };
+    let mut hasher = Sha256::new();
+    add_identity_field(&mut hasher, kind.as_bytes());
+    add_identity_field(&mut hasher, author.as_bytes());
+    match second {
+        Some(value) => {
+            hasher.update([1]);
+            add_identity_field(&mut hasher, value.as_bytes());
+        }
+        None => hasher.update([0]),
+    }
+    PublicCleanupIdentity::Toggle {
+        card_key: format!("{:x}", hasher.finalize()),
+        author: author.to_owned(),
+        effect: PublicToggle::Save,
+    }
+}
+
+#[async_trait::async_trait]
+impl<A: SaveAdapter + ?Sized> ToggleCleanupAdapter for SaveCleanupBridge<'_, A> {
+    async fn observe(&mut self) -> anyhow::Result<ToggleCleanupObservation> {
+        let observation = self.inner.observe().await?;
+        Ok(ToggleCleanupObservation {
+            identity: observation.identity.as_ref().map(save_cleanup_identity),
+            sequence: observation.sequence,
+            state: match observation.state {
+                BookmarkState::Saved => PublicEffectState::Present,
+                BookmarkState::Unsaved => PublicEffectState::Absent,
+                BookmarkState::Unreadable => PublicEffectState::Unreadable,
+            },
+            tap_point: observation.tap_point,
+        })
+    }
+
+    async fn tap(&mut self, point: TapPoint) -> anyhow::Result<()> {
+        self.inner.tap(point).await
+    }
+}
+
+/// Reach Unsaved state using the same measured hierarchy/pixel adapter as Save.
+///
+/// An invariant Bookmark label is not enough: this only taps after the adapter positively reads
+/// `Saved`, re-proves the same card on a newer observation, persists `durable_intent`, and then
+/// confirms `Unsaved` on that card. It therefore cannot turn an unreadable/already-unsaved state
+/// into a blind toggle.
+pub async fn tiktok_unsave<A, F>(adapter: &mut A, durable_intent: F) -> ToggleCleanupEvidence
+where
+    A: SaveAdapter + ?Sized,
+    F: FnOnce(&ToggleCleanupObservation) -> anyhow::Result<()>,
+{
+    clear_public_toggle(&mut SaveCleanupBridge { inner: adapter }, durable_intent).await
+}
+
+/// Hierarchy adapter shared by Interaction Save and its cleanup reversal.
+pub struct HierarchySaveAdapter<'a> {
+    session: &'a dyn UiSession,
+    labels: TikTokControls,
+    sequence: u64,
+}
+
+impl<'a> HierarchySaveAdapter<'a> {
+    pub fn new(session: &'a dyn UiSession, labels: TikTokControls) -> Self {
+        Self {
+            session,
+            labels,
+            sequence: 0,
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl SaveAdapter for HierarchySaveAdapter<'_> {
+    async fn observe(&mut self) -> anyhow::Result<SaveObservation> {
+        self.sequence = self.sequence.saturating_add(1);
+        let author = crate::interaction_hierarchy::read_author_label(self.session, self.labels)
+            .await
+            .filter(|author| !author.trim().is_empty());
+        let sound = match self.labels.label(TikTokControl::SoundLink) {
+            Some(label) => self
+                .session
+                .locate(label.to_query())
+                .await?
+                .and_then(|element| element.description),
+            None => None,
+        };
+        let control = match self.labels.label(TikTokControl::Bookmark) {
+            Some(label) => self.session.locate_stateful(label.to_query()).await?,
+            None => None,
+        };
+        let Some(author) = author else {
+            return Ok(SaveObservation {
+                identity: None,
+                sequence: self.sequence,
+                state: BookmarkState::Unreadable,
+                tap_point: None,
+            });
+        };
+        Ok(hierarchy_save_observation(
+            SaveCardIdentity::Hierarchy { author, sound },
+            self.sequence,
+            control,
+        ))
+    }
+
+    async fn tap(&mut self, point: TapPoint) -> anyhow::Result<()> {
+        self.session.tap(point).await
+    }
+}
+
+/// Reach Unsaved on a hierarchy card, with the intent callback immediately before the tap.
+pub async fn unsave_post_with_gate<F>(
+    session: &dyn UiSession,
+    labels: TikTokControls,
+    durable_intent: F,
+) -> ToggleCleanupEvidence
+where
+    F: FnOnce(&ToggleCleanupObservation) -> anyhow::Result<()>,
+{
+    tiktok_unsave(
+        &mut HierarchySaveAdapter::new(session, labels),
+        durable_intent,
+    )
+    .await
 }
 
 #[cfg(test)]
@@ -607,6 +755,50 @@ mod tests {
             tiktok_save(&mut unchanged, |_| Ok(())).await.verdict,
             SaveVerdict::NotConfirmed
         );
+    }
+
+    #[tokio::test]
+    async fn saved_to_unsaved_cleanup_uses_the_existing_identity_adapter_once() {
+        let mut fixture = adapter(vec![
+            Ok(observation("author-a", 1, BookmarkState::Saved)),
+            Ok(observation("author-a", 2, BookmarkState::Saved)),
+            Ok(observation("author-a", 3, BookmarkState::Unsaved)),
+        ]);
+        let mut intents = 0;
+        let evidence = tiktok_unsave(&mut fixture, |proved| {
+            intents += 1;
+            assert_eq!(proved.sequence, 2);
+            Ok(())
+        })
+        .await;
+
+        assert_eq!(evidence.verdict, crate::ToggleCleanupVerdict::Cleared);
+        assert_eq!((intents, fixture.taps), (1, 1));
+        assert!(!evidence.retry_is_safe());
+    }
+
+    #[tokio::test]
+    async fn already_unsaved_cleanup_is_a_zero_tap_no_op() {
+        let mut fixture = adapter(vec![Ok(observation("author-a", 1, BookmarkState::Unsaved))]);
+        let evidence = tiktok_unsave(&mut fixture, |_| panic!("no intent for a no-op")).await;
+        assert_eq!(evidence.verdict, crate::ToggleCleanupVerdict::AlreadyClear);
+        assert_eq!(fixture.taps, 0);
+        assert!(evidence.retry_is_safe());
+    }
+
+    #[tokio::test]
+    async fn unsave_refuses_card_change_before_the_toggle() {
+        let mut fixture = adapter(vec![
+            Ok(observation("author-a", 1, BookmarkState::Saved)),
+            Ok(observation("author-b", 2, BookmarkState::Saved)),
+        ]);
+        let evidence = tiktok_unsave(&mut fixture, |_| panic!("changed card must not arm")).await;
+        assert_eq!(
+            evidence.verdict,
+            crate::ToggleCleanupVerdict::TargetChangedBeforeEffect
+        );
+        assert_eq!(fixture.taps, 0);
+        assert!(evidence.retry_is_safe());
     }
 
     fn stateful(checked: Option<bool>, selected: Option<bool>) -> StatefulElementBox {

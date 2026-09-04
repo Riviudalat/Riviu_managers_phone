@@ -275,6 +275,54 @@ impl AndroidDriver {
         found
     }
 
+    /// Parse ActivityManager's live instrumentation ledger and return runners we do not own.
+    ///
+    /// `pidof <target>` is deliberately not used here. Genfarmer's target process can remain
+    /// alive solely because its `AdbKeyboard` IME is bound; that is not an active instrumentation
+    /// and must not block Riviu. ActivityManager exposes the actual owner as an
+    /// `ActiveInstrumentation{... {package/runner} ...}` row.
+    fn active_instrumentations(dump: &str, ours: &[&str]) -> Vec<String> {
+        let mut active = Vec::new();
+        for line in dump
+            .lines()
+            .filter(|line| line.contains("ActiveInstrumentation{"))
+        {
+            let component = line
+                .split_whitespace()
+                .map(|field| field.trim_matches(|ch| matches!(ch, '{' | '}' | ',')))
+                .find(|field| field.contains('/'));
+            let Some(component) = component else {
+                continue;
+            };
+            let package = component.split('/').next().unwrap_or(component);
+            if package.is_empty() || ours.contains(&package) {
+                continue;
+            }
+            if !active.iter().any(|seen: &String| seen == component) {
+                active.push(component.to_string());
+            }
+        }
+        active
+    }
+
+    async fn active_foreign_instrumentations(&self, serial: &str) -> Vec<String> {
+        let Ok(dump) = self.adb.shell(serial, "dumpsys activity").await else {
+            return Vec::new();
+        };
+        Self::active_instrumentations(&dump, &[AGENT_PACKAGE, AGENT_TEST_PACKAGE])
+    }
+
+    async fn refuse_active_foreign_instrumentation(&self, serial: &str) -> anyhow::Result<()> {
+        let active = self.active_foreign_instrumentations(serial).await;
+        anyhow::ensure!(
+            active.is_empty(),
+            "máy {serial} đang chạy UiAutomator của công cụ khác: {}. Riviu không khởi động hoặc \
+             restart agent để tránh tranh UiAutomation; hãy dừng công cụ kia rồi thử lại",
+            active.join(", ")
+        );
+        Ok(())
+    }
+
     /// Turn "something else may be holding UiAutomation" into the name of that something.
     ///
     /// The two messages below already carried the right hypothesis and never checked it, so an
@@ -607,6 +655,7 @@ impl AndroidDriver {
                     );
                 }
             }
+            self.refuse_active_foreign_instrumentation(serial).await?;
             let note = self.foreign_instrumentation_note(serial).await;
             tracing::warn!(
                 serial,
@@ -657,6 +706,7 @@ impl AndroidDriver {
     }
     /// Start the runner and wait for a session that can actually read the screen.
     async fn instrument_and_wait(&self, serial: &str, base: &str) -> anyhow::Result<AgentClient> {
+        self.refuse_active_foreign_instrumentation(serial).await?;
         // **Hold this phone's adb queue for the whole startup.** The child outlives the call
         // so it must not hold a global slot, but while `am instrument -w` is taking
         // `UiAutomation` a concurrent gesture that finds the queue free would open a second
@@ -957,6 +1007,40 @@ mod instrumentation_tests {
                     .to_string()
             ],
             "ours must not be reported, and theirs must be named with its runner"
+        );
+    }
+
+    #[test]
+    fn activity_manager_names_the_live_foreign_instrumentation_and_excludes_ours() {
+        let dump = "Active instrumentation:\n\
+          Instrumentation #0: ActiveInstrumentation{d8bab16 {com.genfarmer.uiautomator.test/androidx.test.runner.AndroidJUnitRunner} 1 procs}\n\
+            mClass=ComponentInfo{com.genfarmer.uiautomator.test/androidx.test.runner.AndroidJUnitRunner} mFinished=false\n\
+          Instrumentation #1: ActiveInstrumentation{f12ac90 {io.appium.uiautomator2.server.test/androidx.test.runner.AndroidJUnitRunner} 1 procs}\n";
+
+        assert_eq!(
+            AndroidDriver::active_instrumentations(
+                dump,
+                &[
+                    "io.appium.uiautomator2.server",
+                    "io.appium.uiautomator2.server.test",
+                ],
+            ),
+            vec![
+                "com.genfarmer.uiautomator.test/androidx.test.runner.AndroidJUnitRunner"
+                    .to_string()
+            ],
+            "only a live foreign ActivityManager instrumentation blocks Riviu"
+        );
+    }
+
+    #[test]
+    fn an_installed_runner_and_its_bound_ime_are_not_live_instrumentation() {
+        let dump = "instrumentation:com.genfarmer.uiautomator.test/androidx.test.runner.AndroidJUnitRunner (target=com.genfarmer.uiautomator)\n\
+          *APP* ProcessRecord{53c6520d0 8018:com.genfarmer.uiautomator/u0a144}\n\
+          ServiceRecord{3ff6ee6 u0 com.genfarmer.uiautomator/.AdbKeyboard}\n";
+        assert!(
+            AndroidDriver::active_instrumentations(dump, &[]).is_empty(),
+            "the real fleet keeps Genfarmer's IME process alive without holding UiAutomation"
         );
     }
 

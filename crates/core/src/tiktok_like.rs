@@ -14,8 +14,13 @@ use std::time::{Duration, Instant};
 use crate::driver::{ElementBox, UiSession};
 use crate::nurture::sleep_interruptible;
 use crate::tiktok_labels::{TikTokControl, TikTokControls};
+use crate::tiktok_public_cleanup::{
+    clear_public_toggle, PublicCleanupIdentity, PublicEffectState, PublicToggle,
+    ToggleCleanupAdapter, ToggleCleanupEvidence, ToggleCleanupObservation,
+};
 use crate::types::TapPoint;
 use crate::ActionFailure;
+use sha2::{Digest, Sha256};
 
 /// How long the like state gets to flip after the tap, and how often to look.
 const LIKE_CONFIRM_WINDOW: Duration = Duration::from_millis(2_500);
@@ -174,6 +179,144 @@ pub fn centre_of(element: &ElementBox) -> TapPoint {
         x: element.x + element.width / 2.0,
         y: element.y + element.height / 2.0,
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LikeCardFingerprint {
+    author: String,
+    sound: Option<String>,
+    comments: Option<String>,
+    share: Option<String>,
+}
+
+async fn like_card_fingerprint(
+    session: &dyn UiSession,
+    labels: TikTokControls,
+) -> Option<LikeCardFingerprint> {
+    let author = crate::interaction_hierarchy::read_author_label(session, labels).await?;
+    let read = |control| async move {
+        locate(session, labels, control)
+            .await
+            .ok()
+            .flatten()
+            .and_then(|element| element.description)
+    };
+    let fingerprint = LikeCardFingerprint {
+        author,
+        sound: read(TikTokControl::SoundLink).await,
+        comments: read(TikTokControl::Comments).await,
+        share: read(TikTokControl::Share).await,
+    };
+    (fingerprint.comments.is_some() || fingerprint.share.is_some()).then_some(fingerprint)
+}
+
+fn like_cleanup_identity(fingerprint: &LikeCardFingerprint) -> PublicCleanupIdentity {
+    let mut hasher = Sha256::new();
+    for value in [
+        Some(fingerprint.author.as_str()),
+        fingerprint.sound.as_deref(),
+        fingerprint.comments.as_deref(),
+        fingerprint.share.as_deref(),
+    ] {
+        match value {
+            Some(value) => {
+                hasher.update([1]);
+                hasher.update((value.len() as u64).to_le_bytes());
+                hasher.update(value.as_bytes());
+            }
+            None => hasher.update([0]),
+        }
+    }
+    PublicCleanupIdentity::Toggle {
+        card_key: format!("{:x}", hasher.finalize()),
+        author: fingerprint.author.clone(),
+        effect: PublicToggle::Like,
+    }
+}
+
+struct HierarchyUnlikeAdapter<'a> {
+    session: &'a dyn UiSession,
+    labels: TikTokControls,
+    sequence: u64,
+}
+
+#[async_trait::async_trait]
+impl ToggleCleanupAdapter for HierarchyUnlikeAdapter<'_> {
+    async fn observe(&mut self) -> anyhow::Result<ToggleCleanupObservation> {
+        self.sequence = self.sequence.saturating_add(1);
+        let Some(before) = like_card_fingerprint(self.session, self.labels).await else {
+            return Ok(ToggleCleanupObservation {
+                identity: None,
+                sequence: self.sequence,
+                state: PublicEffectState::Unreadable,
+                tap_point: None,
+            });
+        };
+        let Some(liked_label) = self.labels.label(TikTokControl::Liked) else {
+            return Ok(ToggleCleanupObservation {
+                identity: Some(like_cleanup_identity(&before)),
+                sequence: self.sequence,
+                state: PublicEffectState::Unreadable,
+                tap_point: None,
+            });
+        };
+        let liked = self.session.locate(liked_label.to_query()).await?;
+        let Some(after) = like_card_fingerprint(self.session, self.labels).await else {
+            return Ok(ToggleCleanupObservation {
+                identity: None,
+                sequence: self.sequence,
+                state: PublicEffectState::Unreadable,
+                tap_point: None,
+            });
+        };
+        if before != after {
+            return Ok(ToggleCleanupObservation {
+                identity: None,
+                sequence: self.sequence,
+                state: PublicEffectState::Unreadable,
+                tap_point: None,
+            });
+        }
+        Ok(ToggleCleanupObservation {
+            identity: Some(like_cleanup_identity(&after)),
+            sequence: self.sequence,
+            state: if liked.is_some() {
+                PublicEffectState::Present
+            } else {
+                PublicEffectState::Absent
+            },
+            tap_point: liked.map(|element| element.centre()),
+        })
+    }
+
+    async fn tap(&mut self, point: TapPoint) -> anyhow::Result<()> {
+        self.session.tap(point).await
+    }
+}
+
+/// Reach the unliked state on the currently proved hierarchy card.
+///
+/// This only exists for builds with a measured positive `Liked` label. Each observation reads
+/// the stable card fingerprint on both sides of the state query, and the shared cleanup machine
+/// reads it once more immediately before the one-shot intent and tap. A caller must first open
+/// and prove the canonical target; this routine deliberately does not navigate to a guessed post.
+pub async fn unlike_post_with_gate<F>(
+    session: &dyn UiSession,
+    labels: TikTokControls,
+    durable_intent: F,
+) -> ToggleCleanupEvidence
+where
+    F: FnOnce(&ToggleCleanupObservation) -> anyhow::Result<()>,
+{
+    clear_public_toggle(
+        &mut HierarchyUnlikeAdapter {
+            session,
+            labels,
+            sequence: 0,
+        },
+        durable_intent,
+    )
+    .await
 }
 
 #[cfg(test)]
@@ -479,5 +622,132 @@ mod tests {
 
         assert_eq!(verdict, LikeVerdict::AlreadyLiked);
         assert_eq!(*phone.taps.lock(), 0);
+    }
+
+    struct UnlikePhone {
+        controls: TikTokControls,
+        liked: std::sync::atomic::AtomicBool,
+        taps: PlMutex<usize>,
+    }
+
+    #[async_trait::async_trait]
+    impl UiSession for UnlikePhone {
+        async fn tap(&self, _point: TapPoint) -> anyhow::Result<()> {
+            *self.taps.lock() += 1;
+            self.liked.store(false, Ordering::Relaxed);
+            Ok(())
+        }
+
+        async fn swipe(&self, _gesture: SwipeGesture) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn type_text(&self, _text: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn home(&self) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn find_and_tap(&self, _accessibility_id: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn assert_visible(&self, _accessibility_id: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        fn stream_url(&self) -> Option<String> {
+            None
+        }
+
+        async fn locate(&self, query: ElementQuery<'_>) -> anyhow::Result<Option<ElementBox>> {
+            let description = if Some(query)
+                == self
+                    .controls
+                    .label(TikTokControl::Liked)
+                    .map(|label| label.to_query())
+            {
+                if !self.liked.load(Ordering::Relaxed) {
+                    return Ok(None);
+                }
+                "Video liked"
+            } else if Some(query)
+                == self
+                    .controls
+                    .label(TikTokControl::AuthorProfileLink)
+                    .map(|label| label.to_query())
+            {
+                "Author A profile"
+            } else if Some(query)
+                == self
+                    .controls
+                    .label(TikTokControl::SoundLink)
+                    .map(|label| label.to_query())
+            {
+                "Sound: Track A"
+            } else if Some(query)
+                == self
+                    .controls
+                    .label(TikTokControl::Comments)
+                    .map(|label| label.to_query())
+            {
+                "Read or add comments. 7 comments"
+            } else if Some(query)
+                == self
+                    .controls
+                    .label(TikTokControl::Share)
+                    .map(|label| label.to_query())
+            {
+                "Share video. 3 shares"
+            } else {
+                return Ok(None);
+            };
+            Ok(Some(ElementBox {
+                description: Some(description.to_owned()),
+                enabled: true,
+                clickable: true,
+                x: 500.0,
+                y: 1200.0,
+                width: 80.0,
+                height: 80.0,
+            }))
+        }
+    }
+
+    #[tokio::test]
+    async fn hierarchy_unlike_reproves_card_and_clears_once() {
+        let phone = UnlikePhone {
+            controls: fleet_controls(),
+            liked: std::sync::atomic::AtomicBool::new(true),
+            taps: PlMutex::new(0),
+        };
+        let mut intents = 0;
+        let evidence = unlike_post_with_gate(&phone, fleet_controls(), |observation| {
+            intents += 1;
+            assert_eq!(observation.state, PublicEffectState::Present);
+            Ok(())
+        })
+        .await;
+        assert_eq!(evidence.verdict, crate::ToggleCleanupVerdict::Cleared);
+        assert_eq!((intents, *phone.taps.lock()), (1, 1));
+        assert!(!evidence.retry_is_safe());
+    }
+
+    #[tokio::test]
+    async fn hierarchy_unlike_is_no_op_when_positive_liked_state_is_absent() {
+        let phone = UnlikePhone {
+            controls: fleet_controls(),
+            liked: std::sync::atomic::AtomicBool::new(false),
+            taps: PlMutex::new(0),
+        };
+        let evidence = unlike_post_with_gate(&phone, fleet_controls(), |_| {
+            panic!("an already-unliked card must not arm a tap")
+        })
+        .await;
+        assert_eq!(evidence.verdict, crate::ToggleCleanupVerdict::AlreadyClear);
+        assert_eq!(*phone.taps.lock(), 0);
+        assert!(evidence.retry_is_safe());
     }
 }

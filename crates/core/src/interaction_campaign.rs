@@ -1607,6 +1607,24 @@ async fn execute_like_action(
             );
         }
     };
+    if !target_proof_authorizes_public_effect(proof) {
+        return settle_claimed_action(
+            db,
+            assignment_id,
+            Kind::Like,
+            claim_revision,
+            None,
+            ActionSettlement {
+                state: State::FailedBeforeEffect,
+                evidence: serde_json::json!({
+                    "phase":"targetProof",
+                    "arrival":proof.as_str(),
+                    "verdict":"targetUnidentified",
+                }),
+                error: Some("Like bị dừng vì chưa xác định được đúng bài/tác giả".into()),
+            },
+        );
+    }
     let armed_revision = std::sync::Mutex::new(None);
     let mut gate = ActionEffectGate::new(|| {
         let armed = db.arm_interaction_action(
@@ -1681,6 +1699,24 @@ async fn execute_save_action(
             );
         }
     };
+    if !target_proof_authorizes_public_effect(proof) {
+        return settle_claimed_action(
+            db,
+            assignment_id,
+            Kind::Save,
+            claim_revision,
+            None,
+            ActionSettlement {
+                state: State::FailedBeforeEffect,
+                evidence: serde_json::json!({
+                    "phase":"targetProof",
+                    "arrival":proof.as_str(),
+                    "verdict":"targetUnidentified",
+                }),
+                error: Some("Lưu bị dừng vì chưa xác định được đúng bài/tác giả".into()),
+            },
+        );
+    }
     let armed_revision = std::sync::Mutex::new(None);
     let mut gate = ActionEffectGate::new(|| {
         let armed =
@@ -2325,26 +2361,39 @@ async fn run_cohort(
                 // Nothing is typed until a fresh comment-specific proof is on screen. The
                 // preceding Like/Save action may have changed the hierarchy or card rail.
                 let proof = driver.open_target(session.as_ref(), target).await?;
-                if proof == TargetProof::Structural {
-                    // Worth saying out loud: the post is open but unidentified, so nothing
-                    // here rules out the link having resolved to a different post.
-                    //
-                    // This used to blame OCR being macOS-only, which was wrong twice. The
-                    // condition is on the proof *level* and knows nothing about platform or
-                    // driver: the hierarchy path never calls OCR at all, and the pixel path
-                    // also lands here when OCR ran fine and simply did not find the handle
-                    // within the grace window. Naming the reader instead of guessing at a
-                    // cause is the honest version — a message that sends the operator to
-                    // install OCR when the handle merely is not on screen is worse than no
-                    // message.
-                    tracing::warn!(
-                        "interaction {}: đăng vào bài của @{} ở mức bằng chứng Structural — \
-                         không có gì trên màn nêu handle nên chưa xác định được đây có đúng \
-                         bài đó không (reader={})",
-                        target.target_key,
-                        target.author,
-                        driver.kind()
-                    );
+                if !target_proof_authorizes_public_effect(proof) {
+                    let Some(comment_claim_revision) = db
+                        .claim_interaction_action(id, crate::InteractionActionKind::Comment)?
+                    else {
+                        anyhow::bail!("Comment action không còn ở trạng thái có thể claim");
+                    };
+                    let comment_result = settle_claimed_action(
+                        db.as_ref(),
+                        id,
+                        crate::InteractionActionKind::Comment,
+                        comment_claim_revision,
+                        None,
+                        ActionSettlement {
+                            state: crate::InteractionActionState::FailedBeforeEffect,
+                            evidence: serde_json::json!({
+                                "phase":"targetProof",
+                                "arrival":proof.as_str(),
+                                "verdict":"targetUnidentified",
+                                "reader":driver.kind(),
+                            }),
+                            error: Some(format!(
+                                "Bình luận bị dừng vì chưa xác định được bài của @{}",
+                                target.author
+                            )),
+                        },
+                    )?;
+                    action_results.push(comment_result);
+                    return Ok::<Option<serde_json::Value>, anyhow::Error>(Some(
+                        serde_json::json!({
+                            "actions": action_results,
+                            "aggregate": crate::aggregate_interaction_actions(&action_results),
+                        }),
+                    ));
                 }
                 // The like, if the operator asked for one. **After the arrival proof and
                 // before anything is typed**, for two reasons: the rail is where the arrival
@@ -2712,14 +2761,8 @@ pub enum TargetProof {
     /// TikTok came forward, the screen changed, and it settled on a post — but
     /// the handle could not be read, so the post is unidentified.
     ///
-    /// This is the level nearly every real send reaches, and **not** because of any
-    /// platform limitation — the note that used to sit here blamed OCR for being
-    /// macOS-only, which was wrong on both counts. The hierarchy path reads the handle
-    /// out of the accessibility tree and calls no OCR at all; it lands here because a
-    /// TikTok post page shows the *nickname*, and a nickname folds onto its handle for
-    /// roughly one account in three (`interaction_hierarchy::author_matches_handle`
-    /// documents the measurements). So sending is deliberately **not** gated on
-    /// [`Self::Identified`]: gating it would refuse most posts that opened perfectly.
+    /// This level is useful diagnostic evidence, but it never authorizes a public effect:
+    /// a swallowed deep link can settle on another card with the same structural controls.
     Structural,
 }
 
@@ -2735,6 +2778,10 @@ impl TargetProof {
             Self::Structural => "structural",
         }
     }
+}
+
+fn target_proof_authorizes_public_effect(proof: TargetProof) -> bool {
+    matches!(proof, TargetProof::Identified)
 }
 
 pub async fn open_target_confirmed(
@@ -4586,6 +4633,16 @@ mod boundary_tests {
             InteractionActionState::Uncertain,
             Some(r#"{"phase":"afterEffect"}"#),
         )));
+    }
+
+    #[test]
+    fn an_unidentified_card_never_authorizes_like_save_or_comment_effects() {
+        assert!(super::target_proof_authorizes_public_effect(
+            super::TargetProof::Identified
+        ));
+        assert!(!super::target_proof_authorizes_public_effect(
+            super::TargetProof::Structural
+        ));
     }
 
     /// Every plan without reply dependencies may fan out, while a reply graph stays ordered.
