@@ -1218,6 +1218,7 @@ mod tests {
             E::JobUpdated { .. } => "jobUpdated",
             E::FlowUpdated { .. } => "flowUpdated",
             E::FlowRunUpdated { .. } => "flowRunUpdated",
+            E::OrchestrationUpdated { .. } => "orchestrationUpdated",
             E::InteractionUpdated { .. } => "interactionUpdated",
             E::PublishUpdated { .. } => "publishUpdated",
             E::WdaExpiryWarning { .. } => "wdaExpiryWarning",
@@ -1231,12 +1232,13 @@ mod tests {
     /// the compiler already made someone write next to the variant, and
     /// `the_tag_names_are_the_ones_serde_writes` checks the naming convention against real
     /// serialised output rather than against this list.
-    const EVERY_EVENT_TAG: [&str; 9] = [
+    const EVERY_EVENT_TAG: [&str; 10] = [
         "devicesUpdated",
         "deviceUpdated",
         "jobUpdated",
         "flowUpdated",
         "flowRunUpdated",
+        "orchestrationUpdated",
         "interactionUpdated",
         "publishUpdated",
         "wdaExpiryWarning",
@@ -1256,6 +1258,9 @@ mod tests {
             riviu_core::AppEvent::FlowRunUpdated {
                 run_id: uuid::Uuid::nil(),
                 revision: 1,
+            },
+            riviu_core::AppEvent::OrchestrationUpdated {
+                run_id: uuid::Uuid::nil(),
             },
             riviu_core::AppEvent::InteractionUpdated {
                 campaign_id: String::new(),
@@ -1281,7 +1286,7 @@ mod tests {
     }
 
     #[test]
-    fn a_struct_variant_reaches_the_frontend_in_the_case_the_frontend_reads() {
+    fn struct_variants_reach_the_frontend_in_the_case_the_frontend_reads() {
         // The bug this pins is not a missing tag but a field spelling, which no tag check can
         // see. `rename_all` on an enum renames variants only -- the fields of a struct variant
         // keep their Rust spelling unless `rename_all_fields` says otherwise, and without it
@@ -1299,6 +1304,19 @@ mod tests {
             "FlowRunMonitor reads `runId`; the wire says {json}"
         );
         assert!(json.get("run_id").is_none(), "both spellings on the wire");
+
+        let orchestration = serde_json::to_value(riviu_core::AppEvent::OrchestrationUpdated {
+            run_id: uuid::Uuid::nil(),
+        })
+        .expect("serialises");
+        assert!(
+            orchestration.get("runId").is_some(),
+            "JobsPanel reads `runId`; the wire says {orchestration}"
+        );
+        assert!(
+            orchestration.get("run_id").is_none(),
+            "both spellings on the wire"
+        );
     }
 
     #[test]

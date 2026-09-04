@@ -43,6 +43,10 @@ pub enum AppEvent {
         run_id: Uuid,
         revision: u64,
     },
+    /// One orchestration run changed and should be re-read from the database.
+    OrchestrationUpdated {
+        run_id: Uuid,
+    },
     InteractionUpdated {
         campaign_id: String,
         revision: u64,

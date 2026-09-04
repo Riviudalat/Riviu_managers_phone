@@ -158,6 +158,7 @@ export function JobsPanel({
       if (![
         "jobUpdated",
         "flowRunUpdated",
+        "orchestrationUpdated",
         "interactionUpdated",
         "publishUpdated",
         "nurtureStatus",

@@ -171,21 +171,28 @@ describe("JobsPanel operations monitor", () => {
     expect(screen.queryByText("Có thể chạy lại từ nguồn gốc", { exact: false })).toBeNull();
   });
 
-  it("refreshes the selected operation from live backend events and uses the fleet label", async () => {
-    const updated = { ...summary, state: "succeeded" as const, issueCount: 0 };
-    operationListRuns.mockResolvedValueOnce([summary]).mockResolvedValueOnce([updated]);
+  it("refreshes the selected operation from orchestration events and uses the fleet label", async () => {
+    const orchestration = {
+      ...summary,
+      id: "orchestration:run-a",
+      sourceId: "run-a",
+      kind: "orchestration" as const,
+      title: "Điều phối tuần",
+    };
+    const updated = { ...orchestration, state: "succeeded" as const, issueCount: 0 };
+    operationListRuns.mockResolvedValueOnce([orchestration]).mockResolvedValueOnce([updated]);
     operationGetRun
-      .mockResolvedValueOnce(detail)
+      .mockResolvedValueOnce({ ...detail, summary: orchestration })
       .mockResolvedValueOnce({ ...detail, summary: updated });
 
     renderPanel();
     expect(await screen.findByText("Máy 19 · Kệ trên")).toBeVisible();
     await waitFor(() => expect(eventListeners).toHaveLength(1));
 
-    eventListeners[0]({ type: "interactionUpdated", campaignId: "campaign-a", revision: 2 });
+    eventListeners[0]({ type: "orchestrationUpdated", runId: "run-a" });
     await waitFor(() => expect(operationListRuns).toHaveBeenCalledTimes(2));
     await waitFor(() => expect(operationGetRun).toHaveBeenCalledTimes(2));
-    expect(within(screen.getByRole("button", { name: /Tương tác · @creator/ })).getByText("Hoàn tất"))
+    expect(within(screen.getByRole("button", { name: /Điều phối tuần/ })).getByText("Hoàn tất"))
       .toBeVisible();
   });
 });

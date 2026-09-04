@@ -1111,6 +1111,7 @@ pub async fn orchestration_run(
         .get_orchestration_run(run.id)
         .map_err(CommandError::from_service)?
         .ok_or_else(|| CommandError::code("OrchestrationRunMissing", "created run disappeared"))?;
+    emit_orchestration_updated(&state.events, run.id);
     spawn_orchestration_worker(app, &state, run.id)?;
     Ok(detail)
 }
@@ -1179,15 +1180,23 @@ pub async fn orchestration_cancel_run(
     state.orchestration.run_cancellation(run_id).notify_one();
     let operation = state.orchestration.run_operation(run_id);
     let _operation = operation.lock().await;
+    let events = state.events.clone();
     let mut port = ProductionOrchestrationPort::from_state(app, &state, run_id);
-    let _result: OrchestrationCancelResult = cancel_orchestration(&state.db, run_id, &mut port)
-        .await
-        .map_err(CommandError::from_service)?;
-    state
+    let result: Result<OrchestrationCancelResult, CommandError> =
+        cancel_orchestration(&state.db, run_id, &mut port)
+            .await
+            .map_err(CommandError::from_service);
+    if let Err(error) = result {
+        emit_orchestration_updated(&events, run_id);
+        return Err(error);
+    }
+    let detail = state
         .db
         .get_orchestration_run(run_id)
         .map_err(CommandError::from_service)?
-        .ok_or_else(|| CommandError::code("OrchestrationRunMissing", "run disappeared"))
+        .ok_or_else(|| CommandError::code("OrchestrationRunMissing", "run disappeared"))?;
+    emit_orchestration_updated(&events, run_id);
+    Ok(detail)
 }
 
 pub(crate) fn start_automation_schedule_runner(app: AppHandle, state: &AppState) {
@@ -1480,6 +1489,7 @@ fn spawn_orchestration_worker(
             return Err(error);
         }
     };
+    let events = state.events.clone();
     let mut port = ProductionOrchestrationPort::from_state(app, state, run_id);
     let db = state.db.clone();
     let runtime = state.orchestration.clone();
@@ -1487,17 +1497,23 @@ fn spawn_orchestration_worker(
     tauri::async_runtime::spawn(async move {
         let _admission = admission;
         loop {
+            let before = db.get_orchestration_run(run_id).ok().flatten();
             let execution = {
                 let _operation = operation.lock().await;
                 execute_orchestration(&db, run_id, &mut port).await
             };
             match execution {
-                Ok(OrchestrationExecution::Complete(_)) => break,
+                Ok(OrchestrationExecution::Complete(_)) => {
+                    emit_orchestration_change(&db, &events, run_id, before.as_ref());
+                    break;
+                }
                 Ok(OrchestrationExecution::Waiting { .. }) => {
+                    emit_orchestration_change(&db, &events, run_id, before.as_ref());
                     tokio::time::sleep(Duration::from_millis(500)).await;
                 }
                 Err(error) => {
                     settle_worker_failure(&db, run_id, &error);
+                    emit_orchestration_change(&db, &events, run_id, before.as_ref());
                     log::error!("orchestration run {run_id} failed to reconcile: {error:#}");
                     break;
                 }
@@ -1506,6 +1522,27 @@ fn spawn_orchestration_worker(
         runtime.release_run(run_id);
     });
     Ok(true)
+}
+
+fn emit_orchestration_change(
+    db: &riviu_core::db::Database,
+    events: &riviu_core::EventBus,
+    run_id: Uuid,
+    before: Option<&OrchestrationRunDetail>,
+) {
+    match db.get_orchestration_run(run_id) {
+        Ok(after) if after.as_ref() != before => {
+            emit_orchestration_updated(events, run_id);
+        }
+        Ok(_) => {}
+        Err(error) => {
+            log::warn!("could not inspect orchestration {run_id} for update event: {error:#}");
+        }
+    }
+}
+
+fn emit_orchestration_updated(events: &riviu_core::EventBus, run_id: Uuid) {
+    events.emit(riviu_core::AppEvent::OrchestrationUpdated { run_id });
 }
 
 fn settle_worker_failure(db: &riviu_core::db::Database, run_id: Uuid, error: &anyhow::Error) {
@@ -1892,5 +1929,20 @@ mod tests {
         assert_eq!(error.code, "ProfileRevisionMissing");
         let expected = node_id.to_string();
         assert_eq!(error.node_id.as_deref(), Some(expected.as_str()));
+    }
+
+    #[test]
+    fn orchestration_invalidation_carries_the_changed_run_id() {
+        let events = riviu_core::EventBus::new(1);
+        let mut receiver = events.subscribe();
+        let run_id = Uuid::new_v4();
+
+        emit_orchestration_updated(&events, run_id);
+
+        assert!(matches!(
+            receiver.try_recv(),
+            Ok(riviu_core::AppEvent::OrchestrationUpdated { run_id: received })
+                if received == run_id
+        ));
     }
 }

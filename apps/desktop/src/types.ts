@@ -2269,6 +2269,7 @@ export type AppEvent =
   | { type: "jobUpdated"; job: JobRecord }
   | { type: "flowUpdated"; flowId: string; revision: number }
   | { type: "flowRunUpdated"; runId: string; revision: number }
+  | { type: "orchestrationUpdated"; runId: string }
   | { type: "interactionUpdated"; campaignId: string; revision: number }
   | { type: "publishUpdated"; campaignId: string; revision: number }
   | { type: "wdaExpiryWarning"; udid: string; daysRemaining: number }
@@ -2296,6 +2297,7 @@ export const APP_EVENT_TYPES = [
   "jobUpdated",
   "flowUpdated",
   "flowRunUpdated",
+  "orchestrationUpdated",
   "interactionUpdated",
   "publishUpdated",
   "wdaExpiryWarning",
