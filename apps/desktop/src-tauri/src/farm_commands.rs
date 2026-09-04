@@ -10,16 +10,39 @@ use std::path::{Path, PathBuf};
 use chrono::{Duration, Utc};
 use futures_util::{stream, StreamExt};
 use riviu_core::{
-    AnalyticsSummary, AndroidInstallDeviceSpec, AppInstallBatchResponse, AppInstallProgress,
-    AppInstallProgressPhase, AppInstallRequest, AppInstallResult, AppInstallStatus, AppLibraryItem,
-    AppLibraryPlatform, AppPackageFormat, DeviceAppInstallRequest, DeviceGroup, DeviceMeta,
-    DevicePlatform, DeviceWorkOwner, MaterialItem, OpLog, ScheduleItem,
+    resolve_target, AnalyticsSummary, AndroidInstallDeviceSpec, AppInstallBatchResponse,
+    AppInstallProgress, AppInstallProgressPhase, AppInstallRequest, AppInstallResult,
+    AppInstallStatus, AppLibraryItem, AppLibraryPlatform, AppPackageFormat,
+    DeviceAppInstallRequest, DeviceGroup, DeviceMeta, DevicePlatform, DeviceWorkOwner,
+    MaterialItem, MaterialPushBatchRequest, MaterialPushBatchResult, MaterialPushDeviceResult,
+    MaterialPushStatus, OpLog, ScheduleItem,
 };
 use sha2::{Digest, Sha256};
 use tauri::State;
 use uuid::Uuid;
 
 use crate::state::AppState;
+
+/// Resolve a flat library file and prove that it is a regular file directly
+/// inside the expected managed root. Database paths are data, not authority to
+/// read or delete elsewhere on the machine.
+fn resolve_managed_file(managed_root: &Path, path: &str) -> Result<PathBuf, CommandError> {
+    let canonical_root = std::fs::canonicalize(managed_root).map_err(err)?;
+    let candidate = PathBuf::from(path);
+    let metadata = std::fs::symlink_metadata(&candidate).map_err(err)?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err(CommandError::operation(
+            "managed artifact is not a regular file",
+        ));
+    }
+    let canonical = std::fs::canonicalize(&candidate).map_err(err)?;
+    if canonical.parent() != Some(canonical_root.as_path()) {
+        return Err(CommandError::operation(
+            "managed artifact escaped its library root",
+        ));
+    }
+    Ok(canonical)
+}
 
 /// Delete a file this app owns, and refuse if it is still there afterwards.
 ///
@@ -35,13 +58,76 @@ use crate::state::AppState;
 /// with the path, because "which file" is the first thing anyone needs.
 ///
 /// Found by an independent review on 27/08/2026.
-fn remove_managed_file(path: &str) -> Result<(), CommandError> {
-    match std::fs::remove_file(path) {
-        Ok(()) => Ok(()),
+fn remove_managed_file(managed_root: &Path, path: &str) -> Result<(), CommandError> {
+    let candidate = PathBuf::from(path);
+    let managed = match std::fs::symlink_metadata(&candidate) {
+        Ok(_) => resolve_managed_file(managed_root, path)?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            let canonical_root = std::fs::canonicalize(managed_root).map_err(err)?;
+            let parent = candidate
+                .parent()
+                .ok_or_else(|| CommandError::operation("managed artifact has no parent"))?;
+            let canonical_parent = std::fs::canonicalize(parent).map_err(err)?;
+            if canonical_parent != canonical_root {
+                return Err(CommandError::operation(
+                    "managed artifact escaped its library root",
+                ));
+            }
+            return Ok(());
+        }
+        Err(error) => return Err(err(error)),
+    };
+    match std::fs::remove_file(&managed) {
+        Ok(()) if !managed.exists() => Ok(()),
+        Ok(()) => Err(CommandError::operation(format!(
+            "managed artifact still exists after delete: {}",
+            managed.display()
+        ))),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(error) => Err(CommandError::operation(format!(
-            "không xoá được {path}: {error}"
+            "không xoá được {}: {error}",
+            managed.display()
         ))),
+    }
+}
+
+fn digest_path_component(value: &str) -> String {
+    format!("{:x}", Sha256::digest(value.as_bytes()))
+}
+
+fn managed_extension(path: &Path) -> Option<String> {
+    let extension = path.extension()?.to_str()?;
+    (!extension.is_empty()
+        && extension.len() <= 12
+        && extension.bytes().all(|byte| byte.is_ascii_alphanumeric()))
+    .then(|| extension.to_ascii_lowercase())
+}
+
+fn material_storage_path(materials_root: &Path, id: &str, source: &Path) -> PathBuf {
+    let stem = digest_path_component(id);
+    match managed_extension(source) {
+        Some(extension) => materials_root.join(format!("{stem}.{extension}")),
+        None => materials_root.join(stem),
+    }
+}
+
+fn material_staging_root(
+    artifacts_dir: &Path,
+    udid: &str,
+    material_id: &str,
+    nonce: Uuid,
+) -> PathBuf {
+    artifacts_dir
+        .join("push-staging")
+        .join(digest_path_component(udid))
+        .join(digest_path_component(material_id))
+        .join(nonce.to_string())
+}
+
+fn staged_material_path(staging_dir: &Path, managed_source: &Path) -> PathBuf {
+    match managed_extension(managed_source) {
+        Some(extension) => staging_dir.join(format!("payload.{extension}")),
+        None => staging_dir.join("payload"),
     }
 }
 
@@ -59,6 +145,30 @@ const MAX_CONTAINER_ENTRIES: usize = 2_048;
 const MAX_CONTAINER_APK_BYTES: u64 = 512 * 1024 * 1024;
 const MAX_CONTAINER_TOTAL_APK_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 const MAX_INSTALL_CONCURRENCY: usize = 2;
+const MAX_MATERIAL_PUSH_CONCURRENCY: usize = 2;
+
+/// Owns one per-attempt desktop staging directory until the device readback finishes.
+/// Drop covers success, transport failure and every early `?` after the copy.
+struct MaterialStagingGuard {
+    root: PathBuf,
+}
+
+impl MaterialStagingGuard {
+    fn create(root: PathBuf) -> std::io::Result<Self> {
+        std::fs::create_dir_all(&root)?;
+        Ok(Self { root })
+    }
+
+    fn root(&self) -> &Path {
+        &self.root
+    }
+}
+
+impl Drop for MaterialStagingGuard {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.root);
+    }
+}
 
 #[derive(Default)]
 struct ActiveInstallBatch {
@@ -1149,15 +1259,17 @@ pub fn add_material(
     if !src.is_file() {
         return Err(err(format!("file not found: {source_path}")));
     }
-    let file_name = name.unwrap_or_else(|| {
-        src.file_name()
-            .map(|s| s.to_string_lossy().to_string())
-            .unwrap_or_else(|| "material.bin".into())
-    });
+    let file_name = name
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| {
+            src.file_name()
+                .map(|s| s.to_string_lossy().to_string())
+                .unwrap_or_else(|| "material.bin".into())
+        });
     let dest_dir = state.artifacts_dir.join("materials");
     std::fs::create_dir_all(&dest_dir).map_err(err)?;
     let id = Uuid::new_v4().to_string();
-    let dest = dest_dir.join(format!("{id}-{file_name}"));
+    let dest = material_storage_path(&dest_dir, &id, &src);
     std::fs::copy(&src, &dest).map_err(err)?;
     let size = std::fs::metadata(&dest).map(|m| m.len()).unwrap_or(0);
     let kind = match src
@@ -1180,7 +1292,10 @@ pub fn add_material(
         size,
         created_at: Utc::now().to_rfc3339(),
     };
-    state.db.add_material(&item).map_err(err)?;
+    if let Err(error) = state.db.add_material(&item) {
+        let _ = std::fs::remove_file(&dest);
+        return Err(err(error));
+    }
     log(&state, "material.add", &item.name);
     Ok(item)
 }
@@ -1195,7 +1310,7 @@ pub fn delete_material(state: State<'_, AppState>, id: String) -> Result<(), Com
         .into_iter()
         .find(|m| m.id == id)
     {
-        remove_managed_file(&item.path)?;
+        remove_managed_file(&state.artifacts_dir.join("materials"), &item.path)?;
     }
     state.db.delete_material(&id).map_err(err)?;
     log(&state, "material.delete", &id);
@@ -1216,41 +1331,142 @@ pub async fn push_material(
         .into_iter()
         .find(|m| m.id == material_id)
         .ok_or_else(|| "material not found".to_string())?;
-    // Media never goes through installd. Stage it as a one-file campaign and
-    // let the driver perform HouseArrest/AFC size+hash readback.
-    let context = state
-        .control
-        .try_acquire_exclusive(&udid, DeviceWorkOwner::Script)
-        .await
-        .map_err(err)?;
-    let staged = state
-        .artifacts_dir
-        .join("push-staging")
-        .join(&udid)
-        .join(&material_id)
-        .join("material");
-    std::fs::create_dir_all(&staged).map_err(err)?;
-    let dest = staged.join(&item.name);
-    std::fs::copy(&item.path, &dest).map_err(err)?;
-    let campaign_root = staged
-        .parent()
-        .ok_or_else(|| "material staging root missing".to_string())?;
-    let evidence = state
-        .control
-        .stage_publish_media(
-            &context,
-            &state.active_agent_bundle_id,
-            &material_id,
-            campaign_root,
-        )
-        .await
-        .map_err(err)?;
+    let evidence = push_material_to_device(&state, &item, &udid).await?;
     let msg = format!(
         "Transferred {} to Agent sandbox on {udid}; readback={}",
         item.name, evidence
     );
     log(&state, "material.push", &format!("{udid}:{material_id}"));
     Ok(msg)
+}
+
+/// Stage one immutable material and return the driver's readback evidence.
+/// Each caller owns admission; this helper owns the per-device lease.
+async fn push_material_to_device(
+    state: &AppState,
+    item: &MaterialItem,
+    udid: &str,
+) -> Result<String, CommandError> {
+    // Media never goes through installd. Stage it as a one-file campaign and
+    // let the driver perform HouseArrest/AFC size+hash readback.
+    let context = state
+        .control
+        .try_acquire_exclusive(udid, DeviceWorkOwner::Script)
+        .await
+        .map_err(err)?;
+    let managed_source = resolve_managed_file(&state.artifacts_dir.join("materials"), &item.path)?;
+    let staging_root = material_staging_root(&state.artifacts_dir, udid, &item.id, Uuid::new_v4());
+    let staging = MaterialStagingGuard::create(staging_root).map_err(err)?;
+    let staged = staging.root().join("material");
+    std::fs::create_dir_all(&staged).map_err(err)?;
+    let dest = staged_material_path(&staged, &managed_source);
+    std::fs::copy(&managed_source, &dest).map_err(err)?;
+    let evidence = state
+        .control
+        .stage_publish_media(
+            &context,
+            &state.active_agent_bundle_id,
+            &item.id,
+            staging.root(),
+        )
+        .await
+        .map_err(err)?;
+    Ok(evidence.to_string())
+}
+
+/// Push one material to a semantic fleet target with per-device isolation.
+/// At most two phones are active at once; one failed lease/readback does not
+/// suppress results from its siblings.
+#[tauri::command]
+pub async fn push_material_batch(
+    state: State<'_, AppState>,
+    request: MaterialPushBatchRequest,
+) -> Result<MaterialPushBatchResult, CommandError> {
+    let _admission = state.ensure_accepting_work()?;
+    if request.material_id.trim().is_empty() {
+        return Err(CommandError::invalid_argument("materialId is required"));
+    }
+    let item = state
+        .db
+        .list_materials()
+        .map_err(err)?
+        .into_iter()
+        .find(|item| item.id == request.material_id)
+        .ok_or_else(|| CommandError::code("MaterialNotFound", "material not found"))?;
+    let fleet_order = state
+        .registry
+        .list()
+        .into_iter()
+        .map(|device| device.udid)
+        .collect::<Vec<_>>();
+    let target = resolve_target(
+        &request.target,
+        &fleet_order,
+        &state.db.list_device_metas().map_err(err)?,
+        &state.db.list_groups().map_err(err)?,
+    )
+    .map_err(err)?;
+    if target.included.is_empty() {
+        return Err(CommandError::code(
+            "MaterialTargetEmpty",
+            "material target has no connected device",
+        ));
+    }
+
+    let state_ref: &AppState = &state;
+    let work = target
+        .included
+        .iter()
+        .enumerate()
+        .map(|(index, device)| (index, device.udid.clone()))
+        .collect::<Vec<_>>();
+    let mut results = collect_bounded(work, MAX_MATERIAL_PUSH_CONCURRENCY, |(index, udid)| {
+        let item = &item;
+        async move {
+            let result = match push_material_to_device(state_ref, item, &udid).await {
+                Ok(evidence) => {
+                    log(state_ref, "material.push", &format!("{udid}:{}", item.id));
+                    MaterialPushDeviceResult {
+                        udid,
+                        status: MaterialPushStatus::Succeeded,
+                        evidence: Some(evidence),
+                        error_code: None,
+                        error: None,
+                    }
+                }
+                Err(error) => {
+                    log(
+                        state_ref,
+                        "material.push.failed",
+                        &format!("{udid}:{}:{}", item.id, error.code),
+                    );
+                    MaterialPushDeviceResult {
+                        udid,
+                        status: MaterialPushStatus::Failed,
+                        evidence: None,
+                        error_code: Some(error.code),
+                        error: Some(error.message.into_string()),
+                    }
+                }
+            };
+            (index, result)
+        }
+    })
+    .await;
+    results.sort_by_key(|(index, _)| *index);
+    let results = results.into_iter().map(|(_, result)| result).collect();
+    let batch_id = Uuid::new_v4().to_string();
+    log(
+        &state,
+        "material.push_batch",
+        &format!("{batch_id}:{}:{}", item.id, target.included.len()),
+    );
+    Ok(MaterialPushBatchResult {
+        batch_id,
+        material_id: item.id,
+        target,
+        results,
+    })
 }
 
 #[tauri::command]
@@ -1392,7 +1608,7 @@ pub fn delete_app_library(state: State<'_, AppState>, id: String) -> Result<(), 
         .into_iter()
         .find(|a| a.id == id)
     {
-        remove_managed_file(&item.path)?;
+        remove_managed_file(&state.artifacts_dir.join("apps"), &item.path)?;
     }
     state.db.delete_app_library(&id).map_err(err)?;
     log(&state, "app.delete", &id);
@@ -2025,13 +2241,16 @@ pub fn api_docs() -> String {
 
 ## Farm data
 - list_groups / save_group / delete_group
-- list_materials / add_material / delete_material / push_material
+- list_materials / add_material / delete_material / push_material / push_material_batch
 - list_apps_library / add_app_library / delete_app_library / install_library_app / uninstall_app
 - list_schedules / save_schedule / delete_schedule
 - publish_scan_folder / publish_create_campaign / publish_list / publish_get / publish_readiness
 - publish_sheet_get_config / publish_sheet_save_config
 - publish_execute / publish_cancel
 - list_op_logs / analytics_summary
+
+## Operations
+- operation_list_runs / operation_get_run
 
 ## Sidecar
 - python riviu_pmd.py list|install|uninstall|media-stage|stream|start-wda|...
@@ -2546,6 +2765,131 @@ mod android_app_library_tests {
         .await;
         assert_eq!(results.len(), 8);
         assert_eq!(peak.load(Ordering::SeqCst), MAX_INSTALL_CONCURRENCY);
+    }
+
+    #[tokio::test]
+    async fn material_push_work_never_exceeds_two_concurrent_devices() {
+        let active = Arc::new(AtomicUsize::new(0));
+        let peak = Arc::new(AtomicUsize::new(0));
+        let results = collect_bounded(0..9, MAX_MATERIAL_PUSH_CONCURRENCY, |value| {
+            let active = Arc::clone(&active);
+            let peak = Arc::clone(&peak);
+            async move {
+                let now = active.fetch_add(1, Ordering::SeqCst) + 1;
+                peak.fetch_max(now, Ordering::SeqCst);
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                active.fetch_sub(1, Ordering::SeqCst);
+                value
+            }
+        })
+        .await;
+        assert_eq!(results.len(), 9);
+        assert_eq!(peak.load(Ordering::SeqCst), MAX_MATERIAL_PUSH_CONCURRENCY);
+    }
+
+    #[test]
+    fn material_staging_guard_removes_copied_bytes_on_every_exit() {
+        let parent = std::env::temp_dir().join(format!("riviu-material-stage-{}", Uuid::new_v4()));
+        let attempt = parent.join("attempt");
+        {
+            let guard = MaterialStagingGuard::create(attempt.clone()).expect("create stage");
+            let material = guard.root().join("material");
+            std::fs::create_dir_all(&material).expect("create material directory");
+            std::fs::write(material.join("fixture.mp4"), b"fixture bytes").expect("copy bytes");
+            assert!(attempt.exists());
+        }
+        assert!(
+            !attempt.exists(),
+            "attempt bytes survived the staging guard"
+        );
+        let _ = std::fs::remove_dir_all(parent);
+    }
+
+    #[test]
+    fn material_paths_never_use_operator_or_device_text_as_components() {
+        let artifacts = Path::new("C:/Riviu data/artifacts");
+        let materials = artifacts.join("materials");
+        let source = Path::new("C:/nguon co dau/video thử.MP4");
+        let stored = material_storage_path(&materials, "../../material:C:ads", source);
+        assert_eq!(stored.parent(), Some(materials.as_path()));
+        assert_eq!(
+            stored.extension().and_then(|value| value.to_str()),
+            Some("mp4")
+        );
+        assert!(!stored.to_string_lossy().contains("material:C:ads"));
+
+        for serial in ["192.168.1.20:5555", "../../outside", "C:\\Windows\\Startup"] {
+            let staged =
+                material_staging_root(artifacts, serial, "..\\material:stream", Uuid::nil());
+            assert_eq!(
+                staged
+                    .parent()
+                    .and_then(Path::parent)
+                    .and_then(Path::parent),
+                Some(artifacts.join("push-staging").as_path())
+            );
+            for component in staged
+                .strip_prefix(artifacts.join("push-staging"))
+                .expect("staging remains under its root")
+                .components()
+                .take(2)
+            {
+                let component = component.as_os_str().to_string_lossy();
+                assert_eq!(component.len(), 64);
+                assert!(component.bytes().all(|byte| byte.is_ascii_hexdigit()));
+            }
+        }
+
+        let staged_file = staged_material_path(Path::new("C:/stage"), source);
+        assert_eq!(staged_file, Path::new("C:/stage/payload.mp4"));
+    }
+
+    #[test]
+    fn managed_delete_is_confined_to_the_declared_library_root() {
+        let fixture = fixture_dir();
+        let root = fixture.path().join("materials");
+        std::fs::create_dir_all(&root).expect("managed root");
+        let managed = root.join("managed.mp4");
+        let outside = fixture.path().join("outside.mp4");
+        std::fs::write(&managed, b"managed").expect("managed fixture");
+        std::fs::write(&outside, b"outside").expect("outside fixture");
+
+        let error = remove_managed_file(&root, &outside.display().to_string())
+            .expect_err("an external DB path must never be deleted");
+        assert!(error.message.contains("escaped"));
+        assert!(outside.exists());
+
+        remove_managed_file(&root, &managed.display().to_string()).expect("managed delete");
+        assert!(!managed.exists());
+    }
+
+    #[test]
+    fn material_push_wire_contract_is_camel_case_and_carries_the_target_snapshot() {
+        let request: MaterialPushBatchRequest = serde_json::from_value(serde_json::json!({
+            "materialId": "material-a",
+            "target": { "type": "explicit", "udids": ["phone-1", "phone-2"] }
+        }))
+        .expect("request");
+        assert_eq!(request.material_id, "material-a");
+
+        let response = MaterialPushBatchResult {
+            batch_id: "batch-a".into(),
+            material_id: request.material_id,
+            target: resolve_target(&request.target, &[String::from("phone-1")], &[], &[])
+                .expect("target"),
+            results: vec![MaterialPushDeviceResult {
+                udid: "phone-1".into(),
+                status: MaterialPushStatus::Succeeded,
+                evidence: Some("sha256=ok".into()),
+                error_code: None,
+                error: None,
+            }],
+        };
+        let value = serde_json::to_value(response).expect("response");
+        assert_eq!(value["batchId"], "batch-a");
+        assert_eq!(value["materialId"], "material-a");
+        assert_eq!(value["target"]["included"][0]["udid"], "phone-1");
+        assert_eq!(value["results"][0]["status"], "succeeded");
     }
 
     #[test]

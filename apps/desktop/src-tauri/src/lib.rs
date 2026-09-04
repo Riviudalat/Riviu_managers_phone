@@ -19,6 +19,7 @@ mod nurture_commands;
 mod nurture_schedule;
 mod orchestration_commands;
 mod peripherals;
+mod public_cleanup_commands;
 // The measured legacy composer remains as calibration/reference code, but its three stepwise
 // commands are deliberately absent from the invoke registry. Only `publish_execute` is live.
 #[allow(dead_code)]
@@ -430,6 +431,8 @@ pub fn run() {
             commands::view_set_preset,
             commands::save_view_snapshot,
             commands::list_jobs,
+            commands::operation_list_runs,
+            commands::operation_get_run,
             commands::run_script,
             commands::cancel_job,
             commands::list_scripts,
@@ -458,6 +461,7 @@ pub fn run() {
             farm_commands::add_material,
             farm_commands::delete_material,
             farm_commands::push_material,
+            farm_commands::push_material_batch,
             farm_commands::list_apps_library,
             farm_commands::add_app_library,
             farm_commands::delete_app_library,
@@ -517,6 +521,8 @@ pub fn run() {
             interaction_commands::interaction_list_target_notes,
             interaction_commands::interaction_list_artifacts,
             interaction_commands::interaction_read_artifact,
+            public_cleanup_commands::public_cleanup_preflight,
+            public_cleanup_commands::public_cleanup_execute,
             nurture_commands::nurture_get_settings,
             nurture_commands::nurture_save_settings,
             nurture_commands::nurture_test_api,
@@ -529,10 +535,12 @@ pub fn run() {
             nurture_commands::nurture_start,
             nurture_commands::nurture_stop,
             publish_commands::publish_scan_folder,
+            publish_commands::publish_preflight,
             publish_commands::publish_auto_assign,
             publish_commands::publish_create_campaign,
             publish_commands::publish_list,
             publish_commands::publish_get,
+            publish_commands::publish_reconcile,
             publish_commands::publish_cancel,
             publish_commands::publish_execute,
             publish_commands::publish_readiness,
@@ -882,6 +890,10 @@ mod tests {
         ("nurture_commands.rs", include_str!("nurture_commands.rs")),
         ("peripherals.rs", include_str!("peripherals.rs")),
         ("publish_commands.rs", include_str!("publish_commands.rs")),
+        (
+            "public_cleanup_commands.rs",
+            include_str!("public_cleanup_commands.rs"),
+        ),
     ];
 
     /// Commands that may skip `ensure_accepting_work()`, each with the reason it may.
@@ -909,6 +921,8 @@ mod tests {
         ("view_endpoint", "read: the loopback URL"),
         ("view_report_paint", "read-back: frontend paint counters"),
         ("list_jobs", "read: DB"),
+        ("operation_list_runs", "read: normalized DB/runtime projection"),
+        ("operation_get_run", "read: normalized DB/runtime detail"),
         ("list_scripts", "read: DB"),
         ("example_script", "read: a static fixture"),
         (

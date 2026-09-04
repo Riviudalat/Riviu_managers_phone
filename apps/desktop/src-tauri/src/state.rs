@@ -981,6 +981,15 @@ impl AppState {
             // Not fatal: the app is more useful with a stale row than not at all.
             Err(error) => log::warn!("không dọn được chiến dịch tương tác dở: {error:#}"),
         }
+        match db.recover_orphaned_public_cleanups() {
+            Ok(recovered) if recovered.retryable == 0 && recovered.uncertain == 0 => {}
+            Ok(recovered) => log::warn!(
+                "public cleanup restart reconciliation: {} trước effect có thể thử lại, {} sau intent bị khóa uncertain",
+                recovered.retryable,
+                recovered.uncertain
+            ),
+            Err(error) => log::warn!("không reconcile được public cleanup dở: {error:#}"),
+        }
         // Same argument again for publish, and the stakes are higher: a row left at
         // `posting` is a carousel that may already be on a real account, and nothing
         // re-enters it. Settling it as `uncertain` is what makes it permanently
@@ -992,6 +1001,29 @@ impl AppState {
                 "{count} chiến dịch đăng bài còn dở từ lần chạy trước đã được đánh dấu là đã dừng"
             ),
             Err(error) => log::warn!("không dọn được chiến dịch đăng bài dở: {error:#}"),
+        }
+        match db.list_orphaned_nurture_statuses() {
+            Ok(orphaned) => {
+                for status in orphaned {
+                    let recovered = nurture_engine.recover_orphaned_session(status).await;
+                    if let Err(error) = db.append_nurture_status(&recovered) {
+                        log::warn!(
+                            "không lưu được bằng chứng cleanup Nuôi sau khởi động lại cho {}: {error:#}",
+                            recovered.udid
+                        );
+                    }
+                }
+            }
+            Err(error) => log::warn!("không đọc được phiên Nuôi cần cleanup: {error:#}"),
+        }
+        // Fallback closes any row whose device cleanup result could not be appended. Rows
+        // successfully recovered above are no longer `running`, so this is idempotent.
+        match db.interrupt_orphaned_nurture_sessions() {
+            Ok(0) => {}
+            Ok(count) => {
+                log::warn!("{count} phiên Nuôi còn dở từ lần chạy trước đã được chốt là gián đoạn")
+            }
+            Err(error) => log::warn!("không chốt được lịch sử Nuôi dở: {error:#}"),
         }
         let committed_artifacts = db.list_committed_flow_artifacts()?;
         for failure in flow_artifacts.reconcile(&committed_artifacts)? {
@@ -1021,7 +1053,7 @@ impl AppState {
             flows,
             flow_artifacts,
             interaction_artifacts,
-            db,
+            db: db.clone(),
             signing,
             secrets: credentials,
             agent_token_configured: ios.token_configured,
@@ -1031,7 +1063,7 @@ impl AppState {
             stream_settings: Arc::new(RwLock::new(stream_settings)),
             artifacts_dir,
             legacy_wda_bundle: sidecar_root.join("wda").join("Riviumanagersphone.ipa"),
-            nurture: NurtureRuntime::new(),
+            nurture: NurtureRuntime::with_database(db.clone()),
             nurture_engine,
             orchestration: crate::orchestration_commands::OrchestrationChildRuntime::new(),
             flow_mutations: FlowMutationCoordinator::default(),
@@ -1873,6 +1905,8 @@ impl AppState {
         let publish_control = self.control.clone();
         let publish_registry = self.registry.clone();
         let publish_events = self.events.clone();
+        let publish_agent_bundle_id = self.active_agent_bundle_id.clone();
+        let publish_streams = self.streams.clone();
         let publish_admission = self.command_admission.clone();
         let publish_background_stop = self.background_stop.clone();
         let publish_started_at = chrono::Local::now().naive_local();
@@ -1958,6 +1992,8 @@ impl AppState {
                             publish_registry.clone(),
                             publish_db.clone(),
                             publish_events.clone(),
+                            publish_agent_bundle_id.clone(),
+                            Arc::new(publish_streams.clone()),
                             campaign_id.clone(),
                         )
                         .await
@@ -2256,8 +2292,16 @@ impl AppState {
                         Some(duration),
                     )
                     .await;
-                if !started.is_empty() {
-                    let _ = db.log_op("nurture.schedule", &format!("{} devices", started.len()));
+                match started {
+                    Ok(started) if !started.is_empty() => {
+                        let _ =
+                            db.log_op("nurture.schedule", &format!("{} devices", started.len()));
+                    }
+                    Ok(_) => {}
+                    Err(error) => {
+                        log::error!("không lưu được lịch sử phiên Nuôi đã lên lịch: {error:#}");
+                        let _ = db.log_op("nurture.schedule.failed", &format!("{error:#}"));
+                    }
                 }
                 let _ = db.set_setting(&mark_key, &next_run_at.to_rfc3339());
             }

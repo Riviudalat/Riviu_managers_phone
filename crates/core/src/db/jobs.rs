@@ -52,6 +52,30 @@ impl Database {
         }
         Ok(out)
     }
+
+    pub fn get_job(&self, id: Uuid) -> anyhow::Result<Option<JobRecord>> {
+        let conn = self.conn()?;
+        let row = conn
+            .query_row(
+                "SELECT id, script_name, udids_json, status, created_at, updated_at, steps_json, error
+                 FROM jobs WHERE id = ?1",
+                params![id.to_string()],
+                |row| {
+                    Ok(JobRow {
+                        id: row.get(0)?,
+                        script_name: row.get(1)?,
+                        udids_json: row.get(2)?,
+                        status: row.get(3)?,
+                        created_at: row.get(4)?,
+                        updated_at: row.get(5)?,
+                        steps_json: row.get(6)?,
+                        error: row.get(7)?,
+                    })
+                },
+            )
+            .optional()?;
+        row.map(JobRow::into_job).transpose()
+    }
     pub fn save_script(&self, name: &str, body_json: &str) -> anyhow::Result<()> {
         let conn = self.conn()?;
         let id = Uuid::new_v4().to_string();
