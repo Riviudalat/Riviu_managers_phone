@@ -7,12 +7,13 @@
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    FlowAggregateState, FlowAttemptState, FlowDeviceRunState, FlowRunDetail, FlowRunRecord,
-    InteractionCampaignDetail, InteractionCampaignSummary, JobRecord, JobStatus,
-    NurtureCleanupState, NurtureSessionStatus, OrchestrationAttemptState, OrchestrationRunDetail,
-    OrchestrationRunRecord, OrchestrationRunState, Outcome, PublishCampaignDetail,
-    PublishCampaignState, PublishExecutionSnapshot, PublishExecutionStatus, PublishRetryScope,
-    StepStatus, ThreadCampaignState, ThreadMessageState,
+    AutomationKind, FlowAggregateState, FlowAttemptState, FlowDeviceRunState, FlowRunDetail,
+    FlowRunRecord, InteractionCampaignDetail, InteractionCampaignSummary, JobRecord, JobStatus,
+    NurtureCleanupState, NurtureSessionStatus, OrchestrationAttemptState, OrchestrationBranch,
+    OrchestrationRunDetail, OrchestrationRunRecord, OrchestrationRunState, Outcome,
+    PublishCampaignDetail, PublishCampaignState, PublishExecutionSnapshot, PublishExecutionStatus,
+    PublishRetryScope, ResolvedTargetDevice, ResolvedTargetSnapshot, StepStatus,
+    ThreadCampaignState, ThreadMessageState,
 };
 
 #[derive(Debug, Clone, Copy, Deserialize, Eq, PartialEq, Serialize)]
@@ -308,7 +309,7 @@ pub fn project_orchestration_detail(
             kind: OperationRunItemKind::Attempt,
             label: attempt
                 .child_kind
-                .map(|kind| format!("{kind:?}"))
+                .map(orchestration_child_label)
                 .unwrap_or_else(|| "Bước điều phối".to_string()),
             state: match attempt.state {
                 OrchestrationAttemptState::Queued | OrchestrationAttemptState::Dispatching => {
@@ -323,13 +324,32 @@ pub fn project_orchestration_detail(
             },
             udid: None,
             error_code: attempt.error_code.clone(),
-            detail: attempt.branch.map(|branch| format!("Nhánh {branch:?}")),
+            detail: attempt.branch.map(orchestration_branch_label),
             evidence: attempt.child_campaign_id.map(|id| id.to_string()),
             retryable: false,
         })
         .collect::<Vec<_>>();
     finish_detail(&mut summary, &items);
     OperationRunDetail { summary, items }
+}
+
+fn orchestration_child_label(kind: AutomationKind) -> String {
+    match kind {
+        AutomationKind::Nurture => "Nuôi TikTok",
+        AutomationKind::Interaction => "Tương tác",
+        AutomationKind::Publish => "Đăng bài",
+    }
+    .to_string()
+}
+
+fn orchestration_branch_label(branch: OrchestrationBranch) -> String {
+    match branch {
+        OrchestrationBranch::Done => "Nhánh hoàn tất",
+        OrchestrationBranch::Partial => "Nhánh một phần",
+        OrchestrationBranch::Failed => "Nhánh thất bại",
+        OrchestrationBranch::Uncertain => "Nhánh chưa chắc chắn",
+    }
+    .to_string()
 }
 
 pub fn nurture_source_id(status: &NurtureSessionStatus) -> String {
@@ -639,6 +659,14 @@ pub fn project_publish_detail(
     detail: &PublishCampaignDetail,
     snapshot: Option<&PublishExecutionSnapshot>,
 ) -> OperationRunDetail {
+    project_publish_detail_with_target(detail, snapshot, None)
+}
+
+pub fn project_publish_detail_with_target(
+    detail: &PublishCampaignDetail,
+    snapshot: Option<&PublishExecutionSnapshot>,
+    target_snapshot: Option<&ResolvedTargetSnapshot>,
+) -> OperationRunDetail {
     let mut summary = project_publish_summary(detail, snapshot);
     let aggregate_issue_count = summary.issue_count;
     let retry_scope = summary.retry_scope.unwrap_or(PublishRetryScope::None);
@@ -649,7 +677,15 @@ pub fn project_publish_detail(
         .map(|assignment| OperationRunItem {
             id: assignment.id.clone(),
             kind: OperationRunItemKind::Assignment,
-            label: format!("Bài {}", assignment.ordinal + 1),
+            label: target_snapshot
+                .and_then(|snapshot| {
+                    snapshot
+                        .included
+                        .iter()
+                        .find(|device| device.udid == assignment.udid)
+                })
+                .map(reviewed_target_label)
+                .unwrap_or_else(|| format!("Bài {}", assignment.ordinal + 1)),
             state: publish_item_state(assignment.state.clone(), aggregate_state),
             udid: Some(assignment.udid.clone()),
             error_code: assignment.error_code.clone(),
@@ -671,6 +707,15 @@ pub fn project_publish_detail(
     // Keep that warning even when every public Post assignment itself succeeded.
     summary.issue_count = summary.issue_count.max(aggregate_issue_count);
     OperationRunDetail { summary, items }
+}
+
+fn reviewed_target_label(device: &ResolvedTargetDevice) -> String {
+    match (device.number, device.alias.trim()) {
+        (Some(number), "") => format!("Máy {number}"),
+        (Some(number), alias) => format!("Máy {number} · {alias}"),
+        (None, "") => "Máy trong snapshot".to_string(),
+        (None, alias) => alias.to_string(),
+    }
 }
 
 fn aggregate_item_state(items: &[OperationRunItem]) -> OperationRunState {
@@ -985,11 +1030,45 @@ mod tests {
             updated_at: "2026-09-04T10:02:00Z".into(),
         };
 
-        let projected = project_publish_detail(&detail, Some(&snapshot));
+        let target_snapshot = crate::ResolvedTargetSnapshot {
+            target_ref: crate::TargetRef::Explicit {
+                udids: vec!["phone-a".into()],
+            },
+            included: vec![crate::ResolvedTargetDevice {
+                udid: "phone-a".into(),
+                alias: "Kệ trên".into(),
+                number: Some(19),
+            }],
+            excluded: Vec::new(),
+            roster_sha256: "a".repeat(64),
+        };
+        let projected =
+            project_publish_detail_with_target(&detail, Some(&snapshot), Some(&target_snapshot));
 
         assert_eq!(projected.summary.state, OperationRunState::Partial);
         assert_eq!(projected.summary.issue_count, 1);
         assert_eq!(projected.items[0].state, OperationRunState::Succeeded);
+        assert_eq!(projected.items[0].label, "Máy 19 · Kệ trên");
+    }
+
+    #[test]
+    fn orchestration_labels_are_operator_facing_vietnamese() {
+        assert_eq!(
+            orchestration_child_label(AutomationKind::Nurture),
+            "Nuôi TikTok"
+        );
+        assert_eq!(
+            orchestration_child_label(AutomationKind::Interaction),
+            "Tương tác"
+        );
+        assert_eq!(
+            orchestration_child_label(AutomationKind::Publish),
+            "Đăng bài"
+        );
+        assert_eq!(
+            orchestration_branch_label(OrchestrationBranch::Uncertain),
+            "Nhánh chưa chắc chắn"
+        );
     }
 
     #[test]

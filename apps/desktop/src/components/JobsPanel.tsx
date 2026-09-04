@@ -340,7 +340,7 @@ export function JobsPanel({
                     <li key={item.id} className={item.state}>
                       <span aria-hidden="true" />
                       <div>
-                        <strong>{item.udid ? deviceNames.get(item.udid) ?? "Máy trong snapshot" : item.label}</strong>
+                        <strong>{item.udid ? deviceNames.get(item.udid) ?? item.label : item.label}</strong>
                         <small>
                           {RUN_LABEL[item.state]}
                           {item.retryable ? " · Có thể chạy lại từ nguồn gốc" : ""}

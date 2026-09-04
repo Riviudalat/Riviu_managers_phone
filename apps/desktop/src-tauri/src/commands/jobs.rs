@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 use riviu_core::{
     nurture_source_id, project_flow_detail, project_flow_summary, project_interaction_detail,
     project_interaction_summary, project_job, project_nurture, project_orchestration_detail,
-    project_orchestration_summary, project_publish_detail, project_publish_summary,
+    project_orchestration_summary, project_publish_detail_with_target, project_publish_summary,
     NurtureSessionStatus, OperationRunDetail, OperationRunState, OperationRunSummary,
 };
 
@@ -226,7 +226,14 @@ pub fn operation_get_run(
                 .db
                 .get_publish_execution_snapshot(source_id)
                 .map_err(err)?;
-            Ok(Some(project_publish_detail(&detail, snapshot.as_ref())))
+            let request = state.db.publish_campaign_request(source_id).map_err(err)?;
+            Ok(Some(project_publish_detail_with_target(
+                &detail,
+                snapshot.as_ref(),
+                request
+                    .as_ref()
+                    .and_then(|request| request.target_snapshot.as_ref()),
+            )))
         }
         _ => Err(CommandError::invalid_argument(
             "operationId source prefix is unknown",

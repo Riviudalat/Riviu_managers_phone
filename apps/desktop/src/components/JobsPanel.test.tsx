@@ -171,6 +171,31 @@ describe("JobsPanel operations monitor", () => {
     expect(screen.queryByText("Có thể chạy lại từ nguồn gốc", { exact: false })).toBeNull();
   });
 
+  it("keeps the reviewed snapshot label when a publish target is offline", async () => {
+    const publishSummary: OperationRunSummary = {
+      ...summary,
+      id: "publish:campaign-offline",
+      sourceId: "campaign-offline",
+      kind: "publish",
+      title: "Đăng bài",
+    };
+    operationListRuns.mockResolvedValue([publishSummary]);
+    operationGetRun.mockResolvedValue({
+      summary: publishSummary,
+      items: [{
+        ...detail.items[0],
+        id: "publish-assignment",
+        label: "Máy 13 · Kệ dưới",
+        udid: "offline-phone",
+      }],
+    });
+
+    renderPanel();
+
+    expect(await screen.findByText("Máy 13 · Kệ dưới")).toBeVisible();
+    expect(screen.queryByText("Máy trong snapshot")).toBeNull();
+  });
+
   it("refreshes the selected operation from orchestration events and uses the fleet label", async () => {
     const orchestration = {
       ...summary,
