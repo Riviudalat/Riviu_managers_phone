@@ -8,7 +8,7 @@ interface Props {
 }
 
 export function ScriptsPanel({ onUseInJobs }: Props) {
-  const [name, setName] = useState("demo");
+  const [name, setName] = useState("");
   const [body, setBody] = useState("");
   const [saved, setSaved] = useState<[string, string][]>([]);
   const [message, setMessage] = useState<string | null>(null);
@@ -28,7 +28,6 @@ export function ScriptsPanel({ onUseInJobs }: Props) {
   };
 
   useEffect(() => {
-    exampleScript().then(setBody).catch(() => undefined);
     void reload();
   }, []);
 
@@ -50,7 +49,10 @@ export function ScriptsPanel({ onUseInJobs }: Props) {
             Tên
             <input value={name} onChange={(e) => setName(e.target.value)} />
           </label>
-          <textarea rows={18} value={body} onChange={(e) => setBody(e.target.value)} />
+          <label>
+            <span>Kịch bản JSON</span>
+            <textarea rows={18} value={body} onChange={(e) => setBody(e.target.value)} />
+          </label>
           {message && <p className="hint">{message}</p>}
           <div className="row">
             <button

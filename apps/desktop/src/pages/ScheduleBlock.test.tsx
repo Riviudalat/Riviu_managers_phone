@@ -7,12 +7,10 @@ import { ScheduleBlock } from "./ScheduleBlock";
 
 vi.mock("../api", () => ({
   deleteSchedule: vi.fn(async () => undefined),
-  exampleScript: vi.fn(async () => "{}"),
   listGroups: vi.fn(async () => []),
   listSchedules: vi.fn(async () => []),
   listScripts: vi.fn(async () => [["daily", "{}"]]),
   saveSchedule: vi.fn(async () => undefined),
-  saveScript: vi.fn(async () => undefined),
 }));
 
 const mocked = api as unknown as Record<string, ReturnType<typeof vi.fn>>;
@@ -20,12 +18,10 @@ const mocked = api as unknown as Record<string, ReturnType<typeof vi.fn>>;
 beforeEach(() => {
   for (const fn of Object.values(mocked)) fn.mockReset();
   mocked.deleteSchedule.mockResolvedValue(undefined);
-  mocked.exampleScript.mockResolvedValue("{}");
   mocked.listGroups.mockResolvedValue([]);
   mocked.listSchedules.mockResolvedValue([]);
   mocked.listScripts.mockResolvedValue([["daily", "{}"]]);
   mocked.saveSchedule.mockResolvedValue(undefined);
-  mocked.saveScript.mockResolvedValue(undefined);
 });
 
 afterEach(cleanup);
@@ -43,6 +39,15 @@ describe("ScheduleBlock states", () => {
 
     expect(await screen.findByText("Chưa có lịch chạy")).toBeVisible();
     expect(screen.getByRole("group", { name: "Cách lịch chạy" })).not.toHaveAttribute("open");
+  });
+
+  it("starts a new schedule unnamed and never creates a sample script", async () => {
+    mocked.listScripts.mockResolvedValue([]);
+    render(<ScheduleBlock devices={[]} selected={[]} onSelectUdids={() => {}} />);
+
+    expect(await screen.findByText("Chưa có lịch chạy")).toBeVisible();
+    expect(screen.getByRole("textbox", { name: "Tên" })).toHaveValue("");
+    expect(mocked.listScripts).toHaveBeenCalledTimes(1);
   });
 
   it("keeps a load failure in the page and retries to the empty state", async () => {

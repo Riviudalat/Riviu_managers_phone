@@ -3,10 +3,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { ScriptsPanel } from "./ScriptsPanel";
 
-const listScripts = vi.hoisted(() => vi.fn());
+const { exampleScript, listScripts } = vi.hoisted(() => ({
+  exampleScript: vi.fn(async () => '{"steps":[]}'),
+  listScripts: vi.fn(),
+}));
 
 vi.mock("../api", () => ({
-  exampleScript: vi.fn(async () => '{"steps":[]}'),
+  exampleScript,
   listScripts,
   saveScript: vi.fn(async () => undefined),
 }));
@@ -23,6 +26,19 @@ describe("ScriptsPanel Save", () => {
     render(<ScriptsPanel onUseInJobs={() => undefined} />);
 
     expect(screen.getByRole("heading", { level: 2, name: "Kịch bản" })).toBeVisible();
+  });
+
+  it("starts blank and only loads the example after an explicit action", async () => {
+    render(<ScriptsPanel onUseInJobs={() => undefined} />);
+
+    expect(screen.getByRole("textbox", { name: "Tên" })).toHaveValue("");
+    expect(screen.getByRole("textbox", { name: "Kịch bản JSON" })).toHaveValue("");
+    expect(exampleScript).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole("button", { name: "Tải mẫu" }));
+
+    await waitFor(() => expect(exampleScript).toHaveBeenCalledTimes(1));
+    expect(screen.getByRole("textbox", { name: "Kịch bản JSON" })).toHaveValue('{"steps":[]}');
   });
 
   it("says why a script was not saved instead of leaving the panel silent", async () => {

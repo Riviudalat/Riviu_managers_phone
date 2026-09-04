@@ -276,7 +276,7 @@ it("renders the production action workflow and a live review rail on the page", 
  * resolves before the (debounced) parse has returned anything.
  */
 async function pasteLink() {
-  fireEvent.change(screen.getByPlaceholderText("https://www.tiktok.com/@creator/video/123"), {
+  fireEvent.change(screen.getByRole("textbox", { name: "Link TikTok — mỗi dòng một link" }), {
     target: { value: "https://www.tiktok.com/@creator/video/123" },
   });
   await screen.findByText("✓");
@@ -313,7 +313,7 @@ describe("InteractionPopup", () => {
       .mockResolvedValueOnce([parsedLine("222")]);
     resolveLinks.mockReturnValueOnce(oldResolution.promise);
     render(<InteractionPopup metas={noMeta} devices={devices} selected={[]} onClose={() => undefined} />);
-    const input = screen.getByPlaceholderText("https://www.tiktok.com/@creator/video/123");
+    const input = screen.getByRole("textbox", { name: "Link TikTok — mỗi dòng một link" });
 
     fireEvent.change(input, { target: { value: oldUrl } });
     fireEvent.click(await screen.findByRole("button", { name: "Gỡ link rút gọn" }));

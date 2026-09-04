@@ -119,7 +119,7 @@ export function InteractionSetupTab({
         <textarea
           value={draft.rawLinks}
           onChange={(event) => patch("rawLinks", event.target.value)}
-          placeholder="https://www.tiktok.com/@creator/video/123"
+          placeholder="Dán link TikTok, mỗi dòng một bài"
           rows={4}
         />
       </label>

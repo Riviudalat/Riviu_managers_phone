@@ -1,11 +1,9 @@
 import { useEffect, useRef, useState } from "react";
 import {
   deleteSchedule,
-  exampleScript,
   listSchedules,
   listScripts,
   saveSchedule,
-  saveScript,
 } from "../api";
 import { SelectionStrip } from "../components/SelectionStrip";
 import { EmptyState, LoadingState, StatusNotice } from "../components/States";
@@ -24,7 +22,7 @@ export function ScheduleBlock({
 }: SelProps) {
   const [items, setItems] = useState<ScheduleItem[]>([]);
   const [scripts, setScripts] = useState<[string, string][]>([]);
-  const [name, setName] = useState("hourly");
+  const [name, setName] = useState("");
   const [scriptName, setScriptName] = useState("");
   const [mins, setMins] = useState(60);
   const [loading, setLoading] = useState(true);
@@ -39,12 +37,7 @@ export function ScheduleBlock({
     setLoadError(null);
     try {
       const nextItems = await listSchedules();
-      let scriptsList = await listScripts();
-      if (!scriptsList.length) {
-        const body = await exampleScript();
-        await saveScript("example", body);
-        scriptsList = await listScripts();
-      }
+      const scriptsList = await listScripts();
       if (ticket !== loadTicket.current) return;
       setItems(nextItems);
       setScripts(scriptsList);
