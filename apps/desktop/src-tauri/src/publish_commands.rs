@@ -623,13 +623,7 @@ fn persist_reconciled_publish_execution(
         .as_ref()
         .map(|snapshot| snapshot.input_digest.clone())
         .unwrap_or(stored_campaign_input_digest(&request, &detail)?);
-    let mut sheet_states = HashMap::new();
-    for assignment in &detail.assignments {
-        if let Some(sheet_state) = db.publish_sheet_outbox_state(&assignment.id)? {
-            sheet_states.insert(assignment.id.clone(), sheet_state);
-        }
-    }
-    let (status, retry_scope) = reconciled_publish_status(&detail, &sheet_states);
+    let (status, retry_scope) = db.reconciled_publish_execution_status(campaign_id)?;
     db.save_publish_execution_snapshot(
         campaign_id,
         &input_digest,
@@ -655,6 +649,50 @@ pub(crate) fn reconcile_publish_execution_and_announce(
     })
 }
 
+fn publish_reconciliation_identity(
+    db: &Database,
+    campaign_id: &str,
+) -> anyhow::Result<(Option<String>, Option<riviu_core::ResolvedTargetSnapshot>)> {
+    let Some(request) = db.publish_campaign_request(campaign_id)? else {
+        // Sheet obligations deliberately outlive a deleted campaign. There is no projection to
+        // refresh in that case, but the already-delivered row must still be allowed to settle.
+        return Ok((None, None));
+    };
+    let input_digest = match db.get_publish_execution_snapshot(campaign_id)? {
+        Some(snapshot) => snapshot.input_digest,
+        None => {
+            let detail = db
+                .get_publish_campaign(campaign_id)?
+                .context("publish campaign disappeared while deriving its input digest")?;
+            stored_campaign_input_digest(&request, &detail)?
+        }
+    };
+    Ok((Some(input_digest), request.target_snapshot))
+}
+
+fn settle_publish_sheet_delivery_and_announce(
+    db: &Database,
+    events: &riviu_core::events::EventBus,
+    row: &riviu_core::db::SheetOutboxRow,
+    input_digest: Option<&str>,
+    target_snapshot: Option<&riviu_core::ResolvedTargetSnapshot>,
+) -> anyhow::Result<bool> {
+    match db.settle_publish_sheet_delivery(
+        &row.assignment_id,
+        &row.campaign_id,
+        row.revision,
+        input_digest,
+        target_snapshot,
+    )? {
+        riviu_core::db::SheetOutboxSettlement::StaleRevision => Ok(false),
+        riviu_core::db::SheetOutboxSettlement::DeliveredWithoutCampaign => Ok(true),
+        riviu_core::db::SheetOutboxSettlement::Delivered(_) => {
+            announce(events, db, &row.campaign_id);
+            Ok(true)
+        }
+    }
+}
+
 /// Finish the exact Sheet revision that was delivered, then converge the durable operation view.
 /// A stale CAS is an ordinary refusal and emits nothing because a newer row is still owed.
 pub(crate) fn mark_publish_sheet_sent_and_reconcile(
@@ -662,97 +700,13 @@ pub(crate) fn mark_publish_sheet_sent_and_reconcile(
     events: &riviu_core::events::EventBus,
     row: &riviu_core::db::SheetOutboxRow,
 ) -> anyhow::Result<bool> {
-    if !db.mark_publish_sheet_sent(&row.assignment_id, row.revision)? {
-        return Ok(false);
-    }
-    reconcile_publish_execution_and_announce(db, events, &row.campaign_id)?;
-    Ok(true)
-}
-
-fn reconciled_publish_status(
-    detail: &PublishCampaignDetail,
-    sheet_states: &HashMap<String, riviu_core::db::SheetOutboxState>,
-) -> (
-    riviu_core::PublishExecutionStatus,
-    riviu_core::PublishRetryScope,
-) {
-    if matches!(
-        detail.campaign.state,
-        riviu_core::PublishCampaignState::Cancelled | riviu_core::PublishCampaignState::Missed
-    ) {
-        return (
-            riviu_core::PublishExecutionStatus::Partial,
-            riviu_core::PublishRetryScope::None,
-        );
-    }
-    let uncertain = detail.assignments.iter().any(|assignment| {
-        matches!(
-            assignment.state,
-            riviu_core::PublishCampaignState::Posting
-                | riviu_core::PublishCampaignState::Verifying
-                | riviu_core::PublishCampaignState::Uncertain
-        )
-    });
-    if uncertain {
-        return (
-            riviu_core::PublishExecutionStatus::Uncertain,
-            riviu_core::PublishRetryScope::None,
-        );
-    }
-
-    let all_succeeded = !detail.assignments.is_empty()
-        && detail.assignments.iter().all(|assignment| {
-            matches!(
-                assignment.state,
-                riviu_core::PublishCampaignState::Succeeded
-            )
-        });
-    if !all_succeeded {
-        return (
-            riviu_core::PublishExecutionStatus::Partial,
-            riviu_core::PublishRetryScope::FullPipeline,
-        );
-    }
-
-    let all_links_known = detail.assignments.iter().all(|assignment| {
-        assignment
-            .evidence_json
-            .as_deref()
-            .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
-            .as_ref()
-            .and_then(post_url_owed)
-            .is_some()
-    });
-    // A confirmed post never re-enters the composer. When its canonical links are already
-    // durable and an outbox row is owed, only that idempotent Sheet write may resume.
-    let sheet_owed = detail.assignments.iter().any(|assignment| {
-        matches!(
-            sheet_states.get(&assignment.id),
-            Some(
-                riviu_core::db::SheetOutboxState::Pending
-                    | riviu_core::db::SheetOutboxState::Failed
-            )
-        )
-    });
-    let every_sheet_row_sent = detail.assignments.iter().all(|assignment| {
-        matches!(
-            sheet_states.get(&assignment.id),
-            Some(riviu_core::db::SheetOutboxState::Sent)
-        )
-    });
-    if all_links_known && every_sheet_row_sent {
-        return (
-            riviu_core::PublishExecutionStatus::Complete,
-            riviu_core::PublishRetryScope::None,
-        );
-    }
-    (
-        riviu_core::PublishExecutionStatus::Partial,
-        if sheet_owed && all_links_known {
-            riviu_core::PublishRetryScope::SheetOnly
-        } else {
-            riviu_core::PublishRetryScope::LinkAndSheet
-        },
+    let (input_digest, target_snapshot) = publish_reconciliation_identity(db, &row.campaign_id)?;
+    settle_publish_sheet_delivery_and_announce(
+        db,
+        events,
+        row,
+        input_digest.as_deref(),
+        target_snapshot.as_ref(),
     )
 }
 
@@ -2130,6 +2084,7 @@ pub(crate) async fn execute_publish_campaign_inner(
             control: control.clone(),
             registry: registry.clone(),
             db: db.clone(),
+            events: events.clone(),
             campaign_id: campaign_id.clone(),
             assignment: assignment.clone(),
             current_evidence,
@@ -2271,6 +2226,7 @@ struct DesktopPublishRuntimePort {
     control: Arc<DeviceControlPlane>,
     registry: riviu_core::DeviceRegistry,
     db: Arc<Database>,
+    events: riviu_core::events::EventBus,
     campaign_id: String,
     assignment: riviu_core::PublishAssignmentRecord,
     current_evidence: Option<serde_json::Value>,
@@ -2374,7 +2330,7 @@ impl riviu_core::PublishRuntimePort for DesktopPublishRuntimePort {
             )
             .map_err(|error| error.to_string())?;
         self.current_evidence = Some(evidence);
-        deliver_assignment_sheet_row(&self.db, assignment_id).await
+        deliver_assignment_sheet_row(&self.db, &self.events, assignment_id).await
     }
 
     async fn cleanup(&mut self) -> Result<(), String> {
@@ -2459,7 +2415,11 @@ fn campaign_retry_scope(
     }
 }
 
-async fn deliver_assignment_sheet_row(db: &Database, assignment_id: &str) -> Result<(), String> {
+async fn deliver_assignment_sheet_row(
+    db: &Database,
+    events: &riviu_core::events::EventBus,
+    assignment_id: &str,
+) -> Result<(), String> {
     let Some(row) = db
         .pending_publish_sheet_row(assignment_id)
         .map_err(|error| error.to_string())?
@@ -2503,8 +2463,7 @@ async fn deliver_assignment_sheet_row(db: &Database, assignment_id: &str) -> Res
         }
         return Err(reason);
     }
-    let marked = db
-        .mark_publish_sheet_sent(&row.assignment_id, row.revision)
+    let marked = mark_publish_sheet_sent_and_reconcile(db, events, &row)
         .map_err(|error| error.to_string())?;
     if !marked
         && db
@@ -4007,13 +3966,13 @@ mod tests {
     use super::poster_identity;
     use super::publish_preflight_digest;
     use super::readiness_of_build;
-    use super::reconciled_publish_status;
     use super::record_transfer_write_ahead;
     use super::refuse_assignments_whose_bundle_is_too_large;
     use super::refuse_devices_whose_composer_is_not_measured;
     use super::refuse_when_the_route_authorities_disagree;
     use super::require_current_preflight_digest;
     use super::resolve_preflight_target;
+    use super::settle_publish_sheet_delivery_and_announce;
     use super::state_for_outcome;
     use super::token_must_be_restated;
     use super::video_plan_for_build;
@@ -4453,82 +4412,6 @@ mod tests {
     }
 
     #[test]
-    fn restart_reconciliation_never_reposts_an_ambiguous_or_confirmed_assignment() {
-        use riviu_core::PublishCampaignState as CampaignState;
-        use riviu_core::{PublishExecutionStatus as Status, PublishRetryScope as Scope};
-
-        let detail_for = |state: CampaignState, evidence: Option<serde_json::Value>| {
-            let bundle = test_bundle("bundle-1");
-            let mut assignment = test_assignment("assignment-1", &bundle.id, "phone-1");
-            assignment.state = state.clone();
-            assignment.evidence_json = evidence.map(|value| value.to_string());
-            riviu_core::PublishCampaignDetail {
-                campaign: riviu_core::PublishCampaignRecord {
-                    id: "campaign-1".into(),
-                    request_id: "request-1".into(),
-                    source_root: "C:/fixture".into(),
-                    state,
-                    run_at: None,
-                    visibility: riviu_core::PublishVisibility::Public,
-                    cleanup_policy:
-                        riviu_core::PublishCleanupPolicy::DeleteImportedAssetsAfterVerified,
-                    assignments: Vec::new(),
-                    created_at: "2026-09-04T00:00:00Z".into(),
-                    updated_at: "2026-09-04T00:00:01Z".into(),
-                    error_code: None,
-                },
-                bundles: vec![bundle],
-                assignments: vec![assignment],
-                events: Vec::new(),
-            }
-        };
-
-        let empty = HashMap::new();
-        assert_eq!(
-            reconciled_publish_status(&detail_for(CampaignState::Posting, None), &empty),
-            (Status::Uncertain, Scope::None)
-        );
-        assert_eq!(
-            reconciled_publish_status(&detail_for(CampaignState::Succeeded, None), &empty),
-            (Status::Partial, Scope::LinkAndSheet)
-        );
-
-        let linked = detail_for(
-            CampaignState::Succeeded,
-            Some(serde_json::json!({
-                "post": {"postUrl": "https://www.tiktok.com/@fixture/video/7400000000000000001"}
-            })),
-        );
-        assert_eq!(
-            reconciled_publish_status(
-                &linked,
-                &HashMap::from([(
-                    "assignment-1".to_string(),
-                    riviu_core::db::SheetOutboxState::Pending,
-                )])
-            ),
-            (Status::Partial, Scope::SheetOnly)
-        );
-        assert_eq!(
-            reconciled_publish_status(
-                &linked,
-                &HashMap::from([(
-                    "assignment-1".to_string(),
-                    riviu_core::db::SheetOutboxState::Sent,
-                )])
-            ),
-            (Status::Complete, Scope::None)
-        );
-
-        let mut cancelled = detail_for(CampaignState::Cancelled, None);
-        cancelled.assignments[0].state = CampaignState::Ready;
-        assert_eq!(
-            reconciled_publish_status(&cancelled, &empty),
-            (Status::Partial, Scope::None)
-        );
-    }
-
-    #[test]
     fn sheet_delivery_reconciles_the_operation_before_emitting_and_rejects_a_stale_revision() {
         let path = std::env::temp_dir().join(format!(
             "riviu-publish-sheet-convergence-{}.db",
@@ -4612,8 +4495,41 @@ mod tests {
             riviu_core::PublishExecutionStatus::Partial
         );
 
+        let forced_failure = settle_publish_sheet_delivery_and_announce(
+            &db,
+            &events,
+            &current,
+            Some("not-a-valid-input-digest"),
+            None,
+        )
+        .expect_err("snapshot failure must abort the whole Sheet settlement");
         assert!(
-            mark_publish_sheet_sent_and_reconcile(&db, &events, &current)
+            forced_failure
+                .to_string()
+                .contains("64 lowercase hexadecimal"),
+            "unexpected forced failure: {forced_failure:#}"
+        );
+        assert!(
+            receiver.try_recv().is_err(),
+            "a rolled-back settle emits nothing"
+        );
+        let retryable = db
+            .pending_publish_sheet_row(&assignment.id)
+            .expect("read row after snapshot failure")
+            .expect("snapshot failure keeps the row retryable");
+        assert_eq!(retryable.revision, current.revision);
+        assert_eq!(retryable.attempts, current.attempts);
+        assert_eq!(
+            db.get_publish_execution_snapshot(&campaign.id)
+                .expect("read projection after rollback")
+                .expect("projection survives rollback")
+                .status,
+            riviu_core::PublishExecutionStatus::Partial,
+            "the failed transaction must not publish half of its state"
+        );
+
+        assert!(
+            mark_publish_sheet_sent_and_reconcile(&db, &events, &retryable)
                 .expect("current delivery settles"),
             "the current revision must settle"
         );
@@ -5098,7 +5014,8 @@ mod tests {
         )
         .expect("record post and outbox atomically");
 
-        let error = deliver_assignment_sheet_row(&db, &assignment.id)
+        let events = riviu_core::events::EventBus::new(8);
+        let error = deliver_assignment_sheet_row(&db, &events, &assignment.id)
             .await
             .expect_err("unconfigured Sheet remains pending");
         assert!(error.contains("sheet_not_ready"), "{error}");

@@ -42,7 +42,7 @@ fn deserialize_wire_enum<T: serde::de::DeserializeOwned>(value: &str) -> anyhow:
     serde_json::from_value(serde_json::Value::String(value.to_owned())).map_err(anyhow::Error::from)
 }
 
-fn prepare_publish_execution_snapshot(
+pub(super) fn prepare_publish_execution_snapshot(
     snapshot: &crate::publish_runtime::PublishExecutionSnapshotDraft,
 ) -> anyhow::Result<(String, String, String, String)> {
     anyhow::ensure!(
@@ -63,6 +63,43 @@ fn prepare_publish_execution_snapshot(
         serialize_wire_enum(snapshot.retry_scope)?,
         serde_json::to_string(&snapshot.report_json)?,
     ))
+}
+
+pub(super) fn store_publish_execution_snapshot(
+    connection: &Connection,
+    campaign_id: &str,
+    snapshot: &crate::publish_runtime::PublishExecutionSnapshotDraft,
+    updated_at: &str,
+) -> anyhow::Result<crate::publish_runtime::PublishExecutionSnapshot> {
+    let (input_digest, status, retry_scope, report_json) =
+        prepare_publish_execution_snapshot(snapshot)?;
+    connection.execute(
+        "INSERT INTO publish_execution_snapshots
+         (campaign_id,input_digest,status,retry_scope,report_json,updated_at)
+         VALUES (?1,?2,?3,?4,?5,?6)
+         ON CONFLICT(campaign_id) DO UPDATE SET
+           input_digest=excluded.input_digest,
+           status=excluded.status,
+           retry_scope=excluded.retry_scope,
+           report_json=excluded.report_json,
+           updated_at=excluded.updated_at",
+        params![
+            campaign_id,
+            &input_digest,
+            status,
+            retry_scope,
+            report_json,
+            updated_at
+        ],
+    )?;
+    Ok(crate::publish_runtime::PublishExecutionSnapshot {
+        campaign_id: campaign_id.to_string(),
+        input_digest,
+        status: snapshot.status,
+        retry_scope: snapshot.retry_scope,
+        report_json: snapshot.report_json.clone(),
+        updated_at: updated_at.to_string(),
+    })
 }
 
 impl Database {
@@ -938,33 +975,9 @@ impl Database {
             retry_scope,
             report_json: report_json.clone(),
         };
-        let (input_digest, status, retry_scope, report_json) =
-            prepare_publish_execution_snapshot(&draft)?;
         let updated_at = Utc::now().to_rfc3339();
         let conn = self.conn()?;
-        conn.execute(
-            "INSERT INTO publish_execution_snapshots
-             (campaign_id,input_digest,status,retry_scope,report_json,updated_at)
-             VALUES (?1,?2,?3,?4,?5,?6)
-             ON CONFLICT(campaign_id) DO UPDATE SET
-               input_digest=excluded.input_digest,
-               status=excluded.status,
-               retry_scope=excluded.retry_scope,
-               report_json=excluded.report_json,
-               updated_at=excluded.updated_at",
-            params![
-                campaign_id,
-                &input_digest,
-                status,
-                retry_scope,
-                report_json,
-                updated_at
-            ],
-        )?;
-        drop(conn);
-
-        self.get_publish_execution_snapshot(campaign_id)?
-            .context("publish execution snapshot disappeared after save")
+        store_publish_execution_snapshot(&conn, campaign_id, &draft, &updated_at)
     }
 
     /// Load the last persisted execution projection without inferring retryability from text.

@@ -43,7 +43,118 @@ pub enum SheetOutboxState {
     Sent,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub enum SheetOutboxSettlement {
+    StaleRevision,
+    DeliveredWithoutCampaign,
+    Delivered(crate::publish_runtime::PublishExecutionSnapshot),
+}
+
+fn evidence_has_post_link(raw: Option<&str>) -> bool {
+    raw.and_then(|value| serde_json::from_str::<serde_json::Value>(value).ok())
+        .as_ref()
+        .and_then(|evidence| {
+            evidence
+                .get("post")
+                .and_then(|post| post.get("postUrl"))
+                .or_else(|| evidence.get("postUrl"))
+        })
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .is_some_and(crate::tiktok_share::looks_like_a_post_link)
+}
+
+fn reconciled_sheet_delivery_status(
+    connection: &Connection,
+    campaign_id: &str,
+) -> anyhow::Result<(
+    crate::publish_runtime::PublishExecutionStatus,
+    crate::publish_runtime::PublishRetryScope,
+)> {
+    use crate::publish::PublishCampaignState as CampaignState;
+    use crate::publish_runtime::{PublishExecutionStatus as Status, PublishRetryScope as Scope};
+
+    let campaign_state: String = connection.query_row(
+        "SELECT state FROM publish_campaigns WHERE id=?1",
+        [campaign_id],
+        |row| row.get(0),
+    )?;
+    let campaign_state = publish_state_from_str(&campaign_state);
+    if matches!(
+        campaign_state,
+        CampaignState::Cancelled | CampaignState::Missed
+    ) {
+        return Ok((Status::Partial, Scope::None));
+    }
+
+    let mut statement = connection.prepare(
+        "SELECT a.state,a.evidence_json,o.state
+         FROM publish_assignments a
+         LEFT JOIN publish_sheet_outbox o ON o.assignment_id=a.id
+         WHERE a.campaign_id=?1
+         ORDER BY a.ordinal",
+    )?;
+    let rows = statement
+        .query_map([campaign_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, Option<String>>(1)?,
+                row.get::<_, Option<String>>(2)?,
+            ))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    drop(statement);
+
+    if rows.iter().any(|(state, _, _)| {
+        matches!(
+            publish_state_from_str(state),
+            CampaignState::Posting | CampaignState::Verifying | CampaignState::Uncertain
+        )
+    }) {
+        return Ok((Status::Uncertain, Scope::None));
+    }
+    let all_succeeded = !rows.is_empty()
+        && rows
+            .iter()
+            .all(|(state, _, _)| publish_state_from_str(state) == CampaignState::Succeeded);
+    if !all_succeeded {
+        return Ok((Status::Partial, Scope::FullPipeline));
+    }
+
+    let all_links_known = rows
+        .iter()
+        .all(|(_, evidence, _)| evidence_has_post_link(evidence.as_deref()));
+    let sheet_owed = rows
+        .iter()
+        .any(|(_, _, state)| matches!(state.as_deref(), Some("pending" | "failed")));
+    let every_sheet_row_sent = rows
+        .iter()
+        .all(|(_, _, state)| state.as_deref() == Some("sent"));
+    if all_links_known && every_sheet_row_sent {
+        return Ok((Status::Complete, Scope::None));
+    }
+    Ok((
+        Status::Partial,
+        if sheet_owed && all_links_known {
+            Scope::SheetOnly
+        } else {
+            Scope::LinkAndSheet
+        },
+    ))
+}
+
 impl Database {
+    /// Derive the restart-safe Publish outcome from the same facts the atomic Sheet settle uses.
+    pub fn reconciled_publish_execution_status(
+        &self,
+        campaign_id: &str,
+    ) -> anyhow::Result<(
+        crate::publish_runtime::PublishExecutionStatus,
+        crate::publish_runtime::PublishRetryScope,
+    )> {
+        reconciled_sheet_delivery_status(&self.conn()?, campaign_id)
+    }
+
     /// Read the durable delivery state without conflating a sent row with a missing row.
     pub fn publish_sheet_outbox_state(
         &self,
@@ -252,11 +363,8 @@ impl Database {
     /// row held *now*, which after a concurrent re-queue is a different URL than the one that
     /// was actually delivered. That URL would then never travel and nothing would say so.
     /// Returns whether the row it named was still the row it delivered.
-    pub fn mark_publish_sheet_sent(
-        &self,
-        assignment_id: &str,
-        revision: i64,
-    ) -> anyhow::Result<bool> {
+    #[cfg(test)]
+    fn mark_publish_sheet_sent(&self, assignment_id: &str, revision: i64) -> anyhow::Result<bool> {
         let conn = self.conn()?;
         let changed = conn.execute(
             "UPDATE publish_sheet_outbox
@@ -265,6 +373,74 @@ impl Database {
             params![assignment_id, Utc::now().to_rfc3339(), revision],
         )?;
         Ok(changed > 0)
+    }
+
+    /// Mark one delivered revision and replace its campaign projection in one transaction.
+    ///
+    /// A snapshot error rolls the outbox row back to pending/failed, so the sweeper can retry it.
+    /// The campaign may have been deleted while its obligation deliberately survived; that case
+    /// commits the Sheet row alone because there is no operation projection left to update.
+    pub fn settle_publish_sheet_delivery(
+        &self,
+        assignment_id: &str,
+        campaign_id: &str,
+        revision: i64,
+        input_digest: Option<&str>,
+        target_snapshot: Option<&crate::ResolvedTargetSnapshot>,
+    ) -> anyhow::Result<SheetOutboxSettlement> {
+        let mut connection = self.conn()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let updated_at = Utc::now().to_rfc3339();
+        let changed = transaction.execute(
+            "UPDATE publish_sheet_outbox
+             SET state='sent',attempts=attempts+1,last_error=NULL,updated_at=?4
+             WHERE assignment_id=?1 AND campaign_id=?2 AND revision=?3 AND state <> 'sent'",
+            params![assignment_id, campaign_id, revision, updated_at],
+        )?;
+        if changed == 0 {
+            transaction.rollback()?;
+            return Ok(SheetOutboxSettlement::StaleRevision);
+        }
+
+        let campaign_exists = transaction
+            .query_row(
+                "SELECT 1 FROM publish_campaigns WHERE id=?1",
+                [campaign_id],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some();
+        if !campaign_exists {
+            transaction.commit()?;
+            return Ok(SheetOutboxSettlement::DeliveredWithoutCampaign);
+        }
+
+        let input_digest = input_digest.context(
+            "publish execution input digest is required while its campaign still exists",
+        )?;
+        let (status, retry_scope) = reconciled_sheet_delivery_status(&transaction, campaign_id)?;
+        let draft = crate::publish_runtime::PublishExecutionSnapshotDraft {
+            input_digest: input_digest.to_string(),
+            status,
+            retry_scope,
+            report_json: serde_json::json!({
+                "campaignId": campaign_id,
+                "status": status,
+                "retryScope": retry_scope,
+                "source": "sheet_delivery_reconciliation",
+                "targetSnapshot": target_snapshot,
+            }),
+        };
+        // Validation and the actual upsert intentionally happen after the outbox UPDATE but
+        // before commit. Any error here drops the transaction and makes the delivery retryable.
+        let snapshot = super::publish::store_publish_execution_snapshot(
+            &transaction,
+            campaign_id,
+            &draft,
+            &updated_at,
+        )?;
+        transaction.commit()?;
+        Ok(SheetOutboxSettlement::Delivered(snapshot))
     }
 
     /// The push failed. Still owed; the message is for a person to read.
@@ -402,6 +578,150 @@ mod tests {
     /// The one row currently owed, and its version.
     fn owed(db: &Database) -> Vec<SheetOutboxRow> {
         db.pending_publish_sheet_rows(10).expect("read back")
+    }
+
+    fn set_publish_states(
+        db: &Database,
+        campaign_id: &str,
+        assignment_id: &str,
+        campaign_state: crate::publish::PublishCampaignState,
+        assignment_state: crate::publish::PublishCampaignState,
+        evidence: Option<&str>,
+    ) {
+        db.update_publish_assignment_state(assignment_id, assignment_state, None, evidence)
+            .expect("set assignment state");
+        db.update_publish_campaign_state(campaign_id, campaign_state, None)
+            .expect("set campaign state");
+    }
+
+    #[test]
+    fn reconciliation_status_covers_terminal_ambiguous_failed_and_legacy_rows() {
+        use crate::publish::PublishCampaignState as CampaignState;
+        use crate::publish_runtime::{
+            PublishExecutionStatus as Status, PublishRetryScope as Scope,
+        };
+
+        let (db, path) = fixture();
+        for campaign_state in [CampaignState::Cancelled, CampaignState::Missed] {
+            let (campaign, assignment) = seed(&db);
+            set_publish_states(
+                &db,
+                &campaign,
+                &assignment,
+                campaign_state,
+                CampaignState::Ready,
+                None,
+            );
+            assert_eq!(
+                db.reconciled_publish_execution_status(&campaign)
+                    .expect("reconcile terminal campaign"),
+                (Status::Partial, Scope::None)
+            );
+        }
+
+        for assignment_state in [
+            CampaignState::Posting,
+            CampaignState::Verifying,
+            CampaignState::Uncertain,
+        ] {
+            let (campaign, assignment) = seed(&db);
+            set_publish_states(
+                &db,
+                &campaign,
+                &assignment,
+                CampaignState::Succeeded,
+                assignment_state,
+                None,
+            );
+            assert_eq!(
+                db.reconciled_publish_execution_status(&campaign)
+                    .expect("reconcile ambiguous assignment"),
+                (Status::Uncertain, Scope::None)
+            );
+        }
+
+        let (failed_campaign, failed_assignment) = seed(&db);
+        set_publish_states(
+            &db,
+            &failed_campaign,
+            &failed_assignment,
+            CampaignState::FailedBeforeDispatch,
+            CampaignState::FailedBeforeDispatch,
+            None,
+        );
+        assert_eq!(
+            db.reconciled_publish_execution_status(&failed_campaign)
+                .expect("reconcile retryable failure"),
+            (Status::Partial, Scope::FullPipeline)
+        );
+
+        // A legacy succeeded assignment may have a canonical link but no outbox row. It may
+        // retry link/Sheet reconciliation, never the public Post.
+        let (legacy_campaign, legacy_assignment) = seed(&db);
+        let link = "https://www.tiktok.com/@fixture/video/7400000000000000001";
+        set_publish_states(
+            &db,
+            &legacy_campaign,
+            &legacy_assignment,
+            CampaignState::Succeeded,
+            CampaignState::Succeeded,
+            Some(&serde_json::json!({"post": {"postUrl": link}}).to_string()),
+        );
+        assert_eq!(
+            db.reconciled_publish_execution_status(&legacy_campaign)
+                .expect("reconcile legacy row without outbox"),
+            (Status::Partial, Scope::LinkAndSheet)
+        );
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn reconciliation_status_moves_pending_and_failed_sheet_rows_to_complete_only_when_sent() {
+        use crate::publish::PublishCampaignState as CampaignState;
+        use crate::publish_runtime::{
+            PublishExecutionStatus as Status, PublishRetryScope as Scope,
+        };
+
+        let (db, path) = fixture();
+        let (campaign, assignment) = seed(&db);
+        let link = "https://www.tiktok.com/@fixture/video/7400000000000000001";
+        db.record_publish_success_with_sheet_row(
+            &assignment,
+            &serde_json::json!({"post": {"postUrl": link}}).to_string(),
+            &campaign,
+            link,
+            "bot",
+            &[],
+        )
+        .expect("record post and outbox");
+        db.update_publish_campaign_state(&campaign, CampaignState::Succeeded, None)
+            .expect("settle campaign");
+        assert_eq!(
+            db.reconciled_publish_execution_status(&campaign)
+                .expect("reconcile pending row"),
+            (Status::Partial, Scope::SheetOnly)
+        );
+
+        let revision = owed(&db)[0].revision;
+        assert!(db
+            .mark_publish_sheet_failed(&assignment, revision, "fixture rejection")
+            .expect("mark failed"));
+        assert_eq!(
+            db.reconciled_publish_execution_status(&campaign)
+                .expect("reconcile failed row"),
+            (Status::Partial, Scope::SheetOnly)
+        );
+        assert!(db
+            .mark_publish_sheet_sent(&assignment, revision)
+            .expect("mark sent"));
+        assert_eq!(
+            db.reconciled_publish_execution_status(&campaign)
+                .expect("reconcile sent row"),
+            (Status::Complete, Scope::None)
+        );
+
+        let _ = std::fs::remove_file(path);
     }
 
     /// A queued row comes back with the names in the order the workbook had them.

@@ -15,8 +15,8 @@
 //! Script's own field names before deploying anything.
 //!
 //! With `--webhook` it takes the last hop too, through `publish_sheet::push_row` — the same
-//! call the sweeper makes — and then marks the row `sent` or `failed` exactly as the sweeper
-//! would, so the DB ends in the state a real delivery leaves behind.
+//! call the sweeper makes — and then atomically settles the row plus its publish projection
+//! (or marks the row `failed`), so the DB ends in the state a real delivery leaves behind.
 //!
 //! # It writes to a scratch database, never the operator's
 //!
@@ -163,7 +163,17 @@ async fn main() -> anyhow::Result<()> {
         execution_confirmed: false,
         target_snapshot: None,
     };
-    let campaign = db.create_publish_campaign(&request, &[bundle(&bundle_id)])?;
+    let initial_snapshot = riviu_core::PublishExecutionSnapshotDraft {
+        input_digest: "a".repeat(64),
+        status: riviu_core::PublishExecutionStatus::Partial,
+        retry_scope: riviu_core::PublishRetryScope::FullPipeline,
+        report_json: serde_json::json!({"source": "sheet_delivery_check"}),
+    };
+    let campaign = db.create_publish_campaign_with_snapshot(
+        &request,
+        &[bundle(&bundle_id)],
+        &initial_snapshot,
+    )?;
     let assignment_id = db
         .get_publish_campaign(&campaign.id)?
         .expect("campaign exists")
@@ -187,6 +197,12 @@ async fn main() -> anyhow::Result<()> {
         "@cn.qut.lt4",
         &["Quán A".to_string(), "Quán B".to_string()],
     )?;
+    db.update_publish_campaign_state(
+        &campaign.id,
+        riviu_core::PublishCampaignState::Succeeded,
+        None,
+    )?;
+    let input_digest = initial_snapshot.input_digest;
 
     // Exactly what the sweeper reads.
     let pending = db.pending_publish_sheet_rows(50)?;
@@ -218,7 +234,16 @@ async fn main() -> anyhow::Result<()> {
             say(&format!("\nĐANG GỬI THẬT tới {url}"));
             match publish_sheet::push_row(url, &payload).await {
                 Ok(()) => {
-                    let marked = db.mark_publish_sheet_sent(&row.assignment_id, row.revision)?;
+                    let marked = !matches!(
+                        db.settle_publish_sheet_delivery(
+                            &row.assignment_id,
+                            &row.campaign_id,
+                            row.revision,
+                            Some(&input_digest),
+                            None,
+                        )?,
+                        riviu_core::db::SheetOutboxSettlement::StaleRevision
+                    );
                     say(&format!(
                         "gửi OK — script nhận. đánh dấu 'sent': {}",
                         if marked {

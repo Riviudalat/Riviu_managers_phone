@@ -26,7 +26,7 @@ pub use flow_runs::{AttemptTransitionPatch, FlowStateConflict};
 pub(crate) use flow_runs::{FlowAttemptExecutionContext, FlowRecoveryRunContext};
 pub use nurture::NurtureRunHistory;
 pub use publish::{PublishRunOutcome, PublishTransferSettle};
-pub use publish_sheet::{SheetOutboxRow, SheetOutboxState};
+pub use publish_sheet::{SheetOutboxRow, SheetOutboxSettlement, SheetOutboxState};
 
 /// Somewhere to keep a secret that is **not** the SQLite file.
 ///
