@@ -443,7 +443,9 @@
 
 /* Flow V2 work surface */
 .content-flow {
-  overflow: hidden;
+  /* A small or DPI-scaled Windows work area must scroll the complete editor instead of
+     clipping its lower monitor band below the taskbar. */
+  overflow: auto;
   padding: 0.55rem 0.75rem 0.75rem;
 }
 

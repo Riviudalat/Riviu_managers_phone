@@ -37,7 +37,7 @@ async function open(page: Page, name: string): Promise<void> {
   // Wait for the fleet the mock serves, so no page is captured mid-bootstrap.
   await expect(page.locator("[data-testid='device-tile']")).toHaveCount(2);
   if (name !== "Thiết bị") {
-    await page.locator("[data-testid='nav-item']").getByText(name, { exact: true }).click();
+    await page.getByRole("button", { name, exact: true }).click();
   }
   // **Loaded before pixels, and the Flow baseline is why this line exists.** Waiting for
   // the fleet says the shell is up; it says nothing about a page that fetches its own

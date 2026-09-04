@@ -606,6 +606,25 @@ describe("Flow page integration", () => {
     );
   });
 
+  it("clears the discarded Flow guard before the next page navigation", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+
+    await user.click(screen.getByRole("button", { name: "Flow" }));
+    await user.click(
+      await screen.findByRole("button", { name: "Mark fixture dirty" }),
+    );
+    await user.click(screen.getByRole("button", { name: "Tác vụ" }));
+    await user.click(await screen.findByRole("button", { name: "Bỏ thay đổi" }));
+    await waitFor(() =>
+      expect(screen.getByText("Tác vụ", { selector: "[data-testid='page-title']" })).toBeVisible(),
+    );
+
+    await user.click(screen.getByRole("button", { name: "Dữ liệu" }));
+    expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument();
+    expect(screen.getByText("Dữ liệu", { selector: "[data-testid='page-title']" })).toBeVisible();
+  });
+
   it("switches between device Flow and orchestration", async () => {
     const user = userEvent.setup();
     render(<App />);
@@ -624,6 +643,31 @@ describe("Flow page integration", () => {
     expect(await screen.findByRole("region", { name: "Điều phối fixture" })).toHaveAttribute(
       "data-target-type",
       "all",
+    );
+  });
+
+  it("clears the discarded Flow guard before switching automation tabs again", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+
+    await user.click(screen.getByRole("button", { name: "Flow" }));
+    await user.click(
+      await screen.findByRole("button", { name: "Mark fixture dirty" }),
+    );
+    await user.click(screen.getByRole("tab", { name: "Điều phối" }));
+    await user.click(await screen.findByRole("button", { name: "Bỏ thay đổi" }));
+    await waitFor(() =>
+      expect(screen.getByRole("tab", { name: "Điều phối" })).toHaveAttribute(
+        "aria-selected",
+        "true",
+      ),
+    );
+
+    await user.click(screen.getByRole("tab", { name: "Flow thiết bị" }));
+    expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: "Flow thiết bị" })).toHaveAttribute(
+      "aria-selected",
+      "true",
     );
   });
 

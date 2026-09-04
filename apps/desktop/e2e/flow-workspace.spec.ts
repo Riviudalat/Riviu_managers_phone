@@ -26,7 +26,7 @@ async function openFlow(page: Page, selectDevices = false): Promise<void> {
     }
     await expect(page.locator("[data-testid='device-tile'].selected")).toHaveCount(2);
   }
-  await page.locator("[data-testid='nav-item']").getByText("Flow", { exact: true }).click();
+  await page.getByRole("button", { name: "Flow", exact: true }).click();
   await expect(page.getByRole("region", { name: "Không gian Flow" })).toHaveAttribute(
     "data-loading",
     "false",
@@ -47,20 +47,16 @@ async function insertActionOnFirstEdge(page: Page, action: string): Promise<Loca
   const before = await page.locator(FLOW_NODE_TITLE).filter({ hasText: action }).count();
   // Select the exact edge before dropping. This test is about structural insertion/deletion, not
   // viewport measurement; geometric nearest-edge behaviour has its own component regression.
-  // Re-resolve and click the path inside `toPass` because React Flow can replace its SVG once
-  // while the initial ResizeObserver measurement settles under parallel browser load.
+  // Re-resolve and dispatch to the hit path inside `toPass` because React Flow can replace its
+  // SVG once while the initial ResizeObserver measurement settles under parallel browser load.
+  // A coordinate click can then land on the newly measured canvas even though the old path gave
+  // us that coordinate; dispatching on the freshly resolved path still exercises React Flow's
+  // click handler without carrying stale geometry across the replacement.
   const edgeInteraction = page.locator(".react-flow__edge-interaction").first();
   const selectedEdge = page.locator(".react-flow__edge.selected");
   await expect(async () => {
     if (await selectedEdge.count() === 0) {
-      const edgePoint = await edgeInteraction.evaluate((node) => {
-        const path = node as SVGPathElement;
-        const matrix = path.getScreenCTM();
-        if (!matrix) throw new Error("Flow edge has no screen transform");
-        const point = path.getPointAtLength(path.getTotalLength() / 2).matrixTransform(matrix);
-        return { x: point.x, y: point.y };
-      });
-      await page.mouse.click(edgePoint.x, edgePoint.y);
+      await edgeInteraction.dispatchEvent("click");
     }
     await expect(selectedEdge).toHaveCount(1, { timeout: 500 });
   }).toPass({ intervals: [50, 100, 250], timeout: 5_000 });
@@ -453,7 +449,7 @@ test("authors a bounded TikTok AutoSwipe node without a script surface", async (
   // config. Reloading also exercises the fixture's command catalog: a missing AutoSwipe wire
   // command used to surface only as an operator-facing `Unknown mock command` toast.
   await page.reload();
-  await page.locator("[data-testid='nav-item']").getByText("Flow", { exact: true }).click();
+  await page.getByRole("button", { name: "Flow", exact: true }).click();
   await expect(page.getByRole("region", { name: "Không gian Flow" })).toHaveAttribute(
     "data-loading",
     "false",
@@ -505,7 +501,6 @@ for (const viewport of [
     await openFlow(page);
     await page.locator(FLOW_NODE_TITLE).filter({ hasText: "Chạm" }).click();
     if (viewport.width <= 1100) {
-      await page.getByRole("button", { name: "Bật/tắt bảng hành động" }).click();
       await expect(page.getByTestId("flow-palette")).toHaveAttribute("data-open", "false");
       await expect(page.getByRole("button", { name: "Chạy Flow" })).toBeInViewport();
       await expect(page.getByRole("button", { name: "Bật/tắt bảng thuộc tính" })).toBeInViewport();
@@ -544,6 +539,31 @@ for (const viewport of [
     );
   });
 }
+
+test("keeps the Flow work surface usable on a scaled laptop viewport", async ({ page }) => {
+  await page.setViewportSize({ width: 820, height: 600 });
+  await openFlow(page);
+  await page.locator(FLOW_NODE_TITLE).filter({ hasText: "Chạm" }).click();
+
+  const sidebar = page.locator(".aside");
+  await expect(sidebar).toHaveClass(/collapsed/);
+  expect((await sidebar.boundingBox())?.width).toBeLessThanOrEqual(64);
+  await expect(page.getByTestId("flow-palette")).toHaveAttribute("data-open", "false");
+
+  const canvas = await page.getByTestId("flow-canvas").boundingBox();
+  const inspector = await page.getByTestId("flow-inspector").boundingBox();
+  expect(canvas?.width).toBeGreaterThanOrEqual(420);
+  expect((inspector?.x ?? 0) + (inspector?.width ?? 0)).toBeLessThanOrEqual(820);
+  await expect(page.getByRole("button", { name: "Chạy Flow" })).toBeInViewport();
+  expect(await page.locator(".content-flow").evaluate((element) =>
+    getComputedStyle(element).overflowY
+  )).toBe("auto");
+  await expect(page).toHaveScreenshot("fixture-only-flow-820x600.png", {
+    fullPage: false,
+    animations: "disabled",
+    maxDiffPixelRatio: 0.002,
+  });
+});
 
 for (const viewport of [
   { width: 1440, height: 900 },

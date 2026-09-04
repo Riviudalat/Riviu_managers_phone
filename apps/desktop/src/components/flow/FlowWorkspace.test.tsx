@@ -342,11 +342,13 @@ describe("FlowWorkspace startup", () => {
   it("distinguishes a valid empty library from a failed read", async () => {
     api.flowList.mockResolvedValue([]);
 
+    const onDirtyChange = vi.fn();
+
     render(
       <FlowWorkspace
         devices={[device]}
         selectedUdids={[device.udid]}
-        onDirtyChange={vi.fn()}
+        onDirtyChange={onDirtyChange}
       />,
     );
 
@@ -358,6 +360,7 @@ describe("FlowWorkspace startup", () => {
     expect(screen.getByTestId("flow-toolbar")).toBeInTheDocument();
     expect(screen.getByTestId("flow-canvas")).toBeInTheDocument();
     expect(api.flowGet).not.toHaveBeenCalled();
+    await waitFor(() => expect(onDirtyChange).toHaveBeenLastCalledWith(false));
   });
 });
 

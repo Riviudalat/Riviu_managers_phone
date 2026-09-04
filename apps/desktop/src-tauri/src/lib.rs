@@ -275,7 +275,7 @@ pub fn run() {
                 WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
                     .title("Riviu Manager")
                     .inner_size(1440.0, 900.0)
-                    .min_inner_size(1100.0, 700.0)
+                    .min_inner_size(820.0, 560.0)
                     .resizable(true)
                     .visible(!smoke_active)
                     .build()?
@@ -643,6 +643,28 @@ pub(crate) fn graceful_shutdown(handle: &tauri::AppHandle) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn desktop_window_minimum_matches_the_compact_layout_gate() {
+        assert!(
+            include_str!("lib.rs").contains(".min_inner_size(820.0, 560.0)"),
+            "the runtime-created window must use the compact desktop minimum"
+        );
+
+        for (name, source) in [
+            ("tauri.conf.json", include_str!("../tauri.conf.json")),
+            (
+                "tauri.full.conf.json",
+                include_str!("../tauri.full.conf.json"),
+            ),
+        ] {
+            let config: serde_json::Value =
+                serde_json::from_str(source).expect("the Tauri config remains valid JSON");
+            let window = &config["app"]["windows"][0];
+            assert_eq!(window["minWidth"], 820, "{name} minWidth drifted");
+            assert_eq!(window["minHeight"], 560, "{name} minHeight drifted");
+        }
+    }
+
     /// Every `#[tauri::command]` in a file, as (name, body).
     fn commands_in(source: &str) -> Vec<(&str, &str)> {
         source

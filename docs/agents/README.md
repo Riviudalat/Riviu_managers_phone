@@ -69,7 +69,7 @@ nếu một trích dẫn nêu số con.
 
 ## Nhật ký §9.x
 
-161 mục, trong 6 file dưới `diary/`. **Thứ tự trong file là thứ tự viết, không phải thứ
+162 mục, trong 6 file dưới `diary/`. **Thứ tự trong file là thứ tự viết, không phải thứ
 tự số và cũng không phải thứ tự thời gian** — trong bản gốc §9.43 nằm giữa §9.20 và
 §9.21, và §9.4 nằm sau §9.17. Đó là lý do bảng này sắp theo **số**: để tra được.
 
@@ -278,6 +278,7 @@ thật của việc các mục không được viết theo thứ tự, không ph
 | §9.141 | [Rời trang rồi quay lại: 20 decoder nhận packet nhưng canvas không vẽ (03/09/2026)](diary/06-2408-2708.md#9141-rời-trang-rồi-quay-lại-20-decoder-nhận-packet-nhưng-canvas-không-vẽ-03092026) | `diary/06-2408-2708.md` |
 | §9.142 | [Profile automation, Save và điều phối TikTok Android (04/09/2026)](diary/06-2408-2708.md#9142-profile-automation-save-và-điều-phối-tiktok-android-04092026) | `diary/06-2408-2708.md` |
 | §9.143 | [Mobile MCP: bắt tay thật, nhưng không được đi vòng control plane (04/09/2026)](diary/06-2408-2708.md#9143-mobile-mcp-bắt-tay-thật-nhưng-không-được-đi-vòng-control-plane-04092026) | `diary/06-2408-2708.md` |
+| §9.144 | [Guard bản nháp không latch và layout laptop có DPI (04/09/2026)](diary/06-2408-2708.md#9144-guard-bản-nháp-không-latch-và-layout-laptop-có-dpi-04092026) | `diary/06-2408-2708.md` |
 
 ---
 

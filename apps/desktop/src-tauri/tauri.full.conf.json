@@ -14,8 +14,8 @@
         "title": "Riviu Manager Full",
         "width": 1440,
         "height": 900,
-        "minWidth": 1100,
-        "minHeight": 700,
+        "minWidth": 820,
+        "minHeight": 560,
         "resizable": true,
         "fullscreen": false
       }

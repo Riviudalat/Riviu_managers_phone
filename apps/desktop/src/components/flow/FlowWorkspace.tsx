@@ -56,6 +56,7 @@ import { FlowRunMonitor } from "./FlowRunMonitor";
 import { FlowToolbar } from "./FlowToolbar";
 import { describeError } from "../../describeError";
 import { LoadingState, StatusNotice } from "../States";
+import { useMediaQuery } from "../../useMediaQuery";
 
 export interface FlowWorkspaceProps {
   devices: DeviceInfo[];
@@ -120,7 +121,9 @@ export function FlowWorkspace({
   const [activeRun, setActiveRun] = useState<FlowRunDetail | null>(null);
   const [artifact, setArtifact] = useState<FlowArtifactPayload | null>(null);
   const [dialog, setDialog] = useState<OpenDialog>(null);
-  const [paletteOpen, setPaletteOpen] = useState(true);
+  const compactLayout = useMediaQuery("(max-width: 1100px)");
+  const [paletteOpenOverride, setPaletteOpenOverride] = useState<boolean | null>(null);
+  const paletteOpen = paletteOpenOverride ?? !compactLayout;
   const [inspectorOpen, setInspectorOpen] = useState(true);
   const [loadState, setLoadState] = useState<WorkspaceLoadState>("loading");
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -238,9 +241,11 @@ export function FlowWorkspace({
     };
   }, [loadAttempt, replaceFromRecord]);
 
+  const hasUnsavedWork = state.dirty && state.documentEpoch > 0;
+
   useEffect(() => {
-    onDirtyChange(state.dirty);
-    if (state.dirty) {
+    onDirtyChange(hasUnsavedWork);
+    if (hasUnsavedWork) {
       try {
         draftWriter.current?.schedule(state.document);
         setDraftError(null);
@@ -257,7 +262,7 @@ export function FlowWorkspace({
       clearDraft(state.document.id);
       setDraftError(null);
     }
-  }, [onDirtyChange, state.dirty, state.document]);
+  }, [hasUnsavedWork, onDirtyChange, state.document]);
 
   useEffect(() => {
     const identity: DocumentRequestIdentity = {
@@ -318,7 +323,7 @@ export function FlowWorkspace({
   }, []);
 
   const confirmDiscard = useCallback(async () => (
-    !state.dirty ||
+    !hasUnsavedWork ||
     (await requestConfirm({
       title: "Bỏ thay đổi Flow chưa lưu?",
       message: "Bản nháp hiện tại chưa được lưu và sẽ mất.",
@@ -326,7 +331,7 @@ export function FlowWorkspace({
       cancelLabel: "Ở lại",
       danger: true,
     }))
-  ), [state.dirty]);
+  ), [hasUnsavedWork]);
 
   const selectFlow = useCallback(async (id: string) => {
     if (!(await confirmDiscard())) return;
@@ -606,7 +611,9 @@ export function FlowWorkspace({
         onJson={() => setDialog("json")}
         onUndo={() => dispatch({ type: "undo" })}
         onRedo={() => dispatch({ type: "redo" })}
-        onTogglePalette={() => setPaletteOpen((open) => !open)}
+        onTogglePalette={() =>
+          setPaletteOpenOverride((open) => !(open ?? !compactLayout))
+        }
         onToggleInspector={() => setInspectorOpen((open) => !open)}
       />
 

@@ -68,6 +68,7 @@ import { PublishPage } from "./pages/PublishPage";
 import type { DeviceInfo, DeviceWorkOwner, PageId, TargetRef } from "./types";
 import { MoreHorizontal } from "lucide-react";
 import { loadZoom, stepZoom, storeZoom, TILE_ZOOM, wheelWantsZoom } from "./zoom";
+import { useMediaQuery } from "./useMediaQuery";
 import "./App.css";
 
 const FlowWorkspace = lazy(async () => {
@@ -178,7 +179,9 @@ function App() {
     retryingStartup,
     retry: retryStartupAndResubscribe,
   } = useFleet();
-  const [asideCollapsed, setAsideCollapsed] = useState(false);
+  const compactViewport = useMediaQuery("(max-width: 1100px)");
+  const [asideCollapsedOverride, setAsideCollapsedOverride] = useState<boolean | null>(null);
+  const asideCollapsed = asideCollapsedOverride ?? compactViewport;
   const [groupTab, setGroupTab] = useState<string>(ALL_DEVICES_TAB);
   const [tileMenu, setTileMenu] = useState<{ udid: string; x: number; y: number } | null>(null);
   const [adbFor, setAdbFor] = useDeviceSurface(devices, "bảng lệnh adb");
@@ -274,7 +277,12 @@ function App() {
   const requestPage = useCallback(
     async (next: PageId) => {
       if (next === page) return;
-      if (flowDirty && !(await confirmDiscardFlow())) return;
+      if (flowDirty) {
+        if (!(await confirmDiscardFlow())) return;
+        // The workspace is about to unmount, so it cannot publish a later `false` value.
+        // Leaving this latched made every subsequent sidebar click ask about the same draft.
+        setFlowDirty(false);
+      }
       setPage(next);
     },
     [confirmDiscardFlow, flowDirty, page],
@@ -283,7 +291,10 @@ function App() {
   const requestAutomationView = useCallback(
     async (next: "device" | "orchestration") => {
       if (next === automationView) return true;
-      if (flowDirty && !(await confirmDiscardFlow())) return false;
+      if (flowDirty) {
+        if (!(await confirmDiscardFlow())) return false;
+        setFlowDirty(false);
+      }
       setAutomationView(next);
       return true;
     },
@@ -595,7 +606,7 @@ function App() {
         readyCount={readyCount}
         groupMode={groupMode}
         onPage={(next) => void requestPage(next)}
-        onToggleCollapse={() => setAsideCollapsed((v) => !v)}
+        onToggleCollapse={() => setAsideCollapsedOverride(!asideCollapsed)}
       />
 
       <div className="main-col">
