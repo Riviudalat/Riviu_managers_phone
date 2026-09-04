@@ -25,6 +25,7 @@ pub mod interaction_threshold;
 pub mod job_queue;
 pub mod nurture;
 pub mod openai_client;
+pub mod operation;
 pub mod orchestration;
 pub mod orchestration_runtime;
 pub mod publish;
@@ -41,8 +42,10 @@ pub mod tiktok_composer;
 pub mod tiktok_drawer;
 pub mod tiktok_labels;
 pub mod tiktok_like;
+pub mod tiktok_public_cleanup;
 pub mod tiktok_save;
 pub mod tiktok_share;
+pub mod tiktok_sound;
 pub mod tiktok_target;
 pub mod tiktok_web;
 pub mod types;
@@ -84,6 +87,7 @@ pub use interaction_lifecycle::{
 };
 pub use job_queue::JobQueue;
 pub use nurture::{NurtureEngine, Outcome};
+pub use operation::*;
 pub use orchestration::*;
 pub use orchestration_runtime::*;
 pub use publish::*;
@@ -96,6 +100,7 @@ pub use stream_budget::{
     BackgroundStreamLease, ForegroundStreamReservation, ForegroundTransfer, StreamBudgetError,
     StreamBudgetManager, StreamStopRequest,
 };
+pub use tiktok_public_cleanup::*;
 pub use tiktok_save::*;
 pub use types::*;
 

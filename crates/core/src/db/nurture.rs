@@ -7,7 +7,341 @@
 
 use super::*;
 
+/// One durable Nuoi TikTok invocation and the latest exact status observed for each target.
+///
+/// The event table keeps every transition; this read model deliberately returns only the last
+/// event per device because that is what the Operations page projects. `target_udids` remains
+/// separate so a device that never got past admission cannot disappear from the denominator.
+#[derive(Debug, Clone)]
+pub struct NurtureRunHistory {
+    pub run_id: Uuid,
+    pub target_udids: Vec<String>,
+    pub statuses: Vec<crate::types::NurtureSessionStatus>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
 impl Database {
+    /// Persist a run and its first per-device states before any worker is spawned.
+    pub fn create_nurture_run(
+        &self,
+        run_id: Uuid,
+        target_udids: &[String],
+        initial_statuses: &[crate::types::NurtureSessionStatus],
+    ) -> anyhow::Result<()> {
+        anyhow::ensure!(!target_udids.is_empty(), "nurture target list is empty");
+        anyhow::ensure!(
+            target_udids.len() == initial_statuses.len(),
+            "nurture initial status count does not match its target list"
+        );
+        let targets = target_udids
+            .iter()
+            .map(String::as_str)
+            .collect::<std::collections::BTreeSet<_>>();
+        anyhow::ensure!(
+            targets.len() == target_udids.len(),
+            "nurture target list contains a duplicate device"
+        );
+        let status_udids = initial_statuses
+            .iter()
+            .map(|status| status.udid.as_str())
+            .collect::<std::collections::BTreeSet<_>>();
+        anyhow::ensure!(
+            status_udids.len() == initial_statuses.len()
+                && status_udids.iter().all(|udid| targets.contains(udid)),
+            "nurture initial statuses do not cover the exact target list"
+        );
+        for status in initial_statuses {
+            anyhow::ensure!(
+                status.run_id == Some(run_id),
+                "nurture initial status carries a different run ID"
+            );
+            anyhow::ensure!(
+                status.run_size as usize == target_udids.len(),
+                "nurture initial status carries a different run size"
+            );
+        }
+
+        let now = Utc::now();
+        let target_json = serde_json::to_string(target_udids)?;
+        let mut conn = self.conn()?;
+        let transaction = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let run_id_text = run_id.to_string();
+        let now_text = now.to_rfc3339();
+        transaction.execute(
+            "INSERT INTO nurture_runs
+             (id,target_udids_json,target_count,created_at,updated_at)
+             VALUES(?1,?2,?3,?4,?4)",
+            params![
+                run_id_text,
+                target_json,
+                target_udids.len() as i64,
+                now_text
+            ],
+        )?;
+        for status in initial_statuses {
+            let recorded_at = status.updated_at.unwrap_or(now);
+            transaction.execute(
+                "INSERT INTO nurture_run_status_events
+                 (run_id,udid,status_json,recorded_at) VALUES(?1,?2,?3,?4)",
+                params![
+                    run_id_text,
+                    status.udid,
+                    serde_json::to_string(status)?,
+                    recorded_at.to_rfc3339()
+                ],
+            )?;
+        }
+        transaction.commit()?;
+        Ok(())
+    }
+
+    /// Append the exact status accepted by the runtime. Previous transitions are immutable.
+    pub fn append_nurture_status(
+        &self,
+        status: &crate::types::NurtureSessionStatus,
+    ) -> anyhow::Result<()> {
+        let run_id = status
+            .run_id
+            .context("a persisted nurture status requires run_id")?;
+        let now = status.updated_at.unwrap_or_else(Utc::now);
+        let run_id_text = run_id.to_string();
+        let now_text = now.to_rfc3339();
+        let payload = serde_json::to_string(status)?;
+        let mut conn = self.conn()?;
+        let transaction = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let targets_json = transaction
+            .query_row(
+                "SELECT target_udids_json FROM nurture_runs WHERE id=?1",
+                [run_id_text.as_str()],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+            .with_context(|| format!("nurture run {run_id} does not exist"))?;
+        let targets: Vec<String> = serde_json::from_str(&targets_json)
+            .context("invalid JSON in nurture run target snapshot")?;
+        anyhow::ensure!(
+            targets.iter().any(|target| target == &status.udid),
+            "nurture status device is outside its immutable target snapshot"
+        );
+        transaction.execute(
+            "INSERT INTO nurture_run_status_events
+             (run_id,udid,status_json,recorded_at) VALUES(?1,?2,?3,?4)",
+            params![run_id_text, status.udid, payload, now_text],
+        )?;
+        transaction.execute(
+            "UPDATE nurture_runs SET updated_at=?2 WHERE id=?1",
+            params![run_id_text, now_text],
+        )?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    pub fn list_nurture_runs(&self, limit: usize) -> anyhow::Result<Vec<NurtureRunHistory>> {
+        let conn = self.conn()?;
+        let rows = {
+            let mut statement = conn.prepare(
+                "SELECT id,target_udids_json,created_at,updated_at
+                 FROM nurture_runs ORDER BY updated_at DESC,id ASC LIMIT ?1",
+            )?;
+            let rows = statement
+                .query_map([limit.clamp(1, 200) as i64], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                    ))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            rows
+        };
+        rows.into_iter()
+            .map(|(run_id, targets_json, created_at, updated_at)| {
+                self.read_nurture_run(
+                    &conn,
+                    Uuid::parse_str(&run_id).context("invalid nurture run UUID")?,
+                    targets_json,
+                    DateTime::parse_from_rfc3339(&created_at)
+                        .context("invalid nurture run created_at")?
+                        .with_timezone(&Utc),
+                    DateTime::parse_from_rfc3339(&updated_at)
+                        .context("invalid nurture run updated_at")?
+                        .with_timezone(&Utc),
+                )
+            })
+            .collect()
+    }
+
+    pub fn get_nurture_run(&self, run_id: Uuid) -> anyhow::Result<Option<NurtureRunHistory>> {
+        let conn = self.conn()?;
+        let row = conn
+            .query_row(
+                "SELECT target_udids_json,created_at,updated_at FROM nurture_runs WHERE id=?1",
+                [run_id.to_string()],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                },
+            )
+            .optional()?;
+        row.map(|(targets_json, created_at, updated_at)| {
+            self.read_nurture_run(
+                &conn,
+                run_id,
+                targets_json,
+                DateTime::parse_from_rfc3339(&created_at)
+                    .context("invalid nurture run created_at")?
+                    .with_timezone(&Utc),
+                DateTime::parse_from_rfc3339(&updated_at)
+                    .context("invalid nurture run updated_at")?
+                    .with_timezone(&Utc),
+            )
+        })
+        .transpose()
+    }
+
+    /// Read the latest worker-owned rows which still claim to be running.
+    ///
+    /// Startup uses this before admitting new commands so it can force-stop the exact app on
+    /// each affected device and append the resulting process proof. Merely changing these rows
+    /// to `failed` would leave TikTok running after a desktop crash.
+    pub fn list_orphaned_nurture_statuses(
+        &self,
+    ) -> anyhow::Result<Vec<crate::types::NurtureSessionStatus>> {
+        let conn = self.conn()?;
+        let rows = {
+            let mut statement = conn.prepare(
+                "SELECT event.run_id,event.status_json
+                 FROM nurture_run_status_events event
+                 WHERE json_extract(event.status_json,'$.running')=1 AND NOT EXISTS (
+                   SELECT 1 FROM nurture_run_status_events newer
+                   WHERE newer.run_id=event.run_id AND newer.udid=event.udid
+                     AND newer.sequence>event.sequence
+                 )
+                 ORDER BY event.run_id ASC,event.udid ASC",
+            )?;
+            let rows = statement
+                .query_map([], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            rows
+        };
+        rows.into_iter()
+            .map(|(run_id, payload)| {
+                let run_id = Uuid::parse_str(&run_id).context("invalid nurture run UUID")?;
+                let mut status: crate::types::NurtureSessionStatus = serde_json::from_str(&payload)
+                    .context("invalid JSON in orphaned nurture status")?;
+                if let Some(status_run_id) = status.run_id {
+                    anyhow::ensure!(
+                        status_run_id == run_id,
+                        "orphaned nurture status carries a different run ID"
+                    );
+                } else {
+                    status.run_id = Some(run_id);
+                }
+                Ok(status)
+            })
+            .collect()
+    }
+
+    fn read_nurture_run(
+        &self,
+        conn: &Connection,
+        run_id: Uuid,
+        targets_json: String,
+        created_at: DateTime<Utc>,
+        updated_at: DateTime<Utc>,
+    ) -> anyhow::Result<NurtureRunHistory> {
+        let target_udids: Vec<String> = serde_json::from_str(&targets_json)
+            .context("invalid JSON in nurture run target snapshot")?;
+        let payloads = {
+            let mut statement = conn.prepare(
+                "SELECT event.status_json
+                 FROM nurture_run_status_events event
+                 WHERE event.run_id=?1 AND NOT EXISTS (
+                   SELECT 1 FROM nurture_run_status_events newer
+                   WHERE newer.run_id=event.run_id AND newer.udid=event.udid
+                     AND newer.sequence>event.sequence
+                 )
+                 ORDER BY event.udid ASC",
+            )?;
+            let payloads = statement
+                .query_map([run_id.to_string()], |row| row.get::<_, String>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            payloads
+        };
+        let statuses = payloads
+            .into_iter()
+            .map(|payload| {
+                serde_json::from_str(&payload).context("invalid JSON in nurture status history")
+            })
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        Ok(NurtureRunHistory {
+            run_id,
+            target_udids,
+            statuses,
+            created_at,
+            updated_at,
+        })
+    }
+
+    /// Close worker-owned sessions left running by a process exit without rewriting history.
+    pub fn interrupt_orphaned_nurture_sessions(&self) -> anyhow::Result<usize> {
+        let mut conn = self.conn()?;
+        let transaction = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let rows = {
+            let mut statement = transaction.prepare(
+                "SELECT event.run_id,event.status_json
+                 FROM nurture_run_status_events event
+                 WHERE json_extract(event.status_json,'$.running')=1 AND NOT EXISTS (
+                   SELECT 1 FROM nurture_run_status_events newer
+                   WHERE newer.run_id=event.run_id AND newer.udid=event.udid
+                     AND newer.sequence>event.sequence
+                 )",
+            )?;
+            let rows = statement
+                .query_map([], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            rows
+        };
+        let now = Utc::now();
+        let now_text = now.to_rfc3339();
+        for (run_id, payload) in &rows {
+            let mut status: crate::types::NurtureSessionStatus =
+                serde_json::from_str(payload).context("invalid JSON in orphaned nurture status")?;
+            status.finish(crate::nurture::Outcome::Partial);
+            status.last_message = "Phiên Nuôi bị gián đoạn khi ứng dụng khởi động lại".to_string();
+            if status.cleanup_state == crate::types::NurtureCleanupState::Pending {
+                status.cleanup_state = crate::types::NurtureCleanupState::Failed;
+                status.cleanup_error = Some("nurture_worker_lost_on_restart".to_string());
+            }
+            status.updated_at = Some(now);
+            transaction.execute(
+                "INSERT INTO nurture_run_status_events
+                 (run_id,udid,status_json,recorded_at) VALUES(?1,?2,?3,?4)",
+                params![
+                    run_id,
+                    status.udid,
+                    serde_json::to_string(&status)?,
+                    now_text
+                ],
+            )?;
+            transaction.execute(
+                "UPDATE nurture_runs SET updated_at=?2 WHERE id=?1",
+                params![run_id, now_text],
+            )?;
+        }
+        transaction.commit()?;
+        Ok(rows.len())
+    }
+
     pub fn get_nurture_settings(&self) -> anyhow::Result<crate::types::NurtureSettings> {
         match self.get_setting("nurture.settings")? {
             Some(raw) => {
@@ -298,5 +632,147 @@ impl Database {
             today_comments: narrow(today_row.2, "today_comments")?,
             total_comments: narrow(total.2, "total_comments")?,
         })
+    }
+}
+
+#[cfg(test)]
+mod history_tests {
+    use super::*;
+    use crate::types::{NurtureCleanupState, NurturePhase, NurtureSessionStatus};
+
+    fn fixture() -> (Database, PathBuf) {
+        let path =
+            std::env::temp_dir().join(format!("riviu-nurture-history-test-{}.db", Uuid::new_v4()));
+        (Database::open(&path).expect("open fixture database"), path)
+    }
+
+    fn queued(run_id: Uuid, udid: &str, run_size: u32) -> NurtureSessionStatus {
+        NurtureSessionStatus {
+            running: true,
+            run_id: Some(run_id),
+            run_size,
+            phase: NurturePhase::Queued,
+            updated_at: Some(Utc::now()),
+            last_message: "queued".into(),
+            ..NurtureSessionStatus::new(udid)
+        }
+    }
+
+    #[test]
+    fn run_history_keeps_the_target_snapshot_and_appends_each_exact_status() {
+        let (database, path) = fixture();
+        let run_id = Uuid::new_v4();
+        let targets = vec!["phone-b".to_string(), "phone-a".to_string()];
+        let initial = vec![queued(run_id, "phone-b", 2), queued(run_id, "phone-a", 2)];
+        database
+            .create_nurture_run(run_id, &targets, &initial)
+            .expect("create durable run");
+
+        let mut changed = initial[1].clone();
+        changed.phase = NurturePhase::Watching;
+        changed.videos_done = 7;
+        changed.last_message = "watching card 8".into();
+        changed.updated_at = Some(Utc::now());
+        database
+            .append_nurture_status(&changed)
+            .expect("append transition");
+
+        let history = database
+            .get_nurture_run(run_id)
+            .expect("read history")
+            .expect("run exists");
+        assert_eq!(history.target_udids, targets, "target order is provenance");
+        assert_eq!(history.statuses.len(), 2);
+        assert_eq!(
+            serde_json::to_value(
+                history
+                    .statuses
+                    .iter()
+                    .find(|status| status.udid == "phone-a")
+                    .expect("phone-a status")
+            )
+            .expect("serialize restored status"),
+            serde_json::to_value(&changed).expect("serialize expected status"),
+            "the exact accepted status must survive serialization"
+        );
+        assert_eq!(
+            database
+                .conn()
+                .expect("inspect events")
+                .query_row(
+                    "SELECT COUNT(*) FROM nurture_run_status_events WHERE run_id=?1",
+                    [run_id.to_string()],
+                    |row| row.get::<_, i64>(0),
+                )
+                .expect("count events"),
+            3,
+            "two initial states plus one transition must all remain"
+        );
+
+        drop(database);
+        std::fs::remove_file(path).expect("remove fixture database");
+    }
+
+    #[test]
+    fn restart_reconciliation_appends_one_partial_terminal_state() {
+        let (database, path) = fixture();
+        let run_id = Uuid::new_v4();
+        let targets = vec!["phone-a".to_string()];
+        let initial = vec![queued(run_id, "phone-a", 1)];
+        database
+            .create_nurture_run(run_id, &targets, &initial)
+            .expect("create durable run");
+
+        let orphaned = database
+            .list_orphaned_nurture_statuses()
+            .expect("list worker-owned rows before reconciliation");
+        assert_eq!(orphaned.len(), 1);
+        assert_eq!(orphaned[0].run_id, Some(run_id));
+        assert_eq!(orphaned[0].udid, "phone-a");
+
+        assert_eq!(
+            database
+                .interrupt_orphaned_nurture_sessions()
+                .expect("reconcile orphan"),
+            1
+        );
+        let recovered = database
+            .get_nurture_run(run_id)
+            .expect("read recovered run")
+            .expect("run exists")
+            .statuses
+            .into_iter()
+            .next()
+            .expect("device status");
+        assert!(!recovered.running);
+        assert_eq!(recovered.phase, NurturePhase::Finished);
+        assert_eq!(recovered.outcome, Some(crate::nurture::Outcome::Partial));
+        assert_eq!(recovered.cleanup_state, NurtureCleanupState::Failed);
+        assert_eq!(
+            recovered.cleanup_error.as_deref(),
+            Some("nurture_worker_lost_on_restart")
+        );
+        assert_eq!(
+            database
+                .interrupt_orphaned_nurture_sessions()
+                .expect("second reconciliation is idempotent"),
+            0
+        );
+        assert_eq!(
+            database
+                .conn()
+                .expect("inspect events")
+                .query_row(
+                    "SELECT COUNT(*) FROM nurture_run_status_events WHERE run_id=?1",
+                    [run_id.to_string()],
+                    |row| row.get::<_, i64>(0),
+                )
+                .expect("count events"),
+            2,
+            "recovery appends once and never rewrites the running evidence"
+        );
+
+        drop(database);
+        std::fs::remove_file(path).expect("remove fixture database");
     }
 }

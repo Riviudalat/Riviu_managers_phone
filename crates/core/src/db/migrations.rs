@@ -191,6 +191,24 @@ const MIGRATIONS: &[Migration] = &[
         apply: apply_migration_26,
         rebuilds_tables: true,
     },
+    Migration {
+        version: 27,
+        name: "publish-execution-snapshots",
+        apply: apply_migration_27,
+        rebuilds_tables: false,
+    },
+    Migration {
+        version: 28,
+        name: "nurture-run-history",
+        apply: apply_migration_28,
+        rebuilds_tables: false,
+    },
+    Migration {
+        version: 29,
+        name: "public-effect-cleanup-journal",
+        apply: apply_migration_29,
+        rebuilds_tables: false,
+    },
 ];
 
 pub(super) fn latest_version() -> i64 {
@@ -1615,6 +1633,106 @@ CREATE INDEX idx_interaction_campaigns_updated ON interaction_campaigns(updated_
     Ok(())
 }
 
+fn apply_migration_27(transaction: &Transaction<'_>) -> anyhow::Result<()> {
+    transaction.execute_batch(
+        r#"
+CREATE TABLE publish_execution_snapshots (
+  campaign_id TEXT PRIMARY KEY REFERENCES publish_campaigns(id) ON DELETE CASCADE,
+  input_digest TEXT NOT NULL CHECK (
+    length(input_digest) = 64 AND
+    input_digest NOT GLOB '*[^0-9a-f]*'
+  ),
+  status TEXT NOT NULL CHECK (status IN ('complete','partial','uncertain')),
+  retry_scope TEXT NOT NULL CHECK (
+    retry_scope IN ('fullPipeline','linkAndSheet','sheetOnly','none')
+  ),
+  report_json TEXT NOT NULL CHECK (
+    json_valid(report_json) AND json_type(report_json) = 'object'
+  ),
+  updated_at TEXT NOT NULL
+);
+"#,
+    )?;
+    Ok(())
+}
+
+fn apply_migration_28(transaction: &Transaction<'_>) -> anyhow::Result<()> {
+    transaction.execute_batch(
+        r#"
+CREATE TABLE nurture_runs (
+  id TEXT PRIMARY KEY,
+  target_udids_json TEXT NOT NULL CHECK (
+    json_valid(target_udids_json) AND
+    json_type(target_udids_json) = 'array'
+  ),
+  target_count INTEGER NOT NULL CHECK (
+    target_count > 0 AND
+    target_count = json_array_length(target_udids_json)
+  ),
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE INDEX nurture_runs_updated ON nurture_runs(updated_at DESC);
+
+CREATE TABLE nurture_run_status_events (
+  sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+  run_id TEXT NOT NULL REFERENCES nurture_runs(id) ON DELETE CASCADE,
+  udid TEXT NOT NULL CHECK (length(udid) > 0),
+  status_json TEXT NOT NULL CHECK (
+    json_valid(status_json) AND
+    json_type(status_json) = 'object' AND
+    json_extract(status_json, '$.udid') = udid AND
+    json_extract(status_json, '$.runId') = run_id AND
+    json_type(status_json, '$.running') IN ('true', 'false')
+  ),
+  recorded_at TEXT NOT NULL
+);
+CREATE INDEX nurture_run_status_events_latest
+  ON nurture_run_status_events(run_id, udid, sequence DESC);
+"#,
+    )?;
+    Ok(())
+}
+
+fn apply_migration_29(transaction: &Transaction<'_>) -> anyhow::Result<()> {
+    transaction.execute_batch(
+        r#"
+CREATE TABLE public_cleanup_runs (
+  id TEXT PRIMARY KEY,
+  request_id TEXT NOT NULL UNIQUE CHECK (length(trim(request_id)) > 0),
+  source_action_run_id TEXT NOT NULL UNIQUE
+    REFERENCES tiktok_action_runs(id) ON DELETE RESTRICT,
+  campaign_id TEXT NOT NULL REFERENCES interaction_campaigns(id) ON DELETE RESTRICT,
+  assignment_id TEXT NOT NULL REFERENCES interaction_assignments(id) ON DELETE RESTRICT,
+  device_udid TEXT NOT NULL CHECK (length(trim(device_udid)) > 0),
+  action_kind TEXT NOT NULL CHECK (action_kind IN ('like','save')),
+  target_json TEXT NOT NULL CHECK (
+    json_valid(target_json) AND
+    json_type(target_json) = 'object' AND
+    length(trim(json_extract(target_json, '$.normalizedUrl'))) > 0 AND
+    length(trim(json_extract(target_json, '$.contentId'))) > 0 AND
+    length(trim(json_extract(target_json, '$.author'))) > 0
+  ),
+  state TEXT NOT NULL DEFAULT 'planned' CHECK (state IN (
+    'planned','preparing','armed','cleared','already_clear','failed_before_effect','uncertain'
+  )),
+  revision INTEGER NOT NULL DEFAULT 0 CHECK (revision >= 0),
+  effect_intent TEXT CHECK (effect_intent IS NULL OR length(trim(effect_intent)) > 0),
+  evidence_json TEXT CHECK (evidence_json IS NULL OR json_valid(evidence_json)),
+  error_code TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE INDEX public_cleanup_runs_recovery
+  ON public_cleanup_runs(state, updated_at)
+  WHERE state IN ('preparing','armed');
+CREATE INDEX public_cleanup_runs_assignment
+  ON public_cleanup_runs(campaign_id, assignment_id, action_kind);
+"#,
+    )?;
+    Ok(())
+}
+
 fn apply_migration_11(transaction: &Transaction<'_>) -> anyhow::Result<()> {
     // **Dropping a column that was always a guess.** The `usd` in both comment tables was
     // `prompt_tokens * input_price_per_1m + completion_tokens * output_price_per_1m`, over two
@@ -2541,11 +2659,14 @@ INSERT INTO tiktok_action_runs
         };
         let action_before = read_action(&connection);
 
-        run(&mut connection).expect("apply migration 26");
+        run(&mut connection).expect("apply migrations from version 26 onward");
 
         assert_eq!(read_interaction_rows(&connection), before);
         assert_eq!(read_action(&connection), action_before);
-        assert_eq!(migration_rows(&connection).last().unwrap().0, 26);
+        assert_eq!(
+            migration_rows(&connection).last().unwrap().0,
+            super::latest_version()
+        );
         let index_sql: String = connection
             .query_row(
                 "SELECT sql FROM sqlite_master WHERE type='index' AND name='idx_interaction_campaigns_updated'",
@@ -2599,6 +2720,245 @@ INSERT INTO tiktok_action_runs
             .collect::<Result<Vec<_>, _>>()
             .expect("collect foreign-key violations");
         assert!(violations.is_empty());
+
+        drop(connection);
+        cleanup(&path);
+    }
+
+    #[test]
+    fn migration_27_adds_publish_execution_snapshots_without_rewriting_campaigns() {
+        let path = temp_db_path("publish-execution-snapshots");
+        let mut connection = Connection::open(&path).expect("fixture");
+        connection
+            .pragma_update(None, "foreign_keys", "ON")
+            .expect("production foreign-key posture");
+        run_with_failpoint(&mut connection, Some(27)).expect_err("stop at v26");
+        assert_eq!(migration_rows(&connection).last().unwrap().0, 26);
+        assert!(!table_exists(&connection, "publish_execution_snapshots"));
+
+        connection
+            .execute(
+                "INSERT INTO publish_campaigns
+                 (id,request_id,source_root,request_json,state,revision,error_code,created_at,updated_at)
+                 VALUES('campaign-v26','request-v26','C:/fixture','{\"kept\":true}',
+                        'uncertain',9,'kept','t0','t1')",
+                [],
+            )
+            .expect("seed v26 publish campaign");
+        let before: (String, String, String, i64, Option<String>, String, String) = connection
+            .query_row(
+                "SELECT request_id,source_root,request_json,revision,error_code,created_at,updated_at
+                 FROM publish_campaigns WHERE id='campaign-v26'",
+                [],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                        row.get(6)?,
+                    ))
+                },
+            )
+            .expect("read v26 campaign");
+
+        run_with_failpoint(&mut connection, Some(28)).expect_err("stop after migration 27");
+
+        assert_eq!(migration_rows(&connection).last().unwrap().0, 27);
+        assert!(table_exists(&connection, "publish_execution_snapshots"));
+        let after = connection
+            .query_row(
+                "SELECT request_id,source_root,request_json,revision,error_code,created_at,updated_at
+                 FROM publish_campaigns WHERE id='campaign-v26'",
+                [],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, i64>(3)?,
+                        row.get::<_, Option<String>>(4)?,
+                        row.get::<_, String>(5)?,
+                        row.get::<_, String>(6)?,
+                    ))
+                },
+            )
+            .expect("read migrated campaign");
+        assert_eq!(
+            after, before,
+            "the append-only migration changed its parent row"
+        );
+
+        connection
+            .execute(
+                "INSERT INTO publish_execution_snapshots
+                 (campaign_id,input_digest,status,retry_scope,report_json,updated_at)
+                 VALUES('campaign-v26',?1,'partial','linkAndSheet','{}','t2')",
+                ["a".repeat(64)],
+            )
+            .expect("valid public enum values and report");
+        for (column, value) in [
+            ("input_digest", "A".repeat(64)),
+            ("status", "failed".to_string()),
+            ("retry_scope", "link_and_sheet".to_string()),
+            ("report_json", "[]".to_string()),
+        ] {
+            let result = connection.execute(
+                &format!(
+                    "UPDATE publish_execution_snapshots SET {column}=?1 WHERE campaign_id='campaign-v26'"
+                ),
+                [value],
+            );
+            assert!(result.is_err(), "invalid {column} passed its schema check");
+        }
+
+        connection
+            .execute("DELETE FROM publish_campaigns WHERE id='campaign-v26'", [])
+            .expect("delete parent");
+        let snapshots: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM publish_execution_snapshots",
+                [],
+                |row| row.get(0),
+            )
+            .expect("count cascade survivors");
+        assert_eq!(
+            snapshots, 0,
+            "execution snapshot did not follow its campaign"
+        );
+
+        drop(connection);
+        cleanup(&path);
+    }
+
+    #[test]
+    fn migration_28_adds_append_only_nurture_history_and_preserves_existing_rows() {
+        let path = temp_db_path("nurture-run-history");
+        let mut connection = Connection::open(&path).expect("fixture");
+        connection
+            .pragma_update(None, "foreign_keys", "ON")
+            .expect("production foreign-key posture");
+        run_with_failpoint(&mut connection, Some(28)).expect_err("stop at v27");
+        assert_eq!(migration_rows(&connection).last().unwrap().0, 27);
+        assert!(!table_exists(&connection, "nurture_runs"));
+        connection
+            .execute(
+                "INSERT INTO settings(key,value) VALUES('kept-at-v27','yes')",
+                [],
+            )
+            .expect("seed existing row");
+
+        run_with_failpoint(&mut connection, Some(29)).expect_err("stop after migration 28");
+
+        assert_eq!(migration_rows(&connection).last().unwrap().0, 28);
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT value FROM settings WHERE key='kept-at-v27'",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+                .expect("read existing row"),
+            "yes"
+        );
+        assert!(table_exists(&connection, "nurture_runs"));
+        assert!(table_exists(&connection, "nurture_run_status_events"));
+
+        connection
+            .execute(
+                "INSERT INTO nurture_runs
+                 (id,target_udids_json,target_count,created_at,updated_at)
+                 VALUES('run-a','[\"phone-a\"]',1,'t0','t0')",
+                [],
+            )
+            .expect("valid run");
+        let queued = serde_json::json!({
+            "udid": "phone-a",
+            "runId": "run-a",
+            "running": true
+        })
+        .to_string();
+        connection
+            .execute(
+                "INSERT INTO nurture_run_status_events
+                 (run_id,udid,status_json,recorded_at) VALUES('run-a','phone-a',?1,'t0')",
+                [queued],
+            )
+            .expect("first transition");
+        let finished = serde_json::json!({
+            "udid": "phone-a",
+            "runId": "run-a",
+            "running": false
+        })
+        .to_string();
+        connection
+            .execute(
+                "INSERT INTO nurture_run_status_events
+                 (run_id,udid,status_json,recorded_at) VALUES('run-a','phone-a',?1,'t1')",
+                [finished],
+            )
+            .expect("second transition");
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM nurture_run_status_events WHERE run_id='run-a'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .expect("count transitions"),
+            2,
+            "a later state must append rather than overwrite its predecessor"
+        );
+        connection
+            .execute("DELETE FROM nurture_runs WHERE id='run-a'", [])
+            .expect("delete run");
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM nurture_run_status_events",
+                    [],
+                    |row| { row.get::<_, i64>(0) }
+                )
+                .expect("count cascade survivors"),
+            0
+        );
+
+        drop(connection);
+        cleanup(&path);
+    }
+
+    #[test]
+    fn migration_29_adds_a_constrained_public_cleanup_journal() {
+        let path = temp_db_path("public-cleanup-journal");
+        let mut connection = Connection::open(&path).expect("fixture");
+        connection
+            .pragma_update(None, "foreign_keys", "ON")
+            .expect("production foreign-key posture");
+        run_with_failpoint(&mut connection, Some(29)).expect_err("stop at v28");
+        assert_eq!(migration_rows(&connection).last().unwrap().0, 28);
+        assert!(!table_exists(&connection, "public_cleanup_runs"));
+
+        run(&mut connection).expect("apply migration 29");
+
+        assert_eq!(migration_rows(&connection).last().unwrap().0, 29);
+        assert!(table_exists(&connection, "public_cleanup_runs"));
+        let schema: String = connection
+            .query_row(
+                "SELECT sql FROM sqlite_master WHERE type='table' AND name='public_cleanup_runs'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("read cleanup schema");
+        for invariant in [
+            "source_action_run_id TEXT NOT NULL UNIQUE",
+            "action_kind IN ('like','save')",
+            "'planned','preparing','armed','cleared','already_clear','failed_before_effect','uncertain'",
+            "json_extract(target_json, '$.normalizedUrl')",
+        ] {
+            assert!(schema.contains(invariant), "cleanup schema lost `{invariant}`");
+        }
 
         drop(connection);
         cleanup(&path);

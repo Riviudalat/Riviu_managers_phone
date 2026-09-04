@@ -5,6 +5,8 @@
 //! retries a post. A confirmed post may resume only at link capture or the idempotent Sheet
 //! write.
 
+use std::collections::BTreeMap;
+
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -122,6 +124,98 @@ pub struct PublishExecutionIssue {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bundle_id: Option<String>,
     pub message: String,
+}
+
+/// The immutable operator input covered by one publish preflight digest.
+///
+/// A sorted map makes caption override ordering deterministic before a caller hashes the
+/// serialized request. Device observations belong in [`PublishPreflightReport`], not here.
+#[derive(Debug, Clone, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PublishPreflightRequest {
+    pub source_root: String,
+    pub bundle_ids: Vec<String>,
+    pub udids: Vec<String>,
+    /// Semantic operator selection. Older clients supplied only `udids`; those requests are
+    /// interpreted as an explicit target so persisted payloads remain readable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_ref: Option<crate::TargetRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_at: Option<String>,
+    #[serde(default)]
+    pub caption_overrides: BTreeMap<String, String>,
+    #[serde(default)]
+    pub sound_policy: PublishSoundPolicy,
+}
+
+/// Result of a bounded, read-only preflight check.
+#[derive(Debug, Clone, Copy, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum PublishPreflightCheck {
+    Pass,
+    Fail,
+}
+
+/// Preflight evidence for the exact bundle-to-device assignment at `ordinal`.
+#[derive(Debug, Clone, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PublishPreflightAssignmentReport {
+    pub ordinal: u32,
+    pub bundle_id: String,
+    pub udid: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub package_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub locale: Option<String>,
+    pub media: PublishPreflightCheck,
+    pub composer: PublishPreflightCheck,
+    pub sound_picker: PublishPreflightCheck,
+    pub storage: PublishPreflightCheck,
+    pub required_bytes: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub available_bytes: Option<u64>,
+    #[serde(default)]
+    pub issues: Vec<PublishExecutionIssue>,
+}
+
+/// Read-only result whose digest must still match when a campaign is created.
+#[derive(Debug, Clone, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PublishPreflightReport {
+    pub input_digest: String,
+    pub target_snapshot: crate::ResolvedTargetSnapshot,
+    pub can_execute: bool,
+    pub assignments: Vec<PublishPreflightAssignmentReport>,
+    #[serde(default)]
+    pub issues: Vec<PublishExecutionIssue>,
+    pub sheet_configured: bool,
+}
+
+/// Latest durable execution projection for one publish campaign.
+///
+/// This is a replacement snapshot, not an append-only event. The campaign's existing event
+/// stream remains the history; this record is the restart-safe answer to "what may resume?".
+#[derive(Debug, Clone, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PublishExecutionSnapshot {
+    pub campaign_id: String,
+    pub input_digest: String,
+    pub status: PublishExecutionStatus,
+    pub retry_scope: PublishRetryScope,
+    pub report_json: Value,
+    pub updated_at: String,
+}
+
+/// Initial restart projection committed atomically with a new publish campaign.
+#[derive(Debug, Clone, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PublishExecutionSnapshotDraft {
+    pub input_digest: String,
+    pub status: PublishExecutionStatus,
+    pub retry_scope: PublishRetryScope,
+    pub report_json: Value,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Serialize)]
@@ -735,6 +829,99 @@ mod tests {
             confirmed: true,
             resume: PublishResumePoint::Full,
         }
+    }
+
+    #[test]
+    fn preflight_and_snapshot_wire_contracts_are_camel_case_and_typed() {
+        let request = PublishPreflightRequest {
+            source_root: "C:/fixture".into(),
+            bundle_ids: vec!["bundle-1".into()],
+            udids: vec!["phone-1".into()],
+            target_ref: Some(crate::TargetRef::Group {
+                group_id: "morning".into(),
+            }),
+            run_at: None,
+            caption_overrides: [("bundle-1".to_string(), "caption".to_string())]
+                .into_iter()
+                .collect(),
+            sound_policy: PublishSoundPolicy::Default,
+        };
+        let request_json = serde_json::to_value(&request).expect("serialize request");
+        assert_eq!(request_json["sourceRoot"], "C:/fixture");
+        assert_eq!(request_json["targetRef"]["type"], "group");
+        assert_eq!(request_json["captionOverrides"]["bundle-1"], "caption");
+        assert_eq!(request_json["soundPolicy"]["kind"], "default");
+        assert!(request_json.get("runAt").is_none());
+
+        let report = PublishPreflightReport {
+            input_digest: "a".repeat(64),
+            target_snapshot: crate::resolve_target(
+                &crate::TargetRef::Explicit {
+                    udids: vec!["phone-1".into()],
+                },
+                &["phone-1".into()],
+                &[],
+                &[],
+            )
+            .expect("resolve target fixture"),
+            can_execute: false,
+            assignments: vec![PublishPreflightAssignmentReport {
+                ordinal: 0,
+                bundle_id: "bundle-1".into(),
+                udid: "phone-1".into(),
+                package_name: None,
+                version: Some("38.3.2".into()),
+                locale: None,
+                media: PublishPreflightCheck::Pass,
+                composer: PublishPreflightCheck::Pass,
+                sound_picker: PublishPreflightCheck::Fail,
+                storage: PublishPreflightCheck::Pass,
+                required_bytes: 1024,
+                available_bytes: Some(4096),
+                issues: vec![PublishExecutionIssue {
+                    code: "sound_picker_unmeasured".into(),
+                    assignment_id: None,
+                    udid: Some("phone-1".into()),
+                    bundle_id: Some("bundle-1".into()),
+                    message: "sound picker is not measured".into(),
+                }],
+            }],
+            issues: Vec::new(),
+            sheet_configured: false,
+        };
+        let report_json = serde_json::to_value(&report).expect("serialize report");
+        assert_eq!(
+            report_json["targetSnapshot"]["included"][0]["udid"],
+            "phone-1"
+        );
+        assert_eq!(
+            report_json["targetSnapshot"]["targetRef"]["type"],
+            "explicit"
+        );
+        assert_eq!(report_json["assignments"][0]["soundPicker"], "fail");
+        assert_eq!(report_json["assignments"][0]["media"], "pass");
+        assert_eq!(report_json["assignments"][0]["storage"], "pass");
+        assert_eq!(report_json["assignments"][0]["availableBytes"], 4096);
+        assert!(report_json["assignments"][0].get("packageName").is_none());
+        assert_eq!(report_json["sheetConfigured"], false);
+
+        let snapshot = PublishExecutionSnapshot {
+            campaign_id: "campaign-1".into(),
+            input_digest: "a".repeat(64),
+            status: PublishExecutionStatus::Partial,
+            retry_scope: PublishRetryScope::LinkAndSheet,
+            report_json: serde_json::json!({"canExecute": false}),
+            updated_at: "2026-09-04T00:00:00Z".into(),
+        };
+        let snapshot_json = serde_json::to_value(&snapshot).expect("serialize snapshot");
+        assert_eq!(snapshot_json["status"], "partial");
+        assert_eq!(snapshot_json["retryScope"], "linkAndSheet");
+        assert_eq!(snapshot_json["reportJson"]["canExecute"], false);
+        assert_eq!(
+            serde_json::from_value::<PublishExecutionSnapshot>(snapshot_json)
+                .expect("restore snapshot"),
+            snapshot
+        );
     }
 
     #[tokio::test]

@@ -759,6 +759,47 @@ pub struct AppLibraryItem {
     pub created_at: String,
 }
 
+/// One bounded fleet transfer request for a managed media artifact.
+///
+/// The semantic target is resolved once when the command starts. Keeping that
+/// snapshot in the response lets the UI name every included/excluded phone
+/// without pretending the current roster is still the roster that ran.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct MaterialPushBatchRequest {
+    pub material_id: String,
+    pub target: crate::automation::TargetRef,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum MaterialPushStatus {
+    Succeeded,
+    Failed,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct MaterialPushDeviceResult {
+    pub udid: String,
+    pub status: MaterialPushStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub evidence: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_code: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct MaterialPushBatchResult {
+    pub batch_id: String,
+    pub material_id: String,
+    pub target: crate::automation::ResolvedTargetSnapshot,
+    pub results: Vec<MaterialPushDeviceResult>,
+}
+
 /// Public request for installing one library artifact on one or more devices.
 ///
 /// `batch_id` is supplied by the caller so a later cancel command can stop only
@@ -1584,6 +1625,22 @@ pub enum NurturePhase {
     Finished,
 }
 
+/// Whether a nurture row can prove that TikTok is no longer running.
+///
+/// Finishing the feed loop and terminating the app are separate transitions. The old
+/// `last_message` suffix collapsed them into prose and forced every reader to guess.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum NurtureCleanupState {
+    /// No termination result has been recorded yet.
+    #[default]
+    Pending,
+    /// The driver returned a [`crate::ProcessAbsenceProof`] for the exact package.
+    ProcessAbsent,
+    /// Termination could not be proved.
+    Failed,
+}
+
 impl NurturePhase {
     /// Whether nothing more will happen on this device.
     pub fn is_terminal(self) -> bool {
@@ -1669,6 +1726,13 @@ pub struct NurtureSessionStatus {
     /// When this device's session actually began — after its stagger, before the app opened.
     #[serde(default)]
     pub started_at: Option<DateTime<Utc>>,
+    /// When the desktop last accepted a status update for this device in this run.
+    ///
+    /// This is separate from `started_at`: counters, cleanup and the terminal outcome can move
+    /// long after the session begins, and Operations must sort by that last observed state rather
+    /// than by the oldest device in the batch. Legacy/in-process rows deserialize as `None`.
+    #[serde(default)]
+    pub updated_at: Option<DateTime<Utc>>,
     /// When the wall clock will end this session regardless of the video count.
     ///
     /// A run ends at **whichever bound arrives first**, and for a manual start this one is a
@@ -1677,6 +1741,15 @@ pub struct NurtureSessionStatus {
     /// time and reads as hung.
     #[serde(default)]
     pub deadline_at: Option<DateTime<Utc>>,
+    /// Typed cleanup verdict; never infer this from [`Self::last_message`].
+    #[serde(default)]
+    pub cleanup_state: NurtureCleanupState,
+    /// Driver evidence for [`NurtureCleanupState::ProcessAbsent`].
+    #[serde(default)]
+    pub cleanup_proof: Option<crate::ProcessAbsenceProof>,
+    /// A termination or context-release failure for the operator detail.
+    #[serde(default)]
+    pub cleanup_error: Option<String>,
 }
 
 impl Default for NurtureSessionStatus {
@@ -1705,7 +1778,11 @@ impl Default for NurtureSessionStatus {
             outcome: None,
             video_target: 0,
             started_at: None,
+            updated_at: None,
             deadline_at: None,
+            cleanup_state: NurtureCleanupState::Pending,
+            cleanup_proof: None,
+            cleanup_error: None,
         }
     }
 }
@@ -2835,5 +2912,21 @@ mod task4_nurture_save_wire_tests {
         assert_eq!(status.saves, 0);
         assert_eq!(status.save_noops, 0);
         assert_eq!(status.save_uncertain, 0);
+    }
+
+    #[test]
+    fn legacy_nurture_status_without_cleanup_fields_fails_closed_to_pending() {
+        let mut legacy =
+            serde_json::to_value(NurtureSessionStatus::new("fixture")).expect("serialize fixture");
+        let object = legacy.as_object_mut().expect("status object");
+        object.remove("cleanupState");
+        object.remove("cleanupProof");
+        object.remove("cleanupError");
+
+        let decoded: NurtureSessionStatus =
+            serde_json::from_value(legacy).expect("decode legacy status");
+        assert_eq!(decoded.cleanup_state, NurtureCleanupState::Pending);
+        assert!(decoded.cleanup_proof.is_none());
+        assert!(decoded.cleanup_error.is_none());
     }
 }

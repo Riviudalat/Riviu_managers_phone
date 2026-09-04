@@ -18,13 +18,15 @@ mod jobs;
 mod migrations;
 mod nurture;
 mod orchestration;
+mod public_cleanup;
 mod publish;
 mod publish_sheet;
 
 pub use flow_runs::{AttemptTransitionPatch, FlowStateConflict};
 pub(crate) use flow_runs::{FlowAttemptExecutionContext, FlowRecoveryRunContext};
+pub use nurture::NurtureRunHistory;
 pub use publish::{PublishRunOutcome, PublishTransferSettle};
-pub use publish_sheet::SheetOutboxRow;
+pub use publish_sheet::{SheetOutboxRow, SheetOutboxState};
 
 /// Somewhere to keep a secret that is **not** the SQLite file.
 ///
@@ -2160,6 +2162,7 @@ mod publish_tests {
                 seed: 77,
             },
             execution_confirmed: true,
+            target_snapshot: None,
         };
         let campaign = db
             .create_publish_campaign(&request, &[bundle("bundle-a", 0), bundle("bundle-b", 1)])
@@ -2219,6 +2222,7 @@ mod publish_tests {
             cleanup_policy: PublishCleanupPolicy::DeleteImportedAssetsAfterVerified,
             sound_policy: crate::publish::PublishSoundPolicy::Default,
             execution_confirmed: false,
+            target_snapshot: None,
         };
         let error = db
             .create_publish_campaign(&request, &[bundle("bundle-a", 0), bundle("bundle-b", 1)])
