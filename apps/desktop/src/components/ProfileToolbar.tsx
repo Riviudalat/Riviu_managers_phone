@@ -4,6 +4,7 @@ import { toastError } from "../toastStore";
 
 interface Props {
   selected: DeviceInfo[];
+  deviceCount: number;
   onStart: () => void | Promise<void>;
   onStop: () => void;
   onInstall: () => void | Promise<void>;
@@ -18,6 +19,7 @@ interface Props {
 
 export function ProfileToolbar({
   selected,
+  deviceCount,
   onStart,
   onStop,
   onInstall,
@@ -29,16 +31,9 @@ export function ProfileToolbar({
   groupToolsOpen,
   syncOn,
 }: Props) {
-  const startable = selected.filter(
-    (d) =>
-      d.status === "connected" ||
-      d.status === "ready" ||
-      d.status === "preparing" ||
-      d.status === "busy" ||
-      d.status === "error",
-  );
   const any = selected.length;
-  const canBatch = true;
+  const canBatch = deviceCount > 0;
+  const scope = any ? `đã chọn (${any})` : `toàn bộ (${deviceCount})`;
 
   return (
     <div className="profile-toolbar">
@@ -53,10 +48,10 @@ export function ProfileToolbar({
             toastError("Khởi động thất bại", e);
           }
         }}
-        title="Mở luồng xem cho các máy đã chọn hoặc toàn bộ danh sách"
+        title={`Mở luồng xem cho ${scope}`}
       >
         <IconPhone size={16} />
-        Mở{startable.length ? ` (${startable.length})` : any ? ` (${any})` : ""}
+        Mở {scope}
       </button>
       <button
         type="button"
@@ -65,7 +60,7 @@ export function ProfileToolbar({
         onClick={onStop}
         title="Bỏ chọn"
       >
-        Bỏ chọn{any ? `(${any})` : ""}
+        Bỏ chọn{any ? ` (${any})` : ""}
       </button>
       <button
         type="button"
@@ -78,9 +73,9 @@ export function ProfileToolbar({
             toastError("Sửa agent thất bại", e);
           }
         }}
-        title="Cài hoặc khôi phục Riviu Agent"
+        title={`Cài hoặc khôi phục Riviu Agent cho ${scope}`}
       >
-        Khôi phục{any ? ` (${any})` : ""}
+        Khôi phục {scope}
       </button>
       <button
         type="button"

@@ -266,7 +266,7 @@ it("renders the production action workflow and a live review rail on the page", 
   expect(within(review).getByText("Link hợp lệ")).toBeVisible();
   expect(within(review).getByText("Thiết bị chạy")).toBeVisible();
   expect(within(review).getByText("Hành động")).toBeVisible();
-  expect(within(review).getByRole("button", { name: "Bắt đầu tương tác" })).toBeDisabled();
+  expect(screen.getByRole("button", { name: "Bắt đầu tương tác" })).toBeDisabled();
   expect(within(review).getByRole("list", { name: "Mục cần xử lý" })).toHaveTextContent(
     "Cần ít nhất một link video/photo hợp lệ",
   );

@@ -234,7 +234,7 @@ export function JobsPanel({
           <div className="operations-filterbar">
             <label>
               <Search size={15} aria-hidden="true" />
-              <span className="sr-only">Tìm tác vụ</span>
+              <span className="visually-hidden">Tìm tác vụ</span>
               <input
                 value={query}
                 onChange={(event) => setQuery(event.target.value)}

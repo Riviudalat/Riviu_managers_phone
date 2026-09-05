@@ -1,61 +1,277 @@
-.toast-icon {
-  flex-shrink: 0;
-  margin-top: 1px;
-  color: var(--primary);
-}
-.toast-ok {
-  border-left-color: var(--ok);
-}
-.toast-ok .toast-icon {
-  color: var(--ok);
-}
-.toast-warn {
-  border-left-color: var(--warn);
-}
-.toast-warn .toast-icon {
-  color: var(--warn);
-}
-.toast-error {
-  border-left-color: var(--danger);
-}
-.toast-error .toast-icon {
-  color: var(--danger);
+/* Cross-page outcomes live in a user-opened activity center instead of appearing over work. */
+.activity-center {
+  position: relative;
+  display: flex;
+  align-items: center;
 }
 
-.toast-copy {
+.activity-center-trigger.icon-btn {
+  position: relative;
+  width: 32px;
+  min-height: 32px;
+}
+
+.activity-center-current {
+  max-width: 280px;
+  display: flex;
   min-width: 0;
-  flex: 1;
-}
-.toast-copy strong {
-  display: block;
-  font-size: var(--text-md);
-  font-weight: 600;
-  color: var(--text-1);
-}
-.toast-copy p {
-  margin: 0.15rem 0 0;
-  max-height: 4.5rem;
+  align-items: center;
+  gap: var(--space-1);
   overflow: hidden;
   color: var(--text-2);
   font-size: var(--text-sm);
-  line-height: 1.45;
+  font-weight: var(--weight-medium);
+}
+
+.activity-center-current > svg {
+  flex: 0 0 auto;
+  color: var(--info-strong);
+}
+
+.activity-center-current-copy {
+  display: grid;
+  min-width: 0;
+}
+
+.activity-center-current-copy > strong,
+.activity-center-current-copy > small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.activity-center-current-copy > strong {
+  color: var(--text-1);
+  font-size: var(--text-sm);
+  font-weight: var(--weight-semibold);
+}
+
+.activity-center-current-copy > small {
+  color: var(--text-3);
+  font-size: var(--text-xs);
+  font-weight: var(--weight-regular);
+}
+
+.activity-center-current.is-ok > svg {
+  color: var(--ok-strong);
+}
+
+.activity-center-current.is-warn > svg {
+  color: var(--warn-strong);
+}
+
+.activity-center-current.is-error > svg {
+  color: var(--danger-deep);
+}
+
+.activity-center-badge {
+  min-width: 17px;
+  height: 17px;
+  display: grid;
+  place-items: center;
+  padding: 0 4px;
+  border: 2px solid var(--bg-elevated);
+  border-radius: var(--radius-pill);
+  background: var(--danger);
+  color: var(--text-inverse);
+  font-size: var(--text-xs);
+  font-weight: var(--weight-bold);
+  line-height: 1;
+}
+
+.activity-center-panel {
+  position: absolute;
+  top: calc(100% + var(--space-2));
+  right: 0;
+  z-index: var(--z-flyout);
+  width: min(420px, calc(100vw - var(--space-6)));
+  max-height: min(620px, calc(100vh - 84px));
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  overflow: hidden;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius);
+  background: var(--bg-elevated);
+  box-shadow: var(--shadow-lg);
+  color: var(--text-1);
+  -webkit-app-region: no-drag;
+}
+
+.activity-center-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-3);
+  padding: var(--space-4);
+  border-bottom: 1px solid var(--line);
+}
+
+.activity-center-header h2 {
+  margin: 0;
+  font-size: var(--text-base);
+  line-height: var(--leading-tight);
+}
+
+.activity-center-header p {
+  margin: var(--space-1) 0 0;
+  color: var(--text-3);
+  font-size: var(--text-sm);
+}
+
+.activity-center-header-actions {
+  display: flex;
+  gap: var(--space-1);
+}
+
+.activity-center-filters {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  padding: var(--space-2) var(--space-3);
+  border-bottom: 1px solid var(--line);
+  color: var(--text-3);
+}
+
+.activity-center-filters button {
+  min-height: 28px;
+  padding: 0 var(--space-2);
+  border-color: transparent;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-2);
+  font-size: var(--text-sm);
+}
+
+.activity-center-filters button[aria-pressed="true"] {
+  border-color: var(--line);
+  background: var(--bg-muted);
+  color: var(--text-1);
+}
+
+.activity-center-filters button span {
+  margin-left: var(--space-1);
+  color: var(--text-3);
+  font-variant-numeric: tabular-nums;
+}
+
+.activity-center-list {
+  margin: 0;
+  padding: 0;
+  overflow-y: auto;
+  list-style: none;
+}
+
+.activity-center-list li {
+  display: grid;
+  grid-template-columns: 24px minmax(0, 1fr) 28px;
+  gap: var(--space-2);
+  padding: var(--space-3);
+  border-bottom: 1px solid var(--line);
+}
+
+.activity-center-list li:last-child {
+  border-bottom: 0;
+}
+
+.activity-center-list li:hover {
+  background: var(--bg-subtle);
+}
+
+.activity-center-icon {
+  width: 24px;
+  height: 24px;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  background: var(--info-soft);
+  color: var(--info-strong);
+}
+
+.activity-center-list .is-ok .activity-center-icon {
+  background: var(--ok-soft);
+  color: var(--ok-strong);
+}
+
+.activity-center-list .is-warn .activity-center-icon {
+  background: var(--warn-soft);
+  color: var(--warn-strong);
+}
+
+.activity-center-list .is-error .activity-center-icon {
+  background: var(--danger-soft);
+  color: var(--danger-deep);
+}
+
+.activity-center-copy {
+  min-width: 0;
+}
+
+.activity-center-copy > div {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-2);
+}
+
+.activity-center-copy strong {
+  min-width: 0;
+  overflow: hidden;
+  font-size: var(--text-md);
+  font-weight: var(--weight-semibold);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.activity-center-copy time,
+.activity-center-kind {
+  color: var(--text-3);
+  font-size: var(--text-xs);
+  white-space: nowrap;
+}
+
+.activity-center-kind {
+  display: block;
+  margin-top: 1px;
+}
+
+.activity-center-copy p {
+  margin: var(--space-1) 0 0;
+  color: var(--text-2);
+  font-size: var(--text-sm);
+  line-height: var(--leading-normal);
   overflow-wrap: anywhere;
 }
 
-.toast-close {
-  flex-shrink: 0;
-  width: 22px;
-  height: 22px;
+.activity-center-dismiss.icon-btn {
+  width: 28px;
+  height: 28px;
+}
+
+.activity-center-empty {
+  min-height: 180px;
   display: grid;
   place-items: center;
-  border: none;
-  border-radius: 5px;
-  background: transparent;
+  align-content: center;
+  gap: var(--space-2);
+  padding: var(--space-6);
   color: var(--text-3);
+  text-align: center;
 }
-.toast-close:hover {
-  background: var(--bg-muted);
+
+.activity-center-empty strong {
   color: var(--text-1);
+  font-size: var(--text-md);
+}
+
+.activity-center-empty span {
+  font-size: var(--text-sm);
+}
+
+@media (max-width: 1100px) {
+  .activity-center-current {
+    display: none;
+  }
 }
 
 /* ——— Confirm dialog · replace window.confirm ——— */

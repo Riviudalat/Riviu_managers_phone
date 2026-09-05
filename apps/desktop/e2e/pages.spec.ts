@@ -53,7 +53,7 @@ async function open(page: Page, name: string): Promise<void> {
   // Fonts before pixels: a screenshot taken while a face is still loading captures the
   // fallback, which is what made the two Flow baselines racy before they were bundled.
   await page.evaluate(() => document.fonts.ready);
-  await expect(page.locator(".toast-error")).toHaveCount(0);
+  await expect(page.locator(".activity-center-current.is-error")).toHaveCount(0);
   await expect(page.getByText(/Unknown mock command/i)).toHaveCount(0);
   if (name === "Đăng bài") {
     await expect(page.getByRole("status").filter({ hasText: "Toàn bộ 2" })).toBeVisible();
@@ -120,8 +120,9 @@ test("the material library dispatches one bounded fleet batch", async ({ page })
 
   await page.getByRole("button", { name: "Chuyển tới 2 máy" }).click();
 
-  await expect(page.getByRole("region", { name: "Kết quả chuyển gần nhất" })).toBeVisible();
-  await expect(page.getByText("Đã chuyển")).toHaveCount(2);
+  const result = page.getByRole("region", { name: "Kết quả chuyển gần nhất" });
+  await expect(result).toBeVisible();
+  await expect(result.getByText("Đã chuyển")).toHaveCount(2);
   const push = (await mockCommandCalls(page)).find(
     (call) => call.command === "push_material_batch",
   );
@@ -149,6 +150,9 @@ test("fleet diagnostics probes each Android and retries only the chosen row", as
   expect((await healthCalls()).slice(beforeRetry.length)).toEqual([
     expect.objectContaining({ args: { udid: "MOCK-ANDROID-01" } }),
   ]);
+  const searchHeight = await page.getByRole("searchbox", { name: "Tìm thiết bị" })
+    .evaluate((element) => element.closest("label")?.getBoundingClientRect().height ?? 0);
+  expect(searchHeight).toBeLessThanOrEqual(40);
 });
 
 test("publish keeps setup separate from campaign monitoring", async ({ page }) => {
@@ -162,7 +166,7 @@ test("publish keeps setup separate from campaign monitoring", async ({ page }) =
   await expect(page.getByRole("tabpanel", { name: "Thiết lập" })).toBeHidden();
   await expect(page.getByRole("tabpanel", { name: "Theo dõi" })).toBeVisible();
   await expect(page.getByText("Chưa có chiến dịch")).toBeVisible();
-  await expect(page.locator(".toast-error")).toHaveCount(0);
+  await expect(page.locator(".activity-center-current.is-error")).toHaveCount(0);
   await expect(page.getByText(/Unknown mock command/i)).toHaveCount(0);
 });
 
@@ -178,6 +182,10 @@ test("publish workflow stays inside the viewport at supported widths", async ({ 
     const workflow = page.getByRole("list", { name: "Quy trình đăng bài" });
     for (const label of ["Nguồn", "Ghép bài/máy", "Preflight", "Xác nhận công khai", "Theo dõi"]) {
       await expect(workflow).toContainText(label);
+    }
+    if (viewport.width === 820) {
+      expect(await workflow.evaluate((element) => element.getBoundingClientRect().height))
+        .toBeLessThanOrEqual(56);
     }
     const overflow = await page.evaluate(() => ({
       viewport: document.documentElement.clientWidth,

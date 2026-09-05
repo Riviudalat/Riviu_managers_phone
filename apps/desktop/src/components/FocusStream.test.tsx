@@ -15,7 +15,7 @@ import {
   viewInjectTouch,
 } from "../api";
 import { FocusStream } from "./FocusStream";
-import { ToastHost } from "./ToastHost";
+import { ActivityCenter } from "./ActivityCenter";
 import { resetToasts } from "../toastStore";
 
 vi.mock("../pickFile", () => ({
@@ -477,7 +477,7 @@ describe("FocusStream with no picture yet", () => {
 
   function renderDark(device: DeviceInfo = fixture) {
     resetToasts();
-    // `ToastHost` is mounted alongside on purpose: a toast pushed into the store that never
+    // `ActivityCenter` is mounted alongside on purpose: an outcome pushed into the store that never
     // reaches the screen would satisfy a store-level assertion and still leave the operator
     // staring at nothing, which is the exact failure being fixed.
     return render(
@@ -491,7 +491,7 @@ describe("FocusStream with no picture yet", () => {
           devices={[device]}
           onSelectDevice={() => undefined}
         />
-        <ToastHost />
+        <ActivityCenter />
       </>,
     );
   }
@@ -504,7 +504,7 @@ describe("FocusStream with no picture yet", () => {
 
   it("says a gesture could not be sent rather than discarding it in silence", async () => {
     // The whole complaint: while this state was up, every pointer handler early-returned on
-    // the missing frame size, so clicking the picture produced no tap, no toast and no log.
+    // the missing frame size, so clicking the picture produced no tap and no visible outcome.
     const { container, findByText } = renderDark();
     const pane = container.querySelector("[data-testid='focus-screen']");
     expect(pane).not.toBeNull();
@@ -550,14 +550,14 @@ describe("FocusStream media export", () => {
           devices={[device]}
           onSelectDevice={() => undefined}
         />
-        <ToastHost />
+        <ActivityCenter />
       </>,
     );
   }
 
   it("says how many files stayed behind instead of reporting a partial pull as a success", async () => {
     // `export_media` returned a bare count of files written, so a phone with 500 photos of
-    // which 20 copied toasted "Đã lấy 20 file" -- the same words it uses for a phone that
+    // which 20 copied reported "Đã lấy 20 file" -- the same words it uses for a phone that
     // only ever had 20. The 480 failures went to a log nobody was reading.
     vi.mocked(exportMedia).mockResolvedValueOnce({ fetched: 20, found: 500, missed: 480 });
     const { getByRole, findByText } = renderOverlay();
@@ -614,7 +614,7 @@ describe("FocusStream media export", () => {
   it("does not report a backup it declined to start", async () => {
     // `runBusy` returns immediately when the device is already busy, which is right —
     // two of these on one phone is the contention this project spent a week removing.
-    // The success toast sat *after* that await, and Backup, Restore and Reboot are the
+    // The success outcome sat *after* that await, and Backup, Restore and Reboot are the
     // three menu rows with no `disabled: busy`, so they are clickable during exactly
     // the window in which nothing happens. A second click picked a second folder, did
     // no work, and reported "Backup xong" against a folder that stays empty — the

@@ -51,15 +51,15 @@ Hai cổng CI giữ điều này, cả hai trong `apps/desktop/src-tauri/src/lib
 | §5 | Trạng thái bình luận | [`05-trang-thai-binh-luan.md`](05-trang-thai-binh-luan.md) | 464 |
 | §6 | Cách hiệu chỉnh detector | [`06-hieu-chinh-detector.md`](06-hieu-chinh-detector.md) | 12 |
 | §7 | Nguyên tắc khi sửa code này | [`07-nguyen-tac.md`](07-nguyen-tac.md) | 18 |
-| §8 | Unified Agent Runtime | [`08-unified-agent-runtime.md`](08-unified-agent-runtime.md) | 748 |
-| §9 | Fleet Android | [`08-unified-agent-runtime.md`](08-unified-agent-runtime.md) | 748 |
+| §8 | Unified Agent Runtime | [`08-unified-agent-runtime.md`](08-unified-agent-runtime.md) | 776 |
+| §9 | Fleet Android | [`08-unified-agent-runtime.md`](08-unified-agent-runtime.md) | 776 |
 | §9 | Fleet Android | [`09-fleet-android.md`](09-fleet-android.md) | 214 |
-| §10 | Mở đường cho thiết bị mới | [`08-unified-agent-runtime.md`](08-unified-agent-runtime.md) | 748 |
+| §10 | Mở đường cho thiết bị mới | [`08-unified-agent-runtime.md`](08-unified-agent-runtime.md) | 776 |
 | §10 | Mở đường cho thiết bị mới | [`10-thiet-bi-moi.md`](10-thiet-bi-moi.md) | 64 |
-| §11 | API comment preview (05/08/2026) | [`08-unified-agent-runtime.md`](08-unified-agent-runtime.md) | 748 |
-| §12 | Stream preview scaling (05/08/2026) | [`08-unified-agent-runtime.md`](08-unified-agent-runtime.md) | 748 |
-| §13 | Standalone Riviu Agent full interaction install (05/08/2026) | [`08-unified-agent-runtime.md`](08-unified-agent-runtime.md) | 748 |
-| §14 | Photo carousel publish campaign (05/08/2026) | [`08-unified-agent-runtime.md`](08-unified-agent-runtime.md) | 748 |
+| §11 | API comment preview (05/08/2026) | [`08-unified-agent-runtime.md`](08-unified-agent-runtime.md) | 776 |
+| §12 | Stream preview scaling (05/08/2026) | [`08-unified-agent-runtime.md`](08-unified-agent-runtime.md) | 776 |
+| §13 | Standalone Riviu Agent full interaction install (05/08/2026) | [`08-unified-agent-runtime.md`](08-unified-agent-runtime.md) | 776 |
+| §14 | Photo carousel publish campaign (05/08/2026) | [`08-unified-agent-runtime.md`](08-unified-agent-runtime.md) | 776 |
 
 **§2 là mục phải đọc trước khi sửa bất cứ thứ gì liên quan tới WDA.** Nó là mục duy nhất
 trong tài liệu này mà bỏ qua có thể làm hỏng thiết bị thật.
@@ -69,7 +69,7 @@ nếu một trích dẫn nêu số con.
 
 ## Nhật ký §9.x
 
-164 mục, trong 6 file dưới `diary/`. **Thứ tự trong file là thứ tự viết, không phải thứ
+165 mục, trong 6 file dưới `diary/`. **Thứ tự trong file là thứ tự viết, không phải thứ
 tự số và cũng không phải thứ tự thời gian** — trong bản gốc §9.43 nằm giữa §9.20 và
 §9.21, và §9.4 nằm sau §9.17. Đó là lý do bảng này sắp theo **số**: để tra được.
 
@@ -281,6 +281,7 @@ thật của việc các mục không được viết theo thứ tự, không ph
 | §9.144 | [Guard bản nháp không latch và layout laptop có DPI (04/09/2026)](diary/06-2408-2708.md#9144-guard-bản-nháp-không-latch-và-layout-laptop-có-dpi-04092026) | `diary/06-2408-2708.md` |
 | §9.145 | [UI production, preflight video và ranh giới cleanup canary (05/09/2026)](diary/06-2408-2708.md#9145-ui-production-preflight-video-và-ranh-giới-cleanup-canary-05092026) | `diary/06-2408-2708.md` |
 | §9.146 | [Mười bài chỉ cần mười máy, và phạm vi trang không còn dính nhau (05/09/2026)](diary/06-2408-2708.md#9146-mười-bài-chỉ-cần-mười-máy-và-phạm-vi-trang-không-còn-dính-nhau-05092026) | `diary/06-2408-2708.md` |
+| §9.147 | [Bỏ toast nổi, giữ trạng thái trong tầm mắt và gom ba nút chạy về một chỗ (05/09/2026)](diary/06-2408-2708.md#9147-bỏ-toast-nổi-giữ-trạng-thái-trong-tầm-mắt-và-gom-ba-nút-chạy-về-một-chỗ-05092026) | `diary/06-2408-2708.md` |
 
 ---
 

@@ -1,6 +1,7 @@
 import { renderHook } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  clearToasts,
   dismissToast,
   pushToast,
   resetToasts,
@@ -14,51 +15,57 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
-/** Read the snapshot the ToastHost would render. */
-function visibleToasts() {
+/** Read the snapshot the activity center would render. */
+function activityHistory() {
   return renderHook(() => useToasts()).result.current;
 }
 
-describe("toastStore", () => {
-  it("shows newest first and caps the stack so an error burst cannot fill the screen", () => {
-    for (let index = 1; index <= 6; index += 1) {
+describe("activity history store", () => {
+  it("keeps the newest 100 outcomes instead of dropping a device-error burst", () => {
+    for (let index = 1; index <= 105; index += 1) {
       pushToast("error", `Lỗi ${index}`);
     }
 
-    const visible = visibleToasts();
-    expect(visible).toHaveLength(4);
-    expect(visible.map((toast) => toast.title)).toEqual([
-      "Lỗi 6",
-      "Lỗi 5",
-      "Lỗi 4",
-      "Lỗi 3",
-    ]);
+    const history = activityHistory();
+    expect(history).toHaveLength(100);
+    expect(history[0].title).toBe("Lỗi 105");
+    expect(history[99].title).toBe("Lỗi 6");
   });
 
-  it("auto-dismisses on the per-kind lifetime and can be closed early", () => {
+  it("does not disappear on a timer and supports dismissing or clearing explicitly", () => {
     vi.useFakeTimers();
     pushToast("ok", "Đã lưu");
     const error = pushToast("error", "Hỏng");
 
-    // `ok` lives 4s and `error` 9s, so only the error survives this tick.
-    vi.advanceTimersByTime(5000);
-    expect(visibleToasts().map((toast) => toast.id)).toEqual([error]);
+    vi.advanceTimersByTime(60_000);
+    expect(activityHistory()).toHaveLength(2);
 
     dismissToast(error);
-    expect(visibleToasts()).toHaveLength(0);
+    expect(activityHistory().map((activity) => activity.title)).toEqual(["Đã lưu"]);
+
+    clearToasts();
+    expect(activityHistory()).toHaveLength(0);
+  });
+
+  it("records when the outcome happened", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-09-05T03:04:05.000Z"));
+    pushToast("info", "Đang chuẩn bị");
+
+    expect(activityHistory()[0].createdAt).toBe(1_788_577_445_000);
   });
 
   it("puts a normalised error in the toast's detail line", () => {
     // `describeError` itself is proved in describeError.test.ts; what matters here is that a
     // toast passes the throwable through it rather than interpolating it raw.
     toastError("Backup thất bại", new Error("hết dung lượng"));
-    expect(visibleToasts()[0]).toMatchObject({
+    expect(activityHistory()[0]).toMatchObject({
       kind: "error",
       title: "Backup thất bại",
       detail: "hết dung lượng",
     });
 
     toastError("Không mở được thư mục", { code: "Io", message: "Permission denied" });
-    expect(visibleToasts()[0].detail).toBe("Io: Permission denied");
+    expect(activityHistory()[0].detail).toBe("Io: Permission denied");
   });
 });

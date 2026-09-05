@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { AppWindow, FolderOpen, RefreshCw, Trash2 } from "lucide-react";
 
 import { describeError } from "../describeError";
+import { requestConfirm } from "../confirmStore";
 import {
   addAppLibrary,
   cancelAppInstallBatch,
@@ -97,9 +98,12 @@ export function AppsPage({ devices, selected, onSelectUdids }: SelProps) {
 
   const runBatch = async (app: AppLibraryItem, udids: string[]) => {
     if (!udids.length) return;
-    if (allowDowngrade && !window.confirm(
-      `Cho phép cài phiên bản ${appVersion(app)} thấp hơn bản đang có?`,
-    )) return;
+    if (allowDowngrade && !(await requestConfirm({
+      title: "Cho phép hạ phiên bản?",
+      message: `Cài ${appVersion(app)} có thể thay thế phiên bản mới hơn trên ${udids.length} thiết bị. Dữ liệu ứng dụng được giữ nguyên.`,
+      confirmLabel: "Tiếp tục cài",
+      danger: true,
+    }))) return;
     const batchId = `app-install-${Date.now()}-${Math.random().toString(16).slice(2)}`;
     setBusy(true);
     setBatchResults([]);
@@ -326,7 +330,13 @@ export function AppsPage({ devices, selected, onSelectUdids }: SelProps) {
                             aria-label={`Xóa ${app.name}`}
                             title={`Xóa ${app.name}`}
                             onClick={async () => {
-                              if (!window.confirm(`Xóa ${app.name} khỏi thư viện?`)) return;
+                              const confirmed = await requestConfirm({
+                                title: `Xóa ${app.name}?`,
+                                message: "Gói cài đặt sẽ bị xóa khỏi thư viện. Ứng dụng trên thiết bị không bị ảnh hưởng.",
+                                confirmLabel: "Xóa khỏi thư viện",
+                                danger: true,
+                              });
+                              if (!confirmed) return;
                               await deleteAppLibrary(app.id);
                               await reloadLibrary();
                             }}

@@ -166,7 +166,7 @@ test("says why it refused a drop instead of doing nothing", async ({ page }) => 
 
   // The point of the change: a refused gesture produces a sentence, not silence.
   await expect(
-    page.getByRole("region", { name: "Thông báo" }).getByText("Không nhận ra thứ được kéo vào"),
+    page.locator(".activity-center-current").getByText("Không nhận ra thứ được kéo vào"),
   ).toBeVisible();
   // And it stays a refusal — no node is invented to make the drag look like it worked.
   await expect(page.locator(FLOW_NODE_TITLE)).toHaveCount(before);
@@ -475,7 +475,7 @@ test("authors a bounded TikTok AutoSwipe node without a script surface", async (
   await expect(page.getByRole("row", { name: /Máy 2.*Tự động vuốt.*Thành công/ }))
     .toBeVisible();
   await expect(page.getByText(/Unknown mock command/i)).toHaveCount(0);
-  await expect(page.getByRole("region", { name: "Thông báo" })).toHaveCount(0);
+  await expect(page.locator(".activity-center-current")).toHaveCount(0);
 });
 
 interface Box {
@@ -585,7 +585,7 @@ for (const viewport of [
     await expect(page.getByRole("strong").filter({ hasText: "Chờ" })).toHaveCount(1);
 
     await expect(page.getByText(/Unknown mock command/i)).toHaveCount(0);
-    await expect(page.getByRole("region", { name: "Thông báo" })).toHaveCount(0);
+    await expect(page.locator(".activity-center-current")).toHaveCount(0);
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
 
     const workspaceBox = await workspace.boundingBox();

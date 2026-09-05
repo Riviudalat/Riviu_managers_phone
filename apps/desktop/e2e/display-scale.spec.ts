@@ -61,7 +61,7 @@ async function openProductionPage(page: Page, name: (typeof PAGES)[number]): Pro
   await expect(page.locator(".loading-state")).toHaveCount(0);
   await page.evaluate(() => document.fonts.ready);
   await expect(page.getByRole("heading", { level: 1 })).toHaveCount(1);
-  await expect(page.locator(".toast-error")).toHaveCount(0);
+  await expect(page.locator(".activity-center-current.is-error")).toHaveCount(0);
   await expect(page.getByText(/Unknown mock command/i)).toHaveCount(0);
 }
 

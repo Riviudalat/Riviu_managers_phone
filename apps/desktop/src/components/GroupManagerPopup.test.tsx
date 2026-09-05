@@ -204,7 +204,7 @@ describe("GroupManagerPopup", () => {
 
   /// **No toast for picking a phone.**
   ///
-  /// `.toast-host` is fixed to the bottom-right corner — where this panel sits — and stacks
+  /// A global success message would duplicate the updated row while this panel is open and add
   /// above it, so one toast per phone covered the list being worked down. The chip changing
   /// colour is the same news in the place it happened.
   it("does not raise a toast for every phone picked", async () => {

@@ -57,9 +57,7 @@ export function InteractionSetupTab({
   linkBusy,
   linkError,
   runError,
-  busy,
   onResolveShortLinks,
-  onRun,
 }: {
   draft: InteractionDraft;
   patch: <K extends keyof InteractionDraft>(
@@ -85,9 +83,7 @@ export function InteractionSetupTab({
   linkBusy: boolean;
   linkError: string | null;
   runError: string | null;
-  busy: boolean;
   onResolveShortLinks: () => void;
-  onRun: () => void;
   /** The threshold section's state, owned by the shell so a tab switch keeps it. */
   threshold: ThresholdControls;
   /**
@@ -391,14 +387,6 @@ export function InteractionSetupTab({
           ))}
         </ul>
       )}
-      <button
-        type="button"
-        className="primary interaction-run"
-        disabled={busy || issues.length > 0}
-        onClick={onRun}
-      >
-        Chạy ngay
-      </button>
     </div>
   );
 }

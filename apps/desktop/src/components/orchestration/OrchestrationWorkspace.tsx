@@ -622,7 +622,7 @@ export function OrchestrationWorkspace({
           <>
             <header className="orchestration-toolbar">
               <label>
-                <span className="sr-only">Tên điều phối</span>
+                <span className="visually-hidden">Tên điều phối</span>
                 <input
                   value={document.name}
                   onChange={(event) => edit((current) => ({ ...current, name: event.target.value }))}

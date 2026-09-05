@@ -746,3 +746,31 @@
 - Trang Tương tác đặt action chính cùng lý do khóa trong summary rail ở viewport rộng;
   nút cuối form vẫn giữ cho luồng một cột. Trạng thái “đang tính lại kế hoạch” chỉ xuất
   hiện khi đã có target cùng đủ actor để một preview thực sự đang chạy.
+
+#### 14.14 Phản hồi UI không che công việc và thanh lệnh thống nhất (05/09/2026; xem §9.147)
+
+- Desktop không render toast overlay tự xuất hiện, tự biến mất hoặc che workspace. Các
+  call site `pushToast`/`toastError` cũ hiện chỉ phát outcome vào store hoạt động: kết
+  quả mới nhất phải luôn có chỉ dấu nhìn thấy trong header, còn toàn bộ danh sách chỉ mở
+  khi operator chủ động mở `ActivityCenter`.
+- Lịch sử trong `ActivityCenter` là danh sách bounded trong bộ nhớ của đúng phiên desktop;
+  operator có thể lọc, xóa từng mục hoặc xóa hết. Nó không phải durable audit, không ghi
+  SQLite/backend và không được hứa còn sau reload/restart. Lịch sử vận hành bền vẫn thuộc
+  ledger/projection của trang Tác vụ và các run/campaign tương ứng.
+- Batch command trên trang Thiết bị phải ghi rõ cả phạm vi lẫn số lượng, ví dụ `đã chọn
+  (N)` hoặc `toàn bộ (N)`; trạng thái không chọn vẫn có thể mang nghĩa toàn bộ nhưng không
+  được để operator phải suy từ tooltip. `DeviceTile`, `PhoneCanvas`, mật độ lưới, chọn,
+  quét chọn, mở máy và menu ngữ cảnh vẫn là interaction contract cũ, không redesign.
+- Nuôi TikTok, Tương tác và Đăng bài dùng chung `CommandBar` để giữ scope/readiness, lý do
+  khóa và primary action ở cùng một vị trí. Summary rail chỉ bổ sung chi tiết, không được
+  là nơi duy nhất chứa lệnh chạy ở viewport rộng hoặc hẹp.
+- Ở viewport compact, `WorkflowStepper` giữ một hàng cuộn ngang thay vì xếp dọc; search
+  field vẫn là một control ngang cao tối đa 40 px; target selector và workspace Điều phối
+  không được tạo khoảng trống giả do `height: 100%`. Các contract không tràn ngang ở
+  1440×900, 900×900 và 820×560 của 14.12 vẫn giữ nguyên.
+- Có thể tham khảo mô hình mật độ, search/filter gần danh sách và batch action theo phạm
+  vi của RoxyBrowser, nhưng không sao chép branding, palette hay nhận diện. Riviu tiếp tục
+  dùng sidebar, màu và typography token của chính sản phẩm.
+- Đợt này chỉ đổi frontend, fixture và test UI. Không có public action, canary hay thao tác
+  trên thiết bị thật nào được chạy; kết quả lint/unit/build/Playwright không được suy thành
+  chứng nhận runtime thiết bị.

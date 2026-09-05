@@ -24,7 +24,7 @@ import { surfaceDeparted } from "./deviceSurface";
 import { describeError } from "./describeError";
 import { pushToast, toastError } from "./toastStore";
 import { ConfirmHost } from "./components/ConfirmHost";
-import { ToastHost } from "./components/ToastHost";
+import { ActivityCenter } from "./components/ActivityCenter";
 import { DeviceTile } from "./components/DeviceTile";
 import { FilterToolbar, type ViewMode } from "./components/FilterToolbar";
 import { GroupTabs } from "./components/GroupTabs";
@@ -68,6 +68,7 @@ import { MaterialPage } from "./pages/MaterialPage";
 import { PublishPage } from "./pages/PublishPage";
 import type { DeviceInfo, DeviceWorkOwner, PageId, TargetRef } from "./types";
 import { MoreHorizontal } from "lucide-react";
+import { MENU_ICONS } from "./components/menuIcons";
 import { loadZoom, stepZoom, storeZoom, TILE_ZOOM, wheelWantsZoom } from "./zoom";
 import { useMediaQuery } from "./useMediaQuery";
 import "./App.css";
@@ -645,6 +646,7 @@ function App() {
   );
 
   const title = PAGE_TITLE[page] ?? page;
+  const PageIcon = MENU_ICONS[page];
 
   if (startupIssue) {
     return (
@@ -689,6 +691,7 @@ function App() {
       <div className="main-col">
         <PageHeader
           title={title}
+          icon={page === "control" || !PageIcon ? undefined : <PageIcon size={18} />}
           titleTestId="page-title"
           dragRegion
           density={page === "control" ? "compact" : "default"}
@@ -704,7 +707,9 @@ function App() {
             </>
           }
           actions={
-            <button
+            <>
+              <ActivityCenter />
+              <button
               type="button"
               className="icon-btn"
               title="Làm mới danh sách máy"
@@ -722,7 +727,8 @@ function App() {
               }}
             >
               <IconRefresh size={16} aria-hidden="true" />
-            </button>
+              </button>
+            </>
           }
         />
 
@@ -782,6 +788,7 @@ function App() {
             <>
               <ProfileToolbar
                 selected={selectedDevices}
+                deviceCount={devices.length}
                 syncOn={groupMode}
                 groupsOpen={groupsOpen}
                 onGroups={() => {
@@ -1047,6 +1054,9 @@ function App() {
                 <div
                   className="window-canvas"
                   ref={canvasRef}
+                  role="listbox"
+                  aria-label="Lưới thiết bị"
+                  aria-multiselectable="true"
                   title="Ctrl + lăn chuột để phóng to / thu nhỏ · kéo chuột để quét chọn máy"
                   onMouseDown={onCanvasMouseDown}
                 >
@@ -1395,7 +1405,6 @@ function App() {
         />
       )}
 
-      <ToastHost />
       <ConfirmHost />
     </div>
   );

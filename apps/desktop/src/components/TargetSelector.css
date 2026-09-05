@@ -1,17 +1,20 @@
 .target-selector {
+  display: grid;
   min-width: 0;
+  grid-template-columns: minmax(150px, auto) auto minmax(0, 1fr);
+  align-items: center;
+  gap: var(--space-3);
   margin: 0 0 var(--space-3);
-  padding: var(--space-3) 0;
-  border: 0;
-  border-block: 1px solid var(--line);
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--bg-elevated);
 }
 
 .target-selector-heading {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: var(--space-3);
-  margin-bottom: var(--space-2);
+  display: grid;
+  align-items: center;
+  gap: var(--space-0h);
 }
 
 .target-selector-legend {
@@ -24,7 +27,7 @@
 .target-selector output {
   color: var(--text-2);
   font-size: var(--text-sm);
-  text-align: right;
+  text-align: left;
 }
 
 .target-selector-modes {
@@ -92,7 +95,7 @@
   grid-template-columns: minmax(110px, auto) minmax(180px, 320px);
   align-items: center;
   gap: var(--space-3);
-  margin-top: var(--space-3);
+  margin: 0 0 0 auto;
   color: var(--text-2);
   font-size: var(--text-sm);
 }
@@ -112,7 +115,8 @@
   grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
   gap: var(--space-1) var(--space-3);
   max-height: 176px;
-  margin-top: var(--space-3);
+  grid-column: 1 / -1;
+  margin-top: 0;
   padding-top: var(--space-2);
   overflow-y: auto;
   border-top: 1px solid var(--line);
@@ -148,12 +152,28 @@
 }
 
 .target-selector-empty {
-  margin: var(--space-3) 0 0;
+  margin: 0;
   color: var(--text-3);
   font-size: var(--text-sm);
 }
 
+@media (max-width: 900px) {
+  .target-selector {
+    grid-template-columns: minmax(140px, auto) minmax(0, 1fr);
+  }
+
+  .target-selector-group,
+  .target-selector-empty {
+    grid-column: 1 / -1;
+    margin-left: 0;
+  }
+}
+
 @media (max-width: 560px) {
+  .target-selector {
+    grid-template-columns: 1fr;
+  }
+
   .target-selector-heading,
   .target-selector-group {
     align-items: stretch;
@@ -173,6 +193,12 @@
     display: grid;
     width: 100%;
     grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .target-selector-group,
+  .target-selector-empty,
+  .target-selector-devices {
+    grid-column: 1;
   }
 
   .target-selector-modes span {

@@ -178,7 +178,7 @@ describe("toolbar Start", () => {
     render(<App />);
     await waitFor(() => expect(screen.getByText("Redmi")).toBeInTheDocument());
     await userEvent.click(
-      screen.getByTitle("Mở luồng xem cho các máy đã chọn hoặc toàn bộ danh sách"),
+      screen.getByTitle("Mở luồng xem cho toàn bộ (1)"),
     );
     await waitFor(() => expect(api.viewEnsure).toHaveBeenCalledWith("10969614"));
     expect(api.prepareDevice).not.toHaveBeenCalled();
@@ -190,7 +190,7 @@ describe("toolbar Start", () => {
     render(<App />);
     await waitFor(() => expect(screen.getByText("iPhone 8")).toBeInTheDocument());
     await userEvent.click(
-      screen.getByTitle("Mở luồng xem cho các máy đã chọn hoặc toàn bộ danh sách"),
+      screen.getByTitle("Mở luồng xem cho toàn bộ (1)"),
     );
     await waitFor(() => expect(api.prepareDevice).toHaveBeenCalledWith(iphone.udid));
     expect(api.viewEnsure).not.toHaveBeenCalled();
@@ -874,7 +874,7 @@ describe("buttons that used to fail in silence", () => {
     await waitFor(() => expect(screen.getByText("Note 8")).toBeInTheDocument());
 
     await userEvent.click(
-      screen.getByTitle("Mở luồng xem cho các máy đã chọn hoặc toàn bộ danh sách"),
+      screen.getByTitle("Mở luồng xem cho toàn bộ (2)"),
     );
 
     expect(await screen.findByText("Khởi động 1/2 máy")).toBeInTheDocument();

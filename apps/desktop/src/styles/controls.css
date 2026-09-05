@@ -41,6 +41,7 @@
 
 button,
 .btn {
+  min-height: 32px;
   border: 1px solid var(--line-strong);
   background: var(--bg-elevated);
   color: var(--text);
@@ -271,6 +272,11 @@ button:disabled {
 }
 .dev-phone:hover {
   border-color: #58627a;
+}
+button.primary:active:not(:disabled),
+.btn.primary:active:not(:disabled) {
+  background: var(--primary-deep);
+  border-color: var(--primary-deep);
 }
 .dev-phone:focus-visible {
   outline: 3px solid var(--primary-ring);

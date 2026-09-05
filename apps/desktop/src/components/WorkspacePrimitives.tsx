@@ -2,6 +2,7 @@ import {
   useEffect,
   useId,
   useRef,
+  type CSSProperties,
   type KeyboardEvent,
   type ReactNode,
 } from "react";
@@ -9,8 +10,31 @@ import { Check, X } from "lucide-react";
 
 export type StatusTone = "neutral" | "info" | "success" | "warning" | "error";
 
+export function CommandBar({
+  title,
+  detail,
+  tone = "neutral",
+  actions,
+}: {
+  title: ReactNode;
+  detail?: ReactNode;
+  tone?: StatusTone;
+  actions: ReactNode;
+}) {
+  return (
+    <div className={`workspace-command-bar is-${tone}`}>
+      <div className="workspace-command-copy" role="status" aria-live="polite">
+        <strong>{title}</strong>
+        {detail && <span>{detail}</span>}
+      </div>
+      <div className="workspace-command-actions">{actions}</div>
+    </div>
+  );
+}
+
 export function PageHeader({
   title,
+  icon,
   description,
   meta,
   actions,
@@ -19,6 +43,7 @@ export function PageHeader({
   titleTestId,
 }: {
   title: string;
+  icon?: ReactNode;
   description?: ReactNode;
   meta?: ReactNode;
   actions?: ReactNode;
@@ -28,6 +53,7 @@ export function PageHeader({
 }) {
   return (
     <header className={`page-header is-${density}`}>
+      {icon && <span className="page-header-icon" aria-hidden="true">{icon}</span>}
       <div className="page-header-copy">
         <h1 data-testid={titleTestId}>{title}</h1>
         {description && <p>{description}</p>}
@@ -124,7 +150,11 @@ export function WorkflowStepper({
 }) {
   const currentIndex = steps.findIndex((step) => step.id === current);
   return (
-    <ol className="workflow-stepper" aria-label={label}>
+    <ol
+      className="workflow-stepper"
+      aria-label={label}
+      style={{ "--workflow-step-count": steps.length } as CSSProperties}
+    >
       {steps.map((step, index) => {
         const state =
           step.state ??

@@ -41,7 +41,7 @@ import { IconChat, IconClose } from "./Icons";
 import { InteractionMonitorTab } from "./interaction/InteractionMonitorTab";
 import { InteractionSetupTab } from "./interaction/InteractionSetupTab";
 import { AutomationProfileControl } from "./AutomationProfileControl";
-import { StatusChip, SummaryRail, WorkflowStepper } from "./WorkspacePrimitives";
+import { CommandBar, StatusChip, SummaryRail, WorkflowStepper } from "./WorkspacePrimitives";
 
 type Props = {
   devices: DeviceInfo[];
@@ -679,6 +679,23 @@ export function InteractionPopup({
             Theo dõi
           </button>
         </div>
+        {tab === "setup" && (
+          <CommandBar
+            title={issues.length ? `${issues.length} mục cần xử lý` : `${validTargets.length} bài sẵn sàng`}
+            detail={issues.length ? "Sửa các mục được đánh dấu trong phần thiết lập." : `Thực hiện trên ${effectiveActors.length} máy theo thứ tự đã chọn.`}
+            tone={issues.length ? "warning" : "success"}
+            actions={(
+              <button
+                type="button"
+                className="primary"
+                disabled={runBusy || issues.length > 0}
+                onClick={() => void run()}
+              >
+                {runBusy ? "Đang bắt đầu…" : pageSurface ? "Bắt đầu tương tác" : "Chạy ngay"}
+              </button>
+            )}
+          />
+        )}
         <div
           className="interaction-float-body"
           role="tabpanel"
@@ -735,9 +752,7 @@ export function InteractionPopup({
                 linkBusy={linkBusy}
                 linkError={linkError}
                 runError={runError}
-                busy={runBusy}
                 onResolveShortLinks={() => void resolveShortLinks()}
-                onRun={() => void run()}
                 />
               </div>
               {pageSurface && (
@@ -771,14 +786,6 @@ export function InteractionPopup({
                       ))}
                     </ul>
                   )}
-                  <button
-                    type="button"
-                    className="primary interaction-review-run"
-                    disabled={runBusy || issues.length > 0}
-                    onClick={() => void run()}
-                  >
-                    Bắt đầu tương tác
-                  </button>
                 </SummaryRail>
               )}
             </div>

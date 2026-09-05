@@ -358,9 +358,7 @@ export function buildDeviceActions(
                   return;
                 }
                 await navigator.clipboard.writeText(read.text);
-                // The content itself in the toast body: the operator asked to see it,
-                // and "copied 41 bytes" is not seeing it.
-                pushToast("ok", "Đã lấy clipboard về máy tính", read.text.slice(0, 200));
+                pushToast("ok", "Đã lấy clipboard về máy tính", `${read.bytes} byte đã sao chép`);
               })
               .catch((error) => toastError("Đọc clipboard thất bại", error));
           },
@@ -378,7 +376,7 @@ export function buildDeviceActions(
                   return;
                 }
                 await deviceSetClipboard(device.udid, text);
-                pushToast("ok", "Đã ghi clipboard sang máy", text.slice(0, 200));
+                pushToast("ok", "Đã ghi clipboard sang máy", `${text.length} ký tự đã gửi`);
               })
               .catch((error) => toastError("Ghi clipboard thất bại", error));
           },

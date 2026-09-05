@@ -558,13 +558,11 @@
   outline-offset: 2px;
 }
 
-.nurture-page-actions {
-  display: flex;
-  justify-content: flex-end;
-  margin: 0 0 var(--space-4);
+.nurture-workspace .workspace-command-bar {
+  margin-bottom: var(--space-4);
 }
 
-.nurture-page-actions .nurture-float-actions {
+.nurture-workspace .workspace-command-actions .nurture-float-actions {
   width: min(100%, 360px);
   margin: 0;
 }

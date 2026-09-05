@@ -22,6 +22,7 @@ import { AutomationProfileControl } from "../components/AutomationProfileControl
 import { IconRocket } from "../components/Icons";
 import { EmptyState, LoadingState, StatusNotice, type NoticeTone } from "../components/States";
 import {
+  CommandBar,
   FormSection,
   ResponsiveTable,
   StatusChip,
@@ -606,6 +607,17 @@ export function PublishPage({
 
       <section id="publish-panel-setup" className="publish-workspace-section" role="tabpanel" aria-label="Thiết lập" hidden={workspaceTab !== "setup"}>
         {stepper}
+        <CommandBar
+          title={canExecute ? `${selectedBundles.length} bài đã sẵn sàng` : "Chưa thể đăng"}
+          detail={canExecute ? `Đầu vào đã khóa cho ${targets.length} máy.` : "Hoàn tất nguồn, ghép máy và preflight trước khi xác nhận."}
+          tone={canExecute ? "success" : "warning"}
+          actions={(
+            <button type="button" className="primary publish-submit" disabled={!canExecute || busy} onClick={() => void executeNewCampaign()}>
+              <Rocket size={17} aria-hidden="true" />
+              {runAt ? "Xác nhận và lập lịch" : "Xác nhận và đăng"} ({selectedBundles.length} → {targets.length})
+            </button>
+          )}
+        />
         <div className="publish-workspace-grid">
           <div className="publish-workspace-main">
             <SourceSection
@@ -669,10 +681,6 @@ export function PublishPage({
                     />
                   </span>
                 </label>
-                <button type="button" className="primary publish-submit" disabled={!canExecute || busy} onClick={() => void executeNewCampaign()}>
-                  <Rocket size={17} aria-hidden="true" />
-                  {runAt ? "Xác nhận và lập lịch" : "Xác nhận và đăng"} ({selectedBundles.length} → {targets.length})
-                </button>
               </div>
               {!canExecute && <p className="publish-muted">Hoàn tất preflight của đầu vào hiện tại để mở nút xác nhận.</p>}
             </FormSection>

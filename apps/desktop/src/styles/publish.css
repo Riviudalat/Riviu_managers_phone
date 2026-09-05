@@ -40,6 +40,12 @@
   align-items: start;
 }
 
+.publish-page .workspace-command-bar {
+  margin-bottom: var(--space-4);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+}
+
 .publish-workspace-main,
 .publish-workspace-aside,
 .publish-bundle-list,
@@ -329,7 +335,7 @@
 
 .publish-confirm-grid {
   display: grid;
-  grid-template-columns: minmax(220px, 1fr) auto;
+  grid-template-columns: minmax(220px, 420px);
   gap: var(--space-3);
   align-items: end;
 }

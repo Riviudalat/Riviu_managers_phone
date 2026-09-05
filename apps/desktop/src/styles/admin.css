@@ -92,6 +92,7 @@
   margin-left: auto;
 }
 
+.admin-workspace .search-field,
 .search-field {
   min-width: min(260px, 100%);
   min-height: 34px;
@@ -103,6 +104,11 @@
   border-radius: var(--radius-sm);
   background: var(--bg-elevated);
   color: var(--text-3);
+}
+
+.admin-workspace label.search-field {
+  display: flex;
+  gap: var(--space-2);
 }
 
 .search-field:focus-within {

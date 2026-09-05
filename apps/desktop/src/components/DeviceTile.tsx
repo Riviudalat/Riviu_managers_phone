@@ -75,7 +75,8 @@ function DeviceTileInner({
       className={`dev-phone ${selected ? "selected" : ""} ${focused ? "focused" : ""}`}
       data-testid="device-tile"
       data-udid={device.udid}
-      role="group"
+      role="option"
+      aria-selected={selected}
       tabIndex={0}
       aria-roledescription="thẻ thiết bị"
       aria-label={`Máy ${index}, ${displayName}, ${operationalLabel}${selected ? ", đã chọn" : ""}`}
@@ -83,6 +84,13 @@ function DeviceTileInner({
       onClick={(e) => onSelect(device.udid, e.metaKey || e.ctrlKey || e.shiftKey)}
       onKeyDown={(event) => {
         if (event.target !== event.currentTarget) return;
+        if (event.key === "ContextMenu" || (event.shiftKey && event.key === "F10")) {
+          if (!onContextMenu) return;
+          event.preventDefault();
+          const rect = event.currentTarget.getBoundingClientRect();
+          onContextMenu(device.udid, rect.left + 16, rect.top + 16);
+          return;
+        }
         if (event.key !== "Enter" && event.key !== " ") return;
         event.preventDefault();
         onSelect(device.udid, event.metaKey || event.ctrlKey || event.shiftKey);

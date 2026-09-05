@@ -30,7 +30,7 @@ import { NurtureDeviceProgress, NurtureRunProgress } from "./nurture/NurtureProg
 import { NurtureBehaviourTab } from "./nurture/NurtureBehaviourTab";
 import { IconClose, IconHeart, IconRefresh } from "./Icons";
 import { LoadingState, StatusNotice } from "./States";
-import { StatusChip, SummaryRail, WorkflowStepper } from "./WorkspacePrimitives";
+import { CommandBar, StatusChip, SummaryRail, WorkflowStepper } from "./WorkspacePrimitives";
 import type {
   DeviceInfo,
   DeviceMeta,
@@ -793,7 +793,14 @@ export function NurturePopup({
                 </div>
               )}
 
-              {pageSurface && <div className="nurture-page-actions">{actionControls}</div>}
+              {pageSurface && (
+                <CommandBar
+                  title={targets.length ? `${targets.length} máy trong phạm vi` : "Chưa có máy trong phạm vi"}
+                  detail={pageMode === "monitor" ? "Theo dõi tiến độ hoặc dừng các máy trong phiên hiện tại." : anyRunning ? "Phiên đang chạy; có thể dừng hoặc lưu thay đổi." : "Kiểm tra thiết lập rồi bắt đầu phiên Nuôi TikTok."}
+                  tone={targets.length ? "success" : "warning"}
+                  actions={actionControls}
+                />
+              )}
 
               {pageSurface && (
                 <div

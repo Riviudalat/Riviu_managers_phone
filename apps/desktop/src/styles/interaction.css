@@ -120,9 +120,8 @@
   color: var(--text-2);
 }
 
-.interaction-review-run {
-  width: 100%;
-  justify-content: center;
+.interaction-workspace .workspace-command-bar {
+  flex: 0 0 auto;
 }
 .interaction-title {
   min-height: 42px;
@@ -381,50 +380,6 @@ span.interaction-error > small { color: var(--text-2); white-space: pre-wrap; ov
 .interaction-detail { display: flex; flex-direction: column; gap: 0.25rem; border-top: 1px solid var(--line); padding-top: 0.55rem; }
 .interaction-assignment { display: flex; align-items: center; gap: 0.45rem; min-width: 0; border-bottom: 1px solid var(--line); padding: 0.3rem 0; font-size: var(--text-xs); }
 .interaction-assignment > .grow { min-width: 0; }
-
-/* ——— Toasts · replace window.alert ——— */
-.toast-host {
-  position: fixed;
-  right: 1rem;
-  bottom: 1rem;
-  z-index: var(--z-toast);
-  display: flex;
-  flex-direction: column;
-  gap: 0.5rem;
-  width: min(360px, calc(100vw - 2rem));
-  pointer-events: none;
-}
-
-.toast {
-  display: flex;
-  align-items: flex-start;
-  gap: 0.6rem;
-  padding: 0.7rem 0.75rem;
-  border: 1px solid var(--line);
-  border-left: 3px solid var(--primary);
-  border-radius: var(--radius);
-  background: var(--bg-elevated);
-  box-shadow: 0 12px 34px rgb(15 23 42 / 16%);
-  pointer-events: auto;
-  animation: toast-in 0.24s cubic-bezier(0.2, 0.8, 0.2, 1);
-}
-
-@keyframes toast-in {
-  from {
-    opacity: 0;
-    transform: translateX(14px);
-  }
-  to {
-    opacity: 1;
-    transform: none;
-  }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .toast {
-    animation: none;
-  }
-}
 
 /* The campaign row is the bordered box; the button inside it is the clickable part and the
    progress bar sits under it as a sibling. The bar was inside the `<button>`, where a

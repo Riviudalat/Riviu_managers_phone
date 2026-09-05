@@ -254,6 +254,8 @@
 .automation-page-stack {
   display: grid;
   min-width: 0;
+  min-height: 0;
+  grid-template-rows: auto minmax(0, 1fr);
   gap: 12px;
 }
 
@@ -431,7 +433,7 @@
 
 .automation-mode-panel {
   display: flex;
-  flex: 1;
+  flex: 0 1 auto;
   min-width: 0;
   min-height: 0;
   flex-direction: column;

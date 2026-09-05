@@ -1,6 +1,5 @@
 .orchestration-workspace {
   min-height: 0;
-  height: 100%;
   display: grid;
   grid-template-columns: 230px minmax(0, 1fr);
   background: var(--bg-content);

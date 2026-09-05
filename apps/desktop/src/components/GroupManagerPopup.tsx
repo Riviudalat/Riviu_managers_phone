@@ -79,7 +79,7 @@ export function GroupManagerPopup({
   /// Write a group, then let the app reload — every list of groups is derived from the fleet
   /// poll, so nothing here keeps its own copy to drift.
   ///
-  /// **No toast on success.** `.toast-host` is `position: fixed; right: 1rem; bottom: 1rem`,
+  /// **No global success message.** The updated group is already visible in this panel,
   /// which is where this panel sits, and it stacks above it — so a toast for every phone
   /// picked covered the very list the operator was working down. Nothing is lost: the chip
   /// changes colour and the counts move, which is the same news arriving in the place it

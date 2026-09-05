@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { AppsPage } from "./AppsPage";
 import { listAppsLibrary, listGroups } from "../api";
+import { requestConfirm } from "../confirmStore";
 import { resetToasts } from "../toastStore";
 import type { AppLibraryItem, DeviceInfo } from "../types";
 
@@ -77,6 +78,8 @@ vi.mock("../pickFile", () => ({
   pickMaterial: vi.fn(async () => null),
 }));
 
+vi.mock("../confirmStore", () => ({ requestConfirm: vi.fn(async () => true) }));
+
 const iphone: DeviceInfo = {
   udid: "a99f4bd9f877b2a0e3682ee24fd1c68f75ba6982",
   name: "iPhone 8",
@@ -105,6 +108,7 @@ afterEach(() => {
 });
 beforeEach(() => {
   vi.clearAllMocks();
+  vi.mocked(requestConfirm).mockResolvedValue(true);
   vi.mocked(listAppsLibrary).mockResolvedValue(library);
   vi.mocked(listGroups).mockResolvedValue([]);
 });
@@ -184,18 +188,34 @@ describe("AppsPage install targets", () => {
         detail: "readback timed out",
       }],
     });
-    const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
     renderApps([iphone]);
 
     await userEvent.click(await screen.findByRole("checkbox", { name: "Cho phép hạ phiên bản" }));
     await userEvent.click(screen.getByRole("button", { name: "Cài → 1 iPhone" }));
 
-    expect(confirm).toHaveBeenCalledOnce();
+    expect(requestConfirm).toHaveBeenCalledWith({
+      title: "Cho phép hạ phiên bản?",
+      message: expect.stringContaining("1 thiết bị"),
+      confirmLabel: "Tiếp tục cài",
+      danger: true,
+    });
     expect(api.installLibraryAppBatch).toHaveBeenCalledWith(expect.objectContaining({
       allowDowngrade: true,
     }));
     expect(await screen.findByText("Cần kiểm lại")).toBeVisible();
     expect(screen.getByText("readback timed out")).toBeVisible();
+  });
+
+  it("keeps installation untouched when downgrade confirmation is declined", async () => {
+    const api = await import("../api");
+    vi.mocked(requestConfirm).mockResolvedValueOnce(false);
+    renderApps([iphone]);
+
+    await userEvent.click(await screen.findByRole("checkbox", { name: "Cho phép hạ phiên bản" }));
+    await userEvent.click(screen.getByRole("button", { name: "Cài → 1 iPhone" }));
+
+    expect(requestConfirm).toHaveBeenCalledOnce();
+    expect(api.installLibraryAppBatch).not.toHaveBeenCalled();
   });
 
   it("cancels only the active batch while the backend owns in-flight installs", async () => {

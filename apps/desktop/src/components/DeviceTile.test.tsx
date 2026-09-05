@@ -41,6 +41,7 @@ function renderTile(
   callbacks: {
     onSelect?: (udid: string, additive: boolean) => void;
     onOpen?: (udid: string) => void;
+    onContextMenu?: (udid: string, x: number, y: number) => void;
   } = {},
 ) {
   const renderedDevice = device(overrides);
@@ -54,6 +55,7 @@ function renderTile(
       onSelect={callbacks.onSelect ?? (() => {})}
       onOpen={callbacks.onOpen ?? (() => {})}
       onPrepare={() => {}}
+      onContextMenu={callbacks.onContextMenu}
     />,
   );
 }
@@ -148,7 +150,7 @@ describe("device tile, before any frame arrives", () => {
     const onOpen = vi.fn();
     renderTile({ name: "Kệ trên" }, null, { onSelect, onOpen });
 
-    const tile = screen.getByRole("group", { name: /Máy 1.*Kệ trên/i });
+    const tile = screen.getByRole("option", { name: /Máy 1.*Kệ trên/i });
     tile.focus();
     await user.keyboard("{Enter}");
     await user.keyboard(" ");
@@ -160,5 +162,18 @@ describe("device tile, before any frame arrives", () => {
     await user.keyboard("{Enter}");
     expect(onOpen).toHaveBeenCalledOnce();
     expect(onOpen).toHaveBeenCalledWith("device-1");
+  });
+
+  it("opens the device menu with the standard keyboard shortcut", async () => {
+    const user = userEvent.setup();
+    const onContextMenu = vi.fn();
+    renderTile({ name: "Kệ trên" }, null, { onContextMenu });
+
+    const tile = screen.getByRole("option", { name: /Máy 1.*Kệ trên/i });
+    tile.focus();
+    await user.keyboard("{Shift>}{F10}{/Shift}");
+
+    expect(onContextMenu).toHaveBeenCalledOnce();
+    expect(onContextMenu).toHaveBeenCalledWith("device-1", expect.any(Number), expect.any(Number));
   });
 });
