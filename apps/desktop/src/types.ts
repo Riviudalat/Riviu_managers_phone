@@ -167,7 +167,9 @@ export type OperationRunKind =
   | "orchestration"
   | "nurture"
   | "interaction"
-  | "publish";
+  | "publish"
+  | "appInstall"
+  | "materialTransfer";
 
 export type OperationRunState =
   | "queued"
@@ -212,6 +214,23 @@ export interface OperationRunItem {
 export interface OperationRunDetail {
   summary: OperationRunSummary;
   items: OperationRunItem[];
+  batch?: { artifactId: string; target: ResolvedTargetSnapshot };
+}
+
+export interface OperationRunQuery {
+  kind?: OperationRunKind;
+  state?: OperationRunState;
+  search?: string;
+  since?: string | null;
+  offset?: number;
+  limit?: number;
+}
+
+export interface OperationRunPage {
+  runs: OperationRunSummary[];
+  total: number;
+  counts: { active: number; succeeded: number; attention: number };
+  hasMore: boolean;
 }
 
 export interface AppleIdConfig {
@@ -312,11 +331,12 @@ export interface MaterialItem {
 }
 
 export interface MaterialPushBatchRequest {
+  batchId?: string;
   materialId: string;
   target: TargetRef;
 }
 
-export type MaterialPushStatus = "succeeded" | "failed";
+export type MaterialPushStatus = "succeeded" | "failed" | "uncertain" | "cancelledBeforeDispatch";
 
 export interface MaterialPushDeviceResult {
   udid: string;
@@ -385,6 +405,7 @@ export interface AppInstallResult {
 
 export interface AppInstallBatchResponse {
   batchId: string;
+  target?: ResolvedTargetSnapshot;
   progress: AppInstallProgress[];
   results: AppInstallResult[];
 }

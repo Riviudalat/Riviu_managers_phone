@@ -54,13 +54,57 @@ const REQUEST_READ_TIMEOUT: Duration = Duration::from_secs(10);
 /// connections wait for a slot rather than being refused, so an honest burst still completes.
 const MAX_CONCURRENT_CONNECTIONS: usize = 64;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LocalApiConfig {
     pub enabled: bool,
     pub port: u16,
     /// Bearer token required on every request. Empty until first generated.
     pub token: String,
+}
+
+#[derive(Default)]
+pub(crate) struct LocalApiRuntime {
+    pub startup: Option<LocalApiConfig>,
+    pub running: Option<bool>,
+    pub last_error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LocalApiStatus {
+    configured_enabled: bool,
+    configured_port: u16,
+    running: Option<bool>,
+    active_port: Option<u16>,
+    restart_required: bool,
+    last_error: Option<String>,
+}
+
+impl LocalApiRuntime {
+    fn status(&self, configured: &LocalApiConfig) -> LocalApiStatus {
+        LocalApiStatus {
+            configured_enabled: configured.enabled,
+            configured_port: configured.port,
+            running: self.running,
+            active_port: self
+                .startup
+                .as_ref()
+                .filter(|_| self.running == Some(true))
+                .map(|config| config.port),
+            restart_required: self
+                .startup
+                .as_ref()
+                .is_some_and(|startup| startup != configured),
+            last_error: self.last_error.clone(),
+        }
+    }
+}
+
+#[tauri::command]
+pub async fn local_api_status(state: State<'_, AppState>) -> Result<LocalApiStatus, CommandError> {
+    let configured = load_config(&state.db, &state.secrets);
+    Ok(state.local_api_runtime.read().status(&configured))
 }
 
 impl Default for LocalApiConfig {
@@ -388,6 +432,7 @@ fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 /// routable is the one thing this must never do, and it is why the address is a literal.
 pub async fn serve(app: AppHandle, port: u16, token: String) -> anyhow::Result<()> {
     let listener = TcpListener::bind(("127.0.0.1", port)).await?;
+    app.state::<AppState>().local_api_runtime.write().running = Some(true);
     log::info!("local API listening on 127.0.0.1:{port}");
     let slots = Arc::new(Semaphore::new(MAX_CONCURRENT_CONNECTIONS));
     // The semaphore below bounds how many connections are *handled* at once; it does nothing
@@ -754,6 +799,47 @@ mod tests {
         assert!(!c.enabled);
         assert_eq!(c.port, 22222);
         assert!(c.token.is_empty());
+    }
+
+    #[test]
+    fn status_keeps_running_server_distinct_from_disabled_configuration() {
+        let startup = LocalApiConfig {
+            enabled: true,
+            port: 22222,
+            token: "fixture-secret".into(),
+        };
+        let runtime = LocalApiRuntime {
+            startup: Some(startup.clone()),
+            running: Some(true),
+            last_error: None,
+        };
+        let configured = LocalApiConfig {
+            enabled: false,
+            ..startup.clone()
+        };
+        let status = runtime.status(&configured);
+        assert_eq!(status.running, Some(true));
+        assert_eq!(status.active_port, Some(22222));
+        assert!(status.restart_required);
+        assert!(!status.configured_enabled);
+        assert!(!serde_json::to_string(&status)
+            .unwrap()
+            .contains("fixture-secret"));
+        assert!(!runtime.status(&startup).restart_required);
+    }
+
+    #[test]
+    fn status_distinguishes_unstarted_and_failed_listener() {
+        let configured = LocalApiConfig::default();
+        assert_eq!(LocalApiRuntime::default().status(&configured).running, None);
+        let runtime = LocalApiRuntime {
+            startup: Some(configured.clone()),
+            running: Some(false),
+            last_error: Some("port occupied".into()),
+        };
+        let status = runtime.status(&configured);
+        assert_eq!(status.active_port, None);
+        assert_eq!(status.last_error.as_deref(), Some("port occupied"));
     }
 
     #[test]

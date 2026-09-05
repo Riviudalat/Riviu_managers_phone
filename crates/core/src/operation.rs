@@ -25,6 +25,8 @@ pub enum OperationRunKind {
     Nurture,
     Interaction,
     Publish,
+    AppInstall,
+    MaterialTransfer,
 }
 
 impl OperationRunKind {
@@ -36,6 +38,8 @@ impl OperationRunKind {
             Self::Nurture => "nurture",
             Self::Interaction => "interaction",
             Self::Publish => "publish",
+            Self::AppInstall => "appInstall",
+            Self::MaterialTransfer => "materialTransfer",
         }
     }
 }
@@ -111,6 +115,103 @@ pub struct OperationRunItem {
 pub struct OperationRunDetail {
     pub summary: OperationRunSummary,
     pub items: Vec<OperationRunItem>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub batch: Option<OperationBatchSnapshot>,
+}
+
+#[derive(Debug, Clone, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OperationBatchSnapshot {
+    pub artifact_id: String,
+    pub target: ResolvedTargetSnapshot,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct OperationRunQuery {
+    pub kind: Option<OperationRunKind>,
+    pub state: Option<OperationRunState>,
+    pub search: Option<String>,
+    pub since: Option<String>,
+    pub offset: Option<usize>,
+    pub limit: Option<usize>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OperationRunCounts {
+    pub active: usize,
+    pub succeeded: usize,
+    pub attention: usize,
+}
+
+#[derive(Debug, Clone, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OperationRunPage {
+    pub runs: Vec<OperationRunSummary>,
+    pub total: usize,
+    pub counts: OperationRunCounts,
+    pub has_more: bool,
+}
+
+pub fn query_operation_summaries(
+    mut runs: Vec<OperationRunSummary>,
+    query: &OperationRunQuery,
+) -> OperationRunPage {
+    let needle = query
+        .search
+        .as_deref()
+        .unwrap_or_default()
+        .trim()
+        .to_lowercase();
+    let since = query
+        .since
+        .as_deref()
+        .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok());
+    runs.retain(|run| {
+        query.kind.is_none_or(|kind| kind == run.kind)
+            && query.state.is_none_or(|state| state == run.state)
+            && since.is_none_or(|since| {
+                !run.state.is_terminal()
+                    || run
+                        .updated_at
+                        .as_deref()
+                        .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
+                        .is_some_and(|value| value >= since)
+            })
+            && (needle.is_empty() || run.title.to_lowercase().contains(&needle))
+    });
+    runs.sort_by(|left, right| {
+        (!right.state.is_terminal())
+            .cmp(&(!left.state.is_terminal()))
+            .then_with(|| right.updated_at.cmp(&left.updated_at))
+            .then_with(|| left.id.cmp(&right.id))
+    });
+    let total = runs.len();
+    let counts = OperationRunCounts {
+        active: runs.iter().filter(|run| !run.state.is_terminal()).count(),
+        succeeded: runs
+            .iter()
+            .filter(|run| run.state == OperationRunState::Succeeded)
+            .count(),
+        attention: runs
+            .iter()
+            .filter(|run| run.state.needs_attention())
+            .count(),
+    };
+    let offset = query.offset.unwrap_or(0);
+    let runs = runs
+        .into_iter()
+        .skip(offset)
+        .take(query.limit.unwrap_or(50).clamp(1, 200))
+        .collect::<Vec<_>>();
+    let has_more = offset.saturating_add(runs.len()) < total;
+    OperationRunPage {
+        runs,
+        total,
+        counts,
+        has_more,
+    }
 }
 
 fn operation_id(kind: OperationRunKind, source_id: &str) -> String {
@@ -176,6 +277,7 @@ pub fn project_job(job: &JobRecord) -> OperationRunDetail {
             updated_at: Some(job.updated_at.to_rfc3339()),
         },
         items,
+        batch: None,
     }
 }
 
@@ -262,7 +364,11 @@ pub fn project_flow_detail(detail: &FlowRunDetail, title: String) -> OperationRu
         })
         .collect::<Vec<_>>();
     finish_detail(&mut summary, &items);
-    OperationRunDetail { summary, items }
+    OperationRunDetail {
+        summary,
+        items,
+        batch: None,
+    }
 }
 
 pub fn project_orchestration_summary(
@@ -330,7 +436,11 @@ pub fn project_orchestration_detail(
         })
         .collect::<Vec<_>>();
     finish_detail(&mut summary, &items);
-    OperationRunDetail { summary, items }
+    OperationRunDetail {
+        summary,
+        items,
+        batch: None,
+    }
 }
 
 fn orchestration_child_label(kind: AutomationKind) -> String {
@@ -442,7 +552,11 @@ pub fn project_nurture(source_id: &str, sessions: &[NurtureSessionStatus]) -> Op
         updated_at: updated.or(started),
     };
     finish_detail(&mut summary, &items);
-    OperationRunDetail { summary, items }
+    OperationRunDetail {
+        summary,
+        items,
+        batch: None,
+    }
 }
 
 pub fn project_interaction_summary(summary: &InteractionCampaignSummary) -> OperationRunSummary {
@@ -507,7 +621,11 @@ pub fn project_interaction_detail(detail: &InteractionCampaignDetail) -> Operati
         })
         .collect::<Vec<_>>();
     finish_detail(&mut summary, &items);
-    OperationRunDetail { summary, items }
+    OperationRunDetail {
+        summary,
+        items,
+        batch: None,
+    }
 }
 
 pub fn project_publish_summary(
@@ -706,7 +824,11 @@ pub fn project_publish_detail_with_target(
     // Link/Sheet settlement lives on the aggregate snapshot, not an assignment row.
     // Keep that warning even when every public Post assignment itself succeeded.
     summary.issue_count = summary.issue_count.max(aggregate_issue_count);
-    OperationRunDetail { summary, items }
+    OperationRunDetail {
+        summary,
+        items,
+        batch: None,
+    }
 }
 
 fn reviewed_target_label(device: &ResolvedTargetDevice) -> String {

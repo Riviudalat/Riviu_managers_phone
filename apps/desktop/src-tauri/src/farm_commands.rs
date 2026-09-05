@@ -15,7 +15,7 @@ use riviu_core::{
     AppInstallStatus, AppLibraryItem, AppLibraryPlatform, AppPackageFormat,
     DeviceAppInstallRequest, DeviceGroup, DeviceMeta, DevicePlatform, DeviceWorkOwner,
     MaterialItem, MaterialPushBatchRequest, MaterialPushBatchResult, MaterialPushDeviceResult,
-    MaterialPushStatus, OpLog, ScheduleItem,
+    MaterialPushStatus, OpLog, OperationRunKind, OperationRunState, ScheduleItem,
 };
 use sha2::{Digest, Sha256};
 use tauri::State;
@@ -137,6 +137,48 @@ fn err(e: impl std::fmt::Display) -> CommandError {
 
 fn log(state: &AppState, action: &str, detail: &str) {
     let _ = state.db.log_op(action, detail);
+}
+
+fn persist_library_outcome(
+    state: &AppState,
+    batch_id: &str,
+    udid: &str,
+    status: OperationRunState,
+    code: Option<&str>,
+    detail: Option<&str>,
+    evidence: Option<&str>,
+) -> Result<(), String> {
+    state.db.settle_library_batch_item(batch_id,udid,status,code,detail,evidence).map_err(|error| {
+        let message = format!("Chưa lưu được kết quả của máy; cần kiểm lại, không thực hiện lại thao tác: {error}");
+        // Retrying only the journal is allowed. The driver action is never repeated.
+        if let Err(recovery) = state.db.settle_library_batch_item(batch_id,udid,OperationRunState::Uncertain,
+            Some("OutcomePersistenceUnavailable"),Some(&message),evidence) {
+            log::error!("library batch outcome and uncertain journal both unavailable: {error}; {recovery}");
+        }
+        message
+    })
+}
+
+fn install_dispatch_claim(claim: Result<bool, String>, udid: &str) -> Result<(), AppInstallResult> {
+    let (status, detail) = match claim {
+        Ok(true) => return Ok(()),
+        Ok(false) => (
+            AppInstallStatus::CancelledBeforeDispatch,
+            "Đã dừng trước khi gửi lệnh tới máy".to_string(),
+        ),
+        Err(error) => (
+            AppInstallStatus::BeforeEffect,
+            format!("Chưa ghi được ý định cài đặt; chưa gửi lệnh tới máy: {error}"),
+        ),
+    };
+    Err(AppInstallResult {
+        udid: udid.to_string(),
+        status,
+        effect_started: false,
+        observed_version_name: None,
+        observed_version_code: None,
+        detail: Some(detail),
+    })
 }
 
 const MAX_SOURCE_BYTES: u64 = 4 * 1024 * 1024 * 1024;
@@ -1331,7 +1373,7 @@ pub async fn push_material(
         .into_iter()
         .find(|m| m.id == material_id)
         .ok_or_else(|| "material not found".to_string())?;
-    let evidence = push_material_to_device(&state, &item, &udid).await?;
+    let evidence = push_material_to_device(&state, &item, &udid, None).await?;
     let msg = format!(
         "Transferred {} to Agent sandbox on {udid}; readback={}",
         item.name, evidence
@@ -1346,6 +1388,7 @@ async fn push_material_to_device(
     state: &AppState,
     item: &MaterialItem,
     udid: &str,
+    batch_id: Option<&str>,
 ) -> Result<String, CommandError> {
     // Media never goes through installd. Stage it as a one-file campaign and
     // let the driver perform HouseArrest/AFC size+hash readback.
@@ -1361,6 +1404,18 @@ async fn push_material_to_device(
     std::fs::create_dir_all(&staged).map_err(err)?;
     let dest = staged_material_path(&staged, &managed_source);
     std::fs::copy(&managed_source, &dest).map_err(err)?;
+    if let Some(batch_id) = batch_id {
+        if !state
+            .db
+            .claim_library_batch_item(batch_id, udid)
+            .map_err(err)?
+        {
+            return Err(CommandError::code(
+                "CancelledBeforeDispatch",
+                "batch item stopped before dispatch",
+            ));
+        }
+    }
     let evidence = state
         .control
         .stage_publish_media(
@@ -1413,6 +1468,21 @@ pub async fn push_material_batch(
         ));
     }
 
+    let batch_id = request
+        .batch_id
+        .filter(|id| !id.trim().is_empty())
+        .unwrap_or_else(|| Uuid::new_v4().to_string());
+    state
+        .db
+        .create_library_batch(
+            &batch_id,
+            OperationRunKind::MaterialTransfer,
+            &item.id,
+            &item.name,
+            &target,
+        )
+        .map_err(err)?;
+
     let state_ref: &AppState = &state;
     let work = target
         .included
@@ -1422,40 +1492,78 @@ pub async fn push_material_batch(
         .collect::<Vec<_>>();
     let mut results = collect_bounded(work, MAX_MATERIAL_PUSH_CONCURRENCY, |(index, udid)| {
         let item = &item;
+        let batch_id = &batch_id;
         async move {
-            let result = match push_material_to_device(state_ref, item, &udid).await {
-                Ok(evidence) => {
-                    log(state_ref, "material.push", &format!("{udid}:{}", item.id));
-                    MaterialPushDeviceResult {
-                        udid,
-                        status: MaterialPushStatus::Succeeded,
-                        evidence: Some(evidence),
-                        error_code: None,
-                        error: None,
+            let mut result =
+                match push_material_to_device(state_ref, item, &udid, Some(batch_id)).await {
+                    Ok(evidence) => {
+                        log(state_ref, "material.push", &format!("{udid}:{}", item.id));
+                        MaterialPushDeviceResult {
+                            udid,
+                            status: MaterialPushStatus::Succeeded,
+                            evidence: Some(evidence),
+                            error_code: None,
+                            error: None,
+                        }
                     }
-                }
-                Err(error) => {
-                    log(
-                        state_ref,
-                        "material.push.failed",
-                        &format!("{udid}:{}:{}", item.id, error.code),
-                    );
-                    MaterialPushDeviceResult {
-                        udid,
-                        status: MaterialPushStatus::Failed,
-                        evidence: None,
-                        error_code: Some(error.code),
-                        error: Some(error.message.into_string()),
+                    Err(error) => {
+                        let started = state_ref
+                            .db
+                            .get_library_batch(batch_id)
+                            .map(|batch| {
+                                batch.is_none_or(|batch| {
+                                    batch.items.iter().any(|row| {
+                                        row.udid.as_deref() == Some(&udid)
+                                            && row.state == OperationRunState::Running
+                                    })
+                                })
+                            })
+                            .unwrap_or(true);
+                        log(
+                            state_ref,
+                            "material.push.failed",
+                            &format!("{udid}:{}:{}", item.id, error.code),
+                        );
+                        MaterialPushDeviceResult {
+                            udid,
+                            status: if error.code == "CancelledBeforeDispatch" {
+                                MaterialPushStatus::CancelledBeforeDispatch
+                            } else if started {
+                                MaterialPushStatus::Uncertain
+                            } else {
+                                MaterialPushStatus::Failed
+                            },
+                            evidence: None,
+                            error_code: Some(error.code),
+                            error: Some(error.message.into_string()),
+                        }
                     }
-                }
+                };
+            let status = match result.status {
+                MaterialPushStatus::Succeeded => OperationRunState::Succeeded,
+                MaterialPushStatus::Failed => OperationRunState::Failed,
+                MaterialPushStatus::Uncertain => OperationRunState::Uncertain,
+                MaterialPushStatus::CancelledBeforeDispatch => OperationRunState::Cancelled,
             };
+            if let Err(error) = persist_library_outcome(
+                state_ref,
+                batch_id,
+                &result.udid,
+                status,
+                result.error_code.as_deref(),
+                result.error.as_deref(),
+                result.evidence.as_deref(),
+            ) {
+                result.status = MaterialPushStatus::Uncertain;
+                result.error_code = Some("OutcomePersistenceUnavailable".into());
+                result.error = Some(error);
+            }
             (index, result)
         }
     })
     .await;
     results.sort_by_key(|(index, _)| *index);
     let results = results.into_iter().map(|(_, result)| result).collect();
-    let batch_id = Uuid::new_v4().to_string();
     log(
         &state,
         "material.push_batch",
@@ -1655,7 +1763,32 @@ pub fn cancel_app_install_batch(
     batch_id: String,
 ) -> Result<(), CommandError> {
     let _admission = state.ensure_accepting_work()?;
+    state.db.cancel_library_batch(&batch_id).map_err(err)?;
     cancel_active_app_install_batch(&batch_id)
+}
+
+#[tauri::command]
+pub fn operation_cancel_batch(
+    state: State<'_, AppState>,
+    operation_id: String,
+) -> Result<(), CommandError> {
+    let _admission = state.ensure_accepting_work()?;
+    let (kind, id) = operation_id
+        .split_once(':')
+        .ok_or_else(|| CommandError::invalid_argument("batch operation ID is required"))?;
+    let detail = state
+        .db
+        .get_library_batch(id)
+        .map_err(err)?
+        .filter(|detail| detail.summary.kind.as_key() == kind)
+        .ok_or_else(|| CommandError::invalid_argument("library batch not found"))?;
+    state.db.cancel_library_batch(id).map_err(err)?;
+    if detail.summary.kind == OperationRunKind::AppInstall
+        && active_install_batches().lock().contains_key(id)
+    {
+        cancel_active_app_install_batch(id)?;
+    }
+    Ok(())
 }
 
 fn cancel_active_app_install_batch(batch_id: &str) -> Result<(), CommandError> {
@@ -1886,8 +2019,51 @@ pub async fn install_library_app_batch(
         .into_iter()
         .find(|item| item.id == request.app_id)
         .ok_or_else(|| CommandError::code("AppNotFound", "app not found"))?;
-    let batch_scratch = BatchScratch::create(&state.artifacts_dir, &request.batch_id)?;
-    let source = snapshot_managed_app_artifact(&item, batch_scratch.path())?;
+    let target = resolve_target(
+        &riviu_core::TargetRef::Explicit {
+            udids: request.udids.clone(),
+        },
+        &request.udids,
+        &state.db.list_device_metas().map_err(err)?,
+        &[],
+    )
+    .map_err(err)?;
+    state
+        .db
+        .create_library_batch(
+            &request.batch_id,
+            OperationRunKind::AppInstall,
+            &item.id,
+            &item.name,
+            &target,
+        )
+        .map_err(err)?;
+    let prepared = (|| {
+        let scratch = BatchScratch::create(&state.artifacts_dir, &request.batch_id)?;
+        let source = snapshot_managed_app_artifact(&item, scratch.path())?;
+        Ok::<_, CommandError>((scratch, source))
+    })();
+    let (batch_scratch, source) = match prepared {
+        Ok(prepared) => prepared,
+        Err(error) => {
+            for udid in &request.udids {
+                let _ = persist_library_outcome(
+                    &state,
+                    &request.batch_id,
+                    udid,
+                    OperationRunState::Failed,
+                    Some("BeforeEffect"),
+                    Some(error.message.as_ref()),
+                    None,
+                );
+            }
+            return Err(error);
+        }
+    };
+    let item = AppLibraryItem {
+        path: source.display().to_string(),
+        ..item
+    };
     let (connected, roster_error) = match state.control.list_devices().await {
         Ok(devices) => (devices, None),
         Err(error) => (Vec::new(), Some(error.to_string())),
@@ -2070,18 +2246,69 @@ pub async fn install_library_app_batch(
                     });
                 }
             }
-            install_one_batch_device(
-                InstallBatchDeviceContext {
-                    state: state_ref,
-                    request: &request,
-                    item: &item,
-                    paths,
-                    expected_spec,
-                    batch: &batch,
-                },
-                udid,
-                device_block,
-            )
+            let request = &request;
+            let batch = &batch;
+            let item = &item;
+            async move {
+                if let Err(mut result) = install_dispatch_claim(
+                    state_ref
+                        .db
+                        .claim_library_batch_item(&request.batch_id, &udid)
+                        .map_err(|error| error.to_string()),
+                    &udid,
+                ) {
+                    if result.status == AppInstallStatus::BeforeEffect {
+                        if let Err(error) = persist_library_outcome(
+                            state_ref,
+                            &request.batch_id,
+                            &udid,
+                            OperationRunState::Failed,
+                            Some("IntentPersistenceUnavailable"),
+                            result.detail.as_deref(),
+                            None,
+                        ) {
+                            result.detail =
+                                Some(format!("{}; {error}", result.detail.unwrap_or_default()));
+                        }
+                    }
+                    return result;
+                }
+                let mut result = install_one_batch_device(
+                    InstallBatchDeviceContext {
+                        state: state_ref,
+                        request,
+                        item,
+                        paths,
+                        expected_spec,
+                        batch,
+                    },
+                    udid,
+                    device_block,
+                )
+                .await;
+                let status = match result.status {
+                    AppInstallStatus::Succeeded => OperationRunState::Succeeded,
+                    AppInstallStatus::Uncertain => OperationRunState::Uncertain,
+                    AppInstallStatus::CancelledBeforeDispatch => OperationRunState::Cancelled,
+                    AppInstallStatus::BeforeEffect | AppInstallStatus::FailedVerified => {
+                        OperationRunState::Failed
+                    }
+                };
+                let evidence = serde_json::to_string(&result).ok();
+                if let Err(error) = persist_library_outcome(
+                    state_ref,
+                    &request.batch_id,
+                    &result.udid,
+                    status,
+                    None,
+                    result.detail.as_deref(),
+                    evidence.as_deref(),
+                ) {
+                    result.status = AppInstallStatus::Uncertain;
+                    result.detail = Some(error);
+                }
+                result
+            }
         },
     )
     .await;
@@ -2126,6 +2353,7 @@ pub async fn install_library_app_batch(
     );
     Ok(AppInstallBatchResponse {
         batch_id: request.batch_id,
+        target,
         progress,
         results,
     })
@@ -2250,7 +2478,7 @@ pub fn api_docs() -> String {
 - list_op_logs / analytics_summary
 
 ## Operations
-- operation_list_runs / operation_get_run
+- operation_list_runs / operation_query_runs / operation_get_run / operation_cancel_batch
 
 ## Sidecar
 - python riviu_pmd.py list|install|uninstall|media-stage|stream|start-wda|...
@@ -2282,6 +2510,22 @@ mod android_app_library_tests {
         let path = std::env::temp_dir().join(format!("riviu-app-fixture-{}", Uuid::new_v4()));
         std::fs::create_dir_all(&path).expect("fixture root");
         TempFixture(path)
+    }
+
+    #[test]
+    fn install_intent_failure_is_before_effect_and_not_a_cancellation() {
+        let failure = install_dispatch_claim(Err("fixture journal unavailable".into()), "a")
+            .expect_err("an intent failure must block dispatch");
+        assert_eq!(failure.status, AppInstallStatus::BeforeEffect);
+        assert!(!failure.effect_started);
+        assert!(failure
+            .detail
+            .unwrap()
+            .contains("fixture journal unavailable"));
+        let cancelled = install_dispatch_claim(Ok(false), "a").unwrap_err();
+        assert_eq!(cancelled.status, AppInstallStatus::CancelledBeforeDispatch);
+        assert!(!cancelled.effect_started);
+        assert!(install_dispatch_claim(Ok(true), "a").is_ok());
     }
 
     fn bundled_apk(name: &str) -> Vec<u8> {

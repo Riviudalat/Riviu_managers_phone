@@ -15,6 +15,7 @@ mod interaction;
 mod interaction_actions;
 mod inventory;
 mod jobs;
+mod library_batches;
 mod migrations;
 mod nurture;
 mod nurture_follow_cleanup;

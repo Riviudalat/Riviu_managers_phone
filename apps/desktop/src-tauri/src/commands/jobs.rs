@@ -8,7 +8,8 @@ use riviu_core::{
     nurture_source_id, project_flow_detail, project_flow_summary, project_interaction_detail,
     project_interaction_summary, project_job, project_nurture, project_orchestration_detail,
     project_orchestration_summary, project_publish_detail_with_target, project_publish_summary,
-    NurtureSessionStatus, OperationRunDetail, OperationRunState, OperationRunSummary,
+    query_operation_summaries, NurtureSessionStatus, OperationRunDetail, OperationRunPage,
+    OperationRunQuery, OperationRunState, OperationRunSummary,
 };
 
 fn merge_nurture_history(
@@ -116,6 +117,20 @@ pub fn operation_list_runs(
         runs.push(project_publish_summary(&detail, snapshot.as_ref()));
     }
 
+    for kind in [
+        riviu_core::OperationRunKind::AppInstall,
+        riviu_core::OperationRunKind::MaterialTransfer,
+    ] {
+        for id in state
+            .db
+            .operation_source_ids(None, Some(kind))
+            .map_err(err)?
+        {
+            if let Some(detail) = read_operation_run(&state, &id)? {
+                runs.push(detail.summary);
+            }
+        }
+    }
     runs.sort_by(|left, right| {
         let left_active = matches!(
             left.state,
@@ -141,9 +156,49 @@ pub fn operation_list_runs(
 }
 
 #[tauri::command]
+pub async fn operation_query_runs(
+    state: State<'_, AppState>,
+    query: OperationRunQuery,
+) -> Result<OperationRunPage, CommandError> {
+    if let Some(since) = &query.since {
+        chrono::DateTime::parse_from_rfc3339(since)
+            .map_err(|_| CommandError::invalid_argument("since must be RFC3339"))?;
+    }
+    let mut runs = BTreeMap::new();
+    for id in state
+        .db
+        .operation_source_ids(query.since.as_deref(), query.kind)
+        .map_err(err)?
+    {
+        if let Some(detail) = read_operation_run(&state, &id)? {
+            runs.insert(id, detail.summary);
+        }
+    }
+    for (id, sessions) in merge_nurture_history(Vec::new(), state.nurture.list_status()) {
+        let summary = project_nurture(&id, &sessions).summary;
+        let detail = read_operation_run(&state, &summary.id)?;
+        runs.insert(
+            summary.id.clone(),
+            detail.map(|detail| detail.summary).unwrap_or(summary),
+        );
+    }
+    Ok(query_operation_summaries(
+        runs.into_values().collect(),
+        &query,
+    ))
+}
+
+#[tauri::command]
 pub fn operation_get_run(
     state: State<'_, AppState>,
     operation_id: String,
+) -> Result<Option<OperationRunDetail>, CommandError> {
+    read_operation_run(&state, &operation_id)
+}
+
+fn read_operation_run(
+    state: &AppState,
+    operation_id: &str,
 ) -> Result<Option<OperationRunDetail>, CommandError> {
     let (kind, source_id) = operation_id.split_once(':').ok_or_else(|| {
         CommandError::invalid_argument("operationId must contain a source prefix")
@@ -154,6 +209,11 @@ pub fn operation_get_run(
         ));
     }
     match kind {
+        "appInstall" | "materialTransfer" => Ok(state
+            .db
+            .get_library_batch(source_id)
+            .map_err(err)?
+            .filter(|detail| detail.summary.kind.as_key() == kind)),
         "script" => {
             let id = uuid::Uuid::parse_str(source_id).map_err(|_| {
                 CommandError::invalid_argument("script operation ID must be a UUID")

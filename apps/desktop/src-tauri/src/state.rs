@@ -365,6 +365,7 @@ pub struct AppState {
     pub active_agent_artifact_version: String,
     pub active_agent_bundle_id: String,
     pub stream_settings: Arc<RwLock<StreamSettings>>,
+    pub(crate) local_api_runtime: Arc<RwLock<crate::local_api::LocalApiRuntime>>,
     pub artifacts_dir: PathBuf,
     pub legacy_wda_bundle: PathBuf,
     pub nurture: NurtureRuntime,
@@ -778,6 +779,7 @@ impl AppState {
         // the credential store precisely so it can be handed one: the AI API key used to sit in
         // the settings blob in cleartext, readable by any process running as the operator.
         let database = Database::open(data.join("riviu.db"))?;
+        database.recover_library_batches()?;
         let (backfilled_apps, app_backfill_failures) = database.backfill_app_library_hashes()?;
         if backfilled_apps > 0 {
             log::info!("đã bổ sung định danh nội dung cho {backfilled_apps} ứng dụng cũ");
@@ -1073,6 +1075,7 @@ impl AppState {
             active_agent_artifact_version: ios.artifact_version,
             active_agent_bundle_id: ios.bundle_id,
             stream_settings: Arc::new(RwLock::new(stream_settings)),
+            local_api_runtime: Arc::new(RwLock::new(crate::local_api::LocalApiRuntime::default())),
             artifacts_dir,
             legacy_wda_bundle: sidecar_root.join("wda").join("Riviumanagersphone.ipa"),
             nurture: NurtureRuntime::with_database(db.clone()),
@@ -1352,13 +1355,26 @@ impl AppState {
         // verify without the running app.
         {
             let config = crate::local_api::load_config(&self.db, &self.secrets);
+            {
+                let mut runtime = self.local_api_runtime.write();
+                runtime.startup = Some(config.clone());
+                runtime.running = if config.enabled && !config.token.is_empty() {
+                    None
+                } else {
+                    Some(false)
+                };
+            }
             if config.enabled && !config.token.is_empty() {
                 let app = app.clone();
+                let runtime = Arc::clone(&self.local_api_runtime);
                 tauri::async_runtime::spawn(async move {
-                    if let Err(error) =
-                        crate::local_api::serve(app, config.port, config.token).await
-                    {
+                    let result = crate::local_api::serve(app, config.port, config.token).await;
+                    runtime.write().running = Some(false);
+                    if let Err(error) = result {
                         log::error!("local API failed to start: {error:#}");
+                        let mut status = runtime.write();
+                        status.running = Some(false);
+                        status.last_error = Some(format!("{error:#}"));
                     }
                 });
             }

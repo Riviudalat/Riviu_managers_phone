@@ -215,7 +215,41 @@ const MIGRATIONS: &[Migration] = &[
         apply: apply_migration_30,
         rebuilds_tables: false,
     },
+    Migration {
+        version: 31,
+        name: "library-batch-operation-ledger",
+        apply: apply_migration_31,
+        rebuilds_tables: false,
+    },
 ];
+
+fn apply_migration_31(tx: &Transaction<'_>) -> anyhow::Result<()> {
+    tx.execute_batch(
+        "CREATE TABLE library_batches (
+            id TEXT PRIMARY KEY,
+            kind TEXT NOT NULL CHECK(kind IN ('appInstall','materialTransfer')),
+            artifact_id TEXT NOT NULL,
+            title TEXT NOT NULL,
+            target_json TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+         );
+         CREATE TABLE library_batch_items (
+            batch_id TEXT NOT NULL REFERENCES library_batches(id),
+            udid TEXT NOT NULL,
+            ordinal INTEGER NOT NULL,
+            label TEXT NOT NULL,
+            state TEXT NOT NULL CHECK(state IN ('queued','running','succeeded','failed','uncertain','cancelled')),
+            error_code TEXT,
+            detail TEXT,
+            evidence TEXT,
+            PRIMARY KEY(batch_id,udid)
+         );
+         CREATE INDEX library_batches_updated ON library_batches(updated_at);
+         CREATE INDEX library_batch_items_state ON library_batch_items(state,batch_id);",
+    )?;
+    Ok(())
+}
 
 pub(super) fn latest_version() -> i64 {
     MIGRATIONS.last().map_or(0, |migration| migration.version)
@@ -3285,7 +3319,7 @@ INSERT INTO tiktok_action_runs
 
         run(&mut connection).expect("apply migration 30");
 
-        assert_eq!(migration_rows(&connection).last().unwrap().0, 30);
+        assert_eq!(migration_rows(&connection).last().unwrap().0, 31);
         assert!(table_exists(
             &connection,
             "nurture_follow_source_identities"

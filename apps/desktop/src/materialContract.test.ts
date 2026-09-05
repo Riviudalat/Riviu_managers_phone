@@ -18,6 +18,8 @@ describe("material batch Rust/TypeScript contract", () => {
     const states = {
       succeeded: true,
       failed: true,
+      uncertain: true,
+      cancelledBeforeDispatch: true,
     } satisfies Record<MaterialPushStatus, true>;
     const result: MaterialPushDeviceResult = {
       udid: "phone-1",
@@ -25,7 +27,7 @@ describe("material batch Rust/TypeScript contract", () => {
       evidence: "sha256=ok",
     };
 
-    expect(Object.keys(states)).toEqual(["succeeded", "failed"]);
+    expect(Object.keys(states)).toEqual(["succeeded", "failed", "uncertain", "cancelledBeforeDispatch"]);
     expect(result.error).toBeUndefined();
   });
 

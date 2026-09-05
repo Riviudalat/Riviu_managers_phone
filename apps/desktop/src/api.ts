@@ -57,6 +57,8 @@ import type {
   OpLog,
   NurtureSessionStatus,
   OperationRunDetail,
+  OperationRunQuery,
+  OperationRunPage,
   OperationRunSummary,
   SessionLogEntry,
   SessionLogSummary,
@@ -484,6 +486,19 @@ export async function localApiGetConfig() {
   return invoke<LocalApiConfig>("local_api_get_config");
 }
 
+export interface LocalApiStatus {
+  configuredEnabled: boolean;
+  configuredPort: number;
+  running: boolean | null;
+  activePort: number | null;
+  restartRequired: boolean;
+  lastError: string | null;
+}
+
+export async function localApiStatus() {
+  return invoke<LocalApiStatus>("local_api_status");
+}
+
 /// Persist the config. The server binds at startup, so a change applies on next app launch.
 /// Enabling without a token makes the backend mint one; the returned config carries it.
 export async function localApiSetConfig(config: LocalApiConfig) {
@@ -597,6 +612,14 @@ export async function operationListRuns(limit = 100) {
 
 export async function operationGetRun(operationId: string) {
   return invoke<OperationRunDetail | null>("operation_get_run", { operationId });
+}
+
+export async function operationQueryRuns(query: OperationRunQuery) {
+  return invoke<OperationRunPage>("operation_query_runs", { query });
+}
+
+export async function operationCancelBatch(operationId: string) {
+  return invoke<void>("operation_cancel_batch", { operationId });
 }
 
 export async function runScript(scriptJson: string, udids: string[]) {

@@ -19,6 +19,8 @@ describe("operations Rust/TypeScript contract", () => {
       nurture: true,
       interaction: true,
       publish: true,
+      appInstall: true,
+      materialTransfer: true,
     } satisfies Record<OperationRunKind, true>;
     const states = {
       queued: true,
@@ -31,7 +33,7 @@ describe("operations Rust/TypeScript contract", () => {
       skipped: true,
     } satisfies Record<OperationRunState, true>;
 
-    expect(Object.keys(kinds)).toHaveLength(6);
+    expect(Object.keys(kinds)).toHaveLength(8);
     expect(Object.keys(states)).toHaveLength(8);
 
     const retryScopes = {

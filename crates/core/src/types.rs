@@ -767,6 +767,8 @@ pub struct AppLibraryItem {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct MaterialPushBatchRequest {
+    #[serde(default)]
+    pub batch_id: Option<String>,
     pub material_id: String,
     pub target: crate::automation::TargetRef,
 }
@@ -776,6 +778,8 @@ pub struct MaterialPushBatchRequest {
 pub enum MaterialPushStatus {
     Succeeded,
     Failed,
+    Uncertain,
+    CancelledBeforeDispatch,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -864,6 +868,7 @@ pub struct AppInstallResult {
 #[serde(rename_all = "camelCase")]
 pub struct AppInstallBatchResponse {
     pub batch_id: String,
+    pub target: crate::ResolvedTargetSnapshot,
     pub progress: Vec<AppInstallProgress>,
     pub results: Vec<AppInstallResult>,
 }
