@@ -1,0 +1,122 @@
+{
+  "date": "2026-09-06",
+  "policy": "Historical patch/diff/evidence bytes are unchanged; resolve old paths through this map.",
+  "moves": [
+    {
+      "old": "docs/superpowers/plans/2026-07-28-unified-agent-runtime.md",
+      "new": "docs/archive/plans/2026-07-28-unified-agent-runtime.md"
+    },
+    {
+      "old": "docs/superpowers/plans/2026-07-29-riviu-agent-standalone-control-parity.md",
+      "new": "docs/archive/plans/2026-07-29-riviu-agent-standalone-control-parity.md"
+    },
+    {
+      "old": "docs/superpowers/plans/2026-07-29-rtmmo-agent-forensic-inventory.md",
+      "new": "docs/archive/plans/2026-07-29-rtmmo-agent-forensic-inventory.md"
+    },
+    {
+      "old": "docs/superpowers/plans/2026-07-29-tiktok-interaction-campaign-core.md",
+      "new": "docs/archive/plans/2026-07-29-tiktok-interaction-campaign-core.md"
+    },
+    {
+      "old": "docs/superpowers/plans/2026-07-29-tiktok-interaction-desktop-workflow.md",
+      "new": "docs/archive/plans/2026-07-29-tiktok-interaction-desktop-workflow.md"
+    },
+    {
+      "old": "docs/superpowers/plans/2026-07-29-tiktok-interaction-fleet-acceptance.md",
+      "new": "docs/archive/plans/2026-07-29-tiktok-interaction-fleet-acceptance.md"
+    },
+    {
+      "old": "docs/superpowers/plans/2026-07-29-tiktok-interaction-gate-0-device-control.md",
+      "new": "docs/archive/plans/2026-07-29-tiktok-interaction-gate-0-device-control.md"
+    },
+    {
+      "old": "docs/superpowers/plans/2026-07-29-tiktok-interaction-new-action-gates.md",
+      "new": "docs/archive/plans/2026-07-29-tiktok-interaction-new-action-gates.md"
+    },
+    {
+      "old": "docs/superpowers/plans/2026-07-29-tiktok-interaction-roadmap.md",
+      "new": "docs/archive/plans/2026-07-29-tiktok-interaction-roadmap.md"
+    },
+    {
+      "old": "docs/superpowers/plans/2026-07-29-tiktok-interaction-verified-actions.md",
+      "new": "docs/archive/plans/2026-07-29-tiktok-interaction-verified-actions.md"
+    },
+    {
+      "old": "docs/superpowers/plans/2026-07-30-riviu-flow-v2-acceptance.md",
+      "new": "docs/archive/plans/2026-07-30-riviu-flow-v2-acceptance.md"
+    },
+    {
+      "old": "docs/superpowers/plans/2026-07-30-riviu-flow-v2-desktop.md",
+      "new": "docs/archive/plans/2026-07-30-riviu-flow-v2-desktop.md"
+    },
+    {
+      "old": "docs/superpowers/plans/2026-07-30-riviu-flow-v2-foundation.md",
+      "new": "docs/archive/plans/2026-07-30-riviu-flow-v2-foundation.md"
+    },
+    {
+      "old": "docs/superpowers/plans/2026-07-30-riviu-flow-v2-roadmap.md",
+      "new": "docs/archive/plans/2026-07-30-riviu-flow-v2-roadmap.md"
+    },
+    {
+      "old": "docs/superpowers/plans/2026-07-30-riviu-flow-v2-runtime.md",
+      "new": "docs/archive/plans/2026-07-30-riviu-flow-v2-runtime.md"
+    },
+    {
+      "old": "docs/superpowers/plans/2026-07-31-interaction-flow-delivery.md",
+      "new": "docs/archive/plans/2026-07-31-interaction-flow-delivery.md"
+    },
+    {
+      "old": "docs/superpowers/plans/README.md",
+      "new": "docs/archive/plans/README.md"
+    },
+    {
+      "old": "docs/superpowers/specs/2026-07-25-packaging-notes.md",
+      "new": "docs/archive/specs/2026-07-25-packaging-notes.md"
+    },
+    {
+      "old": "docs/superpowers/specs/2026-07-25-riviu-managers-phone-design.md",
+      "new": "docs/archive/specs/2026-07-25-riviu-managers-phone-design.md"
+    },
+    {
+      "old": "docs/superpowers/specs/2026-07-28-riviu-unified-iphone-control-design.md",
+      "new": "docs/archive/specs/2026-07-28-riviu-unified-iphone-control-design.md"
+    },
+    {
+      "old": "docs/superpowers/specs/2026-07-29-riviu-agent-source-reconstruction-design.md",
+      "new": "docs/archive/specs/2026-07-29-riviu-agent-source-reconstruction-design.md"
+    },
+    {
+      "old": "docs/superpowers/specs/2026-07-29-riviu-agent-standalone-control-parity-design.md",
+      "new": "docs/archive/specs/2026-07-29-riviu-agent-standalone-control-parity-design.md"
+    },
+    {
+      "old": "docs/superpowers/specs/2026-07-29-tiktok-interaction-campaign-design.md",
+      "new": "docs/archive/specs/2026-07-29-tiktok-interaction-campaign-design.md"
+    },
+    {
+      "old": "docs/superpowers/specs/2026-07-30-riviu-flow-v2-design.md",
+      "new": "docs/archive/specs/2026-07-30-riviu-flow-v2-design.md"
+    },
+    {
+      "old": "docs/ANDROID_PROBE_REPORT_2026-08-09.md",
+      "new": "docs/archive/reports/2026-08-09-android-probe-report.md"
+    },
+    {
+      "old": "docs/LIVE_NURTURE_REPORT_2026-07-26.md",
+      "new": "docs/archive/reports/2026-07-26-live-nurture-report.md"
+    },
+    {
+      "old": "docs/PLAN_STATUS_2026-08-13.md",
+      "new": "docs/archive/reports/2026-08-13-plan-status.md"
+    },
+    {
+      "old": "docs/XIAOWEI_IOS_PERIPHERALS_PORT_2026-08-19.md",
+      "new": "docs/archive/reports/2026-08-19-xiaowei-ios-peripherals-port.md"
+    },
+    {
+      "old": "docs/live-agent-runtime-2026-07-28.md",
+      "new": "docs/archive/reports/2026-07-28-live-agent-runtime.md"
+    }
+  ]
+}

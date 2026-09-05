@@ -160,7 +160,7 @@ engine.
 
 - Commit and push this coordination plan plus its `AGENTS.md` checkpoint first.
   Resolve the implementation base with
-  `git log -1 --format=%H -- docs/superpowers/plans/2026-07-31-interaction-flow-delivery.md`
+  `git log -1 --format=%H -- docs/archive/plans/2026-07-31-interaction-flow-delivery.md`
   and create the isolated implementation worktree from that commit. Keep `d4523a1`
   as the rollback baseline; a worktree created directly from it would omit this plan.
 - Record production IPA and canonical-LF manifest hashes.

@@ -13,7 +13,7 @@
 ## Execution Preconditions
 
 - Execute from an isolated worktree created with the `using-git-worktrees` skill after the current Project 2/runtime/spec work is committed to an integration baseline. The present shared checkout is dirty; do not stage, reset, or overwrite its unrelated changes.
-- Read `AGENTS.md` and `docs/superpowers/specs/2026-07-29-tiktok-interaction-campaign-design.md` before every task. If their session-before-stream, capability, proxy, or persistence invariants changed, stop and reconcile this plan first.
+- Read `AGENTS.md` and `docs/archive/specs/2026-07-29-tiktok-interaction-campaign-design.md` before every task. If their session-before-stream, capability, proxy, or persistence invariants changed, stop and reconcile this plan first.
 - Gate 0 must be complete and passing before Task 1 begins. This plan consumes its injected `InteractionBatchExecutor`/shared `DeviceControlPlane` contract and does not introduce a second lock, semaphore, or capacity counter. Re-run Gate 0's control-plane tests before Task 10. This plan does not implement `open_url`, Copy Link identity proof, stream-budget transfer, verified TikTok actions, or production capability enablement.
 - Production `sidecars/wda/RiviuAgent.ipa` and `sidecars/wda/agent-manifest.json` remain untouched.
 - Each commit command below stages only the listed paths in the isolated worktree. Run `git diff --cached --name-only` before every commit and remove any path not listed for that task from the index without changing its working-tree contents.
@@ -2612,7 +2612,7 @@ Record, with the actual test counts and no aspirational PASS claims:
 - dispatcher recovery matrix and fixed schedule lateness;
 - Gate 0 remains the active control plane, while real Interaction execution stays disabled until verified-action qualification is wired.
 
-Label the checkpoint `G1` only after every Step 3 command passes, record the resulting commit IDs, name `docs/superpowers/plans/2026-07-29-tiktok-interaction-verified-actions.md` as the next plan, and include the reverse-order commit reverts. Do not copy fixture-executor results into a live qualification table.
+Label the checkpoint `G1` only after every Step 3 command passes, record the resulting commit IDs, name `docs/archive/plans/2026-07-29-tiktok-interaction-verified-actions.md` as the next plan, and include the reverse-order commit reverts. Do not copy fixture-executor results into a live qualification table.
 
 Do not claim comment, save, repost, DM, or any real TikTok action is complete based on fake-executor tests.
 

@@ -5,6 +5,7 @@ import subprocess
 import sys
 import unittest
 from pathlib import Path
+import csv
 
 from scripts import build_xiaowei_parity_matrix as matrix
 from scripts import check_xiaowei_provenance as gate
@@ -74,7 +75,24 @@ class XiaoweiProvenanceTests(unittest.TestCase):
             generated = Path(temporary) / "matrix.csv"
             matrix.build(generated)
             checked_in = Path(__file__).parents[1] / "docs" / "provenance" / "xiaowei-parity-matrix.csv"
-            self.assertEqual(generated.read_bytes(), checked_in.read_bytes())
+            with generated.open(encoding="utf-8", newline="") as actual:
+                with checked_in.open(encoding="utf-8", newline="") as expected:
+                    self.assertEqual(list(csv.reader(actual)), list(csv.reader(expected)))
+
+    def test_matrix_rows_survive_checkout_line_endings_without_hiding_cell_changes(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            generated = Path(temporary) / "matrix.csv"
+            matrix.build(generated)
+            raw = generated.read_bytes()
+            windows = Path(temporary) / "windows.csv"
+            windows.write_bytes(raw.replace(b"\n", b"\r\n"))
+            with generated.open(encoding="utf-8", newline="") as actual:
+                with windows.open(encoding="utf-8", newline="") as expected:
+                    self.assertEqual(list(csv.reader(actual)), list(csv.reader(expected)))
+            rows = list(csv.reader(raw.decode("utf-8").splitlines()))
+            changed = [row[:] for row in rows]
+            changed[1][-1] += " changed"
+            self.assertNotEqual(rows, changed)
 
     def test_missing_scan_target_fails_closed(self):
         with tempfile.TemporaryDirectory() as temporary:

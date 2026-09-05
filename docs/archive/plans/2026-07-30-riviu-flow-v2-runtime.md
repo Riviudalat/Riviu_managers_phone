@@ -1849,7 +1849,7 @@ git commit -m "feat(flow): orchestrate durable multi-device runs"
 
 **Files:**
 - Modify: `AGENTS.md`
-- Modify: `docs/superpowers/plans/2026-07-30-riviu-flow-v2-runtime.md`
+- Modify: `docs/archive/plans/2026-07-30-riviu-flow-v2-runtime.md`
 
 - [x] **Step 1: Run the full gate**
 
@@ -1868,6 +1868,6 @@ Expected: every command exits 0; production IPA/manifest hashes remain the value
 Mark all F1 checkboxes complete. Record commit range, test counts, termination contract, disabled TikTok nodes, next plan, and rollback commit in `AGENTS.md`.
 
 ```powershell
-git add AGENTS.md docs/superpowers/plans/2026-07-30-riviu-flow-v2-runtime.md
+git add AGENTS.md docs/archive/plans/2026-07-30-riviu-flow-v2-runtime.md
 git commit -m "docs(flow): record runtime gate F1"
 ```

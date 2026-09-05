@@ -1,7 +1,7 @@
 ## 9. Fleet Android (09/08/2026)
 
 Ổ cắm cho việc này được chừa từ ngày đầu — bản thiết kế gốc
-(`docs/superpowers/specs/2026-07-25-riviu-managers-phone-design.md:7`) viết
+(`docs/archive/specs/2026-07-25-riviu-managers-phone-design.md:7`) viết
 *"…multiple iPhones, with Android deferred behind a `DeviceDriver` trait"*.
 `crates/android-driver` lấp chỗ đó và **không phải sửa `DeviceDriver`/`UiSession`**.
 
@@ -12,7 +12,7 @@ Nuôi và tương tác đã chạy trên `adb` + uiautomator2 + scrcpy/minicap. 
 không phải bàn phím mặc định. (Mục này từng viết *"chưa pin binary cho tới khi có SDK
 build"* — đã pin từ đó; xem sửa ở §9.52.)
 
-Số đo đầy đủ ở `docs/ANDROID_PROBE_REPORT_2026-08-09.md`. Những điều không được
+Số đo đầy đủ ở `docs/archive/reports/2026-08-09-android-probe-report.md`. Những điều không được
 đoán lại:
 
 - **Hai tầng, chia theo số đo, không theo thẩm mỹ.** `adb.rs` chỉ dùng cho vòng

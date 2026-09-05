@@ -2,7 +2,7 @@
 //!
 //! Compiling is not evidence. This exercises the actual trait implementations
 //! — `DeviceDriver` and `UiSession`, no test doubles — and times each call, so
-//! the numbers in `docs/ANDROID_PROBE_REPORT_2026-08-09.md` can be checked
+//! the numbers in `docs/archive/reports/2026-08-09-android-probe-report.md` can be checked
 //! against the shipped code rather than against a shell transcript.
 //!
 //! ```text

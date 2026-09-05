@@ -1952,7 +1952,7 @@ git commit -m "feat(flow): integrate the visual automation workspace"
 
 **Files:**
 - Modify: `AGENTS.md`
-- Modify: `docs/superpowers/plans/2026-07-30-riviu-flow-v2-desktop.md`
+- Modify: `docs/archive/plans/2026-07-30-riviu-flow-v2-desktop.md`
 
 - [x] **Step 1: Run full Rust and frontend gates**
 
@@ -1973,6 +1973,6 @@ Expected: every command exits 0.
 Mark all F2 checkboxes complete. Record commit range, Rust/frontend counts, disabled nodes, next plan, and rollback commit in `AGENTS.md`.
 
 ```powershell
-git add AGENTS.md docs/superpowers/plans/2026-07-30-riviu-flow-v2-desktop.md
+git add AGENTS.md docs/archive/plans/2026-07-30-riviu-flow-v2-desktop.md
 git commit -m "docs(flow): record desktop gate F2"
 ```

@@ -11,7 +11,7 @@
 //! | | |
 //! |---|---|
 //! | caption from the web | 157, 171, 184, 216, 399 characters |
-//! | caption from the tree | truncated at ~116 characters (`docs/PLAN_STATUS_2026-08-13.md`) |
+//! | caption from the tree | truncated at ~116 characters (`docs/archive/reports/2026-08-13-plan-status.md`) |
 //! | carousel slides from the web | 2, 5, 7, 8 pictures at 1416x2008 |
 //! | carousel slides from a phone | `CAROUSEL_SLIDE_CAP` = 4, reached by swiping a real account |
 //! | posts with an ASR transcript | **0 of 7** |

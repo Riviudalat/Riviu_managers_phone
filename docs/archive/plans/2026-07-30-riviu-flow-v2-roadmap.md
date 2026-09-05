@@ -12,7 +12,7 @@
 
 ## Approved Source
 
-- Design: `docs/superpowers/specs/2026-07-30-riviu-flow-v2-design.md`
+- Design: `docs/archive/specs/2026-07-30-riviu-flow-v2-design.md`
 - Approved design commit: `a8c3497`
 - Runtime constraints and handoff: `AGENTS.md`
 

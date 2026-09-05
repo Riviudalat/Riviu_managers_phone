@@ -6,7 +6,7 @@
 //! capture geometry.
 //!
 //! The geometry constants were measured on the live iPhone 8 (750×1334 @2x)
-//! this project targets; see `docs/LIVE_NURTURE_REPORT_2026-07-26.md` for the
+//! this project targets; see `docs/archive/reports/2026-07-26-live-nurture-report.md` for the
 //! captures they came from. Fractions rather than pixels keep them meaningful
 //! if the stream is rescaled.
 

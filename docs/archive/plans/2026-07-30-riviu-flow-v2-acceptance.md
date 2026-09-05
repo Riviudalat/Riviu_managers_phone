@@ -670,7 +670,7 @@ Expected: F3 is `PASS` only when every node proof and cleanup assertion passes. 
 
 **Files:**
 - Modify: `AGENTS.md`
-- Modify: `docs/superpowers/plans/2026-07-30-riviu-flow-v2-acceptance.md`
+- Modify: `docs/archive/plans/2026-07-30-riviu-flow-v2-acceptance.md`
 - Create: `docs/fixtures/rollback-legacy-probe.rs`
 - Create: `docs/re/flow-v2/release-1.md`
 
@@ -883,6 +883,6 @@ production Agent hashes unchanged.
 Mark checkboxes complete, update `AGENTS.md` with F3 commit/test counts/live tuple/rollback, and commit:
 
 ```powershell
-git add AGENTS.md docs/fixtures/rollback-legacy-probe.rs docs/superpowers/plans/2026-07-30-riviu-flow-v2-acceptance.md docs/re/flow-v2/release-1.md
+git add AGENTS.md docs/fixtures/rollback-legacy-probe.rs docs/archive/plans/2026-07-30-riviu-flow-v2-acceptance.md docs/re/flow-v2/release-1.md
 git commit -m "docs(flow): close release-one gate F3"
 ```

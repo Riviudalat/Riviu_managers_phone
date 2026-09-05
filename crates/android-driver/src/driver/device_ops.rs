@@ -1047,7 +1047,7 @@ impl AndroidDriver {
     ///
     /// The id is validated the same way the picker in the UI validates it, and for the same
     /// reason twice over: it is interpolated into a device shell, and the helper's own IME
-    /// must never be left installed as the phone's keyboard (AGENTS.md §9.5x).
+    /// must never be left installed as the phone's keyboard (AGENTS.md §9.52).
     pub async fn set_input_method(&self, serial: &str, ime_id: &str) -> anyhow::Result<()> {
         let ime_id = crate::riviu_agent::validate_ime_id(ime_id)?;
         if ime_id == crate::riviu_agent::IME_ID {

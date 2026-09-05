@@ -6,7 +6,7 @@
 //! only measured, and this is the measurement.
 //!
 //! The one `am broadcast` data point the project already has is a **negative** one
-//! (`docs/ANDROID_PROBE_REPORT_2026-08-09.md`): `am broadcast -a ADB_INPUT_TEXT`
+//! (`docs/archive/reports/2026-08-09-android-probe-report.md`): `am broadcast -a ADB_INPUT_TEXT`
 //! returned `result=0` while the input field did not change. That is exactly the trap
 //! waiting here — **`result=0` proves nothing**. Every claim below is checked by
 //! querying MediaStore, never by a broadcast's exit code.

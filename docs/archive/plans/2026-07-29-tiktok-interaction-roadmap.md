@@ -12,7 +12,7 @@
 
 ## Approved Source
 
-- Design: `docs/superpowers/specs/2026-07-29-tiktok-interaction-campaign-design.md`
+- Design: `docs/archive/specs/2026-07-29-tiktok-interaction-campaign-design.md`
 - Approved design commit: `10433fb`
 - Runtime constraints: `AGENTS.md`
 - Production oracle/rollback artifacts that must remain byte-identical:

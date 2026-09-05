@@ -8,15 +8,10 @@ và macOS Intel.
 Phần mềm của người khác đi kèm trong bộ cài được liệt kê ở [`NOTICE`](NOTICE),
 gồm cả một mục ghi rõ chỗ giấy phép **chưa được thẩm định**.
 
-Trạng thái công việc — cái gì chạy được, cái gì chưa, và **vì sao chưa** — ở nhật ký
-mục 9, đọc từ mục **mới nhất** trở lên. Đó là nơi duy nhất được cập nhật theo từng đợt:
-[`docs/agents/README.md`](docs/agents/README.md) là bản mục lục, và
-[`AGENTS.md`](AGENTS.md) là cửa vào.
-
-[`docs/PLAN_STATUS_2026-08-13.md`](docs/PLAN_STATUS_2026-08-13.md) là **một bản chụp
-của 13/08/2026**, không phải trạng thái hiện tại: file này từng bán nó là nguồn sự
-thật, và tới lúc đọc lại nó đã lệch hai minor version và ghi “106 test frontend / 19
-file” khi con số thật là hơn 700 trên hơn 80 file.
+Tài liệu hiện tại ở [docs/README.md](docs/README.md): hướng dẫn vận hành 12 trang,
+runbook phát triển/agent, hợp đồng UI và kho lịch sử. [AGENTS.md](AGENTS.md) vẫn là
+cửa vào của agent; [chỉ mục §](docs/agents/README.md) dẫn tới số đo và nhật ký mới nhất.
+Báo cáo có ngày ở [archive](docs/archive/README.md) không phải trạng thái hiện tại.
 
 ## Cài bản dựng
 
@@ -217,8 +212,10 @@ python3 -m py_compile scripts/build_desktop_sidecar.py `
   sidecars/wda/build_and_install.py sidecars/wda/test_build_and_install.py `
   tools/interaction-gate0/probe.py tools/interaction-gate0/test_probe.py `
   scripts/build_agents_index.py
-python3 -m unittest -v scripts.test_collect_desktop_ci_artifacts `
-  scripts.test_stage_deployment_checker sidecars.pymobiledevice3.test_app_control `
+python3 -m unittest -v scripts.test_build_per_user_wix_resources `
+  scripts.test_collect_desktop_ci_artifacts scripts.test_stage_deployment_checker `
+  scripts.test_stage_android_package_tools scripts.test_xiaowei_provenance `
+  scripts.test_build_agents_index scripts.test_check_docs sidecars.pymobiledevice3.test_app_control `
   sidecars.pymobiledevice3.test_rtmmo_lifecycle `
   sidecars.pymobiledevice3.test_media_stage sidecars.signer.test_riviu_signer `
   sidecars.wda.test_build_and_install
@@ -226,6 +223,7 @@ python3 -m unittest discover -s tools/interaction-gate0 -p "test_probe.py" -v
 python3 scripts/collect_desktop_ci_artifacts.py verify-version
 python3 scripts/collect_desktop_ci_artifacts.py verify-android-tools
 python3 scripts/build_agents_index.py --check
+python3 scripts/check_docs.py
 python3 -m pip check
 
 # Phụ thuộc: advisory + giấy phép

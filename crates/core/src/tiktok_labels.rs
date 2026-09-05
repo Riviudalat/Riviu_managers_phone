@@ -1569,11 +1569,11 @@ pub fn parse_version_code(dumpsys: &str) -> Option<&str> {
 /// that build in that language and copied the strings out. Two entries today.
 pub const TIKTOK_LABEL_SETS: &[TikTokLabels] = &[
     // Global build, English UI. From the Galaxy S8+ fleet measurements recorded in
-    // AGENTS.md §9 and `docs/ANDROID_PROBE_REPORT_2026-08-09.md`.
+    // AGENTS.md §9 and `docs/archive/reports/2026-08-09-android-probe-report.md`.
     TikTokLabels {
         package: "com.zhiliaoapp.musically",
         language: "en",
-        measured_on: "Galaxy S8+ fleet, 09/08/2026 (docs/ANDROID_PROBE_REPORT_2026-08-09.md); \
+        measured_on: "Galaxy S8+ fleet, 09/08/2026 (docs/archive/reports/2026-08-09-android-probe-report.md); \
                       composer + picker + tail 31/08/2026 trên ce11171beb408a1501 (46.2.1)",
         // The original 09/08 sweep did not record it; the composer measurements that
         // completed this set (31/08/2026) all ran on 46.2.1, which is also what three of

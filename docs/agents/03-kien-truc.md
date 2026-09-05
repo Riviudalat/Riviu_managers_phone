@@ -135,7 +135,7 @@ MDM/supervision là **phase sau** nhưng đã dành interface `AdminControl`: re
 erase, clear passcode, restrictions, OS update policy, ADE và Activation Lock
 escrow. Phase hiện tại triển khai Agent + Device Bridge, tương ứng gần đầy đủ
 quyền vận hành qua USB. Thiết kế đầy đủ:
-`docs/superpowers/specs/2026-07-28-riviu-unified-iphone-control-design.md`.
+`docs/archive/specs/2026-07-28-riviu-unified-iphone-control-design.md`.
 
 ### 3.8 Hướng bỏ phụ thuộc RT-MMO (chốt 29/07/2026)
 
@@ -159,7 +159,7 @@ token/UDID. Mac là build/sign authority; binary production không được over
 trong lúc A/B test.
 
 Thiết kế chi tiết:
-`docs/superpowers/specs/2026-07-29-riviu-agent-source-reconstruction-design.md`.
+`docs/archive/specs/2026-07-29-riviu-agent-source-reconstruction-design.md`.
 
 - Gate A forensic inventory đã **PASS**; Project 2 chỉ được dùng các delta và
   bằng chứng đã version trong `docs/re/rtmmo-agent/`. Xem `gate-a.md` trước khi
@@ -316,7 +316,7 @@ tren ca hai iPhone van duoc giu o `SUPPLEMENTAL_ONLY`; HTTP port hoac `/status`
 bao toan voi SHA-256:
 `8a24847099495ff70b998522692c43f00dd16b90f698bda6953a73f5d33002ea` va
 `e98a549af4c061556effd36424e7732219e1a6d262bcf1f259279975024b6e1a`. Xem
-`docs/superpowers/specs/2026-07-29-riviu-agent-standalone-control-parity-design.md`
+`docs/archive/specs/2026-07-29-riviu-agent-standalone-control-parity-design.md`
 va `docs/re/riviu-agent/`.
 
 Text gate da co bang chung TikTok that, khong dung chuoi mau: probe
@@ -448,7 +448,7 @@ cua TikTok hay full filesystem; khong ghi cac quyen do vao product scope.
 ### 3.12 TikTok Interaction Campaign (reviewed design 29/07/2026)
 
 Thiet ke o
-`docs/superpowers/specs/2026-07-29-tiktok-interaction-campaign-design.md`. Phase nay
+`docs/archive/specs/2026-07-29-tiktok-interaction-campaign-design.md`. Phase nay
 tao `InteractionCampaignEngine` rieng, actor `device:<udid>:default`, hai mode
 `All/RoundRobin`, campaign default + override tung link, run-now/one-time va
 partial-and-continue. Chi video/photo post duoc chay; profile/LIVE/music/shop/search
@@ -814,15 +814,15 @@ lock theo UDID; khong goi sidecar truc tiep.
 that co contract/live test.
 
 Thiet ke day du:
-`docs/superpowers/specs/2026-07-30-riviu-flow-v2-design.md`. User da duyet thiet ke;
+`docs/archive/specs/2026-07-30-riviu-flow-v2-design.md`. User da duyet thiet ke;
 implementation duoc chia thanh bon gate bat buoc F0 Foundation -> F1 Runtime -> F2
 Desktop -> F3 Acceptance tai:
 
-- `docs/superpowers/plans/2026-07-30-riviu-flow-v2-roadmap.md`;
-- `docs/superpowers/plans/2026-07-30-riviu-flow-v2-foundation.md`;
-- `docs/superpowers/plans/2026-07-30-riviu-flow-v2-runtime.md`;
-- `docs/superpowers/plans/2026-07-30-riviu-flow-v2-desktop.md`;
-- `docs/superpowers/plans/2026-07-30-riviu-flow-v2-acceptance.md`.
+- `docs/archive/plans/2026-07-30-riviu-flow-v2-roadmap.md`;
+- `docs/archive/plans/2026-07-30-riviu-flow-v2-foundation.md`;
+- `docs/archive/plans/2026-07-30-riviu-flow-v2-runtime.md`;
+- `docs/archive/plans/2026-07-30-riviu-flow-v2-desktop.md`;
+- `docs/archive/plans/2026-07-30-riviu-flow-v2-acceptance.md`.
 
 Commit chua checkpoint ke hoach nay la rollback baseline truoc F0. Ngay truoc source
 edit dau tien, worktree phai sach, dat `RIVIU_PRE_F0_COMMIT=$(git rev-parse HEAD)`
@@ -860,7 +860,7 @@ Gate da PASS `cargo fmt --all -- --check`, `cargo test --workspace` (377 passed,
 va `git diff --check`. F0 van cam `Terminate`, moi TikTok/domain node va moi Flow
 runtime/device dispatch; catalog chi co foundation release-1 da kiem chung. Gate tiep
 theo la F1 tai
-`docs/superpowers/plans/2026-07-30-riviu-flow-v2-runtime.md`; khong bat F2/F3 truoc
+`docs/archive/plans/2026-07-30-riviu-flow-v2-runtime.md`; khong bat F2/F3 truoc
 khi F1 co checkpoint rieng.
 
 F1 Task 4 checkpoint ngay 31/07/2026: Python app-control tests PASS 10/10; Rust Pmd
@@ -1032,7 +1032,7 @@ bi khoa cho toi khi `InteractionCampaignEngine` + persistence + G0-G3 va identit
 artifact gate ton tai. `RawHttp`, `RawWda` va `Shell` cung khong nam trong catalog.
 
 Gate tiep theo la Desktop F2 tai
-`docs/superpowers/plans/2026-07-30-riviu-flow-v2-desktop.md`. F2 phai wire Tauri
+`docs/archive/plans/2026-07-30-riviu-flow-v2-desktop.md`. F2 phai wire Tauri
 commands/startup, runtime-qualified protected snapshot + geometry, Flow React UI,
 startup artifact order va live node invalidation; khong chuyen thang sang F3. Mac
 van phai chay B0/Gate B/Gate C cua Riviu Agent candidate rieng truoc khi thay production
@@ -1107,7 +1107,7 @@ chi vi source/build fixture PASS.
 User da chot uu tien hai nhom: (1) menu `Tương tác`, dan link, chon tat ca/tung may,
 All/RoundRobin, Run Now/Once, scheduler + durable campaign engine; (2) Flow V2 F2/F3
 voi editor keo tha va run monitor. Plan dieu phoi active nam o
-`docs/superpowers/plans/2026-07-31-interaction-flow-delivery.md` va la noi giai quyet
+`docs/archive/plans/2026-07-31-interaction-flow-delivery.md` va la noi giai quyet
 xung dot giua cac detailed plan cu.
 
 Trang thai thuc thi: Flow F2 va F3 mock/Playwright/rollback da dong tren Windows.

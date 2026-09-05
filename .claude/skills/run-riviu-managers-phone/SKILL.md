@@ -20,7 +20,7 @@ repo root**.
 
 There is no CDP endpoint and no Playwright `_electron` handle: `tauri.conf.json`
 sets `app.windows[0].create: false` and the WebView2 window is built in Rust
-(`apps/desktop/src-tauri/src/lib.rs:36`). The handle is therefore Win32, wrapped in
+(`apps/desktop/src-tauri/src/lib.rs`, desktop window setup). The handle is therefore Win32, wrapped in
 **`.claude/skills/run-riviu-managers-phone/driver.ps1`** — it raises the window by
 z-order, captures its screen rectangle, and injects real mouse/keyboard input.
 
@@ -155,56 +155,60 @@ tile footer reads `● Live  USB  iPhone10,1 · 16.…` and **Settings** reports
 
 ## Checks (what CI actually gates)
 
-`.github/workflows/desktop-ci-cd.yml` runs exactly these on `windows-2025`:
-
-CI runs whole-workspace commands. **Do not copy them onto this machine** — run the
-per-crate list below instead, and see why underneath.
+The source of truth for CI is `.github/workflows/desktop-ci-cd.yml`. It includes
+workspace Rust, frontend unit/e2e, Python, pinned tools, provenance and dependency gates.
+On this host use the per-crate commands below; record each exit independently.
+Current runbooks are `docs/developer-guide.md` and `docs/agents/README.md`.
 
 ```powershell
 $env:PATH = "$env:USERPROFILE\.cargo\bin;$env:PATH"
 cargo fmt --all -- --check
 
-# Per crate, never --workspace. Counts as of 25/08/2026.
-cargo test -p riviu-core                                     # 718 lib + 27 + 1, ~100 s
-cargo test -p riviu-managers-phone                           # 179
-cargo test -p riviu-android-driver                           # 185
-cargo clippy -p riviu-core --all-targets -- -D warnings
-cargo clippy -p riviu-managers-phone --all-targets -- -D warnings
-cargo clippy -p riviu-android-driver --all-targets -- -D warnings
+# Per crate, preserving Cargo.lock. Core parallelism is explicit for this host.
+cargo test --locked -p riviu-core -- --test-threads=4
+cargo test --locked -p riviu-managers-phone -- --test-threads=1
+cargo test --locked -p riviu-android-driver -- --test-threads=1
+cargo clippy --locked -p riviu-core --all-targets -- -D warnings
+cargo clippy --locked -p riviu-managers-phone --all-targets -- -D warnings
+cargo clippy --locked -p riviu-android-driver --all-targets -- -D warnings
+cargo deny check
 
 cd apps\desktop
 npm run lint
-npm test         # 682 tests
+npm test -- --maxWorkers=2 --reporter=dot
 npm run build    # tsc -b && vite build
+npx playwright test --workers=2
+npm audit --audit-level=high
 ```
 
 **Why per crate.** A whole-workspace `cargo test` or `cargo clippy` on this host is
 killed by Smart App Control part way through and reports a link error that looks like a
-code fault. The per-crate list covers the same ground and finishes. Never turn Smart App
-Control off to make the workspace command work.
+code fault in historical runs. The three-crate list targets the desktop/core/Android
+surface; it does not certify every workspace tool or the iOS crate independently.
+Run the relevant extra crate/sidecar gates when that ownership boundary changes.
 
-**`npm` may not run at all here.** `npm ci` was refused by the OS on 25/08/2026 —
+**Historical npm failure (25/08/2026).** `npm ci` was refused by the OS then —
 `The operation was rejected by your operating system` — leaving `apps/desktop/node_modules`
-with 11 packages and no `.bin`, so `npm test`, `npm run lint` and `npm run build` all fail
+with 11 packages and no `.bin`, so `npm test`, `npm run lint` and `npm run build` failed
 with `'vitest' is not recognized`. That is the machine, not the tree: the frontend gates run
 in CI on every pull request. A Rust test does cover the Rust↔TypeScript boundary
 (`the_frontend_types_describe_the_same_fields_the_backend_sends` reads `types.ts` as text),
-so a type added on one side and forgotten on the other is caught by `cargo test -p riviu-core`.
+so a type added on one side and forgotten on the other is caught by `cargo test --locked -p riviu-core`.
+This dated incident does not waive current frontend gates; the 06/09/2026 results
+are recorded separately in AGENTS.md §9.152.
 
-`cargo test -q -p riviu-managers-phone` alone is the fast inner loop.
+`cargo test --locked -q -p riviu-managers-phone` alone is the fast inner loop.
 **Stop the app first** — a running `riviu-managers-phone.exe` is locked and cargo
 cannot relink it.
 
-Three `flow::evidence` tests fail **under load** and pass when run alone: their deadlines
-are one second of real time and 700 sibling tests starve them. `cargo test -p riviu-core
---lib flow::evidence` on its own is the check; a failure there while the rest of the suite
-is green is not a regression.
+Timing failures under load must be diagnosed and recorded, not dismissed because a
+focused rerun passes. Preserve the original full-gate result and rerun the full scope
+after a regression fix. Current counts belong in the dated diary, not this runbook.
 
-`npm run test:e2e` is **not** in CI but passes locally (6 specs, ~14s) after
-`npx playwright install chromium`. It starts its own vite on `127.0.0.1:1421` with a
-mocked Tauri IPC (`e2e/fixtures/tauriMock.ts`), so it is the only way to drive the
-frontend with no phone attached. The `[vite] Unhandled error: ResizeObserver loop
-completed with undelivered notifications` lines it prints are noise, not failures.
+`npm run test:e2e` is a CI gate. Install its locked Chromium once with
+`npx playwright install chromium`. The harness uses mocked Tauri IPC
+(`e2e/fixtures/tauriMock.ts`); its result verifies UI fixtures, not physical devices.
+Inspect console errors and actual screenshots before accepting a changed snapshot.
 
 ## Run — human path
 
@@ -232,7 +236,7 @@ A window opens; Ctrl-C in the terminal stops it. No PATH setup is needed: `pytho
   misfire. Install them into 3.12.
 - **First cold connect freezes the UI for ~2 minutes.** `_list_devices()` in
   `sidecars/pymobiledevice3/riviu_pmd.py:337` awaits `create_using_usbmux()` with no
-  timeout, and `lib.rs:57` runs `block_on(AppState::bootstrap(..))` inside `.setup()`.
+  timeout, and the desktop setup runs `block_on(AppState::bootstrap(..))` inside `.setup()`.
   The title shows "(Not Responding)" over a black webview. **Wait it out** — it
   recovers and the device comes up Ready. Only the first connect after pairing does this.
 - **`SetForegroundWindow` is refused** for a non-foreground caller, so it silently
@@ -359,7 +363,7 @@ A window opens; Ctrl-C in the terminal stops it. No PATH setup is needed: `pytho
   accessibility connection. (4) `screen::CALIBRATED_LAYOUTS` holds exactly
   `iphone8-portrait-v1`, so nurture refuses any other screen class by design. The
   desktop's only TikTok constant is the **iOS** bundle `com.ss.iphone.ugc.Ame`.
-  See AGENTS.md §9/§10 and `docs/ANDROID_PROBE_REPORT_2026-08-09.md`.
+  See AGENTS.md §9/§10 and `docs/archive/reports/2026-08-09-android-probe-report.md`.
 - **`wm size` can print one line or two.** AGENTS.md says read `Override`, measured on
   a fleet that always had one; this Redmi prints only `Physical size: 1080x2400`.
   `parse_wm_size`/`parse_wm_density` handle both — their own tests cover the

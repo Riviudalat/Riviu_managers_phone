@@ -256,7 +256,7 @@ impl LadderStep {
 ///
 /// **Lazy on purpose.** Every probe is a round trip, and under a playing feed the measured
 /// cost is 90–170 ms for geometry and up to ten seconds for a query the server has to wait
-/// out (`docs/ANDROID_PROBE_REPORT_2026-08-09.md`). A version of this that collected the
+/// out (`docs/archive/reports/2026-08-09-android-probe-report.md`). A version of this that collected the
 /// whole screen state first and then decided would be tidier and would pay for four probes
 /// on every poll where the first one already answered.
 pub async fn step(

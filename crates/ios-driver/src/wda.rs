@@ -1088,7 +1088,7 @@ impl WdaClient {
     /// waits for the app to go quiescent — and TikTok's feed animates non-stop,
     /// so that wait routinely outlives the deadline and surfaces as
     /// "error sending request". Measured on this device before the change; the
-    /// numbers are in `docs/LIVE_NURTURE_REPORT_2026-07-26.md`.
+    /// numbers are in `docs/archive/reports/2026-07-26-live-nurture-report.md`.
     ///
     /// `/wda/tap` remains a fallback for the one case it helps with: `/actions`
     /// being rejected outright (some builds 500 on the first call after init).

@@ -12,7 +12,7 @@
 
 ## Execution Preconditions
 
-- Complete and merge `docs/superpowers/plans/2026-07-29-tiktok-interaction-gate-0-device-control.md` and `docs/superpowers/plans/2026-07-29-tiktok-interaction-campaign-core.md` first. G0 must expose the shared `DeviceWorkCoordinator`, producer-counted `StreamBudget`, install-only repair, ordered Interaction session/stream primitives, clipboard modes, and an exact qualification registry. G1 must expose `InteractionBatchExecutor`, `TikTokActionExecutor`, `InteractionProgress`, `PreparedActionPayload`, `ActionOutcome`, and `EvidenceRef`.
+- Complete and merge `docs/archive/plans/2026-07-29-tiktok-interaction-gate-0-device-control.md` and `docs/archive/plans/2026-07-29-tiktok-interaction-campaign-core.md` first. G0 must expose the shared `DeviceWorkCoordinator`, producer-counted `StreamBudget`, install-only repair, ordered Interaction session/stream primitives, clipboard modes, and an exact qualification registry. G1 must expose `InteractionBatchExecutor`, `TikTokActionExecutor`, `InteractionProgress`, `PreparedActionPayload`, `ActionOutcome`, and `EvidenceRef`.
 - Reconcile the G1 names to the canonical set used by its final task: `PlannedActionKind`, `ActionStatus`, `AssignmentStatus`, and `CampaignStatus`. Do not introduce parallel `ActionKind` or `ActionState` enums.
 - Execute in an isolated worktree after the current dirty Project 2/runtime work is committed to an integration baseline. Stage only paths named by the current task.
 - Keep `sidecars/wda/RiviuAgent.ipa` and `sidecars/wda/agent-manifest.json` byte-identical. This plan adds no Agent route and does not advertise a manifest feature.

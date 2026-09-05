@@ -12,7 +12,7 @@
 
 ## Execution Preconditions
 
-- Execute this plan only after G0, G1, and G2 are merged and their named verification commands pass. Read `AGENTS.md`, the approved design at `docs/superpowers/specs/2026-07-29-tiktok-interaction-campaign-design.md`, and the three prerequisite plans before Task 1.
+- Execute this plan only after G0, G1, and G2 are merged and their named verification commands pass. Read `AGENTS.md`, the approved design at `docs/archive/specs/2026-07-29-tiktok-interaction-campaign-design.md`, and the three prerequisite plans before Task 1.
 - Use an isolated worktree created with the `using-git-worktrees` skill. The current shared checkout is dirty; never stage, reset, format, or overwrite unrelated work.
 - Treat the G1 contracts as canonical: `InteractionCampaignRequest`, `TikTokTargetInput`, `ActorSelection`, `DistributionMode`, `ScheduleMode`, `InteractionDefaults`, `InteractionOverrides`, `ActionPolicy`, `RecipientPolicy`, `AccountBinding`, `CampaignStatus`, `AssignmentStatus`, `AssignmentResultCode`, `RetryBlockedReason`, `IdentityCopyIntent`, `CapabilitySnapshot`, `CapabilityState`, `CampaignSummary`, `Page<T>`, and the approved `interaction_*` commands. Do not introduce a second parser, planner, campaign store, scheduler, capability map, or client-side resolved-target request.
 - Treat G0's `DeviceControlPlane`, `DeviceWorkOwner::ManualControl`, typed `DeviceBusy`, session-before-stream transition, and producer-counted stream budget as mandatory. `interaction_open_on_device` must not call a driver or `ensure_stream` directly.
@@ -1604,7 +1604,7 @@ Add a dated checkpoint containing:
 - `interaction_open_on_device` uses `DeviceWorkOwner::ManualControl` and typed `DeviceBusy`;
 - Proxy is CRUD/export/assignment plus desktop endpoint reachability and manual confirmation only;
 - current proxy capability remains `unsupported_unsupervised/manual_required`;
-- Save, Repost, and Direct Message remain `Deferred/GateNotQualified` until `docs/superpowers/plans/2026-07-29-tiktok-interaction-new-action-gates.md` completes;
+- Save, Repost, and Direct Message remain `Deferred/GateNotQualified` until `docs/archive/plans/2026-07-29-tiktok-interaction-new-action-gates.md` completes;
 - production IPA/manifest checksums above remain unchanged;
 - rollback is the G3 commit range only; additive proxy annotations/history may remain.
 
@@ -1648,7 +1648,7 @@ Expected staged paths: exactly the six desktop paths above plus only the reviewe
 Run these checks against this plan before execution handoff:
 
 ```powershell
-$plan = 'docs/superpowers/plans/2026-07-29-tiktok-interaction-desktop-workflow.md'
+$plan = 'docs/archive/plans/2026-07-29-tiktok-interaction-desktop-workflow.md'
 $text = Get-Content $plan -Raw
 $fences = ([regex]::Matches($text, '(?m)^```')).Count
 if (($fences % 2) -ne 0) { throw 'Unbalanced code fences' }

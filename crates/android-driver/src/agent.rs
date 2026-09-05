@@ -3,7 +3,7 @@
 //!
 //! Everything in a control loop belongs here rather than in [`crate::adb`].
 //! Measured on the same Galaxy S8+, same operations
-//! (`docs/ANDROID_PROBE_REPORT_2026-08-09.md`):
+//! (`docs/archive/reports/2026-08-09-android-probe-report.md`):
 //!
 //! | operation      | adb CLI   | this client |
 //! |----------------|-----------|-------------|
@@ -297,7 +297,7 @@ impl AgentClient {
         let base = base.into().trim_end_matches('/').to_string();
         // 30 s, from measurements rather than from caution. The slowest *legitimate*
         // element query recorded against this server is 10,2–10,5 s (the S8+ fleet under a
-        // playing feed, `docs/ANDROID_PROBE_REPORT_2026-08-09.md`), and a rotten session
+        // playing feed, `docs/archive/reports/2026-08-09-android-probe-report.md`), and a rotten session
         // answers at 10,1 s before erroring; `/source` is 3,4 s. Nothing measured comes
         // near 30 s, and nothing slow goes through this client at all — APK pushes and
         // installs are adb.
@@ -349,7 +349,7 @@ impl AgentClient {
     /// `waitForIdleTimeout: 0` was verified applied and changed nothing, and
     /// neither did `enableTopmostWindowFromActivePackage` or
     /// `deferAccessibilityCacheReset`. Measured 20/20 queries at p50 10531 ms.
-    /// See `docs/ANDROID_PROBE_REPORT_2026-08-09.md`.
+    /// See `docs/archive/reports/2026-08-09-android-probe-report.md`.
     /// Uses [`Self::send_once`] deliberately: this runs against a session that was
     /// *just* created, so a recycle here would be a loop, and a fresh session having
     /// a rotten tree is not a case that recycling can fix.

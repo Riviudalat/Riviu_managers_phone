@@ -118,6 +118,8 @@ jobs:
           # headings, so a hand edit or a forgotten regeneration is exactly the drift that
           # made the split necessary -- and the one thing a doc index cannot survive.
           python scripts/build_agents_index.py --check
+          python -m unittest scripts.test_build_agents_index scripts.test_check_docs -v
+          python scripts/check_docs.py
 
       # Repo-side digest check for the bundled Android tools. Deliberately in the
       # quality job as well as in the packaged verification: a PR that replaces a

@@ -48,3 +48,5 @@ sidecars/yt-dlp/yt-dlp-manifest.json
 # and committing an agent's scratch copy beside the real one is how two skill files with the
 # same name come to disagree.
 .agents/
+# Length-prefixed MJPEG copies are reconstructible from the retained evidence JPEG.
+docs/re/riviu-agent/**/*.framed

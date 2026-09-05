@@ -19,7 +19,7 @@
 ## Scope And Baseline
 
 This plan implements milestone 1, `Unified Agent Runtime`, from the approved design in
-`docs/superpowers/specs/2026-07-28-riviu-unified-iphone-control-design.md`.
+`docs/archive/specs/2026-07-28-riviu-unified-iphone-control-design.md`.
 Milestones 2-6 will add the broader capability control plane, system controls,
 apps/transfers, backup/diagnostics, and RSD support. MDM remains deferred.
 
@@ -1034,7 +1034,7 @@ git commit -m "feat: manage the unified agent from desktop UI"
 
 **Files:**
 - Modify: `AGENTS.md`
-- Create: `docs/live-agent-runtime-2026-07-28.md`
+- Create: `docs/archive/reports/2026-07-28-live-agent-runtime.md`
 
 - [ ] **Step 1: Update handoff documentation before final verification**
 
@@ -1049,7 +1049,7 @@ Document in `AGENTS.md`:
 - Repeated `TextNotArmed` refreshes the fresh session after two occurrences.
 - Future milestones 2-6 remain pending; MDM remains phase 3/deferred.
 
-Start `docs/live-agent-runtime-2026-07-28.md` with the exact commands below and fill
+Start `docs/archive/reports/2026-07-28-live-agent-runtime.md` with the exact commands below and fill
 in actual pass counts, package path, installed executable path, and live JSONL path.
 
 - [ ] **Step 2: Run format, Rust, Python, and frontend gates**
@@ -1185,7 +1185,7 @@ app-owned files, and only intentional working-tree changes.
 - [ ] **Step 8: Commit documentation and final integration fixes**
 
 ```powershell
-git add AGENTS.md docs/live-agent-runtime-2026-07-28.md
+git add AGENTS.md docs/archive/reports/2026-07-28-live-agent-runtime.md
 git diff --cached --check
 git commit -m "docs: record unified agent runtime verification"
 ```

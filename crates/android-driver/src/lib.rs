@@ -3,11 +3,11 @@
 //!
 //! The original design doc reserved this seam on day one — *"manage and
 //! automate multiple iPhones, with Android deferred behind a `DeviceDriver`
-//! trait"* (`docs/superpowers/specs/2026-07-25-riviu-managers-phone-design.md:7`).
+//! trait"* (`docs/archive/specs/2026-07-25-riviu-managers-phone-design.md:7`).
 //! This crate fills it.
 //!
 //! Two layers, split by what each is good for, and the split is measured
-//! rather than assumed (`docs/ANDROID_PROBE_REPORT_2026-08-09.md`):
+//! rather than assumed (`docs/archive/reports/2026-08-09-android-probe-report.md`):
 //!
 //! - [`adb`] — the `adb` CLI, for device lifecycle. A call costs 1–2 s on the
 //!   Galaxy S8+ fleet, which is fine for install/launch/stop and wrong for

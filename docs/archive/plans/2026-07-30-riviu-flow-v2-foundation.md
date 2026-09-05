@@ -1569,7 +1569,7 @@ git commit -m "feat(flow): persist immutable compiled revisions"
 
 **Files:**
 - Modify: `AGENTS.md`
-- Modify: `docs/superpowers/plans/2026-07-30-riviu-flow-v2-foundation.md`
+- Modify: `docs/archive/plans/2026-07-30-riviu-flow-v2-foundation.md`
 
 - [x] **Step 1: Run the full gate**
 
@@ -1587,6 +1587,6 @@ Expected: every command exits 0.
 Mark all F0 checkboxes complete. Append the F0 commit range, test counts, disabled Terminate/TikTok/runtime nodes, next plan path, and rollback commit to `AGENTS.md`.
 
 ```powershell
-git add AGENTS.md docs/superpowers/plans/2026-07-30-riviu-flow-v2-foundation.md
+git add AGENTS.md docs/archive/plans/2026-07-30-riviu-flow-v2-foundation.md
 git commit -m "docs(flow): record foundation gate F0"
 ```

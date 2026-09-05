@@ -7,7 +7,7 @@
 //! a shell script that starts a VM per call, and batching several into one
 //! `adb shell` does not help (five taps cost five times as much). At 1–2 s a
 //! call this layer is fine for setup and wrong for everything else.
-//! See `docs/ANDROID_PROBE_REPORT_2026-08-09.md`.
+//! See `docs/archive/reports/2026-08-09-android-probe-report.md`.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};

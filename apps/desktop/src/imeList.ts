@@ -18,7 +18,7 @@
  *    own output and choosing from that list means the string never originates here.
  * 2. **Never offer the Riviu helper IME.** `com.riviu.agent/.RiviuIme` is switched in for a
  *    single clipboard call and switched straight back out; leaving it as the phone's
- *    keyboard is GenFarmer's mark and this project rules it out (AGENTS.md §9.5x). A picker
+ *    keyboard is GenFarmer's mark and this project rules it out (AGENTS.md §9.52). A picker
  *    that lists it can violate that with one click.
  */
 

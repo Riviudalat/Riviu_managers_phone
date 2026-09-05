@@ -36,4 +36,4 @@ Grouped by what they were about:
   acceptance; `-roadmap.md` is the entry point
 - `2026-07-31-interaction-flow-delivery.md` — the combined delivery plan for the two above
 
-Specs these plans were written against: `docs/superpowers/specs/`.
+Specs these plans were written against: `docs/archive/specs/`.
