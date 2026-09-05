@@ -627,3 +627,96 @@
   Dừng desktop trước khi dùng cùng thiết bị; không chạy Like, Save, Comment, Follow
   hay Post qua MCP. Fixture đã đo phải được mã hóa lại trong adapter Riviu và action
   production vẫn đi qua `DeviceControlPlane`.
+
+#### 14.12 UI production, trạng thái bền và cleanup công khai (05/09/2026; xem §9.145)
+
+- Các workspace vận hành dùng chung `PageHeader`, `WorkspaceTabs`,
+  `WorkflowStepper`, `SummaryRail`, `StatusChip`, `ResponsiveTable`,
+  `DetailDrawer` và `FormSection`: nền nội dung sáng, bề mặt trắng, sidebar tối và
+  một `h1` cho mỗi trang. `DeviceTile`, `PhoneCanvas`, mật độ lưới cùng thao tác
+  chọn/mở máy của trang Thiết bị vẫn là contract cũ. Bảng/canvas tự cuộn trong vùng;
+  document, shell và content không được tràn ngang ở 1440×900, 900×900, 820×560
+  hoặc display scale 125/150%. Mockup standalone V3 và dữ liệu Playwright chỉ là
+  fixture review/test, không phải fallback runtime hay resource được đóng gói;
+  `RIVIU_MOCK_DEVICES=1` vẫn là test mode cô lập đã định nghĩa ở 14.7.
+- Mỗi lần Nuôi có `run_id`, target list bất biến và các status event append-only.
+  Migration 28 lưu cả trạng thái ban đầu trước khi spawn worker; lần cập nhật sau chỉ
+  append, và reader lấy event mới nhất cho từng máy rồi overlay status đang chạy.
+  `NurtureCleanupState = pending | processAbsent | failed` là nguồn duy nhất cho UI:
+  chỉ `processAbsent` kèm `ProcessAbsenceProof` của đúng package mới được hiển thị
+  “TikTok đã tắt”. `Outcome::Done` thiếu proof phải chiếu thành `Partial`, không thành
+  công. Restart không được làm mất lịch sử Nuôi khỏi trang Tác vụ. Khi startup gặp
+  session đã bắt đầu nhưng chưa có terminal cleanup, recovery phải lấy lease Nuôi,
+  terminate đúng package TikTok rồi append cleanup status; row queued chưa từng bắt đầu
+  chỉ được đóng trạng thái, không chạm thiết bị.
+- `PublishPreflightRequest/Report` mang semantic `TargetRef`,
+  `ResolvedTargetSnapshot`, digest của input đã duyệt và kết quả từng máy cho
+  package/build/locale, media, dung lượng, composer và sound picker. Command tạo
+  campaign phải resolve lại cùng target, tính lại digest và dừng trước device effect
+  nếu request stale. Campaign và snapshot thực thi đầu tiên phải commit atomically;
+  transfer cũng cần write-ahead bền trước khi chạm thiết bị.
+- Một bundle chứa hoặc 1–35 ảnh, hoặc đúng một MP4 H.264 có AAC/không audio, tối đa
+  10 phút và 2 GiB. Video Android dùng MediaStore `Videos`, ảnh dùng `Images`; stage,
+  readback và cleanup đều buộc vào collection cùng đường dẫn chính xác. Picker video
+  hiện chỉ được mở cho tuple đã đo `com.ss.android.ugc.trill/en/38.3.2`. Cả ảnh và
+  video đi qua cùng lựa chọn nhạc seeded, lưu `section/title/artist/index/digest`,
+  re-proof danh sách trước callback effect one-shot ngay trước Post; mismatch phải
+  dừng trước Post.
+- `PublishExecutionSnapshot` lưu `complete | partial | uncertain` cùng
+  `fullPipeline | linkAndSheet | sheetOnly | none`; restart đọc trường này thay vì
+  đoán từ chuỗi trạng thái. Một Post đã confirmed không bao giờ chạy lại full
+  pipeline. Không có Sheet config thì canonical URL và đúng một outbox pending cho
+  phép retry idempotent, còn kết quả vận hành là `Partial`.
+- Mọi lần đổi durable state của Publish phải lưu execution snapshot trước khi phát
+  event UI; nếu lưu lỗi thì không được phát một event mới hơn trạng thái trên đĩa.
+  Khi Sheet trả thành công, CAS `pending/failed -> sent` và snapshot execution suy ra
+  từ outbox phải nằm trong cùng một SQLite `IMMEDIATE` transaction. Lỗi upsert
+  snapshot rollback cả CAS, để hàng vẫn retryable và không phát event `sent`; đường
+  trực tiếp cùng sweeper bắt buộc dùng chung operation atomic này.
+- Trang Tác vụ là projection chỉ đọc qua `OperationRunSummary/Detail` cho script,
+  Flow, orchestration, Nuôi, Interaction và Publish; không tạo bảng trạng thái thứ hai
+  hay dữ liệu ví dụ. ID công khai của projection có prefix loại nguồn; state chuẩn là
+  `queued | running | succeeded | partial | failed | uncertain | cancelled |
+  skipped`. Nguồn gốc vẫn là ledger/run/campaign tương ứng, và Publish phải ưu tiên
+  execution snapshot bền khi xác định retry scope.
+- Cleanup public effect phải fail closed. Contract toggle Like/Save/Follow chỉ cho tap
+  khi đọc dương tính `Present`, identity đầy đủ, observation mới hơn, re-proof cùng
+  card và write-ahead thành công; sau tap chỉ `Absent` trên cùng identity mới là cleared.
+  Xóa comment/post còn đòi strong ownership, đúng campaign identity và đúng một nút
+  xác nhận đã đo. Lỗi sau effect boundary là uncertain và không tự retry. Migration
+  29 giữ cleanup journal `planned -> preparing -> armed -> terminal` bằng CAS và
+  reconcile row dở dang sau restart. Tauri preflight/execute cho Unlike/Unsave mở lại
+  canonical URL, đòi `TargetProof::Identified`, dùng hierarchy adapter/state đã đo và
+  arm journal ngay trước tap. Trong implementation hiện tại chỉ Unlike/Unsave đã nối
+  đường production, và cũng chỉ trở thành bằng chứng live khi canary cùng readback đạt.
+  Scout canary đã thấy `Following | Friends` cạnh exact handle trong danh sách
+  Following, và thấy `Delete` sau một lần cuộn ngang share rail của owned post rồi
+  sheet `Delete and re-edit | Delete`. Hai observation này chưa đủ mở production:
+  Follow còn thiếu handle được persist theo source action cùng negative readback sau
+  unfollow; modal Delete che target và chưa có canonical/grid-absence readback sau
+  xóa. Comment cũng chưa có exact owned row gắn URL để đo long-press. Vì vậy cả
+  Follow/Comment/Post vẫn phải trả typed `unsupportedUnmeasured` trước DB/device
+  lookup, lease và tap thay vì thử mò.
+- Stream có frame đã vẽ và hierarchy sẵn sàng là hai điều kiện độc lập. Nếu thiết bị
+  còn instrumentation UiAutomator cạnh tranh, gồm runner Genfarmer hoặc runner test
+  khác, public-action preflight/canary phải dừng cho tới khi owner đó được dừng/gỡ;
+  việc agent Riviu tự restart và stream trở lại không được tính là chứng nhận
+  accessibility hay effect. Ngay trước mọi lần start/restart, Android driver đọc
+  `Active instrumentation` từ ActivityManager và từ chối runner lạ mà không force-stop
+  nó. Không dùng `pidof <target>` cho guard này: Genfarmer có thể giữ target process
+  chỉ để phục vụ `AdbKeyboard` trong khi không sở hữu UiAutomation. Một thiết bị chỉ
+  được có một owner UiAutomator hữu hiệu trong lúc Riviu đọc hierarchy và chạy action.
+- Android instrumentation phải pipe và drain liên tục cả stdout lẫn stderr; trỏ stdout
+  vào NUL có thể làm `am instrument` trả code `0` trước khi runner giữ session. Mỗi
+  channel chỉ giữ một tail chẩn đoán 64 KiB nhưng vẫn phải drain toàn bộ để output lớn
+  không deadlock. Sau start, `ActiveInstrumentation` mới là bằng chứng runner đang giữ
+  UiAutomation; exit code spawn riêng lẻ không đủ.
+- Backend phát `orchestrationUpdated { runId }` cho create/cancel và khi durable worker
+  snapshot thật sự đổi. Frontend Tác vụ dùng event này để refresh projection bền; không
+  poll liên tục hoặc tự dựng optimistic history. Khi thiết bị offline, nhãn chính của
+  dòng Tác vụ vẫn lấy alias/số máy đã review trong target snapshot bất biến, không rơi
+  về serial; nhãn child/branch Điều phối phải là tiếng Việt, còn raw ID chỉ ở details.
+- Bản thử nội bộ 0.2.3 đóng MSI và NSIS cùng checker/resource manifest. Profile
+  `internal` cho phép Authenticode chưa ký dưới dạng warning; profile production không
+  được kế thừa ngoại lệ này. Một report đạt trên host phát triển chỉ chứng minh đúng
+  installer/OS đã chạy, không thay thế ma trận snapshot Windows 10/11 sạch.
