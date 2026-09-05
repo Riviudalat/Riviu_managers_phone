@@ -143,10 +143,12 @@ export function WorkflowStepper({
   steps,
   current,
   label = "Tiến trình",
+  onStepChange,
 }: {
   steps: WorkflowStep[];
   current: string;
   label?: string;
+  onStepChange?: (id: string) => void;
 }) {
   const currentIndex = steps.findIndex((step) => step.id === current);
   return (
@@ -159,8 +161,7 @@ export function WorkflowStepper({
         const state =
           step.state ??
           (index < currentIndex ? "complete" : index === currentIndex ? "current" : "upcoming");
-        return (
-          <li key={step.id} className={`workflow-step is-${state}`} aria-current={state === "current" ? "step" : undefined}>
+        const content = <>
             <span className="workflow-step-marker" aria-hidden="true">
               {state === "complete" ? <Check size={13} /> : index + 1}
             </span>
@@ -168,6 +169,12 @@ export function WorkflowStepper({
               <strong>{step.label}</strong>
               {step.description && <small>{step.description}</small>}
             </span>
+          </>;
+        return (
+          <li key={step.id} className={`workflow-step is-${state}`} aria-current={state === "current" ? "step" : undefined}>
+            {onStepChange ? <button type="button" className="workflow-step-link"
+              aria-label={step.label} aria-current={state === "current" ? "step" : undefined}
+              onClick={() => onStepChange(step.id)}>{content}</button> : content}
           </li>
         );
       })}
@@ -212,86 +219,7 @@ export function StatusChip({
   );
 }
 
-export interface ResponsiveTableColumn<Row> {
-  id: string;
-  label: string;
-  render: (row: Row) => ReactNode;
-  className?: string;
-}
-
-export function ResponsiveTable<Row>({
-  label,
-  columns,
-  rows,
-  keyForRow,
-  labelForRow,
-  onRowOpen,
-  empty,
-}: {
-  label: string;
-  columns: ResponsiveTableColumn<Row>[];
-  rows: Row[];
-  keyForRow: (row: Row) => string;
-  labelForRow?: (row: Row) => string;
-  onRowOpen?: (row: Row) => void;
-  empty?: ReactNode;
-}) {
-  if (!rows.length) return <>{empty ?? null}</>;
-  return (
-    <div className="responsive-table-wrap">
-      <table className="responsive-table" aria-label={label}>
-        <thead>
-          <tr>
-            {columns.map((column) => (
-              <th key={column.id} scope="col" className={column.className}>
-                {column.label}
-              </th>
-            ))}
-          </tr>
-        </thead>
-        <tbody>
-          {rows.map((row) => (
-            <tr
-              key={keyForRow(row)}
-              tabIndex={onRowOpen ? 0 : undefined}
-              aria-label={labelForRow?.(row)}
-              onClick={
-                onRowOpen
-                  ? (event) => {
-                      if (
-                        (event.target as HTMLElement).closest(
-                          'button, a, input, select, textarea, [role="button"]',
-                        )
-                      ) {
-                        return;
-                      }
-                      onRowOpen(row);
-                    }
-                  : undefined
-              }
-              onKeyDown={
-                onRowOpen
-                  ? (event) => {
-                      if (event.target !== event.currentTarget) return;
-                      if (event.key !== "Enter") return;
-                      event.preventDefault();
-                      onRowOpen(row);
-                    }
-                  : undefined
-              }
-            >
-              {columns.map((column) => (
-                <td key={column.id} data-label={column.label} className={column.className}>
-                  {column.render(row)}
-                </td>
-              ))}
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </div>
-  );
-}
+export { ResponsiveTable, type ResponsiveTableColumn } from "./table/ResponsiveTable";
 
 export function DetailDrawer({
   open,

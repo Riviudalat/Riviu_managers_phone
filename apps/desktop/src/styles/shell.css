@@ -1,4 +1,4 @@
-/* Swarmote admin shell layout · Riviu orange */
+/* Application shell; device surfaces keep their own geometry. */
 
 .shell {
   display: flex;
@@ -93,7 +93,7 @@
   letter-spacing: 0;
   white-space: nowrap;
   overflow: hidden;
-  color: var(--nav-active);
+  color: var(--text-1);
 }
 
 .aside-scroll {
@@ -112,7 +112,7 @@
   font-size: var(--text-xs);
   font-weight: 700;
   line-height: 1.5;
-  text-transform: uppercase;
+  text-transform: none;
 }
 
 .menu-item {
@@ -156,9 +156,8 @@
 .aside-stats {
   margin: 0.65rem 0.35rem 0.35rem;
   padding: 0.65rem 0.75rem;
-  border: 1px solid var(--nav-line);
-  border-radius: var(--radius);
-  background: var(--nav-panel);
+  border-top: 1px solid var(--nav-line);
+  background: transparent;
 }
 .aside-stats h4 {
   margin: 0 0 0.4rem;
@@ -247,6 +246,10 @@
   gap: 0.55rem;
 }
 
+.content:not(.content-control) {
+  font-size: var(--text-base);
+}
+
 .content-control {
   padding: 0.65rem 1rem 1rem;
 }
@@ -285,7 +288,7 @@
   margin: 0;
   gap: 4px;
   color: var(--text-2);
-  font-size: var(--text-xs);
+  font-size: var(--text-sm);
   font-weight: 600;
 }
 

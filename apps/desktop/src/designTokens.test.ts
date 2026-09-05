@@ -29,6 +29,11 @@ const shipped = Object.keys(
 const code = (css: string) => css.replace(/\/\*[\s\S]*?\*\//g, " ");
 
 describe("the token layer", () => {
+  it("uses a white navigation surface and an orange action accent", () => {
+    expect(code(indexCssRaw)).toMatch(/--nav-bg:\s*#ffffff;/);
+    expect(code(indexCssRaw)).toMatch(/--primary:\s*#c2410c;/);
+    expect(code(indexCssRaw)).toMatch(/--nav-text:\s*#374151;/);
+  });
   // The point of the layer is one place to change a step, and a step that exists at
   // all. A half-declared scale is worse than none: callers reach for `var(--space-7)`,
   // get nothing, and the declaration silently does nothing. That is not theoretical —

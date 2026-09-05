@@ -14,17 +14,17 @@
   --orange-soft: var(--primary-100);
   --orange-ring: var(--primary-ring);
 
-  --nav-bg: #111827;
-  --nav-bg-hover: #1f2937;
-  --nav-panel: #182234;
-  --nav-line: #334155;
-  --nav-text: #dbe4f0;
-  --nav-muted: #94a3b8;
-  --nav-active: #ffffff;
+  --nav-bg: #ffffff;
+  --nav-bg-hover: #fff7ed;
+  --nav-panel: #f5f6f8;
+  --nav-line: #e5e7eb;
+  --nav-text: #374151;
+  --nav-muted: #6b7280;
+  --nav-active: #9a3412;
 
-  --bg: #f4f7fb;
-  --bg-canvas: #f4f7fb;
-  --bg-content: #f4f7fb;
+  --bg: #f5f6f8;
+  --bg-canvas: #f5f6f8;
+  --bg-content: #f5f6f8;
   --bg-elevated: #ffffff;
   --bg-panel: #ffffff;
   --bg-aside: #f8fafc;
@@ -112,7 +112,7 @@
      old sizes look like ten different fonts. */
   --text-2xs: 0.625rem;
   --text-xs: 0.6875rem;
-  --text-sm: 0.75rem;
+  --text-sm: 0.8125rem;
   --text-md: 0.8125rem;
   --text-base: 0.875rem;
   --text-lg: 1rem;
@@ -132,7 +132,7 @@
   /* `--radius` keeps its old value: it is referenced in 3332 lines of App.css and
      changing it silently restyles the whole app. The scale grows around it. */
   --radius-sm: 4px;
-  --radius-lg: 12px;
+  --radius-lg: 8px;
   --radius-pill: 999px;
 
   /* Stacking order, as one list instead of eighteen numbers spread over 4,000 lines.

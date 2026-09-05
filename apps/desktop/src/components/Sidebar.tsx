@@ -92,19 +92,19 @@ export function Sidebar({
 
         {!collapsed && (
           <div className="aside-stats">
-            <h4>Tổng quan</h4>
+            <h4>Kết nối</h4>
             <div className="aside-stat-row">
-              <span>Thiết bị</span>
+              <span>Sẵn sàng</span>
               <span />
               <strong>
                 {readyCount}/{total}
               </strong>
             </div>
-            <div className="aside-stat-row">
-              <span>Đã chọn</span>
+            {page === "control" && <div className="aside-stat-row">
+              <span>Đã chọn trong lưới</span>
               <span />
               <strong>{selectedCount}</strong>
-            </div>
+            </div>}
             <div className="aside-stat-row">
               <span>Đồng bộ</span>
               <span />

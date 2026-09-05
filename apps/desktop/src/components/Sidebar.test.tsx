@@ -23,6 +23,12 @@ function renderSidebar(collapsed = false) {
 }
 
 describe("Sidebar information architecture", () => {
+  it("does not present grid selection as the scope of an automation workspace", () => {
+    render(<Sidebar page="publish" collapsed={false} selectedCount={21} total={21} readyCount={20}
+      groupMode={false} onPage={vi.fn()} onToggleCollapse={vi.fn()} />);
+    expect(screen.queryByText("Đã chọn trong lưới")).toBeNull();
+    expect(screen.getByText("20/21")).toBeVisible();
+  });
   it("groups every workspace in the requested operator order", () => {
     renderSidebar();
 
