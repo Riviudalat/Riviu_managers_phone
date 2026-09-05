@@ -2099,7 +2099,7 @@ mod tests {
 
     #[test]
     fn selected_sound_is_reproved_after_caption_and_before_the_post_boundary() {
-        let source = include_str!("tiktok_composer.rs");
+        let source = include_str!("tiktok_composer.rs").replace("\r\n", "\n");
         let start = source
             .find("async fn post_with_effect_intent")
             .expect("effect-aware Post routine");
