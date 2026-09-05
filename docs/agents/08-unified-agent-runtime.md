@@ -321,7 +321,7 @@
   sửa transactionally thành `uncertain/post_account_locked`, assignment có
   `effectIntent=post_carousel`, frame `/tmp/e561-post-success.png`, event
   `verification_failed` revision 7. Không gọi đây là post thành công.
-- `publish_commands.rs` nay chạy Vision OCR ở frame sau Post và frame chờ tiếp
+- `publish_commands/execution.rs` chạy Vision OCR ở frame sau Post và frame chờ tiếp
   theo, chặn cả chuỗi tiếng Việt/không dấu và English `account locked`. Desktop
   crate test 47/47, core publish 9/9, Python candidate 125/125, fmt/check PASS.
 - Baseline lock có 13 patch; patch mới
