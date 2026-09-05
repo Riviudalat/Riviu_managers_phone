@@ -679,24 +679,34 @@
   `queued | running | succeeded | partial | failed | uncertain | cancelled |
   skipped`. Nguồn gốc vẫn là ledger/run/campaign tương ứng, và Publish phải ưu tiên
   execution snapshot bền khi xác định retry scope.
-- Cleanup public effect phải fail closed. Contract toggle Like/Save/Follow chỉ cho tap
-  khi đọc dương tính `Present`, identity đầy đủ, observation mới hơn, re-proof cùng
-  card và write-ahead thành công; sau tap chỉ `Absent` trên cùng identity mới là cleared.
-  Xóa comment/post còn đòi strong ownership, đúng campaign identity và đúng một nút
-  xác nhận đã đo. Lỗi sau effect boundary là uncertain và không tự retry. Migration
-  29 giữ cleanup journal `planned -> preparing -> armed -> terminal` bằng CAS và
-  reconcile row dở dang sau restart. Tauri preflight/execute cho Unlike/Unsave mở lại
-  canonical URL, đòi `TargetProof::Identified`, dùng hierarchy adapter/state đã đo và
-  arm journal ngay trước tap. Trong implementation hiện tại chỉ Unlike/Unsave đã nối
-  đường production, và cũng chỉ trở thành bằng chứng live khi canary cùng readback đạt.
-  Scout canary đã thấy `Following | Friends` cạnh exact handle trong danh sách
-  Following, và thấy `Delete` sau một lần cuộn ngang share rail của owned post rồi
-  sheet `Delete and re-edit | Delete`. Hai observation này chưa đủ mở production:
-  Follow còn thiếu handle được persist theo source action cùng negative readback sau
-  unfollow; modal Delete che target và chưa có canonical/grid-absence readback sau
-  xóa. Comment cũng chưa có exact owned row gắn URL để đo long-press. Vì vậy cả
-  Follow/Comment/Post vẫn phải trả typed `unsupportedUnmeasured` trước DB/device
-  lookup, lease và tap thay vì thử mò.
+- Cleanup public effect phải fail closed. Contract toggle Like/Save chỉ cho tap khi
+  đọc dương tính `Present`, identity đầy đủ, observation mới hơn, re-proof cùng card
+  và write-ahead thành công; sau tap chỉ `Absent` trên cùng identity mới là cleared.
+  Xóa comment/post còn đòi strong ownership, đúng campaign identity, cleanup journal
+  riêng và đúng một control xác nhận đã đo; lỗi sau effect boundary là uncertain và
+  không tự retry. Migration 29 giữ cleanup journal chung `planned -> preparing ->
+  armed -> terminal` bằng CAS và reconcile row dở dang sau restart. Tauri
+  preflight/execute cho Unlike/Unsave mở lại canonical URL, đòi
+  `TargetProof::Identified`, dùng hierarchy adapter/state đã đo và arm journal ngay
+  trước tap. Trong implementation hiện tại chỉ Unlike/Unsave đã nối đường production,
+  và cũng chỉ trở thành bằng chứng live khi canary cùng readback đạt.
+- Migration 30 bổ sung provenance bất biến cho Follow của Nuôi: witness được chụp khi
+  `armed`, source identity chỉ được append cùng settlement confirmed, và recovery đổi
+  orphan `preparing` thành `failedBeforeEffect`, orphan `armed` thành `uncertain`.
+  Origin `possibleEffect` giữ đủ identity để điều tra/cleanup sau này nhưng tuyệt đối
+  không xác nhận Follow đã xảy ra và không cấp quyền tap. Source proof hiện chỉ chấp
+  nhận một snapshot feed có canonical `@handle profile` cùng `Follow @handle`. Hierarchy
+  thật của tuple đã đo lại dùng display name, ví dụ `Mì Gánh ... profile` và `Follow Mì
+  Gánh ...`; canonical `@handle` chỉ xuất hiện sau khi đi vào profile. Vì vậy đường
+  hierarchy production hiện fail closed thành no-op trước arm/tap; pixel Follow cũng
+  luôn no-op. Không được suy các fixture canonical tổng hợp thành khả năng chạy live.
+- Comment vẫn `unsupportedUnmeasured` vì chưa có strong ownership của exact comment
+  row, chuỗi menu/confirm và authoritative absence readback gắn cùng URL. Post vẫn
+  `unsupportedUnmeasured`: observation nút Delete chưa thay thế publish-bound ownership,
+  journal xóa riêng hoặc canonical/grid-absence readback sau xóa. Follow cũng chưa mở
+  cleanup production do thiếu đường lấy canonical handle từ feed và negative readback
+  sau unfollow. Cả ba phải dừng trước device lookup/lease/tap; chưa có public canary nào
+  được chạy từ nền tảng migration 30 này.
 - Stream có frame đã vẽ và hierarchy sẵn sàng là hai điều kiện độc lập. Nếu thiết bị
   còn instrumentation UiAutomator cạnh tranh, gồm runner Genfarmer hoặc runner test
   khác, public-action preflight/canary phải dừng cho tới khi owner đó được dừng/gỡ;

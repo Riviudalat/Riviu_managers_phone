@@ -51,15 +51,15 @@ Hai cổng CI giữ điều này, cả hai trong `apps/desktop/src-tauri/src/lib
 | §5 | Trạng thái bình luận | [`05-trang-thai-binh-luan.md`](05-trang-thai-binh-luan.md) | 464 |
 | §6 | Cách hiệu chỉnh detector | [`06-hieu-chinh-detector.md`](06-hieu-chinh-detector.md) | 12 |
 | §7 | Nguyên tắc khi sửa code này | [`07-nguyen-tac.md`](07-nguyen-tac.md) | 18 |
-| §8 | Unified Agent Runtime | [`08-unified-agent-runtime.md`](08-unified-agent-runtime.md) | 722 |
-| §9 | Fleet Android | [`08-unified-agent-runtime.md`](08-unified-agent-runtime.md) | 722 |
+| §8 | Unified Agent Runtime | [`08-unified-agent-runtime.md`](08-unified-agent-runtime.md) | 732 |
+| §9 | Fleet Android | [`08-unified-agent-runtime.md`](08-unified-agent-runtime.md) | 732 |
 | §9 | Fleet Android | [`09-fleet-android.md`](09-fleet-android.md) | 214 |
-| §10 | Mở đường cho thiết bị mới | [`08-unified-agent-runtime.md`](08-unified-agent-runtime.md) | 722 |
+| §10 | Mở đường cho thiết bị mới | [`08-unified-agent-runtime.md`](08-unified-agent-runtime.md) | 732 |
 | §10 | Mở đường cho thiết bị mới | [`10-thiet-bi-moi.md`](10-thiet-bi-moi.md) | 64 |
-| §11 | API comment preview (05/08/2026) | [`08-unified-agent-runtime.md`](08-unified-agent-runtime.md) | 722 |
-| §12 | Stream preview scaling (05/08/2026) | [`08-unified-agent-runtime.md`](08-unified-agent-runtime.md) | 722 |
-| §13 | Standalone Riviu Agent full interaction install (05/08/2026) | [`08-unified-agent-runtime.md`](08-unified-agent-runtime.md) | 722 |
-| §14 | Photo carousel publish campaign (05/08/2026) | [`08-unified-agent-runtime.md`](08-unified-agent-runtime.md) | 722 |
+| §11 | API comment preview (05/08/2026) | [`08-unified-agent-runtime.md`](08-unified-agent-runtime.md) | 732 |
+| §12 | Stream preview scaling (05/08/2026) | [`08-unified-agent-runtime.md`](08-unified-agent-runtime.md) | 732 |
+| §13 | Standalone Riviu Agent full interaction install (05/08/2026) | [`08-unified-agent-runtime.md`](08-unified-agent-runtime.md) | 732 |
+| §14 | Photo carousel publish campaign (05/08/2026) | [`08-unified-agent-runtime.md`](08-unified-agent-runtime.md) | 732 |
 
 **§2 là mục phải đọc trước khi sửa bất cứ thứ gì liên quan tới WDA.** Nó là mục duy nhất
 trong tài liệu này mà bỏ qua có thể làm hỏng thiết bị thật.
