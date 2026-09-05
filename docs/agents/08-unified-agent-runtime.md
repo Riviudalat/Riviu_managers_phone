@@ -777,8 +777,9 @@
 
 #### 14.15 Hình học form Nuôi TikTok và vị trí cuộn khi chuyển workspace (05/09/2026; xem §9.148)
 
-- `InfoDot` là nút 16×16 px và phải override cả `height` lẫn `min-height`; nếu chỉ đặt
-  `height`, rule nút toàn cục kéo nó thành 16×32 px và làm lệch hàng chứa label.
+- `InfoDot` phải override cả `height` lẫn `min-height`; nếu chỉ đặt `height`, rule nút
+  toàn cục có thể kéo lệch hàng chứa label. Từ §9.150, vùng bấm là 24×24 px, SVG 14 px;
+  kích thước 16×16 px của §9.148 chỉ còn là mốc lịch sử.
 - Nhóm nhịp Nuôi TikTok là lưới công tắc 2×2 tại viewport vận hành, tiếp theo là một hàng
   `Giờ nghỉ đêm | Từ | Đến`. Hai input giữ accessible name đầy đủ `Nghỉ đêm từ` và
   `Nghỉ đêm đến`; nhãn rút gọn chỉ là phần nhìn thấy.
@@ -792,3 +793,42 @@
   cuộn của trang hiện tại.
 - Regression phải đo computed geometry ở 1440×900 và 820×560, chụp riêng nhóm Nhịp, và
   giữ baseline Flow/Tương tác vì các trang đó cũng dùng chung `InfoDot`.
+
+#### 14.16 Bản nháp, hồ sơ và tiến độ vận hành có chủ thể (06/09/2026; xem §9.150)
+
+- `workspaceDraft` đăng ký snapshot chỉnh sửa theo từng vùng. Load, polling và phản hồi
+  đang chờ không tự làm dirty. Rời trang hoặc đóng cửa sổ dùng `Lưu | Bỏ thay đổi | Ở lại`;
+  lưu lỗi hoặc có chỉnh sửa mới trong lúc lưu phải ở lại. Quyết định cho một vùng không
+  được dùng để bỏ nháp của vùng khác. Discard phải phục hồi dữ liệu, không chỉ xóa cờ.
+- Flow V2 và Điều phối giữ riêng danh tính tài liệu, epoch chỉnh sửa và request lưu.
+  Phản hồi Save/Open/Archive cũ không được đổi tài liệu mới hoặc baseline của nó; Apply
+  JSON là chỉnh sửa chưa lưu, không trở thành baseline server. Không thay hash/format V2.
+- Chọn hồ sơ nạp đúng revision, cấu hình và phạm vi; không phát chiến dịch. Save tạo
+  revision bất biến và không chuyển lịch đã ghim. Nuôi giữ credential ngoài JSON hồ sơ;
+  lưu hồ sơ không được đánh dấu khóa vừa gõ là đã lưu, hoặc áp public-action rate toàn cục.
+  Settings chỉ áp dụng vùng được lưu; FPS không phát IPC theo từng phím.
+- Bốn workspace automation mới bắt đầu bằng `explicit []`, cần chọn All/Group/Specific
+  rõ ràng. Profile Tương tác ghim đúng tập actor đã chọn, không nâng tập con thành All.
+  Parse URL chỉ có hiệu lực cho chính chuỗi đầu vào đã parse; sửa link làm mất quyền chạy
+  của kết quả cũ ngay cả khi request kế tiếp lỗi. Trang Thiết bị và shared selection của
+  thư viện giữ contract cũ, với số máy/phạm vi toàn bộ được ghi ngay trên hành động.
+- Publish đọc trạng thái tổng hợp và retry scope đã lưu. Confirmed Post chưa đủ link/Sheet
+  vẫn là Partial; chỉ retry đoạn được phép, không đưa về fullPipeline. Nhạc, URL, Sheet và
+  cleanup giữ bằng chứng riêng; khi projection lỗi, UI không suy đoán thành hoàn tất.
+- Migration 31 lưu `library_batches/library_batch_items` trước dispatch, gồm artifact và
+  target snapshot có số/alias. Cancel chỉ thắng ở queued. Sau restart, queued thành
+  cancelled-before-dispatch, running thành uncertain; terminal không bị ghi đè, không
+  replay. Driver hiện chưa có probe độc lập đủ chứng minh package/version hoặc media sau
+  restart nên không nâng uncertain thành succeeded. Nếu cả ghi outcome lẫn ghi uncertain
+  đều lỗi, báo lớn và giữ journal chưa kết thúc tới recovery; tuyệt đối không gọi driver lại.
+- `operation_query_runs` lọc nguồn trước hydration, đếm trên tập khớp trước phân trang,
+  giữ active đứng đầu kể cả cũ hơn 24 giờ. Quá 10.000 nguồn trả lỗi rõ để thu khoảng lọc,
+  không báo tổng giả từ danh sách đã cắt. Tác vụ/Dữ liệu và monitor thư viện đọc projection
+  thật; `ActivityCenter` vẫn chỉ là lịch sử trong bộ nhớ, không thay ledger.
+  Với Tương tác, `targetCount` đếm bài đích, không phải số máy; UI tách số bài và tập
+  UDID assignment duy nhất, không suy đoán số máy khi chưa có chi tiết.
+- Local API phải phân biệt cấu hình đã lưu với listener thực sự chạy và yêu cầu restart.
+  Tooltip dùng Floating UI để tránh mép màn hình, keyboard/touch/Escape; lưới Thiết bị dùng
+  ARIA grid/row/gridcell để các nút con vẫn truy cập được, không đổi thao tác hoặc mật độ.
+  Nút chạy Flow không chuyển động opacity/màu khi vừa enabled; trạng thái có thể bấm phải
+  đạt contrast ngay frame đầu tiên, không chỉ sau khi CSS transition kết thúc.
