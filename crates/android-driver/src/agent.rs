@@ -217,6 +217,18 @@ impl Rect {
 /// Matched as a substring because the message carries a varying millisecond count.
 const STALE_TREE_MARKER: &str = "waiting for the root AccessibilityNodeInfo";
 
+/// Whether a failed accessibility request may be repeated after replacing the agent session.
+///
+/// UiAutomator2 models element lookup as `POST`, so HTTP method alone cannot separate reads from
+/// effects. Keep the allowlist deliberately narrow: a repeated lookup/source read observes the
+/// screen again, while repeating `/actions`, element click/value/clear, or a key press can emit a
+/// second public effect after the first response was lost.
+fn stale_tree_retry_is_safe(method: &reqwest::Method, suffix: &str) -> bool {
+    (*method == reqwest::Method::POST && matches!(suffix, "/element" | "/elements"))
+        || (*method == reqwest::Method::GET
+            && (suffix == "/source" || suffix.starts_with("/element/")))
+}
+
 /// Past this, an **operator gesture** is something they can feel.
 ///
 /// A tap is one `/actions` round trip. Measured on this fleet's own release log: 227 `/actions`
@@ -474,9 +486,12 @@ impl AgentClient {
         body: Option<Value>,
     ) -> anyhow::Result<Value> {
         match self.send_once(method.clone(), suffix, body.clone()).await {
-            Err(error) if error.to_string().contains(STALE_TREE_MARKER) => {
-                // One retry, on one specific server message. Anything else propagates:
-                // a blanket retry would re-issue taps and non-idempotent calls.
+            Err(error)
+                if stale_tree_retry_is_safe(&method, suffix)
+                    && error.to_string().contains(STALE_TREE_MARKER) =>
+            {
+                // One retry, on one specific server message and only for an allowlisted read.
+                // Effectful routes propagate the first error because the device may have acted.
                 self.recreate_session().await?;
                 self.send_once(method, suffix, body).await
             }
@@ -866,6 +881,102 @@ fn element_id_from(element: &Value) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stale_tree_retry_allowlist_contains_reads_and_excludes_effects() {
+        for (method, route) in [
+            (reqwest::Method::POST, "/element"),
+            (reqwest::Method::POST, "/elements"),
+            (reqwest::Method::GET, "/source"),
+            (
+                reqwest::Method::GET,
+                "/element/fixture/attribute/content-desc",
+            ),
+            (reqwest::Method::GET, "/element/fixture/rect"),
+            (reqwest::Method::GET, "/element/fixture/text"),
+        ] {
+            assert!(
+                stale_tree_retry_is_safe(&method, route),
+                "read-only route {method} {route} lost stale-tree recovery"
+            );
+        }
+        for (method, route) in [
+            (reqwest::Method::POST, "/actions"),
+            (reqwest::Method::POST, "/element/fixture/click"),
+            (reqwest::Method::POST, "/element/fixture/value"),
+            (reqwest::Method::POST, "/element/fixture/clear"),
+            (reqwest::Method::POST, "/appium/device/press_keycode"),
+            (reqwest::Method::DELETE, ""),
+        ] {
+            assert!(
+                !stale_tree_retry_is_safe(&method, route),
+                "effectful route {method} {route} must never be reissued"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn stale_tree_action_error_sends_exactly_one_http_request() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("bind fixture agent");
+        let base = format!("http://{}", listener.local_addr().expect("fixture address"));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let server_calls = Arc::clone(&calls);
+        let server = tokio::spawn(async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    return;
+                };
+                server_calls.fetch_add(1, Ordering::SeqCst);
+                let mut request = [0_u8; 8_192];
+                let _ = socket.read(&mut request).await;
+                let body =
+                    format!(r#"{{"value":{{"message":"{STALE_TREE_MARKER} after 10000 ms"}}}}"#);
+                let response = format!(
+                    "HTTP/1.1 500 Internal Server Error\r\n\
+                     Content-Type: application/json\r\n\
+                     Content-Length: {}\r\n\
+                     Connection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = socket.write_all(response.as_bytes()).await;
+                let _ = socket.shutdown().await;
+            }
+        });
+        let client = AgentClient {
+            http: reqwest::Client::builder()
+                .timeout(Duration::from_secs(2))
+                .build()
+                .expect("fixture client"),
+            base,
+            serial: "fixture-device".to_owned(),
+            session_id: Arc::new(Mutex::new("fixture-session".to_owned())),
+        };
+
+        let error = client
+            .send(
+                reqwest::Method::POST,
+                "/actions",
+                Some(json!({ "actions": [] })),
+            )
+            .await
+            .expect_err("stale-tree gesture must remain uncertain");
+        assert!(error.to_string().contains(STALE_TREE_MARKER));
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "one action intent must issue exactly one HTTP request"
+        );
+        server.abort();
+        let _ = server.await;
+    }
 
     #[test]
     fn description_uses_the_accessibility_id_strategy() {

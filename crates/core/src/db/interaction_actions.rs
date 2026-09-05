@@ -318,6 +318,12 @@ impl Database {
         error_code: Option<&str>,
     ) -> anyhow::Result<bool> {
         use crate::interaction::InteractionActionState;
+        if owner.kind == crate::interaction::TikTokActionOwnerKind::Nurture
+            && kind == crate::interaction::InteractionActionKind::Follow
+            && state == InteractionActionState::Confirmed
+        {
+            anyhow::bail!("confirmed Nurture Follow must use atomic source/readback settlement");
+        }
         let expected = match state {
             InteractionActionState::NoOp | InteractionActionState::FailedBeforeEffect => {
                 "preparing"

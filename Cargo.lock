@@ -3476,6 +3476,7 @@ dependencies = [
  "image",
  "mp4",
  "parking_lot",
+ "quick-xml",
  "rand 0.8.7",
  "reqwest 0.12.28",
  "riviu-script-engine",

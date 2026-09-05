@@ -749,13 +749,9 @@ impl NurtureRuntime {
             };
 
             tauri::async_runtime::spawn(async move {
-                // **The run's identity is the batch's, not the session's, so it is stamped
-                // here.** `run_session` takes a udid and knows nothing about the other
-                // thirteen phones; asking it to carry a run id would put a fact about the
-                // caller into a signature five harnesses also call. Stamping on the way past
-                // means every status this device ever emits — queued, mid-run, terminal, and
-                // the error path below — carries it, and there is exactly one place to get
-                // it wrong.
+                // The callback still stamps the fleet denominator, while the scoped engine
+                // receives the same durable run ID so its public-action ledger can be
+                // reconciled exactly after a worker/process restart.
                 let tag = move |mut st: NurtureSessionStatus| {
                     st.run_id = Some(run_id);
                     st.run_size = run_size;
@@ -773,7 +769,8 @@ impl NurtureRuntime {
                     status
                 } else {
                     match engine
-                        .run_session(
+                        .run_session_scoped(
+                            run_id,
                             &udid_clone,
                             settings,
                             task_stop.clone(),

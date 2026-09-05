@@ -1016,6 +1016,18 @@ impl AppState {
             }
             Err(error) => log::warn!("không đọc được phiên Nuôi cần cleanup: {error:#}"),
         }
+        // Catch action rows whose session status had already reached a terminal event before
+        // the process died. Admission is still closed here, so no live worker can cross the
+        // Follow arm/tap boundary while this global sweep runs.
+        match db.recover_all_orphaned_nurture_follow_actions() {
+            Ok(recovered) if recovered.is_empty() => {}
+            Ok(recovered) => log::warn!(
+                "Nurture Follow restart reconciliation: {} trước effect có thể thử lại, {} sau intent bị khóa uncertain",
+                recovered.failed_before_effect,
+                recovered.uncertain
+            ),
+            Err(error) => log::warn!("không reconcile được Follow Nuôi dở: {error:#}"),
+        }
         // Fallback closes any row whose device cleanup result could not be appended. Rows
         // successfully recovered above are no longer `running`, so this is idempotent.
         match db.interrupt_orphaned_nurture_sessions() {

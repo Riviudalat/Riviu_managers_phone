@@ -600,6 +600,18 @@ pub trait DeviceDriver: Send + Sync {
     }
 }
 
+/// One immutable accessibility-tree read, ordered within a live UI session.
+///
+/// This is intentionally separate from the cheap element locators. Public actions that need
+/// ancestry/resource-id proof can pay for one full source read immediately before their effect;
+/// ordinary feed observation must keep using [`UiSession::locate`]. A generation is assigned by
+/// the session only after a source read succeeds, so `0` can never be mistaken for evidence.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HierarchySourceSnapshot {
+    pub generation: u64,
+    pub xml: String,
+}
+
 #[async_trait]
 pub trait UiSession: Send + Sync {
     async fn tap(&self, point: TapPoint) -> anyhow::Result<()>;
@@ -883,6 +895,13 @@ pub trait UiSession: Send + Sync {
         query: ElementQuery<'_>,
     ) -> anyhow::Result<Vec<ElementBox>> {
         self.locate_all(query).await
+    }
+    /// Read one full accessibility tree for an effect-bound identity proof.
+    ///
+    /// The default refuses. A caller must never replace it with independently queried elements:
+    /// those can come from different cards while TikTok is animating between feed items.
+    async fn hierarchy_source_snapshot(&self) -> anyhow::Result<HierarchySourceSnapshot> {
+        unsupported("hierarchySourceSnapshot")
     }
     /// Whether [`Self::locate_description`] answers instead of refusing.
     ///

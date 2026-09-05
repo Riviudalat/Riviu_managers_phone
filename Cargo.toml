@@ -52,6 +52,7 @@ dirs = "6"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
 base64 = "0.22"
 sha2 = "0.10"
+quick-xml = "=0.41.0"
 # Structured ISO-BMFF parsing for publish-video validation. Pinned exactly so the accepted
 # container/track surface cannot drift without an explicit review.
 mp4 = "=0.14.0"

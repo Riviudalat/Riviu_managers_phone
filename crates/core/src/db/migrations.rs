@@ -209,6 +209,12 @@ const MIGRATIONS: &[Migration] = &[
         apply: apply_migration_29,
         rebuilds_tables: false,
     },
+    Migration {
+        version: 30,
+        name: "nurture-follow-source-identities",
+        apply: apply_migration_30,
+        rebuilds_tables: false,
+    },
 ];
 
 pub(super) fn latest_version() -> i64 {
@@ -1733,6 +1739,304 @@ CREATE INDEX public_cleanup_runs_assignment
     Ok(())
 }
 
+fn apply_migration_30(transaction: &Transaction<'_>) -> anyhow::Result<()> {
+    transaction.execute_batch(
+        r#"
+CREATE TABLE nurture_follow_armed_witnesses (
+  action_run_id TEXT PRIMARY KEY
+    REFERENCES tiktok_action_runs(id) ON DELETE RESTRICT,
+  armed_revision INTEGER NOT NULL CHECK (armed_revision >= 2),
+  identity_json TEXT NOT NULL CHECK (json_valid(identity_json)),
+  effect_intent TEXT NOT NULL CHECK (length(trim(effect_intent)) > 0),
+  armed_at TEXT NOT NULL CHECK (length(trim(armed_at)) > 0)
+);
+
+CREATE TRIGGER nurture_follow_arm_transition_valid
+BEFORE UPDATE ON tiktok_action_runs
+WHEN OLD.owner_kind='nurture' AND OLD.action_kind='follow'
+  AND OLD.state='preparing' AND NEW.state='armed'
+BEGIN
+  SELECT CASE WHEN NOT (
+    NEW.owner_kind=OLD.owner_kind AND NEW.owner_id=OLD.owner_id
+    AND NEW.device_udid=OLD.device_udid AND NEW.action_kind=OLD.action_kind
+    AND NEW.revision=OLD.revision+1 AND NEW.revision >= 2
+    AND OLD.effect_intent IS NULL AND NEW.effect_intent IS NOT NULL
+    AND length(trim(NEW.effect_intent)) > 0
+    AND OLD.card_identity_json IS NOT NULL AND NEW.card_identity_json IS NOT NULL
+    AND json(OLD.card_identity_json)=json(NEW.card_identity_json)
+  ) THEN RAISE(ABORT, 'invalid Nurture Follow arm transition') END;
+END;
+
+CREATE TRIGGER nurture_follow_arm_transition_capture
+AFTER UPDATE ON tiktok_action_runs
+WHEN OLD.owner_kind='nurture' AND OLD.action_kind='follow'
+  AND OLD.state='preparing' AND NEW.state='armed'
+BEGIN
+  INSERT INTO nurture_follow_armed_witnesses
+    (action_run_id,armed_revision,identity_json,effect_intent,armed_at)
+  VALUES(NEW.id,NEW.revision,NEW.card_identity_json,NEW.effect_intent,NEW.updated_at);
+END;
+
+CREATE TRIGGER nurture_follow_armed_witnesses_no_update
+BEFORE UPDATE ON nurture_follow_armed_witnesses
+BEGIN
+  SELECT RAISE(ABORT, 'nurture Follow arm witnesses are immutable');
+END;
+
+CREATE TRIGGER nurture_follow_armed_witnesses_no_delete
+BEFORE DELETE ON nurture_follow_armed_witnesses
+BEGIN
+  SELECT RAISE(ABORT, 'nurture Follow arm witnesses are immutable');
+END;
+
+CREATE TRIGGER nurture_follow_witness_parent_identity_no_update
+BEFORE UPDATE OF owner_kind,owner_id,device_udid,card_identity_json,action_kind,effect_intent
+ON tiktok_action_runs
+WHEN EXISTS (
+  SELECT 1 FROM nurture_follow_armed_witnesses AS witness
+  WHERE witness.action_run_id=OLD.id
+)
+AND (
+  NEW.owner_kind IS NOT OLD.owner_kind OR NEW.owner_id IS NOT OLD.owner_id
+  OR NEW.device_udid IS NOT OLD.device_udid
+  OR NEW.card_identity_json IS NOT OLD.card_identity_json
+  OR NEW.action_kind IS NOT OLD.action_kind
+  OR NEW.effect_intent IS NOT OLD.effect_intent
+)
+BEGIN
+  SELECT RAISE(ABORT, 'armed Nurture Follow identity is immutable');
+END;
+
+CREATE TABLE nurture_follow_source_identities (
+  action_run_id TEXT PRIMARY KEY
+    REFERENCES tiktok_action_runs(id) ON DELETE RESTRICT,
+  identity_json TEXT NOT NULL CHECK (json_valid(identity_json)),
+  canonical_handle TEXT NOT NULL CHECK (
+    length(canonical_handle) BETWEEN 3 AND 33 AND
+    substr(canonical_handle, 1, 1) = '@' AND
+    lower(canonical_handle) = canonical_handle
+  ),
+  card_key TEXT NOT NULL CHECK (
+    length(card_key) = 64 AND
+    lower(card_key) = card_key AND
+    card_key NOT GLOB '*[^0-9a-f]*'
+  ),
+  author_profile_key TEXT NOT NULL CHECK (
+    length(author_profile_key) = 64 AND
+    lower(author_profile_key) = author_profile_key AND
+    author_profile_key NOT GLOB '*[^0-9a-f]*'
+  ),
+  readback_generation INTEGER NOT NULL CHECK (readback_generation > 0),
+  readback_snapshot_sha256 TEXT NOT NULL CHECK (
+    length(readback_snapshot_sha256) = 64 AND
+    lower(readback_snapshot_sha256) = readback_snapshot_sha256 AND
+    readback_snapshot_sha256 NOT GLOB '*[^0-9a-f]*'
+  ),
+  readback_verdict TEXT NOT NULL CHECK (readback_verdict = 'follow_absent'),
+  confirmed_at TEXT NOT NULL CHECK (length(trim(confirmed_at)) > 0)
+);
+
+CREATE TRIGGER nurture_follow_source_identities_valid_source
+BEFORE INSERT ON nurture_follow_source_identities
+BEGIN
+  SELECT CASE WHEN NOT EXISTS (
+    SELECT 1
+    FROM tiktok_action_runs AS action
+    JOIN nurture_follow_armed_witnesses AS witness
+      ON witness.action_run_id=action.id
+    WHERE action.id=NEW.action_run_id
+      AND action.owner_kind='nurture'
+      AND action.action_kind='follow'
+      AND action.state='confirmed'
+      AND action.revision=witness.armed_revision+1
+      AND action.effect_intent=witness.effect_intent
+      AND action.card_identity_json IS NOT NULL
+      AND json(action.card_identity_json)=json(NEW.identity_json)
+      AND json(witness.identity_json)=json(NEW.identity_json)
+      AND json_type(NEW.identity_json)='object'
+      AND (SELECT COUNT(*) FROM json_each(NEW.identity_json))=4
+      AND json_type(NEW.identity_json,'$.canonicalHandle')='text'
+      AND json_extract(NEW.identity_json,'$.canonicalHandle')=NEW.canonical_handle
+      AND json_type(NEW.identity_json,'$.cardKey')='text'
+      AND json_extract(NEW.identity_json,'$.cardKey')=NEW.card_key
+      AND json_type(NEW.identity_json,'$.authorProfileKey')='text'
+      AND json_extract(NEW.identity_json,'$.authorProfileKey')=NEW.author_profile_key
+      AND json_type(NEW.identity_json,'$.authorProfileProof')='object'
+      AND (SELECT COUNT(*) FROM json_each(
+            json_extract(NEW.identity_json,'$.authorProfileProof')))=39
+      AND json_type(NEW.identity_json,
+            '$.authorProfileProof.hierarchyGeneration')='integer'
+      AND json_extract(NEW.identity_json,
+            '$.authorProfileProof.hierarchyGeneration') > 0
+      AND json_type(NEW.identity_json,
+            '$.authorProfileProof.snapshotSha256')='text'
+      AND length(json_extract(NEW.identity_json,
+            '$.authorProfileProof.snapshotSha256'))=64
+      AND lower(json_extract(NEW.identity_json,
+            '$.authorProfileProof.snapshotSha256'))=
+          json_extract(NEW.identity_json,'$.authorProfileProof.snapshotSha256')
+      AND json_extract(NEW.identity_json,
+            '$.authorProfileProof.snapshotSha256') NOT GLOB '*[^0-9a-f]*'
+      AND json_type(NEW.identity_json,
+            '$.authorProfileProof.profileNodeIndex')='integer'
+      AND json_extract(NEW.identity_json,
+            '$.authorProfileProof.profileNodeIndex') >= 0
+      AND json_type(NEW.identity_json,
+            '$.authorProfileProof.profileResourceId')='text'
+      AND json_extract(NEW.identity_json,
+            '$.authorProfileProof.profileResourceId')='com.ss.android.ugc.trill:id/t40'
+      AND json_extract(NEW.identity_json,
+            '$.authorProfileProof.profileClassName')='android.widget.ImageView'
+      AND json_extract(NEW.identity_json,
+            '$.authorProfileProof.profileContentDescription')=
+          NEW.canonical_handle || ' profile'
+      AND json_type(NEW.identity_json,
+            '$.authorProfileProof.profileEnabled')='true'
+      AND json_type(NEW.identity_json,
+            '$.authorProfileProof.profileClickable')='true'
+      AND json_type(NEW.identity_json,
+            '$.authorProfileProof.followNodeIndex')='integer'
+      AND json_extract(NEW.identity_json,
+            '$.authorProfileProof.followNodeIndex') >= 0
+      AND json_extract(NEW.identity_json,
+            '$.authorProfileProof.followNodeIndex') !=
+          json_extract(NEW.identity_json,'$.authorProfileProof.profileNodeIndex')
+      AND json_extract(NEW.identity_json,
+            '$.authorProfileProof.followResourceId')='com.ss.android.ugc.trill:id/fm1'
+      AND json_extract(NEW.identity_json,
+            '$.authorProfileProof.followClassName')='android.widget.Button'
+      AND json_extract(NEW.identity_json,
+            '$.authorProfileProof.followContentDescription')=
+          'Follow ' || NEW.canonical_handle
+      AND json_type(NEW.identity_json,
+            '$.authorProfileProof.followEnabled')='true'
+      AND json_type(NEW.identity_json,
+            '$.authorProfileProof.followClickable')='true'
+      AND json_type(NEW.identity_json,
+            '$.authorProfileProof.cardNodeIndex')='integer'
+      AND json_extract(NEW.identity_json,
+            '$.authorProfileProof.cardResourceId')='com.ss.android.ugc.trill:id/cv2'
+      AND json_extract(NEW.identity_json,
+            '$.authorProfileProof.cardClassName')='android.widget.FrameLayout'
+      AND json_type(NEW.identity_json,
+            '$.authorProfileProof.cardEnabled')='true'
+      AND json_type(NEW.identity_json,
+            '$.authorProfileProof.cardClickable')='true'
+      AND json_type(NEW.identity_json,
+            '$.authorProfileProof.railNodeIndex')='integer'
+      AND json_extract(NEW.identity_json,
+            '$.authorProfileProof.railResourceId')='com.ss.android.ugc.trill:id/hfp'
+      AND json_extract(NEW.identity_json,
+            '$.authorProfileProof.railClassName')='android.widget.LinearLayout'
+      AND json_type(NEW.identity_json,
+            '$.authorProfileProof.railEnabled')='true'
+      AND json_type(NEW.identity_json,
+            '$.authorProfileProof.railClickable')='true'
+      AND json_type(NEW.identity_json,
+            '$.authorProfileProof.pagerNodeIndex')='integer'
+      AND json_extract(NEW.identity_json,
+            '$.authorProfileProof.pagerResourceId')='com.ss.android.ugc.trill:id/tod'
+      AND json_extract(NEW.identity_json,
+            '$.authorProfileProof.pagerClassName')='androidx.viewpager.widget.ViewPager'
+      AND json_type(NEW.identity_json,
+            '$.authorProfileProof.pagerEnabled')='true'
+      AND json_type(NEW.identity_json,
+            '$.authorProfileProof.pagerClickable')='false'
+      AND json_type(NEW.identity_json,
+            '$.authorProfileProof.feedTabNodeIndex')='integer'
+      AND json_extract(NEW.identity_json,
+            '$.authorProfileProof.feedTabClassName')='android.widget.LinearLayout'
+      AND json_extract(NEW.identity_json,
+            '$.authorProfileProof.feedTabContentDescription')='For You'
+      AND json_type(NEW.identity_json,
+            '$.authorProfileProof.feedTabEnabled')='true'
+      AND json_type(NEW.identity_json,
+            '$.authorProfileProof.feedTabClickable')='false'
+      AND json_type(NEW.identity_json,
+            '$.authorProfileProof.feedTabSelected')='true'
+      AND json_type(NEW.identity_json,
+            '$.authorProfileProof.parentChain')='array'
+      AND json_array_length(json_extract(NEW.identity_json,
+            '$.authorProfileProof.parentChain')) >= 3
+      AND NOT EXISTS (
+        SELECT 1 FROM json_each(json_extract(
+          NEW.identity_json,'$.authorProfileProof.parentChain')) AS parent
+        WHERE parent.type != 'integer' OR parent.value < 0
+      )
+      AND json_extract(NEW.identity_json,
+            '$.authorProfileProof.parentChain[0]')=
+          json_extract(NEW.identity_json,'$.authorProfileProof.cardNodeIndex')
+      AND json_extract(NEW.identity_json,
+            '$.authorProfileProof.parentChain[1]')=
+          json_extract(NEW.identity_json,'$.authorProfileProof.railNodeIndex')
+      AND json_extract(NEW.identity_json,
+            '$.authorProfileProof.parentChain[2]')=
+          json_extract(NEW.identity_json,'$.authorProfileProof.pagerNodeIndex')
+      AND json_type(NEW.identity_json,
+            '$.authorProfileProof.canonicalHandle')='text'
+      AND json_extract(NEW.identity_json,
+            '$.authorProfileProof.canonicalHandle')=NEW.canonical_handle
+      AND json_type(NEW.identity_json,
+            '$.authorProfileProof.cardContinuityKey')='text'
+      AND length(json_extract(NEW.identity_json,
+            '$.authorProfileProof.cardContinuityKey'))=64
+      AND lower(json_extract(NEW.identity_json,
+            '$.authorProfileProof.cardContinuityKey'))=
+          json_extract(NEW.identity_json,'$.authorProfileProof.cardContinuityKey')
+      AND json_extract(NEW.identity_json,
+            '$.authorProfileProof.cardContinuityKey') NOT GLOB '*[^0-9a-f]*'
+      AND json_extract(NEW.identity_json,
+            '$.authorProfileProof.cardContinuityKey')=NEW.card_key
+      AND NEW.readback_generation>
+          json_extract(NEW.identity_json,
+                       '$.authorProfileProof.hierarchyGeneration')
+      AND NEW.readback_verdict='follow_absent'
+      AND json_type(NEW.identity_json,
+            '$.authorProfileProof.tuple')='object'
+      AND (SELECT COUNT(*) FROM json_each(
+            json_extract(NEW.identity_json,'$.authorProfileProof.tuple')))=3
+      AND json_type(NEW.identity_json,
+            '$.authorProfileProof.tuple.package')='text'
+      AND json_extract(NEW.identity_json,
+            '$.authorProfileProof.tuple.package')='com.ss.android.ugc.trill'
+      AND json_type(NEW.identity_json,
+            '$.authorProfileProof.tuple.versionName')='text'
+      AND json_extract(NEW.identity_json,
+            '$.authorProfileProof.tuple.versionName')='38.3.2'
+      AND json_type(NEW.identity_json,
+            '$.authorProfileProof.tuple.locale')='text'
+      AND json_extract(NEW.identity_json,
+            '$.authorProfileProof.tuple.locale')='en'
+      AND NEW.confirmed_at=action.updated_at
+  ) THEN RAISE(ABORT, 'invalid Nurture Follow source identity') END;
+END;
+
+CREATE TRIGGER nurture_follow_source_identities_no_update
+BEFORE UPDATE ON nurture_follow_source_identities
+BEGIN
+  SELECT RAISE(ABORT, 'nurture Follow source identities are immutable');
+END;
+
+CREATE TRIGGER nurture_follow_source_identities_no_delete
+BEFORE DELETE ON nurture_follow_source_identities
+BEGIN
+  SELECT RAISE(ABORT, 'nurture Follow source identities are immutable');
+END;
+
+CREATE TRIGGER nurture_follow_source_parent_no_update
+BEFORE UPDATE ON tiktok_action_runs
+WHEN EXISTS (
+  SELECT 1 FROM nurture_follow_source_identities AS source
+  WHERE source.action_run_id=OLD.id
+)
+BEGIN
+  SELECT RAISE(ABORT, 'confirmed Nurture Follow source parent is immutable');
+END;
+"#,
+    )?;
+    Ok(())
+}
+
 fn apply_migration_11(transaction: &Transaction<'_>) -> anyhow::Result<()> {
     // **Dropping a column that was always a guess.** The `usd` in both comment tables was
     // `prompt_tokens * input_price_per_1m + completion_tokens * output_price_per_1m`, over two
@@ -2940,7 +3244,7 @@ INSERT INTO tiktok_action_runs
         assert_eq!(migration_rows(&connection).last().unwrap().0, 28);
         assert!(!table_exists(&connection, "public_cleanup_runs"));
 
-        run(&mut connection).expect("apply migration 29");
+        run_with_failpoint(&mut connection, Some(30)).expect_err("stop after migration 29");
 
         assert_eq!(migration_rows(&connection).last().unwrap().0, 29);
         assert!(table_exists(&connection, "public_cleanup_runs"));
@@ -2959,6 +3263,264 @@ INSERT INTO tiktok_action_runs
         ] {
             assert!(schema.contains(invariant), "cleanup schema lost `{invariant}`");
         }
+
+        drop(connection);
+        cleanup(&path);
+    }
+
+    #[test]
+    fn migration_30_adds_immutable_nurture_follow_provenance_without_rebuilding_v29() {
+        let path = temp_db_path("nurture-follow-source-identity");
+        let mut connection = Connection::open(&path).expect("fixture");
+        connection
+            .pragma_update(None, "foreign_keys", "ON")
+            .expect("production foreign-key posture");
+        run_with_failpoint(&mut connection, Some(30)).expect_err("stop at v29");
+        assert_eq!(migration_rows(&connection).last().unwrap().0, 29);
+        assert!(table_exists(&connection, "public_cleanup_runs"));
+        assert!(!table_exists(
+            &connection,
+            "nurture_follow_source_identities"
+        ));
+
+        run(&mut connection).expect("apply migration 30");
+
+        assert_eq!(migration_rows(&connection).last().unwrap().0, 30);
+        assert!(table_exists(
+            &connection,
+            "nurture_follow_source_identities"
+        ));
+        assert!(table_exists(&connection, "nurture_follow_armed_witnesses"));
+        let schema: String = connection
+            .query_row(
+                "SELECT sql FROM sqlite_master
+                 WHERE type='table' AND name='nurture_follow_source_identities'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("read Follow provenance schema");
+        for invariant in [
+            "action_run_id TEXT PRIMARY KEY",
+            "identity_json TEXT NOT NULL CHECK (json_valid(identity_json))",
+            "substr(canonical_handle, 1, 1) = '@'",
+            "card_key NOT GLOB '*[^0-9a-f]*'",
+            "author_profile_key NOT GLOB '*[^0-9a-f]*'",
+            "readback_generation INTEGER NOT NULL CHECK (readback_generation > 0)",
+            "readback_snapshot_sha256 TEXT NOT NULL CHECK",
+            "readback_verdict TEXT NOT NULL CHECK (readback_verdict = 'follow_absent')",
+        ] {
+            assert!(
+                schema.contains(invariant),
+                "Follow schema lost `{invariant}`"
+            );
+        }
+        let trigger_count: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master
+                 WHERE type='trigger'
+                   AND name LIKE 'nurture_follow_source_identities_%'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("count immutable triggers");
+        assert_eq!(trigger_count, 3);
+
+        connection
+            .pragma_update(None, "foreign_keys", "OFF")
+            .expect("schema fixture isolates the source trigger");
+        let mut identity_value = serde_json::json!({
+            "canonicalHandle": "@exact.author",
+            "cardKey": "a".repeat(64),
+            "authorProfileKey": "b".repeat(64),
+            "authorProfileProof": {
+                "tuple": {
+                    "package": "com.ss.android.ugc.trill",
+                    "versionName": "38.3.2",
+                    "locale": "en"
+                },
+                "hierarchyGeneration": 41,
+                "snapshotSha256": "c".repeat(64),
+                "profileNodeIndex": 4,
+                "profileResourceId": "com.ss.android.ugc.trill:id/t40",
+                "profileClassName": "android.widget.ImageView",
+                "profileContentDescription": "@exact.author profile",
+                "profileEnabled": true,
+                "profileClickable": true,
+                "followNodeIndex": 5,
+                "followResourceId": "com.ss.android.ugc.trill:id/fm1",
+                "followClassName": "android.widget.Button",
+                "followContentDescription": "Follow @exact.author",
+                "followEnabled": true,
+                "followClickable": true,
+                "cardNodeIndex": 3,
+                "railNodeIndex": 2,
+                "pagerNodeIndex": 1,
+                "feedTabNodeIndex": 6,
+                "parentChain": [3, 2, 1, 0],
+                "canonicalHandle": "@exact.author",
+                "cardContinuityKey": "a".repeat(64)
+            }
+        });
+        let proof = identity_value["authorProfileProof"]
+            .as_object_mut()
+            .expect("proof object");
+        for (name, value) in [
+            (
+                "cardResourceId",
+                serde_json::json!("com.ss.android.ugc.trill:id/cv2"),
+            ),
+            (
+                "cardClassName",
+                serde_json::json!("android.widget.FrameLayout"),
+            ),
+            ("cardEnabled", serde_json::json!(true)),
+            ("cardClickable", serde_json::json!(true)),
+            (
+                "railResourceId",
+                serde_json::json!("com.ss.android.ugc.trill:id/hfp"),
+            ),
+            (
+                "railClassName",
+                serde_json::json!("android.widget.LinearLayout"),
+            ),
+            ("railEnabled", serde_json::json!(true)),
+            ("railClickable", serde_json::json!(true)),
+            (
+                "pagerResourceId",
+                serde_json::json!("com.ss.android.ugc.trill:id/tod"),
+            ),
+            (
+                "pagerClassName",
+                serde_json::json!("androidx.viewpager.widget.ViewPager"),
+            ),
+            ("pagerEnabled", serde_json::json!(true)),
+            ("pagerClickable", serde_json::json!(false)),
+            (
+                "feedTabClassName",
+                serde_json::json!("android.widget.LinearLayout"),
+            ),
+            ("feedTabContentDescription", serde_json::json!("For You")),
+            ("feedTabEnabled", serde_json::json!(true)),
+            ("feedTabClickable", serde_json::json!(false)),
+            ("feedTabSelected", serde_json::json!(true)),
+        ] {
+            proof.insert(name.to_owned(), value);
+        }
+        let identity = identity_value.to_string();
+        let mut untyped_value: serde_json::Value =
+            serde_json::from_str(&identity).expect("identity");
+        untyped_value["unexpected"] = serde_json::json!(true);
+        let untyped = untyped_value.to_string();
+        let wrong_tuple = identity.replace("38.3.2", "38.3.3");
+        for (id, owner_kind, action_kind, card_identity) in [
+            ("valid", "nurture", "follow", identity.as_str()),
+            ("direct-confirmed", "nurture", "follow", identity.as_str()),
+            ("planned", "nurture", "follow", identity.as_str()),
+            ("like", "nurture", "like", identity.as_str()),
+            ("interaction", "interaction", "follow", identity.as_str()),
+            ("untyped", "nurture", "follow", untyped.as_str()),
+            ("wrong-tuple", "nurture", "follow", wrong_tuple.as_str()),
+        ] {
+            let (campaign, assignment) = if owner_kind == "interaction" {
+                (Some("campaign"), Some("assignment"))
+            } else {
+                (None, None)
+            };
+            connection
+                .execute(
+                    "INSERT INTO tiktok_action_runs
+                     (id,owner_kind,owner_id,device_udid,card_identity_json,campaign_id,
+                      assignment_id,action_kind,state,revision,effect_intent,created_at,updated_at)
+                     VALUES(?1,?2,COALESCE(?5,?1),'device-2',?3,?4,?5,?6,
+                            CASE WHEN ?1='direct-confirmed' THEN 'confirmed' ELSE 'planned' END,
+                            CASE WHEN ?1='direct-confirmed' THEN 3 ELSE 0 END,
+                            CASE WHEN ?1='direct-confirmed' THEN 'follow_exact_author' ELSE NULL END,
+                            'now',CASE WHEN ?1='direct-confirmed' THEN 'confirmed-at' ELSE 'now' END)",
+                    params![
+                        id,
+                        owner_kind,
+                        card_identity,
+                        campaign,
+                        assignment,
+                        action_kind
+                    ],
+                )
+                .expect("source action fixture");
+        }
+        for id in ["valid", "untyped", "wrong-tuple"] {
+            assert_eq!(
+                connection
+                    .execute(
+                        "UPDATE tiktok_action_runs SET state='preparing',revision=1,
+                                updated_at='preparing-at' WHERE id=?1 AND state='planned'",
+                        [id],
+                    )
+                    .expect("claim Follow fixture"),
+                1
+            );
+            assert_eq!(
+                connection
+                    .execute(
+                        "UPDATE tiktok_action_runs SET state='armed',revision=2,
+                                effect_intent='follow_exact_author',updated_at='armed-at'
+                         WHERE id=?1 AND state='preparing' AND revision=1",
+                        [id],
+                    )
+                    .expect("arm Follow fixture"),
+                1
+            );
+            assert_eq!(
+                connection
+                    .execute(
+                        "UPDATE tiktok_action_runs SET state='confirmed',revision=3,
+                                updated_at='confirmed-at'
+                         WHERE id=?1 AND state='armed' AND revision=2",
+                        [id],
+                    )
+                    .expect("confirm Follow fixture"),
+                1
+            );
+        }
+        let insert_source = |action_run_id: &str, raw_identity: &str, handle: &str| {
+            connection.execute(
+                "INSERT INTO nurture_follow_source_identities
+                 (action_run_id,identity_json,canonical_handle,card_key,author_profile_key,
+                  readback_generation,readback_snapshot_sha256,readback_verdict,confirmed_at)
+                 VALUES(?1,?2,?3,?4,?5,42,?6,'follow_absent','confirmed-at')",
+                params![
+                    action_run_id,
+                    raw_identity,
+                    handle,
+                    "a".repeat(64),
+                    "b".repeat(64),
+                    "d".repeat(64)
+                ],
+            )
+        };
+        assert!(insert_source("planned", &identity, "@exact.author").is_err());
+        assert!(insert_source("like", &identity, "@exact.author").is_err());
+        assert!(insert_source("interaction", &identity, "@exact.author").is_err());
+        assert!(insert_source("direct-confirmed", &identity, "@exact.author").is_err());
+        assert!(insert_source("valid", &identity, "@other.author").is_err());
+        assert!(insert_source("untyped", &untyped, "@exact.author").is_err());
+        assert!(insert_source("wrong-tuple", &wrong_tuple, "@exact.author").is_err());
+        assert_eq!(
+            insert_source("valid", &identity, "@exact.author").expect("valid exact source"),
+            1
+        );
+        assert!(connection
+            .execute(
+                "UPDATE tiktok_action_runs SET card_identity_json='{}' WHERE id='valid'",
+                [],
+            )
+            .is_err());
+        assert!(connection
+            .execute(
+                "UPDATE nurture_follow_armed_witnesses SET effect_intent='other'
+                 WHERE action_run_id='valid'",
+                [],
+            )
+            .is_err());
 
         drop(connection);
         cleanup(&path);

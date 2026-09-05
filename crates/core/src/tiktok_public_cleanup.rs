@@ -82,15 +82,20 @@ pub fn static_public_cleanup_capability(kind: PublicCleanupKind) -> PublicCleanu
         ),
         PublicCleanupKind::Follow => (
             PublicCleanupCapabilityStatus::UnsupportedUnmeasured,
-            "Following/Unfollow state is not measured on the same author card",
+            "Following/Friends is measured only before effect on com.ss.android.ugc.trill en \
+             38.3.2; the campaign-bound canonical source identity is not produced by the \
+             Nurture engines and the post-unfollow Follow readback is unmeasured",
         ),
         PublicCleanupKind::Comment => (
             PublicCleanupCapabilityStatus::UnsupportedUnmeasured,
-            "Owned-comment menu, delete and confirmation controls are not measured",
+            "Owned-comment row, menu and Delete controls are measured only on \
+             com.ss.android.ugc.trill en 38.3.2; durable campaign source binding and a \
+             positive post-delete absence proof are not implemented",
         ),
         PublicCleanupKind::Post => (
             PublicCleanupCapabilityStatus::UnsupportedUnmeasured,
-            "PostDeleteMenu, PostDelete and PostDeleteConfirm are not measured",
+            "Delete navigation is measured only on com.ss.android.ugc.trill en 38.3.2; the \
+             publish cleanup journal and strong canonical/grid absence readback are not implemented",
         ),
     };
     PublicCleanupCapability {

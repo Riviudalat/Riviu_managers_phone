@@ -67,6 +67,7 @@ use crate::types::{
 use crate::{DeviceWorkOwner, ProcessAbsenceProof};
 use touch::TouchPointPlanner;
 
+use crate::tiktok_follow_cleanup::{NurtureFollowReadback, NurtureFollowSourceIdentity};
 use crate::tiktok_save::{
     pixel_save_observation, tiktok_save, SaveAdapter, SaveCardIdentity, SaveEvidence,
     SaveObservation, SaveVerdict,
@@ -202,6 +203,38 @@ struct NurtureSaveLease {
     armed_revision: i64,
 }
 
+#[derive(Debug, Clone)]
+struct NurtureFollowLease {
+    action_run_id: String,
+    owner: TikTokActionOwner,
+    armed_revision: i64,
+}
+
+trait NurtureFollowJournal: Sync {
+    fn arm(&self, identity: &NurtureFollowSourceIdentity) -> anyhow::Result<NurtureFollowLease>;
+
+    fn settle_failed_before_effect(
+        &self,
+        lease: NurtureFollowLease,
+        evidence: &str,
+        error_code: &str,
+    ) -> anyhow::Result<()>;
+
+    fn settle_confirmed(
+        &self,
+        lease: NurtureFollowLease,
+        readback: &NurtureFollowReadback,
+        evidence: &str,
+    ) -> anyhow::Result<()>;
+
+    fn settle_uncertain(
+        &self,
+        lease: NurtureFollowLease,
+        evidence: &str,
+        error_code: &str,
+    ) -> anyhow::Result<()>;
+}
+
 trait NurtureSaveJournal: Sync {
     fn arm(
         &self,
@@ -220,6 +253,121 @@ struct NurtureSaveLedger<'a> {
     db: &'a Database,
     session_id: &'a str,
     udid: &'a str,
+}
+
+struct NurtureFollowLedger<'a> {
+    db: &'a Database,
+    session_id: &'a str,
+    udid: &'a str,
+}
+
+impl<'a> NurtureFollowLedger<'a> {
+    fn new(db: &'a Database, session_id: &'a str, udid: &'a str) -> Self {
+        Self {
+            db,
+            session_id,
+            udid,
+        }
+    }
+}
+
+impl NurtureFollowJournal for NurtureFollowLedger<'_> {
+    fn arm(&self, identity: &NurtureFollowSourceIdentity) -> anyhow::Result<NurtureFollowLease> {
+        identity.validate()?;
+        let identity_json = serde_json::to_string(identity)?;
+        let owner = TikTokActionOwner {
+            kind: TikTokActionOwnerKind::Nurture,
+            owner_id: format!(
+                "{}:follow:{}:{}",
+                self.session_id,
+                &identity.card_key()[..16],
+                &identity.author_profile_key()[..16]
+            ),
+            device_udid: self.udid.to_owned(),
+            card_identity: Some(identity_json),
+        };
+        let action = self
+            .db
+            .ensure_tiktok_action_run(&owner, InteractionActionKind::Follow)?;
+        let claim_revision = self
+            .db
+            .claim_tiktok_action(&owner, InteractionActionKind::Follow)?
+            .ok_or_else(|| anyhow::anyhow!("Nurture Follow ledger row is not claimable"))?;
+        let intent = serde_json::json!({
+            "intent": "follow exact author",
+            "canonicalHandle": identity.canonical_handle(),
+            "cardKey": identity.card_key(),
+            "authorProfileKey": identity.author_profile_key(),
+        })
+        .to_string();
+        let armed_revision = self
+            .db
+            .arm_tiktok_action(
+                &owner,
+                InteractionActionKind::Follow,
+                claim_revision,
+                &intent,
+            )?
+            .ok_or_else(|| anyhow::anyhow!("Nurture Follow ledger arm lost ownership"))?;
+        Ok(NurtureFollowLease {
+            action_run_id: action.id,
+            owner,
+            armed_revision,
+        })
+    }
+
+    fn settle_failed_before_effect(
+        &self,
+        lease: NurtureFollowLease,
+        evidence: &str,
+        error_code: &str,
+    ) -> anyhow::Result<()> {
+        if !self.db.settle_armed_nurture_follow_failed_before_effect(
+            &lease.action_run_id,
+            lease.armed_revision,
+            Some(evidence),
+            error_code,
+        )? {
+            anyhow::bail!("Nurture Follow before-effect settlement lost ownership");
+        }
+        Ok(())
+    }
+
+    fn settle_confirmed(
+        &self,
+        lease: NurtureFollowLease,
+        readback: &NurtureFollowReadback,
+        evidence: &str,
+    ) -> anyhow::Result<()> {
+        self.db
+            .settle_confirmed_nurture_follow_with_source(
+                &lease.action_run_id,
+                lease.armed_revision,
+                readback,
+                Some(evidence),
+            )?
+            .ok_or_else(|| anyhow::anyhow!("Nurture Follow confirmed settlement lost ownership"))?;
+        Ok(())
+    }
+
+    fn settle_uncertain(
+        &self,
+        lease: NurtureFollowLease,
+        evidence: &str,
+        error_code: &str,
+    ) -> anyhow::Result<()> {
+        if !self.db.settle_tiktok_action(
+            &lease.owner,
+            InteractionActionKind::Follow,
+            lease.armed_revision,
+            InteractionActionState::Uncertain,
+            Some(evidence),
+            Some(error_code),
+        )? {
+            anyhow::bail!("Nurture Follow uncertain settlement lost ownership");
+        }
+        Ok(())
+    }
 }
 
 impl<'a> NurtureSaveLedger<'a> {
@@ -741,7 +889,20 @@ impl NurtureEngine {
         &self,
         mut status: NurtureSessionStatus,
     ) -> NurtureSessionStatus {
-        if status.phase == NurturePhase::Queued && status.started_at.is_none() {
+        let follow_recovery = match status.run_id {
+            Some(run_id) => self
+                .db
+                .recover_orphaned_nurture_follow_actions(run_id, &status.udid),
+            None => Ok(Default::default()),
+        };
+        let possible_follow_effect = follow_recovery
+            .as_ref()
+            .is_ok_and(|recovered| recovered.has_possible_effect());
+        if status.phase == NurturePhase::Queued
+            && status.started_at.is_none()
+            && !possible_follow_effect
+            && follow_recovery.is_ok()
+        {
             // The durable row is written before its worker starts. A crash in that gap has
             // no device effect to clean up, so terminating a manually opened TikTok here
             // would itself be an unrelated effect.
@@ -811,6 +972,16 @@ impl NurtureEngine {
         };
         status.finish(Outcome::Partial);
         status.last_message = "Phiên Nuôi bị gián đoạn khi ứng dụng khởi động lại".to_string();
+        match follow_recovery {
+            Ok(recovered) if recovered.uncertain > 0 => status.last_message.push_str(&format!(
+                "; {} Follow đã qua effect intent và được khóa uncertain",
+                recovered.uncertain
+            )),
+            Err(error) => status
+                .last_message
+                .push_str(&format!("; lỗi reconcile Follow: {error:#}")),
+            Ok(_) => {}
+        }
         status.updated_at = Some(chrono::Utc::now());
         Self::record_cleanup(&mut status, cleanup);
         status
@@ -2242,29 +2413,13 @@ impl NurtureEngine {
                 .await
             {
                 Ok(verdict) => {
-                    if verdict.did_act() {
-                        policy.commit_attempt(reservation);
-                        progress.status.follow_attempts += 1;
-                        ctx.push(&progress.status);
-                    } else {
-                        policy.cancel_no_effect(reservation);
-                    }
+                    policy.cancel_no_effect(reservation);
                     match verdict {
-                        FollowResult::Followed => {
-                            progress.status.follows += 1;
-                            ctx.report(&mut progress.status, "follow thành công".into());
-                        }
-                        FollowResult::NoControl => ctx.report(
+                        FollowResult::SourceUnavailable => ctx.report(
                             &mut progress.status,
-                            "bỏ qua follow: thẻ không có nút Follow".into(),
+                            "bỏ qua follow: đường nhận dạng ảnh không có bằng chứng hồ sơ tác giả"
+                                .into(),
                         ),
-                        FollowResult::CardChanged => ctx.report(
-                            &mut progress.status,
-                            "bỏ qua follow: thẻ hoặc tác giả đã đổi trước cú tap".into(),
-                        ),
-                        FollowResult::NotConfirmed => {
-                            ctx.report(&mut progress.status, "follow không đổi trạng thái".into())
-                        }
                     }
                 }
                 Err(e) => {
@@ -2307,6 +2462,55 @@ impl NurtureEngine {
         max_duration: Option<Duration>,
         on_status: impl Fn(NurtureSessionStatus) + Send + Sync,
     ) -> anyhow::Result<NurtureSessionStatus> {
+        let session_owner = format!("nurture-session:{}", uuid::Uuid::new_v4());
+        self.run_session_inner(
+            None,
+            &session_owner,
+            udid,
+            settings,
+            stop,
+            max_duration,
+            on_status,
+        )
+        .await
+    }
+
+    /// Run one device under the durable batch identity persisted before worker dispatch.
+    pub async fn run_session_scoped(
+        &self,
+        run_id: uuid::Uuid,
+        udid: &str,
+        settings: NurtureSettings,
+        stop: Arc<AtomicBool>,
+        max_duration: Option<Duration>,
+        on_status: impl Fn(NurtureSessionStatus) + Send + Sync,
+    ) -> anyhow::Result<NurtureSessionStatus> {
+        self.db
+            .recover_orphaned_nurture_follow_actions(run_id, udid)?;
+        let session_owner = format!("nurture-run:{run_id}");
+        self.run_session_inner(
+            Some(run_id),
+            &session_owner,
+            udid,
+            settings,
+            stop,
+            max_duration,
+            on_status,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn run_session_inner(
+        &self,
+        run_id: Option<uuid::Uuid>,
+        nurture_session_id: &str,
+        udid: &str,
+        settings: NurtureSettings,
+        stop: Arc<AtomicBool>,
+        max_duration: Option<Duration>,
+        on_status: impl Fn(NurtureSessionStatus) + Send + Sync,
+    ) -> anyhow::Result<NurtureSessionStatus> {
         // Folded once here so the whole loop below reads effective values: a feature whose
         // switch is off arrives as probability 0, and no call site has to remember the
         // switch exists (`NurtureSettings::into_effective`). Refreshed the same way.
@@ -2316,10 +2520,9 @@ impl NurtureEngine {
         // does, so the context has to exist by then. The gesture lock came up with it — it
         // is one of the four values every phase needs, and it depends on nothing.
         let gestures = Arc::new(tokio::sync::Mutex::new(()));
-        let nurture_session_id = uuid::Uuid::new_v4().to_string();
         let ctx = SessionCtx {
             udid,
-            session_id: &nurture_session_id,
+            session_id: nurture_session_id,
             stop: &stop,
             gestures: &gestures,
             on_status: &on_status,
@@ -2338,6 +2541,7 @@ impl NurtureEngine {
             status: NurtureSessionStatus {
                 running: true,
                 last_message: "bắt đầu".into(),
+                run_id,
                 phase: NurturePhase::Opening,
                 video_target: live::video_target(&settings),
                 started_at: Some(session_began),
@@ -2393,7 +2597,8 @@ impl NurtureEngine {
         };
         let live_source = EngineLiveSettings { engine: self };
         let mut said_live_settings_failed = false;
-        let save_ledger = NurtureSaveLedger::new(self.db.as_ref(), &nurture_session_id, udid);
+        let save_ledger = NurtureSaveLedger::new(self.db.as_ref(), nurture_session_id, udid);
+        let follow_ledger = NurtureFollowLedger::new(self.db.as_ref(), nurture_session_id, udid);
         let attempt = hierarchy::run_hierarchy_session_with_save_intent(
             device.session.as_ref(),
             device.screen_size,
@@ -2407,6 +2612,7 @@ impl NurtureEngine {
             Some(&comment_source),
             Some(&live_source),
             &save_ledger,
+            &follow_ledger,
         )
         .await;
         match attempt {
@@ -2922,6 +3128,10 @@ impl NurtureEngine {
         if let Some(task) = popup_watch_task.take() {
             let _ = tokio::time::timeout(Duration::from_secs(3), task).await;
         }
+        let follow_recovery = run_id.map(|run_id| {
+            self.db
+                .recover_orphaned_nurture_follow_actions(run_id, udid)
+        });
         let OpenedDevice {
             ui_context,
             bundle_id,
@@ -2931,6 +3141,24 @@ impl NurtureEngine {
         self.clear_touch_points(udid);
         match session_result {
             Ok(mut status) => {
+                if let Some(recovery) = &follow_recovery {
+                    match recovery {
+                        Ok(recovered) if recovered.uncertain > 0 => {
+                            status.finish(Outcome::Partial);
+                            status.last_message.push_str(&format!(
+                                "; {} Follow chưa xác định sau effect intent",
+                                recovered.uncertain
+                            ));
+                        }
+                        Err(error) => {
+                            status.finish(Outcome::Partial);
+                            status
+                                .last_message
+                                .push_str(&format!("; lỗi chốt ledger Follow: {error:#}"));
+                        }
+                        Ok(_) => {}
+                    }
+                }
                 match Self::record_cleanup(&mut status, shutdown) {
                     None => status.last_message.push_str(", đã tắt sạch TikTok"),
                     Some(error) => {
@@ -2966,6 +3194,20 @@ impl NurtureEngine {
                 };
                 status.finish(outcome);
                 status.last_message = format!("error: {error}");
+                if let Some(recovery) = &follow_recovery {
+                    match recovery {
+                        Ok(recovered) if recovered.uncertain > 0 => {
+                            status.last_message.push_str(&format!(
+                                "; {} Follow chưa xác định sau effect intent",
+                                recovered.uncertain
+                            ))
+                        }
+                        Err(error) => status
+                            .last_message
+                            .push_str(&format!("; lỗi chốt ledger Follow: {error:#}")),
+                        Ok(_) => {}
+                    }
+                }
                 if let Some(cleanup) = Self::record_cleanup(&mut status, shutdown) {
                     status
                         .last_message
@@ -3626,8 +3868,9 @@ mod tests {
         ));
         let db_path =
             std::env::temp_dir().join(format!("riviu-orphan-cleanup-{}.db", uuid::Uuid::new_v4()));
+        let db = Arc::new(Database::open(&db_path).expect("test database"));
         let engine = NurtureEngine::new(
-            Arc::new(Database::open(&db_path).expect("test database")),
+            db.clone(),
             control,
             Arc::new(NullFrameSource),
             std::env::temp_dir(),
@@ -3662,7 +3905,65 @@ mod tests {
         assert_eq!(queued.outcome, Some(Outcome::Stopped));
         assert_eq!(queued.cleanup_state, NurtureCleanupState::Pending);
 
+        let run_id = uuid::Uuid::new_v4();
+        let mut possible_effect = NurtureSessionStatus::new("possible-follow-device");
+        possible_effect.running = true;
+        possible_effect.run_id = Some(run_id);
+        possible_effect.run_size = 1;
+        db.create_nurture_run(
+            run_id,
+            &[possible_effect.udid.clone()],
+            &[possible_effect.clone()],
+        )
+        .expect("create orphaned nurture run");
+        let owner = TikTokActionOwner {
+            kind: TikTokActionOwnerKind::Nurture,
+            owner_id: format!("nurture-run:{run_id}:follow:card:author"),
+            device_udid: possible_effect.udid.clone(),
+            card_identity: Some(r#"{"fixture":"runtime-recovery-boundary"}"#.to_string()),
+        };
+        db.ensure_tiktok_action_run(&owner, InteractionActionKind::Follow)
+            .expect("create orphaned Follow action");
+        let preparing = db
+            .claim_tiktok_action(&owner, InteractionActionKind::Follow)
+            .expect("claim orphaned Follow")
+            .expect("orphaned Follow ownership");
+        db.arm_tiktok_action(
+            &owner,
+            InteractionActionKind::Follow,
+            preparing,
+            "follow exact author fixture",
+        )
+        .expect("arm orphaned Follow")
+        .expect("armed revision");
+
+        let stale_status_after_recovery_crash = possible_effect.clone();
+        let possible_effect = engine.recover_orphaned_session(possible_effect).await;
+        assert_eq!(
+            driver.terminate_calls.load(Ordering::Relaxed),
+            2,
+            "an armed Follow means a queued status can no longer prove zero device effect"
+        );
+        assert_eq!(possible_effect.outcome, Some(Outcome::Partial));
+        assert!(possible_effect.last_message.contains("khóa uncertain"));
+        let recovered_action = db
+            .get_tiktok_action_run(&owner, InteractionActionKind::Follow)
+            .expect("read recovered Follow")
+            .expect("recovered Follow action");
+        assert_eq!(recovered_action.state, InteractionActionState::Uncertain);
+
+        let second_restart = engine
+            .recover_orphaned_session(stale_status_after_recovery_crash)
+            .await;
+        assert_eq!(
+            driver.terminate_calls.load(Ordering::Relaxed),
+            3,
+            "an existing uncertain witness survives a crash before recovered status is appended"
+        );
+        assert_eq!(second_restart.outcome, Some(Outcome::Partial));
+
         drop(engine);
+        drop(db);
         let _ = std::fs::remove_file(db_path);
     }
 

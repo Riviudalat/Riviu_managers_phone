@@ -46,6 +46,9 @@ use crate::human_behavior::{
     HumanBehavior, HumanSessionPolicy, MoodCycle, PolicyAction,
 };
 use crate::tiktok_drawer::CommentVerdict;
+use crate::tiktok_follow_cleanup::{
+    prove_nurture_follow_source, readback_nurture_follow_source, NurtureFollowReadbackVerdict,
+};
 use crate::tiktok_labels::{controls_for, TikTokControl, TikTokControls};
 use crate::tiktok_like::LikeVerdict;
 use crate::tiktok_save::{
@@ -61,7 +64,7 @@ use uuid::Uuid;
 
 use super::recovery::Outcome;
 use super::touch::TouchPointPlanner;
-use super::{sleep_interruptible, NurtureSaveJournal, NurtureSaveLease};
+use super::{sleep_interruptible, NurtureFollowJournal, NurtureSaveJournal, NurtureSaveLease};
 
 /// How many consecutive cards may lack the feed tab before the loop gives up.
 ///
@@ -276,13 +279,21 @@ fn follow_control_matches_author(
 enum FollowVerdict {
     Followed,
     NoControl,
+    SourceUnavailable,
     CardChanged,
     NotConfirmed,
+    Cancelled,
 }
 
 impl FollowVerdict {
     fn did_act(self) -> bool {
         matches!(self, Self::Followed | Self::NotConfirmed)
+    }
+
+    fn latch_session_outcome(self, outcome: &mut Outcome) {
+        if self == Self::NotConfirmed && *outcome == Outcome::Done {
+            *outcome = Outcome::Partial;
+        }
     }
 }
 
@@ -667,12 +678,6 @@ impl<'a> HierarchyRun<'a> {
         present(self.session, self.labels, TikTokControl::FeedTab).await
     }
 
-    /// Tap a jittered point inside a located control.
-    async fn tap_inside(&mut self, element: &ElementBox) -> anyhow::Result<()> {
-        let point = self.planner.next(element.centre(), element.jitter_radius());
-        self.session.tap(point).await
-    }
-
     /// Like the current post and say what was actually proved.
     ///
     /// Confirmation without a measured liked-label: the *not-liked* label is an
@@ -774,6 +779,7 @@ impl<'a> HierarchyRun<'a> {
         &mut self,
         expected: &PostFingerprint,
         stop: &AtomicBool,
+        journal: Option<&dyn NurtureFollowJournal>,
     ) -> Result<FollowVerdict, ActionFailure> {
         if !self.on_feed().await {
             return Ok(FollowVerdict::CardChanged);
@@ -794,22 +800,138 @@ impl<'a> HierarchyRun<'a> {
         if !follow_control_matches_author(self.labels, expected, &element) {
             return Ok(FollowVerdict::CardChanged);
         }
-        self.tap_inside(&element)
+
+        let Some(journal) = journal else {
+            return Ok(FollowVerdict::SourceUnavailable);
+        };
+        let package = self
+            .session
+            .active_app_bundle()
             .await
-            .map_err(ActionFailure::after)?;
+            .map_err(ActionFailure::before)?;
+        let Some(version) = self.session.app_version(&package).await else {
+            return Ok(FollowVerdict::SourceUnavailable);
+        };
+        let Some(locale) = self.session.ui_language().await else {
+            return Ok(FollowVerdict::SourceUnavailable);
+        };
+        let source_snapshot = match self.session.hierarchy_source_snapshot().await {
+            Ok(snapshot) => snapshot,
+            Err(_) => return Ok(FollowVerdict::SourceUnavailable),
+        };
+        let proof = match prove_nurture_follow_source(&package, &version, &locale, &source_snapshot)
+        {
+            Ok(proof) => proof,
+            Err(_) => return Ok(FollowVerdict::SourceUnavailable),
+        };
+        let Some(profile_label) = self.labels.label(TikTokControl::AuthorProfileLink) else {
+            return Ok(FollowVerdict::SourceUnavailable);
+        };
+        let Some(expected_handle) = expected
+            .author
+            .as_deref()
+            .and_then(|author| embedded_author(author, profile_label))
+            .filter(|author| author.starts_with('@'))
+            .map(|author| author.to_ascii_lowercase())
+        else {
+            return Ok(FollowVerdict::SourceUnavailable);
+        };
+        if expected_handle != proof.identity().canonical_handle() {
+            return Ok(FollowVerdict::CardChanged);
+        }
+        let mut evidence = serde_json::json!({
+            "canonicalHandle": proof.identity().canonical_handle(),
+            "cardKey": proof.identity().card_key(),
+            "authorProfileKey": proof.identity().author_profile_key(),
+            "hierarchyGeneration": proof.hierarchy_generation(),
+            "snapshotSha256": proof.snapshot_sha256(),
+        });
+        let follow_tap_point = proof.follow_tap_point();
+        if stop.load(Ordering::Relaxed) {
+            return Ok(FollowVerdict::Cancelled);
+        }
+        // The database arm is deliberately the last operation before the tap. The point and
+        // immutable identity came from this same hierarchy generation; no stale locator is kept.
+        let lease = journal
+            .arm(proof.identity())
+            .map_err(ActionFailure::before)?;
+        if stop.load(Ordering::Relaxed) {
+            evidence["tap"] = serde_json::json!("cancelled_before_dispatch");
+            journal
+                .settle_failed_before_effect(
+                    lease,
+                    &evidence.to_string(),
+                    "follow_cancelled_before_tap",
+                )
+                .map_err(ActionFailure::before)?;
+            return Ok(FollowVerdict::Cancelled);
+        }
+        if let Err(error) = self.session.tap(follow_tap_point).await {
+            evidence["tap"] = serde_json::json!("transport_error_after_arm");
+            let serialized = evidence.to_string();
+            let settlement =
+                journal.settle_uncertain(lease, &serialized, "follow_tap_transport_uncertain");
+            return Err(ActionFailure::after(match settlement {
+                Ok(()) => anyhow::anyhow!("Follow tap failed after durable arm: {error}"),
+                Err(settle) => anyhow::anyhow!(
+                    "Follow tap failed after durable arm: {error}; uncertain settlement failed: {settle}"
+                ),
+            }));
+        }
         sleep_interruptible(Duration::from_millis(1_200), stop).await;
-        // Following removes the button; its continued presence means the tap did
-        // not take, and reporting that as a follow would inflate every count.
-        let follow_gone = locate(self.session, self.labels, TikTokControl::Follow)
-            .await
-            .map_err(ActionFailure::after)?
-            .is_none();
-        let after = fingerprint(self.session, self.labels).await;
-        Ok(if follow_gone && after.has_same_author(expected) {
-            FollowVerdict::Followed
-        } else {
-            FollowVerdict::NotConfirmed
-        })
+        let readback_snapshot = match self.session.hierarchy_source_snapshot().await {
+            Ok(value) => value,
+            Err(error) => {
+                evidence["readback"] = serde_json::json!("transport_error");
+                let serialized = evidence.to_string();
+                let settlement = journal.settle_uncertain(
+                    lease,
+                    &serialized,
+                    "follow_readback_transport_uncertain",
+                );
+                return Err(ActionFailure::after(match settlement {
+                    Ok(()) => anyhow::anyhow!("Follow readback failed after tap: {error}"),
+                    Err(settle) => anyhow::anyhow!(
+                        "Follow readback failed after tap: {error}; uncertain settlement failed: {settle}"
+                    ),
+                }));
+            }
+        };
+        let readback = match readback_nurture_follow_source(
+            proof.identity(),
+            &package,
+            &version,
+            &locale,
+            &readback_snapshot,
+        ) {
+            Ok(value) => value,
+            Err(error) => {
+                evidence["readback"] = serde_json::json!(error.to_string());
+                journal
+                    .settle_uncertain(lease, &evidence.to_string(), "follow_readback_unproved")
+                    .map_err(ActionFailure::after)?;
+                return Ok(FollowVerdict::NotConfirmed);
+            }
+        };
+        evidence["readbackHierarchyGeneration"] =
+            serde_json::json!(readback.hierarchy_generation());
+        evidence["readbackSnapshotSha256"] = serde_json::json!(readback.snapshot_sha256());
+        evidence["readbackVerdict"] = serde_json::json!(format!("{:?}", readback.verdict()));
+        match readback.verdict() {
+            NurtureFollowReadbackVerdict::FollowAbsent => {
+                journal
+                    .settle_confirmed(lease, &readback, &evidence.to_string())
+                    .map_err(ActionFailure::after)?;
+                Ok(FollowVerdict::Followed)
+            }
+            NurtureFollowReadbackVerdict::FollowPresent
+            | NurtureFollowReadbackVerdict::CardChanged => {
+                journal
+                    .settle_uncertain(lease, &evidence.to_string(), "follow_not_confirmed")
+                    .map_err(ActionFailure::after)?;
+                Ok(FollowVerdict::NotConfirmed)
+            }
+        }
     }
 
     /// Where we are inside a photo post: `(current, total)`, or `None` when this card is
@@ -1236,6 +1358,7 @@ pub async fn run_hierarchy_session(
         comments,
         live,
         None,
+        None,
     )
     .await
 }
@@ -1254,6 +1377,7 @@ pub(super) async fn run_hierarchy_session_with_save_intent(
     comments: Option<&dyn CommentTextSource>,
     live: Option<&dyn LiveSettings>,
     save_journal: &dyn NurtureSaveJournal,
+    follow_journal: &dyn NurtureFollowJournal,
 ) -> HierarchySession {
     run_hierarchy_session_inner(
         session,
@@ -1268,6 +1392,7 @@ pub(super) async fn run_hierarchy_session_with_save_intent(
         comments,
         live,
         Some(save_journal),
+        Some(follow_journal),
     )
     .await
 }
@@ -1286,6 +1411,7 @@ async fn run_hierarchy_session_inner(
     comments: Option<&dyn CommentTextSource>,
     live: Option<&dyn LiveSettings>,
     save_journal: Option<&dyn NurtureSaveJournal>,
+    follow_journal: Option<&dyn NurtureFollowJournal>,
 ) -> HierarchySession {
     if !session.supports_element_bounds() {
         return HierarchySession::NotSupported;
@@ -1325,6 +1451,7 @@ async fn run_hierarchy_session_inner(
         comments,
         live,
         save_journal,
+        follow_journal,
     )
     .await;
     HierarchySession::Ran(outcome)
@@ -1697,6 +1824,7 @@ pub(super) async fn run_feed(
     comments: Option<&dyn CommentTextSource>,
     live: Option<&dyn LiveSettings>,
     save_journal: Option<&dyn NurtureSaveJournal>,
+    follow_journal: Option<&dyn NurtureFollowJournal>,
 ) -> Outcome {
     // The loop's own copy, because from here on the operator can change it. Everything
     // below reads `settings` per post already, so owning it is all that was missing.
@@ -2243,8 +2371,9 @@ pub(super) async fn run_feed(
             } else {
                 let reservation = policy.reserve_attempt(PolicyAction::Follow);
                 report(status, "follow tác giả".into());
-                match run.follow(&before, stop).await {
+                match run.follow(&before, stop, follow_journal).await {
                     Ok(verdict) => {
+                        verdict.latch_session_outcome(&mut outcome);
                         if verdict.did_act() {
                             policy.commit_attempt(reservation);
                             acted_this_pass = true;
@@ -2263,23 +2392,37 @@ pub(super) async fn run_feed(
                             FollowVerdict::NoControl => {
                                 report(status, "bỏ qua follow: thẻ không có nút Follow".into())
                             }
+                            FollowVerdict::SourceUnavailable => report(
+                                status,
+                                "bỏ qua follow: chưa chứng minh được hồ sơ tác giả để hoàn tác"
+                                    .into(),
+                            ),
                             FollowVerdict::CardChanged => report(
                                 status,
                                 "bỏ qua follow: thẻ hoặc tác giả đã đổi trước cú tap".into(),
                             ),
                             FollowVerdict::NotConfirmed => report(
                                 status,
-                                "bỏ qua follow: nút Follow vẫn còn — chưa xác nhận".into(),
+                                "follow đã chạm nhưng readback không chắc chắn".into(),
                             ),
+                            FollowVerdict::Cancelled => {
+                                report(status, "đã dừng trước cú tap Follow".into());
+                                outcome = Outcome::Stopped;
+                                break 'feed;
+                            }
                         }
                     }
                     Err(error) => {
+                        let possible_effect = error.effect_may_have_gone_out();
                         acted_this_pass |= settle_action_failure(
                             &mut policy,
                             reservation,
                             &error,
                             &mut status.follow_attempts,
                         );
+                        if possible_effect {
+                            outcome = Outcome::Partial;
+                        }
                         report(status, format!("follow thất bại: {error}"));
                     }
                 }
@@ -2429,6 +2572,10 @@ mod tests {
         controls_for("com.ss.android.ugc.trill", "vi", "46.3.3").expect("measured set")
     }
 
+    fn english_38() -> TikTokControls {
+        controls_for("com.ss.android.ugc.trill", "en", "38.3.2").expect("measured set")
+    }
+
     fn texts(items: &[&str]) -> Vec<String> {
         items.iter().map(|s| (*s).to_string()).collect()
     }
@@ -2523,7 +2670,7 @@ mod tests {
         };
 
         assert_eq!(
-            run.follow(&expected, &AtomicBool::new(false))
+            run.follow(&expected, &AtomicBool::new(false), None)
                 .await
                 .expect("classified follow"),
             FollowVerdict::CardChanged
@@ -2554,7 +2701,7 @@ mod tests {
         };
 
         assert_eq!(
-            run.follow(&expected, &AtomicBool::new(false))
+            run.follow(&expected, &AtomicBool::new(false), None)
                 .await
                 .expect("classified follow"),
             FollowVerdict::CardChanged
@@ -2563,7 +2710,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn hierarchy_follow_taps_once_when_author_stays_the_same() {
+    async fn hierarchy_follow_without_a_durable_source_journal_never_taps() {
         let phone = FollowCardPhone {
             author: "author_a",
             follow_author: "author_a",
@@ -2585,12 +2732,411 @@ mod tests {
         };
 
         assert_eq!(
-            run.follow(&expected, &AtomicBool::new(false))
+            run.follow(&expected, &AtomicBool::new(false), None)
                 .await
                 .expect("follow"),
+            FollowVerdict::SourceUnavailable
+        );
+        assert_eq!(phone.taps.load(Ordering::Relaxed), 0);
+    }
+
+    struct ProvedFollowPhone {
+        handle: &'static str,
+        confirm: bool,
+        taps: std::sync::atomic::AtomicUsize,
+        followed: std::sync::atomic::AtomicBool,
+    }
+
+    impl ProvedFollowPhone {
+        fn source_xml(&self) -> String {
+            let handle = self.handle;
+            let follow_control = if self.followed.load(Ordering::Relaxed) {
+                String::new()
+            } else {
+                format!(
+                    r#"          <node package="com.ss.android.ugc.trill" class="android.widget.Button" resource-id="com.ss.android.ugc.trill:id/fm1" text="" content-desc="Follow {handle}" bounds="[870,1450][1030,1530]" enabled="true" clickable="true" selected="false" />"#
+                )
+            };
+            format!(
+                r#"<?xml version="1.0" encoding="UTF-8"?>
+<hierarchy rotation="0">
+  <node package="com.ss.android.ugc.trill" class="android.widget.FrameLayout" resource-id="root" text="" content-desc="" bounds="[0,0][1080,2160]" enabled="true" clickable="false" selected="false">
+    <node package="com.ss.android.ugc.trill" class="androidx.viewpager.widget.ViewPager" resource-id="com.ss.android.ugc.trill:id/tod" text="" content-desc="" bounds="[0,0][1080,2000]" enabled="true" clickable="false" selected="false">
+      <node package="com.ss.android.ugc.trill" class="android.widget.LinearLayout" resource-id="com.ss.android.ugc.trill:id/hfp" text="" content-desc="" bounds="[0,0][1080,1900]" enabled="true" clickable="true" selected="false">
+        <node package="com.ss.android.ugc.trill" class="android.widget.FrameLayout" resource-id="com.ss.android.ugc.trill:id/cv2" text="" content-desc="" bounds="[0,100][1080,1900]" enabled="true" clickable="true" selected="false">
+          <node package="com.ss.android.ugc.trill" class="android.widget.ImageView" resource-id="com.ss.android.ugc.trill:id/t40" text="" content-desc="{handle} profile" bounds="[24,1500][580,1560]" enabled="true" clickable="true" selected="false" />
+{follow_control}
+        </node>
+      </node>
+    </node>
+    <node package="com.ss.android.ugc.trill" class="android.widget.LinearLayout" resource-id="" text="" content-desc="For You" bounds="[540,2020][1080,2160]" enabled="true" clickable="false" selected="true" />
+  </node>
+</hierarchy>"#
+            )
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl UiSession for ProvedFollowPhone {
+        async fn tap(&self, _point: TapPoint) -> anyhow::Result<()> {
+            self.taps.fetch_add(1, Ordering::Relaxed);
+            self.followed.store(self.confirm, Ordering::Relaxed);
+            Ok(())
+        }
+
+        async fn swipe(&self, _gesture: crate::types::SwipeGesture) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn type_text(&self, _text: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn home(&self) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn find_and_tap(&self, _accessibility_id: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn assert_visible(&self, _accessibility_id: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn active_app_bundle(&self) -> anyhow::Result<String> {
+            Ok("com.ss.android.ugc.trill".into())
+        }
+
+        async fn ui_language(&self) -> Option<String> {
+            Some("en".into())
+        }
+
+        async fn app_version(&self, _bundle_id: &str) -> Option<String> {
+            Some("38.3.2".into())
+        }
+
+        async fn hierarchy_source_snapshot(
+            &self,
+        ) -> anyhow::Result<crate::HierarchySourceSnapshot> {
+            Ok(crate::HierarchySourceSnapshot {
+                generation: if self.taps.load(Ordering::Relaxed) > 0 {
+                    2
+                } else {
+                    1
+                },
+                xml: self.source_xml(),
+            })
+        }
+
+        async fn locate(&self, query: ElementQuery<'_>) -> anyhow::Result<Option<ElementBox>> {
+            let ElementQuery::Description { value, .. } = query else {
+                return Ok(None);
+            };
+            let found = match value {
+                "For You" => Some("For You".to_owned()),
+                " profile" => Some(format!("{} profile", self.handle)),
+                "comments" => Some("Read or add comments. 12 comments".to_owned()),
+                "Share video" => Some("Share video. 3".to_owned()),
+                "Sound:" => Some("Sound: fixture".to_owned()),
+                "Follow " if !self.followed.load(Ordering::Relaxed) => {
+                    Some(format!("Follow {}", self.handle))
+                }
+                _ => None,
+            };
+            Ok(found.map(|description| ElementBox {
+                x: 870.0,
+                y: 1_450.0,
+                width: 160.0,
+                height: 80.0,
+                description: Some(description),
+                enabled: true,
+                clickable: true,
+            }))
+        }
+
+        fn stream_url(&self) -> Option<String> {
+            None
+        }
+    }
+
+    fn follow_fixture() -> (Database, std::path::PathBuf) {
+        let path = std::env::temp_dir().join(format!(
+            "riviu-nurture-follow-runtime-test-{}.db",
+            Uuid::new_v4()
+        ));
+        (Database::open(&path).expect("follow database"), path)
+    }
+
+    #[test]
+    fn unconfirmed_follow_latches_partial_session_outcome() {
+        let mut outcome = Outcome::Done;
+        FollowVerdict::NotConfirmed.latch_session_outcome(&mut outcome);
+        let attempts = u32::from(FollowVerdict::NotConfirmed.did_act());
+        let confirmed = u32::from(FollowVerdict::NotConfirmed == FollowVerdict::Followed);
+        assert_eq!(outcome, Outcome::Partial);
+        assert_eq!((attempts, confirmed), (1, 0));
+
+        FollowVerdict::NoControl.latch_session_outcome(&mut outcome);
+        assert_eq!(outcome, Outcome::Partial);
+    }
+
+    struct StopOnFollowArm<'a> {
+        inner: crate::nurture::NurtureFollowLedger<'a>,
+        stop: &'a AtomicBool,
+    }
+
+    impl NurtureFollowJournal for StopOnFollowArm<'_> {
+        fn arm(
+            &self,
+            identity: &crate::tiktok_follow_cleanup::NurtureFollowSourceIdentity,
+        ) -> anyhow::Result<crate::nurture::NurtureFollowLease> {
+            let lease = self.inner.arm(identity)?;
+            self.stop.store(true, Ordering::Relaxed);
+            Ok(lease)
+        }
+
+        fn settle_failed_before_effect(
+            &self,
+            lease: crate::nurture::NurtureFollowLease,
+            evidence: &str,
+            error_code: &str,
+        ) -> anyhow::Result<()> {
+            self.inner
+                .settle_failed_before_effect(lease, evidence, error_code)
+        }
+
+        fn settle_confirmed(
+            &self,
+            lease: crate::nurture::NurtureFollowLease,
+            readback: &crate::tiktok_follow_cleanup::NurtureFollowReadback,
+            evidence: &str,
+        ) -> anyhow::Result<()> {
+            self.inner.settle_confirmed(lease, readback, evidence)
+        }
+
+        fn settle_uncertain(
+            &self,
+            lease: crate::nurture::NurtureFollowLease,
+            evidence: &str,
+            error_code: &str,
+        ) -> anyhow::Result<()> {
+            self.inner.settle_uncertain(lease, evidence, error_code)
+        }
+    }
+
+    #[tokio::test]
+    async fn hierarchy_follow_stop_after_arm_settles_before_effect_without_tap() {
+        let phone = ProvedFollowPhone {
+            handle: "@exact.author",
+            confirm: true,
+            taps: std::sync::atomic::AtomicUsize::new(0),
+            followed: std::sync::atomic::AtomicBool::new(false),
+        };
+        let (db, path) = follow_fixture();
+        let stop = AtomicBool::new(false);
+        let journal = StopOnFollowArm {
+            inner: crate::nurture::NurtureFollowLedger::new(&db, "session-stop", "device-a"),
+            stop: &stop,
+        };
+        let screen = (1_080.0, 2_220.0);
+        let mut run = HierarchyRun {
+            session: &phone,
+            labels: english_38(),
+            screen,
+            planner: TouchPointPlanner::new(screen),
+        };
+        let expected = PostFingerprint {
+            author: Some("@exact.author profile".into()),
+            comments: Some("Read or add comments. 12 comments".into()),
+            share: Some("Share video. 3".into()),
+            sound: Some("Sound: fixture".into()),
+        };
+
+        assert_eq!(
+            run.follow(&expected, &stop, Some(&journal))
+                .await
+                .expect("cancelled Follow"),
+            FollowVerdict::Cancelled
+        );
+        assert_eq!(phone.taps.load(Ordering::Relaxed), 0);
+        let connection = rusqlite::Connection::open(&path).expect("read follow database");
+        let row: (String, String, i64, i64) = connection
+            .query_row(
+                "SELECT action.state, action.error_code,
+                        (SELECT COUNT(*) FROM nurture_follow_armed_witnesses),
+                        (SELECT COUNT(*) FROM nurture_follow_source_identities)
+                 FROM tiktok_action_runs AS action WHERE action.action_kind='follow'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .expect("settled Follow row");
+        assert_eq!(
+            row,
+            (
+                "failed_before_effect".into(),
+                "follow_cancelled_before_tap".into(),
+                1,
+                0,
+            )
+        );
+        drop(connection);
+        drop(db);
+        std::fs::remove_file(path).expect("remove follow database");
+    }
+
+    #[tokio::test]
+    async fn hierarchy_follow_persists_atomic_source_after_confirmation() {
+        let phone = ProvedFollowPhone {
+            handle: "@exact.author",
+            confirm: true,
+            taps: std::sync::atomic::AtomicUsize::new(0),
+            followed: std::sync::atomic::AtomicBool::new(false),
+        };
+        let (db, path) = follow_fixture();
+        let ledger = crate::nurture::NurtureFollowLedger::new(&db, "session-a", "device-a");
+        let screen = (1_080.0, 2_220.0);
+        let mut run = HierarchyRun {
+            session: &phone,
+            labels: english_38(),
+            screen,
+            planner: TouchPointPlanner::new(screen),
+        };
+        let expected = PostFingerprint {
+            author: Some("@exact.author profile".into()),
+            comments: Some("Read or add comments. 12 comments".into()),
+            share: Some("Share video. 3".into()),
+            sound: Some("Sound: fixture".into()),
+        };
+
+        assert_eq!(
+            run.follow(&expected, &AtomicBool::new(false), Some(&ledger))
+                .await
+                .expect("follow with durable source"),
             FollowVerdict::Followed
         );
         assert_eq!(phone.taps.load(Ordering::Relaxed), 1);
+        let connection = rusqlite::Connection::open(&path).expect("read follow database");
+        let row: (String, String, i64) = connection
+            .query_row(
+                "SELECT action.state,source.canonical_handle,COUNT(*)
+                 FROM tiktok_action_runs AS action
+                 JOIN nurture_follow_source_identities AS source
+                   ON source.action_run_id=action.id
+                 WHERE action.owner_kind='nurture' AND action.action_kind='follow'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .expect("confirmed source row");
+        assert_eq!(row, ("confirmed".into(), "@exact.author".into(), 1));
+        drop(connection);
+        drop(db);
+        std::fs::remove_file(path).expect("remove follow database");
+    }
+
+    #[tokio::test]
+    async fn hierarchy_follow_uncertain_has_no_cleanup_source() {
+        let phone = ProvedFollowPhone {
+            handle: "@exact.author",
+            confirm: false,
+            taps: std::sync::atomic::AtomicUsize::new(0),
+            followed: std::sync::atomic::AtomicBool::new(false),
+        };
+        let (db, path) = follow_fixture();
+        let ledger = crate::nurture::NurtureFollowLedger::new(&db, "session-b", "device-a");
+        let screen = (1_080.0, 2_220.0);
+        let mut run = HierarchyRun {
+            session: &phone,
+            labels: english_38(),
+            screen,
+            planner: TouchPointPlanner::new(screen),
+        };
+        let expected = PostFingerprint {
+            author: Some("@exact.author profile".into()),
+            comments: Some("Read or add comments. 12 comments".into()),
+            share: Some("Share video. 3".into()),
+            sound: Some("Sound: fixture".into()),
+        };
+
+        assert_eq!(
+            run.follow(&expected, &AtomicBool::new(false), Some(&ledger))
+                .await
+                .expect("uncertain follow"),
+            FollowVerdict::NotConfirmed
+        );
+        assert_eq!(phone.taps.load(Ordering::Relaxed), 1);
+        let connection = rusqlite::Connection::open(&path).expect("read follow database");
+        let action_state: String = connection
+            .query_row(
+                "SELECT state FROM tiktok_action_runs WHERE action_kind='follow'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("uncertain action row");
+        let source_count: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM nurture_follow_source_identities",
+                [],
+                |row| row.get(0),
+            )
+            .expect("source count");
+        assert_eq!(action_state, "uncertain");
+        assert_eq!(source_count, 0);
+        drop(connection);
+        drop(db);
+        std::fs::remove_file(path).expect("remove follow database");
+    }
+
+    #[tokio::test]
+    async fn hierarchy_follow_noncanonical_author_is_noop_without_action_source() {
+        let phone = ProvedFollowPhone {
+            handle: "Display Name",
+            confirm: true,
+            taps: std::sync::atomic::AtomicUsize::new(0),
+            followed: std::sync::atomic::AtomicBool::new(false),
+        };
+        let (db, path) = follow_fixture();
+        let ledger = crate::nurture::NurtureFollowLedger::new(&db, "session-c", "device-a");
+        let screen = (1_080.0, 2_220.0);
+        let mut run = HierarchyRun {
+            session: &phone,
+            labels: english_38(),
+            screen,
+            planner: TouchPointPlanner::new(screen),
+        };
+        let expected = PostFingerprint {
+            author: Some("Display Name profile".into()),
+            comments: Some("Read or add comments. 12 comments".into()),
+            share: Some("Share video. 3".into()),
+            sound: Some("Sound: fixture".into()),
+        };
+
+        assert_eq!(
+            run.follow(&expected, &AtomicBool::new(false), Some(&ledger))
+                .await
+                .expect("typed source refusal"),
+            FollowVerdict::SourceUnavailable
+        );
+        assert_eq!(phone.taps.load(Ordering::Relaxed), 0);
+        let connection = rusqlite::Connection::open(&path).expect("read follow database");
+        let action_count: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM tiktok_action_runs WHERE action_kind='follow'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("action count");
+        let source_count: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM nurture_follow_source_identities",
+                [],
+                |row| row.get(0),
+            )
+            .expect("source count");
+        assert_eq!((action_count, source_count), (0, 0));
+        drop(connection);
+        drop(db);
+        std::fs::remove_file(path).expect("remove follow database");
     }
 
     struct PhaseFailurePhone {
@@ -2774,7 +3320,7 @@ mod tests {
             sound: None,
         };
         let failure = phase_failure_run(&phone)
-            .follow(&expected, &AtomicBool::new(false))
+            .follow(&expected, &AtomicBool::new(false), None)
             .await
             .expect_err("scripted Follow locate must fail");
         assert_before_effect_refunds(
@@ -3583,6 +4129,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .await;
 
@@ -3719,6 +4266,7 @@ mod tests {
             &stop,
             &mut status,
             &report,
+            None,
             None,
             None,
             None,
@@ -3913,6 +4461,7 @@ mod tests {
             Some(&AlwaysHasWords),
             None,
             None,
+            None,
         )
         .await;
 
@@ -4090,6 +4639,7 @@ mod tests {
             &stop,
             &mut status,
             &report,
+            None,
             None,
             None,
             None,

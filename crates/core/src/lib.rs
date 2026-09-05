@@ -38,10 +38,13 @@ pub mod screen_match;
 pub mod screen_watch;
 pub mod session_log;
 pub mod stream_budget;
+pub mod tiktok_comment_delete;
 pub mod tiktok_composer;
 pub mod tiktok_drawer;
+pub mod tiktok_follow_cleanup;
 pub mod tiktok_labels;
 pub mod tiktok_like;
+pub mod tiktok_post_delete;
 pub mod tiktok_public_cleanup;
 pub mod tiktok_save;
 pub mod tiktok_share;
@@ -66,8 +69,8 @@ pub use device_work::{
 pub use driver::{
     ui_error_kind, AppProcessState, DeviceDriver, ElementBox, ElementQuery,
     GuardedClipboardOperation, GuardedClipboardOutput, GuardedClipboardProgress,
-    GuardedClipboardTransition, MediaPullReport, ProcessAbsenceProof, UiError, UiErrorKind,
-    UiSession, UnsupportedCapability,
+    GuardedClipboardTransition, HierarchySourceSnapshot, MediaPullReport, ProcessAbsenceProof,
+    UiError, UiErrorKind, UiSession, UnsupportedCapability,
 };
 pub use events::{AppEvent, EventBus};
 pub use feed_ladder::{step as feed_ladder_step, LadderSpend, LadderStep, FEED_LADDER};
@@ -100,6 +103,7 @@ pub use stream_budget::{
     BackgroundStreamLease, ForegroundStreamReservation, ForegroundTransfer, StreamBudgetError,
     StreamBudgetManager, StreamStopRequest,
 };
+pub use tiktok_comment_delete::*;
 pub use tiktok_public_cleanup::*;
 pub use tiktok_save::*;
 pub use types::*;

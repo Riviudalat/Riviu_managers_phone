@@ -5,6 +5,7 @@ use async_trait::async_trait;
 use riviu_core::driver::UiSession;
 use riviu_core::flow::model::{ElementLocatorStrategy, QualifiedElementLocator};
 use riviu_core::{HardwareKey, SwipeGesture, TapPoint};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::adb::AdbProgram;
 use crate::agent::{AgentClient, Locator};
@@ -118,6 +119,8 @@ pub struct AndroidUiSession {
     /// clipboard stays the trait default (`unsupported`) — never the empty
     /// uiautomator2 body.
     helper: Option<HelperClient>,
+    /// Monotonic ordering for successful full-tree reads made by this session.
+    hierarchy_generation: AtomicU64,
 }
 
 impl AndroidUiSession {
@@ -128,6 +131,7 @@ impl AndroidUiSession {
             serial,
             screen: ScreenCache::seeded(screen),
             helper: None,
+            hierarchy_generation: AtomicU64::new(0),
         }
     }
 
@@ -857,6 +861,20 @@ impl UiSession for AndroidUiSession {
             });
         }
         Ok(found)
+    }
+
+    async fn hierarchy_source_snapshot(
+        &self,
+    ) -> anyhow::Result<riviu_core::HierarchySourceSnapshot> {
+        let xml = self.agent.source().await?;
+        let generation = self
+            .hierarchy_generation
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+                current.checked_add(1)
+            })
+            .map_err(|_| anyhow!("hierarchy source generation exhausted"))?
+            + 1;
+        Ok(riviu_core::HierarchySourceSnapshot { generation, xml })
     }
 
     /// True — this is the backend the primitive exists for.

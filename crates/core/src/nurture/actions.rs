@@ -111,16 +111,8 @@ pub(super) enum LikeResult {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum FollowResult {
-    Followed,
-    NoControl,
-    CardChanged,
-    NotConfirmed,
-}
-
-impl FollowResult {
-    pub(super) fn did_act(self) -> bool {
-        matches!(self, Self::Followed | Self::NotConfirmed)
-    }
+    /// Pixel OCR cannot prove an exact canonical author-profile hierarchy identity.
+    SourceUnavailable,
 }
 
 /// Where a text-comment attempt stopped. A transport ACK from `/wda/keys` is not
@@ -878,99 +870,19 @@ impl NurtureEngine {
     /// Tap follow, then confirm the red badge is gone.
     pub(super) async fn do_follow(
         &self,
-        udid: &str,
-        session: &dyn UiSession,
-        gestures: &tokio::sync::Mutex<()>,
+        _udid: &str,
+        _session: &dyn UiSession,
+        _gestures: &tokio::sync::Mutex<()>,
         _rail: &ActionRail,
-        screen_size: (f64, f64),
-        stop: &AtomicBool,
+        _screen_size: (f64, f64),
+        _stop: &AtomicBool,
     ) -> anyhow::Result<FollowResult> {
-        let Some(baseline_frame) = self.frames.latest(udid) else {
-            return Ok(FollowResult::CardChanged);
-        };
-        let Some(baseline_image) = image::load_from_memory(&baseline_frame)
-            .ok()
-            .map(|image| image.to_rgb8())
-        else {
-            return Ok(FollowResult::CardChanged);
-        };
-        if !screen::feed_ready(&baseline_image, Some(screen_size.0)) {
-            return Ok(FollowResult::CardChanged);
-        }
-        let Some(expected) = self.read_card_identity(&baseline_frame).await else {
-            return Ok(FollowResult::CardChanged);
-        };
-
-        let mut rng = StdRng::from_entropy();
-        sleep_interruptible(Duration::from_millis(rng.gen_range(300..700)), stop).await;
-        let watermark = {
-            let _guard = gestures.lock().await;
-            // Re-prove identity and geometry while no competing gesture can move the card.
-            let Some(fresh_frame) = self.frames.latest(udid) else {
-                return Ok(FollowResult::CardChanged);
-            };
-            let Some(fresh_image) = image::load_from_memory(&fresh_frame)
-                .ok()
-                .map(|image| image.to_rgb8())
-            else {
-                return Ok(FollowResult::CardChanged);
-            };
-            let Some(actual) = self.read_card_identity(&fresh_frame).await else {
-                return Ok(FollowResult::CardChanged);
-            };
-            if !screen::feed_ready(&fresh_image, Some(screen_size.0))
-                || !expected.same_card(&actual)
-            {
-                return Ok(FollowResult::CardChanged);
-            }
-            let Some(fresh_rail) = screen::locate_action_rail(&fresh_image) else {
-                return Ok(FollowResult::NoControl);
-            };
-            if !screen::follow_badge_present(&fresh_image, &fresh_rail) {
-                return Ok(FollowResult::NoControl);
-            }
-            let point = self.next_touch_point(
-                udid,
-                screen_size,
-                TapPoint {
-                    x: screen_size.0 * fresh_rail.x,
-                    y: screen_size.1 * fresh_rail.follow_y,
-                },
-                (10.0, 10.0),
-            );
-            session.tap(point).await?;
-            frame_digest(&fresh_frame)
-        };
-        // Require the confirming frame to still be an actionable feed: a system
-        // alert dims the whole screen, which reads as "badge gone" at the rail
-        // and would otherwise count a follow the alert actually swallowed.
-        let confirmed = self
-            .wait_for_frame_after(
-                udid,
-                Duration::from_millis(2_500),
-                stop,
-                &[watermark],
-                |img| {
-                    let Some(rail) = screen::locate_action_rail(img) else {
-                        return false;
-                    };
-                    !screen::follow_badge_present(img, &rail)
-                        && screen::feed_ready(img, Some(screen_size.0))
-                },
-            )
-            .await;
-        let Some((confirmed_frame, _)) = confirmed else {
-            return Ok(FollowResult::NotConfirmed);
-        };
-        let same_author = self
-            .read_card_identity(&confirmed_frame)
-            .await
-            .is_some_and(|actual| expected.same_card(&actual));
-        Ok(if same_author {
-            FollowResult::Followed
-        } else {
-            FollowResult::NotConfirmed
-        })
+        // Keep the signature tied to the production call site while explicitly declining every
+        // pixel attempt. A frame can prove a badge and an OCR name, but it has no resource id,
+        // ancestry, canonical @handle or hierarchy generation. Those fields are required to
+        // locate the exact Following-list row during cleanup, so tapping here would create an
+        // effect which Riviu could not later own. The hierarchy path is the only Follow producer.
+        Ok(FollowResult::SourceUnavailable)
     }
 
     /// Swipe to the next video, proving from the stream that the feed actually
@@ -3138,7 +3050,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn follow_refuses_when_author_changes_immediately_before_tap() {
+    async fn pixel_follow_refuses_without_author_profile_hierarchy_proof() {
         let frames = Arc::new(TestFrames::new());
         let stop = Arc::new(AtomicBool::new(false));
         let session = RecordingSession::new(frames.clone(), stop.clone(), false, false);
@@ -3159,13 +3071,13 @@ mod tests {
             .await
             .expect("classified follow");
 
-        assert_eq!(verdict, FollowResult::CardChanged);
+        assert_eq!(verdict, FollowResult::SourceUnavailable);
         assert_eq!(session.ordinary_taps.load(Ordering::Relaxed), 0);
         let _ = std::fs::remove_file(db_path);
     }
 
     #[tokio::test]
-    async fn follow_taps_once_when_author_stays_the_same() {
+    async fn pixel_follow_does_not_tap_even_when_ocr_author_stays_the_same() {
         let frames = Arc::new(TestFrames::new());
         let stop = Arc::new(AtomicBool::new(false));
         let session =
@@ -3185,13 +3097,13 @@ mod tests {
             .await
             .expect("follow");
 
-        assert_eq!(verdict, FollowResult::Followed);
-        assert_eq!(session.ordinary_taps.load(Ordering::Relaxed), 1);
+        assert_eq!(verdict, FollowResult::SourceUnavailable);
+        assert_eq!(session.ordinary_taps.load(Ordering::Relaxed), 0);
         let _ = std::fs::remove_file(db_path);
     }
 
     #[tokio::test]
-    async fn a_follow_is_not_confirmed_on_a_non_feed_frame() {
+    async fn pixel_follow_refuses_before_a_non_feed_confirmation_can_mislead_it() {
         // The real feed fixture shows a red follow badge; tapping follow flips
         // the mock to a grey drawer frame — badge gone but NOT an actionable
         // feed, exactly like the SIM-less activation alert that dims the screen.
@@ -3225,9 +3137,10 @@ mod tests {
 
         assert_eq!(
             confirmed,
-            FollowResult::NotConfirmed,
-            "a badge that vanished on a non-feed (dimmed) frame must not count as a follow"
+            FollowResult::SourceUnavailable,
+            "pixel evidence cannot own a reversible Follow"
         );
+        assert_eq!(session.ordinary_taps.load(Ordering::Relaxed), 0);
         let _ = std::fs::remove_file(db_path);
     }
 
