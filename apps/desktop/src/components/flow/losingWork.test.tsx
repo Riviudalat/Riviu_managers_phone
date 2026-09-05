@@ -41,7 +41,7 @@ const api = vi.hoisted(() => ({
 
 vi.mock("../../api", () => api);
 
-const confirmed = vi.hoisted(() => ({ requestConfirm: vi.fn() }));
+const confirmed = vi.hoisted(() => ({ requestConfirm: vi.fn(), requestSaveChanges: vi.fn() }));
 vi.mock("../../confirmStore", () => confirmed);
 
 /**
@@ -178,6 +178,7 @@ beforeEach(() => {
   localStorage.clear();
   for (const mock of Object.values(api)) mock.mockReset();
   confirmed.requestConfirm.mockReset().mockResolvedValue(true);
+  confirmed.requestSaveChanges.mockReset().mockResolvedValue("discard");
   api.flowActionCatalog.mockResolvedValue(catalog);
   api.flowList.mockResolvedValue([summary]);
   api.flowListRuns.mockResolvedValue([]);
@@ -216,16 +217,15 @@ describe("commands that would throw away an unsaved draft", () => {
     fireEvent.click(screen.getByRole("button", { name: "Lưu trữ Flow" }));
 
     await waitFor(() => expect(confirmed.requestConfirm).toHaveBeenCalled());
-    const titles = confirmed.requestConfirm.mock.calls.map((call) => call[0].title as string);
-    expect(titles.some((title) => title.includes("chưa lưu"))).toBe(true);
+    expect(confirmed.requestSaveChanges).toHaveBeenCalledWith("Flow thiết bị");
   });
 
   it("does not archive when the operator keeps the draft", async () => {
     await openDirtyWorkspace();
-    confirmed.requestConfirm.mockResolvedValue(false);
+    confirmed.requestSaveChanges.mockResolvedValue("stay");
     fireEvent.click(screen.getByRole("button", { name: "Lưu trữ Flow" }));
 
-    await waitFor(() => expect(confirmed.requestConfirm).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(confirmed.requestSaveChanges).toHaveBeenCalledTimes(1));
     expect(api.flowArchive).not.toHaveBeenCalled();
     expect(screen.getByTestId("canvas-kinds")).toHaveTextContent("start,end,home");
   });
@@ -234,10 +234,10 @@ describe("commands that would throw away an unsaved draft", () => {
     // A successful import replaces the open document outright, which is the same discard New and
     // Duplicate both ask about.
     await openDirtyWorkspace();
-    confirmed.requestConfirm.mockResolvedValue(false);
+    confirmed.requestSaveChanges.mockResolvedValue("stay");
     fireEvent.click(screen.getByRole("button", { name: "Nhập Flow" }));
 
-    await waitFor(() => expect(confirmed.requestConfirm).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(confirmed.requestSaveChanges).toHaveBeenCalledTimes(1));
     expect(screen.queryByRole("dialog", { name: "Nhập Flow cũ" })).toBeNull();
   });
 

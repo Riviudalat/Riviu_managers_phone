@@ -103,7 +103,7 @@ describe("TargetSelector", () => {
     expect(screen.getByRole("combobox", { name: "Chọn nhóm thiết bị" })).toBeInTheDocument();
   });
 
-  it("turns the current fleet into an explicit selection and never emits empty-as-all", async () => {
+  it("starts explicit selection empty and permits clearing the last device", async () => {
     const user = userEvent.setup();
     const onChange = vi.fn();
     const { rerender } = render(
@@ -117,7 +117,7 @@ describe("TargetSelector", () => {
     );
 
     await user.click(screen.getByRole("radio", { name: "Máy cụ thể" }));
-    expect(onChange).toHaveBeenLastCalledWith(["serial-a", "serial-b"]);
+    expect(onChange).toHaveBeenLastCalledWith([]);
 
     rerender(
       <TargetSelector
@@ -145,8 +145,23 @@ describe("TargetSelector", () => {
         deviceLabel={(entry, index) => `Máy ${index + 1} · ${entry.name}`}
       />,
     );
-    expect(screen.getByRole("checkbox", { name: "Máy 2 · ONE-02" })).toBeDisabled();
+    expect(screen.getByRole("checkbox", { name: "Máy 2 · ONE-02" })).toBeEnabled();
     expect(screen.getByRole("status")).toHaveTextContent("1 máy cụ thể");
+    await user.click(screen.getByRole("checkbox", { name: "Máy 2 · ONE-02" }));
+    expect(onChange).toHaveBeenLastCalledWith([]);
+  });
+
+  it("requires a deliberate initial scope and selects only matching search results", async () => {
+    const user = userEvent.setup();
+    const onTargetRefChange = vi.fn();
+    render(<TargetSelector devices={devices} groups={[]} selected={[]} onChange={vi.fn()}
+      targetRef={{type:"explicit",udids:[]}} onTargetRefChange={onTargetRefChange} requireChoice />);
+    expect(screen.getByRole("status")).toHaveTextContent("Chưa chọn phạm vi");
+    expect(screen.getAllByRole("radio").every((radio) => !(radio as HTMLInputElement).checked)).toBe(true);
+    await user.click(screen.getByRole("radio", {name:"Máy cụ thể"}));
+    await user.type(screen.getByRole("searchbox"), "ONE-02");
+    await user.click(screen.getByRole("button", {name:"Chọn đang hiện"}));
+    expect(onTargetRefChange).toHaveBeenLastCalledWith({type:"explicit",udids:["serial-b"]});
   });
 
   it("renders an explicit empty state when no device is available", async () => {

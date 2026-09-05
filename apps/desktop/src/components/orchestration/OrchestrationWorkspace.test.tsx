@@ -3,6 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import * as api from "../../api";
+import { requestSaveChanges } from "../../confirmStore";
 import type {
   AutomationDefinition,
   OrchestrationDocumentV1,
@@ -26,6 +27,7 @@ vi.mock("../../api", () => ({
 
 vi.mock("../../confirmStore", () => ({
   requestConfirm: vi.fn().mockResolvedValue(true),
+  requestSaveChanges: vi.fn().mockResolvedValue("discard"),
 }));
 
 const profile: AutomationDefinition = {
@@ -265,6 +267,83 @@ describe("OrchestrationWorkspace", () => {
     await waitFor(() => {
       expect(screen.getByRole("button", { name: "Lưu bản" })).toBeDisabled();
     });
+  });
+
+  it("keeps edits made while a save is in flight and pins the new base revision", async () => {
+    const record = (item: OrchestrationDocumentV1) => ({ compiled: { document: item, executionOrder: ["start", "interaction", "end"], canonicalJson: "{}", sha256: "a".repeat(64), profiles: {} }, createdAt: "2026-09-03T00:00:00Z" });
+    vi.mocked(api.orchestrationList).mockResolvedValue([{ id: document.id, name: document.name, latestRevision: 3, archived: false, updatedAt: "2026-09-03T00:00:00Z" }]);
+    vi.mocked(api.orchestrationGet).mockResolvedValue(record(document));
+    let complete!: (value: ReturnType<typeof record>) => void;
+    vi.mocked(api.orchestrationSaveRevision).mockImplementationOnce(() => new Promise((resolve) => { complete = resolve; }));
+    render(<OrchestrationWorkspace onDirtyChange={vi.fn()} />);
+    await userEvent.click(await screen.findByRole("button", { name: /Ca buổi sáng/ }));
+    const name = await screen.findByLabelText("Tên điều phối");
+    fireEvent.change(name, { target: { value: "Snapshot đang lưu" } });
+    await userEvent.click(screen.getByRole("button", { name: "Lưu bản" }));
+    fireEvent.change(name, { target: { value: "Bản nháp mới hơn" } });
+    await act(async () => complete(record({ ...document, name: "Snapshot đang lưu", revision: 4 })));
+    expect(name).toHaveValue("Bản nháp mới hơn");
+    expect(screen.getByRole("button", { name: "Chạy điều phối" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Lưu bản" })).toBeEnabled();
+  });
+
+  it("does not replace an edited document with a delayed Open reply", async () => {
+    const record = (item: OrchestrationDocumentV1) => ({ compiled: { document: item, executionOrder: ["start", "interaction", "end"], canonicalJson: "{}", sha256: "a".repeat(64), profiles: {} }, createdAt: "2026-09-03T00:00:00Z" });
+    const second = { ...document, id: "second", name: "Ca buổi tối" };
+    vi.mocked(api.orchestrationList).mockResolvedValue([document, second].map((item) => ({ id: item.id, name: item.name, latestRevision: item.revision, archived: false, updatedAt: "2026-09-03T00:00:00Z" })));
+    let complete!: (value: ReturnType<typeof record>) => void;
+    vi.mocked(api.orchestrationGet).mockResolvedValueOnce(record(document)).mockImplementationOnce(() => new Promise((resolve) => { complete = resolve; }));
+    render(<OrchestrationWorkspace onDirtyChange={vi.fn()} />);
+    await userEvent.click(await screen.findByRole("button", { name: /Ca buổi sáng/ }));
+    const name = await screen.findByLabelText("Tên điều phối");
+    await userEvent.click(screen.getByRole("button", { name: /Ca buổi tối/ }));
+    fireEvent.change(name, { target: { value: "Giữ bản này" } });
+    await act(async () => complete(record(second)));
+    expect(name).toHaveValue("Giữ bản này");
+  });
+
+  it("asks Save/Discard/Stay before New and preserves the draft on Stay", async () => {
+    render(<OrchestrationWorkspace onDirtyChange={vi.fn()} />);
+    await userEvent.click(await screen.findByRole("button", { name: "Tạo điều phối" }));
+    fireEvent.change(screen.getByLabelText("Tên điều phối"), { target: { value: "Chưa lưu" } });
+    vi.mocked(requestSaveChanges).mockResolvedValueOnce("stay");
+    await userEvent.click(screen.getByRole("button", { name: "Tạo điều phối mới" }));
+    expect(requestSaveChanges).toHaveBeenCalledWith("Điều phối");
+    expect(screen.getByLabelText("Tên điều phối")).toHaveValue("Chưa lưu");
+  });
+
+  it("keeps a newer draft when a save response arrives after New", async () => {
+    const record = (item: OrchestrationDocumentV1) => ({ compiled: { document: item, executionOrder: ["start", "interaction", "end"], canonicalJson: "{}", sha256: "a".repeat(64), profiles: {} }, createdAt: "2026-09-03T00:00:00Z" });
+    vi.mocked(api.orchestrationList).mockResolvedValue([{ id: document.id, name: document.name, latestRevision: 3, archived: false, updatedAt: "2026-09-03T00:00:00Z" }]);
+    vi.mocked(api.orchestrationGet).mockResolvedValue(record(document));
+    let complete!: (value: ReturnType<typeof record>) => void;
+    vi.mocked(api.orchestrationSaveRevision).mockImplementationOnce(() => new Promise((resolve) => { complete = resolve; }));
+    render(<OrchestrationWorkspace onDirtyChange={vi.fn()} />);
+    await userEvent.click(await screen.findByRole("button", { name: /Ca buổi sáng/ }));
+    fireEvent.change(await screen.findByLabelText("Tên điều phối"), { target: { value: "Snapshot" } });
+    await userEvent.click(screen.getByRole("button", { name: "Lưu bản" }));
+    await userEvent.click(screen.getByRole("button", { name: "Tạo điều phối mới" }));
+    fireEvent.change(screen.getByLabelText("Tên điều phối"), { target: { value: "Tài liệu khác" } });
+    await act(async () => complete(record({ ...document, name: "Snapshot", revision: 4 })));
+    expect(screen.getByLabelText("Tên điều phối")).toHaveValue("Tài liệu khác");
+    expect(screen.getByText("Chưa lưu")).toBeVisible();
+  });
+
+  it("preserves edits made during Archive as a new unsaved document", async () => {
+    const record = { compiled: { document, executionOrder: ["start", "interaction", "end"], canonicalJson: "{}", sha256: "a".repeat(64), profiles: {} }, createdAt: "2026-09-03T00:00:00Z" };
+    vi.mocked(api.orchestrationList).mockResolvedValue([{ id: document.id, name: document.name, latestRevision: 3, archived: false, updatedAt: "2026-09-03T00:00:00Z" }]);
+    vi.mocked(api.orchestrationGet).mockResolvedValue(record);
+    let complete!: () => void;
+    vi.mocked(api.orchestrationArchive).mockImplementationOnce(() => new Promise((resolve) => { complete = resolve; }));
+    render(<OrchestrationWorkspace onDirtyChange={vi.fn()} />);
+    await userEvent.click(await screen.findByRole("button", { name: /Ca buổi sáng/ }));
+    const name = await screen.findByLabelText("Tên điều phối");
+    await userEvent.click(screen.getByRole("button", { name: "Lưu trữ" }));
+    fireEvent.change(name, { target: { value: "Bản tiếp theo" } });
+    await act(async () => complete());
+    expect(name).toHaveValue("Bản tiếp theo");
+    expect(screen.getByText("Chưa lưu")).toBeVisible();
+    expect(screen.getByRole("button", { name: "Chạy điều phối" })).toBeDisabled();
   });
 
   it("runs an immutable revision against the semantic target and opens monitoring", async () => {

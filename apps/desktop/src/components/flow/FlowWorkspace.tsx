@@ -34,6 +34,7 @@ import {
 } from "./editorState";
 import { normalizeFlowIssues, validateDraftNumbers } from "../../flow/validation";
 import { requestConfirm } from "../../confirmStore";
+import { requestWorkspaceLeave, useWorkspaceDraft } from "../../workspaceDraft";
 import type {
   ActionDefinition,
   DeviceInfo,
@@ -149,6 +150,20 @@ export function FlowWorkspace({
   };
   const [draftError, setDraftError] = useState<string | null>(null);
   const draftWriter = useRef<FlowDraftWriter | null>(null);
+  const savedDocument = useRef(state.document);
+  const latestDocument = useRef(state.document);
+  latestDocument.current = state.document;
+  const archivePending = useRef(false);
+  const workspaceLive = useRef(true);
+  useEffect(() => {
+    workspaceLive.current = true;
+    return () => { workspaceLive.current = false; };
+  }, []);
+  const activeSave = useRef<DocumentRequestIdentity | null>(null);
+  const retireSave = useCallback(() => {
+    if (activeSave.current) dispatch({ type: "saveFailed", identity: activeSave.current });
+    activeSave.current = null;
+  }, []);
   if (draftWriter.current === null) {
     // The debounced write runs on a timer, so its failure has no caller to return to. Without a
     // channel a quota error simply vanished: the graph stayed dirty on screen and the recovery
@@ -159,6 +174,8 @@ export function FlowWorkspace({
   }
 
   const replaceFromRecord = useCallback((record: FlowRevisionRecord) => {
+    retireSave();
+    savedDocument.current = record.document;
     const draft = loadDraft(record.document.id);
     const canRestore = draft?.baseRevision === record.document.revision;
     dispatch({
@@ -166,7 +183,7 @@ export function FlowWorkspace({
       document: canRestore && draft ? draft.document : record.document,
       source: canRestore ? "draft" : "server",
     });
-  }, []);
+  }, [retireSave]);
 
   // Every path that replaces the document takes a ticket, and only the newest ticket's
   // response may replace. Without it `flowGet` resolved whenever it resolved: a slower
@@ -323,16 +340,7 @@ export function FlowWorkspace({
     return next;
   }, []);
 
-  const confirmDiscard = useCallback(async () => (
-    !hasUnsavedWork ||
-    (await requestConfirm({
-      title: "Bỏ thay đổi Flow chưa lưu?",
-      message: "Bản nháp hiện tại chưa được lưu và sẽ mất.",
-      confirmLabel: "Bỏ thay đổi",
-      cancelLabel: "Ở lại",
-      danger: true,
-    }))
-  ), [hasUnsavedWork]);
+  const confirmDiscard = useCallback(() => requestWorkspaceLeave(["flow-device"]), []);
 
   const selectFlow = useCallback(async (id: string) => {
     if (!(await confirmDiscard())) return;
@@ -343,11 +351,13 @@ export function FlowWorkspace({
     // A new or duplicated document is the newest intent, so it retires every open still in
     // flight — otherwise a late `flowGet` response would replace the document just created.
     openSequence.current += 1;
+    retireSave();
     draftWriter.current?.cancel();
     setOperationError(null);
     setActiveRun(null);
+    if (savedDocument.current.id !== document.id) savedDocument.current = document;
     dispatch({ type: "replaceDocument", document, source });
-  }, []);
+  }, [retireSave]);
 
   useEffect(() => {
     let disposed = false;
@@ -405,53 +415,107 @@ export function FlowWorkspace({
     };
   }, [replaceFromRecord, replaceWithNew]);
 
-  const save = useCallback(() => {
-    if (!state.compiled || !isCompilationCurrent(state)) return;
+  const save = useCallback(async () => {
+    if (!state.compiled || !isCompilationCurrent(state)) {
+      setOperationError("Chờ kiểm tra Flow và sửa các mục chưa hợp lệ trước khi lưu.");
+      return false;
+    }
     const identity = { ...state.compiled.identity };
-    if (!canStartSave(state, identity)) return;
+    if (activeSave.current || !canStartSave(state, identity)) return false;
     const snapshot = structuredClone(state.document);
+    activeSave.current = identity;
     dispatch({ type: "saveStarted", identity });
     setOperationError(null);
-    void flowSaveRevision(snapshot, snapshot.revision === 0 ? null : snapshot.revision).then(
-      (record) => {
-        dispatch({ type: "saveCompleted", identity, record });
+    try {
+        const record = await flowSaveRevision(snapshot, snapshot.revision === 0 ? null : snapshot.revision);
+        if (!workspaceLive.current) return false;
         setFlows((current) => {
+          if (current.some((item) => item.id === record.document.id && item.latestRevision > record.document.revision)) return current;
           const next = current.filter((item) => item.id !== record.document.id);
           return [savedSummary(record.document, record.createdAt), ...next];
         });
-      },
-      (error) => {
+        // A replaced document owns a different savepoint, even if the same Flow was reopened.
+        if (activeSave.current !== identity) return false;
+        activeSave.current = null;
+        savedDocument.current = record.document;
+        dispatch({ type: "saveCompleted", identity, record });
+        return invalidationState.current.flowId === identity.flowId &&
+          invalidationState.current.epoch === identity.documentEpoch;
+    } catch (error) {
+        if (activeSave.current !== identity) return false;
+        activeSave.current = null;
         dispatch({ type: "saveFailed", identity });
         setOperationError(describeError(error));
-      },
-    );
+        return false;
+    }
   }, [state]);
 
+  useWorkspaceDraft({
+    id: "flow-device",
+    label: "Flow thiết bị",
+    dirty: hasUnsavedWork,
+    snapshotKey: JSON.stringify({ ...state.document, revision: 0 }),
+    save,
+    discard: () => {
+      retireSave();
+      draftWriter.current?.cancel();
+      clearDraft(state.document.id);
+      dispatch({type:"replaceDocument",document:savedDocument.current,source:"server"});
+    },
+  });
+
   const archive = useCallback(() => {
-    if (!saved) return;
+    if (!saved || archivePending.current) return;
+    archivePending.current = true;
     void (async () => {
+      let archived = false;
+      const preserveArchivedDraft = () => {
+        const draft = { ...structuredClone(latestDocument.current), id: newFlowDocument().id, revision: 0 };
+        clearDraft(state.document.id);
+        replaceWithNew(draft, "new");
+      };
       // The archive confirmation talks about the flow leaving the active list; it says nothing
       // about unsaved work, and the handler then calls `clearDraft` and opens another flow. So an
       // operator who added three actions and pressed Archive before Save lost those actions to a
       // dialog that never mentioned them. `New`, `Duplicate` and picking another flow all ask
       // first; this did not.
-      if (!(await confirmDiscard())) return;
-      const proceed = await requestConfirm({
-        title: `Lưu trữ «${state.document.name}»?`,
-        message: "Flow sẽ được đưa khỏi danh sách đang dùng. Các bản chạy đã ghi vẫn giữ nguyên.",
-        confirmLabel: "Lưu trữ",
-        danger: true,
-      });
-      if (!proceed) return;
-      setOperationError(null);
       try {
+        if (!(await confirmDiscard())) return;
+        const identity = { ...invalidationState.current, openTicket: openSequence.current };
+        if (identity.flowId !== state.document.id) return;
+        const stillOwnsDocument = () => invalidationState.current.flowId === identity.flowId &&
+          invalidationState.current.epoch === identity.epoch && openSequence.current === identity.openTicket;
+        const proceed = await requestConfirm({
+          title: `Lưu trữ «${state.document.name}»?`,
+          message: "Flow sẽ được đưa khỏi danh sách đang dùng. Các bản chạy đã ghi vẫn giữ nguyên.",
+          confirmLabel: "Lưu trữ",
+          danger: true,
+        });
+        if (!proceed || !stillOwnsDocument()) return;
+        setOperationError(null);
         await flowArchive(state.document.id);
-        clearDraft(state.document.id);
+        archived = true;
+        if (!workspaceLive.current) return;
         const next = await refreshFlows();
+        if (!workspaceLive.current) return;
+        if (!stillOwnsDocument()) {
+          // The archived id cannot own a new revision. Preserve later typing under a fresh id.
+          if (invalidationState.current.flowId === identity.flowId &&
+            invalidationState.current.dirty && openSequence.current === identity.openTicket) {
+            preserveArchivedDraft();
+          }
+          return;
+        }
+        clearDraft(state.document.id);
         if (next.length > 0) await openSavedFlow(next[0].id);
         else replaceWithNew(newFlowDocument(), "new");
       } catch (error) {
-        setOperationError(describeError(error));
+        if (workspaceLive.current && invalidationState.current.flowId === state.document.id) {
+          if (archived) preserveArchivedDraft();
+          setOperationError(describeError(error));
+        }
+      } finally {
+        archivePending.current = false;
       }
     })();
   }, [

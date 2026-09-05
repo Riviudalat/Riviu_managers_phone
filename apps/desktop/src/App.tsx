@@ -20,6 +20,7 @@ import {
 import { startDevicePreview, startFleetPreview } from "./startPreview";
 import { summarizeBulkRepair } from "./agentStatus";
 import { requestConfirm } from "./confirmStore";
+import { hasWorkspaceDrafts, requestWorkspaceLeave, useWorkspaceDirty } from "./workspaceDraft";
 import { surfaceDeparted } from "./deviceSurface";
 import { describeError } from "./describeError";
 import { pushToast, toastError } from "./toastStore";
@@ -215,18 +216,17 @@ function App() {
   const [tileWidth, setTileWidth] = useState(() => loadZoom(TILE_ZOOM));
   const [groupToolsOpen, setGroupToolsOpen] = useState(false);
   const [groupsOpen, setGroupsOpen] = useState(false);
-  const [flowDirty, setFlowDirty] = useState(false);
-  const flowDirtyRef = useRef(false);
+  const workspaceDirty = useWorkspaceDirty();
   const [automationView, setAutomationView] = useState<"device" | "orchestration">("device");
   const automationViewRef = useRef(automationView);
   automationViewRef.current = automationView;
   const pendingNavigationRef = useRef<PendingNavigation | null>(null);
   const navigationDrainRef = useRef<Promise<void> | null>(null);
   const contentRef = useRef<HTMLDivElement>(null);
-  const [orchestrationTargetRef, setOrchestrationTargetRef] = useState<TargetRef>({ type: "all" });
-  const [publishTargetRef, setPublishTargetRef] = useState<TargetRef>({ type: "all" });
-  const [nurtureTargetRef, setNurtureTargetRef] = useState<TargetRef>({ type: "all" });
-  const [interactionTargetRef, setInteractionTargetRef] = useState<TargetRef>({ type: "all" });
+  const [orchestrationTargetRef, setOrchestrationTargetRef] = useState<TargetRef>({ type: "explicit", udids: [] });
+  const [publishTargetRef, setPublishTargetRef] = useState<TargetRef>({ type: "explicit", udids: [] });
+  const [nurtureTargetRef, setNurtureTargetRef] = useState<TargetRef>({ type: "explicit", udids: [] });
+  const [interactionTargetRef, setInteractionTargetRef] = useState<TargetRef>({ type: "explicit", udids: [] });
   const [deviceWorkOwners, setDeviceWorkOwners] = useState<DeviceWorkOwnerProjection>({
     state: "loading",
   });
@@ -283,22 +283,7 @@ function App() {
     void deploymentFrontendReady();
   }, [bootError, fleetSettled, startupIssue]);
 
-  const confirmDiscardFlow = useCallback(
-    () =>
-      requestConfirm({
-        title: "Bỏ thay đổi chưa lưu?",
-        message: "Bản nháp hiện tại chưa được lưu và sẽ mất khi rời khỏi trang.",
-        confirmLabel: "Bỏ thay đổi",
-        cancelLabel: "Ở lại",
-        danger: true,
-      }),
-    [],
-  );
-
-  const updateFlowDirty = useCallback((dirty: boolean) => {
-    flowDirtyRef.current = dirty;
-    setFlowDirty(dirty);
-  }, []);
+  const updateFlowDirty = useCallback((_dirty: boolean) => {}, []);
 
   const queueNavigation = useCallback(
     (intent: Omit<PendingNavigation, "settle">): Promise<boolean> =>
@@ -311,18 +296,17 @@ function App() {
 
         const drain = (async () => {
           while (pendingNavigationRef.current) {
-            if (flowDirtyRef.current) {
-              const confirmed = await confirmDiscardFlow();
+            if (hasWorkspaceDrafts()) {
+              const confirmed = await requestWorkspaceLeave();
               // Dirty state can change while the dialog awaits an answer. Read it again rather
               // than deciding from the render that opened the dialog.
               if (!pendingNavigationRef.current) return;
-              if (!confirmed && flowDirtyRef.current) {
+              if (!confirmed) {
                 const abandoned = pendingNavigationRef.current;
                 pendingNavigationRef.current = null;
                 abandoned.settle(false);
                 return;
               }
-              if (flowDirtyRef.current) updateFlowDirty(false);
             }
 
             const latest = pendingNavigationRef.current;
@@ -347,7 +331,7 @@ function App() {
           if (navigationDrainRef.current === drain) navigationDrainRef.current = null;
         });
       }),
-    [confirmDiscardFlow, updateFlowDirty],
+    [],
   );
 
   const requestPage = useCallback(
@@ -388,13 +372,32 @@ function App() {
   };
 
   useEffect(() => {
-    if (!flowDirty) return;
+    if (!workspaceDirty) return;
     const preventUnload = (event: BeforeUnloadEvent) => {
       event.preventDefault();
     };
     window.addEventListener("beforeunload", preventUnload);
     return () => window.removeEventListener("beforeunload", preventUnload);
-  }, [flowDirty]);
+  }, [workspaceDirty]);
+
+  useEffect(() => {
+    let dispose: (() => void) | undefined;
+    let stopped = false;
+    let closing = false;
+    void import("@tauri-apps/api/window").then(async ({ getCurrentWindow }) => {
+      const window = getCurrentWindow();
+      const unlisten = await window.onCloseRequested(async (event) => {
+        if (closing || !hasWorkspaceDrafts()) return;
+        event.preventDefault();
+        if (await requestWorkspaceLeave()) {
+          closing = true;
+          await window.close();
+        }
+      });
+      if (stopped) unlisten(); else dispose = unlisten;
+    }).catch(() => { /* Browser-only fixture uses beforeunload. */ });
+    return () => { stopped = true; dispose?.(); };
+  }, []);
 
   useEffect(() => {
     storeZoom(TILE_ZOOM, tileWidth);
@@ -1062,7 +1065,7 @@ function App() {
                 <div
                   className="window-canvas"
                   ref={canvasRef}
-                  role="listbox"
+                  role="grid"
                   aria-label="Lưới thiết bị"
                   aria-multiselectable="true"
                   title="Ctrl + lăn chuột để phóng to / thu nhỏ · kéo chuột để quét chọn máy"
@@ -1248,6 +1251,7 @@ function App() {
                       selected={selected}
                       onChange={setSelected}
                       targetRef={orchestrationTargetRef}
+                      requireChoice
                       onTargetRefChange={setOrchestrationTargetRef}
                       deviceLabel={(device) =>
                         automationDeviceLabels.get(device.udid) ?? device.name
@@ -1281,6 +1285,7 @@ function App() {
                 selected={selected}
                 onChange={setSelected}
                 targetRef={publishTargetRef}
+                requireChoice
                 onTargetRefChange={setPublishTargetRef}
                 deviceLabel={(device) => automationDeviceLabels.get(device.udid) ?? device.name}
               />
@@ -1290,6 +1295,7 @@ function App() {
                 targetUdids={publishTargetUdids}
                 targetRef={publishTargetRef}
                 metas={metaMap}
+                onTargetRefChange={setPublishTargetRef}
                 onSelectUdids={setSelected}
               />
             </div>
@@ -1302,6 +1308,7 @@ function App() {
                 selected={selected}
                 onChange={setSelected}
                 targetRef={nurtureTargetRef}
+                requireChoice
                 onTargetRefChange={setNurtureTargetRef}
                 deviceLabel={(device) => automationDeviceLabels.get(device.udid) ?? device.name}
               />
@@ -1311,6 +1318,7 @@ function App() {
                 targetUdids={nurtureTargetUdids}
                 targetRef={nurtureTargetRef}
                 metas={metaMap}
+                onTargetRefChange={setNurtureTargetRef}
                 surface="page"
               />
             </div>
@@ -1323,6 +1331,7 @@ function App() {
                 selected={selected}
                 onChange={setSelected}
                 targetRef={interactionTargetRef}
+                requireChoice
                 onTargetRefChange={setInteractionTargetRef}
                 deviceLabel={(device) => automationDeviceLabels.get(device.udid) ?? device.name}
               />
@@ -1332,6 +1341,7 @@ function App() {
                 targetUdids={interactionTargetUdids}
                 targetRef={interactionTargetRef}
                 metas={metaMap}
+                onTargetRefChange={setInteractionTargetRef}
                 surface="page"
               />
             </div>

@@ -38,6 +38,7 @@ import {
   orchestrationValidate,
 } from "../../api";
 import { requestConfirm } from "../../confirmStore";
+import { requestWorkspaceLeave, useWorkspaceDraft } from "../../workspaceDraft";
 import { describeError } from "../../describeError";
 import type {
   AutomationDefinition,
@@ -191,6 +192,12 @@ export function OrchestrationWorkspace({
   });
   const selectedRunId = useRef<string | null>(null);
   const selectedDocumentId = useRef<string | null>(null);
+  const documentRef = useRef(document);
+  const savedDocument = useRef<OrchestrationDocumentV1 | null>(null);
+  const documentEpoch = useRef(0);
+  const documentRequest = useRef(0);
+  const savingRef = useRef(false);
+  documentRef.current = document;
 
   useEffect(() => onDirtyChange(dirty), [dirty, onDirtyChange]);
 
@@ -218,49 +225,51 @@ export function OrchestrationWorkspace({
   }, [load]);
 
   const edit = useCallback((update: (current: OrchestrationDocumentV1) => OrchestrationDocumentV1) => {
+    documentEpoch.current += 1;
     setDocument((current) => (current ? rebuildDocument(update(current)) : current));
     setDirty(true);
     setNotice(null);
   }, []);
 
-  const create = useCallback(() => {
+  const create = useCallback(async () => {
+    if (!await requestWorkspaceLeave(["orchestration"])) return;
+    documentRequest.current += 1;
+    documentEpoch.current += 1;
     const next = newDocument();
     selectedDocumentId.current = next.id;
+    savedDocument.current = null;
+    documentRef.current = next;
     setDocument(next);
     setSavedRevision(null);
     setDirty(true);
     setError(null);
     setNotice(null);
+    setBusy(false);
   }, []);
 
   const open = useCallback(async (summary: OrchestrationSummary) => {
-    if (dirty) {
-      const discard = await requestConfirm({
-        title: "Bỏ thay đổi chưa lưu?",
-        message: "Bản điều phối đang mở có thay đổi chưa lưu.",
-        confirmLabel: "Bỏ thay đổi",
-        cancelLabel: "Ở lại",
-        danger: true,
-      });
-      if (!discard) return;
-    }
+    if (!await requestWorkspaceLeave(["orchestration"])) return;
+    const ticket = ++documentRequest.current;
+    const epoch = documentEpoch.current;
     selectedDocumentId.current = summary.id;
     setBusy(true);
     setError(null);
     try {
       const record = await orchestrationGet(summary.id, summary.latestRevision);
       if (!record) throw new Error("Không tìm thấy revision điều phối");
-      if (selectedDocumentId.current !== summary.id) return;
+      if (ticket !== documentRequest.current || epoch !== documentEpoch.current) return;
+      savedDocument.current = record.compiled.document;
+      documentRef.current = record.compiled.document;
       setDocument(record.compiled.document);
       setSavedRevision(record.compiled.document.revision);
       setDirty(false);
       setNotice(null);
     } catch (cause) {
-      if (selectedDocumentId.current === summary.id) setError(describeError(cause));
+      if (ticket === documentRequest.current) setError(describeError(cause));
     } finally {
-      if (selectedDocumentId.current === summary.id) setBusy(false);
+      if (ticket === documentRequest.current) setBusy(false);
     }
-  }, [dirty]);
+  }, []);
 
   const addCampaign = useCallback((kind: AutomationKind) => {
     const profile = profiles.find((candidate) =>
@@ -320,23 +329,51 @@ export function OrchestrationWorkspace({
   }, [edit]);
 
   const save = useCallback(async () => {
-    if (!document) return;
+    if (!document || savingRef.current) return false;
+    const ticket = ++documentRequest.current;
+    const epoch = documentEpoch.current;
+    const id = document.id;
+    savingRef.current = true;
     setBusy(true);
     setError(null);
     try {
       await orchestrationValidate({ ...document, revision: (savedRevision ?? 0) + 1 });
       const record = await orchestrationSaveRevision(document, savedRevision);
-      setDocument(record.compiled.document);
-      setSavedRevision(record.compiled.document.revision);
-      setDirty(false);
-      setNotice(`Đã lưu bản ${record.compiled.document.revision}`);
+      if (ticket === documentRequest.current && documentRef.current?.id === id) {
+        savedDocument.current = record.compiled.document;
+        setSavedRevision(record.compiled.document.revision);
+        if (epoch === documentEpoch.current) {
+          documentRef.current = record.compiled.document;
+          setDocument(record.compiled.document);
+          setDirty(false);
+          setNotice(`Đã lưu bản ${record.compiled.document.revision}`);
+        } else {
+          setDocument((current) => current && { ...current, revision: record.compiled.document.revision });
+        }
+      }
       setSummaries(await orchestrationList());
+      return ticket === documentRequest.current && epoch === documentEpoch.current;
     } catch (cause) {
-      setError(describeError(cause));
+      if (ticket === documentRequest.current) setError(describeError(cause));
+      return false;
     } finally {
-      setBusy(false);
+      savingRef.current = false;
+      if (ticket === documentRequest.current) setBusy(false);
     }
   }, [document, savedRevision]);
+
+  const discard = useCallback(() => {
+    documentEpoch.current += 1;
+    documentRequest.current += 1;
+    documentRef.current = savedDocument.current;
+    setDocument(savedDocument.current);
+    setSavedRevision(savedDocument.current?.revision ?? null);
+    setDirty(false);
+    setBusy(false);
+    setError(null);
+    setNotice(null);
+  }, []);
+  useWorkspaceDraft({ id: "orchestration", label: "Điều phối", dirty, snapshotKey: String(documentEpoch.current), save, discard });
 
   const updateRun = useCallback((detail: OrchestrationRunDetail) => {
     selectedRunId.current = detail.run.id;
@@ -465,6 +502,8 @@ export function OrchestrationWorkspace({
 
   const archive = useCallback(async () => {
     if (!document || savedRevision === null) return;
+    const id = document.id;
+    if (!await requestWorkspaceLeave(["orchestration"])) return;
     const confirmed = await requestConfirm({
       title: "Lưu trữ điều phối?",
       message: "Điều phối sẽ rời danh sách đang dùng. Các lần chạy cũ vẫn được giữ.",
@@ -473,18 +512,33 @@ export function OrchestrationWorkspace({
       danger: true,
     });
     if (!confirmed) return;
+    if (documentRef.current?.id !== id) return;
+    const epoch = documentEpoch.current;
+    const ticket = ++documentRequest.current;
     setBusy(true);
     try {
-      await orchestrationArchive(document.id);
-      selectedDocumentId.current = null;
-      setDocument(null);
-      setSavedRevision(null);
-      setDirty(false);
+      await orchestrationArchive(id);
+      if (ticket === documentRequest.current && documentRef.current?.id === id) {
+        savedDocument.current = null;
+        setSavedRevision(null);
+        if (epoch === documentEpoch.current) {
+          selectedDocumentId.current = null;
+          documentRef.current = null;
+          setDocument(null);
+          setDirty(false);
+        } else {
+          const next = { ...documentRef.current, id: randomId(), revision: 0 };
+          selectedDocumentId.current = next.id;
+          documentRef.current = next;
+          setDocument(next);
+          setNotice("Đã lưu trữ bản cũ; thay đổi mới được giữ trong bản nháp.");
+        }
+      }
       setSummaries(await orchestrationList());
     } catch (cause) {
-      setError(describeError(cause));
+      if (ticket === documentRequest.current) setError(describeError(cause));
     } finally {
-      setBusy(false);
+      if (ticket === documentRequest.current) setBusy(false);
     }
   }, [document, savedRevision]);
 
@@ -583,7 +637,7 @@ export function OrchestrationWorkspace({
           <aside className="orchestration-library" aria-label="Danh sách điều phối">
         <div className="orchestration-library-head">
           <strong>Điều phối</strong>
-          <button type="button" className="icon-btn" onClick={create} title="Tạo điều phối mới" aria-label="Tạo điều phối mới">
+          <button type="button" className="icon-btn" onClick={() => void create()} title="Tạo điều phối mới" aria-label="Tạo điều phối mới">
             <Plus size={17} />
           </button>
         </div>
@@ -616,7 +670,7 @@ export function OrchestrationWorkspace({
           <EmptyState
             icon={<GitBranch size={20} />}
             title="Chọn hoặc tạo một điều phối"
-            action={<button type="button" onClick={create}>Tạo điều phối</button>}
+            action={<button type="button" onClick={() => void create()}>Tạo điều phối</button>}
           />
         ) : (
           <>

@@ -5,6 +5,8 @@ import App from "./App";
 import { resetConfirms } from "./confirmStore";
 import { resetToasts } from "./toastStore";
 import type { DeviceInfo } from "./types";
+import { useState } from "react";
+import { useWorkspaceDraft } from "./workspaceDraft";
 
 vi.mock("./api", () => ({
   agentBulkRepair: vi.fn(async () => []),
@@ -53,6 +55,7 @@ vi.mock("./api", () => ({
   listGroups: vi.fn(async () => []),
   listJobs: vi.fn(async () => []),
   operationListRuns: vi.fn(async () => []),
+  operationQueryRuns: vi.fn(async () => ({runs:[],total:0,counts:{active:0,succeeded:0,attention:0},hasMore:false})),
   operationGetRun: vi.fn(async () => null),
   listSchedules: vi.fn(async () => []),
   listScripts: vi.fn(async () => [["fixture", "{}"]]),
@@ -78,26 +81,35 @@ vi.mock("./api", () => ({
 }));
 
 vi.mock("./components/flow/FlowWorkspace", () => ({
-  FlowWorkspace: ({ onDirtyChange }: { onDirtyChange: (dirty: boolean) => void }) => (
+  FlowWorkspace: () => {
+    const [dirty, setDirty] = useState(false);
+    useWorkspaceDraft({id:"flow-device",label:"Flow thiết bị",dirty,snapshotKey:String(dirty),
+      save:async () => { setDirty(false); return true; }, discard:() => setDirty(false)});
+    return (
     <section aria-label="Flow fixture">
-      <button type="button" onClick={() => onDirtyChange(true)}>Mark fixture dirty</button>
-      <button type="button" onClick={() => onDirtyChange(false)}>Mark fixture clean</button>
+      <button type="button" onClick={() => setDirty(true)}>Mark fixture dirty</button>
+      <button type="button" onClick={() => setDirty(false)}>Mark fixture clean</button>
     </section>
-  ),
+    );
+  },
 }));
 
 vi.mock("./components/orchestration/OrchestrationWorkspace", () => ({
   OrchestrationWorkspace: ({
-    onDirtyChange,
     targetRef,
   }: {
     onDirtyChange: (dirty: boolean) => void;
     targetRef?: { type: string };
-  }) => (
+  }) => {
+    const [dirty, setDirty] = useState(false);
+    useWorkspaceDraft({id:"orchestration",label:"Điều phối",dirty,snapshotKey:String(dirty),
+      save:async () => { setDirty(false); return true; },discard:() => setDirty(false)});
+    return (
     <section aria-label="Điều phối fixture" data-target-type={targetRef?.type}>
-      <button type="button" onClick={() => onDirtyChange(true)}>Mark orchestration dirty</button>
+      <button type="button" onClick={() => setDirty(true)}>Mark orchestration dirty</button>
     </section>
-  ),
+    );
+  },
 }));
 
 vi.mock("./components/NurturePopup", () => ({
@@ -693,9 +705,7 @@ describe("Flow page integration", () => {
     // `flowDirty` closure would keep the page pinned even though there is no work left to lose.
     fireEvent.click(screen.getByRole("button", { name: "Mark fixture clean" }));
     await user.click(screen.getByRole("button", { name: "Ở lại" }));
-    await waitFor(() =>
-      expect(screen.getByText("Tác vụ", { selector: "[data-testid='page-title']" })).toBeVisible(),
-    );
+    expect(screen.getByRole("region", {name:"Flow fixture"})).toBeVisible();
     expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument();
   });
 
@@ -716,7 +726,7 @@ describe("Flow page integration", () => {
     expect(screen.getByRole("group", { name: "Phạm vi thiết bị" })).toBeVisible();
     expect(await screen.findByRole("region", { name: "Điều phối fixture" })).toHaveAttribute(
       "data-target-type",
-      "all",
+      "explicit",
     );
   });
 
@@ -856,7 +866,7 @@ describe("fleet diagnostics page integration", () => {
     await userEvent.click(screen.getByRole("button", { name: "Tương tác" }));
     expect(screen.getByRole("region", { name: "Không gian Tương tác" })).toHaveAttribute(
       "data-target-type",
-      "all",
+      "explicit",
     );
   });
 });

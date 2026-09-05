@@ -14,6 +14,14 @@ import type {
   JsonValue,
 } from "../../types";
 import { FlowWorkspace } from "./FlowWorkspace";
+import { requestWorkspaceLeave } from "../../workspaceDraft";
+import { loadDraft } from "./draftStorage";
+
+const confirmations = vi.hoisted(() => ({
+  requestConfirm: vi.fn(),
+  requestSaveChanges: vi.fn(),
+}));
+vi.mock("../../confirmStore", () => confirmations);
 
 const api = vi.hoisted(() => ({
   flowActionCatalog: vi.fn(),
@@ -225,6 +233,8 @@ function runRecord(document: FlowDocumentV2): FlowRunRecord {
 
 beforeEach(() => {
   localStorage.clear();
+  confirmations.requestConfirm.mockReset().mockResolvedValue(true);
+  confirmations.requestSaveChanges.mockReset().mockResolvedValue("discard");
   riviuEventHandler = undefined;
   for (const mock of Object.values(api)) mock.mockReset();
   api.flowActionCatalog.mockResolvedValue(catalog);
@@ -470,6 +480,126 @@ describe("FlowWorkspace open races", () => {
 });
 
 describe("FlowWorkspace editing", () => {
+  it("restores the persisted baseline after applying JSON edits to the same flow", async () => {
+    await renderReadyWorkspace();
+    fireEvent.click(screen.getByRole("button", { name: "Xem JSON" }));
+    const dialog = await screen.findByRole("dialog", { name: "Flow JSON" });
+    fireEvent.change(within(dialog).getByRole("textbox", { name: "JSON tài liệu" }), {
+      target: { value: JSON.stringify({ ...savedDocument, name: "Unsaved JSON edit" }) },
+    });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Kiểm tra và áp dụng" }));
+    await screen.findByDisplayValue("Unsaved JSON edit");
+    await act(async () => { expect(await requestWorkspaceLeave(["flow-device"])).toBe(true); });
+    expect(screen.getByRole("textbox", { name: "Tên Flow" })).toHaveValue("Saved flow");
+  });
+
+  it("keeps edits made to another flow while the previous archive is pending", async () => {
+    const secondDocument = { ...structuredClone(savedDocument), id: "flow-second", name: "Second flow" };
+    api.flowList.mockResolvedValue([savedSummaryForTest(savedDocument), savedSummaryForTest(secondDocument)]);
+    api.flowGet.mockImplementation(async (id: string) => revisionRecord(id === secondDocument.id ? secondDocument : savedDocument));
+    let releaseArchive!: () => void;
+    api.flowArchive.mockImplementationOnce(() => new Promise<void>((resolve) => { releaseArchive = resolve; }));
+    await renderReadyWorkspace();
+    fireEvent.click(screen.getByRole("button", { name: "Lưu trữ Flow" }));
+    await waitFor(() => expect(api.flowArchive).toHaveBeenCalledWith(savedDocument.id));
+    fireEvent.change(screen.getByRole("combobox", { name: "Flow" }), { target: { value: secondDocument.id } });
+    await screen.findByDisplayValue("Second flow");
+    fireEvent.change(screen.getByRole("textbox", { name: "Tên Flow" }), { target: { value: "Newer B edit" } });
+    api.flowList.mockResolvedValue([savedSummaryForTest(secondDocument)]);
+    await act(async () => { releaseArchive(); });
+    expect(screen.getByRole("textbox", { name: "Tên Flow" })).toHaveValue("Newer B edit");
+    expect(screen.getByRole("combobox", { name: "Flow" })).toHaveValue(secondDocument.id);
+  });
+
+  it("retains edits made during archive as a new unsaved flow", async () => {
+    let releaseArchive!: () => void;
+    api.flowArchive.mockImplementationOnce(() => new Promise<void>((resolve) => { releaseArchive = resolve; }));
+    await renderReadyWorkspace();
+    fireEvent.click(screen.getByRole("button", { name: "Lưu trữ Flow" }));
+    await waitFor(() => expect(api.flowArchive).toHaveBeenCalledTimes(1));
+    fireEvent.change(screen.getByRole("textbox", { name: "Tên Flow" }), { target: { value: "Edit during archive" } });
+    api.flowList.mockResolvedValue([]);
+    await act(async () => { releaseArchive(); });
+    expect(screen.getByRole("textbox", { name: "Tên Flow" })).toHaveValue("Edit during archive");
+    await waitFor(() => expect(screen.getByRole("button", { name: "Lưu bản" })).toBeEnabled());
+    fireEvent.click(screen.getByRole("button", { name: "Lưu bản" }));
+    await waitFor(() => expect(api.flowSaveRevision).toHaveBeenCalledTimes(1));
+    expect(api.flowSaveRevision.mock.calls[0][0].id).not.toBe(savedDocument.id);
+    expect(api.flowSaveRevision.mock.calls[0][1]).toBeNull();
+  });
+
+  it("preserves a savable copy when archive succeeds but refreshing the list fails", async () => {
+    await renderReadyWorkspace();
+    api.flowArchive.mockResolvedValueOnce(undefined);
+    api.flowList.mockRejectedValueOnce(new Error("List refresh failed"));
+    fireEvent.click(screen.getByRole("button", { name: "Lưu trữ Flow" }));
+    await screen.findByText("List refresh failed");
+    expect(screen.getByRole("textbox", { name: "Tên Flow" })).toHaveValue("Saved flow");
+    await waitFor(() => expect(screen.getByRole("button", { name: "Lưu bản" })).toBeEnabled());
+    fireEvent.click(screen.getByRole("button", { name: "Lưu bản" }));
+    await waitFor(() => expect(api.flowSaveRevision).toHaveBeenCalledTimes(1));
+    expect(api.flowSaveRevision.mock.calls[0][0].id).not.toBe(savedDocument.id);
+    expect(api.flowSaveRevision.mock.calls[0][1]).toBeNull();
+  });
+
+  it("does not remove the recovery draft when archive resolves after unmount", async () => {
+    let releaseArchive!: () => void;
+    api.flowArchive.mockImplementationOnce(() => new Promise<void>((resolve) => { releaseArchive = resolve; }));
+    await renderReadyWorkspace();
+    fireEvent.click(screen.getByRole("button", { name: "Lưu trữ Flow" }));
+    await waitFor(() => expect(api.flowArchive).toHaveBeenCalledTimes(1));
+    fireEvent.change(screen.getByRole("textbox", { name: "Tên Flow" }), { target: { value: "Recovery edit" } });
+    cleanup();
+    expect(loadDraft(savedDocument.id)?.document.name).toBe("Recovery edit");
+    api.flowList.mockResolvedValue([]);
+    await act(async () => { releaseArchive(); });
+    expect(loadDraft(savedDocument.id)?.document.name).toBe("Recovery edit");
+  });
+
+  it("keeps the current flow and discard baseline when a previous flow save resolves late", async () => {
+    const secondDocument = { ...structuredClone(savedDocument), id: "flow-second", name: "Second flow", revision: 7 };
+    api.flowList.mockResolvedValue([savedSummaryForTest(savedDocument), savedSummaryForTest(secondDocument)]);
+    api.flowGet.mockImplementation(async (id: string) => revisionRecord(id === secondDocument.id ? secondDocument : savedDocument));
+    let releaseSave!: (record: FlowRevisionRecord) => void;
+    api.flowSaveRevision.mockImplementationOnce(() => new Promise<FlowRevisionRecord>((resolve) => { releaseSave = resolve; }));
+    await renderReadyWorkspace();
+    fireEvent.change(screen.getByRole("textbox", { name: "Tên Flow" }), { target: { value: "Old snapshot" } });
+    await waitFor(() => expect(screen.getByRole("button", { name: "Lưu bản" })).toBeEnabled());
+    fireEvent.click(screen.getByRole("button", { name: "Lưu bản" }));
+    await waitFor(() => expect(api.flowSaveRevision).toHaveBeenCalledTimes(1));
+    const sent = api.flowSaveRevision.mock.calls[0][0] as FlowDocumentV2;
+
+    fireEvent.change(screen.getByRole("combobox", { name: "Flow" }), { target: { value: secondDocument.id } });
+    await screen.findByDisplayValue("Second flow");
+    await act(async () => { releaseSave(revisionRecord({ ...sent, revision: 3 })); });
+    fireEvent.change(screen.getByRole("textbox", { name: "Tên Flow" }), { target: { value: "Newer B edit" } });
+    await act(async () => { expect(await requestWorkspaceLeave(["flow-device"])).toBe(true); });
+
+    expect(screen.getByRole("textbox", { name: "Tên Flow" })).toHaveValue("Second flow");
+    expect(screen.getByRole("combobox", { name: "Flow" })).toHaveValue(secondDocument.id);
+    fireEvent.change(screen.getByRole("textbox", { name: "Tên Flow" }), { target: { value: "Saved B edit" } });
+    await waitFor(() => expect(screen.getByRole("button", { name: "Lưu bản" })).toBeEnabled());
+    fireEvent.click(screen.getByRole("button", { name: "Lưu bản" }));
+    await waitFor(() => expect(api.flowSaveRevision).toHaveBeenCalledTimes(2));
+    expect(api.flowSaveRevision.mock.calls[1][1]).toBe(7);
+  });
+
+  it("advances the discard baseline after saving an older edit of the same flow", async () => {
+    let releaseSave!: (record: FlowRevisionRecord) => void;
+    api.flowSaveRevision.mockImplementationOnce(() => new Promise<FlowRevisionRecord>((resolve) => { releaseSave = resolve; }));
+    await renderReadyWorkspace();
+    fireEvent.change(screen.getByRole("textbox", { name: "Tên Flow" }), { target: { value: "Saved snapshot" } });
+    await waitFor(() => expect(screen.getByRole("button", { name: "Lưu bản" })).toBeEnabled());
+    fireEvent.click(screen.getByRole("button", { name: "Lưu bản" }));
+    await waitFor(() => expect(api.flowSaveRevision).toHaveBeenCalledTimes(1));
+    const sent = api.flowSaveRevision.mock.calls[0][0] as FlowDocumentV2;
+    fireEvent.change(screen.getByRole("textbox", { name: "Tên Flow" }), { target: { value: "Unsaved later edit" } });
+    await act(async () => { releaseSave(revisionRecord({ ...sent, revision: 3 })); });
+    expect(screen.getByRole("textbox", { name: "Tên Flow" })).toHaveValue("Unsaved later edit");
+    await act(async () => { expect(await requestWorkspaceLeave(["flow-device"])).toBe(true); });
+    expect(screen.getByRole("textbox", { name: "Tên Flow" })).toHaveValue("Saved snapshot");
+  });
+
   it("reloads a clean document after a Flow invalidation", async () => {
     await renderReadyWorkspace();
     await waitFor(() => expect(riviuEventHandler).toBeDefined());

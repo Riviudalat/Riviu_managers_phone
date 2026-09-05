@@ -4,7 +4,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
   automationCreate,
+  automationGet,
+  automationList,
   listenRiviuEvents,
+  operationListRuns,
   publishGet,
   publishList,
   publishReadiness,
@@ -130,6 +133,10 @@ vi.mock("../api", () => ({
     },
   })),
   automationList: vi.fn(async () => []),
+  automationGet: vi.fn(),
+  automationScheduleList: vi.fn(async () => []),
+  operationListRuns: vi.fn(async () => []),
+  operationGetRun: vi.fn(async () => null),
   automationRevise: vi.fn(),
   apiDocs: vi.fn(async () => ""),
   deleteAppLibrary: vi.fn(async () => undefined),
@@ -186,6 +193,7 @@ function iphone(udid: string): DeviceInfo {
 const devices = [iphone("PHONE-A"), iphone("PHONE-B"), iphone("PHONE-C")];
 
 beforeEach(() => {
+  vi.mocked(operationListRuns).mockReset().mockResolvedValue([]);
   createCampaign.mockClear();
   executeCampaign.mockClear();
   preflightCampaign.mockClear();
@@ -211,6 +219,78 @@ beforeEach(() => {
 afterEach(cleanup);
 
 describe("publish, bundle to phone", () => {
+  it("applies saved publish content and captions but requires a fresh preflight", async () => {
+    const definition = { id: "saved-publish", name: "Đăng ca sáng", kind: "publish", latestRevision: 1, archived: false };
+    vi.mocked(automationList).mockResolvedValueOnce([definition] as never);
+    vi.mocked(automationGet).mockResolvedValueOnce({ definition, revision: {
+      definitionId: definition.id, revision: 1, targetRef: { type: "explicit", udids: ["PHONE-A"] },
+      config: { schemaVersion: 1, sourceRoot: "C:/carousels", bundleIds: ["b1"], captionOverrides: { b1: "Chú thích đã ghim" },
+        soundPolicy: { kind: "trendingAny", poolSize: 3, seed: 42 }, executionConfirmed: true },
+    } } as never);
+    render(<PublishPage devices={devices} selected={["PHONE-A"]} targetRef={{ type: "explicit", udids: ["PHONE-A"] }} onSelectUdids={() => {}} />);
+    fireEvent.change(await screen.findByRole("combobox", { name: "Hồ sơ Đăng bài" }), { target: { value: definition.id } });
+    expect(await screen.findByDisplayValue("Chú thích đã ghim")).toBeVisible();
+    expect(screen.getByRole("button", { name: /Xác nhận và đăng/ })).toBeDisabled();
+    expect(preflightCampaign).not.toHaveBeenCalled();
+    expect(executeCampaign).not.toHaveBeenCalled();
+  });
+
+  it("keeps a confirmed Post partial and offers only the outstanding Sheet step", async () => {
+    const campaign = {
+      id: "posted-partial", requestId: "request", sourceRoot: "C:/fixture", state: "succeeded",
+      visibility: "public", cleanupPolicy: "deleteImportedAssetsAfterVerified", assignments: [],
+      createdAt: "2026-09-05T00:00:00Z", updatedAt: "2026-09-05T00:00:00Z",
+    };
+    vi.mocked(publishList).mockResolvedValueOnce([campaign] as never);
+    vi.mocked(operationListRuns).mockResolvedValueOnce([{
+      id: "publish:posted-partial", sourceId: "posted-partial", kind: "publish", title: "Đăng bài",
+      state: "partial", targetCount: 1, totalItems: 1, completedItems: 1, issueCount: 1, retryableCount: 1,
+      retryScope: "sheetOnly", createdAt: campaign.createdAt, updatedAt: campaign.updatedAt,
+    }]);
+    vi.mocked(publishReconcile).mockResolvedValueOnce({
+      campaignId: campaign.id, inputDigest: "digest", status: "partial", retryScope: "sheetOnly",
+      reportJson: {}, updatedAt: campaign.updatedAt,
+    });
+    render(<PublishPage devices={devices} selected={[]} onSelectUdids={() => {}} />);
+    fireEvent.click(screen.getByRole("tab", { name: "Theo dõi" }));
+    expect(await screen.findByText("Hoàn tất một phần")).toBeVisible();
+    expect(screen.queryByText("Hoàn tất", { exact: true })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Ghi lại Sheet" }));
+    await waitFor(() => expect(executeCampaign).toHaveBeenCalledWith(campaign.id, true));
+    expect(requestConfirm).toHaveBeenCalledWith(expect.objectContaining({ message: expect.stringContaining("Chỉ tiếp tục ghi Sheet") }));
+  });
+
+  it("shows the confirmed post link and account sound evidence separately from Sheet completion", async () => {
+    const campaign = {
+      id: "posted-evidence", requestId: "request", sourceRoot: "C:/fixture", state: "succeeded",
+      visibility: "public", cleanupPolicy: "deleteImportedAssetsAfterVerified", assignments: [],
+      createdAt: "2026-09-05T00:00:00Z", updatedAt: "2026-09-05T00:00:00Z",
+    };
+    vi.mocked(publishList).mockResolvedValueOnce([campaign] as never);
+    vi.mocked(publishReconcile).mockResolvedValueOnce({
+      campaignId: campaign.id, inputDigest: "digest", status: "partial", retryScope: "sheetOnly",
+      reportJson: {}, updatedAt: campaign.updatedAt,
+    });
+    vi.mocked(publishGet).mockResolvedValueOnce({
+      campaign, bundles: [], events: [], assignments: [{
+        id: "assignment", campaignId: campaign.id, bundleId: "bundle", ordinal: 0, udid: "PHONE-A", state: "succeeded",
+        evidenceJson: JSON.stringify({ post: { postUrl: "https://www.tiktok.com/@fixture/video/123", soundSelection: {
+          title: "Bài nhạc trên tài khoản", artist: "Tác giả", section: "recommended", index: 2,
+          candidatesDigest: "sound-digest", confirmed: true,
+        } }, cleanup: { state: "cleaned" } }),
+      }],
+    } as never);
+    render(<PublishPage devices={devices} selected={[]} onSelectUdids={() => {}} />);
+    fireEvent.click(screen.getByRole("tab", { name: "Theo dõi" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Đối chiếu kết quả" }));
+    expect(await screen.findByRole("link", { name: "Mở bài đã xác nhận" })).toHaveAttribute("href", "https://www.tiktok.com/@fixture/video/123");
+    expect(screen.getByText("Bài nhạc trên tài khoản · Tác giả")).toBeVisible();
+    expect(screen.getByText("Sheet chưa hoàn tất")).toBeVisible();
+    fireEvent.click(screen.getByText("Đã xác nhận nhạc"));
+    expect(screen.getByText("sound-digest")).toBeVisible();
+    expect(screen.getByText("Đề xuất", { exact: true })).toBeVisible();
+  });
+
   it("distinguishes loading, load failure with retry, and a genuinely empty monitor", async () => {
     const user = userEvent.setup();
     const list = vi.mocked(publishList);
@@ -581,7 +661,7 @@ describe("publish, bundle to phone", () => {
     await waitFor(() => expect(list).toHaveBeenCalledTimes(3));
 
     releaseSucceeded();
-    await waitFor(() => expect(screen.getByText("Hoàn tất")).toBeTruthy());
+    await waitFor(() => expect(screen.getByText("Đã đăng · chờ đối chiếu")).toBeTruthy());
     releasePosting();
 
     // The late answer is discarded rather than rendered. Waiting first would pass even
@@ -591,7 +671,7 @@ describe("publish, bundle to phone", () => {
       screen.queryByText("Đang đăng"),
       "a reload that started earlier repainted the page over a newer one",
     ).toBeNull();
-    expect(screen.getByText("Hoàn tất")).toBeTruthy();
+    expect(screen.getByText("Đã đăng · chờ đối chiếu")).toBeTruthy();
 
     list.mockReset();
     list.mockResolvedValue([] as never);

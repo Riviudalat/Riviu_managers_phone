@@ -1,4 +1,5 @@
 import { useId, useMemo, useState } from "react";
+import { CheckCheck, Search, X } from "lucide-react";
 
 import type { DeviceGroup, DeviceInfo, TargetRef } from "../types";
 import "./TargetSelector.css";
@@ -16,6 +17,7 @@ export interface TargetSelectorProps {
   onTargetRefChange?: (target: TargetRef) => void;
   deviceLabel?: (device: DeviceInfo, index: number) => string;
   label?: string;
+  requireChoice?: boolean;
 }
 
 function defaultDeviceLabel(device: DeviceInfo, index: number): string {
@@ -35,13 +37,17 @@ export function TargetSelector({
   onTargetRefChange,
   deviceLabel = defaultDeviceLabel,
   label = "Phạm vi thiết bị",
+  requireChoice = false,
 }: TargetSelectorProps) {
   const baseId = useId();
   const [internalMode, setInternalMode] = useState<TargetSelectorMode>(
     selected.length ? "explicit" : "all",
   );
   const [internalGroupId, setInternalGroupId] = useState("");
-  const mode = targetRef?.type ?? internalMode;
+  const [choiceMade, setChoiceMade] = useState(false);
+  const [search, setSearch] = useState("");
+  const emptyTarget = targetRef?.type === "explicit" && targetRef.udids.length === 0;
+  const mode = requireChoice && !choiceMade && emptyTarget ? null : targetRef?.type ?? internalMode;
   const groupId = targetRef?.type === "group" ? targetRef.groupId : internalGroupId;
 
   const rosterIds = useMemo(() => new Set(devices.map((device) => device.udid)), [devices]);
@@ -61,19 +67,25 @@ export function TargetSelector({
     [devices, groups],
   );
   const activeGroup = groupOptions.find((entry) => entry.group.id === groupId);
-  const explicitIds =
-    mode === "explicit" && selectedIds.size === 0 && targetRef?.type !== "explicit"
-      ? new Set(devices.map((device) => device.udid))
-      : selectedIds;
+  const explicitIds = selectedIds;
+  const visibleDevices = devices.map((device, index) => ({ device, index }))
+    .filter(({ device, index }) => `${deviceLabel(device, index)} ${device.udid}`
+      .toLocaleLowerCase("vi").includes(search.trim().toLocaleLowerCase("vi")));
+  const updateExplicit = (ids: Set<string>) => {
+    const udids = devices.filter((device) => ids.has(device.udid)).map((device) => device.udid);
+    onChange(udids);
+    onTargetRefChange?.({ type: "explicit", udids });
+  };
 
   const summary =
-    mode === "all"
+    mode === null ? "Chưa chọn phạm vi" : mode === "all"
       ? `Toàn bộ ${devices.length}`
       : mode === "group"
         ? (activeGroup ? `${activeGroup.group.name} · ${activeGroup.udids.length} máy` : "Chọn một nhóm")
         : `${explicitIds.size} máy cụ thể`;
 
   const selectMode = (next: TargetSelectorMode) => {
+    setChoiceMade(true);
     setInternalMode(next);
     if (next === "all") {
       setInternalGroupId("");
@@ -83,9 +95,7 @@ export function TargetSelector({
     }
     if (next === "explicit") {
       setInternalGroupId("");
-      const udids = selectedIds.size
-        ? devices.filter((device) => selectedIds.has(device.udid)).map((device) => device.udid)
-        : devices.map((device) => device.udid);
+      const udids = devices.filter((device) => selectedIds.has(device.udid)).map((device) => device.udid);
       onChange(udids);
       onTargetRefChange?.({ type: "explicit", udids });
       return;
@@ -170,12 +180,23 @@ export function TargetSelector({
       )}
 
       {mode === "explicit" && devices.length > 0 && (
+        <div className="target-selector-explicit">
+          <div className="target-selector-search">
+            <label><Search size={16} /><input type="search" aria-label="Tìm máy trong phạm vi"
+              placeholder="Tìm số máy, tên máy" value={search}
+              onChange={(event) => setSearch(event.currentTarget.value)} /></label>
+            <button type="button" className="ghost" onClick={() => updateExplicit(new Set([
+              ...explicitIds, ...visibleDevices.map(({ device }) => device.udid),
+            ]))}><CheckCheck size={16} /> Chọn đang hiện</button>
+            <button type="button" className="icon-btn" title="Bỏ chọn máy" aria-label="Bỏ chọn máy"
+              onClick={() => updateExplicit(new Set())}><X size={16} /></button>
+          </div>
         <div
           className="target-selector-devices"
           role="group"
           aria-label="Danh sách máy cụ thể"
         >
-          {devices.map((device, index) => {
+          {visibleDevices.map(({ device, index }) => {
             const checked = explicitIds.has(device.udid);
             return (
               <label key={device.udid} htmlFor={`${baseId}-device-${index}`}>
@@ -183,23 +204,19 @@ export function TargetSelector({
                   id={`${baseId}-device-${index}`}
                   type="checkbox"
                   checked={checked}
-                  disabled={checked && explicitIds.size === 1}
                   onChange={(event) => {
                     const next = new Set(explicitIds);
                     if (event.currentTarget.checked) next.add(device.udid);
                     else next.delete(device.udid);
-                    if (next.size === 0) return;
-                    const udids = devices
-                      .filter((entry) => next.has(entry.udid))
-                      .map((entry) => entry.udid);
-                    onChange(udids);
-                    onTargetRefChange?.({ type: "explicit", udids });
+                    updateExplicit(next);
                   }}
                 />
                 <span>{deviceLabel(device, index)}</span>
               </label>
             );
           })}
+        </div>
+        {visibleDevices.length === 0 && <p className="target-selector-empty">Không có máy khớp tìm kiếm.</p>}
         </div>
       )}
     </fieldset>

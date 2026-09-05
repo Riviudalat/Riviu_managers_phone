@@ -75,7 +75,7 @@ function DeviceTileInner({
       className={`dev-phone ${selected ? "selected" : ""} ${focused ? "focused" : ""}`}
       data-testid="device-tile"
       data-udid={device.udid}
-      role="option"
+      role="row"
       aria-selected={selected}
       tabIndex={0}
       aria-roledescription="thẻ thiết bị"
@@ -105,7 +105,7 @@ function DeviceTileInner({
       {/* Every tile keeps the same phone-shaped frame regardless of stream
           state or the stream's own aspect, so the grid never reflows when a
           frame arrives — the "fixed frame" the operator asked for. */}
-      <div className="dev-phone-screen">
+      <div className="dev-phone-screen" role="gridcell">
         <PhoneCanvas udid={device.udid} surfaceId="tile" />
         <StreamPlaceholder
           view={view}

@@ -2,6 +2,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testi
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { InteractionPopup } from "./InteractionPopup";
+import { automationCreate, automationGet, automationList } from "../api";
 import type {
   DeviceInfo,
   DeviceMeta,
@@ -103,6 +104,8 @@ const { parseLinks, resolveLinks, startThread, previewThread, measurePost } = vi
 vi.mock("../api", () => ({
   automationArchive: vi.fn(async () => undefined),
   automationCreate: vi.fn(),
+  automationGet: vi.fn(),
+  automationScheduleList: vi.fn(async () => []),
   automationList: vi.fn(async () => []),
   automationRevise: vi.fn(),
   interactionCancel: vi.fn(async () => undefined),
@@ -301,6 +304,64 @@ function openAdvanced() {
 }
 
 describe("InteractionPopup", () => {
+  it("invalidates parsed links immediately and keeps every action blocked after a replacement fails", async () => {
+    parseLinks.mockResolvedValueOnce([parsedLine("111")]).mockRejectedValueOnce(new Error("Không đọc được link mới"));
+    render(<InteractionPopup metas={noMeta} devices={devices} selected={[]} surface="page" targetRef={{ type: "all" }} />);
+    fireEvent.click(screen.getByRole("checkbox", { name: "Tim" }));
+    fireEvent.click(screen.getByRole("checkbox", { name: "Bình luận" }));
+    const input = screen.getByRole("textbox", { name: "Link TikTok — mỗi dòng một link" });
+    fireEvent.change(input, { target: { value: parsedLine("111").original } });
+    const start = screen.getByRole("button", { name: "Bắt đầu tương tác" });
+    await waitFor(() => expect(start).toBeEnabled());
+    const profile = screen.getByRole("button", { name: "Tạo hồ sơ" });
+    fireEvent.change(input, { target: { value: parsedLine("222").original } });
+    expect(start).toBeDisabled();
+    expect(profile).toBeDisabled();
+    expect(document.querySelector(".interaction-link-list")).not.toHaveTextContent("111");
+    expect(await screen.findByText("Không đọc được link mới")).toBeVisible();
+    expect(start).toBeDisabled();
+    fireEvent.click(start);
+    fireEvent.click(profile);
+    expect(startThread).not.toHaveBeenCalled();
+    expect(automationCreate).not.toHaveBeenCalled();
+  });
+
+  it("stores exactly the selected actors when the profile scope is larger than the direct run", async () => {
+    vi.mocked(automationCreate).mockRejectedValueOnce(new Error("fixture stops after observing the saved scope"));
+    render(<InteractionPopup metas={noMeta} devices={devices} selected={[]} surface="page" targetRef={{ type: "all" }} />);
+    fireEvent.click(screen.getByRole("checkbox", { name: "Tim" }));
+    fireEvent.click(screen.getByRole("checkbox", { name: "Bình luận" }));
+    await pasteLink();
+    fireEvent.click(screen.getByLabelText("Phone B"));
+    const profile = screen.getByRole("button", { name: "Tạo hồ sơ" });
+    await waitFor(() => expect(profile).toBeEnabled());
+    fireEvent.click(profile);
+    await waitFor(() => expect(automationCreate).toHaveBeenCalledWith(
+      "Hồ sơ Tương tác", "interaction", { type: "explicit", udids: ["actor-a"] }, expect.anything(),
+    ));
+    fireEvent.click(screen.getByRole("button", { name: "Bắt đầu tương tác" }));
+    await waitFor(() => expect(startThread).toHaveBeenCalledWith(expect.objectContaining({ actorUdids: ["actor-a"] })));
+  });
+
+  it("applies a saved interaction profile to the visible actions and validated links", async () => {
+    const definition = { id: "saved", name: "Hồ sơ đã lưu", kind: "interaction", latestRevision: 1, archived: false };
+    vi.mocked(automationList).mockResolvedValueOnce([definition] as never);
+    vi.mocked(automationGet).mockResolvedValueOnce({ definition, revision: {
+      definitionId: "saved", revision: 1, targetRef: { type: "explicit", udids: ["actor-a"] },
+      config: { schemaVersion: 1, request: {
+        targets: [parsedLine("123").target], mode: "standalone", messageCount: 2, maxWords: 12,
+        instruction: "", actions: { like: false, comment: false, save: true },
+      } },
+    } } as never);
+    render(<InteractionPopup metas={noMeta} devices={devices} selected={["actor-a"]} targetRef={{ type: "explicit", udids: ["actor-a"] }} surface="page" />);
+    fireEvent.change(await screen.findByRole("combobox", { name: "Hồ sơ Tương tác" }), { target: { value: "saved" } });
+    await waitFor(() => expect(screen.getByRole("checkbox", { name: "Lưu" })).toBeChecked());
+    expect(screen.getByRole("checkbox", { name: "Bình luận" })).not.toBeChecked();
+    expect(screen.getByRole("textbox", { name: "Link TikTok — mỗi dòng một link" })).toHaveValue(parsedLine("123").original);
+    await waitFor(() => expect(screen.getByRole("button", { name: "Bắt đầu tương tác" })).toBeEnabled());
+    expect(startThread).not.toHaveBeenCalled();
+  });
+
   it("does not let an old short-link resolution replace links parsed from newer input", async () => {
     const oldResolution = deferred<TikTokLinkLine[]>();
     const oldUrl = "https://vt.tiktok.com/old";

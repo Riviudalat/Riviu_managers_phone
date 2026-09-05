@@ -150,7 +150,7 @@ describe("device tile, before any frame arrives", () => {
     const onOpen = vi.fn();
     renderTile({ name: "Kệ trên" }, null, { onSelect, onOpen });
 
-    const tile = screen.getByRole("option", { name: /Máy 1.*Kệ trên/i });
+    const tile = screen.getByRole("row", { name: /Máy 1.*Kệ trên/i });
     tile.focus();
     await user.keyboard("{Enter}");
     await user.keyboard(" ");
@@ -169,7 +169,7 @@ describe("device tile, before any frame arrives", () => {
     const onContextMenu = vi.fn();
     renderTile({ name: "Kệ trên" }, null, { onContextMenu });
 
-    const tile = screen.getByRole("option", { name: /Máy 1.*Kệ trên/i });
+    const tile = screen.getByRole("row", { name: /Máy 1.*Kệ trên/i });
     tile.focus();
     await user.keyboard("{Shift>}{F10}{/Shift}");
 

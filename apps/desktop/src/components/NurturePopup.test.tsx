@@ -1,8 +1,10 @@
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { NurturePopup } from "./NurturePopup";
 import { validateNurtureSettings } from "../nurtureValidation";
+import { requestWorkspaceLeave, hasWorkspaceDrafts } from "../workspaceDraft";
+import { requestSaveChanges } from "../confirmStore";
 import type { DeviceInfo, DeviceMeta, NurtureSessionStatus, NurtureSettings } from "../types";
 
 /**
@@ -28,6 +30,11 @@ vi.mock("./AutomationProfileControl", () => ({
     profileControl.render(props);
     return <div data-testid="nurture-profile-control" />;
   },
+}));
+
+vi.mock("../confirmStore", async (importOriginal) => ({
+  ...await importOriginal<typeof import("../confirmStore")>(),
+  requestSaveChanges: vi.fn(async () => "save"),
 }));
 
 /** The per-device ring, faked. Hoisted so the `../api` factory below can close over it. */
@@ -329,7 +336,29 @@ describe("NurturePopup", () => {
     expect(JSON.stringify(props)).not.toContain("apiKey");
 
     fireEvent.click(screen.getByRole("tab", { name: "Theo dõi" }));
-    expect(screen.queryByTestId("nurture-profile-control")).toBeNull();
+    expect(screen.getByTestId("nurture-profile-control")).not.toBeVisible();
+  });
+
+  it("keeps profile-only rates separate while saving edited credentials through the settings API", async () => {
+    const api = await import("../api");
+    const scope = { type: "explicit", udids: ["mock-1"] } as const;
+    render(<NurturePopup devices={devices} selected={[]} targetRef={{ ...scope, udids: [...scope.udids] }} targetUdids={["mock-1"]} metas={new Map()} surface="page" />);
+    await screen.findByTestId("nurture-profile-control");
+    let props = profileControl.render.mock.calls.at(-1)?.[0];
+    await act(async () => props.onApply({ revision: { targetRef: scope, config: { schemaVersion: 1, settings: { likeProb: 99 } } } }));
+    fireEvent.click(screen.getByRole("tab", { name: "AI" }));
+    const key = document.querySelector<HTMLInputElement>('[data-nurture-field="apiKey"]')!;
+    fireEvent.change(key, { target: { value: "new-fixture-key" } });
+    props = profileControl.render.mock.calls.at(-1)?.[0];
+    await act(async () => props.onSaved());
+    expect(hasWorkspaceDrafts()).toBe(true);
+    vi.mocked(api.nurtureGetSettings).mockResolvedValueOnce(settings);
+    saved.saveSettings.mockResolvedValueOnce({ ...settings, apiKey: "__riviu_keep_stored_key__", hasApiKey: true });
+    vi.mocked(requestSaveChanges).mockResolvedValueOnce("save");
+    await act(async () => { await requestWorkspaceLeave(["nurture-credentials"]); });
+    expect(saved.saveSettings).toHaveBeenCalledWith(expect.objectContaining({ apiKey: "new-fixture-key", likeProb: settings.likeProb }));
+    expect(api.nurtureStart).not.toHaveBeenCalled();
+    expect(key).toHaveValue("__riviu_keep_stored_key__");
   });
 
   it("keeps automation profiles out of the legacy popup surface", async () => {

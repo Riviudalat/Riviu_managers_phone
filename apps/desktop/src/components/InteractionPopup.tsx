@@ -27,9 +27,11 @@ import {
   validateDraft,
   type InteractionDraft,
 } from "../interactionPlan";
-import { interactionProfileConfig } from "../automationProfileConfig";
+import { interactionDraftFromProfile, interactionProfileConfig, interactionProfileTarget } from "../automationProfileConfig";
+import { useWorkspaceDraft } from "../workspaceDraft";
 import type {
   DeviceInfo,
+  AutomationDefinitionRecord,
   DeviceMeta,
   InteractionPostReading,
   PostTargets,
@@ -40,7 +42,7 @@ import type {
 import { IconChat, IconClose } from "./Icons";
 import { InteractionMonitorTab } from "./interaction/InteractionMonitorTab";
 import { InteractionSetupTab } from "./interaction/InteractionSetupTab";
-import { AutomationProfileControl } from "./AutomationProfileControl";
+import { AutomationProfileControl, type AutomationProfileHandle } from "./AutomationProfileControl";
 import { CommandBar, StatusChip, SummaryRail } from "./WorkspacePrimitives";
 
 type Props = {
@@ -50,6 +52,7 @@ type Props = {
   targetUdids?: string[];
   /** Semantic scope stored with an automation profile; groups resolve again at execution. */
   targetRef?: TargetRef;
+  onTargetRefChange?: (target: TargetRef) => void;
   /**
    * The operator's own records for each phone — the name and the number they assigned.
    *
@@ -64,6 +67,20 @@ type Props = {
 function newRequestId() {
   if (typeof crypto !== "undefined" && "randomUUID" in crypto) return crypto.randomUUID();
   return `interaction-${Date.now()}`;
+}
+
+const MEASUREMENT_DRAFT_KEY = "riviu.interaction-measurement.v1";
+function readMeasurementDraft(): { wanted: PostTargets; readViews: boolean } {
+  const empty = { wanted: { views: null, likes: null, comments: null }, readViews: false };
+  try {
+    const raw = JSON.parse(sessionStorage.getItem(MEASUREMENT_DRAFT_KEY) ?? "null") as unknown;
+    if (!raw || typeof raw !== "object" || !("wanted" in raw) || !("readViews" in raw)) return empty;
+    const { wanted, readViews } = raw;
+    if (!wanted || typeof wanted !== "object" || typeof readViews !== "boolean") return empty;
+    const values = wanted as Record<string, unknown>;
+    if (!["views", "likes", "comments"].every((key) => values[key] === null || (typeof values[key] === "number" && Number.isInteger(values[key]) && values[key] >= 0))) return empty;
+    return { wanted: values as unknown as PostTargets, readViews };
+  } catch { return empty; }
 }
 
 /**
@@ -89,6 +106,7 @@ export function InteractionPopup({
   selected,
   targetUdids,
   targetRef,
+  onTargetRefChange,
   metas,
   onClose,
   surface = "popup",
@@ -141,6 +159,10 @@ export function InteractionPopup({
 
   const [tab, setTab] = useState<"setup" | "monitor">("setup");
   const [draft, setDraft] = useState<InteractionDraft>(DEFAULT_DRAFT);
+  const [edited, setEdited] = useState(false);
+  const profileRef = useRef<AutomationProfileHandle>(null);
+  const [baseline, setBaseline] = useState({ draft: DEFAULT_DRAFT, targetRef });
+  const pendingProfileActors = useRef<TargetRef | null>(null);
   /// Set one draft field, from a value or from the value it currently has.
   ///
   /// The updater form matters for the actor list. `patch("actors", draft.actors.filter(...))`
@@ -152,17 +174,21 @@ export function InteractionPopup({
     <K extends keyof InteractionDraft>(
       key: K,
       value: InteractionDraft[K] | ((previous: InteractionDraft[K]) => InteractionDraft[K]),
-    ) =>
+    ) => {
+      setEdited(true);
       setDraft((previous) => ({
         ...previous,
         [key]:
           typeof value === "function"
             ? (value as (from: InteractionDraft[K]) => InteractionDraft[K])(previous[key])
             : value,
-      })),
+      }));
+    },
     [],
   );
   const [lines, setLines] = useState<TikTokLinkLine[]>([]);
+  const [parsedInput, setParsedInput] = useState<string | null>(null);
+  const [parseRevision, setParseRevision] = useState(0);
   const [preview, setPreview] = useState<ThreadPreview | null>(null);
   const [planError, setPlanError] = useState<string | null>(null);
   const [handles, setHandles] = useState<Record<string, string>>({});
@@ -174,6 +200,21 @@ export function InteractionPopup({
   const [runBusy, setRunBusy] = useState(false);
   const [runError, setRunError] = useState<string | null>(null);
   const pageSurface = surface === "page";
+  const snapshotKey = JSON.stringify({ draft, targetRef });
+  const dirty = (edited || JSON.stringify(targetRef) !== JSON.stringify(baseline.targetRef))
+    && snapshotKey !== JSON.stringify(baseline);
+  useWorkspaceDraft({
+    id: pageSurface ? "interaction" : "interaction-popup",
+    label: "Tương tác",
+    dirty,
+    snapshotKey,
+    save: async () => await profileRef.current?.save() ?? false,
+    discard: () => {
+      setDraft(baseline.draft);
+      if (baseline.targetRef) onTargetRefChange?.(baseline.targetRef);
+      setEdited(false);
+    },
+  });
 
   /// One id per attempt, not one per keystroke.
   ///
@@ -195,26 +236,43 @@ export function InteractionPopup({
   ///
   /// Up here for the same reason as the disclosure: a look at Theo dõi must not throw away a
   /// reading that cost a phone two to four minutes.
-  const [wanted, setWanted] = useState<PostTargets>({
-    views: null,
-    likes: null,
-    comments: null,
+  const [measurementBaseline, setMeasurementBaseline] = useState(readMeasurementDraft);
+  const [wanted, setWanted] = useState<PostTargets>(measurementBaseline.wanted);
+  const [readViews, setReadViews] = useState(measurementBaseline.readViews);
+  const measurementDraft = { wanted, readViews };
+  useWorkspaceDraft({
+    id: pageSurface ? "interaction-measurement" : "interaction-popup-measurement",
+    label: "Ngưỡng đo bài", dirty: JSON.stringify(measurementDraft) !== JSON.stringify(measurementBaseline),
+    snapshotKey: JSON.stringify(measurementDraft),
+    save: async () => {
+      sessionStorage.setItem(MEASUREMENT_DRAFT_KEY, JSON.stringify(measurementDraft));
+      setMeasurementBaseline(measurementDraft);
+      return true;
+    },
+    discard: () => { setWanted(measurementBaseline.wanted); setReadViews(measurementBaseline.readViews); },
   });
-  const [readViews, setReadViews] = useState(false);
   const [reading, setReading] = useState<InteractionPostReading | null>(null);
   const [measureBusy, setMeasureBusy] = useState(false);
   const [measureError, setMeasureError] = useState<string | null>(null);
+  const measurementKey = JSON.stringify([draft.rawLinks, draft.actors, wanted, readViews]);
+  const latestMeasurementKey = useRef(measurementKey);
+  latestMeasurementKey.current = measurementKey;
+  useEffect(() => { setReading(null); setMeasureError(null); }, [measurementKey]);
 
   const [pos, setPos] = useState({ x: 0, y: 0 });
   const drag = useRef<{ ox: number; oy: number; sx: number; sy: number } | null>(null);
 
+  const currentLines = useMemo(
+    () => parsedInput === draft.rawLinks ? lines : [],
+    [draft.rawLinks, lines, parsedInput],
+  );
   const validTargets = useMemo(
-    () => lines.flatMap((line) => (line.target ? [line.target] : [])),
-    [lines],
+    () => currentLines.flatMap((line) => (line.target ? [line.target] : [])),
+    [currentLines],
   );
   const badLineCount = useMemo(
-    () => lines.filter((line) => !line.target).length,
-    [lines],
+    () => currentLines.filter((line) => !line.target).length,
+    [currentLines],
   );
 
   const inScopeKey = useMemo(() => inScope.map((device) => device.udid).join(","), [inScope]);
@@ -303,6 +361,18 @@ export function InteractionPopup({
   /// shape: a new array on every poll re-renders forever.
   const departed = useRef<string[]>([]);
   useEffect(() => {
+    if (pendingProfileActors.current) {
+      if (JSON.stringify(targetRef) === JSON.stringify(pendingProfileActors.current)) {
+        const target = pendingProfileActors.current;
+        const actors = target.type === "explicit"
+          ? target.udids.filter((udid) => inScope.some((device) => device.udid === udid))
+          : inScope.map((device) => device.udid);
+        pendingProfileActors.current = null;
+        setDraft((previous) => ({ ...previous, actors }));
+        setBaseline((previous) => ({ ...previous, draft: { ...previous.draft, actors } }));
+      }
+      return;
+    }
     const here = (udid: string) => inScope.some((device) => device.udid === udid);
     const gone = draft.actors.filter((udid) => !here(udid));
     const back = departed.current.filter(here);
@@ -314,7 +384,7 @@ export function InteractionPopup({
       ...previous,
       actors: [...previous.actors.filter(here), ...back],
     }));
-  }, [inScope, draft.actors]);
+  }, [inScope, draft.actors, targetRef]);
 
   /// Cancels the debounced parse below.
   ///
@@ -329,9 +399,11 @@ export function InteractionPopup({
   useEffect(() => {
     const generation = ++linkRequestGeneration.current;
     setLinkBusy(false);
+    setLinkError(null);
     const raw = draft.rawLinks;
     if (!raw.trim()) {
       setLines([]);
+      setParsedInput(raw);
       // Cleared here too. Paste something the parser rejects, then select-all and delete: the
       // list emptied and the red banner stayed on screen for the rest of the session, because
       // this branch returned before touching it.
@@ -344,11 +416,14 @@ export function InteractionPopup({
         .then((next) => {
           if (!live || linkRequestGeneration.current !== generation) return;
           setLines(next);
+          setParsedInput(raw);
           setLinkError(null);
         })
         .catch((e) => {
           if (!live || linkRequestGeneration.current !== generation) return;
           setLinkError(describeError(e));
+          setLines([]);
+          setParsedInput(null);
         });
     }, 300);
     cancelParse.current = () => {
@@ -359,7 +434,7 @@ export function InteractionPopup({
       live = false;
       clearTimeout(timer);
     };
-  }, [draft.rawLinks]);
+  }, [draft.rawLinks, parseRevision]);
 
   /// What the plan on screen was computed for.
   ///
@@ -480,6 +555,19 @@ export function InteractionPopup({
       ),
     [draft, effectiveActors, largestCohort, mentions, validTargets],
   );
+  const applyProfile = (record: AutomationDefinitionRecord) => {
+    const nextTarget = record.revision.targetRef;
+    const actors = nextTarget.type === "explicit" ? nextTarget.udids : inScope.map((device) => device.udid);
+    const next = interactionDraftFromProfile(record.revision.config, actors);
+    departed.current = [];
+    seededActors.current = true;
+    pendingProfileActors.current = nextTarget;
+    setDraft(next);
+    setEdited(false);
+    setBaseline({ draft: next, targetRef: nextTarget });
+    onTargetRefChange?.(nextTarget);
+    setTab("setup");
+  };
 
   const resolveShortLinks = useCallback(async () => {
     if (!draft.rawLinks.trim()) return;
@@ -491,10 +579,13 @@ export function InteractionPopup({
       const next = await interactionResolveLinks(draft.rawLinks);
       if (linkRequestGeneration.current !== generation) return;
       setLines(next);
+      setParsedInput(draft.rawLinks);
       setLinkError(null);
     } catch (e) {
       if (linkRequestGeneration.current !== generation) return;
       setLinkError(describeError(e));
+      setLines([]);
+      setParsedInput(null);
     } finally {
       if (linkRequestGeneration.current === generation) setLinkBusy(false);
     }
@@ -512,22 +603,24 @@ export function InteractionPopup({
     if (!target || !udid) return;
     setMeasureBusy(true);
     setMeasureError(null);
+    const key = latestMeasurementKey.current;
     try {
-      setReading(
-        await interactionMeasurePost(
+      const next = await interactionMeasurePost(
           udid,
           target,
           wanted,
           effectiveActors.length,
           readViews,
-        ),
-      );
+        );
+      if (latestMeasurementKey.current === key) setReading(next);
     } catch (e) {
       // The old reading is dropped rather than left on screen next to a fresh error: it
       // describes a post as it was before something went wrong, and which of the two the
       // operator would believe is not a question worth creating.
-      setReading(null);
-      setMeasureError(describeError(e));
+      if (latestMeasurementKey.current === key) {
+        setReading(null);
+        setMeasureError(describeError(e));
+      }
     } finally {
       setMeasureBusy(false);
     }
@@ -665,6 +758,8 @@ export function InteractionPopup({
             detail={issues.length ? "Sửa các mục được đánh dấu trong phần thiết lập." : `Thực hiện trên ${effectiveActors.length} máy theo thứ tự đã chọn.`}
             tone={issues.length ? "warning" : "success"}
             actions={(
+              <>
+              {linkError && <button type="button" className="ghost" onClick={() => setParseRevision((value) => value + 1)}>Đọc lại link</button>}
               <button
                 type="button"
                 className="primary"
@@ -673,6 +768,7 @@ export function InteractionPopup({
               >
                 {runBusy ? "Đang bắt đầu…" : pageSurface ? "Bắt đầu tương tác" : "Chạy ngay"}
               </button>
+              </>
             )}
           />
         )}
@@ -683,13 +779,18 @@ export function InteractionPopup({
           aria-labelledby="interaction-tab-setup"
           hidden={tab !== "setup"}
         >
-          {tab === "setup" && (
+          {(
             <div className={pageSurface ? "interaction-setup-grid" : undefined}>
               <div className="interaction-setup-main">
                 {pageSurface && targetRef && (
                   <AutomationProfileControl
+                    ref={profileRef}
+                    dirty={dirty}
+                    draftId="interaction"
+                    onApply={applyProfile}
+                    onSaved={() => { setBaseline({ draft, targetRef }); setEdited(false); }}
                     kind="interaction"
-                    target={targetRef}
+                    target={interactionProfileTarget(targetRef, inScope.map((device) => device.udid), effectiveActors)}
                     config={profileConfig}
                     defaultName="Hồ sơ Tương tác"
                     disabled={issues.length > 0}
@@ -712,7 +813,7 @@ export function InteractionPopup({
                 setAdvancedOpen={setAdvancedOpen}
                 draft={draft}
                 patch={patch}
-                lines={lines}
+                lines={currentLines}
                 preview={preview}
                 issues={issues}
                 warnings={warnings}

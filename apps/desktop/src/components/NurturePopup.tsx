@@ -10,7 +10,8 @@ import {
 } from "react";
 
 import { InfoDot as Info } from "./InfoDot";
-import { AutomationProfileControl } from "./AutomationProfileControl";
+import { AutomationProfileControl, type AutomationProfileHandle } from "./AutomationProfileControl";
+import { useWorkspaceDraft } from "../workspaceDraft";
 import {
   listenRiviuEvents,
   nurtureGetSettings,
@@ -21,7 +22,7 @@ import {
   nurtureStop,
 } from "../api";
 import { targetsOf } from "../selectionTargets";
-import { nurtureProfileConfig } from "../automationProfileConfig";
+import { nurtureProfileConfig, nurtureSettingsFromProfile } from "../automationProfileConfig";
 import { validateNurtureSettings } from "../nurtureValidation";
 import { orderDevicesByNumber, tileName, tileNumber } from "../deviceNaming";
 import { useTickWhile } from "../useTickWhile";
@@ -65,6 +66,7 @@ type Props = {
   /** Already resolved from All/Group/Explicit at this render; an empty array means no target. */
   targetUdids?: string[];
   targetRef?: TargetRef;
+  onTargetRefChange?: (target: TargetRef) => void;
   metas: Map<string, DeviceMeta>;
   onClose?: () => void;
   surface?: "popup" | "page";
@@ -290,11 +292,21 @@ export function NurturePopup({
   selected,
   targetUdids,
   targetRef,
+  onTargetRefChange,
   metas,
   onClose,
   surface = "popup",
 }: Props) {
   const [settings, setSettings] = useState<NurtureSettings | null>(null);
+  const [baseline, setBaseline] = useState<{settings: NurtureSettings; target?: TargetRef} | null>(null);
+  const [credentialBaseline, setCredentialBaseline] = useState<string | null>(null);
+  const profileRef = useRef<AutomationProfileHandle>(null);
+  const settingsRef = useRef(settings);
+  settingsRef.current = settings;
+  const targetRefLatest = useRef(targetRef);
+  targetRefLatest.current = targetRef;
+  const snapshotKey = JSON.stringify([settings ? nurtureProfileConfig(settings) : null, targetRef]);
+  const dirty = baseline !== null && snapshotKey !== JSON.stringify([nurtureProfileConfig(baseline.settings), baseline.target]);
   const [statuses, setStatuses] = useState<NurtureSessionStatus[]>([]);
   const [startedTargets, setStartedTargets] = useState<string[]>([]);
   const [msg, setMsg] = useState<string | null>(null);
@@ -422,6 +434,7 @@ export function NurturePopup({
   const selectedRow = rows.find((row) => row.udid === openLog) ?? null;
 
   const reload = useCallback(async () => {
+    const original = settingsRef.current;
     setMsg(null);
     try {
       const [s, st, summary] = await Promise.all([
@@ -429,7 +442,11 @@ export function NurturePopup({
         nurtureSessionStatus(),
         nurtureSessionLogSummary(),
       ]);
-      setSettings(s);
+      if (settingsRef.current === original) {
+        setSettings(s);
+        setBaseline({ settings: s, target: targetRefLatest.current });
+        setCredentialBaseline(s.apiKey);
+      }
       setStatuses(st);
       setLogged(summary);
       setMsg(null);
@@ -510,9 +527,52 @@ export function NurturePopup({
       scheduleUdids: s.scheduleEnabled ? targets : s.scheduleUdids,
     };
     const saved = await nurtureSaveSettings(payload);
+    if (settingsRef.current !== settings || targetRefLatest.current !== targetRef) return false;
     setSettings(saved);
+    setBaseline({ settings: saved, target: targetRef });
+    setCredentialBaseline(saved.apiKey);
     return true;
   };
+
+  useWorkspaceDraft({
+    id: "nurture",
+    label: "Thiết lập Nuôi TikTok",
+    dirty,
+    snapshotKey,
+    save: async () => {
+      try {
+        const targetChanged = JSON.stringify(baseline?.target) !== JSON.stringify(targetRef);
+        return pageSurface && targetChanged && profileRef.current ? await profileRef.current.save() : await save();
+      } catch (error) { setMsg(describeError(error)); return false; }
+    },
+    discard: () => {
+      if (baseline) {
+        setSettings(baseline.settings);
+        if (baseline.target) onTargetRefChange?.(baseline.target);
+      }
+    },
+  });
+
+  useWorkspaceDraft({
+    id: "nurture-credentials", label: "Khóa API Nuôi TikTok",
+    dirty: settings !== null && credentialBaseline !== null && settings.apiKey !== credentialBaseline,
+    snapshotKey: JSON.stringify(settings?.apiKey),
+    save: async () => {
+      if (!settings) return false;
+      const apiKey = settings.apiKey;
+      try {
+        const persisted = await nurtureGetSettings();
+        const saved = await nurtureSaveSettings({ ...persisted, apiKey });
+        if (settingsRef.current?.apiKey !== apiKey) return false;
+        setSettings((current) => current ? { ...current, apiKey: saved.apiKey, hasApiKey: saved.hasApiKey } : current);
+        setCredentialBaseline(saved.apiKey);
+        return true;
+      } catch (error) { setMsg(describeError(error)); return false; }
+    },
+    discard: () => {
+      if (credentialBaseline !== null) setSettings((current) => current ? { ...current, apiKey: credentialBaseline } : current);
+    },
+  });
 
   const start = async () => {
     if (!targets.length) {
@@ -822,18 +882,28 @@ export function NurturePopup({
                   aria-labelledby="nurture-page-tab-setup"
                   hidden={pageMode !== "setup"}
                 >
-                  {pageMode === "setup" && (
+                  {(
                     <div className="nurture-setup-grid">
                       <div className="nurture-setup-main">
                         {targetRef && profileConfig && (
                           <AutomationProfileControl
+                            ref={profileRef}
+                            dirty={dirty}
+                            draftId="nurture"
                             kind="nurture"
                             target={targetRef}
                             config={profileConfig}
                             defaultName="Hồ sơ Nuôi TikTok"
-                            disabled={Boolean(settingsIssue)}
+                            disabled={Boolean(settingsIssue) || targets.length === 0}
                             disabledReason={settingsIssue?.message}
                             disabledReasonId={settingsIssue ? issueId : undefined}
+                            onApply={(record) => {
+                              const next = nurtureSettingsFromProfile(record.revision.config, settings);
+                              setSettings(next);
+                              onTargetRefChange?.(record.revision.targetRef);
+                              setBaseline({ settings: next, target: record.revision.targetRef });
+                            }}
+                            onSaved={() => setBaseline({ settings, target: targetRef })}
                           />
                         )}
                         {renderSettings()}
