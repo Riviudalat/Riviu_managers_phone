@@ -36,6 +36,7 @@ interface PendingConfirm extends ConfirmRequest {
    * and why `requestPrompt` normalises the optional fields here rather than at render time.
    */
   prompt?: { initial: string; placeholder?: string; numeric: boolean };
+  alternateLabel?: string;
   settle: (ok: boolean, text: string) => void;
 }
 
@@ -73,6 +74,20 @@ function enqueue(pending: PendingConfirm) {
 export function requestConfirm(request: ConfirmRequest): Promise<boolean> {
   return new Promise<boolean>((resolve) => {
     enqueue({ ...request, id: nextId++, settle: (ok) => resolve(ok) });
+  });
+}
+
+export function requestSaveChanges(message: string): Promise<"save" | "discard" | "stay"> {
+  return new Promise((resolve) => {
+    enqueue({
+      id: nextId++,
+      title: "Thay đổi chưa được lưu",
+      message,
+      confirmLabel: "Lưu",
+      alternateLabel: "Bỏ thay đổi",
+      cancelLabel: "Ở lại",
+      settle: (ok, choice) => resolve(ok ? "save" : choice === "discard" ? "discard" : "stay"),
+    });
   });
 }
 

@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import { Cable, Monitor, ShieldCheck } from "lucide-react";
 
 import { driverMode } from "../api";
 import type { DeviceInfo } from "../types";
@@ -44,20 +45,30 @@ export function SettingsPanel({ devices, deviceLabels }: Props) {
 
   return (
     <div className="settings-page">
-      <div className="settings-span-full">
-        <AgentSection
-          connectedDevices={connectedDevices}
-          connectedUdids={connectedUdids}
-          deviceLabels={deviceLabels}
-        />
+      <nav className="settings-navigation" aria-label="Nhóm cài đặt">
+        <a href="#settings-control"><Monitor size={16} />Hình ảnh và điều khiển</a>
+        <a href="#settings-integration"><Cable size={16} />Kết nối và API</a>
+        <a href="#settings-maintenance"><ShieldCheck size={16} />Bảo trì</a>
+      </nav>
+      <div className="settings-sections">
+        <section id="settings-control" className="settings-category" aria-labelledby="settings-control-title">
+          <h2 id="settings-control-title">Hình ảnh và điều khiển</h2>
+          <StreamQualitySection />
+          <GroupSyncSection />
+        </section>
+        <section id="settings-integration" className="settings-category" aria-labelledby="settings-integration-title">
+          <h2 id="settings-integration-title">Kết nối và API</h2>
+          <WifiAdbSection />
+          <LocalApiSection />
+          <DesktopBridgeSection mode={mode} />
+        </section>
+        <section id="settings-maintenance" className="settings-category" aria-labelledby="settings-maintenance-title">
+          <h2 id="settings-maintenance-title">Bảo trì</h2>
+          <AgentSection connectedDevices={connectedDevices} connectedUdids={connectedUdids} deviceLabels={deviceLabels} />
+          <UpdateSection />
+          <LegacyAgentSection />
+        </section>
       </div>
-      <StreamQualitySection />
-      <GroupSyncSection />
-      <WifiAdbSection />
-      <LocalApiSection />
-      <UpdateSection />
-      <DesktopBridgeSection mode={mode} />
-      <LegacyAgentSection />
     </div>
   );
 }

@@ -1,138 +1,108 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { Save } from "lucide-react";
 import { getStreamSettings, setStreamSettings } from "../../api";
 import { describeError } from "../../describeError";
 import type { StreamSettings } from "../../types";
+import { useWorkspaceDraft } from "../../workspaceDraft";
 import { LoadingState, StatusNotice } from "../States";
 
-/// Pinned to `MIN_VIEW_FPS` and `MAX_SETTABLE_VIEW_FPS` on the Rust side by
-/// `the_fps_field_offers_exactly_the_range_this_file_clamps_to` in `commands.rs`, which
-/// reads these two lines and names the other when one changes.
-///
-/// Rust clamps regardless — these only stop the field from displaying a number the encoder
-/// will never run at while the operator waits to see it take effect.
 const MIN_STREAM_FPS = 5;
 const MAX_STREAM_FPS = 30;
-
-/// Display only, and it must match `ViewPreset::Tile::max_fps()` in `scrcpy.rs` — the cap
-/// is enforced there, not here. It is named in the hint because a field labelled "FPS"
-/// that only half the picture obeys is the same disagreement the overlay/encoder mismatch
-/// already cost us once.
 const TILE_FPS_CEILING = 10;
 
-/**
- * Stream quality and frame rate for the phone grid.
- *
- * The row this panel was missing. `StreamSettings` had been in the Rust command surface the
- * whole time with nothing on the frontend calling it, so quality and frame rate were
- * unreachable — which is also why "they are lost on restart" was only half the story.
- */
+type StreamDraft = Omit<StreamSettings, "fps"> & { fps: string };
+const draftOf = (settings: StreamSettings): StreamDraft => ({ ...settings, fps: String(settings.fps) });
+
 export function StreamQualitySection() {
-  const [streamSettings, setStreamSettingsState] = useState<StreamSettings | null>(null);
-  const [savingStream, setSavingStream] = useState(false);
-  const [streamMessage, setStreamMessage] = useState<string | null>(null);
+  const [saved, setSaved] = useState<StreamSettings | null>(null);
+  const [draft, setDraft] = useState<StreamDraft | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+  const epoch = useRef(0);
+  const request = useRef(0);
+  const savingRef = useRef(false);
+  const dirty = saved !== null && draft !== null && JSON.stringify(draft) !== JSON.stringify(draftOf(saved));
 
   const load = useCallback(() => {
-    setStreamSettingsState(null);
-    setStreamMessage(null);
-    getStreamSettings()
-      .then(setStreamSettingsState)
-      .catch((error) => setStreamMessage(describeError(error)));
+    const ticket = ++request.current;
+    const editEpoch = epoch.current;
+    setError(null);
+    void getStreamSettings().then((next) => {
+      if (ticket !== request.current || editEpoch !== epoch.current) return;
+      setSaved(next);
+      setDraft(draftOf(next));
+    }).catch((cause) => {
+      if (ticket === request.current) setError(describeError(cause));
+    });
   }, []);
-
   useEffect(load, [load]);
 
-  /// Send the whole row, not the one field that changed: the command takes a complete
-  /// `StreamSettings` and a partial one would reset the fields it omitted to their defaults.
-  const saveStream = async (change: Partial<StreamSettings>) => {
-    if (!streamSettings) return;
-    setSavingStream(true);
-    setStreamMessage(null);
+  const patch = (change: Partial<StreamDraft>) => {
+    epoch.current += 1;
+    setDraft((current) => current && { ...current, ...change });
+    setNotice(null);
+  };
+  const discard = () => {
+    epoch.current += 1;
+    setDraft(saved && draftOf(saved));
+    setError(null);
+    setNotice(null);
+  };
+  const save = async () => {
+    if (!draft || savingRef.current) return false;
+    const fps = Number(draft.fps);
+    if (!draft.fps.trim() || !Number.isInteger(fps) || fps < MIN_STREAM_FPS || fps > MAX_STREAM_FPS) {
+      setError(`FPS phải là số nguyên từ ${MIN_STREAM_FPS} đến ${MAX_STREAM_FPS}.`);
+      return false;
+    }
+    const editEpoch = epoch.current;
+    savingRef.current = true;
+    setSaving(true);
+    setError(null);
+    setNotice(null);
     try {
-      // The reply is the clamped value Rust actually stored, so the field shows what took
-      // effect rather than what was typed.
-      setStreamSettingsState(await setStreamSettings({ ...streamSettings, ...change }));
-    } catch (error) {
-      setStreamMessage(describeError(error));
+      const next = await setStreamSettings({ ...draft, fps });
+      setSaved(next);
+      if (epoch.current === editEpoch) {
+        setDraft(draftOf(next));
+        setNotice("Đã áp dụng chất lượng hình.");
+      }
+      return epoch.current === editEpoch;
+    } catch (cause) {
+      setError(describeError(cause));
+      return false;
     } finally {
-      setSavingStream(false);
+      savingRef.current = false;
+      setSaving(false);
     }
   };
+  useWorkspaceDraft({ id: "settings-stream", label: "Chất lượng hình", dirty, snapshotKey: JSON.stringify(draft), save, discard });
+
   return (
-    <section className="settings-section">
+    <section className="settings-section" aria-label="Chất lượng stream">
       <h3>Chất lượng stream</h3>
-      <p className="hint">
-        Đổi chất lượng sẽ khởi động lại hình Android đang chạy; Tile trong lưới bị chặn ở {TILE_FPS_CEILING} hình/giây, còn FPS bên dưới áp cho máy đang mở lớn.
-      </p>
+      <p className="hint">Áp dụng sẽ khởi động lại hình Android đang chạy.</p>
       <details className="settings-details" aria-label="Phạm vi chất lượng hình">
         <summary>Phạm vi chất lượng hình</summary>
-        <p className="hint">
-          Lưới và máy mở lớn mã hoá riêng. Thiết lập này không đổi stream iOS và có thể làm hình Android tối trong lúc khởi động lại.
-        </p>
+        <p className="hint">Tile trong lưới bị chặn ở {TILE_FPS_CEILING} hình/giây. FPS bên dưới áp cho máy mở lớn; thiết lập không đổi stream iOS.</p>
       </details>
-      {!streamSettings && !streamMessage && <LoadingState label="Đang đọc chất lượng hình…" />}
+      {!draft && !error && <LoadingState label="Đang đọc chất lượng hình…" />}
+      {draft && <div className="row">
+        {(["gridQuality", "focusQuality"] as const).map((field) => <label key={field}>
+          {field === "gridQuality" ? "Chất lượng lưới" : "Chất lượng overlay"}
+          <select value={draft[field]} onChange={(event) => patch({ [field]: event.target.value as StreamSettings[typeof field] })}>
+            <option value="low">Thấp</option><option value="medium">Vừa</option><option value="high">Cao</option><option value="extra">Rất cao</option>
+          </select>
+        </label>)}
+        <label>FPS overlay<input type="number" min={MIN_STREAM_FPS} max={MAX_STREAM_FPS} value={draft.fps} onChange={(event) => patch({ fps: event.target.value })} /></label>
+      </div>}
+      {error && <StatusNotice tone="error" action={!draft ? <button type="button" className="ghost" onClick={load}>Đọc lại</button> : undefined}>{error}</StatusNotice>}
+      {notice && <StatusNotice tone="success">{notice}</StatusNotice>}
       <div className="row">
-        <label>
-          Chất lượng lưới
-          <select
-            value={streamSettings?.gridQuality ?? "medium"}
-            disabled={!streamSettings || savingStream}
-            onChange={(event) => {
-              void saveStream({
-                gridQuality: event.target.value as StreamSettings["gridQuality"],
-              });
-            }}
-          >
-            <option value="low">Thấp</option>
-            <option value="medium">Vừa</option>
-            <option value="high">Cao</option>
-            <option value="extra">Rất cao</option>
-          </select>
-        </label>
-        <label>
-          Chất lượng overlay
-          <select
-            value={streamSettings?.focusQuality ?? "high"}
-            disabled={!streamSettings || savingStream}
-            onChange={(event) => {
-              void saveStream({
-                focusQuality: event.target.value as StreamSettings["focusQuality"],
-              });
-            }}
-          >
-            <option value="low">Thấp</option>
-            <option value="medium">Vừa</option>
-            <option value="high">Cao</option>
-            <option value="extra">Rất cao</option>
-          </select>
-        </label>
-        <label>
-          FPS overlay
-          <input
-            type="number"
-            min={MIN_STREAM_FPS}
-            max={MAX_STREAM_FPS}
-            value={streamSettings?.fps ?? MAX_STREAM_FPS}
-            disabled={!streamSettings || savingStream}
-            onChange={(event) => {
-              const fps = Number(event.target.value);
-              if (!Number.isFinite(fps)) return;
-              // Clamped here as well as in Rust, so the field cannot show a number the
-              // encoder will never run at while the operator waits for it to take effect.
-              void saveStream({
-                fps: Math.min(Math.max(Math.round(fps), MIN_STREAM_FPS), MAX_STREAM_FPS),
-              });
-            }}
-          />
-        </label>
+        <button type="button" className="primary" disabled={!dirty || saving} onClick={() => void save()}><Save size={15} />{saving ? "Đang áp dụng…" : "Áp dụng chất lượng hình"}</button>
+        {dirty && <button type="button" className="ghost" disabled={saving} onClick={discard}>Bỏ thay đổi</button>}
       </div>
-      {streamMessage && (
-        <StatusNotice
-          tone="error"
-          action={<button type="button" className="ghost" onClick={load}>Đọc lại</button>}
-        >
-          {streamMessage}
-        </StatusNotice>
-      )}
     </section>
   );
 }

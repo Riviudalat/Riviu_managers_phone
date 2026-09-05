@@ -15,6 +15,7 @@ export function ConfirmHost() {
   const request = useConfirmRequest();
   const confirmRef = useRef<HTMLButtonElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
+  const cardRef = useRef<HTMLDivElement>(null);
   const [text, setText] = useState("");
   const id = request?.id;
   const prompt = request?.prompt;
@@ -26,6 +27,7 @@ export function ConfirmHost() {
 
   useEffect(() => {
     if (id === undefined) return;
+    const previousFocus = document.activeElement as HTMLElement | null;
     if (promptInitial !== undefined) {
       setText(promptInitial);
       // Selected, not just focused: a rename starts from the current name far more often
@@ -40,9 +42,24 @@ export function ConfirmHost() {
         event.preventDefault();
         answerConfirm(id, false);
       }
+      if (event.key === "Tab") {
+        const controls = Array.from(cardRef.current?.querySelectorAll<HTMLElement>(
+          "button:not(:disabled), input:not(:disabled), [tabindex='0']",
+        ) ?? []);
+        const first = controls[0];
+        const last = controls.at(-1);
+        if (event.shiftKey && document.activeElement === first) {
+          event.preventDefault(); last?.focus();
+        } else if (!event.shiftKey && document.activeElement === last) {
+          event.preventDefault(); first?.focus();
+        }
+      }
     };
     window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("keydown", onKey);
+      if (previousFocus?.isConnected) previousFocus.focus();
+    };
   }, [id, promptInitial]);
 
   if (!request) return null;
@@ -51,6 +68,7 @@ export function ConfirmHost() {
     <div className="confirm-layer">
       <div className="confirm-backdrop" onClick={() => answerConfirm(request.id, false)} />
       <div
+        ref={cardRef}
         className="confirm-card"
         role="alertdialog"
         aria-modal="true"
@@ -78,6 +96,11 @@ export function ConfirmHost() {
           <button type="button" onClick={() => answerConfirm(request.id, false)}>
             {request.cancelLabel ?? "Hủy"}
           </button>
+          {request.alternateLabel && (
+            <button type="button" onClick={() => answerConfirm(request.id, false, "discard")}>
+              {request.alternateLabel}
+            </button>
+          )}
           <button
             ref={confirmRef}
             type="button"

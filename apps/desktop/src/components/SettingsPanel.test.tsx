@@ -1,8 +1,9 @@
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { SettingsPanel } from "./SettingsPanel";
 import { updateCheck, updateInstall } from "../api";
+import type { LocalApiConfig } from "../api";
 
 vi.mock("../api", () => ({
   agentGetSettings: vi.fn(async () => ({
@@ -30,6 +31,7 @@ vi.mock("../api", () => ({
   // Reached on mount too — the loopback API config load.
   localApiGetConfig: vi.fn(async () => ({ enabled: false, port: 22222, token: "" })),
   localApiSetConfig: vi.fn(async (config: unknown) => config),
+  localApiStatus: vi.fn(async () => ({ configuredEnabled: false, configuredPort: 22222, running: false, activePort: null, restartRequired: false, lastError: null })),
   updateCheck: vi.fn(),
   updateInstall: vi.fn(async () => undefined),
 }));
@@ -56,7 +58,7 @@ describe("SettingsPanel update section", () => {
     render(<SettingsPanel devices={[]} />);
     await waitFor(() => expect(screen.getByText("Chưa kiểm bản mới")).toBeTruthy());
 
-    expect(screen.queryByRole("heading", { level: 2 })).toBeNull();
+    expect(screen.queryByRole("heading", { name: "Cài đặt" })).toBeNull();
     expect(checkMock).not.toHaveBeenCalled();
   });
 
@@ -115,7 +117,7 @@ describe("SettingsPanel update section", () => {
 
     await userEvent.click(installButton());
 
-    expect(await screen.findByRole("status")).toHaveTextContent(
+    expect(await screen.findByText("Đã cài xong — mở lại app để dùng bản mới.")).toHaveTextContent(
       "Đã cài xong — mở lại app để dùng bản mới.",
     );
     expect(screen.queryByText("Không kiểm được bản mới")).toBeNull();
@@ -162,6 +164,8 @@ describe("stream quality", () => {
     await waitFor(() => expect(screen.getByLabelText("Chất lượng lưới")).toBeTruthy());
 
     await userEvent.selectOptions(screen.getByLabelText("Chất lượng lưới"), "extra");
+    expect(save).not.toHaveBeenCalled();
+    await userEvent.click(screen.getByRole("button", { name: "Áp dụng chất lượng hình" }));
 
     await waitFor(() => expect(save).toHaveBeenCalledTimes(1));
     expect(save.mock.calls[0][0]).toEqual({
@@ -188,7 +192,9 @@ describe("stream quality", () => {
 
     const fps = screen.getByLabelText("FPS overlay");
     await userEvent.clear(fps);
-    await userEvent.type(fps, "99");
+    await userEvent.type(fps, "15");
+    expect(save).not.toHaveBeenCalled();
+    await userEvent.click(screen.getByRole("button", { name: "Áp dụng chất lượng hình" }));
 
     await waitFor(() => expect((fps as HTMLInputElement).value).toBe("30"));
   });
@@ -223,5 +229,82 @@ describe("stream quality", () => {
     expect(screen.queryByText("Desktop bridge")).toBeNull();
     expect(screen.queryByText("Legacy stock agent")).toBeNull();
     expect(screen.queryByText(/Mock chỉ dùng khi phát triển/)).toBeNull();
+  });
+});
+
+describe("independent settings drafts", () => {
+  it("groups settings under keyboard-accessible anchors without unmounting draft regions", async () => {
+    render(<SettingsPanel devices={[]} />);
+    const navigation = screen.getByRole("navigation", { name: "Nhóm cài đặt" });
+    for (const label of ["Hình ảnh và điều khiển", "Kết nối và API", "Bảo trì"]) {
+      const link = within(navigation).getByRole("link", { name: label });
+      expect(globalThis.document.querySelector(link.getAttribute("href")!)).toHaveAttribute("aria-labelledby");
+    }
+    expect(await screen.findByLabelText("FPS overlay")).toBeVisible();
+    expect(await screen.findByLabelText("Cổng")).toBeVisible();
+  });
+  it("keeps valid multi-digit FPS editable and only sends after Apply", async () => {
+    const save = vi.mocked((await import("../api")).setStreamSettings);
+    save.mockClear();
+    render(<SettingsPanel devices={[]} />);
+    const fps = await screen.findByLabelText("FPS overlay");
+    await userEvent.clear(fps);
+    await userEvent.type(fps, "15");
+    expect(fps).toHaveValue(15);
+    expect(save).not.toHaveBeenCalled();
+    await userEvent.click(screen.getByRole("button", { name: "Áp dụng chất lượng hình" }));
+    expect(save).toHaveBeenCalledExactlyOnceWith({ fps: 15, gridQuality: "medium", focusQuality: "high" });
+  });
+
+  it("keeps newer FPS edits when an older save returns", async () => {
+    const api = await import("../api");
+    let complete!: (settings: { fps: number; gridQuality: "medium"; focusQuality: "high" }) => void;
+    vi.mocked(api.setStreamSettings).mockImplementationOnce(() => new Promise((resolve) => { complete = resolve; }));
+    render(<SettingsPanel devices={[]} />);
+    const fps = await screen.findByLabelText("FPS overlay");
+    fireEvent.change(fps, { target: { value: "15" } });
+    await userEvent.click(screen.getByRole("button", { name: "Áp dụng chất lượng hình" }));
+    fireEvent.change(fps, { target: { value: "20" } });
+    await act(async () => complete({ fps: 15, gridQuality: "medium", focusQuality: "high" }));
+    expect(fps).toHaveValue(20);
+    expect(screen.getByRole("button", { name: "Áp dụng chất lượng hình" })).toBeEnabled();
+  });
+
+  it("rejects incomplete FPS without a request", async () => {
+    const save = vi.mocked((await import("../api")).setStreamSettings);
+    save.mockClear();
+    render(<SettingsPanel devices={[]} />);
+    const fps = await screen.findByLabelText("FPS overlay");
+    await userEvent.clear(fps);
+    await userEvent.click(screen.getByRole("button", { name: "Áp dụng chất lượng hình" }));
+    expect(save).not.toHaveBeenCalled();
+    expect(screen.getByText("FPS phải là số nguyên từ 5 đến 30.")).toBeVisible();
+  });
+
+  it("never reports an active API as stopped after saving disabled configuration", async () => {
+    const api = await import("../api");
+    vi.mocked(api.localApiGetConfig).mockResolvedValueOnce({ enabled: true, port: 22222, token: "fixture-token" });
+    vi.mocked(api.localApiStatus).mockResolvedValue({ configuredEnabled: false, configuredPort: 22222, running: true, activePort: 22222, restartRequired: true, lastError: null });
+    render(<SettingsPanel devices={[]} />);
+    const enabled = await screen.findByRole("checkbox", { name: "Bật API cục bộ" });
+    await userEvent.click(enabled);
+    await userEvent.click(screen.getByRole("button", { name: "Lưu API cục bộ" }));
+    expect(await screen.findByText(/Đang chạy tại 127.0.0.1:22222/)).toHaveTextContent("Cần khởi động lại");
+    expect(screen.queryByText(/API đang tắt/)).not.toBeInTheDocument();
+  });
+
+  it("keeps newer API port edits while the previous snapshot saves", async () => {
+    const api = await import("../api");
+    let complete!: (config: LocalApiConfig) => void;
+    vi.mocked(api.localApiSetConfig).mockImplementationOnce(() => new Promise((resolve) => { complete = resolve; }));
+    render(<SettingsPanel devices={[]} />);
+    const region = screen.getByRole("region", { name: "API tự động hoá cục bộ" });
+    const port = await within(region).findByLabelText("Cổng");
+    fireEvent.change(port, { target: { value: "23000" } });
+    await userEvent.click(screen.getByRole("button", { name: "Lưu API cục bộ" }));
+    fireEvent.change(port, { target: { value: "24000" } });
+    await act(async () => complete({ enabled: false, port: 23000, token: "" }));
+    expect(port).toHaveValue(24000);
+    expect(screen.getByRole("button", { name: "Lưu API cục bộ" })).toBeEnabled();
   });
 });

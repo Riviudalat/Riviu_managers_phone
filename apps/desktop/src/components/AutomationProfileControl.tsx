@@ -1,16 +1,19 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState, type Ref } from "react";
 import { Archive, Plus, RefreshCw, Save } from "lucide-react";
 
 import {
   automationArchive,
   automationCreate,
+  automationGet,
   automationList,
   automationRevise,
 } from "../api";
 import { requestConfirm } from "../confirmStore";
+import { requestWorkspaceLeave, useWorkspaceDraft } from "../workspaceDraft";
 import { describeError } from "../describeError";
 import type {
   AutomationDefinition,
+  AutomationDefinitionRecord,
   AutomationKind,
   JsonValue,
   TargetRef,
@@ -33,7 +36,16 @@ type Props = {
   disabledReason?: string;
   disabledReasonId?: string;
   confirmSave?: () => Promise<boolean>;
+  ref?: Ref<AutomationProfileHandle>;
+  onApply?: (record: AutomationDefinitionRecord) => void | Promise<void>;
+  onSaved?: (record: AutomationDefinitionRecord) => void | Promise<void>;
+  dirty?: boolean;
+  draftId?: string;
 };
+
+export interface AutomationProfileHandle {
+  save: () => Promise<boolean>;
+}
 
 /** Stores the current setup as an immutable, target-bound automation revision. */
 export function AutomationProfileControl({
@@ -45,15 +57,31 @@ export function AutomationProfileControl({
   disabledReason,
   disabledReasonId,
   confirmSave,
+  ref,
+  onApply,
+  onSaved,
+  dirty = false,
+  draftId,
 }: Props) {
   const label = KIND_LABEL[kind];
   const [profiles, setProfiles] = useState<AutomationDefinition[]>([]);
   const [selectedId, setSelectedId] = useState("");
   const [name, setName] = useState(defaultName);
+  const [savedName, setSavedName] = useState(defaultName);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const requestEpoch = useRef(0);
+  const busyRef = useRef(false);
+  const editableKey = JSON.stringify([name, target, config]);
+  const latestKey = useRef(editableKey);
+  const latestName = useRef(name);
+  const successfulSaveKeys = useRef(new Set<string>());
+  latestKey.current = editableKey;
+  latestName.current = name;
+  const nameDirty = name !== savedName;
+  const nameDraftId = `profile-name-${kind}`;
 
   const selectedProfile = useMemo(
     () => profiles.find((profile) => profile.id === selectedId) ?? null,
@@ -61,32 +89,37 @@ export function AutomationProfileControl({
   );
 
   const load = useCallback(async () => {
+    const epoch = ++requestEpoch.current;
     setLoading(true);
     setError(null);
     try {
       const next = (await automationList()).filter(
         (profile) => profile.kind === kind && !profile.archived,
       );
+      if (requestEpoch.current !== epoch) return;
       setProfiles(next);
-      setSelectedId("");
-      setName(defaultName);
     } catch (cause) {
-      setError(describeError(cause));
+      if (requestEpoch.current === epoch) setError(describeError(cause));
     } finally {
-      setLoading(false);
+      if (requestEpoch.current === epoch) setLoading(false);
     }
-  }, [defaultName, kind]);
+  }, [kind]);
 
   useEffect(() => {
     void load();
+    return () => { requestEpoch.current += 1; };
   }, [load]);
 
   const save = useCallback(async () => {
+    if (disabled || busyRef.current) return false;
+    if (successfulSaveKeys.current.has(editableKey)) return true;
     const trimmedName = name.trim();
     if (!trimmedName) {
       setError("Tên hồ sơ không được để trống.");
-      return;
+      return false;
     }
+    busyRef.current = true;
+    const snapshotKey = editableKey;
     setBusy(true);
     setError(null);
     setNotice(null);
@@ -98,9 +131,9 @@ export function AutomationProfileControl({
           confirmLabel: "Lưu bản mới",
           cancelLabel: "Hủy",
         });
-        if (!confirmed) return;
+        if (!confirmed) return false;
       }
-      if (confirmSave && !(await confirmSave())) return;
+      if (confirmSave && !(await confirmSave())) return false;
       const record = selectedProfile
         ? await automationRevise(
             selectedProfile.id,
@@ -115,20 +148,81 @@ export function AutomationProfileControl({
           left.name.localeCompare(right.name, "vi"),
         );
       });
-      setSelectedId(record.definition.id);
-      setName(record.definition.name);
+      if (latestName.current === name) {
+        setSelectedId(record.definition.id);
+        setName(record.definition.name);
+        setSavedName(record.definition.name);
+      }
       setNotice(
         `${selectedProfile ? "Đã lưu" : "Đã tạo"} ${record.definition.name} · bản ${record.revision.revision}`,
       );
+      if (latestKey.current !== snapshotKey) {
+        setNotice("Đã lưu bản trước. Thiết lập vừa sửa vẫn chưa được lưu.");
+        return false;
+      }
+      await onSaved?.(record);
+      successfulSaveKeys.current = new Set([snapshotKey, JSON.stringify([record.definition.name, target, config])]);
+      return true;
     } catch (cause) {
       setError(describeError(cause));
+      return false;
     } finally {
+      busyRef.current = false;
       setBusy(false);
     }
-  }, [config, confirmSave, kind, name, selectedProfile, target]);
+  }, [config, confirmSave, disabled, editableKey, kind, name, onSaved, selectedProfile, target]);
+
+  useImperativeHandle(ref, () => ({ save }), [save]);
+
+  useWorkspaceDraft({
+    id: nameDraftId,
+    label: `Tên hồ sơ ${label}`,
+    dirty: nameDirty,
+    snapshotKey: name,
+    save,
+    discard: () => setName(savedName),
+  });
+
+  const selectProfile = async (id: string) => {
+    if (busyRef.current || id === selectedId) return;
+    if ((dirty || nameDirty) && !(await requestWorkspaceLeave(draftId ? [draftId, nameDraftId] : [nameDraftId]))) return;
+    const profile = profiles.find((entry) => entry.id === id);
+    if (!profile) {
+      successfulSaveKeys.current.clear();
+      setSelectedId("");
+      setName(defaultName);
+      setSavedName(defaultName);
+      setNotice(null);
+      return;
+    }
+    busyRef.current = true;
+    setBusy(true);
+    setError(null);
+    const epoch = ++requestEpoch.current;
+    const snapshotKey = latestKey.current;
+    try {
+      const record = await automationGet(id, profile.latestRevision);
+      if (epoch !== requestEpoch.current || latestKey.current !== snapshotKey) return;
+      if (!record || record.definition.kind !== kind || record.revision.revision !== profile.latestRevision) {
+        throw new Error("Hồ sơ đã thay đổi. Tải lại danh sách trước khi chọn.");
+      }
+      await onApply?.(record);
+      successfulSaveKeys.current.clear();
+      setSelectedId(id);
+      setName(profile.name);
+      setSavedName(profile.name);
+      setNotice(`Đã nạp ${profile.name} · bản ${record.revision.revision}`);
+    } catch (cause) {
+      if (epoch === requestEpoch.current) setError(describeError(cause));
+    } finally {
+      busyRef.current = false;
+      if (epoch === requestEpoch.current) setBusy(false);
+    }
+  };
 
   const archive = useCallback(async () => {
     if (!selectedProfile) return;
+    if ((dirty || nameDirty) && !(await requestWorkspaceLeave(draftId ? [draftId, nameDraftId] : [nameDraftId]))) return;
     const confirmed = await requestConfirm({
       title: "Lưu trữ hồ sơ?",
       message: `${selectedProfile.name} sẽ không còn xuất hiện khi tạo điều phối mới. Các revision đã ghim vẫn được giữ.`,
@@ -141,16 +235,18 @@ export function AutomationProfileControl({
     setError(null);
     try {
       await automationArchive(selectedProfile.id);
+      successfulSaveKeys.current.clear();
       setNotice(`Đã lưu trữ ${selectedProfile.name}.`);
       setSelectedId("");
       setName(defaultName);
+      setSavedName(defaultName);
       await load();
     } catch (cause) {
       setError(describeError(cause));
     } finally {
       setBusy(false);
     }
-  }, [defaultName, load, selectedProfile]);
+  }, [defaultName, dirty, draftId, load, nameDirty, nameDraftId, selectedProfile]);
 
   if (loading) return <LoadingState label={`Đang tải hồ sơ ${label}…`} />;
 
@@ -162,13 +258,8 @@ export function AutomationProfileControl({
           <select
             aria-label={`Hồ sơ ${label}`}
             value={selectedId}
-            onChange={(event) => {
-              const id = event.currentTarget.value;
-              setSelectedId(id);
-              const profile = profiles.find((candidate) => candidate.id === id);
-              setName(profile?.name ?? defaultName);
-              setNotice(null);
-            }}
+            disabled={busy}
+            onChange={(event) => void selectProfile(event.currentTarget.value)}
           >
             <option value="">Hồ sơ mới</option>
             {profiles.map((profile) => (
@@ -194,11 +285,7 @@ export function AutomationProfileControl({
             aria-label="Tạo hồ sơ mới"
             title="Tạo hồ sơ mới"
             disabled={busy}
-            onClick={() => {
-              setSelectedId("");
-              setName(defaultName);
-              setNotice(null);
-            }}
+            onClick={() => void selectProfile("")}
           >
             <Plus size={16} />
           </button>

@@ -2,7 +2,10 @@ import { describe, expect, it } from "vitest";
 
 import {
   interactionProfileConfig,
+  interactionProfileTarget,
+  interactionDraftFromProfile,
   nurtureProfileConfig,
+  nurtureSettingsFromProfile,
   publishProfileConfig,
 } from "./automationProfileConfig";
 import type { NurtureSettings, ThreadCampaignRequest } from "./types";
@@ -43,6 +46,11 @@ const nurtureSettings: NurtureSettings = {
 };
 
 describe("automation profile config v1", () => {
+  it("preserves an explicit actor subset and its order instead of broadening a profile", () => {
+    expect(interactionProfileTarget({ type: "all" }, ["a", "b", "c"], ["b"])).toEqual({ type: "explicit", udids: ["b"] });
+    expect(interactionProfileTarget({ type: "group", groupId: "g" }, ["a", "b"], ["b", "a"])).toEqual({ type: "explicit", udids: ["b", "a"] });
+    expect(interactionProfileTarget({ type: "group", groupId: "g" }, ["a", "b"], ["a", "b"])).toEqual({ type: "group", groupId: "g" });
+  });
   it("strips nurture credentials while preserving independent Save settings", () => {
     const config = nurtureProfileConfig(nurtureSettings, 12);
     expect(config).toMatchObject({
@@ -53,6 +61,12 @@ describe("automation profile config v1", () => {
     expect(JSON.stringify(config)).not.toContain("must-not-be-stored");
     expect(config).not.toHaveProperty("settings.apiKey");
     expect(config).not.toHaveProperty("settings.hasApiKey");
+  });
+
+  it("hydrates nurture settings without importing a profile credential or an incompatible field", () => {
+    expect(nurtureSettingsFromProfile({ schemaVersion: 1, settings: { numVideos: 14, apiKey: "injected" } }, nurtureSettings))
+      .toMatchObject({ numVideos: 14, apiKey: "must-not-be-stored" });
+    expect(() => nurtureSettingsFromProfile({ schemaVersion: 1, settings: { numVideos: "14" } }, nurtureSettings)).toThrow("sai kiểu");
   });
 
   it("removes interaction attempt identity and device actors", () => {
@@ -80,6 +94,17 @@ describe("automation profile config v1", () => {
     });
     expect(config).not.toHaveProperty("request.requestId");
     expect(config).not.toHaveProperty("request.actorUdids");
+    expect(interactionDraftFromProfile(config, ["phone-a"])).toMatchObject({
+      rawLinks: "https://www.tiktok.com/@riviu/video/1",
+      actors: ["phone-a"], actions: request.actions, threadKind: "standalone",
+    });
+  });
+
+  it("rejects an incompatible profile instead of overwriting the current interaction draft", () => {
+    expect(() => interactionDraftFromProfile({ schemaVersion: 2 }, [])).toThrow("không đúng định dạng");
+    expect(() => interactionDraftFromProfile({ schemaVersion: 1, request: { targets: [], actions: { like: "yes" } } }, [])).toThrow("lựa chọn hành động");
+    expect(interactionDraftFromProfile({ schemaVersion: 1, request: { targets: [], likeTarget: true } }, []))
+      .toMatchObject({ actions: { like: true, comment: true, save: false } });
   });
 
   it("pins Publish input and seeded TikTok sound policy without run identity", () => {

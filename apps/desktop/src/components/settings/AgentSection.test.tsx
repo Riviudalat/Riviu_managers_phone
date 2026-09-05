@@ -53,6 +53,17 @@ beforeEach(() => {
 });
 
 describe("AgentSection states", () => {
+  it("only saves auto-repair after Apply and never invokes a device repair", async () => {
+    api.agentSaveSettings.mockImplementation(async (settings) => ({ settings, tokenConfigured: true, activeArtifactId: "agent", activeArtifactVersion: "1" }));
+    render(<AgentSection connectedDevices={[device]} connectedUdids={[device.udid]} />);
+    const checkbox = screen.getByRole("checkbox", { name: "Tự khôi phục Agent" });
+    await waitFor(() => expect(checkbox).toBeChecked());
+    fireEvent.click(checkbox);
+    expect(api.agentSaveSettings).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Lưu tự khôi phục" }));
+    await waitFor(() => expect(api.agentSaveSettings).toHaveBeenCalledExactlyOnceWith({ autoRepair: false }));
+    expect(api.agentRepair).not.toHaveBeenCalled();
+  });
   it("does not render unknown readiness fields as No", async () => {
     render(<AgentSection connectedDevices={[device]} connectedUdids={[device.udid]} />);
 

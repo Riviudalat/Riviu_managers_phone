@@ -1,14 +1,17 @@
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import * as api from "../api";
-import { requestConfirm } from "../confirmStore";
+import { requestConfirm, requestSaveChanges } from "../confirmStore";
+import { hasWorkspaceDrafts, requestWorkspaceLeave, useWorkspaceDraft } from "../workspaceDraft";
+import { createRef } from "react";
 import type { AutomationDefinitionRecord } from "../types";
-import { AutomationProfileControl } from "./AutomationProfileControl";
+import { AutomationProfileControl, type AutomationProfileHandle } from "./AutomationProfileControl";
 
 vi.mock("../api", () => ({
   automationArchive: vi.fn(),
   automationCreate: vi.fn(),
+  automationGet: vi.fn(),
   automationList: vi.fn(),
   automationRevise: vi.fn(),
   automationScheduleCreate: vi.fn(),
@@ -18,6 +21,7 @@ vi.mock("../api", () => ({
 
 vi.mock("../confirmStore", () => ({
   requestConfirm: vi.fn(),
+  requestSaveChanges: vi.fn().mockResolvedValue("discard"),
 }));
 
 const saved: AutomationDefinitionRecord = {
@@ -46,6 +50,7 @@ describe("AutomationProfileControl", () => {
     vi.mocked(api.automationScheduleList).mockResolvedValue([]);
     vi.mocked(requestConfirm).mockResolvedValue(true);
     vi.mocked(api.automationCreate).mockResolvedValue(saved);
+    vi.mocked(api.automationGet).mockResolvedValue(saved);
     vi.mocked(api.automationRevise).mockResolvedValue({
       ...saved,
       definition: { ...saved.definition, latestRevision: 4 },
@@ -54,6 +59,49 @@ describe("AutomationProfileControl", () => {
   });
 
   afterEach(cleanup);
+
+  it("guards name-only edits and keeps them when navigation is declined", async () => {
+    render(<AutomationProfileControl kind="nurture" target={{ type: "all" }} config={{}} defaultName="Nuôi TikTok" />);
+    const name = await screen.findByLabelText("Tên hồ sơ Nuôi TikTok");
+    expect(hasWorkspaceDrafts()).toBe(false);
+    fireEvent.change(name, { target: { value: "Tên mới" } });
+    expect(hasWorkspaceDrafts()).toBe(true);
+    vi.mocked(requestSaveChanges).mockResolvedValueOnce("stay");
+    await act(async () => expect(await requestWorkspaceLeave()).toBe(false));
+    expect(name).toHaveValue("Tên mới");
+    await act(async () => expect(await requestWorkspaceLeave()).toBe(true));
+    expect(name).toHaveValue("Nuôi TikTok");
+    expect(api.automationCreate).not.toHaveBeenCalled();
+  });
+
+  it("keeps a newer profile name after an earlier create finishes", async () => {
+    let complete!: (record: AutomationDefinitionRecord) => void;
+    vi.mocked(api.automationCreate).mockImplementationOnce(() => new Promise((resolve) => { complete = resolve; }));
+    render(<AutomationProfileControl kind="nurture" target={{ type: "all" }} config={{}} defaultName="Nuôi TikTok" />);
+    const name = await screen.findByLabelText("Tên hồ sơ Nuôi TikTok");
+    fireEvent.change(name, { target: { value: "Ca sáng" } });
+    fireEvent.click(screen.getByRole("button", { name: "Tạo hồ sơ" }));
+    fireEvent.change(name, { target: { value: "Ca tối" } });
+    await act(async () => complete(saved));
+    expect(name).toHaveValue("Ca tối");
+    expect(name).toBeEnabled();
+    expect(hasWorkspaceDrafts()).toBe(true);
+    expect(screen.getByLabelText("Hồ sơ Nuôi TikTok")).toHaveValue("");
+  });
+
+  it("saves one snapshot when both the workspace and profile name are dirty", async () => {
+    const ref = createRef<AutomationProfileHandle>();
+    function Fixture() {
+      useWorkspaceDraft({ id: "fixture-parent", label: "Thiết lập", dirty: true, snapshotKey: "edited", save: async () => ref.current!.save(), discard: () => undefined });
+      return <AutomationProfileControl ref={ref} kind="nurture" target={{ type: "all" }} config={{}} defaultName="Nuôi TikTok" dirty draftId="fixture-parent" />;
+    }
+    render(<Fixture />);
+    fireEvent.change(await screen.findByLabelText("Tên hồ sơ Nuôi TikTok"), { target: { value: "Ca sáng" } });
+    vi.mocked(requestSaveChanges).mockResolvedValueOnce("save");
+    await act(async () => expect(await requestWorkspaceLeave()).toBe(true));
+    expect(api.automationCreate).toHaveBeenCalledTimes(1);
+    expect(api.automationRevise).not.toHaveBeenCalled();
+  });
 
   it("links disabled saving to an existing issue without repeating it", async () => {
     render(<>
@@ -131,7 +179,7 @@ describe("AutomationProfileControl", () => {
     fireEvent.change(screen.getByLabelText("Hồ sơ Nuôi TikTok"), {
       target: { value: "profile-1" },
     });
-    fireEvent.click(screen.getByRole("button", { name: "Lưu bản mới" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Lưu bản mới" }));
 
     await waitFor(() =>
       expect(api.automationRevise).toHaveBeenCalledWith(
@@ -167,7 +215,7 @@ describe("AutomationProfileControl", () => {
     expect(screen.getByRole("button", { name: "Tạo hồ sơ" })).toBeEnabled();
 
     fireEvent.change(selector, { target: { value: "profile-1" } });
-    fireEvent.click(screen.getByRole("button", { name: "Lưu bản mới" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Lưu bản mới" }));
 
     await waitFor(() => expect(requestConfirm).toHaveBeenCalledTimes(1));
     expect(api.automationRevise).not.toHaveBeenCalled();
@@ -189,5 +237,32 @@ describe("AutomationProfileControl", () => {
     expect(await screen.findByText("database unavailable")).toBeVisible();
     fireEvent.click(screen.getByRole("button", { name: "Thử lại hồ sơ" }));
     await waitFor(() => expect(api.automationList).toHaveBeenCalledTimes(2));
+  });
+
+  it("loads the selected pinned revision before exposing it for use", async () => {
+    vi.mocked(api.automationList).mockResolvedValue([saved.definition]);
+    const onApply = vi.fn();
+    render(<AutomationProfileControl kind="nurture" target={{type:"all"}} config={{}}
+      defaultName="Nuôi TikTok" onApply={onApply} />);
+    fireEvent.change(await screen.findByLabelText("Hồ sơ Nuôi TikTok"), {target:{value:"profile-1"}});
+    await waitFor(() => expect(onApply).toHaveBeenCalledWith(saved));
+    expect(api.automationGet).toHaveBeenCalledWith("profile-1", 3);
+    expect(api.automationCreate).not.toHaveBeenCalled();
+    expect(api.automationRevise).not.toHaveBeenCalled();
+  });
+
+  it("does not replace edits made while a profile is loading", async () => {
+    vi.mocked(api.automationList).mockResolvedValue([saved.definition]);
+    let resolve!: (record: AutomationDefinitionRecord) => void;
+    vi.mocked(api.automationGet).mockReturnValue(new Promise((done) => { resolve = done; }));
+    const onApply = vi.fn();
+    const props = {kind:"nurture" as const,target:{type:"all" as const},defaultName:"Nuôi TikTok",onApply};
+    const view = render(<AutomationProfileControl {...props} config={{numVideos:3}} />);
+    fireEvent.change(await screen.findByLabelText("Hồ sơ Nuôi TikTok"), {target:{value:"profile-1"}});
+    view.rerender(<AutomationProfileControl {...props} config={{numVideos:8}} />);
+    resolve(saved);
+    await waitFor(() => expect(screen.getByLabelText("Hồ sơ Nuôi TikTok")).toBeEnabled());
+    expect(onApply).not.toHaveBeenCalled();
+    expect(screen.getByLabelText("Hồ sơ Nuôi TikTok")).toHaveValue("");
   });
 });

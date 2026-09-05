@@ -1,4 +1,6 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { Save } from "lucide-react";
+import { useWorkspaceDraft } from "../../workspaceDraft";
 import {
   agentGetSettings,
   agentListStatuses,
@@ -25,6 +27,9 @@ export function AgentSection({ connectedDevices, connectedUdids, deviceLabels }:
   const [statusesLoading, setStatusesLoading] = useState(false);
   const [busy, setBusy] = useState<Record<string, AgentAction>>({});
   const [savingSettings, setSavingSettings] = useState(false);
+  const [autoRepair, setAutoRepair] = useState(false);
+  const editEpoch = useRef(0);
+  const savingRef = useRef(false);
   const [agentMessage, setAgentMessage] = useState<string | null>(null);
   const [runtimeError, setRuntimeError] = useState<string | null>(null);
   const [statusesError, setStatusesError] = useState<string | null>(null);
@@ -33,7 +38,7 @@ export function AgentSection({ connectedDevices, connectedUdids, deviceLabels }:
     setRuntime(undefined);
     setRuntimeError(null);
     agentGetSettings()
-      .then((next) => setRuntime(next))
+      .then((next) => { setRuntime(next); setAutoRepair(next.settings.autoRepair); })
       .catch((error) => {
         setRuntime(null);
         setRuntimeError(describeError(error));
@@ -59,6 +64,32 @@ export function AgentSection({ connectedDevices, connectedUdids, deviceLabels }:
   }, [connectedUdids]);
 
   useEffect(loadStatuses, [loadStatuses]);
+
+  const dirty = Boolean(runtime && runtime.settings.autoRepair !== autoRepair);
+  const saveSettings = async () => {
+    if (!runtime || savingRef.current) return false;
+    const epoch = editEpoch.current;
+    savingRef.current = true;
+    setSavingSettings(true);
+    setAgentMessage(null);
+    try {
+      const next = await agentSaveSettings({ autoRepair });
+      setRuntime(next);
+      if (epoch === editEpoch.current) setAutoRepair(next.settings.autoRepair);
+      return epoch === editEpoch.current;
+    } catch (error) {
+      setAgentMessage(describeError(error));
+      return false;
+    } finally {
+      savingRef.current = false;
+      setSavingSettings(false);
+    }
+  };
+  const discard = () => {
+    editEpoch.current += 1;
+    setAutoRepair(runtime?.settings.autoRepair ?? false);
+  };
+  useWorkspaceDraft({ id: "settings-agent", label: "Tự khôi phục Agent", dirty, snapshotKey: JSON.stringify(autoRepair), save: saveSettings, discard });
 
   const runAgentAction = async (udid: string, action: AgentAction) => {
     setBusy((current) => ({ ...current, [udid]: action }));
@@ -144,24 +175,16 @@ export function AgentSection({ connectedDevices, connectedUdids, deviceLabels }:
       <label className="agent-toggle">
         <input
           type="checkbox"
-          checked={runtime?.settings.autoRepair ?? false}
-          disabled={!runtime || savingSettings}
-          onChange={async (event) => {
-            if (!runtime) return;
-            const settings = { autoRepair: event.target.checked };
-            setSavingSettings(true);
-            setAgentMessage(null);
-            try {
-              setRuntime(await agentSaveSettings(settings));
-            } catch (error) {
-              setAgentMessage(describeError(error));
-            } finally {
-              setSavingSettings(false);
-            }
-          }}
+          checked={autoRepair}
+          disabled={!runtime}
+          onChange={(event) => { editEpoch.current += 1; setAutoRepair(event.target.checked); }}
         />
         Tự khôi phục Agent
       </label>
+      <div className="row">
+        <button type="button" className="primary" disabled={!dirty || savingSettings} onClick={() => void saveSettings()}><Save size={15} />{savingSettings ? "Đang lưu…" : "Lưu tự khôi phục"}</button>
+        {dirty && <button type="button" className="ghost" disabled={savingSettings} onClick={discard}>Bỏ thay đổi</button>}
+      </div>
 
       {runtimeError && (
         <StatusNotice
