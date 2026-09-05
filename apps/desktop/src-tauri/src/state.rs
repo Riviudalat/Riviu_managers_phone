@@ -1354,29 +1354,40 @@ impl AppState {
         // the lifecycle stays a single spawn rather than a bind/unbind dance we could not
         // verify without the running app.
         {
-            let config = crate::local_api::load_config(&self.db, &self.secrets);
-            {
-                let mut runtime = self.local_api_runtime.write();
-                runtime.startup = Some(config.clone());
-                runtime.running = if config.enabled && !config.token.is_empty() {
+            let config = match crate::local_api::load_config(&self.db, &self.secrets) {
+                Ok(config) => Some(config),
+                Err(error) => {
+                    log::error!("local API configuration failed to load: {error:#}");
+                    let mut runtime = self.local_api_runtime.write();
+                    runtime.running = Some(false);
+                    runtime.last_error = Some(format!("{error:#}"));
                     None
-                } else {
-                    Some(false)
-                };
-            }
-            if config.enabled && !config.token.is_empty() {
-                let app = app.clone();
-                let runtime = Arc::clone(&self.local_api_runtime);
-                tauri::async_runtime::spawn(async move {
-                    let result = crate::local_api::serve(app, config.port, config.token).await;
-                    runtime.write().running = Some(false);
-                    if let Err(error) = result {
-                        log::error!("local API failed to start: {error:#}");
-                        let mut status = runtime.write();
-                        status.running = Some(false);
-                        status.last_error = Some(format!("{error:#}"));
-                    }
-                });
+                }
+            };
+            if let Some(config) = config {
+                {
+                    let mut runtime = self.local_api_runtime.write();
+                    runtime.startup = Some(config.clone());
+                    runtime.running = if config.enabled && !config.token.is_empty() {
+                        None
+                    } else {
+                        Some(false)
+                    };
+                }
+                if config.enabled && !config.token.is_empty() {
+                    let app = app.clone();
+                    let runtime = Arc::clone(&self.local_api_runtime);
+                    tauri::async_runtime::spawn(async move {
+                        let result = crate::local_api::serve(app, config.port, config.token).await;
+                        runtime.write().running = Some(false);
+                        if let Err(error) = result {
+                            log::error!("local API failed to start: {error:#}");
+                            let mut status = runtime.write();
+                            status.running = Some(false);
+                            status.last_error = Some(format!("{error:#}"));
+                        }
+                    });
+                }
             }
         }
 

@@ -18,8 +18,8 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tauri::{AppHandle, Manager, State};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpStream};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::net::TcpListener;
 use tokio::sync::Semaphore;
 use tokio::time::timeout;
 
@@ -46,6 +46,8 @@ const MAX_REQUEST_BYTES: usize = 64 * 1024;
 /// client needs (the whole point of this API is that it is on the same machine) and far less
 /// than the "forever" it was.
 const REQUEST_READ_TIMEOUT: Duration = Duration::from_secs(10);
+/// After device work settles, an unread response gets the same bounded socket lifetime.
+const RESPONSE_WRITE_TIMEOUT: Duration = Duration::from_secs(10);
 /// How many connections may be in flight at once.
 ///
 /// Paired with the timeout: the timeout bounds one slow client, this bounds how many of them
@@ -92,10 +94,10 @@ impl LocalApiRuntime {
                 .as_ref()
                 .filter(|_| self.running == Some(true))
                 .map(|config| config.port),
-            restart_required: self
-                .startup
-                .as_ref()
-                .is_some_and(|startup| startup != configured),
+            restart_required: self.startup.as_ref().map_or(
+                self.running == Some(false) && configured.enabled,
+                |startup| startup != configured,
+            ),
             last_error: self.last_error.clone(),
         }
     }
@@ -103,7 +105,7 @@ impl LocalApiRuntime {
 
 #[tauri::command]
 pub async fn local_api_status(state: State<'_, AppState>) -> Result<LocalApiStatus, CommandError> {
-    let configured = load_config(&state.db, &state.secrets);
+    let configured = load_config(&state.db, &state.secrets).map_err(CommandError::operation)?;
     Ok(state.local_api_runtime.read().status(&configured))
 }
 
@@ -120,33 +122,34 @@ impl Default for LocalApiConfig {
 /// Name the bearer token lives under in the OS credential store.
 pub const SECRET_LOCAL_API_TOKEN: &str = "local-api-token";
 
-/// Read the stored config, falling back to the (disabled) default on any read/parse failure —
-/// the API staying off is the safe direction to fail.
+/// Read the stored config. Missing settings use the disabled default; storage failures
+/// remain errors so a credential migration can be retried without losing its source.
 ///
 /// The **token comes from the credential store**, not from the SQLite row: it is a bearer
 /// credential for a server that can drive the whole fleet, and the database is a plain
 /// unencrypted file. A token still sitting in an old row is migrated on read and removed from
 /// the row, so a database written before this change stops carrying it.
-pub fn load_config(db: &Database, secrets: &CredentialStore) -> LocalApiConfig {
-    let mut config: LocalApiConfig = match db.get_setting(CONFIG_KEY) {
-        Ok(Some(raw)) => serde_json::from_str(&raw).unwrap_or_default(),
-        _ => LocalApiConfig::default(),
+pub fn load_config(db: &Database, secrets: &CredentialStore) -> anyhow::Result<LocalApiConfig> {
+    let mut config: LocalApiConfig = match db.get_setting(CONFIG_KEY)? {
+        Some(raw) => serde_json::from_str(&raw)?,
+        None => LocalApiConfig::default(),
     };
     if !config.token.is_empty() {
-        // Legacy row. Move it, then rewrite the row without it.
+        // Keep the legacy row until the credential store confirms the write.
         let moved = std::mem::take(&mut config.token);
-        let _ = db.set_setting(
-            CONFIG_KEY,
-            &serde_json::to_string(&config).unwrap_or_default(),
+        secrets.set_app_secret(SECRET_LOCAL_API_TOKEN, &moved)?;
+        anyhow::ensure!(
+            secrets.app_secret(SECRET_LOCAL_API_TOKEN)?.as_deref() == Some(moved.as_str()),
+            "local API credential migration was not confirmed"
         );
-        let _ = secrets.set_app_secret(SECRET_LOCAL_API_TOKEN, &moved);
+        db.set_setting(CONFIG_KEY, &serde_json::to_string(&config)?)?;
         config.token = moved;
-        return config;
+        return Ok(config);
     }
-    if let Ok(Some(token)) = secrets.app_secret(SECRET_LOCAL_API_TOKEN) {
+    if let Some(token) = secrets.app_secret(SECRET_LOCAL_API_TOKEN)? {
         config.token = token;
     }
-    config
+    Ok(config)
 }
 
 /// Persist the config: everything but the token as JSON, the token in the credential store.
@@ -175,7 +178,7 @@ pub fn generate_token() -> String {
 pub async fn local_api_get_config(
     state: State<'_, AppState>,
 ) -> Result<LocalApiConfig, CommandError> {
-    Ok(load_config(&state.db, &state.secrets))
+    load_config(&state.db, &state.secrets).map_err(CommandError::operation)
 }
 
 /// Persist the Local-API config. A change takes effect on the next app launch — the server is
@@ -470,19 +473,58 @@ pub async fn serve(app: AppHandle, port: u16, token: String) -> anyhow::Result<(
         let token = token.clone();
         tokio::spawn(async move {
             let _slot = slot;
-            match timeout(REQUEST_READ_TIMEOUT, handle_conn(stream, &app, &token)).await {
-                Ok(Err(error)) => log::debug!("local API connection ended: {error}"),
-                // A client that never finished its request. Dropped without a reply: there is
-                // nothing to reply *to* yet, and answering a half-request would just keep the
-                // socket alive a little longer.
-                Err(_) => log::debug!("local API connection timed out before a full request"),
-                Ok(Ok(())) => {}
+            if let Err(error) = handle_conn(stream, &token, |command| execute(&app, command)).await
+            {
+                log::debug!("local API connection ended: {error}");
             }
         });
     }
 }
 
-async fn handle_conn(mut stream: TcpStream, app: &AppHandle, token: &str) -> anyhow::Result<()> {
+async fn handle_conn<S, F, Fut>(mut stream: S, token: &str, execute: F) -> anyhow::Result<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+    F: FnOnce(Command) -> Fut,
+    Fut: std::future::Future<Output = Result<Value, ApiError>>,
+{
+    let request = match timeout(REQUEST_READ_TIMEOUT, read_command(&mut stream, token)).await {
+        Ok(request) => request?,
+        Err(_) => {
+            log::debug!("local API connection timed out before a full request");
+            return Ok(());
+        }
+    };
+    let Some(command) = request else {
+        return Ok(());
+    };
+    // AGENTS.md §2.5: once admitted, device work must finish on its own request deadline.
+    // A slow client or disconnected response socket must not cancel an in-flight gesture.
+    let result = match command {
+        Ok(command) => execute(command).await,
+        Err(error) => Err(error),
+    };
+    let response = async {
+        match result {
+            Ok(payload) => {
+                write_response(&mut stream, 200, &json!({"ok": true, "result": payload})).await
+            }
+            Err(error) => {
+                write_response(
+                    &mut stream,
+                    error.status,
+                    &json!({"ok": false, "error": error.message}),
+                )
+                .await
+            }
+        }
+    };
+    timeout(RESPONSE_WRITE_TIMEOUT, response).await?
+}
+
+async fn read_command<S: AsyncRead + Unpin>(
+    stream: &mut S,
+    token: &str,
+) -> anyhow::Result<Option<Result<Command, ApiError>>> {
     let mut buf = Vec::new();
     let mut chunk = [0u8; 4096];
 
@@ -492,39 +534,24 @@ async fn handle_conn(mut stream: TcpStream, app: &AppHandle, token: &str) -> any
             break pos + 4;
         }
         if buf.len() > MAX_REQUEST_BYTES {
-            return write_response(
-                &mut stream,
-                400,
-                &json!({"ok": false, "error": "request quá lớn"}),
-            )
-            .await;
+            return Ok(Some(Err(ApiError::new(400, "request quá lớn"))));
         }
         let n = stream.read(&mut chunk).await?;
         if n == 0 {
-            return Ok(()); // client vanished before sending a full request
+            return Ok(None); // client vanished before sending a full request
         }
         buf.extend_from_slice(&chunk[..n]);
     };
 
     let Some(head) = parse_head(&String::from_utf8_lossy(&buf[..header_end])) else {
-        return write_response(
-            &mut stream,
-            400,
-            &json!({"ok": false, "error": "request lỗi định dạng"}),
-        )
-        .await;
+        return Ok(Some(Err(ApiError::new(400, "request lỗi định dạng"))));
     };
 
     // 2) Read the declared body.
     let mut body = buf[header_end..].to_vec();
     while body.len() < head.content_length {
         if body.len() > MAX_REQUEST_BYTES {
-            return write_response(
-                &mut stream,
-                400,
-                &json!({"ok": false, "error": "body quá lớn"}),
-            )
-            .await;
+            return Ok(Some(Err(ApiError::new(400, "body quá lớn"))));
         }
         let n = stream.read(&mut chunk).await?;
         if n == 0 {
@@ -535,12 +562,7 @@ async fn handle_conn(mut stream: TcpStream, app: &AppHandle, token: &str) -> any
 
     // 3) Auth before anything is parsed or done.
     if !authorized(&head, token) {
-        return write_response(
-            &mut stream,
-            401,
-            &json!({"ok": false, "error": "unauthorized"}),
-        )
-        .await;
+        return Ok(Some(Err(ApiError::new(401, "unauthorized"))));
     }
 
     // 4) Body JSON (empty body is an empty object, for GETs and no-arg POSTs).
@@ -550,37 +572,19 @@ async fn handle_conn(mut stream: TcpStream, app: &AppHandle, token: &str) -> any
         match serde_json::from_slice(&body) {
             Ok(v) => v,
             Err(_) => {
-                return write_response(
-                    &mut stream,
-                    400,
-                    &json!({"ok": false, "error": "JSON không hợp lệ"}),
-                )
-                .await
+                return Ok(Some(Err(ApiError::new(400, "JSON không hợp lệ"))));
             }
         }
     };
 
-    // 5) Route + execute.
-    let result = match route(&head.method, &head.path, &value) {
-        Ok(command) => execute(app, command).await,
-        Err(error) => Err(error),
-    };
-    match result {
-        Ok(payload) => {
-            write_response(&mut stream, 200, &json!({"ok": true, "result": payload})).await
-        }
-        Err(error) => {
-            write_response(
-                &mut stream,
-                error.status,
-                &json!({"ok": false, "error": error.message}),
-            )
-            .await
-        }
-    }
+    Ok(Some(route(&head.method, &head.path, &value)))
 }
 
-async fn write_response(stream: &mut TcpStream, status: u16, body: &Value) -> anyhow::Result<()> {
+async fn write_response<S: AsyncWrite + Unpin>(
+    stream: &mut S,
+    status: u16,
+    body: &Value,
+) -> anyhow::Result<()> {
     stream.write_all(&render_response(status, body)).await?;
     stream.flush().await?;
     Ok(())
@@ -646,6 +650,203 @@ async fn run_gesture(state: &AppState, udid: &str, gesture: Gesture) -> Result<(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    #[derive(Default)]
+    struct TestCredentials {
+        value: parking_lot::Mutex<Option<String>>,
+        fail_write: AtomicBool,
+        fail_read: AtomicBool,
+        ignore_write: AtomicBool,
+    }
+
+    impl riviu_signing::CredentialBackend for TestCredentials {
+        fn get(&self, _: &str) -> anyhow::Result<Option<String>> {
+            anyhow::ensure!(
+                !self.fail_read.load(Ordering::Relaxed),
+                "fixture read error"
+            );
+            Ok(self.value.lock().clone())
+        }
+
+        fn set(&self, _: &str, value: &str) -> anyhow::Result<()> {
+            anyhow::ensure!(
+                !self.fail_write.load(Ordering::Relaxed),
+                "fixture write error"
+            );
+            if !self.ignore_write.load(Ordering::Relaxed) {
+                *self.value.lock() = Some(value.to_string());
+            }
+            Ok(())
+        }
+
+        fn delete(&self, _: &str) -> anyhow::Result<()> {
+            *self.value.lock() = None;
+            Ok(())
+        }
+    }
+
+    struct ConfigFixture {
+        db: Database,
+        root: std::path::PathBuf,
+        backend: Arc<TestCredentials>,
+        secrets: CredentialStore,
+    }
+
+    impl ConfigFixture {
+        fn legacy() -> Self {
+            let root =
+                std::env::temp_dir().join(format!("riviu-local-api-{}", uuid::Uuid::new_v4()));
+            let db = Database::open(root.join("settings.db")).unwrap();
+            db.set_setting(
+                CONFIG_KEY,
+                r#"{"enabled":true,"port":22222,"token":"fixture-token"}"#,
+            )
+            .unwrap();
+            let backend = Arc::new(TestCredentials::default());
+            let secrets = CredentialStore::new(backend.clone());
+            Self {
+                db,
+                root,
+                backend,
+                secrets,
+            }
+        }
+
+        fn stored(&self) -> LocalApiConfig {
+            serde_json::from_str(&self.db.get_setting(CONFIG_KEY).unwrap().unwrap()).unwrap()
+        }
+    }
+
+    impl Drop for ConfigFixture {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.root);
+        }
+    }
+
+    #[test]
+    fn legacy_token_survives_failed_keyring_write_and_migrates_on_retry() {
+        let fixture = ConfigFixture::legacy();
+        fixture.backend.fail_write.store(true, Ordering::Relaxed);
+        assert!(load_config(&fixture.db, &fixture.secrets).is_err());
+        assert_eq!(fixture.stored().token, "fixture-token");
+        assert_eq!(*fixture.backend.value.lock(), None);
+        fixture.backend.fail_write.store(false, Ordering::Relaxed);
+        let migrated = load_config(&fixture.db, &fixture.secrets).unwrap();
+        assert_eq!(migrated.token, "fixture-token");
+        assert!(fixture.stored().token.is_empty());
+        assert_eq!(
+            load_config(&fixture.db, &fixture.secrets).unwrap(),
+            migrated
+        );
+    }
+
+    #[test]
+    fn legacy_token_is_retained_until_the_keyring_read_confirms_it() {
+        let fixture = ConfigFixture::legacy();
+        fixture.backend.ignore_write.store(true, Ordering::Relaxed);
+        assert!(load_config(&fixture.db, &fixture.secrets).is_err());
+        assert_eq!(fixture.stored().token, "fixture-token");
+        fixture.backend.ignore_write.store(false, Ordering::Relaxed);
+        fixture.backend.fail_read.store(true, Ordering::Relaxed);
+        assert!(load_config(&fixture.db, &fixture.secrets).is_err());
+        assert_eq!(fixture.stored().token, "fixture-token");
+        fixture.backend.fail_read.store(false, Ordering::Relaxed);
+        assert_eq!(
+            load_config(&fixture.db, &fixture.secrets).unwrap().token,
+            "fixture-token"
+        );
+        assert!(fixture.stored().token.is_empty());
+    }
+
+    #[test]
+    fn config_read_errors_are_not_reported_as_successful_disabled_settings() {
+        let fixture = ConfigFixture::legacy();
+        fixture.db.set_setting(CONFIG_KEY, "not JSON").unwrap();
+        assert!(load_config(&fixture.db, &fixture.secrets).is_err());
+        fixture
+            .db
+            .set_setting(CONFIG_KEY, r#"{"enabled":true,"port":22222,"token":""}"#)
+            .unwrap();
+        fixture.backend.fail_read.store(true, Ordering::Relaxed);
+        assert!(load_config(&fixture.db, &fixture.secrets).is_err());
+    }
+
+    const VALID_REQUEST: &[u8] =
+        b"GET /v1/devices HTTP/1.1\r\nAuthorization: Bearer fixture-token\r\n\r\n";
+
+    #[tokio::test(start_paused = true)]
+    async fn slow_request_read_times_out_without_dispatch() {
+        let (mut client, server) = tokio::io::duplex(1024);
+        client
+            .write_all(b"GET /v1/devices HTTP/1.1\r\n")
+            .await
+            .unwrap();
+        let called = Arc::new(AtomicBool::new(false));
+        let dispatched = called.clone();
+        let task = tokio::spawn(handle_conn(server, "fixture-token", move |_| async move {
+            dispatched.store(true, Ordering::Relaxed);
+            Ok(json!({}))
+        }));
+        tokio::task::yield_now().await;
+        tokio::time::advance(REQUEST_READ_TIMEOUT + Duration::from_secs(1)).await;
+        task.await.unwrap().unwrap();
+        assert!(!called.load(Ordering::Relaxed));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn admitted_operation_outlives_read_deadline_and_finishes_before_response() {
+        let (mut client, server) = tokio::io::duplex(1024);
+        client.write_all(VALID_REQUEST).await.unwrap();
+        let settled = Arc::new(AtomicBool::new(false));
+        let completed = settled.clone();
+        let task = tokio::spawn(handle_conn(server, "fixture-token", move |_| async move {
+            tokio::time::sleep(REQUEST_READ_TIMEOUT * 2).await;
+            completed.store(true, Ordering::Relaxed);
+            Ok(json!({"finished": true}))
+        }));
+        tokio::task::yield_now().await;
+        tokio::time::advance(REQUEST_READ_TIMEOUT + Duration::from_secs(1)).await;
+        assert!(!task.is_finished());
+        assert!(!settled.load(Ordering::Relaxed));
+        tokio::time::advance(REQUEST_READ_TIMEOUT).await;
+        task.await.unwrap().unwrap();
+        let mut response = String::new();
+        client.read_to_string(&mut response).await.unwrap();
+        assert!(settled.load(Ordering::Relaxed));
+        assert!(response.starts_with("HTTP/1.1 200 OK"));
+        assert!(response.contains(r#""finished":true"#));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn disconnected_client_does_not_cancel_admitted_operation() {
+        let (mut client, server) = tokio::io::duplex(1024);
+        client.write_all(VALID_REQUEST).await.unwrap();
+        let settled = Arc::new(AtomicBool::new(false));
+        let completed = settled.clone();
+        let task = tokio::spawn(handle_conn(server, "fixture-token", move |_| async move {
+            tokio::time::sleep(REQUEST_READ_TIMEOUT * 2).await;
+            completed.store(true, Ordering::Relaxed);
+            Ok(json!({}))
+        }));
+        tokio::task::yield_now().await;
+        drop(client);
+        tokio::time::advance(REQUEST_READ_TIMEOUT * 2).await;
+        assert!(task.await.unwrap().is_err());
+        assert!(settled.load(Ordering::Relaxed));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn unread_response_times_out_only_after_operation_settles() {
+        let (mut client, server) = tokio::io::duplex(128);
+        client.write_all(VALID_REQUEST).await.unwrap();
+        let task = tokio::spawn(handle_conn(server, "fixture-token", |_| async {
+            Ok(json!({"body": "x".repeat(1024)}))
+        }));
+        tokio::task::yield_now().await;
+        tokio::time::advance(RESPONSE_WRITE_TIMEOUT + Duration::from_secs(1)).await;
+        assert!(task.await.unwrap().is_err());
+    }
 
     fn head(raw: &str) -> Head {
         parse_head(raw).expect("well-formed request")
@@ -840,6 +1041,24 @@ mod tests {
         let status = runtime.status(&configured);
         assert_eq!(status.active_port, None);
         assert_eq!(status.last_error.as_deref(), Some("port occupied"));
+    }
+
+    #[test]
+    fn repaired_configuration_requires_restart_after_startup_read_failure() {
+        let runtime = LocalApiRuntime {
+            startup: None,
+            running: Some(false),
+            last_error: Some("credential read failed".into()),
+        };
+        let config = LocalApiConfig {
+            enabled: true,
+            token: "fixture-token".into(),
+            ..LocalApiConfig::default()
+        };
+        let status = runtime.status(&config);
+        assert!(status.restart_required);
+        assert_eq!(status.active_port, None);
+        assert_eq!(status.running, Some(false));
     }
 
     #[test]

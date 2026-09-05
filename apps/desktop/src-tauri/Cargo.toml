@@ -72,6 +72,8 @@ windows = { version = "0.58", features = [
 ] }
 
 [dev-dependencies]
+syn = { version = "2", features = ["full"] }
+proc-macro2 = { version = "1", features = ["span-locations"] }
 # `test-util` only, and only for tests — the same line `riviu-core` carries: it unlocks
 # `#[tokio::test(start_paused = true)]`, which is what finally lets the three background
 # sampler tests advance their five-second turn deadlines virtually instead of sleeping

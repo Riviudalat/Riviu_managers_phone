@@ -20,9 +20,6 @@ mod nurture_schedule;
 mod orchestration_commands;
 mod peripherals;
 mod public_cleanup_commands;
-// The measured legacy composer remains as calibration/reference code, but its three stepwise
-// commands are deliberately absent from the invoke registry. Only `publish_execute` is live.
-#[allow(dead_code)]
 mod publish_commands;
 mod state;
 mod view_hub;
@@ -678,17 +675,117 @@ mod tests {
 
     /// Every `#[tauri::command]` in a file, as (name, body).
     fn commands_in(source: &str) -> Vec<(&str, &str)> {
-        source
-            .split("#[tauri::command]")
-            .skip(1)
-            .filter_map(|chunk| {
-                let signature = chunk.find("fn ")? + 3;
-                let tail = &chunk[signature..];
-                let name = &tail[..tail.find(['(', '<'])?];
-                let end = chunk.find("\n#[").unwrap_or(chunk.len());
-                Some((name, &chunk[..end]))
+        use syn::spanned::Spanned;
+
+        let parsed = syn::parse_file(source).expect("command source must be valid Rust");
+        parsed
+            .items
+            .into_iter()
+            .filter_map(|item| {
+                let syn::Item::Fn(function) = item else {
+                    return None;
+                };
+                if !function.attrs.iter().any(|attribute| {
+                    let names = attribute
+                        .path()
+                        .segments
+                        .iter()
+                        .map(|segment| segment.ident.to_string())
+                        .collect::<Vec<_>>();
+                    names == ["tauri", "command"]
+                }) {
+                    return None;
+                }
+                let name = function.sig.ident.span();
+                Some((
+                    &source[name.byte_range()],
+                    &source[function.sig.span().byte_range().start
+                        ..function.block.span().byte_range().end],
+                ))
             })
             .collect()
+    }
+
+    fn command_holds_admission(source: &str) -> bool {
+        let function: syn::ItemFn = syn::parse_str(source).expect("one command function");
+        function.block.stmts.iter().any(|statement| {
+            let syn::Stmt::Local(local) = statement else {
+                return false;
+            };
+            if !matches!(&local.pat, syn::Pat::Ident(_)) {
+                return false;
+            }
+            let Some(init) = &local.init else {
+                return false;
+            };
+            let syn::Expr::Try(checked) = init.expr.as_ref() else {
+                return false;
+            };
+            let syn::Expr::MethodCall(call) = checked.expr.as_ref() else {
+                return false;
+            };
+            call.method == "ensure_accepting_work" && call.args.is_empty()
+        })
+    }
+
+    #[test]
+    fn admission_scan_ignores_helper_calls_comments_and_nested_test_modules() {
+        let source = r#"
+            #[tauri::command]
+            async fn unguarded() {
+                // state.ensure_accepting_work()
+                let note = "state.ensure_accepting_work()";
+            }
+            fn helper() { let _admission = state.ensure_accepting_work()?; }
+            #[cfg(test)] mod tests { #[tauri::command] fn fixture() {} }
+            #[tauri::command]
+            async fn guarded() { let _admission = state.ensure_accepting_work()?; let text = "Tiếng Việt"; }
+        "#;
+        for source in [source.to_string(), source.replace('\n', "\r\n")] {
+            let commands = commands_in(&source);
+            assert_eq!(
+                commands.iter().map(|(name, _)| *name).collect::<Vec<_>>(),
+                ["unguarded", "guarded"]
+            );
+            assert!(!command_holds_admission(commands[0].1));
+            assert!(command_holds_admission(commands[1].1));
+        }
+    }
+
+    #[test]
+    fn admission_scan_rejects_the_real_cancel_command_with_its_guard_removed() {
+        let source = include_str!("orchestration_commands.rs");
+        let (name, command) = commands_in(source)
+            .into_iter()
+            .find(|(name, _)| *name == "orchestration_cancel_run")
+            .unwrap();
+        assert_eq!(name, "orchestration_cancel_run");
+        assert!(command_holds_admission(command));
+        let mutant = source.replacen(
+            command,
+            &command.replace("let _admission = state.ensure_accepting_work()?;", ""),
+            1,
+        );
+        let (_, unguarded) = commands_in(&mutant)
+            .into_iter()
+            .find(|(name, _)| *name == "orchestration_cancel_run")
+            .unwrap();
+        assert!(!command_holds_admission(unguarded));
+    }
+
+    #[test]
+    fn admission_scan_requires_a_checked_guard_bound_in_the_command_scope() {
+        for body in [
+            "let _ = state.ensure_accepting_work()?;",
+            "let _admission = state.ensure_accepting_work();",
+            "{ let _admission = state.ensure_accepting_work()?; }",
+            "fn helper() { let _admission = state.ensure_accepting_work()?; }",
+        ] {
+            assert!(
+                !command_holds_admission(&format!("fn command() {{ {body} }}")),
+                "{body}"
+            );
+        }
     }
 
     /// The local login is gone, and this is what keeps it gone.
@@ -739,7 +836,22 @@ mod tests {
                 include_str!("orchestration_commands.rs"),
             ),
             ("nurture_commands.rs", include_str!("nurture_commands.rs")),
-            ("publish_commands.rs", include_str!("publish_commands.rs")),
+            (
+                "publish_commands/preflight.rs",
+                include_str!("publish_commands/preflight.rs"),
+            ),
+            (
+                "publish_commands/execution.rs",
+                include_str!("publish_commands/execution.rs"),
+            ),
+            (
+                "publish_commands/sheet.rs",
+                include_str!("publish_commands/sheet.rs"),
+            ),
+            (
+                "publish_commands/legacy.rs",
+                include_str!("publish_commands/legacy.rs"),
+            ),
             (
                 "interaction_commands.rs",
                 include_str!("interaction_commands.rs"),
@@ -892,7 +1004,22 @@ mod tests {
         ("local_api.rs", include_str!("local_api.rs")),
         ("nurture_commands.rs", include_str!("nurture_commands.rs")),
         ("peripherals.rs", include_str!("peripherals.rs")),
-        ("publish_commands.rs", include_str!("publish_commands.rs")),
+        (
+            "publish_commands/preflight.rs",
+            include_str!("publish_commands/preflight.rs"),
+        ),
+        (
+            "publish_commands/execution.rs",
+            include_str!("publish_commands/execution.rs"),
+        ),
+        (
+            "publish_commands/sheet.rs",
+            include_str!("publish_commands/sheet.rs"),
+        ),
+        (
+            "publish_commands/legacy.rs",
+            include_str!("publish_commands/legacy.rs"),
+        ),
         (
             "public_cleanup_commands.rs",
             include_str!("public_cleanup_commands.rs"),
@@ -1034,45 +1161,8 @@ mod tests {
     fn all_commands() -> Vec<(&'static str, &'static str, &'static str)> {
         let mut found = Vec::new();
         for (file, source) in COMMAND_SOURCES {
-            // Cut the trailing test *module* first: `lib.rs`'s own tests contain the literal
-            // "#[tauri::command]" (this scanner splits on it), so counting those would make
-            // the test read itself.
-            //
-            // Matched as `#[cfg(test)]` immediately followed by `mod `, not as a bare
-            // `#[cfg(test)]`: several files carry item-level `#[cfg(test)]` on test-only
-            // imports at the *top*, and cutting there truncated the entire file. Not
-            // hypothetical — it hid all six commands in `agent_commands.rs`, and the
-            // cross-check below is what caught it.
-            //
-            // Matched **newline-agnostically**, and that is not a detail. This repo is developed
-            // on Windows with `core.autocrlf=true`: the index holds LF and a fresh checkout
-            // writes CRLF, so a `"#[cfg(test)]\nmod "` needle finds nothing there. The cut then
-            // never happens, the scan reads this file's own test module, and it reports the test
-            // helpers `commands_in` and `all_commands` as commands answering in the wrong shape.
-            // It passed here for months only because these files happened to have been written
-            // by an editor rather than by `git checkout` — one history rewrite was enough to
-            // turn it red, which means every clone on a Windows box was already red.
-            let cut = source
-                .match_indices("#[cfg(test)]")
-                .find(|(at, marker)| {
-                    source[at + marker.len()..]
-                        .trim_start_matches(['\r', '\n'])
-                        .starts_with("mod ")
-                })
-                .map(|(at, _)| at);
-            let source = match cut {
-                Some(at) => &source[..at],
-                None => source,
-            };
-            for chunk in source.split("#[tauri::command]").skip(1) {
-                let Some(at) = chunk.find("fn ") else {
-                    continue;
-                };
-                let tail = &chunk[at + 3..];
-                let Some(stop) = tail.find(['(', '<']) else {
-                    continue;
-                };
-                found.push((*file, &tail[..stop], chunk));
+            for (name, body) in commands_in(source) {
+                found.push((*file, name, body));
             }
         }
         found
@@ -1234,7 +1324,7 @@ mod tests {
             ADMISSION_EXEMPT.iter().copied().collect();
         let mut offenders = Vec::new();
         for (file, name, body) in all_commands() {
-            if body.contains("ensure_accepting_work()") || exempt.contains_key(name) {
+            if command_holds_admission(body) || exempt.contains_key(name) {
                 continue;
             }
             offenders.push(format!("{file}::{name}"));
@@ -1249,17 +1339,8 @@ mod tests {
 
     /// The scan sees every command that is actually registered — proved, not assumed.
     ///
-    /// `all_commands()` stops at each file's `#[cfg(test)]`, because `lib.rs`'s own test module
-    /// contains the literal `"#[tauri::command]"` and splitting on it would make this test read
-    /// itself. That cut is also a blind spot: a command written *below* the test module would
-    /// be invisible to the gate, and a gate with an invisible region is the thing this whole
-    /// inversion is trying to stop being. Found the honest way — an early probe of the gate was
-    /// appended to the end of a file, the gate stayed green, and the probe rather than the gate
-    /// turned out to be wrong.
-    ///
-    /// So: cross-check the scan against `generate_handler!`, which is the list Tauri actually
-    /// exposes. A command hidden below a test module, or defined and never registered, makes
-    /// the two disagree.
+    /// The Rust parser sees top-level functions even after test modules. Cross-check its
+    /// inventory against `generate_handler!` so a command in a new file cannot be omitted.
     #[test]
     fn the_admission_scan_sees_every_registered_command() {
         let source = include_str!("lib.rs");
@@ -1316,7 +1397,7 @@ mod tests {
         let redundant: Vec<&str> = all_commands()
             .into_iter()
             .filter(|(_, name, body)| {
-                body.contains("ensure_accepting_work()")
+                command_holds_admission(body)
                     && ADMISSION_EXEMPT.iter().any(|(exempt, _)| exempt == name)
             })
             .map(|(_, name, _)| name)
@@ -1804,28 +1885,24 @@ mod tests {
     #[test]
     fn every_agents_section_citation_resolves() {
         fn walk(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
-            const SKIP: [&str; 6] = [
-                "node_modules",
-                "target",
-                ".git",
-                "dist",
-                "re",
-                "WebDriverAgent",
-            ];
-            let Ok(entries) = std::fs::read_dir(dir) else {
-                return;
-            };
-            for entry in entries.flatten() {
-                let path = entry.path();
-                let name = entry.file_name().to_string_lossy().to_string();
-                if path.is_dir() {
-                    if !SKIP.contains(&name.as_str()) {
-                        walk(&path, out);
-                    }
-                } else if matches!(
-                    path.extension().and_then(|e| e.to_str()),
-                    Some("rs" | "ts" | "tsx" | "py" | "yml" | "md" | "java" | "css" | "toml")
-                ) {
+            let listing = std::process::Command::new("git")
+                .args(["ls-files", "-z"])
+                .current_dir(dir)
+                .output()
+                .expect("git lists the tracked documentation scope");
+            assert!(listing.status.success(), "git ls-files failed");
+            let names = String::from_utf8(listing.stdout).expect("tracked paths are UTF-8");
+            for name in names.split('\0').filter(|name| !name.is_empty()) {
+                if name.starts_with("docs/re/") || name.contains("/WebDriverAgent/") {
+                    continue;
+                }
+                let path = dir.join(name);
+                if path.is_file()
+                    && matches!(
+                        path.extension().and_then(|e| e.to_str()),
+                        Some("rs" | "ts" | "tsx" | "py" | "yml" | "md" | "java" | "css" | "toml")
+                    )
+                {
                     out.push(path);
                 }
             }
@@ -1850,12 +1927,28 @@ mod tests {
                     .chars()
                     .next()
                     .is_some_and(|c| c.is_alphanumeric());
-                if !num.is_empty() && !suffixed && num.contains(|c: char| c.is_ascii_digit()) {
-                    found.push(num.to_string());
+                if !num.is_empty() && num.contains(|c: char| c.is_ascii_digit()) {
+                    let tail = &after[digits.len()..];
+                    let suffix = tail.chars().next().filter(char::is_ascii_lowercase);
+                    if suffixed
+                        && num.contains('.')
+                        && suffix.is_some()
+                        && tail.chars().nth(1).is_none_or(|ch| !ch.is_alphanumeric())
+                    {
+                        found.push(format!("{num}{}", suffix.unwrap()));
+                    } else if !suffixed {
+                        found.push(num.to_string());
+                    }
                 }
             }
             found
         }
+
+        assert_eq!(sections_in("\u{a7}5.2b variant"), vec!["5.2b"]);
+        // A family placeholder remains an unresolved exact citation, never a wildcard.
+        assert_eq!(sections_in("\u{a7}9.5x placeholder"), vec!["9.5x"]);
+        assert_eq!(sections_in("\u{a7}9.11x placeholder"), vec!["9.11x"]);
+        assert!(sections_in("\u{a7}2b external notice").is_empty());
 
         let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../..")
@@ -1878,7 +1971,7 @@ mod tests {
             let body = std::fs::read_to_string(path).expect("a split doc is readable");
             let mut fenced = false;
             for line in body.lines() {
-                if line.trim_start().starts_with("```") {
+                if line.trim_start().starts_with("```") || line.trim_start().starts_with("~~~") {
                     fenced = !fenced;
                     continue;
                 }
@@ -1894,9 +1987,19 @@ mod tests {
                     .chars()
                     .take_while(|c| c.is_ascii_digit() || *c == '.')
                     .collect();
-                let num = num.trim_end_matches('.');
-                if !num.is_empty() {
-                    present.insert(num.to_string());
+                let mut section = num.trim_end_matches('.').to_string();
+                if section.contains('.') {
+                    if let Some(suffix) = heading[num.len()..]
+                        .chars()
+                        .next()
+                        .filter(char::is_ascii_lowercase)
+                    {
+                        section.push(suffix);
+                    }
+                }
+                let diary = path.components().any(|part| part.as_os_str() == "diary");
+                if !section.is_empty() && (!diary || section.starts_with("9.")) {
+                    present.insert(section);
                 }
             }
         }
