@@ -11,6 +11,10 @@
   background: var(--bg-panel);
 }
 
+.flow-workspace[data-lower-band-expanded="false"] {
+  grid-template-rows: auto auto minmax(420px, 1fr) auto;
+}
+
 .flow-toolbar {
   grid-row: 1;
   position: relative;

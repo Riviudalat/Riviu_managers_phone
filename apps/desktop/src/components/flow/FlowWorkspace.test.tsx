@@ -1,5 +1,6 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import flowCssRaw from "../../styles/flow.css?raw";
 import type {
   ActionDefinition,
   ActionKind,
@@ -274,6 +275,39 @@ async function renderReadyWorkspace(onDirtyChange = vi.fn()) {
 }
 
 describe("FlowWorkspace startup", () => {
+  it("collapses an idle valid lower band and reserves its track when content needs attention", async () => {
+    await renderReadyWorkspace();
+
+    expect(screen.getByRole("region", { name: "Không gian Flow" })).toHaveAttribute(
+      "data-lower-band-expanded",
+      "false",
+    );
+    expect(flowCssRaw).toMatch(
+      /\.flow-workspace\[data-lower-band-expanded="false"\]\s*\{[^}]*grid-template-rows:\s*auto auto minmax\(420px, 1fr\) auto;/,
+    );
+  });
+
+  it("expands the lower band when validation reports an issue", async () => {
+    api.flowValidate.mockRejectedValueOnce({
+      code: "ConfigInvalid",
+      message: "fixture invalid",
+    });
+
+    render(
+      <FlowWorkspace
+        devices={[device]}
+        selectedUdids={[device.udid]}
+        onDirtyChange={vi.fn()}
+      />,
+    );
+
+    expect(await screen.findByText("Giá trị cấu hình chưa hợp lệ.")).toBeInTheDocument();
+    expect(screen.getByRole("region", { name: "Không gian Flow" })).toHaveAttribute(
+      "data-lower-band-expanded",
+      "true",
+    );
+  });
+
   it("loads the saved revision, keeps disabled catalog reasons, and omits raw actions", async () => {
     await renderReadyWorkspace();
 
@@ -535,6 +569,9 @@ describe("FlowWorkspace editing", () => {
 
     fireEvent.click(run);
     fireEvent.click(screen.getByRole("button", { name: "Chạy trên thiết bị" }));
+    await waitFor(() => expect(
+      screen.getByRole("region", { name: "Không gian Flow" }),
+    ).toHaveAttribute("data-lower-band-expanded", "true"));
     await waitFor(() => expect(api.flowRun).toHaveBeenCalledWith(
       savedDocument.id,
       3,

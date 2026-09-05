@@ -2,6 +2,7 @@ import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+import operationsCssRaw from "../styles/operations.css?raw";
 import type { AppEvent, OperationRunDetail, OperationRunSummary } from "../types";
 import { JobsPanel } from "./JobsPanel";
 
@@ -86,6 +87,15 @@ beforeEach(() => {
 });
 
 describe("JobsPanel operations monitor", () => {
+  it("keeps the task search as one horizontal control after panel defaults load", () => {
+    expect(operationsCssRaw).toMatch(
+      /\.panel \.operations-filterbar > label\s*\{(?=[^}]*flex-direction:\s*row)(?=[^}]*margin:\s*0)[^}]*\}/,
+    );
+    expect(operationsCssRaw).toMatch(
+      /\.panel \.operations-filterbar > label > input\s*\{(?=[^}]*flex:\s*1)(?=[^}]*border:\s*0)(?=[^}]*padding:\s*0)[^}]*\}/,
+    );
+  });
+
   it("leaves the page title to the topbar and renders loading then empty", async () => {
     let resolve!: (runs: OperationRunSummary[]) => void;
     operationListRuns.mockReturnValueOnce(new Promise((done) => { resolve = done; }));

@@ -297,6 +297,7 @@ describe("NurturePopup", () => {
     expect(workspace.querySelector("[style*='translate']")).toBeNull();
     expect(screen.queryByRole("button", { name: "Đóng" })).toBeNull();
     await waitFor(() => expect(screen.getByRole("tab", { name: "Thiết lập" })).toBeVisible());
+    expect(screen.queryByRole("list", { name: "Quy trình Nuôi TikTok" })).toBeNull();
   });
 
   it("offers a target-bound Nurture profile only on page setup", async () => {

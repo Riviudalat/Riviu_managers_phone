@@ -315,6 +315,7 @@ export function FlowWorkspace({
   // the operator needs the coordinate picker.
   const launchBundleId =
     initialLaunchBundleId(state.document) ?? compiled?.plan.contextPlan.initialBundleId ?? null;
+  const lowerBandExpanded = activeRun !== null || state.validation.length > 0;
 
   const refreshFlows = useCallback(async () => {
     const next = await flowList();
@@ -565,6 +566,7 @@ export function FlowWorkspace({
       aria-label="Không gian Flow"
       data-loading="false"
       data-state={loadState}
+      data-lower-band-expanded={String(lowerBandExpanded)}
     >
       <FlowToolbar
         flows={flows}

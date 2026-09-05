@@ -244,7 +244,7 @@ it("shows target-bound automation profiles only on the dedicated page", async ()
   expect(screen.queryByRole("region", { name: "Quản lý hồ sơ Tương tác" })).not.toBeInTheDocument();
 });
 
-it("renders the production action workflow and a live review rail on the page", async () => {
+it("renders a compact action workspace and a live review rail on the page", async () => {
   render(
     <InteractionPopup
       metas={noMeta}
@@ -255,13 +255,8 @@ it("renders the production action workflow and a live review rail on the page", 
     />,
   );
 
-  const workflow = await screen.findByRole("list", { name: "Quy trình Tương tác" });
-  expect(within(workflow).getAllByRole("listitem").map((item) => item.textContent)).toEqual([
-    "1Phạm vi",
-    "2Hành động",
-    "3Kiểm tra",
-    "4Theo dõi",
-  ]);
+  await screen.findByRole("tablist", { name: "Chế độ Tương tác" });
+  expect(screen.queryByRole("list", { name: "Quy trình Tương tác" })).toBeNull();
   const review = screen.getByRole("complementary", { name: "Kiểm tra chiến dịch" });
   expect(within(review).getByText("Link hợp lệ")).toBeVisible();
   expect(within(review).getByText("Thiết bị chạy")).toBeVisible();

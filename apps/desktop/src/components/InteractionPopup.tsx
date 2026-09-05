@@ -41,7 +41,7 @@ import { IconChat, IconClose } from "./Icons";
 import { InteractionMonitorTab } from "./interaction/InteractionMonitorTab";
 import { InteractionSetupTab } from "./interaction/InteractionSetupTab";
 import { AutomationProfileControl } from "./AutomationProfileControl";
-import { CommandBar, StatusChip, SummaryRail, WorkflowStepper } from "./WorkspacePrimitives";
+import { CommandBar, StatusChip, SummaryRail } from "./WorkspacePrimitives";
 
 type Props = {
   devices: DeviceInfo[];
@@ -632,26 +632,6 @@ export function InteractionPopup({
               <IconClose size={14} />
             </button>
           </header>
-        )}
-        {pageSurface && (
-          <WorkflowStepper
-            label="Quy trình Tương tác"
-            current={
-              tab === "monitor"
-                ? "monitor"
-                : !effectiveActors.length || !validTargets.length
-                  ? "scope"
-                  : issues.length
-                    ? "actions"
-                    : "review"
-            }
-            steps={[
-              { id: "scope", label: "Phạm vi" },
-              { id: "actions", label: "Hành động" },
-              { id: "review", label: "Kiểm tra" },
-              { id: "monitor", label: "Theo dõi" },
-            ]}
-          />
         )}
         <div className="interaction-tabs" role="tablist" aria-label="Chế độ Tương tác">
           <button

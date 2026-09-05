@@ -30,7 +30,7 @@ import { NurtureDeviceProgress, NurtureRunProgress } from "./nurture/NurtureProg
 import { NurtureBehaviourTab } from "./nurture/NurtureBehaviourTab";
 import { IconClose, IconHeart, IconRefresh } from "./Icons";
 import { LoadingState, StatusNotice } from "./States";
-import { CommandBar, StatusChip, SummaryRail, WorkflowStepper } from "./WorkspacePrimitives";
+import { CommandBar, StatusChip, SummaryRail } from "./WorkspacePrimitives";
 import type {
   DeviceInfo,
   DeviceMeta,
@@ -750,19 +750,6 @@ export function NurturePopup({
           ) : (
             <>
               {!pageSurface && actionControls}
-
-              {pageSurface && (
-                <WorkflowStepper
-                  label="Quy trình Nuôi TikTok"
-                  current={pageMode === "monitor" ? "monitor" : targets.length ? "review" : "scope"}
-                  steps={[
-                    { id: "scope", label: "Phạm vi" },
-                    { id: "setup", label: "Thiết lập" },
-                    { id: "review", label: "Kiểm tra" },
-                    { id: "monitor", label: "Theo dõi" },
-                  ]}
-                />
-              )}
 
               {pageSurface && (
                 <div className="nurture-page-tabs" role="tablist" aria-label="Chế độ Nuôi TikTok">

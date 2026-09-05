@@ -1,5 +1,9 @@
 .publish-page {
+  display: flex;
+  min-height: 0;
   min-width: 0;
+  flex: 1;
+  flex-direction: column;
   overflow: hidden;
   padding: 0;
   background: var(--bg-canvas);
@@ -15,7 +19,10 @@
 }
 
 .publish-workspace-section {
+  flex: 1 1 0;
   min-width: 0;
+  min-height: 0;
+  overflow: auto;
   padding: var(--space-4) var(--space-5) var(--space-6);
 }
 
