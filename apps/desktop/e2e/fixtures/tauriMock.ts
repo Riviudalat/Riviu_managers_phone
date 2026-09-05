@@ -1090,7 +1090,7 @@ export async function installTauriMock(
       detail: "Dữ liệu fixture đã sẵn sàng",
       createdAt: "2026-09-01T08:00:00.000Z",
     }]);
-    commandHandlers.set("api_docs", () => "GET /v1/devices\nGET /v1/jobs");
+    commandHandlers.set("api_docs", () => "# Riviu Manager local API (Tauri invoke)\n## Devices\n- list_devices / refresh_devices / device_health\n## Farm data\n- list_groups / list_materials / list_apps_library\n## Operations\n- operation_query_runs / operation_get_run");
     // The publish page reads its campaign list on mount, and now re-reads it on every
     // `publishUpdated`. Unregistered, that rejected and the page carried a red
     // `Unknown mock command: publish_list` through its own screenshot baseline — the same

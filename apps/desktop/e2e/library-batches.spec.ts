@@ -10,10 +10,14 @@ for (const surface of [
     await page.goto("/");
     await expect(page.getByTestId("device-tile")).toHaveCount(2);
     await page.getByRole("button",{name:surface.name,exact:true}).click();
+    await page.getByRole("radiogroup", { name:"Cách chọn thiết bị" }).getByText("Toàn bộ", { exact:true }).click();
+    await expect(page.getByRole("radio", { name:"Toàn bộ", exact:true })).toBeChecked();
     await page.getByRole("button",{name:surface.button}).click();
     await page.getByRole("button",{name:"Dữ liệu",exact:true}).click();
     await expect(page.getByText("Tác vụ trong 24 giờ qua")).toBeVisible();
     await page.getByRole("button",{name:surface.name,exact:true}).click();
+    await page.getByRole("radiogroup", { name:"Cách chọn thiết bị" }).getByText("Toàn bộ", { exact:true }).click();
+    await expect(page.getByRole("radio", { name:"Toàn bộ", exact:true })).toBeChecked();
     await expect(page.getByRole("table",{name:"Tiến độ batch đã lưu"})).toBeVisible();
     await expect(page.getByText("Máy 2 · Kệ 2",{exact:true})).toBeVisible();
     await expect(page.getByRole("button",{name:surface.button})).toBeDisabled();
@@ -21,6 +25,8 @@ for (const surface of [
     await page.reload();
     await expect(page.getByTestId("device-tile")).toHaveCount(2);
     await page.getByRole("button",{name:surface.name,exact:true}).click();
+    await page.getByRole("radiogroup", { name:"Cách chọn thiết bị" }).getByText("Toàn bộ", { exact:true }).click();
+    await expect(page.getByRole("radio", { name:"Toàn bộ", exact:true })).toBeChecked();
     await expect(page.getByText("Máy 1 · Kệ 1",{exact:true})).toBeVisible();
     await expect(page.getByRole("button",{name:surface.button})).toBeDisabled();
     await page.getByRole("button",{name:"Dừng máy đang chờ"}).click();

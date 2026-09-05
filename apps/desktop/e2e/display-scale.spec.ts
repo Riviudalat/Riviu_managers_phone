@@ -139,7 +139,8 @@ async function assertPaintedPixels(page: Page, png: Buffer): Promise<void> {
   expect(sample.sampled, JSON.stringify(sample)).toBeGreaterThan(1_000);
   expect(sample.colours, JSON.stringify(sample)).toBeGreaterThan(16);
   expect(sample.contrast, JSON.stringify(sample)).toBeGreaterThan(120);
-  expect(sample.darkRatio, JSON.stringify(sample)).toBeGreaterThan(0.01);
+  // White navigation leaves only text/icon ink, not a large dark sidebar.
+  expect(sample.darkRatio, JSON.stringify(sample)).toBeGreaterThan(0.001);
   expect(sample.lightRatio, JSON.stringify(sample)).toBeGreaterThan(0.2);
 }
 
@@ -173,6 +174,12 @@ async function checkScaledPage(
 }
 
 test.describe("Windows display scaling", () => {
+  test("the pixel gate rejects a blank light surface", async ({ page }) => {
+    await page.setContent('<html><body style="margin:0;background:white"></body></html>');
+    const blank = await page.screenshot();
+    await expect(assertPaintedPixels(page, blank)).rejects.toThrow();
+  });
+
   for (const profile of DISPLAY_PROFILES) {
     for (const name of PAGES) {
       test(`${name} paints at ${profile.label}% without page-wide overflow`, async ({ browser }, testInfo) => {

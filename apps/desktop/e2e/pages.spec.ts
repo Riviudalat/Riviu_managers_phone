@@ -2,18 +2,7 @@ import { expect, test, type Page } from "@playwright/test";
 
 import { installTauriMock, mockCommandCalls } from "./fixtures/tauriMock";
 
-/**
- * One baseline per page in the sidebar.
- *
- * Until now the whole app had two screenshots, both of the Flow workspace, so eight of
- * the nine pages had no visual coverage at all. That is the reason the design pass could
- * tokenise colours and collapse the type scale but had to stop before touching spacing:
- * with nothing watching those pages, a sweep across 298 padding and gap declarations is
- * a change nobody can see until an operator does.
- *
- * These are not assertions about what the design *should* be. They are a record of what
- * it *is*, so the next change to it is reviewable.
- */
+// Every production route has a loaded-state visual baseline at each operator viewport.
 const PAGES = [
   "Thiết bị",
   "Chẩn đoán",
@@ -158,6 +147,9 @@ test("the Android app library dispatches and renders one fleet batch", async ({ 
   await page.setViewportSize({ width: 1440, height: 900 });
   await open(page, "Trung tâm ứng dụng");
 
+  await expect(page.getByRole("button", { name: "Cài → 0 Android" })).toBeDisabled();
+  await page.getByRole("radiogroup", { name: "Cách chọn thiết bị" }).getByText("Toàn bộ", { exact: true }).click();
+  await expect(page.getByRole("radio", { name: "Toàn bộ", exact: true })).toBeChecked();
   await page.getByRole("button", { name: "Cài → 2 Android" }).click();
 
   await expect(page.getByRole("heading", { name: "Tiến độ theo máy" })).toBeVisible();
@@ -179,6 +171,9 @@ test("the material library dispatches one bounded fleet batch", async ({ page })
   await page.setViewportSize({ width: 1440, height: 900 });
   await open(page, "Kho nội dung");
 
+  await expect(page.getByRole("button", { name: "Chuyển tới 0 máy" })).toBeDisabled();
+  await page.getByRole("radiogroup", { name: "Cách chọn thiết bị" }).getByText("Toàn bộ", { exact: true }).click();
+  await expect(page.getByRole("radio", { name: "Toàn bộ", exact: true })).toBeChecked();
   await page.getByRole("button", { name: "Chuyển tới 2 máy" }).click();
 
   const result = page.getByRole("table", { name: "Tiến độ batch đã lưu" });
@@ -241,9 +236,14 @@ test("publish workflow stays inside the viewport at supported widths", async ({ 
     await open(page, "Đăng bài");
     await expect(page.getByRole("heading", { level: 1, name: "Đăng bài" })).toHaveCount(1);
     const workflow = page.getByRole("list", { name: "Quy trình đăng bài" });
-    for (const label of ["Nguồn", "Ghép bài/máy", "Preflight", "Xác nhận công khai", "Theo dõi"]) {
-      await expect(workflow).toContainText(label);
+    for (const [label, id] of [["Nguồn", "source"], ["Ghép bài/máy", "mapping"], ["Preflight", "preflight"], ["Xác nhận công khai", "confirm"]]) {
+      const step = workflow.getByRole("button", { name: label, exact: true });
+      await expect(step).toBeVisible();
+      await step.focus();
+      await page.keyboard.press("Enter");
+      await expect(page.locator(`#publish-step-${id}`)).toBeFocused();
     }
+    await expect(workflow.getByRole("button")).toHaveCount(4);
     if (viewport.width === 820) {
       expect(await workflow.evaluate((element) => element.getBoundingClientRect().height))
         .toBeLessThanOrEqual(56);
