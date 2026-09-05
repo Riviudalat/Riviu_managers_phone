@@ -1930,14 +1930,16 @@ mod tests {
                 if !num.is_empty() && num.contains(|c: char| c.is_ascii_digit()) {
                     let tail = &after[digits.len()..];
                     let suffix = tail.chars().next().filter(char::is_ascii_lowercase);
-                    if suffixed
-                        && num.contains('.')
-                        && suffix.is_some()
-                        && tail.chars().nth(1).is_none_or(|ch| !ch.is_alphanumeric())
-                    {
-                        found.push(format!("{num}{}", suffix.unwrap()));
-                    } else if !suffixed {
-                        found.push(num.to_string());
+                    match suffix {
+                        Some(suffix)
+                            if suffixed
+                                && num.contains('.')
+                                && tail.chars().nth(1).is_none_or(|ch| !ch.is_alphanumeric()) =>
+                        {
+                            found.push(format!("{num}{suffix}"));
+                        }
+                        _ if !suffixed => found.push(num.to_string()),
+                        _ => {}
                     }
                 }
             }
