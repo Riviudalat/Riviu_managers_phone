@@ -67,6 +67,15 @@
   gap: 0.1rem;
 }
 
+.material-page .operations-list-section > header {
+  flex-wrap: wrap;
+}
+
+.material-page .operations-list-section > header > .admin-actions {
+  display: flex;
+  gap: var(--space-2);
+}
+
 .operations-list-section > header span,
 .operations-results > header span {
   color: var(--text-3);

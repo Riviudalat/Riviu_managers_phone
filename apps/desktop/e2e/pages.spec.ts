@@ -44,6 +44,15 @@ async function open(page: Page, name: string): Promise<void> {
   await page.evaluate(() => document.fonts.ready);
   await expect(page.locator(".activity-center-current.is-error")).toHaveCount(0);
   await expect(page.getByText(/Unknown mock command/i)).toHaveCount(0);
+  if (name === "Kho nội dung") {
+    const add = await page.getByRole("button", { name: "Thêm nội dung", exact: true }).boundingBox();
+    const refresh = await page.getByRole("button", { name: "Làm mới kho nội dung", exact: true }).boundingBox();
+    expect(add).not.toBeNull();
+    expect(refresh).not.toBeNull();
+    expect(Math.abs(add!.y + add!.height / 2 - refresh!.y - refresh!.height / 2)).toBeLessThan(1);
+    expect(refresh!.x).toBeGreaterThanOrEqual(add!.x + add!.width);
+    expect(refresh!.x + refresh!.width).toBeLessThanOrEqual(page.viewportSize()!.width);
+  }
   if (name === "Đăng bài") {
     await expect(page.getByRole("status").filter({ hasText: "Chưa chọn phạm vi" })).toBeVisible();
   }
