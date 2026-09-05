@@ -372,7 +372,11 @@ export function InteractionPopup({
   );
   const [previewFor, setPreviewFor] = useState<string | null>(null);
   const previewGeneration = useRef(0);
-  const previewStale = draft.actions.comment && previewFor !== previewKey;
+  const previewStale =
+    draft.actions.comment &&
+    validTargets.length > 0 &&
+    effectiveActors.length >= 2 &&
+    previewFor !== previewKey;
 
   const cohorts = useMemo(() => groupPlanByCohort(preview?.plan), [preview]);
   const largestCohort = largestCohortOf(cohorts, effectiveActors.length);
@@ -760,6 +764,21 @@ export function InteractionPopup({
                   {warnings.length > 0 && (
                     <StatusChip tone="warning">{warnings.length} cảnh báo</StatusChip>
                   )}
+                  {issues.length > 0 && (
+                    <ul className="interaction-review-issues" aria-label="Mục cần xử lý">
+                      {issues.slice(0, 3).map((issue) => (
+                        <li key={`${issue.field}:${issue.message}`}>{issue.message}</li>
+                      ))}
+                    </ul>
+                  )}
+                  <button
+                    type="button"
+                    className="primary interaction-review-run"
+                    disabled={runBusy || issues.length > 0}
+                    onClick={() => void run()}
+                  >
+                    Bắt đầu tương tác
+                  </button>
                 </SummaryRail>
               )}
             </div>

@@ -83,6 +83,11 @@
   min-width: 0;
 }
 
+.publish-page .responsive-table select {
+  width: 100%;
+  min-width: 180px;
+}
+
 .publish-source-row {
   display: grid;
   grid-template-columns: minmax(220px, 1fr) auto auto;

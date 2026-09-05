@@ -9,6 +9,7 @@ import {
   publishList,
   publishReadiness,
   publishReconcile,
+  publishScanFolder,
   publishSheetGetConfig,
   publishSheetSaveConfig,
 } from "../api";
@@ -203,6 +204,7 @@ beforeEach(() => {
   vi.mocked(publishSheetSaveConfig)
     .mockReset()
     .mockResolvedValue({ webhookUrl: "", hasToken: false });
+  vi.mocked(publishScanFolder).mockReset().mockResolvedValue(manifest);
   resetToasts();
 });
 
@@ -473,6 +475,44 @@ describe("publish, bundle to phone", () => {
       "the campaign pairs bundles with phones in a different order than the screen promised",
     ).toEqual(shown);
     expect(dispatchedTargets).toEqual(["PHONE-A", "PHONE-B", "PHONE-C"]);
+  });
+
+  it("maps ten posts to ten chosen phones inside a larger eligible fleet", async () => {
+    const user = userEvent.setup();
+    const fleet = Array.from({ length: 21 }, (_, index) => iphone(`PHONE-${index + 1}`));
+    const tenBundles = Array.from({ length: 10 }, (_, index) =>
+      bundle(`b${index + 1}`, `bo${index + 1}`),
+    );
+    vi.mocked(publishScanFolder).mockResolvedValueOnce({ ...manifest, bundles: tenBundles });
+
+    render(
+      <PublishPage
+        devices={fleet}
+        selected={[]}
+        targetUdids={fleet.map((device) => device.udid)}
+        targetRef={{ type: "all" }}
+        onSelectUdids={() => {}}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "Chọn thư mục" }));
+    const lastAssignment = await screen.findByRole("combobox", { name: "Máy đăng bo10" });
+    expect(screen.getByRole("button", { name: /Xác nhận và đăng \(10 → 10\)/ })).toBeDisabled();
+
+    await user.selectOptions(lastAssignment, "PHONE-21");
+    await user.click(screen.getByRole("button", { name: "Chạy preflight" }));
+
+    await waitFor(() => expect(preflightCampaign).toHaveBeenCalledTimes(1));
+    const expectedUdids = [
+      ...fleet.slice(0, 9).map((device) => device.udid),
+      "PHONE-21",
+    ];
+    expect(preflightCampaign).toHaveBeenCalledWith(expect.objectContaining({
+      bundleIds: tenBundles.map((entry) => entry.id),
+      udids: expectedUdids,
+      targetRef: { type: "explicit", udids: expectedUdids },
+    }));
+    expect(screen.queryByText(/phải bằng số máy đích/i)).toBeNull();
   });
 
   /**

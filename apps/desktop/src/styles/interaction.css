@@ -119,6 +119,11 @@
   margin-top: var(--space-2);
   color: var(--text-2);
 }
+
+.interaction-review-run {
+  width: 100%;
+  justify-content: center;
+}
 .interaction-title {
   min-height: 42px;
   flex: 0 0 auto;

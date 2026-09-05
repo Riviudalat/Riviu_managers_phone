@@ -730,3 +730,19 @@
   `internal` cho phép Authenticode chưa ký dưới dạng warning; profile production không
   được kế thừa ngoại lệ này. Một report đạt trên host phát triển chỉ chứng minh đúng
   installer/OS đã chạy, không thay thế ma trận snapshot Windows 10/11 sạch.
+
+#### 14.13 Phạm vi tự động hóa độc lập và ánh xạ Publish theo tập con (05/09/2026; xem §9.146)
+
+- `TargetSelector` của Điều phối, Nuôi, Tương tác và Đăng bài có state độc lập. Đổi
+  nhóm hoặc chọn máy cụ thể ở một workspace không được âm thầm đổi target của workspace
+  khác.
+- Với Publish, target đã resolve là tập máy đủ điều kiện, không phải số lượng bài bắt
+  buộc. UI tạo một ánh xạ bất biến `bundleIds[i] -> assignedUdids[i]`, tự chọn tối đa
+  số máy bằng số bundle và cho đổi từng máy nhưng không cho trùng. Preflight, profile và
+  campaign chỉ nhận danh sách đã gán; khi đó `TargetRef` phải được snapshot thành
+  `explicit` nếu ánh xạ là một tập con của `All` hoặc `Group`.
+- Backend vẫn buộc số bundle bằng số `assignedUdids` và từ chối trùng máy. Không nới
+  invariant này để chữa lỗi UI vì như vậy có thể đăng nhầm nội dung sang tài khoản khác.
+- Trang Tương tác đặt action chính cùng lý do khóa trong summary rail ở viewport rộng;
+  nút cuối form vẫn giữ cho luồng một cột. Trạng thái “đang tính lại kế hoạch” chỉ xuất
+  hiện khi đã có target cùng đủ actor để một preview thực sự đang chạy.

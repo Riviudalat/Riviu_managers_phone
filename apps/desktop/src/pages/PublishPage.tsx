@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState, type Dispatch, type SetStateAction } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type Dispatch, type SetStateAction } from "react";
 import type { UnlistenFn } from "@tauri-apps/api/event";
 import { CalendarClock, FolderOpen, RefreshCw, Rocket, ShieldCheck } from "lucide-react";
 
@@ -175,6 +175,26 @@ function deviceDisplayName(
     : "Máy chưa kết nối";
 }
 
+function reconcilePublishTargets(
+  current: readonly string[],
+  eligible: readonly string[],
+  wanted: number,
+): string[] {
+  const eligibleSet = new Set(eligible);
+  const next = current.filter(
+    (udid, index) => eligibleSet.has(udid) && current.indexOf(udid) === index,
+  ).slice(0, wanted);
+  for (const udid of eligible) {
+    if (next.length >= wanted) break;
+    if (!next.includes(udid)) next.push(udid);
+  }
+  return next;
+}
+
+function sameOrderedTargets(left: readonly string[], right: readonly string[]): boolean {
+  return left.length === right.length && left.every((udid, index) => udid === right[index]);
+}
+
 type PublishPageProps = SelProps & {
   targetUdids?: string[];
   targetRef?: TargetRef;
@@ -193,6 +213,7 @@ export function PublishPage({
   const [sourceRoot, setSourceRoot] = useState("");
   const [manifest, setManifest] = useState<PublishFolderManifest | null>(null);
   const [bundleIds, setBundleIds] = useState<string[]>([]);
+  const [assignedUdids, setAssignedUdids] = useState<string[]>([]);
   const [captionDrafts, setCaptionDrafts] = useState<Record<string, string>>({});
   const [runAt, setRunAt] = useState("");
   const [campaigns, setCampaigns] = useState<PublishCampaignRecord[]>([]);
@@ -220,8 +241,15 @@ export function PublishPage({
     report: PublishPreflightReport;
   } | null>(null);
 
-  const targets = targetUdids ?? targetsOf(selected, devices);
+  const eligibleTargets = useMemo(
+    () => targetUdids ?? targetsOf(selected, devices),
+    [targetUdids, selected, devices],
+  );
   const selectedBundles = manifest?.bundles.filter((bundle) => bundleIds.includes(bundle.id)) ?? [];
+  const targets = assignedUdids;
+  const effectiveTargetRef: TargetRef = sameOrderedTargets(targets, eligibleTargets)
+    ? targetRef
+    : { type: "explicit", udids: targets };
   const orderedBundleIds = selectedBundles.map((bundle) => bundle.id);
   const currentCaptionOverrides = Object.fromEntries(
     selectedBundles.map((bundle) => [bundle.id, (captionDrafts[bundle.id] ?? bundle.caption).trim()]),
@@ -243,18 +271,22 @@ export function PublishPage({
     sourceRoot: sourceRoot.trim(),
     bundleIds: orderedBundleIds,
     udids: targets,
-    targetRef,
+    targetRef: effectiveTargetRef,
     runAt: runAt || null,
     captionOverrides: currentCaptionOverrides,
     soundPolicy: currentSoundPolicy,
   };
   const inputKey = JSON.stringify(preflightRequest);
-  const mappingReady = selectedBundles.length > 0 && selectedBundles.length === targets.length;
+  const mappingReady = selectedBundles.length > 0
+    && selectedBundles.length === targets.length
+    && new Set(targets).size === targets.length
+    && targets.every((udid) => eligibleTargets.includes(udid));
   const captionsReady = Object.values(currentCaptionOverrides).every((caption) => caption.length > 0);
   const profileReady = mappingReady && captionsReady;
   const currentPreflight = preflightSnapshot?.inputKey === inputKey ? preflightSnapshot.report : null;
   const canExecute = currentPreflight?.canExecute === true;
-  const androidTargets = targets.filter(
+  const readinessTargets = targets.length ? targets : eligibleTargets;
+  const androidTargets = readinessTargets.filter(
     (udid) => devices.find((device) => device.udid === udid)?.platform === "android",
   );
 
@@ -263,6 +295,13 @@ export function PublishPage({
     setPreflightState("idle");
     setPreflightError(null);
   };
+
+  useEffect(() => {
+    setAssignedUdids((current) => {
+      const next = reconcilePublishTargets(current, eligibleTargets, selectedBundles.length);
+      return sameOrderedTargets(current, next) ? current : next;
+    });
+  }, [eligibleTargets, selectedBundles.length]);
 
   const reloadTicket = useRef(0);
   const reload = () => {
@@ -326,9 +365,8 @@ export function PublishPage({
     };
   }, [reloadSheetConfig]);
 
-  const androidKey = devices
-    .filter((device) => device.platform === "android")
-    .map((device) => device.udid)
+  const androidKey = androidTargets
+    .slice()
     .sort()
     .join(",");
   useEffect(() => {
@@ -362,7 +400,7 @@ export function PublishPage({
       const next = await publishScanFolder(path);
       setSourceRoot(path);
       setManifest(next);
-      setBundleIds(next.bundles.slice(0, targets.length).map((bundle) => bundle.id));
+      setBundleIds(next.bundles.slice(0, eligibleTargets.length).map((bundle) => bundle.id));
       setCaptionDrafts(Object.fromEntries(next.bundles.map((bundle) => [bundle.id, bundle.caption])));
     } catch (error) {
       setManifest(null);
@@ -417,7 +455,7 @@ export function PublishPage({
         runAt || null,
         currentCaptionOverrides,
         currentSoundPolicy,
-        targetRef,
+        effectiveTargetRef,
         true,
         currentPreflight.inputDigest,
       );
@@ -576,6 +614,7 @@ export function PublishPage({
               manifest={manifest}
               bundleIds={bundleIds}
               captionDrafts={captionDrafts}
+              maxSelected={eligibleTargets.length}
               setSourceRoot={setSourceRoot}
               setManifest={setManifest}
               setBundleIds={setBundleIds}
@@ -587,6 +626,7 @@ export function PublishPage({
               busy={busy}
               manifest={manifest}
               sourceRoot={sourceRoot}
+              eligibleTargets={eligibleTargets}
               targets={targets}
               devices={devices}
               metas={metas}
@@ -595,6 +635,7 @@ export function PublishPage({
               setBusy={setBusy}
               setNotice={setNotice}
               setBundleIds={setBundleIds}
+              setAssignedUdids={setAssignedUdids}
               invalidate={invalidatePreflight}
             />
             <PreflightSection
@@ -652,7 +693,7 @@ export function PublishPage({
             orderedBundleIds={orderedBundleIds}
             captionOverrides={currentCaptionOverrides}
             soundPolicy={currentSoundPolicy}
-            targetRef={targetRef}
+            targetRef={effectiveTargetRef}
             profileReady={profileReady}
             busy={busy}
             setSheetUrlDraft={setSheetUrlDraft}
@@ -723,6 +764,7 @@ function SourceSection({
   manifest,
   bundleIds,
   captionDrafts,
+  maxSelected,
   setSourceRoot,
   setManifest,
   setBundleIds,
@@ -735,6 +777,7 @@ function SourceSection({
   manifest: PublishFolderManifest | null;
   bundleIds: string[];
   captionDrafts: Record<string, string>;
+  maxSelected: number;
   setSourceRoot: (value: string) => void;
   setManifest: (value: PublishFolderManifest | null) => void;
   setBundleIds: Dispatch<SetStateAction<string[]>>;
@@ -799,6 +842,7 @@ function SourceSection({
                     type="checkbox"
                     aria-label={`Chọn ${bundle.name}`}
                     checked={checked}
+                    disabled={!checked && bundleIds.length >= maxSelected}
                     onChange={(event) => {
                       setBundleIds((current) =>
                         event.target.checked ? [...current, bundle.id] : current.filter((id) => id !== bundle.id),
@@ -842,6 +886,7 @@ function MappingSection({
   busy,
   manifest,
   sourceRoot,
+  eligibleTargets,
   targets,
   devices,
   metas,
@@ -850,11 +895,13 @@ function MappingSection({
   setBusy,
   setNotice,
   setBundleIds,
+  setAssignedUdids,
   invalidate,
 }: {
   busy: boolean;
   manifest: PublishFolderManifest | null;
   sourceRoot: string;
+  eligibleTargets: string[];
   targets: string[];
   devices: SelProps["devices"];
   metas: Map<string, import("../types").DeviceMeta>;
@@ -863,6 +910,7 @@ function MappingSection({
   setBusy: (value: boolean) => void;
   setNotice: NoticeSetter;
   setBundleIds: (value: string[]) => void;
+  setAssignedUdids: Dispatch<SetStateAction<string[]>>;
   invalidate: () => void;
 }) {
   return (
@@ -873,16 +921,18 @@ function MappingSection({
         <button
           type="button"
           className="ghost"
-          disabled={busy || !manifest || targets.length === 0}
+          disabled={busy || !manifest || eligibleTargets.length === 0}
           onClick={async () => {
             if (!manifest) return;
             setBusy(true);
             setNotice(null);
             invalidate();
             try {
-              const result = await publishAutoAssign(sourceRoot.trim(), targets, targets.length);
+              const wanted = selectedBundles.length || Math.min(manifest.bundles.length, eligibleTargets.length);
+              const result = await publishAutoAssign(sourceRoot.trim(), eligibleTargets, wanted);
               setBundleIds(result.plan.map((row) => row.bundleId));
-              setNotice({ tone: "success", text: `Đã chia ${result.plan.length} bài cho ${targets.length} máy.` });
+              setAssignedUdids(result.plan.map((row) => row.udid));
+              setNotice({ tone: "success", text: `Đã ghép ${result.plan.length} bài với ${result.plan.length} máy.` });
             } catch (error) {
               setNotice({ tone: "error", text: describeError(error) });
             } finally {
@@ -907,7 +957,30 @@ function MappingSection({
               label: "Máy đích",
               render: (bundle) => {
                 const index = selectedBundles.indexOf(bundle);
-                return targets[index] ? deviceDisplayName(devices, metas, targets[index]) : "Chưa có máy";
+                const currentUdid = targets[index] ?? "";
+                const usedElsewhere = new Set(targets.filter((_, targetIndex) => targetIndex !== index));
+                return (
+                  <select
+                    aria-label={`Máy đăng ${bundle.name}`}
+                    value={currentUdid}
+                    onChange={(event) => {
+                      const udid = event.target.value;
+                      setAssignedUdids((current) => {
+                        const next = reconcilePublishTargets(current, eligibleTargets, selectedBundles.length);
+                        next[index] = udid;
+                        return next;
+                      });
+                      invalidate();
+                    }}
+                  >
+                    <option value="" disabled>Chọn máy</option>
+                    {eligibleTargets.map((udid) => (
+                      <option key={udid} value={udid} disabled={usedElsewhere.has(udid)}>
+                        {deviceDisplayName(devices, metas, udid)}
+                      </option>
+                    ))}
+                  </select>
+                );
               },
             },
           ]}
@@ -916,7 +989,9 @@ function MappingSection({
         <EmptyState compact title="Chưa có cặp bài-máy" hint="Chọn nội dung và máy đích để tạo ánh xạ." />
       )}
       {!mappingReady && selectedBundles.length > 0 && (
-        <StatusNotice tone="warning">Số bài ({selectedBundles.length}) phải bằng số máy đích ({targets.length}).</StatusNotice>
+        <StatusNotice tone="warning">
+          Cần chọn {selectedBundles.length} máy khác nhau cho {selectedBundles.length} bài. Phạm vi hiện có {eligibleTargets.length} máy.
+        </StatusNotice>
       )}
     </FormSection>
   );

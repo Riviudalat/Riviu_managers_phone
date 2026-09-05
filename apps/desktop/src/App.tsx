@@ -221,7 +221,10 @@ function App() {
   automationViewRef.current = automationView;
   const pendingNavigationRef = useRef<PendingNavigation | null>(null);
   const navigationDrainRef = useRef<Promise<void> | null>(null);
-  const [automationTargetRef, setAutomationTargetRef] = useState<TargetRef>({ type: "all" });
+  const [orchestrationTargetRef, setOrchestrationTargetRef] = useState<TargetRef>({ type: "all" });
+  const [publishTargetRef, setPublishTargetRef] = useState<TargetRef>({ type: "all" });
+  const [nurtureTargetRef, setNurtureTargetRef] = useState<TargetRef>({ type: "all" });
+  const [interactionTargetRef, setInteractionTargetRef] = useState<TargetRef>({ type: "all" });
   const [deviceWorkOwners, setDeviceWorkOwners] = useState<DeviceWorkOwnerProjection>({
     state: "loading",
   });
@@ -415,9 +418,17 @@ function App() {
     });
     return labels;
   }, [metaMap, orderedDevices]);
-  const automationTargetUdids = useMemo(
-    () => resolveAutomationTarget(automationTargetRef, devices, groups),
-    [automationTargetRef, devices, groups],
+  const publishTargetUdids = useMemo(
+    () => resolveAutomationTarget(publishTargetRef, devices, groups),
+    [publishTargetRef, devices, groups],
+  );
+  const nurtureTargetUdids = useMemo(
+    () => resolveAutomationTarget(nurtureTargetRef, devices, groups),
+    [nurtureTargetRef, devices, groups],
+  );
+  const interactionTargetUdids = useMemo(
+    () => resolveAutomationTarget(interactionTargetRef, devices, groups),
+    [interactionTargetRef, devices, groups],
   );
   // Numbered phones lead, in number order; an unnumbered fleet is left exactly as the
   // driver listed it. That is the point of a number — a grid position moves when a phone
@@ -1218,8 +1229,8 @@ function App() {
                       groups={groups}
                       selected={selected}
                       onChange={setSelected}
-                      targetRef={automationTargetRef}
-                      onTargetRefChange={setAutomationTargetRef}
+                      targetRef={orchestrationTargetRef}
+                      onTargetRefChange={setOrchestrationTargetRef}
                       deviceLabel={(device) =>
                         automationDeviceLabels.get(device.udid) ?? device.name
                       }
@@ -1227,7 +1238,7 @@ function App() {
                     <Suspense fallback={<LoadingState label="Đang tải Điều phối…" />}>
                       <OrchestrationWorkspace
                         onDirtyChange={updateFlowDirty}
-                        targetRef={automationTargetRef}
+                        targetRef={orchestrationTargetRef}
                       />
                     </Suspense>
                   </div>
@@ -1251,15 +1262,15 @@ function App() {
                 groups={groups}
                 selected={selected}
                 onChange={setSelected}
-                targetRef={automationTargetRef}
-                onTargetRefChange={setAutomationTargetRef}
+                targetRef={publishTargetRef}
+                onTargetRefChange={setPublishTargetRef}
                 deviceLabel={(device) => automationDeviceLabels.get(device.udid) ?? device.name}
               />
               <PublishPage
                 devices={devices}
                 selected={selected}
-                targetUdids={automationTargetUdids}
-                targetRef={automationTargetRef}
+                targetUdids={publishTargetUdids}
+                targetRef={publishTargetRef}
                 metas={metaMap}
                 onSelectUdids={setSelected}
               />
@@ -1272,15 +1283,15 @@ function App() {
                 groups={groups}
                 selected={selected}
                 onChange={setSelected}
-                targetRef={automationTargetRef}
-                onTargetRefChange={setAutomationTargetRef}
+                targetRef={nurtureTargetRef}
+                onTargetRefChange={setNurtureTargetRef}
                 deviceLabel={(device) => automationDeviceLabels.get(device.udid) ?? device.name}
               />
               <NurturePopup
                 devices={devices}
                 selected={selected}
-                targetUdids={automationTargetUdids}
-                targetRef={automationTargetRef}
+                targetUdids={nurtureTargetUdids}
+                targetRef={nurtureTargetRef}
                 metas={metaMap}
                 surface="page"
               />
@@ -1293,15 +1304,15 @@ function App() {
                 groups={groups}
                 selected={selected}
                 onChange={setSelected}
-                targetRef={automationTargetRef}
-                onTargetRefChange={setAutomationTargetRef}
+                targetRef={interactionTargetRef}
+                onTargetRefChange={setInteractionTargetRef}
                 deviceLabel={(device) => automationDeviceLabels.get(device.udid) ?? device.name}
               />
               <InteractionPopup
                 devices={devices}
                 selected={selected}
-                targetUdids={automationTargetUdids}
-                targetRef={automationTargetRef}
+                targetUdids={interactionTargetUdids}
+                targetRef={interactionTargetRef}
                 metas={metaMap}
                 surface="page"
               />

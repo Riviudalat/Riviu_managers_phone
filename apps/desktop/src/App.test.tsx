@@ -120,8 +120,8 @@ vi.mock("./components/NurturePopup", () => ({
 }));
 
 vi.mock("./components/InteractionPopup", () => ({
-  InteractionPopup: ({ surface }: { surface?: string }) => (
-    <section aria-label="Không gian Tương tác" data-surface={surface} />
+  InteractionPopup: ({ surface, targetRef }: { surface?: string; targetRef?: { type: string } }) => (
+    <section aria-label="Không gian Tương tác" data-surface={surface} data-target-type={targetRef?.type} />
   ),
 }));
 
@@ -820,6 +820,26 @@ describe("fleet diagnostics page integration", () => {
       "page",
     );
     expect(screen.getByRole("group", { name: "Phạm vi thiết bị" })).toBeVisible();
+  });
+
+  it("keeps each automation workspace's target scope independent", async () => {
+    const api = await import("./api");
+    vi.mocked(api.listDevices).mockResolvedValue([androidPhone]);
+    render(<App />);
+    await waitFor(() => expect(screen.getByText("Redmi")).toBeInTheDocument());
+
+    await userEvent.click(screen.getByRole("button", { name: "Nuôi TikTok" }));
+    await userEvent.click(screen.getByRole("radio", { name: "Máy cụ thể" }));
+    expect(screen.getByRole("region", { name: "Không gian Nuôi TikTok" })).toHaveAttribute(
+      "data-target-type",
+      "explicit",
+    );
+
+    await userEvent.click(screen.getByRole("button", { name: "Tương tác" }));
+    expect(screen.getByRole("region", { name: "Không gian Tương tác" })).toHaveAttribute(
+      "data-target-type",
+      "all",
+    );
   });
 });
 
