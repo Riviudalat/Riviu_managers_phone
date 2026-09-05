@@ -63,9 +63,9 @@
 
 .publish-workspace-main {
   padding: var(--space-4);
-  border: 1px solid var(--line);
-  border-radius: var(--radius);
-  background: var(--bg-elevated);
+  border: 1px solid transparent;
+  border-radius: 0;
+  background: transparent;
 }
 
 .publish-workspace-aside {

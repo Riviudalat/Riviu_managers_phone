@@ -415,30 +415,60 @@
 .settings-page {
   display: grid;
   min-width: 0;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: var(--space-4);
+  grid-template-columns: 190px minmax(0, 1fr);
+  gap: var(--space-6);
   align-items: start;
 }
 
-.settings-page > .settings-section,
-.settings-page > .settings-span-full {
+.settings-sections {
   min-width: 0;
+  background: var(--bg-elevated);
 }
 
-.settings-span-full > .settings-section {
-  min-width: 0;
+.settings-navigation {
+  position: sticky;
+  top: 0;
+  display: grid;
+  gap: var(--space-1);
 }
 
-.settings-page > .settings-span-full {
-  grid-column: 1 / -1;
+.settings-navigation a {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-height: 36px;
+  padding: var(--space-2);
+  color: var(--text-2);
+  font-size: var(--text-sm);
+  text-decoration: none;
+}
+
+.settings-navigation a:hover {
+  background: var(--primary-50);
+  color: var(--primary-deep);
+}
+
+.settings-category {
+  scroll-margin-top: var(--space-3);
+  padding: 0 var(--space-4);
+  border-top: 1px solid var(--line-strong);
+}
+
+.settings-category:first-child {
+  border-top: 0;
+}
+
+.settings-category > h2 {
+  margin: 0;
+  padding: var(--space-4) 0 var(--space-2);
+  font-size: var(--text-base);
+  color: var(--text-1);
 }
 
 .settings-section {
-  padding: var(--space-4);
-  border: 1px solid var(--line);
-  border-radius: var(--radius);
+  padding: var(--space-4) 0;
+  border-top: 1px solid var(--line);
   background: var(--bg-elevated);
-  box-shadow: var(--shadow-sm);
 }
 
 .settings-section > h3,
@@ -465,6 +495,16 @@
 
 .settings-page .row {
   align-items: end;
+  flex-wrap: wrap;
+}
+
+.settings-page .row > label {
+  flex: 1 1 160px;
+}
+
+.settings-page .row > button {
+  flex: 0 0 auto;
+  margin-top: var(--space-2);
 }
 
 .settings-page label {
@@ -482,8 +522,11 @@
     grid-template-columns: minmax(0, 1fr);
   }
 
-  .settings-page > .settings-span-full {
-    grid-column: auto;
+  .settings-navigation {
+    position: static;
+    display: flex;
+    flex-wrap: wrap;
+    border-bottom: 1px solid var(--line);
   }
 }
 

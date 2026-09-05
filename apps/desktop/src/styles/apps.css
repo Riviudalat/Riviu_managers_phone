@@ -217,7 +217,7 @@
   color: #1f2937;
 }
 .group-tabs button.active {
-  color: #ea580c;
+  color: var(--primary-deep);
   border-bottom-color: #f97316;
   font-weight: 600;
 }

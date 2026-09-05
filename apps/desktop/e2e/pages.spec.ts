@@ -56,7 +56,7 @@ async function open(page: Page, name: string): Promise<void> {
   await expect(page.locator(".activity-center-current.is-error")).toHaveCount(0);
   await expect(page.getByText(/Unknown mock command/i)).toHaveCount(0);
   if (name === "Đăng bài") {
-    await expect(page.getByRole("status").filter({ hasText: "Toàn bộ 2" })).toBeVisible();
+    await expect(page.getByRole("status").filter({ hasText: "Chưa chọn phạm vi" })).toBeVisible();
   }
   if (name === "Flow") {
     const runButton = page.getByRole("button", { name: "Chạy Flow" });
@@ -133,6 +133,8 @@ test("automation profile controls keep consistent size and secondary actions", a
 
 test("nurture readiness blocks invalid values and links to the repair field", async ({ page }) => {
   await open(page, "Nuôi TikTok");
+  await page.getByRole("radiogroup", { name: "Cách chọn thiết bị" }).getByText("Toàn bộ", { exact: true }).click();
+  await expect(page.getByRole("radio", { name: "Toàn bộ", exact: true })).toBeChecked();
   const input = page.locator('input[data-nurture-field="watchMax"]');
   await input.fill("1");
   await expect(page.getByRole("button", { name: "Bắt đầu", exact: true })).toBeDisabled();
@@ -158,8 +160,8 @@ test("the Android app library dispatches and renders one fleet batch", async ({ 
 
   await page.getByRole("button", { name: "Cài → 2 Android" }).click();
 
-  await expect(page.getByRole("heading", { name: "Kết quả cài đặt" })).toBeVisible();
-  await expect(page.getByRole("table", { name: "Kết quả cài đặt gần nhất" })
+  await expect(page.getByRole("heading", { name: "Tiến độ theo máy" })).toBeVisible();
+  await expect(page.getByRole("table", { name: "Tiến độ batch đã lưu" })
     .getByText("Đã xác nhận", { exact: true })).toHaveCount(2);
   const install = (await mockCommandCalls(page)).find(
     (call) => call.command === "install_library_app_batch",
@@ -179,9 +181,9 @@ test("the material library dispatches one bounded fleet batch", async ({ page })
 
   await page.getByRole("button", { name: "Chuyển tới 2 máy" }).click();
 
-  const result = page.getByRole("region", { name: "Kết quả chuyển gần nhất" });
+  const result = page.getByRole("table", { name: "Tiến độ batch đã lưu" });
   await expect(result).toBeVisible();
-  await expect(result.getByText("Đã chuyển")).toHaveCount(2);
+  await expect(result.getByText("Đã xác nhận", { exact: true })).toHaveCount(2);
   const push = (await mockCommandCalls(page)).find(
     (call) => call.command === "push_material_batch",
   );
@@ -278,7 +280,8 @@ test("nurture rhythm controls stay compact and aligned", async ({ page }) => {
       return {
         info: Array.from(group.querySelectorAll<HTMLElement>(".nu-info"), (element) => {
           const rect = element.getBoundingClientRect();
-          return { width: rect.width, height: rect.height };
+          const icon = element.querySelector("svg")?.getBoundingClientRect();
+          return { width: rect.width, height: rect.height, iconWidth: icon?.width, iconHeight: icon?.height };
         }),
         switchRows: Array.from(toggle.querySelectorAll<HTMLElement>(".nu-switch"), (element) => {
           const rect = element.getBoundingClientRect();
@@ -292,8 +295,10 @@ test("nurture rhythm controls stay compact and aligned", async ({ page }) => {
 
     expect(geometry.info.length).toBeGreaterThan(0);
     for (const info of geometry.info) {
-      expect(info.width, JSON.stringify(geometry)).toBeLessThanOrEqual(18);
-      expect(info.height, JSON.stringify(geometry)).toBeLessThanOrEqual(18);
+      expect(info.width, JSON.stringify(geometry)).toBe(24);
+      expect(info.height, JSON.stringify(geometry)).toBe(24);
+      expect(info.iconWidth, JSON.stringify(geometry)).toBeLessThanOrEqual(16);
+      expect(info.iconHeight, JSON.stringify(geometry)).toBeLessThanOrEqual(16);
     }
     expect(new Set(geometry.switchRows.map(({ top }) => top)).size, JSON.stringify(geometry))
       .toBe(2);

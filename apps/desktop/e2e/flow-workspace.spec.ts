@@ -581,6 +581,10 @@ for (const viewport of [
     await expect(page.getByText("Chưa có điều phối nào")).toBeVisible();
     await page.getByRole("button", { name: "Tạo điều phối", exact: true }).click();
     await expect(page.getByLabel("Tên điều phối")).toHaveValue("Điều phối mới");
+    expect((await page.getByLabel("Tên điều phối").boundingBox())?.height).toBeGreaterThanOrEqual(36);
+    expect(await workspace.locator("select:visible").evaluateAll((elements) =>
+      elements.every((element) => element.getBoundingClientRect().height >= 36)
+    )).toBe(true);
     await page.getByRole("button", { name: "Thêm Chờ" }).click();
     await expect(page.getByRole("strong").filter({ hasText: "Chờ" })).toHaveCount(1);
 

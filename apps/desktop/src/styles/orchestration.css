@@ -5,6 +5,18 @@
   background: var(--bg-content);
 }
 
+.orchestration-workspace input,
+.orchestration-workspace select {
+  min-width: 0;
+  min-height: 36px;
+  padding: 6px 10px;
+  border: 1px solid var(--line-strong);
+  border-radius: 4px;
+  background: var(--bg-elevated);
+  color: var(--text-1);
+  line-height: var(--leading-normal);
+}
+
 .orchestration-mode-tabs {
   grid-column: 1 / -1;
   display: flex;

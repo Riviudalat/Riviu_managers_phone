@@ -23,6 +23,7 @@
     "tauri:build": "tauri build"
   },
   "dependencies": {
+    "@floating-ui/react-dom": "2.1.9",
     "@tauri-apps/api": "^2.11.1",
     "@tauri-apps/plugin-dialog": "^2.7.2",
     "@tauri-apps/plugin-fs": "^2.5.1",
@@ -33,6 +34,7 @@
     "react-dom": "^19.2.7"
   },
   "devDependencies": {
+    "@axe-core/playwright": "4.13.0",
     "@mobilenext/mobile-mcp": "1.0.2",
     "@playwright/test": "1.62.0",
     "@tauri-apps/cli": "^2.11.4",

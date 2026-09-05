@@ -8,7 +8,7 @@
   --primary-100: #ffedd5;
   --primary-200: #fed7aa;
   --primary-soft: rgb(194 65 12 / 8%);
-  --primary-ring: rgb(194 65 12 / 32%);
+  --primary-ring: #c2410c;
   --orange: var(--primary);
   --orange-deep: var(--primary-deep);
   --orange-soft: var(--primary-100);
@@ -34,7 +34,7 @@
   --text: #172033;
   --text-1: #172033;
   --text-2: #475569;
-  --text-3: #64748b;
+  --text-3: #59687d;
   --muted: var(--text-3);
   --accent: var(--primary);
   --accent-dim: var(--primary-deep);

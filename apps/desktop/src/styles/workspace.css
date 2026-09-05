@@ -86,11 +86,9 @@
 }
 
 .workspace-command-copy span {
-  overflow: hidden;
   color: var(--text-3);
   font-size: var(--text-xs);
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  overflow-wrap: anywhere;
 }
 
 .workspace-command-actions {
@@ -243,8 +241,7 @@
 .summary-rail {
   min-width: 0;
   padding: var(--space-4);
-  border: 1px solid var(--line);
-  border-radius: var(--radius);
+  border-left: 1px solid var(--line);
   background: var(--bg-elevated);
 }
 
@@ -338,6 +335,7 @@
 
 .responsive-table th,
 .responsive-table td {
+  height: 40px;
   padding: var(--space-2) var(--space-3);
   border-bottom: 1px solid var(--line);
   text-align: left;

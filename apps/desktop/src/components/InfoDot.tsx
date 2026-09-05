@@ -1,6 +1,7 @@
 import { useEffect, useId, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { CircleHelp } from "lucide-react";
+import { autoUpdate, flip, hide, offset, shift, useFloating } from "@floating-ui/react-dom";
 
 /**
  * The help icon after a control's name: what that control does, shown instantly on hover.
@@ -19,17 +20,24 @@ import { CircleHelp } from "lucide-react";
  * Hover, focus and click all reveal the same description; click pins it for touch users.
  */
 export function InfoDot({ of, what }: { of: string; what: string }) {
-  const [tip, setTip] = useState<{ left: number; top: number } | null>(null);
+  const [tip, setTip] = useState(false);
   const [pinned, setPinned] = useState(false);
   const tooltipId = useId();
   const triggerRef = useRef<HTMLButtonElement>(null);
+  const { refs, floatingStyles, middlewareData } = useFloating({
+    open: tip,
+    placement: "top",
+    strategy: "fixed",
+    whileElementsMounted: autoUpdate,
+    middleware: [offset(8), flip({ padding: 8 }), shift({ padding: 8 }), hide()],
+  });
 
   useEffect(() => {
     if (!pinned) return;
 
     const dismiss = () => {
       setPinned(false);
-      setTip(null);
+      setTip(false);
     };
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === "Escape") dismiss();
@@ -46,41 +54,35 @@ export function InfoDot({ of, what }: { of: string; what: string }) {
     };
   }, [pinned]);
 
-  const open = (element: HTMLElement) => {
-    const rect = element.getBoundingClientRect();
-    setTip({ left: Math.round(rect.left + rect.width / 2), top: Math.round(rect.top) });
-  };
-
   return (
     <button
-      ref={triggerRef}
+      ref={(element) => {
+        triggerRef.current = element;
+        refs.setReference(element);
+      }}
       type="button"
       className="nu-info"
       aria-label={`Giải thích ${of}`}
       aria-describedby={tip ? tooltipId : undefined}
       data-info={of}
       data-tip={what}
-      onMouseEnter={(event) => open(event.currentTarget)}
+      onMouseEnter={() => setTip(true)}
       onMouseLeave={(event) => {
-        if (!pinned && document.activeElement !== event.currentTarget) setTip(null);
+        if (!pinned && document.activeElement !== event.currentTarget) setTip(false);
       }}
-      onFocus={(event) => open(event.currentTarget)}
+      onFocus={() => setTip(true)}
       onBlur={() => {
-        if (!pinned) setTip(null);
+        if (!pinned) setTip(false);
       }}
-      onClick={(event) => {
-        const element = event.currentTarget;
-        setPinned((current) => {
-          if (current) setTip(null);
-          else open(element);
-          return !current;
-        });
+      onClick={() => {
+        setTip(!pinned);
+        setPinned(!pinned);
       }}
       onKeyDown={(event) => {
         if (event.key === "Escape") {
           event.stopPropagation();
           setPinned(false);
-          setTip(null);
+          setTip(false);
         }
       }}
     >
@@ -88,10 +90,11 @@ export function InfoDot({ of, what }: { of: string; what: string }) {
       {tip &&
         createPortal(
           <span
+            ref={refs.setFloating}
             id={tooltipId}
             className="nu-tip"
             role="tooltip"
-            style={{ left: tip.left, top: tip.top }}
+            style={{ ...floatingStyles, visibility: middlewareData.hide?.referenceHidden ? "hidden" : undefined }}
           >
             {what}
           </span>,

@@ -29,6 +29,8 @@ async function edges(page: Page, card: string, tabs: string) {
 
 test("picking phones in Tương tác never scrolls its tabs away", async ({ page }) => {
   await openWorkspace(page, "Tương tác", "Không gian Tương tác");
+  await page.getByRole("radiogroup", { name: "Cách chọn thiết bị" }).getByText("Toàn bộ", { exact: true }).click();
+  await expect(page.getByRole("radio", { name: "Toàn bộ", exact: true })).toBeChecked();
 
   const before = await edges(page, ".interaction-workspace-inner", ".interaction-tabs");
   expect(before.tabs).toBeGreaterThanOrEqual(before.card);

@@ -85,6 +85,7 @@
   border-color: var(--primary);
   background: var(--primary);
   color: var(--text-inverse);
+  transition: border-color var(--duration-fast) var(--ease);
 }
 
 .flow-run-command:hover:not(:disabled) {
