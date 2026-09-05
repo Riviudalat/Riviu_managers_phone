@@ -123,6 +123,21 @@ function renderApps(devices: DeviceInfo[], selected: string[] = []) {
 }
 
 describe("AppsPage install targets", () => {
+  it("keeps empty groups and a cleared explicit scope at zero devices", async () => {
+    vi.mocked(listGroups).mockResolvedValueOnce([{ id: "empty", name: "Nhóm rỗng", udids: [] }] as never);
+    renderApps([iphone]);
+    await waitFor(() => expect(screen.getByRole("radio", { name: "Nhóm" })).toBeEnabled());
+    await userEvent.click(screen.getByRole("radio", { name: "Nhóm" }));
+    expect(screen.getByRole("button", { name: "Cài → 0 iPhone" })).toBeDisabled();
+    await userEvent.click(screen.getByRole("radio", { name: "Máy cụ thể" }));
+    await userEvent.click(screen.getByRole("button", { name: "Chọn đang hiện" }));
+    expect(screen.getByRole("button", { name: "Cài → 1 iPhone" })).toBeEnabled();
+    await userEvent.click(screen.getByRole("button", { name: "Bỏ chọn máy" }));
+    expect(screen.getByRole("button", { name: "Cài → 0 iPhone" })).toBeDisabled();
+    const api = await import("../api");
+    expect(api.installLibraryAppBatch).not.toHaveBeenCalled();
+    expect(screen.queryByRole("button", { name: "Cài → nhóm" })).toBeNull();
+  });
   it("routes an Android split package only to selected Android devices", async () => {
     const api = await import("../api");
     vi.mocked(listAppsLibrary).mockResolvedValue(androidLibrary);
@@ -144,6 +159,8 @@ describe("AppsPage install targets", () => {
     // whose label said it was about to install on twenty machines.
     renderApps([iphone, android, { ...android, udid: "ce0617", name: "Note 8" }]);
 
+    expect(await screen.findByRole("button", { name: "Cài → 0 iPhone" })).toBeDisabled();
+    await userEvent.click(screen.getByRole("radio", { name: "Toàn bộ" }));
     expect(await screen.findByRole("button", { name: "Cài → 1 iPhone" })).toBeEnabled();
   });
 
@@ -168,7 +185,7 @@ describe("AppsPage install targets", () => {
   it("installs on every selected iPhone and nothing else", async () => {
     const api = await import("../api");
     const second = { ...iphone, udid: "second-iphone", name: "iPhone 8 (2)" };
-    renderApps([iphone, android, second]);
+    renderApps([iphone, android, second], [iphone.udid, android.udid, second.udid]);
 
     await userEvent.click(await screen.findByRole("button", { name: "Cài → 2 iPhone" }));
 
@@ -191,7 +208,7 @@ describe("AppsPage install targets", () => {
         detail: "readback timed out",
       }],
     });
-    renderApps([iphone]);
+    renderApps([iphone], [iphone.udid]);
 
     await userEvent.click(await screen.findByRole("checkbox", { name: "Cho phép hạ phiên bản" }));
     await userEvent.click(screen.getByRole("button", { name: "Cài → 1 iPhone" }));
@@ -212,7 +229,7 @@ describe("AppsPage install targets", () => {
   it("keeps installation untouched when downgrade confirmation is declined", async () => {
     const api = await import("../api");
     vi.mocked(requestConfirm).mockResolvedValueOnce(false);
-    renderApps([iphone]);
+    renderApps([iphone], [iphone.udid]);
 
     await userEvent.click(await screen.findByRole("checkbox", { name: "Cho phép hạ phiên bản" }));
     await userEvent.click(screen.getByRole("button", { name: "Cài → 1 iPhone" }));
@@ -227,7 +244,7 @@ describe("AppsPage install targets", () => {
     vi.mocked(api.installLibraryAppBatch).mockReturnValueOnce(new Promise((resolve) => {
       finish = resolve;
     }));
-    renderApps([iphone]);
+    renderApps([iphone], [iphone.udid]);
 
     await userEvent.click(await screen.findByRole("button", { name: "Cài → 1 iPhone" }));
     const cancel = await screen.findByRole("button", { name: "Hủy máy chưa bắt đầu" });
@@ -246,7 +263,8 @@ describe("AppsPage list states", () => {
 
     expect(screen.getByText("Đang tải thư viện ứng dụng…")).toBeInTheDocument();
     expect(screen.queryByText("Chưa có ứng dụng")).toBeNull();
-    expect(screen.getAllByRole("heading", { level: 2 })).toHaveLength(4);
+    expect(screen.queryByRole("dialog", { name: "Thêm gói cài đặt" })).toBeNull();
+    expect(screen.getByRole("button", { name: "Thêm gói" })).toBeEnabled();
     expect(await screen.findByText("TikTok.ipa")).toBeInTheDocument();
   });
 
@@ -279,13 +297,13 @@ describe("AppsPage list states", () => {
     expect(screen.getByRole("button", { name: "Thử lại danh sách nhóm" })).toBeEnabled();
     expect(screen.getByRole("button", { name: "Thử lại thư viện ứng dụng" })).toBeEnabled();
     expect(screen.queryByText("Chưa có nhóm thiết bị")).toBeNull();
-    expect(screen.getByText("Danh sách nhóm chưa tải được")).toBeInTheDocument();
+    expect(screen.getByRole("radio", { name: "Nhóm" })).toBeDisabled();
 
     const callsBeforeRetry = vi.mocked(listGroups).mock.calls.length;
     vi.mocked(listGroups).mockResolvedValue([]);
     await userEvent.click(screen.getByRole("button", { name: "Thử lại danh sách nhóm" }));
     await waitFor(() => expect(listGroups).toHaveBeenCalledTimes(callsBeforeRetry + 1));
-    expect(await screen.findByText("Chưa có nhóm thiết bị")).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByRole("radio", { name: "Nhóm" })).toBeDisabled());
     expect(screen.queryByText(/Không tải được danh sách nhóm/)).toBeNull();
   });
 

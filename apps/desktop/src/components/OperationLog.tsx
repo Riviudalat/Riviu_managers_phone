@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
-import { RefreshCw, Search } from "lucide-react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Download, RefreshCw, Search } from "lucide-react";
 
 import { listOpLogs } from "../api";
 import { describeError } from "../describeError";
@@ -33,20 +33,23 @@ export function OperationLog() {
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [needle, setNeedle] = useState("");
+  const ticket = useRef(0);
 
   const load = useCallback(() => {
+    const current = ++ticket.current;
     setLoading(true);
     setError(null);
     void listOpLogs(LIMIT)
       .then((next) => {
+        if (ticket.current !== current) return;
         setRows(next);
         setError(null);
       })
-      .catch((cause) => setError(describeError(cause)))
-      .finally(() => setLoading(false));
+      .catch((cause) => { if (ticket.current === current) setError(describeError(cause)); })
+      .finally(() => { if (ticket.current === current) setLoading(false); });
   }, []);
 
-  useEffect(load, [load]);
+  useEffect(() => { load(); return () => { ticket.current += 1; }; }, [load]);
 
   const shown = useMemo(() => {
     if (!rows) return [];
@@ -78,6 +81,13 @@ export function OperationLog() {
           <RefreshCw size={15} aria-hidden="true" />
           Làm mới
         </button>
+        <button type="button" className="ghost" disabled={!shown.length || loading || !!error} onClick={() => {
+          const body = shown.map((row) => ({ action: operationLabel(row.action), createdAt: row.createdAt }));
+          const url = URL.createObjectURL(new Blob([JSON.stringify(body, null, 2)], { type: "application/json" }));
+          const anchor = document.createElement("a");
+          anchor.href = url; anchor.download = "riviu-operation-summary.json"; anchor.click();
+          URL.revokeObjectURL(url);
+        }}><Download size={15} aria-hidden="true" />Xuất danh sách</button>
       </header>
 
       {error && (

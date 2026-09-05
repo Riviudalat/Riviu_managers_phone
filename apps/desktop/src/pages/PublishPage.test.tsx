@@ -219,6 +219,39 @@ beforeEach(() => {
 afterEach(cleanup);
 
 describe("publish, bundle to phone", () => {
+  it("navigates each setup step by keyboard without opening the execution gate", async () => {
+    render(<PublishPage devices={devices} selected={[]} onSelectUdids={() => {}} />);
+    await screen.findByRole("combobox", { name: "Hồ sơ Đăng bài" });
+    const user = userEvent.setup();
+    for (const [name, id] of [["Nguồn", "source"], ["Ghép bài/máy", "mapping"], ["Preflight", "preflight"], ["Xác nhận công khai", "confirm"]]) {
+      const button = screen.getByRole("button", { name });
+      button.focus();
+      await user.keyboard("{Enter}");
+      expect(document.getElementById(`publish-step-${id}`)).toHaveFocus();
+    }
+    expect(screen.getByRole("button", { name: /Xác nhận và đăng/ })).toBeDisabled();
+    expect(preflightCampaign).not.toHaveBeenCalled();
+    expect(executeCampaign).not.toHaveBeenCalled();
+  });
+
+  it("opens an exact historical campaign without reconciling or executing it", async () => {
+    const campaign = { id: "historical", requestId: "req", sourceRoot: "C:/fixture", state: "failed", assignments: [], createdAt: "2026-08-01T00:00:00Z" };
+    vi.mocked(publishGet).mockResolvedValueOnce({ campaign, bundles: [], assignments: [], events: [] } as never);
+    render(<PublishPage devices={devices} selected={[]} onSelectUdids={() => {}} operationSource={{ operationId: "publish:historical", sourceId: "historical", kind: "publish" }} />);
+    await waitFor(() => expect(publishGet).toHaveBeenCalledWith("historical"));
+    expect(screen.getByRole("tab", { name: "Theo dõi" })).toHaveAttribute("aria-selected", "true");
+    expect(await screen.findByRole("region", { name: "Chi tiết chiến dịch đang chọn" })).toBeVisible();
+    expect(publishReconcile).not.toHaveBeenCalled();
+    expect(executeCampaign).not.toHaveBeenCalled();
+  });
+
+  it("reports a missing exact campaign without showing another campaign instead", async () => {
+    vi.mocked(publishGet).mockResolvedValueOnce(null);
+    render(<PublishPage devices={devices} selected={[]} onSelectUdids={() => {}} operationSource={{ operationId: "publish:missing", sourceId: "missing", kind: "publish" }} />);
+    expect(await screen.findByText("Chiến dịch được chọn không còn trong nguồn dữ liệu.")).toBeVisible();
+    expect(screen.queryByRole("table", { name: "Danh sách chiến dịch" })).toBeNull();
+    expect(executeCampaign).not.toHaveBeenCalled();
+  });
   it("applies saved publish content and captions but requires a fresh preflight", async () => {
     const definition = { id: "saved-publish", name: "Đăng ca sáng", kind: "publish", latestRevision: 1, archived: false };
     vi.mocked(automationList).mockResolvedValueOnce([definition] as never);
@@ -593,6 +626,10 @@ describe("publish, bundle to phone", () => {
       targetRef: { type: "explicit", udids: expectedUdids },
     }));
     expect(screen.queryByText(/phải bằng số máy đích/i)).toBeNull();
+    await user.click(screen.getByRole("button", { name: "Xác nhận công khai" }));
+    await user.click(screen.getByRole("button", { name: /Xác nhận và đăng \(10 → 10\)/ }));
+    expect(createCampaign).toHaveBeenCalledWith("C:/carousels", tenBundles.map((entry) => entry.id), expectedUdids,
+      null, expect.any(Object), expect.any(Object), { type: "explicit", udids: expectedUdids }, true, "approved-digest-1");
   });
 
   /**

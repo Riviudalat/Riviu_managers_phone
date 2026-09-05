@@ -5,22 +5,25 @@ import {
   addMaterial,
   deleteMaterial,
   listMaterials,
+  listGroups,
   pushMaterialBatch,
 } from "../api";
 import { requestConfirm } from "../confirmStore";
-import { SelectionStrip } from "../components/SelectionStrip";
+import { TargetSelector } from "../components/TargetSelector";
 import { LibraryBatchMonitor } from "../components/LibraryBatchMonitor";
 import { useLibraryBatch } from "../useLibraryBatch";
 import { EmptyState, LoadingState, StatusNotice } from "../components/States";
-import { ResponsiveTable, StatusChip } from "../components/WorkspacePrimitives";
+import { DetailDrawer, ResponsiveTable, StatusChip } from "../components/WorkspacePrimitives";
 import { describeError } from "../describeError";
 import { flash, flashError } from "../farmToast";
 import { pickMaterial } from "../pickFile";
-import { targetsOf } from "../selectionTargets";
+import { resolveAutomationTarget } from "../automationTargets";
+import type { OperationSourceRef } from "../operationSource";
 import type {
   MaterialItem,
   MaterialPushBatchResult,
   TargetRef,
+  DeviceGroup,
 } from "../types";
 import type { SelProps } from "./pageProps";
 import "../styles/operations.css";
@@ -31,8 +34,13 @@ function formatBytes(bytes: number): string {
 }
 
 /** Material library backed by the managed artifact store and a bounded fleet transfer. */
-export function MaterialPage({ devices, selected, onSelectUdids }: SelProps) {
-  const batch = useLibraryBatch("materialTransfer");
+export function MaterialPage({ devices, selected, operationSource }: SelProps & { operationSource?: OperationSourceRef }) {
+  const batch = useLibraryBatch("materialTransfer", operationSource?.kind === "materialTransfer" ? operationSource.operationId : undefined);
+  const [targetRef, setTargetRef] = useState<TargetRef>(() => ({ type: "explicit", udids: [...selected] }));
+  const [groups, setGroups] = useState<DeviceGroup[]>([]);
+  const [groupError, setGroupError] = useState<string | null>(null);
+  const [groupRetry, setGroupRetry] = useState(0);
+  const [importOpen, setImportOpen] = useState(false);
   const [items, setItems] = useState<MaterialItem[]>([]);
   const [path, setPath] = useState("");
   const [busyMaterialId, setBusyMaterialId] = useState<string | null>(null);
@@ -42,7 +50,13 @@ export function MaterialPage({ devices, selected, onSelectUdids }: SelProps) {
   const [transferError, setTransferError] = useState<string | null>(null);
   const [lastBatch, setLastBatch] = useState<MaterialPushBatchResult | null>(null);
   const loadTicket = useRef(0);
-  const targets = targetsOf(selected, devices);
+  const targets = resolveAutomationTarget(targetRef, devices, groups);
+  useEffect(() => {
+    let active = true;
+    void listGroups().then((next) => { if (active) { setGroups(next); setGroupError(null); } })
+      .catch((error) => { if (active) setGroupError(describeError(error)); });
+    return () => { active = false; };
+  }, [groupRetry]);
   const deviceNames = useMemo(
     () => new Map(devices.map((device, index) => [device.udid, `Máy ${index + 1} · ${device.name}`])),
     [devices],
@@ -82,9 +96,8 @@ export function MaterialPage({ devices, selected, onSelectUdids }: SelProps) {
   const transfer = async (materialId: string, retryUdids?: string[]) => {
     const target: TargetRef = retryUdids
       ? { type: "explicit", udids: retryUdids }
-      : selected.length
-        ? { type: "explicit", udids: targets }
-        : { type: "all" };
+      : targetRef;
+    if (!(retryUdids ?? targets).length) return;
     setBusyMaterialId(materialId);
     setTransferError(null);
     try {
@@ -93,6 +106,7 @@ export function MaterialPage({ devices, selected, onSelectUdids }: SelProps) {
       // results from the old attempt beside the new batch id would also keep a stale roster
       // hash and stale exclusions, so the "latest" panel replaces the attempt atomically.
       setLastBatch(batch);
+      if (operationSource) followBatch(`materialTransfer:${batch.batchId}`);
       const succeeded = batch.results.filter((result) => result.status === "succeeded").length;
       const failed = batch.results.length - succeeded;
       flash(
@@ -111,17 +125,9 @@ export function MaterialPage({ devices, selected, onSelectUdids }: SelProps) {
   const failedUdids = lastBatch?.results
     .filter((result) => result.status === "failed")
     .map((result) => result.udid) ?? [];
+  const followBatch = batch.follow;
 
-  return (
-    <div className="panel operations-page material-page">
-      <SelectionStrip
-        devices={devices}
-        selected={selected}
-        onSelectAll={() => onSelectUdids(devices.map((device) => device.udid))}
-        onClear={() => onSelectUdids([])}
-        onSelectUdids={onSelectUdids}
-      />
-
+  const importForm = (
       <section className="operations-toolbar" aria-label="Thêm nội dung">
         <label className="operations-file-field">
           <span>File nguồn</span>
@@ -150,6 +156,7 @@ export function MaterialPage({ devices, selected, onSelectUdids }: SelProps) {
             try {
               await addMaterial(path.trim());
               setPath("");
+              setImportOpen(false);
               await reload();
               flash("Đã thêm vào kho nội dung");
             } catch (error) {
@@ -162,7 +169,8 @@ export function MaterialPage({ devices, selected, onSelectUdids }: SelProps) {
           Thêm vào kho
         </button>
       </section>
-
+  );
+  const monitor = <>
       {transferError && (
         <StatusNotice tone="error">
           Không thể bắt đầu chuyển nội dung: {transferError}
@@ -227,17 +235,25 @@ export function MaterialPage({ devices, selected, onSelectUdids }: SelProps) {
           </div>
         </section>
       )}
-
+    </>;
+  return (
+    <div className="operations-page material-page">
       <section className="operations-list-section" aria-label="Nội dung đã lưu">
         <header>
           <div>
             <strong>Nội dung đã lưu</strong>
             <span>{items.length} file</span>
           </div>
+          <div className="admin-actions">
+          <button type="button" className="primary" onClick={() => setImportOpen(true)}><ImagePlus size={16} /> Thêm nội dung</button>
           <button type="button" className="icon-btn" onClick={() => void reload()} aria-label="Làm mới kho nội dung" title="Làm mới">
             <RefreshCw size={16} />
           </button>
+          </div>
         </header>
+        <TargetSelector devices={devices} groups={groups} selected={[]} onChange={() => undefined}
+          targetRef={targetRef} onTargetRefChange={setTargetRef} requireChoice label="Phạm vi chuyển nội dung" />
+        {groupError && <StatusNotice tone="error" action={<button type="button" onClick={() => setGroupRetry((value) => value + 1)}>Thử lại nhóm</button>}>Không tải được nhóm: {groupError}</StatusNotice>}
         {loadError && (
           <StatusNotice
             tone="error"
@@ -247,11 +263,12 @@ export function MaterialPage({ devices, selected, onSelectUdids }: SelProps) {
           </StatusNotice>
         )}
         {loading && !items.length && <LoadingState label="Đang tải kho nội dung…" />}
-        <ResponsiveTable label="Nội dung đã lưu" rows={items} keyForRow={(material) => material.id} columns={[
-          { id:"name",label:"Tên file",render:(material) => <strong>{material.name}</strong> },
-          { id:"kind",label:"Loại",render:(material) => <StatusChip>{material.kind === "video" ? "Video" : material.kind === "image" ? "Ảnh" : "File"}</StatusChip> },
-          { id:"size",label:"Dung lượng",render:(material) => formatBytes(material.size) },
-          { id:"actions",label:"Thao tác",render:(material) => (
+        <ResponsiveTable label="Nội dung đã lưu" viewKey="material" searchText={(material) => `${material.name} ${material.kind}`} rows={items} keyForRow={(material) => material.id}
+          empty={!loading && !loadError ? <EmptyState compact icon={<ImagePlus size={17} />} title="Chưa có nội dung" /> : null} columns={[
+          { id:"name",label:"Tên file",sortValue:(material) => material.name,render:(material) => <strong>{material.name}</strong> },
+          { id:"kind",label:"Loại",sortValue:(material) => material.kind,render:(material) => <StatusChip>{material.kind === "video" ? "Video" : material.kind === "image" ? "Ảnh" : "File"}</StatusChip> },
+          { id:"size",label:"Dung lượng",sortValue:(material) => material.size,render:(material) => formatBytes(material.size) },
+          { id:"actions",label:"Thao tác",required:true,render:(material) => (
               <div className="admin-actions">
                 <button
                   type="button"
@@ -294,15 +311,9 @@ export function MaterialPage({ devices, selected, onSelectUdids }: SelProps) {
               </div>
           ) },
         ]} />
-        {!loading && !loadError && !items.length && (
-          <EmptyState
-            compact
-            icon={<ImagePlus size={17} />}
-            title="Chưa có nội dung"
-            hint="Chọn ảnh hoặc video để thêm vào kho."
-          />
-        )}
       </section>
+      {monitor}
+      <DetailDrawer open={importOpen} title="Thêm nội dung" onClose={() => { if (!adding) setImportOpen(false); }}>{importForm}</DetailDrawer>
     </div>
   );
 }

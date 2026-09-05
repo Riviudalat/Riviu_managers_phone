@@ -7,13 +7,26 @@ import { ApiPage } from "./ApiPage";
 
 const loadDocs = vi.hoisted(() => vi.fn());
 
-vi.mock("../api", () => ({ apiDocs: loadDocs }));
+vi.mock("../api", () => ({ apiDocs: loadDocs, localApiStatus: vi.fn(async () => ({ running: false, activePort: null, restartRequired: false, lastError: null })) }));
 
 beforeEach(() => {
   loadDocs.mockReset();
 });
 
 describe("ApiPage load states", () => {
+  it("searches localized groups and individual runtime commands", async () => {
+    loadDocs.mockResolvedValue("## Devices\n- list_devices / device_health\n## Operations\n- operation_get_run");
+    render(<ApiPage />);
+    await screen.findByText("Thiết bị");
+    await userEvent.type(screen.getByRole("searchbox", { name: "Tìm lệnh API" }), "device_health");
+    expect(screen.getByText("device_health")).toBeVisible();
+    expect(screen.queryByText("operation_get_run")).toBeNull();
+    expect(screen.queryByText("list_devices")).toBeNull();
+    await userEvent.clear(screen.getByRole("searchbox", { name: "Tìm lệnh API" }));
+    await userEvent.type(screen.getByRole("searchbox", { name: "Tìm lệnh API" }), "Thiết bị");
+    expect(screen.getByText("list_devices")).toBeVisible();
+  });
+
   it("shows loading, then the documentation without a duplicate page heading", async () => {
     loadDocs.mockResolvedValue("GET /health\n200 OK");
 
@@ -22,6 +35,7 @@ describe("ApiPage load states", () => {
     expect(screen.getByRole("status")).toHaveTextContent("Đang tải tài liệu API");
     expect(screen.queryByRole("heading", { level: 2 })).toBeNull();
     expect(await screen.findByText(/GET \/health/)).toBeInTheDocument();
+    expect(screen.queryByRole("searchbox")).toBeNull();
   });
 
   it("shows an inline error and retries the request", async () => {

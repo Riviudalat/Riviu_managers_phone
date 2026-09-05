@@ -78,12 +78,12 @@ export function SelectionStrip({
           value=""
           onChange={(event) => {
             const group = groups.find((candidate) => candidate.id === event.currentTarget.value);
-            if (group) onSelectUdids(group.udids);
+            if (group?.udids.length) onSelectUdids(group.udids);
           }}
         >
           <option value="">Chọn nhóm…</option>
           {groups.map((group) => (
-            <option key={group.id} value={group.id}>
+            <option key={group.id} value={group.id} disabled={!group.udids.length}>
               {group.name} ({group.udids.length})
             </option>
           ))}
@@ -105,7 +105,7 @@ export function SelectionStrip({
         Bỏ chọn
       </button>
       {!devices.length && (
-        <span className="hint">Chưa có thiết bị — về Quản lý cửa sổ rồi làm mới</span>
+        <span className="hint">Chưa có thiết bị kết nối</span>
       )}
       {!!devices.length && (
         <span className="hint">Phạm vi: {n} máy</span>

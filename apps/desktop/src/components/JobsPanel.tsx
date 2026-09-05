@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Braces, RefreshCw, Search, Square, ChevronLeft, ChevronRight } from "lucide-react";
+import { Braces, RefreshCw, Search, Square, ChevronLeft, ChevronRight, ArrowUpRight } from "lucide-react";
 
 import {
   cancelJob,
@@ -11,6 +11,7 @@ import {
 import { describeError } from "../describeError";
 import { flash } from "../farmToast";
 import { targetsOf } from "../selectionTargets";
+import { operationSourceFor, type OperationSourceRef } from "../operationSource";
 import type {
   DeviceInfo,
   AppEvent,
@@ -31,6 +32,7 @@ interface Props {
   onSelectUdids: (udids: string[]) => void;
   initialScript?: string | null;
   deviceLabels: ReadonlyMap<string, string>;
+  onOpenSource?: (source: OperationSourceRef) => void;
 }
 
 const RUN_LABEL: Record<OperationRunState, string> = {
@@ -78,6 +80,7 @@ export function JobsPanel({
   onSelectUdids,
   initialScript,
   deviceLabels,
+  onOpenSource,
 }: Props) {
   const [runs, setRuns] = useState<OperationRunSummary[]>([]);
   const [loading, setLoading] = useState(true);
@@ -329,6 +332,11 @@ export function JobsPanel({
                     {interactionActorCount > 0 ? ` · ${interactionActorCount} máy` : ""} · {RUN_LABEL[shownSummary.state]}
                   </span>
                 </div>
+                {onOpenSource && shownSummary.kind !== "script" && (
+                  <button type="button" className="ghost" onClick={() => onOpenSource(operationSourceFor(shownSummary))}>
+                    <ArrowUpRight size={16} /> Mở tại {KIND_LABEL[shownSummary.kind]}
+                  </button>
+                )}
                 {shownSummary.kind === "script" && isActive(shownSummary) && (
                   <button
                     type="button"
@@ -368,6 +376,13 @@ export function JobsPanel({
                           {RUN_LABEL[item.state]}
                           {item.retryable ? " · Có thể chạy lại từ nguồn gốc" : ""}
                         </small>
+                        {onOpenSource && item.retryable && shownSummary.kind !== "script" && (
+                          <button type="button" className="ghost" onClick={() => onOpenSource({
+                            ...operationSourceFor(shownSummary), itemId: item.id, udid: item.udid ?? undefined,
+                          })}>
+                            <ArrowUpRight size={14} /> Mở mục cần xử lý
+                          </button>
+                        )}
                         {(item.udid || item.errorCode || item.detail || item.evidence) && (
                           <details>
                             <summary>Chi tiết kỹ thuật</summary>

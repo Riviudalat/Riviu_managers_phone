@@ -43,6 +43,8 @@ import type {
   TargetRef,
 } from "../types";
 import { describeError } from "../describeError";
+import type { OperationSourceRef } from "../operationSource";
+import { OperationSourceDetail } from "./OperationSourceDetail";
 
 /**
  * One line in the live list.
@@ -70,6 +72,7 @@ type Props = {
   metas: Map<string, DeviceMeta>;
   onClose?: () => void;
   surface?: "popup" | "page";
+  operationSource?: OperationSourceRef;
 };
 
 /**
@@ -296,6 +299,7 @@ export function NurturePopup({
   metas,
   onClose,
   surface = "popup",
+  operationSource,
 }: Props) {
   const [settings, setSettings] = useState<NurtureSettings | null>(null);
   const [baseline, setBaseline] = useState<{settings: NurtureSettings; target?: TargetRef} | null>(null);
@@ -322,6 +326,9 @@ export function NurturePopup({
   // panel is open to watch. One group at a time, full width, with the log in the same tab row.
   const [tab, setTab] = useState<"behaviour" | "ai" | "comments" | "log">("behaviour");
   const [pageMode, setPageMode] = useState<"setup" | "monitor">("setup");
+  useEffect(() => {
+    if (operationSource?.kind === "nurture") setPageMode("monitor");
+  }, [operationSource]);
   /**
    * Which device's history is open, or `null`.
    *
@@ -510,7 +517,7 @@ export function NurturePopup({
     setSettings((prev) => (prev ? { ...prev, [key]: bounded } : prev));
   };
 
-  const save = async (next?: NurtureSettings): Promise<boolean> => {
+  const save = async (next?: NurtureSettings, applyDefaultsOnly = false): Promise<boolean> => {
     const s = next ?? settings;
     if (!s) return false;
     const issue = validateNurtureSettings(s);
@@ -529,7 +536,7 @@ export function NurturePopup({
     const saved = await nurtureSaveSettings(payload);
     if (settingsRef.current !== settings || targetRefLatest.current !== targetRef) return false;
     setSettings(saved);
-    setBaseline({ settings: saved, target: targetRef });
+    if (!applyDefaultsOnly) setBaseline({ settings: saved, target: targetRef });
     setCredentialBaseline(saved.apiKey);
     return true;
   };
@@ -541,8 +548,7 @@ export function NurturePopup({
     snapshotKey,
     save: async () => {
       try {
-        const targetChanged = JSON.stringify(baseline?.target) !== JSON.stringify(targetRef);
-        return pageSurface && targetChanged && profileRef.current ? await profileRef.current.save() : await save();
+        return pageSurface ? await profileRef.current?.save() ?? false : await save();
       } catch (error) { setMsg(describeError(error)); return false; }
     },
     discard: () => {
@@ -757,7 +763,7 @@ export function NurturePopup({
         onClick={async () => {
           setBusy(true);
           try {
-            if (await save()) setMsg(null);
+            if (pageSurface ? await profileRef.current?.save() : await save()) setMsg(null);
           } catch (e) {
             setMsg(describeError(e));
           } finally {
@@ -765,7 +771,7 @@ export function NurturePopup({
           }
         }}
       >
-        Lưu
+        {pageSurface ? "Lưu hồ sơ" : "Lưu"}
       </button>
     </div>
   );
@@ -849,7 +855,7 @@ export function NurturePopup({
                 </div>
               )}
 
-              {pageSurface && (
+              {pageSurface && operationSource?.kind !== "nurture" && (
                 <CommandBar
                   title={targets.length ? `${targets.length} máy trong phạm vi` : "Chưa có máy trong phạm vi"}
                   detail={pageMode === "monitor" ? "Theo dõi tiến độ hoặc dừng các máy trong phiên hiện tại." : anyRunning ? "Phiên đang chạy; có thể dừng hoặc lưu thay đổi." : "Kiểm tra thiết lập rồi bắt đầu phiên Nuôi TikTok."}
@@ -907,6 +913,14 @@ export function NurturePopup({
                           />
                         )}
                         {renderSettings()}
+                        <div className="nurture-default-actions">
+                          <button type="button" className="ghost" disabled={busy || Boolean(settingsIssue)} onClick={async () => {
+                            setBusy(true);
+                            try { if (await save(undefined, true)) setMsg("Đã áp dụng thiết lập mặc định."); }
+                            catch (error) { setMsg(describeError(error)); }
+                            finally { setBusy(false); }
+                          }}>Áp dụng mặc định</button>
+                        </div>
                       </div>
                       <SummaryRail
                         title="Kiểm tra trước khi chạy"
@@ -941,7 +955,8 @@ export function NurturePopup({
                 }
                 hidden={pageSurface ? pageMode !== "monitor" : tab !== "log"}
               >
-                {((pageSurface && pageMode === "monitor") || (!pageSurface && tab === "log")) && (
+                {pageSurface && pageMode === "monitor" && operationSource?.kind === "nurture" && <OperationSourceDetail source={operationSource} />}
+                {((pageSurface && pageMode === "monitor" && operationSource?.kind !== "nurture") || (!pageSurface && tab === "log")) && (
                   <>
                   {rows.length > 0 ? (
                     <>

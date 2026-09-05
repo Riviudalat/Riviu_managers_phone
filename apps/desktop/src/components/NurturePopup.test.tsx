@@ -1,5 +1,6 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { useImperativeHandle } from "react";
 
 import { NurturePopup } from "./NurturePopup";
 import { validateNurtureSettings } from "../nurtureValidation";
@@ -23,10 +24,11 @@ import type { DeviceInfo, DeviceMeta, NurtureSessionStatus, NurtureSettings } fr
  * the subject words. The help control has its own name and is exercised independently below.
  */
 const saved = vi.hoisted(() => ({ saveSettings: vi.fn() }));
-const profileControl = vi.hoisted(() => ({ render: vi.fn() }));
+const profileControl = vi.hoisted(() => ({ render: vi.fn(), save: vi.fn(async () => true) }));
 
 vi.mock("./AutomationProfileControl", () => ({
-  AutomationProfileControl: (props: unknown) => {
+  AutomationProfileControl: (props: { ref?: import("react").Ref<{ save: () => Promise<boolean> }> }) => {
+    useImperativeHandle(props.ref, () => ({ save: profileControl.save }));
     profileControl.render(props);
     return <div data-testid="nurture-profile-control" />;
   },
@@ -337,6 +339,29 @@ describe("NurturePopup", () => {
 
     fireEvent.click(screen.getByRole("tab", { name: "Theo dõi" }));
     expect(screen.getByTestId("nurture-profile-control")).not.toBeVisible();
+  });
+
+  it("saves page drafts to the profile independent of target changes", async () => {
+    render(<NurturePopup devices={devices} selected={[]} targetRef={{ type: "all" }} targetUdids={["mock-1"]} metas={new Map()} surface="page" />);
+    await screen.findByTestId("nurture-profile-control");
+    fireEvent.change(screen.getByLabelText("Giới hạn video", { selector: "input" }), { target: { value: "121" } });
+    fireEvent.click(screen.getByRole("button", { name: "Lưu hồ sơ" }));
+    await waitFor(() => expect(profileControl.save).toHaveBeenCalledTimes(1));
+    expect(saved.saveSettings).not.toHaveBeenCalled();
+    await act(async () => { await requestWorkspaceLeave(["nurture"]); });
+    expect(profileControl.save).toHaveBeenCalledTimes(2);
+    expect(saved.saveSettings).not.toHaveBeenCalled();
+  });
+
+  it("applies defaults only through its explicit command and keeps the profile draft dirty", async () => {
+    saved.saveSettings.mockImplementationOnce(async (value) => value);
+    render(<NurturePopup devices={devices} selected={[]} targetRef={{ type: "all" }} targetUdids={["mock-1"]} metas={new Map()} surface="page" />);
+    await screen.findByTestId("nurture-profile-control");
+    fireEvent.change(screen.getByLabelText("Giới hạn video", { selector: "input" }), { target: { value: "121" } });
+    fireEvent.click(screen.getByRole("button", { name: "Áp dụng mặc định" }));
+    await waitFor(() => expect(saved.saveSettings).toHaveBeenCalledWith(expect.objectContaining({ numVideos: 121 })));
+    expect(profileControl.save).not.toHaveBeenCalled();
+    expect(hasWorkspaceDrafts()).toBe(true);
   });
 
   it("keeps profile-only rates separate while saving edited credentials through the settings API", async () => {

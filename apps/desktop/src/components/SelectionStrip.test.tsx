@@ -26,6 +26,19 @@ beforeEach(() => {
 afterEach(cleanup);
 
 describe("SelectionStrip group state", () => {
+  it("never turns an empty group into the legacy all-device scope", async () => {
+    vi.mocked(listGroups).mockResolvedValue([{
+      id: "empty", name: "Nhóm rỗng", color: "#f97316", udids: [], createdAt: "2026-09-06",
+    }]);
+    const select = vi.fn();
+    render(<SelectionStrip devices={devices} selected={["phone-a"]}
+      onSelectAll={vi.fn()} onClear={vi.fn()} onSelectUdids={select} />);
+    const option = await screen.findByRole("option", { name: /Nhóm rỗng/ });
+    expect(option).toBeDisabled();
+    await userEvent.selectOptions(screen.getByRole("combobox", { name: "Chọn theo nhóm" }), "empty");
+    expect(select).not.toHaveBeenCalled();
+  });
+
   it("shows a scoped group error and recovers through retry", async () => {
     const selectUdids = vi.fn();
     vi.mocked(listGroups)

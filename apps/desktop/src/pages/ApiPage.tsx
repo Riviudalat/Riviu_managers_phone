@@ -1,15 +1,23 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { RefreshCw } from "lucide-react";
+import { RefreshCw, Search } from "lucide-react";
 
 import { apiDocs } from "../api";
 import { EmptyState, LoadingState, StatusNotice } from "../components/States";
 import { StatusChip, SummaryRail } from "../components/WorkspacePrimitives";
 import { describeError } from "../describeError";
+import { ApiRuntimeStatus } from "../components/settings/ApiRuntimeStatus";
 
 interface ApiDocGroup {
   title: string;
   commands: string[];
 }
+
+const GROUP_LABELS: Record<string, string> = {
+  Devices: "Thiết bị",
+  "Farm data": "Dữ liệu và tài nguyên",
+  Operations: "Tác vụ",
+  Sidecar: "Công cụ hỗ trợ",
+};
 
 function parseApiDocs(source: string): ApiDocGroup[] {
   const groups: ApiDocGroup[] = [];
@@ -17,7 +25,8 @@ function parseApiDocs(source: string): ApiDocGroup[] {
   for (const rawLine of source.split(/\r?\n/)) {
     const line = rawLine.trim();
     if (line.startsWith("## ")) {
-      current = { title: line.slice(3).trim(), commands: [] };
+      const title = line.slice(3).trim();
+      current = { title: GROUP_LABELS[title] ?? title, commands: [] };
       groups.push(current);
       continue;
     }
@@ -40,6 +49,7 @@ export function ApiPage() {
   const [docs, setDocs] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  const [query, setQuery] = useState("");
   const loadTicket = useRef(0);
 
   const load = async () => {
@@ -67,6 +77,9 @@ export function ApiPage() {
   const structured = hasStructuredReference(docs ?? "");
   const commandCount = groups.reduce((total, group) => total + group.commands.length, 0);
   const isEmpty = docs !== null && docs.trim() === "";
+  const filteredGroups = groups.map((group) => ({ ...group,
+    commands: group.commands.filter((command) => `${group.title} ${command}`.toLocaleLowerCase("vi").includes(query.trim().toLocaleLowerCase("vi"))),
+  })).filter((group) => group.commands.length > 0);
 
   return (
     <div className="admin-workspace api-workspace">
@@ -92,18 +105,19 @@ export function ApiPage() {
             <div className="admin-toolbar">
               <div className="admin-toolbar-copy">
                 <strong>Danh mục lệnh</strong>
-                <span>Mở từng nhóm để xem tên lệnh runtime hiện hỗ trợ.</span>
               </div>
               <div className="admin-toolbar-actions">
-                <button type="button" className="ghost" onClick={() => void load()} disabled={loading}>
+                {structured && <label className="search-field"><Search size={15} aria-hidden="true" /><span className="visually-hidden">Tìm lệnh API</span>
+                  <input type="search" placeholder="Tìm lệnh…" value={query} onChange={(event) => setQuery(event.target.value)} />
+                </label>}
+                <button type="button" className="icon-btn" title="Làm mới tài liệu API" aria-label="Làm mới tài liệu API" onClick={() => void load()} disabled={loading}>
                   <RefreshCw size={15} aria-hidden="true" />
-                  {loading ? "Đang tải…" : "Làm mới"}
                 </button>
               </div>
             </div>
             <div className="api-reference-list">
-              {structured && groups.map((group) => (
-                <details key={group.title} className="api-reference-group">
+              {structured && filteredGroups.map((group) => (
+                <details key={group.title} className="api-reference-group" open={query.trim() ? true : undefined}>
                   <summary>
                     {group.title}
                     <StatusChip>{group.commands.length} lệnh</StatusChip>
@@ -113,6 +127,7 @@ export function ApiPage() {
                   </ul>
                 </details>
               ))}
+              {structured && !filteredGroups.length && <EmptyState compact title="Không tìm thấy lệnh" />}
               {!structured && (
                 <details className="api-reference-group">
                   <summary>Tài liệu runtime <StatusChip>{groups.length ? `${commandCount} lệnh` : "Văn bản"}</StatusChip></summary>
@@ -122,12 +137,11 @@ export function ApiPage() {
             </div>
           </main>
           <SummaryRail title="Trạng thái API">
-            <StatusChip tone="success">Đã đọc từ runtime</StatusChip>
-            <dl className="admin-metric-grid">
+            <ApiRuntimeStatus />
+            {structured && <dl className="admin-metric-grid">
               <div className="admin-metric"><dt>Nhóm</dt><dd>{groups.length}</dd></div>
               <div className="admin-metric"><dt>Lệnh</dt><dd>{commandCount}</dd></div>
-            </dl>
-            <p className="hint">Cấu hình bật/tắt, cổng và token được lưu riêng trong Cài đặt.</p>
+            </dl>}
           </SummaryRail>
         </div>
       )}

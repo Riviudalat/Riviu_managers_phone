@@ -29,6 +29,7 @@ import {
 } from "../interactionPlan";
 import { interactionDraftFromProfile, interactionProfileConfig, interactionProfileTarget } from "../automationProfileConfig";
 import { useWorkspaceDraft } from "../workspaceDraft";
+import type { OperationSourceRef } from "../operationSource";
 import type {
   DeviceInfo,
   AutomationDefinitionRecord,
@@ -46,6 +47,7 @@ import { AutomationProfileControl, type AutomationProfileHandle } from "./Automa
 import { CommandBar, StatusChip, SummaryRail } from "./WorkspacePrimitives";
 
 type Props = {
+  operationSource?: OperationSourceRef;
   devices: DeviceInfo[];
   selected: string[];
   /** Already resolved from All/Group/Explicit; an empty array remains an empty scope. */
@@ -102,6 +104,7 @@ function readMeasurementDraft(): { wanted: PostTargets; readViews: boolean } {
 const DRAG_KEEP = 64;
 
 export function InteractionPopup({
+  operationSource,
   devices,
   selected,
   targetUdids,
@@ -193,6 +196,11 @@ export function InteractionPopup({
   const [planError, setPlanError] = useState<string | null>(null);
   const [handles, setHandles] = useState<Record<string, string>>({});
   const [openCampaignId, setOpenCampaignId] = useState<string | null>(null);
+  useEffect(() => {
+    if (operationSource?.kind !== "interaction") return;
+    setOpenCampaignId(operationSource.sourceId);
+    setTab("monitor");
+  }, [operationSource]);
   // Scoped, not one shared string. A link that would not parse and a dispatch that was
   // refused used to overwrite each other, so the message on screen was whichever failed last.
   const [linkBusy, setLinkBusy] = useState(false);

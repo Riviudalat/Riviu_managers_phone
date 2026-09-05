@@ -21,11 +21,12 @@ import { startDevicePreview, startFleetPreview } from "./startPreview";
 import { summarizeBulkRepair } from "./agentStatus";
 import { requestConfirm } from "./confirmStore";
 import { hasWorkspaceDrafts, requestWorkspaceLeave, useWorkspaceDirty } from "./workspaceDraft";
-import { surfaceDeparted } from "./deviceSurface";
+import { useDeviceSurface } from "./features/devices/useDeviceSurface";
 import { describeError } from "./describeError";
 import { pushToast, toastError } from "./toastStore";
 import { ConfirmHost } from "./components/ConfirmHost";
 import { ActivityCenter } from "./components/ActivityCenter";
+import { OperationSourceDetail } from "./components/OperationSourceDetail";
 import { DeviceTile } from "./components/DeviceTile";
 import { FilterToolbar, type ViewMode } from "./components/FilterToolbar";
 import { GroupTabs } from "./components/GroupTabs";
@@ -72,6 +73,7 @@ import { MoreHorizontal } from "lucide-react";
 import { MENU_ICONS } from "./components/menuIcons";
 import { loadZoom, stepZoom, storeZoom, TILE_ZOOM, wheelWantsZoom } from "./zoom";
 import { useMediaQuery } from "./useMediaQuery";
+import { operationSourcePage, type OperationSourceRef } from "./operationSource";
 import "./App.css";
 
 const FlowWorkspace = lazy(async () => {
@@ -104,75 +106,17 @@ type DeviceWorkOwnerProjection =
   | { state: "known"; owners: Map<string, DeviceWorkOwner | null> }
   | { state: "error"; message: string };
 
-type PendingNavigation =
-  | { kind: "page"; value: PageId; settle: (activated: boolean) => void }
+type NavigationIntent =
+  | { kind: "page"; value: PageId; clearOperationSource?: boolean }
   | {
       kind: "automationView";
       value: "device" | "orchestration";
-      settle: (activated: boolean) => void;
     };
-
-/**
- * State for a surface opened against **one phone**, that closes itself — out loud — when that
- * phone leaves the fleet.
- *
- * **Why this is a hook and not three `useState`s.** `App` held three of these — the adb console,
- * the file browser, and the focus overlay — each resolved through `devices.find(...) ?? null`
- * into a render gated on the result, and none of them cleared the udid when the phone went away.
- * The consequence is not that the panel closes; it is that it closes **silently and then refuses
- * to reopen**: the stale udid is still in state, so clicking the same phone's row is a `setState`
- * with the value already there, React bails out, and the row does nothing at all. Permanently,
- * for that phone, until another phone is clicked or the app restarts.
- *
- * That is the reported bug — *"mở thư mục máy điện thoại còn mở không được"* — and `controlCenter`
- * had the fix for it 470 lines below, with a doc comment making the argument, while the surface
- * that needed it most did not. Extracted so the next per-phone surface cannot be written without
- * it. See `deviceSurface.ts` for why an empty roster is not a departure.
- */
-function useDeviceSurface(
-  devices: DeviceInfo[],
-  /// Names the thing in the message — "đã đóng trình quản lý tệp". Not the component name.
-  label: string,
-): [string | null, (udid: string | null) => void] {
-  const [openFor, setOpenFor] = useState<string | null>(null);
-  /// The phone's display name, captured **when the surface opened**. At clear time the device is
-  /// already out of the roster, so its name is unreachable then — and "một máy đã rời" is a
-  /// worse message than naming it.
-  const nameRef = useRef<string>("");
-  /// A ref rather than a dependency, so `open` keeps a stable identity across roster updates:
-  /// it is handed to `tileActions`, and a new function on every scan would churn every consumer.
-  const devicesRef = useRef(devices);
-  useEffect(() => {
-    devicesRef.current = devices;
-  }, [devices]);
-
-  const open = useCallback((udid: string | null) => {
-    if (udid) {
-      nameRef.current =
-        devicesRef.current.find((device) => device.udid === udid)?.name ?? udid;
-    }
-    setOpenFor(udid);
-  }, []);
-
-  useEffect(() => {
-    if (!surfaceDeparted(devices, openFor)) return;
-    setOpenFor(null);
-    // Silence is what made this a bug report rather than an annoyance: an operator three
-    // folders deep watched the panel evaporate with no word. `controlCenter` clears quietly
-    // because a designation vanishing is invisible anyway; a panel closing under someone's
-    // hands is not.
-    pushToast(
-      "warn",
-      "Máy đã rời khỏi danh sách",
-      `${nameRef.current} không còn kết nối — đã đóng ${label}.`,
-    );
-  }, [devices, openFor, label]);
-
-  return [openFor, open];
-}
+type PendingNavigation = NavigationIntent & { settle: (activated: boolean) => void };
 
 function App() {
   const [page, setPage] = useState<PageId>("control");
+  const [operationSource, setOperationSource] = useState<OperationSourceRef>();
   const pageRef = useRef(page);
   pageRef.current = page;
   const {
@@ -286,7 +230,7 @@ function App() {
   const updateFlowDirty = useCallback((_dirty: boolean) => {}, []);
 
   const queueNavigation = useCallback(
-    (intent: Omit<PendingNavigation, "settle">): Promise<boolean> =>
+    (intent: NavigationIntent): Promise<boolean> =>
       new Promise<boolean>((settle) => {
         // One pending destination is enough. A later click supersedes the destination but
         // shares the open discard dialog, so a stale page cannot open after it is answered.
@@ -317,6 +261,7 @@ function App() {
               contentRef.current.scrollLeft = 0;
             }
             if (latest.kind === "page") {
+              if (latest.clearOperationSource) setOperationSource(undefined);
               pageRef.current = latest.value;
               setPage(latest.value);
             } else {
@@ -335,15 +280,16 @@ function App() {
   );
 
   const requestPage = useCallback(
-    async (next: PageId) => {
-      if (next === pageRef.current) {
+    async (next: PageId, clearOperationSource = false) => {
+      // Leaving history is a real navigation even when the sidebar destination is this page.
+      if (next === pageRef.current && !(clearOperationSource && operationSource)) {
         pendingNavigationRef.current?.settle(false);
         pendingNavigationRef.current = null;
-        return;
+        return true;
       }
-      await queueNavigation({ kind: "page", value: next });
+      return queueNavigation({ kind: "page", value: next, clearOperationSource });
     },
-    [queueNavigation],
+    [operationSource, queueNavigation],
   );
 
   const requestAutomationView = useCallback(
@@ -357,6 +303,16 @@ function App() {
     },
     [queueNavigation],
   );
+
+  const openOperationSource = useCallback(async (source: OperationSourceRef) => {
+    const destination = operationSourcePage(source);
+    if (!(await requestPage(destination)) || pageRef.current !== destination) return;
+    if (source.kind === "flow" || source.kind === "orchestration") {
+      if (!(await requestAutomationView(source.kind === "flow" ? "device" : "orchestration"))) return;
+    }
+    if (pageRef.current !== destination) return;
+    setOperationSource(source);
+  }, [requestPage, requestAutomationView]);
 
   const onAutomationTabKeyDown = (
     event: ReactKeyboardEvent<HTMLButtonElement>,
@@ -692,7 +648,7 @@ function App() {
         total={devices.length}
         readyCount={readyCount}
         groupMode={groupMode}
-        onPage={(next) => void requestPage(next)}
+        onPage={(next) => void requestPage(next, true)}
         onToggleCollapse={() => setAsideCollapsedOverride(!asideCollapsed)}
       />
 
@@ -1176,6 +1132,7 @@ function App() {
 
           {page === "material" && (
             <MaterialPage
+              operationSource={operationSource?.kind === "materialTransfer" ? operationSource : undefined}
               devices={devices}
               selected={selected}
               onSelectUdids={setSelected}
@@ -1183,6 +1140,7 @@ function App() {
           )}
           {page === "apps" && (
             <AppsPage
+              operationSource={operationSource?.kind === "appInstall" ? operationSource : undefined}
               devices={devices}
               selected={selected}
               onSelectUdids={setSelected}
@@ -1190,6 +1148,12 @@ function App() {
           )}
           {page === "scripts" && (
             <section className="automation-surface">
+              {(operationSource?.kind === "flow" || operationSource?.kind === "orchestration") && (
+                <details className="admin-detail" open>
+                  <summary>Tác vụ được chọn</summary>
+                  <OperationSourceDetail source={operationSource} />
+                </details>
+              )}
               <div role="tablist" aria-label="Chế độ Flow" className="automation-tabs">
                 <button
                   id="flow-mode-tab-device"
@@ -1270,6 +1234,7 @@ function App() {
           )}
           {page === "jobs" && (
             <JobsPanel
+              onOpenSource={(source) => void openOperationSource(source)}
               devices={devices}
               selectedUdids={selected}
               onSelectUdids={setSelected}
@@ -1290,6 +1255,7 @@ function App() {
                 deviceLabel={(device) => automationDeviceLabels.get(device.udid) ?? device.name}
               />
               <PublishPage
+                operationSource={operationSource?.kind === "publish" ? operationSource : undefined}
                 devices={devices}
                 selected={selected}
                 targetUdids={publishTargetUdids}
@@ -1313,6 +1279,7 @@ function App() {
                 deviceLabel={(device) => automationDeviceLabels.get(device.udid) ?? device.name}
               />
               <NurturePopup
+                operationSource={operationSource?.kind === "nurture" ? operationSource : undefined}
                 devices={devices}
                 selected={selected}
                 targetUdids={nurtureTargetUdids}
@@ -1336,6 +1303,7 @@ function App() {
                 deviceLabel={(device) => automationDeviceLabels.get(device.udid) ?? device.name}
               />
               <InteractionPopup
+                operationSource={operationSource?.kind === "interaction" ? operationSource : undefined}
                 devices={devices}
                 selected={selected}
                 targetUdids={interactionTargetUdids}

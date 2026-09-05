@@ -1,5 +1,5 @@
 import { StrictMode } from "react";
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -145,8 +145,9 @@ describe("MaterialPage list states", () => {
       materialId: material.id,
       target: { type: "explicit", udids: ["phone-1", "phone-2"] },
     });
-    expect(await screen.findByText("Máy 1 · Galaxy A")).toBeVisible();
-    expect(screen.getByText("Máy 2 · Galaxy B")).toBeVisible();
+    const results = within(await screen.findByRole("region", { name: "Kết quả chuyển gần nhất" }));
+    expect(results.getByText("Máy 1 · Galaxy A")).toBeVisible();
+    expect(results.getByText("Máy 2 · Galaxy B")).toBeVisible();
     expect(screen.getByText("Thất bại")).toBeVisible();
 
     await user.click(screen.getByRole("button", { name: "Thử lại 1 máy lỗi" }));
@@ -155,11 +156,11 @@ describe("MaterialPage list states", () => {
       target: { type: "explicit", udids: ["phone-2"] },
     });
     expect(await screen.findByText("Máy 2 · Ca chiều")).toBeVisible();
-    expect(screen.queryByText("Máy 1 · Galaxy A")).toBeNull();
+    expect(results.queryByText("Máy 1 · Galaxy A")).toBeNull();
     expect(screen.queryByRole("button", { name: "Thử lại 1 máy lỗi" })).toBeNull();
   });
 
-  it("resolves an empty selection as the whole fleet instead of one device", async () => {
+  it("requires an explicit All choice before an empty initial selection can use the fleet", async () => {
     listMaterials.mockResolvedValue([material]);
     const devices = [
       { udid: "phone-1", name: "Galaxy A", model: "A", platform: "android" },
@@ -187,10 +188,42 @@ describe("MaterialPage list states", () => {
       <MaterialPage devices={devices} selected={[]} onSelectUdids={() => undefined} />,
     );
 
+    expect(await screen.findByRole("button", { name: "Chuyển tới 0 máy" })).toBeDisabled();
+    await userEvent.click(screen.getByRole("radio", { name: "Toàn bộ" }));
     await userEvent.click(await screen.findByRole("button", { name: "Chuyển tới 2 máy" }));
     expect(pushMaterialBatch).toHaveBeenCalledWith({
       materialId: material.id,
       target: { type: "all" },
     });
+  });
+
+  it("never expands an empty group or cleared explicit selection into All", async () => {
+    listMaterials.mockResolvedValue([material]);
+    listGroups.mockResolvedValue([{ id: "empty", name: "Nhóm rỗng", udids: [] }]);
+    const devices = [{ udid: "phone-1", name: "Galaxy A", platform: "android" }] as DeviceInfo[];
+    render(<MaterialPage devices={devices} selected={[]} onSelectUdids={() => undefined} />);
+    await waitFor(() => expect(screen.getByRole("radio", { name: "Nhóm" })).toBeEnabled());
+    await userEvent.click(screen.getByRole("radio", { name: "Nhóm" }));
+    expect(screen.getByText("Nhóm rỗng · 0 máy")).toBeVisible();
+    expect(screen.getByRole("button", { name: "Chuyển tới 0 máy" })).toBeDisabled();
+    await userEvent.click(screen.getByRole("radio", { name: "Máy cụ thể" }));
+    await userEvent.click(screen.getByRole("button", { name: "Chọn đang hiện" }));
+    expect(screen.getByRole("button", { name: "Chuyển tới 1 máy" })).toBeEnabled();
+    await userEvent.click(screen.getByRole("button", { name: "Bỏ chọn máy" }));
+    expect(screen.getByRole("button", { name: "Chuyển tới 0 máy" })).toBeDisabled();
+    expect(pushMaterialBatch).not.toHaveBeenCalled();
+  });
+
+  it("keeps import in a drawer and filters the table without changing scope", async () => {
+    listMaterials.mockResolvedValue([material]);
+    renderPage();
+    await screen.findByText(material.name);
+    expect(screen.queryByPlaceholderText("Chọn ảnh hoặc video")).toBeNull();
+    await userEvent.click(screen.getByRole("button", { name: "Thêm nội dung" }));
+    expect(screen.getByRole("dialog", { name: "Thêm nội dung" })).toBeVisible();
+    await userEvent.click(screen.getByRole("button", { name: "Đóng" }));
+    await userEvent.type(screen.getByRole("searchbox", { name: "Tìm trong Nội dung đã lưu" }), "missing");
+    expect(screen.queryByText(material.name)).toBeNull();
+    expect(screen.getByText("Không có kết quả phù hợp")).toBeVisible();
   });
 });

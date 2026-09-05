@@ -28,7 +28,7 @@ describe("LibraryBatchMonitor durable lifecycle", () => {
     const retry = vi.fn();
     render(<LibraryBatchMonitor batch={{ detail:{ ...detail,batch:{artifactId:"fixture",target:{targetRef:{type:"all"},included:[],excluded:[],rosterSha256:"a".repeat(64)}},
       items:[{...detail.items[0],state:"uncertain",retryable:false},{...detail.items[1],state:"failed",retryable:true}] },
-      active:false,loading:false,error:null,reload:vi.fn() }} onRetry={retry}/>);
+      active:false,loading:false,error:null,reload:vi.fn(),follow:vi.fn() }} onRetry={retry}/>);
     await userEvent.click(screen.getByRole("button",{name:"Chạy lại 1 máy"}));
     expect(retry).toHaveBeenCalledWith("fixture",["b"]);
   });

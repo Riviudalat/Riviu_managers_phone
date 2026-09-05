@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { AppWindow, FolderOpen, RefreshCw, Trash2 } from "lucide-react";
+import { AppWindow, FolderOpen, Plus, RefreshCw, Trash2 } from "lucide-react";
 
 import { describeError } from "../describeError";
 import { requestConfirm } from "../confirmStore";
@@ -11,23 +11,25 @@ import {
   listAppsLibrary,
   listGroups,
 } from "../api";
-import { SelectionStrip } from "../components/SelectionStrip";
+import { TargetSelector } from "../components/TargetSelector";
 import { LibraryBatchMonitor } from "../components/LibraryBatchMonitor";
 import { useLibraryBatch } from "../useLibraryBatch";
 import { flash, flashError } from "../farmToast";
-import { targetsOf } from "../selectionTargets";
+import { resolveAutomationTarget } from "../automationTargets";
 import { EmptyState, LoadingState, StatusNotice } from "../components/States";
 import { IconApp } from "../components/Icons";
 import {
   FormSection,
+  DetailDrawer,
   ResponsiveTable,
   StatusChip,
   SummaryRail,
   type StatusTone,
 } from "../components/WorkspacePrimitives";
 import { pickFile } from "../pickFile";
-import type { AppInstallResult, AppInstallStatus, AppLibraryItem, DeviceGroup } from "../types";
+import type { AppInstallResult, AppInstallStatus, AppLibraryItem, DeviceGroup, TargetRef } from "../types";
 import type { SelProps } from "./pageProps";
+import type { OperationSourceRef } from "../operationSource";
 
 const INSTALL_STATUS: Record<AppInstallStatus, { label: string; tone: StatusTone }> = {
   succeeded: { label: "Đã xác nhận", tone: "success" },
@@ -42,14 +44,15 @@ function appVersion(app: AppLibraryItem): string {
 }
 
 /** The real app library and bounded, per-device installation results. */
-export function AppsPage({ devices, selected, onSelectUdids }: SelProps) {
-  const batch = useLibraryBatch("appInstall");
+export function AppsPage({ devices, selected, operationSource }: SelProps & { operationSource?: OperationSourceRef }) {
+  const batch = useLibraryBatch("appInstall", operationSource?.kind === "appInstall" ? operationSource.operationId : undefined);
+  const [importOpen, setImportOpen] = useState(false);
   const [items, setItems] = useState<AppLibraryItem[]>([]);
   const [path, setPath] = useState("");
   const [bundleId, setBundleId] = useState("");
   const [busy, setBusy] = useState(false);
   const [groups, setGroups] = useState<DeviceGroup[]>([]);
-  const [groupId, setGroupId] = useState("");
+  const [targetRef, setTargetRef] = useState<TargetRef>(() => ({ type: "explicit", udids: [...selected] }));
   const [batchResults, setBatchResults] = useState<AppInstallResult[]>([]);
   const [batchLabels, setBatchLabels] = useState<Map<string,string>>(new Map());
   const [activeBatch, setActiveBatch] = useState<{ id: string; appId: string } | null>(null);
@@ -121,6 +124,7 @@ export function AppsPage({ devices, selected, onSelectUdids }: SelProps) {
         allowDowngrade,
       });
       setBatchResults(response.results);
+      if (operationSource) batch.follow(`appInstall:${response.batchId}`);
       if (response.target) setBatchLabels(new Map(response.target.included.map((device,index) => [device.udid,
         `Máy ${device.number ?? index + 1}${device.alias.trim() ? ` · ${device.alias.trim()}` : ""}`])));
       const succeeded = response.results.filter((result) => result.status === "succeeded").length;
@@ -140,41 +144,22 @@ export function AppsPage({ devices, selected, onSelectUdids }: SelProps) {
     }
   };
 
-  const installToGroup = async (app: AppLibraryItem) => {
-    const group = groups.find((candidate) => candidate.id === groupId);
-    if (!group) {
-      flash("Chọn một nhóm trước");
-      return;
-    }
-    const platform = app.platform === "ios" ? iosDevices : androidDevices;
-    const connected = new Set(platform.map((device) => device.udid));
-    const targets = group.udids.filter((udid) => connected.has(udid));
-    if (!targets.length) {
-      flash(`Nhóm không có máy ${app.platform === "ios" ? "iPhone" : "Android"} đang kết nối`);
-      return;
-    }
-    await runBatch(app, targets);
-  };
-
-  const selectedCount = selected.length || devices.length;
+  const targets = resolveAutomationTarget(targetRef, devices, groups);
+  const selectedCount = targets.length;
   const confirmedCount = batchResults.filter((result) => result.status === "succeeded").length;
 
   return (
     <div className="admin-workspace apps-workspace">
-      <SelectionStrip
-        devices={devices}
-        selected={selected}
-        onSelectAll={() => onSelectUdids(devices.map((device) => device.udid))}
-        onClear={() => onSelectUdids([])}
-        onSelectUdids={onSelectUdids}
-      />
+      <TargetSelector devices={devices} groups={groups} selected={[]} onChange={() => undefined}
+        targetRef={targetRef} onTargetRefChange={setTargetRef} requireChoice label="Phạm vi cài đặt" />
+      {groupsLoading && <LoadingState label="Đang tải danh sách nhóm…" />}
+      {groupsError && <StatusNotice tone="error" action={<button type="button" className="ghost" onClick={() => void reloadGroups()}>Thử lại danh sách nhóm</button>}>
+        Không tải được danh sách nhóm: {groupsError}
+      </StatusNotice>}
 
       <div className="admin-split">
         <main className="admin-main">
-          <FormSection
-            title="Thêm gói cài đặt"
-            description="Đọc metadata và lưu một bản quản lý trước khi phân phối tới thiết bị."
-          >
+          <DetailDrawer open={importOpen} title="Thêm gói cài đặt" onClose={() => { if (!busy) setImportOpen(false); }}>
             <div className="admin-field-grid">
               <label className="is-wide">
                 Tệp ứng dụng
@@ -214,6 +199,7 @@ export function AppsPage({ devices, selected, onSelectUdids }: SelProps) {
                       setPath("");
                       setBundleId("");
                       await reloadLibrary();
+                      setImportOpen(false);
                       flash("Đã thêm ứng dụng vào thư viện");
                     } catch (error) {
                       flashError(error);
@@ -227,15 +213,16 @@ export function AppsPage({ devices, selected, onSelectUdids }: SelProps) {
                 </button>
               </div>
             </div>
-          </FormSection>
+          </DetailDrawer>
 
           <FormSection
             title="Thư viện ứng dụng"
             description={items.length ? `${items.length} gói sẵn sàng phân phối` : undefined}
             actions={(
+              <><button type="button" className="primary" onClick={() => setImportOpen(true)}><Plus size={15} aria-hidden="true" />Thêm gói</button>
               <button type="button" className="icon-btn" onClick={() => void reloadLibrary()} disabled={itemsLoading} aria-label="Làm mới thư viện ứng dụng" title="Làm mới thư viện ứng dụng">
                 <RefreshCw size={16} aria-hidden="true" />
-              </button>
+              </button></>
             )}
           >
             {itemsError && (
@@ -252,18 +239,21 @@ export function AppsPage({ devices, selected, onSelectUdids }: SelProps) {
                 compact
                 icon={<IconApp size={15} />}
                 title="Chưa có ứng dụng"
-                hint="Chọn một gói cài đặt ở phần trên để bắt đầu."
+                action={<button type="button" className="primary" onClick={() => setImportOpen(true)}>Thêm gói cài đặt</button>}
               />
             )}
             {items.length > 0 && (
               <ResponsiveTable
                 label="Thư viện ứng dụng"
+                viewKey="apps"
+                searchText={(app) => [app.name, appVersion(app), app.applicationId, app.bundleId, app.platform].join(" ")}
                 rows={items}
                 keyForRow={(app) => app.id}
                 columns={[
                   {
                     id: "app",
                     label: "Ứng dụng",
+                    sortValue: (app) => app.name,
                     render: (app) => (
                       <span className="apps-library-name">
                         <strong>{app.name}</strong>
@@ -274,11 +264,12 @@ export function AppsPage({ devices, selected, onSelectUdids }: SelProps) {
                   {
                     id: "format",
                     label: "Nền tảng",
+                    sortValue: (app) => app.platform,
                     render: (app) => <StatusChip>{app.platform === "ios" ? "iPhone" : "Android"} · {app.packageFormat.toUpperCase()}</StatusChip>,
                   },
                   {
                     id: "metadata",
-                    label: "Metadata",
+                    label: "Thông tin gói",
                     render: (app) => (
                       <StatusChip tone={app.metadataError ? "warning" : "success"}>
                         {app.metadataError ? "Cần xem" : "Đã đọc"}
@@ -288,9 +279,10 @@ export function AppsPage({ devices, selected, onSelectUdids }: SelProps) {
                   {
                     id: "actions",
                     label: "Cài đặt",
+                    required: true,
                     render: (app) => {
                       const platformDevices = app.platform === "ios" ? iosDevices : androidDevices;
-                      const installTargets = targetsOf(selected, platformDevices).filter((udid) =>
+                      const installTargets = targets.filter((udid) =>
                         platformDevices.some((device) => device.udid === udid),
                       );
                       const platformName = app.platform === "ios" ? "iPhone" : "Android";
@@ -308,15 +300,6 @@ export function AppsPage({ devices, selected, onSelectUdids }: SelProps) {
                             onClick={() => void runBatch(app, installTargets)}
                           >
                             Cài → {installTargets.length} {platformName}
-                          </button>
-                          <button
-                            type="button"
-                            className="ghost"
-                            disabled={!groupId || busy || batch.loading || batch.active || !!batch.error}
-                            title="Cài lên toàn bộ máy trong nhóm đã chọn"
-                            onClick={() => void installToGroup(app)}
-                          >
-                            Cài → nhóm
                           </button>
                           {activeBatch?.appId === app.id && (
                             <button type="button" className="ghost" onClick={() => void cancelAppInstallBatch(activeBatch.id).catch(flashError)}>
@@ -407,26 +390,6 @@ export function AppsPage({ devices, selected, onSelectUdids }: SelProps) {
             <div className="admin-metric"><dt>Android kết nối</dt><dd>{androidDevices.length}</dd></div>
             <div className="admin-metric"><dt>iPhone kết nối</dt><dd>{iosDevices.length}</dd></div>
           </dl>
-          {groupsError && (
-            <StatusNotice tone="error" action={<button type="button" className="ghost" onClick={() => void reloadGroups()}>Thử lại danh sách nhóm</button>}>
-              Không tải được danh sách nhóm: {groupsError}
-            </StatusNotice>
-          )}
-          <label>
-            Cài hàng loạt theo nhóm
-            <select value={groupId} disabled={groupsLoading || !!groupsError} onChange={(event) => setGroupId(event.target.value)}>
-              <option value="">
-                {groupsLoading
-                  ? "Đang tải danh sách nhóm…"
-                  : groupsError
-                    ? "Danh sách nhóm chưa tải được"
-                    : groups.length
-                      ? "Chọn nhóm"
-                      : "Chưa có nhóm thiết bị"}
-              </option>
-              {groups.map((group) => <option key={group.id} value={group.id}>{group.name} ({group.udids.length} máy)</option>)}
-            </select>
-          </label>
           <label className="agent-toggle">
             <input type="checkbox" checked={allowDowngrade} disabled={busy} onChange={(event) => setAllowDowngrade(event.target.checked)} />
             Cho phép hạ phiên bản

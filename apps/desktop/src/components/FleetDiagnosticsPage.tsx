@@ -108,6 +108,7 @@ export function FleetDiagnosticsPage({
   const [rows, setRows] = useState<DisplayRow[] | null>(null);
   const [detailUdid, setDetailUdid] = useState<string | null>(null);
   const [query, setQuery] = useState("");
+  const [attentionOnly, setAttentionOnly] = useState(false);
   const generation = useRef(0);
   const activeRosterKey = useRef("");
   const limiter = useRef(createHealthLimiter());
@@ -183,6 +184,7 @@ export function FleetDiagnosticsPage({
     0,
   );
   const filteredRows = rows.filter((row, position) =>
+    (!attentionOnly || Boolean(row.error) || row.checks?.some((check) => ["warning", "fail", "unknown"].includes(check.status))) &&
     deviceLabel(row.device, metasByUdid.get(row.device.udid), position)
       .toLowerCase()
       .includes(query.trim().toLowerCase()),
@@ -198,9 +200,9 @@ export function FleetDiagnosticsPage({
       <div className="admin-toolbar">
         <div className="admin-toolbar-copy">
           <strong>{complete}/{rows.length} máy đã có kết quả</strong>
-          <span>Các phép kiểm chỉ đọc, không thay đổi điện thoại.</span>
         </div>
         <div className="admin-toolbar-actions">
+          <label className="agent-toggle"><input type="checkbox" checked={attentionOnly} onChange={(event) => setAttentionOnly(event.target.checked)} />Chỉ máy cần xem</label>
           <label className="search-field">
             <Search size={15} aria-hidden="true" />
             <span className="visually-hidden">Tìm thiết bị</span>
@@ -238,6 +240,7 @@ export function FleetDiagnosticsPage({
 
       <ResponsiveTable
         label="Kết quả chẩn đoán thiết bị"
+        viewKey="diagnostics"
         rows={filteredRows}
         keyForRow={(row) => row.device.udid}
         labelForRow={(row) => {
@@ -247,14 +250,15 @@ export function FleetDiagnosticsPage({
         empty={(
           <EmptyState
             compact
-            title="Không tìm thấy thiết bị"
-            hint="Đổi từ khóa để xem lại toàn bộ kết quả chẩn đoán."
+            title={attentionOnly && !query.trim() ? "Không có máy cần xem thêm" : "Không tìm thấy thiết bị"}
+            hint={attentionOnly ? "Bỏ bộ lọc để xem toàn bộ kết quả chẩn đoán." : "Đổi từ khóa để xem lại toàn bộ kết quả chẩn đoán."}
           />
         )}
         columns={[
           {
             id: "device",
             label: "Thiết bị",
+            sortValue: (row) => metasByUdid.get(row.device.udid)?.number ?? rows.indexOf(row) + 1,
             render: (row) => {
               const position = rows.indexOf(row);
               const label = primaryDeviceLabel(row.device, metasByUdid.get(row.device.udid), position);
@@ -268,12 +272,12 @@ export function FleetDiagnosticsPage({
           },
           {
             id: "agent",
-            label: "Agent",
+            label: "Điều khiển",
             render: (row) => statusCell(clusterStatus(row, ["agentCache", "agentLive", "agentCapabilities"]), row.loading),
           },
           {
             id: "helper",
-            label: "Helper",
+            label: "Kết nối phụ trợ",
             render: (row) => statusCell(clusterStatus(row, ["helperInstalled", "helperReachable"]), row.loading),
           },
           {
@@ -284,6 +288,7 @@ export function FleetDiagnosticsPage({
           {
             id: "actions",
             label: "Thao tác",
+            required: true,
             render: (row) => {
               const position = rows.indexOf(row);
               const label = deviceLabel(row.device, metasByUdid.get(row.device.udid), position);

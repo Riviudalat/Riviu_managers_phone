@@ -92,6 +92,16 @@ beforeEach(() => {
 });
 
 describe("JobsPanel operations monitor", () => {
+  it("opens the exact source and retryable item without dispatching", async () => {
+    operationListRuns.mockResolvedValue([summary]);
+    operationGetRun.mockResolvedValue(detail);
+    const onOpenSource = vi.fn();
+    render(<JobsPanel devices={[]} selectedUdids={[]} onSelectUdids={() => undefined} deviceLabels={new Map()} onOpenSource={onOpenSource} />);
+    await userEvent.click(await screen.findByRole("button", { name: "Mở tại Tương tác" }));
+    expect(onOpenSource).toHaveBeenLastCalledWith({ operationId: summary.id, sourceId: summary.sourceId, kind: "interaction" });
+    await userEvent.click(screen.getByRole("button", { name: "Mở mục cần xử lý" }));
+    expect(onOpenSource).toHaveBeenLastCalledWith({ operationId: summary.id, sourceId: summary.sourceId, kind: "interaction", itemId: "assignment-b", udid: "phone-2" });
+  });
   it("separates interaction posts from unique assignment devices", async () => {
     const onePost = { ...summary, targetCount: 1 };
     operationListRuns.mockResolvedValue([onePost]);

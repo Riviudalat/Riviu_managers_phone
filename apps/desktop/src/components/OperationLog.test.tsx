@@ -1,4 +1,5 @@
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
+import { StrictMode } from "react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -25,9 +26,47 @@ function row(over: Partial<OpLog>): OpLog {
 beforeEach(() => {
   listLogs.mockReset();
 });
-afterEach(cleanup);
+afterEach(() => { cleanup(); vi.restoreAllMocks(); vi.unstubAllGlobals(); });
 
 describe("the operation log", () => {
+  it("exports only the filtered human-readable summary, not raw details", async () => {
+    listLogs.mockResolvedValue([
+      row({ action: "publish.create", detail: "token=private-value" }),
+      row({ id: "other", action: "nurture.start" }),
+    ]);
+    const createObjectURL = vi.fn((_blob: Blob) => "blob:summary");
+    const revokeObjectURL = vi.fn();
+    vi.stubGlobal("URL", class extends URL {
+      static createObjectURL = createObjectURL;
+      static revokeObjectURL = revokeObjectURL;
+    });
+    vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => undefined);
+    render(<OperationLog />);
+    await screen.findByText("publish.create");
+    await userEvent.type(screen.getByLabelText("Lọc nhật ký thao tác"), "Đăng bài");
+    await userEvent.click(screen.getByRole("button", { name: "Xuất danh sách" }));
+    const blob: Blob = createObjectURL.mock.calls[0][0];
+    const text = await new Promise<string>((resolve) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(String(reader.result));
+      reader.readAsText(blob);
+    });
+    expect(JSON.parse(text)).toEqual([{ action: "Đăng bài", createdAt: "2026-08-27T09:14:02.512Z" }]);
+    expect(text).not.toContain("private-value");
+    expect(revokeObjectURL).toHaveBeenCalledWith("blob:summary");
+  });
+
+  it("ignores an older read after StrictMode starts a replacement", async () => {
+    let resolveOld!: (value: OpLog[]) => void;
+    listLogs.mockImplementationOnce(() => new Promise<OpLog[]>((resolve) => { resolveOld = resolve; }))
+      .mockResolvedValueOnce([row({ action: "publish.current" })]);
+    render(<StrictMode><OperationLog /></StrictMode>);
+    await screen.findByText("publish.current");
+    await act(async () => { resolveOld([row({ action: "nurture.stale" })]); });
+    expect(screen.queryByText("nurture.stale")).toBeNull();
+    expect(screen.getByText("publish.current")).toBeInTheDocument();
+  });
+
   /**
    * **The table had fifteen writers and no reader.**
    *

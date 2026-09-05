@@ -39,6 +39,7 @@ import { describeError } from "../describeError";
 import { orderDevicesByNumber, tileName, tileNumber } from "../deviceNaming";
 import { pickDirectory } from "../pickFile";
 import { targetsOf } from "../selectionTargets";
+import type { OperationSourceRef } from "../operationSource";
 import type {
   DevicePublishReadiness,
   PublishAssignmentRecord,
@@ -271,6 +272,7 @@ type PublishPageProps = SelProps & {
   targetRef?: TargetRef;
   onTargetRefChange?: (target: TargetRef) => void;
   metas?: Map<string, import("../types").DeviceMeta>;
+  operationSource?: OperationSourceRef;
 };
 type AsyncState = "idle" | "loading" | "ready" | "error";
 
@@ -281,6 +283,7 @@ export function PublishPage({
   targetRef = { type: "all" },
   onTargetRefChange,
   metas = new Map(),
+  operationSource,
 }: PublishPageProps) {
   const [workspaceTab, setWorkspaceTab] = useState<"setup" | "monitor">("setup");
   const [sourceRoot, setSourceRoot] = useState("");
@@ -317,6 +320,26 @@ export function PublishPage({
     inputKey: string;
     report: PublishPreflightReport;
   } | null>(null);
+  const [sourceCampaign, setSourceCampaign] = useState<PublishCampaignRecord | null>(null);
+  const [sourceError, setSourceError] = useState<string | null>(null);
+  const [sourceLoading, setSourceLoading] = useState(false);
+  const sourceId = operationSource?.kind === "publish" ? operationSource.sourceId : undefined;
+  useEffect(() => {
+    if (!sourceId) { setSourceCampaign(null); setSourceError(null); return; }
+    let active = true;
+    setWorkspaceTab("monitor");
+    setSourceCampaign(null);
+    setSourceError(null);
+    setSourceLoading(true);
+    void publishGet(sourceId).then((detail) => {
+      if (!active) return;
+      if (!detail || detail.campaign.id !== sourceId) throw new Error("Chiến dịch được chọn không còn trong nguồn dữ liệu.");
+      setSourceCampaign(detail.campaign);
+      setDetails((current) => ({ ...current, [sourceId]: detail }));
+    }).catch((error) => { if (active) setSourceError(describeError(error)); })
+      .finally(() => { if (active) setSourceLoading(false); });
+    return () => { active = false; };
+  }, [sourceId]);
 
   const eligibleTargets = useMemo(
     () => targetUdids ?? targetsOf(selected, devices),
@@ -733,18 +756,21 @@ export function PublishPage({
   };
 
   const setupStep = !manifest ? "source" : !profileReady ? "mapping" : !canExecute ? "preflight" : "confirm";
-  const currentStep = workspaceTab === "monitor" ? "monitor" : setupStep;
   const stepper = (
     <div className="publish-stepper-scroll">
       <WorkflowStepper
-        current={currentStep}
+        current={setupStep}
         label="Quy trình đăng bài"
+        onStepChange={(id) => {
+          const section = document.getElementById(`publish-step-${id}`);
+          section?.focus();
+          section?.scrollIntoView?.({ block: "nearest", behavior: "auto" });
+        }}
         steps={[
           { id: "source", label: "Nguồn" },
           { id: "mapping", label: "Ghép bài/máy" },
           { id: "preflight", label: "Preflight" },
           { id: "confirm", label: "Xác nhận công khai" },
-          { id: "monitor", label: "Theo dõi" },
         ]}
       />
     </div>
@@ -785,6 +811,7 @@ export function PublishPage({
         />
         <div className="publish-workspace-grid">
           <div className="publish-workspace-main">
+            <div id="publish-step-source" className="publish-step-section" tabIndex={-1} role="group" aria-label="Nguồn nội dung">
             <SourceSection
               busy={busy}
               sourceRoot={sourceRoot}
@@ -799,6 +826,8 @@ export function PublishPage({
               invalidate={invalidatePreflight}
               scan={scan}
             />
+            </div>
+            <div id="publish-step-mapping" className="publish-step-section" tabIndex={-1} role="group" aria-label="Ghép bài với máy">
             <MappingSection
               busy={busy}
               manifest={manifest}
@@ -815,6 +844,8 @@ export function PublishPage({
               setAssignedUdids={setAssignedUdids}
               invalidate={invalidatePreflight}
             />
+            </div>
+            <div id="publish-step-preflight" className="publish-step-section" tabIndex={-1} role="group" aria-label="Kiểm tra trước khi đăng">
             <PreflightSection
               profileReady={profileReady}
               busy={busy}
@@ -830,6 +861,8 @@ export function PublishPage({
               devices={devices}
               metas={metas}
             />
+            </div>
+            <div id="publish-step-confirm" className="publish-step-section" tabIndex={-1} role="group" aria-label="Xác nhận công khai">
             <FormSection title="Xác nhận công khai" description="Nút chạy chỉ mở cho đúng digest vừa vượt qua preflight.">
               <div className="publish-confirm-grid">
                 <label>
@@ -849,6 +882,7 @@ export function PublishPage({
               </div>
               {!canExecute && <p className="publish-muted">Hoàn tất preflight của đầu vào hiện tại để mở nút xác nhận.</p>}
             </FormSection>
+            </div>
           </div>
           <PublishAside
             manifest={manifest}
@@ -885,6 +919,8 @@ export function PublishPage({
       </section>
 
       <section id="publish-panel-monitor" className="publish-workspace-section" role="tabpanel" aria-label="Theo dõi" hidden={workspaceTab !== "monitor"}>
+        {sourceLoading && <LoadingState label="Đang mở chiến dịch được chọn…" />}
+        {sourceError && <StatusNotice tone="error">{sourceError}</StatusNotice>}
         <div className="publish-monitor-head">
           <div>
             <h2>Tiến độ chiến dịch</h2>
@@ -907,9 +943,9 @@ export function PublishPage({
         {campaignLoadState === "ready" && campaigns.length === 0 && (
           <EmptyState compact icon={<IconRocket size={17} />} title="Chưa có chiến dịch" hint="Tạo chiến dịch ở thẻ Thiết lập để bắt đầu đăng bài." />
         )}
-        {campaignLoadState === "ready" && campaigns.length > 0 && (
+        {(sourceId ? sourceCampaign !== null : campaignLoadState === "ready" && campaigns.length > 0) && (
           <CampaignMonitor
-            campaigns={campaigns}
+            campaigns={sourceCampaign ? [campaigns.find((campaign) => campaign.id === sourceCampaign.id) ?? sourceCampaign] : campaigns}
             busy={busy}
             details={details}
             detailErrors={detailErrors}

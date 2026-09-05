@@ -4,7 +4,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import App from "./App";
 import { resetConfirms } from "./confirmStore";
 import { resetToasts } from "./toastStore";
-import type { DeviceInfo } from "./types";
+import type { DeviceInfo, OperationRunSummary } from "./types";
+import type { OperationSourceRef } from "./operationSource";
 import { useState } from "react";
 import { useWorkspaceDraft } from "./workspaceDraft";
 
@@ -117,18 +118,27 @@ vi.mock("./components/NurturePopup", () => ({
     surface,
     targetUdids,
     targetRef,
+    operationSource,
   }: {
     surface?: string;
     targetUdids?: string[];
     targetRef?: { type: string };
-  }) => (
+    operationSource?: OperationSourceRef;
+  }) => {
+    const [dirty, setDirty] = useState(false);
+    useWorkspaceDraft({ id:"nurture-fixture", label:"Nuôi TikTok fixture", dirty, snapshotKey:String(dirty),
+      save:async () => { setDirty(false); return true; }, discard:() => setDirty(false) });
+    return (
     <section
       aria-label="Không gian Nuôi TikTok"
       data-surface={surface}
       data-targets={targetUdids?.join(",")}
       data-target-type={targetRef?.type}
-    />
-  ),
+      data-operation-id={operationSource?.operationId}
+      data-source-id={operationSource?.sourceId}
+      data-item-id={operationSource?.itemId}
+    ><button type="button" onClick={() => setDirty(true)}>Mark nurture dirty</button></section>
+  ); },
 }));
 
 vi.mock("./components/InteractionPopup", () => ({
@@ -145,6 +155,59 @@ afterEach(() => {
 
 beforeEach(() => {
   vi.clearAllMocks();
+});
+
+describe("operation source navigation", () => {
+  afterEach(async () => {
+    const api = await import("./api");
+    vi.mocked(api.operationQueryRuns).mockReset().mockResolvedValue({ runs:[],total:0,counts:{active:0,succeeded:0,attention:0},hasMore:false });
+    vi.mocked(api.operationGetRun).mockReset().mockResolvedValue(null);
+  });
+  async function openHistory() {
+    const api = await import("./api");
+    const run: OperationRunSummary = { id:"nurture:historic", sourceId:"historic", kind:"nurture", title:"Phiên lịch sử",
+      state:"failed", targetCount:1,totalItems:1,completedItems:1,issueCount:1,retryableCount:1,retryScope:null,createdAt:null,updatedAt:null };
+    vi.mocked(api.operationQueryRuns).mockResolvedValue({ runs:[run],total:1,counts:{active:0,succeeded:0,attention:1},hasMore:false });
+    vi.mocked(api.operationGetRun).mockResolvedValue({summary:run,items:[{id:"item-old",kind:"device",label:"Máy lịch sử",state:"failed",udid:"old-phone",errorCode:null,detail:null,evidence:null,retryable:true}]});
+    render(<App />);
+    await userEvent.click(screen.getByRole("button", {name:"Tác vụ"}));
+    await userEvent.click(await screen.findByRole("button", {name:"Mở mục cần xử lý"}));
+    const workspace = await screen.findByRole("region", {name:"Không gian Nuôi TikTok"});
+    await waitFor(() => expect(workspace).toHaveAttribute("data-operation-id", run.id));
+    expect(workspace).toHaveAttribute("data-source-id", "historic");
+    expect(workspace).toHaveAttribute("data-item-id", "item-old");
+    return workspace;
+  }
+
+  it("retains the exact Jobs source until ordinary sidebar navigation is accepted", async () => {
+    await openHistory();
+    await userEvent.click(screen.getByRole("button", {name:"Thiết bị"}));
+    await userEvent.click(screen.getByRole("button", {name:"Nuôi TikTok"}));
+    expect(screen.getByRole("region", {name:"Không gian Nuôi TikTok"})).not.toHaveAttribute("data-operation-id");
+  });
+
+  it("keeps historical context when leaving a dirty workspace is declined", async () => {
+    const workspace = await openHistory();
+    await userEvent.click(screen.getByRole("button", {name:"Mark nurture dirty"}));
+    await userEvent.click(screen.getByRole("button", {name:"Thiết bị"}));
+    await userEvent.click(await screen.findByRole("button", {name:"Ở lại"}));
+    expect(workspace).toHaveAttribute("data-operation-id", "nurture:historic");
+    await userEvent.click(screen.getByRole("button", {name:"Thiết bị"}));
+    await userEvent.click(await screen.findByRole("button", {name:"Bỏ thay đổi"}));
+    await userEvent.click(screen.getByRole("button", {name:"Nuôi TikTok"}));
+    expect(screen.getByRole("region", {name:"Không gian Nuôi TikTok"})).not.toHaveAttribute("data-operation-id");
+  });
+
+  it("guards the same sidebar destination before closing historical context", async () => {
+    const workspace = await openHistory();
+    await userEvent.click(screen.getByRole("button", {name:"Mark nurture dirty"}));
+    await userEvent.click(screen.getByRole("button", {name:"Nuôi TikTok"}));
+    await userEvent.click(await screen.findByRole("button", {name:"Ở lại"}));
+    expect(workspace).toHaveAttribute("data-operation-id", "nurture:historic");
+    await userEvent.click(screen.getByRole("button", {name:"Nuôi TikTok"}));
+    await userEvent.click(await screen.findByRole("button", {name:"Bỏ thay đổi"}));
+    await waitFor(() => expect(workspace).not.toHaveAttribute("data-operation-id"));
+  });
 });
 
 const androidPhone: DeviceInfo = {
