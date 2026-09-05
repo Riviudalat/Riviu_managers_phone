@@ -80,6 +80,10 @@
   flex-direction: column;
 }
 
+.publish-workspace-aside .automation-profile-fields label {
+  flex: 0 0 auto;
+}
+
 .publish-workspace-aside .automation-profile-control {
   padding: var(--space-3) 0 0;
   border: 0;

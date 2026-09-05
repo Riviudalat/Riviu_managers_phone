@@ -566,8 +566,22 @@
 }
 
 .nurture-workspace .workspace-command-actions .nurture-float-actions {
-  width: min(100%, 360px);
+  flex-wrap: wrap;
   margin: 0;
+}
+
+.nurture-workspace .workspace-command-actions .nurture-float-actions button {
+  flex: 0 0 auto;
+  min-width: 64px;
+  white-space: nowrap;
+}
+
+.nurture-workspace-body > .banner-warning {
+  margin-bottom: var(--space-3);
+}
+
+.nurture-workspace input[aria-invalid="true"] {
+  border-color: var(--danger-deep);
 }
 
 .nurture-workspace .nurture-live {

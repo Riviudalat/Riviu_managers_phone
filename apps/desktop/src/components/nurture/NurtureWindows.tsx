@@ -1,4 +1,5 @@
 import type { NurtureSettings, NurtureWindow, NurtureWindowBehaviour } from "../../types";
+import { nurtureFieldValidation, type NurtureSettingsIssue } from "../../nurtureValidation";
 import { InfoDot as Info } from "../InfoDot";
 
 /**
@@ -54,11 +55,15 @@ export function NurtureWindows({
   settings,
   patch,
   targets,
+  issue,
+  issueId,
 }: {
   settings: NurtureSettings;
   patch: <K extends keyof NurtureSettings>(key: K, value: NurtureSettings[K]) => void;
   /** The phones selected on the grid right now — what "dùng máy đang chọn" means. */
   targets: string[];
+  issue?: NurtureSettingsIssue | null;
+  issueId?: string;
 }) {
   const windows = settings.scheduleWindows ?? [];
 
@@ -102,7 +107,7 @@ export function NurtureWindows({
         </span>
       </label>
 
-      {windows.length === 0 && (
+      {(windows.length === 0 || issue?.field === "scheduleEveryMinutes" || issue?.field === "scheduleDurationMinutes") && (
         <>
           <div className="nurture-row">
             <label>
@@ -115,6 +120,7 @@ export function NurtureWindows({
                 min={15}
                 max={1440}
                 value={settings.scheduleEveryMinutes}
+                {...nurtureFieldValidation("scheduleEveryMinutes", issue, issueId)}
                 onChange={(e) =>
                   patch("scheduleEveryMinutes", Number(e.target.value) || 240)
                 }
@@ -125,7 +131,7 @@ export function NurtureWindows({
                 Thời lượng (phút)
                 <Info
                   of="Thời lượng (phút)"
-                  what="Phiên theo lịch chạy tối đa bấy nhiêu phút. Đo 24/08/2026: trần được tôn trọng, dừng trễ 4-5 giây vì chỉ kiểm giữa hai video. Phiên bấm tay không dùng số này."
+                  what="Thời lượng tối đa của phiên theo lịch; phiên dừng ở ranh giới giữa hai video. Phiên bấm tay không dùng giới hạn này."
                 />
               </span>
               <input
@@ -133,16 +139,17 @@ export function NurtureWindows({
                 min={15}
                 max={360}
                 value={settings.scheduleDurationMinutes}
+                {...nurtureFieldValidation("scheduleDurationMinutes", issue, issueId)}
                 onChange={(e) =>
                   patch("scheduleDurationMinutes", Number(e.target.value) || 150)
                 }
               />
             </label>
           </div>
-          <p className="nu-hint">
+          {windows.length === 0 && <p className="nu-hint">
             Chưa có khung giờ nào — lịch sẽ chạy <strong>cả ngày</strong> theo chu kỳ trên,
             kể cả ban đêm. Thêm khung giờ để giới hạn lại.
-          </p>
+          </p>}
         </>
       )}
 

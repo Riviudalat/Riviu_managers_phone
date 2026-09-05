@@ -7,6 +7,7 @@ import { describeError } from "../../describeError";
 import { COMMENT_MODEL_SUGGESTIONS } from "../../commentModels";
 import { evidenceLabel } from "../../commentEvidence";
 import { InfoDot as Info } from "../InfoDot";
+import { nurtureFieldValidation, type NurtureSettingsIssue } from "../../nurtureValidation";
 
 /**
  * Where the comments come from: endpoint, model, key, price, and the test that proves it.
@@ -14,8 +15,10 @@ import { InfoDot as Info } from "../InfoDot";
  * Owns the API-test state, which is the one cluster in this panel that belongs to a single
  * tab — the other two tabs are functions of `settings` and nothing else.
  */
-export function NurtureAiTab({ settings, patch, devices, targets, save, onMessage }: {
+export function NurtureAiTab({ settings, patch, devices, targets, save, onMessage, issue, issueId }: {
   settings: NurtureSettings;
+  issue?: NurtureSettingsIssue | null;
+  issueId?: string;
   patch: <K extends keyof NurtureSettings>(key: K, value: NurtureSettings[K]) => void;
   devices: DeviceInfo[];
   /// The phones this panel is acting on; the first is the default to test against.
@@ -111,6 +114,7 @@ export function NurtureAiTab({ settings, patch, devices, targets, save, onMessag
         <input
           type="password"
           value={settings.apiKey}
+          {...nurtureFieldValidation("apiKey", issue, issueId)}
           onChange={(e) => patch("apiKey", e.target.value)}
           autoComplete="off"
           placeholder={settings.hasApiKey ? "Đã lưu — gõ để thay" : "Chưa có khoá"}
@@ -143,6 +147,7 @@ export function NurtureAiTab({ settings, patch, devices, targets, save, onMessag
             min={4}
             max={30}
             value={settings.maxCommentWords}
+            {...nurtureFieldValidation("maxCommentWords", issue, issueId)}
             onChange={(e) => patch("maxCommentWords", Number(e.target.value) || 4)}
           />
         </label>

@@ -2,6 +2,7 @@ import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-li
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { NurturePopup } from "./NurturePopup";
+import { validateNurtureSettings } from "../nurtureValidation";
 import type { DeviceInfo, DeviceMeta, NurtureSessionStatus, NurtureSettings } from "../types";
 
 /**
@@ -512,6 +513,75 @@ describe("NurturePopup", () => {
     expect(api.nurtureStart).not.toHaveBeenCalled();
   });
 
+  it("blocks invalid settings before Start and profile save, and focuses the field to repair", async () => {
+    const api = await import("../api");
+    vi.mocked(api.nurtureGetSettings).mockResolvedValueOnce({ ...settings, watchMax: 1 });
+    render(
+      <NurturePopup devices={devices} selected={[]} metas={new Map()} surface="page"
+        targetRef={{ type: "all" }} />,
+    );
+
+    const start = await screen.findByRole("button", { name: "Bắt đầu" });
+    expect(start).toBeDisabled();
+    const review = screen.getByRole("complementary", { name: "Kiểm tra trước khi chạy" });
+    expect(within(review).queryByText("Sẵn sàng")).toBeNull();
+    expect(within(review).getByText("Cần sửa thiết lập")).toBeVisible();
+    expect(profileControl.render).toHaveBeenLastCalledWith(expect.objectContaining({ disabled: true }));
+    fireEvent.click(start);
+    expect(api.nurtureStart).not.toHaveBeenCalled();
+    expect(api.nurtureSaveSettings).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole("button", { name: "Sửa thiết lập" }));
+    const input = screen.getByLabelText(/Xem max/, { selector: "input" });
+    expect(input).toHaveFocus();
+    expect(input).toHaveAttribute("aria-invalid", "true");
+    expect(input).toHaveAccessibleDescription(/Thời gian xem tối đa/);
+    fireEvent.change(input, { target: { value: "18" } });
+    expect(start).toBeEnabled();
+    expect(input).not.toHaveAttribute("aria-invalid");
+    expect(within(review).getByText("Sẵn sàng")).toBeVisible();
+    expect(screen.queryByRole("button", { name: "Sửa thiết lập" })).toBeNull();
+    expect(profileControl.render).toHaveBeenLastCalledWith(expect.objectContaining({ disabled: false }));
+  });
+
+  it("takes a missing comment key to AI and re-enables Start after repair", async () => {
+    const api = await import("../api");
+    vi.mocked(api.nurtureGetSettings).mockResolvedValueOnce({ ...settings, commentProb: 20 });
+    render(<NurturePopup devices={devices} selected={[]} metas={new Map()} surface="page" />);
+    const start = await screen.findByRole("button", { name: "Bắt đầu" });
+    expect(start).toBeDisabled();
+    fireEvent.click(screen.getByRole("button", { name: "Sửa thiết lập" }));
+    expect(screen.getByRole("tab", { name: "AI" })).toHaveAttribute("aria-selected", "true");
+    const key = screen.getByLabelText(/Khóa API/, { selector: "input" });
+    expect(key).toHaveFocus();
+    expect(key).toHaveAccessibleDescription(/điền API key/);
+    fireEvent.change(key, { target: { value: "fixture-key" } });
+    expect(start).toBeEnabled();
+    expect(api.nurtureStart).not.toHaveBeenCalled();
+  });
+
+  it.each(["scheduleEveryMinutes", "scheduleDurationMinutes"] as const)(
+    "reveals and focuses invalid %s even with an existing schedule window", async (field) => {
+      const api = await import("../api");
+      vi.mocked(api.nurtureGetSettings).mockResolvedValueOnce({
+        ...settings, [field]: 1,
+        scheduleWindows: [{ id: "w-1", startMinute: 480, endMinute: 600,
+          everyMinutes: 60, durationMinutes: 20, udids: [], behaviour: null }],
+      });
+      render(<NurturePopup devices={devices} selected={[]} metas={new Map()} surface="page" />);
+      const start = await screen.findByRole("button", { name: "Bắt đầu" });
+      expect(start).toBeDisabled();
+      fireEvent.click(screen.getByRole("button", { name: "Sửa thiết lập" }));
+      const input = document.querySelector(`[data-nurture-field="${field}"]`);
+      expect(input).toHaveFocus();
+      expect(input).toHaveAttribute("aria-invalid", "true");
+      fireEvent.change(input!, { target: { value: "60" } });
+      expect(start).toBeEnabled();
+      expect(screen.queryByRole("button", { name: "Sửa thiết lập" })).toBeNull();
+      expect(api.nurtureStart).not.toHaveBeenCalled();
+    },
+  );
+
   it("stops the devices captured by Start even after the page target changes", async () => {
     const api = await import("../api");
     const second = { ...devices[0], udid: "mock-2", name: "iPhone Mock 02" };
@@ -795,6 +865,26 @@ describe("NurturePopup", () => {
       "mock-1",
       [new Uint8Array([0xff, 0xd8, 0xff, 0x01])],
     ]);
+  });
+});
+
+describe("Nurture readiness validation", () => {
+  it.each([
+    ["numVideos", 0], ["numVideos", 10_001], ["numVideos", NaN], ["numVideos", 1.5],
+    ["numRounds", 101], ["numRounds", Infinity],
+    ["watchMin", 0], ["watchMin", NaN], ["watchMax", 1], ["watchMax", 121],
+    ["maxCommentWords", 31], ["maxCommentWords", NaN],
+    ["scheduleEveryMinutes", 14], ["scheduleEveryMinutes", Infinity],
+    ["scheduleDurationMinutes", 361], ["scheduleDurationMinutes", 15.5],
+  ] as const)("rejects %s=%s before persistence", (field, value) => {
+    expect(validateNurtureSettings({ ...settings, [field]: value })?.field).toBe(field);
+  });
+
+  it("preserves stored-key and disabled-comment semantics", () => {
+    expect(validateNurtureSettings(settings)).toBeNull();
+    expect(validateNurtureSettings({ ...settings, commentProb: 20, commentEnabled: false })).toBeNull();
+    expect(validateNurtureSettings({ ...settings, commentProb: 20, apiKey: "__riviu_keep_stored_key__" })).toBeNull();
+    expect(validateNurtureSettings({ ...settings, commentProb: 20, hasApiKey: true, apiKey: "" })?.field).toBe("apiKey");
   });
 });
 

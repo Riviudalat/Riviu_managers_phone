@@ -69,7 +69,7 @@ nếu một trích dẫn nêu số con.
 
 ## Nhật ký §9.x
 
-166 mục, trong 6 file dưới `diary/`. **Thứ tự trong file là thứ tự viết, không phải thứ
+167 mục, trong 6 file dưới `diary/`. **Thứ tự trong file là thứ tự viết, không phải thứ
 tự số và cũng không phải thứ tự thời gian** — trong bản gốc §9.43 nằm giữa §9.20 và
 §9.21, và §9.4 nằm sau §9.17. Đó là lý do bảng này sắp theo **số**: để tra được.
 
@@ -283,6 +283,7 @@ thật của việc các mục không được viết theo thứ tự, không ph
 | §9.146 | [Mười bài chỉ cần mười máy, và phạm vi trang không còn dính nhau (05/09/2026)](diary/06-2408-2708.md#9146-mười-bài-chỉ-cần-mười-máy-và-phạm-vi-trang-không-còn-dính-nhau-05092026) | `diary/06-2408-2708.md` |
 | §9.147 | [Bỏ toast nổi, giữ trạng thái trong tầm mắt và gom ba nút chạy về một chỗ (05/09/2026)](diary/06-2408-2708.md#9147-bỏ-toast-nổi-giữ-trạng-thái-trong-tầm-mắt-và-gom-ba-nút-chạy-về-một-chỗ-05092026) | `diary/06-2408-2708.md` |
 | §9.148 | [Một icon 16×32 px kéo lệch cả hàng Nuôi TikTok (05/09/2026)](diary/06-2408-2708.md#9148-một-icon-16×32-px-kéo-lệch-cả-hàng-nuôi-tiktok-05092026) | `diary/06-2408-2708.md` |
+| §9.149 | [Form hồ sơ đồng nhất và trạng thái sẵn sàng Nuôi TikTok (05/09/2026)](diary/06-2408-2708.md#9149-form-hồ-sơ-đồng-nhất-và-trạng-thái-sẵn-sàng-nuôi-tiktok-05092026) | `diary/06-2408-2708.md` |
 
 ---
 

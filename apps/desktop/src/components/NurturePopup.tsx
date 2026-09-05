@@ -1,6 +1,7 @@
 import {
   useCallback,
   useEffect,
+  useId,
   useMemo,
   useRef,
   useState,
@@ -21,6 +22,7 @@ import {
 } from "../api";
 import { targetsOf } from "../selectionTargets";
 import { nurtureProfileConfig } from "../automationProfileConfig";
+import { validateNurtureSettings } from "../nurtureValidation";
 import { orderDevicesByNumber, tileName, tileNumber } from "../deviceNaming";
 import { useTickWhile } from "../useTickWhile";
 import { NurtureAiTab } from "./nurture/NurtureAiTab";
@@ -297,6 +299,10 @@ export function NurturePopup({
   const [startedTargets, setStartedTargets] = useState<string[]>([]);
   const [msg, setMsg] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const issueId = useId();
+  const workspaceRef = useRef<HTMLDivElement>(null);
+  const [focusInvalid, setFocusInvalid] = useState(false);
+  const settingsIssue = settings ? validateNurtureSettings(settings) : null;
   // Tabs rather than a stack of collapsibles. The old panel put "Cấu hình AI", "Hành vi"
   // and the schedule one under another in a column narrow enough that each of them had to
   // be folded away, so tuning two related numbers meant scrolling past a closed section —
@@ -331,6 +337,19 @@ export function NurturePopup({
   );
   const stopTargets = startedTargets.length > 0 ? startedTargets : runningTargets;
   const pageSurface = surface === "page";
+  useEffect(() => {
+    if (!focusInvalid || !settingsIssue) return;
+    const input = workspaceRef.current?.querySelector<HTMLElement>(
+      `[data-nurture-field="${settingsIssue.field}"]`,
+    );
+    if (input) {
+      input.focus();
+      input.scrollIntoView?.({ block: "nearest" });
+    } else {
+      document.getElementById(`nurture-settings-tab-${settingsIssue.tab}`)?.focus();
+    }
+    setFocusInvalid(false);
+  }, [focusInvalid, settingsIssue]);
   const profileConfig = useMemo(
     () =>
       settings ? nurtureProfileConfig(settings, settings.scheduleDurationMinutes) : null,
@@ -477,28 +496,13 @@ export function NurturePopup({
   const save = async (next?: NurtureSettings): Promise<boolean> => {
     const s = next ?? settings;
     if (!s) return false;
-    if (s.maxCommentWords < 4 || s.maxCommentWords > 30) {
-      setMsg(`Giới hạn comment phải từ 4 đến 30 từ`);
-      return false;
-    }
-    if (s.numVideos < 1 || s.numVideos > 10_000 || s.numRounds < 1 || s.numRounds > 100) {
-      setMsg(`Giới hạn video phải từ 1 đến 10000 và vòng từ 1 đến 100`);
-      return false;
-    }
-    if (!Number.isFinite(s.watchMin) || !Number.isFinite(s.watchMax) || s.watchMin <= 0 || s.watchMax < s.watchMin || s.watchMax > 120) {
-      setMsg(`Khoảng xem phải trong 0 đến 120 giây và min không lớn hơn max`);
-      return false;
-    }
-    if (s.scheduleEveryMinutes < 15 || s.scheduleEveryMinutes > 1440 || s.scheduleDurationMinutes < 15 || s.scheduleDurationMinutes > 360) {
-      setMsg(`Lịch phải cách nhau 15–1440 phút và kéo dài 15–360 phút`);
-      return false;
-    }
-    // The switch, not just the number: a percentage kept for later while the switch is off
-    // cannot produce a comment — `NurtureSettings::into_effective` zeroes it before the loop
-    // ever sees it — so demanding an API key for it was refusing a save over a feature that
-    // provably will not run.
-    if ((s.commentEnabled ?? true) && s.commentProb > 0 && !s.apiKey.trim()) {
-      setMsg(`Đã bật bình luận: điền API key trong Cấu hình AI`);
+    const issue = validateNurtureSettings(s);
+    if (issue) {
+      if (pageSurface) {
+        setPageMode("setup");
+        setTab(issue.tab);
+        setFocusInvalid(true);
+      } else setMsg(issue.message);
       return false;
     }
     const payload = {
@@ -647,6 +651,8 @@ export function NurturePopup({
               {tab === key && key === "ai" && (
                 <NurtureAiTab
                   settings={settings}
+                  issue={settingsIssue}
+                  issueId={pageSurface ? issueId : undefined}
                   patch={patch}
                   devices={devices}
                   targets={targets}
@@ -657,6 +663,8 @@ export function NurturePopup({
               {tab === key && key === "behaviour" && (
                 <NurtureBehaviourTab
                   settings={settings}
+                  issue={settingsIssue}
+                  issueId={pageSurface ? issueId : undefined}
                   patch={patch}
                   patchRate={patchRate}
                   targets={targets}
@@ -676,7 +684,7 @@ export function NurturePopup({
 
   const actionControls = (
     <div className="nurture-float-actions">
-      <button type="button" className="primary" disabled={busy || !targets.length} onClick={start}>
+      <button type="button" className="primary" disabled={busy || !targets.length || !settings || Boolean(settingsIssue)} onClick={start}>
         Bắt đầu
       </button>
       <button type="button" className="danger" disabled={busy || !stopTargets.length} onClick={stop}>
@@ -704,6 +712,7 @@ export function NurturePopup({
 
   return (
     <div
+      ref={workspaceRef}
       className={pageSurface ? "nurture-workspace" : "nurture-float-layer"}
       role={pageSurface ? "region" : undefined}
       aria-label={pageSurface ? "Không gian Nuôi TikTok" : "Nuôi TikTok"}
@@ -784,9 +793,26 @@ export function NurturePopup({
                 <CommandBar
                   title={targets.length ? `${targets.length} máy trong phạm vi` : "Chưa có máy trong phạm vi"}
                   detail={pageMode === "monitor" ? "Theo dõi tiến độ hoặc dừng các máy trong phiên hiện tại." : anyRunning ? "Phiên đang chạy; có thể dừng hoặc lưu thay đổi." : "Kiểm tra thiết lập rồi bắt đầu phiên Nuôi TikTok."}
-                  tone={targets.length ? "success" : "warning"}
+                  tone={targets.length && !settingsIssue ? "success" : "warning"}
                   actions={actionControls}
                 />
+              )}
+
+              {pageSurface && settingsIssue && (
+                <StatusNotice
+                  tone="warning"
+                  action={(
+                    <button type="button" className="ghost" onClick={() => {
+                      setPageMode("setup");
+                      setTab(settingsIssue.tab);
+                      setFocusInvalid(true);
+                    }}>
+                      Sửa thiết lập
+                    </button>
+                  )}
+                >
+                  <span id={issueId}>{settingsIssue.message}</span>
+                </StatusNotice>
               )}
 
               {pageSurface && (
@@ -805,6 +831,9 @@ export function NurturePopup({
                             target={targetRef}
                             config={profileConfig}
                             defaultName="Hồ sơ Nuôi TikTok"
+                            disabled={Boolean(settingsIssue)}
+                            disabledReason={settingsIssue?.message}
+                            disabledReasonId={settingsIssue ? issueId : undefined}
                           />
                         )}
                         {renderSettings()}
@@ -812,8 +841,8 @@ export function NurturePopup({
                       <SummaryRail
                         title="Kiểm tra trước khi chạy"
                         actions={(
-                          <StatusChip tone={targets.length ? "success" : "warning"}>
-                            {targets.length ? "Sẵn sàng" : "Thiếu phạm vi"}
+                          <StatusChip tone={targets.length && !settingsIssue ? "success" : "warning"}>
+                            {settingsIssue ? "Cần sửa thiết lập" : targets.length ? "Sẵn sàng" : "Thiếu phạm vi"}
                           </StatusChip>
                         )}
                       >

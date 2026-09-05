@@ -31,6 +31,7 @@ type Props = {
   defaultName: string;
   disabled?: boolean;
   disabledReason?: string;
+  disabledReasonId?: string;
   confirmSave?: () => Promise<boolean>;
 };
 
@@ -42,6 +43,7 @@ export function AutomationProfileControl({
   defaultName,
   disabled = false,
   disabledReason,
+  disabledReasonId,
   confirmSave,
 }: Props) {
   const label = KIND_LABEL[kind];
@@ -203,9 +205,10 @@ export function AutomationProfileControl({
         )}
         <button
           type="button"
-          className="primary"
+          className="ghost automation-profile-save"
           disabled={busy || disabled}
           title={disabled ? disabledReason : undefined}
+          aria-describedby={disabled ? disabledReasonId : undefined}
           onClick={() => void save()}
         >
           {selectedProfile ? <Save size={16} /> : <Plus size={16} />}
@@ -224,7 +227,7 @@ export function AutomationProfileControl({
           </button>
         )}
       </div>
-      {disabled && disabledReason && <p className="hint">{disabledReason}</p>}
+      {disabled && disabledReason && !disabledReasonId && <p className="hint">{disabledReason}</p>}
       {error && (
         <StatusNotice
           tone="error"

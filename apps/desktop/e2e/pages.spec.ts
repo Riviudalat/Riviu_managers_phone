@@ -93,6 +93,65 @@ function screenshotName(name: string): string {
   return name.normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[đĐ]/g, "d").replace(/\s+/g, "-").toLowerCase();
 }
 
+test("automation profile controls keep consistent size and secondary actions", async ({ page }) => {
+  test.setTimeout(60_000);
+  for (const viewport of [{ width: 1440, height: 900 }, { width: 900, height: 900 }, { width: 820, height: 560 }]) {
+    await page.setViewportSize(viewport);
+    for (const name of ["Nuôi TikTok", "Tương tác", "Đăng bài"]) {
+      await open(page, name);
+      const profile = page.getByRole("region", { name: `Quản lý hồ sơ ${name}` });
+      await expect(profile).toBeVisible();
+      const dimensions = await profile.locator(".automation-profile-fields label > input, .automation-profile-fields label > select").evaluateAll((controls) =>
+        controls.map((control) => {
+          const box = control.getBoundingClientRect();
+          const style = getComputedStyle(control);
+          return { height: box.height, width: box.width, right: box.right, fontSize: style.fontSize };
+        }),
+      );
+      expect(dimensions).toHaveLength(2);
+      for (const control of dimensions) {
+        expect(control.height).toBe(36);
+        expect(control.width).toBeGreaterThan(120);
+        expect(control.right).toBeLessThanOrEqual(viewport.width);
+      }
+      expect(dimensions[0].fontSize).toBe(dimensions[1].fontSize);
+      await expect(profile.locator("button.primary")).toHaveCount(0);
+      if (name === "Nuôi TikTok") {
+        const start = await page.getByRole("button", { name: "Bắt đầu", exact: true }).boundingBox();
+        expect(start?.height).toBeLessThanOrEqual(40);
+      }
+      if (name === "Tương tác") {
+        const profileBox = await profile.boundingBox();
+        const linkBox = await page.getByPlaceholder("Dán link TikTok, mỗi dòng một bài").boundingBox();
+        expect(Math.abs(profileBox!.x - linkBox!.x)).toBeLessThan(1);
+        const select = page.getByRole("combobox", { name: /Nội dung bình luận/ });
+        expect((await select.boundingBox())!.height).toBeGreaterThanOrEqual(32);
+      }
+    }
+  }
+});
+
+test("nurture readiness blocks invalid values and links to the repair field", async ({ page }) => {
+  await open(page, "Nuôi TikTok");
+  const input = page.locator('input[data-nurture-field="watchMax"]');
+  await input.fill("1");
+  await expect(page.getByRole("button", { name: "Bắt đầu", exact: true })).toBeDisabled();
+  await expect(page.getByRole("button", { name: "Tạo hồ sơ", exact: true })).toBeDisabled();
+  await page.getByRole("button", { name: "Sửa thiết lập" }).click();
+  await expect(input).toBeFocused();
+  await expect(input).toHaveAttribute("aria-invalid", "true");
+  await input.fill("20");
+  // The fixture also lacks a comment key: fixing one field must not clear another blocker.
+  await expect(page.getByRole("button", { name: "Bắt đầu", exact: true })).toBeDisabled();
+  await page.getByRole("button", { name: "Sửa thiết lập" }).click();
+  const key = page.locator('input[data-nurture-field="apiKey"]');
+  await expect(key).toBeFocused();
+  await key.fill("fixture-key");
+  await expect(page.getByRole("button", { name: "Bắt đầu", exact: true })).toBeEnabled();
+  await expect(page.getByRole("button", { name: "Sửa thiết lập" })).toHaveCount(0);
+  expect((await mockCommandCalls(page)).filter((call) => call.command === "nurture_start")).toHaveLength(0);
+});
+
 test("the Android app library dispatches and renders one fleet batch", async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
   await open(page, "Trung tâm ứng dụng");

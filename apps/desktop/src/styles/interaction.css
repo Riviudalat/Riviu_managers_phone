@@ -64,10 +64,15 @@
   grid-template-columns: minmax(0, 1fr) minmax(260px, 330px);
   align-items: start;
   gap: var(--space-5);
+  padding: 12px;
 }
 
 .interaction-setup-main {
   min-width: 0;
+}
+
+.interaction-setup-main > .interaction-body {
+  padding: 0;
 }
 
 .interaction-review-list {
@@ -167,7 +172,9 @@
 .interaction-body { display: flex; flex-direction: column; gap: 0.55rem; padding: 0.7rem; }
 .interaction-body label { display: flex; flex-direction: column; gap: 0.25rem; font-size: var(--text-sm); color: var(--text-2); }
 .interaction-body textarea,
+.interaction-body select,
 .interaction-body input { border: 1px solid var(--line-strong); border-radius: 5px; padding: 0.45rem; font: inherit; color: var(--text-1); background: var(--bg-elevated); }
+.interaction-body select { min-width: 0; width: 100%; min-height: 32px; }
 .interaction-body textarea { resize: vertical; min-height: 92px; }
 .interaction-link-list { display: flex; flex-direction: column; gap: 0.2rem; max-height: 120px; overflow: auto; font-size: var(--text-sm); }
 .interaction-link-list > div { display: flex; gap: 0.35rem; align-items: flex-start; overflow-wrap: anywhere; }

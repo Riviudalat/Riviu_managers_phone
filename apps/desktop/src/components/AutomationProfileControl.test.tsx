@@ -55,6 +55,21 @@ describe("AutomationProfileControl", () => {
 
   afterEach(cleanup);
 
+  it("links disabled saving to an existing issue without repeating it", async () => {
+    render(<>
+      <p id="settings-issue">Cần sửa thời gian xem</p>
+      <AutomationProfileControl kind="nurture" target={{ type: "all" }} config={{}}
+        defaultName="Nuôi TikTok" disabled disabledReason="Cần sửa thời gian xem"
+        disabledReasonId="settings-issue" />
+    </>);
+    const save = await screen.findByRole("button", { name: "Tạo hồ sơ" });
+    expect(save).toBeDisabled();
+    expect(save).toHaveAccessibleDescription("Cần sửa thời gian xem");
+    expect(screen.getAllByText("Cần sửa thời gian xem")).toHaveLength(1);
+    fireEvent.click(save);
+    expect(api.automationCreate).not.toHaveBeenCalled();
+  });
+
   it("creates a profile from the current typed target and config snapshot", async () => {
     render(
       <AutomationProfileControl
@@ -66,6 +81,7 @@ describe("AutomationProfileControl", () => {
     );
 
     const nameInput = await screen.findByLabelText("Tên hồ sơ Nuôi TikTok");
+    expect(screen.getByRole("button", { name: "Tạo hồ sơ" })).not.toHaveClass("primary");
     fireEvent.change(nameInput, {
       target: { value: "Ca sáng" },
     });

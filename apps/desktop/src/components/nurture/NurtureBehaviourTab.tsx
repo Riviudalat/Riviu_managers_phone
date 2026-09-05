@@ -1,4 +1,5 @@
 import type { NurtureSettings } from "../../types";
+import { nurtureFieldValidation, type NurtureSettingsIssue } from "../../nurtureValidation";
 import { InfoDot as Info } from "../InfoDot";
 import { NurtureWindows } from "./NurtureWindows";
 import { Switch, FeatureRow } from "../NurturePopup";
@@ -12,8 +13,12 @@ export function NurtureBehaviourTab({
   patch,
   patchRate,
   targets,
+  issue,
+  issueId,
 }: {
   settings: NurtureSettings;
+  issue?: NurtureSettingsIssue | null;
+  issueId?: string;
   patch: <K extends keyof NurtureSettings>(key: K, value: NurtureSettings[K]) => void;
   patchRate: (
     key: "likeProb" | "saveProb" | "commentProb" | "followProb" | "frenzyProb",
@@ -38,6 +43,7 @@ export function NurtureBehaviourTab({
             min={1}
             max={10000}
             value={settings.numVideos}
+            {...nurtureFieldValidation("numVideos", issue, issueId)}
             onChange={(e) => patch("numVideos", Number(e.target.value) || 1)}
           />
         </label>
@@ -54,6 +60,7 @@ export function NurtureBehaviourTab({
             min={1}
             max={100}
             value={settings.numRounds}
+            {...nurtureFieldValidation("numRounds", issue, issueId)}
             onChange={(e) => patch("numRounds", Number(e.target.value) || 1)}
           />
         </label>
@@ -120,6 +127,7 @@ export function NurtureBehaviourTab({
               min={0.5}
               max={120}
               value={settings.watchMin}
+              {...nurtureFieldValidation("watchMin", issue, issueId)}
               onChange={(e) => patch("watchMin", Number(e.target.value) || 1)}
             />
           </label>
@@ -137,6 +145,7 @@ export function NurtureBehaviourTab({
               min={0.5}
               max={120}
               value={settings.watchMax}
+              {...nurtureFieldValidation("watchMax", issue, issueId)}
               onChange={(e) => patch("watchMax", Number(e.target.value) || 5)}
             />
           </label>
@@ -250,7 +259,7 @@ export function NurtureBehaviourTab({
 
       {/* The schedule sits at the bottom of this pane rather than in a tab of its own: a
           window overrides the rates above it, and the two were a tab apart. */}
-      <NurtureWindows settings={settings} patch={patch} targets={targets} />
+      <NurtureWindows settings={settings} patch={patch} targets={targets} issue={issue} issueId={issueId} />
     </div>
   );
 }
