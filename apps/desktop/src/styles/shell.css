@@ -259,6 +259,10 @@
   gap: 12px;
 }
 
+.content > .automation-page-stack {
+  flex: 1 1 0;
+}
+
 .automation-profile-control {
   display: grid;
   gap: 8px;

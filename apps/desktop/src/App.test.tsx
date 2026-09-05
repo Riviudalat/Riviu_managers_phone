@@ -601,6 +601,24 @@ describe("Flow page integration", () => {
     expect(screen.getAllByRole("heading", { level: 1 })).toHaveLength(1);
   });
 
+  it("starts each destination at the top of its workspace", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+
+    const content = document.querySelector<HTMLElement>(".content");
+    expect(content).not.toBeNull();
+    content!.scrollTop = 420;
+    content!.scrollLeft = 24;
+
+    await user.click(screen.getByRole("button", { name: "Nuôi TikTok" }));
+    await waitFor(() =>
+      expect(screen.getByRole("heading", { level: 1, name: "Nuôi TikTok" })).toBeVisible(),
+    );
+
+    expect(content!.scrollTop).toBe(0);
+    expect(content!.scrollLeft).toBe(0);
+  });
+
   it("prompts once before leaving a dirty Flow draft", async () => {
     const user = userEvent.setup();
     render(<App />);

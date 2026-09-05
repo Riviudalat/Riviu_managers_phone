@@ -141,41 +141,45 @@ export function NurtureBehaviourTab({
             />
           </label>
         </div>
-        <Switch
-          checked={settings.fatigue}
-          onChange={(v) => patch("fatigue", v)}
-          label="Mỏi dần"
-          what="Càng về cuối phiên càng xem lâu và tương tác thưa hơn, thay vì giữ đúng một nhịp từ đầu tới cuối. Bật thì số tim thực tế thấp hơn tỉ lệ đã đặt."
-        />
-        <Switch
-          checked={settings.timeOfDay}
-          onChange={(v) => patch("timeOfDay", v)}
-          label="Theo giờ trong ngày"
-          what="Nhịp thay đổi theo giờ thật của máy tính: đêm và giờ làm thì chậm và ít tương tác hơn giờ cao điểm."
-        />
-        <Switch
-          checked={settings.pauseSwipe}
-          onChange={(v) => patch("pauseSwipe", v)}
-          label="Ngập ngừng khi vuốt"
-          what="Thỉnh thoảng vuốt nửa vời rồi mới vuốt hẩn, và thời gian mỗi cú vuốt không đều nhau."
-        />
-        <Switch
-          checked={settings.humanLimits ?? false}
-          onChange={(v) => patch("humanLimits", v)}
-          label="Giới hạn nhịp người"
-          what="Tắt (mặc định): các tỉ lệ bạn đặt ở trên là tỉ lệ thực. Bật: hệ thống tự áp thêm trần 8–16 tim / 1–3 bình luận / 1–2 lượt theo dõi mỗi giờ, chỉ cho tương tác 2 trong 5 bài gần nhất, chờ 12–35 giây sau mỗi hành động và nghỉ 15–90 giây mỗi 7–13 bài — phiên trông giống người hơn nhưng chạy ít hơn nhiều so với số bạn đặt."
-        />
-        <div className="nu-grid">
+        <div className="nu-toggle-grid">
+          <Switch
+            checked={settings.fatigue}
+            onChange={(v) => patch("fatigue", v)}
+            label="Mỏi dần"
+            what="Càng về cuối phiên càng xem lâu và tương tác thưa hơn, thay vì giữ đúng một nhịp từ đầu tới cuối. Bật thì số tim thực tế thấp hơn tỉ lệ đã đặt."
+          />
+          <Switch
+            checked={settings.timeOfDay}
+            onChange={(v) => patch("timeOfDay", v)}
+            label="Theo giờ trong ngày"
+            what="Nhịp thay đổi theo giờ thật của máy tính: đêm và giờ làm thì chậm và ít tương tác hơn giờ cao điểm."
+          />
+          <Switch
+            checked={settings.pauseSwipe}
+            onChange={(v) => patch("pauseSwipe", v)}
+            label="Ngập ngừng khi vuốt"
+            what="Thỉnh thoảng vuốt nửa vời rồi mới vuốt hẩn, và thời gian mỗi cú vuốt không đều nhau."
+          />
+          <Switch
+            checked={settings.humanLimits ?? false}
+            onChange={(v) => patch("humanLimits", v)}
+            label="Giới hạn nhịp người"
+            what="Tắt (mặc định): các tỉ lệ bạn đặt ở trên là tỉ lệ thực. Bật: hệ thống tự áp thêm trần 8–16 tim / 1–3 bình luận / 1–2 lượt theo dõi mỗi giờ, chỉ cho tương tác 2 trong 5 bài gần nhất, chờ 12–35 giây sau mỗi hành động và nghỉ 15–90 giây mỗi 7–13 bài — phiên trông giống người hơn nhưng chạy ít hơn nhiều so với số bạn đặt."
+          />
+        </div>
+        <div className="nu-night-setting">
+          <span className="nu-night-setting-title">
+            Giờ nghỉ đêm
+            <Info
+              of="Nghỉ đêm"
+              what="Rơi vào khoảng giờ này thì phiên tự dừng, tính theo giờ máy tính. Để 0 và 0 là không nghỉ đêm."
+            />
+          </span>
           <label className="nu-field">
-            <span className="nu-label">
-              Nghỉ đêm từ
-              <Info
-                of="Nghỉ đêm"
-                what="Rơi vào khoảng giờ này thì phiên tự dừng, tính theo giờ máy tính. Để 0 và 0 là không nghỉ đêm."
-              />
-            </span>
+            <span className="nu-label">Từ</span>
             <input
               type="number"
+              aria-label="Nghỉ đêm từ"
               min={0}
               max={23}
               value={settings.nightStart}
@@ -183,9 +187,10 @@ export function NurtureBehaviourTab({
             />
           </label>
           <label className="nu-field">
-            <span className="nu-label">đến</span>
+            <span className="nu-label">Đến</span>
             <input
               type="number"
+              aria-label="Nghỉ đêm đến"
               min={0}
               max={23}
               value={settings.nightEnd}

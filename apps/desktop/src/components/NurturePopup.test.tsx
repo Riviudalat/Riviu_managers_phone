@@ -693,7 +693,7 @@ describe("NurturePopup", () => {
     expect(screen.getByLabelText(/^Theo giờ trong ngày/)).toBeChecked();
     expect(screen.getByLabelText(/^Ngập ngừng khi vuốt/)).toBeChecked();
     expect(screen.getByLabelText(/^Nghỉ đêm từ/, { selector: "input" })).toHaveValue(0);
-    expect(screen.getByLabelText("đến", { selector: "input" })).toHaveValue(0);
+    expect(screen.getByLabelText("Nghỉ đêm đến", { selector: "input" })).toHaveValue(0);
     expect(screen.getByLabelText(/Bundle TikTok/, { selector: "input" })).toHaveValue("com.ss.iphone.ugc.Ame");
   });
 

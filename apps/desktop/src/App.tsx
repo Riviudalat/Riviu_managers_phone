@@ -222,6 +222,7 @@ function App() {
   automationViewRef.current = automationView;
   const pendingNavigationRef = useRef<PendingNavigation | null>(null);
   const navigationDrainRef = useRef<Promise<void> | null>(null);
+  const contentRef = useRef<HTMLDivElement>(null);
   const [orchestrationTargetRef, setOrchestrationTargetRef] = useState<TargetRef>({ type: "all" });
   const [publishTargetRef, setPublishTargetRef] = useState<TargetRef>({ type: "all" });
   const [nurtureTargetRef, setNurtureTargetRef] = useState<TargetRef>({ type: "all" });
@@ -327,6 +328,10 @@ function App() {
             const latest = pendingNavigationRef.current;
             pendingNavigationRef.current = null;
             if (!latest) return;
+            if (contentRef.current) {
+              contentRef.current.scrollTop = 0;
+              contentRef.current.scrollLeft = 0;
+            }
             if (latest.kind === "page") {
               pageRef.current = latest.value;
               setPage(latest.value);
@@ -732,7 +737,10 @@ function App() {
           }
         />
 
-        <div className={`content content-${page} ${page === "scripts" ? "content-flow" : ""}`}>
+        <div
+          ref={contentRef}
+          className={`content content-${page} ${page === "scripts" ? "content-flow" : ""}`}
+        >
           {bootError && (
             <Banner
               tone="error"

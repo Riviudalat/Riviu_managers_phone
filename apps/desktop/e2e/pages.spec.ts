@@ -198,6 +198,69 @@ test("publish workflow stays inside the viewport at supported widths", async ({ 
   }
 });
 
+test("nurture rhythm controls stay compact and aligned", async ({ page }) => {
+  for (const viewport of [
+    { width: 1440, height: 900 },
+    { width: 820, height: 560 },
+  ]) {
+    await page.setViewportSize(viewport);
+    await open(page, "Nuôi TikTok");
+
+    const rhythm = page.locator(".nu-group").filter({
+      has: page.locator(".nu-group-head", { hasText: "Nhịp" }),
+    });
+    await rhythm.scrollIntoViewIfNeeded();
+    const geometry = await rhythm.evaluate((group) => {
+      const toggle = group.querySelector<HTMLElement>(".nu-toggle-grid");
+      const night = group.querySelector<HTMLElement>(".nu-night-setting");
+      if (!toggle || !night) throw new Error("Nurture rhythm controls are missing");
+      const toggleRect = toggle.getBoundingClientRect();
+      const nightRect = night.getBoundingClientRect();
+      return {
+        info: Array.from(group.querySelectorAll<HTMLElement>(".nu-info"), (element) => {
+          const rect = element.getBoundingClientRect();
+          return { width: rect.width, height: rect.height };
+        }),
+        switchRows: Array.from(toggle.querySelectorAll<HTMLElement>(".nu-switch"), (element) => {
+          const rect = element.getBoundingClientRect();
+          return { top: Math.round(rect.top), height: rect.height };
+        }),
+        toggleHeight: toggleRect.height,
+        nightHeight: nightRect.height,
+        nightGap: nightRect.top - toggleRect.bottom,
+      };
+    });
+
+    expect(geometry.info.length).toBeGreaterThan(0);
+    for (const info of geometry.info) {
+      expect(info.width, JSON.stringify(geometry)).toBeLessThanOrEqual(18);
+      expect(info.height, JSON.stringify(geometry)).toBeLessThanOrEqual(18);
+    }
+    expect(new Set(geometry.switchRows.map(({ top }) => top)).size, JSON.stringify(geometry))
+      .toBe(2);
+    for (const row of geometry.switchRows) {
+      expect(row.height, JSON.stringify(geometry)).toBeLessThanOrEqual(36);
+    }
+    expect(geometry.toggleHeight, JSON.stringify(geometry)).toBeLessThanOrEqual(76);
+    expect(geometry.nightGap, JSON.stringify(geometry)).toBeLessThanOrEqual(12);
+    expect(geometry.nightHeight, JSON.stringify(geometry)).toBeLessThanOrEqual(48);
+
+    await expect(rhythm).toHaveScreenshot(
+      `nurture-rhythm-${viewport.width}x${viewport.height}.png`,
+      { animations: "disabled", maxDiffPixelRatio: 0.002 },
+    );
+
+    const stack = page.locator(".automation-page-stack");
+    const setupHeight = await stack.evaluate((element) => element.getBoundingClientRect().height);
+    for (const tabName of ["AI", "Bình luận"]) {
+      await page.getByRole("tab", { name: tabName, exact: true }).click();
+      const tabHeight = await stack.evaluate((element) => element.getBoundingClientRect().height);
+      expect(Math.abs(tabHeight - setupHeight), `${tabName}: ${tabHeight} vs ${setupHeight}`)
+        .toBeLessThanOrEqual(1);
+    }
+  }
+});
+
 test.describe("every page in the sidebar", () => {
   test.beforeEach(async ({ page }) => {
     await page.setViewportSize({ width: 1440, height: 900 });

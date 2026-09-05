@@ -774,3 +774,21 @@
 - Đợt này chỉ đổi frontend, fixture và test UI. Không có public action, canary hay thao tác
   trên thiết bị thật nào được chạy; kết quả lint/unit/build/Playwright không được suy thành
   chứng nhận runtime thiết bị.
+
+#### 14.15 Hình học form Nuôi TikTok và vị trí cuộn khi chuyển workspace (05/09/2026; xem §9.148)
+
+- `InfoDot` là nút 16×16 px và phải override cả `height` lẫn `min-height`; nếu chỉ đặt
+  `height`, rule nút toàn cục kéo nó thành 16×32 px và làm lệch hàng chứa label.
+- Nhóm nhịp Nuôi TikTok là lưới công tắc 2×2 tại viewport vận hành, tiếp theo là một hàng
+  `Giờ nghỉ đêm | Từ | Đến`. Hai input giữ accessible name đầy đủ `Nghỉ đêm từ` và
+  `Nghỉ đêm đến`; nhãn rút gọn chỉ là phần nhìn thấy.
+- Cột thiết lập có chiều rộng tối đa 56 rem và summary rail nằm sát cột này, không bị đẩy
+  tới mép phải của màn hình rộng. Rail dùng `align-items: start`, không kéo cao theo form.
+- Chỉ `.automation-page-stack` là con trực tiếp của `.content` mới được grow hết vùng làm
+  việc. Không áp rule này toàn cục: stack Điều phối nằm trong panel Flow và sẽ collapse nếu
+  nhận flex basis 0 ở cấp lồng đó.
+- Một navigation đã được chấp nhận phải đặt `scrollTop` và `scrollLeft` của `.content` về
+  0 trước khi đổi page/view. Navigation bị hủy bởi guard bản nháp không được thay đổi vị trí
+  cuộn của trang hiện tại.
+- Regression phải đo computed geometry ở 1440×900 và 820×560, chụp riêng nhóm Nhịp, và
+  giữ baseline Flow/Tương tác vì các trang đó cũng dùng chung `InfoDot`.
