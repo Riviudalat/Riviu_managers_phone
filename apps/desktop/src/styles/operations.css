@@ -15,6 +15,12 @@
   background: var(--bg-elevated);
 }
 
+.material-page .operations-toolbar {
+  border-color: transparent;
+  border-radius: 0;
+  background: transparent;
+}
+
 .operations-file-field {
   display: grid;
   gap: 0.35rem;
@@ -28,7 +34,6 @@
 }
 
 .operations-toolbar button,
-.operations-card-actions button,
 .operations-results button {
   display: inline-flex;
   align-items: center;
@@ -58,19 +63,11 @@
 }
 
 .operations-list-section > header span,
-.operations-results > header span,
-.operations-card-title > div > span {
+.operations-results > header span {
   color: var(--text-3);
   font-size: var(--text-sm);
 }
 
-.operations-card-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
-  gap: 0.65rem;
-}
-
-.operations-card,
 .operations-result-list article {
   min-width: 0;
   padding: 0.8rem;
@@ -79,8 +76,6 @@
   background: var(--bg-elevated);
 }
 
-.operations-card-title,
-.operations-card-actions,
 .operations-result-list article > div:first-child {
   display: flex;
   align-items: center;
@@ -88,30 +83,12 @@
   gap: 0.55rem;
 }
 
-.operations-card-title > div {
-  display: grid;
-  gap: 0.1rem;
-  min-width: 0;
-}
-
-.operations-card-title strong {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.operations-card-actions {
-  margin-top: 0.75rem;
-}
-
-.operations-card details,
 .operations-result-list details {
   margin-top: 0.55rem;
   color: var(--text-2);
   font-size: var(--text-sm);
 }
 
-.operations-card code,
 .operations-result-list code {
   display: block;
   margin-top: 0.35rem;
@@ -381,8 +358,7 @@
     align-items: stretch;
   }
 
-  .operations-toolbar button,
-  .operations-card-actions .primary {
+  .operations-toolbar button {
     width: 100%;
   }
 

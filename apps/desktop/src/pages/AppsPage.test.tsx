@@ -36,6 +36,9 @@ const androidLibrary: AppLibraryItem[] = [
 ];
 
 vi.mock("../api", () => ({
+  operationQueryRuns: vi.fn(async () => ({ runs: [], total:0, counts:{active:0,succeeded:0,attention:0}, hasMore:false })),
+  operationGetRun: vi.fn(async () => null),
+  operationCancelBatch: vi.fn(async () => undefined),
   addAppLibrary: vi.fn(async () => undefined),
   cancelAppInstallBatch: vi.fn(async () => undefined),
   addMaterial: vi.fn(async () => undefined),
@@ -243,7 +246,7 @@ describe("AppsPage list states", () => {
 
     expect(screen.getByText("Đang tải thư viện ứng dụng…")).toBeInTheDocument();
     expect(screen.queryByText("Chưa có ứng dụng")).toBeNull();
-    expect(screen.getAllByRole("heading", { level: 2 })).toHaveLength(3);
+    expect(screen.getAllByRole("heading", { level: 2 })).toHaveLength(4);
     expect(await screen.findByText("TikTok.ipa")).toBeInTheDocument();
   });
 

@@ -12,6 +12,8 @@ import {
   listGroups,
 } from "../api";
 import { SelectionStrip } from "../components/SelectionStrip";
+import { LibraryBatchMonitor } from "../components/LibraryBatchMonitor";
+import { useLibraryBatch } from "../useLibraryBatch";
 import { flash, flashError } from "../farmToast";
 import { targetsOf } from "../selectionTargets";
 import { EmptyState, LoadingState, StatusNotice } from "../components/States";
@@ -41,6 +43,7 @@ function appVersion(app: AppLibraryItem): string {
 
 /** The real app library and bounded, per-device installation results. */
 export function AppsPage({ devices, selected, onSelectUdids }: SelProps) {
+  const batch = useLibraryBatch("appInstall");
   const [items, setItems] = useState<AppLibraryItem[]>([]);
   const [path, setPath] = useState("");
   const [bundleId, setBundleId] = useState("");
@@ -48,6 +51,7 @@ export function AppsPage({ devices, selected, onSelectUdids }: SelProps) {
   const [groups, setGroups] = useState<DeviceGroup[]>([]);
   const [groupId, setGroupId] = useState("");
   const [batchResults, setBatchResults] = useState<AppInstallResult[]>([]);
+  const [batchLabels, setBatchLabels] = useState<Map<string,string>>(new Map());
   const [activeBatch, setActiveBatch] = useState<{ id: string; appId: string } | null>(null);
   const [allowDowngrade, setAllowDowngrade] = useState(false);
   const [itemsLoading, setItemsLoading] = useState(true);
@@ -107,6 +111,7 @@ export function AppsPage({ devices, selected, onSelectUdids }: SelProps) {
     const batchId = `app-install-${Date.now()}-${Math.random().toString(16).slice(2)}`;
     setBusy(true);
     setBatchResults([]);
+    setBatchLabels(new Map(udids.map((udid,index) => [udid,`Máy ${devices.findIndex((device) => device.udid === udid) + 1 || index + 1}`])));
     setActiveBatch({ id: batchId, appId: app.id });
     try {
       const response = await installLibraryAppBatch({
@@ -116,6 +121,8 @@ export function AppsPage({ devices, selected, onSelectUdids }: SelProps) {
         allowDowngrade,
       });
       setBatchResults(response.results);
+      if (response.target) setBatchLabels(new Map(response.target.included.map((device,index) => [device.udid,
+        `Máy ${device.number ?? index + 1}${device.alias.trim() ? ` · ${device.alias.trim()}` : ""}`])));
       const succeeded = response.results.filter((result) => result.status === "succeeded").length;
       const uncertain = response.results.filter((result) => result.status === "uncertain").length;
       const failed = response.results.length - succeeded - uncertain;
@@ -129,6 +136,7 @@ export function AppsPage({ devices, selected, onSelectUdids }: SelProps) {
     } finally {
       setActiveBatch(null);
       setBusy(false);
+      void batch.reload();
     }
   };
 
@@ -291,7 +299,7 @@ export function AppsPage({ devices, selected, onSelectUdids }: SelProps) {
                           <button
                             type="button"
                             className="primary"
-                            disabled={!installTargets.length || busy}
+                            disabled={!installTargets.length || busy || batch.loading || batch.active || !!batch.error}
                             title={installTargets.length
                               ? `Cài lên ${installTargets.length} ${platformName}`
                               : app.platform === "ios"
@@ -304,14 +312,14 @@ export function AppsPage({ devices, selected, onSelectUdids }: SelProps) {
                           <button
                             type="button"
                             className="ghost"
-                            disabled={!groupId || busy}
+                            disabled={!groupId || busy || batch.loading || batch.active || !!batch.error}
                             title="Cài lên toàn bộ máy trong nhóm đã chọn"
                             onClick={() => void installToGroup(app)}
                           >
                             Cài → nhóm
                           </button>
                           {activeBatch?.appId === app.id && (
-                            <button type="button" className="ghost" onClick={() => void cancelAppInstallBatch(activeBatch.id)}>
+                            <button type="button" className="ghost" onClick={() => void cancelAppInstallBatch(activeBatch.id).catch(flashError)}>
                               Hủy máy chưa bắt đầu
                             </button>
                           )}
@@ -329,6 +337,7 @@ export function AppsPage({ devices, selected, onSelectUdids }: SelProps) {
                             className="icon-btn"
                             aria-label={`Xóa ${app.name}`}
                             title={`Xóa ${app.name}`}
+                            disabled={busy || batch.active}
                             onClick={async () => {
                               const confirmed = await requestConfirm({
                                 title: `Xóa ${app.name}?`,
@@ -337,8 +346,10 @@ export function AppsPage({ devices, selected, onSelectUdids }: SelProps) {
                                 danger: true,
                               });
                               if (!confirmed) return;
-                              await deleteAppLibrary(app.id);
-                              await reloadLibrary();
+                              try {
+                                await deleteAppLibrary(app.id);
+                                await reloadLibrary();
+                              } catch (cause) { flashError(cause); }
                             }}
                           >
                             <Trash2 size={15} aria-hidden="true" />
@@ -352,7 +363,12 @@ export function AppsPage({ devices, selected, onSelectUdids }: SelProps) {
             )}
           </FormSection>
 
-          {batchResults.length > 0 && (
+          <LibraryBatchMonitor batch={batch} retryDisabled={busy} onRetry={(artifactId,udids) => {
+            const app = items.find((item) => item.id === artifactId);
+            if (app) void runBatch(app,udids);
+            else flash("Gói cài đặt không còn trong thư viện; hãy thêm lại trước khi chạy.");
+          }} />
+          {!batch.detail && batchResults.length > 0 && (
             <FormSection title="Kết quả cài đặt" description={`${confirmedCount}/${batchResults.length} máy đã xác nhận phiên bản`}>
               <ResponsiveTable
                 label="Kết quả cài đặt gần nhất"
@@ -362,7 +378,7 @@ export function AppsPage({ devices, selected, onSelectUdids }: SelProps) {
                   {
                     id: "device",
                     label: "Thiết bị",
-                    render: (result) => devices.find((device) => device.udid === result.udid)?.name || "Thiết bị không còn trong danh sách",
+                    render: (result) => batchLabels.get(result.udid) ?? "Máy trong lần chạy",
                   },
                   {
                     id: "status",

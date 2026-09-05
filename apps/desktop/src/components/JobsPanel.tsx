@@ -1,11 +1,11 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Braces, RefreshCw, Search, Square } from "lucide-react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { Braces, RefreshCw, Search, Square, ChevronLeft, ChevronRight } from "lucide-react";
 
 import {
   cancelJob,
   listenRiviuEvents,
   operationGetRun,
-  operationListRuns,
+  operationQueryRuns,
   runScript,
 } from "../api";
 import { describeError } from "../describeError";
@@ -19,6 +19,7 @@ import type {
   OperationRunState,
   OperationRunSummary,
   PublishRetryScope,
+  OperationRunPage,
 } from "../types";
 import { SelectionStrip } from "./SelectionStrip";
 import { EmptyState, LoadingState, StatusNotice } from "./States";
@@ -50,6 +51,8 @@ const KIND_LABEL: Record<OperationRunKind, string> = {
   nurture: "Nuôi TikTok",
   interaction: "Tương tác",
   publish: "Đăng bài",
+  appInstall: "Cài ứng dụng",
+  materialTransfer: "Chuyển nội dung",
 };
 
 const RETRY_SCOPE_LABEL: Record<PublishRetryScope, string> = {
@@ -61,10 +64,6 @@ const RETRY_SCOPE_LABEL: Record<PublishRetryScope, string> = {
 
 function isActive(run: OperationRunSummary): boolean {
   return run.state === "queued" || run.state === "running";
-}
-
-function needsAttention(run: OperationRunSummary): boolean {
-  return run.state === "partial" || run.state === "failed" || run.state === "uncertain";
 }
 
 function formatTimestamp(value: string | null): string {
@@ -92,6 +91,10 @@ export function JobsPanel({
   const [error, setError] = useState<string | null>(null);
   const [query, setQuery] = useState("");
   const [status, setStatus] = useState<OperationRunState | "all">("all");
+  const [kind, setKind] = useState<OperationRunKind | "all">("all");
+  const [period, setPeriod] = useState("24");
+  const [offset, setOffset] = useState(0);
+  const [page, setPage] = useState<OperationRunPage | null>(null);
   const listTicket = useRef(0);
   const detailTicket = useRef(0);
   const targets = targetsOf(selectedUdids, devices);
@@ -103,8 +106,12 @@ export function JobsPanel({
     setLoading(true);
     setLoadError(null);
     try {
-      const next = await operationListRuns(200);
+      const nextPage = await operationQueryRuns({ limit: 50, offset,
+        state: status === "all" ? undefined : status, kind: kind === "all" ? undefined : kind,
+        search: query, since: period === "all" ? null : new Date(Date.now() - Number(period) * 3600000).toISOString() });
+      const next = nextPage.runs;
       if (ticket !== listTicket.current) return;
+      setPage(nextPage);
       setRuns(next);
       setSelectedRunId((current) =>
         current && next.some((run) => run.id === current) ? current : next[0]?.id ?? null
@@ -114,7 +121,7 @@ export function JobsPanel({
     } finally {
       if (ticket === listTicket.current) setLoading(false);
     }
-  }, []);
+  }, [kind,offset,period,query,status]);
 
   const loadDetail = useCallback(async (operationId: string) => {
     const ticket = ++detailTicket.current;
@@ -140,12 +147,19 @@ export function JobsPanel({
   }, []);
 
   useEffect(() => {
-    void reload();
+    const timer = window.setTimeout(() => void reload(), 200);
+    const polling = window.setInterval(() => {
+      void reload();
+      const current = selectedRunIdRef.current;
+      if (current) void loadDetail(current);
+    }, 5000);
     return () => {
+      window.clearTimeout(timer);
+      window.clearInterval(polling);
       listTicket.current += 1;
       detailTicket.current += 1;
     };
-  }, [reload]);
+  }, [loadDetail,reload]);
 
   useEffect(() => {
     selectedRunIdRef.current = selectedRunId;
@@ -191,18 +205,14 @@ export function JobsPanel({
     void loadDetail(selectedRunId);
   }, [loadDetail, selectedRunId]);
 
-  const filtered = useMemo(() => {
-    const needle = query.trim().toLocaleLowerCase("vi");
-    return runs.filter((run) => {
-      if (status !== "all" && run.state !== status) return false;
-      if (!needle) return true;
-      return run.title.toLocaleLowerCase("vi").includes(needle)
-        || KIND_LABEL[run.kind].toLocaleLowerCase("vi").includes(needle);
-    });
-  }, [query, runs, status]);
+  const filtered = runs;
   const selectedRun = filtered.find((run) => run.id === selectedRunId) ?? filtered[0] ?? null;
   const visibleDetail = detail?.summary.id === selectedRun?.id ? detail : null;
   const shownSummary = visibleDetail?.summary ?? selectedRun;
+  const interactionActorCount = shownSummary?.kind === "interaction"
+    ? new Set(visibleDetail?.items.filter((item) => item.kind === "assignment")
+      .map((item) => item.udid?.trim()).filter(Boolean)).size
+    : 0;
 
   useEffect(() => {
     if (selectedRun && selectedRun.id !== selectedRunId) setSelectedRunId(selectedRun.id);
@@ -211,9 +221,9 @@ export function JobsPanel({
   return (
     <div className="panel operations-page jobs-page">
       <section className="operations-summary" aria-label="Tổng quan tác vụ">
-        <div><span>Đang thực hiện</span><strong>{runs.filter(isActive).length}</strong></div>
-        <div><span>Hoàn tất</span><strong>{runs.filter((run) => run.state === "succeeded").length}</strong></div>
-        <div><span>Cần xử lý</span><strong>{runs.filter(needsAttention).length}</strong></div>
+        <div><span>Đang thực hiện</span><strong>{page?.counts.active ?? "—"}</strong></div>
+        <div><span>Hoàn tất</span><strong>{page?.counts.succeeded ?? "—"}</strong></div>
+        <div><span>Cần xử lý</span><strong>{page?.counts.attention ?? "—"}</strong></div>
         <button type="button" className="ghost" disabled={loading} onClick={() => void reload()}>
           <RefreshCw size={15} /> Làm mới
         </button>
@@ -237,21 +247,33 @@ export function JobsPanel({
               <span className="visually-hidden">Tìm tác vụ</span>
               <input
                 value={query}
-                onChange={(event) => setQuery(event.target.value)}
+                onChange={(event) => { setQuery(event.target.value); setOffset(0); }}
                 placeholder="Tìm theo loại hoặc tên tác vụ"
               />
             </label>
             <select
               value={status}
               aria-label="Lọc trạng thái tác vụ"
-              onChange={(event) => setStatus(event.target.value as OperationRunState | "all")}
+              onChange={(event) => { setStatus(event.target.value as OperationRunState | "all"); setOffset(0); }}
             >
               <option value="all">Tất cả trạng thái</option>
               {Object.entries(RUN_LABEL).map(([value, label]) => (
                 <option key={value} value={value}>{label}</option>
               ))}
             </select>
+            <select aria-label="Loại tác vụ" value={kind} onChange={(event) => { setKind(event.target.value as OperationRunKind | "all"); setOffset(0); }}>
+              <option value="all">Mọi loại tác vụ</option>
+              {Object.entries(KIND_LABEL).map(([value,label]) => <option key={value} value={value}>{label}</option>)}
+            </select>
+            <select aria-label="Khoảng thời gian tác vụ" value={period} onChange={(event) => { setPeriod(event.target.value); setOffset(0); }}>
+              <option value="24">24 giờ qua</option><option value="168">7 ngày qua</option><option value="all">Toàn bộ lịch sử</option>
+            </select>
           </div>
+          {page && <div className="admin-actions" aria-label="Phân trang tác vụ">
+            <span>{page.total ? `${offset + 1}–${offset + runs.length}` : "0"} / {page.total} tác vụ</span>
+            <button type="button" className="icon-btn" aria-label="Trang tác vụ trước" disabled={loading || offset === 0} onClick={() => setOffset(Math.max(0,offset - 50))}><ChevronLeft size={16}/></button>
+            <button type="button" className="icon-btn" aria-label="Trang tác vụ sau" disabled={loading || !page.hasMore} onClick={() => setOffset(offset + 50)}><ChevronRight size={16}/></button>
+          </div>}
           {loading && !runs.length && <LoadingState label="Đang tải tác vụ…" />}
           {!loading && !loadError && filtered.length === 0 && (
             <EmptyState
@@ -303,7 +325,8 @@ export function JobsPanel({
                 <div>
                   <strong>{shownSummary.title}</strong>
                   <span>
-                    {KIND_LABEL[shownSummary.kind]} · {shownSummary.targetCount} máy · {RUN_LABEL[shownSummary.state]}
+                    {KIND_LABEL[shownSummary.kind]} · {shownSummary.targetCount} {shownSummary.kind === "interaction" ? "bài" : "máy"}
+                    {interactionActorCount > 0 ? ` · ${interactionActorCount} máy` : ""} · {RUN_LABEL[shownSummary.state]}
                   </span>
                 </div>
                 {shownSummary.kind === "script" && isActive(shownSummary) && (
@@ -340,7 +363,7 @@ export function JobsPanel({
                     <li key={item.id} className={item.state}>
                       <span aria-hidden="true" />
                       <div>
-                        <strong>{item.udid ? deviceNames.get(item.udid) ?? item.label : item.label}</strong>
+                        <strong>{visibleDetail.batch ? item.label : item.udid ? deviceNames.get(item.udid) ?? item.label : item.label}</strong>
                         <small>
                           {RUN_LABEL[item.state]}
                           {item.retryable ? " · Có thể chạy lại từ nguồn gốc" : ""}

@@ -1,4 +1,5 @@
 import type { Page } from "@playwright/test";
+import type { OperationRunDetail } from "../../src/types";
 
 export type MockRunMode = "succeeded" | "uncertainTap" | "runningWait";
 
@@ -6,6 +7,7 @@ export interface TauriMockOptions {
   initialRunMode?: MockRunMode;
   /** Dedicated Android roster for Android-specific operator surfaces. */
   androidRoster?: boolean;
+  libraryBatchRunning?: boolean;
 }
 
 export interface MockCommandCall {
@@ -699,8 +701,37 @@ export async function installTauriMock(
     );
     commandHandlers.set("refresh_devices", () => clone(devices));
     commandHandlers.set("list_jobs", () => []);
-    commandHandlers.set("operation_list_runs", () => []);
-    commandHandlers.set("operation_get_run", () => null);
+    const batchKey = "riviu.e2e.library-batches";
+    const operations: Record<string, OperationRunDetail> = JSON.parse(sessionStorage.getItem(batchKey) ?? "{}");
+    const persistOperations = () => sessionStorage.setItem(batchKey, JSON.stringify(operations));
+    const recordBatch = (kind: "appInstall" | "materialTransfer", id: string, artifactId: string, udids: string[]) => {
+      const running = fixtureOptions.libraryBatchRunning;
+      const operationId = `${kind}:${id}`;
+      operations[operationId] = {
+        summary: { id:operationId,sourceId:id,kind,title:kind === "appInstall" ? "Riviu Cuộn thử.apk" : "video-san-pham.mp4",
+          state:running ? "running" : "succeeded",targetCount:udids.length,totalItems:udids.length,completedItems:running ? 0 : udids.length,
+          issueCount:0,retryableCount:0,retryScope:null,createdAt:new Date().toISOString(),updatedAt:new Date().toISOString() },
+        batch: { artifactId,target:{targetRef:{type:"explicit",udids},included:udids.map((udid,index) => ({udid,number:index + 1,alias:`Kệ ${index + 1}`})),excluded:[],rosterSha256:"c".repeat(64)} },
+        items:udids.map((udid,index) => ({id:udid,kind:"device",label:`Máy ${index + 1} · Kệ ${index + 1}`,
+          state:running ? index === 0 ? "running" : "queued" : "succeeded",udid,errorCode:null,detail:null,evidence:running ? null : "sha256=verified",retryable:false})),
+      };
+      persistOperations();
+    };
+    commandHandlers.set("operation_list_runs", () => Object.values(operations).map((detail) => detail.summary));
+    commandHandlers.set("operation_query_runs", (args) => {
+      const query = (args.query ?? {}) as {kind?:string;state?:string;search?:string;offset?:number;limit?:number};
+      const all = Object.values(operations).map((detail) => detail.summary).filter((run) =>
+        (!query.kind || query.kind === run.kind) && (!query.state || query.state === run.state) && (!query.search || run.title.includes(query.search)));
+      const offset = query.offset ?? 0;
+      const runs = all.slice(offset,offset + (query.limit ?? 50));
+      return {runs,total:all.length,counts:{active:all.filter((run) => ["queued","running"].includes(run.state)).length,
+        succeeded:all.filter((run) => run.state === "succeeded").length,attention:all.filter((run) => ["failed","partial","uncertain"].includes(run.state)).length},hasMore:offset + runs.length < all.length};
+    });
+    commandHandlers.set("operation_cancel_batch", (args) => {
+      const detail = operations[String(args.operationId)];
+      if (detail) { detail.items.forEach((item) => { if (item.state === "queued") item.state = "cancelled"; }); persistOperations(); }
+    });
+    commandHandlers.set("operation_get_run", (args) => clone(operations[String(args.operationId)] ?? null));
     commandHandlers.set("nurture_get_settings", () => ({
       baseUrl: "https://api.openai.com/v1",
       model: "gpt-5-mini",
@@ -1001,6 +1032,8 @@ export async function installTauriMock(
       const requested = request?.target?.type === "explicit"
         ? request.target.udids ?? []
         : devices.map((device) => device.udid);
+      recordBatch("materialTransfer","fixture-material-batch",request?.materialId ?? "fixture-material",requested);
+      if (fixtureOptions.libraryBatchRunning) return new Promise(() => undefined);
       return {
         batchId: "fixture-material-batch",
         materialId: request?.materialId ?? "fixture-material",
@@ -1023,6 +1056,8 @@ export async function installTauriMock(
     });
     commandHandlers.set("install_library_app_batch", (args) => {
       const request = (args as { request?: { batchId?: string; udids?: string[] } })?.request;
+      recordBatch("appInstall",request?.batchId ?? "fixture-batch","fixture-app",request?.udids ?? []);
+      if (fixtureOptions.libraryBatchRunning) return new Promise(() => undefined);
       return {
         batchId: request?.batchId ?? "fixture-batch",
         progress: [],
@@ -1190,6 +1225,14 @@ export async function installTauriMock(
       token: "",
     }));
     commandHandlers.set("local_api_set_config", (args) => args.config ?? null);
+    commandHandlers.set("local_api_status", () => ({
+      configuredEnabled: false,
+      configuredPort: 17999,
+      running: false,
+      activePort: null,
+      restartRequired: false,
+      lastError: null,
+    }));
     commandHandlers.set("get_apple_id", () => ({ email: "", hasPassword: false }));
     commandHandlers.set("driver_mode", () => "mock");
     commandHandlers.set("arp_scan", () => []);

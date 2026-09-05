@@ -12,6 +12,9 @@ const flashError = vi.hoisted(() => vi.fn());
 const pushMaterialBatch = vi.hoisted(() => vi.fn());
 
 vi.mock("../api", () => ({
+  operationQueryRuns: vi.fn(async () => ({ runs: [], total:0, counts:{active:0,succeeded:0,attention:0}, hasMore:false })),
+  operationGetRun: vi.fn(async () => null),
+  operationCancelBatch: vi.fn(async () => undefined),
   addMaterial: vi.fn(async () => undefined),
   deleteMaterial: vi.fn(async () => undefined),
   listGroups,
@@ -51,7 +54,7 @@ describe("MaterialPage list states", () => {
 
     expect(screen.getByText("Đang tải kho nội dung…")).toBeInTheDocument();
     expect(screen.queryByText("Chưa có nội dung")).toBeNull();
-    expect(screen.queryByRole("heading", { level: 2 })).toBeNull();
+    expect(screen.getByRole("heading", { level: 2 })).toHaveTextContent("Tiến độ theo máy");
     expect(await screen.findByText("Chưa có nội dung")).toBeInTheDocument();
   });
 
@@ -151,7 +154,7 @@ describe("MaterialPage list states", () => {
       materialId: material.id,
       target: { type: "explicit", udids: ["phone-2"] },
     });
-    expect(await screen.findByText("Ca chiều")).toBeVisible();
+    expect(await screen.findByText("Máy 2 · Ca chiều")).toBeVisible();
     expect(screen.queryByText("Máy 1 · Galaxy A")).toBeNull();
     expect(screen.queryByRole("button", { name: "Thử lại 1 máy lỗi" })).toBeNull();
   });

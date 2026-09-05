@@ -8,7 +8,8 @@ import type { AnalyticsSummary } from "../types";
 
 const loadSummary = vi.hoisted(() => vi.fn());
 
-vi.mock("../api", () => ({ analyticsSummary: loadSummary }));
+const queryOperations = vi.hoisted(() => vi.fn());
+vi.mock("../api", () => ({ analyticsSummary: loadSummary, operationQueryRuns: queryOperations }));
 vi.mock("../components/OperationLog", () => ({
   OperationLog: () => <div data-testid="operation-log" />,
 }));
@@ -29,9 +30,19 @@ const summary: AnalyticsSummary = {
 
 beforeEach(() => {
   loadSummary.mockReset();
+  queryOperations.mockReset();
+  queryOperations.mockResolvedValue({ runs:[],total:0,counts:{active:0,succeeded:0,attention:0},hasMore:false });
 });
 
 describe("DataPage load states", () => {
+  it("uses all operation counts instead of the legacy JSON job counters", async () => {
+    loadSummary.mockResolvedValue({ ...summary,jobsFailed:0 });
+    queryOperations.mockResolvedValue({ runs:[],total:517,counts:{active:3,succeeded:509,attention:5},hasMore:true });
+    render(<DataPage />);
+    expect(await screen.findByText("5 tác vụ cần xử lý")).toBeVisible();
+    expect(screen.getByText("517")).toBeVisible();
+    expect(queryOperations).toHaveBeenCalledWith(expect.objectContaining({since:expect.any(String),limit:1}));
+  });
   it("shows loading before the summary, then data without repeating the topbar title", async () => {
     loadSummary.mockResolvedValue(summary);
 

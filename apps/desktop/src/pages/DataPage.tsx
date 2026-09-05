@@ -1,16 +1,17 @@
 import { useEffect, useRef, useState } from "react";
 import { RefreshCw } from "lucide-react";
 
-import { analyticsSummary } from "../api";
+import { analyticsSummary, operationQueryRuns } from "../api";
 import { OperationLog } from "../components/OperationLog";
 import { FormSection, StatusChip } from "../components/WorkspacePrimitives";
 import { LoadingState, StatusNotice } from "../components/States";
-import type { AnalyticsSummary } from "../types";
+import type { AnalyticsSummary, OperationRunPage } from "../types";
 import { describeError } from "../describeError";
 
 /** Fleet analytics projected only from durable application data. */
 export function DataPage() {
   const [data, setData] = useState<AnalyticsSummary | null>(null);
+  const [operations, setOperations] = useState<OperationRunPage | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const loadTicket = useRef(0);
@@ -19,8 +20,8 @@ export function DataPage() {
     setLoading(true);
     setErr(null);
     try {
-      const next = await analyticsSummary();
-      if (ticket === loadTicket.current) setData(next);
+      const [next, runs] = await Promise.all([analyticsSummary(), operationQueryRuns({ since: new Date(Date.now() - 86400000).toISOString(), limit: 1 })]);
+      if (ticket === loadTicket.current) { setData(next); setOperations(runs); }
     } catch (error) {
       if (ticket === loadTicket.current) setErr(describeError(error));
     } finally {
@@ -50,11 +51,11 @@ export function DataPage() {
           <div className="admin-toolbar">
             <div className="admin-toolbar-copy">
               <strong>Tổng quan vận hành</strong>
-              <span>Số liệu được tổng hợp từ trạng thái và lịch sử hiện có.</span>
+              <span>Tác vụ trong 24 giờ qua</span>
             </div>
             <div className="admin-toolbar-actions">
-              <StatusChip tone={data.jobsFailed ? "warning" : "success"}>
-                {data.jobsFailed ? `${data.jobsFailed} tác vụ lỗi` : "Không có tác vụ lỗi"}
+              <StatusChip tone={operations?.counts.attention ? "warning" : "success"}>
+                {operations?.counts.attention ? `${operations.counts.attention} tác vụ cần xử lý` : "Không có tác vụ cần xử lý trong 24 giờ"}
               </StatusChip>
               <button type="button" className="ghost" onClick={() => void load()} disabled={loading}>
                 <RefreshCw size={15} aria-hidden="true" />
@@ -74,10 +75,10 @@ export function DataPage() {
           <FormSection title="Năng lực hiện tại">
             <dl className="admin-metric-grid">
               <div className="admin-metric"><dt>Thiết bị</dt><dd>{data.deviceReady}/{data.deviceTotal}</dd></div>
-              <div className="admin-metric"><dt>Đang chạy</dt><dd>{data.jobsRunning}</dd></div>
-              <div className="admin-metric"><dt>Đã thành công</dt><dd>{data.jobsSucceeded}</dd></div>
-              <div className="admin-metric"><dt>Thất bại</dt><dd>{data.jobsFailed}</dd></div>
-              <div className="admin-metric"><dt>Flow</dt><dd>{data.scriptsTotal}</dd></div>
+              <div className="admin-metric"><dt>Đang chạy</dt><dd>{operations?.counts.active ?? "—"}</dd></div>
+              <div className="admin-metric"><dt>Đã thành công</dt><dd>{operations?.counts.succeeded ?? "—"}</dd></div>
+              <div className="admin-metric"><dt>Cần xử lý</dt><dd>{operations?.counts.attention ?? "—"}</dd></div>
+              <div className="admin-metric"><dt>Tổng tác vụ</dt><dd>{operations?.total ?? "—"}</dd></div>
               <div className="admin-metric"><dt>Nội dung</dt><dd>{data.materialsTotal}</dd></div>
               <div className="admin-metric"><dt>Ứng dụng</dt><dd>{data.appsTotal}</dd></div>
               <div className="admin-metric"><dt>Lịch đang bật</dt><dd>{data.schedulesEnabled}</dd></div>

@@ -9,7 +9,10 @@ import {
 } from "../api";
 import { requestConfirm } from "../confirmStore";
 import { SelectionStrip } from "../components/SelectionStrip";
+import { LibraryBatchMonitor } from "../components/LibraryBatchMonitor";
+import { useLibraryBatch } from "../useLibraryBatch";
 import { EmptyState, LoadingState, StatusNotice } from "../components/States";
+import { ResponsiveTable, StatusChip } from "../components/WorkspacePrimitives";
 import { describeError } from "../describeError";
 import { flash, flashError } from "../farmToast";
 import { pickMaterial } from "../pickFile";
@@ -29,6 +32,7 @@ function formatBytes(bytes: number): string {
 
 /** Material library backed by the managed artifact store and a bounded fleet transfer. */
 export function MaterialPage({ devices, selected, onSelectUdids }: SelProps) {
+  const batch = useLibraryBatch("materialTransfer");
   const [items, setItems] = useState<MaterialItem[]>([]);
   const [path, setPath] = useState("");
   const [busyMaterialId, setBusyMaterialId] = useState<string | null>(null);
@@ -47,10 +51,9 @@ export function MaterialPage({ devices, selected, onSelectUdids }: SelProps) {
     if (!lastBatch) return new Map<string, string>();
     return new Map(lastBatch.target.included.map((device, index) => {
       const alias = device.alias.trim();
-      const stableName = alias
-        || (device.number ? `Máy ${device.number}` : null)
-        || deviceNames.get(device.udid)
-        || `Máy ${index + 1}`;
+      const number = device.number ?? index + 1;
+      const stableName = alias ? `Máy ${number} · ${alias}`
+        : device.number ? `Máy ${number}` : deviceNames.get(device.udid) || `Máy ${number}`;
       return [device.udid, stableName];
     }));
   }, [deviceNames, lastBatch]);
@@ -101,6 +104,7 @@ export function MaterialPage({ devices, selected, onSelectUdids }: SelProps) {
       setTransferError(describeError(error));
     } finally {
       setBusyMaterialId(null);
+      void batch.reload();
     }
   };
 
@@ -165,7 +169,8 @@ export function MaterialPage({ devices, selected, onSelectUdids }: SelProps) {
         </StatusNotice>
       )}
 
-      {lastBatch && (
+      <LibraryBatchMonitor batch={batch} retryDisabled={busyMaterialId !== null} onRetry={(artifactId,udids) => void transfer(artifactId,udids)} />
+      {!batch.detail && lastBatch && (
         <section className="operations-results" aria-label="Kết quả chuyển gần nhất">
           <header>
             <div>
@@ -207,7 +212,7 @@ export function MaterialPage({ devices, selected, onSelectUdids }: SelProps) {
                 <div>
                   <strong>{batchDeviceNames.get(result.udid) ?? "Máy trong snapshot"}</strong>
                   <span className={`pill ${result.status}`}>
-                    {result.status === "succeeded" ? "Đã chuyển" : "Thất bại"}
+                    {result.status === "succeeded" ? "Đã chuyển" : result.status === "uncertain" ? "Cần kiểm lại" : result.status === "cancelledBeforeDispatch" ? "Đã dừng trước khi chạy" : "Thất bại"}
                   </span>
                 </div>
                 <details>
@@ -242,21 +247,16 @@ export function MaterialPage({ devices, selected, onSelectUdids }: SelProps) {
           </StatusNotice>
         )}
         {loading && !items.length && <LoadingState label="Đang tải kho nội dung…" />}
-        <div className="operations-card-grid">
-          {items.map((material) => (
-            <article key={material.id} className="operations-card">
-              <div className="operations-card-title">
-                <div>
-                  <strong>{material.name}</strong>
-                  <span>{formatBytes(material.size)}</span>
-                </div>
-                <span className="pill">{material.kind === "video" ? "Video" : material.kind === "image" ? "Ảnh" : "File"}</span>
-              </div>
-              <div className="operations-card-actions">
+        <ResponsiveTable label="Nội dung đã lưu" rows={items} keyForRow={(material) => material.id} columns={[
+          { id:"name",label:"Tên file",render:(material) => <strong>{material.name}</strong> },
+          { id:"kind",label:"Loại",render:(material) => <StatusChip>{material.kind === "video" ? "Video" : material.kind === "image" ? "Ảnh" : "File"}</StatusChip> },
+          { id:"size",label:"Dung lượng",render:(material) => formatBytes(material.size) },
+          { id:"actions",label:"Thao tác",render:(material) => (
+              <div className="admin-actions">
                 <button
                   type="button"
-                  className="primary"
-                  disabled={!targets.length || busyMaterialId !== null}
+                  className="ghost"
+                  disabled={!targets.length || busyMaterialId !== null || batch.loading || batch.active || !!batch.error}
                   onClick={() => void transfer(material.id)}
                 >
                   <Send size={15} /> Chuyển tới {targets.length} máy
@@ -266,7 +266,7 @@ export function MaterialPage({ devices, selected, onSelectUdids }: SelProps) {
                   className="icon-btn"
                   aria-label={`Xóa ${material.name}`}
                   title="Xóa khỏi kho"
-                  disabled={busyMaterialId !== null}
+                  disabled={busyMaterialId !== null || batch.active}
                   onClick={async () => {
                     const confirmed = await requestConfirm({
                       title: "Xóa nội dung khỏi kho?",
@@ -287,14 +287,13 @@ export function MaterialPage({ devices, selected, onSelectUdids }: SelProps) {
                 >
                   <Trash2 size={16} />
                 </button>
-              </div>
               <details>
                 <summary>Chi tiết file</summary>
                 <code>{material.path}</code>
               </details>
-            </article>
-          ))}
-        </div>
+              </div>
+          ) },
+        ]} />
         {!loading && !loadError && !items.length && (
           <EmptyState
             compact

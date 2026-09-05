@@ -21,6 +21,11 @@ vi.mock("../api", () => ({
   }),
   operationGetRun,
   operationListRuns,
+  operationQueryRuns: vi.fn(async (query) => {
+    const all = await operationListRuns();
+    const runs = all.filter((run: OperationRunSummary) => (!query.state || run.state === query.state) && (!query.kind || run.kind === query.kind));
+    return { runs,total:runs.length,counts:{active:runs.filter((run: OperationRunSummary) => run.state === "running" || run.state === "queued").length,succeeded:runs.filter((run: OperationRunSummary) => run.state === "succeeded").length,attention:runs.filter((run: OperationRunSummary) => ["partial","failed","uncertain"].includes(run.state)).length},hasMore:false };
+  }),
   runScript: vi.fn(async () => undefined),
 }));
 
@@ -87,6 +92,31 @@ beforeEach(() => {
 });
 
 describe("JobsPanel operations monitor", () => {
+  it("separates interaction posts from unique assignment devices", async () => {
+    const onePost = { ...summary, targetCount: 1 };
+    operationListRuns.mockResolvedValue([onePost]);
+    operationGetRun.mockResolvedValue({
+      summary: onePost,
+      items: [
+        ...detail.items,
+        { ...detail.items[0], id: "same-actor-again" },
+        { ...detail.items[0], id: "missing-actor", udid: null },
+        { ...detail.items[0], id: "empty-actor", udid: "  " },
+      ],
+    });
+    renderPanel();
+    expect(await screen.findByText("Tương tác · 1 bài · 2 máy · Một phần")).toBeVisible();
+  });
+
+  it("does not infer zero devices when an interaction has no assignment details", async () => {
+    const onePost = { ...summary, targetCount: 1 };
+    operationListRuns.mockResolvedValue([onePost]);
+    operationGetRun.mockResolvedValue({ summary: onePost, items: [] });
+    renderPanel();
+    expect(await screen.findByText("Tương tác · 1 bài · Một phần")).toBeVisible();
+    expect(screen.queryByText(/Tương tác · 1 bài · 0 máy/)).toBeNull();
+  });
+
   it("keeps the task search as one horizontal control after panel defaults load", () => {
     expect(operationsCssRaw).toMatch(
       /\.panel \.operations-filterbar > label\s*\{(?=[^}]*flex-direction:\s*row)(?=[^}]*margin:\s*0)[^}]*\}/,
@@ -175,6 +205,7 @@ describe("JobsPanel operations monitor", () => {
     renderPanel();
     expect(await screen.findByRole("button", { name: /Đăng bài/ })).toBeVisible();
     await screen.findByText("Mã tác vụ và tiến độ");
+    expect(screen.getByText(/Đăng bài · 1 máy ·/)).toBeVisible();
     await userEvent.click(screen.getByText("Mã tác vụ và tiến độ"));
 
     expect(screen.getByText("Phạm vi khôi phục: Không tự động chạy lại")).toBeVisible();
