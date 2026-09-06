@@ -411,6 +411,38 @@ describe("device operational identity", () => {
 });
 
 describe("automation target resolution", () => {
+  it("docks the real workspace with an explicit grid snapshot and preserves its editor", async () => {
+    const api = await import("./api");
+    vi.mocked(api.listDevices).mockResolvedValue([androidPhone]);
+    render(<App />);
+    const tile = await screen.findByTestId("device-tile");
+    fireEvent.click(tile);
+    fireEvent.click(screen.getByRole("tab", { name: "Nuôi TikTok" }));
+    const workspace = await screen.findByRole("region", { name: "Không gian Nuôi TikTok" });
+    expect(workspace).toHaveAttribute("data-targets", "");
+    expect(screen.getByRole("grid", { name: "Lưới thiết bị" })).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "Dùng 1 máy đã chọn" }));
+    expect(workspace).toHaveAttribute("data-targets", androidPhone.udid);
+    fireEvent.click(screen.getByRole("button", { name: "Bỏ chọn" }));
+    expect(workspace).toHaveAttribute("data-targets", androidPhone.udid);
+    fireEvent.click(screen.getByRole("button", { name: "Mark nurture dirty" }));
+    fireEvent.click(screen.getByRole("button", { name: "Mở trang tác vụ" }));
+    await screen.findByRole("button", { name: "Xem cùng thiết bị" });
+    expect(screen.getByRole("region", { name: "Không gian Nuôi TikTok" })).toBe(workspace);
+    expect(screen.queryByRole("alertdialog")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Xem cùng thiết bị" }));
+    await screen.findByRole("button", { name: "Đóng khung tác vụ" });
+    expect(screen.getByRole("region", { name: "Không gian Nuôi TikTok" })).toBe(workspace);
+    fireEvent.click(screen.getByRole("button", { name: "Đóng khung tác vụ" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Ở lại" }));
+    await waitFor(() => expect(screen.queryByRole("alertdialog")).toBeNull());
+    expect(workspace).toBeVisible();
+    fireEvent.click(screen.getByRole("tab", { name: "Tương tác" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Bỏ thay đổi" }));
+    expect(await screen.findByRole("region", { name: "Không gian Tương tác" })).toBeVisible();
+    expect(screen.getByRole("grid", { name: "Lưới thiết bị" })).toBeVisible();
+  });
+
   it("keeps an empty group at zero targets instead of expanding it to the fleet", async () => {
     const api = await import("./api");
     vi.mocked(api.listDevices).mockResolvedValue([androidPhone]);

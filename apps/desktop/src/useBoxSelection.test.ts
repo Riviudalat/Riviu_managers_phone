@@ -98,6 +98,19 @@ describe("useBoxSelection", () => {
     expect(result.current.selected).toEqual([]);
   });
 
+  it("Ctrl+A inside the adjacent automation workspace does not select the fleet", () => {
+    const devices = fleet("a", "b");
+    const { result } = renderHook(() => useBoxSelection(devices, devices, true));
+    const dock = document.createElement("section");
+    dock.className = "automation-host";
+    const button = document.createElement("button");
+    dock.append(button);
+    let event: KeyboardEvent | undefined;
+    act(() => { event = press("a", button); });
+    expect(result.current.selected).toEqual([]);
+    expect(event?.defaultPrevented).toBe(false);
+  });
+
   it("selectedDevices follows the selection and keeps fleet order", () => {
     const devices = fleet("a", "b", "c");
     const { result } = renderHook(() => useBoxSelection(devices, devices, true));

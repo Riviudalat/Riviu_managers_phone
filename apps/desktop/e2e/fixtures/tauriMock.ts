@@ -8,6 +8,7 @@ export interface TauriMockOptions {
   /** Dedicated Android roster for Android-specific operator surfaces. */
   androidRoster?: boolean;
   libraryBatchRunning?: boolean;
+  fleetSize?: number;
 }
 
 export interface MockCommandCall {
@@ -254,7 +255,12 @@ export async function installTauriMock(
         tileStreamState: "parked",
       },
     ];
-    const devices = fixtureOptions.androidRoster ? androidDevices : iosDevices;
+    const initialDevices = fixtureOptions.androidRoster ? androidDevices : iosDevices;
+    const devices = fixtureOptions.fleetSize ? Array.from({ length: fixtureOptions.fleetSize }, (_, index) => ({
+      ...initialDevices[index % initialDevices.length],
+      udid: `MOCK-FLEET-${index + 1}`,
+      name: `Máy thử ${index + 1}`,
+    })) : initialDevices;
     let orchestrationDetail: JsonRecord | null = null;
 
     function orchestrationRunDetail(args: JsonRecord): JsonRecord {

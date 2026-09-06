@@ -1,0 +1,156 @@
+.device-browser {
+  display: flex;
+  flex: 1 0 auto;
+  min-width: 0;
+  flex-direction: column;
+  gap: 8px;
+}
+.device-browser-toolbar,
+.device-browser-content {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  gap: 8px;
+}
+.device-browser-content { flex: 1 0 auto; }
+
+.window-canvas {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, var(--device-tile-min-width, 180px)), 1fr));
+  align-content: start;
+  align-items: start;
+}
+
+/* Grid tracks distribute the remainder; the last row keeps the same tile size.
+   Only this host overrides the legacy explicit dimensions used by other callers. */
+.window-canvas > .dev-phone {
+  width: 100% !important;
+  height: auto !important;
+  aspect-ratio: 1 / 2;
+  min-width: 0;
+}
+
+.device-automation-bar,
+.device-automation-head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  min-width: 0;
+}
+
+.device-automation-bar {
+  border-bottom: 1px solid var(--line);
+}
+
+.device-automation-bar [role="tablist"] {
+  display: flex;
+  flex: 1;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.device-automation-bar [role="tab"] {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 34px;
+  padding: 6px 10px;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  border-radius: 0;
+  background: transparent;
+  color: var(--text-2);
+}
+
+.device-automation-bar [aria-selected="true"] {
+  color: var(--primary-deep);
+  border-bottom-color: var(--primary);
+  background: var(--primary-50);
+}
+
+.device-automation-head {
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--line);
+  background: var(--bg-elevated);
+}
+
+.device-automation-head strong { flex: 1; }
+.automation-host[hidden] { display: none; }
+.automation-host {
+  display: flex;
+  flex: 1 1 0;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+}
+.automation-host > .automation-page-stack { flex: 1 1 0; }
+
+.content-control.has-device-automation {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(520px, 48%);
+  grid-template-rows: auto minmax(0, 1fr);
+  overflow: hidden;
+  gap: 12px;
+}
+.has-device-automation > .banner { grid-column: 1 / -1; }
+.has-device-automation .device-browser { display: contents; }
+.has-device-automation .device-browser-toolbar { grid-column: 1 / -1; }
+.has-device-automation .device-browser-content {
+  min-height: 0;
+  overflow: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+}
+
+.automation-host.is-docked {
+  border-left: 1px solid var(--line);
+  background: var(--bg-elevated);
+  overflow: hidden;
+}
+.is-docked > .automation-page-stack {
+  display: flex;
+  flex-direction: column;
+  overflow: auto;
+  padding: 10px;
+  gap: 8px;
+  overscroll-behavior: contain;
+}
+.is-docked .target-selector {
+  grid-template-columns: minmax(0, 1fr);
+  flex: none;
+  margin: 0;
+}
+.is-docked .target-selector-explicit { grid-column: auto; }
+.automation-scope { min-width: 0; }
+.automation-scope > summary[hidden] { display: none; }
+.automation-scope.is-collapsible { flex: none; border-bottom: 1px solid var(--line); }
+.automation-scope.is-collapsible > summary { padding: 8px; color: var(--text-2); cursor: pointer; }
+.automation-scope.is-collapsible > summary strong { margin-left: 12px; color: var(--text-1); }
+.automation-scope.is-collapsible[open] > summary { margin-bottom: 8px; }
+.is-docked :is(.nurture-workspace, .interaction-workspace, .publish-page) { flex: 1 0 520px; }
+.is-docked :is(.nurture-setup-grid, .nurture-monitor-grid, .interaction-setup-grid,
+  .interaction-monitor-master, .publish-workspace-grid) {
+  grid-template-columns: minmax(0, 1fr);
+}
+.is-docked .publish-workspace-aside { position: static; }
+.is-docked .nu-feature-ranged { grid-template-columns: auto minmax(80px, 1fr) minmax(80px, 1fr) 60px; }
+.is-docked .automation-schedule-create { grid-template-columns: minmax(0, 1fr); }
+.is-docked .automation-schedule-row-main { flex-wrap: wrap; }
+.is-docked .nu-night-setting { grid-template-columns: minmax(0, 1fr) repeat(2, minmax(70px, 1fr)); }
+
+@media (max-width: 1279px) {
+  .content-control.has-device-automation {
+    grid-template-columns: minmax(180px, 1fr) minmax(380px, 55%);
+  }
+  .is-docked .device-automation-head { padding-inline: 8px; }
+  .is-docked .device-automation-head .ghost { padding-inline: 8px; }
+  .is-docked .interaction-setup-grid { padding: 8px; }
+  .is-docked .interaction-mode-cards { grid-template-columns: 1fr; }
+  .is-docked .nu-night-setting { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .is-docked .nu-night-setting-title { grid-column: 1 / -1; }
+  .is-docked .nu-feature-ranged { grid-template-columns: auto minmax(60px, 1fr) minmax(50px, 1fr) 60px; }
+  .is-docked .publish-source-row { grid-template-columns: minmax(0, 1fr); }
+  .is-docked .publish-workspace-section { padding: 10px; }
+  .is-docked .publish-workspace-main { padding: 0; }
+}

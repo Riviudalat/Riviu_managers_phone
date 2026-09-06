@@ -7,6 +7,7 @@ import {
   useRef,
   useState,
   type KeyboardEvent as ReactKeyboardEvent,
+  type CSSProperties,
 } from "react";
 import {
   agentBulkRepair,
@@ -46,9 +47,10 @@ import { ALL_DEVICES_TAB, devicesInTab, groupTabs, withDeviceAdded } from "./dev
 import { FocusStream } from "./components/FocusStream";
 import { IconPhone, IconRefresh } from "./components/Icons";
 import { Banner, EmptyState, LoadingState } from "./components/States";
-import { InteractionPopup } from "./components/InteractionPopup";
+import { AutomationWorkspace } from "./components/AutomationWorkspace";
+import { DeviceAutomationBar, DeviceAutomationLayoutButton } from "./features/devices/DeviceAutomationBar";
+import { isDeviceAutomation, type DeviceAutomation } from "./features/devices/deviceAutomation";
 import { JobsPanel } from "./components/JobsPanel";
-import { NurturePopup } from "./components/NurturePopup";
 import { GroupManagerPopup } from "./components/GroupManagerPopup";
 import { GroupToolsPopup } from "./components/GroupToolsPopup";
 import { ProfileToolbar } from "./components/ProfileToolbar";
@@ -67,7 +69,6 @@ import { ApiPage } from "./pages/ApiPage";
 import { AppsPage } from "./pages/AppsPage";
 import { DataPage } from "./pages/DataPage";
 import { MaterialPage } from "./pages/MaterialPage";
-import { PublishPage } from "./pages/PublishPage";
 import type { DeviceInfo, DeviceWorkOwner, PageId, TargetRef } from "./types";
 import { MoreHorizontal } from "lucide-react";
 import { MENU_ICONS } from "./components/menuIcons";
@@ -108,6 +109,7 @@ type DeviceWorkOwnerProjection =
 
 type NavigationIntent =
   | { kind: "page"; value: PageId; clearOperationSource?: boolean }
+  | { kind: "deviceAutomation"; value: DeviceAutomation | null }
   | {
       kind: "automationView";
       value: "device" | "orchestration";
@@ -119,6 +121,14 @@ function App() {
   const [operationSource, setOperationSource] = useState<OperationSourceRef>();
   const pageRef = useRef(page);
   pageRef.current = page;
+  const [deviceAutomation, setDeviceAutomation] = useState<DeviceAutomation | null>(null);
+  const deviceAutomationRef = useRef(deviceAutomation);
+  deviceAutomationRef.current = deviceAutomation;
+  const activeAutomation = isDeviceAutomation(page) ? page : page === "control" ? deviceAutomation : null;
+  const activeAutomationRef = useRef(activeAutomation);
+  activeAutomationRef.current = activeAutomation;
+  const operationSourceRef = useRef(operationSource);
+  operationSourceRef.current = operationSource;
   const {
     devices,
     groups,
@@ -240,7 +250,14 @@ function App() {
 
         const drain = (async () => {
           while (pendingNavigationRef.current) {
-            if (hasWorkspaceDrafts()) {
+            const pending = pendingNavigationRef.current;
+            const destination = pending.kind === "deviceAutomation" ? pending.value
+              : pending.kind === "page" && isDeviceAutomation(pending.value) ? pending.value
+              : pending.kind === "page" && pending.value === "control" ? deviceAutomationRef.current : null;
+            // Switching between the page and its dock preserves the same mounted editor.
+            const retainsEditor = destination !== null && destination === activeAutomationRef.current
+              && !(pending.kind === "page" && pending.clearOperationSource && operationSourceRef.current);
+            if (!retainsEditor && hasWorkspaceDrafts()) {
               const confirmed = await requestWorkspaceLeave();
               // Dirty state can change while the dialog awaits an answer. Read it again rather
               // than deciding from the render that opened the dialog.
@@ -264,6 +281,11 @@ function App() {
               if (latest.clearOperationSource) setOperationSource(undefined);
               pageRef.current = latest.value;
               setPage(latest.value);
+            } else if (latest.kind === "deviceAutomation") {
+              deviceAutomationRef.current = latest.value;
+              setDeviceAutomation(latest.value);
+              pageRef.current = "control";
+              setPage("control");
             } else {
               automationViewRef.current = latest.value;
               setAutomationView(latest.value);
@@ -303,6 +325,9 @@ function App() {
     },
     [queueNavigation],
   );
+
+  const requestDeviceAutomation = useCallback((next: DeviceAutomation | null) =>
+    queueNavigation({ kind: "deviceAutomation", value: next }), [queueNavigation]);
 
   const openOperationSource = useCallback(async (source: OperationSourceRef) => {
     const destination = operationSourcePage(source);
@@ -395,6 +420,11 @@ function App() {
     () => resolveAutomationTarget(interactionTargetRef, devices, groups),
     [interactionTargetRef, devices, groups],
   );
+  const workspaceScope = activeAutomation === "nurture"
+    ? { targetRef: nurtureTargetRef, targetUdids: nurtureTargetUdids, setTarget: setNurtureTargetRef }
+    : activeAutomation === "interaction"
+      ? { targetRef: interactionTargetRef, targetUdids: interactionTargetUdids, setTarget: setInteractionTargetRef }
+      : { targetRef: publishTargetRef, targetUdids: publishTargetUdids, setTarget: setPublishTargetRef };
   // Numbered phones lead, in number order; an unnumbered fleet is left exactly as the
   // driver listed it. That is the point of a number — a grid position moves when a phone
   // drops off USB, a number does not.
@@ -433,6 +463,7 @@ function App() {
     onCanvasMouseDown,
     band,
   } = useBoxSelection(devices, visibleDevices, page === "control" && viewMode === "window");
+  const hasVisibleDevices = visibleDevices.length > 0;
 
   // Wheel over the phone grid zooms the tiles. Registered by hand because
   // React's synthetic onWheel is passive and cannot preventDefault the page
@@ -449,7 +480,7 @@ function App() {
     return () => canvas.removeEventListener("wheel", onWheel);
   // `canvasRef` is a ref object and never changes identity, but it now arrives through
   // `useBoxSelection`'s return value where the rule cannot see that. Listing it is free.
-  }, [page, viewMode, canvasRef]);
+  }, [page, viewMode, canvasRef, hasVisibleDevices]);
   const menuAdbDevice = useMemo(
     () => (adbFor ? (devices.find((d) => d.udid === adbFor) ?? null) : null),
     [adbFor, devices],
@@ -672,6 +703,8 @@ function App() {
           }
           actions={
             <>
+              {isDeviceAutomation(page) && <DeviceAutomationLayoutButton docked={false}
+                onClick={() => void requestDeviceAutomation(page)} />}
               <ActivityCenter />
               <button
               type="button"
@@ -698,7 +731,7 @@ function App() {
 
         <div
           ref={contentRef}
-          className={`content content-${page} ${page === "scripts" ? "content-flow" : ""}`}
+          className={`content content-${page} ${page === "scripts" ? "content-flow" : ""} ${page === "control" && deviceAutomation ? "has-device-automation" : ""}`}
         >
           {bootError && (
             <Banner
@@ -752,7 +785,8 @@ function App() {
           )}
 
           {page === "control" && (
-            <>
+            <section className="device-browser" aria-label="Danh sách và màn hình thiết bị">
+              <div className="device-browser-toolbar">
               <ProfileToolbar
                 selected={selectedDevices}
                 deviceCount={devices.length}
@@ -846,6 +880,8 @@ function App() {
                 }}
               />
 
+              <DeviceAutomationBar value={deviceAutomation} onChange={requestDeviceAutomation} />
+
               {deviceWorkOwners.state === "error" && (
                 <Banner
                   tone="error"
@@ -919,6 +955,9 @@ function App() {
                 </div>
                 <FilterToolbar viewMode={viewMode} onViewMode={setViewMode} />
               </div>
+              </div>
+
+              <div className="device-browser-content">
 
               {visibleDevices.length > 0 && viewMode === "list" && (
                 <table className="device-table" aria-label="Danh sách thiết bị">
@@ -1020,11 +1059,11 @@ function App() {
               {visibleDevices.length > 0 && viewMode === "window" && (
                 <div
                   className="window-canvas"
+                  style={{ "--device-tile-min-width": `${tileWidth}px` } as CSSProperties}
                   ref={canvasRef}
                   role="grid"
                   aria-label="Lưới thiết bị"
                   aria-multiselectable="true"
-                  title="Ctrl + lăn chuột để phóng to / thu nhỏ · kéo chuột để quét chọn máy"
                   onMouseDown={onCanvasMouseDown}
                 >
                   {band && (
@@ -1127,7 +1166,8 @@ function App() {
                   }
                 />
               )}
-            </>
+              </div>
+            </section>
           )}
 
           {page === "material" && (
@@ -1242,78 +1282,27 @@ function App() {
               deviceLabels={automationDeviceLabels}
             />
           )}
-          {page === "publish" && (
-            <div className="automation-page-stack">
-              <TargetSelector
-                devices={devices}
-                groups={groups}
-                selected={selected}
-                onChange={setSelected}
-                targetRef={publishTargetRef}
-                requireChoice
-                onTargetRefChange={setPublishTargetRef}
-                deviceLabel={(device) => automationDeviceLabels.get(device.udid) ?? device.name}
-              />
-              <PublishPage
-                operationSource={operationSource?.kind === "publish" ? operationSource : undefined}
-                devices={devices}
-                selected={selected}
-                targetUdids={publishTargetUdids}
-                targetRef={publishTargetRef}
-                metas={metaMap}
-                onTargetRefChange={setPublishTargetRef}
+          <section key="automation-workspace" id="device-automation-panel"
+            hidden={!activeAutomation}
+            className={`automation-host${page === "control" ? " is-docked" : ""}`}
+            role={page === "control" ? "tabpanel" : undefined}
+            aria-labelledby={page === "control" && activeAutomation ? `device-automation-${activeAutomation}` : undefined}>
+            {activeAutomation && <>
+              {page === "control" && <header className="device-automation-head">
+                <strong>{PAGE_TITLE[activeAutomation]}</strong>
+                <button type="button" className="ghost" disabled={!selected.length}
+                  onClick={() => workspaceScope.setTarget({ type: "explicit", udids: [...selected] })}>
+                  Dùng {selected.length} máy đã chọn
+                </button>
+                <DeviceAutomationLayoutButton docked onClick={() => void requestPage(activeAutomation)} />
+              </header>}
+              <AutomationWorkspace key={activeAutomation} kind={activeAutomation} docked={page === "control"} devices={devices} groups={groups}
+                selected={selected} targetRef={workspaceScope.targetRef} targetUdids={workspaceScope.targetUdids}
+                onTargetRefChange={workspaceScope.setTarget} metas={metaMap} labels={automationDeviceLabels}
                 onSelectUdids={setSelected}
-              />
-            </div>
-          )}
-          {page === "nurture" && (
-            <div className="automation-page-stack">
-              <TargetSelector
-                devices={devices}
-                groups={groups}
-                selected={selected}
-                onChange={setSelected}
-                targetRef={nurtureTargetRef}
-                requireChoice
-                onTargetRefChange={setNurtureTargetRef}
-                deviceLabel={(device) => automationDeviceLabels.get(device.udid) ?? device.name}
-              />
-              <NurturePopup
-                operationSource={operationSource?.kind === "nurture" ? operationSource : undefined}
-                devices={devices}
-                selected={selected}
-                targetUdids={nurtureTargetUdids}
-                targetRef={nurtureTargetRef}
-                metas={metaMap}
-                onTargetRefChange={setNurtureTargetRef}
-                surface="page"
-              />
-            </div>
-          )}
-          {page === "interaction" && (
-            <div className="automation-page-stack">
-              <TargetSelector
-                devices={devices}
-                groups={groups}
-                selected={selected}
-                onChange={setSelected}
-                targetRef={interactionTargetRef}
-                requireChoice
-                onTargetRefChange={setInteractionTargetRef}
-                deviceLabel={(device) => automationDeviceLabels.get(device.udid) ?? device.name}
-              />
-              <InteractionPopup
-                operationSource={operationSource?.kind === "interaction" ? operationSource : undefined}
-                devices={devices}
-                selected={selected}
-                targetUdids={interactionTargetUdids}
-                targetRef={interactionTargetRef}
-                metas={metaMap}
-                onTargetRefChange={setInteractionTargetRef}
-                surface="page"
-              />
-            </div>
-          )}
+                operationSource={operationSource?.kind === activeAutomation ? operationSource : undefined} />
+            </>}
+          </section>
           {page === "diagnostics" && <FleetDiagnosticsPage devices={devices} metas={metas} />}
           {page === "data" && <DataPage />}
           {page === "api" && <ApiPage />}
