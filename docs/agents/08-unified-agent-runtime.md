@@ -832,3 +832,31 @@
   ARIA grid/row/gridcell để các nút con vẫn truy cập được, không đổi thao tác hoặc mật độ.
   Nút chạy Flow không chuyển động opacity/màu khi vừa enabled; trạng thái có thể bấm phải
   đạt contrast ngay frame đầu tiên, không chỉ sau khi CSS transition kết thúc.
+
+#### 14.17 Cửa sổ native phải vừa vùng làm việc (06/09/2026; xem §9.153)
+
+- Kích thước 1440×900 là client mong muốn, không phải khung ngoài cửa sổ. Khởi tạo
+  cửa sổ ẩn, đo `inner_size`/`outer_size` và DPI thật, rồi fit vào `Monitor::work_area`
+  trước khi show. Không dùng toàn bộ độ phân giải màn hình vì taskbar chiếm một phần.
+- Tính vị trí và kích thước bằng physical pixel, giữ origin âm của màn hình phụ và
+  taskbar trái/trên. Minimum 820×560 logical được giảm nếu vùng làm việc nhỏ hơn;
+  không ép cửa sổ vượt màn hình chỉ để giữ minimum. Màn hình thiếu chỗ cho decoration
+  giao lại cho maximize của hệ điều hành; không tự sửa scale hay độ phân giải.
+- Chỉ fit lúc khởi tạo. Không can thiệp thao tác kéo/resize của người dùng, stream,
+  lựa chọn máy hoặc cấu hình vận hành. Browser viewport test không thay thế phép đo
+  khung native bằng work area; screenshot bị downscale không phải phép đo DPI.
+
+#### 14.18 Lưới chia đều và tác vụ bên cạnh stream (06/09/2026; xem §9.154)
+
+- `window-canvas` dùng cột `auto-fill/minmax/1fr`, lấy zoom đã lưu làm chiều rộng
+  tối thiểu. Phần dư chia đều giữa các cột; hàng cuối giữ cùng kích thước, tỷ lệ 1:2.
+  Không đổi stream canvas, thao tác chọn/mở, thứ tự/số máy hoặc viewport điện thoại.
+- Trang Thiết bị mở Nuôi TikTok/Tương tác/Đăng bài trong dock cùng stream. Toolbar
+  dùng toàn chiều ngang, hai vùng dưới cuộn riêng. Dock dùng `AutomationWorkspace`
+  chung với trang riêng; chuyển layout cùng loại giữ component, draft, monitor và
+  campaign identity, không dispatch lại. Đổi loại/đóng/rời trang vẫn qua draft guard.
+- Lựa chọn trên grid không tự trở thành phạm vi public action. Nút `Dùng N máy đã
+  chọn` chụp explicit UDID cho tác vụ đang mở; bỏ chọn hoặc lọc grid sau đó không đổi
+  snapshot tác vụ. Mỗi loại giữ TargetRef riêng; empty không được hiểu là toàn fleet.
+- Không bỏ preflight/xác nhận/evidence/uncertain guard khi chạy trong dock. Toàn bộ
+  command vẫn đi API/control plane hiện có. Gate browser chỉ dùng fixture đã dán nhãn.

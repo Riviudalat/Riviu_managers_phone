@@ -93,6 +93,8 @@ Nhật ký là bản ghi có ngày; mục mới hơn chỉ thay thế các kết
 | §14.14 | [14.14 Phản hồi UI không che công việc và thanh lệnh thống nhất (05/09/2026; xem §9.147)](08-unified-agent-runtime.md#1414-phản-hồi-ui-không-che-công-việc-và-thanh-lệnh-thống-nhất-05092026-xem-9147) | `08-unified-agent-runtime.md` |
 | §14.15 | [14.15 Hình học form Nuôi TikTok và vị trí cuộn khi chuyển workspace (05/09/2026; xem §9.148)](08-unified-agent-runtime.md#1415-hình-học-form-nuôi-tiktok-và-vị-trí-cuộn-khi-chuyển-workspace-05092026-xem-9148) | `08-unified-agent-runtime.md` |
 | §14.16 | [14.16 Bản nháp, hồ sơ và tiến độ vận hành có chủ thể (06/09/2026; xem §9.150)](08-unified-agent-runtime.md#1416-bản-nháp-hồ-sơ-và-tiến-độ-vận-hành-có-chủ-thể-06092026-xem-9150) | `08-unified-agent-runtime.md` |
+| §14.17 | [14.17 Cửa sổ native phải vừa vùng làm việc (06/09/2026; xem §9.153)](08-unified-agent-runtime.md#1417-cửa-sổ-native-phải-vừa-vùng-làm-việc-06092026-xem-9153) | `08-unified-agent-runtime.md` |
+| §14.18 | [14.18 Lưới chia đều và tác vụ bên cạnh stream (06/09/2026; xem §9.154)](08-unified-agent-runtime.md#1418-lưới-chia-đều-và-tác-vụ-bên-cạnh-stream-06092026-xem-9154) | `08-unified-agent-runtime.md` |
 
 ## Số mục kế thừa có nhiều chủ sở hữu
 
@@ -103,11 +105,11 @@ Khi trích các mục này, ghi thêm ngày/tiêu đề và liên kết trực t
 
 ## Mới nhất
 
+- [§9.154: §9.154 Chia đều lưới và thao tác TikTok cạnh stream (06/09/2026)](diary/06-2408-2708.md#9154-chia-đều-lưới-và-thao-tác-tiktok-cạnh-stream-06092026)
+- [§9.153: §9.153 Cửa sổ khởi tạo bị taskbar che đáy (06/09/2026)](diary/06-2408-2708.md#9153-cửa-sổ-khởi-tạo-bị-taskbar-che-đáy-06092026)
 - [§9.152: §9.152 UI cam trắng, phạm vi tác vụ và biên Local API (06/09/2026)](diary/06-2408-2708.md#9152-ui-cam-trắng-phạm-vi-tác-vụ-và-biên-local-api-06092026)
 - [§9.151: §9.151 Tài liệu theo tác vụ, chỉ mục có ngữ nghĩa và dữ liệu trùng được chứng minh (06/09/2026)](diary/06-2408-2708.md#9151-tài-liệu-theo-tác-vụ-chỉ-mục-có-ngữ-nghĩa-và-dữ-liệu-trùng-được-chứng-minh-06092026)
 - [§9.150: §9.150 Bản nháp, hồ sơ và tiến độ fleet không còn phụ thuộc tab đang mở (06/09/2026)](diary/06-2408-2708.md#9150-bản-nháp-hồ-sơ-và-tiến-độ-fleet-không-còn-phụ-thuộc-tab-đang-mở-06092026)
-- [§9.149: §9.149 Form hồ sơ đồng nhất và trạng thái sẵn sàng Nuôi TikTok (05/09/2026)](diary/06-2408-2708.md#9149-form-hồ-sơ-đồng-nhất-và-trạng-thái-sẵn-sàng-nuôi-tiktok-05092026)
-- [§9.148: §9.148 Một icon 16×32 px kéo lệch cả hàng Nuôi TikTok (05/09/2026)](diary/06-2408-2708.md#9148-một-icon-1632-px-kéo-lệch-cả-hàng-nuôi-tiktok-05092026)
 
 ## Nhật ký §9.x
 
@@ -275,6 +277,8 @@ Khi trích các mục này, ghi thêm ngày/tiêu đề và liên kết trực t
 | §9.150 | [§9.150 Bản nháp, hồ sơ và tiến độ fleet không còn phụ thuộc tab đang mở (06/09/2026)](diary/06-2408-2708.md#9150-bản-nháp-hồ-sơ-và-tiến-độ-fleet-không-còn-phụ-thuộc-tab-đang-mở-06092026) | `diary/06-2408-2708.md` |
 | §9.151 | [§9.151 Tài liệu theo tác vụ, chỉ mục có ngữ nghĩa và dữ liệu trùng được chứng minh (06/09/2026)](diary/06-2408-2708.md#9151-tài-liệu-theo-tác-vụ-chỉ-mục-có-ngữ-nghĩa-và-dữ-liệu-trùng-được-chứng-minh-06092026) | `diary/06-2408-2708.md` |
 | §9.152 | [§9.152 UI cam trắng, phạm vi tác vụ và biên Local API (06/09/2026)](diary/06-2408-2708.md#9152-ui-cam-trắng-phạm-vi-tác-vụ-và-biên-local-api-06092026) | `diary/06-2408-2708.md` |
+| §9.153 | [§9.153 Cửa sổ khởi tạo bị taskbar che đáy (06/09/2026)](diary/06-2408-2708.md#9153-cửa-sổ-khởi-tạo-bị-taskbar-che-đáy-06092026) | `diary/06-2408-2708.md` |
+| §9.154 | [§9.154 Chia đều lưới và thao tác TikTok cạnh stream (06/09/2026)](diary/06-2408-2708.md#9154-chia-đều-lưới-và-thao-tác-tiktok-cạnh-stream-06092026) | `diary/06-2408-2708.md` |
 
 ## Cổng
 

@@ -15,12 +15,18 @@ phạm vi máy rõ ràng và kết quả có thể đọc lại. Chọn hồ sơ
 ## Thiết bị
 
 **Đầu vào:** kết nối USB, nhóm, bộ lọc trạng thái, từ khoá và các máy được chọn.
-Danh sách/lưới phải dùng cùng tập sau lọc; tile, canvas, mật độ và cử chỉ điều khiển giữ
-nguyên hợp đồng hiện có.
+Danh sách/lưới dùng cùng tập sau lọc; các ô chia đều chiều ngang, giữ tỷ lệ màn hình và
+cử chỉ điều khiển. Ctrl+lăn chuột đổi mức zoom; hàng cuối giữ cùng kích thước ô.
 
 **Thao tác:** làm mới roster; chọn nhóm; chọn máy; mở máy hoặc drawer chi tiết; thao tác
 hàng loạt qua menu ngữ cảnh. Đọc số máy đích ngay tại lệnh. Dùng Chẩn đoán khi trạng thái
 quyền/transport khác trạng thái kết nối.
+
+Ba tab **Nuôi TikTok / Tương tác / Đăng bài** mở khung tác vụ cạnh lưới stream.
+Chọn máy rồi bấm **Dùng N máy đã chọn**, hoặc mở **Phạm vi thiết bị** để chọn nhóm.
+Phạm vi tác vụ không tự đổi khi bỏ chọn/lọc lưới. Khung có đủ Thiết lập và Theo dõi;
+nút **Mở trang tác vụ** mở rộng workspace, **Xem cùng thiết bị** đưa trở lại cạnh lưới
+mà giữ bản nháp. Đóng/đổi tác vụ vẫn hỏi lưu nếu đã sửa.
 
 **Kết quả:** roster, trạng thái work owner, preview và tiến độ từng máy. Máy rời fleet
 đóng các vùng thao tác của chính máy đó. **Tiếp theo:** mở máy cần kiểm tra hoặc chuyển
