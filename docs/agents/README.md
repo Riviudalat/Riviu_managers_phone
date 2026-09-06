@@ -105,11 +105,11 @@ Khi trích các mục này, ghi thêm ngày/tiêu đề và liên kết trực t
 
 ## Mới nhất
 
+- [§9.155: §9.155 Push main và bộ cài Windows 0.2.4 (06/09/2026)](diary/06-2408-2708.md#9155-push-main-và-bộ-cài-windows-024-06092026)
 - [§9.154: §9.154 Chia đều lưới và thao tác TikTok cạnh stream (06/09/2026)](diary/06-2408-2708.md#9154-chia-đều-lưới-và-thao-tác-tiktok-cạnh-stream-06092026)
 - [§9.153: §9.153 Cửa sổ khởi tạo bị taskbar che đáy (06/09/2026)](diary/06-2408-2708.md#9153-cửa-sổ-khởi-tạo-bị-taskbar-che-đáy-06092026)
 - [§9.152: §9.152 UI cam trắng, phạm vi tác vụ và biên Local API (06/09/2026)](diary/06-2408-2708.md#9152-ui-cam-trắng-phạm-vi-tác-vụ-và-biên-local-api-06092026)
 - [§9.151: §9.151 Tài liệu theo tác vụ, chỉ mục có ngữ nghĩa và dữ liệu trùng được chứng minh (06/09/2026)](diary/06-2408-2708.md#9151-tài-liệu-theo-tác-vụ-chỉ-mục-có-ngữ-nghĩa-và-dữ-liệu-trùng-được-chứng-minh-06092026)
-- [§9.150: §9.150 Bản nháp, hồ sơ và tiến độ fleet không còn phụ thuộc tab đang mở (06/09/2026)](diary/06-2408-2708.md#9150-bản-nháp-hồ-sơ-và-tiến-độ-fleet-không-còn-phụ-thuộc-tab-đang-mở-06092026)
 
 ## Nhật ký §9.x
 
@@ -279,6 +279,7 @@ Khi trích các mục này, ghi thêm ngày/tiêu đề và liên kết trực t
 | §9.152 | [§9.152 UI cam trắng, phạm vi tác vụ và biên Local API (06/09/2026)](diary/06-2408-2708.md#9152-ui-cam-trắng-phạm-vi-tác-vụ-và-biên-local-api-06092026) | `diary/06-2408-2708.md` |
 | §9.153 | [§9.153 Cửa sổ khởi tạo bị taskbar che đáy (06/09/2026)](diary/06-2408-2708.md#9153-cửa-sổ-khởi-tạo-bị-taskbar-che-đáy-06092026) | `diary/06-2408-2708.md` |
 | §9.154 | [§9.154 Chia đều lưới và thao tác TikTok cạnh stream (06/09/2026)](diary/06-2408-2708.md#9154-chia-đều-lưới-và-thao-tác-tiktok-cạnh-stream-06092026) | `diary/06-2408-2708.md` |
+| §9.155 | [§9.155 Push main và bộ cài Windows 0.2.4 (06/09/2026)](diary/06-2408-2708.md#9155-push-main-và-bộ-cài-windows-024-06092026) | `diary/06-2408-2708.md` |
 
 ## Cổng
 
