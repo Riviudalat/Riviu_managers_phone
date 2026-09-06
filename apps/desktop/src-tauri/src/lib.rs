@@ -24,6 +24,7 @@ mod publish_commands;
 mod state;
 mod view_hub;
 mod view_watchdog;
+mod window_placement;
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -275,9 +276,10 @@ pub fn run() {
                     .inner_size(1440.0, 900.0)
                     .min_inner_size(820.0, 560.0)
                     .resizable(true)
-                    .visible(!smoke_active)
+                    .visible(false)
                     .build()?
             };
+            window_placement::fit_initial_window(&window)?;
             if smoke_active {
                 window.hide()?;
             } else {
