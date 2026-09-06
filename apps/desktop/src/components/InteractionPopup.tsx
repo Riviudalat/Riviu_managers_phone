@@ -7,17 +7,16 @@ import {
   type KeyboardEvent as ReactKeyboardEvent,
 } from "react";
 import {
-  getDeviceMeta,
   interactionParseLinks,
   interactionPreviewThread,
   interactionResolveLinks,
   interactionStartThread,
-  saveDeviceMeta,
   interactionMeasurePost,
 } from "../api";
 import { describeError } from "../describeError";
 import { orderDevicesByNumber, tileName, tileNumber } from "../deviceNaming";
 import { parseMentions, resolveMentionActors, unionActors } from "../interactionMentions";
+import { useDeviceHandles } from "../useDeviceHandles";
 import {
   buildRequest,
   DEFAULT_DRAFT,
@@ -194,7 +193,7 @@ export function InteractionPopup({
   const [parseRevision, setParseRevision] = useState(0);
   const [preview, setPreview] = useState<ThreadPreview | null>(null);
   const [planError, setPlanError] = useState<string | null>(null);
-  const [handles, setHandles] = useState<Record<string, string>>({});
+  const { handles, savedHandles, handleErrors, savingHandles, change: changeHandle, persist: persistHandle, reload: reloadHandle } = useDeviceHandles(inScope.map((device) => device.udid));
   const [openCampaignId, setOpenCampaignId] = useState<string | null>(null);
   useEffect(() => {
     if (operationSource?.kind !== "interaction") return;
@@ -284,37 +283,6 @@ export function InteractionPopup({
   );
 
   const inScopeKey = useMemo(() => inScope.map((device) => device.udid).join(","), [inScope]);
-  // @handles for the in-scope phones. The fleet poll rebuilds `inScope` every few seconds, so
-  // keying the load on the udid list keeps it from refetching — and clobbering an unsaved
-  // edit — on every poll. A locally-edited handle in `prev` wins over a reload.
-  useEffect(() => {
-    let alive = true;
-    const udids = inScopeKey ? inScopeKey.split(",") : [];
-    void Promise.all(
-      udids.map((udid) =>
-        getDeviceMeta(udid)
-          .then((meta) => [udid, meta.handle ?? ""] as const)
-          .catch(() => [udid, ""] as const),
-      ),
-    ).then((pairs) => {
-      if (alive) setHandles((prev) => ({ ...Object.fromEntries(pairs), ...prev }));
-    });
-    return () => {
-      alive = false;
-    };
-  }, [inScopeKey]);
-
-  const persistHandle = useCallback(async (udid: string, value: string) => {
-    const handle = value.trim().replace(/^@+/, "");
-    setHandles((prev) => ({ ...prev, [udid]: handle }));
-    try {
-      // Round-trip the full meta so notes/tags/group/proxy are preserved, not wiped.
-      const meta = await getDeviceMeta(udid);
-      await saveDeviceMeta({ ...meta, handle });
-    } catch {
-      // Non-fatal: the tag still resolves from local state for this session.
-    }
-  }, []);
 
   const mentions = useMemo(
     () => (draft.actions.comment ? parseMentions(draft.mentionText) : []),
@@ -326,9 +294,9 @@ export function InteractionPopup({
     const udids = inScopeKey ? inScopeKey.split(",") : [];
     return resolveMentionActors(
       mentions,
-      udids.map((udid) => ({ udid, handle: handles[udid] ?? "" })),
+      udids.map((udid) => ({ udid, handle: savedHandles[udid] ?? "" })),
     );
-  }, [mentions, inScopeKey, handles]);
+  }, [mentions, inScopeKey, savedHandles]);
   const effectiveActors = useMemo(
     () => unionActors(draft.actors, mentionActors),
     [draft.actors, mentionActors],
@@ -450,15 +418,14 @@ export function InteractionPopup({
   /// limit does not move the cohorts, so it must not disable the run button either.
   const previewKey = useMemo(
     () =>
-      JSON.stringify([validTargets.map((target) => target.targetKey), effectiveActors]),
-    [validTargets, effectiveActors],
+      JSON.stringify([validTargets.map((target) => target.targetKey), effectiveActors, draft.actions, draft.threadKind, draft.messageCount]),
+    [validTargets, effectiveActors, draft.actions, draft.threadKind, draft.messageCount],
   );
   const [previewFor, setPreviewFor] = useState<string | null>(null);
   const previewGeneration = useRef(0);
   const previewStale =
-    draft.actions.comment &&
     validTargets.length > 0 &&
-    effectiveActors.length >= 2 &&
+    effectiveActors.length >= (!draft.actions.comment || draft.threadKind === "standalone" ? 1 : 2) &&
     previewFor !== previewKey;
 
   const cohorts = useMemo(() => groupPlanByCohort(preview?.plan), [preview]);
@@ -471,13 +438,7 @@ export function InteractionPopup({
   /// complaint is about the form, not about the request having failed.
   useEffect(() => {
     const generation = ++previewGeneration.current;
-    if (!draft.actions.comment) {
-      setPreview(null);
-      setPlanError(null);
-      setPreviewFor(previewKey);
-      return;
-    }
-    if (validTargets.length === 0 || effectiveActors.length < 2) {
+    if (validTargets.length === 0 || effectiveActors.length < (!draft.actions.comment || draft.threadKind === "standalone" ? 1 : 2)) {
       setPreview(null);
       setPlanError(null);
       return;
@@ -542,8 +503,15 @@ export function InteractionPopup({
     ],
   );
   const issues = useMemo(
-    () => validateDraft(draft, validationContext),
-    [draft, validationContext],
+    () => {
+      const issues = validateDraft(draft, validationContext);
+      if (draft.actions.comment && inScope.some((device) => savingHandles[device.udid] || handleErrors[device.udid]
+        || (handles[device.udid] ?? "") !== (savedHandles[device.udid] ?? ""))) {
+        issues.push({ field: "actors", message: "Tài khoản máy còn thay đổi chưa lưu hoặc đang lỗi. Lưu lại nick trước khi chạy." });
+      }
+      return issues;
+    },
+    [draft, validationContext, inScope, handles, savedHandles, savingHandles, handleErrors],
   );
   // Advice rather than refusals: these never disable the run button.
   const warnings = useMemo(
@@ -832,10 +800,11 @@ export function InteractionPopup({
                 hierarchyActors={hierarchyActors}
                 largestCohort={largestCohort}
                 handles={handles}
-                onHandleChange={(udid, value) =>
-                  setHandles((prev) => ({ ...prev, [udid]: value }))
-                }
+                handleErrors={handleErrors}
+                savingHandles={savingHandles}
+                onHandleChange={changeHandle}
                 onHandleBlur={(udid, value) => void persistHandle(udid, value)}
+                onHandleReload={(udid) => void reloadHandle(udid)}
                 mentions={mentions}
                 mentionActorCount={mentionActors.length}
                 linkBusy={linkBusy}
@@ -891,7 +860,8 @@ export function InteractionPopup({
             <InteractionMonitorTab
               devices={devices}
               deviceNumber={deviceNumber}
-              handles={handles}
+              deviceLabel={deviceLabel}
+              handles={savedHandles}
               openCampaignId={openCampaignId}
               onOpenCampaign={setOpenCampaignId}
               masterDetail={pageSurface}

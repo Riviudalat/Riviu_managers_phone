@@ -19,11 +19,17 @@ export function InteractionPlanPreview({
   devices,
   deviceNumber,
   threadKind,
+  deviceLabel,
+  handles,
+  commentEnabled = true,
 }: {
   preview: ThreadPreview | null;
   devices: DeviceInfo[];
   deviceNumber: Map<string, number>;
   threadKind: ThreadKind;
+  deviceLabel?: Map<string, string>;
+  handles?: Record<string, string>;
+  commentEnabled?: boolean;
 }) {
   const cohorts = groupPlanByCohort(preview?.plan);
   if (!preview || !cohorts.length) return null;
@@ -31,7 +37,7 @@ export function InteractionPlanPreview({
   const label = (udid: string) => {
     const number = deviceNumber.get(udid);
     const device = devices.find((entry) => entry.udid === udid);
-    const name = device?.name || device?.model || udid.slice(0, 8);
+    const name = deviceLabel?.get(udid) || device?.name || "Máy chưa có tên";
     return number ? `${number} · ${name}` : name;
   };
 
@@ -47,6 +53,13 @@ export function InteractionPlanPreview({
   return (
     <div className="interaction-preview">
       <div className="nu-group-head">Sẽ chạy như thế này</div>
+      <div className="interaction-sheet-rows"><table aria-label="Phân công bài và máy"><thead><tr><th>Máy</th><th>Nick</th><th>Bài viết</th><th>Thứ tự</th></tr></thead><tbody>
+        {preview.plan?.assignments.map((assignment) => <tr key={`${assignment.targetKey}:${assignment.ordinal}`}>
+          <td>{label(assignment.actorUdid)}</td><td>{handles?.[assignment.actorUdid] ? `@${handles[assignment.actorUdid].replace(/^@+/, "")}` : "Chưa gán"}</td>
+          <td>{preview.lines.find((line) => line.target?.targetKey === assignment.targetKey)?.target?.normalizedUrl ?? `Bài ${preview.plan!.assignments.findIndex((a) => a.targetKey === assignment.targetKey) + 1}`}</td>
+          <td>{!commentEnabled ? "Tim / Lưu" : assignment.parentOrdinal === null ? "Mở đầu" : `Trả lời lượt ${assignment.parentOrdinal + 1}`}</td>
+        </tr>)}
+      </tbody></table></div>
       {overCapacity && (
         <Banner tone="warn">
           {running} cụm chạy song song nhưng máy này chỉ mở được{" "}
@@ -61,7 +74,7 @@ export function InteractionPlanPreview({
           </strong>
           <small>{team.actorUdids.map(label).join(" · ")}</small>
           <small className="hint">
-            {threadKind === "standalone"
+            {!commentEnabled ? "Hành động trên các bài đã phân công" : threadKind === "standalone"
               ? "mỗi máy một bình luận gốc"
               : threadKind === "star"
                 ? `máy ${label(team.actorUdids[0])} mở bình luận, ${Math.max(

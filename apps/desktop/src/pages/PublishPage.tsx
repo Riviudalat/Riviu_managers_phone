@@ -38,6 +38,7 @@ import { requestConfirm } from "../confirmStore";
 import { describeError } from "../describeError";
 import { orderDevicesByNumber, tileName, tileNumber } from "../deviceNaming";
 import { pickDirectory } from "../pickFile";
+import { publishScanErrorView, type PublishScanErrorView } from "../publishScanErrors";
 import { targetsOf } from "../selectionTargets";
 import type { OperationSourceRef } from "../operationSource";
 import type {
@@ -135,9 +136,14 @@ function campaignView(
   };
 }
 
-function retryActionLabel(scope: PublishExecutionSnapshot["retryScope"]): string {
+function snapshotSheetEnabled(snapshot?: PublishExecutionSnapshot): boolean {
+  const report = snapshot?.reportJson;
+  return !(report && typeof report === "object" && !Array.isArray(report) && report.sheetEnabled === false);
+}
+
+function retryActionLabel(scope: PublishExecutionSnapshot["retryScope"], sheetEnabled = true): string {
   if (scope === "sheetOnly") return "Ghi lại Sheet";
-  if (scope === "linkAndSheet") return "Lấy link và ghi Sheet";
+  if (scope === "linkAndSheet") return sheetEnabled ? "Lấy link và ghi Sheet" : "Lấy lại liên kết";
   return "Chạy lại từ đầu";
 }
 
@@ -293,11 +299,35 @@ export function PublishPage({
   const [captionDrafts, setCaptionDrafts] = useState<Record<string, string>>({});
   const [runAt, setRunAt] = useState("");
   const [soundPolicyOverride, setSoundPolicyOverride] = useState<PublishSoundPolicy | null>(null);
+  const [sheetEnabled, setSheetEnabled] = useState(true);
   const profileRef = useRef<AutomationProfileHandle>(null);
   const [campaigns, setCampaigns] = useState<PublishCampaignRecord[]>([]);
   const [campaignLoadState, setCampaignLoadState] = useState<"loading" | "ready" | "error">("loading");
   const [campaignLoadError, setCampaignLoadError] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
+  const [operationBusy, setBusy] = useState(false);
+  const [scanning, setScanning] = useState(false);
+  const busy = operationBusy || scanning;
+  const [scanError, setScanError] = useState<PublishScanErrorView | null>(null);
+  const scanTicket = useRef(0);
+  const latestSourceRoot = useRef("");
+  const mounted = useRef(true);
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+      scanTicket.current += 1;
+    };
+  }, []);
+  const invalidateScan = () => {
+    scanTicket.current += 1;
+    setScanning(false);
+    setScanError(null);
+  };
+  const editSourceRoot = (value: string) => {
+    invalidateScan();
+    latestSourceRoot.current = value;
+    setSourceRoot(value);
+  };
   const [notice, setNotice] = useState<{ tone: NoticeTone; text: string } | null>(null);
   const [readiness, setReadiness] = useState<DevicePublishReadiness[]>([]);
   const [readinessNote, setReadinessNote] = useState<string | null>(null);
@@ -368,6 +398,7 @@ export function PublishPage({
     ),
   };
   const preflightRequest: PublishPreflightRequest = {
+    sheetEnabled,
     sourceRoot: sourceRoot.trim(),
     bundleIds: orderedBundleIds,
     udids: targets,
@@ -377,8 +408,8 @@ export function PublishPage({
     soundPolicy: currentSoundPolicy,
   };
   const inputKey = JSON.stringify(preflightRequest);
-  const draftSnapshot = useMemo(() => ({ sourceRoot, bundleIds, assignedUdids, captionDrafts, runAt, targetRef, soundPolicyOverride }),
-    [sourceRoot, bundleIds, assignedUdids, captionDrafts, runAt, targetRef, soundPolicyOverride]);
+  const draftSnapshot = useMemo(() => ({ sourceRoot, bundleIds, assignedUdids, captionDrafts, runAt, targetRef, soundPolicyOverride, sheetEnabled }),
+    [sourceRoot, bundleIds, assignedUdids, captionDrafts, runAt, targetRef, soundPolicyOverride, sheetEnabled]);
   const draftKey = JSON.stringify(draftSnapshot);
   const latestDraftKey = useRef(draftKey);
   latestDraftKey.current = draftKey;
@@ -396,12 +427,15 @@ export function PublishPage({
       return await profileRef.current?.save() ?? false;
     },
     discard: () => {
+      invalidateScan();
+      latestSourceRoot.current = baseline.sourceRoot;
       setSourceRoot(baseline.sourceRoot);
       setBundleIds(baseline.bundleIds);
       setAssignedUdids(baseline.assignedUdids);
       setCaptionDrafts(baseline.captionDrafts);
       setRunAt(baseline.runAt);
       setSoundPolicyOverride(baseline.soundPolicyOverride);
+      setSheetEnabled(baseline.sheetEnabled);
       setManifest(baselineManifest);
       onTargetRefChange?.(baseline.targetRef);
       setPreflightSnapshot(null);
@@ -444,6 +478,8 @@ export function PublishPage({
   }, [draftSnapshot, mappingReady, manifest, targetRef]);
 
   const applyProfile = async (record: AutomationDefinitionRecord) => {
+    invalidateScan();
+    const ticket = scanTicket.current;
     const applyingKey = latestDraftKey.current;
     const config = record.revision.config;
     if (!config || typeof config !== "object" || Array.isArray(config) || config.schemaVersion !== 1
@@ -452,6 +488,8 @@ export function PublishPage({
       throw new Error("Hồ sơ Đăng bài không đúng định dạng.");
     }
     const next = await publishScanFolder(config.sourceRoot);
+    if (!mounted.current) return;
+    if (ticket !== scanTicket.current) throw new Error("Thiết lập vừa thay đổi. Chọn lại hồ sơ để áp dụng.");
     if (latestDraftKey.current !== applyingKey) throw new Error("Thiết lập vừa thay đổi. Chọn lại hồ sơ để áp dụng.");
     if (!config.bundleIds.every((id) => next.bundles.some((bundle) => bundle.id === id))) {
       throw new Error("Nội dung hồ sơ đã thay đổi hoặc bị thiếu. Chọn lại thư mục trước khi đăng.");
@@ -462,17 +500,22 @@ export function PublishPage({
       throw new Error("Hồ sơ Đăng bài thiếu chú thích hợp lệ.");
     }
     const policy = config.soundPolicy;
+    if (config.sheetEnabled !== undefined && typeof config.sheetEnabled !== "boolean") {
+      throw new Error("Hồ sơ Đăng bài có lựa chọn Sheet sai định dạng.");
+    }
     if (!policy || typeof policy !== "object" || Array.isArray(policy)
       || (policy.kind !== "default" && !(policy.kind === "trendingAny"
         && typeof policy.poolSize === "number" && typeof policy.seed === "number"))) {
       throw new Error("Hồ sơ Đăng bài thiếu lựa chọn nhạc hợp lệ.");
     }
+    latestSourceRoot.current = config.sourceRoot;
     setSourceRoot(config.sourceRoot);
     setManifest(next);
     setBundleIds(config.bundleIds);
     setCaptionDrafts(captions as Record<string, string>);
     setRunAt("");
     setSoundPolicyOverride(policy as unknown as PublishSoundPolicy);
+    setSheetEnabled(config.sheetEnabled !== false);
     setAssignedUdids(record.revision.targetRef.type === "explicit" ? record.revision.targetRef.udids : []);
     applyingProfile.current = record.revision.targetRef;
     onTargetRefChange?.(record.revision.targetRef);
@@ -578,22 +621,33 @@ export function PublishPage({
   }, [androidKey, readinessNonce]);
 
   const scan = async (path: string) => {
-    setBusy(true);
+    if (!mounted.current) return;
+    const root = path.trim();
+    const ticket = ++scanTicket.current;
+    const isCurrent = () => mounted.current && ticket === scanTicket.current && latestSourceRoot.current === root;
+    latestSourceRoot.current = root;
+    setSourceRoot(root);
+    setManifest(null);
+    setBundleIds([]);
+    setCaptionDrafts({});
+    setScanError(null);
+    setScanning(true);
     setNotice(null);
     invalidatePreflight();
     try {
-      const next = await publishScanFolder(path);
-      setSourceRoot(path);
+      const next = await publishScanFolder(root);
+      if (!isCurrent()) return;
       setManifest(next);
       setBundleIds(next.bundles.slice(0, eligibleTargets.length).map((bundle) => bundle.id));
       setCaptionDrafts(Object.fromEntries(next.bundles.map((bundle) => [bundle.id, bundle.caption])));
     } catch (error) {
+      if (!isCurrent()) return;
       setManifest(null);
       setBundleIds([]);
       setCaptionDrafts({});
-      setNotice({ tone: "error", text: describeError(error) });
+      setScanError(publishScanErrorView(error));
     } finally {
-      setBusy(false);
+      if (isCurrent()) setScanning(false);
     }
   };
 
@@ -643,6 +697,7 @@ export function PublishPage({
         effectiveTargetRef,
         true,
         currentPreflight.inputDigest,
+        sheetEnabled,
       );
       setWorkspaceTab("monitor");
       if (!runAt) {
@@ -652,7 +707,7 @@ export function PublishPage({
           tone: result.status === "complete" ? "success" : result.status === "uncertain" ? "warning" : "info",
           text:
             result.status === "complete"
-              ? "Đã đăng, lấy liên kết và ghi Sheet."
+              ? (sheetEnabled ? "Đã đăng, lấy liên kết và ghi Sheet." : "Đã đăng và lấy liên kết. Không ghi Sheet.")
               : result.status === "uncertain"
                 ? "Có máy chưa xác định được kết quả sau thao tác Đăng. Quy trình đã dừng."
                 : "Bài đã xử lý nhưng còn bước cần hoàn tất. Mở chi tiết để xem phạm vi retry.",
@@ -690,7 +745,7 @@ export function PublishPage({
     }
     const confirmed = await requestConfirm({
       title: "Xác nhận tiếp tục đăng bài?",
-      message: `${retryScopeLabel(snapshot.retryScope)}. Trạng thái chưa chắc chắn không được tự đăng lại.`,
+      message: `${retryScopeLabel(snapshot.retryScope, snapshotSheetEnabled(snapshot))}. Trạng thái chưa chắc chắn không được tự đăng lại.`,
       confirmLabel: "Tiếp tục",
     });
     if (!confirmed) return;
@@ -704,7 +759,7 @@ export function PublishPage({
         tone: result.status === "complete" ? "success" : result.status === "uncertain" ? "warning" : "info",
         text:
           result.status === "complete"
-            ? "Đã hoàn tất đăng bài và ghi Sheet."
+            ? (snapshotSheetEnabled(snapshot) ? "Đã hoàn tất đăng bài và ghi Sheet." : "Đã đăng và lấy liên kết. Không ghi Sheet.")
             : result.status === "uncertain"
               ? "Kết quả sau thao tác Đăng chưa chắc chắn; app không tự đăng lại."
               : "Quy trình còn bước chưa hoàn tất. Xem chi tiết để xử lý tiếp.",
@@ -795,6 +850,17 @@ export function PublishPage({
           <StatusNotice tone={notice.tone}>{notice.text}</StatusNotice>
         </div>
       )}
+      {scanError && (
+        <div className="publish-global-notice">
+          <StatusNotice tone="error">
+            <strong>{scanError.title}</strong>
+            {scanError.detail && <p>{scanError.detail}</p>}
+            {scanError.raw !== scanError.title && (
+              <details><summary>Chi tiết lỗi quét</summary><code>{scanError.raw}</code></details>
+            )}
+          </StatusNotice>
+        </div>
+      )}
 
       <section id="publish-panel-setup" className="publish-workspace-section" role="tabpanel" aria-label="Thiết lập" hidden={workspaceTab !== "setup"}>
         {stepper}
@@ -819,7 +885,7 @@ export function PublishPage({
               bundleIds={bundleIds}
               captionDrafts={captionDrafts}
               maxSelected={eligibleTargets.length}
-              setSourceRoot={setSourceRoot}
+              setSourceRoot={editSourceRoot}
               setManifest={setManifest}
               setBundleIds={setBundleIds}
               setCaptionDrafts={setCaptionDrafts}
@@ -891,6 +957,8 @@ export function PublishPage({
             currentPreflight={currentPreflight}
             preflightState={preflightState}
             sheetConfig={sheetConfig}
+            sheetEnabled={sheetEnabled}
+            setSheetEnabled={setSheetEnabled}
             sheetLoadState={sheetLoadState}
             sheetLoadError={sheetLoadError}
             sheetUrlDraft={sheetUrlDraft}
@@ -1004,7 +1072,7 @@ function SourceSection({
   scan: (path: string) => Promise<void>;
 }) {
   return (
-    <FormSection title="Nguồn nội dung" description="Mỗi thư mục con chứa một video hoặc một bộ ảnh cùng chú thích.">
+    <FormSection title="Nguồn nội dung" description="Chọn một gói bài hoặc thư mục cha chứa nhiều gói; mỗi gói gồm một video hoặc một bộ ảnh cùng chú thích.">
       <div className="publish-source-row">
         <label className="publish-path-field">
           <span>Thư mục nguồn</span>
@@ -1367,6 +1435,8 @@ function PublishAside({
   currentPreflight,
   preflightState,
   sheetConfig,
+  sheetEnabled,
+  setSheetEnabled,
   sheetLoadState,
   sheetLoadError,
   sheetUrlDraft,
@@ -1397,6 +1467,8 @@ function PublishAside({
   currentPreflight: PublishPreflightReport | null;
   preflightState: AsyncState;
   sheetConfig: PublishSheetConfig | null;
+  sheetEnabled: boolean;
+  setSheetEnabled: (value: boolean) => void;
   sheetLoadState: "loading" | "ready" | "error";
   sheetLoadError: string | null;
   sheetUrlDraft: string;
@@ -1452,7 +1524,7 @@ function PublishAside({
           <StatusChip tone={canExecute ? "success" : preflightState === "error" ? "error" : "neutral"}>
             {canExecute ? "Preflight đạt" : "Chưa có preflight hợp lệ"}
           </StatusChip>
-          {sheetLoadState === "error" ? (
+          {!sheetEnabled ? <StatusChip tone="neutral">Không ghi Sheet</StatusChip> : sheetLoadState === "error" ? (
             <StatusChip tone="error">Không đọc được Sheet</StatusChip>
           ) : sheetConfig ? (
             <StatusChip tone={sheetConfig.webhookUrl && sheetConfig.hasToken ? "success" : "warning"}>
@@ -1474,7 +1546,7 @@ function PublishAside({
           onSaved={profileSaved}
           kind="publish"
           target={targetRef}
-          config={publishProfileConfig(sourceRoot.trim(), orderedBundleIds, captionOverrides, soundPolicy, true)}
+          config={publishProfileConfig(sourceRoot.trim(), orderedBundleIds, captionOverrides, soundPolicy, true, sheetEnabled)}
           defaultName="Đăng bài theo thư mục"
           disabled={!profileReady || busy}
           disabledReason={pendingSchedule ? "Lịch hẹn chưa được tạo. Xác nhận lịch hoặc xóa thời gian hẹn trước khi lưu hồ sơ." : "Chọn đủ nội dung, máy đích và chú thích trước khi lưu hồ sơ."}
@@ -1487,7 +1559,12 @@ function PublishAside({
           })}
         />
       </SummaryRail>
-      <details className="publish-sheet-panel">
+      <label className="publish-sheet-toggle">
+        <input type="checkbox" checked={sheetEnabled} disabled={busy}
+          onChange={(event) => setSheetEnabled(event.target.checked)} />
+        <span>Ghi kết quả lên Sheet</span>
+      </label>
+      {sheetEnabled && <details className="publish-sheet-panel">
         <summary>Cấu hình Sheet</summary>
         {sheetLoadState === "loading" && <LoadingState label="Đang đọc cấu hình Sheet…" />}
         {sheetLoadState === "error" && (
@@ -1556,7 +1633,7 @@ function PublishAside({
             </button>
           )}
         </div>
-      </details>
+      </details>}
     </div>
   );
 }
@@ -1681,7 +1758,7 @@ function CampaignMonitor({
               <div className="publish-row-actions">
                 {campaignView(campaign, operations[campaign.id], executionSnapshots[campaign.id]).retryScope !== "none" && (
                   <button type="button" className="primary" disabled={busy} onClick={() => void retryCampaign(campaign)}>
-                    {retryActionLabel(campaignView(campaign, operations[campaign.id], executionSnapshots[campaign.id]).retryScope)}
+                    {retryActionLabel(campaignView(campaign, operations[campaign.id], executionSnapshots[campaign.id]).retryScope, snapshotSheetEnabled(executionSnapshots[campaign.id]))}
                   </button>
                 )}
                 {CANCELLABLE_STATES.includes(campaign.state) && (
@@ -1750,7 +1827,7 @@ function CampaignDetail({
                 {snapshot.status === "complete" ? "Đã hoàn tất" : snapshot.status === "uncertain" ? "Kết quả chưa chắc chắn" : "Còn bước cần hoàn tất"}
               </StatusChip>
               <span>{retryScopeLabel(snapshot.retryScope)}</span>
-              <span>{snapshot.status === "complete" ? "Sheet đã xác nhận" : snapshot.retryScope === "sheetOnly" ? "Sheet chưa hoàn tất" : "Sheet chưa xác nhận hoàn tất"}</span>
+              <span>{!snapshotSheetEnabled(snapshot) ? "Không ghi Sheet" : snapshot.status === "complete" ? "Sheet đã xác nhận" : snapshot.retryScope === "sheetOnly" ? "Sheet chưa hoàn tất" : "Sheet chưa xác nhận hoàn tất"}</span>
             </div>
           )}
           <ResponsiveTable
@@ -1834,12 +1911,12 @@ function CampaignDetail({
   );
 }
 
-function retryScopeLabel(scope: PublishExecutionSnapshot["retryScope"]): string {
+function retryScopeLabel(scope: PublishExecutionSnapshot["retryScope"], sheetEnabled = true): string {
   switch (scope) {
     case "fullPipeline":
       return "Có thể chạy lại từ đầu";
     case "linkAndSheet":
-      return "Chỉ tiếp tục lấy liên kết và ghi Sheet";
+      return sheetEnabled ? "Chỉ tiếp tục lấy liên kết và ghi Sheet" : "Chỉ tiếp tục lấy liên kết";
     case "sheetOnly":
       return "Chỉ tiếp tục ghi Sheet";
     case "none":

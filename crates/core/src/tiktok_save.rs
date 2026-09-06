@@ -1,5 +1,7 @@
 //! Desired-state Save primitive shared by hierarchy and pixel callers.
 
+pub(crate) mod hierarchy;
+
 use crate::driver::{StatefulElementBox, UiSession};
 use crate::screen::ActionRail;
 use crate::tiktok_labels::{TikTokControl, TikTokControls};
@@ -363,15 +365,15 @@ impl<'a> HierarchySaveAdapter<'a> {
             sequence: 0,
         }
     }
-}
 
-#[async_trait::async_trait]
-impl SaveAdapter for HierarchySaveAdapter<'_> {
-    async fn observe(&mut self) -> anyhow::Result<SaveObservation> {
-        self.sequence = self.sequence.saturating_add(1);
-        let author = crate::interaction_hierarchy::read_author_label(self.session, self.labels)
-            .await
-            .filter(|author| !author.trim().is_empty());
+    async fn identity(&self) -> anyhow::Result<Option<SaveCardIdentity>> {
+        let Some(author) =
+            crate::interaction_hierarchy::read_author_label(self.session, self.labels)
+                .await
+                .filter(|author| !author.trim().is_empty())
+        else {
+            return Ok(None);
+        };
         let sound = match self.labels.label(TikTokControl::SoundLink) {
             Some(label) => self
                 .session
@@ -380,11 +382,19 @@ impl SaveAdapter for HierarchySaveAdapter<'_> {
                 .and_then(|element| element.description),
             None => None,
         };
-        let control = match self.labels.label(TikTokControl::Bookmark) {
-            Some(label) => self.session.locate_stateful(label.to_query()).await?,
-            None => None,
-        };
-        let Some(author) = author else {
+        Ok(Some(SaveCardIdentity::Hierarchy { author, sound }))
+    }
+}
+
+#[async_trait::async_trait]
+impl SaveAdapter for HierarchySaveAdapter<'_> {
+    async fn observe(&mut self) -> anyhow::Result<SaveObservation> {
+        self.sequence = self.sequence.saturating_add(1);
+        let before = self.identity().await?;
+        let control = hierarchy::read_bookmark_control(self.session, self.labels).await?;
+        let after = self.identity().await?;
+        let identity = before.filter(|identity| Some(identity) == after.as_ref());
+        let Some(identity) = identity else {
             return Ok(SaveObservation {
                 identity: None,
                 sequence: self.sequence,
@@ -392,11 +402,7 @@ impl SaveAdapter for HierarchySaveAdapter<'_> {
                 tap_point: None,
             });
         };
-        Ok(hierarchy_save_observation(
-            SaveCardIdentity::Hierarchy { author, sound },
-            self.sequence,
-            control,
-        ))
+        Ok(hierarchy_save_observation(identity, self.sequence, control))
     }
 
     async fn tap(&mut self, point: TapPoint) -> anyhow::Result<()> {

@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { listGroups } from "../../api";
 import type { DeviceGroup, DeviceInfo } from "../../types";
+import { AccountReadControl } from "./AccountReadControl";
 
 /**
  * Who comments, and under what name.
@@ -20,8 +21,11 @@ export function InteractionActorPicker({
   onToggle,
   onReplace,
   handles,
+  handleErrors,
+  savingHandles,
   onHandleChange,
   onHandleBlur,
+  onHandleReload,
   mentionText,
   onMentionText,
   mentions,
@@ -49,8 +53,11 @@ export function InteractionActorPicker({
   onToggle: (udid: string) => void;
   onReplace: (udids: string[]) => void;
   handles: Record<string, string>;
+  handleErrors?: Record<string, string>;
+  savingHandles?: Record<string, boolean>;
   onHandleChange: (udid: string, value: string) => void;
   onHandleBlur: (udid: string, value: string) => void;
+  onHandleReload?: (udid: string) => void;
   mentionText: string;
   onMentionText: (value: string) => void;
   mentions: string[];
@@ -209,21 +216,30 @@ export function InteractionActorPicker({
                     <summary>Chi tiết</summary>
                     <code>{device.udid}</code>
                   </details>
-                  {/* The @handle this phone is logged into. Kept next to the phone so an
-                      operator sets it once, here, and tagging it later pulls this phone into
-                      the post. Blurring saves it to the device meta. */}
+                  {/* Operator mapping; saving is not a live login verification. */}
                   {commentEnabled && (
-                    <input
-                      type="text"
-                      className="interaction-handle"
-                    placeholder="@handle"
-                    spellCheck={false}
-                    aria-label={`Tài khoản TikTok của ${name}`}
-                    title="Nick TikTok máy này đang đăng nhập — để tag thì máy này tự vào comment"
-                      value={handles[device.udid] ?? ""}
-                      onChange={(event) => onHandleChange(device.udid, event.target.value)}
-                      onBlur={(event) => onHandleBlur(device.udid, event.target.value)}
-                    />
+                    <>
+                      <input
+                        type="text"
+                        className="interaction-handle"
+                        placeholder="@handle"
+                        spellCheck={false}
+                        aria-label={`Tài khoản TikTok của ${name}`}
+                        title="Nick do bạn gán; chưa xác nhận tài khoản đang đăng nhập trên máy"
+                        disabled={savingHandles?.[device.udid]}
+                        aria-invalid={Boolean(handleErrors?.[device.udid])}
+                        aria-describedby={handleErrors?.[device.udid] ? `handle-error-${device.udid}` : undefined}
+                        value={handles[device.udid] ?? ""}
+                        onChange={(event) => onHandleChange(device.udid, event.target.value)}
+                        onBlur={(event) => onHandleBlur(device.udid, event.target.value)}
+                      />
+                      {savingHandles?.[device.udid] && <small role="status">Đang lưu nick…</small>}
+                      {handleErrors?.[device.udid] && <>
+                        <small id={`handle-error-${device.udid}`} role="alert">{handleErrors[device.udid]}</small>
+                        {onHandleReload && <button type="button" className="btn btn-sm" disabled={savingHandles?.[device.udid]} onClick={() => onHandleReload(device.udid)}>Tải lại nick đã lưu</button>}
+                      </>}
+                      {device.platform === "android" && <AccountReadControl udid={device.udid} handle={handles[device.udid] ?? ""} disabled={Boolean(savingHandles?.[device.udid] || handleErrors?.[device.udid])} />}
+                    </>
                   )}
                 </div>
               );

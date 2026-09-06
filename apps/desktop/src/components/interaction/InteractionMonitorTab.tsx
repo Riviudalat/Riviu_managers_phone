@@ -44,6 +44,7 @@ const RELATIVE_WORDING_WINDOW_MS = 60 * 60 * 1000;
 export function InteractionMonitorTab({
   devices,
   deviceNumber,
+  deviceLabel,
   handles,
   openCampaignId,
   onOpenCampaign,
@@ -51,6 +52,7 @@ export function InteractionMonitorTab({
 }: {
   devices: DeviceInfo[];
   deviceNumber: Map<string, number>;
+  deviceLabel?: Map<string, string>;
   handles: Record<string, string>;
   openCampaignId: string | null;
   onOpenCampaign: (id: string | null) => void;
@@ -68,12 +70,15 @@ export function InteractionMonitorTab({
   const [detailLoadError, setDetailLoadError] = useState<string | null>(null);
   const [artifacts, setArtifacts] = useState<InteractionArtifactRecord[]>([]);
   const [notes, setNotes] = useState<InteractionTargetNote[]>([]);
+  const [evidenceError, setEvidenceError] = useState<string | null>(null);
   const [shot, setShot] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  const mounted = useRef(true);
   const campaignReloadTicket = useRef(0);
   const reloadCampaigns = useCallback(async () => {
+    if (!mounted.current) return;
     const ticket = ++campaignReloadTicket.current;
     setCampaignLoadState((current) => (current === "ready" ? current : "loading"));
     setCampaignLoadError(null);
@@ -100,39 +105,49 @@ export function InteractionMonitorTab({
   /// rather than during render, because a render React throws away must not leave a mutation
   /// behind.
   const openRef = useRef<string | null>(openCampaignId);
-  useEffect(() => {
-    openRef.current = openCampaignId;
-  }, [openCampaignId]);
+  const selectionTicket = useRef(0);
+  const shotLoadTicket = useRef(0);
 
   const detailLoadTicket = useRef(0);
   const loadDetail = useCallback(async (campaignId: string) => {
+    if (openRef.current !== campaignId) return;
     const ticket = ++detailLoadTicket.current;
     setDetailLoadState("loading");
     setDetailLoadError(null);
     try {
       const loaded = await interactionGet(campaignId);
+      if (openRef.current !== campaignId || ticket !== detailLoadTicket.current) return;
+      if (!loaded || loaded.summary.id !== campaignId) {
+        setDetail(null);
+        setArtifacts([]);
+        setNotes([]);
+        setEvidenceError(null);
+        setDetailLoadError(loaded
+          ? "Dữ liệu trả về không khớp chiến dịch đang chọn."
+          : "Chiến dịch không còn trong dữ liệu.");
+        setDetailLoadState("error");
+        return;
+      }
       // Saved frames are what makes a campaign result checkable rather than just asserted; a
       // campaign that has none still opens.
-      const frames = await interactionListArtifacts(campaignId).catch(() => []);
+      const failures: string[] = [];
+      const frames = await interactionListArtifacts(campaignId).catch((error: unknown) => {
+        failures.push(`Ảnh bằng chứng: ${describeError(error)}`); return [];
+      });
       // Same treatment as the frames: a campaign whose targets were never looked up still
       // opens, and the panel says "chưa tra" rather than showing nothing at all.
-      const targetNotes = await interactionListTargetNotes(campaignId).catch(() => []);
+      const targetNotes = await interactionListTargetNotes(campaignId).catch((error: unknown) => {
+        failures.push(`Nội dung bài: ${describeError(error)}`); return [];
+      });
       // **Dropped if the operator has moved on.** Two clicks — a slow campaign then a fast one
       // — used to settle out of order and leave B open while A was on screen, and then Dừng
       // cancelled A. Cancelling the wrong live campaign is not recoverable, and the same hole
       // was open on the event path, where every `interactionUpdated` fired an unsequenced load.
       if (openRef.current !== campaignId || ticket !== detailLoadTicket.current) return;
-      if (!loaded) {
-        setDetail(null);
-        setArtifacts([]);
-        setNotes([]);
-        setDetailLoadError("Chiến dịch không còn trong dữ liệu.");
-        setDetailLoadState("error");
-        return;
-      }
       setDetail(loaded);
       setArtifacts(frames);
       setNotes(targetNotes);
+      setEvidenceError(failures.length ? failures.join("; ") : null);
       setDetailLoadState("ready");
       setError(null);
     } catch (e) {
@@ -140,33 +155,46 @@ export function InteractionMonitorTab({
       setDetail(null);
       setArtifacts([]);
       setNotes([]);
+      setEvidenceError(null);
       setDetailLoadError(describeError(e));
       setDetailLoadState("error");
     }
   }, []);
 
   useEffect(() => {
+    mounted.current = true;
     void reloadCampaigns();
+    return () => {
+      mounted.current = false;
+      campaignReloadTicket.current += 1;
+    };
   }, [reloadCampaigns]);
 
   useEffect(() => {
-    if (!openCampaignId) {
+    openRef.current = openCampaignId;
+    setDetail(null);
+    setArtifacts([]);
+    setNotes([]);
+    setEvidenceError(null);
+    setShot(null);
+    setBusy(false);
+    setError(null);
+    setDetailLoadError(null);
+    setDetailLoadState(openCampaignId ? "loading" : "idle");
+    if (openCampaignId) void loadDetail(openCampaignId);
+    return () => {
+      openRef.current = null;
       detailLoadTicket.current += 1;
-      setDetail(null);
-      setArtifacts([]);
-      setShot(null);
-      setDetailLoadState("idle");
-      setDetailLoadError(null);
-      return;
-    }
-    void loadDetail(openCampaignId);
+      selectionTicket.current += 1;
+      shotLoadTicket.current += 1;
+    };
   }, [openCampaignId, loadDetail]);
 
   useEffect(() => {
     let alive = true;
     let unlisten: (() => void) | undefined;
     void listenRiviuEvents((event) => {
-      if (event.type !== "interactionUpdated") return;
+      if (!alive || event.type !== "interactionUpdated") return;
       void reloadCampaigns();
       if (event.campaignId && event.campaignId === openRef.current) {
         // Artifacts too. They were fetched once when the campaign was opened and never again,
@@ -210,16 +238,38 @@ export function InteractionMonitorTab({
     (newest > 0 && Date.now() - newest < RELATIVE_WORDING_WINDOW_MS);
   useTickWhile(ticking);
 
-  const guard = useCallback(async (action: () => Promise<void>) => {
+  const guard = useCallback(async (campaignId: string, action: () => Promise<void>) => {
+    if (openRef.current !== campaignId) return;
+    // A -> B -> A is a different selection even though the campaign id matches again.
+    const ticket = selectionTicket.current;
     setBusy(true);
     setError(null);
     try {
       await action();
     } catch (e) {
-      setError(describeError(e));
+      if (openRef.current === campaignId && ticket === selectionTicket.current) {
+        setError(describeError(e));
+      }
     } finally {
-      setBusy(false);
+      if (openRef.current === campaignId && ticket === selectionTicket.current) {
+        setBusy(false);
+      }
     }
+  }, []);
+
+  const showShot = useCallback(async (campaignId: string, artifactId: string) => {
+    const ticket = ++shotLoadTicket.current;
+    await guard(campaignId, async () => {
+      const payload = await interactionReadArtifact(artifactId);
+      if (openRef.current === campaignId && ticket === shotLoadTicket.current) {
+        setShot(`data:${payload.mimeType};base64,${payload.base64}`);
+      }
+    });
+  }, [guard]);
+
+  const dismissShot = useCallback(() => {
+    shotLoadTicket.current += 1;
+    setShot(null);
   }, []);
 
   // **Driven by the open id, not by `detail`.** With `detail` in charge, a load that
@@ -257,11 +307,15 @@ export function InteractionMonitorTab({
     return (
       <div className="interaction-body">
         <InteractionCampaignDetailView
+          key={detail.summary.id}
           detail={detail}
           artifacts={artifacts}
           notes={notes}
           devices={devices}
           deviceNumber={deviceNumber}
+          deviceLabel={deviceLabel}
+          evidenceError={evidenceError}
+          onRetryEvidence={() => void loadDetail(detail.summary.id)}
           handles={handles}
           busy={busy}
           error={error}
@@ -269,27 +323,22 @@ export function InteractionMonitorTab({
           // Awaited, with a busy state and a caught failure. It used to be fire-and-forget, so
           // a cancel the backend refused looked exactly like one it accepted.
           onCancel={() =>
-            void guard(async () => {
+            void guard(detail.summary.id, async () => {
               await interactionCancel(detail.summary.id);
               await loadDetail(detail.summary.id);
               await reloadCampaigns();
             })
           }
           onRetry={(assignmentIds) =>
-            void guard(async () => {
+            void guard(detail.summary.id, async () => {
               await interactionRetry(detail.summary.id, assignmentIds);
               await loadDetail(detail.summary.id);
               await reloadCampaigns();
             })
           }
-          onShowShot={(artifactId) =>
-            void guard(async () => {
-              const payload = await interactionReadArtifact(artifactId);
-              setShot(`data:${payload.mimeType};base64,${payload.base64}`);
-            })
-          }
+          onShowShot={(artifactId) => void showShot(detail.summary.id, artifactId)}
           shot={shot}
-          onDismissShot={() => setShot(null)}
+          onDismissShot={dismissShot}
         />
       </div>
     );
@@ -353,10 +402,11 @@ export function InteractionMonitorTab({
             // content model is phrasing content — so the bar was invalid there, and worse, its
             // `aria-label` was folded into the button's name-from-content, giving one
             // ninety-character name per row.
-            <div className="interaction-campaign-row" key={campaign.id}>
+            <div className="interaction-campaign-row" key={campaign.id} data-selected={openCampaignId === campaign.id}>
               <button
                 type="button"
                 className="interaction-campaign"
+                aria-current={openCampaignId === campaign.id ? "true" : undefined}
                 onClick={() => onOpenCampaign(campaign.id)}
               >
                 <span className="grow">
@@ -416,37 +466,36 @@ export function InteractionMonitorTab({
         <aside className="interaction-monitor-detail" aria-label="Chi tiết chiến dịch">
           {openCampaignId && detail?.summary.id === openCampaignId ? (
             <InteractionCampaignDetailView
+              key={detail.summary.id}
               detail={detail}
               artifacts={artifacts}
               notes={notes}
               devices={devices}
               deviceNumber={deviceNumber}
+              deviceLabel={deviceLabel}
+              evidenceError={evidenceError}
+              onRetryEvidence={() => void loadDetail(detail.summary.id)}
               handles={handles}
               busy={busy}
               error={error}
               onBack={() => onOpenCampaign(null)}
               onCancel={() =>
-                void guard(async () => {
+                void guard(detail.summary.id, async () => {
                   await interactionCancel(detail.summary.id);
                   await loadDetail(detail.summary.id);
                   await reloadCampaigns();
                 })
               }
               onRetry={(assignmentIds) =>
-                void guard(async () => {
+                void guard(detail.summary.id, async () => {
                   await interactionRetry(detail.summary.id, assignmentIds);
                   await loadDetail(detail.summary.id);
                   await reloadCampaigns();
                 })
               }
-              onShowShot={(artifactId) =>
-                void guard(async () => {
-                  const payload = await interactionReadArtifact(artifactId);
-                  setShot(`data:${payload.mimeType};base64,${payload.base64}`);
-                })
-              }
+              onShowShot={(artifactId) => void showShot(detail.summary.id, artifactId)}
               shot={shot}
-              onDismissShot={() => setShot(null)}
+              onDismissShot={dismissShot}
             />
           ) : openCampaignId ? (
             detailLoadState === "error" ? (

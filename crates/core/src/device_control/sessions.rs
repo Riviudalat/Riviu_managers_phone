@@ -4,6 +4,90 @@
 use super::*;
 
 impl DeviceControlPlane {
+    /// New automation attempt only. Reserve capacity before any stop; keep ownership on errors.
+    /// This does not reset a campaign journal or authorize retry after a public effect.
+    pub async fn start_clean_app_session(
+        &self,
+        exclusive: DeviceExclusiveContext,
+        capacity: UiCapacityReservation,
+        bundle_id: &str,
+        kind: InteractionSessionKind,
+    ) -> Result<UiWithStreamContext, DeviceControlError> {
+        let token = self.validate_interaction_capacity(&exclusive)?;
+        if capacity.plane_id != self.plane_id
+            || capacity.reservation.as_ref().map(|r| r.token()) != Some(token)
+        {
+            return Err(DeviceControlError::InvalidContext {
+                reason: "clean start capacity does not match its device lease",
+            });
+        }
+        let udid = exclusive.udid().to_owned();
+        let proof = self.terminate_app(&exclusive, bundle_id).await?;
+        if proof.bundle_id != bundle_id {
+            return Err(DeviceControlError::InvalidContext {
+                reason: "termination proof names another app",
+            });
+        }
+        tracing::info!(udid, bundle_id, old_pid=?proof.old_pid, "automation clean start: target process absent");
+        let session = match self
+            .try_start_interaction_session(exclusive, bundle_id, kind)
+            .await
+        {
+            Ok(session) => session,
+            Err(failure) => {
+                let cleanup = self.terminate_app(&failure.context, bundle_id).await;
+                let closed = self.close_exclusive_context(failure.context);
+                return Err(lifecycle_start_error(
+                    &udid,
+                    failure.error,
+                    cleanup.err(),
+                    closed.err(),
+                ));
+            }
+        };
+        match self.try_start_reserved_stream(session, capacity).await {
+            Ok(context) => Ok(context),
+            Err(failure) => {
+                let (cleanup, closed) = if let Some(context) = failure.context {
+                    let cleanup = self.terminate_session_app(&context, bundle_id).await;
+                    (cleanup.err(), self.close_session_context(context).err())
+                } else if let Some(context) = failure.failed_start {
+                    // The pending stream owns this device until close_failed_stream_start completes.
+                    let cleanup = self
+                        .driver
+                        .terminate_app(&udid, bundle_id)
+                        .await
+                        .map_err(|error| driver_error(&udid, "terminateFailedStart", error));
+                    (
+                        cleanup.err(),
+                        self.close_failed_stream_start(context).await.err(),
+                    )
+                } else {
+                    (None, None)
+                };
+                Err(lifecycle_start_error(&udid, failure.error, cleanup, closed))
+            }
+        }
+    }
+
+    /// Capture public-effect evidence before calling; close even when termination fails.
+    pub async fn finish_app_session(
+        &self,
+        context: UiWithStreamContext,
+        bundle_id: &str,
+    ) -> Result<ProcessAbsenceProof, DeviceControlError> {
+        let udid = context.udid().to_owned();
+        let stopped = self.terminate_streaming_app(&context, bundle_id).await;
+        let closed = self.close_ui_context(context).await;
+        match (stopped, closed) {
+            (Ok(proof), Ok(_)) if proof.bundle_id == bundle_id => Ok(proof),
+            (Ok(_), Ok(_)) => Err(DeviceControlError::InvalidContext {
+                reason: "termination proof names another app",
+            }),
+            (Err(error), Ok(_)) | (Ok(_), Err(error)) => Err(error),
+            (Err(stop), Err(close)) => Err(lifecycle_start_error(&udid, stop, None, Some(close))),
+        }
+    }
     pub async fn foreground_target_app(
         &self,
         context: &DeviceExclusiveContext,
@@ -185,5 +269,24 @@ impl DeviceControlPlane {
             .screenshot(lease.udid(), destination)
             .await
             .map_err(|error| driver_error(lease.udid(), "sessionScreenshot", error))
+    }
+}
+
+fn lifecycle_start_error(
+    udid: &str,
+    primary: DeviceControlError,
+    cleanup: Option<DeviceControlError>,
+    close: Option<DeviceControlError>,
+) -> DeviceControlError {
+    DeviceControlError::Driver {
+        udid: udid.into(),
+        operation: "cleanAppSession",
+        message: format!(
+            "{primary}{}{}",
+            cleanup
+                .map(|e| format!("; cleanup: {e}"))
+                .unwrap_or_default(),
+            close.map(|e| format!("; close: {e}")).unwrap_or_default()
+        ),
     }
 }

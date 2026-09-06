@@ -19,6 +19,7 @@ mod library_batches;
 mod migrations;
 mod nurture;
 mod nurture_follow_cleanup;
+mod operation_log;
 mod orchestration;
 mod public_cleanup;
 mod publish;
@@ -663,6 +664,98 @@ mod device_meta_tests {
         // The neighbouring column, because the update statement lists every column by hand
         // and the way that breaks is by overwriting the one nobody looked at.
         assert_eq!(read.handle, "riviu.demo");
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn handle_update_preserves_device_identity_and_rejects_stale_editors() {
+        let (db, path) = fixture();
+        let original = crate::types::DeviceMeta {
+            alias: "Canary".into(),
+            number: Some(2),
+            notes: "keep".into(),
+            tags: vec!["group-tag".into()],
+            group_id: Some("group-id".into()),
+            handle: "old.account".into(),
+            ..meta("canary")
+        };
+        db.upsert_device_meta(&original).unwrap();
+        assert_eq!(
+            db.set_device_handle("canary", "old.account", " @New.account ")
+                .unwrap(),
+            "New.account"
+        );
+        assert!(db
+            .set_device_handle("canary", "old.account", "wrong")
+            .is_err());
+        let current = db.get_device_meta("canary").unwrap();
+        assert_eq!(current.handle, "New.account");
+        assert_eq!(current.alias, original.alias);
+        assert_eq!(current.number, original.number);
+        assert_eq!(current.notes, original.notes);
+        assert_eq!(current.tags, original.tags);
+        assert_eq!(current.group_id, original.group_id);
+        drop(db);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn handle_update_rejects_duplicate_legacy_handles_and_invalid_usernames() {
+        let (db, path) = fixture();
+        db.upsert_device_meta(&crate::types::DeviceMeta {
+            handle: " @Account ".into(),
+            ..meta("a")
+        })
+        .unwrap();
+        assert!(db.set_device_handle("b", "", "account").is_err());
+        for invalid in [
+            "display name",
+            "https://www.tiktok.com/@user",
+            "user.",
+            "abcdefghijklmnopqrstuvwxy",
+            "a/b",
+        ] {
+            assert!(db.set_device_handle("b", "", invalid).is_err(), "{invalid}");
+        }
+        assert!(db.set_device_handle(" ", "", "account2").is_err());
+        assert_eq!(
+            db.set_device_handle("b", "", "account2").unwrap(),
+            "account2"
+        );
+        assert_eq!(db.set_device_handle("a", " @Account ", "").unwrap(), "");
+        assert_eq!(
+            db.set_device_handle("b", "account2", "account").unwrap(),
+            "account"
+        );
+        drop(db);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn rename_and_renumber_do_not_write_a_stale_account_snapshot() {
+        let (db, path) = fixture();
+        db.set_device_handle("a", "", "old.account").unwrap();
+        let stale = db.get_device_meta("a").unwrap();
+        db.set_device_handle("a", &stale.handle, "new.account")
+            .unwrap();
+        db.patch_device_meta("a", &crate::DeviceMetaChange::Alias("Canary".into()))
+            .unwrap();
+        let after = db
+            .patch_device_meta("a", &crate::DeviceMetaChange::Number(Some(2)))
+            .unwrap();
+        assert_eq!(after.handle, "new.account");
+        assert_eq!(after.alias, "Canary");
+        assert_eq!(after.number, Some(2));
+        assert_eq!(
+            db.patch_device_meta("a", &crate::DeviceMetaChange::Number(None))
+                .unwrap()
+                .handle,
+            "new.account"
+        );
+        assert!(db
+            .patch_device_meta("a", &crate::DeviceMetaChange::Number(Some(0)))
+            .is_err());
+        drop(db);
         let _ = std::fs::remove_file(path);
     }
 
@@ -2152,6 +2245,7 @@ mod publish_tests {
     fn publish_campaign_persists_mapping_hash_manifest_and_revision_events() {
         let (db, path) = fixture();
         let request = PublishCampaignRequest {
+            sheet_enabled: true,
             request_id: "publish-db-1".into(),
             source_root: "/fixture/root".into(),
             bundle_ids: vec!["bundle-a".into(), "bundle-b".into()],
@@ -2215,6 +2309,7 @@ mod publish_tests {
     fn publish_campaign_rejects_duplicate_device_mapping() {
         let (db, path) = fixture();
         let request = PublishCampaignRequest {
+            sheet_enabled: true,
             request_id: "publish-db-duplicate".into(),
             source_root: "/fixture/root".into(),
             bundle_ids: vec!["bundle-a".into(), "bundle-b".into()],

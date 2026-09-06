@@ -240,6 +240,21 @@
 .tile-name { min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; font-size: var(--text-sm); }
 .interaction-actor-tile.selected .tile-name { color: var(--primary-deep); font-weight: 600; }
 .interaction-handle { width: 100%; font-size: var(--text-xs); padding: 0.15rem 0.3rem; }
+.interaction-account-proof, .interaction-readback { display: grid; gap: 0.25rem; min-width: 0; }
+.interaction-account-proof small, .interaction-readback small { white-space: normal; overflow-wrap: anywhere; }
+.interaction-account-proof button, .interaction-readback button { display: inline-flex; gap: 0.35rem; align-items: center; justify-content: flex-start; }
+.interaction-sheet-import { margin-bottom: 0.75rem; min-width: 0; }
+.interaction-sheet-source { display: grid; grid-template-columns: minmax(0,1fr) 80px auto; gap: 8px; align-items: end; margin: 8px 0; }
+.interaction-sheet-source label { min-width: 0; display: grid; gap: 4px; }
+.interaction-sheet-source input { width: 100%; min-width: 0; box-sizing: border-box; }
+.interaction-sheet-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-bottom: 8px; }
+.interaction-sheet-rows { max-height: 260px; overflow: auto; margin-bottom: 8px; }
+.interaction-sheet-rows table { width: 100%; table-layout: fixed; border-collapse: collapse; }
+.interaction-sheet-rows th, .interaction-sheet-rows td { text-align: left; border-bottom: 1px solid var(--line); padding: 6px; overflow-wrap: anywhere; }
+.interaction-sheet-rows th:nth-child(1), .interaction-sheet-rows th:nth-child(2) { width: 50px; }
+.interaction-sheet-rows th:last-child { width: 120px; }
+.interaction-sheet-import code { display: block; overflow-wrap: anywhere; }
+@media (max-width: 900px) { .interaction-sheet-source { grid-template-columns: minmax(0,1fr) 70px; } .interaction-sheet-source button { grid-column: 1 / -1; } }
 /* One decision, three cards. It was two dependent dropdowns, the second of which only meant
    anything when the first said "qua lại". */
 .interaction-mode-cards { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 0.3rem; }
@@ -308,6 +323,7 @@
 .interaction-detail-head button { margin-left: auto; }
 .interaction-back { align-self: flex-start; }
 .interaction-campaign-head { display: flex; align-items: center; gap: 0.4rem; }
+.interaction-campaign-head strong { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .interaction-campaign-head .chip { margin-left: auto; }
 .interaction-action-counters {
   display: flex;
@@ -382,11 +398,14 @@ span.interaction-error > small { color: var(--text-2); white-space: pre-wrap; ov
 }
 .interaction-campaign-list { display: flex; flex-direction: column; gap: 0.25rem; }
 .interaction-campaign { display: flex; align-items: center; gap: 0.45rem; width: 100%; border: 0; background: none; padding: 0; text-align: left; cursor: pointer; }
+.interaction-campaign > .grow { min-width: 0; flex: 1 1 auto; }
+.interaction-campaign-head .chip { flex-shrink: 0; }
 .interaction-campaign strong, .interaction-assignment strong { display: block; font-size: var(--text-sm); color: var(--text-1); }
 .interaction-campaign small, .interaction-assignment small { display: block; color: var(--text-3); font-size: var(--text-xs); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .interaction-detail { display: flex; flex-direction: column; gap: 0.25rem; border-top: 1px solid var(--line); padding-top: 0.55rem; }
 .interaction-assignment { display: flex; align-items: center; gap: 0.45rem; min-width: 0; border-bottom: 1px solid var(--line); padding: 0.3rem 0; font-size: var(--text-xs); }
 .interaction-assignment > .grow { min-width: 0; }
+.interaction-assignment > button { flex-shrink: 0; white-space: nowrap; }
 
 /* The campaign row is the bordered box; the button inside it is the clickable part and the
    progress bar sits under it as a sibling. The bar was inside the `<button>`, where a
@@ -394,7 +413,8 @@ span.interaction-error > small { color: var(--text-2); white-space: pre-wrap; ov
    button's name-from-content — one ninety-character accessible name per row, and two identical
    ones whenever a post had two campaigns. */
 .interaction-campaign-row { display: flex; flex-direction: column; gap: 0.25rem; border: 1px solid var(--line); border-radius: 5px; background: var(--bg-elevated); padding: 0.45rem; }
-.interaction-campaign-row:hover { border-color: var(--primary); background: var(--primary-50); }
+.interaction-campaign-row:hover { border-color: var(--line-strong); background: var(--bg-subtle); }
+.interaction-campaign-row[data-selected="true"] { border-color: var(--primary); background: var(--primary-50); box-shadow: inset 3px 0 var(--primary); }
 
 /* The threshold reading: one line per metric, stacked under the Đo bài button. Deliberately
    plain text rather than three more cards — the numbers are what matter and a reading that has

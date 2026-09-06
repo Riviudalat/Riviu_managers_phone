@@ -738,6 +738,7 @@ export async function installTauriMock(
       if (detail) { detail.items.forEach((item) => { if (item.state === "queued") item.state = "cancelled"; }); persistOperations(); }
     });
     commandHandlers.set("operation_get_run", (args) => clone(operations[String(args.operationId)] ?? null));
+    commandHandlers.set("operation_device_log", () => ({ entries: [], truncated: false }));
     commandHandlers.set("nurture_get_settings", () => ({
       baseUrl: "https://api.openai.com/v1",
       model: "gpt-5-mini",

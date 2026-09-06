@@ -313,6 +313,7 @@ export function NurturePopup({
   const dirty = baseline !== null && snapshotKey !== JSON.stringify([nurtureProfileConfig(baseline.settings), baseline.target]);
   const [statuses, setStatuses] = useState<NurtureSessionStatus[]>([]);
   const [startedTargets, setStartedTargets] = useState<string[]>([]);
+  const [startReport, setStartReport] = useState<{ requested: string[]; started: string[] } | null>(null);
   const [msg, setMsg] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const issueId = useId();
@@ -587,10 +588,12 @@ export function NurturePopup({
     }
     const runTargets = [...targets];
     setBusy(true);
+    setStartReport(null);
     try {
       if (settings && !(await save({ ...settings, scheduleUdids: runTargets }))) return;
-      await nurtureStart(runTargets);
-      setStartedTargets((current) => [...new Set([...current, ...runTargets])]);
+      const started = await nurtureStart(runTargets);
+      setStartReport({ requested: runTargets, started });
+      setStartedTargets((current) => [...new Set([...current, ...started])]);
       await reload();
       if (pageSurface) setPageMode("monitor");
       else setTab("log");
@@ -862,6 +865,16 @@ export function NurturePopup({
                   tone={targets.length && !settingsIssue ? "success" : "warning"}
                   actions={actionControls}
                 />
+              )}
+
+              {startReport && (
+                <StatusNotice tone={startReport.started.length === startReport.requested.length ? "info" : "warning"}>
+                  <strong>{startReport.started.length}/{startReport.requested.length} máy đã bắt đầu</strong>
+                  {startReport.requested.filter((udid) => !startReport.started.includes(udid)).length > 0 && <>
+                    <p>Không bắt đầu: {startReport.requested.filter((udid) => !startReport.started.includes(udid)).map((udid) => deviceLabel(devices, metas, udid)).join("; ")}.</p>
+                    <p>Các máy này không thuộc phiên và không được tự tắt TikTok. Xem nhật ký khởi chạy để biết lý do.</p>
+                  </>}
+                </StatusNotice>
               )}
 
               {pageSurface && settingsIssue && (

@@ -737,6 +737,18 @@ pub const TRANSCRIPT_MAX_WORDS: usize = 240;
 ///
 /// `None` on anything unexpected. A campaign without a transcript writes what it always wrote.
 pub async fn fetch_transcript(track: &SubtitleTrack) -> Option<String> {
+    fetch_transcript_with_limit(track, TRANSCRIPT_MAX_WORDS).await
+}
+
+/// Bounded longer transcript for explicit content evaluation; existing comment callers
+/// retain their original budget through `fetch_transcript`.
+pub async fn fetch_transcript_with_limit(
+    track: &SubtitleTrack,
+    max_words: usize,
+) -> Option<String> {
+    if !(1..=1200).contains(&max_words) {
+        return None;
+    }
     let client = reqwest::Client::builder()
         .timeout(SLIDE_TIMEOUT)
         .user_agent(BROWSER_UA)
@@ -757,7 +769,7 @@ pub async fn fetch_transcript(track: &SubtitleTrack) -> Option<String> {
         return None;
     }
     let vtt = response.text().await.ok()?;
-    transcript_from_vtt(&vtt, TRANSCRIPT_MAX_WORDS)
+    transcript_from_vtt(&vtt, max_words)
 }
 
 /// Turn a WebVTT track into one line of what was said.
@@ -1201,6 +1213,17 @@ mod tests {
             "the cap is on words said"
         );
         assert!(marker.contains("phần sau chưa đọc"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn extended_transcript_budget_rejects_unbounded_requests_before_network() {
+        let track = SubtitleTrack {
+            lang: "vie-VN".into(),
+            source: "ASR".into(),
+            url: "https://invalid.invalid/track".into(),
+        };
+        assert!(fetch_transcript_with_limit(&track, 0).await.is_none());
+        assert!(fetch_transcript_with_limit(&track, 1201).await.is_none());
     }
 
     /// An empty or timings-only track is nothing, not an empty string.

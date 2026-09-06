@@ -15,10 +15,10 @@
  * - **It never promotes an unknown technical string to the headline.** The campaign-level
  *   `errorCode` is a free-text anyhow chain, so an unknown value gets one stable Vietnamese
  *   headline while the original remains available in the disclosure.
- * - **It does not re-translate the detail.** The hierarchy refusals are stored by the engine
+ * - **It preserves the engine's detail.** The hierarchy refusals are stored by the engine
  *   as `code: câu tiếng Việt`, and that sentence is better than anything this file could
  *   write: it was authored next to the measurement it describes. The code becomes the title,
- *   the engine's sentence becomes the detail.
+ *   the engine's sentence stays in the detail alongside guidance for known guards.
  */
 
 export interface InteractionErrorView {
@@ -44,6 +44,11 @@ const EXACT: Record<string, string> = {
   target_open_no_measured_label: "Bản TikTok này chưa được đo nhãn",
   target_open_no_baseline: "Không đọc được bài đang mở trước đó",
   target_open_cancelled: "Đã dừng khi đang mở bài",
+  target_link_proof: "Chưa xác minh được đúng bài bằng liên kết",
+  target_exact_open: "Chưa mở và xác minh được đúng bài",
+  target_post_unavailable: "TikTok báo bài không khả dụng trên máy này",
+  target_package_unreadable: "Chưa đọc được ứng dụng TikTok trên máy",
+  skipped_after_assignment_stopped: "Chưa thực hiện vì lượt trên máy đã dừng",
   // Reply: did we find the right comment to answer?
   reply_control_unmeasured: "Chưa đo nút Trả lời trên bản này",
   reply_no_drawer: "Không mở được khay bình luận",
@@ -61,6 +66,17 @@ const EXACT: Record<string, string> = {
   reply_cleared_frame_missing: "Không chụp được ảnh sau khi gửi",
 };
 
+const GUARD_GUIDANCE: Record<string, string> = {
+  target_post_unavailable: "Thông báo này chỉ ghi nhận trạng thái trên máy đang chạy, chưa xác định bài đã bị xóa hay tài khoản bị chặn. Kiểm tra bài bằng đúng tài khoản trên máy đó.",
+  target_package_unreadable: "Kiểm tra kết nối và dịch vụ hệ thống Android trên máy, rồi đọc lại ứng dụng TikTok. Lỗi đọc không có nghĩa TikTok chưa được cài.",
+};
+
+const PRECISE_TARGET_CODES = new Set([
+  "target_post_unavailable",
+  "target_package_unreadable",
+  "target_link_proof",
+]);
+
 /**
  * The planner's own refusals, which reach the panel in English.
  *
@@ -73,6 +89,9 @@ const EXACT: Record<string, string> = {
  * that sentence is all the wire carries — `thiserror` renders the variant, not its name.
  */
 const PLANNER: Record<string, string> = {
+  "message count must be one to sixty-four for standalone, two to sixty-four for threaded": "Riêng lẻ cần 1–64 bình luận; chuỗi cần ít nhất 2",
+  "actor count must be one to sixty-four; threaded comments need at least two": "Chọn 1–64 máy; chuỗi bình luận cần ít nhất 2 máy",
+  "cohort size must be positive; threaded comments need at least two actors": "Riêng lẻ cần ít nhất 1 máy mỗi cụm; chuỗi cần ít nhất 2",
   "request id is empty": "Thiếu mã yêu cầu",
   "at least one target is required": "Cần ít nhất một link",
   "message count must be between two and sixty-four":
@@ -137,16 +156,23 @@ function titleOf(segment: string): string | undefined {
 export function interactionErrorVi(raw: string): InteractionErrorView {
   const trimmed = raw.trim();
   if (!trimmed) return { title: "Lỗi không rõ", raw };
+  const summary = /^xong (\d+), lỗi (\d+), còn dở (\d+)$/.exec(trimmed);
+  if (summary) return { title: `${summary[1]} lượt hoàn tất, ${summary[2]} lượt lỗi, ${summary[3]} lượt chưa xong`, raw };
+  if (trimmed === "Like không an toàn để tiếp tục assignment") return { title: "Lượt dừng ở bước Tim; xem nguyên nhân từng hành động", raw };
+  if (trimmed === "Save không an toàn để tiếp tục assignment") return { title: "Lượt dừng ở bước Lưu; xem nguyên nhân từng hành động", raw };
 
   const parts = trimmed.split(": ");
-  for (let at = 0; at < parts.length; at += 1) {
-    const title = titleOf(parts[at].trim());
-    if (!title) continue;
+  // An opener wrapper must not hide the concrete refusal nested inside it.
+  const precise = parts.findIndex((part) => PRECISE_TARGET_CODES.has(part.trim()));
+  const at = precise >= 0 ? precise : parts.findIndex((part) => titleOf(part.trim()));
+  if (at >= 0) {
+    const code = parts[at].trim();
+    const title = titleOf(code)!;
     // What the chain said around the code is kept as the detail: the context in front of it
     // names which assignment failed, and the tail is usually the engine's own sentence.
     const context = parts.slice(0, at).join(": ").trim();
     const tail = parts.slice(at + 1).join(": ").trim();
-    const detail = [context, tail].filter((part) => part.length > 0).join(" — ");
+    const detail = [GUARD_GUIDANCE[code], context, tail].filter((part) => Boolean(part)).join(" — ");
     return { title, detail: detail || undefined, raw };
   }
 

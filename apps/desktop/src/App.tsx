@@ -28,6 +28,7 @@ import { pushToast, toastError } from "./toastStore";
 import { ConfirmHost } from "./components/ConfirmHost";
 import { ActivityCenter } from "./components/ActivityCenter";
 import { OperationSourceDetail } from "./components/OperationSourceDetail";
+import { OperationProgressCenter } from "./features/operations/OperationProgressCenter";
 import { DeviceTile } from "./components/DeviceTile";
 import { FilterToolbar, type ViewMode } from "./components/FilterToolbar";
 import { GroupTabs } from "./components/GroupTabs";
@@ -729,6 +730,7 @@ function App() {
           }
         />
 
+        <OperationProgressCenter deviceLabels={automationDeviceLabels} />
         <div
           ref={contentRef}
           className={`content content-${page} ${page === "scripts" ? "content-flow" : ""} ${page === "control" && deviceAutomation ? "has-device-automation" : ""}`}

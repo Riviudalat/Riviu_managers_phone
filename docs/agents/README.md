@@ -95,6 +95,22 @@ Nhật ký là bản ghi có ngày; mục mới hơn chỉ thay thế các kết
 | §14.16 | [14.16 Bản nháp, hồ sơ và tiến độ vận hành có chủ thể (06/09/2026; xem §9.150)](08-unified-agent-runtime.md#1416-bản-nháp-hồ-sơ-và-tiến-độ-vận-hành-có-chủ-thể-06092026-xem-9150) | `08-unified-agent-runtime.md` |
 | §14.17 | [14.17 Cửa sổ native phải vừa vùng làm việc (06/09/2026; xem §9.153)](08-unified-agent-runtime.md#1417-cửa-sổ-native-phải-vừa-vùng-làm-việc-06092026-xem-9153) | `08-unified-agent-runtime.md` |
 | §14.18 | [14.18 Lưới chia đều và tác vụ bên cạnh stream (06/09/2026; xem §9.154)](08-unified-agent-runtime.md#1418-lưới-chia-đều-và-tác-vụ-bên-cạnh-stream-06092026-xem-9154) | `08-unified-agent-runtime.md` |
+| §14.19 | [14.19 Nghiệm thu Nuôi bằng kết quả và cleanup (06/09/2026; xem §9.156)](08-unified-agent-runtime.md#1419-nghiệm-thu-nuôi-bằng-kết-quả-và-cleanup-06092026-xem-9156) | `08-unified-agent-runtime.md` |
+| §14.20 | [14.20 Bằng chứng video và đo chất lượng nội dung (06/09/2026; xem §9.157)](08-unified-agent-runtime.md#1420-bằng-chứng-video-và-đo-chất-lượng-nội-dung-06092026-xem-9157) | `08-unified-agent-runtime.md` |
+| §14.21 | [14.21 Sheet tùy chọn và nhạc theo trạng thái (06/09/2026; xem §9.158)](08-unified-agent-runtime.md#1421-sheet-tùy-chọn-và-nhạc-theo-trạng-thái-06092026-xem-9158) | `08-unified-agent-runtime.md` |
+| §14.22 | [14.22 Tương tác một máy và chứng cứ đúng bài (06/09/2026; xem §9.159)](08-unified-agent-runtime.md#1422-tương-tác-một-máy-và-chứng-cứ-đúng-bài-06092026-xem-9159) | `08-unified-agent-runtime.md` |
+| §14.23 | [14.23 Nick theo UDID và trạng thái Lưu đã đo (06/09/2026; xem §9.160)](08-unified-agent-runtime.md#1423-nick-theo-udid-và-trạng-thái-lưu-đã-đo-06092026-xem-9160) | `08-unified-agent-runtime.md` |
+| §14.24 | [14.24 Kiểm tra tài khoản và nhập nguồn Tương tác (06/09/2026; xem §9.161)](08-unified-agent-runtime.md#1424-kiểm-tra-tài-khoản-và-nhập-nguồn-tương-tác-06092026-xem-9161) | `08-unified-agent-runtime.md` |
+| §14.25 | [14.25 Phạm vi cleanup Nuôi và máy không bắt đầu (07/09/2026; xem §9.163)](08-unified-agent-runtime.md#1425-phạm-vi-cleanup-nuôi-và-máy-không-bắt-đầu-07092026-xem-9163) | `08-unified-agent-runtime.md` |
+| §14.26 | [14.26 Phiên TikTok khởi động sạch (07/09/2026; xem §9.164)](08-unified-agent-runtime.md#1426-phiên-tiktok-khởi-động-sạch-07092026-xem-9164) | `08-unified-agent-runtime.md` |
+| §14.27 | [14.27 Tiến trình chung và cửa sổ máy đổi hướng (07/09/2026; xem §9.165)](08-unified-agent-runtime.md#1427-tiến-trình-chung-và-cửa-sổ-máy-đổi-hướng-07092026-xem-9165) | `08-unified-agent-runtime.md` |
+| §14.28 | [14.28 Cửa sổ tiến trình nổi và xoá bản ghi theo dõi (07/09/2026; xem §9.166)](08-unified-agent-runtime.md#1428-cửa-sổ-tiến-trình-nổi-và-xoá-bản-ghi-theo-dõi-07092026-xem-9166) | `08-unified-agent-runtime.md` |
+| §14.29 | [14.29 Monitor một tác vụ, danh sách máy gọn và nhật ký dễ đọc (07/09/2026; xem §9.168)](08-unified-agent-runtime.md#1429-monitor-một-tác-vụ-danh-sách-máy-gọn-và-nhật-ký-dễ-đọc-07092026-xem-9168) | `08-unified-agent-runtime.md` |
+| §14.30 | [14.30 Monitor state continuity và nghiệm thu UI (07/09/2026; xem §9.169)](08-unified-agent-runtime.md#1430-monitor-state-continuity-và-nghiệm-thu-ui-07092026-xem-9169) | `08-unified-agent-runtime.md` |
+| §14.31 | [14.31 Monitor gọn mặc định (07/09/2026; xem §9.170)](08-unified-agent-runtime.md#1431-monitor-gọn-mặc-định-07092026-xem-9170) | `08-unified-agent-runtime.md` |
+| §14.32 | [14.32 Interaction target proof và kết thúc hành động chưa chạy (07/09/2026; xem §9.171)](08-unified-agent-runtime.md#1432-interaction-target-proof-và-kết-thúc-hành-động-chưa-chạy-07092026-xem-9171) | `08-unified-agent-runtime.md` |
+| §14.33 | [14.33 Interaction phân biệt bài không khả dụng và lỗi đọc thiết bị (07/09/2026; xem §9.172)](08-unified-agent-runtime.md#1433-interaction-phân-biệt-bài-không-khả-dụng-và-lỗi-đọc-thiết-bị-07092026-xem-9172) | `08-unified-agent-runtime.md` |
+| §14.34 | [14.34 Đăng bài nhận thư mục bài đơn và giữ scope quét nguồn (07/09/2026; xem §9.173)](08-unified-agent-runtime.md#1434-đăng-bài-nhận-thư-mục-bài-đơn-và-giữ-scope-quét-nguồn-07092026-xem-9173) | `08-unified-agent-runtime.md` |
 
 ## Số mục kế thừa có nhiều chủ sở hữu
 
@@ -105,11 +121,11 @@ Khi trích các mục này, ghi thêm ngày/tiêu đề và liên kết trực t
 
 ## Mới nhất
 
-- [§9.155: §9.155 Push main và bộ cài Windows 0.2.4 (06/09/2026)](diary/06-2408-2708.md#9155-push-main-và-bộ-cài-windows-024-06092026)
-- [§9.154: §9.154 Chia đều lưới và thao tác TikTok cạnh stream (06/09/2026)](diary/06-2408-2708.md#9154-chia-đều-lưới-và-thao-tác-tiktok-cạnh-stream-06092026)
-- [§9.153: §9.153 Cửa sổ khởi tạo bị taskbar che đáy (06/09/2026)](diary/06-2408-2708.md#9153-cửa-sổ-khởi-tạo-bị-taskbar-che-đáy-06092026)
-- [§9.152: §9.152 UI cam trắng, phạm vi tác vụ và biên Local API (06/09/2026)](diary/06-2408-2708.md#9152-ui-cam-trắng-phạm-vi-tác-vụ-và-biên-local-api-06092026)
-- [§9.151: §9.151 Tài liệu theo tác vụ, chỉ mục có ngữ nghĩa và dữ liệu trùng được chứng minh (06/09/2026)](diary/06-2408-2708.md#9151-tài-liệu-theo-tác-vụ-chỉ-mục-có-ngữ-nghĩa-và-dữ-liệu-trùng-được-chứng-minh-06092026)
+- [§9.174: §9.174 Commit và bộ cài Windows 0.2.6 (07/09/2026)](diary/06-2408-2708.md#9174-commit-và-bộ-cài-windows-026-07092026)
+- [§9.173: §9.173 Đăng bài quét trực tiếp một thư mục nội dung (07/09/2026)](diary/06-2408-2708.md#9173-đăng-bài-quét-trực-tiếp-một-thư-mục-nội-dung-07092026)
+- [§9.172: §9.172 Phân loại lỗi Tương tác sau chiến dịch 20 máy tiếp theo (07/09/2026)](diary/06-2408-2708.md#9172-phân-loại-lỗi-tương-tác-sau-chiến-dịch-20-máy-tiếp-theo-07092026)
+- [§9.171: §9.171 Sửa lỗi Tương tác trong phiên 20 máy (07/09/2026)](diary/06-2408-2708.md#9171-sửa-lỗi-tương-tác-trong-phiên-20-máy-07092026)
+- [§9.170: §9.170 Thu gọn monitor theo yêu cầu người dùng (07/09/2026)](diary/06-2408-2708.md#9170-thu-gọn-monitor-theo-yêu-cầu-người-dùng-07092026)
 
 ## Nhật ký §9.x
 
@@ -280,6 +296,25 @@ Khi trích các mục này, ghi thêm ngày/tiêu đề và liên kết trực t
 | §9.153 | [§9.153 Cửa sổ khởi tạo bị taskbar che đáy (06/09/2026)](diary/06-2408-2708.md#9153-cửa-sổ-khởi-tạo-bị-taskbar-che-đáy-06092026) | `diary/06-2408-2708.md` |
 | §9.154 | [§9.154 Chia đều lưới và thao tác TikTok cạnh stream (06/09/2026)](diary/06-2408-2708.md#9154-chia-đều-lưới-và-thao-tác-tiktok-cạnh-stream-06092026) | `diary/06-2408-2708.md` |
 | §9.155 | [§9.155 Push main và bộ cài Windows 0.2.4 (06/09/2026)](diary/06-2408-2708.md#9155-push-main-và-bộ-cài-windows-024-06092026) | `diary/06-2408-2708.md` |
+| §9.156 | [§9.156 Chạy thật Nuôi TikTok và hai lỗi sau Dừng (06/09/2026)](diary/06-2408-2708.md#9156-chạy-thật-nuôi-tiktok-và-hai-lỗi-sau-dừng-06092026) | `diary/06-2408-2708.md` |
+| §9.157 | [§9.157 Hiểu video: một bài live và sáu bài nguồn bổ sung (06/09/2026)](diary/06-2408-2708.md#9157-hiểu-video-một-bài-live-và-sáu-bài-nguồn-bổ-sung-06092026) | `diary/06-2408-2708.md` |
+| §9.158 | [§9.158 Đăng thật sáu ảnh, chọn nhạc và Sheet tùy chọn (06/09/2026)](diary/06-2408-2708.md#9158-đăng-thật-sáu-ảnh-chọn-nhạc-và-sheet-tùy-chọn-06092026) | `diary/06-2408-2708.md` |
+| §9.159 | [§9.159 Tương tác: một máy, no-op trung thực và live chỉ đọc (06/09/2026)](diary/06-2408-2708.md#9159-tương-tác-một-máy-no-op-trung-thực-và-live-chỉ-đọc-06092026) | `diary/06-2408-2708.md` |
+| §9.160 | [§9.160 Tương tác thật từ Sheet và gán nick cho đúng máy (06/09/2026)](diary/06-2408-2708.md#9160-tương-tác-thật-từ-sheet-và-gán-nick-cho-đúng-máy-06092026) | `diary/06-2408-2708.md` |
+| §9.161 | [§9.161 Khép guard Tương tác, đối chiếu nick và nhập Sheet có chọn dòng (06/09/2026)](diary/06-2408-2708.md#9161-khép-guard-tương-tác-đối-chiếu-nick-và-nhập-sheet-có-chọn-dòng-06092026) | `diary/06-2408-2708.md` |
+| §9.162 | [§9.162 Bộ cài Windows 0.2.5 chứa WIP ổn định TikTok (06/09/2026)](diary/06-2408-2708.md#9162-bộ-cài-windows-025-chứa-wip-ổn-định-tiktok-06092026) | `diary/06-2408-2708.md` |
+| §9.163 | [§9.163 Kiểm tra phản ánh Nuôi xong còn TikTok (07/09/2026)](diary/06-2408-2708.md#9163-kiểm-tra-phản-ánh-nuôi-xong-còn-tiktok-07092026) | `diary/06-2408-2708.md` |
+| §9.164 | [§9.164 Thống nhất cold-start và cleanup TikTok khi chạy (07/09/2026)](diary/06-2408-2708.md#9164-thống-nhất-cold-start-và-cleanup-tiktok-khi-chạy-07092026) | `diary/06-2408-2708.md` |
+| §9.165 | [§9.165 Tiến trình phần trăm, nhật ký từng máy và cửa sổ ngang (07/09/2026)](diary/06-2408-2708.md#9165-tiến-trình-phần-trăm-nhật-ký-từng-máy-và-cửa-sổ-ngang-07092026) | `diary/06-2408-2708.md` |
+| §9.166 | [§9.166 Đổi monitor thành cửa sổ nổi, thu nhỏ và xoá bản ghi (07/09/2026)](diary/06-2408-2708.md#9166-đổi-monitor-thành-cửa-sổ-nổi-thu-nhỏ-và-xoá-bản-ghi-07092026) | `diary/06-2408-2708.md` |
+| §9.167 | [§9.167 Bỏ nút grip, kéo trực tiếp tiêu đề monitor (07/09/2026)](diary/06-2408-2708.md#9167-bỏ-nút-grip-kéo-trực-tiếp-tiêu-đề-monitor-07092026) | `diary/06-2408-2708.md` |
+| §9.168 | [§9.168 Thiết kế lại mật độ và thông tin trong monitor (07/09/2026)](diary/06-2408-2708.md#9168-thiết-kế-lại-mật-độ-và-thông-tin-trong-monitor-07092026) | `diary/06-2408-2708.md` |
+| §9.169 | [§9.169 Review độc lập và sửa lỗi thao tác monitor (07/09/2026)](diary/06-2408-2708.md#9169-review-độc-lập-và-sửa-lỗi-thao-tác-monitor-07092026) | `diary/06-2408-2708.md` |
+| §9.170 | [§9.170 Thu gọn monitor theo yêu cầu người dùng (07/09/2026)](diary/06-2408-2708.md#9170-thu-gọn-monitor-theo-yêu-cầu-người-dùng-07092026) | `diary/06-2408-2708.md` |
+| §9.171 | [§9.171 Sửa lỗi Tương tác trong phiên 20 máy (07/09/2026)](diary/06-2408-2708.md#9171-sửa-lỗi-tương-tác-trong-phiên-20-máy-07092026) | `diary/06-2408-2708.md` |
+| §9.172 | [§9.172 Phân loại lỗi Tương tác sau chiến dịch 20 máy tiếp theo (07/09/2026)](diary/06-2408-2708.md#9172-phân-loại-lỗi-tương-tác-sau-chiến-dịch-20-máy-tiếp-theo-07092026) | `diary/06-2408-2708.md` |
+| §9.173 | [§9.173 Đăng bài quét trực tiếp một thư mục nội dung (07/09/2026)](diary/06-2408-2708.md#9173-đăng-bài-quét-trực-tiếp-một-thư-mục-nội-dung-07092026) | `diary/06-2408-2708.md` |
+| §9.174 | [§9.174 Commit và bộ cài Windows 0.2.6 (07/09/2026)](diary/06-2408-2708.md#9174-commit-và-bộ-cài-windows-026-07092026) | `diary/06-2408-2708.md` |
 
 ## Cổng
 

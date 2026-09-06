@@ -38,6 +38,7 @@ pub mod screen_match;
 pub mod screen_watch;
 pub mod session_log;
 pub mod stream_budget;
+pub mod tiktok_account;
 pub mod tiktok_comment_delete;
 pub mod tiktok_composer;
 pub mod tiktok_drawer;
@@ -52,6 +53,7 @@ pub mod tiktok_sound;
 pub mod tiktok_target;
 pub mod tiktok_web;
 pub mod types;
+pub mod video_evidence;
 
 pub use action_failure::ActionFailure;
 pub use automation::*;

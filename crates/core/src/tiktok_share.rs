@@ -88,7 +88,7 @@ pub enum LinkCapture {
     ///
     /// Refuses rather than falling back to reading whatever is there: without a written
     /// baseline, a copy tap that misses is indistinguishable from one that lands.
-    ClipboardUnwritable,
+    ClipboardUnwritable(String),
     /// Share was tapped and the sheet never showed a copy row.
     NoCopyRow,
     /// More than one row could be the copy row, and none matched a needle exactly.
@@ -123,10 +123,8 @@ impl LinkCapture {
             Self::Captured(link) => format!("đã lấy link: {link}"),
             Self::ShareUnmeasured => "chưa đo nút Chia sẻ trên bản build này".into(),
             Self::NoShareControl => "không thấy nút Chia sẻ trên màn hình".into(),
-            Self::ClipboardUnwritable => {
-                "không ghi được clipboard nên không có mốc để so — KHÔNG đọc bừa cái đang có, \
-                 vì đó là link của bài trước"
-                    .into()
+            Self::ClipboardUnwritable(reason) => {
+                format!("không ghi được clipboard nên chưa lấy link: {reason}")
             }
             Self::NoCopyRow => "bảng chia sẻ không có dòng sao chép liên kết".into(),
             Self::AmbiguousCopyRow => {
@@ -201,6 +199,67 @@ pub fn looks_like_a_post_link(value: &str) -> bool {
     segments
         .windows(2)
         .any(|pair| matches!(pair[0], "video" | "photo") && !pair[1].is_empty())
+}
+
+/// Resolve only TikTok HTTPS redirects; retain the canonical post path, not tracking data.
+pub async fn resolve_canonical_post_link(value: &str) -> anyhow::Result<String> {
+    let mut url = url::Url::parse(value.trim())?;
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(Duration::from_secs(8))
+        .build()?;
+    for _ in 0..5 {
+        anyhow::ensure!(
+            url.scheme() == "https"
+                && url.username().is_empty()
+                && url.password().is_none()
+                && matches!(
+                    url.host_str(),
+                    Some(
+                        "www.tiktok.com"
+                            | "tiktok.com"
+                            | "m.tiktok.com"
+                            | "vt.tiktok.com"
+                            | "vm.tiktok.com"
+                    )
+                )
+                && url.port_or_known_default() == Some(443),
+            "untrusted TikTok link redirect"
+        );
+        if let Some(link) = canonical_post_path(&url) {
+            return Ok(link);
+        }
+        anyhow::ensure!(
+            matches!(url.host_str(), Some("vt.tiktok.com" | "vm.tiktok.com")),
+            "TikTok redirect did not identify a post"
+        );
+        let response = client.get(url.clone()).send().await?;
+        anyhow::ensure!(
+            response.status().is_redirection(),
+            "TikTok short link did not redirect"
+        );
+        let location = response
+            .headers()
+            .get(reqwest::header::LOCATION)
+            .ok_or_else(|| anyhow::anyhow!("TikTok redirect location missing"))?
+            .to_str()?;
+        url = url.join(location)?;
+    }
+    anyhow::bail!("TikTok redirect limit exceeded")
+}
+
+fn canonical_post_path(url: &url::Url) -> Option<String> {
+    if !matches!(
+        url.host_str(),
+        Some("www.tiktok.com" | "tiktok.com" | "m.tiktok.com")
+    ) {
+        return None;
+    }
+    crate::interaction::parse_tiktok_links(url.as_str())
+        .into_iter()
+        .next()?
+        .target
+        .map(|target| target.normalized_url)
 }
 
 /// How long the profile grid may take to render after its tab is tapped.
@@ -504,12 +563,8 @@ async fn read_through_sheet(
     // **Written, not observed.** See the module docs: an unreadable prior value used to
     // become an empty baseline, after which any stale link counted as a change.
     let mark = sentinel();
-    if session
-        .set_clipboard("plaintext", mark.as_bytes())
-        .await
-        .is_err()
-    {
-        return LinkCapture::ClipboardUnwritable;
+    if let Err(error) = session.set_clipboard("plaintext", mark.as_bytes()).await {
+        return LinkCapture::ClipboardUnwritable(format!("{error:#}"));
     }
 
     if let Err(error) = session.tap(control.centre()).await {
@@ -569,6 +624,25 @@ enum CopyRow {
 async fn await_copy_row(session: &dyn UiSession) -> CopyRow {
     let deadline = tokio::time::Instant::now() + SHEET_WINDOW;
     loop {
+        // The caption under the icon can lie outside TikTok's clickable hit area.
+        // Prefer its exactly labelled parent (Trill 38.3.2 live 2026-09-06).
+        let mut controls = Vec::new();
+        for label in ["Copy link", "Sao chép liên kết", "Sao chép link"] {
+            if let Ok(found) = session
+                .locate_all(ElementQuery::Description {
+                    value: label,
+                    exact: true,
+                })
+                .await
+            {
+                controls.extend(found);
+            }
+        }
+        match controls.as_slice() {
+            [control] => return CopyRow::Found(control.centre()),
+            [_, _, ..] => return CopyRow::Ambiguous,
+            [] => {}
+        }
         let rows = match session
             .locate_all_described(ElementQuery::ClassName("android.widget.TextView"))
             .await
@@ -624,6 +698,9 @@ async fn await_copy_row(session: &dyn UiSession) -> CopyRow {
 /// because there is no async destructor to hang it on.
 async fn close_sheet(session: &dyn UiSession) {
     for _ in 0..3 {
+        if !matches!(await_copy_row_once(session).await, CopyRow::Found(_)) {
+            return;
+        }
         let _ = session.back().await;
         tokio::time::sleep(POLL).await;
         if matches!(await_copy_row_once(session).await, CopyRow::Missing) {
@@ -635,11 +712,12 @@ async fn close_sheet(session: &dyn UiSession) {
 /// One look for the copy row, with no waiting. Split out so the close loop does not spend a
 /// full sheet window per press.
 async fn await_copy_row_once(session: &dyn UiSession) -> CopyRow {
-    let Ok(rows) = session
+    let rows = match session
         .locate_all_described(ElementQuery::ClassName("android.widget.TextView"))
         .await
-    else {
-        return CopyRow::Missing;
+    {
+        Ok(rows) => rows,
+        Err(error) => return CopyRow::Failed(error.to_string()),
     };
     let present = rows.iter().any(|row| {
         row.description.as_deref().is_some_and(|value| {
@@ -681,10 +759,12 @@ mod tests {
         backs: Mutex<usize>,
         /// The row that a landing tap must hit, if it is not `rows[0]`.
         copy_row: Option<ElementBox>,
+        copy_controls: Vec<ElementBox>,
         set_clipboard_fails: bool,
         share_tap_fails: bool,
         /// Once the sheet is dismissed the rows go away, like the real one.
         dismissed: Mutex<bool>,
+        auto_dismiss_copy: bool,
     }
 
     fn labelled(label: &str, y: f64) -> ElementBox {
@@ -733,6 +813,20 @@ mod tests {
 
     #[async_trait::async_trait]
     impl UiSession for FakeSession {
+        async fn locate_all(&self, query: ElementQuery<'_>) -> anyhow::Result<Vec<ElementBox>> {
+            if matches!(
+                query,
+                ElementQuery::Description {
+                    value: "Copy link",
+                    exact: true
+                }
+            ) && !*self.dismissed.lock()
+            {
+                Ok(self.copy_controls.clone())
+            } else {
+                Ok(Vec::new())
+            }
+        }
         async fn tap(&self, point: TapPoint) -> anyhow::Result<()> {
             if self.share_tap_fails {
                 anyhow::bail!("the agent went away mid-gesture");
@@ -741,6 +835,9 @@ mod tests {
             self.taps.lock().push(point);
             if hit && !self.copies.is_empty() {
                 *self.clipboard.lock() = Some((self.kind.clone(), self.copies.clone()));
+                if self.auto_dismiss_copy {
+                    *self.dismissed.lock() = true;
+                }
             }
             Ok(())
         }
@@ -799,6 +896,72 @@ mod tests {
 
     fn english() -> TikTokControls {
         controls_for("com.ss.android.ugc.trill", "en", "").expect("a measured set")
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_copy_that_auto_dismisses_never_backs_out_of_the_target_post() {
+        let session = FakeSession {
+            auto_dismiss_copy: true,
+            ..FakeSession::sheet(
+                vec![labelled("Copy link", 1800.0)],
+                "https://www.tiktok.com/@a/photo/2",
+            )
+        };
+        assert_eq!(
+            capture_post_link(&session, &english()).await.link(),
+            Some("https://www.tiktok.com/@a/photo/2")
+        );
+        assert_eq!(*session.backs.lock(), 0);
+    }
+
+    #[tokio::test]
+    async fn canonical_links_strip_tracking_and_reject_foreign_hosts_before_network() {
+        assert_eq!(
+            resolve_canonical_post_link(
+                "https://www.tiktok.com/@fixture/photo/123456789?_r=1#tracking"
+            )
+            .await
+            .unwrap(),
+            "https://www.tiktok.com/@fixture/photo/123456789"
+        );
+        for url in [
+            "http://www.tiktok.com/@fixture/photo/123",
+            "https://example.com/@fixture/photo/123",
+            "https://www.tiktok.com:444/@fixture/photo/123",
+            "https://user@www.tiktok.com/@fixture/photo/123",
+        ] {
+            assert!(resolve_canonical_post_link(url).await.is_err());
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn copy_uses_the_accessible_button_not_its_outside_text_caption() {
+        let button = labelled("Copy link", 1626.0);
+        let mut session = FakeSession::sheet(
+            vec![labelled("Copy link", 1800.0)],
+            "https://www.tiktok.com/@a/photo/2",
+        )
+        .copying_row(button.clone());
+        session.copy_controls = vec![button];
+        assert_eq!(
+            capture_post_link(&session, &english()).await.link(),
+            Some("https://www.tiktok.com/@a/photo/2")
+        );
+        assert_eq!(session.taps.lock().len(), 2);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn ambiguous_accessible_copy_buttons_never_fall_back_to_text() {
+        let mut session = FakeSession::sheet(
+            vec![labelled("Copy link", 1800.0)],
+            "https://www.tiktok.com/@a/photo/2",
+        );
+        session.copy_controls = vec![labelled("Copy link", 1626.0), labelled("Copy link", 1750.0)];
+        assert_eq!(
+            capture_post_link(&session, &english()).await,
+            LinkCapture::AmbiguousCopyRow
+        );
+        assert_eq!(session.taps.lock().len(), 1);
     }
 
     // -------------------------------------------------------------- the happy path
@@ -876,7 +1039,7 @@ mod tests {
         .primed_with("https://www.tiktok.com/@a/photo/1");
         assert_eq!(
             capture_post_link(&session, &english()).await,
-            LinkCapture::ClipboardUnwritable
+            LinkCapture::ClipboardUnwritable("no clipboard helper on this device".into())
         );
         assert!(
             session.taps.lock().is_empty(),

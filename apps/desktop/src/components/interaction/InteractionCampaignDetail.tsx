@@ -9,13 +9,16 @@ import {
 import { timeAgoVi } from "../../timeAgo";
 import type { InteractionArtifactRecord } from "../../api";
 import { PublicCleanupControl } from "./PublicCleanupControl";
+import { InteractionReadbackControl } from "./InteractionReadbackControl";
 import type {
   DeviceInfo,
   InteractionActionCounters,
   InteractionActionKind,
   InteractionActionState,
+  InteractionAssignmentRecord,
   InteractionCampaignDetail,
   InteractionTargetNote,
+  PublicActionResult,
 } from "../../types";
 
 const ACTION_KIND_VI: Record<InteractionActionKind, string> = {
@@ -28,7 +31,7 @@ const ACTION_KIND_VI: Record<InteractionActionKind, string> = {
 const ACTION_STATE_VI: Record<InteractionActionState, string> = {
   planned: "Đang chờ",
   preparing: "Đang chuẩn bị",
-  armed: "Đã phát lệnh, đang xác nhận",
+  armed: "Đã ghi ý định, chờ xác nhận",
   confirmed: "Đã xác nhận",
   noOp: "Không cần làm",
   failedBeforeEffect: "Chưa thực hiện",
@@ -40,6 +43,38 @@ function actionTone(state: InteractionActionState): "ok" | "warn" | "danger" | "
   if (state === "armed" || state === "uncertain") return "warn";
   if (state === "failedBeforeEffect") return "danger";
   return "info";
+}
+
+function isBlockedAction(assignment: InteractionAssignmentRecord, action: PublicActionResult): boolean {
+  // Older runs could stop the parent without settling its unclaimed child actions.
+  return ["failed", "uncertain", "skippedParent"].includes(assignment.state)
+    && action.state === "planned"
+    && action.effectIntent === null;
+}
+
+function assignmentReason(assignment: InteractionAssignmentRecord): string | null {
+  const original = assignment.errorCode;
+  if (!original || !["Like không an toàn để tiếp tục assignment", "Save không an toàn để tiếp tục assignment"].includes(original.trim())) {
+    return original;
+  }
+  return assignment.actions?.find((action) =>
+    ["failedBeforeEffect", "uncertain"].includes(action.state)
+    && action.error?.trim()
+    && action.error !== original,
+  )?.error ?? original;
+}
+
+function actionView(action: PublicActionResult, assignment: InteractionAssignmentRecord): { label: string; tone: "ok" | "warn" | "danger" | "info" } {
+  if (isBlockedAction(assignment, action)) return { label: "Chưa thực hiện: lượt đã dừng", tone: "danger" };
+  if (action.state !== "noOp") return { label: ACTION_STATE_VI[action.state] ?? "Chưa nhận diện trạng thái", tone: actionTone(action.state) };
+  let verdict: unknown;
+  try { verdict = JSON.parse(action.evidence ?? "null")?.verdict; } catch { /* Evidence remains available in details. */ }
+  if (verdict === "alreadyLiked") return { label: "Đã tim từ trước", tone: "ok" };
+  if (verdict === "alreadySaved") return { label: "Đã lưu từ trước", tone: "ok" };
+  if (verdict === "stateUnreadable") return { label: "Bỏ qua: chưa đọc được trạng thái", tone: "warn" };
+  if (verdict === "noControl") return { label: "Bỏ qua: không thấy nút", tone: "warn" };
+  if (verdict === "cardChangedBeforeEffect") return { label: "Bỏ qua: bài đã đổi", tone: "warn" };
+  return { label: "Không thao tác", tone: "info" };
 }
 
 function actionAggregateVi(
@@ -216,6 +251,9 @@ export function InteractionCampaignDetailView({
   notes,
   devices,
   deviceNumber,
+  deviceLabel,
+  evidenceError,
+  onRetryEvidence,
   handles,
   busy,
   error,
@@ -231,6 +269,9 @@ export function InteractionCampaignDetailView({
   notes: InteractionTargetNote[];
   devices: DeviceInfo[];
   deviceNumber: Map<string, number>;
+  deviceLabel?: Map<string, string>;
+  evidenceError?: string | null;
+  onRetryEvidence?: () => void;
   handles: Record<string, string>;
   busy: boolean;
   error: string | null;
@@ -248,7 +289,9 @@ export function InteractionCampaignDetailView({
   const hasActionCounters = Boolean(actionCounters?.planned);
   const actionFailedBeforeEffect = detail.assignments.reduce(
     (count, assignment) =>
-      count + (assignment.actions ?? []).filter((action) => action.state === "failedBeforeEffect").length,
+      count + (assignment.actions ?? []).filter((action) =>
+        action.state === "failedBeforeEffect" || isBlockedAction(assignment, action),
+      ).length,
     0,
   );
   const actionSettled = actionCounters
@@ -279,7 +322,7 @@ export function InteractionCampaignDetailView({
       const departed = departedNumber.get(udid) ?? 1;
       return `Máy đã rời fleet ${departed}/${departedUdids.length}`;
     }
-    const name = device?.name || device?.model || "Thiết bị chưa đặt tên";
+    const name = deviceLabel?.get(udid) || device?.name || device?.model || "Thiết bị chưa đặt tên";
     return `${number ? `${number} · ` : ""}${name}${handle ? ` · @${handle}` : ""}`;
   };
 
@@ -297,6 +340,7 @@ export function InteractionCampaignDetailView({
         ← Chiến dịch gần đây
       </button>
       {error && <Banner tone="error">{error}</Banner>}
+      {evidenceError && <Banner tone="error" action={<button type="button" className="ghost" onClick={onRetryEvidence}>Tải lại bằng chứng</button>}>{evidenceError}</Banner>}
       <div className="interaction-detail-head">
         <span className={`chip ${stateTone(summary.state)}`}>
           {campaignStateVi(summary.state)}
@@ -321,7 +365,8 @@ export function InteractionCampaignDetailView({
         {/* Offered only on a campaign that has finished badly: `Sending`, `Succeeded` and
             `Uncertain` assignments are excluded server-side because re-sending a comment that
             may already be public is the one thing this must never do. */}
-        {["partial", "failed", "cancelled"].includes(summary.state) && (
+        {["partial", "failed", "cancelled"].includes(summary.state) && detail.assignments.some((assignment) =>
+          !["sending", "succeeded", "uncertain"].includes(assignment.state)) && (
           <button type="button" disabled={busy} onClick={() => onRetry()}>
             Thử lại phần hỏng
           </button>
@@ -360,15 +405,19 @@ export function InteractionCampaignDetailView({
       {/* Grouped by link, which is also grouped by team: `plan_threads` gives each cohort its
           own links, so one heading is one conversation on one post. A flat list of sixty rows
           from six teams running at once cannot be read. */}
-      {Object.entries(byLink).map(([targetKey, rows]) => (
+      {Object.entries(byLink).map(([targetKey, rows], targetIndex) => (
         <div key={targetKey} className="interaction-thread">
           <div className="interaction-thread-head">
-            <strong>{targetKey.replace(/^content:/, "link ")}</strong>
+            <strong>{notes.find((note) => note.targetKey === targetKey)?.normalizedUrl
+              ? <a href={notes.find((note) => note.targetKey === targetKey)!.normalizedUrl} target="_blank" rel="noreferrer">Bài {targetIndex + 1}</a>
+              : `Bài ${targetIndex + 1}`}</strong>
+            <details className="interaction-raw-code"><summary>Mã bài</summary><code>{targetKey}</code></details>
             <small>
               {rows.filter((row) => row.state === "succeeded").length}/{rows.length} lượt
             </small>
           </div>
           {rows.map((assignment) => {
+            const reason = assignmentReason(assignment);
             const shotRecord = artifacts.find(
               (item) => item.assignmentId === assignment.id && item.relativePath,
             );
@@ -399,16 +448,16 @@ export function InteractionCampaignDetailView({
                     <div className="interaction-action-results" aria-label="Kết quả hành động">
                       {assignment.actions!.map((action) => (
                         <div key={action.kind} className="interaction-action-result">
-                          <span className={`chip ${actionTone(action.state)}`}>
-                            {ACTION_KIND_VI[action.kind]} · {ACTION_STATE_VI[action.state]}
+                          <span className={`chip ${actionView(action, assignment).tone}`}>
+                            {ACTION_KIND_VI[action.kind]} · {actionView(action, assignment).label}
                           </span>
-                          {(action.error || action.evidence) && (
+                          {(action.error || action.evidence || isBlockedAction(assignment, action)) && (
                             <details
                               className="interaction-raw-code"
                               aria-label={`Chi tiết ${ACTION_KIND_VI[action.kind]}`}
                             >
                               <summary>Chi tiết</summary>
-                              <code>{action.error ?? action.evidence}</code>
+                              <code>{isBlockedAction(assignment, action) ? JSON.stringify(action) : action.error ?? action.evidence}</code>
                             </details>
                           )}
                           {(action.kind === "like" || action.kind === "save") && (
@@ -426,7 +475,13 @@ export function InteractionCampaignDetailView({
                       ))}
                     </div>
                   )}
-                  {assignment.errorCode && <Reason code={assignment.errorCode} />}
+                  {reason && <Reason code={reason} />}
+                  {assignment.errorCode && reason !== assignment.errorCode && (
+                    <details className="interaction-raw-code" aria-label="Mã lỗi lượt gốc">
+                      <summary>Mã lỗi lượt</summary>
+                      <code>{assignment.errorCode}</code>
+                    </details>
+                  )}
                   {assignment.like && (
                     <small
                       className={
@@ -454,6 +509,7 @@ export function InteractionCampaignDetailView({
                       thấy.
                     </small>
                   )}
+                  {assignment.state === "uncertain" && <InteractionReadbackControl campaignId={summary.id} assignmentId={assignment.id} disabled={busy || summary.state === "running"} />}
                 </span>
                 {shotRecord && (
                   <button

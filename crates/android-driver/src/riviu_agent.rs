@@ -137,12 +137,18 @@ impl HelperClient {
         enable_ime(&adb, serial).await?;
         start_service(&adb, serial).await?;
         let host_port = forward_helper(&adb, serial).await?;
-        let client = Self::at(adb, serial, host_port)?;
-        let status = client.require_status().await?;
-        if let Some(apk) = apk {
-            client.upgrade_if_stale(&status, apk).await;
-        }
-        Ok(client)
+        finish_helper_attach(
+            async {
+                let client = Self::at(adb.clone(), serial, host_port)?;
+                let status = await_helper_ready(|| client.require_status()).await?;
+                if let Some(apk) = apk {
+                    client.upgrade_if_stale(&status, apk).await;
+                }
+                Ok(client)
+            },
+            || frames::remove_forward(&adb, serial, host_port),
+        )
+        .await
     }
 
     /// Replace a helper that predates a feature this build needs, once per phone per run.
@@ -782,6 +788,50 @@ async fn prune_helper_forwards(adb: &AdbProgram, serial: &str) -> usize {
     removed
 }
 
+// Until attach succeeds the driver has no cached client to clean during shutdown.
+async fn finish_helper_attach<T, Attach, Cleanup, CleanupFuture>(
+    attach: Attach,
+    cleanup: Cleanup,
+) -> anyhow::Result<T>
+where
+    Attach: std::future::Future<Output = anyhow::Result<T>>,
+    Cleanup: FnOnce() -> CleanupFuture,
+    CleanupFuture: std::future::Future<Output = anyhow::Result<()>>,
+{
+    match attach.await {
+        Ok(client) => Ok(client),
+        Err(error) => match cleanup().await {
+            Ok(()) => Err(error),
+            Err(cleanup) => {
+                Err(error.context(format!("helper attach forward cleanup failed: {cleanup:#}")))
+            }
+        },
+    }
+}
+
+async fn await_helper_ready<T, F, Fut>(mut probe: F) -> anyhow::Result<T>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = anyhow::Result<T>>,
+{
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(4);
+    let mut last_error = None;
+    loop {
+        match tokio::time::timeout_at(deadline, probe()).await {
+            Ok(Ok(value)) => return Ok(value),
+            Ok(Err(error)) => last_error = Some(error),
+            Err(_) => {
+                return Err(last_error.unwrap_or_else(|| anyhow!("helper status timed out")))
+                    .context("helper not ready within four seconds")
+            }
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Err(last_error.unwrap()).context("helper not ready within four seconds");
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct StatusWire {
@@ -795,6 +845,66 @@ struct StatusWire {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn helper_startup_can_finish_after_the_service_start_command_returns() {
+        let calls = std::sync::atomic::AtomicUsize::new(0);
+        let value = await_helper_ready(|| async {
+            if calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed) == 0 {
+                anyhow::bail!("connection refused");
+            }
+            Ok(42)
+        })
+        .await
+        .unwrap();
+        assert_eq!(value, 42);
+        assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 2);
+    }
+
+    #[tokio::test]
+    async fn helper_startup_deadline_keeps_the_last_status_error() {
+        let started = std::time::Instant::now();
+        let error = await_helper_ready(|| async { Err::<(), _>(anyhow!("status auth not ready")) })
+            .await
+            .unwrap_err();
+        assert!(format!("{error:#}").contains("status auth not ready"));
+        assert!(started.elapsed() < Duration::from_secs(6));
+    }
+
+    #[tokio::test]
+    async fn failed_helper_attach_releases_its_forward_before_returning_error() {
+        let cleaned = std::sync::atomic::AtomicBool::new(false);
+        let result = finish_helper_attach(
+            async { Err::<(), _>(anyhow!("status timeout")) },
+            || async {
+                cleaned.store(true, std::sync::atomic::Ordering::SeqCst);
+                Ok(())
+            },
+        )
+        .await;
+        assert!(cleaned.load(std::sync::atomic::Ordering::SeqCst));
+        assert_eq!(result.unwrap_err().to_string(), "status timeout");
+    }
+
+    #[tokio::test]
+    async fn successful_helper_attach_retains_its_forward() {
+        let result = finish_helper_attach(async { Ok(42) }, || async {
+            panic!("must retain transport")
+        })
+        .await;
+        assert_eq!(result.unwrap(), 42);
+    }
+
+    #[tokio::test]
+    async fn failed_helper_attach_preserves_status_and_cleanup_errors() {
+        let result = finish_helper_attach(
+            async { Err::<(), _>(anyhow!("status timeout")) },
+            || async { Err(anyhow!("adb offline")) },
+        )
+        .await;
+        let message = format!("{:#}", result.unwrap_err());
+        assert!(message.contains("status timeout") && message.contains("adb offline"));
+    }
 
     #[test]
     fn status_v1_is_accepted() {

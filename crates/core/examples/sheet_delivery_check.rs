@@ -152,6 +152,7 @@ async fn main() -> anyhow::Result<()> {
     // A real campaign and a real assignment, through the production creation path.
     let bundle_id = format!("bundle-{}", uuid::Uuid::new_v4());
     let request = PublishCampaignRequest {
+        sheet_enabled: true,
         request_id: uuid::Uuid::new_v4().to_string(),
         source_root: "/fixture/root".into(),
         bundle_ids: vec![bundle_id.clone()],

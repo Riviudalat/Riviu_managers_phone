@@ -124,7 +124,7 @@ export function effectiveMessageCount(
   largestCohort: number,
 ): number {
   if (draft.messageCount !== null) return draft.messageCount;
-  return Math.max(2, largestCohort);
+  return Math.max(draft.actions.comment && draft.threadKind !== "standalone" ? 2 : 1, largestCohort);
 }
 
 /** `threadKind` as the two fields the backend has always taken. */
@@ -240,7 +240,7 @@ export function validateDraft(
   }
 
   const actors = context.actorUdids.length;
-  const minimumActors = draft.actions.comment ? 2 : 1;
+  const minimumActors = draft.actions.comment && draft.threadKind !== "standalone" ? 2 : 1;
   if (actors < minimumActors || actors > 64) {
     issues.push({
       field: "actors",
@@ -276,10 +276,11 @@ export function validateDraft(
   }
 
   if (draft.actions.comment && draft.messageCount !== null) {
-    if (draft.messageCount < 2 || draft.messageCount > 64) {
+    const minimumMessages = draft.threadKind === "standalone" ? 1 : 2;
+    if (draft.messageCount < minimumMessages || draft.messageCount > 64) {
       issues.push({
         field: "messageCount",
-        message: "Số bình luận mỗi link phải từ 2 đến 64",
+        message: `Số bình luận mỗi link phải từ ${minimumMessages} đến 64`,
       });
       // Per cohort, not per fleet: fourteen phones in teams of three need three comments a
       // link, not fourteen. Measured against the biggest team, because spreading the

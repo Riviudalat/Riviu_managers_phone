@@ -2,6 +2,7 @@
 **/*.rs.bk
 .DS_Store
 apps/desktop/dist
+/output/playwright/
 apps/desktop/src-tauri/target
 # Target-specific deployment checker binaries staged for Tauri packaging.
 apps/desktop/src-tauri/binaries/
@@ -37,6 +38,9 @@ sidecars/riviu-android-agent/local.properties
 *.xml
 !apps/desktop/**/*.xml
 !sidecars/**/*.xml
+# Sanitized, measured bookmark fixtures only; raw device dumps remain ignored.
+!fixtures/tiktok/bookmark-trill-38.3.2-en-unsaved.xml
+!fixtures/tiktok/bookmark-trill-38.3.2-en-saved.xml
 # yt-dlp sidecar. 17 MB of third-party binary that goes stale on TikTok's schedule, not
 # ours -- fetched per machine and per release build instead of carried in history. See
 # sidecars/yt-dlp/README.md for the one-line curl and for why the lookup is optional.

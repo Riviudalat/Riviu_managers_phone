@@ -534,10 +534,8 @@ impl SaveAdapter for HierarchyNurtureSaveAdapter<'_> {
     async fn observe(&mut self) -> anyhow::Result<SaveObservation> {
         self.sequence = self.sequence.saturating_add(1);
         let before = fingerprint(self.session, self.labels).await;
-        let control = match self.labels.label(TikTokControl::Bookmark) {
-            Some(label) => self.session.locate_stateful(label.to_query()).await?,
-            None => None,
-        };
+        let control =
+            crate::tiktok_save::hierarchy::read_bookmark_control(self.session, self.labels).await?;
         let card = fingerprint(self.session, self.labels).await;
         if !before.same_card_for_duplicate_guard(&card) {
             let mut observation = hierarchy_save_observation(

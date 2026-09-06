@@ -551,6 +551,13 @@ pub struct DeviceMeta {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "field", content = "value", rename_all = "camelCase")]
+pub enum DeviceMetaChange {
+    Alias(String),
+    Number(Option<u32>),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DeviceGroup {
     pub id: String,

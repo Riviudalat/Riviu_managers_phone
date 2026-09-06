@@ -531,6 +531,7 @@ fn sheet_delivery_reconciles_the_operation_before_emitting_and_rejects_a_stale_r
     bundle.caption = "caption".into();
     bundle.caption_sha256 = super::frame_sha256(bundle.caption.as_bytes());
     let request = riviu_core::PublishCampaignRequest {
+        sheet_enabled: true,
         request_id: Uuid::new_v4().to_string(),
         source_root: "C:/fixture".into(),
         bundle_ids: vec![bundle.id.clone()],
@@ -698,6 +699,7 @@ fn a_failed_final_snapshot_write_emits_no_completion_event() {
 #[test]
 fn preflight_digest_binds_caption_target_and_observed_tiktok_build() {
     let request = riviu_core::PublishPreflightRequest {
+        sheet_enabled: true,
         source_root: "C:/source".into(),
         bundle_ids: vec!["bundle-1".into()],
         udids: vec!["phone-1".into()],
@@ -740,6 +742,7 @@ fn preflight_digest_binds_caption_target_and_observed_tiktok_build() {
     )
     .expect("digest");
     let report = riviu_core::PublishPreflightReport {
+        sheet_enabled: true,
         input_digest: approved.clone(),
         target_snapshot: target_snapshot.clone(),
         can_execute: true,
@@ -748,6 +751,18 @@ fn preflight_digest_binds_caption_target_and_observed_tiktok_build() {
         sheet_configured: false,
     };
     require_current_preflight_digest(&report, &approved).expect("same snapshot is approved");
+    let mut without_sheet = request.clone();
+    without_sheet.sheet_enabled = false;
+    assert_ne!(
+        approved,
+        publish_preflight_digest(
+            &without_sheet,
+            std::slice::from_ref(&bundle),
+            &target_snapshot,
+            &observations
+        )
+        .unwrap()
+    );
 
     let mut changed_free_space = observations.clone();
     changed_free_space[0]["availableBytes"] = serde_json::json!(8192);
@@ -823,6 +838,7 @@ fn preflight_digest_binds_caption_target_and_observed_tiktok_build() {
     assert_ne!(approved, build_digest);
 
     let stale = riviu_core::PublishPreflightReport {
+        sheet_enabled: true,
         input_digest: build_digest,
         ..report
     };
@@ -834,6 +850,7 @@ fn preflight_digest_binds_caption_target_and_observed_tiktok_build() {
 #[test]
 fn semantic_publish_target_keeps_disconnected_group_members_in_the_snapshot() {
     let request = riviu_core::PublishPreflightRequest {
+        sheet_enabled: true,
         source_root: "C:/source".into(),
         bundle_ids: vec!["bundle-1".into()],
         udids: vec!["phone-a".into()],
@@ -1083,6 +1100,7 @@ async fn missing_sheet_config_keeps_the_confirmed_post_in_a_pending_outbox() {
     bundle.caption = "caption".into();
     bundle.caption_sha256 = super::frame_sha256(bundle.caption.as_bytes());
     let request = riviu_core::PublishCampaignRequest {
+        sheet_enabled: true,
         request_id: Uuid::new_v4().to_string(),
         source_root: "C:/fixture".into(),
         bundle_ids: vec![bundle.id.clone()],
@@ -1142,6 +1160,7 @@ fn transfer_write_ahead_failure_stops_before_any_device_call() {
     bundle.caption = "caption".into();
     bundle.caption_sha256 = super::frame_sha256(bundle.caption.as_bytes());
     let request = riviu_core::PublishCampaignRequest {
+        sheet_enabled: true,
         request_id: Uuid::new_v4().to_string(),
         source_root: "C:/fixture".into(),
         bundle_ids: vec![bundle.id.clone()],
@@ -1660,7 +1679,7 @@ fn the_post_fan_out_runs_only_the_unposted_participants() {
 
 #[test]
 fn the_publish_session_targets_the_device_own_tiktok_build() {
-    let body = code_of("async fn open_publish_context(");
+    let body = code_of("pub(crate) async fn open_publish_context(");
     assert!(
         body.iter()
             .any(|line| line.contains("resolve_tiktok_package")),
@@ -1670,18 +1689,12 @@ fn the_publish_session_targets_the_device_own_tiktok_build() {
         !body.iter().any(|line| line.contains("IOS_TIKTOK_BUNDLE")),
         "the publish context is back to assuming the iOS bundle on every backend"
     );
-    // **And the answer has to reach both calls.** Resolving the package and then passing a
-    // literal to `terminate_app` satisfies the two checks above while doing exactly what
-    // they exist to prevent.
-    for call in [
-        "terminate_app(&exclusive, &target_package)",
-        "start_interaction_session(exclusive, &target_package",
-    ] {
-        assert!(
-            body.iter().any(|line| line.contains(call)),
-            "the resolved package does not reach `{call}`"
-        );
-    }
+    // The shared lifecycle owns both stop and launch; both use the resolved package.
+    let call = "start_clean_app_session(exclusive, capacity, &target_package, kind)";
+    assert!(
+        body.iter().any(|line| line.contains(call)),
+        "the resolved package does not reach `{call}`"
+    );
 }
 
 #[test]

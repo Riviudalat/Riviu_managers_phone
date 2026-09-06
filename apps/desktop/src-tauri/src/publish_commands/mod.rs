@@ -42,3 +42,6 @@ const PRODUCTION_SOURCES: &str = concat!(
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod live_canary;

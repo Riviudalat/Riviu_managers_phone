@@ -83,6 +83,17 @@ pub fn ai_key_missing(request: &ThreadCampaignRequest, api_key: &str) -> bool {
     request.needs_ai_evidence_frames() && api_key.trim().is_empty()
 }
 
+pub fn settings_for_request(
+    db: &crate::db::Database,
+    request: &ThreadCampaignRequest,
+) -> anyhow::Result<crate::NurtureSettings> {
+    if request.needs_ai_evidence_frames() {
+        db.get_nurture_settings().context("đọc cấu hình AI")
+    } else {
+        Ok(crate::NurtureSettings::default())
+    }
+}
+
 /// Which assignments a retry may re-send.
 ///
 /// Excluding `Succeeded` is the whole point: tapping Send is not idempotent, so
@@ -124,6 +135,21 @@ const SWEEP_YIELD_WAIT: std::time::Duration = std::time::Duration::from_millis(1
 pub async fn open_interaction_context(
     control: &DeviceControlPlane,
     udid: &str,
+) -> Result<InteractionDevice, DeviceControlError> {
+    open_interaction_context_with_start(control, udid, false).await
+}
+
+pub async fn open_clean_interaction_context(
+    control: &DeviceControlPlane,
+    udid: &str,
+) -> Result<InteractionDevice, DeviceControlError> {
+    open_interaction_context_with_start(control, udid, true).await
+}
+
+async fn open_interaction_context_with_start(
+    control: &DeviceControlPlane,
+    udid: &str,
+    clean_start: bool,
 ) -> Result<InteractionDevice, DeviceControlError> {
     // Resolve before acquiring anything: a phone with no drivable TikTok build should
     // refuse without taking a lease or a capacity slot.
@@ -168,10 +194,16 @@ pub async fn open_interaction_context(
     } else {
         InteractionSessionKind::Ordinary
     };
-    let session = control
-        .start_interaction_session(exclusive, &target_package, kind)
-        .await?;
-    let context = control.start_reserved_stream(session, capacity).await?;
+    let context = if clean_start {
+        control
+            .start_clean_app_session(exclusive, capacity, &target_package, kind)
+            .await?
+    } else {
+        let session = control
+            .start_interaction_session(exclusive, &target_package, kind)
+            .await?;
+        control.start_reserved_stream(session, capacity).await?
+    };
     Ok(InteractionDevice {
         context,
         target_package,
@@ -307,10 +339,16 @@ async fn collect_target_evidence_frames(
     let InteractionDevice {
         context,
         target_package,
-    } = open_interaction_context(control, photographer)
+    } = open_clean_interaction_context(control, photographer)
         .await
         .map_err(|error| anyhow::anyhow!("{error}"))?;
-    let session = control.streaming_session(&context)?;
+    let session = match control.streaming_session(&context) {
+        Ok(session) => session,
+        Err(error) => {
+            let cleanup = control.finish_app_session(context, &target_package).await;
+            return Err(anyhow::anyhow!("{error}; cleanup: {cleanup:?}"));
+        }
+    };
     // Evidence for the AI has to come from the target, not from whatever survived the two
     // seconds this used to sleep.
     let evidence_gestures = tokio::sync::Mutex::new(());
@@ -365,7 +403,7 @@ async fn collect_target_evidence_frames(
     .await;
     // Closed on every path, including the failing ones: leaving the context open would
     // strand the lease and the stream for a target we are about to give up on.
-    let closed = control.close_ui_context(context).await;
+    let closed = control.finish_app_session(context, &target_package).await;
     let shot = frames?;
     closed?;
     if shot.frames.is_empty() {
@@ -1549,6 +1587,22 @@ fn action_stops_assignment(result: &crate::PublicActionResult) -> bool {
     result.state == crate::InteractionActionState::Uncertain || action_lost_target_proof(result)
 }
 
+fn stopped_action_reason(result: &crate::PublicActionResult) -> String {
+    let kind = match result.kind {
+        crate::InteractionActionKind::Like => "like",
+        crate::InteractionActionKind::Save => "save",
+        crate::InteractionActionKind::Comment => "comment",
+        crate::InteractionActionKind::Follow => "follow",
+    };
+    format!(
+        "{kind}_action_stopped: {}",
+        result
+            .error
+            .as_deref()
+            .unwrap_or("public action chưa được xác nhận")
+    )
+}
+
 fn like_result_note(result: &crate::PublicActionResult) -> String {
     let verdict = result
         .evidence
@@ -1803,7 +1857,7 @@ async fn run_cohort(
     // `pre_prepare_standalone_texts` for why a `Standalone` fan-out cannot write its own.
     pre_prepared: Arc<HashMap<String, String>>,
 ) -> anyhow::Result<(usize, usize)> {
-    let settings = db.get_nurture_settings().context("đọc cấu hình AI")?;
+    let settings = settings_for_request(&db, &request)?;
     if ai_key_missing(&request, &settings.api_key) {
         anyhow::bail!("AI API key chưa được cấu hình cho Interaction");
     }
@@ -2084,18 +2138,20 @@ async fn run_cohort(
                                 target.target_key,
                                 assignment.ordinal
                             );
-                            db.update_interaction_assignment_state(
+                            let settled = db.settle_owned_interaction_assignment(
                                 id,
+                                ownership_revision,
                                 ThreadMessageState::Failed,
                                 Some(&format!(
                                     "ai_comment_unavailable: ordinal {} — {detail}",
                                     assignment.ordinal
                                 )),
                                 None,
-                                None,
                             )?;
-                            notify(&events, &campaign_id);
-                            failed += 1;
+                            if settled {
+                                notify(&events, &campaign_id);
+                                failed += 1;
+                            }
                             continue;
                         }
                     };
@@ -2195,14 +2251,15 @@ async fn run_cohort(
                     }
                     chain_broken_at.unwrap_or(parent_ordinal)
                 });
-            let opened = match open_interaction_context(&control, &prepared.actor_udid).await {
+            let opened = match open_clean_interaction_context(&control, &prepared.actor_udid).await
+            {
                 Ok(context) => context,
                 Err(error) => {
-                    db.update_interaction_assignment_state(
+                    db.settle_owned_interaction_assignment(
                         id,
+                        *ownership_revision,
                         ThreadMessageState::Failed,
                         Some(&format!("{error}")),
-                        None,
                         None,
                     )?;
                     notify(&events, &campaign_id);
@@ -2214,7 +2271,14 @@ async fn run_cohort(
                 context,
                 target_package: opened_package,
             } = opened;
-            let session = control.streaming_session(&context)?;
+            let session = match control.streaming_session(&context) {
+                Ok(session) => session,
+                Err(error) => {
+                    let cleanup = control.finish_app_session(context, &opened_package).await;
+                    tracing::warn!("interaction session access {error}; cleanup: {cleanup:?}");
+                    return Err(error.into());
+                }
+            };
             let gestures = tokio::sync::Mutex::new(());
             let mut effect_intent = false;
             // The stream this context owns. A frame from any other generation belongs to a
@@ -2279,9 +2343,11 @@ async fn run_cohort(
                     };
                     let stops = action_stops_assignment(&action);
                     effect_intent |= action_requires_uncertain_assignment(&action);
+                    let stop_reason = stops.then(|| stopped_action_reason(&action));
                     action_results.push(action);
-                    if stops {
-                        anyhow::bail!("Like không an toàn để tiếp tục assignment");
+                    notify(&events, &campaign_id);
+                    if let Some(reason) = stop_reason {
+                        anyhow::bail!(reason);
                     }
                 }
                 if request.actions.save {
@@ -2306,9 +2372,11 @@ async fn run_cohort(
                     };
                     let stops = action_stops_assignment(&action);
                     effect_intent |= action_requires_uncertain_assignment(&action);
+                    let stop_reason = stops.then(|| stopped_action_reason(&action));
                     action_results.push(action);
-                    if stops {
-                        anyhow::bail!("Save không an toàn để tiếp tục assignment");
+                    notify(&events, &campaign_id);
+                    if let Some(reason) = stop_reason {
+                        anyhow::bail!(reason);
                     }
                 }
 
@@ -2593,7 +2661,26 @@ async fn run_cohort(
                 generation,
                 watermark,
             );
-            let cleanup = control.close_ui_context(context).await;
+            let cleanup = control.finish_app_session(context, &opened_package).await;
+            let cleanup_evidence = match &cleanup {
+                Ok(proof) => serde_json::json!({"state":"processAbsent","proof":proof}),
+                Err(error) => serde_json::json!({"state":"failed","error":error.to_string()}),
+            };
+            let _ = db.add_interaction_artifact(
+                &campaign_id,
+                &target.target_key,
+                Some(id),
+                "tiktok-cleanup",
+                &cleanup_evidence.to_string(),
+                "",
+                None,
+            );
+            if let Err(error) = &cleanup {
+                let _ = db.log_op(
+                    "interaction.cleanup.failed",
+                    &format!("{}: {error}", prepared.actor_udid),
+                );
+            }
             if effect_claim_lost {
                 if let Err(error) = &cleanup {
                     tracing::warn!("interaction cleanup {}: {}", prepared.actor_udid, error);
@@ -2601,11 +2688,23 @@ async fn run_cohort(
                 continue;
             }
             match result {
-                Ok(Some(evidence_json)) => {
+                Ok(Some(mut evidence_json)) => {
+                    if let Some(object) = evidence_json.as_object_mut() {
+                        object.insert("appCleanup".into(), cleanup_evidence.clone());
+                    }
                     let evidence_text = evidence_json.to_string();
                     let skipped_parent_at = evidence_json
                         .get("skippedParentAt")
                         .and_then(|value| value.as_u64());
+                    let terminal_note = skipped_parent_at
+                        .map(|ordinal| {
+                            format!("parent_identity_not_confirmed_at_ordinal_{ordinal}")
+                        })
+                        .or_else(|| {
+                            cleanup.as_ref().err().map(|error| {
+                                format!("Hành động đã xác nhận; chưa tắt sạch TikTok: {error}")
+                            })
+                        });
                     let settled = db.settle_owned_interaction_assignment(
                         id,
                         *ownership_revision,
@@ -2614,12 +2713,7 @@ async fn run_cohort(
                         } else {
                             ThreadMessageState::Succeeded
                         },
-                        skipped_parent_at
-                            .as_ref()
-                            .map(|ordinal| {
-                                format!("parent_identity_not_confirmed_at_ordinal_{ordinal}")
-                            })
-                            .as_deref(),
+                        terminal_note.as_deref(),
                         Some(&evidence_text),
                     )?;
                     if !settled {
@@ -2678,11 +2772,12 @@ async fn run_cohort(
                 Ok(None) => unreachable!("effect-claim loser left above"),
                 Err(error) => {
                     let state = assignment_state_after_failure(effect_intent);
+                    let failure_detail = format!("{error:#}");
                     let _ = db.settle_owned_interaction_assignment(
                         id,
                         *ownership_revision,
                         state,
-                        Some(&error.to_string()),
+                        Some(&failure_detail),
                         None,
                     )?;
                     // Especially here. `Uncertain` means the Send tap went out
@@ -2701,7 +2796,7 @@ async fn run_cohort(
                             &target.target_key,
                             Some(id),
                             "comment-failure-evidence",
-                            &serde_json::json!({ "error": error.to_string() }).to_string(),
+                            &serde_json::json!({ "error": failure_detail }).to_string(),
                             &sha,
                             Some(&path),
                         );
@@ -3183,57 +3278,6 @@ impl HierarchyTargetDriver<'_> {
     }
 }
 
-struct InteractionHierarchySaveAdapter<'a> {
-    session: &'a dyn crate::UiSession,
-    labels: crate::tiktok_labels::TikTokControls,
-    sequence: u64,
-}
-
-#[async_trait::async_trait]
-impl crate::SaveAdapter for InteractionHierarchySaveAdapter<'_> {
-    async fn observe(&mut self) -> anyhow::Result<crate::SaveObservation> {
-        self.sequence = self.sequence.saturating_add(1);
-        let author = crate::interaction_hierarchy::read_author_label(self.session, self.labels)
-            .await
-            .filter(|author| !author.trim().is_empty());
-        let sound = match self
-            .labels
-            .label(crate::tiktok_labels::TikTokControl::SoundLink)
-        {
-            Some(label) => self
-                .session
-                .locate(label.to_query())
-                .await?
-                .and_then(|element| element.description),
-            None => None,
-        };
-        let control = match self
-            .labels
-            .label(crate::tiktok_labels::TikTokControl::Bookmark)
-        {
-            Some(label) => self.session.locate_stateful(label.to_query()).await?,
-            None => None,
-        };
-        let Some(author) = author else {
-            return Ok(crate::SaveObservation {
-                identity: None,
-                sequence: self.sequence,
-                state: crate::BookmarkState::Unreadable,
-                tap_point: None,
-            });
-        };
-        Ok(crate::hierarchy_save_observation(
-            crate::SaveCardIdentity::Hierarchy { author, sound },
-            self.sequence,
-            control,
-        ))
-    }
-
-    async fn tap(&mut self, point: crate::TapPoint) -> anyhow::Result<()> {
-        self.session.tap(point).await
-    }
-}
-
 fn map_hierarchy_send_failure(
     failure: crate::interaction_hierarchy::HierarchySendFailure,
 ) -> SendFailure {
@@ -3301,11 +3345,7 @@ impl TargetDriver for HierarchyTargetDriver<'_> {
         session: &dyn crate::UiSession,
         effect_gate: &mut ActionEffectGate<'_>,
     ) -> crate::SaveEvidence {
-        let mut adapter = InteractionHierarchySaveAdapter {
-            session,
-            labels: self.labels,
-            sequence: 0,
-        };
+        let mut adapter = crate::HierarchySaveAdapter::new(session, self.labels);
         crate::tiktok_save(&mut adapter, |_| {
             effect_gate
                 .cross()
@@ -3325,48 +3365,19 @@ impl TargetDriver for HierarchyTargetDriver<'_> {
         // on purpose (see `execute_thread_campaign`), so passing it would only add a
         // parameter that never changes.
         let never = AtomicBool::new(false);
-        let mut arrival = crate::interaction_hierarchy::open_target_by_hierarchy(
+        let arrival = crate::interaction_hierarchy::open_exact_target_by_hierarchy(
             session,
             self.labels,
             self.target_package,
-            &target.normalized_url,
-            &target.author,
+            target,
             &never,
         )
-        .await;
-        // **"The screen did not change" also happens when the phone was already there.**
-        //
-        // The gate compares the author label before and after the deep link, and refuses when
-        // it is the same — which catches the real failure (TikTok swallowing an intent for a
-        // deleted post) and also catches a phone standing on the target post already. Measured
-        // 25/08/2026 on a live retry: message #2 refused with `màn hình vẫn là bài cũ (Phượt
-        // Thủ Hệ Slay⚡)`, and that name is the target's own author — the phone had been left
-        // on the post by the run before it.
-        //
-        // Stepping off with Back and asking once more separates the two: from the feed the
-        // deep link has a change to make. The same two lines the Đo bài command already had;
-        // the campaign path never got them.
-        if arrival
-            .as_ref()
-            .err()
-            .is_some_and(|refusal| refusal.code() == "target_open_screen_unchanged")
-            && session.back().await.is_ok()
-        {
-            tokio::time::sleep(std::time::Duration::from_millis(2_500)).await;
-            arrival = crate::interaction_hierarchy::open_target_by_hierarchy(
-                session,
-                self.labels,
-                self.target_package,
-                &target.normalized_url,
-                &target.author,
-                &never,
-            )
-            .await;
-        }
+        .await?;
         match arrival {
-            Ok(TargetArrival::Identified { .. }) => Ok(TargetProof::Identified),
-            Ok(TargetArrival::Structural) => Ok(TargetProof::Structural),
-            Err(refusal) => anyhow::bail!("{}: {}", refusal.code(), refusal.message()),
+            TargetArrival::Identified { .. } => Ok(TargetProof::Identified),
+            TargetArrival::Structural => {
+                anyhow::bail!("target_link_proof: exact post identity not confirmed")
+            }
         }
     }
 
@@ -3762,6 +3773,26 @@ mod tests {
             let manual = request(vec!["đẹp quá".into(), "chỗ này ở đâu ạ".into()]);
             assert!(!ai_key_missing(&manual, ""));
             assert!(!ai_key_missing(&manual, "   "));
+        }
+
+        #[test]
+        fn manual_and_action_only_ignore_broken_ai_configuration() {
+            let path =
+                std::env::temp_dir().join(format!("interaction-no-ai-{}.db", uuid::Uuid::new_v4()));
+            let db = crate::db::Database::open(&path).unwrap();
+            db.set_setting("nurture.settings", "invalid json").unwrap();
+            let manual = request(vec!["One".into(), "Two".into()]);
+            assert!(settings_for_request(&db, &manual).is_ok());
+            let mut action_only = request(vec![]);
+            action_only.actions = crate::InteractionActionSet {
+                like: true,
+                save: true,
+                comment: false,
+            };
+            assert!(settings_for_request(&db, &action_only).is_ok());
+            assert!(settings_for_request(&db, &request(vec![])).is_err());
+            drop(db);
+            let _ = std::fs::remove_file(path);
         }
 
         #[test]
@@ -4616,6 +4647,19 @@ mod boundary_tests {
     }
 
     #[test]
+    fn stopped_action_preserves_the_underlying_target_proof_error() {
+        let mut failed = action(InteractionActionState::FailedBeforeEffect, None);
+        failed.kind = InteractionActionKind::Like;
+        failed.error = Some("target_exact_open: target_link_proof: wrong post ID".into());
+        assert_eq!(
+            super::stopped_action_reason(&failed),
+            "like_action_stopped: target_exact_open: target_link_proof: wrong post ID"
+        );
+        failed.kind = InteractionActionKind::Save;
+        assert!(super::stopped_action_reason(&failed).starts_with("save_action_stopped:"));
+    }
+
+    #[test]
     fn proven_no_op_and_local_failure_continue_but_uncertainty_or_lost_proof_stop() {
         assert!(!super::action_stops_assignment(&action(
             InteractionActionState::NoOp,
@@ -4786,6 +4830,31 @@ mod boundary_tests {
             "these writes change an assignment and then leave without telling the \
              frontend: {silent:?}"
         );
+    }
+
+    #[test]
+    fn ai_preparation_failure_keeps_ownership_reason_and_action_settlement() {
+        let source = include_str!("interaction_campaign.rs");
+        let start = source
+            .find("let prepared_text = match crate::openai_client::prepare_comment_for_frames(")
+            .expect("AI preparation exists");
+        let rest = &source[start..];
+        let failure = &rest[..rest
+            .find("let (grounded, _evidence_mode) = prepared_text;")
+            .expect("AI preparation finishes before enqueue")];
+        assert!(failure.contains("let detail = format!(\"{error:#}\");"));
+        assert!(failure.contains("ai_comment_unavailable: ordinal {}"));
+        assert!(failure.contains("{detail}"));
+        assert!(failure.contains("db.settle_owned_interaction_assignment("));
+        assert!(failure.contains("ownership_revision,"));
+        assert!(!failure.contains("update_interaction_assignment_state("));
+        let conditional = failure
+            .split_once("if settled {")
+            .expect("CAS loser must not count or report a new failure")
+            .1;
+        assert!(conditional.contains("notify(&events, &campaign_id)"));
+        assert!(conditional.contains("failed += 1;"));
+        assert!(conditional.contains("continue;"));
     }
 
     /// A worker that loses `preparing` between claim and persistence must not reach Send.

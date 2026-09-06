@@ -412,6 +412,10 @@ pub async fn nurture_start(
             preflight.skipped.len(),
             preflight.skipped.join("; ")
         );
+        state
+            .db
+            .log_op("nurture.start.skipped", &preflight.skipped.join("; "))
+            .map_err(CommandError::operation)?;
     }
     let udids = preflight.ready;
     // Manual starts get a varied 2–3 hour horizon so they do not all end on

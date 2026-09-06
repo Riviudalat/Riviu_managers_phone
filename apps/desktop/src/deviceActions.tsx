@@ -4,7 +4,6 @@ import {
   deviceSetClipboard,
   deviceShell,
   deviceSwipe,
-  getDeviceMeta,
   disableWifiAdb,
   enableWifiAdb,
   exportMedia,
@@ -18,7 +17,8 @@ import {
   rebootDevice,
   refreshDevices,
   resetDisplayMetrics,
-  saveDeviceMeta,
+  patchDeviceMeta,
+  type DeviceMetaChange,
   screenshot,
   screenshotToDevice,
   setInputMethod,
@@ -144,12 +144,9 @@ export function buildDeviceActions(
     },
   });
 
-  /// Save one field of this phone's record, reading the row back first so an edit to the
-  /// name cannot wipe the number (or the TikTok handle) that lives in the same row.
-  const patchMeta = async (patch: Partial<DeviceMeta>, done: string) => {
+  const patchMeta = async (change: DeviceMetaChange, done: string) => {
     try {
-      const current = await getDeviceMeta(device.udid);
-      await saveDeviceMeta({ ...current, ...patch });
+      await patchDeviceMeta(device.udid, change);
       setMetas(await listDeviceMetas().catch(() => metas));
       pushToast("ok", done);
     } catch (error) {
@@ -184,7 +181,7 @@ export function buildDeviceActions(
           });
           if (answer === null) return;
           await patchMeta(
-            { alias: answer },
+            { field: "alias", value: answer },
             answer ? `Đã đổi tên thành “${answer}”` : "Đã bỏ tên riêng",
           );
         })();
@@ -214,7 +211,7 @@ export function buildDeviceActions(
             return;
           }
           await patchMeta(
-            { number: parsed.number },
+            { field: "number", value: parsed.number },
             parsed.number === null ? "Đã bỏ số máy" : `Đã đặt số máy ${parsed.number}`,
           );
         })();

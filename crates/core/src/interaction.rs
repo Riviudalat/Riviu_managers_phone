@@ -367,11 +367,13 @@ pub enum ThreadValidationError {
     NoTargets,
     #[error("at least one interaction action is required")]
     NoActions,
-    #[error("message count must be between two and sixty-four")]
+    #[error(
+        "message count must be one to sixty-four for standalone, two to sixty-four for threaded"
+    )]
     InvalidMessageCount,
-    #[error("actor count must be between two and sixty-four, and every actor distinct")]
+    #[error("actor count must be one to sixty-four; threaded comments need at least two")]
     InvalidActorCount,
-    #[error("a cohort needs at least two actors")]
+    #[error("cohort size must be positive; threaded comments need at least two actors")]
     InvalidCohortSize,
     #[error("message count must cover every selected actor")]
     TooFewMessagesForActors,
@@ -398,7 +400,7 @@ impl ThreadCampaignRequest {
         if !self.actions.any() {
             return Err(ThreadValidationError::NoActions);
         }
-        let minimum_actors = if self.actions.comment {
+        let minimum_actors = if self.actions.comment && self.mode == ThreadMode::Threaded {
             MIN_ACTOR_COUNT
         } else {
             1
@@ -427,10 +429,20 @@ impl ThreadCampaignRequest {
         if !self.actions.comment {
             return Ok(());
         }
-        if !(MIN_MESSAGE_COUNT..=MAX_MESSAGE_COUNT).contains(&self.message_count) {
+        let minimum_messages = if self.mode == ThreadMode::Standalone {
+            1
+        } else {
+            MIN_MESSAGE_COUNT
+        };
+        if !(minimum_messages..=MAX_MESSAGE_COUNT).contains(&self.message_count) {
             return Err(ThreadValidationError::InvalidMessageCount);
         }
-        if self.cohort_size.is_some_and(|size| size < MIN_COHORT_SIZE) {
+        let minimum_cohort = if self.mode == ThreadMode::Standalone {
+            1
+        } else {
+            MIN_COHORT_SIZE
+        };
+        if self.cohort_size.is_some_and(|size| size < minimum_cohort) {
             return Err(ThreadValidationError::InvalidCohortSize);
         }
         // **Per cohort, not per fleet.** The rule is that every actor gets a turn, and a
@@ -678,7 +690,29 @@ pub enum InteractionRunAggregate {
     Uncertain,
 }
 
-/// Aggregate only typed terminal outcomes. Error text is deliberately not interpreted.
+fn unfulfilled_no_op(result: &PublicActionResult) -> bool {
+    if result.state != InteractionActionState::NoOp {
+        return false;
+    }
+    result
+        .evidence
+        .as_deref()
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+        .and_then(|value| {
+            value
+                .get("verdict")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned)
+        })
+        .is_some_and(|verdict| {
+            matches!(
+                verdict.as_str(),
+                "stateUnreadable" | "noControl" | "cardChangedBeforeEffect"
+            )
+        })
+}
+
+/// Aggregate typed states and structured no-op verdicts, never free-form error text.
 pub fn aggregate_interaction_actions(results: &[PublicActionResult]) -> InteractionRunAggregate {
     if results.iter().any(|result| {
         matches!(
@@ -691,22 +725,25 @@ pub fn aggregate_interaction_actions(results: &[PublicActionResult]) -> Interact
     let completed_count = results
         .iter()
         .filter(|result| {
-            matches!(
-                result.state,
-                InteractionActionState::Confirmed | InteractionActionState::NoOp
-            )
+            !unfulfilled_no_op(result)
+                && matches!(
+                    result.state,
+                    InteractionActionState::Confirmed | InteractionActionState::NoOp
+                )
         })
         .count();
     let incomplete = results.iter().any(|result| {
-        matches!(
-            result.state,
-            InteractionActionState::Planned
-                | InteractionActionState::Preparing
-                | InteractionActionState::FailedBeforeEffect
-        )
+        unfulfilled_no_op(result)
+            || matches!(
+                result.state,
+                InteractionActionState::Planned
+                    | InteractionActionState::Preparing
+                    | InteractionActionState::FailedBeforeEffect
+            )
     });
     match (completed_count, incomplete) {
         (_, false) => InteractionRunAggregate::Done,
+        (0, true) if results.iter().any(unfulfilled_no_op) => InteractionRunAggregate::Partial,
         (0, true) => InteractionRunAggregate::Failed,
         (_, true) => InteractionRunAggregate::Partial,
     }
@@ -1929,6 +1966,33 @@ mod tests {
     }
 
     #[test]
+    fn standalone_one_actor_comment_plans_exactly_one_assignment() {
+        let mut raw = action_request_json(true, true, true);
+        raw["mode"] = serde_json::json!("standalone");
+        raw["messageCount"] = serde_json::json!(1);
+        raw["maxWords"] = serde_json::json!(12);
+        raw["manualComments"] = serde_json::json!(["Bai thu tuong tac"]);
+        let request: ThreadCampaignRequest = serde_json::from_value(raw).unwrap();
+        let plan = plan_threads(&request).expect("one standalone actor is valid");
+        assert_eq!(plan.assignments.len(), 1);
+        assert!(plan.assignments[0].parent_ordinal.is_none());
+        let path =
+            std::env::temp_dir().join(format!("single-interaction-{}.db", uuid::Uuid::new_v4()));
+        let db = crate::db::Database::open(&path).unwrap();
+        let campaign = db.create_interaction_campaign(&request, &plan).unwrap();
+        assert_eq!(
+            db.get_interaction_campaign(&campaign)
+                .unwrap()
+                .unwrap()
+                .assignments
+                .len(),
+            1
+        );
+        drop(db);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
     fn action_outcomes_aggregate_without_free_form_error_inference() {
         use InteractionActionKind::{Comment, Like, Save};
         use InteractionActionState::{Confirmed, FailedBeforeEffect, NoOp, Uncertain};
@@ -1977,6 +2041,28 @@ mod tests {
             ]),
             InteractionRunAggregate::Failed
         );
+    }
+
+    #[test]
+    fn unreadable_noop_is_partial_but_already_saved_satisfies_the_action() {
+        for verdict in [
+            "noControl",
+            "stateUnreadable",
+            "cardChangedBeforeEffect",
+            "alreadySaved",
+        ] {
+            let mut action =
+                PublicActionResult::new(InteractionActionKind::Save, InteractionActionState::NoOp);
+            action.evidence = Some(serde_json::json!({"verdict":verdict}).to_string());
+            assert_eq!(
+                aggregate_interaction_actions(&[action]),
+                if verdict == "alreadySaved" {
+                    InteractionRunAggregate::Done
+                } else {
+                    InteractionRunAggregate::Partial
+                }
+            );
+        }
     }
 
     #[test]

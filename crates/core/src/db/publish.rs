@@ -181,8 +181,11 @@ impl Database {
             )
             .optional()?;
         if let Some((existing_id, existing_request)) = existing {
+            let existing_request: crate::publish::PublishCampaignRequest =
+                serde_json::from_str(&existing_request)
+                    .context("parse existing publish request")?;
             anyhow::ensure!(
-                existing_id == campaign_id && existing_request == request_json,
+                existing_id == campaign_id && existing_request == *request,
                 "publish child idempotency conflict"
             );
             let stored = {
@@ -1323,6 +1326,7 @@ mod claim_tests {
         let bundles: Vec<crate::publish::PublishBundle> =
             bundle_ids.iter().map(|id| bundle(id)).collect();
         let request = crate::publish::PublishCampaignRequest {
+            sheet_enabled: true,
             request_id: request_id.clone(),
             source_root: "C:/fixture".into(),
             bundle_ids,
@@ -1372,6 +1376,7 @@ mod claim_tests {
         let bundle_id = format!("{child_id}:bundle");
         let bundles = vec![bundle(&bundle_id)];
         let request = crate::publish::PublishCampaignRequest {
+            sheet_enabled: true,
             request_id: "attempt-key".into(),
             source_root: "C:/fixture".into(),
             bundle_ids: vec![bundle_id],
@@ -1396,6 +1401,26 @@ mod claim_tests {
         assert_eq!(first.0.id, child_id);
         assert_eq!(second.0.id, first.0.id);
         assert_eq!(db.list_publish_campaigns(10).expect("list").len(), 1);
+
+        let mut legacy = serde_json::to_value(&request).unwrap();
+        legacy.as_object_mut().unwrap().remove("sheetEnabled");
+        db.conn()
+            .unwrap()
+            .execute(
+                "UPDATE publish_campaigns SET request_json=?1 WHERE id=?2",
+                params![legacy.to_string(), first.0.id],
+            )
+            .unwrap();
+        assert!(
+            !db.create_publish_campaign_with_id(&child_id, &request, &bundles)
+                .unwrap()
+                .1
+        );
+        let mut changed_sheet = request.clone();
+        changed_sheet.sheet_enabled = false;
+        assert!(db
+            .create_publish_campaign_with_id(&child_id, &changed_sheet, &bundles)
+            .is_err());
 
         let mut conflicting = request;
         conflicting.source_root = "C:/different".into();
@@ -2669,6 +2694,7 @@ mod execution_snapshot_tests {
             partners: Vec::new(),
         };
         let request = PublishCampaignRequest {
+            sheet_enabled: true,
             request_id: Uuid::new_v4().to_string(),
             source_root: "C:/fixture".into(),
             bundle_ids: vec![bundle.id.clone()],

@@ -836,6 +836,8 @@ impl Database {
     /// Before a public effect, the preparation revision is the ownership token and a success
     /// additionally requires the campaign to remain running. After Comment crosses Send, the
     /// non-retryable `sending` state is itself exclusive and may still be confirmed after Cancel.
+    /// Unstarted actions end in the same transaction, without changing another action's claim
+    /// or public-effect evidence.
     pub fn settle_owned_interaction_assignment(
         &self,
         assignment_id: &str,
@@ -855,9 +857,12 @@ impl Database {
             ),
             "interaction assignment settlement requires a terminal state"
         );
-        let conn = self.conn()?;
+        let mut conn = self.conn()?;
+        let transaction = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let stop_unstarted = state != ThreadMessageState::Succeeded;
         let state = interaction_message_state_label(state);
-        let changed = conn.execute(
+        let now = Utc::now().to_rfc3339();
+        let changed = transaction.execute(
             "UPDATE interaction_assignments
              SET state=?1,error_code=?2,evidence_json=COALESCE(?3,evidence_json),
                  revision=revision+1,updated_at=?4
@@ -875,11 +880,33 @@ impl Database {
                 state,
                 error_code,
                 evidence_json,
-                Utc::now().to_rfc3339(),
+                now,
                 assignment_id,
                 ownership_revision,
             ],
         )?;
+        if changed > 0 && stop_unstarted {
+            let reason = error_code.unwrap_or(state);
+            transaction.execute(
+                "UPDATE tiktok_action_runs
+                 SET state='failed_before_effect',revision=revision+1,updated_at=?1,
+                     error_code=?2,evidence_json=?3
+                 WHERE owner_kind='interaction' AND assignment_id=?4
+                   AND state='planned' AND effect_intent IS NULL",
+                params![
+                    now,
+                    format!("skipped_after_assignment_stopped: {reason}"),
+                    serde_json::json!({
+                        "phase": "assignmentStopped",
+                        "assignmentState": state,
+                        "reason": reason,
+                    })
+                    .to_string(),
+                    assignment_id,
+                ],
+            )?;
+        }
+        transaction.commit()?;
         Ok(changed > 0)
     }
     /// Saved frames for a campaign, newest first. Rows without a
@@ -964,5 +991,266 @@ impl Database {
             ],
         )?;
         Ok(id)
+    }
+}
+
+#[cfg(test)]
+mod settlement_tests {
+    use super::*;
+    use crate::interaction::{
+        plan_threads, InteractionActionKind, InteractionActionSet, InteractionActionState,
+        ThreadCampaignRequest, ThreadCampaignState, ThreadMessageState, ThreadMode, ThreadShape,
+    };
+
+    struct Fixture {
+        db: Database,
+        path: PathBuf,
+        campaign: String,
+        assignment: String,
+        sibling: String,
+        revision: i64,
+    }
+
+    impl Fixture {
+        fn new() -> Self {
+            let path = std::env::temp_dir()
+                .join(format!("riviu-assignment-settlement-{}.db", Uuid::new_v4()));
+            let db = Database::open(&path).expect("fixture database");
+            let request = ThreadCampaignRequest {
+                request_id: Uuid::new_v4().to_string(),
+                targets: vec![crate::parse_tiktok_links(
+                    "https://www.tiktok.com/@fixture/video/12345",
+                )
+                .remove(0)
+                .target
+                .expect("fixture target")],
+                actor_udids: vec!["actor-a".into(), "actor-b".into()],
+                message_count: 2,
+                instruction: "fixture".into(),
+                max_words: 12,
+                mode: ThreadMode::Standalone,
+                shape: ThreadShape::Star,
+                cohort_size: None,
+                manual_comments: vec!["first fixture".into(), "second fixture".into()],
+                actions: InteractionActionSet {
+                    like: true,
+                    save: true,
+                    comment: true,
+                },
+                mentions: Vec::new(),
+                mention_parent: false,
+            };
+            let plan = plan_threads(&request).expect("fixture plan");
+            let campaign = db
+                .create_interaction_campaign(&request, &plan)
+                .expect("fixture campaign");
+            db.update_interaction_campaign_state(&campaign, ThreadCampaignState::Running, None)
+                .expect("running campaign");
+            let assignments = db
+                .get_interaction_campaign(&campaign)
+                .expect("read campaign")
+                .expect("campaign exists")
+                .assignments;
+            let assignment = assignments[0].id.clone();
+            let sibling = assignments[1].id.clone();
+            let revision = db
+                .claim_interaction_assignment_for_send(&assignment)
+                .expect("claim assignment")
+                .expect("assignment ownership");
+            Self {
+                db,
+                path,
+                campaign,
+                assignment,
+                sibling,
+                revision,
+            }
+        }
+
+        fn settle(&self, revision: i64, state: ThreadMessageState) -> anyhow::Result<bool> {
+            self.db.settle_owned_interaction_assignment(
+                &self.assignment,
+                revision,
+                state,
+                Some("target_open_no_baseline"),
+                None,
+            )
+        }
+    }
+
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
+
+    #[test]
+    fn stopped_assignment_closes_only_its_unstarted_actions() {
+        for terminal in [
+            ThreadMessageState::Failed,
+            ThreadMessageState::Uncertain,
+            ThreadMessageState::SkippedParent,
+        ] {
+            let fixture = Fixture::new();
+            let db = &fixture.db;
+            let like_claim = db
+                .claim_interaction_action(&fixture.assignment, InteractionActionKind::Like)
+                .expect("claim Like")
+                .expect("Like owner");
+            db.arm_interaction_action(
+                &fixture.assignment,
+                InteractionActionKind::Like,
+                like_claim,
+                "like_desired_state",
+            )
+            .expect("arm Like")
+            .expect("armed Like");
+            let before = db
+                .list_interaction_action_runs(&fixture.assignment)
+                .expect("actions before");
+            let sibling = db
+                .list_interaction_action_runs(&fixture.sibling)
+                .expect("sibling before");
+
+            assert!(fixture.settle(fixture.revision, terminal).expect("settle"));
+            let after = db
+                .list_interaction_action_runs(&fixture.assignment)
+                .expect("actions after");
+            assert_eq!(after[0], before[0], "armed Like must remain untouched");
+            for action in &after[1..] {
+                assert_eq!(action.state, InteractionActionState::FailedBeforeEffect);
+                assert_eq!(action.effect_intent, None);
+                assert_eq!(action.revision, 1);
+                assert_eq!(
+                    action.error.as_deref(),
+                    Some("skipped_after_assignment_stopped: target_open_no_baseline")
+                );
+                let evidence: serde_json::Value =
+                    serde_json::from_str(action.evidence.as_deref().expect("evidence"))
+                        .expect("valid evidence JSON");
+                assert_eq!(evidence["phase"], "assignmentStopped");
+                assert_eq!(
+                    evidence["assignmentState"],
+                    interaction_message_state_label(terminal)
+                );
+            }
+            assert_eq!(
+                db.list_interaction_action_runs(&fixture.sibling)
+                    .expect("sibling after"),
+                sibling
+            );
+        }
+    }
+
+    #[test]
+    fn assignment_settlement_preserves_claimed_effectful_and_terminal_actions() {
+        for (state, intent) in [
+            ("preparing", None),
+            ("armed", Some("effect")),
+            ("confirmed", Some("effect")),
+            ("no_op", None),
+            ("failed_before_effect", None),
+            ("uncertain", Some("effect")),
+            ("planned", Some("historical_effect")),
+        ] {
+            let fixture = Fixture::new();
+            fixture
+                .db
+                .conn()
+                .expect("connection")
+                .execute(
+                    r#"UPDATE tiktok_action_runs
+                 SET state=?1,effect_intent=?2,evidence_json='{"kept":true}',
+                     error_code='original',revision=7
+                 WHERE assignment_id=?3 AND action_kind='like'"#,
+                    params![state, intent, fixture.assignment],
+                )
+                .expect("fixture action state");
+            let before = fixture
+                .db
+                .list_interaction_action_runs(&fixture.assignment)
+                .expect("before");
+            assert!(fixture
+                .settle(fixture.revision, ThreadMessageState::Failed)
+                .expect("settle"));
+            let after = fixture
+                .db
+                .list_interaction_action_runs(&fixture.assignment)
+                .expect("after");
+            assert_eq!(after[0], before[0], "preserve {state}");
+            assert_eq!(after[1].state, InteractionActionState::FailedBeforeEffect);
+        }
+    }
+
+    #[test]
+    fn assignment_settlement_loser_and_success_leave_planned_actions_unchanged() {
+        let fixture = Fixture::new();
+        let before = fixture
+            .db
+            .list_interaction_action_runs(&fixture.assignment)
+            .expect("before");
+        assert!(!fixture
+            .settle(fixture.revision + 1, ThreadMessageState::Failed)
+            .expect("CAS loser"));
+        assert_eq!(
+            fixture
+                .db
+                .list_interaction_action_runs(&fixture.assignment)
+                .expect("after stale worker"),
+            before
+        );
+        assert!(fixture
+            .settle(fixture.revision, ThreadMessageState::Succeeded)
+            .expect("settle success"));
+        assert_eq!(
+            fixture
+                .db
+                .list_interaction_action_runs(&fixture.assignment)
+                .expect("after success"),
+            before
+        );
+    }
+
+    #[test]
+    fn assignment_and_planned_actions_roll_back_when_audit_insert_fails() {
+        let fixture = Fixture::new();
+        let before = fixture
+            .db
+            .get_interaction_campaign(&fixture.campaign)
+            .expect("before")
+            .expect("campaign")
+            .assignments;
+        fixture
+            .db
+            .conn()
+            .expect("connection")
+            .execute_batch(
+                "CREATE TABLE fixture_audit (entry TEXT NOT NULL);
+             CREATE TRIGGER fixture_audit_failure AFTER UPDATE OF state ON tiktok_action_runs
+             WHEN NEW.state='failed_before_effect'
+             BEGIN INSERT INTO fixture_audit(entry) VALUES (NULL); END;",
+            )
+            .expect("install failing audit fixture");
+        assert!(fixture
+            .settle(fixture.revision, ThreadMessageState::Failed)
+            .is_err());
+        assert_eq!(
+            fixture
+                .db
+                .get_interaction_campaign(&fixture.campaign)
+                .expect("after rollback")
+                .expect("campaign")
+                .assignments,
+            before
+        );
+        fixture
+            .db
+            .conn()
+            .expect("connection")
+            .execute_batch("DROP TRIGGER fixture_audit_failure;")
+            .expect("remove fault injection");
+        assert!(fixture
+            .settle(fixture.revision, ThreadMessageState::Failed)
+            .expect("same ownership still valid after rollback"));
     }
 }

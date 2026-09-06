@@ -266,6 +266,9 @@ impl PublishCampaignState {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct PublishCampaignRequest {
+    /// Immutable reporting choice. Legacy campaigns still owe their Sheet row.
+    #[serde(default = "default_sheet_enabled")]
+    pub sheet_enabled: bool,
     pub request_id: String,
     pub source_root: String,
     pub bundle_ids: Vec<String>,
@@ -286,6 +289,10 @@ pub struct PublishCampaignRequest {
     /// replaced after restart without losing the roster, aliases or exclusions that were approved.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target_snapshot: Option<crate::ResolvedTargetSnapshot>,
+}
+
+pub const fn default_sheet_enabled() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -700,7 +707,8 @@ pub enum PublishVideoError {
     Io(#[from] std::io::Error),
 }
 
-/// Scan one folder level and produce a stable, side-effect-free manifest.
+/// Scan child bundle directories, or the selected folder itself when it has direct media
+/// and no child directories. The bundle reader and its stable identities are shared.
 pub fn scan_publish_folder(
     root: impl AsRef<Path>,
     options: PublishScanOptions,
@@ -716,6 +724,24 @@ pub fn scan_publish_folder(
     }
 
     let mut entries = read_dir_sorted(root)?;
+    let has_child_directories = entries.iter().any(|entry| entry.path().is_dir());
+    let has_direct_bundle_files = entries.iter().any(|entry| {
+        let name = entry.file_name().to_string_lossy().to_string();
+        !name.starts_with('.')
+            && (is_supported_image(&name) || is_supported_video(&name) || is_caption_file(&name))
+    });
+    if !has_child_directories && has_direct_bundle_files {
+        let (bundle, notices, ignored_partner_files, ignored_hidden_files) =
+            scan_bundle(root, options)?;
+        return Ok(PublishFolderManifest {
+            source_root: root.display().to_string(),
+            scanned_at: Utc::now(),
+            bundles: vec![bundle],
+            notices,
+            ignored_partner_files,
+            ignored_hidden_files,
+        });
+    }
     let mut bundles = Vec::new();
     let mut notices = Vec::new();
     let mut ignored_partner_files = 0;
@@ -1686,6 +1712,147 @@ mod tests {
         assert_eq!(manifest.ignored_hidden_files, 1);
     }
 
+    #[test]
+    fn direct_image_bundle_matches_parent_scan_identity_paths_and_managed_copy() {
+        let parent = TempDir::new();
+        let bundle = parent.path().join("one post");
+        fs::create_dir(&bundle).unwrap();
+        write_png(&bundle.join("01-cover.png"), [1, 2, 3]);
+        write_png(&bundle.join("02-detail.png"), [4, 5, 6]);
+        fs::write(bundle.join("caption.txt"), "one caption\r\n").unwrap();
+        fs::write(bundle.join(".hidden"), "ignored").unwrap();
+        let parent_manifest =
+            scan_publish_folder(parent.path(), PublishScanOptions::default()).unwrap();
+        let direct_manifest = scan_publish_folder(&bundle, PublishScanOptions::default()).unwrap();
+        assert_eq!(direct_manifest.bundles, parent_manifest.bundles);
+        assert_eq!(direct_manifest.source_root, bundle.display().to_string());
+        assert_eq!(
+            direct_manifest.bundles[0].source_path,
+            bundle.display().to_string()
+        );
+        assert_eq!(direct_manifest.ignored_hidden_files, 1);
+        let destination = TempDir::new();
+        let copied =
+            copy_bundle_to_managed(&direct_manifest.bundles[0], destination.path()).unwrap();
+        assert_eq!(copied.id, parent_manifest.bundles[0].id);
+        assert_eq!(
+            copied.caption_sha256,
+            parent_manifest.bundles[0].caption_sha256
+        );
+        assert_eq!(
+            copied.images[0].sha256,
+            parent_manifest.bundles[0].images[0].sha256
+        );
+        assert_eq!(copied.source_path, destination.path().display().to_string());
+    }
+
+    #[test]
+    fn direct_video_bundle_matches_parent_scan_without_changing_media_contract() {
+        let parent = TempDir::new();
+        let bundle = write_video_bundle(
+            parent.path(),
+            &mp4_fixture(1_000, FixtureVideoCodec::H264, FixtureAudioCodec::Aac),
+            "video caption",
+        );
+        let parent_manifest =
+            scan_publish_folder(parent.path(), PublishScanOptions::default()).unwrap();
+        let direct_manifest = scan_publish_folder(&bundle, PublishScanOptions::default()).unwrap();
+        assert_eq!(direct_manifest.bundles, parent_manifest.bundles);
+        assert_eq!(
+            direct_manifest.bundles[0].media_kind,
+            PublishMediaKind::Video
+        );
+        assert!(direct_manifest.bundles[0].images.is_empty());
+    }
+
+    #[test]
+    fn direct_bundle_keeps_caption_order_count_and_media_guards() {
+        let missing = TempDir::new();
+        write_png(&missing.path().join("01.png"), [1, 2, 3]);
+        assert!(matches!(
+            scan_publish_folder(missing.path(), PublishScanOptions::default()),
+            Err(PublishScanError::MissingCaption { .. })
+        ));
+        fs::write(missing.path().join("caption.txt"), " \n").unwrap();
+        assert!(matches!(
+            scan_publish_folder(missing.path(), PublishScanOptions::default()),
+            Err(PublishScanError::EmptyCaption { .. })
+        ));
+        fs::write(missing.path().join("caption.txt"), "caption").unwrap();
+        write_png(&missing.path().join("03.png"), [1, 2, 3]);
+        assert!(matches!(
+            scan_publish_folder(missing.path(), PublishScanOptions::default()),
+            Err(PublishScanError::InvalidImageOrder { .. })
+        ));
+        assert!(matches!(
+            scan_publish_folder(
+                missing.path(),
+                PublishScanOptions {
+                    max_images_per_bundle: 1,
+                }
+            ),
+            Err(PublishScanError::TooManyImages {
+                count: 2,
+                max: 1,
+                ..
+            })
+        ));
+        fs::write(missing.path().join("clip.mp4"), b"fixture").unwrap();
+        assert!(matches!(
+            scan_publish_folder(missing.path(), PublishScanOptions::default()),
+            Err(PublishScanError::MixedMedia { .. })
+        ));
+
+        let invalid_video = TempDir::new();
+        fs::write(invalid_video.path().join("clip.mp4"), b"not an MP4").unwrap();
+        fs::write(invalid_video.path().join("caption.txt"), "caption").unwrap();
+        assert!(matches!(
+            scan_publish_folder(invalid_video.path(), PublishScanOptions::default()),
+            Err(PublishScanError::Video { .. })
+        ));
+        let only_caption = TempDir::new();
+        fs::write(only_caption.path().join("caption.txt"), "caption").unwrap();
+        assert!(matches!(
+            scan_publish_folder(only_caption.path(), PublishScanOptions::default()),
+            Err(PublishScanError::EmptyBundle { .. })
+        ));
+    }
+
+    #[test]
+    fn empty_root_stays_no_bundles_and_child_directories_keep_legacy_precedence() {
+        let parent = TempDir::new();
+        assert!(matches!(
+            scan_publish_folder(parent.path(), PublishScanOptions::default()),
+            Err(PublishScanError::NoBundles)
+        ));
+        fs::write(parent.path().join(".hidden.png"), b"ignored").unwrap();
+        fs::write(parent.path().join("readme.txt"), "ignored").unwrap();
+        assert!(matches!(
+            scan_publish_folder(parent.path(), PublishScanOptions::default()),
+            Err(PublishScanError::NoBundles)
+        ));
+        let child = parent.path().join("actual bundle");
+        fs::create_dir(&child).unwrap();
+        write_png(&child.join("01.png"), [1, 2, 3]);
+        fs::write(child.join("caption.txt"), "child caption").unwrap();
+        let baseline = scan_publish_folder(parent.path(), PublishScanOptions::default()).unwrap();
+        fs::write(
+            parent.path().join("01.png"),
+            b"root loose media remains ignored",
+        )
+        .unwrap();
+        fs::write(
+            parent.path().join("caption.txt"),
+            "root caption remains ignored",
+        )
+        .unwrap();
+        let after = scan_publish_folder(parent.path(), PublishScanOptions::default()).unwrap();
+        assert_eq!(after.bundles, baseline.bundles);
+        assert_eq!(after.source_root, baseline.source_root);
+        assert_eq!(after.notices.len(), baseline.notices.len() + 2);
+        assert_eq!(after.bundles.len(), 1);
+    }
+
     /// **One partner workbook rides the bundle out of the scan, or degrades loudly.**
     ///
     /// A readable workbook carries names in workbook order. A corrupt workbook cannot supply
@@ -2276,6 +2443,7 @@ mod execution_contract_tests {
         )
         .expect("resolve pinned target");
         let request = PublishCampaignRequest {
+            sheet_enabled: true,
             request_id: "request-1".into(),
             source_root: "C:/fixture".into(),
             bundle_ids: vec!["bundle-1".into()],
@@ -2298,6 +2466,19 @@ mod execution_contract_tests {
         assert_eq!(restored.sound_policy, request.sound_policy);
         assert!(restored.execution_confirmed);
         assert_eq!(restored.target_snapshot, Some(target_snapshot));
+        let mut legacy = serde_json::to_value(&request).unwrap();
+        legacy.as_object_mut().unwrap().remove("sheetEnabled");
+        assert!(
+            serde_json::from_value::<PublishCampaignRequest>(legacy.clone())
+                .unwrap()
+                .sheet_enabled
+        );
+        legacy["sheetEnabled"] = serde_json::json!(false);
+        assert!(
+            !serde_json::from_value::<PublishCampaignRequest>(legacy)
+                .unwrap()
+                .sheet_enabled
+        );
     }
 }
 

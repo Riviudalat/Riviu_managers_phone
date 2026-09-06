@@ -7,10 +7,18 @@
  * own phone joins the post and replies (see `ThreadCampaignRequest.mentions`/`actorUdids`).
  */
 
-/** A device paired with the TikTok @handle it is logged into (without the leading `@`). */
+/** Operator-assigned account mapping, not a live login verification. */
 export interface DeviceHandle {
   udid: string;
   handle: string;
+}
+
+export function normalizeDeviceHandle(value: string): string {
+  const handle = value.trim().replace(/^@+/, "");
+  if (handle && (!/^[a-zA-Z0-9_.]{1,24}$/.test(handle) || handle.endsWith("."))) {
+    throw new Error("Nhập username TikTok, không nhập tên hiển thị hoặc đường link.");
+  }
+  return handle;
 }
 
 /**
@@ -46,8 +54,9 @@ export function resolveMentionActors(mentions: string[], devices: DeviceHandle[]
   const out: string[] = [];
   const added = new Set<string>();
   for (const device of devices) {
-    const handle = device.handle.trim().toLowerCase();
+    const handle = device.handle.trim().replace(/^@+/, "").toLowerCase();
     if (!handle || !wanted.has(handle) || added.has(device.udid)) continue;
+    if (devices.filter((other) => other.handle.trim().replace(/^@+/, "").toLowerCase() === handle).length !== 1) continue;
     added.add(device.udid);
     out.push(device.udid);
   }

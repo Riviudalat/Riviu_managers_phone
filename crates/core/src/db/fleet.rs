@@ -93,6 +93,73 @@ impl Database {
         )?;
         Ok(())
     }
+
+    pub fn patch_device_meta(
+        &self,
+        udid: &str,
+        change: &crate::DeviceMetaChange,
+    ) -> anyhow::Result<crate::DeviceMeta> {
+        anyhow::ensure!(!udid.trim().is_empty(), "device identifier missing");
+        {
+            let conn = self.conn()?;
+            match change {
+                crate::DeviceMetaChange::Alias(value) => {
+                    conn.execute("INSERT INTO device_meta(udid,alias) VALUES(?1,?2) ON CONFLICT(udid) DO UPDATE SET alias=excluded.alias",params![udid,value])?;
+                }
+                crate::DeviceMetaChange::Number(value) => {
+                    anyhow::ensure!(
+                        value.is_none_or(|number| number > 0),
+                        "device number must be positive"
+                    );
+                    conn.execute("INSERT INTO device_meta(udid,number) VALUES(?1,?2) ON CONFLICT(udid) DO UPDATE SET number=excluded.number",params![udid,value])?;
+                }
+            }
+        }
+        self.get_device_meta(udid)
+    }
+
+    /// Update only the account mapping, rejecting stale editors without overwriting aliases/groups.
+    pub fn set_device_handle(
+        &self,
+        udid: &str,
+        expected: &str,
+        handle: &str,
+    ) -> anyhow::Result<String> {
+        let handle = handle.trim().trim_start_matches('@');
+        anyhow::ensure!(
+            handle.is_empty()
+                || (handle.len() <= 24
+                    && !handle.ends_with('.')
+                    && handle
+                        .bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'.')),
+            "invalid TikTok username"
+        );
+        anyhow::ensure!(!udid.trim().is_empty(), "device identifier missing");
+        let mut conn = self.conn()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let current: Option<String> = tx
+            .query_row(
+                "SELECT handle FROM device_meta WHERE udid=?1",
+                [udid],
+                |row| row.get(0),
+            )
+            .optional()?;
+        anyhow::ensure!(
+            current.as_deref().unwrap_or_default() == expected,
+            "device account mapping changed; reload before saving"
+        );
+        if !handle.is_empty() {
+            let duplicate:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM device_meta WHERE udid<>?1 AND lower(ltrim(trim(handle),'@'))=lower(?2))",params![udid,handle],|row|row.get(0))?;
+            anyhow::ensure!(
+                !duplicate,
+                "TikTok username is already assigned to another device"
+            );
+        }
+        tx.execute("INSERT INTO device_meta(udid,handle) VALUES(?1,?2) ON CONFLICT(udid) DO UPDATE SET handle=excluded.handle",params![udid,handle])?;
+        tx.commit()?;
+        Ok(handle.to_string())
+    }
     pub fn list_groups(&self) -> anyhow::Result<Vec<crate::types::DeviceGroup>> {
         let conn = self.conn()?;
         let mut stmt =

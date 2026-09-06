@@ -1,11 +1,22 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  normalizeDeviceHandle,
   parseMentions,
   resolveMentionActors,
   unionActors,
   type DeviceHandle,
 } from "./interactionMentions";
+
+describe("normalizeDeviceHandle", () => {
+  it("normalizes usernames, not display names or URLs", () => {
+    expect(normalizeDeviceHandle(" @New.account ")).toBe("New.account");
+    expect(normalizeDeviceHandle(" ")).toBe("");
+    for (const invalid of ["display name", "https://www.tiktok.com/@user", "user.", "a/b", "a".repeat(25)]) {
+      expect(() => normalizeDeviceHandle(invalid)).toThrow();
+    }
+  });
+});
 
 describe("parseMentions", () => {
   it("strips @, splits on space/comma/semicolon, and dedups case-insensitively", () => {
@@ -41,6 +52,13 @@ describe("resolveMentionActors", () => {
   it("never matches a blank-handle device", () => {
     expect(resolveMentionActors([""], devices)).toEqual([]);
     expect(resolveMentionActors(["ann"], [{ udid: "x", handle: "  " }])).toEqual([]);
+  });
+
+  it("accepts legacy @ prefixes but never resolves an ambiguous account", () => {
+    expect(resolveMentionActors(["ann"], [{ udid: "u1", handle: " @Ann " }])).toEqual(["u1"]);
+    expect(resolveMentionActors(["ann"], [
+      { udid: "u1", handle: " @Ann " }, { udid: "u2", handle: "ann" },
+    ])).toEqual([]);
   });
 });
 

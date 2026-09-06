@@ -13,6 +13,7 @@ import {
   exportMedia,
   groupInput,
   viewInjectTouch,
+  setScreenRotation,
 } from "../api";
 import { FocusStream } from "./FocusStream";
 import { ActivityCenter } from "./ActivityCenter";
@@ -54,13 +55,14 @@ vi.mock("../api", () => ({
 let liveTouchAvailable = false;
 let dark = false;
 let decodeRefused = false;
+let frame = { width: 288, height: 600, generation: 1 };
 
 vi.mock("../viewStore", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../viewStore")>();
   return {
     ...actual,
     useViewLive: () => !dark,
-    useViewSize: () => (dark ? undefined : { width: 288, height: 600, generation: 1 }),
+    useViewSize: () => (dark ? undefined : frame),
     useViewDecodeFailed: () => decodeRefused,
   };
 });
@@ -68,6 +70,7 @@ vi.mock("../viewStore", async (importOriginal) => {
 // `render` binds its queries to document.body, not to the container it returns, so without
 // this every test after the first searches the leftovers of the ones before it.
 afterEach(cleanup);
+afterEach(() => { frame = { width: 288, height: 600, generation: 1 }; });
 
 const fixture: DeviceInfo = {
   udid: "ce06",
@@ -102,6 +105,35 @@ describe("FocusStream hit mapping", () => {
     vi.mocked(deviceSwipePath).mockClear();
     HTMLElement.prototype.setPointerCapture = vi.fn();
     HTMLElement.prototype.releasePointerCapture = vi.fn();
+  });
+
+  it("changes orientation only on request and checks readback before claiming portrait", async () => {
+    vi.mocked(setScreenRotation).mockClear().mockResolvedValueOnce(3).mockResolvedValueOnce(0);
+    const view = render(<FocusStream device={fixture} index={5} onClose={() => undefined} groupUdids={[]} groupMode={false} devices={[fixture]} onSelectDevice={() => undefined} />);
+    expect(setScreenRotation).not.toHaveBeenCalled();
+    fireEvent.click(view.getByRole("button", { name: "Đưa về màn hình dọc" }));
+    await waitFor(() => expect(view.getByRole("status")).toHaveTextContent("Máy chưa về hướng dọc"));
+    expect(setScreenRotation).toHaveBeenLastCalledWith("ce06", 0);
+    fireEvent.click(view.getByRole("button", { name: "Đưa về màn hình dọc" }));
+    await waitFor(() => expect(view.getByRole("status")).toHaveTextContent("Máy đã về hướng dọc"));
+  });
+
+  it("maps landscape taps without rotating the coordinates twice and drops a stale drag", async () => {
+    const props = { device: fixture, index: 2, onClose: () => undefined, groupUdids: [], groupMode: false, devices: [fixture], onSelectDevice: () => undefined };
+    const view = render(<FocusStream {...props} />);
+    const screen = view.getByTestId("focus-screen");
+    mockRect(view.container.querySelector("canvas")!, { left: 0, top: 0, width: 400, height: 832 });
+    await waitFor(() => expect(deviceControlBegin).toHaveBeenCalled());
+    fireEvent.pointerDown(screen, { button: 0, clientX: 100, clientY: 100, pointerId: 1 });
+    frame = { width: 600, height: 288, generation: 2 };
+    view.rerender(<FocusStream {...props} />);
+    mockRect(view.container.querySelector("canvas")!, { left: 0, top: 0, width: 800, height: 384 });
+    fireEvent.pointerUp(screen, { button: 0, clientX: 200, clientY: 200, pointerId: 1 });
+    expect(deviceTap).not.toHaveBeenCalled();
+    fireEvent.pointerDown(screen, { button: 0, clientX: 400, clientY: 192, pointerId: 2 });
+    fireEvent.pointerUp(screen, { button: 0, clientX: 400, clientY: 192, pointerId: 2 });
+    await waitFor(() => expect(deviceTap).toHaveBeenCalledWith("ce06", 300, 144, 600, 288));
+    expect(view.container.querySelector(".focus-stage")).toHaveClass("is-landscape");
   });
 
   it("taps through the painted canvas, not the black pane", async () => {

@@ -21,6 +21,48 @@ use riviu_core::interaction_campaign::{
     retryable_assignments, revision, InteractionDevice,
 };
 
+#[cfg(test)]
+#[path = "interaction_commands/live_canary.rs"]
+mod live_canary;
+
+mod inspection;
+mod sheet;
+
+#[tauri::command]
+pub async fn interaction_import_sheet(
+    state: State<'_, AppState>,
+    sheet_url: String,
+    column: String,
+) -> Result<sheet::SheetImport, CommandError> {
+    let _admission = state.ensure_accepting_work()?;
+    sheet::import(&sheet_url, &column)
+        .await
+        .map_err(interaction_error)
+}
+
+#[tauri::command]
+pub async fn interaction_read_account(
+    state: State<'_, AppState>,
+    udid: String,
+) -> Result<inspection::AccountReading, CommandError> {
+    let _admission = state.ensure_accepting_work()?;
+    inspection::read_account(&state.control, &state.db, &udid)
+        .await
+        .map_err(interaction_error)
+}
+
+#[tauri::command]
+pub async fn interaction_readback(
+    state: State<'_, AppState>,
+    campaign_id: String,
+    assignment_id: String,
+) -> Result<inspection::ActionReadback, CommandError> {
+    let _admission = state.ensure_accepting_work()?;
+    inspection::readback(&state.control, &state.db, &campaign_id, &assignment_id)
+        .await
+        .map_err(interaction_error)
+}
+
 /// What one phone read off a post, and what that means for the numbers asked for.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -256,9 +298,7 @@ pub async fn interaction_start_thread(
     // list should not claim it did. A manual campaign passes: it never calls the AI.
     if riviu_core::interaction_campaign::ai_key_missing(
         &request,
-        &state
-            .db
-            .get_nurture_settings()
+        &riviu_core::interaction_campaign::settings_for_request(&state.db, &request)
             .map_err(CommandError::operation)?
             .api_key,
     ) {
@@ -534,9 +574,7 @@ pub fn interaction_retry(
     // instead of as a campaign that flipped to Failed a second after they pressed retry.
     if riviu_core::interaction_campaign::ai_key_missing(
         &request,
-        &state
-            .db
-            .get_nurture_settings()
+        &riviu_core::interaction_campaign::settings_for_request(&state.db, &request)
             .map_err(CommandError::operation)?
             .api_key,
     ) {

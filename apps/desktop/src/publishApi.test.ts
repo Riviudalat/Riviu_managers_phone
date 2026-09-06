@@ -50,6 +50,7 @@ describe("Publish API client", () => {
           targetRef: request.targetRef,
           confirmed: true,
           approvedInputDigest: "approved-digest",
+          sheetEnabled: true,
         },
       ],
       ["publish_reconcile", { campaignId: "campaign-a" }],

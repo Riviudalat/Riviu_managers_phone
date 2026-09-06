@@ -84,6 +84,7 @@ export function NurtureRunProgress({
   const run: RunProgress | null = currentRun(statuses, now);
   if (!run) return null;
   const settled = run.done + run.failed;
+  const cleaned = run.rows.filter((status) => !status.running && status.cleanupState === "processAbsent" && status.cleanupProof).length;
   return (
     <div className="nu-run">
       <div className="nu-run-head">
@@ -101,6 +102,7 @@ export function NurtureRunProgress({
         className="nu-bar-lg"
       />
       <div className="nu-run-chips">
+        <span className="nu-chip" role="status">TikTok đã tắt: {cleaned}/{run.size} máy trong phiên</span>
         <span className="nu-chip is-run" title="đang chạy">
           ● {run.running} đang chạy
         </span>

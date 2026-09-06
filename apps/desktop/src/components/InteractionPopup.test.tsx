@@ -2,7 +2,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testi
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { InteractionPopup } from "./InteractionPopup";
-import { automationCreate, automationGet, automationList } from "../api";
+import { automationCreate, automationGet, automationList, getDeviceMeta, saveDeviceHandle } from "../api";
 import type {
   DeviceInfo,
   DeviceMeta,
@@ -127,6 +127,7 @@ vi.mock("../api", () => ({
     handle: "",
   })),
   saveDeviceMeta: vi.fn(async () => undefined),
+  saveDeviceHandle: vi.fn(async (_udid: string, _expected: string, handle: string) => handle),
   interactionRetry: vi.fn(async () => undefined),
   interactionListArtifacts: vi.fn(async () => []),
   interactionReadArtifact: vi.fn(async () => ""),
@@ -283,6 +284,66 @@ async function pasteLink() {
   });
   await screen.findByText("✓");
 }
+
+it("saves a normalized handle by UDID without rewriting device metadata", async () => {
+  render(<InteractionPopup metas={noMeta} devices={devices} selected={[]} />);
+  await waitFor(() => expect(getDeviceMeta).toHaveBeenCalledWith("actor-a"));
+  const input = screen.getByRole("textbox", { name: "Tài khoản TikTok của Phone A" });
+  fireEvent.change(input, { target: { value: " @new.account " } });
+  fireEvent.blur(input);
+  await waitFor(() => expect(saveDeviceHandle).toHaveBeenCalledWith("actor-a", "", "new.account"));
+  await waitFor(() => expect(input).toHaveValue("new.account"));
+});
+
+it("shows failed handle saves inline and never uses an unsaved nick as an actor", async () => {
+  vi.mocked(saveDeviceHandle).mockRejectedValueOnce(new Error("database locked"));
+  render(<InteractionPopup metas={noMeta} devices={devices} selected={[]} />);
+  await waitFor(() => expect(getDeviceMeta).toHaveBeenCalledWith("actor-a"));
+  const input = screen.getByRole("textbox", { name: "Tài khoản TikTok của Phone A" });
+  fireEvent.change(input, { target: { value: "new.account" } });
+  fireEvent.blur(input);
+  expect(await screen.findByText(/Chưa lưu nick:.*database locked/)).toHaveAttribute("role", "alert");
+  expect(input).toHaveAttribute("aria-invalid", "true");
+  expect(input).toHaveValue("new.account");
+  fireEvent.blur(input);
+  await waitFor(() => expect(input).toHaveAttribute("aria-invalid", "false"));
+});
+
+it("rejects duplicate drafts without calling the save endpoint", async () => {
+  render(<InteractionPopup metas={noMeta} devices={devices} selected={[]} />);
+  await waitFor(() => expect(getDeviceMeta).toHaveBeenCalledWith("actor-b"));
+  fireEvent.change(screen.getByRole("textbox", { name: "Tài khoản TikTok của Phone A" }), { target: { value: "@same.account" } });
+  const second = screen.getByRole("textbox", { name: "Tài khoản TikTok của Phone B" });
+  fireEvent.change(second, { target: { value: "SAME.account" } });
+  fireEvent.blur(second);
+  expect(await screen.findByText(/Nick này đang gán cho máy khác/)).toHaveAttribute("role", "alert");
+  expect(saveDeviceHandle).not.toHaveBeenCalled();
+});
+
+it("reloads the stored nick explicitly after a stale save error", async () => {
+  vi.mocked(saveDeviceHandle).mockRejectedValueOnce(new Error("mapping changed"));
+  render(<InteractionPopup metas={noMeta} devices={devices} selected={[]} />);
+  await waitFor(() => expect(getDeviceMeta).toHaveBeenCalledWith("actor-a"));
+  const input = screen.getByRole("textbox", { name: "Tài khoản TikTok của Phone A" });
+  fireEvent.change(input, { target: { value: "draft.account" } });
+  fireEvent.blur(input);
+  const reload = await screen.findByRole("button", { name: "Tải lại nick đã lưu" });
+  vi.mocked(getDeviceMeta).mockResolvedValueOnce({ udid: "actor-a", handle: "other.editor", notes: "", tags: [], groupId: null, alias: "", number: 1 });
+  fireEvent.click(reload);
+  await waitFor(() => expect(input).toHaveValue("other.editor"));
+  expect(input).toHaveAttribute("aria-invalid", "false");
+});
+
+it("scope return uses the new stored handle without inventing an unsaved edit", async () => {
+  vi.mocked(getDeviceMeta).mockResolvedValueOnce({ udid: "actor-a", handle: "old.account", notes: "", tags: [], groupId: null, alias: "", number: 1 });
+  const { rerender } = render(<InteractionPopup metas={noMeta} devices={[devices[0]]} selected={[]} targetUdids={["actor-a"]} />);
+  await waitFor(() => expect(screen.getByPlaceholderText("@handle")).toHaveValue("old.account"));
+  rerender(<InteractionPopup metas={noMeta} devices={[devices[0]]} selected={[]} targetUdids={[]} />);
+  vi.mocked(getDeviceMeta).mockResolvedValueOnce({ udid: "actor-a", handle: "new.account", notes: "", tags: [], groupId: null, alias: "", number: 1 });
+  rerender(<InteractionPopup metas={noMeta} devices={[devices[0]]} selected={[]} targetUdids={["actor-a"]} />);
+  await waitFor(() => expect(screen.getByPlaceholderText("@handle")).toHaveValue("new.account"));
+  expect(screen.queryByText(/Tài khoản máy còn thay đổi chưa lưu/)).toBeNull();
+});
 
 /**
  * Wait for the panel to be ready, then press Chạy ngay.

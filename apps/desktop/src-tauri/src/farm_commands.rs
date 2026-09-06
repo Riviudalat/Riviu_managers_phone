@@ -1254,6 +1254,34 @@ pub fn save_device_meta(state: State<'_, AppState>, meta: DeviceMeta) -> Result<
 }
 
 #[tauri::command]
+pub fn save_device_handle(
+    state: State<'_, AppState>,
+    udid: String,
+    expected_handle: String,
+    handle: String,
+) -> Result<String, CommandError> {
+    let _admission = state.ensure_accepting_work()?;
+    let saved = state
+        .db
+        .set_device_handle(&udid, &expected_handle, &handle)
+        .map_err(err)?;
+    log(&state, "device.handle", &udid);
+    Ok(saved)
+}
+
+#[tauri::command]
+pub fn patch_device_meta(
+    state: State<'_, AppState>,
+    udid: String,
+    change: riviu_core::DeviceMetaChange,
+) -> Result<DeviceMeta, CommandError> {
+    let _admission = state.ensure_accepting_work()?;
+    let meta = state.db.patch_device_meta(&udid, &change).map_err(err)?;
+    log(&state, "device.meta", &udid);
+    Ok(meta)
+}
+
+#[tauri::command]
 pub fn list_groups(state: State<'_, AppState>) -> Result<Vec<DeviceGroup>, CommandError> {
     state.db.list_groups().map_err(err)
 }

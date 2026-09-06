@@ -102,7 +102,7 @@ vi.mock("../api", () => ({
   nurtureSessionLog: logBook.read,
   nurtureSessionLogSummary: logBook.summary,
   nurtureClearSessionLog: logBook.clear,
-  nurtureStart: vi.fn(async () => undefined),
+  nurtureStart: vi.fn(async (udids: string[]) => udids),
   nurtureStop: vi.fn(async () => undefined),
   nurtureTestApi: vi.fn(async () => null),
   nurtureListCommentAttempts: vi.fn(async () => []),
@@ -547,6 +547,21 @@ describe("NurturePopup", () => {
     await waitFor(() => expect(api.nurtureStart).toHaveBeenCalledWith(["mock-1"]));
     await waitFor(() => expect(monitor).toHaveAttribute("aria-selected", "true"));
     expect(screen.getByRole("tabpanel", { name: "Theo dõi" })).toBeVisible();
+  });
+
+  it("names machines excluded at start and stops only the accepted targets", async () => {
+    const api = await import("../api");
+    saved.saveSettings.mockResolvedValueOnce(settings);
+    vi.mocked(api.nurtureStart).mockResolvedValueOnce(["mock-1"]);
+    const second = { ...devices[0], udid: "mock-2", name: "Second phone" };
+    render(<NurturePopup devices={[devices[0], second]} selected={[]} metas={new Map()} surface="page" />);
+    fireEvent.click(await screen.findByRole("button", { name: "Bắt đầu" }));
+    expect(await screen.findByText("1/2 máy đã bắt đầu")).toBeVisible();
+    expect(screen.getByText(/Không bắt đầu: Máy 2/)).toHaveTextContent("Second phone");
+    expect(screen.getByText(/không thuộc phiên và không được tự tắt TikTok/)).toBeVisible();
+    expect(api.nurtureStart).toHaveBeenCalledWith(["mock-1", "mock-2"]);
+    fireEvent.click(screen.getByRole("button", { name: /^Dừng$/ }));
+    await waitFor(() => expect(api.nurtureStop).toHaveBeenCalledWith(["mock-1"]));
   });
 
   it("keeps Start disabled when the resolved page target group is empty", async () => {

@@ -53,6 +53,7 @@ vi.mock("./api", () => ({
   listDeviceMetas: vi.fn(async () => []),
   getDeviceMeta: vi.fn(async (udid: string) => ({ udid, notes: "", tags: [] })),
   saveDeviceMeta: vi.fn(async () => undefined),
+  patchDeviceMeta: vi.fn(async () => undefined),
   listGroups: vi.fn(async () => []),
   listJobs: vi.fn(async () => []),
   operationListRuns: vi.fn(async () => []),

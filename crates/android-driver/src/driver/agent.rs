@@ -245,19 +245,21 @@ impl AndroidDriver {
     }
     /// The pid of a package, or `None` when it is not running.
     ///
-    /// `pidof` exits non-zero for an absent process, which the adb wrapper
-    /// reports as a command failure. Absence is an answer here, not an error —
-    /// propagating it made `inspect_app_process` fail precisely when it was
-    /// asked about a stopped app, which is the case it exists to describe.
+    /// Exit 1 with no output is absence; every transport, permission or malformed-output
+    /// failure propagates. None must never stand for a failed process read.
     ///
     /// `bundle_id` must already have passed [`adb::validate_package_name`];
     /// every public caller checks it before reaching here.
-    pub(super) async fn pid_of(&self, serial: &str, bundle_id: &str) -> Option<u64> {
-        self.adb
-            .shell(serial, &format!("pidof {bundle_id}"))
-            .await
-            .ok()
-            .and_then(|stdout| adb::parse_pidof(&stdout))
+    pub(super) async fn pid_of(
+        &self,
+        serial: &str,
+        bundle_id: &str,
+    ) -> anyhow::Result<Option<u64>> {
+        let output = self
+            .adb
+            .shell_output(serial, &format!("pidof {bundle_id}"), adb::DEFAULT_TIMEOUT)
+            .await?;
+        adb::checked_pidof(&output)
     }
     async fn screen_size(&self, serial: &str) -> anyhow::Result<(f64, f64)> {
         let stdout = self.adb.shell(serial, "wm size").await?;

@@ -2,7 +2,7 @@
 //!
 //! # Two deliveries, and only one of them is the post
 //!
-//! Every published carousel owes a row to a Google Sheet: its link in column D, `bot` as
+//! A campaign with Sheet reporting enabled owes a row: its link in column D, `bot` as
 //! the poster, and the partner names out of the campaign's workbook from column K onward.
 //! The obvious shape is an HTTP call at the end of the post step, and it is wrong in a way
 //! that costs real money: a network error would then make a **published** post read as a
@@ -130,7 +130,9 @@ fn reconciled_sheet_delivery_status(
     let every_sheet_row_sent = rows
         .iter()
         .all(|(_, _, state)| state.as_deref() == Some("sent"));
-    if all_links_known && every_sheet_row_sent {
+    if all_links_known
+        && (!campaign_sheet_enabled(connection, campaign_id)? || every_sheet_row_sent)
+    {
         return Ok((Status::Complete, Scope::None));
     }
     Ok((
@@ -141,6 +143,23 @@ fn reconciled_sheet_delivery_status(
             Scope::LinkAndSheet
         },
     ))
+}
+
+fn campaign_sheet_enabled(connection: &Connection, campaign_id: &str) -> anyhow::Result<bool> {
+    let raw: Option<String> = connection
+        .query_row(
+            "SELECT request_json FROM publish_campaigns WHERE id=?1",
+            [campaign_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    // Detached legacy outbox fixtures predate campaign persistence.
+    raw.map(|raw| {
+        serde_json::from_str::<crate::PublishCampaignRequest>(&raw)
+            .map(|request| request.sheet_enabled)
+            .map_err(Into::into)
+    })
+    .unwrap_or(Ok(true))
 }
 
 impl Database {
@@ -428,6 +447,7 @@ impl Database {
                 "status": status,
                 "retryScope": retry_scope,
                 "source": "sheet_delivery_reconciliation",
+                "sheetEnabled": campaign_sheet_enabled(&transaction, campaign_id)?,
                 "targetSnapshot": target_snapshot,
             }),
         };
@@ -475,6 +495,9 @@ fn queue_sheet_row(
     poster: &str,
     partners: &[String],
 ) -> anyhow::Result<()> {
+    if !campaign_sheet_enabled(conn, campaign_id)? {
+        return Ok(());
+    }
     let now = Utc::now().to_rfc3339();
     conn.execute(
         "INSERT INTO publish_sheet_outbox(
@@ -543,10 +566,15 @@ mod tests {
 
     /// One campaign with one assignment, and that assignment's id.
     fn seed(db: &Database) -> (String, String) {
+        seed_with_sheet(db, true)
+    }
+
+    fn seed_with_sheet(db: &Database, sheet_enabled: bool) -> (String, String) {
         // A fresh bundle id per campaign: `publish_bundles.id` is a primary key, so a fixture
         // that always says `bundle-a` can only ever make one campaign.
         let bundle_id = format!("bundle-{}", Uuid::new_v4());
         let request = PublishCampaignRequest {
+            sheet_enabled,
             request_id: Uuid::new_v4().to_string(),
             source_root: "/fixture/root".into(),
             bundle_ids: vec![bundle_id.clone()],
@@ -573,6 +601,53 @@ mod tests {
             .expect("one assignment")
             .id;
         (campaign.id, assignment)
+    }
+
+    #[test]
+    fn disabled_sheet_keeps_link_without_outbox_and_reconciles_complete_after_restart() {
+        let (db, path) = fixture();
+        let (campaign, assignment) = seed_with_sheet(&db, false);
+        let link = "https://www.tiktok.com/@fixture/photo/1234567890123456789";
+        let evidence = serde_json::json!({"post":{"postUrl":link}}).to_string();
+        db.record_publish_success_with_sheet_row(
+            &assignment,
+            &evidence,
+            &campaign,
+            link,
+            "bot",
+            &[],
+        )
+        .unwrap();
+        assert!(db.pending_publish_sheet_row(&assignment).unwrap().is_none());
+        db.queue_publish_sheet_row(&assignment, &campaign, link, "bot", &[])
+            .unwrap();
+        assert!(db.pending_publish_sheet_row(&assignment).unwrap().is_none());
+        drop(db);
+        let db = Database::open(&path).unwrap();
+        assert!(
+            !db.publish_campaign_request(&campaign)
+                .unwrap()
+                .unwrap()
+                .sheet_enabled
+        );
+        assert_eq!(
+            db.reconciled_publish_execution_status(&campaign).unwrap(),
+            (
+                crate::PublishExecutionStatus::Complete,
+                crate::PublishRetryScope::None
+            )
+        );
+        assert_eq!(
+            db.get_publish_campaign(&campaign)
+                .unwrap()
+                .unwrap()
+                .assignments[0]
+                .evidence_json
+                .as_deref(),
+            Some(evidence.as_str())
+        );
+        drop(db);
+        let _ = std::fs::remove_file(path);
     }
 
     /// The one row currently owed, and its version.

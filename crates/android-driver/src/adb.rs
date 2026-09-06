@@ -1126,6 +1126,34 @@ pub fn parse_display_geometry(stdout: &str) -> Option<DisplayGeometry> {
     None
 }
 
+/// Only exit 1 with empty output proves absence. Transport/permission/parser errors do not.
+pub fn checked_pidof(output: &ShellOutput) -> anyhow::Result<Option<u64>> {
+    anyhow::ensure!(
+        output.stderr.trim().is_empty(),
+        "pidof stderr: {}",
+        output.stderr.trim()
+    );
+    if output.exit_code == 1 && output.stdout.trim().is_empty() {
+        return Ok(None);
+    }
+    anyhow::ensure!(
+        output.exit_code == 0,
+        "pidof failed with exit {}: {}",
+        output.exit_code,
+        output.stdout.trim()
+    );
+    let pids = output
+        .stdout
+        .split_whitespace()
+        .map(str::parse::<u64>)
+        .collect::<Result<Vec<_>, _>>()?;
+    anyhow::ensure!(
+        !pids.is_empty() && pids.iter().all(|pid| *pid > 0),
+        "pidof returned invalid PID output"
+    );
+    Ok(pids.first().copied())
+}
+
 /// Parse the pid out of `pidof <package>`; absent output means not running.
 pub fn parse_pidof(stdout: &str) -> Option<u64> {
     stdout.split_whitespace().next()?.parse().ok()
@@ -2978,6 +3006,31 @@ drwxr-xr-x  32 root   root       788 2009-01-01 07:00 ..\n";
         assert_eq!(parse_pidof("12345 12346\n"), Some(12345));
         assert_eq!(parse_pidof("\n"), None);
         assert_eq!(parse_pidof(""), None);
+    }
+
+    #[test]
+    fn checked_pidof_never_turns_failures_into_absence() {
+        let output = |exit_code, stdout: &str, stderr: &str| ShellOutput {
+            exit_code,
+            stdout: stdout.into(),
+            stderr: stderr.into(),
+        };
+        assert_eq!(checked_pidof(&output(1, "", "")).unwrap(), None);
+        assert_eq!(
+            checked_pidof(&output(0, "123 124\n", "")).unwrap(),
+            Some(123)
+        );
+        for bad in [
+            output(-1, "", ""),
+            output(1, "", "device offline"),
+            output(127, "", ""),
+            output(0, "", ""),
+            output(0, "0", ""),
+            output(0, "denied", ""),
+            output(1, "permission denied", ""),
+        ] {
+            assert!(checked_pidof(&bad).is_err(), "{bad:?}");
+        }
     }
 
     #[test]

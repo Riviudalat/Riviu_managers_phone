@@ -1,0 +1,7 @@
+<hierarchy>
+  <node package="com.ss.android.ugc.trill" class="android.widget.Button" content-desc="Add or remove this video from Favorites." resource-id="com.ss.android.ugc.trill:id/f1p" checked="false" selected="false" clickable="true" enabled="true" displayed="true" bounds="[922,1373][1080,1539]">
+    <node package="com.ss.android.ugc.trill" class="android.widget.FrameLayout" resource-id="com.ss.android.ugc.trill:id/f14">
+      <node package="com.ss.android.ugc.trill" class="android.widget.ImageView" resource-id="com.ss.android.ugc.trill:id/f0y" checked="false" selected="true" displayed="true" bounds="[942,1373][1060,1491]"/>
+    </node>
+  </node>
+</hierarchy>

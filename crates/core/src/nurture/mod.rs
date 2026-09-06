@@ -793,11 +793,9 @@ impl NurtureEngine {
             .acquire_exclusive(udid, DeviceWorkOwner::Nurture)
             .await?;
         let (exclusive, capacity) = self.control.reserve_ui_capacity(exclusive).await?;
-        let session = self
-            .control
-            .start_interaction_session(exclusive, bundle_id, kind)
-            .await?;
-        self.control.start_reserved_stream(session, capacity).await
+        self.control
+            .start_clean_app_session(exclusive, capacity, bundle_id, kind)
+            .await
     }
 
     /// Stop TikTok before releasing the session and stream that prove which device and app
@@ -2593,6 +2591,8 @@ impl NurtureEngine {
             engine: self,
             udid,
             stop: &stop,
+            session: device.session.as_ref(),
+            package: &device.bundle_id,
             slides: parking_lot::Mutex::new(SlideEvidence::default()),
         };
         let live_source = EngineLiveSettings { engine: self };
@@ -2623,10 +2623,9 @@ impl NurtureEngine {
                     ran_outcome = Outcome::Failed;
                 }
                 let summary = format!(
-                    "{} — {}/{} video, {} tim, {} lưu, {} bình luận, {} follow, {:.0}s (hierarchy)",
+                    "{} — {}, {} tim, {} lưu, {} bình luận, {} follow, {:.0}s (hierarchy)",
                     ran_outcome.as_str(),
-                    progress.status.videos_done,
-                    progress.status.swipe_attempts,
+                    video_progress_message(&progress.status),
                     progress.status.likes,
                     progress.status.saves,
                     progress.status.comments,
@@ -3097,10 +3096,9 @@ impl NurtureEngine {
 
         let elapsed = started.elapsed();
         let summary = format!(
-            "{} — {}/{} video, {} tim, {} lưu, {} bình luận, {} follow, {} popup đóng, {} recovery, {:.0}s{}",
+            "{} — {}, {} tim, {} lưu, {} bình luận, {} follow, {} popup đóng, {} recovery, {:.0}s{}",
             progress.outcome.as_str(),
-            progress.status.videos_done,
-            progress.status.swipe_attempts,
+            video_progress_message(&progress.status),
             progress.status.likes,
             progress.status.saves,
             progress.status.comments,
@@ -3384,6 +3382,8 @@ struct EngineCommentSource<'a> {
     stop: &'a AtomicBool,
     /// Slides offered by the traversal since the last comment was written.
     slides: parking_lot::Mutex<SlideEvidence>,
+    session: &'a dyn UiSession,
+    package: &'a str,
 }
 
 /// The frames a photo post's traversal offered, kept two at a time.
@@ -3487,7 +3487,15 @@ impl hierarchy::CommentTextSource for EngineCommentSource<'_> {
     ) -> Result<Option<hierarchy::PreparedComment>, hierarchy::CommentSourceError> {
         let (slides, offered) = self.slides.lock().drain();
         self.engine
-            .prepare_hierarchy_comment(self.udid, settings, slides, offered, self.stop)
+            .prepare_hierarchy_comment(
+                self.udid,
+                settings,
+                slides,
+                offered,
+                self.stop,
+                self.session,
+                self.package,
+            )
             .await
     }
 
@@ -3619,6 +3627,13 @@ async fn wait_for_action_gap(
     }
     *last_action_at = Some(Instant::now());
     true
+}
+
+fn video_progress_message(status: &NurtureSessionStatus) -> String {
+    format!(
+        "{}/{} video, {} lượt vuốt",
+        status.videos_done, status.video_target, status.swipe_attempts
+    )
 }
 
 #[cfg(test)]
@@ -3841,7 +3856,8 @@ mod tests {
             .expect("session failure is a typed terminal status");
 
         assert_eq!(driver.session_calls.load(Ordering::Relaxed), 2);
-        assert_eq!(driver.terminate_calls.load(Ordering::Relaxed), 1);
+        // Two attempts each stop before opening and after failure, then final cleanup proves absence.
+        assert_eq!(driver.terminate_calls.load(Ordering::Relaxed), 5);
         assert_eq!(
             final_status.cleanup_state,
             NurtureCleanupState::ProcessAbsent
@@ -3975,6 +3991,19 @@ mod tests {
         assert_eq!(Outcome::Partial.as_str(), "partial");
         assert_eq!(Outcome::Done.as_str(), "done");
         assert_eq!(Outcome::Stopped.as_str(), "stopped");
+    }
+
+    #[test]
+    fn video_progress_keeps_the_original_target_when_stopped_or_swipes_fail() {
+        let mut status = NurtureSessionStatus {
+            videos_done: 1,
+            swipe_attempts: 1,
+            video_target: 500,
+            ..Default::default()
+        };
+        assert_eq!(video_progress_message(&status), "1/500 video, 1 lượt vuốt");
+        status.swipe_attempts = 3;
+        assert_eq!(video_progress_message(&status), "1/500 video, 3 lượt vuốt");
     }
 
     #[test]

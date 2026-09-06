@@ -13,7 +13,10 @@ import {
   installIpa,
   viewInjectTouch,
   viewRequestKeyframe,
+  setScreenRotation,
 } from "../api";
+import { Smartphone } from "lucide-react";
+import { describeError } from "../describeError";
 import { createLiveDragGroup, liveTap, type LiveDragGroup } from "../liveDrag";
 
 import { InstalledApps } from "./InstalledApps";
@@ -61,6 +64,7 @@ import {
 } from "./Icons";
 import { withoutMenuIds, type DeviceMenuNode } from "../deviceMenu";
 import { DeviceFunctionList } from "./DeviceFunctionList";
+import { focusLayout } from "./focus/focusLayout";
 
 interface Props {
   device: DeviceInfo;
@@ -113,11 +117,19 @@ export function FocusStream({
   const hasView = useViewLive(device.udid);
   const viewSize = useViewSize(device.udid);
   const [busy, setBusy] = useState(false);
+  const [rotationMessage, setRotationMessage] = useState<string | null>(null);
+  useEffect(() => setRotationMessage(null), [device.udid]);
   const [showAdb, setShowAdb] = useState(false);
   const [showDevices, setShowDevices] = useState(false);
   const [showPhrases, setShowPhrases] = useState(false);
   const [showKeyboards, setShowKeyboards] = useState(false);
   const [frameWidth, setFrameWidth] = useState(() => loadZoom(FOCUS_ZOOM));
+  const [viewport, setViewport] = useState(() => ({ width: window.innerWidth, height: window.innerHeight }));
+  useEffect(() => {
+    const resized = () => setViewport({ width: window.innerWidth, height: window.innerHeight });
+    window.addEventListener("resize", resized);
+    return () => window.removeEventListener("resize", resized);
+  }, []);
   const screenRef = useRef<HTMLDivElement>(null);
   /// The drag in progress: where it started, every sample since, and when the last one was
   /// taken. Held in a ref rather than state because a pointer fires far too often to
@@ -182,7 +194,14 @@ export function FocusStream({
   const encodedW = viewSize?.width && viewSize.width > 0 ? viewSize.width : 0;
   const encodedH =
     viewSize?.height && viewSize.height > 0 ? viewSize.height : 0;
-  const aspect = encodedW > 0 && encodedH > 0 ? encodedH / encodedW : 2;
+  const layout = focusLayout(encodedW, encodedH, frameWidth, viewport.width, viewport.height);
+  useEffect(() => () => {
+    // Never finish a gesture using coordinates from a newer orientation/generation.
+    const held = drag.current;
+    drag.current = null;
+    const last = held?.steps.at(-1) ?? held?.start;
+    if (held?.live && last) void held.live.end(last.x, last.y);
+  }, [device.udid, encodedW, encodedH, viewSize?.generation]);
   const decodeFailed = useViewDecodeFailed(device.udid);
   const placeholder = streamPlaceholder({
     hasView,
@@ -700,9 +719,7 @@ export function FocusStream({
       aria-label={`Điều khiển ${device.name}`}
       onClick={onClose}
     >
-      <div className="focus-stage" onClick={(event) => event.stopPropagation()}>
-        {/* Exact pixel size from the wheel zoom — never shrink-to-fit the
-            viewport, or zooming in looks like it did nothing. */}
+      <div className={`focus-stage${layout.stacked ? " is-stacked" : ""}${layout.landscape ? " is-landscape" : ""}`} onClick={(event) => event.stopPropagation()}>
         <div
           ref={screenRef}
           className={`focus-phone-screen${busy ? " is-busy" : ""}`}
@@ -710,7 +727,7 @@ export function FocusStream({
           // restyle is about to change a lot of them; a test that breaks because a colour
           // moved is a test that stops meaning anything.
           data-testid="focus-screen"
-          style={{ width: frameWidth, height: frameWidth * aspect }}
+          style={{ width: layout.screenWidth, height: layout.screenHeight }}
           title="Ctrl + lăn chuột để phóng to / thu nhỏ"
           onPointerDown={(e) => {
             if (busy || inFlight.current || e.button !== 0) return;
@@ -885,21 +902,14 @@ export function FocusStream({
             }}
           />
         </div>
-        {/* Exactly as tall as the phone picture beside it, and that is the whole fix for a
-            visible bug: `.focus-stage` is a flex row that stretches to its **tallest** child,
-            so a panel taller than the picture grew the stage and left a band of white under
-            the phone. Pinning the height here (the same `frameWidth * aspect` the pane uses)
-            makes the picture the reference and the panel scroll inside it. The CSS
-            `max-height` stays as the cap for a very large zoom, where the picture is the
-            taller one again and there is no gap either way. */}
         <aside
           className="focus-menu"
           aria-label="Chức năng thiết bị"
-          style={{ height: frameWidth * aspect }}
+          style={{ height: layout.menuHeight }}
         >
           <header className="focus-menu-head">
-            <strong title={device.udid}>
-              {index} {device.name}
+            <strong title={`Máy ${index} · ${device.name} (${device.udid})`}>
+              Máy {index} · {device.name}
             </strong>
             {groupMode && targets.length > 1 && (
               <span
@@ -924,6 +934,15 @@ export function FocusStream({
               <IconBattery size={13} />
               {device.battery == null ? "—" : `${device.battery}%`}
             </span>
+            {!isIos && <button type="button" className="ghost" disabled={busy}
+              title="Đưa về màn hình dọc" aria-label="Đưa về màn hình dọc"
+              onClick={() => void runBusy(async () => {
+                setRotationMessage(null);
+                try {
+                  const observed = await setScreenRotation(device.udid, 0);
+                  setRotationMessage(observed === 0 ? "Máy đã về hướng dọc." : "Máy chưa về hướng dọc. Kiểm tra ứng dụng đang mở.");
+                } catch (error) { setRotationMessage(`Chưa đổi được hướng: ${describeError(error)}`); }
+              })}><Smartphone size={14} /></button>}
             <button
               type="button"
               className="ghost"
@@ -943,6 +962,7 @@ export function FocusStream({
               <IconClose size={14} />
             </button>
           </header>
+          {rotationMessage && <p className="focus-rotation-status" role="status">{rotationMessage}</p>}
           {/* Why every row is greyed out. `disabled={busy}` alone is silent, and a row that
               cannot be clicked and does not say why reads exactly like a row that does
               nothing — which is how three working rows came to be reported as broken. */}

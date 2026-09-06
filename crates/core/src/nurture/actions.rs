@@ -1526,32 +1526,43 @@ impl NurtureEngine {
         })
     }
 
-    /// Frames for grounding a comment, without the iPhone pixel gate.
-    ///
-    /// [`Self::collect_comment_frames`] rejects anything `screen::feed_ready`
-    /// dislikes, and that detector is calibrated for one iPhone 8 layout — on an
-    /// Android frame it would reject every sample and the comment would always come
-    /// out as "context unavailable". The hierarchy loop has already established
-    /// that the feed tab and the action rail are on screen, which is *stronger*
-    /// evidence than a pixel heuristic, so the gate is not merely skipped here, it
-    /// is replaced.
+    /// Fresh Android frame samples with author/caption proof around each capture.
+    /// The window spans twelve seconds, not the whole video; no playback position
+    /// or speech is inferred from the elapsed capture clock.
     pub(super) async fn collect_grounding_frames(
         &self,
         udid: &str,
         stop: &AtomicBool,
-    ) -> Option<Vec<Vec<u8>>> {
-        let mut frames = Vec::with_capacity(3);
-        for sample in 0..3 {
-            if stop.load(std::sync::atomic::Ordering::Relaxed) {
-                return None;
-            }
-            let frame = self.frames.latest(udid)?;
-            frames.push((*frame).clone());
-            if sample < 2 {
-                sleep_interruptible(Duration::from_millis(600), stop).await;
+        session: &dyn UiSession,
+        package: &str,
+    ) -> anyhow::Result<crate::video_evidence::VideoEvidence> {
+        struct FreshCamera<'a> {
+            frames: &'a dyn crate::FrameSource,
+            udid: &'a str,
+        }
+        #[async_trait::async_trait]
+        impl crate::interaction_hierarchy::SlideCamera for FreshCamera<'_> {
+            async fn capture(&self) -> Option<Vec<u8>> {
+                let mut stream = self.frames.subscribe(self.udid);
+                let frame = tokio::time::timeout(Duration::from_secs(3), stream.next())
+                    .await
+                    .ok()??;
+                Some((*frame).clone())
             }
         }
-        (!frames.is_empty()).then_some(frames)
+        let camera = FreshCamera {
+            frames: self.frames.as_ref(),
+            udid,
+        };
+        crate::video_evidence::collect_video_evidence(
+            session,
+            &camera,
+            package,
+            Duration::from_secs(12),
+            4,
+            stop,
+        )
+        .await
     }
 
     /// Generate one grounded comment and record its attempt row.
@@ -1560,6 +1571,7 @@ impl NurtureEngine {
     /// the provider has it, OCR caption otherwise — so the two backends do not
     /// develop separate voices or separate audit trails. Only the frame gate
     /// differs, for the reason on [`Self::collect_grounding_frames`].
+    #[allow(clippy::too_many_arguments)]
     pub(super) async fn prepare_hierarchy_comment(
         &self,
         udid: &str,
@@ -1571,6 +1583,8 @@ impl NurtureEngine {
         slides: Vec<Vec<u8>>,
         slides_offered: u32,
         stop: &AtomicBool,
+        session: &dyn UiSession,
+        package: &str,
     ) -> Result<Option<super::hierarchy::PreparedComment>, super::hierarchy::CommentSourceError>
     {
         if settings.api_key.trim().is_empty() {
@@ -1595,8 +1609,7 @@ impl NurtureEngine {
         // taken 600 ms apart of image one. On a still card those three samples are one
         // picture, so a six-image post was commented on from one sixth of itself.
         //
-        // Falling back to sampling here is not a lesser path — it is what every video post
-        // still does, unchanged.
+        // Videos use a bounded fresh-frame window; carousel frames retain their slide semantics.
         // Read before `slides` is moved: what the pictures *are* decides what the model may
         // say about them, and once the two sources have been folded into one `frames` they are
         // indistinguishable. Sampling produces moments of one card; the traversal produces
@@ -1606,15 +1619,24 @@ impl NurtureEngine {
         } else {
             EvidenceKind::CarouselSlides
         };
+        let mut observed_span = None;
         let frames = if slides.is_empty() {
-            match self.collect_grounding_frames(udid, stop).await {
-                Some(frames) => frames,
-                None => {
+            match self
+                .collect_grounding_frames(udid, stop, session, package)
+                .await
+            {
+                Ok(evidence) => {
+                    observed_span = Some(crate::openai_client::PostCoverage::VideoWindow {
+                        span_secs: evidence.span_ms() / 1000,
+                    });
+                    evidence.frames()
+                }
+                Err(error) => {
                     self.record_context_skip_attempt(
                         udid,
                         settings,
                         context_source(settings),
-                        "evidence_unavailable",
+                        &format!("evidence_unavailable: {error}"),
                         slides_offered,
                         None,
                     );
@@ -1634,7 +1656,10 @@ impl NurtureEngine {
                 &frames,
                 kind,
                 direction.as_deref(),
-                Default::default(),
+                crate::openai_client::PostBrief {
+                    coverage: observed_span,
+                    ..Default::default()
+                },
             )
             .await
         } else {

@@ -123,6 +123,7 @@ describe("automation profile config v1", () => {
       captionOverrides: { "bo-1": "Caption" },
       soundPolicy: { kind: "trendingAny", poolSize: 5, seed: 42 },
       executionConfirmed: true,
+      sheetEnabled: true,
     });
   });
 });

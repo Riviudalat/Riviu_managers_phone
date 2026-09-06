@@ -13,17 +13,18 @@
 .focus-stage {
   display: flex;
   flex-direction: row;
-  align-items: stretch;
+  align-items: center;
   margin: auto;
-  background: var(--bg-elevated);
+  background: var(--bg-stage);
   /* Brand, not blue — see `--link` in index.css. */
   border: 1px solid var(--primary);
   border-radius: 4px;
   overflow: hidden;
   box-shadow: 0 28px 80px rgb(0 0 0 / 45%);
 }
-/* Exact width/height come from the inline style (wheel zoom). Do not
-   max-height the pane to the viewport — that made zoom-in look like a no-op. */
+.focus-stage.is-stacked { flex-direction: column; }
+.focus-stage.is-stacked .focus-menu { width: 100%; }
+/* Geometry follows the decoded frame, with the short-edge zoom bounded by the viewport. */
 .focus-phone-screen {
   position: relative;
   display: flex;
@@ -64,25 +65,17 @@
 }
 .focus-menu {
   width: 220px;
+  flex-shrink: 0;
   display: flex;
   flex-direction: column;
   background: var(--bg-elevated);
   min-height: 0;
-  /* The column's height must be *definite*, or `flex: 1` + `overflow-y: auto` on the row list
-     below constrains nothing and the aside simply grows: `.focus-stage` is a flex row that
-     stretches to its tallest child, so a long menu first pushed the app/keyboard panels off
-     the bottom of the screen, and then — once it was allowed to reach the viewport — grew the
-     stage past the picture and left a band of white under the phone.
-
-     The definite height comes from the component: the same `frameWidth * aspect` the phone
-     pane uses, set inline, so the picture is always the reference. This stays as the cap for a
-     very large zoom, where the picture is the taller one again. `100vh - 24px` is the
-     overlay's own padding box (12px a side). The phone pane keeps its exact zoom size, which
-     AGENTS.md §9.57 and the note above `.focus-phone-screen` both require. */
+  /* Definite height keeps the menu's own scroll region usable after rotation. */
   max-height: calc(100vh - 24px);
 }
 .focus-menu-head {
-  display: flex;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) repeat(3, 26px);
   align-items: center;
   gap: 4px;
   padding: 8px 8px 8px 12px;
@@ -90,7 +83,9 @@
   border-bottom: 1px solid var(--primary-ring);
   flex-shrink: 0;
 }
+.focus-rotation-status { margin: 0; padding: 8px 12px; font-size: var(--text-sm); overflow-wrap: anywhere; }
 .focus-menu-head strong {
+  grid-column: 1 / -2;
   flex: 1;
   min-width: 0;
   font-size: var(--text-md);
@@ -100,6 +95,10 @@
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.focus-menu-head > .close { grid-column: 4; grid-row: 1; }
+.focus-menu-head > .focus-menu-battery { grid-column: 1; grid-row: 2; }
+.focus-menu-head > button.ghost { grid-row: 2; }
+.focus-menu-head > .focus-menu-group { grid-column: 1 / -1; }
 .focus-menu-group {
   flex-shrink: 0;
   font-size: var(--text-xs);

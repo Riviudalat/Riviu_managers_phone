@@ -8,6 +8,65 @@ import {
 } from "./interactionErrors";
 
 describe("interactionErrorVi", () => {
+  it.each([
+    "target_post_unavailable",
+    "like_action_stopped: target re-proof before Like failed: target_exact_open: exact post proof failed: target_post_unavailable: TikTok reported 'This video is unavailable'",
+  ])("names TikTok's unavailable response without inferring deletion or an account block: %s", (raw) => {
+    const result = interactionErrorVi(raw);
+    expect(result.title).toBe("TikTok báo bài không khả dụng trên máy này");
+    expect(result.detail).toContain("chưa xác định bài đã bị xóa hay tài khoản bị chặn");
+    expect(result.detail).toContain("đúng tài khoản trên máy đó");
+    if (raw.includes("This video")) expect(result.detail).toContain("TikTok reported 'This video is unavailable'");
+    expect(result.raw).toBe(raw);
+  });
+
+  it.each([
+    "target_package_unreadable",
+    "target_exact_open: target_package_unreadable: cmd: Can't find service: package",
+  ])("distinguishes unreadable Android package services from an uninstalled app: %s", (raw) => {
+    const result = interactionErrorVi(raw);
+    expect(result.title).toBe("Chưa đọc được ứng dụng TikTok trên máy");
+    expect(result.detail).toContain("dịch vụ hệ thống Android");
+    expect(result.detail).toContain("không có nghĩa TikTok chưa được cài");
+    if (raw.includes("Can't find service")) expect(result.detail).toContain("Can't find service: package");
+    expect(result.raw).toBe(raw);
+  });
+
+  it("keeps expected and observed links in the exact-target mismatch diagnostic", () => {
+    const expected = "https://www.tiktok.com/@fixture.expected/photo/111";
+    const observed = "https://www.tiktok.com/@fixture.other/video/222";
+    const raw = `like_action_stopped: target re-proof before Like failed: target_exact_open: exact post proof failed: target_link_proof: copied link belongs to a different post; expected=${expected}; observed=${observed}`;
+    const result = interactionErrorVi(raw);
+    expect(result.title).toBe("Chưa xác minh được đúng bài bằng liên kết");
+    expect(result.title).not.toContain("https://");
+    expect(result.detail).toContain(`expected=${expected}; observed=${observed}`);
+    expect(result.detail).toContain("copied link belongs to a different post");
+    expect(result.raw).toBe(raw);
+  });
+
+  it.each([
+    "foreground: chưa đọc được ứng dụng đang mở",
+    "Comments: measured control missing or unreadable",
+    "author: label missing or unreadable",
+    "caption: measured identity missing, empty, ambiguous or unreadable",
+  ])("retains the exact-open measurement failure in details: %s", (cause) => {
+    const raw = `target_exact_open: no readable post in the target app within 14 seconds; last check: ${cause}`;
+    const result = interactionErrorVi(raw);
+    expect(result.title).toBe("Chưa mở và xác minh được đúng bài");
+    expect(result.detail).toContain(cause);
+    expect(result.raw).toBe(raw);
+  });
+
+  it("renders actual campaign totals instead of claiming the failure is unknown", () => {
+    const raw = "xong 11, lỗi 9, còn dở 0";
+    expect(interactionErrorVi(raw)).toEqual({ title: "11 lượt hoàn tất, 9 lượt lỗi, 0 lượt chưa xong", raw });
+    expect(interactionErrorVi("Like không an toàn để tiếp tục assignment").title).toContain("bước Tim");
+  });
+  it("preserves the precise proof cause when the assignment stops before Like", () => {
+    expect(interactionErrorVi("like_action_stopped: target re-proof before Like failed: target_open_no_baseline: tác giả chưa đọc được").title).toBe("Không đọc được bài đang mở trước đó");
+    expect(interactionErrorVi("target_exact_open: link mismatch").title).toBe("Chưa mở và xác minh được đúng bài");
+    expect(interactionErrorVi("skipped_after_assignment_stopped: Like đã dừng").title).toBe("Chưa thực hiện vì lượt trên máy đã dừng");
+  });
   it("names a hierarchy refusal and keeps the engine's own sentence as the detail", () => {
     // The engine stores these as `code: câu tiếng Việt`, and that sentence was written next
     // to the measurement it describes — re-translating it here would only make it worse.

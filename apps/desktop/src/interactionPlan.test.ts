@@ -66,6 +66,12 @@ describe("requestShapeOf", () => {
 });
 
 describe("effectiveMessageCount", () => {
+  it("plans one standalone comment for one selected phone", () => {
+    const single = draft({ threadKind: "standalone", textSource: "manual", manualText: "Bài thử tương tác" });
+    expect(effectiveMessageCount(single, 1)).toBe(1);
+    expect(validateDraft(single, context({ actorUdids: ["a"], largestCohort: 1 }))).toEqual([]);
+    expect(buildRequest(single, buildContext({ actorUdids: ["a"], largestCohort: 1 })).messageCount).toBe(1);
+  });
   it("follows the biggest cohort while it is on auto", () => {
     // The old literal default of 2 against a pre-selected fourteen-phone fleet made the form
     // invalid the moment it opened.

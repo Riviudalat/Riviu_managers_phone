@@ -196,6 +196,29 @@ pub fn operation_get_run(
     read_operation_run(&state, &operation_id)
 }
 
+#[tauri::command]
+pub fn operation_device_log(
+    state: State<'_, AppState>,
+    operation_id: String,
+    udid: String,
+) -> Result<riviu_core::OperationDeviceLog, CommandError> {
+    let detail = read_operation_run(&state, &operation_id)?
+        .ok_or_else(|| CommandError::invalid_argument("operation no longer exists"))?;
+    if !detail
+        .items
+        .iter()
+        .any(|item| item.udid.as_deref() == Some(&udid))
+    {
+        return Err(CommandError::invalid_argument(
+            "device does not belong to this operation",
+        ));
+    }
+    state
+        .db
+        .operation_device_log(detail.summary.kind, &detail.summary.source_id, &udid)
+        .map_err(err)
+}
+
 fn read_operation_run(
     state: &AppState,
     operation_id: &str,

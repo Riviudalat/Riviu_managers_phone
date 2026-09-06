@@ -653,6 +653,7 @@ impl ProductionOrchestrationPort {
             managed.push(copied);
         }
         let campaign = PublishCampaignRequest {
+            sheet_enabled: config.sheet_enabled,
             request_id: request.idempotency_key.clone(),
             source_root: config.source_root,
             bundle_ids: managed.iter().map(|bundle| bundle.id.clone()).collect(),

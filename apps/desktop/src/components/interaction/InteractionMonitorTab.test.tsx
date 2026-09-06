@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { InteractionMonitorTab } from "./InteractionMonitorTab";
@@ -140,7 +140,153 @@ function renderMasterDetail(openCampaignId: string | null = null, onOpen = vi.fn
   return onOpen;
 }
 
+function selectedCampaign(id: string) {
+  return <InteractionMonitorTab devices={devices} deviceNumber={deviceNumber} handles={{}}
+    openCampaignId={id} onOpenCampaign={() => {}} masterDetail />;
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (error: Error) => void;
+  const promise = new Promise<T>((accept, decline) => { resolve = accept; reject = decline; });
+  return { promise, resolve, reject };
+}
+
+const nextDetail = {
+  ...detail,
+  summary: { ...summary, id: "campaign-2", state: "running", brief: { ...summary.brief, firstAuthor: "new.author" } },
+  assignments: [{ ...detail.assignments[0], id: "b1", state: "queued", preparedText: "nội dung chiến dịch mới" }],
+};
+
 describe("InteractionMonitorTab", () => {
+  it("marks the exact selected campaign and hides old actions while a new campaign loads", async () => {
+    const api = await import("../../api");
+    const pending = deferred<Awaited<ReturnType<typeof api.interactionGet>>>();
+    vi.mocked(api.interactionList).mockResolvedValue([summary, nextDetail.summary] as never);
+    vi.mocked(api.interactionGet).mockResolvedValueOnce(detail as never).mockReturnValueOnce(pending.promise);
+    const { rerender } = render(selectedCampaign("campaign-1"));
+    await screen.findByText("gốc của cụm một");
+
+    rerender(selectedCampaign("campaign-2"));
+    expect(screen.getByText("Đang mở chiến dịch…")).toBeVisible();
+    expect(screen.queryByText("gốc của cụm một")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Thử lại phần hỏng" })).toBeNull();
+    expect(screen.getByRole("button", { current: true })).toHaveTextContent("@new.author");
+    await act(async () => { pending.resolve(nextDetail as never); });
+    expect(screen.getByText("nội dung chiến dịch mới")).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "Dừng" }));
+    await waitFor(() => expect(api.interactionCancel).toHaveBeenCalledWith("campaign-2"));
+    expect(api.interactionRetry).not.toHaveBeenCalled();
+  });
+
+  it("rejects a detail response for a different campaign before loading its evidence", async () => {
+    const api = await import("../../api");
+    vi.mocked(api.interactionGet).mockResolvedValueOnce(detail as never);
+    renderMasterDetail("campaign-2");
+    expect(await screen.findByRole("alert")).toHaveTextContent("Dữ liệu trả về không khớp chiến dịch đang chọn.");
+    expect(screen.queryByText("gốc của cụm một")).toBeNull();
+    expect(api.interactionListArtifacts).not.toHaveBeenCalled();
+    expect(api.interactionListTargetNotes).not.toHaveBeenCalled();
+  });
+
+  it.each(["loaded", "pending"])("does not carry a %s evidence image into another campaign", async (state) => {
+    const api = await import("../../api");
+    const pending = deferred<Awaited<ReturnType<typeof api.interactionReadArtifact>>>();
+    const image = { id: "art-1", kind: "comment-root-evidence", mimeType: "image/jpeg", base64: "AAAA" };
+    vi.mocked(api.interactionGet).mockResolvedValueOnce(detail as never).mockResolvedValueOnce(nextDetail as never);
+    vi.mocked(api.interactionListArtifacts).mockResolvedValueOnce([
+      { id: "art-1", assignmentId: "a1", relativePath: "a1.jpg" },
+    ] as never).mockResolvedValueOnce([]);
+    vi.mocked(api.interactionReadArtifact).mockReturnValueOnce(pending.promise);
+    const { rerender } = render(selectedCampaign("campaign-1"));
+    fireEvent.click(await screen.findByRole("button", { name: "Ảnh" }));
+    if (state === "loaded") {
+      await act(async () => { pending.resolve(image); });
+      expect(screen.getByRole("img", { name: "Ảnh màn hình khay bình luận" })).toBeVisible();
+    }
+    rerender(selectedCampaign("campaign-2"));
+    await screen.findByText("nội dung chiến dịch mới");
+    if (state === "pending") await act(async () => { pending.resolve(image); });
+    expect(screen.queryByRole("img", { name: "Ảnh màn hình khay bình luận" })).toBeNull();
+    expect(screen.getByRole("button", { name: "Dừng" })).toBeEnabled();
+  });
+
+  it("does not let an old retry invalidate the new campaign's pending detail request", async () => {
+    const api = await import("../../api");
+    const oldRetry = deferred<void>();
+    const newDetail = deferred<Awaited<ReturnType<typeof api.interactionGet>>>();
+    vi.mocked(api.interactionGet).mockResolvedValueOnce(detail as never).mockReturnValueOnce(newDetail.promise);
+    vi.mocked(api.interactionRetry).mockReturnValueOnce(oldRetry.promise);
+    const { rerender } = render(selectedCampaign("campaign-1"));
+    fireEvent.click(await screen.findByRole("button", { name: "Thử lại phần hỏng" }));
+    rerender(selectedCampaign("campaign-2"));
+    await act(async () => { oldRetry.resolve(); });
+    expect(vi.mocked(api.interactionGet).mock.calls).toEqual([["campaign-1"], ["campaign-2"]]);
+    await act(async () => { newDetail.resolve(nextDetail as never); });
+    expect(screen.getByText("nội dung chiến dịch mới")).toBeVisible();
+  });
+
+  it("does not show an old action error on the newly selected campaign", async () => {
+    const api = await import("../../api");
+    const oldRetry = deferred<void>();
+    vi.mocked(api.interactionGet).mockResolvedValueOnce(detail as never).mockResolvedValueOnce(nextDetail as never);
+    vi.mocked(api.interactionRetry).mockReturnValueOnce(oldRetry.promise);
+    const { rerender } = render(selectedCampaign("campaign-1"));
+    fireEvent.click(await screen.findByRole("button", { name: "Thử lại phần hỏng" }));
+    rerender(selectedCampaign("campaign-2"));
+    await screen.findByText("nội dung chiến dịch mới");
+    await act(async () => { oldRetry.reject(new Error("old campaign retry failed")); });
+    expect(screen.queryByText("old campaign retry failed")).toBeNull();
+    expect(screen.getByRole("button", { name: "Dừng" })).toBeEnabled();
+  });
+
+  it("does not continue evidence reads after the selected view unmounts", async () => {
+    const api = await import("../../api");
+    const pending = deferred<Awaited<ReturnType<typeof api.interactionGet>>>();
+    vi.mocked(api.interactionGet).mockReturnValueOnce(pending.promise);
+    const { unmount } = render(selectedCampaign("campaign-1"));
+    await waitFor(() => expect(listeners).toHaveLength(1));
+    unmount();
+    await act(async () => { pending.resolve(detail as never); });
+    expect(api.interactionListArtifacts).not.toHaveBeenCalled();
+    expect(api.interactionListTargetNotes).not.toHaveBeenCalled();
+    expect(listeners).toHaveLength(0);
+  });
+
+  it("does not reload the campaign list when an old action finishes after unmount", async () => {
+    const api = await import("../../api");
+    const oldRetry = deferred<void>();
+    vi.mocked(api.interactionGet).mockResolvedValueOnce(detail as never);
+    vi.mocked(api.interactionRetry).mockReturnValueOnce(oldRetry.promise);
+    const { unmount } = render(selectedCampaign("campaign-1"));
+    fireEvent.click(await screen.findByRole("button", { name: "Thử lại phần hỏng" }));
+    unmount();
+    await act(async () => { oldRetry.resolve(); });
+    expect(api.interactionGet).toHaveBeenCalledTimes(1);
+    expect(api.interactionList).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps the campaign visible when evidence loading fails and retries its evidence", async () => {
+    const api = await import("../../api");
+    vi.mocked(api.interactionGet).mockResolvedValue(detail as never);
+    vi.mocked(api.interactionListArtifacts).mockRejectedValueOnce(new Error("evidence offline"));
+    renderMasterDetail("campaign-1");
+    expect(await screen.findByText("Ảnh bằng chứng: evidence offline")).toBeVisible();
+    expect(screen.getByText("gốc của cụm một")).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "Tải lại bằng chứng" }));
+    await waitFor(() => expect(screen.queryByText("Ảnh bằng chứng: evidence offline")).toBeNull());
+  });
+
+  it("labels unreadable no-ops as warnings and uses the operator alias", async () => {
+    const api = await import("../../api");
+    vi.mocked(api.interactionGet).mockResolvedValue({ ...detail, assignments: [{ ...detail.assignments[0],
+      actions: [{ kind: "save", state: "noOp", revision: 1, evidence: JSON.stringify({ verdict: "stateUnreadable" }) }],
+    }] } as never);
+    render(<InteractionMonitorTab devices={devices} deviceNumber={deviceNumber} deviceLabel={new Map([["android-0", "Máy Đà Lạt"]])}
+      handles={{}} openCampaignId="campaign-1" onOpenCampaign={() => {}} masterDetail />);
+    expect(await screen.findByText("Lưu · Bỏ qua: chưa đọc được trạng thái")).toHaveClass("warn");
+    expect(screen.getByText("7 · Máy Đà Lạt")).toBeVisible();
+  });
   it.each([
     ["missing", null, "Chiến dịch không còn trong dữ liệu."],
     ["rejected", new Error("database read failed"), "database read failed"],
@@ -157,7 +303,7 @@ describe("InteractionMonitorTab", () => {
     expect(await screen.findByRole("alert")).toHaveTextContent(message);
     expect(screen.queryByText("Đang mở chiến dịch…")).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "Thử lại" }));
-    expect(await screen.findByText("link 111")).toBeVisible();
+    expect(await screen.findByText("Bài 1")).toBeVisible();
   });
 
   it("keeps the newest campaign-list response when an older request finishes later", async () => {
@@ -230,7 +376,7 @@ describe("InteractionMonitorTab", () => {
     expect(await screen.findByRole("region", { name: "Danh sách chiến dịch" })).toBeVisible();
     expect(screen.getByRole("complementary", { name: "Chi tiết chiến dịch" })).toBeVisible();
     expect(await screen.findByText("@.lt.gi.mang.v +1 link")).toBeVisible();
-    expect(await screen.findByText("link 111")).toBeVisible();
+    expect(await screen.findByText("Bài 1")).toBeVisible();
   });
 
   it("distinguishes loading, load failure with retry, and a genuinely empty list", async () => {
@@ -275,8 +421,8 @@ describe("InteractionMonitorTab", () => {
     vi.mocked(api.interactionGet).mockResolvedValue(detail as never);
     renderTab("campaign-1");
 
-    expect(await screen.findByText("link 111")).toBeVisible();
-    expect(screen.getByText("link 222")).toBeVisible();
+    expect(await screen.findByText("Bài 1")).toBeVisible();
+    expect(screen.getByText("Bài 2")).toBeVisible();
     expect(screen.getByText("2/2 lượt")).toBeVisible();
     expect(screen.getByText("0/1 lượt")).toBeVisible();
     expect(screen.getByText("không tim được: nhãn nút tim chưa đo")).toBeVisible();
@@ -340,7 +486,7 @@ describe("InteractionMonitorTab", () => {
       ],
     } as never);
     renderTab("campaign-1");
-    await screen.findByText("link 222");
+    await screen.findByText("Bài 1");
     expect(screen.queryByRole("button", { name: "Thử lại" })).toBeNull();
   });
 

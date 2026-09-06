@@ -726,6 +726,52 @@ fn parse_available_storage_bytes(output: &str) -> anyhow::Result<u64> {
         .ok_or_else(|| anyhow::anyhow!("adb df available storage overflowed bytes"))
 }
 
+fn checked_tiktok_package_listing(output: &adb::ShellOutput) -> anyhow::Result<String> {
+    anyhow::ensure!(
+        output.exit_code == 0 && output.stderr.trim().is_empty(),
+        "pm list packages exit {}: stdout={:?}; stderr={:?}",
+        output.exit_code,
+        output.stdout.trim(),
+        output.stderr.trim()
+    );
+    let mut listing = String::new();
+    for line in output
+        .stdout
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+    {
+        let package = line
+            .strip_prefix("package:")
+            .ok_or_else(|| anyhow!("unexpected package listing line: {line:?}"))?;
+        adb::validate_package_name(package)
+            .with_context(|| format!("invalid package listing line: {line:?}"))?;
+        listing.push_str(line);
+        listing.push('\n');
+    }
+    Ok(listing)
+}
+
+fn complete_tiktok_package_listing(
+    udid: &str,
+    readings: impl IntoIterator<Item = (&'static str, anyhow::Result<adb::ShellOutput>)>,
+) -> anyhow::Result<String> {
+    let mut listing = String::new();
+    let mut failures = Vec::new();
+    for (candidate, reading) in readings {
+        match reading.and_then(|output| checked_tiktok_package_listing(&output)) {
+            Ok(stdout) => listing.push_str(&stdout),
+            Err(error) => failures.push(format!("{candidate}: {error:#}")),
+        }
+    }
+    anyhow::ensure!(
+        failures.is_empty(),
+        "target_package_unreadable: {udid}: {}",
+        failures.join("; ")
+    );
+    Ok(listing)
+}
+
 pub struct AndroidDriver {
     adb: AdbProgram,
     adb_origin: adb::AdbOrigin,
@@ -1690,20 +1736,33 @@ impl DeviceDriver for AndroidDriver {
         bundle_id: &str,
     ) -> anyhow::Result<ProcessAbsenceProof> {
         let bundle_id = adb::validate_package_name(bundle_id)?;
-        let before = self.pid_of(udid, bundle_id).await;
-        self.adb
-            .shell(udid, &format!("am force-stop {bundle_id}"))
-            .await?;
-        let after = self.pid_of(udid, bundle_id).await;
-        if let Some(pid) = after {
-            return Err(anyhow!(
-                "{bundle_id} is still running (pid {pid}) after force-stop"
-            ));
+        let before = self.pid_of(udid, bundle_id).await?;
+        // SM-G955F Android9, 07/09/2026: an in-flight activity launch respawned PID336
+        // as PID363 after the first stop. Repeat this idempotent stop at most once;
+        // never launch during cleanup, and propagate unreadable PID results.
+        for attempt in 0..2 {
+            self.adb
+                .shell(udid, &format!("am force-stop {bundle_id}"))
+                .await?;
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+            loop {
+                let Some(pid) = self.pid_of(udid, bundle_id).await? else {
+                    return Ok(ProcessAbsenceProof {
+                        bundle_id: bundle_id.to_string(),
+                        old_pid: before,
+                    });
+                };
+                if tokio::time::Instant::now() >= deadline {
+                    anyhow::ensure!(
+                        attempt == 0,
+                        "{bundle_id} is still running (pid {pid}) after force-stop"
+                    );
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
         }
-        Ok(ProcessAbsenceProof {
-            bundle_id: bundle_id.to_string(),
-            old_pid: before,
-        })
+        unreachable!("last attempt returns proof or error")
     }
 
     fn supports_verified_app_termination(&self, _udid: &str) -> bool {
@@ -2053,18 +2112,25 @@ impl DeviceDriver for AndroidDriver {
         if let Some(known) = self.tiktok_packages.lock().get(udid) {
             return Ok(known.clone());
         }
-        let mut listing = String::new();
+        let mut readings = Vec::new();
+        let mut seen = HashSet::new();
         for candidate in riviu_core::tiktok_target::measured_android_packages() {
             let candidate = adb::validate_package_name(candidate)?;
-            if let Ok(stdout) = self
-                .adb
-                .shell(udid, &format!("pm list packages {candidate}"))
-                .await
-            {
-                listing.push_str(&stdout);
-                listing.push('\n');
+            if !seen.insert(candidate) {
+                continue;
             }
+            let reading = self
+                .adb
+                .shell_output(
+                    udid,
+                    &format!("pm list packages {candidate}"),
+                    adb::DEFAULT_TIMEOUT,
+                )
+                .await;
+            readings.push((candidate, reading));
         }
+        // One unreadable candidate makes both absence and uniqueness unproved.
+        let listing = complete_tiktok_package_listing(udid, readings)?;
         let resolved = match riviu_core::tiktok_target::resolve_installed_android_tiktok(&listing) {
             Ok(package) => package,
             Err(riviu_core::tiktok_target::TargetResolution::Ambiguous(found)) => {
@@ -2106,7 +2172,7 @@ impl DeviceDriver for AndroidDriver {
         bundle_id: &str,
     ) -> anyhow::Result<AppProcessState> {
         let bundle_id = adb::validate_package_name(bundle_id)?;
-        let pid = self.pid_of(udid, bundle_id).await;
+        let pid = self.pid_of(udid, bundle_id).await?;
         Ok(AppProcessState {
             bundle_id: bundle_id.to_string(),
             pid,
@@ -2470,6 +2536,149 @@ pub async fn detect_driver(config: &AndroidDriverConfig) -> Result<Arc<AndroidDr
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn package_reading(stdout: &str, stderr: &str, exit_code: i32) -> adb::ShellOutput {
+        adb::ShellOutput {
+            exit_code,
+            stdout: stdout.into(),
+            stderr: stderr.into(),
+        }
+    }
+
+    #[test]
+    fn tiktok_package_listing_rejects_service_errors_even_with_exit_zero() {
+        for output in [
+            package_reading("", "cmd: Can't find service: package", 1),
+            package_reading("cmd: Can't find service: package\n", "", 0),
+            package_reading("Error: package service unavailable\n", "", 0),
+            package_reading(
+                "package:com.ss.android.ugc.trill\nError: partial result\n",
+                "",
+                0,
+            ),
+            package_reading("package:com.ss.android.ugc.trill\n", "service failure", 0),
+            package_reading("package:com.ss.android.ugc.trill\n", "", 1),
+            package_reading("package:bad package\n", "", 0),
+            package_reading("package:\n", "", 0),
+        ] {
+            assert!(
+                checked_tiktok_package_listing(&output).is_err(),
+                "{output:?}"
+            );
+        }
+        assert_eq!(
+            checked_tiktok_package_listing(&package_reading(
+                "\r\n package:com.ss.android.ugc.trill\r\npackage:com.ss.android.ugc.trill.extra\n",
+                "",
+                0,
+            ))
+            .unwrap(),
+            "package:com.ss.android.ugc.trill\npackage:com.ss.android.ugc.trill.extra\n"
+        );
+        assert_eq!(
+            checked_tiktok_package_listing(&package_reading("\n", "", 0)).unwrap(),
+            ""
+        );
+    }
+
+    #[test]
+    fn tiktok_package_listing_requires_every_candidate_before_resolution() {
+        const TRILL: &str = "com.ss.android.ugc.trill";
+        const MUSICALLY: &str = "com.zhiliaoapp.musically";
+        for failed_candidate in [TRILL, MUSICALLY] {
+            let readings = [TRILL, MUSICALLY].map(|candidate| {
+                let reading = if candidate == failed_candidate {
+                    Err(anyhow!("cmd: Can't find service: package"))
+                } else {
+                    Ok(package_reading(&format!("package:{candidate}\n"), "", 0))
+                };
+                (candidate, reading)
+            });
+            let error = complete_tiktok_package_listing("fixture", readings)
+                .unwrap_err()
+                .to_string();
+            assert!(error.starts_with("target_package_unreadable: fixture:"));
+            assert!(error.contains(failed_candidate));
+            assert!(error.contains("Can't find service: package"));
+        }
+        let error = complete_tiktok_package_listing(
+            "fixture",
+            [
+                (TRILL, Err(anyhow!("transport offline"))),
+                (MUSICALLY, Ok(package_reading("", "service missing", 1))),
+            ],
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains(TRILL) && error.contains("transport offline"));
+        assert!(error.contains(MUSICALLY) && error.contains("service missing"));
+
+        let both = complete_tiktok_package_listing(
+            "fixture",
+            [
+                (
+                    TRILL,
+                    Ok(package_reading(&format!("package:{TRILL}\n"), "", 0)),
+                ),
+                (
+                    MUSICALLY,
+                    Ok(package_reading(&format!("package:{MUSICALLY}\n"), "", 0)),
+                ),
+            ],
+        )
+        .unwrap();
+        assert!(matches!(
+            riviu_core::tiktok_target::resolve_installed_android_tiktok(&both),
+            Err(riviu_core::tiktok_target::TargetResolution::Ambiguous(_))
+        ));
+        let none = complete_tiktok_package_listing(
+            "fixture",
+            [
+                (TRILL, Ok(package_reading("", "", 0))),
+                (MUSICALLY, Ok(package_reading("", "", 0))),
+            ],
+        )
+        .unwrap();
+        assert_eq!(
+            riviu_core::tiktok_target::resolve_installed_android_tiktok(&none),
+            Err(riviu_core::tiktok_target::TargetResolution::NoneInstalled)
+        );
+        let one = complete_tiktok_package_listing(
+            "fixture",
+            [
+                (
+                    TRILL,
+                    Ok(package_reading(&format!("package:{TRILL}\n"), "", 0)),
+                ),
+                (MUSICALLY, Ok(package_reading("", "", 0))),
+            ],
+        )
+        .unwrap();
+        assert_eq!(
+            riviu_core::tiktok_target::resolve_installed_android_tiktok(&one).unwrap(),
+            TRILL
+        );
+    }
+
+    #[test]
+    fn tiktok_package_resolution_checks_complete_readings_before_caching() {
+        let source = include_str!("mod.rs");
+        let start = source.find("async fn resolve_tiktok_package(").unwrap();
+        let body = &source[start..];
+        let body = &body[..body.find("async fn inspect_app_process(").unwrap()];
+        let checked = body
+            .find("complete_tiktok_package_listing(udid, readings)?")
+            .unwrap();
+        let resolved = body
+            .find("resolve_installed_android_tiktok(&listing)")
+            .unwrap();
+        let cached = body
+            .find(".insert(udid.to_string(), resolved.clone())")
+            .unwrap();
+        assert!(checked < resolved && resolved < cached);
+        assert!(body.contains(".shell_output("));
+        assert!(!body.contains("if let Ok(stdout)"));
+    }
 
     use std::sync::atomic::{AtomicU64, Ordering};
 

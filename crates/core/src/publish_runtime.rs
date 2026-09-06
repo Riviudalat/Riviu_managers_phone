@@ -86,6 +86,8 @@ pub enum PublishResumePoint {
 #[derive(Debug, Clone, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PublishExecutionInput {
+    #[serde(default = "crate::publish::default_sheet_enabled")]
+    pub sheet_enabled: bool,
     pub assignment_id: String,
     pub bundle: PublishBundle,
     pub sound_policy: PublishSoundPolicy,
@@ -133,6 +135,8 @@ pub struct PublishExecutionIssue {
 #[derive(Debug, Clone, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PublishPreflightRequest {
+    #[serde(default = "crate::publish::default_sheet_enabled")]
+    pub sheet_enabled: bool,
     pub source_root: String,
     pub bundle_ids: Vec<String>,
     pub udids: Vec<String>,
@@ -184,6 +188,8 @@ pub struct PublishPreflightAssignmentReport {
 #[derive(Debug, Clone, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PublishPreflightReport {
+    #[serde(default = "crate::publish::default_sheet_enabled")]
+    pub sheet_enabled: bool,
     pub input_digest: String,
     pub target_snapshot: crate::ResolvedTargetSnapshot,
     pub can_execute: bool,
@@ -550,6 +556,12 @@ where
     };
     result.canonical_link = Some(canonical_link.clone());
 
+    if !input.sheet_enabled {
+        skip_phase(&mut result, PublishExecutionPhase::Sheet);
+        result.status = PublishExecutionStatus::Complete;
+        result.retry_scope = PublishRetryScope::None;
+        return finish_after_full_if_needed(port, result, &input.resume).await;
+    }
     if let Err(error) = port
         .write_sheet(&input.assignment_id, &canonical_link, &input.bundle)
         .await
@@ -820,6 +832,7 @@ mod tests {
 
     fn input(bundle: PublishBundle) -> PublishExecutionInput {
         PublishExecutionInput {
+            sheet_enabled: true,
             assignment_id: "assignment-1".into(),
             bundle,
             sound_policy: PublishSoundPolicy::TrendingAny {
@@ -831,9 +844,29 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn disabled_sheet_skips_delivery_without_losing_confirmed_link() {
+        let mut request = input(image_bundle());
+        request.sheet_enabled = false;
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let mut port = FakePort::happy(calls.clone());
+        port.sheet_error = Some("must not call webhook".into());
+        let result = run_publish_pipeline(request, &mut port, |_| Ok(())).await;
+        assert_eq!(result.status, PublishExecutionStatus::Complete);
+        assert_eq!(result.retry_scope, PublishRetryScope::None);
+        assert!(result.canonical_link.is_some());
+        assert!(!calls.lock().iter().any(|call| call == "sheet"));
+        assert!(result
+            .phases
+            .iter()
+            .any(|phase| phase.phase == PublishExecutionPhase::Sheet
+                && phase.status == PublishPhaseStatus::Skipped));
+    }
+
     #[test]
     fn preflight_and_snapshot_wire_contracts_are_camel_case_and_typed() {
         let request = PublishPreflightRequest {
+            sheet_enabled: true,
             source_root: "C:/fixture".into(),
             bundle_ids: vec!["bundle-1".into()],
             udids: vec!["phone-1".into()],
@@ -854,6 +887,7 @@ mod tests {
         assert!(request_json.get("runAt").is_none());
 
         let report = PublishPreflightReport {
+            sheet_enabled: true,
             input_digest: "a".repeat(64),
             target_snapshot: crate::resolve_target(
                 &crate::TargetRef::Explicit {

@@ -9,12 +9,27 @@ async function fixture(page: Page, scenario: "interaction" | "publish") {
       __AUTOMATION_CALLS__: { command: string; args: Record<string, unknown> }[];
     };
     const invoke = w.__TAURI_INTERNALS__.invoke;
+    const deviceHandles: Record<string, string> = {};
     w.__AUTOMATION_CALLS__ = [];
     w.__TAURI_INTERNALS__.invoke = async (command, args) => {
       const url = "https://www.tiktok.com/@fixture/video/111";
       const target = { originalUrl: url, normalizedUrl: url, targetKey: "content:111", contentId: "111", author: "fixture", kind: "video" };
       const definition = { id: "profile", name: "Lưu bài đã duyệt", kind: "interaction", latestRevision: 1, archived: false, createdAt: "2026-09-05T00:00:00Z", updatedAt: "2026-09-05T00:00:00Z" };
       if (mode === "interaction") {
+        if (command === "interaction_preview_thread") {
+          const request = args.request as { requestId: string; actorUdids: string[]; targets: typeof target[] };
+          return { lines: request.targets.map((target, index) => ({ lineNo: index + 1, original: target.normalizedUrl, target, error: null })), validTargetCount: request.targets.length, cohortCount: 1, streamCapacity: 8, plan: { requestId: request.requestId, assignments: request.targets.flatMap((target) => request.actorUdids.map((actorUdid, ordinal) => ({ actorUdid, ordinal, targetKey: target.targetKey, parentOrdinal: null, cohort: 0 }))) } };
+        }
+        if (command === "interaction_read_account") return { udid: args.udid, expectedHandle: deviceHandles[String(args.udid)] ?? "", observedHandle: "test.account", status: "matched", checkedAt: "2026-09-06T00:00:00Z", snapshotSha256: "account-proof" };
+        if (command === "interaction_import_sheet") return { sourceUrl: args.sheetUrl, column: "D", digest: "sheet-proof", rows: [{ row: 2, line: { lineNo: 2, original: url, target, error: null }, duplicateOf: null }, { row: 3, line: { lineNo: 3, original: url, target, error: null }, duplicateOf: 2 }] };
+        if (command === "get_device_meta") return { udid: args.udid, handle: deviceHandles[String(args.udid)] ?? "", notes: "", tags: [], groupId: null, alias: "", number: null };
+        if (command === "save_device_handle") {
+          const udid = String(args.udid);
+          if ((deviceHandles[udid] ?? "") !== args.expectedHandle) throw new Error("mapping changed");
+          deviceHandles[udid] = String(args.handle);
+          w.__AUTOMATION_CALLS__.push({ command, args });
+          return deviceHandles[udid];
+        }
         if (command === "automation_list") return [definition];
         if (command === "automation_get") return { definition, revision: {
           definitionId: "profile", revision: 1, targetRef: { type: "explicit", udids: ["MOCK-ANDROID-01"] },
@@ -64,6 +79,70 @@ test("saved interaction profile hydrates its exact scope and stale replacement U
   expect(await page.evaluate(() => (window as unknown as { __AUTOMATION_CALLS__: unknown[] }).__AUTOMATION_CALLS__)).toEqual([]);
 });
 
+test("interaction action-only setup fits desktop and narrow layouts without hidden comment fields", async ({ page }) => {
+  await fixture(page,"interaction");
+  await page.getByRole("button",{name:"Tương tác",exact:true}).click();
+  await page.getByRole("combobox",{name:"Hồ sơ Tương tác"}).selectOption("profile");
+  await expect(page.getByRole("checkbox",{name:"Lưu",exact:true})).toBeChecked();
+  await expect(page.getByRole("radiogroup",{name:"Kiểu tương tác"})).toHaveCount(0);
+  await expect(page.getByRole("button",{name:"Bắt đầu tương tác"})).toBeEnabled();
+  for(const viewport of [{width:1440,height:900},{width:820,height:560}]) {
+    await page.setViewportSize(viewport);
+    expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true);
+    await page.screenshot({path:test.info().outputPath(`interaction-save-${viewport.width}.png`),fullPage:true});
+  }
+  expect(await page.evaluate(()=>(window as unknown as {__AUTOMATION_CALLS__:unknown[]}).__AUTOMATION_CALLS__)).toEqual([]);
+});
+
+test("interaction maps nick by device and keeps duplicate errors inline across viewports", async ({ page }) => {
+  await fixture(page, "interaction");
+  await page.getByRole("button", { name: "Tương tác", exact: true }).click();
+  await page.getByRole("radiogroup", { name: "Cách chọn thiết bị" }).getByText("Toàn bộ", { exact: true }).click();
+  const inputs = page.getByPlaceholder("@handle");
+  await expect(inputs).toHaveCount(2);
+  await inputs.nth(0).fill("@test.account");
+  await inputs.nth(0).press("Tab");
+  await expect(inputs.nth(0)).toHaveValue("test.account");
+  await expect.poll(async () => await page.evaluate(() => (window as unknown as { __AUTOMATION_CALLS__: { command: string }[] }).__AUTOMATION_CALLS__.filter((c) => c.command === "save_device_handle").length)).toBe(1);
+  await inputs.nth(1).fill("TEST.account");
+  await inputs.nth(1).press("Tab");
+  await expect(inputs.nth(1)).toHaveAttribute("aria-invalid", "true");
+  await expect(page.getByRole("alert").filter({ hasText: "Nick này đang gán cho máy khác" })).toBeVisible();
+  for (const viewport of [{ width: 1440, height: 900 }, { width: 820, height: 560 }]) {
+    await page.setViewportSize(viewport);
+    await page.getByRole("button", { name: "Tải lại nick đã lưu" }).scrollIntoViewIfNeeded();
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+    await page.screenshot({ path: test.info().outputPath(`interaction-handles-${viewport.width}.png`), fullPage: true });
+  }
+  await page.getByRole("button", { name: "Tải lại nick đã lưu" }).click();
+  await expect(inputs.nth(1)).toHaveValue("");
+  await expect(inputs.nth(1)).toHaveAttribute("aria-invalid", "false");
+});
+
+test("interaction reads Sheet selections and account proof without dispatching", async ({ page }) => {
+  await fixture(page, "interaction");
+  await page.getByRole("button", { name: "Tương tác", exact: true }).click();
+  await page.getByRole("radiogroup", { name: "Cách chọn thiết bị" }).getByText("Toàn bộ", { exact: true }).click();
+  await page.getByText("Nhập từ Google Sheet", { exact: true }).click();
+  await page.getByLabel("Link Sheet", { exact: true }).fill("https://docs.google.com/spreadsheets/d/fixture/edit#gid=42");
+  await page.getByRole("button", { name: "Đọc Sheet", exact: true }).click();
+  await expect(page.getByLabel("Chọn dòng 3")).toBeDisabled();
+  await page.getByLabel("Chọn dòng 2").check();
+  for (const viewport of [{ width: 1440, height: 900 }, { width: 820, height: 560 }]) {
+    await page.setViewportSize(viewport);
+    await page.getByLabel("Chọn dòng 2").scrollIntoViewIfNeeded();
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+    await page.screenshot({ path: test.info().outputPath(`interaction-sheet-${viewport.width}.png`) });
+  }
+  await page.getByRole("button", { name: "Thêm 1 bài đã chọn" }).click();
+  await expect(page.getByPlaceholder("Dán link TikTok, mỗi dòng một bài")).toHaveValue("https://www.tiktok.com/@fixture/video/111");
+  const input = page.getByPlaceholder("@handle").first();
+  await input.fill("test.account"); await input.press("Tab");
+  await page.getByRole("button", { name: "Đọc tài khoản từ máy", exact: true }).first().click();
+  await expect(page.getByText("Khớp tài khoản · @test.account")).toBeVisible();
+  expect(await page.evaluate(() => (window as unknown as { __AUTOMATION_CALLS__: { command: string }[] }).__AUTOMATION_CALLS__.filter((call) => call.command !== "save_device_handle"))).toEqual([]);
+});
+
 test("publish monitor keeps partial delivery actionable and shows evidence at fleet viewports", async ({ page }) => {
   await fixture(page, "publish");
   await page.getByRole("button", { name: "Đăng bài", exact: true }).click();
@@ -80,4 +159,31 @@ test("publish monitor keeps partial delivery actionable and shows evidence at fl
     await page.screenshot({ path: test.info().outputPath(`publish-partial-${viewport.width}.png`), fullPage: true });
   }
   expect(await page.evaluate(() => (window as unknown as { __AUTOMATION_CALLS__: unknown[] }).__AUTOMATION_CALLS__)).toEqual([]);
+});
+
+test("publish Sheet toggle is keyboard accessible and fits both workspace sizes", async ({ page }) => {
+  await installTauriMock(page, { androidRoster: true });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Đăng bài", exact: true }).click();
+  const toggle = page.getByRole("checkbox", { name: "Ghi kết quả lên Sheet" });
+  await expect(toggle).toBeChecked();
+  await toggle.focus();
+  await page.keyboard.press("Space");
+  await expect(toggle).not.toBeChecked();
+  await expect(page.getByText("Sheet chờ cấu hình", { exact: true })).toHaveCount(0);
+  await expect(page.getByText("Không ghi Sheet", { exact: true })).toBeVisible();
+  for (const viewport of [{ width: 1440, height: 900 }, { width: 820, height: 560 }]) {
+    await page.setViewportSize(viewport);
+    await toggle.scrollIntoViewIfNeeded();
+    const geometry = await toggle.evaluate((input) => {
+      const box = input.getBoundingClientRect();
+      const label = input.parentElement!.querySelector("span")!.getBoundingClientRect();
+      return { width: box.width, x: box.right, labelX: label.left, deltaY: Math.abs(box.top + box.height / 2 - label.top - label.height / 2) };
+    });
+    expect(geometry.width).toBe(18);
+    expect(geometry.labelX).toBeGreaterThan(geometry.x);
+    expect(geometry.deltaY).toBeLessThan(2);
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+    await page.screenshot({ path: test.info().outputPath(`publish-sheet-off-${viewport.width}.png`), fullPage: true });
+  }
 });

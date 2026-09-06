@@ -217,6 +217,20 @@ export interface OperationRunDetail {
   batch?: { artifactId: string; target: ResolvedTargetSnapshot };
 }
 
+export interface OperationDeviceLogEntry {
+  id: string;
+  at: string | null;
+  action: string;
+  state: string;
+  text: string | null;
+  detail: string | null;
+}
+
+export interface OperationDeviceLog {
+  entries: OperationDeviceLogEntry[];
+  truncated: boolean;
+}
+
 export interface OperationRunQuery {
   kind?: OperationRunKind;
   state?: OperationRunState;
@@ -543,6 +557,7 @@ export type PublishSoundPolicy =
   | { kind: "trendingAny"; poolSize: number; seed: number };
 
 export interface PublishPreflightRequest {
+  sheetEnabled?: boolean;
   sourceRoot: string;
   bundleIds: string[];
   udids: string[];
@@ -572,6 +587,7 @@ export interface PublishPreflightAssignmentReport {
 }
 
 export interface PublishPreflightReport {
+  sheetEnabled?: boolean;
   inputDigest: string;
   targetSnapshot: ResolvedTargetSnapshot;
   canExecute: boolean;
@@ -1595,6 +1611,7 @@ export interface InteractionAutomationProfileConfigV1 {
 }
 
 export interface PublishAutomationProfileConfigV1 {
+  sheetEnabled?: boolean;
   schemaVersion: 1;
   sourceRoot: string;
   bundleIds: string[];

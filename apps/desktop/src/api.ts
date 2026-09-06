@@ -2,6 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type {
   AnalyticsSummary,
+  OperationDeviceLog,
   AppEvent,
   AgentRuntimeView,
   AgentSettings,
@@ -614,6 +615,10 @@ export async function operationGetRun(operationId: string) {
   return invoke<OperationRunDetail | null>("operation_get_run", { operationId });
 }
 
+export async function operationDeviceLog(operationId: string, udid: string) {
+  return invoke<OperationDeviceLog>("operation_device_log", { operationId, udid });
+}
+
 export async function operationQueryRuns(query: OperationRunQuery) {
   return invoke<OperationRunPage>("operation_query_runs", { query });
 }
@@ -835,6 +840,38 @@ export async function saveDeviceMeta(meta: DeviceMeta) {
   return invoke<void>("save_device_meta", { meta });
 }
 
+export async function saveDeviceHandle(udid: string, expectedHandle: string, handle: string) {
+  return invoke<string>("save_device_handle", { udid, expectedHandle, handle });
+}
+
+export type DeviceMetaChange = { field: "alias"; value: string } | { field: "number"; value: number | null };
+export async function patchDeviceMeta(udid: string, change: DeviceMetaChange) {
+  return invoke<DeviceMeta>("patch_device_meta", { udid, change });
+}
+
+export interface AccountReading {
+  udid: string; expectedHandle: string; observedHandle: string | null;
+  status: "matched" | "mismatch" | "unknown" | "unassigned"; checkedAt: string; snapshotSha256: string;
+}
+export async function interactionReadAccount(udid: string) {
+  return invoke<AccountReading>("interaction_read_account", { udid });
+}
+export interface InteractionReadback {
+  assignmentId: string; targetUrl: string; checkedAt: string;
+  like: "present" | "absent" | "unknown"; save: "saved" | "unsaved" | "unreadable"; snapshotSha256: string;
+}
+export async function interactionReadback(campaignId: string, assignmentId: string) {
+  return invoke<InteractionReadback>("interaction_readback", { campaignId, assignmentId });
+}
+
+export interface InteractionSheetImport {
+  sourceUrl: string; column: string; digest: string;
+  rows: { row: number; line: TikTokLinkLine; duplicateOf: number | null }[];
+}
+export async function interactionImportSheet(sheetUrl: string, column: string) {
+  return invoke<InteractionSheetImport>("interaction_import_sheet", { sheetUrl, column });
+}
+
 export async function listGroups() {
   return invoke<DeviceGroup[]>("list_groups");
 }
@@ -957,6 +994,7 @@ export async function publishCreateCampaign(
   targetRef: TargetRef,
   confirmed: boolean,
   approvedInputDigest: string,
+  sheetEnabled = true,
 ) {
   return invoke<PublishCampaignRecord>("publish_create_campaign", {
     sourceRoot,
@@ -968,6 +1006,7 @@ export async function publishCreateCampaign(
     targetRef,
     confirmed,
     approvedInputDigest,
+    sheetEnabled,
   });
 }
 

@@ -40,6 +40,9 @@ use crate::driver::{ElementBox, ElementQuery, UiSession};
 use crate::interaction::CommentLocatorIdentity;
 use crate::tiktok_labels::{LabelMatch, TikTokControl, TikTokControls};
 
+mod exact_target;
+pub use exact_target::open_exact_target_by_hierarchy;
+
 /// Where to tap to reply to one specific comment, and whose comment it is.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ElementReplyTarget {
@@ -293,6 +296,118 @@ pub enum TargetArrival {
     /// TikTok is foreground on the right package and a post page is up, but nothing on
     /// screen carried the handle. Same honesty as the pixel path's `Structural`.
     Structural,
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("target_link_proof: copied link belongs to a different post; expected={expected_url}; observed={observed_url}")]
+struct TargetLinkMismatch {
+    expected_url: String,
+    observed_url: String,
+}
+
+fn target_diagnostic_url(value: &str) -> String {
+    crate::parse_tiktok_links(value)
+        .into_iter()
+        .next()
+        .and_then(|line| line.target)
+        .map(|target| target.normalized_url.chars().take(512).collect())
+        .unwrap_or_else(|| "<invalid target URL>".into())
+}
+
+/// Prove a structurally opened card by its own copied link when its nickname is not a handle.
+/// No Like/Save/Send is used. The author and caption must survive opening/closing Share.
+pub async fn confirm_target_from_share_link(
+    session: &dyn UiSession,
+    labels: TikTokControls,
+    expected: &crate::ResolvedTikTokTarget,
+) -> anyhow::Result<TargetArrival> {
+    let before_author = read_author_label(session, labels).await;
+    let before_caption = read_target_identity_caption(session).await;
+    anyhow::ensure!(
+        before_author.as_ref().is_some_and(|v| !v.trim().is_empty())
+            && before_caption
+                .as_ref()
+                .is_some_and(|v| !v.trim().is_empty()),
+        "target_link_proof: card identity unreadable"
+    );
+    let copied = crate::tiktok_share::capture_post_link(session, &labels).await;
+    let link = copied
+        .link()
+        .ok_or_else(|| anyhow::anyhow!("target_link_proof: {}", copied.reason()))?;
+    let canonical = crate::tiktok_share::resolve_canonical_post_link(link).await?;
+    let after_author = read_author_label(session, labels).await;
+    let after_caption = read_target_identity_caption(session).await;
+    let comments = labels
+        .label(TikTokControl::Comments)
+        .ok_or_else(|| anyhow::anyhow!("target_link_proof: comments unmeasured"))?;
+    anyhow::ensure!(
+        before_author == after_author
+            && before_caption == after_caption
+            && session.locate(comments.to_query()).await?.is_some(),
+        "target_link_proof: card changed while copying its link"
+    );
+    if !link_identifies_target(&canonical, expected) {
+        return Err(TargetLinkMismatch {
+            expected_url: target_diagnostic_url(&expected.normalized_url),
+            observed_url: target_diagnostic_url(&canonical),
+        }
+        .into());
+    }
+    Ok(TargetArrival::Identified {
+        author_label: before_author.unwrap_or_default(),
+    })
+}
+
+/// Continuity evidence for copied-link proof, not a substitute for the canonical URL.
+/// A measured caption node may be short, but ambiguity or a failed read must not fall
+/// through to arbitrary page text. The legacy class fallback keeps its 40-character floor.
+pub async fn read_target_identity_caption(session: &dyn UiSession) -> Option<String> {
+    let nodes = session
+        .locate_all_described(ElementQuery::ResourceIdSuffix(":id/desc"))
+        .await
+        .ok()?;
+    if !nodes.is_empty() {
+        let mut captions = nodes
+            .into_iter()
+            .filter_map(|node| node.description)
+            .map(|text| text.trim().to_string())
+            .filter(|text| !text.is_empty());
+        let caption = captions.next()?;
+        return captions.next().is_none().then_some(caption);
+    }
+
+    for class in [
+        "com.bytedance.tux.input.TuxTextLayoutView",
+        "android.widget.TextView",
+    ] {
+        let Ok(nodes) = session
+            .locate_all_described(ElementQuery::ClassName(class))
+            .await
+        else {
+            continue;
+        };
+        let caption = nodes
+            .into_iter()
+            .filter_map(|node| node.description)
+            .map(|text| text.trim().to_string())
+            .filter(|text| text.chars().count() >= 40)
+            .max_by_key(|text| text.chars().count());
+        if caption.is_some() {
+            return caption;
+        }
+    }
+    None
+}
+
+fn link_identifies_target(canonical: &str, expected: &crate::ResolvedTikTokTarget) -> bool {
+    crate::parse_tiktok_links(canonical)
+        .first()
+        .and_then(|line| line.target.as_ref())
+        .is_some_and(|actual| {
+            actual.content_id == expected.content_id
+                && actual.kind == expected.kind
+                && actual.author.eq_ignore_ascii_case(&expected.author)
+        })
 }
 
 /// Why an arrival could not be proved. Every variant means **nothing was typed**.
@@ -3161,6 +3276,135 @@ fn sane_pair(current: u32, total: u32) -> Option<(u32, u32)> {
 
 #[cfg(test)]
 mod tests {
+    struct LinkProofSession {
+        copied: std::sync::atomic::AtomicBool,
+        taps: std::sync::atomic::AtomicUsize,
+        clipboard: parking_lot::Mutex<String>,
+        link: &'static str,
+        changed: bool,
+    }
+    #[async_trait::async_trait]
+    impl UiSession for LinkProofSession {
+        async fn tap(&self, _: crate::TapPoint) -> anyhow::Result<()> {
+            if self.taps.fetch_add(1, Ordering::Relaxed) == 1 {
+                self.copied.store(true, Ordering::Relaxed);
+                *self.clipboard.lock() = self.link.into();
+            }
+            Ok(())
+        }
+        async fn swipe(&self, _: crate::SwipeGesture) -> anyhow::Result<()> {
+            unreachable!()
+        }
+        async fn type_text(&self, _: &str) -> anyhow::Result<()> {
+            panic!("proof cannot type");
+        }
+        async fn home(&self) -> anyhow::Result<()> {
+            unreachable!()
+        }
+        async fn back(&self) -> anyhow::Result<()> {
+            panic!("copy auto-dismissed");
+        }
+        async fn find_and_tap(&self, _: &str) -> anyhow::Result<()> {
+            unreachable!()
+        }
+        async fn assert_visible(&self, _: &str) -> anyhow::Result<()> {
+            unreachable!()
+        }
+        fn stream_url(&self) -> Option<String> {
+            None
+        }
+        async fn set_clipboard(&self, _: &str, bytes: &[u8]) -> anyhow::Result<()> {
+            *self.clipboard.lock() = String::from_utf8(bytes.to_vec())?;
+            Ok(())
+        }
+        async fn get_clipboard(&self, _: usize) -> anyhow::Result<(String, Vec<u8>)> {
+            Ok((
+                "plaintext".into(),
+                self.clipboard.lock().as_bytes().to_vec(),
+            ))
+        }
+        async fn locate(&self, query: ElementQuery<'_>) -> anyhow::Result<Option<ElementBox>> {
+            let ElementQuery::Description { value, .. } = query else {
+                return Ok(None);
+            };
+            let desc = if value.contains("profile") || value.contains("Follow") {
+                if self.changed && self.copied.load(Ordering::Relaxed) {
+                    "Follow Author B"
+                } else {
+                    "Follow Author A"
+                }
+            } else {
+                value
+            };
+            Ok(Some(node(0.0, 0.0, 100.0, 100.0, desc)))
+        }
+        async fn locate_all(&self, query: ElementQuery<'_>) -> anyhow::Result<Vec<ElementBox>> {
+            Ok(match query {
+                ElementQuery::Description {
+                    value: "Copy link",
+                    exact: true,
+                } if !self.copied.load(Ordering::Relaxed) => {
+                    vec![node(0.0, 100.0, 100.0, 100.0, "Copy link")]
+                }
+                _ => vec![],
+            })
+        }
+        async fn locate_all_described(
+            &self,
+            query: ElementQuery<'_>,
+        ) -> anyhow::Result<Vec<ElementBox>> {
+            Ok(match query {
+                ElementQuery::ResourceIdSuffix(":id/desc") => vec![node(
+                    0.0,
+                    0.0,
+                    100.0,
+                    100.0,
+                    "A stable caption long enough to identify this one post without guessing",
+                )],
+                _ => vec![],
+            })
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn exact_link_proof_still_rejects_a_card_changed_during_copy() {
+        let url = "https://www.tiktok.com/@fixture/photo/12345";
+        let target = crate::parse_tiktok_links(url).remove(0).target.unwrap();
+        let labels = controls_for("com.ss.android.ugc.trill", "en", "38.3.2").unwrap();
+        for changed in [false, true] {
+            let session = LinkProofSession {
+                copied: AtomicBool::new(false),
+                taps: std::sync::atomic::AtomicUsize::new(0),
+                clipboard: parking_lot::Mutex::new(String::new()),
+                link: url,
+                changed,
+            };
+            let proof = confirm_target_from_share_link(&session, labels, &target).await;
+            assert_eq!(proof.is_ok(), !changed, "{proof:?}");
+            assert_eq!(session.taps.load(Ordering::Relaxed), 2);
+        }
+    }
+
+    #[test]
+    fn copied_link_proof_requires_same_post_kind_id_and_exact_author() {
+        let target =
+            crate::parse_tiktok_links("https://www.tiktok.com/@ghin.lt.sng.sng/photo/12345")
+                .remove(0)
+                .target
+                .unwrap();
+        assert!(super::link_identifies_target(
+            "https://www.tiktok.com/@ghin.lt.sng.sng/photo/12345?x=1",
+            &target
+        ));
+        for wrong in [
+            "https://www.tiktok.com/@ghin.lt.sng.sng/photo/12346",
+            "https://www.tiktok.com/@other/photo/12345",
+            "https://www.tiktok.com/@ghin.lt.sng.sng/video/12345",
+            "https://vt.tiktok.com/abc/",
+        ] {
+            assert!(!super::link_identifies_target(wrong, &target));
+        }
+    }
     use super::*;
 
     use crate::driver::ElementQuery;

@@ -1982,6 +1982,9 @@ mod tests {
     const QUICK_WAIT: Duration = Duration::from_millis(25);
 
     struct TestDriver {
+        fail_termination: AtomicBool,
+        fail_session: AtomicBool,
+        lifecycle_calls: Mutex<Vec<String>>,
         shutdown_owned_process_calls: AtomicUsize,
         session_starts: AtomicUsize,
         stream_starts: AtomicUsize,
@@ -2022,6 +2025,9 @@ mod tests {
     impl Default for TestDriver {
         fn default() -> Self {
             Self {
+                fail_termination: AtomicBool::new(false),
+                fail_session: AtomicBool::new(false),
+                lifecycle_calls: Mutex::new(Vec::new()),
                 shutdown_owned_process_calls: AtomicUsize::new(0),
                 session_starts: AtomicUsize::new(0),
                 stream_starts: AtomicUsize::new(0),
@@ -2331,6 +2337,7 @@ mod tests {
             &self,
             _udid: &str,
         ) -> anyhow::Result<StreamStartProof> {
+            self.lifecycle_calls.lock().push("stream".into());
             self.stream_starts.fetch_add(1, Ordering::SeqCst);
             if self.block_streams.load(Ordering::SeqCst) {
                 self.stream_started.notify_one();
@@ -2354,6 +2361,8 @@ mod tests {
             _bundle_id: &str,
             _kind: InteractionSessionKind,
         ) -> anyhow::Result<Box<dyn crate::UiSession>> {
+            self.lifecycle_calls.lock().push("session".into());
+            anyhow::ensure!(!self.fail_session.load(Ordering::SeqCst), "session refused");
             self.session_starts.fetch_add(1, Ordering::SeqCst);
             if self.block_sessions.load(Ordering::SeqCst) {
                 self.session_started.notify_one();
@@ -2484,6 +2493,13 @@ mod tests {
             udid: &str,
             bundle_id: &str,
         ) -> anyhow::Result<ProcessAbsenceProof> {
+            self.lifecycle_calls
+                .lock()
+                .push(format!("stop:{udid}:{bundle_id}"));
+            anyhow::ensure!(
+                !self.fail_termination.load(Ordering::SeqCst),
+                "termination refused"
+            );
             self.termination_calls.lock().push(udid.to_string());
             if self.block_terminations.load(Ordering::SeqCst) {
                 let permit = self
@@ -2536,6 +2552,138 @@ mod tests {
             Arc::new(crate::DeviceWorkCoordinator::new()),
             Arc::new(crate::StreamBudgetManager::new(limit).expect("valid test stream limit")),
         )
+    }
+
+    #[tokio::test]
+    async fn clean_app_session_stops_before_session_and_stream_and_after_completion() {
+        let driver = Arc::new(TestDriver::default());
+        driver.allow_stop.add_permits(4);
+        let control = control_plane(driver.clone(), 1);
+        let lease = control
+            .acquire_exclusive("a", DeviceWorkOwner::Nurture)
+            .await
+            .unwrap();
+        let (lease, capacity) = control.reserve_ui_capacity(lease).await.unwrap();
+        let context = control
+            .start_clean_app_session(
+                lease,
+                capacity,
+                "com.fixture",
+                InteractionSessionKind::Ordinary,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            *driver.lifecycle_calls.lock(),
+            vec!["stop:a:com.fixture", "session", "stream"]
+        );
+        assert_eq!(
+            control.current_work_owner("a"),
+            Some(DeviceWorkOwner::Nurture)
+        );
+        let proof = control
+            .finish_app_session(context, "com.fixture")
+            .await
+            .unwrap();
+        assert_eq!(proof.bundle_id, "com.fixture");
+        assert_eq!(
+            driver.lifecycle_calls.lock().last().unwrap(),
+            "stop:a:com.fixture"
+        );
+        assert_eq!(control.current_work_owner("a"), None);
+        control.shutdown_cleanup().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn clean_app_session_refuses_unproven_stop_and_mismatched_capacity() {
+        let driver = Arc::new(TestDriver::default());
+        let control = control_plane(driver.clone(), 2);
+        let a = control
+            .acquire_exclusive("a", DeviceWorkOwner::Nurture)
+            .await
+            .unwrap();
+        let b = control
+            .acquire_exclusive("b", DeviceWorkOwner::Nurture)
+            .await
+            .unwrap();
+        let (a, ca) = control.reserve_ui_capacity(a).await.unwrap();
+        let (b, cb) = control.reserve_ui_capacity(b).await.unwrap();
+        assert!(control
+            .start_clean_app_session(a, cb, "com.fixture", InteractionSessionKind::Ordinary)
+            .await
+            .is_err());
+        assert!(driver.lifecycle_calls.lock().is_empty());
+        drop(ca);
+        drop(b);
+        driver.fail_termination.store(true, Ordering::SeqCst);
+        let a = control
+            .acquire_exclusive("a", DeviceWorkOwner::Nurture)
+            .await
+            .unwrap();
+        let (a, ca) = control.reserve_ui_capacity(a).await.unwrap();
+        assert!(control
+            .start_clean_app_session(a, ca, "com.fixture", InteractionSessionKind::Ordinary)
+            .await
+            .is_err());
+        assert_eq!(driver.session_starts.load(Ordering::SeqCst), 0);
+        assert_eq!(control.current_work_owner("a"), None);
+        control.shutdown_cleanup().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn clean_app_session_cleans_partial_open_without_relaunching() {
+        for missing_frame in [false, true] {
+            let driver = Arc::new(TestDriver::default());
+            driver.allow_stop.add_permits(4);
+            driver.fail_session.store(!missing_frame, Ordering::SeqCst);
+            driver
+                .first_frame_observed
+                .store(!missing_frame, Ordering::SeqCst);
+            let control = control_plane(driver.clone(), 1);
+            let a = control
+                .try_acquire_exclusive("a", DeviceWorkOwner::Interaction)
+                .await
+                .unwrap();
+            let (a, ca) = control.reserve_ui_capacity(a).await.unwrap();
+            assert!(control
+                .start_clean_app_session(a, ca, "com.fixture", InteractionSessionKind::Ordinary)
+                .await
+                .is_err());
+            assert_eq!(
+                driver
+                    .lifecycle_calls
+                    .lock()
+                    .iter()
+                    .filter(|c| c.starts_with("stop:"))
+                    .count(),
+                2
+            );
+            assert_eq!(control.current_work_owner("a"), None);
+            control.shutdown_cleanup().await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn clean_app_session_end_failure_releases_lease_without_claiming_absence() {
+        let driver = Arc::new(TestDriver::default());
+        driver.allow_stop.add_permits(4);
+        let control = control_plane(driver.clone(), 1);
+        let a = control
+            .acquire_exclusive("a", DeviceWorkOwner::Script)
+            .await
+            .unwrap();
+        let (a, ca) = control.reserve_ui_capacity(a).await.unwrap();
+        let context = control
+            .start_clean_app_session(a, ca, "com.fixture", InteractionSessionKind::Ordinary)
+            .await
+            .unwrap();
+        driver.fail_termination.store(true, Ordering::SeqCst);
+        assert!(control
+            .finish_app_session(context, "com.fixture")
+            .await
+            .is_err());
+        assert_eq!(control.current_work_owner("a"), None);
+        control.shutdown_cleanup().await.unwrap();
     }
 
     #[tokio::test]

@@ -198,7 +198,7 @@ describe("assignment evidence", () => {
               state: "noOp",
               revision: 1,
               effectIntent: null,
-              evidence: "already-saved",
+              evidence: JSON.stringify({ verdict: "alreadySaved" }),
               error: null,
             },
           ],
@@ -212,7 +212,7 @@ describe("assignment evidence", () => {
     expect(screen.getByLabelText("1 xác nhận")).toBeVisible();
     expect(screen.getByLabelText("1 không cần làm")).toBeVisible();
     expect(screen.getByText("Tim · Đã xác nhận")).toBeVisible();
-    expect(screen.getByText("Lưu · Không cần làm")).toBeVisible();
+    expect(screen.getByText("Lưu · Đã lưu từ trước")).toBeVisible();
     expect(screen.queryByText(/0\/0 bình luận/)).not.toBeInTheDocument();
   });
 

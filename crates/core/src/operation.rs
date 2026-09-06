@@ -119,6 +119,25 @@ pub struct OperationRunDetail {
     pub batch: Option<OperationBatchSnapshot>,
 }
 
+/// A timestamp belongs to its source record, never to the time the monitor polled it.
+#[derive(Debug, Clone, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OperationDeviceLogEntry {
+    pub id: String,
+    pub at: Option<String>,
+    pub action: String,
+    pub state: String,
+    pub text: Option<String>,
+    pub detail: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OperationDeviceLog {
+    pub entries: Vec<OperationDeviceLogEntry>,
+    pub truncated: bool,
+}
+
 #[derive(Debug, Clone, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OperationBatchSnapshot {
@@ -1301,6 +1320,7 @@ mod tests {
             partners: Vec::new(),
         };
         let request = crate::PublishCampaignRequest {
+            sheet_enabled: true,
             request_id: "request-orphan-db".into(),
             source_root: "C:/fixture".into(),
             bundle_ids: vec![bundle.id.clone()],

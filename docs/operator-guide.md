@@ -14,6 +14,30 @@ phạm vi máy rõ ràng và kết quả có thể đọc lại. Chọn hồ sơ
 
 ## Thiết bị
 
+Thanh **Tiến trình công việc** nằm trong cửa sổ nổi ở góc dưới khi có tác vụ đang chạy
+hoặc vừa kết thúc. Bấm mở rồi chọn số máy/alias để xem kết quả và nhật ký
+`giờ:phút:giây`. Chuyển trang vẫn giữ monitor. 100% là đã xử lý xong, không có nghĩa
+tất cả đều thành công; đọc trạng thái lỗi/chưa xác nhận bên cạnh. Dữ liệu thiếu giờ
+không được tự gán giờ hiện tại. Các tác vụ cũ hơn xem tại **Tác vụ**.
+Giữ và kéo trên thanh tiêu đề để di chuyển; bấm nhẹ mở/thu gọn, nút dấu trừ thu nhỏ
+cửa sổ. Nút thùng rác
+xoá bản ghi đã kết thúc khỏi cửa sổ theo dõi, không xoá lịch sử/bằng chứng trong
+**Tác vụ** và không dừng công việc. **Hoàn tác xoá** khôi phục lượt xoá gần nhất.
+Trong cửa sổ, chọn tác vụ theo tên và thời gian; tìm máy hoặc lọc **Cần kiểm tra**.
+Danh sách máy chỉ báo tiến độ phần trăm khi còn chạy; máy đã kết thúc có trạng thái
+riêng. Tab **Nhật ký** hiển thị hoạt động theo giờ, tab **Bằng chứng** chứa kết quả
+xác minh. Dòng lặp giữ số lần và thời gian cuối; nút thông tin bên phải mở bản ghi gốc.
+Nút **Phóng rộng tiến trình** mở rộng vùng đọc; **Khôi phục kích thước** trở lại cửa sổ
+nhỏ. Thu nhỏ giữ máy/tab/vị trí đang đọc. Nhật ký mặc định mới nhất trước, đổi thứ tự
+bằng nút cạnh số mốc. Trên màn hẹp, chọn máy mở chi tiết toàn chiều rộng và dùng mũi
+tên quay lại danh sách. Menu ba chấm có lệnh dọn các bản ghi đã kết thúc.
+Mặc định cửa sổ gọn: mỗi máy một dòng, chọn máy mới mở nhật ký. Thu nhỏ còn thanh
+300px; nút phóng rộng mới bật bảng hai cột trên màn hình lớn.
+
+Trong cửa sổ điều khiển, nút hình điện thoại **Đưa về màn hình dọc** yêu cầu máy đổi
+về dọc và đọc lại kết quả. Máy đang ngang vẫn giữ đúng tỉ lệ ảnh và menu cuộn riêng;
+không cần đóng/mở cửa sổ để bố cục theo hướng mới.
+
 **Đầu vào:** kết nối USB, nhóm, bộ lọc trạng thái, từ khoá và các máy được chọn.
 Danh sách/lưới dùng cùng tập sau lọc; các ô chia đều chiều ngang, giữ tỷ lệ màn hình và
 cử chỉ điều khiển. Ctrl+lăn chuột đổi mức zoom; hàng cuối giữ cùng kích thước ô.
@@ -54,11 +78,46 @@ comment. Dừng phiên không chứng minh các effect đã gửi được hoàn
 `Lưu hồ sơ` không áp mặc định toàn cục. Chỉ lệnh áp mặc định riêng mới thay cấu hình
 dùng chung; lệnh đó không được tự làm sạch bản nháp hồ sơ chưa lưu.
 
+Kết thúc Nuôi TikTok chỉ tắt ứng dụng trên các máy đã được nhận vào phiên.
+Nếu báo `16/20 máy đã bắt đầu`, bốn máy còn lại chưa được xử lý và không bị tự tắt.
+Xem danh sách máy không bắt đầu và nhật ký `nurture.start.skipped`; số **TikTok đã tắt**
+chỉ tính các máy trong phiên có chứng cứ tiến trình, không tính mọi máy đang trên lưới.
+
+Khi bắt đầu phiên mới, Nuôi/Tương tác/Đăng bài lấy quyền sử dụng máy và tắt riêng TikTok
+có kiểm chứng trước khi mở lại. Chỉ mở tab không làm việc này. Không xóa dữ liệu/cache,
+không đăng xuất, không tắt app khác. Kết thúc công việc thì tắt TikTok và đóng stream;
+lỗi dọn được báo riêng. Lượt đã qua Send/Post mà chưa rõ kết quả vẫn không tự gửi/đăng
+lại; bài đã xác nhận chỉ được tiếp tục lấy link/Sheet theo phạm vi được ghi nhận.
+
 ## Tương tác
 
 **Đầu vào:** URL bài, hành động, nội dung/AI, actors và hồ sơ revision. **Thao tác:** parse
 đúng chuỗi URL hiện tại; sửa lỗi parse trước khi chạy; review assignment và số bài/số máy;
 chạy rồi theo dõi kết quả từng hành động.
+
+`Riêng lẻ` cho phép một máy và một bình luận; kiểu chuỗi vẫn cần ít nhất hai máy.
+Tim/Lưu và bình luận thủ công không phụ thuộc cấu hình AI. “Bỏ qua: chưa đọc được
+trạng thái” không có nghĩa đã Tim/Lưu; xem lý do và bằng chứng trước khi chạy lượt mới.
+Nếu tên hiển thị khác handle, ứng dụng có thể đối chiếu link từ chính bài trước hành động.
+
+Ô tài khoản cạnh từng máy nhận **username TikTok**, ví dụ `@ten.nick`, không phải
+tên hiển thị. Tên/số máy vẫn giữ riêng; nick được gắn với định danh máy. Rời ô sẽ lưu;
+nếu báo lỗi, sửa hoặc bấm **Tải lại nick đã lưu** trước khi chạy. Không gán cùng nick
+cho hai máy để tránh nhầm actor khi tag. Nick lưu trong Riviu chưa chứng minh máy
+đang đăng nhập tài khoản đó; sau khi đổi tài khoản trên TikTok cần đối chiếu lại.
+
+**Đọc tài khoản từ máy** mở Hồ sơ, đối chiếu nick đã gán với nick quan sát được,
+báo Khớp/Lệch/Chưa đọc được và thời điểm. Không tự đổi tài khoản hoặc ghi đè nick.
+Hiện đã đo `trill 38.3.2/en`; bản/ngôn ngữ khác cần hiệu chỉnh trước.
+
+**Nhập từ Google Sheet:** dán link đúng tab, chọn cột chứa link, bấm Đọc Sheet.
+Chọn các dòng hợp lệ rồi Thêm bài đã chọn. Link trùng/lỗi có trạng thái riêng; đọc
+Sheet không chạy chiến dịch. Xem bảng **Phân công bài và máy** trước khi xác nhận.
+Nguồn phải đọc được bằng quyền xem liên kết; Riviu không ghi ngược Sheet ở bước này.
+
+Với lượt **Chưa chắc kết quả**, **Kiểm tra lại kết quả** chỉ mở đúng bài để đọc lại
+Tim/Lưu. Không gửi lại, không thay lịch sử uncertain. Bình luận chưa được kiểm lại
+bằng nút này; giữ bằng chứng đã gửi và không tự retry vì thiếu kết quả readback.
 
 **Kết quả:** campaign, assignment, prepared content và trạng thái effect. Đổi URL rồi
 parse lỗi không được dùng target cũ. **Tiếp theo:** mở bằng chứng cho uncertain; retry chỉ
@@ -71,7 +130,12 @@ gán cho từng bài. **Thao tác:** preflight trước dispatch; đối chiếu
 đã gán và toàn bộ hậu quả cleanup; chạy pipeline rồi xem projection trong Theo dõi.
 
 **Kết quả:** bằng chứng Post, URL, nhạc, Sheet và cleanup riêng biệt. Đăng thành công
-nhưng thiếu link/Sheet vẫn là Partial. **Tiếp theo:** retry chỉ phạm vi metadata/outbox
+nhưng thiếu link, hoặc còn nợ Sheet khi đã bật ghi Sheet, vẫn là Partial.
+`Ghi kết quả lên Sheet` là lựa chọn riêng cho từng chiến dịch/hồ sơ: tắt thì không
+tạo hàng chờ hoặc gửi webhook; bật mà chưa cấu hình thì giữ link trong outbox pending.
+Đổi lựa chọn phải chạy preflight lại. Nhạc được chọn ngẫu nhiên có seed từ tối đa
+năm đề xuất/thịnh hành đang hiện trên tài khoản, không lấy danh sách ngoài TikTok.
+**Tiếp theo:** retry chỉ phạm vi metadata/outbox
 còn thiếu; không mở lại full pipeline cho bài đã đăng. Cleanup là tập effect cụ thể,
 không phải xoá tùy ý theo tên thư mục.
 

@@ -860,3 +860,306 @@
   snapshot tác vụ. Mỗi loại giữ TargetRef riêng; empty không được hiểu là toàn fleet.
 - Không bỏ preflight/xác nhận/evidence/uncertain guard khi chạy trong dock. Toàn bộ
   command vẫn đi API/control plane hiện có. Gate browser chỉ dùng fixture đã dán nhãn.
+
+#### 14.19 Nghiệm thu Nuôi bằng kết quả và cleanup (06/09/2026; xem §9.156)
+
+- Harness Android phải yêu cầu serial rõ ràng; Tim/Lưu/Bình luận/Follow mặc định 0,
+  mỗi flag điều khiển cả switch và rate. Kế thừa settings chỉ khi yêu cầu; lỗi đọc/copy
+  không âm thầm đổi thành profile khác. Ghi secret của scratch chỉ ở memory, không
+  ghi Credential Manager thật; không copy DB có WAL chưa checkpoint.
+- Không coi `Ok(status)` là nghiệm thu thành công: kiểm outcome terminal, tiến độ
+  thật và `ProcessAbsenceProof`. Report giữ attempts/confirmed/uncertain, target,
+  capacity/quarantine và lỗi cleanup; evidence không tự xóa khi tiến trình kết thúc.
+- Mỗi run_session có cờ stop riêng vì engine cũng set cờ đó khi teardown watcher.
+  Tín hiệu Dừng ngoài có thể fan-out vào các cờ riêng; không truyền cùng một Arc
+  cho nhiều máy rồi để máy kết thúc sớm làm dừng sibling.
+- Log `N/M video` dùng M là `video_target` snapshot, không phải số lần vuốt. Vuốt
+  hiển thị thành counter riêng; Dừng sớm không biến `1/500` thành `1/1`.
+- Helper chưa attach thành công chưa có trong cache driver. Lỗi sau tạo forward
+  phải gỡ đúng serial/port trước trả lỗi; giữ cả lỗi attach và lỗi cleanup. Không
+  dọn tất cả forward hoặc restart ADB để làm lượt kiểm xanh.
+
+#### 14.20 Bằng chứng video và đo chất lượng nội dung (06/09/2026; xem §9.157)
+
+- Android hierarchy Nuôi lấy bốn frame từ subscription mới trong cửa sổ 12 giây.
+  Mỗi sample kiểm author/caption trước và sau capture; identity đổi, không đọc được,
+  stop hoặc deadline thì bỏ cả tập và ghi nguyên nhân evidence vào audit.
+- `VideoCardIdentity` hiện chỉ gồm author/caption theo catalog package/build/locale.
+  Nó không phải canonical post ID và không phân biệt hai bài có cùng author/caption.
+  Không nâng kết quả này thành chứng cứ playback position, tổng duration hoặc audio.
+- `PostCoverage::VideoWindow` giữ khác biệt với nguồn có timestamp đã xác nhận;
+  cả tập chỉ một ảnh khác biệt cũng phải nói rõ chưa biết phần video còn lại.
+  Carousel không bị chuyển thành cửa sổ video; pixel/iOS giữ đường hiện có.
+- `video_understanding` là harness phân tích nháp, không gọi sender công khai.
+  Bộ phân tích nhận tối đa 24 frame, caption nguồn và transcript thật nếu có;
+  lượt rà soát dẫn F/C/T và từ chối source không được cung cấp. JSON lỗi vẫn giữ
+  spend đã phát sinh. Việc dẫn source hợp lệ chưa chứng minh ý đó đúng ngữ nghĩa.
+- `fetch_transcript` giữ 240 từ cho caller cũ; chỉ caller yêu cầu rõ ràng dùng
+  `fetch_transcript_with_limit` trong 1..1.200. Không tạo URL hay transcript giả
+  cho Nuôi. Bộ đánh giá toàn nguồn chưa tự nối vào bình luận Nuôi production.
+- Đo 80% bằng rubric ý chính chốt trước output, kiểm cả recall, precision và lỗi
+  trọng yếu. Giữ riêng development/holdout, lưu source và hash; model tự chấm điểm
+  hoặc trung bình nhiều bài không đủ chứng nhận từng bài. Nhãn agent phải ghi rõ
+  chưa được người chấm độc lập kiểm lại. Không phát public action để chấm nội dung.
+
+#### 14.21 Sheet tùy chọn và nhạc theo trạng thái (06/09/2026; xem §9.158)
+
+- `sheetEnabled` nằm trong campaign/profile/preflight và digest, default true cho
+  JSON cũ. False bỏ outbox/webhook nhưng vẫn bắt buộc confirmed Post và canonical URL.
+  Không đổi nghĩa vụ của campaign cũ. Restart đọc request bền, không đoán từ thiếu row.
+- Link được persist độc lập với delivery. `record_publish_success_with_sheet_row`
+  kiểm lựa chọn trong transaction; false giữ Post/link mà không queue. Child idempotency
+  so request typed sau default hóa, không so chuỗi JSON gây xung đột giả cho payload cũ.
+- Trill/en/38.3.2: `dfu` là kéo cắt trên hàng nhạc đang chọn, không phải nút chọn.
+  Re-read pool/title/artist, dùng rectangle mới; đã chọn đúng thì không tap lại vì
+  tap có thể bỏ nhạc. Chờ marker đúng, Back đóng picker rồi đọc editor `so9`.
+- Màn caption không có chip nhạc. Re-proof cuối đi Back `aun` về editor, xác nhận
+  nhạc, Next về caption, so caption nguyên vẹn và lấy rectangle Post mới. Callback
+  write-ahead vẫn one-shot trước tap; sau effect không tự retry.
+- Copy link ưu tiên Button có description chính xác thay chữ dưới icon. Ambiguity
+  từ chối; clipboard vẫn cần sentinel mới, lỗi giữ nguyên detail. Resolve short URL
+  chỉ theo tối đa năm redirect HTTPS trên host TikTok đã liệt kê, bỏ tracking bằng
+  parser hiện có. Lỗi link chỉ cho retry metadata, không Post lại.
+
+#### 14.22 Tương tác một máy và chứng cứ đúng bài (06/09/2026; xem §9.159)
+
+- Standalone cho phép 1 actor/1 message; Threaded giữ 2 actor/2 message và cohort
+  tối thiểu 2. Không đổi default chuỗi hoặc JSON lịch sử. Migration 26 đã nhận count 1.
+- `settings_for_request` chỉ đọc cấu hình/credential AI khi thật sự soạn bằng AI;
+  Tim/Lưu-only và manual không bị JSON AI hỏng chặn. Caller start/retry/runtime dùng chung.
+- Nickname không khớp handle giữ `Structural` tới khi copy link từ card, resolve
+  canonical và so đúng content ID, kind, author. Author/caption cùng rail phải còn
+  nguyên sau Share; clipboard/readback lỗi không nâng thành `Identified`.
+- Copy link có thể tự đóng sheet: trước Back phải kiểm sheet còn đó. Query lỗi
+  không phải bằng chứng sheet mất và không cấp quyền Back mù khỏi target.
+- Helper start-service trả trước HTTP ready: chờ status tối đa bốn giây, retry
+  chỉ handshake đọc, giữ lỗi cuối và cleanup exact forward khi attach thất bại.
+- No-op vì `stateUnreadable/noControl/cardChangedBeforeEffect` là Partial, không
+  Done. Counter no-op vẫn không tính attempted. UI nói lý do, không tô xanh như
+  AlreadyLiked/AlreadySaved; `armed` chỉ nói đã ghi intent, không khẳng định tap.
+- Monitor dùng alias/số máy từ shell, raw key ở details, tải artifact/context lỗi
+  vẫn giữ campaign nhưng báo lỗi có retry; không giả thành danh sách rỗng.
+
+#### 14.23 Nick theo UDID và trạng thái Lưu đã đo (06/09/2026; xem §9.160)
+
+- `device_meta.handle` là ánh xạ do operator nhập, không phải chứng cứ đăng nhập.
+  Giữ số máy/alias riêng; `save_device_handle` chỉ ghi handle, CAS expected handle
+  và chặn nick trùng không phân biệt hoa/thường hoặc tiền tố `@`. Không dùng full
+  `save_device_meta` khi sửa một nick, vì có thể ghi đè alias/nhóm vừa đổi ở nơi khác.
+- UI dùng nick đã lưu để resolve mention actor; nick đang sửa/lỗi không được âm
+  thầm dùng trong chiến dịch. Lỗi inline có tải lại bản đã lưu; nick trùng lịch sử
+  không kéo cả hai máy vào bài. Sửa nick không tự chuyển tài khoản trên điện thoại.
+- `trill 38.3.2/en`: bookmark Button `f1p` luôn `checked=false/selected=false`.
+  State thật ở ImageView `f0y`, dưới FrameLayout `f14` của đúng Button đó. Snapshot
+  có một `f0y` không liên quan ở status overlay, nên ID trần hoặc container false
+  đều không đủ. Parser XML kiểm package/class/ancestry/geometry và đúng một control.
+- Interaction, Nurture và cleanup Save dùng chung reader. Tuple chưa đo trả
+  Unreadable, không diễn giải false mặc định thành Unsaved. Fixture minimal được
+  trích từ capture trước/sau tap, không chứa nội dung hay dữ liệu tài khoản.
+- Canary chỉ một máy/một link trong Sheet; lượt Save đầu uncertain giữ nguyên audit.
+  Readback xác nhận Saved không phát tap và không tự viết lại lịch sử uncertain.
+
+#### 14.24 Kiểm tra tài khoản và nhập nguồn Tương tác (06/09/2026; xem §9.161)
+
+- `HierarchySaveAdapter` dùng chung cho Interaction/unsave: đọc identity trước và
+  sau control; không ghép author A với nút B. Nurture giữ guard fingerprint bao
+  quanh reader. Hai fixture XML đã có allowlist chính xác trong .gitignore; dump
+  tài khoản thật vẫn ở target, không mở allowlist XML toàn repo.
+- UI đổi alias/number qua `patch_device_meta(DeviceMetaChange)`; không read-modify-write
+  toàn DeviceMeta. `useDeviceHandles` lưu draft/saved chung record và ticket theo UDID;
+  scope reload cập nhật saved và display đồng nhất, không đè draft đang sửa hoặc save mới.
+- `interaction_read_account` giữ lease, mở Profile rồi đọc `mjf` và Edit profile
+  trên tuple trill 38.3.2/en. Hai lần đọc phải khớp. Trả observed/expected/status/time/hash,
+  không tự gán nick hoặc đổi login. Chưa đo tuple khác thì báo rõ, không đoán từ bio.
+- `interaction_readback` lấy đúng assignment và target snapshot trong DB; mở bài,
+  đối chiếu canonical URL, đọc Like/Save với identity trước/sau rồi đóng context.
+  Không tap toggle/Send, không settle audit uncertain, không mở quyền retry. Kết quả
+  là trạng thái hiện tại chứ không suy ra hiệu ứng do campaign nào tạo. Comment chưa
+  có readback lại qua API này; UI nói rõ. Chức năng chưa thay preflight account của runner.
+- `interaction_import_sheet` chỉ GET docs.google.com/gviz với gid và cột đã kiểm,
+  không redirect sang host khác, 20 giây/2 MiB/5.000 dòng. Wrapper cố định được gỡ,
+  JSON được deserialize, tuyệt đối không eval. Giữ số dòng vật lý; parser TikTok
+  chung xác định link lỗi/trùng. Chọn dòng rõ ràng mới thêm vào draft, không dispatch.
+  Sheet riêng tư cần quyền xem hợp lệ; không mượn cookie trình duyệt hay ghi vào Sheet.
+  Giao thức nguồn: [Google Visualization spreadsheets](https://developers.google.com/chart/interactive/docs/spreadsheets).
+- Preview dùng planner backend cả action-only; khóa generation khi đổi action/mode/count.
+  Bảng phân công theo UDID/alias và target. Monitor lấy saved handles, không dùng draft
+  nick; nick hiện tại không thay cho snapshot tài khoản lịch sử.
+
+#### 14.25 Phạm vi cleanup Nuôi và máy không bắt đầu (07/09/2026; xem §9.163)
+
+- Kết thúc Nuôi chỉ force-stop các máy thực sự thuộc phiên. Không quét tắt toàn
+  fleet để che một preflight partial; máy không bắt đầu có thể đang bị tác vụ khác giữ.
+- `nurture_start` trả danh sách máy được nhận, frontend phải dùng đúng danh sách
+  này cho `startedTargets`/Stop, không thay bằng danh sách yêu cầu ban đầu.
+- Phản hồi partial hiển thị ngay số đã bắt đầu/tổng yêu cầu và số máy/alias bị bỏ qua.
+  Các lý do preflight bỏ qua được lưu `op_logs/nurture.start.skipped` trước dispatch;
+  không chỉ log::warn vì log release có thể không giữ thông tin đó.
+- Tổng cleanup chỉ đếm row thuộc current run, running=false, cleanupState=processAbsent
+  và cleanupProof có thật. Finished hoặc text "đã tắt" không thay thế proof.
+
+#### 14.26 Phiên TikTok khởi động sạch (07/09/2026; xem §9.164)
+
+- `DeviceControlPlane::start_clean_app_session` nhận exclusive context/capacity cùng
+  token đã cấp, chứng minh target process absent, rồi session trước stream. Caller
+  giữ kiểm tra capability/readiness; helper không sửa journal hay nới retry.
+- Nuôi dùng clean start trước mỗi lần mở phiên; giữ cleanup cuối và proof typed.
+  Interaction dùng `open_clean_interaction_context` chỉ ở campaign evidence/assignment;
+  lệnh đọc thủ công vẫn dùng `open_interaction_context` hiện có, không tự thêm cold-start.
+  Finish lấy frame evidence trước force-stop và close; artifact `tiktok-cleanup` ghi proof/lỗi.
+- Publish fresh và phần lấy link của assignment Succeeded dùng clean start; assignment
+  Posting/Verifying/Uncertain không vào đường recovery này. Cleanup media và stop app
+  đều được thử; lỗi cleanup không biến bài đã đăng thành bài được phép đăng lại.
+- Android PID reader trả Result: exit1 + stdout/stderr rỗng là absent; exit0 phải có
+  PID dương hợp lệ; offline/permission/parse lỗi không thành None. Force-stop đúng
+  package tối đa2 lần, mỗi lần đọc lại tối đa3s. Lần2 xử lý Activity launch đang dở
+  tự sinh process mới đã đo trên SM-G955F, không launch trong cleanup.
+- Không kill app khác, không clear data/cache, không logout/reinstall. Không thao tác
+  máy ngoài accepted scope. Cold start không chứng minh đúng account: runner giữ các
+  guard target/card và đối chiếu tài khoản on-demand hiện có, không tự đổi login.
+
+#### 14.27 Tiến trình chung và cửa sổ máy đổi hướng (07/09/2026; xem §9.165)
+
+- `OperationProgressCenter` nằm ngoài page/editor, đọc projection các nguồn hiện có mỗi
+  2 giây, giữ trạng thái mở khi chuyển trang. Một request đang chạy không bị poll chồng;
+  chọn máy/run mới loại phản hồi cũ. Đọc lỗi có retry tại vùng lỗi, không toast.
+- Phần trăm đo phần công việc đã xử lý, không phải tỷ lệ thành công. Terminal có thể
+  đạt 100% và vẫn Failed/Partial/Uncertain; active chặn ở 99% tới khi nguồn kết thúc.
+  Nuôi dùng `deviceProgress` của đúng run; Flow không đếm đôi parent/attempt.
+  Thiếu mẫu số hiển thị chưa rõ, không dùng bộ đếm giờ giả để tăng thanh.
+- `operation_device_log` chỉ đọc máy thuộc operation đã chọn, không lấy ring chỉ khóa
+  theo UDID làm lịch sử phiên. Nuôi đọc `nurture_run_status_events`; migration 32 thêm
+  `operation_device_events`, trigger cùng transaction với assignment/action Tương tác
+  và Đăng bài. Backfill chỉ trạng thái cuối có timestamp nguồn, không dựng lại quá khứ.
+- Nhật ký trả tối đa 500 mốc gần nhất, báo `truncated`; giờ hiển thị local HH:mm:ss,
+  timestamp đầy đủ ở tooltip. Flow có mốc attempt; batch cũ không có giờ từng máy dùng
+  `--:--:--`; script/điều phối chưa có timeline per-device, không chép log fleet cho từng máy.
+- Focus đo zoom theo cạnh ngắn, giữ tỉ lệ decoded frame, giới hạn theo viewport và
+  xếp menu dưới ở màn hẹp. Đổi kích thước/generation hủy gesture cũ, không phát lại.
+  Nút về dọc gọi API rotation đang có qua lease; chỉ xác nhận khi readback bằng 0.
+  Không sửa orientation trên điện thoại chỉ vì người dùng mở preview.
+
+#### 14.28 Cửa sổ tiến trình nổi và xoá bản ghi theo dõi (07/09/2026; xem §9.166)
+
+- Thay cách bố trí dưới PageHeader của §14.27 bằng portal tới body, cửa sổ fixed
+  không đẩy grid/editor xuống. Thu nhỏ giữ thanh %, mở rộng giữ log; không modal,
+  không backdrop. Layer thấp hơn điều khiển máy và dialog xác nhận.
+- Kéo trực tiếp thanh tiêu đề bằng pointer capture hoặc các phím mũi tên khi focus
+  tiêu đề (sửa tiếp ở §9.167, bỏ nút grip). Clamp theo kích thước
+  cửa sổ/viewport, kể cả resize và mở lại sau thu nhỏ. Escape thu nhỏ và trả focus.
+- Xoá chỉ là dismiss bản ghi terminal khỏi monitor, không gọi IPC mutation, không
+  huỷ run, không xoá audit/journal/Sheet. Có xoá từng bản ghi, xoá tất cả terminal và
+  hoàn tác lượt xoá gần nhất; queued/running luôn giữ lại.
+- `riviu.monitor.dismissed.v1` lưu ID/state/updatedAt/counters và thời điểm dismiss,
+  không lưu log/secret. Snapshot thay đổi hoặc run chạy lại phải hiện lại. Retention
+  local 7 ngày, danh sách nguồn 24 giờ + mọi active. Lỗi ghi giữ nguyên bản ghi và hiện
+  retry; lỗi đọc không được giả là đã xoá. Lịch sử thật vẫn ở Tác vụ.
+- Phân biệt click/drag bằng ngưỡng 4 CSS px; chỉ capture khi vượt ngưỡng. Sau drag,
+  click tổng hợp bị chặn một lần để không thu nhỏ ngoài ý muốn. Pointercancel/lost
+  capture kết thúc drag; keyboard click và lần pointerdown kế tiếp vẫn bình thường.
+  Nút có `data-monitor-no-drag` không khởi động drag hoặc di chuyển bằng phím mũi tên.
+
+#### 14.29 Monitor một tác vụ, danh sách máy gọn và nhật ký dễ đọc (07/09/2026; xem §9.168)
+
+- Thay accordion nhiều run của §14.28 bằng select một run, nhãn gồm title/scope/time.
+  Mỗi run mount `OperationRunDevices` theo key operationId; đổi run xoá lựa chọn máy,
+  không giữ log từ run cũ. API/persistence/effect semantics không thay đổi.
+- Expanded chỉ có một progressbar từ summary nguồn đang chọn; không vẽ thanh100%
+  ở mọi máy terminal. Success/warning/uncertain luôn thể hiện bằng chữ/icon. Tổng máy
+  được lấy từ các device rows, không gọi targetCount của Interaction là số máy.
+- Hai cột cố định: tìm/lọc máy bên trái; Nhật ký/Bằng chứng bên phải. Mỗi cột cuộn
+  riêng và phần header/tab không cuộn lẫn timeline. Scope/ID/raw evidence không mất.
+- Số máy là primary; chỉ model nhận dạng chắc chắn được đưa xuống secondary, alias
+  người dùng giữ nguyên. Timeline map `queued` sang tiếng Việt, tóm tắt nhãn calibration,
+  giữ nguyên message nguồn trong disclosure. Không sửa DB/message của runtime.
+- Gộp chỉ các dòng liên tiếp có action/state/text/detail giống tuyệt đối; giữ timestamp
+  đầu/cuối và số lần. Không gộp dòng khác error/evidence hoặc từ phiên/máy khác.
+
+#### 14.30 Monitor state continuity và nghiệm thu UI (07/09/2026; xem §9.169)
+
+- React `Activity` giữ selection/tab/order/scroll khi thu nhỏ và đổi tab, đồng thời
+  dừng effects đọc ở vùng ẩn. Selected run được pin từ lần mở đầu, polling run khác
+  không tự thay inspector. Lọc máy chỉ hiện chi tiết máy còn trong tập lọc.
+- Phóng rộng bằng nút riêng, khôi phục vị trí khi trở lại; không kéo trong maximized.
+  Pointerup/cancel ngoài header trước ngưỡng capture, blur và mode change đều giải
+  phóng drag. Không restore frame hay sửa thiết bị bằng thao tác cửa sổ.
+- Cửa sổ 900x620 fit viewport, header/summary nén; inspector heading/tabs chung hàng.
+  <=600px dùng danh sách hoặc chi tiết toàn chiều rộng, nút Back trả focus về list.
+  Newest-first mặc định; raw log qua nút info, message căn cùng trục với nhau.
+- Menu More chứa dọn terminal; Escape đóng menu trước khi thu nhỏ; click ngoài đóng
+  menu. Các nút công cụ có tên ARIA; tabs chỉ đúng panel, focus không nằm trong pane ẩn.
+- `deviceRows` ưu tiên terminal Uncertain; terminal hỗn hợp là Partial thay vì lấy
+  trạng thái đầu. `deviceStateCounts` đếm đủ success/issues/active/stopped, không coi
+  aggregate không có UDID là máy. Không đổi dữ liệu chuẩn/audit ở backend.
+
+#### 14.31 Monitor gọn mặc định (07/09/2026; xem §9.170)
+
+- Theo yêu cầu gọn nhẹ, mặc định300x44 thu nhỏ,480x410 mở; không còn900x620 mặc định.
+  Hàng máy34px, tên và trạng thái trên một hàng, font token giữ nguyên. Cảnh báo vẫn
+  có icon/accessible name, phần trăm vẫn là progressbar thật.
+- `OperationRunDevices compact={!maximized}` chọn master/detail một cột trên cả
+  desktop; Back hiện sau chọn máy. Phóng rộng mở hai cột trên viewport rộng, màn hẹp
+  vẫn một cột. Không đổi key/state khi thay compact để giữ selection/log/order.
+- Tìm/lọc ở danh sách, Nhật ký/Bằng chứng ở chi tiết; hidden controls không được thao
+  tác trước khi Back hoặc maximize. Giữ title drag, dismiss/undo và effect semantics.
+
+#### 14.32 Interaction target proof và kết thúc hành động chưa chạy (07/09/2026; xem §9.171)
+
+- Campaign hierarchy dùng `open_exact_target_by_hierarchy`: copied canonical URL phải
+  khớp author, content ID và loại bài. Tên hiển thị giống nhau không chứng minh đúng bài.
+  Bài đang mở được xác minh tại chỗ; nếu cần chỉ dispatch một URL pinned, không về Home
+  để ép author thay đổi. Chờ settle900ms, chỉ retry chứng minh link sai trong cửa sổ14s;
+  lỗi transport/card đổi dừng. Cửa sổ chờ card không bao gồm toàn bộ thời gian copy/link.
+- `read_target_identity_caption` đọc một caption đo được `:id/desc` không rỗng, kể cả
+  ngắn. Nhiều caption, đọc lỗi hoặc node rỗng đều từ chối; chỉ khi không có node đo
+  mới dùng fallback class>=40 ký tự. Reader nội dung AI `read_post_caption` không đổi.
+- `settle_owned_interaction_assignment` dùng cùng transaction cho CAS assignment và
+  action còn `planned` không có effect intent. Khi parent Failed/Uncertain/SkippedParent,
+  các action này kết thúc `failed_before_effect`, evidence `assignmentStopped`.
+  Không đổi sibling hoặc action Preparing/Armed/Confirmed/NoOp/Uncertain; CAS thua không
+  ghi tiếp. Giữ nguyên nhân action và anyhow chain trong assignment/ảnh lỗi.
+- UI chỉ chiếu planned+effectIntent=null dưới parent terminal cũ thành chưa thực hiện;
+  không sửa lịch sử DB. Response detail/evidence/ảnh phải khớp campaign và request ticket;
+  đổi selection/unmount vô hiệu response cũ. Selected và hover là hai trạng thái riêng.
+- Nghiệm thu `target-proof-only` dùng DB riêng, một Android và URL env bắt buộc; mở bài,
+  copy link, đọc hierarchy/frame hai lần, rồi finish session. Không tạo public campaign.
+
+#### 14.33 Interaction phân biệt bài không khả dụng và lỗi đọc thiết bị (07/09/2026; xem §9.172)
+
+- Chỉ ghi `target_post_unavailable` khi sau pinned dispatch, đúng package TikTok đang
+  foreground và cây trả đúng text `This video is unavailable`. Không suy ra bài bị xóa,
+  account bị chặn hay mọi máy đều mất quyền xem từ một lỗi link; không retry sau khi
+  quan sát thông báo này. Không có public action để thử khả năng truy cập.
+- `TargetLinkMismatch` giữ expected/observed canonical URL, bỏ query/fragment, từ chối
+  userinfo và giới hạn mỗi giá trị 512 ký tự. Guard vẫn so author, loại bài và content ID;
+  URL chẩn đoán không được dùng thay đối tượng target gốc. Chỉ mismatch typed mới được
+  đọc lại trong cửa sổ hiện có, không dispatch lại URL hay suy thành thành công.
+- Lỗi hết cửa sổ ghi predicate cuối: foreground, Comments, author hoặc caption. Cửa sổ
+  14 giây là ngân sách poll, không phải deadline tổng của ADB/HTTP/clipboard. Mỗi request
+  giữ deadline riêng; không bọc hủy WDA request giữa chừng để rút ngắn số đo.
+- Android đọc đủ từng package ứng viên: exit khác 0, stderr, dòng sai định dạng hoặc
+  transport lỗi là `target_package_unreadable`, không phải TikTok chưa cài. Một ứng viên
+  đọc lỗi làm cả kết luận vắng mặt lẫn duy nhất mất bằng chứng; không cache kết quả đó.
+  Package hợp lệ đã cache giữ cơ chế hiện tại, không tự reinstall hoặc reset thiết bị.
+- AI preparation lỗi dùng `settle_owned_interaction_assignment` với revision đang sở hữu;
+  action chưa chạy được kết thúc cùng transaction, không hạ sibling hay mở lại public effect.
+  UI ưu tiên nguyên nhân target cụ thể trong anyhow chain, giữ raw details và guidance đúng
+  phạm vi máy; trạng thái không khả dụng và lỗi dịch vụ Android là hai nhãn khác nhau.
+
+#### 14.34 Đăng bài nhận thư mục bài đơn và giữ scope quét nguồn (07/09/2026; xem §9.173)
+
+- `scan_publish_folder` giữ ưu tiên thư mục con: nếu có child directory, quét từng child
+  theo hợp đồng cũ và không trộn media rời ở root vào các bundle. Chỉ khi không có child
+  directory và có file media/caption trực tiếp thì gọi cùng `scan_bundle` cho chính root.
+  Root rỗng hoặc chỉ có file không liên quan vẫn trả `NoBundles`.
+- Quét bài đơn không tạo schema, ID hoặc hash mới. Cùng thư mục bài được chọn trực tiếp
+  hay qua thư mục cha phải cho cùng bundle, thứ tự ảnh, caption, partner metadata và hash.
+  Các guard caption không rỗng, thứ tự/số ảnh, MP4 và cấm trộn media giữ nguyên.
+- UI ghi lại đường dẫn vừa quét ngay cả khi quét thất bại; lỗi riêng tại nguồn có nhãn
+  tiếng Việt và raw details. Scan ticket gắn đường dẫn và lifecycle; response thành công,
+  lỗi hoặc finally cũ không thay manifest/loading của đường dẫn mới. Đổi nguồn xóa lựa
+  chọn bundle/caption cũ và vô hiệu preflight; không tự điền nguồn mẫu khi lỗi.
+- Áp profile dùng ticket và draft key để từ chối response đến muộn. Preflight snapshot
+  vẫn khóa source root, bundle IDs, caption, targets và sound policy. Create campaign
+  quét lại, so digest đã duyệt rồi mới copy vào vùng quản lý; copy kiểm hash từng media.
+  Quét không chuyển file xuống máy, không mở composer, không Post và không sửa file nguồn.

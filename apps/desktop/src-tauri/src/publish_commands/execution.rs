@@ -171,6 +171,7 @@ pub async fn publish_create_campaign(
     run_at: Option<String>,
     caption_overrides: Option<HashMap<String, String>>,
     sound_policy: Option<riviu_core::PublishSoundPolicy>,
+    sheet_enabled: Option<bool>,
     target_ref: Option<riviu_core::TargetRef>,
     confirmed: Option<bool>,
     approved_input_digest: String,
@@ -180,6 +181,7 @@ pub async fn publish_create_campaign(
     let sound_policy = sound_policy.unwrap_or_default();
     let confirmed = confirmed.unwrap_or(false);
     let preflight_request = riviu_core::PublishPreflightRequest {
+        sheet_enabled: sheet_enabled.unwrap_or(true),
         source_root: source_root.clone(),
         bundle_ids: bundle_ids.clone(),
         udids: udids.clone(),
@@ -237,6 +239,7 @@ pub async fn publish_create_campaign(
     }
     let managed_bundle_ids = managed.iter().map(|bundle| bundle.id.clone()).collect();
     let request = PublishCampaignRequest {
+        sheet_enabled: sheet_enabled.unwrap_or(true),
         request_id: request_id.clone(),
         source_root,
         bundle_ids: managed_bundle_ids,
@@ -376,6 +379,7 @@ pub(super) fn persist_reconciled_publish_execution(
             "status": status,
             "retryScope": retry_scope,
             "source": "typed_state_reconciliation",
+            "sheetEnabled": request.sheet_enabled,
             "targetSnapshot": request.target_snapshot,
         }),
     )
@@ -434,6 +438,7 @@ pub(super) fn publish_execution_report(
     result: &riviu_core::PublishCampaignExecutionResult,
 ) -> anyhow::Result<serde_json::Value> {
     Ok(serde_json::json!({
+        "sheetEnabled": request.sheet_enabled,
         "targetSnapshot": request.target_snapshot,
         "result": serde_json::to_value(result)?,
     }))
@@ -1062,10 +1067,36 @@ pub(crate) async fn execute_publish_campaign_inner(
             ));
             continue;
         };
-        let current_evidence = assignment
+        let mut current_evidence = assignment
             .evidence_json
             .as_deref()
             .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok());
+        if assignment.state == riviu_core::PublishCampaignState::Succeeded {
+            if let Some(link) = current_evidence.as_ref().and_then(post_url_owed) {
+                match riviu_core::tiktok_share::resolve_canonical_post_link(link).await {
+                    Ok(canonical) => {
+                        let evidence = evidence_with_post_url(current_evidence.clone(), &canonical);
+                        db.record_publish_success_with_sheet_row(
+                            &assignment.id,
+                            &evidence.to_string(),
+                            &campaign_id,
+                            &canonical,
+                            poster_identity(),
+                            &bundle.partners,
+                        )?;
+                        current_evidence = Some(evidence);
+                    }
+                    Err(error) => {
+                        issues.push(publish_issue(
+                            "linkcapture_failed",
+                            Some(&assignment),
+                            &format!("chuẩn hóa liên kết: {error}"),
+                        ));
+                        continue;
+                    }
+                }
+            }
+        }
 
         let resume = match assignment.state {
             riviu_core::PublishCampaignState::Succeeded => {
@@ -1135,6 +1166,7 @@ pub(crate) async fn execute_publish_campaign_inner(
         let effect_assignment_id = assignment.id.clone();
         let result = riviu_core::run_publish_pipeline(
             riviu_core::PublishExecutionInput {
+                sheet_enabled: request.sheet_enabled,
                 assignment_id: assignment.id.clone(),
                 bundle,
                 sound_policy: request.sound_policy.clone(),
@@ -1346,9 +1378,26 @@ impl riviu_core::PublishRuntimePort for DesktopPublishRuntimePort {
         &mut self,
         bundle: &riviu_core::PublishBundle,
     ) -> Result<String, String> {
-        capture_confirmed_assignment_link(&self.control, &self.assignment, bundle)
+        let link = capture_confirmed_assignment_link(&self.control, &self.assignment, bundle)
             .await
-            .map_err(|error| error.to_string())
+            .map_err(|error| error.to_string())?;
+        let link = riviu_core::tiktok_share::resolve_canonical_post_link(&link)
+            .await
+            .map_err(|error| error.to_string())?;
+        // Link persistence must not depend on whether the operator wants a Sheet row.
+        let evidence = evidence_with_post_url(self.current_evidence.clone(), &link);
+        self.db
+            .record_publish_success_with_sheet_row(
+                &self.assignment.id,
+                &evidence.to_string(),
+                &self.campaign_id,
+                &link,
+                poster_identity(),
+                &bundle.partners,
+            )
+            .map_err(|error| error.to_string())?;
+        self.current_evidence = Some(evidence);
+        Ok(link)
     }
 
     async fn write_sheet(
@@ -1449,6 +1498,12 @@ pub(super) fn campaign_retry_scope(
         if results.iter().any(|result| result.retry_scope == scope) {
             return scope;
         }
+    }
+    if issues
+        .iter()
+        .any(|issue| issue.code == "linkcapture_failed")
+    {
+        return riviu_core::PublishRetryScope::LinkAndSheet;
     }
     if issues.is_empty() {
         riviu_core::PublishRetryScope::None
@@ -1587,6 +1642,10 @@ pub(super) async fn capture_confirmed_assignment_link(
     bundle: &riviu_core::PublishBundle,
 ) -> anyhow::Result<String> {
     anyhow::ensure!(
+        assignment.state == riviu_core::PublishCampaignState::Succeeded,
+        "link recovery requires a confirmed post; never restart an uncertain Post"
+    );
+    anyhow::ensure!(
         !bundle.caption.trim().is_empty(),
         "caption rỗng nên không có identity proof cho bài"
     );
@@ -1594,10 +1653,7 @@ pub(super) async fn capture_confirmed_assignment_link(
     let session = match control.streaming_session(&context) {
         Ok(session) => session,
         Err(error) => {
-            control
-                .close_ui_context(context)
-                .await
-                .map_err(anyhow::Error::new)?;
+            close_publish_context(control, context, &assignment.udid).await?;
             return Err(anyhow::Error::new(error));
         }
     };
@@ -1623,10 +1679,7 @@ pub(super) async fn capture_confirmed_assignment_link(
             .ok_or_else(|| anyhow::anyhow!(capture.reason()))
     }
     .await;
-    let closed = control
-        .close_ui_context(context)
-        .await
-        .map_err(anyhow::Error::new);
+    let closed = close_publish_context(control, context, &assignment.udid).await;
     match (outcome, closed) {
         (Ok(link), Ok(_)) => Ok(link),
         (Err(error), _) => Err(error),
@@ -2132,10 +2185,7 @@ pub(super) async fn tidy_up_the_imported_media(
     let cleanup_while_live = control
         .cleanup_publish_media_with_ui(&context, import)
         .await;
-    control
-        .close_ui_context(context)
-        .await
-        .map_err(anyhow::Error::new)?;
+    let shutdown = close_publish_context(control, context, udid).await;
     let cleanup = match cleanup_while_live {
         Ok(cleanup) => cleanup,
         Err(first_error) => {
@@ -2160,10 +2210,37 @@ pub(super) async fn tidy_up_the_imported_media(
         == Some("cleaned")
         || cleanup.get("state").and_then(serde_json::Value::as_str) == Some("cleaned");
     anyhow::ensure!(cleaned, "native media cleanup did not return cleaned");
+    let proof = shutdown?;
+    let mut cleanup = cleanup;
+    if let Some(object) = cleanup.as_object_mut() {
+        object.insert(
+            "appCleanup".into(),
+            serde_json::json!({"state":"processAbsent","proof":proof}),
+        );
+    }
     Ok(cleanup)
 }
 
-pub(super) async fn open_publish_context(
+async fn close_publish_context(
+    control: &DeviceControlPlane,
+    context: riviu_core::UiWithStreamContext,
+    udid: &str,
+) -> anyhow::Result<riviu_core::ProcessAbsenceProof> {
+    match control.resolve_tiktok_package(udid).await {
+        Ok(package) => control
+            .finish_app_session(context, &package)
+            .await
+            .map_err(anyhow::Error::new),
+        Err(error) => {
+            let closed = control.close_ui_context(context).await;
+            Err(anyhow::anyhow!(
+                "package cleanup: {error}; close: {closed:?}"
+            ))
+        }
+    }
+}
+
+pub(crate) async fn open_publish_context(
     control: &DeviceControlPlane,
     udid: &str,
 ) -> anyhow::Result<riviu_core::UiWithStreamContext> {
@@ -2188,21 +2265,13 @@ pub(super) async fn open_publish_context(
         .resolve_tiktok_package(exclusive.udid())
         .await
         .map_err(anyhow::Error::new)?;
-    control
-        .terminate_app(&exclusive, &target_package)
-        .await
-        .map_err(anyhow::Error::new)?;
     let kind = if control.requires_fresh_text_session(udid) {
         InteractionSessionKind::FreshText
     } else {
         InteractionSessionKind::Ordinary
     };
-    let session = control
-        .start_interaction_session(exclusive, &target_package, kind)
-        .await
-        .map_err(anyhow::Error::new)?;
     control
-        .start_reserved_stream(session, capacity)
+        .start_clean_app_session(exclusive, capacity, &target_package, kind)
         .await
         .map_err(anyhow::Error::new)
 }
@@ -2857,7 +2926,7 @@ pub(super) async fn post_through_the_composer(
         Err(error) if crossed_effect_boundary => {
             return PostOutcome::Unknown(format!("{udid}: {error}"))
         }
-        Err(error) => return PostOutcome::NothingPublished(format!("{udid}: {error}")),
+        Err(error) => return PostOutcome::NothingPublished(format!("{udid}: {error:#}")),
     };
     let mut evidence = serde_json::json!({
         "state": if verdict.is_posted() { "posted" } else { "not_posted" },
@@ -2906,10 +2975,16 @@ pub(super) async fn post_through_the_composer(
             let capture =
                 riviu_core::tiktok_share::capture_own_post_link(session, &labels, &bundle.caption)
                     .await;
-            if let Some(link) = capture.link() {
-                evidence["postUrl"] = serde_json::Value::String(link.to_string());
-            }
             evidence["linkCaptureReason"] = serde_json::Value::String(capture.reason());
+            if let Some(link) = capture.link() {
+                match riviu_core::tiktok_share::resolve_canonical_post_link(link).await {
+                    Ok(link) => evidence["postUrl"] = serde_json::Value::String(link),
+                    Err(error) => {
+                        evidence["linkCaptureReason"] =
+                            serde_json::Value::String(format!("chuẩn hóa liên kết: {error}"))
+                    }
+                }
+            }
             PostOutcome::Posted(evidence)
         }
         other if other.may_retry() => PostOutcome::NothingPublished(other.reason().to_string()),

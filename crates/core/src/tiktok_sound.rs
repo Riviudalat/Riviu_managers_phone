@@ -28,9 +28,15 @@ pub struct SoundPickerPlan {
     title_id: &'static str,
     artist_id: &'static str,
     choose_id: Option<&'static str>,
+    close_with_back: bool,
 }
 
 impl SoundPickerPlan {
+    pub(crate) fn post_back_query(self) -> Option<ElementQuery<'static>> {
+        self.close_with_back
+            .then_some(ElementQuery::ResourceIdSuffix(":id/aun"))
+    }
+
     /// Resolve only an exact build/locale tuple measured on the attached fleet.
     pub fn resolve(package: &str, locale: &str, version: &str) -> Option<Self> {
         let language = locale
@@ -51,7 +57,9 @@ impl SoundPickerPlan {
                 row_id: ":id/ta8",
                 title_id: ":id/title",
                 artist_id: ":id/rr5",
-                choose_id: Some(":id/dfu"),
+                // dfu is the trim scissors, not a choose control (live 2026-09-06).
+                choose_id: None,
+                close_with_back: true,
             }),
             ("com.zhiliaoapp.musically", "46.2.1") => Some(Self {
                 entry_id: ":id/dvc",
@@ -65,6 +73,7 @@ impl SoundPickerPlan {
                 // row's stable selection target; the readback below still decides whether it
                 // took.
                 choose_id: None,
+                close_with_back: false,
             }),
             ("com.zhiliaoapp.musically", "46.2.42") => Some(Self {
                 entry_id: ":id/dv3",
@@ -75,6 +84,7 @@ impl SoundPickerPlan {
                 title_id: ":id/title",
                 artist_id: ":id/zdw",
                 choose_id: None,
+                close_with_back: false,
             }),
             _ => None,
         }
@@ -99,6 +109,7 @@ impl SoundPickerPlan {
 pub struct ObservedSoundPool {
     pub candidates: Vec<SoundCandidate>,
     targets: Vec<ElementBox>,
+    selected_index: Option<usize>,
 }
 
 impl ObservedSoundPool {
@@ -129,6 +140,14 @@ pub async fn open_and_observe_sounds(
         .await
         .context("open sound picker")?;
 
+    observe_sound_pool(session, plan, maximum_visible).await
+}
+
+async fn observe_sound_pool(
+    session: &dyn UiSession,
+    plan: SoundPickerPlan,
+    maximum_visible: usize,
+) -> anyhow::Result<ObservedSoundPool> {
     let deadline = Instant::now() + PICKER_WINDOW;
     let (rows, titles, artists, choices) = loop {
         let section = session
@@ -150,7 +169,7 @@ pub async fn open_and_observe_sounds(
             .locate_all_described(ElementQuery::ResourceIdSuffix(plan.artist_id))
             .await
             .unwrap_or_default();
-        let choices = match plan.choose_id {
+        let choices = match plan.choose_id.or(plan.close_with_back.then_some(":id/dfu")) {
             Some(id) => session
                 .locate_all(ElementQuery::ResourceIdSuffix(id))
                 .await
@@ -180,14 +199,51 @@ pub async fn choose_and_confirm_sound(
         .candidates
         .get(index)
         .context("sound selection index is outside the observed pool")?;
-    let target = pool
+    let fresh = observe_sound_pool(session, plan, pool.candidates.len()).await?;
+    let target = reproof_target(pool, &fresh, index)?;
+    if fresh.selected_index != Some(index) {
+        session
+            .tap(target.centre())
+            .await
+            .context("select observed sound")?;
+    }
+    if plan.close_with_back {
+        // The measured Android sheet selects inline; Back closes only that sheet.
+        // Prove the same pool remains before dismissing it, then prove the editor chip.
+        let deadline = Instant::now() + READBACK_WINDOW;
+        loop {
+            let selected_pool = observe_sound_pool(session, plan, pool.candidates.len()).await?;
+            reproof_target(pool, &selected_pool, index)?;
+            if selected_pool.selected_index == Some(index) {
+                break;
+            }
+            anyhow::ensure!(
+                Instant::now() < deadline,
+                "selected sound row not confirmed before closing picker"
+            );
+            tokio::time::sleep(POLL).await;
+        }
+        session.back().await.context("close inline sound picker")?;
+    }
+    confirm_sound(session, plan, &candidate.title)
+        .await
+        .context("initial sound selection readback")
+}
+
+fn reproof_target<'a>(
+    expected: &ObservedSoundPool,
+    fresh: &'a ObservedSoundPool,
+    index: usize,
+) -> anyhow::Result<&'a ElementBox> {
+    anyhow::ensure!(
+        expected.candidates == fresh.candidates,
+        "sound candidates changed before selection"
+    );
+    let target = fresh
         .target(index)
         .context("sound selection target is missing")?;
-    session
-        .tap(target.centre())
-        .await
-        .context("select observed sound")?;
-    confirm_sound(session, plan, &candidate.title).await
+    anyhow::ensure!(target.enabled, "sound selection control disabled");
+    Ok(target)
 }
 
 /// Re-read the editor chip. The exact title and exactly one node are both required.
@@ -209,7 +265,7 @@ pub async fn confirm_sound(
             return Ok(());
         }
         if Instant::now() >= deadline {
-            anyhow::bail!("selected sound was not confirmed on the editor");
+            anyhow::bail!("selected sound was not confirmed on the editor: expected {expected:?}, observed {:?}", rows.iter().map(|row| row.description.as_deref()).collect::<Vec<_>>());
         }
         tokio::time::sleep(POLL).await;
     }
@@ -226,7 +282,15 @@ fn assemble_pool(
     rows.sort_by(|left, right| left.y.total_cmp(&right.y));
     let mut candidates = Vec::new();
     let mut targets = Vec::new();
-    for row in rows.into_iter().take(maximum_visible) {
+    let mut selected_index = None;
+    for (index, row) in rows.into_iter().take(maximum_visible).enumerate() {
+        if plan.close_with_back && !inside(&row, &choices).is_empty() {
+            anyhow::ensure!(
+                selected_index.is_none() && inside(&row, &choices).len() == 1,
+                "ambiguous selected sound row"
+            );
+            selected_index = Some(index);
+        }
         let title = exactly_one(inside(&row, &titles), "sound title inside candidate row")?;
         let title_text = title
             .description
@@ -268,6 +332,7 @@ fn assemble_pool(
     Ok(ObservedSoundPool {
         candidates,
         targets,
+        selected_index,
     })
 }
 
@@ -305,6 +370,140 @@ fn normalize_artist(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    struct InlineSession {
+        selected: AtomicBool,
+        closed: AtomicBool,
+        taps: AtomicUsize,
+        select_takes: bool,
+    }
+
+    #[async_trait::async_trait]
+    impl UiSession for InlineSession {
+        async fn tap(&self, _: crate::TapPoint) -> anyhow::Result<()> {
+            self.taps.fetch_add(1, Ordering::Relaxed);
+            if self.select_takes {
+                self.selected.fetch_xor(true, Ordering::Relaxed);
+            }
+            Ok(())
+        }
+        async fn swipe(&self, _: crate::SwipeGesture) -> anyhow::Result<()> {
+            unreachable!()
+        }
+        async fn type_text(&self, _: &str) -> anyhow::Result<()> {
+            unreachable!()
+        }
+        async fn home(&self) -> anyhow::Result<()> {
+            unreachable!()
+        }
+        async fn back(&self) -> anyhow::Result<()> {
+            self.closed.store(true, Ordering::Relaxed);
+            Ok(())
+        }
+        async fn find_and_tap(&self, _: &str) -> anyhow::Result<()> {
+            unreachable!()
+        }
+        async fn assert_visible(&self, _: &str) -> anyhow::Result<()> {
+            unreachable!()
+        }
+        fn stream_url(&self) -> Option<String> {
+            None
+        }
+        async fn locate_all(&self, query: ElementQuery<'_>) -> anyhow::Result<Vec<ElementBox>> {
+            Ok(match query {
+                ElementQuery::ResourceIdSuffix(":id/ta8") => vec![ElementBox {
+                    height: 200.0,
+                    ..element(100.0, None)
+                }],
+                ElementQuery::ResourceIdSuffix(":id/dfu")
+                    if self.selected.load(Ordering::Relaxed) =>
+                {
+                    vec![element(125.0, None)]
+                }
+                _ => vec![],
+            })
+        }
+        async fn locate_all_described(
+            &self,
+            query: ElementQuery<'_>,
+        ) -> anyhow::Result<Vec<ElementBox>> {
+            Ok(match query {
+                ElementQuery::Text {
+                    value: "Recommended",
+                    ..
+                } => vec![element(0.0, Some("Recommended"))],
+                ElementQuery::ResourceIdSuffix(":id/title") => vec![element(120.0, Some("One"))],
+                ElementQuery::ResourceIdSuffix(":id/rr5") => vec![element(180.0, Some("Artist"))],
+                ElementQuery::ResourceIdSuffix(":id/so9")
+                    if self.closed.load(Ordering::Relaxed)
+                        && self.selected.load(Ordering::Relaxed) =>
+                {
+                    vec![element(20.0, Some("One"))]
+                }
+                _ => vec![],
+            })
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn inline_sound_desired_state_never_toggles_an_already_selected_track_off() {
+        for selected in [false, true] {
+            let session = InlineSession {
+                selected: AtomicBool::new(selected),
+                closed: AtomicBool::new(false),
+                taps: AtomicUsize::new(0),
+                select_takes: true,
+            };
+            let plan =
+                SoundPickerPlan::resolve("com.ss.android.ugc.trill", "en", "38.3.2").unwrap();
+            let pool = observe_sound_pool(&session, plan, 1).await.unwrap();
+            choose_and_confirm_sound(&session, plan, &pool, 0)
+                .await
+                .unwrap();
+            assert_eq!(session.taps.load(Ordering::Relaxed), usize::from(!selected));
+            assert!(session.closed.load(Ordering::Relaxed));
+            assert!(session.selected.load(Ordering::Relaxed));
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn unconfirmed_sound_selection_stops_without_another_tap_or_closing_picker() {
+        let session = InlineSession {
+            selected: AtomicBool::new(false),
+            closed: AtomicBool::new(false),
+            taps: AtomicUsize::new(0),
+            select_takes: false,
+        };
+        let plan = SoundPickerPlan::resolve("com.ss.android.ugc.trill", "en", "38.3.2").unwrap();
+        let pool = observe_sound_pool(&session, plan, 1).await.unwrap();
+        assert!(choose_and_confirm_sound(&session, plan, &pool, 0)
+            .await
+            .is_err());
+        assert_eq!(session.taps.load(Ordering::Relaxed), 1);
+        assert!(!session.closed.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn sound_reproof_rejects_changed_pool_and_uses_fresh_position() {
+        let expected = ObservedSoundPool {
+            selected_index: None,
+            candidates: vec![SoundCandidate {
+                section: "recommended".into(),
+                title: "One".into(),
+                artist: "Artist".into(),
+            }],
+            targets: vec![element(100.0, None)],
+        };
+        let mut fresh = expected.clone();
+        fresh.targets[0].y = 200.0;
+        assert_eq!(reproof_target(&expected, &fresh, 0).unwrap().y, 200.0);
+        fresh.candidates[0].artist = "Other".into();
+        assert!(reproof_target(&expected, &fresh, 0).is_err());
+        fresh.candidates = expected.candidates.clone();
+        fresh.targets[0].enabled = false;
+        assert!(reproof_target(&expected, &fresh, 0).is_err());
+    }
 
     fn element(y: f64, description: Option<&str>) -> ElementBox {
         ElementBox {
@@ -320,6 +519,8 @@ mod tests {
 
     #[test]
     fn plans_are_exactly_version_and_locale_keyed() {
+        let trill = SoundPickerPlan::resolve("com.ss.android.ugc.trill", "en", "38.3.2").unwrap();
+        assert!(trill.choose_id.is_none() && trill.close_with_back);
         assert!(SoundPickerPlan::resolve("com.ss.android.ugc.trill", "en-US", "38.3.2").is_some());
         assert!(SoundPickerPlan::resolve("com.zhiliaoapp.musically", "en", "46.2.1").is_some());
         assert!(SoundPickerPlan::resolve("com.zhiliaoapp.musically", "en", "46.2.42").is_some());
@@ -348,7 +549,7 @@ mod tests {
             element(160.0, Some("Artist A · 10K posts")),
             element(260.0, Some("Artist B · 20K posts")),
         ];
-        let choices = vec![element(125.0, None), element(225.0, None)];
+        let choices = vec![element(125.0, None)];
         let pool = assemble_pool(plan, rows, titles, artists, choices, 5).expect("pool");
         assert_eq!(
             pool.candidates,
@@ -366,6 +567,7 @@ mod tests {
             ]
         );
         assert_eq!(pool.targets.len(), 2);
+        assert_eq!(pool.selected_index, Some(0));
     }
 
     #[test]
@@ -412,7 +614,7 @@ mod tests {
                 element(160.0, Some("Artist A")),
                 element(260.0, Some("Artist B")),
             ],
-            vec![element(125.0, None), element(225.0, None)],
+            vec![element(125.0, None)],
             5,
         );
         assert!(result

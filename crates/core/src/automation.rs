@@ -502,6 +502,8 @@ impl InteractionAutomationProfileConfigV1 {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct PublishAutomationProfileConfigV1 {
+    #[serde(default = "crate::publish::default_sheet_enabled")]
+    pub sheet_enabled: bool,
     #[serde(deserialize_with = "deserialize_profile_schema_v1")]
     pub schema_version: u8,
     pub source_root: String,

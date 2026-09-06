@@ -221,7 +221,96 @@ const MIGRATIONS: &[Migration] = &[
         apply: apply_migration_31,
         rebuilds_tables: false,
     },
+    Migration {
+        version: 32,
+        name: "operation-device-timeline",
+        apply: apply_migration_32,
+        rebuilds_tables: false,
+    },
 ];
+
+fn apply_migration_32(tx: &Transaction<'_>) -> anyhow::Result<()> {
+    tx.execute_batch(
+        "CREATE TABLE operation_device_events (
+        sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+        source_kind TEXT NOT NULL,
+        source_id TEXT NOT NULL,
+        udid TEXT NOT NULL,
+        action TEXT NOT NULL,
+        state TEXT NOT NULL,
+        recorded_at TEXT NOT NULL,
+        text TEXT,
+        detail TEXT
+    );
+    CREATE INDEX operation_device_events_source
+      ON operation_device_events(source_kind,source_id,udid,sequence);",
+    )?;
+    // Source transitions and history commit together. No second runtime or polling clock.
+    // Backfill is the last known source state, not reconstructed intermediate actions.
+    for (table, kind, source, udid, action, text, detail, predicate) in [
+        (
+            "interaction_assignments",
+            "interaction",
+            "campaign_id",
+            "actor_udid",
+            "'interaction'",
+            "prepared_json",
+            "error_code",
+            "1",
+        ),
+        (
+            "tiktok_action_runs",
+            "interaction",
+            "campaign_id",
+            "device_udid",
+            "action_kind",
+            "NULL",
+            "error_code",
+            "owner_kind='interaction'",
+        ),
+        (
+            "publish_assignments",
+            "publish",
+            "campaign_id",
+            "udid",
+            "'publish'",
+            "NULL",
+            "error_code",
+            "1",
+        ),
+    ] {
+        let fields = format!("'{kind}',{source},{udid},{action},state,updated_at,{text},{detail}");
+        tx.execute_batch(&format!(
+            "INSERT INTO operation_device_events
+            (source_kind,source_id,udid,action,state,recorded_at,text,detail)
+            SELECT {fields} FROM {table} WHERE {predicate};"
+        ))?;
+        for transition in ["INSERT", "UPDATE"] {
+            let watched = if table == "tiktok_action_runs" {
+                "state,error_code,evidence_json"
+            } else if table == "interaction_assignments" {
+                "state,error_code,prepared_json,evidence_json"
+            } else {
+                "state,error_code,evidence_json"
+            };
+            let event = if transition == "UPDATE" {
+                format!("UPDATE OF {watched}")
+            } else {
+                transition.to_string()
+            };
+            tx.execute_batch(&format!(
+                "CREATE TRIGGER {table}_operation_log_{transition}
+                AFTER {event} ON {table}
+                BEGIN
+                  INSERT INTO operation_device_events
+                    (source_kind,source_id,udid,action,state,recorded_at,text,detail)
+                  SELECT {fields} FROM {table} WHERE id=NEW.id AND {predicate};
+                END;"
+            ))?;
+        }
+    }
+    Ok(())
+}
 
 fn apply_migration_31(tx: &Transaction<'_>) -> anyhow::Result<()> {
     tx.execute_batch(
@@ -3319,7 +3408,10 @@ INSERT INTO tiktok_action_runs
 
         run(&mut connection).expect("apply migration 30");
 
-        assert_eq!(migration_rows(&connection).last().unwrap().0, 31);
+        assert_eq!(
+            migration_rows(&connection).last().unwrap().0,
+            super::latest_version()
+        );
         assert!(table_exists(
             &connection,
             "nurture_follow_source_identities"

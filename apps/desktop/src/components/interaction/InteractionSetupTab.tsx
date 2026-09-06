@@ -3,6 +3,7 @@ import { InteractionThreshold, type ThresholdControls } from "./InteractionThres
 import { Banner } from "../States";
 import { InteractionActorPicker } from "./InteractionActorPicker";
 import { InteractionPlanPreview } from "./InteractionPlanPreview";
+import { InteractionSheetImport } from "./InteractionSheetImport";
 import { linkErrorVi } from "../../interactionErrors";
 import {
   effectiveMessageCount,
@@ -50,8 +51,11 @@ export function InteractionSetupTab({
   hierarchyActors,
   largestCohort,
   handles,
+  handleErrors,
+  savingHandles,
   onHandleChange,
   onHandleBlur,
+  onHandleReload,
   mentions,
   mentionActorCount,
   linkBusy,
@@ -76,8 +80,11 @@ export function InteractionSetupTab({
   hierarchyActors: DeviceInfo[];
   largestCohort: number;
   handles: Record<string, string>;
+  handleErrors?: Record<string, string>;
+  savingHandles?: Record<string, boolean>;
   onHandleChange: (udid: string, value: string) => void;
   onHandleBlur: (udid: string, value: string) => void;
+  onHandleReload?: (udid: string) => void;
   mentions: string[];
   mentionActorCount: number;
   linkBusy: boolean;
@@ -110,6 +117,7 @@ export function InteractionSetupTab({
   return (
     <div className="interaction-body nu-pane">
       <div className="nu-group-head">Bài viết</div>
+      <InteractionSheetImport onApply={(urls) => patch("rawLinks", (previous) => [...new Set([...previous.split(/\r?\n/).map((line) => line.trim()).filter(Boolean), ...urls])].join("\n"))} />
       <label className="nu-field">
         <span className="nu-label">Link TikTok — mỗi dòng một link</span>
         <textarea
@@ -285,8 +293,11 @@ export function InteractionSetupTab({
           }
           onReplace={(udids) => patch("actors", udids)}
           handles={handles}
+          handleErrors={handleErrors}
+          savingHandles={savingHandles}
           onHandleChange={onHandleChange}
           onHandleBlur={onHandleBlur}
+          onHandleReload={onHandleReload}
           mentionText={draft.mentionText}
           onMentionText={(value) => patch("mentionText", value)}
           mentions={mentions}
@@ -313,7 +324,7 @@ export function InteractionSetupTab({
             </span>
             <input
               type="number"
-              min={2}
+              min={draft.threadKind === "standalone" ? 1 : 2}
               max={64}
               // Placeholder rather than value while it is on auto: showing the computed number
               // as a value would look like a choice the operator made, and typing over it
@@ -346,13 +357,6 @@ export function InteractionSetupTab({
         </p>
       )}
 
-      <InteractionPlanPreview
-        preview={preview}
-        devices={devices}
-        deviceNumber={deviceNumber}
-        threadKind={draft.threadKind}
-      />
-
       {warnings.map((warning) => (
         <Banner key={warning} tone="warn">
           {warning}
@@ -360,6 +364,7 @@ export function InteractionSetupTab({
       ))}
         </>
       )}
+      <InteractionPlanPreview preview={preview} devices={devices} deviceNumber={deviceNumber} deviceLabel={deviceLabel} handles={handles} threadKind={draft.threadKind} commentEnabled={draft.actions.comment} />
       {runError && <Banner tone="error">{runError}</Banner>}
       {issues.length > 0 && (
         <ul className="interaction-reasons">

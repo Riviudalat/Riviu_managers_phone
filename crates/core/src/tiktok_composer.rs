@@ -82,6 +82,7 @@ use crate::tiktok_labels::{TikTokControl, TikTokControls};
 use crate::tiktok_sound::{
     choose_and_confirm_sound, confirm_sound, open_and_observe_sounds, SoundPickerPlan,
 };
+use anyhow::Context;
 
 /// How long the composer may take to appear after its tab is tapped.
 pub const COMPOSER_WINDOW: Duration = Duration::from_millis(8_000);
@@ -1365,7 +1366,7 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
     /// the feed is uncertain and this routine never taps Post again.
     async fn post_with_effect_intent<F>(
         &mut self,
-        _caption: &str,
+        caption: &str,
         stop: &AtomicBool,
         before_post: &mut F,
     ) -> anyhow::Result<ComposerVerdict>
@@ -1385,10 +1386,27 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
             return Ok(ComposerVerdict::NoPostButton);
         };
         if let Some((sound_plan, expected_title)) = self.pending_sound_proof.clone() {
-            confirm_sound(self.session, sound_plan, &expected_title).await?;
-            // `confirm_sound` is the final device round-trip before the effect boundary. Refresh
-            // the Post rectangle once after it so an old coordinate cannot survive a layout
-            // change while the sound was being proved. Ambiguity is a pre-effect refusal.
+            if let Some(back_query) = sound_plan.post_back_query() {
+                // Trill's caption page has no sound chip. Revisit its editor and
+                // return without typing again; both caption readbacks must agree.
+                self.require_caption_unchanged(caption).await?;
+                let back = self.session.locate_all(back_query).await?;
+                let [back] = back.as_slice() else {
+                    anyhow::bail!("sound reproof: caption back control missing or ambiguous");
+                };
+                self.tap_inside(back).await?;
+                confirm_sound(self.session, sound_plan, &expected_title)
+                    .await
+                    .context("final sound editor reproof")?;
+                anyhow::ensure!(
+                    self.advance_to_post_screen(stop).await?,
+                    "sound reproof: caption page did not return"
+                );
+                self.require_caption_unchanged(caption).await?;
+            } else {
+                confirm_sound(self.session, sound_plan, &expected_title).await?;
+            }
+            // Resolve Post again after sound/continuity readback. Never keep the old rectangle.
             let buttons = self.session.locate_all(query).await?;
             let [current] = buttons.as_slice() else {
                 return Ok(ComposerVerdict::NoPostButton);
@@ -1418,6 +1436,16 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
         } else {
             ComposerVerdict::PostNotConfirmed
         })
+    }
+
+    async fn require_caption_unchanged(&self, caption: &str) -> anyhow::Result<()> {
+        let query = self.plan.publish.context("caption plan missing")?.caption;
+        let rows = self.session.locate_all_described(query).await?;
+        anyhow::ensure!(
+            matches!(rows.as_slice(), [only] if only.description.as_deref().is_some_and(|value| value.trim() == caption.trim())),
+            "sound reproof: caption changed or unreadable"
+        );
+        Ok(())
     }
 
     /// Back out until the bottom tab bar is visible again.
@@ -2293,6 +2321,14 @@ mod tests {
             Some("fixture-edit-next"),
         )
     }
+
+    fn sound_edit_step(title: &str) -> Scene {
+        let mut scene = edit_step().texted(":id/so9", title);
+        scene
+            .elements
+            .insert(":id/so9".into(), box_at(300.0, 150.0));
+        scene
+    }
     fn post_screen() -> Scene {
         scene(
             vec![
@@ -2432,6 +2468,9 @@ mod tests {
 
     #[async_trait::async_trait]
     impl UiSession for FakeSession {
+        async fn locate_all(&self, query: ElementQuery<'_>) -> anyhow::Result<Vec<ElementBox>> {
+            Ok(self.locate(query).await?.into_iter().collect())
+        }
         async fn tap(&self, point: TapPoint) -> anyhow::Result<()> {
             if self
                 .fail_taps_after
@@ -3456,7 +3495,13 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn changed_sound_stops_before_effect_intent_and_post() {
-        let session = FakeSession::with(vec![post_screen().texted(":id/so9", "Sound B")]);
+        let mut caption_page = post_screen();
+        caption_page
+            .elements
+            .insert(":id/aun".into(), box_at(20.0, 70.0));
+        caption_page.exit = Some(":id/aun".into());
+        let session = FakeSession::with(vec![caption_page, sound_edit_step("Sound B")]);
+        *session.typed.lock() = Some("caption".into());
         let stop = AtomicBool::new(false);
         let intent_calls = std::sync::atomic::AtomicUsize::new(0);
         let mut composer = Composer::new(&session, plan(), |element: &ElementBox| element.centre());
@@ -3467,22 +3512,53 @@ mod tests {
         ));
 
         let error = composer
-            .post_with_effect_intent("", &stop, &mut || {
+            .post_with_effect_intent("caption", &stop, &mut || {
                 intent_calls.fetch_add(1, Ordering::Relaxed);
                 Ok(())
             })
             .await
             .expect_err("a changed sound must fail closed");
 
-        assert!(error
-            .to_string()
-            .contains("selected sound was not confirmed"));
+        assert!(format!("{error:#}").contains("selected sound was not confirmed"));
         assert_eq!(intent_calls.load(Ordering::Relaxed), 0);
         assert_eq!(
             post_button_taps(&session),
             0,
             "sound mismatch must be detected before the write-ahead boundary and Post gesture"
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn inline_sound_reproof_returns_to_caption_before_one_post() {
+        let mut caption_page = post_screen();
+        caption_page
+            .elements
+            .insert(":id/aun".into(), box_at(20.0, 70.0));
+        caption_page.exit = Some(":id/aun".into());
+        let session = FakeSession::with(vec![
+            caption_page,
+            sound_edit_step("Sound A"),
+            post_screen(),
+            feed(),
+        ]);
+        *session.typed.lock() = Some("caption".into());
+        let mut composer = Composer::new(&session, plan(), |element: &ElementBox| element.centre());
+        composer.pending_sound_proof = Some((
+            SoundPickerPlan::resolve("com.ss.android.ugc.trill", "en", "38.3.2").unwrap(),
+            "Sound A".into(),
+        ));
+        let mut intents = 0;
+        let verdict = composer
+            .post_with_effect_intent("caption", &AtomicBool::new(false), &mut || {
+                intents += 1;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        assert!(verdict.is_posted());
+        assert_eq!(intents, 1);
+        assert_eq!(post_button_taps(&session), 1);
+        assert_eq!(session.typed.lock().as_deref(), Some("caption"));
     }
 
     #[tokio::test(start_paused = true)]

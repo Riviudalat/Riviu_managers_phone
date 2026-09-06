@@ -12,6 +12,7 @@
 //! it can be typed into someone's comment box.
 
 use std::collections::HashSet;
+pub mod video_understanding;
 use std::sync::{Mutex, OnceLock};
 
 use anyhow::{anyhow, Context};
@@ -2299,6 +2300,8 @@ pub enum PostCoverage {
         seen_secs: u64,
         total_secs: Option<u64>,
     },
+    /// A capture window on a feed card, with no verified playback start or duration.
+    VideoWindow { span_secs: u64 },
 }
 
 /// One picture for the model, plus an honest count of how much evidence is really in it.
@@ -2336,6 +2339,7 @@ impl ContactSheet {
                 seen_secs,
                 total_secs,
             } => total_secs.is_none_or(|total| total > *seen_secs),
+            PostCoverage::VideoWindow { .. } => true,
         });
         self
     }
@@ -2352,6 +2356,10 @@ impl ContactSheet {
             // single frame of "the post": one second of fifty-two is not a still card, it is a
             // video nobody managed to watch.
             (EvidenceKind::Moments, 0 | 1) => match self.coverage {
+                Some(PostCoverage::VideoWindow { span_secs }) => format!(
+                    "ĐÚNG MỘT ảnh khác biệt trong cửa sổ lấy mẫu {span_secs} giây; chưa xác nhận \
+                     vị trí phát hoặc âm thanh. KHÔNG suy diễn chuyển động hoặc kết luận toàn bộ video"
+                ),
                 Some(PostCoverage::Video {
                     total_secs: Some(total),
                     ..
@@ -2385,6 +2393,11 @@ impl ContactSheet {
                 )
             }
             (EvidenceKind::Moments, n) => match self.coverage {
+                Some(PostCoverage::VideoWindow { span_secs }) => format!(
+                    "{n} khung KHÁC NHAU trong cửa sổ lấy mẫu {span_secs} giây; không biết vị trí \
+                     phát hoặc tổng thời lượng. Đây chỉ là một phần bài, KHÔNG chứng minh đã hiểu \
+                     toàn bộ video và không được suy diễn phần chưa quan sát"
+                ),
                 Some(PostCoverage::Video {
                     seen_secs,
                     total_secs,
@@ -4895,6 +4908,23 @@ mod tests {",
             one.starts_with("ĐÚNG MỘT khung của bài (chụp ba lần"),
             "{one}"
         );
+    }
+
+    #[test]
+    fn feed_video_window_never_claims_to_be_the_beginning_or_full_video() {
+        let moments: Vec<Vec<u8>> = (0..4).map(|index| slide_shaded(index * 60)).collect();
+        let note = make_contact_sheet(&moments, EvidenceKind::Moments)
+            .unwrap()
+            .with_coverage(Some(PostCoverage::VideoWindow { span_secs: 12 }))
+            .layout_note();
+        assert!(note.contains("không biết vị trí") && note.contains("12 giây"));
+        assert!(!note.contains("đầu của video"));
+        let still = make_contact_sheet(&[slide_shaded(10)], EvidenceKind::Moments)
+            .unwrap()
+            .with_coverage(Some(PostCoverage::VideoWindow { span_secs: 12 }))
+            .layout_note();
+        assert!(still.contains("ĐÚNG MỘT") && still.contains("12 giây"));
+        assert!(!still.contains("chụp ba lần"));
     }
 
     /// A slide count on a video, or seconds on a carousel, cannot be built — the enum forbids

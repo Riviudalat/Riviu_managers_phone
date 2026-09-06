@@ -111,6 +111,7 @@ export function publishProfileConfig(
   captionOverrides: Record<string, string>,
   soundPolicy: PublishSoundPolicy,
   executionConfirmed: boolean,
+  sheetEnabled = true,
 ): JsonValue {
   return cloneJson({
     schemaVersion: 1,
@@ -119,5 +120,6 @@ export function publishProfileConfig(
     captionOverrides,
     soundPolicy,
     executionConfirmed,
+    sheetEnabled,
   });
 }

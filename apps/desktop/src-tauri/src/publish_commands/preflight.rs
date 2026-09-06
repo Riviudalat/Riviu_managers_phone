@@ -325,15 +325,19 @@ pub(super) async fn build_publish_preflight(
 
     let input_digest =
         publish_preflight_digest(&request, &bundles, &target_snapshot, &observations)?;
-    let webhook = db
-        .get_setting(riviu_core::publish_sheet::WEBHOOK_URL_SETTING)?
-        .unwrap_or_default();
-    let token = db
-        .get_setting(riviu_core::publish_sheet::WEBHOOK_TOKEN_SETTING)?
-        .unwrap_or_default();
-    let sheet_configured = riviu_core::publish_sheet::is_acceptable_webhook(webhook.trim())
-        && !token.trim().is_empty();
+    let sheet_configured = if request.sheet_enabled {
+        let webhook = db
+            .get_setting(riviu_core::publish_sheet::WEBHOOK_URL_SETTING)?
+            .unwrap_or_default();
+        let token = db
+            .get_setting(riviu_core::publish_sheet::WEBHOOK_TOKEN_SETTING)?
+            .unwrap_or_default();
+        riviu_core::publish_sheet::is_acceptable_webhook(webhook.trim()) && !token.trim().is_empty()
+    } else {
+        false
+    };
     let report = riviu_core::PublishPreflightReport {
+        sheet_enabled: request.sheet_enabled,
         input_digest,
         target_snapshot,
         can_execute: issues.is_empty(),

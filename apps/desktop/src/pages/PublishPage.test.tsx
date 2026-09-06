@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -19,6 +19,7 @@ import {
 import { PublishPage } from "./PublishPage";
 import { requestConfirm } from "../confirmStore";
 import { resetToasts } from "../toastStore";
+import { pickDirectory } from "../pickFile";
 import type {
   AppEvent,
   DeviceInfo,
@@ -213,12 +214,155 @@ beforeEach(() => {
     .mockReset()
     .mockResolvedValue({ webhookUrl: "", hasToken: false });
   vi.mocked(publishScanFolder).mockReset().mockResolvedValue(manifest);
+  vi.mocked(pickDirectory).mockReset().mockResolvedValue("C:/carousels");
   resetToasts();
 });
 
 afterEach(cleanup);
 
 describe("publish, bundle to phone", () => {
+  it("keeps the selected path when scanning fails and places the raw scan error in details", async () => {
+    const path = "C:/Nội dung/set1 01 3n2d";
+    vi.mocked(pickDirectory).mockResolvedValueOnce(`  ${path}  `);
+    vi.mocked(publishScanFolder).mockRejectedValueOnce({ code: "OperationFailed", message: "publish folder has no bundle directories" });
+    render(<PublishPage devices={devices} selected={[]} onSelectUdids={() => {}} />);
+    fireEvent.click(screen.getByRole("button", { name: "Chọn thư mục" }));
+    expect(await screen.findByText("Chưa tìm thấy gói bài trong thư mục đã chọn")).toBeVisible();
+    expect(screen.getByRole("textbox", { name: "Thư mục nguồn" })).toHaveValue(path);
+    expect(publishScanFolder).toHaveBeenCalledWith(path);
+    expect(screen.getByText("publish folder has no bundle directories").closest("details")).not.toHaveAttribute("open");
+    expect(screen.getByRole("button", { name: "Quét nguồn" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: /Xác nhận và đăng/ })).toBeDisabled();
+  });
+
+  it.each(["resolve", "reject"] as const)("discards an older scan %s after the source path changes", async (outcome) => {
+    let resolve!: (value: PublishFolderManifest) => void;
+    let reject!: (error: Error) => void;
+    vi.mocked(publishScanFolder).mockImplementationOnce(() => new Promise((accept, fail) => { resolve = accept; reject = fail; }));
+    render(<PublishPage devices={devices} selected={[]} onSelectUdids={() => {}} />);
+    fireEvent.click(screen.getByRole("button", { name: "Chọn thư mục" }));
+    await waitFor(() => expect(publishScanFolder).toHaveBeenCalledTimes(1));
+    const source = screen.getByRole("textbox", { name: "Thư mục nguồn" });
+    expect(source).toHaveValue("C:/carousels");
+    fireEvent.change(source, { target: { value: "C:/Nguồn mới" } });
+    await act(async () => {
+      if (outcome === "resolve") resolve(manifest);
+      else reject(new Error("publish folder has no bundle directories"));
+    });
+    expect(source).toHaveValue("C:/Nguồn mới");
+    expect(screen.queryByRole("textbox", { name: "Chú thích cho bo1" })).toBeNull();
+    expect(screen.queryByText("Chưa tìm thấy gói bài trong thư mục đã chọn")).toBeNull();
+    expect(screen.getByRole("button", { name: "Quét nguồn" })).toBeEnabled();
+  });
+
+  it("does not let an older scan clear the busy state of a newer scan", async () => {
+    let resolveOld!: (value: PublishFolderManifest) => void;
+    let resolveNew!: (value: PublishFolderManifest) => void;
+    vi.mocked(publishScanFolder)
+      .mockImplementationOnce(() => new Promise((resolve) => { resolveOld = resolve; }))
+      .mockImplementationOnce(() => new Promise((resolve) => { resolveNew = resolve; }));
+    render(<PublishPage devices={devices} selected={[]} onSelectUdids={() => {}} />);
+    fireEvent.click(screen.getByRole("button", { name: "Chọn thư mục" }));
+    await waitFor(() => expect(publishScanFolder).toHaveBeenCalledTimes(1));
+    fireEvent.change(screen.getByRole("textbox", { name: "Thư mục nguồn" }), { target: { value: "C:/Nguồn mới" } });
+    fireEvent.click(screen.getByRole("button", { name: "Quét nguồn" }));
+    await waitFor(() => expect(publishScanFolder).toHaveBeenCalledTimes(2));
+    await act(async () => { resolveOld(manifest); });
+    expect(screen.getByRole("button", { name: "Quét nguồn" })).toBeDisabled();
+    expect(screen.getByText("Đang quét nội dung…")).toBeVisible();
+    await act(async () => { resolveNew({ ...manifest, sourceRoot: "C:/Nguồn mới", bundles: [bundle("new", "bài mới")] }); });
+    expect(screen.getByRole("textbox", { name: "Chú thích cho bài mới" })).toBeVisible();
+    expect(screen.queryByRole("textbox", { name: "Chú thích cho bo1" })).toBeNull();
+    expect(screen.getByRole("button", { name: "Quét nguồn" })).toBeEnabled();
+  });
+
+  it("clears the previous source inventory and preflight when the path is edited", async () => {
+    render(<PublishPage devices={devices} selected={[]} onSelectUdids={() => {}} />);
+    fireEvent.click(screen.getByRole("button", { name: "Chọn thư mục" }));
+    await screen.findByRole("textbox", { name: "Chú thích cho bo1" });
+    await waitFor(() => expect(screen.getByRole("button", { name: "Chạy preflight" })).toBeEnabled());
+    fireEvent.click(screen.getByRole("button", { name: "Chạy preflight" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: /Xác nhận và đăng/ })).toBeEnabled());
+    fireEvent.change(screen.getByRole("textbox", { name: "Thư mục nguồn" }), { target: { value: "C:/Nguồn mới" } });
+    expect(screen.queryByLabelText("Gói nội dung")).toBeNull();
+    expect(screen.getByRole("button", { name: "Chạy preflight" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: /Xác nhận và đăng/ })).toBeDisabled();
+  });
+
+  it("does not apply a pending profile scan after a new source has been selected", async () => {
+    const definition = { id: "saved-publish", name: "Đăng ca sáng", kind: "publish", latestRevision: 1, archived: false };
+    vi.mocked(automationList).mockResolvedValueOnce([definition] as never);
+    vi.mocked(automationGet).mockResolvedValueOnce({ definition, revision: {
+      definitionId: definition.id, revision: 1, targetRef: { type: "explicit", udids: ["PHONE-A"] },
+      config: { schemaVersion: 1, sourceRoot: "C:/carousels", bundleIds: ["b1"], captionOverrides: { b1: "Chú thích đã ghim" },
+        soundPolicy: { kind: "trendingAny", poolSize: 3, seed: 42 }, executionConfirmed: true },
+    } } as never);
+    let finishProfile!: (value: PublishFolderManifest) => void;
+    vi.mocked(publishScanFolder).mockImplementationOnce(() => new Promise((resolve) => { finishProfile = resolve; }));
+    render(<PublishPage devices={devices} selected={[]} onSelectUdids={() => {}} />);
+    fireEvent.change(await screen.findByRole("combobox", { name: "Hồ sơ Đăng bài" }), { target: { value: definition.id } });
+    await waitFor(() => expect(publishScanFolder).toHaveBeenCalledTimes(1));
+    fireEvent.change(screen.getByRole("textbox", { name: "Thư mục nguồn" }), { target: { value: "C:/Nguồn mới" } });
+    await act(async () => { finishProfile(manifest); });
+    expect(screen.getByRole("textbox", { name: "Thư mục nguồn" })).toHaveValue("C:/Nguồn mới");
+    expect(screen.queryByDisplayValue("Chú thích đã ghim")).toBeNull();
+    expect(screen.getByText("Thiết lập vừa thay đổi. Chọn lại hồ sơ để áp dụng.")).toBeVisible();
+    expect(screen.getByRole("button", { name: /Xác nhận và đăng/ })).toBeDisabled();
+  });
+
+  it("shows and maps a directly selected one-bundle folder without widening the source", async () => {
+    const source = "C:/Nội dung/set1 01 3n2d";
+    const single = { ...bundle("one", "set1 01 3n2d"), sourcePath: source, captionPath: `${source}/caption-set1.txt` };
+    vi.mocked(pickDirectory).mockResolvedValueOnce(source);
+    vi.mocked(publishScanFolder).mockResolvedValueOnce({ ...manifest, sourceRoot: source, bundles: [single] });
+    render(<PublishPage devices={devices} selected={[]} onSelectUdids={() => {}} />);
+    fireEvent.click(screen.getByRole("button", { name: "Chọn thư mục" }));
+    expect(await within(await screen.findByLabelText("Gói nội dung")).findByText("1 gói hợp lệ")).toBeVisible();
+    expect(screen.getByRole("checkbox", { name: "Chọn set1 01 3n2d" })).toBeChecked();
+    expect(screen.getByRole("textbox", { name: "Thư mục nguồn" })).toHaveValue(source);
+    fireEvent.click(screen.getByRole("button", { name: "Chạy preflight" }));
+    await waitFor(() => expect(preflightCampaign).toHaveBeenCalledWith(expect.objectContaining({ sourceRoot: source, bundleIds: ["one"], udids: ["PHONE-A"] })));
+    expect(createCampaign).not.toHaveBeenCalled();
+    expect(executeCampaign).not.toHaveBeenCalled();
+  });
+
+  it("keeps the existing source and manifest when the folder picker is cancelled", async () => {
+    render(<PublishPage devices={devices} selected={[]} onSelectUdids={() => {}} />);
+    fireEvent.click(screen.getByRole("button", { name: "Chọn thư mục" }));
+    await within(await screen.findByLabelText("Gói nội dung")).findByText("3 gói hợp lệ");
+    vi.mocked(pickDirectory).mockResolvedValueOnce(null);
+    fireEvent.click(screen.getByRole("button", { name: "Chọn thư mục" }));
+    await waitFor(() => expect(pickDirectory).toHaveBeenCalledTimes(2));
+    expect(publishScanFolder).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole("textbox", { name: "Thư mục nguồn" })).toHaveValue("C:/carousels");
+    expect(within(screen.getByLabelText("Gói nội dung")).getByText("3 gói hợp lệ")).toBeVisible();
+  });
+
+  it("discards a scan that finishes after unmount instead of repopulating a later workspace", async () => {
+    let resolve!: (value: PublishFolderManifest) => void;
+    vi.mocked(publishScanFolder).mockImplementationOnce(() => new Promise((accept) => { resolve = accept; }));
+    const view = render(<PublishPage devices={devices} selected={[]} onSelectUdids={() => {}} />);
+    fireEvent.click(screen.getByRole("button", { name: "Chọn thư mục" }));
+    await waitFor(() => expect(publishScanFolder).toHaveBeenCalledTimes(1));
+    view.unmount();
+    render(<PublishPage devices={devices} selected={[]} onSelectUdids={() => {}} />);
+    await act(async () => { resolve(manifest); });
+    expect(screen.getByRole("textbox", { name: "Thư mục nguồn" })).toHaveValue("");
+    expect(screen.queryByRole("textbox", { name: "Chú thích cho bo1" })).toBeNull();
+    expect(createCampaign).not.toHaveBeenCalled();
+    expect(executeCampaign).not.toHaveBeenCalled();
+  });
+
+  it("does not start scanning when a folder picker returns after the page unmounts", async () => {
+    let pick!: (path: string) => void;
+    vi.mocked(pickDirectory).mockImplementationOnce(() => new Promise((resolve) => { pick = resolve; }));
+    const { unmount } = render(<PublishPage devices={devices} selected={[]} onSelectUdids={() => {}} />);
+    fireEvent.click(screen.getByRole("button", { name: "Chọn thư mục" }));
+    unmount();
+    await act(async () => { pick("C:/Nguồn cũ"); });
+    expect(publishScanFolder).not.toHaveBeenCalled();
+  });
+
   it("navigates each setup step by keyboard without opening the execution gate", async () => {
     render(<PublishPage devices={devices} selected={[]} onSelectUdids={() => {}} />);
     await screen.findByRole("combobox", { name: "Hồ sơ Đăng bài" });
@@ -457,6 +601,7 @@ describe("publish, bundle to phone", () => {
       { type: "all" },
       true,
       "approved-digest-1",
+      true,
     ]);
     expect(executeCampaign).toHaveBeenCalledWith("campaign-1", true);
     expect(screen.queryByRole("button", { name: "Post" })).toBeNull();
@@ -629,7 +774,27 @@ describe("publish, bundle to phone", () => {
     await user.click(screen.getByRole("button", { name: "Xác nhận công khai" }));
     await user.click(screen.getByRole("button", { name: /Xác nhận và đăng \(10 → 10\)/ }));
     expect(createCampaign).toHaveBeenCalledWith("C:/carousels", tenBundles.map((entry) => entry.id), expectedUdids,
-      null, expect.any(Object), expect.any(Object), { type: "explicit", udids: expectedUdids }, true, "approved-digest-1");
+      null, expect.any(Object), expect.any(Object), { type: "explicit", udids: expectedUdids }, true, "approved-digest-1", true);
+  });
+
+  it("pins the Sheet choice, invalidates preflight when changed and does not claim Sheet delivery", async () => {
+    const user = userEvent.setup();
+    render(<PublishPage devices={[devices[0]]} selected={["PHONE-A"]} onSelectUdids={() => {}} />);
+    await user.click(screen.getByRole("button", { name: "Chọn thư mục" }));
+    await screen.findByRole("textbox", { name: "Chú thích cho bo1" });
+    await user.click(screen.getByRole("button", { name: "Chạy preflight" }));
+    const submit = screen.getByRole("button", { name: /Xác nhận và đăng/ });
+    await waitFor(() => expect(submit).toBeEnabled());
+    await user.click(screen.getByRole("checkbox", { name: "Ghi kết quả lên Sheet" }));
+    expect(submit).toBeDisabled();
+    expect(screen.queryByText("Sheet chờ cấu hình")).toBeNull();
+    await user.click(screen.getByRole("button", { name: "Chạy preflight" }));
+    await waitFor(() => expect(submit).toBeEnabled());
+    expect(preflightCampaign).toHaveBeenLastCalledWith(expect.objectContaining({ sheetEnabled: false }));
+    await user.click(submit);
+    await waitFor(() => expect(createCampaign).toHaveBeenCalledTimes(1));
+    expect(createCampaign.mock.calls[0].at(-1)).toBe(false);
+    expect(await screen.findByText("Đã đăng và lấy liên kết. Không ghi Sheet.")).toBeVisible();
   });
 
   /**
