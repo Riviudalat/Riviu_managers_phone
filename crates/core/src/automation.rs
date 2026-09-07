@@ -503,6 +503,8 @@ impl InteractionAutomationProfileConfigV1 {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct PublishAutomationProfileConfigV1 {
     #[serde(default = "crate::publish::default_sheet_enabled")]
+    pub delete_after_publish: bool,
+    #[serde(default = "crate::publish::default_sheet_enabled")]
     pub sheet_enabled: bool,
     #[serde(deserialize_with = "deserialize_profile_schema_v1")]
     pub schema_version: u8,
@@ -868,6 +870,17 @@ mod tests {
         }))
         .expect("typed publish profile");
         assert_eq!(publish.bundle_ids, ["bundle-a"]);
+        assert!(
+            publish.delete_after_publish,
+            "legacy profiles retain the old cleanup default"
+        );
+        let mut kept = serde_json::to_value(&publish).unwrap();
+        kept["deleteAfterPublish"] = serde_json::json!(false);
+        assert!(
+            !serde_json::from_value::<PublishAutomationProfileConfigV1>(kept)
+                .unwrap()
+                .delete_after_publish
+        );
 
         let nurture: NurtureAutomationProfileConfigV1 = serde_json::from_value(serde_json::json!({
             "schemaVersion": 1,

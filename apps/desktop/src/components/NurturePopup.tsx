@@ -12,6 +12,7 @@ import {
 import { InfoDot as Info } from "./InfoDot";
 import { AutomationProfileControl, type AutomationProfileHandle } from "./AutomationProfileControl";
 import { useWorkspaceDraft } from "../workspaceDraft";
+import { readFormDraft, writeFormDraft } from "../formDraftStorage";
 import {
   listenRiviuEvents,
   nurtureGetSettings,
@@ -451,7 +452,9 @@ export function NurturePopup({
         nurtureSessionLogSummary(),
       ]);
       if (settingsRef.current === original) {
-        setSettings(s);
+        const restored = original === null
+          ? readFormDraft("nurture", value => nurtureSettingsFromProfile(value as Parameters<typeof nurtureSettingsFromProfile>[0], s)) : null;
+        setSettings(restored ?? s);
         setBaseline({ settings: s, target: targetRefLatest.current });
         setCredentialBaseline(s.apiKey);
       }
@@ -547,6 +550,8 @@ export function NurturePopup({
     label: "Thiết lập Nuôi TikTok",
     dirty,
     snapshotKey,
+    autoSave: () => { if (settings) writeFormDraft("nurture", nurtureProfileConfig(settings)); },
+    onAutoSaveError: (error) => setMsg(`Chưa tự lưu được thiết lập: ${describeError(error)}`),
     save: async () => {
       try {
         return pageSurface ? await profileRef.current?.save() ?? false : await save();
@@ -562,6 +567,17 @@ export function NurturePopup({
 
   useWorkspaceDraft({
     id: "nurture-credentials", label: "Khóa API Nuôi TikTok",
+    autoSave: async () => {
+      if (!settings) return false;
+      const apiKey = settings.apiKey;
+      const persisted = await nurtureGetSettings();
+      const saved = await nurtureSaveSettings({ ...persisted, apiKey });
+      if (settingsRef.current?.apiKey !== apiKey) return false;
+      setSettings(current => current ? { ...current, apiKey: saved.apiKey, hasApiKey: saved.hasApiKey } : current);
+      setCredentialBaseline(saved.apiKey);
+      return true;
+    },
+    onAutoSaveError: (error) => setMsg(`Chưa tự lưu được khóa API: ${describeError(error)}`),
     dirty: settings !== null && credentialBaseline !== null && settings.apiKey !== credentialBaseline,
     snapshotKey: JSON.stringify(settings?.apiKey),
     save: async () => {

@@ -77,7 +77,7 @@ export function StreamQualitySection() {
       setSaving(false);
     }
   };
-  useWorkspaceDraft({ id: "settings-stream", label: "Chất lượng hình", dirty, snapshotKey: JSON.stringify(draft), save, discard });
+  useWorkspaceDraft({ autoSave: save, id: "settings-stream", label: "Chất lượng hình", dirty, snapshotKey: JSON.stringify(draft), save, discard });
 
   return (
     <section className="settings-section" aria-label="Chất lượng stream">

@@ -146,7 +146,7 @@ test("interaction reads Sheet selections and account proof without dispatching",
 test("publish monitor keeps partial delivery actionable and shows evidence at fleet viewports", async ({ page }) => {
   await fixture(page, "publish");
   await page.getByRole("button", { name: "Đăng bài", exact: true }).click();
-  await page.getByRole("tab", { name: "Theo dõi", exact: true }).click();
+  await page.getByRole("button", { name: "Theo dõi", exact: true }).click();
   await expect(page.getByText("Hoàn tất một phần", { exact: true })).toBeVisible();
   await expect(page.getByRole("button", { name: "Ghi lại Sheet" })).toBeVisible();
   await expect(page.getByRole("button", { name: "Chạy lại từ đầu" })).toHaveCount(0);
@@ -165,7 +165,11 @@ test("publish Sheet toggle is keyboard accessible and fits both workspace sizes"
   await installTauriMock(page, { androidRoster: true });
   await page.goto("/");
   await page.getByRole("button", { name: "Đăng bài", exact: true }).click();
+  await page.getByRole("button", { name: "Hồ sơ & cài đặt" }).click();
   const toggle = page.getByRole("checkbox", { name: "Ghi kết quả lên Sheet" });
+  await expect(toggle).not.toBeChecked();
+  await toggle.focus();
+  await page.keyboard.press("Space");
   await expect(toggle).toBeChecked();
   await toggle.focus();
   await page.keyboard.press("Space");

@@ -35,7 +35,6 @@ for (const viewport of [{ width: 1673, height: 1000 }, { width: 1440, height: 90
     await expect(dock.locator("summary").filter({ hasText: "Phạm vi thiết bị" })).toContainText("1 máy");
     for (const name of ["Nuôi TikTok", "Tương tác", "Đăng bài"]) {
       await tabs.getByRole("tab", { name, exact: true }).click();
-      if (name === "Tương tác") await page.getByRole("button", { name: "Bỏ thay đổi" }).click();
       await expect(tabs.getByRole("tab", { name, exact: true })).toHaveAttribute("aria-selected", "true");
       await expect(page.locator(".loading-state")).toHaveCount(0);
       const geometry = await page.evaluate(() => {
@@ -56,10 +55,16 @@ for (const viewport of [{ width: 1673, height: 1000 }, { width: 1440, height: 90
       await expect(dock).toBeVisible();
       await expect(page.getByText(/Unknown mock command/)).toHaveCount(0);
       await expect(page.locator(".activity-center-current.is-error")).toHaveCount(0);
-      await dock.getByRole("tab", { name: "Theo dõi", exact: true }).click();
-      await expect(dock.getByRole("tab", { name: "Theo dõi", exact: true })).toHaveAttribute("aria-selected", "true");
+      if (name === "Đăng bài") {
+        await dock.getByRole("button", { name: "Theo dõi", exact: true }).click();
+        await expect(dock.getByRole("region", { name: "Theo dõi", exact: true })).toBeVisible();
+      } else {
+        await dock.getByRole("tab", { name: "Theo dõi", exact: true }).click();
+        await expect(dock.getByRole("tab", { name: "Theo dõi", exact: true })).toHaveAttribute("aria-selected", "true");
+      }
       await expect(page.getByRole("grid", { name: "Lưới thiết bị" })).toBeVisible();
-      await dock.getByRole("tab", { name: "Thiết lập", exact: true }).click();
+      if (name === "Đăng bài") await dock.getByRole("button", { name: "← Về thiết lập", exact: true }).click();
+      else await dock.getByRole("tab", { name: "Thiết lập", exact: true }).click();
       await page.screenshot({ path: testInfo.outputPath(`dock-${name}.png`) });
       if (viewport.width === 1440) {
         const result = await new AxeBuilder({ page }).include(".content").withTags(["wcag2a", "wcag2aa"]).analyze();
@@ -84,10 +89,9 @@ test("dock preserves unsaved interaction form across page layout changes", async
   await page.getByRole("button", { name: "Xem cùng thiết bị" }).click();
   await expect(input).toHaveValue(value);
   await page.getByRole("button", { name: "Đóng khung tác vụ" }).click();
-  await expect(page.getByRole("alertdialog")).toBeVisible();
-  await page.getByRole("button", { name: "Ở lại" }).click();
+  await expect(page.getByRole("alertdialog")).toHaveCount(0);
+  await page.getByRole("tab", { name: "Tương tác", exact: true }).click();
   await expect(input).toHaveValue(value);
   await page.getByRole("tab", { name: "Đăng bài", exact: true }).click();
-  await page.getByRole("button", { name: "Bỏ thay đổi" }).click();
   await expect(page.locator(".publish-page")).toBeVisible();
 });

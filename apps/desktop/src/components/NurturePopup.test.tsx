@@ -349,7 +349,22 @@ describe("NurturePopup", () => {
     await waitFor(() => expect(profileControl.save).toHaveBeenCalledTimes(1));
     expect(saved.saveSettings).not.toHaveBeenCalled();
     await act(async () => { await requestWorkspaceLeave(["nurture"]); });
-    expect(profileControl.save).toHaveBeenCalledTimes(2);
+    expect(profileControl.save).toHaveBeenCalledTimes(1);
+    expect(saved.saveSettings).not.toHaveBeenCalled();
+  });
+
+  it("restores autosaved settings without applying them to a live session or storing credentials", async () => {
+    const view = render(<NurturePopup devices={devices} selected={[]} metas={new Map()} surface="page" />);
+    await screen.findByLabelText("Giới hạn video", { selector: "input" });
+    fireEvent.change(screen.getByLabelText("Giới hạn video", { selector: "input" }), { target: { value: "27" } });
+    await act(async () => { expect(await requestWorkspaceLeave(["nurture"])).toBe(true); });
+    const stored = JSON.parse(localStorage.getItem("riviu.form-draft.v1.nurture")!);
+    expect(stored.value.settings.numVideos).toBe(27);
+    expect(stored.value.settings).not.toHaveProperty("apiKey");
+    expect(stored.value.settings).not.toHaveProperty("hasApiKey");
+    view.unmount();
+    render(<NurturePopup devices={devices} selected={[]} metas={new Map()} surface="page" />);
+    await waitFor(() => expect(screen.getByLabelText("Giới hạn video", { selector: "input" })).toHaveValue(27));
     expect(saved.saveSettings).not.toHaveBeenCalled();
   });
 

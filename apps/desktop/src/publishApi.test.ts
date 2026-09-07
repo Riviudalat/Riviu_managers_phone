@@ -51,6 +51,7 @@ describe("Publish API client", () => {
           confirmed: true,
           approvedInputDigest: "approved-digest",
           sheetEnabled: true,
+          deleteAfterPublish: true,
         },
       ],
       ["publish_reconcile", { campaignId: "campaign-a" }],

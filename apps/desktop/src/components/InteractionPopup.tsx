@@ -28,6 +28,7 @@ import {
 } from "../interactionPlan";
 import { interactionDraftFromProfile, interactionProfileConfig, interactionProfileTarget } from "../automationProfileConfig";
 import { useWorkspaceDraft } from "../workspaceDraft";
+import { readFormDraft, restoreFormShape, writeFormDraft } from "../formDraftStorage";
 import type { OperationSourceRef } from "../operationSource";
 import type {
   DeviceInfo,
@@ -160,7 +161,8 @@ export function InteractionPopup({
   );
 
   const [tab, setTab] = useState<"setup" | "monitor">("setup");
-  const [draft, setDraft] = useState<InteractionDraft>(DEFAULT_DRAFT);
+  const [restoredDraft] = useState(() => readFormDraft("interaction", value => restoreFormShape(value, DEFAULT_DRAFT)));
+  const [draft, setDraft] = useState<InteractionDraft>(restoredDraft ?? DEFAULT_DRAFT);
   const [edited, setEdited] = useState(false);
   const profileRef = useRef<AutomationProfileHandle>(null);
   const [baseline, setBaseline] = useState({ draft: DEFAULT_DRAFT, targetRef });
@@ -215,6 +217,8 @@ export function InteractionPopup({
     label: "Tương tác",
     dirty,
     snapshotKey,
+    autoSave: () => writeFormDraft("interaction", draft),
+    onAutoSaveError: (error) => setRunError(`Chưa tự lưu được thiết lập: ${describeError(error)}`),
     save: async () => await profileRef.current?.save() ?? false,
     discard: () => {
       setDraft(baseline.draft);
@@ -251,6 +255,11 @@ export function InteractionPopup({
     id: pageSurface ? "interaction-measurement" : "interaction-popup-measurement",
     label: "Ngưỡng đo bài", dirty: JSON.stringify(measurementDraft) !== JSON.stringify(measurementBaseline),
     snapshotKey: JSON.stringify(measurementDraft),
+    autoSave: () => {
+      sessionStorage.setItem(MEASUREMENT_DRAFT_KEY, JSON.stringify(measurementDraft));
+      setMeasurementBaseline(measurementDraft);
+    },
+    onAutoSaveError: (error) => setRunError(`Chưa tự lưu được ngưỡng đo: ${describeError(error)}`),
     save: async () => {
       sessionStorage.setItem(MEASUREMENT_DRAFT_KEY, JSON.stringify(measurementDraft));
       setMeasurementBaseline(measurementDraft);
@@ -310,7 +319,7 @@ export function InteractionPopup({
   ///
   /// Pre-selects from ONE group, never across both: a default already invalid for a thread
   /// would make the operator undo the app's own choice before they could start.
-  const seededActors = useRef(false);
+  const seededActors = useRef(restoredDraft !== null);
   useEffect(() => {
     if (seededActors.current) return;
     if (!hierarchyActors.length && !pixelActors.length) return;

@@ -1226,12 +1226,16 @@ export async function installTauriMock(
     }));
     commandHandlers.set("agent_preflight", (args) => fixtureAgentStatus(String(args.udid ?? "")));
     commandHandlers.set("agent_repair", (args) => fixtureAgentStatus(String(args.udid ?? "")));
-    commandHandlers.set("local_api_get_config", () => ({
+    let localApiConfig = {
       enabled: false,
       port: 17999,
       token: "",
-    }));
-    commandHandlers.set("local_api_set_config", (args) => args.config ?? null);
+    };
+    commandHandlers.set("local_api_get_config", () => clone(localApiConfig));
+    commandHandlers.set("local_api_set_config", (args) => {
+      localApiConfig = clone(args.config) as typeof localApiConfig;
+      return clone(localApiConfig);
+    });
     commandHandlers.set("local_api_status", () => ({
       configuredEnabled: false,
       configuredPort: 17999,

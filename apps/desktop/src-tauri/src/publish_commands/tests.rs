@@ -699,6 +699,7 @@ fn a_failed_final_snapshot_write_emits_no_completion_event() {
 #[test]
 fn preflight_digest_binds_caption_target_and_observed_tiktok_build() {
     let request = riviu_core::PublishPreflightRequest {
+        delete_after_publish: true,
         sheet_enabled: true,
         source_root: "C:/source".into(),
         bundle_ids: vec!["bundle-1".into()],
@@ -751,6 +752,18 @@ fn preflight_digest_binds_caption_target_and_observed_tiktok_build() {
         sheet_configured: false,
     };
     require_current_preflight_digest(&report, &approved).expect("same snapshot is approved");
+    let mut keep_media = request.clone();
+    keep_media.delete_after_publish = false;
+    assert_ne!(
+        approved,
+        publish_preflight_digest(
+            &keep_media,
+            std::slice::from_ref(&bundle),
+            &target_snapshot,
+            &observations
+        )
+        .unwrap()
+    );
     let mut without_sheet = request.clone();
     without_sheet.sheet_enabled = false;
     assert_ne!(
@@ -850,6 +863,7 @@ fn preflight_digest_binds_caption_target_and_observed_tiktok_build() {
 #[test]
 fn semantic_publish_target_keeps_disconnected_group_members_in_the_snapshot() {
     let request = riviu_core::PublishPreflightRequest {
+        delete_after_publish: true,
         sheet_enabled: true,
         source_root: "C:/source".into(),
         bundle_ids: vec!["bundle-1".into()],
@@ -1363,9 +1377,31 @@ fn files_left_on_the_phone_do_not_unpublish_a_carousel() {
     );
     assert!(
         body.iter()
-            .any(|line| line.contains("tidy_up_the_imported_media")),
+            .any(|line| line.contains("finish_import_with_policy")),
         "the imported media is no longer cleaned up at all"
     );
+}
+
+#[test]
+fn cleanup_choice_never_deletes_without_confirmed_post() {
+    for confirmed in [false, true] {
+        assert!(!super::should_delete_import(
+            &riviu_core::PublishCleanupPolicy::KeepImportedAssets,
+            confirmed
+        ));
+        assert_eq!(
+            super::should_delete_import(
+                &riviu_core::PublishCleanupPolicy::DeleteImportedAssetsAfterVerified,
+                confirmed
+            ),
+            confirmed
+        );
+    }
+    let kept = fold_cleanup_into(
+        PostOutcome::Posted(serde_json::json!({"state":"posted"})),
+        Ok(serde_json::json!({"state":"kept"})),
+    );
+    assert!(matches!(kept,PostOutcome::Posted(ref value) if value["cleanup"]["state"]=="kept"));
 }
 
 /// **Three outcomes, three states — and the retryable one must not be stranded.**
@@ -1562,7 +1598,7 @@ fn the_post_path_reconciles_the_two_route_authorities_before_it_branches() {
     assert!(
         body[asks..branches]
             .iter()
-            .any(|line| line.contains("tidy_up_the_imported_media")),
+            .any(|line| line.contains("finish_import_with_policy")),
         "a route refusal still has to clear the imported media"
     );
     // The session has to exist before the question is asked: `supports_element_bounds` is

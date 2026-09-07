@@ -23,7 +23,13 @@ import { afterEach } from "vitest";
  * a guarantee: a file added tomorrow inherits it. The files that already call `cleanup()` keep
  * working -- a second call has nothing left to unmount.
  */
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  // Each test owns one application installation; remounts within a test retain drafts.
+  for (const key of Object.keys(localStorage)) {
+    if (key.startsWith("riviu.form-draft.v1.")) localStorage.removeItem(key);
+  }
+});
 
 /**
  * `waitFor`'s default is 1000 ms, and that is a **load** threshold rather than a behaviour

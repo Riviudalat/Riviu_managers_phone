@@ -24,9 +24,10 @@ export function AutomationWorkspace({ kind, devices, groups, selected, targetRef
 }) {
   const [scopeExpanded, setScopeExpanded] = useState(false);
   const common = { devices, selected, targetRef, targetUdids, metas, onTargetRefChange, operationSource };
-  return <div className="automation-page-stack">
-    <details className={`automation-scope${docked ? " is-collapsible" : ""}`} open={!docked || scopeExpanded}>
-      <summary hidden={!docked} onClick={(event) => { event.preventDefault(); setScopeExpanded((expanded) => !expanded); }}>
+  const collapsible = docked || kind === "publish";
+  return <div className={`automation-page-stack${kind === "publish" ? " is-publish-workspace" : ""}`}>
+    <details className={`automation-scope${collapsible ? " is-collapsible" : ""}`} open={!collapsible || scopeExpanded}>
+      <summary hidden={!collapsible} onClick={(event) => { event.preventDefault(); setScopeExpanded((expanded) => !expanded); }}>
         Phạm vi thiết bị <strong>{targetRef.type === "all" ? "Toàn bộ · " : targetRef.type === "group"
           ? `${groups.find((group) => group.id === targetRef.groupId)?.name ?? "Nhóm"} · ` : ""}{targetUdids.length} máy</strong>
       </summary>

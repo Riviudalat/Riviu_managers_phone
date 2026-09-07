@@ -54,7 +54,7 @@ export function LocalApiSection() {
       setSavingApi(false);
     }
   };
-  useWorkspaceDraft({ id: "settings-api", label: "API cục bộ", dirty, snapshotKey: String(editEpoch.current), save, discard });
+  useWorkspaceDraft({ autoSave: save, id: "settings-api", label: "API cục bộ", dirty, snapshotKey: String(editEpoch.current), save, discard });
   return (
     <section className="settings-section" aria-label="API tự động hoá cục bộ">
       <h3>API tự động hoá cục bộ</h3>

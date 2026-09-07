@@ -979,6 +979,10 @@ export async function publishScanFolder(sourceRoot: string) {
   return invoke<PublishFolderManifest>("publish_scan_folder", { sourceRoot });
 }
 
+export async function publishImagePreview(bundleRoot: string, imagePath: string, sha256: string) {
+  return invoke<string>("publish_image_preview", { bundleRoot, imagePath, sha256 });
+}
+
 /** Read-only validation of the exact input that will be allowed to create a campaign. */
 export async function publishPreflight(request: PublishPreflightRequest) {
   return invoke<PublishPreflightReport>("publish_preflight", { request });
@@ -995,6 +999,7 @@ export async function publishCreateCampaign(
   confirmed: boolean,
   approvedInputDigest: string,
   sheetEnabled = true,
+  deleteAfterPublish = true,
 ) {
   return invoke<PublishCampaignRecord>("publish_create_campaign", {
     sourceRoot,
@@ -1007,6 +1012,7 @@ export async function publishCreateCampaign(
     confirmed,
     approvedInputDigest,
     sheetEnabled,
+    deleteAfterPublish,
   });
 }
 

@@ -172,6 +172,7 @@ pub async fn publish_create_campaign(
     caption_overrides: Option<HashMap<String, String>>,
     sound_policy: Option<riviu_core::PublishSoundPolicy>,
     sheet_enabled: Option<bool>,
+    delete_after_publish: Option<bool>,
     target_ref: Option<riviu_core::TargetRef>,
     confirmed: Option<bool>,
     approved_input_digest: String,
@@ -180,7 +181,9 @@ pub async fn publish_create_campaign(
     source_root = source_root.trim().to_string();
     let sound_policy = sound_policy.unwrap_or_default();
     let confirmed = confirmed.unwrap_or(false);
+    let delete_after_publish = delete_after_publish.unwrap_or(true);
     let preflight_request = riviu_core::PublishPreflightRequest {
+        delete_after_publish,
         sheet_enabled: sheet_enabled.unwrap_or(true),
         source_root: source_root.clone(),
         bundle_ids: bundle_ids.clone(),
@@ -249,7 +252,11 @@ pub async fn publish_create_campaign(
         // campaign the operator scheduled to `failed_before_dispatch` for a leading space.
         run_at: run_at.map(|value| value.trim().to_string()),
         visibility: PublishVisibility::Public,
-        cleanup_policy: PublishCleanupPolicy::DeleteImportedAssetsAfterVerified,
+        cleanup_policy: if delete_after_publish {
+            PublishCleanupPolicy::DeleteImportedAssetsAfterVerified
+        } else {
+            PublishCleanupPolicy::KeepImportedAssets
+        },
         sound_policy,
         execution_confirmed: confirmed,
         target_snapshot: Some(prepared.report.target_snapshot.clone()),
@@ -1926,6 +1933,14 @@ pub(super) async fn post_one_assignment(
         outcome,
         claim_refused: false,
     };
+    let cleanup_policy = match db.get_publish_campaign(campaign_id) {
+        Ok(Some(detail)) => detail.campaign.cleanup_policy,
+        _ => {
+            return finish(PostOutcome::NothingPublished(
+                "Không đọc được chính sách dọn nội dung của chiến dịch".into(),
+            ))
+        }
+    };
     // **Everything before the phone opens is a refusal, not an unknown.** These used to be
     // `bail!`s that the caller turned into `uncertain` — permanently unclaimable — for a
     // caption nobody could have posted and a phone nobody had touched.
@@ -1980,8 +1995,15 @@ pub(super) async fn post_one_assignment(
     let session = match control.streaming_session(&context) {
         Ok(session) => session,
         Err(error) => {
-            let cleanup =
-                tidy_up_the_imported_media(control, context, &assignment.udid, &import).await;
+            let cleanup = finish_import_with_policy(
+                control,
+                context,
+                &assignment.udid,
+                &import,
+                &cleanup_policy,
+                false,
+            )
+            .await;
             return finish(fold_cleanup_into(
                 PostOutcome::NothingPublished(format!("{}: {error}", assignment.udid)),
                 cleanup,
@@ -1993,13 +2015,29 @@ pub(super) async fn post_one_assignment(
         control.reports_element_bounds(&assignment.udid),
         session.supports_element_bounds(),
     ) {
-        let cleanup = tidy_up_the_imported_media(control, context, &assignment.udid, &import).await;
+        let cleanup = finish_import_with_policy(
+            control,
+            context,
+            &assignment.udid,
+            &import,
+            &cleanup_policy,
+            false,
+        )
+        .await;
         return finish(fold_cleanup_into(refusal, cleanup));
     }
     if matches!(bundle.media_kind, riviu_core::PublishMediaKind::Video)
         && !session.supports_element_bounds()
     {
-        let cleanup = tidy_up_the_imported_media(control, context, &assignment.udid, &import).await;
+        let cleanup = finish_import_with_policy(
+            control,
+            context,
+            &assignment.udid,
+            &import,
+            &cleanup_policy,
+            false,
+        )
+        .await;
         return finish(fold_cleanup_into(
             PostOutcome::NothingPublished(format!(
                 "{}: video picker is measured only on the Android hierarchy route",
@@ -2079,7 +2117,15 @@ pub(super) async fn post_one_assignment(
     // **Cleanup runs whatever the route said.** It used to sit behind `action_result?`, so
     // every error path left the campaign's images in a real phone's gallery with nothing
     // owning them — including the Android build gate, which refuses *before its first tap*.
-    let cleanup = tidy_up_the_imported_media(control, context, &assignment.udid, &import).await;
+    let cleanup = finish_import_with_policy(
+        control,
+        context,
+        &assignment.udid,
+        &import,
+        &cleanup_policy,
+        matches!(&action_result, PostOutcome::Posted(_)),
+    )
+    .await;
     AssignmentPostAttempt {
         outcome: fold_cleanup_into(action_result, cleanup),
         claim_refused,
@@ -2171,11 +2217,33 @@ pub(super) fn state_for_outcome(
     }
 }
 
-/// Take the campaign's images back off the phone, with one retry on a fresh lease.
-///
-/// Split out of `post_one_assignment` so the outcome above can be decided without this
-/// function's four failure modes in the same block. Returns the cleanup evidence or the reason
-/// it could not — never a reason to change what the post did.
+/// Close TikTok and retain evidence. Delete only this import when the campaign opted in
+/// and Post was confirmed; a failed or uncertain Post retains its media for reconciliation.
+async fn finish_import_with_policy(
+    control: &DeviceControlPlane,
+    context: riviu_core::UiWithStreamContext,
+    udid: &str,
+    import: &str,
+    policy: &PublishCleanupPolicy,
+    post_confirmed: bool,
+) -> anyhow::Result<serde_json::Value> {
+    if should_delete_import(policy, post_confirmed) {
+        return tidy_up_the_imported_media(control, context, udid, import).await;
+    }
+    let proof = close_publish_context(control, context, udid).await?;
+    Ok(
+        serde_json::json!({"state":"kept","importId":import,"reason":if post_confirmed {"operator_choice"} else {"post_not_confirmed"},"appCleanup":{"state":"processAbsent","proof":proof}}),
+    )
+}
+
+pub(super) fn should_delete_import(policy: &PublishCleanupPolicy, post_confirmed: bool) -> bool {
+    post_confirmed
+        && matches!(
+            policy,
+            PublishCleanupPolicy::DeleteImportedAssetsAfterVerified
+        )
+}
+
 pub(super) async fn tidy_up_the_imported_media(
     control: &DeviceControlPlane,
     context: riviu_core::UiWithStreamContext,
@@ -2939,6 +3007,8 @@ pub(super) async fn post_through_the_composer(
         "imageCount": bundle.images.len(),
         "captionSha256": bundle.caption_sha256,
         "labels": labels.provenance(),
+        "pickerImageCountConfirmed": verdict.is_posted()
+            && matches!(bundle.media_kind, riviu_core::PublishMediaKind::Image),
         "soundPickerProvenance": sound_plan.provenance(),
         "soundSelection": sound_selection,
     });

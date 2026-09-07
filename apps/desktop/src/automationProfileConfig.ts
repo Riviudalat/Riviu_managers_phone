@@ -112,6 +112,7 @@ export function publishProfileConfig(
   soundPolicy: PublishSoundPolicy,
   executionConfirmed: boolean,
   sheetEnabled = true,
+  deleteAfterPublish = true,
 ): JsonValue {
   return cloneJson({
     schemaVersion: 1,
@@ -121,5 +122,6 @@ export function publishProfileConfig(
     soundPolicy,
     executionConfirmed,
     sheetEnabled,
+    deleteAfterPublish,
   });
 }

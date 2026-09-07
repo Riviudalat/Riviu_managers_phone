@@ -22,6 +22,7 @@ use crate::state::AppState;
 
 mod execution;
 mod preflight;
+mod preview;
 mod sheet;
 // Unregistered stepwise entry points and their historical calibration.
 #[allow(dead_code)]
@@ -29,12 +30,14 @@ mod legacy;
 
 pub use execution::*;
 pub use preflight::*;
+pub use preview::*;
 pub use sheet::*;
 
 #[cfg(test)]
 const PRODUCTION_SOURCES: &str = concat!(
     include_str!("mod.rs"),
     include_str!("preflight.rs"),
+    include_str!("preview.rs"),
     include_str!("execution.rs"),
     include_str!("sheet.rs"),
     include_str!("legacy.rs"),

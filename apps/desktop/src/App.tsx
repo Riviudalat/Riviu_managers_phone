@@ -21,7 +21,8 @@ import {
 import { startDevicePreview, startFleetPreview } from "./startPreview";
 import { summarizeBulkRepair } from "./agentStatus";
 import { requestConfirm } from "./confirmStore";
-import { hasWorkspaceDrafts, requestWorkspaceLeave, useWorkspaceDirty } from "./workspaceDraft";
+import { hasWorkspaceDrafts, requestWorkspaceLeave, useWorkspaceDirty, useWorkspaceDraft } from "./workspaceDraft";
+import { readTargetDraft, writeFormDraft } from "./formDraftStorage";
 import { useDeviceSurface } from "./features/devices/useDeviceSurface";
 import { describeError } from "./describeError";
 import { pushToast, toastError } from "./toastStore";
@@ -179,9 +180,22 @@ function App() {
   const navigationDrainRef = useRef<Promise<void> | null>(null);
   const contentRef = useRef<HTMLDivElement>(null);
   const [orchestrationTargetRef, setOrchestrationTargetRef] = useState<TargetRef>({ type: "explicit", udids: [] });
-  const [publishTargetRef, setPublishTargetRef] = useState<TargetRef>({ type: "explicit", udids: [] });
-  const [nurtureTargetRef, setNurtureTargetRef] = useState<TargetRef>({ type: "explicit", udids: [] });
-  const [interactionTargetRef, setInteractionTargetRef] = useState<TargetRef>({ type: "explicit", udids: [] });
+  const [publishTargetRef, setPublishTargetRef] = useState<TargetRef>(() => readTargetDraft("publish-target", { type: "all" }));
+  const [nurtureTargetRef, setNurtureTargetRef] = useState<TargetRef>(() => readTargetDraft("nurture-target", { type: "explicit", udids: [] }));
+  const [interactionTargetRef, setInteractionTargetRef] = useState<TargetRef>(() => readTargetDraft("interaction-target", { type: "explicit", udids: [] }));
+  const [draftStorageError, setDraftStorageError] = useState<string | null>(null);
+  useWorkspaceDraft({
+    id: "automation-targets", label: "Phạm vi thiết bị", dirty: true,
+    snapshotKey: JSON.stringify([publishTargetRef, nurtureTargetRef, interactionTargetRef]),
+    save: async () => true, discard: () => {},
+    autoSave: () => {
+      writeFormDraft("publish-target", publishTargetRef);
+      writeFormDraft("nurture-target", nurtureTargetRef);
+      writeFormDraft("interaction-target", interactionTargetRef);
+      setDraftStorageError(null);
+    },
+    onAutoSaveError: () => setDraftStorageError("Chưa lưu được phạm vi thiết bị. Kiểm tra dung lượng ổ đĩa rồi thử chuyển tab lại."),
+  });
   const [deviceWorkOwners, setDeviceWorkOwners] = useState<DeviceWorkOwnerProjection>({
     state: "loading",
   });
@@ -735,6 +749,7 @@ function App() {
           ref={contentRef}
           className={`content content-${page} ${page === "scripts" ? "content-flow" : ""} ${page === "control" && deviceAutomation ? "has-device-automation" : ""}`}
         >
+          {draftStorageError && <Banner tone="error">{draftStorageError}</Banner>}
           {bootError && (
             <Banner
               tone="error"

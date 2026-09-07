@@ -543,6 +543,7 @@ pub fn run() {
             nurture_commands::nurture_start,
             nurture_commands::nurture_stop,
             publish_commands::publish_scan_folder,
+            publish_commands::publish_image_preview,
             publish_commands::publish_preflight,
             publish_commands::publish_auto_assign,
             publish_commands::publish_create_campaign,
@@ -1013,6 +1014,10 @@ mod tests {
         ("nurture_commands.rs", include_str!("nurture_commands.rs")),
         ("peripherals.rs", include_str!("peripherals.rs")),
         (
+            "publish_commands/preview.rs",
+            include_str!("publish_commands/preview.rs"),
+        ),
+        (
             "publish_commands/preflight.rs",
             include_str!("publish_commands/preflight.rs"),
         ),
@@ -1098,6 +1103,7 @@ mod tests {
              admission, cùng posture với is_rooted",
         ),
         ("publish_sheet_get_config", "read: DB, và không bao giờ trả token"),
+        ("publish_image_preview", "read: bounded local bundle image, hash-verified; touches no device"),
         ("flow_action_catalog", "read: static catalog"),
         ("flow_list", "read: DB"),
         ("flow_get", "read: DB"),

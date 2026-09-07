@@ -1,4 +1,4 @@
-.run-monitor { position: fixed; right: 16px; bottom: 16px; z-index: var(--z-overlay); width: 300px; max-width: calc(100vw - 16px); min-width: 0; display: flex; flex-direction: column; border: 1px solid var(--line-strong); border-top: 2px solid var(--primary); border-radius: 6px; background: var(--bg-elevated); color: var(--text); box-shadow: 0 4px 16px rgb(0 0 0 / 12%); overflow: hidden; font-size: var(--text-md); }
+.run-monitor { position: fixed; right: 16px; top: 72px; z-index: var(--z-flyout); width: 300px; max-width: calc(100vw - 16px); min-width: 0; display: flex; flex-direction: column; border: 1px solid var(--line-strong); border-top: 2px solid var(--primary); border-radius: 6px; background: var(--bg-elevated); color: var(--text); box-shadow: 0 4px 16px rgb(0 0 0 / 12%); overflow: hidden; font-size: var(--text-md); }
 .run-monitor.is-expanded { width: 480px; height: min(410px, calc(100dvh - 24px)); }
 .run-monitor.is-maximized { inset: 12px; width: auto; height: auto; max-width: none; }
 .run-monitor [hidden] { display: none !important; }
@@ -118,7 +118,7 @@
 .run-monitor.is-compact .run-log-scroll, .run-monitor.is-compact .run-evidence-scroll { padding: 0 10px 8px; }
 .run-monitor.is-compact .run-device-log > li { padding: 5px 0; gap: 8px; }
 @media (max-width: 600px) {
-  .run-monitor { right: 8px; bottom: 8px; }
+  .run-monitor { right: 8px; }
   .run-monitor.is-expanded { height: min(450px, calc(100dvh - 16px)); }
   .run-monitor-detail { grid-template-columns: minmax(0, 1fr); }
   .run-monitor.is-maximized { inset: 8px; height: auto; }

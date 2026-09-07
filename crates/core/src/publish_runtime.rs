@@ -136,6 +136,8 @@ pub struct PublishExecutionIssue {
 #[serde(rename_all = "camelCase")]
 pub struct PublishPreflightRequest {
     #[serde(default = "crate::publish::default_sheet_enabled")]
+    pub delete_after_publish: bool,
+    #[serde(default = "crate::publish::default_sheet_enabled")]
     pub sheet_enabled: bool,
     pub source_root: String,
     pub bundle_ids: Vec<String>,
@@ -866,6 +868,7 @@ mod tests {
     #[test]
     fn preflight_and_snapshot_wire_contracts_are_camel_case_and_typed() {
         let request = PublishPreflightRequest {
+            delete_after_publish: true,
             sheet_enabled: true,
             source_root: "C:/fixture".into(),
             bundle_ids: vec!["bundle-1".into()],

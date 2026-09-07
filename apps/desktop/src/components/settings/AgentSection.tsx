@@ -89,7 +89,7 @@ export function AgentSection({ connectedDevices, connectedUdids, deviceLabels }:
     editEpoch.current += 1;
     setAutoRepair(runtime?.settings.autoRepair ?? false);
   };
-  useWorkspaceDraft({ id: "settings-agent", label: "Tự khôi phục Agent", dirty, snapshotKey: JSON.stringify(autoRepair), save: saveSettings, discard });
+  useWorkspaceDraft({ autoSave: saveSettings, id: "settings-agent", label: "Tự khôi phục Agent", dirty, snapshotKey: JSON.stringify(autoRepair), save: saveSettings, discard });
 
   const runAgentAction = async (udid: string, action: AgentAction) => {
     setBusy((current) => ({ ...current, [udid]: action }));

@@ -124,6 +124,7 @@ describe("automation profile config v1", () => {
       soundPolicy: { kind: "trendingAny", poolSize: 5, seed: 42 },
       executionConfirmed: true,
       sheetEnabled: true,
+      deleteAfterPublish: true,
     });
   });
 });

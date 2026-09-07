@@ -8,9 +8,12 @@ export interface WorkspaceDraft {
   snapshotKey: string;
   save: () => Promise<boolean | void>;
   discard: () => void | Promise<void>;
+  /** Separate from explicit profile save: autosaving must never grant execution consent. */
+  autoSave?: () => Promise<boolean | void> | boolean | void;
+  onAutoSaveError?: (error: unknown) => void;
 }
 
-type Entry = { read: () => WorkspaceDraft; acknowledged?: string };
+type Entry = { read: () => WorkspaceDraft; acknowledged?: string; saving?: Promise<boolean> };
 const drafts = new Map<string, Entry>();
 const listeners = new Set<() => void>();
 let pending: Promise<boolean> | null = null;
@@ -28,13 +31,39 @@ export function hasWorkspaceDrafts(): boolean {
 export function useWorkspaceDirty(): boolean {
   return useSyncExternalStore(
     (listener) => { listeners.add(listener); return () => { listeners.delete(listener); }; },
-    hasWorkspaceDrafts,
+    () => [...drafts.values()].some(entry => !entry.read().autoSave && isDirty(entry)),
     () => false,
   );
 }
 
+async function saveAutomatic(entry: Entry): Promise<boolean> {
+  if (entry.saving) {
+    const ok = await entry.saving;
+    return ok && isDirty(entry) ? saveAutomatic(entry) : ok;
+  }
+  const draft = entry.read();
+  if (!draft.autoSave || !isDirty(entry)) return true;
+  const snapshot = draft.snapshotKey;
+  entry.saving = (async () => {
+    try {
+      const saved = await draft.autoSave!();
+      if (saved === false) return false;
+      entry.acknowledged = snapshot;
+      return true;
+    } catch (error) {
+      entry.read().onAutoSaveError?.(error);
+      return false;
+    }
+  })();
+  const ok = await entry.saving;
+  entry.saving = undefined;
+  emit();
+  return ok && isDirty(entry) ? saveAutomatic(entry) : ok;
+}
+
 /** Only editable snapshots participate; polling and pending requests never make a draft dirty. */
 export function useWorkspaceDraft(draft: WorkspaceDraft): void {
+  const automatic = Boolean(draft.autoSave);
   const latest = useRef(draft);
   latest.current = draft;
   useLayoutEffect(() => {
@@ -53,6 +82,14 @@ export function useWorkspaceDraft(draft: WorkspaceDraft): void {
     }
     emit();
   }, [draft.id, draft.dirty, draft.snapshotKey]);
+  useEffect(() => {
+    if (!automatic || !draft.dirty) return;
+    const timer = window.setTimeout(() => {
+      const entry = drafts.get(draft.id);
+      if (entry) void saveAutomatic(entry);
+    }, 650);
+    return () => window.clearTimeout(timer);
+  }, [draft.id, draft.dirty, draft.snapshotKey, automatic]);
 }
 
 export function requestWorkspaceLeave(ids?: string[]): Promise<boolean> {
@@ -66,9 +103,14 @@ export function requestWorkspaceLeave(ids?: string[]): Promise<boolean> {
   if (!entries.length) return Promise.resolve(true);
   pendingScope = scope;
   pending = (async () => {
-    const choice = await requestSaveChanges(entries.map(([, entry]) => entry.read().label).join(", "));
+    for (const [, entry] of entries) {
+      if (entry.read().autoSave && !(await saveAutomatic(entry))) return false;
+    }
+    const manual = entries.filter(([, entry]) => !entry.read().autoSave && isDirty(entry));
+    if (!manual.length) return true;
+    const choice = await requestSaveChanges(manual.map(([, entry]) => entry.read().label).join(", "));
     if (choice === "stay") return false;
-    for (const [id, entry] of entries) {
+    for (const [id, entry] of manual) {
       if (drafts.get(id) !== entry || !isDirty(entry)) continue;
       const draft = entry.read();
       const snapshot = draft.snapshotKey;

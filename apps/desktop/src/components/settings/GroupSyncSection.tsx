@@ -24,7 +24,7 @@ export function GroupSyncSection() {
     setError(null);
     return true;
   };
-  useWorkspaceDraft({ id: "settings-sync", label: "Đồng bộ nhóm", dirty, snapshotKey: JSON.stringify(groupSync), save, discard });
+  useWorkspaceDraft({ autoSave: save, id: "settings-sync", label: "Đồng bộ nhóm", dirty, snapshotKey: JSON.stringify(groupSync), save, discard });
   // Normalised locals so the union narrows cleanly in JSX (the store always stores concrete
   // values; the type keeps the fields optional for forward-compat).
   const gsDelay: DelayPolicy = groupSync.delay ?? { mode: "none" };

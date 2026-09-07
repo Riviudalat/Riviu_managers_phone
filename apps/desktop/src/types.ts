@@ -519,7 +519,7 @@ export interface PublishCampaignRecord {
   state: PublishCampaignState;
   runAt?: string | null;
   visibility: "public";
-  cleanupPolicy: "deleteImportedAssetsAfterVerified";
+  cleanupPolicy: "deleteImportedAssetsAfterVerified" | "keepImportedAssets";
   assignments: PublishAssignmentPlan[];
   createdAt: string;
   updatedAt: string;
@@ -557,6 +557,7 @@ export type PublishSoundPolicy =
   | { kind: "trendingAny"; poolSize: number; seed: number };
 
 export interface PublishPreflightRequest {
+  deleteAfterPublish?: boolean;
   sheetEnabled?: boolean;
   sourceRoot: string;
   bundleIds: string[];

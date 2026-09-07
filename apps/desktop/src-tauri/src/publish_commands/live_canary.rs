@@ -117,6 +117,7 @@ async fn live_publish_canary() -> anyhow::Result<()> {
         save(&out, "manifest.json", &manifest)?;
         let bundle = manifest.bundles.iter().find(|bundle| bundle.name == "set1 01 3n2d").context("requested first image bundle missing")?;
         let request = riviu_core::PublishPreflightRequest {
+        delete_after_publish: true,
             source_root: source.to_string_lossy().to_string(), bundle_ids: vec![bundle.id.clone()],
             udids: vec![SERIAL.into()], target_ref: Some(riviu_core::TargetRef::Explicit { udids: vec![SERIAL.into()] }),
             run_at: None, caption_overrides: Default::default(),

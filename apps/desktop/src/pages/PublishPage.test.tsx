@@ -1,16 +1,23 @@
-import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import {
+  act,
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { useState } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
-  automationCreate,
   automationGet,
   automationList,
   listenRiviuEvents,
   operationListRuns,
   publishGet,
   publishList,
-  publishReadiness,
   publishReconcile,
   publishScanFolder,
   publishSheetGetConfig,
@@ -18,6 +25,7 @@ import {
 } from "../api";
 import { PublishPage } from "./PublishPage";
 import { requestConfirm } from "../confirmStore";
+import { requestWorkspaceLeave } from "../workspaceDraft";
 import { resetToasts } from "../toastStore";
 import { pickDirectory } from "../pickFile";
 import type {
@@ -28,6 +36,8 @@ import type {
   PublishFolderManifest,
   PublishPreflightReport,
   PublishPreflightRequest,
+  TargetRef,
+  AutomationDefinitionRecord,
 } from "../types";
 
 function bundle(id: string, name: string): PublishBundle {
@@ -67,36 +77,52 @@ const executeCampaign = vi.fn(async () => ({
   status: "complete",
   retryScope: "none",
   issues: [],
-  detail: { campaign: { id: "campaign-1" }, bundles: [], assignments: [], events: [] },
+  detail: {
+    campaign: { id: "campaign-1" },
+    bundles: [],
+    assignments: [],
+    events: [],
+  },
 }));
 
-const preflightCampaign = vi.fn(async (request: PublishPreflightRequest): Promise<PublishPreflightReport> => ({
-  inputDigest: "approved-digest-1",
-  targetSnapshot: {
-    targetRef: request.targetRef ?? { type: "explicit", udids: request.udids },
-    included: request.udids.map((udid, index) => ({ udid, alias: `Máy ${index + 1}`, number: index + 1 })),
-    excluded: [],
-    rosterSha256: "11".repeat(32),
-  },
-  canExecute: true,
-  assignments: request.bundleIds.map((bundleId, ordinal) => ({
-    ordinal,
-    bundleId,
-    udid: request.udids[ordinal],
-    packageName: "com.ss.android.ugc.trill",
-    version: "38.3.2",
-    locale: "en",
-    media: "pass" as const,
-    composer: "pass" as const,
-    soundPicker: "pass" as const,
-    storage: "pass" as const,
-    requiredBytes: 1024,
-    availableBytes: 4096,
+const preflightCampaign = vi.fn(
+  async (
+    request: PublishPreflightRequest,
+  ): Promise<PublishPreflightReport> => ({
+    inputDigest: "approved-digest-1",
+    targetSnapshot: {
+      targetRef: request.targetRef ?? {
+        type: "explicit",
+        udids: request.udids,
+      },
+      included: request.udids.map((udid, index) => ({
+        udid,
+        alias: `Máy ${index + 1}`,
+        number: index + 1,
+      })),
+      excluded: [],
+      rosterSha256: "11".repeat(32),
+    },
+    canExecute: true,
+    assignments: request.bundleIds.map((bundleId, ordinal) => ({
+      ordinal,
+      bundleId,
+      udid: request.udids[ordinal],
+      packageName: "com.ss.android.ugc.trill",
+      version: "38.3.2",
+      locale: "en",
+      media: "pass" as const,
+      composer: "pass" as const,
+      soundPicker: "pass" as const,
+      storage: "pass" as const,
+      requiredBytes: 1024,
+      availableBytes: 4096,
+      issues: [],
+    })),
     issues: [],
-  })),
-  issues: [],
-  sheetConfigured: false,
-}));
+    sheetConfigured: false,
+  }),
+);
 
 vi.mock("../pickFile", () => ({
   pickDirectory: vi.fn(async () => "C:/carousels"),
@@ -105,6 +131,7 @@ vi.mock("../pickFile", () => ({
 }));
 
 vi.mock("../confirmStore", () => ({
+  useConfirmRequest: () => null,
   requestConfirm: vi.fn(async () => true),
 }));
 
@@ -149,6 +176,7 @@ vi.mock("../api", () => ({
   // The page follows a live run now, so it subscribes. Returning a no-op unsubscriber keeps
   // the effect's cleanup honest without the test caring about events.
   listenRiviuEvents: vi.fn(async () => () => undefined),
+  publishImagePreview: vi.fn(async () => "data:image/jpeg;base64,AA=="),
   publishAutoAssign: vi.fn(async () => ({ plan: [] })),
   listAppsLibrary: vi.fn(async () => []),
   listGroups: vi.fn(async () => []),
@@ -156,11 +184,13 @@ vi.mock("../api", () => ({
   listSchedules: vi.fn(async () => []),
   listScripts: vi.fn(async () => []),
   publishCancel: vi.fn(async () => undefined),
-  publishCreateCampaign: (...args: unknown[]) => createCampaign(...(args as [])),
+  publishCreateCampaign: (...args: unknown[]) =>
+    createCampaign(...(args as [])),
   publishExecute: (...args: unknown[]) => executeCampaign(...(args as [])),
   publishGet: vi.fn(async () => null),
   publishList: vi.fn(async () => []),
-  publishPreflight: (...args: unknown[]) => preflightCampaign(...(args as [PublishPreflightRequest])),
+  publishPreflight: (...args: unknown[]) =>
+    preflightCampaign(...(args as [PublishPreflightRequest])),
   publishReadiness: vi.fn(async () => []),
   publishReconcile: vi.fn(async (campaignId: string) => ({
     campaignId,
@@ -170,8 +200,14 @@ vi.mock("../api", () => ({
     reportJson: {},
     updatedAt: "2026-09-04T00:00:00Z",
   })),
-  publishSheetGetConfig: vi.fn(async () => ({ webhookUrl: "", hasToken: false })),
-  publishSheetSaveConfig: vi.fn(async () => ({ webhookUrl: "", hasToken: false })),
+  publishSheetGetConfig: vi.fn(async () => ({
+    webhookUrl: "",
+    hasToken: false,
+  })),
+  publishSheetSaveConfig: vi.fn(async () => ({
+    webhookUrl: "",
+    hasToken: false,
+  })),
   publishScanFolder: vi.fn(async () => manifest),
   pushMaterial: vi.fn(async () => undefined),
   saveSchedule: vi.fn(async () => undefined),
@@ -194,18 +230,29 @@ function iphone(udid: string): DeviceInfo {
 const devices = [iphone("PHONE-A"), iphone("PHONE-B"), iphone("PHONE-C")];
 
 beforeEach(() => {
+  vi.mocked(publishList).mockReset().mockResolvedValue([]);
+  HTMLDialogElement.prototype.showModal = function () {
+    this.setAttribute("open", "");
+  };
+  HTMLDialogElement.prototype.close = function () {
+    this.removeAttribute("open");
+  };
   vi.mocked(operationListRuns).mockReset().mockResolvedValue([]);
+  vi.mocked(automationList).mockReset().mockResolvedValue([]);
+  vi.mocked(automationGet).mockReset();
   createCampaign.mockClear();
   executeCampaign.mockClear();
   preflightCampaign.mockClear();
-  vi.mocked(publishReconcile).mockReset().mockImplementation(async (campaignId) => ({
-    campaignId,
-    inputDigest: "approved-digest-1",
-    status: "partial",
-    retryScope: "fullPipeline",
-    reportJson: {},
-    updatedAt: "2026-09-04T00:00:00Z",
-  }));
+  vi.mocked(publishReconcile)
+    .mockReset()
+    .mockImplementation(async (campaignId) => ({
+      campaignId,
+      inputDigest: "approved-digest-1",
+      status: "partial",
+      retryScope: "fullPipeline",
+      reportJson: {},
+      updatedAt: "2026-09-04T00:00:00Z",
+    }));
   vi.mocked(requestConfirm).mockReset().mockResolvedValue(true);
   vi.mocked(publishSheetGetConfig)
     .mockReset()
@@ -220,247 +267,558 @@ beforeEach(() => {
 
 afterEach(cleanup);
 
-describe("publish, bundle to phone", () => {
-  it("keeps the selected path when scanning fails and places the raw scan error in details", async () => {
-    const path = "C:/Nội dung/set1 01 3n2d";
-    vi.mocked(pickDirectory).mockResolvedValueOnce(`  ${path}  `);
-    vi.mocked(publishScanFolder).mockRejectedValueOnce({ code: "OperationFailed", message: "publish folder has no bundle directories" });
-    render(<PublishPage devices={devices} selected={[]} onSelectUdids={() => {}} />);
-    fireEvent.click(screen.getByRole("button", { name: "Chọn thư mục" }));
-    expect(await screen.findByText("Chưa tìm thấy gói bài trong thư mục đã chọn")).toBeVisible();
-    expect(screen.getByRole("textbox", { name: "Thư mục nguồn" })).toHaveValue(path);
-    expect(publishScanFolder).toHaveBeenCalledWith(path);
-    expect(screen.getByText("publish folder has no bundle directories").closest("details")).not.toHaveAttribute("open");
-    expect(screen.getByRole("button", { name: "Quét nguồn" })).toBeEnabled();
-    expect(screen.getByRole("button", { name: /Xác nhận và đăng/ })).toBeDisabled();
-  });
+async function prepareOne() {
+  await userEvent.click(screen.getByRole("button", { name: "Chọn thư mục" }));
+  await userEvent.click(
+    await screen.findByRole("checkbox", { name: "Chọn bo1" }),
+  );
+  await userEvent.click(screen.getByRole("button", { name: "Chọn máy" }));
+  await userEvent.click(screen.getByRole("button", { name: /Ghép tự động/ }));
+  await userEvent.click(
+    screen.getByRole("button", { name: "Xem lại & kiểm tra" }),
+  );
+}
 
-  it.each(["resolve", "reject"] as const)("discards an older scan %s after the source path changes", async (outcome) => {
-    let resolve!: (value: PublishFolderManifest) => void;
-    let reject!: (error: Error) => void;
-    vi.mocked(publishScanFolder).mockImplementationOnce(() => new Promise((accept, fail) => { resolve = accept; reject = fail; }));
-    render(<PublishPage devices={devices} selected={[]} onSelectUdids={() => {}} />);
-    fireEvent.click(screen.getByRole("button", { name: "Chọn thư mục" }));
-    await waitFor(() => expect(publishScanFolder).toHaveBeenCalledTimes(1));
-    const source = screen.getByRole("textbox", { name: "Thư mục nguồn" });
-    expect(source).toHaveValue("C:/carousels");
-    fireEvent.change(source, { target: { value: "C:/Nguồn mới" } });
-    await act(async () => {
-      if (outcome === "resolve") resolve(manifest);
-      else reject(new Error("publish folder has no bundle directories"));
-    });
-    expect(source).toHaveValue("C:/Nguồn mới");
-    expect(screen.queryByRole("textbox", { name: "Chú thích cho bo1" })).toBeNull();
-    expect(screen.queryByText("Chưa tìm thấy gói bài trong thư mục đã chọn")).toBeNull();
-    expect(screen.getByRole("button", { name: "Quét nguồn" })).toBeEnabled();
-  });
-
-  it("does not let an older scan clear the busy state of a newer scan", async () => {
-    let resolveOld!: (value: PublishFolderManifest) => void;
-    let resolveNew!: (value: PublishFolderManifest) => void;
-    vi.mocked(publishScanFolder)
-      .mockImplementationOnce(() => new Promise((resolve) => { resolveOld = resolve; }))
-      .mockImplementationOnce(() => new Promise((resolve) => { resolveNew = resolve; }));
-    render(<PublishPage devices={devices} selected={[]} onSelectUdids={() => {}} />);
-    fireEvent.click(screen.getByRole("button", { name: "Chọn thư mục" }));
-    await waitFor(() => expect(publishScanFolder).toHaveBeenCalledTimes(1));
-    fireEvent.change(screen.getByRole("textbox", { name: "Thư mục nguồn" }), { target: { value: "C:/Nguồn mới" } });
-    fireEvent.click(screen.getByRole("button", { name: "Quét nguồn" }));
-    await waitFor(() => expect(publishScanFolder).toHaveBeenCalledTimes(2));
-    await act(async () => { resolveOld(manifest); });
-    expect(screen.getByRole("button", { name: "Quét nguồn" })).toBeDisabled();
-    expect(screen.getByText("Đang quét nội dung…")).toBeVisible();
-    await act(async () => { resolveNew({ ...manifest, sourceRoot: "C:/Nguồn mới", bundles: [bundle("new", "bài mới")] }); });
-    expect(screen.getByRole("textbox", { name: "Chú thích cho bài mới" })).toBeVisible();
-    expect(screen.queryByRole("textbox", { name: "Chú thích cho bo1" })).toBeNull();
-    expect(screen.getByRole("button", { name: "Quét nguồn" })).toBeEnabled();
-  });
-
-  it("clears the previous source inventory and preflight when the path is edited", async () => {
-    render(<PublishPage devices={devices} selected={[]} onSelectUdids={() => {}} />);
-    fireEvent.click(screen.getByRole("button", { name: "Chọn thư mục" }));
-    await screen.findByRole("textbox", { name: "Chú thích cho bo1" });
-    await waitFor(() => expect(screen.getByRole("button", { name: "Chạy preflight" })).toBeEnabled());
-    fireEvent.click(screen.getByRole("button", { name: "Chạy preflight" }));
-    await waitFor(() => expect(screen.getByRole("button", { name: /Xác nhận và đăng/ })).toBeEnabled());
-    fireEvent.change(screen.getByRole("textbox", { name: "Thư mục nguồn" }), { target: { value: "C:/Nguồn mới" } });
-    expect(screen.queryByLabelText("Gói nội dung")).toBeNull();
-    expect(screen.getByRole("button", { name: "Chạy preflight" })).toBeDisabled();
-    expect(screen.getByRole("button", { name: /Xác nhận và đăng/ })).toBeDisabled();
-  });
-
-  it("does not apply a pending profile scan after a new source has been selected", async () => {
-    const definition = { id: "saved-publish", name: "Đăng ca sáng", kind: "publish", latestRevision: 1, archived: false };
-    vi.mocked(automationList).mockResolvedValueOnce([definition] as never);
-    vi.mocked(automationGet).mockResolvedValueOnce({ definition, revision: {
-      definitionId: definition.id, revision: 1, targetRef: { type: "explicit", udids: ["PHONE-A"] },
-      config: { schemaVersion: 1, sourceRoot: "C:/carousels", bundleIds: ["b1"], captionOverrides: { b1: "Chú thích đã ghim" },
-        soundPolicy: { kind: "trendingAny", poolSize: 3, seed: 42 }, executionConfirmed: true },
-    } } as never);
-    let finishProfile!: (value: PublishFolderManifest) => void;
-    vi.mocked(publishScanFolder).mockImplementationOnce(() => new Promise((resolve) => { finishProfile = resolve; }));
-    render(<PublishPage devices={devices} selected={[]} onSelectUdids={() => {}} />);
-    fireEvent.change(await screen.findByRole("combobox", { name: "Hồ sơ Đăng bài" }), { target: { value: definition.id } });
-    await waitFor(() => expect(publishScanFolder).toHaveBeenCalledTimes(1));
-    fireEvent.change(screen.getByRole("textbox", { name: "Thư mục nguồn" }), { target: { value: "C:/Nguồn mới" } });
-    await act(async () => { finishProfile(manifest); });
-    expect(screen.getByRole("textbox", { name: "Thư mục nguồn" })).toHaveValue("C:/Nguồn mới");
-    expect(screen.queryByDisplayValue("Chú thích đã ghim")).toBeNull();
-    expect(screen.getByText("Thiết lập vừa thay đổi. Chọn lại hồ sơ để áp dụng.")).toBeVisible();
-    expect(screen.getByRole("button", { name: /Xác nhận và đăng/ })).toBeDisabled();
-  });
-
-  it("shows and maps a directly selected one-bundle folder without widening the source", async () => {
-    const source = "C:/Nội dung/set1 01 3n2d";
-    const single = { ...bundle("one", "set1 01 3n2d"), sourcePath: source, captionPath: `${source}/caption-set1.txt` };
-    vi.mocked(pickDirectory).mockResolvedValueOnce(source);
-    vi.mocked(publishScanFolder).mockResolvedValueOnce({ ...manifest, sourceRoot: source, bundles: [single] });
-    render(<PublishPage devices={devices} selected={[]} onSelectUdids={() => {}} />);
-    fireEvent.click(screen.getByRole("button", { name: "Chọn thư mục" }));
-    expect(await within(await screen.findByLabelText("Gói nội dung")).findByText("1 gói hợp lệ")).toBeVisible();
-    expect(screen.getByRole("checkbox", { name: "Chọn set1 01 3n2d" })).toBeChecked();
-    expect(screen.getByRole("textbox", { name: "Thư mục nguồn" })).toHaveValue(source);
-    fireEvent.click(screen.getByRole("button", { name: "Chạy preflight" }));
-    await waitFor(() => expect(preflightCampaign).toHaveBeenCalledWith(expect.objectContaining({ sourceRoot: source, bundleIds: ["one"], udids: ["PHONE-A"] })));
-    expect(createCampaign).not.toHaveBeenCalled();
-    expect(executeCampaign).not.toHaveBeenCalled();
-  });
-
-  it("keeps the existing source and manifest when the folder picker is cancelled", async () => {
-    render(<PublishPage devices={devices} selected={[]} onSelectUdids={() => {}} />);
-    fireEvent.click(screen.getByRole("button", { name: "Chọn thư mục" }));
-    await within(await screen.findByLabelText("Gói nội dung")).findByText("3 gói hợp lệ");
-    vi.mocked(pickDirectory).mockResolvedValueOnce(null);
-    fireEvent.click(screen.getByRole("button", { name: "Chọn thư mục" }));
-    await waitFor(() => expect(pickDirectory).toHaveBeenCalledTimes(2));
-    expect(publishScanFolder).toHaveBeenCalledTimes(1);
-    expect(screen.getByRole("textbox", { name: "Thư mục nguồn" })).toHaveValue("C:/carousels");
-    expect(within(screen.getByLabelText("Gói nội dung")).getByText("3 gói hợp lệ")).toBeVisible();
-  });
-
-  it("discards a scan that finishes after unmount instead of repopulating a later workspace", async () => {
-    let resolve!: (value: PublishFolderManifest) => void;
-    vi.mocked(publishScanFolder).mockImplementationOnce(() => new Promise((accept) => { resolve = accept; }));
+describe("production publish wizard", () => {
+  it("autosaves mapping and caption, rescans on remount and requires fresh preflight", async () => {
     const view = render(<PublishPage devices={devices} selected={[]} onSelectUdids={() => {}} />);
-    fireEvent.click(screen.getByRole("button", { name: "Chọn thư mục" }));
-    await waitFor(() => expect(publishScanFolder).toHaveBeenCalledTimes(1));
+    await prepareOne();
+    await userEvent.click(screen.getByRole("checkbox", { name: "Xóa ảnh đã chuyển trên máy" }));
+    await act(async () => { expect(await requestWorkspaceLeave()).toBe(true); });
+    expect(requestConfirm).not.toHaveBeenCalled();
+    expect(createCampaign).not.toHaveBeenCalled();
     view.unmount();
     render(<PublishPage devices={devices} selected={[]} onSelectUdids={() => {}} />);
-    await act(async () => { resolve(manifest); });
-    expect(screen.getByRole("textbox", { name: "Thư mục nguồn" })).toHaveValue("");
-    expect(screen.queryByRole("textbox", { name: "Chú thích cho bo1" })).toBeNull();
-    expect(createCampaign).not.toHaveBeenCalled();
-    expect(executeCampaign).not.toHaveBeenCalled();
-  });
-
-  it("does not start scanning when a folder picker returns after the page unmounts", async () => {
-    let pick!: (path: string) => void;
-    vi.mocked(pickDirectory).mockImplementationOnce(() => new Promise((resolve) => { pick = resolve; }));
-    const { unmount } = render(<PublishPage devices={devices} selected={[]} onSelectUdids={() => {}} />);
-    fireEvent.click(screen.getByRole("button", { name: "Chọn thư mục" }));
-    unmount();
-    await act(async () => { pick("C:/Nguồn cũ"); });
-    expect(publishScanFolder).not.toHaveBeenCalled();
-  });
-
-  it("navigates each setup step by keyboard without opening the execution gate", async () => {
-    render(<PublishPage devices={devices} selected={[]} onSelectUdids={() => {}} />);
-    await screen.findByRole("combobox", { name: "Hồ sơ Đăng bài" });
-    const user = userEvent.setup();
-    for (const [name, id] of [["Nguồn", "source"], ["Ghép bài/máy", "mapping"], ["Preflight", "preflight"], ["Xác nhận công khai", "confirm"]]) {
-      const button = screen.getByRole("button", { name });
-      button.focus();
-      await user.keyboard("{Enter}");
-      expect(document.getElementById(`publish-step-${id}`)).toHaveFocus();
-    }
-    expect(screen.getByRole("button", { name: /Xác nhận và đăng/ })).toBeDisabled();
+    await waitFor(() => expect(screen.getByRole("checkbox", { name: "Chọn bo1" })).toBeChecked());
+    expect(publishScanFolder).toHaveBeenCalledTimes(2);
+    await userEvent.click(screen.getByRole("button", { name: "Chọn máy" }));
+    expect(screen.getByRole("button", { name: "Máy 1: bo1" })).toBeVisible();
+    await userEvent.click(screen.getByRole("button", { name: "Xem lại & kiểm tra" }));
+    expect(screen.getByRole("checkbox", { name: "Xóa ảnh đã chuyển trên máy" })).toBeChecked();
     expect(preflightCampaign).not.toHaveBeenCalled();
     expect(executeCampaign).not.toHaveBeenCalled();
   });
+  it("scans real source but never selects or dispatches on load", async () => {
+    render(
+      <PublishPage devices={devices} selected={[]} onSelectUdids={() => {}} />,
+    );
+    await userEvent.click(screen.getByRole("button", { name: "Chọn thư mục" }));
+    expect(
+      await screen.findByRole("checkbox", { name: "Chọn bo1" }),
+    ).not.toBeChecked();
+    expect(screen.getByRole("button", { name: "Chọn máy" })).toBeDisabled();
+    expect(createCampaign).not.toHaveBeenCalled();
+    expect(preflightCampaign).not.toHaveBeenCalled();
+  });
+  it("keeps scan errors and ignores late success after source edit", async () => {
+    let release!: (value: PublishFolderManifest) => void;
+    vi.mocked(publishScanFolder).mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          release = resolve;
+        }),
+    );
+    render(
+      <PublishPage devices={devices} selected={[]} onSelectUdids={() => {}} />,
+    );
+    await userEvent.click(screen.getByRole("button", { name: "Chọn thư mục" }));
+    fireEvent.change(screen.getByRole("textbox", { name: "Thư mục nguồn" }), {
+      target: { value: "C:/new-source" },
+    });
+    await act(async () => {
+      release(manifest);
+    });
+    expect(screen.queryByRole("checkbox", { name: "Chọn bo1" })).toBeNull();
+    expect(screen.getByRole("textbox", { name: "Thư mục nguồn" })).toHaveValue(
+      "C:/new-source",
+    );
+    vi.mocked(publishScanFolder).mockRejectedValueOnce(
+      new Error("publish folder has no bundle directories"),
+    );
+    await userEvent.click(screen.getByRole("button", { name: "Quét nguồn" }));
+    expect(
+      await screen.findByText("Chưa tìm thấy gói bài trong thư mục đã chọn"),
+    ).toBeVisible();
+  });
+  it("posts only after current preflight and explicit confirmation, carrying Sheet and cleanup", async () => {
+    render(
+      <PublishPage devices={devices} selected={[]} onSelectUdids={() => {}} />,
+    );
+    await prepareOne();
+    await userEvent.click(
+      screen.getByRole("checkbox", { name: "Xóa ảnh đã chuyển trên máy" }),
+    );
+    await userEvent.click(
+      screen.getByRole("button", { name: "Kiểm tra 1 bài" }),
+    );
+    const confirm = await screen.findByRole("button", {
+      name: "Xác nhận đăng 1 bài",
+    });
+    await waitFor(() => expect(confirm).toBeEnabled());
+    expect(createCampaign).not.toHaveBeenCalled();
+    expect(preflightCampaign).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        bundleIds: ["b1"],
+        udids: ["PHONE-A"],
+        deleteAfterPublish: true,
+        sheetEnabled: false,
+      }),
+    );
+    await userEvent.click(confirm);
+    await waitFor(() => expect(createCampaign).toHaveBeenCalledTimes(1));
+    expect(createCampaign).toHaveBeenCalledWith(
+      "C:/carousels",
+      ["b1"],
+      ["PHONE-A"],
+      null,
+      { b1: "caption for bo1" },
+      expect.any(Object),
+      { type: "explicit", udids: ["PHONE-A"] },
+      true,
+      "approved-digest-1",
+      false,
+      true,
+    );
+    expect(executeCampaign).toHaveBeenCalledWith("campaign-1", true);
+    expect(requestConfirm).toHaveBeenCalledWith(
+      expect.objectContaining({
+        message: expect.stringContaining("sau khi mở TikTok"),
+      }),
+    );
+  });
+  it("rejects a late preflight when its assigned machine leaves the scope", async () => {
+    let release!: (value: PublishPreflightReport) => void;
+    const implementation = preflightCampaign.getMockImplementation()!;
+    preflightCampaign.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          release = resolve;
+        }),
+    );
+    const view = render(
+      <PublishPage
+        devices={devices}
+        selected={[]}
+        targetUdids={["PHONE-A"]}
+        onSelectUdids={() => {}}
+      />,
+    );
+    await prepareOne();
+    await userEvent.click(
+      screen.getByRole("button", { name: "Kiểm tra 1 bài" }),
+    );
+    const request = preflightCampaign.mock.calls.at(-1)![0];
+    await userEvent.click(screen.getByRole("button", { name: "Đóng" }));
+    view.rerender(
+      <PublishPage
+        devices={devices}
+        selected={[]}
+        targetUdids={["PHONE-B"]}
+        onSelectUdids={() => {}}
+      />,
+    );
+    await act(async () => {
+      release(await implementation(request));
+    });
+    expect(
+      screen.queryByText("Đầu vào đã đạt kiểm tra. Chưa đăng bài."),
+    ).toBeNull();
+    expect(
+      screen.getByRole("button", { name: "Kiểm tra 1 bài" }),
+    ).toBeDisabled();
+    expect(createCampaign).not.toHaveBeenCalled();
+  });
+  it("does not create a campaign if the roster changes during native confirmation", async () => {
+    let approve!: (value: boolean) => void;
+    vi.mocked(requestConfirm).mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          approve = resolve;
+        }),
+    );
+    const view = render(
+      <PublishPage
+        devices={devices}
+        selected={[]}
+        targetUdids={["PHONE-A"]}
+        onSelectUdids={() => {}}
+      />,
+    );
+    await prepareOne();
+    await userEvent.click(
+      screen.getByRole("button", { name: "Kiểm tra 1 bài" }),
+    );
+    const confirm = await screen.findByRole("button", {
+      name: "Xác nhận đăng 1 bài",
+    });
+    await waitFor(() => expect(confirm).toBeEnabled());
+    await userEvent.click(confirm);
+    view.rerender(
+      <PublishPage
+        devices={devices}
+        selected={[]}
+        targetUdids={["PHONE-B"]}
+        onSelectUdids={() => {}}
+      />,
+    );
+    await act(async () => approve(true));
+    expect(createCampaign).not.toHaveBeenCalled();
+    expect(executeCampaign).not.toHaveBeenCalled();
+  });
+  it("applies a group profile against its newly resolved machines and restores cleanup", async () => {
+    const record = {
+      definition: {
+        id: "profile-b",
+        name: "Nhóm B",
+        kind: "publish",
+        latestRevision: 1,
+        archived: false,
+        createdAt: "2026-09-07T00:00:00Z",
+        updatedAt: "2026-09-07T00:00:00Z",
+      },
+      revision: {
+        definitionId: "profile-b",
+        revision: 1,
+        createdAt: "2026-09-07T00:00:00Z",
+        canonicalJson: "{}",
+        sha256: "ab".repeat(32),
+        targetRef: { type: "group", groupId: "b" },
+        config: {
+          schemaVersion: 1,
+          sourceRoot: "C:/carousels",
+          bundleIds: ["b1"],
+          captionOverrides: { b1: "Caption B" },
+          soundPolicy: { kind: "trendingAny", poolSize: 5, seed: 42 },
+          executionConfirmed: true,
+          sheetEnabled: false,
+          deleteAfterPublish: false,
+        },
+      },
+    } as AutomationDefinitionRecord;
+    vi.mocked(automationList).mockResolvedValue([record.definition]);
+    vi.mocked(automationGet).mockResolvedValue(record);
+    function Workspace() {
+      const [target, setTarget] = useState<TargetRef>({
+        type: "group",
+        groupId: "a",
+      });
+      return (
+        <PublishPage
+          devices={devices}
+          selected={[]}
+          targetRef={target}
+          onTargetRefChange={setTarget}
+          targetUdids={
+            target.type === "group" && target.groupId === "b"
+              ? ["PHONE-B"]
+              : ["PHONE-A"]
+          }
+          onSelectUdids={() => {}}
+        />
+      );
+    }
+    render(<Workspace />);
+    await userEvent.click(
+      screen.getByRole("button", { name: "Hồ sơ & cài đặt" }),
+    );
+    await userEvent.selectOptions(
+      await screen.findByRole("combobox", { name: "Hồ sơ Đăng bài" }),
+      "profile-b",
+    );
+    await waitFor(() => expect(publishScanFolder).toHaveBeenCalled());
+    await userEvent.click(screen.getByRole("button", { name: "Đóng" }));
+    await userEvent.click(screen.getByRole("button", { name: "Chọn máy" }));
+    expect(screen.getByRole("button", { name: "Máy 2: bo1" })).toBeVisible();
+    await userEvent.click(
+      screen.getByRole("button", { name: "Xem lại & kiểm tra" }),
+    );
+    expect(
+      screen.getByRole("checkbox", { name: "Xóa ảnh đã chuyển trên máy" }),
+    ).not.toBeChecked();
+    await userEvent.click(
+      screen.getByRole("button", { name: "Kiểm tra 1 bài" }),
+    );
+    expect(preflightCampaign).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        udids: ["PHONE-B"],
+        soundPolicy: { kind: "trendingAny", poolSize: 5, seed: 42 },
+        deleteAfterPublish: false,
+      }),
+    );
+  });
+  it("does not publish when native confirmation is cancelled", async () => {
+    vi.mocked(requestConfirm).mockResolvedValueOnce(false);
+    render(
+      <PublishPage devices={devices} selected={[]} onSelectUdids={() => {}} />,
+    );
+    await prepareOne();
+    await userEvent.click(
+      screen.getByRole("button", { name: "Kiểm tra 1 bài" }),
+    );
+    const confirm = await screen.findByRole("button", {
+      name: "Xác nhận đăng 1 bài",
+    });
+    await waitFor(() => expect(confirm).toBeEnabled());
+    await userEvent.click(confirm);
+    expect(createCampaign).not.toHaveBeenCalled();
+  });
+  it("changing cleanup invalidates the approved digest", async () => {
+    render(
+      <PublishPage devices={devices} selected={[]} onSelectUdids={() => {}} />,
+    );
+    await prepareOne();
+    await userEvent.click(
+      screen.getByRole("button", { name: "Kiểm tra 1 bài" }),
+    );
+    await waitFor(() =>
+      expect(
+        screen.getByRole("button", { name: "Xác nhận đăng 1 bài" }),
+      ).toBeEnabled(),
+    );
+    await userEvent.click(screen.getByRole("button", { name: "Đóng" }));
+    await userEvent.click(
+      screen.getByRole("checkbox", { name: "Xóa ảnh đã chuyển trên máy" }),
+    );
+    await userEvent.click(
+      screen.getByRole("button", { name: "Kiểm tra 1 bài" }),
+    );
+    await waitFor(() => expect(preflightCampaign).toHaveBeenCalledTimes(2));
+    expect(preflightCampaign.mock.calls.at(-1)![0].deleteAfterPublish).toBe(
+      true,
+    );
+  });
+  it("keeps bundle identity when a sibling is removed", async () => {
+    render(
+      <PublishPage devices={devices} selected={[]} onSelectUdids={() => {}} />,
+    );
+    await userEvent.click(screen.getByRole("button", { name: "Chọn thư mục" }));
+    await userEvent.click(
+      await screen.findByRole("checkbox", { name: "Chọn bo1" }),
+    );
+    await userEvent.click(screen.getByRole("checkbox", { name: "Chọn bo2" }));
+    await userEvent.click(screen.getByRole("button", { name: "Chọn máy" }));
+    await userEvent.click(screen.getByRole("button", { name: /Ghép tự động/ }));
+    await userEvent.click(screen.getByRole("button", { name: "Quay lại" }));
+    await userEvent.click(screen.getByRole("checkbox", { name: "Chọn bo1" }));
+    await userEvent.click(screen.getByRole("button", { name: "Chọn máy" }));
+    await userEvent.click(
+      screen.getByRole("button", { name: "Xem lại & kiểm tra" }),
+    );
+    await userEvent.click(
+      screen.getByRole("button", { name: "Kiểm tra 1 bài" }),
+    );
+    expect(preflightCampaign).toHaveBeenLastCalledWith(
+      expect.objectContaining({ bundleIds: ["b2"], udids: ["PHONE-B"] }),
+    );
+  });
+  it("preserves edited caption without modifying source manifest", async () => {
+    render(
+      <PublishPage devices={devices} selected={[]} onSelectUdids={() => {}} />,
+    );
+    await userEvent.click(screen.getByRole("button", { name: "Chọn thư mục" }));
+    await userEvent.click(
+      await screen.findByRole("button", { name: "Sửa nội dung bo1" }),
+    );
+    fireEvent.change(
+      screen.getByRole("textbox", { name: "Chú thích cho bo1" }),
+      { target: { value: "Nội dung mới" } },
+    );
+    await userEvent.click(screen.getByRole("button", { name: "Lưu nội dung" }));
+    expect(manifest.bundles[0].caption).toBe("caption for bo1");
+    await userEvent.click(screen.getByRole("checkbox", { name: "Chọn bo1" }));
+    await userEvent.click(screen.getByRole("button", { name: "Chọn máy" }));
+    await userEvent.click(screen.getByRole("button", { name: /Ghép tự động/ }));
+    await userEvent.click(
+      screen.getByRole("button", { name: "Xem lại & kiểm tra" }),
+    );
+    await userEvent.click(
+      screen.getByRole("button", { name: "Kiểm tra 1 bài" }),
+    );
+    expect(preflightCampaign).toHaveBeenLastCalledWith(
+      expect.objectContaining({ captionOverrides: { b1: "Nội dung mới" } }),
+    );
+  });
+});
 
+describe("publish campaign monitoring", () => {
   it("opens an exact historical campaign without reconciling or executing it", async () => {
-    const campaign = { id: "historical", requestId: "req", sourceRoot: "C:/fixture", state: "failed", assignments: [], createdAt: "2026-08-01T00:00:00Z" };
-    vi.mocked(publishGet).mockResolvedValueOnce({ campaign, bundles: [], assignments: [], events: [] } as never);
-    render(<PublishPage devices={devices} selected={[]} onSelectUdids={() => {}} operationSource={{ operationId: "publish:historical", sourceId: "historical", kind: "publish" }} />);
+    const campaign = {
+      id: "historical",
+      requestId: "req",
+      sourceRoot: "C:/fixture",
+      state: "failed",
+      assignments: [],
+      createdAt: "2026-08-01T00:00:00Z",
+    };
+    vi.mocked(publishGet).mockResolvedValueOnce({
+      campaign,
+      bundles: [],
+      assignments: [],
+      events: [],
+    } as never);
+    render(
+      <PublishPage
+        devices={devices}
+        selected={[]}
+        onSelectUdids={() => {}}
+        operationSource={{
+          operationId: "publish:historical",
+          sourceId: "historical",
+          kind: "publish",
+        }}
+      />,
+    );
     await waitFor(() => expect(publishGet).toHaveBeenCalledWith("historical"));
-    expect(screen.getByRole("tab", { name: "Theo dõi" })).toHaveAttribute("aria-selected", "true");
-    expect(await screen.findByRole("region", { name: "Chi tiết chiến dịch đang chọn" })).toBeVisible();
+    expect(screen.getByRole("region", { name: "Theo dõi" })).toBeVisible();
+    expect(
+      await screen.findByRole("region", {
+        name: "Chi tiết chiến dịch đang chọn",
+      }),
+    ).toBeVisible();
     expect(publishReconcile).not.toHaveBeenCalled();
     expect(executeCampaign).not.toHaveBeenCalled();
   });
 
   it("reports a missing exact campaign without showing another campaign instead", async () => {
     vi.mocked(publishGet).mockResolvedValueOnce(null);
-    render(<PublishPage devices={devices} selected={[]} onSelectUdids={() => {}} operationSource={{ operationId: "publish:missing", sourceId: "missing", kind: "publish" }} />);
-    expect(await screen.findByText("Chiến dịch được chọn không còn trong nguồn dữ liệu.")).toBeVisible();
-    expect(screen.queryByRole("table", { name: "Danh sách chiến dịch" })).toBeNull();
-    expect(executeCampaign).not.toHaveBeenCalled();
-  });
-  it("applies saved publish content and captions but requires a fresh preflight", async () => {
-    const definition = { id: "saved-publish", name: "Đăng ca sáng", kind: "publish", latestRevision: 1, archived: false };
-    vi.mocked(automationList).mockResolvedValueOnce([definition] as never);
-    vi.mocked(automationGet).mockResolvedValueOnce({ definition, revision: {
-      definitionId: definition.id, revision: 1, targetRef: { type: "explicit", udids: ["PHONE-A"] },
-      config: { schemaVersion: 1, sourceRoot: "C:/carousels", bundleIds: ["b1"], captionOverrides: { b1: "Chú thích đã ghim" },
-        soundPolicy: { kind: "trendingAny", poolSize: 3, seed: 42 }, executionConfirmed: true },
-    } } as never);
-    render(<PublishPage devices={devices} selected={["PHONE-A"]} targetRef={{ type: "explicit", udids: ["PHONE-A"] }} onSelectUdids={() => {}} />);
-    fireEvent.change(await screen.findByRole("combobox", { name: "Hồ sơ Đăng bài" }), { target: { value: definition.id } });
-    expect(await screen.findByDisplayValue("Chú thích đã ghim")).toBeVisible();
-    expect(screen.getByRole("button", { name: /Xác nhận và đăng/ })).toBeDisabled();
-    expect(preflightCampaign).not.toHaveBeenCalled();
+    render(
+      <PublishPage
+        devices={devices}
+        selected={[]}
+        onSelectUdids={() => {}}
+        operationSource={{
+          operationId: "publish:missing",
+          sourceId: "missing",
+          kind: "publish",
+        }}
+      />,
+    );
+    expect(
+      await screen.findByText(
+        "Chiến dịch được chọn không còn trong nguồn dữ liệu.",
+      ),
+    ).toBeVisible();
+    expect(
+      screen.queryByRole("table", { name: "Danh sách chiến dịch" }),
+    ).toBeNull();
     expect(executeCampaign).not.toHaveBeenCalled();
   });
 
   it("keeps a confirmed Post partial and offers only the outstanding Sheet step", async () => {
     const campaign = {
-      id: "posted-partial", requestId: "request", sourceRoot: "C:/fixture", state: "succeeded",
-      visibility: "public", cleanupPolicy: "deleteImportedAssetsAfterVerified", assignments: [],
-      createdAt: "2026-09-05T00:00:00Z", updatedAt: "2026-09-05T00:00:00Z",
+      id: "posted-partial",
+      requestId: "request",
+      sourceRoot: "C:/fixture",
+      state: "succeeded",
+      visibility: "public",
+      cleanupPolicy: "deleteImportedAssetsAfterVerified",
+      assignments: [],
+      createdAt: "2026-09-05T00:00:00Z",
+      updatedAt: "2026-09-05T00:00:00Z",
     };
     vi.mocked(publishList).mockResolvedValueOnce([campaign] as never);
-    vi.mocked(operationListRuns).mockResolvedValueOnce([{
-      id: "publish:posted-partial", sourceId: "posted-partial", kind: "publish", title: "Đăng bài",
-      state: "partial", targetCount: 1, totalItems: 1, completedItems: 1, issueCount: 1, retryableCount: 1,
-      retryScope: "sheetOnly", createdAt: campaign.createdAt, updatedAt: campaign.updatedAt,
-    }]);
+    vi.mocked(operationListRuns).mockResolvedValueOnce([
+      {
+        id: "publish:posted-partial",
+        sourceId: "posted-partial",
+        kind: "publish",
+        title: "Đăng bài",
+        state: "partial",
+        targetCount: 1,
+        totalItems: 1,
+        completedItems: 1,
+        issueCount: 1,
+        retryableCount: 1,
+        retryScope: "sheetOnly",
+        createdAt: campaign.createdAt,
+        updatedAt: campaign.updatedAt,
+      },
+    ]);
     vi.mocked(publishReconcile).mockResolvedValueOnce({
-      campaignId: campaign.id, inputDigest: "digest", status: "partial", retryScope: "sheetOnly",
-      reportJson: {}, updatedAt: campaign.updatedAt,
+      campaignId: campaign.id,
+      inputDigest: "digest",
+      status: "partial",
+      retryScope: "sheetOnly",
+      reportJson: {},
+      updatedAt: campaign.updatedAt,
     });
-    render(<PublishPage devices={devices} selected={[]} onSelectUdids={() => {}} />);
-    fireEvent.click(screen.getByRole("tab", { name: "Theo dõi" }));
+    render(
+      <PublishPage devices={devices} selected={[]} onSelectUdids={() => {}} />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Theo dõi" }));
     expect(await screen.findByText("Hoàn tất một phần")).toBeVisible();
     expect(screen.queryByText("Hoàn tất", { exact: true })).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "Ghi lại Sheet" }));
-    await waitFor(() => expect(executeCampaign).toHaveBeenCalledWith(campaign.id, true));
-    expect(requestConfirm).toHaveBeenCalledWith(expect.objectContaining({ message: expect.stringContaining("Chỉ tiếp tục ghi Sheet") }));
+    await waitFor(() =>
+      expect(executeCampaign).toHaveBeenCalledWith(campaign.id, true),
+    );
+    expect(requestConfirm).toHaveBeenCalledWith(
+      expect.objectContaining({
+        message: expect.stringContaining("Chỉ tiếp tục ghi Sheet"),
+      }),
+    );
   });
 
   it("shows the confirmed post link and account sound evidence separately from Sheet completion", async () => {
     const campaign = {
-      id: "posted-evidence", requestId: "request", sourceRoot: "C:/fixture", state: "succeeded",
-      visibility: "public", cleanupPolicy: "deleteImportedAssetsAfterVerified", assignments: [],
-      createdAt: "2026-09-05T00:00:00Z", updatedAt: "2026-09-05T00:00:00Z",
+      id: "posted-evidence",
+      requestId: "request",
+      sourceRoot: "C:/fixture",
+      state: "succeeded",
+      visibility: "public",
+      cleanupPolicy: "deleteImportedAssetsAfterVerified",
+      assignments: [],
+      createdAt: "2026-09-05T00:00:00Z",
+      updatedAt: "2026-09-05T00:00:00Z",
     };
     vi.mocked(publishList).mockResolvedValueOnce([campaign] as never);
     vi.mocked(publishReconcile).mockResolvedValueOnce({
-      campaignId: campaign.id, inputDigest: "digest", status: "partial", retryScope: "sheetOnly",
-      reportJson: {}, updatedAt: campaign.updatedAt,
+      campaignId: campaign.id,
+      inputDigest: "digest",
+      status: "partial",
+      retryScope: "sheetOnly",
+      reportJson: {},
+      updatedAt: campaign.updatedAt,
     });
     vi.mocked(publishGet).mockResolvedValueOnce({
-      campaign, bundles: [], events: [], assignments: [{
-        id: "assignment", campaignId: campaign.id, bundleId: "bundle", ordinal: 0, udid: "PHONE-A", state: "succeeded",
-        evidenceJson: JSON.stringify({ post: { postUrl: "https://www.tiktok.com/@fixture/video/123", soundSelection: {
-          title: "Bài nhạc trên tài khoản", artist: "Tác giả", section: "recommended", index: 2,
-          candidatesDigest: "sound-digest", confirmed: true,
-        } }, cleanup: { state: "cleaned" } }),
-      }],
+      campaign,
+      bundles: [],
+      events: [],
+      assignments: [
+        {
+          id: "assignment",
+          campaignId: campaign.id,
+          bundleId: "bundle",
+          ordinal: 0,
+          udid: "PHONE-A",
+          state: "succeeded",
+          evidenceJson: JSON.stringify({
+            post: {
+              postUrl: "https://www.tiktok.com/@fixture/video/123",
+              soundSelection: {
+                title: "Bài nhạc trên tài khoản",
+                artist: "Tác giả",
+                section: "recommended",
+                index: 2,
+                candidatesDigest: "sound-digest",
+                confirmed: true,
+              },
+            },
+            cleanup: { state: "cleaned" },
+          }),
+        },
+      ],
     } as never);
-    render(<PublishPage devices={devices} selected={[]} onSelectUdids={() => {}} />);
-    fireEvent.click(screen.getByRole("tab", { name: "Theo dõi" }));
-    fireEvent.click(await screen.findByRole("button", { name: "Đối chiếu kết quả" }));
-    expect(await screen.findByRole("link", { name: "Mở bài đã xác nhận" })).toHaveAttribute("href", "https://www.tiktok.com/@fixture/video/123");
+    render(
+      <PublishPage devices={devices} selected={[]} onSelectUdids={() => {}} />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Theo dõi" }));
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Đối chiếu kết quả" }),
+    );
+    expect(
+      await screen.findByRole("link", { name: "Mở bài đã xác nhận" }),
+    ).toHaveAttribute("href", "https://www.tiktok.com/@fixture/video/123");
     expect(screen.getByText("Bài nhạc trên tài khoản · Tác giả")).toBeVisible();
     expect(screen.getByText("Sheet chưa hoàn tất")).toBeVisible();
     fireEvent.click(screen.getByText("Đã xác nhận nhạc"));
@@ -473,18 +831,23 @@ describe("publish, bundle to phone", () => {
     const list = vi.mocked(publishList);
     let rejectFirst!: (reason: Error) => void;
     list.mockImplementationOnce(
-      () => new Promise((_, reject) => {
-        rejectFirst = reject;
-      }),
+      () =>
+        new Promise((_, reject) => {
+          rejectFirst = reject;
+        }),
     );
 
-    render(<PublishPage devices={devices} selected={[]} onSelectUdids={() => {}} />);
-    await user.click(screen.getByRole("tab", { name: "Theo dõi" }));
+    render(
+      <PublishPage devices={devices} selected={[]} onSelectUdids={() => {}} />,
+    );
+    await user.click(screen.getByRole("button", { name: "Theo dõi" }));
     expect(screen.getByText("Đang tải chiến dịch…")).toBeVisible();
     expect(screen.queryByText("Chưa có chiến dịch")).toBeNull();
 
     rejectFirst(new Error("không đọc được chiến dịch"));
-    expect(await screen.findByRole("alert")).toHaveTextContent("không đọc được chiến dịch");
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "không đọc được chiến dịch",
+    );
     expect(screen.queryByText("Chưa có chiến dịch")).toBeNull();
 
     list.mockResolvedValueOnce([] as never);
@@ -492,324 +855,6 @@ describe("publish, bundle to phone", () => {
     expect(await screen.findByText("Chưa có chiến dịch")).toBeVisible();
   });
 
-  it("presents one publish workspace for photos and video", () => {
-    render(<PublishPage devices={devices} selected={[]} onSelectUdids={() => {}} />);
-
-    expect(screen.queryByRole("heading", { level: 1 })).toBeNull();
-    expect(screen.getByText(/một video hoặc một bộ ảnh/i)).toBeInTheDocument();
-    expect(screen.queryByText(/dùng âm thanh mặc định/i)).toBeNull();
-  });
-
-  it("provides a roving keyboard tablist linked to named publish panels", async () => {
-    render(<PublishPage devices={devices} selected={[]} onSelectUdids={() => {}} />);
-
-    const setup = screen.getByRole("tab", { name: "Thiết lập" });
-    const monitor = screen.getByRole("tab", { name: "Theo dõi" });
-    expect(setup).toHaveAttribute("tabindex", "0");
-    expect(monitor).toHaveAttribute("tabindex", "-1");
-    expect(document.getElementById(setup.getAttribute("aria-controls")!)).toHaveAttribute(
-      "aria-label",
-      "Thiết lập",
-    );
-
-    setup.focus();
-    fireEvent.keyDown(setup, { key: "ArrowRight" });
-    await waitFor(() => expect(monitor).toHaveFocus());
-    expect(monitor).toHaveAttribute("aria-selected", "true");
-    const monitorPanel = document.getElementById(monitor.getAttribute("aria-controls")!);
-    expect(monitorPanel).toHaveAttribute("role", "tabpanel");
-    expect(monitorPanel).toHaveAttribute("aria-label", "Theo dõi");
-
-    fireEvent.keyDown(monitor, { key: "Home" });
-    await waitFor(() => expect(setup).toHaveFocus());
-    expect(setup).toHaveAttribute("aria-selected", "true");
-    fireEvent.keyDown(setup, { key: "End" });
-    await waitFor(() => expect(monitor).toHaveFocus());
-    fireEvent.keyDown(monitor, { key: "ArrowLeft" });
-    await waitFor(() => expect(setup).toHaveFocus());
-  });
-
-  it("separates setup from monitoring and saves a target-bound publish profile", async () => {
-    const user = userEvent.setup();
-    render(
-      <PublishPage
-        devices={[devices[0]]}
-        selected={["PHONE-A"]}
-        targetUdids={["PHONE-A"]}
-        targetRef={{ type: "group", groupId: "group-a" }}
-        onSelectUdids={() => {}}
-      />,
-    );
-
-    expect(screen.getByRole("tab", { name: "Thiết lập" })).toHaveAttribute(
-      "aria-selected",
-      "true",
-    );
-    await user.click(screen.getByRole("button", { name: "Chọn thư mục" }));
-    await user.click(await screen.findByRole("button", { name: "Tạo hồ sơ" }));
-
-    await waitFor(() => {
-      expect(automationCreate).toHaveBeenCalledWith(
-        "Đăng bài theo thư mục",
-        "publish",
-        { type: "group", groupId: "group-a" },
-        expect.objectContaining({
-          schemaVersion: 1,
-          sourceRoot: "C:/carousels",
-          bundleIds: ["b1"],
-          executionConfirmed: true,
-          soundPolicy: expect.objectContaining({ kind: "trendingAny", poolSize: 5 }),
-        }),
-      );
-    });
-    expect(requestConfirm).toHaveBeenCalledWith(expect.objectContaining({
-      title: "Cho phép hồ sơ đăng công khai?",
-      confirmLabel: "Cho phép và lưu",
-    }));
-
-    await user.click(screen.getByRole("tab", { name: "Theo dõi" }));
-    expect(screen.getByText("Chưa có chiến dịch")).toBeVisible();
-    expect(screen.queryByRole("button", { name: "Chọn thư mục" })).not.toBeInTheDocument();
-  });
-
-  it("snapshots an edited caption and starts the confirmed trending-sound pipeline", async () => {
-    const user = userEvent.setup();
-    render(
-      <PublishPage
-        devices={[devices[0]]}
-        selected={["PHONE-A"]}
-        onSelectUdids={() => {}}
-      />,
-    );
-
-    await user.click(screen.getByRole("button", { name: "Chọn thư mục" }));
-    const caption = await screen.findByRole("textbox", { name: "Chú thích cho bo1" });
-    await user.clear(caption);
-    await user.type(caption, "Caption đã duyệt");
-    await user.click(screen.getByRole("button", { name: "Chạy preflight" }));
-    await screen.findByText(/Có thể chuyển sang xác nhận công khai/);
-    await user.click(screen.getByRole("button", { name: /Xác nhận và đăng/ }));
-
-    await waitFor(() => expect(createCampaign).toHaveBeenCalledTimes(1));
-    expect(createCampaign.mock.calls[0]).toEqual([
-      "C:/carousels",
-      ["b1"],
-      ["PHONE-A"],
-      null,
-      { b1: "Caption đã duyệt" },
-      expect.objectContaining({ kind: "trendingAny", poolSize: 5, seed: expect.any(Number) }),
-      { type: "all" },
-      true,
-      "approved-digest-1",
-      true,
-    ]);
-    expect(executeCampaign).toHaveBeenCalledWith("campaign-1", true);
-    expect(screen.queryByRole("button", { name: "Post" })).toBeNull();
-    expect(screen.queryByRole("button", { name: "Prepare" })).toBeNull();
-    expect(screen.queryByRole("button", { name: /Transfer media/ })).toBeNull();
-  });
-
-  it("keeps public execution locked until current input passes preflight", async () => {
-    const user = userEvent.setup();
-    render(
-      <PublishPage
-        devices={[devices[0]]}
-        selected={["PHONE-A"]}
-        onSelectUdids={() => {}}
-      />,
-    );
-
-    const submit = screen.getByRole("button", { name: /Xác nhận và đăng/ });
-    expect(submit).toBeDisabled();
-    await user.click(screen.getByRole("button", { name: "Chọn thư mục" }));
-    expect(submit).toBeDisabled();
-
-    await user.click(screen.getByRole("button", { name: "Chạy preflight" }));
-    await waitFor(() => expect(submit).toBeEnabled());
-    expect(preflightCampaign).toHaveBeenCalledWith(expect.objectContaining({
-      sourceRoot: "C:/carousels",
-      bundleIds: ["b1"],
-      udids: ["PHONE-A"],
-      targetRef: { type: "all" },
-      captionOverrides: { b1: "caption for bo1" },
-      soundPolicy: expect.objectContaining({ kind: "trendingAny", poolSize: 5 }),
-    }));
-
-    await user.type(screen.getByRole("textbox", { name: "Chú thích cho bo1" }), " mới");
-    expect(submit).toBeDisabled();
-    expect(screen.getByText("Chưa có preflight hợp lệ")).toBeVisible();
-    await user.click(submit);
-    expect(createCampaign).not.toHaveBeenCalled();
-  });
-
-  it("shows a scoped preflight failure and leaves public execution locked", async () => {
-    const user = userEvent.setup();
-    preflightCampaign.mockResolvedValueOnce({
-      inputDigest: "rejected-digest",
-      targetSnapshot: {
-        targetRef: { type: "explicit", udids: ["PHONE-A"] },
-        included: [{ udid: "PHONE-A", alias: "Máy 1", number: 1 }],
-        excluded: [],
-        rosterSha256: "22".repeat(32),
-      },
-      canExecute: false,
-      assignments: [{
-        ordinal: 0,
-        bundleId: "b1",
-        udid: "PHONE-A",
-        packageName: "com.ss.android.ugc.trill",
-        version: "38.3.2",
-        locale: "en",
-        media: "pass",
-        composer: "fail",
-        soundPicker: "fail",
-        storage: "pass",
-        requiredBytes: 1024,
-        availableBytes: 4096,
-        issues: [],
-      }],
-      issues: [{ code: "sound_picker_unmeasured", message: "Bộ chọn nhạc chưa được đo trên build này." }],
-      sheetConfigured: false,
-    });
-    render(<PublishPage devices={[devices[0]]} selected={["PHONE-A"]} onSelectUdids={() => {}} />);
-
-    await user.click(screen.getByRole("button", { name: "Chọn thư mục" }));
-    await user.click(screen.getByRole("button", { name: "Chạy preflight" }));
-
-    expect(await screen.findByText("Bộ chọn nhạc chưa được đo trên build này.")).toBeVisible();
-    expect(screen.getByRole("button", { name: /Xác nhận và đăng/ })).toBeDisabled();
-    expect(createCampaign).not.toHaveBeenCalled();
-  });
-
-  /**
-   * The pairing is positional all the way down — `validate_publish_mapping` zips
-   * `bundle_ids[i]` with `udids[i]` — so the order of the array that is *sent* is the
-   * whole contract. The screen shows one order and used to send another: the preview
-   * iterated the bundles in scanned-folder order while the dispatch sent them in the
-   * order the checkboxes happened to be clicked.
-   *
-   * Nothing errors when they disagree. Each phone is a different live TikTok account,
-   * so what it costs is one account posting another's photographs under another's
-   * caption, with no discrepancy to notice afterwards and no delete path to undo it.
-   */
-  it("sends the bundles in the order it showed them, whatever order they were ticked", async () => {
-    const user = userEvent.setup();
-    render(
-      <PublishPage
-        devices={devices}
-        selected={["PHONE-A", "PHONE-B", "PHONE-C"]}
-        onSelectUdids={() => {}}
-      />,
-    );
-
-    await user.click(screen.getByRole("button", { name: "Chọn thư mục" }));
-    await waitFor(() => expect(screen.getByText(/1\. bo1/)).toBeTruthy());
-
-    // Reconsider the middle bundle and put it back — the ordinary hesitation that made
-    // the two arrays disagree. Ticking bottom-up does the same thing.
-    const boxes = screen.getAllByRole("checkbox");
-    await user.click(boxes[1]);
-    await user.click(boxes[1]);
-
-    // Read the pairing off the screen, exactly as the operator would.
-    const shown = screen
-      .getAllByText(/^\d+\. bo\d$/)
-      .map((node) => node.textContent!.replace(/^\d+\.\s*/, ""));
-    expect(shown).toEqual(["bo1", "bo2", "bo3"]);
-
-    await user.click(screen.getByRole("button", { name: "Chạy preflight" }));
-    await screen.findByText(/Có thể chuyển sang xác nhận công khai/);
-    await user.click(screen.getByRole("button", { name: /Xác nhận và đăng/ }));
-    await waitFor(() => expect(createCampaign).toHaveBeenCalled());
-
-    const [, dispatchedIds, dispatchedTargets] = createCampaign.mock.calls[0] as unknown as [
-      string,
-      string[],
-      string[],
-    ];
-    const byId = new Map(manifest.bundles.map((b) => [b.id, b.name]));
-    expect(
-      dispatchedIds.map((id) => byId.get(id)),
-      "the campaign pairs bundles with phones in a different order than the screen promised",
-    ).toEqual(shown);
-    expect(dispatchedTargets).toEqual(["PHONE-A", "PHONE-B", "PHONE-C"]);
-  });
-
-  it("maps ten posts to ten chosen phones inside a larger eligible fleet", async () => {
-    const user = userEvent.setup();
-    const fleet = Array.from({ length: 21 }, (_, index) => iphone(`PHONE-${index + 1}`));
-    const tenBundles = Array.from({ length: 10 }, (_, index) =>
-      bundle(`b${index + 1}`, `bo${index + 1}`),
-    );
-    vi.mocked(publishScanFolder).mockResolvedValueOnce({ ...manifest, bundles: tenBundles });
-
-    render(
-      <PublishPage
-        devices={fleet}
-        selected={[]}
-        targetUdids={fleet.map((device) => device.udid)}
-        targetRef={{ type: "all" }}
-        onSelectUdids={() => {}}
-      />,
-    );
-
-    await user.click(screen.getByRole("button", { name: "Chọn thư mục" }));
-    const lastAssignment = await screen.findByRole("combobox", { name: "Máy đăng bo10" });
-    expect(screen.getByRole("button", { name: /Xác nhận và đăng \(10 → 10\)/ })).toBeDisabled();
-
-    await user.selectOptions(lastAssignment, "PHONE-21");
-    await user.click(screen.getByRole("button", { name: "Chạy preflight" }));
-
-    await waitFor(() => expect(preflightCampaign).toHaveBeenCalledTimes(1));
-    const expectedUdids = [
-      ...fleet.slice(0, 9).map((device) => device.udid),
-      "PHONE-21",
-    ];
-    expect(preflightCampaign).toHaveBeenCalledWith(expect.objectContaining({
-      bundleIds: tenBundles.map((entry) => entry.id),
-      udids: expectedUdids,
-      targetRef: { type: "explicit", udids: expectedUdids },
-    }));
-    expect(screen.queryByText(/phải bằng số máy đích/i)).toBeNull();
-    await user.click(screen.getByRole("button", { name: "Xác nhận công khai" }));
-    await user.click(screen.getByRole("button", { name: /Xác nhận và đăng \(10 → 10\)/ }));
-    expect(createCampaign).toHaveBeenCalledWith("C:/carousels", tenBundles.map((entry) => entry.id), expectedUdids,
-      null, expect.any(Object), expect.any(Object), { type: "explicit", udids: expectedUdids }, true, "approved-digest-1", true);
-  });
-
-  it("pins the Sheet choice, invalidates preflight when changed and does not claim Sheet delivery", async () => {
-    const user = userEvent.setup();
-    render(<PublishPage devices={[devices[0]]} selected={["PHONE-A"]} onSelectUdids={() => {}} />);
-    await user.click(screen.getByRole("button", { name: "Chọn thư mục" }));
-    await screen.findByRole("textbox", { name: "Chú thích cho bo1" });
-    await user.click(screen.getByRole("button", { name: "Chạy preflight" }));
-    const submit = screen.getByRole("button", { name: /Xác nhận và đăng/ });
-    await waitFor(() => expect(submit).toBeEnabled());
-    await user.click(screen.getByRole("checkbox", { name: "Ghi kết quả lên Sheet" }));
-    expect(submit).toBeDisabled();
-    expect(screen.queryByText("Sheet chờ cấu hình")).toBeNull();
-    await user.click(screen.getByRole("button", { name: "Chạy preflight" }));
-    await waitFor(() => expect(submit).toBeEnabled());
-    expect(preflightCampaign).toHaveBeenLastCalledWith(expect.objectContaining({ sheetEnabled: false }));
-    await user.click(submit);
-    await waitFor(() => expect(createCampaign).toHaveBeenCalledTimes(1));
-    expect(createCampaign.mock.calls[0].at(-1)).toBe(false);
-    expect(await screen.findByText("Đã đăng và lấy liên kết. Không ghi Sheet.")).toBeVisible();
-  });
-
-  /**
-   * **The last answer on screen has to be the newest one asked for.**
-   *
-   * A run emits `publishUpdated` several times in a few seconds — one per phone as its
-   * assignment moves — and each one started its own `publishList()` with nothing sequencing
-   * them. Two commands in flight over the same USB bus do not come back in the order they went
-   * out, so the reload started while the campaign was `posting` could resolve *after* the one
-   * started once it read `succeeded`, and put `posting` back on screen.
-   *
-   * That state then stays. Nothing else re-reads until the next event, and the last event of a
-   * run is the one that says it finished — so the page an operator is watching ends the run
-   * showing a campaign still working, on phones that are already idle.
-   */
   it("keeps the newest reload when an older one answers late", async () => {
     const listen = vi.mocked(listenRiviuEvents);
     const list = vi.mocked(publishList);
@@ -854,7 +899,9 @@ describe("publish, bundle to phone", () => {
       }) as never,
     );
 
-    render(<PublishPage devices={devices} selected={[]} onSelectUdids={() => {}} />);
+    render(
+      <PublishPage devices={devices} selected={[]} onSelectUdids={() => {}} />,
+    );
     await waitFor(() => expect(list).toHaveBeenCalledTimes(1));
 
     fire({ type: "publishUpdated", campaignId: "campaign-1", revision: 2 });
@@ -863,7 +910,9 @@ describe("publish, bundle to phone", () => {
     await waitFor(() => expect(list).toHaveBeenCalledTimes(3));
 
     releaseSucceeded();
-    await waitFor(() => expect(screen.getByText("Đã đăng · chờ đối chiếu")).toBeTruthy());
+    await waitFor(() =>
+      expect(screen.getByText("Đã đăng · chờ đối chiếu")).toBeTruthy(),
+    );
     releasePosting();
 
     // The late answer is discarded rather than rendered. Waiting first would pass even
@@ -881,19 +930,6 @@ describe("publish, bundle to phone", () => {
     listen.mockImplementation(async () => () => undefined);
   });
 
-  /**
-   * **A campaign the backend will re-transfer has to have a button that re-transfers it.**
-   *
-   * Every refusal after the phone is claimed — a route disagreement, a session that would not
-   * open, an unmeasured build — ends the campaign in `failedBeforeDispatch`, and
-   * `claim_publish_campaign_for_transfer` accepts exactly that state. The retry has to start at
-   * Transfer rather than Post, because claiming an assignment overwrites its `evidence_json`
-   * with the run intent and the `nativeImport.importId` that Post needs is gone.
-   *
-   * With Transfer shown only for `ready` and Post only for `imported`, the one state the
-   * backend was built to let an operator retry had no button at all: the campaign was
-   * retryable in the database and finished on the screen.
-   */
   it("offers a full-pipeline retry for a campaign that failed before dispatch", async () => {
     const user = userEvent.setup();
     const list = vi.mocked(publishList);
@@ -915,10 +951,14 @@ describe("publish, bundle to phone", () => {
       },
     ] as never);
 
-    render(<PublishPage devices={devices} selected={[]} onSelectUdids={() => {}} />);
+    render(
+      <PublishPage devices={devices} selected={[]} onSelectUdids={() => {}} />,
+    );
 
-    await user.click(screen.getByRole("tab", { name: "Theo dõi" }));
-    const retry = await screen.findByRole("button", { name: "Chạy lại từ đầu" });
+    await user.click(screen.getByRole("button", { name: "Theo dõi" }));
+    const retry = await screen.findByRole("button", {
+      name: "Chạy lại từ đầu",
+    });
     await user.click(retry);
     expect(publishReconcile).toHaveBeenCalledWith("campaign-1");
     await waitFor(() => expect(executeCampaign).toHaveBeenCalled());
@@ -932,19 +972,21 @@ describe("publish, bundle to phone", () => {
     const user = userEvent.setup();
     const list = vi.mocked(publishList);
     list.mockReset();
-    list.mockResolvedValue([{
-      id: "campaign-locked",
-      requestId: "req-locked",
-      sourceRoot: "C:/carousels",
-      state: "failedBeforeDispatch",
-      runAt: null,
-      visibility: "public",
-      cleanupPolicy: "afterPost",
-      assignments: [],
-      createdAt: "2026-08-18T00:00:00.000Z",
-      updatedAt: "2026-08-18T00:00:00.000Z",
-      errorCode: "stale_projection",
-    }] as never);
+    list.mockResolvedValue([
+      {
+        id: "campaign-locked",
+        requestId: "req-locked",
+        sourceRoot: "C:/carousels",
+        state: "failedBeforeDispatch",
+        runAt: null,
+        visibility: "public",
+        cleanupPolicy: "afterPost",
+        assignments: [],
+        createdAt: "2026-08-18T00:00:00.000Z",
+        updatedAt: "2026-08-18T00:00:00.000Z",
+        errorCode: "stale_projection",
+      },
+    ] as never);
     vi.mocked(publishReconcile).mockResolvedValueOnce({
       campaignId: "campaign-locked",
       inputDigest: "approved-digest-1",
@@ -954,11 +996,17 @@ describe("publish, bundle to phone", () => {
       updatedAt: "2026-09-04T00:00:00Z",
     });
 
-    render(<PublishPage devices={devices} selected={[]} onSelectUdids={() => {}} />);
-    await user.click(screen.getByRole("tab", { name: "Theo dõi" }));
-    await user.click(await screen.findByRole("button", { name: "Chạy lại từ đầu" }));
+    render(
+      <PublishPage devices={devices} selected={[]} onSelectUdids={() => {}} />,
+    );
+    await user.click(screen.getByRole("button", { name: "Theo dõi" }));
+    await user.click(
+      await screen.findByRole("button", { name: "Chạy lại từ đầu" }),
+    );
 
-    expect(await screen.findByText(/không có bước nào được phép tự chạy lại/i)).toBeVisible();
+    expect(
+      await screen.findByText(/không có bước nào được phép tự chạy lại/i),
+    ).toBeVisible();
     expect(executeCampaign).not.toHaveBeenCalled();
     expect(requestConfirm).not.toHaveBeenCalled();
 
@@ -966,101 +1014,6 @@ describe("publish, bundle to phone", () => {
     list.mockResolvedValue([] as never);
   });
 
-  /**
-   * The preflight's own answer, on the page BEFORE the refusal. `readiness_of` runs adb
-   * probes, so the fetch is keyed on the android udid set — an iOS-only roster (every
-   * other test in this file) must not fetch at all, which is also what keeps those tests
-   * free of act() noise.
-   */
-  it("shows each android phone's publish readiness, and only asks about android phones", async () => {
-    const ready = vi.mocked(publishReadiness);
-    ready.mockResolvedValueOnce([
-      { udid: "ANDROID-A", readiness: { kind: "hierarchyReady" } },
-      {
-        udid: "ANDROID-B",
-        readiness: { kind: "hierarchyMissing", labels: ["ComposerCaption", "PostButton"] },
-      },
-    ] as never);
-    const android = (udid: string) =>
-      ({ ...iphone(udid), platform: "android" }) as DeviceInfo;
-
-    render(
-      <PublishPage
-        devices={[android("ANDROID-A"), android("ANDROID-B"), iphone("PHONE-A")]}
-        selected={[]}
-        onSelectUdids={() => {}}
-      />,
-    );
-
-    // The positive chip says what was actually checked. `hierarchyReady` comes from the
-    // shortest gap across the catalogue for that package — not from this phone's own
-    // build — so a chip promising "sẵn sàng" outright would be a claim the backend never
-    // made, and the phone would still be refused at the first tap after a TikTok update.
-    await screen.findByText(/bản đo có đủ nhãn/);
-    expect(screen.getByText(/chưa đối chiếu build máy/)).toBeTruthy();
-    const missing = screen.getByText(/thiếu ô chú thích, nút Đăng/);
-    expect(missing).toBeTruthy();
-    expect(missing.closest(".pill")).not.toHaveAttribute("title");
-    const technical = screen.getByText("Chi tiết khả năng tương thích").closest("details")!;
-    expect(technical).not.toHaveAttribute("open");
-    expect(within(technical).getByText("ComposerCaption, PostButton")).toBeInTheDocument();
-    expect(ready).toHaveBeenCalledWith(["ANDROID-A", "ANDROID-B"]);
-    expect(screen.getByText(/bị từ chối trước khi chuyển nội dung/)).toBeInTheDocument();
-    expect(screen.queryByText(/composer_scout/)).toBeNull();
-  });
-
-  it("renders a future readiness variant as unknown and keeps its raw code in details", async () => {
-    vi.mocked(publishReadiness).mockResolvedValueOnce([
-      { udid: "ANDROID-A", readiness: { kind: "futureProbe", raw: 7 } },
-    ] as never);
-    const android = ({ ...iphone("ANDROID-A"), platform: "android" }) as DeviceInfo;
-
-    render(<PublishPage devices={[android]} selected={[]} onSelectUdids={() => {}} />);
-
-    const label = await screen.findByText(/trạng thái chưa nhận diện/);
-    expect(label.closest(".pill")).not.toHaveAttribute("title");
-    const technical = screen.getByText("Chi tiết khả năng tương thích").closest("details")!;
-    expect(technical).not.toHaveAttribute("open");
-    expect(within(technical).getByText(/futureProbe/)).toBeInTheDocument();
-  });
-
-  /**
-   * A phone whose TikTok updates in place keeps its udid, so the effect's key cannot
-   * notice the one change readiness is keyed on a build for. Without this button the only
-   * way to re-ask was to unplug the phone.
-   */
-  it("re-asks readiness when the operator presses Hỏi lại", async () => {
-    const ready = vi.mocked(publishReadiness);
-    ready.mockReset();
-    ready.mockResolvedValue([
-      { udid: "ANDROID-A", readiness: { kind: "hierarchyReady" } },
-    ] as never);
-    const android = (udid: string) =>
-      ({ ...iphone(udid), platform: "android" }) as DeviceInfo;
-    const user = userEvent.setup();
-
-    render(
-      <PublishPage
-        devices={[android("ANDROID-A")]}
-        selected={[]}
-        onSelectUdids={() => {}}
-      />,
-    );
-    await screen.findByText(/bản đo có đủ nhãn/);
-    const beforeClick = ready.mock.calls.length;
-
-    await user.click(screen.getByRole("button", { name: "Hỏi lại" }));
-    await waitFor(() => expect(ready.mock.calls.length).toBe(beforeClick + 1));
-
-    ready.mockReset();
-    ready.mockResolvedValue([] as never);
-  });
-
-  /**
-   * `publishList` carries assignment PLANS, so per-phone state/errorCode were invisible
-   * here — a campaign could sit `failedBeforeDispatch` with the one refusing phone
-   * unnameable except by reading the backend log. The detail toggle is that read.
-   */
   it("names the refusing phone when the operator opens a campaign's details", async () => {
     const user = userEvent.setup();
     const list = vi.mocked(publishList);
@@ -1108,11 +1061,20 @@ describe("publish, bundle to phone", () => {
       updatedAt: "2026-09-04T00:00:00Z",
     });
 
-    const namedDevices = [{ ...devices[0], name: "SM-G950F" }, ...devices.slice(1)];
+    const namedDevices = [
+      { ...devices[0], name: "SM-G950F" },
+      ...devices.slice(1),
+    ];
     const metas = new Map<string, DeviceMeta>([
       [
         "PHONE-A",
-        { udid: "PHONE-A", notes: "", tags: [], alias: "Máy quay sản phẩm", number: 17 },
+        {
+          udid: "PHONE-A",
+          notes: "",
+          tags: [],
+          alias: "Máy quay sản phẩm",
+          number: 17,
+        },
       ],
     ]);
     render(
@@ -1124,11 +1086,17 @@ describe("publish, bundle to phone", () => {
       />,
     );
 
-    await user.click(screen.getByRole("tab", { name: "Theo dõi" }));
-    await user.click(await screen.findByRole("button", { name: "Chi tiết máy" }));
+    await user.click(screen.getByRole("button", { name: "Theo dõi" }));
+    await user.click(
+      await screen.findByRole("button", { name: "Chi tiết máy" }),
+    );
     expect(publishReconcile).toHaveBeenCalledWith("campaign-9");
-    expect(await screen.findByText("Chỉ tiếp tục lấy liên kết và ghi Sheet")).toBeVisible();
-    const technical = await screen.findByRole("group", { name: "Chi tiết kỹ thuật máy" });
+    expect(
+      await screen.findByText("Chỉ tiếp tục lấy liên kết và ghi Sheet"),
+    ).toBeVisible();
+    const technical = await screen.findByRole("group", {
+      name: "Chi tiết kỹ thuật máy",
+    });
     const deviceCell = technical.closest("td")!;
     const row = deviceCell.closest("tr")!;
     expect(row).toHaveTextContent("Máy 17 · Máy quay sản phẩm");
@@ -1139,67 +1107,14 @@ describe("publish, bundle to phone", () => {
     expect(raw).toBeVisible();
     expect(raw).toHaveTextContent("failedBeforeDispatch");
     expect(raw).toHaveTextContent("route_authorities_disagree");
-    expect(screen.getByText(/chưa dọn được ảnh tạm: adb disconnected/)).toBeVisible();
+    expect(
+      screen.getByText(/chưa dọn được ảnh tạm: adb disconnected/),
+    ).toBeVisible();
 
     await user.click(screen.getByRole("button", { name: "Ẩn chi tiết máy" }));
     expect(screen.queryByText(/route_authorities_disagree/)).toBeNull();
 
     list.mockReset();
     list.mockResolvedValue([] as never);
-  });
-
-  /**
-   * The unconfigured badge answers "why is my link still `pending`?" on the page where the
-   * operator is looking — and it must come from a real answer, not render as a flash while
-   * the config is still loading, and not linger once url + token are both set.
-   */
-  it("shows the Sheet-unconfigured badge only for a real unconfigured answer", async () => {
-    const getConfig = vi.mocked(
-      (await import("../api")).publishSheetGetConfig,
-    );
-
-    getConfig.mockResolvedValueOnce({ webhookUrl: "", hasToken: false });
-    render(<PublishPage devices={devices} selected={[]} onSelectUdids={() => {}} />);
-    expect(await screen.findByText("Sheet chờ cấu hình")).toBeVisible();
-    cleanup();
-
-    getConfig.mockResolvedValueOnce({
-      webhookUrl: "https://script.google.com/macros/s/x/exec",
-      hasToken: true,
-    });
-    render(<PublishPage devices={devices} selected={[]} onSelectUdids={() => {}} />);
-    // **The anchor has to come from the second answer itself.** Waiting on
-    // `getConfig` having been called proved nothing — the first render already called it,
-    // so the assertion was satisfied by stale history while the page was still loading,
-    // and during loading the badge is absent anyway. The page writes the config's URL into
-    // the webhook field, so finding that value is proof this answer landed.
-    await screen.findByDisplayValue("https://script.google.com/macros/s/x/exec");
-    expect(screen.queryByText("Sheet chờ cấu hình")).toBeNull();
-  });
-
-  it("fails closed when Sheet config cannot be read and enables save only after retry", async () => {
-    const getConfig = vi.mocked(publishSheetGetConfig);
-    const saveConfig = vi.mocked(publishSheetSaveConfig);
-    getConfig
-      .mockReset()
-      .mockRejectedValueOnce(new Error("credential store unavailable"))
-      .mockResolvedValueOnce({
-        webhookUrl: "https://script.google.com/macros/s/current/exec",
-        hasToken: true,
-      });
-
-    render(<PublishPage devices={devices} selected={[]} onSelectUdids={() => {}} />);
-    fireEvent.click(screen.getByText("Cấu hình Sheet"));
-
-    expect(await screen.findByRole("alert")).toHaveTextContent("credential store unavailable");
-    const save = screen.getByRole("button", { name: "Lưu cấu hình" });
-    expect(save).toBeDisabled();
-    fireEvent.click(save);
-    expect(saveConfig).not.toHaveBeenCalled();
-
-    fireEvent.click(screen.getByRole("button", { name: "Thử lại" }));
-    await screen.findByDisplayValue("https://script.google.com/macros/s/current/exec");
-    expect(save).not.toBeDisabled();
-    expect(screen.queryByText("Không đọc được Sheet")).toBeNull();
   });
 });

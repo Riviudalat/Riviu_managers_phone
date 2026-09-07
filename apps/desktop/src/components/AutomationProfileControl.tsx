@@ -8,6 +8,7 @@ import {
   automationList,
   automationRevise,
 } from "../api";
+import { readFormDraft, writeFormDraft } from "../formDraftStorage";
 import { requestConfirm } from "../confirmStore";
 import { requestWorkspaceLeave, useWorkspaceDraft } from "../workspaceDraft";
 import { describeError } from "../describeError";
@@ -66,7 +67,7 @@ export function AutomationProfileControl({
   const label = KIND_LABEL[kind];
   const [profiles, setProfiles] = useState<AutomationDefinition[]>([]);
   const [selectedId, setSelectedId] = useState("");
-  const [name, setName] = useState(defaultName);
+  const [name, setName] = useState(() => readFormDraft(`profile-name-${kind}`, value => typeof value === "string" ? value : defaultName) ?? defaultName);
   const [savedName, setSavedName] = useState(defaultName);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
@@ -176,6 +177,8 @@ export function AutomationProfileControl({
 
   useWorkspaceDraft({
     id: nameDraftId,
+    autoSave: () => writeFormDraft(nameDraftId, name),
+    onAutoSaveError: error => setError(`Chưa tự lưu được tên hồ sơ: ${describeError(error)}`),
     label: `Tên hồ sơ ${label}`,
     dirty: nameDirty,
     snapshotKey: name,

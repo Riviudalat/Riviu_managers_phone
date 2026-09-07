@@ -33,11 +33,11 @@ test("all workspaces expose accessible controls and a real nonempty main surface
   }
 });
 
-test("save dialog traps keyboard focus and restores it on Escape", async ({ page }) => {
+test("Flow save dialog traps keyboard focus and restores it on Escape", async ({ page }) => {
   await installTauriMock(page);
   await page.goto("/");
-  await page.getByRole("button", {name:"Tương tác",exact:true}).click();
-  await page.getByPlaceholder("Dán link TikTok, mỗi dòng một bài").fill("https://www.tiktok.com/@fixture/video/123");
+  await page.getByRole("button", {name:"Flow",exact:true}).click();
+  await page.getByRole("textbox", {name:"Tên Flow"}).fill("Bản nháp cần lưu");
   const destination = page.getByRole("button", {name:"Dữ liệu",exact:true});
   await destination.click();
   const dialog = page.getByRole("alertdialog", {name:"Thay đổi chưa được lưu"});

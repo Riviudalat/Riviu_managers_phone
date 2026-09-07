@@ -6,6 +6,58 @@ import { resetConfirms } from "./confirmStore";
 import { hasWorkspaceDrafts, requestWorkspaceLeave, useWorkspaceDraft } from "./workspaceDraft";
 
 afterEach(() => { cleanup(); resetConfirms(); });
+
+it("autosaves on leave without creating a public profile or asking for consent", async () => {
+  const save = vi.fn(async () => true), automatic = vi.fn(async (_value: string) => true);
+  function AutoForm() {
+    const [value, setValue] = useState("");
+    useWorkspaceDraft({ id: "publish-auto", label: "Đăng bài", dirty: !!value, snapshotKey: value,
+      save, autoSave: () => automatic(value), discard: () => setValue("") });
+    return <><input aria-label="Auto" value={value} onChange={e => setValue(e.target.value)} /><ConfirmHost /></>;
+  }
+  render(<AutoForm />);
+  fireEvent.change(screen.getByLabelText("Auto"), { target: { value: "10 bài" } });
+  await act(async () => { expect(await requestWorkspaceLeave()).toBe(true); });
+  expect(automatic).toHaveBeenCalledWith("10 bài");
+  expect(save).not.toHaveBeenCalled();
+  expect(screen.queryByRole("alertdialog")).toBeNull();
+  expect(hasWorkspaceDrafts()).toBe(false);
+});
+
+it("reports autosave failure without pretending the draft was saved", async () => {
+  const error = vi.fn();
+  function AutoForm() {
+    useWorkspaceDraft({ id: "publish-auto", label: "Đăng bài", dirty: true, snapshotKey: "current",
+      save: async () => true, autoSave: () => { throw Error("disk full"); }, onAutoSaveError: error, discard: () => {} });
+    return <ConfirmHost />;
+  }
+  render(<AutoForm />);
+  await act(async () => { expect(await requestWorkspaceLeave()).toBe(false); });
+  expect(error).toHaveBeenCalled();
+  expect(hasWorkspaceDrafts()).toBe(true);
+  expect(screen.queryByRole("alertdialog")).toBeNull();
+});
+
+it("serializes writes and saves the latest keystroke before navigation", async () => {
+  let resolve!: () => void;
+  const saved: string[] = [];
+  function AutoForm() {
+    const [value, setValue] = useState("A");
+    useWorkspaceDraft({ id: "auto", label: "Tương tác", dirty: true, snapshotKey: value,
+      save: async () => false, discard: () => {}, autoSave: async () => {
+        if (value === "A") await new Promise<void>(done => { resolve = done; });
+        saved.push(value);
+      } });
+    return <input aria-label="Auto" value={value} onChange={e => setValue(e.target.value)} />;
+  }
+  render(<AutoForm />);
+  let leave!: Promise<boolean>;
+  act(() => { leave = requestWorkspaceLeave(); });
+  fireEvent.change(screen.getByLabelText("Auto"), { target: { value: "B" } });
+  await act(async () => { resolve(); expect(await leave).toBe(true); });
+  expect(saved).toEqual(["A", "B"]);
+  expect(hasWorkspaceDrafts()).toBe(false);
+});
 function Form({ save = async () => true }: {save?: () => Promise<boolean>}) {
   const [value, setValue] = useState("initial");
   const [baseline, setBaseline] = useState("initial");

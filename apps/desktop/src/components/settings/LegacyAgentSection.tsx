@@ -60,7 +60,7 @@ export function LegacyAgentSection() {
       setSaving(false);
     }
   };
-  useWorkspaceDraft({ id: "settings-ios", label: "Thông tin iOS dự phòng", dirty, snapshotKey: String(epoch.current), save, discard });
+  useWorkspaceDraft({ autoSave: save, id: "settings-ios", label: "Thông tin iOS dự phòng", dirty, snapshotKey: String(epoch.current), save, discard });
   return (
     <section className="settings-section">
       <h3>Khôi phục agent iOS cũ</h3>

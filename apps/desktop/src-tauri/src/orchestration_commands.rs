@@ -660,7 +660,11 @@ impl ProductionOrchestrationPort {
             udids: Self::target_udids(request),
             run_at: None,
             visibility: PublishVisibility::Public,
-            cleanup_policy: PublishCleanupPolicy::DeleteImportedAssetsAfterVerified,
+            cleanup_policy: if config.delete_after_publish {
+                PublishCleanupPolicy::DeleteImportedAssetsAfterVerified
+            } else {
+                PublishCleanupPolicy::KeepImportedAssets
+            },
             sound_policy: config.sound_policy.clone(),
             execution_confirmed: true,
             target_snapshot: Some(request.target.clone()),

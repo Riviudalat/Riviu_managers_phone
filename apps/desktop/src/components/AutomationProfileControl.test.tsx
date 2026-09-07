@@ -60,17 +60,15 @@ describe("AutomationProfileControl", () => {
 
   afterEach(cleanup);
 
-  it("guards name-only edits and keeps them when navigation is declined", async () => {
+  it("autosaves name-only edits without creating a public profile", async () => {
     render(<AutomationProfileControl kind="nurture" target={{ type: "all" }} config={{}} defaultName="Nuôi TikTok" />);
     const name = await screen.findByLabelText("Tên hồ sơ Nuôi TikTok");
     expect(hasWorkspaceDrafts()).toBe(false);
     fireEvent.change(name, { target: { value: "Tên mới" } });
     expect(hasWorkspaceDrafts()).toBe(true);
-    vi.mocked(requestSaveChanges).mockResolvedValueOnce("stay");
-    await act(async () => expect(await requestWorkspaceLeave()).toBe(false));
-    expect(name).toHaveValue("Tên mới");
     await act(async () => expect(await requestWorkspaceLeave()).toBe(true));
-    expect(name).toHaveValue("Nuôi TikTok");
+    expect(name).toHaveValue("Tên mới");
+    expect(requestSaveChanges).not.toHaveBeenCalled();
     expect(api.automationCreate).not.toHaveBeenCalled();
   });
 

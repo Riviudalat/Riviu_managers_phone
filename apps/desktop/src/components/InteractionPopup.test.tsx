@@ -2,6 +2,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testi
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { InteractionPopup } from "./InteractionPopup";
+import { requestWorkspaceLeave } from "../workspaceDraft";
 import { automationCreate, automationGet, automationList, getDeviceMeta, saveDeviceHandle } from "../api";
 import type {
   DeviceInfo,
@@ -365,6 +366,19 @@ function openAdvanced() {
 }
 
 describe("InteractionPopup", () => {
+  it("restores a saved editor without dispatching or widening its chosen actors", async () => {
+    const view = render(<InteractionPopup metas={noMeta} devices={devices} selected={[]} surface="page" targetRef={{ type: "all" }} />);
+    const input = await screen.findByRole("textbox", { name: "Link TikTok — mỗi dòng một link" });
+    fireEvent.change(input, { target: { value: "https://www.tiktok.com/@creator/video/123" } });
+    await act(async () => { expect(await requestWorkspaceLeave(["interaction"])).toBe(true); });
+    const actors = JSON.parse(localStorage.getItem("riviu.form-draft.v1.interaction")!).value.actors;
+    view.unmount();
+    render(<InteractionPopup metas={noMeta} devices={devices} selected={[]} surface="page" targetRef={{ type: "all" }} />);
+    expect(await screen.findByRole("textbox", { name: "Link TikTok — mỗi dòng một link" })).toHaveValue("https://www.tiktok.com/@creator/video/123");
+    expect(JSON.parse(localStorage.getItem("riviu.form-draft.v1.interaction")!).value.actors).toEqual(actors);
+    expect(startThread).not.toHaveBeenCalled();
+    expect(automationCreate).not.toHaveBeenCalled();
+  });
   it("invalidates parsed links immediately and keeps every action blocked after a replacement fails", async () => {
     parseLinks.mockResolvedValueOnce([parsedLine("111")]).mockRejectedValueOnce(new Error("Không đọc được link mới"));
     render(<InteractionPopup metas={noMeta} devices={devices} selected={[]} surface="page" targetRef={{ type: "all" }} />);

@@ -223,6 +223,7 @@ pub enum PublishVisibility {
 #[serde(rename_all = "camelCase")]
 pub enum PublishCleanupPolicy {
     DeleteImportedAssetsAfterVerified,
+    KeepImportedAssets,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

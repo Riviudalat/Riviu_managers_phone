@@ -12,11 +12,16 @@
   min-width: 0;
   gap: 8px;
 }
-.device-browser-content { flex: 1 0 auto; }
+.device-browser-content {
+  flex: 1 0 auto;
+}
 
 .window-canvas {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(min(100%, var(--device-tile-min-width, 180px)), 1fr));
+  grid-template-columns: repeat(
+    auto-fill,
+    minmax(min(100%, var(--device-tile-min-width, 180px)), 1fr)
+  );
   align-content: start;
   align-items: start;
 }
@@ -75,8 +80,12 @@
   background: var(--bg-elevated);
 }
 
-.device-automation-head strong { flex: 1; }
-.automation-host[hidden] { display: none; }
+.device-automation-head strong {
+  flex: 1;
+}
+.automation-host[hidden] {
+  display: none;
+}
 .automation-host {
   display: flex;
   flex: 1 1 0;
@@ -84,7 +93,9 @@
   min-width: 0;
   min-height: 0;
 }
-.automation-host > .automation-page-stack { flex: 1 1 0; }
+.automation-host > .automation-page-stack {
+  flex: 1 1 0;
+}
 
 .content-control.has-device-automation {
   display: grid;
@@ -93,9 +104,15 @@
   overflow: hidden;
   gap: 12px;
 }
-.has-device-automation > .banner { grid-column: 1 / -1; }
-.has-device-automation .device-browser { display: contents; }
-.has-device-automation .device-browser-toolbar { grid-column: 1 / -1; }
+.has-device-automation > .banner {
+  grid-column: 1 / -1;
+}
+.has-device-automation .device-browser {
+  display: contents;
+}
+.has-device-automation .device-browser-toolbar {
+  grid-column: 1 / -1;
+}
 .has-device-automation .device-browser-content {
   min-height: 0;
   overflow: auto;
@@ -121,36 +138,76 @@
   flex: none;
   margin: 0;
 }
-.is-docked .target-selector-explicit { grid-column: auto; }
-.automation-scope { min-width: 0; }
-.automation-scope > summary[hidden] { display: none; }
-.automation-scope.is-collapsible { flex: none; border-bottom: 1px solid var(--line); }
-.automation-scope.is-collapsible > summary { padding: 8px; color: var(--text-2); cursor: pointer; }
-.automation-scope.is-collapsible > summary strong { margin-left: 12px; color: var(--text-1); }
-.automation-scope.is-collapsible[open] > summary { margin-bottom: 8px; }
-.is-docked :is(.nurture-workspace, .interaction-workspace, .publish-page) { flex: 1 0 520px; }
-.is-docked :is(.nurture-setup-grid, .nurture-monitor-grid, .interaction-setup-grid,
-  .interaction-monitor-master, .publish-workspace-grid) {
+.is-docked .target-selector-explicit {
+  grid-column: auto;
+}
+.automation-scope {
+  min-width: 0;
+}
+.automation-scope > summary[hidden] {
+  display: none;
+}
+.automation-scope.is-collapsible {
+  flex: none;
+  border-bottom: 1px solid var(--line);
+}
+.automation-scope.is-collapsible > summary {
+  padding: 8px;
+  color: var(--text-2);
+  cursor: pointer;
+}
+.automation-scope.is-collapsible > summary strong {
+  margin-left: 12px;
+  color: var(--text-1);
+}
+.automation-scope.is-collapsible[open] > summary {
+  margin-bottom: 8px;
+}
+.is-docked :is(.nurture-workspace, .interaction-workspace, .publish-page) {
+  flex: 1 0 520px;
+}
+.is-docked .publish-workspace-aside {
+  position: static;
+}
+.is-docked .nu-feature-ranged {
+  grid-template-columns: auto minmax(80px, 1fr) minmax(80px, 1fr) 60px;
+}
+.is-docked .automation-schedule-create {
   grid-template-columns: minmax(0, 1fr);
 }
-.is-docked .publish-workspace-aside { position: static; }
-.is-docked .nu-feature-ranged { grid-template-columns: auto minmax(80px, 1fr) minmax(80px, 1fr) 60px; }
-.is-docked .automation-schedule-create { grid-template-columns: minmax(0, 1fr); }
-.is-docked .automation-schedule-row-main { flex-wrap: wrap; }
-.is-docked .nu-night-setting { grid-template-columns: minmax(0, 1fr) repeat(2, minmax(70px, 1fr)); }
+.is-docked .automation-schedule-row-main {
+  flex-wrap: wrap;
+}
+.is-docked .nu-night-setting {
+  grid-template-columns: minmax(0, 1fr) repeat(2, minmax(70px, 1fr));
+}
 
 @media (max-width: 1279px) {
   .content-control.has-device-automation {
     grid-template-columns: minmax(180px, 1fr) minmax(380px, 55%);
   }
-  .is-docked .device-automation-head { padding-inline: 8px; }
-  .is-docked .device-automation-head .ghost { padding-inline: 8px; }
-  .is-docked .interaction-setup-grid { padding: 8px; }
-  .is-docked .interaction-mode-cards { grid-template-columns: 1fr; }
-  .is-docked .nu-night-setting { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .is-docked .nu-night-setting-title { grid-column: 1 / -1; }
-  .is-docked .nu-feature-ranged { grid-template-columns: auto minmax(60px, 1fr) minmax(50px, 1fr) 60px; }
-  .is-docked .publish-source-row { grid-template-columns: minmax(0, 1fr); }
-  .is-docked .publish-workspace-section { padding: 10px; }
-  .is-docked .publish-workspace-main { padding: 0; }
+  .is-docked .device-automation-head {
+    padding-inline: 8px;
+  }
+  .is-docked .device-automation-head .ghost {
+    padding-inline: 8px;
+  }
+  .is-docked .interaction-setup-grid {
+    padding: 8px;
+  }
+  .is-docked .interaction-mode-cards {
+    grid-template-columns: 1fr;
+  }
+  .is-docked .nu-night-setting {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .is-docked .nu-night-setting-title {
+    grid-column: 1 / -1;
+  }
+  .is-docked .nu-feature-ranged {
+    grid-template-columns: auto minmax(60px, 1fr) minmax(50px, 1fr) 60px;
+  }
+  .is-docked .publish-workspace-section {
+    padding: 10px;
+  }
 }
