@@ -13,6 +13,8 @@ use tokio::time::Instant;
 use crate::driver::{ElementBox, ElementQuery, UiSession};
 use crate::publish::SoundCandidate;
 
+mod snapshot;
+
 const PICKER_WINDOW: Duration = Duration::from_secs(8);
 const READBACK_WINDOW: Duration = Duration::from_secs(8);
 const POLL: Duration = Duration::from_millis(250);
@@ -33,8 +35,15 @@ pub struct SoundPickerPlan {
 
 impl SoundPickerPlan {
     pub(crate) fn post_back_query(self) -> Option<ElementQuery<'static>> {
-        self.close_with_back
-            .then_some(ElementQuery::ResourceIdSuffix(":id/aun"))
+        match self.entry_id {
+            ":id/c_4" => Some(ElementQuery::ResourceIdSuffix(":id/aun")),
+            ":id/dv3" => Some(ElementQuery::ResourceIdSuffix(":id/bot")),
+            _ => None,
+        }
+    }
+
+    fn uses_carousel_snapshot(self) -> bool {
+        self.entry_id == ":id/dv3"
     }
 
     /// Resolve only an exact build/locale tuple measured on the attached fleet.
@@ -84,7 +93,7 @@ impl SoundPickerPlan {
                 title_id: ":id/title",
                 artist_id: ":id/zdw",
                 choose_id: None,
-                close_with_back: false,
+                close_with_back: true,
             }),
             _ => None,
         }
@@ -140,6 +149,10 @@ pub async fn open_and_observe_sounds(
         .await
         .context("open sound picker")?;
 
+    if plan.uses_carousel_snapshot() {
+        snapshot::select_hot_tab(session).await?;
+    }
+
     observe_sound_pool(session, plan, maximum_visible).await
 }
 
@@ -148,6 +161,9 @@ async fn observe_sound_pool(
     plan: SoundPickerPlan,
     maximum_visible: usize,
 ) -> anyhow::Result<ObservedSoundPool> {
+    if plan.uses_carousel_snapshot() {
+        return snapshot::observe(session, plan, maximum_visible).await;
+    }
     let deadline = Instant::now() + PICKER_WINDOW;
     let (rows, titles, artists, choices) = loop {
         let section = session
@@ -169,13 +185,23 @@ async fn observe_sound_pool(
             .locate_all_described(ElementQuery::ResourceIdSuffix(plan.artist_id))
             .await
             .unwrap_or_default();
-        let choices = match plan.choose_id.or(plan.close_with_back.then_some(":id/dfu")) {
+        let mut choices = match plan.choose_id.or(plan.close_with_back.then_some(":id/dfu")) {
             Some(id) => session
                 .locate_all(ElementQuery::ResourceIdSuffix(id))
                 .await
                 .unwrap_or_default(),
             None => Vec::new(),
         };
+        if plan.close_with_back {
+            // Carousel uses an equalizer inside the active row instead of the video
+            // trim scissors. Both are selection evidence, never tap targets.
+            choices.extend(
+                session
+                    .locate_all(ElementQuery::ResourceIdSuffix(":id/jk1"))
+                    .await
+                    .unwrap_or_default(),
+            );
+        }
         if section.len() == 1 && !rows.is_empty() && !titles.is_empty() {
             break (rows, titles, artists, choices);
         }
@@ -285,10 +311,7 @@ fn assemble_pool(
     let mut selected_index = None;
     for (index, row) in rows.into_iter().take(maximum_visible).enumerate() {
         if plan.close_with_back && !inside(&row, &choices).is_empty() {
-            anyhow::ensure!(
-                selected_index.is_none() && inside(&row, &choices).len() == 1,
-                "ambiguous selected sound row"
-            );
+            anyhow::ensure!(selected_index.is_none(), "ambiguous selected sound row");
             selected_index = Some(index);
         }
         let title = exactly_one(inside(&row, &titles), "sound title inside candidate row")?;
@@ -377,6 +400,8 @@ mod tests {
         closed: AtomicBool,
         taps: AtomicUsize,
         select_takes: bool,
+        marker_id: &'static str,
+        editor_title: &'static str,
     }
 
     #[async_trait::async_trait]
@@ -416,8 +441,8 @@ mod tests {
                     height: 200.0,
                     ..element(100.0, None)
                 }],
-                ElementQuery::ResourceIdSuffix(":id/dfu")
-                    if self.selected.load(Ordering::Relaxed) =>
+                ElementQuery::ResourceIdSuffix(id)
+                    if id == self.marker_id && self.selected.load(Ordering::Relaxed) =>
                 {
                     vec![element(125.0, None)]
                 }
@@ -439,7 +464,7 @@ mod tests {
                     if self.closed.load(Ordering::Relaxed)
                         && self.selected.load(Ordering::Relaxed) =>
                 {
-                    vec![element(20.0, Some("One"))]
+                    vec![element(20.0, Some(self.editor_title))]
                 }
                 _ => vec![],
             })
@@ -454,6 +479,8 @@ mod tests {
                 closed: AtomicBool::new(false),
                 taps: AtomicUsize::new(0),
                 select_takes: true,
+                marker_id: ":id/dfu",
+                editor_title: "One",
             };
             let plan =
                 SoundPickerPlan::resolve("com.ss.android.ugc.trill", "en", "38.3.2").unwrap();
@@ -474,6 +501,8 @@ mod tests {
             closed: AtomicBool::new(false),
             taps: AtomicUsize::new(0),
             select_takes: false,
+            marker_id: ":id/dfu",
+            editor_title: "One",
         };
         let plan = SoundPickerPlan::resolve("com.ss.android.ugc.trill", "en", "38.3.2").unwrap();
         let pool = observe_sound_pool(&session, plan, 1).await.unwrap();
@@ -482,6 +511,90 @@ mod tests {
             .is_err());
         assert_eq!(session.taps.load(Ordering::Relaxed), 1);
         assert!(!session.closed.load(Ordering::Relaxed));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn carousel_sound_equalizer_confirms_selected_track_without_trim_control() {
+        // Measured carousel row on trill/en/38.3.2: jk1 appears inside the selected
+        // ta8 row; dfu is absent. Editor so9 must still confirm the exact title.
+        for selected in [false, true] {
+            let session = InlineSession {
+                selected: AtomicBool::new(selected),
+                closed: AtomicBool::new(false),
+                taps: AtomicUsize::new(0),
+                select_takes: true,
+                marker_id: ":id/jk1",
+                editor_title: "One",
+            };
+            let plan =
+                SoundPickerPlan::resolve("com.ss.android.ugc.trill", "en", "38.3.2").unwrap();
+            let pool = observe_sound_pool(&session, plan, 1).await.unwrap();
+            choose_and_confirm_sound(&session, plan, &pool, 0)
+                .await
+                .unwrap();
+            assert_eq!(session.taps.load(Ordering::Relaxed), usize::from(!selected));
+            assert!(session.closed.load(Ordering::Relaxed));
+            assert!(session.selected.load(Ordering::Relaxed));
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn carousel_marker_does_not_replace_editor_title_readback() {
+        let session = InlineSession {
+            selected: AtomicBool::new(false),
+            closed: AtomicBool::new(false),
+            taps: AtomicUsize::new(0),
+            select_takes: true,
+            marker_id: ":id/jk1",
+            editor_title: "Different sound",
+        };
+        let plan = SoundPickerPlan::resolve("com.ss.android.ugc.trill", "en", "38.3.2").unwrap();
+        let pool = observe_sound_pool(&session, plan, 1).await.unwrap();
+        let error = choose_and_confirm_sound(&session, plan, &pool, 0)
+            .await
+            .unwrap_err();
+        assert!(format!("{error:#}").contains("selected sound was not confirmed"));
+        assert_eq!(session.taps.load(Ordering::Relaxed), 1);
+        assert!(session.closed.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn inline_markers_must_all_belong_to_one_candidate_row() {
+        let plan = SoundPickerPlan::resolve("com.ss.android.ugc.trill", "en", "38.3.2").unwrap();
+        let rows = vec![
+            ElementBox {
+                height: 100.0,
+                ..element(100.0, None)
+            },
+            ElementBox {
+                height: 100.0,
+                ..element(200.0, None)
+            },
+        ];
+        let titles = vec![element(115.0, Some("One")), element(215.0, Some("Two"))];
+        let artists = vec![element(155.0, Some("A")), element(255.0, Some("B"))];
+        let same_row = assemble_pool(
+            plan,
+            rows.clone(),
+            titles.clone(),
+            artists.clone(),
+            vec![element(120.0, None), element(130.0, None)],
+            5,
+        )
+        .unwrap();
+        assert_eq!(same_row.selected_index, Some(0));
+        let different_rows = assemble_pool(
+            plan,
+            rows,
+            titles,
+            artists,
+            vec![element(120.0, None), element(220.0, None)],
+            5,
+        )
+        .unwrap_err();
+        assert!(different_rows
+            .to_string()
+            .contains("ambiguous selected sound row"));
     }
 
     #[test]

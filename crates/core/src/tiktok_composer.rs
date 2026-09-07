@@ -58,17 +58,15 @@
 //! transition and proves nothing here, while the comment drawer's Send button on another
 //! build moves `enabled` and not this.
 //!
-//! # What the hierarchy cannot tell us, stated plainly
+//! # Selection proof
 //!
-//! Selecting an image renders **no per-cell numeral** on this build. So:
-//!
-//! * "**enough** images are selected" is **not checkable**. `Next` arming proves that *at
-//!   least one* cell took, and nothing more. [`Selection::Armed`] says exactly that and no
-//!   caller should read more into it.
-//! * slide *order* cannot be read back, and a scrolled grid cannot be re-identified — which
-//!   is why [`PhotoGrid`] refuses past the rows that are on screen instead of flicking.
+//! 07/09/2026 on 98895a3355424e484f: thumbnail taps open a single-photo preview
+//! while the picker tree remains underneath it. Corner-button taps instead render
+//! ordinals 1..N and `Next (N)`. Production uses those measured controls and proves
+//! each selection; a bare Next no longer authorizes a photo carousel.
 
 use std::sync::atomic::{AtomicBool, Ordering};
+mod selection;
 use std::time::Duration;
 
 // `tokio`'s clock for the same reason `tiktok_drawer` uses it: a
@@ -253,7 +251,9 @@ impl ComposerVerdict {
                  không bấm ô nào cả. (Công tắc hai-chiều-có-nhớ đã được đọc trước khi bấm, \
                  nên đây không còn là ca lật nhầm trạng thái; màn hình này đáng được dump.)"
             }
-            Self::NotEnoughSelected => "picker báo số ảnh đã chọn khác số ảnh bài này cần",
+            Self::NotEnoughSelected => {
+                "chưa xác nhận chọn đủ ảnh trong thư mục; đã dừng trước khi đăng"
+            }
             Self::EditStepDidNotOpen => "bấm Tiếp mà bước chỉnh sửa không mở",
             Self::PostScreenDidNotOpen => "bấm Tiếp ở bước chỉnh sửa mà màn đăng không mở",
             Self::PostUnmeasured => "chưa đo nút Đăng trên bản build này — không bấm gì cả",
@@ -359,6 +359,7 @@ pub struct ComposerPlan {
     tabs: ElementQuery<'static>,
     multi_select: ElementQuery<'static>,
     picker_next: ElementQuery<'static>,
+    selection_controls: Option<selection::PickerControls>,
     /// The edit step's own control, when it is measured, used **only to prove arrival**.
     ///
     /// Separate from the publishing tail below, and a review is why: keying the arrival proof
@@ -426,7 +427,10 @@ impl ComposerPlan {
             album_menu: query(TikTokControl::PickerAlbumMenu),
             tabs: query(TikTokControl::PickerTabPhotos),
             multi_select: query(TikTokControl::PickerMultiSelect),
-            picker_next: query(TikTokControl::PickerNext),
+            picker_next: selection::PickerControls::for_labels(labels)
+                .map(|controls| controls.next)
+                .unwrap_or_else(|| query(TikTokControl::PickerNext)),
+            selection_controls: selection::PickerControls::for_labels(labels),
             edit_step_marker: optional(TikTokControl::ComposerNext),
             gallery_entry: labels.gallery_entry_id().map(|label| label.to_query()),
             discard: optional(TikTokControl::ComposerDiscard),
@@ -485,6 +489,7 @@ impl ComposerPlan {
             tabs: NEVER_MEASURED,
             multi_select: NEVER_MEASURED,
             picker_next: NEVER_MEASURED,
+            selection_controls: None,
             edit_step_marker: None,
             gallery_entry: gallery.map(|label| label.to_query()),
             discard: labels
@@ -733,6 +738,8 @@ impl PhotoGrid {
 /// `Posted` from the middle of the picker is one refactor away from a caller believing it.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Selection {
+    /// Not all requested photos have a matching ordinal/count readback.
+    NotEnoughSelected,
     /// `Select multiple` never engaged: the very first cell tap failed to arm `Next`.
     ///
     /// Checked after cell one and before cells two onward, because the measured failure
@@ -748,9 +755,7 @@ pub enum Selection {
     /// `counted` is the one thing that can sometimes be recovered: some builds render the
     /// number of selected images in the `Next` control's own text. When it is `Some`, it is
     /// authoritative and [`ComposerVerdict::NotEnoughSelected`] is what a mismatch becomes.
-    /// When it is `None` the build states no count, and the run proceeds on the count of taps
-    /// it *sent* — which is weaker, and is why this variant names the difference instead of
-    /// hiding it.
+    /// Photo publishing refuses when it is `None`; sent taps are not selection proof.
     Armed {
         next: ElementBox,
         counted: Option<usize>,
@@ -1102,9 +1107,8 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
     /// [`Self::await_armed`] already trusts (the editor's own `Next` renders its text on a
     /// non-clickable node, so it reads honestly as unarmed there).
     ///
-    /// Past the first cell there is nothing per cell to check — see [`Selection::Armed`]
-    /// for exactly how weak the end-of-set evidence is, and why it is still the strongest
-    /// available.
+    /// Kept for measured one-video selection and legacy fixture paths. Photo publishing
+    /// requires explicit final count; measured photo tuples use corner controls instead.
     ///
     /// Refuses a `count` past this screen's visible capacity instead of scrolling.
     async fn select(
@@ -1149,9 +1153,8 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
     /// How many images the picker says are selected, when it says so at all.
     ///
     /// Read out of the `Next` control's own rendered text, because that is where a build that
-    /// states a count puts it (`Next (5)`, `Tiếp 5`). Measured on
-    /// `com.ss.android.ugc.trill` 38.3.2 the text is a bare `Next` and this returns `None` —
-    /// which is a fact about that build, not a failure.
+    /// states a count puts it (`Next (5)`, `Tiếp 5`). A bare `Next` does not prove
+    /// photo selection, including the single-photo preview reached by a thumbnail tap.
     ///
     /// Through `locate_all_described` rather than `locate` for the reason the album pill
     /// needed the same: `locate` returns `content-desc`, and the picker's controls carry only
@@ -1162,17 +1165,7 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
             .locate_all_described(self.plan.picker_next)
             .await
             .ok()?;
-        rows.iter()
-            .filter_map(|row| row.description.as_deref())
-            .filter_map(|text| {
-                let digits: String = text
-                    .chars()
-                    .skip_while(|character| !character.is_ascii_digit())
-                    .take_while(char::is_ascii_digit)
-                    .collect();
-                digits.parse::<usize>().ok()
-            })
-            .next()
+        selection::explicit_count(&rows)
     }
 
     /// Wait for `Next` to arm, and return it so the caller can tap it.
@@ -1646,6 +1639,7 @@ struct PickerSelection<'a> {
     album: &'a str,
     count: usize,
     screen: Screen,
+    video: bool,
 }
 
 impl<'a> PickerSelection<'a> {
@@ -1654,6 +1648,7 @@ impl<'a> PickerSelection<'a> {
             album: request.album,
             count: request.images,
             screen: request.screen,
+            video: false,
         }
     }
 
@@ -1662,6 +1657,7 @@ impl<'a> PickerSelection<'a> {
             album: request.album,
             count: 1,
             screen: request.screen,
+            video: true,
         }
     }
 }
@@ -2068,7 +2064,15 @@ async fn reach_selected_media_edit_step<P: TapPlanner>(
     let Some(grid) = composer.grid(request.screen, stop).await? else {
         return Ok(ComposerVerdict::NoTabsToAnchorTo);
     };
-    let next = match composer.select(&grid, request.count, stop).await? {
+    let selected =
+        if let Some(controls) = composer.plan.selection_controls.filter(|_| !request.video) {
+            composer
+                .select_verified(controls, request.screen, request.count, request.album, stop)
+                .await?
+        } else {
+            composer.select(&grid, request.count, stop).await?
+        };
+    let next = match selected {
         // **A stated count is believed, and a mismatch stops the run.** `Next` arming proves
         // only that *something* is selected; a build that also renders the number is the one
         // chance to prove the rest, and taking it is the difference between publishing five
@@ -2077,7 +2081,14 @@ async fn reach_selected_media_edit_step<P: TapPlanner>(
             counted: Some(counted),
             ..
         } if counted != request.count => return Ok(ComposerVerdict::NotEnoughSelected),
-        Selection::Armed { next, .. } => next,
+        Selection::Armed { next, counted } if counted == Some(request.count) => next,
+        Selection::Armed {
+            next,
+            counted: None,
+        } if request.video => next,
+        Selection::Armed { .. } | Selection::NotEnoughSelected => {
+            return Ok(ComposerVerdict::NotEnoughSelected)
+        }
         Selection::MoreCellsThanTheGridShows => {
             return Ok(ComposerVerdict::MoreCellsThanTheGridShows)
         }
@@ -2384,6 +2395,8 @@ mod tests {
         /// "I could not read the screen" and "the post did not go" are different facts.
         locate_fails_at: Option<usize>,
         locates: Mutex<usize>,
+        selected_cells: Mutex<usize>,
+        hide_selection_count: bool,
     }
 
     impl FakeSession {
@@ -2453,7 +2466,17 @@ mod tests {
                     (
                         key.clone(),
                         ElementBox {
-                            description: scene.texts.get(key).cloned(),
+                            description: scene.texts.get(key).cloned().or_else(|| {
+                                matches!(key.as_str(), "fixture-picker-next" | ":id/q4g").then(
+                                    || {
+                                        if element.clickable && !self.hide_selection_count {
+                                            format!("Next ({})", *self.selected_cells.lock())
+                                        } else {
+                                            "Next".into()
+                                        }
+                                    },
+                                )
+                            }),
                             ..element.clone()
                         },
                     )
@@ -2468,6 +2491,19 @@ mod tests {
 
     #[async_trait::async_trait]
     impl UiSession for FakeSession {
+        async fn hierarchy_source_snapshot(
+            &self,
+        ) -> anyhow::Result<crate::driver::HierarchySourceSnapshot> {
+            let count = *self.selected_cells.lock();
+            let cells=(0..3).map(|index|format!(r#"<node package="com.ss.android.ugc.trill" class="android.widget.Button" resource-id="com.ss.android.ugc.trill:id/h4b" text="{}" bounds="[{},375][{},447]" displayed="true" enabled="true" clickable="true"/>"#,if index<count {(index+1).to_string()}else{String::new()},268+index*358,340+index*358)).collect::<String>();
+            Ok(crate::driver::HierarchySourceSnapshot {
+                generation: 1,
+                xml: format!(
+                    r#"<hierarchy>{cells}<node package="com.ss.android.ugc.trill" class="android.widget.Button" resource-id="com.ss.android.ugc.trill:id/q4g" text="Next ({count})" bounds="[552,1896][652,1946]" displayed="true" enabled="true" clickable="{}"/></hierarchy>"#,
+                    count > 0
+                ),
+            })
+        }
         async fn locate_all(&self, query: ElementQuery<'_>) -> anyhow::Result<Vec<ElementBox>> {
             Ok(self.locate(query).await?.into_iter().collect())
         }
@@ -2490,6 +2526,18 @@ mod tests {
                     && y >= element.y
                     && y <= element.y + element.height
             };
+            if self.screens.get(*at).is_some_and(|scene| {
+                (scene.elements.contains_key("fixture-picker-next")
+                    || scene.elements.contains_key(":id/q4g"))
+                    && (scene
+                        .exit
+                        .as_deref()
+                        .is_some_and(|key| matches!(key, "fixture-picker-next" | ":id/q4g"))
+                        || scene.exit_rect.as_ref() == Some(&grid_area()))
+            }) && inside(&grid_area())
+            {
+                *self.selected_cells.lock() += 1;
+            }
             let navigates = match self.screens.get(*at) {
                 None => false,
                 Some(scene) => match (&scene.exit, &scene.exit_rect) {
@@ -2565,6 +2613,27 @@ mod tests {
                 | ElementQuery::ClassName(value)
                 | ElementQuery::ResourceIdSuffix(value) => value,
             };
+            if wanted == ":id/h4b"
+                && self.current().contains_key("Select multiple")
+                && self.current().contains_key(":id/q4g")
+            {
+                let selected = *self.selected_cells.lock();
+                return Ok((0..3)
+                    .map(|index| ElementBox {
+                        x: 268.0 + index as f64 * 358.0,
+                        y: 375.0,
+                        width: 72.0,
+                        height: 72.0,
+                        description: Some(if index < selected {
+                            (index + 1).to_string()
+                        } else {
+                            String::new()
+                        }),
+                        enabled: true,
+                        clickable: true,
+                    })
+                    .collect());
+            }
             // The caption field reports the text it holds, the way a real one does — or the
             // placeholder it kept, when the write did not land.
             //
@@ -2903,7 +2972,7 @@ mod tests {
             ];
             if let Some(armed) = next {
                 elements.push((
-                    "Next",
+                    ":id/q4g",
                     ElementBox {
                         clickable: armed,
                         ..box_at(552.0, 1896.0)
@@ -2930,7 +2999,7 @@ mod tests {
             picker_real("riviu-abc", Some("Select multiple"), None),
             // The toggle took: multi mode's `Next` exists, unarmed; the first cell arms it.
             picker_real("riviu-abc", None, Some(false)).leaving_by(grid_area()),
-            picker_real("riviu-abc", Some("Next"), Some(true)),
+            picker_real("riviu-abc", Some(":id/q4g"), Some(true)),
             // The edit step, carrying exactly what the measured screen carries: its own
             // `Next` (`:id/kl7`, whose only text child reads `Next` — measured 30/08/2026).
             // With `composer_next` in the catalogue, `advance_to_edit_step` proves arrival
@@ -3562,6 +3631,47 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn musically_carousel_reproof_uses_editor_before_post() {
+        for changed in [false, true] {
+            let mut caption_page = post_screen();
+            caption_page
+                .elements
+                .insert(":id/bot".into(), box_at(20.0, 70.0));
+            caption_page.exit = Some(":id/bot".into());
+            let mut editor =
+                edit_step().texted(":id/tv_top_text", if changed { "Other" } else { "Sound A" });
+            editor
+                .elements
+                .insert(":id/tv_top_text".into(), box_at(300.0, 150.0));
+            let session = FakeSession::with(vec![caption_page, editor, post_screen(), feed()]);
+            *session.typed.lock() = Some("caption".into());
+            let mut composer =
+                Composer::new(&session, plan(), |element: &ElementBox| element.centre());
+            composer.pending_sound_proof = Some((
+                SoundPickerPlan::resolve("com.zhiliaoapp.musically", "en", "46.2.42").unwrap(),
+                "Sound A".into(),
+            ));
+            let mut intents = 0;
+            let result = composer
+                .post_with_effect_intent("caption", &AtomicBool::new(false), &mut || {
+                    intents += 1;
+                    Ok(())
+                })
+                .await;
+            if changed {
+                assert!(result.is_err());
+                assert_eq!(intents, 0);
+                assert_eq!(post_button_taps(&session), 0);
+            } else {
+                assert!(result.unwrap().is_posted());
+                assert_eq!(intents, 1);
+                assert_eq!(post_button_taps(&session), 1);
+            }
+            assert_eq!(session.typed.lock().as_deref(), Some("caption"));
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn effect_intent_failure_happens_before_post_and_keeps_the_attempt_retryable() {
         let session = FakeSession::full_walk("riviu-abc");
         let request = CarouselRequest {
@@ -4185,10 +4295,11 @@ mod tests {
         );
     }
 
-    /// A build that states no count runs on the taps it sent, which is the measured case.
+    /// A bare Next is also visible on single-photo preview and cannot prove a carousel.
     #[tokio::test(start_paused = true)]
-    async fn a_build_that_states_no_count_still_publishes() {
-        let session = FakeSession::full_walk("riviu-abc");
+    async fn a_build_that_states_no_count_never_publishes_a_partial_carousel() {
+        let mut session = FakeSession::full_walk("riviu-abc");
+        session.hide_selection_count = true;
         let request = CarouselRequest {
             album: "riviu-abc",
             images: 3,
@@ -4206,8 +4317,9 @@ mod tests {
             )
             .await
             .expect("no transport error"),
-            ComposerVerdict::Posted
+            ComposerVerdict::NotEnoughSelected
         );
+        assert!(session.typed.lock().is_none());
     }
 
     /// **One dropped hierarchy read must not shorten the post-confirmation window.**
