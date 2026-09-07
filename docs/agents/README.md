@@ -111,6 +111,11 @@ Nhật ký là bản ghi có ngày; mục mới hơn chỉ thay thế các kết
 | §14.32 | [14.32 Interaction target proof và kết thúc hành động chưa chạy (07/09/2026; xem §9.171)](08-unified-agent-runtime.md#1432-interaction-target-proof-và-kết-thúc-hành-động-chưa-chạy-07092026-xem-9171) | `08-unified-agent-runtime.md` |
 | §14.33 | [14.33 Interaction phân biệt bài không khả dụng và lỗi đọc thiết bị (07/09/2026; xem §9.172)](08-unified-agent-runtime.md#1433-interaction-phân-biệt-bài-không-khả-dụng-và-lỗi-đọc-thiết-bị-07092026-xem-9172) | `08-unified-agent-runtime.md` |
 | §14.34 | [14.34 Đăng bài nhận thư mục bài đơn và giữ scope quét nguồn (07/09/2026; xem §9.173)](08-unified-agent-runtime.md#1434-đăng-bài-nhận-thư-mục-bài-đơn-và-giữ-scope-quét-nguồn-07092026-xem-9173) | `08-unified-agent-runtime.md` |
+| §14.35 | [14.35 Carousel phải chứng minh đủ ảnh trước Next (07/09/2026; xem §9.175)](08-unified-agent-runtime.md#1435-carousel-phải-chứng-minh-đủ-ảnh-trước-next-07092026-xem-9175) | `08-unified-agent-runtime.md` |
+| §14.36 | [14.36 Nhạc carousel có marker riêng, vẫn cần readback editor (07/09/2026; xem §9.177)](08-unified-agent-runtime.md#1436-nhạc-carousel-có-marker-riêng-vẫn-cần-readback-editor-07092026-xem-9177) | `08-unified-agent-runtime.md` |
+| §14.37 | [14.37 Musically 46.2.42: Hot phải được chọn và sheet phải đóng (07/09/2026; xem §9.178)](08-unified-agent-runtime.md#1437-musically-46242-hot-phải-được-chọn-và-sheet-phải-đóng-07092026-xem-9178) | `08-unified-agent-runtime.md` |
+| §14.38 | [14.38 Workspace Đăng bài production theo ba bước (07/09/2026; xem §9.179)](08-unified-agent-runtime.md#1438-workspace-đăng-bài-production-theo-ba-bước-07092026-xem-9179) | `08-unified-agent-runtime.md` |
+| §14.39 | [14.39 Tự lưu workspace ngoài Flow và monitor độc lập (08/09/2026; xem §9.180)](08-unified-agent-runtime.md#1439-tự-lưu-workspace-ngoài-flow-và-monitor-độc-lập-08092026-xem-9180) | `08-unified-agent-runtime.md` |
 
 ## Số mục kế thừa có nhiều chủ sở hữu
 
@@ -121,11 +126,11 @@ Khi trích các mục này, ghi thêm ngày/tiêu đề và liên kết trực t
 
 ## Mới nhất
 
-- [§9.174: §9.174 Commit và bộ cài Windows 0.2.6 (07/09/2026)](diary/06-2408-2708.md#9174-commit-và-bộ-cài-windows-026-07092026)
-- [§9.173: §9.173 Đăng bài quét trực tiếp một thư mục nội dung (07/09/2026)](diary/06-2408-2708.md#9173-đăng-bài-quét-trực-tiếp-một-thư-mục-nội-dung-07092026)
-- [§9.172: §9.172 Phân loại lỗi Tương tác sau chiến dịch 20 máy tiếp theo (07/09/2026)](diary/06-2408-2708.md#9172-phân-loại-lỗi-tương-tác-sau-chiến-dịch-20-máy-tiếp-theo-07092026)
-- [§9.171: §9.171 Sửa lỗi Tương tác trong phiên 20 máy (07/09/2026)](diary/06-2408-2708.md#9171-sửa-lỗi-tương-tác-trong-phiên-20-máy-07092026)
-- [§9.170: §9.170 Thu gọn monitor theo yêu cầu người dùng (07/09/2026)](diary/06-2408-2708.md#9170-thu-gọn-monitor-theo-yêu-cầu-người-dùng-07092026)
+- [§9.181: §9.181 Chuẩn bị bộ cài Windows 0.2.8 và đồng bộ main (08/09/2026)](diary/06-2408-2708.md#9181-chuẩn-bị-bộ-cài-windows-028-và-đồng-bộ-main-08092026)
+- [§9.180: §9.180 Tự lưu ngoài Flow, tiến trình nổi không co trang (08/09/2026)](diary/06-2408-2708.md#9180-tự-lưu-ngoài-flow-tiến-trình-nổi-không-co-trang-08092026)
+- [§9.179: §9.179 Dựng tab Đăng bài production theo mockup (07/09/2026)](diary/06-2408-2708.md#9179-dựng-tab-đăng-bài-production-theo-mockup-07092026)
+- [§9.178: §9.178 Kiểm chứng nhạc trên box phone: Hot/For You và sheet inline (07/09/2026)](diary/06-2408-2708.md#9178-kiểm-chứng-nhạc-trên-box-phone-hotfor-you-và-sheet-inline-07092026)
+- [§9.177: §9.177 Nhạc carousel và mockup riêng tab Đăng bài (07/09/2026)](diary/06-2408-2708.md#9177-nhạc-carousel-và-mockup-riêng-tab-đăng-bài-07092026)
 
 ## Nhật ký §9.x
 
@@ -315,6 +320,13 @@ Khi trích các mục này, ghi thêm ngày/tiêu đề và liên kết trực t
 | §9.172 | [§9.172 Phân loại lỗi Tương tác sau chiến dịch 20 máy tiếp theo (07/09/2026)](diary/06-2408-2708.md#9172-phân-loại-lỗi-tương-tác-sau-chiến-dịch-20-máy-tiếp-theo-07092026) | `diary/06-2408-2708.md` |
 | §9.173 | [§9.173 Đăng bài quét trực tiếp một thư mục nội dung (07/09/2026)](diary/06-2408-2708.md#9173-đăng-bài-quét-trực-tiếp-một-thư-mục-nội-dung-07092026) | `diary/06-2408-2708.md` |
 | §9.174 | [§9.174 Commit và bộ cài Windows 0.2.6 (07/09/2026)](diary/06-2408-2708.md#9174-commit-và-bộ-cài-windows-026-07092026) | `diary/06-2408-2708.md` |
+| §9.175 | [§9.175 Sửa chọn thiếu ảnh carousel Publish (07/09/2026)](diary/06-2408-2708.md#9175-sửa-chọn-thiếu-ảnh-carousel-publish-07092026) | `diary/06-2408-2708.md` |
+| §9.176 | [§9.176 Bộ cài local 0.2.7 chứa sửa chọn đủ ảnh (07/09/2026)](diary/06-2408-2708.md#9176-bộ-cài-local-027-chứa-sửa-chọn-đủ-ảnh-07092026) | `diary/06-2408-2708.md` |
+| §9.177 | [§9.177 Nhạc carousel và mockup riêng tab Đăng bài (07/09/2026)](diary/06-2408-2708.md#9177-nhạc-carousel-và-mockup-riêng-tab-đăng-bài-07092026) | `diary/06-2408-2708.md` |
+| §9.178 | [§9.178 Kiểm chứng nhạc trên box phone: Hot/For You và sheet inline (07/09/2026)](diary/06-2408-2708.md#9178-kiểm-chứng-nhạc-trên-box-phone-hotfor-you-và-sheet-inline-07092026) | `diary/06-2408-2708.md` |
+| §9.179 | [§9.179 Dựng tab Đăng bài production theo mockup (07/09/2026)](diary/06-2408-2708.md#9179-dựng-tab-đăng-bài-production-theo-mockup-07092026) | `diary/06-2408-2708.md` |
+| §9.180 | [§9.180 Tự lưu ngoài Flow, tiến trình nổi không co trang (08/09/2026)](diary/06-2408-2708.md#9180-tự-lưu-ngoài-flow-tiến-trình-nổi-không-co-trang-08092026) | `diary/06-2408-2708.md` |
+| §9.181 | [§9.181 Chuẩn bị bộ cài Windows 0.2.8 và đồng bộ main (08/09/2026)](diary/06-2408-2708.md#9181-chuẩn-bị-bộ-cài-windows-028-và-đồng-bộ-main-08092026) | `diary/06-2408-2708.md` |
 
 ## Cổng
 

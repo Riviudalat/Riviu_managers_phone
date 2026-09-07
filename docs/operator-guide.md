@@ -7,15 +7,16 @@ phạm vi máy rõ ràng và kết quả có thể đọc lại. Chọn hồ sơ
 
 - Kiểm tra số máy, nhóm, ứng dụng và tài khoản đang hiển thị trước khi chạy.
 - Mỗi workspace automation giữ phạm vi riêng; đổi trang không biến một máy thành toàn bộ fleet.
-- Khi có bản nháp, `Lưu`, `Bỏ thay đổi`, `Ở lại` là ba kết quả khác nhau. Nạp/polling không được làm bẩn bản nháp.
+- Flow thiết bị/Điều phối giữ thao tác `Lưu`, `Bỏ thay đổi`, `Ở lại`. Các tab còn lại tự lưu thiết lập sau khi ngừng nhập và trước khi chuyển tab/đóng app; lỗi lưu xuất hiện tại vùng đang sửa.
+- Tự lưu bài/máy/caption không tạo chiến dịch, không bật lịch và không cấp quyền đăng. Hồ sơ có tên vẫn được lưu riêng khi cần ghim revision cho Flow. Credential đi qua kho thông tin xác thực hiện có.
 - `queued` còn đang chờ; `running` đã bắt đầu; `uncertain` cần đối chiếu bằng chứng. Không thử lại thao tác công khai chỉ vì thiếu ACK.
 - Trạng thái ngắn hạn nằm trong vùng hoạt động; lịch sử bền nằm ở Tác vụ/Dữ liệu và monitor nguồn.
 - Mất thiết bị hoặc lỗi quyền phải hiện lỗi ở vùng liên quan. Không dùng ảnh preview còn lưu làm bằng chứng máy đang sẵn sàng.
 
 ## Thiết bị
 
-Thanh **Tiến trình công việc** nằm trong cửa sổ nổi ở góc dưới khi có tác vụ đang chạy
-hoặc vừa kết thúc. Bấm mở rồi chọn số máy/alias để xem kết quả và nhật ký
+Thanh **Tiến trình công việc** nằm trong cửa sổ nổi ở góc trên bên phải khi có tác vụ đang chạy
+hoặc vừa kết thúc. Cửa sổ nằm trên các trang, không chiếm diện tích layout; kéo tiêu đề để đổi vị trí. Bấm mở rồi chọn số máy/alias để xem kết quả và nhật ký
 `giờ:phút:giây`. Chuyển trang vẫn giữ monitor. 100% là đã xử lý xong, không có nghĩa
 tất cả đều thành công; đọc trạng thái lỗi/chưa xác nhận bên cạnh. Dữ liệu thiếu giờ
 không được tự gán giờ hiện tại. Các tác vụ cũ hơn xem tại **Tác vụ**.
@@ -124,6 +125,24 @@ parse lỗi không được dùng target cũ. **Tiếp theo:** mở bằng chứ
 phần được hệ thống xác định còn hợp lệ, không gửi lại một comment chỉ vì nhận ACK không rõ.
 
 ## Đăng bài
+
+Tab làm việc có ba bước, danh sách tự chia trang theo chiều cao cửa sổ:
+
+1. **Chọn bài:** chọn thư mục rồi đánh dấu bài cần đăng, hoặc dùng **Chọn nhanh**.
+   Một thư mục con là một bài gồm toàn bộ ảnh. Chọn ảnh trong khung xem trước chỉ
+   đổi ảnh đang xem. **Sửa nội dung chữ** lưu bản nháp trong chiến dịch, giữ file gốc.
+2. **Chọn máy:** **Ghép tự động** điền các bài chưa có máy theo số máy. Kéo ảnh sang
+   ô máy để gán hoặc đổi chỗ; bấm bài rồi bấm máy cho cùng kết quả. Giữ ảnh trên nút
+   trang tiếp để kéo sang trang khác. **Chọn dải máy**, **Hoàn tác** và **Làm lại**
+   giúp sửa hàng loạt. Chọn 10 bài chỉ cần ghép 10 máy, dù đang kết nối 20 máy.
+3. **Kiểm tra & đăng:** chọn giờ, ghi Sheet và giữ/xóa bản nội dung đã chuyển.
+   Bấm **Kiểm tra**, đọc kết quả từng máy rồi xác nhận đăng. Nhạc được chọn khi đã
+   mở TikTok và chọn media; kết quả kiểm tra chưa có nghĩa đã chọn nhạc. Các máy
+   có thể dùng trùng nhạc. Chỉ xóa bản chuyển khi đã xác nhận đăng thành công;
+   bài lỗi/chưa chắc kết quả giữ media để kiểm tra lại.
+
+**Theo dõi** mở lịch sử và bằng chứng thật. **Về thiết lập** giữ nguyên bài/máy
+đang ghép. Hồ sơ và cấu hình webhook nằm trong **Hồ sơ & cài đặt**.
 
 **Đầu vào:** một MP4 H.264/AAC hoặc 1–35 ảnh, caption, âm nhạc, hồ sơ, Sheet và máy được
 gán cho từng bài. **Thao tác:** preflight trước dispatch; đối chiếu một bài với một máy

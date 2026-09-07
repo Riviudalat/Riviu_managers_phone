@@ -1163,3 +1163,102 @@
   vẫn khóa source root, bundle IDs, caption, targets và sound policy. Create campaign
   quét lại, so digest đã duyệt rồi mới copy vào vùng quản lý; copy kiểm hash từng media.
   Quét không chuyển file xuống máy, không mở composer, không Post và không sửa file nguồn.
+
+#### 14.35 Carousel phải chứng minh đủ ảnh trước Next (07/09/2026; xem §9.175)
+
+- Thumbnail giữa ảnh mở single-photo preview; picker vẫn có thể còn trong hierarchy
+  bên dưới. Không dùng `Next` text hoặc số tap đã phát làm proof chọn đủ ảnh.
+- Photo tuple đo được dùng corner selector: trill38.3.2 `h4b/q4g`, musically46.2.42
+  `kh7/wud`, musically46.2.1 `kir/wwo` (selector/Next resource suffix). Snapshot phải
+  đúng package, displayed, enabled/clickable và bounds trên màn, không dưới Next.
+- Cùng album import đã xác nhận, selector đọc thứ tự hàng/cột. Trước từng tap kiểm
+  vị trí không đổi, prefix1..N đã chọn và tail trống; tap từng selector một lần,
+  chờ ordinal và `Next (N)` tăng đúng một. Thiếu, trùng, sai thứ tự hoặc count không
+  đọc được trả NotEnoughSelected trước caption/Post; không tap lặp để sửa ngầm.
+- API `locate_all_described` cố ý không đọc flags; không coi clickable=false ở API
+  đó là trạng thái thật. Parser snapshot đọc XML theo giới hạn node/size/depth, bỏ
+  node khác package, từ chối XML hỏng. Video vẫn dùng đường riêng đã đo.
+- `imageCount` cũ chỉ số ảnh yêu cầu. `pickerImageCountConfirmed` mới chỉ true khi
+  photo đi qua guard đủ ảnh và Posted. Không sửa evidence lịch sử hay retry bài cũ.
+- Giữ giới hạn grid/preflight hiện có; chưa có re-identification sau scroll nên
+  album vượt số selector hiện trên màn bị dừng, không đăng lén một phần thư mục.
+
+#### 14.36 Nhạc carousel có marker riêng, vẫn cần readback editor (07/09/2026; xem §9.177)
+
+- Trill/en/38.3.2 photo carousel chọn nhạc inline trong row `ta8`. Marker `jk1`
+  (sóng âm cạnh title) xuất hiện khi đang chọn; không nhất thiết có `dfu` (kéo cắt
+  nhạc của đường video). Cả hai là bằng chứng đọc, không phải nút chọn nhạc.
+- Marker phải nằm trong đúng candidate row; nhiều marker cùng row được chấp nhận,
+  marker ở nhiều row bị từ chối. Vẫn khóa pool title/artist/section trước tap,
+  giữ desired-state để không tap lại nhạc đã chọn, và dùng target vừa đọc.
+- Sau đóng sheet phải khớp title chính xác ở chip editor. Trước Post tiếp tục
+  đọc lại nhạc và caption; marker không thay thế hai guard đó hay effect intent.
+- Scout `carousel_selection_scout sound-scout` chỉ chọn và đọc lại nhạc;
+  `rehearse` dùng composer production nhưng callback luôn trả lỗi trước Post.
+  Hai chế độ cleanup media của import riêng và kiểm process absent cuối phiên.
+- Mockup tab Đăng bài ở `output/playwright/publish-review/index.html`, không trong
+  bundle production. Dữ liệu nội dung từ thư mục người dùng; pairing/device state
+  là fixture để duyệt thiết kế. Không có API public effect hoặc kết quả preflight
+  thiết bị giả; nút xác nhận đăng giữ disabled khi chưa có kết quả từ máy.
+
+#### 14.37 Musically 46.2.42: Hot phải được chọn và sheet phải đóng (07/09/2026; xem §9.178)
+
+- Live máy13 cho thấy mở soundpicker vào For You, dù chữ Hot vẫn nhìn thấy. Không
+  gắn candidate là trending chỉ dựa trên sự tồn tại của label Hot. Nhánh snapshot
+  riêng cho musically/en/46.2.42 kiểm selected ở tabx2k; tap Hot tốiđa1lần, đọc lại.
+- Rows/titles/artists/marker đọc trong cùng hierarchy snapshot, chờ hai pool giống
+  nhau. Bỏ hàng cuối bị viewport cắt mấttitle/artist; mọi hàng nhận phải đầy đủ,
+  cùng viewport, package/displayed/geometry hợp lệ. XML/node/depth giới hạn như picker.
+- Marker `nve` trong row `vertical_item_music_new_rl` chứng minh nhạc chọn inline.
+  Không tap lại row đã chọn; selectionkhông đạt thì không đóngsheet/tap lại. Back
+  đóng sheet, chip `tv_top_text` phải khớp title trước đi tiếp.
+- Màn caption không có chip nhạc. Reproof dùng nút `bot` vềeditor rồi trở lại
+  caption; caption phải giữ nguyên, Post được locate mới, effect callback one-shot.
+- Chỉ tuple46.2.42 được mở rộng trong lần này. 46.2.1 vàTrill không được suy rộng
+  chứng nhận từ máy13. Không bypass foreign instrumentation guard: Genfarmer đang
+  giữ UiAutomation trên máy1/2/17 ở thời điểm kiểm; không force-stop nó để lấy quyền.
+- Cùng seed và cùngpool vẫn chọn cùng nhạc; chưa có uniquenessledger cho fleet.
+  Mọi báo cáo tách chọnnhạc, tớiPostboundary, publicPost vàcleanup thực tế.
+
+#### 14.38 Workspace Đăng bài production theo ba bước (07/09/2026; xem §9.179)
+
+- `PublishWizard` dùng API thật: Chọn bài → Chọn máy → Kiểm tra & đăng. Bài là
+  toàn bộ một bundle; ảnh con chỉ dùng xem trước, không biến thành bài riêng.
+  Không tự chọn nội dung sau quét. Phạm vi là tập máy được phép ghép; số máy chạy
+  là số assignment, không phải tổng số máy đang kết nối hoặc thư mục được quét.
+- Mapping lưu theo bundle ID, tách khỏi thứ tự checkbox. Gán ô đã có bài sẽ đổi
+  chỗ, gán mới chuyển bài, có hoàn tác/làm lại; thao tác bấm dùng cùng hàm với kéo.
+  Profile nhóm chờ target mới được resolve rồi mới ghép; không lấy máy của nhóm cũ.
+- Preview đi qua `publish_image_preview`: canonical parent phải là bundle root,
+  SHA-256 phải khớp lần quét; giới hạn đọc 64 MiB, decode 192 MiB/16.384 px,
+  hai decoder đồng thời và ảnh trả về JPEG tối đa 960 px. Không mở asset scope rộng.
+- Preflight khóa nguồn, captions, mapping, nhạc, Sheet và `deleteAfterPublish`.
+  Đầu vào đổi thì hủy trạng thái pending; response cũ không mở nút Đăng. Sau khi
+  người dùng trả lời xác nhận, kiểm lại input/draft trước tạo campaign.
+- Nhạc được chọn khi thực thi trên TikTok; preflight chỉ kiểm capability đã đo.
+  Có thể trùng nhạc giữa máy: chưa có uniqueness ledger. Không trình bày nhạc như
+  đã chọn chỉ vì preflight xanh. Xác nhận dùng shared queue; dialog native tạm
+  đóng để không làm hộp xác nhận chung bị inert, rồi trả focus khi Hủy.
+- UI mới mặc định giữ nội dung trên máy. `deleteAfterPublish=false` persist thành
+  `KeepImportedAssets`; true chỉ xóa import riêng khi Post đã xác nhận. Failed hoặc
+  Uncertain giữ media để đối chiếu. Cả hai chính sách vẫn đóng TikTok với proof.
+  Profile/payload cũ thiếu field dùng true để giữ tương thích; không cần migration.
+- Theo dõi giữ projection, retry scope và evidence thật. Chuyển sang Theo dõi không
+  unmount thiết lập/hồ sơ, nên quay lại còn mapping, caption và khả năng lưu draft.
+  Mockup ở output không được import vào frontend hoặc đóng gói.
+
+#### 14.39 Tự lưu workspace ngoài Flow và monitor độc lập (08/09/2026; xem §9.180)
+
+- `WorkspaceDraft.autoSave` tách khỏi `save` thủ công: debounce 650 ms, serialize
+  writer, flush revision mới nhất trước navigation/close. Auto-save không đi qua
+  dialog cấp consent của profile. Flow thiết bị/Điều phối giữ guard cũ.
+- Nuôi/Tương tác/Publish lưu draft UI có version dưới `riviu.form-draft.v1.*`;
+  nguồn, bundle IDs, mapping, caption, options và target giữ qua remount/restart.
+  Không lưu approval, preflight digest, manifest hoặc token vào draft đó. Credential
+  và cài đặt có hiệu lực dùng API lưu hiện có, giữ validate/stale-response guard.
+- Publish restore phải scan lại folder, lọc bundle ID còn tồn tại, reconcile máy
+  sau khi có roster; preflight luôn mới. Không tạo campaign/outbox hoặc bật lịch
+  từ việc autosave, nạp draft hay chuyển tab. Schedule/profile revision vẫn explicit.
+- Monitor dùng portal/fixed layer, mặc định góc trên bên phải để tránh footer CTA;
+  giữ kéo/thu nhỏ và keyboard. Không tạo margin hay rút ngắn bảng theo sự hiện diện
+  của monitor. Điều này thay quy tắc chừa khoảng trống của §9.179.
