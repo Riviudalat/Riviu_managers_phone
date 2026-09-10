@@ -71,7 +71,7 @@ TEMURIN_SOURCE = (
     "jdk-21.0.12.1%2B1/OpenJDK21U-jre_x64_windows_hotspot_21.0.12.1_1.zip"
 )
 ANDROID_PACKAGE_TOOLS_TREE_SHA256 = (
-    "f24951701beb69fe74ef073196c249d6df153749722f82260d79fc6687a7d57f"
+    "de003f9f8b872ba8a9e2bb57d0539e04c0c7116e409619ded42941aaf85a3762"
 )
 EXPECTED_DATABASE_VERSION = 32
 BRANDING_LOGO = REPOSITORY_ROOT / "logo.jpg"
@@ -747,15 +747,66 @@ def read_msi_log(path: Path, *, keep: int = 24) -> str:
     return " | ".join(selected)
 
 
+def packaged_command_environment() -> dict[str, str]:
+    """Verify the installed payload without borrowing this checkout's tools.
+
+    This remains a local-host test, not a clean Windows image. Preserve the user
+    profile for WebView2/Credential Manager, but remove tool and app overrides.
+    """
+    if sys.platform != "win32":
+        return dict(os.environ)
+    prefixes = (
+        "RIVIU_", "PYTHON", "ANDROID_", "ADB_", "WEBVIEW2_", "CONDA_",
+    )
+    removed = {
+        "PATH", "JAVA_HOME", "JDK_HOME", "JDK_JAVA_OPTIONS", "JAVA_TOOL_OPTIONS",
+        "_JAVA_OPTIONS", "VIRTUAL_ENV", "PSMODULEPATH", "RUST_LOG",
+    }
+    environment = {
+        key: value for key, value in os.environ.items()
+        if key.upper() not in removed and not key.upper().startswith(prefixes)
+    }
+    system_root = next(
+        (value for key, value in environment.items() if key.upper() == "SYSTEMROOT"),
+        r"C:\Windows",
+    ).rstrip("\\/")
+    environment["PATH"] = ";".join([
+        system_root + r"\System32", system_root,
+        system_root + r"\System32\Wbem",
+        system_root + r"\System32\WindowsPowerShell\v1.0",
+    ])
+    return environment
+
+
+def packaged_process_command(command: list[str]) -> list[str] | str:
+    """NSIS parses its final /D directly and ignores it when argv quoting wraps it.
+
+    Keep normal argv everywhere else. The returned string goes to CreateProcess,
+    never a shell; the final absolute path may contain spaces and Unicode.
+    """
+    if sys.platform != "win32" or not command or not command[-1].startswith("/D="):
+        return command
+    if "/S" not in command or Path(command[0]).suffix.lower() != ".exe":
+        raise ArtifactError("NSIS /D path is only supported for a silent .exe installer")
+    destination = command[-1][3:]
+    if not Path(destination).is_absolute() or any(char in destination for char in ['"', '\n', '\r', '\0']):
+        raise ArtifactError("NSIS /D requires an absolute unquoted final directory")
+    return subprocess.list2cmdline(command[:-1]) + " /D=" + destination
+
+
 def run_checked(command: list[str], *, timeout: int = 120) -> subprocess.CompletedProcess[str]:
     try:
         return subprocess.run(
-            command,
-            cwd=REPOSITORY_ROOT,
+            packaged_process_command(command),
+            cwd=Path(tempfile.gettempdir()) if sys.platform == "win32" else REPOSITORY_ROOT,
+            env=packaged_command_environment(),
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=timeout,
             check=True,
+            creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
         )
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as error:
         stdout = getattr(error, "stdout", "") or ""
@@ -896,6 +947,14 @@ def verify_android_package_tools(root: Path, *, execute: bool = True) -> dict[st
     jre = manifest.get("jre")
     if not isinstance(bundletool, dict) or not isinstance(jre, dict):
         raise ArtifactError(f"{manifest_path} lacks Bundletool or JRE provenance")
+    expected_transform = {
+        "id": "riviu-java-utf8-manifest-v1",
+        "sourceSha256": "82051fdab26319d77d20cc0065045d05ec00b3e3d05f44935d7c06b96b621d55",
+        "outputSha256": "8c5e289a71c6c071cf208b48a7811d2dad88f945447a7d5023ecec2c308ce354",
+        "manifestSha256": "66b2dc8c2630998296c6f58cfc720975a62cf4ef4d11e5041244a2abd53d9ca1",
+    }
+    if jre.get("launcherTransform") != expected_transform:
+        raise ArtifactError(f"{manifest_path} Java launcher transform provenance differs")
     for key, expected in {
         "path": "bundletool.jar",
         "version": BUNDLETOOL_VERSION,
@@ -1263,13 +1322,13 @@ def verify_packaged_resources(
                 "--udid",
                 "FIXTURE_ONLY",
             ],
-            cwd=REPOSITORY_ROOT,
+            cwd=Path(tempfile.gettempdir()),
             # Credentials by environment, never argv — the signer stopped accepting
             # `--apple-id`/`--password` because a Windows command line is readable by every
             # process running as the same user. Passed here anyway so this smoke test keeps
             # exercising the same path the desktop uses.
             env={
-                **os.environ,
+                **packaged_command_environment(),
                 "RIVIU_APPLE_ID": "fixture@example.test",
                 "RIVIU_APPLE_PASSWORD": "FIXTURE_ONLY",
             },
@@ -1278,6 +1337,7 @@ def verify_packaged_resources(
             encoding="utf-8",
             errors="strict",
             timeout=90,
+            creationflags=subprocess.CREATE_NO_WINDOW,
         )
         error_lines = [
             line
@@ -1501,6 +1561,7 @@ def run_installed_app_smoke(
     )
 
     def verify_startup() -> dict[str, Any]:
+        report.unlink(missing_ok=True)
         run_checked(installed_app_smoke_command(executable, report, data_dir), timeout=180)
         payload = load_json(report)
         if not (
@@ -1594,6 +1655,8 @@ def validate_deployment_report_binding(
             )
     if payload.get("profile") != profile:
         raise ArtifactError("deployment report profile does not match the requested profile")
+    if payload.get("appVersion") != load_json(TAURI_CONFIG).get("version"):
+        raise ArtifactError("deployment checker version does not match the current app release")
     expected_hashes = {
         "installerSha256": sha256_file(installer),
         "checkerSha256": sha256_file(checker),
@@ -1624,6 +1687,7 @@ def run_installed_deployment_check(
     install_root: Path, installer: Path, report: Path, profile: str
 ) -> dict[str, Any]:
     checker = find_deployment_checker(install_root)
+    report.unlink(missing_ok=True)
     run_checked(
         deployment_checker_command(checker, report, installer, profile), timeout=180
     )

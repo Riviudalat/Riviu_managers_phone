@@ -90,6 +90,44 @@ it("opens run, exact device and HH:mm:ss log without dispatching work", async ()
   await waitFor(() => expect(screen.getByLabelText("Chi tiết máy")).not.toBeVisible());
 });
 
+it.each(["running", "partial"] as const)("does not display complete progress for a %s post awaiting verification", async (state) => {
+  const pending = { ...run, state, completedItems: state === "running" ? 1 : 2, retryScope: "linkAndSheet" as const };
+  vi.mocked(operationQueryRuns).mockResolvedValue({ runs: [pending], total: 1, counts: { active: 0, succeeded: 0, attention: 1 }, hasMore: false });
+  vi.mocked(operationGetRun).mockResolvedValue({ ...detail, summary: pending, items: [detail.items[0], {
+    ...detail.items[1], state, errorCode: "post_verification_pending",
+  }] });
+  await openDevices();
+  const progress = screen.getByRole("progressbar", { name: "Tiến độ công việc" });
+  if (state === "running") expect(progress).toHaveAttribute("aria-valuenow", "50");
+  else expect(progress).not.toHaveAttribute("aria-valuenow");
+  expect(screen.queryByText("100%")).toBeNull();
+  expect(screen.getByRole("button", { name: /Máy 5.*Chờ xác minh bài đăng/ })).toBeVisible();
+  expect(screen.getByLabelText("Kết quả từng máy")).toHaveTextContent("1 hoàn tất");
+  expect(screen.getByLabelText("Kết quả từng máy")).toHaveTextContent(state === "running" ? "1 đang chờ/chạy" : "1 cần kiểm tra");
+});
+
+it("renders numbered Publish steps with original times in both sort directions", async () => {
+  vi.mocked(operationDeviceLog).mockResolvedValue({ entries: [
+    { id: "1", at: "2026-09-08T07:01:02", action: "publishStep", state: "opening_app", text: "[3] Đang mở TikTok và chờ màn hình sẵn sàng", detail: null },
+    { id: "2", at: "2026-09-08T07:02:03", action: "publishStep", state: "finished", text: "[14] Thành công — máy 2 đã đăng bài", detail: null },
+  ], truncated: false });
+  await openDevices();
+  fireEvent.click(screen.getByRole("button", { name: /Máy 2/ }));
+  const list = await screen.findByRole("list", { name: "Nhật ký theo thời gian" });
+  expect(within(list).getAllByRole("listitem")[0]).toHaveTextContent("07:02:03[14] Thành công");
+  fireEvent.click(screen.getByRole("button", { name: "Mới nhất trước" }));
+  expect(within(list).getAllByRole("listitem")[0]).toHaveTextContent("07:01:02[3] Đang mở TikTok");
+  expect(operationDeviceLog).toHaveBeenLastCalledWith(run.id, "a");
+});
+
+it("keeps the recorded machine number after the current fleet changes", async () => {
+  vi.mocked(operationGetRun).mockResolvedValue({ ...detail, items: [{ ...detail.items[0], label: "Máy 8" }] });
+  render(<OperationProgressCenter deviceLabels={new Map([["a", "Máy 2 · SM G955F"]])} />);
+  fireEvent.click(await screen.findByLabelText("Tiến trình công việc"));
+  expect(await screen.findByRole("button", { name: /Máy 8/ })).toBeVisible();
+  expect(screen.queryByRole("button", { name: /Máy 2/ })).toBeNull();
+});
+
 it("ignores a late log from the previously selected phone", async () => {
   let resolve!: (value: Awaited<ReturnType<typeof operationDeviceLog>>) => void;
   vi.mocked(operationDeviceLog).mockImplementationOnce(() => new Promise((done) => { resolve = done; }));

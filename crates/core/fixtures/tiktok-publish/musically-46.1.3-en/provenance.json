@@ -1,0 +1,72 @@
+{
+  "version": "46.1.3",
+  "measurement": "SM-G955F ce051715e15b2c2e02, Android 9/en, 08/09/2026 code2024601030; isolated album, ordinal 1/2, Hot, selected sound, caption roundtrip, Send empty/typed/cleared",
+  "publicPost": false,
+  "captures": {
+    "profile": {
+      "source": "target\\fleet-compat-20260908\\461b\\01-profile.xml",
+      "sourceSha256": "5b054e28cf4371a8df682a3ed36c0a24da1c1cf15ced7583b472f3c6c2a15e3a",
+      "fixtureSha256": "8bdbd0eb5761d1ee1e933b47f6d07a5d7b44a051a291deab628d31ff13c977a6"
+    },
+    "camera": {
+      "source": "target\\fleet-compat-20260908\\461b\\03-create.xml",
+      "sourceSha256": "0a52883cab90d6017501b4117fca23a769bb501319e3531726b54ec6bf2de162",
+      "fixtureSha256": "3d41e59d92087b8daa5050cf0166197a261507d26de091b1c5c2628602e6051b"
+    },
+    "picker": {
+      "source": "target\\fleet-compat-20260908\\461b\\06-album.xml",
+      "sourceSha256": "a3a7278c8d21a6b0b2ec72e36c81d9d0d4e1fabb7bf74ed08f66dc2c79ee8266",
+      "fixtureSha256": "0243e0e6c197300ba62ca0262de9edf94c34eda9e0229e43958b384fa79e21a3"
+    },
+    "one": {
+      "source": "target\\fleet-compat-20260908\\461b\\07-one.xml",
+      "sourceSha256": "caa527ae299e6c625b98b1ce06e83846002249aa41c0656251363a4d0a7143c1",
+      "fixtureSha256": "10c75038b6e93cb3fba97e15a9fb43e553b4b1a9f89d1d28d6de50b9569c111e"
+    },
+    "two": {
+      "source": "target\\fleet-compat-20260908\\461b\\08-two.xml",
+      "sourceSha256": "9d7ff545b9beb7766a8b67eca62298940aee9bf0ac2a229b8ca93f43848ff91a",
+      "fixtureSha256": "319fddbef51b922ae0a02222cfe1a34fadffeb53bf6c6c4574042d9bfe0ac8be"
+    },
+    "sound": {
+      "source": "target\\fleet-compat-20260908\\461b\\10-sound.xml",
+      "sourceSha256": "64d82539d4a09624541bd862abe45d62cddfb4072dfb43b2bed8e441aac8a932",
+      "fixtureSha256": "bf63a652459e96972eb12544acbdfe96b774c65f40de2595612750925fa092c9"
+    },
+    "hot": {
+      "source": "target\\fleet-compat-20260908\\461b\\12-hot-stable.xml",
+      "sourceSha256": "a737ad456013bf29ae0067063ec0c1907e23376ecdbfc7cf12298ac56a8a50e2",
+      "fixtureSha256": "f914d9b3aaab46d27c68a4a0d46df60defa2fc8dad9bbf01ca6baed74199922f"
+    },
+    "selected": {
+      "source": "target\\fleet-compat-20260908\\461b\\13-selected.xml",
+      "sourceSha256": "46eda163ccf46d1c2c3172fd04ec3b953bde3793ea3428402529a29f5b234aad",
+      "fixtureSha256": "617361fe52695a9f0f5807905e9cdbc0a85e6a2c1e743d8e17d3779290270694"
+    },
+    "editor": {
+      "source": "target\\fleet-compat-20260908\\461b\\14-readback.xml",
+      "sourceSha256": "3003f7278f2be27b6a638adf449e651b9607d569096b1f7a6097bd8e4fccaf8e",
+      "fixtureSha256": "287f7c21882c59944ade4c4390b21d2f831944bfecbe68ef0d5d1a96ab09723a"
+    },
+    "caption": {
+      "source": "target\\fleet-compat-20260908\\461b\\20-caption-return.xml",
+      "sourceSha256": "de9ccaeccf0073eac76935806b13efe8d621ba645c7cb936afbe1709e0d540d7",
+      "fixtureSha256": "882ed0b759e4b0cbf7a15a096df9c51bf195b96769e45a27410c4caffe7644ea"
+    },
+    "comment-empty": {
+      "source": "target\\fleet-compat-20260908\\461b\\32-focus-comment.xml",
+      "sourceSha256": "2b9728d1ab7ba41faaab118d7701c7fb8c96ae0c8bb67281bd13122c67edb326",
+      "fixtureSha256": "39e6c2cc78470d088ac63ae342405692fb4d4b81a1cda225c4f6743defd5a951"
+    },
+    "comment-typed": {
+      "source": "target\\fleet-compat-20260908\\461b\\33-text-comment.xml",
+      "sourceSha256": "c35738b0150cbc2005ba36a8c8568769ecfc3904980b2ddd7fc520a9aa29b9ef",
+      "fixtureSha256": "77f9973c5a5a614d4bc489fd2e47ed970dba9bbad889513eebc668a3c2f5cef3"
+    },
+    "comment-cleared": {
+      "source": "target\\fleet-compat-20260908\\461b\\34-clear-comment.xml",
+      "sourceSha256": "2b9728d1ab7ba41faaab118d7701c7fb8c96ae0c8bb67281bd13122c67edb326",
+      "fixtureSha256": "39e6c2cc78470d088ac63ae342405692fb4d4b81a1cda225c4f6743defd5a951"
+    }
+  }
+}

@@ -6,11 +6,35 @@ import tempfile
 import unittest
 from pathlib import Path
 import zipfile
+from unittest.mock import patch
 
 from scripts import stage_android_package_tools as tools
 
 
 class AndroidPackageToolsStageTests(unittest.TestCase):
+    def test_java_utf8_patch_rejects_unverified_input_without_invoking_sdk(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            java = Path(temporary) / "java.exe"
+            java.write_bytes(b"unverified")
+            with patch.object(tools, "run_checked") as run:
+                with self.assertRaisesRegex(tools.StageError, "pinned original"):
+                    tools.patch_java_utf8(java)
+            run.assert_not_called()
+
+    def test_java_utf8_patch_requires_exact_transformed_output(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            java = Path(temporary) / "java.exe"
+            java.write_bytes(b"fixture")
+            with (
+                patch.object(tools, "sha256_file", side_effect=[
+                    tools.JAVA_ORIGINAL_SHA256, tools.JAVA_UTF8_MANIFEST_SHA256, "0" * 64,
+                ]),
+                patch.object(tools, "find_manifest_tool", return_value=Path("mt.exe")),
+                patch.object(tools, "run_checked"),
+            ):
+                with self.assertRaisesRegex(tools.StageError, "transformed UTF-8"):
+                    tools.patch_java_utf8(java)
+
     def test_tool_versions_are_checked_exactly(self):
         tools.verify_tool_versions(
             'openjdk version "21.0.12.1"\nOpenJDK Runtime Environment Temurin-21.0.12.1+1',

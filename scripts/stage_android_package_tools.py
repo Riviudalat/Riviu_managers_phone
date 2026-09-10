@@ -12,6 +12,7 @@ from pathlib import Path, PurePosixPath
 import shutil
 import stat
 import subprocess
+import sys
 import tempfile
 import urllib.request
 import zipfile
@@ -20,8 +21,19 @@ import zipfile
 BUNDLETOOL_VERSION = "1.18.3"
 TEMURIN_VERSION = "21.0.12.1+1"
 ANDROID_PACKAGE_TOOLS_TREE_SHA256 = (
-    "f24951701beb69fe74ef073196c249d6df153749722f82260d79fc6687a7d57f"
+    "de003f9f8b872ba8a9e2bb57d0539e04c0c7116e409619ded42941aaf85a3762"
 )
+ORIGINAL_PACKAGE_TOOLS_TREE_SHA256 = "f24951701beb69fe74ef073196c249d6df153749722f82260d79fc6687a7d57f"
+JAVA_ORIGINAL_SHA256 = "82051fdab26319d77d20cc0065045d05ec00b3e3d05f44935d7c06b96b621d55"
+JAVA_UTF8_SHA256 = "8c5e289a71c6c071cf208b48a7811d2dad88f945447a7d5023ecec2c308ce354"
+JAVA_UTF8_MANIFEST = Path(__file__).resolve().parent / "resources" / "java-utf8.manifest"
+JAVA_UTF8_MANIFEST_SHA256 = "66b2dc8c2630998296c6f58cfc720975a62cf4ef4d11e5041244a2abd53d9ca1"
+JAVA_UTF8_TRANSFORM = {
+    "id": "riviu-java-utf8-manifest-v1",
+    "sourceSha256": JAVA_ORIGINAL_SHA256,
+    "outputSha256": JAVA_UTF8_SHA256,
+    "manifestSha256": JAVA_UTF8_MANIFEST_SHA256,
+}
 
 
 @dataclass(frozen=True)
@@ -195,11 +207,46 @@ def verify_tree_manifest(root: Path, manifest: dict[str, object]) -> None:
 
 
 def run_checked(command: list[str]) -> str:
-    result = subprocess.run(command, capture_output=True, text=True, timeout=120)
+    result = subprocess.run(
+        command, capture_output=True, text=True, encoding="utf-8", errors="replace",
+        timeout=120, creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0,
+    )
     output = (result.stdout + result.stderr).strip()
     if result.returncode != 0:
         raise StageError(f"command failed ({result.returncode}): {command!r}: {output}")
     return output
+
+
+def find_manifest_tool() -> Path:
+    tool = shutil.which("mt.exe")
+    if tool:
+        return Path(tool)
+    sdk = Path(os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)")) / "Windows Kits/10/bin"
+    candidates = sorted(sdk.glob("*/x64/mt.exe"), reverse=True)
+    if not candidates:
+        raise StageError("Windows SDK mt.exe is required to stage the UTF-8 Java launcher")
+    return candidates[0]
+
+
+def patch_java_utf8(java: Path) -> dict[str, str]:
+    """Apply one reproducible resource transform after attesting the upstream tree.
+
+    Temurin's launcher uses ANSI Windows paths; activeCodePage UTF-8 fixes both
+    launcher DLL lookup and JVM java.home under Vietnamese profile/install paths.
+    mt.exe removes the upstream executable signature; original archive provenance
+    remains unchanged and the transformed launcher has its own exact SHA-256 pin.
+    """
+    if sha256_file(java) != JAVA_ORIGINAL_SHA256:
+        raise StageError("UTF-8 manifest patch requires the pinned original Java launcher")
+    if sha256_file(JAVA_UTF8_MANIFEST) != JAVA_UTF8_MANIFEST_SHA256:
+        raise StageError("UTF-8 Java launcher manifest differs from its pin")
+    run_checked([
+        str(find_manifest_tool()), "-nologo", "-manifest", str(JAVA_UTF8_MANIFEST),
+        "-outputresource:" + str(java) + ";#1",
+    ])
+    if sha256_file(java) != JAVA_UTF8_SHA256:
+        raise StageError("transformed UTF-8 Java launcher differs from its pin")
+    return dict(JAVA_UTF8_TRANSFORM)
 
 
 def verify_tool_versions(java_version: str, bundletool_version: str) -> None:
@@ -227,7 +274,10 @@ def stage(output: Path, cache: Path, overlay: Path) -> dict[str, object]:
         staged.mkdir()
         shutil.copyfile(bundletool_source, staged / "bundletool.jar")
         extract_jre(jre_source, staged / "jre")
+        if tree_sha256(tree_files(staged)) != ORIGINAL_PACKAGE_TOOLS_TREE_SHA256:
+            raise StageError("original Android package-tools extracted tree differs from its pin")
         java = staged / "jre" / "bin" / "java.exe"
+        java_transform = patch_java_utf8(java)
         java_version = run_checked([str(java), "-version"])
         bundletool_version = run_checked([str(java), "-jar", str(staged / "bundletool.jar"), "version"])
         verify_tool_versions(java_version, bundletool_version)
@@ -257,6 +307,7 @@ def stage(output: Path, cache: Path, overlay: Path) -> dict[str, object]:
                 "sourceSha256": TEMURIN_JRE.sha256,
                 "javaPath": "jre/bin/java.exe",
                 "versionOutput": java_version,
+                "launcherTransform": java_transform,
             },
             "files": files,
         }

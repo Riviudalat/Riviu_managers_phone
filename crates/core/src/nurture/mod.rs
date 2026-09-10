@@ -787,12 +787,20 @@ impl NurtureEngine {
         udid: &str,
         bundle_id: &str,
         kind: InteractionSessionKind,
+        stop: &AtomicBool,
+        waiting: impl Fn() + Send,
     ) -> Result<UiWithStreamContext, crate::DeviceControlError> {
         let exclusive = self
             .control
             .acquire_exclusive(udid, DeviceWorkOwner::Nurture)
             .await?;
-        let (exclusive, capacity) = self.control.reserve_ui_capacity(exclusive).await?;
+        let (exclusive, capacity) = self
+            .control
+            .reserve_ui_capacity_until(exclusive, || stop.load(Ordering::Acquire), waiting)
+            .await?;
+        if stop.load(Ordering::Acquire) {
+            return Err(crate::DeviceControlError::CapacityWaitCancelled);
+        }
         self.control
             .start_clean_app_session(exclusive, capacity, bundle_id, kind)
             .await
@@ -1304,18 +1312,30 @@ impl NurtureEngine {
         // Session creation can transiently fail while the relay settles. Retry
         // by dropping only the cached session; startup probes are not evidence
         // that the transport itself is wedged.
+        let mut queued = status.clone();
+        queued.phase = NurturePhase::Queued;
+        queued.last_message = "Chờ lượt điều khiển".into();
         let first_session = self
-            .open_ui_context(ctx.udid, &bundle_id, session_kind)
+            .open_ui_context(ctx.udid, &bundle_id, session_kind, ctx.stop, || {
+                (ctx.on_status)(queued.clone())
+            })
             .await;
         let ui_context = match first_session {
             Ok(context) => context,
             Err(first) => {
+                if ctx.stop.load(Ordering::Acquire) {
+                    status.finish(Outcome::Stopped);
+                    ctx.report(status, "Đã dừng khi chờ lượt".into());
+                    return Ok(None);
+                }
                 ctx.report(
                     status,
                     format!("chưa mở được phiên điều khiển ({first}) — thử lần nữa"),
                 );
                 let second_session = self
-                    .open_ui_context(ctx.udid, &bundle_id, session_kind)
+                    .open_ui_context(ctx.udid, &bundle_id, session_kind, ctx.stop, || {
+                        (ctx.on_status)(queued.clone())
+                    })
                     .await;
                 match second_session {
                     Ok(context) => {
@@ -1323,6 +1343,11 @@ impl NurtureEngine {
                         context
                     }
                     Err(e) => {
+                        if ctx.stop.load(Ordering::Acquire) {
+                            status.finish(Outcome::Stopped);
+                            ctx.report(status, "Đã dừng khi chờ lượt".into());
+                            return Ok(None);
+                        }
                         let cleanup = self
                             .shutdown_tiktok_after_open_failure(ctx.udid, &bundle_id)
                             .await;

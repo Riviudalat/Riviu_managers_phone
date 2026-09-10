@@ -107,11 +107,12 @@ function DeviceTileInner({
           frame arrives — the "fixed frame" the operator asked for. */}
       <div className="dev-phone-screen" role="gridcell">
         <PhoneCanvas udid={device.udid} surfaceId="tile" />
-        <StreamPlaceholder
+        {focused && <div className="dev-phone-focused-message" role="status">Đang mở phóng to</div>}
+        {!focused && <StreamPlaceholder
           view={view}
           deviceName={displayName}
           onRetry={() => onPrepare(device.udid)}
-        />
+        />}
 
         <button
           type="button"

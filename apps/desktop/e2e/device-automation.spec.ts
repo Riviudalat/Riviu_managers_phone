@@ -32,7 +32,7 @@ for (const viewport of [{ width: 1673, height: 1000 }, { width: 1440, height: 90
     await tabs.getByRole("tab", { name: "Nuôi TikTok" }).click();
     await page.getByRole("button", { name: "Dùng 1 máy đã chọn" }).click();
     const dock = page.locator(".automation-host.is-docked");
-    await expect(dock.locator("summary").filter({ hasText: "Phạm vi thiết bị" })).toContainText("1 máy");
+    await expect(dock.getByRole("region", { name: "Máy thực hiện", exact: true }).locator(".nurture-count")).toHaveText("Đã chọn 1/20");
     for (const name of ["Nuôi TikTok", "Tương tác", "Đăng bài"]) {
       await tabs.getByRole("tab", { name, exact: true }).click();
       await expect(tabs.getByRole("tab", { name, exact: true })).toHaveAttribute("aria-selected", "true");
@@ -56,15 +56,14 @@ for (const viewport of [{ width: 1673, height: 1000 }, { width: 1440, height: 90
       await expect(page.getByText(/Unknown mock command/)).toHaveCount(0);
       await expect(page.locator(".activity-center-current.is-error")).toHaveCount(0);
       if (name === "Đăng bài") {
-        await dock.getByRole("button", { name: "Theo dõi", exact: true }).click();
-        await expect(dock.getByRole("region", { name: "Theo dõi", exact: true })).toBeVisible();
+        await dock.getByRole("tab", { name: "Theo dõi", exact: true }).click();
+        await expect(dock.getByRole("tabpanel", { name: "Theo dõi", exact: true })).toBeVisible();
       } else {
         await dock.getByRole("tab", { name: "Theo dõi", exact: true }).click();
         await expect(dock.getByRole("tab", { name: "Theo dõi", exact: true })).toHaveAttribute("aria-selected", "true");
       }
       await expect(page.getByRole("grid", { name: "Lưới thiết bị" })).toBeVisible();
-      if (name === "Đăng bài") await dock.getByRole("button", { name: "← Về thiết lập", exact: true }).click();
-      else await dock.getByRole("tab", { name: "Thiết lập", exact: true }).click();
+      await dock.getByRole("tab", { name: "Thiết lập", exact: true }).click();
       await page.screenshot({ path: testInfo.outputPath(`dock-${name}.png`) });
       if (viewport.width === 1440) {
         const result = await new AxeBuilder({ page }).include(".content").withTags(["wcag2a", "wcag2aa"]).analyze();
@@ -86,7 +85,9 @@ test("dock preserves unsaved interaction form across page layout changes", async
   await page.getByRole("button", { name: "Mở trang tác vụ" }).click();
   await expect(input).toHaveValue(value);
   await expect(page.getByRole("alertdialog")).toHaveCount(0);
-  await page.getByRole("button", { name: "Xem cùng thiết bị" }).click();
+  await expect(page.getByRole("button", { name: "Xem cùng thiết bị" })).toHaveCount(0);
+  await page.getByRole("navigation", { name: "Điều hướng chính" }).getByRole("button", { name: "Thiết bị", exact: true }).click();
+  await page.getByRole("tab", { name: "Tương tác", exact: true }).click();
   await expect(input).toHaveValue(value);
   await page.getByRole("button", { name: "Đóng khung tác vụ" }).click();
   await expect(page.getByRole("alertdialog")).toHaveCount(0);

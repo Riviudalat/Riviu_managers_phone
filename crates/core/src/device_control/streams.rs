@@ -100,13 +100,53 @@ impl DeviceControlPlane {
     pub fn stream_capacity(&self) -> usize {
         self.streams.configured_limit()
     }
+    pub fn grow_stream_capacity(&self, fleet_size: usize) {
+        self.streams.grow_to_fleet(fleet_size);
+    }
     pub async fn reserve_ui_capacity(
         &self,
         context: DeviceExclusiveContext,
     ) -> Result<(DeviceExclusiveContext, UiCapacityReservation), DeviceControlError> {
-        self.try_reserve_ui_capacity(context)
+        self.reserve_ui_capacity_until(context, || false, || {})
             .await
-            .map_err(|failure| failure.error)
+    }
+
+    /// Wait only on admission. No phone request is issued until capacity is reserved.
+    pub async fn reserve_ui_capacity_until(
+        &self,
+        mut context: DeviceExclusiveContext,
+        cancelled: impl Fn() -> bool + Send,
+        waiting: impl Fn() + Send,
+    ) -> Result<(DeviceExclusiveContext, UiCapacityReservation), DeviceControlError> {
+        let mut announced = false;
+        loop {
+            self.ensure_running()?;
+            if cancelled() {
+                return Err(DeviceControlError::CapacityWaitCancelled);
+            }
+            match self.try_reserve_ui_capacity(context).await {
+                Ok(result) => return Ok(result),
+                Err(failure) => {
+                    if !matches!(
+                        failure.error,
+                        DeviceControlError::StreamBudget(
+                            StreamBudgetError::CapacityExhausted { .. }
+                        )
+                    ) {
+                        return Err(failure.error);
+                    }
+                    let Some(returned) = failure.context else {
+                        return Err(failure.error);
+                    };
+                    context = returned;
+                    if !announced {
+                        waiting();
+                        announced = true;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                }
+            }
+        }
     }
     pub fn streaming_session(
         &self,

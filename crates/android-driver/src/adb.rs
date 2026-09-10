@@ -100,6 +100,19 @@ fn adb_target<'a>(args: &[&'a str]) -> (Option<&'a str>, Option<&'a str>) {
     (serial, rest.first().copied())
 }
 
+/// An anonymous adb transport is diagnostic evidence, never a `-s` selector.
+/// Reject the old parser's truncated `(no` identity as well, so stale callers
+/// cannot turn the observed placeholder into a command while the roster refreshes.
+fn validate_serial(serial: &str) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        !serial.is_empty()
+            && !serial.chars().any(|c| c.is_whitespace() || c.is_control())
+            && serial != "(no",
+        "adb_serial_unavailable: ADB chưa cung cấp serial hợp lệ; chưa gửi lệnh tới thiết bị"
+    );
+    Ok(())
+}
+
 /// `pull` and `push` move bytes; everything else answers a question.
 fn adb_lane(verb: Option<&str>) -> AdbLane {
     match verb {
@@ -508,12 +521,15 @@ impl AdbProgram {
     /// with U+FFFD, which silently corrupts a PNG into something the same
     /// order of size and no longer an image.
     pub async fn run_bytes(&self, args: &[&str], timeout: Duration) -> anyhow::Result<Vec<u8>> {
+        let (serial, verb) = adb_target(args);
+        if let Some(serial) = serial {
+            validate_serial(serial)?;
+        }
         let mut command = self.command();
         command.args(args);
         // The timeout starts AFTER the slot is acquired, deliberately. Counting queue time
         // against a command's own deadline would make a busy host look like a broken phone,
         // and the caller's timeouts are sized on what the device takes to answer.
-        let (serial, verb) = adb_target(args);
         let _slot = enter_adb_slot(serial, verb.unwrap_or("adb"), adb_lane(verb)).await;
         let output = tokio::time::timeout(timeout, command.output())
             .await
@@ -548,6 +564,7 @@ impl AdbProgram {
         script: &str,
         timeout: Duration,
     ) -> anyhow::Result<ShellOutput> {
+        validate_serial(serial)?;
         let mut command = self.command();
         command.args(["-s", serial, "shell", script]);
         let _slot = enter_adb_slot(Some(serial), "shell", AdbLane::Interactive).await;
@@ -682,6 +699,9 @@ impl AdbProgram {
     where
         F: FnOnce() -> bool + Send,
     {
+        validate_serial(serial).map_err(|error| AdbEffectFailure::BeforeSpawn {
+            detail: error.to_string(),
+        })?;
         let mut command = self.command();
         command.args(["-s", serial]);
         command.args(args);
@@ -716,6 +736,47 @@ impl AdbProgram {
         self.device(serial, &["shell", script], DEFAULT_TIMEOUT)
             .await
     }
+
+    /// Read foreground without starting an automation session or changing the device.
+    /// Session control and dual-package resolution share the same measured fallbacks.
+    pub async fn foreground_package(&self, serial: &str) -> anyhow::Result<String> {
+        read_foreground_package_with(|source| self.shell(serial, source)).await
+    }
+}
+
+/// `windows` works on the Android 9 fleet; `displays` works on Android 15.
+/// Plain `dumpsys window` is measured on both and therefore comes first. Keep
+/// deadlines on each ADB request; a missing form only advances to the next form.
+pub(crate) async fn read_foreground_package_with<F, Fut>(mut read: F) -> anyhow::Result<String>
+where
+    F: FnMut(&'static str) -> Fut,
+    Fut: std::future::Future<Output = anyhow::Result<String>>,
+{
+    const SOURCES: [&str; 3] = [
+        "dumpsys window | grep mCurrentFocus",
+        "dumpsys window windows | grep mCurrentFocus",
+        "dumpsys window displays | grep mCurrentFocus",
+    ];
+    let mut tried = Vec::new();
+    for source in SOURCES {
+        match read(source).await {
+            Ok(stdout) => match parse_foreground_window(&stdout) {
+                ForegroundWindow::App(package) => return Ok(package),
+                ForegroundWindow::System(window) => tried.push(format!(
+                    "`{source}` reported the system window {window}, not an app — a lock \
+                     screen does this, and so does any system dialog standing over the app"
+                )),
+                ForegroundWindow::Unreadable => {
+                    tried.push(format!("`{source}` had no readable mCurrentFocus line"))
+                }
+            },
+            Err(error) => tried.push(format!("`{source}` failed: {error}")),
+        }
+    }
+    Err(anyhow!(
+        "could not read the foreground package. Tried: {}",
+        tried.join("; ")
+    ))
 }
 
 /// Check a package name before it is pasted into a device shell command.
@@ -874,6 +935,8 @@ impl AdbDeviceState {
 /// delays the message the operator actually needs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AdbFault {
+    /// Wait for a new online roster observation instead of retrying a transfer immediately.
+    Offline,
     /// The transport blipped. The same command can succeed on the next attempt.
     Transient,
     /// The command outlived its deadline.
@@ -901,6 +964,9 @@ impl AdbFault {
 /// are tested first.
 pub fn classify_fault(message: &str) -> AdbFault {
     let text = message.to_ascii_lowercase();
+    if text.contains("device offline") {
+        return AdbFault::Offline;
+    }
     if text.contains("timed out after") {
         return AdbFault::Timeout;
     }
@@ -913,8 +979,7 @@ pub fn classify_fault(message: &str) -> AdbFault {
     {
         return AdbFault::UnknownDevice;
     }
-    const TRANSIENT: [&str; 8] = [
-        "device offline",
+    const TRANSIENT: [&str; 7] = [
         "protocol fault",
         "connection reset",
         "device still authorizing",
@@ -971,7 +1036,8 @@ pub fn same_fleet(left: &[AdbDeviceLine], right: &[AdbDeviceLine]) -> bool {
         .all(|(a, b)| a.serial == b.serial && a.state == b.state)
 }
 
-/// Parse `adb devices -l`. The header line and blank lines are skipped.
+/// Parse addressable rows of `adb devices -l`. Anonymous transports remain
+/// diagnostic log entries rather than fabricated device identities.
 pub fn parse_devices(stdout: &str) -> Vec<AdbDeviceLine> {
     stdout
         .lines()
@@ -980,8 +1046,31 @@ pub fn parse_devices(stdout: &str) -> Vec<AdbDeviceLine> {
         // adb prints daemon chatter on first contact; it has no second column.
         .filter(|line| !line.starts_with('*'))
         .filter_map(|line| {
+            // Windows Samsung fleet, 09/09/2026: the complete observed row was
+            // `(no serial number) offline transport_id:1`. Whitespace splitting
+            // invented serial `(no` and state `serial`, which could reach recovery.
+            // A transport ID is not a persistent serial, and is never used to guess one.
+            if let Some(details) = line.strip_prefix("(no serial number)") {
+                let mut parts = details.split_whitespace();
+                let state = parts.next().unwrap_or("unknown");
+                let transport_id = parts
+                    .find_map(|part| part.strip_prefix("transport_id:"))
+                    .unwrap_or("unknown");
+                tracing::warn!(
+                    state,
+                    transport_id,
+                    "ADB có transport chưa có serial; chưa tạo thiết bị hoặc gửi lệnh phục hồi"
+                );
+                return None;
+            }
             let mut parts = line.split_whitespace();
             let serial = parts.next()?.to_string();
+            if validate_serial(&serial).is_err() {
+                tracing::warn!(
+                    "ADB trả dòng thiết bị thiếu serial hợp lệ; bỏ qua định danh chưa rõ"
+                );
+                return None;
+            }
             let state = match parts.next()? {
                 "device" => AdbDeviceState::Device,
                 "unauthorized" => AdbDeviceState::Unauthorized,
@@ -2759,8 +2848,12 @@ drwxr-xr-x  32 root   root       788 2009-01-01 07:00 ..\n";
 
     #[test]
     fn transport_blips_are_retried_and_unknown_failures_are_not() {
+        assert_eq!(
+            classify_fault("push scrcpy failed: device offline"),
+            AdbFault::Offline
+        );
+        assert!(!AdbFault::Offline.is_worth_retrying());
         for message in [
-            "adb -s X shell id failed: error: device offline",
             "adb devices failed: protocol fault (couldn't read status): connection reset",
             "adb -s X shell id failed: error: device still authorizing",
             "adb devices failed: * daemon not running; starting now",
@@ -2820,6 +2913,67 @@ drwxr-xr-x  32 root   root       788 2009-01-01 07:00 ..\n";
         assert_eq!(parsed[0].model, None);
         assert_eq!(parsed[1].state, AdbDeviceState::Device);
         assert_eq!(parsed[1].model.as_deref(), Some("SM G955N"));
+    }
+
+    #[test]
+    fn missing_serial_transport_never_becomes_an_addressable_device() {
+        // Windows fleet, 09/09/2026: adb saw this transport while Windows PnP
+        // still listed twenty Samsung devices. Its real serial was not in this row.
+        let listing = "List of devices attached\n\
+            (no serial number) offline transport_id:1\n\
+            ce0717171c2a64d50d device product:dream2lte model:SM_G955F transport_id:2\n\
+            ce031713dd735a1103 offline transport_id:3\n";
+        let parsed = parse_devices(listing);
+        assert_eq!(parsed.len(), 2, "an anonymous transport is not a device ID");
+        assert_eq!(parsed[0].serial, "ce0717171c2a64d50d");
+        assert_eq!(parsed[0].state, AdbDeviceState::Device);
+        assert_eq!(parsed[1].serial, "ce031713dd735a1103");
+        assert_eq!(parsed[1].state, AdbDeviceState::Offline);
+        assert!(parse_devices("(no serial number) offline transport_id:1\n").is_empty());
+        assert!(parse_devices("(no serial number) device transport_id:1\n").is_empty());
+    }
+
+    #[tokio::test]
+    async fn missing_serial_target_is_rejected_before_queue_spawn_or_effect_admission() {
+        let missing = AdbProgram::unrunnable_for_test(PathBuf::from(format!(
+            "definitely-missing-adb-{}",
+            uuid::Uuid::new_v4()
+        )));
+        for serial in ["", " ", "(no", "(no serial number)", "known\nserial"] {
+            let error = missing
+                .device(serial, &["get-state"], Duration::from_secs(1))
+                .await
+                .expect_err("unknown identity must fail before process creation");
+            assert!(
+                error.to_string().contains("adb_serial_unavailable"),
+                "{error:#}"
+            );
+            let error = missing
+                .shell_output(serial, "id", Duration::from_secs(1))
+                .await
+                .expect_err("raw shell must validate its device identity too");
+            assert!(
+                error.to_string().contains("adb_serial_unavailable"),
+                "{error:#}"
+            );
+            let called = std::sync::atomic::AtomicBool::new(false);
+            let error = missing
+                .device_effect_with_before_spawn(
+                    serial,
+                    &["install", "fixture.apk"],
+                    Duration::from_secs(1),
+                    || {
+                        called.store(true, std::sync::atomic::Ordering::SeqCst);
+                        true
+                    },
+                )
+                .await
+                .expect_err("effect must reject unknown identity before admission");
+            assert!(
+                matches!(error, AdbEffectFailure::BeforeSpawn { ref detail } if detail.contains("adb_serial_unavailable"))
+            );
+            assert!(!called.load(std::sync::atomic::Ordering::SeqCst));
+        }
     }
 
     #[test]

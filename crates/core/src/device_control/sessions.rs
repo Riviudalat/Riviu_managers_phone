@@ -22,6 +22,7 @@ impl DeviceControlPlane {
             });
         }
         let udid = exclusive.udid().to_owned();
+        self.ensure_clean_start_allowed(&udid)?;
         let proof = self.terminate_app(&exclusive, bundle_id).await?;
         if proof.bundle_id != bundle_id {
             return Err(DeviceControlError::InvalidContext {

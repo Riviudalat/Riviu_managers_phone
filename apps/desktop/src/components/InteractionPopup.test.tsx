@@ -2,8 +2,9 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testi
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { InteractionPopup } from "./InteractionPopup";
+import { ConfirmHost } from "./ConfirmHost";
 import { requestWorkspaceLeave } from "../workspaceDraft";
-import { automationCreate, automationGet, automationList, getDeviceMeta, saveDeviceHandle } from "../api";
+import { automationCreate, automationGet, getDeviceMeta, saveDeviceHandle } from "../api";
 import type {
   DeviceInfo,
   DeviceMeta,
@@ -226,30 +227,14 @@ function previewOf(request: ThreadCampaignRequest): ThreadPreview {
   };
 }
 
-it("shows target-bound automation profiles only on the dedicated page", async () => {
-  const { rerender } = render(
-    <InteractionPopup
-      metas={noMeta}
-      devices={devices}
-      selected={[]}
-      surface="page"
-      targetRef={{ type: "group", groupId: "morning" }}
-    />,
-  );
-  expect(await screen.findByRole("region", { name: "Quản lý hồ sơ Tương tác" })).toBeVisible();
-
-  rerender(
-    <InteractionPopup
-      metas={noMeta}
-      devices={devices}
-      selected={[]}
-      onClose={() => undefined}
-    />,
-  );
-  expect(screen.queryByRole("region", { name: "Quản lý hồ sơ Tương tác" })).not.toBeInTheDocument();
+it("keeps obsolete profiles out of setup and exposes schedules from settings", async () => {
+  render(<InteractionPopup metas={noMeta} devices={devices} selected={[]} surface="page" targetRef={{type:"group",groupId:"morning"}} />);
+  expect(screen.queryByText("Hồ sơ & cài đặt")).toBeNull();
+  fireEvent.click(screen.getByRole("tab",{name:"Hẹn giờ"}));
+  expect(await screen.findByRole("region",{name:"Hẹn giờ từ thiết lập"})).toBeVisible();
 });
 
-it("renders a compact action workspace and a live review rail on the page", async () => {
+it("allows switching setup tabs while keeping execution gated until the draft is ready", async () => {
   render(
     <InteractionPopup
       metas={noMeta}
@@ -262,14 +247,12 @@ it("renders a compact action workspace and a live review rail on the page", asyn
 
   await screen.findByRole("tablist", { name: "Chế độ Tương tác" });
   expect(screen.queryByRole("list", { name: "Quy trình Tương tác" })).toBeNull();
-  const review = screen.getByRole("complementary", { name: "Kiểm tra chiến dịch" });
-  expect(within(review).getByText("Link hợp lệ")).toBeVisible();
-  expect(within(review).getByText("Thiết bị chạy")).toBeVisible();
-  expect(within(review).getByText("Hành động")).toBeVisible();
-  expect(screen.getByRole("button", { name: "Bắt đầu tương tác" })).toBeDisabled();
-  expect(within(review).getByRole("list", { name: "Mục cần xử lý" })).toHaveTextContent(
-    "Cần ít nhất một link video/photo hợp lệ",
-  );
+  const review = screen.getByRole("complementary", { name: "Đầu vào và kết quả" });
+  expect(within(review).getByText("Bài viết cụ thể")).toBeVisible();
+  expect(screen.getByRole("button", { name: "Chọn hành động & máy →" })).toBeDisabled();
+  expect(screen.getByRole("tab", { name: "Hành động & máy" })).toBeEnabled();
+  expect(screen.queryByRole("checkbox", { name: "Bình luận" })).toBeNull();
+  expect(startThread).not.toHaveBeenCalled();
 });
 
 /**
@@ -283,7 +266,14 @@ async function pasteLink() {
   fireEvent.change(screen.getByRole("textbox", { name: "Link TikTok — mỗi dòng một link" }), {
     target: { value: "https://www.tiktok.com/@creator/video/123" },
   });
-  await screen.findByText("✓");
+  if (document.querySelector(".interaction-wizard")) await screen.findByText("Đúng định dạng");
+  else await screen.findByText("✓");
+}
+
+async function nextPageStep(label = "Chọn hành động & máy →") {
+  const button = screen.getByRole("button", { name: label });
+  await waitFor(() => expect(button).toBeEnabled());
+  fireEvent.click(button);
 }
 
 it("saves a normalized handle by UDID without rewriting device metadata", async () => {
@@ -382,59 +372,71 @@ describe("InteractionPopup", () => {
   it("invalidates parsed links immediately and keeps every action blocked after a replacement fails", async () => {
     parseLinks.mockResolvedValueOnce([parsedLine("111")]).mockRejectedValueOnce(new Error("Không đọc được link mới"));
     render(<InteractionPopup metas={noMeta} devices={devices} selected={[]} surface="page" targetRef={{ type: "all" }} />);
-    fireEvent.click(screen.getByRole("checkbox", { name: "Tim" }));
-    fireEvent.click(screen.getByRole("checkbox", { name: "Bình luận" }));
     const input = screen.getByRole("textbox", { name: "Link TikTok — mỗi dòng một link" });
     fireEvent.change(input, { target: { value: parsedLine("111").original } });
-    const start = screen.getByRole("button", { name: "Bắt đầu tương tác" });
-    await waitFor(() => expect(start).toBeEnabled());
-    const profile = screen.getByRole("button", { name: "Tạo hồ sơ" });
+    const next = screen.getByRole("button", { name: "Chọn hành động & máy →" });
+    await waitFor(() => expect(next).toBeEnabled());
     fireEvent.change(input, { target: { value: parsedLine("222").original } });
-    expect(start).toBeDisabled();
-    expect(profile).toBeDisabled();
+    expect(next).toBeDisabled();
+
     expect(document.querySelector(".interaction-link-list")).not.toHaveTextContent("111");
     expect(await screen.findByText("Không đọc được link mới")).toBeVisible();
-    expect(start).toBeDisabled();
-    fireEvent.click(start);
-    fireEvent.click(profile);
+    expect(next).toBeDisabled();
+    fireEvent.click(next);
+
     expect(startThread).not.toHaveBeenCalled();
     expect(automationCreate).not.toHaveBeenCalled();
   });
 
-  it("stores exactly the selected actors when the profile scope is larger than the direct run", async () => {
-    vi.mocked(automationCreate).mockRejectedValueOnce(new Error("fixture stops after observing the saved scope"));
-    render(<InteractionPopup metas={noMeta} devices={devices} selected={[]} surface="page" targetRef={{ type: "all" }} />);
-    fireEvent.click(screen.getByRole("checkbox", { name: "Tim" }));
-    fireEvent.click(screen.getByRole("checkbox", { name: "Bình luận" }));
-    await pasteLink();
-    fireEvent.click(screen.getByLabelText("Phone B"));
-    const profile = screen.getByRole("button", { name: "Tạo hồ sơ" });
-    await waitFor(() => expect(profile).toBeEnabled());
-    fireEvent.click(profile);
-    await waitFor(() => expect(automationCreate).toHaveBeenCalledWith(
-      "Hồ sơ Tương tác", "interaction", { type: "explicit", udids: ["actor-a"] }, expect.anything(),
-    ));
-    fireEvent.click(screen.getByRole("button", { name: "Bắt đầu tương tác" }));
-    await waitFor(() => expect(startThread).toHaveBeenCalledWith(expect.objectContaining({ actorUdids: ["actor-a"] })));
+  it("keeps the link step blocked when a valid post is mixed with a malformed link", async () => {
+    parseLinks.mockResolvedValueOnce([parsedLine("111"), { lineNo: 2, original: "broken", target: null, error: "invalidUrl" }]);
+    render(<InteractionPopup metas={noMeta} devices={devices} selected={[]} surface="page" />);
+    fireEvent.change(screen.getByRole("textbox", { name: "Link TikTok — mỗi dòng một link" }), { target: { value: `${parsedLine("111").original}\nbroken` } });
+    await waitFor(() => expect(parseLinks).toHaveBeenCalled());
+    expect(screen.getByRole("button", { name: "Chọn hành động & máy →" })).toBeDisabled();
+    expect(startThread).not.toHaveBeenCalled();
   });
 
-  it("applies a saved interaction profile to the visible actions and validated links", async () => {
-    const definition = { id: "saved", name: "Hồ sơ đã lưu", kind: "interaction", latestRevision: 1, archived: false };
-    vi.mocked(automationList).mockResolvedValueOnce([definition] as never);
-    vi.mocked(automationGet).mockResolvedValueOnce({ definition, revision: {
-      definitionId: "saved", revision: 1, targetRef: { type: "explicit", udids: ["actor-a"] },
-      config: { schemaVersion: 1, request: {
-        targets: [parsedLine("123").target], mode: "standalone", messageCount: 2, maxWords: 12,
-        instruction: "", actions: { like: false, comment: false, save: true },
-      } },
-    } } as never);
-    render(<InteractionPopup metas={noMeta} devices={devices} selected={["actor-a"]} targetRef={{ type: "explicit", udids: ["actor-a"] }} surface="page" />);
-    fireEvent.change(await screen.findByRole("combobox", { name: "Hồ sơ Tương tác" }), { target: { value: "saved" } });
-    await waitFor(() => expect(screen.getByRole("checkbox", { name: "Lưu" })).toBeChecked());
-    expect(screen.getByRole("checkbox", { name: "Bình luận" })).not.toBeChecked();
-    expect(screen.getByRole("textbox", { name: "Link TikTok — mỗi dòng một link" })).toHaveValue(parsedLine("123").original);
-    await waitFor(() => expect(screen.getByRole("button", { name: "Bắt đầu tương tác" })).toBeEnabled());
+  it("stores selected actors in the draft and starts after explicit confirmation", async () => {
+    render(<><ConfirmHost /><InteractionPopup metas={noMeta} devices={devices} selected={[]} surface="page" targetRef={{type:"explicit",udids:["actor-a"]}} targetUdids={["actor-a"]} /></>);
+    await pasteLink();
+    await nextPageStep();
+    fireEvent.click(screen.getByRole("checkbox",{name:"Tim"}));
+    fireEvent.click(screen.getByRole("checkbox",{name:"Bình luận"}));
+    await nextPageStep("Kiểm tra lượt chạy →");
+    fireEvent.click(screen.getByRole("button",{name:"Bắt đầu tương tác"}));
+    const confirmation=await screen.findByRole("alertdialog",{name:"Xác nhận tương tác"});
     expect(startThread).not.toHaveBeenCalled();
+    fireEvent.click(within(confirmation).getByRole("button",{name:"Bắt đầu tương tác"}));
+    await waitFor(() => expect(startThread).toHaveBeenCalledWith(expect.objectContaining({actorUdids:["actor-a"],actions:{like:true,save:false,comment:false},mode:"standalone"})));
+    expect(automationCreate).not.toHaveBeenCalled();
+  });
+
+  it("requires a new confirmation if the target scope changes while confirmation is open", async () => {
+    const view = render(<><ConfirmHost /><InteractionPopup metas={noMeta} devices={devices} selected={[]} surface="page" targetUdids={["actor-a", "actor-b"]} /></>);
+    await pasteLink();
+    await nextPageStep();
+    await nextPageStep("Kiểm tra lượt chạy →");
+    fireEvent.click(screen.getByRole("button", { name: "Bắt đầu tương tác" }));
+    const confirmation = await screen.findByRole("alertdialog", { name: "Xác nhận tương tác" });
+    view.rerender(<><ConfirmHost /><InteractionPopup metas={noMeta} devices={devices} selected={[]} surface="page" targetUdids={["actor-a"]} /></>);
+    fireEvent.click(within(confirmation).getByRole("button", { name: "Bắt đầu tương tác" }));
+    expect(await screen.findByText("Thiết lập hoặc danh sách máy đã thay đổi. Kiểm tra lượt chạy rồi xác nhận lại.")).toBeVisible();
+    expect(startThread).not.toHaveBeenCalled();
+  });
+
+  it("restores saved action settings without applying an automation profile", async () => {
+    const view=render(<InteractionPopup metas={noMeta} devices={devices} selected={["actor-a"]} surface="page" />);
+    await pasteLink();await nextPageStep();
+    fireEvent.click(screen.getByRole("checkbox",{name:"Lưu"}));
+    fireEvent.click(screen.getByRole("checkbox",{name:"Bình luận"}));
+    await act(async () => { await requestWorkspaceLeave(["interaction"]); });
+    view.unmount();
+    render(<InteractionPopup metas={noMeta} devices={devices} selected={["actor-a"]} surface="page" />);
+    await nextPageStep();
+    expect(screen.getByRole("checkbox",{name:"Lưu"})).toBeChecked();
+    expect(screen.getByRole("checkbox",{name:"Bình luận"})).not.toBeChecked();
+    expect(automationGet).not.toHaveBeenCalled();
   });
 
   it("does not let an old short-link resolution replace links parsed from newer input", async () => {
@@ -555,14 +557,17 @@ describe("InteractionPopup", () => {
     );
 
     const setup = screen.getByRole("tab", { name: "Thiết lập" });
+    const schedule = screen.getByRole("tab", { name: "Hẹn giờ" });
     const monitor = screen.getByRole("tab", { name: "Theo dõi" });
-    for (const tab of [setup, monitor]) {
+    for (const tab of [setup, schedule, monitor]) {
       const panel = document.getElementById(tab.getAttribute("aria-controls")!);
       expect(panel).toHaveAttribute("role", "tabpanel");
       expect(panel).toHaveAttribute("aria-labelledby", tab.id);
     }
     setup.focus();
     fireEvent.keyDown(setup, { key: "ArrowRight" });
+    expect(schedule).toHaveFocus();
+    fireEvent.keyDown(schedule, { key: "ArrowRight" });
     expect(monitor).toHaveFocus();
     expect(monitor).toHaveAttribute("aria-selected", "true");
 
@@ -573,7 +578,7 @@ describe("InteractionPopup", () => {
     fireEvent.keyDown(setup, { key: "End" });
     expect(monitor).toHaveFocus();
     fireEvent.keyDown(monitor, { key: "ArrowLeft" });
-    expect(setup).toHaveFocus();
+    expect(schedule).toHaveFocus();
   });
 
   it("parses multiline links and submits every selected actor", async () => {

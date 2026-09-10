@@ -90,6 +90,22 @@ pub fn automation_schedule_list(
 }
 
 #[tauri::command]
+pub fn automation_schedule_from_settings(
+    state: State<'_, AppState>,
+    name: String,
+    kind: AutomationKind,
+    target: TargetRef,
+    config: Value,
+    schedule: AutomationScheduleV1,
+) -> Result<AutomationSchedule, CommandError> {
+    let _admission = state.ensure_accepting_work()?;
+    state
+        .db
+        .create_automation_schedule_from_settings(&name, kind, &target, &config, &schedule)
+        .map_err(CommandError::from_service)
+}
+
+#[tauri::command]
 pub fn automation_schedule_create(
     state: State<'_, AppState>,
     name: String,

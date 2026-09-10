@@ -15,6 +15,33 @@ use crate::{
 };
 
 impl Database {
+    /// Save the current setup and its first schedule atomically; no profile UI required.
+    pub fn create_automation_schedule_from_settings(
+        &self,
+        name: &str,
+        kind: AutomationKind,
+        target: &TargetRef,
+        config: &serde_json::Value,
+        schedule: &AutomationScheduleV1,
+    ) -> anyhow::Result<AutomationSchedule> {
+        let name = name.trim();
+        anyhow::ensure!(!name.is_empty(), "tên lịch không được trống");
+        schedule.validate()?;
+        validate_automation_profile_config(kind, config)?;
+        validate_automation_config(config)?;
+        let definition_id = Uuid::new_v4();
+        let schedule_id = Uuid::new_v4();
+        let now = timestamp();
+        let next_due = next_due_from(&now, schedule.every_minutes)?;
+        let mut connection = self.conn()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        transaction.execute("INSERT INTO automation_definitions(id,name,kind,latest_revision,archived,created_at,updated_at) VALUES(?1,?2,?3,1,0,?4,?4)", params![definition_id.to_string(),name,kind.as_str(),now])?;
+        transaction.execute("INSERT INTO automation_definition_revisions(definition_id,revision,target_json,config_json,created_at) VALUES(?1,1,?2,?3,?4)",params![definition_id.to_string(),serde_json::to_string(target)?,serde_json::to_string(config)?,now])?;
+        transaction.execute("INSERT INTO automation_schedules(id,revision,name,definition_id,definition_revision,enabled,schedule_json,next_due_at,last_error_code,created_at,updated_at) VALUES(?1,1,?2,?3,1,1,?4,?5,NULL,?6,?6)",params![schedule_id.to_string(),name,definition_id.to_string(),serde_json::to_string(schedule)?,next_due,now])?;
+        let result = query_schedule(&transaction, schedule_id)?.context("lịch vừa lưu bị thiếu")?;
+        transaction.commit()?;
+        Ok(result)
+    }
     pub fn create_automation_definition(
         &self,
         name: &str,

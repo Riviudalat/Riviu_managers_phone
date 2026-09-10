@@ -2,14 +2,12 @@ import { useEffect, useRef, useState, type ReactNode } from "react";
 import {
   ArrowLeft,
   ArrowRight,
-  Check,
   FolderOpen,
-  History,
   Image as ImageIcon,
+  Maximize2,
   Music2,
   Pencil,
   Search,
-  Settings,
 } from "lucide-react";
 import type {
   DeviceInfo,
@@ -26,6 +24,7 @@ import { PublishMedia } from "./PublishMedia";
 import { PublishPager } from "./PublishPager";
 import { usePublishPageSize } from "./usePublishPageSize";
 import { PublishAssignmentBoard } from "./PublishAssignmentBoard";
+import { PublishPreflightResult } from "./PublishPreflightResult";
 
 export interface PublishWizardProps {
   active?: boolean;
@@ -57,11 +56,15 @@ export interface PublishWizardProps {
   onPreflight: () => Promise<void>;
   onExecute: () => Promise<void>;
   onHistory: () => void;
+  onSchedule?: () => void;
   settings: ReactNode;
+  scopeControl?: ReactNode;
   notices?: ReactNode;
 }
 
 export function PublishWizard(p: PublishWizardProps) {
+  const settingsRef = useRef<HTMLDetailsElement>(null);
+  const openSettings = () => { if (settingsRef.current) { settingsRef.current.open = true; settingsRef.current.scrollIntoView({ block: "nearest" }); } };
   const [checkPage, setCheckPage] = useState(0);
   const [step, setStep] = useState(1),
     [query, setQuery] = useState(""),
@@ -70,7 +73,7 @@ export function PublishWizard(p: PublishWizardProps) {
     [activeId, setActiveId] = useState<string>(),
     [photo, setPhoto] = useState(0);
   const [dialog, setDialog] = useState<
-    "count" | "caption" | "settings" | "check" | "music" | null
+    "count" | "caption" | "image" | "check" | "music" | null
   >(null);
   const [count, setCount] = useState(1),
     [text, setText] = useState(""),
@@ -112,6 +115,17 @@ export function PublishWizard(p: PublishWizardProps) {
   const captionsValid = selected.every((b) =>
     Boolean((p.captions[b.id] ?? b.caption).trim()),
   );
+  const stepSummaries = [
+    selected.length ? `${selected.length} bài đã chọn` : "Chọn bài muốn đăng",
+    mapped ? `${mapped} / ${selected.length} bài đã ghép` : "Chưa ghép máy",
+    p.preflightLoading
+      ? "Đang kiểm tra…"
+      : p.preflightError || (p.preflight && !p.preflight.canExecute)
+        ? "Cần xử lý"
+        : p.preflight?.canExecute
+          ? "Đã kiểm tra"
+          : "Chưa kiểm tra",
+  ];
   const locked = p.busy || p.scanning || p.preflightLoading;
   const changeStep = (n: number) => {
     if (locked) return;
@@ -167,37 +181,21 @@ export function PublishWizard(p: PublishWizardProps) {
             ? `${selected.length} bài đang thiết lập`
             : "Chiến dịch mới"}
         </strong>
-        <div>
-          <button
-            type="button"
-            className="ghost"
-            onClick={() => setDialog("settings")}
-          >
-            <Settings size={16} /> Hồ sơ & cài đặt
-          </button>
-          <button type="button" className="ghost" onClick={p.onHistory}>
-            <History size={16} /> Theo dõi
-          </button>
-        </div>
+        {step !== 2 && p.scopeControl}
       </header>
-      <nav className="pw-steps" aria-label="Quy trình đăng bài">
+      <details className="pw-inline-settings" ref={settingsRef}><summary>Hồ sơ & cài đặt</summary>{p.settings}</details>
+      <nav className="pw-steps" role="tablist" aria-label="Nội dung thiết lập Đăng bài">
         {["Chọn bài", "Chọn máy", "Kiểm tra & đăng"].map((label, i) => (
-          <button
-            type="button"
-            key={label}
-            aria-current={step === i + 1 ? "step" : undefined}
-            disabled={
-              locked || (i === 1 && !selected.length) || (i === 2 && !complete)
-            }
-            onClick={() => changeStep(i + 1)}
-          >
-            <span>{step > i + 1 ? <Check size={15} /> : i + 1}</span>
-            <strong>{label}</strong>
+          <button type="button" key={label} role="tab" id={`pw-tab-${i + 1}`} aria-controls={`pw-panel-${i + 1}`}
+            aria-selected={step === i + 1} tabIndex={step === i + 1 ? 0 : -1} disabled={locked} onClick={() => changeStep(i + 1)}
+            onKeyDown={event => { const next = event.key === "Home" ? 1 : event.key === "End" ? 3 : event.key === "ArrowRight" ? step % 3 + 1 : event.key === "ArrowLeft" ? (step + 1) % 3 + 1 : null; if (next) { event.preventDefault(); changeStep(next); document.getElementById(`pw-tab-${next}`)?.focus(); } }}>
+            <span className="pw-step-label"><strong>{label}</strong><small>{stepSummaries[i]}</small></span>
           </button>
         ))}
       </nav>
+      {[1, 2, 3].filter(value => value !== step).map(value => <div key={value} role="tabpanel" id={`pw-panel-${value}`} aria-labelledby={`pw-tab-${value}`} hidden />)}
       {p.notices && <div className="pw-notices">{p.notices}</div>}
-      <div className="pw-stage">
+      <div className="pw-stage" role="tabpanel" id={`pw-panel-${step}`} aria-labelledby={`pw-tab-${step}`}>
         {step === 1 && (
           <section className="pw-content" aria-label="Chọn bài đăng">
             <div className="pw-source-list">
@@ -340,14 +338,19 @@ export function PublishWizard(p: PublishWizardProps) {
                         <PublishMedia bundle={b} />
                         <span>
                           <strong>{b.name}</strong>
-                          <small>
-                            {b.mediaKind === "video"
-                              ? "Video MP4"
-                              : `${b.images.length} ảnh`}{" "}
-                            · {(b.totalBytes / 1048576).toFixed(1)} MB
+                          <small className="pw-bundle-caption">
+                            {p.captions[b.id] ?? b.caption}
                           </small>
                         </span>
                       </button>
+                      <span className="pw-bundle-details">
+                        <span>
+                          {b.mediaKind === "video"
+                            ? "Video MP4"
+                            : `${b.images.length} ảnh`}
+                        </span>
+                        <small>{(b.totalBytes / 1048576).toFixed(1)} MB</small>
+                      </span>
                       <button
                         className="ghost icon-only"
                         aria-label={`Sửa nội dung ${b.name}`}
@@ -393,6 +396,16 @@ export function PublishWizard(p: PublishWizardProps) {
                 ) : (
                   <ImageIcon size={38} />
                 )}
+                {active?.mediaKind === "image" && active.images.length > 0 && (
+                  <button
+                    type="button"
+                    className="pw-expand-image icon-only"
+                    aria-label="Phóng to ảnh"
+                    onClick={() => setDialog("image")}
+                  >
+                    <Maximize2 size={16} />
+                  </button>
+                )}
               </div>
               <div className="pw-photo-controls">
                 <button
@@ -435,6 +448,7 @@ export function PublishWizard(p: PublishWizardProps) {
         )}
         {step === 2 && (
           <PublishAssignmentBoard
+            scopeControl={p.scopeControl}
             bundles={selected}
             assignments={p.assignments}
             eligible={p.eligible}
@@ -509,7 +523,7 @@ export function PublishWizard(p: PublishWizardProps) {
                 <button
                   type="button"
                   className="ghost pw-detail-link"
-                  onClick={() => setDialog("settings")}
+                  onClick={openSettings}
                 >
                   Cấu hình Sheet
                 </button>
@@ -689,14 +703,44 @@ export function PublishWizard(p: PublishWizardProps) {
           </small>
         </PublishDialog>
       )}
-      <PublishDialog
-        title="Hồ sơ & cài đặt Đăng bài"
-        onClose={closeDialog}
-        wide
-        isOpen={dialog === "settings"}
-      >
-        {p.settings}
-      </PublishDialog>
+      {dialog === "image" && active && (
+        <PublishDialog
+          title={`Xem ảnh · ${active.name}`}
+          onClose={closeDialog}
+          wide
+          actions={
+            <div className="pw-photo-controls">
+              <button
+                type="button"
+                aria-label="Ảnh trước"
+                disabled={photo === 0}
+                onClick={() => setPhoto((n) => n - 1)}
+              >
+                <ArrowLeft size={16} />
+              </button>
+              <span aria-live="polite">
+                Ảnh {Math.min(photo + 1, active.images.length)} / {active.images.length}
+              </span>
+              <button
+                type="button"
+                aria-label="Ảnh tiếp"
+                disabled={photo >= active.images.length - 1}
+                onClick={() => setPhoto((n) => n + 1)}
+              >
+                <ArrowRight size={16} />
+              </button>
+            </div>
+          }
+        >
+          <div className="pw-expanded-image">
+            <PublishMedia
+              bundle={active}
+              index={Math.min(photo, Math.max(0, active.images.length - 1))}
+              expanded
+            />
+          </div>
+        </PublishDialog>
+      )}
       {dialog === "music" && (
         <PublishDialog title="Nhạc khi chạy" onClose={closeDialog}>
           <p>
@@ -748,46 +792,14 @@ export function PublishWizard(p: PublishWizardProps) {
               </button>
             </div>
           ) : p.preflight ? (
-            <>
-              <p className={p.preflight.canExecute ? "pw-success" : "pw-error"}>
-                {p.preflight.canExecute
-                  ? "Đầu vào đã đạt kiểm tra. Chưa đăng bài."
-                  : "Có điều kiện chưa đạt. Sửa máy hoặc nội dung trước khi chạy."}
-              </p>
-              <div
-                className="pw-check-results"
-                tabIndex={0}
-                role="region"
-                aria-label="Kết quả kiểm tra từng máy"
-              >
-                {p.preflight.assignments
-                  .slice(checkPage * 3, (checkPage + 1) * 3)
-                  .map((row) => (
-                    <div key={row.udid}>
-                      <strong>
-                        {machineName(row.udid, p.devices, p.metas)}
-                      </strong>
-                      <span>
-                        {row.issues.length
-                          ? row.issues.map((i) => i.message).join(" · ")
-                          : "Nội dung, dung lượng và luồng đăng được hỗ trợ"}
-                      </span>
-                    </div>
-                  ))}
-                {p.preflight.issues
-                  .filter((i) => !i.udid)
-                  .map((i, n) => (
-                    <p key={n}>{i.message}</p>
-                  ))}
-              </div>
-              <PublishPager
-                label="Kết quả kiểm tra"
-                page={checkPage}
-                size={3}
-                total={p.preflight.assignments.length}
-                onPage={setCheckPage}
-              />
-            </>
+            <PublishPreflightResult
+              report={p.preflight}
+              machineName={(udid) => machineName(udid, p.devices, p.metas)}
+              page={checkPage}
+              onPage={setCheckPage}
+              onRetry={() => void p.onPreflight()}
+              busy={locked}
+            />
           ) : (
             <p>
               Thiết lập đã đổi.{" "}

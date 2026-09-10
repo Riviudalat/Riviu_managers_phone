@@ -103,6 +103,127 @@ pub(super) fn store_publish_execution_snapshot(
 }
 
 impl Database {
+    /// Atomically consume a due schedule. Cancellation/retiming that won first prevents launch.
+    pub fn claim_due_publish_schedule(
+        &self,
+        campaign_id: &str,
+        expected_run_at: &str,
+        now: &str,
+    ) -> anyhow::Result<bool> {
+        let changed = self.conn()?.execute(
+            "UPDATE publish_campaigns SET state='queued',revision=revision+1,updated_at=?4
+             WHERE id=?1 AND state='scheduled' AND run_at=?2 AND datetime(run_at)<=datetime(?3)",
+            params![campaign_id, expected_run_at, now, Utc::now().to_rfc3339()],
+        )?;
+        Ok(changed == 1)
+    }
+
+    pub fn publish_schedule_time_conflicts(
+        &self,
+        udid: &str,
+        run_at: &str,
+        except_id: &str,
+    ) -> anyhow::Result<bool> {
+        self.conn()?.query_row("SELECT EXISTS(SELECT 1 FROM publish_campaigns c JOIN publish_assignments a ON a.campaign_id=c.id
+            WHERE datetime(c.run_at)=datetime(?1) AND a.udid=?2 AND c.id<>?3 AND c.state NOT IN ('cancelled','missed','failed_before_dispatch'))",
+            params![run_at,udid,except_id], |row|row.get(0)).map_err(Into::into)
+    }
+
+    /// Change only the time of an unstarted campaign; keep content, device and approval intact.
+    pub fn reschedule_publish_campaign(
+        &self,
+        campaign_id: &str,
+        expected_updated_at: &str,
+        run_at: &str,
+    ) -> anyhow::Result<crate::PublishCampaignRecord> {
+        let mut connection = self.conn()?;
+        let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let detail = Self::get_publish_campaign_from_connection(&tx, campaign_id)?
+            .context("không tìm thấy lịch")?;
+        anyhow::ensure!(
+            detail.campaign.state == crate::PublishCampaignState::Scheduled
+                && detail.campaign.updated_at == expected_updated_at
+                && detail
+                    .assignments
+                    .iter()
+                    .all(|row| row.state == crate::PublishCampaignState::Scheduled),
+            "lịch đã thay đổi hoặc bắt đầu chạy; tải lại để xem trạng thái mới"
+        );
+        let raw: String = tx.query_row(
+            "SELECT request_json FROM publish_campaigns WHERE id=?1",
+            [campaign_id],
+            |row| row.get(0),
+        )?;
+        let mut request: crate::PublishCampaignRequest = serde_json::from_str(&raw)?;
+        for udid in &request.udids {
+            let conflict: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM publish_campaigns c JOIN publish_assignments a ON a.campaign_id=c.id
+                WHERE datetime(c.run_at)=datetime(?1) AND a.udid=?2 AND c.id<>?3 AND c.state NOT IN ('cancelled','missed','failed_before_dispatch'))",
+                params![run_at,udid,campaign_id], |row| row.get(0))?;
+            anyhow::ensure!(!conflict, "máy {udid} đã có lịch lúc {run_at}");
+        }
+        request.run_at = Some(run_at.to_owned());
+        let digest = publish_campaign_input_digest(&request, &detail)?;
+        let now = Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Nanos, true);
+        tx.execute("UPDATE publish_campaigns SET run_at=?2,request_json=?3,revision=revision+1,updated_at=?4 WHERE id=?1",
+            params![campaign_id,run_at,serde_json::to_string(&request)?,now])?;
+        tx.execute("UPDATE publish_execution_snapshots SET input_digest=?2,report_json=?3,updated_at=?4 WHERE campaign_id=?1",
+            params![campaign_id,digest,serde_json::json!({"source":"reschedule","runAt":run_at,"sheetEnabled":request.sheet_enabled,"targetSnapshot":request.target_snapshot}).to_string(),now])?;
+        let record = Self::get_publish_campaign_from_connection(&tx, campaign_id)?
+            .context("lịch đã mất sau đổi giờ")?
+            .campaign;
+        tx.commit()?;
+        Ok(record)
+    }
+
+    /// Every slot becomes one existing scheduler campaign, committed together.
+    pub fn create_publish_schedule_batch(
+        &self,
+        slots: &[(
+            String,
+            crate::PublishCampaignRequest,
+            Vec<crate::PublishBundle>,
+            crate::PublishExecutionSnapshotDraft,
+        )],
+    ) -> anyhow::Result<Vec<crate::PublishCampaignRecord>> {
+        anyhow::ensure!(
+            !slots.is_empty() && slots.len() <= 100,
+            "lịch cần từ 1 đến 100 khung giờ"
+        );
+        let mut connection = self.conn()?;
+        let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        for (id, request, bundles, snapshot) in slots {
+            anyhow::ensure!(
+                request.run_at.is_some()
+                    && request.udids.len() == 1
+                    && bundles.len() == 1
+                    && request.execution_confirmed,
+                "mỗi khung giờ cần một bài, một máy và xác nhận"
+            );
+            let conflict: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM publish_campaigns c JOIN publish_assignments a ON a.campaign_id=c.id
+                 WHERE datetime(c.run_at)=datetime(?1) AND a.udid=?2 AND c.id<>?3 AND c.state NOT IN ('cancelled','missed','failed_before_dispatch'))",
+                params![request.run_at,request.udids[0],id], |row|row.get(0),
+            )?;
+            anyhow::ensure!(
+                !conflict,
+                "máy {} đã có lịch lúc {}",
+                request.udids[0],
+                request.run_at.as_deref().unwrap_or_default()
+            );
+            Self::insert_publish_campaign(&tx, id, request, bundles, Some(snapshot))?;
+        }
+        let records = slots
+            .iter()
+            .map(|(id, _, _, _)| {
+                Self::get_publish_campaign_from_connection(&tx, id)?
+                    .map(|d| d.campaign)
+                    .context("scheduled campaign missing")
+            })
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        tx.commit()?;
+        Ok(records)
+    }
+
     pub fn create_publish_campaign(
         &self,
         request: &crate::publish::PublishCampaignRequest,
@@ -154,6 +275,29 @@ impl Database {
         bundles: &[crate::publish::PublishBundle],
         initial_snapshot: Option<&crate::publish_runtime::PublishExecutionSnapshotDraft>,
     ) -> anyhow::Result<(crate::publish::PublishCampaignRecord, bool)> {
+        let mut conn = self.conn()?;
+        let transaction = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let created = Self::insert_publish_campaign(
+            &transaction,
+            campaign_id,
+            request,
+            bundles,
+            initial_snapshot,
+        )?;
+        let record = Self::get_publish_campaign_from_connection(&transaction, campaign_id)?
+            .context("publish campaign disappeared")?
+            .campaign;
+        transaction.commit()?;
+        Ok((record, created))
+    }
+
+    fn insert_publish_campaign(
+        transaction: &rusqlite::Transaction<'_>,
+        campaign_id: &str,
+        request: &crate::PublishCampaignRequest,
+        bundles: &[crate::PublishBundle],
+        initial_snapshot: Option<&crate::PublishExecutionSnapshotDraft>,
+    ) -> anyhow::Result<bool> {
         let assignments =
             crate::publish::validate_publish_mapping(&request.bundle_ids, &request.udids)
                 .map_err(|error| anyhow::anyhow!(error))?;
@@ -169,8 +313,6 @@ impl Database {
             .map(prepare_publish_execution_snapshot)
             .transpose()?;
 
-        let mut conn = self.conn()?;
-        let transaction = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let request_json = serde_json::to_string(request)?;
         let existing = transaction
             .query_row(
@@ -201,13 +343,7 @@ impl Database {
                     .collect::<anyhow::Result<Vec<crate::publish::PublishBundle>>>()?
             };
             anyhow::ensure!(stored == bundles, "publish child bundle conflict");
-            transaction.commit()?;
-            drop(conn);
-            let record = self
-                .get_publish_campaign(campaign_id)?
-                .context("idempotent publish child disappeared")?
-                .campaign;
-            return Ok((record, false));
+            return Ok(false);
         }
         let now = Utc::now().to_rfc3339();
         let state = if request.run_at.is_some() {
@@ -288,24 +424,7 @@ impl Database {
                 ],
             )?;
         }
-        transaction.commit()?;
-
-        Ok((
-            crate::publish::PublishCampaignRecord {
-                id: campaign_id.to_string(),
-                request_id: request.request_id.clone(),
-                source_root: request.source_root.clone(),
-                state,
-                run_at: request.run_at.clone(),
-                visibility: request.visibility.clone(),
-                cleanup_policy: request.cleanup_policy.clone(),
-                assignments,
-                created_at: now.clone(),
-                updated_at: now,
-                error_code: None,
-            },
-            true,
-        ))
+        Ok(true)
     }
     pub fn list_publish_campaigns(
         &self,
@@ -332,6 +451,13 @@ impl Database {
         id: &str,
     ) -> anyhow::Result<Option<crate::publish::PublishCampaignDetail>> {
         let conn = self.conn()?;
+        Self::get_publish_campaign_from_connection(&conn, id)
+    }
+
+    pub(super) fn get_publish_campaign_from_connection(
+        conn: &Connection,
+        id: &str,
+    ) -> anyhow::Result<Option<crate::publish::PublishCampaignDetail>> {
         let Some((campaign, request)) = conn
             .query_row(
                 "SELECT id,request_id,source_root,state,run_at,request_json,created_at,updated_at,error_code
@@ -511,8 +637,9 @@ impl Database {
     ///
     /// # Why the two assignment updates differ, and why that asymmetry is the safety
     ///
-    /// An assignment that was `posting` or `verifying` may have reached TikTok. Nobody can tell
-    /// from here, so it becomes **`uncertain`** — which
+    /// An assignment that was `posting` may have reached TikTok, so it becomes `uncertain`.
+    /// A `verifying` row with durable intent retains its observed submission across restart;
+    /// legacy rows without that intent remain conservative and become **`uncertain`** — which
     /// [`Self::claim_publish_assignment_for_posting`] deliberately refuses to claim, making the
     /// row permanently unclaimable. That is correct: re-posting would publish a second carousel
     /// to a real account, and there is no delete path on Android to undo it.
@@ -530,7 +657,8 @@ impl Database {
         let stranded: Vec<String> = transaction
             .prepare(
                 "SELECT id FROM publish_campaigns
-                 WHERE state IN ('preparing','transferring','posting','verifying')",
+                 WHERE state IN ('preparing','transferring','posting','verifying')
+                    OR EXISTS (SELECT 1 FROM publish_assignments a WHERE a.campaign_id=publish_campaigns.id AND a.state='posting')",
             )?
             .query_map([], |row| row.get(0))?
             .collect::<Result<_, _>>()?;
@@ -539,9 +667,19 @@ impl Database {
                 "UPDATE publish_assignments
                  SET state='uncertain',revision=revision+1,updated_at=?2,
                      error_code=COALESCE(error_code,'publish_worker_lost: app đóng khi bài này đang đăng — không xác nhận được là đã lên hay chưa, nên không đăng lại')
-                 WHERE campaign_id=?1 AND state IN ('posting','verifying')",
+                 WHERE campaign_id=?1 AND (state='posting' OR (state='verifying' AND effect_intent IS NULL))",
                 params![campaign_id, now],
             )?;
+            // Cancel can land after the effect claim. Reconcile that orphaned child too,
+            // while keeping the operator's terminal campaign decision intact.
+            let parent_state: String = transaction.query_row(
+                "SELECT state FROM publish_campaigns WHERE id=?1",
+                [campaign_id],
+                |row| row.get(0),
+            )?;
+            if matches!(parent_state.as_str(), "cancelled" | "missed") {
+                continue;
+            }
             transaction.execute(
                 "UPDATE publish_assignments
                  SET state='failed_before_dispatch',revision=revision+1,updated_at=?2,
@@ -565,19 +703,26 @@ impl Database {
             // And `failed_before_dispatch` for the rest, which the claim accepts; when some
             // children posted and others never started, the reason says so instead of
             // pretending the desktop never dispatched anything.
-            let (uncertain, succeeded, total): (i64, i64, i64) = transaction.query_row(
-                "SELECT
+            let (uncertain, verifying, succeeded, total): (i64, i64, i64, i64) = transaction
+                .query_row(
+                    "SELECT
                    COUNT(*) FILTER (WHERE state='uncertain'),
+                   COUNT(*) FILTER (WHERE state='verifying'),
                    COUNT(*) FILTER (WHERE state='succeeded'),
                    COUNT(*)
                  FROM publish_assignments WHERE campaign_id=?1",
-                params![campaign_id],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-            )?;
+                    params![campaign_id],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                )?;
             let (state, reason) = if uncertain > 0 {
                 (
                     "uncertain",
                     "publish_worker_lost: app đóng khi đang đăng — có máy không xác nhận được",
+                )
+            } else if verifying > 0 {
+                (
+                    "verifying",
+                    "post_verification_pending: tiếp tục xác minh bài đã gửi sau khi mở lại app",
                 )
             } else if total > 0 && succeeded == total {
                 (
@@ -703,7 +848,7 @@ impl Database {
         // opened a phone that published after the run was stopped. One statement closes it —
         // SQLite evaluates the `EXISTS` inside the same update.
         let changed = conn.execute(
-            "UPDATE publish_assignments SET state=?1,error_code=NULL,evidence_json=?2,\
+            "UPDATE publish_assignments SET state=?1,error_code=NULL,evidence_json=?2,effect_intent=?2,\
              revision=revision+1,updated_at=?3 WHERE id=?4 AND state IN (?5,?6) \
              AND EXISTS (SELECT 1 FROM publish_campaigns c \
                          WHERE c.id = publish_assignments.campaign_id AND c.state = ?7)",
@@ -1140,7 +1285,7 @@ impl Database {
         id: &str,
         outcome: PublishRunOutcome,
     ) -> anyhow::Result<Option<crate::publish::PublishCampaignState>> {
-        let wanted = match outcome {
+        let mut wanted = match outcome {
             PublishRunOutcome::AllPosted => crate::publish::PublishCampaignState::Succeeded,
             // **Nothing may be live, so the campaign stays claimable.** It used to become
             // `uncertain` for *any* failure, which the claim refuses forever — so a run where
@@ -1154,7 +1299,7 @@ impl Database {
                 crate::publish::PublishCampaignState::Uncertain
             }
         };
-        let error_code = match outcome {
+        let mut error_code = match outcome {
             PublishRunOutcome::AllPosted => None,
             PublishRunOutcome::NothingPublished => Some("post_refused_before_dispatch"),
             PublishRunOutcome::SomethingMayBeLive => Some("post_or_cleanup_failed"),
@@ -1165,6 +1310,22 @@ impl Database {
         // an audit gap on the one action in this project that cannot be undone.
         let mut conn = self.conn()?;
         let transaction = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        // A feed-return submission does not become success because the fan-out returned.
+        // Inspect persisted children inside the settle transaction, not a stale run count.
+        let (verifying, ambiguous): (i64, i64) = transaction.query_row(
+            "SELECT COUNT(*) FILTER (WHERE state='verifying'),
+                    COUNT(*) FILTER (WHERE state IN ('posting','uncertain'))
+             FROM publish_assignments WHERE campaign_id=?1",
+            [id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        if ambiguous > 0 {
+            wanted = crate::publish::PublishCampaignState::Uncertain;
+            error_code = Some("post_or_cleanup_failed");
+        } else if verifying > 0 {
+            wanted = crate::publish::PublishCampaignState::Verifying;
+            error_code = Some("post_verification_pending");
+        }
         let now = Utc::now().to_rfc3339();
         let moved = transaction.execute(
             "UPDATE publish_campaigns
@@ -2720,6 +2881,162 @@ mod execution_snapshot_tests {
             .create_publish_campaign(&request, &[bundle])
             .expect("create campaign");
         (db, path, campaign.id)
+    }
+
+    #[test]
+    fn schedule_retime_and_due_claim_serialize_with_cancel_and_restart() {
+        let path =
+            std::env::temp_dir().join(format!("riviu-schedule-retime-{}.db", Uuid::new_v4()));
+        let db = Database::open(&path).unwrap();
+        let (mut request, bundle) = campaign_input();
+        request.run_at = Some("2099-09-10T20:00:00".into());
+        let record = db.create_publish_campaign(&request, &[bundle]).unwrap();
+        assert!(!db
+            .claim_due_publish_schedule(&record.id, "2099-09-10T20:00:00", "2099-09-10T19:59:59")
+            .unwrap());
+        let edited = db
+            .reschedule_publish_campaign(&record.id, &record.updated_at, "2099-09-10T21:00:00")
+            .unwrap();
+        assert_eq!(edited.run_at.as_deref(), Some("2099-09-10T21:00:00"));
+        assert!(db
+            .reschedule_publish_campaign(&record.id, &record.updated_at, "2099-09-10T22:00:00")
+            .is_err());
+        assert!(!db
+            .claim_due_publish_schedule(&record.id, "2099-09-10T20:00:00", "2099-09-10T22:00:00")
+            .unwrap());
+        drop(db);
+        let db = Database::open(&path).unwrap();
+        assert!(db
+            .claim_due_publish_schedule(&record.id, "2099-09-10T21:00:00", "2099-09-10T21:00:00")
+            .unwrap());
+        assert!(!db
+            .claim_due_publish_schedule(&record.id, "2099-09-10T21:00:00", "2099-09-10T21:00:01")
+            .unwrap());
+        assert!(db
+            .reschedule_publish_campaign(&record.id, &edited.updated_at, "2099-09-10T22:00:00")
+            .is_err());
+        assert_eq!(
+            db.publish_campaign_request(&record.id)
+                .unwrap()
+                .unwrap()
+                .run_at,
+            edited.run_at
+        );
+        let (mut second, bundle) = campaign_input();
+        second.run_at = Some("2099-09-11T20:00:00".into());
+        let cancelled = db.create_publish_campaign(&second, &[bundle]).unwrap();
+        db.cancel_publish_campaign(&cancelled.id).unwrap();
+        assert!(!db
+            .claim_due_publish_schedule(&cancelled.id, "2099-09-11T20:00:00", "2099-09-11T20:00:00")
+            .unwrap());
+        assert!(db
+            .reschedule_publish_campaign(
+                &cancelled.id,
+                &cancelled.updated_at,
+                "2099-09-12T20:00:00"
+            )
+            .is_err());
+        drop(db);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn daily_schedule_is_atomic_durable_and_idempotent() {
+        let path = std::env::temp_dir().join(format!("riviu-schedule-{}.db", Uuid::new_v4()));
+        let db = Database::open(&path).unwrap();
+        let slots: Vec<_> = (0..3)
+            .map(|i| {
+                let (mut request, bundle) = campaign_input();
+                request.run_at = Some(format!("2099-09-08T12:{:02}:00", i * 5));
+                (
+                    Uuid::new_v4().to_string(),
+                    request,
+                    vec![bundle],
+                    PublishExecutionSnapshotDraft {
+                        input_digest: "a".repeat(64),
+                        status: PublishExecutionStatus::Partial,
+                        retry_scope: PublishRetryScope::FullPipeline,
+                        report_json: serde_json::json!({}),
+                    },
+                )
+            })
+            .collect();
+        let mut invalid = slots.clone();
+        invalid[2].3.report_json = serde_json::json!([]);
+        assert!(db.create_publish_schedule_batch(&invalid).is_err());
+        assert!(db.list_publish_campaigns(100).unwrap().is_empty());
+        let records = db.create_publish_schedule_batch(&slots).unwrap();
+        assert_eq!(records.len(), 3);
+        drop(db);
+        let reopened = Database::open(&path).unwrap();
+        assert_eq!(reopened.scheduled_publish_campaigns().unwrap().len(), 3);
+        assert_eq!(
+            reopened
+                .create_publish_schedule_batch(&slots)
+                .unwrap()
+                .len(),
+            3
+        );
+        assert_eq!(reopened.list_publish_campaigns(100).unwrap().len(), 3);
+        for (id, request, _, _) in &slots {
+            assert_eq!(
+                reopened.publish_campaign_request(id).unwrap().unwrap(),
+                *request
+            );
+            assert!(reopened
+                .get_publish_execution_snapshot(id)
+                .unwrap()
+                .is_some());
+        }
+        let (mut request, bundle) = campaign_input();
+        // Minute and second precision represent the same instant on the same phone.
+        request.run_at = Some("2099-09-08T12:05".into());
+        let conflict = vec![(
+            Uuid::new_v4().to_string(),
+            request,
+            vec![bundle],
+            slots[0].3.clone(),
+        )];
+        assert!(reopened
+            .create_publish_schedule_batch(&conflict)
+            .unwrap_err()
+            .to_string()
+            .contains("đã có lịch"));
+        assert_eq!(reopened.scheduled_publish_campaigns().unwrap().len(), 3);
+        drop(reopened);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn daily_schedule_rejects_conflicting_slots_without_partial_creation() {
+        let path =
+            std::env::temp_dir().join(format!("riviu-schedule-conflict-{}.db", Uuid::new_v4()));
+        let db = Database::open(&path).unwrap();
+        let slots: Vec<_> = (0..2)
+            .map(|_| {
+                let (mut request, bundle) = campaign_input();
+                request.run_at = Some("2099-09-08T12:00:00".into());
+                (
+                    Uuid::new_v4().to_string(),
+                    request,
+                    vec![bundle],
+                    PublishExecutionSnapshotDraft {
+                        input_digest: "a".repeat(64),
+                        status: PublishExecutionStatus::Partial,
+                        retry_scope: PublishRetryScope::FullPipeline,
+                        report_json: serde_json::json!({}),
+                    },
+                )
+            })
+            .collect();
+        assert!(db
+            .create_publish_schedule_batch(&slots)
+            .unwrap_err()
+            .to_string()
+            .contains("đã có lịch"));
+        assert!(db.scheduled_publish_campaigns().unwrap().is_empty());
+        drop(db);
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]

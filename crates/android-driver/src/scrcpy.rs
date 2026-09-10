@@ -375,6 +375,22 @@ pub const fn reset_video() -> [u8; 1] {
 /// the device has no framing, and desynchronising it kills the video too.
 pub const CONTROL_MESSAGE_INJECT_TOUCH: u8 = 0x02;
 
+/// scrcpy 3.3.4 control_msg.c: keycode packets are 14 bytes, all integer fields big-endian.
+/// Keep DOWN and UP in one write so another pointer event cannot split the pair.
+/// Reference: https://github.com/Genymobile/scrcpy/blob/v3.3.4/app/src/control_msg.c
+pub fn hardware_key_message(key: riviu_core::HardwareKey) -> Vec<u8> {
+    if matches!(key, riviu_core::HardwareKey::Notification) {
+        return vec![5]; // EXPAND_NOTIFICATION_PANEL, no payload.
+    }
+    let code = crate::session::hardware_keycode(key) as u32;
+    let mut bytes = vec![0; 28];
+    for (offset, action) in [(0, 0), (14, 1)] {
+        bytes[offset + 1] = action;
+        bytes[offset + 2..offset + 6].copy_from_slice(&code.to_be_bytes());
+    }
+    bytes
+}
+
 /// Which end of a gesture a touch message carries.
 ///
 /// The values are `AMOTION_EVENT_ACTION_*` and must stay these numbers — the server passes
@@ -462,15 +478,34 @@ pub fn socket_name(scid: u32) -> String {
 /// as minicap: the host file is already SHA-256 pinned in the installer
 /// manifest, so a matching length is enough to skip a 120 s push.
 pub async fn ensure_server(adb: &AdbProgram, serial: &str, local: &Path) -> anyhow::Result<()> {
+    let state = adb
+        .device(serial, &["get-state"], Duration::from_secs(5))
+        .await
+        .with_context(|| format!("Kiểm tra kết nối ADB của {serial} trước khi mở stream"))?;
+    anyhow::ensure!(
+        state.trim() == "device",
+        "Mất kết nối ADB với {serial} (device offline); chờ máy kết nối lại"
+    );
     let local_len = tokio::fs::metadata(local)
         .await
         .with_context(|| format!("read {}", local.display()))?
         .len();
-    let remote_len = adb
+    let remote = adb
         .shell(serial, &format!("wc -c < {REMOTE_SERVER} 2>/dev/null"))
-        .await
-        .ok()
-        .and_then(|out| out.trim().parse::<u64>().ok());
+        .await;
+    if let Err(error) = &remote {
+        if matches!(
+            crate::adb::classify_fault(&format!("{error:#}")),
+            crate::adb::AdbFault::Offline
+                | crate::adb::AdbFault::Unauthorized
+                | crate::adb::AdbFault::UnknownDevice
+        ) {
+            return Err(remote.unwrap_err().context(format!(
+                "Mất kết nối ADB với {serial} trước khi chuyển scrcpy"
+            )));
+        }
+    }
+    let remote_len = remote.ok().and_then(|out| out.trim().parse::<u64>().ok());
     if remote_len == Some(local_len) {
         return Ok(());
     }
@@ -792,6 +827,35 @@ pub fn annexb_has_idr(bytes: &[u8]) -> bool {
 
 pub fn annexb_has_sps(bytes: &[u8]) -> bool {
     annexb_has_nal(bytes, 7)
+}
+
+/// SPS/PPS initialization only. Replaying a cached IDR here would flash an older picture.
+pub fn annexb_decoder_config(bytes: &[u8]) -> Vec<u8> {
+    let mut starts = Vec::new();
+    let mut i = 0;
+    while i + 3 < bytes.len() {
+        let prefix = if bytes[i..].starts_with(&[0, 0, 0, 1]) {
+            4
+        } else if bytes[i..].starts_with(&[0, 0, 1]) {
+            3
+        } else {
+            i += 1;
+            continue;
+        };
+        starts.push((i, prefix));
+        i += prefix;
+    }
+    let mut config = Vec::new();
+    for (index, &(start, prefix)) in starts.iter().enumerate() {
+        let end = starts
+            .get(index + 1)
+            .map(|value| value.0)
+            .unwrap_or(bytes.len());
+        if start + prefix < end && matches!(bytes[start + prefix] & 0x1f, 7 | 8) {
+            config.extend_from_slice(&bytes[start..end]);
+        }
+    }
+    config
 }
 
 fn annexb_has_nal(bytes: &[u8], nal_type: u8) -> bool {
@@ -1613,5 +1677,25 @@ mod handshake_tests {
             ),
             Ok(_) => panic!("the server never sent a dummy byte"),
         }
+    }
+}
+
+#[cfg(test)]
+mod hardware_key_tests {
+    use super::*;
+    #[test]
+    fn volume_key_has_one_down_up_pair_and_notifications_use_the_panel_command() {
+        let message = hardware_key_message(riviu_core::HardwareKey::VolumeDown);
+        assert_eq!(
+            message,
+            [
+                0, 0, 0, 0, 0, 25, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 25, 0, 0, 0, 0, 0, 0, 0,
+                0
+            ]
+        );
+        assert_eq!(
+            hardware_key_message(riviu_core::HardwareKey::Notification),
+            [5]
+        );
     }
 }

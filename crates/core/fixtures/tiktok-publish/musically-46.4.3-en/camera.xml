@@ -1,0 +1,6 @@
+<hierarchy>
+  <android.widget.Button package="com.zhiliaoapp.musically" class="android.widget.Button" text="" content-desc="@2131823333" resource-id="com.zhiliaoapp.musically:id/t6z" checked="false" clickable="true" enabled="false" focused="false" selected="false" bounds="[395,1588][684,1877]" displayed="true" />
+  <android.widget.FrameLayout package="com.zhiliaoapp.musically" class="android.widget.FrameLayout" text="" resource-id="com.zhiliaoapp.musically:id/upload_hot_area" checked="false" clickable="true" enabled="true" focused="false" selected="false" bounds="[0,1891][179,2070]" displayed="true" />
+  <android.widget.Button package="com.zhiliaoapp.musically" class="android.widget.Button" text="" resource-id="com.zhiliaoapp.musically:id/dwh" checked="false" clickable="true" enabled="true" focused="false" selected="false" bounds="[362,100][717,216]" displayed="true" />
+  <android.widget.TextView package="com.zhiliaoapp.musically" class="android.widget.TextView" text="Add sound" resource-id="com.zhiliaoapp.musically:id/tv_top_text" checked="false" clickable="false" enabled="true" focused="true" selected="true" bounds="[446,100][696,216]" displayed="true" />
+</hierarchy>

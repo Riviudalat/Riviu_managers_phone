@@ -1,0 +1,34 @@
+{
+  "sound": {
+    "source": "target\\fleet-compat-20260908\\462soundb\\07-sound.xml",
+    "sha256": "7a9e489910160aa756147561beb5548b5d2b1e032ec139c6019aa6a69cbc7dc2"
+  },
+  "hot": {
+    "source": "target\\fleet-compat-20260908\\462soundb\\09-hot-stable.xml",
+    "sha256": "f5a17aff3d979ca7a3279f9513870d963edb9c6f97e89a452ab9c296aeb37c6f"
+  },
+  "selected": {
+    "source": "target\\fleet-compat-20260908\\462soundb\\10-selected.xml",
+    "sha256": "f7e72bca953d3877153d87312da4189dc93c46887d361132772be0352cd46be4"
+  },
+  "editor": {
+    "source": "target\\fleet-compat-20260908\\462soundb\\11-readback.xml",
+    "sha256": "e2654d517f7a1125650ae75052429821b99fbab25eb7116458a221d1f650401e"
+  },
+  "video-caption": {
+    "source": "target\\fleet-compat-20260908\\462soundb\\17-caption-return.xml",
+    "sha256": "8170aff404f188ead523ab9332636ef4af871b095ae381baefdb37b0ef66b46e"
+  },
+  "video-selected": {
+    "source": "target\\fleet-compat-20260908\\462soundb\\05-selected.xml",
+    "sha256": "e7d3f0d3fab67279f4eebc0a5a250f502d2d55d539343babd3c7de74519ebc44"
+  },
+  "video-picker": {
+    "source": "target\\fleet-compat-20260908\\462soundb\\04-album.xml",
+    "sha256": "42f1b0fdcdf235e543600db80785c28f64e497feb62ac3cf426339df0bc185c7"
+  },
+  "video-editor": {
+    "source": "target\\fleet-compat-20260908\\462soundb\\06-editor.xml",
+    "sha256": "ed2945ad9097177f53ab35d0224b5b72f8122374cc6bf853d6b0f87e552f68d0"
+  }
+}

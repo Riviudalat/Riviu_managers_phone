@@ -669,7 +669,31 @@ pub fn project_publish_summary(
     let (state, retry_scope) = if typed_uncertain {
         // Startup recovery can advance these rows after the last execution snapshot. A stale
         // FullPipeline value must never turn an ambiguous Post into another public Post.
-        (OperationRunState::Uncertain, PublishRetryScope::None)
+        let review_rows: Vec<_> = detail
+            .assignments
+            .iter()
+            .filter(|row| row.state == PublishCampaignState::Uncertain)
+            .collect();
+        let manual_link_only = !review_rows.is_empty()
+            && review_rows
+                .iter()
+                .all(|row| row.error_code.as_deref() == Some("post_verification_needs_review"))
+            && !detail
+                .assignments
+                .iter()
+                .any(|row| row.state == PublishCampaignState::Posting)
+            && !matches!(
+                campaign.state,
+                PublishCampaignState::Cancelled | PublishCampaignState::Missed
+            );
+        (
+            OperationRunState::Uncertain,
+            if manual_link_only {
+                PublishRetryScope::LinkAndSheet
+            } else {
+                PublishRetryScope::None
+            },
+        )
     } else {
         match campaign.state {
             PublishCampaignState::Queued | PublishCampaignState::Scheduled => {
@@ -679,9 +703,13 @@ pub fn project_publish_summary(
             | PublishCampaignState::Ready
             | PublishCampaignState::Transferring
             | PublishCampaignState::Imported
-            | PublishCampaignState::Posting
-            | PublishCampaignState::Verifying => {
+            | PublishCampaignState::Posting => {
                 (OperationRunState::Running, PublishRetryScope::None)
+            }
+            PublishCampaignState::Verifying => {
+                // A submitted post still owns unfinished work, but an explicit warm
+                // link check is available immediately. It never grants a fresh Post.
+                (OperationRunState::Running, PublishRetryScope::LinkAndSheet)
             }
             PublishCampaignState::FailedBeforeDispatch => {
                 let has_success = detail
@@ -1381,6 +1409,114 @@ mod tests {
         assert_eq!(projected.summary.retryable_count, 0);
         assert!(projected.items.iter().all(|item| !item.retryable));
 
+        drop(db);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn verifying_publish_projection_offers_only_link_retry_after_database_restart() {
+        let path = std::env::temp_dir().join(format!(
+            "riviu-verifying-projection-{}.db",
+            uuid::Uuid::new_v4()
+        ));
+        let db = crate::db::Database::open(&path).expect("open fixture");
+        let bundle = |id: &str| crate::PublishBundle {
+            id: id.into(),
+            source_path: format!("C:/fixture/{id}"),
+            name: id.into(),
+            media_kind: crate::PublishMediaKind::Image,
+            images: Vec::new(),
+            video: None,
+            caption_path: format!("C:/fixture/{id}/caption.txt"),
+            caption: id.into(),
+            caption_sha256: "a".repeat(64),
+            total_bytes: 1,
+            partners: Vec::new(),
+        };
+        let request = crate::PublishCampaignRequest {
+            sheet_enabled: true,
+            request_id: "verifying-projection".into(),
+            source_root: "C:/fixture".into(),
+            bundle_ids: vec!["confirmed".into(), "pending".into()],
+            udids: vec!["phone-a".into(), "phone-b".into()],
+            run_at: None,
+            visibility: crate::PublishVisibility::Public,
+            cleanup_policy: crate::PublishCleanupPolicy::KeepImportedAssets,
+            sound_policy: crate::PublishSoundPolicy::Default,
+            execution_confirmed: true,
+            target_snapshot: None,
+        };
+        let campaign = db
+            .create_publish_campaign(&request, &[bundle("confirmed"), bundle("pending")])
+            .expect("create");
+        db.update_publish_campaign_state(&campaign.id, PublishCampaignState::Posting, None)
+            .unwrap();
+        let detail = db.get_publish_campaign(&campaign.id).unwrap().unwrap();
+        let confirmed = &detail.assignments[0];
+        let pending = &detail.assignments[1];
+        db.update_publish_assignment_state(
+            &confirmed.id,
+            PublishCampaignState::Succeeded,
+            None,
+            Some(r#"{"postUrl":"https://www.tiktok.com/@fixture/photo/123"}"#),
+        )
+        .unwrap();
+        db.update_publish_assignment_state(&pending.id, PublishCampaignState::Imported, None, None)
+            .unwrap();
+        assert!(db
+            .claim_publish_assignment_for_posting(&pending.id, r#"{"effectIntent":"post"}"#)
+            .unwrap());
+        db.update_publish_assignment_state(
+            &pending.id,
+            PublishCampaignState::Verifying,
+            Some("post_verification_pending"),
+            Some(r#"{"state":"submitted"}"#),
+        )
+        .unwrap();
+        db.update_publish_campaign_state(
+            &campaign.id,
+            PublishCampaignState::Verifying,
+            Some("post_verification_pending"),
+        )
+        .unwrap();
+        db.save_publish_execution_snapshot(
+            &campaign.id,
+            &"c".repeat(64),
+            PublishExecutionStatus::Partial,
+            PublishRetryScope::FullPipeline,
+            &serde_json::json!({"source":"stale-before-submit"}),
+        )
+        .unwrap();
+        drop(db);
+        let db = crate::db::Database::open(&path).unwrap();
+        db.interrupt_orphaned_publish_campaigns().unwrap();
+        let restored = db.get_publish_campaign(&campaign.id).unwrap().unwrap();
+        let snapshot = db.get_publish_execution_snapshot(&campaign.id).unwrap();
+        let result = project_publish_detail(&restored, snapshot.as_ref());
+        assert_eq!(result.summary.state, OperationRunState::Running);
+        assert_eq!(
+            result.summary.retry_scope,
+            Some(PublishRetryScope::LinkAndSheet)
+        );
+        assert_eq!(result.summary.retryable_count, 1);
+        assert_eq!(result.summary.total_items, 2);
+        assert_eq!(result.summary.completed_items, 1);
+        assert_eq!(result.items[1].state, OperationRunState::Running);
+        assert!(
+            !result.items[1].retryable,
+            "metadata retry never grants an assignment a fresh Post"
+        );
+        let without_snapshot = project_publish_summary(&restored, None);
+        assert_eq!(
+            without_snapshot.retry_scope,
+            Some(PublishRetryScope::LinkAndSheet)
+        );
+        let mut uncertain = restored;
+        uncertain.assignments[1].state = PublishCampaignState::Uncertain;
+        assert_eq!(
+            project_publish_summary(&uncertain, snapshot.as_ref()).retry_scope,
+            Some(PublishRetryScope::None)
+        );
         drop(db);
         let _ = std::fs::remove_file(path);
     }

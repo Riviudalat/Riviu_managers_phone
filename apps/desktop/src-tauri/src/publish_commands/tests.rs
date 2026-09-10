@@ -50,9 +50,14 @@ async fn publish_scan_propagates_errors_and_releases_capacity() {
 
 #[test]
 fn folder_scan_and_preflight_share_the_bounded_blocking_worker() {
+    let preflight = code_of("async fn build_publish_preflight(").join("\n");
+    assert!(preflight.contains("scan_preflight_source(&request.source_root).await?"));
+    let schedule = code_of("async fn prepare_schedule(").join("\n");
+    assert_eq!(schedule.matches("scan_preflight_source(").count(), 1);
+    assert!(schedule.contains("build_publish_preflight_from_manifest("));
     for signature in [
         "pub async fn publish_scan_folder(",
-        "async fn build_publish_preflight(",
+        "async fn scan_preflight_source(",
     ] {
         let body = code_of(signature).join("\n");
         assert!(
@@ -297,16 +302,20 @@ fn no_link_is_read_off_the_feed_until_the_route_is_measured() {
          capture_own_post_link is the only one allowed here"
     );
     assert!(
-        module.contains("capture_own_post_link("),
+        module.contains("capture_own_post_link_for_submission("),
         "the Posted arm no longer captures at all — a published carousel owes the sheet \
          its link, and dropping the call loses it silently"
     );
     let body = code_of("async fn post_through_the_composer(");
     assert!(
         body.iter()
-            .any(|line| line.contains("capture_own_post_link(")),
+            .any(|line| line.contains("capture_own_post_link_for_submission(")),
         "the routed capture left the Posted arm; the link is read there or nowhere"
     );
+    let body = body.join("\n");
+    assert!(body.contains("observe_publish_account(session, &labels)"));
+    assert!(body.contains("SubmissionIdentity"));
+    assert!(body.contains("before_post(Some(selection), Some((&expected_account, &at)))"));
 }
 
 /// **Readiness answers about the build in front of it, not about the package.**
@@ -336,6 +345,12 @@ fn readiness_asks_the_catalogue_about_this_phones_build() {
             if missing.contains(&riviu_core::tiktok_labels::TikTokControl::ComposerCaption)),
         "an unmeasured version must lose its version-keyed control, not inherit another \
          version's verdict: {updated:?}"
+    );
+    assert!(
+        matches!(&updated, PublishReadiness::HierarchyMissing(missing)
+            if missing.contains(&riviu_core::tiktok_labels::TikTokControl::PickerAlbumMenu)
+                && missing.contains(&riviu_core::tiktok_labels::TikTokControl::PickerMultiSelect)),
+        "preflight must report opening and verified-selection prerequisites too"
     );
     // A version that was never read (the empty string a failed `dumpsys` leaves) is the
     // same answer for the same reason — it is not a licence to use another version's ids.
@@ -898,6 +913,51 @@ fn semantic_publish_target_keeps_disconnected_group_members_in_the_snapshot() {
 }
 
 #[test]
+fn publish_snapshot_captures_fleet_numbers_not_assignment_positions() {
+    let fleet = vec!["a".into(), "b".into(), "c".into(), "d".into()];
+    let request = riviu_core::PublishPreflightRequest {
+        source_root: "fixture".into(),
+        bundle_ids: vec!["one".into(), "two".into()],
+        udids: vec!["b".into(), "d".into()],
+        target_ref: None,
+        run_at: None,
+        caption_overrides: Default::default(),
+        sound_policy: Default::default(),
+        sheet_enabled: false,
+        delete_after_publish: false,
+    };
+    let result = resolve_preflight_target(&request, &fleet, &[], &[]).unwrap();
+    assert_eq!(
+        result
+            .included
+            .iter()
+            .map(|device| device.number)
+            .collect::<Vec<_>>(),
+        vec![Some(2), Some(4)]
+    );
+    let metas = vec![riviu_core::DeviceMeta {
+        udid: "d".into(),
+        notes: String::new(),
+        tags: vec![],
+        group_id: None,
+        handle: String::new(),
+        alias: "Test".into(),
+        number: Some(9),
+    }];
+    let numbered = resolve_preflight_target(&request, &fleet, &metas, &[]).unwrap();
+    assert_eq!(
+        numbered
+            .included
+            .iter()
+            .map(|device| device.number)
+            .collect::<Vec<_>>(),
+        vec![Some(3), Some(9)]
+    );
+    assert_ne!(result.roster_sha256, numbered.roster_sha256);
+    assert_eq!(metas[0].number, Some(9));
+}
+
+#[test]
 fn caption_override_is_snapshotted_without_touching_the_source_file() {
     let temp = std::env::temp_dir().join(format!("riviu-caption-{}.txt", Uuid::new_v4()));
     fs::write(&temp, "caption from disk\n").expect("source caption");
@@ -971,7 +1031,7 @@ fn video_snapshot_is_validated_and_picker_readiness_is_tuple_scoped() {
     assert!(bundle_media_shape_is_ready(&image, PublishRoute::Hierarchy));
     assert!(bundle_media_shape_is_ready(&video, PublishRoute::Hierarchy));
     assert!(video_plan_for_build("com.ss.android.ugc.trill", "en", "38.3.2").is_ok());
-    assert!(video_plan_for_build("com.zhiliaoapp.musically", "en", "46.2.1").is_err());
+    assert!(video_plan_for_build("com.zhiliaoapp.musically", "en", "46.2.2").is_err());
 
     video.video = None;
     assert!(!bundle_media_shape_is_ready(
@@ -990,7 +1050,7 @@ fn video_snapshot_is_validated_and_picker_readiness_is_tuple_scoped() {
 fn hierarchy_video_uses_the_typed_sound_and_one_shot_post_state_machine() {
     let body = code_of("async fn post_through_the_composer(");
     let joined = body.join("\n");
-    assert!(joined.contains("publish_video_with_sound_effect_intent("));
+    assert!(joined.contains("publish_video_with_sound_effect_intent_and_progress("));
     assert!(joined.contains("video_plan_for_build(&package, &language, &version)"));
     assert!(joined.contains("&mut record_effect_intent"));
     assert!(joined.contains("crossed_effect_boundary = true"));
@@ -1305,6 +1365,46 @@ fn a_staged_root_holds_exactly_one_bundle_and_is_removed_afterwards() {
 }
 
 #[test]
+fn scheduled_sibling_staging_keeps_other_active_attempts_alive() {
+    let temp = std::env::temp_dir().join(format!("riviu-stage-siblings-{}", Uuid::new_v4()));
+    let make = |name: &str, bytes: &[u8]| {
+        let dir = temp.join(name);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("01.png"), bytes).unwrap();
+        let mut bundle = test_bundle(name);
+        bundle.source_path = dir.display().to_string();
+        bundle.caption = "caption".into();
+        bundle.caption_sha256 = riviu_core::frame_sha256(b"caption");
+        bundle.images = vec![riviu_core::PublishImage {
+            path: dir.join("01.png").display().to_string(),
+            file_name: "01.png".into(),
+            order: 1,
+            sha256: riviu_core::frame_sha256(bytes),
+            byte_len: bytes.len() as u64,
+            width: 1,
+            height: 1,
+        }];
+        bundle
+    };
+    let a = make("0", b"first");
+    let b = make("1", b"second");
+    let first = super::stage_one_bundle(&a, 0).unwrap();
+    let second = super::stage_one_bundle(&b, 0).unwrap();
+    let retry = super::stage_one_bundle(&a, 0).unwrap();
+    assert_ne!(first.path(), second.path());
+    assert_ne!(first.path(), retry.path());
+    assert_eq!(fs::read(first.path().join("0/01.png")).unwrap(), b"first");
+    drop(second);
+    drop(retry);
+    assert_eq!(fs::read(first.path().join("0/01.png")).unwrap(), b"first");
+    let first_path = first.path().to_owned();
+    drop(first);
+    assert!(!first_path.exists());
+    assert_eq!(fs::read(temp.join("0/01.png")).unwrap(), b"first");
+    let _ = fs::remove_dir_all(temp);
+}
+
+#[test]
 fn a_device_scope_is_a_component_every_backend_accepts() {
     // Two phones, two scopes -- which is what gives them two staging directories, two
     // manifest hashes and two albums. And the string has to survive validators written
@@ -1508,7 +1608,7 @@ fn a_cancel_is_read_before_the_phone_and_the_claim_lives_at_the_post_boundary() 
     assert!(
         assignment
             .iter()
-            .any(|line| line.contains("before_pixel_post = || before_post(None)"))
+            .any(|line| line.contains("before_pixel_post = || before_post(None, None)"))
             && assignment
                 .iter()
                 .any(|line| line.contains("&mut before_pixel_post")),
@@ -1715,7 +1815,11 @@ fn the_post_fan_out_runs_only_the_unposted_participants() {
 
 #[test]
 fn the_publish_session_targets_the_device_own_tiktok_build() {
-    let body = code_of("pub(crate) async fn open_publish_context(");
+    let wrapper = code_of("pub(crate) async fn open_publish_context(");
+    assert!(wrapper
+        .iter()
+        .any(|line| line.contains("open_publish_context_until(control, udid, || false)")));
+    let body = code_of("async fn open_publish_context_until(");
     assert!(
         body.iter()
             .any(|line| line.contains("resolve_tiktok_package")),

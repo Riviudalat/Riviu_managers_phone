@@ -7,7 +7,7 @@ for (const viewport of [
   { width: 900, height: 900 },
   { width: 820, height: 560 },
 ]) {
-  test(`production publish wizard ${viewport.width}`, async ({ page }) => {
+  test(`production publish quick workspace ${viewport.width}`, async ({ page }) => {
     await page.setViewportSize(viewport);
     await installTauriMock(page, { androidRoster: true, fleetSize: 20 });
     await page.addInitScript(() => {
@@ -113,188 +113,112 @@ for (const viewport of [
     await page.goto("/");
     await expect(page.getByTestId("device-tile")).toHaveCount(20);
     await page.getByRole("button", { name: "Đăng bài", exact: true }).click();
-    await page.locator(".automation-scope summary").click();
-    await page
-      .locator(".target-selector-modes label")
-      .filter({ hasText: "Toàn bộ" })
-      .click();
-    await page.locator(".automation-scope summary").click();
+    await page.getByRole("combobox", { name: "Phạm vi thiết bị" }).selectOption("all");
     await page
       .getByRole("button", { name: "Chọn thư mục", exact: true })
       .click();
+    await page.getByRole("button", { name: "Quét", exact: true }).click();
     await expect(
       page.getByRole("checkbox", { name: "Chọn Bài Đà Lạt 1", exact: true }),
     ).not.toBeChecked();
-    await page.getByRole("button", { name: "Chọn nhanh", exact: true }).click();
-    await page.getByRole("spinbutton", { name: "Số bài" }).fill("10");
-    await page
-      .getByRole("button", { name: "Chọn 10 bài", exact: true })
-      .click();
+
+    await page.getByRole("button", { name: "Chọn tất cả bài", exact: true }).click();
+    await expect(page.getByRole("textbox", { name: "Nội dung bài đăng", exact: true })).toHaveValue("Nội dung bài 1");
     const checkLayout = async (label: string) => {
-      const dimensions = await page
-        .locator(".publish-wizard")
-        .evaluate((root) => {
-          const visible = (e: Element) => !!e.getClientRects().length;
-          return {
-            overflow: document.documentElement.scrollWidth > innerWidth,
-            rows: [...root.querySelectorAll(".pw-page-rows,.pw-machine-grid")]
-              .filter(visible)
-              .filter((e) => e.scrollHeight > e.clientHeight + 1)
-              .map((e) => e.className),
-            offscreen: [...root.querySelectorAll("button,input,select")]
-              .filter(visible)
-              .filter((e) => {
-                const r = e.getBoundingClientRect();
-                return (
-                  r.x < 0 ||
-                  r.right > innerWidth + 1 ||
-                  r.bottom > innerHeight + 1
-                );
-              })
-              .map((e) => e.textContent),
-          };
-        });
-      expect(dimensions).toEqual({ overflow: false, rows: [], offscreen: [] });
-      const monitor = await page.locator(".run-monitor.is-minimized").boundingBox();
-      expect(monitor).not.toBeNull();
-      const before = await page.locator(".publish-wizard").boundingBox();
+      expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+      const root = page.locator(".publish-quick");
+      const before = await root.boundingBox();
       const surface = page.locator(".run-monitor");
       await surface.evaluate(element => element.classList.remove("is-minimized"));
-      expect(await page.locator(".publish-wizard").boundingBox()).toEqual(before);
+      expect(await root.boundingBox()).toEqual(before);
       await surface.evaluate(element => element.classList.add("is-minimized"));
-      await page.screenshot({
-        path: test.info().outputPath(`${label}-${viewport.width}.png`),
-      });
+      const footer = root.locator(".pq-footer");
+      const box = await footer.boundingBox();
+      expect(box!.x).toBeGreaterThanOrEqual(0);
+      expect(box!.x + box!.width).toBeLessThanOrEqual(viewport.width);
+      expect(box!.y + box!.height).toBeLessThanOrEqual(viewport.height);
+      await page.screenshot({ path: test.info().outputPath(`${label}-${viewport.width}.png`) });
     };
     await checkLayout("source");
-    await page.getByRole("button", { name: "Chọn máy", exact: true }).click();
-    await page.getByRole("button", { name: /Ghép tự động/ }).click();
-    await expect(page.locator(".pw-slot.is-filled").first()).toBeVisible();
+    await page.getByRole("button", { name: "Phóng to ảnh", exact: true }).click();
+    const imagePreview = page.getByRole("dialog", { name: "Xem trước · Bài Đà Lạt 1" });
+    await expect(imagePreview).toBeVisible();
+    await expect(imagePreview.getByRole("img")).toHaveAttribute("alt", "1.png");
+    await imagePreview.getByRole("button", { name: "Ảnh tiếp", exact: true }).click();
+    await expect(imagePreview.getByRole("img")).toHaveAttribute("alt", "2.png");
+    await expect(imagePreview.getByText("2 / 5", { exact: true })).toBeVisible();
+    const previewDimensions = await imagePreview.boundingBox();
+    expect(previewDimensions!.x).toBeGreaterThanOrEqual(0);
+    expect(previewDimensions!.y).toBeGreaterThanOrEqual(0);
+    expect(previewDimensions!.x + previewDimensions!.width).toBeLessThanOrEqual(viewport.width);
+    expect(previewDimensions!.y + previewDimensions!.height).toBeLessThanOrEqual(viewport.height);
+    await page.keyboard.press("Escape");
+    await expect(imagePreview).toHaveCount(0);
+    await expect(page.getByRole("button", { name: "Phóng to ảnh", exact: true })).toBeFocused();
+    const machines = page.getByRole("region", { name: "Máy thực hiện", exact: true });
+    await expect(machines.getByRole("checkbox")).toHaveCount(20);
+    expect(await machines.locator(".pq-machine-grid").evaluate(element => getComputedStyle(element).gridTemplateColumns.split(" ").length)).toBe(2);
+    await machines.getByRole("button", { name: "Chọn tất cả", exact: true }).click();
+    await page.getByRole("button", { name: "Chọn tất cả bài", exact: true }).click();
+    await page.getByRole("button", { name: "Chọn nhanh", exact: true }).click();
+    await expect(page.locator(".pq-footer")).toContainText("10/10 bài có máy");
     await checkLayout("board");
-    const first = page.locator(".pw-slot.is-filled .pw-slot-body").first(),
-      second = page.locator(".pw-slot.is-filled").nth(1);
-    const source = await first.getAttribute("data-post-drag");
-    await first.dragTo(second);
-    await expect(second.locator(".pw-slot-body")).toHaveAttribute(
-      "data-post-drag",
-      source!,
-    );
-    await page.getByRole("button", { name: "Hoàn tác ghép máy" }).click();
-    if (viewport.width === 820) {
-      const incoming = page.locator(".pw-post-pick").first();
-      const incomingId = await incoming.getAttribute("data-post-drag");
-      const beforeSlot = await page
-        .locator(".pw-slot")
-        .first()
-        .getAttribute("data-slot");
-      const from = (await incoming.boundingBox())!;
-      const next = (await page
-        .getByRole("button", { name: "Máy nhận: trang tiếp" })
-        .boundingBox())!;
-      await page.mouse.move(from.x + 20, from.y + 20);
-      await page.mouse.down();
-      await page.mouse.move(next.x + next.width / 2, next.y + next.height / 2, {
-        steps: 10,
-      });
-      await expect(page.locator(".pw-slot").first()).not.toHaveAttribute(
-        "data-slot",
-        beforeSlot!,
-      );
-      const destination = (await page
-        .locator(".pw-slot")
-        .first()
-        .boundingBox())!;
-      await page.mouse.move(destination.x + 30, destination.y + 45, {
-        steps: 6,
-      });
-      await page.mouse.up();
-      await expect(page.locator(".pw-slot-body").first()).toHaveAttribute(
-        "data-post-drag",
-        incomingId!,
-      );
-      await page.getByRole("button", { name: "Hoàn tác ghép máy" }).click();
-    }
-    await page
-      .getByRole("button", { name: "Xem lại & kiểm tra", exact: true })
-      .click();
-    await page
-      .getByRole("checkbox", { name: "Xóa ảnh đã chuyển trên máy" })
-      .check();
-    await checkLayout("review");
-    for (const label of ["Ghi kết quả lên Sheet", "Xóa ảnh đã chuyển trên máy"]) {
+    // Swapping the active post keeps the other post assigned to the displaced phone.
+    const assignmentSelect = page.getByRole("combobox", { name: "Máy nhận bài đang chỉnh" });
+    const firstPhone = await assignmentSelect.inputValue();
+    const secondPhone = await assignmentSelect.locator("option").nth(2).getAttribute("value");
+    await assignmentSelect.selectOption(secondPhone!);
+    await expect(assignmentSelect).toHaveValue(secondPhone!);
+    await assignmentSelect.selectOption(firstPhone);
+    await machines.getByRole("button", { name: "Bỏ chọn", exact: true }).click();
+    await expect(machines.getByRole("checkbox", { checked: true })).toHaveCount(0);
+    await machines.getByRole("checkbox", { name: /Chọn Máy 20 ·/ }).check();
+    await expect(machines.getByRole("checkbox", { checked: true })).toHaveCount(1);
+    await page.getByRole("button", { name: "Chọn nhanh", exact: true }).click();
+    await expect(machines.getByRole("status")).toContainText("Đã gán 1 bài cho 1 máy");
+    await expect(page.locator(".pq-footer")).toContainText("1/1 bài có máy");
+    await page.getByRole("button", { name: "Chọn tất cả bài", exact: true }).click();
+    await machines.getByRole("button", { name: "Chọn tất cả", exact: true }).click();
+    await page.getByRole("button", { name: "Chọn nhanh", exact: true }).click();
+    await expect(page.locator(".pq-footer")).toContainText("10/10 bài có máy");
+    await page.getByRole("tab", { name: "Hẹn giờ", exact: true }).click();
+    await expect(page.getByRole("tabpanel", { name: "Hẹn giờ", exact: true })).toBeVisible();
+    await page.getByRole("tab", { name: "Thiết lập", exact: true }).click();
+    await expect(page.locator(".pq-footer")).toContainText("10/10 bài có máy");
+    await page.getByRole("checkbox", { name: "Xóa bản chuyển sau khi đăng thành công" }).check();
+    for (const label of ["Ghi kết quả lên Sheet", "Xóa bản chuyển sau khi đăng thành công"]) {
       const row = await page.getByRole("checkbox", { name: label }).evaluate(input => {
         const parent = input.parentElement!;
         return { direction: getComputedStyle(parent).flexDirection, width: input.getBoundingClientRect().width, height: input.getBoundingClientRect().height };
       });
-      expect(row.direction).toBe("row");
-      expect(row.width).toBe(15);
-      expect(row.height).toBe(15);
+      expect(row).toEqual({ direction: "row", width: 15, height: 15 });
     }
-    await page
-      .getByRole("button", { name: "Kiểm tra 10 bài", exact: true })
-      .click();
-    await expect(
-      page.getByRole("button", { name: "Xác nhận đăng 10 bài", exact: true }),
-    ).toBeEnabled();
-    await expect(
-      page.getByText("Nhạc được chọn sau khi mở TikTok.", { exact: false }),
-    ).toBeVisible();
-    await page.screenshot({
-      path: test.info().outputPath(`preflight-${viewport.width}.png`),
-    });
-    const axe = await new AxeBuilder({ page })
-      .include(".publish-dialog[open]")
-      .withTags(["wcag2a", "wcag2aa"])
-      .analyze();
+    await page.getByRole("button", { name: "Kiểm tra & đăng", exact: true }).click();
+    await expect(page.getByRole("button", { name: "Xác nhận đăng 10 bài", exact: true })).toBeEnabled();
+    await expect(page.getByText("Nhạc được chọn sau khi mở TikTok.", { exact: false })).toBeVisible();
+    await page.screenshot({ path: test.info().outputPath(`preflight-${viewport.width}.png`) });
+    const axe = await new AxeBuilder({ page }).include(".publish-dialog[open]").withTags(["wcag2a", "wcag2aa"]).analyze();
     expect(axe.violations).toEqual([]);
-    await page
-      .getByRole("button", { name: "Xác nhận đăng 10 bài", exact: true })
-      .click();
-    const publicConfirm = page.getByRole("alertdialog", {
-      name: "Xác nhận đăng công khai?",
-    });
+    await page.getByRole("button", { name: "Xác nhận đăng 10 bài", exact: true }).click();
+    const publicConfirm = page.getByRole("alertdialog", { name: "Xác nhận đăng công khai?" });
     await expect(publicConfirm).toBeVisible();
-    await expect(
-      publicConfirm.getByRole("button", { name: "Đăng bài", exact: true }),
-    ).toBeFocused();
-    await publicConfirm
-      .getByRole("button", { name: "Huỷ", exact: true })
-      .click();
-    await expect(
-      page.getByRole("dialog", { name: "Xem lại trước khi bắt đầu" }),
-    ).toBeVisible();
-    const calls = await page.evaluate(
-      () =>
-        (
-          window as unknown as {
-            __PUBLISH_CALLS__: {
-              command: string;
-              args: {
-                request?: {
-                  udids: string[];
-                  bundleIds: string[];
-                  deleteAfterPublish: boolean;
-                };
-              };
-            }[];
-          }
-        ).__PUBLISH_CALLS__,
-    );
+    await expect(publicConfirm.getByRole("button", { name: "Đăng bài", exact: true })).toBeFocused();
+    await publicConfirm.getByRole("button", { name: "Huỷ", exact: true }).click();
+    const checkDialog = page.getByRole("dialog", { name: "Kiểm tra đợt đăng" });
+    await expect(checkDialog).toBeVisible();
+    const calls = await page.evaluate(() => (window as unknown as { __PUBLISH_CALLS__: { command: string; args: { request?: { udids: string[]; bundleIds: string[]; deleteAfterPublish: boolean } } }[] }).__PUBLISH_CALLS__);
     expect(calls).toHaveLength(1);
     expect(calls[0].args.request?.udids).toHaveLength(10);
     expect(calls[0].args.request?.bundleIds).toHaveLength(10);
     expect(calls[0].args.request?.deleteAfterPublish).toBe(true);
     expect(errors).toEqual([]);
-    // Closing/switching a workspace persists input, never campaign consent.
-    await page.getByRole("dialog", { name: "Xem lại trước khi bắt đầu" }).getByRole("button", { name: "Đóng" }).click();
+    await checkDialog.getByRole("button", { name: "Đóng" }).click();
     await page.getByRole("button", { name: "Dữ liệu", exact: true }).click();
     await expect(page.getByRole("alertdialog")).toHaveCount(0);
     await page.getByRole("button", { name: "Đăng bài", exact: true }).click();
-    await expect(page.getByText("10 bài được chọn", { exact: true })).toBeVisible();
+    await expect(page.locator(".pq-footer")).toContainText("10/10 bài có máy");
     await page.reload();
     await page.getByRole("button", { name: "Đăng bài", exact: true }).click();
-    await expect(page.getByText("10 bài được chọn", { exact: true })).toBeVisible();
-    await page.getByRole("button", { name: "Chọn máy", exact: true }).click();
-    await expect(page.getByText("10 / 10 bài đã có máy", { exact: false })).toBeVisible();
+    await expect(page.locator(".pq-footer")).toContainText("10/10 bài có máy");
   });
 }

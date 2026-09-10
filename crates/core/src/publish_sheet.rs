@@ -47,6 +47,7 @@
 //! the app uses; that is fine here in a way it is not for an API key that can spend money,
 //! because the worst this token can do is write rows to one spreadsheet.
 
+use anyhow::Context;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -55,6 +56,7 @@ use serde::{Deserialize, Serialize};
 pub const WEBHOOK_URL_SETTING: &str = "publish_sheet_webhook_url";
 /// Settings key holding the shared token the script checks.
 pub const WEBHOOK_TOKEN_SETTING: &str = "publish_sheet_webhook_token";
+pub const INTERNAL_REPORTING_SETTING: &str = "publish_sheet_internal_reporting";
 
 /// How long to wait on the webhook.
 ///
@@ -93,6 +95,41 @@ pub struct SheetRow {
     /// paste the same link into column D twice, and nothing on the desktop can tell that
     /// case apart from a request that never arrived.
     pub assignment_id: String,
+    /// Immutable time the Post intent was recorded, formatted by the destination timezone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub posted_at: Option<String>,
+}
+
+/// Read-only report facts; these fields never create a classic outbox obligation.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct InternalReportMetadata {
+    pub report_version: u32,
+    pub row_revision: i64,
+    pub machine: String,
+    pub tiktok_account: String,
+    pub status: String,
+    pub state_notes: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct InternalSheetReportRow {
+    pub row_kind: String,
+    #[serde(flatten)]
+    pub metadata: InternalReportMetadata,
+    pub assignment_id: String,
+    pub post_url: String,
+    pub poster: String,
+    pub partners: Vec<String>,
+    pub posted_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SheetDeliverySettings {
+    pub webhook_url: String,
+    pub token: String,
+    pub internal_reporting: bool,
 }
 
 /// What the script answers.
@@ -175,37 +212,144 @@ fn is_script_content_host(host: &str) -> bool {
 fn client() -> anyhow::Result<reqwest::Client> {
     Ok(reqwest::Client::builder()
         .timeout(WEBHOOK_TIMEOUT)
-        // **One measured hop, and it may not carry the body.**
-        //
-        // The token is a bearer credential in the body, so a redirect that *preserves* the
-        // method — 307 and 308 — would hand it to whoever answers. Those are refused
-        // outright. A 302/303 turns the follow-up into a GET with no body, which is exactly
-        // how Apps Script's own answer is fetched, and is why this hop costs the credential
-        // nothing.
-        //
-        // Bounded at one: `/exec` → content host is the whole protocol, and a chain longer
-        // than that is not Apps Script answering.
-        .redirect(reqwest::redirect::Policy::custom(|attempt| {
-            let body_preserving = matches!(attempt.status().as_u16(), 307 | 308);
-            let target_ok = attempt.url().scheme() == "https"
-                && attempt.url().host_str().is_some_and(is_script_content_host);
-            if attempt.previous().len() > 1 {
-                attempt.error("webhook Sheet chuyển hướng quá nhiều lần")
-            } else if body_preserving {
-                attempt.error(
-                    "webhook Sheet chuyển hướng kiểu giữ nguyên body (307/308) — token nằm \
-                     trong body nên KHÔNG đi theo",
-                )
-            } else if target_ok {
-                attempt.follow()
-            } else {
-                attempt.error(
-                    "webhook Sheet chuyển hướng ra ngoài script.googleusercontent.com — \
-                     không đi theo",
-                )
-            }
-        }))
+        .connect_timeout(Duration::from_secs(7))
+        .redirect(reqwest::redirect::Policy::none())
         .build()?)
+}
+
+#[derive(Debug)]
+struct SheetTransportError {
+    message: String,
+    retryable: bool,
+}
+
+fn sheet_redirect(status: reqwest::StatusCode, location: &str) -> anyhow::Result<reqwest::Url> {
+    anyhow::ensure!(
+        matches!(status.as_u16(), 302 | 303),
+        "Sheet chuyển hướng không hỗ trợ (HTTP {status})"
+    );
+    let url = reqwest::Url::parse(location)
+        .map_err(|_| anyhow::anyhow!("Sheet trả địa chỉ chuyển hướng không hợp lệ"))?;
+    anyhow::ensure!(
+        url.scheme() == "https"
+            && url.host_str().is_some_and(is_script_content_host)
+            && url.username().is_empty()
+            && url.password().is_none()
+            && url.port_or_known_default() == Some(443),
+        "Sheet chuyển hướng ngoài máy chủ nội dung Google"
+    );
+    Ok(url)
+}
+
+fn retry_sheet_status(status: reqwest::StatusCode, content_hop: bool) -> bool {
+    status == reqwest::StatusCode::TOO_MANY_REQUESTS
+        || status.is_server_error()
+        || (content_hop && status == reqwest::StatusCode::NOT_FOUND)
+}
+
+fn sheet_network_error(error: reqwest::Error, stage: &str) -> SheetTransportError {
+    let retryable =
+        error.is_timeout() || error.is_connect() || error.is_request() || error.is_body();
+    // reqwest's Display can include user_content_key and the complete ephemeral URL.
+    SheetTransportError {
+        message: format!("Kết nối Sheet lỗi tại {stage}: {}", error.without_url()),
+        retryable,
+    }
+}
+
+async fn sheet_post_once(
+    http: &reqwest::Client,
+    webhook: &str,
+    payload: &serde_json::Value,
+) -> Result<String, SheetTransportError> {
+    let mut response = http
+        .post(webhook)
+        .json(payload)
+        .send()
+        .await
+        .map_err(|error| sheet_network_error(error, "webhook"))?;
+    let mut content_hop = false;
+    if response.status().is_redirection() {
+        let location = response
+            .headers()
+            .get(reqwest::header::LOCATION)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or("");
+        let url =
+            sheet_redirect(response.status(), location).map_err(|error| SheetTransportError {
+                message: error.to_string(),
+                retryable: false,
+            })?;
+        // A fresh GET contains neither the token-bearing POST body nor its credentials.
+        response = http
+            .get(url)
+            .send()
+            .await
+            .map_err(|error| sheet_network_error(error, "nội dung Google"))?;
+        content_hop = true;
+    }
+    let status = response.status();
+    if !status.is_success() {
+        return Err(SheetTransportError {
+            message: format!(
+                "Kết nối ghi trả HTTP {status} tại {}",
+                if content_hop {
+                    "nội dung Google"
+                } else {
+                    "webhook"
+                }
+            ),
+            retryable: retry_sheet_status(status, content_hop),
+        });
+    }
+    limited_body(response).await.map_err(|error| {
+        let retryable = error
+            .downcast_ref::<reqwest::Error>()
+            .is_some_and(|error| error.is_body() || error.is_timeout());
+        SheetTransportError {
+            message: error.to_string(),
+            retryable,
+        }
+    })
+}
+
+async fn sheet_post_body(
+    webhook: &str,
+    payload: &serde_json::Value,
+    budget: Duration,
+    attempts: u32,
+) -> anyhow::Result<String> {
+    let http = client()?;
+    let deadline = tokio::time::Instant::now() + budget;
+    for attempt in 0..attempts {
+        // Reserve the remaining backoffs; all retries start at the original webhook.
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        let delay_reserve = Duration::from_secs((attempt + 1..attempts).map(u64::from).sum());
+        let allowance = remaining.saturating_sub(delay_reserve) / (attempts - attempt);
+        let result = tokio::time::timeout(allowance, sheet_post_once(&http, webhook, payload))
+            .await
+            .unwrap_or_else(|_| {
+                Err(SheetTransportError {
+                    message: "Kết nối Sheet quá thời gian chờ".into(),
+                    retryable: true,
+                })
+            });
+        match result {
+            Ok(body) => return Ok(body),
+            Err(error) => {
+                if !error.retryable || attempt + 1 == attempts {
+                    anyhow::bail!("{} (lượt {}/{})", error.message, attempt + 1, attempts);
+                }
+                tracing::warn!(attempt = attempt + 1, stage_error = %error.message, "Sheet connection will retry from webhook");
+                let delay = Duration::from_secs(u64::from(attempt + 1));
+                if tokio::time::Instant::now() + delay >= deadline {
+                    anyhow::bail!("{}; hết thời gian kết nối", error.message);
+                }
+                tokio::time::sleep(delay).await;
+            }
+        }
+    }
+    anyhow::bail!("Sheet chưa có lượt kết nối")
 }
 
 /// Whether a webhook URL is one this client will send a credential to.
@@ -233,6 +377,14 @@ pub fn is_acceptable_webhook(url: &str) -> bool {
 /// as a failure would leave the row in the outbox forever, retrying something that is
 /// already done.
 pub async fn push_row(webhook_url: &str, row: &SheetRow) -> anyhow::Result<()> {
+    push_row_with_metadata(webhook_url, row, None).await
+}
+
+pub async fn push_row_with_metadata(
+    webhook_url: &str,
+    row: &SheetRow,
+    metadata: Option<&InternalReportMetadata>,
+) -> anyhow::Result<()> {
     anyhow::ensure!(
         !webhook_url.trim().is_empty(),
         "chưa đặt webhook Apps Script — điền URL trong cài đặt trước khi đẩy link lên Sheet"
@@ -253,37 +405,409 @@ pub async fn push_row(webhook_url: &str, row: &SheetRow) -> anyhow::Result<()> {
         !row.post_url.trim().is_empty() && !row.assignment_id.trim().is_empty(),
         "thiếu link bài hoặc assignmentId — script sẽ từ chối mãi mà không ai biết vì sao"
     );
-    let response = client()?
-        .post(webhook_url)
-        .json(row)
-        .send()
-        .await
-        .map_err(|error| anyhow::anyhow!("không gọi được webhook Sheet: {error}"))?;
+    let mut payload = serde_json::to_value(row)?;
+    if let Some(metadata) = metadata {
+        let fields = serde_json::to_value(metadata)?;
+        payload
+            .as_object_mut()
+            .context("Sheet payload object")?
+            .extend(fields.as_object().context("Sheet metadata object")?.clone());
+        payload["rowKind"] = serde_json::json!("canonical");
+    }
+    send_sheet_payload(webhook_url, &row.token, &payload, None).await
+}
 
-    let status = response.status();
-    let body = response.text().await.unwrap_or_default();
-    // Apps Script answers 200 with a JSON body for its own refusals — a non-2xx here is
-    // Google's infrastructure, not the script, and the body is an HTML error page. Quoting a
-    // slice of it is what tells the two apart in a log.
-    //
-    // **The slice is redacted first, and that is not paranoia about our own script.** The
-    // body comes from whatever host the URL points at; an endpoint that echoes the request
-    // — a debug handler, a proxy, a mistyped host — puts the bearer token in it, and this
-    // string is stored in `last_error` and written to the app log. A credential that
-    // reaches a log has to be re-issued, so the quoted evidence never carries it.
+pub async fn push_internal_report(
+    webhook_url: &str,
+    token: &str,
+    row: &InternalSheetReportRow,
+) -> anyhow::Result<()> {
     anyhow::ensure!(
-        status.is_success(),
-        "webhook Sheet trả {status}: {}",
-        redact_token(&body, &row.token)
+        is_acceptable_webhook(webhook_url) && !token.trim().is_empty(),
+        "Sheet nội bộ cần webhook HTTPS và token"
     );
+    anyhow::ensure!(
+        row.row_kind == "internalReport"
+            && row.metadata.report_version == 1
+            && !row.assignment_id.trim().is_empty()
+            && row.metadata.row_revision >= 0,
+        "internal report identity/version missing"
+    );
+    let mut payload = serde_json::to_value(row)?;
+    payload["token"] = serde_json::json!(token);
+    send_sheet_payload(
+        webhook_url,
+        token,
+        &payload,
+        Some((&row.assignment_id, row.metadata.row_revision)),
+    )
+    .await
+}
+
+async fn send_sheet_payload(
+    webhook_url: &str,
+    token: &str,
+    payload: &serde_json::Value,
+    internal_ack: Option<(&str, i64)>,
+) -> anyhow::Result<()> {
+    let body = sheet_post_body(webhook_url, payload, WEBHOOK_TIMEOUT, 1).await?;
     let reply: SheetReply = serde_json::from_str(&body).map_err(|error| {
         anyhow::anyhow!(
             "webhook Sheet trả thứ không phải JSON ({error}) — thường là do URL trỏ vào bản \
              deploy cũ hoặc chưa đặt quyền truy cập: {}",
-            redact_token(&body, &row.token)
+            redact_token(&body, token)
         )
     })?;
-    interpret(reply)
+    interpret(reply)?;
+    if let Some((assignment_id, revision)) = internal_ack {
+        validate_internal_ack(&body, assignment_id, revision)?;
+    }
+    Ok(())
+}
+
+fn validate_internal_ack(body: &str, assignment_id: &str, revision: i64) -> anyhow::Result<()> {
+    let ack: serde_json::Value = serde_json::from_str(body)?;
+    anyhow::ensure!(
+        ack["ok"] == true
+            && ack["reportVersion"] == 1
+            && ack["assignmentId"].as_str() == Some(assignment_id)
+            && ack["rowRevision"]
+                .as_i64()
+                .is_some_and(|value| value >= revision),
+        "Sheet nội bộ chưa xác nhận đúng hàng/phiên bản; kiểm tra bản Apps Script đã triển khai"
+    );
+    Ok(())
+}
+
+/// The user-facing Google Sheet address, independent of the Apps Script endpoint.
+pub const SHEET_URL_SETTING: &str = "publish_sheet_url";
+const CHECK_TIMEOUT: Duration = Duration::from_secs(20);
+const CHECK_BODY_LIMIT: usize = 2 * 1024 * 1024;
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SheetCheckResult {
+    pub sheet_url: String,
+    pub spreadsheet_id: String,
+    pub sheet_gid: u64,
+    pub readable: bool,
+    pub connection_verified: bool,
+    pub layout: Option<String>,
+    pub columns: Vec<String>,
+    pub message: String,
+}
+
+fn parse_sheet_url(value: &str) -> anyhow::Result<SheetCheckResult> {
+    let parsed = url::Url::parse(value.trim()).context("Link Google Sheet không hợp lệ")?;
+    anyhow::ensure!(
+        parsed.scheme() == "https"
+            && parsed.host_str() == Some("docs.google.com")
+            && parsed.username().is_empty()
+            && parsed.password().is_none()
+            && parsed.port_or_known_default() == Some(443),
+        "Dùng link HTTPS của docs.google.com/spreadsheets/d/..."
+    );
+    let parts: Vec<_> = parsed
+        .path_segments()
+        .context("Đường dẫn Sheet không hợp lệ")?
+        .collect();
+    anyhow::ensure!(
+        parts.len() >= 3 && parts[0] == "spreadsheets" && parts[1] == "d",
+        "Dùng link Google Sheet có mã bảng sau /spreadsheets/d/"
+    );
+    let id = parts[2];
+    anyhow::ensure!(
+        !id.is_empty()
+            && id.len() <= 128
+            && id
+                .bytes()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'_' | b'-')),
+        "Mã Google Sheet không hợp lệ"
+    );
+    anyhow::ensure!(
+        parts[3..]
+            .iter()
+            .all(|part| part.is_empty() || *part == "edit"),
+        "Dùng link chỉnh sửa Google Sheet, không dùng link xuất bản hoặc tải xuống"
+    );
+    let mut gids = parsed
+        .query_pairs()
+        .filter(|(k, _)| k == "gid")
+        .map(|(_, v)| v.into_owned())
+        .collect::<Vec<_>>();
+    if let Some(fragment) = parsed.fragment() {
+        gids.extend(
+            url::form_urlencoded::parse(fragment.as_bytes())
+                .filter(|(k, _)| k == "gid")
+                .map(|(_, v)| v.into_owned()),
+        );
+    }
+    let mut gid = None;
+    for value in gids {
+        let next = value
+            .parse::<u64>()
+            .context("gid của tab phải là số không âm")?;
+        anyhow::ensure!(next <= i32::MAX as u64, "gid của tab vượt giới hạn");
+        anyhow::ensure!(
+            gid.is_none_or(|old| old == next),
+            "Link có nhiều gid khác nhau"
+        );
+        gid = Some(next);
+    }
+    let gid = gid.unwrap_or(0);
+    Ok(SheetCheckResult {
+        sheet_url: format!("https://docs.google.com/spreadsheets/d/{id}/edit#gid={gid}"),
+        spreadsheet_id: id.into(),
+        sheet_gid: gid,
+        readable: false,
+        connection_verified: false,
+        layout: None,
+        columns: vec![],
+        message: String::new(),
+    })
+}
+
+fn check_columns(columns: &[String]) -> anyhow::Result<String> {
+    let normalized = columns
+        .iter()
+        .map(|s| s.trim().trim_start_matches('\u{feff}').to_lowercase())
+        .collect::<Vec<_>>();
+    anyhow::ensure!(
+        normalized.len() >= 4,
+        "Sheet thiếu các cột STT, Người air, Ngày, Link"
+    );
+    let c = |n| normalized.get(n).map(String::as_str).unwrap_or("");
+    if c(0) == "stt" && c(1) == "người air" && c(2) == "ngày" && c(3) == "link" {
+        if c(4) == "máy"
+            && c(5) == "tài khoản tiktok"
+            && c(6) == "trạng thái"
+            && c(7) == "lỗi hoặc ghi chú"
+        {
+            anyhow::ensure!(
+                c(8) == "đối tác",
+                "Sheet nội bộ thiếu cột Đối tác sau bốn cột báo cáo"
+            );
+            return Ok("internal".into());
+        }
+        anyhow::ensure!(c(4) == "đối tác", "Sheet thiếu cột Đối tác ngay sau Link");
+        return Ok("compact".into());
+    }
+    if matches!(c(1), "nhân viên" | "người đăng") && c(3).contains("link") && c(10) == "đối tác"
+    {
+        return Ok("legacy".into());
+    }
+    anyhow::bail!("Tiêu đề bảng chưa khớp mẫu Đăng bài")
+}
+
+fn csv_columns(body: &str, content_type: &str) -> anyhow::Result<Vec<String>> {
+    anyhow::ensure!(body.len() <= CHECK_BODY_LIMIT, "Phản hồi Sheet vượt 2 MiB");
+    let clean = body.trim_start_matches('\u{feff}').trim_start();
+    anyhow::ensure!(
+        !content_type.to_ascii_lowercase().contains("text/html") && !clean.starts_with('<'),
+        "Google yêu cầu đăng nhập hoặc chưa chia sẻ quyền đọc bảng"
+    );
+    let mut fields = Vec::new();
+    let mut value = String::new();
+    let mut quoted = false;
+    let mut chars = clean.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '"' {
+            if quoted && chars.peek() == Some(&'"') {
+                chars.next();
+                value.push('"');
+            } else {
+                quoted = !quoted;
+            }
+        } else if c == ',' && !quoted {
+            fields.push(std::mem::take(&mut value));
+        } else if matches!(c, '\r' | '\n') && !quoted {
+            break;
+        } else {
+            value.push(c);
+        }
+    }
+    anyhow::ensure!(!quoted, "Hàng tiêu đề CSV chưa kết thúc dấu nháy");
+    fields.push(value);
+    check_columns(&fields)?;
+    Ok(fields)
+}
+
+fn public_check_client() -> anyhow::Result<reqwest::Client> {
+    Ok(reqwest::Client::builder()
+        .timeout(CHECK_TIMEOUT)
+        .redirect(reqwest::redirect::Policy::custom(|attempt| {
+            let host = attempt.url().host_str().unwrap_or("");
+            if attempt.previous().len() > 3
+                || attempt.url().scheme() != "https"
+                || !(host == "docs.google.com"
+                    || host == "drive.google.com"
+                    || host.ends_with(".googleusercontent.com"))
+            {
+                attempt.error("Sheet chuyển hướng đến trang đăng nhập hoặc host khác")
+            } else {
+                attempt.follow()
+            }
+        }))
+        .build()?)
+}
+
+async fn limited_body(mut response: reqwest::Response) -> anyhow::Result<String> {
+    anyhow::ensure!(
+        response
+            .content_length()
+            .is_none_or(|length| length <= CHECK_BODY_LIMIT as u64),
+        "Phản hồi Sheet vượt 2 MiB"
+    );
+    let mut bytes = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|error| anyhow::Error::new(error.without_url()))?
+    {
+        anyhow::ensure!(
+            bytes.len() + chunk.len() <= CHECK_BODY_LIMIT,
+            "Phản hồi Sheet vượt 2 MiB"
+        );
+        bytes.extend_from_slice(&chunk);
+    }
+    String::from_utf8(bytes).context("Phản hồi Sheet không phải UTF-8")
+}
+
+fn validate_sheet_check_ack(
+    body: &str,
+    expected: &SheetCheckResult,
+    token: &str,
+) -> anyhow::Result<(String, Vec<String>)> {
+    let ack: serde_json::Value = serde_json::from_str(body).map_err(|_| {
+        anyhow::anyhow!(
+            "Kết nối ghi chưa hỗ trợ kiểm tra; cập nhật Apps Script. {}",
+            redact_token(body, token)
+        )
+    })?;
+    anyhow::ensure!(
+        ack["ok"] == true,
+        "Kết nối ghi từ chối: {}",
+        redact_token(
+            ack["error"]
+                .as_str()
+                .unwrap_or("cần cập nhật Apps Script hoặc kiểm tra token"),
+            token
+        )
+    );
+    anyhow::ensure!(
+        ack["checkVersion"] == 1,
+        "Cập nhật Apps Script để hỗ trợ kiểm tra kết nối không ghi dữ liệu"
+    );
+    anyhow::ensure!(
+        ack["spreadsheetId"].as_str() == Some(expected.spreadsheet_id.as_str())
+            && ack["sheetGid"].as_u64() == Some(expected.sheet_gid),
+        "Kết nối ghi hiện trỏ tới bảng hoặc tab khác; link mới chưa được kết nối"
+    );
+    let columns = ack["columns"]
+        .as_array()
+        .context("Kết nối không trả tiêu đề bảng")?
+        .iter()
+        .map(|v| {
+            v.as_str()
+                .map(str::to_owned)
+                .context("Tiêu đề bảng không hợp lệ")
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    let layout = check_columns(&columns)?;
+    anyhow::ensure!(
+        ack["layout"].as_str() == Some(layout.as_str()),
+        "Bố cục kiểm tra không khớp tiêu đề"
+    );
+    Ok((layout, columns))
+}
+
+/// Check read access and the configured writer's actual target without writing a Sheet row.
+pub async fn check_sheet(
+    value: &str,
+    settings: &SheetDeliverySettings,
+) -> anyhow::Result<SheetCheckResult> {
+    let mut result = parse_sheet_url(value)?;
+    let read = async {
+        let url = format!(
+            "https://docs.google.com/spreadsheets/d/{}/export?format=csv&gid={}",
+            result.spreadsheet_id, result.sheet_gid
+        );
+        let response = public_check_client()?.get(url).send().await?;
+        anyhow::ensure!(
+            response.status().is_success(),
+            "Google chưa cho phép đọc bảng (HTTP {})",
+            response.status()
+        );
+        let kind = response
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .to_owned();
+        let body = limited_body(response).await?;
+        let columns = csv_columns(&body, &kind)?;
+        Ok::<_, anyhow::Error>((check_columns(&columns)?, columns))
+    }
+    .await;
+    let mut details = Vec::new();
+    match read {
+        Ok((layout, columns)) => {
+            result.readable = true;
+            result.layout = Some(layout);
+            result.columns = columns;
+        }
+        Err(error) => details.push(error.to_string()),
+    };
+    if is_acceptable_webhook(&settings.webhook_url) && !settings.token.trim().is_empty() {
+        let checked=async {
+            let payload=serde_json::json!({"rowKind":"check","checkVersion":1,"token":settings.token,"spreadsheetId":result.spreadsheet_id,"sheetGid":result.sheet_gid});
+            let body = sheet_post_body(&settings.webhook_url, &payload, CHECK_TIMEOUT, 3).await?;
+            validate_sheet_check_ack(&body, &result, &settings.token)
+        }.await;
+        match checked {
+            Ok((layout, columns)) => {
+                result.readable = true;
+                result.connection_verified = true;
+                result.layout = Some(layout);
+                result.columns = columns;
+            }
+            Err(error) => details.push(redact_token(&error.to_string(), &settings.token)),
+        }
+    } else {
+        details.push("Chưa cấu hình kết nối ghi cho bảng này".into());
+    }
+    result.message = if result.connection_verified {
+        "Đã kiểm tra đúng bảng và tab qua kết nối ghi; không thêm dữ liệu thử".into()
+    } else if result.readable {
+        format!(
+            "Đọc được bảng; chưa xác minh kết nối ghi. {}",
+            details.join(". ")
+        )
+    } else {
+        format!("Chưa kiểm tra được bảng. {}", details.join(". "))
+    };
+    Ok(result)
+}
+
+/// Explicit initialization endpoint, separate from the read-only connection check.
+pub async fn prepare_sheet(
+    value: &str,
+    settings: &SheetDeliverySettings,
+) -> anyhow::Result<SheetCheckResult> {
+    let mut result = parse_sheet_url(value)?;
+    anyhow::ensure!(
+        is_acceptable_webhook(&settings.webhook_url) && !settings.token.trim().is_empty(),
+        "Chưa có kết nối ghi cho Sheet này"
+    );
+    let payload = serde_json::json!({"rowKind":"prepare","checkVersion":1,"token":settings.token,"spreadsheetId":result.spreadsheet_id,"sheetGid":result.sheet_gid});
+    let body = sheet_post_body(&settings.webhook_url, &payload, Duration::from_secs(45), 3).await?;
+    let (layout, columns) = validate_sheet_check_ack(&body, &result, &settings.token)?;
+    result.readable = true;
+    result.connection_verified = true;
+    result.layout = Some(layout);
+    result.columns = columns;
+    result.message = "Sheet đã sẵn sàng ghi kết quả".into();
+    Ok(result)
 }
 
 #[cfg(test)]
@@ -311,9 +835,10 @@ mod tests {
             poster: "@cn.qut.lt4".into(),
             partners: vec!["Quán A".into()],
             assignment_id: "a-1".into(),
+            posted_at: Some("2026-09-08T19:46:32Z".into()),
         })
         .expect("the payload serialises");
-        let sent: Vec<String> = sent
+        let mut sent: Vec<String> = sent
             .as_object()
             .expect("a JSON object")
             .keys()
@@ -327,6 +852,9 @@ mod tests {
                  dropped on arrival, silently"
             );
         }
+        let internal = serde_json::to_value(internal_fixture()).unwrap();
+        sent.extend(internal.as_object().unwrap().keys().cloned());
+        sent.extend(["checkVersion", "spreadsheetId", "sheetGid"].map(str::to_owned));
 
         // Every `payload.<name>` the script mentions, harvested from its own text.
         let mut read: Vec<String> = script
@@ -349,6 +877,115 @@ mod tests {
                  it arrives `undefined` and lands in the sheet as an empty cell"
             );
         }
+    }
+
+    fn internal_fixture() -> InternalSheetReportRow {
+        InternalSheetReportRow {
+            row_kind: "internalReport".into(),
+            metadata: InternalReportMetadata {
+                report_version: 1,
+                row_revision: 7,
+                machine: "Máy 17".into(),
+                tiktok_account: String::new(),
+                status: "Chưa đăng".into(),
+                state_notes: String::new(),
+            },
+            assignment_id: "assignment-fixture".into(),
+            post_url: String::new(),
+            poster: "bot".into(),
+            partners: vec!["Partner A".into()],
+            posted_at: None,
+        }
+    }
+
+    #[test]
+    fn sheet_check_parses_only_normal_google_sheet_targets_and_unambiguous_gid() {
+        let target = parse_sheet_url(
+            "https://docs.google.com/spreadsheets/d/fixture_Ab-12/edit?gid=37#gid=37",
+        )
+        .unwrap();
+        assert_eq!(target.sheet_gid, 37);
+        assert_eq!(target.spreadsheet_id, "fixture_Ab-12");
+        assert_eq!(
+            target.sheet_url,
+            "https://docs.google.com/spreadsheets/d/fixture_Ab-12/edit#gid=37"
+        );
+        for url in [
+            "http://docs.google.com/spreadsheets/d/abc/edit",
+            "https://docs.google.com.evil.test/spreadsheets/d/abc/edit",
+            "https://secret@docs.google.com/spreadsheets/d/abc/edit",
+            "https://docs.google.com:444/spreadsheets/d/abc/edit",
+            "https://docs.google.com/spreadsheets/d/abc/edit?gid=1#gid=2",
+            "https://docs.google.com/spreadsheets/d/%2e%2e/edit",
+            "https://docs.google.com/spreadsheets/d/abc/edit#gid=-1",
+        ] {
+            assert!(parse_sheet_url(url).is_err(), "accepted {url}");
+        }
+    }
+
+    #[test]
+    fn sheet_check_rejects_login_html_and_damaged_headers_and_reads_quoted_csv() {
+        for body in [
+            "<!DOCTYPE html><html>Sign in</html>",
+            "<html>STT,Người air,Ngày,Link,Đối tác</html>",
+            "STT,broken,Ngày,Link,Đối tác",
+        ] {
+            assert!(csv_columns(body, "text/csv").is_err());
+        }
+        let cols = csv_columns(
+            "\u{feff}\"STT\",\"Người air\",Ngày,Link,Đối tác\r\n1,bot",
+            "text/csv",
+        )
+        .unwrap();
+        assert_eq!(check_columns(&cols).unwrap(), "compact");
+        assert!(csv_columns("STT,Người air,Ngày,Link,Đối tác", "text/html").is_err());
+        assert!(csv_columns(&"x".repeat(CHECK_BODY_LIMIT + 1), "text/csv").is_err());
+    }
+
+    #[test]
+    fn sheet_check_requires_actual_target_version_and_redacts_token_in_errors() {
+        let target =
+            parse_sheet_url("https://docs.google.com/spreadsheets/d/fixture/edit#gid=7").unwrap();
+        let ack = serde_json::json!({"ok":true,"checkVersion":1,"spreadsheetId":"fixture","sheetGid":7,"layout":"compact","columns":["STT","Người air","Ngày","Link","Đối tác"]});
+        assert!(validate_sheet_check_ack(&ack.to_string(), &target, "token-secret").is_ok());
+        for field in ["spreadsheetId", "sheetGid", "checkVersion"] {
+            let mut wrong = ack.clone();
+            wrong[field] = serde_json::json!("wrong");
+            assert!(validate_sheet_check_ack(&wrong.to_string(), &target, "token-secret").is_err());
+        }
+        let error = validate_sheet_check_ack(
+            r#"{"ok":false,"error":"token-secret rejected"}"#,
+            &target,
+            "token-secret",
+        )
+        .unwrap_err();
+        assert!(!error.to_string().contains("token-secret"));
+        assert!(validate_sheet_check_ack(r#"{"ok":true}"#, &target, "token-secret").is_err());
+    }
+
+    #[test]
+    fn internal_report_wire_supports_blank_link_and_requires_a_revision_ack() {
+        let row = internal_fixture();
+        let value = serde_json::to_value(&row).unwrap();
+        assert_eq!(value["postUrl"], "");
+        assert!(value["postedAt"].is_null());
+        assert_eq!(value["status"], "Chưa đăng");
+        assert_eq!(value["rowRevision"], 7);
+        assert_eq!(value["partners"][0], "Partner A");
+        for reply in [
+            r#"{"ok":true}"#,
+            r#"{"ok":true,"reportVersion":1,"assignmentId":"wrong","rowRevision":7}"#,
+            r#"{"ok":true,"reportVersion":1,"assignmentId":"assignment-fixture","rowRevision":6}"#,
+            r#"{"ok":false,"reportVersion":1,"assignmentId":"assignment-fixture","rowRevision":9}"#,
+        ] {
+            assert!(validate_internal_ack(reply, "assignment-fixture", 7).is_err());
+        }
+        assert!(validate_internal_ack(
+            r#"{"ok":true,"reportVersion":1,"assignmentId":"assignment-fixture","rowRevision":8}"#,
+            "assignment-fixture",
+            7
+        )
+        .is_ok());
     }
 
     /// **The shipped script's column numbers depend on each other, and nothing else checks
@@ -519,6 +1156,7 @@ mod tests {
             poster: "bot".into(),
             partners: vec![],
             assignment_id: "assign-1".into(),
+            posted_at: Some("2026-09-08T19:46:32Z".into()),
         };
         let error = push_row("https://example/hook", &row)
             .await
@@ -540,6 +1178,7 @@ mod tests {
             poster: "bot".into(),
             partners: vec!["Quán A".into()],
             assignment_id: "assign-1".into(),
+            posted_at: Some("2026-09-08T19:46:32Z".into()),
         };
         // **https**, and a port nothing listens on: the scheme check now runs first, so an
         // `http://` fixture here would fail for the wrong reason — and that message happens to
@@ -573,6 +1212,7 @@ mod tests {
             poster: "@cn.qut.lt4".into(),
             partners: vec!["Quán A".into(), "Quán B".into()],
             assignment_id: "assign-1".into(),
+            posted_at: Some("2026-09-08T19:46:32Z".into()),
         };
         let json = serde_json::to_value(&row).expect("serialises");
         assert_eq!(json["postUrl"], "https://www.tiktok.com/@a/photo/1");
@@ -601,5 +1241,105 @@ mod tests {
         assert!(minimal.ok);
         assert!(!minimal.duplicate);
         assert!(minimal.error.is_none());
+    }
+}
+
+#[cfg(test)]
+mod connection_recovery_tests {
+    use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    async fn endpoint(statuses: Vec<u16>) -> (String, tokio::task::JoinHandle<Vec<String>>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/exec", listener.local_addr().unwrap());
+        let task = tokio::spawn(async move {
+            let mut requests = Vec::new();
+            for status in statuses {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut data = Vec::new();
+                loop {
+                    let mut part = [0; 4096];
+                    let n = socket.read(&mut part).await.unwrap();
+                    if n == 0 {
+                        break;
+                    }
+                    data.extend_from_slice(&part[..n]);
+                    let text = String::from_utf8_lossy(&data);
+                    if let Some(end) = text.find("\r\n\r\n") {
+                        let length = text[..end]
+                            .lines()
+                            .find_map(|line| {
+                                line.to_ascii_lowercase()
+                                    .strip_prefix("content-length:")
+                                    .and_then(|value| value.trim().parse::<usize>().ok())
+                            })
+                            .unwrap_or(0);
+                        if data.len() >= end + 4 + length {
+                            break;
+                        }
+                    }
+                }
+                requests.push(String::from_utf8(data).unwrap());
+                let body = r#"{"ok":true}"#;
+                let reply = format!("HTTP/1.1 {status} Result\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+                socket.write_all(reply.as_bytes()).await.unwrap();
+            }
+            requests
+        });
+        (url, task)
+    }
+
+    #[tokio::test]
+    async fn retry_uses_the_original_post_and_stops_after_success() {
+        let (url, requests) = endpoint(vec![503, 429, 200]).await;
+        let body = sheet_post_body(
+            &url,
+            &serde_json::json!({"rowKind":"prepare","token":"fixture"}),
+            Duration::from_secs(10),
+            3,
+        )
+        .await
+        .unwrap();
+        assert_eq!(body, r#"{"ok":true}"#);
+        let requests = requests.await.unwrap();
+        assert_eq!(requests.len(), 3);
+        assert!(requests.iter().all(
+            |request| request.starts_with("POST /exec HTTP/1.1") && request.contains("fixture")
+        ));
+    }
+
+    #[tokio::test]
+    async fn original_webhook_404_is_not_retried() {
+        let (url, requests) = endpoint(vec![404]).await;
+        let error = sheet_post_body(&url, &serde_json::json!({}), Duration::from_secs(10), 3)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("404"));
+        assert!(error.to_string().contains("lượt 1/3"));
+        assert_eq!(requests.await.unwrap().len(), 1);
+    }
+
+    #[test]
+    fn only_content_404_is_transient_and_redirect_never_preserves_a_body() {
+        assert!(retry_sheet_status(reqwest::StatusCode::NOT_FOUND, true));
+        assert!(!retry_sheet_status(reqwest::StatusCode::NOT_FOUND, false));
+        assert!(!retry_sheet_status(reqwest::StatusCode::FORBIDDEN, true));
+        let good = "https://script.googleusercontent.com/macros/echo?user_content_key=fixture";
+        for status in [302, 303] {
+            assert!(sheet_redirect(reqwest::StatusCode::from_u16(status).unwrap(), good).is_ok());
+        }
+        for status in [301, 307, 308] {
+            assert!(sheet_redirect(reqwest::StatusCode::from_u16(status).unwrap(), good).is_err());
+        }
+        for url in [
+            "https://example.com/?user_content_key=fixture",
+            "http://script.googleusercontent.com/",
+            "https://script.googleusercontent.com:444/",
+        ] {
+            let error = sheet_redirect(reqwest::StatusCode::FOUND, url)
+                .unwrap_err()
+                .to_string();
+            assert!(!error.contains("fixture"));
+        }
     }
 }

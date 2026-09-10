@@ -363,17 +363,10 @@ impl AgentClient {
         .map(|_| ())
     }
 
-    /// Delete this session on the device.
+    /// End this session and its server instrumentation on the device.
     ///
-    /// **Not hygiene — a measured fix.** `connect` POSTs `/session` and nothing used
-    /// to remove it, so every `open_session` left one behind. Measured on a Redmi
-    /// Note 12 (11/08/2026) after roughly ten accumulated sessions in one afternoon:
-    /// every element query went from ~150 ms to the server's hardcoded
-    /// root-`AccessibilityNodeInfo` timeout — 10 000+ ms, then `absent` — and a
-    /// force-stop of the instrumentation restored 118–425 ms immediately. The
-    /// symptom looks exactly like a wrong locator, which is what makes it expensive:
-    /// AGENTS.md §9 records the same 10 s regime for the S8+ fleet as if it were a
-    /// property of a playing feed.
+    /// The pinned Appium v10.6.2 DeleteSession handler schedules server shutdown.
+    /// This is explicit termination, never the first half of an in-place replacement.
     pub async fn close(&self) -> anyhow::Result<()> {
         self.send(reqwest::Method::DELETE, "", None)
             .await
@@ -435,25 +428,15 @@ impl AgentClient {
 
     /// Replace a degraded session with a fresh one, in place.
     ///
-    /// **Measured, and it corrects an earlier wrong conclusion.** On a Redmi Note 12
-    /// (11/08/2026) a session that had been in use for a while answered every element
-    /// query with the server's hardcoded root-`AccessibilityNodeInfo` timeout — 10 116 ms
-    /// and then an error, which reads exactly like a wrong locator. `GET /sessions`
-    /// showed **one** session, so sessions were not accumulating. Deleting that session
-    /// and creating another, **without restarting the agent**, dropped the same query to
-    /// **7 ms**. So it is a long-lived session that rots, not a pile of them.
-    ///
-    /// That is why holding one session forever is the wrong fix: the desktop app runs
-    /// for hours. Recycling on the server's own error message is self-healing and needs
-    /// no timing heuristic.
+    /// Measured 09/09/2026 on ce0717171c2a64d50d, Appium v10.6.2: DELETE
+    /// scheduled ServerInstrumentation.stop while POST had already returned a new ID;
+    /// its first /appium/settings then lost the connection. The pinned upstream
+    /// handler/NewSession.java resets settings and model/AppiumUIA2Driver.java replaces
+    /// its singleton Session (including ElementsCache) directly. POST therefore replaces
+    /// the stale session without DELETE's asynchronous server shutdown. Only the existing
+    /// allowlisted read is replayed, once; effectful requests never enter this path.
     async fn recreate_session(&self) -> anyhow::Result<()> {
         let previous = self.session_id.lock().clone();
-        // Best effort: the point is the new session, and the old one is already broken.
-        let _ = self
-            .http
-            .delete(format!("{}/session/{previous}", self.base))
-            .send()
-            .await;
         let response: Value = self
             .http
             .post(format!("{}/session", self.base))
@@ -493,7 +476,15 @@ impl AgentClient {
                 // One retry, on one specific server message and only for an allowlisted read.
                 // Effectful routes propagate the first error because the device may have acted.
                 self.recreate_session().await?;
-                self.send_once(method, suffix, body).await
+                self.send_once(method, suffix, body).await.map_err(|error| {
+                    if error.to_string().contains(STALE_TREE_MARKER) {
+                        anyhow::Error::new(riviu_core::driver::AccessibilityReadUnavailable {
+                            message: error.to_string(),
+                        })
+                    } else {
+                        error
+                    }
+                })
             }
             other => other,
         }
@@ -600,6 +591,27 @@ impl AgentClient {
         self.find(locator)
             .await?
             .ok_or_else(|| anyhow!("không thấy phần tử {locator:?} trên màn hình"))
+    }
+
+    /// Re-resolve a node once if Android replaced it between find and geometry.
+    /// Only a stale element allows another read; session/transport errors still propagate.
+    pub(crate) async fn find_with_rect(
+        &self,
+        locator: &Locator,
+    ) -> anyhow::Result<Option<(String, Rect)>> {
+        for attempt in 0..2 {
+            let Some(id) = self.find(locator).await? else {
+                return Ok(None);
+            };
+            match self.rect(&id).await {
+                Ok(rect) => return Ok(Some((id, rect))),
+                Err(error)
+                    if attempt == 0
+                        && error.to_string().contains("does not exist in DOM anymore") => {}
+                Err(error) => return Err(error),
+            }
+        }
+        unreachable!("second geometry attempt returns")
     }
 
     pub async fn rect(&self, element: &str) -> anyhow::Result<Rect> {
@@ -882,6 +894,67 @@ fn element_id_from(element: &Value) -> Option<String> {
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn stale_geometry_requeries_node_once_without_recreating_session_or_tapping() {
+        use tokio::{
+            io::{AsyncReadExt, AsyncWriteExt},
+            net::TcpListener,
+        };
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let mut routes = Vec::new();
+            for (status, body) in [
+                ("200 OK", r#"{"value":{"ELEMENT":"old"}}"#),
+                (
+                    "404 Not Found",
+                    r#"{"value":{"message":"The element 'Create' does not exist in DOM anymore"}}"#,
+                ),
+                ("200 OK", r#"{"value":{"ELEMENT":"new"}}"#),
+                (
+                    "200 OK",
+                    r#"{"value":{"x":10,"y":20,"width":30,"height":40}}"#,
+                ),
+            ] {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut bytes = [0; 8192];
+                let n = socket.read(&mut bytes).await.unwrap();
+                routes.push(
+                    String::from_utf8_lossy(&bytes[..n])
+                        .lines()
+                        .next()
+                        .unwrap()
+                        .to_string(),
+                );
+                let response=format!("HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",body.len());
+                socket.write_all(response.as_bytes()).await.unwrap();
+            }
+            routes
+        });
+        let client = AgentClient {
+            http: reqwest::Client::new(),
+            base,
+            serial: "fixture".into(),
+            session_id: Arc::new(Mutex::new("fixed".into())),
+        };
+        let (id, rect) = client
+            .find_with_rect(&Locator::Description("Create".into()))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(id, "new");
+        assert_eq!(rect.x, 10.0);
+        assert_eq!(
+            server.await.unwrap(),
+            vec![
+                "POST /session/fixed/element HTTP/1.1",
+                "GET /session/fixed/element/old/rect HTTP/1.1",
+                "POST /session/fixed/element HTTP/1.1",
+                "GET /session/fixed/element/new/rect HTTP/1.1"
+            ]
+        );
+    }
+
     #[test]
     fn stale_tree_retry_allowlist_contains_reads_and_excludes_effects() {
         for (method, route) in [
@@ -913,6 +986,159 @@ mod tests {
                 "effectful route {method} {route} must never be reissued"
             );
         }
+    }
+
+    /// Model the pinned server's singleton session and DELETE-triggered shutdown.
+    /// Appium v10.6.2 DeleteSession stops ServerInstrumentation after replying;
+    /// NewSession replaces AppiumUIA2Driver.session and its ElementsCache directly.
+    async fn session_replacement_fixture(
+        persistent_stale: bool,
+    ) -> (
+        AgentClient,
+        Arc<Mutex<Vec<String>>>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let routes = Arc::new(Mutex::new(Vec::new()));
+        let observed = Arc::clone(&routes);
+        let server = tokio::spawn(async move {
+            let mut session = "old";
+            let mut primed = false;
+            loop {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut request = Vec::new();
+                let header_end = loop {
+                    let mut buffer = [0_u8; 2048];
+                    let read = socket.read(&mut buffer).await.unwrap();
+                    assert!(read > 0, "fixture request ended before its headers");
+                    request.extend_from_slice(&buffer[..read]);
+                    if let Some(end) = request.windows(4).position(|p| p == b"\r\n\r\n") {
+                        break end + 4;
+                    }
+                };
+                let headers = String::from_utf8_lossy(&request[..header_end]);
+                let route = headers.lines().next().unwrap().to_string();
+                let content_length = headers
+                    .lines()
+                    .find_map(|line| {
+                        line.to_ascii_lowercase()
+                            .strip_prefix("content-length:")
+                            .map(str::trim)
+                            .and_then(|v| v.parse::<usize>().ok())
+                    })
+                    .unwrap_or(0);
+                while request.len() < header_end + content_length {
+                    let mut buffer = [0_u8; 2048];
+                    let read = socket.read(&mut buffer).await.unwrap();
+                    assert!(read > 0, "fixture request ended before its body");
+                    request.extend_from_slice(&buffer[..read]);
+                }
+                observed.lock().push(route.clone());
+                let deleting = route.starts_with("DELETE ");
+                let (status, body) = match route.as_str() {
+                    "POST /session HTTP/1.1" => {
+                        session = "fresh";
+                        primed = false;
+                        ("200 OK", json!({"value":{"sessionId":"fresh"}}))
+                    }
+                    "POST /session/fresh/appium/settings HTTP/1.1" => {
+                        assert_eq!(session, "fresh");
+                        let value: Value = serde_json::from_slice(&request[header_end..]).unwrap();
+                        assert_eq!(value["settings"]["waitForIdleTimeout"], 0);
+                        primed = true;
+                        ("200 OK", json!({"value":null}))
+                    }
+                    "GET /session/fresh/source HTTP/1.1" if !persistent_stale => {
+                        assert_eq!(session, "fresh");
+                        assert!(primed, "a replacement session must be primed before replay");
+                        ("200 OK", json!({"value":"<hierarchy/>"}))
+                    }
+                    _ if deleting => ("200 OK", json!({"value":null})),
+                    _ => (
+                        "500 Internal Server Error",
+                        json!({"value":{"message":STALE_TREE_MARKER}}),
+                    ),
+                };
+                let body = body.to_string();
+                let response = format!("HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+                socket.write_all(response.as_bytes()).await.unwrap();
+                socket.shutdown().await.unwrap();
+                if deleting {
+                    // The real handler posts stop() with a 15 ms delay; immediate closure
+                    // deterministically reproduces the same invalid recovery ordering.
+                    break;
+                }
+            }
+        });
+        let client = AgentClient {
+            http: reqwest::Client::builder()
+                .timeout(Duration::from_secs(2))
+                .build()
+                .unwrap(),
+            base,
+            serial: "fixture-device".into(),
+            session_id: Arc::new(Mutex::new("old".into())),
+        };
+        (client, routes, server)
+    }
+
+    #[tokio::test]
+    async fn stale_tree_replacement_keeps_server_alive_and_primes_before_read_replay() {
+        let (client, routes, server) = session_replacement_fixture(false).await;
+        let shared = client.clone();
+        let result = client.source().await;
+        let shared_result = if result.is_ok() {
+            Some(shared.source().await)
+        } else {
+            None
+        };
+        server.abort();
+        let _ = server.await;
+        assert_eq!(
+            result.expect("session replacement must not stop its own server"),
+            "<hierarchy/>"
+        );
+        assert_eq!(shared_result.unwrap().unwrap(), "<hierarchy/>");
+        assert_eq!(
+            *routes.lock(),
+            vec![
+                "GET /session/old/source HTTP/1.1",
+                "POST /session HTTP/1.1",
+                "POST /session/fresh/appium/settings HTTP/1.1",
+                "GET /session/fresh/source HTTP/1.1",
+                "GET /session/fresh/source HTTP/1.1",
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn stale_tree_replacement_retries_the_read_only_once() {
+        let (client, routes, server) = session_replacement_fixture(true).await;
+        let result = client.source().await;
+        server.abort();
+        let _ = server.await;
+        assert!(result.unwrap_err().to_string().contains(STALE_TREE_MARKER));
+        assert_eq!(
+            *routes.lock(),
+            vec![
+                "GET /session/old/source HTTP/1.1",
+                "POST /session HTTP/1.1",
+                "POST /session/fresh/appium/settings HTTP/1.1",
+                "GET /session/fresh/source HTTP/1.1",
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn explicit_close_still_terminates_the_server_once() {
+        let (client, routes, server) = session_replacement_fixture(false).await;
+        client.close().await.unwrap();
+        server.await.unwrap();
+        assert_eq!(*routes.lock(), vec!["DELETE /session/old HTTP/1.1"]);
     }
 
     #[tokio::test]

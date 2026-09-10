@@ -544,6 +544,13 @@ impl AndroidDriver {
             .copied()
             .unwrap_or(crate::scrcpy::ViewPreset::Tile)
     }
+    /// Record UI intent before the desktop waits for a recovery/start permit.
+    pub fn request_view_preset(&self, serial: &str, preset: crate::scrcpy::ViewPreset) {
+        self.desired_presets
+            .lock()
+            .insert(serial.to_owned(), preset);
+    }
+
     /// Set the quality and frame rate new views will start with.
     ///
     /// Does **not** touch running producers. Restarting sixteen encoders because a
@@ -992,6 +999,36 @@ impl AndroidDriver {
         );
         Ok(())
     }
+    /// Hardware keys use the existing scrcpy shell transport. The caller owns a manual lease.
+    /// Return false only before sending anything; errors must never replay a possibly sent key.
+    pub async fn inject_hardware_key(
+        &self,
+        serial: &str,
+        key: riviu_core::HardwareKey,
+    ) -> anyhow::Result<bool> {
+        let control = {
+            let views = self.views.lock().await;
+            match views.get(serial) {
+                Some(producer) => Arc::clone(&producer.control),
+                None => return Ok(false),
+            }
+        };
+        let message = crate::scrcpy::hardware_key_message(key);
+        let mut socket = control.lock().await;
+        let sent = tokio::time::timeout(Duration::from_secs(2), async {
+            socket.write_all(&message).await?;
+            socket.flush().await
+        })
+        .await;
+        match sent {
+            Ok(Ok(())) => Ok(true),
+            other => {
+                let _ = socket.shutdown().await;
+                anyhow::bail!("Gửi phím qua scrcpy tới {serial} thất bại: {other:?}");
+            }
+        }
+    }
+
     /// Put one touch event on the phone, in the coordinate space of the picture on screen.
     ///
     /// `image_w`/`image_h` are the dimensions the *caller* was looking at when the operator

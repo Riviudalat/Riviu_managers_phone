@@ -670,6 +670,7 @@ impl AndroidDriver {
 
     /// Make sure the agent is installed, running and forwarded.
     pub(super) async fn ensure_agent(&self, serial: &str) -> anyhow::Result<AgentClient> {
+        self.verify_adb_transport(serial).await?;
         let base = self.agent_base(serial);
         self.forward(serial).await?;
 

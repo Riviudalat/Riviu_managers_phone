@@ -7,6 +7,7 @@ import {
   deviceSwipe,
   deviceSwipePath,
   deviceTap,
+  deviceKey,
   deviceControlBegin,
   deviceControlEnd,
   deviceTypeText,
@@ -790,4 +791,52 @@ describe("FocusStream control lease lifecycle", () => {
       warn.mockRestore();
     }
   });
+});
+
+describe("focus hardware controls", () => {
+  it("enables keys after opening, disables during a key request and sends exactly once", async () => {
+    vi.mocked(deviceKey).mockReset();
+    vi.mocked(deviceControlBegin).mockResolvedValue(undefined);
+    let finish!: () => void;
+    vi.mocked(deviceKey).mockImplementation(() => new Promise(resolve => { finish = resolve; }));
+    const view = render(<FocusStream device={fixture} index={1} onClose={() => undefined} groupUdids={[]} groupMode={false} devices={[fixture]} onSelectDevice={() => undefined}/>);
+    const home = view.getByRole("button", { name: "Home" });
+    expect(home).toBeDisabled();
+    await waitFor(() => expect(home).toBeEnabled());
+    fireEvent.click(home);
+    expect(home).toBeDisabled();
+    fireEvent.click(home);
+    expect(deviceKey).toHaveBeenCalledExactlyOnceWith(fixture.udid, "home");
+    finish();
+    await waitFor(() => expect(home).toBeEnabled());
+    expect(view.getByTestId("focus-control-status")).toHaveTextContent("Điều khiển sẵn sàng");
+  });
+  it("shows a failed control session and opens it again from the retry button", async () => {
+    vi.mocked(deviceControlBegin).mockRejectedValueOnce(new Error("device offline")).mockResolvedValue(undefined);
+    const view = render(<FocusStream device={fixture} index={1} onClose={() => undefined} groupUdids={[]} groupMode={false} devices={[fixture]} onSelectDevice={() => undefined}/>);
+    const retry = await view.findByRole("button", { name: "Thử lại điều khiển" });
+    expect(view.getByTestId("focus-control-status")).toHaveTextContent("device offline");
+    expect(view.getByRole("button", { name: "Home" })).toBeDisabled();
+    fireEvent.click(retry);
+    await waitFor(() => expect(view.getByRole("button", { name: "Home" })).toBeEnabled());
+  });
+});
+
+it("coalesces wheel ticks while a swipe is pending and stops after closing", async () => {
+  vi.mocked(deviceControlBegin).mockResolvedValue(undefined);
+  let finish!: () => void;
+  vi.mocked(deviceSwipe).mockReset().mockImplementationOnce(() => new Promise(resolve => { finish = resolve; })).mockResolvedValue(undefined);
+  const view = render(<FocusStream device={fixture} index={1} onClose={() => undefined} groupUdids={[]} groupMode={false} devices={[fixture]} onSelectDevice={() => undefined}/>);
+  await waitFor(() => expect(view.getByRole("button", { name: "Home" })).toBeEnabled());
+  const screen = view.getByTestId("focus-screen");
+  fireEvent.wheel(screen, { deltaY: 120 });
+  for (let tick = 0; tick < 20; tick++) fireEvent.wheel(screen, { deltaY: 120 });
+  expect(deviceSwipe).toHaveBeenCalledTimes(1);
+  finish();
+  await waitFor(() => expect(deviceSwipe).toHaveBeenCalledTimes(2));
+  const [, , start, , end, , height] = vi.mocked(deviceSwipe).mock.calls[1];
+  expect(Math.abs(start - end)).toBeCloseTo(height! * 0.54);
+  view.unmount();
+  await Promise.resolve();
+  expect(deviceSwipe).toHaveBeenCalledTimes(2);
 });

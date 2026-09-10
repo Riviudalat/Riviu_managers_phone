@@ -1,0 +1,5 @@
+.automation-page-tabs { display: flex; flex: none; align-items: center; gap: 24px; min-height: 44px; border-bottom: 1px solid var(--line); background: var(--bg); overflow-x: auto; }
+.automation-page-tabs > button { border: 0; border-bottom: 2px solid transparent; border-radius: 0; padding: 10px 2px; background: transparent; color: var(--text-2); font-size: var(--text-sm); white-space: nowrap; }
+.automation-page-tabs > button[aria-selected="true"] { color: var(--primary); border-bottom-color: var(--primary); }
+.automation-page-tabs > button:focus-visible { outline: 2px solid var(--primary); outline-offset: -2px; }
+.machine-scope-select { min-width: 0; max-width: 160px; height: 30px; padding: 3px 7px; border: 1px solid var(--line-strong); border-radius: 4px; background: var(--bg-elevated); color: var(--text-2); font-size: var(--text-xs); }

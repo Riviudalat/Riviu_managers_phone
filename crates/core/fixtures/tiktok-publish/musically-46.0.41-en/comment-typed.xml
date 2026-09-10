@@ -1,0 +1,3 @@
+<hierarchy>
+  <android.widget.Button index="4" package="com.zhiliaoapp.musically" class="android.widget.Button" text="" content-desc="@2131823225" resource-id="com.zhiliaoapp.musically:id/cuv" checkable="false" checked="false" clickable="true" enabled="true" focusable="true" focused="false" long-clickable="false" password="false" scrollable="false" selected="false" bounds="[911,1111][1048,1195]" displayed="true" a11y-important="true" screen-reader-focusable="false" drawing-order="11" showing-hint="false" dismissable="false" a11y-focused="false" heading="false" live-region="0" context-clickable="false" content-invalid="false" window-id="149" />
+</hierarchy>

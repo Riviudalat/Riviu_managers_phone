@@ -1,0 +1,5 @@
+<hierarchy>
+  <android.widget.LinearLayout package="com.zhiliaoapp.musically" class="android.widget.LinearLayout" text="" resource-id="com.zhiliaoapp.musically:id/dmk" checked="false" clickable="true" enabled="true" focused="false" selected="false" bounds="[278,100][703,216]" displayed="true" />
+  <android.widget.TextView package="com.zhiliaoapp.musically" class="android.widget.TextView" text="Sure Thing (Live)" resource-id="com.zhiliaoapp.musically:id/zy1" checked="false" clickable="false" enabled="true" focused="true" selected="false" bounds="[362,100][698,216]" displayed="true" />
+  <android.widget.ImageView package="com.zhiliaoapp.musically" class="android.widget.ImageView" text="" content-desc="@2131888700" resource-id="com.zhiliaoapp.musically:id/bgy" checked="false" clickable="true" enabled="true" focused="false" selected="false" bounds="[32,95][137,200]" displayed="true" />
+</hierarchy>

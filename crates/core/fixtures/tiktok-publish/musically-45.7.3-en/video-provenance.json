@@ -1,0 +1,26 @@
+{
+  "version": "45.7.3",
+  "result": {
+    "error": "video measurement stops before Post",
+    "publicPost": false,
+    "reachedPostBoundary": true,
+    "sound": {
+      "artist": "Hast",
+      "candidatesDigest": "1494580bcb19699d218fd56c050af0e2be6af6a3f3fa55a0c3ea968df6e3d8ad",
+      "confirmed": false,
+      "index": 2,
+      "section": "trending",
+      "title": "Parting and separation"
+    },
+    "version": "45.7.3"
+  },
+  "sourceFolder": "target\\fleet-compat-20260908\\video3-457",
+  "sourceHashes": {
+    "video-caption.xml": "605666bf00d32756b4a6dd0eb29029a3f8c2194a7e93ad0352d4a6d64ed35a32",
+    "video-editor.xml": "2c728bd9d50563d892f30e0a0d888bab5915cb6c19a837c3c8d353965266a09c",
+    "video-picker.xml": "34611d487151a047cb4c16722a87d0e5aff88d65b8e41f305df40b194a2aecda",
+    "video-selected.xml": "ba1581923fd2208e73e4f2282650e2fe7b01c37c4b1d58da3b0c4be9b37847e2",
+    "video-sound.xml": "5131d243b2e955a3336b8faadb3b82f04cf327fbf32c81b7cdca798069184828"
+  },
+  "note": "choose_and_confirm_sound succeeded; initial measurement selection struct did not set confirmed; see video-sound exact readback"
+}

@@ -101,6 +101,7 @@ struct DeviceView {
     generation: u64,
     last_jpeg: Option<ViewPacket>,
     last_h264: Option<ViewPacket>,
+    h264_config: Vec<u8>,
     last_packet_at: Option<Instant>,
     tx: broadcast::Sender<ViewPacket>,
 }
@@ -112,6 +113,7 @@ impl DeviceView {
             generation,
             last_jpeg: None,
             last_h264: None,
+            h264_config: Vec::new(),
             last_packet_at: None,
             tx,
         }
@@ -369,6 +371,7 @@ impl ViewSink for ViewHub {
                     // sender on every generation bump would close and reopen the device
                     // stream on every restart.
                     device.last_h264 = None;
+                    device.h264_config.clear();
                     device.last_packet_at = None;
                     (device.generation, false)
                 }
@@ -384,7 +387,7 @@ impl ViewSink for ViewHub {
         next
     }
 
-    fn publish(&self, packet: ViewPacket) -> bool {
+    fn publish(&self, mut packet: ViewPacket) -> bool {
         let (tx, created) = {
             let mut devices = self.devices.lock();
             // The stale-generation refusal comes FIRST so a packet from a producer that has
@@ -403,6 +406,16 @@ impl ViewSink for ViewHub {
             let device = devices
                 .entry(packet.udid.clone())
                 .or_insert_with(|| DeviceView::new(packet.generation));
+            if packet.kind == ViewKind::H264 {
+                let config = riviu_android_driver::scrcpy::annexb_decoder_config(&packet.bytes);
+                if !config.is_empty() {
+                    device.h264_config = config;
+                } else if packet.key && !device.h264_config.is_empty() {
+                    let mut bytes = device.h264_config.clone();
+                    bytes.extend_from_slice(&packet.bytes);
+                    packet.bytes = bytes;
+                }
+            }
             match packet.kind {
                 ViewKind::Jpeg => device.last_jpeg = Some(packet.clone()),
                 ViewKind::H264 if packet.key => device.last_h264 = Some(packet.clone()),
@@ -1395,5 +1408,44 @@ mod tests {
             replayed.into_data().to_vec(),
             encode_packet(&h264("a", true, 1))
         );
+    }
+}
+
+#[cfg(test)]
+mod reconnect_bootstrap_tests {
+    use super::*;
+    #[test]
+    fn reconnect_receives_parameter_sets_and_only_the_newest_picture() {
+        let hub = ViewHub::new();
+        let generation = hub.advance("phone");
+        let config = vec![0, 0, 0, 1, 0x67, 0x42, 0, 0x1e, 0, 0, 1, 0x68, 0xaa];
+        let mut first = config.clone();
+        first.extend_from_slice(&[0, 0, 1, 0x65, 0xbb]);
+        let packet = ViewPacket {
+            udid: "phone".into(),
+            generation,
+            kind: ViewKind::H264,
+            width: 408,
+            height: 832,
+            key: true,
+            bytes: first,
+        };
+        assert!(hub.publish(packet.clone()));
+        let newest = vec![0, 0, 1, 0x65, 0xcc];
+        assert!(hub.publish(ViewPacket {
+            bytes: newest.clone(),
+            ..packet
+        }));
+        let mut expected = config;
+        expected.extend_from_slice(&newest);
+        assert_eq!(hub.peek_last_h264("phone").unwrap().bytes, expected);
+        hub.advance("phone");
+        assert!(hub
+            .devices
+            .lock()
+            .get("phone")
+            .unwrap()
+            .h264_config
+            .is_empty());
     }
 }

@@ -229,12 +229,12 @@ async fn main() -> anyhow::Result<()> {
     anyhow::ensure!(
         matches!(
             verdict,
-            riviu_core::tiktok_composer::ComposerVerdict::Posted
+            riviu_core::tiktok_composer::ComposerVerdict::Submitted
         ),
-        "chuyến M7 không kết thúc ở Posted: {}",
+        "chuyến M7 chưa xác nhận TikTok nhận thao tác Đăng: {}",
         verdict.reason()
     );
-    say("\nM7: bài đã lên. Bước đo tiếp theo là share_scout trên chính máy này.");
+    say("\nM7: đã gửi thao tác Đăng; chờ share_scout xác minh liên kết trên chính máy này.");
     Ok(())
 }
 

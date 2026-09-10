@@ -188,3 +188,13 @@ describe("codecFromAnnexB fabricates a default, so callers must check for an SPS
     expect(codecFromAnnexB(annexB(sps, idr))).toBe("avc1.420015");
   });
 });
+
+it("decoder config strips cached picture NALs so resync never replays an old frame", async () => {
+  const { annexBDecoderConfig, annexBHasNal } = await import("./viewProtocol");
+  const packet = new Uint8Array([0,0,0,1,0x67,0x42,0,0x1e,0,0,1,0x68,0xbb,0,0,0,1,0x65,0xcc]);
+  const config = annexBDecoderConfig(packet);
+  expect(annexBHasNal(config,7)).toBe(true);
+  expect(annexBHasNal(config,8)).toBe(true);
+  expect(annexBHasNal(config,5)).toBe(false);
+  expect([...config]).toEqual([0,0,0,1,0x67,0x42,0,0x1e,0,0,0,1,0x68,0xbb]);
+});

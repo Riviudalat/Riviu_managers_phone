@@ -1,6 +1,7 @@
 import { expect, test } from "@playwright/test";
 import type { InteractionAssignmentRecord, InteractionCampaignDetail, PublicActionResult } from "../src/types";
 import { installTauriMock } from "./fixtures/tauriMock";
+import AxeBuilder from "@axe-core/playwright";
 
 function makeCampaign(id: string, running: boolean): InteractionCampaignDetail {
   const assignments = Array.from({ length: 20 }, (_, index): InteractionAssignmentRecord => {
@@ -39,7 +40,7 @@ function makeCampaign(id: string, running: boolean): InteractionCampaignDetail {
   };
 }
 
-for (const viewport of [{ width: 1440, height: 900 }, { width: 820, height: 560 }]) {
+for (const viewport of [{ width: 1440, height: 900 }, { width: 900, height: 700 }, { width: 820, height: 560 }]) {
   test(`interaction monitor keeps selection and historical outcomes truthful at ${viewport.width}x${viewport.height}`, async ({ page }) => {
     const runtimeErrors: string[] = [];
     page.on("pageerror", (error) => runtimeErrors.push(error.message));
@@ -101,20 +102,29 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 820, height: 560 
     });
     expect(campaignBounds).toBe(true);
     await expect(detail.getByText(/40\/40 hành động đã có kết quả/)).toBeVisible();
-    await expect(detail.locator(".interaction-assignment")).toHaveCount(20);
+    await expect(detail.getByRole("button", { name: /^Xem log / })).toHaveCount(20);
     await expect(detail.getByLabel("18 chưa thực hiện", { exact: true })).toBeVisible();
     await expect(detail.getByLabel("21 xác nhận", { exact: true })).toBeVisible();
     await expect(detail.getByText("Bình luận · Chưa thực hiện: lượt đã dừng", { exact: true })).toHaveCount(9);
     await expect(detail.getByText("Bình luận · Đang chờ", { exact: true })).toHaveCount(0);
     await expect(detail.getByRole("progressbar", { name: "Tiến trình chiến dịch đang xem" })).toHaveAttribute("aria-valuenow", "100");
     const generic = detail.getByText("Like không an toàn để tiếp tục assignment", { exact: true });
-    await expect(generic).toHaveCount(9);
+    await expect(generic).toHaveCount(0);
     await expect(generic.first()).not.toBeVisible();
     await detail.getByText(/40\/40 hành động đã có kết quả/).scrollIntoViewIfNeeded();
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
     await page.screenshot({ path: test.info().outputPath(`interaction-monitor-overview-${viewport.width}.png`) });
+    expect((await new AxeBuilder({ page }).include(".interaction-workspace").withTags(["wcag2a", "wcag2aa"]).analyze()).violations).toEqual([]);
     await detail.getByText("Bình luận · Chưa thực hiện: lượt đã dừng", { exact: true }).first().scrollIntoViewIfNeeded();
     await page.screenshot({ path: test.info().outputPath(`interaction-monitor-stopped-${viewport.width}.png`) });
+    await detail.getByRole("button", { name: /^Xem log / }).nth(11).click();
+    const drawer = page.getByRole("dialog", { name: /Máy thử 12/ });
+    await expect(drawer).toBeVisible();
+    await expect(drawer.locator(".interaction-assignment")).toHaveCount(1);
+    await expect(drawer.getByText("Bình luận · Chưa thực hiện: lượt đã dừng", { exact: true })).toBeVisible();
+    await page.screenshot({ path: test.info().outputPath(`interaction-monitor-log-${viewport.width}.png`) });
+    await page.keyboard.press("Escape");
+    await expect(drawer).toHaveCount(0);
 
     await runningRow.click();
     await expect(runningRow).toHaveAttribute("aria-current", "true");

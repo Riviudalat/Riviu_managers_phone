@@ -36,6 +36,10 @@ impl DeviceControlPlane {
     ) -> Result<DeviceExclusiveContext, DeviceControlError> {
         self.ensure_running()?;
         let lease = self.work.try_acquire(udid, owner)?;
+        // Idle tidying must leave submitted uploads and their verification screens alone.
+        if owner == DeviceWorkOwner::IdleSweep {
+            self.ensure_clean_start_allowed(udid)?;
+        }
         let activity = self.lifecycle.register()?;
         Ok(DeviceExclusiveContext {
             plane_id: self.plane_id,

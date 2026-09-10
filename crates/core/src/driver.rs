@@ -6,6 +6,13 @@ use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+/// A read exhausted the Android driver's own recovery. Effects never carry this type.
+#[derive(Debug, Error)]
+#[error("{message}")]
+pub struct AccessibilityReadUnavailable {
+    pub message: String,
+}
+
 use crate::device_capabilities::{
     validate_clipboard_read_limit, AgentInstallProof, ClipboardAccessMode,
     DeviceCapabilitySnapshot, UiCapabilities,
@@ -351,6 +358,11 @@ pub trait DeviceDriver: Send + Sync {
     async fn tiktok_build(&self, _udid: &str) -> anyhow::Result<(String, String, String)> {
         anyhow::bail!("backend này không đọc được (gói, versionName, locale) của TikTok")
     }
+    /// Observe transport conflicts without opening or replacing a UI session.
+    async fn verify_automation_transport(&self, _udid: &str) -> anyhow::Result<()> {
+        Ok(())
+    }
+
     /// Bytes available on the filesystem used to stage publish media.
     async fn available_storage_bytes(&self, _udid: &str) -> anyhow::Result<u64> {
         unsupported("availableStorageBytes")

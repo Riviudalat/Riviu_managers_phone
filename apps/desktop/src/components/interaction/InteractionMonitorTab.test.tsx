@@ -145,6 +145,10 @@ function selectedCampaign(id: string) {
     openCampaignId={id} onOpenCampaign={() => {}} masterDetail />;
 }
 
+async function openFirstLog() {
+  fireEvent.click((await screen.findAllByRole("button", { name: /^Xem log / }))[0]);
+}
+
 function deferred<T>() {
   let resolve!: (value: T) => void;
   let reject!: (error: Error) => void;
@@ -165,6 +169,7 @@ describe("InteractionMonitorTab", () => {
     vi.mocked(api.interactionList).mockResolvedValue([summary, nextDetail.summary] as never);
     vi.mocked(api.interactionGet).mockResolvedValueOnce(detail as never).mockReturnValueOnce(pending.promise);
     const { rerender } = render(selectedCampaign("campaign-1"));
+    await openFirstLog();
     await screen.findByText("gốc của cụm một");
 
     rerender(selectedCampaign("campaign-2"));
@@ -173,6 +178,7 @@ describe("InteractionMonitorTab", () => {
     expect(screen.queryByRole("button", { name: "Thử lại phần hỏng" })).toBeNull();
     expect(screen.getByRole("button", { current: true })).toHaveTextContent("@new.author");
     await act(async () => { pending.resolve(nextDetail as never); });
+    await openFirstLog();
     expect(screen.getByText("nội dung chiến dịch mới")).toBeVisible();
     fireEvent.click(screen.getByRole("button", { name: "Dừng" }));
     await waitFor(() => expect(api.interactionCancel).toHaveBeenCalledWith("campaign-2"));
@@ -199,12 +205,14 @@ describe("InteractionMonitorTab", () => {
     ] as never).mockResolvedValueOnce([]);
     vi.mocked(api.interactionReadArtifact).mockReturnValueOnce(pending.promise);
     const { rerender } = render(selectedCampaign("campaign-1"));
+    await openFirstLog();
     fireEvent.click(await screen.findByRole("button", { name: "Ảnh" }));
     if (state === "loaded") {
       await act(async () => { pending.resolve(image); });
       expect(screen.getByRole("img", { name: "Ảnh màn hình khay bình luận" })).toBeVisible();
     }
     rerender(selectedCampaign("campaign-2"));
+    await openFirstLog();
     await screen.findByText("nội dung chiến dịch mới");
     if (state === "pending") await act(async () => { pending.resolve(image); });
     expect(screen.queryByRole("img", { name: "Ảnh màn hình khay bình luận" })).toBeNull();
@@ -223,6 +231,7 @@ describe("InteractionMonitorTab", () => {
     await act(async () => { oldRetry.resolve(); });
     expect(vi.mocked(api.interactionGet).mock.calls).toEqual([["campaign-1"], ["campaign-2"]]);
     await act(async () => { newDetail.resolve(nextDetail as never); });
+    await openFirstLog();
     expect(screen.getByText("nội dung chiến dịch mới")).toBeVisible();
   });
 
@@ -234,6 +243,7 @@ describe("InteractionMonitorTab", () => {
     const { rerender } = render(selectedCampaign("campaign-1"));
     fireEvent.click(await screen.findByRole("button", { name: "Thử lại phần hỏng" }));
     rerender(selectedCampaign("campaign-2"));
+    await openFirstLog();
     await screen.findByText("nội dung chiến dịch mới");
     await act(async () => { oldRetry.reject(new Error("old campaign retry failed")); });
     expect(screen.queryByText("old campaign retry failed")).toBeNull();
@@ -272,6 +282,7 @@ describe("InteractionMonitorTab", () => {
     vi.mocked(api.interactionListArtifacts).mockRejectedValueOnce(new Error("evidence offline"));
     renderMasterDetail("campaign-1");
     expect(await screen.findByText("Ảnh bằng chứng: evidence offline")).toBeVisible();
+    await openFirstLog();
     expect(screen.getByText("gốc của cụm một")).toBeVisible();
     fireEvent.click(screen.getByRole("button", { name: "Tải lại bằng chứng" }));
     await waitFor(() => expect(screen.queryByText("Ảnh bằng chứng: evidence offline")).toBeNull());
@@ -303,6 +314,7 @@ describe("InteractionMonitorTab", () => {
     expect(await screen.findByRole("alert")).toHaveTextContent(message);
     expect(screen.queryByText("Đang mở chiến dịch…")).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "Thử lại" }));
+    await openFirstLog();
     expect(await screen.findByText("Bài 1")).toBeVisible();
   });
 
@@ -349,6 +361,7 @@ describe("InteractionMonitorTab", () => {
     expect(screen.getByLabelText("2 chưa thực hiện")).toBeVisible();
     expect(screen.getByRole("progressbar", { name: "Tiến trình chiến dịch đang xem" }))
       .toHaveAttribute("aria-valuenow", "100");
+    await openFirstLog();
     expect(screen.getByRole("button", { name: "Kiểm tra bỏ tim" })).toBeEnabled();
     expect(screen.getByRole("button", { name: "Bỏ Lưu" })).toBeDisabled();
     expect(screen.queryByRole("button", { name: /hoàn tác.*bình luận/i })).toBeNull();
@@ -376,6 +389,7 @@ describe("InteractionMonitorTab", () => {
     expect(await screen.findByRole("region", { name: "Danh sách chiến dịch" })).toBeVisible();
     expect(screen.getByRole("complementary", { name: "Chi tiết chiến dịch" })).toBeVisible();
     expect(await screen.findByText("@.lt.gi.mang.v +1 link")).toBeVisible();
+    await openFirstLog();
     expect(await screen.findByText("Bài 1")).toBeVisible();
   });
 

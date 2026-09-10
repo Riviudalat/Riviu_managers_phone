@@ -718,8 +718,6 @@ function App() {
           }
           actions={
             <>
-              {isDeviceAutomation(page) && <DeviceAutomationLayoutButton docked={false}
-                onClick={() => void requestDeviceAutomation(page)} />}
               <ActivityCenter />
               <button
               type="button"
@@ -1108,7 +1106,7 @@ function App() {
                       )}
                       onContextMenu={(udid, x, y) => setTileMenu({ udid, x, y })}
                       selected={selected.includes(device.udid)}
-                      focused={focusUdid === device.udid}
+                      focused={overlayUdid === device.udid}
                       controlCenter={controlCenter === device.udid}
                       onSelect={onSelect}
                       onOpen={setFocusUdid}

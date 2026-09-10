@@ -276,3 +276,12 @@ function findNal(bytes: Uint8Array, type: number): Uint8Array | null {
   }
   return null;
 }
+
+/** Decoder initialization contains parameter sets only, never an older picture. */
+export function annexBDecoderConfig(bytes: Uint8Array): Uint8Array {
+  const nals = [findNal(bytes, 7), findNal(bytes, 8)].filter((nal): nal is Uint8Array => nal !== null);
+  const result = new Uint8Array(nals.reduce((size, nal) => size + 4 + nal.length, 0));
+  let offset = 0;
+  for (const nal of nals) { result.set([0, 0, 0, 1], offset); result.set(nal, offset + 4); offset += 4 + nal.length; }
+  return result;
+}

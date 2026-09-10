@@ -373,3 +373,10 @@ button.danger {
 button.danger:hover:not(:disabled) {
   filter: brightness(0.95);
 }
+
+.focus-control-status { padding: 8px 12px; font-size: var(--text-sm); border-bottom: 1px solid var(--line); }
+.focus-control-status p { margin: 6px 0; overflow-wrap: anywhere; color: var(--danger); }
+.focus-quick-keys { display: flex; gap: 6px; padding: 8px 12px; border-bottom: 1px solid var(--line); }
+.focus-quick-keys button { flex: 1; min-height: 34px; display: grid; place-items: center; }
+
+.dev-phone-focused-message { position: absolute; inset: 0; display: grid; place-items: center; padding: 12px; text-align: center; background: var(--bg-stage); color: #e2e8f0; font-size: var(--text-sm); }

@@ -1,4 +1,6 @@
 import { ProgressBar } from "../ProgressBar";
+import { useState } from "react";
+import { DetailDrawer } from "../WorkspacePrimitives";
 import { Banner } from "../States";
 import {
   assignmentStateVi,
@@ -263,6 +265,7 @@ export function InteractionCampaignDetailView({
   onShowShot,
   shot,
   onDismissShot,
+  compact = false,
 }: {
   detail: InteractionCampaignDetail;
   artifacts: InteractionArtifactRecord[];
@@ -281,7 +284,9 @@ export function InteractionCampaignDetailView({
   onShowShot: (artifactId: string) => void;
   shot: string | null;
   onDismissShot: () => void;
+  compact?: boolean;
 }) {
+  const [selectedActor, setSelectedActor] = useState<string | null>(null);
   const { summary } = detail;
   const total = summary.messageCount * summary.targetCount;
   const settled = summary.succeededMessages + summary.failedMessages;
@@ -328,76 +333,21 @@ export function InteractionCampaignDetailView({
 
   const byLink = detail.assignments.reduce<Record<string, typeof detail.assignments>>(
     (groups, assignment) => {
+      if (compact && selectedActor !== assignment.actorUdid) return groups;
       (groups[assignment.targetKey] ??= []).push(assignment);
       return groups;
     },
     {},
   );
 
-  return (
-    <div className="interaction-detail">
-      <button type="button" className="ghost interaction-back" onClick={onBack}>
-        ← Chiến dịch gần đây
-      </button>
-      {error && <Banner tone="error">{error}</Banner>}
-      {evidenceError && <Banner tone="error" action={<button type="button" className="ghost" onClick={onRetryEvidence}>Tải lại bằng chứng</button>}>{evidenceError}</Banner>}
-      <div className="interaction-detail-head">
-        <span className={`chip ${stateTone(summary.state)}`}>
-          {campaignStateVi(summary.state)}
-        </span>
-        {detail.actionAggregate && (
-          <span className={`chip ${actionAggregateTone(detail.actionAggregate)}`}>
-            {actionAggregateVi(detail.actionAggregate)}
-          </span>
-        )}
-        <small>
-          {hasActionCounters
-            ? `${actionSettled}/${actionCounters!.planned} hành động đã có kết quả`
-            : `${summary.succeededMessages}/${total} bình luận`}
-          {summary.failedMessages > 0 && ` · ${summary.failedMessages} lỗi`}
-          {summary.updatedAt && ` · ${timeAgoVi(summary.updatedAt)}`}
-        </small>
-        {summary.state === "running" && (
-          <button type="button" className="danger" disabled={busy} onClick={onCancel}>
-            Dừng
-          </button>
-        )}
-        {/* Offered only on a campaign that has finished badly: `Sending`, `Succeeded` and
-            `Uncertain` assignments are excluded server-side because re-sending a comment that
-            may already be public is the one thing this must never do. */}
-        {["partial", "failed", "cancelled"].includes(summary.state) && detail.assignments.some((assignment) =>
-          !["sending", "succeeded", "uncertain"].includes(assignment.state)) && (
-          <button type="button" disabled={busy} onClick={() => onRetry()}>
-            Thử lại phần hỏng
-          </button>
-        )}
-      </div>
-      {hasActionCounters && (
-        <ActionCounters
-          counters={actionCounters!}
-          failedBeforeEffect={actionFailedBeforeEffect}
-        />
-      )}
-      <ProgressBar
-        fraction={
-          hasActionCounters
-            ? actionSettled / actionCounters!.planned
-            : total > 0
-              ? settled / total
-              : null
-        }
-        failedFraction={
-          hasActionCounters
-            ? actionFailedBeforeEffect / actionCounters!.planned
-            : total > 0
-              ? summary.failedMessages / total
-              : 0
-        }
-        tone={summary.state === "running" ? "run" : stateTone(summary.state) === "ok" ? "done" : "failed"}
-        label="Tiến trình chiến dịch đang xem"
-      />
-      {summary.errorCode && <Reason code={summary.errorCode} />}
+  const byActor = new Map<string, InteractionAssignmentRecord[]>();
+  for (const assignment of detail.assignments) {
+    const rows = byActor.get(assignment.actorUdid) ?? [];
+    rows.push(assignment);
+    byActor.set(assignment.actorUdid, rows);
+  }
 
+  const evidenceContent = <>
       {/* Above the threads on purpose: it is what the comments below were written from, so
           reading it first is reading the evidence before the verdict. */}
       <TargetNotesPanel notes={notes} />
@@ -546,6 +496,106 @@ export function InteractionCampaignDetailView({
           <img src={shot} alt="Ảnh màn hình khay bình luận" />
         </button>
       )}
+  </>;
+  return (
+    <div className={`interaction-detail${compact ? " iw-monitor-result" : ""}`}>
+      {!compact && <button type="button" className="ghost interaction-back" onClick={onBack}>
+        ← Chiến dịch gần đây
+      </button>}
+      {error && <Banner tone="error">{error}</Banner>}
+      {evidenceError && <Banner tone="error" action={<button type="button" className="ghost" onClick={onRetryEvidence}>Tải lại bằng chứng</button>}>{evidenceError}</Banner>}
+      <div className="interaction-detail-head">
+        <span className={`chip ${stateTone(summary.state)}`}>
+          {campaignStateVi(summary.state)}
+        </span>
+        {detail.actionAggregate && (
+          <span className={`chip ${actionAggregateTone(detail.actionAggregate)}`}>
+            {actionAggregateVi(detail.actionAggregate)}
+          </span>
+        )}
+        <small>
+          {hasActionCounters
+            ? `${actionSettled}/${actionCounters!.planned} hành động đã có kết quả`
+            : `${summary.succeededMessages}/${total} bình luận`}
+          {summary.failedMessages > 0 && ` · ${summary.failedMessages} lỗi`}
+          {summary.updatedAt && ` · ${timeAgoVi(summary.updatedAt)}`}
+        </small>
+        {summary.state === "running" && (
+          <button type="button" className="danger" disabled={busy} onClick={onCancel}>
+            Dừng
+          </button>
+        )}
+        {/* Offered only on a campaign that has finished badly: `Sending`, `Succeeded` and
+            `Uncertain` assignments are excluded server-side because re-sending a comment that
+            may already be public is the one thing this must never do. */}
+        {["partial", "failed", "cancelled"].includes(summary.state) && detail.assignments.some((assignment) =>
+          !["sending", "succeeded", "uncertain"].includes(assignment.state)) && (
+          <button type="button" disabled={busy} onClick={() => onRetry()}>
+            Thử lại phần hỏng
+          </button>
+        )}
+      </div>
+      {hasActionCounters && (
+        <ActionCounters
+          counters={actionCounters!}
+          failedBeforeEffect={actionFailedBeforeEffect}
+        />
+      )}
+      <ProgressBar
+        fraction={
+          hasActionCounters
+            ? actionSettled / actionCounters!.planned
+            : total > 0
+              ? settled / total
+              : null
+        }
+        failedFraction={
+          hasActionCounters
+            ? actionFailedBeforeEffect / actionCounters!.planned
+            : total > 0
+              ? summary.failedMessages / total
+              : 0
+        }
+        tone={summary.state === "running" ? "run" : stateTone(summary.state) === "ok" ? "done" : "failed"}
+        label="Tiến trình chiến dịch đang xem"
+      />
+      {summary.errorCode && <Reason code={summary.errorCode} />}
+
+      {compact ? <>
+        <InteractionMachineResults rows={byActor} actorLabel={actorLabel} onOpen={setSelectedActor} />
+        <DetailDrawer open={selectedActor !== null} title={selectedActor ? actorLabel(selectedActor) : ""}
+          onClose={() => { setSelectedActor(null); onDismissShot(); }}>
+          {evidenceContent}
+        </DetailDrawer>
+      </> : evidenceContent}
     </div>
   );
+}
+
+function InteractionMachineResults({ rows, actorLabel, onOpen }: {
+  rows: Map<string, InteractionAssignmentRecord[]>;
+  actorLabel: (udid: string) => string;
+  onOpen: (udid: string) => void;
+}) {
+  return <div className="iw-table-scroll iw-monitor-table-scroll" tabIndex={0} aria-label="Kết quả từng máy">
+    <table className="iw-table iw-monitor-table"><thead><tr><th>Máy / tài khoản</th><th>Hành động</th><th>Kết quả</th><th>Chi tiết</th></tr></thead><tbody>
+      {[...rows].map(([udid, assignments]) => {
+        const results = assignments.flatMap((assignment) => (assignment.actions ?? []).map((action) => ({ action, assignment })));
+        const counts = new Map<string, { label: string; tone: string; count: number }>();
+        for (const { action, assignment } of results) {
+          const view = actionView(action, assignment);
+          const key = `${action.kind}:${view.label}`;
+          const entry = counts.get(key) ?? { ...view, label: `${ACTION_KIND_VI[action.kind]} · ${view.label}`, count: 0 };
+          entry.count++;
+          counts.set(key, entry);
+        }
+        const targetCount = new Set(assignments.map((assignment) => assignment.targetKey)).size;
+        return <tr key={udid}><td><strong>{actorLabel(udid)}</strong><small>{targetCount} bài · {assignments.length} lượt</small></td>
+          <td>{[...new Set(results.map(({ action }) => ACTION_KIND_VI[action.kind]))].join(" → ") || "Bình luận"}</td>
+          <td><div className="iw-machine-outcomes">{counts.size ? [...counts].map(([key, result]) => <span key={key} className={`chip ${result.tone}`}>{result.label}{result.count > 1 ? ` (${result.count})` : ""}</span>) : [...new Set(assignments.map((assignment) => assignment.state))].map((state) => <span key={state} className={`chip ${stateTone(state)}`}>{assignmentStateVi(state)}</span>)}</div></td>
+          <td><button type="button" className="ghost" aria-label={`Xem log ${actorLabel(udid)}`} onClick={() => onOpen(udid)}>Xem log</button></td>
+        </tr>;
+      })}
+    </tbody></table>
+  </div>;
 }

@@ -85,7 +85,7 @@ export function OperationProgressCenter({ deviceLabels }: { deviceLabels: Readon
     <header className="run-monitor-titlebar" {...floating.handle}>
       <button ref={toggleRef} type="button" className="run-monitor-toggle" aria-label="Tiến trình công việc"
         aria-expanded={expanded} aria-controls={bodyId} onClick={() => setExpanded((value) => !value)}>
-        <Clock3 size={16} aria-hidden="true" /><strong>{expanded ? "Theo dõi tác vụ" : state.error ? "Chưa đọc được tiến trình" : active.length ? `${active.length} tác vụ đang chạy` : runs.length ? `${runs.length} tác vụ đã kết thúc` : "Không còn bản ghi"}</strong>
+        <Clock3 size={16} aria-hidden="true" /><strong>{expanded ? "Theo dõi tác vụ" : state.error ? "Chưa đọc được tiến trình" : active.length ? `${active.length} tác vụ đang xử lý / chờ` : runs.length ? `${runs.length} tác vụ đã kết thúc` : "Không còn bản ghi"}</strong>
       </button>
       {expanded && <span className="run-monitor-total">{runs.length} bản ghi</span>}
       {!expanded && <span className="run-percent">{!runs.length && !state.error ? "—" : state.error ? "?" : progressLabel(fraction)}</span>}

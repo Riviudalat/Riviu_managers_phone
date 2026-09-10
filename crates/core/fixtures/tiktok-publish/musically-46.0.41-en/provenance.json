@@ -1,0 +1,59 @@
+{
+  "package": "com.zhiliaoapp.musically",
+  "versionName": "46.0.41",
+  "versionCode": "2024600410",
+  "locale": "en-US",
+  "serial": "ce011711c354be2005",
+  "measuredDate": "2026-09-08",
+  "scope": "Selected relevant nodes extracted from headless remote captures before Post. Original source files remain unchanged; no published-post certification.",
+  "fixtures": [
+    {
+      "fixture": "q460-back-editor.xml",
+      "fixtureSha256": "844d393bdbe09ff68698e99bcbae26ecd5bb3cbc1cdee95bea19f2dd59f41dd3",
+      "source": "target/remote-publish-192.168.1.43/q460-back-editor.xml",
+      "sourceSha256": "baad445aa30f83786e5ffb81bf9a93fa9860f9574c29bd48d3908c4e84cf28bc"
+    },
+    {
+      "fixture": "q460-caption-return.xml",
+      "fixtureSha256": "ceb16ac2f21ccd5b7711fb6c4f10fdf35f8c342c33d7f907e0ccaa7bd1f35178",
+      "source": "target/remote-publish-192.168.1.43/q460-caption-return.xml",
+      "sourceSha256": "332123013f63da2c157c7ca37217177c7e5a1081b3713d7415858cfb9e61ff23"
+    },
+    {
+      "fixture": "q460-caption-typed.xml",
+      "fixtureSha256": "3a7d4991a061888fc61a20ea92a899b99a4e23f67ab085b48c3aa3e05053c90c",
+      "source": "target/remote-publish-192.168.1.43/q460-caption-typed.xml",
+      "sourceSha256": "095eadfa400fa35b62960b607688d45600bc66f6c312de7f1fa0f8fd7ca03351"
+    },
+    {
+      "fixture": "q460-composer.xml",
+      "fixtureSha256": "cfbf2021bf2c9e9b252766365f382979b643e4bdbb3ee8047eddb8e5e7238170",
+      "source": "target/remote-publish-192.168.1.43/q460-composer.xml",
+      "sourceSha256": "9c82e4f8758e645dec151cda16903e5764f927ad5a0b8f540d16e5e8ca5d6f4a"
+    },
+    {
+      "fixture": "q460-gallery.xml",
+      "fixtureSha256": "14f9f847b00ad850543165a8e02cded8b8ec1c5953f27be249ddec49cf56ee23",
+      "source": "target/remote-publish-192.168.1.43/q460-gallery.xml",
+      "sourceSha256": "2849b54e0948482f7dfb22484597d524e677c28bbe360e9564d016fe507386d1"
+    },
+    {
+      "fixture": "q460-one.xml",
+      "fixtureSha256": "a862c91db17fac4aa6591025d6008b15a7778fbb0eda3fcfee9677e085b271e9",
+      "source": "target/remote-publish-192.168.1.43/q460-one.xml",
+      "sourceSha256": "b58aad10eae31f7a481107a1813af29af480e3d636ef33edd232d8e58e7ee111"
+    },
+    {
+      "fixture": "q460-three.xml",
+      "fixtureSha256": "02c954fe840bacbbff0ba25689d3c3efb310770613435cb824040c3c45f24ddc",
+      "source": "target/remote-publish-192.168.1.43/q460-three.xml",
+      "sourceSha256": "f23c596882a255baeb52064a8bc3936763d2a8249bd8aaaf6aa834d2c90788e6"
+    },
+    {
+      "fixture": "q460-two.xml",
+      "fixtureSha256": "d27b7f571e6cf7c0e3e37d06f7619f183a64e883d8c484b21cd7310fe305f02f",
+      "source": "target/remote-publish-192.168.1.43/q460-two.xml",
+      "sourceSha256": "2e6ffc4b20cd2e100ead3bab500350b1915ec406b7575c28a7571ded84300070"
+    }
+  ]
+}

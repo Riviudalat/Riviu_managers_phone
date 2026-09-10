@@ -1,0 +1,7 @@
+{
+  "provenance": "09/09/2026 Global 46.2.1/en phone17: target/stable-installer-20260909/resume-live/profile-with-draft.xml contains Drafts: 1 at :id/zq_ [16,929][342,971] inside first cover [0,913][358,1390]; second cover [361,913][719,1390] opens set4, retained in set4-own-post.xml. Labels and geometry retained; post caption/account are synthetic in the test.",
+  "draftTile": [0, 913, 358, 477],
+  "postTile": [361, 913, 358, 477],
+  "draftBadge": [16, 929, 326, 42],
+  "draftText": "Drafts: 1"
+}

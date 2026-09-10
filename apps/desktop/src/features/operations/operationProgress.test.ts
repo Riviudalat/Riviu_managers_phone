@@ -1,9 +1,29 @@
 import { describe, expect, it } from "vitest";
 import type { NurtureSessionStatus, OperationRunItem, OperationRunState, OperationRunSummary } from "../../types";
-import { compactLogEntries, deviceRows, deviceStateCounts, logMessage, logTime, monitorDeviceName, runOptionLabel, runProgress } from "./operationProgress";
+import { compactLogEntries, deviceRows, deviceStateCounts, logMessage, logTime, monitorDeviceName, runOptionLabel, runProgress, timelineEntries } from "./operationProgress";
 
 const run = { sourceId: "one", kind: "nurture", state: "running", totalItems: 2, completedItems: 0, targetCount: 2 } as OperationRunSummary;
 describe("operation progress", () => {
+  it("shows persisted publish steps and preserves real timestamps and failure details", () => {
+    const step = { id: "12", at: "2026-09-08T12:34:56", action: "publishStep", state: "selecting_sound", text: "[8] Đang chọn nhạc: Đến Khi Nào", detail: null };
+    expect(logMessage(step)).toBe(step.text);
+    expect(logTime(step.at)).toBe("12:34:56");
+    const failed = { ...step, id: "13", state: "failed_before_post", text: "[9] Dừng ở bước trên — chưa bấm Đăng, xem chi tiết lỗi", detail: "sound title changed" };
+    expect(logMessage(failed)).toBe(failed.text);
+    expect(timelineEntries([step, failed])).toEqual([step, failed]);
+    const legacy = { ...step, action: "publish", state: "succeeded", text: null };
+    expect(logMessage(legacy)).toBe("Thành công — đã xác nhận bài đăng");
+    expect(timelineEntries([legacy])).toEqual([legacy]);
+  });
+  it("keeps old history and terminal fallback while removing duplicate coarse publish transitions", () => {
+    const old = { id: "1", at: "2026-09-07T12:00:00", action: "publish", state: "failed_before_dispatch", text: null, detail: "old failure" };
+    const step = { ...old, id: "2", action: "publishStep", state: "checking_device", text: "[1] Kiểm tra máy 2", detail: null };
+    const coarse = { ...old, id: "3", state: "posting", detail: null };
+    const done = { ...coarse, id: "4", state: "succeeded" };
+    expect(timelineEntries([old, step, coarse, done])).toEqual([old, step, done]);
+    const final = { ...step, id: "5", state: "finished", text: "[14] Thành công — máy 2 đã đăng bài" };
+    expect(timelineEntries([old, step, coarse, done, final])).toEqual([old, step, final]);
+  });
   it("counts only the selected run, reserves the unreported device and waits for cleanup", () => {
     const row = { udid: "a", runId: "one", running: true, videosDone: 5, videoTarget: 10, phase: "watching", startedAt: null, deadlineAt: null } as NurtureSessionStatus;
     expect(runProgress(run, [row, { ...row, runId: "older", videosDone: 10 }])).toBe(.25);
@@ -13,6 +33,22 @@ describe("operation progress", () => {
     expect(runProgress({ ...run, kind: "flow", totalItems: 0 }, [])).toBeNull();
     expect(runProgress({ ...run, state: "failed" }, [])).toBe(1);
     expect(runProgress({ ...run, kind: "publish", completedItems: 20, totalItems: 2 }, [])).toBe(.99);
+  });
+  it("keeps submitted Publish work below completion and explains pending verification", () => {
+    const pending = { ...run, kind: "publish", state: "running", totalItems: 10, completedItems: 8 } as OperationRunSummary;
+    expect(runProgress(pending, [])).toBe(.8);
+    expect(runProgress({ ...pending, completedItems: 10 }, [])).toBe(.99);
+    expect(runProgress({ ...pending, state: "partial", retryScope: "linkAndSheet", completedItems: 10 }, [])).toBeNull();
+    expect(deviceRows([{ id: "pending", udid: "a", kind: "assignment", state: "partial", errorCode: "post_verification_pending" } as OperationRunItem])[0])
+      .toMatchObject({ fraction: null, pendingPublish: true });
+    expect(logMessage({ id: "pending", at: null, action: "publish", state: "verifying", text: null, detail: null }))
+      .toBe("Đã bấm Đăng — chờ TikTok hoàn tất và xác minh liên kết bài");
+  });
+  it("keeps publication needing review out of active progress without displaying completion", () => {
+    const review = { ...run, kind: "publish", state: "uncertain", retryScope: "linkAndSheet" } as OperationRunSummary;
+    expect(runProgress(review, [])).toBeNull();
+    expect(deviceRows([{ id: "review", udid: "a", kind: "assignment", state: "uncertain", errorCode: "post_verification_needs_review" } as OperationRunItem])[0])
+      .toMatchObject({ fraction: null, reviewPublish: true, pendingPublish: false });
   });
   it("does not double count a Flow parent plus its child attempts", () => {
     const item = { id: "device", udid: "a", kind: "device", state: "running" } as OperationRunItem;

@@ -65,7 +65,7 @@ async function open(page: Page, name: string): Promise<void> {
   }
   if (name === "Đăng bài") {
     await expect(
-      page.getByRole("button", { name: "Chọn máy", exact: true }),
+      page.getByRole("button", { name: "Kiểm tra & đăng", exact: true }),
     ).toBeDisabled();
   }
   if (name === "Flow") {
@@ -124,10 +124,12 @@ test("automation profile controls keep consistent size and secondary actions", a
     { width: 820, height: 560 },
   ]) {
     await page.setViewportSize(viewport);
-    for (const name of ["Nuôi TikTok", "Tương tác", "Đăng bài"]) {
+    for (const name of ["Nuôi TikTok", "Tương tác"]) {
       await open(page, name);
-      if (name === "Đăng bài")
-        await page.getByRole("button", { name: "Hồ sơ & cài đặt" }).click();
+      if (name === "Nuôi TikTok")
+        await page.getByRole("tab", { name: "Hành vi", exact: true }).click();
+      if (name === "Tương tác")
+        await page.getByText("Hồ sơ & cài đặt", { exact: true }).click();
       const profile = page.getByRole("region", {
         name: `Quản lý hồ sơ ${name}`,
       });
@@ -158,20 +160,16 @@ test("automation profile controls keep consistent size and secondary actions", a
       await expect(profile.locator("button.primary")).toHaveCount(0);
       if (name === "Nuôi TikTok") {
         const start = await page
-          .getByRole("button", { name: "Bắt đầu", exact: true })
+          .getByRole("button", { name: "Kiểm tra & bắt đầu", exact: true })
           .boundingBox();
         expect(start?.height).toBeLessThanOrEqual(40);
       }
       if (name === "Tương tác") {
         const profileBox = await profile.boundingBox();
-        const linkBox = await page
-          .getByPlaceholder("Dán link TikTok, mỗi dòng một bài")
-          .boundingBox();
-        expect(Math.abs(profileBox!.x - linkBox!.x)).toBeLessThan(1);
-        const select = page.getByRole("combobox", {
-          name: /Nội dung bình luận/,
-        });
-        expect((await select.boundingBox())!.height).toBeGreaterThanOrEqual(32);
+        expect(profileBox!.x).toBeGreaterThanOrEqual(0);
+        expect(profileBox!.x + profileBox!.width).toBeLessThanOrEqual(viewport.width);
+        await page.getByText("Hồ sơ & cài đặt", { exact: true }).click();
+        await expect(page.getByPlaceholder("Dán link TikTok, mỗi dòng một bài")).toBeVisible();
       }
     }
   }
@@ -181,17 +179,12 @@ test("nurture readiness blocks invalid values and links to the repair field", as
   page,
 }) => {
   await open(page, "Nuôi TikTok");
-  await page
-    .getByRole("radiogroup", { name: "Cách chọn thiết bị" })
-    .getByText("Toàn bộ", { exact: true })
-    .click();
-  await expect(
-    page.getByRole("radio", { name: "Toàn bộ", exact: true }),
-  ).toBeChecked();
+  await page.getByRole("combobox", { name: "Phạm vi thiết bị" }).selectOption("all");
+  await page.getByRole("tab", { name: "Thiết lập", exact: true }).click();
   const input = page.locator('input[data-nurture-field="watchMax"]');
   await input.fill("1");
   await expect(
-    page.getByRole("button", { name: "Bắt đầu", exact: true }),
+    page.getByRole("button", { name: "Kiểm tra & bắt đầu", exact: true }),
   ).toBeDisabled();
   await expect(
     page.getByRole("button", { name: "Tạo hồ sơ", exact: true }),
@@ -202,14 +195,14 @@ test("nurture readiness blocks invalid values and links to the repair field", as
   await input.fill("20");
   // The fixture also lacks a comment key: fixing one field must not clear another blocker.
   await expect(
-    page.getByRole("button", { name: "Bắt đầu", exact: true }),
+    page.getByRole("button", { name: "Kiểm tra & bắt đầu", exact: true }),
   ).toBeDisabled();
   await page.getByRole("button", { name: "Sửa thiết lập" }).click();
   const key = page.locator('input[data-nurture-field="apiKey"]');
   await expect(key).toBeFocused();
   await key.fill("fixture-key");
   await expect(
-    page.getByRole("button", { name: "Bắt đầu", exact: true }),
+    page.getByRole("button", { name: "Kiểm tra & bắt đầu", exact: true }),
   ).toBeEnabled();
   await expect(page.getByRole("button", { name: "Sửa thiết lập" })).toHaveCount(
     0,
@@ -327,15 +320,15 @@ test("publish keeps setup separate from campaign monitoring", async ({
   await page.setViewportSize({ width: 1440, height: 900 });
   await open(page, "Đăng bài");
 
-  await expect(page.locator(".publish-wizard")).toBeVisible();
+  await expect(page.locator(".publish-quick")).toBeVisible();
   await expect(
-    page.getByRole("region", { name: "Theo dõi", exact: true }),
+    page.getByRole("tabpanel", { name: "Theo dõi", exact: true }),
   ).toBeHidden();
 
-  await page.getByRole("button", { name: "Theo dõi", exact: true }).click();
-  await expect(page.locator(".publish-wizard")).toBeHidden();
+  await page.getByRole("tab", { name: "Theo dõi", exact: true }).click();
+  await expect(page.locator(".publish-quick")).toBeHidden();
   await expect(
-    page.getByRole("region", { name: "Theo dõi", exact: true }),
+    page.getByRole("tabpanel", { name: "Theo dõi", exact: true }),
   ).toBeVisible();
   await expect(page.getByText("Chưa có chiến dịch")).toBeVisible();
   await expect(page.locator(".activity-center-current.is-error")).toHaveCount(
@@ -357,19 +350,10 @@ test("publish workflow stays inside the viewport at supported widths", async ({
     await expect(
       page.getByRole("heading", { level: 1, name: "Đăng bài" }),
     ).toHaveCount(1);
-    const workflow = page.getByRole("navigation", {
-      name: "Quy trình đăng bài",
-    });
-    await expect(workflow.getByRole("button")).toHaveCount(3);
-    await expect(
-      workflow.getByRole("button", { name: "1 Chọn bài" }),
-    ).toHaveAttribute("aria-current", "step");
-    await expect(
-      workflow.getByRole("button", { name: "2 Chọn máy" }),
-    ).toBeDisabled();
-    await expect(
-      workflow.getByRole("button", { name: "3 Kiểm tra & đăng" }),
-    ).toBeDisabled();
+    for (const name of ["Nội dung đăng", "Bài đang chỉnh", "Máy thực hiện"]) {
+      await expect(page.getByRole("region", { name, exact: true })).toBeVisible();
+    }
+    await expect(page.getByRole("button", { name: "Kiểm tra & đăng", exact: true })).toBeDisabled();
     const overflow = await page.evaluate(() => ({
       viewport: document.documentElement.clientWidth,
       document: document.documentElement.scrollWidth,
@@ -394,11 +378,12 @@ test("nurture rhythm controls stay compact and aligned", async ({ page }) => {
   ]) {
     await page.setViewportSize(viewport);
     await open(page, "Nuôi TikTok");
+    await page.getByRole("tab", { name: "Hành vi", exact: true }).click();
 
     const rhythm = page.locator(".nu-group").filter({
       has: page.locator(".nu-group-head", { hasText: "Nhịp" }),
     });
-    await rhythm.scrollIntoViewIfNeeded();
+    await rhythm.evaluate((group) => group.scrollIntoView({ block: "center" }));
     const geometry = await rhythm.evaluate((group) => {
       const toggle = group.querySelector<HTMLElement>(".nu-toggle-grid");
       const night = group.querySelector<HTMLElement>(".nu-night-setting");

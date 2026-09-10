@@ -218,6 +218,7 @@ async fn main() -> anyhow::Result<()> {
         poster: row.poster.clone(),
         partners: row.partners.clone(),
         assignment_id: row.assignment_id.clone(),
+        posted_at: row.posted_at.clone(),
     };
     // Printed with the token masked unless one was supplied on purpose: this output goes in
     // terminal scrollback and screenshots.

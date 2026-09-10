@@ -336,6 +336,10 @@ impl DeviceDriver for MultiplexDriver {
         self.route(udid)?.available_storage_bytes(udid).await
     }
 
+    async fn verify_automation_transport(&self, udid: &str) -> anyhow::Result<()> {
+        self.route(udid)?.verify_automation_transport(udid).await
+    }
+
     fn supports_push_media(&self, udid: &str) -> bool {
         self.try_route(udid)
             .is_some_and(|driver| driver.supports_push_media(udid))

@@ -1,0 +1,5 @@
+<hierarchy>
+  <android.widget.Button package="com.zhiliaoapp.musically" class="android.widget.Button" text="Edit" checked="false" clickable="true" enabled="true" focused="false" selected="false" bounds="[646,436][772,510]" displayed="true" />
+  <android.widget.Button package="com.zhiliaoapp.musically" class="android.widget.Button" text="@fixture.account" resource-id="com.zhiliaoapp.musically:id/sj8" checked="false" clickable="true" enabled="true" focused="false" selected="false" bounds="[350,510][729,549]" displayed="true" />
+  <android.widget.Button package="com.zhiliaoapp.musically" class="android.widget.Button" text="" content-desc="Profile menu" checked="false" clickable="true" enabled="true" focused="false" selected="false" bounds="[954,79][1059,184]" displayed="true" />
+</hierarchy>

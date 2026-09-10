@@ -5,9 +5,8 @@ import { InfoDot as Info } from "../InfoDot";
 /**
  * When the schedule is allowed to run, and how it runs in each stretch of the day.
  *
- * **Lives under Hành vi, not in a tab of its own.** A schedule is a statement about behaviour
- * — these hours, this hard, on these phones — and reading it a tab away from the rates it
- * overrides is how a window ends up quietly contradicting the panel above it.
+ * The page exposes scheduling in its own horizontal tab. The legacy popup embeds
+ * this editor under behaviour; both surfaces edit the same settings and per-window overrides.
  *
  * With no windows the schedule keeps its old shape: one cadence, all day. That is what every
  * settings row written before this editor existed contains, so the empty state is a real mode

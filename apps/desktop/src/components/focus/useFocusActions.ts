@@ -54,7 +54,6 @@ export function useFocusActions({
   runBusy,
 }: FocusActionDeps) {
   const pressKey = async (key: HardwareKey) => {
-    recordKey(key); // A8: no-op unless a macro recording is armed.
     // Single-device gestures go through the manual-session lease; wait for control to open
     // rather than race it. The group path (`group_input`) skips and reports per device, so
     // it needs no gate.
@@ -64,6 +63,7 @@ export function useFocusActions({
     }
     try {
       await runExclusive(async () => {
+        recordKey(key);
         if (targets.length > 1) {
           reportGroup(
             await groupInput({

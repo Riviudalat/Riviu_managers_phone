@@ -1,6 +1,6 @@
 [package]
 name = "riviu-managers-phone"
-version = "0.2.8"
+version = "0.2.24"
 description = "Riviu Manager — iPhone and Android device farm"
 authors = ["Riviu"]
 edition = "2021"
@@ -83,6 +83,64 @@ tokio = { workspace = true, features = ["test-util"] }
 
 [features]
 default = []
+diagnostics = []
+deployment-check = []
 
 [lints]
 workspace = true
+
+# Helper programs are explicit opt-ins; production bundles include only the app and staged checker.
+[[bin]]
+name = "capture_frames"
+path = "src/bin/capture_frames.rs"
+required-features = ["diagnostics"]
+
+[[bin]]
+name = "carousel_comment"
+path = "src/bin/carousel_comment.rs"
+required-features = ["diagnostics"]
+
+[[bin]]
+name = "live_app_install_android"
+path = "src/bin/live_app_install_android.rs"
+required-features = ["diagnostics"]
+
+[[bin]]
+name = "live_flow_android"
+path = "src/bin/live_flow_android.rs"
+required-features = ["diagnostics"]
+
+[[bin]]
+name = "live_flow_test"
+path = "src/bin/live_flow_test.rs"
+required-features = ["diagnostics"]
+
+[[bin]]
+name = "live_interaction_android"
+path = "src/bin/live_interaction_android.rs"
+required-features = ["diagnostics"]
+
+[[bin]]
+name = "live_nurture_android"
+path = "src/bin/live_nurture_android.rs"
+required-features = ["diagnostics"]
+
+[[bin]]
+name = "live_nurture_test"
+path = "src/bin/live_nurture_test.rs"
+required-features = ["diagnostics"]
+
+[[bin]]
+name = "riviu-deployment-check"
+path = "src/bin/riviu-deployment-check.rs"
+required-features = ["deployment-check"]
+
+[[bin]]
+name = "swipe_probe"
+path = "src/bin/swipe_probe.rs"
+required-features = ["diagnostics"]
+
+[[bin]]
+name = "video_understanding"
+path = "src/bin/video_understanding.rs"
+required-features = ["diagnostics"]

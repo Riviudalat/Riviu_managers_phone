@@ -534,65 +534,8 @@ impl UiSession for AndroidUiSession {
     }
 
     async fn active_app_bundle(&self) -> anyhow::Result<String> {
-        // `dumpsys window windows` no longer carries `mCurrentFocus`: measured
-        // empty on Android 15 (Redmi Note 12, HyperOS `OS2.0.207.0`) while it is
-        // the line that does work on the Android 9 S8+ fleet. So ask both instead
-        // of betting on one, and treat grep's non-zero exit for "no match" as an
-        // answer rather than an error — that exit is what made the G1 probe fail
-        // here with an empty message.
-        // Measured on both phones in the fleet, 12/08/2026, and the split is total:
-        //
-        // | form                      | Note 8 / Android 8 | Redmi Note 12 / Android 15 |
-        // |---------------------------|--------------------|----------------------------|
-        // | `dumpsys window windows`  | works, 88–148 ms   | **empty, always**          |
-        // | `dumpsys window displays` | **empty, always**  | works, 105–107 ms          |
-        // | `dumpsys window`          | works, 84–97 ms    | works, 129–172 ms          |
-        //
-        // So the subcommand-free form is the only one that answers on both, and it costs
-        // the same — the `grep` runs on the device, so one line comes back either way.
-        // It goes first for that reason: with `windows` first, every call on the Android
-        // 15 phone spent a wasted round trip (122–167 ms) before the one that works.
-        // The other two stay as fallbacks rather than being deleted, because a phone
-        // that answers only one of them is exactly what this list is for.
-        const SOURCES: [&str; 3] = [
-            "dumpsys window | grep mCurrentFocus",
-            "dumpsys window windows | grep mCurrentFocus",
-            "dumpsys window displays | grep mCurrentFocus",
-        ];
-        let mut tried: Vec<String> = Vec::new();
-        for source in SOURCES {
-            match self.adb.shell(&self.serial, source).await {
-                // **The three-way answer matters, and flattening it produced a false
-                // sentence.** Measured 23/08/2026 on two locked phones: `mCurrentFocus` read
-                // `Window{… StatusBar}`, which has no `package/activity` pair, so the old
-                // code reported *"had no mCurrentFocus line"* — about a line that was right
-                // there. The operator was then told the phone was "unreadable", which is not
-                // a thing anybody can act on; "on the lock screen" is.
-                Ok(stdout) => match crate::adb::parse_foreground_window(&stdout) {
-                    crate::adb::ForegroundWindow::App(package) => return Ok(package),
-                    // Names the window and stops there. It used to add "the phone is most
-                    // likely on its lock screen", which is one possibility presented as the
-                    // answer: measured 25/08/2026, a phone reporting `Select input method`
-                    // was awake, unlocked, and holding Android's keyboard chooser over the
-                    // app. The caller can act on a name; it cannot act on a guess.
-                    crate::adb::ForegroundWindow::System(window) => tried.push(format!(
-                        "`{source}` reported the system window {window}, not an app — a lock \
-                         screen does this, and so does any system dialog standing over the \
-                         app"
-                    )),
-                    crate::adb::ForegroundWindow::Unreadable => {
-                        tried.push(format!("`{source}` had no readable mCurrentFocus line"))
-                    }
-                },
-                Err(error) => tried.push(format!("`{source}` failed: {error}")),
-            }
-        }
-        Err(anyhow!(
-            "could not read the foreground package. Tried: {}",
-            tried.join("; ")
-        ))
+        self.adb.foreground_package(&self.serial).await
     }
-
     /// Android has a first-class intent for this, so unlike the iOS side it
     /// needs no capability negotiation.
     async fn open_url(&self, url: &str) -> anyhow::Result<()> {
@@ -689,10 +632,9 @@ impl UiSession for AndroidUiSession {
         query: riviu_core::ElementQuery<'_>,
     ) -> anyhow::Result<Option<riviu_core::ElementBox>> {
         let locator = to_agent_locator(query);
-        let Some(element) = self.agent.find(&locator).await? else {
+        let Some((element, rect)) = self.agent.find_with_rect(&locator).await? else {
             return Ok(None);
         };
-        let rect = self.agent.rect(&element).await?;
         // A missing label is not a failure: absent is a legitimate answer for an
         // element found by substring or by class, and the caller only needs it for
         // the fingerprint.
@@ -730,10 +672,9 @@ impl UiSession for AndroidUiSession {
         query: riviu_core::ElementQuery<'_>,
     ) -> anyhow::Result<Option<riviu_core::driver::StatefulElementBox>> {
         let locator = to_agent_locator(query);
-        let Some(element) = self.agent.find(&locator).await? else {
+        let Some((element, rect)) = self.agent.find_with_rect(&locator).await? else {
             return Ok(None);
         };
-        let rect = self.agent.rect(&element).await?;
         let description = self
             .agent
             .attribute(&element, "content-desc")

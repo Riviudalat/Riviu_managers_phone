@@ -552,13 +552,31 @@ pub async fn device_key(
     key: HardwareKey,
 ) -> Result<(), CommandError> {
     let _admission = state.ensure_accepting_work()?;
+    let android = state.android.clone();
+    let serial = udid.clone();
     with_manual_session(
         &state,
         &udid,
         DeviceWorkOwner::ManualControl,
-        move |session| async move { session.press_hardware_key(key).await },
+        move |session| async move {
+            press_manual_key(android.as_deref(), &serial, session.as_ref(), key).await
+        },
     )
     .await
+}
+
+async fn press_manual_key(
+    android: Option<&riviu_android_driver::AndroidDriver>,
+    udid: &str,
+    session: &dyn riviu_core::UiSession,
+    key: HardwareKey,
+) -> anyhow::Result<()> {
+    if let Some(android) = android {
+        if android.inject_hardware_key(udid, key).await? {
+            return Ok(());
+        }
+    }
+    session.press_hardware_key(key).await
 }
 
 /// Lock (screen off) or unlock a phone — xiaowei "锁屏/解锁", batched by the UI over a group
@@ -735,9 +753,13 @@ pub async fn group_input(
             "home" => session.home().await,
             // Validated before the loop, so this arm cannot be reached without a key.
             "key" => {
-                session
-                    .press_hardware_key(key.expect("key was validated"))
-                    .await
+                press_manual_key(
+                    state.android.as_deref(),
+                    &udid,
+                    session.as_ref(),
+                    key.expect("key was validated"),
+                )
+                .await
             }
             _ => unreachable!("group input kind was validated"),
         };

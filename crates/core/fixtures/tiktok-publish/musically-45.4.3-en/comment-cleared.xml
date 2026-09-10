@@ -1,0 +1,7 @@
+<hierarchy>
+  <android.widget.Button package="com.zhiliaoapp.musically" class="android.widget.Button" text="Carrot in Da Lat 🥕🥕🥕" resource-id="com.zhiliaoapp.musically:id/title" checked="false" clickable="true" enabled="true" focused="false" selected="false" bounds="[167,808][556,852]" displayed="true" />
+  <android.widget.Button package="com.zhiliaoapp.musically" class="android.widget.Button" text="ᥫᩣ" resource-id="com.zhiliaoapp.musically:id/title" checked="false" clickable="true" enabled="true" focused="false" selected="false" bounds="[167,1551][201,1595]" displayed="true" />
+  <android.widget.Button package="com.zhiliaoapp.musically" class="android.widget.Button" text="Khanh_Nguyen" resource-id="com.zhiliaoapp.musically:id/title" checked="false" clickable="true" enabled="true" focused="false" selected="false" bounds="[167,1902][414,1939]" displayed="true" />
+  <android.widget.LinearLayout package="com.zhiliaoapp.musically" class="android.widget.LinearLayout" text="" resource-id="com.zhiliaoapp.musically:id/viewpager_container" checked="false" clickable="false" enabled="true" focused="false" selected="false" bounds="[0,0][1080,2094]" displayed="true" />
+  <android.widget.Button package="com.zhiliaoapp.musically" class="android.widget.Button" text="" content-desc="@2131888575" resource-id="com.zhiliaoapp.musically:id/cog" checked="false" clickable="true" enabled="false" focused="false" selected="false" bounds="[911,1111][1048,1195]" displayed="true" />
+</hierarchy>

@@ -2,6 +2,55 @@ use super::*;
 use crate::{OperationDeviceLog, OperationDeviceLogEntry, OperationRunKind};
 
 impl Database {
+    /// Append an actual runtime step, with its source timestamp and durable ordinal.
+    /// This audit never changes assignment state or authorizes Post.
+    pub fn append_publish_progress(
+        &self,
+        campaign_id: &str,
+        assignment_id: &str,
+        progress: &crate::tiktok_composer::PublishProgress,
+    ) -> anyhow::Result<()> {
+        let mut connection = self.conn()?;
+        let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let (udid, request): (String, String) = tx.query_row(
+            "SELECT a.udid,c.request_json FROM publish_assignments a
+             JOIN publish_campaigns c ON c.id=a.campaign_id
+             WHERE a.id=?1 AND a.campaign_id=?2",
+            params![assignment_id, campaign_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        let request: serde_json::Value = serde_json::from_str(&request)?;
+        let device = request
+            .pointer("/targetSnapshot/included")
+            .and_then(serde_json::Value::as_array)
+            .and_then(|rows| rows.iter().find(|row| row["udid"].as_str() == Some(&udid)));
+        let label = device
+            .and_then(|row| row["number"].as_u64())
+            .map(|number| format!("máy {number}"))
+            .unwrap_or_else(|| "thiết bị này".into());
+        let ordinal: u64 = tx.query_row(
+            "SELECT COUNT(*)+1 FROM operation_device_events
+             WHERE source_kind='publish' AND source_id=?1 AND udid=?2 AND action='publishStep'",
+            params![campaign_id, udid],
+            |row| row.get(0),
+        )?;
+        tx.execute(
+            "INSERT INTO operation_device_events
+             (source_kind,source_id,udid,action,state,recorded_at,text,detail)
+             VALUES ('publish',?1,?2,'publishStep',?3,?4,?5,?6)",
+            params![
+                campaign_id,
+                udid,
+                progress.state(),
+                Utc::now().to_rfc3339(),
+                format!("[{ordinal}] {}", progress.message(&label)),
+                progress.detail()
+            ],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
     /// Read only the selected run AND device. The ring keyed by UDID alone is not history.
     pub fn operation_device_log(
         &self,
@@ -42,7 +91,8 @@ impl Database {
         };
         let connection = self.conn()?;
         let mut statement = connection.prepare(&format!(
-            "SELECT * FROM ({query}) ORDER BY 2 DESC,1 DESC LIMIT 501"
+            "WITH log(id,at,action,state,text,detail) AS ({query})
+             SELECT * FROM log ORDER BY at DESC,CAST(id AS INTEGER) DESC,id DESC LIMIT 501"
         ))?;
         let mut entries = statement
             .query_map(params![source_id, udid], |row| {
@@ -124,6 +174,54 @@ mod tests {
             .entries
             .is_empty());
         drop(conn);
+        use crate::tiktok_composer::PublishProgress;
+        db.append_publish_progress("campaign", "assignment", &PublishProgress::CheckingDevice)
+            .unwrap();
+        db.append_publish_progress("campaign", "assignment", &PublishProgress::OpeningSounds)
+            .unwrap();
+        db.append_publish_progress(
+            "campaign",
+            "assignment",
+            &PublishProgress::FailedBeforePost {
+                reason: "sound timeout".into(),
+            },
+        )
+        .unwrap();
+        assert!(db
+            .append_publish_progress("different", "assignment", &PublishProgress::Finished)
+            .is_err());
+        let state: String = db
+            .conn()
+            .unwrap()
+            .query_row(
+                "SELECT state FROM publish_assignments WHERE id='assignment'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(state, "posting", "log must not change business state");
+        drop(db);
+        let db = Database::open(&path).unwrap();
+        let restored = db
+            .operation_device_log(OperationRunKind::Publish, "campaign", "phone-a")
+            .unwrap();
+        let steps: Vec<_> = restored
+            .entries
+            .iter()
+            .filter(|row| row.action == "publishStep")
+            .collect();
+        assert_eq!(steps.len(), 3);
+        assert!(steps[0].text.as_deref().unwrap().starts_with("[1] "));
+        assert!(steps[2].text.as_deref().unwrap().starts_with("[3] Dừng"));
+        assert_eq!(steps[2].detail.as_deref(), Some("sound timeout"));
+        assert!(steps
+            .iter()
+            .all(|row| chrono::DateTime::parse_from_rfc3339(row.at.as_deref().unwrap()).is_ok()));
+        assert!(db
+            .operation_device_log(OperationRunKind::Publish, "campaign", "phone-b")
+            .unwrap()
+            .entries
+            .is_empty());
         drop(db);
         std::fs::remove_file(path).unwrap();
     }

@@ -1,0 +1,7 @@
+{
+  "provenance": "09/09/2026 Global 45.7.3/en, target/publish-approved-20260909/links/7/post-0.xml; resource IDs and relative-time text retained; caption replaced",
+  "nodes": [
+    { "resourceId": "com.zhiliaoapp.musically:id/desc", "text": "Fixture caption for a submitted carousel" },
+    { "resourceId": "com.zhiliaoapp.musically:id/zwj", "text": "· 1m ago" }
+  ]
+}

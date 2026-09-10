@@ -1,4 +1,4 @@
-import { cleanup, render, screen, within } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { InteractionCampaignDetailView } from "./InteractionCampaignDetail";
@@ -55,6 +55,26 @@ function renderDetail(detail: InteractionCampaignDetail) {
 }
 
 describe("InteractionCampaignDetail terminal action projection", () => {
+  it("shows compact machine outcomes and opens evidence only for the selected machine", () => {
+    const detail = campaign([
+      { ...assignment(0, "uncertain", [action("save", "uncertain", "tap")]), preparedText: "evidence for first machine" },
+      { ...assignment(1, "succeeded", [action("comment", "confirmed", "send")]), preparedText: "evidence for second machine" },
+    ]);
+    const retry = vi.fn();
+    render(<InteractionCampaignDetailView compact detail={detail} artifacts={[]} notes={[]} devices={[]} deviceNumber={new Map()} handles={{}}
+      busy={false} error={null} onBack={() => {}} onCancel={() => {}} onRetry={retry}
+      onShowShot={() => {}} shot={null} onDismissShot={() => {}} />);
+    expect(screen.getByText("Lưu · Chưa chắc kết quả")).toBeVisible();
+    expect(screen.queryByText("evidence for first machine")).toBeNull();
+    fireEvent.click(screen.getAllByRole("button", { name: /^Xem log / })[0]);
+    const drawer = screen.getByRole("dialog");
+    expect(within(drawer).getByText("evidence for first machine")).toBeVisible();
+    expect(within(drawer).queryByText("evidence for second machine")).toBeNull();
+    expect(within(drawer).queryByRole("button", { name: "Thử lại" })).toBeNull();
+    fireEvent.keyDown(document, { key: "Escape" });
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(retry).not.toHaveBeenCalled();
+  });
   it("settles all 40 actions while preserving 9 unclaimed historical comments and their raw records", () => {
     const rows = Array.from({ length: 20 }, (_, index) => {
       if (index < 11) {

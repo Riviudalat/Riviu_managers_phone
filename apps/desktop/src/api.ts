@@ -80,6 +80,7 @@ import type {
   DeviceHealthReport,
   DevicePublishReadiness,
   PublishSheetConfig,
+  PublishSheetCheckResult,
   AutomationDefinition,
   AutomationDefinitionRecord,
   AutomationKind,
@@ -988,6 +989,17 @@ export async function publishPreflight(request: PublishPreflightRequest) {
   return invoke<PublishPreflightReport>("publish_preflight", { request });
 }
 
+export async function publishSchedulePreflight(request: import("./types").PublishScheduleRequest) {
+  return invoke<import("./types").PublishScheduleReport>("publish_schedule_preflight", { request });
+}
+export async function publishScheduleReschedule(campaignId: string, expectedUpdatedAt: string, runAt: string) {
+  return invoke<PublishCampaignRecord>("publish_schedule_reschedule", { campaignId, expectedUpdatedAt, runAt });
+}
+
+export async function publishScheduleCreate(request: import("./types").PublishScheduleRequest, approvedInputDigest: string, confirmed: boolean) {
+  return invoke<PublishCampaignRecord[]>("publish_schedule_create", { request, approvedInputDigest, confirmed });
+}
+
 export async function publishCreateCampaign(
   sourceRoot: string,
   bundleIds: string[],
@@ -1061,14 +1073,23 @@ export async function publishSheetGetConfig() {
   return invoke<PublishSheetConfig>("publish_sheet_get_config");
 }
 
+export async function publishSheetCheck(sheetUrl: string) {
+  return invoke<PublishSheetCheckResult>("publish_sheet_check", { sheetUrl });
+}
+
+export async function publishSheetPrepare(sheetUrl: string) {
+  return invoke<PublishSheetCheckResult>("publish_sheet_prepare", { sheetUrl });
+}
+
 /**
  * Save the webhook URL; `token` undefined keeps the stored one, an empty string clears it.
  * The backend refuses a non-HTTPS URL — the token and every post link travel in the body.
  */
-export async function publishSheetSaveConfig(webhookUrl: string, token?: string) {
+export async function publishSheetSaveConfig(webhookUrl: string, token?: string, internalReporting?: boolean) {
   return invoke<PublishSheetConfig>("publish_sheet_save_config", {
     webhookUrl,
     token: token ?? null,
+    internalReporting: internalReporting ?? null,
   });
 }
 
@@ -1372,6 +1393,10 @@ export async function automationScheduleCreate(
     enabled,
     schedule,
   });
+}
+
+export async function automationScheduleFromSettings(name: string, kind: AutomationKind, target: TargetRef, config: JsonValue, schedule: AutomationScheduleV1): Promise<AutomationSchedule> {
+  return invoke<AutomationSchedule>("automation_schedule_from_settings", { name, kind, target, config, schedule });
 }
 
 export async function automationScheduleUpdate(

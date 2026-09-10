@@ -497,7 +497,7 @@ fn check_operating_system(host: &HostInfo) -> CheckResult {
             format!("{} build {} is supported", host.name, host.build)
         } else {
             format!(
-                "Windows version/build could not prove Windows 10 or newer: version={:?}, build={:?}",
+                "Windows 10 version 1903 (build 18362) or newer is required: version={:?}, build={:?}",
                 host.version, host.build
             )
         },
@@ -520,7 +520,7 @@ fn windows_version_status(version: &str, build: &str) -> CheckStatus {
     );
     match parsed {
         (Some(10), Some(0), Some(version_build), Some(build))
-            if version_build == build && build >= 10_240 =>
+            if version_build == build && build >= 18_362 =>
         {
             CheckStatus::Pass
         }
@@ -1215,7 +1215,7 @@ pub(crate) fn check_android_package_tools(sidecars_root: &Path) -> CheckResult {
         "https://github.com/google/bundletool/releases/download/1.18.3/bundletool-all-1.18.3.jar";
     const EXPECTED_JRE_SOURCE: &str = "https://github.com/adoptium/temurin21-binaries/releases/download/jdk-21.0.12.1%2B1/OpenJDK21U-jre_x64_windows_hotspot_21.0.12.1_1.zip";
     const EXPECTED_TREE_SHA256: &str =
-        "f24951701beb69fe74ef073196c249d6df153749722f82260d79fc6687a7d57f";
+        "de003f9f8b872ba8a9e2bb57d0539e04c0c7116e409619ded42941aaf85a3762";
 
     let root = sidecars_root.join("android-package-tools");
     let manifest_path = root.join("android-package-tools-manifest.json");
@@ -1235,6 +1235,15 @@ pub(crate) fn check_android_package_tools(sidecars_root: &Path) -> CheckResult {
             .get("jre")
             .and_then(Value::as_object)
             .context("manifest lacks JRE provenance")?;
+        let expected_transform = json!({
+            "id": "riviu-java-utf8-manifest-v1",
+            "sourceSha256": "82051fdab26319d77d20cc0065045d05ec00b3e3d05f44935d7c06b96b621d55",
+            "outputSha256": "8c5e289a71c6c071cf208b48a7811d2dad88f945447a7d5023ecec2c308ce354",
+            "manifestSha256": "66b2dc8c2630998296c6f58cfc720975a62cf4ef4d11e5041244a2abd53d9ca1",
+        });
+        if jre.get("launcherTransform") != Some(&expected_transform) {
+            return Err(anyhow!("Java launcher transform provenance pin mismatch"));
+        }
         if bundletool.get("path").and_then(Value::as_str) != Some("bundletool.jar")
             || bundletool.get("version").and_then(Value::as_str) != Some(EXPECTED_BUNDLETOOL)
             || bundletool.get("sourceBytes").and_then(Value::as_u64)
@@ -1562,6 +1571,10 @@ mod tests {
     #[test]
     fn windows_10_and_11_builds_are_supported() {
         assert_eq!(
+            windows_version_status("10.0.18362", "18362"),
+            CheckStatus::Pass
+        );
+        assert_eq!(
             windows_version_status("10.0.19045.0", "19045"),
             CheckStatus::Pass
         );
@@ -1573,6 +1586,11 @@ mod tests {
 
     #[test]
     fn missing_malformed_and_pre_windows_10_builds_fail_closed() {
+        // Java's process-local UTF-8 manifest requires Windows 10 1903+.
+        assert_eq!(
+            windows_version_status("10.0.17763", "17763"),
+            CheckStatus::Fail
+        );
         assert_eq!(windows_version_status("", ""), CheckStatus::Fail);
         assert_eq!(
             windows_version_status("not-a-version", "19045"),

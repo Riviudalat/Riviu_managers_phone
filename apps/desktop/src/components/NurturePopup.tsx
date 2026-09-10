@@ -6,11 +6,11 @@ import {
   useRef,
   useState,
   type CSSProperties,
+  type ReactNode,
   type KeyboardEvent as ReactKeyboardEvent,
 } from "react";
 
 import { InfoDot as Info } from "./InfoDot";
-import { AutomationProfileControl, type AutomationProfileHandle } from "./AutomationProfileControl";
 import { useWorkspaceDraft } from "../workspaceDraft";
 import { readFormDraft, writeFormDraft } from "../formDraftStorage";
 import {
@@ -32,9 +32,13 @@ import { NurtureCommentsTab } from "./nurture/NurtureCommentsTab";
 import { NurtureDeviceLog } from "./nurture/NurtureDeviceLog";
 import { NurtureDeviceProgress, NurtureRunProgress } from "./nurture/NurtureProgress";
 import { NurtureBehaviourTab } from "./nurture/NurtureBehaviourTab";
+import { NurtureWindows } from "./nurture/NurtureWindows";
+import { NurtureMachinePicker, NurtureSessionSetup } from "./nurture/NurtureSessionSetup";
+import { AutomationSettingsSchedule } from "./AutomationSettingsSchedule";
+import "../styles/nurture-workspace.css";
 import { IconClose, IconHeart, IconRefresh } from "./Icons";
 import { LoadingState, StatusNotice } from "./States";
-import { CommandBar, StatusChip, SummaryRail } from "./WorkspacePrimitives";
+import { CommandBar, StatusChip } from "./WorkspacePrimitives";
 import type {
   DeviceInfo,
   DeviceMeta,
@@ -44,6 +48,7 @@ import type {
   TargetRef,
 } from "../types";
 import { describeError } from "../describeError";
+import { requestConfirm } from "../confirmStore";
 import type { OperationSourceRef } from "../operationSource";
 import { OperationSourceDetail } from "./OperationSourceDetail";
 
@@ -74,6 +79,7 @@ type Props = {
   onClose?: () => void;
   surface?: "popup" | "page";
   operationSource?: OperationSourceRef;
+  scopeControl?: ReactNode;
 };
 
 /**
@@ -301,11 +307,11 @@ export function NurturePopup({
   onClose,
   surface = "popup",
   operationSource,
+  scopeControl,
 }: Props) {
   const [settings, setSettings] = useState<NurtureSettings | null>(null);
   const [baseline, setBaseline] = useState<{settings: NurtureSettings; target?: TargetRef} | null>(null);
   const [credentialBaseline, setCredentialBaseline] = useState<string | null>(null);
-  const profileRef = useRef<AutomationProfileHandle>(null);
   const settingsRef = useRef(settings);
   settingsRef.current = settings;
   const targetRefLatest = useRef(targetRef);
@@ -313,6 +319,11 @@ export function NurturePopup({
   const snapshotKey = JSON.stringify([settings ? nurtureProfileConfig(settings) : null, targetRef]);
   const dirty = baseline !== null && snapshotKey !== JSON.stringify([nurtureProfileConfig(baseline.settings), baseline.target]);
   const [statuses, setStatuses] = useState<NurtureSessionStatus[]>([]);
+  const mounted = useRef(true);
+  const reloadTicket = useRef(0);
+  const logSummaryTicket = useRef(0);
+  const statusEventSequence = useRef(0);
+  const latestStatusEvents = useRef(new Map<string, { sequence: number; status: NurtureSessionStatus }>());
   const [startedTargets, setStartedTargets] = useState<string[]>([]);
   const [startReport, setStartReport] = useState<{ requested: string[]; started: string[] } | null>(null);
   const [msg, setMsg] = useState<string | null>(null);
@@ -320,14 +331,19 @@ export function NurturePopup({
   const issueId = useId();
   const workspaceRef = useRef<HTMLDivElement>(null);
   const [focusInvalid, setFocusInvalid] = useState(false);
-  const settingsIssue = settings ? validateNurtureSettings(settings) : null;
+  const settingsIssue = useMemo(() => {
+    const issue = settings ? validateNurtureSettings(settings) : null;
+    return surface === "page" && (issue?.field === "numVideos" || issue?.field === "numRounds")
+      ? { ...issue, field: "numVideos" as const, message: "Nhập tổng số video muốn lướt từ 1 đến 10000." }
+      : issue;
+  }, [settings, surface]);
   // Tabs rather than a stack of collapsibles. The old panel put "Cấu hình AI", "Hành vi"
   // and the schedule one under another in a column narrow enough that each of them had to
   // be folded away, so tuning two related numbers meant scrolling past a closed section —
   // and opening two at once pushed the live log off the bottom, which is the one thing the
   // panel is open to watch. One group at a time, full width, with the log in the same tab row.
   const [tab, setTab] = useState<"behaviour" | "ai" | "comments" | "log">("behaviour");
-  const [pageMode, setPageMode] = useState<"setup" | "monitor">("setup");
+  const [pageMode, setPageMode] = useState<"setup" | "schedule" | "monitor">("setup");
   useEffect(() => {
     if (operationSource?.kind === "nurture") setPageMode("monitor");
   }, [operationSource]);
@@ -360,9 +376,9 @@ export function NurturePopup({
   const pageSurface = surface === "page";
   useEffect(() => {
     if (!focusInvalid || !settingsIssue) return;
-    const input = workspaceRef.current?.querySelector<HTMLElement>(
+    const input = Array.from(workspaceRef.current?.querySelectorAll<HTMLElement>(
       `[data-nurture-field="${settingsIssue.field}"]`,
-    );
+    ) ?? []).find(element => !element.closest("[hidden]"));
     if (input) {
       input.focus();
       input.scrollIntoView?.({ block: "nearest" });
@@ -370,7 +386,7 @@ export function NurturePopup({
       document.getElementById(`nurture-settings-tab-${settingsIssue.tab}`)?.focus();
     }
     setFocusInvalid(false);
-  }, [focusInvalid, settingsIssue]);
+  }, [focusInvalid, settingsIssue, pageSurface]);
   const profileConfig = useMemo(
     () =>
       settings ? nurtureProfileConfig(settings, settings.scheduleDurationMinutes) : null,
@@ -443,6 +459,9 @@ export function NurturePopup({
   const selectedRow = rows.find((row) => row.udid === openLog) ?? null;
 
   const reload = useCallback(async () => {
+    const ticket = ++reloadTicket.current;
+    const logTicket = ++logSummaryTicket.current;
+    const startedAfterEvent = statusEventSequence.current;
     const original = settingsRef.current;
     setMsg(null);
     try {
@@ -451,6 +470,7 @@ export function NurturePopup({
         nurtureSessionStatus(),
         nurtureSessionLogSummary(),
       ]);
+      if (!mounted.current || ticket !== reloadTicket.current) return;
       if (settingsRef.current === original) {
         const restored = original === null
           ? readFormDraft("nurture", value => nurtureSettingsFromProfile(value as Parameters<typeof nurtureSettingsFromProfile>[0], s)) : null;
@@ -458,16 +478,29 @@ export function NurturePopup({
         setBaseline({ settings: s, target: targetRefLatest.current });
         setCredentialBaseline(s.apiKey);
       }
-      setStatuses(st);
-      setLogged(summary);
+      // A delayed read must not rewind a live event (including a completed/new run).
+      // Keep untouched machines from the snapshot, and replace only rows updated since it began.
+      const merged = new Map(st.map((status) => [status.udid, status]));
+      for (const [udid, event] of latestStatusEvents.current) {
+        if (event.sequence > startedAfterEvent) merged.set(udid, event.status);
+      }
+      setStatuses([...merged.values()]);
+      if (logTicket === logSummaryTicket.current) setLogged(summary);
       setMsg(null);
     } catch (e) {
+      if (!mounted.current || ticket !== reloadTicket.current) return;
       setMsg(describeError(e));
     }
   }, []);
 
   useEffect(() => {
-    reload();
+    mounted.current = true;
+    void reload();
+    return () => {
+      mounted.current = false;
+      reloadTicket.current += 1;
+      logSummaryTicket.current += 1;
+    };
   }, [reload]);
 
   /**
@@ -477,8 +510,11 @@ export function NurturePopup({
    */
   useEffect(() => {
     const timer = setInterval(() => {
+      const ticket = ++logSummaryTicket.current;
       nurtureSessionLogSummary()
-        .then(setLogged)
+        .then((summary) => {
+          if (mounted.current && ticket === logSummaryTicket.current) setLogged(summary);
+        })
         .catch(() => undefined);
     }, 5_000);
     return () => clearInterval(timer);
@@ -491,6 +527,7 @@ export function NurturePopup({
       if (event.type !== "nurtureStatus") return;
       if (!alive) return;
       const st = event.status;
+      latestStatusEvents.current.set(st.udid, { sequence: ++statusEventSequence.current, status: st });
       setStatuses((prev) => {
         const next = prev.filter((x) => x.udid !== st.udid);
         next.push(st);
@@ -527,7 +564,7 @@ export function NurturePopup({
     const issue = validateNurtureSettings(s);
     if (issue) {
       if (pageSurface) {
-        setPageMode("setup");
+        setPageMode(issue.field === "scheduleEveryMinutes" ? "schedule" : "setup");
         setTab(issue.tab);
         setFocusInvalid(true);
       } else setMsg(issue.message);
@@ -554,7 +591,7 @@ export function NurturePopup({
     onAutoSaveError: (error) => setMsg(`Chưa tự lưu được thiết lập: ${describeError(error)}`),
     save: async () => {
       try {
-        return pageSurface ? await profileRef.current?.save() ?? false : await save();
+        return await save();
       } catch (error) { setMsg(describeError(error)); return false; }
     },
     discard: () => {
@@ -603,11 +640,32 @@ export function NurturePopup({
       return;
     }
     const runTargets = [...targets];
+    const runSettings = settings;
+    const runTargetRef = targetRef;
     setBusy(true);
     setStartReport(null);
     try {
+      if (pageSurface && settings) {
+        const enabled = [
+          (settings.likeEnabled ?? true) && settings.likeProb > 0 ? `Tim ${settings.likeProb}%` : null,
+          (settings.saveEnabled ?? false) && (settings.saveProb ?? 0) > 0 ? `Lưu ${settings.saveProb}%` : null,
+          (settings.commentEnabled ?? true) && settings.commentProb > 0 ? `Bình luận ${settings.commentProb}%` : null,
+          (settings.followEnabled ?? true) && settings.followProb > 0 ? `Theo dõi ${settings.followProb}%` : null,
+        ].filter(Boolean);
+        if (!(await requestConfirm({
+          title: "Kiểm tra phiên Nuôi TikTok",
+          message: `${runTargets.length} máy đã chọn. Tối đa ${settings.scheduleDurationMinutes} phút hoặc ${settings.numVideos * settings.numRounds} bài / máy.\n${enabled.length ? enabled.join(" · ") : "Chỉ xem nội dung"}.\nKết thúc: đóng TikTok và kiểm tra đã tắt.`,
+          confirmLabel: `Bắt đầu ${runTargets.length} máy`,
+          cancelLabel: "Sửa thiết lập",
+        }))) return;
+        if (!mounted.current || settingsRef.current !== runSettings || targetRefLatest.current !== runTargetRef) return;
+      }
       if (settings && !(await save({ ...settings, scheduleUdids: runTargets }))) return;
-      const started = await nurtureStart(runTargets);
+      // The manual command otherwise chooses its legacy 2–3 hour horizon. Send the
+      // duration reviewed on this page explicitly; saved schedule settings alone do not.
+      const started = pageSurface && runSettings
+        ? await nurtureStart(runTargets, runSettings.scheduleDurationMinutes)
+        : await nurtureStart(runTargets);
       setStartReport({ requested: runTargets, started });
       setStartedTargets((current) => [...new Set([...current, ...started])]);
       await reload();
@@ -649,7 +707,8 @@ export function NurturePopup({
     drag.current = null;
   };
 
-  type PageMode = "setup" | "monitor";
+  type PageMode = "setup" | "schedule" | "monitor";
+  const pageModes: ReadonlyArray<readonly [PageMode, string]> = [["setup", "Thiết lập"], ["schedule", "Hẹn giờ"], ["monitor", "Theo dõi"]];
   type SettingsTab = "behaviour" | "ai" | "comments" | "log";
   const visibleSettingsTabs: ReadonlyArray<readonly [SettingsTab, string]> = pageSurface
     ? [
@@ -669,12 +728,15 @@ export function NurturePopup({
     document.getElementById(`nurture-page-tab-${next}`)?.focus();
   };
   const onPageTabKeyDown = (event: ReactKeyboardEvent<HTMLButtonElement>) => {
-    let next: PageMode | null = null;
-    if (event.key === "ArrowRight" || event.key === "End") next = "monitor";
-    if (event.key === "ArrowLeft" || event.key === "Home") next = "setup";
-    if (!next) return;
+    const index = pageModes.findIndex(([key]) => key === pageMode);
+    let next: number | null = null;
+    if (event.key === "ArrowRight") next = (index + 1) % pageModes.length;
+    if (event.key === "ArrowLeft") next = (index - 1 + pageModes.length) % pageModes.length;
+    if (event.key === "Home") next = 0;
+    if (event.key === "End") next = pageModes.length - 1;
+    if (next === null) return;
     event.preventDefault();
-    activatePageMode(next);
+    activatePageMode(pageModes[next][0]);
   };
   const activateSettingsTab = (next: SettingsTab) => {
     setTab(next);
@@ -747,6 +809,8 @@ export function NurturePopup({
               )}
               {tab === key && key === "behaviour" && (
                 <NurtureBehaviourTab
+                  showSchedule={!pageSurface}
+                  showSessionControls={!pageSurface}
                   settings={settings}
                   issue={settingsIssue}
                   issueId={pageSurface ? issueId : undefined}
@@ -770,19 +834,19 @@ export function NurturePopup({
   const actionControls = (
     <div className="nurture-float-actions">
       <button type="button" className="primary" disabled={busy || !targets.length || !settings || Boolean(settingsIssue)} onClick={start}>
-        Bắt đầu
+        {pageSurface ? "Kiểm tra & bắt đầu" : "Bắt đầu"}
       </button>
       <button type="button" className="danger" disabled={busy || !stopTargets.length} onClick={stop}>
         Dừng
       </button>
-      <button
+      {(!pageSurface || pageMode === "setup") && <button
         type="button"
         className="ghost"
         disabled={busy}
         onClick={async () => {
           setBusy(true);
           try {
-            if (pageSurface ? await profileRef.current?.save() : await save()) setMsg(null);
+            if (await save()) setMsg(null);
           } catch (e) {
             setMsg(describeError(e));
           } finally {
@@ -790,8 +854,8 @@ export function NurturePopup({
           }
         }}
       >
-        {pageSurface ? "Lưu hồ sơ" : "Lưu"}
-      </button>
+        {pageSurface ? "Lưu thiết lập" : "Lưu"}
+      </button>}
     </div>
   );
 
@@ -847,34 +911,15 @@ export function NurturePopup({
 
               {pageSurface && (
                 <div className="nurture-page-tabs" role="tablist" aria-label="Chế độ Nuôi TikTok">
-                  <button
-                    id="nurture-page-tab-setup"
-                    type="button"
-                    role="tab"
-                    aria-selected={pageMode === "setup"}
-                    aria-controls="nurture-page-panel-setup"
-                    tabIndex={pageMode === "setup" ? 0 : -1}
-                    onClick={() => setPageMode("setup")}
-                    onKeyDown={onPageTabKeyDown}
-                  >
-                    Thiết lập
-                  </button>
-                  <button
-                    id="nurture-page-tab-monitor"
-                    type="button"
-                    role="tab"
-                    aria-selected={pageMode === "monitor"}
-                    aria-controls="nurture-page-panel-monitor"
-                    tabIndex={pageMode === "monitor" ? 0 : -1}
-                    onClick={() => setPageMode("monitor")}
-                    onKeyDown={onPageTabKeyDown}
-                  >
-                    Theo dõi
-                  </button>
+                  {pageModes.map(([key, label]) => <button key={key}
+                    id={`nurture-page-tab-${key}`} type="button" role="tab"
+                    aria-selected={pageMode === key} aria-controls={`nurture-page-panel-${key}`}
+                    tabIndex={pageMode === key ? 0 : -1} onClick={() => setPageMode(key)}
+                    onKeyDown={onPageTabKeyDown}>{label}</button>)}
                 </div>
               )}
 
-              {pageSurface && operationSource?.kind !== "nurture" && (
+              {pageSurface && pageMode === "monitor" && operationSource?.kind !== "nurture" && (
                 <CommandBar
                   title={targets.length ? `${targets.length} máy trong phạm vi` : "Chưa có máy trong phạm vi"}
                   detail={pageMode === "monitor" ? "Theo dõi tiến độ hoặc dừng các máy trong phiên hiện tại." : anyRunning ? "Phiên đang chạy; có thể dừng hoặc lưu thay đổi." : "Kiểm tra thiết lập rồi bắt đầu phiên Nuôi TikTok."}
@@ -898,7 +943,7 @@ export function NurturePopup({
                   tone="warning"
                   action={(
                     <button type="button" className="ghost" onClick={() => {
-                      setPageMode("setup");
+                      setPageMode(settingsIssue.field === "scheduleEveryMinutes" ? "schedule" : "setup");
                       setTab(settingsIssue.tab);
                       setFocusInvalid(true);
                     }}>
@@ -917,60 +962,43 @@ export function NurturePopup({
                   aria-labelledby="nurture-page-tab-setup"
                   hidden={pageMode !== "setup"}
                 >
-                  {(
-                    <div className="nurture-setup-grid">
-                      <div className="nurture-setup-main">
-                        {targetRef && profileConfig && (
-                          <AutomationProfileControl
-                            ref={profileRef}
-                            dirty={dirty}
-                            draftId="nurture"
-                            kind="nurture"
-                            target={targetRef}
-                            config={profileConfig}
-                            defaultName="Hồ sơ Nuôi TikTok"
-                            disabled={Boolean(settingsIssue) || targets.length === 0}
-                            disabledReason={settingsIssue?.message}
-                            disabledReasonId={settingsIssue ? issueId : undefined}
-                            onApply={(record) => {
-                              const next = nurtureSettingsFromProfile(record.revision.config, settings);
-                              setSettings(next);
-                              onTargetRefChange?.(record.revision.targetRef);
-                              setBaseline({ settings: next, target: record.revision.targetRef });
-                            }}
-                            onSaved={() => setBaseline({ settings, target: targetRef })}
-                          />
-                        )}
-                        {renderSettings()}
-                        <div className="nurture-default-actions">
-                          <button type="button" className="ghost" disabled={busy || Boolean(settingsIssue)} onClick={async () => {
-                            setBusy(true);
-                            try { if (await save(undefined, true)) setMsg("Đã áp dụng thiết lập mặc định."); }
-                            catch (error) { setMsg(describeError(error)); }
-                            finally { setBusy(false); }
-                          }}>Áp dụng mặc định</button>
-                        </div>
+                  <div className="nurture-session-layout">
+                    <div className="nurture-setup-fields">
+                      <NurtureSessionSetup settings={settings} onChange={setSettings} issue={settingsIssue} issueId={issueId} />
+                    <div className="nurture-config-body">
+                      {renderSettings()}
+                      <div className="nurture-default-actions">
+                        <button type="button" className="ghost" disabled={busy || Boolean(settingsIssue)} onClick={async () => {
+                          setBusy(true);
+                          try { if (await save(undefined, true)) setMsg("Đã áp dụng thiết lập mặc định."); }
+                          catch (error) { setMsg(describeError(error)); }
+                          finally { setBusy(false); }
+                        }}>Áp dụng mặc định</button>
                       </div>
-                      <SummaryRail
-                        title="Kiểm tra trước khi chạy"
-                        actions={(
-                          <StatusChip tone={targets.length && !settingsIssue ? "success" : "warning"}>
-                            {settingsIssue ? "Cần sửa thiết lập" : targets.length ? "Sẵn sàng" : "Thiếu phạm vi"}
-                          </StatusChip>
-                        )}
-                      >
-                        <dl className="nurture-review-list">
-                          <div><dt>Thiết bị</dt><dd>{targets.length} máy</dd></div>
-                          <div><dt>Khối lượng</dt><dd>{settings.numVideos * settings.numRounds} video/máy</dd></div>
-                          <div><dt>Thích</dt><dd>{settings.likeEnabled === false ? "Tắt" : `${settings.likeProb}%`}</dd></div>
-                          <div><dt>Lưu</dt><dd>{settings.saveEnabled === false ? "Tắt" : `${settings.saveProb}%`}</dd></div>
-                          <div><dt>Bình luận</dt><dd>{settings.commentEnabled === false ? "Tắt" : `${settings.commentProb}%`}</dd></div>
-                          <div><dt>Theo dõi</dt><dd>{settings.followEnabled === false ? "Tắt" : `${settings.followProb}%`}</dd></div>
-                        </dl>
-                      </SummaryRail>
                     </div>
-                  )}
+                    </div>
+                    <NurtureMachinePicker devices={devices} metas={metas} targets={targets} onTargetRefChange={onTargetRefChange} scopeControl={scopeControl} />
+                  </div>
                 </div>
+              )}
+              {pageSurface && <div id="nurture-page-panel-schedule" role="tabpanel"
+                aria-labelledby="nurture-page-tab-schedule" hidden={pageMode !== "schedule"}>
+                <div className="nurture-config-body">
+                  <NurtureWindows settings={settings} patch={patch} targets={targets} issue={settingsIssue} issueId={issueId} />
+                  <div className="nurture-default-actions"><button type="button" className="primary" disabled={busy || Boolean(settingsIssue) || (settings.scheduleEnabled && !targets.length)} onClick={async () => {
+                    setBusy(true);
+                    try { if (await save(undefined, true)) setMsg(settings.scheduleEnabled ? "Đã áp dụng hẹn giờ cho các máy đã chọn." : "Đã tắt lịch tự chạy."); }
+                    catch (error) { setMsg(describeError(error)); }
+                    finally { setBusy(false); }
+                  }}>Áp dụng hẹn giờ</button><span>Lịch dùng các máy đã chọn ở Thiết lập. Giữ Riviu và máy tính đang mở.</span></div>
+                  {targetRef && profileConfig && <AutomationSettingsSchedule kind="nurture" target={targetRef} config={profileConfig} disabled={Boolean(settingsIssue) || !targets.length} />}
+                </div>
+              </div>}
+              {pageSurface && pageMode !== "monitor" && (
+                  <footer className="nurture-session-footer">
+                    <div><strong>{targets.length} máy được chọn</strong><span>Tối đa {settings.scheduleDurationMinutes} phút hoặc {settings.numVideos * settings.numRounds} bài / máy</span></div>
+                    {actionControls}
+                  </footer>
               )}
 
               {!pageSurface && renderSettings()}
@@ -1054,6 +1082,7 @@ export function NurturePopup({
                             }`}
                           />
                           <strong>{deviceLabel(devices, metas, row.udid)}</strong>
+                          {pageSurface && metas.get(row.udid)?.handle && <span className="nurture-monitor-handle">@{metas.get(row.udid)?.handle}</span>}
                           <div className="grow" />
                           {/* The session numbers as labelled cells: the old
                               single string ("12/34v · ♥5/6 · BL1/1 · +0/0") packed done-vs-
@@ -1093,8 +1122,13 @@ export function NurturePopup({
                             {openLog === row.udid ? "▾" : "▸"}
                           </span>
                         </button>
+                        {pageSurface && row.status && <div className="nurture-monitor-row-status">
+                          <span className={`nurture-machine-state${row.status.outcome === "done" ? " is-ready" : ""}`}>{row.running ? "Đang chạy" : row.status.outcome === "failed" ? "Cần kiểm tra" : row.status.outcome === "done" ? "Hoàn tất" : row.status.outcome === "stopped" ? "Đã dừng" : row.status.outcome === "partial" ? "Hoàn tất một phần" : "Chờ xử lý"}</span>
+                          <span>{row.status.videosDone}/{row.status.videoTarget} bài đã xem</span>
+                          {row.status.updatedAt && <time dateTime={row.status.updatedAt}>{new Date(row.status.updatedAt).toLocaleTimeString("vi-VN", { hour12: false })}</time>}
+                        </div>}
                         <p className="nurture-float-log-msg">{statusVi(row.message)}</p>
-                        {row.status && (
+                        {row.status && (!pageSurface || openLog === row.udid) && (
                           <p className="nurture-save-audit">
                             Lưu: {row.status.saves ?? 0} xác nhận · {row.status.saveAttempts ?? 0}{" "}
                             lần chạm · {row.status.saveNoops ?? 0} bỏ qua ·{" "}
@@ -1105,7 +1139,7 @@ export function NurturePopup({
                             button is neither, and the row head has to stay a plain control.
                             Gated on `row.status` so an idle-sweep row — which never ran a
                             session and has no target — does not draw a bar stuck at 0%. */}
-                        {row.status && (
+                        {row.status && (!pageSurface || openLog === row.udid) && (
                           <NurtureDeviceProgress
                             status={row.status}
                             now={nowTick}
@@ -1141,6 +1175,7 @@ export function NurturePopup({
                                 <strong>
                                   {deviceLabel(devices, metas, selectedRow.udid)}
                                 </strong>
+                                {metas.get(selectedRow.udid)?.handle && <span>@{metas.get(selectedRow.udid)?.handle}</span>}
                               </div>
                               {selectedRow.status && <CleanupStatus status={selectedRow.status} />}
                             </div>
@@ -1186,7 +1221,7 @@ export function NurturePopup({
                   </div>
                     </>
                   ) : (
-                    <p className="nurture-log-empty">Chưa có log nuôi TikTok.</p>
+                    <div className="nurture-monitor-empty"><strong>Chưa có lượt Nuôi TikTok</strong><p>Chọn máy và thiết lập phiên để bắt đầu. Kết quả và nhật ký sẽ hiện riêng cho từng máy.</p><button type="button" className="ghost" onClick={() => pageSurface ? setPageMode("setup") : setTab("behaviour")}>Về thiết lập</button></div>
                   )}
                   </>
                 )}

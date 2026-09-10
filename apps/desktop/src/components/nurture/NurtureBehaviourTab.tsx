@@ -15,10 +15,14 @@ export function NurtureBehaviourTab({
   targets,
   issue,
   issueId,
+  showSchedule = true,
+  showSessionControls = true,
 }: {
   settings: NurtureSettings;
   issue?: NurtureSettingsIssue | null;
   issueId?: string;
+  showSchedule?: boolean;
+  showSessionControls?: boolean;
   patch: <K extends keyof NurtureSettings>(key: K, value: NurtureSettings[K]) => void;
   patchRate: (
     key: "likeProb" | "saveProb" | "commentProb" | "followProb" | "frenzyProb",
@@ -29,7 +33,7 @@ export function NurtureBehaviourTab({
 }) {
   return (
     <div className="nurture-sect nu-pane">
-      <div className="nu-grid">
+      {showSessionControls && <div className="nu-grid">
         <label className="nu-field">
           <span className="nu-label">
             Giới hạn video
@@ -64,9 +68,9 @@ export function NurtureBehaviourTab({
             onChange={(e) => patch("numRounds", Number(e.target.value) || 1)}
           />
         </label>
-      </div>
+      </div>}
 
-      <div className="nu-group">
+      {showSessionControls && <div className="nu-group">
         <div className="nu-group-head">Tương tác</div>
         <FeatureRow
           label="Thích"
@@ -100,7 +104,7 @@ export function NurtureBehaviourTab({
           onPercent={(v) => patchRate("followProb", v)}
           onEnabled={(v) => patch("followEnabled", v)}
         />
-      </div>
+      </div>}
 
       <div className="nu-group">
         <div className="nu-group-head">Nhịp</div>
@@ -257,9 +261,7 @@ export function NurtureBehaviourTab({
         <input value={settings.bundleId} onChange={(e) => patch("bundleId", e.target.value)} />
       </label>
 
-      {/* The schedule sits at the bottom of this pane rather than in a tab of its own: a
-          window overrides the rates above it, and the two were a tab apart. */}
-      <NurtureWindows settings={settings} patch={patch} targets={targets} issue={issue} issueId={issueId} />
+      {showSchedule && <NurtureWindows settings={settings} patch={patch} targets={targets} issue={issue} issueId={issueId} />}
     </div>
   );
 }

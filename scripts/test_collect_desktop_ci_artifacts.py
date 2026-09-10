@@ -35,6 +35,68 @@ def active_dependency_closure() -> dict[str, str]:
 
 
 class ArtifactContractTests(unittest.TestCase):
+    @unittest.skipUnless(sys.platform == "win32", "Windows CreateProcess NSIS contract")
+    def test_nsis_directory_override_remains_unquoted_and_last(self):
+        command = [r"C:\Bộ cài\Riviu Setup.exe", "/S", r"/D=C:\Users\Phát\Riviu Manager"]
+        raw = artifacts.packaged_process_command(command)
+        self.assertEqual(raw, r'"C:\Bộ cài\Riviu Setup.exe" /S /D=C:\Users\Phát\Riviu Manager')
+        with patch.object(artifacts.subprocess, "run") as child:
+            artifacts.run_checked(command)
+        self.assertEqual(child.call_args.args[0], raw)
+        self.assertFalse(child.call_args.kwargs.get("shell", False))
+        normal = ["checker.exe", "--report", r"C:\Phát\report.json"]
+        self.assertEqual(artifacts.packaged_process_command(normal), normal)
+        for destination in ['relative', 'C:\\bad"quote', 'C:\\bad\npath']:
+            with self.assertRaises(artifacts.ArtifactError):
+                artifacts.packaged_process_command(["installer.exe", "/S", "/D=" + destination])
+
+    def test_packaged_command_does_not_inherit_developer_tools_or_runtime_overrides(self):
+        poison = {
+            "SystemRoot": r"C:\Windows",
+            "TEMP": tempfile.gettempdir(),
+            "USERPROFILE": r"C:\Users\Phát",
+            "PATH": r"C:\developer-python;C:\developer-adb",
+            "RIVIU_SIDECAR_ROOT": r"C:\checkout\sidecars",
+            "PYTHONPATH": r"C:\developer-python",
+            "JAVA_TOOL_OPTIONS": "-javaagent:developer.jar",
+            "ANDROID_HOME": r"C:\developer-sdk",
+            "ADB_SERVER_SOCKET": "tcp:other-host:5037",
+            "WEBVIEW2_BROWSER_EXECUTABLE_FOLDER": r"C:\developer-webview",
+        }
+        with (
+            patch.dict(artifacts.os.environ, poison, clear=True),
+            patch.object(artifacts.sys, "platform", "win32"),
+            patch.object(artifacts.subprocess, "run") as child,
+        ):
+            artifacts.run_checked(["fixture.exe"])
+        options = child.call_args.kwargs
+        environment = options.get("env")
+        self.assertIsNotNone(environment, "packaged checks must isolate developer state")
+        self.assertEqual(environment["USERPROFILE"], poison["USERPROFILE"])
+        self.assertNotIn("developer", environment["PATH"])
+        for key in poison.keys() - {"SystemRoot", "TEMP", "USERPROFILE", "PATH"}:
+            self.assertNotIn(key, environment)
+        self.assertNotEqual(options["cwd"], artifacts.REPOSITORY_ROOT)
+        self.assertEqual(options["encoding"], "utf-8")
+
+    def test_installed_app_smoke_rejects_a_stale_ready_report(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            report = root / "startup.json"
+            (root / "riviu-managers-phone.exe").write_bytes(b"fixture")
+            report.write_text(json.dumps({
+                "schemaVersion": 1, "status": "ready", "mode": "mock",
+                "tauriReady": True, "frontendReady": True,
+                "databaseVersion": artifacts.EXPECTED_DATABASE_VERSION,
+            }), encoding="utf-8")
+            with (
+                patch.object(artifacts, "verify_windows_desktop_executable",
+                             return_value={"name": "riviu-managers-phone.exe"}),
+                patch.object(artifacts, "run_checked"),
+            ):
+                with self.assertRaises(artifacts.ArtifactError):
+                    artifacts.run_installed_app_smoke(root, report, root / "data")
+
     def test_windows_collection_requires_staged_android_package_tools(self):
         with self.assertRaisesRegex(
             artifacts.ArtifactError, "Windows collection requires"
@@ -100,6 +162,18 @@ class ArtifactContractTests(unittest.TestCase):
             manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
             with self.assertRaisesRegex(artifacts.ArtifactError, "tree attestation"):
                 artifacts.verify_android_package_tools(root, execute=False)
+
+    @unittest.skipUnless(sys.platform == "win32", "Windows Unicode JRE regression")
+    def test_packaged_bundletool_runs_from_a_vietnamese_path_without_host_java(self):
+        source = artifacts.REPOSITORY_ROOT / "target" / "android-package-tools"
+        if not source.is_dir():
+            self.skipTest("local staged package tools are not present")
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "Đường dẫn có dấu" / "Bộ công cụ"
+            artifacts.shutil.copytree(source, root)
+            evidence = artifacts.verify_android_package_tools(root)
+            self.assertEqual(evidence["bundletoolVersion"], "1.18.3")
+            self.assertEqual(evidence["jreVersion"], "21.0.12.1+1")
 
     @staticmethod
     def _materialize_windows_install(command: list[str]) -> Path:
@@ -1321,6 +1395,7 @@ class DeclaredResourcesAreVerified(unittest.TestCase):
                 "installerSha256": artifacts.sha256_file(installer),
                 "checkerSha256": artifacts.sha256_file(checker),
                 "appSha256": artifacts.sha256_file(app),
+                "appVersion": artifacts.load_json(artifacts.TAURI_CONFIG)["version"],
             }
             artifacts.validate_deployment_report_binding(
                 payload, install_root, installer, checker, app, "internal"
@@ -1333,6 +1408,7 @@ class DeclaredResourcesAreVerified(unittest.TestCase):
                 "installerSha256": "0" * 64,
                 "checkerSha256": "1" * 64,
                 "appSha256": "2" * 64,
+                "appVersion": "0.0.0",
             }
             for field, wrong_value in corruptions.items():
                 with self.subTest(field=field):
@@ -1388,24 +1464,20 @@ class DeclaredResourcesAreVerified(unittest.TestCase):
             root = Path(temporary)
             report = root / "startup.json"
             data_dir = root / "data"
+            def run_child(_command, *, timeout):
+                report.write_text(json.dumps({
+                    "schemaVersion": 1, "status": "ready", "mode": "mock",
+                    "databaseVersion": artifacts.EXPECTED_DATABASE_VERSION,
+                }), encoding="utf-8")
             with (
                 patch.object(
                     artifacts,
                     "verify_windows_desktop_executable",
                     return_value={"name": "riviu-managers-phone.exe"},
                 ),
-                patch.object(artifacts, "run_checked"),
+                patch.object(artifacts, "run_checked", side_effect=run_child),
             ):
                 (root / "riviu-managers-phone.exe").write_bytes(b"fixture")
-                report.write_text(
-                    json.dumps({
-                        "schemaVersion": 1,
-                        "status": "ready",
-                        "mode": "mock",
-                        "databaseVersion": 18,
-                    }),
-                    encoding="utf-8",
-                )
                 with self.assertRaisesRegex(
                     artifacts.ArtifactError, "did not become ready"
                 ):
@@ -1417,26 +1489,19 @@ class DeclaredResourcesAreVerified(unittest.TestCase):
             report = root / "startup.json"
             data_dir = root / "data"
             (root / "riviu-managers-phone.exe").write_bytes(b"fixture")
-            report.write_text(
-                json.dumps(
-                    {
-                        "schemaVersion": 1,
-                        "status": "ready",
-                        "mode": "mock",
-                        "tauriReady": True,
-                        "frontendReady": True,
-                        "databaseVersion": 18,
-                    }
-                ),
-                encoding="utf-8",
-            )
+            def run_child(_command, *, timeout):
+                report.write_text(json.dumps({
+                    "schemaVersion": 1, "status": "ready", "mode": "mock",
+                    "tauriReady": True, "frontendReady": True,
+                    "databaseVersion": artifacts.EXPECTED_DATABASE_VERSION - 1,
+                }), encoding="utf-8")
             with (
                 patch.object(
                     artifacts,
                     "verify_windows_desktop_executable",
                     return_value={"name": "riviu-managers-phone.exe"},
                 ),
-                patch.object(artifacts, "run_checked"),
+                patch.object(artifacts, "run_checked", side_effect=run_child),
             ):
                 with self.assertRaisesRegex(
                     artifacts.ArtifactError, "did not become ready"

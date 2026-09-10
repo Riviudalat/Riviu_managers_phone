@@ -9,6 +9,10 @@
 
 ## Hợp đồng làm việc
 
+- Theo yêu cầu người dùng ngày 08/09/2026: sau mỗi thay đổi, chạy Tauri dev và kiểm tra trước.
+  Sửa giao diện dùng cập nhật nóng; sửa Rust để dev biên dịch lại. Chỉ đóng gói release/Setup
+  khi cần giao bản cài hoặc kiểm chứng riêng việc đóng gói, không tạo Setup sau từng lần sửa.
+  Lệnh dev và điều kiện dùng thiết bị thật nằm trong developer guide, mục Chuẩn bị.
 - Đọc `git status --short --untracked-files=all`; không reset/revert thay đổi không thuộc mình.
 - Root AGENTS giữ vai trò cửa vào, dưới cổng 120 dòng. Nội dung mới đi vào file đúng chủ đề.
 - Số § là định danh vĩnh viễn; §9/§10 và §9.43/§9.44/§9.45 cần thêm file/ngày khi nhập nhằng.
@@ -28,6 +32,15 @@ snapshot, log nghiệm thu, file phụ tái tạo được và cache compiler.
 `target/` chứa evidence và rollback ngoài cache. Không đụng stash hay dữ liệu vận hành
 để làm `git status` đẹp hơn. Di chuyển tài liệu có ngày phải có old/new map; patch/diff
 lịch sử giữ byte gốc và được đọc cùng map.
+
+Đợt dọn 10/09/2026 chỉ xoá cache compiler trong các thư mục `target/**/debug`
+sau khi xác nhận không chứa executable đang chạy hoặc Git worktree. Các thư mục
+evidence/rollback, runtime phục vụ đóng gói và bộ cài đã giao được giữ nguyên.
+Ảnh và bản thử UI ở `output/`, `.playwright-cli/` được nén vào
+`target/local-evidence-archive-20260910/ui-evidence.zip`; `path-map.json` cùng thư
+mục ghi đường dẫn cũ, kích thước và SHA-256 từng file. Hai đường dẫn gốc nay ignored
+để lần chạy sau không đưa ảnh/log cục bộ vào commit. Chi tiết ở
+[manifest dọn ngày 10/09](../archive/cleanup-2026-09-10.md).
 
 ## Skill và công cụ
 

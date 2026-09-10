@@ -1,0 +1,12 @@
+<hierarchy>
+  <node package="com.zhiliaoapp.musically" class="android.widget.ImageView" text="" resource-id="com.zhiliaoapp.musically:id/cover" clickable="false" enabled="true" selected="false" bounds="[0,876][358,1353]" />
+  <node package="com.zhiliaoapp.musically" class="android.widget.ImageView" text="" resource-id="com.zhiliaoapp.musically:id/cover" clickable="false" enabled="true" selected="false" bounds="[361,876][719,1353]" />
+  <node package="com.zhiliaoapp.musically" class="android.widget.ImageView" text="" resource-id="com.zhiliaoapp.musically:id/cover" clickable="false" enabled="true" selected="false" bounds="[722,876][1080,1353]" />
+  <node package="com.zhiliaoapp.musically" class="android.widget.ImageView" text="" resource-id="com.zhiliaoapp.musically:id/cover" clickable="false" enabled="true" selected="false" bounds="[0,1356][358,1833]" />
+  <node package="com.zhiliaoapp.musically" class="android.widget.ImageView" text="" resource-id="com.zhiliaoapp.musically:id/cover" clickable="false" enabled="true" selected="false" bounds="[361,1356][719,1833]" />
+  <node package="com.zhiliaoapp.musically" class="android.widget.ImageView" text="" resource-id="com.zhiliaoapp.musically:id/cover" clickable="false" enabled="true" selected="false" bounds="[722,1356][1080,1833]" />
+  <node package="com.zhiliaoapp.musically" class="android.widget.ImageView" text="" resource-id="com.zhiliaoapp.musically:id/cover" clickable="false" enabled="true" selected="false" bounds="[0,1836][358,2094]" />
+  <node package="com.zhiliaoapp.musically" class="android.widget.ImageView" text="" resource-id="com.zhiliaoapp.musically:id/cover" clickable="false" enabled="true" selected="false" bounds="[361,1836][719,2094]" />
+  <node package="com.zhiliaoapp.musically" class="android.widget.ImageView" text="" resource-id="com.zhiliaoapp.musically:id/cover" clickable="false" enabled="true" selected="false" bounds="[722,1836][1080,2094]" />
+  <node package="com.zhiliaoapp.musically" class="android.widget.FrameLayout" text="" content-desc="Profile" resource-id="com.zhiliaoapp.musically:id/nhq" clickable="true" enabled="true" selected="true" bounds="[864,1965][1080,2094]" />
+</hierarchy>

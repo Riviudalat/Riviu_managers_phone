@@ -73,6 +73,9 @@ export function streamPlaceholder(input: StreamPlaceholderInput): StreamPlacehol
 
   const failure = input.lastError || (input.tileStreamState === "error" ? "Stream lỗi." : null);
   if (failure) {
+    if (/device offline/i.test(failure)) {
+      return { view: { kind: "failed", reason: "Máy mất kết nối ADB. Kiểm tra cáp hoặc mạng; stream sẽ phục hồi khi máy online.", canRetry: false }, blocksInput };
+    }
     return { view: { kind: "failed", reason: failure, canRetry: true }, blocksInput };
   }
 

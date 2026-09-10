@@ -21,6 +21,8 @@ use crate::{
 
 #[derive(Debug, Error)]
 pub enum DeviceControlError {
+    #[error("new automation is waiting for publication verification on {udid}: {reason}")]
+    PendingPublication { udid: String, reason: String },
     #[error(transparent)]
     Busy(#[from] DeviceBusy),
     #[error(transparent)]
@@ -51,6 +53,8 @@ pub enum DeviceControlError {
     ControlPlaneShuttingDown,
     #[error("the device control plane is stopped")]
     ControlPlaneStopped,
+    #[error("đã dừng trong khi chờ lượt điều khiển")]
+    CapacityWaitCancelled,
     #[error("background stream for device {udid} is blocked by {current_owner:?}")]
     BackgroundStreamBlocked {
         udid: String,
@@ -121,7 +125,10 @@ pub struct DeviceControlPlane {
     shutdown_gate: tokio::sync::Mutex<()>,
     background_gate: Mutex<()>,
     plane_id: Uuid,
+    clean_start_guard: Mutex<Option<Arc<CleanStartGuard>>>,
 }
+
+type CleanStartGuard = dyn Fn(&str) -> Result<(), String> + Send + Sync;
 
 mod apps;
 mod leases;
@@ -181,6 +188,7 @@ impl DeviceControlPlane {
             shutdown_gate: tokio::sync::Mutex::new(()),
             background_gate: Mutex::new(()),
             plane_id: Uuid::new_v4(),
+            clean_start_guard: Mutex::new(None),
         }
     }
 
@@ -188,6 +196,23 @@ impl DeviceControlPlane {
     /// Fleet UI may poll this read without consuming stream capacity or contending for a lease.
     pub fn current_work_owner(&self, udid: &str) -> Option<DeviceWorkOwner> {
         self.work.current_owner(udid)
+    }
+
+    /// Invoked under the exclusive device lease immediately before a cold automation start.
+    /// Manual viewing and warm verification keep working while a submitted upload is pending.
+    pub fn set_clean_start_guard(&self, guard: Arc<CleanStartGuard>) {
+        *self.clean_start_guard.lock() = Some(guard);
+    }
+
+    fn ensure_clean_start_allowed(&self, udid: &str) -> Result<(), DeviceControlError> {
+        let guard = self.clean_start_guard.lock().clone();
+        if let Some(guard) = guard {
+            guard(udid).map_err(|reason| DeviceControlError::PendingPublication {
+                udid: udid.to_owned(),
+                reason,
+            })?;
+        }
+        Ok(())
     }
 
     pub(crate) async fn try_reserve_ui_capacity(
@@ -2555,6 +2580,45 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn pending_publication_guard_runs_after_lease_before_any_cold_start() {
+        let driver = Arc::new(TestDriver::default());
+        let control = control_plane(driver.clone(), 1);
+        control.set_clean_start_guard(Arc::new(|_| Err("upload pending".into())));
+        let lease = control
+            .acquire_exclusive("a", DeviceWorkOwner::Nurture)
+            .await
+            .unwrap();
+        let (lease, capacity) = control.reserve_ui_capacity(lease).await.unwrap();
+        let result = control
+            .start_clean_app_session(
+                lease,
+                capacity,
+                "com.fixture",
+                InteractionSessionKind::Ordinary,
+            )
+            .await;
+        assert!(matches!(
+            result,
+            Err(DeviceControlError::PendingPublication { .. })
+        ));
+        assert!(driver.lifecycle_calls.lock().is_empty());
+        assert_eq!(control.current_work_owner("a"), None);
+        assert_eq!(control.reserved_stream_capacity(), 0);
+        assert!(matches!(
+            control
+                .try_acquire_exclusive_keeping_stream("a", DeviceWorkOwner::IdleSweep)
+                .await,
+            Err(DeviceControlError::PendingPublication { .. })
+        ));
+        let manual = control
+            .try_acquire_exclusive_keeping_stream("a", DeviceWorkOwner::ManualControl)
+            .await
+            .unwrap();
+        control.close_exclusive_context(manual).unwrap();
+        control.shutdown_cleanup().await.unwrap();
+    }
+
+    #[tokio::test]
     async fn clean_app_session_stops_before_session_and_stream_and_after_completion() {
         let driver = Arc::new(TestDriver::default());
         driver.allow_stop.add_permits(4);
@@ -3732,7 +3796,7 @@ mod tests {
             .try_acquire_exclusive("iphone-b", crate::DeviceWorkOwner::ManualControl)
             .await
             .expect("target B lease");
-        let outcome_b = timeout(TEST_TIMEOUT, control.reserve_ui_capacity(exclusive_b))
+        let outcome_b = timeout(TEST_TIMEOUT, control.try_reserve_ui_capacity(exclusive_b))
             .await
             .expect("a reserve for an unrelated device must not block on the stuck stop");
         assert!(

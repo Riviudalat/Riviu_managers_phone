@@ -794,6 +794,7 @@ export async function installTauriMock(
       totalComments: 0,
     }));
     commandHandlers.set("automation_list", () => []);
+    commandHandlers.set("automation_schedule_list", () => []);
     commandHandlers.set("orchestration_list", () => []);
     commandHandlers.set("orchestration_list_runs", () => {
       if (!orchestrationDetail) return [];

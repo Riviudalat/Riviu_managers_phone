@@ -4,7 +4,7 @@ import { operationDeviceLog, operationGetRun } from "../../api";
 import { ProgressBar } from "../../components/ProgressBar";
 import { StatusChip, WorkspaceTabs } from "../../components/WorkspacePrimitives";
 import type { NurtureSessionStatus, OperationRunSummary } from "../../types";
-import { activeRun, compactLogEntries, deviceRows, deviceStateCounts, issueState, logMessage, logTime, monitorDeviceName, progressLabel, runProgress, RUN_STATE_LABEL } from "./operationProgress";
+import { activeRun, compactLogEntries, deviceRows, deviceStateCounts, issueState, logMessage, logTime, monitorDeviceName, progressLabel, runProgress, RUN_STATE_LABEL, timelineEntries } from "./operationProgress";
 import { useMonitorRead } from "./useMonitorRead";
 import { deviceProgress } from "../../nurtureProgress";
 import { useMediaQuery } from "../../useMediaQuery";
@@ -17,11 +17,11 @@ function DeviceTimeline({ operationId, udid }: { operationId: string; udid: stri
   const read = useCallback(() => operationDeviceLog(operationId, udid), [operationId, udid]);
   const state = useMonitorRead(read);
   const [newestFirst, setNewestFirst] = useState(true);
-  const rows = useMemo(() => compactLogEntries(state.value?.entries ?? []), [state.value]);
+  const rows = useMemo(() => compactLogEntries(timelineEntries(state.value?.entries ?? [])), [state.value]);
   if (state.error) return <MonitorReadError message={`Chưa đọc được nhật ký: ${state.error}`} retry={state.retry} />;
   if (!state.value) return <p className="run-monitor-empty" role="status">Đang đọc nhật ký…</p>;
   return <>
-    <div className="run-log-toolbar"><span>{state.value.truncated ? "500 mốc gần nhất" : `${state.value.entries.length} mốc ghi nhận`}</span>
+    <div className="run-log-toolbar"><span>{state.value.truncated ? "500 mốc gần nhất" : `${rows.length} mốc ghi nhận`}</span>
       <button type="button" className="ghost" onClick={() => setNewestFirst((value) => !value)}>
         {newestFirst ? <ArrowDown size={14} /> : <ArrowUp size={14} />}{newestFirst ? "Mới nhất trước" : "Cũ nhất trước"}
       </button>
@@ -63,8 +63,12 @@ export function OperationRunDevices({ run, labels, sessions, compact = false }: 
   const backRef = useRef<HTMLButtonElement>(null);
   const panelId = useId();
   const tabs = [{ id: "log", label: "Nhật ký", panelId: `${panelId}-log` }, { id: "evidence", label: "Bằng chứng", panelId: `${panelId}-evidence` }];
-  const rows = useMemo(() => deviceRows(state.value?.items ?? []).map((row, index) => {
-    const label = row.udid ? labels.get(row.udid) ?? (row.entries[0]?.label.startsWith("Máy ") ? row.entries[0].label : `Máy ${index + 1}`) : "Toàn tác vụ";
+  const rows = useMemo(() => deviceRows(state.value?.items ?? []).map((row) => {
+    const recorded = row.entries[0]?.label;
+    const label = row.udid
+      ? recorded && /^Máy \d+(?:\s|$)/.test(recorded) ? recorded
+        : labels.get(row.udid) ?? (recorded && recorded !== "Máy trong snapshot" ? recorded : `Thiết bị …${row.udid.slice(-6)}`)
+      : "Toàn tác vụ";
     return { ...row, label, ...monitorDeviceName(label) };
   }), [state.value, labels]);
   const shown = rows.filter((row) => row.label.toLocaleLowerCase("vi-VN").includes(search.trim().toLocaleLowerCase("vi-VN"))
@@ -114,7 +118,7 @@ export function OperationRunDevices({ run, labels, sessions, compact = false }: 
               if (selected !== row.udid) { setSelected(row.udid); setTab("log"); }
             }}>
               <Icon size={16} className={row.state === "succeeded" ? "run-success" : issueState(row.state) ? "run-attention" : "run-state"} aria-hidden="true" />
-              <span className="run-device-copy"><strong>{row.name}</strong><small>{RUN_STATE_LABEL[row.state]}</small></span>
+              <span className="run-device-copy"><strong>{row.name}</strong><small>{row.reviewPublish ? "Cần kiểm tra bài đăng" : row.pendingPublish ? "Chờ xác minh bài đăng" : RUN_STATE_LABEL[row.state]}</small></span>
               {activeRun(row) && <span className="run-percent">{progressLabel(fraction)}</span>}
             </button>;
           })}
@@ -123,7 +127,7 @@ export function OperationRunDevices({ run, labels, sessions, compact = false }: 
       <section className="run-monitor-log" aria-label="Chi tiết máy" hidden={singlePane && !selectedRow}>
         {!selectedRow ? <div className="run-monitor-placeholder"><List size={24} /><strong>Chọn máy để xem nhật ký</strong></div> : <>
           <div className="run-inspector-top"><header className="run-device-heading">{singlePane && <button ref={backRef} type="button" className="icon-btn" onClick={showDevices} title="Về danh sách máy" aria-label="Về danh sách máy"><ArrowLeft size={18} /></button>}<div><strong title={selectedRow.label}>{selectedRow.name}</strong>{!compact && selectedRow.model && <small>{selectedRow.model}</small>}</div>
-            <StatusChip tone={issueState(selectedRow.state) ? "warning" : selectedRow.state === "succeeded" ? "success" : "neutral"}>{RUN_STATE_LABEL[selectedRow.state]}</StatusChip>
+            <StatusChip tone={issueState(selectedRow.state) ? "warning" : selectedRow.state === "succeeded" ? "success" : "neutral"}>{selectedRow.reviewPublish ? "Cần kiểm tra bài đăng" : selectedRow.pendingPublish ? "Chờ xác minh bài đăng" : RUN_STATE_LABEL[selectedRow.state]}</StatusChip>
           </header>
           <WorkspaceTabs label="Chi tiết hoạt động máy" tabs={tabs} value={tab} onChange={setTab} /></div>
           <Activity mode={tab === "log" ? "visible" : "hidden"}><div role="tabpanel" aria-label="Nhật ký" id={`${panelId}-log`} className="run-timeline-panel">{selectedRow.udid ? <DeviceTimeline key={`${run.id}:${selectedRow.udid}`} operationId={run.id} udid={selectedRow.udid} /> : <p className="run-monitor-empty">Nguồn chưa ghi nhật ký theo máy.</p>}</div></Activity>

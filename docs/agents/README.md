@@ -126,11 +126,11 @@ Khi trích các mục này, ghi thêm ngày/tiêu đề và liên kết trực t
 
 ## Mới nhất
 
-- [§9.181: §9.181 Chuẩn bị bộ cài Windows 0.2.8 và đồng bộ main (08/09/2026)](diary/06-2408-2708.md#9181-chuẩn-bị-bộ-cài-windows-028-và-đồng-bộ-main-08092026)
-- [§9.180: §9.180 Tự lưu ngoài Flow, tiến trình nổi không co trang (08/09/2026)](diary/06-2408-2708.md#9180-tự-lưu-ngoài-flow-tiến-trình-nổi-không-co-trang-08092026)
-- [§9.179: §9.179 Dựng tab Đăng bài production theo mockup (07/09/2026)](diary/06-2408-2708.md#9179-dựng-tab-đăng-bài-production-theo-mockup-07092026)
-- [§9.178: §9.178 Kiểm chứng nhạc trên box phone: Hot/For You và sheet inline (07/09/2026)](diary/06-2408-2708.md#9178-kiểm-chứng-nhạc-trên-box-phone-hotfor-you-và-sheet-inline-07092026)
-- [§9.177: §9.177 Nhạc carousel và mockup riêng tab Đăng bài (07/09/2026)](diary/06-2408-2708.md#9177-nhạc-carousel-và-mockup-riêng-tab-đăng-bài-07092026)
+- [§9.213: 9.213 Lịch 20:00: xung đột thư mục staging cùng ordinal (10/09/2026)](diary/06-2408-2708.md#9213-lịch-2000-xung-đột-thư-mục-staging-cùng-ordinal-10092026)
+- [§9.212: 9.212 Hẹn giờ: kiểm tra UX, đến hạn theo máy và release0.2.23 (10/09/2026)](diary/06-2408-2708.md#9212-hẹn-giờ-kiểm-tra-ux-đến-hạn-theo-máy-và-release0223-10092026)
+- [§9.211: 9.211 Dev: Chọn nhanh theo sức chứa, Sheet retry và ưu tiên phóng to (10/09/2026)](diary/06-2408-2708.md#9211-dev-chọn-nhanh-theo-sức-chứa-sheet-retry-và-ưu-tiên-phóng-to-10092026)
+- [§9.210: §9.210 Box khác: Trill38.3.2, Global46.2.42 và release0.2.22 (10/09/2026)](diary/06-2408-2708.md#9210-box-khác-trill3832-global46242-và-release0222-10092026)
+- [§9.209: §9.209 Dev: gán nhanh và xác minh Publish độc lập theo máy (10/09/2026)](diary/06-2408-2708.md#9209-dev-gán-nhanh-và-xác-minh-publish-độc-lập-theo-máy-10092026)
 
 ## Nhật ký §9.x
 
@@ -327,6 +327,38 @@ Khi trích các mục này, ghi thêm ngày/tiêu đề và liên kết trực t
 | §9.179 | [§9.179 Dựng tab Đăng bài production theo mockup (07/09/2026)](diary/06-2408-2708.md#9179-dựng-tab-đăng-bài-production-theo-mockup-07092026) | `diary/06-2408-2708.md` |
 | §9.180 | [§9.180 Tự lưu ngoài Flow, tiến trình nổi không co trang (08/09/2026)](diary/06-2408-2708.md#9180-tự-lưu-ngoài-flow-tiến-trình-nổi-không-co-trang-08092026) | `diary/06-2408-2708.md` |
 | §9.181 | [§9.181 Chuẩn bị bộ cài Windows 0.2.8 và đồng bộ main (08/09/2026)](diary/06-2408-2708.md#9181-chuẩn-bị-bộ-cài-windows-028-và-đồng-bộ-main-08092026) | `diary/06-2408-2708.md` |
+| §9.182 | [§9.182 Chẩn đoán Publish máy LAN, foreground Android 9 và preflight theo máy (08/09/2026)](diary/06-2408-2708.md#9182-chẩn-đoán-publish-máy-lan-foreground-android-9-và-preflight-theo-máy-08092026) | `diary/06-2408-2708.md` |
+| §9.183 | [§9.183 Sửa Nuôi/Publish, đo TikTok 46.0.41 và chuẩn bị bộ cài 0.2.9 (08/09/2026)](diary/06-2408-2708.md#9183-sửa-nuôipublish-đo-tiktok-46041-và-chuẩn-bị-bộ-cài-029-08092026) | `diary/06-2408-2708.md` |
+| §9.184 | [§9.184 Box 45.7.3 và mockup production cho ba tab tự động hóa (08/09/2026)](diary/06-2408-2708.md#9184-box-4573-và-mockup-production-cho-ba-tab-tự-động-hóa-08092026) | `diary/06-2408-2708.md` |
+| §9.185 | [§9.185 Build nhanh Windows 0.2.10 theo yêu cầu (08/09/2026)](diary/06-2408-2708.md#9185-build-nhanh-windows-0210-theo-yêu-cầu-08092026) | `diary/06-2408-2708.md` |
+| §9.186 | [§9.186 Publish máy phụ: xác nhận Hot và phục hồi một cú tap hụt (08/09/2026)](diary/06-2408-2708.md#9186-publish-máy-phụ-xác-nhận-hot-và-phục-hồi-một-cú-tap-hụt-08092026) | `diary/06-2408-2708.md` |
+| §9.187 | [§9.187 Publish thật máy 2/3/4: cửa sổ đọc nhạc phải đủ cho hierarchy chậm (08/09/2026)](diary/06-2408-2708.md#9187-publish-thật-máy-234-cửa-sổ-đọc-nhạc-phải-đủ-cho-hierarchy-chậm-08092026) | `diary/06-2408-2708.md` |
+| §9.188 | [§9.188 Nhật ký Publish theo thao tác, số bước và thời gian thật (08/09/2026)](diary/06-2408-2708.md#9188-nhật-ký-publish-theo-thao-tác-số-bước-và-thời-gian-thật-08092026) | `diary/06-2408-2708.md` |
+| §9.189 | [§9.189 Triển khai box mới và mở rộng các phiên bản TikTok đo trên fleet (08/09/2026)](diary/06-2408-2708.md#9189-triển-khai-box-mới-và-mở-rộng-các-phiên-bản-tiktok-đo-trên-fleet-08092026) | `diary/06-2408-2708.md` |
+| §9.190 | [§9.190 Lịch Publish nhiều khung giờ trong ngày trên cùng máy (08/09/2026)](diary/06-2408-2708.md#9190-lịch-publish-nhiều-khung-giờ-trong-ngày-trên-cùng-máy-08092026) | `diary/06-2408-2708.md` |
+| §9.191 | [§9.191 Kiểm tra toàn fleet, chặn tranh ADB và đọc lại phần tử cũ (08/09/2026)](diary/06-2408-2708.md#9191-kiểm-tra-toàn-fleet-chặn-tranh-adb-và-đọc-lại-phần-tử-cũ-08092026) | `diary/06-2408-2708.md` |
+| §9.192 | [§9.192 Nuôi TikTok: tab ngang, tổng video và lưới chọn tất cả máy (08/09/2026)](diary/06-2408-2708.md#9192-nuôi-tiktok-tab-ngang-tổng-video-và-lưới-chọn-tất-cả-máy-08092026) | `diary/06-2408-2708.md` |
+| §9.193 | [§9.193 Lưới chọn máy hai cột cho ba workspace, kiểm tra bằng dev (08/09/2026)](diary/06-2408-2708.md#9193-lưới-chọn-máy-hai-cột-cho-ba-workspace-kiểm-tra-bằng-dev-08092026) | `diary/06-2408-2708.md` |
+| §9.194 | [§9.194 Phạm vi máy trên toolbar, cấu hình trong Thiết lập và tab đồng nhất (09/09/2026)](diary/06-2408-2708.md#9194-phạm-vi-máy-trên-toolbar-cấu-hình-trong-thiết-lập-và-tab-đồng-nhất-09092026) | `diary/06-2408-2708.md` |
+| §9.195 | [§9.195 Nuôi dùng một ô tổng video, chọn máy gọn và cuộn độc lập (09/09/2026)](diary/06-2408-2708.md#9195-nuôi-dùng-một-ô-tổng-video-chọn-máy-gọn-và-cuộn-độc-lập-09092026) | `diary/06-2408-2708.md` |
+| §9.196 | [§9.196 Khoảng trống dưới trang do checkbox absolute thoát vùng cuộn (09/09/2026)](diary/06-2408-2708.md#9196-khoảng-trống-dưới-trang-do-checkbox-absolute-thoát-vùng-cuộn-09092026) | `diary/06-2408-2708.md` |
+| §9.197 | [§9.197 Mẫu 01 Đăng bài, bản nhanh 0.2.18 và bài 13 ảnh (09/09/2026)](diary/06-2408-2708.md#9197-mẫu-01-đăng-bài-bản-nhanh-0218-và-bài-13-ảnh-09092026) | `diary/06-2408-2708.md` |
+| §9.198 | [§9.198 Tiếp nhận lượt 10 bài: upload chưa xong và link đang xử lý (09/09/2026)](diary/06-2408-2708.md#9198-tiếp-nhận-lượt-10-bài-upload-chưa-xong-và-link-đang-xử-lý-09092026) | `diary/06-2408-2708.md` |
+| §9.199 | [§9.199 Sheet đúng cột và ghi bằng phiên trình duyệt nền (09/09/2026)](diary/06-2408-2708.md#9199-sheet-đúng-cột-và-ghi-bằng-phiên-trình-duyệt-nền-09092026) | `diary/06-2408-2708.md` |
+| §9.200 | [§9.200 Ổn định xác minh Publish và bộ cài Windows 0.2.19 (09/09/2026, đang nghiệm thu)](diary/06-2408-2708.md#9200-ổn-định-xác-minh-publish-và-bộ-cài-windows-0219-09092026-đang-nghiệm-thu) | `diary/06-2408-2708.md` |
+| §9.201 | [§9.201 Tiếp nhận 0.2.19: phục hồi UiAutomator2 làm tắt server (09/09/2026, đang nghiệm thu)](diary/06-2408-2708.md#9201-tiếp-nhận-0219-phục-hồi-uiautomator2-làm-tắt-server-09092026-đang-nghiệm-thu) | `diary/06-2408-2708.md` |
+| §9.202 | [§9.202 Dev: thiếu serial và giới hạn chờ xác minh Publish (09/09/2026)](diary/06-2408-2708.md#9202-dev-thiếu-serial-và-giới-hạn-chờ-xác-minh-publish-09092026) | `diary/06-2408-2708.md` |
+| §9.203 | [§9.203 Sheet riêng: bốn cột nội bộ trước đối tác (09/09/2026)](diary/06-2408-2708.md#9203-sheet-riêng-bốn-cột-nội-bộ-trước-đối-tác-09092026) | `diary/06-2408-2708.md` |
+| §9.204 | [§9.204 Đăng bài: ba tab, nguồn và Sheet trực tiếp (09/09/2026)](diary/06-2408-2708.md#9204-đăng-bài-ba-tab-nguồn-và-sheet-trực-tiếp-09092026) | `diary/06-2408-2708.md` |
+| §9.205 | [§9.205 Hẹn giờ kéo thả và phân bài theo máy (10/09/2026)](diary/06-2408-2708.md#9205-hẹn-giờ-kéo-thả-và-phân-bài-theo-máy-10092026) | `diary/06-2408-2708.md` |
+| §9.206 | [§9.206 Chọn nhanh và hướng dẫn hoàn tất lịch đăng (10/09/2026)](diary/06-2408-2708.md#9206-chọn-nhanh-và-hướng-dẫn-hoàn-tất-lịch-đăng-10092026) | `diary/06-2408-2708.md` |
+| §9.207 | [§9.207 Build bộ cài 0.2.20 sau Hẹn giờ và Chọn nhanh (10/09/2026)](diary/06-2408-2708.md#9207-build-bộ-cài-0220-sau-hẹn-giờ-và-chọn-nhanh-10092026) | `diary/06-2408-2708.md` |
+| §9.208 | [§9.208 Máy mới: ngân sách phiên động, Sheet chung và bỏ UI Hồ sơ (10/09/2026)](diary/06-2408-2708.md#9208-máy-mới-ngân-sách-phiên-động-sheet-chung-và-bỏ-ui-hồ-sơ-10092026) | `diary/06-2408-2708.md` |
+| §9.209 | [§9.209 Dev: gán nhanh và xác minh Publish độc lập theo máy (10/09/2026)](diary/06-2408-2708.md#9209-dev-gán-nhanh-và-xác-minh-publish-độc-lập-theo-máy-10092026) | `diary/06-2408-2708.md` |
+| §9.210 | [§9.210 Box khác: Trill38.3.2, Global46.2.42 và release0.2.22 (10/09/2026)](diary/06-2408-2708.md#9210-box-khác-trill3832-global46242-và-release0222-10092026) | `diary/06-2408-2708.md` |
+| §9.211 | [9.211 Dev: Chọn nhanh theo sức chứa, Sheet retry và ưu tiên phóng to (10/09/2026)](diary/06-2408-2708.md#9211-dev-chọn-nhanh-theo-sức-chứa-sheet-retry-và-ưu-tiên-phóng-to-10092026) | `diary/06-2408-2708.md` |
+| §9.212 | [9.212 Hẹn giờ: kiểm tra UX, đến hạn theo máy và release0.2.23 (10/09/2026)](diary/06-2408-2708.md#9212-hẹn-giờ-kiểm-tra-ux-đến-hạn-theo-máy-và-release0223-10092026) | `diary/06-2408-2708.md` |
+| §9.213 | [9.213 Lịch 20:00: xung đột thư mục staging cùng ordinal (10/09/2026)](diary/06-2408-2708.md#9213-lịch-2000-xung-đột-thư-mục-staging-cùng-ordinal-10092026) | `diary/06-2408-2708.md` |
 
 ## Cổng
 

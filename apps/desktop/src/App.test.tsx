@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import App from "./App";
@@ -6,7 +6,7 @@ import { resetConfirms } from "./confirmStore";
 import { resetToasts } from "./toastStore";
 import type { DeviceInfo, OperationRunSummary } from "./types";
 import type { OperationSourceRef } from "./operationSource";
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 import { useWorkspaceDraft } from "./workspaceDraft";
 
 vi.mock("./api", () => ({
@@ -117,11 +117,13 @@ vi.mock("./components/orchestration/OrchestrationWorkspace", () => ({
 vi.mock("./components/NurturePopup", () => ({
   NurturePopup: ({
     surface,
+    scopeControl,
     targetUdids,
     targetRef,
     operationSource,
   }: {
     surface?: string;
+    scopeControl?: ReactNode;
     targetUdids?: string[];
     targetRef?: { type: string };
     operationSource?: OperationSourceRef;
@@ -138,13 +140,13 @@ vi.mock("./components/NurturePopup", () => ({
       data-operation-id={operationSource?.operationId}
       data-source-id={operationSource?.sourceId}
       data-item-id={operationSource?.itemId}
-    ><button type="button" onClick={() => setDirty(true)}>Mark nurture dirty</button></section>
+    >{scopeControl}<button type="button" onClick={() => setDirty(true)}>Mark nurture dirty</button></section>
   ); },
 }));
 
 vi.mock("./components/InteractionPopup", () => ({
-  InteractionPopup: ({ surface, targetRef }: { surface?: string; targetRef?: { type: string } }) => (
-    <section aria-label="Không gian Tương tác" data-surface={surface} data-target-type={targetRef?.type} />
+  InteractionPopup: ({ surface, targetRef, scopeControl }: { surface?: string; targetRef?: { type: string }; scopeControl?: ReactNode }) => (
+    <section aria-label="Không gian Tương tác" data-surface={surface} data-target-type={targetRef?.type}>{scopeControl}</section>
   ),
 }));
 
@@ -157,6 +159,24 @@ afterEach(() => {
 beforeEach(() => {
   vi.clearAllMocks();
 });
+
+// The sidebar is a known visible subtree. Scoped accessible queries avoid walking
+// every mounted workspace and recomputing jsdom CSS for unrelated controls.
+function navigationButton(name: string) {
+  const navigation = document.getElementById("primary-navigation");
+  if (!navigation) throw new Error("Primary navigation is not mounted");
+  return within(navigation).getByRole("button", { name, hidden: true });
+}
+
+async function navigate(name: string) {
+  await act(async () => { fireEvent.click(navigationButton(name)); });
+}
+
+async function clickConfirmation(name: string) {
+  const dialog = await screen.findByRole("alertdialog", { hidden: true });
+  const button = within(dialog).getByRole("button", { name, hidden: true });
+  await act(async () => { fireEvent.click(button); });
+}
 
 describe("operation source navigation", () => {
   afterEach(async () => {
@@ -171,9 +191,13 @@ describe("operation source navigation", () => {
     vi.mocked(api.operationQueryRuns).mockResolvedValue({ runs:[run],total:1,counts:{active:0,succeeded:0,attention:1},hasMore:false });
     vi.mocked(api.operationGetRun).mockResolvedValue({summary:run,items:[{id:"item-old",kind:"device",label:"Máy lịch sử",state:"failed",udid:"old-phone",errorCode:null,detail:null,evidence:null,retryable:true}]});
     render(<App />);
-    await userEvent.click(screen.getByRole("button", {name:"Tác vụ"}));
-    await userEvent.click(await screen.findByRole("button", {name:"Mở mục cần xử lý"}));
-    const workspace = await screen.findByRole("region", {name:"Không gian Nuôi TikTok"});
+    await navigate("Tác vụ");
+    // A full-document role scan can monopolize jsdom while the two async loads
+    // are settling. Wait on the small detail region before its accessible action.
+    await waitFor(() => expect(document.querySelector(".operations-monitor-detail header")).not.toBeNull());
+    const detail = document.querySelector(".operations-monitor-detail") as HTMLElement;
+    fireEvent.click(await within(detail).findByRole("button", {name:"Mở mục cần xử lý", hidden: true}));
+    const workspace = await screen.findByRole("region", {name:"Không gian Nuôi TikTok", hidden: true});
     await waitFor(() => expect(workspace).toHaveAttribute("data-operation-id", run.id));
     expect(workspace).toHaveAttribute("data-source-id", "historic");
     expect(workspace).toHaveAttribute("data-item-id", "item-old");
@@ -182,31 +206,31 @@ describe("operation source navigation", () => {
 
   it("retains the exact Jobs source until ordinary sidebar navigation is accepted", async () => {
     await openHistory();
-    await userEvent.click(screen.getByRole("button", {name:"Thiết bị"}));
-    await userEvent.click(screen.getByRole("button", {name:"Nuôi TikTok"}));
+    await navigate("Thiết bị");
+    await navigate("Nuôi TikTok");
     expect(screen.getByRole("region", {name:"Không gian Nuôi TikTok"})).not.toHaveAttribute("data-operation-id");
   });
 
   it("keeps historical context when leaving a dirty workspace is declined", async () => {
     const workspace = await openHistory();
-    await userEvent.click(screen.getByRole("button", {name:"Mark nurture dirty"}));
-    await userEvent.click(screen.getByRole("button", {name:"Thiết bị"}));
-    await userEvent.click(await screen.findByRole("button", {name:"Ở lại"}));
+    fireEvent.click(screen.getByText("Mark nurture dirty", { selector: "button" }));
+    await navigate("Thiết bị");
+    await clickConfirmation("Ở lại");
     expect(workspace).toHaveAttribute("data-operation-id", "nurture:historic");
-    await userEvent.click(screen.getByRole("button", {name:"Thiết bị"}));
-    await userEvent.click(await screen.findByRole("button", {name:"Bỏ thay đổi"}));
-    await userEvent.click(screen.getByRole("button", {name:"Nuôi TikTok"}));
+    await navigate("Thiết bị");
+    await clickConfirmation("Bỏ thay đổi");
+    await navigate("Nuôi TikTok");
     expect(screen.getByRole("region", {name:"Không gian Nuôi TikTok"})).not.toHaveAttribute("data-operation-id");
   });
 
   it("guards the same sidebar destination before closing historical context", async () => {
     const workspace = await openHistory();
-    await userEvent.click(screen.getByRole("button", {name:"Mark nurture dirty"}));
-    await userEvent.click(screen.getByRole("button", {name:"Nuôi TikTok"}));
-    await userEvent.click(await screen.findByRole("button", {name:"Ở lại"}));
+    fireEvent.click(screen.getByText("Mark nurture dirty", { selector: "button" }));
+    await navigate("Nuôi TikTok");
+    await clickConfirmation("Ở lại");
     expect(workspace).toHaveAttribute("data-operation-id", "nurture:historic");
-    await userEvent.click(screen.getByRole("button", {name:"Nuôi TikTok"}));
-    await userEvent.click(await screen.findByRole("button", {name:"Bỏ thay đổi"}));
+    await navigate("Nuôi TikTok");
+    await clickConfirmation("Bỏ thay đổi");
     await waitFor(() => expect(workspace).not.toHaveAttribute("data-operation-id"));
   });
 });
@@ -426,23 +450,25 @@ describe("automation target resolution", () => {
     expect(workspace).toHaveAttribute("data-targets", androidPhone.udid);
     fireEvent.click(screen.getByRole("button", { name: "Bỏ chọn" }));
     expect(workspace).toHaveAttribute("data-targets", androidPhone.udid);
-    fireEvent.click(screen.getByRole("button", { name: "Mark nurture dirty" }));
+    fireEvent.click(screen.getByText("Mark nurture dirty", { selector: "button" }));
     fireEvent.click(screen.getByRole("button", { name: "Mở trang tác vụ" }));
-    await screen.findByRole("button", { name: "Xem cùng thiết bị" });
+    await waitFor(() => expect(screen.queryByRole("button", { name: "Mở trang tác vụ" })).toBeNull());
+    expect(screen.queryByRole("button", { name: "Xem cùng thiết bị" })).toBeNull();
     expect(screen.getByRole("region", { name: "Không gian Nuôi TikTok" })).toBe(workspace);
     expect(screen.queryByRole("alertdialog")).toBeNull();
-    fireEvent.click(screen.getByRole("button", { name: "Xem cùng thiết bị" }));
+    fireEvent.click(within(screen.getByRole("navigation", { name: "Điều hướng chính" })).getByRole("button", { name: /^Thiết bị$/ }));
+    fireEvent.click(screen.getByRole("tab", { name: "Nuôi TikTok" }));
     await screen.findByRole("button", { name: "Đóng khung tác vụ" });
     expect(screen.getByRole("region", { name: "Không gian Nuôi TikTok" })).toBe(workspace);
     fireEvent.click(screen.getByRole("button", { name: "Đóng khung tác vụ" }));
-    fireEvent.click(await screen.findByRole("button", { name: "Ở lại" }));
+    await clickConfirmation("Ở lại");
     await waitFor(() => expect(screen.queryByRole("alertdialog")).toBeNull());
     expect(workspace).toBeVisible();
     fireEvent.click(screen.getByRole("tab", { name: "Tương tác" }));
-    fireEvent.click(await screen.findByRole("button", { name: "Bỏ thay đổi" }));
+    await clickConfirmation("Bỏ thay đổi");
     expect(await screen.findByRole("region", { name: "Không gian Tương tác" })).toBeVisible();
     expect(screen.getByRole("grid", { name: "Lưới thiết bị" })).toBeVisible();
-  });
+  }, 40_000);
 
   it("keeps an empty group at zero targets instead of expanding it to the fleet", async () => {
     const api = await import("./api");
@@ -459,13 +485,13 @@ describe("automation target resolution", () => {
     render(<App />);
 
     await waitFor(() => expect(screen.getByText("Redmi")).toBeInTheDocument());
-    await userEvent.click(screen.getByRole("button", { name: "Nuôi TikTok" }));
-    await userEvent.click(screen.getByRole("radio", { name: "Nhóm" }));
+    await navigate("Nuôi TikTok");
+    await userEvent.selectOptions(screen.getByRole("combobox", { name: "Phạm vi thiết bị" }), "group:empty");
 
     const workspace = screen.getByRole("region", { name: "Không gian Nuôi TikTok" });
     expect(workspace).toHaveAttribute("data-targets", "");
     expect(workspace).toHaveAttribute("data-target-type", "group");
-    expect(screen.getByRole("status")).toHaveTextContent("Ca trống · 0 máy");
+    expect(screen.getByRole("combobox", { name: "Phạm vi thiết bị" })).toHaveValue("group:empty");
   });
 });
 
@@ -615,7 +641,7 @@ describe("the zoom overlay per-phone rows", () => {
     const tile = document.querySelector('[data-udid="10969614"]');
     if (!tile) throw new Error("no tile");
     fireEvent.doubleClick(tile);
-    await userEvent.click(screen.getByRole("button", { name: "Tác vụ" }));
+    await navigate("Tác vụ");
 
     // The overlay's rows are plain buttons there rather than menu items, so reach for the
     // `title` both renderings share.
@@ -700,17 +726,15 @@ describe("fleet health banners", () => {
 
 describe("Flow page integration", () => {
   it("uses the page header as the one semantic page heading", async () => {
-    const user = userEvent.setup();
     render(<App />);
 
     expect(screen.getByRole("heading", { level: 1, name: "Thiết bị" })).toBeVisible();
-    await user.click(screen.getByRole("button", { name: "Dữ liệu" }));
+    await navigate("Dữ liệu");
     expect(screen.getByRole("heading", { level: 1, name: "Dữ liệu" })).toBeVisible();
     expect(screen.getAllByRole("heading", { level: 1 })).toHaveLength(1);
   });
 
   it("starts each destination at the top of its workspace", async () => {
-    const user = userEvent.setup();
     render(<App />);
 
     const content = document.querySelector<HTMLElement>(".content");
@@ -718,7 +742,7 @@ describe("Flow page integration", () => {
     content!.scrollTop = 420;
     content!.scrollLeft = 24;
 
-    await user.click(screen.getByRole("button", { name: "Nuôi TikTok" }));
+    await navigate("Nuôi TikTok");
     await waitFor(() =>
       expect(screen.getByRole("heading", { level: 1, name: "Nuôi TikTok" })).toBeVisible(),
     );
@@ -731,21 +755,21 @@ describe("Flow page integration", () => {
     const user = userEvent.setup();
     render(<App />);
 
-    await user.click(screen.getByRole("button", { name: "Flow" }));
+    await navigate("Flow");
     await user.click(
       await screen.findByRole("button", { name: "Mark fixture dirty" }),
     );
-    await user.click(screen.getByRole("button", { name: "Tác vụ" }));
+    await navigate("Tác vụ");
 
     // Declining the themed confirm keeps the draft open on the Flow page.
-    await user.click(await screen.findByRole("button", { name: "Ở lại" }));
+    await clickConfirmation("Ở lại");
     await waitFor(() =>
       expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument(),
     );
     expect(screen.getByText("Flow", { selector: "[data-testid='page-title']" })).toBeVisible();
 
-    await user.click(screen.getByRole("button", { name: "Tác vụ" }));
-    await user.click(await screen.findByRole("button", { name: "Bỏ thay đổi" }));
+    await navigate("Tác vụ");
+    await clickConfirmation("Bỏ thay đổi");
     await waitFor(() =>
       expect(screen.getByText("Tác vụ", { selector: "[data-testid='page-title']" })).toBeVisible(),
     );
@@ -755,17 +779,17 @@ describe("Flow page integration", () => {
     const user = userEvent.setup();
     render(<App />);
 
-    await user.click(screen.getByRole("button", { name: "Flow" }));
+    await navigate("Flow");
     await user.click(
       await screen.findByRole("button", { name: "Mark fixture dirty" }),
     );
-    await user.click(screen.getByRole("button", { name: "Tác vụ" }));
-    await user.click(await screen.findByRole("button", { name: "Bỏ thay đổi" }));
+    await navigate("Tác vụ");
+    await clickConfirmation("Bỏ thay đổi");
     await waitFor(() =>
       expect(screen.getByText("Tác vụ", { selector: "[data-testid='page-title']" })).toBeVisible(),
     );
 
-    await user.click(screen.getByRole("button", { name: "Dữ liệu" }));
+    await navigate("Dữ liệu");
     expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument();
     expect(screen.getByText("Dữ liệu", { selector: "[data-testid='page-title']" })).toBeVisible();
   });
@@ -774,10 +798,10 @@ describe("Flow page integration", () => {
     const user = userEvent.setup();
     render(<App />);
 
-    await user.click(screen.getByRole("button", { name: "Flow" }));
+    await navigate("Flow");
     await user.click(await screen.findByRole("button", { name: "Mark fixture dirty" }));
-    await user.click(screen.getByRole("button", { name: "Tác vụ" }));
-    await user.click(screen.getByRole("button", { name: "Dữ liệu" }));
+    await navigate("Tác vụ");
+    await navigate("Dữ liệu");
 
     expect(screen.getAllByRole("alertdialog")).toHaveLength(1);
     await user.click(screen.getByRole("button", { name: "Bỏ thay đổi" }));
@@ -792,9 +816,9 @@ describe("Flow page integration", () => {
     const user = userEvent.setup();
     render(<App />);
 
-    await user.click(screen.getByRole("button", { name: "Flow" }));
+    await navigate("Flow");
     await user.click(await screen.findByRole("button", { name: "Mark fixture dirty" }));
-    await user.click(screen.getByRole("button", { name: "Tác vụ" }));
+    await navigate("Tác vụ");
     expect(screen.getByRole("alertdialog")).toBeVisible();
 
     // Simulate the editor finishing its save while the modal is awaiting the operator. A stale
@@ -809,7 +833,7 @@ describe("Flow page integration", () => {
     const user = userEvent.setup();
     render(<App />);
 
-    await user.click(screen.getByRole("button", { name: "Flow" }));
+    await navigate("Flow");
     expect(screen.getByRole("tab", { name: "Flow thiết bị" })).toHaveAttribute(
       "aria-selected",
       "true",
@@ -830,12 +854,12 @@ describe("Flow page integration", () => {
     const user = userEvent.setup();
     render(<App />);
 
-    await user.click(screen.getByRole("button", { name: "Flow" }));
+    await navigate("Flow");
     await user.click(
       await screen.findByRole("button", { name: "Mark fixture dirty" }),
     );
     await user.click(screen.getByRole("tab", { name: "Điều phối" }));
-    await user.click(await screen.findByRole("button", { name: "Bỏ thay đổi" }));
+    await clickConfirmation("Bỏ thay đổi");
     await waitFor(() =>
       expect(screen.getByRole("tab", { name: "Điều phối" })).toHaveAttribute(
         "aria-selected",
@@ -853,7 +877,7 @@ describe("Flow page integration", () => {
 
   it("links both Flow modes to panels and activates them with the horizontal keyboard pattern", async () => {
     render(<App />);
-    await userEvent.click(screen.getByRole("button", { name: "Flow" }));
+    await navigate("Flow");
 
     const device = screen.getByRole("tab", { name: "Flow thiết bị" });
     const orchestration = screen.getByRole("tab", { name: "Điều phối" });
@@ -883,7 +907,7 @@ describe("Flow page integration", () => {
     const user = userEvent.setup();
     render(<App />);
 
-    await user.click(screen.getByRole("button", { name: "Flow" }));
+    await navigate("Flow");
     const cleanEvent = new Event("beforeunload", { cancelable: true });
     fireEvent(window, cleanEvent);
     expect(cleanEvent.defaultPrevented).toBe(false);
@@ -913,7 +937,7 @@ describe("fleet diagnostics page integration", () => {
     render(<App />);
     await waitFor(() => expect(screen.getByText("Redmi")).toBeInTheDocument());
 
-    await userEvent.click(screen.getByRole("button", { name: "Chẩn đoán" }));
+    await navigate("Chẩn đoán");
 
     expect(screen.getByRole("heading", { level: 1, name: "Chẩn đoán" })).toBeVisible();
     expect(await screen.findByRole("region", { name: "Chẩn đoán thiết bị" })).toBeVisible();
@@ -921,7 +945,6 @@ describe("fleet diagnostics page integration", () => {
   });
 
   it("opens nurture and interaction as dedicated workspaces", async () => {
-    const user = userEvent.setup();
     render(<App />);
 
     const deviceToolbar = document.querySelector(".profile-toolbar");
@@ -929,21 +952,21 @@ describe("fleet diagnostics page integration", () => {
     expect(deviceToolbar).not.toHaveTextContent("Nuôi TT");
     expect(deviceToolbar).not.toHaveTextContent("Tương tác");
 
-    await user.click(screen.getByRole("button", { name: "Nuôi TikTok" }));
+    await navigate("Nuôi TikTok");
     expect(screen.getByRole("heading", { level: 1, name: "Nuôi TikTok" })).toBeVisible();
     expect(screen.getByRole("region", { name: "Không gian Nuôi TikTok" })).toHaveAttribute(
       "data-surface",
       "page",
     );
-    expect(screen.getByRole("group", { name: "Phạm vi thiết bị" })).toBeVisible();
+    expect(screen.getByRole("combobox", { name: "Phạm vi thiết bị" })).toBeVisible();
 
-    await user.click(screen.getByRole("button", { name: "Tương tác" }));
+    await navigate("Tương tác");
     expect(screen.getByRole("heading", { level: 1, name: "Tương tác" })).toBeVisible();
     expect(screen.getByRole("region", { name: "Không gian Tương tác" })).toHaveAttribute(
       "data-surface",
       "page",
     );
-    expect(screen.getByRole("group", { name: "Phạm vi thiết bị" })).toBeVisible();
+    expect(screen.getByRole("combobox", { name: "Phạm vi thiết bị" })).toBeVisible();
   });
 
   it("keeps each automation workspace's target scope independent", async () => {
@@ -952,14 +975,14 @@ describe("fleet diagnostics page integration", () => {
     render(<App />);
     await waitFor(() => expect(screen.getByText("Redmi")).toBeInTheDocument());
 
-    await userEvent.click(screen.getByRole("button", { name: "Nuôi TikTok" }));
-    await userEvent.click(screen.getByRole("radio", { name: "Máy cụ thể" }));
+    await navigate("Nuôi TikTok");
+    await userEvent.selectOptions(screen.getByRole("combobox", { name: "Phạm vi thiết bị" }), "explicit");
     expect(screen.getByRole("region", { name: "Không gian Nuôi TikTok" })).toHaveAttribute(
       "data-target-type",
       "explicit",
     );
 
-    await userEvent.click(screen.getByRole("button", { name: "Tương tác" }));
+    await navigate("Tương tác");
     expect(screen.getByRole("region", { name: "Không gian Tương tác" })).toHaveAttribute(
       "data-target-type",
       "explicit",

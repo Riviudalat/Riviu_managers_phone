@@ -263,7 +263,7 @@ fn canonical_post_path(url: &url::Url) -> Option<String> {
 }
 
 /// How long the profile grid may take to render after its tab is tapped.
-pub const PROFILE_WINDOW: Duration = Duration::from_millis(8_000);
+pub const PROFILE_WINDOW: Duration = Duration::from_millis(30_000);
 /// How long a tapped tile may take to become a post page carrying its caption.
 pub const POST_PAGE_WINDOW: Duration = Duration::from_millis(6_000);
 /// How many tiles the route will open looking for the caption it was given.
@@ -305,6 +305,11 @@ pub enum OwnPostLink {
     CaptionUnusable,
     /// Tiles were opened and none carried the expected caption.
     CaptionNotFound,
+    /// A measured profile shows drafts, but none of the opened posts proved this submission.
+    DraftsPresent(usize),
+    /// Own profile could not be proved or the copied link names a different account.
+    AccountUnverified,
+    SubmissionUnverified,
     /// The route reached our post; the sheet capture then said this.
     Sheet(LinkCapture),
     /// A tap or a read failed on the way. The post is unaffected.
@@ -312,6 +317,20 @@ pub enum OwnPostLink {
 }
 
 impl OwnPostLink {
+    pub fn reason_code(&self) -> &'static str {
+        match self {
+            Self::Captured(_) => "verified",
+            Self::ReadFailed(_) => "readFailed",
+            Self::AccountUnverified => "accountUnverified",
+            Self::SubmissionUnverified => "submissionUnverified",
+            Self::Sheet(_) => "linkUnavailable",
+            Self::ProfileTabUnmeasured | Self::TilesUnmeasured => "unmeasuredLayout",
+            Self::ProfileTabMissing => "profileUnavailable",
+            Self::CaptionUnusable => "captionUnusable",
+            Self::DraftsPresent(_) => "draftsObserved",
+            Self::NoTiles | Self::CaptionNotFound => "postNotVisible",
+        }
+    }
     /// The link, if there is one.
     pub fn link(&self) -> Option<&str> {
         match self {
@@ -338,9 +357,18 @@ impl OwnPostLink {
                  chưa hiện xong, hoặc caption bị sửa"
                     .into()
             }
+            Self::DraftsPresent(count) => format!(
+                "Hồ sơ có {count} bản nháp; chưa tìm thấy bài khớp lượt đã gửi. Bản nháp có thể thuộc lượt khác; cần kiểm tra trên máy"
+            ),
+            Self::AccountUnverified => {
+                "chưa xác nhận tài khoản của bài; chờ kiểm tra lại liên kết".into()
+            }
+            Self::SubmissionUnverified => {
+                "bài trên màn hình chưa khớp nội dung và thời điểm gửi của lượt này".into()
+            }
             Self::Sheet(capture) => capture.reason(),
             Self::ReadFailed(message) => {
-                format!("không đi được đường về bài ({message}) — bài vẫn ổn")
+                format!("Lỗi đọc màn hình khi xác minh bài: {message}")
             }
         }
     }
@@ -388,6 +416,70 @@ pub async fn capture_own_post_link(
     labels: &TikTokControls,
     caption: &str,
 ) -> OwnPostLink {
+    capture_own_post_link_internal(session, labels, caption, None).await
+}
+
+#[derive(Debug, Clone)]
+pub struct SubmissionIdentity {
+    pub account: String,
+    pub submitted_at: String,
+}
+
+/// Read the authenticated own account before composing, then return to the measured Home tab.
+pub async fn observe_publish_account(
+    session: &dyn UiSession,
+    labels: &TikTokControls,
+) -> anyhow::Result<String> {
+    let profile = labels
+        .label(TikTokControl::ProfileTab)
+        .ok_or_else(|| anyhow::anyhow!("profile tab unmeasured"))?;
+    let tab = session
+        .locate(profile.to_query())
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("profile tab absent"))?;
+    session.tap(tab.centre()).await?;
+    let deadline = tokio::time::Instant::now() + PROFILE_WINDOW;
+    let account = loop {
+        if let Some(account) = crate::tiktok_account::observe_own_account(session, *labels).await? {
+            break account;
+        }
+        anyhow::ensure!(
+            tokio::time::Instant::now() < deadline,
+            "own account was not proven before Post"
+        );
+        tokio::time::sleep(POLL).await;
+    };
+    let home = labels
+        .label(TikTokControl::HomeTab)
+        .ok_or_else(|| anyhow::anyhow!("Home tab unmeasured"))?;
+    let tab = session
+        .locate(home.to_query())
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("Home tab absent"))?;
+    session.tap(tab.centre()).await?;
+    Ok(account)
+}
+
+pub async fn capture_own_post_link_for_submission(
+    session: &dyn UiSession,
+    labels: &TikTokControls,
+    caption: &str,
+    identity: &SubmissionIdentity,
+) -> OwnPostLink {
+    if identity.account.trim().is_empty()
+        || chrono::DateTime::parse_from_rfc3339(&identity.submitted_at).is_err()
+    {
+        return OwnPostLink::SubmissionUnverified;
+    }
+    capture_own_post_link_internal(session, labels, caption, Some(identity)).await
+}
+
+async fn capture_own_post_link_internal(
+    session: &dyn UiSession,
+    labels: &TikTokControls,
+    caption: &str,
+    identity: Option<&SubmissionIdentity>,
+) -> OwnPostLink {
     let Some(proof) = caption_proof(caption) else {
         return OwnPostLink::CaptionUnusable;
     };
@@ -412,6 +504,21 @@ pub async fn capture_own_post_link(
         Ok(tiles) => tiles,
         Err(error) => return OwnPostLink::ReadFailed(error.to_string()),
     };
+    // A profile navigation is not an identity proof. Read the owned account twice before
+    // considering tiles; a link for a different handle must never settle this assignment.
+    let account = match crate::tiktok_account::observe_own_account(session, *labels).await {
+        Ok(Some(account)) => account,
+        Ok(None) => return OwnPostLink::AccountUnverified,
+        Err(error) => return OwnPostLink::ReadFailed(error.to_string()),
+    };
+    if identity.is_some_and(|identity| {
+        !identity
+            .account
+            .trim_start_matches('@')
+            .eq_ignore_ascii_case(&account)
+    }) {
+        return OwnPostLink::AccountUnverified;
+    }
     // Cheap skip, when this build's badge is measured: a pinned tile is a page load that
     // can be known not to be ours before it is spent. Identity is still the caption.
     let pinned = match labels.pinned_badge_id() {
@@ -421,27 +528,75 @@ pub async fn capture_own_post_link(
             .unwrap_or_default(),
         None => Vec::new(),
     };
+    // A Drafts cover opens the composer, not a published post. Read its measured
+    // badge before spending the tile budget; a failed read must not tap that cover.
+    let drafts = match labels.draft_badge_id() {
+        Some(badge) => match session.locate_all_described(badge.to_query()).await {
+            Ok(badges) => badges,
+            Err(error) => return OwnPostLink::ReadFailed(error.to_string()),
+        },
+        None => Vec::new(),
+    };
+    let observed_drafts = drafts
+        .iter()
+        .filter_map(|badge| {
+            badge
+                .description
+                .as_deref()?
+                .trim()
+                .strip_prefix("Drafts:")?
+                .trim()
+                .parse::<usize>()
+                .ok()
+        })
+        .fold(0usize, usize::saturating_add);
     let candidates: Vec<ElementBox> = tiles
         .into_iter()
         .filter(|tile| !pinned.iter().any(|badge| contains(tile, badge)))
+        .filter(|tile| !drafts.iter().any(|badge| contains(tile, badge)))
         .take(TILES_TO_TRY)
         .collect();
     if candidates.is_empty() {
-        return OwnPostLink::CaptionNotFound;
+        return if observed_drafts > 0 {
+            OwnPostLink::DraftsPresent(observed_drafts)
+        } else {
+            OwnPostLink::CaptionNotFound
+        };
     }
 
+    let mut submission_unverified = false;
     for tile in candidates {
         if let Err(error) = session.tap(tile.centre()).await {
             return OwnPostLink::ReadFailed(error.to_string());
         }
         match await_caption(session, &proof).await {
             Ok(true) => {
+                if let Some(identity) = identity {
+                    match submission_visible(session, labels, caption, identity).await {
+                        Ok(true) => {}
+                        Ok(false) => {
+                            submission_unverified = true;
+                            leave_post_page(session, labels).await;
+                            continue;
+                        }
+                        Err(error) => {
+                            leave_post_page(session, labels).await;
+                            return OwnPostLink::ReadFailed(error.to_string());
+                        }
+                    }
+                }
                 let capture = capture_post_link(session, labels).await;
                 // Out of the post page whatever the sheet said, so the next thing to run
                 // does not start inside somebody's post.
                 leave_post_page(session, labels).await;
                 return match capture {
-                    LinkCapture::Captured(link) => OwnPostLink::Captured(link),
+                    LinkCapture::Captured(link) => match resolve_canonical_post_link(&link).await {
+                        Ok(canonical) if canonical_account_matches(&canonical, &account) => {
+                            OwnPostLink::Captured(canonical)
+                        }
+                        Ok(_) => OwnPostLink::AccountUnverified,
+                        Err(error) => OwnPostLink::ReadFailed(error.to_string()),
+                    },
                     other => OwnPostLink::Sheet(other),
                 };
             }
@@ -452,7 +607,23 @@ pub async fn capture_own_post_link(
             }
         }
     }
-    OwnPostLink::CaptionNotFound
+    if submission_unverified {
+        OwnPostLink::SubmissionUnverified
+    } else if observed_drafts > 0 {
+        OwnPostLink::DraftsPresent(observed_drafts)
+    } else {
+        OwnPostLink::CaptionNotFound
+    }
+}
+
+fn canonical_account_matches(link: &str, account: &str) -> bool {
+    let Ok(url) = url::Url::parse(link) else {
+        return false;
+    };
+    url.path_segments()
+        .and_then(|mut segments| segments.next())
+        .and_then(|segment| segment.strip_prefix('@'))
+        .is_some_and(|handle| handle.eq_ignore_ascii_case(account.trim_start_matches('@')))
 }
 
 /// Wait for the profile grid to have tiles, and hand them back in hierarchy order.
@@ -732,6 +903,164 @@ async fn await_copy_row_once(session: &dyn UiSession) -> CopyRow {
     }
 }
 
+fn visible_caption_matches(visible: &str, expected: &str) -> bool {
+    let normalize = |value: &str| {
+        value
+            .trim_matches(['\u{200e}', '\u{200f}'])
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+    let expected = normalize(expected);
+    let visible = normalize(visible);
+    if visible == expected {
+        return true;
+    }
+    // Only TikTok's explicit truncation markers authorize a prefix comparison.
+    // A complete older caption must not stand in for a longer new caption, and
+    // ordinary text ending in "more" must remain part of the caption.
+    let prefix = ["…more", "...more", "… more", "... more", "…", "..."]
+        .iter()
+        .find_map(|suffix| visible.strip_suffix(suffix));
+    let Some(prefix) = prefix.map(str::trim_end) else {
+        return false;
+    };
+    prefix.chars().count() >= expected.chars().count().min(64) && expected.starts_with(prefix)
+}
+
+fn relative_post_age(text: &str) -> Option<(i64, i64)> {
+    let text = text
+        .trim()
+        .trim_start_matches(['\u{200e}', '\u{200f}'])
+        .trim()
+        .trim_start_matches('·')
+        .trim()
+        .to_ascii_lowercase();
+    if matches!(text.as_str(), "just now" | "now") {
+        return Some((0, 60));
+    }
+    let age = text.strip_suffix(" ago")?;
+    let split = age.find(|c: char| !c.is_ascii_digit()).unwrap_or(age.len());
+    let amount = age[..split].parse::<i64>().ok()?;
+    let unit = match age[split..].trim() {
+        "s" | "sec" | "seconds" => 1,
+        "m" | "min" | "minutes" => 60,
+        "h" | "hr" | "hours" => 3600,
+        _ => return None,
+    };
+    Some((amount.checked_mul(unit)?, unit))
+}
+
+fn relative_post_time_matches(
+    text: &str,
+    submitted_at: &str,
+    now: chrono::DateTime<chrono::Utc>,
+) -> bool {
+    let Ok(submitted) = chrono::DateTime::parse_from_rfc3339(submitted_at) else {
+        return false;
+    };
+    let Some((age, precision)) = relative_post_age(text) else {
+        return false;
+    };
+    let Some(oldest_age) = age
+        .checked_add(precision)
+        .and_then(chrono::Duration::try_seconds)
+    else {
+        return false;
+    };
+    let Some(oldest_creation) = now.checked_sub_signed(oldest_age) else {
+        return false;
+    };
+    // The whole rounded interval must remain after dispatch; waiting never relaxes this proof.
+    submitted <= now && oldest_creation >= submitted
+}
+
+/// A matching newborn post can have only a few valid seconds per minute. Fixed retries
+/// miss that window forever. Wait on that same page, then read BOTH caption and time anew.
+fn submission_time_recheck_delay(
+    text: &str,
+    submitted_at: &str,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Option<Duration> {
+    let submitted = chrono::DateTime::parse_from_rfc3339(submitted_at).ok()?;
+    let (age, precision) = relative_post_age(text)?;
+    if precision > 60 || submitted > now {
+        return None;
+    }
+    let youngest = now.checked_sub_signed(chrono::Duration::try_seconds(age)?)?;
+    if youngest < submitted {
+        return None;
+    }
+    let boundary = submitted
+        .checked_add_signed(chrono::Duration::try_seconds(age.checked_add(precision)?)?)?;
+    let wait = boundary.signed_duration_since(now).to_std().ok()?;
+    (wait <= Duration::from_secs(60)).then_some(wait + Duration::from_millis(150))
+}
+
+async fn submission_visible(
+    session: &dyn UiSession,
+    labels: &TikTokControls,
+    caption: &str,
+    identity: &SubmissionIdentity,
+) -> anyhow::Result<bool> {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(65);
+    loop {
+        let caption_id = match (labels.package(), labels.resource_version()) {
+            // AGENTS.md §9.210: 9889db374744474635, own post snapshot 10/09/2026.
+            ("com.ss.android.ugc.trill", Some("38.3.2")) => ":id/dmk",
+            _ => ":id/desc",
+        };
+        let captions = session
+            .locate_all_described(ElementQuery::ResourceIdSuffix(caption_id))
+            .await?;
+        let [visible] = captions.as_slice() else {
+            return Ok(false);
+        };
+        if !visible
+            .description
+            .as_deref()
+            .is_some_and(|text| visible_caption_matches(text, caption))
+        {
+            return Ok(false);
+        }
+        // Measured 09/09/2026: Global 45.7.3/en uses zwj in the matching post
+        // snapshots links/{2,7,8,9}/post-0.xml under target/publish-approved-20260909.
+        // The matching 46.0.41, 46.2.1 and 46.4.3 captures retain tv_post_time.
+        let time_id = match (
+            labels.package(),
+            labels.language(),
+            labels.resource_version(),
+        ) {
+            // AGENTS.md §9.209: ce0417141d4decde0c and ce04171435f104080c,
+            // fresh carousel and older own posts, 10/09/2026. No timing tolerance change.
+            ("com.ss.android.ugc.trill", "en", Some("38.3.2")) => ":id/qrp",
+            ("com.zhiliaoapp.musically", "en", Some("45.4.3")) => ":id/zj1",
+            ("com.zhiliaoapp.musically", "en", Some("45.7.3")) => ":id/zwj",
+            _ => ":id/tv_post_time",
+        };
+        let times = session
+            .locate_all_described(ElementQuery::ResourceIdSuffix(time_id))
+            .await?;
+        let [time] = times.as_slice() else {
+            return Ok(false);
+        };
+        let Some(text) = time.description.as_deref() else {
+            return Ok(false);
+        };
+        let now = chrono::Utc::now();
+        if relative_post_time_matches(text, &identity.submitted_at, now) {
+            return Ok(true);
+        }
+        let Some(delay) = submission_time_recheck_delay(text, &identity.submitted_at, now) else {
+            return Ok(false);
+        };
+        if tokio::time::Instant::now() + delay >= deadline {
+            return Ok(false);
+        }
+        tokio::time::sleep(delay).await;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -765,6 +1094,7 @@ mod tests {
         /// Once the sheet is dismissed the rows go away, like the real one.
         dismissed: Mutex<bool>,
         auto_dismiss_copy: bool,
+        post_nodes: Option<Vec<(String, ElementBox)>>,
     }
 
     fn labelled(label: &str, y: f64) -> ElementBox {
@@ -885,8 +1215,15 @@ mod tests {
         }
         async fn locate_all_described(
             &self,
-            _query: ElementQuery<'_>,
+            query: ElementQuery<'_>,
         ) -> anyhow::Result<Vec<ElementBox>> {
+            if let Some(nodes) = &self.post_nodes {
+                return Ok(nodes
+                    .iter()
+                    .filter(|(id, _)| matches!(query, ElementQuery::ResourceIdSuffix(suffix) if id.ends_with(suffix)))
+                    .map(|(_, node)| node.clone())
+                    .collect());
+            }
             if *self.dismissed.lock() {
                 return Ok(Vec::new());
             }
@@ -896,6 +1233,241 @@ mod tests {
 
     fn english() -> TikTokControls {
         controls_for("com.ss.android.ugc.trill", "en", "").expect("a measured set")
+    }
+
+    struct DraftProfileSession {
+        sheet: FakeSession,
+        page: Mutex<&'static str>,
+        draft_tile: ElementBox,
+        post_tile: ElementBox,
+        draft_badge: ElementBox,
+        draft_taps: Mutex<usize>,
+        post_taps: Mutex<usize>,
+        badge_read_fails: bool,
+        post_matches: bool,
+    }
+
+    const DRAFT_TEST_CAPTION: &str =
+        "Fixture caption identifies the newly submitted carousel exactly";
+    const DRAFT_TEST_URL: &str = "https://www.tiktok.com/@fixture.account/photo/123456789";
+
+    impl DraftProfileSession {
+        fn measured() -> Self {
+            let fixture: serde_json::Value = serde_json::from_str(include_str!(
+                "../../../docs/fixtures/tiktok-share/global-46.2.1-draft-profile.json"
+            ))
+            .unwrap();
+            let rectangle = |name: &str, text: Option<String>| {
+                let values = fixture[name].as_array().unwrap();
+                ElementBox {
+                    x: values[0].as_f64().unwrap(),
+                    y: values[1].as_f64().unwrap(),
+                    width: values[2].as_f64().unwrap(),
+                    height: values[3].as_f64().unwrap(),
+                    description: text,
+                    enabled: true,
+                    clickable: true,
+                }
+            };
+            Self {
+                sheet: FakeSession::sheet(vec![labelled("Copy link", 1800.0)], DRAFT_TEST_URL),
+                page: Mutex::new("feed"),
+                draft_tile: rectangle("draftTile", None),
+                post_tile: rectangle("postTile", None),
+                draft_badge: rectangle(
+                    "draftBadge",
+                    Some(fixture["draftText"].as_str().unwrap().into()),
+                ),
+                draft_taps: Mutex::new(0),
+                post_taps: Mutex::new(0),
+                badge_read_fails: false,
+                post_matches: true,
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl UiSession for DraftProfileSession {
+        async fn tap(&self, point: TapPoint) -> anyhow::Result<()> {
+            let page = *self.page.lock();
+            match page {
+                "feed" => *self.page.lock() = "profile",
+                "profile" if point.x < self.post_tile.x => {
+                    *self.draft_taps.lock() += 1;
+                    *self.page.lock() = "draft";
+                }
+                "profile" => {
+                    *self.post_taps.lock() += 1;
+                    *self.page.lock() = "post";
+                }
+                "post" => {
+                    *self.page.lock() = "sheet";
+                    self.sheet.tap(point).await?;
+                }
+                "sheet" => self.sheet.tap(point).await?,
+                _ => {}
+            }
+            Ok(())
+        }
+        async fn swipe(&self, _gesture: crate::types::SwipeGesture) -> anyhow::Result<()> {
+            anyhow::bail!("unexpected swipe")
+        }
+        async fn type_text(&self, _text: &str) -> anyhow::Result<()> {
+            anyhow::bail!("unexpected text effect")
+        }
+        async fn home(&self) -> anyhow::Result<()> {
+            anyhow::bail!("unexpected Home")
+        }
+        async fn back(&self) -> anyhow::Result<()> {
+            let page = *self.page.lock();
+            *self.page.lock() = match page {
+                "sheet" => "post",
+                "post" => "profile",
+                // The measured defect: a draft exit loses the profile grid.
+                _ => "feed",
+            };
+            if page == "sheet" {
+                self.sheet.back().await?;
+            }
+            Ok(())
+        }
+        async fn find_and_tap(&self, _id: &str) -> anyhow::Result<()> {
+            anyhow::bail!("unexpected unmeasured tap")
+        }
+        async fn assert_visible(&self, _id: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn stream_url(&self) -> Option<String> {
+            None
+        }
+        async fn active_app_bundle(&self) -> anyhow::Result<String> {
+            Ok("com.zhiliaoapp.musically".into())
+        }
+        async fn hierarchy_source_snapshot(
+            &self,
+        ) -> anyhow::Result<crate::HierarchySourceSnapshot> {
+            anyhow::ensure!(
+                *self.page.lock() == "profile",
+                "account read outside profile"
+            );
+            Ok(crate::HierarchySourceSnapshot {
+                generation: 1,
+                xml: include_str!("../fixtures/tiktok-publish/musically-46.2.1-en/profile.xml")
+                    .into(),
+            })
+        }
+        async fn locate(&self, query: ElementQuery<'_>) -> anyhow::Result<Option<ElementBox>> {
+            let page = *self.page.lock();
+            match page {
+                "feed" => Ok(Some(labelled("Profile", 2100.0))),
+                "post" => match query {
+                    ElementQuery::Text { value, .. }
+                        if self.post_matches && DRAFT_TEST_CAPTION.starts_with(value) =>
+                    {
+                        Ok(Some(labelled(DRAFT_TEST_CAPTION, 1500.0)))
+                    }
+                    ElementQuery::Text { .. } => Ok(None),
+                    _ => Ok(self.sheet.share.clone()),
+                },
+                _ => Ok(None),
+            }
+        }
+        async fn locate_all(&self, query: ElementQuery<'_>) -> anyhow::Result<Vec<ElementBox>> {
+            let page = *self.page.lock();
+            if page == "profile" && matches!(query, ElementQuery::ResourceIdSuffix(":id/cover")) {
+                return Ok(vec![self.draft_tile.clone(), self.post_tile.clone()]);
+            }
+            if page == "sheet" {
+                return self.sheet.locate_all(query).await;
+            }
+            Ok(Vec::new())
+        }
+        async fn locate_all_described(
+            &self,
+            query: ElementQuery<'_>,
+        ) -> anyhow::Result<Vec<ElementBox>> {
+            let page = *self.page.lock();
+            match (page, query) {
+                ("profile", ElementQuery::ResourceIdSuffix(":id/zq_")) => {
+                    anyhow::ensure!(!self.badge_read_fails, "draft badge read failed");
+                    Ok(vec![self.draft_badge.clone()])
+                }
+                ("post", ElementQuery::ResourceIdSuffix(":id/desc")) => {
+                    Ok(vec![labelled(DRAFT_TEST_CAPTION, 1500.0)])
+                }
+                ("post", ElementQuery::ResourceIdSuffix(":id/tv_post_time")) => {
+                    Ok(vec![labelled("· 6s ago", 1400.0)])
+                }
+                ("sheet", _) => self.sheet.locate_all_described(query).await,
+                _ => Ok(Vec::new()),
+            }
+        }
+        async fn set_clipboard(&self, kind: &str, value: &[u8]) -> anyhow::Result<()> {
+            self.sheet.set_clipboard(kind, value).await
+        }
+        async fn get_clipboard(&self, limit: usize) -> anyhow::Result<(String, Vec<u8>)> {
+            self.sheet.get_clipboard(limit).await
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn own_profile_drafts_never_open_and_next_post_keeps_submission_proof() {
+        let session = DraftProfileSession::measured();
+        let labels = controls_for("com.zhiliaoapp.musically", "en", "46.2.1").unwrap();
+        let identity = SubmissionIdentity {
+            account: "fixture.account".into(),
+            submitted_at: (chrono::Utc::now() - chrono::Duration::seconds(30)).to_rfc3339(),
+        };
+        let result =
+            capture_own_post_link_for_submission(&session, &labels, DRAFT_TEST_CAPTION, &identity)
+                .await;
+        assert_eq!(
+            *session.draft_taps.lock(),
+            0,
+            "the Drafts cover must never be opened"
+        );
+        assert_eq!(result, OwnPostLink::Captured(DRAFT_TEST_URL.into()));
+        assert_eq!(*session.post_taps.lock(), 1);
+        assert_eq!(*session.page.lock(), "profile");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn own_profile_drafts_read_failure_stops_before_any_cover_tap() {
+        let mut session = DraftProfileSession::measured();
+        session.badge_read_fails = true;
+        let labels = controls_for("com.zhiliaoapp.musically", "en", "46.2.1").unwrap();
+        let result = capture_own_post_link(&session, &labels, DRAFT_TEST_CAPTION).await;
+        assert!(matches!(result, OwnPostLink::ReadFailed(_)));
+        assert_eq!(*session.draft_taps.lock(), 0);
+        assert_eq!(*session.post_taps.lock(), 0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn own_profile_drafts_report_observation_only_after_no_matching_post() {
+        let mut session = DraftProfileSession::measured();
+        session.post_matches = false;
+        let labels = controls_for("com.zhiliaoapp.musically", "en", "46.2.1").unwrap();
+        let result = capture_own_post_link(&session, &labels, DRAFT_TEST_CAPTION).await;
+        assert_eq!(result, OwnPostLink::DraftsPresent(1));
+        assert!(result.reason().contains("có thể thuộc lượt khác"));
+        assert_eq!(*session.draft_taps.lock(), 0);
+        assert_eq!(*session.post_taps.lock(), 1);
+        assert_eq!(*session.page.lock(), "profile");
+    }
+
+    #[test]
+    fn draft_badge_mapping_stays_on_the_measured_build_and_language() {
+        for (package, language, version, expected) in [
+            ("com.zhiliaoapp.musically", "en", "46.2.1", true),
+            ("com.zhiliaoapp.musically", "en", "46.4.3", false),
+            ("com.zhiliaoapp.musically", "en", "45.7.3", false),
+            ("com.zhiliaoapp.musically", "vi", "46.2.1", false),
+            ("com.ss.android.ugc.trill", "en", "38.3.2", false),
+        ] {
+            let mapped =
+                controls_for(package, language, version).and_then(|labels| labels.draft_badge_id());
+            assert_eq!(mapped.is_some(), expected);
+        }
     }
 
     #[tokio::test(start_paused = true)]
@@ -1250,5 +1822,272 @@ mod tests {
             !looks_like_a_post_link(&first),
             "a sentinel must never be mistaken for a link"
         );
+    }
+
+    #[test]
+    fn canonical_link_must_name_the_observed_profile() {
+        assert!(canonical_account_matches(
+            "https://www.tiktok.com/@fixture.account/photo/123",
+            "fixture.account"
+        ));
+        assert!(canonical_account_matches(
+            "https://www.tiktok.com/@fixture.account/photo/123",
+            "@fixture.account"
+        ));
+        assert!(!canonical_account_matches(
+            "https://www.tiktok.com/@other/photo/123",
+            "fixture.account"
+        ));
+        assert!(!canonical_account_matches(
+            "https://vt.tiktok.com/abc/",
+            "fixture.account"
+        ));
+    }
+
+    fn measured_post_time_fixture() -> FakeSession {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../docs/fixtures/tiktok-share/global-45.7.3-own-post-time.json"
+        ))
+        .unwrap();
+        FakeSession {
+            post_nodes: Some(
+                fixture["nodes"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|node| {
+                        (
+                            node["resourceId"].as_str().unwrap().to_owned(),
+                            labelled(node["text"].as_str().unwrap(), 100.0),
+                        )
+                    })
+                    .collect(),
+            ),
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn submission_time_locator_reads_measured_build_aliases() {
+        let identity = SubmissionIdentity {
+            account: "fixture.account".into(),
+            submitted_at: (chrono::Utc::now() - chrono::Duration::minutes(3)).to_rfc3339(),
+        };
+        for (version, time_id) in [
+            ("45.4.3", "zj1"),
+            ("45.7.3", "zwj"),
+            ("46.0.41", "tv_post_time"),
+            ("46.2.1", "tv_post_time"),
+            ("46.4.3", "tv_post_time"),
+        ] {
+            let mut session = measured_post_time_fixture();
+            session.post_nodes.as_mut().unwrap()[1].0 =
+                format!("com.zhiliaoapp.musically:id/{time_id}");
+            let labels = controls_for("com.zhiliaoapp.musically", "en", version).unwrap();
+            assert!(
+                submission_visible(
+                    &session,
+                    &labels,
+                    "Fixture caption for a submitted carousel",
+                    &identity,
+                )
+                .await
+                .unwrap(),
+                "measured post time missing for {version}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn trill_submission_uses_measured_caption_time_and_direction_mark() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../docs/fixtures/tiktok-share/trill-38.3.2-own-post-time.json"
+        ))
+        .unwrap();
+        let mut session = measured_post_time_fixture();
+        session.post_nodes = Some(
+            fixture["nodes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|n| {
+                    (
+                        n["resourceId"].as_str().unwrap().into(),
+                        labelled(n["text"].as_str().unwrap(), 100.0),
+                    )
+                })
+                .collect(),
+        );
+        let labels = controls_for("com.ss.android.ugc.trill", "en-US", "38.3.2").unwrap();
+        let identity = SubmissionIdentity {
+            account: "fixture.account".into(),
+            submitted_at: (chrono::Utc::now() - chrono::Duration::hours(18)).to_rfc3339(),
+        };
+        assert!(submission_visible(
+            &session,
+            &labels,
+            "Fixture caption for a submitted carousel",
+            &identity
+        )
+        .await
+        .unwrap());
+        session.post_nodes.as_mut().unwrap()[1].1.description = Some("\u{200e} · 2d ago".into());
+        assert!(!submission_visible(
+            &session,
+            &labels,
+            "Fixture caption for a submitted carousel",
+            &identity
+        )
+        .await
+        .unwrap());
+    }
+
+    #[tokio::test]
+    async fn submission_time_locator_requires_a_single_time_node() {
+        let labels = controls_for("com.zhiliaoapp.musically", "en", "45.7.3").unwrap();
+        let identity = SubmissionIdentity {
+            account: "fixture.account".into(),
+            submitted_at: (chrono::Utc::now() - chrono::Duration::minutes(3)).to_rfc3339(),
+        };
+        let mut session = measured_post_time_fixture();
+        let nodes = session.post_nodes.as_mut().unwrap();
+        nodes.push(nodes[1].clone());
+        assert!(!submission_visible(
+            &session,
+            &labels,
+            "Fixture caption for a submitted carousel",
+            &identity,
+        )
+        .await
+        .unwrap());
+        session.post_nodes.as_mut().unwrap().truncate(1);
+        assert!(!submission_visible(
+            &session,
+            &labels,
+            "Fixture caption for a submitted carousel",
+            &identity,
+        )
+        .await
+        .unwrap());
+    }
+
+    #[test]
+    fn rounded_time_recheck_targets_the_live_window_without_accepting_old_posts() {
+        let at = |value: &str| {
+            chrono::DateTime::parse_from_rfc3339(value)
+                .unwrap()
+                .with_timezone(&chrono::Utc)
+        };
+        let submitted = "2026-09-09T21:30:56.473Z";
+        let now = at("2026-09-09T21:47:47.573Z");
+        assert!(!relative_post_time_matches("· 16m ago", submitted, now));
+        let delay = submission_time_recheck_delay("· 16m ago", submitted, now).unwrap();
+        assert_eq!(delay, Duration::from_millis(9050));
+        let rechecked = now + chrono::Duration::from_std(delay).unwrap();
+        assert!(relative_post_time_matches(
+            "· 16m ago",
+            submitted,
+            rechecked
+        ));
+        // A label that advanced during the wait is rechecked and remains unproven.
+        assert!(!relative_post_time_matches(
+            "· 17m ago",
+            submitted,
+            rechecked
+        ));
+        assert!(submission_time_recheck_delay("· 18m ago", submitted, now).is_none());
+        assert!(submission_time_recheck_delay("· 1h ago", submitted, now).is_none());
+        assert!(submission_time_recheck_delay("yesterday", submitted, now).is_none());
+    }
+
+    #[test]
+    fn submission_proof_rejects_old_same_prefix_and_retains_visible_caption_identity() {
+        let caption = "A measured caption with a long exact opening and unique destination for this submission";
+        assert!(visible_caption_matches(caption, caption));
+        assert!(visible_caption_matches(
+            &format!("{}…more", &caption[..70]),
+            caption
+        ));
+        assert!(!visible_caption_matches(
+            "A measured caption with another destination",
+            caption
+        ));
+        assert!(!visible_caption_matches("A measured caption", caption));
+        let complete_old = "A".repeat(64);
+        assert!(!visible_caption_matches(
+            &complete_old,
+            &format!("{complete_old} destination NEW")
+        ));
+        assert!(visible_caption_matches("Visit more", "Visit more"));
+        assert!(!visible_caption_matches(
+            "Visit more",
+            "Visit destination NEW"
+        ));
+        assert!(!visible_caption_matches(
+            &format!("{complete_old}more"),
+            &format!("{complete_old} destination NEW")
+        ));
+        let submitted = "2026-09-09T00:00:00Z";
+        let now = chrono::DateTime::parse_from_rfc3339("2026-09-09T00:06:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        assert!(relative_post_time_matches("· 5m ago", submitted, now));
+        assert!(!relative_post_time_matches("· 2h ago", submitted, now));
+        assert!(!relative_post_time_matches("2026-08-01", submitted, now));
+        assert!(!relative_post_time_matches("yesterday", submitted, now));
+    }
+
+    #[test]
+    fn relative_time_requires_the_entire_creation_interval_after_submission() {
+        let at = |value: &str| {
+            chrono::DateTime::parse_from_rfc3339(value)
+                .unwrap()
+                .with_timezone(&chrono::Utc)
+        };
+        let submitted = "2026-09-09T10:00:00Z";
+        // An existing 09:10 post appears as 1h old at 11:05, but that rounded
+        // interval spans the new submission and cannot identify its publication.
+        assert!(!relative_post_time_matches(
+            "· 1h ago",
+            submitted,
+            at("2026-09-09T11:05:00Z")
+        ));
+        assert!(!relative_post_time_matches(
+            "· 1m ago",
+            submitted,
+            at("2026-09-09T10:00:10Z")
+        ));
+        assert!(!relative_post_time_matches(
+            "just now",
+            submitted,
+            at("2026-09-09T10:00:10Z")
+        ));
+        // A new upload can settle on a later read as its full time bucket moves
+        // after the recorded dispatch; ambiguity is temporary, not publication failure.
+        assert!(relative_post_time_matches(
+            "· 1m ago",
+            submitted,
+            at("2026-09-09T10:02:02Z")
+        ));
+        assert!(relative_post_time_matches(
+            "just now",
+            submitted,
+            at("2026-09-09T10:01:01Z")
+        ));
+        assert!(!relative_post_time_matches(
+            "now",
+            submitted,
+            at("2026-09-09T09:59:59Z")
+        ));
+        assert!(!relative_post_time_matches(
+            "1m ago",
+            "2026-09-09T10:00:00.900Z",
+            at("2026-09-09T10:02:00.100Z")
+        ));
+        assert!(!relative_post_time_matches(
+            "9223372036854775807h ago",
+            submitted,
+            at("2026-09-09T10:02:02Z")
+        ));
     }
 }

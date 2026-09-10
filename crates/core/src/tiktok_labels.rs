@@ -842,6 +842,80 @@ impl TikTokResourceLabels {
 
 /// Every resource-id set that has been read off a device, by app version.
 pub const TIKTOK_RESOURCE_SETS: &[TikTokResourceLabels] = &[
+    TikTokResourceLabels {
+        package: "com.zhiliaoapp.musically",
+        app_version: "45.4.3",
+        measured_on: "SM-G955F ce04171435f104080c, Android 9/en, 08/09/2026 code2024504030; isolated album, ordinal 1/2, Hot, selected sound, caption roundtrip, Send empty/typed/cleared",
+        comment_send: Some(LabelMatch::ResourceId(":id/cog")),
+        picker_album_menu: Some(LabelMatch::ResourceId(":id/zx7")),
+        composer_caption: Some(LabelMatch::ResourceId(":id/gl9")),
+        composer_shutter: Some(LabelMatch::ResourceId(":id/sb0")),
+        gallery_entry: Some(LabelMatch::ResourceId(":id/upload_hot_area")),
+        // Own profile measured in fleet compatibility probe 08/09/2026.
+        post_tile: Some(LabelMatch::ResourceId(":id/cover")),
+        pinned_badge: None,
+    },
+    TikTokResourceLabels {
+        package: "com.zhiliaoapp.musically",
+        app_version: "46.1.3",
+        measured_on: "SM-G955F ce051715e15b2c2e02, Android 9/en, 08/09/2026 code2024601030; isolated album, ordinal 1/2, Hot, selected sound, caption roundtrip, Send empty/typed/cleared",
+        comment_send: Some(LabelMatch::ResourceId(":id/cv8")),
+        picker_album_menu: Some(LabelMatch::ResourceId(":id/tv_title")),
+        composer_caption: Some(LabelMatch::ResourceId(":id/gv0")),
+        composer_shutter: Some(LabelMatch::ResourceId(":id/suh")),
+        gallery_entry: Some(LabelMatch::ResourceId(":id/upload_hot_area")),
+        // Own profile measured in fleet compatibility probe 08/09/2026.
+        post_tile: Some(LabelMatch::ResourceId(":id/cover")),
+        pinned_badge: None,
+    },
+    TikTokResourceLabels {
+        package: "com.zhiliaoapp.musically",
+        app_version: "46.4.3",
+        measured_on: "SM-G955F ce031713aadf361905, Android 9/en, 08/09/2026 code2024604030; isolated album, ordinal 1/2, Hot, selected sound, caption roundtrip, Send empty/typed/cleared",
+        comment_send: Some(LabelMatch::ResourceId(":id/cxl")),
+        picker_album_menu: Some(LabelMatch::ResourceId(":id/tv_title")),
+        composer_caption: Some(LabelMatch::ResourceId(":id/h00")),
+        composer_shutter: Some(LabelMatch::ResourceId(":id/t6z")),
+        gallery_entry: Some(LabelMatch::ResourceId(":id/upload_hot_area")),
+        // Own profile cover measured 09/09/2026; sanitized fixture accompanies this tuple.
+        post_tile: Some(LabelMatch::ResourceId(":id/cover")),
+        pinned_badge: None,
+    },
+
+    TikTokResourceLabels {
+        package: "com.zhiliaoapp.musically",
+        app_version: "45.7.3",
+        measured_on: "SM-G955F ce031713b0c610ab0c, Android 9/en, 08/09/2026, versionCode 2024507030; three photos, Hot sound and caption return",
+        // Empty -> typed -> cleared field independently toggled enabled false/true/false.
+        // cqf is the Send control; the other unresolved references stay enabled.
+        comment_send: Some(LabelMatch::ResourceId(":id/cqf")),
+        picker_album_menu: Some(LabelMatch::ResourceId(":id/tv_title")),
+        composer_caption: Some(LabelMatch::ResourceId(":id/gpr")),
+        composer_shutter: Some(LabelMatch::ResourceId(":id/sn3")),
+        gallery_entry: Some(LabelMatch::ResourceId(":id/upload_hot_area")),
+        // Own profile cover measured 09/09/2026; sanitized fixture accompanies this tuple.
+        post_tile: Some(LabelMatch::ResourceId(":id/cover")),
+        // SM-G955N ce041714d44264230d,45.7.3/en,10/09/2026: three tv_top
+        // badges inside first-row covers; the newly posted carousel is in the next row.
+        pinned_badge: Some(LabelMatch::ResourceId(":id/tv_top")),
+    },
+    // 08/09/2026, remote Windows fleet, ce011711c354be2005, Android 9/en-US.
+    // versionCode 2024600410: three selected photos -> Hot sound -> caption ->
+    // back to editor -> caption unchanged. No public Post during measurement.
+    TikTokResourceLabels {
+        package: "com.zhiliaoapp.musically",
+        app_version: "46.0.41",
+        measured_on: "SM-G955N ce011711c354be2005, Android 9/en-US, 08/09/2026, versionCode 2024600410",
+        comment_send: Some(LabelMatch::ResourceId(":id/cuv")),
+        picker_album_menu: Some(LabelMatch::ResourceId(":id/tv_title")),
+        // guf is description; guj immediately above it is the distinct title field.
+        composer_caption: Some(LabelMatch::ResourceId(":id/guf")),
+        composer_shutter: Some(LabelMatch::ResourceId(":id/stc")),
+        gallery_entry: Some(LabelMatch::ResourceId(":id/upload_hot_area")),
+        // 09/09/2026 phone1 own profile: cover grid and tv_top Pinned badge.
+        post_tile: Some(LabelMatch::ResourceId(":id/cover")),
+        pinned_badge: Some(LabelMatch::ResourceId(":id/tv_top")),
+    },
     // The four `com.zhiliaoapp.musically` phones on this farm. Both versions here leave the
     // Send button as an unresolved reference, the way 46.3.3 and 46.4.3 do — unlike
     // `trill` 38.3.2, which renders it and is therefore described by language instead.
@@ -935,7 +1009,8 @@ pub const TIKTOK_RESOURCE_SETS: &[TikTokResourceLabels] = &[
         // which is the effects rail: tapping "the entry" there opens filters. This id is
         // what makes the composer walk possible on this build at all.
         gallery_entry: Some(LabelMatch::ResourceId(":id/upload_hot_area")),
-        post_tile: None,
+        // Own profile cover measured 09/09/2026; sanitized fixture accompanies this tuple.
+        post_tile: Some(LabelMatch::ResourceId(":id/cover")),
         pinned_badge: None,
     },
     TikTokResourceLabels {
@@ -968,7 +1043,7 @@ pub const TIKTOK_RESOURCE_SETS: &[TikTokResourceLabels] = &[
         // `FrameLayout …:id/upload_hot_area [0,1891][179,2070]`, bottom-left — the same id
         // as 46.2.1, measured on this build rather than borrowed from that one.
         gallery_entry: Some(LabelMatch::ResourceId(":id/upload_hot_area")),
-        post_tile: None,
+        post_tile: Some(LabelMatch::ResourceId(":id/cover")),
         pinned_badge: None,
     },
     TikTokResourceLabels {
@@ -1360,6 +1435,27 @@ impl TikTokControls {
                 .and_then(|set| set.resource(control))
                 .or_else(|| self.translated.translated(control)),
             TikTokControl::PickerAlbumMenu => self.resources.and_then(|set| set.resource(control)),
+            // Own Profile tab observed independently on these English Global builds.
+            // Exact description excludes the author's "<name> profile" rail control.
+            TikTokControl::ProfileTab
+                if self.package() == "com.zhiliaoapp.musically"
+                    && self.translated.language == "en"
+                    && matches!(
+                        self.resource_version(),
+                        Some(
+                            "45.4.3"
+                                | "45.7.3"
+                                | "46.0.41"
+                                | "46.1.3"
+                                | "46.2.1"
+                                | "46.2.42"
+                                | "46.4.3"
+                        )
+                    ) =>
+            {
+                Some(LabelMatch::Exact("Profile"))
+            }
+
             // The caption field reads the version table first for the reason its field there
             // documents: on 38.3.2 the post screen carries TWO `EditText`s, so a class can
             // resolve the wrong one and a placeholder string stops matching once typed. The
@@ -1422,6 +1518,19 @@ impl TikTokControls {
     /// rather than a wrong post: identity is settled by the caption either way.
     pub fn pinned_badge_id(&self) -> Option<LabelMatch> {
         self.resources.and_then(|set| set.pinned_badge)
+    }
+
+    /// The Drafts label inside a profile cover, measured separately from real post tiles.
+    /// Global 46.2.1/en, 09/09/2026 phone17: zq_ reads "Drafts: 1" at
+    /// [16,929][342,971] inside cover [0,913][358,1390]. See the retained
+    /// target/stable-installer-20260909/resume-live/profile-with-draft.xml.
+    pub fn draft_badge_id(&self) -> Option<LabelMatch> {
+        match (self.package(), self.language(), self.resource_version()) {
+            ("com.zhiliaoapp.musically", "en", Some("46.2.1")) => {
+                Some(LabelMatch::ResourceId(":id/zq_"))
+            }
+            _ => None,
+        }
     }
 
     /// One line of provenance for a session log, naming what actually resolved.
@@ -2135,6 +2244,100 @@ pub fn normalise_language(locale: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn observed_global_profile_navigation_uses_exact_build_and_description() {
+        for (version, xml) in [
+            (
+                "45.4.3",
+                include_str!("../fixtures/tiktok-publish/own-profile-musically-45.4.3-en.xml"),
+            ),
+            (
+                "46.1.3",
+                include_str!("../fixtures/tiktok-publish/own-profile-musically-46.1.3-en.xml"),
+            ),
+            (
+                "45.7.3",
+                include_str!("../fixtures/tiktok-publish/own-profile-musically-45.7.3-en.xml"),
+            ),
+            (
+                "46.0.41",
+                include_str!("../fixtures/tiktok-publish/own-profile-musically-46.0.41-en.xml"),
+            ),
+            (
+                "46.2.1",
+                include_str!("../fixtures/tiktok-publish/own-profile-musically-46.2.1-en.xml"),
+            ),
+            (
+                "46.4.3",
+                include_str!("../fixtures/tiktok-publish/own-profile-musically-46.4.3-en.xml"),
+            ),
+        ] {
+            let labels = controls_for("com.zhiliaoapp.musically", "en-US", version).unwrap();
+            assert_eq!(
+                labels.label(TikTokControl::ProfileTab),
+                Some(LabelMatch::Exact("Profile"))
+            );
+            assert_eq!(
+                labels.post_tile_id(),
+                Some(LabelMatch::ResourceId(":id/cover"))
+            );
+            assert!(xml.contains("content-desc=\"Profile\""));
+            assert!(xml.contains("com.zhiliaoapp.musically:id/cover"));
+        }
+        let unseen = controls_for("com.zhiliaoapp.musically", "en", "46.4.4").unwrap();
+        assert!(unseen.label(TikTokControl::ProfileTab).is_none());
+        assert!(unseen.post_tile_id().is_none());
+        let other_language = controls_for("com.zhiliaoapp.musically", "vi", "46.0.41");
+        assert_ne!(
+            other_language.and_then(|labels| labels.label(TikTokControl::ProfileTab)),
+            Some(LabelMatch::Exact("Profile"))
+        );
+    }
+    #[test]
+    fn new_fleet_send_controls_arm_only_while_text_is_present() {
+        for (version, empty, typed, cleared) in [
+            (
+                "45.4.3",
+                include_str!("../fixtures/tiktok-publish/musically-45.4.3-en/comment-empty.xml"),
+                include_str!("../fixtures/tiktok-publish/musically-45.4.3-en/comment-typed.xml"),
+                include_str!("../fixtures/tiktok-publish/musically-45.4.3-en/comment-cleared.xml"),
+            ),
+            (
+                "46.1.3",
+                include_str!("../fixtures/tiktok-publish/musically-46.1.3-en/comment-empty.xml"),
+                include_str!("../fixtures/tiktok-publish/musically-46.1.3-en/comment-typed.xml"),
+                include_str!("../fixtures/tiktok-publish/musically-46.1.3-en/comment-cleared.xml"),
+            ),
+            (
+                "46.4.3",
+                include_str!("../fixtures/tiktok-publish/musically-46.4.3-en/comment-empty.xml"),
+                include_str!("../fixtures/tiktok-publish/musically-46.4.3-en/comment-typed.xml"),
+                include_str!("../fixtures/tiktok-publish/musically-46.4.3-en/comment-cleared.xml"),
+            ),
+            (
+                "46.0.41",
+                include_str!("../fixtures/tiktok-publish/musically-46.0.41-en/comment-empty.xml"),
+                include_str!("../fixtures/tiktok-publish/musically-46.0.41-en/comment-typed.xml"),
+                include_str!("../fixtures/tiktok-publish/musically-46.0.41-en/comment-cleared.xml"),
+            ),
+        ] {
+            let controls = super::controls_for("com.zhiliaoapp.musically", "en", version).unwrap();
+            let super::LabelMatch::ResourceId(id) =
+                controls.label(super::TikTokControl::CommentSend).unwrap()
+            else {
+                panic!("resource Send required");
+            };
+            for (xml, expected) in [(empty, false), (typed, true), (cleared, false)] {
+                let marker = format!("resource-id=\"com.zhiliaoapp.musically{id}\"");
+                let row = xml.lines().find(|line| line.contains(&marker)).unwrap();
+                assert!(
+                    row.contains(&format!("enabled=\"{expected}\"")),
+                    "{version}: {row}"
+                );
+            }
+        }
+    }
+
     use super::*;
 
     /// The Redmi Note 12's build, language and app version.
@@ -2731,9 +2934,15 @@ mod tests {
             ("com.zhiliaoapp.musically", "en", "46.2.1"),
         ];
         let measured_caption_rows = [
+            ("com.zhiliaoapp.musically", "45.4.3"),
+            ("com.zhiliaoapp.musically", "46.1.3"),
+            ("com.zhiliaoapp.musically", "46.4.3"),
+            ("com.zhiliaoapp.musically", "45.7.3"),
             ("com.ss.android.ugc.trill", "38.3.2"),
             ("com.zhiliaoapp.musically", "46.2.1"),
             ("com.zhiliaoapp.musically", "46.2.42"),
+            // 08/09/2026, remote ce011711c354be2005, q460-caption typed/return.
+            ("com.zhiliaoapp.musically", "46.0.41"),
         ];
         for set in TIKTOK_LABEL_SETS {
             let measured_trip =
@@ -3079,11 +3288,19 @@ mod tests {
                 set.package,
                 set.app_version
             );
-            // These are ids, not words, and an id that is not a `@`-reference means
-            // somebody pasted a translation into the wrong table.
+            // Resource IDs and unresolved Android string references are both measured
+            // locators. Translated words never belong in the version resource table.
             if let Some(send) = set.resource(TikTokControl::CommentSend) {
                 assert!(
-                    send.value().starts_with('@'),
+                    match send {
+                        LabelMatch::ResourceId(value) => value
+                            .strip_prefix(":id/")
+                            .is_some_and(|suffix| !suffix.is_empty()),
+                        LabelMatch::Exact(value) => value.strip_prefix('@').is_some_and(|id| !id
+                            .is_empty()
+                            && id.bytes().all(|b| b.is_ascii_digit())),
+                        _ => false,
+                    },
                     "{} {} CommentSend {:?} does not look like a resource reference",
                     set.package,
                     set.app_version,
@@ -3136,6 +3353,67 @@ mod tests {
 #[cfg(test)]
 mod provenance_tests {
     use super::*;
+
+    #[test]
+    fn measured_45_7_3_send_control_tracks_empty_typed_and_cleared_field() {
+        use quick_xml::{events::Event, Reader};
+        let labels = controls_for("com.zhiliaoapp.musically", "en", "45.7.3").unwrap();
+        assert_eq!(
+            labels.label(TikTokControl::CommentSend),
+            Some(LabelMatch::ResourceId(":id/cqf"))
+        );
+        for (xml, expected_enabled) in [
+            (
+                include_str!(
+                    "../fixtures/tiktok-publish/musically-45.7.3-en/28-comment-focused.xml"
+                ),
+                false,
+            ),
+            (
+                include_str!(
+                    "../fixtures/tiktok-publish/musically-45.7.3-en/29-comment-unsent.xml"
+                ),
+                true,
+            ),
+            (
+                include_str!(
+                    "../fixtures/tiktok-publish/musically-45.7.3-en/30-comment-cleared.xml"
+                ),
+                false,
+            ),
+        ] {
+            let mut reader = Reader::from_str(xml);
+            let mut matched = Vec::new();
+            loop {
+                match reader.read_event().unwrap() {
+                    Event::Start(node) | Event::Empty(node) => {
+                        let attrs = node
+                            .attributes()
+                            .map(|attr| {
+                                let attr = attr.unwrap();
+                                (
+                                    String::from_utf8(attr.key.0.to_vec()).unwrap(),
+                                    String::from_utf8(attr.value.to_vec()).unwrap(),
+                                )
+                            })
+                            .collect::<std::collections::HashMap<_, _>>();
+                        if attrs.get("resource-id").map(String::as_str)
+                            == Some("com.zhiliaoapp.musically:id/cqf")
+                        {
+                            matched.push(attrs.get("enabled").map(String::as_str) == Some("true"));
+                        }
+                    }
+                    Event::Eof => break,
+                    _ => {}
+                }
+            }
+            assert_eq!(matched, vec![expected_enabled]);
+        }
+        assert!(controls_for("com.zhiliaoapp.musically", "en", "45.7.4")
+            .unwrap()
+            .label(TikTokControl::CommentSend)
+            .is_none());
+    }
 
     /// The eleven phones that were being warned at. `trill/en` renders the Send button as
     /// text, so a missing resource set costs it nothing — and the line must not imply
@@ -3232,5 +3510,18 @@ mod provenance_tests {
             assert!(line.contains(package), "{line}");
             assert!(line.starts_with(package), "package comes first: {line}");
         }
+    }
+}
+
+#[cfg(test)]
+mod pinned_45_7_3_tests {
+    use super::*;
+    #[test]
+    fn pinned_row_is_excluded_before_the_fresh_post_budget() {
+        let labels = controls_for("com.zhiliaoapp.musically", "en", "45.7.3").unwrap();
+        assert_eq!(
+            labels.pinned_badge_id(),
+            Some(LabelMatch::ResourceId(":id/tv_top"))
+        );
     }
 }

@@ -1,0 +1,5 @@
+<hierarchy>
+  <android.widget.LinearLayout package="com.zhiliaoapp.musically" class="android.widget.LinearLayout" text="" resource-id="com.zhiliaoapp.musically:id/dvc" clickable="true" enabled="true" selected="false" bounds="[381,100][698,216]" displayed="true" />
+  <android.widget.TextView package="com.zhiliaoapp.musically" class="android.widget.TextView" text="Loading..." resource-id="com.zhiliaoapp.musically:id/tv_top_text" clickable="false" enabled="true" selected="false" bounds="[465,100][677,216]" displayed="true" />
+  <android.widget.ImageView package="com.zhiliaoapp.musically" class="android.widget.ImageView" text="" resource-id="com.zhiliaoapp.musically:id/bot" clickable="true" enabled="true" selected="false" bounds="[32,95][137,200]" displayed="true" />
+</hierarchy>

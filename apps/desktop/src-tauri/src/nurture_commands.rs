@@ -472,7 +472,7 @@ pub(crate) async fn preflight_comment_job(
     udids: &[String],
     settings: &NurtureSettings,
 ) -> CommentPreflight {
-    if settings.comment_prob == 0 {
+    if !settings.comment_enabled || settings.comment_prob == 0 {
         // Comments are off, so no phone needs an agent for them. Every device is eligible
         // and nothing is probed -- taking a lease per phone to answer a question nobody
         // asked would be its own way of blocking a start.
@@ -961,6 +961,28 @@ mod tests {
             .await
             .expect("stagger stop should be observed promptly")
             .expect("stagger waiter"));
+    }
+
+    #[tokio::test]
+    async fn disabled_comments_do_not_block_viewing_on_agent_comment_preflight() {
+        let driver = MockIosDriver::new();
+        let udid = "comment-disabled";
+        let mut status = driver.cached_agent_status(udid);
+        status.state = AgentState::RepairRequired;
+        driver.set_mock_agent_status(status);
+        let control = DeviceControlPlane::new(
+            Arc::new(driver),
+            Arc::new(DeviceWorkCoordinator::new()),
+            Arc::new(StreamBudgetManager::default()),
+        );
+        let settings = NurtureSettings {
+            comment_enabled: false,
+            comment_prob: 100,
+            ..Default::default()
+        };
+        let result = preflight_comment_job(&control, &[udid.to_string()], &settings).await;
+        assert_eq!(result.ready, vec![udid.to_string()]);
+        assert!(result.skipped.is_empty());
     }
 
     #[tokio::test]

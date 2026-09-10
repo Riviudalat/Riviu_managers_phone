@@ -136,20 +136,21 @@ pub async fn open_interaction_context(
     control: &DeviceControlPlane,
     udid: &str,
 ) -> Result<InteractionDevice, DeviceControlError> {
-    open_interaction_context_with_start(control, udid, false).await
+    open_interaction_context_with_start(control, udid, false, || false).await
 }
 
 pub async fn open_clean_interaction_context(
     control: &DeviceControlPlane,
     udid: &str,
 ) -> Result<InteractionDevice, DeviceControlError> {
-    open_interaction_context_with_start(control, udid, true).await
+    open_interaction_context_with_start(control, udid, true, || false).await
 }
 
 async fn open_interaction_context_with_start(
     control: &DeviceControlPlane,
     udid: &str,
     clean_start: bool,
+    cancelled: impl Fn() -> bool + Send,
 ) -> Result<InteractionDevice, DeviceControlError> {
     // Resolve before acquiring anything: a phone with no drivable TikTok build should
     // refuse without taking a lease or a capacity slot.
@@ -188,7 +189,11 @@ async fn open_interaction_context_with_start(
             }
         }
     };
-    let (exclusive, capacity) = control.reserve_ui_capacity(exclusive).await?;
+    let (exclusive, capacity) = control
+        .reserve_ui_capacity_until(exclusive, cancelled, || {
+            tracing::info!("interaction {udid}: Chờ lượt điều khiển")
+        })
+        .await?;
     let kind = if control.requires_fresh_text_session(udid) {
         InteractionSessionKind::FreshText
     } else {
@@ -2251,7 +2256,13 @@ async fn run_cohort(
                     }
                     chain_broken_at.unwrap_or(parent_ordinal)
                 });
-            let opened = match open_clean_interaction_context(&control, &prepared.actor_udid).await
+            let opened = match open_interaction_context_with_start(
+                &control,
+                &prepared.actor_udid,
+                true,
+                || campaign_is_cancelled(&db, &campaign_id).unwrap_or(true),
+            )
+            .await
             {
                 Ok(context) => context,
                 Err(error) => {

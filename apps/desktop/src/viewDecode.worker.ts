@@ -1,5 +1,7 @@
 import {
   annexBHasSps,
+  annexBDecoderConfig,
+  annexBHasNal,
   annexBIsSyncSample,
   codecCandidatesFromAnnexB,
   decoderBootstrapSequence,
@@ -12,8 +14,10 @@ import {
 } from "./viewProtocol";
 
 const ACCELS: VideoDecoderConfig["hardwareAcceleration"][] = [
-  "prefer-hardware",
+  // WebView2 152 / SM-G955F at 408x832: software p95 1.1ms, hardware 512.3ms
+  // on the same 16-swipe trace (10-device fleet, 10/09/2026). Retain the codec ladder.
   "prefer-software",
+  "prefer-hardware",
   "no-preference",
 ];
 
@@ -55,6 +59,7 @@ interface Surface {
   id: string;
   canvas: OffscreenCanvas;
   ctx: OffscreenCanvasRenderingContext2D;
+  lastPaintAt: number;
 }
 
 interface Slot {
@@ -103,15 +108,14 @@ interface Slot {
   /// `decodeUnsupported` cannot fire either. That is exactly the black overlay that survived
   /// two rounds of diagnosis.
   queueRefusals: number;
+  needsSync: boolean;
+  lastResyncAt: number;
+  resyncRequests: number;
+  lastFrame: VideoFrame | ImageBitmap | null;
+  paintTimer: ReturnType<typeof setTimeout> | null;
+  frameTimes: Map<number, number>;
+  latencies: number[];
 }
-
-/// Consecutive queue refusals after which the decoder is rebuilt.
-///
-/// 48 is ~2 s at 24 fps -- comfortably longer than a decoder briefly running behind (which
-/// is what the cap is for) and short enough that the operator sees a blip rather than a dead
-/// canvas. Rebuilding is cheap: close, wait for the next keyframe, which scrcpy emits every
-/// `i-frame-interval` (1 s here).
-const MAX_QUEUE_REFUSALS = 48;
 
 /// How often the worker reports what it received versus what it drew.
 const PAINT_BEAT_MS = 1000;
@@ -200,12 +204,13 @@ function diagReport(udid: string, note: string) {
 }
 
 const slots = new Map<string, Slot>();
+const arrivalTimes = new WeakMap<ViewEnvelope, number>();
 const pending = new Map<string, ViewEnvelope>();
 // `pending` deliberately keeps the newest IDR, but that packet commonly has no SPS/PPS.
 // Keep the most recent configuration packet separately so a canvas destroyed by page
 // navigation can build a fresh decoder without restarting the phone-side producer.
 const decoderBootstraps = new Map<string, ViewEnvelope>();
-const queued = new Map<string, ViewEnvelope>();
+const queued = new Map<string, ViewEnvelope[]>();
 const decoding = new Set<string>();
 
 function jpegCopy(bytes: Uint8Array): Uint8Array {
@@ -226,10 +231,43 @@ function paintSize(slot: Slot, width: number, height: number) {
   }
 }
 
-function drawFrame(slot: Slot, source: CanvasImageSource) {
+function paintLatest(slot: Slot) {
+  if (!slot.lastFrame) return;
+  const now = performance.now();
+  const overlayHere = slot.surfaces.some(surface => surface.id === "overlay");
+  const overlayOpen = [...slots.values()].some(entry => entry.surfaces.some(surface => surface.id === "overlay"));
+  let painted = false;
+  let nextIn = Infinity;
   for (const surface of slot.surfaces) {
-    surface.ctx.drawImage(source, 0, 0, surface.canvas.width, surface.canvas.height);
+    // Keep the tile attached so moving between surfaces never destroys the decoder.
+    if (surface.id === "tile" && overlayHere) continue;
+    const interval = surface.id === "tile" && overlayOpen ? 200 : 0;
+    const wait = surface.lastPaintAt + interval - now;
+    if (wait > 0) { nextIn = Math.min(nextIn, wait); continue; }
+    surface.ctx.drawImage(slot.lastFrame, 0, 0, surface.canvas.width, surface.canvas.height);
+    surface.lastPaintAt = now;
+    painted = true;
   }
+  if (painted) { notifyPainted(slot.udid, slot); beatPainted(slot); }
+  // Paint the newest retained frame even if motion stops before the next 5 FPS tick.
+  if (Number.isFinite(nextIn) && slot.paintTimer === null) {
+    slot.paintTimer = setTimeout(() => { slot.paintTimer = null; paintLatest(slot); }, Math.ceil(nextIn));
+  }
+}
+
+function drawFrame(slot: Slot, source: VideoFrame | ImageBitmap) {
+  slot.lastFrame?.close();
+  slot.lastFrame = source;
+  paintLatest(slot);
+}
+
+function requestResync(slot: Slot) {
+  slot.needsSync = true;
+  const now = performance.now();
+  if (slot.resyncRequests >= 3 || now - slot.lastResyncAt < 1000) return;
+  slot.resyncRequests += 1;
+  slot.lastResyncAt = now;
+  postMessage({ type: "requestKeyframe", udid: slot.udid });
 }
 
 function closeDecoder(slot: Slot) {
@@ -295,6 +333,7 @@ function emitBeat(udid: string, generation: number, frames: number) {
           genChanges: d.genChanges,
           lastCodec: d.lastCodec,
           lastCandidates: d.lastCandidates,
+          decodeLatencyP95Ms: (() => { const values = slots.get(udid)?.latencies.slice().sort((a, b) => a - b) ?? []; return values.length ? values[Math.ceil(values.length * 0.95) - 1] : null; })(),
         }
       : undefined,
   });
@@ -340,18 +379,22 @@ async function configureDecoder(slot: Slot, codec: string): Promise<VideoDecoder
   const Ctor = (self as unknown as { VideoDecoder?: typeof VideoDecoder }).VideoDecoder;
   if (!Ctor) return null;
 
+  const generation = slot.generation;
   const output = (frame: VideoFrame) => {
-    try {
+    if (slots.get(slot.udid) !== slot || slot.generation !== generation) { frame.close(); return; }
+    {
+      const receivedAt = slot.frameTimes.get(frame.timestamp);
+      slot.frameTimes.delete(frame.timestamp);
+      if (receivedAt !== undefined) {
+        slot.latencies.push(performance.now() - receivedAt);
+        if (slot.latencies.length > 120) slot.latencies.shift();
+      }
       const width = frame.displayWidth || frame.codedWidth;
       const height = frame.displayHeight || frame.codedHeight;
       paintSize(slot, width, height);
       drawFrame(slot, frame);
-      notifyPainted(slot.udid, slot);
-      beatPainted(slot);
       slot.outputsSinceConfigure += 1;
       if (DIAG) diagFor(slot.udid).output += 1;
-    } finally {
-      frame.close();
     }
   };
 
@@ -426,6 +469,8 @@ async function handleH264(slot: Slot, envelope: ViewEnvelope) {
     slot.accelIndex = 0;
     slot.codecIndex = 0;
     slot.codecCandidates = [];
+    slot.needsSync = false;
+    slot.resyncRequests = 0;
   }
   paintSize(slot, envelope.width, envelope.height);
   const isSync = annexBIsSyncSample(envelope.payload, envelope.key);
@@ -434,35 +479,31 @@ async function handleH264(slot: Slot, envelope: ViewEnvelope) {
     d.lastGeneration = slot.generation;
     if (isSync) d.keys += 1;
   }
-  if (!shouldDecodeH264Sample(Boolean(slot.decoder), slot.decoder?.decodeQueueSize ?? 0, isSync)) {
-    if (!slot.decoder) {
-      // Waiting for a keyframe to build a decoder with. Normal and self-clearing.
-      if (DIAG) {
-        diagFor(slot.udid).refusedNoDecoder += 1;
-        diagReport(slot.udid, "no decoder yet");
-      }
+  if (!slot.decoder && isSync && !annexBHasSps(envelope.payload) && decoderBootstraps.get(slot.udid)?.generation !== envelope.generation) {
+    requestResync(slot);
+    return;
+  }
+  if (slot.needsSync) {
+    // An SPS alone is configuration, not the IDR that restores the reference chain.
+    if (!annexBHasNal(envelope.payload, 5)) {
+      if (DIAG) diagFor(slot.udid).refusedNotSync += 1;
+      if (annexBHasSps(envelope.payload)) slot.codecCandidates = codecCandidatesFromAnnexB(envelope.payload);
+      requestResync(slot);
       return;
     }
-    // A decoder exists and its queue is over the cap. Brief is normal; permanent is the
-    // trap, because the refusal also blocks the keyframes that would fix it.
-    slot.queueRefusals += 1;
-    if (DIAG) {
-      diagFor(slot.udid).refusedQueue += 1;
-      diagReport(slot.udid, `queue=${slot.decoder.decodeQueueSize} refusals=${slot.queueRefusals}`);
-    }
-    if (slot.queueRefusals < MAX_QUEUE_REFUSALS) return;
-    // Break out. Closing sets slot.decoder to null, so the next sync sample rebuilds from
-    // scratch instead of feeding a decoder that has stopped producing output.
-    console.warn(
-      `view decoder for ${slot.udid} stopped draining (${slot.queueRefusals} refusals); rebuilding`,
-    );
     closeDecoder(slot);
-    slot.queueRefusals = 0;
-    slot.accelIndex = 0;
-    slot.codecIndex = 0;
-    if (!isSync) return;
-  } else {
-    slot.queueRefusals = 0;
+    slot.needsSync = false;
+    slot.resyncRequests = 0;
+  }
+  if (!shouldDecodeH264Sample(Boolean(slot.decoder), slot.decoder?.decodeQueueSize ?? 0, isSync)) {
+    if (!slot.decoder) {
+      if (DIAG) diagFor(slot.udid).refusedNoDecoder += 1;
+      return;
+    }
+    if (DIAG) diagFor(slot.udid).refusedQueue += 1;
+    closeDecoder(slot);
+    requestResync(slot);
+    return;
   }
   if (
     slot.decoder &&
@@ -565,11 +606,22 @@ async function handleH264(slot: Slot, envelope: ViewEnvelope) {
     diagReport(slot.udid, `queue=${slot.decoder.decodeQueueSize}`);
   }
   slot.feedsSinceConfigure += 1;
+  const bootstrap = decoderBootstraps.get(slot.udid);
+  let payload = envelope.payload;
+  if (isSync && !annexBHasSps(payload) && bootstrap?.generation === envelope.generation) {
+    const config = annexBDecoderConfig(bootstrap.payload);
+    const prefixed = new Uint8Array(config.length + payload.length);
+    prefixed.set(config);
+    prefixed.set(payload, config.length);
+    payload = prefixed;
+  }
+  slot.frameTimes.set(slot.timestamp, arrivalTimes.get(envelope) ?? performance.now());
+  if (slot.frameTimes.size > 64) slot.frameTimes.delete(slot.frameTimes.keys().next().value!);
   slot.decoder.decode(
     new Chunk({
-      type: envelope.key ? "key" : "delta",
+      type: isSync ? "key" : "delta",
       timestamp: slot.timestamp,
-      data: jpegCopy(envelope.payload),
+      data: jpegCopy(payload),
     }),
   );
 }
@@ -579,14 +631,9 @@ async function handleJpeg(udid: string, slot: Slot, envelope: NonNullable<Return
   jpeg.set(envelope.payload);
   const blob = new Blob([jpeg], { type: "image/jpeg" });
   const bitmap = await createImageBitmap(blob);
-  try {
-    paintSize(slot, envelope.width || bitmap.width, envelope.height || bitmap.height);
-    drawFrame(slot, bitmap);
-    notifyPainted(udid, slot);
-    beatPainted(slot);
-  } finally {
-    bitmap.close();
-  }
+  if (slots.get(udid) !== slot) { bitmap.close(); return; }
+  paintSize(slot, envelope.width || bitmap.width, envelope.height || bitmap.height);
+  drawFrame(slot, bitmap);
 }
 
 self.onmessage = (event: MessageEvent<InMessage>) => {
@@ -613,19 +660,27 @@ self.onmessage = (event: MessageEvent<InMessage>) => {
       lastBeatAt: 0,
       lastBeatFrames: 0,
       queueRefusals: 0,
+      needsSync: false,
+      lastResyncAt: -Infinity,
+      resyncRequests: 0,
+      lastFrame: null,
+      paintTimer: null,
+      frameTimes: new Map(),
+      latencies: [],
       lastNotifiedW: 0,
       lastNotifiedH: 0,
       lastNotifiedGen: -1,
     };
     slot.surfaces = slot.surfaces.filter((surface) => surface.id !== message.surfaceId);
-    slot.surfaces.push({ id: message.surfaceId, canvas: message.canvas, ctx });
+    slot.surfaces.push({ id: message.surfaceId, canvas: message.canvas, ctx, lastPaintAt: -Infinity });
     if (slot.width > 0 && slot.height > 0) {
       message.canvas.width = slot.width;
       message.canvas.height = slot.height;
     }
     slots.set(message.udid, slot);
     const held = pending.get(message.udid);
-    if (held) {
+    if (slot.lastFrame) paintLatest(slot);
+    if (held && !slot.decoder) {
       if (held.kind === "h264") {
         for (const packet of decoderBootstrapSequence(
           held,
@@ -649,14 +704,20 @@ self.onmessage = (event: MessageEvent<InMessage>) => {
     slot.surfaces = slot.surfaces.filter((surface) => surface.id !== message.surfaceId);
     if (slot.surfaces.length === 0) {
       closeDecoder(slot);
+      slot.lastFrame?.close();
+      if (slot.paintTimer !== null) clearTimeout(slot.paintTimer);
+      queued.delete(message.udid);
       slots.delete(message.udid);
+    } else {
+      for (const surface of slot.surfaces) surface.lastPaintAt = -Infinity;
+      paintLatest(slot);
     }
     return;
   }
   if (message.type === "export") {
     const slot = slots.get(message.udid);
     const requestId = message.requestId;
-    const canvas = slot?.surfaces[0]?.canvas;
+    const canvas = (slot?.surfaces.find(surface => surface.id === "overlay") ?? slot?.surfaces[0])?.canvas;
     if (!slot || !canvas || typeof canvas.convertToBlob !== "function") {
       postMessage({ type: "exportResult", requestId, bytes: null });
       return;
@@ -687,6 +748,7 @@ self.onmessage = (event: MessageEvent<InMessage>) => {
   } else {
     decoderBootstraps.delete(envelope.udid);
   }
+  arrivalTimes.set(envelope, performance.now());
   beatArrival(envelope.udid);
   const previous = pending.get(envelope.udid);
   if (previous && previous.generation !== envelope.generation) {
@@ -711,15 +773,22 @@ self.onmessage = (event: MessageEvent<InMessage>) => {
 };
 
 function pumpH264(slot: Slot, envelope: ViewEnvelope) {
-  queued.set(slot.udid, envelope);
+  const waiting = queued.get(slot.udid) ?? [];
+  if (waiting.length >= 16) {
+    waiting.length = 0;
+    requestResync(slot);
+  }
+  waiting.push(envelope);
+  queued.set(slot.udid, waiting);
   if (decoding.has(slot.udid)) return;
   decoding.add(slot.udid);
   void (async () => {
     try {
       while (queued.has(slot.udid)) {
-        const next = queued.get(slot.udid);
-        queued.delete(slot.udid);
-        if (next) await handleH264(slot, next);
+        const packets = queued.get(slot.udid)!;
+        const next = packets.shift();
+        if (!packets.length) queued.delete(slot.udid);
+        if (next && slots.get(slot.udid) === slot) await handleH264(slot, next);
       }
     } finally {
       decoding.delete(slot.udid);

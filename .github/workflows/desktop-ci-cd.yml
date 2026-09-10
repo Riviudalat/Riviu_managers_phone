@@ -129,6 +129,9 @@ jobs:
         shell: pwsh
         run: python scripts/collect_desktop_ci_artifacts.py verify-android-tools
 
+      - name: Verify Sheet delivery transaction and layout
+        run: node --test scripts/test_publish_sheet.mjs
+
       - name: Verify release tag matches application version
         if: startsWith(github.ref, 'refs/tags/v')
         shell: pwsh
@@ -138,10 +141,10 @@ jobs:
         run: cargo fmt --all -- --check
 
       - name: Lint Rust
-        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+        run: cargo clippy --workspace --all-targets --features riviu-managers-phone/diagnostics,riviu-managers-phone/deployment-check --locked -- -D warnings
 
       - name: Test Rust workspace
-        run: cargo test --workspace --locked -- --test-threads=1
+        run: cargo test --workspace --features riviu-managers-phone/diagnostics,riviu-managers-phone/deployment-check --locked -- --test-threads=1
 
       - name: Lint frontend
         working-directory: apps/desktop
@@ -377,7 +380,7 @@ jobs:
           cargo build --release --locked \
             --target "${{ matrix.target }}" \
             -p riviu-managers-phone \
-            --bin riviu-deployment-check
+            --bin riviu-deployment-check --features deployment-check
           if [ "${{ runner.os }}" = "Windows" ]; then
             checker="target/${{ matrix.target }}/release/riviu-deployment-check.exe"
           else

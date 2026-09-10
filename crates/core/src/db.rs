@@ -23,13 +23,19 @@ mod operation_log;
 mod orchestration;
 mod public_cleanup;
 mod publish;
+mod publish_cleanup;
+mod publish_report;
 mod publish_sheet;
+mod publish_verification;
 
 pub use flow_runs::{AttemptTransitionPatch, FlowStateConflict};
 pub(crate) use flow_runs::{FlowAttemptExecutionContext, FlowRecoveryRunContext};
 pub use nurture::NurtureRunHistory;
 pub use publish::{PublishRunOutcome, PublishTransferSettle};
+pub use publish_cleanup::PendingPublishCleanup;
+pub use publish_report::InternalPublishReportPage;
 pub use publish_sheet::{SheetOutboxRow, SheetOutboxSettlement, SheetOutboxState};
+pub use publish_verification::{publish_campaign_input_digest, PendingPublishVerification};
 
 /// Somewhere to keep a secret that is **not** the SQLite file.
 ///

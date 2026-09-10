@@ -141,33 +141,8 @@
 .is-docked .target-selector-explicit {
   grid-column: auto;
 }
-.automation-scope {
-  min-width: 0;
-}
-.automation-scope > summary[hidden] {
-  display: none;
-}
-.automation-scope.is-collapsible {
-  flex: none;
-  border-bottom: 1px solid var(--line);
-}
-.automation-scope.is-collapsible > summary {
-  padding: 8px;
-  color: var(--text-2);
-  cursor: pointer;
-}
-.automation-scope.is-collapsible > summary strong {
-  margin-left: 12px;
-  color: var(--text-1);
-}
-.automation-scope.is-collapsible[open] > summary {
-  margin-bottom: 8px;
-}
 .is-docked :is(.nurture-workspace, .interaction-workspace, .publish-page) {
   flex: 1 0 520px;
-}
-.is-docked .publish-workspace-aside {
-  position: static;
 }
 .is-docked .nu-feature-ranged {
   grid-template-columns: auto minmax(80px, 1fr) minmax(80px, 1fr) 60px;

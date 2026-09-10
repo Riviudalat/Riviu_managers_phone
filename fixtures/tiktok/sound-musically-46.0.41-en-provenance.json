@@ -1,0 +1,41 @@
+{
+  "package": "com.zhiliaoapp.musically",
+  "versionName": "46.0.41",
+  "versionCode": "2024600410",
+  "locale": "en-US",
+  "serial": "ce011711c354be2005",
+  "measuredDate": "2026-09-08",
+  "scope": "Pre-Post sound navigation only. Relevant nodes extracted; original text including capture mojibake preserved. No public Post certification.",
+  "selection": "Hot selected, Sure Thing (Live) selected at index 1, nrm marker, Back restores editor exact title.",
+  "postBack": "bmy returns from caption to editor; parent verified caption retained after Next.",
+  "fixtures": [
+    {
+      "stage": "sound",
+      "source": "target/remote-publish-192.168.1.43/q460-sound.xml",
+      "sourceSha256": "43dabbb358b59f0b1fad32a68cef0ad2d9819e8745e85d99b16050deafface9f",
+      "fixture": "sound-musically-46.0.41-en-sound.xml",
+      "fixtureSha256": "f1f49bbd56f4e03bbc0662ab25a1d5e022cbca9440e50a079b23084cb4f2322e"
+    },
+    {
+      "stage": "hot",
+      "source": "target/remote-publish-192.168.1.43/q460-hot.xml",
+      "sourceSha256": "fa4df40ed0f6035ae7fbd7d9382f392a8e09c746f46de6db1e912cad7a94fddb",
+      "fixture": "sound-musically-46.0.41-en-hot.xml",
+      "fixtureSha256": "fdc320cfd631dcb765085e247fe73f4e6ce6fd6fbfa782f63cde45178c0ac15b"
+    },
+    {
+      "stage": "selected-sound",
+      "source": "target/remote-publish-192.168.1.43/q460-selected-sound.xml",
+      "sourceSha256": "4b159b53798c94d878feb9688cf6e33638cdc899ab35108546c00a0a0b23aca9",
+      "fixture": "sound-musically-46.0.41-en-selected-sound.xml",
+      "fixtureSha256": "872db13f45267f8c1ad47b2c4201be1e6a9bcd1796e7864ba76b0481613fa6c0"
+    },
+    {
+      "stage": "readback",
+      "source": "target/remote-publish-192.168.1.43/q460-readback.xml",
+      "sourceSha256": "f04f30bc99d990eda831fc96d81193023321dc6dd0d843b30fab6bb65238b04c",
+      "fixture": "sound-musically-46.0.41-en-readback.xml",
+      "fixtureSha256": "873c9e89edf3fa1512363b9cf7f8a29171845a60106ac9188aebda0a536a689b"
+    }
+  ]
+}

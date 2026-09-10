@@ -345,7 +345,7 @@ export function InteractionMonitorTab({
   }
 
   return (
-    <div className={`interaction-body${masterDetail ? " interaction-monitor-master" : ""}`}>
+    <div className={`interaction-body${masterDetail ? " interaction-monitor-master iw-monitor" : ""}`}>
       <section className="interaction-monitor-list" aria-label="Danh sách chiến dịch">
       <div className="interaction-monitor-head">
         <strong>Chiến dịch gần đây</strong>
@@ -466,6 +466,7 @@ export function InteractionMonitorTab({
         <aside className="interaction-monitor-detail" aria-label="Chi tiết chiến dịch">
           {openCampaignId && detail?.summary.id === openCampaignId ? (
             <InteractionCampaignDetailView
+              compact
               key={detail.summary.id}
               detail={detail}
               artifacts={artifacts}

@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -28,7 +29,7 @@ const DEFAULT_STREAM_LIMIT: usize = 1;
 /// history in this project, and nothing here has been measured at that scale on that
 /// transport. What protects an iOS desktop is the *default*, which is still one per
 /// `Default` and is sized from the connected fleet by the desktop — not this ceiling.
-const MAXIMUM_STREAM_LIMIT: usize = 32;
+pub const MAXIMUM_STREAM_LIMIT: usize = 32;
 const BACKGROUND_TURN_TIMEOUT: Duration = Duration::from_secs(5);
 const BACKGROUND_FAILURE_BACKOFF: Duration = Duration::from_secs(30);
 
@@ -127,7 +128,7 @@ impl StreamStopProof {
 #[derive(Clone)]
 pub struct StreamBudgetManager {
     inner: Arc<Mutex<BudgetState>>,
-    configured_limit: usize,
+    configured_limit: Arc<AtomicUsize>,
     turn_timeout: Duration,
     failure_backoff: Duration,
     /// Where "now" comes from. Production is `Instant::now`; tests may hand in a closure
@@ -166,7 +167,7 @@ impl StreamBudgetManager {
         }
         Ok(Self {
             inner: Arc::new(Mutex::new(BudgetState::default())),
-            configured_limit,
+            configured_limit: Arc::new(AtomicUsize::new(configured_limit)),
             turn_timeout: BACKGROUND_TURN_TIMEOUT,
             failure_backoff: BACKGROUND_FAILURE_BACKOFF,
             clock,
@@ -178,7 +179,13 @@ impl StreamBudgetManager {
     }
 
     pub fn configured_limit(&self) -> usize {
+        self.configured_limit.load(Ordering::Acquire)
+    }
+
+    /// Auto sizing only grows: disconnects never revoke a running foreground session.
+    pub fn grow_to_fleet(&self, fleet_size: usize) {
         self.configured_limit
+            .fetch_max(fleet_size.clamp(1, MAXIMUM_STREAM_LIMIT), Ordering::AcqRel);
     }
 
     pub fn turn_timeout(&self) -> Duration {
@@ -232,9 +239,9 @@ impl StreamBudgetManager {
                 state: record.state.name(),
             });
         }
-        if state.reserved_capacity() >= self.configured_limit {
+        if state.reserved_capacity() >= self.configured_limit() {
             return Err(StreamBudgetError::CapacityExhausted {
-                limit: self.configured_limit,
+                limit: self.configured_limit(),
             });
         }
 
@@ -328,15 +335,15 @@ impl StreamBudgetManager {
         });
         let victim_token = if target_background.is_some() {
             target_background
-        } else if state.reserved_capacity() >= self.configured_limit {
+        } else if state.reserved_capacity() >= self.configured_limit() {
             state.oldest_background_token()
         } else {
             None
         };
 
-        if victim_token.is_none() && state.reserved_capacity() >= self.configured_limit {
+        if victim_token.is_none() && state.reserved_capacity() >= self.configured_limit() {
             return Err(StreamBudgetError::CapacityExhausted {
-                limit: self.configured_limit,
+                limit: self.configured_limit(),
             });
         }
 
@@ -413,7 +420,7 @@ impl StreamBudgetManager {
             }
         }
 
-        if state.reserved_capacity() < self.configured_limit {
+        if state.reserved_capacity() < self.configured_limit() {
             return Ok(None);
         }
         let victim = state
@@ -422,7 +429,7 @@ impl StreamBudgetManager {
             .map(|record| record.udid.clone());
         victim
             .ok_or(StreamBudgetError::CapacityExhausted {
-                limit: self.configured_limit,
+                limit: self.configured_limit(),
             })
             .map(Some)
     }
@@ -672,7 +679,7 @@ impl StreamBudgetManager {
             .filter(|record| record.state.occupies_capacity())
             .collect();
         StreamBudgetInvariantSnapshot {
-            configured_limit: self.configured_limit,
+            configured_limit: self.configured_limit(),
             reserved_capacity: active.len(),
             running_producers: active
                 .iter()

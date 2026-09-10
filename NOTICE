@@ -316,7 +316,18 @@ Windows installers also carry two build-time-downloaded, byte-pinned tools:
 
 CI downloads both release artifacts, verifies size and SHA-256 before any
 extraction, and generates `android-package-tools-manifest.json` over the entire
-installed tree. The canonical 316-file extracted-tree SHA-256 is
+installed tree. The canonical 316-file upstream extracted-tree SHA-256 is
 `f24951701beb69fe74ef073196c249d6df153749722f82260d79fc6687a7d57f`.
+Riviu then modifies only `jre/bin/java.exe`'s application manifest to declare
+`activeCodePage=UTF-8`, so Windows profile/install paths containing Vietnamese
+characters work. The transform is in `scripts/resources/java-utf8.manifest` and
+`scripts/stage_android_package_tools.py`; executable code is unchanged. Microsoft
+SDK `mt.exe` removes the upstream launcher Authenticode signature while updating
+this resource. The transformed launcher is identified by SHA-256
+`8c5e289a71c6c071cf208b48a7811d2dad88f945447a7d5023ecec2c308ce354`;
+the complete transformed 316-file tree is
+`de003f9f8b872ba8a9e2bb57d0539e04c0c7116e409619ded42941aaf85a3762`.
+The manifest records both upstream and transformed hashes. This process-local
+UTF-8 setting requires Windows 10 1903 (build 18362) or newer.
 Bundletool is used only to select/extract device-compatible APKs
 from an existing `.apks` archive; Riviu's own control plane performs installation.

@@ -21,6 +21,7 @@ use crate::adb::{self, AdbDeviceState, AdbProgram};
 use crate::agent::AgentClient;
 use crate::frames;
 use crate::session::AndroidUiSession;
+mod transport;
 
 /// Package names of the agent halves, as published by Appium.
 const AGENT_PACKAGE: &str = "io.appium.uiautomator2.server";
@@ -770,6 +771,23 @@ fn complete_tiktok_package_listing(
         failures.join("; ")
     );
     Ok(listing)
+}
+
+fn select_foreground_tiktok_package(
+    udid: &str,
+    installed: &[String],
+    foreground: anyhow::Result<String>,
+) -> anyhow::Result<String> {
+    let refusal = || {
+        format!(
+            "{udid}: more than one measured TikTok build is installed ({}), and none \
+             of them is in the foreground to break the tie",
+            installed.join(", ")
+        )
+    };
+    let package = foreground.with_context(refusal)?;
+    anyhow::ensure!(installed.contains(&package), "{}", refusal());
+    Ok(package)
 }
 
 pub struct AndroidDriver {
@@ -1800,6 +1818,10 @@ impl DeviceDriver for AndroidDriver {
         Ok(status)
     }
 
+    async fn verify_automation_transport(&self, udid: &str) -> anyhow::Result<()> {
+        self.verify_adb_transport(udid).await
+    }
+
     /// Repair is the same operation as preflight here, and that is not a shortcut.
     ///
     /// `ensure_agent` installs both APK halves when they are missing and restarts the
@@ -2140,21 +2162,11 @@ impl DeviceDriver for AndroidDriver {
                 // Read through adb rather than opening a session: resolving a package
                 // must not have the side effect of creating one, and `mCurrentFocus`
                 // needs no agent.
-                let foreground = self
-                    .adb
-                    .shell(udid, "dumpsys window displays | grep mCurrentFocus")
-                    .await
-                    .ok()
-                    .as_deref()
-                    .and_then(adb::parse_current_focus_package);
-                match foreground.filter(|package| found.contains(package)) {
-                    Some(package) => package,
-                    None => anyhow::bail!(
-                        "{udid}: more than one measured TikTok build is installed ({}), and none \
-                         of them is in the foreground to break the tie",
-                        found.join(", ")
-                    ),
-                }
+                select_foreground_tiktok_package(
+                    udid,
+                    &found,
+                    self.adb.foreground_package(udid).await,
+                )?
             }
             Err(error) => {
                 return Err(anyhow!("{udid}: {error}"));
@@ -2536,6 +2548,97 @@ pub async fn detect_driver(config: &AndroidDriverConfig) -> Result<Arc<AndroidDr
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn dual_package_foreground_probe_handles_plain_windows_and_displays() {
+        let installed = vec![
+            "com.ss.android.ugc.trill".to_string(),
+            "com.zhiliaoapp.musically".to_string(),
+        ];
+        for source_index in 0..3 {
+            let mut visited = Vec::new();
+            let expected = &installed[source_index % 2];
+            let foreground = adb::read_foreground_package_with(|source| {
+                let index = visited.len();
+                visited.push(source);
+                let result = if index == source_index {
+                    Ok(format!(
+                        "mCurrentFocus=Window{{a u0 {expected}/MainActivity}}"
+                    ))
+                } else if index == 0 {
+                    Err(anyhow!("unavailable dumpsys form"))
+                } else {
+                    Ok("mCurrentFocus=null".into())
+                };
+                std::future::ready(result)
+            })
+            .await;
+            assert_eq!(
+                select_foreground_tiktok_package("fixture", &installed, foreground).unwrap(),
+                *expected
+            );
+            assert_eq!(visited.len(), source_index + 1);
+            assert_eq!(visited[0], "dumpsys window | grep mCurrentFocus");
+            if source_index >= 1 {
+                assert_eq!(visited[1], "dumpsys window windows | grep mCurrentFocus");
+            }
+            if source_index == 2 {
+                assert_eq!(visited[2], "dumpsys window displays | grep mCurrentFocus");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn dual_package_foreground_probe_keeps_unknown_system_and_foreign_apps_ambiguous() {
+        let installed = vec![
+            "com.ss.android.ugc.trill".to_string(),
+            "com.zhiliaoapp.musically".to_string(),
+        ];
+        for output in [
+            "",
+            "mCurrentFocus=null",
+            "mCurrentFocus=Window{a u0 StatusBar}",
+            "mCurrentFocus=Window{a u0 com.android.chrome/MainActivity}",
+        ] {
+            let mut calls = 0;
+            let foreground = adb::read_foreground_package_with(|_| {
+                calls += 1;
+                std::future::ready(Ok(output.into()))
+            })
+            .await;
+            let error =
+                select_foreground_tiktok_package("fixture", &installed, foreground).unwrap_err();
+            assert!(error
+                .to_string()
+                .contains("more than one measured TikTok build"));
+            assert_eq!(calls, if output.contains("chrome") { 1 } else { 3 });
+        }
+        // A package outside the observed installed set is never a tie-breaker.
+        assert!(select_foreground_tiktok_package(
+            "fixture",
+            &installed[..1],
+            Ok(installed[1].clone()),
+        )
+        .is_err());
+    }
+
+    #[tokio::test]
+    async fn dual_package_foreground_probe_preserves_transport_failure_details() {
+        let installed = vec![
+            "com.ss.android.ugc.trill".to_string(),
+            "com.zhiliaoapp.musically".to_string(),
+        ];
+        let mut calls = 0;
+        let foreground = adb::read_foreground_package_with(|_| {
+            calls += 1;
+            std::future::ready(Err(anyhow!("device offline")))
+        })
+        .await;
+        let error =
+            select_foreground_tiktok_package("fixture", &installed, foreground).unwrap_err();
+        assert!(format!("{error:#}").contains("device offline"));
+        assert_eq!(calls, 3);
+    }
 
     fn package_reading(stdout: &str, stderr: &str, exit_code: i32) -> adb::ShellOutput {
         adb::ShellOutput {
@@ -3309,6 +3412,21 @@ mod tests {
             .expect("a session without a recorded handoff must be refused");
 
         assert!(error.to_string().contains("stop_owned_stream"), "{error}");
+    }
+
+    #[test]
+    fn a_pending_desktop_permit_does_not_lose_overlay_intent() {
+        let driver = AndroidDriver::new(&AndroidDriverConfig::default()).expect("driver");
+        driver.request_view_preset("waiting", crate::scrcpy::ViewPreset::Overlay);
+        assert_eq!(
+            driver.desired_view_preset("waiting"),
+            crate::scrcpy::ViewPreset::Overlay
+        );
+        driver.request_view_preset("waiting", crate::scrcpy::ViewPreset::Tile);
+        assert_eq!(
+            driver.desired_view_preset("waiting"),
+            crate::scrcpy::ViewPreset::Tile
+        );
     }
 
     #[tokio::test]

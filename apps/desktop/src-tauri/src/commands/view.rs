@@ -284,12 +284,16 @@ pub async fn view_set_preset(
     // A refusal here is not the end of it. The keeper reconciles toward
     // `desired_view_preset` on its own tick, which is what makes this safe to refuse at all;
     // `set_view_preset` records the desire before it does any work.
+    android.request_view_preset(&udid, preset);
     let frames = state
         .view_paint
         .sample(&udid)
         .map(|report| report.frames)
         .unwrap_or(0);
     let permit = state.view_recovery.admit_operator(&udid, frames).await?;
+    if android.desired_view_preset(&udid) != preset {
+        return Ok(()); // A newer open/close/switch won while this call waited for a permit.
+    }
     let outcome = android
         .set_view_preset(&udid, preset)
         .await

@@ -144,6 +144,10 @@ export function FocusStream({
     live: LiveDragGroup | null;
   } | null>(null);
   const inFlight = useRef(false);
+  const [actionPending, setActionPending] = useState(false);
+  const [controlState, setControlState] = useState<{ key: string; ready: string[]; errors: Record<string, string> }>({ key: "", ready: [], errors: {} });
+  const [controlRetry, setControlRetry] = useState(0);
+  const controlTransitions = useRef(new Map<string, Promise<void>>());
   /// Devices whose overlay control session (`deviceControlBegin`) has finished opening.
   ///
   /// A gesture fired before this — the reflex scroll during a slow open on a phone whose
@@ -157,6 +161,9 @@ export function FocusStream({
   const targets =
     groupMode && groupUdids.length > 1 ? groupUdids : [device.udid];
   const targetKey = targets.join("\0");
+  const sessionReady = controlState.key === targetKey && controlState.ready.length === targets.length;
+  const controlErrors = controlState.key === targetKey ? Object.values(controlState.errors) : [];
+  const keyDisabled = busy || actionPending || !sessionReady;
   const isIos = device.platform === "ios";
 
   /// Report a group action that did not reach every phone.
@@ -237,22 +244,42 @@ export function FocusStream({
   /// it, which is why it could not be dismissed as unlikely.
   useEffect(() => {
     const udids = targetKey.split("\0").filter(Boolean);
+    const transitions = controlTransitions.current;
     let cancelled = false;
     // Control is reopening for a new target set; nothing is ready until each begin lands.
     controlReady.current = new Set();
+    setControlState({ key: targetKey, ready: [], errors: {} });
     // One promise per device, kept so the cleanup queues behind the right one rather than
     // behind all of them: a slow phone must not delay releasing a fast one.
     const opening = new Map(
-      udids.map((udid) => [udid, deviceControlBegin(udid)] as const),
+      udids.map((udid) => [udid, (async () => {
+        const previous = transitions.get(udid);
+        if (previous) await previous.catch(() => undefined);
+        if (cancelled) return;
+        for (let attempt = 0; ; attempt += 1) {
+          if (cancelled) return;
+          try { await deviceControlBegin(udid); return; }
+          catch (error) {
+            // IdleSweep is a short background owner, not a user job to interrupt.
+            if (cancelled || attempt >= 19 || !/DeviceBusy.*IdleSweep/.test(describeError(error))) throw error;
+            await new Promise(resolve => setTimeout(resolve, 500));
+          }
+        }
+      })()] as const),
     );
     for (const [udid, begin] of opening) {
       void begin
         .then(() => {
           // Registered now, so `with_manual_session` will reuse it — gestures may fire.
-          if (!cancelled) controlReady.current.add(udid);
+          if (!cancelled) {
+            controlReady.current.add(udid);
+            setControlState(current => ({ ...current, ready: [...controlReady.current] }));
+          }
         })
         .catch((error) => {
-          if (!cancelled) toastError("Không mở được điều khiển", error);
+          if (!cancelled) {
+            setControlState(current => ({ ...current, errors: { ...current.errors, [udid]: describeError(error) } }));
+          }
         });
     }
     return () => {
@@ -260,21 +287,24 @@ export function FocusStream({
       for (const [udid, begin] of opening) {
         // `.catch` before `.then`, so a device whose begin rejected is still asked to
         // close: the failure may have come after the session was created.
-        void begin
-          .catch(() => undefined)
-          .then(() => deviceControlEnd(udid))
-          .catch(() => undefined);
+        const release = begin.catch(() => undefined).then(() => deviceControlEnd(udid)).catch(() => undefined);
+        transitions.set(udid, release);
       }
     };
-  }, [targetKey]);
+  }, [targetKey, controlRetry]);
 
   const runExclusive = async (work: () => Promise<void>) => {
-    if (inFlight.current) return;
+    if (inFlight.current) {
+      pushToast("warn", "Máy đang xử lý thao tác trước", "Chờ thao tác hoàn tất rồi bấm lại.");
+      return;
+    }
     inFlight.current = true;
+    setActionPending(true);
     try {
       await work();
     } finally {
       inFlight.current = false;
+      setActionPending(false);
     }
   };
 
@@ -319,36 +349,37 @@ export function FocusStream({
   useEffect(() => {
     const screen = screenRef.current;
     if (!screen) return;
+    let pendingTicks = 0;
+    let sending = false;
+    let disposed = false;
+    const drain = async () => {
+      if (sending || disposed || inFlight.current || !pendingTicks) return;
+      sending = true;
+      try {
+        while (pendingTicks && !disposed) {
+          const ticks = pendingTicks;
+          pendingTicks = 0;
+          const x = encodedW / 2, startY = encodedH * 0.55;
+          await runExclusive(() => deviceSwipe(device.udid, x, startY, x,
+            Math.max(0, Math.min(encodedH - 1, startY - ticks * encodedH * 0.18)), encodedW, encodedH, 160));
+        }
+      } catch (error) { pendingTicks = 0; toastError("Không cuộn được", error); }
+      finally { sending = false; }
+    };
     const onWheel = (event: WheelEvent) => {
+      event.preventDefault();
       if (wheelWantsZoom(event)) {
-        event.preventDefault();
-        setFrameWidth((width) => stepZoom(FOCUS_ZOOM, width, event.deltaY));
+        setFrameWidth(width => stepZoom(FOCUS_ZOOM, width, event.deltaY));
         return;
       }
-      if (!encodedW || !encodedH || inFlight.current) return;
-      event.preventDefault();
-      // Control is still opening — silently drop this tick rather than race the lease its
-      // own begin holds. Wheel ticks are plentiful; the operator loses nothing and gets no
-      // error toast, and the scroll works the moment control is up.
-      if (!controlReady.current.has(device.udid)) return;
-      const x = encodedW / 2;
-      const startY = encodedH * 0.55;
-      const endY = startY - Math.sign(event.deltaY) * encodedH * 0.18;
-      void runExclusive(async () => {
-        await deviceSwipe(
-          device.udid,
-          x,
-          startY,
-          x,
-          endY,
-          encodedW,
-          encodedH,
-          160,
-        );
-      }).catch((error) => toastError("Không cuộn được", error));
+      if (!encodedW || !encodedH || !controlReady.current.has(device.udid)) return;
+      if (inFlight.current && !sending) return;
+      // At most three original wheel steps; the endpoint stays inside the measured frame.
+      pendingTicks = Math.max(-3, Math.min(3, pendingTicks + Math.sign(event.deltaY)));
+      void drain();
     };
     screen.addEventListener("wheel", onWheel, { passive: false });
-    return () => screen.removeEventListener("wheel", onWheel);
+    return () => { disposed = true; pendingTicks = 0; screen.removeEventListener("wheel", onWheel); };
   }, [device.udid, encodedH, encodedW]);
 
   /// The most samples a single drag is allowed to carry.
@@ -505,7 +536,7 @@ export function FocusStream({
       label: "Vol+",
       Icon: IconVolumeUp,
       androidOnly: true,
-      disabled: busy,
+      disabled: keyDisabled,
       run: () => void pressKey("volumeUp"),
     },
     {
@@ -513,7 +544,7 @@ export function FocusStream({
       label: "Vol−",
       Icon: IconVolumeDown,
       androidOnly: true,
-      disabled: busy,
+      disabled: keyDisabled,
       run: () => void pressKey("volumeDown"),
     },
     {
@@ -547,7 +578,7 @@ export function FocusStream({
       label: "Nút nguồn",
       Icon: IconPower,
       androidOnly: true,
-      disabled: busy,
+      disabled: keyDisabled,
       run: () => void pressKey("power"),
     },
     {
@@ -633,7 +664,7 @@ export function FocusStream({
       label: "Thông báo",
       Icon: IconBell,
       androidOnly: true,
-      disabled: busy,
+      disabled: keyDisabled,
       run: () => void pressKey("notification"),
     },
     {
@@ -962,6 +993,18 @@ export function FocusStream({
               <IconClose size={14} />
             </button>
           </header>
+          <div className="focus-control-status" aria-live="polite" data-testid="focus-control-status">
+            <span>{hasView ? "Có hình" : "Đang chờ hình"} · {sessionReady ? (busy || actionPending ? "Đang thực hiện…" : "Điều khiển sẵn sàng") : controlErrors.length ? "Điều khiển gặp lỗi" : "Đang mở điều khiển…"}</span>
+            {controlErrors.length > 0 && <><p>{controlErrors.join(" · ")}</p><button type="button" onClick={() => setControlRetry(value => value + 1)}>Thử lại điều khiển</button></>}
+          </div>
+          <div className="focus-quick-keys" aria-label="Phím nhanh">
+            {!isIos && <>
+              <button type="button" title="Giảm âm lượng" aria-label="Giảm âm lượng" disabled={keyDisabled} onClick={() => void pressKey("volumeDown")}><IconVolumeDown size={17}/></button>
+              <button type="button" title="Tăng âm lượng" aria-label="Tăng âm lượng" disabled={keyDisabled} onClick={() => void pressKey("volumeUp")}><IconVolumeUp size={17}/></button>
+              <button type="button" title="Nguồn" aria-label="Nguồn" disabled={keyDisabled} onClick={() => void pressKey("power")}><IconPower size={17}/></button>
+            </>}
+            <button type="button" title="Chụp màn hình" aria-label="Chụp màn hình nhanh" disabled={busy || actionPending} onClick={() => void capture()}><IconCamera size={17}/></button>
+          </div>
           {rotationMessage && <p className="focus-rotation-status" role="status">{rotationMessage}</p>}
           {/* Why every row is greyed out. `disabled={busy}` alone is silent, and a row that
               cannot be clicked and does not say why reads exactly like a row that does
@@ -1126,8 +1169,9 @@ export function FocusStream({
               <button
                 key={key}
                 type="button"
-                disabled={busy}
+                disabled={keyDisabled}
                 title={title}
+                aria-label={title}
                 onClick={() => void pressKey(key)}
               >
                 <Icon size={18} />

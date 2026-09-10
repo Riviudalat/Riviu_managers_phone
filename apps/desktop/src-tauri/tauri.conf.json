@@ -1,7 +1,7 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "Riviu Manager",
-  "version": "0.2.8",
+  "version": "0.2.24",
   "identifier": "com.riviu.manager",
   "build": {
     "frontendDist": "../dist",
@@ -47,7 +47,8 @@
         "silent": true
       },
       "nsis": {
-        "installMode": "currentUser"
+        "installMode": "currentUser",
+        "installerHooks": "../../../scripts/windows-installer-hooks.nsh"
       },
       "wix": {
         "template": "wix/main-per-user.wxs"

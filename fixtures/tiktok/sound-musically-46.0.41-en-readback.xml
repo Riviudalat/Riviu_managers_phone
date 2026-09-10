@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<hierarchy>
+  <node package="com.zhiliaoapp.musically" resource-id="com.zhiliaoapp.musically:id/dsv" text="" displayed="true" enabled="true" clickable="true" selected="false" bounds="[278,100][703,216]" />
+  <node package="com.zhiliaoapp.musically" resource-id="com.zhiliaoapp.musically:id/tv_top_text" text="Sure Thing (Live)" displayed="true" enabled="true" clickable="false" selected="false" bounds="[362,100][698,216]" />
+</hierarchy>

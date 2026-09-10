@@ -28,6 +28,12 @@ WIX_NAMESPACE = "http://schemas.microsoft.com/wix/2006/wi"
 COMPONENT_NAMESPACE = uuid.UUID("d81f39f9-63fc-48ff-8ce8-d68b2a30b66b")
 COMPONENT_GROUP_ID = "RiviuPerUserResources"
 REGISTRY_KEY = r"Software\riviu\Riviu Manager Full\Components"
+WINDOWS_BUILD_PROPERTY = "RIVIU_WINDOWS_BUILD"
+MINIMUM_WINDOWS_BUILD = 18362
+WINDOWS_BUILD_CONDITION = (
+    f"Installed OR ({WINDOWS_BUILD_PROPERTY} AND "
+    f"{WINDOWS_BUILD_PROPERTY} >= {MINIMUM_WINDOWS_BUILD})"
+)
 
 
 @dataclass(frozen=True, order=True)
@@ -165,6 +171,18 @@ def render_fragment(resources: list[ResourceFile], *, win64: bool) -> str:
             "    </DirectoryRef>",
             "  </Fragment>",
             "  <Fragment>",
+            # Keep the search/condition in the referenced group's fragment so
+            # WiX cannot discard them as unreachable. CurrentBuildNumber is
+            # REG_SZ; the unquoted integer makes MSI compare numerically and
+            # reject missing/non-numeric values. Installed permits maintenance.
+            f'    <Property Id="{WINDOWS_BUILD_PROPERTY}" Secure="yes">',
+            '      <RegistrySearch Id="RiviuWindowsBuildSearch" Root="HKLM"',
+            '        Key="SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion"',
+            '        Name="CurrentBuildNumber" Type="raw" Win64="yes" />',
+            "    </Property>",
+            '    <Condition Message="Riviu Manager requires Windows 10 version 1903 (build 18362) or newer.">',
+            f"      {WINDOWS_BUILD_CONDITION}",
+            "    </Condition>",
             f'    <ComponentGroup Id="{COMPONENT_GROUP_ID}">',
             *refs,
             "    </ComponentGroup>",

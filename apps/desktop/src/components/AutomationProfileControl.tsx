@@ -42,6 +42,8 @@ type Props = {
   onSaved?: (record: AutomationDefinitionRecord) => void | Promise<void>;
   dirty?: boolean;
   draftId?: string;
+  showSchedule?: boolean;
+  onSelectedProfileChange?: (profile: AutomationDefinition | null) => void;
 };
 
 export interface AutomationProfileHandle {
@@ -63,6 +65,8 @@ export function AutomationProfileControl({
   onSaved,
   dirty = false,
   draftId,
+  showSchedule = true,
+  onSelectedProfileChange,
 }: Props) {
   const label = KIND_LABEL[kind];
   const [profiles, setProfiles] = useState<AutomationDefinition[]>([]);
@@ -88,6 +92,7 @@ export function AutomationProfileControl({
     () => profiles.find((profile) => profile.id === selectedId) ?? null,
     [profiles, selectedId],
   );
+  useEffect(() => { onSelectedProfileChange?.(selectedProfile); }, [selectedProfile, onSelectedProfileChange]);
 
   const load = useCallback(async () => {
     const epoch = ++requestEpoch.current;
@@ -331,7 +336,7 @@ export function AutomationProfileControl({
         </StatusNotice>
       )}
       {notice && <StatusNotice tone="success">{notice}</StatusNotice>}
-      <AutomationScheduleControl profile={selectedProfile} />
+      {showSchedule && <AutomationScheduleControl profile={selectedProfile} />}
     </section>
   );
 }

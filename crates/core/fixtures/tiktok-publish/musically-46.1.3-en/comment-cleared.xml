@@ -1,0 +1,6 @@
+<hierarchy>
+  <android.widget.Button package="com.zhiliaoapp.musically" class="android.widget.Button" text="US" resource-id="com.zhiliaoapp.musically:id/title" checked="false" clickable="true" enabled="true" focused="false" selected="false" bounds="[167,950][209,992]" displayed="true" />
+  <android.widget.Button package="com.zhiliaoapp.musically" class="android.widget.Button" text="US" resource-id="com.zhiliaoapp.musically:id/title" checked="false" clickable="true" enabled="true" focused="false" selected="false" bounds="[167,1524][209,1566]" displayed="true" />
+  <android.widget.LinearLayout package="com.zhiliaoapp.musically" class="android.widget.LinearLayout" text="" resource-id="com.zhiliaoapp.musically:id/viewpager_container" checked="false" clickable="false" enabled="true" focused="false" selected="false" bounds="[0,0][1080,2094]" displayed="true" />
+  <android.widget.Button package="com.zhiliaoapp.musically" class="android.widget.Button" text="" content-desc="@2131823239" resource-id="com.zhiliaoapp.musically:id/cv8" checked="false" clickable="true" enabled="false" focused="false" selected="false" bounds="[911,1111][1048,1195]" displayed="true" />
+</hierarchy>

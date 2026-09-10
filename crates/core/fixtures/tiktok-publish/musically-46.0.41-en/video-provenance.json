@@ -1,0 +1,26 @@
+{
+  "version": "46.0.41",
+  "result": {
+    "error": "video measurement stops before Post",
+    "publicPost": false,
+    "reachedPostBoundary": true,
+    "sound": {
+      "artist": "The Five Stairsteps",
+      "candidatesDigest": "03c851db52e5f085fc5894fb44e4ac75f67f3f5b4803ca2ff310b1d53462e3ce",
+      "confirmed": false,
+      "index": 2,
+      "section": "trending",
+      "title": "Ooh Baby Baby (Buddha Remastered 2001)"
+    },
+    "version": "46.0.41"
+  },
+  "sourceFolder": "target\\fleet-compat-20260908\\video3-460",
+  "sourceHashes": {
+    "video-caption.xml": "8f7f21145141496e5d82ea360fd691e354b2e8c5302e387832fc29aed3e14266",
+    "video-editor.xml": "aa99a35abf669e43c4ac5fa71c281cdcd8713c3ae200e6f5e96561a4c8fa4e8f",
+    "video-picker.xml": "e0d9e080b7faa5099d63ea040ca156786e5c1f18080e8104881b8e5a49334fa7",
+    "video-selected.xml": "2c4299fd46b4797abab0be099794028b2297375291a23f17ca0638f979b3bfaf",
+    "video-sound.xml": "35b8e9d358f50a80a3f40b26e1d6c688b67d421e3537324a7293fc537a066bec"
+  },
+  "note": "choose_and_confirm_sound succeeded; initial measurement selection struct did not set confirmed; see video-sound exact readback"
+}

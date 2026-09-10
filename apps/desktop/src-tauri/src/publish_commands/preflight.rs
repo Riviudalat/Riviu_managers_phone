@@ -59,7 +59,36 @@ pub(super) fn resolve_preflight_target(
             .unwrap_or_else(|| riviu_core::TargetRef::Explicit {
                 udids: request.udids.clone(),
             });
-    let snapshot = riviu_core::resolve_target(&target_ref, fleet_order, metas, groups)?;
+    // Capture the same fallback numbers displayed by orderDevicesByNumber/tileNumber.
+    // A selected subset's ordinal is not its number in the fleet (AGENTS.md §9.188).
+    let mut numbered_order: Vec<_> = fleet_order.iter().collect();
+    numbered_order.sort_by_key(|udid| {
+        metas
+            .iter()
+            .find(|meta| meta.udid == **udid)
+            .and_then(|meta| meta.number)
+            .map(|number| (false, number))
+            .unwrap_or((true, 0))
+    });
+    let mut display_metas = metas.to_vec();
+    for (index, udid) in numbered_order.into_iter().enumerate() {
+        if let Some(meta) = display_metas.iter_mut().find(|meta| meta.udid == *udid) {
+            if meta.number.is_none() {
+                meta.number = Some(u32::try_from(index + 1)?);
+            }
+        } else {
+            display_metas.push(riviu_core::DeviceMeta {
+                udid: udid.clone(),
+                notes: String::new(),
+                tags: vec![],
+                group_id: None,
+                handle: String::new(),
+                alias: String::new(),
+                number: Some(u32::try_from(index + 1)?),
+            });
+        }
+    }
+    let snapshot = riviu_core::resolve_target(&target_ref, fleet_order, &display_metas, groups)?;
     let resolved_udids = snapshot
         .included
         .iter()
@@ -101,11 +130,33 @@ pub(super) async fn build_publish_preflight(
     riviu_core::publish::validate_publish_mapping(&request.bundle_ids, &request.udids)
         .map_err(anyhow::Error::new)?;
 
-    let source_root = request.source_root.clone();
-    let manifest = bounded_publish_scan(Arc::clone(&PUBLISH_SCAN_SLOTS), move || {
+    let manifest = scan_preflight_source(&request.source_root).await?;
+    build_publish_preflight_from_manifest(control, registry, db, request, &manifest).await
+}
+
+pub(super) async fn scan_preflight_source(
+    source_root: &str,
+) -> anyhow::Result<PublishFolderManifest> {
+    let source_root = source_root.trim().to_string();
+    bounded_publish_scan(Arc::clone(&PUBLISH_SCAN_SLOTS), move || {
         scan_publish_folder(source_root, PublishScanOptions::default()).map_err(anyhow::Error::from)
     })
-    .await?;
+    .await
+}
+
+pub(super) async fn build_publish_preflight_from_manifest(
+    control: &DeviceControlPlane,
+    registry: &riviu_core::DeviceRegistry,
+    db: &Database,
+    request: riviu_core::PublishPreflightRequest,
+    manifest: &PublishFolderManifest,
+) -> anyhow::Result<PreparedPublishPreflight> {
+    riviu_core::publish::validate_publish_mapping(&request.bundle_ids, &request.udids)
+        .map_err(anyhow::Error::new)?;
+    request.sound_policy.pool_size()?;
+    if let Some(run_at) = request.run_at.as_deref() {
+        parse_run_at(run_at).map_err(anyhow::Error::msg)?;
+    }
     let mut bundles = request
         .bundle_ids
         .iter()
@@ -138,6 +189,14 @@ pub(super) async fn build_publish_preflight(
     let mut issues = Vec::new();
     for (ordinal, (bundle, udid)) in bundles.iter().zip(&request.udids).enumerate() {
         let mut row_issues = Vec::new();
+        if db.has_pending_publish_for_device(udid)? {
+            row_issues.push(preflight_issue(
+                "post_verification_pending",
+                udid,
+                &bundle.id,
+                "Máy còn bài đang chờ xác minh xuất bản; hoàn tất kiểm tra bài đó trước lượt mới",
+            ));
+        }
         // Android keeps the managed import and a MediaStore copy during composition. Reserve
         // both plus fixed working headroom, rather than discovering a full phone after transfer.
         let required_bytes = bundle
@@ -177,6 +236,16 @@ pub(super) async fn build_publish_preflight(
                 &bundle.id,
                 "đợt đăng có chọn nhạc này chỉ chứng nhận trên Android",
             ));
+        }
+        if android {
+            if let Err(error) = control.verify_automation_transport(udid).await {
+                row_issues.push(preflight_issue(
+                    "automation_transport_conflict",
+                    udid,
+                    &bundle.id,
+                    &error.to_string(),
+                ));
+            }
         }
         if !control.supports_push_media(udid) {
             row_issues.push(preflight_issue(
@@ -229,6 +298,15 @@ pub(super) async fn build_publish_preflight(
                                 && video_plan_for_build(&package, &locale, &version).is_ok());
                     let composer_ok = base_composer_ok && video_picker_ok;
                     let sound_picker_ok = sound_plan_for_build(&package, &locale, &version).is_ok();
+                    let links_ready = missing_link_locators(&package, &locale, &version).is_empty()
+                        && riviu_core::tiktok_labels::controls_for(&package, &locale, &version)
+                            .is_some_and(riviu_core::tiktok_account::account_read_supported);
+                    if !links_ready {
+                        row_issues.push(preflight_issue(
+                            "link_verification_unmeasured", udid, &bundle.id,
+                            "Phiên bản này chưa đủ nhận diện hồ sơ/bài để xác minh đăng thành công; cần đo bổ sung trước khi đăng",
+                        ));
+                    }
                     if !composer_ok {
                         row_issues.push(preflight_issue(
                             if base_composer_ok {
@@ -647,7 +725,7 @@ pub(super) fn readiness_of_build(package: &str, locale: &str, version: &str) -> 
             "chưa đo bộ nhãn cho {package} / {locale} / {version}"
         ));
     };
-    let missing = riviu_core::tiktok_composer::ComposerPlan::missing_to_publish(&controls);
+    let missing = riviu_core::tiktok_composer::ComposerPlan::missing_for_carousel(&controls);
     if missing.is_empty() {
         PublishReadiness::HierarchyReady
     } else {
@@ -697,10 +775,7 @@ pub(super) fn bundle_media_shape_is_ready(
 pub(crate) fn max_images_for(route: PublishRoute) -> usize {
     match route {
         PublishRoute::PixelGrid => IOS_PIXEL_GRID_MAX_IMAGES,
-        PublishRoute::Hierarchy => {
-            riviu_core::tiktok_composer::GRID_COLUMNS
-                * riviu_core::tiktok_composer::GRID_MEASURED_ROWS
-        }
+        PublishRoute::Hierarchy => 13,
     }
 }
 

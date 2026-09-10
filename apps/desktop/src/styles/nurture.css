@@ -353,21 +353,6 @@
   margin-bottom: var(--space-4);
 }
 
-.nurture-setup-grid {
-  display: grid;
-  grid-template-columns: minmax(0, 56rem) minmax(250px, 320px);
-  align-items: start;
-  justify-content: start;
-  gap: var(--space-5);
-}
-
-.nurture-setup-main {
-  width: 100%;
-  max-width: 56rem;
-  min-width: 0;
-}
-
-.nurture-review-list,
 .nurture-device-counters,
 .nurture-cleanup-status dl {
   display: grid;
@@ -375,7 +360,6 @@
   margin: 0;
 }
 
-.nurture-review-list > div,
 .nurture-device-counters > div,
 .nurture-cleanup-status dl > div {
   display: flex;
@@ -385,14 +369,12 @@
   gap: var(--space-3);
 }
 
-.nurture-review-list dt,
 .nurture-device-counters dt,
 .nurture-cleanup-status dt {
   color: var(--text-3);
   font-size: var(--text-sm);
 }
 
-.nurture-review-list dd,
 .nurture-device-counters dd,
 .nurture-cleanup-status dd {
   margin: 0;
@@ -401,16 +383,6 @@
   font-weight: var(--weight-semibold);
   text-align: right;
   overflow-wrap: anywhere;
-}
-
-.nurture-setup-grid .summary-rail .nurture-float-actions {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  margin: var(--space-2) 0 0;
-}
-
-.nurture-setup-grid .summary-rail .nurture-float-actions .ghost {
-  grid-column: 1 / -1;
 }
 
 .nurture-monitor-grid {
@@ -785,6 +757,8 @@
 /* A switch, not a checkbox. `appearance: none` keeps it a checkbox to the accessibility
    tree and to every test that finds it by label. */
 .nu-pane .nu-switch {
+  /* Keep the invisible absolute checkbox inside the scrolling settings panel. */
+  position: relative;
   display: flex;
   /* Stated, not inherited: the panel's `label` rule is `flex-direction: column`, which put
      the switch's label underneath its track. Same trap as the restart badge. */
@@ -888,7 +862,6 @@
 }
 
 @media (max-width: 980px) {
-  .nurture-setup-grid,
   .nurture-monitor-grid {
     grid-template-columns: 1fr;
   }

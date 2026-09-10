@@ -226,7 +226,9 @@ fn should_bootstrap_android(mock_requested: bool) -> bool {
 fn configured_desktop_stream_capacity() -> Option<usize> {
     let raw = std::env::var("RIVIU_STREAM_CAPACITY").ok()?;
     match raw.trim().parse::<usize>() {
-        Ok(value) if (1..=MAX_DESKTOP_STREAM_CAPACITY).contains(&value) => Some(value),
+        Ok(value) if (1..=MAX_DESKTOP_STREAM_CAPACITY).contains(&value) => {
+            Some(value.min(riviu_core::stream_budget::MAXIMUM_STREAM_LIMIT))
+        }
         _ => {
             log::warn!("invalid RIVIU_STREAM_CAPACITY={raw:?}; sizing from the fleet instead");
             None
@@ -234,23 +236,14 @@ fn configured_desktop_stream_capacity() -> Option<usize> {
     }
 }
 
-/// Build the stream budget, falling back rather than panicking.
-///
-/// `configured_desktop_stream_capacity` accepts up to 100 but the budget
-/// manager hard-caps concurrent producers at 2 (AGENTS.md 3.5/3.12), so
-/// `RIVIU_STREAM_CAPACITY=3` used to panic the app at startup through an
-/// `expect`. The env var's own contract is to fail closed to the default, and
-/// that is what a farm-sized value gets now, with the reason logged.
-/// The stream budget this desktop runs with.
-///
-/// `fleet_size` is how many phones the first scan found. The budget is sized to it so a
-/// two-phone bench gets two and a twenty-phone farm gets twenty — the operator's explicit
-/// `RIVIU_STREAM_CAPACITY` still wins, and a fleet of zero (nothing plugged in yet, or a
-/// scan that failed) falls back to the conservative default rather than reserving for
-/// phones that may never arrive.
+/// Initial capacity follows the first scan; later discovery grows the same shared budget.
+/// Explicit limits remain fixed, clamped to the core ceiling instead of falling back to two.
 fn desktop_stream_budget(fleet_size: usize) -> StreamBudgetManager {
     let requested = configured_desktop_stream_capacity().unwrap_or_else(|| {
-        fleet_size.clamp(DEFAULT_DESKTOP_STREAM_CAPACITY, MAX_DESKTOP_STREAM_CAPACITY)
+        fleet_size.clamp(
+            DEFAULT_DESKTOP_STREAM_CAPACITY,
+            riviu_core::stream_budget::MAXIMUM_STREAM_LIMIT,
+        )
     });
     match StreamBudgetManager::new(requested) {
         Ok(manager) => manager,
@@ -793,6 +786,33 @@ impl AppState {
         }
         let db =
             Arc::new(database.with_secrets(Arc::new(KeyringSecrets::new(credentials.clone()))));
+        // Local fleet installer may carry a target-bound bootstrap connection; secrets move
+        // to the OS credential store before any worker can deliver an outbox row.
+        let sheet = db.publish_sheet_delivery_settings()?;
+        if !sheet.webhook_url.is_empty() && !sheet.token.is_empty() {
+            db.set_publish_sheet_config_with_reporting(
+                &sheet.webhook_url,
+                Some(&sheet.token),
+                Some(sheet.internal_reporting),
+            )?;
+        } else if sheet.webhook_url.is_empty() && sheet.token.is_empty() {
+            let bootstrap = sidecar_root.join("publish-sheet/connection.json");
+            if bootstrap.is_file() {
+                let value: serde_json::Value = serde_json::from_slice(&std::fs::read(bootstrap)?)?;
+                if value["spreadsheetId"] == "1HUcp3DMPTLfQVjhxRnXa_4xvyXd3-EF3LAbYsl0Wwxc"
+                    && value["sheetGid"] == 0
+                {
+                    let url = value["webhookUrl"].as_str().unwrap_or_default();
+                    let token = value["token"].as_str().unwrap_or_default();
+                    anyhow::ensure!(
+                        riviu_core::publish_sheet::is_acceptable_webhook(url) && !token.is_empty(),
+                        "cấu hình Sheet đi kèm chưa hợp lệ"
+                    );
+                    db.set_publish_sheet_config_with_reporting(url, Some(token), Some(false))?;
+                    db.set_setting(riviu_core::publish_sheet::SHEET_URL_SETTING, "https://docs.google.com/spreadsheets/d/1HUcp3DMPTLfQVjhxRnXa_4xvyXd3-EF3LAbYsl0Wwxc/edit#gid=0")?;
+                }
+            }
+        }
         let legacy_token = std::env::var("RIVIU_RTMMO_TOKEN").ok();
         let ios =
             bootstrap_ios_runtime(resolve_desktop_agent_runtime_for_bootstrap_with_candidate(
@@ -920,6 +940,14 @@ impl AppState {
             Arc::new(desktop_stream_budget(initial_devices.len())),
             ios.interaction_capabilities.clone(),
         ));
+        let publish_guard_db = db.clone();
+        control.set_clean_start_guard(Arc::new(move |udid| {
+            match publish_guard_db.has_pending_publish_for_device(udid) {
+                Ok(false) => Ok(()),
+                Ok(true) => Err("máy còn bài đang tải hoặc chờ xác minh; kiểm tra liên kết trước khi chạy lượt mới".into()),
+                Err(error) => Err(format!("chưa đọc được trạng thái bài đang xử lý: {error}")),
+            }
+        }));
         let signing =
             SigningService::with_credentials(sidecar_root.join("signer"), credentials.clone());
 
@@ -1341,6 +1369,100 @@ impl AppState {
         crate::orchestration_commands::resume_orchestration_runs(app.clone(), self);
         crate::orchestration_commands::start_automation_schedule_runner(app.clone(), self);
 
+        // A submitted post may finish uploading after its command returns or after restart.
+        // Recover only its identity/link, inside the same per-device ownership as the UI.
+        // No external watcher, global app-closed check, or second Post is involved.
+        {
+            let db = self.db.clone();
+            let control = self.control.clone();
+            let events = self.events.clone();
+            let registry = self.registry.clone();
+            let admission = self.command_admission.clone();
+            let stop = self.background_stop.clone();
+            tauri::async_runtime::spawn(async move {
+                let mut interval = tokio::time::interval(Duration::from_secs(30));
+                interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+                let mut queue = crate::publish_commands::VerificationQueue::default();
+                let mut failed_until = std::collections::HashMap::new();
+                loop {
+                    tokio::select! {
+                        _ = interval.tick() => {},
+                        Some((udid, result)) = queue.next(), if !queue.is_empty() => {
+                            if let Err(error) = &result {
+                                log::warn!("publish verification {udid}: {error}");
+                            }
+                            if !matches!(result, Ok(true)) {
+                                failed_until.insert(udid, Instant::now() + Duration::from_secs(30));
+                            }
+                        }
+                    }
+                    if stop.load(Ordering::Relaxed) {
+                        while queue.next().await.is_some() {}
+                        break;
+                    }
+                    match db.expire_due_publish_verifications() {
+                        Ok(campaigns) => {
+                            for campaign_id in campaigns {
+                                events.emit(riviu_core::events::AppEvent::PublishUpdated {
+                                    revision: db
+                                        .publish_campaign_revision(&campaign_id)
+                                        .unwrap_or_default(),
+                                    campaign_id,
+                                });
+                            }
+                        }
+                        Err(error) => log::warn!("publish verification deadline: {error}"),
+                    }
+                    let pending = match db.pending_publish_verifications(1000) {
+                        Ok(rows) => rows,
+                        Err(error) => {
+                            log::warn!("publish verification queue: {error}");
+                            continue;
+                        }
+                    };
+                    failed_until.retain(|_, until| *until > Instant::now());
+                    for row in pending {
+                        if stop.load(Ordering::Relaxed) {
+                            break;
+                        }
+                        if !queue.available(&row.udid)
+                            || !registry.get(&row.udid).is_some_and(|device| {
+                                device.status == riviu_core::DeviceStatus::Ready
+                            })
+                            || control.current_work_owner(&row.udid).is_some()
+                            || failed_until.contains_key(&row.udid)
+                            || !row.is_due(chrono::Utc::now())
+                        {
+                            continue;
+                        }
+                        let Ok(admitted) = admission.ensure_accepting_work() else {
+                            break;
+                        };
+                        let (control, db, events) = (control.clone(), db.clone(), events.clone());
+                        queue.push(row.udid.clone(), async move {
+                            let _admitted = admitted;
+                            crate::publish_commands::verify_pending_assignment(
+                                &control, &db, &events, &row,
+                            )
+                            .await
+                        });
+                    }
+                    if queue.is_empty() && !stop.load(Ordering::Relaxed) {
+                        if let Ok(_admitted) = admission.ensure_accepting_work() {
+                            if let Err(error) =
+                                crate::publish_commands::cleanup_verified_assignments(
+                                    &control, &db, &events, 20,
+                                )
+                                .await
+                            {
+                                log::warn!("verified publish media cleanup: {error}");
+                            }
+                        }
+                    }
+                }
+            });
+        }
+
         let view_hub = self.view_hub.clone();
         tauri::async_runtime::spawn(async move {
             if let Err(error) = view_hub.listen().await {
@@ -1686,6 +1808,9 @@ impl AppState {
                 if last_scan.elapsed() >= Duration::from_secs(3) {
                     last_scan = Instant::now();
                     if let Ok(devices) = control.list_devices().await {
+                        if configured_desktop_stream_capacity().is_none() {
+                            control.grow_stream_capacity(devices.len());
+                        }
                         // Preserve stream URLs / WDA flags from registry when PMD returns fresh list
                         let existing = registry.list();
                         let merged = devices
@@ -1950,11 +2075,49 @@ impl AppState {
         let publish_background_stop = self.background_stop.clone();
         let publish_started_at = chrono::Local::now().naive_local();
         tauri::async_runtime::spawn(async move {
+            let mut dispatch = crate::publish_scheduler::PublishScheduleDispatch::default();
+            let mut tasks = tokio::task::JoinSet::new();
+            let mut task_campaigns = std::collections::HashMap::<tokio::task::Id, String>::new();
             let mut interval = tokio::time::interval(Duration::from_secs(15));
             loop {
                 interval.tick().await;
                 if publish_background_stop.load(Ordering::Acquire) {
                     break;
+                }
+                while let Some(completed) = tasks.try_join_next_with_id() {
+                    let (task_id, failed) = match completed {
+                        Ok((id, ())) => (id, false),
+                        Err(error) => {
+                            log::warn!("publish schedule worker stopped: {error}");
+                            (error.id(), true)
+                        }
+                    };
+                    if let Some(campaign) = task_campaigns.remove(&task_id) {
+                        dispatch.release(&campaign);
+                        if failed {
+                            if publish_db
+                                .get_publish_campaign(&campaign)
+                                .ok()
+                                .flatten()
+                                .is_some_and(|detail| {
+                                    detail.campaign.state
+                                        == riviu_core::PublishCampaignState::Queued
+                                })
+                            {
+                                let _ = publish_db.update_publish_campaign_state(
+                                    &campaign,
+                                    riviu_core::PublishCampaignState::FailedBeforeDispatch,
+                                    Some("schedule_worker_failed"),
+                                );
+                            }
+                            let _ =
+                                crate::publish_commands::reconcile_publish_execution_and_announce(
+                                    &publish_db,
+                                    &publish_events,
+                                    &campaign,
+                                );
+                        }
+                    }
                 }
                 // **Asked for by state, not taken from the newest page.** This used to read
                 // two hundred campaigns and pick the scheduled ones out of them — so once two
@@ -2025,25 +2188,89 @@ impl AppState {
                     if run_at > now {
                         continue;
                     }
-                    let Ok(_admission) = publish_admission.ensure_accepting_work() else {
+                    let Some(request) = publish_db
+                        .publish_campaign_request(&campaign_id)
+                        .ok()
+                        .flatten()
+                    else {
+                        continue;
+                    };
+                    if request
+                        .udids
+                        .iter()
+                        .any(|udid| publish_control.current_work_owner(udid).is_some())
+                    {
+                        continue;
+                    }
+                    if !dispatch.reserve(&campaign_id, &request.udids) {
+                        continue;
+                    }
+                    let Ok(admission) = publish_admission.ensure_accepting_work() else {
+                        dispatch.release(&campaign_id);
                         break;
                     };
-                    if let Err(error) =
-                        crate::publish_commands::execute_scheduled_publish_campaign_inner(
-                            publish_control.clone(),
-                            publish_registry.clone(),
-                            publish_db.clone(),
-                            publish_events.clone(),
-                            publish_agent_bundle_id.clone(),
-                            Arc::new(publish_streams.clone()),
-                            campaign_id.clone(),
+                    if !publish_db
+                        .claim_due_publish_schedule(
+                            &campaign_id,
+                            raw_run_at,
+                            &now.format("%Y-%m-%dT%H:%M:%S").to_string(),
                         )
-                        .await
+                        .unwrap_or(false)
                     {
-                        let _ = publish_db
-                            .log_op("publish.schedule.error", &format!("{campaign_id}: {error}"));
-                        settle_projection(&campaign_id);
+                        dispatch.release(&campaign_id);
+                        continue;
                     }
+                    settle_projection(&campaign_id);
+                    let control = publish_control.clone();
+                    let registry = publish_registry.clone();
+                    let db = publish_db.clone();
+                    let events = publish_events.clone();
+                    let agent_bundle_id = publish_agent_bundle_id.clone();
+                    let frames = Arc::new(publish_streams.clone());
+                    let task_campaign = campaign_id.clone();
+                    let task = tasks.spawn(async move {
+                        let _admission = admission;
+                        if let Err(error) =
+                            crate::publish_commands::execute_scheduled_publish_campaign_inner(
+                                control,
+                                registry,
+                                db.clone(),
+                                events.clone(),
+                                agent_bundle_id,
+                                frames,
+                                task_campaign.clone(),
+                            )
+                            .await
+                        {
+                            let _ = db.log_op(
+                                "publish.schedule.error",
+                                &format!("{task_campaign}: {error}"),
+                            );
+                            // A failure before transfer must not stay queued forever or run on the next tick.
+                            if db
+                                .get_publish_campaign(&task_campaign)
+                                .ok()
+                                .flatten()
+                                .is_some_and(|detail| {
+                                    detail.campaign.state
+                                        == riviu_core::PublishCampaignState::Queued
+                                })
+                            {
+                                let _ = db.update_publish_campaign_state(
+                                    &task_campaign,
+                                    riviu_core::PublishCampaignState::FailedBeforeDispatch,
+                                    Some("schedule_start_failed"),
+                                );
+                            }
+                            let _ =
+                                crate::publish_commands::reconcile_publish_execution_and_announce(
+                                    &db,
+                                    &events,
+                                    &task_campaign,
+                                );
+                        }
+                    });
+                    task_campaigns.insert(task.id(), campaign_id);
                 }
             }
         });
@@ -2111,23 +2338,23 @@ impl AppState {
             // never be reached, so each pass skips past what the previous one could not
             // deliver and comes back to it after the newer rows have had their turn.
             let mut skip_poisoned = 0usize;
+            let mut internal_sync = crate::publish_commands::InternalSheetSync::default();
             loop {
                 interval.tick().await;
-                let config = match (
-                    sheet_db.get_setting(riviu_core::publish_sheet::WEBHOOK_URL_SETTING),
-                    sheet_db.get_setting(riviu_core::publish_sheet::WEBHOOK_TOKEN_SETTING),
-                ) {
-                    (Ok(url), Ok(token)) => (url.unwrap_or_default(), token.unwrap_or_default()),
+                let config = match sheet_db.publish_sheet_delivery_settings() {
+                    Ok(config) => config,
                     // **A database that would not answer is not "unconfigured".** Reading
                     // the error away made a locked DB print the one message an operator
                     // reads as "you forgot to paste the webhook" — and then, once the lock
                     // cleared, print it again as if the config had just been removed.
-                    (Err(error), _) | (_, Err(error)) => {
+                    Err(error) => {
                         log::warn!("outbox Sheet: không đọc được cấu hình ({error:#})");
                         continue;
                     }
                 };
-                let (webhook, token) = config;
+                let webhook = config.webhook_url.clone();
+                let token = config.token.clone();
+                internal_sync.configure(&config);
                 if let Some(reason) = sheet_delivery_blocked(&webhook, &token) {
                     if !said_unconfigured {
                         log::info!("outbox Sheet đứng yên: {reason}");
@@ -2136,6 +2363,15 @@ impl AppState {
                     continue;
                 }
                 said_unconfigured = false;
+                if let Err(error) = crate::publish_commands::sync_internal_sheet_reports(
+                    &sheet_db,
+                    &config,
+                    &mut internal_sync,
+                )
+                .await
+                {
+                    log::warn!("Sheet nội bộ: không đọc được báo cáo ({error:#})");
+                }
                 let rows = match sheet_db.pending_publish_sheet_rows(50 + skip_poisoned) {
                     Ok(rows) => rows,
                     Err(error) => {
@@ -2158,8 +2394,31 @@ impl AppState {
                         poster: row.poster.clone(),
                         partners: row.partners.clone(),
                         assignment_id: row.assignment_id.clone(),
+                        posted_at: row.posted_at.clone(),
                     };
-                    match riviu_core::publish_sheet::push_row(&webhook, &payload).await {
+                    let metadata = if config.internal_reporting {
+                        match sheet_db.internal_publish_report(&row.assignment_id) {
+                            Ok(report) => report
+                                .filter(|report| report.metadata.status == "Đã xác minh")
+                                .map(|row| row.metadata),
+                            Err(error) => {
+                                log::warn!(
+                                    "Sheet nội bộ: chưa đọc được metadata {} ({error:#})",
+                                    row.assignment_id
+                                );
+                                None
+                            }
+                        }
+                    } else {
+                        None
+                    };
+                    match riviu_core::publish_sheet::push_row_with_metadata(
+                        &webhook,
+                        &payload,
+                        metadata.as_ref(),
+                    )
+                    .await
+                    {
                         Ok(()) => {
                             // Marked by the revision that was DELIVERED — a row edited
                             // between read and send keeps owing its newer content.
@@ -2384,6 +2643,12 @@ fn resolve_desktop_data_dir(
         );
         anyhow::ensure!(path.is_absolute(), "RIVIU_MOCK_DATA_DIR must be absolute");
         return Ok(path);
+    }
+    if cfg!(debug_assertions) && std::env::var("RIVIU_DEV_BACKGROUND").as_deref() == Ok("1") {
+        if let Some(path) = std::env::var_os("RIVIU_DEV_DATA_DIR").map(PathBuf::from) {
+            anyhow::ensure!(path.is_absolute(), "RIVIU_DEV_DATA_DIR must be absolute");
+            return Ok(path);
+        }
     }
     Ok(dirs::data_dir()
         .unwrap_or_else(|| PathBuf::from("."))

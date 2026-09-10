@@ -12,6 +12,7 @@ export const issueState = (state: OperationRunState) => ["failed", "partial", "u
 export const progressLabel = (fraction: number | null) => fraction === null ? "Chưa rõ %" : `${Math.round(fraction * 100)}%`;
 
 export function runProgress(run: OperationRunSummary, sessions: NurtureSessionStatus[], now = Date.now()): number | null {
+  if (run.kind === "publish" && (run.state === "partial" || run.state === "uncertain") && run.retryScope === "linkAndSheet") return null;
   if (!activeRun(run)) return 1;
   if (run.kind === "nurture") {
     const rows = sessions.filter((row) => row.runId === run.sourceId);
@@ -37,7 +38,9 @@ export function deviceRows(items: OperationRunItem[]) {
       : states.has("queued") ? "queued"
       : states.has("uncertain") ? "uncertain"
       : states.size > 1 ? "partial" : work[0]?.state ?? "queued";
-    return { udid, entries, state, fraction: work.length ? work.filter((item) => !activeRun(item)).length / work.length : null };
+    const pendingPublish = work.some((item) => item.errorCode === "post_verification_pending");
+    const reviewPublish = work.some((item) => item.errorCode === "post_verification_needs_review");
+    return { udid, entries, state, pendingPublish, reviewPublish, fraction: pendingPublish || reviewPublish ? null : work.length ? work.filter((item) => !activeRun(item)).length / work.length : null };
   });
 }
 
@@ -76,6 +79,21 @@ const EVIDENCE: Record<string, string> = { "tiktok-cleanup": "Đã ghi bằng ch
   "frame": "Đã lưu ảnh kiểm tra", "before": "Đã lưu ảnh trước thao tác", "after": "Đã lưu ảnh sau thao tác" };
 
 export function logMessage(row: OperationDeviceLogEntry): string {
+  if (row.action === "publishStep" && row.text?.trim()) return row.text.trim();
+  if (row.action === "publish") {
+    const messages: Record<string, string> = {
+      queued: "Đang chờ bắt đầu đăng bài",
+      transferring: "Đang tải ảnh/video vào điện thoại",
+      imported: "Đã tải ảnh/video vào thư viện điện thoại",
+      posting: "Bắt đầu thao tác Đăng và chờ xác nhận",
+      verifying: "Đã bấm Đăng — chờ TikTok hoàn tất và xác minh liên kết bài",
+      succeeded: "Thành công — đã xác nhận bài đăng",
+      failed_before_dispatch: "Dừng trước khi đăng — xem chi tiết lỗi",
+      uncertain: "Chưa xác nhận bài đã lên — cần kiểm tra trên TikTok",
+      cancelled: "Đã dừng lượt đăng bài",
+    };
+    if (messages[row.state]) return messages[row.state];
+  }
   if (row.action === "nurture" && row.text?.trim()) {
     const text = row.text.trim();
     const exact: Record<string, string> = { queued: "Đang chờ bắt đầu", "bắt đầu": "Bắt đầu phiên", "mở phiên điều khiển mới": "Mở phiên điều khiển mới" };
@@ -91,6 +109,22 @@ export function logMessage(row: OperationDeviceLogEntry): string {
   if (row.action === "evidence") return EVIDENCE[row.state] ?? "Đã lưu bằng chứng kiểm tra";
   const action = LOG_ACTION[row.action] ?? ACTION_PRESENTATION[row.action as ActionKind]?.label ?? "Thao tác";
   return `${action} · ${LOG_STATE[row.state] ?? "Đã cập nhật trạng thái"}`;
+}
+
+/** Detailed runtime milestones supersede the duplicate coarse transition beside them.
+ * Older runs keep their original events; never invent steps or timestamps for history. */
+export function timelineEntries(entries: OperationDeviceLogEntry[]) {
+  const firstStep = entries.findIndex((entry) => entry.action === "publishStep");
+  if (firstStep < 0) return entries;
+  return entries.filter((entry, index) => {
+    if (index < firstStep || entry.action !== "publish") return true;
+    if (["queued", "transferring", "imported", "posting"].includes(entry.state)) return false;
+    const terminalStep: Record<string, string> = {
+      succeeded: "finished", failed_before_dispatch: "failed_before_post", uncertain: "post_uncertain",
+    };
+    const nextStep = entries.slice(index + 1).find((next) => next.action === "publishStep");
+    return !nextStep || nextStep.state !== terminalStep[entry.state];
+  });
 }
 
 export function compactLogEntries(entries: OperationDeviceLogEntry[]) {

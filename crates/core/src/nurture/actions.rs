@@ -2816,7 +2816,7 @@ mod tests {
         let _ = std::fs::remove_file(db_path);
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn landing_in_a_live_room_does_not_settle_as_a_feed_card() {
         // A LIVE room has no compose bar and no icon chain, so it must not pass
         // for a new feed card however long it is on screen. Guards the settle

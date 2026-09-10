@@ -95,6 +95,7 @@ for (const viewport of [
     await page
       .getByRole("button", { name: "Chọn thư mục", exact: true })
       .click();
+    await page.getByRole("button", { name: "Quét", exact: true }).click();
     const source = page.getByRole("textbox", { name: "Thư mục nguồn" });
     await expect(source).toHaveValue("C:/Nội dung/thư mục rỗng");
     await expect(
@@ -119,9 +120,9 @@ for (const viewport of [
     });
 
     await source.fill("C:/Nội dung/quét chậm");
-    await page.getByRole("button", { name: "Quét nguồn", exact: true }).click();
+    await page.getByRole("button", { name: "Quét", exact: true }).click();
     await expect(
-      page.getByText("Đang quét nội dung…", { exact: true }),
+      page.getByText("Đang đọc nội dung…", { exact: true }),
     ).toBeVisible();
     await source.fill("C:/Nội dung/Bài riêng");
     await page.evaluate(() =>
@@ -135,7 +136,7 @@ for (const viewport of [
     await expect(
       page.getByRole("checkbox", { name: "Chọn Bài riêng", exact: true }),
     ).toHaveCount(0);
-    await page.getByRole("button", { name: "Quét nguồn", exact: true }).click();
+    await page.getByRole("button", { name: "Quét", exact: true }).click();
     await expect(
       page.getByRole("checkbox", { name: "Chọn Bài riêng", exact: true }),
     ).toBeVisible();
@@ -143,29 +144,22 @@ for (const viewport of [
       page.getByRole("checkbox", { name: "Chọn Bài riêng", exact: true }),
     ).not.toBeChecked();
     await expect(
-      page.getByRole("button", { name: "Chọn máy", exact: true }),
+      page.getByRole("button", { name: "Kiểm tra & đăng", exact: true }),
     ).toBeDisabled();
 
     await source.fill("C:/Nội dung/21 bài");
-    await page.getByRole("button", { name: "Quét nguồn", exact: true }).click();
-    const bundles = page.getByRole("region", { name: "Chọn bài đăng" });
+    await page.getByRole("button", { name: "Quét", exact: true }).click();
+    const bundles = page.getByRole("region", { name: "Nội dung đăng" });
     await expect(
       bundles.getByRole("checkbox", { name: "Chọn Bộ ảnh 1", exact: true }),
     ).toBeVisible();
-    const seen = new Set<string>();
-    do {
-      const boxes = bundles.getByRole("checkbox", { name: /^Chọn Bộ ảnh/ });
-      for (const box of await boxes.all()) {
-        await expect(box).not.toBeChecked();
-        seen.add((await box.getAttribute("aria-label"))!);
-      }
-      const next = page.getByRole("button", { name: "Bài đăng: trang tiếp" });
-      if (await next.isDisabled()) break;
-      await next.click();
-    } while (seen.size <= 21);
-    expect(seen.size).toBe(21);
+    const boxes = bundles.getByRole("checkbox", { name: /^Chọn Bộ ảnh/ });
+    await expect(boxes).toHaveCount(21);
+    for (const box of await boxes.all()) await expect(box).not.toBeChecked();
+    await boxes.last().scrollIntoViewIfNeeded();
+    await expect(boxes.last()).toBeVisible();
     await expect(
-      page.getByRole("button", { name: "Chọn máy", exact: true }),
+      page.getByRole("button", { name: "Kiểm tra & đăng", exact: true }),
     ).toBeDisabled();
     expect(
       await page.evaluate(

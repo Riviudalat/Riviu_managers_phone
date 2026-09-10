@@ -1,14 +1,16 @@
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
-import { Check, Pencil, Plus, Redo2, Search, Undo2, X } from "lucide-react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
+import { Check, Pencil, Plus, Redo2, Search, Undo2 } from "lucide-react";
 import type { DeviceInfo, DeviceMeta, PublishBundle } from "../../types";
 import { PublishMedia } from "./PublishMedia";
 import { PublishPager } from "./PublishPager";
 import { usePublishPageSize } from "./usePublishPageSize";
 import { PublishDialog } from "./PublishDialog";
 import { assignDevice, fillAssignments } from "./publishAssignments";
-import { orderDevicesByNumber } from "../../deviceNaming";
+import { orderDevicesByNumber, tileNumber } from "../../deviceNaming";
+import { MachineChoice } from "../MachineChoice";
 
 type Props = {
+  scopeControl?: ReactNode;
   bundles: PublishBundle[];
   assignments: Record<string, string>;
   eligible: string[];
@@ -28,8 +30,6 @@ type Drag = {
   ghost?: HTMLElement;
   target?: HTMLElement;
   frame?: number;
-  pageTimer?: ReturnType<typeof setTimeout>;
-  pageTarget?: number;
 };
 export function PublishAssignmentBoard(p: Props) {
   const [compact, setCompact] = useState(
@@ -48,15 +48,13 @@ export function PublishAssignmentBoard(p: Props) {
     [query, setQuery] = useState(""),
     [deviceQuery, setDeviceQuery] = useState("");
   const [filter, setFilter] = useState("all"),
-    [page, setPage] = useState(0),
-    [devicePage, setDevicePage] = useState(0);
+    [page, setPage] = useState(0);
   const [ref, size] = usePublishPageSize(compact ? 64 : 86),
     grid = useRef<HTMLDivElement>(null),
     stage = useRef<HTMLDivElement>(null),
     ghost = useRef<Drag | null>(null),
     suppress = useRef(0);
-  const [capacity, setCapacity] = useState({ columns: 4, rows: 3 }),
-    [preview, setPreview] = useState<{ id: string; udid: string } | null>(null);
+  const [preview, setPreview] = useState<{ id: string; udid: string } | null>(null);
   const [history, setHistory] = useState<{
     undo: Record<string, string>[];
     redo: Record<string, string>[];
@@ -69,27 +67,6 @@ export function PublishAssignmentBoard(p: Props) {
   useEffect(() => {
     setHistory({ undo: [], redo: [] });
   }, [historyKey]);
-  useLayoutEffect(() => {
-    const node = grid.current;
-    if (!node) return;
-    const update = () => {
-      if (node.clientHeight)
-        setCapacity({
-          columns: Math.max(
-            1,
-            Math.min(5, Math.floor((node.clientWidth + 8) / 134)),
-          ),
-          rows: Math.max(
-            1,
-            Math.min(4, Math.floor((node.clientHeight + 8) / 92)),
-          ),
-        });
-    };
-    update();
-    const observer = new ResizeObserver(update);
-    observer.observe(node);
-    return () => observer.disconnect();
-  }, []);
   const visibleBundles = p.bundles.filter(
     (b) =>
       `${b.name} ${b.caption}`.toLowerCase().includes(query.toLowerCase()) &&
@@ -111,12 +88,7 @@ export function PublishAssignmentBoard(p: Props) {
     return `Máy ${meta?.number ?? i + 1}${meta?.alias ? ` · ${meta.alias}` : ""}`;
   };
   const machineRows = available.filter((d) =>
-      name(d.udid).toLowerCase().includes(deviceQuery.toLowerCase()),
-    ),
-    deviceSize = capacity.columns * capacity.rows;
-  const currentDevicePage = Math.min(
-    devicePage,
-    Math.max(0, Math.ceil(machineRows.length / deviceSize) - 1),
+    name(d.udid).toLowerCase().includes(deviceQuery.toLowerCase()),
   );
   const owner = (udid: string) =>
     p.bundles.find((b) => p.assignments[b.id] === udid);
@@ -194,7 +166,6 @@ export function PublishAssignmentBoard(p: Props) {
     if (!d) return;
     ghost.current = null;
     if (d.frame) cancelAnimationFrame(d.frame);
-    if (d.pageTimer) clearTimeout(d.pageTimer);
     d.ghost?.remove();
     d.source.classList.remove("is-drag-source");
     stage.current
@@ -249,21 +220,6 @@ export function PublishAssignmentBoard(p: Props) {
       document.body.append(d.ghost);
     }
     const hit = document.elementFromPoint(e.clientX, e.clientY);
-    const pageButton = hit?.closest<HTMLElement>("[data-pw-device-page]");
-    const pageTarget = pageButton
-      ? Number(pageButton.dataset.pwDevicePage)
-      : undefined;
-    if (pageTarget !== d.pageTarget) {
-      if (d.pageTimer) clearTimeout(d.pageTimer);
-      d.pageTarget = pageTarget;
-      if (pageTarget !== undefined)
-        d.pageTimer = setTimeout(() => {
-          if (ghost.current === d) {
-            setDevicePage(pageTarget);
-            setPreview(null);
-          }
-        }, 650);
-    }
     const target = hit?.closest<HTMLElement>("[data-slot]");
     if (target !== d.target) {
       d.target?.classList.remove("is-drop-target");
@@ -298,6 +254,10 @@ export function PublishAssignmentBoard(p: Props) {
   const previewPost = p.bundles.find((b) => b.id === preview?.id),
     displaced = preview ? owner(preview.udid) : undefined;
   const missing = p.bundles.filter((b) => !p.assignments[b.id]);
+  const selectAllMap = fillAssignments(
+    p.bundles.map(b => b.id), p.assignments,
+    available.filter(device => device.status === "ready" || owner(device.udid)).map(device => device.udid),
+  );
   const planned = fillAssignments(
     p.bundles.map((b) => b.id),
     replace ? {} : p.assignments,
@@ -489,25 +449,25 @@ export function PublishAssignmentBoard(p: Props) {
                 value={deviceQuery}
                 onChange={(e) => {
                   setDeviceQuery(e.target.value);
-                  setDevicePage(0);
                 }}
               />
             </label>
           </header>
+          <div className="pw-machine-tools">
+            <button type="button" className="ghost" title="Ghép các bài chưa có máy với máy sẵn sàng còn trống, mỗi máy một bài" disabled={p.disabled || !missing.length || !selectAllMap} onClick={() => {
+              if (selectAllMap) commit(selectAllMap);
+            }}>Chọn tất cả</button>
+            <button type="button" className="ghost" disabled={p.disabled || missing.length === p.bundles.length} onClick={() => commit({})}>Bỏ chọn</button>
+            {p.scopeControl}
+            <span>{p.bundles.length - missing.length} / {available.length} máy · {machineRows.length} hiển thị</span>
+          </div>
           <div
             ref={grid}
-            className="pw-machine-grid"
-            style={{
-              gridTemplateColumns: `repeat(${capacity.columns},minmax(0,1fr))`,
-              gridTemplateRows: `repeat(${capacity.rows},minmax(0,1fr))`,
-            }}
+            className={`pw-machine-grid machine-choice-grid${available.length > 12 ? " is-compact" : ""}`}
+            role="group"
+            aria-label="Danh sách máy nhận bài"
           >
-            {machineRows
-              .slice(
-                currentDevicePage * deviceSize,
-                (currentDevicePage + 1) * deviceSize,
-              )
-              .map((d) => {
+            {machineRows.map((d) => {
                 const post = owner(d.udid);
                 return (
                   <article
@@ -515,26 +475,19 @@ export function PublishAssignmentBoard(p: Props) {
                     key={d.udid}
                     data-slot={d.udid}
                   >
-                    <header>
-                      <strong title={name(d.udid)}>{name(d.udid)}</strong>
-                      {post ? (
-                        <button
-                          className="ghost icon-only"
-                          type="button"
-                          aria-label={`Bỏ bài khỏi ${name(d.udid)}`}
-                          disabled={p.disabled}
-                          onClick={() => {
-                            const next = { ...p.assignments };
-                            delete next[post.id];
-                            commit(next);
-                          }}
-                        >
-                          <X size={13} />
-                        </button>
-                      ) : (
-                        <small>Trống</small>
-                      )}
-                    </header>
+                    <MachineChoice number={tileNumber(p.devices.findIndex(device => device.udid === d.udid) + 1, p.metas.get(d.udid))}
+                      name={p.metas.get(d.udid)?.alias || d.name} status={d.status} label={`Chọn ${name(d.udid)}`} checked={Boolean(post)}
+                      disabled={p.disabled || (!post && (d.status !== "ready" || !missing.length))}
+                      onChange={(checked) => {
+                        if (!checked && post) {
+                          const next = { ...p.assignments };
+                          delete next[post.id];
+                          commit(next);
+                        } else if (checked) {
+                          const nextPost = chosen && !p.assignments[chosen.id] ? chosen : missing[0];
+                          if (nextPost) assign(nextPost.id, d.udid);
+                        }
+                      }} detail={
                     <button
                       type="button"
                       className="pw-slot-body"
@@ -568,6 +521,7 @@ export function PublishAssignmentBoard(p: Props) {
                         </>
                       )}
                     </button>
+                    } />
                     {preview?.udid === d.udid &&
                       previewPost &&
                       previewPost.id !== post?.id && (
@@ -585,14 +539,6 @@ export function PublishAssignmentBoard(p: Props) {
               </div>
             )}
           </div>
-          <PublishPager
-            label="Máy nhận"
-            dragPaging
-            page={currentDevicePage}
-            size={deviceSize}
-            total={machineRows.length}
-            onPage={setDevicePage}
-          />
         </div>
       </div>
       <div className="pw-drop-summary" role="status">

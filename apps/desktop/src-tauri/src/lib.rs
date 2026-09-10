@@ -21,6 +21,7 @@ mod orchestration_commands;
 mod peripherals;
 mod public_cleanup_commands;
 mod publish_commands;
+mod publish_scheduler;
 mod state;
 mod view_hub;
 mod view_watchdog;
@@ -268,19 +269,26 @@ pub fn run() {
         .setup(|app| {
             let deployment_smoke = DeploymentSmokeState::from_process_args();
             let smoke_active = deployment_smoke.active();
+            let background_dev = cfg!(debug_assertions) && std::env::var("RIVIU_DEV_BACKGROUND").as_deref() == Ok("1");
+            let dev_browser_args = if background_dev {
+                let port = std::env::var("RIVIU_DEV_CDP_PORT").ok().and_then(|value| value.parse::<u16>().ok()).filter(|port| *port >= 1024).unwrap_or(9229);
+                format!("--remote-debugging-address=127.0.0.1 --remote-debugging-port={port} --disable-background-timer-throttling --disable-renderer-backgrounding --disable-backgrounding-occluded-windows")
+            } else { String::new() };
             let window = if let Some(window) = app.get_webview_window("main") {
                 window
             } else {
-                WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
+                let builder = WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
                     .title("Riviu Manager")
                     .inner_size(1440.0, 900.0)
                     .min_inner_size(820.0, 560.0)
                     .resizable(true)
                     .visible(false)
-                    .build()?
+                    .focused(!background_dev);
+                let builder = if background_dev { builder.additional_browser_args(&dev_browser_args) } else { builder };
+                builder.build()?
             };
             window_placement::fit_initial_window(&window)?;
-            if smoke_active {
+            if smoke_active || background_dev {
                 window.hide()?;
             } else {
                 window.show()?;
@@ -487,6 +495,7 @@ pub fn run() {
             automation_commands::automation_archive,
             automation_commands::automation_schedule_list,
             automation_commands::automation_schedule_create,
+            automation_commands::automation_schedule_from_settings,
             automation_commands::automation_schedule_update,
             flow_commands::flow_action_catalog,
             flow_commands::flow_list,
@@ -547,6 +556,9 @@ pub fn run() {
             publish_commands::publish_preflight,
             publish_commands::publish_auto_assign,
             publish_commands::publish_create_campaign,
+            publish_commands::publish_schedule_preflight,
+            publish_commands::publish_schedule_create,
+            publish_commands::publish_schedule_reschedule,
             publish_commands::publish_list,
             publish_commands::publish_get,
             publish_commands::publish_reconcile,
@@ -554,6 +566,8 @@ pub fn run() {
             publish_commands::publish_execute,
             publish_commands::publish_readiness,
             publish_commands::publish_sheet_get_config,
+            publish_commands::publish_sheet_check,
+            publish_commands::publish_sheet_prepare,
             publish_commands::publish_sheet_save_config,
         ])
         .build(tauri::generate_context!())
@@ -1024,6 +1038,10 @@ mod tests {
         (
             "publish_commands/execution.rs",
             include_str!("publish_commands/execution.rs"),
+        ),
+        (
+            "publish_commands/schedule.rs",
+            include_str!("publish_commands/schedule.rs"),
         ),
         (
             "publish_commands/sheet.rs",

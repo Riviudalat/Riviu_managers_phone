@@ -49,6 +49,14 @@ impl DeviceControlPlane {
             .await
             .map_err(|error| driver_error(udid, "availableStorageBytes", error))
     }
+    /// Read-only check for another host competing for the device's UI session.
+    pub async fn verify_automation_transport(&self, udid: &str) -> Result<(), DeviceControlError> {
+        self.driver
+            .verify_automation_transport(udid)
+            .await
+            .map_err(|error| driver_error(udid, "verifyAutomationTransport", error))
+    }
+
     /// Every app the phone reports as present.
     ///
     /// Lease-free on purpose, following `resolve_tiktok_package` directly above: this

@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<hierarchy>
+  <node package="com.zhiliaoapp.musically" resource-id="com.zhiliaoapp.musically:id/wy5" text="Hot" displayed="true" enabled="true" clickable="false" selected="false" bounds="[43,1117][111,1167]" />
+  <node package="com.zhiliaoapp.musically" resource-id="com.zhiliaoapp.musically:id/wy5" text="For You" displayed="true" enabled="true" clickable="false" selected="true" bounds="[175,1117][313,1167]" />
+  <node package="com.zhiliaoapp.musically" resource-id="com.zhiliaoapp.musically:id/wy5" text="Favorites" displayed="true" enabled="true" clickable="false" selected="false" bounds="[377,1117][545,1167]" />
+  <node package="com.zhiliaoapp.musically" resource-id="com.zhiliaoapp.musically:id/wy5" text="Recent" displayed="true" enabled="true" clickable="false" selected="false" bounds="[609,1117][740,1167]" />
+  <node package="com.zhiliaoapp.musically" resource-id="com.zhiliaoapp.musically:id/viewpager_container" text="" displayed="true" enabled="true" clickable="false" selected="false" bounds="[0,1201][996,1931]" />
+  <node package="com.zhiliaoapp.musically" resource-id="com.zhiliaoapp.musically:id/vertical_item_music_new_rl" text="" displayed="true" enabled="true" clickable="false" selected="false" bounds="[0,1217][996,1375]" />
+  <node package="com.zhiliaoapp.musically" resource-id="com.zhiliaoapp.musically:id/nrm" text="" displayed="true" enabled="true" clickable="false" selected="false" bounds="[199,1252][241,1294]" />
+  <node package="com.zhiliaoapp.musically" resource-id="com.zhiliaoapp.musically:id/title" text="KhÃ´ng Thá»i Gian" displayed="true" enabled="true" clickable="false" selected="false" bounds="[252,1247][585,1300]" />
+  <node package="com.zhiliaoapp.musically" resource-id="com.zhiliaoapp.musically:id/z_g" text="DÆ°Æ¡ng Domic Â· â1783 posts" displayed="true" enabled="true" clickable="false" selected="false" bounds="[199,1305][586,1344]" />
+  <node package="com.zhiliaoapp.musically" resource-id="com.zhiliaoapp.musically:id/vertical_item_music_new_rl" text="" displayed="true" enabled="true" clickable="false" selected="false" bounds="[0,1375][996,1533]" />
+  <node package="com.zhiliaoapp.musically" resource-id="com.zhiliaoapp.musically:id/title" text="GIáº¢I Cá»¨U THáº¾ GIá»I (Short #2)" displayed="true" enabled="true" clickable="false" selected="false" bounds="[199,1405][796,1458]" />
+  <node package="com.zhiliaoapp.musically" resource-id="com.zhiliaoapp.musically:id/z_g" text="TINH HÃ &quot;SAY HI&quot; &amp; JSOL &amp; SÆ¡n.K &amp; IVAN &amp; HYO &amp; Softest Hard Â· â200 posts" displayed="true" enabled="true" clickable="false" selected="false" bounds="[199,1463][921,1502]" />
+  <node package="com.zhiliaoapp.musically" resource-id="com.zhiliaoapp.musically:id/vertical_item_music_new_rl" text="" displayed="true" enabled="true" clickable="false" selected="false" bounds="[0,1533][996,1691]" />
+  <node package="com.zhiliaoapp.musically" resource-id="com.zhiliaoapp.musically:id/title" text="ThÃ¬ Ra MÃ¬nh ÄÃ£ YÃªu Nhau Xong Rá»i" displayed="true" enabled="true" clickable="false" selected="false" bounds="[199,1563][893,1616]" />
+  <node package="com.zhiliaoapp.musically" resource-id="com.zhiliaoapp.musically:id/z_g" text="Jack - J97 Â· â180 posts" displayed="true" enabled="true" clickable="false" selected="false" bounds="[199,1621][524,1660]" />
+  <node package="com.zhiliaoapp.musically" resource-id="com.zhiliaoapp.musically:id/vertical_item_music_new_rl" text="" displayed="true" enabled="true" clickable="false" selected="false" bounds="[0,1691][996,1849]" />
+  <node package="com.zhiliaoapp.musically" resource-id="com.zhiliaoapp.musically:id/title" text="CHIáº¾N" displayed="true" enabled="true" clickable="false" selected="false" bounds="[199,1721][328,1774]" />
+  <node package="com.zhiliaoapp.musically" resource-id="com.zhiliaoapp.musically:id/z_g" text="Anh Trai VÆ°á»£t NgÃ n ChÃ´ng Gai &amp; Thanh Duy &amp; THá» (Da LAB) &amp; Will &amp; HoÃ ng Rob &amp; HoÃ ng DÅ©ng Â· â99 posts" displayed="true" enabled="true" clickable="false" selected="false" bounds="[199,1779][924,1819]" />
+  <node package="com.zhiliaoapp.musically" resource-id="com.zhiliaoapp.musically:id/vertical_item_music_new_rl" text="" displayed="true" enabled="true" clickable="false" selected="false" bounds="[0,1849][996,1931]" />
+  <node package="com.zhiliaoapp.musically" resource-id="com.zhiliaoapp.musically:id/title" text="Máº¥t TrÃ­.. Nhá»" displayed="true" enabled="true" clickable="false" selected="false" bounds="[199,1879][452,1931]" />
+</hierarchy>

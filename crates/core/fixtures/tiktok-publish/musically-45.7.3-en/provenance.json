@@ -1,0 +1,100 @@
+{
+  "package": "com.zhiliaoapp.musically",
+  "version": "45.7.3",
+  "versionCode": "2024507030",
+  "locale": "en",
+  "serial": "ce031713b0c610ab0c",
+  "publicPost": false,
+  "files": [
+    {
+      "file": "03-composer.xml",
+      "sha256": "731a191d37f3d94c36aab339e41b30be5ed0d48a9f3768c85148b042425c013a",
+      "source": "target/box-20260908/03-composer.xml",
+      "sourceSha256": "edbc2287ce6c236fbd406e21e89de6baf328f370b301c15b8be8173cce23b43a"
+    },
+    {
+      "file": "06-camera.xml",
+      "sha256": "a25bf5f0b28c07a969a99f8fb68b69ddd95b9dbd2ab4b76b10a64e624191baa6",
+      "source": "target/box-20260908/06-camera.xml",
+      "sourceSha256": "e89e69117a9f9e3bf9f4483b00aea1a503f181c33f80ceb0e76bf910826b2952"
+    },
+    {
+      "file": "07-one.xml",
+      "sha256": "98f08f0f13b8dc8693a7d96aaf4e691cc688f32e4ee0bb1f1f28b1d514950f4d",
+      "source": "target/box-20260908/07-one.xml",
+      "sourceSha256": "732103aa4ba15088abda886dda77afb9d8a065b73a061e1b696e0b34737881be"
+    },
+    {
+      "file": "08-two.xml",
+      "sha256": "a974f5d0f02903177d19be01a3c0ffe2fc355f3e848cd1712eb894338ebfb68e",
+      "source": "target/box-20260908/08-two.xml",
+      "sourceSha256": "4db190da08bff84e669d993fb1f66020e2db2bc2cb4dd6344e5d0cff49203c84"
+    },
+    {
+      "file": "09-three.xml",
+      "sha256": "ce08b531e3f2245a0c7455945c34fc6fe7bb095dd233526b7dc35ff6df8da34d",
+      "source": "target/box-20260908/09-three.xml",
+      "sourceSha256": "800e507f4a4a6d74672ff73009f4c2e6fa3f9edb2e693ef16dad723943eb1368"
+    },
+    {
+      "file": "11-sound.xml",
+      "sha256": "49438d68b33c875281e8c85b0bbdf59d0413522ccd897c359f2c8bd6ba58e871",
+      "source": "target/box-20260908/11-sound.xml",
+      "sourceSha256": "d161ba676b01b0b46f249183abca282083f8820b40231d05d155ef9ee0c4c65f"
+    },
+    {
+      "file": "13-hot-stable.xml",
+      "sha256": "a74788cc925cb86f2c83b2dfa6db1a54a82c21d1751dc9967f1f58df238b4353",
+      "source": "target/box-20260908/13-hot-stable.xml",
+      "sourceSha256": "84b862c64e29b8bd106bc665da6ba087583fc8f26b293c7dc2e147637d5f3aa4"
+    },
+    {
+      "file": "14-selected.xml",
+      "sha256": "f8a7ba312524d1a54961808f2bcf98b913e0826921990fdfdf1070d9ad42966c",
+      "source": "target/box-20260908/14-selected.xml",
+      "sourceSha256": "2ed2238e62975d1d0c76e38b733553f943865ff5a310037aa3c48655cc6f142a"
+    },
+    {
+      "file": "15-readback.xml",
+      "sha256": "9f5f433c9e12766a781f641451ae12ca28d2b17733eae52701a62acbd45dd09d",
+      "source": "target/box-20260908/15-readback.xml",
+      "sourceSha256": "6dcb39049f598b45598e1264179c2e553f0df9a47abebed8b27c8ece129a2011"
+    },
+    {
+      "file": "18-typed.xml",
+      "sha256": "2937fe2b067eb7dd7760fa19f4d706a7cf800d37253d6121260241431301bb0b",
+      "source": "target/box-20260908/18-typed.xml",
+      "sourceSha256": "6aadf58c06a6d6f76b1b796b194975f502fd3aade5c07df142c6453f9654ba78"
+    },
+    {
+      "file": "19-back-editor.xml",
+      "sha256": "9f5f433c9e12766a781f641451ae12ca28d2b17733eae52701a62acbd45dd09d",
+      "source": "target/box-20260908/19-back-editor.xml",
+      "sourceSha256": "0c02eaa9fcd1fd1cc25c1d2ebec9da7d50e2798660d9d930a87725e7bf9617ba"
+    },
+    {
+      "file": "20-caption-return.xml",
+      "sha256": "998e7f6bcb78a0ae2e6efdca2d5ecd772eb3264e076bce809732236666bd9be0",
+      "source": "target/box-20260908/20-caption-return.xml",
+      "sourceSha256": "aea7c58a0243ee68e96b8e8323246eedb063beeb02447bbf40181f2b8e400d8e"
+    },
+    {
+      "file": "28-comment-focused.xml",
+      "sha256": "7910d66bc744738f855a82a0dce64cd77508751392eec230a332e7759b7b3f7f",
+      "source": "target/box-20260908/28-comment-focused.xml",
+      "sourceSha256": "f8ec097cb5014d8bc76ba6c3deed10b90bc4a4798cefcafb7812b79f2928c7d4"
+    },
+    {
+      "file": "29-comment-unsent.xml",
+      "sha256": "e1a80c06113dbb95eec2d380af304f7e50a867f0818541adc7c4efeb209bd910",
+      "source": "target/box-20260908/29-comment-unsent.xml",
+      "sourceSha256": "e5c14532606fbfc668474068cc991a1c6a13bd615c8eb8cbcb9b6996c94131a4"
+    },
+    {
+      "file": "30-comment-cleared.xml",
+      "sha256": "7910d66bc744738f855a82a0dce64cd77508751392eec230a332e7759b7b3f7f",
+      "source": "target/box-20260908/30-comment-cleared.xml",
+      "sourceSha256": "f8ec097cb5014d8bc76ba6c3deed10b90bc4a4798cefcafb7812b79f2928c7d4"
+    }
+  ]
+}

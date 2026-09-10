@@ -1,0 +1,4 @@
+<hierarchy>
+  <android.widget.Button package="com.zhiliaoapp.musically" class="android.widget.Button" text="" resource-id="com.zhiliaoapp.musically:id/bot" clickable="true" enabled="true" selected="false" bounds="[16,63][131,179]" displayed="true" />
+  <android.widget.EditText package="com.zhiliaoapp.musically" class="android.widget.EditText" text="RiviuCompatibility20260908" resource-id="com.zhiliaoapp.musically:id/gx_" clickable="true" enabled="true" selected="false" bounds="[42,201][673,608]" displayed="true" />
+</hierarchy>

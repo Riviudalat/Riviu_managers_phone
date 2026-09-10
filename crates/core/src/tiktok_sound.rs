@@ -4,7 +4,7 @@
 //! selecting the wrong row is still a public-post input even though the selection itself is
 //! reversible. Unknown packages, versions and locales therefore have no plan.
 
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::time::Duration;
 
 use anyhow::Context;
@@ -22,6 +22,7 @@ const POLL: Duration = Duration::from_millis(250);
 /// The exact hierarchy shape measured for one TikTok build.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SoundPickerPlan {
+    package: &'static str,
     entry_id: &'static str,
     current_title_id: &'static str,
     section_label: &'static str,
@@ -30,20 +31,238 @@ pub struct SoundPickerPlan {
     title_id: &'static str,
     artist_id: &'static str,
     choose_id: Option<&'static str>,
-    close_with_back: bool,
+    layout: SoundPickerLayout,
+    selection: SoundSelectionMode,
+    post_back_id: Option<&'static str>,
+    provenance: &'static str,
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SoundPickerLayout {
+    ElementQueries,
+    TabbedSnapshot(SoundSnapshotLayout),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SoundSnapshotLayout {
+    tab_id: &'static str,
+    viewport_id: &'static str,
+    boundary_rows: SoundBoundaryRows,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SoundBoundaryRows {
+    RequireCompleteText,
+    ExcludeBottomEdge,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SoundSelectionMode {
+    Inline { marker_ids: &'static [&'static str] },
+}
+
+struct MeasuredSoundPicker {
+    version: &'static str,
+    language: &'static str,
+    plan: SoundPickerPlan,
+}
+
+// A measurement owns its behavior as well as its locators. Identical IDs across
+// versions are not aliases, and an entry ID never chooses a parser or close route.
+const MEASURED_SOUND_PICKERS: &[MeasuredSoundPicker] = &[
+    MeasuredSoundPicker {
+        version: "45.4.3", language: "en",
+        plan: SoundPickerPlan {
+            package: "com.zhiliaoapp.musically",
+            entry_id: ":id/dmk", current_title_id: ":id/zy1",
+            section_label: "Hot", canonical_section: "trending",
+            row_id: ":id/vertical_item_music_new_rl", title_id: ":id/title",
+            artist_id: ":id/yq_", choose_id: None,
+            layout: SoundPickerLayout::TabbedSnapshot(SoundSnapshotLayout {
+                tab_id: ":id/wf9", viewport_id: ":id/viewpager_container",
+                boundary_rows: SoundBoundaryRows::ExcludeBottomEdge,
+            }),
+            selection: SoundSelectionMode::Inline { marker_ids: &[":id/nd_"] },
+            post_back_id: Some(":id/bgy"),
+            provenance: "SM-G955F ce04171435f104080c, Android 9/en, 08/09/2026 code2024504030; isolated album, ordinal 1/2, Hot, selected sound, caption roundtrip, Send empty/typed/cleared",
+        },
+    },
+    MeasuredSoundPicker {
+        version: "46.1.3", language: "en",
+        plan: SoundPickerPlan {
+            package: "com.zhiliaoapp.musically",
+            entry_id: ":id/dta", current_title_id: ":id/tv_top_text",
+            section_label: "Hot", canonical_section: "trending",
+            row_id: ":id/vertical_item_music_new_rl", title_id: ":id/title",
+            artist_id: ":id/zba", choose_id: None,
+            layout: SoundPickerLayout::TabbedSnapshot(SoundSnapshotLayout {
+                tab_id: ":id/wzs", viewport_id: ":id/viewpager_container",
+                boundary_rows: SoundBoundaryRows::ExcludeBottomEdge,
+            }),
+            selection: SoundSelectionMode::Inline { marker_ids: &[":id/ntf"] },
+            post_back_id: Some(":id/bn7"),
+            provenance: "SM-G955F ce051715e15b2c2e02, Android 9/en, 08/09/2026 code2024601030; isolated album, ordinal 1/2, Hot, selected sound, caption roundtrip, Send empty/typed/cleared",
+        },
+    },
+    MeasuredSoundPicker {
+        version: "46.4.3", language: "en",
+        plan: SoundPickerPlan {
+            package: "com.zhiliaoapp.musically",
+            entry_id: ":id/dwh", current_title_id: ":id/tv_top_text",
+            section_label: "Hot", canonical_section: "trending",
+            row_id: ":id/vertical_item_music_new_rl", title_id: ":id/title",
+            artist_id: ":id/zp2", choose_id: None,
+            layout: SoundPickerLayout::TabbedSnapshot(SoundSnapshotLayout {
+                tab_id: ":id/xbv", viewport_id: ":id/viewpager_container",
+                boundary_rows: SoundBoundaryRows::ExcludeBottomEdge,
+            }),
+            selection: SoundSelectionMode::Inline { marker_ids: &[":id/o2k"] },
+            post_back_id: Some(":id/bor"),
+            provenance: "SM-G955F ce031713aadf361905, Android 9/en, 08/09/2026 code2024604030; isolated album, ordinal 1/2, Hot, selected sound, caption roundtrip, Send empty/typed/cleared",
+        },
+    },
+
+    MeasuredSoundPicker {
+        version: "45.7.3",
+        language: "en",
+        plan: SoundPickerPlan {
+            package: "com.zhiliaoapp.musically",
+            entry_id: ":id/dou",
+            current_title_id: ":id/tv_top_text",
+            section_label: "Hot",
+            canonical_section: "trending",
+            row_id: ":id/vertical_item_music_new_rl",
+            title_id: ":id/title",
+            artist_id: ":id/z3k",
+            choose_id: None,
+            layout: SoundPickerLayout::TabbedSnapshot(SoundSnapshotLayout {
+                tab_id: ":id/wrv",
+                viewport_id: ":id/viewpager_container",
+                boundary_rows: SoundBoundaryRows::ExcludeBottomEdge,
+            }),
+            selection: SoundSelectionMode::Inline { marker_ids: &[":id/nms"] },
+            post_back_id: Some(":id/bix"),
+            provenance: "musically/en/45.7.3 code2024507030, measured 2026-09-08 on ce031713b0c610ab0c; three-photo selection, Hot, selected row/editor/caption return",
+        },
+    },
+    MeasuredSoundPicker {
+        version: "38.3.2",
+        language: "en",
+        plan: SoundPickerPlan {
+            package: "com.ss.android.ugc.trill",
+            entry_id: ":id/c_4",
+            current_title_id: ":id/so9",
+            section_label: "Recommended",
+            canonical_section: "recommended",
+            row_id: ":id/ta8",
+            title_id: ":id/title",
+            artist_id: ":id/rr5",
+            // dfu is the trim scissors, not a choose control (live 2026-09-06).
+            choose_id: None,
+            layout: SoundPickerLayout::ElementQueries,
+            selection: SoundSelectionMode::Inline {
+                marker_ids: &[":id/dfu", ":id/jk1"],
+            },
+            post_back_id: Some(":id/aun"),
+            provenance: "trill/en/38.3.2, measured 2026-09-04 on 9889db374744474635",
+        },
+    },
+    MeasuredSoundPicker {
+        version: "46.2.1",
+        language: "en",
+        plan: SoundPickerPlan {
+            package: "com.zhiliaoapp.musically",
+            entry_id: ":id/dvc",
+            current_title_id: ":id/tv_top_text",
+            section_label: "Hot",
+            canonical_section: "trending",
+            row_id: ":id/vertical_item_music_new_rl",
+            title_id: ":id/title",
+            artist_id: ":id/zgj",
+            // This layout has no dedicated choose icon. The measured title area is the
+            // row's stable selection target; the readback below still decides whether it
+            // took.
+            choose_id: None,
+            layout: SoundPickerLayout::TabbedSnapshot(SoundSnapshotLayout {
+                tab_id: ":id/x4y", viewport_id: ":id/viewpager_container",
+                boundary_rows: SoundBoundaryRows::ExcludeBottomEdge,
+            }),
+            selection: SoundSelectionMode::Inline { marker_ids: &[":id/nx3"] },
+            post_back_id: Some(":id/bot"),
+            provenance: "musically/en/46.2.1, remeasured 08-09-2026 on ce04171411ae6a1504; Hot inline marker, Back, editor title and caption roundtrip; AGENTS.md ?9.189",
+        },
+    },
+    MeasuredSoundPicker {
+        version: "46.2.42",
+        language: "en",
+        plan: SoundPickerPlan {
+            package: "com.zhiliaoapp.musically",
+            entry_id: ":id/dv3",
+            current_title_id: ":id/tv_top_text",
+            section_label: "Hot",
+            canonical_section: "trending",
+            row_id: ":id/vertical_item_music_new_rl",
+            title_id: ":id/title",
+            artist_id: ":id/zdw",
+            choose_id: None,
+            layout: SoundPickerLayout::TabbedSnapshot(SoundSnapshotLayout {
+                tab_id: ":id/x2k",
+                viewport_id: ":id/viewpager_container",
+                boundary_rows: SoundBoundaryRows::RequireCompleteText,
+            }),
+            selection: SoundSelectionMode::Inline {
+                marker_ids: &[":id/nve"],
+            },
+            post_back_id: Some(":id/bot"),
+            provenance: "musically/en/46.2.42, measured 2026-09-04 on ce0517155ab38c390d",
+        },
+    },
+    MeasuredSoundPicker {
+        version: "46.0.41",
+        language: "en",
+        plan: SoundPickerPlan {
+            package: "com.zhiliaoapp.musically",
+            entry_id: ":id/dsv",
+            current_title_id: ":id/tv_top_text",
+            section_label: "Hot",
+            canonical_section: "trending",
+            row_id: ":id/vertical_item_music_new_rl",
+            title_id: ":id/title",
+            artist_id: ":id/z_g",
+            choose_id: None,
+            layout: SoundPickerLayout::TabbedSnapshot(SoundSnapshotLayout {
+                tab_id: ":id/wy5",
+                viewport_id: ":id/viewpager_container",
+                // The artist is visibly clipped despite both text nodes existing.
+                boundary_rows: SoundBoundaryRows::ExcludeBottomEdge,
+            }),
+            selection: SoundSelectionMode::Inline { marker_ids: &[":id/nrm"] },
+            post_back_id: Some(":id/bmy"),
+            provenance: "musically/en/46.0.41 code2024600410, measured 2026-09-08 on ce011711c354be2005; selected row/editor/caption return verified before Post",
+        },
+    },
+];
 
 impl SoundPickerPlan {
     pub(crate) fn post_back_query(self) -> Option<ElementQuery<'static>> {
-        match self.entry_id {
-            ":id/c_4" => Some(ElementQuery::ResourceIdSuffix(":id/aun")),
-            ":id/dv3" => Some(ElementQuery::ResourceIdSuffix(":id/bot")),
-            _ => None,
+        self.post_back_id.map(ElementQuery::ResourceIdSuffix)
+    }
+
+    fn snapshot_layout(self) -> Option<SoundSnapshotLayout> {
+        match self.layout {
+            SoundPickerLayout::ElementQueries => None,
+            SoundPickerLayout::TabbedSnapshot(layout) => Some(layout),
         }
     }
 
-    fn uses_carousel_snapshot(self) -> bool {
-        self.entry_id == ":id/dv3"
+    fn closes_with_back(self) -> bool {
+        matches!(self.selection, SoundSelectionMode::Inline { .. })
+    }
+
+    fn selected_marker_ids(self) -> &'static [&'static str] {
+        match self.selection {
+            SoundSelectionMode::Inline { marker_ids } => marker_ids,
+        }
     }
 
     /// Resolve only an exact build/locale tuple measured on the attached fleet.
@@ -54,62 +273,18 @@ impl SoundPickerPlan {
             .next()
             .unwrap_or_default()
             .to_ascii_lowercase();
-        if language != "en" {
-            return None;
-        }
-        match (package.trim(), version.trim()) {
-            ("com.ss.android.ugc.trill", "38.3.2") => Some(Self {
-                entry_id: ":id/c_4",
-                current_title_id: ":id/so9",
-                section_label: "Recommended",
-                canonical_section: "recommended",
-                row_id: ":id/ta8",
-                title_id: ":id/title",
-                artist_id: ":id/rr5",
-                // dfu is the trim scissors, not a choose control (live 2026-09-06).
-                choose_id: None,
-                close_with_back: true,
-            }),
-            ("com.zhiliaoapp.musically", "46.2.1") => Some(Self {
-                entry_id: ":id/dvc",
-                current_title_id: ":id/tv_top_text",
-                section_label: "Hot",
-                canonical_section: "trending",
-                row_id: ":id/vertical_item_music_new_rl",
-                title_id: ":id/title",
-                artist_id: ":id/zgj",
-                // This layout has no dedicated choose icon. The measured title area is the
-                // row's stable selection target; the readback below still decides whether it
-                // took.
-                choose_id: None,
-                close_with_back: false,
-            }),
-            ("com.zhiliaoapp.musically", "46.2.42") => Some(Self {
-                entry_id: ":id/dv3",
-                current_title_id: ":id/tv_top_text",
-                section_label: "Hot",
-                canonical_section: "trending",
-                row_id: ":id/vertical_item_music_new_rl",
-                title_id: ":id/title",
-                artist_id: ":id/zdw",
-                choose_id: None,
-                close_with_back: true,
-            }),
-            _ => None,
-        }
+        MEASURED_SOUND_PICKERS
+            .iter()
+            .find(|entry| {
+                entry.plan.package == package.trim()
+                    && entry.language == language
+                    && entry.version == version.trim()
+            })
+            .map(|entry| entry.plan)
     }
 
     pub fn provenance(self) -> &'static str {
-        match (self.entry_id, self.current_title_id) {
-            (":id/c_4", ":id/so9") => "trill/en/38.3.2, measured 2026-09-04 on 9889db374744474635",
-            (":id/dvc", ":id/tv_top_text") => {
-                "musically/en/46.2.1, measured 2026-09-04 on ce11171beb408a1501"
-            }
-            (":id/dv3", ":id/tv_top_text") => {
-                "musically/en/46.2.42, measured 2026-09-04 on ce0517155ab38c390d"
-            }
-            _ => "unknown",
-        }
+        self.provenance
     }
 }
 
@@ -117,6 +292,7 @@ impl SoundPickerPlan {
 #[derive(Debug, Clone, PartialEq)]
 pub struct ObservedSoundPool {
     pub candidates: Vec<SoundCandidate>,
+    maximum_visible: usize,
     targets: Vec<ElementBox>,
     selected_index: Option<usize>,
 }
@@ -149,8 +325,8 @@ pub async fn open_and_observe_sounds(
         .await
         .context("open sound picker")?;
 
-    if plan.uses_carousel_snapshot() {
-        snapshot::select_hot_tab(session).await?;
+    if plan.snapshot_layout().is_some() {
+        snapshot::select_section_tab(session, plan).await?;
     }
 
     observe_sound_pool(session, plan, maximum_visible).await
@@ -161,11 +337,11 @@ async fn observe_sound_pool(
     plan: SoundPickerPlan,
     maximum_visible: usize,
 ) -> anyhow::Result<ObservedSoundPool> {
-    if plan.uses_carousel_snapshot() {
+    if plan.snapshot_layout().is_some() {
         return snapshot::observe(session, plan, maximum_visible).await;
     }
     let deadline = Instant::now() + PICKER_WINDOW;
-    let (rows, titles, artists, choices) = loop {
+    let (rows, titles, artists, choices, markers) = loop {
         let section = session
             .locate_all_described(ElementQuery::Text {
                 value: plan.section_label,
@@ -185,25 +361,26 @@ async fn observe_sound_pool(
             .locate_all_described(ElementQuery::ResourceIdSuffix(plan.artist_id))
             .await
             .unwrap_or_default();
-        let mut choices = match plan.choose_id.or(plan.close_with_back.then_some(":id/dfu")) {
+        let choices = match plan.choose_id {
             Some(id) => session
                 .locate_all(ElementQuery::ResourceIdSuffix(id))
                 .await
                 .unwrap_or_default(),
             None => Vec::new(),
         };
-        if plan.close_with_back {
-            // Carousel uses an equalizer inside the active row instead of the video
-            // trim scissors. Both are selection evidence, never tap targets.
-            choices.extend(
+        let mut markers = Vec::new();
+        for id in plan.selected_marker_ids() {
+            // An equalizer or trim control can prove the selected row without
+            // becoming a tap target. The measured plan names both independently.
+            markers.extend(
                 session
-                    .locate_all(ElementQuery::ResourceIdSuffix(":id/jk1"))
+                    .locate_all(ElementQuery::ResourceIdSuffix(id))
                     .await
                     .unwrap_or_default(),
             );
         }
         if section.len() == 1 && !rows.is_empty() && !titles.is_empty() {
-            break (rows, titles, artists, choices);
+            break (rows, titles, artists, choices, markers);
         }
         if Instant::now() >= deadline {
             anyhow::bail!("sound picker did not expose one measured section with candidate rows");
@@ -211,7 +388,15 @@ async fn observe_sound_pool(
         tokio::time::sleep(POLL).await;
     };
 
-    assemble_pool(plan, rows, titles, artists, choices, maximum_visible)
+    assemble_pool(
+        plan,
+        rows,
+        titles,
+        artists,
+        choices,
+        markers,
+        maximum_visible,
+    )
 }
 
 /// Tap the selected row once and prove the editor now names the same sound.
@@ -225,7 +410,7 @@ pub async fn choose_and_confirm_sound(
         .candidates
         .get(index)
         .context("sound selection index is outside the observed pool")?;
-    let fresh = observe_sound_pool(session, plan, pool.candidates.len()).await?;
+    let fresh = observe_sound_pool(session, plan, pool.maximum_visible).await?;
     let target = reproof_target(pool, &fresh, index)?;
     if fresh.selected_index != Some(index) {
         session
@@ -233,12 +418,12 @@ pub async fn choose_and_confirm_sound(
             .await
             .context("select observed sound")?;
     }
-    if plan.close_with_back {
+    if plan.closes_with_back() {
         // The measured Android sheet selects inline; Back closes only that sheet.
         // Prove the same pool remains before dismissing it, then prove the editor chip.
         let deadline = Instant::now() + READBACK_WINDOW;
         loop {
-            let selected_pool = observe_sound_pool(session, plan, pool.candidates.len()).await?;
+            let selected_pool = observe_sound_pool(session, plan, pool.maximum_visible).await?;
             reproof_target(pool, &selected_pool, index)?;
             if selected_pool.selected_index == Some(index) {
                 break;
@@ -303,6 +488,7 @@ fn assemble_pool(
     titles: Vec<ElementBox>,
     artists: Vec<ElementBox>,
     choices: Vec<ElementBox>,
+    markers: Vec<ElementBox>,
     maximum_visible: usize,
 ) -> anyhow::Result<ObservedSoundPool> {
     rows.sort_by(|left, right| left.y.total_cmp(&right.y));
@@ -310,7 +496,7 @@ fn assemble_pool(
     let mut targets = Vec::new();
     let mut selected_index = None;
     for (index, row) in rows.into_iter().take(maximum_visible).enumerate() {
-        if plan.close_with_back && !inside(&row, &choices).is_empty() {
+        if plan.closes_with_back() && !inside(&row, &markers).is_empty() {
             anyhow::ensure!(selected_index.is_none(), "ambiguous selected sound row");
             selected_index = Some(index);
         }
@@ -345,15 +531,32 @@ fn assemble_pool(
         !candidates.is_empty(),
         "sound picker exposed no complete candidate row"
     );
-    let mut unique_titles = HashSet::with_capacity(candidates.len());
-    anyhow::ensure!(
-        candidates
-            .iter()
-            .all(|candidate| unique_titles.insert(candidate.title.clone())),
-        "sound picker contains duplicate titles; the editor chip cannot prove which artist was selected"
-    );
+    // Skip every ambiguous title, retaining the original observation window for
+    // reproof. One duplicate recommendation must not discard distinct usable songs.
+    let mut counts = HashMap::new();
+    for candidate in &candidates {
+        *counts.entry(candidate.title.clone()).or_insert(0) += 1;
+    }
+    let mut unique_candidates = Vec::new();
+    let mut unique_targets = Vec::new();
+    let mut unique_selected = None;
+    for (index, (candidate, target)) in candidates.into_iter().zip(targets).enumerate() {
+        if counts[&candidate.title] != 1 {
+            continue;
+        }
+        if selected_index == Some(index) {
+            unique_selected = Some(unique_candidates.len());
+        }
+        unique_candidates.push(candidate);
+        unique_targets.push(target);
+    }
+    anyhow::ensure!(!unique_candidates.is_empty(), "sound picker contains only duplicate titles; the editor chip cannot prove which artist was selected");
+    let candidates = unique_candidates;
+    let targets = unique_targets;
+    let selected_index = unique_selected;
     Ok(ObservedSoundPool {
         candidates,
+        maximum_visible,
         targets,
         selected_index,
     })
@@ -578,6 +781,7 @@ mod tests {
             rows.clone(),
             titles.clone(),
             artists.clone(),
+            vec![],
             vec![element(120.0, None), element(130.0, None)],
             5,
         )
@@ -588,6 +792,7 @@ mod tests {
             rows,
             titles,
             artists,
+            vec![],
             vec![element(120.0, None), element(220.0, None)],
             5,
         )
@@ -600,6 +805,7 @@ mod tests {
     #[test]
     fn sound_reproof_rejects_changed_pool_and_uses_fresh_position() {
         let expected = ObservedSoundPool {
+            maximum_visible: 5,
             selected_index: None,
             candidates: vec![SoundCandidate {
                 section: "recommended".into(),
@@ -633,11 +839,97 @@ mod tests {
     #[test]
     fn plans_are_exactly_version_and_locale_keyed() {
         let trill = SoundPickerPlan::resolve("com.ss.android.ugc.trill", "en", "38.3.2").unwrap();
-        assert!(trill.choose_id.is_none() && trill.close_with_back);
+        assert!(trill.choose_id.is_none() && trill.closes_with_back());
         assert!(SoundPickerPlan::resolve("com.ss.android.ugc.trill", "en-US", "38.3.2").is_some());
         assert!(SoundPickerPlan::resolve("com.zhiliaoapp.musically", "en", "46.2.1").is_some());
         assert!(SoundPickerPlan::resolve("com.zhiliaoapp.musically", "en", "46.2.42").is_some());
         assert!(SoundPickerPlan::resolve("com.ss.android.ugc.trill", "vi", "38.3.2").is_none());
+        assert!(SoundPickerPlan::resolve("com.zhiliaoapp.musically", "en-US", "46.0.41").is_some());
+        assert!(SoundPickerPlan::resolve("com.zhiliaoapp.musically", "en-US", "45.7.3").is_some());
+        for version in [
+            "45.7.2", "45.7.4", "46.1.4", "46.0.40", "46.0.42", "46.2", "",
+        ] {
+            assert!(SoundPickerPlan::resolve("com.zhiliaoapp.musically", "en", version).is_none());
+        }
+    }
+
+    #[test]
+    fn entry_ids_do_not_choose_layout_close_route_or_provenance() {
+        for measurement in MEASURED_SOUND_PICKERS {
+            let plan = measurement.plan;
+            let moved = SoundPickerPlan {
+                entry_id: ":id/new_entry_fixture",
+                ..plan
+            };
+            assert_eq!(moved.snapshot_layout(), plan.snapshot_layout());
+            assert_eq!(moved.closes_with_back(), plan.closes_with_back());
+            assert_eq!(moved.post_back_query(), plan.post_back_query());
+            assert_eq!(moved.provenance(), plan.provenance());
+        }
+        let inline = SoundPickerPlan::resolve("com.zhiliaoapp.musically", "en", "46.2.1").unwrap();
+        let decoy = SoundPickerPlan {
+            entry_id: ":id/dv3",
+            ..inline
+        };
+        assert_eq!(decoy.snapshot_layout().unwrap().tab_id, ":id/x4y");
+        assert!(decoy.closes_with_back());
+        assert_eq!(
+            decoy.post_back_query(),
+            Some(ElementQuery::ResourceIdSuffix(":id/bot"))
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn inline_marker_locator_is_plan_data_not_a_trill_constant() {
+        let base = SoundPickerPlan::resolve("com.ss.android.ugc.trill", "en", "38.3.2").unwrap();
+        let plan = SoundPickerPlan {
+            entry_id: ":id/fixture_entry",
+            selection: SoundSelectionMode::Inline {
+                marker_ids: &[":id/fixture_marker"],
+            },
+            ..base
+        };
+        let session = InlineSession {
+            selected: AtomicBool::new(true),
+            closed: AtomicBool::new(false),
+            taps: AtomicUsize::new(0),
+            select_takes: true,
+            marker_id: ":id/fixture_marker",
+            editor_title: "One",
+        };
+        let pool = observe_sound_pool(&session, plan, 1).await.unwrap();
+        assert_eq!(pool.selected_index, Some(0));
+        choose_and_confirm_sound(&session, plan, &pool, 0)
+            .await
+            .unwrap();
+        assert_eq!(session.taps.load(Ordering::Relaxed), 0);
+        assert!(session.closed.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn choose_control_and_selected_marker_are_independent() {
+        let base = SoundPickerPlan::resolve("com.ss.android.ugc.trill", "en", "38.3.2").unwrap();
+        let plan = SoundPickerPlan {
+            choose_id: Some(":id/fixture_choose"),
+            ..base
+        };
+        let row = ElementBox {
+            height: 100.0,
+            ..element(100.0, None)
+        };
+        let choice = element(125.0, None);
+        let pool = assemble_pool(
+            plan,
+            vec![row],
+            vec![element(115.0, Some("One"))],
+            vec![element(155.0, Some("Artist"))],
+            vec![choice.clone()],
+            vec![],
+            1,
+        )
+        .unwrap();
+        assert_eq!(pool.selected_index, None);
+        assert_eq!(pool.target(0), Some(&choice));
     }
 
     #[test]
@@ -662,8 +954,8 @@ mod tests {
             element(160.0, Some("Artist A · 10K posts")),
             element(260.0, Some("Artist B · 20K posts")),
         ];
-        let choices = vec![element(125.0, None)];
-        let pool = assemble_pool(plan, rows, titles, artists, choices, 5).expect("pool");
+        let markers = vec![element(125.0, None)];
+        let pool = assemble_pool(plan, rows, titles, artists, vec![], markers, 5).expect("pool");
         assert_eq!(
             pool.candidates,
             vec![
@@ -696,10 +988,46 @@ mod tests {
             vec![row],
             vec![element(120.0, Some("One")), element(130.0, Some("Two"))],
             vec![element(160.0, Some("Artist"))],
+            vec![],
             vec![element(140.0, None)],
             5,
         )
         .is_err());
+    }
+
+    #[test]
+    fn duplicate_recommendations_keep_unique_rows_and_the_original_read_window() {
+        let plan = SoundPickerPlan::resolve("com.ss.android.ugc.trill", "en", "38.3.2").unwrap();
+        let rows = [100.0, 200.0, 300.0]
+            .into_iter()
+            .map(|y| ElementBox {
+                height: 90.0,
+                ..element(y, None)
+            })
+            .collect();
+        let pool = assemble_pool(
+            plan,
+            rows,
+            vec![
+                element(120.0, Some("Same")),
+                element(220.0, Some("Same")),
+                element(320.0, Some("Distinct")),
+            ],
+            vec![
+                element(160.0, Some("A")),
+                element(260.0, Some("B")),
+                element(360.0, Some("C")),
+            ],
+            vec![],
+            vec![element(325.0, None)],
+            5,
+        )
+        .unwrap();
+        assert_eq!(pool.candidates.len(), 1);
+        assert_eq!(pool.candidates[0].title, "Distinct");
+        assert_eq!(pool.selected_index, Some(0));
+        assert_eq!(pool.maximum_visible, 5);
+        assert_eq!(pool.target(0).unwrap().y, 320.0);
     }
 
     #[test]
@@ -727,6 +1055,7 @@ mod tests {
                 element(160.0, Some("Artist A")),
                 element(260.0, Some("Artist B")),
             ],
+            vec![],
             vec![element(125.0, None)],
             5,
         );

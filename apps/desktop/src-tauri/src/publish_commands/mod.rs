@@ -21,6 +21,15 @@ use uuid::Uuid;
 use crate::state::AppState;
 
 mod execution;
+mod verification;
+mod verification_queue;
+pub(crate) use verification::verify_pending_assignment;
+pub(crate) use verification_queue::VerificationQueue;
+mod verified_cleanup;
+pub(crate) use verified_cleanup::cleanup_verified_assignments;
+mod progress;
+mod schedule;
+pub use schedule::*;
 mod preflight;
 mod preview;
 mod sheet;
@@ -39,6 +48,7 @@ const PRODUCTION_SOURCES: &str = concat!(
     include_str!("preflight.rs"),
     include_str!("preview.rs"),
     include_str!("execution.rs"),
+    include_str!("schedule.rs"),
     include_str!("sheet.rs"),
     include_str!("legacy.rs"),
 );

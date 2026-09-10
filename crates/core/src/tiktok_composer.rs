@@ -66,7 +66,9 @@
 //! each selection; a bare Next no longer authorizes a photo carousel.
 
 use std::sync::atomic::{AtomicBool, Ordering};
+mod progress;
 mod selection;
+pub use progress::{PublishProgress, PublishProgressObserver};
 use std::time::Duration;
 
 // `tokio`'s clock for the same reason `tiktok_drawer` uses it: a
@@ -135,7 +137,7 @@ impl Screen {
 
 /// What a publish attempt actually achieved, named for the step that failed.
 ///
-/// Every variant except [`Self::Posted`] and [`Self::PostNotConfirmed`] means **nothing was
+/// Every variant except [`Self::Submitted`] and [`Self::PostNotConfirmed`] means **nothing was
 /// published**. Those two mean the carousel is — or may be — on a real account, and
 /// [`Self::may_retry`] is the single question a caller must ask before dispatching again.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -148,10 +150,9 @@ pub enum ComposerVerdict {
     /// fail on the network or be rejected after this. What it does rule out is the composer
     /// still sitting there with the images in it.
     ///
-    /// Closing the remaining gap means reading the post back from the account, which needs the
-    /// route to our own post page — unmeasured on every build, and the same thing blocking the
-    /// link capture.
-    Posted,
+    /// Only the runtime's caption-identified own-post link capture can close that gap.
+    /// This verdict never authorizes success, app termination, or imported-media deletion.
+    Submitted,
     /// Post was tapped, or may have been, and the result could not be read. **Never
     /// retried.**
     ///
@@ -233,7 +234,7 @@ pub enum ComposerVerdict {
 impl ComposerVerdict {
     pub fn reason(self) -> &'static str {
         match self {
-            Self::Posted => "đã đăng",
+            Self::Submitted => "đã đăng",
             Self::PostNotConfirmed => {
                 "đã bấm Đăng (hoặc có thể đã bấm) nhưng không xác nhận được; KHÔNG đăng lại — \
                  bài có thể đã lên và Android không có đường xoá"
@@ -267,20 +268,19 @@ impl ComposerVerdict {
         }
     }
 
-    /// Whether the composer completed its side of the post — see [`Self::Posted`] for the
-    /// gap between that and the carousel being live on the account.
-    pub fn is_posted(self) -> bool {
-        self == Self::Posted
+    /// Whether TikTok accepted the composer navigation. Publication is still unverified.
+    pub fn is_submitted(self) -> bool {
+        self == Self::Submitted
     }
 
     /// Whether the caller may dispatch this assignment again.
     ///
     /// **The one question this enum exists to answer.** `false` for
-    /// [`Self::PostNotConfirmed`] as well as for [`Self::Posted`], because an unconfirmed
+    /// [`Self::PostNotConfirmed`] as well as for [`Self::Submitted`], because an unconfirmed
     /// post may be live and a second attempt would publish a duplicate that nothing here can
     /// take down.
     pub fn may_retry(self) -> bool {
-        !matches!(self, Self::Posted | Self::PostNotConfirmed)
+        !matches!(self, Self::Submitted | Self::PostNotConfirmed)
     }
 }
 
@@ -356,6 +356,7 @@ pub struct ComposerPlan {
     open: ElementQuery<'static>,
     shutter: ElementQuery<'static>,
     album_menu: ElementQuery<'static>,
+    album_scroll: Option<ElementQuery<'static>>,
     tabs: ElementQuery<'static>,
     multi_select: ElementQuery<'static>,
     picker_next: ElementQuery<'static>,
@@ -425,6 +426,12 @@ impl ComposerPlan {
             open: query(TikTokControl::ComposerOpen),
             shutter: query(TikTokControl::ComposerShutter),
             album_menu: query(TikTokControl::PickerAlbumMenu),
+            // SM-G955N ce011711c354be2005, 08/09/2026: 46.0.41 album RecyclerView
+            // :id/kbh bounds [0,210][1080,2094]; one upward swipe reveals the new
+            // exact import below eight older albums. Other builds require measurement.
+            album_scroll: (labels.package() == "com.zhiliaoapp.musically"
+                && labels.resource_version() == Some("46.0.41"))
+            .then_some(ElementQuery::ResourceIdSuffix(":id/kbh")),
             tabs: query(TikTokControl::PickerTabPhotos),
             multi_select: query(TikTokControl::PickerMultiSelect),
             picker_next: selection::PickerControls::for_labels(labels)
@@ -486,6 +493,7 @@ impl ComposerPlan {
             open: query(TikTokControl::ComposerOpen),
             shutter: query(TikTokControl::ComposerShutter),
             album_menu: NEVER_MEASURED,
+            album_scroll: None,
             tabs: NEVER_MEASURED,
             multi_select: NEVER_MEASURED,
             picker_next: NEVER_MEASURED,
@@ -512,6 +520,28 @@ impl ComposerPlan {
     /// has its own entry point and its own name, rather than being what happens by default.
     pub fn can_publish(&self) -> bool {
         self.publish.is_some()
+    }
+
+    /// Production photo publishing needs measured corner-selection proof as well
+    /// as the tail. Measuring walks and the video route retain their own gates.
+    pub fn can_publish_carousel(&self) -> bool {
+        self.can_publish() && self.selection_controls.is_some()
+    }
+
+    /// All photo prerequisites, used by desktop preflight before transferring media.
+    /// `PickerMultiSelect` also names a missing verified corner-selector/count mapping.
+    pub fn missing_for_carousel(labels: &TikTokControls) -> Vec<TikTokControl> {
+        let mut missing: Vec<_> = REQUIRED
+            .into_iter()
+            .chain(REQUIRED_TO_PUBLISH)
+            .filter(|control| labels.label(*control).is_none())
+            .collect();
+        if selection::PickerControls::for_labels(labels).is_none()
+            && !missing.contains(&TikTokControl::PickerMultiSelect)
+        {
+            missing.push(TikTokControl::PickerMultiSelect);
+        }
+        missing
     }
 
     /// Which of [`REQUIRED_TO_PUBLISH`] this build is still missing.
@@ -837,6 +867,7 @@ pub struct Composer<'a, P: TapPlanner> {
     plan: ComposerPlan,
     plan_tap: P,
     pending_sound_proof: Option<(SoundPickerPlan, String)>,
+    progress: &'a PublishProgressObserver<'a>,
 }
 
 impl<'a, P: TapPlanner> Composer<'a, P> {
@@ -846,11 +877,17 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
             plan,
             plan_tap,
             pending_sound_proof: None,
+            progress: &|_| {},
         }
     }
 
     pub fn plan(&self) -> ComposerPlan {
         self.plan
+    }
+
+    pub fn with_progress(mut self, progress: &'a PublishProgressObserver<'a>) -> Self {
+        self.progress = progress;
+        self
     }
 
     async fn tap_inside(&mut self, element: &ElementBox) -> anyhow::Result<()> {
@@ -963,18 +1000,72 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
             return Ok(AlbumChoice::NotFound);
         };
         self.tap_inside(&menu).await?;
-        sleep(POLL, stop).await;
-        let rows = self
-            .session
-            .locate_all_described(ElementQuery::Text {
-                value: album,
-                exact: true,
-            })
-            .await?;
-        let [row] = rows.as_slice() else {
-            return Ok(AlbumChoice::NotFound);
+        // Galaxy S8+ fleet 08/09/2026: album rows arrive after the menu animation.
+        // A single immediate read reported AlbumNotFound although import was verified.
+        // Wait for one exact row with stable geometry; never choose an ambiguous album.
+        let deadline = Instant::now() + PICKER_WINDOW;
+        let mut previous: Option<ElementBox> = None;
+        let mut scrolls = 0;
+        let mut empty_reads = 0;
+        let row = loop {
+            if stop.load(Ordering::Relaxed) {
+                return Ok(AlbumChoice::NotFound);
+            }
+            let rows = self
+                .session
+                .locate_all_described(ElementQuery::Text {
+                    value: album,
+                    exact: true,
+                })
+                .await?;
+            match rows.as_slice() {
+                [row]
+                    if previous.as_ref().is_some_and(|old| {
+                        old.x == row.x
+                            && old.y == row.y
+                            && old.width == row.width
+                            && old.height == row.height
+                    }) =>
+                {
+                    break row.clone()
+                }
+                [row] => previous = Some(row.clone()),
+                [] => {
+                    previous = None;
+                    empty_reads += 1;
+                    if empty_reads >= 2 && scrolls < 4 {
+                        if let Some(query) = self.plan.album_scroll {
+                            let lists = self.session.locate_all(query).await?;
+                            if let [list] = lists.as_slice() {
+                                if list.width > 0.0 && list.height > 0.0 {
+                                    let x = list.x + list.width / 2.0;
+                                    self.session
+                                        .swipe(crate::SwipeGesture {
+                                            from: crate::TapPoint {
+                                                x,
+                                                y: list.y + list.height * 0.80,
+                                            },
+                                            to: crate::TapPoint {
+                                                x,
+                                                y: list.y + list.height * 0.20,
+                                            },
+                                            duration_ms: 400,
+                                        })
+                                        .await?;
+                                    scrolls += 1;
+                                    empty_reads = 0;
+                                }
+                            }
+                        }
+                    }
+                }
+                _ => return Ok(AlbumChoice::NotFound),
+            }
+            if Instant::now() >= deadline {
+                return Ok(AlbumChoice::NotFound);
+            }
+            sleep(POLL, stop).await;
         };
-        let row = row.clone();
         self.tap_inside(&row).await?;
         Ok(if self.pill_reads(album, stop).await? {
             AlbumChoice::Confirmed
@@ -1388,9 +1479,29 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
                     anyhow::bail!("sound reproof: caption back control missing or ambiguous");
                 };
                 self.tap_inside(back).await?;
-                confirm_sound(self.session, sound_plan, &expected_title)
-                    .await
-                    .context("final sound editor reproof")?;
+                if let Err(first_error) =
+                    confirm_sound(self.session, sound_plan, &expected_title).await
+                {
+                    // A missed Back leaves the exact caption page visible (live S8+, 10/09).
+                    // Re-observe before one bounded retry; an editor mismatch, unreadable
+                    // caption or unknown screen never authorizes another navigation tap.
+                    if stop.load(Ordering::Relaxed) {
+                        return Ok(ComposerVerdict::Stopped);
+                    }
+                    if self.require_caption_unchanged(caption).await.is_err() {
+                        return Err(first_error.context("final sound editor reproof"));
+                    }
+                    let fresh_back = self.session.locate_all(back_query).await?;
+                    let [fresh_back] = fresh_back.as_slice() else {
+                        return Err(
+                            first_error.context("sound reproof: caption Back retry ambiguous")
+                        );
+                    };
+                    self.tap_inside(fresh_back).await?;
+                    confirm_sound(self.session, sound_plan, &expected_title)
+                        .await
+                        .context("final sound editor reproof after caption Back retry")?;
+                }
                 anyhow::ensure!(
                     self.advance_to_post_screen(stop).await?,
                     "sound reproof: caption page did not return"
@@ -1411,10 +1522,12 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
             return Ok(ComposerVerdict::Stopped);
         }
         before_post()?;
+        (self.progress)(PublishProgress::SubmittingPost);
         if self.tap_inside(&button).await.is_err() {
             // The tap may have reached the phone before the transport died.
             return Ok(ComposerVerdict::PostNotConfirmed);
         }
+        (self.progress)(PublishProgress::AwaitingPost);
         // **Deliberately not passing `stop`.** Cancelling cannot un-publish, and a stop set
         // here would end the wait early and downgrade a good post to `PostNotConfirmed`,
         // which is permanently unclaimable.
@@ -1425,7 +1538,8 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
         // `PostNotConfirmed`, permanently unclaimable, twenty seconds early.
         let back_on_the_feed = self.await_feed(POST_CONFIRM_WINDOW).await;
         Ok(if back_on_the_feed {
-            ComposerVerdict::Posted
+            (self.progress)(PublishProgress::PostSubmitted);
+            ComposerVerdict::Submitted
         } else {
             ComposerVerdict::PostNotConfirmed
         })
@@ -1623,10 +1737,22 @@ impl VideoPickerPlan {
     /// caption and Post. Back did not fully leave that editor, so the trip force-stopped
     /// TikTok and read back both process absence and exact MediaStore cleanup.
     pub fn resolve(package: &str, language: &str, version: &str) -> Option<Self> {
-        (package == "com.ss.android.ugc.trill" && language == "en" && version == "38.3.2")
-            .then_some(Self {
-                provenance: "SM-G955F 9889db374744474635 / Android 9 / trill 38.3.2 en / one MP4 album -> editor / 05-09-2026",
-            })
+        let language = language.split(['-', '_']).next()?;
+        if language != "en" {
+            return None;
+        }
+        let provenance = match (package, version) {
+            ("com.ss.android.ugc.trill", "38.3.2") => "SM-G955F 9889db374744474635 / Android 9 / trill 38.3.2 en / one MP4 album -> editor / 05-09-2026",
+            ("com.zhiliaoapp.musically", "45.4.3") => "ce04171435f104080c / 45.4.3 / H264 single video, ordinal+Next(1), sound, caption boundary / 08-09-2026",
+            ("com.zhiliaoapp.musically", "45.7.3") => "ce031713b0c610ab0c / 45.7.3 / H264 single video, ordinal+Next(1), sound, caption boundary / 08-09-2026",
+            ("com.zhiliaoapp.musically", "46.0.41") => "ce031713a8f5bd0805 / 46.0.41 / H264 single video, ordinal+Next(1), sound, caption boundary / 08-09-2026",
+            ("com.zhiliaoapp.musically", "46.1.3") => "ce051715e15b2c2e02 / 46.1.3 / H264 single video, ordinal+Next(1), sound, caption boundary / 08-09-2026",
+            ("com.zhiliaoapp.musically", "46.4.3") => "ce031713aadf361905 / 46.4.3 / H264 single video, ordinal+Next(1), sound, caption boundary / 08-09-2026",
+            ("com.zhiliaoapp.musically", "46.2.1") => "ce04171411ae6a1504 / 46.2.1 / H264 single video, ordinal+Next(1), inline sound and caption roundtrip / 08-09-2026",
+            ("com.zhiliaoapp.musically", "46.2.42") => "ce0517155ab38c390d / 46.2.42 / H264 video, kh7 ordinal+Next(1), Hot nve marker, BbY WOW readback, caption / 10-09-2026",
+            _ => return None,
+        };
+        Some(Self { provenance })
     }
 
     pub const fn provenance(self) -> &'static str {
@@ -1741,6 +1867,35 @@ pub async fn publish_carousel_with_sound_effect_intent<F>(
 where
     F: FnMut(&SoundSelectionEvidence) -> anyhow::Result<()>,
 {
+    publish_carousel_with_sound_effect_intent_and_progress(
+        session,
+        plan,
+        sound_plan,
+        sound_policy,
+        plan_tap,
+        request,
+        stop,
+        before_post,
+        &|_| {},
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn publish_carousel_with_sound_effect_intent_and_progress<F>(
+    session: &dyn UiSession,
+    plan: ComposerPlan,
+    sound_plan: SoundPickerPlan,
+    sound_policy: &PublishSoundPolicy,
+    plan_tap: impl TapPlanner,
+    request: &CarouselRequest<'_>,
+    stop: &AtomicBool,
+    before_post: F,
+    progress: &PublishProgressObserver<'_>,
+) -> anyhow::Result<(ComposerVerdict, Option<SoundSelectionEvidence>)>
+where
+    F: FnMut(&SoundSelectionEvidence) -> anyhow::Result<()>,
+{
     publish_selected_media_with_sound_effect_intent(
         session,
         plan,
@@ -1751,6 +1906,7 @@ where
         request.caption,
         stop,
         before_post,
+        progress,
     )
     .await
 }
@@ -1776,6 +1932,37 @@ pub async fn publish_video_with_sound_effect_intent<F>(
 where
     F: FnMut(&SoundSelectionEvidence) -> anyhow::Result<()>,
 {
+    publish_video_with_sound_effect_intent_and_progress(
+        session,
+        plan,
+        video_plan,
+        sound_plan,
+        sound_policy,
+        plan_tap,
+        request,
+        stop,
+        before_post,
+        &|_| {},
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn publish_video_with_sound_effect_intent_and_progress<F>(
+    session: &dyn UiSession,
+    plan: ComposerPlan,
+    video_plan: VideoPickerPlan,
+    sound_plan: SoundPickerPlan,
+    sound_policy: &PublishSoundPolicy,
+    plan_tap: impl TapPlanner,
+    request: &VideoRequest<'_>,
+    stop: &AtomicBool,
+    before_post: F,
+    progress: &PublishProgressObserver<'_>,
+) -> anyhow::Result<(ComposerVerdict, Option<SoundSelectionEvidence>)>
+where
+    F: FnMut(&SoundSelectionEvidence) -> anyhow::Result<()>,
+{
     let _measured_video_tuple = video_plan.provenance();
     publish_selected_media_with_sound_effect_intent(
         session,
@@ -1787,6 +1974,7 @@ where
         request.caption,
         stop,
         before_post,
+        progress,
     )
     .await
 }
@@ -1802,24 +1990,32 @@ async fn publish_selected_media_with_sound_effect_intent<P, F>(
     caption: &str,
     stop: &AtomicBool,
     mut before_post: F,
+    progress: &PublishProgressObserver<'_>,
 ) -> anyhow::Result<(ComposerVerdict, Option<SoundSelectionEvidence>)>
 where
     P: TapPlanner,
     F: FnMut(&SoundSelectionEvidence) -> anyhow::Result<()>,
 {
-    if !plan.can_publish() {
+    if !plan.can_publish() || (!requested_media.video && !plan.can_publish_carousel()) {
         return Ok((ComposerVerdict::PostUnmeasured, None));
     }
-    let mut composer = Composer::new(session, plan, plan_tap);
+    let mut composer = Composer::new(session, plan, plan_tap).with_progress(progress);
     let outcome = async {
         match reach_selected_media_edit_step(&mut composer, requested_media, stop).await? {
             ComposerVerdict::Stopped => {}
             refusal => return Ok((refusal, None)),
         }
         let visible_pool = sound_policy.pool_size()?.min(5);
+        progress(PublishProgress::OpeningSounds);
         let pool = open_and_observe_sounds(session, sound_plan, visible_pool).await?;
         let mut selection = select_sound_candidate(sound_policy, &pool.candidates)?;
+        progress(PublishProgress::SelectingSound {
+            title: selection.title.clone(),
+        });
         choose_and_confirm_sound(session, sound_plan, &pool, selection.index).await?;
+        progress(PublishProgress::SoundConfirmed {
+            title: selection.title.clone(),
+        });
         selection.confirmed = true;
         composer.pending_sound_proof = Some((sound_plan, selection.title.clone()));
         let mut record_selected_sound = || before_post(&selection);
@@ -1919,15 +2115,21 @@ where
     if !composer.plan.can_publish() {
         return Ok(ComposerVerdict::PostUnmeasured);
     }
+    (composer.progress)(PublishProgress::OpeningCaption);
     if !composer.advance_to_post_screen(stop).await? {
         return Ok(ComposerVerdict::PostScreenDidNotOpen);
     }
+    if !caption.trim().is_empty() {
+        (composer.progress)(PublishProgress::EnteringCaption);
+    }
     match composer.type_caption(caption, stop).await? {
-        CaptionOutcome::Typed | CaptionOutcome::NothingToSay => {}
+        CaptionOutcome::Typed => (composer.progress)(PublishProgress::CaptionConfirmed),
+        CaptionOutcome::NothingToSay => {}
         CaptionOutcome::Unmeasured => return Ok(ComposerVerdict::PostUnmeasured),
         CaptionOutcome::NoField => return Ok(ComposerVerdict::NoCaptionField),
         CaptionOutcome::NotConfirmed => return Ok(ComposerVerdict::CaptionNotConfirmed),
     }
+    (composer.progress)(PublishProgress::CheckingBeforePost);
     composer
         .post_with_effect_intent(caption, stop, before_post)
         .await
@@ -1980,15 +2182,18 @@ async fn reach_picker_for_media<P: TapPlanner>(
     request: PickerSelection<'_>,
     stop: &AtomicBool,
 ) -> anyhow::Result<ComposerVerdict> {
+    (composer.progress)(PublishProgress::OpeningComposer);
     if !composer.open(stop).await? {
         return Ok(ComposerVerdict::ComposerDidNotOpen);
     }
+    (composer.progress)(PublishProgress::OpeningGallery);
     if !composer.tap_gallery_entry(request.screen, stop).await? {
         return Ok(ComposerVerdict::NoShutterToAnchorTo);
     }
     if !composer.await_picker(stop).await? {
         return Ok(ComposerVerdict::PickerDidNotOpen);
     }
+    (composer.progress)(PublishProgress::SelectingAlbum);
     match composer.select_album(request.album, stop).await? {
         AlbumChoice::Confirmed => {}
         AlbumChoice::NotFound => return Ok(ComposerVerdict::AlbumNotFound),
@@ -2064,14 +2269,21 @@ async fn reach_selected_media_edit_step<P: TapPlanner>(
     let Some(grid) = composer.grid(request.screen, stop).await? else {
         return Ok(ComposerVerdict::NoTabsToAnchorTo);
     };
-    let selected =
-        if let Some(controls) = composer.plan.selection_controls.filter(|_| !request.video) {
-            composer
-                .select_verified(controls, request.screen, request.count, request.album, stop)
-                .await?
-        } else {
-            composer.select(&grid, request.count, stop).await?
-        };
+    (composer.progress)(PublishProgress::SelectingMedia {
+        count: request.count,
+        video: request.video,
+    });
+    let selected = if let Some(controls) = composer
+        .plan
+        .selection_controls
+        .filter(|controls| !request.video || controls.package == "com.zhiliaoapp.musically")
+    {
+        composer
+            .select_verified(controls, request.screen, request.count, request.album, stop)
+            .await?
+    } else {
+        composer.select(&grid, request.count, stop).await?
+    };
     let next = match selected {
         // **A stated count is believed, and a mismatch stops the run.** `Next` arming proves
         // only that *something* is selected; a build that also renders the number is the one
@@ -2096,6 +2308,11 @@ async fn reach_selected_media_edit_step<P: TapPlanner>(
         Selection::MultiSelectDidNotEngage => return Ok(ComposerVerdict::MultiSelectDidNotEngage),
         Selection::Stopped => return Ok(ComposerVerdict::Stopped),
     };
+    (composer.progress)(PublishProgress::MediaSelected {
+        count: request.count,
+        video: request.video,
+    });
+    (composer.progress)(PublishProgress::OpeningEditor);
     if !composer.advance_to_edit_step(&next, stop).await? {
         return Ok(ComposerVerdict::EditStepDidNotOpen);
     }
@@ -2364,6 +2581,9 @@ mod tests {
         taps: Mutex<Vec<TapPoint>>,
         backs: Mutex<usize>,
         rows: Mutex<HashMap<String, Vec<ElementBox>>>,
+        delayed_album_reads: Mutex<usize>,
+        album_requires_scroll: bool,
+        swipes: Mutex<usize>,
         /// What `type_text` last wrote, which is what the caption field then holds.
         ///
         /// Modelled rather than ignored: the readback in `type_caption` is the whole reason
@@ -2495,11 +2715,26 @@ mod tests {
             &self,
         ) -> anyhow::Result<crate::driver::HierarchySourceSnapshot> {
             let count = *self.selected_cells.lock();
+            let scene = self.screens.get(*self.at.lock());
+            let album = scene
+                .and_then(|scene| {
+                    scene
+                        .texts
+                        .get("fixture-album-menu")
+                        .or_else(|| scene.texts.get(":id/snr"))
+                })
+                .map(String::as_str)
+                .unwrap_or("");
+            let album_id = if scene.is_some_and(|scene| scene.texts.contains_key(":id/snr")) {
+                "com.ss.android.ugc.trill:id/snr"
+            } else {
+                "com.ss.android.ugc.trill:fixture-album-menu"
+            };
             let cells=(0..3).map(|index|format!(r#"<node package="com.ss.android.ugc.trill" class="android.widget.Button" resource-id="com.ss.android.ugc.trill:id/h4b" text="{}" bounds="[{},375][{},447]" displayed="true" enabled="true" clickable="true"/>"#,if index<count {(index+1).to_string()}else{String::new()},268+index*358,340+index*358)).collect::<String>();
             Ok(crate::driver::HierarchySourceSnapshot {
                 generation: 1,
                 xml: format!(
-                    r#"<hierarchy>{cells}<node package="com.ss.android.ugc.trill" class="android.widget.Button" resource-id="com.ss.android.ugc.trill:id/q4g" text="Next ({count})" bounds="[552,1896][652,1946]" displayed="true" enabled="true" clickable="{}"/></hierarchy>"#,
+                    r#"<hierarchy><node package="com.ss.android.ugc.trill" class="android.widget.TextView" resource-id="{album_id}" text="{album}" displayed="true"/>{cells}<node package="com.ss.android.ugc.trill" class="android.widget.Button" resource-id="com.ss.android.ugc.trill:id/q4g" text="Next ({count})" bounds="[552,1896][652,1946]" displayed="true" enabled="true" clickable="{}"/></hierarchy>"#,
                     count > 0
                 ),
             })
@@ -2556,6 +2791,7 @@ mod tests {
             Ok(())
         }
         async fn swipe(&self, _gesture: crate::types::SwipeGesture) -> anyhow::Result<()> {
+            *self.swipes.lock() += 1;
             Ok(())
         }
         async fn type_text(&self, text: &str) -> anyhow::Result<()> {
@@ -2613,6 +2849,16 @@ mod tests {
                 | ElementQuery::ClassName(value)
                 | ElementQuery::ResourceIdSuffix(value) => value,
             };
+            if wanted == "riviu-late-album" {
+                if self.album_requires_scroll && *self.swipes.lock() == 0 {
+                    return Ok(Vec::new());
+                }
+                let mut left = self.delayed_album_reads.lock();
+                if *left > 0 {
+                    *left -= 1;
+                    return Ok(Vec::new());
+                }
+            }
             if wanted == ":id/h4b"
                 && self.current().contains_key("Select multiple")
                 && self.current().contains_key(":id/q4g")
@@ -2736,6 +2982,11 @@ mod tests {
             publishable,
             vec![
                 r#"com.zhiliaoapp.musically / en (app "46.2.1")"#.to_string(),
+                r#"com.zhiliaoapp.musically / en (app "45.4.3")"#.to_string(),
+                r#"com.zhiliaoapp.musically / en (app "46.1.3")"#.to_string(),
+                r#"com.zhiliaoapp.musically / en (app "46.4.3")"#.to_string(),
+                r#"com.zhiliaoapp.musically / en (app "45.7.3")"#.to_string(),
+                r#"com.zhiliaoapp.musically / en (app "46.0.41")"#.to_string(),
                 r#"com.zhiliaoapp.musically / en (app "46.2.42")"#.to_string(),
                 r#"com.ss.android.ugc.trill / en (app "38.3.2")"#.to_string(),
             ],
@@ -2785,6 +3036,69 @@ mod tests {
             "an unread app version borrowed another build's resource id"
         );
         assert!(ComposerPlan::resolve(&unknown_version).is_err());
+    }
+
+    #[test]
+    fn production_carousel_readiness_requires_verified_selection_and_every_opening_control() {
+        let fixture = every_publish_control_measured();
+        let plan = ComposerPlan::resolve(&fixture).unwrap();
+        assert!(
+            plan.can_publish(),
+            "the synthetic tail remains useful for measuring tests"
+        );
+        assert!(!plan.can_publish_carousel());
+        assert_eq!(
+            ComposerPlan::missing_for_carousel(&fixture),
+            vec![TikTokControl::PickerMultiSelect]
+        );
+        let missing = ComposerPlan::missing_for_carousel(&nothing_measured());
+        for control in REQUIRED.into_iter().chain(REQUIRED_TO_PUBLISH) {
+            assert!(
+                missing.contains(&control),
+                "{control:?} must block preflight"
+            );
+        }
+        for (package, version) in [
+            ("com.ss.android.ugc.trill", "38.3.2"),
+            ("com.zhiliaoapp.musically", "46.2.1"),
+            ("com.zhiliaoapp.musically", "46.2.42"),
+        ] {
+            let labels = controls_for(package, "en", version).unwrap();
+            assert!(ComposerPlan::missing_for_carousel(&labels).is_empty());
+            assert!(ComposerPlan::resolve(&labels)
+                .unwrap()
+                .can_publish_carousel());
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn production_carousel_without_selection_proof_refuses_before_any_tap() {
+        let session = FakeSession::with(vec![feed()]);
+        let result = publish_selected_media_with_sound_effect_intent(
+            &session,
+            plan(),
+            SoundPickerPlan::resolve("com.ss.android.ugc.trill", "en", "38.3.2").unwrap(),
+            &PublishSoundPolicy::TrendingAny {
+                pool_size: 5,
+                seed: 1,
+            },
+            |element: &ElementBox| element.centre(),
+            PickerSelection {
+                album: "fixture",
+                count: 3,
+                screen: Screen::new(1080.0, 2220.0).unwrap(),
+                video: false,
+            },
+            "fixture caption",
+            &AtomicBool::new(false),
+            |_| anyhow::bail!("Post gate must not be reached"),
+            &|_| {},
+        )
+        .await
+        .unwrap();
+        assert_eq!(result, (ComposerVerdict::PostUnmeasured, None));
+        assert!(session.taps.lock().is_empty());
+        assert!(session.typed.lock().is_none());
     }
 
     /// A set with nothing measured refuses every required control, not just the first.
@@ -2892,10 +3206,16 @@ mod tests {
         let measured = VideoPickerPlan::resolve("com.ss.android.ugc.trill", "en", "38.3.2")
             .expect("the canary MP4 reached its editor");
         assert!(measured.provenance().contains("9889db374744474635"));
+        for version in ["45.4.3", "45.7.3", "46.0.41", "46.1.3", "46.2.1", "46.4.3"] {
+            assert!(
+                VideoPickerPlan::resolve("com.zhiliaoapp.musically", "en-US", version).is_some()
+            );
+            assert!(VideoPickerPlan::resolve("com.zhiliaoapp.musically", "vi", version).is_none());
+        }
         for (package, language, version) in [
             ("com.ss.android.ugc.trill", "vi", "38.3.2"),
             ("com.ss.android.ugc.trill", "en", "38.3.3"),
-            ("com.zhiliaoapp.musically", "en", "46.2.1"),
+            ("com.zhiliaoapp.musically", "en", "46.2.2"),
         ] {
             assert!(
                 VideoPickerPlan::resolve(package, language, version).is_none(),
@@ -3042,9 +3362,9 @@ mod tests {
 
     // ----------------------------------------------------------------- the walk
 
-    /// The whole happy path, ending `Posted` because the feed came back.
+    /// The composer completes submission when the feed returns, before publication proof.
     #[tokio::test(start_paused = true)]
-    async fn a_full_walk_ends_posted_when_the_feed_returns() {
+    async fn a_full_walk_ends_submitted_when_the_feed_returns() {
         let session = FakeSession::full_walk("riviu-abc");
         let request = CarouselRequest {
             album: "riviu-abc",
@@ -3063,7 +3383,7 @@ mod tests {
             )
             .await
             .expect("no transport error"),
-            ComposerVerdict::Posted
+            ComposerVerdict::Submitted
         );
     }
 
@@ -3097,7 +3417,7 @@ mod tests {
             ComposerVerdict::NoPostButton,
             "the run stalled on the edit screen, which is what forgetting to tap looks like"
         );
-        assert_eq!(verdict, ComposerVerdict::Posted);
+        assert_eq!(verdict, ComposerVerdict::Submitted);
     }
 
     /// A composer that never opens is named, and **nothing further is tapped**.
@@ -3139,6 +3459,70 @@ mod tests {
     }
 
     // -------------------------------------------------------------- the album
+
+    #[tokio::test(start_paused = true)]
+    async fn measured_album_list_scrolls_to_exact_import_without_tapping_another_album() {
+        let mut menu = picker("All", None).leaving_by(box_at(0.0, 400.0));
+        menu.elements.insert(
+            ":id/kbh".into(),
+            ElementBox {
+                x: 0.0,
+                y: 210.0,
+                width: 1080.0,
+                height: 1884.0,
+                description: None,
+                enabled: true,
+                clickable: false,
+            },
+        );
+        let session = FakeSession {
+            album_requires_scroll: true,
+            ..FakeSession::with(vec![
+                picker("All", Some("fixture-album-menu")),
+                menu,
+                picker("riviu-late-album", None),
+            ])
+            .rows("riviu-late-album", vec![box_at(0.0, 400.0)])
+        };
+        let mut measured = plan();
+        measured.album_scroll = Some(ElementQuery::ResourceIdSuffix(":id/kbh"));
+        let mut composer = Composer::new(&session, measured, |e: &ElementBox| e.centre());
+        assert_eq!(
+            composer
+                .select_album("riviu-late-album", &AtomicBool::new(false))
+                .await
+                .unwrap(),
+            AlbumChoice::Confirmed
+        );
+        assert_eq!(*session.swipes.lock(), 1);
+        assert_eq!(session.taps.lock().len(), 2);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn album_menu_waits_for_delayed_exact_row_and_taps_it_once() {
+        let session = FakeSession {
+            delayed_album_reads: Mutex::new(2),
+            ..FakeSession::with(vec![
+                picker("All", Some("fixture-album-menu")),
+                picker("All", None).leaving_by(box_at(0.0, 400.0)),
+                picker("riviu-late-album", None),
+            ])
+            .rows("riviu-late-album", vec![box_at(0.0, 400.0)])
+        };
+        let mut composer = Composer::new(&session, plan(), |e: &ElementBox| e.centre());
+        assert_eq!(
+            composer
+                .select_album("riviu-late-album", &AtomicBool::new(false))
+                .await
+                .unwrap(),
+            AlbumChoice::Confirmed
+        );
+        assert_eq!(
+            session.taps.lock().len(),
+            2,
+            "one menu tap and one exact album tap"
+        );
+    }
 
     /// **Two albums matching the campaign's name is a refusal, not a coin flip.**
     #[tokio::test(start_paused = true)]
@@ -3624,10 +4008,108 @@ mod tests {
             })
             .await
             .unwrap();
-        assert!(verdict.is_posted());
+        assert!(verdict.is_submitted());
         assert_eq!(intents, 1);
         assert_eq!(post_button_taps(&session), 1);
         assert_eq!(session.typed.lock().as_deref(), Some("caption"));
+    }
+
+    /// Returning to the feed while TikTok uploads must never report a published post.
+    /// The live failure on 09/09 returned here at 5-19% upload and then killed TikTok.
+    #[tokio::test(start_paused = true)]
+    async fn feed_return_is_submitted_without_publication_confirmation() {
+        let session = FakeSession::with(vec![post_screen(), feed()]);
+        let steps = std::sync::Mutex::new(Vec::new());
+        let progress = |step| steps.lock().unwrap().push(step);
+        let mut composer = Composer::new(&session, plan(), |element: &ElementBox| element.centre())
+            .with_progress(&progress);
+        let mut intents = 0;
+        let verdict = composer
+            .post_with_effect_intent("caption", &AtomicBool::new(false), &mut || {
+                intents += 1;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        assert_eq!(intents, 1);
+        assert_eq!(post_button_taps(&session), 1);
+        assert!(
+            !verdict.may_retry(),
+            "an accepted submission must never post twice"
+        );
+        assert!(
+            !steps
+                .lock()
+                .unwrap()
+                .contains(&PublishProgress::PostConfirmed),
+            "the feed proves navigation only; upload and publication may still be pending"
+        );
+        assert_eq!(format!("{verdict:?}"), "Submitted");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn publish_progress_reports_post_only_after_intent_and_confirms_after_tap() {
+        for allowed in [false, true] {
+            let session = FakeSession::with(vec![post_screen(), feed()]);
+            let steps = std::sync::Mutex::new(Vec::new());
+            let progress = |step| {
+                steps
+                    .lock()
+                    .unwrap()
+                    .push((step, post_button_taps(&session)));
+            };
+            let mut composer =
+                Composer::new(&session, plan(), |element: &ElementBox| element.centre())
+                    .with_progress(&progress);
+            let result = composer
+                .post_with_effect_intent("caption", &AtomicBool::new(false), &mut || {
+                    assert!(steps.lock().unwrap().is_empty());
+                    anyhow::ensure!(allowed, "rehearsal boundary");
+                    Ok(())
+                })
+                .await;
+            if allowed {
+                assert_eq!(result.unwrap(), ComposerVerdict::Submitted);
+                assert_eq!(
+                    *steps.lock().unwrap(),
+                    vec![
+                        (PublishProgress::SubmittingPost, 0),
+                        (PublishProgress::AwaitingPost, 1),
+                        (PublishProgress::PostSubmitted, 1),
+                    ]
+                );
+            } else {
+                assert!(result.is_err());
+                assert!(steps.lock().unwrap().is_empty());
+                assert_eq!(post_button_taps(&session), 0);
+            }
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn publish_progress_keeps_caption_failure_before_post_milestones() {
+        let session = FakeSession::with(vec![edit_step(), post_screen()]);
+        let steps = std::sync::Mutex::new(Vec::new());
+        let progress = |step| steps.lock().unwrap().push(step);
+        let mut composer = Composer::new(&session, plan(), |element: &ElementBox| element.centre())
+            .with_progress(&progress);
+        let stop = AtomicBool::new(true);
+        let result = continue_from_edit_step_with_effect_intent(
+            &mut composer,
+            "caption",
+            &stop,
+            &mut || panic!("no Post"),
+        )
+        .await;
+        assert!(!result.unwrap().is_submitted());
+        assert!(!steps
+            .lock()
+            .unwrap()
+            .contains(&PublishProgress::PostSubmitted));
+        assert!(!steps
+            .lock()
+            .unwrap()
+            .contains(&PublishProgress::SubmittingPost));
     }
 
     #[tokio::test(start_paused = true)]
@@ -3663,11 +4145,60 @@ mod tests {
                 assert_eq!(intents, 0);
                 assert_eq!(post_button_taps(&session), 0);
             } else {
-                assert!(result.unwrap().is_posted());
+                assert!(result.unwrap().is_submitted());
                 assert_eq!(intents, 1);
                 assert_eq!(post_button_taps(&session), 1);
             }
             assert_eq!(session.typed.lock().as_deref(), Some("caption"));
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn missed_caption_back_retries_only_on_the_unchanged_caption_page() {
+        for stuck in [false, true] {
+            let caption = |x| {
+                let mut page = post_screen();
+                page.elements.insert(":id/bix".into(), box_at(x, 70.0));
+                page.exit = Some(":id/bix".into());
+                page
+            };
+            // First gesture leaves the same page visible, with a newly laid out Back button.
+            let mut editor = edit_step().texted(":id/tv_top_text", "Sound A");
+            editor
+                .elements
+                .insert(":id/tv_top_text".into(), box_at(300.0, 150.0));
+            let mut session = FakeSession::with(vec![
+                caption(20.0),
+                caption(220.0),
+                editor,
+                post_screen(),
+                feed(),
+            ]);
+            session.stuck_at = stuck.then_some(1);
+            *session.typed.lock() = Some("caption".into());
+            let mut composer = Composer::new(&session, plan(), |e: &ElementBox| e.centre());
+            composer.pending_sound_proof = Some((
+                SoundPickerPlan::resolve("com.zhiliaoapp.musically", "en", "45.7.3").unwrap(),
+                "Sound A".into(),
+            ));
+            let mut intents = 0;
+            let result = composer
+                .post_with_effect_intent("caption", &AtomicBool::new(false), &mut || {
+                    intents += 1;
+                    Ok(())
+                })
+                .await;
+            if stuck {
+                assert!(result.is_err());
+                assert_eq!(session.taps.lock().len(), 2, "one bounded Back retry");
+                assert_eq!(intents, 0);
+                assert_eq!(post_button_taps(&session), 0);
+            } else {
+                assert!(result.expect("missed Back must recover").is_submitted());
+                assert_eq!(session.taps.lock()[1].x, box_at(220.0, 70.0).centre().x);
+                assert_eq!(intents, 1);
+                assert_eq!(post_button_taps(&session), 1);
+            }
         }
     }
 
@@ -3831,7 +4362,7 @@ mod tests {
             )
             .await
             .expect("no transport error"),
-            ComposerVerdict::Posted
+            ComposerVerdict::Submitted
         );
         assert_eq!(
             post_button_taps(&session),
@@ -3991,7 +4522,7 @@ mod tests {
         let stop = AtomicBool::new(false);
         assert_eq!(
             composer.post("", &stop).await.expect("no error"),
-            ComposerVerdict::Posted
+            ComposerVerdict::Submitted
         );
     }
 
@@ -4342,7 +4873,7 @@ mod tests {
         // comes back.
         assert_eq!(
             composer.post("", &stop).await.expect("no error"),
-            ComposerVerdict::Posted
+            ComposerVerdict::Submitted
         );
     }
 
@@ -4615,7 +5146,7 @@ mod tests {
     /// **An unconfirmed post is never retried, and neither is a successful one.**
     #[test]
     fn only_the_verdicts_that_published_nothing_may_be_dispatched_again() {
-        assert!(!ComposerVerdict::Posted.may_retry());
+        assert!(!ComposerVerdict::Submitted.may_retry());
         assert!(!ComposerVerdict::PostNotConfirmed.may_retry());
         for verdict in [
             ComposerVerdict::ComposerDidNotOpen,
@@ -4646,7 +5177,7 @@ mod tests {
             );
             assert!(!verdict.reason().is_empty());
         }
-        assert!(ComposerVerdict::Posted.is_posted());
-        assert!(!ComposerVerdict::PostNotConfirmed.is_posted());
+        assert!(ComposerVerdict::Submitted.is_submitted());
+        assert!(!ComposerVerdict::PostNotConfirmed.is_submitted());
     }
 }

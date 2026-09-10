@@ -23,7 +23,7 @@ test("progress expands to per-device timed logs, stays available after navigatio
   await page.getByLabel("Tiến trình công việc", { exact: true }).press("Enter");
   await center.getByRole("button", { name: /Máy 1/ }).click();
   await expect(center.getByText("12:34:56", { exact: true })).toBeVisible();
-  await expect(center.getByText("Đăng bài · Đang chuyển nội dung", { exact: true })).toBeVisible();
+  await expect(center.getByText("Đang tải ảnh/video vào điện thoại", { exact: true })).toBeVisible();
   for (const viewport of [{ width: 1440, height: 900 }, { width: 900, height: 900 }, { width: 820, height: 560 }, { width: 390, height: 844 }]) {
     await page.setViewportSize(viewport);
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);

@@ -1,0 +1,8 @@
+<hierarchy>
+  <android.widget.Button package="com.zhiliaoapp.musically" class="android.widget.Button" text="Titanoboa" resource-id="com.zhiliaoapp.musically:id/title" checked="false" clickable="true" enabled="true" focused="false" selected="false" bounds="[167,918][336,960]" displayed="true" />
+  <android.widget.Button package="com.zhiliaoapp.musically" class="android.widget.Button" text="LLLL" resource-id="com.zhiliaoapp.musically:id/title" checked="false" clickable="true" enabled="true" focused="false" selected="false" bounds="[167,1211][243,1253]" displayed="true" />
+  <android.widget.Button package="com.zhiliaoapp.musically" class="android.widget.Button" text="jjj" resource-id="com.zhiliaoapp.musically:id/title" checked="false" clickable="true" enabled="true" focused="false" selected="false" bounds="[167,1560][197,1602]" displayed="true" />
+  <android.widget.Button package="com.zhiliaoapp.musically" class="android.widget.Button" text="Phuongnole" resource-id="com.zhiliaoapp.musically:id/title" checked="false" clickable="true" enabled="true" focused="false" selected="false" bounds="[167,1909][367,1939]" displayed="true" />
+  <android.widget.LinearLayout package="com.zhiliaoapp.musically" class="android.widget.LinearLayout" text="" resource-id="com.zhiliaoapp.musically:id/viewpager_container" checked="false" clickable="false" enabled="true" focused="false" selected="false" bounds="[0,0][1080,2094]" displayed="true" />
+  <android.widget.Button package="com.zhiliaoapp.musically" class="android.widget.Button" text="" content-desc="@2131823293" resource-id="com.zhiliaoapp.musically:id/cxl" checked="false" clickable="true" enabled="false" focused="false" selected="false" bounds="[911,1111][1048,1195]" displayed="true" />
+</hierarchy>

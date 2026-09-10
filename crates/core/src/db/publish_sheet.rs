@@ -34,6 +34,7 @@ pub struct SheetOutboxRow {
     /// pushed, is now marked delivered and never travels.
     pub revision: i64,
     pub last_error: Option<String>,
+    pub posted_at: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -50,7 +51,7 @@ pub enum SheetOutboxSettlement {
     Delivered(crate::publish_runtime::PublishExecutionSnapshot),
 }
 
-fn evidence_has_post_link(raw: Option<&str>) -> bool {
+pub(super) fn evidence_has_post_link(raw: Option<&str>) -> bool {
     raw.and_then(|value| serde_json::from_str::<serde_json::Value>(value).ok())
         .as_ref()
         .and_then(|evidence| {
@@ -64,7 +65,7 @@ fn evidence_has_post_link(raw: Option<&str>) -> bool {
         .is_some_and(crate::tiktok_share::looks_like_a_post_link)
 }
 
-fn reconciled_sheet_delivery_status(
+pub(super) fn reconciled_sheet_delivery_status(
     connection: &Connection,
     campaign_id: &str,
 ) -> anyhow::Result<(
@@ -108,10 +109,35 @@ fn reconciled_sheet_delivery_status(
     if rows.iter().any(|(state, _, _)| {
         matches!(
             publish_state_from_str(state),
-            CampaignState::Posting | CampaignState::Verifying | CampaignState::Uncertain
+            CampaignState::Posting | CampaignState::Uncertain
         )
     }) {
-        return Ok((Status::Uncertain, Scope::None));
+        let manual_link_only = rows.iter().any(|(state, evidence, _)| {
+            publish_state_from_str(state) == CampaignState::Uncertain
+                && super::publish_verification::needs_review(evidence.as_deref())
+        }) && rows.iter().all(|(state, evidence, _)| {
+            match publish_state_from_str(state) {
+                CampaignState::Posting => false,
+                CampaignState::Uncertain => {
+                    super::publish_verification::needs_review(evidence.as_deref())
+                }
+                _ => true,
+            }
+        });
+        return Ok((
+            Status::Uncertain,
+            if manual_link_only {
+                Scope::LinkAndSheet
+            } else {
+                Scope::None
+            },
+        ));
+    }
+    if rows
+        .iter()
+        .any(|(state, _, _)| publish_state_from_str(state) == CampaignState::Verifying)
+    {
+        return Ok((Status::Partial, Scope::LinkAndSheet));
     }
     let all_succeeded = !rows.is_empty()
         && rows
@@ -216,6 +242,29 @@ impl Database {
         webhook_url: &str,
         token: Option<&str>,
     ) -> anyhow::Result<()> {
+        self.set_publish_sheet_config_with_reporting(webhook_url, token, None)
+    }
+
+    pub fn set_publish_sheet_config_with_reporting(
+        &self,
+        webhook_url: &str,
+        token: Option<&str>,
+        internal_reporting: Option<bool>,
+    ) -> anyhow::Result<()> {
+        if let Some(secrets) = &self.secrets {
+            let previous = self.publish_sheet_delivery_settings()?;
+            let value = serde_json::json!({"webhookUrl":webhook_url,"token":token.unwrap_or(&previous.token),"internalReporting":internal_reporting.unwrap_or(previous.internal_reporting)});
+            secrets.set_secret("publish-sheet-connection", &value.to_string())?;
+            let mut conn = self.conn()?;
+            let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            tx.execute("INSERT INTO settings(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",params![crate::publish_sheet::WEBHOOK_URL_SETTING,webhook_url])?;
+            tx.execute(
+                "DELETE FROM settings WHERE key=?1",
+                params![crate::publish_sheet::WEBHOOK_TOKEN_SETTING],
+            )?;
+            tx.commit()?;
+            return Ok(());
+        }
         let mut conn = self.conn()?;
         let transaction = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         transaction.execute(
@@ -228,6 +277,12 @@ impl Database {
                 "INSERT INTO settings (key, value) VALUES (?1, ?2)
                  ON CONFLICT(key) DO UPDATE SET value=excluded.value",
                 params![crate::publish_sheet::WEBHOOK_TOKEN_SETTING, token],
+            )?;
+        }
+        if let Some(enabled) = internal_reporting {
+            transaction.execute(
+                "INSERT INTO settings (key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                params![crate::publish_sheet::INTERNAL_REPORTING_SETTING,if enabled {"true"} else {"false"}],
             )?;
         }
         transaction.commit()?;
@@ -319,7 +374,7 @@ impl Database {
         let limit = crate::publish_sheet::sweep_limit(limit);
         let mut statement = conn.prepare(
             "SELECT assignment_id,campaign_id,post_url,poster,partners_json,attempts,revision,\
-                    last_error
+                    last_error,(SELECT COALESCE(CASE WHEN json_valid(a.evidence_json) THEN json_extract(a.evidence_json,'$.post.submittedAt') END,CASE WHEN json_valid(a.evidence_json) THEN json_extract(a.evidence_json,'$.submittedAt') END,CASE WHEN json_valid(a.effect_intent) THEN json_extract(a.effect_intent,'$.submittedAt') END,a.created_at) FROM publish_assignments a WHERE a.id=publish_sheet_outbox.assignment_id)
              FROM publish_sheet_outbox
              WHERE state <> 'sent'
              ORDER BY created_at ASC
@@ -340,6 +395,7 @@ impl Database {
                     attempts: row.get::<_, i64>(5)?.max(0) as u32,
                     revision: row.get(6)?,
                     last_error: row.get(7)?,
+                    posted_at: row.get(8)?,
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -354,7 +410,7 @@ impl Database {
         let conn = self.conn()?;
         conn.query_row(
             "SELECT assignment_id,campaign_id,post_url,poster,partners_json,attempts,revision,\
-                    last_error
+                    last_error,(SELECT COALESCE(CASE WHEN json_valid(a.evidence_json) THEN json_extract(a.evidence_json,'$.post.submittedAt') END,CASE WHEN json_valid(a.evidence_json) THEN json_extract(a.evidence_json,'$.submittedAt') END,CASE WHEN json_valid(a.effect_intent) THEN json_extract(a.effect_intent,'$.submittedAt') END,a.created_at) FROM publish_assignments a WHERE a.id=publish_sheet_outbox.assignment_id)
              FROM publish_sheet_outbox
              WHERE assignment_id=?1 AND state <> 'sent'",
             params![assignment_id],
@@ -369,6 +425,7 @@ impl Database {
                     attempts: row.get::<_, i64>(5)?.max(0) as u32,
                     revision: row.get(6)?,
                     last_error: row.get(7)?,
+                    posted_at: row.get(8)?,
                 })
             },
         )
@@ -487,7 +544,7 @@ impl Database {
 }
 
 /// The insert itself, so it can run inside a caller's transaction or on its own connection.
-fn queue_sheet_row(
+pub(super) fn queue_sheet_row(
     conn: &rusqlite::Connection,
     assignment_id: &str,
     campaign_id: &str,
@@ -603,6 +660,642 @@ mod tests {
         (campaign.id, assignment)
     }
 
+    fn review_fixture(age_minutes: i64) -> (Database, PathBuf, String, String, String) {
+        let (db, path) = fixture();
+        let (campaign, assignment) = seed(&db);
+        db.update_publish_campaign_state(&campaign, crate::PublishCampaignState::Posting, None)
+            .unwrap();
+        db.update_publish_assignment_state(
+            &assignment,
+            crate::PublishCampaignState::Imported,
+            None,
+            None,
+        )
+        .unwrap();
+        let intent = serde_json::json!({"effectIntent":"post","submittedAt":(Utc::now()-chrono::Duration::minutes(age_minutes)).to_rfc3339(),"expectedAccount":"fixture","importId":"keep-import"}).to_string();
+        assert!(db
+            .claim_publish_assignment_for_posting(&assignment, &intent)
+            .unwrap());
+        db.update_publish_assignment_state(
+            &assignment,
+            crate::PublishCampaignState::Verifying,
+            Some("post_verification_pending"),
+            Some(r#"{"state":"submitted","importId":"keep-import","cleanup":{"state":"kept"}}"#),
+        )
+        .unwrap();
+        db.finish_publish_campaign(&campaign, PublishRunOutcome::AllPosted)
+            .unwrap();
+        (db, path, campaign, assignment, intent)
+    }
+
+    #[test]
+    fn verification_review_deadline_stops_automatic_checks_and_preserves_effect_after_restart() {
+        let (db, path, campaign, assignment, intent) = review_fixture(31);
+        let candidate = db.pending_publish_verifications(10).unwrap().remove(0);
+        assert!(db
+            .record_publish_verification_pending(
+                &candidate,
+                "Observed draft; submitted post not identified"
+            )
+            .unwrap());
+        let detail = db.get_publish_campaign(&campaign).unwrap().unwrap();
+        assert_eq!(
+            detail.assignments[0].state,
+            crate::PublishCampaignState::Uncertain
+        );
+        assert_eq!(
+            detail.assignments[0].error_code.as_deref(),
+            Some("post_verification_needs_review")
+        );
+        assert_eq!(
+            detail.assignments[0].effect_intent.as_deref(),
+            Some(intent.as_str())
+        );
+        let evidence: serde_json::Value =
+            serde_json::from_str(detail.assignments[0].evidence_json.as_deref().unwrap()).unwrap();
+        assert_eq!(evidence["importId"], "keep-import");
+        assert_eq!(evidence["cleanup"]["state"], "kept");
+        assert_eq!(evidence["verificationStatus"]["state"], "needsReview");
+        assert_eq!(
+            detail.campaign.state,
+            crate::PublishCampaignState::Uncertain
+        );
+        let snapshot = db
+            .get_publish_execution_snapshot(&campaign)
+            .unwrap()
+            .unwrap();
+        assert_eq!(snapshot.status, crate::PublishExecutionStatus::Uncertain);
+        assert_eq!(snapshot.retry_scope, crate::PublishRetryScope::LinkAndSheet);
+        let summary = crate::operation::project_publish_summary(&detail, Some(&snapshot));
+        assert_eq!(
+            summary.state,
+            crate::operation::OperationRunState::Uncertain
+        );
+        assert_eq!(
+            summary.retry_scope,
+            Some(crate::PublishRetryScope::LinkAndSheet)
+        );
+        assert!(!db
+            .record_publish_verification_pending(&candidate, "stale")
+            .unwrap());
+        drop(db);
+        let db = Database::open(&path).unwrap();
+        db.interrupt_orphaned_publish_campaigns().unwrap();
+        assert!(db.pending_publish_verifications(10).unwrap().is_empty());
+        assert!(db.has_pending_publish_for_device(&candidate.udid).unwrap());
+        assert!(!db
+            .claim_publish_assignment_for_posting(&assignment, &intent)
+            .unwrap());
+        assert!(db.pending_publish_sheet_row(&assignment).unwrap().is_none());
+        drop(db);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn verification_review_recent_failure_remains_pending_without_restarting_deadline() {
+        let (db, path, campaign, assignment, intent) = review_fixture(1);
+        let candidate = db.pending_publish_verifications(10).unwrap().remove(0);
+        assert!(db
+            .record_publish_verification_pending(&candidate, "temporary read failure")
+            .unwrap());
+        let detail = db.get_publish_campaign(&campaign).unwrap().unwrap();
+        assert_eq!(
+            detail.assignments[0].state,
+            crate::PublishCampaignState::Verifying
+        );
+        assert_eq!(
+            detail.assignments[0].effect_intent.as_deref(),
+            Some(intent.as_str())
+        );
+        assert_eq!(db.pending_publish_verifications(10).unwrap().len(), 1);
+        assert!(!db
+            .claim_publish_assignment_for_posting(&assignment, &intent)
+            .unwrap());
+        drop(db);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn verification_backoff_survives_restart_and_resets_after_a_readable_observation() {
+        let (db, path, campaign, _, intent) = review_fixture(1);
+        for seconds in [30, 60, 120, 120] {
+            let candidate = db.pending_publish_verifications(10).unwrap().remove(0);
+            assert!(db
+                .record_publish_verification_observation(
+                    &candidate,
+                    "root inaccessible",
+                    "readFailed"
+                )
+                .unwrap());
+            let candidate = db.pending_publish_verifications(10).unwrap().remove(0);
+            let evidence: serde_json::Value =
+                serde_json::from_str(candidate.evidence_json.as_deref().unwrap()).unwrap();
+            let status = &evidence["verificationStatus"];
+            let checked =
+                DateTime::parse_from_rfc3339(status["checkedAt"].as_str().unwrap()).unwrap();
+            let next =
+                DateTime::parse_from_rfc3339(status["nextCheckAt"].as_str().unwrap()).unwrap();
+            assert_eq!((next - checked).num_seconds(), seconds);
+            assert!(!candidate.is_due(checked.into()));
+            assert!(candidate.is_due(next.into()));
+        }
+        drop(db);
+        let db = Database::open(&path).unwrap();
+        let candidate = db.pending_publish_verifications(10).unwrap().remove(0);
+        assert!(!candidate.is_due(Utc::now()));
+        assert!(db
+            .record_publish_verification_observation(&candidate, "upload pending", "postNotVisible")
+            .unwrap());
+        let detail = db.get_publish_campaign(&campaign).unwrap().unwrap();
+        assert_eq!(
+            detail.assignments[0].effect_intent.as_deref(),
+            Some(intent.as_str())
+        );
+        let evidence: serde_json::Value =
+            serde_json::from_str(detail.assignments[0].evidence_json.as_deref().unwrap()).unwrap();
+        assert_eq!(evidence["verificationStatus"]["attempts"], 5);
+        assert_eq!(evidence["verificationStatus"]["readFailures"], 0);
+        assert_eq!(
+            evidence["verificationStatus"]["reasonCode"],
+            "postNotVisible"
+        );
+        assert!(db
+            .pending_publish_sheet_row(&candidate.assignment_id)
+            .unwrap()
+            .is_none());
+        drop(db);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn verification_review_expiry_ignores_device_presence_and_late_link_settles_once() {
+        let (db, path, campaign, assignment, intent) = review_fixture(31);
+        assert_eq!(
+            db.expire_due_publish_verifications().unwrap(),
+            vec![campaign.clone()]
+        );
+        assert!(db.expire_due_publish_verifications().unwrap().is_empty());
+        assert!(db.pending_publish_verifications(10).unwrap().is_empty());
+        let review = db
+            .publish_verifications_for_campaign(&campaign, 10)
+            .unwrap()
+            .remove(0);
+        assert_eq!(review.effect_intent.as_deref(), Some(intent.as_str()));
+        let url = "https://www.tiktok.com/@fixture/photo/1234567890123456789";
+        let mut proof: serde_json::Value =
+            serde_json::from_str(review.evidence_json.as_deref().unwrap()).unwrap();
+        proof["postUrl"] = serde_json::json!(url);
+        proof["publicationVerified"] = serde_json::json!(true);
+        assert!(db
+            .record_verified_publish_with_sheet_row(&review, &proof.to_string(), url, "bot", &[])
+            .unwrap());
+        assert!(!db
+            .record_verified_publish_with_sheet_row(&review, &proof.to_string(), url, "bot", &[])
+            .unwrap());
+        assert!(!db
+            .record_publish_verification_pending(&review, "late failed observer")
+            .unwrap());
+        let row = db
+            .get_publish_campaign(&campaign)
+            .unwrap()
+            .unwrap()
+            .assignments
+            .remove(0);
+        assert_eq!(row.state, crate::PublishCampaignState::Succeeded);
+        let evidence: serde_json::Value =
+            serde_json::from_str(row.evidence_json.as_deref().unwrap()).unwrap();
+        assert_eq!(evidence["verificationStatus"]["state"], "verified");
+        assert!(row.error_code.is_none());
+        assert_eq!(evidence["importId"], "keep-import");
+        assert_eq!(db.pending_publish_sheet_rows(10).unwrap().len(), 1);
+        assert!(!db.has_pending_publish_for_device(&review.udid).unwrap());
+        assert!(!db
+            .claim_publish_assignment_for_posting(&assignment, &intent)
+            .unwrap());
+        drop(db);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn verification_review_expiry_rolls_back_assignment_and_campaign_when_projection_fails() {
+        let (db, path, campaign, _, _) = review_fixture(31);
+        let before = db.get_publish_campaign(&campaign).unwrap().unwrap();
+        let before_revision = db.publish_campaign_revision(&campaign).unwrap();
+        let conn = db.conn().unwrap();
+        conn.execute_batch("CREATE TRIGGER fail_review_projection BEFORE INSERT ON publish_execution_snapshots BEGIN SELECT RAISE(ABORT,'projection unavailable'); END;").unwrap();
+        let candidate = db.pending_publish_verifications(10).unwrap().remove(0);
+        assert!(db
+            .record_publish_verification_pending(&candidate, "not identified")
+            .is_err());
+        let after = db.get_publish_campaign(&campaign).unwrap().unwrap();
+        assert_eq!(
+            db.pending_publish_verifications(10).unwrap()[0].revision,
+            candidate.revision
+        );
+        assert_eq!(after.assignments[0].state, before.assignments[0].state);
+        assert_eq!(
+            db.publish_campaign_revision(&campaign).unwrap(),
+            before_revision
+        );
+        assert_eq!(after.campaign.state, before.campaign.state);
+        drop(conn);
+        drop(db);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn verification_review_due_transition_does_not_change_cancelled_assignment() {
+        let (db, path, campaign, assignment, _) = review_fixture(31);
+        let candidate = db.pending_publish_verifications(10).unwrap().remove(0);
+        db.update_publish_assignment_state(
+            &assignment,
+            crate::PublishCampaignState::Cancelled,
+            None,
+            None,
+        )
+        .unwrap();
+        assert!(!db
+            .record_publish_verification_pending(&candidate, "expired")
+            .unwrap());
+        assert!(db.expire_due_publish_verifications().unwrap().is_empty());
+        assert_eq!(
+            db.get_publish_campaign(&campaign)
+                .unwrap()
+                .unwrap()
+                .assignments[0]
+                .state,
+            crate::PublishCampaignState::Cancelled
+        );
+        drop(db);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn legacy_verification_without_submission_identity_requires_review_on_first_failure() {
+        let (db, path) = fixture();
+        let (campaign, assignment) = seed(&db);
+        let prior =
+            r#"{ "post":{"state":"posted","verdict":"Posted","importId":"historical-import"} }"#;
+        db.update_publish_assignment_state(
+            &assignment,
+            crate::PublishCampaignState::Succeeded,
+            None,
+            Some(prior),
+        )
+        .unwrap();
+        db.update_publish_campaign_state(&campaign, crate::PublishCampaignState::Succeeded, None)
+            .unwrap();
+        let candidate = db.pending_publish_verifications(10).unwrap().remove(0);
+        assert!(db
+            .record_publish_verification_pending(
+                &candidate,
+                "submission identity missing; review old post manually"
+            )
+            .unwrap());
+        let detail = db.get_publish_campaign(&campaign).unwrap().unwrap();
+        assert_eq!(
+            detail.assignments[0].state,
+            crate::PublishCampaignState::Uncertain
+        );
+        assert_eq!(
+            detail.assignments[0].error_code.as_deref(),
+            Some("post_verification_needs_review")
+        );
+        assert!(detail.assignments[0].effect_intent.is_none());
+        let e: serde_json::Value =
+            serde_json::from_str(detail.assignments[0].evidence_json.as_deref().unwrap()).unwrap();
+        assert_eq!(e["priorEvidenceJson"], prior);
+        assert_eq!(e["post"]["importId"], "historical-import");
+        assert_eq!(
+            e["verificationStatus"]["cause"],
+            "submissionIdentityMissing"
+        );
+        assert!(e["verificationStatus"]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("Thiếu bằng chứng tài khoản hoặc thời điểm"));
+        assert_eq!(
+            e["verificationStatus"]["observationReason"],
+            "submission identity missing; review old post manually"
+        );
+        assert!(e["verificationStatus"]["submittedAt"].is_null());
+        assert!(e["verificationStatus"]["reviewAfterMinutes"].is_null());
+        assert_eq!(
+            detail.campaign.state,
+            crate::PublishCampaignState::Uncertain
+        );
+        assert_eq!(
+            db.get_publish_execution_snapshot(&campaign)
+                .unwrap()
+                .unwrap()
+                .retry_scope,
+            crate::PublishRetryScope::LinkAndSheet
+        );
+        drop(db);
+        let db = Database::open(&path).unwrap();
+        db.interrupt_orphaned_publish_campaigns().unwrap();
+        assert!(db.pending_publish_verifications(10).unwrap().is_empty());
+        assert_eq!(
+            db.publish_verifications_for_campaign(&campaign, 10)
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(db.has_pending_publish_for_device(&candidate.udid).unwrap());
+        assert!(!db
+            .claim_publish_assignment_for_posting(&assignment, r#"{"effectIntent":"post"}"#)
+            .unwrap());
+        assert!(db.pending_publish_sheet_rows(10).unwrap().is_empty());
+        drop(db);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn legacy_verification_sweep_requires_complete_immutable_identity_without_inferred_age() {
+        for identity in [
+            serde_json::json!({"effectIntent":"post","expectedAccount":"fixture","submittedAt":"not-a-time"}),
+            serde_json::json!({"effectIntent":"post","submittedAt":Utc::now().to_rfc3339()}),
+            serde_json::json!({"effectIntent":"post","expectedAccount":"  ","submittedAt":Utc::now().to_rfc3339()}),
+        ] {
+            let (db, path, campaign, assignment, _) = review_fixture(1);
+            let raw = identity.to_string();
+            db.conn()
+                .unwrap()
+                .execute(
+                    "UPDATE publish_assignments SET effect_intent=?1 WHERE id=?2",
+                    params![raw, assignment],
+                )
+                .unwrap();
+            assert_eq!(
+                db.expire_due_publish_verifications().unwrap(),
+                vec![campaign.clone()]
+            );
+            let row = db
+                .get_publish_campaign(&campaign)
+                .unwrap()
+                .unwrap()
+                .assignments
+                .remove(0);
+            assert_eq!(row.state, crate::PublishCampaignState::Uncertain);
+            assert_eq!(row.effect_intent.as_deref(), Some(raw.as_str()));
+            let e: serde_json::Value =
+                serde_json::from_str(row.evidence_json.as_deref().unwrap()).unwrap();
+            assert_eq!(
+                e["verificationStatus"]["cause"],
+                "submissionIdentityMissing"
+            );
+            assert!(e["verificationStatus"]["reviewAfterMinutes"].is_null());
+            assert!(db.pending_publish_verifications(10).unwrap().is_empty());
+            drop(db);
+            std::fs::remove_file(path).unwrap();
+        }
+    }
+
+    #[test]
+    fn verification_survives_restart_and_atomically_settles_link_without_reposting() {
+        use crate::PublishCampaignState as State;
+        let (db, path) = fixture();
+        let (campaign, assignment) = seed(&db);
+        db.update_publish_campaign_state(&campaign, State::Posting, None)
+            .unwrap();
+        db.update_publish_assignment_state(&assignment, State::Imported, None, None)
+            .unwrap();
+        let submitted_at = Utc::now().to_rfc3339();
+        let intent_owned = serde_json::json!({"effectIntent":"post","bundleId":"fixture","submittedAt":submitted_at,"expectedAccount":"fixture"}).to_string();
+        let intent = intent_owned.as_str();
+        assert!(db
+            .claim_publish_assignment_for_posting(&assignment, intent)
+            .unwrap());
+        let prior = "{ \"state\": \"submitted\", \"importId\": \"import-1\" }";
+        db.update_publish_assignment_state(
+            &assignment,
+            State::Verifying,
+            Some("post_verification_pending"),
+            Some(prior),
+        )
+        .unwrap();
+        assert_eq!(
+            db.finish_publish_campaign(&campaign, PublishRunOutcome::AllPosted)
+                .unwrap(),
+            Some(State::Verifying)
+        );
+        assert_eq!(
+            db.reconciled_publish_execution_status(&campaign).unwrap(),
+            (
+                crate::PublishExecutionStatus::Partial,
+                crate::PublishRetryScope::LinkAndSheet
+            )
+        );
+        drop(db);
+        let db = Database::open(&path).unwrap();
+        db.interrupt_orphaned_publish_campaigns().unwrap();
+        assert_eq!(
+            db.publish_campaign_state(&campaign).unwrap(),
+            Some(State::Verifying)
+        );
+        let candidates = db.pending_publish_verifications(10).unwrap();
+        assert_eq!(candidates.len(), 1);
+        let candidate = &candidates[0];
+        assert_eq!(candidate.effect_intent.as_deref(), Some(intent));
+        assert!(db.has_pending_publish_for_device(&candidate.udid).unwrap());
+        assert!(!db
+            .claim_publish_assignment_for_posting(&assignment, intent)
+            .unwrap());
+        assert!(db
+            .record_publish_verification_pending(candidate, "Post is being processed")
+            .unwrap());
+        let url = "https://www.tiktok.com/@fixture/photo/1234567890123456789";
+        let evidence = serde_json::json!({"postUrl":url,"publicationVerified":true}).to_string();
+        assert!(
+            !db.record_verified_publish_with_sheet_row(
+                candidate,
+                &evidence,
+                url,
+                "bot",
+                &["partner".into()]
+            )
+            .unwrap(),
+            "stale observation must lose CAS"
+        );
+        assert!(db.pending_publish_sheet_row(&assignment).unwrap().is_none());
+        let refreshed = db.pending_publish_verifications(10).unwrap().remove(0);
+        let foreign_url = "https://www.tiktok.com/@other/photo/1234567890123456789";
+        let foreign_evidence =
+            serde_json::json!({"postUrl":foreign_url,"publicationVerified":true}).to_string();
+        assert!(db
+            .record_verified_publish_with_sheet_row(
+                &refreshed,
+                &foreign_evidence,
+                foreign_url,
+                "bot",
+                &[]
+            )
+            .is_err());
+        assert!(db.pending_publish_sheet_row(&assignment).unwrap().is_none());
+        assert!(db
+            .record_verified_publish_with_sheet_row(
+                &refreshed,
+                &evidence,
+                url,
+                "bot",
+                &["partner".into()]
+            )
+            .unwrap());
+        assert!(!db
+            .record_verified_publish_with_sheet_row(&refreshed, &evidence, url, "bot", &[])
+            .unwrap());
+        let detail = db.get_publish_campaign(&campaign).unwrap().unwrap();
+        assert_eq!(detail.campaign.state, State::Succeeded);
+        let stored: serde_json::Value =
+            serde_json::from_str(detail.assignments[0].evidence_json.as_deref().unwrap()).unwrap();
+        assert_eq!(stored["priorEvidenceJson"], prior);
+        assert_eq!(stored["submittedAt"], submitted_at);
+        assert_eq!(
+            db.pending_publish_sheet_row(&assignment)
+                .unwrap()
+                .unwrap()
+                .posted_at
+                .as_deref(),
+            Some(submitted_at.as_str())
+        );
+        let snapshot = db
+            .get_publish_execution_snapshot(&campaign)
+            .unwrap()
+            .unwrap();
+        assert_eq!(snapshot.status, crate::PublishExecutionStatus::Partial);
+        assert_eq!(snapshot.retry_scope, crate::PublishRetryScope::SheetOnly);
+        assert_eq!(
+            snapshot.report_json["source"],
+            "post_verification_reconciliation"
+        );
+        assert_eq!(
+            db.pending_publish_sheet_row(&assignment)
+                .unwrap()
+                .unwrap()
+                .post_url,
+            url
+        );
+        assert!(!db.has_pending_publish_for_device(&refreshed.udid).unwrap());
+        assert!(db.pending_publish_verifications(10).unwrap().is_empty());
+        drop(db);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn verification_excludes_active_posts_and_rolls_back_state_when_sheet_write_fails() {
+        use crate::PublishCampaignState as State;
+        let (db, path) = fixture();
+        let (campaign, assignment) = seed(&db);
+        db.update_publish_campaign_state(&campaign, State::Posting, None)
+            .unwrap();
+        db.update_publish_assignment_state(&assignment, State::Imported, None, None)
+            .unwrap();
+        assert!(db
+            .claim_publish_assignment_for_posting(&assignment, r#"{"effectIntent":"post"}"#)
+            .unwrap());
+        assert!(
+            db.pending_publish_verifications(10).unwrap().is_empty(),
+            "active Posting is owned by the run"
+        );
+        db.update_publish_assignment_state(
+            &assignment,
+            State::Verifying,
+            None,
+            Some(r#"{"state":"submitted"}"#),
+        )
+        .unwrap();
+        let candidate = db.pending_publish_verifications(10).unwrap().remove(0);
+        let url = "https://www.tiktok.com/@fixture/photo/1234567890123456789";
+        let evidence = serde_json::json!({"postUrl":url,"publicationVerified":true}).to_string();
+        assert!(db
+            .record_verified_publish_with_sheet_row(&candidate, &evidence, url, "", &[])
+            .is_err());
+        assert_eq!(
+            db.get_publish_campaign(&campaign)
+                .unwrap()
+                .unwrap()
+                .assignments[0]
+                .state,
+            State::Verifying
+        );
+        assert!(db.pending_publish_sheet_row(&assignment).unwrap().is_none());
+        assert!(db
+            .get_publish_execution_snapshot(&campaign)
+            .unwrap()
+            .is_none());
+        db.update_publish_assignment_state(&assignment, State::Posting, None, None)
+            .unwrap();
+        assert!(!db
+            .record_verified_publish_with_sheet_row(&candidate, &evidence, url, "bot", &[])
+            .unwrap());
+        drop(db);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn historical_feed_success_is_recovered_without_erasing_cancel_or_original_capture() {
+        use crate::PublishCampaignState as State;
+        let (db, path) = fixture();
+        let (campaign, assignment) = seed(&db);
+        let prior = "{\n  \"state\": \"posted\", \"verdict\": \"Posted\"\n}";
+        db.update_publish_assignment_state(&assignment, State::Succeeded, None, Some(prior))
+            .unwrap();
+        db.update_publish_campaign_state(&campaign, State::Cancelled, None)
+            .unwrap();
+        let candidate = db.pending_publish_verifications(1).unwrap().remove(0);
+        let url = "https://www.tiktok.com/@fixture/photo/1234567890123456789";
+        let evidence = serde_json::json!({"postUrl":url,"publicationVerified":true}).to_string();
+        assert!(db
+            .record_verified_publish_with_sheet_row(&candidate, &evidence, url, "bot", &[])
+            .unwrap());
+        assert_eq!(
+            db.publish_campaign_state(&campaign).unwrap(),
+            Some(State::Cancelled)
+        );
+        let detail = db.get_publish_campaign(&campaign).unwrap().unwrap();
+        let stored: serde_json::Value =
+            serde_json::from_str(detail.assignments[0].evidence_json.as_deref().unwrap()).unwrap();
+        assert_eq!(stored["priorEvidenceJson"], prior);
+        drop(db);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn orphaned_post_under_cancelled_campaign_stays_recoverable_and_never_reposts() {
+        use crate::PublishCampaignState as State;
+        let (db, path) = fixture();
+        let (campaign, assignment) = seed(&db);
+        db.update_publish_campaign_state(&campaign, State::Posting, None)
+            .unwrap();
+        db.update_publish_assignment_state(&assignment, State::Imported, None, None)
+            .unwrap();
+        let intent = r#"{"effectIntent":"post"}"#;
+        assert!(db
+            .claim_publish_assignment_for_posting(&assignment, intent)
+            .unwrap());
+        db.update_publish_campaign_state(&campaign, State::Cancelled, None)
+            .unwrap();
+        db.interrupt_orphaned_publish_campaigns().unwrap();
+        assert_eq!(
+            db.publish_campaign_state(&campaign).unwrap(),
+            Some(State::Cancelled)
+        );
+        assert_eq!(
+            db.get_publish_campaign(&campaign)
+                .unwrap()
+                .unwrap()
+                .assignments[0]
+                .state,
+            State::Uncertain
+        );
+        assert_eq!(db.pending_publish_verifications(10).unwrap().len(), 1);
+        assert!(!db
+            .claim_publish_assignment_for_posting(&assignment, intent)
+            .unwrap());
+        drop(db);
+        std::fs::remove_file(path).unwrap();
+    }
+
     #[test]
     fn disabled_sheet_keeps_link_without_outbox_and_reconciles_complete_after_restart() {
         let (db, path) = fixture();
@@ -694,11 +1387,7 @@ mod tests {
             );
         }
 
-        for assignment_state in [
-            CampaignState::Posting,
-            CampaignState::Verifying,
-            CampaignState::Uncertain,
-        ] {
+        for assignment_state in [CampaignState::Posting, CampaignState::Uncertain] {
             let (campaign, assignment) = seed(&db);
             set_publish_states(
                 &db,

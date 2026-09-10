@@ -4,6 +4,8 @@ import {
   useMemo,
   useRef,
   useState,
+  type ComponentProps,
+  type ReactNode,
   type KeyboardEvent as ReactKeyboardEvent,
 } from "react";
 import {
@@ -14,6 +16,7 @@ import {
   interactionMeasurePost,
 } from "../api";
 import { describeError } from "../describeError";
+import { requestConfirm } from "../confirmStore";
 import { orderDevicesByNumber, tileName, tileNumber } from "../deviceNaming";
 import { parseMentions, resolveMentionActors, unionActors } from "../interactionMentions";
 import { useDeviceHandles } from "../useDeviceHandles";
@@ -26,13 +29,12 @@ import {
   validateDraft,
   type InteractionDraft,
 } from "../interactionPlan";
-import { interactionDraftFromProfile, interactionProfileConfig, interactionProfileTarget } from "../automationProfileConfig";
+import { interactionProfileConfig, interactionProfileTarget } from "../automationProfileConfig";
 import { useWorkspaceDraft } from "../workspaceDraft";
 import { readFormDraft, restoreFormShape, writeFormDraft } from "../formDraftStorage";
 import type { OperationSourceRef } from "../operationSource";
 import type {
   DeviceInfo,
-  AutomationDefinitionRecord,
   DeviceMeta,
   InteractionPostReading,
   PostTargets,
@@ -43,8 +45,10 @@ import type {
 import { IconChat, IconClose } from "./Icons";
 import { InteractionMonitorTab } from "./interaction/InteractionMonitorTab";
 import { InteractionSetupTab } from "./interaction/InteractionSetupTab";
-import { AutomationProfileControl, type AutomationProfileHandle } from "./AutomationProfileControl";
-import { CommandBar, StatusChip, SummaryRail } from "./WorkspacePrimitives";
+import { InteractionWorkspaceSetup } from "./interaction/InteractionWorkspaceSetup";
+import { AutomationTabs, type AutomationMode } from "./AutomationTabs";
+import { AutomationSettingsSchedule } from "./AutomationSettingsSchedule";
+import { CommandBar } from "./WorkspacePrimitives";
 
 type Props = {
   operationSource?: OperationSourceRef;
@@ -64,6 +68,7 @@ type Props = {
   metas: Map<string, DeviceMeta>;
   onClose?: () => void;
   surface?: "popup" | "page";
+  scopeControl?: ReactNode;
 };
 
 function newRequestId() {
@@ -113,6 +118,7 @@ export function InteractionPopup({
   metas,
   onClose,
   surface = "popup",
+  scopeControl,
 }: Props) {
   const inScope = useMemo(
     () => devices.filter((device) =>
@@ -160,13 +166,11 @@ export function InteractionPopup({
     [inScope],
   );
 
-  const [tab, setTab] = useState<"setup" | "monitor">("setup");
+  const [tab, setTab] = useState<AutomationMode>("setup");
   const [restoredDraft] = useState(() => readFormDraft("interaction", value => restoreFormShape(value, DEFAULT_DRAFT)));
   const [draft, setDraft] = useState<InteractionDraft>(restoredDraft ?? DEFAULT_DRAFT);
   const [edited, setEdited] = useState(false);
-  const profileRef = useRef<AutomationProfileHandle>(null);
   const [baseline, setBaseline] = useState({ draft: DEFAULT_DRAFT, targetRef });
-  const pendingProfileActors = useRef<TargetRef | null>(null);
   /// Set one draft field, from a value or from the value it currently has.
   ///
   /// The updater form matters for the actor list. `patch("actors", draft.actors.filter(...))`
@@ -219,7 +223,7 @@ export function InteractionPopup({
     snapshotKey,
     autoSave: () => writeFormDraft("interaction", draft),
     onAutoSaveError: (error) => setRunError(`Chưa tự lưu được thiết lập: ${describeError(error)}`),
-    save: async () => await profileRef.current?.save() ?? false,
+    save: async () => { writeFormDraft("interaction", draft); setBaseline({ draft, targetRef }); setEdited(false); return true; },
     discard: () => {
       setDraft(baseline.draft);
       if (baseline.targetRef) onTargetRefChange?.(baseline.targetRef);
@@ -346,18 +350,6 @@ export function InteractionPopup({
   /// shape: a new array on every poll re-renders forever.
   const departed = useRef<string[]>([]);
   useEffect(() => {
-    if (pendingProfileActors.current) {
-      if (JSON.stringify(targetRef) === JSON.stringify(pendingProfileActors.current)) {
-        const target = pendingProfileActors.current;
-        const actors = target.type === "explicit"
-          ? target.udids.filter((udid) => inScope.some((device) => device.udid === udid))
-          : inScope.map((device) => device.udid);
-        pendingProfileActors.current = null;
-        setDraft((previous) => ({ ...previous, actors }));
-        setBaseline((previous) => ({ ...previous, draft: { ...previous.draft, actors } }));
-      }
-      return;
-    }
     const here = (udid: string) => inScope.some((device) => device.udid === udid);
     const gone = draft.actors.filter((udid) => !here(udid));
     const back = departed.current.filter(here);
@@ -540,20 +532,6 @@ export function InteractionPopup({
       ),
     [draft, effectiveActors, largestCohort, mentions, validTargets],
   );
-  const applyProfile = (record: AutomationDefinitionRecord) => {
-    const nextTarget = record.revision.targetRef;
-    const actors = nextTarget.type === "explicit" ? nextTarget.udids : inScope.map((device) => device.udid);
-    const next = interactionDraftFromProfile(record.revision.config, actors);
-    departed.current = [];
-    seededActors.current = true;
-    pendingProfileActors.current = nextTarget;
-    setDraft(next);
-    setEdited(false);
-    setBaseline({ draft: next, targetRef: nextTarget });
-    onTargetRefChange?.(nextTarget);
-    setTab("setup");
-  };
-
   const resolveShortLinks = useCallback(async () => {
     if (!draft.rawLinks.trim()) return;
     // Drop any parse still in flight for the same text; see `cancelParse`.
@@ -611,11 +589,30 @@ export function InteractionPopup({
     }
   }, [validTargets, effectiveActors, wanted, readViews]);
 
+  const runRevision = JSON.stringify([draft, validTargets, effectiveActors, targetRef, savedHandles, handles, savingHandles, handleErrors, previewKey, previewFor, issues]);
+  const latestRunRevision = useRef<string | null>(runRevision);
+  latestRunRevision.current = runRevision;
+  useEffect(() => () => { latestRunRevision.current = null; }, []);
+  const starting = useRef(false);
   const run = useCallback(async () => {
-    if (issues.length) return;
+    if (issues.length || starting.current) return;
+    starting.current = true;
     setRunBusy(true);
     setRunError(null);
     try {
+      if (pageSurface) {
+        const approved = await requestConfirm({
+          title: "Xác nhận tương tác",
+          message: `${validTargets.length} bài sẽ được mở trên ${effectiveActors.length} máy. Thực hiện: ${[draft.actions.like && "Tim", draft.actions.save && "Lưu", draft.actions.comment && "Bình luận"].filter(Boolean).join(" → ")}. Khi kết quả chưa rõ, lượt đó dừng để kiểm tra và không tự gửi lại.`,
+          confirmLabel: "Bắt đầu tương tác",
+          cancelLabel: "Quay lại",
+        });
+        if (!approved) return;
+        if (latestRunRevision.current !== runRevision) {
+          if (latestRunRevision.current !== null) setRunError("Thiết lập hoặc danh sách máy đã thay đổi. Kiểm tra lượt chạy rồi xác nhận lại.");
+          return;
+        }
+      }
       const result = await interactionStartThread(
         buildRequest(draft, {
           requestId: requestIdRef.current,
@@ -633,9 +630,10 @@ export function InteractionPopup({
     } catch (e) {
       setRunError(describeError(e));
     } finally {
+      starting.current = false;
       setRunBusy(false);
     }
-  }, [draft, effectiveActors, issues.length, largestCohort, mentions, validTargets]);
+  }, [draft, effectiveActors, issues.length, largestCohort, mentions, validTargets, pageSurface, runRevision]);
 
   const onTitleDown = (event: React.PointerEvent<HTMLElement>) => {
     if ((event.target as HTMLElement).closest("button")) return;
@@ -682,6 +680,46 @@ export function InteractionPopup({
     setTab(next);
   };
 
+  const setupProps: ComponentProps<typeof InteractionSetupTab> = {
+    threshold: {
+      wanted,
+      setWanted,
+      readViews,
+      setReadViews,
+      reading,
+      busy: measureBusy,
+      error: measureError,
+      onMeasure: () => void measure(),
+      canMeasure: validTargets.length > 0 && effectiveActors.length > 0,
+    },
+    advancedOpen,
+    setAdvancedOpen,
+    draft,
+    patch,
+    lines: currentLines,
+    preview,
+    issues,
+    warnings,
+    devices,
+    deviceNumber,
+    deviceLabel,
+    pixelActors,
+    hierarchyActors,
+    largestCohort,
+    handles,
+    handleErrors,
+    savingHandles,
+    onHandleChange: changeHandle,
+    onHandleBlur: (udid, value) => void persistHandle(udid, value),
+    onHandleReload: (udid) => void reloadHandle(udid),
+    mentions,
+    mentionActorCount: mentionActors.length,
+    linkBusy,
+    linkError,
+    runError,
+    onResolveShortLinks: () => void resolveShortLinks(),
+  };
+
   return (
     <div
       className={pageSurface ? "interaction-workspace" : "interaction-float-layer"}
@@ -711,7 +749,7 @@ export function InteractionPopup({
             </button>
           </header>
         )}
-        <div className="interaction-tabs" role="tablist" aria-label="Chế độ Tương tác">
+        {pageSurface ? <AutomationTabs id="interaction" label="Chế độ Tương tác" value={tab} onChange={setTab} /> : <div className="interaction-tabs" role="tablist" aria-label="Chế độ Tương tác">
           <button
             type="button"
             role="tab"
@@ -736,8 +774,8 @@ export function InteractionPopup({
           >
             Theo dõi
           </button>
-        </div>
-        {tab === "setup" && (
+        </div>}
+        {tab === "setup" && !pageSurface && (
           <CommandBar
             title={issues.length ? `${issues.length} mục cần xử lý` : `${validTargets.length} bài sẵn sàng`}
             detail={issues.length ? "Sửa các mục được đánh dấu trong phần thiết lập." : `Thực hiện trên ${effectiveActors.length} máy theo thứ tự đã chọn.`}
@@ -764,99 +802,9 @@ export function InteractionPopup({
           aria-labelledby="interaction-tab-setup"
           hidden={tab !== "setup"}
         >
-          {(
-            <div className={pageSurface ? "interaction-setup-grid" : undefined}>
-              <div className="interaction-setup-main">
-                {pageSurface && targetRef && (
-                  <AutomationProfileControl
-                    ref={profileRef}
-                    dirty={dirty}
-                    draftId="interaction"
-                    onApply={applyProfile}
-                    onSaved={() => { setBaseline({ draft, targetRef }); setEdited(false); }}
-                    kind="interaction"
-                    target={interactionProfileTarget(targetRef, inScope.map((device) => device.udid), effectiveActors)}
-                    config={profileConfig}
-                    defaultName="Hồ sơ Tương tác"
-                    disabled={issues.length > 0}
-                    disabledReason={issues[0]?.message}
-                  />
-                )}
-                <InteractionSetupTab
-                threshold={{
-                  wanted,
-                  setWanted,
-                  readViews,
-                  setReadViews,
-                  reading,
-                  busy: measureBusy,
-                  error: measureError,
-                  onMeasure: () => void measure(),
-                  canMeasure: validTargets.length > 0 && effectiveActors.length > 0,
-                }}
-                advancedOpen={advancedOpen}
-                setAdvancedOpen={setAdvancedOpen}
-                draft={draft}
-                patch={patch}
-                lines={currentLines}
-                preview={preview}
-                issues={issues}
-                warnings={warnings}
-                devices={devices}
-                deviceNumber={deviceNumber}
-                deviceLabel={deviceLabel}
-                pixelActors={pixelActors}
-                hierarchyActors={hierarchyActors}
-                largestCohort={largestCohort}
-                handles={handles}
-                handleErrors={handleErrors}
-                savingHandles={savingHandles}
-                onHandleChange={changeHandle}
-                onHandleBlur={(udid, value) => void persistHandle(udid, value)}
-                onHandleReload={(udid) => void reloadHandle(udid)}
-                mentions={mentions}
-                mentionActorCount={mentionActors.length}
-                linkBusy={linkBusy}
-                linkError={linkError}
-                runError={runError}
-                onResolveShortLinks={() => void resolveShortLinks()}
-                />
-              </div>
-              {pageSurface && (
-                <SummaryRail
-                  title="Kiểm tra chiến dịch"
-                  actions={(
-                    <StatusChip tone={issues.length ? "warning" : "success"}>
-                      {issues.length ? `${issues.length} mục cần xử lý` : "Sẵn sàng"}
-                    </StatusChip>
-                  )}
-                >
-                  <dl className="interaction-review-list">
-                    <div><dt>Link hợp lệ</dt><dd>{validTargets.length}</dd></div>
-                    <div><dt>Thiết bị chạy</dt><dd>{effectiveActors.length}</dd></div>
-                    <div><dt>Hành động</dt><dd>{[
-                      draft.actions.like && "Tim",
-                      draft.actions.save && "Lưu",
-                      draft.actions.comment && "Bình luận",
-                    ].filter(Boolean).join(" → ")}</dd></div>
-                    {draft.actions.comment && (
-                      <div><dt>Bình luận/link</dt><dd>{draft.messageCount ?? largestCohort}</dd></div>
-                    )}
-                  </dl>
-                  {warnings.length > 0 && (
-                    <StatusChip tone="warning">{warnings.length} cảnh báo</StatusChip>
-                  )}
-                  {issues.length > 0 && (
-                    <ul className="interaction-review-issues" aria-label="Mục cần xử lý">
-                      {issues.slice(0, 3).map((issue) => (
-                        <li key={`${issue.field}:${issue.message}`}>{issue.message}</li>
-                      ))}
-                    </ul>
-                  )}
-                </SummaryRail>
-              )}
-            </div>
-          )}
+          {pageSurface ? <InteractionWorkspaceSetup setup={setupProps} profiles={null} scopeControl={scopeControl}
+            effectiveActors={effectiveActors} busy={runBusy} onRun={() => void run()}
+            onReparse={() => setParseRevision((value) => value + 1)} /> : <InteractionSetupTab {...setupProps} />}
         </div>
         <div
           className="interaction-float-body"
@@ -877,6 +825,9 @@ export function InteractionPopup({
             />
           )}
         </div>
+        {pageSurface && <div className="interaction-schedule-panel" role="tabpanel" id="interaction-panel-schedule" aria-labelledby="interaction-tab-schedule" hidden={tab !== "schedule"}>
+          <AutomationSettingsSchedule kind="interaction" target={interactionProfileTarget(targetRef ?? { type: "explicit", udids: effectiveActors }, inScope.map(d => d.udid), effectiveActors)} config={profileConfig} disabled={issues.length > 0} />
+        </div>}
       </section>
     </div>
   );

@@ -1,5 +1,5 @@
 import { useEffect, useSyncExternalStore } from "react";
-import { viewEndpoint, viewReportPaint, type ViewPaintReport } from "./api";
+import { viewEndpoint, viewReportPaint, viewRequestKeyframe, type ViewPaintReport } from "./api";
 import { SILENT_DECODER_MIN_FEEDS } from "./viewProtocol";
 
 export interface ViewSize {
@@ -101,6 +101,7 @@ export function viewDecodeFailed(udid: string): boolean {
 /// One udid's most recent worker beat: how many envelopes arrived and how many frames were
 /// drawn, as of `at`.
 export interface ViewDiag {
+  decodeLatencyP95Ms?: number | null;
   fed: number;
   output: number;
   closes: number;
@@ -246,6 +247,10 @@ function ensureWorker(): Worker | null {
   worker.postMessage({ type: "diag", enabled: true });
   worker.onmessage = (event: MessageEvent<{ type: string; udid?: string; width?: number; height?: number; generation?: number; requestId?: number; bytes?: Uint8Array | null; frames?: number; received?: number; diag?: ViewDiag; codecs?: string[]; codec?: string; accel?: number; candidate?: number; errorMessage?: string }>) => {
     const message = event.data;
+    if (message.type === "requestKeyframe" && message.udid) {
+      void viewRequestKeyframe(message.udid).catch(error => console.warn("view resync request failed", error));
+      return;
+    }
     if (message.type === "painted" && message.udid) {
       const next: ViewSize = {
         width: message.width ?? 0,
@@ -407,6 +412,9 @@ function startStallWatch() {
 
 /** Open the loopback view WebSocket and keep one worker for every canvas. */
 export function startViewClient() {
+  if (import.meta.env.DEV) {
+    (globalThis as unknown as { __RIVIU_VIEW_DIAGNOSTICS__: typeof viewDiagnostics }).__RIVIU_VIEW_DIAGNOSTICS__ = viewDiagnostics;
+  }
   if (started) return;
   started = true;
   ensureWorker();
@@ -585,4 +593,9 @@ export function useViewClient() {
   useEffect(() => {
     startViewClient();
   }, []);
+}
+
+/** Local diagnostics for the dev harness; never changes devices or the view lifecycle. */
+export function viewDiagnostics() {
+  return Object.fromEntries([...latestBeat].map(([udid, beat]) => [udid, { ...beat }]));
 }

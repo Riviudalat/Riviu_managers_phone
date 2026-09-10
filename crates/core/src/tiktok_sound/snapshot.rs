@@ -1,10 +1,48 @@
-//! Carousel sound sheet measured on musically/en/46.2.42, 2026-09-07 (machine13).
-//! Read one hierarchy generation for rows, selected tab and inline equalizer.
+//! Read one hierarchy generation using the tuple's measured sound-sheet layout.
+//! Rows, selected tab and inline markers always come from the same snapshot.
 use super::*;
 use quick_xml::{events::Event, Reader, XmlVersion};
 use std::collections::HashMap;
 
-const PACKAGE: &str = "com.zhiliaoapp.musically";
+// AGENTS.md §9.187: 0.2.11 exhausted eight seconds before any Hot tap on the
+// local 45.7.3 phones 2/3. Android source reads take multiple seconds; the
+// driver's measured worst root-query regime is 11 seconds. Two stable reads,
+// one missed tap, two fresh reads for the retry and its confirmation need five
+// such reads plus polling. Keep both observation phases bounded independently.
+const SECTION_WINDOW: Duration = Duration::from_secs(60);
+const SNAPSHOT_POOL_WINDOW: Duration = Duration::from_secs(30);
+
+/// One extra observation per phase after the driver's exhausted read recovery.
+/// Clear the previous generation before waiting; a stale rectangle cannot authorize a tap.
+async fn read_snapshot(
+    session: &dyn UiSession,
+    deadline: Instant,
+    recovery_used: &mut bool,
+) -> anyhow::Result<Option<String>> {
+    let started = Instant::now();
+    match session.hierarchy_source_snapshot().await {
+        Ok(snapshot) => Ok(Some(snapshot.xml)),
+        Err(error)
+            if error
+                .downcast_ref::<crate::driver::AccessibilityReadUnavailable>()
+                .is_some()
+                && !*recovery_used
+                && Instant::now() + POLL < deadline =>
+        {
+            *recovery_used = true;
+            tracing::warn!(elapsed_ms = started.elapsed().as_millis() as u64,
+                    recovery = 1, remaining_ms = deadline.saturating_duration_since(Instant::now()).as_millis() as u64,
+                    error = %error, "sound screen read unavailable; observing once more");
+            tokio::time::sleep(POLL).await;
+            Ok(None)
+        }
+        Err(error) => Err(error.context(format!(
+            "đọc bảng nhạc thất bại sau {} lần phục hồi bổ sung; request {} ms",
+            usize::from(*recovery_used),
+            started.elapsed().as_millis()
+        ))),
+    }
+}
 
 #[derive(Debug)]
 struct Node {
@@ -13,7 +51,10 @@ struct Node {
     rect: ElementBox,
 }
 
-fn parse(xml: &str) -> anyhow::Result<Vec<Node>> {
+fn parse(xml: &str, plan: SoundPickerPlan) -> anyhow::Result<Vec<Node>> {
+    let layout = plan
+        .snapshot_layout()
+        .context("sound snapshot layout unmeasured")?;
     anyhow::ensure!(xml.len() <= 16 * 1024 * 1024, "sound snapshot size limit");
     let mut reader = Reader::from_str(xml);
     let mut out = Vec::new();
@@ -41,22 +82,24 @@ fn parse(xml: &str) -> anyhow::Result<Vec<Node>> {
                     );
                 }
                 let a = |key: &str| attrs.get(key).map(String::as_str).unwrap_or("");
-                if a("package") != PACKAGE
+                if a("package") != plan.package
                     || a("displayed") != "true"
-                    || !a("resource-id").starts_with(&format!("{PACKAGE}:id/"))
+                    || !a("resource-id").starts_with(&format!("{}:id/", plan.package))
                 {
                     continue;
                 }
-                let id = a("resource-id").trim_start_matches(PACKAGE);
-                if !matches!(
-                    id,
-                    ":id/x2k"
-                        | ":id/viewpager_container"
-                        | ":id/vertical_item_music_new_rl"
-                        | ":id/title"
-                        | ":id/zdw"
-                        | ":id/nve"
-                ) {
+                let id = a("resource-id").trim_start_matches(plan.package);
+                if ![
+                    layout.tab_id,
+                    layout.viewport_id,
+                    plan.row_id,
+                    plan.title_id,
+                    plan.artist_id,
+                ]
+                .contains(&id)
+                    && !plan.selected_marker_ids().contains(&id)
+                    && plan.choose_id != Some(id)
+                {
                     continue;
                 }
                 let (start, end) = a("bounds")
@@ -106,41 +149,78 @@ fn parse(xml: &str) -> anyhow::Result<Vec<Node>> {
     Ok(out)
 }
 
-fn hot_tab(nodes: &[Node]) -> anyhow::Result<(&ElementBox, bool)> {
-    let tabs: Vec<_> = nodes.iter().filter(|n| n.id == ":id/x2k").collect();
+fn section_tab(nodes: &[Node], plan: SoundPickerPlan) -> anyhow::Result<(&ElementBox, bool)> {
+    let layout = plan
+        .snapshot_layout()
+        .context("sound snapshot layout unmeasured")?;
+    let tabs: Vec<_> = nodes.iter().filter(|n| n.id == layout.tab_id).collect();
     let hot: Vec<_> = tabs
         .iter()
-        .filter(|n| n.rect.description.as_deref() == Some("Hot"))
+        .filter(|n| n.rect.description.as_deref() == Some(plan.section_label))
         .collect();
     let [hot] = hot.as_slice() else {
-        anyhow::bail!("Hot tab missing or ambiguous");
+        anyhow::bail!("{} tab missing or ambiguous", plan.section_label);
     };
     let selected: Vec<_> = tabs.iter().filter(|n| n.selected).collect();
     anyhow::ensure!(selected.len() == 1, "sound tab selection unreadable");
-    anyhow::ensure!(hot.rect.enabled, "Hot tab disabled");
+    anyhow::ensure!(hot.rect.enabled, "{} tab disabled", plan.section_label);
     Ok((&hot.rect, hot.selected))
 }
 
-pub(super) async fn select_hot_tab(session: &dyn UiSession) -> anyhow::Result<()> {
-    let deadline = Instant::now() + PICKER_WINDOW;
-    let mut tapped = false;
+pub(super) async fn select_section_tab(
+    session: &dyn UiSession,
+    plan: SoundPickerPlan,
+) -> anyhow::Result<()> {
+    let deadline = Instant::now() + SECTION_WINDOW;
+    let mut previous: Option<ElementBox> = None;
+    let mut attempts = 0;
+    let mut retry_after = Instant::now();
+    let mut recovery_used = false;
     loop {
-        let parsed = parse(&session.hierarchy_source_snapshot().await?.xml)?;
-        if let Ok((tab, selected)) = hot_tab(&parsed) {
-            if selected {
-                return Ok(());
+        let Some(xml) = read_snapshot(session, deadline, &mut recovery_used).await? else {
+            previous = None;
+            continue;
+        };
+        let parsed = parse(&xml, plan)?;
+        let observation = match section_tab(&parsed, plan) {
+            Ok((_, true)) => return Ok(()),
+            Ok((tab, false)) => {
+                // LAN 46.0.41 campaigns stopped here without selecting Hot
+                // (AGENTS.md §9.186). Wait for stable bounds while the sheet opens.
+                // A section tab is idempotent: one fresh, still-unselected readback
+                // may authorize one retry. Sound rows themselves remain single-tap.
+                let now = Instant::now();
+                if previous.as_ref() == Some(tab)
+                    && attempts < 2
+                    && now >= retry_after
+                    && now < deadline
+                {
+                    attempts += 1;
+                    tracing::debug!(
+                        section = plan.section_label,
+                        attempts,
+                        "select sound section"
+                    );
+                    session
+                        .tap(tab.centre())
+                        .await
+                        .context("select measured sound section")?;
+                    retry_after = Instant::now() + Duration::from_secs(1);
+                    previous = None;
+                } else {
+                    previous = Some(tab.clone());
+                }
+                "another sound section is still selected".to_string()
             }
-            if !tapped {
-                session
-                    .tap(tab.centre())
-                    .await
-                    .context("select Hot sound section")?;
-                tapped = true;
+            Err(error) => {
+                previous = None;
+                error.to_string()
             }
-        }
+        };
         anyhow::ensure!(
             Instant::now() < deadline,
-            "Hot sound section did not become selected"
+            "{} sound section did not become selected after {attempts} tap(s): {observation}",
+            plan.section_label,
         );
         tokio::time::sleep(POLL).await;
     }
@@ -154,8 +234,15 @@ fn contains(outer: &ElementBox, inner: &ElementBox) -> bool {
 }
 
 fn pool(xml: &str, plan: SoundPickerPlan, maximum: usize) -> anyhow::Result<ObservedSoundPool> {
-    let nodes = parse(xml)?;
-    anyhow::ensure!(hot_tab(&nodes)?.1, "Hot tab visible but not selected");
+    let nodes = parse(xml, plan)?;
+    let layout = plan
+        .snapshot_layout()
+        .context("sound snapshot layout unmeasured")?;
+    anyhow::ensure!(
+        section_tab(&nodes, plan)?.1,
+        "{} tab visible but not selected",
+        plan.section_label
+    );
     let find = |id| {
         nodes
             .iter()
@@ -163,16 +250,18 @@ fn pool(xml: &str, plan: SoundPickerPlan, maximum: usize) -> anyhow::Result<Obse
             .map(|n| n.rect.clone())
             .collect::<Vec<_>>()
     };
-    let viewport = exactly_one(find(":id/viewpager_container"), "sound list viewport")?;
-    let titles = find(":id/title");
-    let artists = find(":id/zdw");
+    let viewport = exactly_one(find(layout.viewport_id), "sound list viewport")?;
+    let titles = find(plan.title_id);
+    let artists = find(plan.artist_id);
     let mut rows = Vec::new();
-    for row in find(":id/vertical_item_music_new_rl") {
+    for row in find(plan.row_id) {
         anyhow::ensure!(contains(&viewport, &row), "sound row outside list viewport");
         let row_titles = inside(&row, &titles);
         let row_artists = inside(&row, &artists);
         if row.y + row.height == viewport.y + viewport.height
-            && (row_titles.is_empty() || row_artists.is_empty())
+            && (layout.boundary_rows == SoundBoundaryRows::ExcludeBottomEdge
+                || row_titles.is_empty()
+                || row_artists.is_empty())
         {
             continue;
         }
@@ -186,7 +275,13 @@ fn pool(xml: &str, plan: SoundPickerPlan, maximum: usize) -> anyhow::Result<Obse
         );
         rows.push(row);
     }
-    assemble_pool(plan, rows, titles, artists, find(":id/nve"), maximum)
+    let choices = plan.choose_id.map(find).unwrap_or_default();
+    let markers = plan
+        .selected_marker_ids()
+        .iter()
+        .flat_map(|id| find(id))
+        .collect();
+    assemble_pool(plan, rows, titles, artists, choices, markers, maximum)
 }
 
 pub(super) async fn observe(
@@ -194,14 +289,15 @@ pub(super) async fn observe(
     plan: SoundPickerPlan,
     maximum: usize,
 ) -> anyhow::Result<ObservedSoundPool> {
-    let deadline = Instant::now() + PICKER_WINDOW;
+    let deadline = Instant::now() + SNAPSHOT_POOL_WINDOW;
     let mut previous: Option<ObservedSoundPool> = None;
+    let mut recovery_used = false;
     loop {
-        let observed = pool(
-            &session.hierarchy_source_snapshot().await?.xml,
-            plan,
-            maximum,
-        );
+        let Some(xml) = read_snapshot(session, deadline, &mut recovery_used).await? else {
+            previous = None;
+            continue;
+        };
+        let observed = pool(&xml, plan, maximum);
         match observed {
             Ok(current) => {
                 if previous.as_ref().is_some_and(|p| p == &current) {
@@ -224,7 +320,82 @@ pub(super) async fn observe(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    #[test]
+    fn new_fleet_sound_tuples_bind_hot_rows_markers_and_exact_readback() {
+        for (version, initial, hot, selected, editor) in [
+            (
+                "46.2.1",
+                include_str!("../../fixtures/tiktok-publish/musically-46.2.1-en/sound.xml"),
+                include_str!("../../fixtures/tiktok-publish/musically-46.2.1-en/hot.xml"),
+                include_str!("../../fixtures/tiktok-publish/musically-46.2.1-en/selected.xml"),
+                include_str!("../../fixtures/tiktok-publish/musically-46.2.1-en/editor.xml"),
+            ),
+            (
+                "45.4.3",
+                include_str!("../../fixtures/tiktok-publish/musically-45.4.3-en/sound.xml"),
+                include_str!("../../fixtures/tiktok-publish/musically-45.4.3-en/hot.xml"),
+                include_str!("../../fixtures/tiktok-publish/musically-45.4.3-en/selected.xml"),
+                include_str!("../../fixtures/tiktok-publish/musically-45.4.3-en/editor.xml"),
+            ),
+            (
+                "46.1.3",
+                include_str!("../../fixtures/tiktok-publish/musically-46.1.3-en/sound.xml"),
+                include_str!("../../fixtures/tiktok-publish/musically-46.1.3-en/hot.xml"),
+                include_str!("../../fixtures/tiktok-publish/musically-46.1.3-en/selected.xml"),
+                include_str!("../../fixtures/tiktok-publish/musically-46.1.3-en/editor.xml"),
+            ),
+            (
+                "46.4.3",
+                include_str!("../../fixtures/tiktok-publish/musically-46.4.3-en/sound.xml"),
+                include_str!("../../fixtures/tiktok-publish/musically-46.4.3-en/hot.xml"),
+                include_str!("../../fixtures/tiktok-publish/musically-46.4.3-en/selected.xml"),
+                include_str!("../../fixtures/tiktok-publish/musically-46.4.3-en/editor.xml"),
+            ),
+        ] {
+            let plan = SoundPickerPlan::resolve(PACKAGE, "en-US", version).unwrap();
+            assert!(
+                pool(initial, plan, 5).is_err(),
+                "For You cannot prove Hot: {version}"
+            );
+            let before = pool(hot, plan, 5).unwrap();
+            let after = pool(selected, plan, 5).unwrap();
+            assert_eq!(
+                before.candidates.len(),
+                3,
+                "clipped row excluded: {version}"
+            );
+            assert_eq!(before.candidates, after.candidates);
+            assert_eq!(after.selected_index, Some(1));
+            assert_eq!(after.candidates[1].title, "Sure Thing (Live)");
+            let nodes = parse(
+                editor,
+                SoundPickerPlan {
+                    title_id: plan.current_title_id,
+                    ..plan
+                },
+            )
+            .unwrap();
+            let names: Vec<_> = nodes
+                .iter()
+                .filter(|n| n.id == plan.current_title_id)
+                .collect();
+            assert_eq!(names.len(), 1);
+            assert_eq!(
+                names[0].rect.description.as_deref(),
+                Some("Sure Thing (Live)")
+            );
+            assert!(
+                pool(hot, observed_460_plan(), 5).is_err(),
+                "cross-version ID borrowing"
+            );
+        }
+        assert!(SoundPickerPlan::resolve(PACKAGE, "en", "46.4.4").is_none());
+    }
+    use std::sync::{
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+        Mutex,
+    };
+    const PACKAGE: &str = "com.zhiliaoapp.musically";
 
     struct CarouselSession {
         hot: AtomicBool,
@@ -233,13 +404,23 @@ mod tests {
         taps: AtomicUsize,
         title: &'static str,
         selection_takes: bool,
+        hot_takes_on: usize,
+        snapshots: AtomicUsize,
+        tap_snapshots: Mutex<Vec<usize>>,
+        snapshot_filter: fn(String, usize) -> String,
+        snapshot_delay: Duration,
+        failed_snapshots: Vec<usize>,
     }
     #[async_trait::async_trait]
     impl UiSession for CarouselSession {
         async fn tap(&self, point: crate::TapPoint) -> anyhow::Result<()> {
-            self.taps.fetch_add(1, Ordering::Relaxed);
+            self.tap_snapshots
+                .lock()
+                .unwrap()
+                .push(self.snapshots.load(Ordering::Relaxed));
+            let taps = self.taps.fetch_add(1, Ordering::Relaxed) + 1;
             if point.y < 50.0 {
-                self.hot.store(true, Ordering::Relaxed);
+                self.hot.store(taps >= self.hot_takes_on, Ordering::Relaxed);
             } else if self.selection_takes {
                 self.selected.fetch_xor(true, Ordering::Relaxed);
             }
@@ -270,11 +451,23 @@ mod tests {
         async fn hierarchy_source_snapshot(
             &self,
         ) -> anyhow::Result<crate::driver::HierarchySourceSnapshot> {
+            tokio::time::sleep(self.snapshot_delay).await;
+            let snapshot = self.snapshots.fetch_add(1, Ordering::Relaxed) + 1;
+            if self.failed_snapshots.contains(&snapshot) {
+                return Err(crate::driver::AccessibilityReadUnavailable {
+                    message: "agent /source lỗi 500: waiting for the root AccessibilityNodeInfo"
+                        .into(),
+                }
+                .into());
+            }
             Ok(crate::driver::HierarchySourceSnapshot {
-                generation: 1,
-                xml: fixture(
-                    self.hot.load(Ordering::Relaxed),
-                    self.selected.load(Ordering::Relaxed),
+                generation: snapshot as u64,
+                xml: (self.snapshot_filter)(
+                    fixture(
+                        self.hot.load(Ordering::Relaxed),
+                        self.selected.load(Ordering::Relaxed),
+                    ),
+                    snapshot,
                 ),
             })
         }
@@ -309,13 +502,117 @@ mod tests {
             taps: AtomicUsize::new(0),
             title: "Two",
             selection_takes: true,
+            hot_takes_on: 1,
+            snapshots: AtomicUsize::new(0),
+            tap_snapshots: Mutex::new(Vec::new()),
+            snapshot_filter: |xml, _| xml,
+            snapshot_delay: Duration::ZERO,
+            failed_snapshots: Vec::new(),
         }
+    }
+    #[tokio::test(start_paused = true)]
+    async fn transient_source_failure_requires_two_new_snapshots_before_tapping() {
+        let mut s = session(false);
+        s.failed_snapshots = vec![2];
+        select_section_tab(&s, plan()).await.unwrap();
+        assert_eq!(*s.tap_snapshots.lock().unwrap(), vec![4]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn repeated_source_failure_stops_without_any_tap() {
+        let mut s = session(false);
+        s.failed_snapshots = vec![1, 2];
+        let error = select_section_tab(&s, plan()).await.unwrap_err();
+        assert!(format!("{error:#}").contains("1 lần phục hồi"));
+        assert_eq!(s.snapshots.load(Ordering::Relaxed), 2);
+        assert_eq!(s.taps.load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn pool_source_recovery_discards_the_previous_generation() {
+        let mut s = session(false);
+        s.hot.store(true, Ordering::Relaxed);
+        s.failed_snapshots = vec![2];
+        observe(&s, plan(), 5).await.unwrap();
+        assert_eq!(s.snapshots.load(Ordering::Relaxed), 4);
+        assert_eq!(s.taps.load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn source_recovery_does_not_start_after_the_phase_deadline() {
+        let mut s = session(false);
+        s.failed_snapshots = vec![1];
+        s.snapshot_delay = SECTION_WINDOW;
+        assert!(select_section_tab(&s, plan()).await.is_err());
+        assert_eq!(s.snapshots.load(Ordering::Relaxed), 1);
+        assert_eq!(s.taps.load(Ordering::Relaxed), 0);
+    }
+    #[tokio::test(start_paused = true)]
+    async fn hot_tab_recovers_one_missed_tap_after_unselected_readback() {
+        let mut s = session(false);
+        s.hot_takes_on = 2;
+        select_section_tab(&s, plan()).await.unwrap();
+        assert_eq!(s.taps.load(Ordering::Relaxed), 2);
+        assert!(s.hot.load(Ordering::Relaxed));
+        assert!(!s.selected.load(Ordering::Relaxed));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn slow_sound_snapshots_still_allow_hot_selection_and_pool_readback() {
+        let mut s = session(false);
+        s.snapshot_delay = Duration::from_secs(11);
+        s.hot_takes_on = 2;
+        select_section_tab(&s, plan()).await.unwrap();
+        let pool = observe(&s, plan(), 5).await.unwrap();
+        assert_eq!(s.taps.load(Ordering::Relaxed), 2);
+        assert_eq!(pool.candidates.len(), 2);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn hot_tab_recovery_stops_after_two_verified_attempts() {
+        let mut s = session(false);
+        s.hot_takes_on = usize::MAX;
+        let error = select_section_tab(&s, plan()).await.unwrap_err();
+        assert_eq!(s.taps.load(Ordering::Relaxed), 2);
+        assert!(error.to_string().contains("did not become selected"));
+        assert!(!s.selected.load(Ordering::Relaxed));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn already_selected_hot_tab_needs_no_tap() {
+        let s = session(false);
+        s.hot.store(true, Ordering::Relaxed);
+        select_section_tab(&s, plan()).await.unwrap();
+        assert_eq!(s.taps.load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn hot_tab_waits_for_sheet_motion_to_settle_before_tapping() {
+        let mut s = session(false);
+        s.snapshot_filter = |xml, read| {
+            if read == 1 {
+                xml.replace("[0,0][80,40]", "[0,5][80,45]")
+            } else {
+                xml
+            }
+        };
+        select_section_tab(&s, plan()).await.unwrap();
+        assert_eq!(*s.tap_snapshots.lock().unwrap(), vec![3]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn unreadable_section_selection_never_authorizes_a_tap() {
+        let mut s = session(false);
+        s.snapshot_filter = |xml, _| xml.replace("selected=\"true\"", "selected=\"false\"");
+        let error = select_section_tab(&s, plan()).await.unwrap_err();
+        assert_eq!(s.taps.load(Ordering::Relaxed), 0);
+        assert!(error.to_string().contains("sound tab selection unreadable"));
     }
     #[tokio::test(start_paused = true)]
     async fn hot_tab_and_desired_sound_are_selected_once_then_sheet_closes() {
         for selected in [false, true] {
             let s = session(selected);
-            select_hot_tab(&s).await.unwrap();
+            select_section_tab(&s, plan()).await.unwrap();
             let p = observe(&s, plan(), 5).await.unwrap();
             choose_and_confirm_sound(&s, plan(), &p, 1).await.unwrap();
             assert_eq!(s.taps.load(Ordering::Relaxed), 1 + usize::from(!selected));
@@ -326,7 +623,7 @@ mod tests {
     async fn missing_selection_marker_never_closes_or_retries() {
         let mut s = session(false);
         s.selection_takes = false;
-        select_hot_tab(&s).await.unwrap();
+        select_section_tab(&s, plan()).await.unwrap();
         let p = observe(&s, plan(), 5).await.unwrap();
         assert!(choose_and_confirm_sound(&s, plan(), &p, 1).await.is_err());
         assert_eq!(s.taps.load(Ordering::Relaxed), 2);
@@ -336,7 +633,7 @@ mod tests {
     async fn selected_marker_does_not_replace_exact_editor_readback() {
         let mut s = session(true);
         s.title = "Wrong";
-        select_hot_tab(&s).await.unwrap();
+        select_section_tab(&s, plan()).await.unwrap();
         let p = observe(&s, plan(), 5).await.unwrap();
         let e = choose_and_confirm_sound(&s, plan(), &p, 1)
             .await
@@ -395,7 +692,7 @@ mod tests {
         let p = pool(&fixture(true, true), plan(), 5).unwrap();
         assert_eq!(p.candidates.len(), 2);
         assert_eq!(p.selected_index, Some(1));
-        assert!(plan().close_with_back);
+        assert!(plan().closes_with_back());
         assert!(matches!(
             plan().post_back_query(),
             Some(ElementQuery::ResourceIdSuffix(":id/bot"))
@@ -433,5 +730,152 @@ mod tests {
                 + "</hierarchy>"),
         );
         assert_eq!(pool(&xml, plan(), 5).unwrap().candidates.len(), 2);
+    }
+
+    #[test]
+    fn snapshot_uses_all_measured_layout_fields_without_build_constants() {
+        let base = plan();
+        let measured = SoundPickerPlan {
+            package: "com.fixture.sound",
+            entry_id: ":id/fixture_entry",
+            section_label: "Recommended",
+            canonical_section: "recommended",
+            row_id: ":id/fixture_row",
+            title_id: ":id/fixture_title",
+            artist_id: ":id/fixture_artist",
+            layout: SoundPickerLayout::TabbedSnapshot(SoundSnapshotLayout {
+                tab_id: ":id/fixture_tab",
+                viewport_id: ":id/fixture_viewport",
+                boundary_rows: SoundBoundaryRows::RequireCompleteText,
+            }),
+            selection: SoundSelectionMode::Inline {
+                marker_ids: &[":id/fixture_marker"],
+            },
+            ..base
+        };
+        let xml = fixture(true, true)
+            .replace(PACKAGE, measured.package)
+            .replace(":id/x2k", ":id/fixture_tab")
+            .replace(":id/viewpager_container", ":id/fixture_viewport")
+            .replace(":id/vertical_item_music_new_rl", ":id/fixture_row")
+            .replace(":id/title", ":id/fixture_title")
+            .replace(":id/zdw", ":id/fixture_artist")
+            .replace(":id/nve", ":id/fixture_marker")
+            .replace("Hot", "Recommended");
+        let observed = pool(&xml, measured, 5).unwrap();
+        assert_eq!(observed.candidates.len(), 2);
+        assert_eq!(observed.candidates[0].section, "recommended");
+        assert_eq!(observed.candidates[1].title, "Two");
+        assert_eq!(observed.selected_index, Some(1));
+        assert!(pool(&xml, base, 5).is_err());
+        assert!(pool(&fixture(true, true), measured, 5).is_err());
+    }
+
+    // Extracted relevant nodes from q460-{sound,hot,selected-sound,readback}.xml;
+    // original captures remain unchanged under target/remote-publish-192.168.1.43.
+    const GLOBAL_460_INITIAL: &str =
+        include_str!("../../../../fixtures/tiktok/sound-musically-46.0.41-en-sound.xml");
+    const GLOBAL_460_HOT: &str =
+        include_str!("../../../../fixtures/tiktok/sound-musically-46.0.41-en-hot.xml");
+    const GLOBAL_460_SELECTED: &str =
+        include_str!("../../../../fixtures/tiktok/sound-musically-46.0.41-en-selected-sound.xml");
+    const GLOBAL_460_READBACK: &str =
+        include_str!("../../../../fixtures/tiktok/sound-musically-46.0.41-en-readback.xml");
+
+    fn observed_460_plan() -> SoundPickerPlan {
+        SoundPickerPlan::resolve(PACKAGE, "en-US", "46.0.41").unwrap()
+    }
+
+    #[test]
+    fn measured_45_7_3_requires_hot_and_confirms_selected_vietnamese_title() {
+        let plan = SoundPickerPlan::resolve(PACKAGE, "en", "45.7.3").unwrap();
+        let initial =
+            include_str!("../../fixtures/tiktok-publish/musically-45.7.3-en/11-sound.xml");
+        let hot =
+            include_str!("../../fixtures/tiktok-publish/musically-45.7.3-en/13-hot-stable.xml");
+        let selected =
+            include_str!("../../fixtures/tiktok-publish/musically-45.7.3-en/14-selected.xml");
+        let readback =
+            include_str!("../../fixtures/tiktok-publish/musically-45.7.3-en/15-readback.xml");
+        assert!(pool(initial, plan, 5).is_err());
+        let before = pool(hot, plan, 5).unwrap();
+        let after = pool(selected, plan, 5).unwrap();
+        assert_eq!(before.candidates.len(), 3);
+        assert_eq!(before.selected_index, None);
+        assert_eq!(before.candidates, after.candidates);
+        assert_eq!(after.selected_index, Some(1));
+        assert_eq!(after.candidates[1].title, "Đến Khi Nào");
+        assert_eq!(
+            plan.post_back_query(),
+            Some(ElementQuery::ResourceIdSuffix(":id/bix"))
+        );
+        let nodes = parse(
+            readback,
+            SoundPickerPlan {
+                title_id: plan.current_title_id,
+                ..plan
+            },
+        )
+        .unwrap();
+        let titles: Vec<_> = nodes
+            .iter()
+            .filter(|node| node.id == plan.current_title_id)
+            .collect();
+        assert_eq!(titles.len(), 1);
+        assert_eq!(titles[0].rect.description.as_deref(), Some("Đến Khi Nào"));
+        assert!(pool(hot, observed_460_plan(), 5).is_err());
+    }
+
+    #[test]
+    fn measured_global_460_hot_pool_excludes_the_visibly_clipped_bottom_artist() {
+        let plan = observed_460_plan();
+        assert!(
+            pool(GLOBAL_460_INITIAL, plan, 5).is_err(),
+            "For You is not selected Hot"
+        );
+        let observed = pool(GLOBAL_460_HOT, plan, 5).unwrap();
+        assert_eq!(observed.candidates.len(), 3);
+        assert_eq!(observed.candidates[0].title, "Summer Bummer (Lights On)");
+        assert_eq!(observed.candidates[1].title, "Sure Thing (Live)");
+        assert_eq!(observed.selected_index, None);
+        assert!(!observed.candidates.iter().any(|row| row.title == "BbY WOW"));
+    }
+
+    #[test]
+    fn measured_global_460_marker_binds_to_the_selected_row_and_editor_title() {
+        let plan = observed_460_plan();
+        let before = pool(GLOBAL_460_HOT, plan, 5).unwrap();
+        let after = pool(GLOBAL_460_SELECTED, plan, 5).unwrap();
+        assert_eq!(after.candidates, before.candidates);
+        assert_eq!(after.selected_index, Some(1));
+        assert_eq!(
+            plan.post_back_query(),
+            Some(ElementQuery::ResourceIdSuffix(":id/bmy"))
+        );
+        assert!(
+            after.target(1).unwrap().x > before.target(1).unwrap().x,
+            "equalizer moves the title; reproof must use the fresh rectangle"
+        );
+        let nodes = parse(
+            GLOBAL_460_READBACK,
+            SoundPickerPlan {
+                title_id: plan.current_title_id,
+                ..plan
+            },
+        )
+        .unwrap();
+        let titles: Vec<_> = nodes
+            .iter()
+            .filter(|node| node.id == plan.current_title_id)
+            .collect();
+        assert_eq!(titles.len(), 1);
+        assert_eq!(
+            titles[0].rect.description.as_deref(),
+            Some("Sure Thing (Live)")
+        );
+        assert!(
+            pool(GLOBAL_460_SELECTED, self::plan(), 5).is_err(),
+            "older tuple cannot borrow new labels"
+        );
     }
 }

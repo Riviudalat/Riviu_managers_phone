@@ -597,6 +597,22 @@ export interface PublishPreflightReport {
   sheetConfigured: boolean;
 }
 
+export interface PublishScheduleSlot { bundleId: string; udid: string; runAt: string; }
+export interface PublishScheduleRequest {
+  requestId: string;
+  sourceRoot: string;
+  slots: PublishScheduleSlot[];
+  captionOverrides: Record<string, string>;
+  soundPolicy: PublishSoundPolicy;
+  sheetEnabled: boolean;
+  deleteAfterPublish: boolean;
+}
+export interface PublishScheduleReport {
+  inputDigest: string;
+  canExecute: boolean;
+  slots: PublishPreflightReport[];
+}
+
 export type PublishExecutionStatus = "complete" | "partial" | "uncertain";
 export type PublishRetryScope = "fullPipeline" | "linkAndSheet" | "sheetOnly" | "none";
 
@@ -2277,6 +2293,19 @@ export interface DevicePublishReadiness {
 export interface PublishSheetConfig {
   webhookUrl: string;
   hasToken: boolean;
+  internalReporting?: boolean;
+  sheetUrl?: string;
+}
+
+export interface PublishSheetCheckResult {
+  sheetUrl: string;
+  spreadsheetId: string;
+  sheetGid: number;
+  readable: boolean;
+  connectionVerified: boolean;
+  layout: "internal" | "compact" | "legacy" | null;
+  columns: string[];
+  message: string;
 }
 
 export interface DeviceDirListing {

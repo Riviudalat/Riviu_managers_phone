@@ -1,8 +1,14 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type { UnlistenFn } from "@tauri-apps/api/event";
-import { RefreshCw } from "lucide-react";
-import { PublishWizard } from "../components/publish/PublishWizard";
+import { RefreshCw, Search, ListChecks, ArrowUpRight } from "lucide-react";
+import { AutomationTabs, type AutomationMode } from "../components/AutomationTabs";
+import { PublishQuickSetup as PublishWizard } from "../components/publish/PublishQuickSetup";
+import { PublishSchedulePlanner } from "../components/publish/PublishSchedulePlanner";
+import { PublishSheetConnection } from "../components/publish/PublishSheetConnection";
+import "../styles/publish-workspace.css";
+import { PublishScheduleRetime } from "../components/publish/PublishScheduleRetime";
 import { reconcileAssignments } from "../components/publish/publishAssignments";
+import { publishSelectionStatus } from "../components/publish/publishSelectionStatus";
 
 import {
   listenRiviuEvents,
@@ -16,14 +22,7 @@ import {
   publishPreflight,
   publishReconcile,
   publishScanFolder,
-  publishSheetGetConfig,
-  publishSheetSaveConfig,
 } from "../api";
-import { publishProfileConfig } from "../automationProfileConfig";
-import {
-  AutomationProfileControl,
-  type AutomationProfileHandle,
-} from "../components/AutomationProfileControl";
 import { useWorkspaceDraft } from "../workspaceDraft";
 import { writeFormDraft } from "../formDraftStorage";
 import { readPublishForm } from "../components/publish/publishDraftStorage";
@@ -37,7 +36,6 @@ import {
 import {
   ResponsiveTable,
   StatusChip,
-  SummaryRail,
   type StatusTone,
 } from "../components/WorkspacePrimitives";
 import { requestConfirm } from "../confirmStore";
@@ -57,9 +55,7 @@ import type {
   PublishExecutionSnapshot,
   PublishPreflightReport,
   PublishPreflightRequest,
-  PublishSheetConfig,
   OperationRunSummary,
-  AutomationDefinitionRecord,
   PublishSoundPolicy,
   TargetRef,
 } from "../types";
@@ -73,7 +69,7 @@ const PUBLISH_STATE_LABELS: Record<PublishCampaignRecord["state"], string> = {
   transferring: "Đang chuyển nội dung",
   imported: "Đã nhập nội dung",
   posting: "Đang đăng",
-  verifying: "Đang xác nhận",
+  verifying: "Đã bấm Đăng · chờ xác minh",
   succeeded: "Đã đăng",
   failedBeforeDispatch: "Dừng trước khi đăng",
   uncertain: "Chưa chắc chắn",
@@ -92,6 +88,8 @@ const CANCELLABLE_STATES: PublishCampaignRecord["state"][] = [
   "scheduled",
   "preparing",
   "ready",
+  "transferring",
+  "imported",
   "failedBeforeDispatch",
 ];
 
@@ -100,6 +98,33 @@ function campaignTone(state: PublishCampaignRecord["state"]): StatusTone {
   if (state === "uncertain" || state === "missed") return "warning";
   if (state === "failedBeforeDispatch" || state === "cancelled") return "error";
   return state === "queued" || state === "scheduled" ? "neutral" : "info";
+}
+
+function needsPublicationReview(value: Pick<PublishCampaignRecord, "state" | "errorCode">): boolean {
+  return value.state === "uncertain" && value.errorCode === "post_verification_needs_review";
+}
+
+function publicationReviewReason(evidenceJson?: string | null): string | null {
+  try {
+    const status = JSON.parse(evidenceJson ?? "null")?.verificationStatus;
+    return status?.state === "needsReview" && typeof status.reason === "string" ? status.reason : null;
+  } catch {
+    return null;
+  }
+}
+
+function verificationDetail(evidenceJson?: string | null): string | null {
+  try {
+    const value = JSON.parse(evidenceJson ?? "null");
+    const status = value?.verificationStatus;
+    if (status?.state === "verified" || value?.post?.publicationVerified || value?.publicationVerified) return null;
+    const reason = status?.reason ?? value?.post?.linkCaptureReason ?? value?.linkCaptureReason;
+    if (typeof reason !== "string") return null;
+    const format = (value: unknown) => typeof value === "string" && Number.isFinite(Date.parse(value))
+      ? new Date(value).toLocaleTimeString("vi-VN") : null;
+    const checked = format(status?.checkedAt), next = format(status?.nextCheckAt);
+    return [reason, checked && `Kiểm tra gần nhất: ${checked}`, next && status?.state === "pending" && `Kiểm tra tiếp: ${next}`].filter(Boolean).join(" · ");
+  } catch { return null; }
 }
 
 function campaignView(
@@ -111,13 +136,21 @@ function campaignView(
   tone: StatusTone;
   retryScope: PublishExecutionSnapshot["retryScope"];
 } {
+  if (campaign.state === "verifying" || needsPublicationReview(campaign)) {
+    const currentSnapshot = snapshot && (!operation?.updatedAt || snapshot.updatedAt >= operation.updatedAt) ? snapshot : undefined;
+    const proposedScope = currentSnapshot?.retryScope ?? operation?.retryScope;
+    return {
+      label: needsPublicationReview(campaign) ? "Cần kiểm tra bài đăng" : PUBLISH_STATE_LABELS.verifying,
+      tone: needsPublicationReview(campaign) ? "warning" : "info",
+      retryScope: proposedScope === "linkAndSheet" ? "linkAndSheet" : "none",
+    };
+  }
   if (
     [
       "scheduled",
       "preparing",
       "transferring",
       "posting",
-      "verifying",
       "uncertain",
       "cancelled",
       "missed",
@@ -173,6 +206,14 @@ function snapshotSheetEnabled(snapshot?: PublishExecutionSnapshot): boolean {
   );
 }
 
+function pendingPublicationMessage(detail: PublishCampaignDetail, sheetEnabled: boolean): string | null {
+  const review = detail.assignments.filter(needsPublicationReview).length;
+  if (review) return `${review} bài cần kiểm tra trên điện thoại. Chưa có đủ bằng chứng xác nhận; tác vụ tự kiểm tra đã dừng. Mở TikTok để xem bài đăng hoặc bản nháp, rồi chọn Kiểm tra liên kết. App giữ nội dung và không tự đăng lại.`;
+  const pending = detail.assignments.filter((assignment) => assignment.state === "verifying").length;
+  if (!pending) return null;
+  return `${pending} bài đã bấm Đăng, đang chờ TikTok hoàn tất và xác minh liên kết. Riviu tự kiểm tra khi máy rảnh; giữ app và điện thoại kết nối.${sheetEnabled ? " Sheet chờ liên kết đã xác minh." : " Không ghi Sheet."}`;
+}
+
 function retryActionLabel(
   scope: PublishExecutionSnapshot["retryScope"],
   sheetEnabled = true,
@@ -203,7 +244,12 @@ function cleanupEvidence(
         : "";
     const raw = JSON.stringify(cleanup);
     if (state === "cleaned") return { label: "ảnh tạm đã dọn", raw };
-    if (state === "kept") return { label: "đã giữ nội dung trên máy", raw };
+    if (state === "kept") {
+      const appCleanup = "appCleanup" in cleanup ? cleanup.appCleanup : null;
+      const leftRunning = appCleanup && typeof appCleanup === "object"
+        && "state" in appCleanup && appCleanup.state === "leftRunning";
+      return { label: leftRunning ? "đã giữ nội dung và để TikTok tiếp tục xử lý" : "đã giữ nội dung trên máy", raw };
+    }
     if (state === "not_cleaned") {
       return {
         label: `chưa dọn được ảnh tạm${message ? `: ${message}` : ""}`,
@@ -310,6 +356,7 @@ function sameOrderedTargets(
 }
 
 type PublishPageProps = SelProps & {
+  scopeControl?: ReactNode;
   targetUdids?: string[];
   targetRef?: TargetRef;
   onTargetRefChange?: (target: TargetRef) => void;
@@ -326,8 +373,9 @@ export function PublishPage({
   onTargetRefChange,
   metas = new Map(),
   operationSource,
+  scopeControl,
 }: PublishPageProps) {
-  const [workspaceTab, setWorkspaceTab] = useState<"setup" | "monitor">(
+  const [workspaceTab, setWorkspaceTab] = useState<AutomationMode>(
     "setup",
   );
   const [restoredForm] = useState(readPublishForm);
@@ -339,12 +387,18 @@ export function PublishPage({
   const [captionDrafts, setCaptionDrafts] = useState<Record<string, string>>(
     restoredForm?.captionDrafts ?? {},
   );
-  const [runAt, setRunAt] = useState(restoredForm?.runAt ?? "");
+  // Setup always posts immediately; daily schedules own a separate draft.
+  const [sheetConnectionReady, setSheetConnectionReady] = useState(false);
+  const [sheetConnectionRevision, setSheetConnectionRevision] = useState(0);
+  const updateSheetConnection = useCallback((ready: boolean) => {
+    setSheetConnectionReady(ready);
+    setSheetConnectionRevision(revision => revision + 1);
+  }, []);
+  const [createdCampaignId, setCreatedCampaignId] = useState<string>();
   const [soundPolicyOverride, setSoundPolicyOverride] =
     useState<PublishSoundPolicy | null>(restoredForm?.soundPolicyOverride ?? null);
   const [sheetEnabled, setSheetEnabled] = useState(restoredForm?.sheetEnabled ?? false);
   const [deleteAfterPublish, setDeleteAfterPublish] = useState(restoredForm?.deleteAfterPublish ?? false);
-  const profileRef = useRef<AutomationProfileHandle>(null);
   const [campaigns, setCampaigns] = useState<PublishCampaignRecord[]>([]);
   const [campaignLoadState, setCampaignLoadState] = useState<
     "loading" | "ready" | "error"
@@ -381,16 +435,6 @@ export function PublishPage({
     tone: NoticeTone;
     text: string;
   } | null>(null);
-  const [sheetConfig, setSheetConfig] = useState<PublishSheetConfig | null>(
-    null,
-  );
-  const [sheetLoadState, setSheetLoadState] = useState<
-    "loading" | "ready" | "error"
-  >("loading");
-  const [sheetLoadError, setSheetLoadError] = useState<string | null>(null);
-  const [sheetUrlDraft, setSheetUrlDraft] = useState("");
-  const [sheetTokenDraft, setSheetTokenDraft] = useState("");
-  const [sheetBusy, setSheetBusy] = useState(false);
   const [details, setDetails] = useState<Record<string, PublishCampaignDetail>>(
     {},
   );
@@ -405,6 +449,46 @@ export function PublishPage({
     Record<string, OperationRunSummary>
   >({});
   const [operationError, setOperationError] = useState<string | null>(null);
+  const openDetailIds = useRef(new Set<string>());
+  const detailTickets = useRef(new Map<string, number>());
+  useEffect(() => {
+    Object.keys(details).forEach((id) => openDetailIds.current.add(id));
+  }, [details]);
+  const loadCampaignDetail = useCallback(async (campaignId: string, reconcile: boolean) => {
+    const ticket = (detailTickets.current.get(campaignId) ?? 0) + 1;
+    detailTickets.current.set(campaignId, ticket);
+    const isCurrent = () => mounted.current && openDetailIds.current.has(campaignId)
+      && detailTickets.current.get(campaignId) === ticket;
+    setDetailErrors((current) => {
+      const next = { ...current };
+      delete next[campaignId];
+      return next;
+    });
+    setDetailLoading((current) => ({ ...current, [campaignId]: true }));
+    try {
+      // Reconciliation announces another event. Automatic refresh must remain read-only
+      // instead of calling reconcile again and creating a feedback loop.
+      const snapshot = reconcile ? await publishReconcile(campaignId) : null;
+      if (!isCurrent()) return;
+      const [detail, projection] = await Promise.all([
+        publishGet(campaignId),
+        operationGetRun(`publish:${campaignId}`)
+          .then((operation) => ({ operation, error: null as string | null }))
+          .catch((error) => ({ operation: null, error: describeError(error) })),
+      ]);
+      if (!isCurrent()) return;
+      if (!detail || detail.campaign.id !== campaignId) throw new Error("Chiến dịch không còn trong dữ liệu hoặc kết quả trả về không khớp.");
+      if (projection.operation) setOperations((current) => ({ ...current, [campaignId]: projection.operation!.summary }));
+      setOperationError(projection.error);
+      if (snapshot) setExecutionSnapshots((current) => ({ ...current, [campaignId]: snapshot }));
+      setDetails((current) => ({ ...current, [campaignId]: detail }));
+      setSourceCampaign((current) => current?.id === campaignId ? detail.campaign : current);
+    } catch (error) {
+      if (isCurrent()) setDetailErrors((current) => ({ ...current, [campaignId]: describeError(error) }));
+    } finally {
+      if (isCurrent()) setDetailLoading((current) => ({ ...current, [campaignId]: false }));
+    }
+  }, []);
   const [preflightState, setPreflightState] = useState<AsyncState>("idle");
   const [preflightError, setPreflightError] = useState<string | null>(null);
   const [preflightSnapshot, setPreflightSnapshot] = useState<{
@@ -418,6 +502,7 @@ export function PublishPage({
   const sourceId =
     operationSource?.kind === "publish" ? operationSource.sourceId : undefined;
   useEffect(() => {
+    setCreatedCampaignId(undefined);
     if (!sourceId) {
       setSourceCampaign(null);
       setSourceError(null);
@@ -480,7 +565,7 @@ export function PublishPage({
         sourceRoot: sourceRoot.trim(),
         bundleIds: orderedBundleIds,
         targets,
-        runAt: runAt || null,
+        runAt: null,
         captions: orderedBundleIds.map((id) => currentCaptionOverrides[id]),
       }),
     ),
@@ -492,11 +577,13 @@ export function PublishPage({
     bundleIds: orderedBundleIds,
     udids: targets,
     targetRef: effectiveTargetRef,
-    runAt: runAt || null,
+    runAt: null,
     captionOverrides: currentCaptionOverrides,
     soundPolicy: currentSoundPolicy,
   };
-  const inputKey = JSON.stringify(preflightRequest);
+  const sheetBlocked = sheetEnabled && !sheetConnectionReady;
+  const sheetBlockingReason = sheetBlocked ? "Kiểm tra và xác minh link Sheet trong tab Thiết lập trước khi ghi kết quả." : undefined;
+  const inputKey = JSON.stringify({ request: preflightRequest, sheetBlocked, sheetConnectionRevision: sheetEnabled ? sheetConnectionRevision : 0 });
   const latestInputKey = useRef(inputKey);
   latestInputKey.current = inputKey;
   const preflightTicket = useRef(0);
@@ -512,7 +599,7 @@ export function PublishPage({
       bundleIds,
       assignments,
       captionDrafts,
-      runAt,
+      runAt: "",
       targetRef,
       soundPolicyOverride,
       sheetEnabled,
@@ -523,7 +610,6 @@ export function PublishPage({
       bundleIds,
       assignments,
       captionDrafts,
-      runAt,
       targetRef,
       soundPolicyOverride,
       sheetEnabled,
@@ -535,8 +621,6 @@ export function PublishPage({
   latestDraftKey.current = draftKey;
   const [baseline, setBaseline] = useState(draftSnapshot);
   const [baselineManifest, setBaselineManifest] = useState(manifest);
-  const applyingProfile = useRef<TargetRef | null>(null);
-  const profileNeedsGroupMapping = useRef(false);
   const dirty = draftKey !== JSON.stringify(baseline);
   useWorkspaceDraft({
     id: "publish",
@@ -545,15 +629,16 @@ export function PublishPage({
     snapshotKey: draftKey,
     autoSave: () => writeFormDraft("publish", draftSnapshot),
     onAutoSaveError: error => setNotice({ tone: "error", text: `Chưa tự lưu được thiết lập: ${describeError(error)}` }),
-    save: async () => {
-      if (runAt) {
-        setNotice({
-          tone: "warning",
-          text: "Lịch hẹn chưa được tạo. Xác nhận lịch hoặc xóa thời gian hẹn trước khi lưu hồ sơ.",
-        });
-        return false;
+    save: () => {
+      try {
+        writeFormDraft("publish", draftSnapshot);
+        setBaseline(draftSnapshot);
+        setBaselineManifest(manifest);
+        return Promise.resolve(true);
+      } catch (error) {
+        setNotice({ tone: "error", text: describeError(error) });
+        return Promise.resolve(false);
       }
-      return (await profileRef.current?.save()) ?? false;
     },
     discard: () => {
       invalidateScan();
@@ -563,7 +648,6 @@ export function PublishPage({
       setAssignments(baseline.assignments);
       setDeleteAfterPublish(baseline.deleteAfterPublish);
       setCaptionDrafts(baseline.captionDrafts);
-      setRunAt(baseline.runAt);
       setSoundPolicyOverride(baseline.soundPolicyOverride);
       setSheetEnabled(baseline.sheetEnabled);
       setManifest(baselineManifest);
@@ -571,15 +655,10 @@ export function PublishPage({
       setPreflightSnapshot(null);
     },
   });
-  const mappingReady =
-    selectedBundles.length > 0 &&
-    selectedBundles.length === targets.length &&
-    new Set(targets).size === targets.length &&
-    targets.every((udid) => eligibleTargets.includes(udid));
-  const captionsReady = Object.values(currentCaptionOverrides).every(
-    (caption) => caption.length > 0,
-  );
-  const profileReady = mappingReady && captionsReady;
+  const selectionStatus = publishSelectionStatus({ selectedIds: bundleIds, bundles: manifest?.bundles ?? [],
+    assignments, captions: currentCaptionOverrides, eligible: eligibleTargets,
+    ready: devices.filter(device => device.status === "ready").map(device => device.udid), blockingReason: sheetBlockingReason });
+  const selectionReady = selectionStatus.ready;
   const currentPreflight =
     preflightSnapshot?.inputKey === inputKey ? preflightSnapshot.report : null;
   useEffect(() => {
@@ -604,131 +683,12 @@ export function PublishPage({
 
   useEffect(() => {
     if (restoringForm || (restoredForm && devices.length === 0)) return;
-    if (
-      applyingProfile.current &&
-      JSON.stringify(applyingProfile.current) !== JSON.stringify(targetRef)
-    )
-      return;
-    const mapResolvedGroup = profileNeedsGroupMapping.current;
     setAssignments((current) => {
-      if (mapResolvedGroup) {
-        return Object.fromEntries(
-          bundleIds.map((id, index) => [id, eligibleTargets[index] ?? ""]),
-        );
-      }
-      const next = reconcileAssignments(bundleIds, current, eligibleTargets);
+      // Roster updates validate availability without erasing the operator's pairs.
+      const next = reconcileAssignments(bundleIds, current, Object.values(current));
       return JSON.stringify(current) === JSON.stringify(next) ? current : next;
     });
-    profileNeedsGroupMapping.current = false;
-  }, [eligibleTargets, bundleIds, targetRef, restoringForm, restoredForm, devices.length]);
-
-  useEffect(() => {
-    if (
-      applyingProfile.current &&
-      JSON.stringify(applyingProfile.current) === JSON.stringify(targetRef) &&
-      mappingReady
-    ) {
-      applyingProfile.current = null;
-      setBaseline(draftSnapshot);
-      setBaselineManifest(manifest);
-    }
-  }, [draftSnapshot, mappingReady, manifest, targetRef]);
-
-  const applyProfile = async (record: AutomationDefinitionRecord) => {
-    invalidateScan();
-    const ticket = scanTicket.current;
-    const applyingKey = latestDraftKey.current;
-    const config = record.revision.config;
-    if (
-      !config ||
-      typeof config !== "object" ||
-      Array.isArray(config) ||
-      config.schemaVersion !== 1 ||
-      typeof config.sourceRoot !== "string" ||
-      !Array.isArray(config.bundleIds) ||
-      !config.bundleIds.every((id): id is string => typeof id === "string")
-    ) {
-      throw new Error("Hồ sơ Đăng bài không đúng định dạng.");
-    }
-    const next = await publishScanFolder(config.sourceRoot);
-    if (!mounted.current) return;
-    if (ticket !== scanTicket.current)
-      throw new Error("Thiết lập vừa thay đổi. Chọn lại hồ sơ để áp dụng.");
-    if (latestDraftKey.current !== applyingKey)
-      throw new Error("Thiết lập vừa thay đổi. Chọn lại hồ sơ để áp dụng.");
-    if (
-      !config.bundleIds.every((id) =>
-        next.bundles.some((bundle) => bundle.id === id),
-      )
-    ) {
-      throw new Error(
-        "Nội dung hồ sơ đã thay đổi hoặc bị thiếu. Chọn lại thư mục trước khi đăng.",
-      );
-    }
-    const captions = config.captionOverrides;
-    if (
-      !captions ||
-      typeof captions !== "object" ||
-      Array.isArray(captions) ||
-      !Object.values(captions).every((caption) => typeof caption === "string")
-    ) {
-      throw new Error("Hồ sơ Đăng bài thiếu chú thích hợp lệ.");
-    }
-    const policy = config.soundPolicy;
-    if (
-      (config.sheetEnabled !== undefined &&
-        typeof config.sheetEnabled !== "boolean") ||
-      (config.deleteAfterPublish !== undefined &&
-        typeof config.deleteAfterPublish !== "boolean")
-    ) {
-      throw new Error("Hồ sơ Đăng bài có lựa chọn Sheet sai định dạng.");
-    }
-    if (
-      !policy ||
-      typeof policy !== "object" ||
-      Array.isArray(policy) ||
-      (policy.kind !== "default" &&
-        !(
-          policy.kind === "trendingAny" &&
-          typeof policy.poolSize === "number" &&
-          typeof policy.seed === "number"
-        ))
-    ) {
-      throw new Error("Hồ sơ Đăng bài thiếu lựa chọn nhạc hợp lệ.");
-    }
-    latestSourceRoot.current = config.sourceRoot;
-    setSourceRoot(config.sourceRoot);
-    setManifest(next);
-    setBundleIds(config.bundleIds);
-    setCaptionDrafts(captions as Record<string, string>);
-    setRunAt("");
-    setSoundPolicyOverride(policy as unknown as PublishSoundPolicy);
-    setSheetEnabled(config.sheetEnabled !== false);
-    const profileTargets =
-      record.revision.targetRef.type === "explicit"
-        ? record.revision.targetRef.udids
-        : eligibleTargets;
-    setAssignments(
-      Object.fromEntries(
-        next.bundles
-          .filter((b) => (config.bundleIds as string[]).includes(b.id))
-          .map((b, i) => [b.id, profileTargets[i] ?? ""]),
-      ),
-    );
-    setDeleteAfterPublish(
-      config.deleteAfterPublish === undefined
-        ? true
-        : config.deleteAfterPublish === true,
-    );
-    applyingProfile.current = record.revision.targetRef;
-    profileNeedsGroupMapping.current =
-      record.revision.targetRef.type !== "explicit";
-    onTargetRefChange?.(record.revision.targetRef);
-    setPreflightSnapshot(null);
-    setPreflightState("idle");
-    setPreflightError(null);
-    setWorkspaceTab("setup");
-  };
+  }, [eligibleTargets, bundleIds, restoringForm, restoredForm, devices.length]);
 
   const reloadTicket = useRef(0);
   const reload = () => {
@@ -744,7 +704,7 @@ export function PublishPage({
         .catch((error) => ({ runs: [], error: describeError(error) })),
     ])
       .then(([next, projection]) => {
-        if (ticket !== reloadTicket.current) return;
+        if (!mounted.current || ticket !== reloadTicket.current) return;
         setCampaigns(next);
         setOperations(
           Object.fromEntries(
@@ -757,7 +717,7 @@ export function PublishPage({
         setCampaignLoadState("ready");
       })
       .catch((error) => {
-        if (ticket !== reloadTicket.current) return;
+        if (!mounted.current || ticket !== reloadTicket.current) return;
         setCampaignLoadError(describeError(error));
         setCampaignLoadState("error");
       });
@@ -768,7 +728,17 @@ export function PublishPage({
     let unlisten: UnlistenFn | undefined;
     let live = true;
     listenRiviuEvents((event) => {
-      if (event.type === "publishUpdated") void reload();
+      if (!live || event.type !== "publishUpdated") return;
+      void reload();
+      if (openDetailIds.current.has(event.campaignId)) {
+        // A previous retry projection is not evidence for a new campaign revision.
+        setExecutionSnapshots((current) => {
+          const next = { ...current };
+          delete next[event.campaignId];
+          return next;
+        });
+        void loadCampaignDetail(event.campaignId, false);
+      }
     })
       .then((off) => {
         if (live) unlisten = off;
@@ -777,35 +747,30 @@ export function PublishPage({
       .catch(() => undefined);
     return () => {
       live = false;
+      reloadTicket.current += 1;
       unlisten?.();
     };
-  }, []);
+  }, [loadCampaignDetail]);
 
-  const sheetLoadTicket = useRef(0);
-  const reloadSheetConfig = useCallback(async () => {
-    const ticket = ++sheetLoadTicket.current;
-    setSheetLoadState("loading");
-    setSheetLoadError(null);
-    try {
-      const config = await publishSheetGetConfig();
-      if (ticket !== sheetLoadTicket.current) return;
-      setSheetConfig(config);
-      setSheetUrlDraft(config.webhookUrl);
-      setSheetLoadState("ready");
-    } catch (error) {
-      if (ticket !== sheetLoadTicket.current) return;
-      setSheetConfig(null);
-      setSheetLoadError(describeError(error));
-      setSheetLoadState("error");
-    }
-  }, []);
-
+  // Assignment transfer/progress commits can precede the next campaign event.
+  // Refresh only the visible monitor; never reconcile or dispatch from this poll.
+  const monitorRefresh = useRef<() => Promise<void>>(async () => {});
+  monitorRefresh.current = async () => {
+    if (!campaigns.some(c => ["queued", "transferring", "imported", "posting", "verifying"].includes(c.state))) return;
+    await reload();
+    await Promise.all([...openDetailIds.current].filter(id => !detailLoading[id])
+      .map(id => loadCampaignDetail(id, false)));
+  };
   useEffect(() => {
-    void reloadSheetConfig();
-    return () => {
-      sheetLoadTicket.current += 1;
-    };
-  }, [reloadSheetConfig]);
+    if (workspaceTab !== "monitor") return;
+    let active = true, inFlight = false;
+    const timer = window.setInterval(() => {
+      if (!active || inFlight) return;
+      inFlight = true;
+      void monitorRefresh.current().finally(() => { inFlight = false; });
+    }, 5000);
+    return () => { active = false; window.clearInterval(timer); };
+  }, [workspaceTab]);
 
   const scan = async (path: string) => {
     setRestoringForm(false);
@@ -848,10 +813,10 @@ export function PublishPage({
   };
 
   const runPreflight = async () => {
-    if (!profileReady) {
+    if (!selectionReady) {
       setPreflightState("error");
       setPreflightError(
-        "Chọn đủ nội dung, máy đích và chú thích trước khi kiểm tra.",
+        selectionStatus.reason,
       );
       return;
     }
@@ -884,14 +849,12 @@ export function PublishPage({
   };
 
   const executeNewCampaign = async () => {
-    if (!currentPreflight?.canExecute) return;
+    if (!currentPreflight?.canExecute || sheetBlocked) return;
     const approvedDraftKey = latestDraftKey.current;
     const confirmed = await requestConfirm({
-      title: runAt ? "Xác nhận lập lịch đăng bài?" : "Xác nhận đăng công khai?",
-      message: runAt
-        ? `${selectedBundles.length} bài sẽ chạy trên ${targets.length} máy vào lịch đã chọn.`
-        : `${selectedBundles.length} bài sẽ được đăng công khai trên ${targets.length} máy Nhạc sẽ được chọn sau khi mở TikTok và xác nhận lại trước Đăng.`,
-      confirmLabel: runAt ? "Lập lịch" : "Đăng bài",
+      title: "Xác nhận đăng công khai?",
+      message: `${selectedBundles.length} bài sẽ được đăng công khai trên ${targets.length} máy. Nhạc sẽ được chọn sau khi mở TikTok và xác nhận lại trước Đăng.`,
+      confirmLabel: "Đăng bài",
       cancelLabel: "Huỷ",
       danger: true,
     });
@@ -913,7 +876,7 @@ export function PublishPage({
         sourceRoot.trim(),
         orderedBundleIds,
         targets,
-        runAt || null,
+        null,
         currentCaptionOverrides,
         currentSoundPolicy,
         effectiveTargetRef,
@@ -924,8 +887,9 @@ export function PublishPage({
       );
       setBaseline(draftSnapshot);
       setBaselineManifest(manifest);
+      setCreatedCampaignId(campaign.id);
       setWorkspaceTab("monitor");
-      if (!runAt) {
+      {
         const result = await publishExecute(campaign.id, true);
         setDetails((current) => ({ ...current, [campaign.id]: result.detail }));
         setNotice({
@@ -936,18 +900,13 @@ export function PublishPage({
                 ? "warning"
                 : "info",
           text:
-            result.status === "complete"
+            pendingPublicationMessage(result.detail, sheetEnabled) ?? (result.status === "complete"
               ? sheetEnabled
                 ? "Đã đăng, lấy liên kết và ghi Sheet."
                 : "Đã đăng và lấy liên kết. Không ghi Sheet."
               : result.status === "uncertain"
                 ? "Có máy chưa xác định được kết quả sau thao tác Đăng. Quy trình đã dừng."
-                : "Bài đã xử lý nhưng còn bước cần hoàn tất. Mở chi tiết để xem phạm vi retry.",
-        });
-      } else {
-        setNotice({
-          tone: "success",
-          text: `Đã lập lịch ${selectedBundles.length} bài cho ${targets.length} máy.`,
+                : "Bài đã xử lý nhưng còn bước cần hoàn tất. Mở chi tiết để xem bước còn thiếu."),
         });
       }
       await reload();
@@ -968,7 +927,7 @@ export function PublishPage({
         ...current,
         [campaign.id]: snapshot,
       }));
-      if (snapshot.retryScope === "none") {
+      if (snapshot.retryScope === "none" || ((campaign.state === "verifying" || needsPublicationReview(campaign)) && snapshot.retryScope !== "linkAndSheet")) {
         setNotice({
           tone: "warning",
           text: "Trạng thái đã được đối chiếu và không có bước nào được phép tự chạy lại.",
@@ -1004,13 +963,13 @@ export function PublishPage({
               ? "warning"
               : "info",
         text:
-          result.status === "complete"
+          pendingPublicationMessage(result.detail, snapshotSheetEnabled(snapshot)) ?? (result.status === "complete"
             ? snapshotSheetEnabled(snapshot)
               ? "Đã hoàn tất đăng bài và ghi Sheet."
               : "Đã đăng và lấy liên kết. Không ghi Sheet."
             : result.status === "uncertain"
               ? "Kết quả sau thao tác Đăng chưa chắc chắn; app không tự đăng lại."
-              : "Quy trình còn bước chưa hoàn tất. Xem chi tiết để xử lý tiếp.",
+              : "Quy trình còn bước chưa hoàn tất. Xem chi tiết để xử lý tiếp."),
       });
     } catch (error) {
       setNotice({ tone: "error", text: describeError(error) });
@@ -1020,7 +979,10 @@ export function PublishPage({
   };
 
   const toggleCampaignDetail = async (campaign: PublishCampaignRecord) => {
-    if (details[campaign.id]) {
+    if ((details[campaign.id] || detailLoading[campaign.id]) && !detailErrors[campaign.id]) {
+      openDetailIds.current.delete(campaign.id);
+      detailTickets.current.set(campaign.id, (detailTickets.current.get(campaign.id) ?? 0) + 1);
+      setDetailLoading((current) => ({ ...current, [campaign.id]: false }));
       setDetails((current) => {
         const next = { ...current };
         delete next[campaign.id];
@@ -1033,46 +995,13 @@ export function PublishPage({
       });
       return;
     }
-    setDetailErrors((current) => {
-      const next = { ...current };
-      delete next[campaign.id];
-      return next;
-    });
-    setDetailLoading((current) => ({ ...current, [campaign.id]: true }));
-    try {
-      const snapshot = await publishReconcile(campaign.id);
-      const [detail, operation] = await Promise.all([
-        publishGet(campaign.id),
-        operationGetRun(`publish:${campaign.id}`),
-      ]);
-      if (detail) {
-        if (operation)
-          setOperations((current) => ({
-            ...current,
-            [campaign.id]: operation.summary,
-          }));
-        setExecutionSnapshots((current) => ({
-          ...current,
-          [campaign.id]: snapshot,
-        }));
-        setDetails((current) => ({ ...current, [campaign.id]: detail }));
-      } else
-        setDetailErrors((current) => ({
-          ...current,
-          [campaign.id]: "Chiến dịch không còn trong dữ liệu.",
-        }));
-    } catch (error) {
-      setDetailErrors((current) => ({
-        ...current,
-        [campaign.id]: describeError(error),
-      }));
-    } finally {
-      setDetailLoading((current) => ({ ...current, [campaign.id]: false }));
-    }
+    openDetailIds.current.add(campaign.id);
+    await loadCampaignDetail(campaign.id, true);
   };
 
   return (
     <main className="panel publish-page">
+      <AutomationTabs id="publish" label="Chế độ Đăng bài" value={workspaceTab} onChange={setWorkspaceTab} />
       {notice && (
         <div className="publish-global-notice">
           <StatusNotice tone={notice.tone}>{notice.text}</StatusNotice>
@@ -1093,8 +1022,21 @@ export function PublishPage({
         </div>
       )}
 
-      {
+      <div className="publish-tab-panel" role="tabpanel" id="publish-panel-schedule" aria-labelledby="publish-tab-schedule" hidden={workspaceTab !== "schedule"}>
+        <PublishSchedulePlanner key={sourceRoot}
+          active={workspaceTab === "schedule"} sourceReady={!scanning && !restoringForm}
+          selectedIds={bundleIds} assignments={assignments} eligible={eligibleTargets}
+          sourceRoot={sourceRoot} bundles={manifest?.bundles ?? []} devices={devices} metas={metas}
+          captions={captionDrafts} sound={currentSoundPolicy} sheet={sheetEnabled} cleanup={deleteAfterPublish}
+          blockingReason={sheetBlockingReason}
+          onSource={()=>setWorkspaceTab("setup")} onCreated={()=>{void reload();}}
+          onSheetSetup={() => { setWorkspaceTab("setup"); requestAnimationFrame(() => document.getElementById("publish-sheet-link")?.focus()); }}
+          onHistory={()=>setWorkspaceTab("monitor")}
+        />
+      </div>
+      <div className="publish-tab-panel" role="tabpanel" id="publish-panel-setup" aria-labelledby="publish-tab-setup" hidden={workspaceTab !== "setup"}>
         <PublishWizard
+          scopeControl={scopeControl}
           active={workspaceTab === "setup"}
           sourceRoot={sourceRoot}
           manifest={manifest}
@@ -1108,11 +1050,12 @@ export function PublishPage({
           scanning={scanning || restoringForm}
           preflightLoading={preflightState === "loading"}
           preflight={currentPreflight}
-          preflightError={preflightError}
+          preflightError={sheetBlockingReason ?? preflightError}
+          blockingReason={sheetBlockingReason}
           sound={currentSoundPolicy}
           sheet={sheetEnabled}
           cleanup={deleteAfterPublish}
-          runAt={runAt}
+          runAt=""
           onSource={(path) => {
             editSourceRoot(path);
             setManifest(null);
@@ -1122,6 +1065,11 @@ export function PublishPage({
             invalidatePreflight();
           }}
           onScan={scan}
+          onAssignmentChange={(ids, next) => {
+            setBundleIds(ids);
+            setAssignments(next);
+            invalidatePreflight();
+          }}
           onSelect={(ids) => {
             setBundleIds(ids);
             invalidatePreflight();
@@ -1142,68 +1090,22 @@ export function PublishPage({
             setDeleteAfterPublish(value);
             invalidatePreflight();
           }}
-          onRunAt={(value) => {
-            setRunAt(value);
-            invalidatePreflight();
-          }}
+          onRunAt={() => {}}
           onPreflight={runPreflight}
           onExecute={executeNewCampaign}
           onHistory={() => setWorkspaceTab("monitor")}
-          settings={
-            <PublishAside
-              deleteAfterPublish={deleteAfterPublish}
-              manifest={manifest}
-              selectedCount={selectedBundles.length}
-              targetCount={targets.length}
-              currentPreflight={currentPreflight}
-              preflightState={preflightState}
-              sheetConfig={sheetConfig}
-              sheetEnabled={sheetEnabled}
-              setSheetEnabled={setSheetEnabled}
-              sheetLoadState={sheetLoadState}
-              sheetLoadError={sheetLoadError}
-              sheetUrlDraft={sheetUrlDraft}
-              sheetTokenDraft={sheetTokenDraft}
-              sheetBusy={sheetBusy}
-              sourceRoot={sourceRoot}
-              orderedBundleIds={orderedBundleIds}
-              captionOverrides={currentCaptionOverrides}
-              soundPolicy={currentSoundPolicy}
-              targetRef={effectiveTargetRef}
-              profileReady={profileReady && !runAt}
-              pendingSchedule={Boolean(runAt)}
-              busy={busy}
-              setSheetUrlDraft={setSheetUrlDraft}
-              setSheetTokenDraft={setSheetTokenDraft}
-              setSheetConfig={setSheetConfig}
-              reloadSheetConfig={reloadSheetConfig}
-              setSheetBusy={setSheetBusy}
-              setNotice={setNotice}
-              profileRef={profileRef}
-              dirty={dirty}
-              applyProfile={applyProfile}
-              profileSaved={() => {
-                setBaseline(draftSnapshot);
-                setBaselineManifest(manifest);
-              }}
-            />
-          }
+          settings={<PublishSheetConnection onReadyChange={updateSheetConnection} />}
         />
-      }
+      </div>
 
       <section
+        role="tabpanel"
+        aria-labelledby="publish-tab-monitor"
         id="publish-panel-monitor"
         className="publish-workspace-section"
         aria-label="Theo dõi"
         hidden={workspaceTab !== "monitor"}
       >
-        <button
-          type="button"
-          className="ghost"
-          onClick={() => setWorkspaceTab("setup")}
-        >
-          ← Về thiết lập
-        </button>
         {sourceLoading && (
           <LoadingState label="Đang mở chiến dịch được chọn…" />
         )}
@@ -1211,6 +1113,7 @@ export function PublishPage({
         <div className="publish-monitor-head">
           <div>
             <h2>Tiến độ chiến dịch</h2>
+            <p>Xem bài đã đăng, liên kết và những máy cần xử lý.</p>
           </div>
           <button
             type="button"
@@ -1264,12 +1167,15 @@ export function PublishPage({
             hint="Tạo chiến dịch ở thẻ Thiết lập để bắt đầu đăng bài."
           />
         )}
-        {(sourceId
+        {(sourceId && !createdCampaignId
           ? sourceCampaign !== null
           : campaignLoadState === "ready" && campaigns.length > 0) && (
           <CampaignMonitor
+          onScheduleChanged={() => { void reload(); }}
+            key={createdCampaignId ?? sourceId ?? "monitor"}
+            initialSelectedId={createdCampaignId ?? sourceId}
             campaigns={
-              sourceCampaign
+              sourceCampaign && !createdCampaignId
                 ? [
                     campaigns.find(
                       (campaign) => campaign.id === sourceCampaign.id,
@@ -1305,309 +1211,9 @@ export function PublishPage({
   );
 }
 
-type NoticeSetter = (notice: { tone: NoticeTone; text: string } | null) => void;
-
-function PublishAside({
-  deleteAfterPublish,
-  pendingSchedule,
-  profileRef,
-  dirty,
-  applyProfile,
-  profileSaved,
-  manifest,
-  selectedCount,
-  targetCount,
-  currentPreflight,
-  preflightState,
-  sheetConfig,
-  sheetEnabled,
-  setSheetEnabled,
-  sheetLoadState,
-  sheetLoadError,
-  sheetUrlDraft,
-  sheetTokenDraft,
-  sheetBusy,
-  sourceRoot,
-  orderedBundleIds,
-  captionOverrides,
-  soundPolicy,
-  targetRef,
-  profileReady,
-  busy,
-  setSheetUrlDraft,
-  setSheetTokenDraft,
-  setSheetConfig,
-  reloadSheetConfig,
-  setSheetBusy,
-  setNotice,
-}: {
-  deleteAfterPublish: boolean;
-  pendingSchedule: boolean;
-  profileRef: React.Ref<AutomationProfileHandle>;
-  dirty: boolean;
-  applyProfile: (record: AutomationDefinitionRecord) => Promise<void>;
-  profileSaved: () => void;
-  manifest: PublishFolderManifest | null;
-  selectedCount: number;
-  targetCount: number;
-  currentPreflight: PublishPreflightReport | null;
-  preflightState: AsyncState;
-  sheetConfig: PublishSheetConfig | null;
-  sheetEnabled: boolean;
-  setSheetEnabled: (value: boolean) => void;
-  sheetLoadState: "loading" | "ready" | "error";
-  sheetLoadError: string | null;
-  sheetUrlDraft: string;
-  sheetTokenDraft: string;
-  sheetBusy: boolean;
-  sourceRoot: string;
-  orderedBundleIds: string[];
-  captionOverrides: Record<string, string>;
-  soundPolicy: PublishPreflightRequest["soundPolicy"];
-  targetRef: TargetRef;
-  profileReady: boolean;
-  busy: boolean;
-  setSheetUrlDraft: (value: string) => void;
-  setSheetTokenDraft: (value: string) => void;
-  setSheetConfig: (value: PublishSheetConfig) => void;
-  reloadSheetConfig: () => Promise<void>;
-  setSheetBusy: (value: boolean) => void;
-  setNotice: NoticeSetter;
-}) {
-  const canExecute = currentPreflight?.canExecute === true;
-  const saveSheet = async () => {
-    if (sheetBusy || sheetLoadState !== "ready") return false;
-    setSheetBusy(true);
-    try {
-      const saved = await publishSheetSaveConfig(
-        sheetUrlDraft,
-        sheetTokenDraft === "" ? undefined : sheetTokenDraft,
-      );
-      setSheetConfig(saved);
-      setSheetUrlDraft(saved.webhookUrl);
-      setSheetTokenDraft("");
-      setNotice({ tone: "success", text: "Đã lưu cấu hình Sheet." });
-      return true;
-    } catch (error) {
-      setNotice({ tone: "error", text: describeError(error) });
-      return false;
-    } finally {
-      setSheetBusy(false);
-    }
-  };
-  useWorkspaceDraft({
-    id: "publish-sheet",
-    label: "Cấu hình Sheet",
-    autoSave: saveSheet,
-    dirty:
-      sheetLoadState === "ready" &&
-      (sheetUrlDraft !== sheetConfig?.webhookUrl || sheetTokenDraft !== ""),
-    snapshotKey: JSON.stringify([sheetUrlDraft, sheetTokenDraft]),
-    save: saveSheet,
-    discard: () => {
-      setSheetUrlDraft(sheetConfig?.webhookUrl ?? "");
-      setSheetTokenDraft("");
-    },
-  });
-  return (
-    <div className="publish-workspace-aside">
-      <SummaryRail title="Tóm tắt lượt chạy">
-        <dl className="publish-summary-list">
-          <div>
-            <dt>Nguồn</dt>
-            <dd>
-              {manifest ? `${manifest.bundles.length} gói hợp lệ` : "Chưa quét"}
-            </dd>
-          </div>
-          <div>
-            <dt>Đã chọn</dt>
-            <dd>{selectedCount} bài</dd>
-          </div>
-          <div>
-            <dt>Máy đích</dt>
-            <dd>{targetCount} máy</dd>
-          </div>
-          <div>
-            <dt>Âm thanh</dt>
-            <dd>
-              {soundPolicy.kind === "default"
-                ? "Âm thanh mặc định"
-                : `Ngẫu nhiên trong tối đa ${soundPolicy.poolSize} đề xuất`}
-            </dd>
-          </div>
-        </dl>
-        <div className="publish-summary-status">
-          <StatusChip
-            tone={
-              canExecute
-                ? "success"
-                : preflightState === "error"
-                  ? "error"
-                  : "neutral"
-            }
-          >
-            {canExecute ? "Preflight đạt" : "Chưa có preflight hợp lệ"}
-          </StatusChip>
-          {!sheetEnabled ? (
-            <StatusChip tone="neutral">Không ghi Sheet</StatusChip>
-          ) : sheetLoadState === "error" ? (
-            <StatusChip tone="error">Không đọc được Sheet</StatusChip>
-          ) : sheetConfig ? (
-            <StatusChip
-              tone={
-                sheetConfig.webhookUrl && sheetConfig.hasToken
-                  ? "success"
-                  : "warning"
-              }
-            >
-              {sheetConfig.webhookUrl && sheetConfig.hasToken
-                ? "Sheet sẵn sàng"
-                : "Sheet chờ cấu hình"}
-            </StatusChip>
-          ) : null}
-        </div>
-        {currentPreflight && (
-          <details className="publish-technical-details">
-            <summary>Chi tiết lần kiểm tra</summary>
-            <code>{currentPreflight.inputDigest}</code>
-          </details>
-        )}
-        <AutomationProfileControl
-          ref={profileRef}
-          dirty={dirty}
-          draftId="publish"
-          onApply={applyProfile}
-          onSaved={profileSaved}
-          kind="publish"
-          target={targetRef}
-          config={publishProfileConfig(
-            sourceRoot.trim(),
-            orderedBundleIds,
-            captionOverrides,
-            soundPolicy,
-            true,
-            sheetEnabled,
-            deleteAfterPublish,
-          )}
-          defaultName="Đăng bài theo thư mục"
-          disabled={!profileReady || busy}
-          disabledReason={
-            pendingSchedule
-              ? "Lịch hẹn chưa được tạo. Xác nhận lịch hoặc xóa thời gian hẹn trước khi lưu hồ sơ."
-              : "Chọn đủ nội dung, máy đích và chú thích trước khi lưu hồ sơ."
-          }
-          confirmSave={() =>
-            requestConfirm({
-              title: "Cho phép hồ sơ đăng công khai?",
-              message:
-                "Mỗi lần chạy hồ sơ, app có thể chuyển nội dung, chọn nhạc và đăng công khai trên các máy đích.",
-              confirmLabel: "Cho phép và lưu",
-              cancelLabel: "Hủy",
-              danger: true,
-            })
-          }
-        />
-      </SummaryRail>
-      <label className="publish-sheet-toggle">
-        <input
-          type="checkbox"
-          checked={sheetEnabled}
-          disabled={busy}
-          onChange={(event) => setSheetEnabled(event.target.checked)}
-        />
-        <span>Ghi kết quả lên Sheet</span>
-      </label>
-      {sheetEnabled && (
-        <details className="publish-sheet-panel">
-          <summary>Cấu hình Sheet</summary>
-          {sheetLoadState === "loading" && (
-            <LoadingState label="Đang đọc cấu hình Sheet…" />
-          )}
-          {sheetLoadState === "error" && (
-            <StatusNotice
-              tone="error"
-              action={
-                <button
-                  type="button"
-                  className="ghost"
-                  onClick={() => void reloadSheetConfig()}
-                >
-                  Thử lại
-                </button>
-              }
-            >
-              {sheetLoadError ?? "Không đọc được cấu hình Sheet."}
-            </StatusNotice>
-          )}
-          {sheetConfig &&
-            (!sheetConfig.webhookUrl || !sheetConfig.hasToken) && (
-              <StatusNotice tone="warning">
-                Sheet chưa cấu hình. Link đã xác nhận sẽ nằm trong hàng chờ.
-              </StatusNotice>
-            )}
-          <label>
-            <span>Webhook URL</span>
-            <input
-              type="url"
-              aria-label="Webhook URL"
-              value={sheetUrlDraft}
-              onChange={(event) => setSheetUrlDraft(event.target.value)}
-              placeholder="https://script.google.com/.../exec"
-            />
-          </label>
-          <label>
-            <span>Webhook token</span>
-            <input
-              type="password"
-              aria-label="Webhook token"
-              value={sheetTokenDraft}
-              onChange={(event) => setSheetTokenDraft(event.target.value)}
-              placeholder={
-                sheetConfig?.hasToken ? "Để trống để giữ token" : "Nhập token"
-              }
-            />
-          </label>
-          <div className="publish-sheet-actions">
-            <button
-              type="button"
-              className="primary"
-              disabled={sheetBusy || sheetLoadState !== "ready"}
-              onClick={() => void saveSheet()}
-            >
-              Lưu cấu hình
-            </button>
-            {sheetConfig?.hasToken && (
-              <button
-                type="button"
-                className="ghost"
-                disabled={sheetBusy || sheetLoadState !== "ready"}
-                onClick={async () => {
-                  setSheetBusy(true);
-                  try {
-                    const saved = await publishSheetSaveConfig(
-                      sheetUrlDraft,
-                      "",
-                    );
-                    setSheetConfig(saved);
-                    setNotice({ tone: "success", text: "Đã xoá token." });
-                  } catch (error) {
-                    setNotice({ tone: "error", text: describeError(error) });
-                  } finally {
-                    setSheetBusy(false);
-                  }
-                }}
-              >
-                Xoá token
-              </button>
-            )}
-          </div>
-        </details>
-      )}
-    </div>
-  );
-}
-
 function CampaignMonitor({
+  initialSelectedId,
+  onScheduleChanged,
   campaigns,
   busy,
   details,
@@ -1621,6 +1227,8 @@ function CampaignMonitor({
   toggleDetail,
   cancel,
 }: {
+  initialSelectedId?: string;
+  onScheduleChanged: () => void;
   campaigns: PublishCampaignRecord[];
   busy: boolean;
   details: Record<string, PublishCampaignDetail>;
@@ -1634,111 +1242,67 @@ function CampaignMonitor({
   toggleDetail: (campaign: PublishCampaignRecord) => Promise<void>;
   cancel: (campaign: PublishCampaignRecord) => Promise<void>;
 }) {
-  return (
-    <div className="publish-campaigns">
-      <ResponsiveTable
-        label="Chiến dịch đăng bài"
-        rows={campaigns}
-        keyForRow={(campaign) => campaign.id}
-        columns={[
-          {
-            id: "campaign",
-            label: "Chiến dịch",
-            render: (campaign) => (
-              <span className="publish-campaign-name">
-                <strong>Chiến dịch {campaigns.indexOf(campaign) + 1}</strong>
-                <small>{new Date(campaign.createdAt).toLocaleString()}</small>
-              </span>
-            ),
-          },
-          {
-            id: "scope",
-            label: "Phạm vi",
-            render: (campaign) => `${campaign.assignments.length} bài`,
-          },
-          {
-            id: "state",
-            label: "Trạng thái",
-            render: (campaign) => {
-              const view = campaignView(
-                campaign,
-                operations[campaign.id],
-                executionSnapshots[campaign.id],
-              );
-              return (
-                <StatusChip tone={view.tone}>
-                  {view.label ?? "Trạng thái chưa nhận diện"}
-                </StatusChip>
-              );
-            },
-          },
-          {
-            id: "actions",
-            label: "Thao tác",
-            render: (campaign) => (
-              <div className="publish-row-actions">
-                {campaignView(
-                  campaign,
-                  operations[campaign.id],
-                  executionSnapshots[campaign.id],
-                ).retryScope !== "none" && (
-                  <button
-                    type="button"
-                    className="primary"
-                    disabled={busy}
-                    onClick={() => void retryCampaign(campaign)}
-                  >
-                    {retryActionLabel(
-                      campaignView(
-                        campaign,
-                        operations[campaign.id],
-                        executionSnapshots[campaign.id],
-                      ).retryScope,
-                      snapshotSheetEnabled(executionSnapshots[campaign.id]),
-                    )}
-                  </button>
-                )}
-                {CANCELLABLE_STATES.includes(campaign.state) && (
-                  <button
-                    type="button"
-                    className="ghost"
-                    disabled={busy}
-                    onClick={() => void cancel(campaign)}
-                  >
-                    Huỷ
-                  </button>
-                )}
-                <button
-                  type="button"
-                  className="ghost"
-                  disabled={detailLoading[campaign.id] === true}
-                  onClick={() => void toggleDetail(campaign)}
-                >
-                  {details[campaign.id]
-                    ? "Ẩn chi tiết máy"
-                    : !operations[campaign.id] && campaign.state === "succeeded"
-                      ? "Đối chiếu kết quả"
-                      : "Chi tiết máy"}
-                </button>
-              </div>
-            ),
-          },
-        ]}
-      />
-      {campaigns.map((campaign) => (
-        <CampaignDetail
-          key={campaign.id}
-          detail={details[campaign.id]}
-          error={detailErrors[campaign.id]}
-          loading={detailLoading[campaign.id] === true}
-          snapshot={executionSnapshots[campaign.id]}
-          devices={devices}
-          metas={metas}
-          retry={() => void toggleDetail(campaign)}
-        />
-      ))}
+  const [filter, setFilter] = useState<"all" | "scheduled" | "active" | "attention" | "done">("all");
+  const [query, setQuery] = useState("");
+  const [selectedId, setSelectedId] = useState<string | null | undefined>(initialSelectedId);
+  const bucket = (campaign: PublishCampaignRecord) => {
+    if (campaign.state === "scheduled") return "scheduled";
+    const view = campaignView(campaign, operations[campaign.id], executionSnapshots[campaign.id]);
+    if (view.label === "Hoàn tất") return "done";
+    if (view.tone === "error" || view.tone === "warning" || campaign.state === "uncertain") return "attention";
+    return "active";
+  };
+  const filtered = campaigns.filter(campaign => (filter === "all" || bucket(campaign) === filter)
+    && `${campaign.sourceRoot} ${campaigns.indexOf(campaign) + 1} ${new Date(campaign.createdAt).toLocaleString("vi-VN")} ${campaign.runAt ? new Date(campaign.runAt).toLocaleString("vi-VN") : ""}`.toLocaleLowerCase().includes(query.toLocaleLowerCase()));
+  const selected = selectedId === undefined
+    ? filtered.find(campaign => details[campaign.id])
+    : filtered.find(campaign => campaign.id === selectedId);
+  const selectedView = selected ? campaignView(selected, operations[selected.id], executionSnapshots[selected.id]) : null;
+  const name = (campaign: PublishCampaignRecord) => campaign.sourceRoot.split(/[\\/]/).filter(Boolean).at(-1) ?? "Nguồn bài đăng";
+  const choose = (campaign: PublishCampaignRecord) => {
+    if (selected && selected.id !== campaign.id && (details[selected.id] || detailLoading[selected.id])) void toggleDetail(selected);
+    setSelectedId(campaign.id);
+    if (!details[campaign.id] && !detailLoading[campaign.id]) void toggleDetail(campaign);
+  };
+  return <div className="publish-campaigns">
+    <div className="publish-monitor-toolbar">
+      <div className="publish-monitor-filters" role="group" aria-label="Lọc chiến dịch">
+        {([["all", "Tất cả"], ["scheduled", "Đã hẹn"], ["active", "Đang chạy"], ["attention", "Cần xử lý"], ["done", "Hoàn tất"]] as const).map(([value, label]) =>
+          <button key={value} type="button" aria-pressed={filter === value} onClick={() => setFilter(value)}>{label}<span>{campaigns.filter(c => value === "all" || bucket(c) === value).length}</span></button>)}
+      </div>
+      <label className="publish-monitor-search"><Search size={15} aria-hidden="true"/><input aria-label="Tìm chiến dịch" placeholder="Tìm nguồn hoặc ngày đăng" value={query} onChange={e => setQuery(e.target.value)}/></label>
     </div>
-  );
+    <div className="publish-monitor-layout">
+      <div className="publish-run-list" role="list" aria-label="Chiến dịch đăng bài">
+        {filtered.map(campaign => {
+          const view = campaignView(campaign, operations[campaign.id], executionSnapshots[campaign.id]);
+          return <div role="listitem" key={campaign.id} className={`publish-run-card ${selected?.id === campaign.id ? "is-selected" : ""}`}>
+            <button type="button" className="publish-run-title" aria-current={selected?.id === campaign.id ? "true" : undefined} onClick={() => choose(campaign)}>
+              <span><strong>Chiến dịch {campaigns.indexOf(campaign) + 1}</strong><small>{campaign.assignments.length} bài · {new Date(campaign.createdAt).toLocaleString("vi-VN")}</small></span>
+              <StatusChip tone={view.tone}>{view.label}</StatusChip>
+            </button>
+            <div className="publish-run-meta"><span title={campaign.sourceRoot}>{name(campaign)}{campaign.runAt ? ` · ${new Date(campaign.runAt).toLocaleString("vi-VN", {day:"2-digit",month:"2-digit",year:"numeric",hour:"2-digit",minute:"2-digit"})}` : ""}</span>
+              <button type="button" className="ghost" disabled={detailLoading[campaign.id]} onClick={() => choose(campaign)}>Chi tiết máy <ArrowUpRight size={13} aria-hidden="true"/></button></div>
+          </div>;
+        })}
+        {!filtered.length && <div className="publish-monitor-placeholder"><Search size={24}/><strong>Không có chiến dịch phù hợp</strong><span>Đổi bộ lọc hoặc từ khóa để xem các lượt khác.</span></div>}
+      </div>
+      <div className="publish-monitor-detail">
+        {selected && selectedView ? <>
+          <div className="publish-monitor-detail-head"><div><h3>Chiến dịch {campaigns.indexOf(selected) + 1}</h3><p>{selected.assignments.length} bài · {name(selected)}</p></div>
+            <div className="publish-row-actions">
+              {selectedView.retryScope !== "none" && <button type="button" className="primary" disabled={busy} onClick={() => void retryCampaign(selected)}>{selected.state === "verifying" || needsPublicationReview(selected) ? "Kiểm tra liên kết" : retryActionLabel(selectedView.retryScope, snapshotSheetEnabled(executionSnapshots[selected.id]))}</button>}
+              <PublishScheduleRetime key={selected.id} campaign={selected} onSaved={onScheduleChanged}/>
+              {CANCELLABLE_STATES.includes(selected.state) && <button type="button" className="ghost" onClick={() => void cancel(selected)}>Huỷ</button>}
+              <button type="button" className="ghost" onClick={() => { setSelectedId(null); if (details[selected.id] || detailLoading[selected.id]) void toggleDetail(selected); }}>Ẩn chi tiết máy</button>
+            </div>
+          </div>
+          <CampaignDetail detail={details[selected.id]} error={detailErrors[selected.id]} loading={detailLoading[selected.id] === true}
+            snapshot={executionSnapshots[selected.id]} devices={devices} metas={metas} retry={() => void toggleDetail(selected)}/>
+        </> : <div className="publish-monitor-placeholder"><ListChecks size={30}/><strong>Chọn một chiến dịch để theo dõi</strong><span>Kết quả từng máy, link và ghi chú sẽ hiện tại đây.</span></div>}
+      </div>
+    </div>
+  </div>;
 }
 
 function CampaignDetail({
@@ -1759,6 +1323,11 @@ function CampaignDetail({
   retry: () => void;
 }) {
   if (!detail && !error && !loading) return null;
+  // Current assignment evidence outranks a completed snapshot from before the
+  // latest read. Submission alone must never claim Post or Sheet completion.
+  const pendingPost = detail?.campaign.state === "verifying"
+    || detail?.assignments.some((assignment) => assignment.state === "verifying") === true;
+  const reviewPost = detail?.assignments.some(needsPublicationReview) === true;
   return (
     <section
       className="publish-campaign-detail"
@@ -1785,24 +1354,24 @@ function CampaignDetail({
             <div className="publish-reconcile-summary">
               <StatusChip
                 tone={
-                  snapshot.status === "complete"
+                  reviewPost ? "warning" : pendingPost ? "info" : snapshot.status === "complete"
                     ? "success"
                     : snapshot.status === "uncertain"
                       ? "warning"
                       : "info"
                 }
               >
-                {snapshot.status === "complete"
+                {reviewPost ? "Cần kiểm tra bài đăng" : pendingPost ? "Đang chờ xác minh bài đăng" : snapshot.status === "complete"
                   ? "Đã hoàn tất"
                   : snapshot.status === "uncertain"
                     ? "Kết quả chưa chắc chắn"
                     : "Còn bước cần hoàn tất"}
               </StatusChip>
-              <span>{retryScopeLabel(snapshot.retryScope)}</span>
+              <span>{reviewPost ? "Đã dừng kiểm tra tự động; mở TikTok kiểm tra bài đăng hoặc bản nháp" : pendingPost ? "Bài đang chờ xác minh sẽ không được đăng lại" : retryScopeLabel(snapshot.retryScope, snapshotSheetEnabled(snapshot))}</span>
               <span>
                 {!snapshotSheetEnabled(snapshot)
                   ? "Không ghi Sheet"
-                  : snapshot.status === "complete"
+                  : reviewPost || pendingPost ? "Sheet chờ liên kết đã xác minh" : snapshot.status === "complete"
                     ? "Sheet đã xác nhận"
                     : snapshot.retryScope === "sheetOnly"
                       ? "Sheet chưa hoàn tất"
@@ -1837,9 +1406,9 @@ function CampaignDetail({
               {
                 id: "state",
                 label: "Kết quả",
-                render: (assignment: PublishAssignmentRecord) =>
-                  PUBLISH_STATE_LABELS[assignment.state] ??
-                  "Trạng thái chưa nhận diện",
+                render: (assignment: PublishAssignmentRecord) => needsPublicationReview(assignment)
+                  ? <span>Cần kiểm tra bài đăng<p>{publicationReviewReason(assignment.evidenceJson) ?? "Chưa có đủ bằng chứng xác nhận bài; kiểm tra TikTok trước khi tiếp tục."}</p></span>
+                  : <span>{PUBLISH_STATE_LABELS[assignment.state] ?? "Trạng thái chưa nhận diện"}{verificationDetail(assignment.evidenceJson) && <p>{verificationDetail(assignment.evidenceJson)}</p>}</span>,
               },
               {
                 id: "link",
@@ -1851,7 +1420,7 @@ function CampaignDetail({
                       Mở bài đã xác nhận
                     </a>
                   ) : (
-                    <span>Chưa có liên kết xác nhận</span>
+                    <span>{needsPublicationReview(assignment) ? "Chưa có liên kết; không tự đăng lại" : assignment.state === "verifying" ? "Đã gửi bài; chờ TikTok hoàn tất và xác minh liên kết" : "Chưa có liên kết xác nhận"}</span>
                   );
                 },
               },

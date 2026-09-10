@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Sanitized own-profile node extract, Global 45.7.3/en, SM-G955F Android 9,
+     measured 08/09/2026. Three measured controls retain original attributes and
+     rectangles; username is replaced. The bio mention is a negative fixture. -->
+<hierarchy rotation="0" width="1080" height="2094">
+  <android.widget.Button package="com.zhiliaoapp.musically" class="android.widget.Button" text="Edit" clickable="true" enabled="true" bounds="[809,436][935,510]" displayed="true" />
+  <android.widget.Button package="com.zhiliaoapp.musically" class="android.widget.Button" text="@fixture.account" resource-id="com.zhiliaoapp.musically:id/s0v" clickable="true" enabled="true" bounds="[423,510][656,549]" displayed="true" />
+  <android.widget.Button package="com.zhiliaoapp.musically" class="android.widget.Button" text="" content-desc="Profile menu" clickable="true" enabled="true" bounds="[954,79][1059,184]" displayed="true" />
+  <android.widget.Button package="com.zhiliaoapp.musically" class="android.widget.Button" text="@bio.mention" clickable="true" enabled="true" bounds="[105,698][975,792]" displayed="true" />
+</hierarchy>
