@@ -2780,7 +2780,7 @@ async fn close_publish_context(
     }
 }
 
-#[cfg(any(test, feature = "diagnostics"))]
+#[cfg(test)]
 pub(crate) async fn open_publish_context(
     control: &DeviceControlPlane,
     udid: &str,
