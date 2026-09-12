@@ -209,6 +209,7 @@ impl Database {
                         .map(str::to_string)
                 });
             Ok(crate::interaction::InteractionAssignmentRecord {
+                comment_verification: None,
                 id: row.get(0)?,
                 target_key: row.get(1)?,
                 ordinal: narrow(row.get::<_, i64>(2)?, "ordinal")?,
@@ -237,6 +238,7 @@ impl Database {
             })
             .collect();
         for assignment in &mut assignments {
+            assignment.comment_verification = self.comment_verification(&assignment.id)?;
             assignment.actions = self
                 .list_interaction_action_runs(&assignment.id)?
                 .into_iter()
@@ -249,6 +251,29 @@ impl Database {
                     error: run.error,
                 })
                 .collect();
+            if assignment.comment_verification.is_none()
+                && assignment.posted_identity().is_none()
+                && assignment
+                    .evidence_json
+                    .as_deref()
+                    .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+                    .is_some_and(|value| {
+                        value.get("reader").and_then(|v| v.as_str()) == Some("hierarchy")
+                    })
+                && assignment.actions.iter().any(|a| {
+                    a.kind == crate::InteractionActionKind::Comment && a.effect_intent.is_some()
+                })
+            {
+                assignment.comment_verification =
+                    Some(crate::comment_verification::CommentVerification {
+                        state: crate::comment_verification::VerificationState::NeedsReview,
+                        attempts: 0,
+                        next_check_at_ms: None,
+                        deadline_ms: None,
+                        reason: Some("legacy_missing_evidence: thiếu bằng chứng đọc lại".into()),
+                        evidence: None,
+                    });
+            }
         }
         let action_results = assignments
             .iter()

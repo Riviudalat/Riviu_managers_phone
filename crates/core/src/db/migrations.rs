@@ -251,7 +251,30 @@ const MIGRATIONS: &[Migration] = &[
         apply: apply_migration_36,
         rebuilds_tables: false,
     },
+    Migration {
+        version: 37,
+        name: "comment-verification-jobs",
+        apply: apply_migration_37,
+        rebuilds_tables: false,
+    },
 ];
+
+fn apply_migration_37(tx: &Transaction<'_>) -> anyhow::Result<()> {
+    tx.execute_batch("CREATE TABLE interaction_comment_verification (
+        assignment_id TEXT PRIMARY KEY REFERENCES interaction_assignments(id) ON DELETE CASCADE,
+        campaign_id TEXT NOT NULL REFERENCES interaction_campaigns(id) ON DELETE CASCADE,
+        device_id TEXT NOT NULL, context_json TEXT NOT NULL,
+        state TEXT NOT NULL CHECK(state IN ('pending','verified','needsReview')),
+        attempts INTEGER NOT NULL DEFAULT 0 CHECK(attempts BETWEEN 0 AND 3),
+        sent_at_ms INTEGER, next_at_ms INTEGER, deadline_ms INTEGER,
+        owner TEXT, lease_until_ms INTEGER, revision INTEGER NOT NULL DEFAULT 0,
+        reason TEXT, evidence_json TEXT,
+        assignment_revision INTEGER, action_revision INTEGER);
+        CREATE INDEX interaction_comment_verification_due ON interaction_comment_verification(state,next_at_ms);
+        CREATE UNIQUE INDEX interaction_comment_verification_device_claim ON interaction_comment_verification(device_id) WHERE owner IS NOT NULL;
+        CREATE TABLE interaction_parent_rechecks(assignment_id TEXT PRIMARY KEY REFERENCES interaction_assignments(id) ON DELETE CASCADE, attempts INTEGER NOT NULL DEFAULT 0, first_at_ms INTEGER NOT NULL,next_at_ms INTEGER NOT NULL);")?;
+    Ok(())
+}
 
 fn apply_migration_36(tx: &Transaction<'_>) -> anyhow::Result<()> {
     tx.execute_batch("CREATE TABLE gui_perception_attempts (

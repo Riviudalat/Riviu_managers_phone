@@ -30,7 +30,7 @@ def main() -> int:
     files = [{"path": str(p.relative_to(runtime)).replace("\\", "/"), "bytes": p.stat().st_size,
               "sha256": hashlib.sha256(p.read_bytes()).hexdigest()}
              for p in sorted(runtime.rglob("*")) if p.is_file() and p.name != "gui-service-manifest.json"]
-    manifest = {"schemaVersion": 1, "protocolVersion": 1, "serviceVersion": "0.2.30", "files": files}
+    manifest = {"schemaVersion": 1, "protocolVersion": 1, "serviceVersion": "0.2.31", "files": files}
     (runtime / "gui-service-manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf8")
     config = {"bundle": {"resources": {str(runtime).replace("\\", "/") + "/": "sidecars/gui-service/"}}}
     (ROOT / "target/tauri-gui-service.conf.json").write_text(json.dumps(config, indent=2), encoding="utf8")

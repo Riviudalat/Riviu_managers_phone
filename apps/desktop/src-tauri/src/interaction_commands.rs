@@ -88,6 +88,38 @@ pub async fn interaction_readback(
 }
 
 /// What one phone read off a post, and what that means for the numbers asked for.
+#[tauri::command]
+pub fn interaction_verify_comment(
+    state: State<'_, AppState>,
+    campaign_id: String,
+    assignment_id: String,
+) -> Result<riviu_core::comment_verification::CommentVerification, CommandError> {
+    let _admission = state.ensure_accepting_work()?;
+    let detail = state
+        .db
+        .get_interaction_campaign(&campaign_id)
+        .map_err(interaction_error)?
+        .ok_or_else(|| interaction_error("Chiến dịch không tồn tại"))?;
+    let row = detail
+        .assignments
+        .iter()
+        .find(|a| a.id == assignment_id)
+        .ok_or_else(|| interaction_error("Bình luận không thuộc chiến dịch"))?;
+    if !state.control.reports_element_bounds(&row.actor_udid) {
+        return Err(interaction_error("Đọc lại bình luận cần máy Android"));
+    }
+    let result = state
+        .db
+        .request_comment_verification(&campaign_id, &assignment_id)
+        .map_err(interaction_error)?;
+    state.events.emit(AppEvent::InteractionUpdated {
+        campaign_id,
+        revision: revision(),
+    });
+    Ok(result)
+}
+
+/// What one phone read off a post, and what that means for the numbers asked for.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct InteractionPostReading {

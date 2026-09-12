@@ -533,6 +533,7 @@ pub fn run() {
             interaction_commands::interaction_measure_post,
             interaction_commands::interaction_read_account,
             interaction_commands::interaction_readback,
+            interaction_commands::interaction_verify_comment,
             interaction_commands::interaction_import_sheet,
             interaction_commands::interaction_start_thread,
             interaction_commands::interaction_list,
@@ -654,6 +655,7 @@ pub(crate) fn graceful_shutdown(handle: &tauri::AppHandle) {
     };
     {
         state.reject_new_work();
+        tauri::async_runtime::block_on(state.comment_verifications.shutdown());
         tauri::async_runtime::block_on(
             orchestration_commands::shutdown_automation_schedule_runner(&state),
         );

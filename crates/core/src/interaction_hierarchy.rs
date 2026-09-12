@@ -41,7 +41,9 @@ use crate::interaction::CommentLocatorIdentity;
 use crate::tiktok_labels::{LabelMatch, TikTokControl, TikTokControls};
 use anyhow::Context;
 
+mod composer;
 mod exact_target;
+pub(crate) mod replies;
 pub use exact_target::open_exact_target_by_hierarchy;
 
 /// Where to tap to reply to one specific comment, and whose comment it is.
@@ -58,14 +60,14 @@ pub struct ElementReplyTarget {
 ///
 /// Small on purpose. The author sits ~50 px above its body on the measured build, so
 /// this only absorbs a row that has settled a pixel or two mid-scroll.
-const ABOVE_SLACK: f64 = 8.0;
+pub(crate) const ABOVE_SLACK: f64 = 8.0;
 
 /// How far above a body an author label may start and still belong to it.
 ///
 /// Measured gap is ~50 px (author y=1327, body y=1377). 140 px allows for a taller
 /// author row — a badge, a second line — while staying well inside the ~300 px row
 /// pitch, so it cannot reach the previous row's body.
-const AUTHOR_REACH: f64 = 140.0;
+pub(crate) const AUTHOR_REACH: f64 = 140.0;
 
 /// How far below a body its own reply control may sit.
 ///
@@ -96,7 +98,7 @@ fn bottom(element: &ElementBox) -> f64 {
 /// (`28` at `x=966`, `3` at `x=978`, `14` at `x=969` — the post's 28 likes, 3 comments and 14
 /// shares). One of them was read as a comment's author on a live run and the reply refused
 /// itself with `wanted: "28"`, which is the good outcome of a bad read.
-const AUTHOR_LEFT_SLACK: f64 = 24.0;
+pub(crate) const AUTHOR_LEFT_SLACK: f64 = 24.0;
 
 /// Whether a label is a bare count rather than somebody's name.
 ///
@@ -1128,14 +1130,21 @@ where
     let mention_note = if mentions.is_empty() {
         None
     } else {
-        let mention_outcome = match append_mentions_by_picker(session, screen, mentions, stop).await
-        {
-            Ok(outcome) => outcome,
-            Err(_) => {
-                drawer.leave(stop).await;
-                return Ok(HierarchySendOutcome::interrupted_before_send());
-            }
-        };
+        let mention_outcome =
+            match append_mentions_checked(session, screen, mentions, stop, Some(text)).await {
+                Ok(outcome) => outcome,
+                Err(error) => {
+                    let cleaned = drawer.leave(stop).await;
+                    if strict_mentions {
+                        return Err(if cleaned {
+                            HierarchySendFailure::before(error)
+                        } else {
+                            HierarchySendFailure::after(error)
+                        });
+                    }
+                    return Ok(HierarchySendOutcome::interrupted_before_send());
+                }
+            };
         if strict_mentions && !mention_outcome.all_linked(mentions) {
             let cleared = drawer.leave(stop).await;
             let error = anyhow::anyhow!(
@@ -1152,7 +1161,13 @@ where
         // Read rather than reconstructed: the token's exact spelling and trailing space are
         // TikTok's to decide, and guessing them is how the read-back missed the first time.
         posted = match composer_text(session).await {
-            Ok(value) => value.filter(|value| value.contains(text)),
+            Ok(value) => value.filter(|value| {
+                value.contains(text)
+                    && (!strict_mentions
+                        || mentions
+                            .iter()
+                            .all(|handle| composer::has_handle(value, handle)))
+            }),
             Err(_) => {
                 drawer.leave(stop).await;
                 return Ok(HierarchySendOutcome::interrupted_before_send());
@@ -1190,6 +1205,9 @@ where
             ));
         }
     };
+    effect_gate
+        .record_draft(posted.as_deref().unwrap_or(text))
+        .map_err(HierarchySendFailure::before)?;
     let armed = frame_sha();
     // Keep the successful gate-to-Send path adjacent: no await or other device operation may
     // enter between the durable CAS and the public tap.
@@ -1332,6 +1350,16 @@ pub async fn append_mentions_by_picker(
     handles: &[String],
     stop: &AtomicBool,
 ) -> anyhow::Result<MentionOutcome> {
+    append_mentions_checked(session, screen, handles, stop, None).await
+}
+
+async fn append_mentions_checked(
+    session: &dyn UiSession,
+    screen: (f64, f64),
+    handles: &[String],
+    stop: &AtomicBool,
+    body: Option<&str>,
+) -> anyhow::Result<MentionOutcome> {
     let mut outcome = MentionOutcome::default();
     let mut planner = crate::nurture::touch::TouchPointPlanner::new(screen);
     for handle in handles {
@@ -1372,21 +1400,20 @@ pub async fn append_mentions_by_picker(
             Some(row) => {
                 let point = planner.next(row.centre(), row.jitter_radius());
                 session.tap(point).await?;
-                tokio::time::sleep(MENTION_PICKER_POLL).await;
                 // **Ask the field, not the list.** The old check read "the row is gone" as
                 // proof the pick landed — but a tap that misses the picker and opens somebody's
                 // profile also makes the row go away, and takes the drawer and the unsent draft
                 // with it. Those two outcomes were indistinguishable, and the wrong one was
                 // recorded as a real mention. The composer can only answer while the drawer is
                 // still on screen, so it is the one witness that separates them.
-                match composer_text(session).await? {
+                match composer::after_pick(session, stop, handle, body).await? {
                     None => {
                         // The field is gone, so that tap did not land in a suggestion list —
                         // and nothing after this can be typed into a drawer that is not there.
                         outcome.unverified.push(handle.to_string());
                         return Ok(outcome);
                     }
-                    Some(field) if !field.to_lowercase().contains(&handle.to_lowercase()) => {
+                    Some(field) if !composer::has_handle(&field, handle) => {
                         // Still a drawer, but the handle is no longer in it: the tap changed
                         // the field into something this function did not ask for.
                         //
@@ -1832,17 +1859,10 @@ const TILE_TAP_UP: f64 = 200.0;
 
 /// What the comment box holds right now.
 ///
-/// `locate_all_described` reads the rendered `text` into `description`, which for an
-/// `EditText` is its contents — the same read the drawer uses to tell a placeholder from a
-/// draft. `None` when there is no field or it is empty.
+/// Android reads the focused field from one snapshot; the collapsed hint can share
+/// its resource ID. Other drivers retain their element API with a uniqueness check.
 async fn composer_text(session: &dyn UiSession) -> anyhow::Result<Option<String>> {
-    Ok(session
-        .locate_all_described(ElementQuery::ClassName(crate::tiktok_drawer::EDIT_TEXT))
-        .await?
-        .into_iter()
-        .find_map(|field| field.description)
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty()))
+    composer::read(session).await
 }
 
 /// Whether a handle can be sent as key events at all.
@@ -1991,6 +2011,18 @@ async fn expand_folded_comments(
     session: &dyn UiSession,
     labels: TikTokControls,
 ) -> anyhow::Result<bool> {
+    if session.supports_accessibility_readback() {
+        let tree =
+            crate::ui_automation::tree::Tree::parse(session.hierarchy_source_snapshot().await?)?;
+        if let Some(control) =
+            crate::comment_verification::search::hidden_control(&tree, labels.package())?
+        {
+            session.tap(control.centre()).await?;
+            tokio::time::sleep(PARENT_SCROLL_SETTLE).await;
+            return Ok(true);
+        }
+        return Ok(false);
+    }
     let Some(label) = labels.label(TikTokControl::FoldedComments) else {
         return Ok(false);
     };
@@ -2222,116 +2254,132 @@ where
     let mut unfolded = false;
     // Whether the list was ever legible at all — see the `unreadable` branch below.
     let mut saw_rows = false;
-    let target = loop {
-        if strict_mentions {
-            if let Some(root) = root {
-                if root != parent {
-                    expand_conversation_root(session, labels, root)
-                        .await
-                        .map_err(HierarchySendFailure::before)?;
+    let target = if strict_mentions && session.supports_accessibility_readback() {
+        let found = crate::comment_verification::search::find_for_reply(
+            session, labels, parent, root, stop,
+        )
+        .await
+        .map_err(HierarchySendFailure::before)?;
+        unfolded = found.hidden;
+        ElementReplyTarget {
+            identity: found.identity,
+            reply: found
+                .reply
+                .context("comment_reply_control_missing")
+                .map_err(HierarchySendFailure::before)?,
+        }
+    } else {
+        loop {
+            if strict_mentions {
+                if let Some(root) = root {
+                    if root != parent {
+                        expand_conversation_root(session, labels, root)
+                            .await
+                            .map_err(HierarchySendFailure::before)?;
+                    }
                 }
             }
-        }
 
-        match if strict_mentions {
-            find_script_parent_snapshot(session, labels, parent).await
-        } else {
-            find_parent(session, reply_label, parent).await
-        } {
-            Ok(Some(found)) => break found,
-            Ok(None) => {}
-            Err(_) => return Ok(Ok(HierarchySendOutcome::interrupted_before_send())),
-        }
-        if scrolls >= PARENT_SCROLL_ATTEMPTS || stop.load(Ordering::Relaxed) {
-            return Ok(Err(ReplyRefusal::ParentNotFound {
-                scrolls,
-                unfolded,
-                saw_rows,
-            }));
-        }
-        // Anchors before the swipe, so "the list did not move" is observable rather than
-        // assumed. Reply controls are the cheapest anchor: geometry only, no text.
-        let before = match anchor_positions(session, reply_label).await {
-            Ok(before) => before,
-            Err(_) => return Ok(Ok(HierarchySendOutcome::interrupted_before_send())),
-        };
-        let rows_before = match visible_rows(session).await {
-            Ok(rows) => rows,
-            Err(_) => return Ok(Ok(HierarchySendOutcome::interrupted_before_send())),
-        };
-        // Still before the Send tap; a transport error scrolling is retryable, not ambiguous.
-        if scroll_comment_list(session, screen, &field).await.is_err() {
-            return Ok(Ok(HierarchySendOutcome::interrupted_before_send()));
-        }
-        tokio::time::sleep(PARENT_SCROLL_SETTLE).await;
-        scrolls += 1;
-        // A swipe that closed the drawer is a different failure from one that hit the
-        // end of the list, and the pixel path checks for exactly this.
-        match session.locate(ElementQuery::ClassName(EDIT_TEXT)).await {
-            Ok(Some(_)) => {}
-            Ok(None) => return Ok(Err(ReplyRefusal::DrawerClosedByScroll)),
-            Err(_) => return Ok(Ok(HierarchySendOutcome::interrupted_before_send())),
-        }
-        let after = match anchor_positions(session, reply_label).await {
-            Ok(after) => after,
-            Err(_) => return Ok(Ok(HierarchySendOutcome::interrupted_before_send())),
-        };
-        let rows_after = match visible_rows(session).await {
-            Ok(rows) => rows,
-            Err(_) => return Ok(Ok(HierarchySendOutcome::interrupted_before_send())),
-        };
-        // **An empty read is not a stationary list.** Both anchors answer with an empty
-        // vector when they cannot see anything, and empty compares equal to empty: zero
-        // reply controls before and zero after satisfy `!moved`, zero rows before and zero
-        // rows after satisfy the text check, and the loop concludes it reached the end of a
-        // list it never managed to read one row of.
-        //
-        // Measured 24/08/2026 on `.../@.lt.gi.mang.v/photo/7668947001618320660`, a post with
-        // 22 comments: three replies refused `reply_parent_not_found` after **one** scroll,
-        // with a budget of ten. The drawer opens before TikTok has rendered the comments, so
-        // on a slow phone the first look is always empty — and that first look was being
-        // read as proof there was nothing to find.
-        //
-        // Spending a scroll instead is the conservative reading: the budget still bounds the
-        // loop, and the refusal at the end now says which of the two happened.
-        if after.is_empty() && rows_after.is_empty() {
-            continue;
-        }
-        saw_rows = true;
-        if !moved(&before, &after) {
-            // The cheap anchor says stopped. It is wrong often enough to matter — evenly
-            // spaced rows alias — so the expensive one gets the final word, and only here,
-            // where the alternative is refusing a reply whose parent is further down.
-            if rows_after != rows_before {
+            match if strict_mentions {
+                find_script_parent_snapshot(session, labels, parent).await
+            } else {
+                find_parent(session, reply_label, parent).await
+            } {
+                Ok(Some(found)) => break found,
+                Ok(None) => {}
+                Err(_) => return Ok(Ok(HierarchySendOutcome::interrupted_before_send())),
+            }
+            if scrolls >= PARENT_SCROLL_ATTEMPTS || stop.load(Ordering::Relaxed) {
+                return Ok(Err(ReplyRefusal::ParentNotFound {
+                    scrolls,
+                    unfolded,
+                    saw_rows,
+                }));
+            }
+            // Anchors before the swipe, so "the list did not move" is observable rather than
+            // assumed. Reply controls are the cheapest anchor: geometry only, no text.
+            let before = match anchor_positions(session, reply_label).await {
+                Ok(before) => before,
+                Err(_) => return Ok(Ok(HierarchySendOutcome::interrupted_before_send())),
+            };
+            let rows_before = match visible_rows(session).await {
+                Ok(rows) => rows,
+                Err(_) => return Ok(Ok(HierarchySendOutcome::interrupted_before_send())),
+            };
+            // Still before the Send tap; a transport error scrolling is retryable, not ambiguous.
+            if scroll_comment_list(session, screen, &field).await.is_err() {
+                return Ok(Ok(HierarchySendOutcome::interrupted_before_send()));
+            }
+            tokio::time::sleep(PARENT_SCROLL_SETTLE).await;
+            scrolls += 1;
+            // A swipe that closed the drawer is a different failure from one that hit the
+            // end of the list, and the pixel path checks for exactly this.
+            match session.locate(ElementQuery::ClassName(EDIT_TEXT)).await {
+                Ok(Some(_)) => {}
+                Ok(None) => return Ok(Err(ReplyRefusal::DrawerClosedByScroll)),
+                Err(_) => return Ok(Ok(HierarchySendOutcome::interrupted_before_send())),
+            }
+            let after = match anchor_positions(session, reply_label).await {
+                Ok(after) => after,
+                Err(_) => return Ok(Ok(HierarchySendOutcome::interrupted_before_send())),
+            };
+            let rows_after = match visible_rows(session).await {
+                Ok(rows) => rows,
+                Err(_) => return Ok(Ok(HierarchySendOutcome::interrupted_before_send())),
+            };
+            // **An empty read is not a stationary list.** Both anchors answer with an empty
+            // vector when they cannot see anything, and empty compares equal to empty: zero
+            // reply controls before and zero after satisfy `!moved`, zero rows before and zero
+            // rows after satisfy the text check, and the loop concludes it reached the end of a
+            // list it never managed to read one row of.
+            //
+            // Measured 24/08/2026 on `.../@.lt.gi.mang.v/photo/7668947001618320660`, a post with
+            // 22 comments: three replies refused `reply_parent_not_found` after **one** scroll,
+            // with a budget of ten. The drawer opens before TikTok has rendered the comments, so
+            // on a slow phone the first look is always empty — and that first look was being
+            // read as proof there was nothing to find.
+            //
+            // Spending a scroll instead is the conservative reading: the budget still bounds the
+            // loop, and the refusal at the end now says which of the two happened.
+            if after.is_empty() && rows_after.is_empty() {
                 continue;
             }
-            // The end of the *open* list, which is not the end of the comments. TikTok
-            // folds these accounts' comments away progressively — measured on the same
-            // post within the same hour, two replies found their parent in the open list
-            // and the next two did not — so the parent is often one tap below the last
-            // row rather than absent. This is the only place that tap can be right: every
-            // scroll has been spent and the control sits under the final comment.
-            //
-            // The revealed rows get their own budget, once. `unfolded` latches, so a list
-            // that keeps refusing to move still ends here.
-            if !unfolded {
-                match expand_folded_comments(session, labels).await {
-                    Ok(true) => {
-                        unfolded = true;
-                        scrolls = 0;
-                        continue;
-                    }
-                    Ok(false) => {}
-                    Err(_) => {
-                        return Ok(Ok(HierarchySendOutcome::interrupted_before_send()));
+            saw_rows = true;
+            if !moved(&before, &after) {
+                // The cheap anchor says stopped. It is wrong often enough to matter — evenly
+                // spaced rows alias — so the expensive one gets the final word, and only here,
+                // where the alternative is refusing a reply whose parent is further down.
+                if rows_after != rows_before {
+                    continue;
+                }
+                // The end of the *open* list, which is not the end of the comments. TikTok
+                // folds these accounts' comments away progressively — measured on the same
+                // post within the same hour, two replies found their parent in the open list
+                // and the next two did not — so the parent is often one tap below the last
+                // row rather than absent. This is the only place that tap can be right: every
+                // scroll has been spent and the control sits under the final comment.
+                //
+                // The revealed rows get their own budget, once. `unfolded` latches, so a list
+                // that keeps refusing to move still ends here.
+                if !unfolded {
+                    match expand_folded_comments(session, labels).await {
+                        Ok(true) => {
+                            unfolded = true;
+                            scrolls = 0;
+                            continue;
+                        }
+                        Ok(false) => {}
+                        Err(_) => {
+                            return Ok(Ok(HierarchySendOutcome::interrupted_before_send()));
+                        }
                     }
                 }
+                return Ok(Err(ReplyRefusal::ParentNotFound {
+                    scrolls,
+                    unfolded,
+                    saw_rows,
+                }));
             }
-            return Ok(Err(ReplyRefusal::ParentNotFound {
-                scrolls,
-                unfolded,
-                saw_rows,
-            }));
         }
     };
 
@@ -2404,17 +2452,18 @@ where
             identity: None,
         }));
     }
-    let mention_outcome = match append_mentions_by_picker(session, screen, mentions, stop).await {
-        Ok(result) => result,
-        Err(error) => {
-            let cleaned = drawer.leave(stop).await;
-            return Err(if cleaned {
-                HierarchySendFailure::before(error)
-            } else {
-                HierarchySendFailure::after(error)
-            });
-        }
-    };
+    let mention_outcome =
+        match append_mentions_checked(session, screen, mentions, stop, Some(text)).await {
+            Ok(result) => result,
+            Err(error) => {
+                let cleaned = drawer.leave(stop).await;
+                return Err(if cleaned {
+                    HierarchySendFailure::before(error)
+                } else {
+                    HierarchySendFailure::after(error)
+                });
+            }
+        };
     if strict_mentions && !mention_outcome.all_linked(mentions) {
         let cleaned = drawer.leave(stop).await;
         let error = anyhow::anyhow!(
@@ -2435,9 +2484,12 @@ where
             .map_err(HierarchySendFailure::before)?
     };
     if strict_mentions
-        && !posted_text
-            .as_deref()
-            .is_some_and(|value| value.contains(text))
+        && !posted_text.as_deref().is_some_and(|value| {
+            value.contains(text)
+                && mentions
+                    .iter()
+                    .all(|handle| composer::has_handle(value, handle))
+        })
     {
         let cleaned = drawer.leave(stop).await;
         let error = anyhow::anyhow!("Nội dung trả lời thay đổi sau gắn tag");
@@ -2464,6 +2516,9 @@ where
         // Still before the Send tap: retryable, not the ambiguous `after` error.
         Err(_) => return Ok(Ok(HierarchySendOutcome::interrupted_before_send())),
     };
+    effect_gate
+        .record_draft(posted_text.as_deref().unwrap_or(text))
+        .map_err(HierarchySendFailure::before)?;
     let armed = frame_sha();
     let confirmed = match effect_gate.cross() {
         Ok(()) => drawer
@@ -2613,62 +2668,12 @@ async fn expand_conversation_root(
     labels: TikTokControls,
     root: &CommentLocatorIdentity,
 ) -> anyhow::Result<()> {
-    let snapshot = session.hierarchy_source_snapshot().await?;
-    let tree = crate::tiktok_share::hierarchy::Tree::parse(snapshot)?;
-    let matches = tree.matching(
-        labels.package(),
-        ElementQuery::Text {
-            value: &root.text,
-            exact: true,
-        },
-    );
-    if matches.is_empty() {
-        return Ok(());
+    let tree =
+        crate::tiktok_share::hierarchy::Tree::parse(session.hierarchy_source_snapshot().await?)?;
+    if let Some(control) = replies::expand_target(&tree, labels.package(), root)? {
+        session.tap(control.centre()).await?;
+        sleep_poll().await;
     }
-    anyhow::ensure!(
-        matches.len() == 1,
-        "Chưa tìm duy nhất bình luận gốc để mở replies"
-    );
-    let body = matches[0];
-    let mut ancestor = tree.nodes[body].parent;
-    while let Some(index) = ancestor {
-        let authors: Vec<_> = tree
-            .matching(
-                labels.package(),
-                ElementQuery::Text {
-                    value: &root.author_label,
-                    exact: true,
-                },
-            )
-            .into_iter()
-            .filter(|i| tree.inside(*i, index))
-            .collect();
-        let controls: Vec<_> = tree
-            .nodes
-            .iter()
-            .enumerate()
-            .filter(|(i, n)| {
-                tree.inside(*i, index) && n.visible(labels.package()) && {
-                    let text = n.attr("text").to_lowercase();
-                    ((text.starts_with("view ") && text.contains("repl"))
-                        || (text.starts_with("xem ") && text.contains("trả lời")))
-                        && n.rect().is_some_and(|r| r.enabled && r.clickable)
-                }
-            })
-            .collect();
-        if authors.len() == 1 && controls.len() == 1 {
-            session
-                .tap(controls[0].1.rect().context("Reply bounds mất")?.centre())
-                .await?;
-            sleep_poll().await;
-            return Ok(());
-        }
-        if controls.len() > 1 {
-            anyhow::bail!("Nhiều nút mở replies; chưa chọn bình luận gốc");
-        }
-        ancestor = tree.nodes[index].parent;
-    }
-    // Replies already expanded: the normal parent search must still prove exact identity.
     Ok(())
 }
 
@@ -2773,7 +2778,7 @@ fn moved(before: &[f64], after: &[f64]) -> bool {
 /// Bounded above by a margin below the drawer's top and below by the input field, rather
 /// than by screen fractions: the field's measured position moves 950 px depending on
 /// whether the keyboard is up, so a fixed fraction can land in the composer.
-async fn scroll_comment_list(
+pub(crate) async fn scroll_comment_list(
     session: &dyn UiSession,
     screen: (f64, f64),
     field: &ElementBox,
@@ -6260,26 +6265,24 @@ mod tests {
         );
         // No `EditText` answer at all — which is what a profile page looks like from here.
 
-        let outcome = append_mentions_by_picker(
+        let result = append_mentions_by_picker(
             &session,
             (1080.0, 2400.0),
             &[".lt.gi.mang.v".to_string(), "lt.gi".to_string()],
             &AtomicBool::new(false),
         )
-        .await
-        .expect("no transport error");
+        .await;
 
         assert_eq!(session.taps.lock().len(), 1);
-        assert_eq!(outcome.linked, Vec::<String>::new());
-        assert_eq!(outcome.unverified, vec![".lt.gi.mang.v".to_string()]);
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("composer_missing_or_empty"));
         assert_eq!(
             *session.keyed.lock(),
             vec![" @.lt.gi.mang.v".to_string()],
             "a second handle cannot be typed into a drawer that is gone"
         );
-        assert!(outcome
-            .note()
-            .is_some_and(|note| note.contains("không đọc lại được ô soạn")));
     }
 
     /// The one shape that really is a mention: a fresh row, tapped, list closes, drawer stays.

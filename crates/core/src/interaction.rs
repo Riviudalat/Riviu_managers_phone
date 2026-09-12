@@ -1317,6 +1317,8 @@ impl InteractionCampaignBrief {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct InteractionAssignmentRecord {
+    #[serde(default)]
+    pub comment_verification: Option<crate::comment_verification::CommentVerification>,
     pub id: String,
     pub target_key: String,
     pub ordinal: u8,
@@ -2742,6 +2744,7 @@ mod tests {
 
     fn stored(evidence: Option<&str>) -> InteractionAssignmentRecord {
         InteractionAssignmentRecord {
+            comment_verification: None,
             id: "assignment-1".into(),
             target_key: "content:123".into(),
             ordinal: 0,

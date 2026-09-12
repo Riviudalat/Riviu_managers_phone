@@ -1276,6 +1276,10 @@ export async function interactionRetry(campaignId: string, assignmentIds?: strin
   return invoke<void>("interaction_retry", { campaignId, assignmentIds });
 }
 
+export async function interactionVerifyComment(campaignId: string, assignmentId: string) {
+  return invoke<import("./types").CommentVerification>("interaction_verify_comment", {campaignId, assignmentId});
+}
+
 export interface InteractionArtifactRecord {
   id: string;
   assignmentId: string | null;

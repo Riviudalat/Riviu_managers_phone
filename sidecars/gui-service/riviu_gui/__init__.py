@@ -1,4 +1,4 @@
 """Perception only. Device effects and campaign persistence belong to Riviu Rust."""
 
-VERSION = "0.2.30"
+VERSION = "0.2.31"
 PROTOCOL_VERSION = 1

@@ -1337,6 +1337,7 @@ export interface InteractionCampaignBrief {
 }
 
 export interface InteractionAssignmentRecord {
+  commentVerification?: CommentVerification | null;
   id: string;
   targetKey: string;
   ordinal: number;
@@ -1368,6 +1369,15 @@ export interface InteractionAssignmentRecord {
   parentWasFolded?: boolean;
   /** Durable outcomes for each requested public action. */
   actions?: PublicActionResult[];
+}
+
+export interface CommentVerification {
+  state: "pending" | "verified" | "needsReview";
+  attempts: number;
+  nextCheckAtMs: number | null;
+  deadlineMs: number | null;
+  reason: string | null;
+  evidence: string | null;
 }
 
 export interface InteractionCampaignDetail {

@@ -8,6 +8,7 @@ use uuid::Uuid;
 use crate::types::{JobRecord, JobStatus, JobStepRecord};
 
 mod automation;
+mod comment_verification;
 mod conversation;
 mod fleet;
 mod flow_runs;
@@ -104,6 +105,18 @@ impl Database {
     fn migrate(&self) -> anyhow::Result<()> {
         let mut conn = self.conn()?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
+        let version: Option<i64> = conn
+            .query_row("SELECT MAX(version) FROM schema_migrations", [], |r| {
+                r.get(0)
+            })
+            .unwrap_or(None);
+        if version == Some(36) {
+            let backup = self.path.with_extension("pre-comment-verification-v36.db");
+            if !backup.exists() {
+                conn.execute("VACUUM INTO ?1", [backup.to_string_lossy().as_ref()])
+                    .context("backup before comment verification migration")?;
+            }
+        }
         migrations::run(&mut conn)
     }
 

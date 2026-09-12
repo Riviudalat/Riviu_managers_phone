@@ -356,6 +356,7 @@ pub struct AppState {
     pub interaction_artifacts: FlowArtifactStore,
     pub db: Arc<Database>,
     pub gui_service: Arc<crate::gui_service::GuiService>,
+    pub comment_verifications: riviu_core::comment_verification::worker::VerificationWorker,
     pub signing: SigningService,
     /// The OS credential store, for secrets that must not sit in the SQLite file.
     pub secrets: CredentialStore,
@@ -1078,6 +1079,13 @@ impl AppState {
         command_admission.start_accepting();
 
         let state = Self {
+            comment_verifications:
+                riviu_core::comment_verification::worker::VerificationWorker::start(
+                    db.clone(),
+                    control.clone(),
+                    events.clone(),
+                    artifacts_dir.clone(),
+                ),
             registry,
             events,
             control,

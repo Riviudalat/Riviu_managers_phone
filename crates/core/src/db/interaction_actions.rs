@@ -126,6 +126,7 @@ impl Database {
             transaction.rollback()?;
             return Ok(None);
         };
+        transaction.execute("UPDATE interaction_comment_verification SET sent_at_ms=?2,next_at_ms=?2+5000,deadline_ms=?2+120000,state='pending',attempts=0,reason=NULL,revision=revision+1 WHERE assignment_id=?1 AND sent_at_ms IS NULL",params![assignment_id,Utc::now().timestamp_millis()])?;
         transaction.commit()?;
         Ok(Some(action_revision))
     }

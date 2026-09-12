@@ -197,6 +197,13 @@ thời lượng. Hết giờ dừng câu chưa gửi, hoàn tất đọc lại c
 lại câu đã xác nhận hoặc chưa chắc kết quả. Theo dõi ghi giờ kết thúc, lượt kế,
 người nói và nhánh. Mở lại app giữ kịch bản và tiến độ; tiếp tục dùng giờ kết thúc cũ.
 
+Trên Android, sau thao tác Gửi app hiển thị **Đang xác minh nội dung**. App tự đọc lại
+tối đa ba lượt có giới hạn; chỉ chuyển thành công đầy đủ khi khớp nội dung, tác giả
+và nhánh. Nếu chưa đủ bằng chứng, dòng chuyển **Cần kiểm tra nội dung** và có nút
+**Đọc lại bình luận**. Nút này chỉ kiểm tra, không gõ hay gửi thêm. Hết giờ chạy
+vẫn có thể hoàn tất xác minh câu đã gửi. Bình luận nằm trong vùng bị ẩn có thể hiện
+khác nhau giữa các tài khoản; app báo chưa tìm thấy câu cha thay vì tự chọn câu khác.
+
 `Riêng lẻ` cho phép một máy và một bình luận; kiểu chuỗi vẫn cần ít nhất hai máy.
 Tim/Lưu và bình luận thủ công không phụ thuộc cấu hình AI. “Bỏ qua: chưa đọc được
 trạng thái” không có nghĩa đã Tim/Lưu; xem lý do và bằng chứng trước khi chạy lượt mới.

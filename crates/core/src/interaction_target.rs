@@ -155,8 +155,10 @@ impl SendFailure {
 /// The callback normally performs the assignment's `preparing -> sending` CAS. Keeping it
 /// here, instead of in the campaign before entering a driver, leaves drawer setup, parent
 /// lookup, typing, and Send arming on the retryable side of the persisted effect boundary.
+type DraftRecorder<'a> = Box<dyn Fn(&str) -> anyhow::Result<()> + Send + 'a>;
 pub(crate) struct EffectGate<'a> {
     callback: Option<Box<dyn FnOnce() -> anyhow::Result<bool> + Send + 'a>>,
+    draft: Option<DraftRecorder<'a>>,
     crossed: bool,
 }
 
@@ -164,12 +166,23 @@ impl<'a> EffectGate<'a> {
     pub fn new(callback: impl FnOnce() -> anyhow::Result<bool> + Send + 'a) -> Self {
         Self {
             callback: Some(Box::new(callback)),
+            draft: None,
             crossed: false,
         }
     }
 
     pub fn allow() -> Self {
         Self::new(|| Ok(true))
+    }
+
+    pub fn record_draft_with(&mut self, callback: impl Fn(&str) -> anyhow::Result<()> + Send + 'a) {
+        self.draft = Some(Box::new(callback));
+    }
+    pub fn record_draft(&self, text: &str) -> anyhow::Result<()> {
+        if let Some(callback) = &self.draft {
+            callback(text)?;
+        }
+        Ok(())
     }
 
     pub fn cross(&mut self) -> Result<(), SendFailure> {

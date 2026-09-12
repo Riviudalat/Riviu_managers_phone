@@ -98,13 +98,21 @@ pub(super) async fn run(
             let step = script
                 .step(&a.target_key, a.ordinal)
                 .context("Câu không tồn tại")?;
+            if !db.parent_recheck_due(&a.id, now)? {
+                continue;
+            }
             if let Some(parent) = &a.parent_assignment_id {
                 let parent = detail
                     .assignments
                     .iter()
                     .find(|p| p.id == *parent)
                     .context("Parent không tồn tại")?;
-                if parent.posted_identity().is_none() {
+                if db.comment_verification_pending(&parent.id)? {
+                    continue;
+                }
+                if parent.posted_identity().is_none()
+                    || parent.state != ThreadMessageState::Succeeded
+                {
                     if matches!(
                         parent.state,
                         ThreadMessageState::Failed
@@ -168,6 +176,33 @@ pub(super) async fn run(
             }
         }
         let finish = chrono::Utc::now().timestamp_millis();
+        let after = db
+            .get_interaction_campaign(&campaign_id)?
+            .context("Phiên mất dữ liệu")?;
+        if let Some(row) = after.assignments.iter().find(|a| a.id == assignment.id) {
+            if row.state == ThreadMessageState::Failed
+                && row.error_code.as_deref().is_some_and(|e| {
+                    e.contains("comment_not_visible") || e.contains("reply_parent_not_found")
+                })
+                && finish < session.ends_at_ms
+                && db.defer_parent_recheck(&row.id, finish)?
+            {
+                attempted.remove(&row.id);
+                session.cursor = (index + 1) % request.targets.len();
+                session.next_at_ms = finish;
+                db.finish_conversation_turn(
+                    &campaign_id,
+                    &token,
+                    &assignment.id,
+                    session.cursor,
+                    finish,
+                    start,
+                    finish,
+                    "",
+                )?;
+                continue;
+            }
+        }
         let remaining = pending.len().saturating_sub(1) as i64;
         let tuple = control
             .tiktok_build(&assignment.actor_udid)

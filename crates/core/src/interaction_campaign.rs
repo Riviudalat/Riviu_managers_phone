@@ -2603,6 +2603,13 @@ async fn run_cohort(
                     }
                     Ok(armed.is_some())
                 });
+                if session.supports_accessibility_readback() {
+                    let account=request.scripted_conversation.as_ref().and_then(|s|s.role_bindings.iter().find(|r|r.udid==prepared.actor_udid).map(|r|r.username.clone())).unwrap_or(db.get_device_meta(&prepared.actor_udid)?.handle);
+                    let verification=crate::comment_verification::VerificationContext{target:target.clone(),device_id:prepared.actor_udid.clone(),account,text:prepared.text.clone(),mentions:prepared.mentions.clone(),parent:parent_identity.clone(),root:prepared.root_identity.clone()};
+                    db.prepare_comment_verification(id,&verification)?;
+                    let draft_db=db.clone();let draft_id=id.clone();
+                    effect_gate.record_draft_with(move |text|{let mut context=verification.clone();context.text=text.into();draft_db.prepare_comment_verification(&draft_id,&context)});
+                }
                 let send_result = if let Some(parent) = parent_identity.as_ref() {
                     driver
                         .send_reply(session.as_ref(), parent, prepared, &stop, &mut effect_gate)
@@ -2688,7 +2695,7 @@ async fn run_cohort(
                     comment_claim_revision,
                     comment_armed,
                     ActionSettlement {
-                        state: crate::InteractionActionState::Confirmed,
+                        state: if session.supports_accessibility_readback() {crate::InteractionActionState::Uncertain} else {crate::InteractionActionState::Confirmed},
                         evidence: serde_json::json!({
                             "verdict":"sent",
                             "arrival": proof.as_str(),
@@ -2700,6 +2707,7 @@ async fn run_cohort(
                 action_results.push(comment_result);
                 if let Some(parent) = parent_identity.as_ref() {
                     Ok::<Option<serde_json::Value>, anyhow::Error>(Some(serde_json::json!({
+                        "commentVerificationPending":session.supports_accessibility_readback(),
                         "send": sent.evidence,
                         "parent": parent,
                         "postedIdentity": sent.identity,
@@ -2719,6 +2727,7 @@ async fn run_cohort(
                     })))
                 } else {
                     Ok::<Option<serde_json::Value>, anyhow::Error>(Some(serde_json::json!({
+                        "commentVerificationPending":session.supports_accessibility_readback(),
                         "send": sent.evidence,
                         "postedIdentity": sent.identity,
                         "reader": driver.kind(),
@@ -2791,12 +2800,26 @@ async fn run_cohort(
                     let settled = db.settle_owned_interaction_assignment(
                         id,
                         *ownership_revision,
-                        if skipped_parent_at.is_some() {
+                        if evidence_json
+                            .get("commentVerificationPending")
+                            .and_then(|v| v.as_bool())
+                            .unwrap_or(false)
+                        {
+                            ThreadMessageState::Uncertain
+                        } else if skipped_parent_at.is_some() {
                             ThreadMessageState::SkippedParent
                         } else {
                             ThreadMessageState::Succeeded
                         },
-                        terminal_note.as_deref(),
+                        if evidence_json
+                            .get("commentVerificationPending")
+                            .and_then(|v| v.as_bool())
+                            .unwrap_or(false)
+                        {
+                            Some("comment_verification_pending")
+                        } else {
+                            terminal_note.as_deref()
+                        },
                         Some(&evidence_text),
                     )?;
                     if !settled {
@@ -3903,6 +3926,7 @@ mod tests {
 
         fn assignment(id: &str, state: ThreadMessageState) -> InteractionAssignmentRecord {
             InteractionAssignmentRecord {
+                comment_verification: None,
                 id: id.to_string(),
                 target_key: "content:1".to_string(),
                 ordinal: 0,
@@ -4502,6 +4526,7 @@ mod tests {
 
     fn assignment(id: &str, ordinal: u8, state: ThreadMessageState) -> InteractionAssignmentRecord {
         InteractionAssignmentRecord {
+            comment_verification: None,
             id: id.into(),
             target_key: "content:1".into(),
             ordinal,

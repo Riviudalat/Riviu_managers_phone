@@ -12,6 +12,7 @@ import { timeAgoVi } from "../../timeAgo";
 import type { InteractionArtifactRecord } from "../../api";
 import { PublicCleanupControl } from "./PublicCleanupControl";
 import { InteractionReadbackControl } from "./InteractionReadbackControl";
+import { CommentVerificationControl } from "./CommentVerificationControl";
 import type {
   DeviceInfo,
   InteractionActionCounters,
@@ -55,6 +56,7 @@ function isBlockedAction(assignment: InteractionAssignmentRecord, action: Public
 }
 
 function assignmentReason(assignment: InteractionAssignmentRecord): string | null {
+  if(assignment.commentVerification)return null;
   const original = assignment.errorCode;
   if (!original || !["Like không an toàn để tiếp tục assignment", "Save không an toàn để tiếp tục assignment"].includes(original.trim())) {
     return original;
@@ -67,6 +69,10 @@ function assignmentReason(assignment: InteractionAssignmentRecord): string | nul
 }
 
 function actionView(action: PublicActionResult, assignment: InteractionAssignmentRecord): { label: string; tone: "ok" | "warn" | "danger" | "info" } {
+  if(action.kind==="comment"&&assignment.commentVerification){
+    if(assignment.commentVerification.state==="pending")return {label:"Đang xác minh nội dung",tone:"warn"};
+    if(assignment.commentVerification.state==="needsReview")return {label:"Cần kiểm tra nội dung",tone:"warn"};
+  }
   if (isBlockedAction(assignment, action)) return { label: "Chưa thực hiện: lượt đã dừng", tone: "danger" };
   if (action.state !== "noOp") return { label: ACTION_STATE_VI[action.state] ?? "Chưa nhận diện trạng thái", tone: actionTone(action.state) };
   let verdict: unknown;
@@ -461,11 +467,11 @@ export function InteractionCampaignDetailView({
                   )}
                   {assignment.parentWasFolded && (
                     <small className="interaction-error">
-                      Bình luận cha bị TikTok gấp; phản hồi này đã gửi nhưng người khác không nhìn
-                      thấy.
+                      Bình luận cha nằm trong khu vực bị ẩn. Khả năng hiển thị có thể khác giữa các tài khoản.
                     </small>
                   )}
-                  {assignment.state === "uncertain" && <InteractionReadbackControl campaignId={summary.id} assignmentId={assignment.id} disabled={busy || summary.state === "running"} />}
+                  {assignment.state === "uncertain" && (!assignment.commentVerification||assignment.actions?.some(a=>a.kind==="like"||a.kind==="save")) && <InteractionReadbackControl campaignId={summary.id} assignmentId={assignment.id} disabled={busy || summary.state === "running"} />}
+                  {assignment.commentVerification&&<CommentVerificationControl campaignId={summary.id} assignmentId={assignment.id} value={assignment.commentVerification} disabled={busy}/>}
                 </span>
                 {shotRecord && (
                   <button
@@ -489,8 +495,8 @@ export function InteractionCampaignDetailView({
                     Thử lại
                   </button>
                 )}
-                <span className={`chip ${stateTone(assignment.state)}`}>
-                  {assignmentStateVi(assignment.state)}
+                <span className={`chip ${assignment.commentVerification?.state==="pending"||assignment.commentVerification?.state==="needsReview"?"warn":stateTone(assignment.state)}`}>
+                  {assignment.commentVerification?.state==="pending"?"Đang xác minh":assignment.commentVerification?.state==="needsReview"?"Cần kiểm tra":assignment.commentVerification?.state==="verified"?"Đã xác minh":assignmentStateVi(assignment.state)}
                 </span>
               </div>
             );

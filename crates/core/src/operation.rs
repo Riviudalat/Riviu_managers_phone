@@ -1015,6 +1015,7 @@ mod tests {
             action_counters: InteractionActionCounters::default(),
         };
         let assignment = |id: &str, state| crate::InteractionAssignmentRecord {
+            comment_verification: None,
             id: id.into(),
             target_key: "target".into(),
             ordinal: 0,

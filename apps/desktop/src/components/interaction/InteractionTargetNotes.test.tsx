@@ -233,7 +233,7 @@ describe("assignment evidence", () => {
 
     expect(
       screen.getByText(
-        "Bình luận cha bị TikTok gấp; phản hồi này đã gửi nhưng người khác không nhìn thấy.",
+        "Bình luận cha nằm trong khu vực bị ẩn. Khả năng hiển thị có thể khác giữa các tài khoản.",
       ),
     ).toBeInTheDocument();
   });

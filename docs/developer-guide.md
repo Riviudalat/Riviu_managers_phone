@@ -363,3 +363,33 @@ begin_interaction_comment_action_effect. Sau restart owner bị thu hồi, effec
 vẫn uncertain; resume không reset endsAt. P90 được tính từ thời gian turn thực thi,
 không từ updated_at chứa thời gian đợi. Reply strict đọc parent bằng một snapshot,
 mở replies của root và dùng picker mention cho cả root/reply; literal không qua Send.
+
+Đọc lại composer Android dùng một hierarchy snapshot và chỉ chọn EditText đang có
+focus, enabled, hiển thị và không phải hint. Hai ô trùng resource-id (thanh thu gọn
+và ô soạn thật) không được chọn theo thứ tự. Sau chọn tag, chỉ đọc lại tối đa 4 giây,
+cách nhau 400 ms; lỗi transport giữ nguyên nguyên nhân, hủy/hết giờ ngắt chờ.
+Tag phải khớp nguyên username và nội dung gốc phải còn trước khi đi qua Send gate.
+Mở nhánh reply xác minh nội dung/tác giả gốc, giới hạn nút mở trước nội dung bình luận
+kế tiếp và tìm vùng cha clickable của nhãn. Nhãn `View N replies` có thể không
+clickable; nhiều bình luận cùng tác giả không thay thế bằng chứng nội dung gốc.
+
+## Xác minh bình luận Android
+
+Migration37 thêm `interaction_comment_verification` và lịch quan sát lại parent.
+Trước khi nâng từ schema36, DB được sao lưu bằng SQLite `VACUUM INTO` sang file
+`.pre-comment-verification-v36.db`. Công việc xác minh được chuẩn bị trước Send;
+thời điểm/hạn đọc lại được kích hoạt trong transaction ghi intent. Android sau Send
+giữ `uncertain` đến khi worker quan sát bài, nội dung, tác giả và nhánh; các lượt
+`uncertain` không trở lại đường gửi. Hàng đợi giữ attempts, lease/revision qua restart.
+
+Worker tối đa hai thiết bị; ba lần đọc tại các mốc 5/20/60 giây, mỗi lần tối đa
+45 giây quan sát và hết ngân sách sau 120 giây từ Send. Thời gian bootstrap/cleanup
+dùng giới hạn của control plane. Chờ không giữ thiết bị. Shutdown dừng và thu hồi
+worker trước khi dọn thiết bị. Hết giờ chiến dịch chỉ cho hoàn tất đọc lại, không gửi.
+`interaction_verify_comment` là lệnh xếp quan sát lại có giới hạn; gọi lặp khi pending
+không đặt lại ngân sách. Lệnh Tim/Lưu `interaction_readback` giữ hợp đồng riêng.
+
+Tìm parent và nội dung dùng snapshot chung, mở vùng `View folded comments` hoặc
+`Community-flagged comments` qua hitbox cha đã đo. Không thấy parent được quan sát
+lại tối đa hai lần trong giờ chạy; link khác tiếp tục. Lịch sử thiếu identity chỉ
+hiện cần kiểm tra; người vận hành chủ động yêu cầu đọc lại, không tự phát lại lịch sử.

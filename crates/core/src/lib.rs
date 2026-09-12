@@ -4,6 +4,7 @@ pub mod action_failure;
 pub mod app_automation;
 pub mod automation;
 pub mod automation_schedule_runtime;
+pub mod comment_verification;
 pub mod conversation;
 pub mod db;
 pub mod device_capabilities;
