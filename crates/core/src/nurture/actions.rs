@@ -2724,7 +2724,7 @@ mod tests {
         let _ = std::fs::remove_file(db_path);
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn a_playing_video_on_the_same_card_is_not_an_advance() {
         // The regression this whole change exists for. All three frames are the
         // same sponsored card; the old check compared whole-frame digests, and
@@ -2774,7 +2774,7 @@ mod tests {
         let _ = std::fs::remove_file(db_path);
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn the_rail_leaving_and_a_card_settling_is_an_advance() {
         // The structural signal: rail → no rail (mid-swipe) → rail on a settled
         // feed card. A playing video cannot produce the middle frame.
@@ -3580,6 +3580,8 @@ mod tests {
         let session = RecordingSession::new(frames.clone(), stop.clone(), true, false);
         let (engine, db_path) = test_engine(frames.clone());
         let prepared = PreparedThreadMessage {
+            strict_mentions: false,
+            root_identity: None,
             ordinal: 1,
             actor_udid: UDID.to_string(),
             text: COMMENT.to_string(),
@@ -3641,6 +3643,8 @@ mod tests {
             RecordingSession::new(frames.clone(), stop.clone(), true, false).failing_type();
         let (engine, db_path) = test_engine(frames);
         let prepared = PreparedThreadMessage {
+            strict_mentions: false,
+            root_identity: None,
             ordinal: 1,
             actor_udid: UDID.to_string(),
             text: COMMENT.to_string(),
@@ -3673,6 +3677,8 @@ mod tests {
             RecordingSession::new(frames.clone(), stop.clone(), true, false).failing_send();
         let (engine, db_path) = test_engine(frames);
         let prepared = PreparedThreadMessage {
+            strict_mentions: false,
+            root_identity: None,
             ordinal: 1,
             actor_udid: UDID.to_string(),
             text: COMMENT.to_string(),
@@ -3704,6 +3710,8 @@ mod tests {
         let session = RecordingSession::new(frames.clone(), stop.clone(), true, false);
         let (engine, db_path) = test_engine(frames.clone());
         let prepared = PreparedThreadMessage {
+            strict_mentions: false,
+            root_identity: None,
             ordinal: 1,
             actor_udid: UDID.to_string(),
             text: COMMENT.to_string(),
@@ -3745,6 +3753,8 @@ mod tests {
             .with_unverified_dismiss();
         let (engine, db_path) = test_engine(frames);
         let prepared = PreparedThreadMessage {
+            strict_mentions: false,
+            root_identity: None,
             ordinal: 1,
             actor_udid: UDID.to_string(),
             text: COMMENT.to_string(),
@@ -3776,6 +3786,8 @@ mod tests {
 
     fn prepared_thread_reply() -> PreparedThreadMessage {
         PreparedThreadMessage {
+            strict_mentions: false,
+            root_identity: None,
             ordinal: 2,
             actor_udid: UDID.to_string(),
             text: COMMENT.to_string(),
@@ -3787,6 +3799,8 @@ mod tests {
 
     fn prepared_thread_root() -> PreparedThreadMessage {
         PreparedThreadMessage {
+            strict_mentions: false,
+            root_identity: None,
             ordinal: 1,
             actor_udid: UDID.to_string(),
             text: COMMENT.to_string(),

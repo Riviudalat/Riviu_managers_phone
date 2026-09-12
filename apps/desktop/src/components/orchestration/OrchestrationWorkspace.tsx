@@ -28,6 +28,7 @@ import {
   automationList,
   orchestrationArchive,
   orchestrationCancelRun,
+  orchestrationCreateThreeFeatureTemplate,
   orchestrationGet,
   orchestrationGetRun,
   orchestrationList,
@@ -246,6 +247,31 @@ export function OrchestrationWorkspace({
     setNotice(null);
     setBusy(false);
   }, []);
+
+  const createThreeFeatureTemplate = useCallback(async () => {
+    if (!await requestWorkspaceLeave(["orchestration"])) return;
+    const ticket = ++documentRequest.current;
+    const epoch = documentEpoch.current;
+    setBusy(true);
+    setError(null);
+    setNotice(null);
+    try {
+      const record = await orchestrationCreateThreeFeatureTemplate();
+      if (ticket !== documentRequest.current || epoch !== documentEpoch.current) return;
+      selectedDocumentId.current = record.compiled.document.id;
+      savedDocument.current = record.compiled.document;
+      documentRef.current = record.compiled.document;
+      setDocument(record.compiled.document);
+      setSavedRevision(record.compiled.document.revision);
+      setDirty(false);
+      setNotice("Đã tạo mẫu Nuôi → Tương tác → Đăng bài (3 hồ sơ TikTok + 1 điều phối).");
+      await load();
+    } catch (cause) {
+      if (ticket === documentRequest.current) setError(describeError(cause));
+    } finally {
+      if (ticket === documentRequest.current) setBusy(false);
+    }
+  }, [load]);
 
   const open = useCallback(async (summary: OrchestrationSummary) => {
     if (!await requestWorkspaceLeave(["orchestration"])) return;
@@ -641,6 +667,15 @@ export function OrchestrationWorkspace({
             <Plus size={17} />
           </button>
         </div>
+        <div className="orchestration-library-actions">
+          <button
+            type="button"
+            disabled={busy || loading}
+            onClick={() => void createThreeFeatureTemplate()}
+          >
+            Tạo mẫu 3 chức năng
+          </button>
+        </div>
         {summaries.length === 0 ? (
           <EmptyState
             compact
@@ -670,7 +705,14 @@ export function OrchestrationWorkspace({
           <EmptyState
             icon={<GitBranch size={20} />}
             title="Chọn hoặc tạo một điều phối"
-            action={<button type="button" onClick={() => void create()}>Tạo điều phối</button>}
+            action={(
+              <>
+                <button type="button" onClick={() => void create()}>Tạo điều phối</button>
+                <button type="button" onClick={() => void createThreeFeatureTemplate()} disabled={busy}>
+                  Tạo mẫu 3 chức năng
+                </button>
+              </>
+            )}
           />
         ) : (
           <>

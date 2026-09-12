@@ -1,0 +1,454 @@
+{
+  "schemaVersion": 1,
+  "engineApiVersion": 1,
+  "id": "tiktok-semantic-v1",
+  "revision": 1,
+  "packages": [
+    "com.zhiliaoapp.musically",
+    "com.ss.android.ugc.trill"
+  ],
+  "targets": [
+    {
+      "id": "profile",
+      "screen": "feed",
+      "labels": [
+        "Profile",
+        "Hồ sơ"
+      ],
+      "resourceSuffixes": [],
+      "anchors": [],
+      "excludedLabels": [
+        "Log in",
+        "Đăng nhập"
+      ],
+      "effectful": false
+    },
+    {
+      "id": "gallery",
+      "screen": "composer",
+      "labels": [
+        "Upload",
+        "Tải lên"
+      ],
+      "resourceSuffixes": [
+        ":id/upload_hot_area"
+      ],
+      "anchors": [],
+      "excludedLabels": [
+        "Post",
+        "Đăng"
+      ],
+      "effectful": false
+    },
+    {
+      "id": "share",
+      "screen": "feed",
+      "labels": [
+        "Share",
+        "Chia sẻ"
+      ],
+      "resourceSuffixes": [],
+      "anchors": [],
+      "excludedLabels": [
+        "Post",
+        "Đăng"
+      ],
+      "effectful": false
+    },
+    {
+      "id": "copyLink",
+      "screen": "share",
+      "labels": [
+        "Copy link",
+        "Sao chép liên kết"
+      ],
+      "resourceSuffixes": [],
+      "anchors": [],
+      "excludedLabels": [],
+      "effectful": false
+    },
+    {
+      "id": "comments",
+      "screen": "feed",
+      "labels": [
+        "Comments",
+        "Bình luận"
+      ],
+      "resourceSuffixes": [],
+      "anchors": [],
+      "excludedLabels": [
+        "Post",
+        "Đăng"
+      ],
+      "effectful": false
+    },
+    {
+      "id": "pickerNext",
+      "screen": "picker",
+      "labels": [
+        "Next",
+        "Tiếp"
+      ],
+      "resourceSuffixes": [],
+      "anchors": [],
+      "excludedLabels": [
+        "Log in",
+        "Đăng nhập"
+      ],
+      "effectful": false
+    },
+    {
+      "id": "post",
+      "screen": "caption",
+      "labels": [
+        "Post",
+        "Đăng"
+      ],
+      "resourceSuffixes": [],
+      "anchors": [],
+      "excludedLabels": [
+        "Log in",
+        "Đăng nhập"
+      ],
+      "effectful": true
+    }
+  ],
+  "fixtures": [
+    {
+      "target": "profile",
+      "package": "com.zhiliaoapp.musically",
+      "width": 400,
+      "height": 800,
+      "xml": "<hierarchy><node package=\"com.zhiliaoapp.musically\" text=\"Profile\" bounds=\"[10,20][210,70]\" displayed=\"true\" enabled=\"true\" clickable=\"true\"/></hierarchy>",
+      "expectedCount": 1
+    },
+    {
+      "target": "profile",
+      "package": "com.zhiliaoapp.musically",
+      "width": 400,
+      "height": 800,
+      "xml": "<hierarchy><node package=\"com.zhiliaoapp.musically\" text=\"Profile\" bounds=\"[10,20][210,70]\" displayed=\"true\" enabled=\"false\" clickable=\"true\"/></hierarchy>",
+      "expectedCount": 0
+    },
+    {
+      "target": "profile",
+      "package": "com.zhiliaoapp.musically",
+      "width": 400,
+      "height": 800,
+      "xml": "<hierarchy><node package=\"com.zhiliaoapp.musically\" text=\"Profile\" bounds=\"[10,20][210,70]\" displayed=\"true\" enabled=\"true\" clickable=\"true\"/><node package=\"com.zhiliaoapp.musically\" text=\"Profile\" bounds=\"[10,20][210,70]\" displayed=\"true\" enabled=\"true\" clickable=\"true\"/></hierarchy>",
+      "expectedCount": 2
+    },
+    {
+      "target": "profile",
+      "package": "com.ss.android.ugc.trill",
+      "width": 400,
+      "height": 800,
+      "xml": "<hierarchy><node package=\"com.ss.android.ugc.trill\" text=\"Profile\" bounds=\"[10,20][210,70]\" displayed=\"true\" enabled=\"true\" clickable=\"true\"/></hierarchy>",
+      "expectedCount": 1
+    },
+    {
+      "target": "profile",
+      "package": "com.ss.android.ugc.trill",
+      "width": 400,
+      "height": 800,
+      "xml": "<hierarchy><node package=\"com.ss.android.ugc.trill\" text=\"Profile\" bounds=\"[10,20][210,70]\" displayed=\"true\" enabled=\"false\" clickable=\"true\"/></hierarchy>",
+      "expectedCount": 0
+    },
+    {
+      "target": "profile",
+      "package": "com.ss.android.ugc.trill",
+      "width": 400,
+      "height": 800,
+      "xml": "<hierarchy><node package=\"com.ss.android.ugc.trill\" text=\"Profile\" bounds=\"[10,20][210,70]\" displayed=\"true\" enabled=\"true\" clickable=\"true\"/><node package=\"com.ss.android.ugc.trill\" text=\"Profile\" bounds=\"[10,20][210,70]\" displayed=\"true\" enabled=\"true\" clickable=\"true\"/></hierarchy>",
+      "expectedCount": 2
+    },
+    {
+      "target": "gallery",
+      "package": "com.zhiliaoapp.musically",
+      "width": 400,
+      "height": 800,
+      "xml": "<hierarchy><node package=\"com.zhiliaoapp.musically\" text=\"Upload\" bounds=\"[10,20][210,70]\" displayed=\"true\" enabled=\"true\" clickable=\"true\"/></hierarchy>",
+      "expectedCount": 1
+    },
+    {
+      "target": "gallery",
+      "package": "com.zhiliaoapp.musically",
+      "width": 400,
+      "height": 800,
+      "xml": "<hierarchy><node package=\"com.zhiliaoapp.musically\" text=\"Upload\" bounds=\"[10,20][210,70]\" displayed=\"true\" enabled=\"false\" clickable=\"true\"/></hierarchy>",
+      "expectedCount": 0
+    },
+    {
+      "target": "gallery",
+      "package": "com.zhiliaoapp.musically",
+      "width": 400,
+      "height": 800,
+      "xml": "<hierarchy><node package=\"com.zhiliaoapp.musically\" text=\"Upload\" bounds=\"[10,20][210,70]\" displayed=\"true\" enabled=\"true\" clickable=\"true\"/><node package=\"com.zhiliaoapp.musically\" text=\"Upload\" bounds=\"[10,20][210,70]\" displayed=\"true\" enabled=\"true\" clickable=\"true\"/></hierarchy>",
+      "expectedCount": 2
+    },
+    {
+      "target": "gallery",
+      "package": "com.ss.android.ugc.trill",
+      "width": 400,
+      "height": 800,
+      "xml": "<hierarchy><node package=\"com.ss.android.ugc.trill\" text=\"Upload\" bounds=\"[10,20][210,70]\" displayed=\"true\" enabled=\"true\" clickable=\"true\"/></hierarchy>",
+      "expectedCount": 1
+    },
+    {
+      "target": "gallery",
+      "package": "com.ss.android.ugc.trill",
+      "width": 400,
+      "height": 800,
+      "xml": "<hierarchy><node package=\"com.ss.android.ugc.trill\" text=\"Upload\" bounds=\"[10,20][210,70]\" displayed=\"true\" enabled=\"false\" clickable=\"true\"/></hierarchy>",
+      "expectedCount": 0
+    },
+    {
+      "target": "gallery",
+      "package": "com.ss.android.ugc.trill",
+      "width": 400,
+      "height": 800,
+      "xml": "<hierarchy><node package=\"com.ss.android.ugc.trill\" text=\"Upload\" bounds=\"[10,20][210,70]\" displayed=\"true\" enabled=\"true\" clickable=\"true\"/><node package=\"com.ss.android.ugc.trill\" text=\"Upload\" bounds=\"[10,20][210,70]\" displayed=\"true\" enabled=\"true\" clickable=\"true\"/></hierarchy>",
+      "expectedCount": 2
+    },
+    {
+      "target": "share",
+      "package": "com.zhiliaoapp.musically",
+      "width": 400,
+      "height": 800,
+      "xml": "<hierarchy><node package=\"com.zhiliaoapp.musically\" text=\"Share\" bounds=\"[10,20][210,70]\" displayed=\"true\" enabled=\"true\" clickable=\"true\"/></hierarchy>",
+      "expectedCount": 1
+    },
+    {
+      "target": "share",
+      "package": "com.zhiliaoapp.musically",
+      "width": 400,
+      "height": 800,
+      "xml": "<hierarchy><node package=\"com.zhiliaoapp.musically\" text=\"Share\" bounds=\"[10,20][210,70]\" displayed=\"true\" enabled=\"false\" clickable=\"true\"/></hierarchy>",
+      "expectedCount": 0
+    },
+    {
+      "target": "share",
+      "package": "com.zhiliaoapp.musically",
+      "width": 400,
+      "height": 800,
+      "xml": "<hierarchy><node package=\"com.zhiliaoapp.musically\" text=\"Share\" bounds=\"[10,20][210,70]\" displayed=\"true\" enabled=\"true\" clickable=\"true\"/><node package=\"com.zhiliaoapp.musically\" text=\"Share\" bounds=\"[10,20][210,70]\" displayed=\"true\" enabled=\"true\" clickable=\"true\"/></hierarchy>",
+      "expectedCount": 2
+    },
+    {
+      "target": "share",
+      "package": "com.ss.android.ugc.trill",
+      "width": 400,
+      "height": 800,
+      "xml": "<hierarchy><node package=\"com.ss.android.ugc.trill\" text=\"Share\" bounds=\"[10,20][210,70]\" displayed=\"true\" enabled=\"true\" clickable=\"true\"/></hierarchy>",
+      "expectedCount": 1
+    },
+    {
+      "target": "share",
+      "package": "com.ss.android.ugc.trill",
+      "width": 400,
+      "height": 800,
+      "xml": "<hierarchy><node package=\"com.ss.android.ugc.trill\" text=\"Share\" bounds=\"[10,20][210,70]\" displayed=\"true\" enabled=\"false\" clickable=\"true\"/></hierarchy>",
+      "expectedCount": 0
+    },
+    {
+      "target": "share",
+      "package": "com.ss.android.ugc.trill",
+      "width": 400,
+      "height": 800,
+      "xml": "<hierarchy><node package=\"com.ss.android.ugc.trill\" text=\"Share\" bounds=\"[10,20][210,70]\" displayed=\"true\" enabled=\"true\" clickable=\"true\"/><node package=\"com.ss.android.ugc.trill\" text=\"Share\" bounds=\"[10,20][210,70]\" displayed=\"true\" enabled=\"true\" clickable=\"true\"/></hierarchy>",
+      "expectedCount": 2
+    },
+    {
+      "target": "copyLink",
+      "package": "com.zhiliaoapp.musically",
+      "width": 400,
+      "height": 800,
+      "xml": "<hierarchy><node package=\"com.zhiliaoapp.musically\" text=\"Copy link\" bounds=\"[10,20][210,70]\" displayed=\"true\" enabled=\"true\" clickable=\"true\"/></hierarchy>",
+      "expectedCount": 1
+    },
+    {
+      "target": "copyLink",
+      "package": "com.zhiliaoapp.musically",
+      "width": 400,
+      "height": 800,
+      "xml": "<hierarchy><node package=\"com.zhiliaoapp.musically\" text=\"Copy link\" bounds=\"[10,20][210,70]\" displayed=\"true\" enabled=\"false\" clickable=\"true\"/></hierarchy>",
+      "expectedCount": 0
+    },
+    {
+      "target": "copyLink",
+      "package": "com.zhiliaoapp.musically",
+      "width": 400,
+      "height": 800,
+      "xml": "<hierarchy><node package=\"com.zhiliaoapp.musically\" text=\"Copy link\" bounds=\"[10,20][210,70]\" displayed=\"true\" enabled=\"true\" clickable=\"true\"/><node package=\"com.zhiliaoapp.musically\" text=\"Copy link\" bounds=\"[10,20][210,70]\" displayed=\"true\" enabled=\"true\" clickable=\"true\"/></hierarchy>",
+      "expectedCount": 2
+    },
+    {
+      "target": "copyLink",
+      "package": "com.ss.android.ugc.trill",
+      "width": 400,
+      "height": 800,
+      "xml": "<hierarchy><node package=\"com.ss.android.ugc.trill\" text=\"Copy link\" bounds=\"[10,20][210,70]\" displayed=\"true\" enabled=\"true\" clickable=\"true\"/></hierarchy>",
+      "expectedCount": 1
+    },
+    {
+      "target": "copyLink",
+      "package": "com.ss.android.ugc.trill",
+      "width": 400,
+      "height": 800,
+      "xml": "<hierarchy><node package=\"com.ss.android.ugc.trill\" text=\"Copy link\" bounds=\"[10,20][210,70]\" displayed=\"true\" enabled=\"false\" clickable=\"true\"/></hierarchy>",
+      "expectedCount": 0
+    },
+    {
+      "target": "copyLink",
+      "package": "com.ss.android.ugc.trill",
+      "width": 400,
+      "height": 800,
+      "xml": "<hierarchy><node package=\"com.ss.android.ugc.trill\" text=\"Copy link\" bounds=\"[10,20][210,70]\" displayed=\"true\" enabled=\"true\" clickable=\"true\"/><node package=\"com.ss.android.ugc.trill\" text=\"Copy link\" bounds=\"[10,20][210,70]\" displayed=\"true\" enabled=\"true\" clickable=\"true\"/></hierarchy>",
+      "expectedCount": 2
+    },
+    {
+      "target": "comments",
+      "package": "com.zhiliaoapp.musically",
+      "width": 400,
+      "height": 800,
+      "xml": "<hierarchy><node package=\"com.zhiliaoapp.musically\" text=\"Comments\" bounds=\"[10,20][210,70]\" displayed=\"true\" enabled=\"true\" clickable=\"true\"/></hierarchy>",
+      "expectedCount": 1
+    },
+    {
+      "target": "comments",
+      "package": "com.zhiliaoapp.musically",
+      "width": 400,
+      "height": 800,
+      "xml": "<hierarchy><node package=\"com.zhiliaoapp.musically\" text=\"Comments\" bounds=\"[10,20][210,70]\" displayed=\"true\" enabled=\"false\" clickable=\"true\"/></hierarchy>",
+      "expectedCount": 0
+    },
+    {
+      "target": "comments",
+      "package": "com.zhiliaoapp.musically",
+      "width": 400,
+      "height": 800,
+      "xml": "<hierarchy><node package=\"com.zhiliaoapp.musically\" text=\"Comments\" bounds=\"[10,20][210,70]\" displayed=\"true\" enabled=\"true\" clickable=\"true\"/><node package=\"com.zhiliaoapp.musically\" text=\"Comments\" bounds=\"[10,20][210,70]\" displayed=\"true\" enabled=\"true\" clickable=\"true\"/></hierarchy>",
+      "expectedCount": 2
+    },
+    {
+      "target": "comments",
+      "package": "com.ss.android.ugc.trill",
+      "width": 400,
+      "height": 800,
+      "xml": "<hierarchy><node package=\"com.ss.android.ugc.trill\" text=\"Comments\" bounds=\"[10,20][210,70]\" displayed=\"true\" enabled=\"true\" clickable=\"true\"/></hierarchy>",
+      "expectedCount": 1
+    },
+    {
+      "target": "comments",
+      "package": "com.ss.android.ugc.trill",
+      "width": 400,
+      "height": 800,
+      "xml": "<hierarchy><node package=\"com.ss.android.ugc.trill\" text=\"Comments\" bounds=\"[10,20][210,70]\" displayed=\"true\" enabled=\"false\" clickable=\"true\"/></hierarchy>",
+      "expectedCount": 0
+    },
+    {
+      "target": "comments",
+      "package": "com.ss.android.ugc.trill",
+      "width": 400,
+      "height": 800,
+      "xml": "<hierarchy><node package=\"com.ss.android.ugc.trill\" text=\"Comments\" bounds=\"[10,20][210,70]\" displayed=\"true\" enabled=\"true\" clickable=\"true\"/><node package=\"com.ss.android.ugc.trill\" text=\"Comments\" bounds=\"[10,20][210,70]\" displayed=\"true\" enabled=\"true\" clickable=\"true\"/></hierarchy>",
+      "expectedCount": 2
+    },
+    {
+      "target": "pickerNext",
+      "package": "com.zhiliaoapp.musically",
+      "width": 400,
+      "height": 800,
+      "xml": "<hierarchy><node package=\"com.zhiliaoapp.musically\" text=\"Next\" bounds=\"[10,20][210,70]\" displayed=\"true\" enabled=\"true\" clickable=\"true\"/></hierarchy>",
+      "expectedCount": 1
+    },
+    {
+      "target": "pickerNext",
+      "package": "com.zhiliaoapp.musically",
+      "width": 400,
+      "height": 800,
+      "xml": "<hierarchy><node package=\"com.zhiliaoapp.musically\" text=\"Next\" bounds=\"[10,20][210,70]\" displayed=\"true\" enabled=\"false\" clickable=\"true\"/></hierarchy>",
+      "expectedCount": 0
+    },
+    {
+      "target": "pickerNext",
+      "package": "com.zhiliaoapp.musically",
+      "width": 400,
+      "height": 800,
+      "xml": "<hierarchy><node package=\"com.zhiliaoapp.musically\" text=\"Next\" bounds=\"[10,20][210,70]\" displayed=\"true\" enabled=\"true\" clickable=\"true\"/><node package=\"com.zhiliaoapp.musically\" text=\"Next\" bounds=\"[10,20][210,70]\" displayed=\"true\" enabled=\"true\" clickable=\"true\"/></hierarchy>",
+      "expectedCount": 2
+    },
+    {
+      "target": "pickerNext",
+      "package": "com.ss.android.ugc.trill",
+      "width": 400,
+      "height": 800,
+      "xml": "<hierarchy><node package=\"com.ss.android.ugc.trill\" text=\"Next\" bounds=\"[10,20][210,70]\" displayed=\"true\" enabled=\"true\" clickable=\"true\"/></hierarchy>",
+      "expectedCount": 1
+    },
+    {
+      "target": "pickerNext",
+      "package": "com.ss.android.ugc.trill",
+      "width": 400,
+      "height": 800,
+      "xml": "<hierarchy><node package=\"com.ss.android.ugc.trill\" text=\"Next\" bounds=\"[10,20][210,70]\" displayed=\"true\" enabled=\"false\" clickable=\"true\"/></hierarchy>",
+      "expectedCount": 0
+    },
+    {
+      "target": "pickerNext",
+      "package": "com.ss.android.ugc.trill",
+      "width": 400,
+      "height": 800,
+      "xml": "<hierarchy><node package=\"com.ss.android.ugc.trill\" text=\"Next\" bounds=\"[10,20][210,70]\" displayed=\"true\" enabled=\"true\" clickable=\"true\"/><node package=\"com.ss.android.ugc.trill\" text=\"Next\" bounds=\"[10,20][210,70]\" displayed=\"true\" enabled=\"true\" clickable=\"true\"/></hierarchy>",
+      "expectedCount": 2
+    },
+    {
+      "target": "post",
+      "package": "com.zhiliaoapp.musically",
+      "width": 400,
+      "height": 800,
+      "xml": "<hierarchy><node package=\"com.zhiliaoapp.musically\" text=\"Post\" bounds=\"[10,20][210,70]\" displayed=\"true\" enabled=\"true\" clickable=\"true\"/></hierarchy>",
+      "expectedCount": 1
+    },
+    {
+      "target": "post",
+      "package": "com.zhiliaoapp.musically",
+      "width": 400,
+      "height": 800,
+      "xml": "<hierarchy><node package=\"com.zhiliaoapp.musically\" text=\"Post\" bounds=\"[10,20][210,70]\" displayed=\"true\" enabled=\"false\" clickable=\"true\"/></hierarchy>",
+      "expectedCount": 0
+    },
+    {
+      "target": "post",
+      "package": "com.zhiliaoapp.musically",
+      "width": 400,
+      "height": 800,
+      "xml": "<hierarchy><node package=\"com.zhiliaoapp.musically\" text=\"Post\" bounds=\"[10,20][210,70]\" displayed=\"true\" enabled=\"true\" clickable=\"true\"/><node package=\"com.zhiliaoapp.musically\" text=\"Post\" bounds=\"[10,20][210,70]\" displayed=\"true\" enabled=\"true\" clickable=\"true\"/></hierarchy>",
+      "expectedCount": 2
+    },
+    {
+      "target": "post",
+      "package": "com.ss.android.ugc.trill",
+      "width": 400,
+      "height": 800,
+      "xml": "<hierarchy><node package=\"com.ss.android.ugc.trill\" text=\"Post\" bounds=\"[10,20][210,70]\" displayed=\"true\" enabled=\"true\" clickable=\"true\"/></hierarchy>",
+      "expectedCount": 1
+    },
+    {
+      "target": "post",
+      "package": "com.ss.android.ugc.trill",
+      "width": 400,
+      "height": 800,
+      "xml": "<hierarchy><node package=\"com.ss.android.ugc.trill\" text=\"Post\" bounds=\"[10,20][210,70]\" displayed=\"true\" enabled=\"false\" clickable=\"true\"/></hierarchy>",
+      "expectedCount": 0
+    },
+    {
+      "target": "post",
+      "package": "com.ss.android.ugc.trill",
+      "width": 400,
+      "height": 800,
+      "xml": "<hierarchy><node package=\"com.ss.android.ugc.trill\" text=\"Post\" bounds=\"[10,20][210,70]\" displayed=\"true\" enabled=\"true\" clickable=\"true\"/><node package=\"com.ss.android.ugc.trill\" text=\"Post\" bounds=\"[10,20][210,70]\" displayed=\"true\" enabled=\"true\" clickable=\"true\"/></hierarchy>",
+      "expectedCount": 2
+    }
+  ]
+}

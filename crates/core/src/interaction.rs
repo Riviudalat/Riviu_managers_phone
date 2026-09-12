@@ -237,6 +237,8 @@ impl Default for InteractionActionSet {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ThreadCampaignRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scripted_conversation: Option<crate::conversation::ScriptedConversation>,
     pub request_id: String,
     pub targets: Vec<ResolvedTikTokTarget>,
     pub actor_udids: Vec<String>,
@@ -306,6 +308,8 @@ pub struct ThreadCampaignRequest {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ThreadCampaignRequestWire {
+    #[serde(default)]
+    scripted_conversation: Option<crate::conversation::ScriptedConversation>,
     request_id: String,
     targets: Vec<ResolvedTikTokTarget>,
     actor_udids: Vec<String>,
@@ -342,6 +346,7 @@ impl<'de> Deserialize<'de> for ThreadCampaignRequest {
             save: false,
         });
         Ok(Self {
+            scripted_conversation: wire.scripted_conversation,
             request_id: wire.request_id,
             targets: wire.targets,
             actor_udids: wire.actor_udids,
@@ -361,6 +366,8 @@ impl<'de> Deserialize<'de> for ThreadCampaignRequest {
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum ThreadValidationError {
+    #[error("{0}")]
+    InvalidScript(String),
     #[error("request id is empty")]
     EmptyRequestId,
     #[error("at least one target is required")]
@@ -424,6 +431,16 @@ impl ThreadCampaignRequest {
         {
             return Err(ThreadValidationError::DuplicateTarget);
         }
+        if let Some(script) = &self.scripted_conversation {
+            if !self.actions.comment {
+                return Err(ThreadValidationError::InvalidScript(
+                    "Kịch bản cần bật Bình luận".into(),
+                ));
+            }
+            return script
+                .validate(&self.targets, &self.actor_udids)
+                .map_err(|e| ThreadValidationError::InvalidScript(e.to_string()));
+        }
         // Like/Save-only campaigns do not consume or validate comment configuration. This
         // keeps hidden stale UI fields from making an otherwise valid desired-state action fail.
         if !self.actions.comment {
@@ -484,7 +501,8 @@ impl ThreadCampaignRequest {
     /// asks for — and those two disagreeing is how a campaign gets validated as manual and
     /// then run as AI.
     pub fn is_manual(&self) -> bool {
-        self.actions.comment && !self.manual_comments.is_empty()
+        self.actions.comment
+            && (self.scripted_conversation.is_some() || !self.manual_comments.is_empty())
     }
 
     /// Which of the operator's comments this message uses.
@@ -495,6 +513,11 @@ impl ThreadCampaignRequest {
     ///
     /// Returns `None` in AI mode so a caller cannot silently get an empty string.
     pub fn manual_comment_for(&self, target_index: usize, ordinal: u8) -> Option<&str> {
+        if let Some(script) = &self.scripted_conversation {
+            return script
+                .step(&self.targets.get(target_index)?.target_key, ordinal)
+                .map(|step| step.text.as_str());
+        }
         if self.manual_comments.is_empty() {
             return None;
         }
@@ -823,6 +846,11 @@ pub fn partition_actors(actors: &[String], cohort_size: Option<u8>) -> Vec<Vec<S
 /// actor than link one.
 pub fn plan_threads(request: &ThreadCampaignRequest) -> Result<ThreadPlan, ThreadValidationError> {
     request.validate()?;
+    if let Some(script) = &request.scripted_conversation {
+        return script
+            .compile(request)
+            .map_err(|error| ThreadValidationError::InvalidScript(error.to_string()));
+    }
     if !request.actions.comment {
         let assignments = request
             .targets
@@ -889,6 +917,10 @@ pub fn plan_threads(request: &ThreadCampaignRequest) -> Result<ThreadPlan, Threa
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PreparedThreadMessage {
+    #[serde(default)]
+    pub strict_mentions: bool,
+    #[serde(default)]
+    pub root_identity: Option<CommentLocatorIdentity>,
     pub ordinal: u8,
     pub actor_udid: String,
     pub text: String,
@@ -946,6 +978,8 @@ impl PreparedThreadMessage {
         digest.update(text.as_bytes());
         let text_sha256 = format!("{:x}", digest.finalize());
         Self {
+            strict_mentions: false,
+            root_identity: None,
             ordinal: plan.ordinal,
             actor_udid: plan.actor_udid.clone(),
             text,
@@ -1565,6 +1599,10 @@ impl InteractionTargetNote {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct InteractionCampaignDetail {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scripted_conversation: Option<crate::conversation::ScriptedConversation>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conversation_session: Option<crate::db::ConversationSession>,
     pub summary: InteractionCampaignSummary,
     pub assignments: Vec<InteractionAssignmentRecord>,
     /// Fleet-wide verdict derived exclusively from the durable action rows.
@@ -1575,6 +1613,8 @@ pub struct InteractionCampaignDetail {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ThreadPreview {
+    #[serde(default)]
+    pub conversation_timeline: Vec<(String, u8, i64)>,
     pub lines: Vec<TikTokLinkLine>,
     pub plan: Option<ThreadPlan>,
     pub valid_target_count: u32,
@@ -1609,6 +1649,7 @@ mod tests {
         #[test]
         fn the_preview_wire_shape_is_what_the_frontend_types_say() {
             let preview = ThreadPreview {
+                conversation_timeline: Vec::new(),
                 lines: Vec::new(),
                 plan: Some(ThreadPlan {
                     request_id: "r".into(),
@@ -1652,6 +1693,7 @@ mod tests {
         #[test]
         fn a_brief_names_the_campaign_by_its_first_link() {
             let mut request = ThreadCampaignRequest {
+                scripted_conversation: None,
                 request_id: "r".into(),
                 targets: vec![super::target("7668947001618320660")],
                 actor_udids: vec!["one".into(), "two".into(), "three".into()],
@@ -1708,6 +1750,7 @@ mod tests {
 
         fn request(pool: Vec<&str>) -> ThreadCampaignRequest {
             ThreadCampaignRequest {
+                scripted_conversation: None,
                 request_id: "r".into(),
                 targets: vec![super::target("1"), super::target("2")],
                 actor_udids: vec!["one".into(), "two".into()],
@@ -1841,6 +1884,7 @@ mod tests {
         count: u8,
     ) -> ThreadCampaignRequest {
         ThreadCampaignRequest {
+            scripted_conversation: None,
             request_id: "req-1".into(),
             targets,
             actor_udids: actors.into_iter().map(str::to_string).collect(),

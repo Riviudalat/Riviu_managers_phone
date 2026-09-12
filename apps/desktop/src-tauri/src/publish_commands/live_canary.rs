@@ -152,9 +152,13 @@ async fn live_publish_canary() -> anyhow::Result<()> {
         let mut managed = copy_bundle_to_managed(bundle, &out.join("managed").join(&id))?;
         managed.id = format!("{id}:{}", bundle.id);
         let campaign_request = PublishCampaignRequest {
+                        sheet_delivery: None,
+            verification_contract_version: Some(1),
+            verification_builds: riviu_core::publish_submission::builds_from_preflight(&prepared.report),
             request_id: id, source_root: request.source_root, bundle_ids: vec![managed.id.clone()],
             udids: request.udids, run_at: None, visibility: PublishVisibility::Public,
             cleanup_policy: PublishCleanupPolicy::DeleteImportedAssetsAfterVerified,
+            network: riviu_core::SocialNetwork::TikTok,
             sound_policy: request.sound_policy, sheet_enabled: false, execution_confirmed: true,
             target_snapshot: Some(prepared.report.target_snapshot.clone()),
         };
@@ -205,13 +209,14 @@ async fn live_publish_canary() -> anyhow::Result<()> {
                 cleaned?;
                 return Ok(());
             }
+            db.update_publish_campaign_state(&campaign.id, riviu_core::PublishCampaignState::Posting, None)?;
             let mut reached_post = false;
-            let mut before_post = |selection: Option<&riviu_core::SoundSelectionEvidence>, _identity:Option<(&str,&str)>| {
+            let mut before_post = |selection: Option<&riviu_core::SoundSelectionEvidence>, _identity:Option<&riviu_core::publish_submission::PublishSubmissionProof>| {
                 reached_post = true;
                 save(&out, "sound.json", &selection)?;
                 anyhow::bail!("canary rehearsal: stop before public Post")
             };
-            let outcome = post_through_the_composer(&control, session.as_ref(), &campaign.id, SERIAL, bundle, &import, &campaign_request.sound_policy, &mut before_post, &|_| {}).await;
+            let outcome = post_through_the_composer(&control, &db, &assignment.id, session.as_ref(), &campaign.id, SERIAL, bundle, &import, &campaign_request.sound_policy, false, &mut before_post, &|_| {}).await;
             let description = match outcome { PostOutcome::NothingPublished(reason) => reason, PostOutcome::Unknown(reason) => format!("UNCERTAIN {reason}"), PostOutcome::Posted(_) | PostOutcome::Submitted(_) => "UNEXPECTED POST".into() };
             if let Ok(snapshot) = session.hierarchy_source_snapshot().await { fs::write(out.join("composer.xml"), snapshot.xml)?; }
             if let Some(frame) = frames.latest(SERIAL) { fs::write(out.join("composer.jpg"), frame.as_ref())?; }

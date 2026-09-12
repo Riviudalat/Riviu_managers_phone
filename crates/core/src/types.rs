@@ -1097,6 +1097,9 @@ pub struct NurtureSettings {
     #[serde(default)]
     pub has_api_key: bool,
     pub bundle_id: String,
+    /// Which social app this nurture session drives. Defaults to TikTok.
+    #[serde(default)]
+    pub network: crate::SocialNetwork,
     pub num_videos: u32,
     pub num_rounds: u32,
     pub like_prob: u32,
@@ -1231,6 +1234,7 @@ impl Default for NurtureSettings {
             api_key: String::new(),
             has_api_key: false,
             bundle_id: "com.ss.iphone.ugc.Ame".into(),
+            network: crate::SocialNetwork::TikTok,
             // Manual runs use a varied 2–3 hour horizon; this remains the
             // legacy fixture ceiling for callers that do not pass a duration.
             num_videos: 120,

@@ -8,9 +8,10 @@ use anyhow::{ensure, Context};
 use async_trait::async_trait;
 use parking_lot::Mutex;
 use riviu_core::{
-    cancel_orchestration, compile_orchestration, copy_bundle_to_managed,
-    execute_automation_schedule_occurrence, execute_orchestration, plan_threads, resolve_target,
-    scan_publish_folder, AutomationChildOwner, AutomationDefinitionRecord, AutomationKind,
+    build_three_feature_document, cancel_orchestration, compile_orchestration,
+    copy_bundle_to_managed, execute_automation_schedule_occurrence, execute_orchestration,
+    plan_threads, resolve_target, scan_publish_folder, three_feature_config_for,
+    three_feature_profile_name, AutomationChildOwner, AutomationDefinitionRecord, AutomationKind,
     AutomationProfileRef, AutomationScheduleExecution, AutomationScheduleOccurrenceState,
     ChildCampaignOutcome, CompiledOrchestrationV1, InteractionAutomationProfileConfigV1,
     InteractionCampaignDetail, InteractionRunAggregate, NurtureAutomationProfileConfigV1,
@@ -79,6 +80,67 @@ pub fn orchestration_save_revision(
     state
         .db
         .save_orchestration_revision(expected_revision, &compiled)
+        .map_err(CommandError::from_service)
+}
+
+/// Creates three TikTok automation profiles and one Nuôi → Tương tác → Đăng orchestration.
+///
+/// Explicit operator action — never overwrites an existing orchestration of the same name.
+#[tauri::command]
+pub fn orchestration_create_three_feature_template(
+    state: State<'_, AppState>,
+) -> Result<OrchestrationRevisionRecord, CommandError> {
+    let _admission = state.ensure_accepting_work()?;
+    let nurture = state
+        .db
+        .create_automation_definition(
+            three_feature_profile_name(AutomationKind::Nurture),
+            AutomationKind::Nurture,
+            &TargetRef::All,
+            &three_feature_config_for(AutomationKind::Nurture),
+        )
+        .map_err(CommandError::from_service)?;
+    let interaction = state
+        .db
+        .create_automation_definition(
+            three_feature_profile_name(AutomationKind::Interaction),
+            AutomationKind::Interaction,
+            &TargetRef::All,
+            &three_feature_config_for(AutomationKind::Interaction),
+        )
+        .map_err(CommandError::from_service)?;
+    let publish = state
+        .db
+        .create_automation_definition(
+            three_feature_profile_name(AutomationKind::Publish),
+            AutomationKind::Publish,
+            &TargetRef::All,
+            &three_feature_config_for(AutomationKind::Publish),
+        )
+        .map_err(CommandError::from_service)?;
+
+    let mut document = build_three_feature_document(
+        Uuid::new_v4(),
+        AutomationProfileRef {
+            definition_id: nurture.definition.id,
+            revision: nurture.revision.revision,
+        },
+        AutomationProfileRef {
+            definition_id: interaction.definition.id,
+            revision: interaction.revision.revision,
+        },
+        AutomationProfileRef {
+            definition_id: publish.definition.id,
+            revision: publish.revision.revision,
+        },
+    );
+    document.revision = 1;
+    let profiles = [nurture, interaction, publish];
+    let compiled = compile_orchestration(&document, &profiles)
+        .map_err(|issues| first_issue(issues, "OrchestrationInvalid"))?;
+    state
+        .db
+        .save_orchestration_revision(None, &compiled)
         .map_err(CommandError::from_service)
 }
 
@@ -616,6 +678,36 @@ impl ProductionOrchestrationPort {
         }
         let manifest = scan_publish_folder(&config.source_root, PublishScanOptions::default())
             .map_err(|error| OrchestrationChildFailure::before_effect(error.to_string()))?;
+        let prepared = crate::publish_commands::preflight::build_publish_preflight_from_manifest(
+            &self.control,
+            &self.registry,
+            &self.db,
+            riviu_core::PublishPreflightRequest {
+                source_root: config.source_root.clone(),
+                bundle_ids: config.bundle_ids.clone(),
+                udids: Self::target_udids(request),
+                target_ref: None,
+                run_at: None,
+                caption_overrides: config.caption_overrides.clone(),
+                sound_policy: config.sound_policy.clone(),
+                sheet_enabled: config.sheet_enabled,
+                delete_after_publish: false,
+            },
+            &manifest,
+        )
+        .await
+        .map_err(|error| OrchestrationChildFailure::before_effect(error.to_string()))?;
+        if !prepared.report.can_execute {
+            return Err(OrchestrationChildFailure::before_effect(
+                prepared
+                    .report
+                    .issues
+                    .iter()
+                    .map(|issue| issue.message.as_str())
+                    .collect::<Vec<_>>()
+                    .join("; "),
+            ));
+        }
         let selected = config
             .bundle_ids
             .iter()
@@ -653,6 +745,11 @@ impl ProductionOrchestrationPort {
             managed.push(copied);
         }
         let campaign = PublishCampaignRequest {
+            sheet_delivery: prepared.report.sheet_delivery.clone(),
+            verification_contract_version: Some(1),
+            verification_builds: riviu_core::publish_submission::builds_from_preflight(
+                &prepared.report,
+            ),
             sheet_enabled: config.sheet_enabled,
             request_id: request.idempotency_key.clone(),
             source_root: config.source_root,
@@ -665,6 +762,7 @@ impl ProductionOrchestrationPort {
             } else {
                 PublishCleanupPolicy::KeepImportedAssets
             },
+            network: config.network,
             sound_policy: config.sound_policy.clone(),
             execution_confirmed: true,
             target_snapshot: Some(request.target.clone()),

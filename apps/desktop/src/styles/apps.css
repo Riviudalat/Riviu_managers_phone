@@ -11,7 +11,7 @@
   flex: 0 0 auto;
   max-height: 340px;
   padding: 0.55rem 0.9rem 0.7rem;
-  border-top: 1px solid #e2e8f0;
+  border-top: 1px solid var(--line);
   overflow: hidden;
 }
 .installed-apps-controls {
@@ -31,7 +31,7 @@
   align-items: center;
   gap: 0.3rem;
   font-size: var(--text-sm);
-  color: #4a5568;
+  color: var(--text-2);
   white-space: nowrap;
 }
 .installed-apps .hint {
@@ -54,7 +54,7 @@
   gap: 0;
   max-height: none;
   overflow: visible;
-  border-top: 1px solid #dbe3ee;
+  border-top: 1px solid var(--line);
   padding: 0.25rem 0 0;
 }
 .installed-apps.is-launchable .installed-apps-list {
@@ -69,10 +69,9 @@
   flex: 0 0 auto;
 }
 .installed-apps-title {
-  color: #94a3b8;
-  font-size: var(--text-xs);
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
+  color: var(--text-2);
+  font-size: var(--text-sm);
+  font-weight: var(--weight-semibold);
 }
 .installed-apps.is-launchable .installed-apps-controls {
   flex: 0 0 auto;
@@ -107,7 +106,8 @@
   align-items: center;
   gap: 0.55rem;
   width: 100%;
-  padding: 0.22rem 0.9rem;
+  min-height: 36px;
+  padding: var(--space-1) var(--space-3);
   border: none;
   border-radius: 0;
   background: none;
@@ -139,7 +139,7 @@
   justify-content: space-between;
   gap: 0.4rem;
   padding: 0.22rem 0;
-  border-bottom: 1px solid #f1f5f9;
+  border-bottom: 1px solid var(--line);
 }
 .installed-apps-list code {
   font-size: var(--text-sm);
@@ -152,10 +152,10 @@
   flex: 0 0 auto;
   width: 24px;
   height: 24px;
-  border-radius: 5px;
+  border-radius: var(--radius-sm);
 }
 .installed-apps-icon.is-blank {
-  background: #e2e8f0;
+  background: var(--bg-muted);
 }
 .installed-apps-name {
   flex: 1 1 auto;
@@ -208,17 +208,17 @@
   border-bottom: 2px solid transparent;
   border-radius: 0;
   background: none;
-  color: #64748b;
+  color: var(--text-3);
   font-size: var(--text-sm);
   white-space: nowrap;
   cursor: pointer;
 }
 .group-tabs button:hover {
-  color: #1f2937;
+  color: var(--text-1);
 }
 .group-tabs button.active {
   color: var(--primary-deep);
-  border-bottom-color: #f97316;
+  border-bottom-color: var(--primary);
   font-weight: 600;
 }
 .group-tabs-dot {
@@ -228,13 +228,13 @@
 }
 .group-tabs-count {
   padding: 0 0.32rem;
-  border-radius: 8px;
-  background: #eef2f7;
-  color: #64748b;
+  border-radius: var(--radius-sm);
+  background: var(--bg-muted);
+  color: var(--text-3);
   font-size: var(--text-xs);
   font-variant-numeric: tabular-nums;
 }
 .group-tabs button.active .group-tabs-count {
-  background: #ffedd5;
-  color: #c2410c;
+  background: var(--primary-50);
+  color: var(--primary-deep);
 }

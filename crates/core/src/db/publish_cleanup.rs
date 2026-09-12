@@ -266,6 +266,9 @@ mod tests {
             partners: Vec::new(),
         };
         let request = crate::PublishCampaignRequest {
+            sheet_delivery: None,
+            verification_contract_version: None,
+            verification_builds: vec![],
             sheet_enabled: false,
             request_id: id.clone(),
             source_root: "C:/fixture".into(),
@@ -274,6 +277,7 @@ mod tests {
             run_at: None,
             visibility: crate::PublishVisibility::Public,
             cleanup_policy: policy,
+            network: crate::SocialNetwork::TikTok,
             sound_policy: crate::PublishSoundPolicy::Default,
             execution_confirmed: true,
             target_snapshot: None,

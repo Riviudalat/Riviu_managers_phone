@@ -110,6 +110,12 @@ impl ScreenCache {
 }
 
 pub struct AndroidUiSession {
+    gui_scope: parking_lot::Mutex<Option<riviu_core::ui_automation::GuiScope>>,
+    gui_reasoner: Option<riviu_core::ui_automation::SharedReasoner>,
+    gui_epoch: String,
+    gui_packs: parking_lot::Mutex<
+        std::collections::HashMap<String, riviu_core::ui_automation::profile::CompatibilityPack>,
+    >,
     agent: AgentClient,
     adb: AdbProgram,
     serial: String,
@@ -127,6 +133,10 @@ impl AndroidUiSession {
     pub fn new(agent: AgentClient, adb: AdbProgram, serial: String, screen: (f64, f64)) -> Self {
         Self {
             agent,
+            gui_reasoner: None,
+            gui_scope: parking_lot::Mutex::new(None),
+            gui_epoch: uuid::Uuid::new_v4().to_string(),
+            gui_packs: parking_lot::Mutex::new(std::collections::HashMap::new()),
             adb,
             serial,
             screen: ScreenCache::seeded(screen),
@@ -149,6 +159,21 @@ impl AndroidUiSession {
 
     pub fn agent(&self) -> &AgentClient {
         &self.agent
+    }
+    async fn semantic_nodes(&self, role: &str) -> anyhow::Result<Vec<riviu_core::ElementBox>> {
+        let package = self.active_app_bundle().await?;
+        let tree =
+            riviu_core::ui_automation::tree::Tree::parse(self.hierarchy_source_snapshot().await?)?;
+        Ok(riviu_core::app_automation::tiktok_roles::locate(
+            &tree, &package, role,
+        ))
+    }
+    pub(crate) fn with_gui_reasoner(
+        mut self,
+        reasoner: Option<riviu_core::ui_automation::SharedReasoner>,
+    ) -> Self {
+        self.gui_reasoner = reasoner;
+        self
     }
 
     /// Resolve a locator to its on-screen rectangle.
@@ -262,6 +287,7 @@ fn scale_to_screen(x: f64, y: f64, image_w: f64, image_h: f64, screen: (f64, f64
 /// Translate a core query into the agent's locator vocabulary.
 fn to_agent_locator(query: riviu_core::ElementQuery<'_>) -> Locator {
     match query {
+        riviu_core::ElementQuery::Semantic(_) => Locator::ResourceIdMatches("^$".into()),
         riviu_core::ElementQuery::Description { value, exact: true } => {
             Locator::Description(value.to_string())
         }
@@ -292,6 +318,34 @@ fn to_locator(locator: &QualifiedElementLocator) -> Locator {
 
 #[async_trait]
 impl UiSession for AndroidUiSession {
+    fn set_gui_scope(&self, scope: riviu_core::ui_automation::GuiScope) {
+        *self.gui_scope.lock() = Some(scope);
+    }
+    fn gui_scope(&self) -> Option<riviu_core::ui_automation::GuiScope> {
+        self.gui_scope.lock().clone()
+    }
+    fn gui_reasoner(&self) -> Option<riviu_core::ui_automation::SharedReasoner> {
+        self.gui_reasoner.clone()
+    }
+    fn gui_session_epoch(&self) -> String {
+        format!("{}:{}", self.gui_epoch, self.agent.session_identity())
+    }
+    fn gui_compatibility_pack(
+        &self,
+        package: &str,
+    ) -> Option<riviu_core::ui_automation::profile::CompatibilityPack> {
+        let mut packs = self.gui_packs.lock();
+        if let Some(pack) = packs.get(package) {
+            return Some(pack.clone());
+        }
+        let pack = self
+            .gui_reasoner
+            .as_ref()
+            .and_then(|r| r.compatibility_pack_for(package, self.gui_scope.lock().as_ref()))
+            .or_else(|| riviu_core::app_automation::adapter(package).map(|a| a.pack()))?;
+        packs.insert(package.to_string(), pack.clone());
+        Some(pack)
+    }
     async fn tap(&self, point: TapPoint) -> anyhow::Result<()> {
         self.agent.tap(point.x, point.y).await
     }
@@ -631,8 +685,38 @@ impl UiSession for AndroidUiSession {
         &self,
         query: riviu_core::ElementQuery<'_>,
     ) -> anyhow::Result<Option<riviu_core::ElementBox>> {
+        if let riviu_core::ElementQuery::Semantic(role) = query {
+            let found = self.semantic_nodes(role).await?;
+            return Ok(if found.len() == 1 {
+                found.into_iter().next()
+            } else {
+                None
+            });
+        }
         let locator = to_agent_locator(query);
         let Some((element, rect)) = self.agent.find_with_rect(&locator).await? else {
+            if matches!(query, riviu_core::ElementQuery::ResourceIdSuffix(_)) {
+                let package = self.active_app_bundle().await?;
+                let version = self.app_version_name(&package).await.unwrap_or_default();
+                let locale = self.ui_locale().await.unwrap_or_default();
+                if let Some(labels) =
+                    riviu_core::tiktok_labels::controls_for(&package, &locale, &version)
+                {
+                    use riviu_core::tiktok_labels::TikTokControl;
+                    for (control, role) in [
+                        (TikTokControl::ComposerCaption, "caption"),
+                        (TikTokControl::PickerAlbumMenu, "album"),
+                        (TikTokControl::CommentSend, "commentSend"),
+                    ] {
+                        if labels.label(control).is_some_and(|l| l.to_query() == query) {
+                            let matches = self.semantic_nodes(role).await?;
+                            if matches.len() == 1 {
+                                return Ok(matches.into_iter().next());
+                            }
+                        }
+                    }
+                }
+            }
             return Ok(None);
         };
         // A missing label is not a failure: absent is a legitimate answer for an
@@ -729,6 +813,9 @@ impl UiSession for AndroidUiSession {
         &self,
         query: riviu_core::ElementQuery<'_>,
     ) -> anyhow::Result<Vec<riviu_core::ElementBox>> {
+        if let riviu_core::ElementQuery::Semantic(role) = query {
+            return self.semantic_nodes(role).await;
+        }
         let locator = to_agent_locator(query);
         let ids = self.agent.find_all(&locator).await?;
         let mut found = Vec::with_capacity(ids.len());
@@ -775,6 +862,9 @@ impl UiSession for AndroidUiSession {
         &self,
         query: riviu_core::ElementQuery<'_>,
     ) -> anyhow::Result<Vec<riviu_core::ElementBox>> {
+        if let riviu_core::ElementQuery::Semantic(role) = query {
+            return self.semantic_nodes(role).await;
+        }
         let locator = to_agent_locator(query);
         let ids = self.agent.find_all(&locator).await?;
         let mut found = Vec::with_capacity(ids.len());
@@ -824,7 +914,32 @@ impl UiSession for AndroidUiSession {
     }
 
     async fn ui_language(&self) -> Option<String> {
-        self.ui_locale().await
+        let system = self.ui_locale().await;
+        // Use only two agreeing rendered labels; a handle or caption cannot select UI language.
+        if let (Ok(package), Ok((width, height))) =
+            (self.active_app_bundle().await, self.window_size().await)
+        {
+            if riviu_core::app_automation::adapter(&package).is_some() {
+                if let Ok(snapshot) = self.hierarchy_source_snapshot().await {
+                    if let Ok(tree) = riviu_core::ui_automation::tree::Tree::parse(snapshot) {
+                        let app = riviu_core::ui_automation::AppContext {
+                            package,
+                            version: String::new(),
+                            system_locale: system.clone().unwrap_or_default(),
+                            observed_language: None,
+                            width: width as u32,
+                            height: height as u32,
+                        };
+                        if let Some(language) =
+                            riviu_core::app_automation::observed_language(&tree, &app)
+                        {
+                            return Some(language);
+                        }
+                    }
+                }
+            }
+        }
+        system
     }
 
     async fn app_version(&self, bundle_id: &str) -> Option<String> {

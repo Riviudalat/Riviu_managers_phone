@@ -15,11 +15,11 @@
   --orange-ring: var(--primary-ring);
 
   --nav-bg: #ffffff;
-  --nav-bg-hover: #fff7ed;
+  --nav-bg-hover: #fff1e8;
   --nav-panel: #f5f6f8;
   --nav-line: #e5e7eb;
   --nav-text: #374151;
-  --nav-muted: #6b7280;
+  --nav-muted: #596579;
   --nav-active: #9a3412;
 
   --bg: #f5f6f8;
@@ -34,7 +34,7 @@
   --text: #172033;
   --text-1: #172033;
   --text-2: #475569;
-  --text-3: #59687d;
+  --text-3: #596579;
   --muted: var(--text-3);
   --accent: var(--primary);
   --accent-dim: var(--primary-deep);
@@ -107,11 +107,10 @@
   --space-12: 48px;
   --space-16: 64px;
 
-  /* Root is 14px, so these are the rem values that land on whole pixels there —
-     which matters because this UI is dense and half-pixel text is what made the
-     old sizes look like ten different fonts. */
-  --text-2xs: 0.625rem;
-  --text-xs: 0.6875rem;
+  /* A 16px root gives 12px captions, 13px secondary text and 14px body.
+     Stream labels retain their separate zoom-dependent geometry. */
+  --text-2xs: 0.75rem;
+  --text-xs: 0.75rem;
   --text-sm: 0.8125rem;
   --text-md: 0.8125rem;
   --text-base: 0.875rem;
@@ -131,7 +130,7 @@
 
   /* `--radius` keeps its old value: it is referenced in 3332 lines of App.css and
      changing it silently restyles the whole app. The scale grows around it. */
-  --radius-sm: 4px;
+  --radius-sm: 6px;
   --radius-lg: 8px;
   --radius-pill: 999px;
 
@@ -176,7 +175,9 @@
      first is a control answering a click, the second is a surface arriving. */
   --ease: cubic-bezier(0.4, 0, 0.2, 1);
   --duration-fast: 120ms;
-  --duration-base: 200ms;
+  --duration-base: 180ms;
+  --control-height: 36px;
+  --header-height: 56px;
 
   --aside-w: 240px;
   --aside-w-collapsed: 64px;

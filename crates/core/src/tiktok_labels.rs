@@ -454,6 +454,7 @@ impl TikTokControl {
 /// cannot find it at all.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LabelAttribute {
+    Semantic,
     /// `content-desc` — Appium's "accessibility id".
     Description,
     /// The rendered `text` of the node.
@@ -475,6 +476,7 @@ pub enum LabelAttribute {
 /// carries a comment count that changes per post, so an exact match can never hit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LabelMatch {
+    Semantic(&'static str),
     Exact(&'static str),
     Contains(&'static str),
     /// Exact match on `text` rather than `content-desc`.
@@ -519,7 +521,8 @@ pub enum LabelMatch {
 impl LabelMatch {
     pub fn value(&self) -> &'static str {
         match self {
-            Self::Exact(value)
+            Self::Semantic(value)
+            | Self::Exact(value)
             | Self::Contains(value)
             | Self::Text(value)
             | Self::TextContains(value)
@@ -537,6 +540,7 @@ impl LabelMatch {
 
     pub fn attribute(&self) -> LabelAttribute {
         match self {
+            Self::Semantic(_) => LabelAttribute::Semantic,
             Self::Exact(_) | Self::Contains(_) => LabelAttribute::Description,
             Self::Text(_) | Self::TextContains(_) => LabelAttribute::Text,
             Self::ResourceId(_) => LabelAttribute::ResourceId,
@@ -552,6 +556,7 @@ impl LabelMatch {
     /// control being absent.
     pub fn to_query(&self) -> crate::driver::ElementQuery<'static> {
         match *self {
+            Self::Semantic(value) => crate::driver::ElementQuery::Semantic(value),
             Self::Exact(value) => crate::driver::ElementQuery::Description { value, exact: true },
             Self::Contains(value) => crate::driver::ElementQuery::Description {
                 value,
@@ -1084,6 +1089,7 @@ pub const TIKTOK_RESOURCE_SETS: &[TikTokResourceLabels] = &[
 /// The only way to read a label. It is `Copy` and cheap — two references.
 #[derive(Debug, Clone, Copy)]
 pub struct TikTokControls {
+    adaptive: bool,
     translated: &'static TikTokLabels,
     resources: Option<&'static TikTokResourceLabels>,
 }
@@ -1142,6 +1148,7 @@ pub(crate) fn nothing_measured() -> TikTokControls {
         composer_discard: None,
     };
     TikTokControls {
+        adaptive: false,
         translated: &NOTHING,
         resources: None,
     }
@@ -1228,6 +1235,7 @@ pub(crate) fn every_publish_control_measured() -> TikTokControls {
         pinned_badge: None,
     };
     TikTokControls {
+        adaptive: false,
         translated: &ALL,
         resources: Some(&ALL_RESOURCES),
     }
@@ -1254,6 +1262,7 @@ pub(crate) fn every_publish_control_measured_with_gallery_id() -> TikTokControls
         pinned_badge: None,
     };
     TikTokControls {
+        adaptive: false,
         translated: &ALL,
         resources: Some(&GALLERY_RESOURCES),
     }
@@ -1267,6 +1276,7 @@ pub(crate) fn every_publish_control_measured_with_gallery_id() -> TikTokControls
 #[cfg(test)]
 pub(crate) fn an_album_pill_string_the_resolver_must_ignore() -> TikTokControls {
     TikTokControls {
+        adaptive: false,
         translated: &ALL,
         resources: None,
     }
@@ -1337,6 +1347,7 @@ pub(crate) fn every_publish_control_but_post_measured() -> TikTokControls {
         pinned_badge: None,
     };
     TikTokControls {
+        adaptive: false,
         translated: &NO_POST,
         resources: Some(&NO_POST_RESOURCES),
     }
@@ -1405,6 +1416,7 @@ pub(crate) fn every_publish_control_but_caption_measured() -> TikTokControls {
         pinned_badge: None,
     };
     TikTokControls {
+        adaptive: false,
         translated: &NO_CAPTION,
         resources: Some(&NO_CAPTION_RESOURCES),
     }
@@ -1414,6 +1426,25 @@ impl TikTokControls {
     /// The label for a control, or `None` when it was never measured for this
     /// device. `None` means refuse — do not substitute another language or version.
     pub fn label(&self, control: TikTokControl) -> Option<LabelMatch> {
+        if self.adaptive {
+            let role = match control {
+                TikTokControl::ProfileTab => Some("profile"),
+                TikTokControl::ComposerOpen => Some("create"),
+                TikTokControl::ComposerShutter => Some("shutter"),
+                TikTokControl::PickerAlbumMenu => Some("album"),
+                TikTokControl::PickerTabPhotos => Some("photos"),
+                TikTokControl::PickerMultiSelect => Some("multiSelect"),
+                TikTokControl::PickerNext => Some("pickerNext"),
+                TikTokControl::ComposerCaption => Some("caption"),
+                TikTokControl::ComposerNext => Some("editorNext"),
+                TikTokControl::PostButton => Some("post"),
+                TikTokControl::CommentSend => Some("commentSend"),
+                _ => None,
+            };
+            if let Some(role) = role {
+                return Some(LabelMatch::Semantic(role));
+            }
+        }
         match control {
             // The resource id wins when this build has one: an id is language-proof, and a
             // string is not. Falling through to the translation is what lets a build that
@@ -1480,6 +1511,13 @@ impl TikTokControls {
     pub fn package(&self) -> &'static str {
         self.translated.package
     }
+    pub fn adaptive(&self) -> bool {
+        self.adaptive
+    }
+    pub fn with_adaptive(mut self) -> Self {
+        self.adaptive = true;
+        self
+    }
 
     pub fn language(&self) -> &'static str {
         self.translated.language
@@ -1504,12 +1542,18 @@ impl TikTokControls {
     /// the `trill`-measured `beside_shutter` geometry, which is correct there and lands on
     /// the effects rail on `musically` — the asymmetry this accessor exists to close.
     pub fn gallery_entry_id(&self) -> Option<LabelMatch> {
+        if self.adaptive {
+            return Some(LabelMatch::Semantic("gallery"));
+        }
         self.resources.and_then(|set| set.gallery_entry)
     }
 
     /// The profile grid's post tile — see [`TikTokResourceLabels::post_tile`]. `None` means
     /// this build's route back to an own post is unmeasured, and the caller must refuse.
     pub fn post_tile_id(&self) -> Option<LabelMatch> {
+        if self.adaptive {
+            return Some(LabelMatch::ResourceId(":id/cover"));
+        }
         self.resources.and_then(|set| set.post_tile)
     }
 
@@ -1638,9 +1682,24 @@ pub fn controls_for(package: &str, language: &str, app_version: &str) -> Option<
         })
         .flatten();
     Some(TikTokControls {
+        adaptive: false,
         translated,
         resources,
     })
+}
+
+/// Unknown versions may prepare a semantic route; each required screen is proved at runtime.
+pub fn controls_for_runtime(
+    package: &str,
+    language: &str,
+    version: &str,
+) -> Option<TikTokControls> {
+    let labels = controls_for(package, language, version)?;
+    if labels.resource_version().is_none() && !version.trim().is_empty() {
+        Some(labels.with_adaptive())
+    } else {
+        Some(labels)
+    }
 }
 
 /// `versionName=46.4.3` out of `dumpsys package <pkg>`.

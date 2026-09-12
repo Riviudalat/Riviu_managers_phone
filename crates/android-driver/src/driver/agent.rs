@@ -570,7 +570,8 @@ impl AndroidDriver {
             // handle replaces the private cache it seeds.
             AndroidUiSession::new(agent, self.adb.clone(), udid.to_string(), (0.0, 0.0))
                 .with_screen_cache(screen)
-                .with_helper(helper),
+                .with_helper(helper)
+                .with_gui_reasoner(self.gui_reasoner.lock().clone()),
         )
     }
     /// Attach the helper when it is already on the phone, or when an APK is
@@ -580,6 +581,7 @@ impl AndroidDriver {
         &self,
         serial: &str,
     ) -> anyhow::Result<Option<crate::riviu_agent::HelperClient>> {
+        let _inventory = self.helper_inventory_lock(serial).write_owned().await;
         let cached = self.helpers.lock().get(serial).cloned();
         if let Some(helper) = cached {
             if helper.is_alive().await {

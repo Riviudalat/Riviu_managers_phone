@@ -5,18 +5,18 @@
   z-index: var(--z-menu);
   min-width: 196px;
   padding: 4px;
-  border: 1px solid #dfe6ef;
-  border-radius: 10px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius);
   background: var(--bg-elevated);
-  box-shadow: 0 12px 32px rgb(15 23 42 / 18%);
+  box-shadow: var(--shadow-lg);
   display: flex;
   flex-direction: column;
 }
 .device-menu-head {
   margin: 0;
   padding: 0.32rem 0.55rem 0.4rem;
-  border-bottom: 1px solid #eef2f7;
-  color: #0f172a;
+  border-bottom: 1px solid var(--line);
+  color: var(--text-1);
   font-size: var(--text-sm);
   font-weight: 600;
   overflow: hidden;
@@ -26,33 +26,34 @@
 .device-menu-label {
   margin: 0.25rem 0 0.1rem;
   padding: 0 0.55rem;
-  color: #94a3b8;
+  color: var(--text-3);
   font-size: var(--text-xs);
-  text-transform: uppercase;
+
   letter-spacing: 0.04em;
 }
 .device-menu button {
   display: flex;
   align-items: center;
+  justify-content: flex-start;
   gap: 0.45rem;
   width: 100%;
   padding: 0.4rem 0.55rem;
   border: none;
   border-radius: 6px;
   background: none;
-  color: #334155;
+  color: var(--text-2);
   font-size: var(--text-sm);
   text-align: left;
   cursor: pointer;
 }
 .device-menu button:hover {
-  background: #f1f5f9;
+  background: var(--bg-muted);
 }
 .device-menu button.danger {
   color: var(--danger-deep);
 }
 .device-menu button.danger:hover {
-  background: #fef2f2;
+  background: var(--danger-soft);
 }
 .device-menu-dot {
   width: 8px;
@@ -75,7 +76,7 @@
   z-index: var(--z-raised);
   margin: 0.3rem 0.2rem;
   padding: 0.32rem 0.5rem;
-  border: 1px solid #dfe6ef;
+  border: 1px solid var(--line-strong);
   border-radius: 6px;
   background: var(--bg-elevated);
   font-size: var(--text-sm);
@@ -102,15 +103,16 @@
   overscroll-behavior: contain;
   padding: 4px;
   border: 1px solid var(--line-strong);
-  border-radius: 10px;
+  border-radius: var(--radius);
   background: var(--bg-elevated);
-  box-shadow: 0 12px 32px rgb(15 23 42 / 18%);
+  box-shadow: var(--shadow-lg);
   display: flex;
   flex-direction: column;
 }
 .device-flyout button {
   display: flex;
   align-items: center;
+  justify-content: flex-start;
   gap: 0.5rem;
   width: 100%;
   padding: 0.4rem 0.55rem;
@@ -141,13 +143,13 @@
 }
 .device-flyout button.is-disabled,
 .device-flyout button:disabled {
-  color: #94a3b8;
+  color: var(--text-3);
   cursor: default;
 }
 .device-flyout .device-menu-note {
   margin: 0;
   padding: 0.3rem 0.55rem;
-  color: #64748b;
+  color: var(--text-3);
   font-size: var(--text-xs);
 }
 /* The row that owns an open flyout stays highlighted, so it is obvious which one the panel
@@ -163,11 +165,11 @@
 }
 .device-menu-chev {
   flex: 0 0 auto;
-  color: #94a3b8;
+  color: var(--text-3);
   font-size: var(--text-xs);
 }
 .device-menu button.is-disabled {
-  color: #94a3b8;
+  color: var(--text-3);
   cursor: default;
 }
 .device-menu button.is-disabled:hover {
@@ -178,7 +180,7 @@
 .device-menu-note {
   margin: 0.1rem 0;
   padding: 0.3rem 0.7rem;
-  color: #64748b;
+  color: var(--text-3);
   font-size: var(--text-xs);
 }
 
@@ -200,20 +202,25 @@
 .modal {
   display: flex;
   flex-direction: column;
-  gap: 0.4rem;
-  max-height: calc(100vh - 3rem);
-  padding: 0.85rem 1rem 1rem;
+  gap: var(--space-3);
+  min-width: 0;
+  max-height: calc(100dvh - 3rem);
+  padding: var(--space-5);
   border: 1px solid var(--line-strong);
-  border-radius: 10px;
+  border-radius: var(--radius);
   background: var(--bg-elevated);
   box-shadow: 0 18px 48px rgb(15 23 42 / 24%);
-  overflow: hidden;
+  overflow: auto;
+  overscroll-behavior: contain;
 }
 .modal > header {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 0.6rem;
+  gap: var(--space-3);
+  padding-bottom: var(--space-4);
+  border-bottom: 1px solid var(--line);
+  flex-shrink: 0;
 }
 
 .device-detail-backdrop {
@@ -228,7 +235,7 @@
 .device-detail-drawer {
   width: min(420px, 100vw);
   height: 100%;
-  padding: 1.1rem;
+  padding: var(--space-5);
   border-left: 1px solid var(--line-strong);
   background: var(--bg-elevated);
   box-shadow: -16px 0 42px rgb(15 23 42 / 18%);
@@ -258,7 +265,7 @@
 .device-detail-kicker {
   margin-bottom: 0.25rem !important;
   font-weight: 600;
-  text-transform: uppercase;
+
 }
 
 .device-detail-list {
@@ -320,7 +327,7 @@
 }
 .device-files-goto label {
   flex: 0 0 auto;
-  color: #64748b;
+  color: var(--text-3);
   font-size: var(--text-xs);
 }
 .device-files-goto input {
@@ -351,8 +358,9 @@
   display: flex;
   align-items: center;
   gap: 0.5rem;
-  padding: 0.28rem 0.55rem;
-  border-bottom: 1px solid #f1f5f9;
+  min-height: 42px;
+  padding: var(--space-2) var(--space-3);
+  border-bottom: 1px solid var(--bg-muted);
   font-size: var(--text-sm);
 }
 .device-files-list li:last-child {
@@ -362,6 +370,9 @@
   background: var(--primary-50);
 }
 .device-files-name {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
   flex: 1 1 auto;
   min-width: 0;
   overflow: hidden;
@@ -371,14 +382,14 @@
 }
 .device-files-size {
   flex: 0 0 88px;
-  color: #475569;
+  color: var(--text-2);
   text-align: right;
   font-variant-numeric: tabular-nums;
 }
 /* The phone's own clock, in the phone's own timezone — see `DeviceFileEntry`. */
 .device-files-when {
   flex: 0 0 132px;
-  color: #94a3b8;
+  color: var(--text-3);
   text-align: right;
   font-variant-numeric: tabular-nums;
 }
@@ -415,8 +426,8 @@
   max-height: 320px;
   overflow: auto;
   border-radius: 8px;
-  background: #0f172a;
-  color: #e2e8f0;
+  background: var(--bg-stage);
+  color: var(--text-inverse);
   font-size: var(--text-sm);
   line-height: 1.45;
   white-space: pre;
@@ -497,8 +508,43 @@
 /* Group Tools popup (feature A2+) — reuses the .nurture-float shell, a touch wider for the
    text area + preview. */
 .nurture-float.group-tools {
-  width: min(480px, calc(100vw - 2.5rem));
+  position: relative;
+  top: auto;
+  left: auto;
+  right: auto;
+  bottom: auto;
+  transform: none;
+  width: min(760px, calc(100vw - 3rem));
+  max-height: calc(100dvh - 3rem);
 }
+.group-tools-layer[hidden] { display: none; }
+.macro-recording-bar {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  padding: var(--space-2) var(--space-3);
+  border-bottom: 1px solid var(--primary-200);
+  background: var(--primary-50);
+  color: var(--primary-deep);
+  font-size: var(--text-sm);
+}
+.macro-recording-summary {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  min-width: 0;
+}
+.macro-recording-summary > span { font-variant-numeric: tabular-nums; }
+.macro-recording-bar > button { flex: none; white-space: nowrap; }
+.focus-menu > .macro-recording-bar {
+  flex-wrap: wrap;
+  gap: var(--space-1);
+}
+.focus-menu > .macro-recording-bar > button { width: 100%; }
+.group-tools-recording-empty { color: var(--text-3); font-size: var(--text-sm); }
 .group-tools-field {
   display: flex;
   flex-direction: column;
@@ -664,4 +710,65 @@
   white-space: pre-wrap;
   overflow-wrap: anywhere;
   tab-size: 2;
+}
+
+/* Consistent device tool surfaces; phone frame geometry remains owned by focusLayout. */
+.device-modal-heading { min-width: 0; }
+.device-modal-heading > p { margin: 0 0 4px; color: var(--text-3); font-size: var(--text-xs); font-weight: var(--weight-medium); }
+.device-modal-heading > h2 { margin: 0; color: var(--text-1); font-size: var(--text-lg); line-height: var(--leading-tight); overflow-wrap: anywhere; }
+.device-modal-heading > span { display: block; margin-top: 4px; color: var(--text-3); font-size: var(--text-xs); overflow-wrap: anywhere; }
+.modal > .hint { margin: 0; font-size: var(--text-sm); line-height: var(--leading-normal); }
+.modal > header > button { flex-shrink: 0; }
+.modal pre { min-width: 0; }
+.device-files-name > svg { flex-shrink: 0; color: var(--text-3); }
+.device-files-name > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.device-files-list { min-height: 120px; }
+.device-files-goto input { min-height: 36px; }
+.device-files-actions { flex-wrap: wrap; padding-top: var(--space-3); border-top: 1px solid var(--line); }
+.device-files-actions .danger { margin-left: var(--space-2); }
+.device-files-jumps .tb-btn.active { background: var(--primary-soft); color: var(--primary-deep); border-color: var(--primary-ring); }
+.device-detail-drawer h2 { font-size: var(--text-lg); }
+.device-detail-evidence pre { padding: var(--space-3); border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--bg-subtle); white-space: pre-wrap; overflow-wrap: anywhere; }
+.device-health { width: min(760px, 94vw); }
+.health-rows { min-height: 0; margin: 0; padding: 0; list-style: none; overflow: auto; overscroll-behavior: contain; }
+.health-rows > li { padding: var(--space-4) 0; border-bottom: 1px solid var(--line); }
+.health-rows > li:last-child { border-bottom: 0; }
+.health-rows > li > div { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--space-2); }
+.health-rows strong { font-size: var(--text-md); }
+.health-rows p { margin: var(--space-2) 0 0; color: var(--text-2); font-size: var(--text-sm); line-height: var(--leading-normal); }
+.health-rows details { margin-top: var(--space-2); color: var(--text-3); font-size: var(--text-sm); }
+.health-rows summary { cursor: pointer; }
+.health-rows pre { margin: var(--space-2) 0 0; padding: var(--space-3); border-radius: var(--radius-sm); background: var(--bg-subtle); white-space: pre-wrap; overflow-wrap: anywhere; }
+.diagnostics-summary-label { color: var(--text-3); font-size: var(--text-sm); margin-right: var(--space-2); }
+.diagnostics-result-count { margin: 0; color: var(--text-3); font-size: var(--text-sm); font-variant-numeric: tabular-nums; }
+.group-tools > .nurture-float-title { height: auto; min-height: 60px; cursor: default; padding: var(--space-4) var(--space-5); background: var(--bg-elevated); border-bottom: 1px solid var(--line); }
+.group-tools > .nurture-float-title strong { font-size: var(--text-lg); }
+.group-tools > .nurture-float-title .close { width: 36px; height: 36px; }
+.group-tools > .nurture-float-body { padding: 0; overflow-y: auto; }
+.group-tools-scope { display: flex; align-items: center; gap: var(--space-3); padding: var(--space-4) var(--space-5); background: var(--bg-subtle); border-bottom: 1px solid var(--line); }
+.group-tools-scope > svg { flex-shrink: 0; color: var(--primary); }
+.group-tools-scope > div { display: flex; flex-direction: column; gap: var(--space-1); }
+.group-tools-scope strong { font-size: var(--text-md); }
+.group-tools-scope span { color: var(--text-3); font-size: var(--text-sm); }
+.group-tools .workspace-tabs { padding: var(--space-2) var(--space-4); }
+.group-tools .workspace-tabs button { flex-shrink: 0; }
+.group-tools-panel { padding: var(--space-5); }
+.group-tools-intro { margin-bottom: var(--space-4); }
+.group-tools-intro h3 { margin: 0; font-size: var(--text-base); }
+.group-tools-intro p { margin: var(--space-1) 0 0; font-size: var(--text-sm); color: var(--text-3); line-height: var(--leading-normal); }
+.group-tools-panel .group-tools-field { gap: var(--space-2); margin-bottom: var(--space-4); }
+.group-tools-panel .group-tools-fieldset { margin-top: var(--space-4); padding: var(--space-3) var(--space-4) var(--space-4); }
+.group-tools-panel .group-tools-keys { gap: var(--space-2); }
+.group-tools-panel .group-tools-keys .tb-btn { min-height: 36px; }
+@media (max-width: 640px) {
+  .modal-backdrop { padding: var(--space-3); }
+  .modal { width: 100%; padding: var(--space-4); max-height: calc(100dvh - 24px); }
+  .modal > header { flex-wrap: wrap; }
+  .device-modal-heading { flex: 1; }
+  .device-files-when { display: none; }
+  .device-files-size { flex-basis: 64px; }
+  .device-files-actions .hint { flex-basis: 100%; }
+  .nurture-float.group-tools { width: 100%; max-height: calc(100dvh - 24px); }
+  .group-tools-panel { padding: var(--space-4); }
+  .group-tools-preview .who { min-width: 80px; }
 }

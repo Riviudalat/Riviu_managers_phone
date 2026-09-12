@@ -49,6 +49,13 @@ const report: PublishPreflightReport = {
 afterEach(cleanup);
 
 describe("publish preflight result", () => {
+  it("shows the blocking link check when all four legacy checks pass",()=>{
+    const issue={code:"link_verification_unmeasured",udid:"phone-1",message:"locale unsupported"};
+    render(<PublishPreflightResult report={{...report,assignments:[{...row,composer:"pass",soundPicker:"pass",issues:[issue],checks:[{id:"link",label:"Nhận diện xác minh liên kết",status:"blocked",reason:issue.message}]}],issues:[issue]}} machineName={()=>"Máy 1"} page={0} onPage={vi.fn()} onRetry={vi.fn()} busy={false}/>);
+    expect(screen.getByText("Nhận diện xác minh liên kết")).toBeVisible();
+    expect(screen.getByText("Bị chặn")).toBeVisible();
+    expect(screen.queryByText("Có điều kiện chưa đạt")).toBeNull();
+  });
   it("shows machine, installed version and actionable problems while technical detail stays collapsed", async () => {
     const retry = vi.fn();
     render(

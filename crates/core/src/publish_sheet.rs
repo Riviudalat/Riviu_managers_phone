@@ -132,6 +132,43 @@ pub struct SheetDeliverySettings {
     pub internal_reporting: bool,
 }
 
+/// Immutable destination captured with a campaign; credentials remain host settings.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SheetDeliveryTarget {
+    pub version: u32,
+    pub spreadsheet_id: String,
+    pub sheet_gid: u64,
+    pub internal_reporting: bool,
+}
+
+impl SheetDeliveryTarget {
+    pub fn validate(&self) -> anyhow::Result<()> {
+        anyhow::ensure!(self.version == 2, "Sheet deliveryVersion phải là 2");
+        anyhow::ensure!(
+            !self.spreadsheet_id.is_empty()
+                && self.spreadsheet_id.len() <= 128
+                && self
+                    .spreadsheet_id
+                    .bytes()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'_' | b'-'))
+                && self.sheet_gid <= i32::MAX as u64,
+            "Đích Sheet đã chốt không hợp lệ"
+        );
+        Ok(())
+    }
+
+    pub fn from_sheet_url(value: &str, internal_reporting: bool) -> anyhow::Result<Self> {
+        let parsed = parse_sheet_url(value)?;
+        Ok(Self {
+            version: 2,
+            spreadsheet_id: parsed.spreadsheet_id,
+            sheet_gid: parsed.sheet_gid,
+            internal_reporting,
+        })
+    }
+}
+
 /// What the script answers.
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -221,6 +258,25 @@ fn client() -> anyhow::Result<reqwest::Client> {
 struct SheetTransportError {
     message: String,
     retryable: bool,
+}
+
+impl std::fmt::Display for SheetTransportError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for SheetTransportError {}
+
+/// The worker retries transport/rate/server failures, while malformed requests,
+/// rejected credentials, target conflicts and unsupported ACKs need correction.
+pub fn sheet_delivery_error_is_retryable(error: &anyhow::Error) -> bool {
+    error
+        .downcast_ref::<SheetTransportError>()
+        .is_some_and(|error| error.retryable)
+        || error
+            .downcast_ref::<reqwest::Error>()
+            .is_some_and(|error| error.is_timeout() || error.is_connect() || error.is_body())
 }
 
 fn sheet_redirect(status: reqwest::StatusCode, location: &str) -> anyhow::Result<reqwest::Url> {
@@ -338,12 +394,15 @@ async fn sheet_post_body(
             Ok(body) => return Ok(body),
             Err(error) => {
                 if !error.retryable || attempt + 1 == attempts {
-                    anyhow::bail!("{} (lượt {}/{})", error.message, attempt + 1, attempts);
+                    return Err(anyhow::Error::new(SheetTransportError {
+                        message: format!("{} (lượt {}/{})", error.message, attempt + 1, attempts),
+                        retryable: error.retryable,
+                    }));
                 }
                 tracing::warn!(attempt = attempt + 1, stage_error = %error.message, "Sheet connection will retry from webhook");
                 let delay = Duration::from_secs(u64::from(attempt + 1));
                 if tokio::time::Instant::now() + delay >= deadline {
-                    anyhow::bail!("{}; hết thời gian kết nối", error.message);
+                    return Err(anyhow::Error::new(error).context("Hết thời gian kết nối Sheet"));
                 }
                 tokio::time::sleep(delay).await;
             }
@@ -442,6 +501,220 @@ pub async fn push_internal_report(
         Some((&row.assignment_id, row.metadata.row_revision)),
     )
     .await
+}
+
+const MAX_SHEET_REVISION: i64 = 9_007_199_254_740_991;
+
+fn bind_payload(
+    payload: &mut serde_json::Value,
+    target: &SheetDeliveryTarget,
+    revision: i64,
+) -> anyhow::Result<()> {
+    target.validate()?;
+    anyhow::ensure!(
+        (0..=MAX_SHEET_REVISION).contains(&revision),
+        "Revision Sheet vượt giới hạn số nguyên an toàn"
+    );
+    payload["deliveryVersion"] = serde_json::json!(2);
+    payload["spreadsheetId"] = serde_json::json!(target.spreadsheet_id);
+    payload["sheetGid"] = serde_json::json!(target.sheet_gid);
+    payload["deliveryRevision"] = serde_json::json!(revision);
+    Ok(())
+}
+
+pub async fn push_bound_canonical(
+    webhook_url: &str,
+    row: &SheetRow,
+    target: &SheetDeliveryTarget,
+    delivery_revision: i64,
+    metadata: Option<&InternalReportMetadata>,
+) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        is_acceptable_webhook(webhook_url) && !row.token.trim().is_empty(),
+        "Sheet cần webhook HTTPS và token"
+    );
+    anyhow::ensure!(
+        !row.assignment_id.trim().is_empty() && !row.post_url.trim().is_empty(),
+        "Thiếu assignmentId hoặc canonical link"
+    );
+    let mut payload = serde_json::to_value(row)?;
+    if let Some(metadata) = metadata {
+        anyhow::ensure!(
+            target.internal_reporting
+                && metadata.report_version == 1
+                && (0..=MAX_SHEET_REVISION).contains(&metadata.row_revision),
+            "Metadata Sheet không khớp đích đã chốt"
+        );
+        payload
+            .as_object_mut()
+            .context("Sheet payload object")?
+            .extend(
+                serde_json::to_value(metadata)?
+                    .as_object()
+                    .context("Sheet metadata object")?
+                    .clone(),
+            );
+    }
+    payload["rowKind"] = serde_json::json!("canonical");
+    bind_payload(&mut payload, target, delivery_revision)?;
+    send_bound_payload(
+        webhook_url,
+        &row.token,
+        &payload,
+        target,
+        delivery_revision,
+        &row.assignment_id,
+        &row.post_url,
+        metadata.map(|metadata| metadata.row_revision),
+        false,
+    )
+    .await
+}
+
+pub async fn push_bound_internal_report(
+    webhook_url: &str,
+    token: &str,
+    row: &InternalSheetReportRow,
+    target: &SheetDeliveryTarget,
+) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        is_acceptable_webhook(webhook_url) && !token.trim().is_empty(),
+        "Sheet cần webhook HTTPS và token"
+    );
+    anyhow::ensure!(
+        target.internal_reporting
+            && row.row_kind == "internalReport"
+            && row.metadata.report_version == 1
+            && !row.assignment_id.trim().is_empty(),
+        "Báo cáo Sheet không khớp đích đã chốt"
+    );
+    let mut payload = serde_json::to_value(row)?;
+    payload["token"] = serde_json::json!(token);
+    bind_payload(&mut payload, target, row.metadata.row_revision)?;
+    send_bound_payload(
+        webhook_url,
+        token,
+        &payload,
+        target,
+        row.metadata.row_revision,
+        &row.assignment_id,
+        &row.post_url,
+        Some(row.metadata.row_revision),
+        true,
+    )
+    .await
+}
+
+fn validate_bound_ack(
+    body: &str,
+    target: &SheetDeliveryTarget,
+    revision: i64,
+    assignment_id: &str,
+    post_url: &str,
+    report_revision: Option<i64>,
+    internal_report: bool,
+) -> anyhow::Result<()> {
+    let ack: serde_json::Value = serde_json::from_str(body)?;
+    let delivered_revision = ack["deliveryRevision"].as_i64();
+    anyhow::ensure!(ack["ok"] == true && ack["deliveryVersion"] == 2
+        && ack["spreadsheetId"].as_str() == Some(target.spreadsheet_id.as_str())
+        && ack["sheetGid"].as_u64() == Some(target.sheet_gid)
+        && ack["assignmentId"].as_str() == Some(assignment_id)
+        && ack["row"].as_u64().is_some_and(|row| row >= 2)
+        && delivered_revision.is_some_and(|stored| (0..=MAX_SHEET_REVISION).contains(&stored)
+            && if internal_report { stored >= revision } else { stored == revision }),
+        "Sheet chưa xác nhận đúng đích, assignment và deliveryRevision đã chốt; kiểm tra Apps Script phiên bản 2");
+    if let Some(report_revision) = report_revision {
+        validate_internal_ack(body, assignment_id, report_revision)?;
+        if internal_report {
+            anyhow::ensure!(
+                ack["rowRevision"].as_i64() == delivered_revision,
+                "Revision ACK nội bộ không nhất quán"
+            );
+        }
+    }
+    // A newer internal projection can already contain its verified canonical URL.
+    // The reply must expose that stored value, never echo an older blank request.
+    let stored_url = ack["postUrl"]
+        .as_str()
+        .context("Sheet chưa xác nhận Link đã lưu")?;
+    if internal_report && delivered_revision.is_some_and(|stored| stored > revision) {
+        anyhow::ensure!(
+            stored_url.is_empty() || is_canonical_sheet_url(stored_url),
+            "Link đã lưu trong ACK Sheet không hợp lệ"
+        );
+        if !post_url.is_empty() {
+            anyhow::ensure!(
+                stored_url == post_url,
+                "Canonical Link trong ACK Sheet khác bài đã gửi"
+            );
+        }
+    } else {
+        anyhow::ensure!(
+            stored_url == post_url,
+            "Link trong ACK Sheet khác bài đã gửi"
+        );
+    }
+    Ok(())
+}
+
+fn is_canonical_sheet_url(value: &str) -> bool {
+    let Ok(url) = url::Url::parse(value) else {
+        return false;
+    };
+    let parts = url.path().split('/').collect::<Vec<_>>();
+    url.scheme() == "https"
+        && matches!(url.host_str(), Some("www.tiktok.com" | "tiktok.com"))
+        && url.username().is_empty()
+        && url.password().is_none()
+        && url.port().is_none()
+        && url.query().is_none()
+        && url.fragment().is_none()
+        && parts.len() == 4
+        && parts[1].starts_with('@')
+        && parts[1].len() > 1
+        && matches!(parts[2], "photo" | "video")
+        && !parts[3].is_empty()
+        && parts[3].bytes().all(|c| c.is_ascii_digit())
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn send_bound_payload(
+    webhook: &str,
+    token: &str,
+    payload: &serde_json::Value,
+    target: &SheetDeliveryTarget,
+    revision: i64,
+    assignment_id: &str,
+    post_url: &str,
+    report_revision: Option<i64>,
+    internal_report: bool,
+) -> anyhow::Result<()> {
+    let body = sheet_post_body(webhook, payload, WEBHOOK_TIMEOUT, 1).await?;
+    let ack: serde_json::Value = serde_json::from_str(&body).map_err(|_| {
+        anyhow::anyhow!(
+            "Sheet chưa trả ACK phiên bản 2: {}",
+            redact_token(&body, token)
+        )
+    })?;
+    if ack["ok"] != true {
+        return Err(anyhow::Error::new(SheetTransportError {
+            message: format!(
+                "Sheet từ chối: {}",
+                redact_token(ack["error"].as_str().unwrap_or("không nói lý do"), token)
+            ),
+            retryable: ack["retryable"] == true,
+        }));
+    }
+    validate_bound_ack(
+        &body,
+        target,
+        revision,
+        assignment_id,
+        post_url,
+        report_revision,
+        internal_report,
+    )
 }
 
 async fn send_sheet_payload(
@@ -695,8 +968,8 @@ fn validate_sheet_check_ack(
         )
     );
     anyhow::ensure!(
-        ack["checkVersion"] == 1,
-        "Cập nhật Apps Script để hỗ trợ kiểm tra kết nối không ghi dữ liệu"
+        ack["checkVersion"] == 1 && ack["deliveryVersion"] == 2,
+        "Cập nhật Apps Script và dùng mẫu compact hoặc nội bộ để xác nhận giao nhận phiên bản 2"
     );
     anyhow::ensure!(
         ack["spreadsheetId"].as_str() == Some(expected.spreadsheet_id.as_str())
@@ -814,6 +1087,200 @@ pub async fn prepare_sheet(
 mod tests {
     use super::*;
 
+    fn bound_fixture() -> (SheetDeliveryTarget, serde_json::Value) {
+        (
+            SheetDeliveryTarget {
+                version: 2,
+                spreadsheet_id: "fixture-book".into(),
+                sheet_gid: 37,
+                internal_reporting: true,
+            },
+            serde_json::json!({"ok":true,"deliveryVersion":2,"spreadsheetId":"fixture-book","sheetGid":37,
+                "assignmentId":"assignment-1","deliveryRevision":1,"row":2,"postUrl":"https://www.tiktok.com/@test/photo/123"}),
+        )
+    }
+
+    #[test]
+    fn bound_canonical_ack_requires_every_pinned_identity_and_actual_link() {
+        let (target, ack) = bound_fixture();
+        let url = ack["postUrl"].as_str().unwrap();
+        assert!(validate_bound_ack(
+            &ack.to_string(),
+            &target,
+            1,
+            "assignment-1",
+            url,
+            None,
+            false
+        )
+        .is_ok());
+        for field in [
+            "ok",
+            "deliveryVersion",
+            "spreadsheetId",
+            "sheetGid",
+            "assignmentId",
+            "deliveryRevision",
+            "row",
+            "postUrl",
+        ] {
+            let mut wrong = ack.clone();
+            wrong.as_object_mut().unwrap().remove(field);
+            assert!(
+                validate_bound_ack(
+                    &wrong.to_string(),
+                    &target,
+                    1,
+                    "assignment-1",
+                    url,
+                    None,
+                    false
+                )
+                .is_err(),
+                "missing {field}"
+            );
+            wrong[field] = serde_json::json!("different");
+            assert!(
+                validate_bound_ack(
+                    &wrong.to_string(),
+                    &target,
+                    1,
+                    "assignment-1",
+                    url,
+                    None,
+                    false
+                )
+                .is_err(),
+                "wrong {field}"
+            );
+        }
+        assert!(validate_bound_ack(
+            r#"{"ok":true,"duplicate":true}"#,
+            &target,
+            1,
+            "assignment-1",
+            url,
+            None,
+            false
+        )
+        .is_err());
+        let mut newer = ack.clone();
+        newer["deliveryRevision"] = serde_json::json!(2);
+        assert!(validate_bound_ack(
+            &newer.to_string(),
+            &target,
+            1,
+            "assignment-1",
+            url,
+            None,
+            false
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn bound_report_ack_allows_a_newer_stored_projection_without_accepting_a_different_canonical() {
+        let (target, mut ack) = bound_fixture();
+        ack["reportVersion"] = serde_json::json!(1);
+        ack["rowRevision"] = serde_json::json!(3);
+        ack["deliveryRevision"] = serde_json::json!(3);
+        assert!(validate_bound_ack(
+            &ack.to_string(),
+            &target,
+            1,
+            "assignment-1",
+            "",
+            Some(1),
+            true
+        )
+        .is_ok());
+        assert!(validate_bound_ack(
+            &ack.to_string(),
+            &target,
+            1,
+            "assignment-1",
+            "https://www.tiktok.com/@test/photo/999",
+            Some(1),
+            true
+        )
+        .is_err());
+        ack["postUrl"] = serde_json::json!("https://attacker.example/link");
+        assert!(validate_bound_ack(
+            &ack.to_string(),
+            &target,
+            1,
+            "assignment-1",
+            "",
+            Some(1),
+            true
+        )
+        .is_err());
+        ack["postUrl"] = serde_json::json!("");
+        ack["rowRevision"] = serde_json::json!(2);
+        assert!(validate_bound_ack(
+            &ack.to_string(),
+            &target,
+            1,
+            "assignment-1",
+            "",
+            Some(1),
+            true
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn delivery_target_and_revision_validate_before_transport() {
+        let target = SheetDeliveryTarget::from_sheet_url(
+            "https://docs.google.com/spreadsheets/d/fixture-book/edit#gid=37",
+            true,
+        )
+        .unwrap();
+        assert!(target.validate().is_ok());
+        let mut payload = serde_json::json!({});
+        bind_payload(&mut payload, &target, 5).unwrap();
+        assert_eq!(
+            payload,
+            serde_json::json!({"deliveryVersion":2,"spreadsheetId":"fixture-book","sheetGid":37,"deliveryRevision":5})
+        );
+        assert!(bind_payload(&mut payload, &target, MAX_SHEET_REVISION + 1).is_err());
+        assert!(bind_payload(&mut payload, &target, -1).is_err());
+        for wrong in [
+            SheetDeliveryTarget {
+                version: 1,
+                ..target.clone()
+            },
+            SheetDeliveryTarget {
+                spreadsheet_id: "../wrong".into(),
+                ..target.clone()
+            },
+            SheetDeliveryTarget {
+                sheet_gid: u64::MAX,
+                ..target
+            },
+        ] {
+            assert!(wrong.validate().is_err());
+        }
+    }
+
+    #[test]
+    fn delivery_retry_classifier_retains_transport_kind_through_context() {
+        let retry = anyhow::Error::new(SheetTransportError {
+            message: "HTTP 503".into(),
+            retryable: true,
+        })
+        .context("delivery");
+        assert!(sheet_delivery_error_is_retryable(&retry));
+        let blocked = anyhow::Error::new(SheetTransportError {
+            message: "target mismatch".into(),
+            retryable: false,
+        });
+        assert!(!sheet_delivery_error_is_retryable(&blocked));
+        assert!(!sheet_delivery_error_is_retryable(&anyhow::anyhow!(
+            "ACK version missing"
+        )));
+    }
+
     /// **The two halves of this wire are in different languages, and nothing else checks
     /// they agree.**
     ///
@@ -854,7 +1321,16 @@ mod tests {
         }
         let internal = serde_json::to_value(internal_fixture()).unwrap();
         sent.extend(internal.as_object().unwrap().keys().cloned());
-        sent.extend(["checkVersion", "spreadsheetId", "sheetGid"].map(str::to_owned));
+        sent.extend(
+            [
+                "checkVersion",
+                "spreadsheetId",
+                "sheetGid",
+                "deliveryVersion",
+                "deliveryRevision",
+            ]
+            .map(str::to_owned),
+        );
 
         // Every `payload.<name>` the script mentions, harvested from its own text.
         let mut read: Vec<String> = script
@@ -946,9 +1422,14 @@ mod tests {
     fn sheet_check_requires_actual_target_version_and_redacts_token_in_errors() {
         let target =
             parse_sheet_url("https://docs.google.com/spreadsheets/d/fixture/edit#gid=7").unwrap();
-        let ack = serde_json::json!({"ok":true,"checkVersion":1,"spreadsheetId":"fixture","sheetGid":7,"layout":"compact","columns":["STT","Người air","Ngày","Link","Đối tác"]});
+        let ack = serde_json::json!({"ok":true,"checkVersion":1,"deliveryVersion":2,"spreadsheetId":"fixture","sheetGid":7,"layout":"compact","columns":["STT","Người air","Ngày","Link","Đối tác"]});
         assert!(validate_sheet_check_ack(&ack.to_string(), &target, "token-secret").is_ok());
-        for field in ["spreadsheetId", "sheetGid", "checkVersion"] {
+        for field in [
+            "spreadsheetId",
+            "sheetGid",
+            "checkVersion",
+            "deliveryVersion",
+        ] {
             let mut wrong = ack.clone();
             wrong[field] = serde_json::json!("wrong");
             assert!(validate_sheet_check_ack(&wrong.to_string(), &target, "token-secret").is_err());

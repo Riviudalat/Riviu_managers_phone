@@ -22,6 +22,7 @@ const POLL: Duration = Duration::from_millis(250);
 /// The exact hierarchy shape measured for one TikTok build.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SoundPickerPlan {
+    dynamic: bool,
     package: &'static str,
     entry_id: &'static str,
     current_title_id: &'static str,
@@ -73,6 +74,7 @@ const MEASURED_SOUND_PICKERS: &[MeasuredSoundPicker] = &[
     MeasuredSoundPicker {
         version: "45.4.3", language: "en",
         plan: SoundPickerPlan {
+            dynamic: false,
             package: "com.zhiliaoapp.musically",
             entry_id: ":id/dmk", current_title_id: ":id/zy1",
             section_label: "Hot", canonical_section: "trending",
@@ -90,6 +92,7 @@ const MEASURED_SOUND_PICKERS: &[MeasuredSoundPicker] = &[
     MeasuredSoundPicker {
         version: "46.1.3", language: "en",
         plan: SoundPickerPlan {
+            dynamic: false,
             package: "com.zhiliaoapp.musically",
             entry_id: ":id/dta", current_title_id: ":id/tv_top_text",
             section_label: "Hot", canonical_section: "trending",
@@ -107,6 +110,7 @@ const MEASURED_SOUND_PICKERS: &[MeasuredSoundPicker] = &[
     MeasuredSoundPicker {
         version: "46.4.3", language: "en",
         plan: SoundPickerPlan {
+            dynamic: false,
             package: "com.zhiliaoapp.musically",
             entry_id: ":id/dwh", current_title_id: ":id/tv_top_text",
             section_label: "Hot", canonical_section: "trending",
@@ -126,6 +130,7 @@ const MEASURED_SOUND_PICKERS: &[MeasuredSoundPicker] = &[
         version: "45.7.3",
         language: "en",
         plan: SoundPickerPlan {
+            dynamic: false,
             package: "com.zhiliaoapp.musically",
             entry_id: ":id/dou",
             current_title_id: ":id/tv_top_text",
@@ -149,6 +154,7 @@ const MEASURED_SOUND_PICKERS: &[MeasuredSoundPicker] = &[
         version: "38.3.2",
         language: "en",
         plan: SoundPickerPlan {
+            dynamic: false,
             package: "com.ss.android.ugc.trill",
             entry_id: ":id/c_4",
             current_title_id: ":id/so9",
@@ -171,6 +177,7 @@ const MEASURED_SOUND_PICKERS: &[MeasuredSoundPicker] = &[
         version: "46.2.1",
         language: "en",
         plan: SoundPickerPlan {
+            dynamic: false,
             package: "com.zhiliaoapp.musically",
             entry_id: ":id/dvc",
             current_title_id: ":id/tv_top_text",
@@ -196,6 +203,7 @@ const MEASURED_SOUND_PICKERS: &[MeasuredSoundPicker] = &[
         version: "46.2.42",
         language: "en",
         plan: SoundPickerPlan {
+            dynamic: false,
             package: "com.zhiliaoapp.musically",
             entry_id: ":id/dv3",
             current_title_id: ":id/tv_top_text",
@@ -221,6 +229,7 @@ const MEASURED_SOUND_PICKERS: &[MeasuredSoundPicker] = &[
         version: "46.0.41",
         language: "en",
         plan: SoundPickerPlan {
+            dynamic: false,
             package: "com.zhiliaoapp.musically",
             entry_id: ":id/dsv",
             current_title_id: ":id/tv_top_text",
@@ -244,6 +253,19 @@ const MEASURED_SOUND_PICKERS: &[MeasuredSoundPicker] = &[
 ];
 
 impl SoundPickerPlan {
+    pub fn resolve_runtime(package: &str, locale: &str, version: &str) -> Option<Self> {
+        Self::resolve(package, locale, version).or_else(|| {
+            let language = crate::tiktok_labels::normalise_language(locale);
+            MEASURED_SOUND_PICKERS
+                .iter()
+                .find(|p| p.plan.package == package && p.language == language)
+                .map(|p| {
+                    let mut plan = p.plan;
+                    plan.dynamic = true;
+                    plan
+                })
+        })
+    }
     pub(crate) fn post_back_query(self) -> Option<ElementQuery<'static>> {
         self.post_back_id.map(ElementQuery::ResourceIdSuffix)
     }
@@ -291,6 +313,7 @@ impl SoundPickerPlan {
 /// One observed pool plus the exact row targets that produced it.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ObservedSoundPool {
+    effective_plan: Option<SoundPickerPlan>,
     pub candidates: Vec<SoundCandidate>,
     maximum_visible: usize,
     targets: Vec<ElementBox>,
@@ -298,6 +321,9 @@ pub struct ObservedSoundPool {
 }
 
 impl ObservedSoundPool {
+    pub fn effective_plan(&self, fallback: SoundPickerPlan) -> SoundPickerPlan {
+        self.effective_plan.unwrap_or(fallback)
+    }
     pub fn target(&self, index: usize) -> Option<&ElementBox> {
         self.targets.get(index)
     }
@@ -313,13 +339,17 @@ pub async fn open_and_observe_sounds(
         (1..=5).contains(&maximum_visible),
         "sound observer limit must be within 1..=5"
     );
-    let entry = exactly_one(
-        session
-            .locate_all(ElementQuery::ResourceIdSuffix(plan.entry_id))
-            .await
-            .context("locate sound-picker entry")?,
-        "sound-picker entry",
-    )?;
+    if plan.dynamic {
+        return open_dynamic_sounds(session, plan, maximum_visible).await;
+    }
+    let entries = session
+        .locate_all(ElementQuery::ResourceIdSuffix(plan.entry_id))
+        .await
+        .context("locate sound-picker entry")?;
+    if entries.is_empty() && !session.gui_session_epoch().is_empty() {
+        return open_dynamic_sounds(session, plan, maximum_visible).await;
+    }
+    let entry = exactly_one(entries, "sound-picker entry")?;
     session
         .tap(entry.centre())
         .await
@@ -332,6 +362,81 @@ pub async fn open_and_observe_sounds(
     observe_sound_pool(session, plan, maximum_visible).await
 }
 
+async fn open_dynamic_sounds(
+    session: &dyn UiSession,
+    plan: SoundPickerPlan,
+    maximum: usize,
+) -> anyhow::Result<ObservedSoundPool> {
+    let source =
+        crate::ui_automation::tree::Tree::parse(session.hierarchy_source_snapshot().await?)?;
+    let mut entries = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for candidate in MEASURED_SOUND_PICKERS
+        .iter()
+        .filter(|p| p.plan.package == plan.package)
+    {
+        if seen.insert(candidate.plan.entry_id) {
+            entries.extend(source.matching(
+                plan.package,
+                ElementQuery::ResourceIdSuffix(candidate.plan.entry_id),
+            ));
+        }
+    }
+    entries.sort_unstable();
+    entries.dedup();
+    let [index] = entries.as_slice() else {
+        anyhow::bail!("sound_entry_ambiguous: giao diện chưa có duy nhất nút nhạc");
+    };
+    let button = source.nodes[*index].rect().context("sound entry bounds")?;
+    anyhow::ensure!(button.enabled && button.clickable, "sound entry disabled");
+    session.tap(button.centre()).await?;
+    let deadline = Instant::now() + std::time::Duration::from_secs(30);
+    let selected = loop {
+        let tree =
+            crate::ui_automation::tree::Tree::parse(session.hierarchy_source_snapshot().await?)?;
+        let mut matches = Vec::new();
+        for candidate in MEASURED_SOUND_PICKERS
+            .iter()
+            .filter(|p| p.plan.package == plan.package)
+        {
+            let p = candidate.plan;
+            let exists = |id| {
+                !tree
+                    .matching(plan.package, ElementQuery::ResourceIdSuffix(id))
+                    .is_empty()
+            };
+            if exists(p.row_id)
+                && exists(p.title_id)
+                && exists(p.artist_id)
+                && p.snapshot_layout()
+                    .is_none_or(|l| exists(l.tab_id) && exists(l.viewport_id))
+            {
+                matches.push(p);
+            }
+        }
+        if let Some(first) = matches.first().copied() {
+            anyhow::ensure!(
+                matches.iter().all(|p| p.row_id == first.row_id
+                    && p.title_id == first.title_id
+                    && p.artist_id == first.artist_id
+                    && p.layout == first.layout
+                    && p.selection == first.selection
+                    && p.choose_id == first.choose_id),
+                "sound_layout_ambiguous"
+            );
+            break first;
+        }
+        anyhow::ensure!(Instant::now() < deadline, "sound_layout_unrecognized");
+        tokio::time::sleep(POLL).await;
+    };
+    if selected.snapshot_layout().is_some() {
+        snapshot::select_section_tab(session, selected).await?;
+    }
+    let mut pool = observe_sound_pool(session, selected, maximum).await?;
+    pool.effective_plan = Some(selected);
+    Ok(pool)
+}
+
 async fn observe_sound_pool(
     session: &dyn UiSession,
     plan: SoundPickerPlan,
@@ -341,7 +446,7 @@ async fn observe_sound_pool(
         return snapshot::observe(session, plan, maximum_visible).await;
     }
     let deadline = Instant::now() + PICKER_WINDOW;
-    let (rows, titles, artists, choices, markers) = loop {
+    loop {
         let section = session
             .locate_all_described(ElementQuery::Text {
                 value: plan.section_label,
@@ -380,23 +485,30 @@ async fn observe_sound_pool(
             );
         }
         if section.len() == 1 && !rows.is_empty() && !titles.is_empty() {
-            break (rows, titles, artists, choices, markers);
+            match assemble_pool(
+                plan,
+                rows,
+                titles,
+                artists,
+                choices,
+                markers,
+                maximum_visible,
+            ) {
+                Ok(pool) => return Ok(pool),
+                Err(error) if Instant::now() >= deadline => return Err(error.context(
+                    "sound_candidates_incomplete: bảng nhạc chưa tải đủ row/title/artist/choose",
+                )),
+                Err(_) => {
+                    tokio::time::sleep(POLL).await;
+                    continue;
+                }
+            }
         }
         if Instant::now() >= deadline {
             anyhow::bail!("sound picker did not expose one measured section with candidate rows");
         }
         tokio::time::sleep(POLL).await;
-    };
-
-    assemble_pool(
-        plan,
-        rows,
-        titles,
-        artists,
-        choices,
-        markers,
-        maximum_visible,
-    )
+    }
 }
 
 /// Tap the selected row once and prove the editor now names the same sound.
@@ -406,6 +518,7 @@ pub async fn choose_and_confirm_sound(
     pool: &ObservedSoundPool,
     index: usize,
 ) -> anyhow::Result<()> {
+    let plan = pool.effective_plan.unwrap_or(plan);
     let candidate = pool
         .candidates
         .get(index)
@@ -467,10 +580,31 @@ pub async fn confirm_sound(
     anyhow::ensure!(!expected.is_empty(), "selected sound title is empty");
     let deadline = Instant::now() + READBACK_WINDOW;
     loop {
-        let rows = session
-            .locate_all_described(ElementQuery::ResourceIdSuffix(plan.current_title_id))
-            .await
-            .unwrap_or_default();
+        let rows = if plan.dynamic {
+            let mut observed = Vec::new();
+            let mut ids = std::collections::HashSet::new();
+            for candidate in MEASURED_SOUND_PICKERS
+                .iter()
+                .filter(|p| p.plan.package == plan.package)
+            {
+                if ids.insert(candidate.plan.current_title_id) {
+                    observed.extend(
+                        session
+                            .locate_all_described(ElementQuery::ResourceIdSuffix(
+                                candidate.plan.current_title_id,
+                            ))
+                            .await
+                            .unwrap_or_default(),
+                    );
+                }
+            }
+            observed
+        } else {
+            session
+                .locate_all_described(ElementQuery::ResourceIdSuffix(plan.current_title_id))
+                .await
+                .unwrap_or_default()
+        };
         if matches!(rows.as_slice(), [only] if only.description.as_deref().is_some_and(|value| value.trim() == expected))
         {
             return Ok(());
@@ -555,6 +689,7 @@ fn assemble_pool(
     let targets = unique_targets;
     let selected_index = unique_selected;
     Ok(ObservedSoundPool {
+        effective_plan: None,
         candidates,
         maximum_visible,
         targets,
@@ -805,6 +940,7 @@ mod tests {
     #[test]
     fn sound_reproof_rejects_changed_pool_and_uses_fresh_position() {
         let expected = ObservedSoundPool {
+            effective_plan: None,
             maximum_visible: 5,
             selected_index: None,
             candidates: vec![SoundCandidate {

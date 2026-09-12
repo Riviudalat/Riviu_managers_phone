@@ -104,17 +104,27 @@ fn project(f: Facts) -> anyhow::Result<InternalSheetReportRow> {
     };
     let note = if f.state == "cancelled" || (f.campaign_state == "cancelled" && !sent && !verified)
     {
-        "Đã hủy"
+        "Đã hủy".to_owned()
     } else if verified {
-        ""
+        String::new()
     } else {
-        evidence["verificationStatus"]["reason"]
+        let raw = evidence["verificationStatus"]["reason"]
             .as_str()
             .or_else(|| post["linkCaptureReason"].as_str())
             .or_else(|| evidence["reason"].as_str())
             .or_else(|| evidence["message"].as_str())
             .or(f.error.as_deref())
-            .unwrap_or("")
+            .unwrap_or("");
+        if evidence["verificationStatus"]["state"] == "needsReview"
+            && !raw.to_ascii_lowercase().contains("tự kiểm tra đã dừng")
+            && !raw.is_empty()
+        {
+            format!("{raw} · Tự kiểm tra đã dừng — chọn Kiểm tra liên kết")
+        } else if evidence["verificationStatus"]["state"] == "needsReview" && raw.is_empty() {
+            "Tự kiểm tra đã dừng — chọn Kiểm tra liên kết".into()
+        } else {
+            raw.into()
+        }
     };
     let state_notes = note
         .chars()
@@ -199,6 +209,16 @@ impl Database {
         Ok(page.rows.into_iter().next())
     }
 
+    /// New delivery workers only enumerate campaigns which explicitly opted into v2.
+    /// Historical report reads remain available to the UI, without being replayed.
+    pub fn bound_internal_publish_report(
+        &self,
+        assignment_id: &str,
+    ) -> anyhow::Result<Option<InternalSheetReportRow>> {
+        let conn = self.conn()?;
+        internal_report_on(&conn, assignment_id)
+    }
+
     fn internal_publish_reports(
         &self,
         after_id: Option<&str>,
@@ -255,6 +275,26 @@ impl Database {
     }
 }
 
+pub(super) fn internal_report_on(
+    conn: &Connection,
+    assignment_id: &str,
+) -> anyhow::Result<Option<InternalSheetReportRow>> {
+    let facts = conn.query_row(
+        "SELECT a.id,a.udid,a.state,a.error_code,a.effect_intent,a.evidence_json,a.revision,c.revision,c.state,c.request_json,b.manifest_json
+         FROM publish_assignments a JOIN publish_campaigns c ON c.id=a.campaign_id JOIN publish_bundles b ON b.id=a.bundle_id
+         WHERE a.id=?1 AND json_valid(c.request_json)
+           AND json_extract(c.request_json,'$.sheetDelivery.version')=2
+           AND json_extract(c.request_json,'$.sheetEnabled')=1",
+        [assignment_id],
+        |row| Ok(Facts {
+            assignment_id:row.get(0)?,udid:row.get(1)?,state:row.get(2)?,error:row.get(3)?,
+            intent:row.get(4)?,evidence:row.get(5)?,revision:row.get(6)?,campaign_revision:row.get(7)?,
+            campaign_state:row.get(8)?,request:row.get(9)?,manifest:row.get(10)?,
+        }),
+    ).optional()?;
+    facts.map(project).transpose()
+}
+
 pub struct InternalPublishReportPage {
     pub rows: Vec<InternalSheetReportRow>,
     pub next_cursor: Option<String>,
@@ -282,6 +322,9 @@ mod tests {
             partners: vec!["Partner B".into(), "Partner A".into()],
         };
         let request = crate::PublishCampaignRequest {
+            sheet_delivery: None,
+            verification_contract_version: None,
+            verification_builds: vec![],
             sheet_enabled: sheet,
             request_id: Uuid::new_v4().to_string(),
             source_root: "/fixture".into(),
@@ -290,6 +333,7 @@ mod tests {
             run_at: None,
             visibility: crate::PublishVisibility::Public,
             cleanup_policy: crate::PublishCleanupPolicy::KeepImportedAssets,
+            network: crate::SocialNetwork::TikTok,
             sound_policy: crate::PublishSoundPolicy::Default,
             execution_confirmed: false,
             target_snapshot: Some(crate::ResolvedTargetSnapshot {

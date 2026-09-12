@@ -36,6 +36,7 @@ fn to_android_locator(label: LabelMatch) -> Locator {
         LabelMatch::TextContains(value) => Locator::TextContains(value.to_string()),
         // Escaped, not interpolated: the agent takes a Java regex here, and a resource-id
         // suffix is a **literal**. The production translation in `session.rs` does the same.
+        LabelMatch::Semantic(_) => Locator::ResourceIdMatches("^$".into()),
         LabelMatch::ClassName(value) => Locator::ClassName(value.to_string()),
         LabelMatch::ResourceId(value) => Locator::ResourceIdMatches(format!(
             ".*{}",
@@ -2800,6 +2801,7 @@ async fn read_the_gallery_candidates(
         .label(TikTokControl::ComposerShutter)
         .and_then(|label| {
             let matches = |node: &Node| match label {
+                LabelMatch::Semantic(_) => false,
                 LabelMatch::Exact(value) => node.desc == value,
                 LabelMatch::Contains(value) => node.desc.contains(value),
                 LabelMatch::Text(value) => node.text == value,

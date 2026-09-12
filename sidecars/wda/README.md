@@ -1,8 +1,24 @@
 # Riviu unified on-device agent
 
-The product runtime installs `RiviuAgent.ipa` (`com.mrph.svc`) and validates it
-against `agent-manifest.json` before every install or repair. It provides the
-RT-MMO control channel on port 8906 and MJPEG on port 9093.
+Riviu Agent is the on-device iPhone component that supplies screen frames and
+accepts touch, swipe and text commands. The desktop selects an artifact in
+`apps/desktop/src-tauri/src/agent_runtime.rs`; every install/repair validates its
+manifest and IPA hash. Android uses its own ADB/UiAutomator2/helper path.
+
+| Mode | Artifact | Control / MJPEG | Declared capabilities |
+|---|---|---|---|
+| candidate / riviu-agent / full | `RiviuAgent-candidate.ipa`, `candidate-manifest.json` | 8916 / 9094 | stream, tap, swipe, clipboard, text, pushMedia |
+| text / candidate-text | `RiviuAgent-text.ipa`, `text-manifest.json` | 8916 / 9094 | stream, tap, swipe, clipboard, text |
+| rt-mmo | `RiviuAgent.ipa`, `agent-manifest.json` | 8906 / 9093 | stream, tap, swipe, text, clipboard, pushMedia |
+
+The desktop passes `prefer_candidate=true`. Without overrides, the build-time
+`RIVIU_DEFAULT_AGENT_MODE` wins, otherwise candidate is selected. Runtime override
+order is `RIVIU_AGENT_MODE`, then `RIVIU_WDA_BACKEND`; `RIVIU_AGENT_MANIFEST` can
+select an explicit manifest. Full uses an ephemeral session token; candidate/text
+use the candidate credential path. Manifest capability declarations and historical
+gate results do not certify a newly connected device or a currently valid signature.
+
+## RT-MMO reference artifact
 
 Installed identity is bound to bundle/version/build plus payload app
 `777wealth.app` and the signer identity recorded in the manifest. Bundle and

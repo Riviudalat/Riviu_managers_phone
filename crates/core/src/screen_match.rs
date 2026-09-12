@@ -67,6 +67,44 @@ pub fn find_template(haystack: &GrayImage, needle: &GrayImage) -> Option<Match> 
     best
 }
 
+/// Two disjoint lookalike regions are ambiguous. This does not change the legacy matcher.
+pub fn find_unique_template(
+    haystack: &GrayImage,
+    needle: &GrayImage,
+    threshold: f64,
+    margin: f64,
+) -> Option<Match> {
+    if !threshold.is_finite()
+        || !margin.is_finite()
+        || !(0.0..=1.0).contains(&threshold)
+        || margin < 0.0
+    {
+        return None;
+    }
+    let best = find_template(haystack, needle)?;
+    if best.score < threshold {
+        return None;
+    }
+    let mut masked = haystack.clone();
+    let radius_x = needle.width() as i64;
+    let radius_y = needle.height() as i64;
+    for y in (best.cy as i64 - radius_y).max(0)
+        ..(best.cy as i64 + radius_y).min(i64::from(masked.height()))
+    {
+        for x in (best.cx as i64 - radius_x).max(0)
+            ..(best.cx as i64 + radius_x).min(i64::from(masked.width()))
+        {
+            masked.put_pixel(x as u32, y as u32, image::Luma([127]));
+        }
+    }
+    if find_template(&masked, needle)
+        .is_some_and(|second| second.score >= threshold && best.score - second.score < margin)
+    {
+        return None;
+    }
+    Some(best)
+}
+
 /// Zero-mean needle statistics, reused across every window.
 struct Needle {
     dev: Vec<f64>,

@@ -15,6 +15,50 @@ phạm vi máy rõ ràng và kết quả có thể đọc lại. Chọn hồ sơ
 
 ## Thiết bị
 
+### Riviu Helper trên Android
+
+Khi phát hiện điện thoại Android đã cho phép gỡ lỗi USB, Riviu Manager tự kiểm tra
+**Riviu Helper** và cài app nếu thiếu, hoặc cập nhật bản cũ chưa có biểu tượng. App
+hiển thị tên **Riviu Helper** cùng logo Riviu trong danh sách ứng dụng. Mở app để xem
+chức năng và trạng thái dịch vụ; thao tác này không đổi bàn phím hoặc mở quyền mới.
+
+Việc chuẩn bị chạy nền tối đa hai máy cùng lúc. Máy đang có tác vụ hoặc được mở điều
+khiển sẽ chờ đến khi rảnh; stream vẫn giữ nguyên. Máy đã có bản phù hợp được dùng lại,
+không cài lại mỗi lần quét. Cài xong phải đọc lại phiên bản và biểu tượng mới tính là
+hoàn tất. Dịch vụ clipboard/media chỉ khởi động khi một chức năng cần sử dụng.
+
+Nếu điện thoại chặn **Cài đặt qua USB**, ứng dụng ghi rõ lỗi ở máy và **Dữ liệu → Nhật
+ký thao tác**. Bật quyền cài qua USB trên điện thoại rồi ngắt/kết nối lại để thử lại.
+Mỗi kết nối chỉ có một lần thử cài, không lặp cài liên tục khi bị từ chối. Máy chưa
+chấp nhận gỡ lỗi USB hoặc mất kết nối chưa bắt đầu cài.
+
+Thanh công cụ đặt **Mở máy**, **Đồng bộ**, **Nhóm** và **Công cụ** cạnh phạm vi máy.
+Lệnh **Sửa Riviu Agent** nằm trong **Bảo trì**; hộp xác nhận nêu rõ số máy và việc
+khởi động lại stream. Nút quét thiết bị nằm bên phải toolbar. Trạng thái **Toàn hệ
+thống** trên header khác phạm vi **Máy thực hiện** của từng tác vụ.
+
+Các cửa sổ chi tiết giữ thao tác bàn phím bên trong; Escape đóng cửa sổ trên cùng
+và trả focus về nơi mở. Cửa sổ tiến trình cho phép tiếp tục làm việc với trang chính.
+
+### Ghi Macro
+
+Vào **Công cụ → Macro**, nhập tên nếu cần rồi bấm **Bắt đầu ghi**. Hộp công cụ thu lại
+thành thanh **Ghi Macro**, gồm số bước và **Dừng ghi**. Mở điện thoại để chạm, vuốt hoặc
+bấm phím; thanh ghi nằm trong menu điều khiển, luôn ở ngoài vùng danh sách cuộn.
+Đổi máy, đóng điện thoại, mất kết nối hoặc chuyển trang vẫn giữ phiên ghi; khi không mở
+điện thoại, thanh ghi nằm dưới header ứng dụng. Escape đóng điện thoại, không dừng ghi.
+
+Bấm **Dừng ghi** để trở lại đúng tab Macro và lưu. Tên nháp, số vòng và các bước được giữ
+nguyên; điện thoại đang mở vẫn ở phía dưới hộp công cụ. Nếu chưa có bước nào, nút lưu
+chưa bật. Khi dừng ở trang khác, hộp chỉ hiển thị Macro; đóng hộp rồi mở Công cụ tại
+Thiết bị để dùng các công cụ khác.
+
+Máy đích để phát lại được chốt khi bắt đầu phiên ghi. Đổi lựa chọn trong lưới hoặc máy
+vừa kết nối không tự mở rộng phạm vi này. Phiên bắt đầu khi không có máy đích vẫn có
+thể lưu Macro để dùng sau, nhưng không phát lại lên máy vừa xuất hiện. Bắt đầu/dừng/lưu
+bản ghi không tự phát lại thao tác; nút **Chạy** là hành động riêng. Bản ghi đang thu
+giữ trong phiên ứng dụng; lưu thành Macro trước khi đóng ứng dụng để giữ lâu dài.
+
 Thanh **Tiến trình công việc** nằm trong cửa sổ nổi ở góc trên bên phải khi có tác vụ đang chạy
 hoặc vừa kết thúc. Cửa sổ nằm trên các trang, không chiếm diện tích layout; kéo tiêu đề để đổi vị trí. Bấm mở rồi chọn số máy/alias để xem kết quả và nhật ký
 `giờ:phút:giây`. Chuyển trang vẫn giữ monitor. 100% là đã xử lý xong, không có nghĩa
@@ -74,15 +118,17 @@ Trang chỉ có một ô nhập tổng video; phần Hành vi giữ các tùy ch
 hiển thị lại giới hạn/vòng hay các tỷ lệ tương tác đã có ở thiết lập phiên.
 
 **Máy thực hiện** hiển thị tất cả máy trong một khung **hai cột** có ô tick, không phân trang.
-**Chọn tất cả** chọn các máy sẵn sàng trong danh sách, kể cả ngoài kết quả tìm kiếm;
+**Chọn tất cả sẵn sàng** chọn các máy sẵn sàng trong danh sách, kể cả ngoài kết quả tìm kiếm;
 **Bỏ chọn** xóa lựa chọn. Máy bận/chưa sẵn sàng không được chọn thêm. Ô máy tự gọn
 khi danh sách đông; cuộn trong khung khi cần, số máy luôn giữ nguyên khi tìm kiếm.
-Ô **Phạm vi thiết bị** nằm cùng hàng Chọn tất cả/Bỏ chọn để chọn nhóm hoặc toàn bộ.
+Ô **Phạm vi thiết bị** nằm cùng hàng Chọn tất cả sẵn sàng/Bỏ chọn để chọn nhóm hoặc toàn bộ.
 Khung máy đã thu hẹp, phần cấu hình phiên có thêm chỗ hiển thị.
-Header ghi **Đã chọn X/Y**; tên/model mỗi máy hiện một lần. Cuộn trong danh sách
+Header ghi **Đã chọn X** cùng số máy sẵn sàng và tổng máy; tên/model mỗi máy hiện một lần. Cuộn trong danh sách
 máy hoặc phần cấu hình độc lập, thanh tab và nút bắt đầu giữ ở vị trí cố định.
 
-**Thiết lập** chứa cấu hình phiên, Hành vi, AI và Bình luận. Tab **Hẹn giờ** chứa lịch
+**Thiết lập** chứa cấu hình phiên; **Tuỳ chỉnh nâng cao** chứa Hành vi, AI và Bình luận.
+Nút **Sửa thiết lập** tự mở phần nâng cao và đưa focus về trường cần sửa.
+Mỗi máy hiển thị trạng thái bằng chữ cùng lý do khi chưa sẵn sàng. Tab **Hẹn giờ** chứa lịch
 tự chạy và các khung giờ riêng; bấm **Áp dụng hẹn giờ** để lưu lịch xuống ứng dụng.
 Chuyển tab hoặc sửa bản nháp chưa bắt đầu phiên; **Kiểm tra & bắt đầu** vẫn là
 thao tác riêng. Giữ máy tính và Riviu đang mở để lịch chạy.
@@ -137,6 +183,20 @@ bảng kết quả theo máy; **Xem log** mở bằng chứng và thao tác xử
 đúng chuỗi URL hiện tại; sửa lỗi parse trước khi chạy; review assignment và số bài/số máy;
 chạy rồi theo dõi kết quả từng hành động.
 
+**Hội thoại theo kịch bản** cho mỗi link một nội dung riêng. Chọn bài trong mục kịch bản,
+dán các dòng `@vai: nội dung`, bấm Phân tích rồi sửa câu, chủ đề, parent và tag.
+AI có thể soạn trước từ mô tả/caption do bạn nhập; toàn bộ câu vẫn phải duyệt trước chạy.
+Gán mỗi vai vào một máy Android và username. Một vai luôn giữ cùng máy, kể cả khi
+quay lại link sau nhiều lượt. Reply chờ parent đã xác nhận; mọi tag phải được chọn
+và xác nhận từ gợi ý TikTok trước Send. Tag được gắn sau phần chữ để giữ token.
+
+Nhập thời lượng chung (mặc định 120 phút) hoặc khung giờ bắt đầu–kết thúc. Engine
+chọn một câu mỗi lượt, luân phiên các link đủ điều kiện; không trả lời hết một bài
+rồi mới sang bài khác. Dự toán giữ 10% thời gian dự phòng, cảnh báo khối lượng vượt
+thời lượng. Hết giờ dừng câu chưa gửi, hoàn tất đọc lại câu đã Send; không tự gửi
+lại câu đã xác nhận hoặc chưa chắc kết quả. Theo dõi ghi giờ kết thúc, lượt kế,
+người nói và nhánh. Mở lại app giữ kịch bản và tiến độ; tiếp tục dùng giờ kết thúc cũ.
+
 `Riêng lẻ` cho phép một máy và một bình luận; kiểu chuỗi vẫn cần ít nhất hai máy.
 Tim/Lưu và bình luận thủ công không phụ thuộc cấu hình AI. “Bỏ qua: chưa đọc được
 trạng thái” không có nghĩa đã Tim/Lưu; xem lý do và bằng chứng trước khi chạy lượt mới.
@@ -167,6 +227,21 @@ phần được hệ thống xác định còn hợp lệ, không gửi lại m�
 
 ## Đăng bài
 
+Kết quả kiểm tra liệt kê riêng nội dung, luồng soạn, nhạc, dung lượng, kết nối,
+chuyển media, khả năng xác minh link và lượt trước đang chờ. Các mục tài khoản,
+clipboard và kết quả xuất bản ghi **Chưa quan sát** cho tới khi chạy bước tương ứng.
+Mã lỗi lấy link và bài chờ xác minh có thông báo riêng; bốn mục đầu đạt chưa có
+nghĩa toàn bộ đợt đăng đã sẵn sàng. Locale tiếng Anh có vùng như `en-US` dùng
+cùng hợp đồng nhãn với `en`.
+
+Trong **Cài đặt → Kết nối và API → Nhận diện giao diện**, bật/tắt hỗ trợ AI,
+chọn provider/model hoặc dùng cấu hình AI đã lưu, và đặt trần request. Dịch vụ
+nhận diện khởi động khi cần. **Kiểm tra dịch vụ** chỉ xác nhận tiến trình và
+giao thức; kết quả model phải được đối chiếu với màn hình trong lúc chạy.
+**Xuất chẩn đoán nhận diện** giữ các quan sát và request liên quan để kỹ thuật
+phát lại. **Nhập gói tương thích** yêu cầu fixture đúng và thiếu/mơ hồ cho từng
+target; **Khôi phục gói tương thích trước** áp dụng cho các phiên mới.
+
 Các tab chính là **Thiết lập · Hẹn giờ · Theo dõi**. Thiết lập mở **Bàn đăng nhanh**:
 nội dung, caption/đối tác và máy thực hiện nằm trên cùng màn hình. Ở cửa sổ nhỏ,
 cuộn trong vùng làm việc để xem phần dưới; nút **Kiểm tra & đăng** ở cuối vẫn giữ vị trí.
@@ -174,20 +249,65 @@ Thanh đầu đặt **Chọn thư mục** cạnh **Quét**, cùng ô **Link Goog
 **Kết nối Sheet**. Đăng bài không còn phần hồ sơ hoặc tab cài đặt riêng. Nhập link Sheet
 rồi kiểm tra; đọc được bảng chưa đồng nghĩa đã xác minh đúng kết nối ghi kết quả.
 Nút này tự tạo tiêu đề nếu tab hoàn toàn trống; không thêm hàng thử. Kết quả chỉ
-xanh khi kết nối ghi xác nhận đúng bảng và tab. Bản nội bộ0.2.21 mang cấu hình
-Sheet chung, máy mới tự nạp kết nối khi chưa có cấu hình. Bảng đã có dữ liệu giữ nguyên.
+xanh khi kết nối ghi xác nhận đúng bảng, tab và phiên bản giao nhận hiện tại. Nếu
+báo cần cập nhật Apps Script, làm theo [hướng dẫn Sheet](apps-script/README.md)
+rồi kết nối lại. Bản nội bộ giữ cấu hình webhook/token đi kèm; token được đưa vào
+kho xác thực hệ điều hành. Ô Link Sheet để trống trên máy mới. Khi nâng cấp, link
+mặc định cũ được xóa đúng một lần; cấu hình kết nối giữ nguyên. Link bạn nhập và
+kết nối sau đó được lưu bình thường. Mở trang chỉ kiểm tra; nút Kết nối mới chuẩn
+bị header nếu bảng trống.
 Khi đã nhập link, cần xác minh thành công trước khi đăng hoặc lưu lịch có bật ghi
 Sheet. Có thể tắt **Ghi kết quả lên Sheet** để chạy lượt không ghi bảng.
+Khi kiểm tra trước đăng hoặc lưu lịch, Riviu chốt đúng bảng/tab và chế độ báo cáo
+của lượt đó. Đổi kết nối cho lượt mới không chuyển các bài cũ sang bảng khác.
+Lượt cũ chưa có đích đã chốt giữ nguyên lịch sử để kiểm tra, không tự gửi sang
+kết nối mới.
 
-Khung **Máy thực hiện** có nút **Chọn nhanh**: có bài/máy đã chọn thì dùng tập đó;
-chưa chọn thì lấy bài trong nguồn (tối đa100) và máy sẵn sàng trong phạm vi.
-Mỗi máy nhận một bài; các cặp đã ghép được giữ. Thiếu máy vẫn ghép phần đủ và báo
-số bài còn thiếu. **Hoàn tác** trả lại lần gán nhanh gần nhất nếu chưa sửa ánh xạ.
+Khung **Máy thực hiện** có nút **Chọn nhanh**: lấy bài trong nguồn (tối đa 100) và
+mọi máy sẵn sàng trong phạm vi; mỗi máy một bài. Cặp đã ghép hợp lệ được giữ. Nếu đợt
+trước chỉ gán một phần mà sau đó thêm máy sẵn sàng, bấm lại sẽ lấp tiếp máy trống bằng
+bài còn trong nguồn — không kẹt ở tập bài/máy của lần gán cũ. Bài đang chọn chưa đủ máy
+vẫn chỉ dùng tập đó cho đến khi đã ghép xong. Thiếu máy thì ghép phần đủ và báo số bài
+còn lại vì hết máy. **Hoàn tác** trả lại lần gán nhanh gần nhất nếu chưa sửa ánh xạ.
 Bỏ tick máy gỡ bài của máy đó; **Máy nhận bài đang chỉnh** cho đổi riêng từng bài.
 Dòng tổng kết và hộp kiểm tra ghi rõ Sheet đang bật hay tắt. Có thể Hủy khi đang
 chuyển nội dung trước Đăng. Theo dõi tự đọc lại kết quả mỗi5giây khi đang mở.
+Đăng nhiều máy chạy theo từng máy: máy nào tải đủ và xác nhận ảnh xong sẽ bắt đầu
+đăng ngay khi có lượt điều khiển, trong lúc máy khác tiếp tục tải. Một máy lỗi
+không dừng cả nhóm. Chi tiết hiển thị đồng thời các máy đang tải, chờ đăng, đang
+gửi và chờ liên kết. Hủy chặn các bài chưa bấm Đăng; bài đã gửi vẫn được xác minh.
+Trước nút Đăng, Riviu kiểm tra clipboard của Helper rồi khôi phục nội dung ban đầu.
+Phiên bản TikTok phải khớp lần kiểm tra đã duyệt. Mỗi tài khoản chỉ có một bài
+đang chờ xác minh link, kể cả khi đăng nhập trên nhiều máy; bài sau chờ bài trước
+có link. Chờ ghi Sheet không giữ tài khoản. Lượt cũ chưa qua cơ chế kiểm tra mới
+cần kiểm tra và tạo lại trước khi chạy; bài đã gửi trong lịch sử không tự kiểm lại.
+
+Khi tìm link, app đọc toàn bộ caption, tài khoản và thời gian của bài. Caption bị
+rút gọn chỉ được mở khi chính vùng caption có thể bấm và nhận diện đúng; sau đó
+đọc lại nội dung. Có nhiều bài cùng khớp hoặc chưa đủ bằng chứng thì giữ trạng thái
+cần kiểm tra. App không tự bấm Đăng lần nữa để giải quyết lỗi lấy link.
+
 Sau Đăng, Theo dõi hiển thị lý do chưa xác minh, lần kiểm gần nhất và lần kiểm
 kế tiếp. App giữ TikTok/media khi chờ; link xác minh xong được gửi Sheet ngay.
+Với bài **hẹn giờ**, phiên đăng trả quyền điều khiển trước khi lấy link. Lần kiểm
+tra đầu sau 2 phút kể từ Đăng, sau đó 5 phút/lần, tối đa 4 giờ. Lỗi đọc/kết nối
+giãn nhịp tối đa 20 phút; mở lại app vẫn giữ mốc Đăng và lịch kiểm tra. Hết 4 giờ
+thì chuyển Cần kiểm tra; nút kiểm tra link thủ công vẫn dùng được, không đăng lại.
+Mọi máy đang chờ liên kết kiểm tra độc lập khi Ready (một observer mỗi máy), chỉ
+chiếm quyền điều khiển trong từng lần đọc. Cột Link trên Sheet chỉ có giá trị khi
+trạng thái **Đã xác minh**; trước đó trống là đúng — đọc Trạng thái / Lỗi. Hết ngân
+sách tự kiểm thì bấm **Kiểm tra liên kết** (không đăng lại).
+Sheet nội bộ cập nhật đúng dòng/STT của mỗi bài dù link về ngược thứ tự. Cột Link
+chỉ có giá trị khi trạng thái **Đã xác minh**; trước đó cột trống là đúng — đọc cột
+Trạng thái / Lỗi để biết đang chờ hay đã dừng tự kiểm tra. Mẫu chỉ ghi bài đã xác
+minh thì thêm dòng theo thứ tự nhận link; ngày vẫn lấy lúc Đăng. Gửi lại cùng kết
+quả không thêm dòng mới.
+Kết quả **Ghi Sheet** được theo dõi riêng: **Đang chờ ghi Sheet** có giờ thử tiếp,
+số lần đã thử và lỗi gần nhất; **Cần xử lý ghi Sheet** yêu cầu sửa nguyên nhân rồi
+bấm **Ghi lại Sheet**; **Sheet đã xác nhận** chứng minh đúng hàng và link đã được
+ghi. Mất mạng được thử lại với thời gian chờ tăng dần, tối đa 15 phút giữa các
+lần; khởi động lại app giữ lịch gửi. Máy đã có link không cần chờ các máy khác
+để gửi kết quả lên Sheet. Lỗi báo cáo tiến độ cũng không chặn link mới của máy khác.
 
 Bản 0.2.16 kiểm tra phone có đang bị một máy tính khác điều khiển ADB qua mạng
 trước khi chuẩn bị đăng. Nếu thấy địa chỉ máy phụ, ngắt kết nối phone ở máy phụ;
@@ -199,11 +319,11 @@ chỉ có biểu tượng Wi-Fi chưa đủ để tải danh sách nhạc.
 bài và cặp bài–máy đã chọn được mang sang. Bản nháp hiện có được giữ khi chuyển tab.
 Ngày/giờ nằm trên cùng, danh sách bài bên trái, máy nhận và bảng phân công bên phải.
 Trong cửa sổ thấp, cuộn vùng nội dung để xem bảng; ngày/giờ và nút lưu vẫn cố định.
-**Chọn nhanh** nằm đầu vùng máy: bấm một lần để tự gán bài. Có bài đã chọn thì
-dùng tập đó; chưa chọn bài thì lấy tối đa 100 bài trong nguồn. Có máy đã tick thì
-chỉ dùng tập đó; chưa tick máy thì lấy máy sẵn sàng trong phạm vi. Cặp đã gán giữ
-nguyên, máy dư không nhận bài; thiếu máy hiện số bài còn thiếu. Bấm lại không
-đảo cặp, **Hoàn tác** phục hồi toàn bộ lần chọn nhanh.
+**Chọn nhanh** nằm đầu vùng máy: bấm một lần để tự gán bài từ nguồn (tối đa 100) vào
+mọi máy sẵn sàng trong phạm vi. Cặp đã gán giữ nguyên; bấm lại sẽ lấp máy sẵn sàng
+mới bằng bài còn lại, không kẹt ở lần chọn cũ. Thiếu máy thì báo số bài còn lại vì hết
+máy; hết bài thì báo số máy sẵn sàng còn trống. Bấm lại không đảo cặp đã đúng,
+**Hoàn tác** phục hồi toàn bộ lần chọn nhanh.
 Tick nhiều bài bên trái và máy bên phải. Kéo một bài trong nhóm đã tick vào vùng
 máy để phân lần lượt theo thứ tự bài và số máy; kéo một bài chưa tick chỉ gán bài đó.
 Thả trực tiếp lên máy trống chỉ chuyển đúng bài đang kéo, kể cả khi đã chọn cả
@@ -270,7 +390,8 @@ vì TikTok còn xử lý/xét duyệt. **Chưa chắc chắn** giữ bằng ch�
 Còn nợ Sheet thì hiển thị **Hoàn tất một phần**, với **Ghi lại Sheet** khi phù hợp.
 Máy chờ xác minh không được tính vào số máy hoàn tất hoặc hiển thị tiến độ 100%.
 `Ghi kết quả lên Sheet` là lựa chọn riêng cho từng chiến dịch: tắt thì không
-tạo hàng chờ hoặc gửi webhook; bật mà chưa cấu hình thì giữ link trong outbox pending.
+tạo hàng chờ hoặc gửi webhook. Bật thì phải kết nối thành công trước lượt mới;
+nếu kết nối mất sau khi đăng, link đã xác minh được giữ để gửi lại đúng bảng/tab.
 Đổi lựa chọn phải chạy preflight lại. Nhạc được chọn ngẫu nhiên có seed từ tối đa
 năm đề xuất/thịnh hành đang hiện trên tài khoản, không lấy danh sách ngoài TikTok.
 
@@ -345,10 +466,11 @@ khi uncertain; kết quả installer/ACK không tự chứng minh trạng thái 
 
 ## Dữ liệu
 
-**Đầu vào:** nguồn lịch sử, khoảng ngày và bộ lọc. **Thao tác:** xem bản ghi, tổng và
-detail; theo liên kết artifact/source. **Kết quả:** dữ liệu bền có nguồn gốc, không phải
-bản sao toast. **Tiếp theo:** quay lại workspace gốc để xử lý; thu hẹp query khi giới
-hạn nguồn được báo, không coi partial list là toàn bộ dữ liệu.
+Trang tách **Năng lực hiện tại** khỏi **Tác vụ trong 24 giờ qua**. Các số tác vụ dùng
+đúng cửa sổ 24 giờ được ghi trên màn hình. **Nhật ký thao tác** hiển thị tối đa 200
+bản ghi gần nhất; ô tìm kiếm chỉ lọc trong tập đã tải, xuất danh sách cũng chỉ xuất
+kết quả đang lọc. Tra cứu lần chạy theo nguồn, trạng thái và khoảng ngày ở **Tác vụ**;
+mở chi tiết rồi quay về workspace gốc để xử lý.
 
 ## API
 
@@ -356,8 +478,17 @@ hạn nguồn được báo, không coi partial list là toàn bộ dữ liệu.
 đúng vùng; đọc địa chỉ listener đang chạy, lỗi bind và yêu cầu restart riêng biệt.
 **Kết quả:** trạng thái runtime, không chỉ giá trị trong form. **Tiếp theo:** xử lý port
 bị chiếm hoặc restart theo chỉ báo; kiểm tra gọi API qua cùng admission/ownership với UI.
+Bấm **Cấu hình kết nối** để mở thẳng nhóm **Kết nối và API** trong Cài đặt.
 
 ## Cài đặt
+
+**Bảo trì → Riviu Agent** hiển thị phần mềm điều khiển của từng điện thoại. Android
+dùng ADB/UiAutomator2 và helper Riviu; iPhone dùng Riviu Agent/WDA. Thông tin gói và
+xác thực iOS nằm riêng trong **Cấu hình Agent iOS**. Khi chỉ dùng Android hoặc chưa có
+iPhone đang kết nối, trang Thiết bị không hiện cảnh báo nhánh iOS; vẫn mở mục cấu hình
+này để xem lý do nếu đang chuẩn bị kết nối iPhone. Khi có iPhone kết nối mà nhánh iOS
+báo lỗi, cảnh báo hiện trên trang Thiết bị. Trạng thái này không thay kết quả kiểm tra
+từng máy và không tự cài hoặc khôi phục Agent.
 
 **Đầu vào:** giá trị của từng section và credential tương ứng. **Thao tác:** chỉnh sửa,
 lưu/bỏ từng section; không coi text vừa nhập là đã persist. **Kết quả:** save status và
@@ -368,6 +499,6 @@ nếu thay đổi yêu cầu, hoặc quay lại vùng vừa sửa sau khi guard 
 
 Ghi workspace, hồ sơ/revision, số/alias máy, thời điểm và execution ID. Mở bằng chứng
 nguồn trước khi lặp lệnh. Không ghi token/password vào report. Khi kiểm tra WDA/iOS,
-đọc [ràng buộc §2](agents/02-wda-doc-truoc-khi-sua.md) và không chạy harness đồng thời
+đọc [ràng buộc WDA](agents/02-wda-doc-truoc-khi-sua.md) và không chạy harness đồng thời
 với desktop đang sở hữu thiết bị. Hướng dẫn này mô tả hợp đồng; nghiệm thu có ngày ở
-[nhật ký](agents/README.md), không tự cấp chứng nhận cho mọi thiết bị/bản cài.
+[kho lịch sử](archive/README.md), không tự cấp chứng nhận cho mọi thiết bị/bản cài.

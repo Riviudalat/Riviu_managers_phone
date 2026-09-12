@@ -7,13 +7,27 @@ from pathlib import Path
 import re
 import sys
 import hashlib
+import html
 import json
+import subprocess
+import unicodedata
 from urllib.parse import unquote, urlsplit
 
-if __package__:
-    from . import build_agents_index as index
-else:
-    import build_agents_index as index
+ROOT = Path(__file__).resolve().parents[1]
+FENCE = re.compile(r"^ {0,3}(`{3,}|~{3,})")
+
+
+def repository_files() -> list[str]:
+    result = subprocess.run(["git", "ls-files", "-z"], cwd=ROOT, check=True, capture_output=True)
+    return result.stdout.decode("utf-8").rstrip("\0").split("\0")
+
+
+def anchor(title: str) -> str:
+    """GFM heading slug, including punctuation-created adjacent hyphens."""
+    title = html.unescape(re.sub(r"<[^>]+>", "", title)).strip().lower()
+    title = re.sub(r"\[([^]]+)\]\([^)]*\)", r"\1", title)
+    title = "".join(char for char in title if char in "-_" or not unicodedata.category(char).startswith(("P", "S")))
+    return re.sub(r"\s", "-", title)
 
 
 def headings(body: str) -> set[str]:
@@ -21,7 +35,7 @@ def headings(body: str) -> set[str]:
     result = set()
     fence = ""
     for line in body.splitlines():
-        opening = index.FENCE.match(line)
+        opening = FENCE.match(line)
         if opening:
             marker = opening.group(1)
             if not fence:
@@ -33,7 +47,7 @@ def headings(body: str) -> set[str]:
             continue
         match = re.match(r"^ {0,3}#{1,6}\s+(.+?)(?:\s+#+)?$", line)
         if match:
-            base = index.anchor(match.group(1))
+            base = anchor(match.group(1))
             count = counts[base]
             counts[base] += 1
             result.add(base if not count else f"{base}-{count}")
@@ -45,7 +59,7 @@ def links(body: str) -> list[tuple[int, str]]:
     result = []
     fence = ""
     for number, line in enumerate(body.splitlines(), 1):
-        opening = index.FENCE.match(line)
+        opening = FENCE.match(line)
         if opening:
             marker = opening.group(1)
             if not fence:
@@ -55,7 +69,6 @@ def links(body: str) -> list[tuple[int, str]]:
             continue
         if fence or line.startswith("    "):
             continue
-        # This repository uses inline links; angle brackets allow a path with spaces.
         for match in re.finditer(r'\]\((?:<([^>]+)>|([^\s)]+))(?:\s+"[^"]*")?\)', line):
             result.append((number, match.group(1) or match.group(2)))
     return result
@@ -91,17 +104,6 @@ def inspect(root: Path, paths: list[str]) -> list[str]:
     return errors
 
 
-def main() -> int:
-    paths = index.repository_files()
-    errors = inspect(index.ROOT, paths)
-    errors.extend(check_deleted_evidence(index.ROOT))
-    if errors:
-        print("\n".join(errors), file=sys.stderr)
-        return 1
-    print(f"documentation links valid ({sum(path.endswith('.md') for path in paths)} tracked Markdown files)")
-    return 0
-
-
 def check_deleted_evidence(root: Path) -> list[str]:
     manifest = root / "docs/archive/deletions-2026-09-06.json"
     if not manifest.is_file():
@@ -122,6 +124,17 @@ def check_deleted_evidence(root: Path) -> list[str]:
         if len(reconstructed) != entry["bytes"] or hashlib.sha256(reconstructed).hexdigest() != entry["sha256"]:
             errors.append(f"framed evidence reconstruction mismatch: {entry['path']}")
     return errors
+
+
+def main() -> int:
+    paths = repository_files()
+    errors = inspect(ROOT, paths)
+    errors.extend(check_deleted_evidence(ROOT))
+    if errors:
+        print("\n".join(errors), file=sys.stderr)
+        return 1
+    print(f"documentation links valid ({sum(path.endswith('.md') for path in paths)} tracked Markdown files)")
+    return 0
 
 
 if __name__ == "__main__":

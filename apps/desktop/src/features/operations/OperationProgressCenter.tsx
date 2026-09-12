@@ -122,7 +122,7 @@ export function OperationProgressCenter({ deviceLabels }: { deviceLabels: Readon
       {state.error ? <MonitorReadError message={state.error} retry={state.retry} /> : selectedRun
         ? <OperationRunDevices key={selectedRun.id} run={selectedRun} labels={deviceLabels} sessions={state.value?.sessions ?? []} compact={!maximized} />
         : <p className="run-monitor-empty">Không còn bản ghi trong cửa sổ này.</p>}
-      {state.value?.page.hasMore && <p className="run-monitor-history-note">Các tác vụ khác nằm trong trang Tác vụ.</p>}
+      <p className="run-monitor-history-note">24 giờ gần nhất · Tối đa 200 bản ghi. {state.value?.page.hasMore ? "Các tác vụ khác nằm trong trang Tác vụ." : "Xem lịch sử đầy đủ tại trang Tác vụ."}</p>
     </div></Activity>
   </section>, document.body);
 }

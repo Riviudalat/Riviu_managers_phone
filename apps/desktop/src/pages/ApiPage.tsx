@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { RefreshCw, Search } from "lucide-react";
+import { ArrowUpRight, ChevronRight, RefreshCw, Search } from "lucide-react";
 
 import { apiDocs } from "../api";
 import { EmptyState, LoadingState, StatusNotice } from "../components/States";
@@ -45,7 +45,7 @@ function hasStructuredReference(source: string): boolean {
 }
 
 /** The Local API reference returned by the running desktop backend. */
-export function ApiPage() {
+export function ApiPage({ onOpenSettings }: { onOpenSettings?: () => void } = {}) {
   const [docs, setDocs] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
@@ -105,6 +105,7 @@ export function ApiPage() {
             <div className="admin-toolbar">
               <div className="admin-toolbar-copy">
                 <strong>Danh mục lệnh</strong>
+                {structured && <span>{commandCount} lệnh · {groups.length} nhóm chức năng</span>}
               </div>
               <div className="admin-toolbar-actions">
                 {structured && <label className="search-field"><Search size={15} aria-hidden="true" /><span className="visually-hidden">Tìm lệnh API</span>
@@ -119,6 +120,7 @@ export function ApiPage() {
               {structured && filteredGroups.map((group) => (
                 <details key={group.title} className="api-reference-group" open={query.trim() ? true : undefined}>
                   <summary>
+                    <ChevronRight className="api-reference-chevron" size={16} aria-hidden="true" />
                     {group.title}
                     <StatusChip>{group.commands.length} lệnh</StatusChip>
                   </summary>
@@ -138,6 +140,9 @@ export function ApiPage() {
           </main>
           <SummaryRail title="Trạng thái API">
             <ApiRuntimeStatus />
+            {onOpenSettings && <button type="button" className="ghost api-settings-link" onClick={onOpenSettings}>
+              Cấu hình kết nối <ArrowUpRight size={16} aria-hidden="true" />
+            </button>}
             {structured && <dl className="admin-metric-grid">
               <div className="admin-metric"><dt>Nhóm</dt><dd>{groups.length}</dd></div>
               <div className="admin-metric"><dt>Lệnh</dt><dd>{commandCount}</dd></div>

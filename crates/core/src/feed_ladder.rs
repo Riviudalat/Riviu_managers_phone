@@ -428,7 +428,7 @@ mod tests {
                 ElementQuery::ClassName(_) => false,
                 // The ladder never looks a node up by id; a fixture that pretended otherwise
                 // would be answering a question the code does not ask.
-                ElementQuery::ResourceIdSuffix(_) => false,
+                ElementQuery::ResourceIdSuffix(_) | ElementQuery::Semantic(_) => false,
             };
             Ok(found.then_some(ElementBox {
                 x: 100.0,

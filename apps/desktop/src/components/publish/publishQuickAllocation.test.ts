@@ -6,14 +6,30 @@ describe("quick publish allocation", () => {
   it("selects source posts and only machines receiving a post", () => {
     expect(allocateQuickPosts(base)).toEqual({ ids: ["a", "b", "c"], assignments: { a: "1", b: "2", c: "3" }, picked: ["1", "2", "3"], missing: [] });
   });
-  it("keeps manual pairs and leaves excess posts for another batch", () => {
-    expect(allocateQuickPosts({ ...base, assignments: { b: "3" }, picked: ["2"] })).toMatchObject({ ids: ["a", "b"], assignments: { a: "2", b: "3" }, missing: [] });
+  it("keeps manual pairs and fills remaining ready machines from the source", () => {
+    expect(allocateQuickPosts({ ...base, assignments: { b: "3" }, picked: ["2"] })).toMatchObject({
+      ids: ["a", "b", "c"], assignments: { a: "1", b: "3", c: "2" }, missing: [],
+    });
   });
-  it("never borrows a machine when all explicit picks are offline", () => {
-    expect(allocateQuickPosts({ ...base, picked: ["offline"] }).ids).toEqual([]);
+  it("ignores stale picked machines when filling capacity", () => {
+    expect(allocateQuickPosts({ ...base, picked: ["offline"] }).assignments).toEqual({ a: "1", b: "2", c: "3" });
   });
-  it("respects selected posts, scope and source order", () => {
+  it("respects an incomplete explicit post selection", () => {
     expect(allocateQuickPosts({ ...base, selectedIds: ["c", "a"], eligibleIds: ["2", "3"] }).assignments).toEqual({ a: "2", c: "3" });
+  });
+  it("expands past a complete prior selection when more ready machines appear", () => {
+    const sourceIds = Array.from({ length: 20 }, (_, i) => `post${i}`);
+    const firstReady = Array.from({ length: 10 }, (_, i) => `device${i}`);
+    const first = allocateQuickPosts({ ...base, sourceIds, readyIds: firstReady, eligibleIds: firstReady });
+    expect(first.ids).toHaveLength(10);
+    const moreReady = Array.from({ length: 14 }, (_, i) => `device${i}`);
+    const second = allocateQuickPosts({
+      ...base, sourceIds, selectedIds: first.ids, assignments: first.assignments,
+      readyIds: moreReady, eligibleIds: moreReady, picked: first.picked,
+    });
+    expect(second.ids).toHaveLength(14);
+    expect(new Set(Object.values(second.assignments)).size).toBe(14);
+    for (const id of first.ids) expect(second.assignments[id]).toBe(first.assignments[id]);
   });
   it("repeating a complete allocation is idempotent", () => {
     const first = allocateQuickPosts(base);

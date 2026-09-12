@@ -70,6 +70,30 @@ export function PublishPreflightResult({
               <p className="pw-preflight-build">
                 {publishTikTokBuildLabel(row)}
               </p>
+              {Boolean(row.checks?.length) && (
+                <dl className="pw-preflight-checks">
+                  {row.checks!.map((check) => (
+                    <div key={check.id}>
+                      <dt>{check.label}</dt>
+                      <dd
+                        className={
+                          check.status === "blocked" ? "pw-error" : undefined
+                        }
+                      >
+                        {
+                          {
+                            pass: "Đạt",
+                            blocked: "Bị chặn",
+                            unknown: "Chưa quan sát",
+                            notApplicable: "Không áp dụng",
+                          }[check.status]
+                        }
+                        {check.reason && <span> · {check.reason}</span>}
+                      </dd>
+                    </div>
+                  ))}
+                </dl>
+              )}
               {row.issues.length > 0 ? (
                 <ul className="pw-preflight-problems">
                   {row.issues.map((issue, index) => (

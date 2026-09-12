@@ -14,6 +14,7 @@ import {
   Upload,
 } from "lucide-react";
 import { useState, type PropsWithChildren } from "react";
+import { useModalFocus } from "../useModalFocus";
 import type {
   ActionDefinition,
   CompiledRevision,
@@ -73,6 +74,17 @@ function IconCommand({
     >
       {children}
     </button>
+  );
+}
+
+function CompilePreview({ onClose, children }: PropsWithChildren<{ onClose: () => void }>) {
+  const dialogRef = useModalFocus<HTMLElement>(onClose);
+  return (
+    <div className="flow-compile-backdrop" onClick={(event) => { if (event.target === event.currentTarget) onClose(); }}>
+      <section ref={dialogRef} tabIndex={-1} role="dialog" aria-modal="true" aria-label="Xem trước biên dịch" className="flow-compile-preview">
+        {children}
+      </section>
+    </div>
   );
 }
 
@@ -148,12 +160,6 @@ export function FlowToolbar(props: FlowToolbarProps) {
         <IconCommand label="Làm lại" disabled={!props.canRedo} onClick={props.onRedo}>
           <Redo2 size={16} />
         </IconCommand>
-        <IconCommand label="Lưu bản" disabled={!canSave} onClick={props.onSave}>
-          <Save size={16} />
-        </IconCommand>
-        <IconCommand label="Kiểm tra Flow" onClick={() => setPreviewOpen(true)}>
-          <CheckCircle size={16} />
-        </IconCommand>
         <IconCommand label="Nhập Flow" onClick={props.onImport}>
           <Upload size={16} />
         </IconCommand>
@@ -177,10 +183,17 @@ export function FlowToolbar(props: FlowToolbarProps) {
         </IconCommand>
       </div>
       <div className="flow-toolbar-group flow-toolbar-actions" role="group" aria-label="Chạy và bố cục Flow">
+        <button type="button" className="ghost" aria-label="Lưu bản" disabled={!canSave} onClick={props.onSave}>
+          <Save size={16} aria-hidden="true" />{props.savePending ? "Đang lưu…" : "Lưu bản"}
+        </button>
+        <button type="button" className="ghost" aria-label="Kiểm tra Flow" onClick={() => setPreviewOpen(true)}>
+          <CheckCircle size={16} aria-hidden="true" />Kiểm tra
+        </button>
         <button
           type="button"
           className="flow-run-command"
           disabled={!canRun}
+          title={props.dirty ? "Lưu bản trước khi chạy Flow" : props.validationPending ? "Đang kiểm tra Flow" : "Chạy phiên bản đã lưu"}
           onClick={props.onRun}
         >
           <Play size={16} />
@@ -191,7 +204,7 @@ export function FlowToolbar(props: FlowToolbarProps) {
         </IconCommand>
       </div>
       {previewOpen && (
-        <section role="dialog" aria-label="Xem trước biên dịch" className="flow-compile-preview">
+        <CompilePreview onClose={() => setPreviewOpen(false)}>
           {/* Three states, not two: every edit clears `compiled` before the debounced request
               goes out, so equating `compiled === null` with invalid announced "Invalid" over a
               document that had not been checked yet -- and kept announcing it for as long as
@@ -220,7 +233,7 @@ export function FlowToolbar(props: FlowToolbarProps) {
           <button type="button" onClick={() => setPreviewOpen(false)}>
             Đóng
           </button>
-        </section>
+        </CompilePreview>
       )}
     </header>
   );

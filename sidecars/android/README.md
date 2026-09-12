@@ -85,5 +85,12 @@ The Riviu helper APK (`com.riviu.agent`) **is** bundled too:
 pinned copy here ships. Clipboard on Android 10+ needs it; uiautomator2 must not
 advertise an empty `get_clipboard`.
 
+The branded **Riviu Helper 0.5.0** has a launcher name/icon and a read-only service
+status screen. The desktop prepares the package after each observed Android
+connection, under a Repair lease that keeps the stream. Missing/old packages are
+installed once, then versionCode and launcher are read back. Current/newer packages
+are reused; blocked installation waits for a new connection after the operator
+fixes the device-side permission. The helper service still starts only when needed.
+
 The manifest pins **nine** files. The Layout section above lists them; if that list
 and the manifest ever disagree, the manifest is the one the loader reads.

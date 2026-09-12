@@ -1,21 +1,29 @@
-/* Both wide and compact operator windows keep exactly two phone columns. */
-.machine-choice-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); grid-auto-rows: max-content; align-content: start; gap: 8px; min-width: 0; min-height: 0; overflow-y: auto; padding: 3px; scrollbar-gutter: stable; }
-.machine-choice { min-width: 0; border: 1px solid var(--line); border-radius: 6px; background: var(--bg-elevated); }
-.machine-choice:hover { border-color: var(--primary); }
+/* Two columns preserve the same spatial map across the automation workspaces. */
+.machine-choice-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); grid-auto-rows: max-content; align-content: start; gap: 8px; min-width: 0; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 3px; scrollbar-gutter: stable; }
+.machine-choice { min-width: 0; border: 1px solid var(--line); border-radius: 6px; background: var(--bg-elevated); transition: border-color 150ms, background-color 150ms; }
+.machine-choice:hover { border-color: var(--line-strong); }
 .machine-choice:focus-within { outline: 2px solid var(--primary); outline-offset: 1px; }
 .machine-choice.is-selected { border-color: var(--primary); background: var(--primary-50); }
-.machine-choice.is-unavailable { opacity: .65; }
-.machine-choice .machine-choice-pick { display: flex; flex-direction: row; align-items: center; gap: 7px; min-width: 0; margin: 0; padding: 8px; cursor: pointer; }
-.machine-choice-pick > svg { width: 17px; height: 24px; flex: none; color: var(--text-3); }
-.machine-choice-name { display: grid; gap: 2px; min-width: 0; flex: 1; }
-.machine-choice-name strong { font-size: var(--text-sm); }
+.machine-choice.is-unavailable { background: var(--bg-muted); }
+.machine-choice .machine-choice-pick { display: flex; flex-direction: row; align-items: center; gap: 8px; min-width: 0; margin: 0; padding: 10px 9px 8px; cursor: pointer; }
+.machine-choice-pick:has(input:disabled) { cursor: default; }
+.machine-choice-pick > svg { width: 18px; height: 24px; flex: none; color: var(--text-3); }
+.machine-choice.is-selected .machine-choice-pick > svg { color: var(--primary); }
+.machine-choice-name { display: grid; gap: 3px; min-width: 0; flex: 1; }
+.machine-choice-name strong { font-size: var(--text-sm); font-weight: 650; }
 .machine-choice-name > span { font-size: var(--text-xs); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--text-3); }
 .machine-choice .machine-choice-pick > input { width: 16px; height: 16px; margin: 0; flex: none; accent-color: var(--primary); }
-.machine-choice-detail { display: flex; align-items: center; gap: 6px; min-width: 0; padding: 0 8px 7px; font-size: var(--text-xs); color: var(--text-3); }
-.machine-choice-detail > span:not(.machine-choice-state) { min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.machine-choice-state { width: 5px; height: 5px; border-radius: 50%; background: var(--text-3); flex: none; }
-.machine-choice-state.is-ready { background: var(--ok); }
+.machine-choice-status { display: flex; align-items: center; gap: 6px; padding: 0 9px 8px; font-size: var(--text-xs); line-height: 1.4; color: var(--text-2); }
+.machine-choice-status.is-ready { color: var(--ok); }
+.machine-choice-status.is-error { color: var(--danger-deep); }
+.machine-choice-state { width: 5px; height: 5px; border-radius: 50%; background: currentColor; flex: none; }
+.machine-choice-detail { display: flex; align-items: center; gap: 6px; min-width: 0; padding: 7px 9px; border-top: 1px solid var(--line); font-size: var(--text-xs); color: var(--text-3); }
+.machine-choice-detail > span { min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.machine-choice-detail button { margin-top: 0; }
+.machine-choice-reason { margin: 0; padding: 0 9px 8px; color: var(--text-3); font-size: var(--text-xs); line-height: 1.45; overflow-wrap: anywhere; }
 .machine-choice-grid.is-compact { gap: 6px; }
-.machine-choice-grid.is-compact .machine-choice-pick { padding: 6px 7px; }
-.machine-choice-grid.is-compact .machine-choice-pick > svg { width: 15px; height: 21px; }
-.machine-choice-grid.is-compact .machine-choice-detail { padding: 0 7px 6px; }
+.machine-choice-grid.is-compact .machine-choice-pick { padding: 7px 8px 5px; }
+.machine-choice-grid.is-compact .machine-choice-pick > svg { width: 16px; height: 22px; }
+.machine-choice-grid.is-compact .machine-choice-status { padding: 0 8px 6px; }
+.machine-choice-grid.is-compact .machine-choice-detail { padding: 5px 8px; }
+@media (prefers-reduced-motion: reduce) { .machine-choice { transition: none; } }

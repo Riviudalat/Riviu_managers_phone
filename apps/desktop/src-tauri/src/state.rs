@@ -25,6 +25,10 @@ use crate::android_tools::SidecarOrigin;
 use crate::command_error::CommandError;
 use crate::nurture_commands::NurtureRuntime;
 
+#[path = "android_helper_setup.rs"]
+mod android_helper_setup;
+use android_helper_setup::AndroidHelperSetup;
+
 const DEFAULT_DESKTOP_STREAM_CAPACITY: usize = 2;
 const MAX_DESKTOP_STREAM_CAPACITY: usize = 100;
 /// UI preview is deliberately a separate budget from the raw stream consumed
@@ -196,6 +200,7 @@ fn platform_fleet(
 /// token, or the reverse) must say which half is missing rather than reporting the generic
 /// state, and a read failure must never reach this function at all — the caller keeps that
 /// distinction, because a database that would not answer is not a configuration choice.
+#[cfg(test)]
 fn sheet_delivery_blocked(webhook_url: &str, token: &str) -> Option<&'static str> {
     match (webhook_url.trim().is_empty(), token.trim().is_empty()) {
         (true, true) => Some("chưa cấu hình publish_sheet_webhook_url và token"),
@@ -350,6 +355,7 @@ pub struct AppState {
     /// campaign left behind hashes of frames nobody kept.
     pub interaction_artifacts: FlowArtifactStore,
     pub db: Arc<Database>,
+    pub gui_service: Arc<crate::gui_service::GuiService>,
     pub signing: SigningService,
     /// The OS credential store, for secrets that must not sit in the SQLite file.
     pub secrets: CredentialStore,
@@ -772,6 +778,7 @@ impl AppState {
         // the credential store precisely so it can be handed one: the AI API key used to sit in
         // the settings blob in cleartext, readable by any process running as the operator.
         let database = Database::open(data.join("riviu.db"))?;
+        database.recover_gui_requests()?;
         database.recover_library_batches()?;
         let (backfilled_apps, app_backfill_failures) = database.backfill_app_library_hashes()?;
         if backfilled_apps > 0 {
@@ -786,8 +793,9 @@ impl AppState {
         }
         let db =
             Arc::new(database.with_secrets(Arc::new(KeyringSecrets::new(credentials.clone()))));
-        // Local fleet installer may carry a target-bound bootstrap connection; secrets move
-        // to the OS credential store before any worker can deliver an outbox row.
+        // Existing operator configuration remains local to this Windows profile. Re-saving it
+        // migrates a legacy SQLite token into Credential Manager before a worker can deliver.
+        // The installer connection is restored separately and never selects a Sheet URL.
         let sheet = db.publish_sheet_delivery_settings()?;
         if !sheet.webhook_url.is_empty() && !sheet.token.is_empty() {
             db.set_publish_sheet_config_with_reporting(
@@ -795,24 +803,8 @@ impl AppState {
                 Some(&sheet.token),
                 Some(sheet.internal_reporting),
             )?;
-        } else if sheet.webhook_url.is_empty() && sheet.token.is_empty() {
-            let bootstrap = sidecar_root.join("publish-sheet/connection.json");
-            if bootstrap.is_file() {
-                let value: serde_json::Value = serde_json::from_slice(&std::fs::read(bootstrap)?)?;
-                if value["spreadsheetId"] == "1HUcp3DMPTLfQVjhxRnXa_4xvyXd3-EF3LAbYsl0Wwxc"
-                    && value["sheetGid"] == 0
-                {
-                    let url = value["webhookUrl"].as_str().unwrap_or_default();
-                    let token = value["token"].as_str().unwrap_or_default();
-                    anyhow::ensure!(
-                        riviu_core::publish_sheet::is_acceptable_webhook(url) && !token.is_empty(),
-                        "cấu hình Sheet đi kèm chưa hợp lệ"
-                    );
-                    db.set_publish_sheet_config_with_reporting(url, Some(token), Some(false))?;
-                    db.set_setting(riviu_core::publish_sheet::SHEET_URL_SETTING, "https://docs.google.com/spreadsheets/d/1HUcp3DMPTLfQVjhxRnXa_4xvyXd3-EF3LAbYsl0Wwxc/edit#gid=0")?;
-                }
-            }
         }
+        crate::sheet_bootstrap::apply(&db, &sidecar_root)?;
         let legacy_token = std::env::var("RIVIU_RTMMO_TOKEN").ok();
         let ios =
             bootstrap_ios_runtime(resolve_desktop_agent_runtime_for_bootstrap_with_candidate(
@@ -948,6 +940,14 @@ impl AppState {
                 Err(error) => Err(format!("chưa đọc được trạng thái bài đang xử lý: {error}")),
             }
         }));
+        let gui_service = Arc::new(crate::gui_service::GuiService::new(
+            db.clone(),
+            resource_dir.clone(),
+            artifacts_dir.join("gui"),
+        ));
+        if let Some(android) = &android {
+            android.set_gui_reasoner(gui_service.clone());
+        }
         let signing =
             SigningService::with_credentials(sidecar_root.join("signer"), credentials.clone());
 
@@ -1105,6 +1105,7 @@ impl AppState {
             stream_settings: Arc::new(RwLock::new(stream_settings)),
             local_api_runtime: Arc::new(RwLock::new(crate::local_api::LocalApiRuntime::default())),
             artifacts_dir,
+            gui_service,
             legacy_wda_bundle: sidecar_root.join("wda").join("Riviumanagersphone.ipa"),
             nurture: NurtureRuntime::with_database(db.clone()),
             nurture_engine,
@@ -1400,7 +1401,7 @@ impl AppState {
                         while queue.next().await.is_some() {}
                         break;
                     }
-                    match db.expire_due_publish_verifications() {
+                    match db.expire_current_publish_verifications() {
                         Ok(campaigns) => {
                             for campaign_id in campaigns {
                                 events.emit(riviu_core::events::AppEvent::PublishUpdated {
@@ -1413,7 +1414,7 @@ impl AppState {
                         }
                         Err(error) => log::warn!("publish verification deadline: {error}"),
                     }
-                    let pending = match db.pending_publish_verifications(1000) {
+                    let pending = match db.pending_current_publish_verifications(1000) {
                         Ok(rows) => rows,
                         Err(error) => {
                             log::warn!("publish verification queue: {error}");
@@ -1447,7 +1448,10 @@ impl AppState {
                             .await
                         });
                     }
-                    if queue.is_empty() && !stop.load(Ordering::Relaxed) {
+                    // Cleanup must not wait for an empty verification queue: with every
+                    // Ready phone observing in parallel the queue is rarely empty, and
+                    // verified media debt would starve.
+                    if !stop.load(Ordering::Relaxed) {
                         if let Ok(_admitted) = admission.ensure_accepting_work() {
                             if let Err(error) =
                                 crate::publish_commands::cleanup_verified_assignments(
@@ -1790,14 +1794,23 @@ impl AppState {
         let background_stopped_notify = self.background_stopped_notify.clone();
         let background_shutdown_error = self.background_shutdown_error.clone();
         let sweep_view_hub = self.view_hub.clone();
+        let helper_android = self.android.clone();
+        let helper_admission = self.command_admission.clone();
+        let helper_db = self.db.clone();
         tauri::async_runtime::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_millis(250));
             let mut last_scan = Instant::now() - Duration::from_secs(3);
             let mut sampler =
                 BackgroundStreamSampler::new(control.clone(), streams, registry.clone());
+            let mut helper_setup = helper_android.map(|android| {
+                AndroidHelperSetup::new(control.clone(), android, helper_admission, helper_db)
+            });
             loop {
                 interval.tick().await;
                 if background_stop.load(Ordering::Acquire) {
+                    if let Some(setup) = &mut helper_setup {
+                        setup.drain().await;
+                    }
                     if let Err(error) = sampler.stop().await {
                         *background_shutdown_error.write() = Some(error.to_string());
                     }
@@ -1808,6 +1821,9 @@ impl AppState {
                 if last_scan.elapsed() >= Duration::from_secs(3) {
                     last_scan = Instant::now();
                     if let Ok(devices) = control.list_devices().await {
+                        if let Some(setup) = &mut helper_setup {
+                            setup.tick_latest();
+                        }
                         if configured_desktop_stream_capacity().is_none() {
                             control.grow_stream_capacity(devices.len());
                         }
@@ -2316,161 +2332,13 @@ impl AppState {
             }
         });
 
-        // Sheets outbox sweeper. The outbox itself has been finished and tested since
-        // 29/08 (§9.127) — this loop is the delivery half that was deliberately unwired
-        // until the link capture existed. It is DB-and-HTTP only: no admission, no lease,
-        // no device — a row can be owed while every phone is unplugged, and delivering it
-        // must not care.
-        //
-        // Unconfigured is the off switch, and it is re-read every tick: the operator can
-        // paste the webhook into settings while the app runs and the backlog starts moving
-        // on the next tick, no restart. The one-time log line is so an operator staring at
-        // a stuck `pending` row finds the reason without grepping.
-        let sheet_db = self.db.clone();
-        let sheet_events = self.events.clone();
-        tauri::async_runtime::spawn(async move {
-            let mut interval = tokio::time::interval(Duration::from_secs(45));
-            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-            let mut said_unconfigured = false;
-            // How many of the oldest owed rows have failed every attempt so far. A batch of
-            // permanently poisoned rows — a link the script rejects, say — would otherwise
-            // be re-tried for the whole window on every tick and the fifty-first row would
-            // never be reached, so each pass skips past what the previous one could not
-            // deliver and comes back to it after the newer rows have had their turn.
-            let mut skip_poisoned = 0usize;
-            let mut internal_sync = crate::publish_commands::InternalSheetSync::default();
-            loop {
-                interval.tick().await;
-                let config = match sheet_db.publish_sheet_delivery_settings() {
-                    Ok(config) => config,
-                    // **A database that would not answer is not "unconfigured".** Reading
-                    // the error away made a locked DB print the one message an operator
-                    // reads as "you forgot to paste the webhook" — and then, once the lock
-                    // cleared, print it again as if the config had just been removed.
-                    Err(error) => {
-                        log::warn!("outbox Sheet: không đọc được cấu hình ({error:#})");
-                        continue;
-                    }
-                };
-                let webhook = config.webhook_url.clone();
-                let token = config.token.clone();
-                internal_sync.configure(&config);
-                if let Some(reason) = sheet_delivery_blocked(&webhook, &token) {
-                    if !said_unconfigured {
-                        log::info!("outbox Sheet đứng yên: {reason}");
-                        said_unconfigured = true;
-                    }
-                    continue;
-                }
-                said_unconfigured = false;
-                if let Err(error) = crate::publish_commands::sync_internal_sheet_reports(
-                    &sheet_db,
-                    &config,
-                    &mut internal_sync,
-                )
-                .await
-                {
-                    log::warn!("Sheet nội bộ: không đọc được báo cáo ({error:#})");
-                }
-                let rows = match sheet_db.pending_publish_sheet_rows(50 + skip_poisoned) {
-                    Ok(rows) => rows,
-                    Err(error) => {
-                        log::warn!("outbox Sheet: không đọc được hàng chờ ({error:#})");
-                        continue;
-                    }
-                };
-                let rows: Vec<_> = rows.into_iter().skip(skip_poisoned).collect();
-                if rows.is_empty() && skip_poisoned > 0 {
-                    // Nothing behind the poisoned block; start over so those rows are tried
-                    // again rather than left owed forever.
-                    skip_poisoned = 0;
-                    continue;
-                }
-                let mut failed_this_pass = 0usize;
-                for row in rows {
-                    let payload = riviu_core::publish_sheet::SheetRow {
-                        token: token.clone(),
-                        post_url: row.post_url.clone(),
-                        poster: row.poster.clone(),
-                        partners: row.partners.clone(),
-                        assignment_id: row.assignment_id.clone(),
-                        posted_at: row.posted_at.clone(),
-                    };
-                    let metadata = if config.internal_reporting {
-                        match sheet_db.internal_publish_report(&row.assignment_id) {
-                            Ok(report) => report
-                                .filter(|report| report.metadata.status == "Đã xác minh")
-                                .map(|row| row.metadata),
-                            Err(error) => {
-                                log::warn!(
-                                    "Sheet nội bộ: chưa đọc được metadata {} ({error:#})",
-                                    row.assignment_id
-                                );
-                                None
-                            }
-                        }
-                    } else {
-                        None
-                    };
-                    match riviu_core::publish_sheet::push_row_with_metadata(
-                        &webhook,
-                        &payload,
-                        metadata.as_ref(),
-                    )
-                    .await
-                    {
-                        Ok(()) => {
-                            // Marked by the revision that was DELIVERED — a row edited
-                            // between read and send keeps owing its newer content.
-                            match crate::publish_commands::mark_publish_sheet_sent_and_reconcile(
-                                &sheet_db,
-                                &sheet_events,
-                                &row,
-                            ) {
-                                Ok(true) => {}
-                                // The CAS said no: the row moved between read and send, so
-                                // what reached the sheet is a version the outbox no longer
-                                // owes. Said out loud rather than swallowed, because the
-                                // script dedupes by assignment id — the NEWER content will
-                                // be answered `duplicate` and never reach column D without
-                                // a person clearing the old row. Two reviews flagged the
-                                // silent shape; it is narrow (needs a requeue mid-send) and
-                                // the log line is what makes it findable when it happens.
-                                Ok(false) => log::warn!(
-                                    "outbox Sheet: đã gửi bản cũ của {} (revision {} đã bị \
-                                     thay giữa lúc đọc và gửi) — bản mới sẽ bị script trả \
-                                     duplicate; cần xoá dòng cũ trên sheet rồi gửi lại",
-                                    row.assignment_id,
-                                    row.revision
-                                ),
-                                Err(error) => log::warn!(
-                                    "outbox Sheet: đã gửi nhưng không hoàn tất được settlement \
-                                     bền vững cho {} ({error:#}); chưa phát event hoàn tất",
-                                    row.assignment_id
-                                ),
-                            }
-                        }
-                        Err(error) => {
-                            let reason = format!("{error:#}");
-                            let _ = sheet_db.mark_publish_sheet_failed(
-                                &row.assignment_id,
-                                row.revision,
-                                &reason,
-                            );
-                            log::warn!(
-                                "outbox Sheet: đẩy {} thất bại — {reason}",
-                                row.assignment_id
-                            );
-                            failed_this_pass += 1;
-                        }
-                    }
-                }
-                // Rows that failed at the head of the queue are stepped over next pass, so a
-                // block of poisoned links cannot hold the newer ones hostage; when there is
-                // nothing behind them the offset resets and they are tried again.
-                skip_poisoned = failed_this_pass;
-            }
-        });
+        // Only v2 campaigns enter the durable fair delivery queue. The worker owns
+        // independent HTTP tasks; one slow status report cannot hold canonical links.
+        tauri::async_runtime::spawn(crate::publish_commands::run_bound_sheet_worker(
+            self.db.clone(),
+            self.events.clone(),
+            self.background_stop.clone(),
+        ));
 
         // TikTok nurture schedule ticks
         let db = self.db.clone();
@@ -2840,6 +2708,17 @@ fn resolve_sidecar_root_from(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn production_startup_does_not_select_a_bundled_sheet_url() {
+        let source = include_str!("state.rs");
+        let production = &source[..source.find("mod tests {").expect("test module")];
+        let legacy_resource = ["publish-sheet", "connection.json"].join("/");
+        assert!(!production.contains(&legacy_resource));
+        assert!(!production.contains("SHEET_URL_SETTING"));
+        assert!(production.contains("publish_sheet_delivery_settings"));
+        assert!(production.contains("set_publish_sheet_config_with_reporting"));
+    }
+
     /// **The publish scheduler asks for scheduled campaigns, not for a page of recent ones.**
     ///
     /// It used to read two hundred rows newest-first and pick the `scheduled` ones out of them.
@@ -2850,7 +2729,7 @@ mod tests {
     fn the_publish_scheduler_queries_by_state_rather_than_paging() {
         let source = include_str!("state.rs");
         let module = &source[..source
-            .find("#[cfg(test)]")
+            .find("mod tests {")
             .expect("this file still has a test module")];
         let scheduler = &module[module
             .find("let publish_started_at")
@@ -2877,7 +2756,7 @@ mod tests {
     fn scheduled_publish_settlements_refresh_the_snapshot_before_the_event() {
         let source = include_str!("state.rs");
         let module = &source[..source
-            .find("#[cfg(test)]")
+            .find("mod tests {")
             .expect("this file still has a test module")];
         let start = module
             .find("let publish_started_at")
@@ -3356,7 +3235,25 @@ mod tests {
                 riviu_core::TileStreamState::Live
             );
         }
-        tokio::time::sleep(Duration::from_secs(6)).await;
+        // Jump past the bookkeeping turn without rendering six virtual seconds
+        // of 24 FPS JPEGs. Each live producer still publishes a real fresh frame.
+        let before = ["MOCK-IPHONE-01", "MOCK-IPHONE-02"]
+            .map(|udid| sampler.streams.latest_frame_sequence(udid));
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_secs(6)).await;
+        for _ in 0..10 {
+            if ["MOCK-IPHONE-01", "MOCK-IPHONE-02"]
+                .iter()
+                .zip(before)
+                .all(|(udid, previous)| sampler.streams.latest_frame_sequence(udid) != previous)
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        for (udid, previous) in ["MOCK-IPHONE-01", "MOCK-IPHONE-02"].iter().zip(before) {
+            assert_ne!(sampler.streams.latest_frame_sequence(udid), previous);
+        }
         assert!(matches!(sampler.tick().await, SamplerTick::Sampling(_)));
         assert_eq!(control.reserved_stream_capacity(), 2);
 

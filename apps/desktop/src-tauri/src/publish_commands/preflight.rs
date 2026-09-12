@@ -41,9 +41,9 @@ pub async fn publish_scan_folder(
     .map_err(err)
 }
 
-pub(super) struct PreparedPublishPreflight {
-    pub(super) report: riviu_core::PublishPreflightReport,
-    pub(super) bundles: Vec<riviu_core::PublishBundle>,
+pub(crate) struct PreparedPublishPreflight {
+    pub(crate) report: riviu_core::PublishPreflightReport,
+    pub(crate) bundles: Vec<riviu_core::PublishBundle>,
 }
 
 pub(super) fn resolve_preflight_target(
@@ -144,12 +144,66 @@ pub(super) async fn scan_preflight_source(
     .await
 }
 
-pub(super) async fn build_publish_preflight_from_manifest(
+pub(crate) async fn build_publish_preflight_from_manifest(
     control: &DeviceControlPlane,
     registry: &riviu_core::DeviceRegistry,
     db: &Database,
     request: riviu_core::PublishPreflightRequest,
     manifest: &PublishFolderManifest,
+) -> anyhow::Result<PreparedPublishPreflight> {
+    let sheet_choice = verify_sheet_delivery_choice(db, request.sheet_enabled).await;
+    build_publish_preflight_from_manifest_with_sheet(
+        control,
+        registry,
+        db,
+        request,
+        manifest,
+        sheet_choice,
+    )
+    .await
+}
+
+pub(super) type VerifiedSheetChoice =
+    Result<Option<riviu_core::publish_sheet::SheetDeliveryTarget>, String>;
+
+/// One fresh writer check per preparation request. A schedule shares this answer
+/// across its slots; the next request rechecks credentials and the actual target.
+pub(super) async fn verify_sheet_delivery_choice(
+    db: &Database,
+    enabled: bool,
+) -> VerifiedSheetChoice {
+    if !enabled {
+        return Ok(None);
+    }
+    let checked = async {
+        let config = db.publish_sheet_delivery_settings()?;
+        let url = db
+            .get_setting(riviu_core::publish_sheet::SHEET_URL_SETTING)?
+            .unwrap_or_default();
+        let result = riviu_core::publish_sheet::check_sheet(&url, &config).await?;
+        anyhow::ensure!(result.connection_verified, "{}", result.message);
+        anyhow::ensure!(
+            config.internal_reporting == (result.layout.as_deref() == Some("internal")),
+            "Chế độ báo cáo không khớp bố cục Sheet; kiểm tra lại kết nối trong Thiết lập"
+        );
+        Ok::<_, anyhow::Error>(riviu_core::publish_sheet::SheetDeliveryTarget {
+            version: 2,
+            spreadsheet_id: result.spreadsheet_id,
+            sheet_gid: result.sheet_gid,
+            internal_reporting: config.internal_reporting,
+        })
+    }
+    .await;
+    checked.map(Some).map_err(|error| error.to_string())
+}
+
+pub(super) async fn build_publish_preflight_from_manifest_with_sheet(
+    control: &DeviceControlPlane,
+    registry: &riviu_core::DeviceRegistry,
+    db: &Database,
+    request: riviu_core::PublishPreflightRequest,
+    manifest: &PublishFolderManifest,
+    sheet_choice: VerifiedSheetChoice,
 ) -> anyhow::Result<PreparedPublishPreflight> {
     riviu_core::publish::validate_publish_mapping(&request.bundle_ids, &request.udids)
         .map_err(anyhow::Error::new)?;
@@ -208,13 +262,20 @@ pub(super) async fn build_publish_preflight_from_manifest(
             bundle_media_shape_is_ready(bundle, route) && !bundle.caption.trim().is_empty();
         if !media_ok {
             let message = if bundle.caption.trim().is_empty() {
-                "caption rỗng nên không thể khóa đúng bài khi lấy link"
+                "caption rỗng nên không thể khóa đúng bài khi lấy link".to_string()
             } else if matches!(bundle.media_kind, riviu_core::PublishMediaKind::Video) {
-                "bundle video phải có đúng một MP4 đã preflight và không được trộn ảnh"
+                "bundle video phải có đúng một MP4 đã preflight và không được trộn ảnh".to_string()
             } else {
-                "số ảnh không nằm trong giới hạn đã đo của composer trên máy"
+                // Name the two numbers: the operator saw "không nằm trong giới hạn" and went
+                // looking for a fault in the phone, when the fault was one more photo than
+                // the composer on that route can select.
+                format!(
+                    "bài có {} ảnh; composer trên máy này chọn được tối đa {} ảnh",
+                    bundle.images.len(),
+                    max_images_for(route)
+                )
             };
-            row_issues.push(preflight_issue("media_unready", udid, &bundle.id, message));
+            row_issues.push(preflight_issue("media_unready", udid, &bundle.id, &message));
         }
 
         let device = registry.get(udid);
@@ -290,7 +351,7 @@ pub(super) async fn build_publish_preflight_from_manifest(
                 Ok((package, version, locale)) => {
                     let base_composer_ok = matches!(
                         readiness_of_build(&package, &locale, &version),
-                        PublishReadiness::HierarchyReady
+                        PublishReadiness::HierarchyReady | PublishReadiness::HierarchyAdaptive
                     );
                     let video_picker_ok =
                         !matches!(bundle.media_kind, riviu_core::PublishMediaKind::Video)
@@ -298,9 +359,11 @@ pub(super) async fn build_publish_preflight_from_manifest(
                                 && video_plan_for_build(&package, &locale, &version).is_ok());
                     let composer_ok = base_composer_ok && video_picker_ok;
                     let sound_picker_ok = sound_plan_for_build(&package, &locale, &version).is_ok();
-                    let links_ready = missing_link_locators(&package, &locale, &version).is_empty()
-                        && riviu_core::tiktok_labels::controls_for(&package, &locale, &version)
-                            .is_some_and(riviu_core::tiktok_account::account_read_supported);
+                    let links_ready =
+                        riviu_core::tiktok_share::PublishVerificationPlan::for_runtime(
+                            &package, &locale, &version,
+                        )
+                        .is_ok();
                     if !links_ready {
                         row_issues.push(preflight_issue(
                             "link_verification_unmeasured", udid, &bundle.id,
@@ -369,6 +432,7 @@ pub(super) async fn build_publish_preflight_from_manifest(
         }));
         issues.extend(row_issues.iter().cloned());
         assignments.push(riviu_core::PublishPreflightAssignmentReport {
+            checks: Vec::new(),
             ordinal: u32::try_from(ordinal)?,
             bundle_id: bundle.id.clone(),
             udid: udid.clone(),
@@ -401,20 +465,32 @@ pub(super) async fn build_publish_preflight_from_manifest(
         });
     }
 
+    for row in &mut assignments {
+        row.checks = riviu_core::ui_automation::checks::publish_checks(row);
+    }
+
+    let mut sheet_delivery = None;
+    if request.sheet_enabled {
+        match sheet_choice
+            .and_then(|target| target.ok_or_else(|| "Chưa xác minh kết nối ghi Sheet".to_owned()))
+        {
+            Ok(target) => sheet_delivery = Some(target),
+            Err(error) => issues.push(riviu_core::PublishExecutionIssue {
+                code: "sheet_connection_unverified".into(),
+                assignment_id: None,
+                udid: None,
+                bundle_id: None,
+                message: format!("Kiểm tra kết nối Sheet trước khi đăng: {error}"),
+            }),
+        }
+    }
+    observations
+        .push(serde_json::json!({"sheetDelivery":sheet_delivery,"verificationContractVersion":1}));
     let input_digest =
         publish_preflight_digest(&request, &bundles, &target_snapshot, &observations)?;
-    let sheet_configured = if request.sheet_enabled {
-        let webhook = db
-            .get_setting(riviu_core::publish_sheet::WEBHOOK_URL_SETTING)?
-            .unwrap_or_default();
-        let token = db
-            .get_setting(riviu_core::publish_sheet::WEBHOOK_TOKEN_SETTING)?
-            .unwrap_or_default();
-        riviu_core::publish_sheet::is_acceptable_webhook(webhook.trim()) && !token.trim().is_empty()
-    } else {
-        false
-    };
+    let sheet_configured = sheet_delivery.is_some();
     let report = riviu_core::PublishPreflightReport {
+        sheet_delivery,
         sheet_enabled: request.sheet_enabled,
         input_digest,
         target_snapshot,
@@ -424,6 +500,132 @@ pub(super) async fn build_publish_preflight_from_manifest(
         sheet_configured,
     };
     Ok(PreparedPublishPreflight { report, bundles })
+}
+
+#[cfg(test)]
+mod sheet_choice_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn shared_sheet_choice_preserves_each_slot_target_failure_and_digest() {
+        let path = std::env::temp_dir().join(format!("shared-sheet-choice-{}.db", Uuid::new_v4()));
+        let db = Database::open(&path).unwrap();
+        let control = DeviceControlPlane::new(
+            Arc::new(riviu_ios_driver::MockIosDriver::new()),
+            Arc::new(riviu_core::DeviceWorkCoordinator::new()),
+            Arc::new(riviu_core::StreamBudgetManager::new(2).unwrap()),
+        );
+        let registry = riviu_core::DeviceRegistry::new(riviu_core::EventBus::new(8));
+        registry.upsert_many(control.list_devices().await.unwrap());
+        let udid = registry.list()[0].udid.clone();
+        let bundle = riviu_core::PublishBundle {
+            id: "fixture".into(),
+            source_path: "fixture".into(),
+            name: "fixture".into(),
+            media_kind: riviu_core::PublishMediaKind::Image,
+            images: vec![],
+            video: None,
+            caption_path: "caption.txt".into(),
+            caption: "caption".into(),
+            caption_sha256: "a".repeat(64),
+            total_bytes: 0,
+            partners: vec![],
+        };
+        let manifest = PublishFolderManifest {
+            source_root: "fixture".into(),
+            scanned_at: chrono::Utc::now(),
+            bundles: vec![bundle],
+            notices: vec![],
+            ignored_partner_files: 0,
+            ignored_hidden_files: 0,
+        };
+        let request = riviu_core::PublishPreflightRequest {
+            source_root: "fixture".into(),
+            bundle_ids: vec!["fixture".into()],
+            udids: vec![udid],
+            target_ref: None,
+            run_at: None,
+            caption_overrides: Default::default(),
+            sound_policy: Default::default(),
+            sheet_enabled: true,
+            delete_after_publish: false,
+        };
+        // No endpoint is configured. The shared result must be consumed as given,
+        // rather than performing another network/database connection check per slot.
+        let target = riviu_core::publish_sheet::SheetDeliveryTarget {
+            version: 2,
+            spreadsheet_id: "fixture-book".into(),
+            sheet_gid: 0,
+            internal_reporting: true,
+        };
+        let shared = Ok(Some(target.clone()));
+        let first = build_publish_preflight_from_manifest_with_sheet(
+            &control,
+            &registry,
+            &db,
+            request.clone(),
+            &manifest,
+            shared.clone(),
+        )
+        .await
+        .unwrap();
+        let second = build_publish_preflight_from_manifest_with_sheet(
+            &control,
+            &registry,
+            &db,
+            request.clone(),
+            &manifest,
+            shared,
+        )
+        .await
+        .unwrap();
+        assert_eq!(first.report.sheet_delivery, Some(target.clone()));
+        assert_eq!(first.report.input_digest, second.report.input_digest);
+        assert!(!first
+            .report
+            .issues
+            .iter()
+            .any(|issue| issue.code == "sheet_connection_unverified"));
+        let mut other = target;
+        other.sheet_gid = 17;
+        let changed = build_publish_preflight_from_manifest_with_sheet(
+            &control,
+            &registry,
+            &db,
+            request.clone(),
+            &manifest,
+            Ok(Some(other)),
+        )
+        .await
+        .unwrap();
+        assert_ne!(first.report.input_digest, changed.report.input_digest);
+        for _ in 0..2 {
+            let failed = build_publish_preflight_from_manifest_with_sheet(
+                &control,
+                &registry,
+                &db,
+                request.clone(),
+                &manifest,
+                Err("shared writer refusal".into()),
+            )
+            .await
+            .unwrap();
+            assert_eq!(failed.report.sheet_delivery, None);
+            assert!(failed
+                .report
+                .issues
+                .iter()
+                .any(|issue| issue.code == "sheet_connection_unverified"
+                    && issue.message.contains("shared writer refusal")));
+        }
+        assert_eq!(
+            verify_sheet_delivery_choice(&db, false).await.unwrap(),
+            None
+        );
+        control.shutdown_cleanup().await.unwrap();
+        drop(db);
+        std::fs::remove_file(path).unwrap();
+    }
 }
 
 pub(super) fn publish_preflight_digest(
@@ -510,6 +712,7 @@ pub(crate) enum PublishRoute {
 /// What a device can actually do, as far as publishing is concerned.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum PublishReadiness {
+    HierarchyAdaptive,
     /// Driven by pixel, which this module has coordinates for.
     PixelGrid,
     /// Driven by label, and every label the publish path needs is measured on its build.
@@ -535,7 +738,9 @@ pub(super) fn refuse_devices_whose_composer_is_not_measured<'a>(
     let mut refusals = Vec::new();
     for (udid, readiness) in reports {
         match readiness {
-            PublishReadiness::PixelGrid | PublishReadiness::HierarchyReady => {}
+            PublishReadiness::PixelGrid
+            | PublishReadiness::HierarchyReady
+            | PublishReadiness::HierarchyAdaptive => {}
             PublishReadiness::HierarchyMissing(missing) => refusals.push(format!(
                 "{udid}: bản TikTok trên máy này chưa đo {} nhãn cần cho việc đăng ({})",
                 missing.len(),
@@ -601,9 +806,9 @@ pub(super) fn sound_plan_for_build(
     locale: &str,
     version: &str,
 ) -> anyhow::Result<riviu_core::tiktok_sound::SoundPickerPlan> {
-    riviu_core::tiktok_sound::SoundPickerPlan::resolve(package, locale, version).ok_or_else(|| {
-        anyhow::anyhow!("sound picker chưa được đo cho {package} / {locale} / {version}")
-    })
+    riviu_core::tiktok_sound::SoundPickerPlan::resolve_runtime(package, locale, version).ok_or_else(
+        || anyhow::anyhow!("sound picker chưa được đo cho {package} / {locale} / {version}"),
+    )
 }
 
 pub(super) fn video_plan_for_build(
@@ -611,13 +816,12 @@ pub(super) fn video_plan_for_build(
     locale: &str,
     version: &str,
 ) -> anyhow::Result<riviu_core::tiktok_composer::VideoPickerPlan> {
-    riviu_core::tiktok_composer::VideoPickerPlan::resolve(package, locale, version).ok_or_else(
-        || {
+    riviu_core::tiktok_composer::VideoPickerPlan::resolve_runtime(package, locale, version)
+        .ok_or_else(|| {
             anyhow::anyhow!(
                 "video picker chưa được đo tới editor cho {package} / {locale} / {version}"
             )
-        },
-    )
+        })
 }
 
 /// Refuse an unmeasured video tuple before any campaign media leaves the desktop.
@@ -720,12 +924,16 @@ pub(super) async fn refuse_devices_whose_sound_picker_is_not_measured(
 /// whose TikTok updated lands on `HierarchyUnknownBuild` instead of keeping a green chip
 /// from some other version's complete set.
 pub(super) fn readiness_of_build(package: &str, locale: &str, version: &str) -> PublishReadiness {
-    let Some(controls) = riviu_core::tiktok_labels::controls_for(package, locale, version) else {
+    let Some(controls) = riviu_core::tiktok_labels::controls_for_runtime(package, locale, version)
+    else {
         return PublishReadiness::HierarchyUnknownBuild(format!(
             "chưa đo bộ nhãn cho {package} / {locale} / {version}"
         ));
     };
     let missing = riviu_core::tiktok_composer::ComposerPlan::missing_for_carousel(&controls);
+    if controls.adaptive() && missing.is_empty() {
+        return PublishReadiness::HierarchyAdaptive;
+    }
     if missing.is_empty() {
         PublishReadiness::HierarchyReady
     } else {
@@ -768,14 +976,16 @@ pub(super) fn bundle_media_shape_is_ready(
 
 /// How many images each route's composer can select.
 ///
-/// Two different facts, and neither is TikTok's own ceiling of 35. The pixel path is bound by
-/// the twelve tap points somebody wrote down; the hierarchy path is bound by how many grid
-/// cells fit on the screen, which it computes per device — this is only the ceiling used
-/// **before transfer**, when no session exists to ask.
+/// Two different facts. The pixel path is bound by the tap points somebody wrote down. The
+/// hierarchy path **used to be bound by how many cells fit on the first screen** — 13 on the
+/// one phone that was measured (§9.197) — because its selector took that screen as the
+/// reference for every later one. It now learns the album's grid from what is visible and
+/// scrolls one measured row at a time (`tiktok_composer::selection::KnownGrid`), so its
+/// ceiling is TikTok's own carousel limit, the same number the scanner enforces.
 pub(crate) fn max_images_for(route: PublishRoute) -> usize {
     match route {
         PublishRoute::PixelGrid => IOS_PIXEL_GRID_MAX_IMAGES,
-        PublishRoute::Hierarchy => 13,
+        PublishRoute::Hierarchy => riviu_core::publish::MAX_CAROUSEL_IMAGES,
     }
 }
 
@@ -827,6 +1037,7 @@ pub(super) fn refuse_assignments_whose_bundle_is_too_large<'a>(
     rename_all_fields = "camelCase"
 )]
 pub enum PublishReadinessWire {
+    HierarchyAdaptive,
     PixelGrid,
     HierarchyReady,
     HierarchyMissing { labels: Vec<String> },
@@ -836,6 +1047,7 @@ pub enum PublishReadinessWire {
 impl From<PublishReadiness> for PublishReadinessWire {
     fn from(readiness: PublishReadiness) -> Self {
         match readiness {
+            PublishReadiness::HierarchyAdaptive => Self::HierarchyAdaptive,
             PublishReadiness::PixelGrid => Self::PixelGrid,
             PublishReadiness::HierarchyReady => Self::HierarchyReady,
             PublishReadiness::HierarchyMissing(labels) => Self::HierarchyMissing {

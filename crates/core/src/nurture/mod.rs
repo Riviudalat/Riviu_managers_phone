@@ -1106,8 +1106,10 @@ impl NurtureEngine {
         // change. That is the LIVE-preview and carousel path.
         let mut left = !rail_before;
         let mut decoded: Option<u64> = None;
-        let deadline = Instant::now() + timeout;
-        while Instant::now() < deadline {
+        // Use the same monotonic clock as the async poll below. Paused-clock
+        // tests can then examine every fixture independently of JPEG CPU cost.
+        let deadline = tokio::time::Instant::now() + timeout;
+        while tokio::time::Instant::now() < deadline {
             if stop.load(Ordering::Relaxed) {
                 break;
             }
@@ -1377,6 +1379,12 @@ impl NurtureEngine {
             }
         };
 
+        session.set_gui_scope(crate::ui_automation::GuiScope {
+            run_id: ctx.session_id.into(),
+            assignment_id: None,
+            device_id: ctx.udid.into(),
+            deadline_ms: status.deadline_at.map(|at| at.timestamp_millis()),
+        });
         // Two refusals here, both closing holes rather than adding caution.
         //
         // The fallback used to be `(375.0, 667.0)`: when the size could not be

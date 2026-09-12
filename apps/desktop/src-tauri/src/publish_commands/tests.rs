@@ -54,7 +54,12 @@ fn folder_scan_and_preflight_share_the_bounded_blocking_worker() {
     assert!(preflight.contains("scan_preflight_source(&request.source_root).await?"));
     let schedule = code_of("async fn prepare_schedule(").join("\n");
     assert_eq!(schedule.matches("scan_preflight_source(").count(), 1);
-    assert!(schedule.contains("build_publish_preflight_from_manifest("));
+    assert!(schedule.contains("build_publish_preflight_from_manifest_with_sheet("));
+    assert_eq!(schedule.matches("verify_sheet_delivery_choice(").count(), 1);
+    assert!(
+        schedule.find("verify_sheet_delivery_choice(").unwrap()
+            < schedule.find("for (index, slot)").unwrap()
+    );
     for signature in [
         "pub async fn publish_scan_folder(",
         "async fn scan_preflight_source(",
@@ -310,12 +315,12 @@ fn no_link_is_read_off_the_feed_until_the_route_is_measured() {
     assert!(
         body.iter()
             .any(|line| line.contains("capture_own_post_link_for_submission(")),
-        "the routed capture left the Posted arm; the link is read there or nowhere"
+        "the immediate route must retain identity-aware capture"
     );
     let body = body.join("\n");
     assert!(body.contains("observe_publish_account(session, &labels)"));
     assert!(body.contains("SubmissionIdentity"));
-    assert!(body.contains("before_post(Some(selection), Some((&expected_account, &at)))"));
+    assert!(body.contains("before_post(Some(selection), Some(&proof))"));
 }
 
 /// **Readiness answers about the build in front of it, not about the package.**
@@ -333,25 +338,16 @@ fn readiness_asks_the_catalogue_about_this_phones_build() {
         readiness_of_build("com.ss.android.ugc.trill", "en", "38.3.2"),
         PublishReadiness::HierarchyReady
     ));
-    // Same phone, same language, after TikTok updated itself. The language set still
-    // describes the strings — they are rendered text, not ids — so this does not become
-    // "unknown build"; what drops out is the one control keyed to `versionName`. The
-    // answer therefore NAMES `ComposerCaption`, which is both a refusal and the
-    // instruction for closing it. (I expected `HierarchyUnknownBuild` here and the code
-    // was more informative than the expectation; the assertion follows the code.)
+    // A semantic route may prepare the run, but is explicitly unobserved rather than measured-ready.
     let updated = readiness_of_build("com.ss.android.ugc.trill", "en", "46.9.9");
+    assert!(matches!(updated, PublishReadiness::HierarchyAdaptive));
     assert!(
-        matches!(&updated, PublishReadiness::HierarchyMissing(missing)
-            if missing.contains(&riviu_core::tiktok_labels::TikTokControl::ComposerCaption)),
-        "an unmeasured version must lose its version-keyed control, not inherit another \
-         version's verdict: {updated:?}"
+        riviu_core::tiktok_labels::controls_for("com.ss.android.ugc.trill", "en", "46.9.9")
+            .unwrap()
+            .resource_version()
+            .is_none()
     );
-    assert!(
-        matches!(&updated, PublishReadiness::HierarchyMissing(missing)
-            if missing.contains(&riviu_core::tiktok_labels::TikTokControl::PickerAlbumMenu)
-                && missing.contains(&riviu_core::tiktok_labels::TikTokControl::PickerMultiSelect)),
-        "preflight must report opening and verified-selection prerequisites too"
-    );
+
     // A version that was never read (the empty string a failed `dumpsys` leaves) is the
     // same answer for the same reason — it is not a licence to use another version's ids.
     assert!(matches!(
@@ -382,7 +378,7 @@ fn readiness_asks_the_catalogue_about_this_phones_build() {
     // borrowing a measured sibling's ids.
     assert!(matches!(
         readiness_of_build("com.zhiliaoapp.musically", "en", "47.0.0"),
-        PublishReadiness::HierarchyMissing(missing) if !missing.is_empty()
+        PublishReadiness::HierarchyAdaptive
     ));
 }
 
@@ -523,6 +519,7 @@ fn test_video_bundle(id: &str) -> riviu_core::PublishBundle {
 
 fn test_assignment(id: &str, bundle_id: &str, udid: &str) -> riviu_core::PublishAssignmentRecord {
     riviu_core::PublishAssignmentRecord {
+        sheet_delivery: None,
         id: id.into(),
         campaign_id: "campaign-1".into(),
         bundle_id: bundle_id.into(),
@@ -546,6 +543,9 @@ fn sheet_delivery_reconciles_the_operation_before_emitting_and_rejects_a_stale_r
     bundle.caption = "caption".into();
     bundle.caption_sha256 = super::frame_sha256(bundle.caption.as_bytes());
     let request = riviu_core::PublishCampaignRequest {
+        sheet_delivery: None,
+        verification_contract_version: None,
+        verification_builds: vec![],
         sheet_enabled: true,
         request_id: Uuid::new_v4().to_string(),
         source_root: "C:/fixture".into(),
@@ -554,6 +554,7 @@ fn sheet_delivery_reconciles_the_operation_before_emitting_and_rejects_a_stale_r
         run_at: None,
         visibility: riviu_core::PublishVisibility::Public,
         cleanup_policy: riviu_core::PublishCleanupPolicy::DeleteImportedAssetsAfterVerified,
+        network: riviu_core::SocialNetwork::TikTok,
         sound_policy: riviu_core::PublishSoundPolicy::Default,
         execution_confirmed: true,
         target_snapshot: None,
@@ -758,6 +759,7 @@ fn preflight_digest_binds_caption_target_and_observed_tiktok_build() {
     )
     .expect("digest");
     let report = riviu_core::PublishPreflightReport {
+        sheet_delivery: None,
         sheet_enabled: true,
         input_digest: approved.clone(),
         target_snapshot: target_snapshot.clone(),
@@ -866,6 +868,7 @@ fn preflight_digest_binds_caption_target_and_observed_tiktok_build() {
     assert_ne!(approved, build_digest);
 
     let stale = riviu_core::PublishPreflightReport {
+        sheet_delivery: None,
         sheet_enabled: true,
         input_digest: build_digest,
         ..report
@@ -1031,7 +1034,12 @@ fn video_snapshot_is_validated_and_picker_readiness_is_tuple_scoped() {
     assert!(bundle_media_shape_is_ready(&image, PublishRoute::Hierarchy));
     assert!(bundle_media_shape_is_ready(&video, PublishRoute::Hierarchy));
     assert!(video_plan_for_build("com.ss.android.ugc.trill", "en", "38.3.2").is_ok());
-    assert!(video_plan_for_build("com.zhiliaoapp.musically", "en", "46.2.2").is_err());
+    assert!(
+        video_plan_for_build("com.zhiliaoapp.musically", "en", "46.2.2")
+            .unwrap()
+            .provenance()
+            .contains("runtime verification")
+    );
 
     video.video = None;
     assert!(!bundle_media_shape_is_ready(
@@ -1174,6 +1182,9 @@ async fn missing_sheet_config_keeps_the_confirmed_post_in_a_pending_outbox() {
     bundle.caption = "caption".into();
     bundle.caption_sha256 = super::frame_sha256(bundle.caption.as_bytes());
     let request = riviu_core::PublishCampaignRequest {
+        sheet_delivery: None,
+        verification_contract_version: None,
+        verification_builds: vec![],
         sheet_enabled: true,
         request_id: Uuid::new_v4().to_string(),
         source_root: "C:/fixture".into(),
@@ -1182,6 +1193,7 @@ async fn missing_sheet_config_keeps_the_confirmed_post_in_a_pending_outbox() {
         run_at: None,
         visibility: riviu_core::PublishVisibility::Public,
         cleanup_policy: riviu_core::PublishCleanupPolicy::DeleteImportedAssetsAfterVerified,
+        network: riviu_core::SocialNetwork::TikTok,
         sound_policy: riviu_core::PublishSoundPolicy::Default,
         execution_confirmed: true,
         target_snapshot: None,
@@ -1234,6 +1246,9 @@ fn transfer_write_ahead_failure_stops_before_any_device_call() {
     bundle.caption = "caption".into();
     bundle.caption_sha256 = super::frame_sha256(bundle.caption.as_bytes());
     let request = riviu_core::PublishCampaignRequest {
+        sheet_delivery: None,
+        verification_contract_version: None,
+        verification_builds: vec![],
         sheet_enabled: true,
         request_id: Uuid::new_v4().to_string(),
         source_root: "C:/fixture".into(),
@@ -1242,6 +1257,7 @@ fn transfer_write_ahead_failure_stops_before_any_device_call() {
         run_at: None,
         visibility: riviu_core::PublishVisibility::Public,
         cleanup_policy: riviu_core::PublishCleanupPolicy::DeleteImportedAssetsAfterVerified,
+        network: riviu_core::SocialNetwork::TikTok,
         sound_policy: riviu_core::PublishSoundPolicy::Default,
         execution_confirmed: true,
         target_snapshot: None,
@@ -1469,7 +1485,7 @@ fn files_left_on_the_phone_do_not_unpublish_a_carousel() {
 
     // **And the production path routes through it**, which testing the helper alone
     // cannot show: `let _ = cleanup; Ok(outcome)` at the call site left this green.
-    let body = code_of("async fn post_one_assignment(");
+    let body = code_of("async fn post_one_assignment_owned(");
     assert!(
         body.iter()
             .any(|line| line.contains("fold_cleanup_into(action_result, cleanup)")),
@@ -1552,7 +1568,7 @@ fn a_cancel_is_read_before_the_phone_and_the_claim_lives_at_the_post_boundary() 
 
     let cancel = at("PublishCampaignState::Cancelled")
         .expect("the cancel is no longer read; the button writes a flag nobody honours");
-    let post = at("post_one_assignment(").expect("this is what touches the phone");
+    let post = at("post_one_assignment_owned(").expect("this is what touches the phone");
     assert!(cancel < post, "the cancel is read after the phone starts");
     assert!(
         at("claim_publish_assignment_for_posting").is_none(),
@@ -1583,7 +1599,7 @@ fn a_cancel_is_read_before_the_phone_and_the_claim_lives_at_the_post_boundary() 
         "the stagger argument is not what delays the task"
     );
 
-    let assignment = code_of("async fn post_one_assignment(");
+    let assignment = code_of("async fn post_one_assignment_owned(");
     let claim = assignment
         .iter()
         .position(|line| line.contains("claim_publish_assignment_for_posting"))
@@ -1650,7 +1666,7 @@ fn code_of(signature: &str) -> Vec<&'static str> {
 /// `supports_element_bounds`, because after that branch the route is already chosen.
 #[test]
 fn the_post_path_reconciles_the_two_route_authorities_before_it_branches() {
-    let body = code_of("async fn post_one_assignment(");
+    let body = code_of("async fn post_one_assignment_owned(");
     let asks = body
         .iter()
         .position(|line| line.contains("refuse_when_the_route_authorities_disagree"))
@@ -1931,6 +1947,46 @@ fn each_device_is_measured_against_its_own_composer() {
         max_images_for(PublishRoute::Hierarchy) > max_images_for(PublishRoute::PixelGrid),
         "if these are equal the split above proves nothing"
     );
+}
+
+/// **The hierarchy ceiling is TikTok's, not the first screen's.**
+///
+/// 13 was how many cells one phone showed before anything was selected (§9.197), and it
+/// refused every 15-photo bundle of the next batch on every phone — read by the operator as
+/// a fault in the phones. The selector now scrolls the album row by row, so the number the
+/// preflight holds against a bundle is the scanner's 35, and one past it is still refused.
+#[test]
+fn the_hierarchy_route_reaches_every_carousel_the_scanner_admits() {
+    assert_eq!(
+        max_images_for(PublishRoute::Hierarchy),
+        riviu_core::publish::MAX_CAROUSEL_IMAGES
+    );
+    for count in [13, 15, 20, 35] {
+        let bundle = bundle_of("tall", count);
+        refuse_assignments_whose_bundle_is_too_large([(
+            "an-android",
+            &bundle,
+            max_images_for(PublishRoute::Hierarchy),
+        )])
+        .unwrap_or_else(|error| panic!("{count} images: {error:#}"));
+        assert!(
+            bundle_media_shape_is_ready(&bundle, PublishRoute::Hierarchy),
+            "{count}"
+        );
+    }
+    let past = bundle_of("past", 36);
+    assert!(refuse_assignments_whose_bundle_is_too_large([(
+        "an-android",
+        &past,
+        max_images_for(PublishRoute::Hierarchy),
+    )])
+    .is_err());
+    assert!(!bundle_media_shape_is_ready(&past, PublishRoute::Hierarchy));
+    // The pixel route did not move.
+    assert!(!bundle_media_shape_is_ready(
+        &bundle_of("twelve", 12),
+        PublishRoute::PixelGrid
+    ));
 }
 
 #[test]

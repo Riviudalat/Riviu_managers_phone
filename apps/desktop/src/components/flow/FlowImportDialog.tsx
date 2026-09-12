@@ -3,6 +3,7 @@ import { useEffect, useRef, useState } from "react";
 import { flowImportLegacy } from "../../api";
 import { describeError } from "../../describeError";
 import type { FlowDocumentV2, LegacyImportResult } from "../../types";
+import { useModalFocus } from "../useModalFocus";
 
 // The same ceiling `FlowJsonDialog.tsx` enforces for V2 documents, refused before the string
 // crosses IPC: the backend re-checks, but by then React has already held the whole paste.
@@ -42,6 +43,7 @@ export function FlowImportDialog({
     live.current = false;
     onClose();
   };
+  const dialogRef = useModalFocus<HTMLElement>(close);
 
   const submit = async () => {
     setBusy(true);
@@ -67,7 +69,7 @@ export function FlowImportDialog({
   };
 
   return (
-    <section role="dialog" aria-modal="true" aria-label="Nhập Flow cũ" className="flow-dialog">
+    <section ref={dialogRef} tabIndex={-1} role="dialog" aria-modal="true" aria-label="Nhập Flow cũ" className="flow-dialog">
       <header>
         <strong>Nhập Flow cũ</strong>
         <button type="button" aria-label="Đóng hộp thoại nhập" title="Đóng" onClick={close}>

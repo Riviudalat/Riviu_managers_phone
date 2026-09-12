@@ -256,6 +256,18 @@ const slider = (name: string) => screen.getByLabelText(`${name} thanh kéo phầ
 const box = (name: string) => screen.getByLabelText(`${name} phần trăm`);
 
 describe("NurturePopup", () => {
+  it("opens advanced settings and focuses the invalid field from the repair action", async () => {
+    const api = await import("../api");
+    vi.mocked(api.nurtureGetSettings).mockResolvedValueOnce({ ...settings, watchMin: 0 });
+    render(<NurturePopup devices={devices} selected={[]} metas={new Map()} surface="page" />);
+    const summary = await screen.findByText("Tuỳ chỉnh nâng cao");
+    expect(summary.closest("details")).not.toHaveAttribute("open");
+    fireEvent.click(screen.getByRole("button", { name: "Sửa thiết lập" }));
+    await waitFor(() => expect(summary.closest("details")).toHaveAttribute("open"));
+    expect(document.activeElement).toHaveAttribute("data-nurture-field", "watchMin");
+    expect(api.nurtureStart).not.toHaveBeenCalled();
+  });
+
   it("reviews the captured settings and leaves cancelled sessions undispatched", async () => {
     const api = await import("../api");
     vi.mocked(requestConfirm).mockResolvedValueOnce(false);
@@ -288,6 +300,7 @@ describe("NurturePopup", () => {
     vi.mocked(api.nurtureGetSettings).mockResolvedValueOnce({ ...settings, commentProb: 17, commentEnabled: false, followProb: 23 });
     render(<NurturePopup devices={devices} selected={[]} metas={new Map()} surface="page" />);
     await screen.findByRole("button", { name: /Cân bằng/ });
+    fireEvent.click(screen.getByText("Tuỳ chỉnh nâng cao"));
     expect(screen.getByRole("tab", { name: "AI" })).toBeVisible();
     fireEvent.click(screen.getByRole("button", { name: /Cân bằng/ }));
     expect(screen.getByRole("spinbutton", { name: /Thời lượng tối đa/ })).toHaveValue(20);
@@ -388,7 +401,7 @@ describe("NurturePopup", () => {
     const roster = Array.from({ length: 8 }, (_, index) => ({ ...devices[0], udid: `scope-${index}`, name: `Phone ${index + 1}`, status: index === 1 ? "busy" as const : "ready" as const }));
     const metas = new Map([["scope-6", { udid: "scope-6", alias: "Đà Lạt", number: 7, notes: "", tags: [], handle: "dalat" }]]);
     render(<NurturePopup devices={roster} selected={[]} targetUdids={[]} targetRef={{ type: "explicit", udids: [] }} onTargetRefChange={onTargetRefChange} metas={metas} surface="page" />);
-    fireEvent.click(await screen.findByRole("button", { name: "Chọn tất cả" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Chọn tất cả sẵn sàng" }));
     expect(new Set(onTargetRefChange.mock.calls[0][0].udids)).toEqual(new Set(roster.filter(device => device.status === "ready").map(device => device.udid)));
     fireEvent.change(screen.getByRole("searchbox", { name: "Tìm máy Nuôi TikTok" }), { target: { value: "dalat" } });
     expect(screen.getByText("Đà Lạt")).toBeVisible();
@@ -502,6 +515,7 @@ describe("NurturePopup", () => {
 
   it("restores autosaved settings without applying them to a live session or storing credentials", async () => {
     const view = render(<NurturePopup devices={devices} selected={[]} metas={new Map()} surface="page" />);
+    fireEvent.click(await screen.findByText("Tuỳ chỉnh nâng cao"));
     fireEvent.click(await screen.findByRole("tab", { name: "Hành vi" }));
     await screen.findByLabelText("Tổng số video muốn lướt", { selector: "input" });
     fireEvent.change(screen.getByLabelText("Tổng số video muốn lướt", { selector: "input" }), { target: { value: "27" } });
@@ -512,6 +526,7 @@ describe("NurturePopup", () => {
     expect(stored.value.settings).not.toHaveProperty("hasApiKey");
     view.unmount();
     render(<NurturePopup devices={devices} selected={[]} metas={new Map()} surface="page" />);
+    fireEvent.click(await screen.findByText("Tuỳ chỉnh nâng cao"));
     fireEvent.click(await screen.findByRole("tab", { name: "Hành vi" }));
     await waitFor(() => expect(screen.getByLabelText("Tổng số video muốn lướt", { selector: "input" })).toHaveValue(27));
     expect(saved.saveSettings).not.toHaveBeenCalled();
@@ -520,6 +535,7 @@ describe("NurturePopup", () => {
   it("saves credentials without applying an obsolete profile", async () => {
     saved.saveSettings.mockImplementationOnce(async value => value);
     render(<NurturePopup devices={devices} selected={[]} targetUdids={["mock-1"]} metas={new Map()} surface="page" />);
+    fireEvent.click(await screen.findByText("Tuỳ chỉnh nâng cao"));
     fireEvent.click(await screen.findByRole("tab", {name:"AI"}));
     fireEvent.change(document.querySelector<HTMLInputElement>('[data-nurture-field="apiKey"]')!, {target:{value:"new-fixture-key"}});
     fireEvent.click(screen.getByRole("button", {name:"Lưu thiết lập"}));
@@ -571,6 +587,7 @@ describe("NurturePopup", () => {
     );
 
     fireEvent.click(screen.getByRole("tab", { name: "Thiết lập" }));
+    fireEvent.click(screen.getByText("Tuỳ chỉnh nâng cao"));
     const settingsTabs = within(workspace).getByRole("tablist", {
       name: "Nhóm thiết lập Nuôi TikTok",
     });
@@ -648,6 +665,7 @@ describe("NurturePopup", () => {
     expect(setup).toHaveFocus();
 
     fireEvent.click(screen.getByRole("tab", { name: "Thiết lập" }));
+    fireEvent.click(screen.getByText("Tuỳ chỉnh nâng cao"));
     const settingsTabs = within(workspace).getByRole("tablist", {
       name: "Nhóm thiết lập Nuôi TikTok",
     });

@@ -43,6 +43,13 @@ use std::time::Duration;
 use crate::driver::{ElementBox, ElementQuery, UiSession};
 use crate::tiktok_labels::{TikTokControl, TikTokControls};
 
+pub(crate) mod hierarchy;
+mod verification;
+pub use verification::{
+    capture_submission_link, probe_clipboard_restore, PublishVerificationPlan, VerificationCapture,
+    VerificationDiagnostic, VerificationReason,
+};
+
 /// How long the share sheet may take to come up.
 pub const SHEET_WINDOW: Duration = Duration::from_millis(6_000);
 /// How long the clipboard may take to change after `Copy link` is tapped.
@@ -131,7 +138,7 @@ impl LinkCapture {
                 "bảng chia sẻ có nhiều hơn một dòng giống 'sao chép liên kết' — không đoán".into()
             }
             Self::CopyDidNotLand => {
-                "bấm sao chép mà clipboard vẫn là mốc đã ghi — cú bấm trượt".into()
+                "TikTok chưa trả liên kết sau khi bấm sao chép; sẽ kiểm tra lại sau".into()
             }
             Self::NotAPostLink(value) => {
                 format!("clipboard đổi nhưng không phải link bài: {value:.80}")
@@ -727,7 +734,17 @@ async fn read_through_sheet(
 ) -> LinkCapture {
     let control = match session.locate(share).await {
         Ok(Some(control)) => control,
-        Ok(None) => return LinkCapture::NoShareControl,
+        Ok(None) => match crate::ui_automation::runtime::resolve_navigation(
+            session,
+            "share",
+            Duration::from_secs(30),
+        )
+        .await
+        {
+            Ok(Some(control)) => control,
+            Ok(None) => return LinkCapture::NoShareControl,
+            Err(error) => return LinkCapture::ReadFailed(error.to_string()),
+        },
         Err(error) => return LinkCapture::ReadFailed(error.to_string()),
     };
 
@@ -917,38 +934,97 @@ fn visible_caption_matches(visible: &str, expected: &str) -> bool {
         return true;
     }
     // Only TikTok's explicit truncation markers authorize a prefix comparison.
-    // A complete older caption must not stand in for a longer new caption, and
-    // ordinary text ending in "more" must remain part of the caption.
-    let prefix = ["…more", "...more", "… more", "... more", "…", "..."]
-        .iter()
-        .find_map(|suffix| visible.strip_suffix(suffix));
-    let Some(prefix) = prefix.map(str::trim_end) else {
+    // EN "…more" and VI "xem thêm" both count; bare "more" in the caption does not.
+    let prefix = [
+        "…more",
+        "...more",
+        "… more",
+        "... more",
+        "…xem thêm",
+        "...xem thêm",
+        "… xem thêm",
+        "... xem thêm",
+        "xem thêm",
+        "…",
+        "...",
+    ]
+    .iter()
+    .find_map(|suffix| visible.strip_suffix(suffix))
+    .map(str::trim_end);
+    let Some(prefix) = prefix else {
         return false;
     };
     prefix.chars().count() >= expected.chars().count().min(64) && expected.starts_with(prefix)
 }
 
+/// Fold Vietnamese letters to ASCII so "phút trước" and "phut truoc" share one parser.
+fn fold_vi_ascii(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    for ch in input.chars() {
+        let mapped = match ch {
+            'à' | 'á' | 'ạ' | 'ả' | 'ã' | 'â' | 'ầ' | 'ấ' | 'ậ' | 'ẩ' | 'ẫ' | 'ă' | 'ằ' | 'ắ'
+            | 'ặ' | 'ẳ' | 'ẵ' => 'a',
+            'è' | 'é' | 'ẹ' | 'ẻ' | 'ẽ' | 'ê' | 'ề' | 'ế' | 'ệ' | 'ể' | 'ễ' => {
+                'e'
+            }
+            'ì' | 'í' | 'ị' | 'ỉ' | 'ĩ' => 'i',
+            'ò' | 'ó' | 'ọ' | 'ỏ' | 'õ' | 'ô' | 'ồ' | 'ố' | 'ộ' | 'ổ' | 'ỗ' | 'ơ' | 'ờ' | 'ớ'
+            | 'ợ' | 'ở' | 'ỡ' => 'o',
+            'ù' | 'ú' | 'ụ' | 'ủ' | 'ũ' | 'ư' | 'ừ' | 'ứ' | 'ự' | 'ử' | 'ữ' => {
+                'u'
+            }
+            'ỳ' | 'ý' | 'ỵ' | 'ỷ' | 'ỹ' => 'y',
+            'đ' => 'd',
+            other => other,
+        };
+        out.push(mapped);
+    }
+    out
+}
+
 fn relative_post_age(text: &str) -> Option<(i64, i64)> {
-    let text = text
+    let trimmed = text
         .trim()
         .trim_start_matches(['\u{200e}', '\u{200f}'])
         .trim()
         .trim_start_matches('·')
-        .trim()
-        .to_ascii_lowercase();
-    if matches!(text.as_str(), "just now" | "now") {
+        .trim();
+    let ascii = trimmed.to_ascii_lowercase();
+    if matches!(ascii.as_str(), "just now" | "now") {
         return Some((0, 60));
     }
-    let age = text.strip_suffix(" ago")?;
-    let split = age.find(|c: char| !c.is_ascii_digit()).unwrap_or(age.len());
-    let amount = age[..split].parse::<i64>().ok()?;
-    let unit = match age[split..].trim() {
-        "s" | "sec" | "seconds" => 1,
-        "m" | "min" | "minutes" => 60,
-        "h" | "hr" | "hours" => 3600,
-        _ => return None,
-    };
-    Some((amount.checked_mul(unit)?, unit))
+    if let Some(age) = ascii.strip_suffix(" ago") {
+        let split = age.find(|c: char| !c.is_ascii_digit()).unwrap_or(age.len());
+        let amount = age[..split].parse::<i64>().ok()?;
+        let unit = match age[split..].trim() {
+            "s" | "sec" | "seconds" => 1,
+            "m" | "min" | "minutes" => 60,
+            "h" | "hr" | "hours" => 3600,
+            "d" | "day" | "days" => 86400,
+            _ => return None,
+        };
+        return Some((amount.checked_mul(unit)?, unit));
+    }
+
+    let folded = fold_vi_ascii(&trimmed.to_lowercase());
+    if matches!(
+        folded.as_str(),
+        "vua xong" | "vua moi" | "bay gio" | "luc nay"
+    ) {
+        return Some((0, 60));
+    }
+    for (suffix, unit) in [
+        (" giay truoc", 1_i64),
+        (" phut truoc", 60),
+        (" gio truoc", 3600),
+        (" ngay truoc", 86400),
+    ] {
+        if let Some(age) = folded.strip_suffix(suffix) {
+            let amount = age.trim().parse::<i64>().ok()?;
+            return Some((amount.checked_mul(unit)?, unit));
+        }
+    }
+    None
 }
 
 fn relative_post_time_matches(
@@ -2035,6 +2111,34 @@ mod tests {
         assert!(!relative_post_time_matches("· 2h ago", submitted, now));
         assert!(!relative_post_time_matches("2026-08-01", submitted, now));
         assert!(!relative_post_time_matches("yesterday", submitted, now));
+        assert!(relative_post_time_matches("· 5 phút trước", submitted, now));
+        assert!(relative_post_time_matches("5 phut truoc", submitted, now));
+        assert!(relative_post_age("vừa xong").is_some());
+        assert!(relative_post_age("Vừa xong").is_some());
+        assert_eq!(
+            relative_post_age("3 giờ trước").map(|v| v.0),
+            Some(3 * 3600)
+        );
+        let vi_caption =
+            "Một caption đo được với phần mở đầu dài và đích đến riêng để xác minh bài đăng TikTok tiếng Việt";
+        assert!(visible_caption_matches(
+            &format!(
+                "{}…xem thêm",
+                &vi_caption.chars().take(70).collect::<String>()
+            ),
+            vi_caption
+        ));
+        assert!(visible_caption_matches(
+            &format!(
+                "{} xem thêm",
+                &vi_caption.chars().take(70).collect::<String>()
+            ),
+            vi_caption
+        ));
+        assert!(!visible_caption_matches(
+            "Một caption đo được với phần mở đầu khác",
+            vi_caption
+        ));
     }
 
     #[test]

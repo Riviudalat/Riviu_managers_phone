@@ -2,6 +2,10 @@ plugins {
     id "com.android.application"
 }
 
+tasks.withType(JavaCompile).configureEach {
+    options.compilerArgs += ["-parameters"]
+}
+
 android {
     namespace "com.riviu.agent"
     compileSdk 34
@@ -13,8 +17,8 @@ android {
         // Kept in step with `Protocol.AGENT_VERSION`, which is what `/status` advertises and
         // what the desktop compares against. Two version strings that disagree is how a
         // stale helper looks fresh.
-        versionCode 4
-        versionName "0.4.0"
+        versionCode 5
+        versionName "0.5.0"
     }
 
     buildTypes {

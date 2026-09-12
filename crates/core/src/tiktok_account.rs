@@ -1,8 +1,6 @@
 //! Read-only account proof for a measured own-profile screen. Never changes the login.
 use crate::tiktok_labels::{LabelMatch, TikTokControls};
 use crate::{ElementBox, ElementQuery, UiSession};
-use quick_xml::{events::Event, Reader, XmlVersion};
-use std::collections::HashMap;
 
 fn single_username(elements: &[ElementBox]) -> Option<String> {
     let [element] = elements else {
@@ -22,6 +20,9 @@ fn single_username(elements: &[ElementBox]) -> Option<String> {
 }
 
 pub fn account_read_supported(labels: TikTokControls) -> bool {
+    if labels.adaptive() {
+        return true;
+    }
     if labels.package() == "com.zhiliaoapp.musically" && labels.language() == "en" {
         return global_username_id(labels.resource_version()).is_some();
     }
@@ -57,104 +58,36 @@ fn global_profile_from_snapshot_with_id(
     xml: &str,
     username_id: &str,
 ) -> anyhow::Result<Option<String>> {
-    anyhow::ensure!(xml.len() <= 16 * 1024 * 1024, "account snapshot size limit");
-    let mut reader = Reader::from_str(xml);
-    let mut nodes = 0usize;
-    let mut depth = 0usize;
-    let mut edits = 0usize;
-    let mut menus = 0usize;
+    let tree = crate::ui_automation::tree::Tree::parse(crate::HierarchySourceSnapshot {
+        generation: 1,
+        xml: xml.into(),
+    })?;
+    let mut edits = 0;
+    let mut menus = 0;
     let mut usernames = Vec::new();
-    loop {
-        let event = reader.read_event()?;
-        if matches!(event, Event::Start(_)) {
-            depth += 1;
-            anyhow::ensure!(depth <= 256, "account snapshot depth limit");
+    for (index, node) in tree.nodes.iter().enumerate() {
+        if !node.visible("com.zhiliaoapp.musically")
+            || !tree.ancestors_visible(index)
+            || node.attr("class") != "android.widget.Button"
+            || node.attr("enabled") != "true"
+            || node.attr("clickable") != "true"
+        {
+            continue;
         }
-        match event {
-            Event::Start(node) | Event::Empty(node) => {
-                nodes += 1;
-                anyhow::ensure!(nodes <= 32768, "account snapshot node limit");
-                let mut attrs = HashMap::new();
-                for attribute in node.attributes() {
-                    let attribute = attribute?;
-                    attrs.insert(
-                        std::str::from_utf8(attribute.key.as_ref())?.to_owned(),
-                        attribute
-                            .decoded_and_normalized_value(
-                                XmlVersion::Implicit1_0,
-                                reader.decoder(),
-                            )?
-                            .into_owned(),
-                    );
-                }
-                let attr = |name: &str| attrs.get(name).map(String::as_str).unwrap_or("");
-                if attr("package") != "com.zhiliaoapp.musically"
-                    || attr("class") != "android.widget.Button"
-                    || attr("displayed") != "true"
-                    || attr("enabled") != "true"
-                    || attr("clickable") != "true"
-                {
-                    continue;
-                }
-                let edit = attr("text") == "Edit";
-                let menu = attr("content-desc") == "Profile menu";
-                let username =
-                    attr("resource-id") == format!("com.zhiliaoapp.musically:id/{username_id}");
-                if !edit && !menu && !username {
-                    continue;
-                }
-                let Some((left, right)) = attr("bounds")
-                    .strip_prefix('[')
-                    .and_then(|value| value.strip_suffix(']'))
-                    .and_then(|value| value.split_once("]["))
-                else {
-                    return Ok(None);
-                };
-                let Some((x, y)) = left.split_once(',') else {
-                    return Ok(None);
-                };
-                let Some((right, bottom)) = right.split_once(',') else {
-                    return Ok(None);
-                };
-                let (x, y, right, bottom) = (
-                    x.parse::<f64>()?,
-                    y.parse::<f64>()?,
-                    right.parse::<f64>()?,
-                    bottom.parse::<f64>()?,
-                );
-                if ![x, y, right, bottom].iter().all(|v| v.is_finite())
-                    || x < 0.0
-                    || y < 0.0
-                    || right <= x
-                    || bottom <= y
-                {
-                    return Ok(None);
-                }
-                edits += usize::from(edit);
-                menus += usize::from(menu);
-                if username {
-                    usernames.push(ElementBox {
-                        x,
-                        y,
-                        width: right - x,
-                        height: bottom - y,
-                        description: Some(attr("text").to_owned()),
-                        enabled: true,
-                        clickable: true,
-                    });
-                }
+        let description = node.attr("content-desc");
+        let edit = node.attr("text") == "Edit";
+        let menu = description == "Profile menu";
+        let username =
+            node.attr("resource-id") == format!("com.zhiliaoapp.musically:id/{username_id}");
+        if edit || menu || username {
+            let Some(rect) = node.rect() else {
+                return Ok(None);
+            };
+            edits += usize::from(edit);
+            menus += usize::from(menu);
+            if username {
+                usernames.push(rect);
             }
-            Event::End(_) => {
-                depth = depth
-                    .checked_sub(1)
-                    .ok_or_else(|| anyhow::anyhow!("account snapshot nesting"))?;
-            }
-            Event::DocType(_) => anyhow::bail!("doctype in account snapshot"),
-            Event::Eof => {
-                anyhow::ensure!(depth == 0, "incomplete account snapshot");
-                break;
-            }
-            _ => {}
         }
     }
     Ok((edits == 1 && menus == 1)
@@ -166,6 +99,30 @@ async fn read_once(
     session: &dyn UiSession,
     labels: TikTokControls,
 ) -> anyhow::Result<Option<String>> {
+    if labels.adaptive() {
+        let tree =
+            crate::ui_automation::tree::Tree::parse(session.hierarchy_source_snapshot().await?)?;
+        let mut headers = Vec::new();
+        let mut own = false;
+        let mut menu = false;
+        for (i, node) in tree.nodes.iter().enumerate() {
+            if !node.visible(labels.package()) || !tree.ancestors_visible(i) {
+                continue;
+            }
+            own |= matches!(node.attr("text"), "Edit" | "Edit profile" | "Sửa hồ sơ");
+            menu |= matches!(node.attr("content-desc"), "Profile menu" | "Menu hồ sơ");
+            if node.attr("text").starts_with('@') && node.attr("class") == "android.widget.Button" {
+                if let Some(rect) = node.rect() {
+                    headers.push(rect);
+                }
+            }
+        }
+        return Ok(if own && menu {
+            single_username(&headers)
+        } else {
+            None
+        });
+    }
     if labels.package() == "com.zhiliaoapp.musically" {
         let id = global_username_id(labels.resource_version())
             .ok_or_else(|| anyhow::anyhow!("unmeasured account build"))?;

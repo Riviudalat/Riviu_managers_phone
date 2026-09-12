@@ -73,7 +73,7 @@ TEMURIN_SOURCE = (
 ANDROID_PACKAGE_TOOLS_TREE_SHA256 = (
     "de003f9f8b872ba8a9e2bb57d0539e04c0c7116e409619ded42941aaf85a3762"
 )
-EXPECTED_DATABASE_VERSION = 32
+EXPECTED_DATABASE_VERSION = 36
 BRANDING_LOGO = REPOSITORY_ROOT / "logo.jpg"
 TAURI_CONFIG = REPOSITORY_ROOT / "apps" / "desktop" / "src-tauri" / "tauri.conf.json"
 # The release build runs with this overlay, so *this* is the version the shipped binary
@@ -1165,6 +1165,19 @@ def verify_packaged_resources(
     runtime_manifest: dict[str, Any],
     android_package_tools_root: Path | None = None,
 ) -> dict[str, Any]:
+    gui_runtime = sidecars_root / "gui-service"
+    if sys.platform == "win32":
+        gui_manifest = load_json(gui_runtime / "gui-service-manifest.json")
+        if gui_manifest.get("protocolVersion") != 1:
+            raise ArtifactError("GUI service protocol mismatch")
+        for entry in gui_manifest.get("files", []):
+            path = (gui_runtime / entry["path"]).resolve()
+            if not path.is_relative_to(gui_runtime.resolve()) or not path.is_file():
+                raise ArtifactError("GUI service resource is missing or leaves runtime")
+            if path.stat().st_size != entry["bytes"] or sha256_file(path) != entry["sha256"]:
+                raise ArtifactError("GUI service resource hash mismatch")
+        if not gui_manifest.get("files"):
+            raise ArtifactError("GUI service manifest is empty")
     packaged_pmd_root = sidecars_root / "pymobiledevice3"
     packaged_runtime = packaged_pmd_root / "runtime"
     packaged_entrypoint = packaged_runtime / runtime_manifest["entrypoint"]

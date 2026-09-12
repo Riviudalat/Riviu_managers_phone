@@ -290,7 +290,7 @@ export function AppsPage({ devices, selected, operationSource }: SelProps & { op
                         <span className="admin-actions">
                           <button
                             type="button"
-                            className="primary"
+                            className="ghost"
                             disabled={!installTargets.length || busy || batch.loading || batch.active || !!batch.error}
                             title={installTargets.length
                               ? `Cài lên ${installTargets.length} ${platformName}`
@@ -390,6 +390,7 @@ export function AppsPage({ devices, selected, operationSource }: SelProps & { op
             <div className="admin-metric"><dt>Android kết nối</dt><dd>{androidDevices.length}</dd></div>
             <div className="admin-metric"><dt>iPhone kết nối</dt><dd>{iosDevices.length}</dd></div>
           </dl>
+          <p className="hint">Chọn gói trong thư viện để cài lên các máy cùng nền tảng trong phạm vi này.</p>
           <label className="agent-toggle">
             <input type="checkbox" checked={allowDowngrade} disabled={busy} onChange={(event) => setAllowDowngrade(event.target.checked)} />
             Cho phép hạ phiên bản

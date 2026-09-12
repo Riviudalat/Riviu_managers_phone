@@ -527,6 +527,7 @@ export interface PublishCampaignRecord {
 }
 
 export interface PublishAssignmentRecord {
+  sheetDelivery?: PublishSheetDeliveryProgress;
   id: string;
   campaignId: string;
   bundleId: string;
@@ -570,8 +571,10 @@ export interface PublishPreflightRequest {
 }
 
 export type PublishPreflightCheck = "pass" | "fail";
+export interface AutomationCheck { id: string; label: string; status: "pass" | "blocked" | "unknown" | "notApplicable"; reason?: string | null; }
 
 export interface PublishPreflightAssignmentReport {
+  checks?: AutomationCheck[];
   ordinal: number;
   bundleId: string;
   udid: string;
@@ -587,7 +590,23 @@ export interface PublishPreflightAssignmentReport {
   issues: PublishExecutionIssue[];
 }
 
+export interface SheetDeliveryTarget {
+  version: number;
+  spreadsheetId: string;
+  sheetGid: number;
+  internalReporting: boolean;
+}
+
+export interface PublishSheetDeliveryProgress {
+  state: "pending" | "failed" | "sent";
+  attempts: number;
+  lastError?: string | null;
+  nextAttemptAtMs?: number | null;
+  updatedAt: string;
+}
+
 export interface PublishPreflightReport {
+  sheetDelivery?: SheetDeliveryTarget;
   sheetEnabled?: boolean;
   inputDigest: string;
   targetSnapshot: ResolvedTargetSnapshot;
@@ -698,6 +717,8 @@ export interface NurtureWindow {
   behaviour?: NurtureWindowBehaviour | null;
 }
 
+export type SocialNetwork = "tiktok" | "instagram" | "threads";
+
 export interface NurtureSettings {
   baseUrl: string;
   model: string;
@@ -713,6 +734,8 @@ export interface NurtureSettings {
   /** Whether a key is stored. The only thing the form can honestly show about it. */
   hasApiKey?: boolean;
   bundleId: string;
+  /** Social app this nurture session targets. Absent means TikTok. */
+  network?: SocialNetwork;
   numVideos: number;
   numRounds: number;
   likeProb: number;
@@ -1157,7 +1180,18 @@ export interface InteractionActionCounters {
   uncertain: number;
 }
 
+export interface ConversationStep {
+  id: string; topic: string; speakerId: string; text: string;
+  parentStepId: string | null; mentionRoleIds: string[];
+}
+export interface TargetConversation { targetKey: string; steps: ConversationStep[]; }
+export interface ConversationRole { roleId: string; udid: string; username: string; }
+export interface ScriptedConversation {
+  schemaVersion: 1; durationMinutes: number; startsAt?: string | null; endsAt?: string | null;
+  seed: number; targetScripts: TargetConversation[]; roleBindings: ConversationRole[];
+}
 export interface ThreadCampaignRequest {
+  scriptedConversation?: ScriptedConversation;
   requestId: string;
   targets: ResolvedTikTokTarget[];
   actorUdids: string[];
@@ -1337,6 +1371,8 @@ export interface InteractionAssignmentRecord {
 }
 
 export interface InteractionCampaignDetail {
+  scriptedConversation?: ScriptedConversation;
+  conversationSession?: { startedAtMs:number; endsAtMs:number; nextAtMs:number; cursor:number };
   summary: InteractionCampaignSummary;
   assignments: InteractionAssignmentRecord[];
   actionAggregate?: "done" | "partial" | "failed" | "uncertain" | null;
@@ -1395,6 +1431,7 @@ export interface ThreadPlan {
 }
 
 export interface ThreadPreview {
+  conversationTimeline?: [string,number,number][];
   lines: TikTokLinkLine[];
   plan: ThreadPlan | null;
   validTargetCount: number;
@@ -1635,6 +1672,8 @@ export interface PublishAutomationProfileConfigV1 {
   captionOverrides?: Record<string, string>;
   soundPolicy: PublishSoundPolicy;
   executionConfirmed: boolean;
+  /** Social app this publish profile targets. Absent means TikTok. */
+  network?: SocialNetwork;
 }
 
 export type ScreenOrientation =
@@ -2281,6 +2320,7 @@ export interface DeviceHealthReport {
 export type PublishReadinessInfo =
   | { kind: "pixelGrid" }
   | { kind: "hierarchyReady" }
+  | { kind: "hierarchyAdaptive" }
   | { kind: "hierarchyMissing"; labels: string[] }
   | { kind: "hierarchyUnknownBuild"; version: string };
 

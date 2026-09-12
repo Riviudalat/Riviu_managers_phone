@@ -1,4 +1,5 @@
 import { useEffect, useState, type ComponentProps, type ReactNode } from "react";
+import { Check, Search } from "lucide-react";
 import { listGroups } from "../../api";
 import { effectiveMessageCount, manualCommentsOf, wholeNumber, type ThreadKind } from "../../interactionPlan";
 import { linkErrorVi } from "../../interactionErrors";
@@ -9,6 +10,7 @@ import { Banner } from "../States";
 import { AccountReadControl } from "./AccountReadControl";
 import { InteractionPlanPreview } from "./InteractionPlanPreview";
 import { InteractionSheetImport } from "./InteractionSheetImport";
+import { ConversationEditor } from "./ConversationEditor";
 import { InteractionThreshold } from "./InteractionThreshold";
 import type { InteractionSetupTab } from "./InteractionSetupTab";
 import "../../styles/interaction-workspace.css";
@@ -48,13 +50,13 @@ export function InteractionWorkspaceSetup({ setup: p, profiles, scopeControl, ef
       {STEPS.map((label, index) => <button key={label} type="button" role="tab" disabled={busy}
         id={`iw-tab-${index + 1}`} aria-controls={`iw-panel-${index + 1}`} aria-selected={step === index + 1} tabIndex={step === index + 1 ? 0 : -1} onClick={() => changeStep(index + 1)}
         onKeyDown={event => { const next = event.key === "Home" ? 1 : event.key === "End" ? 3 : event.key === "ArrowRight" ? step % 3 + 1 : event.key === "ArrowLeft" ? (step + 1) % 3 + 1 : null; if (next) { event.preventDefault(); changeStep(next); document.getElementById(`iw-tab-${next}`)?.focus(); } }}>
-        {label}
+        <span className="iw-step-number" aria-hidden="true">{step > index + 1 ? <Check size={14} /> : index + 1}</span><span>{label}</span>
       </button>)}
     </nav>
     <div className={`iw-stage iw-step-${step}`}>
       <div className="iw-step-content" role="tabpanel" id="iw-panel-1" aria-labelledby="iw-tab-1" hidden={step !== 1}>
         <section className="iw-panel iw-links" aria-label="Bài viết cần tương tác">
-          <div className="iw-heading"><h3>Bài viết cần tương tác</h3></div>
+          <div className="iw-heading"><div><span className="automation-section-kicker">Nguồn nội dung</span><h3>Bài viết cần tương tác</h3></div></div>
           <InteractionSheetImport onApply={(urls) => patch("rawLinks", (previous) => [...new Set([...previous.split(/\r?\n/).map((line) => line.trim()).filter(Boolean), ...urls])].join("\n"))} />
           <label className="iw-field"><span>Link TikTok — mỗi dòng một link</span>
             <textarea value={draft.rawLinks} onChange={(event) => patch("rawLinks", event.target.value)} placeholder="Dán link TikTok, mỗi dòng một bài" rows={4} />
@@ -74,8 +76,8 @@ export function InteractionWorkspaceSetup({ setup: p, profiles, scopeControl, ef
             </tbody></table>
           </div>
         </section>
-        <aside className="iw-panel iw-context" aria-label="Đầu vào và kết quả">
-          <h3>Đầu vào → Kết quả</h3>
+        <aside className="iw-panel iw-context" aria-label="Đầu vào và kết quả" tabIndex={0}>
+          <span className="automation-section-kicker">Luồng thực hiện</span><h3>Đầu vào → Kết quả</h3>
           <ol>{[
             ["Bài viết cụ thể", "Hệ thống mở đúng link trên từng máy."],
             ["Hành động bạn chọn", "Tim, Lưu, Bình luận có thể bật riêng."],
@@ -86,7 +88,7 @@ export function InteractionWorkspaceSetup({ setup: p, profiles, scopeControl, ef
       </div>
       <div className="iw-step-content" role="tabpanel" id="iw-panel-2" aria-labelledby="iw-tab-2" hidden={step !== 2}>
         <section className="iw-panel iw-settings" aria-label="Hành động thực hiện">
-          <div className="iw-heading"><h3>Hành động thực hiện</h3><StatusChip>{targets.length} bài</StatusChip></div>
+          <div className="iw-heading"><div><span className="automation-section-kicker">Cấu hình</span><h3>Hành động thực hiện</h3></div><StatusChip>{targets.length} bài</StatusChip></div>
           <div className="iw-action-choices" role="group" aria-label="Hành động">
             {ACTIONS.map(([key, label]) => <label key={key} className={draft.actions[key] ? "selected" : ""}>
               <input type="checkbox" aria-label={label} checked={draft.actions[key]} disabled={draft.actions[key] && Object.values(draft.actions).filter(Boolean).length === 1}
@@ -96,16 +98,16 @@ export function InteractionWorkspaceSetup({ setup: p, profiles, scopeControl, ef
           <p className="iw-order"><span>Thứ tự</span><strong>{actionOrder}</strong></p>
           {draft.actions.comment ? <>
             <div className="iw-fields">
-              <label className="iw-field"><span>Cách bình luận</span><select value={draft.threadKind} onChange={(event) => patch("threadKind", event.target.value as ThreadKind)}>
+              {draft.textSource !== "script" && <label className="iw-field"><span>Cách bình luận</span><select value={draft.threadKind} onChange={(event) => patch("threadKind", event.target.value as ThreadKind)}>
                 <option value="standalone">Riêng lẻ · mỗi máy một bình luận</option><option value="star">Cùng trả lời bình luận gốc</option><option value="chain">Trả lời nối tiếp</option>
-              </select></label>
-              <label className="iw-field"><span>Nội dung bình luận</span><select value={draft.textSource} onChange={(event) => patch("textSource", event.target.value as "ai" | "manual")}><option value="ai">AI viết theo bài</option><option value="manual">Nội dung tự nhập</option></select></label>
+              </select></label>}
+              <label className="iw-field"><span>Nội dung bình luận</span><select value={draft.textSource} onChange={(event) => patch("textSource", event.target.value as "ai" | "manual" | "script")}><option value="ai">AI viết theo bài</option><option value="manual">Nội dung tự nhập</option><option value="script">Hội thoại theo kịch bản</option></select></label>
             </div>
-            {draft.textSource === "ai" ? <label className="iw-field"><span>Hướng dẫn giọng điệu cho AI</span><textarea rows={3} value={draft.instruction} onChange={(event) => patch("instruction", event.target.value)} /></label>
+            {draft.textSource === "script" ? <ConversationEditor draft={draft} onChange={value=>patch("conversationJson",value)} onRawChange={value=>patch("conversationRawJson",value)} targets={targets} devices={p.devices.filter(device=>effectiveActors.includes(device.udid))} handles={p.handles}/> : draft.textSource === "ai" ? <label className="iw-field"><span>Hướng dẫn giọng điệu cho AI</span><textarea rows={3} value={draft.instruction} onChange={(event) => patch("instruction", event.target.value)} /></label>
               : <label className="iw-field"><span>Danh sách bình luận — mỗi dòng một câu</span><textarea rows={4} value={draft.manualText} onChange={(event) => patch("manualText", event.target.value)} /><small>{manualCommentsOf(draft).length} câu · cần ít nhất {messages}</small></label>}
-            <p className="iw-help">{draft.threadKind === "standalone" ? "Mỗi máy tự mở bài và gửi bình luận riêng." : "Cần ít nhất 2 máy cùng loại. Một máy gửi gốc trước khi các máy còn lại trả lời."} {draft.textSource === "ai" && "AI chỉ gửi khi đọc đủ nội dung bài."}</p>
-            <button type="button" className="ghost iw-advanced-button" aria-expanded={p.advancedOpen} onClick={() => p.setAdvancedOpen(!p.advancedOpen)}>{p.advancedOpen ? "Ẩn tuỳ chỉnh nâng cao" : "Tuỳ chỉnh nâng cao"}</button>
-            {p.advancedOpen && <div className="iw-advanced">
+            <p className="iw-help">{draft.textSource === "script" ? "Các vai giữ đúng máy; mỗi link có hội thoại riêng và được thực hiện xen kẽ." : draft.threadKind === "standalone" ? "Mỗi máy tự mở bài và gửi bình luận riêng." : "Cần ít nhất 2 máy cùng loại. Một máy gửi gốc trước khi các máy còn lại trả lời."} {draft.textSource === "ai" && "AI chỉ gửi khi đọc đủ nội dung bài."}</p>
+            {draft.textSource !== "script" && <button type="button" className="ghost iw-advanced-button" aria-expanded={p.advancedOpen} onClick={() => p.setAdvancedOpen(!p.advancedOpen)}>{p.advancedOpen ? "Ẩn tuỳ chỉnh nâng cao" : "Tuỳ chỉnh nâng cao"}</button>}
+            {p.advancedOpen && draft.textSource !== "script" && <div className="iw-advanced">
               <div className="iw-fields">
                 <label className="iw-field"><span>Số bình luận mỗi link</span><input type="number" min={draft.threadKind === "standalone" ? 1 : 2} max={64} placeholder={`${messages} · tự động`} value={draft.messageCount ?? ""} onChange={(event) => patch("messageCount", event.target.value === "" ? null : wholeNumber(event.target.value))} /></label>
                 <label className="iw-field"><span>Số từ tối đa mỗi câu</span><input type="number" min={4} max={20} value={draft.maxWords} onChange={(event) => patch("maxWords", wholeNumber(event.target.value))} /></label>
@@ -158,17 +160,17 @@ function WorkspaceActors({ setup: p, effectiveActors, scopeControl }: { setup: S
   const filtered = choices.filter((device) => [p.deviceLabel.get(device.udid), p.deviceNumber.get(device.udid), p.handles[device.udid]].join(" ").toLocaleLowerCase("vi").includes(query.toLocaleLowerCase("vi")));
   const inspected = choices.find((device) => device.udid === account);
   const replaceActors = (devices: DeviceInfo[]) => p.patch("actors", devices.map((device) => device.udid));
-  return <section className="iw-panel iw-machines" aria-label="Máy thực hiện">
-    <div className="iw-heading"><h3>Máy thực hiện</h3><StatusChip>{effectiveActors.length} đã chọn</StatusChip></div>
-    <input className="iw-search" aria-label="Tìm máy hoặc tài khoản" placeholder="Tìm số máy, tên hoặc tài khoản…" value={query} onChange={(event) => setQuery(event.target.value)} />
-    <div className="iw-picker-tools"><button type="button" className="ghost" title="Chọn tất cả máy sẵn sàng trong phạm vi, kể cả ngoài kết quả tìm kiếm" disabled={!choices.some(device => device.status === "ready")} onClick={() => replaceActors(choices.filter((device) => device.status === "ready"))}>Chọn tất cả</button><button type="button" className="ghost" disabled={!p.draft.actors.length} onClick={() => replaceActors([])}>Bỏ chọn</button>{scopeControl}<span>{filtered.length} máy</span></div>
+  return <section className="iw-panel iw-machines" tabIndex={0} aria-label="Máy thực hiện">
+    <div className="iw-heading"><div><span className="automation-section-kicker">Phạm vi</span><h2>Máy thực hiện</h2></div><span className="machine-select-count" role="status">Đã chọn {effectiveActors.length}</span></div>
+    <label className="iw-search"><Search size={16} aria-hidden="true" /><input type="search" aria-label="Tìm máy Tương tác" placeholder="Tìm số máy hoặc tên" value={query} onChange={(event) => setQuery(event.target.value)} /></label>
+    <div className="iw-picker-tools"><button type="button" className="ghost" title="Chọn tất cả máy sẵn sàng trong phạm vi, kể cả ngoài kết quả tìm kiếm" disabled={!choices.some(device => device.status === "ready")} onClick={() => replaceActors(choices.filter((device) => device.status === "ready"))}>Chọn tất cả sẵn sàng</button><button type="button" className="ghost" disabled={!p.draft.actors.length} onClick={() => replaceActors([])}>Bỏ chọn</button>{scopeControl}<small>{choices.filter(d => d.status === "ready").length} sẵn sàng · {choices.length} tổng</small></div>
     {thread && groups.length > 0 && <label className="iw-field"><span>Lấy từ nhóm</span><select value="" onChange={(event) => { const group = groups.find((entry) => entry.id === event.target.value); if (group) replaceActors(choices.filter((device) => group.udids.includes(device.udid))); }}><option value="">Chọn nhóm…</option>{groups.map((group) => <option key={group.id} value={group.id}>{group.name} ({group.udids.length})</option>)}</select></label>}
     <div className={`iw-machine-scroll machine-choice-grid${choices.length > 12 ? " is-compact" : ""}`} role="group" aria-label="Danh sách máy thực hiện">
       {filtered.length ? filtered.map((device) => {
         const name = p.deviceLabel.get(device.udid) ?? device.name;
         const tagged = !p.draft.actors.includes(device.udid) && effectiveActors.includes(device.udid);
         const checked = effectiveActors.includes(device.udid);
-        return <MachineChoice key={device.udid} number={p.deviceNumber.get(device.udid) ?? 0} name={name} status={device.status}
+        return <MachineChoice key={device.udid} number={p.deviceNumber.get(device.udid) ?? 0} name={name} status={device.status} reason={device.lastError}
           label={name} checked={checked} disabled={tagged || (device.status !== "ready" && !checked)}
           title={tagged ? "Được thêm bởi tag tài khoản; sửa tag trong tuỳ chỉnh nâng cao" : undefined}
           onChange={() => p.patch("actors", (previous) => previous.includes(device.udid) ? previous.filter((id) => id !== device.udid) : [...previous, device.udid])}

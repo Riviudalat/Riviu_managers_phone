@@ -3,14 +3,15 @@
 #
 # Two paths, and the second is not a shortcut: Gradle when it is on PATH, otherwise the
 # build-tools pipeline it would have driven anyway (aapt2 -> javac -> d8 -> zipalign ->
-# apksigner). This app is four hundred lines of Java with two resource files and no
-# dependencies, so the second path produces the same APK from the same inputs — and it is the
+# apksigner). This app uses the Android platform APIs without external dependencies,
+# so the second path produces the same APK from the same inputs — and it is the
 # only path on a machine that has the Android SDK but not Gradle, which is this one. Neither
 # path invents a signature: both sign with the standard debug keystore, and shipping requires
 # pinning bytes + SHA-256 by hand (see README).
 
 $ErrorActionPreference = "Stop"
 $Root = Split-Path -Parent $MyInvocation.MyCommand.Path
+$Root = [IO.Path]::GetFullPath($Root)
 Set-Location $Root
 
 function Fail([string]$Message) {
@@ -90,6 +91,9 @@ else {
     Write-Host "version $VersionName ($VersionCode), minSdk $MinSdk, targetSdk $TargetSdk"
 
     $Out = Join-Path $Root "build-tools-out"
+    if ([IO.Path]::GetFullPath($Out) -ne [IO.Path]::Combine($Root, "build-tools-out")) {
+        Fail "build output path must remain in the helper workspace"
+    }
     if (Test-Path $Out) { Remove-Item -Recurse -Force $Out }
     New-Item -ItemType Directory -Force -Path $Out | Out-Null
     $Gen = Join-Path $Out "gen"
@@ -132,7 +136,9 @@ else {
     # `-source 8 -target 8` and not `--release 8`: android.jar is the platform's own class
     # library, and --release would pin the JDK's instead and reject every android.* import.
     # d8 desugars whatever javac leaves.
-    & $Javac -source 8 -target 8 -nowarn -encoding UTF-8 -classpath $Platform -d $Classes @Sources
+    # JDK 21+ emits unnamed synthetic enum constructor parameters. SDK 34's d8 needs
+    # their names; -parameters keeps that metadata valid without changing bytecode level.
+    & $Javac -parameters -source 8 -target 8 -nowarn -encoding UTF-8 -classpath $Platform -d $Classes @Sources
     if ($LASTEXITCODE -ne 0) { Fail "javac failed with exit $LASTEXITCODE" }
 
     $ClassFiles = (Get-ChildItem -Recurse $Classes -Filter *.class).FullName

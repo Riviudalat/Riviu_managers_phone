@@ -1,7 +1,5 @@
 //! A thumbnail opens preview; the measured corner button selects the photo.
 use super::*;
-use quick_xml::{events::Event, Reader, XmlVersion};
-use std::collections::HashMap;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct PickerControls {
@@ -12,6 +10,13 @@ pub(super) struct PickerControls {
 
 impl PickerControls {
     pub fn for_labels(labels: &TikTokControls) -> Option<Self> {
+        if labels.adaptive() {
+            return Some(Self {
+                package: labels.package(),
+                selector: ElementQuery::Semantic("selector"),
+                next: ElementQuery::Semantic("pickerNext"),
+            });
+        }
         // 07/09/2026, 98895a3355424e484f: h4b text changes empty -> 1..6;
         // Next becomes Next (6). A thumbnail-centre tap opens preview instead.
         match (labels.package(), labels.resource_version()) {
@@ -133,93 +138,50 @@ fn picker_snapshot(
     xml: &str,
     controls: PickerControls,
 ) -> anyhow::Result<(Vec<ElementBox>, Vec<ElementBox>)> {
-    anyhow::ensure!(xml.len() <= 16 * 1024 * 1024, "picker snapshot too large");
-    let suffix = |query| match query {
-        ElementQuery::ResourceIdSuffix(value) => value,
-        _ => "unmeasured",
-    };
-    let mut reader = Reader::from_str(xml);
+    let tree = crate::ui_automation::tree::Tree::parse(crate::HierarchySourceSnapshot {
+        generation: 1,
+        xml: xml.into(),
+    })?;
     let mut selectors = Vec::new();
     let mut next = Vec::new();
-    let mut nodes = 0;
-    let mut depth = 0usize;
-    loop {
-        let event = reader.read_event()?;
-        if matches!(event, Event::Start(_)) {
-            depth += 1;
-            anyhow::ensure!(depth <= 256, "picker depth limit");
+    for (index, node) in tree.nodes.iter().enumerate() {
+        if !node.visible(controls.package) || !tree.ancestors_visible(index) {
+            continue;
         }
-        match event {
-            Event::Start(node) | Event::Empty(node) => {
-                nodes += 1;
-                anyhow::ensure!(nodes <= 32768, "picker node limit");
-                let mut attrs = HashMap::new();
-                for attr in node.attributes() {
-                    let attr = attr?;
-                    attrs.insert(
-                        std::str::from_utf8(attr.key.as_ref())?.to_string(),
-                        attr.decoded_and_normalized_value(
-                            XmlVersion::Implicit1_0,
-                            reader.decoder(),
-                        )?
-                        .into_owned(),
-                    );
-                }
-                let a = |key: &str| attrs.get(key).map(String::as_str).unwrap_or("");
-                let id = a("resource-id");
-                let is_selector = id.ends_with(suffix(controls.selector));
-                let is_next = id.ends_with(suffix(controls.next));
-                if (!is_selector && !is_next)
-                    || a("displayed") != "true"
-                    || a("package") != controls.package
-                    || !id.starts_with(&format!("{}:", a("package")))
-                {
-                    continue;
-                }
-                let Some((start, end)) = a("bounds")
-                    .strip_prefix('[')
-                    .and_then(|s| s.strip_suffix(']'))
-                    .and_then(|s| s.split_once("]["))
-                else {
-                    anyhow::bail!("picker bounds missing");
-                };
-                let (x, y) = start.split_once(',').context("picker bounds")?;
-                let (r, b) = end.split_once(',').context("picker bounds")?;
-                let (x, y, r, b) = (
-                    x.parse::<f64>()?,
-                    y.parse::<f64>()?,
-                    r.parse::<f64>()?,
-                    b.parse::<f64>()?,
-                );
-                let row = ElementBox {
-                    x,
-                    y,
-                    width: r - x,
-                    height: b - y,
-                    description: Some(a("text").into()),
-                    enabled: a("enabled") == "true",
-                    clickable: a("clickable") == "true",
-                };
-                if is_selector {
-                    anyhow::ensure!(
-                        a("class") == "android.widget.Button",
-                        "picker selector class"
-                    );
-                    selectors.push(row);
-                } else {
-                    next.push(row);
-                }
+        let semantic = |query| match query {
+            ElementQuery::Semantic(role) => {
+                crate::app_automation::tiktok_roles::indices(&tree, controls.package, role)
+                    .contains(&index)
             }
-            Event::DocType(_) => anyhow::bail!("doctype in picker"),
-            Event::End(_) => {
-                depth = depth.checked_sub(1).context("invalid picker nesting")?;
-            }
-            Event::Eof => {
-                anyhow::ensure!(depth == 0, "incomplete picker snapshot");
-                break;
-            }
-            _ => {}
+            _ => node.matches(query),
+        };
+        let selector = semantic(controls.selector);
+        let is_next = semantic(controls.next);
+        if !selector && !is_next {
+            continue;
         }
+        if !matches!(controls.selector, ElementQuery::Semantic(_)) {
+            anyhow::ensure!(
+                node.attr("resource-id")
+                    .starts_with(&format!("{}:", controls.package)),
+                "picker package mismatch"
+            );
+        }
+        let row = node.rect().context("picker bounds missing")?;
+        if selector {
+            anyhow::ensure!(
+                node.attr("class") == "android.widget.Button",
+                "picker selector class"
+            );
+            selectors.push(row);
+        } else {
+            next.push(row);
+        }
+    }
+    if selectors.is_empty() && next.is_empty() {
+        selectors =
+            crate::app_automation::tiktok_roles::locate(&tree, controls.package, "selector");
+        next = crate::app_automation::tiktok_roles::locate(&tree, controls.package, "pickerNext");
     }
     Ok((selectors, next))
 }
@@ -230,69 +192,162 @@ fn snapshot_has_album(
     query: ElementQuery<'_>,
     album: &str,
 ) -> anyhow::Result<bool> {
-    let mut reader = Reader::from_str(xml);
-    let mut matches = Vec::new();
-    loop {
-        match reader.read_event()? {
-            Event::Start(node) | Event::Empty(node) => {
-                let mut attrs = HashMap::new();
-                for attr in node.attributes() {
-                    let attr = attr?;
-                    attrs.insert(
-                        std::str::from_utf8(attr.key.as_ref())?.to_string(),
-                        attr.decoded_and_normalized_value(
-                            XmlVersion::Implicit1_0,
-                            reader.decoder(),
-                        )?
-                        .into_owned(),
-                    );
-                }
-                let a = |key: &str| attrs.get(key).map(String::as_str).unwrap_or("");
-                if a("displayed") != "true" || a("package") != controls.package {
-                    continue;
-                }
-                let matched = match query {
-                    ElementQuery::ResourceIdSuffix(suffix) => {
-                        a("resource-id").starts_with(&format!("{}:", controls.package))
-                            && a("resource-id").ends_with(suffix)
-                    }
-                    ElementQuery::Description { value, exact } => {
-                        if exact {
-                            a("content-desc") == value
-                        } else {
-                            a("content-desc").contains(value)
-                        }
-                    }
-                    ElementQuery::Text { value, exact } => {
-                        if exact {
-                            a("text") == value
-                        } else {
-                            a("text").contains(value)
-                        }
-                    }
-                    ElementQuery::ClassName(class) => a("class") == class,
-                };
-                if matched {
-                    matches.push(a("text").trim() == album);
-                }
-            }
-            Event::Eof => break,
-            _ => {}
-        }
-    }
-    Ok(matches == [true])
+    let tree = crate::ui_automation::tree::Tree::parse(crate::HierarchySourceSnapshot {
+        generation: 1,
+        xml: xml.into(),
+    })?;
+    // Album text is read-only metadata; its label may omit geometry while its
+    // separately resolved menu ancestor owns the tap rectangle.
+    let matched: Vec<_> = if let ElementQuery::Semantic(role) = query {
+        crate::app_automation::tiktok_roles::indices(&tree, controls.package, role)
+    } else {
+        tree.nodes
+            .iter()
+            .enumerate()
+            .filter(|(i, n)| {
+                n.visible(controls.package) && tree.ancestors_visible(*i) && n.matches(query)
+            })
+            .map(|(i, _)| i)
+            .collect()
+    };
+    Ok(matched.len() == 1 && tree.nodes[matched[0]].attr("text").trim() == album)
 }
 
-/// Match the visible contiguous slice back to the isolated album's initial grid.
+/// How far an extrapolated row may sit from `previous row + pitch` and still be the grid.
+///
+/// Measured grids are exact (45.7.3: every row 362 px apart, 09/09/2026), so this only
+/// absorbs a rounding pixel in a layout no fixture has shown yet. Cells that have been seen
+/// are always matched exactly.
+const ROW_PITCH_TOLERANCE: f64 = 2.0;
+
+/// The isolated album's grid, learned from the cells that have been on screen.
+///
+/// **The album used to have to fit on one screen.** `select_verified` read the picker once,
+/// with nothing selected, and took those cells as the reference for every later snapshot —
+/// which meant a bundle could hold exactly as many photos as the first screen showed, and the
+/// ceiling was 13 on the one phone that was measured. A carousel is TikTok's 35, and the
+/// picker is a regular grid: fixed columns, one row pitch. So the reference is now built from
+/// what is visible and **extended one row at a time as scrolling reveals it**, each new row
+/// admitted only where the grid says it must be — same column geometry, previous row plus the
+/// pitch — and, once admitted, matched exactly like every cell before it.
+///
+/// `cells[k]` is cell `k` in the frame of the first snapshot; later snapshots are that frame
+/// translated by one uniform `shift`, which is how a scroll shows up.
+#[derive(Debug, Clone, PartialEq)]
+pub(super) struct KnownGrid {
+    cells: Vec<ElementBox>,
+    /// `(x, width, height)` per column, left to right.
+    columns: Vec<(f64, f64, f64)>,
+    /// Distance between consecutive rows, once two rows have been seen.
+    row_pitch: Option<f64>,
+    /// How many cells the album must hold — the bundle's image count.
+    wanted: usize,
+}
+
+impl KnownGrid {
+    /// Build the reference from the unselected first screen, or refuse a layout that is not a
+    /// regular grid.
+    ///
+    /// When the album is larger than the screen the visible part must end on a full row: cells
+    /// in one row share `y` and `height`, so `ordered_controls` keeps or drops a row whole, and
+    /// a ragged last row with more photos still to come is a layout this never measured.
+    pub(super) fn from_initial(initial: Vec<ElementBox>, wanted: usize) -> Option<Self> {
+        if initial.is_empty() || initial.len() > wanted {
+            return None;
+        }
+        let first_y = initial[0].y;
+        let columns: Vec<(f64, f64, f64)> = initial
+            .iter()
+            .take_while(|cell| cell.y == first_y)
+            .map(|cell| (cell.x, cell.width, cell.height))
+            .collect();
+        if columns
+            .windows(2)
+            .any(|pair| pair[1].0 <= pair[0].0 + pair[0].1)
+        {
+            return None;
+        }
+        let mut row_pitch = None;
+        for (index, cell) in initial.iter().enumerate() {
+            let (x, width, height) = columns[index % columns.len()];
+            if cell.x != x || cell.width != width || cell.height != height {
+                return None;
+            }
+            if index >= columns.len() {
+                let above = &initial[index - columns.len()];
+                let pitch = cell.y - above.y;
+                match row_pitch {
+                    None if pitch > 1.0 => row_pitch = Some(pitch),
+                    Some(known) if (pitch - known).abs() <= ROW_PITCH_TOLERANCE => {}
+                    _ => return None,
+                }
+            } else if cell.y != first_y {
+                return None;
+            }
+        }
+        if initial.len() < wanted
+            && (!initial.len().is_multiple_of(columns.len()) || row_pitch.is_none())
+        {
+            return None;
+        }
+        Some(Self {
+            cells: initial,
+            columns,
+            row_pitch,
+            wanted,
+        })
+    }
+
+    pub(super) fn columns(&self) -> usize {
+        self.columns.len()
+    }
+
+    pub(super) fn known(&self) -> usize {
+        self.cells.len()
+    }
+
+    /// The row pitch, for a scroll of exactly one row.
+    pub(super) fn row_pitch(&self) -> Option<f64> {
+        self.row_pitch
+    }
+
+    /// Where cell `absolute` must be, in the first snapshot's frame, if it has not been seen:
+    /// the cell one row above it, one pitch further down. `learned` holds the cells this
+    /// snapshot has already admitted, so a snapshot may reveal more than one new row.
+    fn expected_unseen(
+        &self,
+        absolute: usize,
+        learned: &[ElementBox],
+    ) -> Option<(f64, f64, f64, f64)> {
+        if absolute != self.cells.len() + learned.len() || absolute >= self.wanted {
+            return None;
+        }
+        let (x, width, height) = self.columns[absolute % self.columns.len()];
+        let above_index = absolute.checked_sub(self.columns.len())?;
+        let above = self
+            .cells
+            .get(above_index)
+            .or_else(|| learned.get(above_index.checked_sub(self.cells.len())?))?;
+        Some((x, above.y + self.row_pitch?, width, height))
+    }
+}
+
+/// Match the visible contiguous slice back to the isolated album's grid.
 /// TikTok 45.7.3, 09/09/2026: selecting image 10 in an 11-photo album hides
 /// ordinals 1..3 and shifts the remaining controls uniformly by -181 px. A scroll
 /// may translate y, but it must not reorder, resize, skip an interior cell or
 /// replace the ordinal immediately before the next blank selection.
+///
+/// Cells past what the grid has seen are admitted only as the next row of the same grid, and
+/// only on success are they written into `grid` — a snapshot that fails any check leaves the
+/// reference exactly as it was. A visible cell past `wanted` is an album holding more photos
+/// than the bundle, and is refused for the same reason the old shape refused an oversize
+/// first screen.
 fn visible_selection(
     rows: Vec<ElementBox>,
     next: &[ElementBox],
     screen: Screen,
-    initial: &[ElementBox],
+    grid: &mut KnownGrid,
     count: usize,
 ) -> Option<(Vec<ElementBox>, ElementBox)> {
     let [next] = next else {
@@ -318,33 +373,55 @@ fn visible_selection(
             .checked_sub(1)?
     };
     if offset > count
-        || offset + rows.len() > initial.len()
-        || (count == 0 && rows.len() != initial.len())
+        || offset + rows.len() > grid.wanted
+        || (count == 0 && rows.len() != grid.known())
         || count > offset + rows.len()
     {
         return None;
     }
-    let shift = rows.first()?.y - initial.get(offset)?.y;
+    let shift = rows.first()?.y - grid.cells.get(offset)?.y;
+    let mut learned = Vec::new();
     for (index, row) in rows.iter().enumerate() {
         let absolute = offset + index;
-        let reference = initial.get(absolute)?;
         let text = row.description.as_deref().unwrap_or("").trim();
         if (absolute < count && text.parse::<usize>() != Ok(absolute + 1))
             || (absolute >= count && !text.is_empty())
-            || row.x != reference.x
-            || row.width != reference.width
-            || row.height != reference.height
-            || row.y - reference.y != shift
         {
             return None;
         }
+        if let Some(reference) = grid.cells.get(absolute) {
+            if row.x != reference.x
+                || row.width != reference.width
+                || row.height != reference.height
+                || row.y - reference.y != shift
+            {
+                return None;
+            }
+        } else {
+            let (x, y, width, height) = grid.expected_unseen(absolute, &learned)?;
+            if row.x != x
+                || row.width != width
+                || row.height != height
+                || (row.y - shift - y).abs() > ROW_PITCH_TOLERANCE
+            {
+                return None;
+            }
+            learned.push(ElementBox {
+                y: row.y - shift,
+                description: None,
+                ..row.clone()
+            });
+        }
     }
+    grid.cells.extend(learned);
     Some((rows, next.clone()))
 }
 
 impl<P: TapPlanner> Composer<'_, P> {
-    /// One selection algorithm for 1..=13 photos, including TikTok's automatic
-    /// scrolling. Every successful tap yields the next validated snapshot directly.
+    /// One selection algorithm for 1..=35 photos — TikTok's own carousel ceiling — including
+    /// TikTok's automatic scrolling and our own, one measured row at a time, when the album
+    /// is taller than the screen. Every successful tap yields the next validated snapshot
+    /// directly; see [`KnownGrid`] for how cells past the first screen are admitted.
     pub(super) async fn select_verified(
         &mut self,
         controls: PickerControls,
@@ -353,7 +430,7 @@ impl<P: TapPlanner> Composer<'_, P> {
         album: &str,
         stop: &AtomicBool,
     ) -> anyhow::Result<Selection> {
-        if !(1..=13).contains(&wanted) {
+        if !(1..=crate::publish::MAX_CAROUSEL_IMAGES).contains(&wanted) {
             return Ok(Selection::NotEnoughSelected);
         }
         if stop.load(Ordering::Relaxed) {
@@ -377,16 +454,18 @@ impl<P: TapPlanner> Composer<'_, P> {
         let Some(initial) = ordered_controls(initial, screen, next_button.y) else {
             return Ok(Selection::NotEnoughSelected);
         };
-        if initial.len() != wanted
-            || !selected_prefix(&initial, 0)
-            || explicit_count(&next).is_some_and(|n| n != 0)
-        {
+        if !selected_prefix(&initial, 0) || explicit_count(&next).is_some_and(|n| n != 0) {
             return Ok(Selection::NotEnoughSelected);
         }
-        let Some(mut current) = visible_selection(initial.clone(), &next, screen, &initial, 0)
-        else {
+        let Some(mut grid) = KnownGrid::from_initial(initial.clone(), wanted) else {
             return Ok(Selection::NotEnoughSelected);
         };
+        let Some(mut current) = visible_selection(initial, &next, screen, &mut grid, 0) else {
+            return Ok(Selection::NotEnoughSelected);
+        };
+        // One scroll reveals one row, so an album of `wanted` cells needs at most one fewer
+        // scroll than it has rows; one more absorbs TikTok's own scroll on the first tap.
+        let scroll_budget = wanted.div_ceil(grid.columns());
         let mut count = 0;
         let mut scrolls = 0;
         loop {
@@ -415,7 +494,7 @@ impl<P: TapPlanner> Composer<'_, P> {
                         return Ok(Selection::NotEnoughSelected);
                     };
                     if let Some(observed) =
-                        visible_selection(rows, &next, screen, &initial, expected)
+                        visible_selection(rows, &next, screen, &mut grid, expected)
                     {
                         break observed;
                     }
@@ -428,7 +507,7 @@ impl<P: TapPlanner> Composer<'_, P> {
             } else {
                 // The selected tail is visible but the next cell is below the viewport.
                 // Scroll only one measured row so overlapping ordinals retain identity.
-                if scrolls >= 3
+                if scrolls >= scroll_budget
                     || rows
                         .last()
                         .and_then(|row| row.description.as_deref())
@@ -441,6 +520,7 @@ impl<P: TapPlanner> Composer<'_, P> {
                     .windows(2)
                     .map(|rows| rows[1].y - rows[0].y)
                     .find(|distance| *distance > 1.0)
+                    .or_else(|| grid.row_pitch())
                     .context("picker rows missing")?;
                 let from = rows.last().unwrap().y;
                 self.session
@@ -461,7 +541,8 @@ impl<P: TapPlanner> Composer<'_, P> {
                 let Some((rows, next)) = read().await? else {
                     return Ok(Selection::NotEnoughSelected);
                 };
-                let Some(observed) = visible_selection(rows, &next, screen, &initial, count) else {
+                let Some(observed) = visible_selection(rows, &next, screen, &mut grid, count)
+                else {
                     return Ok(Selection::NotEnoughSelected);
                 };
                 current = observed;
@@ -561,6 +642,12 @@ mod tests {
     }
     use crate::TapPoint;
     use parking_lot::Mutex;
+    const MOCK_ROW_PITCH: f64 = 362.0;
+    /// A picker whose album may be taller than its screen.
+    ///
+    /// `visible_rows` is how many rows fit with nothing selected; `tray_hides_row` takes one
+    /// away once something is (the selected-photos tray measured on 46.0.41, §9.197); each
+    /// swipe scrolls exactly one row. `None` shows the whole album, as the small albums did.
     struct Picker {
         selected: Mutex<usize>,
         taps: Mutex<Vec<TapPoint>>,
@@ -570,7 +657,11 @@ mod tests {
         autoscroll: bool,
         reads: std::sync::atomic::AtomicUsize,
         corrupt_after_ten: Option<&'static str>,
-        hidden_thirteenth: bool,
+        visible_rows: Option<usize>,
+        tray_hides_row: bool,
+        /// A row the album grows after this many swipes, off the grid: `"column"` shifts the
+        /// new row's x, `"pitch"` its y, `"extra"` appends photos the bundle does not have.
+        corrupt_scrolled_row: Option<&'static str>,
         swipes: Mutex<usize>,
     }
     impl Picker {
@@ -584,8 +675,40 @@ mod tests {
                 autoscroll: false,
                 reads: std::sync::atomic::AtomicUsize::new(0),
                 corrupt_after_ten: None,
-                hidden_thirteenth: false,
+                visible_rows: None,
+                tray_hides_row: false,
+                corrupt_scrolled_row: None,
                 swipes: Mutex::new(0),
+            }
+        }
+        /// A thirteen-photo album on the measured phone: five rows fit, four once the tray
+        /// shows, so the thirteenth is reached by one scroll.
+        fn with_tray(total: usize) -> Self {
+            let mut session = Self::new(None);
+            session.total = total;
+            session.visible_rows = Some(5);
+            session.tray_hides_row = true;
+            session
+        }
+        /// First visible cell index and how many cells the viewport shows right now.
+        fn viewport(&self) -> (usize, usize) {
+            let selected = *self.selected.lock();
+            let scrolled_rows = *self.swipes.lock();
+            let Some(mut rows) = self.visible_rows else {
+                return (0, self.total);
+            };
+            if self.tray_hides_row && selected > 0 {
+                rows -= 1;
+            }
+            let start = scrolled_rows * 3;
+            let end = ((scrolled_rows + rows) * 3).min(self.album_size());
+            (start, end.saturating_sub(start))
+        }
+        fn album_size(&self) -> usize {
+            if self.corrupt_scrolled_row == Some("extra") && *self.swipes.lock() > 0 {
+                self.total + 3
+            } else {
+                self.total
             }
         }
         fn rows(&self) -> Vec<ElementBox> {
@@ -627,26 +750,36 @@ mod tests {
                 }
                 return rows;
             }
-            let scrolled = self.hidden_thirteenth && *self.swipes.lock() > 0;
-            let offset = if scrolled { 3 } else { 0 };
-            let visible_end = if self.hidden_thirteenth && selected > 0 && !scrolled {
-                12
-            } else {
-                self.total
-            };
-            (offset..visible_end)
-                .map(|index| ElementBox {
-                    x: 268.0 + (index % 3) as f64 * 358.0,
-                    y: 375.0 + ((index - offset) / 3) as f64 * 362.0,
-                    width: 72.0,
-                    height: 72.0,
-                    description: Some(if index < selected {
-                        (index + 1).to_string()
+            let (offset, shown) = self.viewport();
+            let first_screen = self.visible_rows.map_or(self.total, |rows| rows * 3);
+            (offset..offset + shown)
+                .map(|index| {
+                    // Corruptions apply to cells the first screen never showed — the ones the
+                    // grid has to admit by extrapolation.
+                    let revealed = index >= first_screen;
+                    let skew_x = if revealed && self.corrupt_scrolled_row == Some("column") {
+                        7.0
                     } else {
-                        String::new()
-                    }),
-                    clickable: true,
-                    enabled: true,
+                        0.0
+                    };
+                    let skew_y = if revealed && self.corrupt_scrolled_row == Some("pitch") {
+                        9.0
+                    } else {
+                        0.0
+                    };
+                    ElementBox {
+                        x: 268.0 + (index % 3) as f64 * 358.0 + skew_x,
+                        y: 375.0 + ((index - offset) / 3) as f64 * MOCK_ROW_PITCH + skew_y,
+                        width: 72.0,
+                        height: 72.0,
+                        description: Some(if index < selected {
+                            (index + 1).to_string()
+                        } else {
+                            String::new()
+                        }),
+                        clickable: true,
+                        enabled: true,
+                    }
                 })
                 .collect()
         }
@@ -682,12 +815,10 @@ mod tests {
                     p.x >= r.x && p.x <= r.x + r.width && p.y >= r.y && p.y <= r.y + r.height
                 })
                 .expect("only corner buttons may be tapped");
-            let index = if (self.autoscroll && *self.selected.lock() >= 10)
-                || (self.hidden_thirteenth && *self.swipes.lock() > 0)
-            {
+            let index = if self.autoscroll && *self.selected.lock() >= 10 {
                 index + 3
             } else {
-                index
+                index + self.viewport().0
             };
             self.taps.lock().push(p);
             if self.drop_at != Some(index) {
@@ -695,10 +826,22 @@ mod tests {
             }
             Ok(())
         }
-        async fn swipe(&self, _: crate::SwipeGesture) -> anyhow::Result<()> {
+        async fn swipe(&self, gesture: crate::SwipeGesture) -> anyhow::Result<()> {
             assert!(
-                self.hidden_thirteenth,
+                self.visible_rows.is_some(),
                 "scroll only when the selected tail hides the next image"
+            );
+            // Exactly one row, anchored on the last visible row — an overshoot would put a
+            // second unseen row on screen with no ordinal to anchor it.
+            let last = self.rows().last().unwrap().y;
+            assert_eq!(
+                gesture.from.y, last,
+                "scroll starts on the last visible row"
+            );
+            assert_eq!(
+                gesture.from.y - gesture.to.y,
+                MOCK_ROW_PITCH,
+                "scroll moves one measured row"
             );
             *self.swipes.lock() += 1;
             Ok(())
@@ -732,6 +875,7 @@ mod tests {
                 ElementQuery::Description { value, .. }
                 | ElementQuery::Text { value, .. }
                 | ElementQuery::ResourceIdSuffix(value)
+                | ElementQuery::Semantic(value)
                 | ElementQuery::ClassName(value) => value,
             };
             if key == ":id/h4b" {
@@ -818,7 +962,9 @@ mod tests {
     }
     #[tokio::test(start_paused = true)]
     async fn every_supported_count_uses_one_confirmed_snapshot_per_selection() {
-        for total in 1..=13 {
+        // Fifteen is the most this mock's screen shows above Next; taller albums scroll, and
+        // are covered below.
+        for total in 1..=15 {
             let mut session = Picker::new(None);
             session.total = total;
             assert!(
@@ -831,9 +977,7 @@ mod tests {
     }
     #[tokio::test(start_paused = true)]
     async fn thirteenth_hidden_by_selection_tray_is_reached_by_one_anchored_scroll() {
-        let mut session = Picker::new(None);
-        session.total = 13;
-        session.hidden_thirteenth = true;
+        let session = Picker::with_tray(13);
         assert!(matches!(
             run_picker(&session).await,
             Selection::Armed {
@@ -844,6 +988,59 @@ mod tests {
         assert_eq!(session.taps.lock().len(), 13);
         assert_eq!(*session.swipes.lock(), 1);
         assert_eq!(session.reads.load(Ordering::Relaxed), 15);
+    }
+    /// **The album no longer has to fit on one screen.** Fifteen, twenty and TikTok's own
+    /// thirty-five: the first screen shows five rows, the tray leaves four, and every row past
+    /// it is reached by one anchored scroll and admitted only where the grid predicts it. One
+    /// read per tap, one per scroll, one to start.
+    #[tokio::test(start_paused = true)]
+    async fn albums_taller_than_the_screen_are_selected_one_measured_row_at_a_time() {
+        for (total, scrolls) in [(14, 1), (15, 1), (18, 2), (20, 3), (35, 8)] {
+            let session = Picker::with_tray(total);
+            assert!(
+                matches!(run_picker(&session).await, Selection::Armed { counted: Some(count), .. } if count == total),
+                "{total}"
+            );
+            assert_eq!(session.taps.lock().len(), total, "{total}");
+            assert_eq!(*session.swipes.lock(), scrolls, "{total}");
+            assert_eq!(
+                session.reads.load(Ordering::Relaxed),
+                total + scrolls + 1,
+                "{total}"
+            );
+        }
+    }
+    /// Past TikTok's ceiling nothing is tapped: the scanner already refuses such a bundle, and
+    /// this is the second wall behind it.
+    #[tokio::test(start_paused = true)]
+    async fn thirty_six_is_refused_before_any_tap() {
+        let session = Picker::with_tray(36);
+        assert_eq!(run_picker(&session).await, Selection::NotEnoughSelected);
+        assert!(session.taps.lock().is_empty());
+        assert_eq!(session.reads.load(Ordering::Relaxed), 0);
+    }
+    /// A row the first screen never showed is admitted only as the next row of the same grid:
+    /// off its column, off its pitch, or past the bundle's count, and the run stops with the
+    /// last verified count rather than tapping into an unmeasured layout.
+    #[tokio::test(start_paused = true)]
+    async fn a_scrolled_in_row_off_the_grid_stops_the_run() {
+        for corruption in ["column", "pitch", "extra"] {
+            // Sixteen: the first screen shows fifteen, so the sixteenth sits in the one row the
+            // grid has to extrapolate — and that row is the corrupted one.
+            let mut session = Picker::with_tray(16);
+            session.corrupt_scrolled_row = Some(corruption);
+            assert_eq!(
+                run_picker(&session).await,
+                Selection::NotEnoughSelected,
+                "{corruption}"
+            );
+            assert_eq!(
+                session.taps.lock().len(),
+                15,
+                "{corruption}: the fifteen verified taps, and none into the bad row"
+            );
+            assert_eq!(*session.swipes.lock(), 2, "{corruption}");
+        }
     }
     #[tokio::test(start_paused = true)]
     async fn scrolling_never_hides_dropped_selection_bad_ordinals_or_changed_album() {
@@ -898,11 +1095,12 @@ mod tests {
             ),
         ] {
             let (rows, next) = picker_snapshot(xml, controls).unwrap();
+            let mut grid = KnownGrid::from_initial(initial.clone(), 11).unwrap();
             assert!(visible_selection(
                 rows.clone(),
                 &next,
                 Screen::new(1080.0, 2220.0).unwrap(),
-                &initial,
+                &mut grid,
                 count
             )
             .is_some());
@@ -912,11 +1110,53 @@ mod tests {
                 wrong,
                 &next,
                 Screen::new(1080.0, 2220.0).unwrap(),
-                &initial,
+                &mut grid,
                 count
             )
             .is_none());
         }
+    }
+    #[test]
+    fn measured_eleven_grid_is_three_columns_at_362px_and_refuses_ragged_layouts() {
+        let labels =
+            crate::tiktok_labels::controls_for("com.zhiliaoapp.musically", "en", "45.7.3").unwrap();
+        let controls = PickerControls::for_labels(&labels).unwrap();
+        let (initial, _) = picker_snapshot(
+            include_str!("../../fixtures/tiktok-publish/picker-11-initial-musically-45.7.3-en.xml"),
+            controls,
+        )
+        .unwrap();
+        let grid = KnownGrid::from_initial(initial.clone(), 11).unwrap();
+        assert_eq!(grid.columns(), 3);
+        assert_eq!(grid.known(), 11);
+        assert_eq!(grid.row_pitch(), Some(362.0));
+        // Eleven visible of a larger album ends on a ragged row: the layout was never measured.
+        assert!(KnownGrid::from_initial(initial.clone(), 20).is_none());
+        // Nine visible of twenty ends on a full row and can be extended.
+        let nine = KnownGrid::from_initial(initial[..9].to_vec(), 20).unwrap();
+        assert_eq!(nine.known(), 9);
+        // The next unseen cell is the first column, one pitch below row three.
+        assert_eq!(
+            nine.expected_unseen(9, &[]),
+            Some((280.0, 1414.0, 63.0, 63.0))
+        );
+        // Anything but the next cell in order is refused.
+        assert!(nine.expected_unseen(10, &[]).is_none());
+        // More visible than wanted is an album holding photos the bundle does not.
+        assert!(KnownGrid::from_initial(initial.clone(), 10).is_none());
+        // A single row cannot yield a pitch, so it may only stand for the whole album.
+        assert!(KnownGrid::from_initial(initial[..3].to_vec(), 3).is_some());
+        assert!(KnownGrid::from_initial(initial[..3].to_vec(), 6).is_none());
+        // A cell off its column is not this grid.
+        let mut skewed = initial.clone();
+        skewed[4].x += 1.0;
+        assert!(KnownGrid::from_initial(skewed, 11).is_none());
+        // An uneven pitch is not this grid either.
+        let mut uneven = initial;
+        for cell in &mut uneven[9..] {
+            cell.y += 5.0;
+        }
+        assert!(KnownGrid::from_initial(uneven, 11).is_none());
     }
     #[tokio::test(start_paused = true)]
     async fn six_photos_require_six_corner_taps_and_six_ordinals() {

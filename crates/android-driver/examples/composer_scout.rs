@@ -171,16 +171,19 @@ fn switch(args: &[String], flag: &str) -> Result<bool, String> {
 /// three by a different road. So the two states are kept apart: nothing asked for (three), and
 /// something asked for that cannot be read (refuse).
 fn how_many_images(args: &[String]) -> Result<usize, String> {
+    // TikTok's carousel ceiling, which the label-driven selector now reaches by scrolling the
+    // album one measured row at a time; it used to be the twelve cells of one screen.
+    const MAX: usize = riviu_core::publish::MAX_CAROUSEL_IMAGES;
     match flag_value(args, "--images") {
         Flag::Absent => Ok(3),
-        Flag::Unusable => Err("--images cần một số từ 1 đến 12 đi ngay sau nó".to_string()),
+        Flag::Unusable => Err(format!("--images cần một số từ 1 đến {MAX} đi ngay sau nó")),
         Flag::Repeated => {
             Err("--images xuất hiện nhiều lần — không đoán lần nào là thật".to_string())
         }
         Flag::Value(raw) => match raw.parse::<usize>() {
-            Ok(count) if (1..=12).contains(&count) => Ok(count),
+            Ok(count) if (1..=MAX).contains(&count) => Ok(count),
             _ => Err(format!(
-                "--images {raw:?} không đọc được; cần một số từ 1 đến 12"
+                "--images {raw:?} không đọc được; cần một số từ 1 đến {MAX}"
             )),
         },
     }
@@ -817,7 +820,8 @@ mod tests {
     fn an_unreadable_image_count_is_refused_rather_than_defaulted() {
         assert_eq!(how_many_images(&line(&["SN"])), Ok(3), "not asked for");
         assert_eq!(how_many_images(&line(&["SN", "--images", "7"])), Ok(7));
-        for bad in ["abc", "-1", "0", "13", "3.5", ""] {
+        assert_eq!(how_many_images(&line(&["SN", "--images", "35"])), Ok(35));
+        for bad in ["abc", "-1", "0", "36", "3.5", ""] {
             assert!(
                 how_many_images(&line(&["SN", "--images", bad])).is_err(),
                 "--images {bad:?} must refuse, not silently mean three"

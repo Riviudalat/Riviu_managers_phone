@@ -133,7 +133,18 @@ fn adb_slots() -> &'static Semaphore {
 
 fn adb_transfer_slots() -> &'static Semaphore {
     static SLOTS: OnceLock<Semaphore> = OnceLock::new();
-    SLOTS.get_or_init(|| Semaphore::new(ADB_MAX_TRANSFERS))
+    SLOTS.get_or_init(|| {
+        let measured = if cfg!(debug_assertions) {
+            std::env::var("RIVIU_BENCH_ADB_TRANSFERS")
+                .ok()
+                .and_then(|v| v.parse::<usize>().ok())
+                .filter(|v| (1..=10).contains(v))
+                .unwrap_or(ADB_MAX_TRANSFERS)
+        } else {
+            ADB_MAX_TRANSFERS
+        };
+        Semaphore::new(measured)
+    })
 }
 
 /// One queue per phone, each one deep enough for exactly one call.

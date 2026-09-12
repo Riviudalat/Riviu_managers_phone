@@ -95,6 +95,11 @@ final class HttpServer {
         }
     }
 
+    synchronized boolean isRunning() {
+        return running && server != null && !server.isClosed()
+                && thread != null && thread.isAlive();
+    }
+
     private void acceptLoop() {
         while (running) {
             try {

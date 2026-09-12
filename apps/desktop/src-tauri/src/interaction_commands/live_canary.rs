@@ -317,6 +317,7 @@ async fn live_interaction_canary() -> anyhow::Result<()> {
         inspected?;closed?;
         if matches!(mode.as_str(), "inspect" | "account-only") {return Ok(());}
         let request = riviu_core::ThreadCampaignRequest {
+            scripted_conversation: None,
             request_id:uuid::Uuid::new_v4().to_string(),targets:vec![target],actor_udids:vec![SERIAL.into()],message_count:1,
             instruction:String::new(),max_words:12,mode:riviu_core::ThreadMode::Standalone,shape:riviu_core::ThreadShape::Star,
             cohort_size:None,manual_comments:vec![comment],actions:riviu_core::InteractionActionSet {like:mode=="public-once",save:mode=="public-once",comment:true},mentions:vec![],mention_parent:false,

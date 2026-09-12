@@ -259,7 +259,16 @@ impl Database {
         // The detail already has the exact rows in memory. Re-derive through the canonical
         // helper so the row-level projection and the summary cannot drift.
         summary.action_counters = crate::interaction::count_interaction_actions(&action_results);
+        let request_json: String = conn.query_row(
+            "SELECT request_json FROM interaction_campaigns WHERE id=?1",
+            [campaign_id],
+            |r| r.get(0),
+        )?;
+        let request: crate::ThreadCampaignRequest = serde_json::from_str(&request_json)?;
+        let session=conn.query_row("SELECT started_at_ms,ends_at_ms,next_at_ms,cursor FROM interaction_conversation_sessions WHERE campaign_id=?1",[campaign_id],|r|Ok(super::ConversationSession{started_at_ms:r.get(0)?,ends_at_ms:r.get(1)?,next_at_ms:r.get(2)?,cursor:r.get::<_,i64>(3)? as usize})).optional()?;
         Ok(Some(crate::interaction::InteractionCampaignDetail {
+            scripted_conversation: request.scripted_conversation,
+            conversation_session: session,
             summary,
             assignments,
             action_aggregate,
@@ -585,6 +594,10 @@ impl Database {
     pub fn interrupt_orphaned_interaction_campaigns(&self) -> anyhow::Result<usize> {
         let mut conn = self.conn()?;
         let transaction = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        transaction.execute(
+            "UPDATE interaction_conversation_sessions SET owner=NULL",
+            [],
+        )?;
         let now = Utc::now().to_rfc3339();
         let stranded: Vec<String> = transaction
             .prepare(
@@ -676,6 +689,10 @@ impl Database {
             transaction.commit()?;
             return Ok(false);
         }
+        transaction.execute(
+            "UPDATE interaction_conversation_sessions SET owner=NULL WHERE campaign_id=?1",
+            [campaign_id],
+        )?;
         let now = Utc::now().to_rfc3339();
         transaction.execute(
             "UPDATE tiktok_action_runs
@@ -1017,6 +1034,7 @@ mod settlement_tests {
                 .join(format!("riviu-assignment-settlement-{}.db", Uuid::new_v4()));
             let db = Database::open(&path).expect("fixture database");
             let request = ThreadCampaignRequest {
+                scripted_conversation: None,
                 request_id: Uuid::new_v4().to_string(),
                 targets: vec![crate::parse_tiktok_links(
                     "https://www.tiktok.com/@fixture/video/12345",

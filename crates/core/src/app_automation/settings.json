@@ -1,0 +1,266 @@
+{
+  "schemaVersion": 1,
+  "engineApiVersion": 1,
+  "id": "android-settings-read-v1",
+  "revision": 1,
+  "packages": [
+    "com.android.settings"
+  ],
+  "targets": [
+    {
+      "id": "aboutDevice",
+      "screen": "settings",
+      "labels": [
+        "About phone",
+        "About device",
+        "Thông tin điện thoại"
+      ],
+      "resourceSuffixes": [],
+      "anchors": [],
+      "excludedLabels": [],
+      "effectful": false
+    }
+  ],
+  "fixtures": [
+    {
+      "target": "aboutDevice",
+      "package": "com.android.settings",
+      "width": 400,
+      "height": 800,
+      "xml": "<hierarchy><node package=\"com.android.settings\" resource-id=\"com.android.settings:id/variant_0\" text=\"About phone\" bounds=\"[10,20][190,65]\" enabled=\"true\" clickable=\"true\"/></hierarchy>",
+      "expectedCount": 1
+    },
+    {
+      "target": "aboutDevice",
+      "package": "com.android.settings",
+      "width": 400,
+      "height": 800,
+      "xml": "<hierarchy><node package=\"com.android.settings\" resource-id=\"com.android.settings:id/variant_1\" text=\"About device\" bounds=\"[30,45][210,90]\" enabled=\"true\" clickable=\"true\"/></hierarchy>",
+      "expectedCount": 1
+    },
+    {
+      "target": "aboutDevice",
+      "package": "com.android.settings",
+      "width": 400,
+      "height": 800,
+      "xml": "<hierarchy><node package=\"com.android.settings\" resource-id=\"com.android.settings:id/variant_2\" text=\"Thông tin điện thoại\" bounds=\"[50,70][230,115]\" enabled=\"true\" clickable=\"true\"/></hierarchy>",
+      "expectedCount": 1
+    },
+    {
+      "target": "aboutDevice",
+      "package": "com.android.settings",
+      "width": 400,
+      "height": 800,
+      "xml": "<hierarchy><node package=\"com.android.settings\" resource-id=\"com.android.settings:id/variant_3\" text=\"About phone\" bounds=\"[10,95][190,140]\" enabled=\"true\" clickable=\"true\"/></hierarchy>",
+      "expectedCount": 1
+    },
+    {
+      "target": "aboutDevice",
+      "package": "com.android.settings",
+      "width": 400,
+      "height": 800,
+      "xml": "<hierarchy><node package=\"com.android.settings\" resource-id=\"com.android.settings:id/variant_4\" text=\"About device\" bounds=\"[30,120][210,165]\" enabled=\"true\" clickable=\"true\"/></hierarchy>",
+      "expectedCount": 1
+    },
+    {
+      "target": "aboutDevice",
+      "package": "com.android.settings",
+      "width": 400,
+      "height": 800,
+      "xml": "<hierarchy><node package=\"com.android.settings\" resource-id=\"com.android.settings:id/variant_5\" text=\"Thông tin điện thoại\" bounds=\"[50,20][230,65]\" enabled=\"true\" clickable=\"true\"/></hierarchy>",
+      "expectedCount": 1
+    },
+    {
+      "target": "aboutDevice",
+      "package": "com.android.settings",
+      "width": 400,
+      "height": 800,
+      "xml": "<hierarchy><node package=\"com.android.settings\" resource-id=\"com.android.settings:id/variant_6\" text=\"About phone\" bounds=\"[10,45][190,90]\" enabled=\"true\" clickable=\"true\"/></hierarchy>",
+      "expectedCount": 1
+    },
+    {
+      "target": "aboutDevice",
+      "package": "com.android.settings",
+      "width": 400,
+      "height": 800,
+      "xml": "<hierarchy><node package=\"com.android.settings\" resource-id=\"com.android.settings:id/variant_7\" text=\"About device\" bounds=\"[30,70][210,115]\" enabled=\"true\" clickable=\"true\"/></hierarchy>",
+      "expectedCount": 1
+    },
+    {
+      "target": "aboutDevice",
+      "package": "com.android.settings",
+      "width": 400,
+      "height": 800,
+      "xml": "<hierarchy><node package=\"com.android.settings\" resource-id=\"com.android.settings:id/variant_8\" text=\"Thông tin điện thoại\" bounds=\"[50,95][230,140]\" enabled=\"true\" clickable=\"true\"/></hierarchy>",
+      "expectedCount": 1
+    },
+    {
+      "target": "aboutDevice",
+      "package": "com.android.settings",
+      "width": 400,
+      "height": 800,
+      "xml": "<hierarchy><node package=\"com.android.settings\" resource-id=\"com.android.settings:id/variant_9\" text=\"About phone\" bounds=\"[10,120][190,165]\" enabled=\"true\" clickable=\"true\"/></hierarchy>",
+      "expectedCount": 1
+    },
+    {
+      "target": "aboutDevice",
+      "package": "com.android.settings",
+      "width": 400,
+      "height": 800,
+      "xml": "<hierarchy><node package=\"com.android.settings\" resource-id=\"com.android.settings:id/variant_10\" text=\"About device\" bounds=\"[30,20][210,65]\" enabled=\"true\" clickable=\"true\"/></hierarchy>",
+      "expectedCount": 1
+    },
+    {
+      "target": "aboutDevice",
+      "package": "com.android.settings",
+      "width": 400,
+      "height": 800,
+      "xml": "<hierarchy><node package=\"com.android.settings\" resource-id=\"com.android.settings:id/variant_11\" text=\"Thông tin điện thoại\" bounds=\"[50,45][230,90]\" enabled=\"true\" clickable=\"true\"/></hierarchy>",
+      "expectedCount": 1
+    },
+    {
+      "target": "aboutDevice",
+      "package": "com.android.settings",
+      "width": 400,
+      "height": 800,
+      "xml": "<hierarchy><node package=\"com.android.settings\" resource-id=\"com.android.settings:id/variant_12\" text=\"About phone\" bounds=\"[10,70][190,115]\" enabled=\"true\" clickable=\"true\"/></hierarchy>",
+      "expectedCount": 1
+    },
+    {
+      "target": "aboutDevice",
+      "package": "com.android.settings",
+      "width": 400,
+      "height": 800,
+      "xml": "<hierarchy><node package=\"com.android.settings\" resource-id=\"com.android.settings:id/variant_13\" text=\"About device\" bounds=\"[30,95][210,140]\" enabled=\"true\" clickable=\"true\"/></hierarchy>",
+      "expectedCount": 1
+    },
+    {
+      "target": "aboutDevice",
+      "package": "com.android.settings",
+      "width": 400,
+      "height": 800,
+      "xml": "<hierarchy><node package=\"com.android.settings\" resource-id=\"com.android.settings:id/variant_14\" text=\"Thông tin điện thoại\" bounds=\"[50,120][230,165]\" enabled=\"true\" clickable=\"true\"/></hierarchy>",
+      "expectedCount": 1
+    },
+    {
+      "target": "aboutDevice",
+      "package": "com.android.settings",
+      "width": 400,
+      "height": 800,
+      "xml": "<hierarchy><node package=\"com.android.settings\" resource-id=\"com.android.settings:id/variant_15\" text=\"About phone\" bounds=\"[10,20][190,65]\" enabled=\"true\" clickable=\"true\"/></hierarchy>",
+      "expectedCount": 1
+    },
+    {
+      "target": "aboutDevice",
+      "package": "com.android.settings",
+      "width": 400,
+      "height": 800,
+      "xml": "<hierarchy><node package=\"com.android.settings\" resource-id=\"com.android.settings:id/variant_16\" text=\"About device\" bounds=\"[30,45][210,90]\" enabled=\"true\" clickable=\"true\"/></hierarchy>",
+      "expectedCount": 1
+    },
+    {
+      "target": "aboutDevice",
+      "package": "com.android.settings",
+      "width": 400,
+      "height": 800,
+      "xml": "<hierarchy><node package=\"com.android.settings\" resource-id=\"com.android.settings:id/variant_17\" text=\"Thông tin điện thoại\" bounds=\"[50,70][230,115]\" enabled=\"true\" clickable=\"true\"/></hierarchy>",
+      "expectedCount": 1
+    },
+    {
+      "target": "aboutDevice",
+      "package": "com.android.settings",
+      "width": 400,
+      "height": 800,
+      "xml": "<hierarchy><node package=\"com.android.settings\" resource-id=\"com.android.settings:id/variant_18\" text=\"About phone\" bounds=\"[10,95][190,140]\" enabled=\"true\" clickable=\"true\"/></hierarchy>",
+      "expectedCount": 1
+    },
+    {
+      "target": "aboutDevice",
+      "package": "com.android.settings",
+      "width": 400,
+      "height": 800,
+      "xml": "<hierarchy><node package=\"com.android.settings\" resource-id=\"com.android.settings:id/variant_19\" text=\"About device\" bounds=\"[30,120][210,165]\" enabled=\"true\" clickable=\"true\"/></hierarchy>",
+      "expectedCount": 1
+    },
+    {
+      "target": "aboutDevice",
+      "package": "com.android.settings",
+      "width": 400,
+      "height": 800,
+      "xml": "<hierarchy><node package=\"com.android.settings\" resource-id=\"com.android.settings:id/variant_20\" text=\"Thông tin điện thoại\" bounds=\"[50,20][230,65]\" enabled=\"false\" clickable=\"true\"/></hierarchy>",
+      "expectedCount": 0
+    },
+    {
+      "target": "aboutDevice",
+      "package": "com.android.settings",
+      "width": 400,
+      "height": 800,
+      "xml": "<hierarchy><node package=\"com.android.settings\" resource-id=\"com.android.settings:id/variant_21\" text=\"About phone\" bounds=\"[10,45][190,90]\" enabled=\"false\" clickable=\"true\"/></hierarchy>",
+      "expectedCount": 0
+    },
+    {
+      "target": "aboutDevice",
+      "package": "com.android.settings",
+      "width": 400,
+      "height": 800,
+      "xml": "<hierarchy><node package=\"com.android.settings\" resource-id=\"com.android.settings:id/variant_22\" text=\"About device\" bounds=\"[30,70][210,115]\" enabled=\"false\" clickable=\"true\"/></hierarchy>",
+      "expectedCount": 0
+    },
+    {
+      "target": "aboutDevice",
+      "package": "com.android.settings",
+      "width": 400,
+      "height": 800,
+      "xml": "<hierarchy><node package=\"com.android.settings\" resource-id=\"com.android.settings:id/variant_23\" text=\"Thông tin điện thoại\" bounds=\"[50,95][230,140]\" enabled=\"false\" clickable=\"true\"/></hierarchy>",
+      "expectedCount": 0
+    },
+    {
+      "target": "aboutDevice",
+      "package": "com.android.settings",
+      "width": 400,
+      "height": 800,
+      "xml": "<hierarchy><node package=\"com.android.settings\" resource-id=\"com.android.settings:id/variant_24\" text=\"About phone\" bounds=\"[10,120][190,165]\" enabled=\"false\" clickable=\"true\"/></hierarchy>",
+      "expectedCount": 0
+    },
+    {
+      "target": "aboutDevice",
+      "package": "com.android.settings",
+      "width": 400,
+      "height": 800,
+      "xml": "<hierarchy><node package=\"com.android.settings\" resource-id=\"com.android.settings:id/variant_25\" text=\"About device\" bounds=\"[30,20][210,65]\" enabled=\"true\" clickable=\"true\"/><node package=\"com.android.settings\" resource-id=\"com.android.settings:id/duplicate_25\" text=\"About device\" bounds=\"[30,20][210,65]\" enabled=\"true\" clickable=\"true\"/></hierarchy>",
+      "expectedCount": 2
+    },
+    {
+      "target": "aboutDevice",
+      "package": "com.android.settings",
+      "width": 400,
+      "height": 800,
+      "xml": "<hierarchy><node package=\"com.android.settings\" resource-id=\"com.android.settings:id/variant_26\" text=\"Thông tin điện thoại\" bounds=\"[50,45][230,90]\" enabled=\"true\" clickable=\"true\"/><node package=\"com.android.settings\" resource-id=\"com.android.settings:id/duplicate_26\" text=\"Thông tin điện thoại\" bounds=\"[50,45][230,90]\" enabled=\"true\" clickable=\"true\"/></hierarchy>",
+      "expectedCount": 2
+    },
+    {
+      "target": "aboutDevice",
+      "package": "com.android.settings",
+      "width": 400,
+      "height": 800,
+      "xml": "<hierarchy><node package=\"com.android.settings\" resource-id=\"com.android.settings:id/variant_27\" text=\"About phone\" bounds=\"[10,70][190,115]\" enabled=\"true\" clickable=\"true\"/><node package=\"com.android.settings\" resource-id=\"com.android.settings:id/duplicate_27\" text=\"About phone\" bounds=\"[10,70][190,115]\" enabled=\"true\" clickable=\"true\"/></hierarchy>",
+      "expectedCount": 2
+    },
+    {
+      "target": "aboutDevice",
+      "package": "com.android.settings",
+      "width": 400,
+      "height": 800,
+      "xml": "<hierarchy><node package=\"com.android.settings\" resource-id=\"com.android.settings:id/variant_28\" text=\"About device\" bounds=\"[30,95][210,140]\" enabled=\"true\" clickable=\"true\"/><node package=\"com.android.settings\" resource-id=\"com.android.settings:id/duplicate_28\" text=\"About device\" bounds=\"[30,95][210,140]\" enabled=\"true\" clickable=\"true\"/></hierarchy>",
+      "expectedCount": 2
+    },
+    {
+      "target": "aboutDevice",
+      "package": "com.android.settings",
+      "width": 400,
+      "height": 800,
+      "xml": "<hierarchy><node package=\"com.android.settings\" resource-id=\"com.android.settings:id/variant_29\" text=\"Thông tin điện thoại\" bounds=\"[50,120][230,165]\" enabled=\"true\" clickable=\"true\"/><node package=\"com.android.settings\" resource-id=\"com.android.settings:id/duplicate_29\" text=\"Thông tin điện thoại\" bounds=\"[50,120][230,165]\" enabled=\"true\" clickable=\"true\"/></hierarchy>",
+      "expectedCount": 2
+    }
+  ]
+}

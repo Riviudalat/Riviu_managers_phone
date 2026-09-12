@@ -1,4 +1,5 @@
-import type { DragEvent } from "react";
+import { useState, type DragEvent } from "react";
+import { Search } from "lucide-react";
 import type { ActionCategory, ActionKind, ActionDefinition } from "../../types";
 import { ACTION_PRESENTATION } from "./actionPresentation";
 
@@ -49,15 +50,26 @@ export function FlowPalette({
   catalog: ActionDefinition[];
   open: boolean;
 }) {
+  const [query, setQuery] = useState("");
+  const matchingActions = catalog.filter((action) => {
+    const presentation = ACTION_PRESENTATION[action.kind];
+    return presentation && !STRUCTURAL_KINDS.includes(action.kind)
+      && `${presentation.label} ${CATEGORY_LABELS[action.category]}`.toLocaleLowerCase("vi").includes(query.trim().toLocaleLowerCase("vi"));
+  });
   return (
     <aside className="flow-palette" data-testid="flow-palette" data-open={String(open)}>
+      <header className="flow-palette-heading">
+        <strong>Hành động</strong>
+        <span>Kéo vào vùng thiết kế để thêm bước.</span>
+      </header>
+      <label className="flow-palette-search">
+        <Search size={15} aria-hidden="true" />
+        <span className="visually-hidden">Tìm hành động Flow</span>
+        <input type="search" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Tìm hành động…" />
+      </label>
+      {matchingActions.length === 0 && <p className="hint">Không có hành động phù hợp.</p>}
       {CATEGORY_ORDER.map((category) => {
-        const actions = catalog.filter(
-          (action) =>
-            action.category === category &&
-            !STRUCTURAL_KINDS.includes(action.kind) &&
-            ACTION_PRESENTATION[action.kind],
-        );
+        const actions = matchingActions.filter((action) => action.category === category);
         if (actions.length === 0) return null;
         return (
           <section key={category} aria-label={CATEGORY_LABELS[category]}>

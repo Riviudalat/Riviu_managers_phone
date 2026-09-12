@@ -5,6 +5,11 @@ import {
 } from "./publishPreflightDisplay";
 
 describe("publish preflight operator wording", () => {
+  it("names link verification and pending publication even when composer and sound passed",()=>{
+    expect(publishPreflightProblem({code:"link_verification_unmeasured",message:"tuple locale mismatch"}).title).toContain("liên kết");
+    expect(publishPreflightProblem({code:"post_verification_pending",message:"pending"}).title).toContain("chờ xác minh");
+    expect(publishPreflightProblem({code:"sheet_connection_unverified",message:"missing target"}).title).toContain("Sheet");
+  });
   it("names a competing host and the USB repair before a publish run starts", () => {
     const issue={code:"automation_transport_conflict",message:"Máy đang cắm USB nhưng còn máy khác điều khiển ADB qua mạng: 192.168.1.43. Ngắt kết nối ở máy phụ."};
     expect(publishPreflightProblem(issue)).toEqual({title:"Kết nối điều khiển cần kiểm tra",action:issue.message});

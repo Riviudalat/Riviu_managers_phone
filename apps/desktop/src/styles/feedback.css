@@ -7,8 +7,8 @@
 
 .activity-center-trigger.icon-btn {
   position: relative;
-  width: 32px;
-  min-height: 32px;
+  width: 36px;
+  min-height: 36px;
 }
 
 .activity-center-current {
@@ -134,8 +134,8 @@
 }
 
 .activity-center-filters button {
-  min-height: 28px;
-  padding: 0 var(--space-2);
+  min-height: 36px;
+  padding: 0 var(--space-3);
   border-color: transparent;
   border-radius: var(--radius-sm);
   background: transparent;
@@ -144,9 +144,9 @@
 }
 
 .activity-center-filters button[aria-pressed="true"] {
-  border-color: var(--line);
-  background: var(--bg-muted);
-  color: var(--text-1);
+  border-color: var(--primary-ring);
+  background: var(--primary-soft);
+  color: var(--primary-deep);
 }
 
 .activity-center-filters button span {
@@ -164,9 +164,9 @@
 
 .activity-center-list li {
   display: grid;
-  grid-template-columns: 24px minmax(0, 1fr) 28px;
+  grid-template-columns: 24px minmax(0, 1fr) 32px;
   gap: var(--space-2);
-  padding: var(--space-3);
+  padding: var(--space-4);
   border-bottom: 1px solid var(--line);
 }
 
@@ -219,8 +219,7 @@
   overflow: hidden;
   font-size: var(--text-md);
   font-weight: var(--weight-semibold);
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  overflow-wrap: anywhere;
 }
 
 .activity-center-copy time,

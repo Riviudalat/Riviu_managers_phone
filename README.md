@@ -9,8 +9,8 @@ Phần mềm của người khác đi kèm trong bộ cài được liệt kê �
 gồm cả một mục ghi rõ chỗ giấy phép **chưa được thẩm định**.
 
 Tài liệu hiện tại ở [docs/README.md](docs/README.md): hướng dẫn vận hành 12 trang,
-runbook phát triển/agent, hợp đồng UI và kho lịch sử. [AGENTS.md](AGENTS.md) vẫn là
-cửa vào của agent; [chỉ mục §](docs/agents/README.md) dẫn tới số đo và nhật ký mới nhất.
+runbook phát triển, hợp đồng UI và kho lịch sử. [AGENTS.md](AGENTS.md) là cửa ngắn
+cho agent; ràng buộc kỹ thuật ở [docs/agents/](docs/agents/README.md).
 Báo cáo có ngày ở [archive](docs/archive/README.md) không phải trạng thái hiện tại.
 
 ## Cài bản dựng
@@ -177,9 +177,7 @@ không pin và không ghi vào app đã ký.
 
 ## Chạy cổng
 
-Mọi mục §9 trong [nhật ký](docs/agents/README.md#nhật-ký-9x) kết thúc bằng một dòng
-“Cổng” phát biểu bằng đúng những lệnh dưới đây, và file này chưa từng liệt kê chúng —
-nên một người mới không tái hiện được một cổng nào từ README.
+Các lệnh dưới đây là cổng chất lượng chính của repo (CI Desktop cũng chạy tương đương).
 
 ```powershell
 # Rust cục bộ: format, lint và test từng crate. Không dùng whole-workspace trên máy
@@ -211,18 +209,17 @@ python3 -m py_compile scripts/build_desktop_sidecar.py `
   sidecars/pymobiledevice3/pyinstaller_runtime_hook.py sidecars/signer/riviu_signer.py `
   sidecars/wda/build_and_install.py sidecars/wda/test_build_and_install.py `
   tools/interaction-gate0/probe.py tools/interaction-gate0/test_probe.py `
-  scripts/build_agents_index.py
+  scripts/check_docs.py
 python3 -m unittest -v scripts.test_build_per_user_wix_resources `
   scripts.test_collect_desktop_ci_artifacts scripts.test_stage_deployment_checker `
   scripts.test_stage_android_package_tools scripts.test_xiaowei_provenance `
-  scripts.test_build_agents_index scripts.test_check_docs sidecars.pymobiledevice3.test_app_control `
+  scripts.test_check_docs sidecars.pymobiledevice3.test_app_control `
   sidecars.pymobiledevice3.test_rtmmo_lifecycle `
   sidecars.pymobiledevice3.test_media_stage sidecars.signer.test_riviu_signer `
   sidecars.wda.test_build_and_install
 python3 -m unittest discover -s tools/interaction-gate0 -p "test_probe.py" -v
 python3 scripts/collect_desktop_ci_artifacts.py verify-version
 python3 scripts/collect_desktop_ci_artifacts.py verify-android-tools
-python3 scripts/build_agents_index.py --check
 python3 scripts/check_docs.py
 python3 -m pip check
 
@@ -283,7 +280,7 @@ sidecars/pymobiledevice3/
 sidecars/signer/
 scripts/                 build/attestation/CI artifact tooling
 tools/                   probe và tiện ích khảo sát, ngoài đường chạy của app
-docs/agents/             nội dung AGENTS.md, chia theo chủ đề + nhật ký §9
+docs/agents/             ràng buộc kỹ thuật đứng yên (WDA, kiến trúc, fleet)
 docs/re/                 khảo sát genfarmer / xiaowei / rtmmo
 docs/verification/       log nghiệm thu trên phần cứng thật
 ```

@@ -1,8 +1,10 @@
 //! Riviu core types, device registry, job queue, and persistence.
 
 pub mod action_failure;
+pub mod app_automation;
 pub mod automation;
 pub mod automation_schedule_runtime;
+pub mod conversation;
 pub mod db;
 pub mod device_capabilities;
 pub mod device_control;
@@ -32,12 +34,15 @@ pub mod publish;
 pub mod publish_partners;
 pub mod publish_runtime;
 pub mod publish_sheet;
+pub mod publish_submission;
 pub mod registry;
 pub mod screen;
 pub mod screen_match;
 pub mod screen_watch;
 pub mod session_log;
+pub mod social_network;
 pub mod stream_budget;
+pub mod three_feature_template;
 pub mod tiktok_account;
 pub mod tiktok_comment_delete;
 pub mod tiktok_composer;
@@ -53,6 +58,7 @@ pub mod tiktok_sound;
 pub mod tiktok_target;
 pub mod tiktok_web;
 pub mod types;
+pub mod ui_automation;
 pub mod video_evidence;
 
 pub use action_failure::ActionFailure;
@@ -101,10 +107,12 @@ pub use registry::DeviceRegistry;
 pub use screen::{ScreenKind, ScreenObservation};
 pub use screen_watch::{ScreenWatcher, WatchStats};
 pub use session_log::{SessionLogBook, SessionLogEntry, SessionLogSummary, SESSION_LOG_CAPACITY};
+pub use social_network::*;
 pub use stream_budget::{
     BackgroundStreamLease, ForegroundStreamReservation, ForegroundTransfer, StreamBudgetError,
     StreamBudgetManager, StreamStopRequest,
 };
+pub use three_feature_template::*;
 pub use tiktok_comment_delete::*;
 pub use tiktok_public_cleanup::*;
 pub use tiktok_save::*;

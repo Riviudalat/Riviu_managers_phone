@@ -53,6 +53,34 @@ beforeEach(() => {
 });
 
 describe("AgentSection states", () => {
+  it("keeps iOS configuration in a disclosure without warning about Android authentication", async () => {
+    api.agentGetSettings.mockResolvedValue({ settings: { autoRepair: false }, tokenConfigured: false,
+      activeArtifactId: "ios-agent-unavailable", activeArtifactVersion: "unknown" });
+    render(<AgentSection connectedDevices={[device]} connectedUdids={[device.udid]} iosRuntimeIssue="Missing iOS credential" />);
+    await waitFor(() => expect(api.agentGetSettings).toHaveBeenCalled());
+    expect(screen.queryByText("Chưa cấu hình xác thực iOS")).toBeNull();
+    const reason = screen.getByText(/Missing iOS credential/);
+    expect(reason).not.toBeVisible();
+    fireEvent.click(screen.getByText("Cấu hình Agent iOS", { selector: "summary" }));
+    expect(reason).toBeVisible();
+    expect(screen.getByText(/không quyết định trạng thái Agent Android/)).toBeVisible();
+    expect(api.agentRepair).not.toHaveBeenCalled();
+    expect(api.agentPreflight).not.toHaveBeenCalled();
+  });
+
+  it("does not report an Android protocol as the iOS Agent protocol", async () => {
+    api.agentListStatuses.mockResolvedValue([{ ...unknownStatus, protocolVersion: 1 }]);
+    render(<AgentSection connectedDevices={[device]} connectedUdids={[device.udid]} />);
+    await waitFor(() => expect(api.agentListStatuses).toHaveBeenCalled());
+    expect(screen.getByText("Giao thức").nextElementSibling).toHaveTextContent("Chưa rõ");
+  });
+
+  it("shows authentication status explicitly for connected iPhones", async () => {
+    const ios = { ...device, udid: "iphone-1", platform: "ios" as const };
+    render(<AgentSection connectedDevices={[ios]} connectedUdids={[ios.udid]} />);
+    expect(await screen.findByText("Đã cấu hình xác thực iOS")).toBeVisible();
+    expect(screen.queryByText(/kho thông tin xác thực Windows/)).toBeNull();
+  });
   it("only saves auto-repair after Apply and never invokes a device repair", async () => {
     api.agentSaveSettings.mockImplementation(async (settings) => ({ settings, tokenConfigured: true, activeArtifactId: "agent", activeArtifactVersion: "1" }));
     render(<AgentSection connectedDevices={[device]} connectedUdids={[device.udid]} />);

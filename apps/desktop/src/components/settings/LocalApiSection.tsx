@@ -4,6 +4,7 @@ import { localApiGetConfig, localApiSetConfig, localApiStatus, type LocalApiConf
 import { useWorkspaceDraft } from "../../workspaceDraft";
 import { describeError } from "../../describeError";
 import { LoadingState, StatusNotice, type NoticeTone } from "../States";
+import { StatusChip } from "../WorkspacePrimitives";
 
 /** The loopback HTTP API: whether it listens, on what port, behind what token. */
 export function LocalApiSection() {
@@ -57,7 +58,10 @@ export function LocalApiSection() {
   useWorkspaceDraft({ autoSave: save, id: "settings-api", label: "API cục bộ", dirty, snapshotKey: String(editEpoch.current), save, discard });
   return (
     <section className="settings-section" aria-label="API tự động hoá cục bộ">
-      <h3>API tự động hoá cục bộ</h3>
+      <div className="settings-section-heading">
+        <h3>API tự động hoá cục bộ</h3>
+        {localApi && <StatusChip tone={savingApi || dirty ? "warning" : "neutral"}>{savingApi ? "Đang lưu" : dirty ? "Chưa lưu" : "Đã lưu"}</StatusChip>}
+      </div>
       <p className="hint">
         Khi bật, script trên chính máy tính có thể điều khiển fleet; thay đổi chỉ có hiệu lực sau khi khởi động lại app.
       </p>

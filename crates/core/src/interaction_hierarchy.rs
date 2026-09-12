@@ -39,6 +39,7 @@ use tokio::time::Instant;
 use crate::driver::{ElementBox, ElementQuery, UiSession};
 use crate::interaction::CommentLocatorIdentity;
 use crate::tiktok_labels::{LabelMatch, TikTokControl, TikTokControls};
+use anyhow::Context;
 
 mod exact_target;
 pub use exact_target::open_exact_target_by_hierarchy;
@@ -1004,8 +1005,37 @@ pub(crate) async fn send_root_by_hierarchy_with_gate<F>(
     text: &str,
     mentions: &[String],
     stop: &AtomicBool,
+    frame_sha: F,
+    effect_gate: &mut crate::interaction_target::EffectGate<'_>,
+) -> Result<HierarchySendOutcome, HierarchySendFailure>
+where
+    F: FnMut() -> String,
+{
+    send_root_by_hierarchy_with_gate_options(
+        session,
+        labels,
+        screen,
+        text,
+        mentions,
+        stop,
+        frame_sha,
+        effect_gate,
+        false,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn send_root_by_hierarchy_with_gate_options<F>(
+    session: &dyn UiSession,
+    labels: TikTokControls,
+    screen: (f64, f64),
+    text: &str,
+    mentions: &[String],
+    stop: &AtomicBool,
     mut frame_sha: F,
     effect_gate: &mut crate::interaction_target::EffectGate<'_>,
+    strict_mentions: bool,
 ) -> Result<HierarchySendOutcome, HierarchySendFailure>
 where
     F: FnMut() -> String,
@@ -1106,6 +1136,18 @@ where
                 return Ok(HierarchySendOutcome::interrupted_before_send());
             }
         };
+        if strict_mentions && !mention_outcome.all_linked(mentions) {
+            let cleared = drawer.leave(stop).await;
+            let error = anyhow::anyhow!(
+                "Tag chưa được xác nhận: {}",
+                mention_outcome.note().unwrap_or_default()
+            );
+            return Err(if cleared {
+                HierarchySendFailure::before(error)
+            } else {
+                HierarchySendFailure::after(error)
+            });
+        }
         // Whatever is in the box now is what Send will publish, tags and spacing included.
         // Read rather than reconstructed: the token's exact spelling and trailing space are
         // TikTok's to decide, and guessing them is how the read-back missed the first time.
@@ -1116,6 +1158,15 @@ where
                 return Ok(HierarchySendOutcome::interrupted_before_send());
             }
         };
+        if strict_mentions && posted.is_none() {
+            let cleaned = drawer.leave(stop).await;
+            let error = anyhow::anyhow!("Không xác nhận được nội dung sau khi gắn tag");
+            return Err(if cleaned {
+                HierarchySendFailure::before(error)
+            } else {
+                HierarchySendFailure::after(error)
+            });
+        }
         mention_outcome.note()
     };
     // Still before the Send tap: a transport error waiting for the arm posted nothing.
@@ -1213,6 +1264,16 @@ pub struct MentionOutcome {
 }
 
 impl MentionOutcome {
+    pub fn all_linked(&self, wanted: &[String]) -> bool {
+        self.literal.is_empty()
+            && self.untyped.is_empty()
+            && self.unverified.is_empty()
+            && wanted.iter().all(|handle| {
+                self.linked
+                    .iter()
+                    .any(|found| found.eq_ignore_ascii_case(handle.trim_start_matches('@')))
+            })
+    }
     /// One line for the operator, or `None` when nothing was asked for.
     pub fn note(&self) -> Option<String> {
         let mut parts = Vec::new();
@@ -2088,8 +2149,41 @@ pub(crate) async fn send_reply_by_hierarchy_with_gate<F>(
     parent: &CommentLocatorIdentity,
     text: &str,
     stop: &AtomicBool,
+    frame_sha: F,
+    effect_gate: &mut crate::interaction_target::EffectGate<'_>,
+) -> Result<Result<HierarchySendOutcome, ReplyRefusal>, HierarchySendFailure>
+where
+    F: FnMut() -> String,
+{
+    send_reply_by_hierarchy_with_gate_options(
+        session,
+        labels,
+        screen,
+        parent,
+        text,
+        stop,
+        frame_sha,
+        effect_gate,
+        &[],
+        false,
+        None,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn send_reply_by_hierarchy_with_gate_options<F>(
+    session: &dyn UiSession,
+    labels: TikTokControls,
+    screen: (f64, f64),
+    parent: &CommentLocatorIdentity,
+    text: &str,
+    stop: &AtomicBool,
     mut frame_sha: F,
     effect_gate: &mut crate::interaction_target::EffectGate<'_>,
+    mentions: &[String],
+    strict_mentions: bool,
+    root: Option<&CommentLocatorIdentity>,
 ) -> Result<Result<HierarchySendOutcome, ReplyRefusal>, HierarchySendFailure>
 where
     F: FnMut() -> String,
@@ -2129,7 +2223,21 @@ where
     // Whether the list was ever legible at all — see the `unreadable` branch below.
     let mut saw_rows = false;
     let target = loop {
-        match find_parent(session, reply_label, parent).await {
+        if strict_mentions {
+            if let Some(root) = root {
+                if root != parent {
+                    expand_conversation_root(session, labels, root)
+                        .await
+                        .map_err(HierarchySendFailure::before)?;
+                }
+            }
+        }
+
+        match if strict_mentions {
+            find_script_parent_snapshot(session, labels, parent).await
+        } else {
+            find_parent(session, reply_label, parent).await
+        } {
             Ok(Some(found)) => break found,
             Ok(None) => {}
             Err(_) => return Ok(Ok(HierarchySendOutcome::interrupted_before_send())),
@@ -2296,6 +2404,50 @@ where
             identity: None,
         }));
     }
+    let mention_outcome = match append_mentions_by_picker(session, screen, mentions, stop).await {
+        Ok(result) => result,
+        Err(error) => {
+            let cleaned = drawer.leave(stop).await;
+            return Err(if cleaned {
+                HierarchySendFailure::before(error)
+            } else {
+                HierarchySendFailure::after(error)
+            });
+        }
+    };
+    if strict_mentions && !mention_outcome.all_linked(mentions) {
+        let cleaned = drawer.leave(stop).await;
+        let error = anyhow::anyhow!(
+            "Tag trả lời chưa được xác nhận: {}",
+            mention_outcome.note().unwrap_or_default()
+        );
+        return Err(if cleaned {
+            HierarchySendFailure::before(error)
+        } else {
+            HierarchySendFailure::after(error)
+        });
+    }
+    let posted_text = if mentions.is_empty() {
+        None
+    } else {
+        composer_text(session)
+            .await
+            .map_err(HierarchySendFailure::before)?
+    };
+    if strict_mentions
+        && !posted_text
+            .as_deref()
+            .is_some_and(|value| value.contains(text))
+    {
+        let cleaned = drawer.leave(stop).await;
+        let error = anyhow::anyhow!("Nội dung trả lời thay đổi sau gắn tag");
+        return Err(if cleaned {
+            HierarchySendFailure::before(error)
+        } else {
+            HierarchySendFailure::after(error)
+        });
+    }
+    let mention_note = mention_outcome.note();
     let send = match drawer.await_armed(stop).await {
         Ok(Some(send)) => send,
         Ok(None) => {
@@ -2358,15 +2510,166 @@ where
             sleep_poll().await;
         }
     }
-    let identity = read_back_identity(session, text, &cleared).await;
+    let identity =
+        read_back_identity(session, posted_text.as_deref().unwrap_or(text), &cleared).await;
     Ok(Ok(HierarchySendOutcome {
         verdict: CommentVerdict::Sent,
-        mention_note: None,
+        mention_note,
         parent_was_folded: unfolded,
         armed_frame_sha256: armed,
         cleared_frame_sha256: cleared,
         identity,
     }))
+}
+
+async fn find_script_parent_snapshot(
+    session: &dyn UiSession,
+    labels: TikTokControls,
+    parent: &CommentLocatorIdentity,
+) -> anyhow::Result<Option<ElementReplyTarget>> {
+    let tree =
+        crate::tiktok_share::hierarchy::Tree::parse(session.hierarchy_source_snapshot().await?)?;
+    let bodies = tree.matching(
+        labels.package(),
+        ElementQuery::Text {
+            value: &parent.text,
+            exact: true,
+        },
+    );
+    let Some(reply_label) = labels.label(TikTokControl::CommentReply) else {
+        return Ok(None);
+    };
+    let replies: Vec<_> = tree
+        .matching(labels.package(), reply_label.to_query())
+        .iter()
+        .filter_map(|i| tree.nodes[*i].rect())
+        .collect();
+    let authors: Vec<_> = tree
+        .matching(
+            labels.package(),
+            ElementQuery::ClassName(COMMENT_AUTHOR_CLASS),
+        )
+        .iter()
+        .filter_map(|i| tree.nodes[*i].rect())
+        .collect();
+    let found: Vec<_> = bodies
+        .iter()
+        .filter_map(|i| {
+            let body = tree.nodes[*i].rect()?;
+            let mut ancestor = tree.nodes[*i].parent;
+            while let Some(index) = ancestor {
+                let local_replies: Vec<_> = tree
+                    .matching(labels.package(), reply_label.to_query())
+                    .into_iter()
+                    .filter(|j| tree.inside(*j, index))
+                    .filter_map(|j| tree.nodes[j].rect())
+                    .collect();
+                let local_authors: Vec<_> = tree
+                    .matching(
+                        labels.package(),
+                        ElementQuery::ClassName(COMMENT_AUTHOR_CLASS),
+                    )
+                    .into_iter()
+                    .filter(|j| tree.inside(*j, index))
+                    .filter_map(|j| tree.nodes[j].rect())
+                    .collect();
+                if local_replies.len() == 1
+                    && local_authors
+                        .iter()
+                        .filter(|a| a.description.as_deref() == Some(parent.author_label.as_str()))
+                        .count()
+                        == 1
+                {
+                    return locate_parent_in_elements(
+                        std::slice::from_ref(&body),
+                        &local_replies,
+                        &local_authors,
+                        parent,
+                    );
+                }
+                if local_replies.len() > 1 {
+                    return None;
+                }
+                ancestor = tree.nodes[index].parent;
+            }
+            // Flat legacy snapshots lack row ancestry; retain uniqueness across the whole view.
+            if tree.nodes[*i].parent.is_none() {
+                locate_parent_in_elements(std::slice::from_ref(&body), &replies, &authors, parent)
+            } else {
+                None
+            }
+        })
+        .filter(|row| row.identity.author_label == parent.author_label)
+        .collect();
+    Ok(if found.len() == 1 {
+        found.into_iter().next()
+    } else {
+        None
+    })
+}
+
+async fn expand_conversation_root(
+    session: &dyn UiSession,
+    labels: TikTokControls,
+    root: &CommentLocatorIdentity,
+) -> anyhow::Result<()> {
+    let snapshot = session.hierarchy_source_snapshot().await?;
+    let tree = crate::tiktok_share::hierarchy::Tree::parse(snapshot)?;
+    let matches = tree.matching(
+        labels.package(),
+        ElementQuery::Text {
+            value: &root.text,
+            exact: true,
+        },
+    );
+    if matches.is_empty() {
+        return Ok(());
+    }
+    anyhow::ensure!(
+        matches.len() == 1,
+        "Chưa tìm duy nhất bình luận gốc để mở replies"
+    );
+    let body = matches[0];
+    let mut ancestor = tree.nodes[body].parent;
+    while let Some(index) = ancestor {
+        let authors: Vec<_> = tree
+            .matching(
+                labels.package(),
+                ElementQuery::Text {
+                    value: &root.author_label,
+                    exact: true,
+                },
+            )
+            .into_iter()
+            .filter(|i| tree.inside(*i, index))
+            .collect();
+        let controls: Vec<_> = tree
+            .nodes
+            .iter()
+            .enumerate()
+            .filter(|(i, n)| {
+                tree.inside(*i, index) && n.visible(labels.package()) && {
+                    let text = n.attr("text").to_lowercase();
+                    ((text.starts_with("view ") && text.contains("repl"))
+                        || (text.starts_with("xem ") && text.contains("trả lời")))
+                        && n.rect().is_some_and(|r| r.enabled && r.clickable)
+                }
+            })
+            .collect();
+        if authors.len() == 1 && controls.len() == 1 {
+            session
+                .tap(controls[0].1.rect().context("Reply bounds mất")?.centre())
+                .await?;
+            sleep_poll().await;
+            return Ok(());
+        }
+        if controls.len() > 1 {
+            anyhow::bail!("Nhiều nút mở replies; chưa chọn bình luận gốc");
+        }
+        ancestor = tree.nodes[index].parent;
+    }
+    // Replies already expanded: the normal parent search must still prove exact identity.
+    Ok(())
 }
 
 /// One pass over the visible list looking for `parent`.
@@ -2408,9 +2711,18 @@ async fn find_parent(
     let authors = session
         .locate_all_described(ElementQuery::ClassName(COMMENT_AUTHOR_CLASS))
         .await?;
-    Ok(locate_parent_in_elements(
-        &bodies, &replies, &authors, parent,
-    ))
+    let matches: Vec<_> = bodies
+        .iter()
+        .filter_map(|body| {
+            locate_parent_in_elements(std::slice::from_ref(body), &replies, &authors, parent)
+        })
+        .filter(|found| found.identity.author_label == parent.author_label)
+        .collect();
+    Ok(if matches.len() == 1 {
+        matches.into_iter().next()
+    } else {
+        None
+    })
 }
 
 /// Y positions of the reply controls, as a cheap "did the list move" fingerprint.
@@ -3603,7 +3915,7 @@ mod tests {
                 ElementQuery::Text { value, .. } => value,
                 // Keyed the same way as everything else here: this fixture answers by the query's
                 // value, whatever the strategy, and the arrival path does not use ids.
-                ElementQuery::ResourceIdSuffix(value) => value,
+                ElementQuery::ResourceIdSuffix(value) | ElementQuery::Semantic(value) => value,
             };
             if wanted == follow_key() {
                 let mut reads = self.follow_reads.lock();
@@ -4377,7 +4689,7 @@ mod tests {
             ElementQuery::Text { value, .. } => value,
             // So a test can register an id suffix as a key like any other — which is how the
             // caption lookup is exercised now that it asks for `:id/desc` first.
-            ElementQuery::ResourceIdSuffix(value) => value,
+            ElementQuery::ResourceIdSuffix(value) | ElementQuery::Semantic(value) => value,
         }
     }
 
@@ -4689,6 +5001,34 @@ mod tests {
         assert!(gate.cross().is_ok());
         assert!(gate.cross().is_err());
         assert_eq!(calls.load(Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn strict_root_never_crosses_send_gate_when_tag_remains_literal() {
+        let session = DrawerSession::default()
+            .with_single("bình luận", node(880.0, 900.0, 120.0, 120.0, "bình luận"))
+            .with_single(EDIT, node(199.0, 1175.0, 700.0, 100.0, ""))
+            .with_single_then(SEND_ID, send_button(false), send_button(true))
+            .with_many("android.widget.TextView", vec![]);
+        let mut gate = crate::interaction_target::EffectGate::allow();
+        let result = send_root_by_hierarchy_with_gate_options(
+            &session,
+            vietnamese(),
+            (1080.0, 2400.0),
+            "hello",
+            &["lt.gi".into()],
+            &AtomicBool::new(false),
+            String::new,
+            &mut gate,
+            true,
+        )
+        .await;
+        assert!(!gate.crossed());
+        assert!(result.is_err());
+        assert!(
+            session.taps.lock().len() <= 2,
+            "only drawer and field, never Send"
+        );
     }
 
     async fn send_root_with_one_mention(
@@ -5738,6 +6078,33 @@ mod tests {
         let session = ArrivalSession::new(TIKTOK, &[]);
         let counters = read_post_counters(&session, vietnamese()).await;
         assert_eq!(counters.likes, None);
+    }
+
+    #[test]
+    fn scripted_mentions_require_every_requested_real_token() {
+        let wanted = vec!["@a".into(), "b".into()];
+        let good = MentionOutcome {
+            linked: vec!["a".into(), "B".into()],
+            ..Default::default()
+        };
+        assert!(good.all_linked(&wanted));
+        assert!(!MentionOutcome {
+            linked: vec!["a".into()],
+            literal: vec!["b".into()],
+            ..Default::default()
+        }
+        .all_linked(&wanted));
+        assert!(!MentionOutcome {
+            linked: vec!["a".into()],
+            unverified: vec!["b".into()],
+            ..Default::default()
+        }
+        .all_linked(&wanted));
+        assert!(!MentionOutcome {
+            linked: vec!["a".into(), "b_near".into()],
+            ..Default::default()
+        }
+        .all_linked(&wanted));
     }
 
     /// A near-miss in the suggestion list must never be tapped.

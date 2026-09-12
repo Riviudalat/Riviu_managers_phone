@@ -35,6 +35,7 @@ import { NurtureBehaviourTab } from "./nurture/NurtureBehaviourTab";
 import { NurtureWindows } from "./nurture/NurtureWindows";
 import { NurtureMachinePicker, NurtureSessionSetup } from "./nurture/NurtureSessionSetup";
 import { AutomationSettingsSchedule } from "./AutomationSettingsSchedule";
+import { AutomationTabs } from "./AutomationTabs";
 import "../styles/nurture-workspace.css";
 import { IconClose, IconHeart, IconRefresh } from "./Icons";
 import { LoadingState, StatusNotice } from "./States";
@@ -331,6 +332,7 @@ export function NurturePopup({
   const issueId = useId();
   const workspaceRef = useRef<HTMLDivElement>(null);
   const [focusInvalid, setFocusInvalid] = useState(false);
+  const [advancedOpen, setAdvancedOpen] = useState(false);
   const settingsIssue = useMemo(() => {
     const issue = settings ? validateNurtureSettings(settings) : null;
     return surface === "page" && (issue?.field === "numVideos" || issue?.field === "numRounds")
@@ -380,13 +382,17 @@ export function NurturePopup({
       `[data-nurture-field="${settingsIssue.field}"]`,
     ) ?? []).find(element => !element.closest("[hidden]"));
     if (input) {
+      if (input.closest("details:not([open])")) {
+        setAdvancedOpen(true);
+        return;
+      }
       input.focus();
       input.scrollIntoView?.({ block: "nearest" });
     } else {
       document.getElementById(`nurture-settings-tab-${settingsIssue.tab}`)?.focus();
     }
     setFocusInvalid(false);
-  }, [focusInvalid, settingsIssue, pageSurface]);
+  }, [focusInvalid, settingsIssue, pageSurface, advancedOpen]);
   const profileConfig = useMemo(
     () =>
       settings ? nurtureProfileConfig(settings, settings.scheduleDurationMinutes) : null,
@@ -708,7 +714,6 @@ export function NurturePopup({
   };
 
   type PageMode = "setup" | "schedule" | "monitor";
-  const pageModes: ReadonlyArray<readonly [PageMode, string]> = [["setup", "Thiết lập"], ["schedule", "Hẹn giờ"], ["monitor", "Theo dõi"]];
   type SettingsTab = "behaviour" | "ai" | "comments" | "log";
   const visibleSettingsTabs: ReadonlyArray<readonly [SettingsTab, string]> = pageSurface
     ? [
@@ -725,18 +730,6 @@ export function NurturePopup({
 
   const activatePageMode = (next: PageMode) => {
     setPageMode(next);
-    document.getElementById(`nurture-page-tab-${next}`)?.focus();
-  };
-  const onPageTabKeyDown = (event: ReactKeyboardEvent<HTMLButtonElement>) => {
-    const index = pageModes.findIndex(([key]) => key === pageMode);
-    let next: number | null = null;
-    if (event.key === "ArrowRight") next = (index + 1) % pageModes.length;
-    if (event.key === "ArrowLeft") next = (index - 1 + pageModes.length) % pageModes.length;
-    if (event.key === "Home") next = 0;
-    if (event.key === "End") next = pageModes.length - 1;
-    if (next === null) return;
-    event.preventDefault();
-    activatePageMode(pageModes[next][0]);
   };
   const activateSettingsTab = (next: SettingsTab) => {
     setTab(next);
@@ -910,13 +903,7 @@ export function NurturePopup({
               {!pageSurface && actionControls}
 
               {pageSurface && (
-                <div className="nurture-page-tabs" role="tablist" aria-label="Chế độ Nuôi TikTok">
-                  {pageModes.map(([key, label]) => <button key={key}
-                    id={`nurture-page-tab-${key}`} type="button" role="tab"
-                    aria-selected={pageMode === key} aria-controls={`nurture-page-panel-${key}`}
-                    tabIndex={pageMode === key ? 0 : -1} onClick={() => setPageMode(key)}
-                    onKeyDown={onPageTabKeyDown}>{label}</button>)}
-                </div>
+                <AutomationTabs id="nurture-page" label="Chế độ Nuôi TikTok" value={pageMode} onChange={activatePageMode} />
               )}
 
               {pageSurface && pageMode === "monitor" && operationSource?.kind !== "nurture" && (
@@ -965,7 +952,9 @@ export function NurturePopup({
                   <div className="nurture-session-layout">
                     <div className="nurture-setup-fields">
                       <NurtureSessionSetup settings={settings} onChange={setSettings} issue={settingsIssue} issueId={issueId} />
-                    <div className="nurture-config-body">
+                    <details className="nurture-config-body nurture-advanced" open={advancedOpen} onToggle={event => setAdvancedOpen(event.currentTarget.open)}>
+                      <summary><div><strong>Tuỳ chỉnh nâng cao</strong><span>Nhịp xem, hành vi, AI và bình luận</span></div></summary>
+                      <div className="nurture-advanced-content">
                       {renderSettings()}
                       <div className="nurture-default-actions">
                         <button type="button" className="ghost" disabled={busy || Boolean(settingsIssue)} onClick={async () => {
@@ -975,7 +964,8 @@ export function NurturePopup({
                           finally { setBusy(false); }
                         }}>Áp dụng mặc định</button>
                       </div>
-                    </div>
+                      </div>
+                    </details>
                     </div>
                     <NurtureMachinePicker devices={devices} metas={metas} targets={targets} onTargetRefChange={onTargetRefChange} scopeControl={scopeControl} />
                   </div>
@@ -984,6 +974,7 @@ export function NurturePopup({
               {pageSurface && <div id="nurture-page-panel-schedule" role="tabpanel"
                 aria-labelledby="nurture-page-tab-schedule" hidden={pageMode !== "schedule"}>
                 <div className="nurture-config-body">
+                  <header className="nurture-card-heading"><div><span className="automation-section-kicker">Lịch thực hiện</span><h2>Hẹn giờ Nuôi TikTok</h2></div><span className="machine-select-count">{targets.length} máy được chọn</span></header>
                   <NurtureWindows settings={settings} patch={patch} targets={targets} issue={settingsIssue} issueId={issueId} />
                   <div className="nurture-default-actions"><button type="button" className="primary" disabled={busy || Boolean(settingsIssue) || (settings.scheduleEnabled && !targets.length)} onClick={async () => {
                     setBusy(true);

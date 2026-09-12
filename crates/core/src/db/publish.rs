@@ -298,6 +298,13 @@ impl Database {
         bundles: &[crate::PublishBundle],
         initial_snapshot: Option<&crate::PublishExecutionSnapshotDraft>,
     ) -> anyhow::Result<bool> {
+        if let Some(target) = &request.sheet_delivery {
+            target.validate()?;
+            anyhow::ensure!(
+                request.sheet_enabled,
+                "Đích ghi Sheet chỉ được dùng khi bật ghi Sheet"
+            );
+        }
         let assignments =
             crate::publish::validate_publish_mapping(&request.bundle_ids, &request.udids)
                 .map_err(|error| anyhow::anyhow!(error))?;
@@ -513,12 +520,26 @@ impl Database {
             .collect::<Result<Vec<crate::publish::PublishBundle>, _>>()?;
 
         let mut assignment_stmt = conn.prepare(
-            "SELECT id,bundle_id,ordinal,udid,state,effect_intent,evidence_json,error_code
-             FROM publish_assignments WHERE campaign_id=?1 ORDER BY ordinal",
+            "SELECT a.id,a.bundle_id,a.ordinal,a.udid,a.state,a.effect_intent,a.evidence_json,a.error_code,
+             o.state,o.attempts,o.last_error,o.next_attempt_at_ms,o.updated_at
+             FROM publish_assignments a LEFT JOIN publish_sheet_outbox o ON o.assignment_id=a.id
+             AND o.delivery_target_json IS NOT NULL WHERE a.campaign_id=?1 ORDER BY a.ordinal",
         )?;
         let assignments = assignment_stmt
             .query_map(params![id], |row| {
                 Ok(crate::publish::PublishAssignmentRecord {
+                    sheet_delivery: row
+                        .get::<_, Option<String>>(8)?
+                        .map(|state| {
+                            Ok::<_, rusqlite::Error>(crate::publish::PublishSheetDeliveryProgress {
+                                state,
+                                attempts: narrow(row.get::<_, i64>(9)?, "attempts")?,
+                                last_error: row.get(10)?,
+                                next_attempt_at_ms: row.get(11)?,
+                                updated_at: row.get(12)?,
+                            })
+                        })
+                        .transpose()?,
                     id: row.get(0)?,
                     campaign_id: id.to_string(),
                     bundle_id: row.get(1)?,
@@ -662,6 +683,12 @@ impl Database {
             )?
             .query_map([], |row| row.get(0))?
             .collect::<Result<_, _>>()?;
+        transaction.execute("DELETE FROM publish_pipeline_runs", [])?;
+        transaction.execute(
+            "DELETE FROM publish_account_reservations WHERE assignment_id IN
+            (SELECT id FROM publish_assignments WHERE effect_intent IS NULL)",
+            [],
+        )?;
         for campaign_id in &stranded {
             transaction.execute(
                 "UPDATE publish_assignments
@@ -797,7 +824,7 @@ impl Database {
         // needs a person looking at the phone rather than a second dispatch.
         let claimed = transaction.execute(
             "UPDATE publish_campaigns SET state=?1,error_code=NULL,revision=?2,updated_at=?3 \
-             WHERE id=?4 AND state IN (?5,?6)",
+             WHERE id=?4 AND state IN (?5,?6) AND NOT EXISTS(SELECT 1 FROM publish_pipeline_runs WHERE campaign_id=?4)",
             params![
                 posting.as_str(),
                 revision,
@@ -841,17 +868,18 @@ impl Database {
         assignment_id: &str,
         intent_json: &str,
     ) -> anyhow::Result<bool> {
-        let conn = self.conn()?;
+        let mut conn = self.conn()?;
+        let transaction = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         // **And the parent has to still be posting.** The campaign state and this claim used
         // to be two statements with a gap between them, and the gap is where a cancel lands: a
         // task read `Posting`, the operator cancelled, and the task then claimed its row and
         // opened a phone that published after the run was stopped. One statement closes it —
         // SQLite evaluates the `EXISTS` inside the same update.
-        let changed = conn.execute(
+        let changed = transaction.execute(
             "UPDATE publish_assignments SET state=?1,error_code=NULL,evidence_json=?2,effect_intent=?2,\
              revision=revision+1,updated_at=?3 WHERE id=?4 AND state IN (?5,?6) \
              AND EXISTS (SELECT 1 FROM publish_campaigns c \
-                         WHERE c.id = publish_assignments.campaign_id AND c.state = ?7)",
+                         WHERE c.id = publish_assignments.campaign_id AND c.state = ?7) AND NOT EXISTS(SELECT 1 FROM publish_pipeline_runs r WHERE r.campaign_id=publish_assignments.campaign_id)",
             params![
                 crate::publish::PublishCampaignState::Posting.as_str(),
                 intent_json,
@@ -862,6 +890,14 @@ impl Database {
                 crate::publish::PublishCampaignState::Posting.as_str(),
             ],
         )?;
+        if changed > 0 {
+            super::publish_submission::validate_submission_claim(
+                &transaction,
+                assignment_id,
+                intent_json,
+            )?;
+        }
+        transaction.commit()?;
         Ok(changed > 0)
     }
 
@@ -1487,6 +1523,9 @@ mod claim_tests {
         let bundles: Vec<crate::publish::PublishBundle> =
             bundle_ids.iter().map(|id| bundle(id)).collect();
         let request = crate::publish::PublishCampaignRequest {
+            sheet_delivery: None,
+            verification_contract_version: None,
+            verification_builds: vec![],
             sheet_enabled: true,
             request_id: request_id.clone(),
             source_root: "C:/fixture".into(),
@@ -1495,6 +1534,7 @@ mod claim_tests {
             run_at: None,
             visibility: crate::publish::PublishVisibility::Public,
             cleanup_policy: crate::publish::PublishCleanupPolicy::DeleteImportedAssetsAfterVerified,
+            network: crate::SocialNetwork::TikTok,
             sound_policy: crate::publish::PublishSoundPolicy::Default,
             execution_confirmed: false,
             target_snapshot: None,
@@ -1537,6 +1577,9 @@ mod claim_tests {
         let bundle_id = format!("{child_id}:bundle");
         let bundles = vec![bundle(&bundle_id)];
         let request = crate::publish::PublishCampaignRequest {
+            sheet_delivery: None,
+            verification_contract_version: None,
+            verification_builds: vec![],
             sheet_enabled: true,
             request_id: "attempt-key".into(),
             source_root: "C:/fixture".into(),
@@ -1545,6 +1588,7 @@ mod claim_tests {
             run_at: None,
             visibility: crate::publish::PublishVisibility::Public,
             cleanup_policy: crate::publish::PublishCleanupPolicy::DeleteImportedAssetsAfterVerified,
+            network: crate::SocialNetwork::TikTok,
             sound_policy: crate::publish::PublishSoundPolicy::Default,
             execution_confirmed: true,
             target_snapshot: None,
@@ -2855,6 +2899,9 @@ mod execution_snapshot_tests {
             partners: Vec::new(),
         };
         let request = PublishCampaignRequest {
+            sheet_delivery: None,
+            verification_contract_version: None,
+            verification_builds: vec![],
             sheet_enabled: true,
             request_id: Uuid::new_v4().to_string(),
             source_root: "C:/fixture".into(),
@@ -2863,6 +2910,7 @@ mod execution_snapshot_tests {
             run_at: None,
             visibility: PublishVisibility::Public,
             cleanup_policy: PublishCleanupPolicy::DeleteImportedAssetsAfterVerified,
+            network: crate::SocialNetwork::TikTok,
             sound_policy: PublishSoundPolicy::Default,
             execution_confirmed: true,
             target_snapshot: None,

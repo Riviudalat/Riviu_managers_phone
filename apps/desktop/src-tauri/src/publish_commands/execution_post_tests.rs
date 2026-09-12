@@ -7,6 +7,7 @@ fn metadata_retry_never_posts_an_untouched_sibling_of_a_submitted_post() {
         PublishAssignmentRecord, PublishCampaignState as State, PublishRetryScope as Scope,
     };
     let assignment = |id: &str, state| PublishAssignmentRecord {
+        sheet_delivery: None,
         id: id.into(),
         campaign_id: "mixed-campaign".into(),
         bundle_id: id.into(),
@@ -373,4 +374,33 @@ async fn pending_upload_releases_real_control_plane_without_terminating_tiktok()
         1
     );
     control.shutdown_cleanup().await.unwrap();
+}
+
+#[tokio::test]
+async fn scheduled_submission_returns_without_polling_capture_or_claiming_publication() {
+    let steps = std::sync::Mutex::new(Vec::new());
+    let progress = |step| steps.lock().unwrap().push(step);
+    let outcome = capture_or_defer_submission(
+        serde_json::json!({"state":"submitted","submittedAt":"2026-09-10T13:00:00Z","expectedAccount":"fixture","importId":"keep"}),
+        true,
+        async { panic!("scheduled Post must not enter profile/share capture") },
+        &progress,
+    ).await;
+    assert!(must_preserve_pending_upload(&outcome));
+    let PostOutcome::Submitted(evidence) = outcome else {
+        panic!("must defer verification")
+    };
+    assert_eq!(evidence["importId"], "keep");
+    assert_eq!(evidence["publicationVerified"], false);
+    assert!(post_url_owed(&evidence).is_none());
+    assert!(steps.lock().unwrap().is_empty());
+    let manual = capture_or_defer_submission(
+        serde_json::json!({"state":"submitted"}),
+        false,
+        async { OwnPostLink::Captured("https://www.tiktok.com/@fixture/photo/123".into()) },
+        &progress,
+    )
+    .await;
+    assert!(matches!(manual, PostOutcome::Posted(_)));
+    assert_eq!(steps.lock().unwrap()[0], PublishProgress::CapturingLink);
 }

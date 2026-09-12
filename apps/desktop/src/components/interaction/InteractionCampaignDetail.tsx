@@ -288,7 +288,7 @@ export function InteractionCampaignDetailView({
 }) {
   const [selectedActor, setSelectedActor] = useState<string | null>(null);
   const { summary } = detail;
-  const total = summary.messageCount * summary.targetCount;
+  const total = detail.scriptedConversation ? detail.assignments.length : summary.messageCount * summary.targetCount;
   const settled = summary.succeededMessages + summary.failedMessages;
   const actionCounters = summary.actionCounters;
   const hasActionCounters = Boolean(actionCounters?.planned);
@@ -348,6 +348,11 @@ export function InteractionCampaignDetailView({
   }
 
   const evidenceContent = <>
+      {detail.conversationSession && <section aria-label="Tiến độ khung giờ hội thoại" className="interaction-thread">
+        <strong>Khung giờ: {new Date(detail.conversationSession.startedAtMs).toLocaleString("vi-VN")} – {new Date(detail.conversationSession.endsAtMs).toLocaleTimeString("vi-VN")}</strong>
+        <p>{Math.max(0,Math.ceil((detail.conversationSession.endsAtMs-Date.now())/60000))} phút còn lại · {detail.assignments.filter(a=>a.state==="succeeded").length}/{detail.assignments.length} câu đã xác nhận</p>
+        <p>Lượt tiếp sớm nhất: {new Date(detail.conversationSession.nextAtMs).toLocaleTimeString("vi-VN")} · luân phiên giữa các bài</p>
+      </section>}
       {/* Above the threads on purpose: it is what the comments below were written from, so
           reading it first is reading the evidence before the verdict. */}
       <TargetNotesPanel notes={notes} />
@@ -367,6 +372,7 @@ export function InteractionCampaignDetailView({
             </small>
           </div>
           {rows.map((assignment) => {
+            const scriptStep = detail.scriptedConversation?.targetScripts.find(s=>s.targetKey===targetKey)?.steps[assignment.ordinal];
             const reason = assignmentReason(assignment);
             const shotRecord = artifacts.find(
               (item) => item.assignmentId === assignment.id && item.relativePath,
@@ -383,7 +389,7 @@ export function InteractionCampaignDetailView({
               <div key={assignment.id} className="interaction-assignment">
                 <span>#{assignment.ordinal + 1}</span>
                 <span className="grow">
-                  <strong>{actorLabel(assignment.actorUdid)}</strong>
+                  <strong>{actorLabel(assignment.actorUdid)}{scriptStep && <small>{scriptStep.topic} · Vai {scriptStep.speakerId}</small>}</strong>
                   <details
                     className="interaction-raw-code"
                     aria-label={`Chi tiết kỹ thuật ${actorLabel(assignment.actorUdid)}`}

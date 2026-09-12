@@ -17,10 +17,10 @@
   margin: auto;
   background: var(--bg-stage);
   /* Brand, not blue — see `--link` in index.css. */
-  border: 1px solid var(--primary);
-  border-radius: 4px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-sm);
   overflow: hidden;
-  box-shadow: 0 28px 80px rgb(0 0 0 / 45%);
+  box-shadow: var(--shadow-lg);
 }
 .focus-stage.is-stacked { flex-direction: column; }
 .focus-stage.is-stacked .focus-menu { width: 100%; }
@@ -79,8 +79,8 @@
   align-items: center;
   gap: 4px;
   padding: 8px 8px 8px 12px;
-  background: var(--primary-100);
-  border-bottom: 1px solid var(--primary-ring);
+  background: var(--bg-subtle);
+  border-bottom: 1px solid var(--line);
   flex-shrink: 0;
 }
 .focus-rotation-status { margin: 0; padding: 8px 12px; font-size: var(--text-sm); overflow-wrap: anywhere; }
@@ -103,7 +103,7 @@
   flex-shrink: 0;
   font-size: var(--text-xs);
   font-weight: 600;
-  color: #5a6a80;
+  color: var(--text-3);
 }
 .focus-menu-head button.ghost,
 .focus-menu-head button.close {
@@ -113,12 +113,12 @@
   display: grid;
   place-items: center;
   border: none;
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   background: none;
-  color: #5a6a80;
+  color: var(--text-3);
 }
 .focus-menu-head button.ghost:hover {
-  background: rgb(0 0 0 / 6%);
+  background: var(--bg-muted);
   color: var(--text);
 }
 .focus-menu-head button.close:hover {
@@ -134,13 +134,14 @@
 .focus-menu-list button {
   display: flex;
   align-items: center;
+  justify-content: flex-start;
   gap: 0.65rem;
   width: 100%;
   padding: 0.52rem 0.9rem;
   border: none;
   border-radius: 0;
   background: none;
-  color: #4a5568;
+  color: var(--text-2);
   font-size: var(--text-md);
   text-align: left;
   white-space: nowrap;
@@ -211,7 +212,7 @@
   gap: 2px;
   font-size: var(--text-xs);
   font-weight: 600;
-  color: #5a6a80;
+  color: var(--text-3);
   white-space: nowrap;
 }
 /* `flex: 0 0 auto` plus a pixel ceiling, never `flex: 1`. The menu list above is the
@@ -232,7 +233,7 @@
   width: 100%;
   padding: 0.32rem 0.5rem;
   border: 1px solid var(--line-strong);
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   font-size: var(--text-sm);
 }
 .focus-menu-panel > button {
@@ -242,14 +243,14 @@
   width: 100%;
   padding: 0.36rem 0.5rem;
   border: none;
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   background: none;
-  color: #4a5568;
+  color: var(--text-2);
   font-size: var(--text-sm);
   text-align: left;
 }
 .focus-menu-panel > button:hover:not(:disabled) {
-  background: var(--primary-100);
+  background: var(--bg-subtle);
   color: var(--link);
 }
 .focus-menu-panel > button.is-current {
@@ -277,9 +278,9 @@
   min-width: 0;
   padding: 0.36rem 0.5rem;
   border: none;
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   background: none;
-  color: #4a5568;
+  color: var(--text-2);
   font-size: var(--text-sm);
   text-align: left;
   overflow: hidden;
@@ -287,7 +288,7 @@
   white-space: nowrap;
 }
 .focus-phrase-row button:first-child:hover:not(:disabled) {
-  background: var(--primary-100);
+  background: var(--bg-subtle);
   color: var(--link);
 }
 .focus-phrase-row button.danger {
@@ -297,7 +298,7 @@
   display: grid;
   place-items: center;
   border: none;
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   background: none;
   color: #a0aec0;
 }
@@ -319,9 +320,9 @@
   display: grid;
   place-items: center;
   border: none;
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   background: none;
-  color: #5a6a80;
+  color: var(--text-3);
 }
 .focus-navbar button:hover:not(:disabled) {
   background: var(--primary-50);
@@ -360,7 +361,7 @@
 .toolbar select,
 .toolbar input {
   border: 1px solid var(--line-strong);
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   padding: 0.35rem 0.55rem;
   background: var(--bg-elevated);
 }

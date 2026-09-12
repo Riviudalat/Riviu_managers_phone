@@ -152,6 +152,9 @@ async fn main() -> anyhow::Result<()> {
     // A real campaign and a real assignment, through the production creation path.
     let bundle_id = format!("bundle-{}", uuid::Uuid::new_v4());
     let request = PublishCampaignRequest {
+        sheet_delivery: None,
+        verification_contract_version: None,
+        verification_builds: vec![],
         sheet_enabled: true,
         request_id: uuid::Uuid::new_v4().to_string(),
         source_root: "/fixture/root".into(),
@@ -160,6 +163,7 @@ async fn main() -> anyhow::Result<()> {
         run_at: None,
         visibility: PublishVisibility::Public,
         cleanup_policy: PublishCleanupPolicy::DeleteImportedAssetsAfterVerified,
+        network: riviu_core::SocialNetwork::TikTok,
         sound_policy: riviu_core::PublishSoundPolicy::Default,
         execution_confirmed: false,
         target_snapshot: None,

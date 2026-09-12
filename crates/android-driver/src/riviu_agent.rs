@@ -39,7 +39,7 @@ pub const DEVICE_PORT: u16 = 17980;
 /// Protocol the APK and this client both speak. A newer APK with a different
 /// number is refused rather than half-read.
 pub const PROTOCOL_VERSION: u32 = 1;
-pub const AGENT_VERSION: &str = "0.4.0";
+pub const AGENT_VERSION: &str = "0.5.0";
 
 /// What this build needs the installed helper to advertise on `/status`.
 ///
@@ -47,7 +47,7 @@ pub const AGENT_VERSION: &str = "0.4.0";
 /// "can it answer the call I am about to make", and a phone can legitimately carry a newer
 /// APK than this build knows about. A helper missing any of these is reinstalled once — see
 /// [`HelperClient::upgrade_if_stale`].
-const REQUIRED_FEATURES: &[&str] = &["clipboard", "pushMedia", "appLabels", "auth"];
+const REQUIRED_FEATURES: &[&str] = &["clipboard", "pushMedia", "appLabels", "auth", "launcher"];
 
 /// Serials this process has already tried to upgrade, so a stale APK on disk cannot turn
 /// every helper call into another install attempt.
@@ -654,11 +654,11 @@ async fn package_installed(adb: &AdbProgram, serial: &str) -> anyhow::Result<boo
     let listing = adb
         .shell(serial, &format!("pm path {PACKAGE}"))
         .await
-        .unwrap_or_default();
+        .context("Không đọc được gói Riviu Helper; chưa xác định được đã cài hay chưa")?;
     Ok(listing.contains("package:"))
 }
 
-async fn install_apk(adb: &AdbProgram, serial: &str, apk: &Path) -> anyhow::Result<()> {
+pub(crate) async fn install_apk(adb: &AdbProgram, serial: &str, apk: &Path) -> anyhow::Result<()> {
     let path = apk
         .to_str()
         .ok_or_else(|| anyhow!("the helper APK path is not UTF-8"))?;
@@ -686,15 +686,19 @@ async fn install_apk(adb: &AdbProgram, serial: &str, apk: &Path) -> anyhow::Resu
     if output.contains("INSTALL_FAILED_USER_RESTRICTED") {
         anyhow::bail!("{}", miui_install_refused(serial));
     }
+    anyhow::ensure!(
+        output.lines().any(|line| line.trim() == "Success"),
+        "Cài Riviu Helper chưa thành công: {}",
+        output.trim()
+    );
     Ok(())
 }
 
 fn miui_install_refused(serial: &str) -> String {
     format!(
-        "MIUI/HyperOS refused to install com.riviu.agent on {serial} \
-         (INSTALL_FAILED_USER_RESTRICTED). Turn on Developer options → \
-         Cài đặt qua USB. Do not retry adb install / pm install / \
-         install-create — all three fail the same way (AGENTS.md §9)."
+        "Máy {serial} chặn cài Riviu Helper (INSTALL_FAILED_USER_RESTRICTED). \
+         Bật Tuỳ chọn nhà phát triển → Cài đặt qua USB trên điện thoại, rồi kết nối lại. \
+         MIUI/HyperOS cũng có thể yêu cầu Gỡ lỗi USB (Cài đặt bảo mật)."
     )
 }
 
@@ -1072,12 +1076,11 @@ mod tests {
     }
 
     #[test]
-    fn a_miui_refusal_names_the_phone_and_forbids_the_three_install_paths() {
+    fn a_miui_refusal_names_the_phone_and_the_operator_recovery() {
         let text = miui_install_refused("10969614");
         assert!(text.contains("10969614"), "{text}");
         assert!(text.contains("INSTALL_FAILED_USER_RESTRICTED"), "{text}");
-        assert!(text.contains("adb install"), "{text}");
-        assert!(text.contains("pm install"), "{text}");
-        assert!(text.contains("install-create"), "{text}");
+        assert!(text.contains("Cài đặt qua USB"), "{text}");
+        assert!(text.contains("kết nối lại"), "{text}");
     }
 }

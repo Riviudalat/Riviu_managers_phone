@@ -60,6 +60,9 @@ export function InteractionPlanPreview({
           <td>{!commentEnabled ? "Tim / Lưu" : assignment.parentOrdinal === null ? "Mở đầu" : `Trả lời lượt ${assignment.parentOrdinal + 1}`}</td>
         </tr>)}
       </tbody></table></div>
+      {!!preview.conversationTimeline?.length && <details open><summary>Lịch xen kẽ dự kiến</summary><ol>{preview.conversationTimeline.map(([target,ordinal,at]) => <li key={`${target}:${ordinal}`}>
+        {new Date(at).toLocaleTimeString("vi-VN")} · Bài {preview.lines.findIndex(line=>line.target?.targetKey===target)+1} · Câu {ordinal+1}
+      </li>)}</ol></details>}
       {overCapacity && (
         <Banner tone="warn">
           {running} cụm chạy song song nhưng máy này chỉ mở được{" "}

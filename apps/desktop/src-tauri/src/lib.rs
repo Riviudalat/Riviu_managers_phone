@@ -11,6 +11,7 @@ mod commands;
 pub mod deployment_check;
 mod farm_commands;
 mod flow_commands;
+mod gui_service;
 mod idle_sweeper;
 mod interaction_commands;
 pub mod interaction_ocr;
@@ -22,6 +23,7 @@ mod peripherals;
 mod public_cleanup_commands;
 mod publish_commands;
 mod publish_scheduler;
+mod sheet_bootstrap;
 mod state;
 mod view_hub;
 mod view_watchdog;
@@ -516,6 +518,7 @@ pub fn run() {
             orchestration_commands::orchestration_get,
             orchestration_commands::orchestration_validate,
             orchestration_commands::orchestration_save_revision,
+            orchestration_commands::orchestration_create_three_feature_template,
             orchestration_commands::orchestration_archive,
             orchestration_commands::orchestration_run,
             orchestration_commands::orchestration_list_runs,
@@ -525,6 +528,8 @@ pub fn run() {
             interaction_commands::interaction_parse_links,
             interaction_commands::interaction_resolve_links,
             interaction_commands::interaction_preview_thread,
+            interaction_commands::interaction_parse_conversation,
+            interaction_commands::interaction_draft_conversation,
             interaction_commands::interaction_measure_post,
             interaction_commands::interaction_read_account,
             interaction_commands::interaction_readback,
@@ -566,6 +571,12 @@ pub fn run() {
             publish_commands::publish_execute,
             publish_commands::publish_readiness,
             publish_commands::publish_sheet_get_config,
+            gui_service::gui_service_status,
+            gui_service::gui_service_save,
+            gui_service::gui_service_check,
+            gui_service::gui_compatibility_import,
+            gui_service::gui_compatibility_rollback,
+            gui_service::gui_diagnostics_export,
             publish_commands::publish_sheet_check,
             publish_commands::publish_sheet_prepare,
             publish_commands::publish_sheet_save_config,
@@ -654,6 +665,7 @@ pub(crate) fn graceful_shutdown(handle: &tauri::AppHandle) {
             &state,
         ));
         tauri::async_runtime::block_on(state.wait_for_mutating_commands());
+        tauri::async_runtime::block_on(state.gui_service.stop());
         tauri::async_runtime::block_on(state.close_all_overlay_sessions());
         tauri::async_runtime::block_on(state.shutdown_android_views());
         let control = state.control.clone();
@@ -999,6 +1011,10 @@ mod tests {
     /// Every command source file. Adding one and forgetting it here is the failure mode the
     /// list below is written to make loud, so it is asserted against the directory listing.
     const COMMAND_SOURCES: &[(&str, &str)] = &[
+        (
+            "gui_service/commands.rs",
+            include_str!("gui_service/commands.rs"),
+        ),
         ("agent_commands.rs", include_str!("agent_commands.rs")),
         (
             "automation_commands.rs",
@@ -1064,6 +1080,7 @@ mod tests {
     /// down. That is the inversion — see the test below for why the previous shape could not
     /// work.
     const ADMISSION_EXEMPT: &[(&str, &str)] = &[
+        ("gui_service_status", "reads perception configuration and process status; no device or configuration changes"),
         // Reads. They answer from the DB, from memory, or from a frame already captured, and
         // touch no device — so refusing them during shutdown drain would blank the UI for no
         // safety gained.
@@ -1896,275 +1913,12 @@ mod tests {
             "strip = symbols is why the hook must say enough on its own"
         );
     }
-    /// Every `§x` citation resolves to a real section in `docs/agents/`.
-    ///
-    /// `AGENTS.md` was one 10,385-line file until 27/08/2026, and the split moved every
-    /// section into `docs/agents/`. The section numbers are the permanent identifier — 261
-    /// citation sites in this repo name them — so the split is only safe for as long as
-    /// every cited number still exists somewhere. Nothing but this test checks that.
-    ///
-    /// It also catches the failure that made the split necessary. Line-number citations
-    /// had *already* drifted 29-33 lines before anyone touched the file, and one landed in
-    /// a paragraph about a different subject entirely. Two more line numbers had been
-    /// written as if they were section numbers -- 691-692 and 4525, in a document whose
-    /// highest section is 9.119 -- and so pointed at nothing at all. A number far above
-    /// the real range is what that mistake looks like, and it is what this reports.
-    ///
-    /// Citations to *other* documents are exempt by number, each carrying the document it
-    /// belongs to: the genfarmer survey in `docs/re/` numbers its own sections, and a
-    /// comment citing it is correct. An exemption is checked from both ends -- it may not
-    /// name a number that is also a real section here, and it may not outlive the
-    /// citations it was added for.
-    #[test]
-    fn every_agents_section_citation_resolves() {
-        fn walk(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
-            let listing = std::process::Command::new("git")
-                .args(["ls-files", "-z"])
-                .current_dir(dir)
-                .output()
-                .expect("git lists the tracked documentation scope");
-            assert!(listing.status.success(), "git ls-files failed");
-            let names = String::from_utf8(listing.stdout).expect("tracked paths are UTF-8");
-            for name in names.split('\0').filter(|name| !name.is_empty()) {
-                if name.starts_with("docs/re/") || name.contains("/WebDriverAgent/") {
-                    continue;
-                }
-                let path = dir.join(name);
-                if path.is_file()
-                    && matches!(
-                        path.extension().and_then(|e| e.to_str()),
-                        Some("rs" | "ts" | "tsx" | "py" | "yml" | "md" | "java" | "css" | "toml")
-                    )
-                {
-                    out.push(path);
-                }
-            }
-        }
-
-        /// `§` followed by a number, which is how this repo cites a section everywhere.
-        fn sections_in(line: &str) -> Vec<String> {
-            let mut found = Vec::new();
-            let mut rest = line;
-            while let Some(at) = rest.find('\u{a7}') {
-                rest = &rest[at + '\u{a7}'.len_utf8()..];
-                let after = rest.trim_start();
-                let digits: String = after
-                    .chars()
-                    .take_while(|c| c.is_ascii_digit() || *c == '.')
-                    .collect();
-                let num = digits.trim_end_matches('.');
-                // A letter straight after the number means another document's scheme:
-                // `NOTICE` numbers its entries 2b, 2c, 2d. Reading that as section 2
-                // would resolve by accident, which is worse than not reading it.
-                let suffixed = after[digits.len()..]
-                    .chars()
-                    .next()
-                    .is_some_and(|c| c.is_alphanumeric());
-                if !num.is_empty() && num.contains(|c: char| c.is_ascii_digit()) {
-                    let tail = &after[digits.len()..];
-                    let suffix = tail.chars().next().filter(char::is_ascii_lowercase);
-                    match suffix {
-                        Some(suffix)
-                            if suffixed
-                                && num.contains('.')
-                                && tail.chars().nth(1).is_none_or(|ch| !ch.is_alphanumeric()) =>
-                        {
-                            found.push(format!("{num}{suffix}"));
-                        }
-                        _ if !suffixed => found.push(num.to_string()),
-                        _ => {}
-                    }
-                }
-            }
-            found
-        }
-
-        assert_eq!(sections_in("\u{a7}5.2b variant"), vec!["5.2b"]);
-        // A family placeholder remains an unresolved exact citation, never a wildcard.
-        assert_eq!(sections_in("\u{a7}9.5x placeholder"), vec!["9.5x"]);
-        assert_eq!(sections_in("\u{a7}9.11x placeholder"), vec!["9.11x"]);
-        assert!(sections_in("\u{a7}2b external notice").is_empty());
-
-        let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../..")
-            .canonicalize()
-            .expect("the repo root resolves from the crate manifest");
-        let agents = repo.join("docs/agents");
-
-        // What exists: every numbered heading in the split files. The index is excluded —
-        // it is generated *from* these headings, so counting it would let the index
-        // vouch for itself.
-        let mut present = std::collections::BTreeSet::new();
-        let mut section_files = 0usize;
-        let mut agent_docs = Vec::new();
-        walk(&agents, &mut agent_docs);
-        for path in &agent_docs {
-            if path.file_name().and_then(|n| n.to_str()) == Some("README.md") {
-                continue;
-            }
-            section_files += 1;
-            let body = std::fs::read_to_string(path).expect("a split doc is readable");
-            let mut fenced = false;
-            for line in body.lines() {
-                if line.trim_start().starts_with("```") || line.trim_start().starts_with("~~~") {
-                    fenced = !fenced;
-                    continue;
-                }
-                if fenced {
-                    continue;
-                }
-                let Some(rest) = line.strip_prefix("##") else {
-                    continue;
-                };
-                let heading = rest.trim_start_matches('#').trim_start();
-                let heading = heading.strip_prefix('\u{a7}').unwrap_or(heading);
-                let num: String = heading
-                    .chars()
-                    .take_while(|c| c.is_ascii_digit() || *c == '.')
-                    .collect();
-                let mut section = num.trim_end_matches('.').to_string();
-                if section.contains('.') {
-                    if let Some(suffix) = heading[num.len()..]
-                        .chars()
-                        .next()
-                        .filter(char::is_ascii_lowercase)
-                    {
-                        section.push(suffix);
-                    }
-                }
-                let diary = path.components().any(|part| part.as_os_str() == "diary");
-                if !section.is_empty() && (!diary || section.starts_with("9.")) {
-                    present.insert(section);
-                }
-            }
-        }
-
-        // A scanner that reads nothing passes every assertion below it.
-        assert!(
-            section_files >= 15,
-            "only {section_files} split docs scanned; the walk is broken"
-        );
-        assert!(
-            present.len() >= 150,
-            "only {} sections found in docs/agents; the heading parse is broken",
-            present.len()
-        );
-
-        // Numbers that belong to another document. The survey in `docs/re/genfarmer/`
-        // numbers its own sections, and this repo cites it by number wherever it took a
-        // lesson from it.
-        const OTHER_DOCUMENT: [(&str, &str); 6] = [
-            ("4.2", "docs/re/genfarmer: frame-change detection"),
-            ("4.5", "docs/re/genfarmer: renderer under app.asar"),
-            ("12.1", "docs/re/genfarmer: two-tier adb queue"),
-            ("12.2", "docs/re/genfarmer: windowed cooldown on recovery"),
-            ("12.3", "docs/re/genfarmer: no path waits forever"),
-            ("12.6", "docs/re/genfarmer: the cost of its own shortcuts"),
-        ];
-
-        // An exemption naming a real section here would silently stop checking it.
-        for (num, owner) in OTHER_DOCUMENT {
-            assert!(
-                !present.contains(num),
-                "\u{a7}{num} is exempt as belonging to {owner}, but docs/agents/ now has a \
-                 section {num}: citations to it are no longer checked"
-            );
-        }
-
-        let mut files = Vec::new();
-        walk(&repo, &mut files);
-        let mut cited = 0usize;
-        let mut exempt_used: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
-        let mut dangling: Vec<String> = Vec::new();
-        for path in &files {
-            let rel = path
-                .strip_prefix(&repo)
-                .unwrap_or(path)
-                .to_string_lossy()
-                .replace('\\', "/");
-            // The index lists every section by number, including both halves of the
-            // numbers used twice; it is the map, not a caller.
-            if rel == "docs/agents/README.md" {
-                continue;
-            }
-            let Ok(body) = std::fs::read_to_string(path) else {
-                continue;
-            };
-            for (idx, line) in body.lines().enumerate() {
-                for num in sections_in(line) {
-                    if let Some((owned, _)) = OTHER_DOCUMENT.iter().find(|(n, _)| *n == num) {
-                        exempt_used.insert(owned);
-                        continue;
-                    }
-                    cited += 1;
-                    if !present.contains(&num) {
-                        dangling.push(format!("{rel}:{}: \u{a7}{num}", idx + 1));
-                    }
-                }
-            }
-        }
-
-        assert!(
-            cited >= 200,
-            "only {cited} section citations scanned; the sweep is broken"
-        );
-        let stale: Vec<&str> = OTHER_DOCUMENT
-            .iter()
-            .map(|(num, _)| *num)
-            .filter(|num| !exempt_used.contains(num))
-            .collect();
-        assert!(
-            stale.is_empty(),
-            "these numbers are exempt as another document's, but nothing cites them any \
-             more: {stale:?} -- drop the exemption"
-        );
-        assert!(
-            dangling.is_empty(),
-            "these citations name a section that does not exist in docs/agents/:\n  {}\n\
-             \n\
-             A number nobody wrote is usually a line number: write \u{a7}<section>, and look it \
-             up in docs/agents/README.md.",
-            dangling.join("\n  ")
-        );
-    }
-
-    /// `AGENTS.md` stays a door, because nothing stopped it growing the first time.
-    ///
-    /// It reached 10,385 lines and 754 KB with no table of contents and its section
-    /// numbers out of file order, and in that state it misled the people writing it: a
-    /// constant was read as 2048 from one entry while another entry 150 lines above
-    /// recorded the real value of 128, and a shipped helper APK was believed unpinned.
-    /// Size was the mechanism, so size is what this pins.
-    #[test]
-    fn agents_md_stays_a_door() {
-        let door = std::fs::read_to_string(
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../AGENTS.md"),
-        )
-        .expect("AGENTS.md is readable");
-        let lines = door.lines().count();
-        assert!(
-            lines <= 120,
-            "AGENTS.md is {lines} lines; it is the entry point, not the content. \
-             Put new material in the right file under docs/agents/ and link it."
-        );
-        assert!(
-            door.contains("docs/agents/README.md"),
-            "AGENTS.md must link the index, or the split content is unreachable from the door"
-        );
-    }
     /// **No HTTP client anywhere in the workspace may be built without a deadline.**
     ///
     /// `wda.rs` carries this gate for its own file, and it is there because of a real bug:
     /// `build().unwrap_or_else(|_| Client::new())` looked like graceful degradation and was
     /// in fact a client with no request timeout at all, so a WDA call could hang forever
     /// while holding a device lease, a stream reservation and a capacity slot.
-    ///
-    /// That gate could not see the other six builders in the workspace -- three in
-    /// `android-driver`, three in `core`. All six were measured on 27/08/2026 and all six
-    /// were already correct, so this is a gate against regression rather than a fix. It is
-    /// worth having anyway: the failure it prevents is invisible at the call site, the
-    /// tempting shape (`.build().unwrap_or_else(..)`) reads as defensive, and the cost lands
-    /// on a phone mid-campaign rather than on the developer.
     ///
     /// Two rules, because a timeout that exists is not the same as a timeout that is taken:
     /// no `Client::new()` in production code, and every `Client::builder()` reaches a

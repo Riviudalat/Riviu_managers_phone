@@ -14,7 +14,7 @@ for (const surface of [
     await expect(page.getByRole("radio", { name:"Toàn bộ", exact:true })).toBeChecked();
     await page.getByRole("button",{name:surface.button}).click();
     await page.getByRole("button",{name:"Dữ liệu",exact:true}).click();
-    await expect(page.getByText("Tác vụ trong 24 giờ qua")).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Tác vụ trong 24 giờ qua", exact: true })).toBeVisible();
     await page.getByRole("button",{name:surface.name,exact:true}).click();
     await page.getByRole("radiogroup", { name:"Cách chọn thiết bị" }).getByText("Toàn bộ", { exact:true }).click();
     await expect(page.getByRole("radio", { name:"Toàn bộ", exact:true })).toBeChecked();

@@ -425,6 +425,9 @@ impl AgentClient {
     fn url(&self, suffix: &str) -> String {
         format!("{}/session/{}{suffix}", self.base, self.session_id.lock())
     }
+    pub(crate) fn session_identity(&self) -> String {
+        self.session_id.lock().clone()
+    }
 
     /// Replace a degraded session with a fresh one, in place.
     ///
@@ -512,6 +515,10 @@ impl AgentClient {
             .await
             .with_context(|| format!("gọi agent {suffix}"))?;
         let elapsed = started.elapsed();
+        if cfg!(debug_assertions) && std::env::var("RIVIU_PUBLISH_REHEARSAL").as_deref() == Ok("1")
+        {
+            tracing::info!(serial=%self.serial,route=suffix,ms=elapsed.as_millis() as u64,"publish benchmark agent latency");
+        }
         if elapsed >= slow_call_budget(suffix) {
             tracing::warn!(
                 serial = %self.serial,

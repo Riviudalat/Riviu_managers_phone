@@ -107,7 +107,9 @@ function needsPublicationReview(value: Pick<PublishCampaignRecord, "state" | "er
 function publicationReviewReason(evidenceJson?: string | null): string | null {
   try {
     const status = JSON.parse(evidenceJson ?? "null")?.verificationStatus;
-    return status?.state === "needsReview" && typeof status.reason === "string" ? status.reason : null;
+    if (status?.state !== "needsReview" || typeof status.reason !== "string") return null;
+    if (/tự kiểm tra đã dừng/i.test(status.reason)) return status.reason;
+    return `${status.reason} · Tự kiểm tra đã dừng · chọn Kiểm tra liên kết`;
   } catch {
     return null;
   }
@@ -123,7 +125,20 @@ function verificationDetail(evidenceJson?: string | null): string | null {
     const format = (value: unknown) => typeof value === "string" && Number.isFinite(Date.parse(value))
       ? new Date(value).toLocaleTimeString("vi-VN") : null;
     const checked = format(status?.checkedAt), next = format(status?.nextCheckAt);
-    return [reason, checked && `Kiểm tra gần nhất: ${checked}`, next && status?.state === "pending" && `Kiểm tra tiếp: ${next}`].filter(Boolean).join(" · ");
+    const stopped = status?.state === "needsReview"
+      && !/tự kiểm tra đã dừng/i.test(reason)
+      ? "Tự kiểm tra đã dừng · chọn Kiểm tra liên kết"
+      : null;
+    const budget = typeof status?.reviewAfterMinutes === "number"
+      ? `Ngân sách tự kiểm: ${status.reviewAfterMinutes} phút`
+      : null;
+    return [
+      reason,
+      stopped,
+      checked && `Kiểm tra gần nhất: ${checked}`,
+      next && status?.state === "pending" && `Kiểm tra tiếp: ${next}`,
+      status?.state === "pending" && budget,
+    ].filter(Boolean).join(" · ");
   } catch { return null; }
 }
 
@@ -1305,6 +1320,12 @@ function CampaignMonitor({
   </div>;
 }
 
+function isComposing(assignment: PublishAssignmentRecord): boolean {
+  if (assignment.state !== "imported") return false;
+  try { return JSON.parse(assignment.evidenceJson ?? "null")?.pipelinePhase === "composing"; }
+  catch { return false; }
+}
+
 function CampaignDetail({
   detail,
   error,
@@ -1379,6 +1400,15 @@ function CampaignDetail({
               </span>
             </div>
           )}
+          <div className="publish-reconcile-summary" role="status" aria-label="Tiến độ từng máy">
+            <span>{detail.assignments.filter(a => ["queued", "scheduled", "ready", "preparing"].includes(a.state)).length} máy chờ tải</span>
+            <span>{detail.assignments.filter(a => a.state === "transferring").length} máy đang tải</span>
+            <span>{detail.assignments.filter(a => a.state === "imported" && !isComposing(a)).length} máy đã tải, chờ đăng</span>
+            <span>{detail.assignments.filter(isComposing).length} máy đang chuẩn bị bài trên TikTok</span>
+            <span>{detail.assignments.filter(a => a.state === "posting").length} máy đang gửi bài</span>
+            <span>{detail.assignments.filter(a => a.state === "verifying").length} máy chờ liên kết</span>
+            <span>{detail.assignments.filter(a => ["uncertain", "failedBeforeDispatch"].includes(a.state)).length} máy cần xử lý</span>
+          </div>
           <ResponsiveTable
             label="Kết quả theo máy"
             rows={detail.assignments}
@@ -1408,7 +1438,7 @@ function CampaignDetail({
                 label: "Kết quả",
                 render: (assignment: PublishAssignmentRecord) => needsPublicationReview(assignment)
                   ? <span>Cần kiểm tra bài đăng<p>{publicationReviewReason(assignment.evidenceJson) ?? "Chưa có đủ bằng chứng xác nhận bài; kiểm tra TikTok trước khi tiếp tục."}</p></span>
-                  : <span>{PUBLISH_STATE_LABELS[assignment.state] ?? "Trạng thái chưa nhận diện"}{verificationDetail(assignment.evidenceJson) && <p>{verificationDetail(assignment.evidenceJson)}</p>}</span>,
+                  : <span>{isComposing(assignment) ? "Đang chuẩn bị bài trên TikTok" : PUBLISH_STATE_LABELS[assignment.state] ?? "Trạng thái chưa nhận diện"}{verificationDetail(assignment.evidenceJson) && <p>{verificationDetail(assignment.evidenceJson)}</p>}</span>,
               },
               {
                 id: "link",
@@ -1416,12 +1446,31 @@ function CampaignDetail({
                 render: (assignment: PublishAssignmentRecord) => {
                   const evidence = postEvidence(assignment.evidenceJson);
                   return evidence.url ? (
-                    <a href={evidence.url} target="_blank" rel="noreferrer">
-                      Mở bài đã xác nhận
+                    <a href={evidence.url} target="_blank" rel="noreferrer" aria-label="Mở bài đã xác nhận">
+                      Đã xác minh link · Mở bài
                     </a>
                   ) : (
                     <span>{needsPublicationReview(assignment) ? "Chưa có liên kết; không tự đăng lại" : assignment.state === "verifying" ? "Đã gửi bài; chờ TikTok hoàn tất và xác minh liên kết" : "Chưa có liên kết xác nhận"}</span>
                   );
+                },
+              },
+              {
+                id: "delivery",
+                label: "Ghi Sheet",
+                render: (assignment: PublishAssignmentRecord) => {
+                  const delivery = assignment.sheetDelivery;
+                  if (!delivery) return snapshot && !snapshotSheetEnabled(snapshot)
+                    ? "Không ghi Sheet" : "Chờ liên kết đã xác minh";
+                  const next = delivery.nextAttemptAtMs == null ? null
+                    : new Date(delivery.nextAttemptAtMs).toLocaleTimeString("vi-VN");
+                  return <span>
+                    {delivery.state === "sent" ? "Sheet đã xác nhận"
+                      : delivery.nextAttemptAtMs == null ? "Cần xử lý ghi Sheet" : "Đang chờ ghi Sheet"}
+                    {delivery.state !== "sent" && delivery.lastError && <p>{delivery.lastError}</p>}
+                    {delivery.attempts > 0 && <p>Đã thử {delivery.attempts} lần · Gần nhất: {new Date(delivery.updatedAt).toLocaleTimeString("vi-VN")}</p>}
+                    {delivery.state !== "sent" && next && <p>Thử tiếp: {next}</p>}
+                    {delivery.state !== "sent" && delivery.nextAttemptAtMs == null && <p>Sửa nguyên nhân rồi chọn Ghi lại Sheet</p>}
+                  </span>;
                 },
               },
               {

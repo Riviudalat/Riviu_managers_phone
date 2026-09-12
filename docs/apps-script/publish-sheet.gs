@@ -188,19 +188,20 @@ function doPost(request) {
         return reply({ ok: false, error: 'không mở được sheet — kiểm tra SPREADSHEET_ID' });
       }
 
-      let layout = compactLayout(sheet);
-      if (layout && Array.isArray(payload.partners) && payload.partners.every(value => typeof value === 'string')) {
-        extendPartnerColumns(sheet, layout, payload.partners.length);
-        layout = compactLayout(sheet);
-      }
+      const currentLayout = compactLayout(sheet);
+      validateDeliveryTarget(sheet, payload);
+      if (payload.deliveryVersion === 2 && !currentLayout) throw new Error('deliveryVersion 2 cần mẫu compact hoặc nội bộ');
+      if (payload.deliveryVersion === 2 && currentLayout && !currentLayout.internal
+        && (payload.reportVersion !== undefined || payload.rowRevision !== undefined)) throw new Error('Metadata báo cáo chỉ dùng mẫu nội bộ');
+      const layout = currentLayout ? planPartnerColumns(currentLayout, payload.partners) : null;
       if (payload.rowKind === 'internalReport' && (!layout || !layout.internal)) {
         throw new Error('Báo cáo nội bộ cần đúng bốn cột Máy, Tài khoản TikTok, Trạng thái, Lỗi hoặc ghi chú');
       }
       if (layout && layout.internal) {
-        return reply(deliverInternal(sheet, layout, payload, postUrl, assignmentId));
+        return reply(finishDelivery(sheet, layout, payload, deliverInternal(sheet, layout, payload, postUrl, assignmentId)));
       }
       if (layout) {
-        return reply(deliverCompact(sheet, layout, payload, postUrl, assignmentId));
+        return reply(finishDelivery(sheet, layout, payload, deliverCompact(sheet, layout, payload, postUrl, assignmentId)));
       }
 
       if (!Array.isArray(payload.partners) || payload.partners.length > CONFIG.PARTNERS_MAX) {
@@ -257,7 +258,7 @@ function doPost(request) {
   } catch (error) {
     // Trả JSON kể cả khi hỏng, vì phía desktop phân biệt "script từ chối" với
     // "Google trả trang lỗi HTML" bằng đúng chuyện body có phải JSON hay không.
-    return reply({ ok: false, error: String(error) });
+    return reply({ ok: false, error: String(error), retryable: Boolean(error && error.sheetRetryable) });
   }
 }
 
@@ -305,36 +306,132 @@ function checkTarget(payload) {
     || !String(columns[3] || '').toLowerCase().includes('link') || (columns[10] || '').trim() !== 'Đối tác')) {
     throw new Error('Header legacy chưa khớp mẫu Đăng bài');
   }
-  return { ok: true, checkVersion: 1, spreadsheetId, sheetGid,
+  return { ok: true, checkVersion: 1, deliveryVersion: compact ? 2 : 1, spreadsheetId, sheetGid,
     layout: compact ? (compact.internal ? 'internal' : 'compact') : 'legacy', columns };
 }
 
 /** Explicit initialization, serialized with all deliveries; never rewrites a populated tab. */
 function prepareTarget(payload) {
   if (payload.checkVersion !== 1) throw new Error('checkVersion không được hỗ trợ');
+  const unsound = assertConfigIsSane();
+  if (unsound) throw new Error(unsound);
   const lock = LockService.getScriptLock();
   lock.waitLock(30000);
   try {
     const sheet = targetSheet();
     if (!sheet || String(payload.spreadsheetId || '') !== sheet.getParent().getId() || payload.sheetGid !== sheet.getSheetId()) throw new Error('Bảng hoặc tab không khớp kết nối');
     if (sheet.getLastRow() === 0 && sheet.getLastColumn() === 0) {
+      if (!['auto', 'internal'].includes(CONFIG.LAYOUT_MODE) || CONFIG.LINK_COLUMN !== 4 || CONFIG.POSTER_COLUMN !== 2) throw new Error('Chuẩn bị bảng trống cần cấu hình mẫu nội bộ với cột B/D');
       const header = ['STT', 'Người air', 'Ngày', 'Link', 'Máy', 'Tài khoản TikTok', 'Trạng thái', 'Lỗi hoặc ghi chú', 'Đối tác'];
-      if (sheet.getMaxColumns() < header.length) sheet.insertColumnsAfter(sheet.getMaxColumns(), header.length - sheet.getMaxColumns());
-      sheet.getRange(1, 1, 1, header.length).setValues([header]);
-      sheet.setFrozenRows(1);
+      if (typeof Sheets === 'undefined' || !Sheets.Spreadsheets?.batchUpdate) throw new Error('Bật dịch vụ Google Sheets API trước khi chuẩn bị bảng');
+      const requests = [];
+      if (sheet.getMaxColumns() < header.length) requests.push({ appendDimension: { sheetId: sheet.getSheetId(), dimension: 'COLUMNS', length: header.length - sheet.getMaxColumns() } });
+      requests.push({ updateCells: { start: { sheetId: sheet.getSheetId(), rowIndex: 0, columnIndex: 0 }, rows: [{ values: header.map(value => ({ userEnteredValue: { stringValue: value } })) }], fields: 'userEnteredValue' } });
+      requests.push({ updateSheetProperties: { properties: { sheetId: sheet.getSheetId(), gridProperties: { frozenRowCount: 1 } }, fields: 'gridProperties.frozenRowCount' } });
+      commitSheetBatch(sheet, { extra: 0 }, 1, requests);
     }
     return checkTarget(payload);
   } finally { lock.releaseLock(); }
 }
 
-function extendPartnerColumns(sheet, layout, count) {
+function planPartnerColumns(layout, partners) {
+  if (!Array.isArray(partners) || partners.some(value => typeof value !== 'string')) throw new Error('partners phải là danh sách tên đối tác');
+  const count = partners.length;
   if (!Number.isInteger(count) || count < 0 || count > 100) throw new Error('Số đối tác không hợp lệ');
-  if (count <= layout.partners) return;
-  // Insert immediately after the partner block, preserving every existing trailing column.
-  const extra = count - layout.partners;
-  sheet.insertColumnsAfter(layout.width, extra);
-  const labels = Array.from({ length: extra }, (_, i) => 'Đối tác ' + (layout.partners + i + 1));
-  sheet.getRange(1, layout.width + 1, 1, extra).setValues([labels]);
+  const extra = Math.max(0, count - layout.partners);
+  return Object.assign({}, layout, { originalWidth: layout.width, originalPartners: layout.partners,
+    width: layout.width + extra, partners: layout.partners + extra, extra: extra });
+}
+
+function validateDeliveryTarget(sheet, payload) {
+  if (payload.deliveryVersion === undefined) return;
+  if (payload.deliveryVersion !== 2 || !Number.isSafeInteger(payload.deliveryRevision) || payload.deliveryRevision < 0
+    || !['canonical', 'internalReport'].includes(payload.rowKind)) throw new Error('deliveryVersion, deliveryRevision hoặc rowKind không hợp lệ');
+  if (payload.spreadsheetId !== sheet.getParent().getId() || payload.sheetGid !== sheet.getSheetId()) throw new Error('Đích Sheet khác bảng hoặc tab đã chốt');
+  if (typeof payload.assignmentId !== 'string' || !payload.assignmentId.trim() || payload.assignmentId !== payload.assignmentId.trim()
+    || typeof payload.postUrl !== 'string' || payload.postUrl !== payload.postUrl.trim()
+    || (payload.postUrl && !/^https:\/\/(?:www\.)?tiktok\.com\/@[^/?#]+\/(?:photo|video)\/\d+$/.test(payload.postUrl))
+    || typeof payload.poster !== 'string' || !payload.poster.trim()) throw new Error('Danh tính hoặc canonical Link không hợp lệ');
+  if (payload.rowKind === 'internalReport' && payload.deliveryRevision !== payload.rowRevision) throw new Error('Revision báo cáo không khớp deliveryRevision');
+}
+
+function ownedRows(sheet, layout, height, method) {
+  if (!height) return [];
+  const width = layout.originalWidth || layout.width;
+  return sheet.getRange(CONFIG.FIRST_DATA_ROW, 1, height, width)[method]()
+    .map(row => row.concat(Array(layout.width - width).fill('')));
+}
+
+function commitSheetBatch(sheet, layout, row, requests) {
+  const prefix = [];
+  if (layout.extra > 0) {
+    prefix.push({ insertDimension: { range: { sheetId: sheet.getSheetId(), dimension: 'COLUMNS', startIndex: layout.originalWidth, endIndex: layout.width }, inheritFromBefore: true } });
+    prefix.push({ updateCells: { start: { sheetId: sheet.getSheetId(), rowIndex: 0, columnIndex: layout.originalWidth },
+      rows: [{ values: Array.from({ length: layout.extra }, (_, index) => ({ userEnteredValue: { stringValue: 'Đối tác ' + (layout.originalPartners + index + 1) } })) }], fields: 'userEnteredValue' } });
+  }
+  if (row > sheet.getMaxRows()) prefix.push({ appendDimension: { sheetId: sheet.getSheetId(), dimension: 'ROWS', length: row - sheet.getMaxRows() } });
+  try {
+    Sheets.Spreadsheets.batchUpdate({ requests: prefix.concat(requests) }, sheet.getParent().getId());
+  } catch (error) {
+    // A request can commit before its response is lost. Only this transport phase
+    // is retryable; every validation and row conflict above it remains permanent.
+    error.sheetRetryable = !/permission|forbidden|unauthori[sz]ed|invalid argument|not found|does not exist|access denied/i.test(String(error));
+    throw error;
+  }
+}
+
+function validateStoredDelivery(stored, payload, values, sheet) {
+  if (!stored || stored.deliveryVersion !== 2) return;
+  if (stored.spreadsheetId !== sheet.getParent().getId() || stored.sheetGid !== sheet.getSheetId()
+    || !rowFingerprintMatches(values, stored.rowFingerprint)) throw new Error('Đích hoặc nội dung hàng đã ghi bị thay đổi');
+  if (payload.deliveryVersion === 2 && payload.rowKind === 'canonical' && stored.canonicalDeliveryRevision !== undefined
+    && stored.canonicalDeliveryRevision !== payload.deliveryRevision) throw new Error('deliveryRevision canonical khác hàng đã lưu');
+  if (payload.deliveryVersion === 2 && payload.rowKind === 'canonical' && stored.canonicalPostedAt !== undefined
+    && stored.canonicalPostedAt !== payload.postedAt) throw new Error('Thời điểm canonical khác hàng đã lưu');
+}
+
+function deliveryNote(payload, stored, values) {
+  if (payload.deliveryVersion !== 2) return stored;
+  const note = reportNote(stored) || {};
+  delete note.legacy;
+  note.kind = 'riviu-publish';
+  note.deliveryVersion = 2;
+  note.assignmentId = payload.assignmentId;
+  note.spreadsheetId = payload.spreadsheetId;
+  note.sheetGid = payload.sheetGid;
+  if (payload.rowKind === 'canonical') {
+    note.canonicalDeliveryRevision = payload.deliveryRevision;
+    note.canonicalPostedAt = payload.postedAt;
+  }
+  note.rowFingerprint = reportFingerprint(values);
+  return JSON.stringify(note);
+}
+
+function finishDelivery(sheet, layout, payload, result) {
+  if (payload.deliveryVersion !== 2) return result;
+  const row = result.row;
+  const range = sheet.getRange(row, 1, 1, layout.width);
+  let values = range.getDisplayValues()[0];
+  const noteRange = sheet.getRange(row, 4);
+  const rawNote = noteRange.getNotes()[0][0];
+  let stored = reportNote(rawNote);
+  if (!stored || stored.assignmentId !== payload.assignmentId || range.getFormulas()[0].some(Boolean)) throw new Error('Không đọc lại được danh tính hàng vừa ghi');
+  if (payload.rowKind === 'canonical' && values[3] !== payload.postUrl) throw new Error('Canonical Link khác hàng đã lưu');
+  // A retry can encounter a row from an older client. Upgrade only the verified
+  // note; the delivery function already checked its complete visible identity.
+  if (stored.deliveryVersion !== 2 || (payload.rowKind === 'canonical' && stored.canonicalDeliveryRevision === undefined)) {
+    const upgraded = deliveryNote(payload, rawNote, values);
+    commitSheetBatch(sheet, { extra: 0 }, row, [{ updateCells: { start: { sheetId: sheet.getSheetId(), rowIndex: row - 1, columnIndex: 3 }, rows: [{ values: [{ note: upgraded }] }], fields: 'note' } }]);
+    stored = reportNote(noteRange.getNotes()[0][0]);
+    values = range.getDisplayValues()[0];
+  }
+  if (!stored || stored.deliveryVersion !== 2 || stored.spreadsheetId !== sheet.getParent().getId()
+    || stored.sheetGid !== sheet.getSheetId() || range.getFormulas()[0].some(Boolean)
+    || !rowFingerprintMatches(values, stored.rowFingerprint)) throw new Error('Dữ liệu đọc lại không khớp hàng đã commit');
+  const revision = payload.rowKind === 'canonical' ? stored.canonicalDeliveryRevision : stored.rowRevision;
+  if (!Number.isSafeInteger(revision) || revision < 0) throw new Error('Hàng đã lưu thiếu deliveryRevision');
+  return Object.assign({}, result, { deliveryVersion: stored.deliveryVersion, spreadsheetId: stored.spreadsheetId,
+    sheetGid: stored.sheetGid, assignmentId: stored.assignmentId, deliveryRevision: revision, postUrl: values[3] });
 }
 
 /** Exact compact header recognition; a damaged compact header never falls back to K+. */
@@ -407,7 +504,7 @@ function reportNote(text) {
   }
   try {
     const note = JSON.parse(text);
-    return note && note.kind === 'riviu-publish' && note.reportVersion === 1
+    return note && note.kind === 'riviu-publish' && (note.reportVersion === 1 || note.deliveryVersion === 2)
       && typeof note.assignmentId === 'string' ? note : null;
   } catch (_) {
     return null;
@@ -416,7 +513,7 @@ function reportNote(text) {
 
 function rowFingerprintMatches(values, expected) {
   const candidate = values.slice();
-  while (candidate.length >= 9) {
+  while (candidate.length >= 5) {
     if (reportFingerprint(candidate) === expected) return true;
     if (candidate[candidate.length - 1] !== '') break;
     candidate.pop();
@@ -442,7 +539,7 @@ function deliverInternal(sheet, layout, payload, postUrl, assignmentId) {
     || payload.partners.length > layout.partners) {
     throw new Error('Danh sách đối tác không hợp lệ hoặc Sheet thiếu cột; không cắt bỏ tên');
   }
-  const versioned = payload.rowKind === 'internalReport' || payload.rowKind === 'canonical'
+  const versioned = payload.rowKind === 'internalReport'
     || payload.reportVersion !== undefined || payload.rowRevision !== undefined;
   if (versioned && (!['internalReport', 'canonical'].includes(payload.rowKind)
     || payload.reportVersion !== 1 || !Number.isSafeInteger(payload.rowRevision) || payload.rowRevision < 0)) {
@@ -456,6 +553,7 @@ function deliverInternal(sheet, layout, payload, postUrl, assignmentId) {
   if (versioned && payload.rowKind === 'canonical' && payload.status !== 'Đã xác minh') {
     throw new Error('Hàng canonical chỉ dành cho bài đã xác minh');
   }
+  if (payload.rowKind === 'canonical' && payload.postedAt === null) throw new Error('Hàng canonical cần thời điểm gửi bài đã lưu');
   if (postUrl && !/^https:\/\/(?:www\.)?tiktok\.com\/@[^/?#]+\/(?:photo|video)\/\d+$/.test(postUrl)) {
     throw new Error('Link báo cáo phải là canonical TikTok HTTPS');
   }
@@ -471,15 +569,15 @@ function deliverInternal(sheet, layout, payload, postUrl, assignmentId) {
     poster, payload.postedAt, postUrl, metadata, partners,
   ]) : null;
   const height = Math.max(0, sheet.getLastRow() - CONFIG.FIRST_DATA_ROW + 1);
-  const range = height ? sheet.getRange(CONFIG.FIRST_DATA_ROW, 1, height, layout.width) : null;
-  const values = range ? range.getDisplayValues() : [];
-  const formulas = range ? range.getFormulas() : [];
+  const values = ownedRows(sheet, layout, height, 'getDisplayValues');
+  const formulas = ownedRows(sheet, layout, height, 'getFormulas');
   const rawNotes = height ? sheet.getRange(CONFIG.FIRST_DATA_ROW, 4, height, 1).getNotes().map(row => row[0]) : [];
   const notes = rawNotes.map(reportNote);
   const keyed = notes.map((note, index) => note && note.assignmentId === assignmentId ? index : -1).filter(index => index >= 0);
   if (keyed.length > 1) throw new Error('Nhiều dòng cùng assignmentId; kiểm tra trước khi gửi');
   let index = keyed.length ? keyed[0] : -1;
   let stored = index >= 0 ? notes[index] : null;
+  if (stored) validateStoredDelivery(stored, payload, values[index], sheet);
   const validRow = at => /^[1-9]\d*$/.test(values[at][0]) && Number.isSafeInteger(Number(values[at][0]))
     && formulas[at].every(value => !value);
   const sameIdentity = (at, maySetDate) => values[at][1] === poster
@@ -490,7 +588,7 @@ function deliverInternal(sheet, layout, payload, postUrl, assignmentId) {
     if (duplicate) result.duplicate = true;
     return result;
   };
-  if (stored && !stored.legacy) {
+  if (stored && !stored.legacy && stored.reportVersion === 1) {
     if (!validRow(index) || !Number.isSafeInteger(stored.rowRevision) || stored.rowRevision < 0
       || !rowFingerprintMatches(values[index], stored.rowFingerprint)) {
       throw new Error('Dòng báo cáo đã bị sửa; kiểm tra trước khi ghi đè');
@@ -544,24 +642,24 @@ function deliverInternal(sheet, layout, payload, postUrl, assignmentId) {
   const display = [String(number)].concat(expected);
   let note;
   if (versioned) {
-    note = JSON.stringify({ kind: 'riviu-publish', reportVersion: 1, assignmentId: assignmentId,
+    note = JSON.stringify(Object.assign({}, stored && !stored.legacy ? stored : {}, { kind: 'riviu-publish', reportVersion: 1, assignmentId: assignmentId,
       rowRevision: payload.rowRevision, rowFingerprint: reportFingerprint(display),
-      payloadFingerprint: payloadFingerprint, postedAt: payload.postedAt });
+      payloadFingerprint: payloadFingerprint, postedAt: payload.postedAt }));
   } else if (stored && !stored.legacy) {
     note = JSON.stringify(Object.assign({}, stored, { rowFingerprint: reportFingerprint(display) }));
   } else {
     note = 'riviu-publish:v1:' + assignmentId;
   }
+  note = deliveryNote(payload, note, display);
   const row = CONFIG.FIRST_DATA_ROW + index;
-  if (row > sheet.getMaxRows()) sheet.insertRowsAfter(sheet.getMaxRows(), row - sheet.getMaxRows());
-  Sheets.Spreadsheets.batchUpdate({ requests: [
+  commitSheetBatch(sheet, layout, row, [
     { updateCells: { start: { sheetId: sheet.getSheetId(), rowIndex: row - 1, columnIndex: 0 },
       rows: [{ values: [{ userEnteredValue: { numberValue: number } }].concat(
         expected.map(value => ({ userEnteredValue: { stringValue: value } }))
       ) }], fields: 'userEnteredValue' } },
     { updateCells: { start: { sheetId: sheet.getSheetId(), rowIndex: row - 1, columnIndex: 3 },
       rows: [{ values: [{ note: note }] }], fields: 'note' } },
-  ] }, CONFIG.SPREADSHEET_ID);
+  ]);
   return versioned ? ack(payload.rowRevision, false) : { ok: true, row: row };
 }
 
@@ -581,18 +679,18 @@ function deliverCompact(sheet, layout, payload, postUrl, assignmentId) {
   const expected = [poster, date, postUrl].concat(partners);
   const note = 'riviu-publish:v1:' + assignmentId;
   const height = Math.max(0, sheet.getLastRow() - CONFIG.FIRST_DATA_ROW + 1);
-  const range = height ? sheet.getRange(CONFIG.FIRST_DATA_ROW, 1, height, layout.width) : null;
-  const values = range ? range.getDisplayValues() : [];
-  const formulas = range ? range.getFormulas() : [];
+  const values = ownedRows(sheet, layout, height, 'getDisplayValues');
+  const formulas = ownedRows(sheet, layout, height, 'getFormulas');
   const notes = height ? sheet.getRange(CONFIG.FIRST_DATA_ROW, 4, height, 1).getNotes() : [];
   const same = index => expected.every((value, column) => String(values[index][column + 1]) === value)
     && /^[1-9]\d*$/.test(String(values[index][0]))
     && formulas[index].every(value => !value);
-  const keyed = notes.map((value, index) => value[0] === note ? index : -1).filter(index => index >= 0);
+  const keyed = notes.map((value, index) => reportNote(value[0])?.assignmentId === assignmentId ? index : -1).filter(index => index >= 0);
   if (keyed.length) {
     if (keyed.length !== 1 || !same(keyed[0])) {
       throw new Error('Dòng đã ghi bị thay đổi hoặc khoá trùng; kiểm tra trước khi gửi lại');
     }
+    validateStoredDelivery(reportNote(notes[keyed[0]][0]), payload, values[keyed[0]], sheet);
     return { ok: true, duplicate: true, row: CONFIG.FIRST_DATA_ROW + keyed[0] };
   }
   const linked = values.map((value, index) => value[3] === postUrl ? index : -1).filter(index => index >= 0);
@@ -621,17 +719,16 @@ function deliverCompact(sheet, layout, payload, postUrl, assignmentId) {
     if (index < 0) index = height;
   }
   const row = CONFIG.FIRST_DATA_ROW + index;
-  if (row > sheet.getMaxRows()) sheet.insertRowsAfter(sheet.getMaxRows(), row - sheet.getMaxRows());
   const start = { sheetId: sheet.getSheetId(), rowIndex: row - 1, columnIndex: 0 };
   // Explicit stringValue prevents formulas; both requests commit together, including
   // the note key. No PropertiesService/hidden-sheet second-write window exists.
-  Sheets.Spreadsheets.batchUpdate({ requests: [
+  commitSheetBatch(sheet, layout, row, [
     { updateCells: { start: start, rows: [{ values: [{ userEnteredValue: { numberValue: number } }].concat(
       expected.map(value => ({ userEnteredValue: { stringValue: value } }))
     ) }], fields: 'userEnteredValue' } },
     { updateCells: { start: { sheetId: start.sheetId, rowIndex: start.rowIndex, columnIndex: 3 },
-      rows: [{ values: [{ note: note }] }], fields: 'note' } },
-  ] }, CONFIG.SPREADSHEET_ID);
+      rows: [{ values: [{ note: deliveryNote(payload, note, [String(number)].concat(expected)) }] }], fields: 'note' } },
+  ]);
   return { ok: true, row: row };
 }
 

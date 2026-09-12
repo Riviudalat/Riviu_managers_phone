@@ -502,37 +502,6 @@
   text-align: center;
 }
 
-.nurture-page-tabs {
-  display: flex;
-  gap: 1.25rem;
-  border-bottom: 1px solid var(--line);
-  margin-bottom: 0.65rem;
-}
-
-.nurture-page-tabs button {
-  border: 0;
-  border-bottom: 2px solid transparent;
-  padding: 0.45rem 0.1rem;
-  background: transparent;
-  color: var(--text-2);
-  font-weight: 600;
-  cursor: pointer;
-}
-
-.nurture-page-tabs button:hover {
-  color: var(--text-1);
-}
-
-.nurture-page-tabs button[aria-selected="true"] {
-  border-bottom-color: var(--primary);
-  color: var(--primary);
-}
-
-.nurture-page-tabs button:focus-visible {
-  outline: 2px solid color-mix(in srgb, var(--primary) 65%, transparent);
-  outline-offset: 2px;
-}
-
 .nurture-workspace .workspace-command-bar {
   margin-bottom: var(--space-4);
 }

@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { CheckCircle2, CircleAlert, Link2, LoaderCircle } from "lucide-react";
-import { publishSheetPrepare, publishSheetGetConfig } from "../../api";
+import { publishSheetPrepare, publishSheetGetConfig, publishSheetCheck } from "../../api";
 import { describeError } from "../../describeError";
 import type { PublishSheetCheckResult } from "../../types";
 
@@ -14,7 +14,7 @@ export function PublishSheetConnection({ onReadyChange }: { onReadyChange?: (rea
   const ticket = useRef(0);
   const edited = useRef(false);
   const inFlight = useRef(false);
-  const ready = configLoaded && !error && (!linkEntered || (!busy && result?.connectionVerified === true));
+  const ready = configLoaded && linkEntered && !error && !busy && result?.connectionVerified === true;
   useEffect(() => { onReadyChange?.(ready); }, [onReadyChange, ready]);
   useEffect(() => {
     let mounted = true;
@@ -26,7 +26,7 @@ export function PublishSheetConnection({ onReadyChange }: { onReadyChange?: (rea
         if (saved.trim() && config.hasToken) {
           inFlight.current = true; setBusy(true);
           const current = ++ticket.current;
-          void publishSheetPrepare(saved).then(next => { if (mounted && current === ticket.current) setResult(next); })
+          void publishSheetCheck(saved).then(next => { if (mounted && current === ticket.current) setResult(next); })
             .catch(e => { if (mounted && current === ticket.current) setError(describeError(e)); })
             .finally(() => { inFlight.current = false; if (mounted && current === ticket.current) setBusy(false); });
         }

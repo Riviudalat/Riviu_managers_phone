@@ -31,7 +31,10 @@ export function GroupSyncSection() {
   const gsMaxPx = groupSync.offset?.maxPx ?? 0;
   return (
     <section className="settings-section" aria-label="Đồng bộ nhóm">
-      <h3>Đồng bộ nhóm</h3>
+      <div className="settings-section-heading">
+        <h3>Đồng bộ nhóm</h3>
+        <span className="settings-save-state" data-dirty={dirty}>{dirty ? "Chưa áp dụng" : "Đã áp dụng"}</span>
+      </div>
       <p className="hint">
         Độ trễ và lệch toạ độ chỉ áp khi điều khiển ít nhất hai máy; đặt cả hai về tắt để phát đồng loạt.
       </p>

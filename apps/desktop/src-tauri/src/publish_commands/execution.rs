@@ -3,7 +3,10 @@
 use super::progress::{record_progress, PublishProgress};
 use super::*;
 
-type BeforePublish<'a> = dyn FnMut(Option<&riviu_core::SoundSelectionEvidence>, Option<(&str, &str)>) -> anyhow::Result<()>
+type BeforePublish<'a> = dyn FnMut(
+        Option<&riviu_core::SoundSelectionEvidence>,
+        Option<&riviu_core::publish_submission::PublishSubmissionProof>,
+    ) -> anyhow::Result<()>
     + Send
     + 'a;
 /// Why one phone did not post, and **whether anything may be live because of it**.
@@ -38,6 +41,7 @@ pub(super) async fn post_one_phone(
     assignment: riviu_core::PublishAssignmentRecord,
     bundle: riviu_core::PublishBundle,
     sound_policy: riviu_core::PublishSoundPolicy,
+    run: Option<riviu_core::db::PublishPipelineRun>,
 ) -> Result<(), PhoneFailure> {
     tokio::time::sleep(stagger).await;
     let _permit = gate.acquire().await.map_err(|error| {
@@ -66,7 +70,7 @@ pub(super) async fn post_one_phone(
     // one-shot callback and the driver invokes it on the last line before tapping Post. A crash
     // anywhere between this point and that callback therefore leaves the row retryable; a crash
     // after it leaves `posting`, which startup reconciliation makes `uncertain`.
-    let attempt = post_one_assignment(
+    let attempt = post_one_assignment_owned(
         &control,
         &db,
         frames.as_ref(),
@@ -74,6 +78,7 @@ pub(super) async fn post_one_phone(
         &assignment,
         &bundle,
         &sound_policy,
+        run.as_ref(),
     )
     .await;
     if attempt.claim_refused {
@@ -87,8 +92,8 @@ pub(super) async fn post_one_phone(
         }));
     }
     let outcome = attempt.outcome;
-    let (state, code) = state_for_outcome(&outcome);
-    let (message, evidence) = match &outcome {
+    let (mut state, mut code) = state_for_outcome(&outcome);
+    let (message, mut evidence) = match &outcome {
         PostOutcome::Posted(evidence) => (None, evidence.to_string()),
         PostOutcome::Submitted(evidence) => (
             Some("Đã gửi bài tới TikTok; đang chờ xác minh liên kết, giữ TikTok chạy".into()),
@@ -104,6 +109,28 @@ pub(super) async fn post_one_phone(
             .to_string(),
         ),
     };
+    if matches!(outcome, PostOutcome::Submitted(_) | PostOutcome::Unknown(_)) {
+        evidence = db
+            .with_initial_scheduled_verification(&campaign_id, &assignment.id, &evidence)
+            .map_err(|error| PhoneFailure::MayBeLive(error.to_string()))?;
+    }
+    // Pixel / unmeasured routes can Post without recording the signed-in account. Link
+    // recovery then fails forever — fail closed to needsReview instead of verifying forever.
+    if matches!(outcome, PostOutcome::Submitted(_)) {
+        if let Ok(Some(detail)) = db.get_publish_campaign(&campaign_id) {
+            if let Some(row) = detail
+                .assignments
+                .iter()
+                .find(|row| row.id == assignment.id)
+            {
+                if publish_expected_account_missing(row.effect_intent.as_deref()) {
+                    evidence = stamp_submission_identity_review(&evidence);
+                    state = riviu_core::PublishCampaignState::Uncertain;
+                    code = Some("post_verification_needs_review");
+                }
+            }
+        }
+    }
     // A posted assignment whose evidence carries a link settles through the one-transaction
     // write: state **and** the sheet's obligation row go in together, or neither does — a
     // link recorded in evidence with no outbox row behind it is a debt the sweeper can never
@@ -123,16 +150,36 @@ pub(super) async fn post_one_phone(
         }
         _ => None,
     };
-    let written = match owed {
-        Some(post_url) => db.record_publish_success_with_sheet_row(
+    let written = if let Some(run) = run.as_ref() {
+        db.settle_pipeline_post(
+            run,
             &assignment.id,
+            attempt.final_revision.expect("owned attempt revision"),
+            state,
+            code,
             &evidence,
-            &campaign_id,
-            &post_url,
+            owed.as_deref(),
             poster_identity(),
             &bundle.partners,
-        ),
-        None => db.update_publish_assignment_state(&assignment.id, state, code, Some(&evidence)),
+        )
+        .and_then(|changed| {
+            anyhow::ensure!(changed, "stale publish worker result");
+            Ok(())
+        })
+    } else {
+        match owed {
+            Some(post_url) => db.record_publish_success_with_sheet_row(
+                &assignment.id,
+                &evidence,
+                &campaign_id,
+                &post_url,
+                poster_identity(),
+                &bundle.partners,
+            ),
+            None => {
+                db.update_publish_assignment_state(&assignment.id, state, code, Some(&evidence))
+            }
+        }
     };
     if let Err(error) = written {
         // The state write failed *after* the attempt, so what the phone did is unknown to the
@@ -277,6 +324,11 @@ pub async fn publish_create_campaign(
     }
     let managed_bundle_ids = managed.iter().map(|bundle| bundle.id.clone()).collect();
     let request = PublishCampaignRequest {
+        sheet_delivery: prepared.report.sheet_delivery.clone(),
+        verification_contract_version: Some(1),
+        verification_builds: riviu_core::publish_submission::builds_from_preflight(
+            &prepared.report,
+        ),
         sheet_enabled: sheet_enabled.unwrap_or(true),
         request_id: request_id.clone(),
         source_root,
@@ -292,6 +344,7 @@ pub async fn publish_create_campaign(
         } else {
             PublishCleanupPolicy::KeepImportedAssets
         },
+        network: riviu_core::SocialNetwork::TikTok,
         sound_policy,
         execution_confirmed: confirmed,
         target_snapshot: Some(prepared.report.target_snapshot.clone()),
@@ -1028,6 +1081,10 @@ pub(crate) async fn execute_publish_campaign_inner(
     let mut detail = db
         .get_publish_campaign(&campaign_id)?
         .ok_or_else(|| anyhow::anyhow!("publish campaign not found"))?;
+    anyhow::ensure!(
+        !db.has_active_publish_pipeline(&campaign_id)?,
+        "chiến dịch đang chạy; theo dõi tiến độ từng máy"
+    );
     let existing_snapshot = db.get_publish_execution_snapshot(&campaign_id)?;
     let input_digest = existing_snapshot
         .as_ref()
@@ -1055,90 +1112,72 @@ pub(crate) async fn execute_publish_campaign_inner(
     // lease between phases. Run the proven transfer + composer path once, then feed only the
     // durable `Succeeded` rows through link/Sheet reconciliation below.
     if has_fresh_assignment && issues.is_empty() {
-        let fresh_assignments: Vec<_> = detail
-            .assignments
-            .iter()
-            .filter(|assignment| {
-                matches!(
-                    assignment.state,
-                    riviu_core::PublishCampaignState::Queued
-                        | riviu_core::PublishCampaignState::Scheduled
-                        | riviu_core::PublishCampaignState::Ready
-                        | riviu_core::PublishCampaignState::Imported
-                        | riviu_core::PublishCampaignState::FailedBeforeDispatch
-                )
-            })
-            .collect();
-        if let Err(error) =
-            refuse_devices_whose_sound_picker_is_not_measured(&control, &fresh_assignments).await
+        if let Err(error) = super::pipeline::execute_pipeline(
+            control.clone(),
+            db.clone(),
+            frames.clone(),
+            events.clone(),
+            agent_bundle_id,
+            campaign_id.clone(),
+            request.sound_policy.clone(),
+        )
+        .await
         {
+            if error.is::<super::pipeline::PipelineClaimRejected>() {
+                return Err(error);
+            }
             issues.push(publish_issue(
-                "sound_picker_unmeasured",
+                "publish_phone_failed",
                 None,
-                &error.to_string(),
+                &format!("{error:#}"),
             ));
-        }
-    }
-    if has_fresh_assignment && issues.is_empty() {
-        if !matches!(
-            detail.campaign.state,
-            riviu_core::PublishCampaignState::Imported
-        ) {
-            if let Err(error) = transfer_publish_campaign_inner(
-                control.clone(),
-                db.clone(),
-                events.clone(),
-                agent_bundle_id,
-                campaign_id.clone(),
-            )
-            .await
-            {
-                issues.push(publish_issue(
-                    "transfer_failed_before_post",
-                    None,
-                    &format!("{error:#}"),
-                ));
-            }
-            detail = db
-                .get_publish_campaign(&campaign_id)?
-                .ok_or_else(|| anyhow::anyhow!("publish campaign disappeared after transfer"))?;
-        }
-        if issues.is_empty()
-            && matches!(
-                detail.campaign.state,
-                riviu_core::PublishCampaignState::Imported
-                    | riviu_core::PublishCampaignState::FailedBeforeDispatch
-            )
-        {
-            if let Err(error) = post_publish_campaign_inner(
-                control.clone(),
-                db.clone(),
-                frames,
-                events.clone(),
-                campaign_id.clone(),
-            )
-            .await
-            {
-                issues.push(publish_issue(
-                    "publish_phone_failed",
-                    None,
-                    &error.to_string(),
-                ));
-            }
         }
     }
 
     // Verification can advance only a previously dispatched assignment and carries its
     // revision into settlement. It never reuses the fresh composer/transfer branch.
+    detail = db
+        .get_publish_campaign(&campaign_id)?
+        .context("campaign missing before verification")?;
     let pending = db.publish_verifications_for_campaign(&campaign_id, 1000)?;
     for candidate in pending
         .iter()
         .filter(|candidate| candidate.campaign_id == campaign_id)
     {
-        if control.current_work_owner(&candidate.udid).is_none() {
-            let _ =
-                super::verification::verify_pending_assignment(&control, &db, &events, candidate)
-                    .await?;
+        let due =
+            !has_fresh_assignment || !candidate.scheduled || candidate.is_due(chrono::Utc::now());
+        let free = control.current_work_owner(&candidate.udid).is_none();
+        let assignment = detail
+            .assignments
+            .iter()
+            .find(|a| a.id == candidate.assignment_id);
+        if !due {
+            issues.push(publish_issue(
+                "link_check_not_due",
+                assignment,
+                "Chưa tới lịch kiểm tra liên kết cho máy này; giữ máy rảnh và thử lại sau.",
+            ));
+            continue;
+        }
+        if !free {
+            issues.push(publish_issue(
+                "link_check_device_busy",
+                assignment,
+                "Máy đang bận việc khác; không chiếm quyền để kiểm tra liên kết.",
+            ));
+            continue;
+        }
+        match super::verification::verify_pending_assignment(&control, &db, &events, candidate)
+            .await
+        {
+            Ok(_) => {}
+            Err(error) => {
+                issues.push(publish_issue(
+                    "link_check_failed",
+                    assignment,
+                    &format!("{error:#}"),
+                ));
+            }
         }
     }
     detail = db
@@ -1220,7 +1259,7 @@ pub(crate) async fn execute_publish_campaign_inner(
                 let reason = current_evidence
                     .as_ref()
                     .and_then(|value| value["verificationStatus"]["reason"].as_str())
-                    .unwrap_or("Chưa có bằng chứng bài đã lên sau 30 phút; cần kiểm tra trên máy");
+                    .unwrap_or("Hết thời gian chờ liên kết; cần kiểm tra bài trên máy");
                 issues.push(publish_issue(
                     "post_verification_needs_review",
                     Some(&assignment),
@@ -1495,11 +1534,13 @@ impl riviu_core::PublishRuntimePort for DesktopPublishRuntimePort {
         let link = capture_confirmed_assignment_link(&self.control, &self.assignment, bundle)
             .await
             .map_err(|error| error.to_string())?;
-        let link = riviu_core::tiktok_share::resolve_canonical_post_link(&link)
+        let diagnostic = link.diagnostic;
+        let link = riviu_core::tiktok_share::resolve_canonical_post_link(&link.url)
             .await
             .map_err(|error| error.to_string())?;
         // Link persistence must not depend on whether the operator wants a Sheet row.
-        let evidence = evidence_with_post_url(self.current_evidence.clone(), &link);
+        let mut evidence = evidence_with_post_url(self.current_evidence.clone(), &link);
+        evidence["verificationDiagnostic"] = diagnostic;
         self.db
             .record_publish_success_with_sheet_row(
                 &self.assignment.id,
@@ -1535,7 +1576,18 @@ impl riviu_core::PublishRuntimePort for DesktopPublishRuntimePort {
             )
             .map_err(|error| error.to_string())?;
         self.current_evidence = Some(evidence);
-        deliver_assignment_sheet_row(&self.db, &self.events, assignment_id).await
+        self.db
+            .retry_bound_sheet_assignment(assignment_id, chrono::Utc::now().timestamp_millis())
+            .map_err(|error| error.to_string())?;
+        deliver_assignment_sheet_row(&self.db, &self.events, assignment_id).await?;
+        match self
+            .db
+            .publish_sheet_outbox_state(assignment_id)
+            .map_err(|error| error.to_string())?
+        {
+            Some(riviu_core::db::SheetOutboxState::Sent) => Ok(()),
+            _ => Err("Sheet chưa xác nhận; hàng đang chờ hoặc do worker khác xử lý".into()),
+        }
     }
 
     async fn cleanup(&mut self) -> Result<(), String> {
@@ -1782,12 +1834,44 @@ pub(super) fn publish_issue(
     }
 }
 
+fn publish_expected_account_missing(intent: Option<&str>) -> bool {
+    intent
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+        .map(|value| {
+            value["expectedAccount"]
+                .as_str()
+                .map(|account| {
+                    let handle = account.trim().trim_start_matches('@');
+                    handle.is_empty()
+                })
+                .unwrap_or(true)
+        })
+        .unwrap_or(true)
+}
+
+fn stamp_submission_identity_review(evidence_json: &str) -> String {
+    let mut evidence = serde_json::from_str::<serde_json::Value>(evidence_json)
+        .ok()
+        .filter(serde_json::Value::is_object)
+        .unwrap_or_else(|| serde_json::json!({}));
+    evidence["verificationStatus"] = serde_json::json!({
+        "state": "needsReview",
+        "reason": "Thiếu bằng chứng tài khoản hoặc thời điểm của lần Đăng; cần kiểm tra bài trên máy, không đăng lại",
+        "cause": "submissionIdentityMissing",
+        "attempts": evidence["verificationStatus"]["attempts"].as_u64().unwrap_or(0),
+        "readFailures": 0,
+        "nextCheckAt": serde_json::Value::Null,
+    });
+    evidence.to_string()
+}
+
 pub(super) fn missing_link_locators(
     package: &str,
     locale: &str,
     version: &str,
 ) -> Vec<&'static str> {
-    let Some(labels) = riviu_core::tiktok_labels::controls_for(package, locale, version) else {
+    let Some(labels) = riviu_core::tiktok_labels::controls_for_runtime(package, locale, version)
+    else {
         return vec!["build_label_set"];
     };
     let mut missing = Vec::new();
@@ -1808,11 +1892,16 @@ pub(super) fn missing_link_locators(
     missing
 }
 
+pub(super) struct ConfirmedAssignmentLink {
+    pub url: String,
+    pub diagnostic: serde_json::Value,
+}
+
 pub(super) async fn capture_confirmed_assignment_link(
     control: &DeviceControlPlane,
     assignment: &riviu_core::PublishAssignmentRecord,
     bundle: &riviu_core::PublishBundle,
-) -> anyhow::Result<String> {
+) -> anyhow::Result<ConfirmedAssignmentLink> {
     anyhow::ensure!(
         matches!(
             assignment.state,
@@ -1833,6 +1922,12 @@ pub(super) async fn capture_confirmed_assignment_link(
         .await?;
     let outcome = async {
         let session = control.session(&context)?;
+        session.set_gui_scope(riviu_core::ui_automation::GuiScope {
+            run_id: assignment.campaign_id.clone(),
+            assignment_id: Some(assignment.id.clone()),
+            device_id: assignment.udid.clone(),
+            deadline_ms: None,
+        });
         let package = control.resolve_tiktok_package(&assignment.udid).await?;
         control.foreground_session_app(&context, &package).await?;
         let language = session
@@ -1843,8 +1938,6 @@ pub(super) async fn capture_confirmed_assignment_link(
             .app_version(&package)
             .await
             .context("app version unavailable")?;
-        let labels = riviu_core::tiktok_labels::controls_for(&package, &language, &version)
-            .context("unmeasured TikTok link route")?;
         anyhow::ensure!(
             missing_link_locators(&package, &language, &version).is_empty(),
             "link locators missing for this build"
@@ -1864,19 +1957,30 @@ pub(super) async fn capture_confirmed_assignment_link(
                 .context("Post timestamp missing")?
                 .into(),
         };
-        let capture = riviu_core::tiktok_share::capture_own_post_link_for_submission(
+        let plan = riviu_core::tiktok_share::PublishVerificationPlan::for_runtime(
+            &package, &language, &version,
+        )?;
+        let capture = riviu_core::tiktok_share::capture_submission_link(
             session.as_ref(),
-            &labels,
+            &plan,
             &bundle.caption,
             &identity,
         )
         .await;
-        capture.link().map(str::to_string).ok_or_else(|| {
-            anyhow::Error::new(super::verification::VerificationObservation {
-                code: capture.reason_code(),
-                reason: capture.reason(),
+        capture
+            .outcome
+            .link()
+            .map(|url| ConfirmedAssignmentLink {
+                url: url.to_owned(),
+                diagnostic: serde_json::to_value(&capture.diagnostic).unwrap_or_default(),
             })
-        })
+            .ok_or_else(|| {
+                anyhow::Error::new(super::verification::VerificationObservation {
+                    code: capture.diagnostic.reason_code.code(),
+                    reason: capture.diagnostic.reason_code.message().into(),
+                    diagnostic: serde_json::to_value(&capture.diagnostic).ok(),
+                })
+            })
     }
     .await;
     let closed = control.close_manual_session(context);
@@ -2030,6 +2134,7 @@ pub(crate) async fn post_publish_campaign_inner(
             (*assignment).clone(),
             bundle.clone(),
             request.sound_policy.clone(),
+            None,
         )));
     }
 
@@ -2113,8 +2218,11 @@ pub(super) enum PostOutcome {
 pub(super) struct AssignmentPostAttempt {
     outcome: PostOutcome,
     claim_refused: bool,
+    final_revision: Option<i64>,
 }
 
+#[cfg(any(test, feature = "diagnostics"))]
+#[allow(dead_code)]
 pub(super) async fn post_one_assignment(
     control: &DeviceControlPlane,
     db: &Database,
@@ -2124,12 +2232,66 @@ pub(super) async fn post_one_assignment(
     bundle: &riviu_core::PublishBundle,
     sound_policy: &riviu_core::PublishSoundPolicy,
 ) -> AssignmentPostAttempt {
+    post_one_assignment_owned(
+        control,
+        db,
+        frames,
+        campaign_id,
+        assignment,
+        bundle,
+        sound_policy,
+        None,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn post_one_assignment_owned(
+    control: &DeviceControlPlane,
+    db: &Database,
+    frames: &dyn FrameSource,
+    campaign_id: &str,
+    assignment: &riviu_core::PublishAssignmentRecord,
+    bundle: &riviu_core::PublishBundle,
+    sound_policy: &riviu_core::PublishSoundPolicy,
+    run: Option<&riviu_core::db::PublishPipelineRun>,
+) -> AssignmentPostAttempt {
+    let initial_revision = match run {
+        Some(_) => match db.publish_assignment_revision(&assignment.id) {
+            Ok(revision) => Some(revision),
+            Err(error) => {
+                return AssignmentPostAttempt {
+                    outcome: PostOutcome::NothingPublished(error.to_string()),
+                    claim_refused: true,
+                    final_revision: None,
+                }
+            }
+        },
+        None => None,
+    };
     let finish = |outcome| AssignmentPostAttempt {
         outcome,
         claim_refused: false,
+        final_revision: initial_revision,
     };
-    let cleanup_policy = match db.get_publish_campaign(campaign_id) {
-        Ok(Some(detail)) => detail.campaign.cleanup_policy,
+    match db.publish_campaign_request(campaign_id) {
+        Ok(Some(request))
+            if request.verification_contract_version == Some(1)
+                && (!request.sheet_enabled
+                    || request
+                        .sheet_delivery
+                        .as_ref()
+                        .is_some_and(|target| target.version == 2)) => {}
+        _ => return finish(PostOutcome::NothingPublished(
+            "Lượt đăng chưa qua kiểm tra theo cơ chế mới; kiểm tra lại và tạo lượt mới trước Đăng"
+                .into(),
+        )),
+    }
+    let (cleanup_policy, defer_link_capture) = match db.get_publish_campaign(campaign_id) {
+        Ok(Some(detail)) => (
+            detail.campaign.cleanup_policy,
+            detail.campaign.run_at.is_some(),
+        ),
         _ => {
             return finish(PostOutcome::NothingPublished(
                 "Không đọc được chính sách dọn nội dung của chiến dịch".into(),
@@ -2177,9 +2339,11 @@ pub(super) async fn post_one_assignment(
     let progress = |step| record_progress(db, campaign_id, &assignment.id, step);
     progress(PublishProgress::OpeningApp);
     let context = match open_publish_context_until(control, &assignment.udid, || {
-        db.publish_campaign_state(campaign_id)
-            .map(|s| matches!(s, Some(riviu_core::PublishCampaignState::Cancelled)))
-            .unwrap_or(true)
+        run.is_some_and(|r| !db.publish_pipeline_current(r).unwrap_or(false))
+            || db
+                .publish_campaign_state(campaign_id)
+                .map(|s| matches!(s, Some(riviu_core::PublishCampaignState::Cancelled)))
+                .unwrap_or(true)
     })
     .await
     {
@@ -2255,25 +2419,42 @@ pub(super) async fn post_one_assignment(
     let mut submitted_at = None;
     let action_result = {
         let mut before_post = |sound_selection: Option<&riviu_core::SoundSelectionEvidence>,
-                               identity: Option<(&str, &str)>|
+                               identity: Option<
+            &riviu_core::publish_submission::PublishSubmissionProof,
+        >|
          -> anyhow::Result<()> {
+            if cfg!(debug_assertions)
+                && std::env::var("RIVIU_PUBLISH_REHEARSAL").as_deref() == Ok("1")
+                && db.get_setting("publish.rehearsal")?.as_deref() == Some("stopBeforePost")
+            {
+                record_progress(
+                    db,
+                    campaign_id,
+                    &assignment.id,
+                    PublishProgress::RehearsalReady,
+                );
+                anyhow::bail!("rehearsal verified before public Post");
+            }
             if effect_claimed {
                 anyhow::bail!("effect-intent callback invoked more than once");
             }
-            let dispatch_time = identity
-                .map(|(_, at)| at.to_owned())
-                .unwrap_or_else(|| chrono::Utc::now().to_rfc3339());
-            let intent = serde_json::json!({
-                "effectIntent": "post",
-                "submittedAt": dispatch_time,
-                "expectedAccount": identity.map(|(account,_)|account),
-                "mediaKind": bundle.media_kind,
-                "bundleId": bundle.id,
-                "captionSha256": bundle.caption_sha256,
-                "soundSelection": sound_selection,
-            })
-            .to_string();
-            match db.claim_publish_assignment_for_posting(&assignment.id, &intent) {
+            let proof = identity.context("Thiếu bằng chứng tài khoản và thời điểm trước Đăng")?;
+            proof.validate()?;
+            let dispatch_time = proof.submitted_at.clone();
+            let mut intent = serde_json::to_value(proof)?;
+            intent["effectIntent"] = serde_json::json!("post");
+            intent["soundSelection"] = serde_json::to_value(sound_selection)?;
+            let intent = intent.to_string();
+            let claim = match run {
+                Some(run) => db.claim_pipeline_post(
+                    run,
+                    &assignment.id,
+                    initial_revision.expect("owned revision"),
+                    &intent,
+                ),
+                None => db.claim_publish_assignment_for_posting(&assignment.id, &intent),
+            };
+            match claim {
                 Ok(true) => {
                     effect_claimed = true;
                     submitted_at = Some(dispatch_time);
@@ -2287,6 +2468,22 @@ pub(super) async fn post_one_assignment(
                     )
                 }
                 Err(error) => {
+                    // Validation rolled back the claim. Keep the operator's cause only if
+                    // this worker still owns the unsubmitted revision; stale workers lose.
+                    if let Some(run) = run {
+                        let evidence = serde_json::json!({"message":error.to_string(),"priorEvidenceJson":assignment.evidence_json});
+                        let _ = db.settle_pipeline_post(
+                            run,
+                            &assignment.id,
+                            initial_revision.expect("owned revision"),
+                            riviu_core::PublishCampaignState::FailedBeforeDispatch,
+                            Some("submission_proof_invalid"),
+                            &evidence.to_string(),
+                            None,
+                            poster_identity(),
+                            &bundle.partners,
+                        );
+                    }
                     claim_refused = true;
                     Err(error)
                 }
@@ -2295,12 +2492,15 @@ pub(super) async fn post_one_assignment(
         if session.supports_element_bounds() {
             post_through_the_composer(
                 control,
+                db,
+                &assignment.id,
                 session.as_ref(),
                 campaign_id,
                 &assignment.udid,
                 bundle,
                 &import,
                 sound_policy,
+                defer_link_capture,
                 &mut before_post,
                 &progress,
             )
@@ -2339,8 +2539,20 @@ pub(super) async fn post_one_assignment(
     } else {
         PublishProgress::Finishing
     });
+    let rehearsal_cleanup = cfg!(debug_assertions)
+        && std::env::var("RIVIU_PUBLISH_REHEARSAL").as_deref() == Ok("1")
+        && campaign_id.starts_with("bench-")
+        && !effect_claimed
+        && db
+            .get_setting("publish.rehearsal")
+            .ok()
+            .flatten()
+            .as_deref()
+            == Some("stopBeforePost");
     let cleanup = if must_preserve_pending_upload(&action_result) {
         release_pending_publish_context(control, context, &import).await
+    } else if rehearsal_cleanup {
+        tidy_up_the_imported_media(control, context, &assignment.udid, &import).await
     } else {
         finish_import_with_policy(
             control,
@@ -2355,6 +2567,7 @@ pub(super) async fn post_one_assignment(
     AssignmentPostAttempt {
         outcome: fold_cleanup_into(action_result, cleanup),
         claim_refused,
+        final_revision: initial_revision.map(|r| r + i64::from(effect_claimed)),
     }
 }
 
@@ -3147,12 +3360,15 @@ pub(super) async fn post_through_the_pixel_grid(
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn post_through_the_composer(
     control: &DeviceControlPlane,
+    db: &Database,
+    assignment_id: &str,
     session: &dyn riviu_core::driver::UiSession,
     campaign_id: &str,
     udid: &str,
     bundle: &riviu_core::PublishBundle,
     import: &str,
     sound_policy: &riviu_core::PublishSoundPolicy,
+    defer_link_capture: bool,
     before_post: &mut BeforePublish<'_>,
     progress: &riviu_core::tiktok_composer::PublishProgressObserver<'_>,
 ) -> PostOutcome {
@@ -3160,6 +3376,14 @@ pub(super) async fn post_through_the_composer(
         publish_carousel_with_sound_effect_intent_and_progress, CarouselRequest, ComposerPlan,
         ComposerVerdict, Screen,
     };
+
+    // **Every refusal in this block happens before the first tap**, so each is
+    session.set_gui_scope(riviu_core::ui_automation::GuiScope {
+        run_id: campaign_id.into(),
+        assignment_id: Some(assignment_id.into()),
+        device_id: udid.into(),
+        deadline_ms: None,
+    });
 
     // **Every refusal in this block happens before the first tap**, so each is
     // `NothingPublished` rather than `Unknown`. They used to be `?`, which the caller turned
@@ -3173,7 +3397,8 @@ pub(super) async fn post_through_the_composer(
     };
     let language = session.ui_language().await.unwrap_or_default();
     let version = session.app_version(&package).await.unwrap_or_default();
-    let Some(labels) = riviu_core::tiktok_labels::controls_for(&package, &language, &version)
+    let Some(labels) =
+        riviu_core::tiktok_labels::controls_for_runtime(&package, &language, &version)
     else {
         return refuse(format!("chưa đo nhãn TikTok cho {package} / {language:?}"));
     };
@@ -3208,11 +3433,64 @@ pub(super) async fn post_through_the_composer(
         return refuse(format!("máy báo màn hình {width}x{height}"));
     };
 
+    let approved_build = db
+        .publish_campaign_request(campaign_id)
+        .ok()
+        .flatten()
+        .is_some_and(|request| {
+            request.verification_builds.iter().any(|build| {
+                build.udid == udid
+                    && build.package == package
+                    && build.version == version
+                    && riviu_core::tiktok_labels::normalise_language(&build.locale)
+                        == riviu_core::tiktok_labels::normalise_language(&language)
+            })
+        });
+    if !approved_build {
+        return refuse("TikTok đã đổi so với lần kiểm tra; kiểm tra lại trước Đăng".into());
+    }
+    let verification_plan = match riviu_core::tiktok_share::PublishVerificationPlan::for_runtime(
+        &package, &language, &version,
+    ) {
+        Ok(plan) => plan,
+        Err(error) => {
+            return refuse(format!(
+                "Thiếu nhận diện xác minh liên kết trước Đăng: {error}"
+            ))
+        }
+    };
+    if let Err(error) = riviu_core::tiktok_share::probe_clipboard_restore(session).await {
+        return refuse(format!(
+            "Helper clipboard chưa sẵn sàng trước Đăng: {error}"
+        ));
+    }
     let expected_account =
         match riviu_core::tiktok_share::observe_publish_account(session, &labels).await {
             Ok(account) => account,
             Err(error) => return refuse(format!("chưa xác minh tài khoản trước Đăng ({error})")),
         };
+
+    if let Err(error) = db.reserve_publish_account(assignment_id, &expected_account) {
+        return refuse(error.to_string());
+    }
+    struct AccountReservation<'a> {
+        db: &'a Database,
+        assignment: &'a str,
+    }
+    impl Drop for AccountReservation<'_> {
+        fn drop(&mut self) {
+            if let Err(error) = self.db.release_unsubmitted_publish_account(self.assignment) {
+                log::warn!(
+                    "Chưa nhả được tài khoản của lượt {}: {error}",
+                    self.assignment
+                );
+            }
+        }
+    }
+    let _reservation = AccountReservation {
+        db,
+        assignment: assignment_id,
+    };
 
     // The same human-looking touch planner every other session uses, built by the crate that
     // owns the policy rather than assembled here.
@@ -3224,7 +3502,18 @@ pub(super) async fn post_through_the_composer(
     let mut submitted_at = None;
     let mut record_effect_intent = |selection: &riviu_core::SoundSelectionEvidence| {
         let at = chrono::Utc::now().to_rfc3339();
-        before_post(Some(selection), Some((&expected_account, &at)))?;
+        let proof = riviu_core::publish_submission::PublishSubmissionProof {
+            verification_contract_version: verification_plan.contract_version(),
+            expected_account: expected_account.clone(),
+            submitted_at: at.clone(),
+            package: package.clone(),
+            version: version.clone(),
+            locale: language.clone(),
+            caption_sha256: bundle.caption_sha256.clone(),
+            bundle_id: bundle.id.clone(),
+            media_kind: bundle.media_kind.clone(),
+        };
+        before_post(Some(selection), Some(&proof))?;
         submitted_at = Some(at);
         crossed_effect_boundary = true;
         Ok(())
@@ -3328,7 +3617,6 @@ pub(super) async fn post_through_the_composer(
             //
             // Submission is not publication. Only this caption-identified route followed
             // by a canonical link authorizes success, media deletion and app termination.
-            progress(PublishProgress::CapturingLink);
             let Some(submitted_at) = submitted_at else {
                 return PostOutcome::Unknown(
                     "composer returned submission without durable dispatch time".into(),
@@ -3338,18 +3626,59 @@ pub(super) async fn post_through_the_composer(
                 account: expected_account,
                 submitted_at,
             };
-            let capture = riviu_core::tiktok_share::capture_own_post_link_for_submission(
+            if defer_link_capture {
+                return capture_or_defer_submission(
+                    evidence,
+                    true,
+                    riviu_core::tiktok_share::capture_own_post_link_for_submission(
+                        session,
+                        &labels,
+                        &bundle.caption,
+                        &identity,
+                    ),
+                    progress,
+                )
+                .await;
+            }
+            progress(PublishProgress::CapturingLink);
+            let capture = riviu_core::tiktok_share::capture_submission_link(
                 session,
-                &labels,
+                &verification_plan,
                 &bundle.caption,
                 &identity,
             )
             .await;
-            settle_submission_capture(evidence, capture, progress).await
+            evidence["verificationDiagnostic"] =
+                serde_json::to_value(&capture.diagnostic).unwrap_or_default();
+            let reason = capture.diagnostic.reason_code.message();
+            let mut outcome = settle_submission_capture(evidence, capture.outcome, progress).await;
+            if let PostOutcome::Submitted(ref mut value) = outcome {
+                value["linkCaptureReason"] = serde_json::json!(reason);
+            }
+            outcome
         }
         other if other.may_retry() => PostOutcome::NothingPublished(other.reason().to_string()),
         other => PostOutcome::Unknown(other.reason().to_string()),
     }
+}
+
+/// Scheduled runs finish the posting session before observing any profile/share UI.
+/// The capture future stays unpolled; the durable verification worker owns that later read.
+pub(super) async fn capture_or_defer_submission(
+    mut evidence: serde_json::Value,
+    defer: bool,
+    capture: impl std::future::Future<Output = riviu_core::tiktok_share::OwnPostLink>,
+    progress: &riviu_core::tiktok_composer::PublishProgressObserver<'_>,
+) -> PostOutcome {
+    if defer {
+        evidence["linkCaptureReason"] = serde_json::json!(
+            "Đã gửi bài hẹn giờ; sẽ kiểm tra liên kết sau 2 phút rồi định kỳ ở nền, tối đa 4 giờ"
+        );
+        evidence["publicationVerified"] = serde_json::json!(false);
+        return PostOutcome::Submitted(evidence);
+    }
+    progress(PublishProgress::CapturingLink);
+    settle_submission_capture(evidence, capture.await, progress).await
 }
 
 /// Only the identity-aware capture may promote submission into a verified publication.

@@ -1,7 +1,7 @@
 use std::{collections::HashMap, future::Future};
 use tokio::task::{Id, JoinSet};
 
-/// Two independently progressing phones, with one observer per device.
+/// Independently progressing phones: one observer per device, no fleet-wide cap.
 #[derive(Default)]
 pub(crate) struct VerificationQueue {
     tasks: JoinSet<anyhow::Result<bool>>,
@@ -13,8 +13,9 @@ impl VerificationQueue {
         self.tasks.is_empty()
     }
 
+    /// True when this UDID is not already running an observer.
     pub fn available(&self, udid: &str) -> bool {
-        self.tasks.len() < 2 && !self.devices.values().any(|id| id == udid)
+        !self.devices.values().any(|id| id == udid)
     }
 
     pub fn push(
@@ -52,18 +53,23 @@ mod tests {
             Ok(false)
         });
         assert!(!queue.available("slow"));
-        queue.push("fast".into(), async { Ok(true) });
-        assert!(!queue.available("third"));
+        for name in ["fast", "third", "fourth", "fifth", "sixth"] {
+            assert!(queue.available(name), "{name}");
+            queue.push(name.to_string(), async { Ok(true) });
+        }
+        assert!(!queue.available("fast"));
         let start = tokio::time::Instant::now();
-        let (device, result) = queue.next().await.unwrap();
-        assert_eq!(device, "fast");
-        assert!(result.unwrap());
-        assert!(start.elapsed() < Duration::from_secs(120));
-        assert!(queue.available("third"));
-        queue.push("third".into(), async { Ok(true) });
-        assert_eq!(queue.next().await.unwrap().0, "third");
+        let mut finished =
+            std::collections::HashSet::from(["fast", "third", "fourth", "fifth", "sixth"]);
+        for _ in 0..5 {
+            let (device, result) = queue.next().await.unwrap();
+            assert!(result.unwrap());
+            assert!(finished.remove(device.as_str()), "{device}");
+            assert!(start.elapsed() < Duration::from_secs(120));
+        }
         assert_eq!(queue.next().await.unwrap().0, "slow");
         assert!(queue.is_empty());
+        assert!(queue.available("slow"));
     }
 
     #[tokio::test]

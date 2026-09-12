@@ -65,6 +65,7 @@ import {
 import { withoutMenuIds, type DeviceMenuNode } from "../deviceMenu";
 import { DeviceFunctionList } from "./DeviceFunctionList";
 import { focusLayout } from "./focus/focusLayout";
+import { useModalFocus } from "./useModalFocus";
 
 interface Props {
   device: DeviceInfo;
@@ -90,6 +91,7 @@ interface Props {
    * exactly the overlay it always had.
    */
   functions?: DeviceMenuNode[];
+  recordingControls?: ReactElement | null;
 }
 
 function mapToDevice(
@@ -113,7 +115,9 @@ export function FocusStream({
   devices,
   onSelectDevice,
   functions = [],
+  recordingControls,
 }: Props) {
+  const dialogRef = useModalFocus<HTMLDivElement>(onClose);
   const hasView = useViewLive(device.udid);
   const viewSize = useViewSize(device.udid);
   const [busy, setBusy] = useState(false);
@@ -217,14 +221,6 @@ export function FocusStream({
     tileStreamState: device.tileStreamState,
     lastError: device.lastError,
   });
-
-  useEffect(() => {
-    const onKey = (event: KeyboardEvent) => {
-      if (event.key === "Escape") onClose();
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [onClose]);
 
   useEffect(() => {
     storeZoom(FOCUS_ZOOM, frameWidth);
@@ -743,6 +739,8 @@ export function FocusStream({
 
   return (
     <div
+      ref={dialogRef}
+      tabIndex={-1}
       className="focus-overlay"
       role="dialog"
       aria-modal="true"
@@ -993,6 +991,7 @@ export function FocusStream({
               <IconClose size={14} />
             </button>
           </header>
+          {recordingControls}
           <div className="focus-control-status" aria-live="polite" data-testid="focus-control-status">
             <span>{hasView ? "Có hình" : "Đang chờ hình"} · {sessionReady ? (busy || actionPending ? "Đang thực hiện…" : "Điều khiển sẵn sàng") : controlErrors.length ? "Điều khiển gặp lỗi" : "Đang mở điều khiển…"}</span>
             {controlErrors.length > 0 && <><p>{controlErrors.join(" · ")}</p><button type="button" onClick={() => setControlRetry(value => value + 1)}>Thử lại điều khiển</button></>}

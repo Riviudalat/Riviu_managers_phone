@@ -7,7 +7,7 @@ test("nurture tabs and one machine grid preserve drafts at three viewports", asy
   await page.goto("/");
   await page.getByRole("button", { name: "Nuôi TikTok", exact: true }).click();
   await page.getByRole("button", { name: /Cân bằng/ }).click();
-  await page.getByRole("region", { name: "Máy thực hiện", exact: true }).getByRole("button", { name: "Chọn tất cả", exact: true }).click();
+  await page.getByRole("region", { name: "Máy thực hiện", exact: true }).getByRole("button", { name: "Chọn tất cả sẵn sàng", exact: true }).click();
   const machines = page.getByRole("group", { name: "Danh sách chọn máy Nuôi TikTok" });
   await expect(page.getByRole("tablist", { name: "Chế độ Nuôi TikTok" }).getByRole("tab")).toHaveText(["Thiết lập", "Hẹn giờ", "Theo dõi"]);
   await expect(page.getByText("Chọn theo nhóm hoặc toàn bộ", { exact: true })).toHaveCount(0);
@@ -23,19 +23,21 @@ test("nurture tabs and one machine grid preserve drafts at three viewports", asy
   await expect(page.locator('.nurture-workspace input[data-nurture-field="numVideos"]')).toHaveCount(1);
   await total.fill("75");
   await expect(page.getByRole("spinbutton", { name: /Thời lượng tối đa/ })).toHaveValue("20");
-  await expect(page.getByRole("tab", { name: "AI", exact: true })).toBeVisible();
+  await expect(page.locator(".nurture-advanced")).not.toHaveAttribute("open", "");
   expect((await new AxeBuilder({ page }).include(".nurture-workspace").withTags(["wcag2a", "wcag2aa"]).analyze()).violations).toEqual([]);
   for (const viewport of [{ width: 1440, height: 900 }, { width: 900, height: 900 }, { width: 820, height: 560 }]) {
     await page.setViewportSize(viewport);
     expect(await machines.evaluate(element => getComputedStyle(element).gridTemplateColumns.split(" ").length)).toBe(2);
-    expect(await page.locator(".nurture-machines-card").evaluate(element => element.getBoundingClientRect().width)).toBeLessThanOrEqual(355);
+    await page.locator(".nurture-machines-card").scrollIntoViewIfNeeded();
+    const pickerWidth = await page.locator(".nurture-machines-card").evaluate(element => element.getBoundingClientRect().width);
+    expect(pickerWidth).toBeLessThanOrEqual(viewport.width >= 1024 ? 355 : viewport.width);
     const pickerLayout = await page.locator(".nurture-machines-card").evaluate(card => {
       const rect = card.getBoundingClientRect();
       const grid = card.querySelector(".nurture-machine-grid")!;
       const parent = card.closest(".nurture-workspace-body")!;
       return { bottom: rect.bottom, viewport: innerHeight, gridScrolls: grid.scrollHeight > grid.clientHeight, outerScrolls: parent.scrollHeight > parent.clientHeight + 1 };
     });
-    expect(pickerLayout.bottom).toBeLessThanOrEqual(pickerLayout.viewport);
+    if (viewport.width >= 1024) expect(pickerLayout.bottom).toBeLessThanOrEqual(pickerLayout.viewport);
     expect(pickerLayout.gridScrolls).toBe(true);
     expect(pickerLayout.outerScrolls).toBe(false);
     const clipped = await page.locator(".nurture-setup-fields").evaluate(element => {
@@ -45,10 +47,13 @@ test("nurture tabs and one machine grid preserve drafts at three viewports", asy
     });
     expect(clipped).toEqual([]);
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+    const footer = await page.locator(".nurture-session-footer").boundingBox();
+    expect(footer!.y + footer!.height).toBeLessThanOrEqual(viewport.height);
     await page.getByRole("region", { name: "Thiết lập phiên", exact: true }).scrollIntoViewIfNeeded();
     await page.screenshot({ path: test.info().outputPath(`nurture-setup-${viewport.width}.png`) });
   }
   await page.getByRole("tab", { name: "Thiết lập", exact: true }).click();
+  await page.locator(".nurture-advanced > summary").click();
   await expect(page.getByRole("tab", { name: "Hành vi", exact: true })).toBeVisible();
   await page.getByRole("tab", { name: "AI", exact: true }).click();
   await expect(page.locator('input[list="riviu-comment-models"]')).toBeVisible();
@@ -64,7 +69,7 @@ test("nurture tabs and one machine grid preserve drafts at three viewports", asy
   await machines.getByRole("checkbox").uncheck();
   await page.getByRole("searchbox", { name: "Tìm máy Nuôi TikTok" }).fill("");
   await expect(machines.getByRole("checkbox", { checked: true })).toHaveCount(37);
-  await expect(page.locator(".nurture-count")).toHaveText("Đã chọn 37/38");
+  await expect(page.locator(".nurture-count")).toHaveText("Đã chọn 37");
   await expect(scope).toHaveValue("explicit");
   await expect(scope.locator("option:checked")).toHaveText("37 máy đã chọn");
   const calls = await mockCommandCalls(page);

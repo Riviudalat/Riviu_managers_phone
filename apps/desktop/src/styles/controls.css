@@ -41,7 +41,7 @@
 
 button,
 .btn {
-  min-height: 32px;
+  min-height: var(--control-height);
   border: 1px solid var(--line-strong);
   background: var(--bg-elevated);
   color: var(--text);
@@ -49,15 +49,16 @@ button,
   padding: var(--space-1) var(--space-3);
   font-weight: var(--weight-medium);
   font-size: var(--text-base);
-  transition: var(--duration-fast) var(--ease);
+  transition: background-color var(--duration-fast) var(--ease), border-color var(--duration-fast) var(--ease), color var(--duration-fast) var(--ease);
   display: inline-flex;
   align-items: center;
-  gap: var(--space-1);
+  gap: var(--space-2);
+  justify-content: center;
+  line-height: var(--leading-normal);
 }
-button:hover:not(:disabled),
-.btn:hover:not(:disabled) {
-  border-color: var(--primary);
-  color: var(--primary);
+:where(button, .btn):where(:hover):not(:disabled) {
+  border-color: var(--line-strong);
+  color: var(--text-1);
 }
 button.primary,
 .btn.primary {
@@ -66,7 +67,8 @@ button.primary,
   color: var(--text-inverse);
 }
 button.primary:hover:not(:disabled) {
-  filter: brightness(1.05);
+  background: var(--primary-deep);
+  border-color: var(--primary-deep);
   color: var(--text-inverse);
 }
 button.link,
@@ -83,7 +85,7 @@ button.ghost {
   background: transparent;
 }
 button:disabled {
-  opacity: 0.45;
+  opacity: 0.55;
   cursor: not-allowed;
 }
 
@@ -138,14 +140,14 @@ button:disabled {
 
 /* ——— ProfileToolbar (Swarmote) ——— */
 .profile-toolbar {
-  margin-top: 0.15rem;
-  min-height: 40px;
+  margin-top: 0;
+  min-height: 52px;
   display: flex;
   align-items: center;
-  gap: 1rem;
+  gap: var(--space-2);
   border: 1px solid var(--line);
   background: var(--bg-elevated);
-  padding: 0 1rem;
+  padding: var(--space-2);
   border-radius: var(--radius);
   flex-wrap: wrap;
   flex-shrink: 0;
@@ -157,17 +159,18 @@ button:disabled {
 .profile-toolbar .tb-btn {
   border: none;
   background: transparent;
-  color: var(--primary);
-  padding: 0.35rem 0.15rem;
+  color: var(--text-2);
+  padding: var(--space-1) var(--space-3);
   font-weight: 500;
   font-size: var(--text-base);
   gap: 0.3rem;
 }
 .profile-toolbar .tb-btn:hover:not(:disabled) {
-  opacity: 0.85;
+  background: var(--bg-muted);
+  color: var(--text-1);
 }
 .profile-toolbar .tb-btn:disabled {
-  color: #c0c4cc;
+  color: var(--text-3);
   opacity: 1;
 }
 .profile-toolbar .tb-btn.danger {
@@ -175,6 +178,69 @@ button:disabled {
 }
 .profile-toolbar .tb-btn.refresh {
   color: var(--text-2);
+}
+
+.profile-toolbar .tb-btn.primary {
+  background: var(--primary);
+  color: var(--text-inverse);
+}
+.profile-toolbar .tb-btn.primary:hover:not(:disabled) {
+  background: var(--primary-deep);
+  color: var(--text-inverse);
+}
+.profile-toolbar .tb-btn.primary:disabled {
+  opacity: 0.55;
+}
+.profile-toolbar .tb-btn.active {
+  background: var(--primary-50);
+  color: var(--primary-deep);
+}
+.toolbar-scope {
+  padding-left: var(--space-2);
+  color: var(--text-3);
+  font-size: var(--text-xs);
+  font-variant-numeric: tabular-nums;
+}
+.toolbar-maintenance {
+  position: relative;
+  flex-shrink: 0;
+}
+.toolbar-maintenance > summary {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-height: var(--control-height);
+  padding: var(--space-1) var(--space-2);
+  border-radius: var(--radius-sm);
+  color: var(--text-2);
+  font-size: var(--text-sm);
+  cursor: pointer;
+  list-style: none;
+}
+.toolbar-maintenance > summary::-webkit-details-marker { display: none; }
+.toolbar-maintenance[open] > summary,
+.toolbar-maintenance > summary:hover { background: var(--bg-muted); }
+.toolbar-maintenance-menu {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 8px);
+  z-index: var(--z-menu);
+  display: grid;
+  gap: var(--space-2);
+  width: 248px;
+  max-width: calc(100vw - 32px);
+  padding: var(--space-4);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--bg-elevated);
+  box-shadow: var(--shadow-lg);
+}
+.toolbar-maintenance-menu > strong { font-size: var(--text-base); }
+.toolbar-maintenance-menu > span { color: var(--text-3); font-size: var(--text-sm); }
+.toolbar-maintenance-menu > button { justify-content: flex-start; }
+
+@media (max-width: 1200px) {
+  .toolbar-scope { display: none; }
 }
 
 /* ——— FilterToolbar ——— */
@@ -191,13 +257,14 @@ button:disabled {
 .view-seg {
   display: inline-flex;
   border: 1px solid var(--line-strong);
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   overflow: hidden;
   background: var(--bg-elevated);
 }
 .view-seg button {
-  width: 30px;
-  height: 30px;
+  width: 34px;
+  height: 34px;
+  min-height: 34px;
   padding: 0;
   border: none;
   border-radius: 0;
@@ -406,7 +473,7 @@ button.primary:active:not(:disabled),
 }
 @media (prefers-reduced-motion: reduce) {
   .dev-phone-loading::before {
-    animation-duration: 2.4s;
+    animation: none;
   }
   .dev-phone-loading img {
     animation: none;

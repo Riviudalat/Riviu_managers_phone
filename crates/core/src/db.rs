@@ -8,10 +8,13 @@ use uuid::Uuid;
 use crate::types::{JobRecord, JobStatus, JobStepRecord};
 
 mod automation;
+mod conversation;
 mod fleet;
 mod flow_runs;
 mod flows;
+mod gui;
 mod interaction;
+pub use conversation::{ConversationAlreadyRunning, ConversationSession};
 mod interaction_actions;
 mod inventory;
 mod jobs;
@@ -23,9 +26,13 @@ mod operation_log;
 mod orchestration;
 mod public_cleanup;
 mod publish;
+mod publish_pipeline;
+pub use publish_pipeline::PublishPipelineRun;
 mod publish_cleanup;
 mod publish_report;
 mod publish_sheet;
+mod publish_sheet_delivery;
+mod publish_submission;
 mod publish_verification;
 
 pub use flow_runs::{AttemptTransitionPatch, FlowStateConflict};
@@ -35,6 +42,7 @@ pub use publish::{PublishRunOutcome, PublishTransferSettle};
 pub use publish_cleanup::PendingPublishCleanup;
 pub use publish_report::InternalPublishReportPage;
 pub use publish_sheet::{SheetOutboxRow, SheetOutboxSettlement, SheetOutboxState};
+pub use publish_sheet_delivery::{SheetDeliveryClaim, SheetDeliveryKind, SheetDeliveryPayload};
 pub use publish_verification::{publish_campaign_input_digest, PendingPublishVerification};
 
 /// Somewhere to keep a secret that is **not** the SQLite file.
@@ -1120,6 +1128,7 @@ mod interaction_tests {
 
     fn request() -> ThreadCampaignRequest {
         ThreadCampaignRequest {
+            scripted_conversation: None,
             request_id: "interaction-db-1".into(),
             targets: vec![ResolvedTikTokTarget {
                 original_url: "https://www.tiktok.com/@creator/video/123".into(),
@@ -2251,6 +2260,9 @@ mod publish_tests {
     fn publish_campaign_persists_mapping_hash_manifest_and_revision_events() {
         let (db, path) = fixture();
         let request = PublishCampaignRequest {
+            sheet_delivery: None,
+            verification_contract_version: None,
+            verification_builds: vec![],
             sheet_enabled: true,
             request_id: "publish-db-1".into(),
             source_root: "/fixture/root".into(),
@@ -2259,6 +2271,7 @@ mod publish_tests {
             run_at: None,
             visibility: PublishVisibility::Public,
             cleanup_policy: PublishCleanupPolicy::DeleteImportedAssetsAfterVerified,
+            network: crate::SocialNetwork::TikTok,
             sound_policy: crate::publish::PublishSoundPolicy::TrendingAny {
                 pool_size: 5,
                 seed: 77,
@@ -2315,6 +2328,9 @@ mod publish_tests {
     fn publish_campaign_rejects_duplicate_device_mapping() {
         let (db, path) = fixture();
         let request = PublishCampaignRequest {
+            sheet_delivery: None,
+            verification_contract_version: None,
+            verification_builds: vec![],
             sheet_enabled: true,
             request_id: "publish-db-duplicate".into(),
             source_root: "/fixture/root".into(),
@@ -2323,6 +2339,7 @@ mod publish_tests {
             run_at: None,
             visibility: PublishVisibility::Public,
             cleanup_policy: PublishCleanupPolicy::DeleteImportedAssetsAfterVerified,
+            network: crate::SocialNetwork::TikTok,
             sound_policy: crate::publish::PublishSoundPolicy::Default,
             execution_confirmed: false,
             target_snapshot: None,

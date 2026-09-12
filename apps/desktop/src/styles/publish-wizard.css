@@ -550,10 +550,10 @@
   width: 580px;
   max-height: calc(100dvh - 32px);
   border: 1px solid var(--line-strong);
-  border-radius: 7px;
+  border-radius: 8px;
   padding: 0;
-  color: var(--text);
-  background: var(--bg-panel);
+  color: var(--text-1);
+  background: var(--bg-elevated);
   box-shadow: var(--shadow-lg);
   overflow: hidden;
 }
@@ -572,7 +572,7 @@
   align-items: center;
   justify-content: space-between;
   gap: 14px;
-  padding: 12px 18px;
+  padding: 16px 20px;
   min-height: 55px;
   border-bottom: 1px solid var(--line);
 }
@@ -583,20 +583,20 @@
   overflow-wrap: anywhere;
 }
 .publish-dialog-body {
-  padding: 16px 18px;
+  padding: 20px;
   overflow: auto;
   min-height: 0;
   font-size: var(--text-base);
   line-height: 1.6;
 }
 .publish-dialog > footer {
-  padding: 12px 18px;
+  padding: 12px 20px;
   display: flex;
   justify-content: flex-end;
   align-items: center;
   gap: 9px;
   border-top: 1px solid var(--line);
-  background: var(--bg-subtle);
+  background: var(--bg-muted);
   min-height: 58px;
   flex: none;
 }
@@ -620,9 +620,13 @@
   font-size: var(--text-base);
 }
 .pw-check-results {
-  max-height: 34dvh;
+  max-height: 48dvh;
   overflow: auto;
 }
+.pw-preflight-checks { margin: var(--space-2) 0; }
+.pw-preflight-checks > div { display: grid; grid-template-columns: minmax(130px, 1fr) minmax(0, 2fr); gap: var(--space-2); padding: 3px 0; }
+.pw-preflight-checks dd { margin: 0; }
+.pw-preflight-checks dd span { color: var(--text-2); font-size: var(--text-sm); }
 .pw-preflight-device {
   border-bottom: 1px solid var(--line);
   padding: var(--space-3) 0;

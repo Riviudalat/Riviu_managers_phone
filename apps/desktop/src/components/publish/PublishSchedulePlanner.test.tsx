@@ -14,46 +14,55 @@ beforeEach(() => { localStorage.clear(); vi.clearAllMocks(); vi.mocked(publishSc
 afterEach(() => { cleanup(); vi.restoreAllMocks(); });
 async function assignAll() {
   await userEvent.click(screen.getByRole("button", { name: "Chọn tất cả bài" }));
-  await userEvent.click(screen.getByRole("button", { name: "Chọn máy sẵn sàng" }));
+  await userEvent.click(screen.getByRole("button", { name: "Chọn tất cả sẵn sàng" }));
   await userEvent.click(screen.getByRole("button", { name: "Gán bài đã chọn" }));
   fireEvent.change(screen.getByLabelText("Ngày đăng"), { target: { value: "2099-09-10" } });
   fireEvent.change(screen.getByLabelText("Giờ chung"), { target: { value: "20:00" } });
 }
 describe("schedule assignment workspace", () => {
-  it("quick-selects ten posts and just ten available machines in one reversible change", async () => {
+  it("quick-selects ten posts onto ten machines and expands when more phones are ready", async () => {
     const ten = Array.from({ length: 10 }, (_, i) => ({ ...bundles[0], id: `q${i}`, name: `Quick ${i}` }));
     const twelve = Array.from({ length: 12 }, (_, i) => ({ ...devices[0], udid: `m${i}` }));
-    render(<PublishSchedulePlanner {...props} bundles={ten} devices={twelve} />);
+    const view = render(<PublishSchedulePlanner {...props} bundles={ten} devices={twelve.slice(0, 10)} />);
     await userEvent.click(screen.getByRole("button", { name: "Chọn nhanh" }));
     const original = localStorage.getItem(SCHEDULE_DRAFT_KEY)!;
     const saved = JSON.parse(original);
     expect(saved.rows.map((r: { udid: string }) => r.udid)).toEqual(twelve.slice(0, 10).map(d => d.udid));
     expect(saved.selectedMachines).toHaveLength(10);
     expect(saved.commonTime).toBe("");
-    expect(screen.getByRole("status")).toHaveTextContent("Đã gán 10/10 bài");
-    fireEvent.click(screen.getByRole("button", { name: "Chọn nhanh" }));
+    expect(screen.getByRole("status")).toHaveTextContent("Đã gán 10 bài cho 10 máy");
     fireEvent.click(screen.getByRole("button", { name: "Chọn nhanh" }));
     expect(localStorage.getItem(SCHEDULE_DRAFT_KEY)).toBe(original);
+    const more = Array.from({ length: 14 }, (_, i) => ({ ...bundles[0], id: `q${i}`, name: `Quick ${i}` }));
+    view.rerender(<PublishSchedulePlanner {...props} bundles={more} devices={twelve} />);
+    await userEvent.click(screen.getByRole("button", { name: "Chọn nhanh" }));
+    const expanded = JSON.parse(localStorage.getItem(SCHEDULE_DRAFT_KEY)!);
+    expect(expanded.rows).toHaveLength(12);
+    expect(expanded.selectedMachines).toHaveLength(12);
     await userEvent.click(screen.getByRole("button", { name: "Hoàn tác" }));
-    expect(document.querySelectorAll("[data-schedule-row]")).toHaveLength(0);
+    expect(JSON.parse(localStorage.getItem(SCHEDULE_DRAFT_KEY)!).rows).toHaveLength(10);
     expect(publishSchedulePreflight).not.toHaveBeenCalled(); expect(publishScheduleCreate).not.toHaveBeenCalled();
   });
-  it("quick selection respects chosen posts and machines and preserves manual mappings", async () => {
+  it("quick selection keeps manual mappings and fills free ready machines for the current rows", async () => {
     render(<PublishSchedulePlanner {...props} selectedIds={["b0", "b1"]} assignments={{ b0: "phone-2" }} />);
     await userEvent.click(screen.getByLabelText("Chọn máy hẹn giờ Máy 3"));
     await userEvent.click(screen.getByRole("button", { name: "Chọn nhanh" }));
     expect(screen.getByLabelText("Máy nhận Bài 1")).toHaveValue("phone-2");
-    expect(screen.getByLabelText("Máy nhận Bài 2")).toHaveValue("phone-3");
+    expect(screen.getByLabelText("Máy nhận Bài 2")).toHaveValue("phone-1");
     expect(screen.queryByLabelText("Máy nhận Bài 3")).toBeNull();
-    expect(screen.getByLabelText("Chọn máy hẹn giờ Máy 1")).not.toBeChecked();
+    expect(screen.getByLabelText("Chọn máy hẹn giờ Máy 1")).toBeChecked();
+    await userEvent.click(screen.getByRole("button", { name: "Chọn nhanh" }));
+    expect(screen.getByLabelText("Máy nhận Bài 3")).toHaveValue("phone-3");
   });
-  it("keeps lost explicit machines out and selects only the available capacity", async () => {
+  it("keeps lost machines out and fills the remaining ready capacity", async () => {
     const view = render(<PublishSchedulePlanner {...props} />);
     await userEvent.click(screen.getByLabelText("Chọn máy hẹn giờ Máy 1"));
     await userEvent.click(screen.getByLabelText("Chọn máy hẹn giờ Máy 2"));
     view.rerender(<PublishSchedulePlanner {...props} devices={devices.filter(d => d.udid !== "phone-2")} />);
     await userEvent.click(screen.getByRole("button", { name: "Chọn nhanh" }));
-    expect(screen.getByRole("status")).toHaveTextContent("Đã gán 1/1 bài");
+    expect(screen.getByRole("status")).toHaveTextContent("Đã gán 2 bài cho 2 máy");
+    expect(screen.getByLabelText("Máy nhận Bài 1")).toHaveValue("phone-1");
+    expect(screen.getByLabelText("Máy nhận Bài 2")).toHaveValue("phone-3");
     expect(screen.queryByLabelText("Máy nhận Bài 3")).toBeNull();
     expect(screen.getByRole("button", { name: "Kiểm tra lịch" })).toBeDisabled();
     await userEvent.click(screen.getByRole("button", { name: "Đặt giờ" }));
@@ -64,7 +73,7 @@ describe("schedule assignment workspace", () => {
     render(<PublishSchedulePlanner {...props} />);
     await userEvent.click(screen.getByRole("button", { name: "Chọn nhanh" }));
     expect(screen.getByRole("alert")).toHaveTextContent("Chưa lưu được bản nháp lịch");
-    expect(screen.getByRole("status")).toHaveTextContent("Đã gán 3/3 bài");
+    expect(screen.getByRole("status")).toHaveTextContent("Đã gán 3 bài cho 3 máy");
     fireEvent.change(screen.getByLabelText("Giờ chung"), { target: { value: "20:00" } });
     expect(screen.getByRole("alert")).toBeVisible();
     write.mockRestore();
@@ -222,7 +231,7 @@ describe("schedule assignment workspace", () => {
     Object.defineProperty(HTMLElement.prototype, "setPointerCapture", { configurable: true, value: vi.fn() });
     Object.defineProperty(HTMLElement.prototype, "hasPointerCapture", { configurable: true, value: () => false });
     const view = render(<PublishSchedulePlanner {...props} />);
-    fireEvent.click(screen.getByRole("button", { name: "Chọn máy sẵn sàng" }));
+    fireEvent.click(screen.getByRole("button", { name: "Chọn tất cả sẵn sàng" }));
     const zone = screen.getByRole("region", { name: "Vùng máy nhận bài" });
     const root = screen.getByRole("region", { name: "Lịch đăng nhiều khung giờ" });
     elementFromPoint.mockReturnValue(zone);

@@ -166,6 +166,8 @@ pub enum PublishPreflightCheck {
 #[derive(Debug, Clone, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PublishPreflightAssignmentReport {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub checks: Vec<crate::ui_automation::AutomationCheck>,
     pub ordinal: u32,
     pub bundle_id: String,
     pub udid: String,
@@ -192,6 +194,8 @@ pub struct PublishPreflightAssignmentReport {
 pub struct PublishPreflightReport {
     #[serde(default = "crate::publish::default_sheet_enabled")]
     pub sheet_enabled: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sheet_delivery: Option<crate::publish_sheet::SheetDeliveryTarget>,
     pub input_digest: String,
     pub target_snapshot: crate::ResolvedTargetSnapshot,
     pub can_execute: bool,
@@ -890,6 +894,7 @@ mod tests {
         assert!(request_json.get("runAt").is_none());
 
         let report = PublishPreflightReport {
+            sheet_delivery: None,
             sheet_enabled: true,
             input_digest: "a".repeat(64),
             target_snapshot: crate::resolve_target(
@@ -903,6 +908,7 @@ mod tests {
             .expect("resolve target fixture"),
             can_execute: false,
             assignments: vec![PublishPreflightAssignmentReport {
+                checks: Vec::new(),
                 ordinal: 0,
                 bundle_id: "bundle-1".into(),
                 udid: "phone-1".into(),

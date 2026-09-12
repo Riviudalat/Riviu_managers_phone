@@ -1,7 +1,23 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="app_name">Riviu helper</string>
+    <string name="app_name">Riviu Helper</string>
     <string name="ime_name">Riviu clipboard</string>
-    <string name="notification_title">Riviu helper</string>
-    <string name="notification_text">USB helper đang chạy — không phải bàn phím mặc định</string>
+    <string name="notification_title">Riviu Helper</string>
+    <string name="notification_text">Dịch vụ hỗ trợ Riviu đang chạy</string>
+    <string name="notification_waiting">Đang chờ kết nối từ Riviu Manager</string>
+    <string name="helper_purpose">Kết nối điện thoại với Riviu Manager trên máy tính.</string>
+    <string name="helper_functions">Hỗ trợ chuyển nội dung, bộ nhớ tạm và thông tin ứng dụng khi Riviu Manager cần sử dụng.</string>
+    <string name="status_heading">Dịch vụ trên điện thoại</string>
+    <string name="status_running">Đang hoạt động</string>
+    <string name="status_running_detail">Dịch vụ hỗ trợ đang sẵn sàng nhận yêu cầu từ Riviu Manager.</string>
+    <string name="status_waiting">Đang chờ kết nối</string>
+    <string name="status_waiting_detail">Riviu Manager đang chuẩn bị kết nối với điện thoại này.</string>
+    <string name="status_stopped">Chưa hoạt động</string>
+    <string name="status_stopped_detail">Mở Riviu Manager trên máy tính và kết nối điện thoại để sử dụng.</string>
+    <string name="status_error">Cần kiểm tra kết nối</string>
+    <string name="status_error_detail">Dịch vụ chưa khởi động được. Xem Chẩn đoán trong Riviu Manager trên máy tính.</string>
+    <string name="connection_heading">Sử dụng cùng Riviu Manager</string>
+    <string name="connection_description">Kết nối cáp USB và cho phép gỡ lỗi USB khi điện thoại yêu cầu. Riviu Manager tự chuẩn bị dịch vụ hỗ trợ khi cần.</string>
+    <string name="status_scope">Trạng thái này phản ánh dịch vụ hỗ trợ trên điện thoại, không phản ánh tiến độ tác vụ.</string>
+    <string name="helper_version">Phiên bản %1$s</string>
 </resources>

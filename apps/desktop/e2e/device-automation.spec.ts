@@ -32,7 +32,7 @@ for (const viewport of [{ width: 1673, height: 1000 }, { width: 1440, height: 90
     await tabs.getByRole("tab", { name: "Nuôi TikTok" }).click();
     await page.getByRole("button", { name: "Dùng 1 máy đã chọn" }).click();
     const dock = page.locator(".automation-host.is-docked");
-    await expect(dock.getByRole("region", { name: "Máy thực hiện", exact: true }).locator(".nurture-count")).toHaveText("Đã chọn 1/20");
+    await expect(dock.getByRole("region", { name: "Máy thực hiện", exact: true }).locator(".nurture-count")).toHaveText("Đã chọn 1");
     for (const name of ["Nuôi TikTok", "Tương tác", "Đăng bài"]) {
       await tabs.getByRole("tab", { name, exact: true }).click();
       await expect(tabs.getByRole("tab", { name, exact: true })).toHaveAttribute("aria-selected", "true");

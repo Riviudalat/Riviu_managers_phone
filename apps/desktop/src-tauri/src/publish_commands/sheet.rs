@@ -2,6 +2,7 @@
 
 use super::*;
 
+#[cfg(test)]
 pub(super) fn settle_publish_sheet_delivery_and_announce(
     db: &Database,
     events: &riviu_core::events::EventBus,
@@ -27,6 +28,7 @@ pub(super) fn settle_publish_sheet_delivery_and_announce(
 
 /// Finish the exact Sheet revision that was delivered, then converge the durable operation view.
 /// A stale CAS is an ordinary refusal and emits nothing because a newer row is still owed.
+#[cfg(test)]
 pub(crate) fn mark_publish_sheet_sent_and_reconcile(
     db: &Database,
     events: &riviu_core::events::EventBus,
@@ -47,74 +49,110 @@ pub(super) async fn deliver_assignment_sheet_row(
     events: &riviu_core::events::EventBus,
     assignment_id: &str,
 ) -> Result<(), String> {
-    let Some(row) = db
-        .pending_publish_sheet_row(assignment_id)
-        .map_err(|error| error.to_string())?
+    let Some(claim) = db
+        .claim_bound_sheet_delivery(
+            riviu_core::db::SheetDeliveryKind::Canonical,
+            Some(assignment_id),
+            chrono::Utc::now().timestamp_millis(),
+        )
+        .map_err(|e| e.to_string())?
     else {
+        if db
+            .pending_publish_sheet_row(assignment_id)
+            .map_err(|e| e.to_string())?
+            .is_some()
+        {
+            return Err("sheet_not_ready: Sheet vẫn đang chờ gửi hoặc cần xử lý; chưa nhận được xác nhận hàng hiện tại".into());
+        }
         return Ok(());
     };
-    let settings = db
-        .publish_sheet_delivery_settings()
-        .map_err(|error| error.to_string())?;
-    let webhook = settings.webhook_url;
-    let token = settings.token;
-    if !riviu_core::publish_sheet::is_acceptable_webhook(webhook.trim()) || token.trim().is_empty()
-    {
-        return Err(
-            "sheet_not_ready: bài đã đăng và link đang nằm trong outbox pending; cấu hình webhook HTTPS cùng token để gửi Sheet"
-                .into(),
+    deliver_bound_claim(db, events, claim)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+async fn deliver_bound_claim(
+    db: &Database,
+    events: &riviu_core::events::EventBus,
+    claim: riviu_core::db::SheetDeliveryClaim,
+) -> anyhow::Result<()> {
+    use riviu_core::db::{SheetDeliveryPayload, SheetOutboxSettlement};
+    let mut transport_accepted = false;
+    let delivered = async {
+        let settings = db.publish_sheet_delivery_settings()?;
+        anyhow::ensure!(
+            !settings.webhook_url.trim().is_empty() && !settings.token.trim().is_empty(),
+            "Sheet chưa cấu hình kết nối ghi"
         );
-    }
-    let payload = riviu_core::publish_sheet::SheetRow {
-        token,
-        post_url: row.post_url.clone(),
-        poster: row.poster.clone(),
-        partners: row.partners.clone(),
-        assignment_id: row.assignment_id.clone(),
-        posted_at: row.posted_at.clone(),
-    };
-    let metadata = if settings.internal_reporting {
-        match db.internal_publish_report(assignment_id) {
-            Ok(report) => report
-                .filter(|report| report.metadata.status == "Đã xác minh")
-                .map(|row| row.metadata),
-            Err(error) => {
-                log::warn!("Sheet nội bộ: chưa đọc được metadata {assignment_id} ({error:#})");
-                None
+        match &claim.payload {
+            SheetDeliveryPayload::Canonical { row, metadata } => {
+                let payload = riviu_core::publish_sheet::SheetRow {
+                    token: settings.token.clone(),
+                    post_url: row.post_url.clone(),
+                    poster: row.poster.clone(),
+                    partners: row.partners.clone(),
+                    assignment_id: row.assignment_id.clone(),
+                    posted_at: row.posted_at.clone(),
+                };
+                riviu_core::publish_sheet::push_bound_canonical(
+                    &settings.webhook_url,
+                    &payload,
+                    &claim.target,
+                    row.revision,
+                    metadata.as_ref(),
+                )
+                .await?;
+            }
+            SheetDeliveryPayload::Report(row) => {
+                riviu_core::publish_sheet::push_bound_internal_report(
+                    &settings.webhook_url,
+                    &settings.token,
+                    row,
+                    &claim.target,
+                )
+                .await?
             }
         }
-    } else {
-        None
-    };
-    if let Err(error) =
-        riviu_core::publish_sheet::push_row_with_metadata(&webhook, &payload, metadata.as_ref())
-            .await
-    {
-        let reason = error.to_string();
-        let marked = db
-            .mark_publish_sheet_failed(&row.assignment_id, row.revision, &reason)
-            .map_err(|error| error.to_string())?;
-        if !marked
-            && db
-                .pending_publish_sheet_row(&row.assignment_id)
-                .map_err(|error| error.to_string())?
-                .is_none()
-        {
-            return Ok(());
+        transport_accepted = true;
+        let (campaign, input_digest, target_snapshot) = match &claim.payload {
+            SheetDeliveryPayload::Canonical { row, .. } => {
+                let (digest, target) = publish_reconciliation_identity(db, &row.campaign_id)?;
+                (Some(row.campaign_id.as_str()), digest, target)
+            }
+            SheetDeliveryPayload::Report(_) => (None, None, None),
+        };
+        let settlement = db.settle_bound_sheet_delivery(
+            &claim,
+            input_digest.as_deref(),
+            target_snapshot.as_ref(),
+            chrono::Utc::now().timestamp_millis(),
+        )?;
+        if matches!(settlement, SheetOutboxSettlement::Delivered(_)) {
+            if let Some(campaign) = campaign {
+                announce(events, db, campaign);
+            }
         }
-        return Err(reason);
+        anyhow::ensure!(
+            !matches!(settlement, SheetOutboxSettlement::StaleRevision),
+            "Sheet đã trả kết quả nhưng quyền gửi đã thay đổi; hàng hiện tại vẫn được giữ"
+        );
+        Ok::<_, anyhow::Error>(())
     }
-    let marked = mark_publish_sheet_sent_and_reconcile(db, events, &row)
-        .map_err(|error| error.to_string())?;
-    if !marked
-        && db
-            .pending_publish_sheet_row(&row.assignment_id)
-            .map_err(|error| error.to_string())?
-            .is_some()
-    {
-        return Err("Sheet accepted the row but its outbox revision changed".into());
+    .await;
+    if let Err(error) = &delivered {
+        let retryable = transport_accepted
+            || riviu_core::publish_sheet::sheet_delivery_error_is_retryable(error);
+        db.fail_bound_sheet_delivery(
+            &claim,
+            &format!("{error:#}"),
+            retryable,
+            chrono::Utc::now().timestamp_millis(),
+        )?;
+        if let SheetDeliveryPayload::Canonical { row, .. } = &claim.payload {
+            announce(events, db, &row.campaign_id);
+        }
     }
-    Ok(())
+    delivered
 }
 
 /// What the Sheet delivery is configured with — minus the token itself.
@@ -163,7 +201,7 @@ pub async fn publish_sheet_check(
     let result = riviu_core::publish_sheet::check_sheet(&sheet_url, &settings)
         .await
         .map_err(err)?;
-    if result.readable {
+    if result.connection_verified {
         state
             .db
             .set_setting(
@@ -171,6 +209,17 @@ pub async fn publish_sheet_check(
                 &result.sheet_url,
             )
             .map_err(err)?;
+        let internal = result.layout.as_deref() == Some("internal");
+        if internal != settings.internal_reporting {
+            state
+                .db
+                .set_publish_sheet_config_with_reporting(
+                    &settings.webhook_url,
+                    Some(&settings.token),
+                    Some(internal),
+                )
+                .map_err(err)?;
+        }
     }
     Ok(result)
 }
@@ -185,6 +234,9 @@ pub async fn publish_sheet_prepare(
     let result = riviu_core::publish_sheet::prepare_sheet(&sheet_url, &settings)
         .await
         .map_err(err)?;
+    if !result.connection_verified {
+        return Err(err("Sheet chưa xác minh kết nối ghi"));
+    }
     state
         .db
         .set_setting(
@@ -192,13 +244,14 @@ pub async fn publish_sheet_prepare(
             &result.sheet_url,
         )
         .map_err(err)?;
-    if result.layout.as_deref() == Some("internal") && !settings.internal_reporting {
+
+    if (result.layout.as_deref() == Some("internal")) != settings.internal_reporting {
         state
             .db
             .set_publish_sheet_config_with_reporting(
                 &settings.webhook_url,
                 Some(&settings.token),
-                Some(true),
+                Some(result.layout.as_deref() == Some("internal")),
             )
             .map_err(err)?;
     }
@@ -265,145 +318,74 @@ pub fn publish_sheet_save_config(
     publish_sheet_config_of(&state.db)
 }
 
-#[derive(Default)]
-pub(crate) struct InternalSheetSync {
-    configuration: String,
-    cursor: Option<String>,
-    acknowledged: HashMap<String, String>,
-    retry: HashMap<String, (Instant, u32)>,
-}
-
-impl InternalSheetSync {
-    pub(crate) fn configure(
-        &mut self,
-        settings: &riviu_core::publish_sheet::SheetDeliverySettings,
-    ) {
-        use sha2::Digest;
-        let mut hash = sha2::Sha256::new();
-        hash.update(settings.webhook_url.as_bytes());
-        hash.update([0]);
-        hash.update(settings.token.as_bytes());
-        hash.update([u8::from(settings.internal_reporting)]);
-        let fingerprint = format!("{:x}", hash.finalize());
-        if self.configuration != fingerprint {
-            self.configuration = fingerprint;
-            self.cursor = None;
-            self.acknowledged.clear();
-            self.retry.clear();
-        }
-    }
-
-    fn due(&self, id: &str, digest: &str, now: Instant) -> bool {
-        self.acknowledged.get(id).is_none_or(|old| old != digest)
-            && self.retry.get(id).is_none_or(|(at, _)| *at <= now)
-    }
-
-    fn failed(&mut self, id: &str, now: Instant) {
-        let attempts = self
-            .retry
-            .get(id)
-            .map_or(1, |(_, count)| count.saturating_add(1));
-        let seconds = 45u64.saturating_mul(1u64 << attempts.min(4)).min(900);
-        self.retry
-            .insert(id.into(), (now + Duration::from_secs(seconds), attempts));
-    }
-
-    fn accepted(&mut self, id: String, digest: String) {
-        self.retry.remove(&id);
-        self.acknowledged.insert(id, digest);
-    }
-}
-
-/// DB-only projection and bounded transport; never changes Publish or classic outbox state.
-pub(crate) async fn sync_internal_sheet_reports(
-    db: &Database,
-    settings: &riviu_core::publish_sheet::SheetDeliverySettings,
-    sync: &mut InternalSheetSync,
-) -> anyhow::Result<()> {
+/// Independent canonical/report work with a shared durable per-assignment claim.
+/// Reports can occupy only one slot, leaving capacity for a newly verified link.
+pub(crate) async fn run_bound_sheet_worker(
+    db: Arc<Database>,
+    events: riviu_core::events::EventBus,
+    stop: Arc<std::sync::atomic::AtomicBool>,
+) {
+    use riviu_core::db::SheetDeliveryKind;
     use sha2::Digest;
-    sync.configure(settings);
-    if !settings.internal_reporting {
-        return Ok(());
-    }
-    let page = db.internal_publish_report_batch(sync.cursor.as_deref(), 50)?;
-    for (id, reason) in &page.errors {
-        log::warn!("Sheet nội bộ: bỏ qua hàng dữ liệu lỗi {id}: {reason}");
-    }
-    let rows = page.rows;
-    let page_len = rows.len();
-    let mut sent = 0usize;
-    let mut consumed = 0usize;
-    for row in rows {
-        sync.cursor = Some(row.assignment_id.clone());
-        consumed += 1;
-        let digest = format!("{:x}", sha2::Sha256::digest(serde_json::to_vec(&row)?));
-        if !sync.due(&row.assignment_id, &digest, Instant::now()) {
-            continue;
+    let mut tasks = tokio::task::JoinSet::new();
+    let mut tick = tokio::time::interval(Duration::from_secs(1));
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    loop {
+        tokio::select! {
+            _=tick.tick()=>{},
+            result=tasks.join_next(),if !tasks.is_empty()=>{
+                if let Some(Err(error))=result {log::warn!("Sheet delivery worker failed: {error}");}
+            },
         }
-        sent += 1;
-        match riviu_core::publish_sheet::push_internal_report(
-            &settings.webhook_url,
-            &settings.token,
-            &row,
-        )
-        .await
-        {
-            Ok(()) => sync.accepted(row.assignment_id, digest),
-            Err(error) => {
-                sync.failed(&row.assignment_id, Instant::now());
-                log::warn!(
-                    "Sheet nội bộ: chưa cập nhật hàng {}: {error:#}",
-                    row.assignment_id
-                );
-            }
-        }
-        if sent >= 5 {
+        if stop.load(std::sync::atomic::Ordering::Acquire) {
             break;
         }
-    }
-    if consumed == page_len {
-        sync.cursor = if page.has_more {
-            page.next_cursor
-        } else {
-            None
+        let settings = match db.publish_sheet_delivery_settings() {
+            Ok(settings) => settings,
+            Err(error) => {
+                log::warn!("Sheet: không đọc được kết nối: {error:#}");
+                continue;
+            }
         };
+        if settings.webhook_url.trim().is_empty() || settings.token.trim().is_empty() {
+            continue;
+        }
+        let mut digest = sha2::Sha256::new();
+        digest.update(settings.webhook_url.as_bytes());
+        digest.update([0]);
+        digest.update(settings.token.as_bytes());
+        let fingerprint = format!("{:x}", digest.finalize());
+        let now = chrono::Utc::now().timestamp_millis();
+        if let Err(error) = db.configure_bound_sheet_delivery(&fingerprint, now) {
+            log::warn!("Sheet: không cập nhật được lịch gửi: {error:#}");
+            continue;
+        }
+        for kind in [
+            SheetDeliveryKind::Canonical,
+            SheetDeliveryKind::Report,
+            SheetDeliveryKind::Canonical,
+        ] {
+            if tasks.len() >= 2 {
+                break;
+            }
+            match db.claim_bound_sheet_delivery(kind, None, now) {
+                Ok(Some(claim)) => {
+                    let db = db.clone();
+                    let events = events.clone();
+                    tasks.spawn(async move {
+                        if let Err(error) = deliver_bound_claim(&db, &events, claim).await {
+                            log::warn!("Sheet chưa gửi được: {error:#}");
+                        }
+                    });
+                }
+                Ok(None) => {}
+                Err(error) => log::warn!("Sheet: không nhận được hàng đến hạn: {error:#}"),
+            }
+        }
     }
-    Ok(())
-}
-
-#[cfg(test)]
-mod internal_tests {
-    use super::*;
-    #[test]
-    fn internal_report_cache_retries_changed_rows_and_resets_for_credentials_or_restart() {
-        let settings = riviu_core::publish_sheet::SheetDeliverySettings {
-            webhook_url: "https://example.com/a".into(),
-            token: "a".into(),
-            internal_reporting: true,
-        };
-        let mut sync = InternalSheetSync::default();
-        sync.configure(&settings);
-        let now = Instant::now();
-        assert!(sync.due("a", "v1", now));
-        sync.accepted("a".into(), "v1".into());
-        assert!(!sync.due("a", "v1", now));
-        assert!(sync.due("a", "v2", now));
-        sync.failed("poison", now);
-        assert!(!sync.due("poison", "v1", now));
-        assert!(sync.due("next", "v1", now));
-        assert!(sync.due("poison", "v1", now + Duration::from_secs(901)));
-        sync.configure(&settings);
-        assert!(!sync.due("a", "v1", now));
-        let mut changed = settings.clone();
-        changed.token = "b".into();
-        sync.configure(&changed);
-        assert!(sync.due("a", "v1", now));
-        sync.accepted("a".into(), "v1".into());
-        changed.internal_reporting = false;
-        sync.configure(&changed);
-        assert!(sync.acknowledged.is_empty());
-        let mut restarted = InternalSheetSync::default();
-        restarted.configure(&settings);
-        assert!(restarted.due("a", "v1", now));
+    while let Some(result) = tasks.join_next().await {
+        if let Err(error) = result {
+            log::warn!("Sheet shutdown delivery failed: {error}");
+        }
     }
 }

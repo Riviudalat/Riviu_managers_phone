@@ -55,7 +55,15 @@ export function PublishQuickSetup(p: PublishWizardProps & { blockingReason?: str
     }
     setPicked(next.picked);
     setError("");
-    setNotice(next.ids.length ? `Đã gán ${next.ids.length} bài cho ${next.ids.length} máy. ${bundles.length - next.ids.length} bài còn lại để đợt sau.` : "Chưa có máy sẵn sàng trong lựa chọn. Kiểm tra kết nối hoặc chọn lại máy.");
+    const leftover = bundles.length - next.ids.length;
+    const freeReady = ready.length - next.picked.length;
+    setNotice(!next.ids.length
+      ? "Chưa có máy sẵn sàng trong phạm vi. Kiểm tra kết nối hoặc chọn lại nhóm máy."
+      : leftover
+        ? `Đã gán ${next.ids.length} bài cho ${next.ids.length} máy. ${leftover} bài còn lại vì hết máy sẵn sàng.`
+        : freeReady
+          ? `Đã gán ${next.ids.length} bài cho ${next.ids.length} máy. Còn ${freeReady} máy sẵn sàng nhưng hết bài trong nguồn.`
+          : `Đã gán ${next.ids.length} bài cho ${next.ids.length} máy.`);
   };
   const undoAssignment = () => {
     if (!undo || undo.source !== p.sourceRoot || undo.after !== mappingKey) return;
@@ -79,7 +87,7 @@ export function PublishQuickSetup(p: PublishWizardProps & { blockingReason?: str
     {error && <div className="pq-error" role="alert">{error}<button type="button" aria-label="Đóng lỗi" onClick={() => setError("")}><X size={14}/></button></div>}
     <div className="pq-columns">
       <section className="pq-library pq-panel" aria-label="Nội dung đăng">
-        <header><h2>Nội dung</h2><span>{bundles.length} bài</span></header>
+        <header><div><span className="automation-section-kicker">Nguồn đăng</span><h2>Nội dung</h2></div><span>{bundles.length} bài</span></header>
         <label className="pq-search"><Search size={15}/><input aria-label="Tìm bài đăng" placeholder="Tìm bài đăng" value={query} onChange={e => setQuery(e.target.value)}/></label>
         <div className="pq-tools"><button type="button" className="ghost" disabled={locked || !bundles.length} onClick={() => p.onSelect(bundles.map(b => b.id))}>Chọn tất cả bài</button><button type="button" className="ghost" disabled={locked} onClick={() => p.onSelect([])}>Bỏ chọn</button><small>{selected.length} đã chọn</small></div>
         <div className="pq-posts">{visibleBundles.map(b => <article key={b.id} className={b.id === active?.id ? "is-active" : ""}>
@@ -91,7 +99,7 @@ export function PublishQuickSetup(p: PublishWizardProps & { blockingReason?: str
         <footer>{p.scanning ? "Đang đọc nội dung…" : `${bundles.length} bài trong thư mục`}</footer>
       </section>
       <section className="pq-editor pq-panel" aria-label="Bài đang chỉnh">
-        <header><h2>Bài đang chỉnh</h2><span>{active?.mediaKind === "video" ? "Video" : "Bộ ảnh"}</span></header>
+        <header><div><span className="automation-section-kicker">Biên tập</span><h2>Bài đang chỉnh</h2></div>{active && <span>{active.mediaKind === "video" ? "Video" : "Bộ ảnh"}</span>}</header>
         {active ? <div className="pq-editor-scroll">
           <div className="pq-active-title"><PublishMedia bundle={active}/><div><h3>{active.name}</h3><small>{active.images.length} ảnh · {(active.totalBytes/1048576).toFixed(1)} MB</small></div><button type="button" className="ghost" aria-label="Phóng to ảnh" onClick={() => setDialog("preview")}><Image size={18}/></button></div>
           <label className="pq-field"><span>Nội dung bài đăng</span><textarea aria-label="Nội dung bài đăng" rows={5} value={p.captions[active.id] ?? active.caption} disabled={locked} onChange={e => p.onCaption(active.id,e.target.value)}/></label>
@@ -103,17 +111,17 @@ export function PublishQuickSetup(p: PublishWizardProps & { blockingReason?: str
         </div> : <div className="pq-empty"><Image size={34}/><strong>Nội dung và đối tác hiện tại đây</strong><p>Chọn một bài trong danh sách bên trái.</p></div>}
       </section>
       <section className="pq-devices pq-panel" aria-label="Máy thực hiện">
-        <header><h2>Máy thực hiện</h2><span>{new Set([...picked,...selected.map(b=>p.assignments[b.id]).filter(Boolean)]).size} / {devices.length}</span></header>
+        <header><div><span className="automation-section-kicker">Phân công</span><h2>Máy thực hiện</h2></div><span className="machine-select-count" role="status">Đã chọn {new Set([...picked,...selected.map(b=>p.assignments[b.id]).filter(Boolean)]).size}</span></header>
         <div className="pq-quick-actions"><button type="button" className="pq-quick-button" disabled={locked || !bundles.length} onClick={autoAssign}><Zap size={16} aria-hidden="true"/>Chọn nhanh</button><button type="button" aria-label="Hoàn tác gán nhanh" disabled={locked || !undo || undo.source !== p.sourceRoot || undo.after !== mappingKey} onClick={undoAssignment}><Undo2 size={16} aria-hidden="true"/>Hoàn tác</button></div>
         {notice && <p className="pq-hint" role="status">{notice}</p>}
         <label className="pq-search"><Search size={15}/><input aria-label="Tìm số máy" value={deviceQuery} onChange={e => setDeviceQuery(e.target.value)} placeholder="Tìm số máy"/></label>
-        <div className="pq-tools"><button type="button" className="ghost" disabled={locked} onClick={() => setPicked(ready.map(d => d.udid))}>Chọn tất cả</button><button type="button" className="ghost" disabled={locked} onClick={() => {setPicked([]);p.onAssign({});}}>Bỏ chọn</button>{p.scopeControl}</div>
+        <div className="pq-tools"><button type="button" className="ghost" title="Chọn tất cả máy sẵn sàng trong phạm vi, kể cả ngoài kết quả tìm kiếm" disabled={locked || !ready.length} onClick={() => setPicked(ready.map(d => d.udid))}>Chọn tất cả sẵn sàng</button><button type="button" className="ghost" disabled={locked || (!picked.length && !selected.some(b => p.assignments[b.id]))} onClick={() => {setPicked([]);p.onAssign({});}}>Bỏ chọn</button>{p.scopeControl}<small>{mapped} bài đã ghép · {ready.length} sẵn sàng</small></div>
         {!p.eligible.length && <p className="pq-hint">Chọn Toàn bộ máy hoặc một nhóm để ghép bài.</p>}
         <div className="pq-machine-grid machine-choice-grid">{devices.filter(d => `${label(d.udid)} ${p.metas.get(d.udid)?.handle ?? ""}`.toLocaleLowerCase().includes(deviceQuery.toLocaleLowerCase())).map(d => {
           const i=deviceIndex.get(d.udid)!.index, assigned=assignedByDevice.get(d.udid),checked=picked.includes(d.udid)||Boolean(assigned);
-          return <MachineChoice key={d.udid} number={tileNumber(i+1,p.metas.get(d.udid))} name={tileName(d,p.metas.get(d.udid))} status={d.status} label={`Chọn ${label(d.udid)}`} checked={checked} disabled={locked || (!checked && !readyIds.has(d.udid))} onChange={value=>{setPicked(value?[...new Set([...picked,d.udid])]:picked.filter(id=>id!==d.udid));if(!value)clearDevice(d.udid);}} detail={assigned?<span title={assigned.name}>{assigned.name}</span>:undefined}/>;
+          return <MachineChoice key={d.udid} number={tileNumber(i+1,p.metas.get(d.udid))} name={tileName(d,p.metas.get(d.udid))} status={d.status} reason={d.lastError} label={`Chọn ${label(d.udid)}`} checked={checked} disabled={locked || (!checked && !readyIds.has(d.udid))} onChange={value=>{setPicked(value?[...new Set([...picked,d.udid])]:picked.filter(id=>id!==d.udid));if(!value)clearDevice(d.udid);}} detail={assigned?<span title={assigned.name}>{assigned.name}</span>:undefined}/>;
         })}</div>
-        <footer><small>{ready.length} máy sẵn sàng trong phạm vi</small></footer>
+        <footer><small>{ready.length} máy sẵn sàng trong phạm vi · {devices.length} tổng</small></footer>
       </section>
     </div>
     <footer className="pq-footer"><div><strong>{selected.length} bài đã chọn</strong><span>{mapped}/{selected.length} bài có máy · mỗi máy một bài · Sheet {p.sheet ? "bật" : "tắt"}</span>{checkReason && <small id="publish-check-reason" role="status">{checkReason}</small>}</div><button type="button" className="primary" aria-describedby={checkReason ? "publish-check-reason" : undefined} disabled={locked || !complete || !captionsValid} onClick={()=>{setReportPage(0);setDialog("check");void p.onPreflight();}}>{p.preflightLoading?"Đang kiểm tra…":"Kiểm tra & đăng"}<ArrowRight size={16}/></button></footer>

@@ -9,7 +9,7 @@ import org.json.JSONObject;
  * Changing a field name here without changing that file is a protocol break.
  */
 final class Protocol {
-    static final String AGENT_VERSION = "0.4.0";
+    static final String AGENT_VERSION = "0.5.0";
     static final int PROTOCOL_VERSION = 1;
     static final int PORT = 17980;
     static final int MAX_BODY_BYTES = 64 * 1024;
@@ -31,6 +31,8 @@ final class Protocol {
         // than sitting there serving the whole device. `/status` stays exempt precisely so this
         // answer is readable before a token has been provisioned.
         features.put("auth");
+        // A named home-screen entry with the Riviu icon and a read-only status screen.
+        features.put("launcher");
         return new JSONObject()
                 .put("ok", true)
                 .put("agentVersion", AGENT_VERSION)

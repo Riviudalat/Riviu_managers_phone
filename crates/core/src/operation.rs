@@ -1030,6 +1030,8 @@ mod tests {
             actions: Vec::new(),
         };
         let detail = project_interaction_detail(&InteractionCampaignDetail {
+            scripted_conversation: None,
+            conversation_session: None,
             summary,
             assignments: vec![
                 assignment("sent", ThreadMessageState::Succeeded),
@@ -1176,6 +1178,7 @@ mod tests {
             },
             bundles: Vec::new(),
             assignments: vec![crate::PublishAssignmentRecord {
+                sheet_delivery: None,
                 id: "assignment-a".into(),
                 campaign_id: campaign_id.clone(),
                 bundle_id: "bundle-a".into(),
@@ -1293,6 +1296,7 @@ mod tests {
             },
             bundles: Vec::new(),
             assignments: vec![crate::PublishAssignmentRecord {
+                sheet_delivery: None,
                 id: "assignment-a".into(),
                 campaign_id: campaign_id.clone(),
                 bundle_id: "bundle-a".into(),
@@ -1348,6 +1352,9 @@ mod tests {
             partners: Vec::new(),
         };
         let request = crate::PublishCampaignRequest {
+            sheet_delivery: None,
+            verification_contract_version: None,
+            verification_builds: vec![],
             sheet_enabled: true,
             request_id: "request-orphan-db".into(),
             source_root: "C:/fixture".into(),
@@ -1356,6 +1363,7 @@ mod tests {
             run_at: None,
             visibility: crate::PublishVisibility::Public,
             cleanup_policy: crate::PublishCleanupPolicy::DeleteImportedAssetsAfterVerified,
+            network: crate::SocialNetwork::TikTok,
             sound_policy: crate::PublishSoundPolicy::Default,
             execution_confirmed: true,
             target_snapshot: None,
@@ -1434,6 +1442,9 @@ mod tests {
             partners: Vec::new(),
         };
         let request = crate::PublishCampaignRequest {
+            sheet_delivery: None,
+            verification_contract_version: None,
+            verification_builds: vec![],
             sheet_enabled: true,
             request_id: "verifying-projection".into(),
             source_root: "C:/fixture".into(),
@@ -1442,6 +1453,7 @@ mod tests {
             run_at: None,
             visibility: crate::PublishVisibility::Public,
             cleanup_policy: crate::PublishCleanupPolicy::KeepImportedAssets,
+            network: crate::SocialNetwork::TikTok,
             sound_policy: crate::PublishSoundPolicy::Default,
             execution_confirmed: true,
             target_snapshot: None,

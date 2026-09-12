@@ -546,11 +546,11 @@ describe("a per-phone panel whose phone leaves the fleet", () => {
     vi.mocked(api.listDevices).mockResolvedValue([androidPhone]);
   });
 
-  /** Swap the roster and press the header's refresh, which reloads it. */
+  /** Swap the roster and use the single device scan action on the current page. */
   async function rosterBecomes(devices: DeviceInfo[]) {
     const api = await import("./api");
     vi.mocked(api.listDevices).mockResolvedValue(devices);
-    await userEvent.click(screen.getByTitle("Làm mới danh sách máy"));
+    await userEvent.click(screen.queryByTitle("Quét lại thiết bị") ?? screen.getByTitle("Làm mới danh sách máy"));
   }
 
   /**
@@ -707,20 +707,42 @@ describe("fleet health banners", () => {
     await waitFor(() => expect(screen.queryByText(/adb/i)).not.toBeInTheDocument());
   });
 
-  it("keeps an iOS failure scoped without claiming the Android fleet is empty", async () => {
+  it("keeps an unused iOS failure out of an Android-only workspace", async () => {
     // Android startup is independent. A broken iOS sidecar may explain absent iPhones, but
     // it must not turn a healthy Android-only install into a global backend failure.
     const api = await import("./api");
     vi.mocked(api.listDevices).mockResolvedValue([androidPhone]);
     vi.mocked(api.driverDegradedReason).mockResolvedValueOnce("sidecar iOS bị suy giảm");
     render(<App />);
-    await waitFor(() =>
-      expect(screen.getByText(/sidecar iOS bị suy giảm/)).toBeInTheDocument(),
-    );
+    await waitFor(() => expect(api.driverDegradedReason).toHaveBeenCalled());
     await waitFor(() => expect(screen.getByText("Redmi")).toBeInTheDocument());
     expect(screen.queryByText(/danh sách sẽ luôn trống/)).not.toBeInTheDocument();
-    expect(screen.getByText(/Nhánh iOS không sẵn sàng/)).toBeInTheDocument();
+    expect(screen.queryByText(/Nhánh iOS không sẵn sàng/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/sidecar iOS bị suy giảm/)).not.toBeInTheDocument();
     expect(screen.queryByText(/khởi động lại app/)).not.toBeInTheDocument();
+  });
+
+  it("keeps the iOS warning visible for a connected iPhone in a mixed fleet", async () => {
+    const api = await import("./api");
+    vi.mocked(api.listDevices).mockResolvedValueOnce([
+      androidPhone,
+      { ...androidPhone, udid: "ios-warning", name: "iPhone", platform: "ios", status: "connected" },
+    ]);
+    vi.mocked(api.driverDegradedReason).mockResolvedValueOnce("sidecar iOS bị suy giảm");
+    render(<App />);
+    expect(await screen.findByText(/Nhánh iOS không sẵn sàng/)).toBeInTheDocument();
+    expect(screen.getByText("Redmi")).toBeInTheDocument();
+  });
+
+  it("does not alert about iOS for an empty fleet or a disconnected iPhone", async () => {
+    const api = await import("./api");
+    vi.mocked(api.listDevices).mockResolvedValueOnce([
+      { ...androidPhone, udid: "ios-offline", name: "iPhone", platform: "ios", status: "disconnected" },
+    ]);
+    vi.mocked(api.driverDegradedReason).mockResolvedValueOnce("sidecar iOS bị suy giảm");
+    render(<App />);
+    await waitFor(() => expect(api.driverDegradedReason).toHaveBeenCalled());
+    expect(screen.queryByText(/Nhánh iOS không sẵn sàng/)).not.toBeInTheDocument();
   });
 });
 

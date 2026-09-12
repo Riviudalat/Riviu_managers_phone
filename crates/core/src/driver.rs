@@ -626,6 +626,24 @@ pub struct HierarchySourceSnapshot {
 
 #[async_trait]
 pub trait UiSession: Send + Sync {
+    fn set_gui_scope(&self, _scope: crate::ui_automation::GuiScope) {}
+    fn gui_scope(&self) -> Option<crate::ui_automation::GuiScope> {
+        None
+    }
+    /// Optional perception provider. It cannot dispatch device actions or change effect state.
+    fn gui_reasoner(&self) -> Option<crate::ui_automation::SharedReasoner> {
+        None
+    }
+    /// Changes whenever a UI session is replaced; responses from an older epoch are discarded.
+    fn gui_session_epoch(&self) -> String {
+        String::new()
+    }
+    fn gui_compatibility_pack(
+        &self,
+        _package: &str,
+    ) -> Option<crate::ui_automation::profile::CompatibilityPack> {
+        None
+    }
     async fn tap(&self, point: TapPoint) -> anyhow::Result<()>;
     /// Tap the way a finger does, through the UI hierarchy rather than by
     /// synthesising HID events.
@@ -962,6 +980,8 @@ pub trait UiSession: Send + Sync {
 /// `text` and an empty `content-desc`, so only its class identifies it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ElementQuery<'a> {
+    /// Resolve an app-defined role against the current hierarchy, never a cached point.
+    Semantic(&'a str),
     /// Match `content-desc`. `exact` is false for labels that embed a value: a
     /// comment label carries its own count (`… 697 bình luận`), so an exact match
     /// can never hit one.

@@ -21,6 +21,7 @@ use uuid::Uuid;
 use crate::state::AppState;
 
 mod execution;
+pub(crate) mod pipeline;
 mod verification;
 mod verification_queue;
 pub(crate) use verification::verify_pending_assignment;
@@ -30,7 +31,7 @@ pub(crate) use verified_cleanup::cleanup_verified_assignments;
 mod progress;
 mod schedule;
 pub use schedule::*;
-mod preflight;
+pub(crate) mod preflight;
 mod preview;
 mod sheet;
 // Unregistered stepwise entry points and their historical calibration.

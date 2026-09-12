@@ -1,114 +1,105 @@
-/* The approved Nuôi workspace. Every selector stays inside this page surface. */
-.nurture-workspace .nurture-page-tabs { position: sticky; top: 0; z-index: 3; flex-shrink: 0; overflow-x: auto; gap: 24px; background: var(--bg); }
-.nurture-workspace .nurture-page-tabs button { white-space: nowrap; }
-.nurture-workspace .nurture-session-card, .nurture-workspace .nurture-config-body { scroll-margin-top: 50px; }
-.nurture-workspace .nurture-config-body { padding: 16px; border: 1px solid var(--line); border-radius: 7px; background: var(--bg-elevated); }
-.nurture-workspace .nurture-default-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; margin-top: 16px; }
-.nurture-workspace .nurture-default-actions > span { color: var(--text-3); font-size: var(--text-sm); }
-.nurture-workspace .nurture-machine-grid { flex: 1; min-height: 0; overscroll-behavior: contain; }
-.nurture-workspace .nurture-machine-empty { grid-column: 1 / -1; color: var(--text-3); font-size: var(--text-sm); }
-.nurture-workspace .nurture-workspace-body { display: flex; flex-direction: column; gap: 10px; overflow: hidden; }
+/* Setup and machine selection own their scroll regions; actions remain reachable. */
+.nurture-workspace [hidden] { display: none; }
+.nurture-workspace .automation-page-tabs { position: sticky; top: 0; z-index: 3; flex-shrink: 0; }
+.nurture-workspace .nurture-workspace-inner { border: 0; border-radius: 0; background: transparent; }
+.nurture-workspace .nurture-workspace-body { display: flex; flex-direction: column; gap: 16px; overflow: hidden; padding: 0; }
 .nurture-workspace #nurture-page-panel-setup { flex: 1; min-height: 0; }
 .nurture-workspace #nurture-page-panel-schedule { flex: 1; min-height: 0; overflow: auto; }
-.nurture-workspace .nurture-workspace-inner { border: 0; border-radius: 0; background: transparent; }
-.nurture-workspace .nurture-workspace-body { padding: 0; }
 .nurture-workspace .nurture-float-body { scroll-padding-block: 16px 80px; }
-.nurture-workspace .nurture-page-tabs { margin-bottom: 0; }
 .nurture-workspace .nurture-session-layout { display: grid; grid-template-columns: minmax(0, 1fr) 350px; gap: 16px; height: 100%; min-height: 0; }
+.nurture-setup-fields { display: grid; grid-template-columns: minmax(0, 1fr); grid-auto-rows: max-content; align-content: start; gap: 16px; min-width: 0; min-height: 0; overflow-y: auto; padding: 2px; overscroll-behavior: contain; }
 .nurture-workspace .nurture-session-card,
-.nurture-workspace .nurture-machines-card { display: flex; flex-direction: column; min-width: 0; min-height: 0; padding: 16px; border: 1px solid var(--line); border-radius: 7px; background: var(--bg-elevated); }
-.nurture-workspace .nurture-card-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 16px; }
+.nurture-workspace .nurture-machines-card,
+.nurture-workspace .nurture-config-body { min-width: 0; min-height: 0; padding: 20px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg-elevated); scroll-margin-top: 50px; }
+.nurture-workspace .nurture-session-card,
+.nurture-workspace .nurture-machines-card { display: flex; flex-direction: column; }
+.nurture-workspace .nurture-machines-card { align-self: stretch; padding: 16px; overflow: hidden; }
+.nurture-workspace .nurture-machines-card > :not(.nurture-machine-grid) { flex: none; }
+.nurture-workspace .nurture-card-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 20px; }
 .nurture-workspace .nurture-card-heading h2 { margin: 0; font-size: var(--text-base); font-weight: 650; }
-.nurture-workspace .nurture-card-heading button { min-height: 30px; font-size: var(--text-sm); }
-.nurture-workspace .nurture-presets { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; margin-bottom: 16px; }
-.nurture-workspace .nurture-presets button { display: flex; flex-direction: column; align-items: flex-start; gap: 5px; min-width: 0; min-height: 64px; height: auto; padding: 10px 12px; border: 1px solid var(--line-strong, var(--line)); border-radius: 6px; background: var(--bg-elevated); text-align: left; white-space: normal; }
-.nurture-workspace .nurture-presets button[aria-pressed="true"] { border-color: var(--primary); box-shadow: inset 0 0 0 1px var(--primary); background: var(--primary-50); }
-.nurture-workspace .nurture-presets strong { font-size: var(--text-sm); color: var(--text-1); }
+.nurture-workspace .nurture-presets { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; margin-bottom: 24px; }
+.nurture-workspace .nurture-presets button { display: flex; flex-direction: column; align-items: flex-start; gap: 5px; min-width: 0; min-height: 68px; height: auto; padding: 12px; border: 1px solid var(--line-strong); border-radius: 6px; background: var(--bg-elevated); text-align: left; white-space: normal; }
+.nurture-workspace .nurture-presets button[aria-pressed="true"] { border-color: var(--primary); background: var(--primary-50); }
+.nurture-workspace .nurture-presets strong { font-size: var(--text-sm); color: var(--text-1); font-weight: 650; }
+.nurture-workspace .nurture-presets button[aria-pressed="true"] strong { color: var(--primary); }
 .nurture-workspace .nurture-presets span { font-size: var(--text-xs); color: var(--text-3); }
-.nurture-workspace .nurture-session-limits { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 18px; }
-.nurture-workspace .nurture-session-limits > label { display: grid; gap: 7px; min-width: 0; font-size: var(--text-sm); color: var(--text-2); }
-.nurture-workspace .nurture-unit-input { display: flex; align-items: center; min-width: 0; border: 1px solid var(--line-strong, var(--line)); border-radius: 4px; background: var(--bg-elevated); }
+.nurture-workspace .nurture-session-limits { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+.nurture-workspace .nurture-session-limits > label { display: grid; gap: 8px; min-width: 0; font-size: var(--text-sm); color: var(--text-2); }
+.nurture-workspace .nurture-unit-input { display: flex; align-items: center; min-width: 0; border: 1px solid var(--line-strong); border-radius: 6px; background: var(--bg-elevated); }
 .nurture-workspace .nurture-unit-input:focus-within { outline: 2px solid var(--primary); outline-offset: 2px; }
-.nurture-workspace .nurture-unit-input input { width: 100%; min-width: 0; height: 35px; padding: 6px 9px; border: 0; background: transparent; }
-.nurture-workspace .nurture-unit-input > span { flex: 0 0 auto; padding-right: 9px; color: var(--text-3); font-size: var(--text-xs); }
-.nurture-workspace .nurture-action-heading { display: flex; justify-content: space-between; gap: 12px; margin-bottom: 12px; font-size: var(--text-sm); }
+.nurture-workspace .nurture-unit-input input { width: 100%; min-width: 0; height: 36px; padding: 6px 10px; border: 0; background: transparent; font-size: var(--text-sm); font-variant-numeric: tabular-nums; }
+.nurture-workspace .nurture-unit-input > span { flex: 0 0 auto; padding-right: 10px; color: var(--text-3); font-size: var(--text-xs); }
+.nurture-workspace .nurture-action-heading { display: flex; justify-content: space-between; gap: 12px; padding-bottom: 12px; font-size: var(--text-sm); }
 .nurture-workspace .nurture-action-heading > span { color: var(--text-3); font-size: var(--text-xs); }
 .nurture-workspace .nurture-action-rows { border-top: 1px solid var(--line); }
-.nurture-workspace .nurture-action-row { display: grid; grid-template-columns: 138px minmax(50px, 1fr) 64px; gap: 12px; align-items: center; min-height: 44px; border-bottom: 1px solid var(--line); }
-.nurture-workspace .nurture-action-row > label { display: flex; align-items: center; gap: 12px; font-size: var(--text-sm); }
+.nurture-workspace .nurture-action-row { display: grid; grid-template-columns: 130px minmax(40px, 1fr) 70px; gap: 16px; align-items: center; min-height: 52px; border-bottom: 1px solid var(--line); }
+.nurture-workspace .nurture-action-row > label { display: flex; align-items: center; gap: 10px; font-size: var(--text-sm); }
 .nurture-workspace .nurture-action-row input[type="checkbox"] { width: 16px; height: 16px; margin: 0; accent-color: var(--primary); }
 .nurture-workspace .nurture-action-row input[type="range"] { width: 100%; min-width: 0; padding: 0; accent-color: var(--primary); }
 .nurture-workspace .nurture-action-row.is-off input[type="range"] { opacity: .55; }
-.nurture-workspace .nurture-rate-value { display: flex; align-items: center; gap: 2px; min-width: 0; border: 1px solid var(--line); border-radius: 4px; padding-right: 6px; }
-.nurture-workspace .nurture-rate-value input { min-width: 0; width: 100%; height: 28px; padding: 3px 0 3px 5px; border: 0; text-align: right; }
+.nurture-workspace .nurture-rate-value { display: flex; align-items: center; gap: 2px; min-width: 0; border: 1px solid var(--line); border-radius: 6px; padding-right: 8px; }
+.nurture-workspace .nurture-rate-value input { min-width: 0; width: 100%; height: 34px; padding: 4px 0 4px 6px; border: 0; text-align: right; font-size: var(--text-sm); font-variant-numeric: tabular-nums; }
 .nurture-workspace .nurture-rate-value span { color: var(--text-3); font-size: var(--text-xs); }
-.nurture-workspace .nurture-setup-note { margin: 14px 0; color: var(--text-3); font-size: var(--text-xs); line-height: 1.6; }
-.nurture-workspace .nurture-cleanup-note { display: flex; gap: 8px; margin-top: auto; padding-top: 14px; border-top: 1px solid var(--line); color: var(--text-2); font-size: var(--text-xs); }
-.nurture-workspace .nurture-cleanup-note > span { color: var(--ok); }
-.nurture-workspace .nurture-count { padding: 3px 6px; color: var(--ok); background: var(--ok-soft, #edf8f3); border-radius: 3px; font-size: var(--text-xs); white-space: nowrap; }
-.nurture-workspace .nurture-machine-tools { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; padding: 6px 0 12px; }
-.nurture-machine-filter-count { margin: 0 0 6px; color: var(--text-3); font-size: var(--text-xs); }
-.nurture-workspace .nurture-machines-card > input[type="search"] { width: 100%; height: 35px; padding: 7px 10px; border: 1px solid var(--line-strong, var(--line)); border-radius: 4px; background: var(--bg-elevated); color: var(--text-1); }
-.nurture-workspace .nurture-machine-tools button { min-height: 30px; padding: 4px 8px; font-size: var(--text-xs); }
-.nurture-workspace .nurture-session-footer { flex: none; display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-top: 0; padding: 10px 0; border-top: 1px solid var(--line); background: var(--bg); }
-.nurture-workspace .nurture-session-footer > div:first-child { display: flex; align-items: baseline; flex-wrap: wrap; gap: 10px; font-size: var(--text-sm); }
-.nurture-workspace .nurture-session-footer > div:first-child > span { color: var(--text-3); font-size: var(--text-xs); }
-.nurture-workspace .nurture-session-footer .nurture-float-actions { padding: 0; border: 0; margin: 0; }
-.nurture-workspace .nurture-session-footer .nurture-float-actions button { flex: 0 0 auto; min-height: 34px; white-space: nowrap; }
-.nurture-workspace .nurture-session-footer .nurture-float-actions .danger:disabled { display: none; }
-.nurture-workspace .nurture-monitor-handle { color: var(--text-3); font-size: var(--text-xs); }
-.nurture-workspace .nurture-float-log-head > strong { max-width: none; flex: 1; }
-.nurture-workspace .nurture-float-log-head .nurture-metrics { display: none; }
-.nurture-workspace .nurture-monitor-row-status { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 3px 10px; }
-.nurture-workspace .nurture-monitor-row-status > span:not(.nurture-machine-state) { color: var(--text-2); font-size: var(--text-xs); }
-.nurture-workspace .nurture-monitor-row-status time { color: var(--text-3); font-size: var(--text-xs); font-variant-numeric: tabular-nums; }
-.nurture-workspace .nurture-monitor-empty { padding: 48px 20px; border: 1px solid var(--line); border-radius: 7px; background: var(--bg-elevated); text-align: center; }
-.nurture-workspace .nurture-monitor-empty p { max-width: 48ch; margin: 10px auto 20px; color: var(--text-3); font-size: var(--text-sm); }
-@media (max-width: 1100px) {
-  .nurture-workspace .nurture-session-layout { grid-template-columns: minmax(0, 1fr) 310px; gap: 12px; }
-  .nurture-workspace .nurture-session-card, .nurture-workspace .nurture-machines-card { padding: 12px; }
-  .nurture-workspace .nurture-action-row { grid-template-columns: 108px minmax(30px, 1fr) 58px; gap: 8px; }
-  .nurture-workspace .nurture-presets button { padding: 8px; }
-}
-@media (max-width: 760px) {
-  .nurture-workspace .nurture-session-layout { grid-template-columns: minmax(0, 1fr); }
-  .nurture-workspace .nurture-session-card, .nurture-workspace .nurture-machines-card { min-height: 0; }
-  .nurture-workspace .nurture-cleanup-note { margin-top: 12px; }
-  .nurture-workspace .nurture-session-footer { align-items: center; }
-}
-@media (max-width: 620px) {
-  .nurture-workspace .nurture-presets span { font-size: var(--text-xs); }
-  .nurture-workspace .nurture-session-footer { flex-wrap: wrap; }
-}
-@media (max-height: 700px) {
-  .nurture-workspace .nurture-session-card, .nurture-workspace .nurture-machines-card { min-height: 0; padding: 10px; }
-  .nurture-workspace .nurture-card-heading { margin-bottom: 8px; }
-  .nurture-workspace .nurture-presets { margin-bottom: 10px; }
-  .nurture-workspace .nurture-presets button { min-height: 48px; gap: 3px; padding: 7px 8px; }
-  .nurture-workspace .nurture-session-limits { margin-bottom: 10px; gap: 10px; }
-  .nurture-workspace .nurture-session-limits > label { gap: 4px; }
-  .nurture-workspace .nurture-unit-input input { height: 30px; }
-  .nurture-workspace .nurture-action-heading { margin-bottom: 6px; }
-  .nurture-workspace .nurture-action-row { min-height: 34px; }
-  .nurture-workspace .nurture-rate-value input { height: 25px; }
-  .nurture-workspace .nurture-setup-note { margin: 8px 0; line-height: 1.4; }
-  .nurture-workspace .nurture-cleanup-note { padding-top: 8px; }
-  .nurture-workspace .nurture-session-footer { padding: 8px 0; }
-}
-.nurture-setup-fields { display: grid; grid-template-columns: minmax(0, 1fr); grid-auto-rows: max-content; align-content: start; gap: 12px; min-width: 0; min-height: 0; overflow-y: auto; padding: 2px; overscroll-behavior: contain; }
-.nurture-workspace .nurture-machines-card { align-self: stretch; padding: 12px; overflow: hidden; }
-.nurture-workspace .nurture-machines-card > :not(.nurture-machine-grid) { flex: none; }
-.nurture-workspace .nurture-machines-card > .nurture-card-heading { margin-bottom: 10px; }
-.nurture-workspace .nurture-machine-tools { gap: 6px; }
+.nurture-workspace .nurture-setup-note { margin: 12px 0 20px; color: var(--text-3); font-size: var(--text-xs); line-height: 1.6; }
+.nurture-workspace .nurture-cleanup-note { display: flex; align-items: center; gap: 8px; margin-top: 4px; padding-top: 16px; border-top: 1px solid var(--line); color: var(--text-2); font-size: var(--text-xs); }
+.nurture-cleanup-note > svg { flex: none; color: var(--ok); }
+.nurture-workspace .nurture-count { padding: 4px 7px; color: var(--primary); background: var(--primary-50); border-radius: 4px; font-size: var(--text-xs); font-weight: 600; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.nurture-machine-search { display: flex; align-items: center; gap: 8px; border: 1px solid var(--line-strong); border-radius: 6px; padding: 0 10px; color: var(--text-3); }
+.nurture-machine-search > svg { flex: none; }
+.nurture-machine-search input { min-width: 0; width: 100%; height: 36px; border: 0; padding: 6px 0; background: transparent; color: var(--text-1); font-size: var(--text-sm); }
+.nurture-machine-search:focus-within { outline: 2px solid var(--primary); outline-offset: 2px; }
+.nurture-workspace .nurture-machine-tools { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; padding: 8px 0 12px; }
+.nurture-workspace .nurture-machine-tools button { min-height: 36px; padding: 5px 6px; font-size: var(--text-xs); }
+.nurture-workspace .nurture-machine-ready-hint { margin-left: auto; color: var(--text-3); font-size: var(--text-xs); }
+.nurture-machine-filter-count { margin: 0 0 8px; color: var(--text-3); font-size: var(--text-xs); }
 .nurture-workspace .machine-scope-select { flex: 1; width: 95px; }
+.nurture-workspace .nurture-machine-grid { flex: 1; min-height: 0; }
+.nurture-workspace .nurture-machine-empty { grid-column: 1 / -1; color: var(--text-3); font-size: var(--text-sm); line-height: 1.6; padding: 24px 12px; text-align: center; }
+.nurture-workspace .nurture-advanced { padding: 0; }
+.nurture-advanced > summary { display: flex; align-items: center; gap: 12px; padding: 16px 20px; cursor: pointer; list-style: none; }
+.nurture-advanced > summary::-webkit-details-marker { display: none; }
+.nurture-advanced > summary::after { content: "+"; margin-left: auto; color: var(--text-3); font-size: var(--text-xl); }
+.nurture-advanced[open] > summary::after { content: "\2212"; }
+.nurture-advanced > summary strong { display: block; font-size: var(--text-sm); font-weight: 650; }
+.nurture-advanced > summary span { display: block; margin-top: 5px; font-size: var(--text-xs); color: var(--text-3); }
+.nurture-advanced > summary:focus-visible { outline: 2px solid var(--primary); outline-offset: -3px; border-radius: 8px; }
+.nurture-advanced-content { padding: 0 20px 20px; }
+.nurture-workspace .nurture-default-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; margin-top: 16px; }
+.nurture-workspace .nurture-default-actions > span { color: var(--text-3); font-size: var(--text-sm); }
 .nurture-workspace .nurture-setup-fields .nu-feature-ranged { grid-template-columns: auto minmax(76px, 1fr) minmax(50px, 1fr) 60px; }
 .nurture-workspace .nurture-setup-fields .nu-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 .nurture-workspace .nurture-setup-fields .nu-field { min-width: 0; }
 .nurture-workspace .nurture-setup-fields .nu-field input { min-width: 0; width: 100%; }
 .nurture-workspace .nurture-setup-fields .nu-night-setting { grid-template-columns: minmax(0, 1fr) repeat(2, minmax(62px, 1fr)); }
-@media (max-width: 760px) {
+.nurture-workspace .nurture-session-footer { flex: none; display: flex; align-items: center; justify-content: space-between; gap: 16px; margin: 0; padding: 12px 0 4px; border-top: 1px solid var(--line); background: var(--bg); }
+.nurture-workspace .nurture-session-footer > div:first-child { display: flex; flex-direction: column; gap: 5px; font-size: var(--text-sm); }
+.nurture-workspace .nurture-session-footer > div:first-child > span { color: var(--text-3); font-size: var(--text-xs); }
+.nurture-workspace .nurture-session-footer .nurture-float-actions { padding: 0; border: 0; margin: 0; }
+.nurture-workspace .nurture-session-footer .nurture-float-actions button { flex: 0 0 auto; min-height: 36px; white-space: nowrap; }
+.nurture-workspace .nurture-session-footer .nurture-float-actions .danger:disabled { display: none; }
+.nurture-workspace .nurture-monitor-handle { color: var(--text-3); font-size: var(--text-xs); }
+.nurture-workspace .nurture-float-log-head > strong { max-width: none; flex: 1; }
+.nurture-workspace .nurture-float-log-head .nurture-metrics { display: none; }
+.nurture-workspace .nurture-monitor-row-status { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 6px 12px; }
+.nurture-workspace .nurture-monitor-row-status > span:not(.nurture-machine-state) { color: var(--text-2); font-size: var(--text-xs); }
+.nurture-workspace .nurture-monitor-row-status time { color: var(--text-3); font-size: var(--text-xs); font-variant-numeric: tabular-nums; }
+.nurture-workspace .nurture-monitor-empty { padding: 48px 24px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg-elevated); text-align: center; }
+.nurture-workspace .nurture-monitor-empty p { max-width: 48ch; margin: 12px auto 20px; color: var(--text-3); font-size: var(--text-sm); line-height: 1.6; }
+@media (max-width: 1200px) {
+  .nurture-workspace .nurture-session-layout { grid-template-columns: minmax(0, 1fr) 310px; gap: 12px; }
+  .nurture-workspace .nurture-session-card, .nurture-workspace .nurture-machines-card { padding: 16px; }
+  .nurture-workspace .nurture-action-row { grid-template-columns: 108px minmax(30px, 1fr) 64px; gap: 8px; }
+  .nurture-workspace .nurture-presets button { padding: 10px; }
+  .nurture-workspace .automation-section-meta { display: none; }
+}
+@media (max-width: 1023px) {
   .nurture-workspace #nurture-page-panel-setup { overflow-y: auto; }
-  .nurture-workspace .nurture-session-layout { height: auto; }
+  .nurture-workspace .nurture-session-layout { grid-template-columns: minmax(0, 1fr); height: auto; }
   .nurture-setup-fields { overflow: visible; }
   .nurture-workspace .nurture-machines-card { height: 400px; }
+  .nurture-workspace .nurture-session-footer { flex-wrap: wrap; gap: 10px; }
+}
+@media (max-height: 700px) {
+  .nurture-workspace .nurture-workspace-body { gap: 10px; }
+  .nurture-workspace .nurture-session-footer { padding-top: 8px; }
 }

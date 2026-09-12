@@ -81,7 +81,10 @@ export function StreamQualitySection() {
 
   return (
     <section className="settings-section" aria-label="Chất lượng stream">
-      <h3>Chất lượng stream</h3>
+      <div className="settings-section-heading">
+        <h3>Chất lượng stream</h3>
+        {draft && <span className="settings-save-state" data-dirty={dirty}>{saving ? "Đang áp dụng" : dirty ? "Chưa áp dụng" : "Đã áp dụng"}</span>}
+      </div>
       <p className="hint">Áp dụng sẽ khởi động lại hình Android đang chạy.</p>
       <details className="settings-details" aria-label="Phạm vi chất lượng hình">
         <summary>Phạm vi chất lượng hình</summary>

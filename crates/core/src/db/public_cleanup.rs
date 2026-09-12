@@ -355,6 +355,7 @@ mod tests {
             comment: false,
         };
         let request = ThreadCampaignRequest {
+            scripted_conversation: None,
             request_id: format!("request-{content_id}"),
             targets: vec![target.clone()],
             actor_udids: vec![format!("phone-{content_id}")],

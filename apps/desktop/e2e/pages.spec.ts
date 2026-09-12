@@ -114,7 +114,7 @@ function screenshotName(name: string): string {
     .toLowerCase();
 }
 
-test("automation profile controls keep consistent size and secondary actions", async ({
+test("automation setup controls keep consistent size and secondary actions", async ({
   page,
 }) => {
   test.setTimeout(60_000);
@@ -126,18 +126,11 @@ test("automation profile controls keep consistent size and secondary actions", a
     await page.setViewportSize(viewport);
     for (const name of ["Nuôi TikTok", "Tương tác"]) {
       await open(page, name);
-      if (name === "Nuôi TikTok")
-        await page.getByRole("tab", { name: "Hành vi", exact: true }).click();
-      if (name === "Tương tác")
-        await page.getByText("Hồ sơ & cài đặt", { exact: true }).click();
-      const profile = page.getByRole("region", {
-        name: `Quản lý hồ sơ ${name}`,
-      });
-      await expect(profile).toBeVisible();
-      const dimensions = await profile
-        .locator(
-          ".automation-profile-fields label > input, .automation-profile-fields label > select",
-        )
+      const workspace = page.getByRole("region", { name: `Không gian ${name}` });
+      await expect(workspace).toBeVisible();
+      await expect(workspace.getByRole("region", { name: `Quản lý hồ sơ ${name}` })).toHaveCount(0);
+      const controls = name === "Nuôi TikTok" ? workspace.locator(".nurture-session-limits input") : workspace.locator(".iw-steps button");
+      const dimensions = await controls
         .evaluateAll((controls) =>
           controls.map((control) => {
             const box = control.getBoundingClientRect();
@@ -150,14 +143,15 @@ test("automation profile controls keep consistent size and secondary actions", a
             };
           }),
         );
-      expect(dimensions).toHaveLength(2);
+      expect(dimensions).toHaveLength(name === "Nuôi TikTok" ? 2 : 3);
       for (const control of dimensions) {
-        expect(control.height).toBe(36);
-        expect(control.width).toBeGreaterThan(120);
+        expect(control.height).toBeGreaterThanOrEqual(36);
+        expect(control.height).toBeLessThanOrEqual(48);
+        expect(control.width).toBeGreaterThan(70);
         expect(control.right).toBeLessThanOrEqual(viewport.width);
       }
       expect(dimensions[0].fontSize).toBe(dimensions[1].fontSize);
-      await expect(profile.locator("button.primary")).toHaveCount(0);
+      expect((await mockCommandCalls(page)).filter(call => ["nurture_start", "interaction_start_thread"].includes(call.command))).toHaveLength(0);
       if (name === "Nuôi TikTok") {
         const start = await page
           .getByRole("button", { name: "Kiểm tra & bắt đầu", exact: true })
@@ -165,10 +159,6 @@ test("automation profile controls keep consistent size and secondary actions", a
         expect(start?.height).toBeLessThanOrEqual(40);
       }
       if (name === "Tương tác") {
-        const profileBox = await profile.boundingBox();
-        expect(profileBox!.x).toBeGreaterThanOrEqual(0);
-        expect(profileBox!.x + profileBox!.width).toBeLessThanOrEqual(viewport.width);
-        await page.getByText("Hồ sơ & cài đặt", { exact: true }).click();
         await expect(page.getByPlaceholder("Dán link TikTok, mỗi dòng một bài")).toBeVisible();
       }
     }
@@ -181,15 +171,15 @@ test("nurture readiness blocks invalid values and links to the repair field", as
   await open(page, "Nuôi TikTok");
   await page.getByRole("combobox", { name: "Phạm vi thiết bị" }).selectOption("all");
   await page.getByRole("tab", { name: "Thiết lập", exact: true }).click();
+  await page.locator(".nurture-advanced > summary").click();
   const input = page.locator('input[data-nurture-field="watchMax"]');
   await input.fill("1");
   await expect(
     page.getByRole("button", { name: "Kiểm tra & bắt đầu", exact: true }),
   ).toBeDisabled();
-  await expect(
-    page.getByRole("button", { name: "Tạo hồ sơ", exact: true }),
-  ).toBeDisabled();
+  await page.locator(".nurture-advanced > summary").click();
   await page.getByRole("button", { name: "Sửa thiết lập" }).click();
+  await expect(page.locator(".nurture-advanced")).toHaveAttribute("open", "");
   await expect(input).toBeFocused();
   await expect(input).toHaveAttribute("aria-invalid", "true");
   await input.fill("20");
@@ -378,6 +368,7 @@ test("nurture rhythm controls stay compact and aligned", async ({ page }) => {
   ]) {
     await page.setViewportSize(viewport);
     await open(page, "Nuôi TikTok");
+    await page.locator(".nurture-advanced > summary").click();
     await page.getByRole("tab", { name: "Hành vi", exact: true }).click();
 
     const rhythm = page.locator(".nu-group").filter({

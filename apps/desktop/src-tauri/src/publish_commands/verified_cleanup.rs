@@ -10,6 +10,12 @@ pub(crate) async fn cleanup_verified_assignments(
     let candidates = db.pending_publish_cleanups(limit)?;
     let mut completed = 0;
     for candidate in candidates {
+        if db
+            .publish_campaign_request(&candidate.campaign_id)?
+            .is_none_or(|request| request.verification_contract_version != Some(1))
+        {
+            continue;
+        }
         if cleanup_verified_assignment(control, db, events, &candidate).await? {
             completed += 1;
         }

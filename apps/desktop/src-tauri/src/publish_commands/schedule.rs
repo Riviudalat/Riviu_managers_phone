@@ -70,6 +70,8 @@ async fn prepare_schedule(
 )> {
     validate_schedule(request)?;
     let manifest = preflight::scan_preflight_source(&request.source_root).await?;
+    let sheet_choice =
+        preflight::verify_sheet_delivery_choice(&state.db, request.sheet_enabled).await;
     let mut prepared = Vec::new();
     for (index, slot) in request.slots.iter().enumerate() {
         let input = riviu_core::PublishPreflightRequest {
@@ -90,12 +92,13 @@ async fn prepare_schedule(
             sheet_enabled: request.sheet_enabled,
             delete_after_publish: request.delete_after_publish,
         };
-        let mut checked = preflight::build_publish_preflight_from_manifest(
+        let mut checked = preflight::build_publish_preflight_from_manifest_with_sheet(
             &state.control,
             &state.registry,
             &state.db,
             input,
             &manifest,
+            sheet_choice.clone(),
         )
         .await?;
         if state.db.publish_schedule_time_conflicts(
@@ -225,6 +228,11 @@ pub async fn publish_schedule_create(
                 .format("%Y-%m-%dT%H:%M:%S")
                 .to_string();
             let campaign = PublishCampaignRequest {
+                sheet_delivery: prepared.report.sheet_delivery.clone(),
+                verification_contract_version: Some(1),
+                verification_builds: riviu_core::publish_submission::builds_from_preflight(
+                    &prepared.report,
+                ),
                 request_id: format!("{}:{index}:{digest}", request.request_id),
                 source_root: request.source_root.clone(),
                 bundle_ids: vec![bundle.id.clone()],
@@ -236,6 +244,7 @@ pub async fn publish_schedule_create(
                 } else {
                     PublishCleanupPolicy::KeepImportedAssets
                 },
+                network: riviu_core::SocialNetwork::TikTok,
                 sound_policy: request.sound_policy.clone(),
                 sheet_enabled: request.sheet_enabled,
                 execution_confirmed: true,

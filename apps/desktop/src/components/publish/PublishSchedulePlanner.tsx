@@ -5,6 +5,7 @@ import { describeError } from "../../describeError";
 import { orderDevicesByNumber, tileNumber, tileName } from "../../deviceNaming";
 import type { DeviceInfo, DeviceMeta, PublishBundle, PublishScheduleReport, PublishScheduleRequest, PublishSoundPolicy } from "../../types";
 import { PublishMedia } from "./PublishMedia";
+import { machineStatusLabel } from "../machineChoiceState";
 import { localDateTime, scheduleDateIssue } from "./publishScheduleTimes";
 import { allocateScheduleRows, decodeScheduleDraft, machineHasScheduleConflict, scheduleTime, SCHEDULE_DRAFT_KEY, type ScheduleDraft, type ScheduleRow } from "./publishScheduleAllocation";
 import { useScheduleDrag, type ScheduleDropTarget } from "./useScheduleDrag";
@@ -125,14 +126,29 @@ export function PublishSchedulePlanner(p: Props) {
   const quickAssign = () => {
     if (locked || inFlight.current) return;
     const before = draftRef.current;
-    const ids = before.rows.length ? orderedIds(before.rows.map(r => r.bundleId)) : p.bundles.slice(0, 100).map(b => b.id);
+    const sourceIds = p.bundles.slice(0, 100).map(b => b.id);
+    const existingIds = orderedIds(before.rows.map(r => r.bundleId));
+    const usedMachines = new Set(before.rows.map(r => r.udid).filter(Boolean));
+    const freeReady = readyIds.filter(id => !usedMachines.has(id));
+    const rowsFullyAssigned = before.rows.length > 0
+      && before.rows.every(r => r.udid && readyIds.includes(r.udid));
+    const expand = !before.rows.length
+      || (rowsFullyAssigned && freeReady.length > 0 && sourceIds.some(id => !existingIds.includes(id)));
+    const ids = expand ? sourceIds : existingIds.length ? existingIds : sourceIds;
     const next = addRows(before, ids);
-    const candidates = before.selectedMachines.length ? readyIds.filter(id => before.selectedMachines.includes(id)) : readyIds;
-    const result = allocateScheduleRows(next.rows, ids, candidates, next.commonTime);
+    const result = allocateScheduleRows(next.rows, ids, readyIds, next.commonTime);
     const rows = result.rows.filter(r => r.udid && readyIds.includes(r.udid));
     const assignedMachines = [...new Set(rows.map(r => r.udid))];
     edit(() => ({ ...next, rows, selectedMachines: rows.length ? assignedMachines : before.selectedMachines }));
-    setNotice(rows.length ? `Đã gán ${rows.length}/${rows.length} bài · ${p.bundles.length > rows.length ? `${p.bundles.length - rows.length} bài còn lại để đợt sau. Hoàn tác để khôi phục lựa chọn trước.` : "mỗi bài đã có máy"}` : "Chưa có máy sẵn sàng trong lựa chọn. Chọn máy trước khi gán nhanh.");
+    const leftover = p.bundles.length - rows.length;
+    const freeAfter = readyIds.length - assignedMachines.length;
+    setNotice(!rows.length
+      ? "Chưa có máy sẵn sàng trong phạm vi. Kiểm tra kết nối hoặc chọn lại nhóm máy."
+      : leftover
+        ? `Đã gán ${rows.length} bài cho ${rows.length} máy. ${leftover} bài còn lại vì hết máy sẵn sàng.`
+        : freeAfter
+          ? `Đã gán ${rows.length} bài cho ${rows.length} máy. Còn ${freeAfter} máy sẵn sàng nhưng hết bài trong nguồn.`
+          : `Đã gán ${rows.length} bài cho ${rows.length} máy.`);
   };
   const drag = useScheduleDrag({ disabled: locked, getIds: id => draftRef.current.rows.some(r => r.bundleId === id) ? orderedIds(draftRef.current.rows.map(r => r.bundleId)) : [id], onDrop: drop });
   useEffect(() => {
@@ -254,13 +270,14 @@ export function PublishSchedulePlanner(p: Props) {
         <section className={`ps-machines ${preview ? "is-drag-over" : ""}`} data-schedule-drop aria-label="Vùng máy nhận bài">
           <header><h3>Thả bài vào máy</h3><span>{draft.selectedMachines.filter(id => readyIds.includes(id)).length} máy đã chọn</span></header>
           <label className="ps-search"><Search size={15} aria-hidden="true"/><input aria-label="Tìm máy hẹn giờ" placeholder="Tìm số máy" value={machineQuery} onChange={e => setMachineQuery(e.target.value)}/></label>
-          <div className="ps-selection-tools"><button type="button" className="ps-quick-select" title="Tự chọn bài và máy phù hợp, rồi gán ngay" disabled={locked || !p.bundles.length} onClick={quickAssign}><Zap size={16} aria-hidden="true"/>Chọn nhanh</button><button type="button" disabled={locked || !readyIds.length} onClick={() => edit(d => ({ ...d, selectedMachines: readyIds }))}>Chọn máy sẵn sàng</button><button type="button" disabled={locked || !draft.selectedMachines.length} onClick={() => edit(d => ({ ...d, selectedMachines: [] }))}>Bỏ chọn máy</button></div>
+          <div className="ps-selection-tools"><button type="button" className="ps-quick-select" title="Tự chọn bài và máy phù hợp, rồi gán ngay" disabled={locked || !p.bundles.length} onClick={quickAssign}><Zap size={16} aria-hidden="true"/>Chọn nhanh</button><button type="button" disabled={locked || !readyIds.length} onClick={() => edit(d => ({ ...d, selectedMachines: readyIds }))}>Chọn tất cả sẵn sàng</button><button type="button" disabled={locked || !draft.selectedMachines.length} onClick={() => edit(d => ({ ...d, selectedMachines: [] }))}>Bỏ chọn máy</button></div>
           <div className="ps-machine-list" data-schedule-scroll>{filteredMachines.map(d => {
             const assigned = draft.rows.filter(r => r.udid === d.udid);
             const willReceive = preview?.assigned.filter(a => a.udid === d.udid) ?? [];
             return <div key={d.udid} data-schedule-device={d.udid} className={`ps-machine ${draft.selectedMachines.includes(d.udid) ? "is-picked" : ""} ${willReceive.length ? "is-drop-target" : ""} ${assigned.some(r => r.bundleId === activePost) ? "is-linked" : ""} ${d.status !== "ready" ? "is-unavailable" : ""}`}>
-              <label><input type="checkbox" checked={draft.selectedMachines.includes(d.udid)} disabled={locked || d.status !== "ready"} aria-label={`Chọn máy hẹn giờ ${label(d.udid)}`} onChange={e => edit(current => ({ ...current, selectedMachines: e.target.checked ? [...new Set([...current.selectedMachines, d.udid])] : current.selectedMachines.filter(id => id !== d.udid) }))}/><strong>{label(d.udid)}</strong><span>{d.status === "ready" ? assigned.length ? `${assigned.length} bài` : "Trống" : "Chưa sẵn sàng"}</span></label>
+              <label><input type="checkbox" checked={draft.selectedMachines.includes(d.udid)} disabled={locked || d.status !== "ready"} aria-label={`Chọn máy hẹn giờ ${label(d.udid)}`} onChange={e => edit(current => ({ ...current, selectedMachines: e.target.checked ? [...new Set([...current.selectedMachines, d.udid])] : current.selectedMachines.filter(id => id !== d.udid) }))}/><strong>{label(d.udid)}</strong><span>{d.status === "ready" ? assigned.length ? `${assigned.length} bài` : "Trống" : machineStatusLabel(d.status)}</span></label>
               {assigned.length ? <p className="ps-machine-post" title={assigned.map(r => name(r.bundleId)).join(", ")}>{assigned.map(r => name(r.bundleId)).join(", ")}</p> : <p className="ps-machine-empty">{d.status === "ready" ? "Thả để gán bài" : "Không nhận bài"}</p>}
+              {d.status !== "ready" && d.lastError && <p className="ps-machine-reason">{d.lastError}</p>}
               {willReceive.length > 0 && <p className="ps-drop-preview">Nhận {willReceive.map(a => name(a.bundleId)).join(", ")}</p>}
             </div>;
           })}{!inScope.length ? <p className="ps-empty">Chọn phạm vi máy trong Thiết lập để phân công.</p> : !filteredMachines.length && <div className="ps-empty ps-empty-machines"><p>Không có máy khớp từ khóa.</p><button type="button" onClick={() => { setMachineQuery(""); drag.root.current?.querySelector<HTMLInputElement>('[aria-label="Tìm máy hẹn giờ"]')?.focus(); }}>Xóa tìm kiếm</button></div>}</div>

@@ -318,6 +318,28 @@ describe("FlowWorkspace startup", () => {
     );
   });
 
+  it("validates only the loaded revision when bootstrap exceeds the debounce", async () => {
+    let resolveRecord!: (record: FlowRevisionRecord) => void;
+    api.flowGet.mockReturnValueOnce(new Promise<FlowRevisionRecord>((resolve) => { resolveRecord = resolve; }));
+    api.flowValidate.mockRejectedValueOnce({ code: "ConfigInvalid", message: "fixture invalid" });
+    vi.useFakeTimers();
+    try {
+      render(<FlowWorkspace devices={[device]} selectedUdids={[device.udid]} onDirtyChange={vi.fn()} />);
+      await act(async () => { await vi.advanceTimersByTimeAsync(300); });
+      expect(api.flowGet).toHaveBeenCalled();
+      expect(api.flowValidate).not.toHaveBeenCalled();
+
+      await act(async () => { resolveRecord(revisionRecord(savedDocument)); });
+      await act(async () => { await vi.advanceTimersByTimeAsync(250); });
+      expect(api.flowValidate).toHaveBeenCalledTimes(1);
+      expect(api.flowValidate).toHaveBeenCalledWith(expect.objectContaining({ id: savedDocument.id }));
+      expect(screen.getByText("Giá trị cấu hình chưa hợp lệ.")).toBeInTheDocument();
+      expect(screen.getByRole("region", { name: "Không gian Flow" })).toHaveAttribute("data-lower-band-expanded", "true");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("loads the saved revision, keeps disabled catalog reasons, and omits raw actions", async () => {
     await renderReadyWorkspace();
 

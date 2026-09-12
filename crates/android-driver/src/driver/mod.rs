@@ -791,6 +791,7 @@ fn select_foreground_tiktok_package(
 }
 
 pub struct AndroidDriver {
+    gui_reasoner: Mutex<Option<riviu_core::ui_automation::SharedReasoner>>,
     adb: AdbProgram,
     adb_origin: adb::AdbOrigin,
     minicap_apk: Option<PathBuf>,
@@ -910,6 +911,10 @@ pub struct AndroidDriver {
     /// serial -> a live helper client. Same reuse rule as [`Self::agents`]:
     /// opening a second forward per session leaks a host port.
     helpers: Mutex<HashMap<String, crate::riviu_agent::HelperClient>>,
+    helper_inventory_locks: Mutex<HashMap<String, Arc<tokio::sync::RwLock<()>>>>,
+    inventory_cache: Mutex<HashMap<String, DeviceInfo>>,
+    helper_setup_errors: Mutex<HashMap<String, String>>,
+    helper_inventory_snapshot: Mutex<Option<Vec<DeviceInfo>>>,
     /// serial -> app names and icons the helper already described, keyed on the exact set of
     /// packages they were read for.
     ///
@@ -931,9 +936,13 @@ pub struct AndroidDriver {
 
 mod agent;
 mod device_ops;
+mod helper_setup;
 mod stream;
 
 impl AndroidDriver {
+    pub fn set_gui_reasoner(&self, reasoner: riviu_core::ui_automation::SharedReasoner) {
+        *self.gui_reasoner.lock() = Some(reasoner);
+    }
     pub fn new(config: &AndroidDriverConfig) -> anyhow::Result<Self> {
         let (adb, origin) = AdbProgram::resolve_for_policy(
             adb::AdbResolutionPolicy::current_build(),
@@ -994,12 +1003,19 @@ impl AndroidDriver {
             .ok()
             .and_then(|out| riviu_core::tiktok_labels::parse_version_name(&out).map(str::to_string))
             .unwrap_or_default();
-        let locale = self
+        let locale_property = self
             .adb
             .shell(serial, "getprop persist.sys.locale")
             .await
             .map(|out| out.trim().to_string())
             .unwrap_or_default();
+        let locale_setting = self
+            .adb
+            .shell(serial, "settings get system system_locales")
+            .await
+            .unwrap_or_default();
+        let locale =
+            crate::adb::parse_locale(&locale_property, &locale_setting).unwrap_or_default();
         Ok((package, version, locale))
     }
 
@@ -1067,6 +1083,7 @@ impl AndroidDriver {
             bundletool_jar: config.bundletool_jar.clone(),
             agent_apks,
             frame_sink: Mutex::new(None),
+            gui_reasoner: Mutex::new(None),
             view_sink: Mutex::new(None),
             streams: tokio::sync::Mutex::new(HashMap::new()),
             views: tokio::sync::Mutex::new(HashMap::new()),
@@ -1092,6 +1109,10 @@ impl AndroidDriver {
             forwarded: Mutex::new(HashSet::new()),
             riviu_agent_apk,
             helpers: Mutex::new(HashMap::new()),
+            helper_inventory_locks: Mutex::new(HashMap::new()),
+            inventory_cache: Mutex::new(HashMap::new()),
+            helper_setup_errors: Mutex::new(HashMap::new()),
+            helper_inventory_snapshot: Mutex::new(None),
             app_descriptions: Mutex::new(HashMap::new()),
             agent_statuses: Mutex::new(HashMap::new()),
         }
@@ -1440,44 +1461,7 @@ impl DeviceDriver for AndroidDriver {
                 "adb device list never settled; using the last reading"
             );
         }
-        let lines = reading.devices;
-
-        // Fan out: the fleet is 16 phones and every one of them costs a round
-        // trip we would otherwise pay in series.
-        let mut inflight = Vec::new();
-        let mut unreachable_devices = Vec::new();
-        for line in lines {
-            match line.state {
-                AdbDeviceState::Device => {
-                    let adb = self.adb.clone();
-                    inflight.push(tokio::spawn(probe_device(adb, line.serial, line.model)));
-                }
-                // **Report it, do not hide it**, and that now covers every state rather
-                // than one of them. A phone whose USB-debugging prompt has not been
-                // accepted is a normal fleet state with an obvious fix; so is one that has
-                // gone `offline` because its cable or hub dropped, or because it is
-                // mid-reboot. Dropping those from the list makes them look unplugged, which
-                // is the one thing they are not — adb can see them, and it can say why.
-                //
-                // `offline` in particular was silently discarded, so a phone that lost its
-                // connection simply vanished from the grid with no row and no reason.
-                state => unreachable_devices.push(unusable_device(&line.serial, line.model, state)),
-            }
-        }
-
-        let mut devices = Vec::with_capacity(inflight.len() + unreachable_devices.len());
-        for handle in inflight {
-            let Ok(mut device) = handle.await else {
-                continue;
-            };
-            device.wda_ready = self.agent_ready(&device.udid).await;
-            if device.wda_ready {
-                device.status = DeviceStatus::Ready;
-            }
-            devices.push(device);
-        }
-        devices.extend(unreachable_devices);
-        Ok(devices)
+        Ok(self.inventory_from_reading(reading, probe_device).await)
     }
 
     async fn refresh_device(&self, udid: &str) -> anyhow::Result<DeviceInfo> {

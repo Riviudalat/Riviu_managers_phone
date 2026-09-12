@@ -15,6 +15,7 @@ vi.mock("../../api", () => ({
   automationList: vi.fn(),
   orchestrationArchive: vi.fn(),
   orchestrationCancelRun: vi.fn(),
+  orchestrationCreateThreeFeatureTemplate: vi.fn(),
   orchestrationGet: vi.fn(),
   orchestrationGetRun: vi.fn(),
   orchestrationList: vi.fn(),

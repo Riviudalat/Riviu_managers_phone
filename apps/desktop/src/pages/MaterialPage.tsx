@@ -242,17 +242,21 @@ export function MaterialPage({ devices, selected, operationSource }: SelProps & 
         <header>
           <div>
             <strong>Nội dung đã lưu</strong>
-            <span>{items.length} file</span>
+            <span>{items.length} file · Ảnh và video dùng cho các máy trong farm</span>
           </div>
           <div className="admin-actions">
           <button type="button" className="primary" onClick={() => setImportOpen(true)}><ImagePlus size={16} /> Thêm nội dung</button>
-          <button type="button" className="icon-btn" onClick={() => void reload()} aria-label="Làm mới kho nội dung" title="Làm mới">
+          <button type="button" className="icon-btn" disabled={loading} onClick={() => void reload()} aria-label="Làm mới kho nội dung" title="Làm mới">
             <RefreshCw size={16} />
           </button>
           </div>
         </header>
         <TargetSelector devices={devices} groups={groups} selected={[]} onChange={() => undefined}
           targetRef={targetRef} onTargetRefChange={setTargetRef} requireChoice label="Phạm vi chuyển nội dung" />
+        <div className="resource-scope-summary" role="status">
+          <StatusChip tone={targets.length ? "info" : "neutral"}>{targets.length} máy nhận nội dung</StatusChip>
+          <span>{targets.length ? "Chọn Chuyển tới ở dòng nội dung cần gửi." : "Chọn phạm vi thiết bị để bắt đầu chuyển nội dung."}</span>
+        </div>
         {groupError && <StatusNotice tone="error" action={<button type="button" onClick={() => setGroupRetry((value) => value + 1)}>Thử lại nhóm</button>}>Không tải được nhóm: {groupError}</StatusNotice>}
         {loadError && (
           <StatusNotice
@@ -304,7 +308,7 @@ export function MaterialPage({ devices, selected, operationSource }: SelProps & 
                 >
                   <Trash2 size={16} />
                 </button>
-              <details>
+              <details className="admin-detail">
                 <summary>Chi tiết file</summary>
                 <code>{material.path}</code>
               </details>

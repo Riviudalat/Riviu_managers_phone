@@ -24,7 +24,7 @@
 //!
 //! What it refuses rather than fakes:
 //!
-//! * an app build / UI language with no measured label set — [`controls_for`]
+//! * an app build / UI language with no measured label set — [`crate::tiktok_labels::controls_for`]
 //!   returns `None` and the session stops, the same fail-closed rule
 //!   `screen::CALIBRATED_LAYOUTS` applies to uncalibrated screens;
 //! * commenting, on any build whose Send control has not been measured. The
@@ -49,7 +49,7 @@ use crate::tiktok_drawer::CommentVerdict;
 use crate::tiktok_follow_cleanup::{
     prove_nurture_follow_source, readback_nurture_follow_source, NurtureFollowReadbackVerdict,
 };
-use crate::tiktok_labels::{controls_for, TikTokControl, TikTokControls};
+use crate::tiktok_labels::{TikTokControl, TikTokControls};
 use crate::tiktok_like::LikeVerdict;
 use crate::tiktok_save::{
     hierarchy_save_observation, tiktok_save, SaveAdapter, SaveCardIdentity, SaveEvidence,
@@ -474,7 +474,22 @@ async fn locate(
     let Some(label) = labels.label(control) else {
         return Ok(None);
     };
-    session.locate(label.to_query()).await
+    let found = session.locate(label.to_query()).await?;
+    if found.is_some() {
+        return Ok(found);
+    }
+    let target = match control {
+        TikTokControl::Comments => "comments",
+        TikTokControl::Share => "share",
+        TikTokControl::ProfileTab => "profile",
+        _ => return Ok(None),
+    };
+    crate::ui_automation::runtime::resolve_navigation(
+        session,
+        target,
+        std::time::Duration::from_secs(30),
+    )
+    .await
 }
 
 /// Whether this build can be asked to page a photo carousel at all.
@@ -652,7 +667,9 @@ impl<'a> HierarchyRun<'a> {
         let app_version = session.app_version(&package).await.unwrap_or_default();
         let labels = language
             .as_deref()
-            .and_then(|language| controls_for(&package, language, &app_version))
+            .and_then(|language| {
+                crate::tiktok_labels::controls_for_runtime(&package, language, &app_version)
+            })
             .ok_or_else(|| Unsupported::NoLabelSet {
                 package: package.clone(),
                 language: language.clone(),
@@ -3709,7 +3726,7 @@ mod tests {
                 ElementQuery::Description { value, .. } => dismissed && value == "For You",
                 ElementQuery::ClassName(_) => false,
                 // This path looks nothing up by id; answering it would be inventing a screen.
-                ElementQuery::ResourceIdSuffix(_) => false,
+                ElementQuery::ResourceIdSuffix(_) | ElementQuery::Semantic(_) => false,
             };
             Ok(found.then_some(ElementBox {
                 x: 420.0,

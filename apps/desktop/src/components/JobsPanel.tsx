@@ -226,7 +226,7 @@ export function JobsPanel({
       <section className="operations-summary" aria-label="Tổng quan tác vụ">
         <div><span>Đang thực hiện</span><strong>{page?.counts.active ?? "—"}</strong></div>
         <div><span>Hoàn tất</span><strong>{page?.counts.succeeded ?? "—"}</strong></div>
-        <div><span>Cần xử lý</span><strong>{page?.counts.attention ?? "—"}</strong></div>
+        <div data-attention={Boolean(page?.counts.attention)}><span>Cần xử lý</span><strong>{page?.counts.attention ?? "—"}</strong></div>
         <button type="button" className="ghost" disabled={loading} onClick={() => void reload()}>
           <RefreshCw size={15} /> Làm mới
         </button>
@@ -244,6 +244,10 @@ export function JobsPanel({
 
       <section className="operations-monitor" aria-label="Theo dõi tác vụ">
         <div className="operations-monitor-list">
+          <header className="operations-list-heading">
+            <strong>Lịch sử tác vụ</strong>
+            <span>{period === "24" ? "24 giờ qua" : period === "168" ? "7 ngày qua" : "Toàn bộ lịch sử"}</span>
+          </header>
           <div className="operations-filterbar">
             <label>
               <Search size={15} aria-hidden="true" />
@@ -272,7 +276,7 @@ export function JobsPanel({
               <option value="24">24 giờ qua</option><option value="168">7 ngày qua</option><option value="all">Toàn bộ lịch sử</option>
             </select>
           </div>
-          {page && <div className="admin-actions" aria-label="Phân trang tác vụ">
+          {page && <div className="admin-actions operations-pagination" aria-label="Phân trang tác vụ">
             <span>{page.total ? `${offset + 1}–${offset + runs.length}` : "0"} / {page.total} tác vụ</span>
             <button type="button" className="icon-btn" aria-label="Trang tác vụ trước" disabled={loading || offset === 0} onClick={() => setOffset(Math.max(0,offset - 50))}><ChevronLeft size={16}/></button>
             <button type="button" className="icon-btn" aria-label="Trang tác vụ sau" disabled={loading || !page.hasMore} onClick={() => setOffset(offset + 50)}><ChevronRight size={16}/></button>

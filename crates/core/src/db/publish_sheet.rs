@@ -88,6 +88,13 @@ pub(super) fn reconciled_sheet_delivery_status(
         return Ok((Status::Partial, Scope::None));
     }
 
+    if connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM publish_pipeline_runs WHERE campaign_id=?1)",
+        [campaign_id],
+        |r| r.get::<_, bool>(0),
+    )? {
+        return Ok((Status::Partial, Scope::None));
+    }
     let mut statement = connection.prepare(
         "SELECT a.state,a.evidence_json,o.state
          FROM publish_assignments a
@@ -466,58 +473,16 @@ impl Database {
     ) -> anyhow::Result<SheetOutboxSettlement> {
         let mut connection = self.conn()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let updated_at = Utc::now().to_rfc3339();
-        let changed = transaction.execute(
-            "UPDATE publish_sheet_outbox
-             SET state='sent',attempts=attempts+1,last_error=NULL,updated_at=?4
-             WHERE assignment_id=?1 AND campaign_id=?2 AND revision=?3 AND state <> 'sent'",
-            params![assignment_id, campaign_id, revision, updated_at],
-        )?;
-        if changed == 0 {
-            transaction.rollback()?;
-            return Ok(SheetOutboxSettlement::StaleRevision);
-        }
-
-        let campaign_exists = transaction
-            .query_row(
-                "SELECT 1 FROM publish_campaigns WHERE id=?1",
-                [campaign_id],
-                |_| Ok(()),
-            )
-            .optional()?
-            .is_some();
-        if !campaign_exists {
-            transaction.commit()?;
-            return Ok(SheetOutboxSettlement::DeliveredWithoutCampaign);
-        }
-
-        let input_digest = input_digest.context(
-            "publish execution input digest is required while its campaign still exists",
-        )?;
-        let (status, retry_scope) = reconciled_sheet_delivery_status(&transaction, campaign_id)?;
-        let draft = crate::publish_runtime::PublishExecutionSnapshotDraft {
-            input_digest: input_digest.to_string(),
-            status,
-            retry_scope,
-            report_json: serde_json::json!({
-                "campaignId": campaign_id,
-                "status": status,
-                "retryScope": retry_scope,
-                "source": "sheet_delivery_reconciliation",
-                "sheetEnabled": campaign_sheet_enabled(&transaction, campaign_id)?,
-                "targetSnapshot": target_snapshot,
-            }),
-        };
-        // Validation and the actual upsert intentionally happen after the outbox UPDATE but
-        // before commit. Any error here drops the transaction and makes the delivery retryable.
-        let snapshot = super::publish::store_publish_execution_snapshot(
+        let result = settle_delivery_on(
             &transaction,
+            assignment_id,
             campaign_id,
-            &draft,
-            &updated_at,
+            revision,
+            input_digest,
+            target_snapshot,
         )?;
         transaction.commit()?;
-        Ok(SheetOutboxSettlement::Delivered(snapshot))
+        Ok(result)
     }
 
     /// The push failed. Still owed; the message is for a person to read.
@@ -543,6 +508,64 @@ impl Database {
     }
 }
 
+pub(super) fn settle_delivery_on(
+    transaction: &Connection,
+    assignment_id: &str,
+    campaign_id: &str,
+    revision: i64,
+    input_digest: Option<&str>,
+    target_snapshot: Option<&crate::ResolvedTargetSnapshot>,
+) -> anyhow::Result<SheetOutboxSettlement> {
+    let updated_at = Utc::now().to_rfc3339();
+    let changed = transaction.execute(
+        "UPDATE publish_sheet_outbox
+             SET state='sent',attempts=attempts+1,last_error=NULL,updated_at=?4
+             WHERE assignment_id=?1 AND campaign_id=?2 AND revision=?3 AND state <> 'sent'",
+        params![assignment_id, campaign_id, revision, updated_at],
+    )?;
+    if changed == 0 {
+        return Ok(SheetOutboxSettlement::StaleRevision);
+    }
+
+    let campaign_exists = transaction
+        .query_row(
+            "SELECT 1 FROM publish_campaigns WHERE id=?1",
+            [campaign_id],
+            |_| Ok(()),
+        )
+        .optional()?
+        .is_some();
+    if !campaign_exists {
+        return Ok(SheetOutboxSettlement::DeliveredWithoutCampaign);
+    }
+
+    let input_digest = input_digest
+        .context("publish execution input digest is required while its campaign still exists")?;
+    let (status, retry_scope) = reconciled_sheet_delivery_status(transaction, campaign_id)?;
+    let draft = crate::publish_runtime::PublishExecutionSnapshotDraft {
+        input_digest: input_digest.to_string(),
+        status,
+        retry_scope,
+        report_json: serde_json::json!({
+            "campaignId": campaign_id,
+            "status": status,
+            "retryScope": retry_scope,
+            "source": "sheet_delivery_reconciliation",
+            "sheetEnabled": campaign_sheet_enabled(transaction, campaign_id)?,
+            "targetSnapshot": target_snapshot,
+        }),
+    };
+    // Validation and the actual upsert intentionally happen after the outbox UPDATE but
+    // before commit. Any error here drops the transaction and makes the delivery retryable.
+    let snapshot = super::publish::store_publish_execution_snapshot(
+        transaction,
+        campaign_id,
+        &draft,
+        &updated_at,
+    )?;
+    Ok(SheetOutboxSettlement::Delivered(snapshot))
+}
+
 /// The insert itself, so it can run inside a caller's transaction or on its own connection.
 pub(super) fn queue_sheet_row(
     conn: &rusqlite::Connection,
@@ -552,15 +575,76 @@ pub(super) fn queue_sheet_row(
     poster: &str,
     partners: &[String],
 ) -> anyhow::Result<()> {
+    super::publish_submission::record_canonical_identity(conn, assignment_id, post_url)?;
+    // Publication proof releases the account even when Sheet reporting is disabled.
+    conn.execute(
+        "DELETE FROM publish_account_reservations WHERE assignment_id=?1 AND EXISTS(
+          SELECT 1 FROM publish_assignments a WHERE a.id=?1 AND a.state='succeeded'
+          AND json_valid(a.evidence_json)
+          AND COALESCE(json_extract(a.evidence_json,'$.post.publicationVerified'),json_extract(a.evidence_json,'$.publicationVerified'))=1
+          AND COALESCE(json_extract(a.evidence_json,'$.post.postUrl'),json_extract(a.evidence_json,'$.postUrl'))=?2)",
+        params![assignment_id,post_url],
+    )?;
     if !campaign_sheet_enabled(conn, campaign_id)? {
         return Ok(());
     }
+    let delivery_target: Option<String> = conn.query_row(
+        "SELECT CASE WHEN json_valid(request_json) AND json_extract(request_json,'$.sheetDelivery.version')=2
+          THEN json_extract(request_json,'$.sheetDelivery') END FROM publish_campaigns WHERE id=?1",
+        [campaign_id], |row|row.get(0),
+    ).optional()?.flatten();
+    if let Some(raw) = &delivery_target {
+        let target: crate::publish_sheet::SheetDeliveryTarget = serde_json::from_str(raw)?;
+        target.validate()?;
+        let verified:bool=conn.query_row("SELECT EXISTS(SELECT 1 FROM publish_assignments WHERE id=?1 AND state='succeeded'
+          AND json_valid(evidence_json)
+          AND COALESCE(json_extract(evidence_json,'$.post.publicationVerified'),json_extract(evidence_json,'$.publicationVerified'))=1
+          AND COALESCE(json_extract(evidence_json,'$.post.postUrl'),json_extract(evidence_json,'$.postUrl'))=?2)",params![assignment_id,post_url],|row|row.get(0))?;
+        anyhow::ensure!(
+            verified,
+            "v2 Sheet delivery requires the verified canonical publication proof"
+        );
+        let existing: Option<(String,String,String)> = conn.query_row(
+            "SELECT post_url,poster,partners_json FROM publish_sheet_outbox WHERE assignment_id=?1",
+            [assignment_id], |row|Ok((row.get(0)?,row.get(1)?,row.get(2)?)),
+        ).optional()?;
+        if let Some((url, by, old_partners)) = existing {
+            anyhow::ensure!(
+                url == post_url
+                    && by == poster
+                    && serde_json::from_str::<Vec<String>>(&old_partners)? == partners,
+                "verified Sheet row identity is immutable"
+            );
+            return Ok(());
+        }
+    }
     let now = Utc::now().to_rfc3339();
+    let posted_at: Option<String> = conn.query_row(
+        "SELECT COALESCE(CASE WHEN json_valid(effect_intent) THEN json_extract(effect_intent,'$.submittedAt') END,
+          CASE WHEN json_valid(evidence_json) THEN COALESCE(json_extract(evidence_json,'$.post.submittedAt'),json_extract(evidence_json,'$.submittedAt')) END)
+         FROM publish_assignments WHERE id=?1", [assignment_id], |row|row.get(0),
+    ).optional()?.flatten();
+    if delivery_target.is_some() {
+        anyhow::ensure!(
+            posted_at
+                .as_deref()
+                .is_some_and(|at| chrono::DateTime::parse_from_rfc3339(at).is_ok()),
+            "v2 Sheet delivery requires its immutable submission time"
+        );
+    }
+    let report_metadata = if delivery_target.is_some() {
+        super::publish_report::internal_report_on(conn, assignment_id)?
+            .filter(|row| row.metadata.status == "Đã xác minh")
+            .map(|row| serde_json::to_string(&row.metadata))
+            .transpose()?
+    } else {
+        None
+    };
     conn.execute(
         "INSERT INTO publish_sheet_outbox(
                  assignment_id,campaign_id,post_url,poster,partners_json,state,
-                 attempts,created_at,updated_at
-             ) VALUES(?1,?2,?3,?4,?5,'pending',0,?6,?6)
+                 attempts,created_at,updated_at,delivery_target_json,posted_at,report_metadata_json
+             ) VALUES(?1,?2,?3,?4,?5,'pending',0,?6,?6,?7,?8,?9)
              ON CONFLICT(assignment_id) DO UPDATE SET
                  post_url=excluded.post_url,
                  poster=excluded.poster,
@@ -576,7 +660,10 @@ pub(super) fn queue_sheet_row(
             post_url,
             poster,
             serde_json::to_string(partners)?,
-            now
+            now,
+            delivery_target,
+            posted_at,
+            report_metadata
         ],
     )?;
     Ok(())
@@ -631,6 +718,9 @@ mod tests {
         // that always says `bundle-a` can only ever make one campaign.
         let bundle_id = format!("bundle-{}", Uuid::new_v4());
         let request = PublishCampaignRequest {
+            sheet_delivery: None,
+            verification_contract_version: None,
+            verification_builds: vec![],
             sheet_enabled,
             request_id: Uuid::new_v4().to_string(),
             source_root: "/fixture/root".into(),
@@ -639,6 +729,7 @@ mod tests {
             run_at: None,
             visibility: PublishVisibility::Public,
             cleanup_policy: PublishCleanupPolicy::DeleteImportedAssetsAfterVerified,
+            network: crate::SocialNetwork::TikTok,
             sound_policy: crate::publish::PublishSoundPolicy::Default,
             execution_confirmed: false,
             target_snapshot: None,
@@ -686,6 +777,193 @@ mod tests {
         db.finish_publish_campaign(&campaign, PublishRunOutcome::AllPosted)
             .unwrap();
         (db, path, campaign, assignment, intent)
+    }
+
+    fn mark_scheduled(db: &Database, campaign: &str) {
+        db.conn()
+            .unwrap()
+            .execute(
+                "UPDATE publish_campaigns SET run_at='2026-09-10T20:00:00' WHERE id=?1",
+                [campaign],
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn scheduled_verification_waits_two_minutes_before_the_first_link_check() {
+        let (db, path, campaign, _, intent) = review_fixture(0);
+        mark_scheduled(&db, &campaign);
+        let candidate = db.pending_publish_verifications(10).unwrap().remove(0);
+        let intent: serde_json::Value = serde_json::from_str(&intent).unwrap();
+        let submitted = DateTime::parse_from_rfc3339(intent["submittedAt"].as_str().unwrap())
+            .unwrap()
+            .with_timezone(&Utc);
+        assert!(!candidate.is_due(submitted + chrono::Duration::seconds(119)));
+        assert!(candidate.is_due(submitted + chrono::Duration::seconds(120)));
+        drop(db);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn scheduled_verification_keeps_checking_after_thirty_minutes_and_restart() {
+        let (db, path, campaign, assignment, intent) = review_fixture(60);
+        mark_scheduled(&db, &campaign);
+        assert!(db.expire_due_publish_verifications().unwrap().is_empty());
+        for (code, delay) in [
+            ("linkUnavailable", 300),
+            ("readFailed", 300),
+            ("readFailed", 600),
+            ("readFailed", 1200),
+            ("readFailed", 1200),
+            ("linkUnavailable", 300),
+        ] {
+            let candidate = db.pending_publish_verifications(10).unwrap().remove(0);
+            assert!(db
+                .record_publish_verification_observation(
+                    &candidate,
+                    "TikTok is still processing",
+                    code
+                )
+                .unwrap());
+            let row = db.pending_publish_verifications(10).unwrap().remove(0);
+            let e: serde_json::Value =
+                serde_json::from_str(row.evidence_json.as_deref().unwrap()).unwrap();
+            let status = &e["verificationStatus"];
+            let checked =
+                DateTime::parse_from_rfc3339(status["checkedAt"].as_str().unwrap()).unwrap();
+            let next =
+                DateTime::parse_from_rfc3339(status["nextCheckAt"].as_str().unwrap()).unwrap();
+            assert_eq!((next - checked).num_seconds(), delay);
+            assert_eq!(status["reviewAfterMinutes"], 240);
+            assert!(!row.is_due(checked.into()));
+            assert!(row.is_due(next.into()));
+        }
+        drop(db);
+        let db = Database::open(&path).unwrap();
+        db.interrupt_orphaned_publish_campaigns().unwrap();
+        let row = db.pending_publish_verifications(10).unwrap().remove(0);
+        assert_eq!(row.effect_intent.as_deref(), Some(intent.as_str()));
+        assert!(!row.is_due(Utc::now()));
+        assert!(!db
+            .claim_publish_assignment_for_posting(&assignment, &intent)
+            .unwrap());
+        assert!(db.pending_publish_sheet_row(&assignment).unwrap().is_none());
+        let url = "https://www.tiktok.com/@fixture/photo/1234567890123456789";
+        let evidence = serde_json::json!({"postUrl":url,"publicationVerified":true}).to_string();
+        assert!(db
+            .record_verified_publish_with_sheet_row(&row, &evidence, url, "bot", &[])
+            .unwrap());
+        assert!(!db
+            .record_verified_publish_with_sheet_row(&row, &evidence, url, "bot", &[])
+            .unwrap());
+        assert_eq!(db.pending_publish_sheet_rows(10).unwrap().len(), 1);
+        drop(db);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn scheduled_verification_stops_at_four_hours_and_retains_explicit_link_recovery() {
+        for age in [239, 240] {
+            let (db, path, campaign, assignment, intent) = review_fixture(age);
+            mark_scheduled(&db, &campaign);
+            let expired = db.expire_due_publish_verifications().unwrap();
+            if age == 239 {
+                assert!(expired.is_empty());
+                assert_eq!(db.pending_publish_verifications(10).unwrap().len(), 1);
+            } else {
+                assert_eq!(expired, vec![campaign.clone()]);
+                assert!(db.pending_publish_verifications(10).unwrap().is_empty());
+                assert!(db.expire_due_publish_verifications().unwrap().is_empty());
+                let manual = db
+                    .publish_verifications_for_campaign(&campaign, 10)
+                    .unwrap()
+                    .remove(0);
+                let e: serde_json::Value =
+                    serde_json::from_str(manual.evidence_json.as_deref().unwrap()).unwrap();
+                assert_eq!(e["verificationStatus"]["state"], "needsReview");
+                assert_eq!(e["verificationStatus"]["reviewAfterMinutes"], 240);
+                assert!(e["verificationStatus"]["reason"]
+                    .as_str()
+                    .unwrap()
+                    .contains("Tự kiểm tra đã dừng"));
+                assert_eq!(manual.effect_intent.as_deref(), Some(intent.as_str()));
+                assert!(!db
+                    .claim_publish_assignment_for_posting(&assignment, &intent)
+                    .unwrap());
+            }
+            drop(db);
+            std::fs::remove_file(path).unwrap();
+        }
+    }
+
+    #[test]
+    fn scheduled_initial_status_preserves_cleanup_and_durable_identity() {
+        let (db, path, campaign, assignment, _) = review_fixture(0);
+        let original =
+            r#"{"post":{"importId":"keep","state":"submitted"},"cleanup":{"state":"kept"}}"#;
+        assert_eq!(
+            db.with_initial_scheduled_verification(&campaign, &assignment, original)
+                .unwrap(),
+            original
+        );
+        mark_scheduled(&db, &campaign);
+        let output = db
+            .with_initial_scheduled_verification(&campaign, &assignment, original)
+            .unwrap();
+        let e: serde_json::Value = serde_json::from_str(&output).unwrap();
+        assert_eq!(e["post"]["importId"], "keep");
+        assert_eq!(e["cleanup"]["state"], "kept");
+        assert_eq!(e["verificationStatus"]["attempts"], 0);
+        assert_eq!(e["verificationStatus"]["reviewAfterMinutes"], 240);
+        assert!(e["verificationStatus"]["nextCheckAt"].as_str().is_some());
+        assert!(db.pending_publish_sheet_row(&assignment).unwrap().is_none());
+        drop(db);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn scheduled_verification_resumes_only_legacy_deadline_review() {
+        let (db, path, campaign, assignment, intent) = review_fixture(31);
+        assert_eq!(
+            db.expire_due_publish_verifications().unwrap(),
+            vec![campaign.clone()]
+        );
+        assert!(db.pending_publish_verifications(10).unwrap().is_empty());
+        mark_scheduled(&db, &campaign);
+        assert_eq!(db.pending_publish_verifications(10).unwrap().len(), 1);
+        assert_eq!(
+            db.expire_due_publish_verifications().unwrap(),
+            vec![campaign.clone()]
+        );
+        let row = db.pending_publish_verifications(10).unwrap().remove(0);
+        assert!(!row.is_due(Utc::now()));
+        assert_eq!(row.effect_intent.as_deref(), Some(intent.as_str()));
+        assert_eq!(
+            db.get_publish_campaign(&campaign)
+                .unwrap()
+                .unwrap()
+                .assignments[0]
+                .state,
+            crate::PublishCampaignState::Verifying
+        );
+        assert!(!db
+            .claim_publish_assignment_for_posting(&assignment, &intent)
+            .unwrap());
+        // A review parked for another reason stays parked, including after startup.
+        let mut e: serde_json::Value =
+            serde_json::from_str(row.evidence_json.as_deref().unwrap()).unwrap();
+        e["verificationStatus"]["state"] = serde_json::json!("needsReview");
+        e["verificationStatus"]["cause"] = serde_json::json!("submissionIdentityMissing");
+        db.update_publish_assignment_state(
+            &assignment,
+            crate::PublishCampaignState::Uncertain,
+            Some("post_verification_needs_review"),
+            Some(&e.to_string()),
+        )
+        .unwrap();
+        assert!(db.pending_publish_verifications(10).unwrap().is_empty());
+        drop(db);
+        std::fs::remove_file(path).unwrap();
     }
 
     #[test]

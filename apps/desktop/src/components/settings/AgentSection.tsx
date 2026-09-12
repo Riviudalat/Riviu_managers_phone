@@ -17,10 +17,11 @@ import type { AgentRuntimeView, AgentStatus, DeviceInfo } from "../../types";
 type AgentAction = "check" | "repair";
 
 /** The Riviu agent on each phone: its version, its status, and repairing it. */
-export function AgentSection({ connectedDevices, connectedUdids, deviceLabels }: {
+export function AgentSection({ connectedDevices, connectedUdids, deviceLabels, iosRuntimeIssue }: {
   connectedDevices: DeviceInfo[];
   connectedUdids: string[];
   deviceLabels?: ReadonlyMap<string, string>;
+  iosRuntimeIssue?: string | null;
 }) {
   const [runtime, setRuntime] = useState<AgentRuntimeView | null>();
   const [statuses, setStatuses] = useState<Record<string, AgentStatus>>({});
@@ -109,36 +110,42 @@ export function AgentSection({ connectedDevices, connectedUdids, deviceLabels }:
     }
   };
 
-  const protocolVersion =
-    Object.values(statuses).find((status) => status.protocolVersion > 0)?.protocolVersion ?? null;
+  const iosDevices = connectedDevices.filter(device => device.platform === "ios");
+  const protocolVersion = iosDevices.map(device => statuses[device.udid])
+    .find(status => status?.protocolVersion > 0)?.protocolVersion ?? null;
+  const hasIos = iosDevices.length > 0;
   return (
     <section className="settings-section">
       <div className="settings-section-heading">
         <div>
           <h3>Riviu Agent</h3>
-          <p className="hint">Giữ kết nối hình ảnh, thao tác và bình luận chữ trên từng điện thoại.</p>
+          <p className="hint">Phần mềm trên điện thoại nhận lệnh điều khiển và cung cấp hình ảnh. Android dùng ADB/UiAutomator2; iPhone dùng Riviu Agent.</p>
         </div>
-        <span
+        {hasIos && <span
           className={`chip ${runtime === undefined ? "info" : runtime?.tokenConfigured ? "ok" : "warn"}`}
         >
           {runtime === undefined
-            ? "Đang đọc thông tin xác thực"
+            ? "Đang đọc xác thực iOS"
             : runtime === null
-              ? "Chưa rõ trạng thái xác thực"
+              ? "Chưa rõ xác thực iOS"
               : runtime.tokenConfigured
-                ? "Đã lưu thông tin xác thực"
-                : "Chưa cấu hình thông tin xác thực"}
-        </span>
+                ? "Đã cấu hình xác thực iOS"
+                : "Chưa cấu hình xác thực iOS"}
+        </span>}
       </div>
 
-      <dl className="agent-runtime-meta">
+      <details className="settings-details" aria-label="Cấu hình Agent iOS">
+        <summary>Cấu hình Agent iOS</summary>
+        {!hasIos && <p className="hint">Chưa có iPhone đang kết nối. Cấu hình này dành cho iOS, không quyết định trạng thái Agent Android.</p>}
+        {iosRuntimeIssue && <p className="hint">iOS chưa sẵn sàng: {iosRuntimeIssue}</p>}
+        <dl className="agent-runtime-meta">
         <div>
-          <dt>Kết nối</dt>
-          <dd>{connectedDevices.length} thiết bị</dd>
+          <dt>iPhone kết nối</dt>
+          <dd>{iosDevices.length} thiết bị</dd>
         </div>
         <div>
           <dt>Agent đang dùng</dt>
-          <dd>{runtime === undefined ? "Đang đọc…" : runtime === null ? "Chưa rõ" : "Đã xác định"}</dd>
+          <dd>{runtime === undefined ? "Đang đọc…" : runtime === null || iosRuntimeIssue ? "Chưa sẵn sàng" : "Đã xác định"}</dd>
         </div>
         <div>
           <dt>Thông tin xác thực</dt>
@@ -148,14 +155,12 @@ export function AgentSection({ connectedDevices, connectedUdids, deviceLabels }:
               : runtime === null
                 ? "Chưa rõ"
                 : runtime.tokenConfigured
-                  ? "Đã lưu trong kho thông tin xác thực Windows"
+                  ? "Đã cấu hình cho Agent iOS"
                   : "Chưa cấu hình"}
           </dd>
         </div>
       </dl>
 
-      <details className="settings-details" aria-label="Chi tiết Riviu Agent">
-        <summary>Chi tiết Riviu Agent</summary>
         <dl className="agent-runtime-meta">
           <div>
             <dt>Mã gói</dt>
@@ -217,7 +222,7 @@ export function AgentSection({ connectedDevices, connectedUdids, deviceLabels }:
           compact
           icon={<IconPhone size={15} />}
           title="Chưa có điện thoại đang kết nối"
-          hint="Cắm máy qua USB rồi làm mới ở Quản lý cửa sổ."
+          hint="Cắm máy qua USB rồi quét lại ở trang Thiết bị."
         />
       ) : (
         <div className="agent-status-table" role="table" aria-label="Trạng thái Agent">

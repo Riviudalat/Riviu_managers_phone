@@ -1,0 +1,53 @@
+{
+  "name": "Riviu TikTok — Nuôi · Tương tác · Đăng bài",
+  "schemaVersion": 1,
+  "description": "Fixture for the three-feature fleet orchestration. Profile definitionIds are placeholders; the desktop command orchestration_create_three_feature_template creates real profiles + a compiled revision.",
+  "profiles": {
+    "nurture": {
+      "name": "Mẫu Nuôi TikTok",
+      "kind": "nurture",
+      "config": {
+        "schemaVersion": 1,
+        "durationMinutes": 30,
+        "settings": {
+          "network": "tiktok"
+        }
+      }
+    },
+    "interaction": {
+      "name": "Mẫu Tương tác TikTok",
+      "kind": "interaction",
+      "config": {
+        "schemaVersion": 1,
+        "request": {
+          "targets": [],
+          "messageCount": 2,
+          "instruction": "Viết ngắn, tự nhiên bằng tiếng Việt.",
+          "maxWords": 12,
+          "mode": "threaded",
+          "shape": "chain",
+          "actions": { "like": true, "comment": false, "save": true },
+          "network": "tiktok"
+        }
+      }
+    },
+    "publish": {
+      "name": "Mẫu Đăng bài TikTok",
+      "kind": "publish",
+      "config": {
+        "schemaVersion": 1,
+        "sourceRoot": "",
+        "bundleIds": [],
+        "captionOverrides": {},
+        "soundPolicy": { "kind": "default" },
+        "executionConfirmed": false,
+        "sheetEnabled": true,
+        "deleteAfterPublish": true,
+        "network": "tiktok"
+      }
+    }
+  },
+  "nodeOrder": ["start", "runNurture", "runInteraction", "runPublish", "end"],
+  "successPath": "done → done → done",
+  "stopBranches": ["partial", "failed", "uncertain"]
+}

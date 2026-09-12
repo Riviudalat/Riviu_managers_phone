@@ -29,6 +29,30 @@ mod inspection;
 mod sheet;
 
 #[tauri::command]
+pub fn interaction_parse_conversation(
+    state: State<'_, AppState>,
+    raw: String,
+) -> Result<Vec<riviu_core::conversation::ConversationStep>, CommandError> {
+    let _admission = state.ensure_accepting_work()?;
+    riviu_core::conversation::parse_conversation(&raw).map_err(interaction_error)
+}
+
+#[tauri::command]
+pub async fn interaction_draft_conversation(
+    state: State<'_, AppState>,
+    context: String,
+    direction: String,
+    roles: Vec<String>,
+    count: usize,
+) -> Result<Vec<riviu_core::conversation::ConversationStep>, CommandError> {
+    let _admission = state.ensure_accepting_work()?;
+    let settings = state.db.get_nurture_settings().map_err(interaction_error)?;
+    riviu_core::openai_client::draft_conversation(&settings, &context, &direction, &roles, count)
+        .await
+        .map_err(interaction_error)
+}
+
+#[tauri::command]
 pub async fn interaction_import_sheet(
     state: State<'_, AppState>,
     sheet_url: String,
@@ -148,6 +172,16 @@ pub fn interaction_preview_thread(
     state: State<'_, AppState>,
     request: ThreadCampaignRequest,
 ) -> Result<ThreadPreview, CommandError> {
+    if request.scripted_conversation.is_some()
+        && request
+            .actor_udids
+            .iter()
+            .any(|udid| !state.control.reports_element_bounds(udid))
+    {
+        return Err(interaction_error(
+            "Hội thoại có tag thật cần chọn toàn máy Android",
+        ));
+    }
     require_parent_locator(
         &state.control,
         request.mode,
@@ -167,6 +201,24 @@ pub fn interaction_preview_thread(
         .collect::<Vec<_>>();
     let plan = plan_threads(&request).map_err(interaction_error)?;
     Ok(ThreadPreview {
+        conversation_timeline: request
+            .scripted_conversation
+            .as_ref()
+            .map(|script| {
+                let starts = script
+                    .starts_at
+                    .as_deref()
+                    .map(chrono::DateTime::parse_from_rfc3339)
+                    .transpose()?
+                    .map_or_else(
+                        || chrono::Utc::now().timestamp_millis(),
+                        |at| at.timestamp_millis(),
+                    );
+                script.timeline(starts, 120_000)
+            })
+            .transpose()
+            .map_err(interaction_error)?
+            .unwrap_or_default(),
         valid_target_count: request.targets.len() as u32,
         // Both from the real planner and the real budget, so the desktop stops maintaining a
         // second copy of the cohort split in TypeScript and can warn about a capacity the
@@ -285,6 +337,16 @@ pub async fn interaction_start_thread(
     request: ThreadCampaignRequest,
 ) -> Result<InteractionStartResult, CommandError> {
     let admission = state.ensure_accepting_work()?;
+    if request.scripted_conversation.is_some()
+        && request
+            .actor_udids
+            .iter()
+            .any(|udid| !state.control.reports_element_bounds(udid))
+    {
+        return Err(interaction_error(
+            "Hội thoại có tag thật cần chọn toàn máy Android",
+        ));
+    }
     require_parent_locator(
         &state.control,
         request.mode,
@@ -563,6 +625,16 @@ pub fn interaction_retry(
         })?;
     // The mode is whatever the campaign was created with, so the reader
     // requirement has to be judged against that rather than a fresh choice.
+    if request.scripted_conversation.is_some()
+        && request
+            .actor_udids
+            .iter()
+            .any(|udid| !state.control.reports_element_bounds(udid))
+    {
+        return Err(interaction_error(
+            "Hội thoại có tag thật cần chọn toàn máy Android",
+        ));
+    }
     require_parent_locator(
         &state.control,
         request.mode,

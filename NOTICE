@@ -118,12 +118,12 @@ scrcpy client is not shipped.
 ------------------------------------------------------------------------
 
     sidecars/riviu-android-agent/           Java source (minSdk 26)
-    sidecars/android/noarch/riviu-agent.apk agent 0.4.0, protocol 1
-      bytes  25050
-      sha256 7d84c1b045d33e80e8b29ac53eec67f78a97d64e7458e13020f288649e14e81c
+    sidecars/android/noarch/riviu-agent.apk agent 0.5.0, protocol 1
+      bytes  211993
+      sha256 f79c13baeea43964c65e3b2b564224f2cf60fd30104ff9bfdef560814a2c8a62
 
 This is Riviu-authored. It is a helper, not an iPhone-Agent equivalent: loopback
-HTTP for clipboard (brief IME), MediaStore insert/delete, wallpaper, mock
+HTTP for clipboard (brief IME), MediaStore import, wallpaper, mock
 location, and app names/icons (`PackageManager`, which adb cannot answer). It
 does not replace uiautomator2, scrcpy, or minicap, and it must not stay the
 default keyboard.
@@ -331,3 +331,12 @@ The manifest records both upstream and transformed hashes. This process-local
 UTF-8 setting requires Windows 10 1903 (build 18362) or newer.
 Bundletool is used only to select/extract device-compatible APKs
 from an existing `.apks` archive; Riviu's own control plane performs installation.
+
+GUI perception service (Python sidecar)
+---------------------------------------
+FastAPI (MIT), Pydantic (MIT), Starlette (BSD-3-Clause), Uvicorn
+(BSD-3-Clause), HTTPX (BSD-3-Clause), and Pillow (MIT-CMU) implement the
+isolated perception API. Exact versions are pinned in sidecars/gui-service/uv.lock.
+The sidecar bundles CPython 3.12 (PSF license) using PyInstaller's bootloader
+exception. Package license texts are retained under sidecars/gui-service/licenses.
+Perception returns observations only; Riviu owns device effects and campaign state.

@@ -23,10 +23,13 @@ use sha2::{Digest, Sha256};
 /// folder made all twenty-one unscannable, with an error naming a post the operator had not
 /// selected.
 ///
-/// The composer's limit now lives with the grid that produces it
+/// The pixel composer's limit lives with the grid that produces it
 /// (`publish_commands::IOS_PIXEL_GRID_MAX_IMAGES`), and is checked before media leaves the
-/// desktop rather than after it has been imported onto a phone.
-const DEFAULT_MAX_IMAGES: usize = 35;
+/// desktop rather than after it has been imported onto a phone. The label-driven Android
+/// composer (`tiktok_composer::selection`) scrolls the isolated album row by row, so its
+/// ceiling is this one — TikTok's — rather than a count of cells that fit on one screen.
+pub const MAX_CAROUSEL_IMAGES: usize = 35;
+const DEFAULT_MAX_IMAGES: usize = MAX_CAROUSEL_IMAGES;
 const MAX_VIDEO_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 const MAX_VIDEO_DURATION_MS: u64 = 10 * 60 * 1_000;
 
@@ -270,6 +273,14 @@ pub struct PublishCampaignRequest {
     /// Immutable reporting choice. Legacy campaigns still owe their Sheet row.
     #[serde(default = "default_sheet_enabled")]
     pub sheet_enabled: bool,
+    /// Frozen writer destination for new deliveries; absent on historical campaigns.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sheet_delivery: Option<crate::publish_sheet::SheetDeliveryTarget>,
+    /// Required before dispatch by the current production runtime.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verification_contract_version: Option<u32>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub verification_builds: Vec<crate::publish_submission::PublishVerificationBuild>,
     pub request_id: String,
     pub source_root: String,
     pub bundle_ids: Vec<String>,
@@ -277,6 +288,9 @@ pub struct PublishCampaignRequest {
     pub run_at: Option<String>,
     pub visibility: PublishVisibility,
     pub cleanup_policy: PublishCleanupPolicy,
+    /// Which social app this publish campaign targets. Defaults to TikTok.
+    #[serde(default)]
+    pub network: crate::SocialNetwork,
     /// The exact deterministic sound policy approved for this run.
     #[serde(default)]
     pub sound_policy: PublishSoundPolicy,
@@ -322,7 +336,19 @@ pub struct PublishCampaignRecord {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
+pub struct PublishSheetDeliveryProgress {
+    pub state: String,
+    pub attempts: u32,
+    pub last_error: Option<String>,
+    pub next_attempt_at_ms: Option<i64>,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
 pub struct PublishAssignmentRecord {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sheet_delivery: Option<PublishSheetDeliveryProgress>,
     pub id: String,
     pub campaign_id: String,
     pub bundle_id: String,
@@ -2444,6 +2470,9 @@ mod execution_contract_tests {
         )
         .expect("resolve pinned target");
         let request = PublishCampaignRequest {
+            sheet_delivery: None,
+            verification_contract_version: None,
+            verification_builds: vec![],
             sheet_enabled: true,
             request_id: "request-1".into(),
             source_root: "C:/fixture".into(),
@@ -2452,6 +2481,7 @@ mod execution_contract_tests {
             run_at: Some("2026-09-03T12:00".into()),
             visibility: PublishVisibility::Public,
             cleanup_policy: PublishCleanupPolicy::DeleteImportedAssetsAfterVerified,
+            network: crate::SocialNetwork::TikTok,
             sound_policy: PublishSoundPolicy::TrendingAny {
                 pool_size: 5,
                 seed: 0x00fe_dcba,

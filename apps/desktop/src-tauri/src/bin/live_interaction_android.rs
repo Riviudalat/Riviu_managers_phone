@@ -189,6 +189,7 @@ async fn main() -> anyhow::Result<()> {
     // `Standalone`, because that is the shape the batched draft covers and the shape an
     // operator uses to put one comment per phone under one post.
     let request = ThreadCampaignRequest {
+        scripted_conversation: None,
         request_id: Uuid::new_v4().to_string(),
         targets,
         actor_udids: devices.clone(),

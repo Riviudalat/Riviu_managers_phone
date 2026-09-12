@@ -1,10 +1,30 @@
 # Hợp đồng UI và ma trận tham chiếu
 
-Thiết kế được chốt cho đợt 06/09/2026: shell trắng, nền trung tính `#F5F6F8`, primary
-cam `#C2410C`; control 36 px, body 13–14 px, heading 18–20 px. Giữ Tauri/React/Rust,
+Thiết kế hiện tại: shell trắng, nền trung tính `#F5F6F8`, primary
+cam `#C2410C`; control 36 px, body 14 px, chữ phụ 13 px, chú thích tối thiểu 12 px,
+heading trang 20 px. Noto Sans/Noto Sans Mono đóng gói cùng app. Control bo 6 px,
+panel bo 8 px; khoảng cách theo thang 4/8/12/16/24 px. Giữ Tauri/React/Rust,
 tile/canvas, mật độ và cử chỉ thiết bị. Không toast nổi; trạng thái ở cạnh hành động,
 monitor nguồn và ActivityCenter. Đây là tiêu chí triển khai, không tự xác nhận mọi
 màn hình đã vượt cổng screenshot/accessibility.
+
+Sidebar giữ 12 chức năng và bốn nhóm, rộng 240 px, thu gọn 64 px ở viewport
+không quá 1024 px. Header cao tối thiểu 56 px, trạng thái có nhãn **Toàn hệ thống**;
+máy thực hiện của mỗi workspace là một phạm vi riêng. Mỗi vùng có một hành động
+chính màu cam, thao tác phụ trung tính. **Bảo trì → Sửa Riviu Agent** tách khỏi
+các lệnh mở máy/đồng bộ. Quét thiết bị xuất hiện tại toolbar Thiết bị hoặc header
+của trang khác, không lặp trong cùng một màn hình.
+
+Modal và drawer giữ focus, Escape đóng lớp đang thao tác, đóng trả focus về nút mở.
+Monitor tiến trình vẫn không modal và hoạt động xuyên trang. Bảng có cuộn riêng;
+thanh hành động và nút chạy nằm trong viewport ở kích thước laptop. Chuyển màu nhẹ
+120–180 ms, không hiệu ứng lặp trang trí; hỗ trợ giảm chuyển động.
+
+Khi ghi Macro, hộp Công cụ nhóm được ẩn và ngừng giữ focus. Chỉ một thanh ghi hiển thị:
+trong menu điện thoại nếu đang mở, hoặc dưới header ứng dụng. Dừng ghi mở lại tab Macro,
+giữ bản nháp và phạm vi UDID đã chốt; không đóng điện thoại hoặc tự chạy Macro.
+Phần tài khoản Tương tác cuộn dọc trong khung máy trên cửa sổ hẹp. Điều phối chuyển
+thành một cột ở 1100 px; toolbar tự xuống hàng nhưng nhãn Lưu/Chạy vẫn một dòng.
 
 ## Nguồn và cách áp dụng
 
@@ -38,7 +58,7 @@ quyết định thiết kế Riviu, không phải tuyên bố parity toàn bộ 
 | Tác vụ | bảng dense, filters, detail | source/status/time | total/page/source link | bài khác máy; active cũ; pagination |
 | Kho nội dung | bảng metadata, bulk toolbar | artifact và target | ledger từng máy | restore monitor, cancel queued, no uncertain retry |
 | Trung tâm ứng dụng | bảng package, contextual action | package/version/target | batch/item result | artifact snapshot, restart uncertainty |
-| Dữ liệu | bảng, filters, detail | source/time | lịch sử bền, artifact | tổng trước trang; không silent truncation |
+| Dữ liệu | năng lực, tác vụ 24 giờ, nhật ký gần nhất | tìm kiếm trong tối đa 200 log đã tải | số liệu theo phạm vi; tra cứu sâu tại Tác vụ | hiển thị giới hạn và phạm vi lọc/xuất |
 | API | listener status, config section | địa chỉ/credential | actual bind/restart | config khác listener; lỗi bind hiển thị |
 | Cài đặt | section rõ, lưu từng vùng | form/credential | persisted readback | stale response, draft guard, restart indication |
 

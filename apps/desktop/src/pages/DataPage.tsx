@@ -51,7 +51,7 @@ export function DataPage() {
           <div className="admin-toolbar">
             <div className="admin-toolbar-copy">
               <strong>Tổng quan vận hành</strong>
-              <span>Tác vụ trong 24 giờ qua</span>
+              <span>Thống kê tác vụ trong 24 giờ qua · Làm mới để cập nhật</span>
             </div>
             <div className="admin-toolbar-actions">
               <StatusChip tone={operations?.counts.attention ? "warning" : "success"}>
@@ -72,20 +72,25 @@ export function DataPage() {
             </StatusNotice>
           )}
 
-          <FormSection title="Năng lực hiện tại">
-            <dl className="admin-metric-grid">
-              <div className="admin-metric"><dt>Thiết bị</dt><dd>{data.deviceReady}/{data.deviceTotal}</dd></div>
+          <FormSection title="Tác vụ trong 24 giờ qua" description="Số liệu từ lịch sử tác vụ đã được lưu.">
+            <dl className="admin-metric-grid data-operation-metrics">
               <div className="admin-metric"><dt>Đang chạy</dt><dd>{operations?.counts.active ?? "—"}</dd></div>
               <div className="admin-metric"><dt>Đã thành công</dt><dd>{operations?.counts.succeeded ?? "—"}</dd></div>
-              <div className="admin-metric"><dt>Cần xử lý</dt><dd>{operations?.counts.attention ?? "—"}</dd></div>
+              <div className="admin-metric" data-attention={Boolean(operations?.counts.attention)}><dt>Cần xử lý</dt><dd>{operations?.counts.attention ?? "—"}</dd></div>
               <div className="admin-metric"><dt>Tổng tác vụ</dt><dd>{operations?.total ?? "—"}</dd></div>
+            </dl>
+          </FormSection>
+
+          <FormSection title="Năng lực hiện tại" description="Thiết bị và tài nguyên tại lần làm mới gần nhất.">
+            <dl className="admin-metric-grid">
+              <div className="admin-metric"><dt>Thiết bị</dt><dd><span>{data.deviceReady}/{data.deviceTotal}</span><small>Sẵn sàng / tổng</small></dd></div>
               <div className="admin-metric"><dt>Nội dung</dt><dd>{data.materialsTotal}</dd></div>
               <div className="admin-metric"><dt>Ứng dụng</dt><dd>{data.appsTotal}</dd></div>
               <div className="admin-metric"><dt>Lịch đang bật</dt><dd>{data.schedulesEnabled}</dd></div>
             </dl>
           </FormSection>
 
-          <FormSection title="Nhật ký thao tác" description="Các ghi nhận gần nhất từ runtime đang chạy.">
+          <FormSection title="Nhật ký thao tác" description="Tối đa 200 ghi nhận gần nhất của ứng dụng; độc lập với cửa sổ thống kê 24 giờ.">
             <OperationLog />
           </FormSection>
         </main>

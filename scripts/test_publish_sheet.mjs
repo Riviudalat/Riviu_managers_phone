@@ -12,12 +12,12 @@ const source = fs.readFileSync(process.env.RIVIU_SHEET_FIXTURE_PATH || path.join
 // Stateful Google Sheets fixture. A batch is validated before applying any write;
 // an optional lost response is raised after the complete write to model retry.
 function harness({ config = {}, headers = ["STT", "Người air", "Ngày", "Link", "Đối tác", "Đối tác 2"], rows = [], gid = 0 } = {}) {
-  const cells = [headers, ...rows].map(row => [...row]);
+  const cells = (headers.length ? [headers, ...rows] : rows).map(row => [...row]);
   const notes = new Map();
   const formulas = new Map();
-  const state = { writes: 0, batches: [], lostResponse: false, rejectBatch: false, locks: 0 };
+  const state = { writes: 0, batches: [], lostResponse: false, rejectBatch: false, locks: 0, afterCommit: null, frozenRows: 0 };
   let maxRows = 20;
-  const maxColumns = Math.max(headers.length, ...rows.map(row => row.length));
+  let maxColumns = Math.max(1, headers.length, ...rows.map(row => row.length));
   const read = (r, c) => cells[r - 1]?.[c - 1] ?? "";
   const sheet = {
     getSheetId: () => gid,
@@ -25,8 +25,9 @@ function harness({ config = {}, headers = ["STT", "Người air", "Ngày", "Link
     getLastRow: () => cells.length,
     getMaxRows: () => maxRows,
     getMaxColumns: () => maxColumns,
-    getLastColumn: () => maxColumns,
-    insertRowsAfter: (_after, count) => { maxRows += count; },
+    getLastColumn: () => Math.max(0, ...cells.map(row => row.length)),
+    insertRowsAfter: () => { throw new Error("row expansion must be inside the atomic batch"); },
+    insertColumnsAfter: () => { throw new Error("column expansion must be inside the atomic batch"); },
     getRange(row, column, height = 1, width = 1) {
       assert.ok(row >= 1 && column >= 1 && column + width - 1 <= maxColumns);
       const matrix = fn => Array.from({ length: height }, (_, y) => Array.from({ length: width }, (_, x) => fn(row + y, column + x)));
@@ -56,17 +57,54 @@ function harness({ config = {}, headers = ["STT", "Người air", "Ngày", "Link
       computeDigest: (_algorithm, value) => [...createHash("sha256").update(value, "utf8").digest()],
     },
     Sheets: { Spreadsheets: { batchUpdate(batch) {
+      assert.equal(state.locks, 1, "each atomic row write must hold the shared script lock");
       state.batches.push(batch);
       if (state.rejectBatch) throw new Error("fixture batch rejected before commit");
+      let nextColumns = maxColumns, nextRows = maxRows;
       for (const request of batch.requests) {
+        if (request.insertDimension) {
+          const range = request.insertDimension.range;
+          assert.equal(range.sheetId, gid); assert.equal(range.dimension, "COLUMNS");
+          assert.ok(range.startIndex <= nextColumns && range.endIndex > range.startIndex);
+          nextColumns += range.endIndex - range.startIndex;
+          continue;
+        }
+        if (request.appendDimension) {
+          assert.equal(request.appendDimension.sheetId, gid);
+          if (request.appendDimension.dimension === "ROWS") nextRows += request.appendDimension.length;
+          else { assert.equal(request.appendDimension.dimension, "COLUMNS"); nextColumns += request.appendDimension.length; }
+          continue;
+        }
+        if (request.updateSheetProperties) { assert.equal(request.updateSheetProperties.properties.sheetId, gid); continue; }
         const update = request.updateCells;
-        assert.ok(update, "only cell writes expected");
+        assert.ok(update, "only validated grid or cell writes expected");
         assert.equal(update.start.sheetId, gid);
         const r = update.start.rowIndex + 1;
         const c = update.start.columnIndex + 1;
-        assert.ok(r <= maxRows && c + update.rows[0].values.length - 1 <= maxColumns);
+        assert.ok(r <= nextRows && c + update.rows[0].values.length - 1 <= nextColumns);
       }
-      for (const { updateCells: update } of batch.requests) {
+      for (const request of batch.requests) {
+        if (request.insertDimension) {
+          const { startIndex, endIndex } = request.insertDimension.range;
+          const extra = endIndex - startIndex;
+          for (const row of cells) row.splice(startIndex, 0, ...Array(extra).fill(""));
+          for (const map of [notes, formulas]) {
+            const entries = [...map]; map.clear();
+            for (const [key, value] of entries) {
+              const [r, c] = key.split(":").map(Number);
+              map.set(`${r}:${c > startIndex ? c + extra : c}`, value);
+            }
+          }
+          maxColumns += extra;
+          continue;
+        }
+        if (request.appendDimension) {
+          if (request.appendDimension.dimension === "ROWS") maxRows += request.appendDimension.length;
+          else maxColumns += request.appendDimension.length;
+          continue;
+        }
+        if (request.updateSheetProperties) { state.frozenRows = request.updateSheetProperties.properties.gridProperties.frozenRowCount; continue; }
+        const update = request.updateCells;
         update.rows.forEach((row, y) => row.values.forEach((cell, x) => {
           const r = update.start.rowIndex + y + 1;
           const c = update.start.columnIndex + x + 1;
@@ -76,6 +114,7 @@ function harness({ config = {}, headers = ["STT", "Người air", "Ngày", "Link
         }));
       }
       state.writes++;
+      state.afterCommit?.();
       if (state.lostResponse) { state.lostResponse = false; throw new Error("fixture response lost after commit"); }
       return {};
     } } },
@@ -116,10 +155,12 @@ test("rejected batch has neither visible row nor idempotency key", () => {
   assert.equal(h.notes.size, 0);
 });
 
-test("compact partner overflow is rejected without dropping names", () => {
+test("compact partner overflow expands headers and data in one commit", () => {
   const h = harness();
-  assert.equal(h.deliver({ partners: ["A", "B", "C"] }).ok, false);
-  assert.equal(h.state.writes, 0);
+  assert.equal(h.deliver({ partners: ["A", "B", "C"] }).ok, true);
+  assert.deepEqual(h.cells[0].slice(4), ["Đối tác", "Đối tác 2", "Đối tác 3"]);
+  assert.deepEqual(h.cells[1].slice(4), ["A", "B", "C"]);
+  assert.equal(h.state.writes, 1);
 });
 
 test("same assignment with changed content is not acknowledged as delivered", () => {
@@ -408,7 +449,7 @@ test("check returns the authenticated exact target and layout without any writes
     const h = harness({ headers, gid: 37 });
     const before = JSON.stringify(h.cells);
     const result = h.deliver({ rowKind: "check", checkVersion: 1, spreadsheetId: "fixture-book", sheetGid: 37, assignmentId: undefined, postUrl: undefined });
-    assert.deepEqual(result, { ok: true, checkVersion: 1, spreadsheetId: "fixture-book", sheetGid: 37, layout, columns: headers });
+    assert.deepEqual(result, { ok: true, checkVersion: 1, deliveryVersion: 2, spreadsheetId: "fixture-book", sheetGid: 37, layout, columns: headers });
     assert.equal(h.state.writes, 0); assert.equal(h.state.locks, 0); assert.equal(h.notes.size, 0);
     assert.equal(JSON.stringify(h.cells), before);
   }
@@ -422,5 +463,233 @@ test("check rejects wrong token, target, gid, version and damaged header without
   }
   const h = harness({ headers: ["STT", "broken", "Ngày", "Link", "Đối tác"] });
   assert.equal(h.deliver({ rowKind: "check", checkVersion: 1, spreadsheetId: "fixture-book", sheetGid: 0 }).ok, false);
+  assert.equal(h.state.writes, 0);
+});
+
+
+test("two scheduled machines finish in reverse order without mixing or duplicating their internal rows", () => {
+  const h = harness({ headers: internalHeaders });
+  const a = { ...internalRow, assignmentId: "phone-a-post", machine: "Máy A", tiktokAccount: "@a", partners: ["Đối tác A"], postedAt: "2026-09-10T13:00:00Z", status: "Đã gửi" };
+  const b = { ...a, assignmentId: "phone-b-post", machine: "Máy B", tiktokAccount: "@b", partners: ["Đối tác B"] };
+  assert.equal(h.deliver(a).row, 2);
+  assert.equal(h.deliver(b).row, 3);
+  const done = row => ({ ...row, rowRevision: 2, status: "Đã xác minh", stateNotes: "", postUrl: `https://www.tiktok.com/${row.tiktokAccount}/photo/${row === a ? "111111" : "222222"}` });
+  h.state.lostResponse = true;
+  assert.equal(h.deliver(done(b)).ok, false, "write completed but response was lost");
+  assert.equal(h.deliver(done(a)).row, 2);
+  assert.equal(h.deliver(done(b)).duplicate, true);
+  assert.equal(h.deliver(b).duplicate, true, "old pending report cannot erase verified B");
+  assert.equal(h.cells.length, 3);
+  for (const [index, row] of [[1, a], [2, b]]) {
+    assert.equal(h.cells[index][0], index);
+    assert.equal(h.cells[index][2], "10/9/2026");
+    assert.equal(h.cells[index][3], done(row).postUrl);
+    assert.equal(h.cells[index][4], row.machine);
+    assert.equal(h.cells[index][5], row.tiktokAccount);
+    assert.equal(h.cells[index][6], "Đã xác minh");
+    assert.equal(h.cells[index][8], row.partners[0]);
+    assert.equal(JSON.parse(h.notes.get(`${index + 1}:4`)).assignmentId, row.assignmentId);
+  }
+  assert.equal(h.state.writes, 4);
+  assert.equal(h.state.locks, 0);
+});
+
+test("compact sheet appends by received link order while retaining each machine post identity", () => {
+  const h = harness();
+  const a = { assignmentId: "a", poster: "Máy A", postUrl: "https://www.tiktok.com/@a/photo/111111", partners: ["Đối tác A"], postedAt: "2026-09-10T13:00:00Z" };
+  const b = { assignmentId: "b", poster: "Máy B", postUrl: "https://www.tiktok.com/@b/photo/222222", partners: ["Đối tác B"], postedAt: "2026-09-10T13:00:00Z" };
+  assert.equal(h.deliver(b).row, 2);
+  assert.equal(h.deliver(a).row, 3);
+  assert.equal(h.deliver(b).duplicate, true);
+  assert.equal(h.deliver(a).duplicate, true);
+  assert.deepEqual(h.cells.slice(1).map(r => r.slice(0,5)), [
+    [1, "Máy B", "10/9/2026", b.postUrl, "Đối tác B"],
+    [2, "Máy A", "10/9/2026", a.postUrl, "Đối tác A"],
+  ]);
+  assert.equal(h.state.writes, 2);
+  assert.equal(h.state.locks, 0);
+});
+
+const deliveryV2 = { deliveryVersion: 2, spreadsheetId: "fixture-book", sheetGid: 0, deliveryRevision: 1, rowKind: "canonical" };
+
+test("v2 canonical ACK contains the committed target identity revision and actual Link", () => {
+  const h = harness();
+  const ack = h.deliver(deliveryV2);
+  assert.deepEqual(ack, { ok: true, row: 2, deliveryVersion: 2, spreadsheetId: "fixture-book", sheetGid: 0,
+    assignmentId: "assignment-1", deliveryRevision: 1, postUrl: h.cells[1][3] });
+  assert.equal(h.state.batches.length, 1);
+  const note = JSON.parse(h.notes.get("2:4"));
+  assert.equal(note.canonicalDeliveryRevision, 1);
+  assert.equal(note.spreadsheetId, "fixture-book");
+  assert.equal(h.deliver(deliveryV2).duplicate, true);
+  assert.equal(h.state.writes, 1);
+});
+
+test("v2 malformed target identity metadata and dates fail before column expansion", () => {
+  for (const patch of [{ spreadsheetId: "another-book" }, { sheetGid: 1 }, { deliveryVersion: 3 },
+    { deliveryRevision: -1 }, { deliveryRevision: 1.2 }, { assignmentId: " padded " },
+    { postUrl: "https://vt.tiktok.com/example" }, { postedAt: "not-a-date" }, { poster: null },
+    { rowKind: "internalReport", reportVersion: 2, rowRevision: 1 }]) {
+    const h = harness();
+    const before = JSON.stringify(h.cells);
+    assert.equal(h.deliver({ ...deliveryV2, partners: ["A", "B", "C"], ...patch }).ok, false, JSON.stringify(patch));
+    assert.equal(JSON.stringify(h.cells), before);
+    assert.equal(h.state.writes, 0);
+    assert.equal(h.state.batches.length, 0);
+  }
+});
+
+test("v2 header extension preserves trailing formulas notes and values in one atomic batch", () => {
+  const h = harness({ headers: ["STT", "Người air", "Ngày", "Link", "Đối tác", "Đối tác 2", "Tổng"],
+    rows: [["", "", "", "", "", "", 42]] });
+  h.formulas.set("2:7", "=40+2"); h.notes.set("2:7", "user note");
+  assert.equal(h.deliver({ ...deliveryV2, partners: ["A", "B", "C", "D"] }).ok, true);
+  assert.deepEqual(h.cells[0].slice(4), ["Đối tác", "Đối tác 2", "Đối tác 3", "Đối tác 4", "Tổng"]);
+  assert.deepEqual(h.cells[1].slice(4), ["A", "B", "C", "D", 42]);
+  assert.equal(h.formulas.get("2:9"), "=40+2"); assert.equal(h.notes.get("2:9"), "user note");
+  assert.equal(h.state.writes, 1);
+  assert.equal(h.state.batches[0].requests[0].insertDimension.range.startIndex, 6);
+});
+
+test("v2 rejected expansion commits neither columns headers values nor key", () => {
+  const h = harness(); h.state.rejectBatch = true;
+  const before = JSON.stringify(h.cells);
+  const ack = h.deliver({ ...deliveryV2, partners: ["A", "B", "C"] });
+  assert.equal(ack.ok, false); assert.equal(ack.retryable, true);
+  assert.equal(JSON.stringify(h.cells), before); assert.equal(h.notes.size, 0); assert.equal(h.state.writes, 0);
+});
+
+test("v2 ambiguous committed expansion retries from stored values without adding another row", () => {
+  const h = harness(); h.state.lostResponse = true;
+  const request = { ...deliveryV2, partners: ["A", "B", "C"] };
+  assert.equal(h.deliver(request).ok, false);
+  const ack = h.deliver(request);
+  assert.equal(ack.ok, true); assert.equal(ack.duplicate, true); assert.equal(ack.deliveryRevision, 1);
+  assert.equal(h.cells.length, 2); assert.equal(h.cells[0].length, 7); assert.equal(h.state.writes, 1);
+});
+
+test("v2 post-commit readback rejects a changed Link instead of echoing the request", () => {
+  const h = harness();
+  h.state.afterCommit = () => { h.cells[1][3] = "https://www.tiktok.com/@other/photo/999"; };
+  const ack = h.deliver(deliveryV2);
+  assert.equal(ack.ok, false); assert.equal(ack.postUrl, undefined);
+});
+
+test("v2 canonical refuses a different revision or immutable Link without writing", () => {
+  const h = harness(); h.deliver(deliveryV2);
+  assert.equal(h.deliver({ ...deliveryV2, deliveryRevision: 2 }).ok, false);
+  assert.equal(h.deliver({ ...deliveryV2, postUrl: "https://www.tiktok.com/@test/photo/999" }).ok, false);
+  assert.equal(h.deliver({ ...deliveryV2, postedAt: "2026-09-08T19:30:00Z" }).ok, false);
+  assert.equal(h.state.writes, 1);
+});
+
+test("v2 stale canonical mismatch cannot acquire a canonical note on another verified Link", () => {
+  const h = harness({ headers: internalHeaders });
+  const verified = { ...deliveryV2, ...internalRow, deliveryRevision: 4, rowRevision: 4,
+    postedAt: "2026-09-08T18:30:00Z", postUrl: "https://www.tiktok.com/@test/photo/123456", status: "Đã xác minh" };
+  h.deliver(verified);
+  const before = h.notes.get("2:4");
+  assert.equal(h.deliver({ ...verified, rowKind: "canonical", deliveryRevision: 1, rowRevision: 3, postUrl: "https://www.tiktok.com/@test/photo/999" }).ok, false);
+  assert.equal(h.notes.get("2:4"), before); assert.equal(h.state.writes, 1);
+});
+
+test("v2 canonical old-client duplicate upgrades only its already verified note", () => {
+  const h = harness(); h.deliver();
+  const row = [...h.cells[1]];
+  assert.equal(h.deliver(deliveryV2).deliveryRevision, 1);
+  assert.deepEqual(h.cells[1], row);
+  assert.equal(h.state.writes, 2);
+  assert.equal(h.state.batches[1].requests.length, 1);
+  assert.equal(h.state.batches[1].requests[0].updateCells.fields, "note");
+  assert.equal(h.deliver().duplicate, true);
+  assert.equal(h.state.writes, 2);
+});
+
+test("v2 note upgrade reads the stored row again after its commit", () => {
+  const h = harness(); h.deliver();
+  h.state.afterCommit = () => h.formulas.set("2:4", '=HYPERLINK("https://example.org")');
+  const ack = h.deliver(deliveryV2);
+  assert.equal(ack.ok, false); assert.equal(ack.postUrl, undefined);
+});
+
+test("v2 internal stale report returns stored revision and canonical Link without erasing it", () => {
+  const h = harness({ headers: internalHeaders });
+  const pending = { ...deliveryV2, ...internalRow };
+  assert.equal(h.deliver(pending).deliveryRevision, 1);
+  const verified = { ...pending, deliveryRevision: 3, rowRevision: 3, postedAt: "2026-09-08T18:30:00Z",
+    postUrl: "https://www.tiktok.com/@test/photo/123456", status: "Đã xác minh", stateNotes: "" };
+  assert.equal(h.deliver(verified).deliveryRevision, 3);
+  const ack = h.deliver(pending);
+  assert.equal(ack.deliveryRevision, 3); assert.equal(ack.rowRevision, 3);
+  assert.equal(ack.postUrl, verified.postUrl); assert.equal(ack.duplicate, true);
+  assert.equal(h.state.writes, 2);
+  assert.equal(h.deliver({ ...pending, deliveryRevision: 4, rowRevision: 4 }).ok, false);
+});
+
+test("v2 canonical metadata and subsequent reports retain independent canonical revision", () => {
+  const h = harness({ headers: internalHeaders });
+  const canonical = { ...deliveryV2, ...internalRow, rowKind: "canonical", rowRevision: 7,
+    postedAt: "2026-09-08T18:30:00Z", postUrl: "https://www.tiktok.com/@test/photo/123456", status: "Đã xác minh", stateNotes: "" };
+  assert.equal(h.deliver(canonical).deliveryRevision, 1);
+  const report = { ...canonical, rowKind: "internalReport", rowRevision: 8, deliveryRevision: 8, stateNotes: "Đã ghi Sheet" };
+  assert.equal(h.deliver(report).deliveryRevision, 8);
+  const ack = h.deliver(canonical);
+  assert.equal(ack.deliveryRevision, 1); assert.equal(ack.rowRevision, 8); assert.equal(ack.postUrl, canonical.postUrl);
+  assert.equal(JSON.parse(h.notes.get("2:4")).canonicalDeliveryRevision, 1);
+  assert.equal(h.state.writes, 2);
+});
+
+test("v2 report validation runs before partner expansion and stale rows never expand", () => {
+  const h = harness({ headers: internalHeaders });
+  const pending = { ...deliveryV2, ...internalRow, rowRevision: 2, deliveryRevision: 2 };
+  assert.equal(h.deliver(pending).ok, true);
+  const before = JSON.stringify(h.cells);
+  assert.equal(h.deliver({ ...pending, partners: ["A", "B", "C"], rowRevision: 3, deliveryRevision: 3, status: "bad" }).ok, false);
+  assert.equal(JSON.stringify(h.cells), before);
+  assert.equal(h.deliver({ ...pending, partners: ["A", "B", "C"], rowRevision: 1, deliveryRevision: 1 }).ok, false);
+  assert.equal(JSON.stringify(h.cells), before); assert.equal(h.state.writes, 1);
+});
+
+test("v2 expands rows only inside its commit and preserves exactly one assignment", () => {
+  const h = harness({ rows: Array.from({ length: 19 }, (_, i) => [i + 1, "person", "date", `old-${i}`, "", ""]) });
+  assert.equal(h.deliver(deliveryV2).ok, true);
+  assert.equal(h.state.batches[0].requests[0].appendDimension.length, 1);
+  assert.equal(h.deliver(deliveryV2).duplicate, true);
+  assert.equal(h.state.writes, 1);
+});
+
+test("prepare blank target commits grid header and frozen row together and never writes on read-only check", () => {
+  const h = harness({ headers: [] });
+  const request = { rowKind: "prepare", checkVersion: 1, spreadsheetId: "fixture-book", sheetGid: 0 };
+  const ack = h.deliver(request);
+  assert.equal(ack.ok, true); assert.equal(ack.deliveryVersion, 2);
+  assert.deepEqual(h.cells[0], internalHeaders.slice(0, 9));
+  assert.equal(h.state.frozenRows, 1); assert.equal(h.state.writes, 1);
+  assert.equal(h.deliver({ ...request, rowKind: "check" }).ok, true);
+  assert.equal(h.state.writes, 1);
+  const rejected = harness({ headers: [] }); rejected.state.rejectBatch = true;
+  assert.equal(rejected.deliver(request).ok, false);
+  assert.equal(rejected.cells.length, 0); assert.equal(rejected.state.frozenRows, 0); assert.equal(rejected.state.writes, 0);
+});
+
+test("legacy check remains available but never advertises v2 delivery support", () => {
+  const headers = Array(34).fill(""); headers[1] = "Nhân Viên"; headers[3] = "Link"; headers[10] = "Đối tác";
+  const h = harness({ headers, config: { LAYOUT_MODE: "legacy" } });
+  const ack = h.deliver({ rowKind: "check", checkVersion: 1, spreadsheetId: "fixture-book", sheetGid: 0 });
+  assert.equal(ack.ok, true); assert.equal(ack.deliveryVersion, 1);
+  assert.equal(h.deliver(deliveryV2).ok, false); assert.equal(h.state.writes, 0);
+});
+
+test("prepare validates its target header configuration before any grid mutation", () => {
+  for (const config of [{ LAYOUT_MODE: "compact" }, { LAYOUT_MODE: "legacy" }, { LINK_COLUMN: 3 }, { POSTER_COLUMN: 1 }]) {
+    const h = harness({ headers: [], config });
+    assert.equal(h.deliver({ rowKind: "prepare", checkVersion: 1, spreadsheetId: "fixture-book", sheetGid: 0 }).ok, false);
+    assert.equal(h.cells.length, 0); assert.equal(h.state.writes, 0); assert.equal(h.state.batches.length, 0);
+  }
+});
+
+test("v2 canonical metadata still requires the immutable send timestamp", () => {
+  const h = harness({ headers: internalHeaders });
+  assert.equal(h.deliver({ ...deliveryV2, ...internalRow, rowKind: "canonical", status: "Đã xác minh", postUrl: "https://www.tiktok.com/@test/photo/123456" }).ok, false);
   assert.equal(h.state.writes, 0);
 });

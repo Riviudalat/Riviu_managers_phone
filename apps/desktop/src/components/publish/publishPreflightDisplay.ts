@@ -48,6 +48,21 @@ export function publishPreflightProblem(
   issue: PublishExecutionIssue,
 ): PublishPreflightProblem {
   switch (issue.code) {
+    case "link_verification_unmeasured":
+      return {
+        title: "Chưa xác minh được bài và lấy liên kết trên giao diện này",
+        action: "Luồng soạn bài có thể đã đạt, nhưng bước đối chiếu bài đăng chưa sẵn sàng. Kiểm tra lại nhận diện và ngôn ngữ của máy; xem mã lỗi để gửi chẩn đoán.",
+      };
+    case "post_verification_pending":
+      return {
+        title: "Máy còn bài đang chờ xác minh",
+        action: "Mở Theo dõi và kiểm tra liên kết của lượt đăng trước trên máy này. Hoàn tất đối soát rồi kiểm tra lại lượt mới.",
+      };
+    case "sheet_connection_unverified":
+      return {
+        title: "Kết nối Sheet chưa được xác minh",
+        action: "Kiểm tra link bảng và kết nối Sheet trong Thiết lập, sau đó kiểm tra lại đợt đăng.",
+      };
     case "automation_transport_conflict":
       return {
         title: "Kết nối điều khiển cần kiểm tra",
@@ -113,7 +128,7 @@ export function publishPreflightProblem(
       return {
         title: "Nội dung bài chưa đạt yêu cầu",
         action:
-          "Kiểm tra caption không rỗng; mỗi bài gồm ảnh hoặc một MP4 được hỗ trợ. Sửa nội dung rồi kiểm tra lại.",
+          "Kiểm tra caption không rỗng; mỗi bài gồm ảnh (Android tối đa 35 ảnh, iPhone tối đa 11) hoặc một MP4 được hỗ trợ. Dòng chi tiết bên dưới ghi số ảnh của bài và giới hạn của máy. Sửa nội dung rồi kiểm tra lại.",
       };
     case "android_required":
       return {

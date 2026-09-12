@@ -1,4 +1,6 @@
+import { useModalFocus } from "./useModalFocus";
 import { useState } from "react";
+import { Terminal, X } from "lucide-react";
 import { describeError } from "../describeError";
 import { deviceShell } from "../api";
 import type { DeviceInfo } from "../types";
@@ -21,6 +23,7 @@ interface Props {
  * shown as-is; it names the current owner, which is the thing the operator needs.
  */
 export function AdbConsole({ device, onClose }: Props) {
+  const dialogRef = useModalFocus<HTMLDivElement>(onClose);
   const [script, setScript] = useState("");
   const [output, setOutput] = useState<{ text: string; failed: boolean } | null>(null);
   const [running, setRunning] = useState(false);
@@ -54,6 +57,8 @@ export function AdbConsole({ device, onClose }: Props) {
   return (
     <div className="modal-backdrop" onClick={onClose}>
       <div
+        ref={dialogRef}
+        tabIndex={-1}
         className="modal adb-console"
         role="dialog"
         aria-modal="true"
@@ -61,19 +66,17 @@ export function AdbConsole({ device, onClose }: Props) {
         onClick={(event) => event.stopPropagation()}
       >
         <header>
-          <strong>adb shell — {device.name}</strong>
-          <button type="button" className="ghost" onClick={onClose}>
-            Đóng
+          <div className="device-modal-heading"><p>Công cụ thiết bị</p><h2>adb shell — {device.name}</h2></div>
+          <button type="button" className="icon-btn" onClick={onClose} aria-label="Đóng" title="Đóng">
+            <X size={18} />
           </button>
         </header>
         <p className="hint">
-          Chỉ <code>adb shell</code>. Không có đường tới <code>adb install</code>,{" "}
-          <code>reboot</code> hay <code>kill-server</code> từ đây.
+          Nhập lệnh <code>adb shell</code> cho máy này. Kết quả hiển thị đầu ra và mã lỗi của lệnh.
         </p>
         <div className="row">
           <input
             value={script}
-            autoFocus
             placeholder="ví dụ: getprop ro.build.version.release"
             aria-label="Lệnh shell"
             onChange={(event) => setScript(event.target.value)}
@@ -81,7 +84,8 @@ export function AdbConsole({ device, onClose }: Props) {
               if (event.key === "Enter") void run();
             }}
           />
-          <button type="button" className="primary" disabled={running} onClick={() => void run()}>
+          <button type="button" className="primary" disabled={running || !script.trim()} onClick={() => void run()}>
+            <Terminal size={15} aria-hidden="true" />
             {running ? "Đang chạy..." : "Chạy"}
           </button>
         </div>

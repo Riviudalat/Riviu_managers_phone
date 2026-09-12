@@ -39,7 +39,9 @@ export interface InteractionDraft {
   messageCount: number | null;
   maxWords: number;
   threadKind: ThreadKind;
-  textSource: "ai" | "manual";
+  textSource: "ai" | "manual" | "script";
+  conversationJson: string;
+  conversationRawJson: string;
   instruction: string;
   manualText: string;
   /** Actions requested for each actor. At least one stays selected in the form. */
@@ -52,6 +54,8 @@ export interface InteractionDraft {
 
 export const DEFAULT_DRAFT: InteractionDraft = {
   rawLinks: "",
+  conversationJson: "",
+  conversationRawJson: "",
   messageCount: null,
   maxWords: 12,
   // Star: the replies do not wait for each other, and one that fails costs only itself. The
@@ -159,14 +163,17 @@ export function buildRequest(
   draft: InteractionDraft,
   context: BuildContext,
 ): ThreadCampaignRequest {
+  const storedScript = draft.actions.comment ? conversationOf(draft) : null;
+  const script = storedScript ? {...storedScript,targetScripts:context.targets.flatMap(target=>storedScript.targetScripts.filter(s=>s.targetKey===target.targetKey))} : null;
   return {
+    scriptedConversation: script ?? undefined,
     requestId: context.requestId,
     targets: context.targets,
-    actorUdids: context.actorUdids,
-    messageCount: effectiveMessageCount(draft, context.largestCohort),
+    actorUdids: script ? [...new Set(script.roleBindings.map(r=>r.udid).filter(id=>context.actorUdids.includes(id)))] : context.actorUdids,
+    messageCount: script ? Math.max(2, ...script.targetScripts.map(target => target.steps.length)) : effectiveMessageCount(draft, context.largestCohort),
     instruction: draft.instruction,
     maxWords: draft.maxWords,
-    ...requestShapeOf(draft.actions.comment ? draft.threadKind : "standalone"),
+    ...requestShapeOf(script ? "chain" : draft.actions.comment ? draft.threadKind : "standalone"),
     // **No cohort size is sent, so the actor list is always one cohort.**
     //
     // It used to be an advanced field, and it quietly outranked the thing above it: load a
@@ -261,6 +268,21 @@ export function validateDraft(
     issues.push({ field: "plan", message: "Đang tính lại kế hoạch cho lựa chọn mới…" });
   }
 
+  if (draft.actions.comment && draft.textSource === "script") {
+    const script = conversationOf(draft);
+    if (!script) issues.push({ field: "manual", message: "Thêm kịch bản cho từng link trước khi chạy" });
+    else {
+      if (context.targets.some(target => !script.targetScripts.some(s => s.targetKey === target.targetKey && s.steps.length))) issues.push({field:"manual",message:"Mỗi link cần kịch bản riêng"});
+      const roles = new Set(script.targetScripts.flatMap(t => t.steps.flatMap(s => [s.speakerId,...s.mentionRoleIds])));
+      if ([...roles].some(id => !script.roleBindings.some(r=>r.roleId===id && r.udid && r.username))) issues.push({field:"actors",message:"Gán máy và tài khoản cho đủ các vai"});
+      if (script.roleBindings.some(r=>!context.actorUdids.includes(r.udid))) issues.push({field:"actors",message:"Máy của vai nằm ngoài phạm vi được chọn"});
+      const minutes = script.startsAt && script.endsAt ? (Date.parse(script.endsAt)-Date.parse(script.startsAt))/60000 : script.durationMinutes;
+      const minimum = Math.ceil(script.targetScripts.reduce((sum,t)=>sum+t.steps.length,0)*2/0.9);
+      if (!Number.isFinite(minutes) || minutes < minimum) issues.push({field:"plan",message:`Kịch bản cần tối thiểu ${minimum} phút, gồm dự phòng`});
+    }
+    if (context.planError && !issues.length) issues.push({field:"plan",message:interactionErrorVi(context.planError).title});
+    return issues;
+  }
   const messages = effectiveMessageCount(draft, context.largestCohort);
 
   // Advertised in a hint since the feature shipped and enforced nowhere, so the run started
@@ -391,4 +413,21 @@ export function groupPlanByCohort(plan: ThreadPlan | null | undefined): CohortVi
 export function largestCohortOf(cohorts: CohortView[], fallback: number): number {
   if (!cohorts.length) return fallback;
   return cohorts.reduce((most, team) => Math.max(most, team.actorUdids.length), 0);
+}
+
+export function conversationOf(draft: Pick<InteractionDraft,"textSource"|"conversationJson">): import("./types").ScriptedConversation | null {
+  if (draft.textSource !== "script" || !draft.conversationJson) return null;
+  try {
+    const value = JSON.parse(draft.conversationJson);
+    return value?.schemaVersion === 1 && typeof value.durationMinutes === "number" && typeof value.seed === "number"
+      && Array.isArray(value.targetScripts) && value.targetScripts.every((target: unknown) => {
+        const t = target as {targetKey?:unknown;steps?:unknown};
+        return typeof t?.targetKey === "string" && Array.isArray(t.steps) && t.steps.every((step: unknown) => {
+          const s = step as import("./types").ConversationStep;
+          return typeof s?.id === "string" && typeof s.topic === "string" && typeof s.speakerId === "string" && typeof s.text === "string" && (s.parentStepId === null || typeof s.parentStepId === "string") && Array.isArray(s.mentionRoleIds) && s.mentionRoleIds.every(v=>typeof v === "string");
+        });
+      }) && Array.isArray(value.roleBindings) && value.roleBindings.every((role: unknown)=>{
+        const r=role as import("./types").ConversationRole; return typeof r?.roleId === "string" && typeof r.udid === "string" && typeof r.username === "string";
+      }) ? value : null;
+  } catch { return null; }
 }

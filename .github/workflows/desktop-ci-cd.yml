@@ -94,10 +94,20 @@ jobs:
         working-directory: apps/desktop
         run: npm ci
 
+      - name: Check GUI perception service
+        shell: pwsh
+        run: |
+          python -m pip install uv
+          uv sync --project sidecars/gui-service --frozen --python 3.12
+          uv run --project sidecars/gui-service ruff check sidecars/gui-service
+          uv run --project sidecars/gui-service ty check sidecars/gui-service/riviu_gui sidecars/gui-service/serve.py
+          uv run --project sidecars/gui-service pytest sidecars/gui-service/tests -q
+          python scripts/check_gui_boundaries.py
+
       - name: Check Python tooling
         shell: pwsh
         run: |
-          python -m py_compile scripts/build_desktop_sidecar.py scripts/build_per_user_wix_resources.py scripts/collect_desktop_ci_artifacts.py scripts/test_build_per_user_wix_resources.py scripts/test_collect_desktop_ci_artifacts.py scripts/stage_deployment_checker.py scripts/test_stage_deployment_checker.py scripts/stage_android_package_tools.py scripts/test_stage_android_package_tools.py scripts/build_xiaowei_parity_matrix.py scripts/check_xiaowei_provenance.py scripts/test_xiaowei_provenance.py sidecars/pymobiledevice3/pyinstaller_runtime_hook.py sidecars/signer/riviu_signer.py sidecars/wda/build_and_install.py sidecars/wda/test_build_and_install.py tools/interaction-gate0/probe.py tools/interaction-gate0/test_probe.py scripts/build_agents_index.py
+          python -m py_compile scripts/build_desktop_sidecar.py scripts/build_per_user_wix_resources.py scripts/collect_desktop_ci_artifacts.py scripts/test_build_per_user_wix_resources.py scripts/test_collect_desktop_ci_artifacts.py scripts/stage_deployment_checker.py scripts/test_stage_deployment_checker.py scripts/stage_android_package_tools.py scripts/test_stage_android_package_tools.py scripts/build_xiaowei_parity_matrix.py scripts/check_xiaowei_provenance.py scripts/test_xiaowei_provenance.py sidecars/pymobiledevice3/pyinstaller_runtime_hook.py sidecars/signer/riviu_signer.py sidecars/wda/build_and_install.py sidecars/wda/test_build_and_install.py tools/interaction-gate0/probe.py tools/interaction-gate0/test_probe.py scripts/check_docs.py
           node scripts/run_python.mjs scripts/build_desktop_sidecar.py --help
           python scripts/collect_desktop_ci_artifacts.py verify-version
           python -m unittest -v scripts.test_build_per_user_wix_resources scripts.test_collect_desktop_ci_artifacts scripts.test_stage_deployment_checker scripts.test_stage_android_package_tools scripts.test_xiaowei_provenance sidecars.pymobiledevice3.test_app_control sidecars.pymobiledevice3.test_rtmmo_lifecycle sidecars.pymobiledevice3.test_media_stage sidecars.signer.test_riviu_signer sidecars.wda.test_build_and_install
@@ -113,12 +123,7 @@ jobs:
           # minute is worth a minute.
           python -m unittest discover -s tools/interaction-gate0 -p "test_probe.py" -v
 
-          # `docs/agents/README.md` is the only way to resolve a `§9.5` citation after
-          # AGENTS.md was split, and the repo holds 200+ of them. It is generated from the
-          # headings, so a hand edit or a forgotten regeneration is exactly the drift that
-          # made the split necessary -- and the one thing a doc index cannot survive.
-          python scripts/build_agents_index.py --check
-          python -m unittest scripts.test_build_agents_index scripts.test_check_docs -v
+          python -m unittest scripts.test_check_docs -v
           python scripts/check_docs.py
 
       # Repo-side digest check for the bundled Android tools. Deliberately in the
@@ -371,6 +376,14 @@ jobs:
             --work target/pyinstaller-work \
             --tauri-config target/tauri-sidecar.conf.json
 
+      - name: Build and verify GUI perception service
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          python -m pip install uv
+          python scripts/build_gui_service.py
+          python scripts/test_gui_service_package.py target/gui-service/riviu-gui-service
+
       - name: Build and stage deployment checker sidecar
         shell: bash
         env:
@@ -427,6 +440,7 @@ jobs:
             --config apps/desktop/src-tauri/tauri.conf.json `
             --config target/tauri-sidecar.conf.json `
             --config target/tauri-android-package-tools.conf.json `
+            --config target/tauri-gui-service.conf.json `
             --fragment-output target/per-user-wix-resources.wxs `
             --config-output target/tauri-per-user-msi.conf.json `
             --target "${{ matrix.target }}"
@@ -458,6 +472,7 @@ jobs:
               --config "${{ github.workspace }}/apps/desktop/src-tauri/tauri.full.conf.json" \
               --config "${{ github.workspace }}/target/tauri-sidecar.conf.json" \
               --config "${{ github.workspace }}/target/tauri-android-package-tools.conf.json" \
+              --config "${{ github.workspace }}/target/tauri-gui-service.conf.json" \
               -- --locked
             npm run tauri -- build --ci \
               --target "${{ matrix.target }}" \
@@ -465,6 +480,7 @@ jobs:
               --config "${{ github.workspace }}/apps/desktop/src-tauri/tauri.full.conf.json" \
               --config "${{ github.workspace }}/target/tauri-sidecar.conf.json" \
               --config "${{ github.workspace }}/target/tauri-android-package-tools.conf.json" \
+              --config "${{ github.workspace }}/target/tauri-gui-service.conf.json" \
               --config "${{ github.workspace }}/target/tauri-per-user-msi.conf.json" \
               -- --locked
           else

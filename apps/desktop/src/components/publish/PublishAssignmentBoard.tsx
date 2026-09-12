@@ -476,7 +476,7 @@ export function PublishAssignmentBoard(p: Props) {
                     data-slot={d.udid}
                   >
                     <MachineChoice number={tileNumber(p.devices.findIndex(device => device.udid === d.udid) + 1, p.metas.get(d.udid))}
-                      name={p.metas.get(d.udid)?.alias || d.name} status={d.status} label={`Chọn ${name(d.udid)}`} checked={Boolean(post)}
+                      name={p.metas.get(d.udid)?.alias || d.name} status={d.status} reason={d.lastError} label={`Chọn ${name(d.udid)}`} checked={Boolean(post)}
                       disabled={p.disabled || (!post && (d.status !== "ready" || !missing.length))}
                       onChange={(checked) => {
                         if (!checked && post) {

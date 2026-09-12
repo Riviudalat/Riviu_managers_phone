@@ -200,6 +200,7 @@ export function FleetDiagnosticsPage({
       <div className="admin-toolbar">
         <div className="admin-toolbar-copy">
           <strong>{complete}/{rows.length} máy đã có kết quả</strong>
+          <span>Kết nối, điều khiển và luồng hình trên toàn bộ thiết bị</span>
         </div>
         <div className="admin-toolbar-actions">
           <label className="agent-toggle"><input type="checkbox" checked={attentionOnly} onChange={(event) => setAttentionOnly(event.target.checked)} />Chỉ máy cần xem</label>
@@ -225,6 +226,7 @@ export function FleetDiagnosticsPage({
       </div>
 
       <div className="diagnostics-summary" aria-label="Tổng hợp kiểm tra">
+        <span className="diagnostics-summary-label">Hạng mục kiểm tra</span>
         <StatusChip tone="success">{countByStatus("pass")} đạt</StatusChip>
         <StatusChip tone="warning">{countByStatus("warning")} cần xem</StatusChip>
         <StatusChip tone="error">{countByStatus("fail")} lỗi</StatusChip>
@@ -237,6 +239,8 @@ export function FleetDiagnosticsPage({
           Chưa đọc được kết quả từ máy nào. Kiểm lại từng hàng để giữ nguyên kết quả của máy khác.
         </StatusNotice>
       )}
+
+      <p className="diagnostics-result-count" role="status">Hiển thị {filteredRows.length} / {rows.length} máy{attentionOnly ? " · Đang lọc máy cần xem" : ""}</p>
 
       <ResponsiveTable
         label="Kết quả chẩn đoán thiết bị"

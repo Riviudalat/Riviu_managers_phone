@@ -227,7 +227,95 @@ const MIGRATIONS: &[Migration] = &[
         apply: apply_migration_32,
         rebuilds_tables: false,
     },
+    Migration {
+        version: 33,
+        name: "publish-pipeline-ownership",
+        apply: apply_migration_33,
+        rebuilds_tables: false,
+    },
+    Migration {
+        version: 34,
+        name: "publish-bound-sheet-delivery-and-account-reservations",
+        apply: apply_migration_34,
+        rebuilds_tables: false,
+    },
+    Migration {
+        version: 35,
+        name: "interaction-conversation-sessions",
+        apply: apply_migration_35,
+        rebuilds_tables: false,
+    },
+    Migration {
+        version: 36,
+        name: "gui-perception-attempts",
+        apply: apply_migration_36,
+        rebuilds_tables: false,
+    },
 ];
+
+fn apply_migration_36(tx: &Transaction<'_>) -> anyhow::Result<()> {
+    tx.execute_batch("CREATE TABLE gui_perception_attempts (
+        request_id TEXT PRIMARY KEY,run_id TEXT NOT NULL,assignment_id TEXT,device_id TEXT NOT NULL,
+        observation_id TEXT NOT NULL,session_epoch TEXT NOT NULL,started_at_ms INTEGER NOT NULL,screenshot_sha256 TEXT NOT NULL,
+        state TEXT NOT NULL CHECK(state IN ('started','resolved','unresolved','ambiguous','failed')),
+        result_json TEXT);
+        CREATE INDEX gui_perception_run ON gui_perception_attempts(run_id);")?;
+    Ok(())
+}
+
+fn apply_migration_35(tx: &Transaction<'_>) -> anyhow::Result<()> {
+    tx.execute_batch("CREATE TABLE interaction_conversation_sessions (
+        campaign_id TEXT PRIMARY KEY REFERENCES interaction_campaigns(id) ON DELETE CASCADE,
+        started_at_ms INTEGER NOT NULL,ends_at_ms INTEGER NOT NULL,next_at_ms INTEGER NOT NULL,cursor INTEGER NOT NULL DEFAULT 0,owner TEXT);
+        CREATE TABLE interaction_conversation_turns (
+        assignment_id TEXT PRIMARY KEY REFERENCES interaction_assignments(id) ON DELETE CASCADE,
+        started_at_ms INTEGER NOT NULL,finished_at_ms INTEGER NOT NULL,tuple TEXT NOT NULL);")?;
+    Ok(())
+}
+
+fn apply_migration_34(tx: &Transaction<'_>) -> anyhow::Result<()> {
+    tx.execute_batch(
+        "ALTER TABLE publish_sheet_outbox ADD COLUMN delivery_target_json TEXT;
+         ALTER TABLE publish_sheet_outbox ADD COLUMN report_metadata_json TEXT;
+         ALTER TABLE publish_sheet_outbox ADD COLUMN posted_at TEXT;
+         ALTER TABLE publish_sheet_outbox ADD COLUMN next_attempt_at_ms INTEGER DEFAULT 0;
+         CREATE INDEX publish_sheet_outbox_due ON publish_sheet_outbox(next_attempt_at_ms,created_at,assignment_id)
+           WHERE state <> 'sent' AND delivery_target_json IS NOT NULL;
+         CREATE TABLE publish_sheet_sync_state (
+           assignment_id TEXT PRIMARY KEY,
+           claim_token TEXT,
+           claim_until_ms INTEGER,
+           claim_kind TEXT CHECK(claim_kind IN ('canonical','report')),
+           report_acked_revision INTEGER NOT NULL DEFAULT -1,
+           report_attempt_revision INTEGER NOT NULL DEFAULT -1,
+           report_next_attempt_at_ms INTEGER DEFAULT 0,
+           report_attempts INTEGER NOT NULL DEFAULT 0,
+           report_last_error TEXT,
+           connection_fingerprint TEXT
+         );
+         CREATE TABLE publish_account_reservations (
+           account TEXT PRIMARY KEY,
+           assignment_id TEXT NOT NULL UNIQUE REFERENCES publish_assignments(id),
+           claimed_at TEXT NOT NULL
+         );
+         CREATE TABLE publish_post_identities (
+           post_url TEXT PRIMARY KEY,
+           assignment_id TEXT NOT NULL UNIQUE
+         );",
+    )?;
+    Ok(())
+}
+
+fn apply_migration_33(tx: &Transaction<'_>) -> anyhow::Result<()> {
+    tx.execute_batch(
+        "CREATE TABLE publish_pipeline_runs (
+      campaign_id TEXT PRIMARY KEY REFERENCES publish_campaigns(id) ON DELETE CASCADE,
+      token TEXT NOT NULL UNIQUE,
+      created_at TEXT NOT NULL
+    );",
+    )?;
+    Ok(())
+}
 
 fn apply_migration_32(tx: &Transaction<'_>) -> anyhow::Result<()> {
     tx.execute_batch(

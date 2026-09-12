@@ -95,6 +95,7 @@ impl Database {
     ) -> anyhow::Result<Option<i64>> {
         let mut conn = self.conn()?;
         let transaction = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        super::conversation::check_conversation_send_deadline(&transaction, assignment_id)?;
         let now = Utc::now().to_rfc3339();
         let assignment_changed = transaction.execute(
             "UPDATE interaction_assignments
@@ -517,6 +518,7 @@ mod tests {
 
     fn request(actions: InteractionActionSet) -> ThreadCampaignRequest {
         ThreadCampaignRequest {
+            scripted_conversation: None,
             request_id: "action-ledger-1".into(),
             targets: vec![ResolvedTikTokTarget {
                 original_url: "https://www.tiktok.com/@creator/video/123".into(),

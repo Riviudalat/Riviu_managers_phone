@@ -228,9 +228,24 @@ impl<'a, P: TapPlanner> CommentDrawer<'a, P> {
         else {
             return Ok(None);
         };
-        let Some(opener) = self.session.locate(opener).await? else {
+        let opener = match self.session.locate(opener).await? {
+            Some(opener) => Some(opener),
+            None if !stop.load(Ordering::Relaxed) => {
+                crate::ui_automation::runtime::resolve_navigation(
+                    self.session,
+                    "comments",
+                    Duration::from_secs(30),
+                )
+                .await?
+            }
+            None => None,
+        };
+        let Some(opener) = opener else {
             return Ok(None);
         };
+        if stop.load(Ordering::Relaxed) {
+            return Ok(None);
+        }
         self.tap_inside(&opener).await?;
         // Wait for the field rather than sleeping a fixed time: the drawer loads
         // comments over the network and can take noticeably longer than the animation.
@@ -247,14 +262,28 @@ impl<'a, P: TapPlanner> CommentDrawer<'a, P> {
         else {
             return Ok(OpenForPost::NoControl);
         };
-        let Some(opener) = self
+        let found = self
             .session
             .locate(opener)
             .await
+            .map_err(ActionFailure::before)?;
+        let found = if found.is_none() && !stop.load(Ordering::Relaxed) {
+            crate::ui_automation::runtime::resolve_navigation(
+                self.session,
+                "comments",
+                Duration::from_secs(30),
+            )
+            .await
             .map_err(ActionFailure::before)?
-        else {
+        } else {
+            found
+        };
+        let Some(opener) = found else {
             return Ok(OpenForPost::NoControl);
         };
+        if stop.load(Ordering::Relaxed) {
+            return Ok(OpenForPost::NoControl);
+        }
         self.tap_inside(&opener)
             .await
             .map_err(ActionFailure::after)?;
@@ -643,7 +672,7 @@ mod tests {
                 ElementQuery::Text { value, .. } => value,
                 // Registered by value like every other strategy, so a fixture can key on an id
                 // suffix without this double having to model resource ids.
-                ElementQuery::ResourceIdSuffix(value) => value,
+                ElementQuery::ResourceIdSuffix(value) | ElementQuery::Semantic(value) => value,
             };
             if self.fail_locates.lock().iter().any(|key| key == wanted) {
                 anyhow::bail!("agent failed before returning {wanted}");

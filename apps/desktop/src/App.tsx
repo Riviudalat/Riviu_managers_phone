@@ -55,6 +55,8 @@ import { isDeviceAutomation, type DeviceAutomation } from "./features/devices/de
 import { JobsPanel } from "./components/JobsPanel";
 import { GroupManagerPopup } from "./components/GroupManagerPopup";
 import { GroupToolsPopup } from "./components/GroupToolsPopup";
+import { MacroRecordingBar } from "./components/MacroRecordingBar";
+import { stopRecording } from "./macroStore";
 import { ProfileToolbar } from "./components/ProfileToolbar";
 import { SettingsPanel } from "./components/SettingsPanel";
 import { Sidebar } from "./components/Sidebar";
@@ -148,7 +150,7 @@ function App() {
     retryingStartup,
     retry: retryStartupAndResubscribe,
   } = useFleet();
-  const compactViewport = useMediaQuery("(max-width: 1100px)");
+  const compactViewport = useMediaQuery("(max-width: 1024px)");
   const [asideCollapsedOverride, setAsideCollapsedOverride] = useState<boolean | null>(null);
   const asideCollapsed = asideCollapsedOverride ?? compactViewport;
   const [groupTab, setGroupTab] = useState<string>(ALL_DEVICES_TAB);
@@ -169,8 +171,14 @@ function App() {
   const [controlCenter, setControlCenter] = useState<string | null>(null);
   const [focusUdid, setFocusUdid] = useDeviceSurface(devices, "màn phóng to");
   const [viewMode, setViewMode] = useState<ViewMode>("window");
+  const [settingsSection, setSettingsSection] = useState<"control" | "integration" | "maintenance" | undefined>();
   const [tileWidth, setTileWidth] = useState(() => loadZoom(TILE_ZOOM));
-  const [groupToolsOpen, setGroupToolsOpen] = useState(false);
+  const [groupToolsView, setGroupToolsView] = useState<"closed" | "dialog" | "recording">("closed");
+  const [macroSession, setMacroSession] = useState<{ udids: string[] } | null>(null);
+  const closeGroupTools = useCallback(() => {
+    setGroupToolsView("closed");
+    setMacroSession(null);
+  }, []);
   const [groupsOpen, setGroupsOpen] = useState(false);
   const workspaceDirty = useWorkspaceDirty();
   const [automationView, setAutomationView] = useState<"device" | "orchestration">("device");
@@ -590,6 +598,21 @@ function App() {
     return devices.find((d) => d.udid === wanted) ?? null;
   }, [devices, focusUdid, groupMode, controlCenter]);
 
+  const beginMacroSession = (targets: string[]) => {
+    setMacroSession(current => current ?? {
+      udids: [...targets],
+    });
+    setGroupToolsView("recording");
+  };
+  const stopMacroSession = useCallback(() => {
+    stopRecording();
+    setGroupToolsView("dialog");
+  }, []);
+  const restoreToolsFocus = () => document.querySelector<HTMLElement>(".focus-menu-head > button.close")
+    ?? document.querySelector<HTMLElement>(".profile-toolbar button[data-group-tools]")
+    ?? document.querySelector<HTMLElement>('.menu-item[aria-current="page"]');
+  const recordingControls = groupToolsView === "recording" ? <MacroRecordingBar onStop={stopMacroSession} /> : null;
+
   /// A designated phone that has left the fleet is not a designation, it is a dangling udid
   /// that would silently redirect the overlay to a device that is not there.
   useEffect(() => {
@@ -701,13 +724,14 @@ function App() {
       <div className="main-col">
         <PageHeader
           title={title}
-          icon={page === "control" || !PageIcon ? undefined : <PageIcon size={18} />}
+          icon={!PageIcon ? undefined : <PageIcon size={18} />}
           titleTestId="page-title"
           dragRegion
-          density={page === "control" ? "compact" : "default"}
+          density="default"
           meta={
             <>
-              {groupMode && <StatusChip tone="info">Sync</StatusChip>}
+              <span className="fleet-status-label">Toàn hệ thống</span>
+              {groupMode && <StatusChip>Đồng bộ bật</StatusChip>}
               {readyCount > 0 && (
                 <StatusChip tone="success">{readyCount} sẵn sàng</StatusChip>
               )}
@@ -719,15 +743,12 @@ function App() {
           actions={
             <>
               <ActivityCenter />
-              <button
+              {page !== "control" && <button
               type="button"
               className="icon-btn"
               title="Làm mới danh sách máy"
               aria-label="Làm mới danh sách máy"
               onClick={async () => {
-                // Same missing failure path as the toolbar's copy. Both are guarded now;
-                // the titles differ so the two are distinguishable to a reader and to a
-                // test, which they were not when both said "Refresh".
                 try {
                   await refreshDevices();
                   await reload();
@@ -737,11 +758,12 @@ function App() {
               }}
             >
               <IconRefresh size={16} aria-hidden="true" />
-              </button>
+              </button>}
             </>
           }
         />
 
+        {!focusDevice && recordingControls}
         <OperationProgressCenter deviceLabels={automationDeviceLabels} />
         <div
           ref={contentRef}
@@ -761,7 +783,7 @@ function App() {
             </Banner>
           )}
 
-          {driverIssue && page === "control" && (
+          {driverIssue && page === "control" && devices.some(device => device.platform === "ios" && device.status !== "disconnected") && (
             <Banner tone="warn">
               Nhánh iOS không sẵn sàng; các máy Android vẫn hoạt động độc lập. Nguyên nhân: {driverIssue}
             </Banner>
@@ -808,13 +830,18 @@ function App() {
                 syncOn={groupMode}
                 groupsOpen={groupsOpen}
                 onGroups={() => {
-                  setGroupToolsOpen(false);
+                  if (groupToolsView !== "recording") closeGroupTools();
                   setGroupsOpen((v) => !v);
                 }}
-                groupToolsOpen={groupToolsOpen}
+                groupToolsOpen={groupToolsView === "dialog"}
                 onGroupTools={() => {
+                  if (groupToolsView === "recording") {
+                    document.querySelector<HTMLElement>(".macro-recording-bar button")?.focus();
+                    return;
+                  }
                   setGroupsOpen(false);
-                  setGroupToolsOpen((v) => !v);
+                  if (groupToolsView === "dialog") closeGroupTools();
+                  else setGroupToolsView("dialog");
                 }}
                 onStart={async () => {
                   const targets = selected.length
@@ -1320,9 +1347,12 @@ function App() {
           </section>
           {page === "diagnostics" && <FleetDiagnosticsPage devices={devices} metas={metas} />}
           {page === "data" && <DataPage />}
-          {page === "api" && <ApiPage />}
+          {page === "api" && <ApiPage onOpenSettings={() => {
+            setSettingsSection("integration");
+            void requestPage("settings", true);
+          }} />}
           {page === "settings" && (
-            <SettingsPanel devices={devices} deviceLabels={automationDeviceLabels} />
+            <SettingsPanel devices={devices} deviceLabels={automationDeviceLabels} initialSection={settingsSection} iosRuntimeIssue={driverIssue} />
           )}
         </div>
       </div>
@@ -1374,6 +1404,7 @@ function App() {
           // The same catalog the tile's right-click menu gets. Zooming into a phone is a
           // different *view* of it, not a smaller set of things you can do to it.
           functions={tileActions(focusDevice)}
+          recordingControls={recordingControls}
         />
       )}
 
@@ -1387,11 +1418,16 @@ function App() {
         />
       )}
 
-      {page === "control" && groupToolsOpen && (
+      {groupToolsView !== "closed" && (page === "control" || macroSession !== null) && (
         <GroupToolsPopup
           devices={devices}
           selected={selected}
-          onClose={() => setGroupToolsOpen(false)}
+          onClose={closeGroupTools}
+          visible={groupToolsView === "dialog"}
+          macroTargets={macroSession?.udids}
+          macroOnly={page !== "control" && macroSession !== null}
+          onBeginMacro={beginMacroSession}
+          restoreFocus={restoreToolsFocus}
         />
       )}
 

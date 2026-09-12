@@ -419,8 +419,8 @@ export function InteractionPopup({
   /// limit does not move the cohorts, so it must not disable the run button either.
   const previewKey = useMemo(
     () =>
-      JSON.stringify([validTargets.map((target) => target.targetKey), effectiveActors, draft.actions, draft.threadKind, draft.messageCount]),
-    [validTargets, effectiveActors, draft.actions, draft.threadKind, draft.messageCount],
+      JSON.stringify([validTargets.map((target) => target.targetKey), effectiveActors, draft.actions, draft.threadKind, draft.messageCount, draft.textSource, draft.conversationJson]),
+    [validTargets, effectiveActors, draft.actions, draft.threadKind, draft.messageCount, draft.textSource, draft.conversationJson],
   );
   const [previewFor, setPreviewFor] = useState<string | null>(null);
   const previewGeneration = useRef(0);
@@ -826,6 +826,7 @@ export function InteractionPopup({
           )}
         </div>
         {pageSurface && <div className="interaction-schedule-panel" role="tabpanel" id="interaction-panel-schedule" aria-labelledby="interaction-tab-schedule" hidden={tab !== "schedule"}>
+          <header className="iw-heading"><div><span className="automation-section-kicker">Lịch thực hiện</span><h2>Hẹn giờ Tương tác</h2></div><span className="machine-select-count">{effectiveActors.length} máy được chọn</span></header>
           <AutomationSettingsSchedule kind="interaction" target={interactionProfileTarget(targetRef ?? { type: "explicit", udids: effectiveActors }, inScope.map(d => d.udid), effectiveActors)} config={profileConfig} disabled={issues.length > 0} />
         </div>}
       </section>

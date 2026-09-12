@@ -14,6 +14,15 @@ beforeEach(() => {
 });
 
 describe("ApiPage load states", () => {
+  it("opens connection settings without invoking an API operation", async () => {
+    loadDocs.mockResolvedValue("## Devices\n- list_devices");
+    const openSettings = vi.fn();
+    render(<ApiPage onOpenSettings={openSettings} />);
+    await userEvent.click(await screen.findByRole("button", { name: "Cấu hình kết nối" }));
+    expect(openSettings).toHaveBeenCalledTimes(1);
+    expect(loadDocs).toHaveBeenCalledTimes(1);
+  });
+
   it("searches localized groups and individual runtime commands", async () => {
     loadDocs.mockResolvedValue("## Devices\n- list_devices / device_health\n## Operations\n- operation_get_run");
     render(<ApiPage />);

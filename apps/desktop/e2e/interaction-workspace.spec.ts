@@ -43,6 +43,16 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 900, height: 700 
     await page.keyboard.press("Enter");
     await expect(workspace.getByLabel("Số từ tối đa mỗi câu")).toBeVisible();
     await workspace.getByRole("button", { name: "Ẩn tuỳ chỉnh nâng cao" }).click();
+    if (viewport.width < 1024) {
+      const sections = await workspace.evaluate(element => {
+        const settings = element.querySelector(".iw-settings")!;
+        const machines = element.querySelector(".iw-machines")!;
+        const actions = element.querySelector(".iw-action-choices")!;
+        return { settingsBottom: settings.getBoundingClientRect().bottom, machinesTop: machines.getBoundingClientRect().top, actionsBottom: actions.getBoundingClientRect().bottom };
+      });
+      expect(sections.settingsBottom).toBeLessThanOrEqual(sections.machinesTop);
+      expect(sections.actionsBottom).toBeLessThanOrEqual(sections.settingsBottom);
+    }
     await workspace.getByRole("checkbox", { name: "Tim", exact: true }).check();
     await workspace.getByRole("checkbox", { name: "Lưu", exact: true }).check();
     await workspace.getByRole("checkbox", { name: "Bình luận", exact: true }).uncheck();
@@ -51,7 +61,7 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 900, height: 700 
     await expect(machines.getByRole("checkbox")).toHaveCount(20);
     expect(await machines.evaluate(element => getComputedStyle(element).gridTemplateColumns.split(" ").length)).toBe(2);
     await expect(workspace.getByRole("button", { name: "Trang máy sau" })).toHaveCount(0);
-    await workspace.getByRole("button", { name: "Chọn tất cả", exact: true }).click();
+    await workspace.getByRole("button", { name: "Chọn tất cả sẵn sàng", exact: true }).click();
     await expect(machines.getByRole("checkbox", { checked: true })).toHaveCount(20);
     await workspace.getByRole("tab", { name: "Hẹn giờ", exact: true }).click();
     await expect(workspace.getByRole("tabpanel", { name: "Hẹn giờ", exact: true })).toBeVisible();
@@ -59,10 +69,10 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 900, height: 700 
     await expect(machines.getByRole("checkbox", { checked: true })).toHaveCount(20);
     await workspace.getByRole("button", { name: "Bỏ chọn", exact: true }).click();
     await workspace.getByRole("checkbox", { name: "Máy thử 9", exact: true }).check();
-    await workspace.getByRole("textbox", { name: "Tìm máy hoặc tài khoản" }).fill("20");
+    await workspace.getByRole("searchbox", { name: "Tìm máy Tương tác" }).fill("20");
     await expect(machines.getByRole("checkbox")).toHaveCount(1);
     await machines.getByRole("checkbox").check();
-    await workspace.getByRole("textbox", { name: "Tìm máy hoặc tài khoản" }).fill("");
+    await workspace.getByRole("searchbox", { name: "Tìm máy Tương tác" }).fill("");
     await workspace.getByRole("checkbox", { name: "Máy thử 20", exact: true }).uncheck();
     await expect(workspace.getByRole("button", { name: "Kiểm tra lượt chạy →" })).toBeEnabled();
     await page.screenshot({ path: test.info().outputPath(`interaction-actions-${viewport.width}.png`) });

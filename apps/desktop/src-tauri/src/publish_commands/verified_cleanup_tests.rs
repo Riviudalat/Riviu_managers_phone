@@ -79,6 +79,9 @@ fn fixture() -> (Database, PathBuf, String) {
         partners: Vec::new(),
     };
     let request = PublishCampaignRequest {
+        sheet_delivery: None,
+        verification_contract_version: Some(1),
+        verification_builds: vec![],
         sheet_enabled: false,
         request_id: "request".into(),
         source_root: "C:/fixture".into(),
@@ -87,6 +90,7 @@ fn fixture() -> (Database, PathBuf, String) {
         run_at: None,
         visibility: PublishVisibility::Public,
         cleanup_policy: PublishCleanupPolicy::DeleteImportedAssetsAfterVerified,
+        network: riviu_core::SocialNetwork::TikTok,
         sound_policy: riviu_core::PublishSoundPolicy::Default,
         execution_confirmed: true,
         target_snapshot: None,

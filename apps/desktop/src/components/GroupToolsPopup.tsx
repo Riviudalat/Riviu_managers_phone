@@ -1,4 +1,8 @@
-import { useMemo, useState } from "react";
+import { useId, useMemo, useState } from "react";
+import { Users } from "lucide-react";
+import { WorkspaceTabs } from "./WorkspacePrimitives";
+import { useModalFocus } from "./useModalFocus";
+import { recordedSteps } from "../macroStore";
 import type { DeviceInfo } from "../types";
 import { targetsOf } from "../selectionTargets";
 import { IconClose } from "./Icons";
@@ -11,31 +15,44 @@ import { QuickReplyTool } from "./groupTools/QuickReplyTool";
 import { RootTool } from "./groupTools/RootTool";
 import { TextDistributionTool } from "./groupTools/TextDistributionTool";
 
-/**
- * The group Tools popup: eight tools over the current selection, one at a time.
- *
- * 1,436 lines and no test of its own — the largest untested frontend unit in the repo. It
- * was already well factored inside: every tool is a component taking `{ targets, scopeLabel }`
- * and nothing else, so the file was eight independent things sharing a tab strip. This is
- * now the tab strip; each tool is its own file, and the pure identity generators are apart
- * from all of them.
- */
 interface Props {
   devices: DeviceInfo[];
   selected: string[];
   onClose: () => void;
+  visible?: boolean;
+  macroTargets?: string[];
+  macroOnly?: boolean;
+  onBeginMacro?: (targets: string[]) => void;
+  restoreFocus?: () => HTMLElement | null;
 }
 
 type Tool = "text" | "files" | "reply" | "keys" | "macro" | "gps" | "root" | "peripherals";
 
-/**
- * Group Tools — batch operations scoped to the current selection (xiaowei device
- * context-menu tools). Text Distribution (A2) and Quick Replies (A6) so far; more tools dock
- * into the same tabbed panel as they land.
- */
-export function GroupToolsPopup({ devices, selected, onClose }: Props) {
+const TOOLS: { id: Tool; label: string; description: string }[] = [
+  { id: "text", label: "Phân phối văn bản", description: "Soạn nội dung và xem trước văn bản cho từng máy." },
+  { id: "files", label: "Phân phối tệp", description: "Chọn tệp, kiểm tra phân công rồi gửi đến máy đích." },
+  { id: "reply", label: "Câu trả lời nhanh", description: "Chuẩn bị câu trả lời để sử dụng trên các máy đích." },
+  { id: "keys", label: "Thao tác nhanh", description: "Thực hiện cùng một thao tác trên các máy trong phạm vi." },
+  { id: "macro", label: "Macro", description: "Ghi, quản lý và chạy lại chuỗi thao tác." },
+  { id: "gps", label: "Vị trí (GPS)", description: "Thiết lập vị trí cho các máy trong phạm vi." },
+  { id: "root", label: "Root / Máy mới", description: "Công cụ bảo trì và chuẩn bị máy." },
+  { id: "peripherals", label: "Ngoại vi", description: "Cấu hình bàn phím, chuột và thiết bị ngoại vi." },
+];
+
+export function GroupToolsPopup({ devices, selected, onClose, visible = true, macroTargets, macroOnly = false, onBeginMacro, restoreFocus }: Props) {
+  const panelId = useId();
+  const macroNameId = useId();
+  const dialogRef = useModalFocus<HTMLDivElement>(onClose, visible, {
+    initialFocus: () => macroTargets !== undefined && recordedSteps().length > 0
+      ? document.getElementById(macroNameId) : null,
+    restoreFocus,
+  });
   const [tool, setTool] = useState<Tool>("text");
-  const targets = useMemo(() => targetsOf(selected, devices), [selected, devices]);
+  const activeId = macroOnly ? "macro" : tool;
+  const isMacroSession = activeId === "macro" && macroTargets !== undefined;
+  const currentTargets = useMemo(() => targetsOf(selected, devices), [selected, devices]);
+  // An explicitly empty recording scope must remain empty after roster changes.
+  const targets = isMacroSession ? macroTargets : currentTargets;
   const targetDevices = useMemo(
     () =>
       targets
@@ -43,92 +60,48 @@ export function GroupToolsPopup({ devices, selected, onClose }: Props) {
         .filter((d): d is DeviceInfo => Boolean(d)),
     [targets, devices],
   );
-  const scopeLabel = selected.length ? `${selected.length} máy` : `Tất cả ${devices.length}`;
+  const scopeLabel = isMacroSession ? `${targets.length} máy trong phiên ghi`
+    : selected.length ? `${targets.length} máy đã chọn` : `Tất cả ${targets.length} máy`;
+  const activeTool = TOOLS.find((item) => item.id === activeId)!;
 
   return (
-    <div className="nurture-float-layer" aria-label="Công cụ nhóm">
-      <div className="nurture-float group-tools">
-        <div className="nurture-float-title" style={{ cursor: "default" }}>
+    <div className="modal-backdrop group-tools-layer" hidden={!visible} inert={!visible} aria-hidden={!visible ? true : undefined} onClick={onClose}>
+      <div ref={dialogRef} tabIndex={-1} className="nurture-float group-tools" role="dialog" aria-modal="true" aria-label="Công cụ nhóm" onClick={(event) => event.stopPropagation()}>
+        <div className="nurture-float-title">
           <strong>Công cụ nhóm</strong>
-          <span className="hint">{scopeLabel}</span>
           <div className="grow" />
-          <button type="button" className="close" title="Đóng" onClick={onClose}>
+          <button type="button" className="close" title="Đóng" aria-label="Đóng công cụ nhóm" onClick={onClose}>
             <IconClose size={14} />
           </button>
         </div>
 
         <div className="nurture-float-body">
-          <div className="group-tools-tabs">
-            <button
-              type="button"
-              className={`tb-btn ${tool === "text" ? "active" : ""}`}
-              onClick={() => setTool("text")}
-            >
-              Phân phối văn bản
-            </button>
-            <button
-              type="button"
-              className={`tb-btn ${tool === "files" ? "active" : ""}`}
-              onClick={() => setTool("files")}
-            >
-              Phân phối tệp
-            </button>
-            <button
-              type="button"
-              className={`tb-btn ${tool === "reply" ? "active" : ""}`}
-              onClick={() => setTool("reply")}
-            >
-              Câu trả lời nhanh
-            </button>
-            <button
-              type="button"
-              className={`tb-btn ${tool === "keys" ? "active" : ""}`}
-              onClick={() => setTool("keys")}
-            >
-              Thao tác nhanh
-            </button>
-            <button
-              type="button"
-              className={`tb-btn ${tool === "macro" ? "active" : ""}`}
-              onClick={() => setTool("macro")}
-            >
-              Macro
-            </button>
-            <button
-              type="button"
-              className={`tb-btn ${tool === "gps" ? "active" : ""}`}
-              onClick={() => setTool("gps")}
-            >
-              Vị trí (GPS)
-            </button>
-            <button
-              type="button"
-              className={`tb-btn ${tool === "root" ? "active" : ""}`}
-              onClick={() => setTool("root")}
-            >
-              Root / Máy mới
-            </button>
-            <button
-              type="button"
-              className={`tb-btn ${tool === "peripherals" ? "active" : ""}`}
-              onClick={() => setTool("peripherals")}
-            >
-              Ngoại vi
-            </button>
+          <div className="group-tools-scope">
+            <Users size={18} aria-hidden="true" />
+            <div><strong>{scopeLabel}</strong><span>{isMacroSession ? "Phạm vi đã chốt khi bắt đầu ghi; đổi lựa chọn không thay máy đích." : selected.length ? "Thao tác áp dụng cho lựa chọn hiện tại." : "Chưa chọn riêng máy nào; thao tác áp dụng cho toàn bộ danh sách."}</span>
+              {isMacroSession && <span>{targets.length ? targets.map(udid => devices.find(device => device.udid === udid)?.name ?? udid).join(", ") : "Chưa có máy đích; lưu Macro để dùng sau."}</span>}
+            </div>
           </div>
-
-          {tool === "text" && (
+          <WorkspaceTabs label="Công cụ nhóm" tabs={(macroOnly ? TOOLS.filter(item => item.id === "macro") : TOOLS).map((item) => ({ ...item, panelId }))} value={activeId} onChange={(value) => setTool(value as Tool)} />
+          <section id={panelId} role="tabpanel" aria-label={activeTool.label} className="group-tools-panel">
+            <div className="group-tools-intro"><h3>{activeTool.label}</h3><p>{activeTool.description}</p></div>
+          {activeId === "text" && (
             <TextDistributionTool devices={devices} targets={targets} targetDevices={targetDevices} />
           )}
-          {tool === "files" && (
+          {activeId === "files" && (
             <FileDistributionTool devices={devices} targets={targets} targetDevices={targetDevices} />
           )}
-          {tool === "reply" && <QuickReplyTool targets={targets} scopeLabel={scopeLabel} />}
-          {tool === "keys" && <QuickActionsTool targets={targets} scopeLabel={scopeLabel} />}
-          {tool === "macro" && <MacroTool targets={targets} scopeLabel={scopeLabel} />}
-          {tool === "gps" && <GpsTool targets={targets} scopeLabel={scopeLabel} />}
-          {tool === "root" && <RootTool targets={targets} scopeLabel={scopeLabel} />}
-          {tool === "peripherals" && <PeripheralsTool targets={targets} scopeLabel={scopeLabel} />}
+          {activeId === "reply" && <QuickReplyTool targets={targets} scopeLabel={scopeLabel} />}
+          {activeId === "keys" && <QuickActionsTool targets={targets} scopeLabel={scopeLabel} />}
+          <div hidden={activeId !== "macro"}>
+            {(activeId === "macro" || macroTargets !== undefined) && <MacroTool targets={macroTargets ?? currentTargets}
+              scopeLabel={macroTargets !== undefined ? `${macroTargets.length} máy trong phiên ghi` : scopeLabel}
+              nameInputId={macroNameId} onStartRecording={() => onBeginMacro?.([...(macroTargets ?? currentTargets)])} />}
+          </div>
+          {activeId === "gps" && <GpsTool targets={targets} scopeLabel={scopeLabel} />}
+          {activeId === "root" && <RootTool targets={targets} scopeLabel={scopeLabel} />}
+          {activeId === "peripherals" && <PeripheralsTool targets={targets} scopeLabel={scopeLabel} />}
+          </section>
         </div>
       </div>
     </div>

@@ -25,6 +25,7 @@ for (const viewport of [
       w.__TAURI_INTERNALS__.invoke = async (command, args) => {
         if (command === "startup_error") return null;
         if (command === "android_tool_problems") return [];
+        if (command === "list_groups") return [{ id: "publish-one", name: "Máy đăng riêng", udids: ["MOCK-FLEET-20"] }];
         if (command === "operation_query_runs") return {
           total: 1, offset: 0, limit: 200,
           counts: { active: 0, succeeded: 1, attention: 0 }, hasMore: false,
@@ -158,7 +159,7 @@ for (const viewport of [
     const machines = page.getByRole("region", { name: "Máy thực hiện", exact: true });
     await expect(machines.getByRole("checkbox")).toHaveCount(20);
     expect(await machines.locator(".pq-machine-grid").evaluate(element => getComputedStyle(element).gridTemplateColumns.split(" ").length)).toBe(2);
-    await machines.getByRole("button", { name: "Chọn tất cả", exact: true }).click();
+    await machines.getByRole("button", { name: "Chọn tất cả sẵn sàng", exact: true }).click();
     await page.getByRole("button", { name: "Chọn tất cả bài", exact: true }).click();
     await page.getByRole("button", { name: "Chọn nhanh", exact: true }).click();
     await expect(page.locator(".pq-footer")).toContainText("10/10 bài có máy");
@@ -175,10 +176,19 @@ for (const viewport of [
     await machines.getByRole("checkbox", { name: /Chọn Máy 20 ·/ }).check();
     await expect(machines.getByRole("checkbox", { checked: true })).toHaveCount(1);
     await page.getByRole("button", { name: "Chọn nhanh", exact: true }).click();
-    await expect(machines.getByRole("status")).toContainText("Đã gán 1 bài cho 1 máy");
+    // Quick allocation uses ready machines in the workspace scope, regardless of checked capacity.
+    await expect(machines.getByRole("status").filter({ hasText: /^Đã gán/ })).toContainText("Đã gán 10 bài cho 10 máy");
+    await expect(page.locator(".pq-footer")).toContainText("10/10 bài có máy");
+    await page.getByRole("combobox", { name: "Phạm vi thiết bị" }).selectOption("group:publish-one");
+    await page.getByRole("button", { name: "Chọn nhanh", exact: true }).click();
+    await expect(machines.getByRole("status").filter({ hasText: /^Đã gán/ })).toContainText("Đã gán 1 bài cho 1 máy");
+    await expect(machines.getByRole("checkbox", { checked: true })).toHaveCount(1);
+    await expect(machines.getByRole("checkbox", { name: /Chọn Máy 20 ·/ })).toBeChecked();
+    await expect(assignmentSelect).toHaveValue("MOCK-FLEET-20");
     await expect(page.locator(".pq-footer")).toContainText("1/1 bài có máy");
+    await page.getByRole("combobox", { name: "Phạm vi thiết bị" }).selectOption("all");
     await page.getByRole("button", { name: "Chọn tất cả bài", exact: true }).click();
-    await machines.getByRole("button", { name: "Chọn tất cả", exact: true }).click();
+    await machines.getByRole("button", { name: "Chọn tất cả sẵn sàng", exact: true }).click();
     await page.getByRole("button", { name: "Chọn nhanh", exact: true }).click();
     await expect(page.locator(".pq-footer")).toContainText("10/10 bài có máy");
     await page.getByRole("tab", { name: "Hẹn giờ", exact: true }).click();

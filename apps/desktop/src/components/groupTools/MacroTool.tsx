@@ -18,7 +18,12 @@ import {
 import { pushToast } from "../../toastStore";
 import { sleep } from "./toolHelpers";
 
-export function MacroTool({ targets, scopeLabel }: { targets: string[]; scopeLabel: string }) {
+export function MacroTool({ targets, scopeLabel, onStartRecording, nameInputId }: {
+  targets: string[];
+  scopeLabel: string;
+  onStartRecording?: () => void;
+  nameInputId?: string;
+}) {
   const recording = useMacroRecording();
   const steps = useRecordedSteps();
   const macros = useSavedMacros();
@@ -124,9 +129,8 @@ export function MacroTool({ targets, scopeLabel }: { targets: string[]; scopeLab
   return (
     <>
       <p className="hint">
-        Ghi thao tác trên một máy rồi phát lại cho {scopeLabel}. Bật ghi, mở "Mở điều khiển"
-        một máy rồi chạm/vuốt/bấm phím — mỗi bước được ghi theo toạ độ ảnh và phát lại đúng vị
-        trí trên từng máy (kèm delay/offset nếu bật).
+        Ghi thao tác trên một máy rồi phát lại cho {scopeLabel}. Bắt đầu ghi sẽ thu hộp công cụ;
+        mở điện thoại để chạm, vuốt hoặc bấm phím. Dùng thanh Ghi Macro để dừng và trở lại lưu bản ghi.
       </p>
       <div className="nurture-float-actions">
         {recording ? (
@@ -134,7 +138,10 @@ export function MacroTool({ targets, scopeLabel }: { targets: string[]; scopeLab
             Dừng ghi ({steps.length})
           </button>
         ) : (
-          <button type="button" className="primary" onClick={() => startRecording()}>
+          <button type="button" className="primary" disabled={playing !== null} onClick={() => {
+            startRecording();
+            onStartRecording?.();
+          }}>
             Bắt đầu ghi
           </button>
         )}
@@ -157,19 +164,19 @@ export function MacroTool({ targets, scopeLabel }: { targets: string[]; scopeLab
               </div>
             ))}
           </div>
-          <div className="row" style={{ marginTop: "0.4rem" }}>
-            <input
-              type="text"
-              placeholder="Tên macro"
-              value={name}
-              onChange={(e) => setName(e.target.value)}
-            />
-            <button type="button" className="ghost" disabled={recording} onClick={save}>
-              Lưu macro
-            </button>
-          </div>
         </>
       )}
+      {steps.length === 0 && !recording && <p className="group-tools-recording-empty">Chưa có bước nào để lưu.</p>}
+      <div className="row">
+        <label htmlFor={nameInputId}>
+          Tên macro
+          <input id={nameInputId} type="text" placeholder="Tên macro" aria-label="Tên macro"
+            value={name} onChange={(event) => setName(event.target.value)} />
+        </label>
+        <button type="button" className="ghost" disabled={recording || !steps.length} onClick={save}>
+          Lưu macro
+        </button>
+      </div>
 
       <div className="row" style={{ marginTop: "0.6rem" }}>
         <label>

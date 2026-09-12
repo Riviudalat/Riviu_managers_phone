@@ -1,13 +1,15 @@
-# Riviu Android helper
+# Riviu Helper for Android
 
-A small APK the desktop can install on a farm phone. It is **not** an iPhone
+A small APK named **Riviu Helper** with the existing orange Riviu R icon in the
+phone launcher. Riviu Manager prepares it automatically after an authorized Android
+connection is discovered. It is **not** an iPhone
 Agent equivalent and it is **not** a replacement for
 `io.appium.uiautomator2.server`.
 
 | This APK does | This APK does not |
 |---|---|
 | Read/write clipboard while it is briefly the current IME | Stay the default keyboard |
-| Insert/delete one MediaStore row by `_id` | Drive taps, the tree, or typing |
+| Import staged media into MediaStore | Drive taps, the tree, or typing |
 | Set the wallpaper and inject a mock location | Replace scrcpy/minicap |
 | Answer app **names and icons** from `PackageManager` | Decide *which* apps exist — adb does |
 | Answer `GET /status` on loopback `:17980` | Bind `0.0.0.0` |
@@ -26,7 +28,22 @@ See `AGENTS.md` §9.51 / §9.52.
 The manifest in `sidecars/android/` pins **bytes + SHA-256**. Inventing those
 numbers for a file that was never assembled — or pinning a debug APK from a
 local assemble without recording it — is a lie the CI gate exists to catch. The
-current pin is agent **0.4.0**; see root `NOTICE` §2c, which is the copy CI verifies.
+current pin is helper **0.5.0 (versionCode 5)**; see root `NOTICE` §2c, which is the copy CI verifies.
+
+## Launcher and service status
+
+Opening **Riviu Helper** displays its purpose, version and current local service
+state: inactive, waiting for the desktop, running, or requiring a connection check.
+The Activity only observes the same process's service and bound HTTP listener. It
+does not start a service, change the keyboard, request a token or claim that a desktop
+task has completed. The status refreshes while the screen is visible and pauses when
+it is hidden. Tapping the service notification opens this screen. The `launcher`
+feature identifies this visible entry; protocol version remains **1**.
+
+The brand assets derive from `apps/desktop/public/logo.jpg`. Legacy icons are supplied
+at all five densities, Android 8+ uses an adaptive icon with the full mark inside its
+safe region, Android 13+ has a monochrome layer, and the notification uses a white
+silhouette on transparency. Regenerate with `python generate_icons.py` (Pillow 12.3+).
 
 ## Build
 
@@ -48,7 +65,8 @@ before editing it: aapt2 requires `package` on the `<manifest>` tag while AGP 8
 **refuses** a manifest carrying both `package` and `namespace`, so the package is
 stamped onto a copy; and `javac --release 8` would pin the JDK's own class library
 and reject every `android.*` import, so it is `-source 8 -target 8` with
-`android.jar` on the classpath.
+`android.jar` on the classpath. `-parameters` supplies names for synthetic enum
+constructor parameters emitted by newer JDKs, which SDK 34's d8 otherwise rejects.
 
 To ship it:
 
@@ -61,12 +79,17 @@ To ship it:
 Override at runtime without bundling: `RIVIU_ANDROID_AGENT_APK=<path>`.
 Precedence is `config → env → bundled`, same trap as minicap (§9.27).
 
-## Install on a phone
+## Deployment
+
+Normal operation uses the desktop's automatic preparation; no launcher button or
+manual keyboard selection is needed. Package identity remains `com.riviu.agent`, and
+updates retain the existing signing certificate. The following commands describe the
+manual diagnostic path, which is separate from building/verifying the APK:
 
 ```powershell
 adb -s <serial> install -r -g app\build\outputs\apk\debug\app-debug.apk
 adb -s <serial> shell ime enable com.riviu.agent/.RiviuIme
-adb -s <serial> shell am start-foreground-service -n com.riviu.agent/.AgentService
+adb -s <serial> shell am start-foreground-service -n com.riviu.agent/.AgentService --es token <session-token>
 ```
 
 Do **not** `ime set` this IME and leave it. The driver enables it for one
@@ -101,7 +124,7 @@ sentence as *"một giả định chịu lực và nó sai"*. Verified on hardwa
 
 | Method | Path | Body | Success |
 |---|---|---|---|
-| GET | `/status` | — | `ok`, `agentVersion=0.4.0`, `protocolVersion=1`, `features` |
+| GET | `/status` | — | `ok`, `agentVersion=0.5.0`, `protocolVersion=1`, `features` |
 | POST | `/v1/clipboard/set` | `{"text":"…"}` | `{"ok":true}` |
 | POST | `/v1/clipboard/get` | `{}` | `{"ok":true,"text":"…"}` |
 | POST | `/v1/media/import` | `{"relativePath":"01.png","displayName":"01.png"}` | `id`, `pendingModel` |
@@ -110,8 +133,8 @@ sentence as *"một giả định chịu lực và nó sai"*. Verified on hardwa
 | POST | `/v1/location/stop` | `{}` | `{"ok":true}` |
 | POST | `/v1/apps/describe` | `{"packages":["…"]}` | labels + 48 px PNG icons |
 
-`features` advertises six: `clipboard`, `pushMedia`, `wallpaper`, `mockLocation`,
-`appLabels`, `auth`. `auth` is advertised rather than inferred from the version because that
+`features` advertises seven: `clipboard`, `pushMedia`, `wallpaper`, `mockLocation`,
+`appLabels`, `auth`, `launcher`. `auth` is advertised rather than inferred from the version because that
 is how the host decides to reinstall — a phone still carrying the tokenless helper is
 missing `auth` and gets replaced once, instead of sitting there serving the whole device.
 
@@ -122,3 +145,10 @@ reintroduce it from this table's history.
 Staged images live in the app's external files dir, `inbox/<relativePath>`.
 Push there with `adb push` (from PowerShell or Rust — Git Bash mangles
 `/sdcard`, §9.12). `relativePath` is one segment: letters, digits, `.`, `_`, `-`.
+
+## Verify without devices
+
+`python sidecars/riviu-android-agent/test_helper_package.py` checks the shipped APK's
+version, launcher, packaged icon resources, signing certificate and source boundaries.
+Set `ANDROID_HOME` or `ANDROID_SDK_ROOT` to SDK 34. The check reads the APK and source;
+it never invokes adb or starts an emulator.

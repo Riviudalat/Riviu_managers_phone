@@ -939,11 +939,27 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
             return Ok(false);
         };
         if let Some(entry_query) = self.plan.gallery_entry {
-            let Some(entry) = self
+            let entry = self
                 .await_condition(COMPOSER_WINDOW, entry_query, stop, |_| true)
-                .await?
-            else {
-                return Ok(false);
+                .await?;
+            let entry = match entry {
+                Some(entry) => entry,
+                None if !stop.load(Ordering::Relaxed) => {
+                    let Some(entry) = crate::ui_automation::runtime::resolve_navigation(
+                        self.session,
+                        "gallery",
+                        Duration::from_secs(30),
+                    )
+                    .await?
+                    else {
+                        return Ok(false);
+                    };
+                    if stop.load(Ordering::Relaxed) {
+                        return Ok(false);
+                    }
+                    entry
+                }
+                None => return Ok(false),
             };
             self.tap_inside(&entry).await?;
             return Ok(true);
@@ -997,7 +1013,7 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
             .await_condition(PICKER_WINDOW, self.plan.album_menu, stop, |_| true)
             .await?
         else {
-            return Ok(AlbumChoice::NotFound);
+            anyhow::bail!("album_menu_missing: chưa thấy nút chọn album của picker");
         };
         self.tap_inside(&menu).await?;
         // Galaxy S8+ fleet 08/09/2026: album rows arrive after the menu animation.
@@ -1059,10 +1075,10 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
                         }
                     }
                 }
-                _ => return Ok(AlbumChoice::NotFound),
+                _ => anyhow::bail!("album_ambiguous: có {} dòng khớp album {album}", rows.len()),
             }
             if Instant::now() >= deadline {
-                return Ok(AlbumChoice::NotFound);
+                anyhow::bail!("album_not_visible: chưa thấy album {album} sau {scrolls} lần cuộn; {empty_reads} lần đọc trống");
             }
             sleep(POLL, stop).await;
         };
@@ -1730,6 +1746,15 @@ pub struct VideoPickerPlan {
 }
 
 impl VideoPickerPlan {
+    pub fn resolve_runtime(package: &str, language: &str, version: &str) -> Option<Self> {
+        Self::resolve(package, language, version).or_else(|| {
+            crate::tiktok_labels::controls_for_runtime(package, language, version)
+                .filter(|c| c.adaptive())
+                .map(|_| Self {
+                    provenance: "semantic-single-video-count-v1; runtime verification required",
+                })
+        })
+    }
     /// Resolve only tuples whose one-video album was observed through the editor boundary.
     ///
     /// The initial measurement selected the isolated MediaStore album on canary
@@ -1737,7 +1762,7 @@ impl VideoPickerPlan {
     /// caption and Post. Back did not fully leave that editor, so the trip force-stopped
     /// TikTok and read back both process absence and exact MediaStore cleanup.
     pub fn resolve(package: &str, language: &str, version: &str) -> Option<Self> {
-        let language = language.split(['-', '_']).next()?;
+        let language = crate::tiktok_labels::normalise_language(language);
         if language != "en" {
             return None;
         }
@@ -2008,6 +2033,7 @@ where
         let visible_pool = sound_policy.pool_size()?.min(5);
         progress(PublishProgress::OpeningSounds);
         let pool = open_and_observe_sounds(session, sound_plan, visible_pool).await?;
+        let sound_plan = pool.effective_plan(sound_plan);
         let mut selection = select_sound_candidate(sound_policy, &pool.candidates)?;
         progress(PublishProgress::SelectingSound {
             title: selection.title.clone(),
@@ -2835,7 +2861,8 @@ mod tests {
                 ElementQuery::Description { value, .. }
                 | ElementQuery::Text { value, .. }
                 | ElementQuery::ClassName(value)
-                | ElementQuery::ResourceIdSuffix(value) => value,
+                | ElementQuery::ResourceIdSuffix(value)
+                | ElementQuery::Semantic(value) => value,
             };
             Ok(self.current().get(wanted).cloned())
         }
@@ -2847,7 +2874,8 @@ mod tests {
                 ElementQuery::Description { value, .. }
                 | ElementQuery::Text { value, .. }
                 | ElementQuery::ClassName(value)
-                | ElementQuery::ResourceIdSuffix(value) => value,
+                | ElementQuery::ResourceIdSuffix(value)
+                | ElementQuery::Semantic(value) => value,
             };
             if wanted == "riviu-late-album" {
                 if self.album_requires_scroll && *self.swipes.lock() == 0 {
@@ -3534,13 +3562,11 @@ mod tests {
         .rows("riviu-abc", vec![box_at(0.0, 400.0), box_at(0.0, 500.0)]);
         let mut composer = Composer::new(&session, plan(), |element: &ElementBox| element.centre());
         let stop = AtomicBool::new(false);
-        assert_eq!(
-            composer
-                .select_album("riviu-abc", &stop)
-                .await
-                .expect("no error"),
-            AlbumChoice::NotFound
-        );
+        let error = composer
+            .select_album("riviu-abc", &stop)
+            .await
+            .expect_err("ambiguous album has a specific failure");
+        assert!(error.to_string().contains("album_ambiguous"));
         assert_eq!(
             session.taps.lock().len(),
             1,

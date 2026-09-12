@@ -6,6 +6,10 @@ import { updateCheck, updateInstall } from "../api";
 import type { LocalApiConfig } from "../api";
 
 vi.mock("../api", () => ({
+  guiServiceStatus: vi.fn(async()=>({config:{enabled:true,baseUrl:"",model:"",maxRequests:20},running:false,providerReady:false,protocolVersion:1})),
+  guiServiceSave: vi.fn(async()=>undefined),
+  guiServiceCheck: vi.fn(async()=>"Sẵn sàng"),
+  guiCompatibilityImport: vi.fn(),guiCompatibilityRollback:vi.fn(),guiDiagnosticsExport:vi.fn(),
   agentGetSettings: vi.fn(async () => ({
     settings: { autoRepair: false },
     tokenConfigured: true,
@@ -52,6 +56,13 @@ function installButton() {
 }
 
 describe("SettingsPanel update section", () => {
+  it("opens the requested connection section and focuses its heading region", async () => {
+    render(<SettingsPanel devices={[]} initialSection="integration" />);
+    await screen.findByText("Chưa kiểm bản mới");
+    expect(screen.getByRole("region", { name: "Kết nối và API" })).toHaveFocus();
+    expect(screen.getByRole("link", { name: "Kết nối và API" })).toHaveAttribute("aria-current", "location");
+  });
+
   it("does not check for an update on mount", async () => {
     // A farm machine is frequently offline and nobody asked it to phone home. This is the
     // wiring half of that promise; the backend never checks on its own either.

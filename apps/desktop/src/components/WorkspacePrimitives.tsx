@@ -1,12 +1,11 @@
 import {
-  useEffect,
   useId,
-  useRef,
   type CSSProperties,
   type KeyboardEvent,
   type ReactNode,
 } from "react";
 import { Check, X } from "lucide-react";
+import { useModalFocus } from "./useModalFocus";
 
 export type StatusTone = "neutral" | "info" | "success" | "warning" | "error";
 
@@ -238,50 +237,7 @@ export function DetailDrawer({
 }) {
   const titleId = useId();
   const descriptionId = useId();
-  const drawerRef = useRef<HTMLElement>(null);
-  const previousFocus = useRef<HTMLElement | null>(null);
-  const onCloseRef = useRef(onClose);
-
-  useEffect(() => {
-    onCloseRef.current = onClose;
-  }, [onClose]);
-
-  useEffect(() => {
-    if (!open) return;
-    previousFocus.current = document.activeElement as HTMLElement | null;
-    const drawer = drawerRef.current;
-    const focusable = () =>
-      Array.from(
-        drawer?.querySelectorAll<HTMLElement>(
-          'button:not(:disabled), a[href], input:not(:disabled), select:not(:disabled), textarea:not(:disabled), [tabindex]:not([tabindex="-1"])',
-        ) ?? [],
-      );
-    focusable()[0]?.focus();
-    const onKeyDown = (event: globalThis.KeyboardEvent) => {
-      if (event.key === "Escape") {
-        event.preventDefault();
-        onCloseRef.current();
-        return;
-      }
-      if (event.key !== "Tab") return;
-      const items = focusable();
-      if (!items.length) return;
-      const first = items[0];
-      const last = items[items.length - 1];
-      if (event.shiftKey && document.activeElement === first) {
-        event.preventDefault();
-        last.focus();
-      } else if (!event.shiftKey && document.activeElement === last) {
-        event.preventDefault();
-        first.focus();
-      }
-    };
-    document.addEventListener("keydown", onKeyDown);
-    return () => {
-      document.removeEventListener("keydown", onKeyDown);
-      previousFocus.current?.focus();
-    };
-  }, [open]);
+  const drawerRef = useModalFocus<HTMLElement>(onClose, open);
 
   if (!open) return null;
   return (
@@ -295,6 +251,7 @@ export function DetailDrawer({
         ref={drawerRef}
         className="detail-drawer"
         role="dialog"
+        tabIndex={-1}
         aria-modal="true"
         aria-labelledby={titleId}
         aria-describedby={description ? descriptionId : undefined}

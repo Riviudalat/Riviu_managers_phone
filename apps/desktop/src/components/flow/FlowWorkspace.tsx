@@ -282,6 +282,10 @@ export function FlowWorkspace({
   }, [hasUnsavedWork, onDirtyChange, state.document]);
 
   useEffect(() => {
+    // The temporary document shown during bootstrap is not the loaded Flow. Wait for
+    // that read to settle before validating, so a slow startup cannot consume a request
+    // or surface an unrelated draft verdict before the saved revision arrives.
+    if (loadState === "loading" || loadState === "error") return;
     const identity: DocumentRequestIdentity = {
       requestId: ++validationSequence.current,
       flowId: state.document.id,
@@ -319,7 +323,7 @@ export function FlowWorkspace({
     // replaces the document object without changing what compiles — watching
     // identity restarted validation on each pan and discarded the in-flight
     // result (its requestId no longer matched), leaving compiled null.
-  }, [state.documentEpoch]);
+  }, [state.documentEpoch, loadState]);
 
   const compiled = isCompilationCurrent(state) ? state.compiled?.value ?? null : null;
   const selectedNode = state.document.nodes.find((node) => node.id === state.selectedNodeId) ?? null;

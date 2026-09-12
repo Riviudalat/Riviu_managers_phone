@@ -1,8 +1,6 @@
 //! Read one hierarchy generation using the tuple's measured sound-sheet layout.
 //! Rows, selected tab and inline markers always come from the same snapshot.
 use super::*;
-use quick_xml::{events::Event, Reader, XmlVersion};
-use std::collections::HashMap;
 
 // AGENTS.md §9.187: 0.2.11 exhausted eight seconds before any Hot tap on the
 // local 45.7.3 phones 2/3. Android source reads take multiple seconds; the
@@ -55,96 +53,37 @@ fn parse(xml: &str, plan: SoundPickerPlan) -> anyhow::Result<Vec<Node>> {
     let layout = plan
         .snapshot_layout()
         .context("sound snapshot layout unmeasured")?;
-    anyhow::ensure!(xml.len() <= 16 * 1024 * 1024, "sound snapshot size limit");
-    let mut reader = Reader::from_str(xml);
+    let tree = crate::ui_automation::tree::Tree::parse(crate::HierarchySourceSnapshot {
+        generation: 1,
+        xml: xml.into(),
+    })?;
     let mut out = Vec::new();
-    let (mut count, mut depth) = (0, 0usize);
-    loop {
-        let event = reader.read_event()?;
-        if matches!(event, Event::Start(_)) {
-            depth += 1;
-            anyhow::ensure!(depth <= 256, "sound snapshot depth limit");
+    for (index, node) in tree.nodes.iter().enumerate() {
+        if !node.visible(plan.package) || !tree.ancestors_visible(index) {
+            continue;
         }
-        match event {
-            Event::Start(node) | Event::Empty(node) => {
-                count += 1;
-                anyhow::ensure!(count <= 32768, "sound snapshot node limit");
-                let mut attrs = HashMap::new();
-                for attr in node.attributes() {
-                    let attr = attr?;
-                    attrs.insert(
-                        std::str::from_utf8(attr.key.as_ref())?.to_string(),
-                        attr.decoded_and_normalized_value(
-                            XmlVersion::Implicit1_0,
-                            reader.decoder(),
-                        )?
-                        .into_owned(),
-                    );
-                }
-                let a = |key: &str| attrs.get(key).map(String::as_str).unwrap_or("");
-                if a("package") != plan.package
-                    || a("displayed") != "true"
-                    || !a("resource-id").starts_with(&format!("{}:id/", plan.package))
-                {
-                    continue;
-                }
-                let id = a("resource-id").trim_start_matches(plan.package);
-                if ![
-                    layout.tab_id,
-                    layout.viewport_id,
-                    plan.row_id,
-                    plan.title_id,
-                    plan.artist_id,
-                ]
-                .contains(&id)
-                    && !plan.selected_marker_ids().contains(&id)
-                    && plan.choose_id != Some(id)
-                {
-                    continue;
-                }
-                let (start, end) = a("bounds")
-                    .strip_prefix('[')
-                    .and_then(|s| s.strip_suffix(']'))
-                    .and_then(|s| s.split_once("]["))
-                    .context("sound bounds")?;
-                let (x, y) = start.split_once(',').context("sound bounds")?;
-                let (right, bottom) = end.split_once(',').context("sound bounds")?;
-                let (x, y, right, bottom) = (
-                    x.parse::<f64>()?,
-                    y.parse::<f64>()?,
-                    right.parse::<f64>()?,
-                    bottom.parse::<f64>()?,
-                );
-                anyhow::ensure!(
-                    [x, y, right, bottom].iter().all(|v| v.is_finite())
-                        && x >= 0.0
-                        && y >= 0.0
-                        && right > x
-                        && bottom > y,
-                    "invalid sound bounds"
-                );
-                out.push(Node {
-                    id: id.into(),
-                    selected: a("selected") == "true",
-                    rect: ElementBox {
-                        x,
-                        y,
-                        width: right - x,
-                        height: bottom - y,
-                        description: Some(a("text").into()),
-                        enabled: a("enabled") == "true",
-                        clickable: a("clickable") == "true",
-                    },
-                });
-            }
-            Event::End(_) => depth = depth.checked_sub(1).context("sound nesting")?,
-            Event::DocType(_) => anyhow::bail!("doctype in sound snapshot"),
-            Event::Eof => {
-                anyhow::ensure!(depth == 0, "incomplete sound snapshot");
-                break;
-            }
-            _ => {}
+        let Some(id) = node.attr("resource-id").strip_prefix(plan.package) else {
+            continue;
+        };
+        if ![
+            layout.tab_id,
+            layout.viewport_id,
+            plan.row_id,
+            plan.title_id,
+            plan.artist_id,
+        ]
+        .contains(&id)
+            && !plan.selected_marker_ids().contains(&id)
+            && plan.choose_id != Some(id)
+        {
+            continue;
         }
+        let rect = node.rect().context("invalid sound bounds")?;
+        out.push(Node {
+            id: id.into(),
+            selected: node.attr("selected") == "true",
+            rect,
+        });
     }
     Ok(out)
 }

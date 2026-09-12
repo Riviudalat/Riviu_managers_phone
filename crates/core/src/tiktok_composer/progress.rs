@@ -2,6 +2,9 @@
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PublishProgress {
+    RehearsalReady,
+    WaitingTransfer,
+    WaitingControl,
     CheckingDevice,
     DeviceReady,
     TransferringMedia { count: usize, video: bool },
@@ -40,6 +43,9 @@ pub type PublishProgressObserver<'a> = dyn Fn(PublishProgress) + Send + Sync + '
 impl PublishProgress {
     pub fn state(&self) -> &'static str {
         match self {
+            Self::RehearsalReady => "rehearsal_ready",
+            Self::WaitingTransfer => "waiting_transfer",
+            Self::WaitingControl => "waiting_control",
             Self::CheckingDevice => "checking_device",
             Self::DeviceReady => "device_ready",
             Self::TransferringMedia { .. } => "transferring_media",
@@ -76,6 +82,9 @@ impl PublishProgress {
 
     pub fn message(&self, device: &str) -> String {
         match self {
+            Self::RehearsalReady => "Đã kiểm tra tới trước nút Đăng".into(),
+            Self::WaitingTransfer => "Đang chờ lượt tải nội dung vào máy".into(),
+            Self::WaitingControl => "Đã tải xong; chờ lượt điều khiển để đăng".into(),
             Self::CheckingDevice => format!("Kiểm tra kết nối và khả năng đăng bài của {device}"),
             Self::DeviceReady => format!("Đã xác nhận {device} sẵn sàng"),
             Self::TransferringMedia { count, video } => format!(
@@ -117,7 +126,7 @@ impl PublishProgress {
             Self::CapturingLink => "Đang lấy liên kết của bài vừa đăng".into(),
             Self::LinkCaptured => "Đã lấy liên kết bài đăng".into(),
             Self::LinkPending { .. } => {
-                "Đang chờ liên kết để xác minh bài đăng, xem chi tiết".into()
+                "Đã gửi bài; hệ thống sẽ kiểm tra liên kết định kỳ, xem chi tiết".into()
             }
             Self::Finishing => "Đang kết thúc phiên và xử lý nội dung tạm".into(),
             Self::ReleasingPendingUpload => {

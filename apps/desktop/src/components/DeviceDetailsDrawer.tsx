@@ -1,5 +1,6 @@
 import { X } from "lucide-react";
-import { useEffect } from "react";
+import { useModalFocus } from "./useModalFocus";
+import { StatusChip } from "./WorkspacePrimitives";
 
 import { deviceWorkOwnerLabel } from "../deviceWork";
 import { deviceOsLabel } from "../types";
@@ -18,13 +19,7 @@ export function DeviceDetailsDrawer({
   ownerReadFailed: boolean;
   onClose: () => void;
 }) {
-  useEffect(() => {
-    const closeOnEscape = (event: KeyboardEvent) => {
-      if (event.key === "Escape") onClose();
-    };
-    window.addEventListener("keydown", closeOnEscape);
-    return () => window.removeEventListener("keydown", closeOnEscape);
-  }, [onClose]);
+  const dialogRef = useModalFocus<HTMLElement>(onClose);
 
   const ownerLabel = ownerReadFailed
     ? "Chưa đọc được"
@@ -35,6 +30,8 @@ export function DeviceDetailsDrawer({
   return (
     <div className="device-detail-backdrop" onClick={onClose}>
       <aside
+        ref={dialogRef}
+        tabIndex={-1}
         className="device-detail-drawer"
         role="dialog"
         aria-modal="true"
@@ -52,7 +49,6 @@ export function DeviceDetailsDrawer({
             className="icon-button"
             aria-label="Đóng chi tiết thiết bị"
             title="Đóng"
-            autoFocus
             onClick={onClose}
           >
             <X size={18} />
@@ -60,7 +56,7 @@ export function DeviceDetailsDrawer({
         </header>
 
         <dl className="device-detail-list">
-          <div><dt>Tác vụ hiện tại</dt><dd>{ownerLabel}</dd></div>
+          <div><dt>Tác vụ hiện tại</dt><dd><StatusChip tone={ownerReadFailed ? "warning" : currentOwner ? "info" : "success"}>{ownerLabel}</StatusChip></dd></div>
           <div><dt>Dòng máy</dt><dd>{device.model}</dd></div>
           <div><dt>Hệ điều hành</dt><dd>{deviceOsLabel(device)}</dd></div>
           <div><dt>Serial / UDID</dt><dd className="mono">{device.udid}</dd></div>

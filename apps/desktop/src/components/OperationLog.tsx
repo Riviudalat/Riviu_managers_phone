@@ -90,6 +90,11 @@ export function OperationLog() {
         }}><Download size={15} aria-hidden="true" />Xuất danh sách</button>
       </header>
 
+      <p className="op-log-scope" role="status">
+        {rows ? `${shown.length}/${rows.length} ghi nhận` : "Đang tải ghi nhận"}
+        {" · Tối đa 200 bản ghi gần nhất. Tìm kiếm chỉ áp dụng trên danh sách đã tải."}
+      </p>
+
       {error && (
         <StatusNotice
           tone="error"

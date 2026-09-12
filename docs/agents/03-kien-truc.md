@@ -1,5 +1,14 @@
 ## 3. Kiến trúc
 
+### 3.0 Phân tầng: OS, mạng xã hội, flow
+
+- **`DevicePlatform`** — OS của máy (iOS / Android). Không dùng để chọn TikTok vs Instagram.
+- **`SocialNetwork`** (`crates/core/src/social_network.rs`) — app mục tiêu. Mặc định TikTok;
+  Instagram/Threads chỉ là seam (package/link refuse) cho đợt sau. Module `tiktok_*` giữ tên.
+- **Orchestration fleet** — đồ thị `runNurture` / `runInteraction` / `runPublish` gọi engine
+  hiện có. Khác Flow V2 (tap/swipe trên một máy). Mẫu “3 chức năng” tạo bằng lệnh
+  `orchestration_create_three_feature_template`, không ghi đè điều phối có sẵn.
+
 ### 3.1 Đọc màn hình qua frame stream, không qua WDA
 
 ```

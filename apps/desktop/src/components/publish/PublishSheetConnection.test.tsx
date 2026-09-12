@@ -1,10 +1,10 @@
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { publishSheetPrepare, publishSheetGetConfig } from "../../api";
+import { publishSheetPrepare, publishSheetGetConfig, publishSheetCheck } from "../../api";
 import type { PublishSheetCheckResult } from "../../types";
 import { PublishSheetConnection } from "./PublishSheetConnection";
 
-vi.mock("../../api", () => ({ publishSheetPrepare: vi.fn(), publishSheetGetConfig: vi.fn() }));
+vi.mock("../../api", () => ({ publishSheetPrepare: vi.fn(), publishSheetGetConfig: vi.fn(), publishSheetCheck: vi.fn() }));
 const first = "https://docs.google.com/spreadsheets/d/first/edit#gid=0";
 const second = "https://docs.google.com/spreadsheets/d/second/edit#gid=0";
 const result = (verified = true): PublishSheetCheckResult => ({ sheetUrl: first, spreadsheetId: "first", sheetGid: 0,
@@ -18,6 +18,7 @@ function deferred<T>() {
 beforeEach(() => {
   vi.resetAllMocks();
   vi.mocked(publishSheetPrepare).mockImplementation(() => new Promise(() => {}));
+  vi.mocked(publishSheetCheck).mockImplementation(() => new Promise(() => {}));
   vi.mocked(publishSheetGetConfig).mockResolvedValue({ webhookUrl: "https://example.com/hook", hasToken: true, internalReporting: false, sheetUrl: "" });
 });
 afterEach(cleanup);
@@ -32,10 +33,11 @@ describe("PublishSheetConnection", () => {
     await act(async () => config.resolve({ webhookUrl: "https://example.com/hook", hasToken: true, sheetUrl: first }));
     expect(ready).toHaveBeenLastCalledWith(false);
   });
-  it("keeps the existing configured writer ready until a link is entered", async () => {
+  it("requires an explicit verified link even with configured writer", async () => {
     const ready = vi.fn();
     render(<PublishSheetConnection onReadyChange={ready} />);
-    await waitFor(() => expect(ready).toHaveBeenLastCalledWith(true));
+    await waitFor(() => expect(publishSheetGetConfig).toHaveBeenCalled());
+    expect(ready).toHaveBeenLastCalledWith(false);
     fireEvent.change(screen.getByRole("textbox", { name: "Link Google Sheet" }), { target: { value: first } });
     expect(ready).toHaveBeenLastCalledWith(false);
     fireEvent.change(screen.getByRole("textbox", { name: "Link Google Sheet" }), { target: { value: "" } });
@@ -45,12 +47,12 @@ describe("PublishSheetConnection", () => {
   it("requires verification again for a restored URL", async () => {
     vi.mocked(publishSheetGetConfig).mockResolvedValue({ webhookUrl: "https://example.com/hook", hasToken: true, internalReporting: false, sheetUrl: first });
     const pending = deferred<PublishSheetCheckResult>();
-    vi.mocked(publishSheetPrepare).mockReturnValue(pending.promise);
+    vi.mocked(publishSheetCheck).mockReturnValue(pending.promise);
     const ready = vi.fn();
     render(<PublishSheetConnection onReadyChange={ready} />);
     await waitFor(() => expect(screen.getByRole("textbox", { name: "Link Google Sheet" })).toHaveValue(first));
     expect(ready).toHaveBeenLastCalledWith(false);
-    expect(publishSheetPrepare).toHaveBeenCalledWith(first);
+    expect(publishSheetCheck).toHaveBeenCalledWith(first);
     await act(async () => pending.resolve(result()));
     await waitFor(() => expect(ready).toHaveBeenLastCalledWith(true));
     fireEvent.change(screen.getByRole("textbox", { name: "Link Google Sheet" }), { target: { value: second } });

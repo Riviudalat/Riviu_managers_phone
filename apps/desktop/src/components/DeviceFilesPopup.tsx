@@ -1,4 +1,6 @@
+import { useModalFocus } from "./useModalFocus";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { ArrowUp, File, Folder, Link2, X } from "lucide-react";
 import { deviceDeletePath, deviceListDir, devicePullPath, devicePushFile } from "../api";
 import { requestConfirm } from "../confirmStore";
 import { describeError } from "../describeError";
@@ -57,6 +59,7 @@ const SHORTCUTS: { label: string; path: string }[] = [
  *   twenty folders.
  */
 export function DeviceFilesPopup({ device, onClose }: Props) {
+  const dialogRef = useModalFocus<HTMLDivElement>(onClose);
   const [path, setPath] = useState(DEVICE_HOME);
   /**
    * **The listing and the path it belongs to, in one state.**
@@ -231,6 +234,8 @@ export function DeviceFilesPopup({ device, onClose }: Props) {
   return (
     <div className="modal-backdrop" onClick={onClose}>
       <div
+        ref={dialogRef}
+        tabIndex={-1}
         className="modal device-files"
         role="dialog"
         aria-modal="true"
@@ -238,11 +243,9 @@ export function DeviceFilesPopup({ device, onClose }: Props) {
         onClick={(event) => event.stopPropagation()}
       >
         <header>
-          <strong>
-            Tệp trên máy — {device.name} <span className="muted">({device.udid})</span>
-          </strong>
-          <button type="button" className="ghost" onClick={onClose}>
-            Đóng
+          <div className="device-modal-heading"><p>Tệp trên thiết bị</p><h2>{device.name}</h2><span title={device.udid}>{device.udid}</span></div>
+          <button type="button" className="icon-btn" onClick={onClose} aria-label="Đóng" title="Đóng">
+            <X size={18} />
           </button>
         </header>
 
@@ -252,6 +255,7 @@ export function DeviceFilesPopup({ device, onClose }: Props) {
               key={shortcut.path}
               type="button"
               className={`tb-btn ${path === shortcut.path ? "active" : ""}`}
+              aria-pressed={path === shortcut.path}
               onClick={() => setPath(shortcut.path)}
             >
               {shortcut.label}
@@ -261,7 +265,7 @@ export function DeviceFilesPopup({ device, onClose }: Props) {
 
         <div className="row device-files-bar">
           <button type="button" className="ghost" disabled={!up} onClick={() => up && setPath(up)}>
-            ↑ Lên
+            <ArrowUp size={15} aria-hidden="true" /> Lên
           </button>
           <nav className="device-files-crumbs" aria-label="Các cấp thư mục">
             {crumbs.map((crumb, index) => (
@@ -339,10 +343,10 @@ export function DeviceFilesPopup({ device, onClose }: Props) {
                     className="link device-files-name"
                     onClick={() => setPath(joinDevicePath(path, entry.name))}
                   >
-                    {entry.kind === "directory" ? "📁" : "🔗"} {entry.name}
+                    {entry.kind === "directory" ? <Folder size={16} aria-hidden="true" /> : <Link2 size={16} aria-hidden="true" />} <span>{entry.name}</span>
                   </button>
                 ) : (
-                  <span className="device-files-name">📄 {entry.name}</span>
+                  <span className="device-files-name"><File size={16} aria-hidden="true" /><span>{entry.name}</span></span>
                 )}
                 <span className="device-files-size">{formatDeviceSize(entry)}</span>
                 {/* The phone's own text, in the phone's own timezone. See `DeviceFileEntry`. */}
@@ -353,8 +357,8 @@ export function DeviceFilesPopup({ device, onClose }: Props) {
         )}
 
         <footer className="row device-files-actions">
-          <span className="hint">
-            {picked.length > 0 ? `Đã chọn ${picked.length} mục` : "Chưa chọn mục nào"}
+          <span className="hint" role="status">
+            <span>{picked.length > 0 ? `Đã chọn ${picked.length} mục` : "Chưa chọn mục nào"}</span>{` · ${rows.length} mục trong thư mục`}
           </span>
           <button type="button" className="ghost" disabled={busy} onClick={() => void pushHere()}>
             Đưa tệp vào đây

@@ -1,4 +1,12 @@
 import { invoke } from "@tauri-apps/api/core";
+export interface GuiServiceConfig { enabled:boolean; baseUrl:string; model:string; maxRequests:number; }
+export interface GuiServiceStatus { config:GuiServiceConfig; running:boolean; providerReady:boolean; protocolVersion:number; lastError?:string|null; }
+export const guiServiceStatus=()=>invoke<GuiServiceStatus>("gui_service_status");
+export const guiServiceSave=(config:GuiServiceConfig)=>invoke<void>("gui_service_save",{config});
+export const guiServiceCheck=()=>invoke<string>("gui_service_check");
+export const guiCompatibilityImport=(document:string)=>invoke<string>("gui_compatibility_import",{document});
+export const guiCompatibilityRollback=()=>invoke<string>("gui_compatibility_rollback");
+export const guiDiagnosticsExport=()=>invoke<string>("gui_diagnostics_export");
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type {
   AnalyticsSummary,
@@ -1441,6 +1449,10 @@ export async function orchestrationSaveRevision(
   });
 }
 
+export async function orchestrationCreateThreeFeatureTemplate() {
+  return invoke<OrchestrationRevisionRecord>("orchestration_create_three_feature_template");
+}
+
 export async function orchestrationArchive(id: string) {
   return invoke<void>("orchestration_archive", { id });
 }
@@ -1539,4 +1551,11 @@ export async function flowCoordinateFrame(udid: string, bundleId: string) {
 
 export async function flowReadArtifact(artifactId: string) {
   return invoke<FlowArtifactPayload>("flow_read_artifact", { artifactId });
+}
+
+export function interactionParseConversation(raw: string): Promise<import("./types").ConversationStep[]> {
+  return invoke("interaction_parse_conversation", { raw });
+}
+export function interactionDraftConversation(context: string, direction: string, roles: string[], count: number): Promise<import("./types").ConversationStep[]> {
+  return invoke("interaction_draft_conversation", { context, direction, roles, count });
 }

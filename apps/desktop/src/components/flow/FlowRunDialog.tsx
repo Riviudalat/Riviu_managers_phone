@@ -1,6 +1,7 @@
 import { X } from "lucide-react";
 import { useState } from "react";
 import type { DeviceInfo, FlowTargetSelection } from "../../types";
+import { useModalFocus } from "../useModalFocus";
 
 type RunMode = FlowTargetSelection["mode"];
 
@@ -30,6 +31,7 @@ export function FlowRunDialog({
 }) {
   const [mode, setMode] = useState<RunMode>("selected");
   const [chosenUdid, setChosenUdid] = useState(devices[0]?.udid ?? "");
+  const dialogRef = useModalFocus<HTMLElement>(() => onClose?.());
   // `oneUdid` was initialised once from `devices[0]` and never reconciled. When that phone dropped
   // off the list the `<select>` fell back to displaying the first remaining option while the state
   // still held the departed one -- so Run submitted a device the operator could not see chosen, and
@@ -41,6 +43,8 @@ export function FlowRunDialog({
 
   return (
     <section
+      ref={dialogRef}
+      tabIndex={-1}
       role="dialog"
       aria-modal="true"
       aria-label="Chạy Flow"

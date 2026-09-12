@@ -810,6 +810,18 @@ describe("publish campaign monitoring", () => {
     expect(executeCampaign).not.toHaveBeenCalled();
   });
 
+  it("shows independent upload and post phases together", async () => {
+    const campaign = { id: "parallel", requestId: "r", sourceRoot: "C:/fixture", state: "posting", visibility: "public", cleanupPolicy: "keepImportedAssets", assignments: [], createdAt: "2026-09-10T00:00:00Z", updatedAt: "2026-09-10T00:00:00Z" };
+    vi.mocked(publishList).mockResolvedValue([campaign] as never);
+    vi.mocked(publishGet).mockResolvedValue({campaign,bundles:[],events:[],assignments:["transferring","imported","posting","verifying"].map((state,i)=>({id:String(i),campaignId:campaign.id,bundleId:String(i),ordinal:i,udid:"PHONE-"+i,state}))} as never);
+    render(<PublishPage devices={devices} selected={[]} onSelectUdids={() => {}} />);
+    fireEvent.click(screen.getByRole("tab", {name:"Theo dõi"}));
+    fireEvent.click(await screen.findByRole("button", {name:"Chi tiết máy"}));
+    const counts=await screen.findByRole("status",{name:"Tiến độ từng máy"});
+    for(const label of ["1 máy đang tải","1 máy đã tải, chờ đăng","1 máy đang gửi bài","1 máy chờ liên kết"]) expect(within(counts).getByText(label)).toBeVisible();
+    expect(executeCampaign).not.toHaveBeenCalled();
+  });
+
   it("keeps submitted posts pending even when an older execution snapshot says complete", async () => {
     const campaign = {
       id: "submitted-pending", requestId: "request", sourceRoot: "C:/fixture",
@@ -845,6 +857,44 @@ describe("publish campaign monitoring", () => {
     expect(executeCampaign).not.toHaveBeenCalled();
   });
 
+  it("shows periodic scheduled link checks without treating the waiting post as failure", async () => {
+    const campaign = {
+      id: "submitted-pending", requestId: "request", sourceRoot: "C:/fixture", runAt: "2026-09-09T07:00:00",
+      state: "verifying", visibility: "public", cleanupPolicy: "keepImportedAssets",
+      assignments: [{ bundleId: "bundle", udid: "PHONE-A", ordinal: 0 }],
+      createdAt: "2026-09-09T00:00:00Z", updatedAt: "2026-09-09T00:01:00Z",
+      errorCode: "post_verification_pending",
+    };
+    vi.mocked(publishList).mockResolvedValue([campaign] as never);
+    vi.mocked(publishGet).mockResolvedValueOnce({
+      campaign, bundles: [], events: [], assignments: [{
+        id: "assignment", campaignId: campaign.id, bundleId: "bundle", ordinal: 0,
+        udid: "PHONE-A", state: "verifying", errorCode: "post_verification_pending",
+        evidenceJson: JSON.stringify({ post: { state: "submitted" }, verificationStatus: { state: "pending", reason: "TikTok đang xử lý; kiểm tra lại mỗi 5 phút, tối đa 4 giờ", checkedAt: "2026-09-09T00:40:00Z", nextCheckAt: "2026-09-09T00:45:00Z", reviewAfterMinutes: 240 }, cleanup: { state: "kept", appCleanup: { state: "leftRunning" } } }),
+      }],
+    } as never);
+    vi.mocked(publishReconcile).mockResolvedValueOnce({
+      campaignId: campaign.id, inputDigest: "digest", status: "complete", retryScope: "none",
+      reportJson: { sheetEnabled: true }, updatedAt: "2026-09-09T00:00:00Z",
+    });
+    render(<PublishPage devices={devices} selected={[]} onSelectUdids={() => {}} />);
+    fireEvent.click(screen.getByRole("tab", { name: "Theo dõi" }));
+    expect(await screen.findByText("Đã bấm Đăng · chờ xác minh")).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "Chi tiết máy" }));
+    const panel = await screen.findByRole("region", { name: "Chi tiết chiến dịch đang chọn" });
+    expect(within(panel).getByText("Đang chờ xác minh bài đăng")).toBeVisible();
+    expect(within(panel).getByText("Sheet chờ liên kết đã xác minh")).toBeVisible();
+    expect(within(panel).getByText("đã giữ nội dung và để TikTok tiếp tục xử lý")).toBeVisible();
+    expect(screen.queryByText("Đã hoàn tất", { exact: true })).toBeNull();
+    expect(screen.queryByText("Sheet đã xác nhận", { exact: true })).toBeNull();
+    expect(screen.queryByRole("link", { name: "Mở bài đã xác nhận" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Chạy lại từ đầu" })).toBeNull();
+    expect(within(panel).getByText(/TikTok đang xử lý; kiểm tra lại mỗi 5 phút, tối đa 4 giờ/)).toBeVisible();
+    expect(within(panel).getByText(/Kiểm tra tiếp:/)).toBeVisible();
+    expect(within(panel).getByText(/Ngân sách tự kiểm: 240 phút/)).toBeVisible();
+    expect(executeCampaign).not.toHaveBeenCalled();
+  });
+
   it("shows expired publication as needs review and permits only an explicit link check", async () => {
     const campaign = {
       id: "review-post", requestId: "request", sourceRoot: "C:/fixture", state: "uncertain",
@@ -873,7 +923,8 @@ describe("publish campaign monitoring", () => {
     expect(executeCampaign).not.toHaveBeenCalled();
     expect(screen.queryByRole("button", { name: "Chạy lại từ đầu" })).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "Chi tiết máy" }));
-    expect(await screen.findByText("Hồ sơ có bản nháp; chưa tìm thấy bài đã gửi.")).toBeVisible();
+    expect(await screen.findByText(/Hồ sơ có bản nháp; chưa tìm thấy bài đã gửi\./)).toBeVisible();
+    expect(screen.getByText(/Tự kiểm tra đã dừng · chọn Kiểm tra liên kết/)).toBeVisible();
     expect(screen.queryByText("Đang chờ xác minh bài đăng")).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "Kiểm tra liên kết" }));
     await waitFor(() => expect(executeCampaign).toHaveBeenCalledWith(campaign.id, true));
@@ -987,6 +1038,10 @@ describe("publish campaign monitoring", () => {
           ordinal: 0,
           udid: "PHONE-A",
           state: "succeeded",
+          sheetDelivery: {
+            state: "failed", attempts: 2, lastError: "Google tạm thời gián đoạn",
+            nextAttemptAtMs: Date.parse("2026-09-05T00:02:00Z"), updatedAt: "2026-09-05T00:01:00Z",
+          },
           evidenceJson: JSON.stringify({
             post: {
               postUrl: "https://www.tiktok.com/@fixture/video/123",
@@ -1016,6 +1071,11 @@ describe("publish campaign monitoring", () => {
     ).toHaveAttribute("href", "https://www.tiktok.com/@fixture/video/123");
     expect(screen.getByText("Bài nhạc trên tài khoản · Tác giả")).toBeVisible();
     expect(screen.getByText("Sheet chưa hoàn tất")).toBeVisible();
+    expect(screen.getByText("Đang chờ ghi Sheet")).toBeVisible();
+    expect(screen.getByText("Google tạm thời gián đoạn")).toBeVisible();
+    expect(screen.getByText(/Đã thử 2 lần/)).toBeVisible();
+    expect(screen.getByText(/Thử tiếp:/)).toBeVisible();
+    expect(screen.queryByText("Sheet đã xác nhận")).toBeNull();
     fireEvent.click(screen.getByText("Đã xác nhận nhạc"));
     expect(screen.getByText("sound-digest")).toBeVisible();
     expect(screen.getByText("Đề xuất", { exact: true })).toBeVisible();

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import { describeError } from "../describeError";
 import { createPortal } from "react-dom";
 import {
@@ -48,6 +48,8 @@ const FLYOUT_GRACE_MS = 180;
 
 interface FlyoutState {
   id: string;
+  focusOwner?: string;
+  anchorId: string;
   /** Viewport coordinates, already clamped. */
   left: number;
   top: number;
@@ -82,6 +84,7 @@ export function DeviceFunctionList({
   autoFocusSearch = false,
   menuSemantics = false,
 }: Props) {
+  const menuId = useId();
   const [query, setQuery] = useState("");
   const [flyout, setFlyout] = useState<FlyoutState | null>(null);
   /// Rows fetched from the phone, per lazy submenu id: `undefined` = never opened,
@@ -148,7 +151,13 @@ export function DeviceFunctionList({
     // enough: it only decides how far up to nudge, and the panel scrolls internally.
     const estimated = Math.min(window.innerHeight * 0.6, Math.max(1, childCount) * 30 + 16);
     const top = Math.max(8, Math.min(rect.top, window.innerHeight - estimated - 8));
-    setFlyout({ id: node.id, left, top });
+    setFlyout({ id: node.id, left, top, anchorId: row.id, focusOwner: row.closest<HTMLElement>("[data-modal-focus-scope]")?.dataset.modalFocusScope });
+  };
+
+  const closeFlyout = () => {
+    cancelClose();
+    if (flyout) document.getElementById(flyout.anchorId)?.focus();
+    setFlyout(null);
   };
 
   const runLeaf = (node: DeviceMenuNode) => {
@@ -185,6 +194,7 @@ export function DeviceFunctionList({
     return (
       <button
         key={node.id}
+        id={`${menuId}-${node.id}`}
         type="button"
         role={menuSemantics ? "menuitem" : undefined}
         className={`device-menu-parent${isOpen ? " is-open" : ""}`}
@@ -197,10 +207,16 @@ export function DeviceFunctionList({
         // touch screen, and the operator may click before the pointer settles.
         onClick={(event) => openFlyout(node, event.currentTarget, children.length)}
         onFocus={(event) => openFlyout(node, event.currentTarget, children.length)}
+        onKeyDown={(event) => {
+          if (event.key !== "Escape" || !isOpen) return;
+          event.preventDefault();
+          event.stopPropagation();
+          closeFlyout();
+        }}
       >
         {Icon && <Icon size={16} />}
         <span>{node.label}</span>
-        <span className="device-menu-chev">▸</span>
+        <span className="device-menu-chev" aria-hidden="true">▸</span>
       </button>
     );
   };
@@ -234,11 +250,19 @@ export function DeviceFunctionList({
         createPortal(
           <div
             className="device-flyout"
+            data-modal-focus-owner={flyout.focusOwner}
+            data-modal-focus-anchor={flyout.anchorId}
             role="menu"
             aria-label={openNode.label}
             style={{ left: flyout.left, top: flyout.top }}
             onPointerEnter={cancelClose}
             onPointerLeave={scheduleClose}
+            onKeyDown={(event) => {
+              if (event.key !== "Escape") return;
+              event.preventDefault();
+              event.stopPropagation();
+              closeFlyout();
+            }}
           >
             {openPending && <p className="device-menu-note">Đang đọc từ máy…</p>}
             {!openPending && openChildren.length === 0 && (

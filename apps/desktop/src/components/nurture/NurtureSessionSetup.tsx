@@ -1,4 +1,5 @@
 import { useState, type ReactNode } from "react";
+import { CheckCircle2, Search } from "lucide-react";
 import { MachineChoice } from "../MachineChoice";
 import type { DeviceInfo, DeviceMeta, NurtureSettings, TargetRef } from "../../types";
 import { orderDevicesByNumber, tileName, tileNumber } from "../../deviceNaming";
@@ -43,7 +44,7 @@ export function NurtureSessionSetup({ settings, onChange, issue, issueId }: {
   const preset = custom ? "custom" : presetOf(settings);
   const patch = (change: Partial<NurtureSettings>) => onChange({ ...settings, ...change });
   return <section className="nurture-session-card" aria-label="Thiết lập phiên">
-    <header className="nurture-card-heading"><h2>Thiết lập phiên</h2></header>
+    <header className="nurture-card-heading"><h2>Thiết lập phiên</h2><span className="automation-section-meta">Áp dụng cho mỗi máy</span></header>
     <div className="nurture-session-limits">
       <label>Tổng số video muốn lướt<span className="nurture-unit-input"><input id="nurture-basic-videos" aria-label="Tổng số video muốn lướt" type="number" min={1} max={10000} step={1} value={Number.isFinite(settings.numVideos * settings.numRounds) ? settings.numVideos * settings.numRounds : ""}
         {...nurtureFieldValidation("numVideos", issue, issueId)} onChange={(event) => patch({ numVideos: Number(event.target.value), numRounds: 1 })} /><span>video / máy</span></span></label>
@@ -73,7 +74,7 @@ export function NurtureSessionSetup({ settings, onChange, issue, issueId }: {
     </div>
     <p className="nurture-setup-note">Các tỷ lệ độc lập. Bài đã tim hoặc lưu được bỏ qua, không tính thêm lượt.</p>
     {settings.scheduleEnabled && <p className="nurture-setup-note">Lịch tự chạy đang bật. Xem ở tab Hẹn giờ.</p>}
-    <div className="nurture-cleanup-note"><span aria-hidden="true">✓</span> Kết thúc: đóng TikTok và kiểm tra đã tắt.</div>
+    <div className="nurture-cleanup-note"><CheckCircle2 size={16} aria-hidden="true" /> Kết thúc: đóng TikTok và kiểm tra đã tắt.</div>
   </section>;
 }
 
@@ -92,12 +93,13 @@ export function NurtureMachinePicker({ devices, metas, targets, onTargetRefChang
   const unavailable = devices.length - available.length;
   const setTargets = (udids: string[]) => onTargetRefChange?.({ type: "explicit", udids });
   return <section className="nurture-machines-card" aria-label="Máy thực hiện">
-    <header className="nurture-card-heading"><h2>Máy thực hiện</h2><span className="nurture-count" role="status">Đã chọn {targets.length}/{devices.length}</span></header>
-    <input type="search" aria-label="Tìm máy Nuôi TikTok" placeholder="Tìm số máy hoặc tên" value={query} onChange={(event) => setQuery(event.target.value)} />
+    <header className="nurture-card-heading"><h2>Máy thực hiện</h2><span className="nurture-count" role="status">Đã chọn {targets.length}</span></header>
+    <label className="nurture-machine-search"><Search size={16} aria-hidden="true" /><input type="search" aria-label="Tìm máy Nuôi TikTok" placeholder="Tìm số máy hoặc tên" value={query} onChange={(event) => setQuery(event.target.value)} /></label>
     <div className="nurture-machine-tools">
-      <button type="button" className="ghost" title="Chọn tất cả máy sẵn sàng, kể cả máy ngoài kết quả tìm kiếm" disabled={!onTargetRefChange || !available.length} onClick={() => setTargets(available.map(({device}) => device.udid))}>Chọn tất cả</button>
+      <button type="button" className="ghost" title="Chọn tất cả máy sẵn sàng, kể cả máy ngoài kết quả tìm kiếm" disabled={!onTargetRefChange || !available.length} onClick={() => setTargets(available.map(({device}) => device.udid))}>Chọn tất cả sẵn sàng</button>
       <button type="button" className="ghost" disabled={!onTargetRefChange || !targets.length} onClick={() => setTargets([])}>Bỏ chọn</button>
       {scopeControl}
+      <small className="nurture-machine-ready-hint">{available.length} sẵn sàng · {devices.length} tổng</small>
     </div>
     {query && <p className="nurture-machine-filter-count">{filtered.length} máy khớp tìm kiếm</p>}
     {unavailable > 0 && <p className="nurture-setup-note">{unavailable} máy chưa sẵn sàng, chưa thể chọn thêm.</p>}
@@ -105,7 +107,7 @@ export function NurtureMachinePicker({ devices, metas, targets, onTargetRefChang
       {filtered.map(({ device, number, name }) => {
         const ready = device.status === "ready";
         const checked = selected.has(device.udid);
-        return <MachineChoice key={device.udid} number={number} name={name} status={device.status} checked={checked}
+        return <MachineChoice key={device.udid} number={number} name={name} status={device.status} reason={device.lastError} checked={checked}
           label={`Chọn Máy ${number} · ${name}`} disabled={!onTargetRefChange || (!ready && !checked)}
           onChange={(selected) => setTargets(selected ? [...targets, device.udid] : targets.filter(id => id !== device.udid))}
           detail={metas.get(device.udid)?.handle ? <span>@{metas.get(device.udid)?.handle?.replace(/^@+/, "")}</span> : undefined} />;

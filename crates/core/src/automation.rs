@@ -445,6 +445,8 @@ pub struct NurtureAutomationProfileConfigV1 {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct InteractionCampaignTemplateV1 {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scripted_conversation: Option<crate::conversation::ScriptedConversation>,
     pub targets: Vec<crate::ResolvedTikTokTarget>,
     pub message_count: u8,
     pub instruction: String,
@@ -463,6 +465,9 @@ pub struct InteractionCampaignTemplateV1 {
     pub mentions: Vec<String>,
     #[serde(default)]
     pub mention_parent: bool,
+    /// Which social app this interaction campaign targets. Defaults to TikTok.
+    #[serde(default)]
+    pub network: crate::SocialNetwork,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -480,6 +485,7 @@ impl InteractionAutomationProfileConfigV1 {
         actor_udids: Vec<String>,
     ) -> crate::ThreadCampaignRequest {
         crate::ThreadCampaignRequest {
+            scripted_conversation: self.request.scripted_conversation,
             request_id,
             targets: self.request.targets,
             actor_udids,
@@ -514,6 +520,9 @@ pub struct PublishAutomationProfileConfigV1 {
     pub caption_overrides: BTreeMap<String, String>,
     pub sound_policy: crate::PublishSoundPolicy,
     pub execution_confirmed: bool,
+    /// Which social app this publish profile targets. Defaults to TikTok.
+    #[serde(default)]
+    pub network: crate::SocialNetwork,
 }
 
 /// Validates the immutable payload against the schema owned by its automation kind.

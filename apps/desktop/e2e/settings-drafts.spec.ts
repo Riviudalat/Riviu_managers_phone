@@ -37,6 +37,7 @@ test("help stays inside the viewport near scroll edges and after resizing", asyn
   await installTauriMock(page);
   await page.goto("/");
   await page.getByRole("button", { name: "Nuôi TikTok", exact: true }).click();
+  await page.locator(".nurture-advanced > summary").click();
   await page.getByRole("tab", { name: "Hành vi", exact: true }).click();
   const help = page.locator(".nu-info").first();
   await expect(help).toBeVisible();

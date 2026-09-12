@@ -3,7 +3,47 @@
 Stack giữ nguyên: Rust workspace, Tauri 2, React/TypeScript/Vite. `src/api.ts` là biên
 IPC frontend. Không thêm một control plane riêng để đi vòng ownership/admission hiện có.
 
+Helper Android được chuẩn bị sau inventory ổn định bằng worker
+`android_helper_setup` trong `state`: tối đa hai máy, admission và lease Repair giữ
+stream, một lần thử mỗi kết nối. `AndroidDriver::ensure_helper_installed` chỉ cài
+gói/đọc lại versionCode và launcher; không mở Activity, đổi IME hay tạo session.
+Inventory dùng dữ liệu máy đã đọc khi cùng máy đang giữ khóa chuẩn bị helper; lỗi
+scan Android không được coi là disconnect để cấp lại lượt cài. Gói `com.riviu.agent`
+có versionCode tối thiểu 5 cho launcher; APK, manifest và NOTICE phải khớp hash.
+
 ## Bản đồ trách nhiệm
+
+### Nhận diện GUI và FastAPI
+
+`ui_automation` sở hữu cây bất biến, DTO, resolver và revalidation; `app_automation`
+sở hữu adapter/profile TikTok và Settings. Cây chung được dùng cho xác minh bài,
+tài khoản, picker và bảng nhạc. Resolver chỉ trả mục tiêu; engine giữ tap/type,
+effect ledger và verifier. Các đường mở thư viện, Hồ sơ, Chia sẻ và bình luận
+có thể yêu cầu nhận diện dự phòng; các điều kiện nghiệp vụ trước Post/Send vẫn
+được kiểm riêng. `controls_for_runtime` cho phiên bản chưa có resource set một
+route semantic: album/corner ordinal/Next/caption/Send phải được tìm trong cây
+hiện tại. Preflight đánh dấu các bước này Chưa quan sát, không coi là đã nghiệm
+thu. `for_build` giữ API chứng nhận strict; `for_runtime` giữ đầy đủ proof tài
+khoản/caption/thời gian/link. Nhạc dynamic chỉ chọn layout khi row/title/artist,
+tab/viewport và hành vi chọn cùng khớp, rồi giữ effective plan xuyên readback.
+
+FastAPI nằm trong `sidecars/gui-service`, protocol1. Pydantic và Rust cùng đọc
+fixture `gui-request.json`. Service không mở ADB hoặc database chiến dịch.
+Rust truyền bootstrap qua pipe, kiểm handshake và hash runtime, giữ cổng localhost
+và token riêng. Runtime Python đóng gói riêng, không trộn với sidecar iOS.
+Migration36 ghi request nhận diện theo run/assignment để giới hạn còn hiệu lực
+qua restart. Đầu ra model sai vẫn ghi usage; phản hồi khác epoch/observation
+bị loại. `check_gui_boundaries.py` kiểm ranh giới import/effect.
+
+Gói tương thích có schema và revision, chỉ chứa dữ liệu; nhập gói phải kiểm
+fixture trước khi chọn revision cho phiên mới. `cargo run -p riviu-core --example
+gui_replay` đọc gói từ stdin và chạy fixture mà không mở điện thoại. Trạng thái
+nghiệp vụ vẫn do database hiện có sở hữu; rollback profile không rollback ledger.
+
+Python gates: `uv run --project sidecars/gui-service pytest sidecars/gui-service/tests`,
+Ruff và ty. `build_gui_service.py` tạo runtime + manifest + overlay Tauri;
+`test_gui_service_package.py` kiểm khởi động và đóng pipe cha trên PATH sạch.
+Windows NSIS/MSI và WiX fragment cùng nhận overlay `tauri-gui-service.conf.json`.
 
 | Vùng | Chủ sở hữu mã | Đầu vào và đầu ra | Retry, cleanup và cổng |
 |---|---|---|---|
@@ -13,12 +53,19 @@ IPC frontend. Không thêm một control plane riêng để đi vòng ownership/
 | Tương tác | `InteractionPopup.tsx`, core `interaction` | URL hiện tại, revision, prepared content -> campaign/assignment/evidence | uncertain không gửi lại mù; parser, effect và JobsPanel regressions |
 | Nuôi | `NurturePopup.tsx`, core `nurture` | phiên, nhịp, effect plan -> quan sát/outcome/cost | budget hữu hạn, credential riêng; nurture tests và readiness UI |
 | Đăng bài | `PublishPage.tsx`, core `publish`, desktop `publish_commands/{mod,preflight,execution,sheet,legacy,tests}.rs` | media/target/preflight -> durable projection và outbox | Post/URL/Sheet/cleanup tách scope; publish tests, preflight và restart recovery |
-| Flow/điều phối | `components/flow`, `components/orchestration`, core `flow` | graph/node identity/revision -> execution history | không thay device Flow bằng fleet orchestration; validate/save/archive/import tests |
+| Flow/điều phối | `components/flow`, `components/orchestration`, core `flow` + `orchestration` | graph/node identity/revision -> execution history | không thay device Flow bằng fleet orchestration; validate/save/archive/import tests |
 | App/nội dung | `AppsPage.tsx`, `MaterialPage.tsx`, library ledger | artifact snapshot + targets -> batch/item outcomes | queued cancel; restart running -> uncertain, không auto replay; ledger regressions |
 | Lịch sử | `JobsPanel.tsx`, `DataPage.tsx`, aggregate query | source/filter/window -> total + page + hydrated detail | filter trước hydrate; >10.000 nguồn báo thu hẹp; projection/query tests |
 | Settings/API | `SettingsPanel.tsx`, `ApiPage.tsx`, settings/local API commands | section draft/credential/listener config -> persisted value + actual listener | readback và stale-response guard; section save tests, Local API tests |
 | iOS/WDA | `crates/ios-driver`, `sidecars/pymobiledevice3`, `sidecars/wda` | manifest/auth/session -> capability/transport | giữ thứ tự session-trước-stream; đọc toàn bộ §2; driver/Python gates |
 | Android | `crates/android-driver`, helper APK và pinned tools | package/permission/hierarchy -> typed observation/effect | không tap theo toạ độ chưa đo; driver tests, hash/version gates |
+
+**Platform vs mạng xã hội vs flow.** `DevicePlatform` là OS thiết bị (iOS/Android).
+`SocialNetwork` (`tiktok` | `instagram` | `threads`, mặc định TikTok) là app mục tiêu — seam
+dispatch package/link; Instagram/Threads từ chối rõ, chưa implement. Orchestration fleet
+(`OrchestrationDocumentV1`) là đồ thị gọi vào engine Nuôi / Tương tác / Đăng hiện có; nút
+“Tạo mẫu 3 chức năng” seed 3 hồ sơ + một điều phối Nuôi→Tương tác→Đăng. Engine vẫn là
+source of truth — không thay bằng node Flow V2 tap/swipe.
 
 Bảng này là ranh giới trách nhiệm hiện có, không khẳng định đã tách hết module lớn.
 Khi tách module, giữ public contract và chuyển các test đọc `include_str!` cùng symbol.
@@ -99,8 +146,11 @@ callback về Setup focus link Sheet. Xem AGENTS.md §9.206.
 Stream budget tăng theo roster scan sau startup trong trần32; explicit thấp xếp
 hàng tác vụ và không tự nâng. Capacity wait xảy ra trước session/terminate, hỗ trợ
 Dừng của Nuôi và cancel campaign của Publish/Tương tác.
-Installer nội bộ0.2.21 mang bootstrap Sheet chung trong resource ignored riêng;
-startup lưu pair vàoOSSecretStore và xóa tokenSQL cũ. publish_sheet_prepare tự tạo
+Installer nội bộ nhận resource publish-sheet/connection.json chỉ gồm webhookUrl/token;
+resource nằm ngoài tracked source. sheet_bootstrap khôi phục cặp khi chưa có cấu hình,
+không ghi link bảng. Migration có marker một lần xóa đúng link mặc định cũ bằng digest;
+không đổi target chiến dịch/outbox hoặc link người dùng lưu sau migration. Startup di
+chuyển credential đã có của máy vào OSSecretStore và xóa token SQL cũ. `publish_sheet_prepare` tự tạo
 header khi tab rỗng, khác publish_sheet_check chỉđọc. Deployment4 đã cập nhật.
 Manual Nuôi page truyền durationMinutes thật, comment preflight đọc enabled+prob.
 45.7.3 có fixture exacttuplechoảnh/nhạc/Send/account; phiên Send chưađược phát trong
@@ -115,8 +165,10 @@ lịch sử không phụ thuộc số thứ tự của riêng nhóm đã chọn.
 
 ## Xác minh Publish và kết quả qua restart
 
-Dev §9.209 dùng VerificationQueue tối đa hai observer khác UDID, không chặn chéo
-khi một máy đọc chậm. evidence.verificationStatus giữ reasonCode, attempts,
+Dev §9.209 dùng VerificationQueue mọi UDID đang due/Ready (một observer mỗi máy,
+không trần số máy), không chặn chéo khi một máy đọc chậm. Cleanup media đã xác minh
+chạy mỗi tick worker, không chờ queue rỗng. Candidates ưu tiên `is_due` trước trần 1000.
+Nhãn thời gian own-post chấp nhận EN và VI (`N phút trước` / `vừa xong`). evidence.verificationStatus giữ reasonCode, attempts,
 readFailures, checkedAt và nextCheckAt; legacy thiếu nextCheckAt kiểm ngay.
 Pending lỗi đọc backoff30/60/120giây, quan sát khác30giây; giữ submittedAt và hạn
 review30phút. Hoàn tất observer đánh thức chọn máy tiếp; stop drain task đã admitted.
@@ -130,6 +182,25 @@ cho một lần đọc bổ sung/phase trong ngân sách và xóa snapshot cũ t
 giữ `expectedAccount`/`submittedAt` để phép xác minh sau restart không dựa đồng hồ lúc
 retry. Thiếu bằng chứng không được cold-start hoặc bấm Post lại.
 
+Lượt mới ghi `verificationContractVersion: 1` và `verificationBuilds` từ preflight.
+`PublishSubmissionProof` bắt buộc tại transaction claim: tài khoản, submittedAt,
+caption hash, bundle/media và đúng package/version/locale đã duyệt. Helper phải qua
+probe clipboard có khôi phục trước composer. `publish_account_reservations` khóa
+tài khoản chuẩn hóa xuyên thiết bị; trước Post được nhả khi dừng, sau Post giữ qua
+restart tới canonical proof. `publish_post_identities` giữ URL riêng cho từng
+assignment ngay cả khi tắt Sheet. Worker mới chỉ tự quan sát/dọn lượt mang marker;
+dữ liệu lịch sử vẫn đọc được.
+
+`capture_submission_link` dùng một snapshot cho caption và thời gian; chỉ nhận
+caption đầy đủ sau chuẩn hóa. Vùng caption rút gọn phải tự có clickable/enabled,
+chỉ bấm một lần rồi đọc lại toàn bộ proof. Link ứng viên chỉ được nhận sau khi
+kiểm các ô còn lại trong viewport không có bài thứ hai cùng khớp. Recovery chờ
+60 giây/tối đa ba điều hướng; một lượt tìm tối đa 12 ô qua ba viewport, ngân sách
+180 giây, không phát thao tác mới khi hết hạn. Primitive đang chạy được hoàn tất
+để giữ khôi phục IME. Cuộn dùng container scrollable chứa ô bài từ snapshot;
+Copy dùng hitbox cùng cây và tối đa hai sentinel độc lập. Diagnostic lưu tuple,
+generation, reason và chi phí; snapshot thành công thuộc đúng bài được nhận.
+
 Nhãn thời gian own-post Global45.4.3/en dùng `:id/zj1`, đo trên hai máy và bài mới
 trong §9.209. Global45.7.3/en dùng `:id/zwj`, đã đối chiếu bốn bài thật;
 các đường còn lại giữ `:id/tv_post_time`. Caption đúng và nhãn phút mới có thể
@@ -137,14 +208,14 @@ chờ ngay trên bài tối đa65giây tới cửa sổ phân biệt được th
 caption/thời gian sau chờ, không nới điều kiện interval-after-submission. Phép đọc phải có đúng một nhãn thời gian
 và caption hợp lệ; đổi ID không nới khoảng thời gian hoặc nhận caption của bài cũ.
 Hồ sơ Global46.2.1/en dùng chung `:id/cover` cho bài đăng và bản nháp. Khi lấy link,
-đọc badge nháp `:id/zq_`, loại cover chứa badge trước giới hạn ba ứng viên. Lỗi đọc
+đọc badge nháp `:id/zq_`, loại cover chứa badge trước khi chọn ứng viên. Lỗi đọc
 badge phải dừng trước tap cover; mở nháp rồi Back không bảo đảm quay về lưới hồ sơ.
 
 `publish_commands/verification.rs` chạy warm session trong control plane; DB CAS ghi
 proof, outbox và snapshot cùng transaction. `verified_cleanup.rs` xử lý riêng media
 đã xác minh theo delete policy và importId, giữ khả năng thử lại qua restart.
-Worker chuyển bài có submittedAt hợp lệ quá30phút sang Uncertain/needsReview trong
-một transaction, kể cả máy offline hoặc đang backoff. Bỏ khỏi hàng tự kiểm tra;
+Worker chuyển bài có submittedAt hợp lệ quá 30 phút (đăng ngay) hoặc 240 phút (hẹn giờ)
+sang Uncertain/needsReview trong một transaction, kể cả máy offline hoặc đang backoff. Bỏ khỏi hàng tự kiểm tra;
 kiểm link chủ động giữ scope LinkAndSheet, không tái phát Post. Một số nháp nhìn
 thấy trên hồ sơ chỉ là quan sát, không là bằng chứng assignment đã thành nháp.
 Nếu receipt cũ thiếu tài khoản hoặc thời điểm gửi hợp lệ, worker yêu cầu kiểm tra
@@ -157,12 +228,32 @@ manual viewing vẫn được, IdleSweep đứng ngoài máy đang chờ.
 Sheet hỗ trợ mẫu compact qua [Apps Script](apps-script/README.md): `postedAt` lấy từ
 intent, đối tác trải ngang, khóa idempotency nằm trong note ô Link cùng atomic update.
 Sheet riêng thêm E:H Máy/Tài khoản TikTok/Trạng thái/Lỗi hoặc ghi chú, đối tác từ I.
-Opt-in cấu hình `internalReporting`; worker đọc projection durable, revision theo
-assignment+campaign, chỉ gửi hàng thay đổi và đòi ACK đúng phiên bản/revision.
-Báo cáo trước Post không đi vào outbox link canonical. Xem AGENTS.md §9.203.
+Preflight xác minh `deliveryVersion: 2`, đúng spreadsheetId/gid và chế độ báo cáo,
+đưa `sheetDelivery: SheetDeliveryTarget` vào digest và request đã lưu của chiến dịch.
+Đổi credential không thay đích đã chốt. Dữ liệu lịch sử thiếu target v2 không được
+tự gán đích từ settings hiện tại hoặc đưa lại vào worker mới.
+
+Worker Sheet chạy độc lập observer liên kết, tối đa hai request, trong đó tối đa
+một báo cáo tiến độ. Claim 120 giây trong SQLite dùng chung theo assignment cho
+gửi chủ động và worker, có token fencing và revision CAS khi hoàn tất. Canonical
+outbox giữ identity bất biến; báo cáo có lịch gửi, số lần thử, lỗi và revision riêng
+theo assignment+campaign. Lỗi transport retry từ 30 giây, tăng tới 15 phút; lỗi
+payload/token/header/đích/ACK tạm dừng tới khi sửa kết nối hoặc thử lại chủ động.
+Khởi động lại phục hồi lịch đến hạn; một hàng lỗi không chặn các hàng khỏe.
+
+Canonical chỉ hoàn tất khi ACK khớp deliveryVersion, spreadsheetId/gid,
+assignmentId, deliveryRevision và postUrl đã gửi. Báo cáo nội bộ đòi reportVersion
+và rowRevision; một revision mới hơn phải trả Link thực tế đang lưu, không echo
+Link trống của request cũ. ACK thành công cùng settlement cập nhật outbox và
+projection trong transaction; lỗi DB sau remote commit giữ khả năng gửi lại cùng
+identity. Báo cáo trước Post không đi vào outbox canonical.
+Apps Script kiểm tra toàn bộ payload và row trước mutation, rồi mở rộng grid,
+header, giá trị và note trong một Sheets batchUpdate. ACK đọc lại dữ liệu đã commit.
+Link canonical bất biến, ghi chú chống trùng và cột riêng sau đối tác được bảo toàn.
 `publish_sheet_check` xác thực URL Google Sheets, đọc CSV có hạn mức và hỏi webhook
 bằng `rowKind: check`. Đọc CSV thành công chỉ xác nhận readable; connectionVerified
-đòi ACK đúng spreadsheetId/gid. Lưu link sau kiểm tra hợp lệ, giữ nguyên credential
+đòi ACK đúng spreadsheetId/gid và capability deliveryVersion2. Mẫu legacy chỉ
+quảng bá phiên bản 1 cho client cũ. Lưu link sau kiểm tra hợp lệ, giữ nguyên credential
 và internalReporting. Handler Apps Script kiểm tra không ghi hàng hoặc sửa header;
 bản triển khai cũ chưa hỗ trợ check không được coi là kết nối đã xác minh.
 Webhook và token cấu hình theo host; không đóng phiên Google/credential máy phát triển
@@ -236,11 +327,8 @@ cargo clippy -p riviu-android-driver --all-targets --locked -- -D warnings
 Tài liệu:
 
 ```powershell
-python -m unittest scripts.test_build_agents_index scripts.test_check_docs -v
-python scripts/build_agents_index.py --check
+python -m unittest scripts.test_check_docs -v
 python scripts/check_docs.py
-cargo test -p riviu-managers-phone every_agents_section_citation_resolves --lib --locked
-cargo test -p riviu-managers-phone agents_md_stays_a_door --lib --locked
 ```
 
 Packaging, sidecar và Python: chạy đúng danh sách ở
@@ -250,13 +338,28 @@ phạm vi. Không bỏ một cổng vì unit của ngôn ngữ khác đã xanh.
 
 ## Quy trình sửa và xác nhận
 
-1. Ghi `git status`, đọc symbol và § liên quan; phân biệt thay đổi của người dùng với phần đang làm.
+1. Ghi `git status`, đọc symbol liên quan; phân biệt thay đổi của người dùng với phần đang làm.
 2. Viết regression thể hiện đúng lỗi. Khi thay contract, chạy baseline và mutant trên bản sao, rồi restore test.
 3. Sửa trong module sở hữu; giữ deadline, cancellation, persistence và uncertainty semantics.
 4. Chạy focused gate trước, full gate theo blast radius; phân biệt compile/unit/e2e/mock/live/installer.
 5. Xem screenshot desktop/laptop, kiểm tra keyboard/focus/contrast/scroll; không chấp nhận snapshot lỗi làm chuẩn.
-6. Cập nhật tài liệu chủ đề, nhật ký số mới và index. Đọc lại artifact trước bàn giao.
+6. Cập nhật hướng dẫn sản phẩm hoặc README khi hành vi người dùng đổi. Đọc lại artifact trước bàn giao.
 
 Không chạy harness song song desktop trên cùng USB. Thao tác công khai/cài app/chuyển
 nội dung không thuộc smoke điều hướng read-only. Số lượng test và kết quả live là số
-đo của một lần chạy, ghi ở nhật ký có ngày, không chép thành năng lực tuyệt đối.
+đo của một lần chạy, không chép thành năng lực tuyệt đối.
+
+## Hội thoại theo phiên
+
+`ThreadCampaignRequest.scriptedConversation` giữ schema1, targetScripts, roleBindings,
+seed, durationMinutes và tùy chọn startsAt/endsAt. Planner dùng ordinal riêng 0–63 mỗi
+bài; parent là câu trước cùng topic. Automation template bảo toàn trường này. Nội dung
+AI trả về draft có cấu trúc; executor chỉ dùng câu đã duyệt. Preview ràng buộc cả script.
+
+Migration35 thêm interaction_conversation_sessions/turns. Coordinator có owner token,
+giờ kết thúc bất biến và cursor link; mỗi lượt gọi lại đường gửi có assignment scope
+của engine hiện có. Chờ không giữ device lease. Deadline được kiểm trong transaction
+begin_interaction_comment_action_effect. Sau restart owner bị thu hồi, effect armed
+vẫn uncertain; resume không reset endsAt. P90 được tính từ thời gian turn thực thi,
+không từ updated_at chứa thời gian đợi. Reply strict đọc parent bằng một snapshot,
+mở replies của root và dùng picker mention cho cả root/reply; literal không qua Send.

@@ -5,6 +5,7 @@ use super::*;
 pub(super) struct VerificationObservation {
     pub code: &'static str,
     pub reason: String,
+    pub diagnostic: Option<serde_json::Value>,
 }
 impl std::fmt::Display for VerificationObservation {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -42,7 +43,8 @@ pub(crate) async fn verify_pending_assignment(
         .context("bundle missing")?;
     let capture = execution::capture_confirmed_assignment_link(control, assignment, bundle).await;
     match capture {
-        Ok(link) => {
+        Ok(captured) => {
+            let link = captured.url;
             let mut evidence = execution::evidence_with_post_url(
                 candidate
                     .evidence_json
@@ -50,6 +52,7 @@ pub(crate) async fn verify_pending_assignment(
                     .and_then(|v| serde_json::from_str(v).ok()),
                 &link,
             );
+            evidence["verificationDiagnostic"] = captured.diagnostic;
             let post = if evidence.get("post").is_some() {
                 &mut evidence["post"]
             } else {
@@ -110,7 +113,14 @@ pub(crate) async fn verify_pending_assignment(
             let code = error
                 .downcast_ref::<VerificationObservation>()
                 .map_or("readFailed", |o| o.code);
-            if db.record_publish_verification_observation(candidate, &reason, code)? {
+            if db.record_publish_verification_diagnostic(
+                candidate,
+                &reason,
+                code,
+                error
+                    .downcast_ref::<VerificationObservation>()
+                    .and_then(|observation| observation.diagnostic.as_ref()),
+            )? {
                 progress::record_progress(
                     db,
                     &candidate.campaign_id,

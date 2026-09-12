@@ -1,4 +1,6 @@
+import { useModalFocus } from "./useModalFocus";
 import { useCallback, useEffect, useState } from "react";
+import { RefreshCw, X } from "lucide-react";
 
 import { syslog } from "../api";
 import { describeError } from "../describeError";
@@ -28,6 +30,7 @@ export function DeviceSyslogPopup({
   device: DeviceInfo;
   onClose: () => void;
 }) {
+  const dialogRef = useModalFocus<HTMLDivElement>(onClose);
   const [text, setText] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -46,26 +49,28 @@ export function DeviceSyslogPopup({
   return (
     <div className="modal-backdrop" onClick={onClose}>
       <div
+        ref={dialogRef}
+        tabIndex={-1}
         className="modal device-syslog"
         role="dialog"
         aria-modal="true"
         aria-label={`Log của ${device.name}`}
         onClick={(event) => event.stopPropagation()}
       >
-        <header className="panel-header">
-          <h2>Log của {device.name}</h2>
+        <header>
+          <div className="device-modal-heading"><p>Nhật ký thiết bị</p><h2>Log của {device.name}</h2></div>
           <span className="grow" />
           <button type="button" className="ghost" onClick={load} disabled={busy}>
+            <RefreshCw size={15} aria-hidden="true" />
             {busy ? "Đang đọc…" : "Đọc lại"}
           </button>
-          <button type="button" className="ghost" onClick={onClose}>
-            Đóng
+          <button type="button" className="icon-btn" onClick={onClose} aria-label="Đóng" title="Đóng">
+            <X size={18} />
           </button>
         </header>
 
         <p className="hint">
-          {LINES} dòng cuối, đọc trực tiếp từ máy. Trong lúc đọc, luồng hình của máy này tạm dừng
-          rồi tự chạy lại — tile tối đi là chuyện bình thường, không phải lỗi.
+          {LINES} dòng cuối, đọc trực tiếp từ máy. Luồng hình tạm dừng trong lúc đọc và tự chạy lại khi hoàn tất.
         </p>
 
         {error && (

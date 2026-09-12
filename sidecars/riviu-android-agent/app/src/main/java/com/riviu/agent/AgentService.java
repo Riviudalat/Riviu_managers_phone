@@ -3,6 +3,7 @@ package com.riviu.agent;
 import android.app.Notification;
 import android.app.NotificationChannel;
 import android.app.NotificationManager;
+import android.app.PendingIntent;
 import android.app.Service;
 import android.content.Intent;
 import android.content.pm.ServiceInfo;
@@ -11,13 +12,16 @@ import android.os.IBinder;
 import android.util.Log;
 
 /**
- * Keeps the loopback HTTP server alive. Not a keyboard and not a launcher
- * activity — the desktop starts this with {@code am start-foreground-service}.
+ * Keeps the loopback HTTP server alive. The desktop starts this with
+ * {@code am start-foreground-service}; the launcher only observes local status.
  */
 public final class AgentService extends Service {
     private static final String TAG = "RiviuHelper";
     private static final String CHANNEL = "riviu-helper";
     private static final int NOTICE_ID = 17980;
+    enum LocalStatus { STOPPED, WAITING, RUNNING, ERROR }
+    private static volatile AgentService activeService;
+    private static volatile LocalStatus localStatus = LocalStatus.STOPPED;
 
     /** Intent extra the desktop passes the shared token in. */
     public static final String EXTRA_TOKEN = "token";
@@ -25,16 +29,22 @@ public final class AgentService extends Service {
     private HttpServer server;
     private String activeToken;
 
+    static LocalStatus localStatus() {
+        AgentService active = activeService;
+        if (localStatus == LocalStatus.RUNNING
+                && (active == null || active.server == null || !active.server.isRunning())) {
+            return LocalStatus.ERROR;
+        }
+        return localStatus;
+    }
+
     @Override
     public void onCreate() {
         super.onCreate();
+        activeService = this;
+        localStatus = LocalStatus.WAITING;
         ensureChannel();
-        Notification notification = new Notification.Builder(this, CHANNEL)
-                .setContentTitle(getString(R.string.notification_title))
-                .setContentText(getString(R.string.notification_text))
-                .setSmallIcon(android.R.drawable.ic_menu_manage)
-                .setOngoing(true)
-                .build();
+        Notification notification = notification(false);
         if (Build.VERSION.SDK_INT >= 34) {
             startForeground(
                     NOTICE_ID,
@@ -79,7 +89,11 @@ public final class AgentService extends Service {
             fresh.start();
             server = fresh;
             activeToken = token;
+            localStatus = LocalStatus.RUNNING;
+            NotificationManager manager = getSystemService(NotificationManager.class);
+            if (manager != null) manager.notify(NOTICE_ID, notification(true));
         } catch (Exception error) {
+            localStatus = LocalStatus.ERROR;
             Log.e(TAG, "HTTP bind failed", error);
             stopSelf();
         }
@@ -92,12 +106,29 @@ public final class AgentService extends Service {
             server.stop();
             server = null;
         }
+        activeService = null;
+        if (localStatus != LocalStatus.ERROR) localStatus = LocalStatus.STOPPED;
         super.onDestroy();
     }
 
     @Override
     public IBinder onBind(Intent intent) {
         return null;
+    }
+
+    private Notification notification(boolean running) {
+        Intent open = new Intent(this, MainActivity.class)
+                .addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP | Intent.FLAG_ACTIVITY_SINGLE_TOP);
+        PendingIntent content = PendingIntent.getActivity(this, 0, open,
+                PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
+        return new Notification.Builder(this, CHANNEL)
+                .setContentTitle(getString(R.string.notification_title))
+                .setContentText(getString(running ? R.string.notification_text : R.string.notification_waiting))
+                .setSmallIcon(R.drawable.ic_notification)
+                .setColor(0xFFC2410C)
+                .setContentIntent(content)
+                .setOngoing(true)
+                .build();
     }
 
     private void ensureChannel() {

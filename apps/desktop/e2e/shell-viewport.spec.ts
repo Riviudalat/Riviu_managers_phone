@@ -6,9 +6,10 @@ test("nurture keeps the document at viewport height while its columns scroll", a
   await page.goto("/");
   await page.getByRole("button", { name: "Nuôi TikTok", exact: true }).click();
   await expect(page.locator(".nurture-machine-grid input")).toHaveCount(30);
+  await page.locator(".nurture-advanced > summary").click();
   for (const viewport of [{ width: 1440, height: 900 }, { width: 820, height: 560 }, { width: 1440, height: 1000 }]) {
     await page.setViewportSize(viewport);
-    const settings = page.locator(".nurture-setup-fields");
+    const settings = viewport.width < 1024 ? page.locator("#nurture-page-panel-setup") : page.locator(".nurture-setup-fields");
     for (const position of [0, 100000]) {
       await settings.evaluate((element, top) => { element.scrollTop = top; }, position);
       await page.evaluate(() => { window.scrollTo(0, 100000); });

@@ -4,6 +4,7 @@ import { flowExport, flowValidate } from "../../api";
 import { describeError } from "../../describeError";
 import { isFlowDocumentV2, normalizeFlowIssues } from "../../flow/validation";
 import type { CompiledRevision, FlowDocumentV2 } from "../../types";
+import { useModalFocus } from "../useModalFocus";
 
 const MAX_FLOW_JSON_BYTES = 1_048_576;
 
@@ -112,6 +113,7 @@ export function FlowJsonDialog({
     live.current = false;
     onClose();
   };
+  const dialogRef = useModalFocus<HTMLElement>(close);
 
   const apply = async () => {
     const ticket = (submission.current += 1);
@@ -154,7 +156,7 @@ export function FlowJsonDialog({
   };
 
   return (
-    <section role="dialog" aria-modal="true" aria-label="Flow JSON" className="flow-dialog">
+    <section ref={dialogRef} tabIndex={-1} role="dialog" aria-modal="true" aria-label="Flow JSON" className="flow-dialog">
       <header>
         <strong>Flow JSON</strong>
         <button type="button" aria-label="Đóng hộp thoại JSON" title="Đóng" onClick={close}>

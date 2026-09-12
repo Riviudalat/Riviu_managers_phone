@@ -928,6 +928,10 @@ impl Drop for RunningCampaign {
 /// The final state is written **once, here**, after every cohort has finished. Leaving it
 /// inside the runner would have each cohort racing to declare the campaign over while its
 /// siblings were still posting.
+#[path = "interaction_campaign/conversation.rs"]
+mod conversation;
+
+#[allow(clippy::too_many_arguments)]
 pub async fn execute_thread_campaign(
     db: Arc<crate::db::Database>,
     control: Arc<DeviceControlPlane>,
@@ -942,6 +946,40 @@ pub async fn execute_thread_campaign(
 ) -> anyhow::Result<()> {
     // Held for the whole run: the idle sweeper reads this and stands down.
     let _running = RunningCampaign::start();
+    if let Some(script) = request.scripted_conversation.as_ref() {
+        let token = uuid::Uuid::new_v4().to_string();
+        let session = match db.claim_conversation_session(
+            &campaign_id,
+            script,
+            &token,
+            chrono::Utc::now().timestamp_millis(),
+        ) {
+            Ok(session) => session,
+            Err(error)
+                if error
+                    .downcast_ref::<crate::db::ConversationAlreadyRunning>()
+                    .is_some() =>
+            {
+                return Ok(())
+            }
+            Err(error) => return Err(error),
+        };
+        let task = tokio::spawn(conversation::run(
+            db.clone(),
+            control,
+            engine,
+            events.clone(),
+            campaign_id.clone(),
+            request,
+            plan,
+            only_assignments,
+            artifacts,
+            frame_source,
+            session,
+            token,
+        ));
+        return join_campaign(db, events, campaign_id, vec![task]).await;
+    }
     let mut by_cohort: std::collections::BTreeMap<u16, std::collections::HashSet<String>> =
         Default::default();
     for message in &plan.assignments {
@@ -2179,8 +2217,26 @@ async fn run_cohort(
                 .and_then(|parent| actor_by_ordinal.get(&(assignment.target_key.clone(), parent)))
                 .and_then(|udid| db.get_device_meta(udid).ok())
                 .map(|meta| meta.handle);
-            let mentions = mentions_for(assignment.ordinal, &request, parent_handle.as_deref());
-            let prepared = PreparedThreadMessage::with_mentions(assignment, text, mentions);
+            let mentions = request.scripted_conversation.as_ref().map_or_else(
+                || mentions_for(assignment.ordinal, &request, parent_handle.as_deref()),
+                |script| script.mentions(&assignment.target_key, assignment.ordinal),
+            );
+            let mut prepared = PreparedThreadMessage::with_mentions(assignment, text, mentions);
+            prepared.strict_mentions = request.scripted_conversation.is_some();
+            if let Some(script) = &request.scripted_conversation {
+                let mut root = assignment.ordinal;
+                while let Some(parent) = plan
+                    .assignments
+                    .iter()
+                    .find(|a| a.target_key == assignment.target_key && a.ordinal == root)
+                    .and_then(|a| a.parent_ordinal)
+                {
+                    root = parent;
+                }
+                prepared.root_identity =
+                    posted.get(&(assignment.target_key.clone(), root)).cloned();
+                let _ = script;
+            }
             previous = Some(prepared.text.clone());
             // The conditional write is the ownership check carried out of the DB. A stale
             // target-wide failure can take the row out of `preparing` while this worker is
@@ -2291,6 +2347,12 @@ async fn run_cohort(
                 }
             };
             let gestures = tokio::sync::Mutex::new(());
+            session.set_gui_scope(crate::ui_automation::GuiScope {
+                run_id: campaign_id.clone(),
+                assignment_id: Some(id.clone()),
+                device_id: prepared.actor_udid.clone(),
+                deadline_ms: db.conversation_session(&campaign_id)?.map(|s| s.ends_at_ms),
+            });
             let mut effect_intent = false;
             // The stream this context owns. A frame from any other generation belongs to a
             // producer that has already been torn down and proves nothing about this send.
@@ -2313,6 +2375,16 @@ async fn run_cohort(
                     &gestures,
                 )
                 .await?;
+                if let Some(script)=&request.scripted_conversation {
+                    let now=chrono::Utc::now().timestamp_millis();
+                    anyhow::ensure!(db.conversation_session(&campaign_id)?.is_some_and(|session|now<session.ends_at_ms),"Phiên đã hết giờ");
+                    anyhow::ensure!(session.supports_element_bounds(),"Hội thoại tag thật cần máy Android");
+                    let role=script.role_bindings.iter().find(|r|r.udid==prepared.actor_udid).context("Vai chưa có tài khoản")?;
+                    let language=session.ui_language().await.context("Chưa đọc được ngôn ngữ TikTok")?;let version=session.app_version(&opened_package).await.context("Chưa đọc được phiên bản TikTok")?;
+                    let labels=crate::tiktok_labels::controls_for_runtime(&opened_package,&language,&version).context("Chưa nhận diện TikTok trên máy")?;
+                    let account=crate::tiktok_share::observe_publish_account(session.as_ref(),&labels).await?;
+                    anyhow::ensure!(account.eq_ignore_ascii_case(role.username.trim_start_matches('@')),"Tài khoản trên máy không khớp vai {}",role.role_id);
+                }
                 // A process can die after arming a composer but before the durable effect
                 // gate. The database correctly makes that assignment retryable, but the
                 // phone keeps the draft. Clear that state before opening anything for this
@@ -3399,7 +3471,7 @@ impl TargetDriver for HierarchyTargetDriver<'_> {
         stop: &AtomicBool,
         effect_gate: &mut EffectGate<'_>,
     ) -> Result<SendOutcome, SendFailure> {
-        let outcome = crate::interaction_hierarchy::send_root_by_hierarchy_with_gate(
+        let outcome = crate::interaction_hierarchy::send_root_by_hierarchy_with_gate_options(
             session,
             self.labels,
             self.screen,
@@ -3408,6 +3480,7 @@ impl TargetDriver for HierarchyTargetDriver<'_> {
             stop,
             || self.frame_sha(),
             effect_gate,
+            prepared.strict_mentions,
         )
         .await
         .map_err(map_hierarchy_send_failure)?;
@@ -3422,7 +3495,7 @@ impl TargetDriver for HierarchyTargetDriver<'_> {
         stop: &AtomicBool,
         effect_gate: &mut EffectGate<'_>,
     ) -> Result<SendOutcome, SendFailure> {
-        let outcome = crate::interaction_hierarchy::send_reply_by_hierarchy_with_gate(
+        let outcome = crate::interaction_hierarchy::send_reply_by_hierarchy_with_gate_options(
             session,
             self.labels,
             self.screen,
@@ -3431,6 +3504,9 @@ impl TargetDriver for HierarchyTargetDriver<'_> {
             stop,
             || self.frame_sha(),
             effect_gate,
+            &prepared.mentions,
+            prepared.strict_mentions,
+            prepared.root_identity.as_ref(),
         )
         .await
         .map_err(map_hierarchy_send_failure)?;
@@ -3481,14 +3557,15 @@ async fn choose_target_driver<'a>(
         .app_version(target_package)
         .await
         .unwrap_or_default();
-    let labels = crate::tiktok_labels::controls_for(target_package, &language, &app_version)
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "chưa đo nhãn cho {target_package} + ngôn ngữ {language:?}; từ chối thay vì \
+    let labels =
+        crate::tiktok_labels::controls_for_runtime(target_package, &language, &app_version)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "chưa đo nhãn cho {target_package} + ngôn ngữ {language:?}; từ chối thay vì \
                  dùng chuỗi của ngôn ngữ khác (nhãn nào silently không khớp thì đọc thành \
                  'không có control đó')"
-            )
-        })?;
+                )
+            })?;
     // The Send control is keyed by app *version*, so a build whose translations are
     // catalogued can still have no Send id — which is exactly what a TikTok update
     // produces. Refusing here rather than inside the drawer is the difference between
@@ -3666,6 +3743,8 @@ mod tests {
                 parent_was_folded: false,
             },
             PreparedThreadMessage {
+                strict_mentions: false,
+                root_identity: None,
                 ordinal: 0,
                 actor_udid: "phone-a".into(),
                 text: "hello".into(),
@@ -3754,6 +3833,7 @@ mod tests {
 
         fn request(manual_comments: Vec<String>) -> ThreadCampaignRequest {
             ThreadCampaignRequest {
+                scripted_conversation: None,
                 request_id: "ai-key".into(),
                 targets: vec![ResolvedTikTokTarget {
                     original_url: "https://www.tiktok.com/@creator/photo/1".into(),
@@ -3895,6 +3975,7 @@ mod tests {
 
         fn request() -> ThreadCampaignRequest {
             ThreadCampaignRequest {
+                scripted_conversation: None,
                 request_id: "cancelled-preparations".into(),
                 targets: vec![ResolvedTikTokTarget {
                     original_url: "https://www.tiktok.com/@creator/video/1".into(),
@@ -4063,6 +4144,7 @@ mod tests {
             ));
             let db = crate::db::Database::open(&path).expect("open fixture database");
             let request = ThreadCampaignRequest {
+                scripted_conversation: None,
                 request_id: "settlement-recovery".into(),
                 targets: vec![ResolvedTikTokTarget {
                     original_url: "https://www.tiktok.com/@creator/video/1".into(),
@@ -4212,6 +4294,7 @@ mod tests {
         ));
         let db = crate::db::Database::open(&path).expect("open fixture database");
         let request = ThreadCampaignRequest {
+            scripted_conversation: None,
             request_id: "cancel-between-actions".into(),
             targets: vec![ResolvedTikTokTarget {
                 original_url: "https://www.tiktok.com/@creator/video/2".into(),
@@ -4585,6 +4668,7 @@ mod mention_tests {
 
     fn request(mentions: &[&str], mention_parent: bool) -> ThreadCampaignRequest {
         ThreadCampaignRequest {
+            scripted_conversation: None,
             request_id: "r".into(),
             targets: Vec::new(),
             actor_udids: Vec::new(),
