@@ -349,6 +349,21 @@ impl UiSession for AndroidUiSession {
     async fn tap(&self, point: TapPoint) -> anyhow::Result<()> {
         self.agent.tap(point.x, point.y).await
     }
+    async fn activate_element(&self, query: riviu_core::ElementQuery<'_>) -> anyhow::Result<()> {
+        let ids = self.agent.find_all(&to_agent_locator(query)).await?;
+        let [id] = ids.as_slice() else {
+            anyhow::bail!("element activation requires one target");
+        };
+        anyhow::ensure!(
+            self.agent.attribute(id, "enabled").await?.as_deref() == Some("true"),
+            "element disabled"
+        );
+        anyhow::ensure!(
+            self.agent.attribute(id, "clickable").await?.as_deref() == Some("true"),
+            "element not clickable"
+        );
+        self.agent.click(id).await
+    }
 
     async fn swipe(&self, gesture: SwipeGesture) -> anyhow::Result<()> {
         self.agent
@@ -635,13 +650,27 @@ impl UiSession for AndroidUiSession {
             .map(|_| ())
     }
 
+    async fn reopen_url_in_app(&self, url: &str, bundle_id: &str) -> anyhow::Result<()> {
+        let package = crate::adb::validate_package_name(bundle_id)?;
+        // Android 9 / SM-G950F ce12171c4b37d62705, 14/09: a VIEW delivered to
+        // retained SplashActivity ignored two photo URLs. NEW_TASK|CLEAR_TASK
+        // recreated navigation and both targets loaded; no app data reset.
+        let output=self.adb.shell(&self.serial,&format!("am start -W -f 0x10008000 -a android.intent.action.VIEW -c android.intent.category.BROWSABLE -d {} -p {package}",shell_quote(url))).await?;
+        anyhow::ensure!(
+            !output.contains("Error:"),
+            "target navigation task was refused"
+        );
+        Ok(())
+    }
+
     async fn read_text(
         &self,
         locator: &QualifiedElementLocator,
-        _request_timeout: std::time::Duration,
+        request_timeout: std::time::Duration,
     ) -> anyhow::Result<String> {
-        let element = self.agent.require(&to_locator(locator)).await?;
-        self.agent.text(&element).await
+        self.agent
+            .read_text_bounded(&to_locator(locator), request_timeout)
+            .await
     }
 
     /// The first backend in this project that can honestly say yes. On iOS

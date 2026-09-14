@@ -237,6 +237,7 @@ impl Database {
                 }
                 OrchestrationNodeAction::Start
                 | OrchestrationNodeAction::Delay { .. }
+                | OrchestrationNodeAction::Log { .. }
                 | OrchestrationNodeAction::End => continue,
             };
             let record = self
@@ -1042,6 +1043,7 @@ fn expected_child_kind(
         OrchestrationNodeAction::RunPublish { .. } => Some(AutomationKind::Publish),
         OrchestrationNodeAction::Start
         | OrchestrationNodeAction::Delay { .. }
+        | OrchestrationNodeAction::Log { .. }
         | OrchestrationNodeAction::End => None,
     })
 }

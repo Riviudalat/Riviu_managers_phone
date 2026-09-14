@@ -1,3 +1,4 @@
+import { openOperatorPage } from "./fixtures/operatorNavigation";
 import { expect, test, type Locator, type Page } from "@playwright/test";
 import {
   emitRiviuEvent,
@@ -26,7 +27,7 @@ async function openFlow(page: Page, selectDevices = false): Promise<void> {
     }
     await expect(page.locator("[data-testid='device-tile'].selected")).toHaveCount(2);
   }
-  await page.getByRole("button", { name: "Flow", exact: true }).click();
+  await openOperatorPage(page, 'Flow');
   await expect(page.getByRole("region", { name: "Không gian Flow" })).toHaveAttribute(
     "data-loading",
     "false",
@@ -311,7 +312,7 @@ test("authors, saves, runs, and reloads a selected-device flow", async ({ page }
   }));
 
   await page.reload();
-  await page.locator("[data-testid='nav-item']").getByText("Flow", { exact: true }).click();
+  await openOperatorPage(page,"Flow");
   await expect(page.getByRole("region", { name: "Không gian Flow" })).toHaveAttribute(
     "data-loading",
     "false",
@@ -357,7 +358,7 @@ test("keeps uncertain Tap non-retryable and cancels a running Wait", async ({ pa
 test("imports supported legacy JSON and preserves the draft on diagnostics", async ({ page }) => {
   await openFlow(page);
   await page.getByRole("button", { name: "Nhập Flow" }).click();
-  let dialog = page.getByRole("dialog", { name: "Nhập Flow cũ" });
+  let dialog = page.getByRole("dialog", { name: "Nhập Flow", exact: true });
   await dialog.getByLabel("JSON script cũ").fill(JSON.stringify({
     version: 1,
     name: "supported",
@@ -373,7 +374,7 @@ test("imports supported legacy JSON and preserves the draft on diagnostics", asy
   // point of the prompt is that it exists at all.
   await page.getByRole("button", { name: "Nhập Flow" }).click();
   await page.getByRole("button", { name: "Bỏ thay đổi" }).click();
-  dialog = page.getByRole("dialog", { name: "Nhập Flow cũ" });
+  dialog = page.getByRole("dialog", { name: "Nhập Flow", exact: true });
   await dialog.getByLabel("JSON script cũ").fill(JSON.stringify({
     version: 1,
     name: "unsupported",
@@ -449,7 +450,7 @@ test("authors a bounded TikTok AutoSwipe node without a script surface", async (
   // config. Reloading also exercises the fixture's command catalog: a missing AutoSwipe wire
   // command used to surface only as an operator-facing `Unknown mock command` toast.
   await page.reload();
-  await page.getByRole("button", { name: "Flow", exact: true }).click();
+  await openOperatorPage(page, 'Flow');
   await expect(page.getByRole("region", { name: "Không gian Flow" })).toHaveAttribute(
     "data-loading",
     "false",
@@ -546,18 +547,22 @@ test("keeps the Flow work surface usable on a scaled laptop viewport", async ({ 
   await page.locator(FLOW_NODE_TITLE).filter({ hasText: "Chạm" }).click();
 
   const sidebar = page.locator(".aside");
-  await expect(sidebar).toHaveClass(/collapsed/);
-  expect((await sidebar.boundingBox())?.width).toBeLessThanOrEqual(64);
+  await expect(sidebar).not.toHaveClass(/collapsed/);
+  expect((await sidebar.boundingBox())?.width).toBeGreaterThanOrEqual(180);
   await expect(page.getByTestId("flow-palette")).toHaveAttribute("data-open", "false");
 
   const canvas = await page.getByTestId("flow-canvas").boundingBox();
   const inspector = await page.getByTestId("flow-inspector").boundingBox();
-  expect(canvas?.width).toBeGreaterThanOrEqual(420);
+  expect(canvas?.width).toBeGreaterThanOrEqual(320);
   expect((inspector?.x ?? 0) + (inspector?.width ?? 0)).toBeLessThanOrEqual(820);
   await expect(page.getByRole("button", { name: "Chạy Flow" })).toBeInViewport();
   expect(await page.locator(".content-flow").evaluate((element) =>
     getComputedStyle(element).overflowY
   )).toBe("auto");
+  // Selecting an offscreen node may scroll the workspace while fonts settle.
+  // Capture the same viewport origin; geometry and inspector checks above remain real.
+  await page.evaluate(() => document.fonts.ready);
+  await page.locator(".content-flow").evaluate(element => { element.scrollTop = 0; element.scrollLeft = 0; });
   await expect(page).toHaveScreenshot("fixture-only-flow-820x600.png", {
     fullPage: false,
     animations: "disabled",

@@ -71,7 +71,7 @@ export function OperationProgressCenter({ deviceLabels }: { deviceLabels: Readon
   const progress = shown.map((run) => runProgress(run, state.value?.sessions ?? []));
   const fraction = progress.length && progress.every((value) => value !== null)
     ? progress.reduce((sum, value) => sum + value!, 0) / progress.length : null;
-  if (!runs.length && !state.error && !dismissal.records.length && !dismissal.error) return null;
+  if (!runs.length && !state.error && !dismissal.error && (!expanded || !undoKeys.length)) return null;
   const minimize = () => { setExpanded(false); toggleRef.current?.focus(); };
   return createPortal(<section ref={floating.ref} style={floating.style}
     className={`run-monitor is-floating${expanded ? " is-expanded" : " is-minimized"}${expanded && maximized ? " is-maximized" : " is-compact"}`}

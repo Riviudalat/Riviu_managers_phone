@@ -12,7 +12,10 @@ use crate::driver::{ElementQuery, UiSession};
 use crate::tiktok_labels::{TikTokControl, TikTokControls};
 use crate::ResolvedTikTokTarget;
 
-const CARD_WINDOW: Duration = Duration::from_secs(14);
+// SM-G955F/Trill 38.3.2, 14/09/2026: the blank loading surface and a feed
+// LIVE placeholder can outlast 14s. Keep one URL dispatch and wait up to 30s;
+// only a copied canonical URL authorizes the requested post.
+const CARD_WINDOW: Duration = Duration::from_secs(30);
 const CARD_POLL: Duration = Duration::from_millis(350);
 const DISPATCH_SETTLE: Duration = Duration::from_millis(900);
 const UNAVAILABLE_TEXT: &str = "This video is unavailable";
@@ -70,12 +73,29 @@ pub async fn open_exact_target_by_hierarchy(
     // Do not require a Home/feed baseline: cold launches and an already-open target can
     // both lack a changed author. The URL readback below is the only arrival authority.
     let deadline = Instant::now() + CARD_WINDOW;
+    let mut redispatched = false;
     tokio::time::sleep(DISPATCH_SETTLE).await;
     loop {
         ensure_not_cancelled(stop)?;
         let observation = readable_card_in_foreground(session, labels, target_package, true).await;
         if matches!(observation, Err(CardObservationError::PostUnavailable)) {
             return Err(CardObservationError::PostUnavailable.into());
+        }
+        // A cold Trill launch can consume the VIEW intent and remain on a LIVE
+        // feed tile. Reopen the SAME pinned link once only after that observable
+        // placeholder persists; this still cannot authorize a public action.
+        if !redispatched
+            && matches!(observation, Err(CardObservationError::CommentsUnreadable))
+            && deadline.saturating_duration_since(Instant::now()) <= Duration::from_secs(20)
+            && live_feed_placeholder(session, target_package).await
+        {
+            ensure_not_cancelled(stop)?;
+            session
+                .reopen_url_in_app(&expected.normalized_url, target_package)
+                .await?;
+            redispatched = true;
+            tokio::time::sleep(DISPATCH_SETTLE).await;
+            continue;
         }
         if observation.is_ok() {
             ensure_not_cancelled(stop)?;
@@ -98,11 +118,28 @@ pub async fn open_exact_target_by_hierarchy(
                 .map(|error| error.to_string())
                 .unwrap_or_else(|| "copied URL did not identify the target".into());
             anyhow::bail!(
-                "target_exact_open: no readable post in the target app within 14 seconds; last check: {last_check}"
+                "target_exact_open: no readable post in the target app within {} seconds; last check: {last_check}", CARD_WINDOW.as_secs()
             );
         }
         tokio::time::sleep(CARD_POLL.min(deadline.saturating_duration_since(Instant::now()))).await;
     }
+}
+
+async fn live_feed_placeholder(session: &dyn UiSession, package: &str) -> bool {
+    let Ok(snapshot) = session.hierarchy_source_snapshot().await else {
+        return false;
+    };
+    let Ok(tree) = crate::ui_automation::tree::Tree::parse(snapshot) else {
+        return false;
+    };
+    let has = |label: &str| {
+        tree.nodes.iter().enumerate().any(|(i, n)| {
+            n.visible(package)
+                && tree.ancestors_visible(i)
+                && (n.attr("text") == label || n.attr("content-desc") == label)
+        })
+    };
+    has("Home") && has("Profile") && (has("Tap to watch LIVE") || has("LIVE now"))
 }
 
 fn ensure_not_cancelled(stop: &AtomicBool) -> anyhow::Result<()> {
@@ -211,6 +248,7 @@ mod tests {
         clipboard_writes: AtomicUsize,
         unavailable_text: Option<&'static str>,
         comments_missing: bool,
+        first_intent_lost_to_live: bool,
         author_missing: bool,
     }
 
@@ -237,6 +275,7 @@ mod tests {
                 clipboard_writes: AtomicUsize::new(0),
                 unavailable_text: None,
                 comments_missing: false,
+                first_intent_lost_to_live: false,
                 author_missing: false,
             }
         }
@@ -264,6 +303,17 @@ mod tests {
 
     #[async_trait::async_trait]
     impl UiSession for ExactSession {
+        async fn hierarchy_source_snapshot(
+            &self,
+        ) -> anyhow::Result<crate::HierarchySourceSnapshot> {
+            anyhow::ensure!(self.first_intent_lost_to_live, "no measured source");
+            Ok(crate::HierarchySourceSnapshot {
+                generation: 1,
+                xml: format!(
+                    r#"<hierarchy><node package="{PACKAGE}" text="Home" bounds="[0,0][100,100]"/><node package="{PACKAGE}" text="Profile" bounds="[100,0][200,100]"/><node package="{PACKAGE}" text="Tap to watch LIVE" bounds="[0,100][200,200]"/></hierarchy>"#
+                ),
+            })
+        }
         async fn active_app_bundle(&self) -> anyhow::Result<String> {
             Ok(if self.foreground {
                 PACKAGE.into()
@@ -371,7 +421,9 @@ mod tests {
                 return Ok(Some(node("Share", 500.0)));
             }
             if value == labels().label(TikTokControl::Comments).unwrap().value() {
-                if self.comments_missing {
+                if self.comments_missing
+                    || (self.first_intent_lost_to_live && self.opens.lock().len() < 2)
+                {
                     return Ok(None);
                 }
                 return Ok(Some(node(value, 300.0)));
@@ -458,6 +510,32 @@ mod tests {
         ));
         assert!(session.opens.lock().is_empty());
         assert_eq!(session.navigation_taps.load(Ordering::Relaxed), 2);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn lost_cold_intent_reopens_only_the_same_link_from_measured_live_feed() {
+        let mut session = ExactSession::new(false, TARGET_URL);
+        session.first_intent_lost_to_live = true;
+        assert!(run(&session, &AtomicBool::new(false)).await.is_ok());
+        assert_eq!(
+            *session.opens.lock(),
+            vec![
+                (TARGET_URL.into(), PACKAGE.into()),
+                (TARGET_URL.into(), PACKAGE.into())
+            ]
+        );
+        assert_eq!(session.navigation_taps.load(Ordering::Relaxed), 2);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn slow_target_after_cold_launch_waits_for_exact_link_without_redispatch() {
+        let mut session = ExactSession::new(false, TARGET_URL);
+        session.target_load_delay = Some(Duration::from_secs(20));
+        let before = Instant::now();
+        assert!(run(&session, &AtomicBool::new(false)).await.is_ok());
+        assert!(before.elapsed() >= Duration::from_secs(20));
+        assert!(before.elapsed() < CARD_WINDOW);
+        assert_eq!(session.opens.lock().len(), 1);
     }
 
     #[tokio::test(start_paused = true)]

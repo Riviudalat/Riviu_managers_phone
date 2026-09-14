@@ -560,8 +560,9 @@ fn reproof_target<'a>(
     index: usize,
 ) -> anyhow::Result<&'a ElementBox> {
     anyhow::ensure!(
-        expected.candidates == fresh.candidates,
-        "sound candidates changed before selection"
+        expected.candidates.get(index).is_some()
+            && expected.candidates.get(index) == fresh.candidates.get(index),
+        "selected sound identity changed before selection"
     );
     let target = fresh
         .target(index)
@@ -953,6 +954,15 @@ mod tests {
         let mut fresh = expected.clone();
         fresh.targets[0].y = 200.0;
         assert_eq!(reproof_target(&expected, &fresh, 0).unwrap().y, 200.0);
+        fresh.candidates.push(SoundCandidate {
+            section: "recommended".into(),
+            title: "Other loaded row".into(),
+            artist: "Another".into(),
+        });
+        assert!(
+            reproof_target(&expected, &fresh, 0).is_ok(),
+            "unrelated rows loading cannot invalidate the exact chosen title/artist/section"
+        );
         fresh.candidates[0].artist = "Other".into();
         assert!(reproof_target(&expected, &fresh, 0).is_err());
         fresh.candidates = expected.candidates.clone();

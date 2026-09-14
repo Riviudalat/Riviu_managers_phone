@@ -82,6 +82,7 @@ struct WaitConfig {
 struct TapConfig {
     point: Option<ImageCoordinateTarget>,
     accessibility_id: Option<String>,
+    selector: Option<riviu_core::ui_automation::inspector::ElementSelector>,
 }
 
 #[derive(Deserialize)]
@@ -135,7 +136,102 @@ struct TapVisionConfig {
     region: Option<VisionRegion>,
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct LocatorConfig {
+    locator: QualifiedElementLocator,
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ReadVariableConfig {
+    name: String,
+    locator: QualifiedElementLocator,
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SetVariableConfig {
+    name: String,
+    value: String,
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct IfValueConfig {
+    name: String,
+    operator: riviu_core::FlowCompareOperator,
+    value: String,
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct LogConfig {
+    message: String,
+    #[serde(default)]
+    variable: Option<String>,
+}
+
 pub fn compile_flow(
+    document: &FlowDocumentV2,
+    catalog: &[ActionDefinition],
+) -> Result<CompiledRevision, Vec<FlowCompileError>> {
+    let source_versions = validate_composition_catalog(document, catalog, 0)?;
+    let expanded = crate::flow_composition::expand_composition(document)?;
+    let mut result = compile_expanded_flow(&expanded.document, catalog)?;
+    result
+        .plan
+        .action_definition_versions
+        .extend(source_versions);
+    result.plan.source_paths = expanded.source_paths;
+    result.canonical_json = canonical_compiled_plan_json(&result.plan)
+        .map_err(|e| vec![FlowCompileError::document("Serialization", e.to_string())])?;
+    result.sha256 = compiled_plan_sha256(&result.plan)
+        .map_err(|e| vec![FlowCompileError::document("Serialization", e.to_string())])?;
+    Ok(result)
+}
+
+fn validate_composition_catalog(
+    document: &FlowDocumentV2,
+    catalog: &[ActionDefinition],
+    depth: usize,
+) -> Result<BTreeMap<ActionKind, u32>, Vec<FlowCompileError>> {
+    if depth > 8 {
+        return Err(vec![FlowCompileError::document(
+            "CompositionDepth",
+            "Flow nesting exceeds eight levels",
+        )]);
+    }
+    let mut versions = BTreeMap::new();
+    for node in &document.nodes {
+        if !matches!(node.kind, ActionKind::Subflow | ActionKind::Repeat) {
+            continue;
+        }
+        let definition = catalog
+            .iter()
+            .find(|d| d.kind == node.kind)
+            .filter(|d| d.disabled_reason.is_none())
+            .ok_or_else(|| {
+                vec![FlowCompileError::node(
+                    "FeatureNotEnabled",
+                    "composition action is unavailable",
+                    node.id,
+                    Some("kind"),
+                )]
+            })?;
+        versions.insert(node.kind, definition.schema_version);
+        let nested: FlowDocumentV2 =
+            serde_json::from_value(node.config.get("document").cloned().unwrap_or(Value::Null))
+                .map_err(|e| {
+                    vec![FlowCompileError::node(
+                        "CompositionDocument",
+                        e.to_string(),
+                        node.id,
+                        Some("document"),
+                    )]
+                })?;
+        versions.extend(validate_composition_catalog(&nested, catalog, depth + 1)?);
+    }
+    Ok(versions)
+}
+
+fn compile_expanded_flow(
     document: &FlowDocumentV2,
     catalog: &[ActionDefinition],
 ) -> Result<CompiledRevision, Vec<FlowCompileError>> {
@@ -320,13 +416,14 @@ pub fn compile_flow(
             // End may be the join of several branches: one or more in, none out.
             ActionKind::End => incoming_count >= 1 && outgoing_count == 0,
             // Branch predicate: one in, both typed ports wired to distinct edges.
-            ActionKind::IfVision => {
+            ActionKind::IfVision | ActionKind::IfVisible | ActionKind::IfValue => {
                 incoming_count == 1
                     && outgoing_count == 2
                     && node_successors.is_some_and(|ports| {
                         ports.contains_key("matched") && ports.contains_key("notMatched")
                     })
             }
+            ActionKind::Join => incoming_count >= 1 && outgoing_count == 1,
             _ => incoming_count == 1 && outgoing_count == 1,
         };
         if !valid {
@@ -411,7 +508,17 @@ pub fn compile_flow(
     let mut context_plan = context_plan(ordered_kinds.iter().copied());
     let executable = execution_order
         .iter()
-        .filter(|node_id| !matches!(nodes[node_id].kind, ActionKind::Start | ActionKind::End))
+        .filter(|node_id| {
+            !matches!(
+                nodes[node_id].kind,
+                ActionKind::Start
+                    | ActionKind::End
+                    | ActionKind::Join
+                    | ActionKind::CopyVariable
+                    | ActionKind::SetVariable
+                    | ActionKind::Log
+            )
+        })
         .copied()
         .collect::<Vec<_>>();
     let launch_nodes = executable
@@ -436,6 +543,7 @@ pub fn compile_flow(
             context_plan.initial_bundle_id = Some(bundle_id.clone());
         }
     }
+    validate_variable_bindings(&execution_order, &compiled_nodes, &incoming, &mut errors);
     if !errors.is_empty() {
         sort_errors(&mut errors);
         return Err(errors);
@@ -455,6 +563,7 @@ pub fn compile_flow(
         nodes: compiled_nodes,
         execution_order,
         successors,
+        source_paths: Default::default(),
         context_plan,
         action_definition_versions,
         required_capabilities,
@@ -476,6 +585,88 @@ pub fn compile_flow(
         canonical_json,
         sha256,
     })
+}
+
+fn validate_variable_bindings(
+    order: &[NodeId],
+    nodes: &BTreeMap<NodeId, CompiledFlowNode>,
+    incoming: &BTreeMap<NodeId, Vec<NodeId>>,
+    errors: &mut Vec<FlowCompileError>,
+) {
+    let mut outputs: BTreeMap<NodeId, BTreeSet<String>> = BTreeMap::new();
+    for id in order {
+        let Some(node) = nodes.get(id) else {
+            continue;
+        };
+        let predecessors = incoming.get(id).cloned().unwrap_or_default();
+        let mut before = predecessors
+            .first()
+            .and_then(|p| outputs.get(p))
+            .cloned()
+            .unwrap_or_default();
+        for predecessor in predecessors.iter().skip(1) {
+            before.retain(|name| {
+                outputs
+                    .get(predecessor)
+                    .is_some_and(|values| values.contains(name))
+            });
+        }
+        let read = match &node.config {
+            CompiledActionConfig::IfValue { name, .. } => Some(name),
+            CompiledActionConfig::CopyVariable { source, .. } => Some(source),
+            CompiledActionConfig::Transform(c) => Some(&c.source),
+            CompiledActionConfig::Log { variable, .. } => variable.as_ref(),
+            _ => None,
+        };
+        if let Some(name) = read.filter(|name| !before.contains(*name)) {
+            errors.push(FlowCompileError::node(
+                "VariableUndefined",
+                format!("variable {name} needs a writer on every incoming path"),
+                *id,
+                Some("name"),
+            ));
+        }
+        let config = serde_json::to_value(&node.config).unwrap_or(Value::Null);
+        let mut texts = Vec::new();
+        match node.kind {
+            ActionKind::FileRead => texts.push("path"),
+            ActionKind::FileWrite => texts.extend(["path", "value"]),
+            ActionKind::HttpRequest => texts.extend(["url", "body"]),
+            ActionKind::SheetRead => texts.extend(["spreadsheetUrl", "tab", "range"]),
+            ActionKind::SheetWrite => texts.extend(["spreadsheetUrl", "tab", "range", "values"]),
+            _ => {}
+        }
+        for field in texts {
+            if let Some(text) = config.get(field).and_then(Value::as_str) {
+                match riviu_core::flow::extended::referenced_variables(text) {
+                    Ok(names) => {
+                        for name in names {
+                            if !before.contains(&name) {
+                                errors.push(FlowCompileError::node(
+                                    "VariableUndefined",
+                                    format!(
+                                        "variable {name} needs a writer on every incoming path"
+                                    ),
+                                    *id,
+                                    Some(field),
+                                ));
+                            }
+                        }
+                    }
+                    Err(reason) => errors.push(FlowCompileError::node(
+                        "VariableReferenceInvalid",
+                        reason,
+                        *id,
+                        Some(field),
+                    )),
+                }
+            }
+        }
+        if let Some(name) = riviu_core::flow::extended::output_variable(&node.config) {
+            before.insert(name.to_owned());
+        }
+        outputs.insert(*id, before);
+    }
 }
 
 fn release_one_feature_enabled(kind: ActionKind) -> bool {
@@ -512,7 +703,7 @@ impl ConfigError {
 
 fn compile_config(kind: ActionKind, value: &Value) -> Result<CompiledActionConfig, ConfigError> {
     match kind {
-        ActionKind::Start | ActionKind::End | ActionKind::Home => {
+        ActionKind::Start | ActionKind::End | ActionKind::Home | ActionKind::Join => {
             decode::<EmptyConfig>(value)?;
             Ok(CompiledActionConfig::Empty)
         }
@@ -539,18 +730,24 @@ fn compile_config(kind: ActionKind, value: &Value) -> Result<CompiledActionConfi
         }
         ActionKind::Tap => {
             let config = decode::<TapConfig>(value)?;
-            let target = match (config.point, config.accessibility_id) {
-                (Some(point), None) => {
+            let target = match (config.point, config.accessibility_id, config.selector) {
+                (Some(point), None, None) => {
                     validate_coordinate("point", &point)?;
                     CompiledTapTarget::Point { target: point }
                 }
-                (None, Some(value)) => {
+                (None, Some(value), None) => {
                     validate_chars("accessibilityId", &value, 1, 512)?;
                     CompiledTapTarget::AccessibilityId { value }
                 }
+                (None, None, Some(selector)) => {
+                    selector
+                        .validate()
+                        .map_err(|e| ConfigError::invalid(e.to_string()))?;
+                    CompiledTapTarget::Element { selector }
+                }
                 _ => {
                     return Err(ConfigError::invalid(
-                        "Tap requires exactly one of point or accessibilityId",
+                        "Tap requires exactly one of point, accessibilityId or selector",
                     ));
                 }
             };
@@ -684,6 +881,110 @@ fn compile_config(kind: ActionKind, value: &Value) -> Result<CompiledActionConfi
                 region: config.region,
             })
         }
+        ActionKind::IfVisible => {
+            let config = decode::<LocatorConfig>(value)?;
+            validate_chars("locator.value", &config.locator.value, 1, 512)?;
+            Ok(CompiledActionConfig::IfVisible {
+                locator: config.locator,
+            })
+        }
+        ActionKind::ReadText => {
+            let config = decode::<ReadVariableConfig>(value)?;
+            riviu_core::validate_flow_variable_name(&config.name).map_err(ConfigError::invalid)?;
+            validate_chars("locator.value", &config.locator.value, 1, 512)?;
+            Ok(CompiledActionConfig::ReadText {
+                name: config.name,
+                locator: config.locator,
+            })
+        }
+        ActionKind::SetVariable => {
+            let config = decode::<SetVariableConfig>(value)?;
+            riviu_core::validate_flow_variable_name(&config.name).map_err(ConfigError::invalid)?;
+            validate_chars("value", &config.value, 0, 4096)?;
+            Ok(CompiledActionConfig::SetVariable {
+                name: config.name,
+                value: config.value,
+            })
+        }
+        ActionKind::IfValue => {
+            let config = decode::<IfValueConfig>(value)?;
+            riviu_core::validate_flow_variable_name(&config.name).map_err(ConfigError::invalid)?;
+            validate_chars("value", &config.value, 0, 4096)?;
+            Ok(CompiledActionConfig::IfValue {
+                name: config.name,
+                operator: config.operator,
+                value: config.value,
+            })
+        }
+        ActionKind::Log => {
+            let config = decode::<LogConfig>(value)?;
+            validate_chars("message", &config.message, 1, 4096)?;
+            if let Some(variable) = config.variable.as_deref().filter(|name| !name.is_empty()) {
+                riviu_core::validate_flow_variable_name(variable).map_err(ConfigError::invalid)?;
+            }
+            Ok(CompiledActionConfig::Log {
+                message: config.message,
+                variable: config.variable.filter(|name| !name.is_empty()),
+            })
+        }
+        ActionKind::Transform => {
+            let c = decode::<riviu_core::flow::extended::TransformConfig>(value)?;
+            c.validate().map_err(ConfigError::invalid)?;
+            Ok(CompiledActionConfig::Transform(c))
+        }
+        ActionKind::CopyVariable => {
+            #[derive(Deserialize)]
+            #[serde(deny_unknown_fields)]
+            struct Config {
+                name: String,
+                source: String,
+            }
+            let c = decode::<Config>(value)?;
+            riviu_core::validate_flow_variable_name(&c.name).map_err(ConfigError::invalid)?;
+            riviu_core::validate_flow_variable_name(&c.source).map_err(ConfigError::invalid)?;
+            Ok(CompiledActionConfig::CopyVariable {
+                name: c.name,
+                source: c.source,
+            })
+        }
+        ActionKind::OcrReadText => {
+            let c = decode::<riviu_core::flow::extended::OcrReadConfig>(value)?;
+            c.validate().map_err(ConfigError::invalid)?;
+            Ok(CompiledActionConfig::OcrReadText {
+                name: c.name,
+                region: c.region,
+                languages: c.languages,
+                min_confidence: c.min_confidence,
+            })
+        }
+        ActionKind::FileRead => {
+            let c = decode::<riviu_core::flow::connectors::FileReadConfig>(value)?;
+            c.validate_template().map_err(ConfigError::invalid)?;
+            Ok(CompiledActionConfig::FileRead(c))
+        }
+        ActionKind::FileWrite => {
+            let c = decode::<riviu_core::flow::connectors::FileWriteConfig>(value)?;
+            c.validate_template().map_err(ConfigError::invalid)?;
+            Ok(CompiledActionConfig::FileWrite(c))
+        }
+        ActionKind::HttpRequest => {
+            let c = decode::<riviu_core::flow::connectors::HttpRequestConfig>(value)?;
+            c.validate_template().map_err(ConfigError::invalid)?;
+            Ok(CompiledActionConfig::HttpRequest(c))
+        }
+        ActionKind::SheetRead => {
+            let c = decode::<riviu_core::flow::connectors::SheetReadConfig>(value)?;
+            c.validate_template().map_err(ConfigError::invalid)?;
+            Ok(CompiledActionConfig::SheetRead(c))
+        }
+        ActionKind::SheetWrite => {
+            let c = decode::<riviu_core::flow::connectors::SheetWriteConfig>(value)?;
+            c.validate_template().map_err(ConfigError::invalid)?;
+            Ok(CompiledActionConfig::SheetWrite(c))
+        }
+        ActionKind::Subflow | ActionKind::Repeat => Err(ConfigError::invalid(
+            "composition must be expanded before compilation",
+        )),
         ActionKind::RawHttp | ActionKind::RawWda | ActionKind::Shell => {
             Err(ConfigError::invalid("raw actions are not enabled"))
         }
@@ -902,6 +1203,18 @@ fn validate_evidence(
             },
             EvidenceSpec::TextReadBackEquals { locator, value },
         ) => text == value && read_back_locator == locator,
+        (
+            ActionKind::FileWrite | ActionKind::HttpRequest | ActionKind::SheetWrite,
+            _,
+            EvidenceSpec::ConnectorResult { name },
+        ) => riviu_core::flow::extended::output_variable(config) == Some(name.as_str()),
+        (
+            ActionKind::Tap,
+            CompiledActionConfig::Tap {
+                target: CompiledTapTarget::Element { .. },
+            },
+            EvidenceSpec::ElementVisible { .. },
+        ) => true,
         (ActionKind::Screenshot, _, EvidenceSpec::ArtifactDecodedAndHashed)
         | (ActionKind::Tap, _, EvidenceSpec::FrameRegionChanged { .. })
         | (ActionKind::TapVision, _, EvidenceSpec::FrameRegionChanged { .. })
@@ -980,8 +1293,10 @@ fn evidence_kind(evidence: &EvidenceSpec) -> EvidenceKind {
         EvidenceSpec::FrameRegionChanged { .. } => EvidenceKind::FrameRegionChanged,
         EvidenceSpec::QualifiedFramePredicate { .. } => EvidenceKind::QualifiedFramePredicate,
         EvidenceSpec::AccessibilityVisible { .. } => EvidenceKind::AccessibilityVisible,
+        EvidenceSpec::ElementVisible { .. } => EvidenceKind::ElementVisible,
         EvidenceSpec::TextReadBackEquals { .. } => EvidenceKind::TextReadBackEquals,
         EvidenceSpec::ArtifactDecodedAndHashed => EvidenceKind::ArtifactDecodedAndHashed,
+        EvidenceSpec::ConnectorResult { .. } => EvidenceKind::ConnectorResult,
     }
 }
 
@@ -1001,8 +1316,13 @@ fn context_plan(nodes: impl Iterator<Item = ActionKind>) -> ContextPlan {
             ResourceClass::UiSession | ResourceClass::UiWithStream
         );
         plan.requires_stream |= resource == ResourceClass::UiWithStream;
-        plan.requires_fresh_text_session |=
-            matches!(kind, ActionKind::TypeText | ActionKind::AssertVisible);
+        plan.requires_fresh_text_session |= matches!(
+            kind,
+            ActionKind::TypeText
+                | ActionKind::AssertVisible
+                | ActionKind::ReadText
+                | ActionKind::IfVisible
+        );
     }
     plan
 }
@@ -1375,6 +1695,73 @@ mod tests {
     use uuid::Uuid;
 
     use super::*;
+
+    #[test]
+    fn data_variables_require_a_preceding_writer_and_have_no_device_context() {
+        let writer = FlowNode::new(
+            ActionKind::SetVariable,
+            json!({"name":"status","value":"ready"}),
+        );
+        let log = FlowNode::new(
+            ActionKind::Log,
+            json!({"message":"checkpoint","variable":"status"}),
+        );
+        let valid = linear_document(vec![start(), writer.clone(), log.clone(), end()]);
+        let compiled = compile(&valid).expect("literal variable and log");
+        assert!(!compiled.plan.context_plan.requires_exclusive);
+        assert!(!compiled.plan.context_plan.requires_ui_session);
+        let invalid = linear_document(vec![start(), log, writer, end()]);
+        assert!(compile(&invalid)
+            .unwrap_err()
+            .iter()
+            .any(|error| error.code == "VariableUndefined"));
+        for name in ["a.b", "2bad", ""] {
+            let doc = linear_document(vec![
+                start(),
+                FlowNode::new(ActionKind::SetVariable, json!({"name":name,"value":"ok"})),
+                end(),
+            ]);
+            assert!(compile(&doc).is_err());
+        }
+    }
+
+    #[test]
+    fn data_branch_has_two_ports_and_preserves_explicit_comparison() {
+        let writer = FlowNode::new(
+            ActionKind::SetVariable,
+            json!({"name":"status","value":"ready"}),
+        );
+        let branch = FlowNode::new(
+            ActionKind::IfValue,
+            json!({"name":"status","operator":"equals","value":"ready"}),
+        );
+        let first = start();
+        let last = end();
+        let mut document = linear_document(vec![
+            first.clone(),
+            writer.clone(),
+            branch.clone(),
+            last.clone(),
+        ]);
+        document.edges = vec![
+            FlowEdge::flow(first.id, writer.id),
+            FlowEdge::flow(writer.id, branch.id),
+            branch_edge(branch.id, "matched", last.id),
+            branch_edge(branch.id, "notMatched", last.id),
+        ];
+        let compiled = compile(&document).expect("data comparison branch");
+        assert_eq!(
+            compiled.plan.successor_on_path(branch.id, Some("matched")),
+            Some(last.id)
+        );
+        assert_eq!(compiled.plan.successor_on_path(branch.id, None), None);
+        assert!(!compiled.plan.context_plan.requires_ui_session);
+        document.edges.pop();
+        assert!(compile(&document)
+            .unwrap_err()
+            .iter()
+            .any(|e| e.code == "InvalidDegree"));
+    }
 
     fn linear_document(nodes: Vec<FlowNode>) -> FlowDocumentV2 {
         let entry_node_id = nodes[0].id;
@@ -2888,7 +3275,7 @@ mod tests {
                 node.postcondition = Some(EvidenceSpec::ArtifactDecodedAndHashed);
                 linear_document(vec![start(), launch("com.apple.Preferences"), node, end()])
             }
-            ActionKind::AssertVisible => {
+            ActionKind::AssertVisible | ActionKind::ReadText => {
                 linear_document(vec![start(), launch("com.apple.Preferences"), node, end()])
             }
             ActionKind::TapVision => {
@@ -2901,7 +3288,7 @@ mod tests {
                 });
                 linear_document(vec![start(), launch("com.apple.Preferences"), node, end()])
             }
-            ActionKind::IfVision => {
+            ActionKind::IfVision | ActionKind::IfVisible | ActionKind::IfValue => {
                 // A branch node: both ports rejoin at a single End node.
                 let start_node = start();
                 let launch_node = launch("com.apple.Preferences");
@@ -2924,7 +3311,20 @@ mod tests {
                     viewport: FlowViewport::default(),
                 }
             }
-            ActionKind::TerminateApp
+            ActionKind::Transform
+            | ActionKind::Join
+            | ActionKind::CopyVariable
+            | ActionKind::Subflow
+            | ActionKind::Repeat
+            | ActionKind::OcrReadText
+            | ActionKind::FileRead
+            | ActionKind::FileWrite
+            | ActionKind::HttpRequest
+            | ActionKind::SheetRead
+            | ActionKind::SheetWrite
+            | ActionKind::SetVariable
+            | ActionKind::Log
+            | ActionKind::TerminateApp
             | ActionKind::RawHttp
             | ActionKind::RawWda
             | ActionKind::Shell => linear_document(vec![start(), node, end()]),

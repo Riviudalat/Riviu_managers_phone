@@ -961,7 +961,32 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
                 }
                 None => return Ok(false),
             };
-            self.tap_inside(&entry).await?;
+            // SM-G955U1 / Trill 38.3.2: shutter and gallery become locatable
+            // before the camera finishes moving. Wait for the gallery's own
+            // geometry to settle and tap its centre, not a pre-animation edge.
+            let mut stable = entry;
+            let end = Instant::now() + Duration::from_secs(3);
+            loop {
+                if stop.load(Ordering::Relaxed) {
+                    return Ok(false);
+                }
+                tokio::time::sleep(Duration::from_millis(350)).await;
+                let Some(current) = self.session.locate(entry_query).await? else {
+                    return Ok(false);
+                };
+                if current.x == stable.x
+                    && current.y == stable.y
+                    && current.width == stable.width
+                    && current.height == stable.height
+                {
+                    self.session.activate_element(entry_query).await?;
+                    break;
+                }
+                if Instant::now() >= end {
+                    return Ok(false);
+                }
+                stable = current;
+            }
             return Ok(true);
         }
         let Some(entry) = GalleryEntry::beside_shutter(screen, &shutter) else {
@@ -2847,6 +2872,13 @@ mod tests {
         }
         fn supports_element_bounds(&self) -> bool {
             true
+        }
+        async fn activate_element(&self, query: ElementQuery<'_>) -> anyhow::Result<()> {
+            let target = self
+                .locate(query)
+                .await?
+                .context("fixture element absent")?;
+            self.tap(target.centre()).await
         }
         async fn locate(&self, query: ElementQuery<'_>) -> anyhow::Result<Option<ElementBox>> {
             {

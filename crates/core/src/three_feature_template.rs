@@ -258,6 +258,7 @@ mod tests {
                 OrchestrationNodeAction::RunPublish { .. } => "runPublish",
                 OrchestrationNodeAction::End => "end",
                 OrchestrationNodeAction::Delay { .. } => "delay",
+                OrchestrationNodeAction::Log { .. } => "log",
             })
             .collect();
         assert_eq!(

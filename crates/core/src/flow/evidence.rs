@@ -186,10 +186,17 @@ pub(crate) async fn capture_baseline(
 ) -> Result<EvidenceBaseline, EvidenceError> {
     check_boundary(deadline, cancellation)?;
     match specification {
+        EvidenceSpec::ElementVisible { selector } => {
+            selector
+                .validate()
+                .map_err(|e| EvidenceError::Invalid(e.to_string()))?;
+            Ok(EvidenceBaseline::None)
+        }
         EvidenceSpec::ActiveAppEquals { bundle_id } => {
             validate_bundle(bundle_id)?;
             Ok(EvidenceBaseline::None)
         }
+        EvidenceSpec::ConnectorResult { .. } => Ok(EvidenceBaseline::None),
         EvidenceSpec::AccessibilityVisible { accessibility_id } => {
             validate_locator_value(accessibility_id, "accessibility id")?;
             Ok(EvidenceBaseline::None)
@@ -392,6 +399,9 @@ pub(crate) async fn evaluate_postcondition(
 ) -> Result<EvidenceResult, EvidenceError> {
     check_boundary(deadline, cancellation)?;
     let result = match specification {
+        EvidenceSpec::ConnectorResult { .. } => {
+            return Err(EvidenceError::Unsupported("connectorUsesResultReceipt"))
+        }
         EvidenceSpec::ActiveAppEquals { bundle_id } => {
             require_none_baseline(baseline)?;
             validate_bundle(bundle_id)?;
@@ -463,6 +473,18 @@ pub(crate) async fn evaluate_postcondition(
                     "height": height,
                     "distance": distance,
                 }),
+            }
+        }
+        EvidenceSpec::ElementVisible { selector } => {
+            let session = require_accessibility_session(session)?;
+            let result = crate::ui_automation::inspector::resolve_unique(session, selector).await;
+            check_boundary(deadline, cancellation)?;
+            let measurement = json!({"selector":selector,"visible":result.is_ok(),"error":result.err().map(|e|e.to_string())});
+            EvidenceResult {
+                kind: EvidenceKind::ElementVisible,
+                matched: measurement["visible"] == true,
+                observed_sha256: sha256_json(&measurement),
+                measurement,
             }
         }
         EvidenceSpec::QualifiedFramePredicate { .. } => {

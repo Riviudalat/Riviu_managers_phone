@@ -10,6 +10,7 @@ import {
   deviceKey,
   deviceControlBegin,
   deviceControlEnd,
+  deviceListDir,
   deviceTypeText,
   exportMedia,
   groupInput,
@@ -23,12 +24,14 @@ import { resetToasts } from "../toastStore";
 vi.mock("../pickFile", () => ({
   pickDirectory: vi.fn(async () => "C:/exports"),
   pickFile: vi.fn(async () => null),
+  pickFiles: vi.fn(async () => ["C:/picture.jpg"]),
 }));
 
 vi.mock("../api", () => ({
   backupDevice: vi.fn(),
   deviceControlBegin: vi.fn(async () => undefined),
   deviceControlEnd: vi.fn(async () => undefined),
+  deviceListDir: vi.fn(async () => ({ entries: [{ name: "Download", kind: "directory", size: 0, modified: null, linkTarget: null }], incomplete: null })),
   deviceKey: vi.fn(),
   deviceShell: vi.fn(async () => ({ exitCode: 0, stdout: "", stderr: "" })),
   deviceSwipePath: vi.fn(async () => undefined),
@@ -46,6 +49,7 @@ vi.mock("../api", () => ({
   setScreenRotation: vi.fn(async () => 0),
   viewInjectTouch: vi.fn(async () => liveTouchAvailable),
   viewRequestKeyframe: vi.fn(async () => true),
+  viewSetPreset: vi.fn(async () => undefined),
 }));
 
 // Flipped by the "no picture yet" block below. A phone that has never painted has neither a
@@ -588,29 +592,23 @@ describe("FocusStream media export", () => {
     );
   }
 
-  it("says how many files stayed behind instead of reporting a partial pull as a success", async () => {
-    // `export_media` returned a bare count of files written, so a phone with 500 photos of
-    // which 20 copied reported "Đã lấy 20 file" -- the same words it uses for a phone that
-    // only ever had 20. The 480 failures went to a log nobody was reading.
-    vi.mocked(exportMedia).mockResolvedValueOnce({ fetched: 20, found: 500, missed: 480 });
-    const { getByRole, findByText } = renderOverlay();
-
-    fireEvent.click(getByRole("button", { name: "Lấy ảnh/video từ máy" }));
-
-    expect(await findByText("Chỉ lấy được 20/500 file")).toBeTruthy();
-  });
-
-  it("still calls a clean export a success, and an empty gallery an answer", async () => {
-    vi.mocked(exportMedia).mockResolvedValueOnce({ fetched: 12, found: 12, missed: 0 });
-    const clean = renderOverlay();
-    fireEvent.click(clean.getByRole("button", { name: "Lấy ảnh/video từ máy" }));
-    expect(await clean.findByText("Đã lấy 12 file")).toBeTruthy();
-    cleanup();
-
-    vi.mocked(exportMedia).mockResolvedValueOnce({ fetched: 0, found: 0, missed: 0 });
-    const empty = renderOverlay();
-    fireEvent.click(empty.getByRole("button", { name: "Lấy ảnh/video từ máy" }));
-    expect(await empty.findByText("Máy không có ảnh/video nào")).toBeTruthy();
+  it.each(["PC → Điện thoại", "Điện thoại → PC"])("%s opens the correct transfer direction", async (label) => {
+    vi.mocked(exportMedia).mockClear();
+    const view = renderOverlay();
+    fireEvent.click(view.getByRole("button", { name: label }));
+    const dialog = await view.findByRole("dialog", { name: "Tệp trên Note 8" });
+    await waitFor(() => expect(deviceListDir).toHaveBeenCalledWith(fixture.udid, "/sdcard"));
+    expect(dialog.querySelector(".device-files-list")).toHaveTextContent("Download");
+    if (label === "Điện thoại → PC") {
+      expect(view.getByRole("button", { name: "Lấy về máy tính" })).toBeDisabled();
+      expect(view.queryByRole("button", { name: "Đưa vào thư mục này" })).toBeNull();
+    } else {
+      expect(view.getByText("picture.jpg")).toBeVisible();
+      expect(view.getByRole("button", { name: "Đưa vào thư mục này" })).toBeEnabled();
+      expect(view.queryByRole("button", { name: "Lấy về máy tính" })).toBeNull();
+    }
+    expect(exportMedia).not.toHaveBeenCalled();
+    expect(dialog.closest(".device-floating-window")).toBeNull();
   });
   it("does not report a quick phrase that reached none of the phones", async () => {
     // `reportGroup` already pushes an error for a fleet action that reached nobody, and
@@ -719,6 +717,7 @@ describe("FocusStream control lease lifecycle", () => {
     );
     // Close it while the begin is still open, which is the fast open-close an operator does
     // by mistake and the timing the defect needs.
+    await waitFor(() => expect(releaseBegin).toBeDefined());
     unmount();
     expect(order).toEqual([]);
 
@@ -809,7 +808,7 @@ describe("focus hardware controls", () => {
     expect(deviceKey).toHaveBeenCalledExactlyOnceWith(fixture.udid, "home");
     finish();
     await waitFor(() => expect(home).toBeEnabled());
-    expect(view.getByTestId("focus-control-status")).toHaveTextContent("Điều khiển sẵn sàng");
+    expect(view.queryByTestId("focus-control-status")).toBeNull();
   });
   it("shows a failed control session and opens it again from the retry button", async () => {
     vi.mocked(deviceControlBegin).mockRejectedValueOnce(new Error("device offline")).mockResolvedValue(undefined);

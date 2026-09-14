@@ -1289,6 +1289,172 @@ mod tests {
     }
 
     #[test]
+    fn completed_old_upload_link_debt_does_not_hold_device_or_allow_reposting() {
+        let (db, path) = fixture();
+        let (campaign, assignment) = seed(&db);
+        let evidence = r#"{"post":{"state":"posted","verdict":"Posted","importId":"historical-import"},"verificationStatus":{"state":"needsReview","cause":"submissionIdentityMissing","reason":"missing legacy link"}}"#;
+        db.update_publish_assignment_state(
+            &assignment,
+            crate::PublishCampaignState::Uncertain,
+            Some("post_verification_needs_review"),
+            Some(evidence),
+        )
+        .unwrap();
+        let udid = db
+            .get_publish_campaign(&campaign)
+            .unwrap()
+            .unwrap()
+            .assignments[0]
+            .udid
+            .clone();
+        assert!(
+            db.has_pending_publish_for_device(&udid).unwrap(),
+            "recent Posted receipt still protects the phone"
+        );
+        for retained_time in [
+            (Utc::now() - chrono::Duration::minutes(239)).to_rfc3339(),
+            (Utc::now() + chrono::Duration::days(1)).to_rfc3339(),
+            "invalid-timestamp".into(),
+        ] {
+            db.conn()
+                .unwrap()
+                .execute(
+                    "UPDATE publish_assignments SET updated_at=?1 WHERE id=?2",
+                    params![retained_time, assignment],
+                )
+                .unwrap();
+            assert!(
+                db.has_pending_publish_for_device(&udid).unwrap(),
+                "the hold ends only after a valid elapsed budget"
+            );
+        }
+        let old = (Utc::now() - chrono::Duration::days(7)).to_rfc3339();
+        db.conn()
+            .unwrap()
+            .execute(
+                "UPDATE publish_assignments SET updated_at=?1 WHERE id=?2",
+                params![old, assignment],
+            )
+            .unwrap();
+        let before = db.get_publish_campaign(&campaign).unwrap().unwrap();
+        let guard = db.publish_device_guard(&udid).unwrap();
+        assert!(guard.blocking.is_empty());
+        assert_eq!(guard.link_review[0].assignment_id, assignment);
+        assert!(!db.has_pending_publish_for_device(&udid).unwrap());
+        let after = db.get_publish_campaign(&campaign).unwrap().unwrap();
+        assert_eq!(
+            serde_json::to_value(&after).unwrap(),
+            serde_json::to_value(&before).unwrap()
+        );
+        assert_eq!(
+            after.assignments[0].evidence_json.as_deref(),
+            Some(evidence)
+        );
+        assert_eq!(
+            after.assignments[0].state,
+            crate::PublishCampaignState::Uncertain
+        );
+        assert!(!db
+            .claim_publish_assignment_for_posting(&assignment, r#"{"effectIntent":"post"}"#)
+            .unwrap());
+        assert!(
+            db.pending_publish_sheet_rows(10).unwrap().is_empty(),
+            "no fabricated link or Sheet success"
+        );
+        assert_eq!(
+            db.publish_verifications_for_campaign(&campaign, 10)
+                .unwrap()
+                .len(),
+            1,
+            "old post remains eligible for explicit link recovery"
+        );
+        db.conn().unwrap().execute("INSERT INTO publish_pipeline_runs(campaign_id,token,created_at) VALUES(?1,'live-pipeline',?2)",params![campaign,Utc::now().to_rfc3339()]).unwrap();
+        assert!(
+            db.has_pending_publish_for_device(&udid).unwrap(),
+            "live pipeline always retains ownership"
+        );
+        db.conn()
+            .unwrap()
+            .execute(
+                "DELETE FROM publish_pipeline_runs WHERE campaign_id=?1",
+                [&campaign],
+            )
+            .unwrap();
+        for retained in ["posting", "verifying", "uncertain"] {
+            db.conn()
+                .unwrap()
+                .execute(
+                    "UPDATE publish_assignments SET state=?1,evidence_json=?2 WHERE id=?3",
+                    params![
+                        retained,
+                        r#"{"state":"submitted","verificationStatus":{"state":"needsReview"}}"#,
+                        assignment
+                    ],
+                )
+                .unwrap();
+            assert!(
+                db.has_pending_publish_for_device(&udid).unwrap(),
+                "age alone never settles a submitted or ambiguous post"
+            );
+        }
+        drop(db);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn stale_submission_idle_proof_releases_device_without_settling_or_reposting() {
+        let (db, path) = fixture();
+        let (campaign, assignment) = seed(&db);
+        let old = (Utc::now() - chrono::Duration::days(5)).to_rfc3339();
+        let intent=serde_json::json!({"effectIntent":"post","submittedAt":old,"expectedAccount":"actor","package":"com.ss.android.ugc.trill"}).to_string();
+        db.conn().unwrap().execute("UPDATE publish_assignments SET state='uncertain',effect_intent=?2,evidence_json=?3 WHERE id=?1",params![assignment,intent,r#"{"post":{"state":"submitted","verdict":"Submitted"},"verificationStatus":{"state":"needsReview"}}"#]).unwrap();
+        let udid = db
+            .get_publish_campaign(&campaign)
+            .unwrap()
+            .unwrap()
+            .assignments[0]
+            .udid
+            .clone();
+        assert!(db.has_pending_publish_for_device(&udid).unwrap());
+        assert!(!db
+            .observe_stale_publish_idle(
+                &assignment,
+                "wrong",
+                "com.ss.android.ugc.trill",
+                &"a".repeat(64)
+            )
+            .unwrap());
+        assert!(db
+            .observe_stale_publish_idle(
+                &assignment,
+                "actor",
+                "com.ss.android.ugc.trill",
+                &"a".repeat(64)
+            )
+            .unwrap());
+        assert!(!db.has_pending_publish_for_device(&udid).unwrap());
+        assert!(!db
+            .claim_publish_assignment_for_posting(&assignment, &intent)
+            .unwrap());
+        assert!(db.pending_publish_sheet_rows(10).unwrap().is_empty());
+        let stored = db.get_publish_campaign(&campaign).unwrap().unwrap();
+        assert_eq!(
+            stored.assignments[0].state,
+            crate::PublishCampaignState::Uncertain
+        );
+        db.conn()
+            .unwrap()
+            .execute(
+                "UPDATE publish_assignments SET effect_intent=?2 WHERE id=?1",
+                params![assignment, intent.replace("actor", "changed")],
+            )
+            .unwrap();
+        assert!(db.has_pending_publish_for_device(&udid).unwrap());
+        drop(db);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
     fn legacy_verification_sweep_requires_complete_immutable_identity_without_inferred_age() {
         for identity in [
             serde_json::json!({"effectIntent":"post","expectedAccount":"fixture","submittedAt":"not-a-time"}),

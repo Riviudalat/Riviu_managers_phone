@@ -3,6 +3,7 @@ import { useEffect, useRef, useState } from "react";
 import { describeError } from "../../describeError";
 import type { FlowCoordinateFrame, VisionRegion } from "../../types";
 import { projectContainedImageClick } from "./projectImageClick";
+import { TemplateMatchTool } from "./TemplateMatchTool";
 
 /** Crop a sub-rectangle of a base64 JPEG frame into a base64 PNG (no data-URL prefix). */
 function cropToPngBase64(
@@ -42,13 +43,18 @@ export function FlowVisionCapture({
   frame,
   onCapture,
   onCancel,
+  reviewBeforeCapture = false,
 }: {
   frame: FlowCoordinateFrame;
   onCapture: (templatePngBase64: string, region: VisionRegion) => void;
   onCancel: () => void;
+  reviewBeforeCapture?: boolean;
 }) {
   const [first, setFirst] = useState<{ x: number; y: number } | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [preview, setPreview] = useState<{
+    base64: string; region: VisionRegion; crop: { x: number; y: number; width: number; height: number };
+  } | null>(null);
   // Decoding a device frame is asynchronous, and nothing used to invalidate it. Pressing Hủy after
   // the second click only called `onCancel`; when the decode finished, `onCapture` still wrote the
   // template and region into whatever node the inspector was showing by then. A second click while
@@ -99,12 +105,17 @@ export function FlowVisionCapture({
     void cropToPngBase64(frame.jpegBase64, x0, y0, width, height)
       .then((base64) => {
         if (!live.current) return;
-        onCapture(base64, {
+        const region = {
           x0: x0 / frame.imageWidth,
           y0: y0 / frame.imageHeight,
           x1: x1 / frame.imageWidth,
           y1: y1 / frame.imageHeight,
-        });
+        };
+        if (reviewBeforeCapture) {
+          setPreview({ base64, region, crop: { x: x0, y: y0, width, height } });
+        } else {
+          onCapture(base64, region);
+        }
       })
       .catch((cropError: unknown) => {
         if (live.current) setError(describeError(cropError));
@@ -113,6 +124,17 @@ export function FlowVisionCapture({
         cropping.current = false;
       });
   };
+
+  if (preview) return (
+    <div className="flow-vision-capture-review">
+      <TemplateMatchTool frame={frame} templatePngBase64={preview.base64} crop={preview.crop} />
+      <div className="flow-vision-template-actions">
+        <button type="button" onClick={() => { if (live.current) onCapture(preview.base64, preview.region); }}>Dùng ảnh mẫu</button>
+        <button type="button" onClick={() => { setPreview(null); setFirst(null); setError(null); }}>Chọn lại vùng</button>
+        <button type="button" onClick={cancel}>Hủy</button>
+      </div>
+    </div>
+  );
 
   return (
     <div className="flow-vision-capture">

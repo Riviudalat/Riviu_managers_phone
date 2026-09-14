@@ -7,6 +7,53 @@ const CAPTION: &str =
     "Fixture caption identifies this new publication with sufficient unique detail";
 const URL: &str = "https://www.tiktok.com/@fixture.account/photo/123456789";
 
+#[test]
+fn short_ellipsized_caption_requests_expansion_without_accepting_a_prefix() {
+    let session = Session::default();
+    let plan = plan();
+    let identity = identity();
+    let mut capture = Capture {
+        session: &session,
+        plan: &plan,
+        caption: CAPTION,
+        identity: &identity,
+        started: Instant::now(),
+        caption_expanded: false,
+        diagnostic: VerificationDiagnostic {
+            expanded_photo_error: None,
+            contract_version: 1,
+            package: PACKAGE.into(),
+            locale: "en".into(),
+            version: "46.2.1".into(),
+            stage: "postProof",
+            reason_code: VerificationReason::Verified,
+            snapshot_generation: 1,
+            caption_candidates: 0,
+            time_candidates: 0,
+            time_label: None,
+            navigation_actions: 0,
+            candidates_visited: 0,
+            viewports_visited: 0,
+            copy_attempts: 0,
+            elapsed_ms: 0,
+            navigation_matches: 0,
+            navigation_enabled: 0,
+            navigation_clickable: 0,
+            screen_state: String::new(),
+        },
+    };
+    let truncated = format!("{}...", CAPTION.chars().take(35).collect::<String>());
+    let observed = tree(format!(
+        "<hierarchy>{}{}</hierarchy>",
+        node(":id/desc", &truncated, "", "[0,800][600,900]", true),
+        node(":id/tv_post_time", "5m ago", "", "[0,910][600,960]", false)
+    ));
+    assert_eq!(
+        capture.post_proof(&observed),
+        Err(VerificationReason::CaptionTruncated)
+    );
+}
+
 fn node(id: &str, text: &str, description: &str, bounds: &str, clickable: bool) -> String {
     format!(
         r#"<node package="{PACKAGE}" class="android.widget.Button" resource-id="{PACKAGE}{id}" text="{text}" content-desc="{description}" bounds="{bounds}" enabled="true" clickable="{clickable}" displayed="true"/>"#
@@ -23,6 +70,7 @@ fn plan() -> PublishVerificationPlan {
 
 fn identity() -> SubmissionIdentity {
     SubmissionIdentity {
+        prepared_at: None,
         account: "fixture.account".into(),
         submitted_at: (chrono::Utc::now() - chrono::Duration::minutes(6)).to_rfc3339(),
     }
@@ -148,6 +196,15 @@ impl Session {
 
 #[async_trait::async_trait]
 impl UiSession for Session {
+    async fn activate_element(&self, query: crate::ElementQuery<'_>) -> anyhow::Result<()> {
+        let snapshot = tree(self.xml());
+        let found = snapshot.matching(PACKAGE, query);
+        let [index] = found.as_slice() else {
+            anyhow::bail!("fixture target not unique");
+        };
+        self.tap(snapshot.nodes[*index].rect().unwrap().centre())
+            .await
+    }
     async fn tap(&self, point: crate::TapPoint) -> anyhow::Result<()> {
         let mut page = self.page.lock();
         let target = match *page {
@@ -557,7 +614,7 @@ async fn unknown_or_stalled_profile_stops_after_bounded_fresh_attempts() {
         let result = capture_submission_link(&session, &plan(), CAPTION, &identity()).await;
         assert_eq!(result.outcome, OwnPostLink::ProfileTabMissing);
         assert!(start.elapsed() <= RECOVERY_WINDOW + POLL);
-        assert!(session.actions.lock().len() <= 3);
+        assert!(session.actions.lock().len() <= MAX_RECOVERY_ACTIONS as usize);
     }
 }
 
@@ -681,6 +738,7 @@ async fn missing_or_invalid_identity_stops_before_any_read_or_action() {
     for account in ["", " ", "bad handle", "fixture."] {
         let session = Session::default();
         let identity = SubmissionIdentity {
+            prepared_at: None,
             account: account.into(),
             submitted_at: chrono::Utc::now().to_rfc3339(),
         };
@@ -710,6 +768,7 @@ fn a_changed_post_snapshot_cannot_combine_prior_caption_with_new_time() {
         started: Instant::now(),
         caption_expanded: false,
         diagnostic: VerificationDiagnostic {
+            expanded_photo_error: None,
             navigation_matches: 0,
             navigation_enabled: 0,
             navigation_clickable: 0,

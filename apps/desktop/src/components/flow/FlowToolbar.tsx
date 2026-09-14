@@ -9,6 +9,7 @@ import {
   Play,
   Plus,
   Redo2,
+  Repeat2,
   Save,
   Undo2,
   Upload,
@@ -42,6 +43,8 @@ interface FlowToolbarProps {
   onSave: () => void;
   onRun: () => void;
   onImport: () => void;
+  onRepeat?: () => void;
+  onCompose?: () => void;
   onExport: () => void;
   onJson: () => void;
   onUndo: () => void;
@@ -163,6 +166,12 @@ export function FlowToolbar(props: FlowToolbarProps) {
         <IconCommand label="Nhập Flow" onClick={props.onImport}>
           <Upload size={16} />
         </IconCommand>
+        {props.onRepeat && <IconCommand label="Lặp chuỗi hành động" onClick={props.onRepeat}>
+          <Repeat2 size={16} />
+        </IconCommand>}
+        {props.onCompose && <IconCommand label="Ghép hoặc chỉnh Flow con" onClick={props.onCompose}>
+          <Copy size={16} />
+        </IconCommand>}
         <IconCommand
           label="Xuất Flow"
           // The backend exports a *saved* revision, so a dirty graph exported the stored copy and

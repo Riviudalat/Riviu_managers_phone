@@ -114,15 +114,15 @@ pub(crate) fn safe_udid_stem(udid: &str) -> String {
         .collect()
 }
 
-pub(crate) async fn with_manual_session<F, Fut>(
+pub(crate) async fn with_manual_session<F, Fut, T>(
     state: &AppState,
     udid: &str,
     owner: DeviceWorkOwner,
     f: F,
-) -> Result<(), CommandError>
+) -> Result<T, CommandError>
 where
     F: FnOnce(Arc<dyn UiSession>) -> Fut,
-    Fut: std::future::Future<Output = anyhow::Result<()>>,
+    Fut: std::future::Future<Output = anyhow::Result<T>>,
 {
     // `hold` stays bound until after `f` completes: it is what stops `end_overlay_session`
     // releasing the lease out from under the work this function is about to do.
@@ -142,9 +142,9 @@ where
         .map_err(CommandError::from)?;
     let result = f(session).await;
     let cleanup = state.control.close_manual_session(context);
-    result.map_err(CommandError::operation)?;
+    let result = result.map_err(CommandError::operation)?;
     cleanup.map_err(CommandError::from)?;
-    Ok(())
+    Ok(result)
 }
 
 async fn prepare_ui_with_control(

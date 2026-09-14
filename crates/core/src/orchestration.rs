@@ -46,6 +46,9 @@ pub enum OrchestrationNodeAction {
     Delay {
         duration_ms: u64,
     },
+    Log {
+        message: String,
+    },
     RunNurture {
         profile: AutomationProfileRef,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -70,7 +73,7 @@ impl OrchestrationNodeAction {
             Self::RunNurture { profile, .. }
             | Self::RunInteraction { profile, .. }
             | Self::RunPublish { profile, .. } => Some(profile),
-            Self::Start | Self::Delay { .. } | Self::End => None,
+            Self::Start | Self::Delay { .. } | Self::Log { .. } | Self::End => None,
         }
     }
 
@@ -85,7 +88,7 @@ impl OrchestrationNodeAction {
             | Self::RunPublish {
                 target_override, ..
             } => target_override.as_ref(),
-            Self::Start | Self::Delay { .. } | Self::End => None,
+            Self::Start | Self::Delay { .. } | Self::Log { .. } | Self::End => None,
         }
     }
 
@@ -94,13 +97,15 @@ impl OrchestrationNodeAction {
             Self::RunNurture { .. } => Some(AutomationKind::Nurture),
             Self::RunInteraction { .. } => Some(AutomationKind::Interaction),
             Self::RunPublish { .. } => Some(AutomationKind::Publish),
-            Self::Start | Self::Delay { .. } | Self::End => None,
+            Self::Start | Self::Delay { .. } | Self::Log { .. } | Self::End => None,
         }
     }
 
     fn accepts_branch(&self, branch: OrchestrationBranch) -> bool {
         match self {
-            Self::Start | Self::Delay { .. } => branch == OrchestrationBranch::Done,
+            Self::Start | Self::Delay { .. } | Self::Log { .. } => {
+                branch == OrchestrationBranch::Done
+            }
             Self::RunNurture { .. } | Self::RunInteraction { .. } | Self::RunPublish { .. } => true,
             Self::End => false,
         }
@@ -365,6 +370,15 @@ pub fn compile_orchestration(
                 );
             }
         }
+        if let OrchestrationNodeAction::Log { ref message } = node.action {
+            if message.len() > 4096 {
+                push(
+                    "LogTooLong",
+                    Some(node.id),
+                    "Log message exceeds 4096 bytes".into(),
+                );
+            }
+        }
     }
 
     let starts: Vec<_> = document
@@ -493,9 +507,9 @@ pub fn compile_orchestration(
 
     for node in &document.nodes {
         let required_ports: &[OrchestrationBranch] = match node.action {
-            OrchestrationNodeAction::Start | OrchestrationNodeAction::Delay { .. } => {
-                &[OrchestrationBranch::Done]
-            }
+            OrchestrationNodeAction::Start
+            | OrchestrationNodeAction::Delay { .. }
+            | OrchestrationNodeAction::Log { .. } => &[OrchestrationBranch::Done],
             OrchestrationNodeAction::RunNurture { .. }
             | OrchestrationNodeAction::RunInteraction { .. }
             | OrchestrationNodeAction::RunPublish { .. } => &[

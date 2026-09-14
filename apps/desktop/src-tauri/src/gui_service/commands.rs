@@ -1,6 +1,34 @@
 use super::*;
 
 #[tauri::command]
+pub async fn gui_ocr(
+    state: tauri::State<'_, crate::state::AppState>,
+    request: riviu_core::ui_automation::OcrRequest,
+) -> Result<riviu_core::ui_automation::OcrResponse, crate::command_error::CommandError> {
+    let _admission = state.ensure_accepting_work()?;
+    state
+        .gui_service
+        .recognize_text(request)
+        .await
+        .map_err(crate::command_error::CommandError::operation)
+}
+
+#[tauri::command]
+pub async fn gui_template_match(
+    state: tauri::State<'_, crate::state::AppState>,
+    request: TemplateMatchRequest,
+) -> Result<TemplateMatchResponse, crate::command_error::CommandError> {
+    // Image-only work may start the supervised sidecar; retain admission so
+    // shutdown cannot race process creation. This never opens a phone context.
+    let _admission = state.ensure_accepting_work()?;
+    state
+        .gui_service
+        .template_match(request)
+        .await
+        .map_err(crate::command_error::CommandError::operation)
+}
+
+#[tauri::command]
 pub async fn gui_compatibility_rollback(
     state: tauri::State<'_, crate::state::AppState>,
 ) -> Result<String, crate::command_error::CommandError> {

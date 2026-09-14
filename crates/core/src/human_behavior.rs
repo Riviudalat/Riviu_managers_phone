@@ -293,6 +293,26 @@ pub enum FeedAction {
     None,
 }
 
+pub fn ordered_feed_actions(plan: &FeedActionPlan, order: &[String]) -> Vec<FeedAction> {
+    let defaults = ["like", "save", "comment"];
+    let requested: Vec<&str> = if order.is_empty() {
+        defaults.to_vec()
+    } else {
+        order.iter().map(String::as_str).collect()
+    };
+    let mut seen = std::collections::BTreeSet::new();
+    requested
+        .into_iter()
+        .filter(|name| seen.insert(*name))
+        .filter_map(|name| match name {
+            "like" if plan.like => Some(FeedAction::Like),
+            "save" if plan.save => Some(FeedAction::Save),
+            "comment" if plan.comment => Some(FeedAction::Comment),
+            _ => None,
+        })
+        .collect()
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct FeedActionPlan {
     pub like: bool,

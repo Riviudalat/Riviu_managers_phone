@@ -60,6 +60,11 @@ sau khi đọc lại dòng và ghi chú đã commit, gồm `ok`, `deliveryVersio
 ACK canonical phải khớp chính xác revision giao nhận và link bài. Một phản hồi chỉ
 có `ok: true` không đủ để đánh dấu đã giao.
 
+Đọc lại sau `batchUpdate` dùng `Sheets.Spreadsheets.get` trên đúng vùng của dòng,
+gồm giá trị, công thức và ghi chú. Không đọc lại bằng `SpreadsheetApp.getRange`:
+bộ nhớ đệm trong cùng request có thể còn giá trị trước khi Advanced API ghi,
+dẫn tới ACK mang revision cũ hoặc báo Link trống dù lệnh ghi đã hoàn tất.
+
 Khi nâng mẫu compact, chèn đúng bốn cột E:H trước toàn bộ đối tác. Ghi chú
 `riviu-publish:v1:assignmentId` ở D được nhận sang JSON nếu người đăng, ngày, link,
 đối tác vẫn khớp và bốn ô mới trống. Dòng ngoài app chỉ được nhận theo một link

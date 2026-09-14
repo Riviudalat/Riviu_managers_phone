@@ -1,6 +1,7 @@
 import { expect, test, type Page } from "@playwright/test";
 
 import { installTauriMock } from "./fixtures/tauriMock";
+import { openOperatorPage } from "./fixtures/operatorNavigation";
 
 /** Page workspaces keep their tabs reachable while only the content body scrolls. */
 async function openWorkspace(page: Page, button: string, region: string): Promise<void> {
@@ -15,7 +16,7 @@ async function openWorkspace(page: Page, button: string, region: string): Promis
   });
   await page.goto("/");
   await expect(page.locator("[data-testid='device-tile']")).toHaveCount(2);
-  await page.locator("[data-testid='nav-item']").getByText(button, { exact: true }).click();
+  await openOperatorPage(page,button);
   await expect(page.getByRole("region", { name: region })).toBeVisible();
 }
 

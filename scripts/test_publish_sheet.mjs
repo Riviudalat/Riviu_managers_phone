@@ -15,11 +15,12 @@ function harness({ config = {}, headers = ["STT", "Người air", "Ngày", "Link
   const cells = (headers.length ? [headers, ...rows] : rows).map(row => [...row]);
   const notes = new Map();
   const formulas = new Map();
-  const state = { writes: 0, batches: [], lostResponse: false, rejectBatch: false, locks: 0, afterCommit: null, frozenRows: 0 };
+  const state = { writes: 0, batches: [], lostResponse: false, rejectBatch: false, locks: 0, afterCommit: null, frozenRows: 0, staleReads: false, cache: null };
   let maxRows = 20;
   let maxColumns = Math.max(1, headers.length, ...rows.map(row => row.length));
   const read = (r, c) => cells[r - 1]?.[c - 1] ?? "";
   const sheet = {
+    getName: () => "Fixture",
     getSheetId: () => gid,
     getParent: () => book,
     getLastRow: () => cells.length,
@@ -33,9 +34,9 @@ function harness({ config = {}, headers = ["STT", "Người air", "Ngày", "Link
       const matrix = fn => Array.from({ length: height }, (_, y) => Array.from({ length: width }, (_, x) => fn(row + y, column + x)));
       return {
         getValues: () => matrix(read),
-        getDisplayValues: () => matrix((r, c) => String(read(r, c))),
-        getFormulas: () => matrix((r, c) => formulas.get(`${r}:${c}`) ?? ""),
-        getNotes: () => matrix((r, c) => notes.get(`${r}:${c}`) ?? ""),
+        getDisplayValues: () => matrix((r, c) => String(state.cache ? state.cache.cells[r-1]?.[c-1] ?? '' : read(r, c))),
+        getFormulas: () => matrix((r, c) => (state.cache?.formulas ?? formulas).get(`${r}:${c}`) ?? ""),
+        getNotes: () => matrix((r, c) => (state.cache?.notes ?? notes).get(`${r}:${c}`) ?? ""),
         setValues(values) {
           for (let y = 0; y < height; y++) {
             cells[row + y - 1] ??= [];
@@ -56,7 +57,13 @@ function harness({ config = {}, headers = ["STT", "Người air", "Ngày", "Link
       DigestAlgorithm: { SHA_256: "sha256" }, Charset: { UTF_8: "utf8" },
       computeDigest: (_algorithm, value) => [...createHash("sha256").update(value, "utf8").digest()],
     },
-    Sheets: { Spreadsheets: { batchUpdate(batch) {
+    Sheets: { Spreadsheets: { get(id, options) {
+      assert.equal(id, 'fixture-book');
+      const match=/!([A-Z]+)(\d+):([A-Z]+)(\d+)$/.exec(options.ranges[0]);assert.ok(match);
+      const col=s=>[...s].reduce((n,c)=>n*26+c.charCodeAt(0)-64,0);
+      const top=Number(match[2]),bottom=Number(match[4]),left=col(match[1]),right=col(match[3]);
+      return {spreadsheetId:id,sheets:[{properties:{sheetId:gid},data:[{startRow:top-1,startColumn:left-1,rowData:Array.from({length:bottom-top+1},(_,y)=>({values:Array.from({length:right-left+1},(_,x)=>({formattedValue:String(read(top+y,left+x)),note:notes.get(`${top+y}:${left+x}`),userEnteredValue:formulas.has(`${top+y}:${left+x}`)?{formulaValue:formulas.get(`${top+y}:${left+x}`)}:{stringValue:String(read(top+y,left+x))}}))}))}]}]};
+    }, batchUpdate(batch) {
       assert.equal(state.locks, 1, "each atomic row write must hold the shared script lock");
       state.batches.push(batch);
       if (state.rejectBatch) throw new Error("fixture batch rejected before commit");
@@ -122,11 +129,50 @@ function harness({ config = {}, headers = ["STT", "Người air", "Ngày", "Link
   });
   vm.runInContext(source + "\nObject.assign(CONFIG, " + JSON.stringify({ SPREADSHEET_ID: "fixture-book", TOKEN: "fixture-token", SHEET_GID: gid, ...config }) + ");", context);
   const deliver = overrides => {
+    state.cache=state.staleReads?{cells:cells.map(r=>[...r]),notes:new Map(notes),formulas:new Map(formulas)}:null;
     const payload = { token: "fixture-token", assignmentId: "assignment-1", postUrl: "https://www.tiktok.com/@test/photo/123456", poster: "bot", partners: ["Quán A", "Quán B"], postedAt: "2026-09-08T18:30:00Z", ...overrides };
     return JSON.parse(context.doPost({ postData: { contents: JSON.stringify(payload) } }).getContent());
   };
   return { cells, notes, formulas, state, deliver, context };
 }
+
+test("Flow reads the exact tab/range and writes literal cells with readback", () => {
+  const h = harness();
+  const request = { rowKind: "flowRead", connectorVersion: 1, spreadsheetId: "fixture-book", tab: "Fixture", range: "A1:B1" };
+  assert.deepEqual(h.deliver(request), { ok: true, connectorVersion: 1, spreadsheetId: "fixture-book", tab: "Fixture", range: "A1:B1", values: [["STT", "Người air"]] });
+  assert.equal(h.state.writes, 0);
+  const values = [["=IMPORTXML(\"https://fixture.invalid\")", "literal,\ntext"]];
+  assert.equal(h.deliver({ ...request, rowKind: "flowWrite", range: "A2:B2", values }).ok, true);
+  assert.deepEqual(h.cells[1].slice(0, 2), values[0]);
+  assert.equal(h.state.batches[0].requests[0].updateCells.rows[0].values[0].userEnteredValue.stringValue, values[0][0]);
+  assert.equal(h.state.locks, 0);
+});
+
+test("Flow rejects unbound targets, unbounded ranges and malformed writes before effect", () => {
+  const request = { rowKind: "flowWrite", connectorVersion: 1, spreadsheetId: "fixture-book", tab: "Fixture", range: "A2:B2", values: [["a", "b"]] };
+  for (const change of [{ token: "wrong" }, { spreadsheetId: "another" }, { tab: "Other" }, { range: "A:A" }, { range: "A1:ZZZ1000000" }, { range: "A1:B30" }, { values: [["one"]] }, { values: [[{}, 4]] }]) {
+    const h = harness();
+    assert.equal(h.deliver({ ...request, ...change }).ok, false, JSON.stringify(change));
+    assert.equal(h.state.writes, 0);
+  }
+});
+
+test("Flow lost response and readback conflict remain errors after exactly one write", () => {
+  for (const mode of ["lostResponse", "changed"]) {
+    const h = harness();
+    if (mode === "lostResponse") h.state.lostResponse = true;
+    else h.state.afterCommit = () => { h.cells[1][0] = "someone else"; };
+    assert.equal(h.deliver({ rowKind: "flowWrite", connectorVersion: 1, spreadsheetId: "fixture-book", tab: "Fixture", range: "A2:B2", values: [["a", "b"]] }).ok, false);
+    assert.equal(h.state.writes, 1);
+    assert.equal(h.state.locks, 0);
+  }
+});
+
+test('Flow write reads committed values while SpreadsheetApp still has an old cache', () => {
+  const h=harness();h.state.staleReads=true;
+  const request={rowKind:'flowWrite',connectorVersion:1,spreadsheetId:'fixture-book',tab:'Fixture',range:'A2:B2',values:[['a','b']]};
+  const result=h.deliver(request);assert.equal(result.ok,true,result.error);assert.deepEqual(result.values,request.values);assert.equal(h.state.writes,1);
+});
 
 test("compact headers write exactly requested visible values and no extra key column", () => {
   const h = harness();
@@ -511,6 +557,16 @@ test("compact sheet appends by received link order while retaining each machine 
 });
 
 const deliveryV2 = { deliveryVersion: 2, spreadsheetId: "fixture-book", sheetGid: 0, deliveryRevision: 1, rowKind: "canonical" };
+
+test('v2 readback bypasses SpreadsheetApp cache after an advanced API commit', () => {
+  const h=harness({headers:internalHeaders});h.state.staleReads=true;
+  const pending={...deliveryV2,...internalRow,rowRevision:1,deliveryRevision:1};
+  const first=h.deliver(pending);assert.equal(first.ok,true,first.error);assert.equal(first.deliveryRevision,1);
+  const progress=h.deliver({...pending,rowRevision:2,deliveryRevision:2});assert.equal(progress.ok,true,progress.error);assert.equal(progress.deliveryRevision,2);
+  const verified={...pending,rowKind:'canonical',rowRevision:3,deliveryRevision:0,postedAt:'2026-09-08T18:30:00Z',postUrl:'https://www.tiktok.com/@test/photo/123456',status:'Đã xác minh',stateNotes:''};
+  const ack=h.deliver(verified);assert.equal(ack.ok,true,ack.error);assert.equal(ack.postUrl,verified.postUrl);assert.equal(ack.deliveryRevision,0);assert.equal(ack.rowRevision,3);
+  assert.equal(h.cells.length,2);assert.equal(h.deliver(verified).duplicate,true);
+});
 
 test("v2 canonical ACK contains the committed target identity revision and actual Link", () => {
   const h = harness();

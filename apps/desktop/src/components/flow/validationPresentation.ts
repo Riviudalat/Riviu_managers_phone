@@ -18,6 +18,7 @@ const ISSUE_LABELS: Record<string, string> = {
   UiSessionTargetRequired: "Flow thao tác màn hình phải bắt đầu bằng mở ứng dụng.",
   UnknownEdgeNode: "Đường nối đang trỏ tới một bước không tồn tại.",
   ValidationTransportFailed: "Không nhận được kết quả kiểm tra Flow.",
+  VariableUndefined: "Biến phải được gán hoặc đọc ở bước trước trên mọi nhánh đi đến đây.",
   WaitOutOfRange: "Thời lượng chờ vượt giới hạn.",
 };
 

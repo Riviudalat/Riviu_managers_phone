@@ -29,7 +29,7 @@ const shipped = Object.keys(
 const code = (css: string) => css.replace(/\/\*[\s\S]*?\*\//g, " ");
 
 describe("the token layer", () => {
-  it("uses a white navigation surface and an orange action accent", () => {
+  it("uses white navigation and Riviu orange actions", () => {
     expect(code(indexCssRaw)).toMatch(/--nav-bg:\s*#ffffff;/);
     expect(code(indexCssRaw)).toMatch(/--primary:\s*#c2410c;/);
     expect(code(indexCssRaw)).toMatch(/--nav-text:\s*#374151;/);

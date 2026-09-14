@@ -1,3 +1,4 @@
+import { openOperatorPage } from "./fixtures/operatorNavigation";
 import { expect, test } from "@playwright/test";
 import { installTauriMock } from "./fixtures/tauriMock";
 test("approved quick desk scans, selects, assigns and checks without public dispatch", async ({page})=>{
@@ -102,7 +103,7 @@ test("approved quick desk scans, selects, assigns and checks without public disp
     });
 
   await page.goto("/");
-  await page.getByRole("button",{name:"Đăng bài",exact:true}).click();
+  await openOperatorPage(page, 'Đăng bài');
   await page.getByRole("combobox",{name:"Phạm vi thiết bị"}).selectOption("all");
   await page.getByRole("button",{name:"Chọn thư mục",exact:true}).click();
   await page.getByRole("button",{name:"Quét",exact:true}).click();

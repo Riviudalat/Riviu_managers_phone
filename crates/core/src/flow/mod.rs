@@ -1,15 +1,19 @@
 pub mod artifact_store;
 pub(crate) mod cancellation;
 pub mod catalog;
+pub mod connectors;
+pub mod data;
 pub(crate) mod device_context;
 pub mod evidence;
 pub(crate) mod executor;
+pub mod extended;
 pub mod model;
 pub mod runtime;
 
 pub use artifact_store::*;
 pub(crate) use cancellation::FlowCancellation;
 pub use catalog::*;
+pub use data::{validate_flow_variable_name, FlowCompareOperator};
 pub(crate) use device_context::*;
 pub use evidence::*;
 pub(crate) use executor::*;
@@ -79,6 +83,22 @@ mod tests {
                 ActionKind::AssertVisible,
                 ActionKind::TapVision,
                 ActionKind::IfVision,
+                ActionKind::IfVisible,
+                ActionKind::ReadText,
+                ActionKind::SetVariable,
+                ActionKind::IfValue,
+                ActionKind::Log,
+                ActionKind::CopyVariable,
+                ActionKind::Transform,
+                ActionKind::Join,
+                ActionKind::Subflow,
+                ActionKind::Repeat,
+                ActionKind::OcrReadText,
+                ActionKind::FileRead,
+                ActionKind::FileWrite,
+                ActionKind::HttpRequest,
+                ActionKind::SheetRead,
+                ActionKind::SheetWrite,
             ]
         );
         assert!(catalog.iter().all(|entry| !matches!(
@@ -278,7 +298,7 @@ mod tests {
             match definition.kind {
                 ActionKind::End => assert!(definition.output_ports.is_empty()),
                 // The branch predicate exposes two typed output ports.
-                ActionKind::IfVision => {
+                ActionKind::IfVision | ActionKind::IfVisible | ActionKind::IfValue => {
                     let names = definition
                         .output_ports
                         .iter()
@@ -347,7 +367,8 @@ mod tests {
         }
 
         let tap = config_schema(ActionKind::Tap);
-        assert_eq!(tap["oneOf"].as_array().unwrap().len(), 2);
+        assert_eq!(tap["oneOf"].as_array().unwrap().len(), 3);
+        assert_eq!(tap["properties"]["selector"]["additionalProperties"], false);
         assert_eq!(tap["properties"]["point"]["additionalProperties"], false);
         assert_eq!(
             tap["properties"]["point"]["properties"]["profileId"]["pattern"],
@@ -411,7 +432,10 @@ mod tests {
                 "Tap",
                 ActionCategory::Input,
                 5_000,
-                vec![EvidenceKind::FrameRegionChanged],
+                vec![
+                    EvidenceKind::FrameRegionChanged,
+                    EvidenceKind::ElementVisible,
+                ],
             ),
             (
                 ActionKind::Swipe,
@@ -571,6 +595,7 @@ mod tests {
             revision,
             nodes: BTreeMap::from([(node.id, node)]),
             execution_order: vec![node_id()],
+            source_paths: Default::default(),
             successors: Default::default(),
             context_plan: ContextPlan {
                 requires_exclusive: true,

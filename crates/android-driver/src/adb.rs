@@ -283,6 +283,8 @@ async fn enter_adb_slot(serial: Option<&str>, what: &str, lane: AdbLane) -> AdbS
 #[derive(Debug, Clone)]
 pub struct AdbProgram {
     path: PathBuf,
+    server_port: Option<u16>,
+    server_routes: Option<Arc<parking_lot::RwLock<HashMap<String, u16>>>>,
 }
 
 /// One place `adb` might be, and where that guess came from.
@@ -453,6 +455,8 @@ impl AdbProgram {
                 return Ok((
                     Self {
                         path: candidate.path.clone(),
+                        server_port: None,
+                        server_routes: None,
                     },
                     candidate.origin,
                 ));
@@ -465,6 +469,8 @@ impl AdbProgram {
             return Ok((
                 Self {
                     path: candidate.path,
+                    server_port: None,
+                    server_routes: None,
                 },
                 candidate.origin,
             ));
@@ -491,7 +497,11 @@ impl AdbProgram {
     /// For [`crate::detect_driver`], which has already proved a specific candidate
     /// answers `adb version` and must not have that choice re-derived underneath it.
     pub fn at(path: PathBuf) -> Self {
-        Self { path }
+        Self {
+            path,
+            server_port: None,
+            server_routes: None,
+        }
     }
 
     pub fn path(&self) -> &Path {
@@ -506,11 +516,47 @@ impl AdbProgram {
     /// name on `PATH`, which on a developer machine usually *is* runnable.
     #[cfg(test)]
     pub(crate) fn unrunnable_for_test(path: PathBuf) -> Self {
-        Self { path }
+        Self {
+            path,
+            server_port: None,
+            server_routes: None,
+        }
     }
 
-    fn command(&self) -> Command {
+    pub(crate) fn with_server_port(mut self, port: Option<u16>) -> Self {
+        self.server_port = port;
+        self
+    }
+
+    pub(crate) fn with_server_discovery(mut self) -> Self {
+        self.server_routes = Some(Arc::new(parking_lot::RwLock::new(HashMap::new())));
+        self
+    }
+
+    pub(crate) fn apply_server_for_serial(&self, command: &mut Command, serial: Option<&str>) {
+        let port = serial
+            .and_then(|id| {
+                self.server_routes
+                    .as_ref()
+                    .and_then(|routes| routes.read().get(id).copied())
+            })
+            .or(self.server_port);
+        if let Some(port) = port {
+            command
+                .env_remove("ADB_SERVER_SOCKET")
+                .env("ANDROID_ADB_SERVER_PORT", port.to_string());
+            command.arg("-P").arg(port.to_string());
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn apply_server(&self, command: &mut Command) {
+        self.apply_server_for_serial(command, None);
+    }
+
+    fn command(&self, serial: Option<&str>) -> Command {
         let mut command = Command::new(&self.path);
+        self.apply_server_for_serial(&mut command, serial);
         command
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
@@ -536,7 +582,7 @@ impl AdbProgram {
         if let Some(serial) = serial {
             validate_serial(serial)?;
         }
-        let mut command = self.command();
+        let mut command = self.command(serial);
         command.args(args);
         // The timeout starts AFTER the slot is acquired, deliberately. Counting queue time
         // against a command's own deadline would make a busy host look like a broken phone,
@@ -576,7 +622,7 @@ impl AdbProgram {
         timeout: Duration,
     ) -> anyhow::Result<ShellOutput> {
         validate_serial(serial)?;
-        let mut command = self.command();
+        let mut command = self.command(Some(serial));
         command.args(["-s", serial, "shell", script]);
         let _slot = enter_adb_slot(Some(serial), "shell", AdbLane::Interactive).await;
         let output = tokio::time::timeout(timeout, command.output())
@@ -622,9 +668,8 @@ impl AdbProgram {
         let mut failure: Option<String>;
         loop {
             attempts += 1;
-            match self.run(&["devices", "-l"], DEFAULT_TIMEOUT).await {
-                Ok(stdout) => {
-                    let reading = parse_devices(&stdout);
+            match self.inventory_read().await {
+                Ok(reading) => {
                     failure = None;
                     if let Some(before) = previous.as_ref() {
                         if same_fleet(before, &reading) {
@@ -657,6 +702,47 @@ impl AdbProgram {
             }
             tokio::time::sleep(settle).await;
         }
+    }
+
+    async fn inventory_read(&self) -> anyhow::Result<Vec<AdbDeviceLine>> {
+        let Some(routes) = &self.server_routes else {
+            return Ok(parse_devices(
+                &self.run(&["devices", "-l"], DEFAULT_TIMEOUT).await?,
+            ));
+        };
+        let (primary, alternate) = tokio::join!(
+            crate::adb_server::roster(5037),
+            crate::adb_server::roster(5038)
+        );
+        if primary.is_err() && alternate.is_err() && routes.read().is_empty() {
+            // A fresh installation has no daemon yet. Let the configured adb
+            // start only its default server; never restart a known fleet server.
+            let devices = parse_devices(&self.run(&["devices", "-l"], DEFAULT_TIMEOUT).await?);
+            routes.write().extend(
+                devices
+                    .iter()
+                    .map(|d| (d.serial.clone(), self.server_port.unwrap_or(5037))),
+            );
+            return Ok(devices);
+        }
+        anyhow::ensure!(
+            primary.is_ok() || alternate.is_ok(),
+            "No existing ADB server answered inventory"
+        );
+        let prior = routes.read().clone();
+        for (port, failed) in [(5037, primary.is_err()), (5038, alternate.is_err())] {
+            anyhow::ensure!(
+                !failed || !prior.values().any(|p| *p == port),
+                "ADB server {port} inventory unavailable; retaining previous fleet"
+            );
+        }
+        let (devices, next) = crate::adb_server::merge_rosters(
+            primary.as_deref().unwrap_or(""),
+            alternate.as_deref().unwrap_or(""),
+            &prior,
+        );
+        *routes.write() = next;
+        Ok(devices)
     }
 
     /// Run `adb -s <serial> <args>` and return raw stdout bytes.
@@ -713,7 +799,7 @@ impl AdbProgram {
         validate_serial(serial).map_err(|error| AdbEffectFailure::BeforeSpawn {
             detail: error.to_string(),
         })?;
-        let mut command = self.command();
+        let mut command = self.command(Some(serial));
         command.args(["-s", serial]);
         command.args(args);
         let verb = args.first().copied().unwrap_or("adb");
@@ -2138,6 +2224,43 @@ pub fn classify_ls_output(stdout: &str, stderr: &str, exit_code: i32) -> LsOutco
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn device_commands_and_stream_children_use_each_serials_server() {
+        use super::*;
+        let adb = AdbProgram::at("fixture-adb.exe".into())
+            .with_server_port(Some(5037))
+            .with_server_discovery();
+        adb.server_routes
+            .as_ref()
+            .unwrap()
+            .write()
+            .extend([("a".into(), 5037), ("b".into(), 5038)]);
+        let clone = adb.clone();
+        for (serial, port) in [("a", "5037"), ("b", "5038")] {
+            let command = clone.command(Some(serial));
+            let args = command
+                .as_std()
+                .get_args()
+                .map(|a| a.to_string_lossy().into_owned())
+                .collect::<Vec<_>>();
+            assert_eq!(args, ["-P", port]);
+            let mut child = Command::new(adb.path());
+            adb.apply_server_for_serial(&mut child, Some(serial));
+            assert_eq!(
+                child.as_std().get_args().collect::<Vec<_>>(),
+                command.as_std().get_args().collect::<Vec<_>>()
+            );
+        }
+        adb.server_routes
+            .as_ref()
+            .unwrap()
+            .write()
+            .insert("b".into(), 5037);
+        assert_eq!(
+            clone.command(Some("b")).as_std().get_args().last(),
+            Some(std::ffi::OsStr::new("5037"))
+        );
+    }
     /// A sentence an operator reads must not carry the source code's indentation.
     ///
     /// Rust joins a literal split across lines *including* the leading spaces of the next

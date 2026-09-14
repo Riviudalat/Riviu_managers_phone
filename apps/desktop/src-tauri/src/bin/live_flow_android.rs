@@ -188,6 +188,7 @@ async fn main() -> anyhow::Result<()> {
     )?;
     let database = Arc::new(Database::open(scratch.path().join("riviu.db"))?);
     let runtime = FlowRuntime::new(FlowRuntimeDeps {
+        reasoner: None,
         database: database.clone(),
         events,
         registry,

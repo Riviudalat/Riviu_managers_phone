@@ -185,3 +185,91 @@ describe("the lifetime guard survives a StrictMode remount", () => {
     await waitFor(() => expect(onImport).toHaveBeenCalledWith(document));
   });
 });
+
+describe("workflow conversion preview", () => {
+  const exported = (action = "Pause", options = { timeoutType: "fixed", timeout: 2 }) => JSON.stringify({ name: "Sample flow", script: { nodes: [
+    { id: "start", data: { action: "Start", options: {}, successNode: "step" } },
+    { id: "step", data: { action, options, successNode: "end" } },
+    { id: "end", data: { action: "Stop", options: {} } },
+  ] } });
+
+  function openSource(format: "genfarmer" | "macro", value: string) {
+    const onImport = vi.fn();
+    const importLegacy = vi.fn();
+    render(<FlowImportDialog onImport={onImport} onClose={vi.fn()} importLegacy={importLegacy} />);
+    fireEvent.change(screen.getByLabelText("Định dạng nguồn"), { target: { value: format } });
+    fireEvent.change(screen.getByLabelText("JSON nguồn"), { target: { value } });
+    return { onImport, importLegacy };
+  }
+
+  it("shows converted counts and source mappings before accepting a draft", () => {
+    const { onImport, importLegacy } = openSource("genfarmer", exported());
+    fireEvent.click(screen.getByRole("button", { name: "Xem trước" }));
+    expect(screen.getByLabelText("Xem trước chuyển đổi")).toHaveTextContent("3 bước nguồn");
+    expect(screen.getByLabelText("Xem trước chuyển đổi")).toHaveTextContent("3 node trong bản nháp");
+    expect(onImport).not.toHaveBeenCalled();
+    expect(importLegacy).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Mở bản nháp" }));
+    expect(onImport).toHaveBeenCalledWith(expect.objectContaining({ revision: 0, name: "Sample flow" }));
+  });
+
+  it("shows the source ID and prevents applying a partially supported script", () => {
+    const { onImport } = openSource("genfarmer", exported("Javascript"));
+    fireEvent.click(screen.getByRole("button", { name: "Xem trước" }));
+    expect(screen.getByLabelText("Xem trước chuyển đổi")).toHaveTextContent("Bước 2 [step]");
+    expect(screen.getByLabelText("Xem trước chuyển đổi")).toHaveTextContent("UnsupportedAction");
+    expect(screen.queryByRole("button", { name: "Mở bản nháp" })).toBeNull();
+    expect(onImport).not.toHaveBeenCalled();
+  });
+
+  it("invalidates an accepted preview immediately when source text changes", () => {
+    openSource("genfarmer", exported());
+    fireEvent.click(screen.getByRole("button", { name: "Xem trước" }));
+    expect(screen.getByRole("button", { name: "Mở bản nháp" })).toBeEnabled();
+    fireEvent.change(screen.getByLabelText("JSON nguồn"), { target: { value: exported("Javascript") } });
+    expect(screen.queryByRole("button", { name: "Mở bản nháp" })).toBeNull();
+  });
+
+  it("previews macro waits and explains missing geometry for old taps", () => {
+    const { onImport } = openSource("macro", JSON.stringify({ id: "m", name: "Recorded", steps: [{ kind: "tap", x: 20, y: 30, iw: 400, ih: 800, afterMs: 100 }] }));
+    fireEvent.click(screen.getByRole("button", { name: "Xem trước" }));
+    expect(screen.getByLabelText("Xem trước chuyển đổi")).toHaveTextContent("CalibrationRequired");
+    expect(onImport).not.toHaveBeenCalled();
+    fireEvent.change(screen.getByLabelText("JSON nguồn"), { target: { value: JSON.stringify({ id: "m", name: "Recorded", steps: [{ kind: "wait", afterMs: 100 }] }) } });
+    fireEvent.click(screen.getByRole("button", { name: "Xem trước" }));
+    expect(screen.getByRole("button", { name: "Mở bản nháp" })).toBeEnabled();
+  });
+
+  it("reads a chosen JSON file into preview without importing or invoking the runtime", async () => {
+    const { onImport, importLegacy } = openSource("genfarmer", "");
+    const file = new File([exported()], "sample.json", { type: "application/json" });
+    Object.defineProperty(file, "text", { value: async () => exported() });
+    fireEvent.change(screen.getByLabelText("Tệp JSON (tối đa 1 MiB)"), { target: { files: [file] } });
+    await waitFor(() => expect(screen.getByLabelText("JSON nguồn")).toHaveValue(exported()));
+    fireEvent.click(screen.getByRole("button", { name: "Xem trước" }));
+    expect(screen.getByRole("button", { name: "Mở bản nháp" })).toBeEnabled();
+    expect(onImport).not.toHaveBeenCalled();
+    expect(importLegacy).not.toHaveBeenCalled();
+  });
+
+  it("rejects an oversized file before reading it", async () => {
+    openSource("genfarmer", "");
+    const text = vi.fn();
+    const file = new File([], "large.json");
+    Object.defineProperties(file, { text: { value: text }, size: { value: 1_048_577 } });
+    fireEvent.change(screen.getByLabelText("Tệp JSON (tối đa 1 MiB)"), { target: { files: [file] } });
+    expect(await screen.findByRole("alert")).toHaveTextContent("FlowImportTooLarge");
+    expect(text).not.toHaveBeenCalled();
+  });
+
+  it("does not apply a legacy response after editing or switching source format", async () => {
+    let release: (value: LegacyImportResult) => void = () => undefined;
+    const imported = new Promise<LegacyImportResult>((resolve) => { release = resolve; });
+    const onImport = open(() => imported);
+    fireEvent.click(importButton());
+    fireEvent.change(screen.getByLabelText("Định dạng nguồn"), { target: { value: "genfarmer" } });
+    release({ document, diagnostics: [] });
+    await waitFor(() => expect(screen.getByRole("button", { name: "Xem trước" })).toBeDisabled());
+    expect(onImport).not.toHaveBeenCalled();
+  });
+});

@@ -55,6 +55,8 @@ import { FlowPalette } from "./FlowPalette";
 import { FlowRunDialog } from "./FlowRunDialog";
 import { FlowRunMonitor } from "./FlowRunMonitor";
 import { FlowToolbar } from "./FlowToolbar";
+import { RepeatFlowDialog } from "./RepeatFlowDialog";
+import { FlowCompositionDialog } from "./FlowCompositionDialog";
 import { describeError } from "../../describeError";
 import { LoadingState, StatusNotice } from "../States";
 import { useMediaQuery } from "../../useMediaQuery";
@@ -66,7 +68,7 @@ export interface FlowWorkspaceProps {
   onDirtyChange: (dirty: boolean) => void;
 }
 
-type OpenDialog = "import" | "json" | "run" | null;
+type OpenDialog = "import" | "json" | "run" | "repeat" | "compose" | null;
 type WorkspaceLoadState = "loading" | "error" | "empty" | "data";
 
 function savedSummary(document: FlowDocumentV2, createdAt: string): FlowSummary {
@@ -663,6 +665,8 @@ export function FlowWorkspace({
         onArchive={archive}
         onSave={save}
         onRun={() => setDialog("run")}
+        onRepeat={() => setDialog("repeat")}
+        onCompose={() => setDialog("compose")}
         onImport={() => {
           // A successful import replaces the open document outright, so it is the same discard as
           // New and Duplicate -- which both ask. This one did not, and on a never-saved flow the
@@ -828,6 +832,22 @@ export function FlowWorkspace({
               setDialog(null);
             }}
           />
+        </div>
+      )}
+      {dialog === "repeat" && (
+        <div className="flow-dialog-layer">
+          <RepeatFlowDialog document={state.document} onClose={() => setDialog(null)} onApply={(document) => {
+            dispatch({ type: "applyDocumentEdit", document });
+            setDialog(null);
+          }} />
+        </div>
+      )}
+      {dialog === "compose" && (
+        <div className="flow-dialog-layer">
+          <FlowCompositionDialog document={state.document} flows={flows} editingNode={state.document.nodes.find((node) => node.id === state.selectedNodeId && ["subflow", "repeat"].includes(node.kind)) ?? null} onClose={() => setDialog(null)} onApply={(document) => {
+            dispatch({ type: "applyDocumentEdit", document });
+            setDialog(null);
+          }} />
         </div>
       )}
       {dialog === "json" && (

@@ -2039,6 +2039,34 @@ impl DeviceDriver for AndroidDriver {
     /// exist on the Note 8 at all (`No shell command implementation.` on SDK 26), and the
     /// `settings` keys alone are what older Android honours. Individual failures are
     /// ignored; the read-back is the only thing that decides the answer.
+    async fn set_http_proxy(&self, udid: &str, endpoint: Option<&str>) -> anyhow::Result<String> {
+        let requested = endpoint.unwrap_or(":0");
+        anyhow::ensure!(
+            requested.len() <= 300
+                && requested
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | ':' | '[' | ']')),
+            "Invalid HTTP proxy endpoint"
+        );
+        self.adb
+            .shell(
+                udid,
+                &format!("settings put global http_proxy '{requested}'"),
+            )
+            .await?;
+        let observed = self
+            .adb
+            .shell(udid, "settings get global http_proxy")
+            .await?
+            .trim()
+            .to_string();
+        anyhow::ensure!(
+            observed == requested,
+            "Device did not retain the requested HTTP proxy"
+        );
+        Ok(observed)
+    }
+
     async fn set_screen_rotation(&self, udid: &str, rotation: u8) -> anyhow::Result<u8> {
         anyhow::ensure!(rotation < 4, "rotation must be 0, 1, 2 or 3");
         // Invalidate BEFORE asking, not after. Once the shells below have run there is no
@@ -2498,6 +2526,9 @@ pub fn create_driver(config: &AndroidDriverConfig) -> anyhow::Result<Arc<dyn Dev
 /// that answers `adb version` wins. Production's candidate set contains only the bundled
 /// binary, so neither a config override nor environment/PATH can take control of the fleet.
 pub async fn detect_driver(config: &AndroidDriverConfig) -> Result<Arc<AndroidDriver>, String> {
+    let server_port = crate::adb_server::discover()
+        .await
+        .map_err(|error| format!("{error:#}"))?;
     let candidates = AdbProgram::candidates_for_policy(
         adb::AdbResolutionPolicy::current_build(),
         config.adb_path.as_deref(),
@@ -2506,7 +2537,12 @@ pub async fn detect_driver(config: &AndroidDriverConfig) -> Result<Arc<AndroidDr
     .map_err(|error| format!("{error:#}"))?;
     let mut refusals: Vec<String> = Vec::new();
     for candidate in candidates {
-        let adb = AdbProgram::at(candidate.path.clone());
+        let adb = AdbProgram::at(candidate.path.clone()).with_server_port(server_port);
+        let adb = if crate::adb_server::explicit_endpoint() {
+            adb
+        } else {
+            adb.with_server_discovery()
+        };
         match adb.run(&["version"], Duration::from_secs(10)).await {
             Ok(_) => {
                 return Ok(Arc::new(AndroidDriver::with_adb(

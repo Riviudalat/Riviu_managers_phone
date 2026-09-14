@@ -284,6 +284,24 @@ async function renderReadyWorkspace(onDirtyChange = vi.fn()) {
   return onDirtyChange;
 }
 
+it("repeats a linear body as a single undoable draft edit and requires saving before run", async () => {
+  const withWait = structuredClone(savedDocument);
+  withWait.nodes.splice(1, 0, { id: "wait-body", kind: "wait", config: { durationMs: 500 }, position: { x: 160, y: 80 }, postcondition: null });
+  withWait.edges = [["start-saved", "wait-body"], ["wait-body", "end-saved"]].map(([source, target], index) => ({ id: `repeat-source-${index}`, sourceNodeId: source, sourcePort: "flow", targetNodeId: target, targetPort: "flow" }));
+  api.flowGet.mockResolvedValue(revisionRecord(withWait));
+  await renderReadyWorkspace();
+  fireEvent.click(screen.getByRole("button", { name: "Lặp chuỗi hành động" }));
+  expect(screen.getByRole("dialog", { name: "Lặp chuỗi hành động" })).toBeVisible();
+  fireEvent.change(screen.getByLabelText("Tổng số lượt"), { target: { value: "3" } });
+  fireEvent.click(screen.getByRole("button", { name: "Tạo các lượt" }));
+  expect(screen.getByTestId("canvas-kinds")).toHaveTextContent("start,wait,wait,wait,end");
+  expect(screen.getByRole("button", { name: "Chạy Flow" })).toBeDisabled();
+  expect(api.flowRun).not.toHaveBeenCalled();
+  fireEvent.click(screen.getByRole("button", { name: "Hoàn tác" }));
+  expect(screen.getByTestId("canvas-kinds")).toHaveTextContent("start,wait,end");
+  await waitFor(() => expect(screen.getByRole("button", { name: "Chạy Flow" })).toBeEnabled());
+});
+
 describe("FlowWorkspace startup", () => {
   it("collapses an idle valid lower band and reserves its track when content needs attention", async () => {
     await renderReadyWorkspace();

@@ -175,8 +175,8 @@ it("deletes a finished record from the monitor, persists and supports undo", asy
   fireEvent.click(screen.getByRole("button", { name: "Xoá các bản ghi đã kết thúc" }));
   cleanup();
   render(<OperationProgressCenter deviceLabels={labels} />);
-  fireEvent.click(await screen.findByLabelText("Tiến trình công việc"));
-  expect(await screen.findByText("Không còn bản ghi trong cửa sổ này.")).toBeVisible();
+  await waitFor(()=>expect(operationQueryRuns).toHaveBeenCalled());
+  expect(screen.queryByLabelText("Tiến trình công việc")).not.toBeInTheDocument();
   expect(screen.queryByRole("button", { name: "Xoá bản ghi Đăng bài" })).not.toBeInTheDocument();
 });
 

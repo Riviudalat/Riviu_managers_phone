@@ -1,10 +1,11 @@
+import { openOperatorPage } from "./fixtures/operatorNavigation";
 import { expect, test } from "@playwright/test";
 import { installTauriMock } from "./fixtures/tauriMock";
 
 test("nurture keeps the document at viewport height while its columns scroll", async ({ page }) => {
   await installTauriMock(page, { androidRoster: true, fleetSize: 30 });
   await page.goto("/");
-  await page.getByRole("button", { name: "Nuôi TikTok", exact: true }).click();
+  await openOperatorPage(page, 'Nuôi TikTok');
   await expect(page.locator(".nurture-machine-grid input")).toHaveCount(30);
   await page.locator(".nurture-advanced > summary").click();
   for (const viewport of [{ width: 1440, height: 900 }, { width: 820, height: 560 }, { width: 1440, height: 1000 }]) {

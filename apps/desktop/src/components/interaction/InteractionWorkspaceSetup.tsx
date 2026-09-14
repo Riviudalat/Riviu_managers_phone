@@ -1,5 +1,5 @@
 import { useEffect, useState, type ComponentProps, type ReactNode } from "react";
-import { Check, Search } from "lucide-react";
+import { Bookmark, Check, Heart, Link2, MessageCircle, Search } from "lucide-react";
 import { listGroups } from "../../api";
 import { effectiveMessageCount, manualCommentsOf, wholeNumber, type ThreadKind } from "../../interactionPlan";
 import { linkErrorVi } from "../../interactionErrors";
@@ -9,7 +9,6 @@ import { MachineChoice } from "../MachineChoice";
 import { Banner } from "../States";
 import { AccountReadControl } from "./AccountReadControl";
 import { InteractionPlanPreview } from "./InteractionPlanPreview";
-import { InteractionSheetImport } from "./InteractionSheetImport";
 import { ConversationEditor } from "./ConversationEditor";
 import { InteractionThreshold } from "./InteractionThreshold";
 import type { InteractionSetupTab } from "./InteractionSetupTab";
@@ -18,6 +17,7 @@ import "../../styles/interaction-workspace.css";
 type Setup = ComponentProps<typeof InteractionSetupTab>;
 const STEPS = ["Chọn bài viết", "Hành động & máy", "Kiểm tra & chạy"];
 const ACTIONS = [["like", "Tim"], ["save", "Lưu"], ["comment", "Bình luận"]] as const;
+const ACTION_ICONS = { like: Heart, save: Bookmark, comment: MessageCircle };
 
 /** Presentation only: parsing, planning, persistence and dispatch stay in the shell. */
 export function InteractionWorkspaceSetup({ setup: p, profiles, scopeControl, effectiveActors, busy, onRun, onReparse }: {
@@ -56,8 +56,7 @@ export function InteractionWorkspaceSetup({ setup: p, profiles, scopeControl, ef
     <div className={`iw-stage iw-step-${step}`}>
       <div className="iw-step-content" role="tabpanel" id="iw-panel-1" aria-labelledby="iw-tab-1" hidden={step !== 1}>
         <section className="iw-panel iw-links" aria-label="Bài viết cần tương tác">
-          <div className="iw-heading"><div><span className="automation-section-kicker">Nguồn nội dung</span><h3>Bài viết cần tương tác</h3></div></div>
-          <InteractionSheetImport onApply={(urls) => patch("rawLinks", (previous) => [...new Set([...previous.split(/\r?\n/).map((line) => line.trim()).filter(Boolean), ...urls])].join("\n"))} />
+          <div className="iw-heading"><div><h3>Bài viết cần tương tác</h3><p className="iw-help">Dán các bài cần chạy, rồi chọn hành động và máy.</p></div><Link2 size={19} aria-hidden="true"/></div>
           <label className="iw-field"><span>Link TikTok — mỗi dòng một link</span>
             <textarea value={draft.rawLinks} onChange={(event) => patch("rawLinks", event.target.value)} placeholder="Dán link TikTok, mỗi dòng một bài" rows={4} />
           </label>
@@ -77,7 +76,8 @@ export function InteractionWorkspaceSetup({ setup: p, profiles, scopeControl, ef
           </div>
         </section>
         <aside className="iw-panel iw-context" aria-label="Đầu vào và kết quả" tabIndex={0}>
-          <span className="automation-section-kicker">Luồng thực hiện</span><h3>Đầu vào → Kết quả</h3>
+          <h3>Lượt tương tác</h3>
+          <div className="iw-input-summary"><strong>{targets.length}</strong><span>bài hợp lệ</span><strong>{effectiveActors.length}</strong><span>máy đã chọn</span></div>
           <ol>{[
             ["Bài viết cụ thể", "Hệ thống mở đúng link trên từng máy."],
             ["Hành động bạn chọn", "Tim, Lưu, Bình luận có thể bật riêng."],
@@ -90,10 +90,10 @@ export function InteractionWorkspaceSetup({ setup: p, profiles, scopeControl, ef
         <section className="iw-panel iw-settings" aria-label="Hành động thực hiện">
           <div className="iw-heading"><div><span className="automation-section-kicker">Cấu hình</span><h3>Hành động thực hiện</h3></div><StatusChip>{targets.length} bài</StatusChip></div>
           <div className="iw-action-choices" role="group" aria-label="Hành động">
-            {ACTIONS.map(([key, label]) => <label key={key} className={draft.actions[key] ? "selected" : ""}>
+            {ACTIONS.map(([key, label]) => { const Icon = ACTION_ICONS[key]; return <label key={key} className={draft.actions[key] ? "selected" : ""}>
               <input type="checkbox" aria-label={label} checked={draft.actions[key]} disabled={draft.actions[key] && Object.values(draft.actions).filter(Boolean).length === 1}
-                onChange={(event) => { const checked = event.target.checked; patch("actions", (previous) => ({ ...previous, [key]: checked })); }} />{label}
-            </label>)}
+                onChange={(event) => { const checked = event.target.checked; patch("actions", (previous) => ({ ...previous, [key]: checked })); }} /><Icon size={17} aria-hidden="true"/>{label}
+            </label>; })}
           </div>
           <p className="iw-order"><span>Thứ tự</span><strong>{actionOrder}</strong></p>
           {draft.actions.comment ? <>
@@ -163,7 +163,8 @@ function WorkspaceActors({ setup: p, effectiveActors, scopeControl }: { setup: S
   return <section className="iw-panel iw-machines" tabIndex={0} aria-label="Máy thực hiện">
     <div className="iw-heading"><div><span className="automation-section-kicker">Phạm vi</span><h2>Máy thực hiện</h2></div><span className="machine-select-count" role="status">Đã chọn {effectiveActors.length}</span></div>
     <label className="iw-search"><Search size={16} aria-hidden="true" /><input type="search" aria-label="Tìm máy Tương tác" placeholder="Tìm số máy hoặc tên" value={query} onChange={(event) => setQuery(event.target.value)} /></label>
-    <div className="iw-picker-tools"><button type="button" className="ghost" title="Chọn tất cả máy sẵn sàng trong phạm vi, kể cả ngoài kết quả tìm kiếm" disabled={!choices.some(device => device.status === "ready")} onClick={() => replaceActors(choices.filter((device) => device.status === "ready"))}>Chọn tất cả sẵn sàng</button><button type="button" className="ghost" disabled={!p.draft.actors.length} onClick={() => replaceActors([])}>Bỏ chọn</button>{scopeControl}<small>{choices.filter(d => d.status === "ready").length} sẵn sàng · {choices.length} tổng</small></div>
+    {scopeControl && <div className="iw-scope-control"><span>Phạm vi máy</span>{scopeControl}</div>}
+    <div className="iw-picker-tools"><button type="button" className="ghost" title="Chọn tất cả máy sẵn sàng trong phạm vi, kể cả ngoài kết quả tìm kiếm" disabled={!choices.some(device => device.status === "ready")} onClick={() => replaceActors(choices.filter((device) => device.status === "ready"))}>Chọn tất cả sẵn sàng</button><button type="button" className="ghost" disabled={!p.draft.actors.length} onClick={() => replaceActors([])}>Bỏ chọn</button><small>{choices.filter(d => d.status === "ready").length} sẵn sàng · {choices.length} tổng</small></div>
     {thread && groups.length > 0 && <label className="iw-field"><span>Lấy từ nhóm</span><select value="" onChange={(event) => { const group = groups.find((entry) => entry.id === event.target.value); if (group) replaceActors(choices.filter((device) => group.udids.includes(device.udid))); }}><option value="">Chọn nhóm…</option>{groups.map((group) => <option key={group.id} value={group.id}>{group.name} ({group.udids.length})</option>)}</select></label>}
     <div className={`iw-machine-scroll machine-choice-grid${choices.length > 12 ? " is-compact" : ""}`} role="group" aria-label="Danh sách máy thực hiện">
       {filtered.length ? filtered.map((device) => {

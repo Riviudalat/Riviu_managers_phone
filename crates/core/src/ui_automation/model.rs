@@ -176,6 +176,12 @@ impl GuiResponse {
 #[async_trait::async_trait]
 pub trait GuiReasoner: Send + Sync {
     async fn resolve(&self, request: GuiRequest) -> anyhow::Result<GuiResponse>;
+    async fn ocr(
+        &self,
+        _request: super::ocr::OcrRequest,
+    ) -> anyhow::Result<super::ocr::OcrResponse> {
+        anyhow::bail!("gui_ocr_unavailable")
+    }
     fn compatibility_pack(&self, _package: &str) -> Option<super::profile::CompatibilityPack> {
         None
     }

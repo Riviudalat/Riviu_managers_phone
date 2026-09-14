@@ -257,7 +257,66 @@ const MIGRATIONS: &[Migration] = &[
         apply: apply_migration_37,
         rebuilds_tables: false,
     },
+    Migration {
+        version: 38,
+        name: "flow-external-effect-ledger",
+        apply: apply_migration_38,
+        rebuilds_tables: true,
+    },
+    Migration {
+        version: 39,
+        name: "operator-workspace",
+        apply: apply_migration_39,
+        rebuilds_tables: false,
+    },
+    Migration {
+        version: 40,
+        name: "app-workflows",
+        apply: apply_migration_40,
+        rebuilds_tables: false,
+    },
 ];
+
+fn apply_migration_40(tx: &Transaction<'_>) -> anyhow::Result<()> {
+    tx.execute_batch("CREATE TABLE app_workflow_documents(id TEXT PRIMARY KEY,revision INTEGER NOT NULL CHECK(revision>0),archived INTEGER NOT NULL DEFAULT 0,document_json TEXT NOT NULL CHECK(json_valid(document_json)),updated_at TEXT NOT NULL);
+        CREATE TABLE app_workflow_revisions(document_id TEXT NOT NULL REFERENCES app_workflow_documents(id),revision INTEGER NOT NULL,document_json TEXT NOT NULL CHECK(json_valid(document_json)),PRIMARY KEY(document_id,revision));")?;
+    Ok(())
+}
+
+fn apply_migration_39(tx: &Transaction<'_>) -> anyhow::Result<()> {
+    tx.execute_batch("CREATE TABLE operator_records (
+        id TEXT PRIMARY KEY,kind TEXT NOT NULL CHECK(kind IN ('account','network','savedTask')),
+        name TEXT NOT NULL,revision INTEGER NOT NULL CHECK(revision>0),archived INTEGER NOT NULL DEFAULT 0,
+        record_json TEXT NOT NULL CHECK(json_valid(record_json)),updated_at TEXT NOT NULL);
+        CREATE INDEX operator_records_kind ON operator_records(kind,archived,updated_at);
+        CREATE TABLE operator_record_revisions(record_id TEXT NOT NULL REFERENCES operator_records(id),revision INTEGER NOT NULL,record_json TEXT NOT NULL CHECK(json_valid(record_json)),PRIMARY KEY(record_id,revision));")?;
+    Ok(())
+}
+
+fn apply_migration_38(tx: &Transaction<'_>) -> anyhow::Result<()> {
+    tx.execute_batch("CREATE TABLE flow_node_attempts_v38 (
+        id TEXT PRIMARY KEY,
+        device_run_id TEXT NOT NULL,
+        node_id TEXT NOT NULL,
+        action_kind TEXT NOT NULL,
+        attempt_no INTEGER NOT NULL CHECK(attempt_no>=1),
+        side_effect_class TEXT NOT NULL CHECK(side_effect_class IN ('none','idempotentSet','ambiguousUi','artifactWrite','externalEffect')),
+        state TEXT NOT NULL CHECK(state IN ('queued','intentCommitted','effectDispatched','verifying','succeeded','failedBeforeDispatch','failedVerified','uncertain','cancelled','interrupted')),
+        canonical_input_json TEXT,evidence_baseline_json TEXT,evidence_result_json TEXT,
+        retry_safe INTEGER NOT NULL DEFAULT 0 CHECK(retry_safe IN (0,1)),
+        error_json TEXT,started_at TEXT,updated_at TEXT NOT NULL,finished_at TEXT,chosen_port TEXT,
+        UNIQUE(device_run_id,node_id,attempt_no),
+        FOREIGN KEY(device_run_id) REFERENCES flow_device_runs(id) ON DELETE RESTRICT
+    );
+    INSERT INTO flow_node_attempts_v38 SELECT id,device_run_id,node_id,action_kind,attempt_no,side_effect_class,state,
+        canonical_input_json,evidence_baseline_json,evidence_result_json,retry_safe,error_json,started_at,updated_at,finished_at,chosen_port
+        FROM flow_node_attempts;
+    DROP TABLE flow_node_attempts;
+    ALTER TABLE flow_node_attempts_v38 RENAME TO flow_node_attempts;
+    CREATE INDEX idx_flow_attempts_state ON flow_node_attempts(device_run_id,state);
+    ")?;
+    Ok(())
+}
 
 fn apply_migration_37(tx: &Transaction<'_>) -> anyhow::Result<()> {
     tx.execute_batch("CREATE TABLE interaction_comment_verification (
@@ -2600,6 +2659,76 @@ mod tests {
 
     use super::super::Database;
     use super::{apply_v1_schema, run, run_with_failpoint, LEDGER_SQL, MIGRATIONS};
+
+    #[test]
+    fn flow_external_effect_migration_preserves_attempts_artifacts_and_foreign_keys() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        connection
+            .pragma_update(None, "foreign_keys", "ON")
+            .unwrap();
+        super::bootstrap_ledger(&mut connection, None).unwrap();
+        for migration in MIGRATIONS.iter().filter(|m| m.version <= 37) {
+            super::apply_one(&mut connection, migration, None).unwrap();
+        }
+        // A complete parent chain makes accidental cascading or rewritten references observable.
+        connection.execute_batch("INSERT INTO flow_documents VALUES('flow','old',1,0,'now','now');
+          INSERT INTO flow_revisions VALUES('flow',1,'{}','{}',printf('%064d',0),'now');
+          INSERT INTO flow_runs VALUES('run','flow',1,printf('%064d',0),'{}','running',0,NULL,'now','now');
+          INSERT INTO flow_device_runs VALUES('device','run','phone','running',NULL,NULL,NULL,NULL,NULL);
+          INSERT INTO flow_node_attempts(id,device_run_id,node_id,action_kind,attempt_no,side_effect_class,state,updated_at,chosen_port)
+            VALUES('attempt','device','node','ifValue',1,'none','succeeded','now','matched');
+          INSERT INTO flow_artifacts VALUES('artifact','attempt','old.jpg','old','jpeg',1,printf('%064d',0),'now');").unwrap();
+        let migration = MIGRATIONS
+            .iter()
+            .find(|migration| migration.version == 38)
+            .unwrap();
+        assert_eq!(migration.version, 38);
+        assert!(super::apply_one(&mut connection, migration, Some(38)).is_err());
+        assert_eq!(
+            connection
+                .query_row("SELECT COUNT(*) FROM flow_artifacts", [], |r| r
+                    .get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+        super::apply_one(&mut connection, migration, None).unwrap();
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT chosen_port FROM flow_node_attempts WHERE id='attempt'",
+                    [],
+                    |r| r.get::<_, String>(0)
+                )
+                .unwrap(),
+            "matched"
+        );
+        assert_eq!(
+            connection
+                .query_row("SELECT COUNT(*) FROM flow_artifacts", [], |r| r
+                    .get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            connection
+                .query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |r| r
+                    .get::<_, i64>(
+                    0
+                ))
+                .unwrap(),
+            0
+        );
+        connection.execute("INSERT INTO flow_node_attempts(id,device_run_id,node_id,action_kind,attempt_no,side_effect_class,state,updated_at) VALUES('new','device','new','httpRequest',1,'externalEffect','uncertain','now')",[]).unwrap();
+        assert!(
+            connection
+                .execute("DELETE FROM flow_node_attempts WHERE id='attempt'", [])
+                .is_err(),
+            "artifact must still protect its parent"
+        );
+        assert!(connection
+            .pragma_query_value(None, "foreign_keys", |r| r.get::<_, bool>(0))
+            .unwrap());
+    }
 
     #[test]
     fn app_library_metadata_migration_is_version_nineteen() {

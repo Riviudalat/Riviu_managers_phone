@@ -248,7 +248,7 @@ pub async fn prune_scrcpy_forwards(
     keep: &[u16],
 ) -> usize {
     let listing = match adb
-        .run(&["forward", "--list"], Duration::from_secs(30))
+        .device(serial, &["forward", "--list"], Duration::from_secs(30))
         .await
     {
         Ok(listing) => listing,
@@ -278,7 +278,7 @@ pub async fn prune_scrcpy_forwards(
 pub async fn prune_forwards(adb: &AdbProgram, serial: &str, socket: &str) -> usize {
     let remote = format!("localabstract:{socket}");
     let listing = match adb
-        .run(&["forward", "--list"], Duration::from_secs(30))
+        .device(serial, &["forward", "--list"], Duration::from_secs(30))
         .await
     {
         Ok(listing) => listing,
@@ -357,7 +357,7 @@ pub async fn forward(adb: &AdbProgram, serial: &str, socket: &str) -> anyhow::Re
     .await
     .with_context(|| format!("forward tcp:0 to {remote}"))?;
     let listing = adb
-        .run(&["forward", "--list"], Duration::from_secs(30))
+        .device(serial, &["forward", "--list"], Duration::from_secs(30))
         .await
         .context("list adb forwards")?;
     parse_forward_port(&listing, serial, &remote).ok_or_else(|| {

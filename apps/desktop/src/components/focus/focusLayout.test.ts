@@ -13,7 +13,7 @@ describe("focus layout", () => {
       it(`fits ${frame} in ${viewport} without distorting the frame`, () => {
         const result = focusLayout(frame[0], frame[1], 500, viewport[0], viewport[1]);
         expect(result.screenWidth / result.screenHeight).toBeCloseTo(frame[0] / frame[1]);
-        expect(result.screenWidth + (result.stacked ? 0 : 220) + 26).toBeLessThanOrEqual(viewport[0]);
+        expect(result.screenWidth + (result.stacked ? 0 : 220) + 38).toBeLessThanOrEqual(viewport[0]);
         expect((result.stacked ? result.screenHeight + result.menuHeight : Math.max(result.screenHeight, result.menuHeight)) + 26).toBeLessThanOrEqual(viewport[1]);
         expect(result.menuHeight).toBeGreaterThanOrEqual(250);
       });

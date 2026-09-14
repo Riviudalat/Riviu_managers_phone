@@ -66,10 +66,6 @@
   position: relative;
   user-select: none;
 }
-.aside.collapsed {
-  width: var(--aside-w-collapsed);
-}
-
 .aside-logo {
   display: flex;
   align-items: center;
@@ -142,9 +138,6 @@
   font-weight: var(--weight-semibold);
   box-shadow: inset 3px 0 0 var(--primary);
 }
-.aside.collapsed .menu-item {
-  padding-left: 0.35rem;
-}
 .menu-item .mi {
   width: 20px;
   height: 20px;
@@ -179,37 +172,6 @@
   color: var(--nav-text);
   font-variant-numeric: tabular-nums;
   font-size: var(--text-sm);
-}
-
-.aside-collapse {
-  width: 100%;
-  height: 40px;
-  padding: 0;
-  border: 0;
-  border-top: 1px solid var(--nav-line);
-  border-radius: 0;
-  background: transparent;
-  display: grid;
-  place-items: center;
-  cursor: pointer;
-  color: var(--nav-muted);
-  flex-shrink: 0;
-}
-.aside-collapse:hover {
-  color: var(--nav-active);
-  background: var(--nav-bg-hover);
-}
-
-.aside.collapsed .aside-logo strong,
-.aside.collapsed .menu-group h2,
-.aside.collapsed .menu-item span:not(.mi),
-.aside.collapsed .aside-stats {
-  display: none;
-}
-.aside.collapsed .menu-item {
-  justify-content: center;
-  padding-left: 0.35rem;
-  padding-right: 0.35rem;
 }
 
 /* ——— Main column ——— */

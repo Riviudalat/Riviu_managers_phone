@@ -133,6 +133,22 @@ pub enum ActionKind {
     AssertVisible,
     TapVision,
     IfVision,
+    IfVisible,
+    ReadText,
+    SetVariable,
+    IfValue,
+    Log,
+    CopyVariable,
+    Transform,
+    Join,
+    Subflow,
+    Repeat,
+    OcrReadText,
+    FileRead,
+    FileWrite,
+    HttpRequest,
+    SheetRead,
+    SheetWrite,
     RawHttp,
     RawWda,
     Shell,
@@ -145,6 +161,9 @@ pub enum ActionKind {
     rename_all_fields = "camelCase"
 )]
 pub enum EvidenceSpec {
+    ElementVisible {
+        selector: crate::ui_automation::inspector::ElementSelector,
+    },
     ActiveAppEquals {
         bundle_id: String,
     },
@@ -172,6 +191,9 @@ pub enum EvidenceSpec {
         value: String,
     },
     ArtifactDecodedAndHashed,
+    ConnectorResult {
+        name: String,
+    },
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -204,6 +226,7 @@ pub enum SideEffectClass {
     IdempotentSet,
     AmbiguousUi,
     ArtifactWrite,
+    ExternalEffect,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -215,11 +238,13 @@ pub enum EvidenceRequirement {
     Frame,
     TextOrQualifiedFrame,
     Artifact,
+    Connector,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub enum EvidenceKind {
+    ElementVisible,
     ActiveAppEquals,
     ProcessAbsent,
     FrameDigestChanged,
@@ -228,6 +253,7 @@ pub enum EvidenceKind {
     AccessibilityVisible,
     TextReadBackEquals,
     ArtifactDecodedAndHashed,
+    ConnectorResult,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -278,9 +304,27 @@ pub struct CompiledFlowPlanV2 {
     /// canonical JSON (and thus their frozen plan hash) byte-identical.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub successors: BTreeMap<NodeId, BTreeMap<String, NodeId>>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub source_paths: BTreeMap<NodeId, CompositionSource>,
     pub context_plan: ContextPlan,
     pub action_definition_versions: BTreeMap<ActionKind, u32>,
     pub required_capabilities: BTreeSet<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CompositionFrame {
+    pub node_id: NodeId,
+    pub flow_id: FlowId,
+    pub revision: u64,
+    pub iteration: Option<u32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CompositionSource {
+    pub source_node_id: NodeId,
+    pub path: Vec<CompositionFrame>,
 }
 
 impl CompiledFlowPlanV2 {
@@ -305,7 +349,9 @@ impl CompiledFlowPlanV2 {
         }
         let ports = self.successors.get(&node_id)?;
         match kind {
-            ActionKind::IfVision => ports.get(chosen_port?).copied(),
+            ActionKind::IfVision | ActionKind::IfVisible | ActionKind::IfValue => {
+                ports.get(chosen_port?).copied()
+            }
             _ => ports.get("flow").copied(),
         }
     }
@@ -589,6 +635,8 @@ pub struct FlowRunDetail {
     pub device_runs: Vec<FlowDeviceRunRecord>,
     pub attempts: Vec<FlowNodeAttemptRecord>,
     pub artifacts: Vec<FlowArtifactRecord>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub source_paths: BTreeMap<NodeId, CompositionSource>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, thiserror::Error)]
@@ -640,6 +688,42 @@ pub struct ImageCoordinateTarget {
 )]
 pub enum CompiledActionConfig {
     Empty,
+    CopyVariable {
+        name: String,
+        source: String,
+    },
+    Transform(super::extended::TransformConfig),
+    OcrReadText {
+        name: String,
+        region: Option<VisionRegion>,
+        languages: Vec<String>,
+        min_confidence: f64,
+    },
+    FileRead(super::connectors::FileReadConfig),
+    FileWrite(super::connectors::FileWriteConfig),
+    HttpRequest(super::connectors::HttpRequestConfig),
+    SheetRead(super::connectors::SheetReadConfig),
+    SheetWrite(super::connectors::SheetWriteConfig),
+    IfVisible {
+        locator: QualifiedElementLocator,
+    },
+    ReadText {
+        name: String,
+        locator: QualifiedElementLocator,
+    },
+    SetVariable {
+        name: String,
+        value: String,
+    },
+    IfValue {
+        name: String,
+        operator: super::FlowCompareOperator,
+        value: String,
+    },
+    Log {
+        message: String,
+        variable: Option<String>,
+    },
     LaunchApp {
         bundle_id: String,
     },
@@ -725,8 +809,15 @@ pub(crate) fn auto_swipe_attempt_seed(attempt_id: Uuid) -> u64 {
     rename_all_fields = "camelCase"
 )]
 pub enum CompiledTapTarget {
-    Point { target: ImageCoordinateTarget },
-    AccessibilityId { value: String },
+    Point {
+        target: ImageCoordinateTarget,
+    },
+    AccessibilityId {
+        value: String,
+    },
+    Element {
+        selector: crate::ui_automation::inspector::ElementSelector,
+    },
 }
 
 /// A rectangular search region for a vision node, in screen fractions (0..=1).
@@ -949,6 +1040,7 @@ mod graph_walk_tests {
                 (end, node(end, ActionKind::End)),
             ]),
             execution_order: vec![start, branch, matched, unmatched, end],
+            source_paths: Default::default(),
             successors: BTreeMap::from([
                 (start, BTreeMap::from([("flow".to_string(), branch)])),
                 (

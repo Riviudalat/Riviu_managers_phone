@@ -1,3 +1,4 @@
+import { openOperatorPage } from "./fixtures/operatorNavigation";
 import { expect, test } from "@playwright/test";
 import { installTauriMock } from "./fixtures/tauriMock";
 
@@ -17,7 +18,7 @@ test("partial nurture start names excluded devices and counts only proven cleanu
     };
   });
   await page.goto("/");
-  await page.getByRole("button", { name: "Nuôi TikTok", exact: true }).click();
+  await openOperatorPage(page, 'Nuôi TikTok');
   await page.getByRole("button", { name: /Cân bằng/ }).click();
   await page.getByRole("combobox", { name: "Phạm vi thiết bị" }).selectOption("all");
   await page.getByRole("button", { name: "Kiểm tra & bắt đầu", exact: true }).click();

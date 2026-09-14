@@ -23,3 +23,6 @@
 @import "./styles/admin.css";
 @import "./styles/device-automation.css";
 @import "./styles/publish-wizard.css";
+@import "./styles/control-center.css";
+@import "./styles/operator-parity.css";
+@import "./styles/operator-polish.css";

@@ -38,4 +38,9 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    if sys.argv[1:] == ["--ocr-worker"]:
+        from riviu_gui.ocr import worker_main
+
+        worker_main()
+    else:
+        main()

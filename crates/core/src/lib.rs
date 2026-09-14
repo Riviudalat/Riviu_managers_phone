@@ -2,6 +2,7 @@
 
 pub mod action_failure;
 pub mod app_automation;
+pub mod app_workflow;
 pub mod automation;
 pub mod automation_schedule_runtime;
 pub mod comment_verification;
@@ -29,6 +30,7 @@ pub mod job_queue;
 pub mod nurture;
 pub mod openai_client;
 pub mod operation;
+pub mod operator_workspace;
 pub mod orchestration;
 pub mod orchestration_runtime;
 pub mod publish;

@@ -263,6 +263,11 @@ thường không kích hoạt CI** (workflow chỉ nghe `main`, tag `v*`, `pull_
 gh workflow run "Desktop CI/CD" --ref <tên-nhánh>
 ```
 
+Trong **Flow**, chọn bước đọc/ghi tệp, HTTP hoặc Google Sheet để mở trình sửa và
+mục **Kết nối dữ liệu**. Tệp được quản lý trong `flow-data`; token HTTP lưu bằng
+tham chiếu. Hướng dẫn nhập bảng, biến và cập nhật Apps Script ở
+[hướng dẫn vận hành Flow](docs/operator-guide.md#flow).
+
 ## Workspace
 
 ```text

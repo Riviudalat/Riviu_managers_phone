@@ -7,10 +7,12 @@ use uuid::Uuid;
 
 use crate::types::{JobRecord, JobStatus, JobStepRecord};
 
+mod app_workflow;
 mod automation;
 mod comment_verification;
 mod conversation;
 mod fleet;
+mod flow_connectors;
 mod flow_runs;
 mod flows;
 mod gui;
@@ -24,6 +26,7 @@ mod migrations;
 mod nurture;
 mod nurture_follow_cleanup;
 mod operation_log;
+mod operator_workspace;
 mod orchestration;
 mod public_cleanup;
 mod publish;
@@ -44,7 +47,10 @@ pub use publish_cleanup::PendingPublishCleanup;
 pub use publish_report::InternalPublishReportPage;
 pub use publish_sheet::{SheetOutboxRow, SheetOutboxSettlement, SheetOutboxState};
 pub use publish_sheet_delivery::{SheetDeliveryClaim, SheetDeliveryKind, SheetDeliveryPayload};
-pub use publish_verification::{publish_campaign_input_digest, PendingPublishVerification};
+pub use publish_verification::{
+    publish_campaign_input_digest, PendingPublishVerification, PublishDeviceGuard,
+    PublishDeviceHold,
+};
 
 /// Somewhere to keep a secret that is **not** the SQLite file.
 ///
@@ -115,6 +121,13 @@ impl Database {
             if !backup.exists() {
                 conn.execute("VACUUM INTO ?1", [backup.to_string_lossy().as_ref()])
                     .context("backup before comment verification migration")?;
+            }
+        }
+        if version.is_some_and(|version| version <= 37) {
+            let backup = self.path.with_extension("pre-flow-connectors-v37.db");
+            if !backup.exists() {
+                conn.execute("VACUUM INTO ?1", [backup.to_string_lossy().as_ref()])
+                    .context("backup before Flow connector ledger migration")?;
             }
         }
         migrations::run(&mut conn)

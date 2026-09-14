@@ -1,3 +1,4 @@
+import { openOperatorPage } from "./fixtures/operatorNavigation";
 import { expect, test } from "@playwright/test";
 import type { InteractionAssignmentRecord, InteractionCampaignDetail, PublicActionResult } from "../src/types";
 import { installTauriMock } from "./fixtures/tauriMock";
@@ -87,7 +88,7 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 900, height: 700 
     }, { completed, running });
     await page.goto("/");
     await expect(page.getByTestId("device-tile")).toHaveCount(20);
-    await page.getByRole("button", { name: "Tương tác", exact: true }).click();
+    await openOperatorPage(page, 'Tương tác');
     await page.getByRole("tab", { name: "Theo dõi", exact: true }).click();
     const list = page.getByRole("region", { name: "Danh sách chiến dịch" });
     const detail = page.getByRole("complementary", { name: "Chi tiết chiến dịch" });

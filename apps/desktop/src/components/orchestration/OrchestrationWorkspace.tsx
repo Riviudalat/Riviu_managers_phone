@@ -1,3 +1,5 @@
+import { OrchestrationCanvas } from "./OrchestrationCanvas";
+import { AUTOMATION_APP_MIME } from "./automationDrag";
 import {
   useCallback,
   useEffect,
@@ -58,6 +60,7 @@ import { EmptyState, LoadingState, StatusNotice } from "../States";
 type Props = {
   onDirtyChange: (dirty: boolean) => void;
   targetRef?: TargetRef;
+  startInEditor?: boolean;
 };
 
 const RUN_STATE_LABEL: Record<OrchestrationRunState, string> = {
@@ -133,7 +136,7 @@ function rebuildDocument(document: OrchestrationDocumentV1): OrchestrationDocume
   const steps = document.nodes.filter((node) => !isBoundary(node));
   const nodes = [start, ...steps, end].map((node, index) => ({
     ...node,
-    position: { x: 40 + index * 240, y: 80 },
+    position: Number.isFinite(node.position?.x) && Number.isFinite(node.position?.y) ? node.position : { x: 40 + index * 260, y: 100 },
   }));
   const nodeIndex = new Map(nodes.map((node, index) => [node.id, index]));
   const edges = nodes.slice(0, -1).flatMap((source, index) => {
@@ -173,10 +176,13 @@ function profileForNode(
 export function OrchestrationWorkspace({
   onDirtyChange,
   targetRef = { type: "all" },
+  startInEditor = false,
 }: Props) {
+  const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
+  const [pendingDrop,setPendingDrop]=useState<{kind:AutomationKind;position?:{x:number;y:number}}|null>(null);
   const [summaries, setSummaries] = useState<OrchestrationSummary[]>([]);
   const [profiles, setProfiles] = useState<AutomationDefinition[]>([]);
-  const [document, setDocument] = useState<OrchestrationDocumentV1 | null>(null);
+  const [document, setDocument] = useState<OrchestrationDocumentV1 | null>(()=>startInEditor?newDocument():null);
   const [savedRevision, setSavedRevision] = useState<number | null>(null);
   const [dirty, setDirty] = useState(false);
   const [loading, setLoading] = useState(true);
@@ -297,22 +303,27 @@ export function OrchestrationWorkspace({
     }
   }, []);
 
-  const addCampaign = useCallback((kind: AutomationKind) => {
+  const addCampaign = useCallback((kind: AutomationKind, position?: {x:number;y:number}, explicitProfile?:string) => {
     const profile = profiles.find((candidate) =>
-      candidate.kind === kind && candidate.id === profileChoice[kind]
+      candidate.kind === kind && candidate.id === (explicitProfile??profileChoice[kind])
     );
-    if (!profile) return;
+    if (!profile) { setPendingDrop({kind,position}); return; }
     edit((current) => {
       const endIndex = current.nodes.findIndex((node) => node.kind === "end");
       const node: OrchestrationNode = {
         id: randomId(),
         kind: CAMPAIGN_NODE[kind],
         profile: { definitionId: profile.id, revision: profile.latestRevision },
-        position: { x: 0, y: 0 },
+        position: position ?? { x: Math.max(1,current.nodes.length-1)*260, y: 120 },
       };
+      if(current.nodes.some(existing=>Math.abs(existing.position.x-node.position.x)<225&&Math.abs(existing.position.y-node.position.y)<90)){
+        const before=current.nodes[Math.max(0,endIndex-1)];node.position={x:before.position.x+270,y:before.position.y};
+      }
+      setSelectedNodeId(node.id);
       const nodes = [...current.nodes];
       const predecessor = endIndex > 0 ? nodes[endIndex - 1] : null;
       nodes.splice(endIndex < 0 ? nodes.length : endIndex, 0, node);
+      const endAt=nodes.findIndex(n=>n.kind==="end");if(endAt>=0){const end=nodes[endAt];nodes[endAt]={...end,position:{x:Math.max(end.position.x,node.position.x+280),y:end.position.y}};}
       const edges = predecessor
         ? current.edges.map((edge) =>
             edge.sourceNodeId === predecessor.id && edge.sourcePort === "done"
@@ -333,9 +344,11 @@ export function OrchestrationWorkspace({
         id: randomId(),
         kind: "delay",
         durationMs: 5_000,
-        position: { x: 0, y: 0 },
+        position: { x: (predecessor?.position.x ?? 40) + 270, y: predecessor?.position.y ?? 120 },
       };
       nodes.splice(endIndex < 0 ? nodes.length : endIndex, 0, node);
+      const end = nodes.findIndex(candidate => candidate.kind === "end");
+      if (end >= 0) nodes[end] = { ...nodes[end], position: { ...nodes[end].position, x: Math.max(nodes[end].position.x, node.position.x + 280) } };
       const edges = predecessor
         ? current.edges.map((edge) =>
             edge.sourceNodeId === predecessor.id && edge.sourcePort === "done"
@@ -624,6 +637,13 @@ export function OrchestrationWorkspace({
 
   return (
     <section className="orchestration-workspace" aria-label="Không gian Điều phối">
+      {pendingDrop&&<div className="application-config-choice" role="region" aria-label="Cấu hình ứng dụng vừa kéo">
+        <strong>{CAMPAIGN_LABEL[pendingDrop.kind]} · Chọn cấu hình cho khối</strong>
+        {profilesByKind[pendingDrop.kind].length?<select aria-label="Cấu hình ứng dụng vừa kéo" defaultValue="" onChange={e=>{if(!e.target.value)return;setProfileChoice(old=>({...old,[pendingDrop.kind]:e.target.value}));addCampaign(pendingDrop.kind,pendingDrop.position,e.target.value);setPendingDrop(null);}}>
+          <option value="">Chọn cấu hình đã lưu</option>{profilesByKind[pendingDrop.kind].map(p=><option key={p.id} value={p.id}>{p.name} · bản {p.latestRevision}</option>)}</select>
+          :<p>Chưa có cấu hình đã lưu. Dùng “Tạo mẫu 3 chức năng” để tạo quy trình và cấu hình mẫu, sau đó chỉnh theo nhu cầu.</p>}
+        <button type="button" onClick={()=>setPendingDrop(null)}>Hủy thêm khối</button>
+      </div>}
       <div className="orchestration-mode-tabs" role="tablist" aria-label="Chế độ Điều phối">
         <button
           id="orchestration-tab-setup"
@@ -754,7 +774,9 @@ export function OrchestrationWorkspace({
               {(["nurture", "interaction", "publish"] as const).map((kind) => {
                 const Icon = kind === "nurture" ? Heart : kind === "interaction" ? MessageCircle : Send;
                 return (
-                  <div className="orchestration-add-campaign" key={kind}>
+                  <div className="orchestration-add-campaign" key={kind} draggable={profilesByKind[kind].length>0}
+                    onDragStart={event=>{event.dataTransfer.effectAllowed="copy";event.dataTransfer.setData(AUTOMATION_APP_MIME,kind);}}>
+
                     <select
                       aria-label={`Chọn hồ sơ ${CAMPAIGN_LABEL[kind]} để thêm`}
                       value={profileChoice[kind]}
@@ -788,11 +810,19 @@ export function OrchestrationWorkspace({
               <StatusNotice tone="info">Chưa có hồ sơ tự động hóa để ghim vào điều phối.</StatusNotice>
             )}
 
-            <div className="orchestration-canvas" aria-label="Các bước điều phối">
+            <OrchestrationCanvas key={document.id} document={document} selectedId={selectedNodeId} onSelect={setSelectedNodeId}
+              onDropApp={addCampaign} onPosition={(id,position)=>edit(current=>({...current,nodes:current.nodes.map(n=>n.id===id?{...n,position}:n)}))}
+              onConnect={connection=>{
+                if(!connection.source||!connection.target)return;
+                const from=document.nodes.findIndex(n=>n.id===connection.source),to=document.nodes.findIndex(n=>n.id===connection.target);
+                if(to<=from){setError("Nối đến một bước phía sau để giữ quy trình không có vòng lặp.");return;}
+                edit(current=>({...current,edges:[...current.edges.filter(e=>e.sourceNodeId!==connection.source||e.sourcePort!=="done"),{sourceNodeId:connection.source!,sourcePort:"done",targetNodeId:connection.target!}]}));
+              }}/>
+            <div className="orchestration-canvas application-inspector" aria-label="Các bước điều phối">
               {document.nodes.map((node, index) => {
                 if (node.kind === "start" || node.kind === "end") {
                   return (
-                    <div className="orchestration-node is-boundary" key={node.id}>
+                    <div className="orchestration-node is-boundary" hidden key={node.id}>
                       <strong>{node.kind === "start" ? "Bắt đầu" : "Kết thúc"}</strong>
                     </div>
                   );
@@ -800,10 +830,10 @@ export function OrchestrationWorkspace({
                 const kind = nodeKind(node);
                 const profile = profileForNode(node, profiles);
                 return (
-                  <div className="orchestration-node" key={node.id}>
+                  <div className="orchestration-node" hidden={selectedNodeId!==node.id} key={node.id}>
                     <div className="orchestration-node-head">
                       <span className="orchestration-step">{index}</span>
-                      <strong>{node.kind === "delay" ? "Chờ" : kind ? CAMPAIGN_LABEL[kind] : "Bước"}</strong>
+                      <strong>{node.kind === "delay" ? "Chờ" : node.kind === "log" ? "Ghi nhật ký" : kind ? CAMPAIGN_LABEL[kind] : "Bước"}</strong>
                       <button type="button" className="icon-btn" onClick={() => removeStep(node.id)} title="Xóa bước" aria-label="Xóa bước">
                         <Trash2 size={15} />
                       </button>
@@ -830,7 +860,7 @@ export function OrchestrationWorkspace({
                         />
                         <span>giây</span>
                       </label>
-                    ) : kind && "profile" in node ? (
+                    ) : node.kind === "log" ? <label>Nội dung<input value={node.message} onChange={event=>edit(current=>({...current,nodes:current.nodes.map(candidate=>candidate.id===node.id&&candidate.kind==="log"?{...candidate,message:event.target.value}:candidate)}))}/></label> : kind && "profile" in node ? (
                       <>
                         <select
                           aria-label={`Hồ sơ ${CAMPAIGN_LABEL[kind]}`}

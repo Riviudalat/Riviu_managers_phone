@@ -36,6 +36,39 @@ describe("ApiPage load states", () => {
     expect(screen.getByText("list_devices")).toBeVisible();
   });
 
+  it("finds HTTP task routes independently of internal invoke commands", async () => {
+    loadDocs.mockResolvedValue("## Devices\n- list_devices");
+    render(<ApiPage />);
+    await userEvent.type(await screen.findByRole("searchbox", { name: "Tìm lệnh API" }), "/v1/flow-runs");
+    expect(screen.getByText("GET /v1/flow-runs?limit=100")).toBeVisible();
+    expect(screen.getByText("GET /v1/flow-runs/{id}")).toBeVisible();
+    expect(screen.getByText("POST /v1/flow-runs/{id}/cancel")).toBeVisible();
+    expect(screen.queryByText("Không tìm thấy lệnh")).not.toBeInTheDocument();
+    expect(screen.queryByText("list_devices")).not.toBeInTheDocument();
+    await userEvent.clear(screen.getByRole("searchbox", { name: "Tìm lệnh API" }));
+    await userEvent.type(screen.getByRole("searchbox", { name: "Tìm lệnh API" }), "route-does-not-exist");
+    expect(screen.getByText("Không tìm thấy lệnh")).toBeVisible();
+  });
+
+  it("shows an explicit revision and selected-device example without dispatching a run", async () => {
+    loadDocs.mockResolvedValue("## Operations\n- operation_get_run");
+    const fetchSpy = vi.spyOn(globalThis, "fetch");
+    render(<ApiPage />);
+    await userEvent.click(await screen.findByText("Ví dụ chạy Flow bằng PowerShell"));
+    const example = screen.getByLabelText("Ví dụ PowerShell chạy và dừng Flow");
+    expect(example).toBeVisible();
+    expect(example).toHaveTextContent('revision = 3');
+    expect(example).toHaveTextContent('mode = "selected"');
+    expect(example).toHaveTextContent('udids = @("UDID_A", "UDID_B")');
+    expect(example).toHaveTextContent("$run.result.id");
+    expect(example).toHaveTextContent("/v1/flow-runs/$runId/cancel");
+    expect(screen.getByText(/chỉ xác nhận yêu cầu dừng/)).toBeVisible();
+    expect(screen.getByText(/tra lịch sử lượt chạy trước khi gửi lại/)).toBeVisible();
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(loadDocs).toHaveBeenCalledTimes(1);
+    fetchSpy.mockRestore();
+  });
+
   it("shows loading, then the documentation without a duplicate page heading", async () => {
     loadDocs.mockResolvedValue("GET /health\n200 OK");
 

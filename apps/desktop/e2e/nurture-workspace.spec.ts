@@ -1,3 +1,4 @@
+import { openOperatorPage } from "./fixtures/operatorNavigation";
 import { expect, test } from "@playwright/test";
 import AxeBuilder from "@axe-core/playwright";
 import { installTauriMock, mockCommandCalls } from "./fixtures/tauriMock";
@@ -5,7 +6,7 @@ import { installTauriMock, mockCommandCalls } from "./fixtures/tauriMock";
 test("nurture tabs and one machine grid preserve drafts at three viewports", async ({ page }) => {
   await installTauriMock(page, { androidRoster: true, fleetSize: 38 });
   await page.goto("/");
-  await page.getByRole("button", { name: "Nuôi TikTok", exact: true }).click();
+  await openOperatorPage(page, 'Nuôi TikTok');
   await page.getByRole("button", { name: /Cân bằng/ }).click();
   await page.getByRole("region", { name: "Máy thực hiện", exact: true }).getByRole("button", { name: "Chọn tất cả sẵn sàng", exact: true }).click();
   const machines = page.getByRole("group", { name: "Danh sách chọn máy Nuôi TikTok" });

@@ -243,12 +243,13 @@ pub(super) async fn build_publish_preflight_from_manifest_with_sheet(
     let mut issues = Vec::new();
     for (ordinal, (bundle, udid)) in bundles.iter().zip(&request.udids).enumerate() {
         let mut row_issues = Vec::new();
-        if db.has_pending_publish_for_device(udid)? {
+        let guard = db.publish_device_guard(udid)?;
+        if let Some(hold) = guard.blocking.first() {
             row_issues.push(preflight_issue(
                 "post_verification_pending",
                 udid,
                 &bundle.id,
-                "Máy còn bài đang chờ xác minh xuất bản; hoàn tất kiểm tra bài đó trước lượt mới",
+                &format!("Lượt {} còn giữ máy (cập nhật {}): {}. Mở Theo dõi của lượt này để kiểm tra liên kết", hold.campaign_id, hold.updated_at, hold.reason),
             ));
         }
         // Android keeps the managed import and a MediaStore copy during composition. Reserve
@@ -467,6 +468,15 @@ pub(super) async fn build_publish_preflight_from_manifest_with_sheet(
 
     for row in &mut assignments {
         row.checks = riviu_core::ui_automation::checks::publish_checks(row);
+        let guard = db.publish_device_guard(&row.udid)?;
+        if let Some(old) = guard.link_review.first() {
+            row.checks.push(riviu_core::ui_automation::AutomationCheck {
+                id: "oldPostLink".into(),
+                label: "Liên kết bài cũ".into(),
+                status: riviu_core::ui_automation::CheckStatus::Unknown,
+                reason: Some(format!("{} lượt cũ còn cần kiểm tra link; hiện không còn giữ máy. Lượt {} ({}). Có thể chạy nội dung mới; kết quả bài cũ giữ trong Theo dõi, không tự đăng lại.", guard.link_review.len(), old.campaign_id, old.updated_at)),
+            });
+        }
     }
 
     let mut sheet_delivery = None;
@@ -643,6 +653,12 @@ pub(super) fn publish_preflight_digest(
                 // binds the required threshold and its pass/fail verdict, while the exact
                 // observed byte count remains available in the report for the operator.
                 fields.remove("availableBytes");
+                if let Some(locale) = fields.get("locale").and_then(serde_json::Value::as_str) {
+                    fields.insert(
+                        "locale".into(),
+                        serde_json::json!(riviu_core::tiktok_labels::normalise_language(locale)),
+                    );
+                }
             }
             observation
         })

@@ -87,7 +87,7 @@ test("empty recording returns only Macro on another page and later tools open no
   await expect(macroDialog(page)).toContainText("Chưa có bước nào");
   await page.keyboard.press("Escape");
   await expect(macroDialog(page)).toHaveCount(0);
-  await navigation.getByRole("button", { name: "Thiết bị", exact: true }).click();
+  await navigation.getByRole("button", { name: "Control Center", exact: true }).click();
   await page.getByRole("button", { name: "Công cụ", exact: true }).click();
   await expect(macroDialog(page).getByRole("tab")).toHaveCount(8);
   await expect(macroDialog(page).getByRole("tab", { name: "Phân phối văn bản", exact: true })).toHaveAttribute("aria-selected", "true");
@@ -161,7 +161,7 @@ async function beginRecording(page: Page) {
 
 async function openPhone(page: Page, index = 0) {
   await page.getByTestId("device-tile").nth(index).getByRole("button", { name: /Mở màn hình/ }).click();
-  await expect(page.locator(".focus-overlay").getByTestId("focus-control-status")).toContainText("Điều khiển sẵn sàng");
+  await expect(page.locator(".focus-overlay").getByRole("button", { name: "Home", exact: true })).toBeEnabled();
 }
 
 async function calls(page: Page) {

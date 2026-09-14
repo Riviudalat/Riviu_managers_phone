@@ -1,0 +1,1174 @@
+{
+  "nurture": {
+    "document": {
+      "schemaVersion": 1,
+      "id": "b9dec199-db32-440c-b980-a37b28d9492c",
+      "revision": 0,
+      "name": "Nuôi TikTok",
+      "kind": "nurture",
+      "entryNodeId": "b65eb6c8-363e-45a0-a824-63c77f1c68f6",
+      "nodes": [
+        {
+          "id": "b65eb6c8-363e-45a0-a824-63c77f1c68f6",
+          "action": "start",
+          "position": {
+            "x": 80,
+            "y": 80
+          },
+          "config": {}
+        },
+        {
+          "id": "65227cb7-4404-47e8-8c7a-f40ebdf65183",
+          "action": "openApp",
+          "position": {
+            "x": 340,
+            "y": 80
+          },
+          "config": {}
+        },
+        {
+          "id": "ef5463e9-cc8c-41ed-8c1a-cc8f23569ba3",
+          "action": "prepareFeed",
+          "position": {
+            "x": 600,
+            "y": 80
+          },
+          "config": {}
+        },
+        {
+          "id": "fc150ad5-c472-44ef-a8a6-50a7b330872b",
+          "action": "readContent",
+          "position": {
+            "x": 860,
+            "y": 80
+          },
+          "config": {}
+        },
+        {
+          "id": "1c190cbc-78e3-438d-86ca-13ba550675ef",
+          "action": "watch",
+          "position": {
+            "x": 80,
+            "y": 230
+          },
+          "config": {
+            "maximumSeconds": 9,
+            "minimumSeconds": 3
+          }
+        },
+        {
+          "id": "13f7f759-06e2-4e70-b140-8378002e65a4",
+          "action": "like",
+          "position": {
+            "x": 340,
+            "y": 230
+          },
+          "config": {
+            "probability": 35
+          }
+        },
+        {
+          "id": "7cd1f298-f856-4852-8e44-6353be7c1ba1",
+          "action": "save",
+          "position": {
+            "x": 600,
+            "y": 230
+          },
+          "config": {
+            "probability": 0
+          }
+        },
+        {
+          "id": "df1df1f5-2c69-429a-99cb-943980922754",
+          "action": "comment",
+          "position": {
+            "x": 860,
+            "y": 230
+          },
+          "config": {
+            "probability": 0
+          }
+        },
+        {
+          "id": "7af55be8-ad23-4448-8f3c-b05530d7bf8b",
+          "action": "follow",
+          "position": {
+            "x": 80,
+            "y": 380
+          },
+          "config": {
+            "probability": 0
+          }
+        },
+        {
+          "id": "082b1202-37a5-46c3-8966-d4bed0faafc5",
+          "action": "nextPost",
+          "position": {
+            "x": 340,
+            "y": 380
+          },
+          "config": {}
+        },
+        {
+          "id": "dc2faa05-6d96-4480-a3d5-1cac1511bab1",
+          "action": "repeatFeed",
+          "position": {
+            "x": 600,
+            "y": 380
+          },
+          "config": {
+            "durationMinutes": 30,
+            "maximumPosts": 10
+          }
+        },
+        {
+          "id": "c0a76600-12c2-45ba-a992-53698e5ba7ba",
+          "action": "end",
+          "position": {
+            "x": 860,
+            "y": 380
+          },
+          "config": {}
+        }
+      ],
+      "edges": [
+        {
+          "id": "97b749f7-2562-48d7-b342-8136f4747567",
+          "source": "b65eb6c8-363e-45a0-a824-63c77f1c68f6",
+          "port": "done",
+          "target": "65227cb7-4404-47e8-8c7a-f40ebdf65183"
+        },
+        {
+          "id": "c189fc33-f7ee-4d8e-a172-5733ee79d4d3",
+          "source": "65227cb7-4404-47e8-8c7a-f40ebdf65183",
+          "port": "done",
+          "target": "ef5463e9-cc8c-41ed-8c1a-cc8f23569ba3"
+        },
+        {
+          "id": "5f42f1ed-7fdf-4a1d-b8a2-30ca2a703ecf",
+          "source": "ef5463e9-cc8c-41ed-8c1a-cc8f23569ba3",
+          "port": "done",
+          "target": "fc150ad5-c472-44ef-a8a6-50a7b330872b"
+        },
+        {
+          "id": "3196e257-422f-45cc-acee-a68beeb62155",
+          "source": "fc150ad5-c472-44ef-a8a6-50a7b330872b",
+          "port": "done",
+          "target": "1c190cbc-78e3-438d-86ca-13ba550675ef"
+        },
+        {
+          "id": "765d0c17-ec36-49de-b2bf-f681ad1956f8",
+          "source": "1c190cbc-78e3-438d-86ca-13ba550675ef",
+          "port": "done",
+          "target": "13f7f759-06e2-4e70-b140-8378002e65a4"
+        },
+        {
+          "id": "23c76eba-3416-4b3b-9cad-a7bea7308019",
+          "source": "13f7f759-06e2-4e70-b140-8378002e65a4",
+          "port": "done",
+          "target": "7cd1f298-f856-4852-8e44-6353be7c1ba1"
+        },
+        {
+          "id": "ad25d65d-b8cb-4684-acbd-0039c77a89c0",
+          "source": "7cd1f298-f856-4852-8e44-6353be7c1ba1",
+          "port": "done",
+          "target": "df1df1f5-2c69-429a-99cb-943980922754"
+        },
+        {
+          "id": "4e1d2ff9-8ede-4797-9ecc-f59ba5002fa2",
+          "source": "df1df1f5-2c69-429a-99cb-943980922754",
+          "port": "done",
+          "target": "7af55be8-ad23-4448-8f3c-b05530d7bf8b"
+        },
+        {
+          "id": "24525c9f-3cf7-4b5b-9a32-40824a3360d5",
+          "source": "7af55be8-ad23-4448-8f3c-b05530d7bf8b",
+          "port": "done",
+          "target": "082b1202-37a5-46c3-8966-d4bed0faafc5"
+        },
+        {
+          "id": "8950583c-1689-41ef-b89b-bb0eb35cde3d",
+          "source": "082b1202-37a5-46c3-8966-d4bed0faafc5",
+          "port": "done",
+          "target": "dc2faa05-6d96-4480-a3d5-1cac1511bab1"
+        },
+        {
+          "id": "06f6fa58-63d4-4d97-b356-dc58840df3ad",
+          "source": "dc2faa05-6d96-4480-a3d5-1cac1511bab1",
+          "port": "done",
+          "target": "c0a76600-12c2-45ba-a992-53698e5ba7ba"
+        }
+      ],
+      "viewport": {
+        "x": 0,
+        "y": 0,
+        "zoom": 1
+      },
+      "profileConfig": {
+        "durationMinutes": 30,
+        "schemaVersion": 1,
+        "settings": {
+          "aiDirections": "Tự nhiên|Thân mật|Hơi hài|Ngắn gọn",
+          "baseUrl": "https://openrouter.ai/api/v1",
+          "bundleId": "com.ss.iphone.ugc.Ame",
+          "carouselEnabled": true,
+          "carouselMaxSlides": 12,
+          "carouselPortionPercent": 100,
+          "commentEnabled": true,
+          "commentLang": "vi",
+          "commentProb": 0,
+          "fatigue": true,
+          "followEnabled": true,
+          "followProb": 3,
+          "frenzyEnabled": true,
+          "frenzyProb": 6,
+          "humanLimits": false,
+          "likeEnabled": true,
+          "likeProb": 35,
+          "maxCommentWords": 12,
+          "model": "openai/gpt-5.6-luna",
+          "network": "tiktok",
+          "nightEnd": 0,
+          "nightStart": 0,
+          "numRounds": 1,
+          "numVideos": 120,
+          "pauseSwipe": true,
+          "persona": "casual",
+          "recoverDelayMax": 4,
+          "recoverDelayMin": 2,
+          "saveEnabled": false,
+          "saveProb": 0,
+          "scheduleDurationMinutes": 150,
+          "scheduleEnabled": false,
+          "scheduleEveryMinutes": 240,
+          "scheduleUdids": [],
+          "scheduleWindows": [],
+          "staggerDelayMax": 15,
+          "staggerDelayMin": 5,
+          "steadyMood": "",
+          "timeOfDay": true,
+          "watchMax": 18,
+          "watchMin": 3,
+          "workflowActionOrder": []
+        }
+      }
+    },
+    "catalog": [
+      {
+        "action": "start",
+        "label": "Bắt đầu",
+        "category": "Điều khiển",
+        "ports": [
+          "done"
+        ],
+        "defaultConfig": {}
+      },
+      {
+        "action": "end",
+        "label": "Kết thúc",
+        "category": "Điều khiển",
+        "ports": [],
+        "defaultConfig": {}
+      },
+      {
+        "action": "wait",
+        "label": "Chờ",
+        "category": "Điều khiển",
+        "ports": [
+          "done"
+        ],
+        "defaultConfig": {
+          "durationMs": 1000
+        }
+      },
+      {
+        "action": "setVariable",
+        "label": "Gán biến",
+        "category": "Dữ liệu",
+        "ports": [
+          "done"
+        ],
+        "defaultConfig": {
+          "name": "value",
+          "value": ""
+        }
+      },
+      {
+        "action": "ifValue",
+        "label": "So sánh biến",
+        "category": "Dữ liệu",
+        "ports": [
+          "matched",
+          "notMatched"
+        ],
+        "defaultConfig": {
+          "equals": "",
+          "name": "value"
+        }
+      },
+      {
+        "action": "log",
+        "label": "Ghi nhật ký",
+        "category": "Dữ liệu",
+        "ports": [
+          "done"
+        ],
+        "defaultConfig": {
+          "message": ""
+        }
+      },
+      {
+        "action": "openApp",
+        "label": "Mở TikTok",
+        "category": "Thiết bị",
+        "ports": [
+          "done"
+        ],
+        "defaultConfig": {}
+      },
+      {
+        "action": "prepareFeed",
+        "label": "Chuẩn bị bảng tin",
+        "category": "Nuôi TikTok",
+        "ports": [
+          "done"
+        ],
+        "defaultConfig": {}
+      },
+      {
+        "action": "readContent",
+        "label": "Đọc nội dung",
+        "category": "Nuôi TikTok",
+        "ports": [
+          "done"
+        ],
+        "defaultConfig": {}
+      },
+      {
+        "action": "watch",
+        "label": "Xem nội dung",
+        "category": "Nuôi TikTok",
+        "ports": [
+          "done"
+        ],
+        "defaultConfig": {
+          "maximumSeconds": 9,
+          "minimumSeconds": 3
+        }
+      },
+      {
+        "action": "like",
+        "label": "Thích bài",
+        "category": "Nuôi TikTok",
+        "ports": [
+          "done"
+        ],
+        "defaultConfig": {
+          "probability": 35
+        }
+      },
+      {
+        "action": "save",
+        "label": "Lưu bài",
+        "category": "Nuôi TikTok",
+        "ports": [
+          "done"
+        ],
+        "defaultConfig": {
+          "probability": 0
+        }
+      },
+      {
+        "action": "comment",
+        "label": "Bình luận",
+        "category": "Nuôi TikTok",
+        "ports": [
+          "done"
+        ],
+        "defaultConfig": {
+          "probability": 0
+        }
+      },
+      {
+        "action": "follow",
+        "label": "Theo dõi",
+        "category": "Nuôi TikTok",
+        "ports": [
+          "done"
+        ],
+        "defaultConfig": {
+          "probability": 0
+        }
+      },
+      {
+        "action": "nextPost",
+        "label": "Chuyển bài",
+        "category": "Nuôi TikTok",
+        "ports": [
+          "done"
+        ],
+        "defaultConfig": {}
+      },
+      {
+        "action": "repeatFeed",
+        "label": "Lặp bảng tin",
+        "category": "Điều khiển",
+        "ports": [
+          "done"
+        ],
+        "defaultConfig": {
+          "durationMinutes": 30,
+          "maximumPosts": 10
+        }
+      }
+    ]
+  },
+  "interaction": {
+    "document": {
+      "schemaVersion": 1,
+      "id": "5599573b-730f-4ea2-8d66-44d2897c9b06",
+      "revision": 0,
+      "name": "Tương tác",
+      "kind": "interaction",
+      "entryNodeId": "8184fd40-9cc8-463b-b83d-f9be014d7a99",
+      "nodes": [
+        {
+          "id": "8184fd40-9cc8-463b-b83d-f9be014d7a99",
+          "action": "start",
+          "position": {
+            "x": 80,
+            "y": 80
+          },
+          "config": {}
+        },
+        {
+          "id": "775fc2f5-7baa-46fa-ae33-7c3a5b22bdeb",
+          "action": "loadTargets",
+          "position": {
+            "x": 340,
+            "y": 80
+          },
+          "config": {}
+        },
+        {
+          "id": "b62fff7d-6696-4564-a684-8d994da00323",
+          "action": "assignRoles",
+          "position": {
+            "x": 600,
+            "y": 80
+          },
+          "config": {}
+        },
+        {
+          "id": "002da4d1-18e6-407b-9037-64c7ac9b166f",
+          "action": "openTarget",
+          "position": {
+            "x": 860,
+            "y": 80
+          },
+          "config": {}
+        },
+        {
+          "id": "2db8f162-b4c5-4d69-a247-111e72059561",
+          "action": "findParent",
+          "position": {
+            "x": 80,
+            "y": 230
+          },
+          "config": {}
+        },
+        {
+          "id": "e090f8aa-f9a7-47f1-bca3-cc66f04c4651",
+          "action": "resolveMentions",
+          "position": {
+            "x": 340,
+            "y": 230
+          },
+          "config": {}
+        },
+        {
+          "id": "ad7b99ca-1580-47f5-89b6-a7e06dd5704a",
+          "action": "compose",
+          "position": {
+            "x": 600,
+            "y": 230
+          },
+          "config": {
+            "maximumWords": 12
+          }
+        },
+        {
+          "id": "a4f5f798-42ff-4e51-874f-1df8d567d431",
+          "action": "send",
+          "position": {
+            "x": 860,
+            "y": 230
+          },
+          "config": {}
+        },
+        {
+          "id": "5bb1071f-2cae-4ca8-9d9f-fc8255874456",
+          "action": "verifyComment",
+          "position": {
+            "x": 80,
+            "y": 380
+          },
+          "config": {}
+        },
+        {
+          "id": "34317f1d-53db-45e7-bb95-5d1785c2ae84",
+          "action": "nextTarget",
+          "position": {
+            "x": 340,
+            "y": 380
+          },
+          "config": {}
+        },
+        {
+          "id": "19217953-abb0-4169-9f85-0610f9af6480",
+          "action": "end",
+          "position": {
+            "x": 600,
+            "y": 380
+          },
+          "config": {}
+        }
+      ],
+      "edges": [
+        {
+          "id": "6ae18edb-f38a-4e44-ab7c-24704b918dcc",
+          "source": "8184fd40-9cc8-463b-b83d-f9be014d7a99",
+          "port": "done",
+          "target": "775fc2f5-7baa-46fa-ae33-7c3a5b22bdeb"
+        },
+        {
+          "id": "2ac2b2ac-e893-44a4-bbca-654f5fa6108e",
+          "source": "775fc2f5-7baa-46fa-ae33-7c3a5b22bdeb",
+          "port": "done",
+          "target": "b62fff7d-6696-4564-a684-8d994da00323"
+        },
+        {
+          "id": "5ea1012e-e521-4e78-9eb9-04599e974e2c",
+          "source": "b62fff7d-6696-4564-a684-8d994da00323",
+          "port": "done",
+          "target": "002da4d1-18e6-407b-9037-64c7ac9b166f"
+        },
+        {
+          "id": "0d23d464-6fea-4f00-8dea-187405bac976",
+          "source": "002da4d1-18e6-407b-9037-64c7ac9b166f",
+          "port": "done",
+          "target": "2db8f162-b4c5-4d69-a247-111e72059561"
+        },
+        {
+          "id": "c13e30b3-eb0f-46b8-9bba-98c613c514ef",
+          "source": "2db8f162-b4c5-4d69-a247-111e72059561",
+          "port": "done",
+          "target": "e090f8aa-f9a7-47f1-bca3-cc66f04c4651"
+        },
+        {
+          "id": "1be5ed5e-8b76-4380-b40e-4e7474bad41b",
+          "source": "e090f8aa-f9a7-47f1-bca3-cc66f04c4651",
+          "port": "done",
+          "target": "ad7b99ca-1580-47f5-89b6-a7e06dd5704a"
+        },
+        {
+          "id": "e849fdc0-110c-4422-becd-39e6bf195378",
+          "source": "ad7b99ca-1580-47f5-89b6-a7e06dd5704a",
+          "port": "done",
+          "target": "a4f5f798-42ff-4e51-874f-1df8d567d431"
+        },
+        {
+          "id": "3b98f707-94d7-4969-a0a3-fd14573f3bef",
+          "source": "a4f5f798-42ff-4e51-874f-1df8d567d431",
+          "port": "done",
+          "target": "5bb1071f-2cae-4ca8-9d9f-fc8255874456"
+        },
+        {
+          "id": "63623d71-6323-420c-8940-7c198e5bc1bb",
+          "source": "5bb1071f-2cae-4ca8-9d9f-fc8255874456",
+          "port": "done",
+          "target": "34317f1d-53db-45e7-bb95-5d1785c2ae84"
+        },
+        {
+          "id": "d10987d1-ab0f-4149-8942-69b99cf2ecb9",
+          "source": "34317f1d-53db-45e7-bb95-5d1785c2ae84",
+          "port": "done",
+          "target": "19217953-abb0-4169-9f85-0610f9af6480"
+        }
+      ],
+      "viewport": {
+        "x": 0,
+        "y": 0,
+        "zoom": 1
+      },
+      "profileConfig": {
+        "request": {
+          "actions": {
+            "comment": false,
+            "like": true,
+            "save": true
+          },
+          "instruction": "Viết ngắn, tự nhiên bằng tiếng Việt.",
+          "maxWords": 12,
+          "messageCount": 2,
+          "mode": "threaded",
+          "network": "tiktok",
+          "shape": "chain",
+          "targets": []
+        },
+        "schemaVersion": 1
+      }
+    },
+    "catalog": [
+      {
+        "action": "start",
+        "label": "Bắt đầu",
+        "category": "Điều khiển",
+        "ports": [
+          "done"
+        ],
+        "defaultConfig": {}
+      },
+      {
+        "action": "end",
+        "label": "Kết thúc",
+        "category": "Điều khiển",
+        "ports": [],
+        "defaultConfig": {}
+      },
+      {
+        "action": "wait",
+        "label": "Chờ",
+        "category": "Điều khiển",
+        "ports": [
+          "done"
+        ],
+        "defaultConfig": {
+          "durationMs": 1000
+        }
+      },
+      {
+        "action": "setVariable",
+        "label": "Gán biến",
+        "category": "Dữ liệu",
+        "ports": [
+          "done"
+        ],
+        "defaultConfig": {
+          "name": "value",
+          "value": ""
+        }
+      },
+      {
+        "action": "ifValue",
+        "label": "So sánh biến",
+        "category": "Dữ liệu",
+        "ports": [
+          "matched",
+          "notMatched"
+        ],
+        "defaultConfig": {
+          "equals": "",
+          "name": "value"
+        }
+      },
+      {
+        "action": "log",
+        "label": "Ghi nhật ký",
+        "category": "Dữ liệu",
+        "ports": [
+          "done"
+        ],
+        "defaultConfig": {
+          "message": ""
+        }
+      },
+      {
+        "action": "loadTargets",
+        "label": "Đọc danh sách bài",
+        "category": "Tương tác",
+        "ports": [
+          "done"
+        ],
+        "defaultConfig": {}
+      },
+      {
+        "action": "assignRoles",
+        "label": "Phân vai và thiết bị",
+        "category": "Tương tác",
+        "ports": [
+          "done"
+        ],
+        "defaultConfig": {}
+      },
+      {
+        "action": "openTarget",
+        "label": "Mở bài đích",
+        "category": "Tương tác",
+        "ports": [
+          "done"
+        ],
+        "defaultConfig": {}
+      },
+      {
+        "action": "findParent",
+        "label": "Tìm bình luận gốc",
+        "category": "Tương tác",
+        "ports": [
+          "done"
+        ],
+        "defaultConfig": {}
+      },
+      {
+        "action": "resolveMentions",
+        "label": "Chọn đúng tài khoản tag",
+        "category": "Tương tác",
+        "ports": [
+          "done"
+        ],
+        "defaultConfig": {}
+      },
+      {
+        "action": "compose",
+        "label": "Soạn nội dung",
+        "category": "Tương tác",
+        "ports": [
+          "done"
+        ],
+        "defaultConfig": {
+          "maximumWords": 12
+        }
+      },
+      {
+        "action": "send",
+        "label": "Gửi bình luận",
+        "category": "Tương tác",
+        "ports": [
+          "done"
+        ],
+        "defaultConfig": {}
+      },
+      {
+        "action": "verifyComment",
+        "label": "Xác minh bình luận",
+        "category": "Tương tác",
+        "ports": [
+          "done"
+        ],
+        "defaultConfig": {}
+      },
+      {
+        "action": "like",
+        "label": "Thích bài",
+        "category": "Tương tác",
+        "ports": [
+          "done"
+        ],
+        "defaultConfig": {}
+      },
+      {
+        "action": "save",
+        "label": "Lưu bài",
+        "category": "Tương tác",
+        "ports": [
+          "done"
+        ],
+        "defaultConfig": {}
+      },
+      {
+        "action": "nextTarget",
+        "label": "Lượt tiếp theo",
+        "category": "Điều khiển",
+        "ports": [
+          "done"
+        ],
+        "defaultConfig": {}
+      }
+    ]
+  },
+  "publish": {
+    "document": {
+      "schemaVersion": 1,
+      "id": "16c30cbb-8314-4586-af33-a19e3fb71412",
+      "revision": 0,
+      "name": "Đăng bài",
+      "kind": "publish",
+      "entryNodeId": "7ff911f1-9587-4c1f-9731-c3f8e25ff418",
+      "nodes": [
+        {
+          "id": "7ff911f1-9587-4c1f-9731-c3f8e25ff418",
+          "action": "start",
+          "position": {
+            "x": 80,
+            "y": 80
+          },
+          "config": {}
+        },
+        {
+          "id": "df383baf-0176-4a6a-8f93-da12d8107649",
+          "action": "loadSource",
+          "position": {
+            "x": 340,
+            "y": 80
+          },
+          "config": {}
+        },
+        {
+          "id": "26880978-3c93-46f3-9046-51459972d374",
+          "action": "assignDevices",
+          "position": {
+            "x": 600,
+            "y": 80
+          },
+          "config": {}
+        },
+        {
+          "id": "0bdac573-add7-4731-8ec9-d45dc5309f04",
+          "action": "preflight",
+          "position": {
+            "x": 860,
+            "y": 80
+          },
+          "config": {}
+        },
+        {
+          "id": "e53447e6-bbd7-4d57-8994-e885dc14e822",
+          "action": "transfer",
+          "position": {
+            "x": 80,
+            "y": 230
+          },
+          "config": {}
+        },
+        {
+          "id": "319c0fba-7662-46b7-9ff9-e55eaca1f87c",
+          "action": "compose",
+          "position": {
+            "x": 340,
+            "y": 230
+          },
+          "config": {}
+        },
+        {
+          "id": "f6d76e75-9973-4541-aa42-35d445673bbc",
+          "action": "selectSound",
+          "position": {
+            "x": 600,
+            "y": 230
+          },
+          "config": {}
+        },
+        {
+          "id": "9d2bccae-4f29-4e54-95fb-c1c4fc21bd79",
+          "action": "post",
+          "position": {
+            "x": 860,
+            "y": 230
+          },
+          "config": {}
+        },
+        {
+          "id": "149b28a7-b5d5-4019-96e3-fd6da6339774",
+          "action": "verifyPost",
+          "position": {
+            "x": 80,
+            "y": 380
+          },
+          "config": {}
+        },
+        {
+          "id": "9e3c9a59-3197-488f-b045-94fb4fd8cbc9",
+          "action": "captureLink",
+          "position": {
+            "x": 340,
+            "y": 380
+          },
+          "config": {}
+        },
+        {
+          "id": "13173eab-8ea9-4d45-b00f-bf9285f8a152",
+          "action": "writeSheet",
+          "position": {
+            "x": 600,
+            "y": 380
+          },
+          "config": {}
+        },
+        {
+          "id": "36335d23-58e3-459f-9641-3bcee1b42088",
+          "action": "cleanup",
+          "position": {
+            "x": 860,
+            "y": 380
+          },
+          "config": {}
+        },
+        {
+          "id": "889faf41-cd86-4b11-83b4-f0428a152e4c",
+          "action": "end",
+          "position": {
+            "x": 80,
+            "y": 530
+          },
+          "config": {}
+        }
+      ],
+      "edges": [
+        {
+          "id": "8e6eb454-0c85-4910-a547-0537ca1cd165",
+          "source": "7ff911f1-9587-4c1f-9731-c3f8e25ff418",
+          "port": "done",
+          "target": "df383baf-0176-4a6a-8f93-da12d8107649"
+        },
+        {
+          "id": "b1e8a93c-1e62-4490-8a49-c1f8a2ba6002",
+          "source": "df383baf-0176-4a6a-8f93-da12d8107649",
+          "port": "done",
+          "target": "26880978-3c93-46f3-9046-51459972d374"
+        },
+        {
+          "id": "d3e7e7ae-cef7-4c20-9bb2-784550ab425c",
+          "source": "26880978-3c93-46f3-9046-51459972d374",
+          "port": "done",
+          "target": "0bdac573-add7-4731-8ec9-d45dc5309f04"
+        },
+        {
+          "id": "28228c51-0c4e-4a9f-97bf-b98819fd734f",
+          "source": "0bdac573-add7-4731-8ec9-d45dc5309f04",
+          "port": "done",
+          "target": "e53447e6-bbd7-4d57-8994-e885dc14e822"
+        },
+        {
+          "id": "e5c95c0f-5d54-4698-9735-ed653e7a22b0",
+          "source": "e53447e6-bbd7-4d57-8994-e885dc14e822",
+          "port": "done",
+          "target": "319c0fba-7662-46b7-9ff9-e55eaca1f87c"
+        },
+        {
+          "id": "e67f39bc-a325-406b-8f17-1286a9e1ed56",
+          "source": "319c0fba-7662-46b7-9ff9-e55eaca1f87c",
+          "port": "done",
+          "target": "f6d76e75-9973-4541-aa42-35d445673bbc"
+        },
+        {
+          "id": "83eb1ef1-dd94-4993-a550-d5b3876190e6",
+          "source": "f6d76e75-9973-4541-aa42-35d445673bbc",
+          "port": "done",
+          "target": "9d2bccae-4f29-4e54-95fb-c1c4fc21bd79"
+        },
+        {
+          "id": "02489bd2-642c-472b-b579-22ec4955ef85",
+          "source": "9d2bccae-4f29-4e54-95fb-c1c4fc21bd79",
+          "port": "done",
+          "target": "149b28a7-b5d5-4019-96e3-fd6da6339774"
+        },
+        {
+          "id": "82f20778-0f9b-4711-9ae8-34e063840f71",
+          "source": "149b28a7-b5d5-4019-96e3-fd6da6339774",
+          "port": "done",
+          "target": "9e3c9a59-3197-488f-b045-94fb4fd8cbc9"
+        },
+        {
+          "id": "22854491-c713-4846-a857-5be0d4baa434",
+          "source": "9e3c9a59-3197-488f-b045-94fb4fd8cbc9",
+          "port": "done",
+          "target": "13173eab-8ea9-4d45-b00f-bf9285f8a152"
+        },
+        {
+          "id": "f4f80ef1-1206-4f09-9157-7bf63d66eb7e",
+          "source": "13173eab-8ea9-4d45-b00f-bf9285f8a152",
+          "port": "done",
+          "target": "36335d23-58e3-459f-9641-3bcee1b42088"
+        },
+        {
+          "id": "8f4dfc19-5630-4380-ab75-14368a155aa7",
+          "source": "36335d23-58e3-459f-9641-3bcee1b42088",
+          "port": "done",
+          "target": "889faf41-cd86-4b11-83b4-f0428a152e4c"
+        }
+      ],
+      "viewport": {
+        "x": 0,
+        "y": 0,
+        "zoom": 1
+      },
+      "profileConfig": {
+        "bundleIds": [],
+        "captionOverrides": {},
+        "deleteAfterPublish": true,
+        "executionConfirmed": false,
+        "network": "tiktok",
+        "schemaVersion": 1,
+        "sheetEnabled": true,
+        "soundPolicy": {
+          "kind": "default"
+        },
+        "sourceRoot": ""
+      }
+    },
+    "catalog": [
+      {
+        "action": "start",
+        "label": "Bắt đầu",
+        "category": "Điều khiển",
+        "ports": [
+          "done"
+        ],
+        "defaultConfig": {}
+      },
+      {
+        "action": "end",
+        "label": "Kết thúc",
+        "category": "Điều khiển",
+        "ports": [],
+        "defaultConfig": {}
+      },
+      {
+        "action": "wait",
+        "label": "Chờ",
+        "category": "Điều khiển",
+        "ports": [
+          "done"
+        ],
+        "defaultConfig": {
+          "durationMs": 1000
+        }
+      },
+      {
+        "action": "setVariable",
+        "label": "Gán biến",
+        "category": "Dữ liệu",
+        "ports": [
+          "done"
+        ],
+        "defaultConfig": {
+          "name": "value",
+          "value": ""
+        }
+      },
+      {
+        "action": "ifValue",
+        "label": "So sánh biến",
+        "category": "Dữ liệu",
+        "ports": [
+          "matched",
+          "notMatched"
+        ],
+        "defaultConfig": {
+          "equals": "",
+          "name": "value"
+        }
+      },
+      {
+        "action": "log",
+        "label": "Ghi nhật ký",
+        "category": "Dữ liệu",
+        "ports": [
+          "done"
+        ],
+        "defaultConfig": {
+          "message": ""
+        }
+      },
+      {
+        "action": "loadSource",
+        "label": "Đọc nguồn đăng",
+        "category": "Đăng bài",
+        "ports": [
+          "done"
+        ],
+        "defaultConfig": {}
+      },
+      {
+        "action": "assignDevices",
+        "label": "Phân công máy",
+        "category": "Đăng bài",
+        "ports": [
+          "done"
+        ],
+        "defaultConfig": {}
+      },
+      {
+        "action": "preflight",
+        "label": "Kiểm tra trước khi đăng",
+        "category": "Đăng bài",
+        "ports": [
+          "done"
+        ],
+        "defaultConfig": {}
+      },
+      {
+        "action": "transfer",
+        "label": "Chuyển ảnh và video",
+        "category": "Đăng bài",
+        "ports": [
+          "done"
+        ],
+        "defaultConfig": {}
+      },
+      {
+        "action": "compose",
+        "label": "Soạn bài",
+        "category": "Đăng bài",
+        "ports": [
+          "done"
+        ],
+        "defaultConfig": {}
+      },
+      {
+        "action": "selectSound",
+        "label": "Chọn nhạc",
+        "category": "Đăng bài",
+        "ports": [
+          "done"
+        ],
+        "defaultConfig": {}
+      },
+      {
+        "action": "post",
+        "label": "Đăng bài",
+        "category": "Đăng bài",
+        "ports": [
+          "done"
+        ],
+        "defaultConfig": {}
+      },
+      {
+        "action": "verifyPost",
+        "label": "Xác minh bài đăng",
+        "category": "Đăng bài",
+        "ports": [
+          "done"
+        ],
+        "defaultConfig": {}
+      },
+      {
+        "action": "captureLink",
+        "label": "Lấy liên kết",
+        "category": "Đăng bài",
+        "ports": [
+          "done"
+        ],
+        "defaultConfig": {}
+      },
+      {
+        "action": "writeSheet",
+        "label": "Ghi kết quả lên Sheet",
+        "category": "Đăng bài",
+        "ports": [
+          "done"
+        ],
+        "defaultConfig": {}
+      },
+      {
+        "action": "cleanup",
+        "label": "Dọn tài nguyên",
+        "category": "Đăng bài",
+        "ports": [
+          "done"
+        ],
+        "defaultConfig": {}
+      }
+    ]
+  }
+}

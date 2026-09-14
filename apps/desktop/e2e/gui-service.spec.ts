@@ -33,7 +33,7 @@ for (const width of [1440, 820]) {
       };
     });
     await page.goto("/");
-    await page.getByRole("button", { name: "Cài đặt", exact: true }).click();
+    await page.getByRole("navigation", { name: "Điều hướng chính" }).getByRole("button", { name: "Cài đặt", exact: true }).click();
     await page.getByRole("link", { name: "Kết nối và API" }).click();
     const section = page.getByRole("region", {
       name: "Nhận diện giao diện",

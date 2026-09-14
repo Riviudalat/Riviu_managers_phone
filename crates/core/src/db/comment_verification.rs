@@ -24,6 +24,26 @@ fn view(row: &rusqlite::Row<'_>) -> rusqlite::Result<CommentVerification> {
 }
 
 impl Database {
+    /// Store an account observed in the owned UI session without overwriting
+    /// operator edits to aliases, numbers, groups or notes.
+    pub fn record_observed_interaction_account(
+        &self,
+        udid: &str,
+        account: &str,
+    ) -> anyhow::Result<()> {
+        let handle = account.trim().trim_start_matches('@');
+        anyhow::ensure!(
+            !handle.is_empty()
+                && handle.len() <= 24
+                && !handle.ends_with('.')
+                && handle
+                    .bytes()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'_' | b'.')),
+            "observed interaction account invalid"
+        );
+        self.conn()?.execute("INSERT INTO device_meta(udid,handle) VALUES(?1,?2) ON CONFLICT(udid) DO UPDATE SET handle=excluded.handle",params![udid,handle])?;
+        Ok(())
+    }
     pub fn defer_parent_recheck(&self, assignment: &str, now: i64) -> anyhow::Result<bool> {
         let conn = self.conn()?;
         let n=conn.execute("INSERT INTO interaction_parent_rechecks(assignment_id,attempts,first_at_ms,next_at_ms) VALUES(?1,1,?2,?2+15000)
@@ -94,7 +114,7 @@ impl Database {
         let mut conn = self.conn()?;
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let owner = Uuid::new_v4().to_string();
-        let raw=tx.query_row("UPDATE interaction_comment_verification SET owner=?2,lease_until_ms=?3+90000,attempts=attempts+1,revision=revision+1,
+        let raw=tx.query_row("UPDATE interaction_comment_verification SET owner=?2,lease_until_ms=?3+150000,attempts=attempts+1,revision=revision+1,
              assignment_revision=(SELECT revision FROM interaction_assignments WHERE id=?1),
              action_revision=(SELECT revision FROM tiktok_action_runs WHERE assignment_id=?1 AND action_kind='comment')
            WHERE assignment_id=?1 AND state='pending' AND next_at_ms<=?3 AND deadline_ms>?3 AND attempts<3 AND owner IS NULL
@@ -286,9 +306,38 @@ impl Database {
             };
             conn.execute("INSERT OR IGNORE INTO interaction_comment_verification(assignment_id,campaign_id,device_id,context_json,state,reason) VALUES(?1,?2,?3,?4,'needsReview','legacy_missing_evidence')",params![assignment,campaign,row.actor_udid,serde_json::to_string(&context)?])?;
         }
+        let account = self.get_device_meta(&row.actor_udid)?.handle;
+        let mut root_row = row;
+        let mut depth = 0;
+        while let Some(parent_id) = &root_row.parent_assignment_id {
+            depth += 1;
+            anyhow::ensure!(
+                depth <= detail.assignments.len(),
+                "Chuỗi bình luận cha bị vòng lặp"
+            );
+            root_row = detail
+                .assignments
+                .iter()
+                .find(|r| &r.id == parent_id)
+                .context("Thiếu câu gốc để kiểm tra nhánh")?;
+        }
+        let root = if row.parent_assignment_id.is_some() {
+            root_row.posted_identity()
+        } else {
+            None
+        };
         // Explicit readback opens a fresh bounded observation budget, never a Send budget.
         let mut conn = self.conn()?;
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        // Legacy sends could persist a blank account. An explicitly requested
+        // readback may fill only that missing field; the worker still verifies
+        // the visible comment author's actual profile before settlement.
+        if !account.trim().is_empty() {
+            tx.execute("UPDATE interaction_comment_verification SET context_json=json_set(context_json,'$.account',?2) WHERE assignment_id=?1 AND owner IS NULL AND state='needsReview' AND COALESCE(json_extract(context_json,'$.account'),'')=''",params![assignment,account])?;
+        }
+        if let Some(root) = root {
+            tx.execute("UPDATE interaction_comment_verification SET context_json=json_set(context_json,'$.root',json(?2)) WHERE assignment_id=?1 AND owner IS NULL AND state='needsReview' AND json_extract(context_json,'$.root') IS NULL",params![assignment,serde_json::to_string(&root)?])?;
+        }
         tx.execute("UPDATE interaction_comment_verification SET state='pending',attempts=0,sent_at_ms=?2,next_at_ms=?2,deadline_ms=?2+120000,reason=NULL,revision=revision+1 WHERE assignment_id=?1 AND owner IS NULL AND state='needsReview'",params![assignment,now])?;
         tx.execute("UPDATE interaction_assignments SET state='uncertain',revision=revision+1 WHERE id=?1 AND state='succeeded'",[assignment])?;
         tx.execute("UPDATE tiktok_action_runs SET state='uncertain',revision=revision+1 WHERE assignment_id=?1 AND action_kind='comment' AND state='confirmed'",[assignment])?;

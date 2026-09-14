@@ -1,7 +1,9 @@
 @import "./assets/fonts/fonts.css";
 
-/* Production shell: cool light workspace, restrained Riviu orange actions. */
+/* Riviu orange identity; reference products inform layout and interaction. */
 :root {
+  --motion-ui: 180ms;
+  --ease-ui: cubic-bezier(.2,.75,.25,1);
   --primary: #c2410c;
   --primary-deep: #9a3412;
   --primary-50: #fff7ed;
@@ -39,7 +41,7 @@
   --accent: var(--primary);
   --accent-dim: var(--primary-deep);
   --warn: #b45309;
-  --danger: #dc2626;
+  --danger: #c91f27;
   --ok: #15803d;
   --info: #2563eb;
   --tile: #ffffff;

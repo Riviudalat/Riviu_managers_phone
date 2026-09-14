@@ -87,10 +87,12 @@ export function DeviceFunctionList({
   const menuId = useId();
   const [query, setQuery] = useState("");
   const [flyout, setFlyout] = useState<FlyoutState | null>(null);
+  const [exiting, setExiting] = useState(false);
   /// Rows fetched from the phone, per lazy submenu id: `undefined` = never opened,
   /// `null` = still asking, an array = the answer (empty included, which is itself news).
   const [loaded, setLoaded] = useState<Record<string, DeviceMenuNode[] | null>>({});
   const closeTimer = useRef<number | null>(null);
+  const exitTimer = useRef<number | null>(null);
 
   const gated = useMemo(() => gateDeviceMenu(nodes, platform), [nodes, platform]);
   const shown = useMemo(() => filterDeviceMenu(gated, query), [gated, query]);
@@ -100,12 +102,22 @@ export function DeviceFunctionList({
       window.clearTimeout(closeTimer.current);
       closeTimer.current = null;
     }
+    if (exitTimer.current !== null) window.clearTimeout(exitTimer.current);
+    exitTimer.current = null;
+    setExiting(false);
+  }, []);
+
+  const dismiss = useCallback(() => {
+    setExiting(true);
+    exitTimer.current = window.setTimeout(() => {
+      setFlyout(null); setExiting(false); exitTimer.current = null;
+    }, window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ? 0 : 160);
   }, []);
 
   const scheduleClose = useCallback(() => {
     cancelClose();
-    closeTimer.current = window.setTimeout(() => setFlyout(null), FLYOUT_GRACE_MS);
-  }, [cancelClose]);
+    closeTimer.current = window.setTimeout(dismiss, FLYOUT_GRACE_MS);
+  }, [cancelClose, dismiss]);
 
   // A timer that outlives the component would call `setFlyout` on an unmounted one, which is
   // exactly what happens when a row's action closes the menu while the pointer is still on it.
@@ -157,7 +169,7 @@ export function DeviceFunctionList({
   const closeFlyout = () => {
     cancelClose();
     if (flyout) document.getElementById(flyout.anchorId)?.focus();
-    setFlyout(null);
+    dismiss();
   };
 
   const runLeaf = (node: DeviceMenuNode) => {
@@ -249,8 +261,10 @@ export function DeviceFunctionList({
         openNode &&
         createPortal(
           <div
-            className="device-flyout"
-            data-modal-focus-owner={flyout.focusOwner}
+            className={`device-flyout${exiting ? " is-closing" : ""}`}
+            inert={exiting}
+            aria-hidden={exiting}
+            data-modal-focus-owner={exiting ? undefined : flyout.focusOwner}
             data-modal-focus-anchor={flyout.anchorId}
             role="menu"
             aria-label={openNode.label}

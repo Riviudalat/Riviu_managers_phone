@@ -93,7 +93,11 @@ impl AndroidDriver {
             self.refuse_undrivable_screen(serial).await?;
         }
 
-        let mut child = tokio::process::Command::new(self.adb.path())
+        let mut command = tokio::process::Command::new(self.adb.path());
+        self.adb.apply_server_for_serial(&mut command, Some(serial));
+        #[cfg(windows)]
+        command.creation_flags(0x0800_0000);
+        let mut child = command
             .args([
                 "-s",
                 serial,
@@ -759,6 +763,7 @@ impl AndroidDriver {
         // opened before listen EOFs and never becomes the video socket.
         // Retry TCP only while dummy has not arrived (`NotListening`).
         let mut child = tokio::process::Command::new(self.adb.path());
+        self.adb.apply_server_for_serial(&mut child, Some(serial));
         child
             .args([
                 "-s",

@@ -100,7 +100,8 @@ pub(super) fn validate_submission_claim(
             .any(|build| build.udid == udid
                 && build.package == proof.package
                 && build.version == proof.version
-                && build.locale == proof.locale),
+                && crate::tiktok_labels::normalise_language(&build.locale)
+                    == crate::tiktok_labels::normalise_language(&proof.locale)),
         "TikTok đã thay đổi so với lần kiểm tra; kiểm tra lại trước Đăng"
     );
     let account = normalize_publish_account(&proof.expected_account)?;
@@ -294,6 +295,21 @@ mod tests {
             .claim_publish_assignment_for_posting(&assignments[0].id, &intent(&proof))
             .unwrap());
         assert!(!db
+            .claim_publish_assignment_for_posting(&assignments[0].id, &intent(&proof))
+            .unwrap());
+    }
+
+    #[test]
+    fn submission_accepts_equivalent_language_but_rejects_changed_language() {
+        let (db, _path, _, assignments, mut proof) = setup();
+        db.reserve_publish_account(&assignments[0].id, &proof.expected_account)
+            .unwrap();
+        proof.locale = "vi-VN".into();
+        assert!(db
+            .claim_publish_assignment_for_posting(&assignments[0].id, &intent(&proof))
+            .is_err());
+        proof.locale = "en-US".into();
+        assert!(db
             .claim_publish_assignment_for_posting(&assignments[0].id, &intent(&proof))
             .unwrap());
     }

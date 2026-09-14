@@ -197,6 +197,7 @@ describe("OrchestrationWorkspace", () => {
 
     const interactionNodes = screen.getAllByText("Tương tác nhẹ");
     expect(interactionNodes).toHaveLength(2);
+    fireEvent.click(screen.getAllByText("Cấu hình · bản 4")[0]);
     const partialRoutes = screen.getAllByRole("combobox", { name: /Đích khi Một phần của bước/ });
     const secondInteractionId = partialRoutes[0].querySelectorAll("option")[0]?.value;
     expect(secondInteractionId).toBeTruthy();

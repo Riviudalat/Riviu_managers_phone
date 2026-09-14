@@ -238,7 +238,7 @@ describe("commands that would throw away an unsaved draft", () => {
     fireEvent.click(screen.getByRole("button", { name: "Nhập Flow" }));
 
     await waitFor(() => expect(confirmed.requestSaveChanges).toHaveBeenCalledTimes(1));
-    expect(screen.queryByRole("dialog", { name: "Nhập Flow cũ" })).toBeNull();
+    expect(screen.queryByRole("dialog", { name: "Nhập Flow" })).toBeNull();
   });
 
   it("refuses to export a dirty flow instead of shipping the stored revision", async () => {

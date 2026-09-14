@@ -272,7 +272,7 @@ pub async fn execute_orchestration<P: OrchestrationChildPort>(
         }
 
         match &node.action {
-            OrchestrationNodeAction::Start => {
+            OrchestrationNodeAction::Start | OrchestrationNodeAction::Log { .. } => {
                 if detail.run.error_code.as_deref() == Some(CANCEL_REQUESTED) {
                     database
                         .cancel_orchestration_attempt_before_effect(attempt.snapshot.attempt_id)?;
@@ -781,6 +781,7 @@ fn child_kind(action: &OrchestrationNodeAction) -> Option<AutomationKind> {
         OrchestrationNodeAction::RunPublish { .. } => Some(AutomationKind::Publish),
         OrchestrationNodeAction::Start
         | OrchestrationNodeAction::Delay { .. }
+        | OrchestrationNodeAction::Log { .. }
         | OrchestrationNodeAction::End => None,
     }
 }

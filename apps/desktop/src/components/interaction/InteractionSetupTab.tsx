@@ -3,7 +3,6 @@ import { InteractionThreshold, type ThresholdControls } from "./InteractionThres
 import { Banner } from "../States";
 import { InteractionActorPicker } from "./InteractionActorPicker";
 import { InteractionPlanPreview } from "./InteractionPlanPreview";
-import { InteractionSheetImport } from "./InteractionSheetImport";
 import { linkErrorVi } from "../../interactionErrors";
 import {
   effectiveMessageCount,
@@ -117,7 +116,6 @@ export function InteractionSetupTab({
   return (
     <div className="interaction-body nu-pane">
       <div className="nu-group-head">Bài viết</div>
-      <InteractionSheetImport onApply={(urls) => patch("rawLinks", (previous) => [...new Set([...previous.split(/\r?\n/).map((line) => line.trim()).filter(Boolean), ...urls])].join("\n"))} />
       <label className="nu-field">
         <span className="nu-label">Link TikTok — mỗi dòng một link</span>
         <textarea

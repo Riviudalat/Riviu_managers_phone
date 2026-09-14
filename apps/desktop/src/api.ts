@@ -7,6 +7,33 @@ export const guiServiceCheck=()=>invoke<string>("gui_service_check");
 export const guiCompatibilityImport=(document:string)=>invoke<string>("gui_compatibility_import",{document});
 export const guiCompatibilityRollback=()=>invoke<string>("gui_compatibility_rollback");
 export const guiDiagnosticsExport=()=>invoke<string>("gui_diagnostics_export");
+export interface TemplateImage { bytesBase64: string; sha256: string; width: number; height: number; }
+export interface TemplatePixelRect { x: number; y: number; width: number; height: number; }
+export interface TemplateMatchRequest {
+  protocolVersion: 1; requestId: string; observationId: string; sessionEpoch: string;
+  generation: number; remainingMs: number; screenshot: TemplateImage; template: TemplateImage;
+  roi: TemplatePixelRect | null; scales: number[]; threshold: number;
+}
+export interface TemplateMatchResponse {
+  protocolVersion: 1; requestId: string; observationId: string; sessionEpoch: string; generation: number;
+  screenshotSha256: string; templateSha256: string;
+  status: "resolved" | "unresolved" | "ambiguous"; reason: string; elapsedMs: number; searchedScales: number[];
+  candidates: { bounds: TemplatePixelRect; score: number; scale: number; method: "templateCorrelation" }[];
+}
+export const guiTemplateMatch = (request: TemplateMatchRequest) =>
+  invoke<TemplateMatchResponse>("gui_template_match", { request });
+export interface OcrRequest {
+  protocolVersion: 1; requestId: string; observationId: string; sessionEpoch: string;
+  generation: number; remainingMs: number; screenshot: TemplateImage;
+  roi: TemplatePixelRect | null; languages: ("vi" | "en")[]; minConfidence: number;
+}
+export interface OcrResponse {
+  protocolVersion: 1; requestId: string; observationId: string; sessionEpoch: string; generation: number;
+  screenshotSha256: string; status: "resolved" | "unresolved"; text: string;
+  lines: { text: string; bounds: TemplatePixelRect; confidence: number }[];
+  engine: string; elapsedMs: number;
+}
+export const guiOcr = (request: OcrRequest) => invoke<OcrResponse>("gui_ocr", { request });
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type {
   AnalyticsSummary,
@@ -1276,6 +1303,10 @@ export async function interactionRetry(campaignId: string, assignmentIds?: strin
   return invoke<void>("interaction_retry", { campaignId, assignmentIds });
 }
 
+export async function publishCheckLinks(campaignId:string,udid?:string) {
+  return invoke<{campaignId:string;outcomes:{assignmentId:string;udid:string;verified:boolean;error:string|null}[]}>("publish_check_links",{campaignId,udid:udid??null});
+}
+
 export async function interactionVerifyComment(campaignId: string, assignmentId: string) {
   return invoke<import("./types").CommentVerification>("interaction_verify_comment", {campaignId, assignmentId});
 }
@@ -1490,6 +1521,11 @@ export async function orchestrationCancelRun(runId: string) {
 export async function flowActionCatalog() {
   return invoke<ActionDefinition[]>("flow_action_catalog");
 }
+
+export interface FlowConnectorInfo { root: string; credentialNames: string[]; sheetConfigured: boolean; }
+export function flowConnectorInfo() { return invoke<FlowConnectorInfo>("flow_connector_info"); }
+export function flowConnectorSaveSecret(name: string, value: string) { return invoke<void>("flow_connector_save_secret", { name, value }); }
+export function flowConnectorImportFile(path: string, content: string) { return invoke<void>("flow_connector_import_file", { path, content }); }
 
 export async function flowList(includeArchived = false) {
   return invoke<FlowSummary[]>("flow_list", { includeArchived });

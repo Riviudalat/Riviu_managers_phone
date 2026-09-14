@@ -325,7 +325,14 @@ async fn sheet_post_once(
         .await
         .map_err(|error| sheet_network_error(error, "webhook"))?;
     let mut content_hop = false;
-    if response.status().is_redirection() {
+    let mut hops = 0;
+    while response.status().is_redirection() {
+        if hops >= 3 {
+            return Err(SheetTransportError {
+                message: "Nội dung Google chuyển hướng quá 3 lần".into(),
+                retryable: true,
+            });
+        }
         let location = response
             .headers()
             .get(reqwest::header::LOCATION)
@@ -343,6 +350,7 @@ async fn sheet_post_once(
             .await
             .map_err(|error| sheet_network_error(error, "nội dung Google"))?;
         content_hop = true;
+        hops += 1;
     }
     let status = response.status();
     if !status.is_success() {
@@ -367,6 +375,26 @@ async fn sheet_post_once(
             retryable,
         }
     })
+}
+
+/// Flow connectors send exactly once. The enclosing Flow ledger owns ambiguous
+/// outcomes; this endpoint must never inherit publish connection retry behavior.
+pub(crate) async fn flow_connector_request(
+    webhook: &str,
+    payload: &serde_json::Value,
+) -> anyhow::Result<serde_json::Value> {
+    let http = reqwest::Client::builder()
+        .timeout(Duration::from_secs(30))
+        .connect_timeout(Duration::from_secs(7))
+        .redirect(reqwest::redirect::Policy::none())
+        .retry(reqwest::retry::never())
+        .build()?;
+    let body = tokio::time::timeout(
+        Duration::from_secs(30),
+        sheet_post_once(&http, webhook, payload),
+    )
+    .await??;
+    serde_json::from_str(&body).context("Sheet connector response is not JSON")
 }
 
 async fn sheet_post_body(
@@ -697,6 +725,22 @@ async fn send_bound_payload(
             redact_token(&body, token)
         )
     })?;
+    tracing::info!(
+        "Sheet receipt assignment={} kind={} delivery_revision={} report_revision={:?} ack={}",
+        assignment_id,
+        if internal_report {
+            "report"
+        } else {
+            "canonical"
+        },
+        revision,
+        report_revision,
+        serde_json::json!({
+            "ok":ack["ok"],"assignmentId":ack["assignmentId"],
+            "deliveryRevision":ack["deliveryRevision"],"rowRevision":ack["rowRevision"],
+            "postUrl":ack["postUrl"],"error":redact_token(ack["error"].as_str().unwrap_or_default(), token),
+        }),
+    );
     if ack["ok"] != true {
         return Err(anyhow::Error::new(SheetTransportError {
             message: format!(
@@ -1328,6 +1372,12 @@ mod tests {
                 "sheetGid",
                 "deliveryVersion",
                 "deliveryRevision",
+                // The range connector is a distinct protocol branch in the same
+                // Apps Script. Publish payloads do not carry these fields.
+                "connectorVersion",
+                "tab",
+                "range",
+                "values",
             ]
             .map(str::to_owned),
         );

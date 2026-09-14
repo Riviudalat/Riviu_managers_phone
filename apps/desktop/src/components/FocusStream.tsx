@@ -4,8 +4,6 @@ import { groupInputOutcome } from "../groupInput";
 import { getGroupSync } from "../groupSync";
 import { recordSwipe, recordTap } from "../macroStore";
 import {
-  deviceControlBegin,
-  deviceControlEnd,
   deviceSwipe,
   deviceSwipePath,
   deviceTap,
@@ -13,15 +11,19 @@ import {
   installIpa,
   viewInjectTouch,
   viewRequestKeyframe,
+  viewSetPreset,
   setScreenRotation,
 } from "../api";
-import { Smartphone } from "lucide-react";
+import { Smartphone, Pin, PinOff, GripVertical, ArrowLeftRight, Volume2, Volume1, Image, Power, PackagePlus, ImageUp, FolderDown, TerminalSquare, TextCursorInput, Keyboard, Bell, RotateCcw, ScanLine } from "lucide-react";
 import { describeError } from "../describeError";
 import { createLiveDragGroup, liveTap, type LiveDragGroup } from "../liveDrag";
 
 import { InstalledApps } from "./InstalledApps";
+import { DeviceFilesPopup } from "./DeviceFilesPopup";
+import { DeviceInspector } from "./DeviceInspector";
 import { AdbConsole } from "./AdbConsole";
-import { pickFile } from "../pickFile";
+import { pickFile, pickFiles } from "../pickFile";
+import { useClosingTransition } from "./useClosingTransition";
 
 import { pushToast, toastError } from "../toastStore";
 import { useDeviceKeyboards } from "./focus/useDeviceKeyboards";
@@ -43,21 +45,13 @@ import { PhoneCanvas } from "./PhoneCanvas";
 import {
   IconBack,
   IconBattery,
-  IconBell,
   IconCamera,
   IconClose,
   IconCopy,
   IconDownload,
-  IconGrid,
   IconHome,
-  IconImage,
-  IconKeyboard,
-  IconPhone,
   IconPower,
   IconRecents,
-  IconRefresh,
-  IconSync,
-  IconText,
   IconUpload,
   IconVolumeDown,
   IconVolumeUp,
@@ -65,9 +59,12 @@ import {
 import { withoutMenuIds, type DeviceMenuNode } from "../deviceMenu";
 import { DeviceFunctionList } from "./DeviceFunctionList";
 import { focusLayout } from "./focus/focusLayout";
-import { useModalFocus } from "./useModalFocus";
+import { acquireControlSession } from "./focus/controlSessions";
 
 interface Props {
+  active?: boolean;
+  windowOrder?: number;
+  onActivate?: () => void;
   device: DeviceInfo;
   /** 1-based index in the visible grid, shown in the sidebar header. */
   index: number;
@@ -107,9 +104,12 @@ function mapToDevice(
 }
 
 export function FocusStream({
+  active = true,
+  windowOrder = 0,
+  onActivate,
   device,
   index,
-  onClose,
+  onClose: onClosed,
   groupUdids,
   groupMode,
   devices,
@@ -117,18 +117,35 @@ export function FocusStream({
   functions = [],
   recordingControls,
 }: Props) {
-  const dialogRef = useModalFocus<HTMLDivElement>(onClose);
+  const { closing, close: onClose } = useClosingTransition(onClosed, 180, device.udid);
+  const dialogRef = useRef<HTMLDivElement>(null);
+  useEffect(() => { if (active) dialogRef.current?.focus({ preventScroll: true }); }, [active]);
+  useEffect(() => {
+    void viewSetPreset(device.udid, "overlay").catch(error => console.warn("overlay preset refused", error));
+    return () => { void viewSetPreset(device.udid, "tile").catch(() => {}); };
+  }, [device.udid]);
   const hasView = useViewLive(device.udid);
   const viewSize = useViewSize(device.udid);
   const [busy, setBusy] = useState(false);
+  const [pinned,setPinned]=useState(false);
+  const stageRef=useRef<HTMLDivElement>(null);
+  const stageOffset=useRef({x:0,y:0});
+  const stageDrag=useRef<{x:number;y:number;origin:{x:number;y:number}}|null>(null);
   const [rotationMessage, setRotationMessage] = useState<string | null>(null);
   useEffect(() => setRotationMessage(null), [device.udid]);
   const [showAdb, setShowAdb] = useState(false);
+  const [showFiles, setShowFiles] = useState<{ mode: "upload" | "download"; paths: string[] } | null>(null);
+  const [showInspector,setShowInspector]=useState(false);
+  const fileTarget = useRef(device.udid);
+  fileTarget.current = device.udid;
+  useEffect(() => setShowFiles(null), [device.udid]);
   const [showDevices, setShowDevices] = useState(false);
   const [showPhrases, setShowPhrases] = useState(false);
   const [showKeyboards, setShowKeyboards] = useState(false);
   const [frameWidth, setFrameWidth] = useState(() => loadZoom(FOCUS_ZOOM));
+  const resizeDrag = useRef<{ x: number; width: number } | null>(null);
   const [viewport, setViewport] = useState(() => ({ width: window.innerWidth, height: window.innerHeight }));
+  useEffect(()=>{stageDrag.current=null;stageOffset.current={x:0,y:0};if(stageRef.current)stageRef.current.style.transform="";},[device.udid,viewport.width,viewport.height]);
   useEffect(() => {
     const resized = () => setViewport({ width: window.innerWidth, height: window.innerHeight });
     window.addEventListener("resize", resized);
@@ -151,7 +168,6 @@ export function FocusStream({
   const [actionPending, setActionPending] = useState(false);
   const [controlState, setControlState] = useState<{ key: string; ready: string[]; errors: Record<string, string> }>({ key: "", ready: [], errors: {} });
   const [controlRetry, setControlRetry] = useState(0);
-  const controlTransitions = useRef(new Map<string, Promise<void>>());
   /// Devices whose overlay control session (`deviceControlBegin`) has finished opening.
   ///
   /// A gesture fired before this — the reflex scroll during a slow open on a phone whose
@@ -162,6 +178,7 @@ export function FocusStream({
   /// not state: the gesture handlers read it imperatively and must see the current value, and
   /// readiness changing should not force a re-render.
   const controlReady = useRef<Set<string>>(new Set());
+  const controlHandoff = useRef<Promise<void> | null>(null);
   const targets =
     groupMode && groupUdids.length > 1 ? groupUdids : [device.udid];
   const targetKey = targets.join("\0");
@@ -240,31 +257,20 @@ export function FocusStream({
   /// it, which is why it could not be dismissed as unlikely.
   useEffect(() => {
     const udids = targetKey.split("\0").filter(Boolean);
-    const transitions = controlTransitions.current;
     let cancelled = false;
     // Control is reopening for a new target set; nothing is ready until each begin lands.
     controlReady.current = new Set();
     setControlState({ key: targetKey, ready: [], errors: {} });
     // One promise per device, kept so the cleanup queues behind the right one rather than
     // behind all of them: a slow phone must not delay releasing a fast one.
-    const opening = new Map(
-      udids.map((udid) => [udid, (async () => {
-        const previous = transitions.get(udid);
-        if (previous) await previous.catch(() => undefined);
-        if (cancelled) return;
-        for (let attempt = 0; ; attempt += 1) {
-          if (cancelled) return;
-          try { await deviceControlBegin(udid); return; }
-          catch (error) {
-            // IdleSweep is a short background owner, not a user job to interrupt.
-            if (cancelled || attempt >= 19 || !/DeviceBusy.*IdleSweep/.test(describeError(error))) throw error;
-            await new Promise(resolve => setTimeout(resolve, 500));
-          }
-        }
-      })()] as const),
-    );
-    for (const [udid, begin] of opening) {
-      void begin
+    const previous = controlHandoff.current;
+    const opening = new Map<string, ReturnType<typeof acquireControlSession>>();
+    const start = async () => {
+    if (previous) await previous;
+    if (cancelled) return;
+    for (const udid of udids) opening.set(udid, acquireControlSession(udid));
+    for (const [udid, session] of opening) {
+      void session.ready
         .then(() => {
           // Registered now, so `with_manual_session` will reuse it — gestures may fire.
           if (!cancelled) {
@@ -278,14 +284,13 @@ export function FocusStream({
           }
         });
     }
+    };
+    const starting = start();
     return () => {
       cancelled = true;
-      for (const [udid, begin] of opening) {
-        // `.catch` before `.then`, so a device whose begin rejected is still asked to
-        // close: the failure may have come after the session was created.
-        const release = begin.catch(() => undefined).then(() => deviceControlEnd(udid)).catch(() => undefined);
-        transitions.set(udid, release);
-      }
+      controlHandoff.current = starting.then(async () => {
+        await Promise.all([...opening.values()].map(session => session.release()));
+      });
     };
   }, [targetKey, controlRetry]);
 
@@ -497,8 +502,6 @@ export function FocusStream({
   const {
     pressKey,
     sendPhrase,
-    importFile,
-    exportFiles,
     copySerial,
     capture,
     reboot,
@@ -524,21 +527,21 @@ export function FocusStream({
       // twenty times to walk the fleet.
       id: "switchDevice",
       label: showDevices ? "Ẩn danh sách máy" : "Đổi máy",
-      Icon: IconPhone,
+      Icon: ArrowLeftRight,
       run: () => setShowDevices((open) => !open),
     },
     {
       id: "volumeUp",
-      label: "Vol+",
-      Icon: IconVolumeUp,
+      label: "Tăng âm lượng",
+      Icon: Volume2,
       androidOnly: true,
       disabled: keyDisabled,
       run: () => void pressKey("volumeUp"),
     },
     {
       id: "volumeDown",
-      label: "Vol−",
-      Icon: IconVolumeDown,
+      label: "Giảm âm lượng",
+      Icon: Volume1,
       androidOnly: true,
       disabled: keyDisabled,
       run: () => void pressKey("volumeDown"),
@@ -549,7 +552,7 @@ export function FocusStream({
       // first for the same reason.
       id: "refreshPicture",
       label: "Làm mới hình",
-      Icon: IconSync,
+      Icon: ScanLine,
       androidOnly: true,
       disabled: busy,
       run: () => {
@@ -565,22 +568,27 @@ export function FocusStream({
     {
       id: "screenshot",
       label: "Chụp màn hình",
-      Icon: IconCamera,
+      Icon: Image,
       disabled: busy,
       run: () => void capture(),
     },
     {
       id: "power",
       label: "Nút nguồn",
-      Icon: IconPower,
+      Icon: Power,
       androidOnly: true,
       disabled: keyDisabled,
       run: () => void pressKey("power"),
     },
+    ...(!isIos ? [{ id: "rotation-lock", label: "Khóa xoay dọc", Icon: Smartphone,
+      disabled: keyDisabled, run: () => void runBusy(async () => {
+        try { const value = await setScreenRotation(device.udid, 0); setRotationMessage(value === 0 ? "Đã khóa hướng dọc." : "Thiết bị chưa xác nhận hướng dọc."); }
+        catch (error) { setRotationMessage(describeError(error)); }
+      }) }] : []),
     {
       id: "installApk",
       label: "Cài APK",
-      Icon: IconUpload,
+      Icon: PackagePlus,
       androidOnly: true,
       disabled: busy,
       run: () => {
@@ -603,19 +611,23 @@ export function FocusStream({
       // Beside Cài APK, because both are "put a file on this phone" — and GenFarmer keeps
       // ImportFile / ExportFile adjacent in its own menu.
       id: "importMedia",
-      label: "Đưa ảnh/video vào máy",
-      Icon: IconImage,
+      label: "PC → Điện thoại",
+      Icon: ImageUp,
       androidOnly: true,
       disabled: busy,
-      run: () => void importFile(),
+      run: () => { void (async () => {
+        const paths = await pickFiles({ title: "Chọn tệp từ PC đưa vào điện thoại" });
+        if (paths.length && fileTarget.current === device.udid) setShowFiles({ mode: "upload", paths });
+      })(); },
     },
+    { id:"inspector",label:"Bắt thuộc tính & ghi Flow",Icon:ScanLine,androidOnly:true,run:()=>setShowInspector(true) },
     {
       id: "exportMedia",
-      label: "Lấy ảnh/video từ máy",
-      Icon: IconDownload,
+      label: "Điện thoại → PC",
+      Icon: FolderDown,
       androidOnly: true,
       disabled: busy,
-      run: () => void exportFiles(),
+      run: () => setShowFiles({ mode: "download", paths: [] }),
     },
     {
       // **`adb-inline`, not `adb`.** `panelNodes` concatenates these rows with the shared
@@ -627,7 +639,7 @@ export function FocusStream({
       // `deviceMenu.test.ts` and `DeviceContextMenu.test.tsx`, so this is the side that moves.
       id: "adb-inline",
       label: "Lệnh adb",
-      Icon: IconGrid,
+      Icon: TerminalSquare,
       androidOnly: true,
       run: () => setShowAdb(true),
     },
@@ -636,7 +648,7 @@ export function FocusStream({
       // they sit here rather than at the end of the list.
       id: "quickPhrase",
       label: showPhrases ? "Ẩn câu nhanh" : "Câu nhanh",
-      Icon: IconText,
+      Icon: TextCursorInput,
       androidOnly: true,
       disabled: busy,
       run: () => setShowPhrases((open) => !open),
@@ -644,7 +656,7 @@ export function FocusStream({
     {
       id: "switchKeyboard",
       label: showKeyboards ? "Ẩn bàn phím" : "Đổi bàn phím",
-      Icon: IconKeyboard,
+      Icon: Keyboard,
       androidOnly: true,
       disabled: busy,
       run: () => {
@@ -658,7 +670,7 @@ export function FocusStream({
     {
       id: "notification",
       label: "Thông báo",
-      Icon: IconBell,
+      Icon: Bell,
       androidOnly: true,
       disabled: keyDisabled,
       run: () => void pressKey("notification"),
@@ -666,7 +678,7 @@ export function FocusStream({
     {
       id: "reboot",
       label: "Khởi động lại",
-      Icon: IconRefresh,
+      Icon: RotateCcw,
       run: () => void reboot(),
     },
     ...(isIos
@@ -741,14 +753,19 @@ export function FocusStream({
     <div
       ref={dialogRef}
       tabIndex={-1}
-      className="focus-overlay"
+      className={`focus-overlay device-floating-window${closing ? " is-closing" : ""}`}
+      inert={closing}
       role="dialog"
-      aria-modal="true"
+      aria-modal="false"
+      data-active={active}
+      data-pinned={pinned}
+      style={{ zIndex: 40 + (pinned ? 6 : 0) + (active ? 2 : windowOrder / 100), translate: `${windowOrder % 5 * 18}px ${windowOrder % 5 * 12}px` }}
       aria-busy={busy}
       aria-label={`Điều khiển ${device.name}`}
-      onClick={onClose}
+      onPointerDownCapture={onActivate}
+      onKeyDown={event => { if (event.key === "Escape" && active && !event.defaultPrevented) { event.stopPropagation(); onClose(); } }}
     >
-      <div className={`focus-stage${layout.stacked ? " is-stacked" : ""}${layout.landscape ? " is-landscape" : ""}`} onClick={(event) => event.stopPropagation()}>
+      <div ref={stageRef} className={`focus-stage${layout.stacked ? " is-stacked" : ""}${layout.landscape ? " is-landscape" : ""}`} onClick={(event) => event.stopPropagation()}>
         <div
           ref={screenRef}
           className={`focus-phone-screen${busy ? " is-busy" : ""}`}
@@ -937,9 +954,13 @@ export function FocusStream({
           style={{ height: layout.menuHeight }}
         >
           <header className="focus-menu-head">
-            <strong title={`Máy ${index} · ${device.name} (${device.udid})`}>
-              Máy {index} · {device.name}
-            </strong>
+            <div className="focus-drag-title" title="Kéo để di chuyển bảng điều khiển"
+              onPointerDown={e=>{if(e.button!==0)return;e.currentTarget.setPointerCapture(e.pointerId);stageDrag.current={x:e.clientX,y:e.clientY,origin:{...stageOffset.current}};}}
+              onPointerMove={e=>{const d=stageDrag.current;if(!d||!stageRef.current)return;const box=stageRef.current.getBoundingClientRect();const proposed={x:d.origin.x+e.clientX-d.x,y:d.origin.y+e.clientY-d.y};const dx=Math.max(12-box.left,Math.min(proposed.x-stageOffset.current.x,window.innerWidth-12-box.right));const dy=Math.max(12-box.top,Math.min(proposed.y-stageOffset.current.y,window.innerHeight-12-box.bottom));stageOffset.current={x:stageOffset.current.x+dx,y:stageOffset.current.y+dy};stageRef.current.style.transform=`translate(${stageOffset.current.x}px, ${stageOffset.current.y}px)`;}}
+              onPointerUp={()=>{stageDrag.current=null;}} onPointerCancel={()=>{stageDrag.current=null;}}>
+              <GripVertical size={15} aria-hidden="true"/><span className="focus-machine-number">{index}</span>
+              <strong title={`Máy ${index} · ${device.name} (${device.udid})`}>{device.name}</strong>
+            </div>
             {groupMode && targets.length > 1 && (
               <span
                 className="focus-menu-group"
@@ -981,6 +1002,7 @@ export function FocusStream({
             >
               <IconCopy size={14} />
             </button>
+            <button type="button" className="ghost" aria-label={pinned?"Bỏ ghim bảng điều khiển":"Ghim bảng điều khiển"} aria-pressed={pinned} onClick={()=>setPinned(v=>!v)} title={pinned?"Bỏ ghim":"Giữ cửa sổ phía trên các máy khác"}>{pinned?<PinOff size={15}/>:<Pin size={15}/>}</button>
             <button
               type="button"
               className="close"
@@ -992,11 +1014,10 @@ export function FocusStream({
             </button>
           </header>
           {recordingControls}
-          <div className="focus-control-status" aria-live="polite" data-testid="focus-control-status">
-            <span>{hasView ? "Có hình" : "Đang chờ hình"} · {sessionReady ? (busy || actionPending ? "Đang thực hiện…" : "Điều khiển sẵn sàng") : controlErrors.length ? "Điều khiển gặp lỗi" : "Đang mở điều khiển…"}</span>
+          {controlErrors.length > 0 && <div className="focus-control-status" aria-live="polite" data-testid="focus-control-status">
             {controlErrors.length > 0 && <><p>{controlErrors.join(" · ")}</p><button type="button" onClick={() => setControlRetry(value => value + 1)}>Thử lại điều khiển</button></>}
-          </div>
-          <div className="focus-quick-keys" aria-label="Phím nhanh">
+          </div>}
+          <div className="focus-quick-keys" aria-label="Phím nhanh" hidden>
             {!isIos && <>
               <button type="button" title="Giảm âm lượng" aria-label="Giảm âm lượng" disabled={keyDisabled} onClick={() => void pressKey("volumeDown")}><IconVolumeDown size={17}/></button>
               <button type="button" title="Tăng âm lượng" aria-label="Tăng âm lượng" disabled={keyDisabled} onClick={() => void pressKey("volumeUp")}><IconVolumeUp size={17}/></button>
@@ -1163,6 +1184,8 @@ export function FocusStream({
           {showAdb && (
             <AdbConsole device={device} onClose={() => setShowAdb(false)} />
           )}
+          {showInspector && <DeviceInspector key={device.udid} udid={device.udid} onClose={()=>setShowInspector(false)}/>}
+          {showFiles && <DeviceFilesPopup key={device.udid} device={device} mode={showFiles.mode} uploadPaths={showFiles.paths} onClose={() => setShowFiles(null)}/>}
           <nav className="focus-navbar" aria-label="Phím điều hướng">
             {navKeys.map(({ key, title, Icon }) => (
               <button
@@ -1178,6 +1201,12 @@ export function FocusStream({
             ))}
           </nav>
         </aside>
+        <button type="button" className="device-window-resize" aria-label="Đổi kích thước cửa sổ máy" title="Kéo để đổi kích thước"
+          onPointerDown={event=>{if(event.button!==0)return;event.currentTarget.setPointerCapture(event.pointerId);resizeDrag.current={x:event.clientX,width:frameWidth};}}
+          onPointerMove={event=>{const start=resizeDrag.current;if(start)setFrameWidth(Math.round(Math.max(FOCUS_ZOOM.min,Math.min(FOCUS_ZOOM.max,start.width+event.clientX-start.x))));}}
+          onPointerUp={()=>{resizeDrag.current=null;}} onPointerCancel={()=>{resizeDrag.current=null;}}>
+          <GripVertical size={12}/>
+        </button>
       </div>
     </div>
   );

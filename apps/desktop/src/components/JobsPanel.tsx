@@ -1,5 +1,21 @@
-import { useCallback, useEffect, useRef, useState } from "react";
-import { Braces, RefreshCw, Search, Square, ChevronLeft, ChevronRight, ArrowUpRight } from "lucide-react";
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
+import {
+  Braces,
+  RefreshCw,
+  Search,
+  Square,
+  ChevronLeft,
+  ChevronRight,
+  ArrowUpRight,
+  X,
+} from "lucide-react";
+import { useModalFocus } from "./useModalFocus";
 
 import {
   cancelJob,
@@ -11,7 +27,10 @@ import {
 import { describeError } from "../describeError";
 import { flash } from "../farmToast";
 import { targetsOf } from "../selectionTargets";
-import { operationSourceFor, type OperationSourceRef } from "../operationSource";
+import {
+  operationSourceFor,
+  type OperationSourceRef,
+} from "../operationSource";
 import type {
   DeviceInfo,
   AppEvent,
@@ -71,7 +90,42 @@ function isActive(run: OperationRunSummary): boolean {
 function formatTimestamp(value: string | null): string {
   if (!value) return "Chưa có thời gian";
   const date = new Date(value);
-  return Number.isNaN(date.getTime()) ? "Thời gian không hợp lệ" : date.toLocaleString("vi-VN");
+  return Number.isNaN(date.getTime())
+    ? "Thời gian không hợp lệ"
+    : date.toLocaleString("vi-VN");
+}
+
+function RunDetails({
+  onClose,
+  children,
+}: {
+  onClose: () => void;
+  children: ReactNode;
+}) {
+  const ref = useModalFocus<HTMLDivElement>(onClose);
+  return (
+    <div className="runs-detail-backdrop" onClick={onClose}>
+      <div
+        ref={ref}
+        className="operations-monitor-detail runs-detail-drawer"
+        role="dialog"
+        aria-modal="true"
+        aria-label="Chi tiết lượt chạy"
+        tabIndex={-1}
+        onClick={(event) => event.stopPropagation()}
+      >
+        <button
+          type="button"
+          className="icon-btn runs-detail-close"
+          aria-label="Đóng chi tiết lượt chạy"
+          onClick={onClose}
+        >
+          <X size={18} />
+        </button>
+        {children}
+      </div>
+    </div>
+  );
 }
 
 export function JobsPanel({
@@ -98,6 +152,7 @@ export function JobsPanel({
   const [period, setPeriod] = useState("24");
   const [offset, setOffset] = useState(0);
   const [page, setPage] = useState<OperationRunPage | null>(null);
+  const [advanced, setAdvanced] = useState(false);
   const listTicket = useRef(0);
   const detailTicket = useRef(0);
   const targets = targetsOf(selectedUdids, devices);
@@ -109,22 +164,30 @@ export function JobsPanel({
     setLoading(true);
     setLoadError(null);
     try {
-      const nextPage = await operationQueryRuns({ limit: 50, offset,
-        state: status === "all" ? undefined : status, kind: kind === "all" ? undefined : kind,
-        search: query, since: period === "all" ? null : new Date(Date.now() - Number(period) * 3600000).toISOString() });
+      const nextPage = await operationQueryRuns({
+        limit: 50,
+        offset,
+        state: status === "all" ? undefined : status,
+        kind: kind === "all" ? undefined : kind,
+        search: query,
+        since:
+          period === "all"
+            ? null
+            : new Date(Date.now() - Number(period) * 3600000).toISOString(),
+      });
       const next = nextPage.runs;
       if (ticket !== listTicket.current) return;
       setPage(nextPage);
       setRuns(next);
       setSelectedRunId((current) =>
-        current && next.some((run) => run.id === current) ? current : next[0]?.id ?? null
+        current && next.some((run) => run.id === current) ? current : null,
       );
     } catch (cause) {
       if (ticket === listTicket.current) setLoadError(describeError(cause));
     } finally {
       if (ticket === listTicket.current) setLoading(false);
     }
-  }, [kind,offset,period,query,status]);
+  }, [kind, offset, period, query, status]);
 
   const loadDetail = useCallback(async (operationId: string) => {
     const ticket = ++detailTicket.current;
@@ -162,7 +225,7 @@ export function JobsPanel({
       listTicket.current += 1;
       detailTicket.current += 1;
     };
-  }, [loadDetail,reload]);
+  }, [loadDetail, reload]);
 
   useEffect(() => {
     selectedRunIdRef.current = selectedRunId;
@@ -172,14 +235,17 @@ export function JobsPanel({
     let disposed = false;
     let unlisten: (() => void) | undefined;
     const refreshForEvent = (event: AppEvent) => {
-      if (![
-        "jobUpdated",
-        "flowRunUpdated",
-        "orchestrationUpdated",
-        "interactionUpdated",
-        "publishUpdated",
-        "nurtureStatus",
-      ].includes(event.type)) return;
+      if (
+        ![
+          "jobUpdated",
+          "flowRunUpdated",
+          "orchestrationUpdated",
+          "interactionUpdated",
+          "publishUpdated",
+          "nurtureStatus",
+        ].includes(event.type)
+      )
+        return;
       void reload();
       const current = selectedRunIdRef.current;
       if (current) void loadDetail(current);
@@ -209,33 +275,34 @@ export function JobsPanel({
   }, [loadDetail, selectedRunId]);
 
   const filtered = runs;
-  const selectedRun = filtered.find((run) => run.id === selectedRunId) ?? filtered[0] ?? null;
+  const selectedRun = filtered.find((run) => run.id === selectedRunId) ?? null;
   const visibleDetail = detail?.summary.id === selectedRun?.id ? detail : null;
   const shownSummary = visibleDetail?.summary ?? selectedRun;
-  const interactionActorCount = shownSummary?.kind === "interaction"
-    ? new Set(visibleDetail?.items.filter((item) => item.kind === "assignment")
-      .map((item) => item.udid?.trim()).filter(Boolean)).size
-    : 0;
+  const interactionActorCount =
+    shownSummary?.kind === "interaction"
+      ? new Set(
+          visibleDetail?.items
+            .filter((item) => item.kind === "assignment")
+            .map((item) => item.udid?.trim())
+            .filter(Boolean),
+        ).size
+      : 0;
 
   useEffect(() => {
-    if (selectedRun && selectedRun.id !== selectedRunId) setSelectedRunId(selectedRun.id);
+    if (selectedRun && selectedRun.id !== selectedRunId)
+      setSelectedRunId(selectedRun.id);
   }, [selectedRun, selectedRunId]);
 
   return (
-    <div className="panel operations-page jobs-page">
-      <section className="operations-summary" aria-label="Tổng quan tác vụ">
-        <div><span>Đang thực hiện</span><strong>{page?.counts.active ?? "—"}</strong></div>
-        <div><span>Hoàn tất</span><strong>{page?.counts.succeeded ?? "—"}</strong></div>
-        <div data-attention={Boolean(page?.counts.attention)}><span>Cần xử lý</span><strong>{page?.counts.attention ?? "—"}</strong></div>
-        <button type="button" className="ghost" disabled={loading} onClick={() => void reload()}>
-          <RefreshCw size={15} /> Làm mới
-        </button>
-      </section>
-
+    <div className="operations-page jobs-page runs-list-page">
       {loadError && (
         <StatusNotice
           tone="error"
-          action={<button type="button" onClick={() => void reload()}>Thử lại</button>}
+          action={
+            <button type="button" onClick={() => void reload()}>
+              Thử lại
+            </button>
+          }
         >
           Không đọc được danh sách tác vụ: {loadError}
         </StatusNotice>
@@ -244,186 +311,359 @@ export function JobsPanel({
 
       <section className="operations-monitor" aria-label="Theo dõi tác vụ">
         <div className="operations-monitor-list">
-          <header className="operations-list-heading">
-            <strong>Lịch sử tác vụ</strong>
-            <span>{period === "24" ? "24 giờ qua" : period === "168" ? "7 ngày qua" : "Toàn bộ lịch sử"}</span>
-          </header>
           <div className="operations-filterbar">
             <label>
               <Search size={15} aria-hidden="true" />
               <span className="visually-hidden">Tìm tác vụ</span>
               <input
                 value={query}
-                onChange={(event) => { setQuery(event.target.value); setOffset(0); }}
+                onChange={(event) => {
+                  setQuery(event.target.value);
+                  setOffset(0);
+                }}
                 placeholder="Tìm theo loại hoặc tên tác vụ"
               />
             </label>
             <select
               value={status}
               aria-label="Lọc trạng thái tác vụ"
-              onChange={(event) => { setStatus(event.target.value as OperationRunState | "all"); setOffset(0); }}
+              onChange={(event) => {
+                setStatus(event.target.value as OperationRunState | "all");
+                setOffset(0);
+              }}
             >
               <option value="all">Tất cả trạng thái</option>
               {Object.entries(RUN_LABEL).map(([value, label]) => (
-                <option key={value} value={value}>{label}</option>
+                <option key={value} value={value}>
+                  {label}
+                </option>
               ))}
             </select>
-            <select aria-label="Loại tác vụ" value={kind} onChange={(event) => { setKind(event.target.value as OperationRunKind | "all"); setOffset(0); }}>
+            <select
+              aria-label="Loại tác vụ"
+              value={kind}
+              onChange={(event) => {
+                setKind(event.target.value as OperationRunKind | "all");
+                setOffset(0);
+              }}
+            >
               <option value="all">Mọi loại tác vụ</option>
-              {Object.entries(KIND_LABEL).map(([value,label]) => <option key={value} value={value}>{label}</option>)}
+              {Object.entries(KIND_LABEL).map(([value, label]) => (
+                <option key={value} value={value}>
+                  {label}
+                </option>
+              ))}
             </select>
-            <select aria-label="Khoảng thời gian tác vụ" value={period} onChange={(event) => { setPeriod(event.target.value); setOffset(0); }}>
-              <option value="24">24 giờ qua</option><option value="168">7 ngày qua</option><option value="all">Toàn bộ lịch sử</option>
+            <select
+              aria-label="Khoảng thời gian tác vụ"
+              value={period}
+              onChange={(event) => {
+                setPeriod(event.target.value);
+                setOffset(0);
+              }}
+            >
+              <option value="24">24 giờ qua</option>
+              <option value="168">7 ngày qua</option>
+              <option value="all">Toàn bộ lịch sử</option>
             </select>
+            <button
+              type="button"
+              className="ghost"
+              disabled={loading}
+              onClick={() => void reload()}
+              aria-label="Làm mới lượt chạy"
+            >
+              <RefreshCw size={15} />
+              Làm mới
+            </button>
+            <button
+              type="button"
+              className="ghost"
+              aria-expanded={advanced}
+              onClick={() => setAdvanced((value) => !value)}
+            >
+              <Braces size={15} />
+              JSON nâng cao
+            </button>
           </div>
-          {page && <div className="admin-actions operations-pagination" aria-label="Phân trang tác vụ">
-            <span>{page.total ? `${offset + 1}–${offset + runs.length}` : "0"} / {page.total} tác vụ</span>
-            <button type="button" className="icon-btn" aria-label="Trang tác vụ trước" disabled={loading || offset === 0} onClick={() => setOffset(Math.max(0,offset - 50))}><ChevronLeft size={16}/></button>
-            <button type="button" className="icon-btn" aria-label="Trang tác vụ sau" disabled={loading || !page.hasMore} onClick={() => setOffset(offset + 50)}><ChevronRight size={16}/></button>
-          </div>}
+          {page && (
+            <div
+              className="admin-actions operations-pagination"
+              aria-label="Phân trang tác vụ"
+            >
+              <span>
+                {page.total ? `${offset + 1}–${offset + runs.length}` : "0"} /{" "}
+                {page.total} tác vụ
+              </span>
+              <button
+                type="button"
+                className="icon-btn"
+                aria-label="Trang tác vụ trước"
+                disabled={loading || offset === 0}
+                onClick={() => setOffset(Math.max(0, offset - 50))}
+              >
+                <ChevronLeft size={16} />
+              </button>
+              <button
+                type="button"
+                className="icon-btn"
+                aria-label="Trang tác vụ sau"
+                disabled={loading || !page.hasMore}
+                onClick={() => setOffset(offset + 50)}
+              >
+                <ChevronRight size={16} />
+              </button>
+            </div>
+          )}
+          <div className="runs-table-scroll">
+            <table className="runs-table" aria-label="Danh sách lượt chạy">
+              <thead>
+                <tr>
+                  <th>Tên lượt chạy</th>
+                  <th>Ứng dụng</th>
+                  <th>Phạm vi</th>
+                  <th>Trạng thái</th>
+                  <th>Bắt đầu</th>
+                  <th>Cập nhật</th>
+                  <th>Kết quả</th>
+                  <th></th>
+                </tr>
+              </thead>
+              <tbody>
+                {filtered.map((run) => (
+                  <tr key={run.id} aria-selected={selectedRunId === run.id}>
+                    <td>
+                      <button
+                        type="button"
+                        className="runs-title-link"
+                        onClick={() => setSelectedRunId(run.id)}
+                      >
+                        {run.title}
+                      </button>
+                    </td>
+                    <td>{KIND_LABEL[run.kind]}</td>
+                    <td>
+                      {run.targetCount}{" "}
+                      {run.kind === "interaction" ? "bài" : "máy"}
+                    </td>
+                    <td>
+                      <span className={`pill ${run.state}`}>
+                        {RUN_LABEL[run.state]}
+                      </span>
+                    </td>
+                    <td>{formatTimestamp(run.createdAt)}</td>
+                    <td>{formatTimestamp(run.updatedAt)}</td>
+                    <td>
+                      {run.completedItems}/{run.totalItems}
+                      {run.issueCount > 0 && (
+                        <small> · {run.issueCount} cần kiểm tra</small>
+                      )}
+                    </td>
+                    <td>
+                      <button
+                        type="button"
+                        className="ghost"
+                        onClick={() => setSelectedRunId(run.id)}
+                        aria-label={`Xem lượt chạy ${run.title}`}
+                      >
+                        Chi tiết
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
           {loading && !runs.length && <LoadingState label="Đang tải tác vụ…" />}
           {!loading && !loadError && filtered.length === 0 && (
             <EmptyState
               compact
               title={runs.length ? "Không có tác vụ phù hợp" : "Chưa có tác vụ"}
-              hint={runs.length
-                ? "Đổi từ khóa hoặc bộ lọc trạng thái."
-                : "Các lần chạy Nuôi, Tương tác, Đăng bài và Flow sẽ xuất hiện tại đây."}
+              hint={
+                runs.length
+                  ? "Đổi từ khóa hoặc bộ lọc trạng thái."
+                  : "Các lần chạy Nuôi, Tương tác, Đăng bài và Flow sẽ xuất hiện tại đây."
+              }
             />
           )}
-          <div className="operations-run-list">
-            {filtered.map((run) => (
-              <button
-                type="button"
-                key={run.id}
-                className={shownSummary?.id === run.id ? "is-active" : ""}
-                aria-pressed={shownSummary?.id === run.id}
-                onClick={() => setSelectedRunId(run.id)}
-              >
-                <span>
-                  <strong>{run.title}</strong>
-                  <small>{KIND_LABEL[run.kind]} · {formatTimestamp(run.updatedAt)}</small>
-                </span>
-                <span className={`pill ${run.state}`}>{RUN_LABEL[run.state]}</span>
-              </button>
-            ))}
-          </div>
         </div>
 
-        <div className="operations-monitor-detail">
-          {!selectedRun ? (
-            <EmptyState compact title="Chọn một tác vụ để xem tiến độ" />
-          ) : detailLoading && !visibleDetail ? (
-            <LoadingState label="Đang tải chi tiết tác vụ…" />
-          ) : detailError ? (
-            <StatusNotice
-              tone="error"
-              action={(
-                <button type="button" onClick={() => void loadDetail(selectedRun.id)}>
-                  Thử lại chi tiết
-                </button>
-              )}
-            >
-              Không đọc được chi tiết tác vụ: {detailError}
-            </StatusNotice>
-          ) : shownSummary && visibleDetail ? (
-            <>
-              <header>
-                <div>
-                  <strong>{shownSummary.title}</strong>
-                  <span>
-                    {KIND_LABEL[shownSummary.kind]} · {shownSummary.targetCount} {shownSummary.kind === "interaction" ? "bài" : "máy"}
-                    {interactionActorCount > 0 ? ` · ${interactionActorCount} máy` : ""} · {RUN_LABEL[shownSummary.state]}
-                  </span>
-                </div>
-                {onOpenSource && shownSummary.kind !== "script" && (
-                  <button type="button" className="ghost" onClick={() => onOpenSource(operationSourceFor(shownSummary))}>
-                    <ArrowUpRight size={16} /> Mở tại {KIND_LABEL[shownSummary.kind]}
-                  </button>
-                )}
-                {shownSummary.kind === "script" && isActive(shownSummary) && (
+        {selectedRun && (
+          <RunDetails onClose={() => setSelectedRunId(null)}>
+            {!selectedRun ? (
+              <EmptyState compact title="Chọn một tác vụ để xem tiến độ" />
+            ) : detailLoading && !visibleDetail ? (
+              <LoadingState label="Đang tải chi tiết tác vụ…" />
+            ) : detailError ? (
+              <StatusNotice
+                tone="error"
+                action={
                   <button
                     type="button"
-                    className="ghost"
-                    disabled={busy}
-                    onClick={async () => {
-                      setBusy(true);
-                      setError(null);
-                      try {
-                        await cancelJob(shownSummary.sourceId);
-                        await reload();
-                        await loadDetail(shownSummary.id);
-                      } catch (cause) {
-                        setError(describeError(cause));
-                      } finally {
-                        setBusy(false);
-                      }
-                    }}
+                    onClick={() => void loadDetail(selectedRun.id)}
                   >
-                    <Square size={14} /> Dừng tác vụ
+                    Thử lại chi tiết
                   </button>
+                }
+              >
+                Không đọc được chi tiết tác vụ: {detailError}
+              </StatusNotice>
+            ) : shownSummary && visibleDetail ? (
+              <>
+                <header>
+                  <div>
+                    <strong>{shownSummary.title}</strong>
+                    <span>
+                      {KIND_LABEL[shownSummary.kind]} ·{" "}
+                      {shownSummary.targetCount}{" "}
+                      {shownSummary.kind === "interaction" ? "bài" : "máy"}
+                      {interactionActorCount > 0
+                        ? ` · ${interactionActorCount} máy`
+                        : ""}{" "}
+                      · {RUN_LABEL[shownSummary.state]}
+                    </span>
+                  </div>
+                  {onOpenSource && shownSummary.kind !== "script" && (
+                    <button
+                      type="button"
+                      className="ghost"
+                      onClick={() =>
+                        onOpenSource(operationSourceFor(shownSummary))
+                      }
+                    >
+                      <ArrowUpRight size={16} /> Mở tại{" "}
+                      {KIND_LABEL[shownSummary.kind]}
+                    </button>
+                  )}
+                  {shownSummary.kind === "script" && isActive(shownSummary) && (
+                    <button
+                      type="button"
+                      className="ghost"
+                      disabled={busy}
+                      onClick={async () => {
+                        setBusy(true);
+                        setError(null);
+                        try {
+                          await cancelJob(shownSummary.sourceId);
+                          await reload();
+                          await loadDetail(shownSummary.id);
+                        } catch (cause) {
+                          setError(describeError(cause));
+                        } finally {
+                          setBusy(false);
+                        }
+                      }}
+                    >
+                      <Square size={14} /> Dừng tác vụ
+                    </button>
+                  )}
+                </header>
+                {shownSummary.issueCount > 0 && (
+                  <StatusNotice
+                    tone={
+                      shownSummary.state === "uncertain" ? "warning" : "error"
+                    }
+                  >
+                    {shownSummary.issueCount} mục cần kiểm tra. Mở chi tiết từng
+                    mục để xem bằng chứng.
+                  </StatusNotice>
                 )}
-              </header>
-              {shownSummary.issueCount > 0 && (
-                <StatusNotice tone={shownSummary.state === "uncertain" ? "warning" : "error"}>
-                  {shownSummary.issueCount} mục cần kiểm tra. Mở chi tiết từng mục để xem bằng chứng.
-                </StatusNotice>
-              )}
-              {visibleDetail.items.length ? (
-                <ol className="operations-timeline">
-                  {visibleDetail.items.map((item) => (
-                    <li key={item.id} className={item.state}>
-                      <span aria-hidden="true" />
-                      <div>
-                        <strong>{visibleDetail.batch ? item.label : item.udid ? deviceNames.get(item.udid) ?? item.label : item.label}</strong>
-                        <small>
-                          {RUN_LABEL[item.state]}
-                          {item.retryable ? " · Có thể chạy lại từ nguồn gốc" : ""}
-                        </small>
-                        {onOpenSource && item.retryable && shownSummary.kind !== "script" && (
-                          <button type="button" className="ghost" onClick={() => onOpenSource({
-                            ...operationSourceFor(shownSummary), itemId: item.id, udid: item.udid ?? undefined,
-                          })}>
-                            <ArrowUpRight size={14} /> Mở mục cần xử lý
-                          </button>
-                        )}
-                        {(item.udid || item.errorCode || item.detail || item.evidence) && (
-                          <details>
-                            <summary>Chi tiết kỹ thuật</summary>
-                            {item.udid && <code>{item.udid}</code>}
-                            {item.detail && <p>{item.detail}</p>}
-                            {item.errorCode && <code>{item.errorCode}</code>}
-                            {item.evidence && <code>{item.evidence}</code>}
-                          </details>
-                        )}
-                      </div>
-                    </li>
-                  ))}
-                </ol>
-              ) : (
-                <EmptyState compact title="Tác vụ chưa có bước chi tiết" />
-              )}
-              <details className="operations-technical-details">
-                <summary>Mã tác vụ và tiến độ</summary>
-                <code>{shownSummary.sourceId}</code>
-                <p>{shownSummary.completedItems}/{shownSummary.totalItems} mục đã kết thúc</p>
-                {shownSummary.retryScope && (
-                  <p>Phạm vi khôi phục: {RETRY_SCOPE_LABEL[shownSummary.retryScope]}</p>
+                {visibleDetail.items.length ? (
+                  <ol className="operations-timeline">
+                    {visibleDetail.items.map((item) => (
+                      <li key={item.id} className={item.state}>
+                        <span aria-hidden="true" />
+                        <div>
+                          <strong>
+                            {visibleDetail.batch
+                              ? item.label
+                              : item.udid
+                                ? (deviceNames.get(item.udid) ?? item.label)
+                                : item.label}
+                          </strong>
+                          <small>
+                            {RUN_LABEL[item.state]}
+                            {item.retryable
+                              ? " · Có thể chạy lại từ nguồn gốc"
+                              : ""}
+                          </small>
+                          {onOpenSource &&
+                            item.retryable &&
+                            shownSummary.kind !== "script" && (
+                              <button
+                                type="button"
+                                className="ghost"
+                                onClick={() =>
+                                  onOpenSource({
+                                    ...operationSourceFor(shownSummary),
+                                    itemId: item.id,
+                                    udid: item.udid ?? undefined,
+                                  })
+                                }
+                              >
+                                <ArrowUpRight size={14} /> Mở mục cần xử lý
+                              </button>
+                            )}
+                          {(item.udid ||
+                            item.errorCode ||
+                            item.detail ||
+                            item.evidence) && (
+                            <details>
+                              <summary>Chi tiết kỹ thuật</summary>
+                              {item.udid && <code>{item.udid}</code>}
+                              {item.detail && <p>{item.detail}</p>}
+                              {item.errorCode && <code>{item.errorCode}</code>}
+                              {item.evidence && <code>{item.evidence}</code>}
+                            </details>
+                          )}
+                        </div>
+                      </li>
+                    ))}
+                  </ol>
+                ) : (
+                  <EmptyState compact title="Tác vụ chưa có bước chi tiết" />
                 )}
-                {shownSummary.retryableCount > 0 && <p>{shownSummary.retryableCount} mục có thể chạy lại từ workspace gốc.</p>}
-              </details>
-            </>
-          ) : null}
-        </div>
+                <details className="operations-technical-details">
+                  <summary>Mã tác vụ và tiến độ</summary>
+                  <code>{shownSummary.sourceId}</code>
+                  <p>
+                    {shownSummary.completedItems}/{shownSummary.totalItems} mục
+                    đã kết thúc
+                  </p>
+                  {shownSummary.retryScope && (
+                    <p>
+                      Phạm vi khôi phục:{" "}
+                      {RETRY_SCOPE_LABEL[shownSummary.retryScope]}
+                    </p>
+                  )}
+                  {shownSummary.retryableCount > 0 && (
+                    <p>
+                      {shownSummary.retryableCount} mục có thể chạy lại từ
+                      workspace gốc.
+                    </p>
+                  )}
+                </details>
+              </>
+            ) : null}
+          </RunDetails>
+        )}
       </section>
 
-      <details className="operations-advanced">
-        <summary><Braces size={16} /> Chạy JSON nâng cao</summary>
+      <details
+        className="operations-advanced"
+        hidden={!advanced}
+        open={advanced}
+      >
+        <summary>
+          <Braces size={16} /> Chạy JSON nâng cao
+        </summary>
         <div>
           <SelectionStrip
             devices={devices}
             selected={selectedUdids}
-            onSelectAll={() => onSelectUdids(devices.map((device) => device.udid))}
+            onSelectAll={() =>
+              onSelectUdids(devices.map((device) => device.udid))
+            }
             onClear={() => onSelectUdids([])}
           />
           <label>

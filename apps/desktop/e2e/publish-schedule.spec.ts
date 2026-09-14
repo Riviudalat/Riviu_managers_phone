@@ -1,3 +1,4 @@
+import { openOperatorPage } from "./fixtures/operatorNavigation";
 import { expect, test, type Page, type Locator } from "@playwright/test";
 import AxeBuilder from "@axe-core/playwright";
 import { installTauriMock } from "./fixtures/tauriMock";
@@ -22,7 +23,7 @@ async function fixture(page: Page, count = 10, fleetSize = 10) {
     };
   }, { count });
   await page.goto("/");
-  await page.getByRole("button", { name: "Đăng bài", exact: true }).click();
+  await openOperatorPage(page, 'Đăng bài');
   await expect(page.getByRole("button", { name: "Xem cùng thiết bị" })).toHaveCount(0);
   await page.getByRole("button", { name: "Chọn thư mục", exact: true }).click();
   await page.getByRole("button", { name: "Quét", exact: true }).click();

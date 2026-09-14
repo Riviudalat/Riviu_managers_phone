@@ -20,6 +20,7 @@ vi.mock("./api", () => ({
   installIpa: vi.fn(),
   setScreenRotation: vi.fn(async () => 0),
   viewRequestKeyframe: vi.fn(async () => true),
+  viewSetPreset: vi.fn(async () => undefined),
   rebootDevice: vi.fn(),
   restoreDevice: vi.fn(),
   saveViewSnapshot: vi.fn(),

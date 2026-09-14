@@ -16,6 +16,52 @@ pub struct PendingPublishVerification {
     pub evidence_json: Option<String>,
 }
 
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PublishDeviceHold {
+    pub assignment_id: String,
+    pub campaign_id: String,
+    pub updated_at: String,
+    pub reason: String,
+}
+
+#[derive(Debug, Default, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PublishDeviceGuard {
+    pub blocking: Vec<PublishDeviceHold>,
+    pub link_review: Vec<PublishDeviceHold>,
+}
+
+/// A terminal legacy Posted observation can still owe a link indefinitely. It is
+/// not an active upload once review stopped and the longest existing upload/verify
+/// budget (four hours) has elapsed since that row's LAST write. Created-at alone
+/// is unsafe: an old scheduled campaign could have dispatched just now.
+/// Submitted/ambiguous rows, malformed dates, and live pipelines stay protected.
+fn completed_upload_with_link_debt(
+    state: &str,
+    evidence: Option<&str>,
+    updated_at: &str,
+    active_pipeline: bool,
+    now: DateTime<Utc>,
+) -> bool {
+    if active_pipeline || !matches!(state, "uncertain" | "verifying" | "succeeded") {
+        return false;
+    }
+    let Some(evidence) =
+        evidence.and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+    else {
+        return false;
+    };
+    let post = evidence.get("post").unwrap_or(&evidence);
+    evidence["verificationStatus"]["state"] == "needsReview"
+        && post["state"] == "posted"
+        && post["verdict"] == "Posted"
+        && DateTime::parse_from_rfc3339(updated_at).is_ok_and(|updated| {
+            now.signed_duration_since(updated)
+                >= chrono::Duration::minutes(SCHEDULED_REVIEW_AFTER_MINUTES)
+        })
+}
+
 impl PendingPublishVerification {
     /// Old receipts without scheduling metadata remain immediately eligible.
     pub fn is_due(&self, now: DateTime<Utc>) -> bool {
@@ -166,6 +212,51 @@ fn scheduled_deadline_review(
 }
 
 impl Database {
+    /// A stale submission is still unresolved, but a fresh own-profile observation
+    /// proves this old receipt is no longer an active upload blocking the phone.
+    /// This does not settle publication, create a link or reopen its Send claim.
+    pub fn observe_stale_publish_idle(
+        &self,
+        assignment_id: &str,
+        account: &str,
+        package: &str,
+        snapshot_sha256: &str,
+    ) -> anyhow::Result<bool> {
+        use sha2::Digest;
+        anyhow::ensure!(
+            snapshot_sha256.len() == 64 && snapshot_sha256.bytes().all(|b| b.is_ascii_hexdigit()),
+            "idle observation hash missing"
+        );
+        let conn = self.conn()?;
+        let raw:Option<(String,String,String)>=conn.query_row("SELECT a.udid,a.effect_intent,a.campaign_id FROM publish_assignments a WHERE a.id=?1 AND a.state IN ('uncertain','verifying') AND NOT EXISTS(SELECT 1 FROM publish_pipeline_runs p WHERE p.campaign_id=a.campaign_id)",[assignment_id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional()?;
+        let Some((udid, intent, _campaign)) = raw else {
+            return Ok(false);
+        };
+        let parsed: serde_json::Value = serde_json::from_str(&intent)?;
+        let now = Utc::now();
+        let old = parsed["submittedAt"]
+            .as_str()
+            .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
+            .is_some_and(|s| now.signed_duration_since(s) >= chrono::Duration::hours(4));
+        if !old
+            || !parsed["expectedAccount"].as_str().is_some_and(|a| {
+                a.trim_start_matches('@')
+                    .eq_ignore_ascii_case(account.trim_start_matches('@'))
+            })
+        {
+            return Ok(false);
+        }
+        if parsed["package"].as_str().is_some_and(|p| p != package) {
+            return Ok(false);
+        }
+        let observation = serde_json::json!({"assignmentId":assignment_id,"udid":udid,"account":account,"package":package,"observedAt":now.to_rfc3339(),"sourceSha256":snapshot_sha256,"intentSha256":format!("{:x}",sha2::Sha256::digest(intent.as_bytes()))});
+        self.set_setting(
+            &format!("publish.idle.{assignment_id}"),
+            &observation.to_string(),
+        )?;
+        Ok(true)
+    }
+
     /// Stamp the first background observation before a submitted assignment becomes visible.
     /// Metadata comes from its durable campaign/intent, not an IPC flag or carried evidence.
     pub fn with_initial_scheduled_verification(
@@ -291,29 +382,102 @@ impl Database {
 
     /// A new automation session must not cold-start TikTok over a pending upload.
     pub fn has_pending_publish_for_device(&self, udid: &str) -> anyhow::Result<bool> {
+        Ok(!self.publish_device_guard(udid)?.blocking.is_empty())
+    }
+
+    /// Read-only split between a protected upload and an old completed upload's
+    /// missing-link obligation. Never edits state, evidence, retry scope or outbox.
+    pub fn publish_device_guard(&self, udid: &str) -> anyhow::Result<PublishDeviceGuard> {
         let conn = self.conn()?;
         let mut statement = conn.prepare(
-            "SELECT state,effect_intent,evidence_json FROM publish_assignments
-             WHERE udid=?1 AND state IN ('posting','verifying','uncertain','succeeded')",
+            "SELECT a.state,a.effect_intent,a.evidence_json,a.id,a.campaign_id,a.updated_at,
+             EXISTS(SELECT 1 FROM publish_pipeline_runs p WHERE p.campaign_id=a.campaign_id)
+             FROM publish_assignments a
+             WHERE a.udid=?1 AND a.state IN ('posting','verifying','uncertain','succeeded')
+             ORDER BY a.updated_at,a.id",
         )?;
         let rows = statement.query_map([udid], |row| {
             Ok((
                 row.get::<_, String>(0)?,
                 row.get::<_, Option<String>>(1)?,
                 row.get::<_, Option<String>>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, String>(5)?,
+                row.get::<_, bool>(6)?,
             ))
         })?;
+        let mut guard = PublishDeviceGuard::default();
+        let now = Utc::now();
         for row in rows {
-            let (state, intent, evidence) = row?;
+            let (state, intent, evidence, assignment_id, campaign_id, updated_at, active_pipeline) =
+                row?;
             if state == "posting"
                 || state == "verifying"
                 || state == "uncertain"
                 || may_verify(&state, intent.as_deref(), evidence.as_deref())
             {
-                return Ok(true);
+                let reason = evidence
+                    .as_deref()
+                    .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+                    .and_then(|e| {
+                        e["verificationStatus"]["reason"]
+                            .as_str()
+                            .map(str::to_owned)
+                    })
+                    .unwrap_or_else(|| "Bài đang tải hoặc chưa xác định được kết quả Đăng".into());
+                let mut completed = completed_upload_with_link_debt(
+                    &state,
+                    evidence.as_deref(),
+                    &updated_at,
+                    active_pipeline,
+                    now,
+                );
+                if !completed
+                    && !active_pipeline
+                    && matches!(state.as_str(), "uncertain" | "verifying")
+                {
+                    use sha2::Digest;
+                    let raw: Option<String> = conn
+                        .query_row(
+                            "SELECT value FROM settings WHERE key=?1",
+                            [format!("publish.idle.{assignment_id}")],
+                            |r| r.get(0),
+                        )
+                        .optional()?;
+                    completed = raw
+                        .and_then(|r| serde_json::from_str::<serde_json::Value>(&r).ok())
+                        .is_some_and(|o| {
+                            let digest = intent
+                                .as_ref()
+                                .map(|i| format!("{:x}", sha2::Sha256::digest(i.as_bytes())));
+                            o["assignmentId"] == assignment_id
+                                && o["udid"] == udid
+                                && o["intentSha256"].as_str() == digest.as_deref()
+                                && o["observedAt"]
+                                    .as_str()
+                                    .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
+                                    .is_some_and(|at| {
+                                        let age = now.signed_duration_since(at);
+                                        age >= chrono::Duration::zero()
+                                            && age < chrono::Duration::days(1)
+                                    })
+                        });
+                }
+                let hold = PublishDeviceHold {
+                    assignment_id,
+                    campaign_id,
+                    updated_at,
+                    reason,
+                };
+                if completed {
+                    guard.link_review.push(hold);
+                } else {
+                    guard.blocking.push(hold);
+                }
             }
         }
-        Ok(false)
+        Ok(guard)
     }
 
     /// Resume obsolete scheduled deadlines; enforce each submission verification budget.

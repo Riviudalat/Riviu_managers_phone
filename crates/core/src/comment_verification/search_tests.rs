@@ -114,6 +114,31 @@ fn row_identity_stays_with_author_and_does_not_match_same_text_twice() {
         .is_none());
     assert!(row(&tree(&(raw.clone() + &raw)), PKG, "approved", None).is_err());
 }
+
+#[test]
+fn visual_wrap_separator_matches_complete_text_without_weakening_identity() {
+    let raw = format!(
+        r#"<node package="{PKG}"><node package="{PKG}" class="android.widget.Button" text="Alice" bounds="[155,1000][600,1050]"/><node package="{PKG}" class="android.widget.TextView" text="Đi Đà Lạt&#8203; theo buổi" bounds="[155,1055][1000,1110]"/></node>"#
+    );
+    let found = row(&tree(&raw), PKG, "Đi Đà Lạt theo buổi", Some("Alice"))
+        .unwrap()
+        .unwrap();
+    assert_eq!(found.identity.text, "Đi Đà Lạt theo buổi");
+    assert!(row(
+        &tree(&(raw.clone() + &raw)),
+        PKG,
+        "Đi Đà Lạt theo buổi",
+        None
+    )
+    .is_err());
+    assert!(row(&tree(&raw), PKG, "Đi Đà Lạt theo buổi khác", None)
+        .unwrap()
+        .is_none());
+    assert!(row(&tree(&raw), PKG, "Di Da Lat theo buoi", None)
+        .unwrap()
+        .is_none());
+    assert!(!rendered_text_matches("a\u{200d}b", "ab"));
+}
 #[test]
 fn verification_worker_has_no_text_or_send_route() {
     let worker = include_str!("worker.rs");

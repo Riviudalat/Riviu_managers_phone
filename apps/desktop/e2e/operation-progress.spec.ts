@@ -1,3 +1,4 @@
+import { openOperatorPage } from "./fixtures/operatorNavigation";
 import { expect, test } from "@playwright/test";
 import { installTauriMock } from "./fixtures/tauriMock";
 
@@ -31,7 +32,7 @@ test("progress expands to per-device timed logs, stays available after navigatio
     await page.screenshot({ path: test.info().outputPath(`progress-${viewport.width}.png`), fullPage: true });
   }
   await page.setViewportSize({ width: 1440, height: 900 });
-  await page.getByRole("button", { name: "Tác vụ", exact: true }).click();
+  await openOperatorPage(page, 'Tác vụ');
   await expect(center.getByText("12:34:56", { exact: true })).toBeVisible();
   await center.getByRole("button", { name: "Thu nhỏ tiến trình" }).press("Escape");
   await expect(center).toHaveClass(/is-minimized/);
@@ -65,7 +66,7 @@ test("landscape decoder frame retains aspect and a usable menu across viewport s
   await page.locator("[data-testid='device-tile']").first().dblclick();
   const stage = page.locator(".focus-stage");
   await expect(stage).toHaveClass(/is-landscape/);
-  await expect(page.getByRole("button", { name: "Đưa về màn hình dọc", exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Khóa xoay dọc", exact: true })).toBeVisible();
   for (const viewport of [{ width: 1440, height: 900 }, { width: 900, height: 900 }, { width: 820, height: 560 }, { width: 390, height: 844 }]) {
     await page.setViewportSize(viewport);
     const pane = await page.getByTestId("focus-screen").boundingBox();

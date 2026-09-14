@@ -1,75 +1,90 @@
 import type { PageId } from "../types";
-import { PanelLeftClose, PanelLeftOpen } from "lucide-react";
+import { useState } from "react";
+import { ChevronDown } from "lucide-react";
 import { MENU_ICONS } from "./menuIcons";
 
 interface Props {
   page: PageId;
-  collapsed: boolean;
   selectedCount: number;
   total: number;
   readyCount: number;
   groupMode: boolean;
   onPage: (page: PageId) => void;
-  onToggleCollapse: () => void;
 }
 
 const MENU: { label: string; items: { id: PageId; label: string }[] }[] = [
   {
     label: "Thiết bị",
     items: [
-      { id: "control", label: "Thiết bị" },
-      { id: "diagnostics", label: "Chẩn đoán" },
+      { id: "control", label: "Control Center" },
     ],
   },
   {
-    label: "Tự động hóa",
+    label: "Automation",
     items: [
       { id: "nurture", label: "Nuôi TikTok" },
       { id: "interaction", label: "Tương tác" },
       { id: "publish", label: "Đăng bài" },
-      { id: "scripts", label: "Flow" },
-      { id: "jobs", label: "Tác vụ" },
+      { id: "myApps", label: "My Apps" },
+      { id: "jobs", label: "Lượt chạy" },
+      { id: "savedTasks", label: "Tác vụ đã lưu" },
+      { id: "scripts", label: "Flow thiết bị" },
     ],
   },
   {
     label: "Tài nguyên",
     items: [
+      { id: "accounts", label: "Quản lý tài khoản" },
+      { id: "schedules", label: "Lịch chạy" },
       { id: "material", label: "Kho nội dung" },
       { id: "apps", label: "Trung tâm ứng dụng" },
-      { id: "data", label: "Dữ liệu" },
     ],
   },
   {
     label: "Hệ thống",
     items: [
       { id: "api", label: "API" },
+      { id: "diagnostics", label: "Chẩn đoán" },
       { id: "settings", label: "Cài đặt" },
+      { id: "help", label: "Trợ giúp" },
     ],
   },
 ];
 
 export function Sidebar({
   page,
-  collapsed,
   selectedCount,
   total,
   readyCount,
   groupMode,
   onPage,
-  onToggleCollapse,
 }: Props) {
+  const [collapsed, setCollapsed] = useState<Record<string, boolean>>(() => {
+    try {
+      const stored: unknown = JSON.parse(localStorage.getItem("riviu.sidebar.groups") ?? "{}");
+      if (!stored || typeof stored !== "object" || Array.isArray(stored)) return {};
+      return Object.fromEntries(Object.entries(stored).filter(([, value]) => typeof value === "boolean"));
+    } catch {
+      return {};
+    }
+  });
+  const toggleGroup = (label: string) => setCollapsed(current => {
+    const next = { ...current, [label]: !current[label] };
+    try { localStorage.setItem("riviu.sidebar.groups", JSON.stringify(next)); } catch { /* optional preference */ }
+    return next;
+  });
   return (
-    <aside className={`aside ${collapsed ? "collapsed" : ""}`} aria-label="Riviu Manager">
+    <aside className="aside" aria-label="Riviu Manager">
       <div className="aside-logo">
         <img src="/logo.jpg" alt="" />
-        {!collapsed && <strong>Riviu Manager</strong>}
+        <strong>Riviu Manager<small>PHONE WORKSPACE</small></strong>
       </div>
 
       <nav id="primary-navigation" className="aside-scroll" aria-label="Điều hướng chính">
         {MENU.map((group) => (
           <section className="menu-group" key={group.label} aria-label={group.label}>
-            <h2>{group.label}</h2>
-            {group.items.map((item) => {
+            <h2><button type="button" className="sidebar-group-toggle" aria-expanded={!collapsed[group.label]} onClick={()=>toggleGroup(group.label)}>{group.label}<ChevronDown size={14}/></button></h2>
+            <div className="sidebar-group-content" data-open={!collapsed[group.label]} inert={!!collapsed[group.label]} aria-hidden={!!collapsed[group.label]}><div>{group.items.map((item) => {
               const Icon = MENU_ICONS[item.id];
               return (
                 <button
@@ -78,19 +93,18 @@ export function Sidebar({
                   className={`menu-item ${page === item.id ? "active" : ""}`}
                   data-testid="nav-item"
                   title={item.label}
-                  aria-label={collapsed ? item.label : undefined}
                   aria-current={page === item.id ? "page" : undefined}
                   onClick={() => onPage(item.id)}
                 >
-                  <span className="mi">{Icon ? <Icon size={16} /> : "›"}</span>
+                  <span className="mi">{Icon && <Icon size={18} />}</span>
                   <span>{item.label}</span>
                 </button>
               );
-            })}
+            })}</div></div>
           </section>
         ))}
 
-        {!collapsed && (
+        {(
           <div className="aside-stats">
             <h4>Kết nối</h4>
             <div className="aside-stat-row">
@@ -114,17 +128,6 @@ export function Sidebar({
         )}
       </nav>
 
-      <button
-        type="button"
-        className="aside-collapse"
-        onClick={onToggleCollapse}
-        title={collapsed ? "Mở rộng" : "Thu gọn"}
-        aria-label={collapsed ? "Mở rộng thanh điều hướng" : "Thu gọn thanh điều hướng"}
-        aria-expanded={!collapsed}
-        aria-controls="primary-navigation"
-      >
-        {collapsed ? <PanelLeftOpen size={17} /> : <PanelLeftClose size={17} />}
-      </button>
     </aside>
   );
 }

@@ -3,7 +3,7 @@ export function focusLayout(width: number, height: number, zoom: number, viewpor
   const aspect = width > 0 && height > 0 ? height / width : 2;
   const landscape = aspect < 1;
   const stacked = viewportWidth < 700;
-  const availableWidth = Math.max(1, viewportWidth - 26 - (stacked ? 0 : 220));
+  const availableWidth = Math.max(1, viewportWidth - 38 - (stacked ? 0 : 220));
   const wantedWidth = landscape ? zoom / aspect : zoom;
   const availableHeight = Math.max(1, viewportHeight - 26 - (stacked ? 250 : 0));
   const screenWidth = Math.min(wantedWidth, availableWidth, availableHeight / aspect);

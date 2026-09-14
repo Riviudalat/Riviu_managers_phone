@@ -1,3 +1,4 @@
+import { openOperatorPage } from "./fixtures/operatorNavigation";
 import { expect, test } from "@playwright/test";
 import { installTauriMock } from "./fixtures/tauriMock";
 
@@ -19,7 +20,7 @@ for (const width of [1440,820]) {
       };
     });
     const errors:string[]=[];page.on("pageerror",e=>errors.push(e.message));
-    await page.goto("/");await page.getByRole("button",{name:"Tương tác",exact:true}).click();
+    await page.goto("/");await openOperatorPage(page, 'Tương tác');
     const workspace=page.getByRole("region",{name:"Không gian Tương tác"});
     await workspace.getByRole("button",{name:"Chọn hành động & máy →"}).click();
     await expect(page.getByLabel("Thời lượng phiên (phút)")).toHaveValue("120");
@@ -30,7 +31,7 @@ for (const width of [1440,820]) {
     await page.getByLabel("Thời lượng phiên (phút)").fill("180");
     await page.screenshot({path:test.info().outputPath(`conversation-${width}.png`)});
     await expect.poll(()=>page.evaluate(()=>JSON.parse(JSON.parse(localStorage.getItem("riviu.form-draft.v1.interaction")!).value.conversationJson).durationMinutes)).toBe(180);
-    await page.reload();await page.getByRole("button",{name:"Tương tác",exact:true}).click();
+    await page.reload();await openOperatorPage(page, 'Tương tác');
     await page.getByRole("region",{name:"Không gian Tương tác"}).getByRole("button",{name:"Chọn hành động & máy →"}).click();
     await expect(page.getByLabel("Thời lượng phiên (phút)")).toHaveValue("180");
     await page.getByLabel("Kịch bản của bài").selectOption("content:456");

@@ -15,6 +15,44 @@ phạm vi máy rõ ràng và kết quả có thể đọc lại. Chọn hồ sơ
 
 ## Thiết bị
 
+Sidebar giữ chiều rộng và tên mục. Bấm tiêu đề **Automation**, **Tài nguyên** hoặc
+**Hệ thống** để ẩn/hiện các mục trong nhóm; lựa chọn được giữ cho lần mở sau.
+**Nuôi TikTok**, **Tương tác**, **Đăng bài** trên sidebar mở ba trang vận hành cũ.
+Trong **My Apps**, tên ứng dụng và **Mở chức năng** cũng mở trang cũ;
+**Thêm Flow** mở trình kéo thả bổ sung của ứng dụng.
+Control Center chỉ chứa quản lý thiết bị. Sidebar bỏ Dữ liệu và Mạng & Router. Trang **Lượt chạy** hiển thị bảng;
+chọn tên hoặc Chi tiết để mở ngăn kết quả. Monitor rỗng tự ẩn.
+
+Trong Control Center, bảng **Hiển thị** có thanh đổi kích thước ô xem trước và màn
+hình điều khiển; hình điện thoại phóng theo ô và giữ tỷ lệ. Rê chuột vào thẻ **Hiển thị**
+để bung bảng nổi, đưa chuột ra ngoài để tự ẩn. Bấm **Ghim bảng Hiển thị** để giữ bảng
+cạnh lưới; bỏ ghim để trở lại hover. Bàn phím mở bảng bằng Tab/Enter, Escape đóng
+bảng chưa ghim. Dấu **+** cạnh **Nhóm thiết bị** mở quản lý để tạo và phân máy vào nhóm.
+Bấm tên nhóm để lọc lưới và bung/thu các số máy thuộc nhóm; số bên phải là đã chọn/tổng.
+Các lựa chọn hiển thị được giữ cho lần mở sau. Chất lượng/FPS Android áp dụng
+ngay khi thả thanh trượt; lỗi đọc hoặc áp dụng hiển thị tại bảng. Bộ lọc USB/Wi-Fi, nhóm và bảng số
+máy chỉ thay tập đang xem/chọn, không tự thay phạm vi chiến dịch đã cấu hình. Trên
+màn hẹp, bảng này giữ bên trái với chiều rộng gọn hơn; sidebar vẫn luôn có chữ.
+Khi máy tính có nhiều ADB server, Riviu đọc và gộp thiết bị ở cổng 5037 và 5038;
+mỗi máy dùng cổng đang quản lý máy đó cho cả điều khiển và stream. Vì vậy dàn máy
+chia giữa hai server vẫn hiện đủ trong một lưới. Có thể giới hạn một cổng bằng
+`RIVIU_ADB_SERVER_PORT`.
+
+Cửa sổ điện thoại có màn hình bên trái, bảng lệnh bên phải, phím điều hướng cố định
+phía dưới. Chỉ có một cửa sổ phóng to: chọn máy B khi A đang mở sẽ chuyển sang B
+trong cùng cửa sổ và trả phiên điều khiển A. Ctrl/Shift chọn nhiều máy vẫn chỉ đổi
+phạm vi chọn. Khi bật Đồng bộ, máy chính đã chỉ định tiếp tục điều khiển nhóm.
+Kéo tiêu đề có số máy để di chuyển, kéo góc dưới phải để đổi kích thước. Trang chính
+vẫn dùng được khi cửa sổ mở. Nút Đóng hoặc Escape đóng cửa sổ đang thao tác. Tìm chức năng lọc toàn bộ bảng;
+các lệnh chưa dùng được vẫn hiện lý do/trạng thái theo máy.
+
+**PC → Điện thoại** mở hộp chọn một/nhiều tệp trên PC, sau đó mở thư mục điện thoại.
+Chọn thư mục đích rồi bấm **Đưa vào thư mục này**. Nếu có tệp lỗi, bấm lại chỉ gửi
+những tệp chưa thành công. **Điện thoại → PC** mở thư mục điện thoại để đánh dấu
+tệp/thư mục, rồi **Lấy về máy tính** mở hộp chọn nơi lưu trên PC. Hai chiều có tiêu đề
+và nút riêng. **Tệp trên máy…** vẫn mở bảng quản lý đủ cả đưa/lấy/xoá.
+Bảng tệp căn trái tên, giữ khung gọn khi tải và có chuyển động mở/đóng.
+
 ### Riviu Helper trên Android
 
 Khi phát hiện điện thoại Android đã cho phép gỡ lỗi USB, Riviu Manager tự kiểm tra
@@ -41,6 +79,24 @@ Các cửa sổ chi tiết giữ thao tác bàn phím bên trong; Escape đóng 
 và trả focus về nơi mở. Cửa sổ tiến trình cho phép tiếp tục làm việc với trang chính.
 
 ### Ghi Macro
+
+**Bắt thuộc tính & ghi Flow:** mở màn hình một máy Android, chọn mục cùng tên trong
+menu bên phải. Rê chuột để tô phần tử; bấm chọn chỉ xem chữ, mô tả, ID và loại.
+**Bấm và kiểm tra kết quả** mới gửi thao tác. Bật **Bắt đầu ghi**, thực hiện các bước,
+**Dừng ghi** rồi **Lưu thành Flow**. Mở Flow thiết bị để chỉnh selector/hậu điều kiện
+và chạy. Phiên có bước chưa thấy phần tử kết quả cần được kiểm tra trước khi lưu.
+Macro tọa độ bên dưới vẫn dùng cho thao tác cử chỉ; Flow Inspector tìm lại phần tử.
+
+Agent có thể dùng MCP Riviu khi API cục bộ đã bật. Chạy `npm run agent-mcp` trong
+apps/desktop với `RIVIU_API_TOKEN` và `RIVIU_API_URL` từ cấu hình API. Các tool
+riviu_devices, riviu_observe, riviu_tap, riviu_record và riviu_recording dùng cùng
+phiên/ghi nhận với Inspector. Mẫu chỉ dẫn:
+
+```text
+Chọn đúng UDID được yêu cầu. Quan sát màn hình trước mỗi bước, dùng selector
+duy nhất và kiểm tra phần tử kết quả. Ghi quy trình bằng riviu_record.
+Giữ bước chưa xác minh để người vận hành xem; không tự lặp thao tác có thể đã gửi.
+```
 
 Vào **Công cụ → Macro**, nhập tên nếu cần rồi bấm **Bắt đầu ghi**. Hộp công cụ thu lại
 thành thanh **Ghi Macro**, gồm số bước và **Dừng ghi**. Mở điện thoại để chạm, vuốt hoặc
@@ -161,8 +217,12 @@ Khi bắt đầu phiên mới, Nuôi/Tương tác/Đăng bài lấy quyền sử
 có kiểm chứng trước khi mở lại. Chỉ mở tab không làm việc này. Không xóa dữ liệu/cache,
 không đăng xuất, không tắt app khác. Kết thúc công việc thì tắt TikTok và đóng stream;
 riêng bài đã bấm Đăng nhưng chưa xác minh được liên kết giữ TikTok chạy và giữ nội dung
-đã chuyển để quá trình tải tiếp tục. Máy còn bài chờ xác minh chưa bắt đầu phiên tự động
-mới có bước tắt TikTok. Lỗi dọn được báo riêng. Lượt đã qua Send/Post mà chưa rõ kết quả
+đã chuyển để quá trình tải tiếp tục. Máy còn bài đang tải hoặc chưa rõ kết quả Đăng
+chưa bắt đầu phiên tự động mới có bước tắt TikTok. Riêng bản ghi đã có `Posted`, đã
+dừng tự xác minh và không có pipeline hoạt động: sau ít nhất 4 giờ kể từ cập nhật cuối,
+việc thiếu link chuyển thành lưu ý **Liên kết bài cũ**, không giữ máy mãi. Bài cũ vẫn
+cần đối soát trong Theo dõi, không được đưa lại vào lượt đăng hay báo Sheet thành công.
+Lỗi dọn được báo riêng. Lượt đã qua Send/Post mà chưa rõ kết quả
 không tự gửi/đăng lại; việc kiểm tra lại chỉ đi theo phạm vi đã được ghi nhận.
 
 ## Tương tác
@@ -215,14 +275,20 @@ nếu báo lỗi, sửa hoặc bấm **Tải lại nick đã lưu** trước khi
 cho hai máy để tránh nhầm actor khi tag. Nick lưu trong Riviu chưa chứng minh máy
 đang đăng nhập tài khoản đó; sau khi đổi tài khoản trên TikTok cần đối chiếu lại.
 
+Trước khi gửi bình luận trên Android, Riviu đọc username từ hồ sơ đang đăng nhập
+và cập nhật nick của máy; số máy, tên, nhóm và ghi chú được giữ nguyên. Reply có
+bật tag dùng username đã đọc của người được trả lời. Chưa xác định được username
+thì lượt dừng trước Gửi, thay vì âm thầm bỏ tag. Kiểm tra lại bình luận cũ thiếu
+username dùng nick đã đối chiếu, rồi vẫn kiểm tra hồ sơ tác giả của bình luận đó.
+
 **Đọc tài khoản từ máy** mở Hồ sơ, đối chiếu nick đã gán với nick quan sát được,
 báo Khớp/Lệch/Chưa đọc được và thời điểm. Không tự đổi tài khoản hoặc ghi đè nick.
 Hiện đã đo `trill 38.3.2/en`; bản/ngôn ngữ khác cần hiệu chỉnh trước.
 
-**Nhập từ Google Sheet:** dán link đúng tab, chọn cột chứa link, bấm Đọc Sheet.
-Chọn các dòng hợp lệ rồi Thêm bài đã chọn. Link trùng/lỗi có trạng thái riêng; đọc
-Sheet không chạy chiến dịch. Xem bảng **Phân công bài và máy** trước khi xác nhận.
-Nguồn phải đọc được bằng quyền xem liên kết; Riviu không ghi ngược Sheet ở bước này.
+Tương tác nhận link trực tiếp, mỗi dòng một bài; phần nhập Google Sheet đã bỏ khỏi
+cả trang chính và cửa sổ nổi. Ba bước Chọn bài viết → Hành động & máy → Kiểm tra & chạy
+giữ cấu hình khi chuyển bước. Phạm vi máy hiển thị thành một dòng riêng phía trên
+chọn tất cả/bỏ chọn; xem bảng phân công trước khi xác nhận chạy.
 
 Với lượt **Chưa chắc kết quả**, **Kiểm tra lại kết quả** chỉ mở đúng bài để đọc lại
 Tim/Lưu. Không gửi lại, không thay lịch sử uncertain. Bình luận chưa được kiểm lại
@@ -433,10 +499,83 @@ không phải xoá tùy ý theo tên thư mục.
 
 ## Flow
 
+**My Apps → Mở trình thiết kế** mở graph riêng của ứng dụng. Thư viện bước ở bên trái,
+canvas ở giữa; chọn bước để chỉnh thông số bên phải. Kéo bước, nối cổng, xóa bước,
+hoàn tác/làm lại và lưu tạo revision. Tìm node bằng tên/ID rồi Enter để đưa vào vùng nhìn.
+**Cấu hình ứng dụng** nhận hồ sơ đã lưu hoặc nguồn/link/nội dung đầu vào. **Chạy** yêu
+cầu lưu trước và chọn phạm vi thiết bị; theo dõi và hủy trong bảng chạy.
+
+Nuôi TikTok dùng thứ tự Thích/Lưu/Bình luận đã nối, tỷ lệ từng bước, giới hạn xem và
+thời lượng. Các bước chuẩn bị/xác minh trong Tương tác/Đăng bài giữ thứ tự phụ thuộc
+của engine; nối sai bị báo khi kiểm tra/lưu. Chờ và Ghi nhật ký đặt trước/sau pipeline;
+lịch theo hồ sơ chưa nhận các bước Chờ/Ghi nhật ký bao quanh. Graph này chưa thay thế
+thư viện thao tác thấp của **Flow thiết bị** và không chứng nhận tương đương mọi node GenFarmer.
+
+**Tác vụ đã lưu** ghim ứng dụng/revision cùng máy thực hiện; **Lịch chạy** quản lý
+lịch của các hồ sơ, hiển thị lần chạy kế tiếp và lỗi gần nhất. **Quản lý tài khoản**
+giữ metadata, nhóm và máy; đọc tài khoản là thao tác riêng. Nhập/xuất JSON không gửi
+lệnh vào điện thoại. **Mạng & Router** giữ hồ sơ kết nối, thử TCP và áp dụng/xóa proxy
+HTTP không xác thực trên Android; kết quả phải đọc lại khớp trên từng máy.
+Phần chợ ứng dụng chưa được thêm trong đợt này.
+
 **Đầu vào:** graph thiết bị hoặc điều phối fleet, cấu hình node, target và profile.
 **Thao tác:** chọn đúng chế độ; sửa graph; validate; lưu trước khi chạy; theo dõi execution
 và từng node. Import/export JSON là thao tác bản nháp có guard; archive phải phản ánh
 đúng identity đang mở.
+
+Trong bảng bước có **Gán biến**, **Đọc văn bản**, **So sánh biến**, **Nếu thấy phần tử**
+và **Ghi nhật ký**. Biến là chuỗi riêng của từng máy; tên chỉ gồm chữ Latin, số và
+gạch dưới, bắt đầu bằng chữ hoặc gạch dưới. Gán/đọc biến trước khi dùng; hai nhánh
+của bước so sánh phải được nối. Lịch sử hiển thị giá trị đã ghi và nhánh thực sự chạy.
+Flow có thao tác UI vẫn cần **Mở ứng dụng** làm bước thao tác đầu tiên. Nếu thấy
+phần tử hiện dùng cây đầy đủ trên Android; máy thiếu khả năng này báo rõ trước khi đọc.
+
+Chọn bước **Đọc tệp**, **Ghi tệp**, **Gọi HTTP**, **Đọc ô Sheet** hoặc
+**Ghi ô Sheet** rồi mở **Kết nối dữ liệu: tệp, HTTP và Google Sheet** trong bảng
+thuộc tính để nhập tệp hoặc lưu token. Tệp nằm trong `flow-data` của Riviu; đường
+dẫn tương đối như `inputs/posts.csv` chỉ đọc/ghi trong thư mục này. Mỗi kết quả tối
+đa 4.096 ký tự, tệp/HTTP tối đa 16 KiB. CSV và Sheet trả bảng JSON gồm các hàng
+chuỗi; ghi bảng nhận cùng dạng `[["Máy 1","Sẵn sàng"]]`. Đặt **Biến lưu kết quả**
+rồi dùng `${ten_bien}` trong đường dẫn hoặc nội dung bước sau. Token HTTP lưu bằng
+tên tham chiếu trong kho xác thực của hệ điều hành. HTTP gửi một lần; khi thiếu
+phản hồi sau gửi, kiểm tra phía nhận trước khi tạo lượt chạy mới.
+
+Các bước Sheet dùng kết nối đã cấu hình ở **Đăng bài**, yêu cầu link bảng, tên tab
+chính xác và vùng A1 hữu hạn tối đa 1.000 ô. Cập nhật bản triển khai Apps Script
+bằng [`publish-sheet.gs`](apps-script/publish-sheet.gs) đi kèm để bật đọc/ghi vùng;
+giữ cấu hình bảng/token hiện có. Vùng phải nằm trong lưới đã có; ghi đủ số hàng,
+số cột và đọc lại khớp mới báo thành công. Công thức nhập trong giá trị được lưu
+như văn bản. Thiết lập connector không chạy Flow hay sửa bảng từ xa.
+
+**Nhập Flow** nhận JSON Flow cũ, script GenFarmer hoặc Macro Riviu. Chọn định dạng,
+đọc file/dán JSON, **Xem trước**, rồi **Mở bản nháp**. Import chỉ chuyển những bước
+có hợp đồng tương thích; danh sách lỗi nêu bước cần sửa. Các bước tọa độ cần profile
+hình học và điều kiện xác minh; dữ liệu thiếu được giữ để người dùng sửa từ nguồn,
+không tự chọn tọa độ thay thế. Home nhập từ ngoài cần đặt đúng app launcher khi validate.
+Ánh xạ ID nguồn hiện có trong màn hình xem trước; Flow lưu sau đó dùng ID Riviu.
+
+**Lặp chuỗi hành động** tạo thêm bản sao body tuyến tính, tối đa 50 lượt và 500 bước. Mỗi bản sao
+có ID và lịch sử riêng. Flow có rẽ nhánh cần chỉnh cấu trúc trước khi dùng chức năng
+này. **Hoàn tác** trả lại toàn bộ graph trước khi lặp.
+
+**Ghép hoặc chỉnh Flow con** lưu trọn nội dung một Flow vào bước **Flow con** hoặc
+**Lặp Flow con**. Chọn Flow đã lưu và **Phiên bản nguồn**, bấm **Nạp đúng phiên bản**;
+hoặc nạp tệp/chỉnh **JSON Flow con** trong hộp thoại. Bản nguồn đổi sau đó không đổi
+nội dung đã ghép. Chọn bước đã ghép rồi mở lại nút này để sửa body hoặc ánh xạ biến.
+Biến đầu vào dùng `biến con: biến cha`; đầu ra dùng `biến cha: biến con`. Mỗi lượt
+có biến riêng, truyền đầu vào trước khi chạy body và trả đầu ra sau khi hoàn tất.
+Ví dụ đầu vào `{"noiDung":"caption"}` lấy biến `caption` của cha vào `noiDung`
+của con; đầu ra `{"ketQua":"daDoc"}` trả biến `daDoc` của con vào `ketQua` của cha.
+Flow con hỗ trợ nhánh và lồng nhau, tối đa 8 cấp, 50 lượt cho mỗi bước lặp và
+2.000 bước sau khi biên dịch. **Áp dụng Flow con** kiểm tra toàn bộ Flow cha trước
+khi cập nhật bản nháp; vẫn cần lưu trước khi chạy.
+Lịch sử hiển thị phiên bản Flow con và số lượt thực sự chạy; mở **Chi tiết** của
+bước để đối chiếu ID nguồn, kể cả sau khi khởi động lại ứng dụng.
+
+Khi chọn ảnh cho **Chạm theo ảnh / Nếu thấy ảnh**, cắt ảnh rồi dùng **Kiểm tra ảnh mẫu**
+để xem vị trí, điểm khớp và các kết quả trùng trên ảnh đã chụp. Phép thử chạy cục bộ
+và không thao tác điện thoại. **Dùng ảnh mẫu** mới ghi ảnh vào bước. Các tùy chọn
+đa tỷ lệ của phép thử không thay config hoặc thuật toán thực thi Flow đã lưu.
 
 **Kết quả:** execution history, node outcomes và artifact nguồn. **Tiếp theo:** mở đúng
 run để xem lỗi; retry chỉ theo contract của effect đó. Lịch sử execution không cho phép
@@ -486,6 +625,39 @@ mở chi tiết rồi quay về workspace gốc để xử lý.
 **Kết quả:** trạng thái runtime, không chỉ giá trị trong form. **Tiếp theo:** xử lý port
 bị chiếm hoặc restart theo chỉ báo; kiểm tra gọi API qua cùng admission/ownership với UI.
 Bấm **Cấu hình kết nối** để mở thẳng nhóm **Kết nối và API** trong Cài đặt.
+
+Trang **API** có danh mục HTTP theo chức năng và ví dụ PowerShell chạy, theo dõi,
+dừng Flow. Tìm bằng tên lệnh hoặc đường dẫn. Phần tham chiếu runtime bên dưới dùng
+qua Tauri invoke trong ứng dụng. HTTP chỉ lắng nghe trên `127.0.0.1`, mặc định cổng
+`22222`; lấy địa chỉ thực tế ở **Trạng thái API**. Mọi request cần
+`Authorization: Bearer TOKEN` với token lấy trong Cấu hình kết nối.
+
+| Thao tác | HTTP |
+|---|---|
+| Danh mục action | `GET /v1/flows/catalog` |
+| Flow đã lưu | `GET /v1/flows?includeArchived=false` |
+| Đọc revision | `GET /v1/flows/{id}?revision=3` |
+| Chạy Flow | `POST /v1/flows/{id}/runs` |
+| Lịch sử Flow | `GET /v1/flow-runs?limit=100` (1–200) |
+| Chi tiết lượt chạy | `GET /v1/flow-runs/{id}` |
+| Yêu cầu dừng | `POST /v1/flow-runs/{id}/cancel`, body trống hoặc `{}` |
+| Thiết bị / nhóm | `GET /v1/devices`, `GET /v1/groups` |
+| Hàng đợi script | `GET /v1/jobs` (100 tác vụ mới nhất) |
+
+Chạy Flow nhận body JSON như
+`{"revision":3,"selection":{"mode":"selected","udids":["UDID_A","UDID_B"]}}`.
+Thay ID, revision và UDID bằng dữ liệu đã đọc. Revision đã lưu là bất biến; bỏ
+revision dùng bản mới nhất. `selection` bắt buộc: `one` nhận `udid`, `selected`
+nhận 1–200 `udids` khác nhau, `allEligible` chọn mọi máy đủ điều kiện. Runtime
+chụp danh sách máy khi nhận lượt chạy; đổi nhóm sau đó không đổi lượt đã nhận.
+
+Phản hồi thành công có `ok: true` và `result`. Khi tạo lượt chạy, lưu `result.id`
+rồi đọc chi tiết để theo dõi kết quả từng máy. `cancellationRequested: true` xác
+nhận yêu cầu dừng; tiếp tục đọc tới trạng thái kết thúc. Nếu mất phản hồi POST,
+tra lịch sử trước khi gửi lại để tránh tạo hai lượt. Khi lỗi, đọc `code`, `error`
+và `details`: HTTP 400 sai dữ liệu, 401 sai token, 404 không tìm thấy, 409 máy bận
+hoặc xung đột trạng thái, 503 ứng dụng đang đóng. Tổng header và body tối đa 64 KiB;
+client gửi Content-Length. Run/cancel dùng chung admission và engine Flow với UI.
 
 ## Cài đặt
 

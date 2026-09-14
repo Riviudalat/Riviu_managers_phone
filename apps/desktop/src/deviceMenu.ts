@@ -12,7 +12,7 @@
  * closure — but it is where the rows are shaped, so it is where the rule is repeated.
  */
 
-import type { ReactElement } from "react";
+import type { ComponentType } from "react";
 
 export interface DeviceMenuNode {
   id: string;
@@ -22,7 +22,7 @@ export interface DeviceMenuNode {
    * does, the right-click menu does not. Optional because the *rule* is that a row exists
    * when its command exists; an icon is decoration and must never gate a row.
    */
-  Icon?: (props: { size?: number }) => ReactElement;
+  Icon?: ComponentType<{ size?: number }>;
   /**
    * Extra words a search should match, for rows an operator would look for by a name the
    * label does not contain: `wifi` for "Bật/tắt Wi-Fi", `dpi` for "Đặt lại mật độ điểm",

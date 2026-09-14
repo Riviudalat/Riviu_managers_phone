@@ -40,6 +40,7 @@ struct FlowRuntimeInner {
     registry: DeviceRegistry,
     control: Arc<DeviceControlPlane>,
     frames: Arc<dyn GenerationFrameSource>,
+    reasoner: Option<crate::ui_automation::SharedReasoner>,
     artifacts: FlowArtifactStore,
     cancellations: Mutex<HashMap<Uuid, FlowCancellation>>,
     tasks: Mutex<HashMap<Uuid, TrackedFlowTask>>,
@@ -148,6 +149,7 @@ pub struct FlowRuntimeDeps {
     pub registry: DeviceRegistry,
     pub control: Arc<DeviceControlPlane>,
     pub frames: Arc<dyn GenerationFrameSource>,
+    pub reasoner: Option<crate::ui_automation::SharedReasoner>,
     pub artifacts: FlowArtifactStore,
 }
 
@@ -160,6 +162,7 @@ impl FlowRuntime {
                 registry: deps.registry,
                 control: deps.control,
                 frames: deps.frames,
+                reasoner: deps.reasoner,
                 artifacts: deps.artifacts,
                 cancellations: Mutex::new(HashMap::new()),
                 tasks: Mutex::new(HashMap::new()),
@@ -785,6 +788,7 @@ impl FlowRuntime {
             database: self.inner.database.clone(),
             control: self.inner.control.clone(),
             frames: self.inner.frames.clone(),
+            reasoner: self.inner.reasoner.clone(),
             artifacts: self.inner.artifacts.clone(),
             cancellation,
         });
@@ -990,6 +994,7 @@ impl FlowRuntime {
                             database: runtime.inner.database.clone(),
                             control: runtime.inner.control.clone(),
                             frames: runtime.inner.frames.clone(),
+                            reasoner: runtime.inner.reasoner.clone(),
                             artifacts: runtime.inner.artifacts.clone(),
                             cancellation,
                         });
@@ -1413,6 +1418,7 @@ impl FlowRuntime {
                 database: self.inner.database.clone(),
                 control: self.inner.control.clone(),
                 frames: self.inner.frames.clone(),
+                reasoner: self.inner.reasoner.clone(),
                 artifacts: self.inner.artifacts.clone(),
                 cancellation,
             });
@@ -1585,6 +1591,7 @@ impl FlowRuntime {
             database: self.inner.database.clone(),
             control: self.inner.control.clone(),
             frames: self.inner.frames.clone(),
+            reasoner: self.inner.reasoner.clone(),
             artifacts: self.inner.artifacts.clone(),
             cancellation,
         });
@@ -4635,6 +4642,7 @@ mod tests {
                 .join(format!("riviu-flow-runtime-artifacts-{}", Uuid::new_v4()));
             let artifacts = FlowArtifactStore::new(artifact_root).expect("artifact store");
             let runtime = FlowRuntime::new(FlowRuntimeDeps {
+                reasoner: None,
                 database: database.clone(),
                 events: events.clone(),
                 registry: registry.clone(),
@@ -6428,6 +6436,7 @@ mod tests {
             revision: 1,
             nodes: nodes.into_iter().map(|node| (node.id, node)).collect(),
             execution_order,
+            source_paths: Default::default(),
             successors: Default::default(),
             context_plan,
             action_definition_versions,

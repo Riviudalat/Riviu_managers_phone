@@ -1,6 +1,7 @@
 import { expect, test, type Page } from "@playwright/test";
 
 import { installTauriMock, mockCommandCalls } from "./fixtures/tauriMock";
+import { openOperatorPage } from "./fixtures/operatorNavigation";
 
 // Every production route has a loaded-state visual baseline at each operator viewport.
 const PAGES = [
@@ -13,7 +14,6 @@ const PAGES = [
   "Tác vụ",
   "Kho nội dung",
   "Trung tâm ứng dụng",
-  "Dữ liệu",
   "API",
   "Cài đặt",
 ] as const;
@@ -26,7 +26,7 @@ async function open(page: Page, name: string): Promise<void> {
   // Wait for the fleet the mock serves, so no page is captured mid-bootstrap.
   await expect(page.locator("[data-testid='device-tile']")).toHaveCount(2);
   if (name !== "Thiết bị") {
-    await page.getByRole("button", { name, exact: true }).click();
+    await openOperatorPage(page, name);
   }
   // **Loaded before pixels, and the Flow baseline is why this line exists.** Waiting for
   // the fleet says the shell is up; it says nothing about a page that fetches its own

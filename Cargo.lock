@@ -3478,6 +3478,7 @@ dependencies = [
  "parking_lot",
  "quick-xml",
  "rand 0.8.7",
+ "regex",
  "reqwest 0.12.28",
  "riviu-script-engine",
  "rusqlite",
@@ -3515,7 +3516,7 @@ dependencies = [
 
 [[package]]
 name = "riviu-managers-phone"
-version = "0.2.31"
+version = "0.2.32"
 dependencies = [
  "anyhow",
  "apk-info",
@@ -3558,6 +3559,7 @@ dependencies = [
  "riviu-core",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "thiserror 2.0.19",
  "uuid",
 ]

@@ -66,6 +66,9 @@ pub struct FlowArtifactStore {
 }
 
 impl FlowArtifactStore {
+    pub fn connector_root(&self) -> PathBuf {
+        self.root.parent().unwrap_or(&self.root).join("flow-data")
+    }
     pub fn new(root: impl AsRef<Path>) -> anyhow::Result<Self> {
         fs::create_dir_all(root.as_ref())
             .with_context(|| format!("create Flow artifact root {}", root.as_ref().display()))?;

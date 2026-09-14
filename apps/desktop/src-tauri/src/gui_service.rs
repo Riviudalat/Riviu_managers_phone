@@ -59,7 +59,7 @@ pub struct GuiService {
     data_dir: PathBuf,
     running: Mutex<Option<Running>>,
     starts: Mutex<Vec<Instant>>,
-    capacity: Semaphore,
+    capacity: Arc<Semaphore>,
     last_error: parking_lot::Mutex<Option<String>>,
     trace_lock: parking_lot::Mutex<()>,
 }
@@ -71,7 +71,7 @@ impl GuiService {
             data_dir,
             running: Mutex::new(None),
             starts: Mutex::new(Vec::new()),
-            capacity: Semaphore::new(2),
+            capacity: Arc::new(Semaphore::new(2)),
             last_error: parking_lot::Mutex::new(None),
             trace_lock: parking_lot::Mutex::new(()),
         }
@@ -143,8 +143,13 @@ impl GuiService {
         anyhow::bail!("gui_service_missing: thiếu dịch vụ nhận diện trong bộ cài")
     }
     async fn connection(&self) -> anyhow::Result<(String, String)> {
+        self.connection_for(true).await
+    }
+    async fn connection_for(&self, require_provider: bool) -> anyhow::Result<(String, String)> {
         let config = self.config()?;
-        anyhow::ensure!(config.enabled, "gui_disabled: nhận diện AI đang tắt");
+        if require_provider {
+            anyhow::ensure!(config.enabled, "gui_disabled: nhận diện AI đang tắt");
+        }
         let settings = self.db.get_nurture_settings()?;
         let base = if config.base_url.is_empty() {
             settings.base_url
@@ -156,13 +161,21 @@ impl GuiService {
         } else {
             config.model
         };
-        validate_provider_url(&base)?;
-        anyhow::ensure!(
-            !settings.api_key.is_empty() && !model.is_empty(),
-            "gui_provider_unconfigured: cấu hình khóa và model AI trước"
-        );
-        let provider =
-            serde_json::json!({"base_url":base,"model":model,"api_key":settings.api_key});
+        let provider_ready = !settings.api_key.is_empty()
+            && !model.is_empty()
+            && validate_provider_url(&base).is_ok();
+        if require_provider {
+            validate_provider_url(&base)?;
+            anyhow::ensure!(
+                provider_ready,
+                "gui_provider_unconfigured: cấu hình khóa và model AI trước"
+            );
+        }
+        let provider = if provider_ready {
+            serde_json::json!({"base_url":base,"model":model,"api_key":settings.api_key})
+        } else {
+            serde_json::json!({})
+        };
         let fingerprint = CompatibilityPack::sha256(serde_json::to_string(&provider)?.as_bytes());
         let mut state = self.running.lock().await;
         if let Some(running) = state.as_mut() {
@@ -227,6 +240,8 @@ impl GuiService {
         let url = format!("http://127.0.0.1:{port}");
         let http = reqwest::Client::builder()
             .timeout(Duration::from_secs(2))
+            .redirect(reqwest::redirect::Policy::none())
+            .no_proxy()
             .build()?;
         let deadline = Instant::now() + Duration::from_secs(10);
         loop {
@@ -326,6 +341,12 @@ fn validate_provider_url(raw: &str) -> anyhow::Result<()> {
 }
 #[async_trait::async_trait]
 impl GuiReasoner for GuiService {
+    async fn ocr(
+        &self,
+        request: riviu_core::ui_automation::OcrRequest,
+    ) -> anyhow::Result<riviu_core::ui_automation::OcrResponse> {
+        self.recognize_text(request).await
+    }
     fn compatibility_pack_for(
         &self,
         package: &str,
@@ -538,6 +559,9 @@ fn prune_images(
 }
 
 mod commands;
+mod ocr;
+mod template_match;
 pub use commands::*;
+pub use template_match::{TemplateMatchRequest, TemplateMatchResponse};
 #[cfg(test)]
 mod tests;

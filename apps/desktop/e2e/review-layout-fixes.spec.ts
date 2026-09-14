@@ -1,3 +1,4 @@
+import { openOperatorPage } from "./fixtures/operatorNavigation";
 import { expect, test, type Locator, type Page } from "@playwright/test";
 import { installTauriMock } from "./fixtures/tauriMock";
 
@@ -90,7 +91,7 @@ for (const viewport of [{ width: 820, height: 560 }, { width: 900, height: 900 }
   test(`interaction account controls remain wheel-accessible with 30 machines at ${viewport.width}`, async ({ page }) => {
     await page.setViewportSize(viewport);
     await installLayoutFixture(page, true);
-    await page.getByRole("button", { name: "Tương tác", exact: true }).click();
+    await openOperatorPage(page, 'Tương tác');
     await page.getByPlaceholder("Dán link TikTok, mỗi dòng một bài").fill("https://www.tiktok.com/@fixture/video/111");
     await page.getByRole("button", { name: "Chọn hành động & máy →" }).click();
     await page.getByRole("combobox", { name: "Phạm vi thiết bị" }).selectOption("all");
@@ -157,7 +158,7 @@ for (const width of [1024, 1025, 1050, 1100, 1101, 1440]) {
   test(`orchestration new, saved and monitor toolbars fit at ${width}`, async ({ page }) => {
     await page.setViewportSize({ width, height: 900 });
     await installLayoutFixture(page);
-    await page.getByRole("button", { name: "Flow", exact: true }).click();
+    await openOperatorPage(page, 'Flow');
     await page.getByRole("tab", { name: "Điều phối", exact: true }).click();
     await page.getByRole("button", { name: "Tạo điều phối", exact: true }).click();
     await page.getByLabel("Tên điều phối", { exact: true }).fill("Điều phối nội dung chiến dịch tháng chín — nhóm máy và tài khoản dành riêng cho kiểm thử");

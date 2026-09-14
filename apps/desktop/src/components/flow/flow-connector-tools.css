@@ -1,0 +1,27 @@
+.flow-connector-tools {
+  min-width: 0;
+  padding: var(--space-3) var(--space-4);
+  border-top: 1px solid var(--line);
+  color: var(--text-2);
+  font-size: var(--text-sm);
+}
+
+.flow-connector-tools summary {
+  color: var(--text-1);
+  cursor: pointer;
+  font-weight: 600;
+}
+
+.flow-connector-tools p { margin-block: var(--space-3); line-height: 1.6; }
+.flow-connector-tools code { overflow-wrap: anywhere; }
+.flow-connector-tools input { max-width: 100%; }
+
+.flow-connector-credentials {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: end;
+  gap: var(--space-3);
+}
+.flow-connector-credentials .flow-field { flex: 1 1 150px; margin: 0; }
+.flow-connector-tools ul { display: flex; flex-wrap: wrap; gap: var(--space-3); padding-inline-start: var(--space-4); }
+.flow-connector-tools [role="alert"] { color: var(--danger); }

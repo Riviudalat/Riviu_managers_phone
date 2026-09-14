@@ -1,3 +1,4 @@
+import { openOperatorPage } from "./fixtures/operatorNavigation";
 import { expect, test } from "@playwright/test";
 import { installTauriMock } from "./fixtures/tauriMock";
 
@@ -35,7 +36,7 @@ test("submitted posts show incomplete progress and processing evidence without a
   await expect(panel).not.toContainText("Thành công");
   await panel.screenshot({ path: "../../target/stable-installer-20260909/frontend/publish-pending.png" });
   await panel.getByRole("button", { name: "Thu nhỏ tiến trình", exact: true }).click();
-  await page.getByRole("button", { name: "Đăng bài", exact: true }).click();
+  await openOperatorPage(page, 'Đăng bài');
   await page.getByRole("tab", { name: "Theo dõi", exact: true }).click();
   await page.getByRole("button", { name: /^Chiến dịch 1 / }).click();
   await expect(page.getByRole("button", { name: "Kiểm tra liên kết", exact: true })).toBeEnabled();
@@ -95,7 +96,7 @@ test("visible monitor refreshes assignment evidence without replaying a command"
     };
   });
   await page.goto("/");
-  await page.getByRole("button",{name:"Đăng bài",exact:true}).click();
+  await openOperatorPage(page, 'Đăng bài');
   await page.getByRole("tab",{name:"Theo dõi",exact:true}).click();
   await page.getByRole("button",{name:"Chi tiết máy",exact:true}).click();
   await expect(page.getByText("Bài đang tải",{exact:false})).toBeVisible();

@@ -4,19 +4,17 @@ import { describe, expect, it, vi } from "vitest";
 
 import { Sidebar } from "./Sidebar";
 
-function renderSidebar(collapsed = false) {
+function renderSidebar() {
   const onPage = vi.fn();
   const onToggleCollapse = vi.fn();
   render(
     <Sidebar
       page="control"
-      collapsed={collapsed}
       selectedCount={2}
       total={5}
       readyCount={4}
       groupMode={false}
       onPage={onPage}
-      onToggleCollapse={onToggleCollapse}
     />,
   );
   return { onPage, onToggleCollapse };
@@ -24,8 +22,8 @@ function renderSidebar(collapsed = false) {
 
 describe("Sidebar information architecture", () => {
   it("does not present grid selection as the scope of an automation workspace", () => {
-    render(<Sidebar page="publish" collapsed={false} selectedCount={21} total={21} readyCount={20}
-      groupMode={false} onPage={vi.fn()} onToggleCollapse={vi.fn()} />);
+    render(<Sidebar page="publish" selectedCount={21} total={21} readyCount={20}
+      groupMode={false} onPage={vi.fn()} />);
     expect(screen.queryByText("Đã chọn trong lưới")).toBeNull();
     expect(screen.getByText("20/21")).toBeVisible();
   });
@@ -33,61 +31,36 @@ describe("Sidebar information architecture", () => {
     renderSidebar();
 
     const navigation = screen.getByRole("navigation", { name: "Điều hướng chính" });
-    expect(within(navigation).getAllByRole("heading", { level: 2 }).map((item) => item.textContent))
-      .toEqual(["Thiết bị", "Tự động hóa", "Tài nguyên", "Hệ thống"]);
-    expect(within(navigation).getAllByTestId("nav-item").map((item) => item.textContent?.trim()))
-      .toEqual([
-        "Thiết bị",
-        "Chẩn đoán",
-        "Nuôi TikTok",
-        "Tương tác",
-        "Đăng bài",
-        "Flow",
-        "Tác vụ",
-        "Kho nội dung",
-        "Trung tâm ứng dụng",
-        "Dữ liệu",
-        "API",
-        "Cài đặt",
-      ]);
+    expect(within(navigation).getAllByTestId("nav-item")).toHaveLength(16);
+    expect(within(navigation).queryByRole("button", {name:"Dữ liệu"})).toBeNull();
+    expect(within(navigation).queryByRole("button", {name:"Mạng & Router"})).toBeNull();
+    expect(within(navigation).getByRole("button", { name: "My Apps" })).toBeVisible();
+    expect(within(navigation).getByRole("button", { name: "Control Center" })).toBeVisible();
   });
 
-  it("opens the dedicated nurture and interaction workspaces", async () => {
+  it("opens the app library and operation history", async () => {
     const { onPage } = renderSidebar();
     const user = userEvent.setup();
 
-    await user.click(screen.getByRole("button", { name: "Nuôi TikTok" }));
-    await user.click(screen.getByRole("button", { name: "Tương tác" }));
+    await user.click(screen.getByRole("button", { name: "My Apps" }));
+    await user.click(screen.getByRole("button", { name: "Control Center" }));
 
-    expect(onPage).toHaveBeenNthCalledWith(1, "nurture");
-    expect(onPage).toHaveBeenNthCalledWith(2, "interaction");
+    expect(onPage).toHaveBeenNthCalledWith(1, "myApps");
+    expect(onPage).toHaveBeenNthCalledWith(2, "control");
   });
 
-  it("marks only the current page and exposes collapse state", () => {
+  it("always shows text navigation with no collapse button", () => {
     renderSidebar();
-
-    expect(screen.getByRole("button", { name: "Thiết bị" })).toHaveAttribute(
-      "aria-current",
-      "page",
-    );
-    expect(screen.getByRole("button", { name: "Đăng bài" })).not.toHaveAttribute("aria-current");
-    expect(screen.getByRole("button", { name: "Thu gọn thanh điều hướng" })).toHaveAttribute(
-      "aria-expanded",
-      "true",
-    );
-    expect(screen.getByRole("button", { name: "Thu gọn thanh điều hướng" })).toHaveAttribute(
-      "aria-controls",
-      "primary-navigation",
-    );
+    expect(screen.queryByRole("button", { name: /Thu g.n thanh|M. r.ng thanh/ })).toBeNull();
+    expect(screen.getByText("Riviu Manager")).toBeVisible();
   });
-
-  it("keeps icon-only navigation and collapse controls named", async () => {
-    const { onToggleCollapse } = renderSidebar(true);
-    const user = userEvent.setup();
-
-    expect(screen.getByRole("button", { name: "Đăng bài" })).toBeVisible();
-    const expand = screen.getByRole("button", { name: "Mở rộng thanh điều hướng" });
-    await user.click(expand);
-    expect(onToggleCollapse).toHaveBeenCalledTimes(1);
+  it("collapses Automation while preserving the three original destinations",async()=>{
+    localStorage.clear();renderSidebar();const user=userEvent.setup();
+    await user.click(screen.getByRole("button",{name:"Automation"}));
+    expect(screen.queryByRole("button",{name:"Nuôi TikTok"})).toBeNull();
+    await user.click(screen.getByRole("button",{name:"Automation"}));
+    expect(screen.getByRole("button",{name:"Nuôi TikTok"})).toBeVisible();
+    expect(screen.getByRole("button",{name:"Tương tác"})).toBeVisible();
+    expect(screen.getByRole("button",{name:"Đăng bài"})).toBeVisible();
   });
 });

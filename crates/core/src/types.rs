@@ -1085,6 +1085,10 @@ impl Default for NurtureWindow {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct NurtureSettings {
+    /// Optional operator-authored order for actions on the current post.
+    /// Empty retains the legacy Like -> Save -> Comment sequence.
+    #[serde(default)]
+    pub workflow_action_order: Vec<String>,
     pub base_url: String,
     pub model: String,
     pub api_key: String,
@@ -1240,6 +1244,7 @@ impl Default for NurtureSettings {
             num_videos: 120,
             num_rounds: 1,
             like_prob: 35,
+            workflow_action_order: Vec::new(),
             // Comments are opt-in because a fresh install has no AI key. Once
             // a key is configured, the operator can enable a small comment rate.
             comment_prob: 0,

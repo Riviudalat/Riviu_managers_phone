@@ -2,7 +2,7 @@ import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { DeviceFilesPopup } from "./DeviceFilesPopup";
-import { deviceDeletePath, deviceListDir, devicePullPath } from "../api";
+import { deviceDeletePath, deviceListDir, devicePullPath, devicePushFile } from "../api";
 import { requestConfirm } from "../confirmStore";
 import { pickDirectory } from "../pickFile";
 import type { DeviceDirListing, DeviceFileEntry, DeviceInfo } from "../types";
@@ -59,6 +59,7 @@ beforeEach(() => {
   deleteMock.mockReset();
   confirmMock.mockReset();
   dirMock.mockReset();
+  vi.mocked(devicePushFile).mockReset();
 });
 afterEach(cleanup);
 
@@ -67,6 +68,20 @@ afterEach(cleanup);
 // for, what a refusal looks like, and that a delete is confirmed by name and drops the
 // selection afterwards.
 describe("DeviceFilesPopup", () => {
+  it("uploads chosen PC files into the navigated folder and retries only failures", async () => {
+    listMock.mockResolvedValue(listing(DOWNLOAD));
+    vi.mocked(devicePushFile).mockResolvedValueOnce("/sdcard/Browser/a.jpg").mockRejectedValueOnce(new Error("USB interrupted")).mockResolvedValueOnce("/sdcard/Browser/b.jpg");
+    render(<DeviceFilesPopup device={REDMI} mode="upload" uploadPaths={["C:/a.jpg", "C:/b.jpg"]} onClose={vi.fn()}/>);
+    await userEvent.click(await screen.findByRole("button", {name:"Browser"}));
+    await userEvent.click(screen.getByRole("button", {name:"Đưa vào thư mục này"}));
+    await screen.findByText(/USB interrupted/);
+    expect(devicePushFile).toHaveBeenNthCalledWith(1, REDMI.udid, "C:/a.jpg", "/sdcard/Browser");
+    await userEvent.click(screen.getByRole("button", {name:"Đưa vào thư mục này"}));
+    await waitFor(() => expect(devicePushFile).toHaveBeenCalledTimes(3));
+    expect(devicePushFile).toHaveBeenLastCalledWith(REDMI.udid, "C:/b.jpg", "/sdcard/Browser");
+    await waitFor(() => expect(screen.getByRole("button", {name:"Đưa vào thư mục này"})).toBeDisabled());
+    expect(screen.queryByRole("button", {name:"Lấy về máy tính"})).toBeNull();
+  });
   it("opens on the phone's own storage and lists it, folders first", async () => {
     listMock.mockResolvedValue(listing(DOWNLOAD));
     render(<DeviceFilesPopup device={REDMI} onClose={vi.fn()} />);

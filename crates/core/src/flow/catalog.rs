@@ -88,11 +88,13 @@ fn read_back_locator_schema() -> Value {
 
 pub fn config_schema(kind: ActionKind) -> Value {
     match kind {
-        ActionKind::Start | ActionKind::End | ActionKind::Home => serde_json::json!({
-            "type": "object",
-            "additionalProperties": false,
-            "properties": {}
-        }),
+        ActionKind::Start | ActionKind::End | ActionKind::Home | ActionKind::Join => {
+            serde_json::json!({
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {}
+            })
+        }
         ActionKind::LaunchApp | ActionKind::TerminateApp => serde_json::json!({
             "type": "object",
             "additionalProperties": false,
@@ -114,11 +116,15 @@ pub fn config_schema(kind: ActionKind) -> Value {
             "additionalProperties": false,
             "properties": {
                 "point": coordinate_schema(),
-                "accessibilityId": { "type": "string", "minLength": 1, "maxLength": 512 }
+                "accessibilityId": { "type": "string", "minLength": 1, "maxLength": 512 },
+                "selector": { "type":"object", "required":["package"], "additionalProperties":false, "properties": {
+                    "package":{"type":"string"}, "text":{"type":["string","null"]}, "description":{"type":["string","null"]}, "resourceId":{"type":["string","null"]}, "className":{"type":["string","null"]}
+                }}
             },
             "oneOf": [
-                { "required": ["point"], "not": { "required": ["accessibilityId"] } },
-                { "required": ["accessibilityId"], "not": { "required": ["point"] } }
+                { "required": ["point"] },
+                { "required": ["accessibilityId"] },
+                { "required": ["selector"] }
             ]
         }),
         ActionKind::Swipe => serde_json::json!({
@@ -197,13 +203,70 @@ pub fn config_schema(kind: ActionKind) -> Value {
                 }
             }
         }),
+        ActionKind::IfVisible => serde_json::json!({
+            "type":"object", "additionalProperties":false, "required":["locator"],
+            "properties":{"locator":read_back_locator_schema()}
+        }),
+        ActionKind::ReadText => serde_json::json!({
+            "type":"object", "additionalProperties":false, "required":["name","locator"],
+            "properties":{"name":{"type":"string","minLength":1,"maxLength":64},"locator":read_back_locator_schema()}
+        }),
+        ActionKind::SetVariable => serde_json::json!({
+            "type":"object", "additionalProperties":false, "required":["name","value"],
+            "properties":{"name":{"type":"string","minLength":1,"maxLength":64},"value":{"type":"string","title":"Nội dung biến","maxLength":4096}}
+        }),
+        ActionKind::IfValue => serde_json::json!({
+            "type":"object", "additionalProperties":false, "required":["name","operator","value"],
+            "properties":{"name":{"type":"string","minLength":1,"maxLength":64},
+                "operator":{"type":"string","enum":["equals","notEquals","contains","startsWith","isEmpty","notEmpty"]},
+                "value":{"type":"string","title":"Giá trị so sánh","maxLength":4096}}
+        }),
+        ActionKind::Log => serde_json::json!({
+            "type":"object", "additionalProperties":false, "required":["message"],
+            "properties":{"message":{"type":"string","minLength":1,"maxLength":4096},"variable":{"type":"string","maxLength":64}}
+        }),
+        ActionKind::CopyVariable => {
+            serde_json::json!({"type":"object","additionalProperties":false,"required":["name","source"],"properties":{"name":{"type":"string","maxLength":64},"source":{"type":"string","maxLength":64}}})
+        }
+        ActionKind::Subflow | ActionKind::Repeat => {
+            serde_json::json!({"type":"object","additionalProperties":false,"required":["document"],"properties":{"document":{"type":"object"},"count":{"type":"integer","minimum":1,"maximum":100},"inputs":{"type":"object"},"outputs":{"type":"object"}}})
+        }
+        ActionKind::OcrReadText => {
+            serde_json::json!({"type":"object","additionalProperties":false,"required":["name"],"properties":{"name":{"type":"string","maxLength":64},"minConfidence":{"type":"number","minimum":0,"maximum":1},"languages":{"type":"array","items":{"type":"string"}},"region":{"type":"object"}}})
+        }
+        ActionKind::FileRead
+        | ActionKind::FileWrite
+        | ActionKind::HttpRequest
+        | ActionKind::SheetRead
+        | ActionKind::SheetWrite => connector_schema(kind),
+        ActionKind::Transform => {
+            serde_json::json!({"type":"object","additionalProperties":false,"required":["name","source","operation"],"properties":{"name":{"type":"string","maxLength":64},"source":{"type":"string","maxLength":64},"operation":{"type":"string","enum":["trim","lowercase","uppercase","splitLines","firstLine","jsonGet","replace","regexExtract","joinLines"]},"path":{"type":"string"},"value":{"type":"string"},"pattern":{"type":"string"}}})
+        }
         ActionKind::RawHttp | ActionKind::RawWda | ActionKind::Shell => Value::Null,
     }
 }
 
 pub fn required_capabilities(kind: ActionKind) -> Vec<String> {
     let capabilities: &[&str] = match kind {
-        ActionKind::Start | ActionKind::End | ActionKind::Wait => &[],
+        ActionKind::Start
+        | ActionKind::End
+        | ActionKind::Wait
+        | ActionKind::SetVariable
+        | ActionKind::IfValue
+        | ActionKind::Log => &[],
+        ActionKind::Transform
+        | ActionKind::Join
+        | ActionKind::CopyVariable
+        | ActionKind::Subflow
+        | ActionKind::Repeat
+        | ActionKind::FileRead
+        | ActionKind::FileWrite
+        | ActionKind::HttpRequest
+        | ActionKind::SheetRead
+        | ActionKind::SheetWrite => &[],
+        ActionKind::OcrReadText => &["stream"],
+        ActionKind::ReadText => &["accessibility.readText"],
+        ActionKind::IfVisible => &["accessibility.hierarchy"],
         ActionKind::LaunchApp => &["app.launch"],
         ActionKind::TerminateApp => &["app.terminate"],
         ActionKind::Tap | ActionKind::TapVision => &["ui.tap", "stream"],
@@ -230,7 +293,38 @@ pub fn contracts(
     RetryPolicy,
 ) {
     match kind {
-        ActionKind::Start | ActionKind::End => (
+        ActionKind::Transform
+        | ActionKind::Join
+        | ActionKind::CopyVariable
+        | ActionKind::Subflow
+        | ActionKind::Repeat
+        | ActionKind::FileRead
+        | ActionKind::SheetRead => (
+            ResourceClass::PureDesktop,
+            SideEffectClass::None,
+            EvidenceRequirement::None,
+            ReconciliationPolicy::None,
+            RetryPolicy::BeforeDispatchOnly,
+        ),
+        ActionKind::FileWrite | ActionKind::HttpRequest | ActionKind::SheetWrite => (
+            ResourceClass::PureDesktop,
+            SideEffectClass::ExternalEffect,
+            EvidenceRequirement::Connector,
+            ReconciliationPolicy::ReadArtifact,
+            RetryPolicy::BeforeDispatchOnly,
+        ),
+        ActionKind::OcrReadText => (
+            ResourceClass::UiWithStream,
+            SideEffectClass::None,
+            EvidenceRequirement::None,
+            ReconciliationPolicy::None,
+            RetryPolicy::BeforeDispatchOnly,
+        ),
+        ActionKind::Start
+        | ActionKind::End
+        | ActionKind::SetVariable
+        | ActionKind::IfValue
+        | ActionKind::Log => (
             ResourceClass::PureDesktop,
             SideEffectClass::None,
             EvidenceRequirement::None,
@@ -244,7 +338,7 @@ pub fn contracts(
             ReconciliationPolicy::None,
             RetryPolicy::BeforeDispatchOnly,
         ),
-        ActionKind::AssertVisible => (
+        ActionKind::AssertVisible | ActionKind::ReadText | ActionKind::IfVisible => (
             ResourceClass::UiSession,
             SideEffectClass::None,
             EvidenceRequirement::None,
@@ -321,6 +415,22 @@ pub fn release_one_catalog() -> Vec<ActionDefinition> {
         ActionKind::AssertVisible,
         ActionKind::TapVision,
         ActionKind::IfVision,
+        ActionKind::IfVisible,
+        ActionKind::ReadText,
+        ActionKind::SetVariable,
+        ActionKind::IfValue,
+        ActionKind::Log,
+        ActionKind::CopyVariable,
+        ActionKind::Transform,
+        ActionKind::Join,
+        ActionKind::Subflow,
+        ActionKind::Repeat,
+        ActionKind::OcrReadText,
+        ActionKind::FileRead,
+        ActionKind::FileWrite,
+        ActionKind::HttpRequest,
+        ActionKind::SheetRead,
+        ActionKind::SheetWrite,
     ]
     .into_iter()
     .map(action_definition)
@@ -349,7 +459,9 @@ fn action_definition(kind: ActionKind) -> ActionDefinition {
         },
         output_ports: match kind {
             ActionKind::End => Vec::new(),
-            ActionKind::IfVision => vec![branch_port("matched"), branch_port("notMatched")],
+            ActionKind::IfVision | ActionKind::IfVisible | ActionKind::IfValue => {
+                vec![branch_port("matched"), branch_port("notMatched")]
+            }
             _ => vec![flow_port()],
         },
         required_capabilities: required_capabilities(kind),
@@ -396,6 +508,22 @@ fn label(kind: ActionKind) -> &'static str {
         ActionKind::AssertVisible => "Assert Visible",
         ActionKind::TapVision => "Tap Vision",
         ActionKind::IfVision => "If Vision",
+        ActionKind::IfVisible => "If Visible",
+        ActionKind::ReadText => "Read Text",
+        ActionKind::SetVariable => "Set Variable",
+        ActionKind::IfValue => "If Value",
+        ActionKind::Log => "Log",
+        ActionKind::CopyVariable => "Copy Variable",
+        ActionKind::Transform => "Transform",
+        ActionKind::Join => "Join",
+        ActionKind::Subflow => "Subflow",
+        ActionKind::Repeat => "Repeat",
+        ActionKind::OcrReadText => "Read OCR",
+        ActionKind::FileRead => "Read File",
+        ActionKind::FileWrite => "Write File",
+        ActionKind::HttpRequest => "HTTP Request",
+        ActionKind::SheetRead => "Read Sheet",
+        ActionKind::SheetWrite => "Write Sheet",
         ActionKind::RawHttp => "Raw HTTP",
         ActionKind::RawWda => "Raw WDA",
         ActionKind::Shell => "Shell",
@@ -404,9 +532,25 @@ fn label(kind: ActionKind) -> &'static str {
 
 fn category(kind: ActionKind) -> ActionCategory {
     match kind {
+        ActionKind::Transform
+        | ActionKind::Join
+        | ActionKind::CopyVariable
+        | ActionKind::Subflow
+        | ActionKind::Repeat
+        | ActionKind::FileRead
+        | ActionKind::FileWrite
+        | ActionKind::HttpRequest
+        | ActionKind::SheetRead
+        | ActionKind::SheetWrite => ActionCategory::Control,
+        ActionKind::OcrReadText => ActionCategory::Evidence,
         ActionKind::Start
         | ActionKind::End
         | ActionKind::IfVision
+        | ActionKind::IfVisible
+        | ActionKind::SetVariable
+        | ActionKind::ReadText
+        | ActionKind::IfValue
+        | ActionKind::Log
         | ActionKind::RawHttp
         | ActionKind::RawWda
         | ActionKind::Shell => ActionCategory::Control,
@@ -423,9 +567,24 @@ fn category(kind: ActionKind) -> ActionCategory {
 
 fn allowed_evidence(kind: ActionKind) -> Vec<EvidenceKind> {
     match kind {
+        ActionKind::Transform
+        | ActionKind::Join
+        | ActionKind::CopyVariable
+        | ActionKind::Subflow
+        | ActionKind::Repeat
+        | ActionKind::FileRead
+        | ActionKind::SheetRead
+        | ActionKind::OcrReadText => Vec::new(),
+        ActionKind::FileWrite | ActionKind::HttpRequest | ActionKind::SheetWrite => {
+            vec![EvidenceKind::ConnectorResult]
+        }
         ActionKind::LaunchApp | ActionKind::Home => vec![EvidenceKind::ActiveAppEquals],
         ActionKind::TerminateApp => vec![EvidenceKind::ProcessAbsent],
-        ActionKind::Tap | ActionKind::TapVision => vec![EvidenceKind::FrameRegionChanged],
+        ActionKind::Tap => vec![
+            EvidenceKind::FrameRegionChanged,
+            EvidenceKind::ElementVisible,
+        ],
+        ActionKind::TapVision => vec![EvidenceKind::FrameRegionChanged],
         ActionKind::Swipe | ActionKind::AutoSwipe => vec![EvidenceKind::FrameDigestChanged],
         ActionKind::TypeText => vec![EvidenceKind::TextReadBackEquals],
         ActionKind::Screenshot => vec![EvidenceKind::ArtifactDecodedAndHashed],
@@ -434,6 +593,11 @@ fn allowed_evidence(kind: ActionKind) -> Vec<EvidenceKind> {
         | ActionKind::Wait
         | ActionKind::AssertVisible
         | ActionKind::IfVision
+        | ActionKind::IfVisible
+        | ActionKind::SetVariable
+        | ActionKind::ReadText
+        | ActionKind::IfValue
+        | ActionKind::Log
         | ActionKind::RawHttp
         | ActionKind::RawWda
         | ActionKind::Shell => Vec::new(),
@@ -442,7 +606,22 @@ fn allowed_evidence(kind: ActionKind) -> Vec<EvidenceKind> {
 
 fn default_timeout_ms(kind: ActionKind) -> u32 {
     match kind {
-        ActionKind::Start | ActionKind::End => 1_000,
+        ActionKind::Transform
+        | ActionKind::Join
+        | ActionKind::CopyVariable
+        | ActionKind::Subflow
+        | ActionKind::Repeat => 1_000,
+        ActionKind::OcrReadText
+        | ActionKind::FileRead
+        | ActionKind::FileWrite
+        | ActionKind::HttpRequest
+        | ActionKind::SheetRead
+        | ActionKind::SheetWrite => 30_000,
+        ActionKind::Start
+        | ActionKind::End
+        | ActionKind::SetVariable
+        | ActionKind::IfValue
+        | ActionKind::Log => 1_000,
         ActionKind::Wait => 60_000,
         ActionKind::LaunchApp | ActionKind::TerminateApp | ActionKind::Home => 10_000,
         ActionKind::Tap | ActionKind::Swipe | ActionKind::Screenshot | ActionKind::TapVision => {
@@ -450,7 +629,60 @@ fn default_timeout_ms(kind: ActionKind) -> u32 {
         }
         ActionKind::AutoSwipe => 3_600_000,
         ActionKind::TypeText => 10_000,
-        ActionKind::AssertVisible | ActionKind::IfVision => 4_000,
+        ActionKind::AssertVisible
+        | ActionKind::IfVision
+        | ActionKind::ReadText
+        | ActionKind::IfVisible => 4_000,
         ActionKind::RawHttp | ActionKind::RawWda | ActionKind::Shell => 10_000,
     }
+}
+
+fn connector_schema(kind: ActionKind) -> Value {
+    let string = serde_json::json!({"type":"string","maxLength":4096});
+    let mut properties = serde_json::Map::new();
+    properties.insert(
+        "name".into(),
+        serde_json::json!({"type":"string","maxLength":64}),
+    );
+    let mut required = vec!["name"];
+    match kind {
+        ActionKind::FileRead | ActionKind::FileWrite => {
+            required.extend(["path", "format"]);
+            properties.insert("path".into(), string.clone());
+            properties.insert(
+                "format".into(),
+                serde_json::json!({"type":"string","enum":["text","json","csv"]}),
+            );
+            if kind == ActionKind::FileWrite {
+                required.push("value");
+                properties.insert("value".into(), string.clone());
+            }
+        }
+        ActionKind::HttpRequest => {
+            required.extend(["url", "method", "timeoutMs"]);
+            properties.insert("url".into(), string.clone());
+            properties.insert(
+                "method".into(),
+                serde_json::json!({"type":"string","enum":["GET","POST","PUT","PATCH","DELETE"]}),
+            );
+            properties.insert(
+                "timeoutMs".into(),
+                serde_json::json!({"type":"integer","minimum":1,"maximum":30000}),
+            );
+            for key in ["body", "secretRef"] {
+                properties.insert(key.into(), string.clone());
+            }
+        }
+        _ => {
+            required.extend(["spreadsheetUrl", "tab", "range"]);
+            for key in ["spreadsheetUrl", "tab", "range"] {
+                properties.insert(key.into(), string.clone());
+            }
+            if kind == ActionKind::SheetWrite {
+                required.push("values");
+                properties.insert("values".into(), string.clone());
+            }
+        }
+    }
+    serde_json::json!({"type":"object","additionalProperties":false,"required":required,"properties":properties})
 }

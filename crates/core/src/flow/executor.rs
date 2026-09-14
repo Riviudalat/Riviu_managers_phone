@@ -1,3 +1,4 @@
+mod extensions;
 use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::time::Duration;
@@ -43,6 +44,7 @@ pub(crate) struct FlowExecutorDeps {
     pub(crate) database: Arc<Database>,
     pub(crate) control: Arc<DeviceControlPlane>,
     pub(crate) frames: Arc<dyn GenerationFrameSource>,
+    pub(crate) reasoner: Option<crate::ui_automation::SharedReasoner>,
     pub(crate) artifacts: FlowArtifactStore,
     pub(crate) cancellation: FlowCancellation,
 }
@@ -133,6 +135,7 @@ struct FlowDevicePreflight {
 
 enum ActionOutput {
     None,
+    Data(serde_json::Value),
     ProcessAbsent(ProcessAbsenceProof),
     Screenshot {
         label: String,
@@ -880,7 +883,7 @@ impl FlowExecutor {
             .filter(|capability| {
                 !matches!(
                     capability.as_str(),
-                    "accessibility.visible" | "accessibility.readText"
+                    "accessibility.visible" | "accessibility.readText" | "accessibility.hierarchy"
                 ) && !capability_ids.contains(*capability)
             })
             .cloned()
@@ -1440,9 +1443,130 @@ impl FlowExecutor {
         effect_dispatched: &mut bool,
     ) -> Result<ActionOutput, ActionDispatchFailure> {
         match (&node.kind, &node.config) {
-            (ActionKind::Start | ActionKind::End, CompiledActionConfig::Empty) => {
-                Ok(ActionOutput::None)
+            (ActionKind::Transform, CompiledActionConfig::Transform(c)) => {
+                let source = self
+                    .variable_at(attempt_id, &c.source)
+                    .map_err(ActionDispatchFailure::deterministic_read)?;
+                let value = c.execute(&source).map_err(|e| {
+                    ActionDispatchFailure::deterministic_read(FlowExecutionError::new(
+                        "TransformInvalid",
+                        e,
+                    ))
+                })?;
+                Ok(ActionOutput::Data(
+                    serde_json::json!({"kind":"flowVariable","name":c.name,"value":value}),
+                ))
             }
+            (ActionKind::SetVariable, CompiledActionConfig::SetVariable { name, value }) => {
+                Ok(ActionOutput::Data(
+                    serde_json::json!({"kind":"flowVariable","name":name,"value":value}),
+                ))
+            }
+            (ActionKind::ReadText, CompiledActionConfig::ReadText { name, locator }) => {
+                let session = context
+                    .session(&self.deps.control)
+                    .map_err(FlowExecutionError::device)?;
+                let value = session
+                    .read_text(locator, Duration::from_secs(4))
+                    .await
+                    .map_err(|e| {
+                        ActionDispatchFailure::deterministic_read(FlowExecutionError::other(e))
+                    })?;
+                if value.chars().count() > 4096 {
+                    return Err(ActionDispatchFailure::deterministic_read(
+                        FlowExecutionError::new(
+                            "ValueTooLarge",
+                            "text variable exceeds 4096 characters",
+                        ),
+                    ));
+                }
+                Ok(ActionOutput::Data(
+                    serde_json::json!({"kind":"flowVariable","name":name,"value":value}),
+                ))
+            }
+            (
+                ActionKind::IfValue,
+                CompiledActionConfig::IfValue {
+                    name,
+                    operator,
+                    value,
+                },
+            ) => {
+                let actual = self
+                    .variable_at(attempt_id, name)
+                    .map_err(ActionDispatchFailure::deterministic_read)?;
+                Ok(ActionOutput::Branch {
+                    port: if operator.evaluate(&actual, value) {
+                        "matched"
+                    } else {
+                        "notMatched"
+                    }
+                    .into(),
+                })
+            }
+            (ActionKind::Log, CompiledActionConfig::Log { message, variable }) => {
+                let value = variable
+                    .as_ref()
+                    .map(|name| self.variable_at(attempt_id, name))
+                    .transpose()
+                    .map_err(ActionDispatchFailure::deterministic_read)?;
+                Ok(ActionOutput::Data(
+                    serde_json::json!({"kind":"flowLog","message":message,"variable":variable,"value":value}),
+                ))
+            }
+            (ActionKind::IfVisible, CompiledActionConfig::IfVisible { locator }) => {
+                let session = context
+                    .session(&self.deps.control)
+                    .map_err(FlowExecutionError::device)?;
+                let observation = tokio::time::timeout(Duration::from_secs(30), async {
+                    let package = session.active_app_bundle().await?;
+                    let snapshot = session.hierarchy_source_snapshot().await?;
+                    anyhow::ensure!(
+                        session.active_app_bundle().await? == package,
+                        "active application changed during hierarchy observation"
+                    );
+                    Ok::<_, anyhow::Error>((package, snapshot))
+                })
+                .await
+                .map_err(|_| {
+                    ActionDispatchFailure::deterministic_read(FlowExecutionError::new(
+                        "ReadDeadline",
+                        "hierarchy read exceeded its deadline",
+                    ))
+                })?
+                .map_err(|e| {
+                    ActionDispatchFailure::deterministic_read(FlowExecutionError::other(e))
+                })?;
+                let (package, snapshot) = observation;
+                let visible = super::data::visible_in_snapshot(snapshot, &package, locator)
+                    .map_err(|e| {
+                        ActionDispatchFailure::deterministic_read(FlowExecutionError::other(e))
+                    })?;
+                Ok(ActionOutput::Branch {
+                    port: if visible { "matched" } else { "notMatched" }.into(),
+                })
+            }
+            (ActionKind::CopyVariable, CompiledActionConfig::CopyVariable { name, source }) => {
+                let value = self
+                    .variable_at(attempt_id, source)
+                    .map_err(ActionDispatchFailure::deterministic_read)?;
+                Ok(ActionOutput::Data(
+                    serde_json::json!({"kind":"flowVariable","name":name,"value":value}),
+                ))
+            }
+            (ActionKind::OcrReadText, _) => self.dispatch_ocr(node, context, attempt_id).await,
+            (
+                ActionKind::FileRead
+                | ActionKind::FileWrite
+                | ActionKind::HttpRequest
+                | ActionKind::SheetRead
+                | ActionKind::SheetWrite,
+                _,
+            ) => self.dispatch_connector(node, attempt_id).await,
+            (
+                ActionKind::Start | ActionKind::End | ActionKind::Join,
+                CompiledActionConfig::Empty,
+            ) => Ok(ActionOutput::None),
             (ActionKind::LaunchApp, CompiledActionConfig::LaunchApp { bundle_id }) => {
                 if special_launch {
                     let kind = if plan.context_plan.requires_fresh_text_session {
@@ -1520,6 +1644,27 @@ impl FlowExecutor {
                     CompiledTapTarget::AccessibilityId { value } => {
                         session
                             .find_and_tap(value)
+                            .await
+                            .map_err(FlowExecutionError::other)?;
+                    }
+                    CompiledTapTarget::Element { selector } => {
+                        let target = crate::ui_automation::inspector::resolve_unique(
+                            session.as_ref(),
+                            selector,
+                        )
+                        .await
+                        .map_err(|e| {
+                            ActionDispatchFailure::non_delivery(FlowExecutionError::other(e))
+                        })?;
+                        if !target.clickable {
+                            return Err(ActionDispatchFailure::non_delivery(
+                                FlowExecutionError::other(anyhow::anyhow!(
+                                    "inspector_element_not_clickable"
+                                )),
+                            ));
+                        }
+                        session
+                            .tap(target.centre())
                             .await
                             .map_err(FlowExecutionError::other)?;
                     }
@@ -2000,19 +2145,58 @@ impl FlowExecutor {
         }
     }
 
+    fn variable_at(&self, attempt_id: Uuid, name: &str) -> Result<String, FlowExecutionError> {
+        let context = self
+            .deps
+            .database
+            .get_flow_attempt_execution_context(attempt_id)
+            .map_err(FlowExecutionError::other)?
+            .ok_or_else(|| {
+                FlowExecutionError::new(
+                    "RunIdentityMismatch",
+                    "variable consumer attempt is missing",
+                )
+            })?;
+        let values = super::data::variables_before(
+            &context.plan,
+            &context.device_attempts,
+            context.device.id,
+            context.attempt.node_id,
+        )
+        .map_err(|reason| FlowExecutionError::new("VariableStateInvalid", reason))?;
+        values.get(name).cloned().ok_or_else(|| {
+            FlowExecutionError::new(
+                "VariableMissing",
+                format!("variable {name} has no completed writer on this device path"),
+            )
+        })
+    }
+
     fn verify_live_node_capabilities(
         &self,
         node: &CompiledFlowNode,
         context: &FlowDeviceContext,
     ) -> Result<(), FlowExecutionError> {
         let needs_text = node.kind == ActionKind::TypeText;
-        let needs_readback = matches!(node.kind, ActionKind::TypeText | ActionKind::AssertVisible);
+        let needs_readback = matches!(
+            node.kind,
+            ActionKind::TypeText
+                | ActionKind::AssertVisible
+                | ActionKind::ReadText
+                | ActionKind::IfVisible
+        );
         if !needs_text && !needs_readback {
             return Ok(());
         }
         let session = context
             .session(&self.deps.control)
             .map_err(FlowExecutionError::device)?;
+        if node.kind == ActionKind::IfVisible && !session.supports_element_bounds() {
+            return Err(FlowExecutionError::new(
+                "CapabilityUnavailable",
+                "complete element hierarchy is unavailable in this session",
+            ));
+        }
         if needs_text && !session.supports_text_input() {
             return Err(FlowExecutionError::new(
                 "CapabilityUnavailable",
@@ -2038,12 +2222,21 @@ impl FlowExecutor {
             || plan
                 .required_capabilities
                 .contains("accessibility.readText");
-        if !needs_text && !needs_readback {
+        let needs_hierarchy = plan
+            .required_capabilities
+            .contains("accessibility.hierarchy");
+        if !needs_text && !needs_readback && !needs_hierarchy {
             return Ok(());
         }
         let session = context
             .session(&self.deps.control)
             .map_err(FlowExecutionError::device)?;
+        if needs_hierarchy && !session.supports_element_bounds() {
+            return Err(FlowExecutionError::new(
+                "CapabilityUnavailable",
+                "complete element hierarchy is unavailable after session bootstrap",
+            ));
+        }
         if needs_text && !session.supports_text_input() {
             return Err(FlowExecutionError::new(
                 "CapabilityUnavailable",
@@ -2070,6 +2263,36 @@ impl FlowExecutor {
         output: ActionOutput,
         deadline: tokio::time::Instant,
     ) -> Result<(), FlowExecutionError> {
+        if let ActionOutput::Data(value) = &output {
+            if node.postcondition.is_some()
+                && !matches!(
+                    node.postcondition,
+                    Some(EvidenceSpec::ConnectorResult { .. })
+                )
+            {
+                return self.fail_verification(
+                    attempt_id,
+                    node,
+                    FlowExecutionError::new(
+                        "CompiledPlanCorrupt",
+                        "data nodes do not accept a device postcondition",
+                    ),
+                );
+            }
+            self.deps
+                .database
+                .transition_attempt(
+                    attempt_id,
+                    FlowAttemptState::Verifying,
+                    FlowAttemptState::Succeeded,
+                    AttemptTransitionPatch {
+                        evidence_result: Some(value.clone()),
+                        ..Default::default()
+                    },
+                )
+                .map_err(FlowExecutionError::other)?;
+            return Ok(());
+        }
         if let ActionOutput::Screenshot {
             label,
             format,
@@ -2201,6 +2424,7 @@ impl FlowExecutor {
                     }
                 }
             }
+            ActionOutput::Data(_) => unreachable!("handled above"),
             ActionOutput::Screenshot { .. } => unreachable!("handled above"),
             ActionOutput::AutoSwipe { .. } => unreachable!("handled above"),
             ActionOutput::Branch { .. } => {
@@ -2483,7 +2707,7 @@ fn last_launch_bundle_before(plan: &CompiledFlowPlanV2, end: usize) -> Option<&s
 /// kind a compile error here instead of a silent refusal at preflight.
 fn compiled_config_matches(node: &CompiledFlowNode) -> bool {
     match node.kind {
-        ActionKind::Start | ActionKind::End | ActionKind::Home => {
+        ActionKind::Start | ActionKind::End | ActionKind::Home | ActionKind::Join => {
             matches!(node.config, CompiledActionConfig::Empty)
         }
         ActionKind::LaunchApp => matches!(node.config, CompiledActionConfig::LaunchApp { .. }),
@@ -2501,6 +2725,22 @@ fn compiled_config_matches(node: &CompiledFlowNode) -> bool {
         }
         ActionKind::TapVision => matches!(node.config, CompiledActionConfig::TapVision { .. }),
         ActionKind::IfVision => matches!(node.config, CompiledActionConfig::IfVision { .. }),
+        ActionKind::Transform => matches!(node.config, CompiledActionConfig::Transform(_)),
+        ActionKind::CopyVariable => {
+            matches!(node.config, CompiledActionConfig::CopyVariable { .. })
+        }
+        ActionKind::OcrReadText => matches!(node.config, CompiledActionConfig::OcrReadText { .. }),
+        ActionKind::FileRead => matches!(node.config, CompiledActionConfig::FileRead(_)),
+        ActionKind::FileWrite => matches!(node.config, CompiledActionConfig::FileWrite(_)),
+        ActionKind::HttpRequest => matches!(node.config, CompiledActionConfig::HttpRequest(_)),
+        ActionKind::SheetRead => matches!(node.config, CompiledActionConfig::SheetRead(_)),
+        ActionKind::SheetWrite => matches!(node.config, CompiledActionConfig::SheetWrite(_)),
+        ActionKind::Subflow | ActionKind::Repeat => false,
+        ActionKind::IfVisible => matches!(node.config, CompiledActionConfig::IfVisible { .. }),
+        ActionKind::ReadText => matches!(node.config, CompiledActionConfig::ReadText { .. }),
+        ActionKind::SetVariable => matches!(node.config, CompiledActionConfig::SetVariable { .. }),
+        ActionKind::IfValue => matches!(node.config, CompiledActionConfig::IfValue { .. }),
+        ActionKind::Log => matches!(node.config, CompiledActionConfig::Log { .. }),
         // The compiler refuses these outright ("raw actions are not enabled"), so no compiled
         // plan carries them; one that does is corrupt no matter what config it claims.
         ActionKind::RawHttp | ActionKind::RawWda | ActionKind::Shell => false,
@@ -2549,13 +2789,10 @@ fn validate_compiled_plan(plan: &CompiledFlowPlanV2) -> Result<(), FlowExecution
         ));
     }
     let target = target_bundle_id(plan);
-    let target_free = plan.execution_order.iter().all(|node_id| {
-        plan.nodes.get(node_id).is_some_and(|node| {
-            matches!(
-                node.kind,
-                ActionKind::Start | ActionKind::Wait | ActionKind::End
-            )
-        })
+    let target_free = plan.execution_order.iter().all(|id| {
+        plan.nodes
+            .get(id)
+            .is_some_and(|n| contracts(n.kind).0 == super::ResourceClass::PureDesktop)
     });
     if target.is_none()
         && (!target_free
@@ -2770,6 +3007,17 @@ mod tests {
     const UDID: &str = "fixture-udid";
     const TARGET: &str = "com.apple.Preferences";
 
+    mod data_tests {
+        include!("executor/data_tests.rs");
+    }
+    mod ocr_tests {
+        include!("executor/ocr_tests.rs");
+    }
+
+    mod connector_tests {
+        include!("executor/connector_tests.rs");
+    }
+
     struct RecordingFlowDriver {
         operations: Arc<Mutex<Vec<String>>>,
         work: Arc<DeviceWorkCoordinator>,
@@ -2793,6 +3041,8 @@ mod tests {
         omit_first_frame: AtomicBool,
         stream_generation: AtomicU64,
         supports_readback: Arc<AtomicBool>,
+        supports_hierarchy: Arc<AtomicBool>,
+        hierarchy_xml: Arc<Mutex<Option<String>>>,
         inspection_calls: AtomicUsize,
         launch_calls: Arc<AtomicUsize>,
         tap_calls: Arc<AtomicUsize>,
@@ -2837,6 +3087,8 @@ mod tests {
                 omit_first_frame: AtomicBool::new(false),
                 stream_generation: AtomicU64::new(1),
                 supports_readback: Arc::new(AtomicBool::new(true)),
+                supports_hierarchy: Arc::new(AtomicBool::new(false)),
+                hierarchy_xml: Arc::new(Mutex::new(None)),
                 inspection_calls: AtomicUsize::new(0),
                 launch_calls: Arc::new(AtomicUsize::new(0)),
                 tap_calls: Arc::new(AtomicUsize::new(0)),
@@ -2905,6 +3157,8 @@ mod tests {
         fail_assert_visible: Arc<AtomicBool>,
         supports_text: bool,
         supports_readback: bool,
+        supports_hierarchy: bool,
+        hierarchy_xml: Arc<Mutex<Option<String>>>,
     }
 
     impl RecordingSession {
@@ -2987,6 +3241,22 @@ mod tests {
 
         fn supports_accessibility_readback(&self) -> bool {
             self.supports_readback
+        }
+
+        fn supports_element_bounds(&self) -> bool {
+            self.supports_hierarchy
+        }
+
+        async fn hierarchy_source_snapshot(
+            &self,
+        ) -> anyhow::Result<crate::HierarchySourceSnapshot> {
+            self.push("hierarchySource");
+            let xml = self
+                .hierarchy_xml
+                .lock()
+                .clone()
+                .ok_or_else(|| anyhow::anyhow!("fixture hierarchy read failed"))?;
+            Ok(crate::HierarchySourceSnapshot { xml, generation: 1 })
         }
 
         async fn screenshot_png(&self) -> anyhow::Result<Vec<u8>> {
@@ -3094,6 +3364,8 @@ mod tests {
                 supports_text: kind == InteractionSessionKind::FreshText,
                 supports_readback: kind == InteractionSessionKind::FreshText
                     && self.supports_readback.load(Ordering::SeqCst),
+                supports_hierarchy: self.supports_hierarchy.load(Ordering::SeqCst),
+                hierarchy_xml: self.hierarchy_xml.clone(),
             }))
         }
 
@@ -3432,6 +3704,7 @@ mod tests {
             let artifact_root = std::env::temp_dir()
                 .join(format!("riviu-flow-executor-artifacts-{}", Uuid::new_v4()));
             let executor = FlowExecutor::new(FlowExecutorDeps {
+                reasoner: None,
                 run_id: run.id,
                 udid: UDID.to_string(),
                 database: database.clone(),
@@ -3467,6 +3740,103 @@ mod tests {
                 .expect("load executor run")
                 .expect("executor run")
         }
+    }
+
+    #[tokio::test]
+    async fn data_flow_records_variables_and_logs_without_opening_a_phone() {
+        let mut plan = wait_only_plan();
+        let start = plan.execution_order[0];
+        let end = *plan.execution_order.last().unwrap();
+        let writer = CompiledFlowNode {
+            id: Uuid::new_v4(),
+            kind: ActionKind::SetVariable,
+            config: CompiledActionConfig::SetVariable {
+                name: "message".into(),
+                value: "fixture value".into(),
+            },
+            postcondition: None,
+        };
+        let log = CompiledFlowNode {
+            id: Uuid::new_v4(),
+            kind: ActionKind::Log,
+            config: CompiledActionConfig::Log {
+                message: "checkpoint".into(),
+                variable: Some("message".into()),
+            },
+            postcondition: None,
+        };
+        plan.nodes.retain(|id, _| *id == start || *id == end);
+        plan.execution_order = vec![start, writer.id, log.id, end];
+        for node in [writer, log] {
+            plan.action_definition_versions.insert(node.kind, 1);
+            plan.nodes.insert(node.id, node);
+        }
+        let fixture = ExecutorFixture::new(plan, Arc::new(FixtureFrames::new(&[40])));
+        fixture
+            .executor
+            .run_device(fixture.device_run_id, fixture.plan.clone())
+            .await
+            .expect("data-only flow");
+        let detail = fixture.detail();
+        let logged = detail
+            .attempts
+            .iter()
+            .find(|a| a.action_kind == ActionKind::Log)
+            .unwrap();
+        assert_eq!(logged.state, FlowAttemptState::Succeeded);
+        assert_eq!(
+            logged.evidence_result.as_ref().unwrap()["value"],
+            "fixture value"
+        );
+        let restored = fixture
+            .database
+            .get_flow_attempt_execution_context(logged.id)
+            .unwrap()
+            .unwrap();
+        let values = super::super::data::variables_before(
+            &restored.plan,
+            &restored.device_attempts,
+            fixture.device_run_id,
+            logged.node_id,
+        )
+        .unwrap();
+        assert_eq!(values["message"], "fixture value");
+        assert!(
+            fixture.driver.operations.lock().is_empty(),
+            "pure data nodes must not open a device"
+        );
+        fixture.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn missing_variable_is_a_verified_failure_and_never_opens_a_phone() {
+        let mut plan = wait_only_plan();
+        let id = plan.execution_order[1];
+        plan.nodes.insert(
+            id,
+            CompiledFlowNode {
+                id,
+                kind: ActionKind::Log,
+                config: CompiledActionConfig::Log {
+                    message: "checkpoint".into(),
+                    variable: Some("missing".into()),
+                },
+                postcondition: None,
+            },
+        );
+        plan.action_definition_versions.insert(ActionKind::Log, 1);
+        let fixture = ExecutorFixture::new(plan, Arc::new(FixtureFrames::new(&[40])));
+        let error = fixture
+            .executor
+            .run_device(fixture.device_run_id, fixture.plan.clone())
+            .await
+            .unwrap_err();
+        assert_eq!(error.code(), "VariableMissing");
+        let detail = fixture.detail();
+        let attempt = detail.attempts.iter().find(|a| a.node_id == id).unwrap();
+        assert_eq!(attempt.state, FlowAttemptState::FailedVerified);
+        assert!(fixture.driver.operations.lock().is_empty());
+        fixture.shutdown().await;
     }
 
     #[tokio::test]
@@ -4976,6 +5346,7 @@ mod tests {
             revision: 1,
             nodes,
             execution_order,
+            source_paths: Default::default(),
             successors: Default::default(),
             context_plan,
             action_definition_versions,

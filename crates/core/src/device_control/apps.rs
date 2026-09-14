@@ -215,6 +215,18 @@ impl DeviceControlPlane {
             .await
             .map_err(|error| driver_error(lease.udid(), "setScreenRotation", error))
     }
+
+    pub async fn set_http_proxy<'a>(
+        &self,
+        context: impl Into<DeviceLeaseRef<'a>>,
+        endpoint: Option<&str>,
+    ) -> Result<String, DeviceControlError> {
+        let lease = self.validate_leased(context.into())?;
+        self.driver
+            .set_http_proxy(lease.udid(), endpoint)
+            .await
+            .map_err(|error| driver_error(lease.udid(), "setHttpProxy", error))
+    }
     /// Copy the phone's photos and videos onto this host.
     ///
     /// Takes a lease like every other device action, but the caller is expected to have used

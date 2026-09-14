@@ -48,6 +48,22 @@ export const ACTION_PRESENTATION: Partial<
   assertVisible: { label: "Kiểm tra hiển thị", icon: ScanSearch },
   tapVision: { label: "Chạm theo ảnh", icon: Crosshair },
   ifVision: { label: "Nếu thấy ảnh", icon: GitBranch },
+  ifVisible: { label: "Nếu thấy phần tử", icon: GitBranch },
+  readText: { label: "Đọc văn bản", icon: ScanSearch },
+  setVariable: { label: "Gán biến", icon: Keyboard },
+  ifValue: { label: "So sánh biến", icon: GitBranch },
+  log: { label: "Ghi nhật ký", icon: Timer },
+  copyVariable: { label: "Sao chép biến", icon: Keyboard },
+  transform: { label: "Xử lý dữ liệu", icon: Keyboard },
+  join: { label: "Gộp nhánh", icon: GitBranch },
+  subflow: { label: "Flow con", icon: CirclePlay },
+  repeat: { label: "Lặp Flow con", icon: Timer },
+  ocrReadText: { label: "Đọc chữ từ ảnh", icon: ScanSearch },
+  fileRead: { label: "Đọc tệp", icon: ScanSearch },
+  fileWrite: { label: "Ghi tệp", icon: Keyboard },
+  httpRequest: { label: "Gọi HTTP", icon: Rocket },
+  sheetRead: { label: "Đọc ô Sheet", icon: ScanSearch },
+  sheetWrite: { label: "Ghi ô Sheet", icon: Keyboard },
 };
 
 export function summarizeAction(kind: ActionKind, config: JsonObject): string {
@@ -62,6 +78,10 @@ export function summarizeAction(kind: ActionKind, config: JsonObject): string {
     case "wait":
       return typeof config.durationMs === "number" ? `${config.durationMs} ms` : "";
     case "tap": {
+      if(config.selector && typeof config.selector==='object' && !Array.isArray(config.selector)) {
+        const s=config.selector;
+        return String(s.description || s.text || s.resourceId || "Phần tử đã chọn");
+      }
       const coordinates = [objectNumber(config.point, "x"), objectNumber(config.point, "y")]
         .filter((value): value is number => value !== null)
         .join(", ");
@@ -83,6 +103,15 @@ export function summarizeAction(kind: ActionKind, config: JsonObject): string {
       return text("label");
     case "assertVisible":
       return text("accessibilityId");
+    case "setVariable":
+    case "readText":
+      return text("name");
+    case "ifValue":
+      return `${text("name")} · ${text("operator")}`;
+    case "ifVisible":
+      return "Hai nhánh theo phần tử hiện tại";
+    case "log":
+      return text("message");
     case "tapVision":
     case "ifVision": {
       const hasTemplate = text("templatePngBase64").length > 0;

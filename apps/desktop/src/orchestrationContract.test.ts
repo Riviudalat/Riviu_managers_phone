@@ -21,6 +21,7 @@ vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
 const NODE_KINDS = {
   start: true,
   delay: true,
+  log: true,
   runNurture: true,
   runInteraction: true,
   runPublish: true,
@@ -64,6 +65,7 @@ describe("orchestration Rust/TypeScript contract", () => {
     expect(Object.keys(NODE_KINDS)).toEqual([
       "start",
       "delay",
+      "log",
       "runNurture",
       "runInteraction",
       "runPublish",

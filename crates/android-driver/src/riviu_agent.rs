@@ -762,7 +762,7 @@ async fn forward_helper(adb: &AdbProgram, serial: &str) -> anyhow::Result<u16> {
     .await
     .with_context(|| format!("forward tcp:0 to {remote} on {serial}"))?;
     let listing = adb
-        .run(&["forward", "--list"], Duration::from_secs(30))
+        .device(serial, &["forward", "--list"], Duration::from_secs(30))
         .await
         .context("list adb forwards")?;
     frames::parse_forward_port(&listing, serial, &remote).ok_or_else(|| {
@@ -773,7 +773,7 @@ async fn forward_helper(adb: &AdbProgram, serial: &str) -> anyhow::Result<u16> {
 async fn prune_helper_forwards(adb: &AdbProgram, serial: &str) -> usize {
     let remote = format!("tcp:{DEVICE_PORT}");
     let listing = match adb
-        .run(&["forward", "--list"], Duration::from_secs(30))
+        .device(serial, &["forward", "--list"], Duration::from_secs(30))
         .await
     {
         Ok(listing) => listing,

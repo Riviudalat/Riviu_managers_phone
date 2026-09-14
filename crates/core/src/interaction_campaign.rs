@@ -1045,12 +1045,37 @@ pub async fn execute_thread_campaign(
             pre_prepare_standalone_texts(&db, &control, &engine, &campaign_id, &request, &in_scope)
                 .await,
         );
-        let mut running = Vec::with_capacity(rows.len());
-        for (index, (assignment_id, target_key)) in rows.into_iter().enumerate() {
-            running.push(tokio::spawn(staggered_cohort(
-                FAN_OUT_STAGGER * index as u32,
+        // Distinct links can share one actor. Queue that actor's assignments in
+        // one task so each preceding session releases before the next is opened.
+        let mut by_device: std::collections::BTreeMap<String, Vec<(String, String)>> =
+            Default::default();
+        for (assignment_id, target_key) in rows {
+            let actor = &in_scope
+                .iter()
+                .find(|a| a.id == assignment_id)
+                .expect("in-scope assignment")
+                .actor_udid;
+            by_device
+                .entry(actor.clone())
+                .or_default()
+                .push((assignment_id, target_key));
+        }
+        let mut running = Vec::with_capacity(by_device.len());
+        for (index, (_, rows)) in by_device.into_iter().enumerate() {
+            let (
+                gate,
+                db,
+                control,
+                engine,
+                events,
+                campaign_id,
+                request,
+                plan,
+                artifacts,
+                frame_source,
+                pre_prepared,
+            ) = (
                 gate.clone(),
-                Some(std::collections::HashSet::from([target_key])),
                 db.clone(),
                 control.clone(),
                 engine.clone(),
@@ -1058,11 +1083,39 @@ pub async fn execute_thread_campaign(
                 campaign_id.clone(),
                 request.clone(),
                 plan.clone(),
-                Some(std::collections::HashSet::from([assignment_id])),
                 artifacts.clone(),
                 frame_source.clone(),
                 pre_prepared.clone(),
-            )));
+            );
+            running.push(tokio::spawn(async move {
+                let mut totals = (0, 0);
+                for (turn, (assignment_id, target_key)) in rows.into_iter().enumerate() {
+                    let result = staggered_cohort(
+                        if turn == 0 {
+                            FAN_OUT_STAGGER * index as u32
+                        } else {
+                            Duration::ZERO
+                        },
+                        gate.clone(),
+                        Some(std::collections::HashSet::from([target_key])),
+                        db.clone(),
+                        control.clone(),
+                        engine.clone(),
+                        events.clone(),
+                        campaign_id.clone(),
+                        request.clone(),
+                        plan.clone(),
+                        Some(std::collections::HashSet::from([assignment_id])),
+                        artifacts.clone(),
+                        frame_source.clone(),
+                        pre_prepared.clone(),
+                    )
+                    .await?;
+                    totals.0 += result.0;
+                    totals.1 += result.1;
+                }
+                Ok(totals)
+            }));
         }
         return join_campaign(db, events, campaign_id, running).await;
     }
@@ -2262,7 +2315,34 @@ async fn run_cohort(
             .collect();
         let mut chain_broken_at: Option<u8> = None;
         for index in 0..prepared_messages.len() {
-            let (id, prepared, ownership_revision) = &prepared_messages[index];
+            let (id, prepared_template, ownership_revision) = &prepared_messages[index];
+            let mut prepared = prepared_template.clone();
+            if prepared.parent_ordinal.is_some() && prepared.root_identity.is_none() {
+                let mut root = prepared.ordinal;
+                while let Some(parent) = plan
+                    .assignments
+                    .iter()
+                    .find(|a| a.target_key == target.target_key && a.ordinal == root)
+                    .and_then(|a| a.parent_ordinal)
+                {
+                    root = parent;
+                }
+                prepared.root_identity = identities.get(&root).cloned();
+            }
+            // Root accounts are observed when their actual session opens below.
+            // Resolve the parent's current observed handle at dispatch time,
+            // after earlier messages have completed, not while drafting the batch.
+            if request.scripted_conversation.is_none() && request.mention_parent {
+                let parent_handle = prepared
+                    .parent_ordinal
+                    .and_then(|ordinal| actor_by_ordinal.get(&(target.target_key.clone(), ordinal)))
+                    .and_then(|udid| db.get_device_meta(udid).ok())
+                    .map(|meta| meta.handle);
+                prepared.mentions =
+                    mentions_for(prepared.ordinal, &request, parent_handle.as_deref());
+                prepared.strict_mentions = true;
+            }
+            let prepared = &prepared;
             // A retry runs the same plan but must not re-send anything already
             // posted; the caller decides which assignments are in scope.
             if only_assignments
@@ -2384,6 +2464,16 @@ async fn run_cohort(
                     let labels=crate::tiktok_labels::controls_for_runtime(&opened_package,&language,&version).context("Chưa nhận diện TikTok trên máy")?;
                     let account=crate::tiktok_share::observe_publish_account(session.as_ref(),&labels).await?;
                     anyhow::ensure!(account.eq_ignore_ascii_case(role.username.trim_start_matches('@')),"Tài khoản trên máy không khớp vai {}",role.role_id);
+                    db.record_observed_interaction_account(&prepared.actor_udid,&account)?;
+                } else if request.actions.comment && session.supports_accessibility_readback() {
+                    let language=session.ui_language().await.context("Chưa đọc được ngôn ngữ TikTok")?;
+                    let version=session.app_version(&opened_package).await.context("Chưa đọc được phiên bản TikTok")?;
+                    let labels=crate::tiktok_labels::controls_for_runtime(&opened_package,&language,&version).context("Chưa nhận diện TikTok trên máy")?;
+                    let account=crate::tiktok_share::observe_publish_account(session.as_ref(),&labels).await?;
+                    db.record_observed_interaction_account(&prepared.actor_udid,&account)?;
+                }
+                if request.actions.comment && request.mention_parent && prepared.parent_ordinal.is_some() {
+                    anyhow::ensure!(!prepared.mentions.is_empty(),"Chưa xác định username của người được trả lời; chưa gửi bình luận");
                 }
                 // A process can die after arming a composer but before the durable effect
                 // gate. The database correctly makes that assignment retryable, but the

@@ -1,3 +1,4 @@
+import { openOperatorPage } from "./fixtures/operatorNavigation";
 import { expect, test, type Browser, type Page, type TestInfo } from "@playwright/test";
 
 import { installTauriMock } from "./fixtures/tauriMock";
@@ -12,7 +13,6 @@ const PAGES = [
   "Tác vụ",
   "Kho nội dung",
   "Trung tâm ứng dụng",
-  "Dữ liệu",
   "API",
   "Cài đặt",
 ] as const;
@@ -56,7 +56,7 @@ async function openProductionPage(page: Page, name: (typeof PAGES)[number]): Pro
   if (name !== "Thiết bị") {
     // At 150% the sidebar collapses and its visual label is clipped, while the button's
     // accessible name remains available to keyboard and screen-reader operators.
-    await page.getByRole("button", { name, exact: true }).click();
+    await openOperatorPage(page, name);
   }
   await expect(page.locator(".loading-state")).toHaveCount(0);
   await page.evaluate(() => document.fonts.ready);

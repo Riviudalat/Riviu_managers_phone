@@ -172,7 +172,7 @@ fn query_flow_run_detail(
     let Some(run) = query_run_record(connection, run_id)? else {
         return Ok(None);
     };
-    validate_run_plan(connection, &run)?;
+    let plan = load_validated_run_plan(connection, &run)?;
     validate_event_ledger(connection, &run)?;
 
     let mut device_statement = connection.prepare(
@@ -243,6 +243,7 @@ fn query_flow_run_detail(
         device_runs,
         attempts,
         artifacts,
+        source_paths: plan.source_paths,
     }))
 }
 
@@ -1161,7 +1162,9 @@ impl Database {
         let identity = query_attempt_identity(&connection, attempt_id)?
             .context("seeded attempt does not exist")?;
         let baseline = match contracts(identity.action_kind).2 {
-            EvidenceRequirement::None | EvidenceRequirement::ActiveApp => json!({"kind":"none"}),
+            EvidenceRequirement::None
+            | EvidenceRequirement::ActiveApp
+            | EvidenceRequirement::Connector => json!({"kind":"none"}),
             EvidenceRequirement::Process => {
                 let CompiledActionConfig::TerminateApp { bundle_id } = identity.node.config else {
                     anyhow::bail!("process fixture requires Terminate App");
@@ -1954,10 +1957,11 @@ fn validate_transition_proof(
                 contracts(identity.action_kind).2 == EvidenceRequirement::None,
                 "StateConflict: compiled action is missing its required postcondition"
             );
-            ensure!(
-                patch.evidence_result.is_none(),
-                "StateConflict: an evidence-free action cannot carry success evidence"
-            );
+            crate::flow::data::validate_data_output(
+                &identity.node.config,
+                patch.evidence_result.as_ref(),
+            )
+            .map_err(anyhow::Error::msg)?;
         }
     }
     if to == FlowAttemptState::FailedVerified {
@@ -2007,6 +2011,27 @@ fn validate_canonical_input(
     Ok(())
 }
 
+fn attempt_evidence_requirement(identity: &AttemptIdentity) -> anyhow::Result<EvidenceRequirement> {
+    if let Some(EvidenceSpec::ElementVisible { selector }) = &identity.node.postcondition {
+        let CompiledActionConfig::Tap {
+            target: crate::CompiledTapTarget::Element { selector: target },
+        } = &identity.node.config
+        else {
+            bail!("element evidence requires a compiled element tap");
+        };
+        selector.validate()?;
+        target.validate()?;
+        ensure!(
+            identity.action_kind == crate::ActionKind::Tap && selector.package == target.package,
+            "element evidence must stay within its target app"
+        );
+        // This postcondition reads a fresh hierarchy. It carries no image baseline;
+        // frame-based taps continue to bind their committed image and generation.
+        return Ok(EvidenceRequirement::None);
+    }
+    Ok(contracts(identity.action_kind).2)
+}
+
 fn validate_evidence_baseline(identity: &AttemptIdentity, value: &Value) -> anyhow::Result<()> {
     let object = value
         .as_object()
@@ -2015,8 +2040,10 @@ fn validate_evidence_baseline(identity: &AttemptIdentity, value: &Value) -> anyh
         .get("kind")
         .and_then(Value::as_str)
         .context("evidence baseline kind is missing")?;
-    let expected = match contracts(identity.action_kind).2 {
-        EvidenceRequirement::None | EvidenceRequirement::ActiveApp => "none",
+    let expected = match attempt_evidence_requirement(identity)? {
+        EvidenceRequirement::None
+        | EvidenceRequirement::ActiveApp
+        | EvidenceRequirement::Connector => "none",
         EvidenceRequirement::Process => "process",
         EvidenceRequirement::Frame
         | EvidenceRequirement::TextOrQualifiedFrame
@@ -2100,6 +2127,14 @@ fn validate_success_evidence(
     postcondition: &EvidenceSpec,
     value: &Value,
 ) -> anyhow::Result<()> {
+    if let EvidenceSpec::ConnectorResult { name } = postcondition {
+        ensure!(
+            crate::flow::extended::output_variable(&identity.node.config) == Some(name.as_str()),
+            "connector postcondition output mismatch"
+        );
+        return crate::flow::data::validate_data_output(&identity.node.config, Some(value))
+            .map_err(anyhow::Error::msg);
+    }
     if identity.action_kind == crate::ActionKind::AutoSwipe {
         return validate_auto_swipe_success_evidence(identity, postcondition, value);
     }
@@ -2253,7 +2288,7 @@ fn validate_failed_measurement(
     measurement: &serde_json::Map<String, Value>,
     observed_sha256: &str,
 ) -> anyhow::Result<()> {
-    let frame_binding = match contracts(identity.action_kind).2 {
+    let frame_binding = match attempt_evidence_requirement(identity)? {
         EvidenceRequirement::Frame | EvidenceRequirement::TextOrQualifiedFrame => {
             let baseline = identity
                 .evidence_baseline
@@ -2279,6 +2314,11 @@ fn validate_failed_measurement(
         _ => None,
     };
     match postcondition {
+        EvidenceSpec::ElementVisible { selector } => ensure!(
+            measurement.get("selector") == Some(&serde_json::to_value(selector)?)
+                && measurement.get("visible") == Some(&Value::Bool(false)),
+            "failed element evidence must bind the missing target"
+        ),
         EvidenceSpec::ActiveAppEquals { bundle_id } => ensure!(
             measurement.len() == 1
                 && measurement
@@ -2365,6 +2405,7 @@ fn validate_failed_measurement(
                 "failed text evidence actually matches the compiled value"
             );
         }
+        EvidenceSpec::ConnectorResult { .. } => bail!("connector failures use their bound error"),
         EvidenceSpec::ArtifactDecodedAndHashed => {
             bail!("artifact verification failure must use its typed error")
         }
@@ -2378,7 +2419,7 @@ fn validate_success_measurement(
     measurement: &serde_json::Map<String, Value>,
     observed_sha256: &str,
 ) -> anyhow::Result<()> {
-    let frame_binding = match contracts(identity.action_kind).2 {
+    let frame_binding = match attempt_evidence_requirement(identity)? {
         EvidenceRequirement::Frame | EvidenceRequirement::TextOrQualifiedFrame => {
             let baseline = identity
                 .evidence_baseline
@@ -2408,6 +2449,11 @@ fn validate_success_measurement(
             measurement.len() == 1
                 && measurement.get("bundleId").and_then(Value::as_str) == Some(bundle_id.as_str()),
             "active-app evidence does not match its compiled bundle"
+        ),
+        EvidenceSpec::ElementVisible { selector } => ensure!(
+            measurement.get("selector") == Some(&serde_json::to_value(selector)?)
+                && measurement.get("visible") == Some(&Value::Bool(true)),
+            "element evidence must bind the visible target"
         ),
         EvidenceSpec::ProcessAbsent { bundle_id } => {
             let baseline = identity
@@ -2473,6 +2519,7 @@ fn validate_success_measurement(
                 "text evidence does not match its compiled locator and value"
             );
         }
+        EvidenceSpec::ConnectorResult { .. } => bail!("connector result uses its receipt verifier"),
         EvidenceSpec::ArtifactDecodedAndHashed => {
             bail!("artifact evidence must be published through the atomic artifact transaction")
         }
@@ -2482,6 +2529,7 @@ fn validate_success_measurement(
 
 fn evidence_kind(spec: &EvidenceSpec) -> EvidenceKind {
     match spec {
+        EvidenceSpec::ElementVisible { .. } => EvidenceKind::ElementVisible,
         EvidenceSpec::ActiveAppEquals { .. } => EvidenceKind::ActiveAppEquals,
         EvidenceSpec::ProcessAbsent { .. } => EvidenceKind::ProcessAbsent,
         EvidenceSpec::FrameDigestChanged { .. } => EvidenceKind::FrameDigestChanged,
@@ -2490,6 +2538,7 @@ fn evidence_kind(spec: &EvidenceSpec) -> EvidenceKind {
         EvidenceSpec::AccessibilityVisible { .. } => EvidenceKind::AccessibilityVisible,
         EvidenceSpec::TextReadBackEquals { .. } => EvidenceKind::TextReadBackEquals,
         EvidenceSpec::ArtifactDecodedAndHashed => EvidenceKind::ArtifactDecodedAndHashed,
+        EvidenceSpec::ConnectorResult { .. } => EvidenceKind::ConnectorResult,
     }
 }
 
@@ -3111,7 +3160,11 @@ fn validate_attempt_claim(
                 .get(&predecessor_id)
                 .map(|node| node.kind)
             {
-                Some(crate::ActionKind::IfVision) => {
+                Some(
+                    crate::ActionKind::IfVision
+                    | crate::ActionKind::IfVisible
+                    | crate::ActionKind::IfValue,
+                ) => {
                     identity
                         .plan
                         .successor_on_path(predecessor_id, chosen_port.as_deref())
@@ -3362,10 +3415,14 @@ fn validate_persisted_attempt(
             )?;
         } else {
             ensure!(
-                contracts(identity.action_kind).2 == EvidenceRequirement::None
-                    && attempt.evidence_result.is_none(),
+                contracts(identity.action_kind).2 == EvidenceRequirement::None,
                 "persisted evidence-free Flow success is invalid"
             );
+            crate::flow::data::validate_data_output(
+                &identity.node.config,
+                attempt.evidence_result.as_ref(),
+            )
+            .map_err(anyhow::Error::msg)?;
         }
     }
     if attempt.state == FlowAttemptState::FailedVerified {
@@ -3849,6 +3906,11 @@ mod tests {
         let mut document = FlowDocumentV2::empty("Runtime fixture");
         document.revision = 1;
         let postcondition = match &config {
+            CompiledActionConfig::Tap {
+                target: crate::CompiledTapTarget::Element { selector },
+            } => Some(EvidenceSpec::ElementVisible {
+                selector: selector.clone(),
+            }),
             CompiledActionConfig::LaunchApp { bundle_id } => Some(EvidenceSpec::ActiveAppEquals {
                 bundle_id: bundle_id.clone(),
             }),
@@ -3880,6 +3942,7 @@ mod tests {
             revision: 1,
             nodes: BTreeMap::from([(node.id, node.clone())]),
             execution_order: vec![node.id],
+            source_paths: Default::default(),
             successors: Default::default(),
             context_plan: ContextPlan {
                 requires_exclusive: false,
@@ -3896,6 +3959,52 @@ mod tests {
             .save_flow_revision(None, &document, &plan, &hash)
             .expect("save runtime revision");
         (revision, node)
+    }
+
+    #[test]
+    fn run_detail_returns_frozen_composition_paths_after_reopen() {
+        let (database, path) = database_fixture();
+        let (revision, node) = save_revision(
+            &database,
+            ActionKind::Wait,
+            CompiledActionConfig::Wait { duration_ms: 10 },
+        );
+        let mut document = revision.document.clone();
+        document.revision += 1;
+        let mut plan = revision.compiled_plan.clone();
+        plan.revision = document.revision;
+        let source = crate::CompositionSource {
+            source_node_id: Uuid::new_v4(),
+            path: vec![crate::CompositionFrame {
+                node_id: Uuid::new_v4(),
+                flow_id: Uuid::new_v4(),
+                revision: 4,
+                iteration: Some(3),
+            }],
+        };
+        plan.source_paths.insert(node.id, source.clone());
+        let hash = compiled_plan_sha256(&plan).unwrap();
+        let frozen = database
+            .save_flow_revision(Some(revision.document.revision), &document, &plan, &hash)
+            .unwrap();
+        let run = database
+            .create_flow_run(&frozen, selection(&["device-a"]))
+            .unwrap();
+        let detail = database.get_flow_run(run.id).unwrap().unwrap();
+        assert_eq!(detail.source_paths.get(&node.id), Some(&source));
+        drop(database);
+        let reopened = Database::open(&path).unwrap();
+        assert_eq!(
+            reopened
+                .get_flow_run(run.id)
+                .unwrap()
+                .unwrap()
+                .source_paths
+                .get(&node.id),
+            Some(&source)
+        );
+        drop(reopened);
+        cleanup(&path);
     }
 
     /// Start -> IfVision -> (matched: Wait) | (notMatched: Home) -> End.
@@ -3950,6 +4059,7 @@ mod tests {
                 (end.id, end.clone()),
             ]),
             execution_order: vec![start.id, branch.id, matched.id, unmatched.id, end.id],
+            source_paths: Default::default(),
             successors: BTreeMap::from([
                 (start.id, BTreeMap::from([("flow".to_string(), branch.id)])),
                 (
@@ -4008,6 +4118,7 @@ mod tests {
             revision: document.revision,
             nodes: BTreeMap::from([(first.id, first.clone()), (second.id, second.clone())]),
             execution_order: vec![first.id, second.id],
+            source_paths: Default::default(),
             successors: Default::default(),
             context_plan: ContextPlan {
                 requires_exclusive: false,
@@ -5667,6 +5778,98 @@ mod tests {
             .expect("remove success evidence");
         assert!(database.get_flow_run(run_id).is_err());
         cleanup(&path);
+    }
+
+    #[test]
+    fn recorded_element_flow_commits_none_baseline_and_binds_both_outcomes_to_selector() {
+        for matched in [true, false] {
+            let selector = crate::ui_automation::inspector::ElementSelector {
+                package: "com.example.fixture".into(),
+                text: Some("Edit profile".into()),
+                description: None,
+                resource_id: None,
+                class_name: None,
+            };
+            let (database, path, run_id, attempt_id, node) = attempt_fixture(
+                ActionKind::Tap,
+                CompiledActionConfig::Tap {
+                    target: crate::CompiledTapTarget::Element {
+                        selector: selector.clone(),
+                    },
+                },
+                SideEffectClass::AmbiguousUi,
+            );
+            database
+                .transition_attempt(
+                    attempt_id,
+                    FlowAttemptState::Queued,
+                    FlowAttemptState::IntentCommitted,
+                    AttemptTransitionPatch {
+                        canonical_input: Some(serde_json::to_value(&node.config).unwrap()),
+                        evidence_baseline: Some(json!({"kind":"none"})),
+                        ..Default::default()
+                    },
+                )
+                .expect("semantic intent baseline");
+            database
+                .transition_attempt(
+                    attempt_id,
+                    FlowAttemptState::IntentCommitted,
+                    FlowAttemptState::EffectDispatched,
+                    Default::default(),
+                )
+                .unwrap();
+            database
+                .transition_attempt(
+                    attempt_id,
+                    FlowAttemptState::EffectDispatched,
+                    FlowAttemptState::Verifying,
+                    Default::default(),
+                )
+                .unwrap();
+            let to = if matched {
+                FlowAttemptState::Succeeded
+            } else {
+                FlowAttemptState::FailedVerified
+            };
+            let proof = |target| json!({"kind":"elementVisible","matched":matched,"observedSha256":"b".repeat(64),"measurement":{"selector":target,"visible":matched,"error":null}});
+            let error = (!matched).then(|| crate::FlowErrorRecord {
+                code: "EvidenceMismatch".into(),
+                message: "target absent".into(),
+                node_id: Some(node.id),
+                field: None,
+                udid: Some("fixture-udid".into()),
+                attempt_id: Some(attempt_id),
+            });
+            let mut wrong = selector.clone();
+            wrong.text = Some("Unrelated".into());
+            assert!(database
+                .transition_attempt(
+                    attempt_id,
+                    FlowAttemptState::Verifying,
+                    to,
+                    AttemptTransitionPatch {
+                        evidence_result: Some(proof(wrong)),
+                        error: error.clone(),
+                        ..Default::default()
+                    }
+                )
+                .is_err());
+            database
+                .transition_attempt(
+                    attempt_id,
+                    FlowAttemptState::Verifying,
+                    to,
+                    AttemptTransitionPatch {
+                        evidence_result: Some(proof(selector)),
+                        error,
+                        ..Default::default()
+                    },
+                )
+                .expect("typed semantic result");
+            assert!(database.get_flow_run(run_id).unwrap().is_some());
+            cleanup(&path);
+        }
     }
 
     #[test]

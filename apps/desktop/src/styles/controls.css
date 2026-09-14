@@ -398,6 +398,11 @@ button.primary:active:not(:disabled),
   display: block;
   user-select: none;
 }
+.dev-phone-screen .phone-canvas {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
 .phone-canvas-host {
   display: contents;
 }

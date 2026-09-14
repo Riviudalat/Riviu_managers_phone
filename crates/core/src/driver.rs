@@ -398,6 +398,10 @@ pub trait DeviceDriver: Send + Sync {
         unsupported("setScreenRotation")
     }
 
+    async fn set_http_proxy(&self, _udid: &str, _endpoint: Option<&str>) -> anyhow::Result<String> {
+        unsupported("httpProxy")
+    }
+
     /// Every app the phone reports as present, tagged user or system.
     ///
     /// Defaults to a refusal rather than an empty list, and the difference is the whole
@@ -645,6 +649,17 @@ pub trait UiSession: Send + Sync {
         None
     }
     async fn tap(&self, point: TapPoint) -> anyhow::Result<()>;
+    async fn activate_element(&self, query: ElementQuery<'_>) -> anyhow::Result<()> {
+        let matches = self.locate_all_described(query).await?;
+        let [target] = matches.as_slice() else {
+            anyhow::bail!("element activation requires one target");
+        };
+        anyhow::ensure!(
+            target.enabled && target.clickable,
+            "element is not actionable"
+        );
+        self.tap(target.centre()).await
+    }
     /// Tap the way a finger does, through the UI hierarchy rather than by
     /// synthesising HID events.
     ///
@@ -839,6 +854,10 @@ pub trait UiSession: Send + Sync {
     ///
     /// The default delegates, which is correct for a backend where the URL scheme has one
     /// possible handler.
+    async fn reopen_url_in_app(&self, url: &str, bundle_id: &str) -> anyhow::Result<()> {
+        self.open_url_in_app(url, bundle_id).await
+    }
+
     async fn open_url_in_app(&self, url: &str, _bundle_id: &str) -> anyhow::Result<()> {
         self.open_url(url).await
     }

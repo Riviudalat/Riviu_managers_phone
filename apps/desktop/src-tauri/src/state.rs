@@ -992,6 +992,7 @@ impl AppState {
         let flow_artifacts = FlowArtifactStore::new(artifacts_dir.join("flows"))?;
         let interaction_artifacts = FlowArtifactStore::new(artifacts_dir.join("interactions"))?;
         let flows = FlowRuntime::new(FlowRuntimeDeps {
+            reasoner: Some(gui_service.clone()),
             database: db.clone(),
             events: events.clone(),
             registry: registry.clone(),

@@ -1,6 +1,8 @@
 import { useModalFocus } from "./useModalFocus";
+import { createPortal } from "react-dom";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { ArrowUp, File, Folder, Link2, X } from "lucide-react";
+import { ArrowUp, ArrowRight, File, Folder, Link2, Monitor, Smartphone, X } from "lucide-react";
+import { useClosingTransition } from "./useClosingTransition";
 import { deviceDeletePath, deviceListDir, devicePullPath, devicePushFile } from "../api";
 import { requestConfirm } from "../confirmStore";
 import { describeError } from "../describeError";
@@ -20,6 +22,8 @@ import type { DeviceFileEntry, DeviceInfo } from "../types";
 interface Props {
   device: DeviceInfo;
   onClose: () => void;
+  mode?: "browse" | "upload" | "download";
+  uploadPaths?: string[];
 }
 
 /**
@@ -58,8 +62,9 @@ const SHORTCUTS: { label: string; path: string }[] = [
  *   changes underneath is how a delete lands on the wrong file — the names are the same in
  *   twenty folders.
  */
-export function DeviceFilesPopup({ device, onClose }: Props) {
-  const dialogRef = useModalFocus<HTMLDivElement>(onClose);
+export function DeviceFilesPopup({ device, onClose, mode = "browse", uploadPaths = [] }: Props) {
+  const { closing, close } = useClosingTransition(onClose);
+  const dialogRef = useModalFocus<HTMLDivElement>(() => { if (!busy) close(); });
   const [path, setPath] = useState(DEVICE_HOME);
   /**
    * **The listing and the path it belongs to, in one state.**
@@ -88,6 +93,8 @@ export function DeviceFilesPopup({ device, onClose }: Props) {
   const requested = useRef(DEVICE_HOME);
   const [picked, setPicked] = useState<string[]>([]);
   const [busy, setBusy] = useState(false);
+  const [uploaded, setUploaded] = useState<string[]>([]);
+  const [transferResult, setTransferResult] = useState<string | null>(null);
   /// What is in the path box, which is not the same as where the browser *is*: the operator
   /// types freely and only Enter commits. Kept in step with `path` on every navigation, so
   /// clicking a folder updates the box too.
@@ -179,6 +186,7 @@ export function DeviceFilesPopup({ device, onClose }: Props) {
       }
     }
     setBusy(false);
+    setTransferResult(failures.length ? `Đã lấy ${saved}/${picked.length} mục. ${failures.join("; ")}` : `Đã lấy ${saved} mục về ${dest}`);
     if (saved > 0) pushToast("ok", `Đã lấy ${saved} mục về máy tính`, dest);
     if (failures.length > 0) {
       pushToast("warn", `${failures.length} mục không lấy được`, failures.join("\n"));
@@ -217,12 +225,18 @@ export function DeviceFilesPopup({ device, onClose }: Props) {
 
   const pushHere = async () => {
     if (busy) return;
-    const local = await pickFile({ title: "Chọn tệp đưa vào máy" });
-    if (!local) return;
+    const pending = mode === "upload" ? uploadPaths.filter(file => !uploaded.includes(file)) : [await pickFile({ title: "Chọn tệp đưa vào máy" })].filter((file): file is string => !!file);
+    if (!pending.length) return;
     setBusy(true);
+    const completed: string[] = [];
+    const failures: string[] = [];
     try {
-      const landed = await devicePushFile(device.udid, local, path);
-      pushToast("ok", "Đã đưa tệp vào máy", landed);
+      for (const local of pending) {
+        try { await devicePushFile(device.udid, local, path); completed.push(local); }
+        catch (error) { failures.push(describeError(error)); }
+      }
+      setUploaded(previous => [...previous, ...completed]);
+      setTransferResult(failures.length ? `Đã đưa ${completed.length}/${pending.length} tệp. ${failures.join("; ")}` : `Đã đưa ${completed.length} tệp vào ${path}`);
       await load(path);
     } catch (error) {
       toastError("Đưa tệp vào máy thất bại", error);
@@ -231,23 +245,27 @@ export function DeviceFilesPopup({ device, onClose }: Props) {
     }
   };
 
-  return (
-    <div className="modal-backdrop" onClick={onClose}>
+  return createPortal(
+    <div className={`modal-backdrop device-files-backdrop${closing ? " is-closing" : ""}`} onClick={() => { if (!busy) close(); }}>
       <div
         ref={dialogRef}
         tabIndex={-1}
-        className="modal device-files"
+        className={`modal device-files mode-${mode}`}
         role="dialog"
         aria-modal="true"
         aria-label={`Tệp trên ${device.name}`}
         onClick={(event) => event.stopPropagation()}
       >
         <header>
-          <div className="device-modal-heading"><p>Tệp trên thiết bị</p><h2>{device.name}</h2><span title={device.udid}>{device.udid}</span></div>
-          <button type="button" className="icon-btn" onClick={onClose} aria-label="Đóng" title="Đóng">
+          <div className="device-modal-heading"><p>{mode === "upload" ? "PC → Điện thoại" : mode === "download" ? "Điện thoại → PC" : "Tệp trên thiết bị"}</p><h2>{device.name}</h2><span title={device.udid}>{device.udid}</span></div>
+          <button type="button" className="icon-btn" disabled={busy} onClick={close} aria-label="Đóng" title="Đóng">
             <X size={18} />
           </button>
         </header>
+        {mode !== "browse" && <div className="device-transfer-direction">
+          {mode === "upload" ? <Monitor size={16}/> : <Smartphone size={16}/>}<span>{mode === "upload" ? `${uploadPaths.length} tệp đã chọn từ PC` : "Chọn tệp hoặc thư mục cần lấy"}</span><ArrowRight size={15}/>{mode === "upload" ? <Smartphone size={16}/> : <Monitor size={16}/>}<strong>{mode === "upload" ? "Chọn thư mục đích bên dưới" : "Chọn nơi lưu trên PC ở bước tiếp"}</strong>
+        </div>}
+        {mode === "upload" && <div className="device-upload-files" title={uploadPaths.join("\n")}>{uploadPaths.map(file => file.split(/[\\/]/).at(-1)).join(", ")}</div>}
 
         <div className="row device-files-jumps">
           {SHORTCUTS.map((shortcut) => (
@@ -331,12 +349,12 @@ export function DeviceFilesPopup({ device, onClose }: Props) {
           <ul className="device-files-list">
             {rows.map((entry) => (
               <li key={entry.name} className={picked.includes(entry.name) ? "is-picked" : ""}>
-                <input
+                {mode !== "upload" && <input
                   type="checkbox"
                   aria-label={`Chọn ${entry.name}`}
                   checked={picked.includes(entry.name)}
                   onChange={() => toggle(entry.name)}
-                />
+                />}
                 {isBrowsableEntry(entry) ? (
                   <button
                     type="button"
@@ -356,31 +374,32 @@ export function DeviceFilesPopup({ device, onClose }: Props) {
           </ul>
         )}
 
+        {transferResult && <p className="device-transfer-result" role="status">{transferResult}</p>}
         <footer className="row device-files-actions">
           <span className="hint" role="status">
             <span>{picked.length > 0 ? `Đã chọn ${picked.length} mục` : "Chưa chọn mục nào"}</span>{` · ${rows.length} mục trong thư mục`}
           </span>
-          <button type="button" className="ghost" disabled={busy} onClick={() => void pushHere()}>
-            Đưa tệp vào đây
-          </button>
-          <button
+          {mode !== "download" && <button type="button" className={mode === "upload" ? "primary" : "ghost"} disabled={busy || (mode === "upload" && uploaded.length === uploadPaths.length)} onClick={() => void pushHere()}>
+            {busy ? "Đang chuyển…" : mode === "upload" ? "Đưa vào thư mục này" : "Đưa tệp vào đây"}
+          </button>}
+          {mode !== "upload" && <button
             type="button"
             className="primary"
             disabled={busy || picked.length === 0}
             onClick={() => void pullPicked()}
           >
             Lấy về máy tính
-          </button>
-          <button
+          </button>}
+          {mode === "browse" && <button
             type="button"
             className="danger"
             disabled={busy || picked.length === 0}
             onClick={() => void deletePicked()}
           >
             Xoá
-          </button>
+          </button>}
         </footer>
       </div>
-    </div>
+    </div>, document.body
   );
 }

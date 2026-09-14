@@ -366,6 +366,10 @@ impl DeviceDriver for MultiplexDriver {
         self.route(udid)?.set_screen_rotation(udid, rotation).await
     }
 
+    async fn set_http_proxy(&self, udid: &str, endpoint: Option<&str>) -> anyhow::Result<String> {
+        self.route(udid)?.set_http_proxy(udid, endpoint).await
+    }
+
     // Hand-written, and it has to be: this type implements the trait itself, so a
     // method left un-forwarded silently answers with the trait *default* — a refusal —
     // for every device, turning the backend's real implementation into dead code that

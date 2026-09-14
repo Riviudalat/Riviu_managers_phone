@@ -337,6 +337,13 @@ GUI perception service (Python sidecar)
 FastAPI (MIT), Pydantic (MIT), Starlette (BSD-3-Clause), Uvicorn
 (BSD-3-Clause), HTTPX (BSD-3-Clause), and Pillow (MIT-CMU) implement the
 isolated perception API. Exact versions are pinned in sidecars/gui-service/uv.lock.
+OpenCV headless (Apache-2.0) and NumPy (BSD-3-Clause) provide local template
+correlation. Their bundled dependency license notices are retained with the runtime.
+Local OCR uses tesserocr 2.10.0 (MIT), Tesseract (Apache-2.0), and Leptonica
+(BSD-2-Clause). The Windows wheel contains Tesseract 5.5.2 and is pinned by URL
+and SHA-256 in uv.lock. English/Vietnamese tessdata_fast models (Apache-2.0)
+are pinned by commit and SHA-256 in riviu_gui/ocr-models.json. Model, Tesseract,
+Leptonica, and wrapper license texts ship in the perception runtime.
 The sidecar bundles CPython 3.12 (PSF license) using PyInstaller's bootloader
 exception. Package license texts are retained under sidecars/gui-service/licenses.
 Perception returns observations only; Riviu owns device effects and campaign state.

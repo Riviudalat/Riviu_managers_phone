@@ -499,8 +499,23 @@ impl AgentClient {
         suffix: &str,
         body: Option<Value>,
     ) -> anyhow::Result<Value> {
+        self.send_once_with_timeout(method, suffix, body, None)
+            .await
+    }
+
+    async fn send_once_with_timeout(
+        &self,
+        method: reqwest::Method,
+        suffix: &str,
+        body: Option<Value>,
+        request_timeout: Option<Duration>,
+    ) -> anyhow::Result<Value> {
         let url = self.url(suffix);
         let mut request = self.http.request(method, &url);
+        if let Some(request_timeout) = request_timeout {
+            anyhow::ensure!(!request_timeout.is_zero(), "text read deadline elapsed");
+            request = request.timeout(request_timeout);
+        }
         if let Some(body) = body {
             request = request.json(&body);
         }
@@ -668,6 +683,69 @@ impl AgentClient {
             .and_then(Value::as_str)
             .unwrap_or_default()
             .to_string())
+    }
+
+    /// A qualified read has one deadline across lookup and text, enforced by the HTTP
+    /// requests themselves. It does not recycle the session behind the caller's budget
+    /// or reuse an element identifier across a session replacement.
+    pub(crate) async fn read_text_bounded(
+        &self,
+        locator: &Locator,
+        request_timeout: Duration,
+    ) -> anyhow::Result<String> {
+        let deadline = std::time::Instant::now()
+            .checked_add(request_timeout)
+            .context("text read deadline overflow")?;
+        let remaining = || {
+            deadline
+                .checked_duration_since(std::time::Instant::now())
+                .filter(|duration| !duration.is_zero())
+                .context("text read deadline elapsed")
+        };
+        let found = self
+            .send_once_with_timeout(
+                reqwest::Method::POST,
+                "/elements",
+                Some(locator.to_body()),
+                Some(remaining()?),
+            )
+            .await?;
+        let matches = found
+            .get("value")
+            .and_then(Value::as_array)
+            .context("text lookup must return an element array")?;
+        anyhow::ensure!(
+            matches.len() == 1,
+            "text lookup requires exactly one matching element"
+        );
+        let legacy = matches[0].get("ELEMENT").and_then(Value::as_str);
+        let w3c = matches[0].get(W3C_ELEMENT_KEY).and_then(Value::as_str);
+        anyhow::ensure!(
+            !matches!((legacy, w3c), (Some(a), Some(b)) if a != b),
+            "text lookup returned conflicting element identifiers"
+        );
+        let element = w3c
+            .or(legacy)
+            .filter(|id| {
+                !id.is_empty()
+                    && id.bytes().all(|b| {
+                        b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~')
+                    })
+            })
+            .context("text lookup returned a missing or invalid element identifier")?;
+        let response = self
+            .send_once_with_timeout(
+                reqwest::Method::GET,
+                &format!("/element/{element}/text"),
+                None,
+                Some(remaining()?),
+            )
+            .await?;
+        response
+            .get("value")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .context("text response must contain a string value")
     }
 
     pub async fn attribute(&self, element: &str, name: &str) -> anyhow::Result<Option<String>> {
@@ -993,6 +1071,166 @@ mod tests {
                 "effectful route {method} {route} must never be reissued"
             );
         }
+    }
+
+    /// A local HTTP fixture with independently delayed lookup/text replies.
+    async fn bounded_text_fixture(
+        responses: Vec<(Duration, Value)>,
+    ) -> (
+        AgentClient,
+        Arc<Mutex<Vec<String>>>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let routes = Arc::new(Mutex::new(Vec::new()));
+        let seen = routes.clone();
+        let server = tokio::spawn(async move {
+            for (delay, response) in responses {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut request = Vec::new();
+                let mut buffer = [0; 2048];
+                loop {
+                    let count = socket.read(&mut buffer).await.unwrap();
+                    if count == 0 {
+                        return;
+                    }
+                    request.extend_from_slice(&buffer[..count]);
+                    if let Some(end) = request.windows(4).position(|bytes| bytes == b"\r\n\r\n") {
+                        let headers = String::from_utf8_lossy(&request[..end]);
+                        let length = headers
+                            .lines()
+                            .find_map(|line| {
+                                line.to_ascii_lowercase()
+                                    .strip_prefix("content-length:")
+                                    .and_then(|value| value.trim().parse::<usize>().ok())
+                            })
+                            .unwrap_or(0);
+                        if request.len() >= end + 4 + length {
+                            break;
+                        }
+                    }
+                }
+                seen.lock().push(
+                    String::from_utf8_lossy(&request)
+                        .lines()
+                        .next()
+                        .unwrap()
+                        .to_owned(),
+                );
+                tokio::time::sleep(delay).await;
+                let body = response.to_string();
+                let reply = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                if socket.write_all(reply.as_bytes()).await.is_err() {
+                    return;
+                }
+            }
+        });
+        let client = AgentClient {
+            http: reqwest::Client::builder()
+                .timeout(DEFAULT_TIMEOUT)
+                .build()
+                .unwrap(),
+            base,
+            serial: "fixture-device".into(),
+            session_id: Arc::new(Mutex::new("fixture".into())),
+        };
+        (client, routes, server)
+    }
+
+    #[tokio::test]
+    async fn bounded_text_keeps_unicode_and_does_not_turn_malformed_values_into_empty_text() {
+        for value in [
+            json!("Xin chào"),
+            Value::Null,
+            json!({"text":"wrong shape"}),
+        ] {
+            let (client, routes, server) = bounded_text_fixture(vec![
+                (Duration::ZERO, json!({"value":[{"ELEMENT":"text-id"}]})),
+                (Duration::ZERO, json!({"value":value})),
+            ])
+            .await;
+            let result = client
+                .read_text_bounded(
+                    &Locator::Description("caption".into()),
+                    Duration::from_secs(2),
+                )
+                .await;
+            server.await.unwrap();
+            if let Some(expected) = value.as_str() {
+                assert_eq!(result.unwrap(), expected);
+            } else {
+                assert!(result.unwrap_err().to_string().contains("string value"));
+            }
+            assert_eq!(routes.lock().len(), 2);
+        }
+    }
+
+    #[tokio::test]
+    async fn bounded_text_spends_one_deadline_across_both_requests() {
+        let (client, routes, server) = bounded_text_fixture(vec![
+            (
+                Duration::from_millis(300),
+                json!({"value":[{"ELEMENT":"text-id"}]}),
+            ),
+            (Duration::from_millis(300), json!({"value":"too late"})),
+        ])
+        .await;
+        // Each request fits 500 ms in isolation; together they exceed the one budget.
+        let result = client
+            .read_text_bounded(
+                &Locator::Description("caption".into()),
+                Duration::from_millis(500),
+            )
+            .await;
+        server.abort();
+        let _ = server.await;
+        assert!(
+            result.is_err(),
+            "the text request must receive only the remaining budget"
+        );
+        assert!(
+            routes.lock().len() <= 2,
+            "deadline exhaustion must not retry or recreate a session"
+        );
+    }
+
+    #[tokio::test]
+    async fn bounded_text_zero_budget_and_invalid_lookup_never_start_a_text_request() {
+        for found in [
+            json!({"value":{}}),
+            json!({"value":[]}),
+            json!({"value":[{"ELEMENT":"a"},{"ELEMENT":"b"}]}),
+            json!({"value":[{"ELEMENT":"../actions"}]}),
+            json!({"value":[{"ELEMENT":"a", "element-6066-11e4-a52e-4f735466cecf":"b"}]}),
+        ] {
+            let (client, routes, server) =
+                bounded_text_fixture(vec![(Duration::ZERO, found)]).await;
+            assert!(client
+                .read_text_bounded(
+                    &Locator::Description("caption".into()),
+                    Duration::from_secs(2)
+                )
+                .await
+                .is_err());
+            server.await.unwrap();
+            assert_eq!(routes.lock().len(), 1);
+        }
+        let (client, routes, server) = bounded_text_fixture(vec![]).await;
+        assert!(client
+            .read_text_bounded(&Locator::Description("caption".into()), Duration::ZERO)
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("deadline"));
+        server.await.unwrap();
+        assert!(routes.lock().is_empty());
     }
 
     /// Model the pinned server's singleton session and DELETE-triggered shutdown.

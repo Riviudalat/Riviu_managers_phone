@@ -2099,13 +2099,8 @@ pub(super) async fn run_feed(
                 mood,
             )
         };
-        for selected in [
-            plan.like.then_some(FeedAction::Like),
-            plan.save.then_some(FeedAction::Save),
-            plan.comment.then_some(FeedAction::Comment),
-        ]
-        .into_iter()
-        .flatten()
+        for selected in
+            crate::human_behavior::ordered_feed_actions(&plan, &settings.workflow_action_order)
         {
             match selected {
                 FeedAction::Like

@@ -1,3 +1,4 @@
+import { openOperatorPage } from "./fixtures/operatorNavigation";
 import { expect, test } from "@playwright/test";
 import { installTauriMock } from "./fixtures/tauriMock";
 import AxeBuilder from "@axe-core/playwright";
@@ -32,7 +33,7 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 900, height: 700 
     });
     await page.goto("/");
     await expect(page.getByTestId("device-tile")).toHaveCount(20);
-    await page.getByRole("button", { name: "Tương tác", exact: true }).click();
+    await openOperatorPage(page, 'Tương tác');
     const workspace = page.getByRole("region", { name: "Không gian Tương tác" });
     await workspace.getByLabel("Link TikTok — mỗi dòng một link").fill("https://www.tiktok.com/@studio.trips/video/7512030405060708011\nhttps://www.tiktok.com/@coffee.corner/photo/7512030405060708022");
     await expect(workspace.getByText("Đúng định dạng", { exact: true })).toHaveCount(2);

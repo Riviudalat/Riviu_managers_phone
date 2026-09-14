@@ -24,9 +24,10 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 820, height: 560 
     const first = page.getByTestId("device-tile").first();
     await first.getByRole("button", { name: /Mở màn hình/ }).click();
     const focus = page.locator(".focus-overlay");
-    await expect(focus.getByTestId("focus-control-status")).toContainText("Điều khiển sẵn sàng");
+    await expect(focus.getByRole("button", { name: "Home", exact: true })).toBeEnabled();
+    await expect(focus.getByTestId("focus-control-status")).toHaveCount(0);
     await expect(first.getByText("Đang mở phóng to")).toBeVisible();
-    for (const name of ["Home", "Back", "Recents", "Giảm âm lượng", "Tăng âm lượng", "Nguồn"]) {
+    for (const name of ["Home", "Back", "Recents", "Giảm âm lượng", "Tăng âm lượng", "Nút nguồn"]) {
       await focus.getByRole("button", { name, exact: true }).click();
     }
     const calls = await page.evaluate(() => (window as unknown as { __FOCUS_CALLS__: { cmd: string; args: Record<string, unknown> }[] }).__FOCUS_CALLS__);

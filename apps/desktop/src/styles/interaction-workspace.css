@@ -157,6 +157,65 @@
 .iw-profile-tools[open] { max-height: 210px; overflow: auto; padding: 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg-elevated); }
 .iw-picker-tools { align-items: center; gap: 6px; }
 .iw-picker-tools button { padding: 5px 7px; font-size: var(--text-xs); }
+
+/* Operator layout: short steps, readable settings, and a full-width scope selector. */
+.interaction-wizard { gap: 12px; padding-top: 8px; }
+.interaction-wizard .iw-steps { display: flex; gap: 4px; padding: 0; border: 0; border-bottom: 1px solid var(--line); border-radius: 0; background: transparent; }
+.interaction-wizard .iw-steps button { flex: 0 1 auto; padding: 9px 15px 11px; min-height: 44px; border: 0; border-bottom: 2px solid transparent; border-radius: 0; background: transparent; }
+.interaction-wizard .iw-steps button[aria-selected="true"] { border-bottom-color: var(--primary); background: transparent; }
+.interaction-wizard .iw-stage { gap: 14px; }
+.interaction-wizard .iw-step-1 { grid-template-columns: minmax(0, 1fr) 270px; }
+.interaction-wizard .iw-step-2 { grid-template-columns: minmax(0, 1fr) minmax(310px, 30%); }
+.interaction-wizard .iw-panel { padding: 16px; gap: 12px; }
+.interaction-wizard .iw-heading h3, .interaction-wizard .iw-heading h2 { font-size: var(--text-md); }
+.interaction-wizard .iw-heading .automation-section-kicker { display: none; }
+.interaction-wizard .iw-heading .iw-help { margin-top: 5px; }
+.interaction-wizard .iw-step-content > .iw-panel, .interaction-wizard .iw-review:not([hidden]) { animation: iw-panel-enter 200ms ease-out; }
+@keyframes iw-panel-enter { from { transform: translateY(5px); } to { transform: translateY(0); } }
+.interaction-wizard .iw-links > .iw-field textarea { height: 132px; padding: 12px; line-height: 1.65; background: var(--bg-subtle); }
+.interaction-wizard .iw-table-scroll { border-color: var(--line); }
+.interaction-wizard .iw-table :is(th,td) { padding: 9px 11px; }
+.interaction-wizard .iw-context { border: 0; background: transparent; padding: 16px 8px; }
+.iw-input-summary { display: grid; grid-template-columns: auto 1fr; gap: 8px 12px; align-items: baseline; padding: 12px 0 18px; border-bottom: 1px solid var(--line); }
+.iw-input-summary strong { font-size: var(--text-2xl); font-weight: 600; font-variant-numeric: tabular-nums; }
+.iw-input-summary span { color: var(--text-3); }
+.interaction-wizard .iw-context ol { gap: 18px; padding-top: 6px; }
+.interaction-wizard .iw-context ol p { font-size: var(--text-xs); }
+.interaction-wizard .iw-context .iw-context-end { margin-top: 12px; font-size: var(--text-xs); }
+.interaction-wizard .iw-action-choices { display: flex; gap: 8px; }
+.interaction-wizard .iw-action-choices label { flex: 0 1 160px; justify-content: flex-start; padding: 9px 12px; min-height: 39px; }
+.interaction-wizard .iw-action-choices input { order: 2; margin-left: auto; }
+.interaction-wizard .iw-action-choices svg { flex: none; }
+.interaction-wizard .iw-order { padding: 0 0 10px; gap: 10px; font-size: var(--text-xs); }
+.interaction-wizard .iw-order span { font-size: inherit; }
+.iw-scope-control { display: flex; flex-direction: column; gap: 5px; font-size: var(--text-xs); color: var(--text-2); }
+.iw-scope-control .machine-scope-select { width: 100%; max-width: none; min-height: 34px; }
+.interaction-wizard .iw-picker-tools { gap: 6px; padding-bottom: 6px; }
+.interaction-wizard .iw-picker-tools small { flex-basis: 100%; margin: 0; }
+.interaction-wizard .iw-search { padding: 6px 9px; }
+.interaction-wizard .iw-fields { align-items: start; }
+.interaction-wizard .conversation-editor { display: flex; flex-direction: column; gap: 12px; }
+.interaction-wizard .conversation-editor > .iw-fields { grid-template-columns: minmax(170px, 240px) minmax(0, 1fr); align-items: end; }
+.interaction-wizard .conversation-editor > .iw-fields > span { padding-bottom: 9px; color: var(--text-3); font-size: var(--text-xs); }
+.interaction-wizard .conversation-editor > button { align-self: flex-start; }
+.interaction-wizard .conversation-editor details { margin: 0; padding: 9px 0; border-block: 1px solid var(--line); }
+.interaction-wizard .conversation-editor details[open] > :not(summary) { margin-top: 10px; }
+.interaction-wizard .iw-issues { padding: 8px 12px; background: var(--primary-50); border-radius: 5px; font-size: var(--text-xs); }
+.interaction-wizard .iw-footer { padding: 10px 0 0; }
+@media (max-width: 1100px) {
+  .interaction-wizard .iw-step-1 { grid-template-columns: minmax(0,1fr); overflow: auto; }
+  .interaction-wizard .iw-step-1 .iw-context { display: none; }
+}
+@media (max-width: 1023px) {
+  .interaction-wizard .iw-step-2 { grid-template-columns: minmax(0,1fr); align-content: start; overflow: auto; }
+  .interaction-wizard .iw-step-2 .iw-panel { overflow: visible; }
+  .interaction-wizard .iw-machine-scroll { max-height: 350px; overflow: auto; }
+  .interaction-wizard .iw-steps button { padding-inline: 7px; font-size: var(--text-xs); }
+  .interaction-wizard .conversation-editor > .iw-fields { grid-template-columns: minmax(0,1fr); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .interaction-wizard .iw-step-content > .iw-panel, .interaction-wizard .iw-review:not([hidden]) { animation: none; }
+}
 .iw-picker-tools > small { flex-basis: auto; text-align: right; }
 .iw-picker-tools .machine-scope-select { flex: 1; width: 90px; }
 .iw-machines .machine-select-count { flex: none; }

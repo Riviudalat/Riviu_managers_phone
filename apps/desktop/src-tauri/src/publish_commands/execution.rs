@@ -1531,9 +1531,10 @@ impl riviu_core::PublishRuntimePort for DesktopPublishRuntimePort {
         &mut self,
         bundle: &riviu_core::PublishBundle,
     ) -> Result<String, String> {
-        let link = capture_confirmed_assignment_link(&self.control, &self.assignment, bundle)
-            .await
-            .map_err(|error| error.to_string())?;
+        let link =
+            capture_confirmed_assignment_link(&self.db, &self.control, &self.assignment, bundle)
+                .await
+                .map_err(|error| error.to_string())?;
         let diagnostic = link.diagnostic;
         let link = riviu_core::tiktok_share::resolve_canonical_post_link(&link.url)
             .await
@@ -1898,6 +1899,7 @@ pub(super) struct ConfirmedAssignmentLink {
 }
 
 pub(super) async fn capture_confirmed_assignment_link(
+    db: &Database,
     control: &DeviceControlPlane,
     assignment: &riviu_core::PublishAssignmentRecord,
     bundle: &riviu_core::PublishBundle,
@@ -1948,6 +1950,13 @@ pub(super) async fn capture_confirmed_assignment_link(
             .and_then(|raw| serde_json::from_str(raw).ok())
             .context("submission identity missing; review old post manually")?;
         let identity = riviu_core::tiktok_share::SubmissionIdentity {
+            prepared_at: db.publish_attempt_opened_at(
+                &assignment.campaign_id,
+                &assignment.udid,
+                intent["submittedAt"]
+                    .as_str()
+                    .context("Post timestamp missing")?,
+            )?,
             account: intent["expectedAccount"]
                 .as_str()
                 .context("pre-Post account proof missing")?
@@ -1960,6 +1969,20 @@ pub(super) async fn capture_confirmed_assignment_link(
         let plan = riviu_core::tiktok_share::PublishVerificationPlan::for_runtime(
             &package, &language, &version,
         )?;
+        let labels = riviu_core::tiktok_labels::controls_for_runtime(&package, &language, &version)
+            .context("account labels missing")?;
+        if let Some(account) =
+            riviu_core::tiktok_account::observe_own_account(session.as_ref(), labels).await?
+        {
+            let snapshot = session.hierarchy_source_snapshot().await?;
+            use sha2::Digest;
+            db.observe_stale_publish_idle(
+                &assignment.id,
+                &account,
+                &package,
+                &format!("{:x}", sha2::Sha256::digest(snapshot.xml.as_bytes())),
+            )?;
+        }
         let capture = riviu_core::tiktok_share::capture_submission_link(
             session.as_ref(),
             &plan,
@@ -3623,6 +3646,7 @@ pub(super) async fn post_through_the_composer(
                 );
             };
             let identity = riviu_core::tiktok_share::SubmissionIdentity {
+                prepared_at: None,
                 account: expected_account,
                 submitted_at,
             };

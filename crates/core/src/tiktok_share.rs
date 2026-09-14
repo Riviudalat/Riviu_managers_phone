@@ -44,7 +44,9 @@ use crate::driver::{ElementBox, ElementQuery, UiSession};
 use crate::tiktok_labels::{TikTokControl, TikTokControls};
 
 pub(crate) mod hierarchy;
+mod photo_proof;
 mod verification;
+pub use photo_proof::capture_expanded_photo_link;
 pub use verification::{
     capture_submission_link, probe_clipboard_restore, PublishVerificationPlan, VerificationCapture,
     VerificationDiagnostic, VerificationReason,
@@ -430,6 +432,9 @@ pub async fn capture_own_post_link(
 pub struct SubmissionIdentity {
     pub account: String,
     pub submitted_at: String,
+    /// Beginning of this recorded app session; a photo ID may be allocated
+    /// during preparation before the final Post tap.
+    pub prepared_at: Option<String>,
 }
 
 /// Read the authenticated own account before composing, then return to the measured Home tab.
@@ -440,14 +445,22 @@ pub async fn observe_publish_account(
     let profile = labels
         .label(TikTokControl::ProfileTab)
         .ok_or_else(|| anyhow::anyhow!("profile tab unmeasured"))?;
-    let tab = session
-        .locate(profile.to_query())
+    let tab = match session.locate(profile.to_query()).await? {
+        Some(tab) => tab,
+        None => crate::ui_automation::runtime::resolve_navigation(
+            session,
+            "profile",
+            Duration::from_secs(30),
+        )
         .await?
-        .ok_or_else(|| anyhow::anyhow!("profile tab absent"))?;
+        .ok_or_else(|| anyhow::anyhow!("profile tab absent"))?,
+    };
     session.tap(tab.centre()).await?;
     let deadline = tokio::time::Instant::now() + PROFILE_WINDOW;
     let account = loop {
-        if let Some(account) = crate::tiktok_account::observe_own_account(session, *labels).await? {
+        if let Some(account) =
+            crate::tiktok_account::restore_own_profile_header(session, *labels).await?
+        {
             break account;
         }
         anyhow::ensure!(
@@ -755,7 +768,12 @@ async fn read_through_sheet(
         return LinkCapture::ClipboardUnwritable(format!("{error:#}"));
     }
 
-    if let Err(error) = session.tap(control.centre()).await {
+    let share_tap = if session.supports_accessibility_readback() {
+        session.activate_element(share).await
+    } else {
+        session.tap(control.centre()).await
+    };
+    if let Err(error) = share_tap {
         // The sheet may or may not be up; assume it is, so the caller closes it.
         *opened = true;
         return LinkCapture::ReadFailed(error.to_string());
@@ -768,7 +786,30 @@ async fn read_through_sheet(
         CopyRow::Ambiguous => return LinkCapture::AmbiguousCopyRow,
         CopyRow::Failed(message) => return LinkCapture::ReadFailed(message),
     };
-    if let Err(error) = session.tap(row).await {
+    let copy_tap = if session.supports_accessibility_readback() {
+        let mut query = None;
+        for label in ["Copy link", "Sao chép liên kết", "Sao chép link"] {
+            let candidate = ElementQuery::Description {
+                value: label,
+                exact: true,
+            };
+            if session
+                .locate_all(candidate)
+                .await
+                .is_ok_and(|items| items.len() == 1)
+            {
+                query = Some(candidate);
+                break;
+            }
+        }
+        match query {
+            Some(query) => session.activate_element(query).await,
+            None => session.tap(row).await,
+        }
+    } else {
+        session.tap(row).await
+    };
+    if let Err(error) = copy_tap {
         return LinkCapture::ReadFailed(error.to_string());
     }
 
@@ -1491,6 +1532,7 @@ mod tests {
         let session = DraftProfileSession::measured();
         let labels = controls_for("com.zhiliaoapp.musically", "en", "46.2.1").unwrap();
         let identity = SubmissionIdentity {
+            prepared_at: None,
             account: "fixture.account".into(),
             submitted_at: (chrono::Utc::now() - chrono::Duration::seconds(30)).to_rfc3339(),
         };
@@ -1946,6 +1988,7 @@ mod tests {
     #[tokio::test]
     async fn submission_time_locator_reads_measured_build_aliases() {
         let identity = SubmissionIdentity {
+            prepared_at: None,
             account: "fixture.account".into(),
             submitted_at: (chrono::Utc::now() - chrono::Duration::minutes(3)).to_rfc3339(),
         };
@@ -1996,6 +2039,7 @@ mod tests {
         );
         let labels = controls_for("com.ss.android.ugc.trill", "en-US", "38.3.2").unwrap();
         let identity = SubmissionIdentity {
+            prepared_at: None,
             account: "fixture.account".into(),
             submitted_at: (chrono::Utc::now() - chrono::Duration::hours(18)).to_rfc3339(),
         };
@@ -2022,6 +2066,7 @@ mod tests {
     async fn submission_time_locator_requires_a_single_time_node() {
         let labels = controls_for("com.zhiliaoapp.musically", "en", "45.7.3").unwrap();
         let identity = SubmissionIdentity {
+            prepared_at: None,
             account: "fixture.account".into(),
             submitted_at: (chrono::Utc::now() - chrono::Duration::minutes(3)).to_rfc3339(),
         };

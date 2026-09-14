@@ -37,7 +37,7 @@ export function FlowActionNode({ data, selected }: NodeProps<FlowCanvasNode>) {
         )}
       </div>
       <div className="flow-node-summary">{summarizeAction(data.kind, data.config)}</div>
-      {data.kind === "ifVision" ? (
+      {["ifVision", "ifVisible", "ifValue"].includes(data.kind) ? (
         <>
           <span className="flow-node-port-label flow-node-port-matched">khớp</span>
           <Handle

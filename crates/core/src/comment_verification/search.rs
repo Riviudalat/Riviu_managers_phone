@@ -23,6 +23,29 @@ pub struct FoundComment {
     pub snapshot: String,
 }
 
+/// Trill 38.3.2 adds U+200B at a visual wrap after "Đà Lạt". Ignore only
+/// that layout separator; retain accents, spaces, punctuation and emoji joiners.
+pub(crate) fn rendered_text_matches(observed: &str, expected: &str) -> bool {
+    observed
+        .chars()
+        .filter(|c| *c != '\u{200b}')
+        .eq(expected.chars().filter(|c| *c != '\u{200b}'))
+}
+
+pub(crate) fn comment_bodies(tree: &Tree, package: &str, text: &str) -> Vec<usize> {
+    tree.nodes
+        .iter()
+        .enumerate()
+        .filter(|(i, n)| {
+            n.visible(package)
+                && tree.ancestors_visible(*i)
+                && n.rect().is_some()
+                && rendered_text_matches(n.attr("text"), text)
+        })
+        .map(|(i, _)| i)
+        .collect()
+}
+
 pub fn parent_matches(
     found: &FoundComment,
     package: &str,
@@ -52,7 +75,7 @@ pub fn parent_matches(
     let body_id = tree
         .nodes
         .iter()
-        .find(|n| n.attr("text") == parent.text)
+        .find(|n| rendered_text_matches(n.attr("text"), &parent.text))
         .map(|n| n.attr("resource-id"))
         .unwrap_or_default();
     if body_id.is_empty() {
@@ -73,13 +96,7 @@ pub fn row(
     text: &str,
     author: Option<&str>,
 ) -> anyhow::Result<Option<FoundComment>> {
-    let bodies = tree.matching(
-        package,
-        ElementQuery::Text {
-            value: text,
-            exact: true,
-        },
-    );
+    let bodies = comment_bodies(tree, package, text);
     anyhow::ensure!(
         bodies.len() <= 1,
         "comment_ambiguous: nhiều câu trùng nội dung"

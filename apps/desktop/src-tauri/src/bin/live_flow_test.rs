@@ -447,6 +447,7 @@ impl MockHarness {
         ));
         let frames = Arc::new(FixtureFrames::new(udids));
         let runtime = FlowRuntime::new(FlowRuntimeDeps {
+            reasoner: None,
             database: database.clone(),
             events,
             registry,

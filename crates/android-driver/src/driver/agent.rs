@@ -967,6 +967,7 @@ impl AndroidDriver {
     /// Found by an independent review on 27/08/2026.
     fn spawn_instrumentation(&self, serial: &str) -> anyhow::Result<InstrumentationProcess> {
         let mut command = tokio::process::Command::new(self.adb.path());
+        self.adb.apply_server_for_serial(&mut command, Some(serial));
         command.args([
             "-s",
             serial,

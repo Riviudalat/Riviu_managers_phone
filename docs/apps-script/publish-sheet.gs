@@ -163,6 +163,7 @@ function doPost(request) {
     }
     if (payload.rowKind === 'check') return reply(checkTarget(payload));
     if (payload.rowKind === 'prepare') return reply(prepareTarget(payload));
+    if (payload.rowKind === 'flowRead' || payload.rowKind === 'flowWrite') return reply(flowConnectorRange(payload));
     const postUrl = String(payload.postUrl || '').trim();
     const assignmentId = String(payload.assignmentId || '').trim();
     if (!postUrl && payload.rowKind !== 'internalReport') {
@@ -268,6 +269,48 @@ function doPost(request) {
  * `getActiveSpreadsheet()` là accessor của ngữ cảnh container/giao diện; một web app
  * chạy qua /exec không có ngữ cảnh đó và nó trả null. Xem mục 3 ở đầu file.
  */
+/** Explicit finite range connector. The shared token binds this one configured
+ * spreadsheet; table writes use stringValue so a cell never becomes a formula.
+ * Flow owns the durable request intent and never automatically replays a write.
+ */
+function flowConnectorRange(payload) {
+  if (payload.connectorVersion !== 1 || payload.spreadsheetId !== CONFIG.SPREADSHEET_ID) throw new Error('Flow connector target/version mismatch');
+  if (typeof payload.tab !== 'string' || !payload.tab.trim() || payload.tab.length > 100) throw new Error('Flow connector requires an exact tab name');
+  const matched = /^([A-Z]{1,3})([1-9][0-9]*)(?::([A-Z]{1,3})([1-9][0-9]*))?$/.exec(String(payload.range || ''));
+  if (!matched) throw new Error('Flow connector requires a finite A1 rectangle');
+  const column = letters => [...letters].reduce((n, letter) => n * 26 + letter.charCodeAt(0) - 64, 0);
+  const top = Number(matched[2]), left = column(matched[1]);
+  const bottom = Number(matched[4] || matched[2]), right = column(matched[3] || matched[1]);
+  const height = bottom - top + 1, width = right - left + 1;
+  if (height < 1 || width < 1 || height * width > 1000 || bottom > 1000000 || right > 18278) throw new Error('Flow connector range exceeds limits');
+  const book = SpreadsheetApp.openById(CONFIG.SPREADSHEET_ID);
+  if (!book || book.getId() !== payload.spreadsheetId) throw new Error('Flow connector spreadsheet identity mismatch');
+  const sheet = book.getSheetByName(payload.tab);
+  if (!sheet || sheet.getName() !== payload.tab) throw new Error('Flow connector tab does not exist');
+  if (bottom > sheet.getMaxRows() || right > sheet.getMaxColumns()) throw new Error('Flow connector range is outside the existing grid');
+  const write = payload.rowKind === 'flowWrite';
+  if (write && (!Array.isArray(payload.values) || payload.values.length !== height
+    || payload.values.some(row => !Array.isArray(row) || row.length !== width || row.some(value => typeof value !== 'string'))
+    || JSON.stringify(payload.values).length > 16384)) throw new Error('Flow connector values do not match the range');
+  const lock = LockService.getScriptLock();
+  lock.waitLock(30000);
+  try {
+    if (write) {
+      Sheets.Spreadsheets.batchUpdate({ requests: [{ updateCells: {
+        start: { sheetId: sheet.getSheetId(), rowIndex: top - 1, columnIndex: left - 1 },
+        rows: payload.values.map(row => ({ values: row.map(value => ({ userEnteredValue: { stringValue: value } })) })),
+        fields: 'userEnteredValue',
+      } }] }, book.getId());
+    }
+    const values = write
+      ? readCommittedGrid(sheet, top, left, height, width).map(row => row.map(cell => cell.formattedValue || ''))
+      : sheet.getRange(top, left, height, width).getDisplayValues();
+    if (write && JSON.stringify(values) !== JSON.stringify(payload.values)) throw new Error('Flow connector readback mismatch after write');
+    if (JSON.stringify(values).length > 16384) throw new Error('Flow connector result exceeds 16 KiB');
+    return { ok: true, connectorVersion: 1, spreadsheetId: book.getId(), tab: sheet.getName(), range: payload.range, values };
+  } finally { lock.releaseLock(); }
+}
+
 function targetSheet() {
   const book = SpreadsheetApp.openById(CONFIG.SPREADSHEET_ID);
   if (!book) {
@@ -407,26 +450,52 @@ function deliveryNote(payload, stored, values) {
   return JSON.stringify(note);
 }
 
+// SpreadsheetApp may return its pre-write cache after Sheets.batchUpdate.
+// Read values, formulas and the receipt together from the same API that wrote them.
+function readCommittedGrid(sheet, row, column, height, width) {
+  const letters = value => {
+    let text = '';
+    while (value > 0) { value--; text = String.fromCharCode(65 + value % 26) + text; value = Math.floor(value / 26); }
+    return text;
+  };
+  const range = "'" + sheet.getName().replace(/'/g, "''") + "'!" + letters(column) + row + ':' + letters(column + width - 1) + (row + height - 1);
+  const result = Sheets.Spreadsheets.get(sheet.getParent().getId(), {
+    ranges: [range], fields: 'spreadsheetId,sheets(properties(sheetId),data(startRow,startColumn,rowData(values(formattedValue,userEnteredValue,note))))',
+  });
+  if (result.spreadsheetId !== sheet.getParent().getId() || !Array.isArray(result.sheets)
+    || result.sheets.length !== 1 || result.sheets[0].properties.sheetId !== sheet.getSheetId()) throw new Error('Đích đọc lại không khớp Sheet');
+  const data = result.sheets[0].data || [];
+  const rows = Array.from({ length: height }, () => Array.from({ length: width }, () => ({})));
+  for (const grid of data) {
+    (grid.rowData || []).forEach((entry, y) => (entry.values || []).forEach((cell, x) => {
+      const atRow = (grid.startRow || 0) + y - row + 1;
+      const atColumn = (grid.startColumn || 0) + x - column + 1;
+      if (atRow >= 0 && atRow < height && atColumn >= 0 && atColumn < width) rows[atRow][atColumn] = cell;
+    }));
+  }
+  return rows;
+}
+
 function finishDelivery(sheet, layout, payload, result) {
   if (payload.deliveryVersion !== 2) return result;
   const row = result.row;
-  const range = sheet.getRange(row, 1, 1, layout.width);
-  let values = range.getDisplayValues()[0];
-  const noteRange = sheet.getRange(row, 4);
-  const rawNote = noteRange.getNotes()[0][0];
+  let cells = readCommittedGrid(sheet, row, 1, 1, layout.width)[0];
+  let values = cells.map(cell => cell.formattedValue || '');
+  const rawNote = cells[3].note || '';
   let stored = reportNote(rawNote);
-  if (!stored || stored.assignmentId !== payload.assignmentId || range.getFormulas()[0].some(Boolean)) throw new Error('Không đọc lại được danh tính hàng vừa ghi');
+  if (!stored || stored.assignmentId !== payload.assignmentId || cells.some(cell => cell.userEnteredValue && cell.userEnteredValue.formulaValue)) throw new Error('Không đọc lại được danh tính hàng vừa ghi');
   if (payload.rowKind === 'canonical' && values[3] !== payload.postUrl) throw new Error('Canonical Link khác hàng đã lưu');
   // A retry can encounter a row from an older client. Upgrade only the verified
   // note; the delivery function already checked its complete visible identity.
   if (stored.deliveryVersion !== 2 || (payload.rowKind === 'canonical' && stored.canonicalDeliveryRevision === undefined)) {
     const upgraded = deliveryNote(payload, rawNote, values);
     commitSheetBatch(sheet, { extra: 0 }, row, [{ updateCells: { start: { sheetId: sheet.getSheetId(), rowIndex: row - 1, columnIndex: 3 }, rows: [{ values: [{ note: upgraded }] }], fields: 'note' } }]);
-    stored = reportNote(noteRange.getNotes()[0][0]);
-    values = range.getDisplayValues()[0];
+    cells = readCommittedGrid(sheet, row, 1, 1, layout.width)[0];
+    stored = reportNote(cells[3].note || '');
+    values = cells.map(cell => cell.formattedValue || '');
   }
   if (!stored || stored.deliveryVersion !== 2 || stored.spreadsheetId !== sheet.getParent().getId()
-    || stored.sheetGid !== sheet.getSheetId() || range.getFormulas()[0].some(Boolean)
+    || stored.sheetGid !== sheet.getSheetId() || cells.some(cell => cell.userEnteredValue && cell.userEnteredValue.formulaValue)
     || !rowFingerprintMatches(values, stored.rowFingerprint)) throw new Error('Dữ liệu đọc lại không khớp hàng đã commit');
   const revision = payload.rowKind === 'canonical' ? stored.canonicalDeliveryRevision : stored.rowRevision;
   if (!Number.isSafeInteger(revision) || revision < 0) throw new Error('Hàng đã lưu thiếu deliveryRevision');
@@ -593,6 +662,7 @@ function deliverInternal(sheet, layout, payload, postUrl, assignmentId) {
       || !rowFingerprintMatches(values[index], stored.rowFingerprint)) {
       throw new Error('Dòng báo cáo đã bị sửa; kiểm tra trước khi ghi đè');
     }
+    if (versioned && payload.rowRevision <= stored.rowRevision && layout.extra > 0) throw new Error('Báo cáo cũ không được mở rộng cột đối tác');
     if (versioned && payload.rowRevision < stored.rowRevision) return ack(stored.rowRevision, true);
     if (versioned && payload.rowRevision === stored.rowRevision) {
       if (!payloadFingerprintMatches(poster, payload.postedAt, postUrl, metadata, partners, stored.payloadFingerprint)) throw new Error('Cùng revision nhưng nội dung khác');

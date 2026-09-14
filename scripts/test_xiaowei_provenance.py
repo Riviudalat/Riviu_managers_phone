@@ -12,6 +12,47 @@ from scripts import check_xiaowei_provenance as gate
 
 
 class XiaoweiProvenanceTests(unittest.TestCase):
+    def test_runtime_source_scan_ignores_nested_development_environments_only(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "app.py").write_text('PRODUCT = "Riviu"', encoding="utf-8")
+            for dirname in [".venv", "__pycache__", ".pytest_cache", ".ruff_cache", ".mypy_cache"]:
+                with self.subTest(directory=dirname):
+                    cached = root / "service" / dirname / "dependency.py"
+                    cached.parent.mkdir(parents=True, exist_ok=True)
+                    cached.write_bytes(b'client_login')
+            self.assertEqual(gate.inspect([("runtime", root)]), [])
+            # Source adjacent to a development environment is still scanned.
+            source = root / "service" / "app.py"
+            source.write_bytes(b'client_login')
+            findings = gate.inspect([("runtime", root)])
+            self.assertTrue(findings)
+            self.assertEqual({item["path"] for item in findings}, {str(source)})
+
+    def test_installer_and_frontend_scans_include_environment_and_cache_contents(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            marker = root / ".venv" / "Lib" / "runtime.py"
+            marker.parent.mkdir(parents=True)
+            marker.write_bytes(b'client_login')
+            for surface in ["installer", "frontend"]:
+                with self.subTest(surface=surface):
+                    findings = gate.inspect([(surface, root)])
+                    self.assertTrue(findings)
+                    self.assertEqual({item["path"] for item in findings}, {str(marker)})
+
+    def test_explicit_runtime_file_or_environment_directory_is_always_scanned(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            marker = root / ".venv" / "Lib" / "__pycache__" / "runtime.pyc"
+            marker.parent.mkdir(parents=True)
+            marker.write_bytes(b'client_login')
+            for target in [marker, root / ".venv", root / ".venv" / "Lib"]:
+                with self.subTest(target=target):
+                    findings = gate.inspect([("runtime", target)])
+                    self.assertTrue(findings)
+                    self.assertEqual({item["path"] for item in findings}, {str(marker)})
+
     def test_gate_runs_as_a_script_from_the_repository_root(self):
         repository = Path(__file__).parents[1]
         with tempfile.TemporaryDirectory() as temporary:

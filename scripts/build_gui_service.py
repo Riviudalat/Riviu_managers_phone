@@ -5,6 +5,7 @@ import argparse
 import hashlib
 import json
 import pathlib
+import shutil
 import subprocess
 import sys
 
@@ -18,13 +19,23 @@ def main() -> int:
     args = parser.parse_args()
     output = args.output.resolve()
     subprocess.run(["uv", "sync", "--frozen", "--python", "3.12"], cwd=SOURCE, check=True)
+    models = ROOT / "target/ocr-models"
+    subprocess.run([sys.executable, str(SOURCE / "stage_ocr_models.py"), "--output", str(models)], check=True)
     subprocess.run(["uv", "run", "--frozen", "pyinstaller", "--noconfirm", "--clean", "--onedir",
                     "--name", "riviu-gui-service", "--distpath", str(output),
                     "--workpath", str(ROOT / "target/gui-service-work"),
                     "--specpath", str(ROOT / "target/gui-service-work"),
-                    "--collect-submodules", "uvicorn", "--collect-submodules", "riviu_gui", "serve.py"],
+                    "--collect-submodules", "uvicorn", "--collect-submodules", "riviu_gui",
+                    "--collect-all", "tesserocr",
+                    "--add-data", f"{SOURCE / 'riviu_gui/ocr-models.json'}:riviu_gui", "serve.py"],
                    cwd=SOURCE, check=True)
     runtime = output / "riviu-gui-service"
+    model_manifest = json.loads((SOURCE / "riviu_gui/ocr-models.json").read_text(encoding="utf8"))
+    packaged_models = runtime / "ocr-models"
+    packaged_models.mkdir(exist_ok=True)
+    for entry in model_manifest["files"]:
+        shutil.copyfile(models / entry["path"], packaged_models / entry["path"])
+    shutil.copyfile(SOURCE / "riviu_gui/ocr-models.json", packaged_models / "ocr-models.json")
     # Preserve upstream attribution from the exact locked environment.
     subprocess.run(["uv","run","--frozen","python","collect_licenses.py",str(runtime / "licenses")],cwd=SOURCE,check=True)
     files = [{"path": str(p.relative_to(runtime)).replace("\\", "/"), "bytes": p.stat().st_size,

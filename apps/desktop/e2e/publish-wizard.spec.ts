@@ -1,3 +1,4 @@
+import { openOperatorPage } from "./fixtures/operatorNavigation";
 import { expect, test } from "@playwright/test";
 import AxeBuilder from "@axe-core/playwright";
 import { installTauriMock } from "./fixtures/tauriMock";
@@ -113,7 +114,7 @@ for (const viewport of [
     page.on("pageerror", (e) => errors.push(e.message));
     await page.goto("/");
     await expect(page.getByTestId("device-tile")).toHaveCount(20);
-    await page.getByRole("button", { name: "Đăng bài", exact: true }).click();
+    await openOperatorPage(page, 'Đăng bài');
     await page.getByRole("combobox", { name: "Phạm vi thiết bị" }).selectOption("all");
     await page
       .getByRole("button", { name: "Chọn thư mục", exact: true })
@@ -223,12 +224,12 @@ for (const viewport of [
     expect(calls[0].args.request?.deleteAfterPublish).toBe(true);
     expect(errors).toEqual([]);
     await checkDialog.getByRole("button", { name: "Đóng" }).click();
-    await page.getByRole("button", { name: "Dữ liệu", exact: true }).click();
+    await page.getByRole("button", { name: "API", exact: true }).click();
     await expect(page.getByRole("alertdialog")).toHaveCount(0);
-    await page.getByRole("button", { name: "Đăng bài", exact: true }).click();
+    await openOperatorPage(page, 'Đăng bài');
     await expect(page.locator(".pq-footer")).toContainText("10/10 bài có máy");
     await page.reload();
-    await page.getByRole("button", { name: "Đăng bài", exact: true }).click();
+    await openOperatorPage(page, 'Đăng bài');
     await expect(page.locator(".pq-footer")).toContainText("10/10 bài có máy");
   });
 }

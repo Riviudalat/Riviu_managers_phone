@@ -1,6 +1,6 @@
 //! Local automation API (Giai đoạn B, xiaowei "openapi" — cổng loopback 22222).
 //!
-//! A loopback-only HTTP/1.1 server exposing a small, whitelisted set of fleet gestures to
+//! A loopback-only HTTP/1.1 server exposing fleet gestures and durable Flow tasks to
 //! scripts running on the same machine — the parity feature for xiaowei's local API. It is
 //! **off by default**: it binds nothing until the operator turns it on in Settings, it never
 //! binds anything but `127.0.0.1`, and it demands a bearer token on every request, so it is
@@ -30,6 +30,8 @@ use riviu_core::DeviceWorkOwner;
 use crate::command_error::CommandError;
 use crate::state::AppState;
 use riviu_signing::CredentialStore;
+
+mod tasks;
 
 /// DB key the config is persisted under (KV settings table).
 const CONFIG_KEY: &str = "local_api.config.v1";
@@ -219,22 +221,28 @@ pub struct Head {
 /// Parse the request line and headers from the text before the blank line.
 ///
 /// Returns `None` on a malformed start line (anything that is not `METHOD /path VERSION`).
-/// Header names match case-insensitively; the query string is dropped from the path so
-/// routing sees `/v1/tap`, not `/v1/tap?x=1`.
+/// Header names match case-insensitively. Preserve the query until typed routing so a
+/// caller's requested Flow revision or run-list limit cannot be silently discarded.
 pub fn parse_head(text: &str) -> Option<Head> {
     let mut lines = text.split("\r\n");
     let start = lines.next()?;
     let mut parts = start.split(' ');
     let method = parts.next()?.to_string();
     let raw_path = parts.next()?;
-    parts.next()?; // require a version token, so a random line is not accepted as a request
-    if method.is_empty() || !raw_path.starts_with('/') {
+    let version = parts.next()?;
+    if method.is_empty()
+        || !raw_path.starts_with('/')
+        || !matches!(version, "HTTP/1.0" | "HTTP/1.1")
+        || parts.next().is_some()
+    {
         return None;
     }
-    let path = raw_path.split('?').next().unwrap_or(raw_path).to_string();
+    let path = raw_path.to_string();
 
     let mut bearer = None;
     let mut content_length = 0usize;
+    let mut seen_length = false;
+    let mut seen_authorization = false;
     for line in lines {
         if line.is_empty() {
             break;
@@ -245,13 +253,28 @@ pub fn parse_head(text: &str) -> Option<Head> {
         let value = value.trim();
         match name.trim().to_ascii_lowercase().as_str() {
             "authorization" => {
+                if seen_authorization {
+                    return None;
+                }
+                seen_authorization = true;
                 // Accept "Bearer <t>" in any case for the scheme word.
                 bearer = value
                     .split_once(' ')
                     .filter(|(scheme, _)| scheme.eq_ignore_ascii_case("bearer"))
                     .map(|(_, t)| t.trim().to_string());
             }
-            "content-length" => content_length = value.parse().unwrap_or(0),
+            "content-length" => {
+                if seen_length
+                    || value.is_empty()
+                    || !value.bytes().all(|byte| byte.is_ascii_digit())
+                {
+                    return None;
+                }
+                seen_length = true;
+                content_length = value.parse().ok()?;
+            }
+            // This deliberately small server accepts one Content-Length-framed request.
+            "transfer-encoding" => return None,
             _ => {}
         }
     }
@@ -267,14 +290,51 @@ pub fn parse_head(text: &str) -> Option<Head> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ApiError {
     pub status: u16,
+    pub code: String,
     pub message: String,
+    pub details: Option<Box<CommandError>>,
 }
 
 impl ApiError {
     fn new(status: u16, message: impl Into<String>) -> Self {
         Self {
             status,
+            code: match status {
+                400 => "InvalidArgument",
+                401 => "Unauthorized",
+                404 => "NotFound",
+                405 => "MethodNotAllowed",
+                409 => "Conflict",
+                503 => "ApplicationUnavailable",
+                _ => "OperationFailed",
+            }
+            .into(),
             message: message.into(),
+            details: None,
+        }
+    }
+}
+
+impl From<CommandError> for ApiError {
+    fn from(error: CommandError) -> Self {
+        let status = match error.code.as_str() {
+            "InvalidArgument" | "EmptySelection" | "DuplicateDevice" => 400,
+            "FlowNotFound" | "FlowRunNotFound" | "FlowAttemptNotFound" | "UnknownDevice" => 404,
+            "DeviceBusy"
+            | "StateConflict"
+            | "RevisionConflict"
+            | "NoEligibleDevice"
+            | "FlowCancellationOwnerMissing"
+            | "RetryNotAllowed"
+            | "RetryAlreadyRunning" => 409,
+            "ApplicationShuttingDown" => 503,
+            _ => 500,
+        };
+        Self {
+            status,
+            code: error.code.clone(),
+            message: error.message.to_string(),
+            details: Some(Box::new(error)),
         }
     }
 }
@@ -301,11 +361,32 @@ pub enum Gesture {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Command {
     ListDevices,
+    Inspector { operation: String, body: Value },
     Act { udid: String, gesture: Gesture },
+    Task(tasks::TaskCommand),
 }
 
 /// Map method + path + JSON body to a [`Command`]. Pure; the executor performs it.
 pub fn route(method: &str, path: &str, body: &Value) -> Result<Command, ApiError> {
+    if method == "POST"
+        && [
+            "/v1/inspector/observe",
+            "/v1/inspector/tap",
+            "/v1/inspector/record",
+            "/v1/inspector/recording",
+        ]
+        .contains(&path)
+    {
+        return Ok(Command::Inspector {
+            operation: path.rsplit('/').next().unwrap_or_default().into(),
+            body: body.clone(),
+        });
+    }
+    if let Some(task) = tasks::route(method, path, body) {
+        return task.map(Command::Task);
+    }
+    // Preserve the existing gesture contract, which accepts ignored query parameters.
+    let path = path.split('?').next().unwrap_or(path);
     let udid = || {
         body.get("udid")
             .and_then(Value::as_str)
@@ -512,7 +593,7 @@ where
                 write_response(
                     &mut stream,
                     error.status,
-                    &json!({"ok": false, "error": error.message}),
+                    &json!({"ok": false, "error": error.message, "code": error.code, "details": error.details}),
                 )
                 .await
             }
@@ -530,11 +611,11 @@ async fn read_command<S: AsyncRead + Unpin>(
 
     // 1) Read up to and including the header terminator.
     let header_end = loop {
-        if let Some(pos) = find_subslice(&buf, b"\r\n\r\n") {
-            break pos + 4;
-        }
         if buf.len() > MAX_REQUEST_BYTES {
             return Ok(Some(Err(ApiError::new(400, "request quá lớn"))));
+        }
+        if let Some(pos) = find_subslice(&buf, b"\r\n\r\n") {
+            break pos + 4;
         }
         let n = stream.read(&mut chunk).await?;
         if n == 0 {
@@ -546,18 +627,25 @@ async fn read_command<S: AsyncRead + Unpin>(
     let Some(head) = parse_head(&String::from_utf8_lossy(&buf[..header_end])) else {
         return Ok(Some(Err(ApiError::new(400, "request lỗi định dạng"))));
     };
+    if head.content_length > MAX_REQUEST_BYTES.saturating_sub(header_end) {
+        return Ok(Some(Err(ApiError::new(400, "request quá lớn"))));
+    }
 
     // 2) Read the declared body.
     let mut body = buf[header_end..].to_vec();
     while body.len() < head.content_length {
-        if body.len() > MAX_REQUEST_BYTES {
-            return Ok(Some(Err(ApiError::new(400, "body quá lớn"))));
-        }
-        let n = stream.read(&mut chunk).await?;
+        let remaining = (head.content_length - body.len()).min(chunk.len());
+        let n = stream.read(&mut chunk[..remaining]).await?;
         if n == 0 {
-            break;
+            return Ok(Some(Err(ApiError::new(400, "request body is incomplete"))));
         }
         body.extend_from_slice(&chunk[..n]);
+    }
+    if body.len() != head.content_length {
+        return Ok(Some(Err(ApiError::new(
+            400,
+            "request body length does not match Content-Length",
+        ))));
     }
 
     // 3) Auth before anything is parsed or done.
@@ -591,20 +679,62 @@ async fn write_response<S: AsyncWrite + Unpin>(
 }
 
 async fn execute(app: &AppHandle, command: Command) -> Result<Value, ApiError> {
+    if let Command::Task(task) = command {
+        return tasks::execute(app, task).await;
+    }
     let state = app.state::<AppState>();
     // Honour app admission so the API stops taking work the moment shutdown begins. Holding
     // the guard for the request duration mirrors what every mutating command does.
-    let _admission = state
-        .ensure_accepting_work()
-        .map_err(|_| ApiError::new(503, "app đang tắt hoặc chưa sẵn sàng"))?;
+    let _admission = state.ensure_accepting_work().map_err(ApiError::from)?;
 
     match command {
         Command::ListDevices => {
             Ok(serde_json::to_value(state.registry.list()).unwrap_or(Value::Null))
         }
+        Command::Inspector { operation, body } => {
+            let udid = body["udid"]
+                .as_str()
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| ApiError::new(400, "udid required"))?
+                .to_owned();
+            let result = match operation.as_str() {
+                "observe" => serde_json::to_value(
+                    crate::inspector_commands::observe(&state, udid)
+                        .await
+                        .map_err(ApiError::from)?,
+                ),
+                "tap" => {
+                    let selector = serde_json::from_value(body["selector"].clone())
+                        .map_err(|e| ApiError::new(400, e.to_string()))?;
+                    serde_json::to_value(
+                        crate::inspector_commands::tap(&state, udid, selector)
+                            .await
+                            .map_err(ApiError::from)?,
+                    )
+                }
+                "record" => serde_json::to_value(
+                    crate::inspector_commands::record(
+                        &state,
+                        udid,
+                        body["name"].as_str().unwrap_or("Agent Flow").into(),
+                        body["active"]
+                            .as_bool()
+                            .ok_or_else(|| ApiError::new(400, "active required"))?,
+                    )
+                    .await
+                    .map_err(ApiError::from)?,
+                ),
+                "recording" => serde_json::to_value(
+                    crate::inspector_commands::recording(&state, &udid).map_err(ApiError::from)?,
+                ),
+                _ => unreachable!(),
+            };
+            result.map_err(|e| ApiError::new(500, e.to_string()))
+        }
         Command::Act { udid, gesture } => run_gesture(&state, &udid, gesture)
             .await
             .map(|()| json!({})),
+        Command::Task(_) => unreachable!("tasks delegate before the gesture admission guard"),
     }
 }
 
@@ -640,11 +770,7 @@ async fn run_gesture(state: &AppState, udid: &str, gesture: Gesture) -> Result<(
         },
     )
     .await
-    .map_err(|error| {
-        // A busy device is a 409 the caller can retry; everything else is a 500.
-        let status = if error.code == "DeviceBusy" { 409 } else { 500 };
-        ApiError::new(status, error.message.to_string())
-    })
+    .map_err(ApiError::from)
 }
 
 #[cfg(test)]
@@ -853,12 +979,156 @@ mod tests {
     }
 
     #[test]
-    fn parses_request_line_headers_and_strips_query() {
+    fn parses_request_line_headers_and_preserves_query_for_typed_routing() {
         let h = head("POST /v1/tap?debug=1 HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer abc123\r\nContent-Length: 7\r\n\r\n");
         assert_eq!(h.method, "POST");
-        assert_eq!(h.path, "/v1/tap");
+        assert_eq!(h.path, "/v1/tap?debug=1");
         assert_eq!(h.bearer.as_deref(), Some("abc123"));
         assert_eq!(h.content_length, 7);
+    }
+
+    #[test]
+    fn rejects_ambiguous_request_framing_before_a_mutation_can_be_routed() {
+        for headers in [
+            "Content-Length: nope\r\n",
+            "Content-Length: -1\r\n",
+            "Content-Length: 2\r\nContent-Length: 2\r\n",
+            "Transfer-Encoding: chunked\r\n",
+            "Authorization: Bearer A\r\nAuthorization: Bearer B\r\n",
+        ] {
+            let raw = format!("POST /v1/flows/id/runs HTTP/1.1\r\n{headers}\r\n");
+            assert!(parse_head(&raw).is_none(), "{headers}");
+        }
+        assert!(parse_head("GET /v1/flows garbage\r\n\r\n").is_none());
+        assert!(parse_head("GET /v1/flows HTTP/1.1 extra\r\n\r\n").is_none());
+    }
+
+    fn request(method: &str, path: &str, token: &str, body: &str) -> Vec<u8> {
+        format!("{method} {path} HTTP/1.1\r\nAuthorization: Bearer {token}\r\nContent-Length: {}\r\n\r\n{body}", body.len()).into_bytes()
+    }
+
+    async fn exchange<F, Fut>(bytes: &[u8], execute: F) -> String
+    where
+        F: FnOnce(Command) -> Fut,
+        Fut: std::future::Future<Output = Result<Value, ApiError>>,
+    {
+        let (mut client, server) = tokio::io::duplex(16_384);
+        client.write_all(bytes).await.unwrap();
+        client.shutdown().await.unwrap();
+        handle_conn(server, "fixture-token", execute).await.unwrap();
+        let mut response = String::new();
+        client.read_to_string(&mut response).await.unwrap();
+        response
+    }
+
+    #[tokio::test]
+    async fn every_task_endpoint_authenticates_before_dispatch() {
+        let id = "d491cbe7-00a0-4651-ac30-7373f23ba0b8";
+        let routes = [
+            ("GET", "/v1/flows/catalog".to_string()),
+            ("GET", "/v1/flows".to_string()),
+            ("GET", format!("/v1/flows/{id}")),
+            ("GET", "/v1/flow-runs".to_string()),
+            ("GET", format!("/v1/flow-runs/{id}")),
+            ("POST", format!("/v1/flows/{id}/runs")),
+            ("POST", format!("/v1/flow-runs/{id}/cancel")),
+            ("GET", "/v1/groups".to_string()),
+            ("GET", "/v1/jobs".to_string()),
+        ];
+        for (method, path) in routes {
+            let response = exchange(&request(method, &path, "wrong-token", "{}"), |_| async {
+                panic!("unauthorized task must never be dispatched")
+            })
+            .await;
+            assert!(response.starts_with("HTTP/1.1 401 Unauthorized"), "{path}");
+            assert!(response.contains(r#""code":"Unauthorized""#));
+        }
+    }
+
+    #[tokio::test]
+    async fn http_run_preserves_selection_and_reports_admission_rejection_as_503() {
+        let path = "/v1/flows/d491cbe7-00a0-4651-ac30-7373f23ba0b8/runs";
+        let body = r#"{"revision":7,"selection":{"mode":"selected","udids":["B","A"]}}"#;
+        let response = exchange(
+            &request("POST", path, "fixture-token", body),
+            |command| async move {
+                let Command::Task(tasks::TaskCommand::Run { request, .. }) = command else {
+                    panic!("Flow run")
+                };
+                assert_eq!(request.revision, Some(7));
+                assert_eq!(
+                    request.selection,
+                    riviu_core::FlowTargetSelection::Selected {
+                        udids: vec!["B".into(), "A".into()]
+                    }
+                );
+                Err(CommandError::application_shutting_down().into())
+            },
+        )
+        .await;
+        assert!(response.starts_with("HTTP/1.1 503 Service Unavailable"));
+        assert!(response.contains(r#""ok":false"#));
+        assert!(response.contains(r#""code":"ApplicationShuttingDown""#));
+    }
+
+    #[tokio::test]
+    async fn http_query_reaches_the_typed_command_without_becoming_a_default() {
+        let response = exchange(
+            &request("GET", "/v1/flow-runs?limit=17", "fixture-token", ""),
+            |command| async move {
+                assert_eq!(
+                    command,
+                    Command::Task(tasks::TaskCommand::ListRuns { limit: 17 })
+                );
+                Ok(json!([]))
+            },
+        )
+        .await;
+        assert!(response.starts_with("HTTP/1.1 200 OK"));
+    }
+
+    #[tokio::test]
+    async fn truncated_oversized_and_undeclared_bodies_never_dispatch() {
+        let cases = [
+            b"POST /v1/home HTTP/1.1\r\nAuthorization: Bearer fixture-token\r\nContent-Length: 999999\r\n\r\n".to_vec(),
+            // Even valid JSON must match the declared body length before dispatch.
+            b"POST /v1/home HTTP/1.1\r\nAuthorization: Bearer fixture-token\r\nContent-Length: 100\r\n\r\n{\"udid\":\"A\"}".to_vec(),
+            b"POST /v1/home HTTP/1.1\r\nAuthorization: Bearer fixture-token\r\n\r\n{\"udid\":\"A\"}".to_vec(),
+        ];
+        for bytes in cases {
+            let response = exchange(&bytes, |_| async {
+                panic!("malformed request must not dispatch")
+            })
+            .await;
+            assert!(response.starts_with("HTTP/1.1 400 Bad Request"));
+        }
+    }
+
+    #[test]
+    fn service_errors_preserve_machine_codes_and_device_ownership_details() {
+        let mut busy = CommandError::code("DeviceBusy", "occupied");
+        busy.udid = Some("A".into());
+        busy.current_owner = Some(DeviceWorkOwner::ManualControl);
+        let mapped = ApiError::from(busy.clone());
+        assert_eq!(mapped.status, 409);
+        assert_eq!(mapped.code, "DeviceBusy");
+        assert_eq!(mapped.details.as_deref(), Some(&busy));
+        for (code, status) in [
+            ("InvalidArgument", 400),
+            ("UnknownDevice", 404),
+            ("FlowNotFound", 404),
+            ("FlowRunNotFound", 404),
+            ("StateConflict", 409),
+            ("NoEligibleDevice", 409),
+            ("OperationFailed", 500),
+            ("ApplicationShuttingDown", 503),
+        ] {
+            assert_eq!(
+                ApiError::from(CommandError::code(code, "detail")).status,
+                status,
+                "{code}"
+            );
+        }
     }
 
     #[test]

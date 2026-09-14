@@ -341,6 +341,7 @@ mod tests {
             revision: document.revision,
             nodes: Default::default(),
             execution_order: Vec::new(),
+            source_paths: Default::default(),
             successors: Default::default(),
             context_plan: ContextPlan {
                 requires_exclusive: false,

@@ -1,3 +1,4 @@
+import { openOperatorPage } from "./fixtures/operatorNavigation";
 import { expect, test, type Page } from "@playwright/test";
 import { installTauriMock } from "./fixtures/tauriMock";
 
@@ -70,7 +71,7 @@ async function fixture(page: Page, scenario: "interaction" | "publish", restored
 
 test("saved interaction draft hydrates its exact scope and stale replacement URL never dispatches", async ({ page }) => {
   await fixture(page, "interaction", true);
-  await page.getByRole("button", { name: "Tương tác", exact: true }).click();
+  await openOperatorPage(page, 'Tương tác');
   const start = page.getByRole("button", { name: "Chọn hành động & máy →" });
   await expect(start).toBeEnabled();
   await page.getByPlaceholder("Dán link TikTok, mỗi dòng một bài").fill("https://www.tiktok.com/@fixture/video/222");
@@ -82,7 +83,7 @@ test("saved interaction draft hydrates its exact scope and stale replacement URL
 
 test("interaction action-only setup fits desktop and narrow layouts without hidden comment fields", async ({ page }) => {
   await fixture(page,"interaction", true);
-  await page.getByRole("button",{name:"Tương tác",exact:true}).click();
+  await openOperatorPage(page, 'Tương tác');
   await expect(page.getByRole("button", { name: "Chọn hành động & máy →" })).toBeEnabled();
   await page.getByRole("button", { name: "Chọn hành động & máy →" }).click();
   await expect(page.getByRole("checkbox",{name:"Lưu",exact:true})).toBeChecked();
@@ -100,7 +101,7 @@ test("interaction action-only setup fits desktop and narrow layouts without hidd
 
 test("interaction maps nick by device and keeps duplicate errors inline across viewports", async ({ page }) => {
   await fixture(page, "interaction");
-  await page.getByRole("button", { name: "Tương tác", exact: true }).click();
+  await openOperatorPage(page, 'Tương tác');
   await page.getByPlaceholder("Dán link TikTok, mỗi dòng một bài").fill("https://www.tiktok.com/@fixture/video/111");
   await page.getByRole("button", { name: "Chọn hành động & máy →" }).click();
   await page.getByRole("combobox", { name: "Phạm vi thiết bị" }).selectOption("all");
@@ -126,21 +127,17 @@ test("interaction maps nick by device and keeps duplicate errors inline across v
   await expect(input).toHaveAttribute("aria-invalid", "false");
 });
 
-test("interaction reads Sheet selections and account proof without dispatching", async ({ page }) => {
+test("interaction accepts direct links and account proof without dispatching", async ({ page }) => {
   await fixture(page, "interaction");
-  await page.getByRole("button", { name: "Tương tác", exact: true }).click();
-  await page.getByText("Nhập từ Google Sheet", { exact: true }).click();
-  await page.getByLabel("Link Sheet", { exact: true }).fill("https://docs.google.com/spreadsheets/d/fixture/edit#gid=42");
-  await page.getByRole("button", { name: "Đọc Sheet", exact: true }).click();
-  await expect(page.getByLabel("Chọn dòng 3")).toBeDisabled();
-  await page.getByLabel("Chọn dòng 2").check();
+  await openOperatorPage(page, 'Tương tác');
+  await expect(page.getByText("Nhập từ Google Sheet", { exact: true })).toHaveCount(0);
+  await page.getByPlaceholder("Dán link TikTok, mỗi dòng một bài").fill("https://www.tiktok.com/@fixture/video/111");
   for (const viewport of [{ width: 1440, height: 900 }, { width: 820, height: 560 }]) {
     await page.setViewportSize(viewport);
-    await page.getByLabel("Chọn dòng 2").scrollIntoViewIfNeeded();
+    await page.getByPlaceholder("Dán link TikTok, mỗi dòng một bài").scrollIntoViewIfNeeded();
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
     await page.screenshot({ path: test.info().outputPath(`interaction-sheet-${viewport.width}.png`) });
   }
-  await page.getByRole("button", { name: "Thêm 1 bài đã chọn" }).click();
   await expect(page.getByPlaceholder("Dán link TikTok, mỗi dòng một bài")).toHaveValue("https://www.tiktok.com/@fixture/video/111");
   await page.getByRole("button", { name: "Chọn hành động & máy →" }).click();
   await page.getByRole("combobox", { name: "Phạm vi thiết bị" }).selectOption("all");
@@ -154,7 +151,7 @@ test("interaction reads Sheet selections and account proof without dispatching",
 
 test("publish monitor keeps partial delivery actionable and shows evidence at fleet viewports", async ({ page }) => {
   await fixture(page, "publish");
-  await page.getByRole("button", { name: "Đăng bài", exact: true }).click();
+  await openOperatorPage(page, 'Đăng bài');
   await page.getByRole("tab", { name: "Theo dõi", exact: true }).click();
   await expect(page.getByText("Hoàn tất một phần", { exact: true })).toBeVisible();
   await page.getByRole("button", { name: "Chi tiết máy", exact: true }).click();
@@ -184,7 +181,7 @@ test("publish Sheet toggle is keyboard accessible and fits both workspace sizes"
     };
   });
   await page.goto("/");
-  await page.getByRole("button", { name: "Đăng bài", exact: true }).click();
+  await openOperatorPage(page, 'Đăng bài');
   await page.getByRole("textbox", { name: "Thư mục nguồn" }).fill("C:/toggle");
   await page.getByRole("button", { name: "Quét", exact: true }).click();
   await expect(page.getByRole("checkbox", { name: "Chọn Bài thử" })).toBeVisible();

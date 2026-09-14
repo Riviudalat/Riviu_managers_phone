@@ -31,7 +31,7 @@ test("iOS warning follows connected iPhones and stays inspectable in Settings", 
   await expect(detail).toContainText("fixture credential missing");
   await expect(detail).toContainText("không quyết định trạng thái Agent Android");
   await page.screenshot({ path: info.outputPath("ios-diagnostic-disclosure.png") });
-  await nav.getByRole("button", { name: "Thiết bị", exact: true }).click();
+  await nav.getByRole("button", { name: "Control Center", exact: true }).click();
   const android = await page.evaluate(() => (window as unknown as {
     __TAURI_INTERNALS__: { invoke: (command: string) => Promise<Record<string, unknown>[]> };
   }).__TAURI_INTERNALS__.invoke("list_devices"));

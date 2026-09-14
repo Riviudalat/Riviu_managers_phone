@@ -27,6 +27,17 @@ function formatEvidence(value: JsonValue | null): string {
   return encoded.length <= 160 ? encoded : `${encoded.slice(0, 157)}...`;
 }
 
+function dataOutcome(value: JsonValue | null, scoped = false): string | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  if ((value.kind === "flowVariable" || value.kind === "flowConnector") && typeof value.name === "string" && typeof value.value === "string") {
+    return `${scoped && /^v_[0-9a-f]{32}$/.test(value.name) ? "Biến Flow con" : value.name} = ${value.value}`;
+  }
+  if (value.kind === "flowLog" && typeof value.message === "string") {
+    return typeof value.value === "string" ? `${value.message} · ${value.value}` : value.message;
+  }
+  return null;
+}
+
 const FLOW_STATE_LABELS: Record<string, string> = {
   queued: "Đang chờ",
   intentCommitted: "Đã ghi ý định",
@@ -300,12 +311,19 @@ export function FlowRunMonitor({
                     "Tap / attempt 1", so the row that failed named no node on the canvas. */}
                 <td>
                   {displayFlowState(attempt.actionKind)}
+                  {detail.sourcePaths?.[attempt.nodeId] && <p className="flow-composition-path">
+                    {detail.sourcePaths[attempt.nodeId].path.map((frame) => `Flow con · bản ${frame.revision}${frame.iteration === null ? "" : ` / lượt ${frame.iteration}`}`).join(" → ")}
+                  </p>}
                   {/* Which branch an If Vision picked is the whole question when a vision flow
                       does the wrong thing, and it was on the wire all along -- TypeScript just
                       had no field for it. */}
                   {attempt.chosenPort && (
                     <span className="flow-monitor-branch">
-                      {attempt.chosenPort === "true"
+                      {attempt.chosenPort === "matched"
+                        ? " → nhánh Khớp"
+                        : attempt.chosenPort === "notMatched"
+                          ? " → nhánh Không khớp"
+                          : attempt.chosenPort === "true"
                         ? " → nhánh Đúng"
                         : attempt.chosenPort === "false"
                           ? " → nhánh Sai"
@@ -317,6 +335,7 @@ export function FlowRunMonitor({
                 <td>{displayFlowState(attempt.state)}</td>
                 <td>{attemptDurationMs(attempt)} ms</td>
                 <td>
+                  {dataOutcome(attempt.evidenceResult, !!detail.sourcePaths?.[attempt.nodeId]) && <p className="flow-data-outcome">{dataOutcome(attempt.evidenceResult, !!detail.sourcePaths?.[attempt.nodeId])}</p>}
                   {attempt.evidenceResult !== null && (
                     <details>
                       <summary>Xem bằng chứng</summary>
@@ -329,6 +348,7 @@ export function FlowRunMonitor({
                   >
                     <summary>Chi tiết</summary>
                     <code>{attempt.nodeId}</code>
+                    {detail.sourcePaths?.[attempt.nodeId] && <p>Bước nguồn: <code>{detail.sourcePaths[attempt.nodeId].sourceNodeId}</code></p>}
                   </details>
                 </td>
                 <td>

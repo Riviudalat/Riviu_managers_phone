@@ -1,6 +1,7 @@
 //! JSON automation script parse / validate / helpers.
 
 pub mod flow;
+pub mod flow_composition;
 pub use flow::*;
 
 use riviu_core::AutomationScript;

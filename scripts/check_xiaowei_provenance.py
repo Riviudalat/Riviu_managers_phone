@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from pathlib import Path
 
 try:
@@ -67,6 +68,13 @@ TEXT_EXTENSIONS = {
     ".css", ".html", ".js", ".json", ".map", ".mjs", ".rs", ".ts", ".tsx", ".vue"
 }
 
+# Development environments under a runtime source root are not shipped inputs. A
+# package/installer scan and an explicitly named environment path still scan every
+# file, so moving an artifact into one of these directories cannot hide a bundle.
+RUNTIME_DEVELOPMENT_DIRS = frozenset({
+    ".venv", "__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache",
+})
+
 
 def excluded_commands() -> set[str]:
     return {
@@ -120,11 +128,24 @@ def matched_excluded_command_tokens(path: Path) -> list[tuple[bytes, str]]:
     return list(matches.items())
 
 
-def files_under(path: Path):
+def files_under(path: Path, *, runtime_source: bool = False):
     if path.is_file():
         yield path
     elif path.is_dir():
-        yield from (candidate for candidate in path.rglob("*") if candidate.is_file())
+        explicit_development_path = any(
+            part.lower() in RUNTIME_DEVELOPMENT_DIRS for part in path.parts
+        )
+        prune_development = runtime_source and not explicit_development_path
+        for directory, children, filenames in os.walk(path):
+            if prune_development:
+                children[:] = [
+                    name for name in children
+                    if name.lower() not in RUNTIME_DEVELOPMENT_DIRS
+                ]
+            for name in filenames:
+                candidate = Path(directory) / name
+                if candidate.is_file():
+                    yield candidate
 
 
 def matched_needles(path: Path) -> list[tuple[bytes, str]]:
@@ -176,7 +197,7 @@ def inspect(paths: list[tuple[str, Path]]) -> list[dict[str, str]]:
                 }
             )
             continue
-        files = list(files_under(root))
+        files = list(files_under(root, runtime_source=surface == "runtime"))
         if not files:
             findings.append(
                 {

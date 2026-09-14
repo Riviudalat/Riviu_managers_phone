@@ -288,6 +288,12 @@ export interface AgentRuntimeView {
 }
 
 export type PageId =
+  | "accounts"
+  | "networks"
+  | "schedules"
+  | "savedTasks"
+  | "help"
+  | "myApps"
   | "control"
   | "nurture"
   | "interaction"
@@ -720,6 +726,7 @@ export interface NurtureWindow {
 export type SocialNetwork = "tiktok" | "instagram" | "threads";
 
 export interface NurtureSettings {
+  workflowActionOrder?: string[];
   baseUrl: string;
   model: string;
   /**
@@ -1522,6 +1529,7 @@ export interface AutomationProfileRef {
 export type OrchestrationNodeAction =
   | { kind: "start" }
   | { kind: "delay"; durationMs: number }
+  | { kind: "log"; message: string }
   | { kind: "runNurture"; profile: AutomationProfileRef; targetOverride?: TargetRef | null }
   | { kind: "runInteraction"; profile: AutomationProfileRef; targetOverride?: TargetRef | null }
   | { kind: "runPublish"; profile: AutomationProfileRef; targetOverride?: TargetRef | null }
@@ -1707,21 +1715,40 @@ export type ActionKind =
   | "assertVisible"
   | "tapVision"
   | "ifVision"
+  | "ifVisible"
+  | "readText"
+  | "setVariable"
+  | "ifValue"
+  | "log"
+  | "copyVariable"
+  | "transform"
+  | "join"
+  | "subflow"
+  | "repeat"
+  | "ocrReadText"
+  | "fileRead"
+  | "fileWrite"
+  | "httpRequest"
+  | "sheetRead"
+  | "sheetWrite"
   | "rawHttp"
   | "rawWda"
   | "shell";
 
 export type ActionCategory = "control" | "app" | "input" | "timing" | "evidence";
 export type ResourceClass = "pureDesktop" | "bridge" | "uiSession" | "uiWithStream";
-export type SideEffectClass = "none" | "idempotentSet" | "ambiguousUi" | "artifactWrite";
+export type SideEffectClass = "none" | "idempotentSet" | "ambiguousUi" | "artifactWrite" | "externalEffect";
 export type EvidenceRequirement =
   | "none"
   | "activeApp"
   | "process"
   | "frame"
   | "textOrQualifiedFrame"
-  | "artifact";
+  | "artifact"
+  | "connector";
+// Connector receipts verify bounded file/HTTP/Sheet output through the native ledger.
 export type EvidenceKind =
+  | "elementVisible"
   | "activeAppEquals"
   | "processAbsent"
   | "frameDigestChanged"
@@ -1729,7 +1756,8 @@ export type EvidenceKind =
   | "qualifiedFramePredicate"
   | "accessibilityVisible"
   | "textReadBackEquals"
-  | "artifactDecodedAndHashed";
+  | "artifactDecodedAndHashed"
+  | "connectorResult";
 export type ReconciliationPolicy =
   | "none"
   | "readActiveApp"
@@ -1797,7 +1825,10 @@ export type QualifiedElementLocator =
   | { strategy: "accessibilityId"; value: string }
   | { strategy: "className"; value: string };
 
+export interface InspectorElementSelector { package:string; text?:string|null; description?:string|null; resourceId?:string|null; className?:string|null; }
+
 export type EvidenceSpec =
+  | { kind: "elementVisible"; selector: InspectorElementSelector }
   | { kind: "activeAppEquals"; bundleId: string }
   | { kind: "processAbsent"; bundleId: string }
   | { kind: "frameDigestChanged"; minimumDistance: number }
@@ -1812,7 +1843,8 @@ export type EvidenceSpec =
   | { kind: "qualifiedFramePredicate"; detectorId: string }
   | { kind: "accessibilityVisible"; accessibilityId: string }
   | { kind: "textReadBackEquals"; locator: QualifiedElementLocator; value: string }
-  | { kind: "artifactDecodedAndHashed" };
+  | { kind: "artifactDecodedAndHashed" }
+  | { kind: "connectorResult"; name: string };
 
 export interface FlowNode {
   id: string;
@@ -1843,7 +1875,8 @@ export interface FlowDocumentV2 {
 
 export type CompiledTapTarget =
   | { mode: "point"; target: ImageCoordinateTarget }
-  | { mode: "accessibilityId"; value: string };
+  | { mode: "accessibilityId"; value: string }
+  | { mode: "element"; selector: InspectorElementSelector };
 
 export type CompiledActionConfig =
   | { kind: "empty" }
@@ -1914,9 +1947,22 @@ export interface CompiledFlowPlanV2 {
    * `skip_serializing_if` — their canonical JSON, and so their frozen plan hash, must not change.
    */
   successors?: Record<string, Record<string, string>>;
+  sourcePaths?: Record<string, CompositionSource>;
   contextPlan: FlowContextPlan;
   actionDefinitionVersions: Partial<Record<ActionKind, number>>;
   requiredCapabilities: string[];
+}
+
+export interface CompositionFrame {
+  nodeId: string;
+  flowId: string;
+  revision: number;
+  iteration: number | null;
+}
+
+export interface CompositionSource {
+  sourceNodeId: string;
+  path: CompositionFrame[];
 }
 
 export interface CompiledRevision {
@@ -2165,6 +2211,7 @@ export interface FlowRunDetail {
   deviceRuns: FlowDeviceRunRecord[];
   attempts: FlowNodeAttemptRecord[];
   artifacts: FlowArtifactRecord[];
+  sourcePaths?: Record<string, CompositionSource>;
 }
 
 export interface RevisionConflict {

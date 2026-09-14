@@ -1,3 +1,4 @@
+import { openOperatorPage } from "./fixtures/operatorNavigation";
 import { expect, test } from "@playwright/test";
 import { installTauriMock } from "./fixtures/tauriMock";
 
@@ -91,7 +92,7 @@ for (const viewport of [
     });
     await page.goto("/");
     await expect(page.getByTestId("device-tile")).toHaveCount(20);
-    await page.getByRole("button", { name: "Đăng bài", exact: true }).click();
+    await openOperatorPage(page, 'Đăng bài');
     await page
       .getByRole("button", { name: "Chọn thư mục", exact: true })
       .click();

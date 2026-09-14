@@ -81,6 +81,7 @@ export type FlowEditorAction =
       idFactory?: IdFactory;
     }
   | { type: "appendNode"; node: FlowNode }
+  | { type: "applyDocumentEdit"; document: FlowDocumentV2 }
   | {
       type: "reconnectEdge";
       edgeId: string;
@@ -196,6 +197,10 @@ export function reduceFlowEditor(
     case "appendNode":
       return finiteNode(action.node)
         ? mutate(state, appendUnconnectedNode(state.document, action.node))
+        : state;
+    case "applyDocumentEdit":
+      return action.document.id === state.document.id && action.document.revision === state.document.revision && action.document.nodes.every(finiteNode)
+        ? mutate(state, cloneFlowDocument(action.document))
         : state;
     case "reconnectEdge":
       return mutate(

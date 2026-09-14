@@ -260,6 +260,20 @@ describe("FlowVisionCapture", () => {
     expect(onCapture).toHaveBeenCalledTimes(1);
   });
 
+  it("offers local inspection before an explicit reviewed crop is saved", async () => {
+    const onCapture = vi.fn();
+    render(<FlowVisionCapture frame={FRAME} onCapture={onCapture} onCancel={vi.fn()} reviewBeforeCapture />);
+    const image = screen.getByRole("img", { name: "Khung hình thiết bị" });
+    pick(image, 10, 10);
+    pick(image, 200, 400);
+    await act(async () => { decode?.(); await Promise.resolve(); });
+    expect(onCapture).not.toHaveBeenCalled();
+    expect(screen.getByRole("button", { name: "Kiểm tra ảnh mẫu" })).toBeEnabled();
+    fireEvent.click(screen.getByRole("button", { name: "Dùng ảnh mẫu" }));
+    expect(onCapture).toHaveBeenCalledOnce();
+    expect(onCapture.mock.calls[0][1]).toEqual({ x0: 10 / 400, y0: 10 / 800, x1: 200 / 400, y1: 400 / 800 });
+  });
+
   it("keeps crop failures out of the operator-facing message", async () => {
     HTMLCanvasElement.prototype.getContext = vi.fn(() => null);
     render(<FlowVisionCapture frame={FRAME} onCapture={vi.fn()} onCancel={vi.fn()} />);

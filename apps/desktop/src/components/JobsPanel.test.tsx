@@ -84,6 +84,8 @@ function renderPanel() {
   );
 }
 
+async function openRun(title:string){await userEvent.click(await screen.findByRole("button",{name:`Xem lượt chạy ${title}`}));}
+
 beforeEach(() => {
   vi.clearAllMocks();
   operationListRuns.mockResolvedValue([]);
@@ -97,6 +99,7 @@ describe("JobsPanel operations monitor", () => {
     operationGetRun.mockResolvedValue(detail);
     const onOpenSource = vi.fn();
     render(<JobsPanel devices={[]} selectedUdids={[]} onSelectUdids={() => undefined} deviceLabels={new Map()} onOpenSource={onOpenSource} />);
+    await openRun(summary.title);
     await userEvent.click(await screen.findByRole("button", { name: "Mở tại Tương tác" }));
     expect(onOpenSource).toHaveBeenLastCalledWith({ operationId: summary.id, sourceId: summary.sourceId, kind: "interaction" });
     await userEvent.click(screen.getByRole("button", { name: "Mở mục cần xử lý" }));
@@ -115,6 +118,7 @@ describe("JobsPanel operations monitor", () => {
       ],
     });
     renderPanel();
+    await openRun(onePost.title);
     expect(await screen.findByText("Tương tác · 1 bài · 2 máy · Một phần")).toBeVisible();
   });
 
@@ -123,6 +127,7 @@ describe("JobsPanel operations monitor", () => {
     operationListRuns.mockResolvedValue([onePost]);
     operationGetRun.mockResolvedValue({ summary: onePost, items: [] });
     renderPanel();
+    await openRun(onePost.title);
     expect(await screen.findByText("Tương tác · 1 bài · Một phần")).toBeVisible();
     expect(screen.queryByText(/Tương tác · 1 bài · 0 máy/)).toBeNull();
   });
@@ -171,8 +176,9 @@ describe("JobsPanel operations monitor", () => {
     renderPanel();
 
     expect(await screen.findByText("Tương tác · @creator")).toBeVisible();
-    const runRow = screen.getByRole("button", { name: /Tương tác · @creator/ });
-    expect(within(runRow).getByText("Một phần")).toBeVisible();
+    const runRow = screen.getByRole("button", { name: "Tương tác · @creator" });
+    expect(within(runRow.closest("tr")!).getByText("Một phần")).toBeVisible();
+    await openRun(summary.title);
     expect(await screen.findByRole("alert")).toHaveTextContent("detail read failed");
     await userEvent.click(screen.getByRole("button", { name: "Thử lại chi tiết" }));
 
@@ -189,7 +195,7 @@ describe("JobsPanel operations monitor", () => {
     const advanced = screen.getByText("Chạy JSON nâng cao").closest("details");
     expect(advanced).not.toHaveAttribute("open");
 
-    await userEvent.click(screen.getByText("Chạy JSON nâng cao"));
+    await userEvent.click(screen.getByRole("button",{name:"JSON nâng cao"}));
     expect(advanced).toHaveAttribute("open");
     expect(screen.getByPlaceholderText("Dán kịch bản JSON đã kiểm tra")).toHaveValue("");
     expect(screen.queryByRole("button", { name: "Nạp ví dụ" })).toBeNull();
@@ -213,7 +219,8 @@ describe("JobsPanel operations monitor", () => {
     operationGetRun.mockResolvedValue({ summary: publishSummary, items: [] });
 
     renderPanel();
-    expect(await screen.findByRole("button", { name: /Đăng bài/ })).toBeVisible();
+    expect(await screen.findByRole("button", { name: "Đăng bài" })).toBeVisible();
+    await openRun(publishSummary.title);
     await screen.findByText("Mã tác vụ và tiến độ");
     expect(screen.getByText(/Đăng bài · 1 máy ·/)).toBeVisible();
     await userEvent.click(screen.getByText("Mã tác vụ và tiến độ"));
@@ -243,6 +250,7 @@ describe("JobsPanel operations monitor", () => {
 
     renderPanel();
 
+    await openRun(publishSummary.title);
     expect(await screen.findByText("Máy 13 · Kệ dưới")).toBeVisible();
     expect(screen.queryByText("Máy trong snapshot")).toBeNull();
   });
@@ -262,13 +270,14 @@ describe("JobsPanel operations monitor", () => {
       .mockResolvedValueOnce({ ...detail, summary: updated });
 
     renderPanel();
+    await openRun(orchestration.title);
     expect(await screen.findByText("Máy 19 · Kệ trên")).toBeVisible();
     await waitFor(() => expect(eventListeners).toHaveLength(1));
 
     eventListeners[0]({ type: "orchestrationUpdated", runId: "run-a" });
     await waitFor(() => expect(operationListRuns).toHaveBeenCalledTimes(2));
     await waitFor(() => expect(operationGetRun).toHaveBeenCalledTimes(2));
-    expect(within(screen.getByRole("button", { name: /Điều phối tuần/ })).getByText("Hoàn tất"))
+    expect(within(screen.getByRole("button", { name: "Điều phối tuần" }).closest("tr")!).getByText("Hoàn tất"))
       .toBeVisible();
   });
 });

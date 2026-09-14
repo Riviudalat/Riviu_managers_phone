@@ -1,4 +1,64 @@
 use super::*;
+
+#[test]
+fn observed_account_preserves_operator_metadata_and_rejects_invalid_handles() {
+    let (db, _, _, _) = fixture();
+    let mut meta = db.get_device_meta("phone").unwrap();
+    meta.alias = "Desk phone".into();
+    meta.number = Some(16);
+    meta.notes = "keep".into();
+    db.upsert_device_meta(&meta).unwrap();
+    db.record_observed_interaction_account("phone", "@actual.user")
+        .unwrap();
+    let read = db.get_device_meta("phone").unwrap();
+    assert_eq!(read.handle, "actual.user");
+    assert_eq!(read.alias, meta.alias);
+    assert_eq!(read.number, meta.number);
+    assert_eq!(read.notes, meta.notes);
+    for invalid in ["", " ", "display name", "ends."] {
+        assert!(db
+            .record_observed_interaction_account("phone", invalid)
+            .is_err());
+    }
+    assert_eq!(db.get_device_meta("phone").unwrap().handle, "actual.user");
+}
+
+#[test]
+fn explicit_recheck_repairs_only_a_blank_account_and_does_not_reopen_send() {
+    for initial in ["", "original.user"] {
+        let (db, campaign, id, mut context) = fixture();
+        context.account = initial.into();
+        let now = armed(&db, &id, &context);
+        db.conn().unwrap().execute("UPDATE interaction_comment_verification SET state='needsReview' WHERE assignment_id=?1",[&id]).unwrap();
+        db.record_observed_interaction_account("phone", "current.user")
+            .unwrap();
+        db.request_comment_verification(&campaign, &id).unwrap();
+        let json: String = db
+            .conn()
+            .unwrap()
+            .query_row(
+                "SELECT context_json FROM interaction_comment_verification WHERE assignment_id=?1",
+                [&id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let stored: VerificationContext = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            stored.account,
+            if initial.is_empty() {
+                "current.user"
+            } else {
+                initial
+            }
+        );
+        assert_eq!(stored.text, context.text);
+        assert!(db
+            .claim_interaction_assignment_for_send(&id)
+            .unwrap()
+            .is_none());
+        assert!(now > 0);
+    }
+}
 fn fixture() -> (Database, String, String, VerificationContext) {
     let path = std::env::temp_dir().join(format!("comment-verification-{}.db", Uuid::new_v4()));
     let db = Database::open(path).unwrap();
@@ -184,6 +244,49 @@ fn repeated_manual_request_returns_same_pending_budget() {
     let b = db.request_comment_verification(&campaign, &id).unwrap();
     assert_eq!(a, b);
     assert_eq!(a.deadline_ms, Some(now + 120000));
+}
+
+#[test]
+fn manual_reply_recheck_restores_root_from_durable_parent_without_changing_text() {
+    let (db, campaign, id, mut context) = fixture();
+    let parent_id = Uuid::new_v4().to_string();
+    let root = crate::CommentLocatorIdentity {
+        author_label: "Root author".into(),
+        text: "Root text".into(),
+        locator_version: "android-snapshot-v2".into(),
+        frame_sha256: "a".repeat(64),
+    };
+    let conn = db.conn().unwrap();
+    conn.execute("INSERT INTO interaction_assignments(id,campaign_id,target_id,message_ordinal,actor_udid,parent_assignment_id,state,prepared_json,effect_intent,evidence_json,error_code,revision,created_at,updated_at) SELECT ?2,campaign_id,target_id,10,'root-phone',NULL,'succeeded',NULL,'post_comment',?3,NULL,1,created_at,updated_at FROM interaction_assignments WHERE id=?1",params![id,parent_id,serde_json::json!({"postedIdentity":root}).to_string()]).unwrap();
+    conn.execute(
+        "UPDATE interaction_assignments SET parent_assignment_id=?2 WHERE id=?1",
+        params![id, parent_id],
+    )
+    .unwrap();
+    context.parent = Some(root.clone());
+    context.root = None;
+    armed(&db, &id, &context);
+    conn.execute(
+        "UPDATE interaction_comment_verification SET state='needsReview' WHERE assignment_id=?1",
+        [&id],
+    )
+    .unwrap();
+    db.request_comment_verification(&campaign, &id).unwrap();
+    let raw: String = conn
+        .query_row(
+            "SELECT context_json FROM interaction_comment_verification WHERE assignment_id=?1",
+            [&id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let stored: VerificationContext = serde_json::from_str(&raw).unwrap();
+    assert_eq!(stored.root, Some(root));
+    assert_eq!(stored.text, context.text);
+    assert_eq!(stored.account, context.account);
+    assert!(db
+        .claim_interaction_assignment_for_send(&id)
+        .unwrap()
+        .is_none());
 }
 
 #[test]

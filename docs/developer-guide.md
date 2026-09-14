@@ -3,6 +3,86 @@
 Stack giữ nguyên: Rust workspace, Tauri 2, React/TypeScript/Vite. `src/api.ts` là biên
 IPC frontend. Không thêm một control plane riêng để đi vòng ownership/admission hiện có.
 
+Bình luận Android đọc tài khoản trong phiên điều khiển trước khi mở bài đích;
+chỉ cập nhật trường handle, giữ các metadata khác. Reply giải username người được
+tag tại thời điểm gửi và giữ identity của câu gốc để mở nhánh khi đọc lại.
+Worker xác minh dùng chung `open_exact_target_by_hierarchy`, không mở URL lần nữa
+trước resolver. Trong cửa sổ 30 giây, chỉ mở lại cùng link một lần nếu đọc được
+Home/Profile và thẻ LIVE sau ít nhất 10 giây mà chưa có nút bình luận. Không mở
+lại với sai package, bài báo không tồn tại hoặc lỗi clipboard. Android dựng lại
+navigation task bằng NEW_TASK|CLEAR_TASK trong nhánh này để thoát SplashActivity
+giữ intent cũ; không xóa dữ liệu ứng dụng. Một lượt quan sát tối đa 75 giây trong
+ngân sách 120 giây đã lưu; lease 150 giây gồm mở phiên và cleanup. Link sao chép
+phải khớp trước thao tác công khai. Lượt gửi chưa xác minh không được gửi lại.
+
+Inspector dùng `ui_automation::inspector::ElementSelector` và `inspector_commands`.
+UI và `scripts/riviu_agent_mcp.mjs` gọi cùng observe/tap/record qua Tauri hoặc
+`POST /v1/inspector/{observe,tap,record,recording}`. MCP dùng URL loopback và token
+API hiện có, không mở ADB server hoặc phiên driver thứ hai. Mỗi thao tác giải lại
+selector duy nhất theo package; recorder ghi intent trước tap, lưu ảnh/cây trước
+và sau. Bước chưa có phần tử kết quả mới giữ unverified và không xuất Flow tự chạy.
+Flow tap dạng `selector` có hậu điều kiện `elementVisible`, được kiểm cả compiler,
+runtime và ledger. Ledger nhận baseline `none` chỉ khi cấu hình là tap phần tử và
+hậu điều kiện là `elementVisible` trong cùng package; tap theo ảnh vẫn giữ baseline
+ảnh/generation. Cả kết quả đạt và không đạt đều phải khớp selector đã biên dịch.
+ElementVisible chỉ chứng minh UI; không thay proof nghiệp vụ
+Đăng/Gửi, canonical link hoặc tài khoản. Dữ liệu quan sát nằm trong artifacts/inspector.
+
+Xác minh bài ảnh đọc caption trong viewer, lấy link bằng clipboard sentinel,
+đối chiếu toàn bộ caption, tài khoản và content ID với metadata oEmbed công khai.
+Nếu viewer đã ẩn caption, chỉ mở Share trên màn bài có nút Back và Comments đã
+nhận diện; metadata công khai vẫn phải khớp toàn bộ nội dung. ID bài hỗ trợ đối chiếu
+phiên: TikTok có thể cấp ID trước nút Đăng; mốc dưới lấy từ sự kiện `opening_app`
+đã lưu của đúng campaign/máy, tối đa 30 phút trước `submittedAt`. Thiếu mốc ấy thì
+chỉ dùng `submittedAt`, không tự nới khoảng thời gian. Caption, tác giả và content ID
+phải cùng khớp; lỗi mạng giữ trạng thái chờ xác minh. Riêng timestamp suy ra từ ID
+không đủ chứng minh xuất bản.
+
+`Database::publish_device_guard` phân biệt upload cần bảo vệ và khoản thiếu link của
+bài cũ. Chỉ bỏ giữ máy khi receipt có `state=posted`/`verdict=Posted`, xác minh đã
+`needsReview`, không có pipeline, và `updated_at` đã qua ngân sách dài nhất hiện có
+(240 phút). Với receipt Submitted cũ, lần kiểm tra chủ động được ghi thêm quan sát
+hồ sơ của đúng tài khoản, hash nguồn và hash intent nếu đã qua 4 giờ từ submittedAt,
+không có pipeline đang chạy. Quan sát có hiệu lực 24 giờ và chỉ giải phóng máy;
+trạng thái xuất bản, outbox và quyền gửi lại không đổi. Intent thay đổi làm mất
+hiệu lực quan sát; tuổi campaign riêng lẻ không đủ để bỏ giữ máy.
+Preflight hiển thị khoản thiếu link riêng; clean-start và cleanup dùng cùng quyết định.
+`adb_server::discover` chỉ đọc `host:devices-l` trên loopback 5037/5038, không gọi
+kill-server. Ở chế độ tự nhận, inventory gộp hai server và giữ bảng serial → cổng
+chung cho các bản clone của `AdbProgram`; lifecycle, shell, forward, instrumentation,
+scrcpy/minicap đều định tuyến theo serial. Máy trùng ở hai server giữ cổng đang dùng;
+máy mất kết nối vẫn giữ route phục vụ cleanup. Server đang quản lý máy mà lỗi đọc
+inventory không được biến thành danh sách rỗng. Cổng cấu hình tường minh chỉ dùng
+server đã chọn; không tự mở rộng phạm vi đó.
+
+My Apps dùng `AppWorkflowV1` (schema1) và revision bất biến; migration40 bổ sung bảng
+document/revision. Graph được kiểm ở biên lưu rồi biên dịch thành cấu hình native và
+điều phối hiện có. `workflowActionOrder` điều khiển thứ tự Like/Save/Comment trong
+cả vòng Nuôi pixel và hierarchy. Chuỗi chuẩn bị/effect/xác minh của hai engine còn lại
+giữ phụ thuộc hiện có; không coi việc vẽ node là bằng chứng đã tách từng stage executor.
+Chờ/log ngoài pipeline thành node điều phối thật, graph cycle bị từ chối.
+
+Migration39 bổ sung tài khoản, kết nối và tác vụ có revision; ghi CAS trong transaction,
+import nguyên tử, credential chỉ là tham chiếu OS store. `set_http_proxy` là lệnh typed
+qua control plane và Android driver, đọc lại `http_proxy` trước khi báo xác nhận.
+Local API `/v1/apps`, `/v1/apps/{id}` và `/v1/apps/{id}/runs` gọi chung command với UI.
+
+Cửa sổ điện thoại là non-modal và chỉ có một instance. `useDeviceWindows` thay UDID
+khi đổi máy; key React giữ ổn định. Handoff chờ end của máy cũ trước begin của máy mới;
+registry theo UDID giữ refcount cho điều khiển nhóm. Bộ test giữ ca begin/end chồng
+nhau, đổi máy khi phiên chưa đóng, và chọn trang khi máy đang mở. Bảng tệp dùng portal
+ngoài stage transform để giữ đúng modal/focus và không bị menu cuộn cắt nội dung.
+Ba workspace cũ vẫn là đích mặc định; graph chỉ mở qua Thêm Flow. Trạng thái ẩn từng
+nhóm sidebar và bảng Hiển thị là preference cục bộ, không đổi cấu hình chiến dịch.
+Rail lưu `riviu.control.displayPinned`; hover dùng overlay không đổi chiều rộng lưới,
+delay rời 240 ms và giữ khi focus bàn phím ở trong. Nhóm dùng grid transition và inert.
+`DeviceFilesPopup` có mode browse/upload/download; upload nhận danh sách từ picker PC,
+ghi theo từng tệp và giữ danh sách hoàn tất để retry không gửi lại chúng. Bảng tồn tại
+thêm 180 ms lúc đóng qua `useClosingTransition`, hỗ trợ reduced motion và trả focus.
+Dropdown dùng stylesheet chung `operator-polish.css`, giữ select/option native và
+thêm `appearance: base-select` trong `@supports`; WebView2 152 đã xác minh picker,
+Escape và chọn option. WebView cũ giữ select native với khung theo token Riviu.
+
 Helper Android được chuẩn bị sau inventory ổn định bằng worker
 `android_helper_setup` trong `state`: tối đa hai máy, admission và lease Repair giữ
 stream, một lần thử mỗi kết nối. `AndroidDriver::ensure_helper_installed` chỉ cài
@@ -350,6 +430,77 @@ nội dung không thuộc smoke điều hướng read-only. Số lượng test v
 đo của một lần chạy, không chép thành năng lực tuyệt đối.
 
 ## Hội thoại theo phiên
+
+### Flow: dữ liệu, nhập kịch bản và API tác vụ
+
+Catalog có thêm `SetVariable`, `ReadText`, `IfValue`, `IfVisible`, `Log` theo schema
+Flow V2. Biến hiện có kiểu chuỗi, tên ASCII tối đa64byte, nội dung tối đa4096ký tự.
+Compiler yêu cầu biến đã được ghi trên mọi đường vào của bước đọc. Gán biến giữ
+nguyên chuỗi literal; connector nội suy tham chiếu có kiểm tra, không thực thi biểu
+thức. Writer ghi output vào transaction Succeeded
+của attempt. Consumer dựng lại biến từ các predecessor đã thành công trên đúng
+đường đi, device-run và revision; không có dictionary chung xuyên thiết bị.
+Database kiểm output theo loại writer khi ghi và khi đọc lịch sử. Hai nhánh
+`matched`/`notMatched` dùng chung successor/admission với IfVision.
+
+`flow::connectors` thực thi FileRead/FileWrite/HttpRequest/SheetRead/SheetWrite;
+UI cấu hình nằm trong FlowInspector. `validate_template` kiểm tên biến và mẫu,
+executor nội suy `${name}` bằng output predecessor đã thành công rồi `validate`
+kiểm lại toàn bộ cấu hình trước dispatch; không đánh giá mã. Payload/output giới
+hạn 4.096 ký tự, I/O 16 KiB. Tệp bị giới hạn trong `Database::flow_connector_root()`
+(`flow-data` cạnh DB), chặn đường dẫn thoát, symlink/reparse và tên hệ thống; khóa
+file ngăn các máy cùng ghi, thay tệp nguyên tử rồi đọc lại/băm SHA-256. Đoạn I/O
+cục bộ hữu hạn không tạo worker có thể sống sau khi node hủy. HTTP dùng HTTPS
+(HTTP chỉ localhost), Bearer từ OS secret store, timeout tối đa 30 giây, không
+redirect hoặc retry; credential echo không đi vào ledger. FileWrite, HTTP và
+SheetWrite ghi intent trước effect; mất phản hồi giữ Uncertain, không tự phát lại.
+Connector ghi giá trị và receipt vào cùng ledger với các node khác.
+
+Sheet dùng cấu hình publish hiện có, không thêm scheduler/outbox. Apps Script
+`flowRead`/`flowWrite` protocol1 buộc đúng spreadsheet ID/tab/vùng A1 và token,
+giới hạn 1.000 ô; ghi bằng `stringValue` rồi xác minh toàn vùng dưới script lock.
+Client gửi một POST, chỉ chấp nhận content redirect GET của Google không mang
+credential. Cần triển khai lại script đi kèm trước khi dùng endpoint này; nâng
+ứng dụng không tự sửa bản triển khai hay nội dung bảng. `flow_connector_info`
+chỉ trả đường dẫn/tên tham chiếu; lệnh lưu token và nhập tệp giữ admission hiện có.
+
+`IfVisible` đọc một cây hoàn chỉnh và phân biệt thiếu bằng chứng với không thấy
+phần tử; cần capability hierarchy thực tế. iOS chưa có primitive cây đầy đủ nên
+node này báo thiếu capability. `ReadText` dùng request deadline trong driver;
+Android không chọn chuỗi rỗng khi response text sai kiểu.
+
+Importer ngoài chuyển dữ liệu thành bản nháp, giữ diagnostics/ID nguồn. Những
+node chưa có ánh xạ tương đương chặn chuyển đổi, không bị bỏ âm thầm. Macro cũ
+không có profile hình học không được gán một profile giả khi nhập tọa độ.
+Repeat mở rộng body tuyến tính thành các node riêng với ID mới (1..50 lượt,
+tối đa500node), có Undo nguyên tử. Runtime vẫn chạy DAG và mỗi copy có attempt
+độc lập; Flow cũ không đổi schema hoặc semantics khi phục hồi.
+
+`Subflow` và `Repeat` native giữ snapshot Flow V2 trong config, kèm ánh xạ biến
+inputs/outputs. Compiler mở rộng tối đa8cấp,50lượt và2.000node; UUID, tên biến và
+đường đi nguồn được tạo xác định theo scope. Start/End của Flow con thành Join,
+CopyVariable nối biến ở biên; mọi nhánh trong body vẫn dùng cổng matched/notMatched.
+Compiled plan ghim sourcePaths/revision và actionDefinitionVersions; FlowRunDetail
+trả đường đi này để monitor hiển thị lượt lặp. Các bước đã hoàn thành được đọc từ
+ledger, không chạy lại body để dựng biến sau restart. `Transform` hỗ trợ xử lý
+chuỗi/dòng, JSON pointer và regex có ngân sách bộ nhớ, đầu ra tối đa4.096ký tự.
+
+Local API task routes gọi cùng Flow command handler của UI; không tạo scheduler
+riêng. POST chạy Flow không tự retry khi mất response. API status/cancel luôn dùng
+run ID trả về; contract/schema ở trang API và module `local_api/tasks.rs`.
+
+GUI Service có endpoint template-match cục bộ dùng OpenCV/NumPy; thao tác xem thử
+trong FlowVisionCapture không chạm điện thoại. Snapshot, crop, hash, epoch và
+generation được ràng buộc hai phía. Tối đa2worker native; client timeout vẫn giữ
+slot đến khi công việc native kết thúc. Các tùy chọn thử đa tỷ lệ chỉ áp dụng phép
+thử này; Flow TapVision/IfVision vẫn dùng matcher Rust và config đã lưu.
+
+`OcrReadText` lấy frame từ generation đang sở hữu rồi gọi OCR cục bộ qua reasoner
+được tiêm vào FlowRuntime. Screenshot/hash/epoch được kiểm hai phía. Tesseract và
+model vie/eng được ghim SHA-256 và đóng gói; máy chạy không tải model ngầm.
+Output OCR giữ văn bản, engine, confidence, bounds và binding trong ledger; lỗi
+đọc/mất generation không thành văn bản rỗng giả. Worker OCR chạy process riêng,
+timeout/hủy thu hồi process, dùng chung trần2slot với các phép nhận diện khác.
 
 `ThreadCampaignRequest.scriptedConversation` giữ schema1, targetScripts, roleBindings,
 seed, durationMinutes và tùy chọn startsAt/endsAt. Planner dùng ordinal riêng 0–63 mỗi

@@ -2,6 +2,26 @@ use super::*;
 use crate::{OperationDeviceLog, OperationDeviceLogEntry, OperationRunKind};
 
 impl Database {
+    pub fn publish_attempt_opened_at(
+        &self,
+        campaign_id: &str,
+        udid: &str,
+        submitted_at: &str,
+    ) -> anyhow::Result<Option<String>> {
+        let conn = self.conn()?;
+        Ok(conn
+            .query_row(
+                "SELECT recorded_at FROM operation_device_events
+             WHERE source_kind='publish' AND source_id=?1 AND udid=?2
+               AND action='publishStep' AND state='opening_app'
+               AND julianday(recorded_at)<=julianday(?3)
+               AND julianday(recorded_at)>=julianday(?3)-30.0/1440.0
+             ORDER BY recorded_at DESC LIMIT 1",
+                params![campaign_id, udid, submitted_at],
+                |row| row.get(0),
+            )
+            .optional()?)
+    }
     /// Append an actual runtime step, with its source timestamp and durable ordinal.
     /// This audit never changes assignment state or authorizes Post.
     pub fn append_publish_progress(
@@ -116,6 +136,36 @@ impl Database {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn preparation_time_belongs_to_this_device_campaign_and_precedes_post() {
+        let path =
+            std::env::temp_dir().join(format!("publish-preparation-{}.sqlite", Uuid::new_v4()));
+        let db = Database::open(&path).unwrap();
+        let conn = db.conn().unwrap();
+        for (run, device, at) in [
+            ("run", "phone", "2026-01-01T11:00:00Z"),
+            ("run", "phone", "2026-01-01T12:00:06Z"),
+            ("run", "phone", "2026-01-01T12:02:00Z"),
+            ("other", "phone", "2026-01-01T12:00:50Z"),
+            ("run", "other", "2026-01-01T12:00:51Z"),
+        ] {
+            conn.execute("INSERT INTO operation_device_events(source_kind,source_id,udid,action,state,recorded_at) VALUES ('publish',?1,?2,'publishStep','opening_app',?3)",params![run,device,at]).unwrap();
+        }
+        assert_eq!(
+            db.publish_attempt_opened_at("run", "phone", "2026-01-01T12:00:58Z")
+                .unwrap()
+                .as_deref(),
+            Some("2026-01-01T12:00:06Z")
+        );
+        assert!(db
+            .publish_attempt_opened_at("run", "phone", "2026-01-01T13:00:00Z")
+            .unwrap()
+            .is_none());
+        drop(conn);
+        drop(db);
+        std::fs::remove_file(path).unwrap();
+    }
 
     #[test]
     fn publish_timeline_preserves_transitions_and_rolls_back_with_source() {

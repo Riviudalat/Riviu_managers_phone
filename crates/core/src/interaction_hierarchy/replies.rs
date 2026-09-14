@@ -7,13 +7,7 @@ pub(crate) fn expand_target(
     package: &str,
     root: &CommentLocatorIdentity,
 ) -> anyhow::Result<Option<ElementBox>> {
-    let bodies = tree.matching(
-        package,
-        ElementQuery::Text {
-            value: &root.text,
-            exact: true,
-        },
-    );
+    let bodies = crate::comment_verification::search::comment_bodies(tree, package, &root.text);
     anyhow::ensure!(
         bodies.len() <= 1,
         "Nhiều bình luận trùng nội dung gốc; chưa mở replies"

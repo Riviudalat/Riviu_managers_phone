@@ -31,6 +31,7 @@
 //! uiautomator2.
 
 pub mod adb;
+mod adb_server;
 pub mod agent;
 mod capability;
 pub mod driver;

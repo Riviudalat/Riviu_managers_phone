@@ -5,19 +5,23 @@ mod agent_commands;
 pub mod agent_runtime;
 pub mod android_package_tools;
 mod android_tools;
+mod app_workflow_commands;
 mod automation_commands;
 mod command_error;
 mod commands;
 pub mod deployment_check;
 mod farm_commands;
 mod flow_commands;
+mod flow_connector_commands;
 mod gui_service;
 mod idle_sweeper;
+mod inspector_commands;
 mod interaction_commands;
 pub mod interaction_ocr;
 mod local_api;
 mod nurture_commands;
 mod nurture_schedule;
+mod operator_commands;
 mod orchestration_commands;
 mod peripherals;
 mod public_cleanup_commands;
@@ -500,6 +504,9 @@ pub fn run() {
             automation_commands::automation_schedule_from_settings,
             automation_commands::automation_schedule_update,
             flow_commands::flow_action_catalog,
+            flow_connector_commands::flow_connector_info,
+            flow_connector_commands::flow_connector_save_secret,
+            flow_connector_commands::flow_connector_import_file,
             flow_commands::flow_list,
             flow_commands::flow_get,
             flow_commands::flow_validate,
@@ -513,12 +520,31 @@ pub fn run() {
             flow_commands::flow_list_runs,
             flow_commands::flow_get_run,
             flow_commands::flow_coordinate_frame,
+            inspector_commands::inspector_observe,
+            inspector_commands::inspector_tap,
+            inspector_commands::inspector_record,
+            inspector_commands::inspector_recording,
             flow_commands::flow_read_artifact,
             orchestration_commands::orchestration_list,
             orchestration_commands::orchestration_get,
             orchestration_commands::orchestration_validate,
             orchestration_commands::orchestration_save_revision,
             orchestration_commands::orchestration_create_three_feature_template,
+            operator_commands::operator_list,
+            operator_commands::operator_import,
+            operator_commands::operator_save,
+            operator_commands::operator_archive,
+            operator_commands::operator_network_probe,
+            operator_commands::operator_network_apply,
+            app_workflow_commands::app_workflow_list,
+            app_workflow_commands::app_workflow_template,
+            app_workflow_commands::app_workflow_catalog,
+            app_workflow_commands::app_workflow_get,
+            app_workflow_commands::app_workflow_validate,
+            app_workflow_commands::app_workflow_save,
+            app_workflow_commands::app_workflow_archive,
+            app_workflow_commands::app_workflow_run,
+            app_workflow_commands::app_workflow_schedule,
             orchestration_commands::orchestration_archive,
             orchestration_commands::orchestration_run,
             orchestration_commands::orchestration_list_runs,
@@ -568,11 +594,14 @@ pub fn run() {
             publish_commands::publish_list,
             publish_commands::publish_get,
             publish_commands::publish_reconcile,
+            publish_commands::publish_check_links,
             publish_commands::publish_cancel,
             publish_commands::publish_execute,
             publish_commands::publish_readiness,
             publish_commands::publish_sheet_get_config,
             gui_service::gui_service_status,
+            gui_service::gui_template_match,
+            gui_service::gui_ocr,
             gui_service::gui_service_save,
             gui_service::gui_service_check,
             gui_service::gui_compatibility_import,
@@ -1034,6 +1063,23 @@ mod tests {
         ("farm_commands.rs", include_str!("farm_commands.rs")),
         ("flow_commands.rs", include_str!("flow_commands.rs")),
         (
+            "inspector_commands.rs",
+            include_str!("inspector_commands.rs"),
+        ),
+        ("operator_commands.rs", include_str!("operator_commands.rs")),
+        (
+            "app_workflow_commands.rs",
+            include_str!("app_workflow_commands.rs"),
+        ),
+        (
+            "publish_commands/verification.rs",
+            include_str!("publish_commands/verification.rs"),
+        ),
+        (
+            "flow_connector_commands.rs",
+            include_str!("flow_connector_commands.rs"),
+        ),
+        (
             "orchestration_commands.rs",
             include_str!("orchestration_commands.rs"),
         ),
@@ -1142,6 +1188,7 @@ mod tests {
         ("publish_sheet_get_config", "read: DB, và không bao giờ trả token"),
         ("publish_image_preview", "read: bounded local bundle image, hash-verified; touches no device"),
         ("flow_action_catalog", "read: static catalog"),
+        ("flow_connector_info", "read: workspace path and credential names; never returns credential values"),
         ("flow_list", "read: DB"),
         ("flow_get", "read: DB"),
         ("flow_validate", "pure: compiles a document, no I/O"),
@@ -1575,7 +1622,12 @@ mod tests {
             registered.len()
         );
 
-        let api = include_str!("../../src/api.ts");
+        let api = concat!(
+            include_str!("../../src/api.ts"),
+            include_str!("../../src/appWorkflow.ts"),
+            include_str!("../../src/operatorRecords.ts"),
+            include_str!("../../src/inspectorApi.ts")
+        );
         let exempt: std::collections::HashMap<&str, &str> =
             UNREACHABLE_EXEMPT.iter().copied().collect();
 

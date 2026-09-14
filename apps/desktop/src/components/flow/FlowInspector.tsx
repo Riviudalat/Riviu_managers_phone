@@ -18,8 +18,10 @@ import { acceptFiniteValueAsNumber } from "../../flow/validation";
 import { ACTION_PRESENTATION, SCREEN_ORIENTATION_LABELS } from "./actionPresentation";
 import { FlowCoordinatePicker } from "./FlowCoordinatePicker";
 import { FlowVisionCapture } from "./FlowVisionCapture";
+import { OcrTool } from "./OcrTool";
 import { flowValidationMessage } from "./validationPresentation";
 import { describeError } from "../../describeError";
+import { FlowConnectorNodeEditor } from "./FlowConnectorNodeEditor";
 
 interface JsonSchema {
   type: "object" | "string" | "number" | "integer" | "boolean";
@@ -69,8 +71,10 @@ const EVIDENCE_LABELS: Record<EvidenceKind, string> = {
   frameRegionChanged: "Vùng màn hình đổi",
   qualifiedFramePredicate: "Vị ngữ khung có kiểm định",
   accessibilityVisible: "Phần tử hiển thị",
+  elementVisible: "Phần tử kết quả xuất hiện",
   textReadBackEquals: "Văn bản đọc lại khớp",
   artifactDecodedAndHashed: "Tệp kết quả giải mã & băm",
+  connectorResult: "Kết quả và biên nhận kết nối",
 };
 
 function isJsonObject(value: JsonValue | undefined): value is JsonObject {
@@ -80,6 +84,15 @@ function isJsonObject(value: JsonValue | undefined): value is JsonObject {
 function titleFor(name: string): string {
   const known: Record<string, string> = {
     accessibilityId: "Mã trợ năng",
+    name: "Tên biến",
+    locator: "Phần tử cần đọc",
+    operator: "Phép so sánh",
+    message: "Thông điệp nhật ký",
+    variable: "Biến đính kèm (tùy chọn)",
+    source: "Biến đầu vào",
+    operation: "Cách xử lý",
+    path: "Đường dẫn JSON",
+    pattern: "Mẫu tìm kiếm",
     bundleId: "Mã ứng dụng",
     detectorId: "Mã bộ dò",
     durationMs: "Thời lượng (ms)",
@@ -107,6 +120,14 @@ function titleFor(name: string): string {
 }
 
 function optionLabel(name: string, option: string): string {
+  if (name === "operation") {
+    const labels: Record<string,string> = {trim:"Bỏ khoảng trắng hai đầu",lowercase:"Chữ thường",uppercase:"Chữ hoa",splitLines:"Tách dòng thành JSON",firstLine:"Lấy dòng đầu",jsonGet:"Lấy giá trị từ JSON",replace:"Thay chuỗi",regexExtract:"Trích theo biểu thức",joinLines:"Ghép các dòng"};
+    return labels[option] ?? option;
+  }
+  if (name === "operator") {
+    const labels: Record<string, string> = { equals: "Bằng", notEquals: "Khác", contains: "Chứa", startsWith: "Bắt đầu bằng", isEmpty: "Rỗng", notEmpty: "Có nội dung" };
+    return labels[option] ?? option;
+  }
   if (name === "preset") {
     if (option === "custom") return "Tùy chỉnh";
     if (option === "tiktokFeed") return "TikTok";
@@ -469,6 +490,8 @@ function defaultEvidence(
       return { kind, bundleId: stringConfig("bundleId") };
     case "frameDigestChanged":
       return { kind, minimumDistance: 1 };
+    case "elementVisible":
+      return {kind,selector:{package:"",text:""}};
     case "frameRegionChanged":
       return { kind, x: 0, y: 0, width: 1, height: 1, minimumDistance: 1 };
     case "qualifiedFramePredicate":
@@ -483,6 +506,7 @@ function defaultEvidence(
       };
     case "artifactDecodedAndHashed":
       return { kind };
+    case "connectorResult": return { kind, name: stringConfig("name") };
   }
 }
 
@@ -548,6 +572,7 @@ function EvidenceFields({
           <input type="text" readOnly value={postcondition.bundleId} />
         </label>
       )}
+      {postcondition?.kind === "connectorResult" && <p>Kết quả được đọc lại và ghi biên nhận vào biến <strong>{postcondition.name}</strong>.</p>}
       {postcondition?.kind === "frameDigestChanged" && (
         <FiniteEvidenceInput
           label="Khoảng cách tối thiểu"
@@ -585,6 +610,9 @@ function EvidenceFields({
           </select>
         </label>
       )}
+      {postcondition?.kind === "elementVisible" && <fieldset className="flow-field-group"><legend>Phần tử kết quả</legend>
+        {([['package','Ứng dụng'],['description','Mô tả'],['text','Chữ'],['resourceId','ID'],['className','Loại']] as const).map(([field,label])=><label className="flow-field" key={field}><span>{label}</span><input value={postcondition.selector[field]??''} onChange={event=>{const next={...postcondition.selector};if(event.target.value)next[field]=event.target.value;else delete next[field];onChange({kind:'elementVisible',selector:next});}}/></label>)}
+      </fieldset>}
       {postcondition?.kind === "accessibilityVisible" && (
         <label className="flow-field">
           <span>Mã trợ năng</span>
@@ -725,6 +753,8 @@ export function FlowInspector({
       const locator = locatorFromValue(config.readBackLocator);
       const value = typeof config.text === "string" ? config.text : "";
       onConfigChange(config, { kind: "textReadBackEquals", locator, value });
+    } else if (["fileWrite", "httpRequest", "sheetWrite"].includes(node.kind)) {
+      onConfigChange(config, { kind: "connectorResult", name: String(config.name ?? "") });
     } else {
       onConfigChange(config);
     }
@@ -809,6 +839,46 @@ export function FlowInspector({
   const renderConfigFields = () => {
     if (schema === null) return <p>Hành động này không có trường cấu hình.</p>;
     if (schema.type !== "object") throw new Error("UnsupportedFieldSchema");
+    if (node.kind === "tap" && isJsonObject(node.config.selector)) {
+      const selector = node.config.selector;
+      return <fieldset className="flow-field-group"><legend>Phần tử đã bắt thuộc tính</legend>
+        {([['package','Ứng dụng'],['description','Mô tả'],['text','Chữ'],['resourceId','ID'],['className','Loại']] as const).map(([field,label]) => <label className="flow-field" key={field}><span>{label}</span><input value={typeof selector[field]==='string'?selector[field]:''} onChange={event=>{const next={...selector};if(event.target.value)next[field]=event.target.value;else delete next[field];commitConfig({selector:next});}}/></label>)}
+        <p>Tìm lại đúng một phần tử trên giao diện hiện tại trước khi bấm.</p><FieldIssues issues={nodeIssues}/>
+      </fieldset>;
+    }
+
+    if (["fileRead", "fileWrite", "httpRequest", "sheetRead", "sheetWrite"].includes(node.kind)) {
+      return <FlowConnectorNodeEditor kind={node.kind} config={node.config} issues={nodeIssues} onChange={commitConfig} />;
+    }
+
+    if (node.kind === "ocrReadText") {
+      const selected = Array.isArray(node.config.languages) ? node.config.languages : ["vi", "en"];
+      return <>
+        <SchemaField name="name" schema={{ type: "string", title: "Biến lưu nội dung" }} value={node.config.name}
+          issues={issuesForField(nodeIssues, "name")} onChange={(value) => updateConfigField("name", value)} />
+        <SchemaField name="minConfidence" schema={{ type: "number", title: "Độ tin cậy tối thiểu", minimum: 0, maximum: 1 }}
+          value={node.config.minConfidence} issues={issuesForField(nodeIssues, "minConfidence")}
+          onChange={(value) => updateConfigField("minConfidence", value)} />
+        <fieldset className="flow-ocr-languages"><legend>Ngôn ngữ OCR</legend>
+          {([ ["vi", "Tiếng Việt"], ["en", "Tiếng Anh"] ] as const).map(([language, label]) => <label key={language}>
+            <input type="checkbox" checked={selected.includes(language)} onChange={(event) => updateConfigField("languages",
+              event.currentTarget.checked ? [...selected, language] : selected.filter((value) => value !== language))} />{label}
+          </label>)}
+        </fieldset>
+        <FieldIssues issues={issuesForField(nodeIssues, "languages")} />
+        <label><input type="checkbox" checked={isJsonObject(node.config.region)} onChange={(event) => {
+          const next = { ...node.config };
+          if (event.currentTarget.checked) next.region = { x0: 0, y0: 0, x1: 1, y1: 1 };
+          else delete next.region;
+          commitConfig(next);
+        }} />Giới hạn vùng đọc chữ</label>
+        {isJsonObject(node.config.region) && <SchemaField name="region" schema={{ type: "object", properties: Object.fromEntries(
+          ["x0", "y0", "x1", "y1"].map((key) => [key, { type: "number", minimum: 0, maximum: 1 }]),
+        ) }} value={node.config.region} issues={issuesForField(nodeIssues, "region")} onChange={(value) => updateConfigField("region", value)} />}
+        <p>Vùng dùng tỷ lệ từ 0 đến 1; cạnh phải và dưới lớn hơn cạnh trái và trên.</p>
+        <button type="button" disabled={!coordinateAvailable || pickerLoading !== null} onClick={() => void requestVisionFrame()}>Chụp ảnh kiểm tra OCR</button>
+      </>;
+    }
 
     if (node.kind === "tapVision" || node.kind === "ifVision") {
       const template =
@@ -1013,8 +1083,20 @@ export function FlowInspector({
       )}
       {visionFrame?.nodeId === node.id && (
         <section className="flow-coordinate-popover" aria-label="Chụp ảnh mẫu">
-          <FlowVisionCapture
+          {node.kind === "ocrReadText" ? <>
+            <OcrTool frame={visionFrame.frame}
+              minConfidence={typeof node.config.minConfidence === "number" ? node.config.minConfidence : 0.7}
+              languages={(Array.isArray(node.config.languages) ? node.config.languages : ["vi", "en"]).filter((value): value is "vi" | "en" => value === "vi" || value === "en")}
+              roi={isJsonObject(node.config.region) ? {
+                x: Math.floor(Number(node.config.region.x0) * visionFrame.frame.imageWidth),
+                y: Math.floor(Number(node.config.region.y0) * visionFrame.frame.imageHeight),
+                width: Math.ceil(Number(node.config.region.x1) * visionFrame.frame.imageWidth) - Math.floor(Number(node.config.region.x0) * visionFrame.frame.imageWidth),
+                height: Math.ceil(Number(node.config.region.y1) * visionFrame.frame.imageHeight) - Math.floor(Number(node.config.region.y0) * visionFrame.frame.imageHeight),
+              } : null} />
+            <button type="button" onClick={() => setVisionFrame(null)}>Đóng kiểm tra OCR</button>
+          </> : <FlowVisionCapture
             frame={visionFrame.frame}
+            reviewBeforeCapture
             onCapture={(templatePngBase64, region) => {
               commitConfig({
                 ...node.config,
@@ -1024,7 +1106,7 @@ export function FlowInspector({
               setVisionFrame(null);
             }}
             onCancel={() => setVisionFrame(null)}
-          />
+          />}
         </section>
       )}
       {picker?.nodeId === node.id && (

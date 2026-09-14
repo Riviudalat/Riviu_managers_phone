@@ -1,6 +1,29 @@
 //! Durable, read-only recovery of a submitted post. Never re-enters the composer.
 use super::*;
 
+#[tauri::command]
+pub async fn publish_check_links(
+    state: State<'_, AppState>,
+    campaign_id: String,
+    udid: Option<String>,
+) -> Result<serde_json::Value, CommandError> {
+    let _admission = state.ensure_accepting_work()?;
+    let rows = state
+        .db
+        .publish_verifications_for_campaign(&campaign_id, 1000)
+        .map_err(preflight::err)?;
+    let mut outcomes = Vec::new();
+    for row in rows
+        .into_iter()
+        .filter(|row| udid.as_ref().is_none_or(|id| id == &row.udid))
+    {
+        let result =
+            verify_pending_assignment(&state.control, &state.db, &state.events, &row).await;
+        outcomes.push(serde_json::json!({"assignmentId":row.assignment_id,"udid":row.udid,"verified":matches!(result,Ok(true)),"error":result.err().map(|e|e.to_string())}));
+    }
+    Ok(serde_json::json!({"campaignId":campaign_id,"outcomes":outcomes}))
+}
+
 #[derive(Debug)]
 pub(super) struct VerificationObservation {
     pub code: &'static str,
@@ -41,7 +64,8 @@ pub(crate) async fn verify_pending_assignment(
         .iter()
         .find(|b| b.id == candidate.bundle_id)
         .context("bundle missing")?;
-    let capture = execution::capture_confirmed_assignment_link(control, assignment, bundle).await;
+    let capture =
+        execution::capture_confirmed_assignment_link(db, control, assignment, bundle).await;
     match capture {
         Ok(captured) => {
             let link = captured.url;
@@ -53,6 +77,8 @@ pub(crate) async fn verify_pending_assignment(
                 &link,
             );
             evidence["verificationDiagnostic"] = captured.diagnostic;
+            let expanded =
+                evidence["verificationDiagnostic"]["stage"] == "expandedPhotoPublicProof";
             let post = if evidence.get("post").is_some() {
                 &mut evidence["post"]
             } else {
@@ -60,7 +86,11 @@ pub(crate) async fn verify_pending_assignment(
             };
             post["publicationVerified"] = serde_json::json!(true);
             post["state"] = serde_json::json!("posted");
-            post["verificationMethod"] = serde_json::json!("ownProfileCaptionAndCanonicalLink");
+            post["verificationMethod"] = if expanded {
+                serde_json::json!("expandedPhotoCaptionCanonicalPublicMetadata")
+            } else {
+                serde_json::json!("ownProfileCaptionAndCanonicalLink")
+            };
             let changed = db.record_verified_publish_with_sheet_row(
                 candidate,
                 &evidence.to_string(),

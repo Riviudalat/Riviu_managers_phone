@@ -20,6 +20,7 @@ export function defaultConfigForAction(kind: ActionKind): JsonObject {
     case "start":
     case "end":
     case "home":
+    case "join":
       return {};
     case "launchApp":
     case "terminateApp":
@@ -50,6 +51,26 @@ export function defaultConfigForAction(kind: ActionKind): JsonObject {
       return { label: "screenshot", format: "jpeg" };
     case "assertVisible":
       return { accessibilityId: "" };
+    case "ifVisible":
+      return { locator: { strategy: "accessibilityId", value: "" } };
+    case "readText":
+      return { name: "observedText", locator: { strategy: "accessibilityId", value: "" } };
+    case "setVariable":
+      return { name: "message", value: "" };
+    case "ifValue":
+      return { name: "observedText", operator: "equals", value: "" };
+    case "log":
+      return { message: "Đã đến bước này", variable: "" };
+    case "copyVariable": return { name: "output", source: "input" };
+    case "transform": return { name: "result", source: "input", operation: "trim" };
+    case "subflow": return { document: newFlowDocument("Flow con") as unknown as JsonObject, inputs: {}, outputs: {} };
+    case "repeat": return { document: newFlowDocument("Nội dung vòng lặp") as unknown as JsonObject, count: 2, inputs: {}, outputs: {} };
+    case "ocrReadText": return { name: "ocrText", languages: ["vi", "en"], minConfidence: 0.5 };
+    case "fileRead": return { name: "fileContent", path: "input.txt", format: "text" };
+    case "fileWrite": return { name: "writtenContent", path: "output.txt", format: "text", value: "" };
+    case "httpRequest": return { name: "response", url: "", method: "GET", timeoutMs: 10000 };
+    case "sheetRead": return { name: "cells", spreadsheetUrl: "", tab: "Sheet1", range: "A1:B2" };
+    case "sheetWrite": return { name: "writtenCells", spreadsheetUrl: "", tab: "Sheet1", range: "A1:B1", values: '[["", ""]]' };
     case "tapVision":
     case "ifVision":
       return { templatePngBase64: "", threshold: 0.85 };
@@ -70,7 +91,7 @@ export function createFlowNode(
     kind,
     position: { ...position },
     config: defaultConfigForAction(kind),
-    postcondition: null,
+    postcondition: ["fileWrite", "httpRequest", "sheetWrite"].includes(kind) ? { kind: "connectorResult", name: String(defaultConfigForAction(kind).name) } : null,
   };
 }
 

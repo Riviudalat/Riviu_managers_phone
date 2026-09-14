@@ -1,7 +1,7 @@
 {
   "name": "riviumanagersphone",
   "private": true,
-  "version": "0.2.31",
+  "version": "0.2.32",
   "type": "module",
   "engines": {
     "node": ">=20.19"
@@ -14,6 +14,7 @@
     "test:e2e": "playwright test",
     "test:mobile-mcp": "node --test ../../scripts/test_mobile_mcp.mjs",
     "mobile-mcp": "node ../../scripts/run_mobile_mcp.mjs",
+    "agent-mcp": "node ../../scripts/riviu_agent_mcp.mjs",
     "mobile-mcp:check": "node ../../scripts/run_mobile_mcp.mjs --check",
     "mobile-mcp:probe": "node scripts/mobile_mcp_probe.mjs",
     "preview": "vite preview",

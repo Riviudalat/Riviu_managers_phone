@@ -796,6 +796,43 @@ fn preflight_digest_binds_caption_target_and_observed_tiktok_build() {
 
     let mut changed_free_space = observations.clone();
     changed_free_space[0]["availableBytes"] = serde_json::json!(8192);
+    let mut same_language = observations.clone();
+    same_language[0]["locale"] = serde_json::json!("en-US");
+    let mut base_language = observations.clone();
+    base_language[0]["locale"] = serde_json::json!("en");
+    assert_eq!(
+        publish_preflight_digest(
+            &request,
+            &[bundle.clone()],
+            &target_snapshot,
+            &same_language
+        )
+        .unwrap(),
+        publish_preflight_digest(
+            &request,
+            &[bundle.clone()],
+            &target_snapshot,
+            &base_language
+        )
+        .unwrap()
+    );
+    same_language[0]["locale"] = serde_json::json!("vi-VN");
+    assert_ne!(
+        publish_preflight_digest(
+            &request,
+            &[bundle.clone()],
+            &target_snapshot,
+            &same_language
+        )
+        .unwrap(),
+        publish_preflight_digest(
+            &request,
+            &[bundle.clone()],
+            &target_snapshot,
+            &base_language
+        )
+        .unwrap()
+    );
     let changed_free_space_digest = publish_preflight_digest(
         &request,
         std::slice::from_ref(&bundle),

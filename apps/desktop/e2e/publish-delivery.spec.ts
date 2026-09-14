@@ -1,3 +1,4 @@
+import { openOperatorPage } from "./fixtures/operatorNavigation";
 import { expect, test } from "@playwright/test";
 import { installTauriMock } from "./fixtures/tauriMock";
 
@@ -42,7 +43,7 @@ for (const width of [1440, 820]) {
 
     const openMonitor = async () => {
       await page.goto("/");
-      await page.getByRole("button", { name: "Đăng bài", exact: true }).click();
+      await openOperatorPage(page, 'Đăng bài');
       await page.getByRole("tab", { name: "Theo dõi", exact: true }).click();
       await page.getByRole("button", { name: "Chi tiết máy", exact: true }).click();
       await page.evaluate(() => document.fonts.ready);

@@ -126,10 +126,8 @@ async fn observe(
             !account.trim().is_empty(),
             "comment_verification_account_missing"
         );
-        session
-            .open_url_in_app(&job.context.target.normalized_url, &package)
-            .await?;
-        tokio::time::sleep(Duration::from_millis(900)).await;
+        // The exact-target resolver owns URL dispatch and readiness. Dispatching
+        // here too can interrupt the first load and replace it with the feed.
         crate::interaction_hierarchy::open_exact_target_by_hierarchy(
             session.as_ref(),
             labels,
@@ -176,7 +174,7 @@ async fn observe(
         Ok::<_, anyhow::Error>((found.identity, found.snapshot, png))
     };
     let remaining =
-        (job.deadline_ms - chrono::Utc::now().timestamp_millis()).clamp(1, 45000) as u64;
+        (job.deadline_ms - chrono::Utc::now().timestamp_millis()).clamp(1, 75000) as u64;
     let result = tokio::select! {
         r=tokio::time::timeout(Duration::from_millis(remaining),result)=>r.context("comment_verification_timeout").and_then(|r|r),
         _=async {while !stop.load(Ordering::Relaxed){tokio::time::sleep(Duration::from_millis(50)).await}}=>Err(anyhow::anyhow!("comment_verification_stopped"))

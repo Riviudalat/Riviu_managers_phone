@@ -168,6 +168,96 @@ pub async fn observe_own_account(
     Ok(before.filter(|handle| Some(handle) == after.as_ref()))
 }
 
+/// Read the own header, recovering a collapsed profile only inside its observed
+/// scroll container. The S8 Trill 38.3.2 snapshots from 14/09 show Edit profile
+/// still visible while :id/mjf/@handle is above the viewport after grid browsing.
+pub async fn restore_own_profile_header(
+    session: &dyn UiSession,
+    labels: TikTokControls,
+) -> anyhow::Result<Option<String>> {
+    for attempt in 0..=3 {
+        if let Some(dismiss) = labels.label(crate::tiktok_labels::TikTokControl::DialogDismiss) {
+            let tree = crate::ui_automation::tree::Tree::parse(
+                session.hierarchy_source_snapshot().await?,
+            )?;
+            let controls = tree.matching(labels.package(), dismiss.to_query());
+            if let [index] = controls.as_slice() {
+                let button = tree.nodes[*index]
+                    .rect()
+                    .filter(|r| r.enabled && r.clickable)
+                    .ok_or_else(|| anyhow::anyhow!("profile dialog dismiss not actionable"))?;
+                session.tap(button.centre()).await?;
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            }
+        }
+        if let Some(account) = observe_own_account(session, labels).await? {
+            return Ok(Some(account));
+        }
+        if attempt == 3 {
+            break;
+        }
+        let tree =
+            crate::ui_automation::tree::Tree::parse(session.hierarchy_source_snapshot().await?)?;
+        let own = tree.nodes.iter().enumerate().any(|(i, n)| {
+            n.visible(labels.package())
+                && tree.ancestors_visible(i)
+                && matches!(n.attr("text"), "Edit profile" | "Edit" | "Sửa hồ sơ")
+        });
+        let profile_grid = labels
+            .post_tile_id()
+            .is_some_and(|label| !tree.matching(labels.package(), label.to_query()).is_empty());
+        // The header can be entirely outside the viewport. Scrolling an observed
+        // profile grid back up is navigation, not proof of its account ownership.
+        if !own && !profile_grid {
+            return Ok(None);
+        }
+        if attempt == 0 {
+            if let Some(home) = labels.label(crate::tiktok_labels::TikTokControl::HomeTab) {
+                if let Some(tab) = session.locate(home.to_query()).await? {
+                    session.tap(tab.centre()).await?;
+                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                }
+            }
+            if let Some(label) = labels.label(crate::tiktok_labels::TikTokControl::ProfileTab) {
+                if let Some(tab) = session.locate(label.to_query()).await? {
+                    session.tap(tab.centre()).await?;
+                    tokio::time::sleep(std::time::Duration::from_millis(350)).await;
+                    continue;
+                }
+            }
+        }
+        let area = tree
+            .nodes
+            .iter()
+            .enumerate()
+            .filter(|(i, n)| {
+                n.visible(labels.package())
+                    && tree.ancestors_visible(*i)
+                    && n.attr("scrollable") == "true"
+            })
+            .filter_map(|(_, n)| n.rect())
+            .max_by(|a, b| (a.width * a.height).total_cmp(&(b.width * b.height)));
+        let Some(area) = area else {
+            return Ok(None);
+        };
+        session
+            .swipe(crate::SwipeGesture {
+                from: crate::TapPoint {
+                    x: area.x + area.width * 0.5,
+                    y: area.y + area.height * 0.55,
+                },
+                to: crate::TapPoint {
+                    x: area.x + area.width * 0.5,
+                    y: area.y + area.height * 0.93,
+                },
+                duration_ms: 650,
+            })
+            .await?;
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    }
+    Ok(None)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

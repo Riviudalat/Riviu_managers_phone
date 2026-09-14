@@ -1,21 +1,30 @@
 # Hợp đồng UI và ma trận tham chiếu
 
 Thiết kế hiện tại: shell trắng, nền trung tính `#F5F6F8`, primary
-cam `#C2410C`; control 36 px, body 14 px, chữ phụ 13 px, chú thích tối thiểu 12 px,
+cam Riviu `#C2410C`; control 36 px, body 14 px, chữ phụ 13 px, chú thích tối thiểu 12 px,
 heading trang 20 px. Noto Sans/Noto Sans Mono đóng gói cùng app. Control bo 6 px,
 panel bo 8 px; khoảng cách theo thang 4/8/12/16/24 px. Giữ Tauri/React/Rust,
 tile/canvas, mật độ và cử chỉ thiết bị. Không toast nổi; trạng thái ở cạnh hành động,
 monitor nguồn và ActivityCenter. Đây là tiêu chí triển khai, không tự xác nhận mọi
 màn hình đã vượt cổng screenshot/accessibility.
 
-Sidebar giữ 12 chức năng và bốn nhóm, rộng 240 px, thu gọn 64 px ở viewport
-không quá 1024 px. Header cao tối thiểu 56 px, trạng thái có nhãn **Toàn hệ thống**;
+Sidebar cố định 196 px (184 px trên màn hẹp); tiêu đề nhóm ẩn/hiện các mục bên trong,
+không thu toàn sidebar thành icon. Automation có ba trang Nuôi TikTok, Tương tác,
+Đăng bài cùng My Apps, Lượt chạy, Tác vụ đã lưu và Flow thiết bị. Header cao tối thiểu 56 px, trạng thái có nhãn **Toàn hệ thống**;
 máy thực hiện của mỗi workspace là một phạm vi riêng. Mỗi vùng có một hành động
 chính màu cam, thao tác phụ trung tính. **Bảo trì → Sửa Riviu Agent** tách khỏi
 các lệnh mở máy/đồng bộ. Quét thiết bị xuất hiện tại toolbar Thiết bị hoặc header
 của trang khác, không lặp trong cùng một màn hình.
 
 Modal và drawer giữ focus, Escape đóng lớp đang thao tác, đóng trả focus về nút mở.
+Các cửa sổ điện thoại là non-modal: không phủ tối, không giữ Tab bên trong;
+chọn được máy và trang khác khi cửa sổ đang mở. Một cửa sổ phóng to dùng lại khi đổi
+máy, trả phiên cũ trước khi mở phiên mới. Menu/confirm vẫn ở trên. Chất lượng và FPS
+Android chỉnh trực tiếp tại rail; hover bung bảng nổi, ghim giữ bảng cạnh lưới, nhóm
+bung/thu số máy bên trong. Dropdown dùng chung nền trắng, viền trung tính, option
+hover/đã chọn màu cam nhạt, dấu chọn và menu cuộn, chuyển động 180–200 ms.
+My Apps dùng bảng ứng dụng gọn. Mở ứng dụng vào trang vận hành cũ; Thêm Flow mở editor
+riêng với thư viện hành động bên trái, canvas chính, cấu hình và thiết bị bên phải.
 Monitor tiến trình vẫn không modal và hoạt động xuyên trang. Bảng có cuộn riêng;
 thanh hành động và nút chạy nằm trong viewport ở kích thước laptop. Chuyển màu nhẹ
 120–180 ms, không hiệu ứng lặp trang trí; hỗ trợ giảm chuyển động.

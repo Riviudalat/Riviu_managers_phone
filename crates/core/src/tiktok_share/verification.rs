@@ -9,7 +9,7 @@ use tokio::time::Instant;
 const CONTRACT_VERSION: u32 = 1;
 const RECOVERY_WINDOW: Duration = Duration::from_secs(60);
 const CAPTURE_WINDOW: Duration = Duration::from_secs(180);
-const MAX_RECOVERY_ACTIONS: u32 = 3;
+const MAX_RECOVERY_ACTIONS: u32 = 5;
 const MAX_CANDIDATES: u32 = 12;
 const MAX_VIEWPORTS: u32 = 3;
 
@@ -150,6 +150,7 @@ pub enum VerificationReason {
     LoginRequired,
     UnknownScreen,
     AccountMismatch,
+    AccountUnreadable,
     CaptionMissing,
     CaptionAmbiguous,
     CaptionMismatch,
@@ -189,6 +190,7 @@ impl VerificationReason {
             Self::LoginRequired => "loginRequired",
             Self::UnknownScreen => "unknownScreen",
             Self::AccountMismatch => "accountMismatch",
+            Self::AccountUnreadable => "accountUnreadable",
             Self::CaptionMissing => "captionMissing",
             Self::CaptionAmbiguous => "captionAmbiguous",
             Self::CaptionMismatch => "captionMismatch",
@@ -228,6 +230,7 @@ impl VerificationReason {
             Self::LoginRequired => "TikTok đang yêu cầu đăng nhập; cần mở lại đúng tài khoản trước khi kiểm tra liên kết.",
             Self::UnknownScreen => "Màn hình hiện tại chưa được nhận diện; chưa điều hướng hoặc bấm Back.",
             Self::AccountMismatch => "Tài khoản trên hồ sơ hoặc trong liên kết chưa khớp tài khoản ghi nhận trước Đăng.",
+            Self::AccountUnreadable => "Chưa đọc được tên tài khoản trên đầu trang Hồ sơ; chưa kết luận tài khoản bị đổi.",
             Self::CaptionMissing => "Không đọc được caption của bài đang mở; chưa đủ bằng chứng chọn bài này.",
             Self::CaptionAmbiguous => "Cây giao diện có nhiều caption cùng lúc; chưa xác định được nội dung thuộc bài đang mở.",
             Self::CaptionMismatch => "Caption của bài đang mở khác nội dung đã duyệt cho lượt đăng.",
@@ -277,6 +280,7 @@ pub struct VerificationDiagnostic {
     pub navigation_enabled: usize,
     pub navigation_clickable: usize,
     pub screen_state: String,
+    pub expanded_photo_error: Option<String>,
 }
 
 #[derive(Debug)]
@@ -326,6 +330,24 @@ fn classify(tree: &Tree, plan: &PublishVerificationPlan) -> Screen {
     if has(TikTokControl::DialogDismiss) {
         return Screen::Dialog;
     }
+    if package == "com.ss.android.ugc.trill"
+        && has(TikTokControl::Comments)
+        && has(TikTokControl::Share)
+        && !tree
+            .matching(package, ElementQuery::ResourceIdSuffix(":id/desc"))
+            .is_empty()
+        && !tree
+            .matching(
+                package,
+                ElementQuery::Description {
+                    value: "Back",
+                    exact: true,
+                },
+            )
+            .is_empty()
+    {
+        return Screen::Post;
+    }
     if tree.copy_control(package).is_err() || tree.copy_control(package).ok().flatten().is_some() {
         return Screen::Share;
     }
@@ -372,10 +394,39 @@ fn classify(tree: &Tree, plan: &PublishVerificationPlan) -> Screen {
     if has(TikTokControl::ProfileTab) || has(TikTokControl::FeedTab) {
         return Screen::Feed;
     }
+    // Global 46.2.1 own photo viewer, 14/09/2026, machine 12: :id/rs_ caption,
+    // bottom Comments + Share controls, no profile tab. It is a post surface from
+    // which Back is valid, even though full caption/time proof is not visible yet.
     if has(TikTokControl::Share)
         && !tree
             .matching(package, ElementQuery::ResourceIdSuffix(plan.caption_id))
             .is_empty()
+    {
+        return Screen::Post;
+    }
+    if tree
+        .nodes
+        .iter()
+        .any(|n| n.visible(package) && n.attr("content-desc") == "Share")
+        && tree
+            .nodes
+            .iter()
+            .any(|n| n.visible(package) && n.attr("content-desc") == "Comments")
+        && tree
+            .nodes
+            .iter()
+            .any(|n| n.visible(package) && n.attr("resource-id").ends_with(":id/rs_"))
+    {
+        return Screen::Post;
+    }
+    if tree
+        .nodes
+        .iter()
+        .any(|n| n.visible(package) && n.attr("resource-id").ends_with(":id/m3q"))
+        && tree
+            .nodes
+            .iter()
+            .any(|n| n.visible(package) && n.attr("resource-id").ends_with(":id/m3h"))
     {
         return Screen::Post;
     }
@@ -437,10 +488,21 @@ impl Capture<'_> {
         Ok(tree)
     }
 
-    async fn account(&self) -> Result<(), VerificationReason> {
-        let observed = crate::tiktok_account::observe_own_account(self.session, self.plan.labels)
-            .await
-            .map_err(|_| VerificationReason::ReadFailed)?;
+    async fn account(&self, restoring: bool) -> Result<(), VerificationReason> {
+        let observed = if restoring {
+            crate::tiktok_account::observe_own_account(self.session, self.plan.labels).await
+        } else {
+            crate::tiktok_account::restore_own_profile_header(self.session, self.plan.labels).await
+        }
+        .map_err(|_| VerificationReason::ReadFailed)?;
+        // Initial header proof is mandatory. Later grid scrolls may hide that
+        // header; preserve their position. Canonical URL still must match account.
+        if observed.is_none() && restoring {
+            return Ok(());
+        }
+        if observed.is_none() {
+            return Err(VerificationReason::AccountUnreadable);
+        }
         if !observed.as_deref().is_some_and(|account| {
             account.eq_ignore_ascii_case(self.identity.account.trim_start_matches('@'))
         }) {
@@ -459,7 +521,7 @@ impl Capture<'_> {
             let screen = classify(&tree, self.plan);
             self.diagnostic.screen_state = format!("{screen:?}");
             if screen == Screen::Profile {
-                self.account().await?;
+                self.account(restoring).await?;
                 let fresh = self.read().await?;
                 if classify(&fresh, self.plan) == Screen::Profile {
                     return Ok(fresh);
@@ -552,7 +614,8 @@ impl Capture<'_> {
                 last_screen = Some(screen);
                 last_action_at = Some(Instant::now());
             } else if matches!(screen, Screen::Post | Screen::Share)
-                && last_screen.as_ref() != Some(&screen)
+                && (last_screen.as_ref() != Some(&screen)
+                    || last_action_at.is_some_and(|at| at.elapsed() >= Duration::from_secs(5)))
             {
                 // Back only from a proved post detail/share surface, never a
                 // composer, arbitrary activity, or unlabelled screen.
@@ -561,6 +624,7 @@ impl Capture<'_> {
                     .await
                     .map_err(|_| VerificationReason::ReadFailed)?;
                 last_screen = Some(screen);
+                last_action_at = Some(Instant::now());
                 actions += 1;
                 self.diagnostic.navigation_actions += 1;
             }
@@ -611,11 +675,24 @@ impl Capture<'_> {
         if normalize(visible) != normalize(self.caption) {
             // A matching prefix is only permission to inspect a caption's own
             // expansion control, never proof of this publication's identity.
-            return Err(if visible_caption_matches(visible, self.caption) {
-                VerificationReason::CaptionTruncated
-            } else {
-                VerificationReason::CaptionMismatch
-            });
+            // A short ellipsized prefix authorizes ONLY opening the caption.
+            // Trill S8 38.3.2 (14/09) truncates at ~55 chars, below the legacy
+            // 64-char matching threshold. Full text equality is still required.
+            let expansion_prefix = normalize(visible);
+            let short_prefix = ["...", "…"]
+                .iter()
+                .find_map(|suffix| expansion_prefix.strip_suffix(suffix))
+                .map(str::trim_end)
+                .is_some_and(|prefix| {
+                    prefix.chars().count() >= 20 && normalize(self.caption).starts_with(prefix)
+                });
+            return Err(
+                if visible_caption_matches(visible, self.caption) || short_prefix {
+                    VerificationReason::CaptionTruncated
+                } else {
+                    VerificationReason::CaptionMismatch
+                },
+            );
         }
         let [time] = times.as_slice() else {
             return Err(if times.is_empty() {
@@ -665,7 +742,7 @@ impl Capture<'_> {
                     }
                     self.caption_expanded = true;
                     self.session
-                        .tap(button.centre())
+                        .activate_element(ElementQuery::ResourceIdSuffix(self.plan.caption_id))
                         .await
                         .map_err(|_| VerificationReason::ReadFailed)?;
                     tokio::time::sleep(POLL).await;
@@ -787,6 +864,20 @@ impl Capture<'_> {
     }
 
     async fn capture(&mut self) -> Result<String, VerificationReason> {
+        match super::capture_expanded_photo_link(
+            self.session,
+            self.plan.labels.package(),
+            self.caption,
+            self.identity,
+        )
+        .await
+        {
+            Ok(link) => {
+                self.diagnostic.stage = "expandedPhotoPublicProof";
+                return Ok(link);
+            }
+            Err(error) => self.diagnostic.expanded_photo_error = Some(error.to_string()),
+        }
         self.diagnostic.stage = "profile";
         let mut tree = self.profile(false).await?;
         let mut last_reason = VerificationReason::PostNotVisible;
@@ -851,6 +942,29 @@ impl Capture<'_> {
                         }
                     }
                     Err(reason) => {
+                        if matches!(
+                            reason,
+                            VerificationReason::CaptionMissing
+                                | VerificationReason::TimestampMissing
+                                | VerificationReason::CaptionTruncated
+                        ) {
+                            match super::capture_expanded_photo_link(
+                                self.session,
+                                self.plan.labels.package(),
+                                self.caption,
+                                self.identity,
+                            )
+                            .await
+                            {
+                                Ok(link) => {
+                                    self.diagnostic.stage = "expandedPhotoPublicProof";
+                                    return Ok(link);
+                                }
+                                Err(error) => {
+                                    self.diagnostic.expanded_photo_error = Some(error.to_string())
+                                }
+                            }
+                        }
                         if !matches!(
                             reason,
                             VerificationReason::CaptionMismatch
@@ -942,6 +1056,7 @@ pub async fn capture_submission_link(
             candidates_visited: 0,
             viewports_visited: 0,
             copy_attempts: 0,
+            expanded_photo_error: None,
             elapsed_ms: 0,
             navigation_matches: 0,
             navigation_enabled: 0,

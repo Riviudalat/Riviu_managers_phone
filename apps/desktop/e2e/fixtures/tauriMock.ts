@@ -1,9 +1,11 @@
+import appFixtures from "./app-workflows.json" with { type: "json" };
 import type { Page } from "@playwright/test";
 import type { OperationRunDetail } from "../../src/types";
 
 export type MockRunMode = "succeeded" | "uncertainTap" | "runningWait";
 
 export interface TauriMockOptions {
+  appFixtures?: typeof appFixtures;
   initialRunMode?: MockRunMode;
   /** Dedicated Android roster for Android-specific operator surfaces. */
   androidRoster?: boolean;
@@ -794,6 +796,11 @@ export async function installTauriMock(
       totalComments: 0,
     }));
     commandHandlers.set("automation_list", () => []);
+    commandHandlers.set("app_workflow_list", () => []);
+    commandHandlers.set("app_workflow_template", args => clone(fixtureOptions.appFixtures![args.kind as keyof typeof appFixtures].document));
+    commandHandlers.set("app_workflow_catalog", args => clone(fixtureOptions.appFixtures![args.kind as keyof typeof appFixtures].catalog));
+    commandHandlers.set("operator_list", () => []);
+
     commandHandlers.set("automation_schedule_list", () => []);
     commandHandlers.set("orchestration_list", () => []);
     commandHandlers.set("orchestration_list_runs", () => {
@@ -834,6 +841,13 @@ export async function installTauriMock(
     // The Settings panel can now write these, and `invoke` throws for anything unregistered.
     commandHandlers.set("set_stream_settings", (args) => clone(args?.settings ?? null));
     commandHandlers.set("flow_action_catalog", () => clone(catalog));
+    commandHandlers.set("gui_service_status", () => ({
+      config: { enabled: true, baseUrl: "", model: "", maxRequests: 20 },
+      running: false,
+      providerReady: false,
+      protocolVersion: 1,
+      lastError: null,
+    }));
     commandHandlers.set("flow_list", () => {
       const seen = new Set<string>();
       return [...state.revisions].reverse().flatMap((revision) => {
@@ -1306,7 +1320,7 @@ export async function installTauriMock(
         persist();
       },
     };
-  }, options);
+  }, { ...options, appFixtures });
 }
 
 export async function setNextRunMode(page: Page, mode: MockRunMode): Promise<void> {

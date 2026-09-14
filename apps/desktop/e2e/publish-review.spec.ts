@@ -1,3 +1,4 @@
+import { openOperatorPage } from "./fixtures/operatorNavigation";
 import { expect, test } from "@playwright/test";
 import AxeBuilder from "@axe-core/playwright";
 import { installTauriMock } from "./fixtures/tauriMock";
@@ -35,7 +36,7 @@ for (const width of [1440, 820]) {
       };
     });
     await page.goto("/");
-    await page.getByRole("button", { name: "Đăng bài", exact: true }).click();
+    await openOperatorPage(page, 'Đăng bài');
     await page.getByRole("tab", { name: "Theo dõi", exact: true }).click();
     await expect(page.getByText("Cần kiểm tra bài đăng", { exact: true })).toBeVisible();
     await expect(page.getByRole("button", { name: "Chạy lại từ đầu", exact: true })).toHaveCount(0);

@@ -16,7 +16,7 @@ import {
   listDeviceWorkStates,
   refreshDevices,
   saveGroup,
-  viewSetPreset,
+  setScreenRotation,
 } from "./api";
 import { startDevicePreview, startFleetPreview } from "./startPreview";
 import { summarizeBulkRepair } from "./agentStatus";
@@ -32,7 +32,6 @@ import { OperationSourceDetail } from "./components/OperationSourceDetail";
 import { OperationProgressCenter } from "./features/operations/OperationProgressCenter";
 import { DeviceTile } from "./components/DeviceTile";
 import { FilterToolbar, type ViewMode } from "./components/FilterToolbar";
-import { GroupTabs } from "./components/GroupTabs";
 import { DeviceContextMenu } from "./components/DeviceContextMenu";
 import { DeviceFilesPopup } from "./components/DeviceFilesPopup";
 import type { DeviceMenuNode } from "./deviceMenu";
@@ -47,11 +46,11 @@ import { DeviceDetailsDrawer } from "./components/DeviceDetailsDrawer";
 import { FleetDiagnosticsPage } from "./components/FleetDiagnosticsPage";
 import { ALL_DEVICES_TAB, devicesInTab, groupTabs, withDeviceAdded } from "./deviceGroups";
 import { FocusStream } from "./components/FocusStream";
+import { useDeviceWindows } from "./components/useDeviceWindows";
 import { IconPhone, IconRefresh } from "./components/Icons";
 import { Banner, EmptyState, LoadingState } from "./components/States";
 import { AutomationWorkspace } from "./components/AutomationWorkspace";
-import { DeviceAutomationBar, DeviceAutomationLayoutButton } from "./features/devices/DeviceAutomationBar";
-import { isDeviceAutomation, type DeviceAutomation } from "./features/devices/deviceAutomation";
+import { isDeviceAutomation } from "./features/devices/deviceAutomation";
 import { JobsPanel } from "./components/JobsPanel";
 import { GroupManagerPopup } from "./components/GroupManagerPopup";
 import { GroupToolsPopup } from "./components/GroupToolsPopup";
@@ -59,6 +58,11 @@ import { MacroRecordingBar } from "./components/MacroRecordingBar";
 import { stopRecording } from "./macroStore";
 import { ProfileToolbar } from "./components/ProfileToolbar";
 import { SettingsPanel } from "./components/SettingsPanel";
+import { MyAppsPage } from "./pages/MyAppsPage";
+import { OperatorRecordsPage } from "./pages/OperatorRecordsPage";
+import { OperatorSchedulesPage } from "./pages/OperatorSchedulesPage";
+import { SavedTasksPage } from "./pages/SavedTasksPage";
+import { ControlCenterRail } from "./components/ControlCenterRail";
 import { Sidebar } from "./components/Sidebar";
 import { TargetSelector } from "./components/TargetSelector";
 import { PageHeader, StatusChip } from "./components/WorkspacePrimitives";
@@ -77,7 +81,6 @@ import type { DeviceInfo, DeviceWorkOwner, PageId, TargetRef } from "./types";
 import { MoreHorizontal } from "lucide-react";
 import { MENU_ICONS } from "./components/menuIcons";
 import { loadZoom, stepZoom, storeZoom, TILE_ZOOM, wheelWantsZoom } from "./zoom";
-import { useMediaQuery } from "./useMediaQuery";
 import { operationSourcePage, type OperationSourceRef } from "./operationSource";
 import "./App.css";
 
@@ -92,13 +95,15 @@ const OrchestrationWorkspace = lazy(async () => {
 });
 
 const PAGE_TITLE: Partial<Record<PageId, string>> = {
+  accounts: "Quản lý tài khoản", networks: "Mạng & Router", schedules: "Lịch chạy", savedTasks: "Tác vụ đã lưu", help: "Trợ giúp",
+  myApps: "My Apps",
   control: "Thiết bị",
   nurture: "Nuôi TikTok",
   interaction: "Tương tác",
   material: "Kho nội dung",
   apps: "Trung tâm ứng dụng",
   scripts: "Flow",
-  jobs: "Tác vụ",
+  jobs: "Lượt chạy",
   publish: "Đăng bài",
   diagnostics: "Chẩn đoán",
   data: "Dữ liệu",
@@ -113,7 +118,6 @@ type DeviceWorkOwnerProjection =
 
 type NavigationIntent =
   | { kind: "page"; value: PageId; clearOperationSource?: boolean }
-  | { kind: "deviceAutomation"; value: DeviceAutomation | null }
   | {
       kind: "automationView";
       value: "device" | "orchestration";
@@ -125,10 +129,7 @@ function App() {
   const [operationSource, setOperationSource] = useState<OperationSourceRef>();
   const pageRef = useRef(page);
   pageRef.current = page;
-  const [deviceAutomation, setDeviceAutomation] = useState<DeviceAutomation | null>(null);
-  const deviceAutomationRef = useRef(deviceAutomation);
-  deviceAutomationRef.current = deviceAutomation;
-  const activeAutomation = isDeviceAutomation(page) ? page : page === "control" ? deviceAutomation : null;
+  const activeAutomation = isDeviceAutomation(page) ? page : null;
   const activeAutomationRef = useRef(activeAutomation);
   activeAutomationRef.current = activeAutomation;
   const operationSourceRef = useRef(operationSource);
@@ -150,9 +151,7 @@ function App() {
     retryingStartup,
     retry: retryStartupAndResubscribe,
   } = useFleet();
-  const compactViewport = useMediaQuery("(max-width: 1024px)");
-  const [asideCollapsedOverride, setAsideCollapsedOverride] = useState<boolean | null>(null);
-  const asideCollapsed = asideCollapsedOverride ?? compactViewport;
+  const [connectionFilter,setConnectionFilter]=useState<"all"|"usb"|"wifi">("all");
   const [groupTab, setGroupTab] = useState<string>(ALL_DEVICES_TAB);
   const [tileMenu, setTileMenu] = useState<{ udid: string; x: number; y: number } | null>(null);
   const [adbFor, setAdbFor] = useDeviceSurface(devices, "bảng lệnh adb");
@@ -169,10 +168,20 @@ function App() {
   /// it was and nothing let the operator choose, so "máy chính" was a label for an accident.
   /// It is a property of the grid, set from the tile's own menu, and it lives here.
   const [controlCenter, setControlCenter] = useState<string | null>(null);
-  const [focusUdid, setFocusUdid] = useDeviceSurface(devices, "màn phóng to");
+  const deviceWindows = useDeviceWindows(devices);
+  const focusUdid = deviceWindows.activeUdid;
+  const overlayUdid = focusUdid;
+  const openDeviceWindow = deviceWindows.open;
+  const setFocusUdid = useCallback((udid: string | null) => {
+    const target = udid && groupMode && controlCenter && devices.some(device => device.udid === controlCenter) ? controlCenter : udid;
+    openDeviceWindow(target);
+  }, [openDeviceWindow, groupMode, controlCenter, devices]);
   const [viewMode, setViewMode] = useState<ViewMode>("window");
   const [settingsSection, setSettingsSection] = useState<"control" | "integration" | "maintenance" | undefined>();
   const [tileWidth, setTileWidth] = useState(() => loadZoom(TILE_ZOOM));
+  const [displayPinned, setDisplayPinned] = useState(() => {
+    try { return localStorage.getItem("riviu.control.displayPinned") === "true"; } catch { return false; }
+  });
   const [groupToolsView, setGroupToolsView] = useState<"closed" | "dialog" | "recording">("closed");
   const [macroSession, setMacroSession] = useState<{ udids: string[] } | null>(null);
   const closeGroupTools = useCallback(() => {
@@ -274,10 +283,8 @@ function App() {
         const drain = (async () => {
           while (pendingNavigationRef.current) {
             const pending = pendingNavigationRef.current;
-            const destination = pending.kind === "deviceAutomation" ? pending.value
-              : pending.kind === "page" && isDeviceAutomation(pending.value) ? pending.value
-              : pending.kind === "page" && pending.value === "control" ? deviceAutomationRef.current : null;
-            // Switching between the page and its dock preserves the same mounted editor.
+            const destination = pending.kind === "page" && isDeviceAutomation(pending.value) ? pending.value : null;
+            // Re-selecting the same workspace preserves its mounted editor.
             const retainsEditor = destination !== null && destination === activeAutomationRef.current
               && !(pending.kind === "page" && pending.clearOperationSource && operationSourceRef.current);
             if (!retainsEditor && hasWorkspaceDrafts()) {
@@ -304,11 +311,6 @@ function App() {
               if (latest.clearOperationSource) setOperationSource(undefined);
               pageRef.current = latest.value;
               setPage(latest.value);
-            } else if (latest.kind === "deviceAutomation") {
-              deviceAutomationRef.current = latest.value;
-              setDeviceAutomation(latest.value);
-              pageRef.current = "control";
-              setPage("control");
             } else {
               automationViewRef.current = latest.value;
               setAutomationView(latest.value);
@@ -349,8 +351,7 @@ function App() {
     [queueNavigation],
   );
 
-  const requestDeviceAutomation = useCallback((next: DeviceAutomation | null) =>
-    queueNavigation({ kind: "deviceAutomation", value: next }), [queueNavigation]);
+
 
   const openOperationSource = useCallback(async (source: OperationSourceRef) => {
     const destination = operationSourcePage(source);
@@ -453,7 +454,7 @@ function App() {
   // drops off USB, a number does not.
   const visibleDevices = useMemo(
     () =>
-      devicesInTab(orderedDevices, groups, groupTab).filter((device) =>
+      devicesInTab(orderedDevices, groups, groupTab).filter((device) => (connectionFilter==="all"||device.connection===connectionFilter) &&
         deviceMatchesFleetFilter(
           device,
           currentDeviceWorkOwner(device.udid),
@@ -465,6 +466,7 @@ function App() {
         ),
       ),
     [
+      connectionFilter,
       deviceSearch,
       deviceStatusFilter,
       deviceWorkOwnerReadState,
@@ -486,6 +488,10 @@ function App() {
     onCanvasMouseDown,
     band,
   } = useBoxSelection(devices, visibleDevices, page === "control" && viewMode === "window");
+  const selectDevice = (udid:string,additive:boolean) => {
+    onSelect(udid,additive);
+    if(!additive&&focusUdid&&focusUdid!==udid)setFocusUdid(udid);
+  };
   const hasVisibleDevices = visibleDevices.length > 0;
 
   // Wheel over the phone grid zooms the tiles. Registered by hand because
@@ -638,35 +644,6 @@ function App() {
     forgetDepartedViews(devices.map((device) => device.udid));
   }, [devices]);
 
-  // Ask for the overlay's own encode while it is open, and give it back on close.
-  //
-  // The overlay CSS-scales one shared stream, so without this it displays the tile encode
-  // -- 216x480 on this fleet -- across 400 to 760 px, a 1.8x to 3.5x upscale. The call
-  // existed and had no caller, which is why raising the overlay's resolution in an earlier
-  // commit changed nothing on a real phone.
-  //
-  // Keyed on the udid rather than on focusDevice: the memo produces a new object on every
-  // device poll, and restarting the encoder a few times a second is worse than a soft
-  // picture. Failure is deliberately swallowed to a log -- the tile encode still plays, so
-  // a phone that refuses the larger one should look worse, not stop.
-  //
-  // `focusDevice`, not `focusUdid`: with Sync on and a control centre designated, the
-  // overlay drives the control centre whichever tile was opened — that is what designating
-  // one means — so keying on `focusUdid` asked a phone nobody is watching for the larger
-  // encode and left the phone on screen at the tile preset. Its `.udid` rather than the
-  // object, for the reason above: the memo is a new object on every poll.
-  const overlayUdid = focusDevice?.udid ?? null;
-  useEffect(() => {
-    if (!overlayUdid) return;
-    void viewSetPreset(overlayUdid, "overlay").catch((error) => {
-      console.warn("overlay preset refused", error);
-    });
-    return () => {
-      void viewSetPreset(overlayUdid, "tile").catch(() => {
-        // The device may be gone -- that is often what closing the overlay means.
-      });
-    };
-  }, [overlayUdid]);
 
   const readyCount = useMemo(
     () => devices.filter((d) => d.wdaReady || d.status === "ready").length,
@@ -712,13 +689,11 @@ function App() {
     <div className="shell">
       <Sidebar
         page={page}
-        collapsed={asideCollapsed}
         selectedCount={selected.length}
         total={devices.length}
         readyCount={readyCount}
         groupMode={groupMode}
         onPage={(next) => void requestPage(next, true)}
-        onToggleCollapse={() => setAsideCollapsedOverride(!asideCollapsed)}
       />
 
       <div className="main-col">
@@ -767,7 +742,7 @@ function App() {
         <OperationProgressCenter deviceLabels={automationDeviceLabels} />
         <div
           ref={contentRef}
-          className={`content content-${page} ${page === "scripts" ? "content-flow" : ""} ${page === "control" && deviceAutomation ? "has-device-automation" : ""}`}
+          className={`content content-${page} ${page === "scripts" ? "content-flow" : ""}`}
         >
           {draftStorageError && <Banner tone="error">{draftStorageError}</Banner>}
           {bootError && (
@@ -822,7 +797,13 @@ function App() {
           )}
 
           {page === "control" && (
-            <section className="device-browser" aria-label="Danh sách và màn hình thiết bị">
+            <section className={`device-browser${displayPinned ? "" : " rail-unpinned"}`} aria-label="Danh sách và màn hình thiết bị">
+              <ControlCenterRail tileWidth={tileWidth} onTileWidth={setTileWidth} connection={connectionFilter} onConnection={setConnectionFilter}
+                pinned={displayPinned} onPinnedChange={next => { setDisplayPinned(next); try { localStorage.setItem("riviu.control.displayPinned", String(next)); } catch { /* optional preference */ } }}
+                groups={tabs.map(tab => ({ ...tab, udids: groups.find(group => group.id === tab.id)?.udids }))} group={groupTab} onGroup={setGroupTab}
+                machines={devices.map(d=>({id:d.udid,number:fleetNumberByUdid.get(d.udid)??1,name:tileName(d,metaMap.get(d.udid)),selected:selected.includes(d.udid)}))}
+                onSelect={id=>onSelect(id,true)} onSettings={()=>{setSettingsSection("control");void requestPage("settings");}}
+                onGroups={()=>setGroupsOpen(true)} onRotate={()=>void(async()=>{const targets=selectedDevices.filter(device=>device.platform==="android");if(!targets.length){pushToast("info","Chọn máy Android để xoay");return;}const results=await Promise.allSettled(targets.map(device=>setScreenRotation(device.udid,1)));const confirmed=results.filter(result=>result.status==="fulfilled"&&result.value===1).length;pushToast(confirmed===targets.length?"ok":"warn",`Đã xác nhận xoay ${confirmed}/${targets.length} máy`);})()}/>
               <div className="device-browser-toolbar">
               <ProfileToolbar
                 selected={selectedDevices}
@@ -922,7 +903,6 @@ function App() {
                 }}
               />
 
-              <DeviceAutomationBar value={deviceAutomation} onChange={requestDeviceAutomation} />
 
               {deviceWorkOwners.state === "error" && (
                 <Banner
@@ -941,11 +921,8 @@ function App() {
                 </Banner>
               )}
 
-              {/* One row, not two: tabs on the left, size and view mode on the right.
-                  The tab strip keeps its own horizontal scroll and the controls do not
-                  join it — otherwise the slider scrolls away with the tabs. */}
+              {/* The rail owns group selection; the dock keeps its compact tab strip. */}
               <div className="device-toolrow">
-                <GroupTabs tabs={tabs} active={groupTab} onSelect={setGroupTab} />
                 <div className="device-filters" role="search" aria-label="Lọc thiết bị">
                   <input
                     type="search"
@@ -1037,12 +1014,12 @@ function App() {
                           className={sel ? "selected" : ""}
                           tabIndex={0}
                           aria-label={`Máy ${machineNumber}, ${tileName(device, meta)}, ${statusLabel}${sel ? ", đã chọn" : ""}`}
-                          onClick={(e) => onSelect(device.udid, e.metaKey || e.ctrlKey)}
+                          onClick={(e) => selectDevice(device.udid, e.metaKey || e.ctrlKey)}
                           onKeyDown={(event) => {
                             if (event.target !== event.currentTarget) return;
                             if (event.key !== "Enter" && event.key !== " ") return;
                             event.preventDefault();
-                            onSelect(device.udid, event.metaKey || event.ctrlKey || event.shiftKey);
+                            selectDevice(device.udid, event.metaKey || event.ctrlKey || event.shiftKey);
                           }}
                           onDoubleClick={() => setFocusUdid(device.udid)}
                         >
@@ -1135,7 +1112,7 @@ function App() {
                       selected={selected.includes(device.udid)}
                       focused={overlayUdid === device.udid}
                       controlCenter={controlCenter === device.udid}
-                      onSelect={onSelect}
+                      onSelect={selectDevice}
                       onOpen={setFocusUdid}
                       onPrepare={(udid) => {
                         const device = devices.find((item) => item.udid === udid);
@@ -1228,6 +1205,7 @@ function App() {
               onSelectUdids={setSelected}
             />
           )}
+          {page === "myApps" && <MyAppsPage devices={devices} onOpenApp={(next) => void requestPage(next)}/>}
           {page === "scripts" && (
             <section className="automation-surface">
               {(operationSource?.kind === "flow" || operationSource?.kind === "orchestration") && (
@@ -1324,21 +1302,9 @@ function App() {
               deviceLabels={automationDeviceLabels}
             />
           )}
-          <section key="automation-workspace" id="device-automation-panel"
-            hidden={!activeAutomation}
-            className={`automation-host${page === "control" ? " is-docked" : ""}`}
-            role={page === "control" ? "tabpanel" : undefined}
-            aria-labelledby={page === "control" && activeAutomation ? `device-automation-${activeAutomation}` : undefined}>
+          <section key="automation-workspace" hidden={!activeAutomation} className="automation-host">
             {activeAutomation && <>
-              {page === "control" && <header className="device-automation-head">
-                <strong>{PAGE_TITLE[activeAutomation]}</strong>
-                <button type="button" className="ghost" disabled={!selected.length}
-                  onClick={() => workspaceScope.setTarget({ type: "explicit", udids: [...selected] })}>
-                  Dùng {selected.length} máy đã chọn
-                </button>
-                <DeviceAutomationLayoutButton docked onClick={() => void requestPage(activeAutomation)} />
-              </header>}
-              <AutomationWorkspace key={activeAutomation} kind={activeAutomation} docked={page === "control"} devices={devices} groups={groups}
+              <AutomationWorkspace key={activeAutomation} kind={activeAutomation} docked={false} devices={devices} groups={groups}
                 selected={selected} targetRef={workspaceScope.targetRef} targetUdids={workspaceScope.targetUdids}
                 onTargetRefChange={workspaceScope.setTarget} metas={metaMap} labels={automationDeviceLabels}
                 onSelectUdids={setSelected}
@@ -1346,6 +1312,11 @@ function App() {
             </>}
           </section>
           {page === "diagnostics" && <FleetDiagnosticsPage devices={devices} metas={metas} />}
+          {page === "accounts" && <OperatorRecordsPage kind="account" devices={devices} />}
+          {page === "networks" && <OperatorRecordsPage kind="network" devices={devices} />}
+          {page === "schedules" && <OperatorSchedulesPage />}
+          {page === "savedTasks" && <SavedTasksPage devices={devices} />}
+          {page === "help" && <section className="operator-help"><h2>Bắt đầu với Riviu Manager</h2><ol><li>Control Center: kết nối, chia nhóm và mở các cửa sổ điện thoại.</li><li>My Apps: mở ứng dụng, chỉnh cấu hình và quy trình từng bước.</li><li>Tác vụ đã lưu: giữ cấu hình và phạm vi máy để dùng lại.</li><li>Lịch chạy và Lượt chạy: đặt giờ và theo dõi kết quả từng thiết bị.</li></ol><button type="button" onClick={()=>void requestPage("diagnostics")}>Kiểm tra thiết bị</button><button type="button" onClick={()=>void requestPage("api")}>Tham chiếu API</button></section>}
           {page === "data" && <DataPage />}
           {page === "api" && <ApiPage onOpenSettings={() => {
             setSettingsSection("integration");
@@ -1390,23 +1361,30 @@ function App() {
         <DeviceFilesPopup device={menuFilesDevice} onClose={() => setFilesFor(null)} />
       )}
 
-      {focusDevice && (
+      {deviceWindows.openUdids.map((udid, windowOrder) => {
+        const device = devices.find(candidate => candidate.udid === udid);
+        if (!device) return null;
+        return (
         <FocusStream
-          device={focusDevice}
-          index={devices.findIndex((d) => d.udid === focusDevice.udid) + 1 || 1}
-          onClose={() => setFocusUdid(null)}
+          key="active-device-window"
+          device={device}
+          active={focusUdid === udid}
+          windowOrder={windowOrder}
+          onActivate={() => deviceWindows.activate(udid)}
+          index={fleetNumberByUdid.get(udid) ?? 1}
+          onClose={() => deviceWindows.close(udid)}
           groupUdids={selected}
-          groupMode={groupMode}
+          groupMode={groupMode && focusDevice?.udid === udid}
           // The same array `index` above is computed from, so the picker's numbering and the
           // header's cannot disagree about which phone is #3.
           devices={devices}
           onSelectDevice={setFocusUdid}
           // The same catalog the tile's right-click menu gets. Zooming into a phone is a
           // different *view* of it, not a smaller set of things you can do to it.
-          functions={tileActions(focusDevice)}
-          recordingControls={recordingControls}
+          functions={tileActions(device)}
+          recordingControls={focusUdid === udid ? recordingControls : null}
         />
-      )}
+      );})}
 
       {page === "control" && groupsOpen && (
         <GroupManagerPopup

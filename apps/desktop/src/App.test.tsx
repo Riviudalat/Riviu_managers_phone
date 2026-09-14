@@ -4,10 +4,18 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import App from "./App";
 import { resetConfirms } from "./confirmStore";
 import { resetToasts } from "./toastStore";
-import type { DeviceInfo, OperationRunSummary } from "./types";
+import type { DeviceInfo, OperationRunSummary, PageId } from "./types";
 import type { OperationSourceRef } from "./operationSource";
 import { useState, type ReactNode } from "react";
 import { useWorkspaceDraft } from "./workspaceDraft";
+
+// These tests exercise App's routing/draft contracts independently of navigation
+// presentation. Sidebar.test and native/E2E tests cover the shipped menu.
+vi.mock("./components/Sidebar",()=>({Sidebar:({onPage}:{onPage:(page:PageId)=>void})=><nav id="primary-navigation" aria-label="Điều hướng chính">{([
+ ["control","Thiết bị"],["nurture","Nuôi TikTok"],["interaction","Tương tác"],["publish","Đăng bài"],
+ ["scripts","Flow"],["jobs","Tác vụ"],["material","Kho nội dung"],["apps","Trung tâm ứng dụng"],
+ ["diagnostics","Chẩn đoán"],["data","Dữ liệu"],["api","API"],["settings","Cài đặt"]
+] as [PageId,string][]).map(([id,label])=><button key={id} onClick={()=>onPage(id)}>{label}</button>)}</nav>}));
 
 vi.mock("./api", () => ({
   agentBulkRepair: vi.fn(async () => []),
@@ -192,6 +200,7 @@ describe("operation source navigation", () => {
     vi.mocked(api.operationGetRun).mockResolvedValue({summary:run,items:[{id:"item-old",kind:"device",label:"Máy lịch sử",state:"failed",udid:"old-phone",errorCode:null,detail:null,evidence:null,retryable:true}]});
     render(<App />);
     await navigate("Tác vụ");
+    fireEvent.click(await screen.findByRole("button", { name: `Xem lượt chạy ${run.title}` }));
     // A full-document role scan can monopolize jsdom while the two async loads
     // are settling. Wait on the small detail region before its accessible action.
     await waitFor(() => expect(document.querySelector(".operations-monitor-detail header")).not.toBeNull());
@@ -319,7 +328,8 @@ describe("device group scope", () => {
 
     render(<App />);
     await waitFor(() => expect(screen.getByText("Note 8")).toBeInTheDocument());
-    await userEvent.click(screen.getByRole("tab", { name: /Máy Redmi/ }));
+    await userEvent.hover(screen.getByRole("button", { name: "Hiện bảng Hiển thị" }));
+    await userEvent.click(screen.getByRole("button", { name: /Máy Redmi/ }));
     await userEvent.click(screen.getByTitle("Danh sách"));
 
     expect(screen.getByRole("cell", { name: /Máy 1.*Redmi/ })).toBeInTheDocument();
@@ -436,39 +446,17 @@ describe("device operational identity", () => {
 });
 
 describe("automation target resolution", () => {
-  it("docks the real workspace with an explicit grid snapshot and preserves its editor", async () => {
+  it("keeps device management separate from automation setup", async () => {
     const api = await import("./api");
     vi.mocked(api.listDevices).mockResolvedValue([androidPhone]);
     render(<App />);
-    const tile = await screen.findByTestId("device-tile");
-    fireEvent.click(tile);
-    fireEvent.click(screen.getByRole("tab", { name: "Nuôi TikTok" }));
-    const workspace = await screen.findByRole("region", { name: "Không gian Nuôi TikTok" });
-    expect(workspace).toHaveAttribute("data-targets", "");
-    expect(screen.getByRole("grid", { name: "Lưới thiết bị" })).toBeVisible();
-    fireEvent.click(screen.getByRole("button", { name: "Dùng 1 máy đã chọn" }));
-    expect(workspace).toHaveAttribute("data-targets", androidPhone.udid);
-    fireEvent.click(screen.getByRole("button", { name: "Bỏ chọn" }));
-    expect(workspace).toHaveAttribute("data-targets", androidPhone.udid);
-    fireEvent.click(screen.getByText("Mark nurture dirty", { selector: "button" }));
-    fireEvent.click(screen.getByRole("button", { name: "Mở trang tác vụ" }));
-    await waitFor(() => expect(screen.queryByRole("button", { name: "Mở trang tác vụ" })).toBeNull());
-    expect(screen.queryByRole("button", { name: "Xem cùng thiết bị" })).toBeNull();
-    expect(screen.getByRole("region", { name: "Không gian Nuôi TikTok" })).toBe(workspace);
-    expect(screen.queryByRole("alertdialog")).toBeNull();
-    fireEvent.click(within(screen.getByRole("navigation", { name: "Điều hướng chính" })).getByRole("button", { name: /^Thiết bị$/ }));
-    fireEvent.click(screen.getByRole("tab", { name: "Nuôi TikTok" }));
-    await screen.findByRole("button", { name: "Đóng khung tác vụ" });
-    expect(screen.getByRole("region", { name: "Không gian Nuôi TikTok" })).toBe(workspace);
-    fireEvent.click(screen.getByRole("button", { name: "Đóng khung tác vụ" }));
-    await clickConfirmation("Ở lại");
-    await waitFor(() => expect(screen.queryByRole("alertdialog")).toBeNull());
-    expect(workspace).toBeVisible();
-    fireEvent.click(screen.getByRole("tab", { name: "Tương tác" }));
-    await clickConfirmation("Bỏ thay đổi");
-    expect(await screen.findByRole("region", { name: "Không gian Tương tác" })).toBeVisible();
-    expect(screen.getByRole("grid", { name: "Lưới thiết bị" })).toBeVisible();
-  }, 40_000);
+    await screen.findByTestId("device-tile");
+    expect(document.querySelector(".device-automation-bar")).toBeNull();
+    expect(document.querySelector(".automation-host")).toHaveAttribute("hidden");
+    await navigate("Nuôi TikTok");
+    expect(await screen.findByRole("region", { name: "Không gian Nuôi TikTok" })).toBeVisible();
+    expect(document.querySelector(".device-browser")).toBeNull();
+  });
 
   it("keeps an empty group at zero targets instead of expanding it to the fleet", async () => {
     const api = await import("./api");
@@ -793,7 +781,7 @@ describe("Flow page integration", () => {
     await navigate("Tác vụ");
     await clickConfirmation("Bỏ thay đổi");
     await waitFor(() =>
-      expect(screen.getByText("Tác vụ", { selector: "[data-testid='page-title']" })).toBeVisible(),
+      expect(screen.getByText("Lượt chạy", { selector: "[data-testid='page-title']" })).toBeVisible(),
     );
   });
 
@@ -808,7 +796,7 @@ describe("Flow page integration", () => {
     await navigate("Tác vụ");
     await clickConfirmation("Bỏ thay đổi");
     await waitFor(() =>
-      expect(screen.getByText("Tác vụ", { selector: "[data-testid='page-title']" })).toBeVisible(),
+      expect(screen.getByText("Lượt chạy", { selector: "[data-testid='page-title']" })).toBeVisible(),
     );
 
     await navigate("Dữ liệu");
