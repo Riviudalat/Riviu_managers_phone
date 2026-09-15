@@ -229,45 +229,28 @@ export interface LiveDragGroup {
 /// finger that drew it, that shape is measurably weaker: on 19/08/2026 a straight constant
 /// speed drag turned a TikTok photo carousel on 13 of 40 attempts where a shaped flick
 /// managed 19 of 19.
-/// A stable per-device coordinate offset within a ±`maxPx` box (A1 anti-detection jitter on
-/// the live-drag path, the counterpart to what `group_input` applies on the batch path).
-///
-/// Deterministic per `(index, maxPx)` so a device's whole gesture shares one offset — begin,
-/// move and end must agree or the path warps mid-drag. `index 0` gets `(0, 0)` so the phone
-/// the operator is nominally tracking follows the true pointer and the rest scatter around
-/// it. `maxPx <= 0` disables it, which is the default policy and keeps the old behaviour.
-export function deviceDragOffset(index: number, maxPx: number): { dx: number; dy: number } {
-  if (maxPx <= 0 || index <= 0) return { dx: 0, dy: 0 };
-  const span = 2 * maxPx + 1;
-  // Knuth multiplicative hash of the index → two independent offsets in [-maxPx, maxPx].
-  const hash = (index * 2654435761) >>> 0;
-  const dx = (hash % span) - maxPx;
-  const dy = (Math.floor(hash / span) % span) - maxPx;
-  return { dx, dy };
-}
-
+/// Live group gestures are intentionally exact. A non-zero delay or coordinate offset uses
+/// the backend `group_input` path instead, where one policy owner plans every recipient.
 export function createLiveDragGroup(
   members: LiveDragMember[],
   onFallback?: OnFallback,
-  offsetMaxPx = 0,
 ): LiveDragGroup {
-  const drags = members.map((member, index) => ({
+  const drags = members.map((member) => ({
     udid: member.udid,
-    offset: deviceDragOffset(index, offsetMaxPx),
     drag: createLiveDrag(member.send, (reason) => onFallback?.(`${member.udid}: ${reason}`)),
   }));
   return {
     begin(x, y) {
-      for (const { drag, offset } of drags) drag.begin(x + offset.dx, y + offset.dy);
+      for (const { drag } of drags) drag.begin(x, y);
     },
     move(x, y) {
-      for (const { drag, offset } of drags) drag.move(x + offset.dx, y + offset.dy);
+      for (const { drag } of drags) drag.move(x, y);
     },
     async end(x, y) {
       const outcomes = await Promise.all(
-        drags.map(async ({ udid, drag, offset }) => ({
+        drags.map(async ({ udid, drag }) => ({
           udid,
-          outcome: await drag.end(x + offset.dx, y + offset.dy),
+          outcome: await drag.end(x, y),
         })),
       );
       return {

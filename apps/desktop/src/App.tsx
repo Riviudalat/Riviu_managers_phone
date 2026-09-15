@@ -78,6 +78,7 @@ import { AppsPage } from "./pages/AppsPage";
 import { DataPage } from "./pages/DataPage";
 import { MaterialPage } from "./pages/MaterialPage";
 import type { DeviceInfo, DeviceWorkOwner, PageId, TargetRef } from "./types";
+import type { ActiveGroupSync, GroupSyncReadiness } from "./groupSync";
 import { MoreHorizontal } from "lucide-react";
 import { MENU_ICONS } from "./components/menuIcons";
 import { loadZoom, stepZoom, storeZoom, TILE_ZOOM, wheelWantsZoom } from "./zoom";
@@ -160,22 +161,17 @@ function App() {
   const [detailsFor, setDetailsFor] = useDeviceSurface(devices, "chi tiết thiết bị");
   /// Which phone's filesystem is open in the browser popup (xiaowei "Preview Mobile Files").
   const [filesFor, setFilesFor] = useDeviceSurface(devices, "trình quản lý tệp");
-  const [groupMode, setGroupMode] = useState(false);
-  /// The phone the operator drives when Sync is on; every other selected phone follows it.
-  ///
-  /// This used to be `selected[0]` — whichever udid happened to land first in the selection
-  /// array — decided on a page of its own that did nothing else. Nothing showed which phone
-  /// it was and nothing let the operator choose, so "máy chính" was a label for an accident.
-  /// It is a property of the grid, set from the tile's own menu, and it lives here.
+  const [activeSync, setActiveSync] = useState<ActiveGroupSync | null>(null);
+  const [syncReadiness, setSyncReadiness] = useState<GroupSyncReadiness | null>(null);
+  /** Draft master selection. The active session owns its own immutable copy. */
   const [controlCenter, setControlCenter] = useState<string | null>(null);
   const deviceWindows = useDeviceWindows(devices);
   const focusUdid = deviceWindows.activeUdid;
   const overlayUdid = focusUdid;
   const openDeviceWindow = deviceWindows.open;
   const setFocusUdid = useCallback((udid: string | null) => {
-    const target = udid && groupMode && controlCenter && devices.some(device => device.udid === controlCenter) ? controlCenter : udid;
-    openDeviceWindow(target);
-  }, [openDeviceWindow, groupMode, controlCenter, devices]);
+    openDeviceWindow(udid);
+  }, [openDeviceWindow]);
   const [viewMode, setViewMode] = useState<ViewMode>("window");
   const [settingsSection, setSettingsSection] = useState<"control" | "integration" | "maintenance" | undefined>();
   const [tileWidth, setTileWidth] = useState(() => loadZoom(TILE_ZOOM));
@@ -492,6 +488,67 @@ function App() {
     onSelect(udid,additive);
     if(!additive&&focusUdid&&focusUdid!==udid)setFocusUdid(udid);
   };
+  const resolvedMasterUdid = useMemo(() => {
+    if (controlCenter && selected.includes(controlCenter)) return controlCenter;
+    if (focusUdid && selected.includes(focusUdid)) return focusUdid;
+    return [...selectedDevices]
+      .sort(
+        (left, right) =>
+          (fleetNumberByUdid.get(left.udid) ?? Number.MAX_SAFE_INTEGER) -
+          (fleetNumberByUdid.get(right.udid) ?? Number.MAX_SAFE_INTEGER),
+      )[0]?.udid ?? null;
+  }, [controlCenter, fleetNumberByUdid, focusUdid, selected, selectedDevices]);
+
+  const stopGroupSync = useCallback((reason?: string) => {
+    setActiveSync(null);
+    setSyncReadiness(null);
+    if (reason) pushToast("warn", "Đã tắt đồng bộ", reason);
+  }, []);
+
+  const beginGroupSync = useCallback((masterUdid: string) => {
+    const available = selectedDevices
+      .filter((device) => device.status !== "disconnected")
+      .sort(
+        (left, right) =>
+          (fleetNumberByUdid.get(left.udid) ?? Number.MAX_SAFE_INTEGER) -
+          (fleetNumberByUdid.get(right.udid) ?? Number.MAX_SAFE_INTEGER),
+      );
+    if (available.length < 2) {
+      pushToast("warn", "Chưa thể bật đồng bộ", "Chọn ít nhất hai máy đang kết nối.");
+      return;
+    }
+    if (!available.some((device) => device.udid === masterUdid)) {
+      pushToast("warn", "Chưa thể bật đồng bộ", "Chọn lại một máy chính đang kết nối.");
+      return;
+    }
+    const targetUdids = [
+      masterUdid,
+      ...available.filter((device) => device.udid !== masterUdid).map((device) => device.udid),
+    ];
+    setControlCenter(masterUdid);
+    setActiveSync({ masterUdid, targetUdids });
+    setSyncReadiness({ state: "preparing", readyUdids: [], failures: {} });
+    openDeviceWindow(masterUdid);
+  }, [fleetNumberByUdid, openDeviceWindow, selectedDevices]);
+
+  useEffect(() => {
+    if (!activeSync) return;
+    if (controlCenter !== activeSync.masterUdid) {
+      stopGroupSync("Máy chính đã thay đổi. Kiểm tra phạm vi rồi bật lại.");
+      return;
+    }
+    const selectedKey = [...selected].sort().join("\0");
+    const targetKey = [...activeSync.targetUdids].sort().join("\0");
+    if (selectedKey !== targetKey) {
+      stopGroupSync("Danh sách máy đã chọn đã thay đổi. Kiểm tra phạm vi rồi bật lại.");
+      return;
+    }
+    const roster = new Map(devices.map((device) => [device.udid, device]));
+    if (activeSync.targetUdids.some((udid) => roster.get(udid)?.status === "disconnected" || !roster.has(udid))) {
+      stopGroupSync("Một máy trong phiên đã rời fleet. Kiểm tra kết nối rồi bật lại.");
+    }
+  }, [activeSync, controlCenter, devices, selected, stopGroupSync]);
+
   const hasVisibleDevices = visibleDevices.length > 0;
 
   // Wheel over the phone grid zooms the tiles. Registered by hand because
@@ -562,7 +619,7 @@ function App() {
         setMetas,
         controlCenter,
         setControlCenter,
-        groupMode,
+        groupMode: activeSync !== null,
         setFocusUdid,
         setFilesFor,
         setAdbFor,
@@ -582,7 +639,7 @@ function App() {
       controlCenter,
       selectedDevices,
       fleetNumberByUdid,
-      groupMode,
+      activeSync,
       metaMap,
       metas,
       setMetas,
@@ -594,19 +651,10 @@ function App() {
     ],
   );
 
-  /// The phone the overlay actually drives.
-  ///
-  /// With Sync on and a control centre designated, that is the control centre whichever tile
-  /// was opened — which is what designating one means. Without Sync it is simply the tile the
-  /// operator opened, because a centre with nothing following it would be a surprise rather
-  /// than a feature.
-  const focusDevice = useMemo(() => {
-    const wanted =
-      groupMode && controlCenter && devices.some((d) => d.udid === controlCenter)
-        ? controlCenter
-        : focusUdid;
-    return devices.find((d) => d.udid === wanted) ?? null;
-  }, [devices, focusUdid, groupMode, controlCenter]);
+  const focusDevice = useMemo(
+    () => devices.find((device) => device.udid === focusUdid) ?? null,
+    [devices, focusUdid],
+  );
 
   const beginMacroSession = (targets: string[]) => {
     setMacroSession(current => current ?? {
@@ -658,6 +706,16 @@ function App() {
     () => jobs.filter((j) => j.status === "running" || j.status === "queued").length,
     [jobs],
   );
+  const syncStatusLabel = activeSync
+    ? `Máy chính: Máy ${fleetNumberByUdid.get(activeSync.masterUdid) ?? "?"} · ${activeSync.targetUdids.length - 1} máy nhận · ${
+        syncReadiness?.state === "active"
+          ? `Đang hoạt động ${syncReadiness.readyUdids.length}/${activeSync.targetUdids.length}`
+          : syncReadiness?.state === "degraded"
+            ? `Cần xử lý ${Object.keys(syncReadiness.failures).length} máy`
+            : `Đang chuẩn bị ${syncReadiness?.readyUdids.length ?? 0}/${activeSync.targetUdids.length}`
+      }`
+    : null;
+
 
   const title = PAGE_TITLE[page] ?? page;
   const PageIcon = MENU_ICONS[page];
@@ -696,7 +754,7 @@ function App() {
         selectedCount={selected.length}
         total={devices.length}
         readyCount={readyCount}
-        groupMode={groupMode}
+        groupMode={activeSync !== null}
         onPage={(next) => void requestPage(next, true)}
       />
 
@@ -710,7 +768,7 @@ function App() {
           meta={
             <>
               <span className="fleet-status-label">Toàn hệ thống</span>
-              {groupMode && <StatusChip>Đồng bộ bật</StatusChip>}
+              {syncStatusLabel && <StatusChip>{syncStatusLabel}</StatusChip>}
               {readyCount > 0 && (
                 <StatusChip tone="success">{readyCount} sẵn sàng</StatusChip>
               )}
@@ -812,9 +870,12 @@ function App() {
               <ProfileToolbar
                 selected={selectedDevices}
                 deviceCount={devices.length}
-                syncOn={groupMode}
-                controlCenter={controlCenter}
-                onControlCenter={setControlCenter}
+                activeSync={activeSync}
+                readiness={syncReadiness}
+                resolvedMasterUdid={resolvedMasterUdid}
+                onMasterChange={setControlCenter}
+                onEnableSync={beginGroupSync}
+                onDisableSync={() => stopGroupSync()}
                 deviceNumbers={fleetNumberByUdid}
                 metas={metaMap}
                 groupsOpen={groupsOpen}
@@ -897,7 +958,6 @@ function App() {
                     toastError("Sửa agent thất bại", error);
                   }
                 }}
-                onSync={() => setGroupMode((v) => !v)}
                 onRefresh={async () => {
                   // Refresh had no failure path at all: `onClick={() => void onRefresh()}`
                   // dropped the rejection, so a device scan that failed left the fleet
@@ -1120,7 +1180,7 @@ function App() {
                       onContextMenu={(udid, x, y) => setTileMenu({ udid, x, y })}
                       selected={selected.includes(device.udid)}
                       focused={overlayUdid === device.udid}
-                      controlCenter={controlCenter === device.udid}
+                      controlCenter={(activeSync?.masterUdid ?? controlCenter) === device.udid}
                       onSelect={selectDevice}
                       onOpen={setFocusUdid}
                       onPrepare={(udid) => {
@@ -1382,8 +1442,8 @@ function App() {
           onActivate={() => deviceWindows.activate(udid)}
           index={fleetNumberByUdid.get(udid) ?? 1}
           onClose={() => deviceWindows.close(udid)}
-          groupUdids={selected}
-          groupMode={groupMode && focusDevice?.udid === udid}
+          activeSync={activeSync?.masterUdid === udid ? activeSync : null}
+          onReadinessChange={activeSync?.masterUdid === udid ? setSyncReadiness : undefined}
           // The same array `index` above is computed from, so the picker's numbering and the
           // header's cannot disagree about which phone is #3.
           devices={devices}

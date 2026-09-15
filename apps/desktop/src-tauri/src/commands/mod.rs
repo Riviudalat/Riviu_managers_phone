@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use riviu_core::{
     apply_offset, AutomationScript, DeviceControlPlane, DeviceExclusiveContext, DeviceInfo,
-    DeviceWorkOwner, GroupSyncPolicy, HardwareKey, InteractionSessionKind, JobRecord,
+    DevicePlan, DeviceWorkOwner, GroupSyncPolicy, HardwareKey, InteractionSessionKind, JobRecord,
     StreamSettings, SwipeGesture, TapPoint, UiSession, UiWithStreamContext,
 };
 use riviu_script_engine::{example_script_json, parse_script};
@@ -69,6 +69,33 @@ fn check_group_input(kind: &str, has_key: bool) -> Result<(), CommandError> {
         ));
     }
     Ok(())
+}
+
+fn ordered_group_targets(
+    udids: Vec<String>,
+    master_udid: Option<&str>,
+) -> Result<Vec<String>, CommandError> {
+    let mut seen = std::collections::HashSet::with_capacity(udids.len());
+    let mut targets = Vec::with_capacity(udids.len());
+    for udid in udids {
+        if seen.insert(udid.clone()) {
+            targets.push(udid);
+        }
+    }
+
+    let Some(master_udid) = master_udid else {
+        return Ok(targets);
+    };
+    let Some(master_index) = targets.iter().position(|udid| udid == master_udid) else {
+        return Err(CommandError::invalid_argument(format!(
+            "group input master '{master_udid}' is not a target"
+        )));
+    };
+    if master_index > 0 {
+        let master = targets.remove(master_index);
+        targets.insert(0, master);
+    }
+    Ok(targets)
 }
 
 async fn continue_ui_context(

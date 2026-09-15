@@ -162,8 +162,8 @@ button:disabled {
   top: calc(100% + 6px);
   left: 0;
   z-index: 50;
-  width: min(520px, 100%);
-  max-height: min(620px, 64vh);
+  width: min(480px, calc(100vw - 24px));
+  max-height: min(640px, calc(100dvh - 96px));
   overflow: auto;
   padding: 16px;
   border: 1px solid var(--line);
@@ -185,8 +185,34 @@ button:disabled {
 }
 .toolbar-sync-master { display: grid; gap: 6px; margin: 12px 0; }
 .toolbar-sync-master select { width: 100%; min-width: 0; }
-.toolbar-sync-targets { display: flex; flex-wrap: wrap; gap: 6px; max-height: 80px; overflow: auto; margin-bottom: 12px; }
-.toolbar-sync-targets span { background: var(--bg-subtle); border-radius: 4px; padding: 4px 7px; font-size: var(--text-xs); overflow-wrap: anywhere; }
+.toolbar-sync-targets {
+  display: grid;
+  gap: 1px;
+  max-height: 220px;
+  overflow: auto;
+  margin-bottom: 12px;
+  border-block: 1px solid var(--line);
+}
+.toolbar-sync-target {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+  padding: 9px 2px;
+  background: var(--bg-elevated);
+}
+.toolbar-sync-target > div { min-width: 0; }
+.toolbar-sync-target strong,
+.toolbar-sync-target span,
+.toolbar-sync-target small { display: block; overflow-wrap: anywhere; }
+.toolbar-sync-target strong { font-size: var(--text-sm); color: var(--text-1); }
+.toolbar-sync-target span,
+.toolbar-sync-target small { margin-top: 2px; font-size: var(--text-xs); color: var(--text-3); }
+.toolbar-sync-target-state { text-align: right; max-width: 180px; }
+.toolbar-sync-target[data-state="error"] .toolbar-sync-target-state span,
+.toolbar-sync-target[data-state="ngoại tuyến"] .toolbar-sync-target-state span { color: var(--danger); }
+.toolbar-sync-actions { display: flex; align-items: center; gap: 10px; }
+.toolbar-sync-actions p { margin: 0; color: var(--text-3); font-size: var(--text-xs); }
 .toolbar-sync-options { border-top: 1px solid var(--line); margin-top: 12px; padding-top: 12px; }
 .toolbar-sync-options > summary { cursor: pointer; }
 .toolbar-sync-options .settings-section { border: 0; padding: 12px 0 0; box-shadow: none; }

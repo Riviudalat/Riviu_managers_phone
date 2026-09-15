@@ -291,8 +291,8 @@ export function buildDeviceActions(
             "ok",
             `${device.name} là máy chính`,
             groupMode
-              ? "Bật Sync rồi mở bất kỳ máy nào cũng ra màn hình của máy này; mọi máy đã chọn làm theo thao tác trên đó."
-              : "Sync đang TẮT nên chưa có tác dụng. Bật Sync ở thanh trên, rồi mọi máy đã chọn sẽ làm theo máy này.",
+              ? "Máy chính đã thay đổi nên lượt đồng bộ hiện tại sẽ tắt. Kiểm tra phạm vi trong bảng Đồng bộ rồi bật lại."
+              : "Đây là máy chính nháp. Mở bảng Đồng bộ để kiểm tra phạm vi và bật lượt mới.",
           );
         } else {
           pushToast("ok", "Đã bỏ máy chính", "Mở máy nào thì điều khiển đúng máy đó.");

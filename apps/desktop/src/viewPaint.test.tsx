@@ -57,7 +57,7 @@ describe("tile and overlay paint path", () => {
     tile.unmount();
 
     const overlay = render(
-      <FocusStream device={fixture} index={1} onClose={() => undefined} groupUdids={[]} groupMode={false} devices={[fixture]} onSelectDevice={() => undefined} />,
+      <FocusStream device={fixture} index={1} onClose={() => undefined} devices={[fixture]} onSelectDevice={() => undefined} />,
     );
     expect(overlay.container.innerHTML).not.toContain("data:image/jpeg;base64");
     expect(overlay.container.querySelector("canvas")).not.toBeNull();

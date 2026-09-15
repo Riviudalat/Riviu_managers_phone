@@ -615,11 +615,242 @@ pub async fn device_control_end(
     state.end_overlay_session(&udid).await
 }
 
+#[derive(Clone)]
+struct GroupInputAction {
+    kind: String,
+    x: Option<f64>,
+    y: Option<f64>,
+    to_x: Option<f64>,
+    to_y: Option<f64>,
+    text: Option<String>,
+    image_w: Option<f64>,
+    image_h: Option<f64>,
+    key: Option<HardwareKey>,
+}
+
+struct GroupInputTargetResult {
+    completed: bool,
+    skipped: Vec<GroupInputSkip>,
+}
+
+async fn run_group_input_target(
+    state: &AppState,
+    udid: String,
+    action: GroupInputAction,
+    plan: DevicePlan,
+) -> GroupInputTargetResult {
+    if plan.delay_ms > 0 {
+        tokio::time::sleep(std::time::Duration::from_millis(plan.delay_ms)).await;
+    }
+
+    // Bound for the whole target future: dropping it early would let the overlay close
+    // mid-gesture and hand this phone to another owner.
+    let overlay_hold = state.overlay_ui_session(&udid).await;
+    let owned = if overlay_hold.is_none() {
+        match state
+            .control
+            .open_manual_session(&udid, DeviceWorkOwner::GroupSync)
+            .await
+        {
+            Ok(context) => Some(context),
+            Err(error) => {
+                return GroupInputTargetResult {
+                    completed: false,
+                    skipped: vec![open_failure_skip(udid, CommandError::from(error))],
+                };
+            }
+        }
+    } else {
+        None
+    };
+
+    let session = match overlay_hold.as_ref() {
+        Some(hold) => Ok(hold.session()),
+        None => state.control.session(
+            owned
+                .as_ref()
+                .expect("group input opened a session when no overlay is held"),
+        ),
+    };
+    let session = match session {
+        Ok(session) => session,
+        Err(error) => {
+            let mut skipped = vec![open_failure_skip(udid.clone(), CommandError::from(error))];
+            if let Some(context) = owned {
+                if let Err(error) = state.control.close_manual_session(context) {
+                    let error = CommandError::from(error);
+                    skipped.push(GroupInputSkip {
+                        udid,
+                        code: "CleanupFailed".to_string(),
+                        current_owner: None,
+                        message: Some(error.message.to_string()),
+                    });
+                }
+            }
+            return GroupInputTargetResult {
+                completed: false,
+                skipped,
+            };
+        }
+    };
+
+    let scale = matches!(
+        (action.image_w, action.image_h),
+        (Some(w), Some(h)) if w > 0.0 && h > 0.0
+    );
+    let bound_w = scale.then_some(action.image_w.expect("scale validates image width"));
+    let bound_h = scale.then_some(action.image_h.expect("scale validates image height"));
+    let effect = match action.kind.as_str() {
+        "tap" => {
+            let (x, y) = apply_offset(
+                action.x.unwrap_or(0.0),
+                action.y.unwrap_or(0.0),
+                plan.dx,
+                plan.dy,
+                bound_w,
+                bound_h,
+            );
+            if scale {
+                session
+                    .tap_image(
+                        x,
+                        y,
+                        bound_w.expect("image width"),
+                        bound_h.expect("image height"),
+                    )
+                    .await
+            } else {
+                session.tap(TapPoint { x, y }).await
+            }
+        }
+        "swipe" => {
+            let (fx, fy) = apply_offset(
+                action.x.unwrap_or(0.0),
+                action.y.unwrap_or(0.0),
+                plan.dx,
+                plan.dy,
+                bound_w,
+                bound_h,
+            );
+            let (tx, ty) = apply_offset(
+                action.to_x.unwrap_or(0.0),
+                action.to_y.unwrap_or(0.0),
+                plan.dx,
+                plan.dy,
+                bound_w,
+                bound_h,
+            );
+            let from = TapPoint { x: fx, y: fy };
+            let to = TapPoint { x: tx, y: ty };
+            if scale {
+                session
+                    .swipe_image(
+                        from,
+                        to,
+                        bound_w.expect("image width"),
+                        bound_h.expect("image height"),
+                        300,
+                    )
+                    .await
+            } else {
+                session
+                    .swipe(SwipeGesture {
+                        from,
+                        to,
+                        duration_ms: 300,
+                    })
+                    .await
+            }
+        }
+        "type" => {
+            session
+                .type_text(action.text.as_deref().unwrap_or(""))
+                .await
+        }
+        "home" => session.home().await,
+        "key" => {
+            press_manual_key(
+                state.android.as_deref(),
+                &udid,
+                session.as_ref(),
+                action.key.expect("key was validated"),
+            )
+            .await
+        }
+        _ => unreachable!("group input kind was validated"),
+    };
+
+    // Close an owned session even when the effect failed. A cleanup error is additional
+    // evidence: it never erases a completed effect and never causes an automatic replay.
+    let cleanup = match owned {
+        Some(context) => state.control.close_manual_session(context).err(),
+        None => None,
+    };
+    let mut result = GroupInputTargetResult {
+        completed: effect.is_ok(),
+        skipped: Vec::with_capacity(usize::from(effect.is_err()) + usize::from(cleanup.is_some())),
+    };
+    if let Err(error) = effect {
+        result.skipped.push(GroupInputSkip {
+            udid: udid.clone(),
+            code: "ActionFailed".to_string(),
+            current_owner: None,
+            message: Some(error.to_string()),
+        });
+    }
+    if let Some(error) = cleanup {
+        let error = CommandError::from(error);
+        result.skipped.push(GroupInputSkip {
+            udid,
+            code: "CleanupFailed".to_string(),
+            current_owner: None,
+            message: Some(error.message.to_string()),
+        });
+    }
+    result
+}
+
+fn group_input_plan(
+    sync: &GroupSyncPolicy,
+    ordinal: usize,
+    group_count: usize,
+    seed: u64,
+    is_master: bool,
+) -> DevicePlan {
+    if is_master {
+        DevicePlan {
+            delay_ms: 0,
+            dx: 0.0,
+            dy: 0.0,
+        }
+    } else {
+        sync.plan(ordinal, group_count, seed)
+    }
+}
+
+fn merge_group_input_results(
+    targets: Vec<String>,
+    target_results: Vec<GroupInputTargetResult>,
+) -> GroupInputReport {
+    let mut report = GroupInputReport {
+        completed_udids: Vec::with_capacity(targets.len()),
+        skipped: Vec::new(),
+    };
+    for (udid, result) in targets.into_iter().zip(target_results) {
+        if result.completed {
+            report.completed_udids.push(udid);
+        }
+        report.skipped.extend(result.skipped);
+    }
+    report
+}
+
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
 pub async fn group_input(
     state: State<'_, AppState>,
     udids: Vec<String>,
+    master_udid: Option<String>,
     kind: String,
     x: Option<f64>,
     y: Option<f64>,
@@ -633,174 +864,31 @@ pub async fn group_input(
 ) -> Result<GroupInputReport, CommandError> {
     let _admission = state.ensure_accepting_work()?;
     check_group_input(&kind, key.is_some())?;
-    let scale = matches!((image_w, image_h), (Some(w), Some(h)) if w > 0.0 && h > 0.0);
-    // Group-sync timing/offset (A1). Absent policy = the old lockstep behaviour, so callers
-    // that never send `sync` are unchanged. One seed per operation keeps successive group
-    // actions different while any single one stays reproducible (the policy is pure/tested).
+    let targets = ordered_group_targets(udids, master_udid.as_deref())?;
+    let group_count = targets.len();
     let sync = sync.unwrap_or_default();
-    let group_count = udids.len();
     let seed = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos() as u64)
+        .map(|duration| duration.as_nanos() as u64)
         .unwrap_or(0);
-    let mut report = GroupInputReport {
-        completed_udids: Vec::new(),
-        skipped: Vec::new(),
+    let action = GroupInputAction {
+        kind,
+        x,
+        y,
+        to_x,
+        to_y,
+        text,
+        image_w,
+        image_h,
+        key,
     };
-    for (ordinal, udid) in udids.into_iter().enumerate() {
-        // Compute this device's delay/offset before touching anything. Sleep *before*
-        // opening the session so a staggered wait does not hold a GroupSync lease idle.
-        let plan = sync.plan(ordinal, group_count, seed);
-        if plan.delay_ms > 0 {
-            tokio::time::sleep(std::time::Duration::from_millis(plan.delay_ms)).await;
-        }
-        // Bound for the whole iteration, not consumed here: dropping it early would let the
-        // overlay close mid-gesture and hand this phone to another owner.
-        let overlay_hold = state.overlay_ui_session(&udid).await;
-        let owned = if overlay_hold.is_none() {
-            match state
-                .control
-                .open_manual_session(&udid, DeviceWorkOwner::GroupSync)
-                .await
-            {
-                Ok(context) => Some(context),
-                Err(error) => {
-                    report
-                        .skipped
-                        .push(open_failure_skip(udid, CommandError::from(error)));
-                    continue;
-                }
-            }
-        } else {
-            None
-        };
-        // The same rule as the open above: a lookup that fails is this phone's problem,
-        // not the batch's. `?` here threw away every phone already actioned.
-        let session = match overlay_hold.as_ref() {
-            Some(hold) => hold.session(),
-            None => match state.control.session(
-                owned
-                    .as_ref()
-                    .expect("group input opened a session when no overlay is held"),
-            ) {
-                Ok(session) => session,
-                Err(error) => {
-                    report
-                        .skipped
-                        .push(open_failure_skip(udid, CommandError::from(error)));
-                    continue;
-                }
-            },
-        };
-        // In image mode the coordinates are pixels bounded by the frame, so jitter must be
-        // clamped on-screen; in logical mode there is no upper bound (only floored at 0).
-        let bound_w = scale.then(|| image_w.unwrap());
-        let bound_h = scale.then(|| image_h.unwrap());
-        let action = match kind.as_str() {
-            "tap" => {
-                let (x, y) = apply_offset(
-                    x.unwrap_or(0.0),
-                    y.unwrap_or(0.0),
-                    plan.dx,
-                    plan.dy,
-                    bound_w,
-                    bound_h,
-                );
-                if scale {
-                    session
-                        .tap_image(x, y, image_w.unwrap(), image_h.unwrap())
-                        .await
-                } else {
-                    session.tap(TapPoint { x, y }).await
-                }
-            }
-            "swipe" => {
-                // Shift both endpoints by the same offset: the gesture's shape and length are
-                // preserved, only its position on the screen jitters.
-                let (fx, fy) = apply_offset(
-                    x.unwrap_or(0.0),
-                    y.unwrap_or(0.0),
-                    plan.dx,
-                    plan.dy,
-                    bound_w,
-                    bound_h,
-                );
-                let (tx, ty) = apply_offset(
-                    to_x.unwrap_or(0.0),
-                    to_y.unwrap_or(0.0),
-                    plan.dx,
-                    plan.dy,
-                    bound_w,
-                    bound_h,
-                );
-                let from = TapPoint { x: fx, y: fy };
-                let to = TapPoint { x: tx, y: ty };
-                if scale {
-                    session
-                        .swipe_image(from, to, image_w.unwrap(), image_h.unwrap(), 300)
-                        .await
-                } else {
-                    session
-                        .swipe(SwipeGesture {
-                            from,
-                            to,
-                            duration_ms: 300,
-                        })
-                        .await
-                }
-            }
-            "type" => session.type_text(text.as_deref().unwrap_or("")).await,
-            "home" => session.home().await,
-            // Validated before the loop, so this arm cannot be reached without a key.
-            "key" => {
-                press_manual_key(
-                    state.android.as_deref(),
-                    &udid,
-                    session.as_ref(),
-                    key.expect("key was validated"),
-                )
-                .await
-            }
-            _ => unreachable!("group input kind was validated"),
-        };
-        // The session is closed whatever the action did. Leaking a GroupSync lease because a
-        // tap failed would take the phone out of the fleet until the app restarts.
-        let cleanup = match owned {
-            Some(context) => state.control.close_manual_session(context).err(),
-            None => None,
-        };
-        // Both arms below consume `udid`, and the cleanup report after them needs it.
-        let udid_for_cleanup = udid.clone();
-        match action {
-            Ok(()) => report.completed_udids.push(udid),
-            // **Record and carry on, rather than abort.** This used to be `?`, so the first
-            // phone that failed for any reason other than Busy threw away
-            // `completed_udids` and told the operator the whole batch had failed — when in
-            // a twenty-phone fleet nineteen of them may have worked. One fleet-batch shape
-            // in this codebase, matching `install_ipa_to_group`.
-            Err(error) => report.skipped.push(GroupInputSkip {
-                udid,
-                code: "ActionFailed".to_string(),
-                current_owner: None,
-                message: Some(error.to_string()),
-            }),
-        }
-        // A cleanup that failed does not undo an input that landed, and it is not a
-        // reason to abandon the phones after this one. The udid stays in
-        // `completed_udids` because the tap really did happen; the failure is reported
-        // beside it so the operator learns the session did not close cleanly. Appearing
-        // in both lists is the accurate description of that, not a contradiction.
-        if let Some(error) = cleanup {
-            let error = CommandError::from(error);
-            report.skipped.push(GroupInputSkip {
-                udid: udid_for_cleanup,
-                code: "CleanupFailed".to_string(),
-                current_owner: None,
-                message: Some(error.message.to_string()),
-            });
-        }
-    }
-    Ok(report)
+    let target_futures = targets.iter().cloned().enumerate().map(|(ordinal, udid)| {
+        let is_master = master_udid.as_deref() == Some(udid.as_str());
+        let plan = group_input_plan(&sync, ordinal, group_count, seed, is_master);
+        run_group_input_target(&state, udid, action.clone(), plan)
+    });
+    let target_results = futures_util::future::join_all(target_futures).await;
+    Ok(merge_group_input_results(targets, target_results))
 }
 
 /// Type a *different* string onto each selected phone (xiaowei "文字分发 / Text Distribution").
@@ -1219,5 +1307,105 @@ mod health_tests {
         let mut status = riviu_core::AgentStatus::unknown("fixture");
         status.features = vec!["tap".to_string(), "swipe".to_string()];
         assert_eq!(report_agent_features(&status), ["tap", "swipe"]);
+    }
+}
+
+#[cfg(test)]
+mod group_input_tests {
+    use super::*;
+    use riviu_core::{DelayPolicy, OffsetPolicy};
+
+    #[test]
+    fn master_is_validated_deduplicated_and_ordered_before_dispatch() {
+        let targets = ordered_group_targets(
+            vec![
+                "MOCK-IPHONE-01".into(),
+                "MOCK-IPHONE-02".into(),
+                "MOCK-IPHONE-01".into(),
+                "MOCK-IPHONE-03".into(),
+            ],
+            Some("MOCK-IPHONE-02"),
+        )
+        .expect("master belongs to the group");
+        assert_eq!(
+            targets,
+            ["MOCK-IPHONE-02", "MOCK-IPHONE-01", "MOCK-IPHONE-03"]
+        );
+
+        let error = ordered_group_targets(
+            vec!["MOCK-IPHONE-01".into(), "MOCK-IPHONE-03".into()],
+            Some("MOCK-IPHONE-02"),
+        )
+        .expect_err("an absent master must fail before dispatch");
+        assert_eq!(error.code, "InvalidArgument");
+        assert!(ordered_group_targets(Vec::new(), None).unwrap().is_empty());
+    }
+
+    #[test]
+    fn master_plan_is_immediate_and_exact_while_followers_keep_policy_ordinals() {
+        let policy = GroupSyncPolicy {
+            delay: DelayPolicy::Staggered { step_ms: 250 },
+            offset: OffsetPolicy { max_px: 20 },
+        };
+        let master = group_input_plan(&policy, 0, 3, 7, true);
+        assert_eq!(master.delay_ms, 0);
+        assert_eq!((master.dx, master.dy), (0.0, 0.0));
+        assert_eq!(group_input_plan(&policy, 1, 3, 7, false).delay_ms, 250);
+        assert_eq!(group_input_plan(&policy, 2, 3, 7, false).delay_ms, 500);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn staggered_targets_finish_at_the_largest_delay_not_the_sum() {
+        let started = tokio::time::Instant::now();
+        let delays = [0_u64, 250, 500];
+        let completed = futures_util::future::join_all(delays.map(|delay_ms| async move {
+            tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+            delay_ms
+        }))
+        .await;
+        assert_eq!(completed, delays);
+        assert_eq!(started.elapsed(), std::time::Duration::from_millis(500));
+    }
+
+    #[test]
+    fn cleanup_and_action_failures_do_not_erase_or_block_peer_results() {
+        let cleanup = GroupInputSkip {
+            udid: "master".into(),
+            code: "CleanupFailed".into(),
+            current_owner: None,
+            message: Some("close failed".into()),
+        };
+        let action = GroupInputSkip {
+            udid: "broken".into(),
+            code: "ActionFailed".into(),
+            current_owner: None,
+            message: Some("tap failed".into()),
+        };
+        let report = merge_group_input_results(
+            vec!["master".into(), "broken".into(), "peer".into()],
+            vec![
+                GroupInputTargetResult {
+                    completed: true,
+                    skipped: vec![cleanup],
+                },
+                GroupInputTargetResult {
+                    completed: false,
+                    skipped: vec![action],
+                },
+                GroupInputTargetResult {
+                    completed: true,
+                    skipped: Vec::new(),
+                },
+            ],
+        );
+        assert_eq!(report.completed_udids, ["master", "peer"]);
+        assert_eq!(
+            report
+                .skipped
+                .iter()
+                .map(|skip| skip.code.as_str())
+                .collect::<Vec<_>>(),
+            ["CleanupFailed", "ActionFailed"]
+        );
     }
 }

@@ -1,6 +1,7 @@
-import { cleanup, fireEvent, render, waitFor, within } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen as testingScreen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { DeviceInfo } from "../types";
+import { defaultGroupSync, setGroupSync, type ActiveGroupSync } from "../groupSync";
 import {
   backupDevice,
   deviceShell,
@@ -74,8 +75,11 @@ vi.mock("../viewStore", async (importOriginal) => {
 
 // `render` binds its queries to document.body, not to the container it returns, so without
 // this every test after the first searches the leftovers of the ones before it.
-afterEach(cleanup);
-afterEach(() => { frame = { width: 288, height: 600, generation: 1 }; });
+afterEach(() => {
+  cleanup();
+  frame = { width: 288, height: 600, generation: 1 };
+  setGroupSync(defaultGroupSync());
+});
 
 const fixture: DeviceInfo = {
   udid: "ce06",
@@ -103,10 +107,16 @@ function mockRect(el: Element, box: { left: number; top: number; width: number; 
   } as DOMRect);
 }
 
+async function waitForControlReady() {
+  await waitFor(() =>
+    expect(testingScreen.getByRole("button", { name: "Home" })).toBeEnabled(),
+  );
+}
+
 describe("FocusStream hit mapping", () => {
   it("opens the shared nick action on right click without sending a tap, and Escape closes only the menu",async()=>{
     const read=vi.fn(),onClose=vi.fn();
-    const view=render(<FocusStream device={fixture} index={2} onClose={onClose} groupUdids={[]} groupMode={false} devices={[fixture]} onSelectDevice={vi.fn()} functions={[{id:"read-tiktok-account",label:"Đọc và gán nick TikTok",run:read}]}/>);
+    const view=render(<FocusStream device={fixture} index={2} onClose={onClose} devices={[fixture]} onSelectDevice={vi.fn()} functions={[{id:"read-tiktok-account",label:"Đọc và gán nick TikTok",run:read}]}/>);
     fireEvent.contextMenu(view.getByTestId("focus-screen"),{clientX:100,clientY:100});
     const menu=view.getByRole("menu");
     expect(deviceTap).not.toHaveBeenCalled();
@@ -128,7 +138,7 @@ describe("FocusStream hit mapping", () => {
 
   it("changes orientation only on request and checks readback before claiming portrait", async () => {
     vi.mocked(setScreenRotation).mockClear().mockResolvedValueOnce(3).mockResolvedValueOnce(0);
-    const view = render(<FocusStream device={fixture} index={5} onClose={() => undefined} groupUdids={[]} groupMode={false} devices={[fixture]} onSelectDevice={() => undefined} />);
+    const view = render(<FocusStream device={fixture} index={5} onClose={() => undefined} devices={[fixture]} onSelectDevice={() => undefined} />);
     expect(setScreenRotation).not.toHaveBeenCalled();
     fireEvent.click(view.getByRole("button", { name: "Đưa về màn hình dọc" }));
     await waitFor(() => expect(view.getByRole("status")).toHaveTextContent("Máy chưa về hướng dọc"));
@@ -138,11 +148,12 @@ describe("FocusStream hit mapping", () => {
   });
 
   it("maps landscape taps without rotating the coordinates twice and drops a stale drag", async () => {
-    const props = { device: fixture, index: 2, onClose: () => undefined, groupUdids: [], groupMode: false, devices: [fixture], onSelectDevice: () => undefined };
+    const props = { device: fixture, index: 2, onClose: () => undefined, devices: [fixture], onSelectDevice: () => undefined };
     const view = render(<FocusStream {...props} />);
     const screen = view.getByTestId("focus-screen");
     mockRect(view.container.querySelector("canvas")!, { left: 0, top: 0, width: 400, height: 832 });
     await waitFor(() => expect(deviceControlBegin).toHaveBeenCalled());
+    await waitForControlReady();
     fireEvent.pointerDown(screen, { button: 0, clientX: 100, clientY: 100, pointerId: 1 });
     frame = { width: 600, height: 288, generation: 2 };
     view.rerender(<FocusStream {...props} />);
@@ -157,13 +168,14 @@ describe("FocusStream hit mapping", () => {
 
   it("taps through the painted canvas, not the black pane", async () => {
     const { container } = render(
-      <FocusStream device={fixture} index={2} onClose={() => undefined} groupUdids={[]} groupMode={false} devices={[fixture]} onSelectDevice={() => undefined} />,
+      <FocusStream device={fixture} index={2} onClose={() => undefined} devices={[fixture]} onSelectDevice={() => undefined} />,
     );
     const screen = container.querySelector("[data-testid='focus-screen']");
     const canvas = container.querySelector("canvas");
     expect(screen).not.toBeNull();
     expect(canvas).not.toBeNull();
     mockRect(canvas!, { left: 0, top: 0, width: 400, height: 832 });
+    await waitForControlReady();
 
     fireEvent.pointerDown(screen!, { button: 0, clientX: 200, clientY: 416, pointerId: 1 });
     fireEvent.pointerUp(screen!, { button: 0, clientX: 200, clientY: 416, pointerId: 1 });
@@ -178,11 +190,12 @@ describe("FocusStream hit mapping", () => {
     // `end` alone, so a curved, accelerating drag reached the phone as a straight line at
     // constant speed. Every intermediate sample was discarded before it left the browser.
     const { container } = render(
-      <FocusStream device={fixture} index={2} onClose={() => undefined} groupUdids={[]} groupMode={false} devices={[fixture]} onSelectDevice={() => undefined} />,
+      <FocusStream device={fixture} index={2} onClose={() => undefined} devices={[fixture]} onSelectDevice={() => undefined} />,
     );
     const screen = container.querySelector("[data-testid='focus-screen']");
     const canvas = container.querySelector("canvas");
     mockRect(canvas!, { left: 0, top: 0, width: 400, height: 832 });
+    await waitForControlReady();
 
     fireEvent.pointerDown(screen!, { button: 0, clientX: 100, clientY: 100, pointerId: 1 });
     // Spaced past the 8 ms sampling floor, and far enough apart to clear the 2 px one.
@@ -216,11 +229,12 @@ describe("FocusStream hit mapping", () => {
     // A flick the browser only sampled once is not a curve, and pretending otherwise would
     // send a one-step path whose duration is the whole gesture.
     const { container } = render(
-      <FocusStream device={fixture} index={2} onClose={() => undefined} groupUdids={[]} groupMode={false} devices={[fixture]} onSelectDevice={() => undefined} />,
+      <FocusStream device={fixture} index={2} onClose={() => undefined} devices={[fixture]} onSelectDevice={() => undefined} />,
     );
     const screen = container.querySelector("[data-testid='focus-screen']");
     const canvas = container.querySelector("canvas");
     mockRect(canvas!, { left: 0, top: 0, width: 400, height: 832 });
+    await waitForControlReady();
 
     fireEvent.pointerDown(screen!, { button: 0, clientX: 100, clientY: 100, pointerId: 1 });
     fireEvent.pointerUp(screen!, { button: 0, clientX: 300, clientY: 520, pointerId: 1 });
@@ -233,7 +247,7 @@ describe("FocusStream hit mapping", () => {
 
   it("ignores a click on the letterbox so it cannot become a bezel tap", async () => {
     const { container } = render(
-      <FocusStream device={fixture} index={2} onClose={() => undefined} groupUdids={[]} groupMode={false} devices={[fixture]} onSelectDevice={() => undefined} />,
+      <FocusStream device={fixture} index={2} onClose={() => undefined} devices={[fixture]} onSelectDevice={() => undefined} />,
     );
     const screen = container.querySelector("[data-testid='focus-screen']");
     const canvas = container.querySelector("canvas");
@@ -257,7 +271,7 @@ describe("FocusStream hit mapping", () => {
       () => new Promise<void>((resolve) => (openControl = () => resolve())),
     );
     const { container } = render(
-      <FocusStream device={fixture} index={2} onClose={() => undefined} groupUdids={[]} groupMode={false} devices={[fixture]} onSelectDevice={() => undefined} />,
+      <FocusStream device={fixture} index={2} onClose={() => undefined} devices={[fixture]} onSelectDevice={() => undefined} />,
     );
     const screen = container.querySelector("[data-testid='focus-screen']")!;
 
@@ -294,8 +308,6 @@ describe("overlay panel rows", () => {
         device={fixture}
         index={1}
         onClose={() => undefined}
-        groupUdids={[]}
-        groupMode={false}
         devices={[fixture, other]}
         onSelectDevice={onSelectDevice}
       />,
@@ -320,8 +332,6 @@ describe("overlay panel rows", () => {
         device={fixture}
         index={1}
         onClose={() => undefined}
-        groupUdids={[]}
-        groupMode={false}
         devices={[fixture]}
         onSelectDevice={() => undefined}
         functions={[
@@ -354,8 +364,6 @@ describe("overlay panel rows", () => {
         device={fixture}
         index={1}
         onClose={() => undefined}
-        groupUdids={[]}
-        groupMode={false}
         devices={[fixture]}
         onSelectDevice={() => undefined}
       />,
@@ -369,8 +377,6 @@ describe("overlay panel rows", () => {
         device={{ ...fixture, battery: 58 }}
         index={1}
         onClose={() => undefined}
-        groupUdids={[]}
-        groupMode={false}
         devices={[fixture]}
         onSelectDevice={() => undefined}
       />,
@@ -384,8 +390,6 @@ describe("overlay panel rows", () => {
         device={fixture}
         index={1}
         onClose={() => undefined}
-        groupUdids={[]}
-        groupMode={false}
         devices={[fixture]}
         onSelectDevice={() => undefined}
       />,
@@ -402,12 +406,12 @@ describe("overlay panel rows", () => {
         device={fixture}
         index={1}
         onClose={() => undefined}
-        groupUdids={["ce06", "ce07"]}
-        groupMode
+        activeSync={{ masterUdid: "ce06", targetUdids: ["ce06", "ce07"] }}
         devices={[fixture, other]}
         onSelectDevice={() => undefined}
       />,
     );
+    await waitForControlReady();
 
     fireEvent.click(getByText("Câu nhanh"));
     fireEvent.change(getByPlaceholderText("Nội dung (vd: xin chào)"), {
@@ -442,8 +446,6 @@ describe("overlay panel rows", () => {
         device={fixture}
         index={1}
         onClose={() => undefined}
-        groupUdids={[]}
-        groupMode={false}
         devices={[fixture]}
         onSelectDevice={() => undefined}
       />,
@@ -483,12 +485,13 @@ describe("FocusStream never leaves a finger down", () => {
     // a DOWN and a run of MOVEs on the control socket with no UP behind them, which is a
     // phone holding a pointer down forever. Releasing past the edge is how a flick ends.
     const { container } = render(
-      <FocusStream device={fixture} index={2} onClose={() => undefined} groupUdids={[]} groupMode={false} devices={[fixture]} onSelectDevice={() => undefined} />,
+      <FocusStream device={fixture} index={2} onClose={() => undefined} devices={[fixture]} onSelectDevice={() => undefined} />,
     );
     const pane = container.querySelector("[data-testid='focus-screen']")!;
     const canvas = container.querySelector("canvas")!;
     mockRect(pane, { left: 0, top: 0, width: 288, height: 600 });
     mockRect(canvas, { left: 0, top: 0, width: 288, height: 600 });
+    await waitForControlReady();
 
     fireEvent.pointerDown(pane, { button: 0, clientX: 100, clientY: 500, pointerId: 1 });
     // Spaced past the handler's 8 ms sampling floor, and far enough to clear TAP_SLOP, or
@@ -537,8 +540,6 @@ describe("FocusStream with no picture yet", () => {
           device={device}
           index={3}
           onClose={() => undefined}
-          groupUdids={[]}
-          groupMode={false}
           devices={[device]}
           onSelectDevice={() => undefined}
         />
@@ -560,6 +561,7 @@ describe("FocusStream with no picture yet", () => {
     const pane = container.querySelector("[data-testid='focus-screen']");
     expect(pane).not.toBeNull();
     mockRect(pane!, { left: 0, top: 0, width: 288, height: 600 });
+    await waitForControlReady();
 
     fireEvent.pointerDown(pane!, { button: 0, clientX: 100, clientY: 200, pointerId: 1 });
     fireEvent.pointerUp(pane!, { button: 0, clientX: 100, clientY: 200, pointerId: 1 });
@@ -587,7 +589,7 @@ describe("FocusStream with no picture yet", () => {
 describe("FocusStream media export", () => {
   function renderOverlay(
     device: DeviceInfo = fixture,
-    group: { groupUdids?: string[]; groupMode?: boolean } = {},
+    group: { activeSync?: ActiveGroupSync | null } = {},
   ) {
     resetToasts();
     return render(
@@ -596,8 +598,7 @@ describe("FocusStream media export", () => {
           device={device}
           index={4}
           onClose={() => undefined}
-          groupUdids={group.groupUdids ?? []}
-          groupMode={group.groupMode ?? false}
+          activeSync={group.activeSync}
           devices={[device]}
           onSelectDevice={() => undefined}
         />
@@ -642,9 +643,9 @@ describe("FocusStream media export", () => {
       ],
     });
     const { getByRole, findByText, queryByText } = renderOverlay(fixture, {
-      groupUdids: ["ce06", "ce07"],
-      groupMode: true,
+      activeSync: { masterUdid: "ce06", targetUdids: ["ce06", "ce07"] },
     });
+    await waitForControlReady();
 
     // The phrase list lives behind its own menu row.
     fireEvent.click(getByRole("button", { name: "Câu nhanh" }));
@@ -723,8 +724,6 @@ describe("FocusStream control lease lifecycle", () => {
         device={fixture}
         index={1}
         onClose={() => undefined}
-        groupUdids={[]}
-        groupMode={false}
         devices={[fixture]}
         onSelectDevice={() => undefined}
       />,
@@ -750,8 +749,6 @@ describe("FocusStream control lease lifecycle", () => {
         device={fixture}
         index={1}
         onClose={() => undefined}
-        groupUdids={[]}
-        groupMode={false}
         devices={[fixture]}
         onSelectDevice={() => undefined}
       />,
@@ -774,8 +771,6 @@ describe("FocusStream control lease lifecycle", () => {
           device={fixture}
           index={1}
           onClose={() => undefined}
-          groupUdids={[]}
-          groupMode={false}
           devices={[fixture]}
           onSelectDevice={() => undefined}
           functions={[
@@ -812,7 +807,7 @@ describe("focus hardware controls", () => {
     vi.mocked(deviceControlBegin).mockResolvedValue(undefined);
     let finish!: () => void;
     vi.mocked(deviceKey).mockImplementation(() => new Promise(resolve => { finish = resolve; }));
-    const view = render(<FocusStream device={fixture} index={1} onClose={() => undefined} groupUdids={[]} groupMode={false} devices={[fixture]} onSelectDevice={() => undefined}/>);
+    const view = render(<FocusStream device={fixture} index={1} onClose={() => undefined} devices={[fixture]} onSelectDevice={() => undefined}/>);
     const home = view.getByRole("button", { name: "Home" });
     expect(home).toBeDisabled();
     await waitFor(() => expect(home).toBeEnabled());
@@ -826,7 +821,7 @@ describe("focus hardware controls", () => {
   });
   it("shows a failed control session and opens it again from the retry button", async () => {
     vi.mocked(deviceControlBegin).mockRejectedValueOnce(new Error("device offline")).mockResolvedValue(undefined);
-    const view = render(<FocusStream device={fixture} index={1} onClose={() => undefined} groupUdids={[]} groupMode={false} devices={[fixture]} onSelectDevice={() => undefined}/>);
+    const view = render(<FocusStream device={fixture} index={1} onClose={() => undefined} devices={[fixture]} onSelectDevice={() => undefined}/>);
     const retry = await view.findByRole("button", { name: "Thử lại điều khiển" });
     expect(view.getByTestId("focus-control-status")).toHaveTextContent("device offline");
     expect(view.getByRole("button", { name: "Home" })).toBeDisabled();
@@ -835,11 +830,155 @@ describe("focus hardware controls", () => {
   });
 });
 
+describe("active group sync input", () => {
+  const other: DeviceInfo = { ...fixture, udid: "ce07", name: "S8+" };
+  const activeSync: ActiveGroupSync = {
+    masterUdid: "ce06",
+    targetUdids: ["ce06", "ce07"],
+  };
+
+  beforeEach(() => {
+    liveTouchAvailable = false;
+    vi.mocked(groupInput).mockReset().mockResolvedValue({
+      completedUdids: ["ce06", "ce07"],
+      skipped: [],
+    });
+    vi.mocked(deviceSwipe).mockClear();
+    vi.mocked(deviceTap).mockClear();
+    vi.mocked(viewInjectTouch).mockClear();
+    vi.mocked(deviceControlBegin).mockReset().mockResolvedValue(undefined);
+    vi.mocked(deviceControlEnd).mockReset().mockResolvedValue(undefined);
+  });
+
+  it("reports preparing until every session is ready and blocks early input", async () => {
+    const release: Record<string, () => void> = {};
+    vi.mocked(deviceControlBegin).mockImplementation(
+      (udid) => new Promise<void>((resolve) => { release[udid] = resolve; }),
+    );
+    const onReadinessChange = vi.fn();
+    const view = render(
+      <FocusStream
+        device={fixture}
+        index={1}
+        onClose={() => undefined}
+        activeSync={activeSync}
+        onReadinessChange={onReadinessChange}
+        devices={[fixture, other]}
+        onSelectDevice={() => undefined}
+      />,
+    );
+    await waitFor(() => expect(deviceControlBegin).toHaveBeenCalledTimes(2));
+    expect(view.getByRole("button", { name: "Home" })).toBeDisabled();
+    expect(view.getByTestId("focus-control-status")).toHaveTextContent("Đang chuẩn bị 0/2 máy");
+    fireEvent.pointerDown(view.getByTestId("focus-screen"), {
+      button: 0,
+      clientX: 50,
+      clientY: 50,
+      pointerId: 1,
+    });
+    expect(groupInput).not.toHaveBeenCalled();
+
+    release.ce06();
+    await waitFor(() =>
+      expect(view.getByTestId("focus-control-status")).toHaveTextContent("Đang chuẩn bị 1/2 máy"),
+    );
+    release.ce07();
+    await waitFor(() =>
+      expect(view.getByTestId("focus-control-status")).toHaveTextContent("Đang hoạt động 2/2"),
+    );
+    expect(onReadinessChange).toHaveBeenLastCalledWith({
+      state: "active",
+      readyUdids: ["ce06", "ce07"],
+      failures: {},
+    });
+  });
+
+  it("fans wheel input through one master-aware group command", async () => {
+    const view = render(
+      <FocusStream device={fixture} index={1} onClose={() => undefined}
+        activeSync={activeSync} devices={[fixture, other]} onSelectDevice={() => undefined} />,
+    );
+    await waitForControlReady();
+    fireEvent.wheel(view.getByTestId("focus-screen"), { deltaY: 120 });
+    await waitFor(() => expect(groupInput).toHaveBeenCalledOnce());
+    expect(groupInput).toHaveBeenCalledWith(expect.objectContaining({
+      udids: ["ce06", "ce07"],
+      masterUdid: "ce06",
+      kind: "swipe",
+      imageW: 288,
+      imageH: 600,
+    }));
+    expect(deviceSwipe).not.toHaveBeenCalled();
+  });
+
+  it("uses one backend gesture for a non-noop policy", async () => {
+    setGroupSync({ delay: { mode: "staggered", stepMs: 250 }, offset: { maxPx: 8 } });
+    liveTouchAvailable = true;
+    const view = render(
+      <FocusStream device={fixture} index={1} onClose={() => undefined}
+        activeSync={activeSync} devices={[fixture, other]} onSelectDevice={() => undefined} />,
+    );
+    await waitForControlReady();
+    const pane = view.getByTestId("focus-screen");
+    mockRect(view.container.querySelector("canvas")!, { left: 0, top: 0, width: 288, height: 600 });
+    fireEvent.pointerDown(pane, { button: 0, clientX: 120, clientY: 240, pointerId: 1 });
+    fireEvent.pointerUp(pane, { button: 0, clientX: 120, clientY: 240, pointerId: 1 });
+    await waitFor(() => expect(groupInput).toHaveBeenCalledOnce());
+    expect(groupInput).toHaveBeenCalledWith(expect.objectContaining({
+      udids: ["ce06", "ce07"],
+      masterUdid: "ce06",
+      kind: "tap",
+      sync: { delay: { mode: "staggered", stepMs: 250 }, offset: { maxPx: 8 } },
+    }));
+    expect(viewInjectTouch).not.toHaveBeenCalled();
+    expect(deviceTap).not.toHaveBeenCalled();
+  });
+
+  it("does not replay no-op live taps through group_input", async () => {
+    liveTouchAvailable = true;
+    const view = render(
+      <FocusStream device={fixture} index={1} onClose={() => undefined}
+        activeSync={activeSync} devices={[fixture, other]} onSelectDevice={() => undefined} />,
+    );
+    await waitForControlReady();
+    const pane = view.getByTestId("focus-screen");
+    mockRect(view.container.querySelector("canvas")!, { left: 0, top: 0, width: 288, height: 600 });
+    fireEvent.pointerDown(pane, { button: 0, clientX: 120, clientY: 240, pointerId: 1 });
+    fireEvent.pointerUp(pane, { button: 0, clientX: 120, clientY: 240, pointerId: 1 });
+    await waitFor(() => expect(viewInjectTouch).toHaveBeenCalledTimes(4));
+    expect(groupInput).not.toHaveBeenCalled();
+    expect(deviceTap).not.toHaveBeenCalled();
+  });
+
+  it("degrades after a partial report and retry never replays the action", async () => {
+    vi.mocked(groupInput).mockResolvedValueOnce({
+      completedUdids: ["ce06"],
+      skipped: [{ udid: "ce07", code: "DeviceUnavailable", message: "device offline" }],
+    });
+    const view = render(
+      <FocusStream device={fixture} index={1} onClose={() => undefined}
+        activeSync={activeSync} devices={[fixture, other]} onSelectDevice={() => undefined} />,
+    );
+    await waitForControlReady();
+    fireEvent.click(view.getByRole("button", { name: "Home" }));
+    await waitFor(() =>
+      expect(view.getByTestId("focus-control-status")).toHaveTextContent("Cần xử lý 1 máy"),
+    );
+    expect(view.getByTestId("focus-control-status")).toHaveTextContent("device offline");
+    expect(view.getByRole("button", { name: "Home" })).toBeDisabled();
+    expect(groupInput).toHaveBeenCalledOnce();
+
+    fireEvent.click(view.getByRole("button", { name: "Thử lại điều khiển" }));
+    await waitFor(() => expect(view.getByRole("button", { name: "Home" })).toBeEnabled());
+    expect(groupInput).toHaveBeenCalledOnce();
+  });
+});
+
 it("coalesces wheel ticks while a swipe is pending and stops after closing", async () => {
   vi.mocked(deviceControlBegin).mockResolvedValue(undefined);
   let finish!: () => void;
   vi.mocked(deviceSwipe).mockReset().mockImplementationOnce(() => new Promise(resolve => { finish = resolve; })).mockResolvedValue(undefined);
-  const view = render(<FocusStream device={fixture} index={1} onClose={() => undefined} groupUdids={[]} groupMode={false} devices={[fixture]} onSelectDevice={() => undefined}/>);
+  const view = render(<FocusStream device={fixture} index={1} onClose={() => undefined} devices={[fixture]} onSelectDevice={() => undefined}/>);
   await waitFor(() => expect(view.getByRole("button", { name: "Home" })).toBeEnabled());
   const screen = view.getByTestId("focus-screen");
   fireEvent.wheel(screen, { deltaY: 120 });

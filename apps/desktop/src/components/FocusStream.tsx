@@ -3,7 +3,7 @@ import { createPortal } from "react-dom";
 import { DeviceContextMenu } from "./DeviceContextMenu";
 import type { DeviceInfo, GroupInputReport, HardwareKey } from "../types";
 import { groupInputOutcome } from "../groupInput";
-import { getGroupSync } from "../groupSync";
+import { getGroupSync, isNoopGroupSync, type ActiveGroupSync, type GroupSyncReadiness } from "../groupSync";
 import { recordSwipe, recordTap } from "../macroStore";
 import {
   deviceSwipe,
@@ -71,8 +71,8 @@ interface Props {
   /** 1-based index in the visible grid, shown in the sidebar header. */
   index: number;
   onClose: () => void;
-  groupUdids: string[];
-  groupMode: boolean;
+  activeSync?: ActiveGroupSync | null;
+  onReadinessChange?: (readiness: GroupSyncReadiness | null) => void;
   /**
    * The phones the operator can switch to without closing the overlay.
    *
@@ -112,8 +112,8 @@ export function FocusStream({
   device,
   index,
   onClose: onClosed,
-  groupUdids,
-  groupMode,
+  activeSync = null,
+  onReadinessChange,
   devices,
   onSelectDevice,
   functions = [],
@@ -169,6 +169,7 @@ export function FocusStream({
   const inFlight = useRef(false);
   const [actionPending, setActionPending] = useState(false);
   const [controlState, setControlState] = useState<{ key: string; ready: string[]; errors: Record<string, string> }>({ key: "", ready: [], errors: {} });
+  const [actionFailures, setActionFailures] = useState<Record<string, string>>({});
   const [controlRetry, setControlRetry] = useState(0);
   /// Devices whose overlay control session (`deviceControlBegin`) has finished opening.
   ///
@@ -181,11 +182,26 @@ export function FocusStream({
   /// readiness changing should not force a re-render.
   const controlReady = useRef<Set<string>>(new Set());
   const controlHandoff = useRef<Promise<void> | null>(null);
-  const targets =
-    groupMode && groupUdids.length > 1 ? groupUdids : [device.udid];
+  const targets = useMemo(
+    () => activeSync?.masterUdid === device.udid
+      ? activeSync.targetUdids
+      : [device.udid],
+    [activeSync, device.udid],
+  );
   const targetKey = targets.join("\0");
-  const sessionReady = controlState.key === targetKey && controlState.ready.length === targets.length;
-  const controlErrors = controlState.key === targetKey ? Object.values(controlState.errors) : [];
+  const controlErrors = useMemo(
+    () => controlState.key === targetKey ? controlState.errors : {},
+    [controlState.errors, controlState.key, targetKey],
+  );
+  const failures = useMemo(
+    () => ({ ...controlErrors, ...actionFailures }),
+    [actionFailures, controlErrors],
+  );
+  const failureCount = Object.keys(failures).length;
+  const sessionReady =
+    controlState.key === targetKey &&
+    controlState.ready.length === targets.length &&
+    failureCount === 0;
   const keyDisabled = busy || actionPending || !sessionReady;
   const isIos = device.platform === "ios";
 
@@ -205,6 +221,14 @@ export function FocusStream({
   const reportGroup = (report: GroupInputReport, quiet: boolean): boolean => {
     const outcome = groupInputOutcome(report);
     if (outcome.kind === "ok") return true;
+    setActionFailures(
+      Object.fromEntries(
+        report.skipped.map((skip) => [
+          skip.udid,
+          skip.message ?? skip.code,
+        ]),
+      ),
+    );
     if (outcome.kind === "none") {
       pushToast("error", outcome.title, outcome.detail);
       return false;
@@ -262,6 +286,7 @@ export function FocusStream({
     let cancelled = false;
     // Control is reopening for a new target set; nothing is ready until each begin lands.
     controlReady.current = new Set();
+    setActionFailures({});
     setControlState({ key: targetKey, ready: [], errors: {} });
     // One promise per device, kept so the cleanup queues behind the right one rather than
     // behind all of them: a slow phone must not delay releasing a fast one.
@@ -295,6 +320,25 @@ export function FocusStream({
       });
     };
   }, [targetKey, controlRetry]);
+
+  useEffect(() => {
+    if (!activeSync || activeSync.masterUdid !== device.udid) return;
+    const readyUdids = targets.filter((udid) => controlState.ready.includes(udid));
+    onReadinessChange?.({
+      state: failureCount > 0
+        ? "degraded"
+        : readyUdids.length === targets.length
+          ? "active"
+          : "preparing",
+      readyUdids,
+      failures,
+    });
+  }, [activeSync, controlState.ready, device.udid, failureCount, failures, onReadinessChange, targets]);
+
+  const retryControl = () => {
+    setActionFailures({});
+    setControlRetry((value) => value + 1);
+  };
 
   const runExclusive = async (work: () => Promise<void>) => {
     if (inFlight.current) {
@@ -355,35 +399,77 @@ export function FocusStream({
     let pendingTicks = 0;
     let sending = false;
     let disposed = false;
+    const wheelTargets = targetKey.split("\0").filter(Boolean);
+    const masterUdid = activeSync?.masterUdid;
     const drain = async () => {
-      if (sending || disposed || inFlight.current || !pendingTicks) return;
+      if (sending || disposed || inFlight.current || !pendingTicks || !sessionReady) return;
       sending = true;
       try {
         while (pendingTicks && !disposed) {
           const ticks = pendingTicks;
           pendingTicks = 0;
-          const x = encodedW / 2, startY = encodedH * 0.55;
-          await runExclusive(() => deviceSwipe(device.udid, x, startY, x,
-            Math.max(0, Math.min(encodedH - 1, startY - ticks * encodedH * 0.18)), encodedW, encodedH, 160));
+          const x = encodedW / 2;
+          const startY = encodedH * 0.55;
+          const toY = Math.max(
+            0,
+            Math.min(encodedH - 1, startY - ticks * encodedH * 0.18),
+          );
+          await runExclusive(async () => {
+            if (wheelTargets.length > 1) {
+              reportGroup(
+                await groupInput({
+                  udids: wheelTargets,
+                  masterUdid,
+                  kind: "swipe",
+                  x,
+                  y: startY,
+                  toX: x,
+                  toY,
+                  imageW: encodedW,
+                  imageH: encodedH,
+                  sync: getGroupSync(),
+                }),
+                true,
+              );
+            } else {
+              await deviceSwipe(
+                device.udid,
+                x,
+                startY,
+                x,
+                toY,
+                encodedW,
+                encodedH,
+                160,
+              );
+            }
+          });
         }
-      } catch (error) { pendingTicks = 0; toastError("Không cuộn được", error); }
-      finally { sending = false; }
+      } catch (error) {
+        pendingTicks = 0;
+        toastError("Không cuộn được", error);
+      } finally {
+        sending = false;
+      }
     };
     const onWheel = (event: WheelEvent) => {
       event.preventDefault();
       if (wheelWantsZoom(event)) {
-        setFrameWidth(width => stepZoom(FOCUS_ZOOM, width, event.deltaY));
+        setFrameWidth((width) => stepZoom(FOCUS_ZOOM, width, event.deltaY));
         return;
       }
-      if (!encodedW || !encodedH || !controlReady.current.has(device.udid)) return;
+      if (!encodedW || !encodedH || !sessionReady) return;
       if (inFlight.current && !sending) return;
-      // At most three original wheel steps; the endpoint stays inside the measured frame.
       pendingTicks = Math.max(-3, Math.min(3, pendingTicks + Math.sign(event.deltaY)));
       void drain();
     };
     screen.addEventListener("wheel", onWheel, { passive: false });
-    return () => { disposed = true; pendingTicks = 0; screen.removeEventListener("wheel", onWheel); };
-  }, [device.udid, encodedH, encodedW]);
+    return () => {
+      disposed = true;
+      pendingTicks = 0;
+      screen.removeEventListener("wheel", onWheel);
+    };
+  }, [activeSync?.masterUdid, device.udid, encodedH, encodedW, sessionReady, targetKey]);
 
   /// The most samples a single drag is allowed to carry.
   ///
@@ -412,20 +498,17 @@ export function FocusStream({
   ) => {
     const iw = encodedW;
     const ih = encodedH;
-    if (!iw || !ih || only.length === 0) return;
+    if (!iw || !ih || only.length === 0 || !sessionReady) return;
     const dist = Math.hypot(end.x - start.x, end.y - start.y);
-    // Macro recording (A8): capture the logical gesture once, in reference-image space, the
-    // same coordinates group_input replays. No-ops unless recording is armed in Group Tools.
+    const policy = getGroupSync();
+    const groupSession = activeSync?.masterUdid === device.udid ? activeSync : null;
+    const liveAllowed = canDragLive && (!groupSession || isNoopGroupSync(policy));
     if (dist < TAP_SLOP) recordTap(end.x, end.y, iw, ih);
     else recordSwipe(start.x, start.y, end.x, end.y, iw, ih);
     await runExclusive(async () => {
       let remaining = only;
       if (dist < TAP_SLOP) {
-        // Down the control socket first, and not for the milliseconds: it is the one input
-        // path that does not depend on uiautomator2, so it still works on a phone whose
-        // agent has lost UiAutomation -- the state that otherwise costs tens of seconds per
-        // tap, or refuses every one of them (AGENTS.md 9.79).
-        if (canDragLive) {
+        if (liveAllowed) {
           const outcomes = await Promise.all(
             remaining.map(async (udid) => ({
               udid,
@@ -433,8 +516,7 @@ export function FocusStream({
                 (action, x, y) => viewInjectTouch(udid, action, x, y, iw, ih),
                 end.x,
                 end.y,
-                (reason) =>
-                  console.warn(`live tap fell back on ${udid}: ${reason}`),
+                (reason) => console.warn(`live tap fell back on ${udid}: ${reason}`),
               ),
             })),
           );
@@ -443,33 +525,32 @@ export function FocusStream({
             .map((row) => row.udid);
           if (remaining.length === 0) return;
         }
-        if (remaining.length > 1) {
+        if (groupSession) {
           reportGroup(
             await groupInput({
               udids: remaining,
+              masterUdid: remaining.includes(groupSession.masterUdid)
+                ? groupSession.masterUdid
+                : undefined,
               kind: "tap",
               x: end.x,
               y: end.y,
               imageW: iw,
               imageH: ih,
-              sync: getGroupSync(),
+              sync: policy,
             }),
             true,
           );
         } else {
           await deviceTap(remaining[0], end.x, end.y, iw, ih);
         }
-      } else if (remaining.length > 1) {
-        // Group control has no path command; the endpoints are what every device gets.
-        //
-        // Which is why this is now the *fallback* rather than the road every group gesture
-        // took. Two endpoints replayed at constant speed is a drag, and a drag is measurably
-        // weaker than the flick the operator drew: 13 of 40 against 19 of 19 on a TikTok
-        // carousel, measured 19/08/2026. The phones that could take it live already have the
-        // real shape; these are the ones that could not.
+      } else if (groupSession) {
         reportGroup(
           await groupInput({
             udids: remaining,
+            masterUdid: remaining.includes(groupSession.masterUdid)
+              ? groupSession.masterUdid
+              : undefined,
             kind: "swipe",
             x: start.x,
             y: start.y,
@@ -477,14 +558,13 @@ export function FocusStream({
             toY: end.y,
             imageW: iw,
             imageH: ih,
-            sync: getGroupSync(),
+            sync: policy,
           }),
           true,
         );
       } else if (steps.length >= 2) {
         await deviceSwipePath(remaining[0], start, steps, iw, ih);
       } else {
-        // Too few samples to be a path -- a fast flick the pointer only reported twice.
         await deviceSwipe(
           remaining[0],
           start.x,
@@ -512,7 +592,8 @@ export function FocusStream({
   } = useFocusActions({
     device,
     targets,
-    controlReady,
+    masterUdid: activeSync?.masterUdid,
+    inputReady: sessionReady,
     reportGroup,
     runExclusive,
     runBusy,
@@ -785,7 +866,7 @@ export function FocusStream({
           style={{ width: layout.screenWidth, height: layout.screenHeight }}
           title="Ctrl + lăn chuột để phóng to / thu nhỏ"
           onPointerDown={(e) => {
-            if (busy || inFlight.current || e.button !== 0) return;
+            if (busy || inFlight.current || !sessionReady || e.button !== 0) return;
             // Said out loud rather than dropped. A gesture needs the encoded frame size to
             // map through, and without it this handler used to return in silence -- so on a
             // phone that had not painted yet the operator could click the picture as long as
@@ -845,8 +926,8 @@ export function FocusStream({
             if (
               !held.live &&
               canDragLive &&
-              Math.hypot(point.x - held.start.x, point.y - held.start.y) >=
-                TAP_SLOP
+              (!activeSync || isNoopGroupSync(getGroupSync())) &&
+              Math.hypot(point.x - held.start.x, point.y - held.start.y) >= TAP_SLOP
             ) {
               held.live = createLiveDragGroup(
                 targets.map((udid) => ({
@@ -854,13 +935,7 @@ export function FocusStream({
                   send: (action, x, y) =>
                     viewInjectTouch(udid, action, x, y, encodedW, encodedH),
                 })),
-                // Not a toast: the gesture still reaches the phone the old way, so there is
-                // nothing for the operator to do about it. It goes to the console so that a
-                // silently dead live path is findable.
                 (reason) => console.warn(`live drag fell back: ${reason}`),
-                // Same anti-detection jitter the batch path applies, so a live group-drag is
-                // not twenty pixel-identical paths. 0 (the default policy) is a no-op.
-                getGroupSync().offset?.maxPx ?? 0,
               );
               held.live.begin(held.start.x, held.start.y);
             }
@@ -970,12 +1045,9 @@ export function FocusStream({
               <GripVertical size={15} aria-hidden="true"/><span className="focus-machine-number">{index}</span>
               <strong title={`Máy ${index} · ${device.name} (${device.udid})`}>{device.name}</strong>
             </div>
-            {groupMode && targets.length > 1 && (
-              <span
-                className="focus-menu-group"
-                title={`Đồng bộ ${targets.length} máy`}
-              >
-                ×{targets.length}
+            {activeSync && (
+              <span className="focus-menu-group">
+                Máy chính: Máy {index} · {targets.length - 1} máy nhận
               </span>
             )}
             {/* Read-only, from the device poll that already carries it. `—` rather than a
@@ -1023,9 +1095,30 @@ export function FocusStream({
             </button>
           </header>
           {recordingControls}
-          {controlErrors.length > 0 && <div className="focus-control-status" aria-live="polite" data-testid="focus-control-status">
-            {controlErrors.length > 0 && <><p>{controlErrors.join(" · ")}</p><button type="button" onClick={() => setControlRetry(value => value + 1)}>Thử lại điều khiển</button></>}
-          </div>}
+          {(activeSync || failureCount > 0) && (
+            <div className="focus-control-status" aria-live="polite" data-testid="focus-control-status">
+              <strong>
+                {failureCount > 0
+                  ? `Cần xử lý ${failureCount} máy`
+                  : sessionReady
+                    ? `Đang hoạt động ${targets.length}/${targets.length}`
+                    : `Đang chuẩn bị ${controlState.ready.length}/${targets.length} máy`}
+              </strong>
+              {failureCount > 0 && (
+                <ul>
+                  {Object.entries(failures).map(([udid, reason]) => (
+                    <li key={udid}>
+                      <strong>{devices.find((candidate) => candidate.udid === udid)?.name ?? udid}</strong>
+                      <span>{reason}</span>
+                    </li>
+                  ))}
+                </ul>
+              )}
+              {failureCount > 0 && (
+                <button type="button" onClick={retryControl}>Thử lại điều khiển</button>
+              )}
+            </div>
+          )}
           <div className="focus-quick-keys" aria-label="Phím nhanh" hidden>
             {!isIos && <>
               <button type="button" title="Giảm âm lượng" aria-label="Giảm âm lượng" disabled={keyDisabled} onClick={() => void pressKey("volumeDown")}><IconVolumeDown size={17}/></button>

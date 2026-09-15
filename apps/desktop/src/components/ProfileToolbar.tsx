@@ -1,14 +1,20 @@
-import type { DeviceInfo, DeviceMeta } from "../types";
 import { useRef, useState } from "react";
+import { ChevronDown, FolderKanban, RefreshCcw, SlidersHorizontal, Wrench } from "lucide-react";
+
+import type { ActiveGroupSync, GroupSyncReadiness } from "../groupSync";
+import type { DeviceInfo, DeviceMeta } from "../types";
 import { tileName } from "../deviceNaming";
-import { GroupSyncSection } from "./settings/GroupSyncSection";
-import { IconPhone, IconRefresh } from "./Icons";
 import { toastError } from "../toastStore";
-import { FolderKanban, SlidersHorizontal, Wrench, RefreshCcw, ChevronDown } from "lucide-react";
+import { IconPhone, IconRefresh } from "./Icons";
+import { GroupSyncSection } from "./settings/GroupSyncSection";
 
 interface Props {
-  controlCenter?: string | null;
-  onControlCenter?: (udid: string | null) => void;
+  activeSync: ActiveGroupSync | null;
+  readiness: GroupSyncReadiness | null;
+  resolvedMasterUdid: string | null;
+  onMasterChange: (udid: string | null) => void;
+  onEnableSync: (masterUdid: string) => void;
+  onDisableSync: () => void;
   deviceNumbers?: Map<string, number>;
   metas?: Map<string, DeviceMeta>;
   selected: DeviceInfo[];
@@ -16,35 +22,37 @@ interface Props {
   onStart: () => void | Promise<void>;
   onStop: () => void;
   onInstall: () => void | Promise<void>;
-  onSync: () => void;
   onRefresh: () => void | Promise<void>;
   onGroupTools: () => void;
   onGroups: () => void;
   groupsOpen: boolean;
   groupToolsOpen: boolean;
-  syncOn: boolean;
 }
 
 export function ProfileToolbar({
+  activeSync,
+  readiness,
+  resolvedMasterUdid,
+  onMasterChange,
+  onEnableSync,
+  onDisableSync,
   selected,
   deviceCount,
   onStart,
   onStop,
   onInstall,
-  onSync,
   onRefresh,
   onGroupTools,
   onGroups,
   groupsOpen,
   groupToolsOpen,
-  syncOn,
-  controlCenter,
-  onControlCenter,
   deviceNumbers,
   metas,
 }: Props) {
   const [syncOpen, setSyncOpen] = useState(false);
   const syncTrigger = useRef<HTMLButtonElement>(null);
+  const ready = new Set(readiness?.readyUdids ?? []);
+  const failures = readiness?.failures ?? {};
   const labelFor = (device: DeviceInfo) => {
     const meta = metas?.get(device.udid);
     const number = deviceNumbers?.get(device.udid) ?? meta?.number;
@@ -53,6 +61,29 @@ export function ProfileToolbar({
   const any = selected.length;
   const canBatch = deviceCount > 0;
   const scope = any ? `đã chọn (${any})` : `toàn bộ (${deviceCount})`;
+  const masterValid = Boolean(
+    resolvedMasterUdid && selected.some((device) => device.udid === resolvedMasterUdid),
+  );
+  const disconnected = selected.filter((device) => device.status === "disconnected");
+  const enableReason = selected.length < 2
+    ? "Chọn ít nhất hai máy để bật đồng bộ."
+    : !masterValid
+      ? "Chọn lại một máy chính trong phạm vi."
+      : disconnected.length > 0
+        ? `${disconnected.map(labelFor).join(", ")} đang ngoại tuyến.`
+        : null;
+  const status = !activeSync
+    ? "Đang tắt"
+    : readiness?.state === "active"
+      ? `Đang hoạt động ${readiness.readyUdids.length}/${activeSync.targetUdids.length}`
+      : readiness?.state === "degraded"
+        ? `Cần xử lý ${Object.keys(failures).length} máy`
+        : `Đang chuẩn bị ${readiness?.readyUdids.length ?? 0}/${activeSync.targetUdids.length}`;
+
+  const closeSyncPanel = () => {
+    setSyncOpen(false);
+    syncTrigger.current?.focus();
+  };
 
   return (
     <div className="profile-toolbar" role="group" aria-label="Thao tác thiết bị">
@@ -63,8 +94,8 @@ export function ProfileToolbar({
         onClick={async () => {
           try {
             await onStart();
-          } catch (e) {
-            toastError("Khởi động thất bại", e);
+          } catch (error) {
+            toastError("Khởi động thất bại", error);
           }
         }}
         title={`Mở luồng xem cho ${scope}`}
@@ -74,49 +105,87 @@ export function ProfileToolbar({
       </button>
       <button
         type="button"
-        className={`tb-btn ${syncOn ? "active" : ""}`}
+        className={`tb-btn ${activeSync ? "active" : ""}`}
         ref={syncTrigger}
         aria-expanded={syncOpen}
         aria-controls="toolbar-sync-panel"
-        onClick={() => setSyncOpen(open => !open)}
+        onClick={() => setSyncOpen((open) => !open)}
         title="Đồng bộ thao tác trên nhóm máy đã chọn"
       >
-        <RefreshCcw size={16} aria-hidden="true" />Đồng bộ{syncOn ? " · Bật" : ""}
+        <RefreshCcw size={16} aria-hidden="true" />
+        {activeSync ? `Đồng bộ · ${activeSync.targetUdids.length} máy` : "Đồng bộ"}
       </button>
-      <button
-        type="button"
-        className={`tb-btn ${groupsOpen ? "active" : ""}`}
-        aria-expanded={groupsOpen}
-        onClick={onGroups}
-        title="Chia fleet thành nhóm — mỗi máy thuộc đúng một nhóm"
-      >
+      <button type="button" className={`tb-btn ${groupsOpen ? "active" : ""}`} aria-expanded={groupsOpen} onClick={onGroups} title="Chia fleet thành nhóm — mỗi máy thuộc đúng một nhóm">
         <FolderKanban size={16} aria-hidden="true" />Nhóm
       </button>
-      <button
-        type="button"
-        className={`tb-btn ${groupToolsOpen ? "active" : ""}`}
-        aria-expanded={groupToolsOpen}
-        data-group-tools
-        onClick={onGroupTools}
-        title="Công cụ nhóm: phân phối văn bản/tệp…"
-      >
+      <button type="button" className={`tb-btn ${groupToolsOpen ? "active" : ""}`} aria-expanded={groupToolsOpen} data-group-tools onClick={onGroupTools} title="Công cụ nhóm: phân phối văn bản/tệp…">
         <SlidersHorizontal size={16} aria-hidden="true" />Công cụ
       </button>
-      {syncOpen && <section id="toolbar-sync-panel" className="toolbar-sync-panel" aria-label="Điều khiển đồng bộ" onKeyDown={event=>{
-        if(event.key==="Escape") {event.preventDefault();event.stopPropagation();setSyncOpen(false);syncTrigger.current?.focus();}
-      }}>
-        <div className="toolbar-sync-heading"><div><strong>Đồng bộ thao tác</strong><span>{syncOn?"Đang bật":"Đang tắt"} · {selected.length} máy đã chọn</span></div>
-          <button type="button" className="tb-btn" onClick={()=>{setSyncOpen(false);syncTrigger.current?.focus();}}>Đóng đồng bộ</button>
-        </div>
-        <p className="hint">Chạm, vuốt, gõ và phím trên máy chính sẽ gửi tới nhóm đã chọn. Máy đang bận sẽ báo lỗi riêng.</p>
-        <label className="toolbar-sync-master">Máy chính <select value={controlCenter??""} onChange={e=>onControlCenter?.(e.target.value||null)}>
-          <option value="">Máy đang mở</option>{controlCenter&&!selected.some(d=>d.udid===controlCenter)&&<option value={controlCenter}>Máy chính nằm ngoài nhóm — chọn lại</option>}{selected.map(d=><option key={d.udid} value={d.udid}>{labelFor(d)}</option>)}
-        </select></label>
-        <div className="toolbar-sync-targets" aria-label="Máy nhận thao tác">{selected.map(device=><span key={device.udid}>{labelFor(device)}</span>)}</div>
-        <button type="button" className={`tb-btn ${syncOn?"active":"primary"}`} aria-pressed={syncOn} disabled={!syncOn&&(selected.length<2||Boolean(controlCenter&&!selected.some(d=>d.udid===controlCenter)))} onClick={onSync}>{syncOn?"Tắt đồng bộ thao tác":"Bật đồng bộ thao tác"}</button>
-        {selected.length<2&&<p>Chọn ít nhất hai máy để bật đồng bộ.</p>}
-        <details className="toolbar-sync-options"><summary>Độ trễ và độ lệch thao tác</summary><GroupSyncSection /></details>
-      </section>}
+      {syncOpen && (
+        <section
+          id="toolbar-sync-panel"
+          className="toolbar-sync-panel"
+          aria-label="Điều khiển đồng bộ"
+          onKeyDown={(event) => {
+            if (event.key !== "Escape") return;
+            event.preventDefault();
+            event.stopPropagation();
+            closeSyncPanel();
+          }}
+        >
+          <div className="toolbar-sync-heading">
+            <div><strong>Đồng bộ thao tác</strong><span>{status}</span></div>
+            <button type="button" className="tb-btn" onClick={closeSyncPanel}>Đóng bảng</button>
+          </div>
+          <p className="hint">Máy chính là màn hình điều khiển. Thao tác chỉ mở sau khi toàn bộ phiên sẵn sàng.</p>
+          <label className="toolbar-sync-master">
+            Máy chính
+            <select value={resolvedMasterUdid ?? ""} onChange={(event) => onMasterChange(event.target.value || null)}>
+              {!resolvedMasterUdid && <option value="">Chọn máy chính</option>}
+              {selected.map((device) => <option key={device.udid} value={device.udid}>{labelFor(device)}</option>)}
+            </select>
+          </label>
+          <div className="toolbar-sync-targets" aria-label="Máy nhận thao tác">
+            {selected.map((device) => {
+              const master = device.udid === (activeSync?.masterUdid ?? resolvedMasterUdid);
+              const failure = failures[device.udid];
+              const sessionState = device.status === "disconnected"
+                ? "Ngoại tuyến"
+                : failure
+                  ? "Cần xử lý"
+                  : activeSync
+                    ? ready.has(device.udid) ? "Sẵn sàng" : "Đang chuẩn bị"
+                    : "Đã chọn";
+              return (
+                <div className="toolbar-sync-target" key={device.udid} data-state={failure ? "error" : sessionState.toLowerCase()}>
+                  <div><strong>{labelFor(device)}</strong><span>{master ? "Máy chính" : "Máy nhận"}</span></div>
+                  <div className="toolbar-sync-target-state"><span>{sessionState}</span>{failure && <small>{failure}</small>}</div>
+                </div>
+              );
+            })}
+          </div>
+          <div className="toolbar-sync-actions">
+            {activeSync ? (
+              <button type="button" className="tb-btn danger" onClick={onDisableSync}>Tắt đồng bộ</button>
+            ) : (
+              <button
+                type="button"
+                className="tb-btn primary"
+                disabled={Boolean(enableReason)}
+                onClick={() => {
+                  if (!resolvedMasterUdid) return;
+                  onEnableSync(resolvedMasterUdid);
+                  closeSyncPanel();
+                }}
+              >
+                Bật đồng bộ thao tác
+              </button>
+            )}
+            {enableReason && <p role="status">{enableReason}</p>}
+          </div>
+          <details className="toolbar-sync-options"><summary>Độ trễ và độ lệch thao tác</summary><GroupSyncSection /></details>
+        </section>
+      )}
       <span className="toolbar-scope">{any ? `${any} máy đã chọn` : `${deviceCount} máy trong hệ thống`}</span>
       {any > 0 && <button type="button" className="tb-btn" onClick={onStop} title="Bỏ chọn">Bỏ chọn ({any})</button>}
       <div className="grow" />
@@ -130,11 +199,10 @@ export function ProfileToolbar({
         <div className="toolbar-maintenance-menu">
           <strong>Bảo trì thiết bị</strong>
           <span>{any ? `${any} máy đã chọn` : "Các máy đang kết nối"}</span>
-          <button type="button" className="tb-btn" disabled={!canBatch}
-            onClick={async (event) => {
-              event.currentTarget.closest("details")?.removeAttribute("open");
-              try { await onInstall(); } catch (e) { toastError("Sửa agent thất bại", e); }
-            }} title={`Cài hoặc khôi phục Riviu Agent cho ${scope}`}>
+          <button type="button" className="tb-btn" disabled={!canBatch} onClick={async (event) => {
+            event.currentTarget.closest("details")?.removeAttribute("open");
+            try { await onInstall(); } catch (error) { toastError("Sửa agent thất bại", error); }
+          }} title={`Cài hoặc khôi phục Riviu Agent cho ${scope}`}>
             <Wrench size={16} aria-hidden="true" />Sửa Riviu Agent
           </button>
         </div>

@@ -53,7 +53,8 @@ chia giữa hai server vẫn hiện đủ trong một lưới. Có thể giới 
 Cửa sổ điện thoại có màn hình bên trái, bảng lệnh bên phải, phím điều hướng cố định
 phía dưới. Chỉ có một cửa sổ phóng to: chọn máy B khi A đang mở sẽ chuyển sang B
 trong cùng cửa sổ và trả phiên điều khiển A. Ctrl/Shift chọn nhiều máy vẫn chỉ đổi
-phạm vi chọn. Khi bật Đồng bộ, máy chính đã chỉ định tiếp tục điều khiển nhóm.
+phạm vi chọn. Bật **Đồng bộ** tự mở máy chính, chuẩn bị phiên cho toàn bộ nhóm và chỉ
+nhận chạm, vuốt, lăn chuột, phím hoặc chữ khi trạng thái là **Đang hoạt động N/N**.
 Kéo tiêu đề có số máy để di chuyển, kéo góc dưới phải để đổi kích thước. Trang chính
 vẫn dùng được khi cửa sổ mở. Nút Đóng hoặc Escape đóng cửa sổ đang thao tác. Tìm chức năng lọc toàn bộ bảng;
 các lệnh chưa dùng được vẫn hiện lý do/trạng thái theo máy.
@@ -83,10 +84,14 @@ Mỗi kết nối chỉ có một lần thử cài, không lặp cài liên tụ
 chấp nhận gỡ lỗi USB hoặc mất kết nối chưa bắt đầu cài.
 
 Thanh công cụ đặt **Mở máy**, **Đồng bộ**, **Nhóm** và **Công cụ** cạnh phạm vi máy.
-**Đồng bộ** mở bảng chọn máy chính, xem các máy nhận thao tác và bật/tắt đồng bộ.
-Chọn ít nhất hai máy, bật đồng bộ rồi mở màn hình máy chính để điều khiển.
-Mục **Độ trễ và độ lệch thao tác** dùng chung cấu hình trong Cài đặt; bấm Áp dụng
-để lưu. Mở hoặc đóng bảng không tự bật đồng bộ.
+**Đồng bộ** mở bảng chọn máy chính, xem từng máy nhận cùng trạng thái phiên và bật/tắt
+đồng bộ. Chọn ít nhất hai máy đang kết nối rồi bấm bật; cửa sổ máy chính tự mở. Phạm
+vi được khóa cho lượt đó: đổi lựa chọn, máy chính hoặc roster sẽ tắt đồng bộ, giữ cửa
+sổ máy chính ở chế độ một máy và yêu cầu kiểm tra rồi bật lại. Lỗi một máy chuyển nhóm
+sang **Cần xử lý**; **Thử lại điều khiển** chỉ mở lại phiên, không phát lại thao tác cũ.
+Mục **Độ trễ và độ lệch thao tác** dùng chung cấu hình trong Cài đặt; bấm Áp dụng để
+lưu. Máy chính luôn nhận ngay tại đúng tọa độ; độ trễ và độ lệch chỉ áp cho máy nhận.
+Mở hoặc đóng bảng không tự bật đồng bộ.
 
 Chuột phải trên ô máy hoặc ngay trên màn hình stream, chọn **Đọc và gán nick TikTok**
 để mở Hồ sơ và lưu username vào danh sách thiết bị. Chuột phải trên một máy đã chọn

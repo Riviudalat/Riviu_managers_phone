@@ -36,12 +36,12 @@ export function GroupSyncSection() {
         <span className="settings-save-state" data-dirty={dirty}>{dirty ? "Chưa áp dụng" : "Đã áp dụng"}</span>
       </div>
       <p className="hint">
-        Độ trễ và lệch toạ độ chỉ áp khi điều khiển ít nhất hai máy; đặt cả hai về tắt để phát đồng loạt.
+        Máy chính nhận ngay tại đúng toạ độ; độ trễ và độ lệch chỉ áp cho máy nhận.
       </p>
       <details className="settings-details" aria-label="Cách đồng bộ nhóm">
         <summary>Cách đồng bộ nhóm</summary>
         <p className="hint">
-          Chạm, vuốt, gõ và phím được phát tới từng máy theo chính sách đã chọn. Điều khiển một máy không dùng các giá trị này.
+          Chạm, vuốt, gõ và phím dùng cùng phạm vi đã khóa khi bật. Điều khiển một máy không dùng các giá trị này.
         </p>
       </details>
       <div className="row">

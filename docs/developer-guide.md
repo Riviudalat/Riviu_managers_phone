@@ -92,6 +92,13 @@ khi đổi máy; key React giữ ổn định. Handoff chờ end của máy cũ 
 registry theo UDID giữ refcount cho điều khiển nhóm. Bộ test giữ ca begin/end chồng
 nhau, đổi máy khi phiên chưa đóng, và chọn trang khi máy đang mở. Bảng tệp dùng portal
 ngoài stage transform để giữ đúng modal/focus và không bị menu cuộn cắt nội dung.
+Phiên Đồng bộ thuộc `App.tsx`: snapshot gồm máy chính và target bất biến, không lưu qua
+restart. `FocusStream` duy nhất của máy chính mở toàn bộ control session, báo
+preparing/active/degraded và chặn input khi chưa active. Mọi `group_input` từ cửa sổ
+này mang `masterUdid`; backend khử trùng, đặt master đầu tiên, áp policy chỉ cho follower
+và poll fan-out đồng thời. Đổi selection/master/roster tắt phiên; retry chỉ mở session,
+không replay input không idempotent.
+
 Ba workspace cũ vẫn là đích mặc định; graph chỉ mở qua Thêm Flow. Trạng thái ẩn từng
 nhóm sidebar và bảng Hiển thị là preference cục bộ, không đổi cấu hình chiến dịch.
 Rail lưu `riviu.control.displayPinned`; hover dùng overlay không đổi chiều rộng lưới,

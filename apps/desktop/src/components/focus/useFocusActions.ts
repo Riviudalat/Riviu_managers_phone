@@ -1,4 +1,3 @@
-import type { MutableRefObject } from "react";
 import type { HardwareKey } from "../../types";
 import { getGroupSync } from "../../groupSync";
 import { recordKey } from "../../macroStore";
@@ -29,10 +28,9 @@ import type { DeviceInfo, GroupInputReport } from "../../types";
 /// in the component because the busy flag they drive is component state.
 export type FocusActionDeps = {
   device: DeviceInfo;
-  /// This phone alone, or the whole group when group mode is on.
   targets: string[];
-  /// Phones whose manual-session lease is already open, so a gesture need not wait again.
-  controlReady: MutableRefObject<Set<string>>;
+  masterUdid?: string;
+  inputReady: boolean;
   reportGroup: (report: GroupInputReport, quiet: boolean) => boolean;
   runExclusive: (work: () => Promise<void>) => Promise<void>;
   runBusy: (work: () => Promise<void>) => Promise<boolean>;
@@ -48,17 +46,15 @@ export type FocusActionDeps = {
 export function useFocusActions({
   device,
   targets,
-  controlReady,
+  masterUdid,
+  inputReady,
   reportGroup,
   runExclusive,
   runBusy,
 }: FocusActionDeps) {
   const pressKey = async (key: HardwareKey) => {
-    // Single-device gestures go through the manual-session lease; wait for control to open
-    // rather than race it. The group path (`group_input`) skips and reports per device, so
-    // it needs no gate.
-    if (targets.length <= 1 && !controlReady.current.has(device.udid)) {
-      pushToast("warn", "Đang mở điều khiển", "Đợi một giây rồi thử lại.");
+    if (!inputReady) {
+      pushToast("warn", "Điều khiển chưa sẵn sàng", "Thử lại điều khiển hoặc tắt đồng bộ.");
       return;
     }
     try {
@@ -68,6 +64,7 @@ export function useFocusActions({
           reportGroup(
             await groupInput({
               udids: targets,
+              masterUdid,
               kind: "key",
               key,
               sync: getGroupSync(),
@@ -89,8 +86,8 @@ export function useFocusActions({
   /// agent's `ACTION_SET_TEXT` — the only route here that carries Vietnamese diacritics.
   /// `adb shell input text` is killed outright by them.
   const sendPhrase = async (phrase: QuickPhrase) => {
-    if (targets.length <= 1 && !controlReady.current.has(device.udid)) {
-      pushToast("warn", "Đang mở điều khiển", "Đợi một giây rồi thử lại.");
+    if (!inputReady) {
+      pushToast("warn", "Điều khiển chưa sẵn sàng", "Thử lại điều khiển hoặc tắt đồng bộ.");
       return;
     }
     try {
@@ -100,6 +97,7 @@ export function useFocusActions({
           delivered = reportGroup(
             await groupInput({
               udids: targets,
+              masterUdid,
               kind: "type",
               text: phrase.content,
               sync: getGroupSync(),

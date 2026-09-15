@@ -10,6 +10,17 @@
 import { useSyncExternalStore } from "react";
 import type { DelayPolicy, GroupSyncPolicy } from "./types";
 
+export interface ActiveGroupSync {
+  masterUdid: string;
+  targetUdids: string[];
+}
+
+export interface GroupSyncReadiness {
+  state: "preparing" | "active" | "degraded";
+  readyUdids: string[];
+  failures: Record<string, string>;
+}
+
 const KEY = "riviu.groupSync";
 
 export function defaultGroupSync(): GroupSyncPolicy {

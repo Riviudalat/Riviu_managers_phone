@@ -287,6 +287,7 @@ export async function deviceControlEnd(udid: string) {
 
 export async function groupInput(payload: {
   udids: string[];
+  masterUdid?: string;
   kind: string;
   x?: number;
   y?: number;
@@ -302,6 +303,7 @@ export async function groupInput(payload: {
   // twenty-phone action that reached zero of them resolved as a success and toasted nothing.
   return invoke<GroupInputReport>("group_input", {
     udids: payload.udids,
+    masterUdid: payload.masterUdid ?? null,
     kind: payload.kind,
     x: payload.x ?? null,
     y: payload.y ?? null,
