@@ -967,7 +967,7 @@ pub async fn device_set_clipboard(
         &state,
         &udid,
         DeviceWorkOwner::ManualControl,
-        move |session| async move { session.set_clipboard("text/plain", text.as_bytes()).await },
+        move |session| async move { session.set_clipboard("plaintext", text.as_bytes()).await },
     )
     .await
 }

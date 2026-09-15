@@ -1429,6 +1429,108 @@ class DeclaredResourcesAreVerified(unittest.TestCase):
             payload.write_bytes(b"Riviu packaged fixture")
             artifacts.verify_clean_room_installed_tree(root)
 
+    def test_installed_payload_rejects_operational_files_even_outside_resource_map(self):
+        cases = {
+            "riviu.db": b"database",
+            "backup/OPERATIONAL.DB-WAL": b"wal",
+            "sidecars/cache/history.sqlite3": b"database",
+            "sidecars/publish-sheet/connection.json": b"{}",
+            "sidecars/Publish-Sheet/CONNECTION.JSON": b"{}",
+            "target/publication-acceptance-20260914/photo.png": b"image",
+            "publication-followthrough-20260915/caption.txt": b"caption",
+            "media/post.mp4": b"video",
+            "exports/partners.xlsx": b"workbook",
+            "renamed-history.bin": b"SQLite format 3\x00" + bytes(128),
+            "settings/local.json": b'{"connection":{"webhookUrl":"https://fixture.invalid/exec","token":"fixture-secret"}}',
+            "settings/destination.json": b'{"sheetUrl":"https://docs.google.com/spreadsheets/d/fixture/edit#gid=0"}',
+        }
+        for relative, content in cases.items():
+            with self.subTest(relative=relative), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                payload = root / relative
+                payload.parent.mkdir(parents=True, exist_ok=True)
+                payload.write_bytes(content)
+                with self.assertRaisesRegex(artifacts.ArtifactError, "operational data") as raised:
+                    artifacts.verify_clean_room_installed_tree(root)
+                self.assertNotIn("fixture-secret", str(raised.exception))
+
+    def test_installed_payload_keeps_runtime_libraries_docs_and_manifest_data(self):
+        files = {
+            "sidecars/pymobiledevice3/runtime/_internal/sqlite3.dll": b"MZ-library",
+            "sidecars/pymobiledevice3/runtime/_internal/sqlite3.py": b"# SQLite runtime module",
+            "sidecars/gui-service/gui-service-manifest.json": b'{"files":[{"path":"fixture.dll","sha256":"abcd"}]}',
+            "sidecars/README.md": b"Configure webhookUrl and token in the app. Export files may use .db or .mp4.",
+            "sidecars/tool/docs/example.csv": b"name,value\nfixture,1\n",
+            "sidecars/wda/logo.jpg": b"fixture logo",
+            "sidecars/tool/schema.json": b'{"properties":{"webhookUrl":{"type":"string"},"token":{"type":"string"}}}',
+            "sidecars/tool/defaults.json": b'{"webhookUrl":"","token":""}',
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            root=Path(temporary)
+            for relative, content in files.items():
+                payload=root/relative
+                payload.parent.mkdir(parents=True,exist_ok=True)
+                payload.write_bytes(content)
+            artifacts.verify_clean_room_installed_tree(root)
+
+    def test_installed_payload_rejects_google_oauth_secret_and_token_values(self):
+        for field in (
+            "client_secret", "refresh_token", "access_token",
+            "clientSecret", "refreshToken", "accessToken",
+        ):
+            with self.subTest(field=field), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                payload = root / "renamed-settings.json"
+                payload.write_text(json.dumps({"accounts": [{"secrets": {
+                    field: "fixture-private-oauth-value",
+                }}]}), encoding="utf-8")
+                with self.assertRaisesRegex(artifacts.ArtifactError, "OAuth credential") as raised:
+                    artifacts.verify_clean_room_installed_tree(root)
+                self.assertNotIn("fixture-private-oauth-value", str(raised.exception))
+
+    def test_installed_payload_rejects_google_oauth_config_and_renamed_json_content(self):
+        cases = [
+            ("data/config.json", {"google": {"clientId": "fixture.apps.googleusercontent.com",
+                                            "pickerApiKey": "fixture-private-api-key"}}),
+            ("data/config.bin", {"client_id": "fixture.apps.googleusercontent.com",
+                                 "api_key": "fixture-private-api-key"}),
+            ("data/renamed-token.dat", [{"nested": {"refreshToken": "fixture-private-refresh"}}]),
+        ]
+        for relative, value in cases:
+            with self.subTest(relative=relative), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                payload = root / relative
+                payload.parent.mkdir(parents=True)
+                payload.write_text("\n  " + json.dumps(value), encoding="utf-8-sig")
+                with self.assertRaisesRegex(artifacts.ArtifactError, "OAuth credential") as raised:
+                    artifacts.verify_clean_room_installed_tree(root)
+                self.assertNotIn("fixture-private-", str(raised.exception))
+
+    def test_installed_payload_preserves_oauth_sdk_schema_defaults_and_source(self):
+        files = {
+            "sdk/schema.json": json.dumps({"properties": {
+                "client_secret": {"type": "string", "description": "OAuth client secret"},
+                "refresh_token": {"type": "string"},
+                "accessToken": {"type": "string"},
+            }, "required": ["client_secret", "refresh_token"]}),
+            "sdk/discovery.json": json.dumps({"parameters": {
+                "access_token": {"location": "query", "type": "string"},
+            }}),
+            "sdk/defaults.json": json.dumps({"clientSecret": " ", "refresh_token": "",
+                                             "accessToken": None, "clientId": "", "apiKey": ""}),
+            "sdk/client-metadata.json": json.dumps({"clientId": "fixture.apps.googleusercontent.com",
+                                                    "projectNumber": "123"}),
+            "sdk/oauth.py": 'FIELDS = {"access_token": "str", "refresh_token": "str"}\n',
+            "sdk/oauth.js": 'const fields = {"client_secret": "string"};\n',
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            for relative, content in files.items():
+                payload = root / relative
+                payload.parent.mkdir(parents=True, exist_ok=True)
+                payload.write_text(content, encoding="utf-8")
+            artifacts.verify_clean_room_installed_tree(root)
+
     def test_direct_script_entrypoint_can_load_the_provenance_gate(self):
         script = artifacts.REPOSITORY_ROOT / "scripts" / "collect_desktop_ci_artifacts.py"
         completed = subprocess.run(

@@ -42,7 +42,7 @@ use crate::db::Database;
 use crate::driver::{ElementBox, ElementQuery, UiSession};
 use crate::feed_ladder::{self, LadderSpend, LadderStep};
 use crate::human_behavior::{
-    in_night_window, roll_bool, roll_feed_actions_in_mood, AttemptReservation, FeedAction,
+    in_night_window, roll_bool, roll_nurture_actions, AttemptReservation, FeedAction,
     HumanBehavior, HumanSessionPolicy, MoodCycle, PolicyAction,
 };
 use crate::tiktok_drawer::CommentVerdict;
@@ -601,6 +601,7 @@ pub(super) struct HierarchyRun<'a> {
     labels: TikTokControls,
     screen: (f64, f64),
     planner: TouchPointPlanner,
+    search_keyword: Option<String>,
 }
 
 /// Why a device cannot run this loop, phrased for the operator.
@@ -679,6 +680,7 @@ impl<'a> HierarchyRun<'a> {
             labels,
             screen,
             planner: TouchPointPlanner::new(screen),
+            search_keyword: None,
         })
     }
 
@@ -690,6 +692,11 @@ impl<'a> HierarchyRun<'a> {
     /// True when the feed tab is on screen — the only condition under which this
     /// loop will tap anything.
     async fn on_feed(&self) -> bool {
+        if let Some(keyword) = &self.search_keyword {
+            return super::search::on_video(self.session, self.labels.package(), keyword)
+                .await
+                .unwrap_or(false);
+        }
         present(self.session, self.labels, TikTokControl::FeedTab).await
     }
 
@@ -786,7 +793,39 @@ impl<'a> HierarchyRun<'a> {
             let _ = screen;
             planner.next(element.centre(), element.jitter_radius())
         };
-        crate::tiktok_drawer::post_comment(self.session, self.labels, plan, text, stop).await
+        if let Some(keyword) = &self.search_keyword {
+            let mut drawer =
+                crate::tiktok_drawer::CommentDrawer::new(self.session, self.labels, plan);
+            if drawer.send_query().is_none() {
+                return Ok(CommentVerdict::SendUnmeasured);
+            }
+            let result = crate::tiktok_drawer::post_into_drawer(&mut drawer, text, stop).await;
+            // Return only to the search viewer. Generic drawer cleanup targets FYP
+            // and would leave the keyword source after every comment.
+            for _ in 0..3 {
+                if super::search::on_video(self.session, self.labels.package(), keyword)
+                    .await
+                    .unwrap_or(false)
+                {
+                    break;
+                }
+                if stop.load(Ordering::Relaxed) {
+                    break;
+                }
+                if self
+                    .session
+                    .press_hardware_key(crate::HardwareKey::Back)
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+                sleep_interruptible(SWIPE_SETTLE, stop).await;
+            }
+            result
+        } else {
+            crate::tiktok_drawer::post_comment(self.session, self.labels, plan, text, stop).await
+        }
     }
 
     /// Follow the author, proved by the Follow control leaving the card.
@@ -1441,7 +1480,7 @@ async fn run_hierarchy_session_inner(
             return HierarchySession::Refused;
         }
     }
-    let run = match HierarchyRun::prepare(session, screen, settings).await {
+    let mut run = match HierarchyRun::prepare(session, screen, settings).await {
         Ok(run) => run,
         Err(Unsupported::NoElementBounds) => return HierarchySession::NotSupported,
         Err(refusal) => {
@@ -1452,6 +1491,23 @@ async fn run_hierarchy_session_inner(
     report(status, run.labels_note());
     if !await_feed(&run, stop, status, report).await {
         return HierarchySession::Refused;
+    }
+    if settings.feed_source == crate::types::NurtureFeedSource::Search {
+        let deadline = max_duration.map_or_else(
+            || Instant::now() + Duration::from_secs(75),
+            |max| started + max,
+        );
+        match super::search::open(session, bundle_id, &settings.search_keyword, stop, deadline)
+            .await
+        {
+            Ok(()) => {
+                run.search_keyword = Some(settings.search_keyword.trim().into());
+            }
+            Err(error) => {
+                report(status, format!("Không mở được video theo từ khóa: {error}"));
+                return HierarchySession::Refused;
+            }
+        }
     }
     await_first_rail(&run, stop).await;
     let outcome = run_feed(
@@ -1581,6 +1637,13 @@ async fn await_feed(
     status: &mut NurtureSessionStatus,
     report: &(dyn Fn(&mut NurtureSessionStatus, String) + Send + Sync),
 ) -> bool {
+    if run.search_keyword.is_some() {
+        report(
+            status,
+            "Đã rời video tìm kiếm — dừng để giữ đúng nguồn từ khóa".into(),
+        );
+        return false;
+    }
     let started = Instant::now();
     let deadline = started + FEED_READY_WINDOW;
     let mut said = false;
@@ -2091,13 +2154,7 @@ pub(super) async fn run_feed(
         let plan = if still_on_acted_card {
             crate::human_behavior::FeedActionPlan::default()
         } else {
-            roll_feed_actions_in_mood(
-                settings.like_prob,
-                settings.comment_prob,
-                settings.save_prob,
-                settings.follow_prob,
-                mood,
-            )
+            roll_nurture_actions(&settings, mood)
         };
         for selected in
             crate::human_behavior::ordered_feed_actions(&plan, &settings.workflow_action_order)
@@ -2508,7 +2565,7 @@ pub(super) async fn run_feed(
                 status,
                 format!("vuốt chưa chứng minh được đổi thẻ ({stuck_swipes}/{STUCK_SWIPE_LIMIT})"),
             );
-            if stuck_swipes >= STUCK_RESTART_AFTER && !restarted {
+            if stuck_swipes >= STUCK_RESTART_AFTER && !restarted && run.search_keyword.is_none() {
                 // **Restart TikTok once before believing the feed is over.**
                 //
                 // A feed that will not advance is not a broken swipe. Measured 18/08/2026
@@ -2671,6 +2728,7 @@ mod tests {
             labels: vietnamese(),
             screen,
             planner: TouchPointPlanner::new(screen),
+            search_keyword: None,
         };
         let expected = PostFingerprint {
             author: Some("Hồ sơ author_a".into()),
@@ -2702,6 +2760,7 @@ mod tests {
             labels: vietnamese(),
             screen,
             planner: TouchPointPlanner::new(screen),
+            search_keyword: None,
         };
         let expected = PostFingerprint {
             author: Some("Hồ sơ author_a".into()),
@@ -2733,6 +2792,7 @@ mod tests {
             labels: vietnamese(),
             screen,
             planner: TouchPointPlanner::new(screen),
+            search_keyword: None,
         };
         let expected = PostFingerprint {
             author: Some("Hồ sơ author_a".into()),
@@ -2955,6 +3015,7 @@ mod tests {
             labels: english_38(),
             screen,
             planner: TouchPointPlanner::new(screen),
+            search_keyword: None,
         };
         let expected = PostFingerprint {
             author: Some("@exact.author profile".into()),
@@ -3011,6 +3072,7 @@ mod tests {
             labels: english_38(),
             screen,
             planner: TouchPointPlanner::new(screen),
+            search_keyword: None,
         };
         let expected = PostFingerprint {
             author: Some("@exact.author profile".into()),
@@ -3060,6 +3122,7 @@ mod tests {
             labels: english_38(),
             screen,
             planner: TouchPointPlanner::new(screen),
+            search_keyword: None,
         };
         let expected = PostFingerprint {
             author: Some("@exact.author profile".into()),
@@ -3113,6 +3176,7 @@ mod tests {
             labels: english_38(),
             screen,
             planner: TouchPointPlanner::new(screen),
+            search_keyword: None,
         };
         let expected = PostFingerprint {
             author: Some("Display Name profile".into()),
@@ -3240,6 +3304,7 @@ mod tests {
             labels: vietnamese(),
             screen,
             planner: TouchPointPlanner::new(screen),
+            search_keyword: None,
         }
     }
 
@@ -3744,6 +3809,7 @@ mod tests {
             labels: controls_for("com.ss.android.ugc.trill", "en", "38.3.2").expect("measured set"),
             screen,
             planner: TouchPointPlanner::new(screen),
+            search_keyword: None,
         };
         let stop = AtomicBool::new(false);
         let mut status = NurtureSessionStatus {
@@ -3855,6 +3921,7 @@ mod tests {
             labels: controls_for("com.ss.android.ugc.trill", "en", "38.3.2").expect("measured set"),
             screen,
             planner: TouchPointPlanner::new(screen),
+            search_keyword: None,
         };
         let stop = AtomicBool::new(false);
         let mut status = NurtureSessionStatus {
@@ -3957,6 +4024,7 @@ mod tests {
             labels: controls_for("com.ss.android.ugc.trill", "en", "38.3.2").expect("measured set"),
             screen,
             planner: TouchPointPlanner::new(screen),
+            search_keyword: None,
         };
         let stop = AtomicBool::new(false);
         let mut status = NurtureSessionStatus {
@@ -4103,6 +4171,7 @@ mod tests {
             labels: controls_for("com.ss.android.ugc.trill", "en", "38.3.2").expect("measured set"),
             screen,
             planner: TouchPointPlanner::new(screen),
+            search_keyword: None,
         };
         let settings = NurtureSettings {
             num_videos: 4,
@@ -4246,6 +4315,7 @@ mod tests {
             labels: controls_for("com.ss.android.ugc.trill", "en", "38.3.2").expect("measured set"),
             screen,
             planner: TouchPointPlanner::new(screen),
+            search_keyword: None,
         };
         let settings = NurtureSettings {
             num_videos: 6,
@@ -4436,6 +4506,7 @@ mod tests {
             labels: controls_for("com.ss.android.ugc.trill", "en", "38.3.2").expect("measured set"),
             screen,
             planner: TouchPointPlanner::new(screen),
+            search_keyword: None,
         };
         let settings = NurtureSettings {
             num_videos: 6,
@@ -4616,6 +4687,7 @@ mod tests {
             labels: controls_for("com.ss.android.ugc.trill", "en", "38.3.2").expect("measured set"),
             screen,
             planner: TouchPointPlanner::new(screen),
+            search_keyword: None,
         };
         let settings = NurtureSettings {
             num_videos: 4,
@@ -4807,6 +4879,7 @@ mod tests {
             labels: vietnamese(),
             screen,
             planner: TouchPointPlanner::new(screen),
+            search_keyword: None,
         };
         let stop = AtomicBool::new(false);
         let mut status = NurtureSessionStatus {
@@ -4885,6 +4958,7 @@ mod tests {
             labels: vietnamese(),
             screen,
             planner: TouchPointPlanner::new(screen),
+            search_keyword: None,
         };
         let stop = AtomicBool::new(false);
         let mut status = NurtureSessionStatus {
@@ -4989,6 +5063,7 @@ mod tests {
             labels: vietnamese(),
             screen,
             planner: TouchPointPlanner::new(screen),
+            search_keyword: None,
         };
         let stop = AtomicBool::new(false);
         let mut status = NurtureSessionStatus {
@@ -5505,6 +5580,7 @@ mod tests {
             labels: vietnamese(),
             screen,
             planner: TouchPointPlanner::new(screen),
+            search_keyword: None,
         };
         let settings = NurtureSettings::default();
         let stop = AtomicBool::new(false);
@@ -5600,6 +5676,7 @@ mod tests {
             labels: vietnamese(),
             screen,
             planner: TouchPointPlanner::new(screen),
+            search_keyword: None,
         };
         let settings = NurtureSettings::default();
         let stop = AtomicBool::new(false);
@@ -5671,6 +5748,7 @@ mod tests {
             labels: vietnamese(),
             screen,
             planner: TouchPointPlanner::new(screen),
+            search_keyword: None,
         };
         let stop = AtomicBool::new(false);
         let mut status = NurtureSessionStatus {
@@ -5718,6 +5796,7 @@ mod tests {
             labels: vietnamese(),
             screen,
             planner: TouchPointPlanner::new(screen),
+            search_keyword: None,
         };
         let stop = AtomicBool::new(false);
         let mut status = NurtureSessionStatus {
@@ -5759,6 +5838,7 @@ mod tests {
             labels: vietnamese(),
             screen,
             planner: TouchPointPlanner::new(screen),
+            search_keyword: None,
         };
         let stop = AtomicBool::new(false);
         let mut status = NurtureSessionStatus {
@@ -5802,6 +5882,7 @@ mod tests {
             labels: controls_for("com.ss.android.ugc.trill", "en", "38.3.2").expect("measured set"),
             screen,
             planner: TouchPointPlanner::new(screen),
+            search_keyword: None,
         };
         let stop = AtomicBool::new(false);
         let mut status = NurtureSessionStatus {

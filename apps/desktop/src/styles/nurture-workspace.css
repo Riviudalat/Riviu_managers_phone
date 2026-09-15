@@ -64,6 +64,36 @@
 .nurture-advanced > summary span { display: block; margin-top: 5px; font-size: var(--text-xs); color: var(--text-3); }
 .nurture-advanced > summary:focus-visible { outline: 2px solid var(--primary); outline-offset: -3px; border-radius: 8px; }
 .nurture-advanced-content { padding: 0 20px 20px; }
+.nurture-settings-tabs .nurture-advanced-content { padding: 0; }
+.nurture-settings-tabs > .nurture-advanced-content > .nurture-tabs { position: sticky; top: 0; z-index: 2; background: var(--bg-elevated); padding: 8px 0; }
+.nurture-settings-tabs .nurture-session-card { border: 0; padding: 12px 0; box-shadow: none; }
+.nurture-search-settings { display: grid; gap: 12px; margin: 16px 0; }
+.nurture-search-settings.has-keyword { grid-template-columns: minmax(160px, .8fr) minmax(0, 1.2fr); align-items: start; }
+.nurture-search-settings > p { grid-column: 1 / -1; margin: 0; }
+.nurture-search-settings label { display: grid; gap: 6px; min-width: 0; }
+.nurture-search-settings input, .nurture-search-settings select { width: 100%; min-width: 0; }
+.nurture-search-settings input { min-height: 38px; border: 1px solid var(--line-strong); border-radius: 7px; padding: 8px 10px; background: var(--bg-elevated); color: var(--text-1); font: inherit; }
+.nurture-workspace .nurture-settings-tabs { border: 0; padding: 0 20px 20px; background: var(--bg-elevated); }
+.nurture-settings-tabs .nurture-tabs { display: flex; justify-content: flex-start; gap: 24px; border-bottom: 1px solid var(--line); }
+.nurture-settings-tabs .nurture-tab { flex: none; min-height: 44px; padding: 12px 2px; border-radius: 0; border-bottom: 2px solid transparent; background: none; }
+.nurture-settings-tabs .nurture-tab.is-on { background: none; border-bottom-color: var(--primary); color: var(--primary); }
+.nurture-action-heading > div { display: grid; gap: 6px; }
+.nurture-action-heading small { font-weight: 400; color: var(--text-3); font-size: var(--text-xs); }
+.nurture-workspace .nurture-action-heading > .nurture-total-rate { font-size: 22px; font-weight: 650; color: var(--text-1); font-variant-numeric: tabular-nums; }
+.nurture-distribution { display:flex; gap:3px; height:14px; overflow:hidden; border-radius:4px; margin:16px 0; }
+.nurture-distribution > span { flex-basis:0; min-width:0; }
+.nurture-distribution .is-watch { background:#dce2e8; }
+.nurture-watch-share { display:flex; justify-content:space-between; align-items:center; gap:16px; padding:12px 0 16px; font-size:var(--text-sm); }
+.nurture-watch-share > span { display:flex; align-items:center; gap:8px; }
+.nurture-watch-share i { width:9px; height:9px; border-radius:2px; background:#dce2e8; }
+.nurture-share-description { color:var(--text-3); font-size:var(--text-xs); margin-left:8px; }
+.nurture-action-row label i { width:8px; height:8px; border-radius:2px; flex:none; }
+.nurture-monitor-tabs { display:flex; gap:20px; padding:0 0 12px; border-bottom:1px solid var(--line); margin-bottom:12px; flex:none; }
+.nurture-monitor-tabs button { border:0; background:none; padding:10px 0; color:var(--text-3); font:inherit; border-bottom:2px solid transparent; cursor:pointer; }
+.nurture-monitor-tabs button[aria-selected="true"] { border-bottom-color:var(--primary); color:var(--primary); font-weight:600; }
+#nurture-comments-content { min-height:0; overflow:auto; }
+#nurture-progress-content { min-height:0; flex:1; display:flex; flex-direction:column; }
+@media(max-width:1023px) { .nurture-share-description { display:none; } .nurture-settings-tabs .nurture-tabs { gap:18px; } .nurture-search-settings.has-keyword { grid-template-columns:minmax(0,1fr); } }
 .nurture-workspace .nurture-default-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; margin-top: 16px; }
 .nurture-workspace .nurture-default-actions > span { color: var(--text-3); font-size: var(--text-sm); }
 .nurture-workspace .nurture-setup-fields .nu-feature-ranged { grid-template-columns: auto minmax(76px, 1fr) minmax(50px, 1fr) 60px; }

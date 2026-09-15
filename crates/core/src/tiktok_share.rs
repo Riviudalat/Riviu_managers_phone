@@ -45,8 +45,10 @@ use crate::tiktok_labels::{TikTokControl, TikTokControls};
 
 pub(crate) mod hierarchy;
 mod photo_proof;
+mod processing;
+pub use processing::ProcessingNotice;
 mod verification;
-pub use photo_proof::capture_expanded_photo_link;
+pub use photo_proof::{capture_expanded_photo_link, capture_visible_video_link};
 pub use verification::{
     capture_submission_link, probe_clipboard_restore, PublishVerificationPlan, VerificationCapture,
     VerificationDiagnostic, VerificationReason,
@@ -110,6 +112,8 @@ pub enum LinkCapture {
     /// Which is the proof the tap did not land — a much stronger statement than the old
     /// "the value did not change", and it cannot be confused with a stale link.
     CopyDidNotLand,
+    /// Fresh processing message observed immediately after Copy, bound to before/after images.
+    Processing(ProcessingNotice),
     /// The clipboard changed into something that is not a link to a post.
     NotAPostLink(String),
     /// A tap or a hierarchy read failed. The post is unaffected.
@@ -141,6 +145,10 @@ impl LinkCapture {
             }
             Self::CopyDidNotLand => {
                 "TikTok chưa trả liên kết sau khi bấm sao chép; sẽ kiểm tra lại sau".into()
+            }
+            Self::Processing(_) => {
+                "TikTok báo bài đang được xử lý; chưa trả liên kết. Tự kiểm tra lại sau 5 phút."
+                    .into()
             }
             Self::NotAPostLink(value) => {
                 format!("clipboard đổi nhưng không phải link bài: {value:.80}")
@@ -745,6 +753,15 @@ async fn read_through_sheet(
     share: ElementQuery<'_>,
     opened: &mut bool,
 ) -> LinkCapture {
+    read_through_sheet_counted(session, share, opened, &mut 0).await
+}
+
+async fn read_through_sheet_counted(
+    session: &dyn UiSession,
+    share: ElementQuery<'_>,
+    opened: &mut bool,
+    copy_attempts: &mut u32,
+) -> LinkCapture {
     let control = match session.locate(share).await {
         Ok(Some(control)) => control,
         Ok(None) => match crate::ui_automation::runtime::resolve_navigation(
@@ -786,6 +803,9 @@ async fn read_through_sheet(
         CopyRow::Ambiguous => return LinkCapture::AmbiguousCopyRow,
         CopyRow::Failed(message) => return LinkCapture::ReadFailed(message),
     };
+    let before_copy = processing::frame(session).await;
+    *copy_attempts = copy_attempts.saturating_add(1);
+    let copy_started = tokio::time::Instant::now();
     let copy_tap = if session.supports_accessibility_readback() {
         let mut query = None;
         for label in ["Copy link", "Sao chép liên kết", "Sao chép link"] {
@@ -812,22 +832,44 @@ async fn read_through_sheet(
     if let Err(error) = copy_tap {
         return LinkCapture::ReadFailed(error.to_string());
     }
+    // Capture the transient toast before clipboard/helper reads can hide it.
+    let after_copy = if before_copy.is_some() {
+        processing::frames_after_copy(session, copy_started).await
+    } else {
+        Vec::new()
+    };
 
-    let deadline = tokio::time::Instant::now() + CLIPBOARD_WINDOW;
+    let deadline = copy_started + CLIPBOARD_WINDOW;
+    let mut readable = false;
+    let mut last_read_error = None;
     loop {
-        if let Ok((kind, bytes)) = session.get_clipboard(CLIPBOARD_LIMIT).await {
-            let now = String::from_utf8_lossy(&bytes).trim().to_string();
-            if now != mark && !now.is_empty() {
-                return if !is_text_kind(&kind) {
-                    LinkCapture::NotAPostLink(format!("{kind}: {now}"))
-                } else if looks_like_a_post_link(&now) {
-                    LinkCapture::Captured(now)
-                } else {
-                    LinkCapture::NotAPostLink(now)
-                };
+        match session.get_clipboard(CLIPBOARD_LIMIT).await {
+            Ok((kind, bytes)) => {
+                readable = true;
+                let now = String::from_utf8_lossy(&bytes).trim().to_string();
+                if now != mark && !now.is_empty() {
+                    return if !is_text_kind(&kind) {
+                        LinkCapture::NotAPostLink(format!("{kind}: {now}"))
+                    } else if looks_like_a_post_link(&now) {
+                        LinkCapture::Captured(now)
+                    } else {
+                        LinkCapture::NotAPostLink(now)
+                    };
+                }
             }
+            Err(error) => last_read_error = Some(format!("{error:#}")),
         }
         if tokio::time::Instant::now() >= deadline {
+            if let Some(notice) = processing::observe_frames(session, before_copy, after_copy).await
+            {
+                return LinkCapture::Processing(notice);
+            }
+            if !readable {
+                return LinkCapture::ReadFailed(
+                    last_read_error
+                        .unwrap_or_else(|| "clipboard was never readable after Copy".into()),
+                );
+            }
             return LinkCapture::CopyDidNotLand;
         }
         tokio::time::sleep(POLL).await;
@@ -1207,6 +1249,8 @@ mod tests {
         copy_row: Option<ElementBox>,
         copy_controls: Vec<ElementBox>,
         set_clipboard_fails: bool,
+        read_errors_remaining: Mutex<u32>,
+        read_error_message: Option<String>,
         share_tap_fails: bool,
         /// Once the sheet is dismissed the rows go away, like the real one.
         dismissed: Mutex<bool>,
@@ -1323,6 +1367,16 @@ mod tests {
             Ok(())
         }
         async fn get_clipboard(&self, _limit: usize) -> anyhow::Result<(String, Vec<u8>)> {
+            let mut remaining = self.read_errors_remaining.lock();
+            if *remaining > 0 {
+                *remaining -= 1;
+                anyhow::bail!(
+                    "{}",
+                    self.read_error_message
+                        .as_deref()
+                        .unwrap_or("fixture clipboard helper disconnected")
+                );
+            }
             let held = self.clipboard.lock().clone();
             let (kind, value) = held.ok_or_else(|| anyhow::anyhow!("clipboard unreadable"))?;
             Ok((kind, value.into_bytes()))
@@ -1655,6 +1709,66 @@ mod tests {
     }
 
     // -------------------------------------------------------------- the happy path
+
+    #[tokio::test(start_paused = true)]
+    async fn unreadable_clipboard_preserves_helper_or_ime_error_instead_of_claiming_unchanged() {
+        for message in [
+            "fixture clipboard helper disconnected",
+            "clipboard succeeded but previous keyboard was not restored",
+        ] {
+            let session = FakeSession {
+                read_errors_remaining: Mutex::new(u32::MAX),
+                read_error_message: Some(message.into()),
+                ..FakeSession::sheet(
+                    vec![labelled("Copy link", 1800.0)],
+                    "https://www.tiktok.com/@fixture/video/123",
+                )
+            };
+            let result = capture_post_link(&session, &english()).await;
+            assert_eq!(result, LinkCapture::ReadFailed(message.into()));
+            assert_eq!(session.taps.lock().len(), 2);
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn temporary_clipboard_read_failures_recover_to_link_and_copy_counter_tracks_actual_tap()
+    {
+        let session = FakeSession {
+            read_errors_remaining: Mutex::new(2),
+            ..FakeSession::sheet(
+                vec![labelled("Copy link", 1800.0)],
+                "https://www.tiktok.com/@fixture/video/123",
+            )
+        };
+        let mut opened = false;
+        let mut copies = 0;
+        let result = read_through_sheet_counted(
+            &session,
+            english().label(TikTokControl::Share).unwrap().to_query(),
+            &mut opened,
+            &mut copies,
+        )
+        .await;
+        assert_eq!(
+            result,
+            LinkCapture::Captured("https://www.tiktok.com/@fixture/video/123".into())
+        );
+        assert_eq!(copies, 1);
+        let mut no_share = FakeSession::sheet(vec![], "");
+        no_share.set_clipboard_fails = true;
+        let mut copies = 0;
+        assert!(matches!(
+            read_through_sheet_counted(
+                &no_share,
+                english().label(TikTokControl::Share).unwrap().to_query(),
+                &mut false,
+                &mut copies
+            )
+            .await,
+            LinkCapture::ClipboardUnwritable(_)
+        ));
+        assert_eq!(copies, 0);
+    }
 
     /// The copy row is tapped, the clipboard changes away from the sentinel, and that is the
     /// link.

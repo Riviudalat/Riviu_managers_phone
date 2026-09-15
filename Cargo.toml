@@ -39,6 +39,7 @@ thiserror = "2"
 anyhow = "1"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "io-util", "process", "fs", "net", "signal"] }
 chrono = { version = "0.4", features = ["serde"] }
+chrono-tz = "0.10"
 uuid = { version = "1", features = ["v4", "serde"] }
 rusqlite = { version = "0.32", features = ["bundled"] }
 # `log` feature, not just the bare crate: every driver diagnostic in this workspace is a

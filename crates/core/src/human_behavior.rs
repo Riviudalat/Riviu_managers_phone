@@ -629,6 +629,62 @@ pub fn roll_feed_actions_in_mood(
     )
 }
 
+pub fn exclusive_action_plan(rates: [u32; 4], roll: u32) -> FeedActionPlan {
+    let mut left = roll.min(99);
+    let mut chosen = None;
+    for (index, rate) in rates.into_iter().enumerate() {
+        if left < rate {
+            chosen = Some(index);
+            break;
+        }
+        left = left.saturating_sub(rate);
+    }
+    FeedActionPlan {
+        like: chosen == Some(0),
+        save: chosen == Some(1),
+        comment: chosen == Some(2),
+        follow: chosen == Some(3),
+    }
+}
+
+#[cfg(test)]
+mod exclusive_distribution_tests {
+    use super::*;
+    #[test]
+    fn all_hundred_rolls_match_the_displayed_distribution_and_never_select_two_actions() {
+        let mut counts = [0; 5];
+        for roll in 0..100 {
+            let plan = exclusive_action_plan([20, 5, 2, 1], roll);
+            let flags = [plan.like, plan.save, plan.comment, plan.follow];
+            assert!(flags.iter().filter(|flag| **flag).count() <= 1);
+            counts[flags.iter().position(|flag| *flag).unwrap_or(4)] += 1;
+        }
+        assert_eq!(counts, [20, 5, 2, 1, 72]);
+    }
+}
+
+pub fn roll_nurture_actions(settings: &crate::NurtureSettings, mood: Mood) -> FeedActionPlan {
+    if settings.action_selection == crate::NurtureActionSelection::Exclusive {
+        exclusive_action_plan(
+            [
+                settings.like_prob,
+                settings.save_prob,
+                settings.comment_prob,
+                settings.follow_prob,
+            ],
+            rand::thread_rng().gen_range(0..100),
+        )
+    } else {
+        roll_feed_actions_in_mood(
+            settings.like_prob,
+            settings.comment_prob,
+            settings.save_prob,
+            settings.follow_prob,
+            mood,
+        )
+    }
+}
+
 /// Internal pacing policy. It is deliberately not exposed as a user setting:
 /// configured probabilities still decide whether an action is desired, while
 /// this policy keeps the resulting session inside a human-sized rolling rate.

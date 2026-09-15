@@ -30,6 +30,7 @@ export function InteractionWorkspaceSetup({ setup: p, profiles, scopeControl, ef
   onReparse: () => void;
 }) {
   const [step, setStep] = useState(1);
+  const [account, setAccount] = useState<string | null>(null);
   const { draft, patch } = p;
   const targets = p.lines.flatMap((line) => line.target ? [line.target] : []);
   const actionOrder = ACTIONS.filter(([key]) => draft.actions[key]).map(([, label]) => label).join(" → ");
@@ -103,7 +104,7 @@ export function InteractionWorkspaceSetup({ setup: p, profiles, scopeControl, ef
               </select></label>}
               <label className="iw-field"><span>Nội dung bình luận</span><select value={draft.textSource} onChange={(event) => patch("textSource", event.target.value as "ai" | "manual" | "script")}><option value="ai">AI viết theo bài</option><option value="manual">Nội dung tự nhập</option><option value="script">Hội thoại theo kịch bản</option></select></label>
             </div>
-            {draft.textSource === "script" ? <ConversationEditor draft={draft} onChange={value=>patch("conversationJson",value)} onRawChange={value=>patch("conversationRawJson",value)} targets={targets} devices={p.devices.filter(device=>effectiveActors.includes(device.udid))} handles={p.handles}/> : draft.textSource === "ai" ? <label className="iw-field"><span>Hướng dẫn giọng điệu cho AI</span><textarea rows={3} value={draft.instruction} onChange={(event) => patch("instruction", event.target.value)} /></label>
+            {draft.textSource === "script" ? <ConversationEditor draft={draft} onChange={value=>patch("conversationJson",value)} onRawChange={value=>patch("conversationRawJson",value)} targets={targets} devices={p.devices.filter(device=>effectiveActors.includes(device.udid))} handles={p.savedHandles ?? {}} deviceNumber={p.deviceNumber} deviceLabel={p.deviceLabel} onAssignAccount={setAccount}/> : draft.textSource === "ai" ? <label className="iw-field"><span>Hướng dẫn giọng điệu cho AI</span><textarea rows={3} value={draft.instruction} onChange={(event) => patch("instruction", event.target.value)} /></label>
               : <label className="iw-field"><span>Danh sách bình luận — mỗi dòng một câu</span><textarea rows={4} value={draft.manualText} onChange={(event) => patch("manualText", event.target.value)} /><small>{manualCommentsOf(draft).length} câu · cần ít nhất {messages}</small></label>}
             <p className="iw-help">{draft.textSource === "script" ? "Các vai giữ đúng máy; mỗi link có hội thoại riêng và được thực hiện xen kẽ." : draft.threadKind === "standalone" ? "Mỗi máy tự mở bài và gửi bình luận riêng." : "Cần ít nhất 2 máy cùng loại. Một máy gửi gốc trước khi các máy còn lại trả lời."} {draft.textSource === "ai" && "AI chỉ gửi khi đọc đủ nội dung bài."}</p>
             {draft.textSource !== "script" && <button type="button" className="ghost iw-advanced-button" aria-expanded={p.advancedOpen} onClick={() => p.setAdvancedOpen(!p.advancedOpen)}>{p.advancedOpen ? "Ẩn tuỳ chỉnh nâng cao" : "Tuỳ chỉnh nâng cao"}</button>}
@@ -120,7 +121,7 @@ export function InteractionWorkspaceSetup({ setup: p, profiles, scopeControl, ef
             </div>}
           </> : <div className="iw-no-comment"><strong>Chỉ thực hiện {actionOrder.replace(" → ", " và ")}.</strong><p>Không tạo bình luận. Bạn có thể chạy với một máy.</p></div>}
         </section>
-        <WorkspaceActors setup={p} effectiveActors={effectiveActors} scopeControl={scopeControl} />
+        <WorkspaceActors setup={p} effectiveActors={effectiveActors} scopeControl={scopeControl} account={account} setAccount={setAccount} />
       </div>
       <section className="iw-panel iw-review" role="tabpanel" id="iw-panel-3" aria-labelledby="iw-tab-3" aria-label="Kiểm tra lượt chạy" hidden={step !== 3}>
         <div className="iw-review-summary">
@@ -145,10 +146,9 @@ export function InteractionWorkspaceSetup({ setup: p, profiles, scopeControl, ef
   </div>;
 }
 
-function WorkspaceActors({ setup: p, effectiveActors, scopeControl }: { setup: Setup; effectiveActors: string[]; scopeControl?: ReactNode }) {
+function WorkspaceActors({ setup: p, effectiveActors, scopeControl, account, setAccount }: { setup: Setup; effectiveActors: string[]; scopeControl?: ReactNode; account: string | null; setAccount: (id: string | null) => void }) {
   const [query, setQuery] = useState("");
   const [groups, setGroups] = useState<DeviceGroup[]>([]);
-  const [account, setAccount] = useState<string | null>(null);
   const choices = [...p.pixelActors, ...p.hierarchyActors].sort((a, b) => (p.deviceNumber.get(a.udid) ?? 0) - (p.deviceNumber.get(b.udid) ?? 0));
   const thread = p.draft.actions.comment && p.draft.threadKind !== "standalone";
   useEffect(() => {

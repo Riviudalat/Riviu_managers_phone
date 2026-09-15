@@ -554,6 +554,8 @@ function App() {
   const tileActions = useCallback(
     (device: DeviceInfo): DeviceMenuNode[] =>
       buildDeviceActions(device, {
+        selectedDevices,
+        deviceNumbers: fleetNumberByUdid,
         reload,
         metaMap,
         metas,
@@ -578,6 +580,8 @@ function App() {
     [
       reload,
       controlCenter,
+      selectedDevices,
+      fleetNumberByUdid,
       groupMode,
       metaMap,
       metas,
@@ -809,6 +813,10 @@ function App() {
                 selected={selectedDevices}
                 deviceCount={devices.length}
                 syncOn={groupMode}
+                controlCenter={controlCenter}
+                onControlCenter={setControlCenter}
+                deviceNumbers={fleetNumberByUdid}
+                metas={metaMap}
                 groupsOpen={groupsOpen}
                 onGroups={() => {
                   if (groupToolsView !== "recording") closeGroupTools();
@@ -1103,6 +1111,7 @@ function App() {
                       width={tileWidth}
                       index={fleetNumberByUdid.get(device.udid) ?? 1}
                       name={tileName(device, metaMap.get(device.udid))}
+                      handle={metaMap.get(device.udid)?.handle}
                       operational={deviceOperationalView(
                         device,
                         currentDeviceWorkOwner(device.udid),

@@ -23,6 +23,9 @@ async-trait = "0.1"
 # version core already pins, so no second copy is built.
 rand = "0.8"
 
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
+
 [lints]
 workspace = true
 

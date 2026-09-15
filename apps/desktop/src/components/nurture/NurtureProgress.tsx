@@ -85,6 +85,7 @@ export function NurtureRunProgress({
   if (!run) return null;
   const settled = run.done + run.failed;
   const cleaned = run.rows.filter((status) => !status.running && status.cleanupState === "processAbsent" && status.cleanupProof).length;
+  const deferred = run.rows.filter((status) => status.cleanupState === "deferred").length;
   return (
     <div className="nu-run">
       <div className="nu-run-head">
@@ -103,6 +104,7 @@ export function NurtureRunProgress({
       />
       <div className="nu-run-chips">
         <span className="nu-chip" role="status">TikTok đã tắt: {cleaned}/{run.size} máy trong phiên</span>
+        {deferred > 0 && <span className="nu-chip" role="status">Đã lên lịch đóng TikTok khi máy rảnh: {deferred} máy</span>}
         <span className="nu-chip is-run" title="đang chạy">
           ● {run.running} đang chạy
         </span>

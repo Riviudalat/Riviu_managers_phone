@@ -1717,14 +1717,7 @@ impl DeviceDriver for AndroidDriver {
     }
 
     async fn launch_app(&self, udid: &str, bundle_id: &str) -> anyhow::Result<()> {
-        let bundle_id = adb::validate_package_name(bundle_id)?;
-        self.adb
-            .shell(
-                udid,
-                &format!("monkey -p {bundle_id} -c android.intent.category.LAUNCHER 1"),
-            )
-            .await
-            .map(|_| ())
+        self.adb.launch_foreground_checked(udid, bundle_id).await
     }
 
     /// Stop the app and prove it is gone.

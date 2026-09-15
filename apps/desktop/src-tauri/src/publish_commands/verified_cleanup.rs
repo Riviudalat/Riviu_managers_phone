@@ -29,6 +29,11 @@ pub(super) async fn cleanup_verified_assignment(
     events: &riviu_core::events::EventBus,
     candidate: &riviu_core::db::PendingPublishCleanup,
 ) -> anyhow::Result<bool> {
+    let Some(_permit) =
+        db.try_publish_work(&candidate.udid, "cleanup", &candidate.assignment_id)?
+    else {
+        return Ok(false);
+    };
     let context = match control
         .try_acquire_exclusive_keeping_stream(&candidate.udid, DeviceWorkOwner::Script)
         .await

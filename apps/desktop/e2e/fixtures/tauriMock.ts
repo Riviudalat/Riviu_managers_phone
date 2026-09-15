@@ -740,6 +740,7 @@ export async function installTauriMock(
       if (detail) { detail.items.forEach((item) => { if (item.state === "queued") item.state = "cancelled"; }); persistOperations(); }
     });
     commandHandlers.set("operation_get_run", (args) => clone(operations[String(args.operationId)] ?? null));
+    commandHandlers.set("operation_stop_status", () => null);
     commandHandlers.set("operation_device_log", () => ({ entries: [], truncated: false }));
     commandHandlers.set("nurture_get_settings", () => ({
       baseUrl: "https://api.openai.com/v1",
@@ -1122,13 +1123,17 @@ export async function installTauriMock(
     // on mount. The fixture roster is iOS-only so the page never fetches — but a later
     // android fixture must not resurrect the red Unknown-mock line in a baseline.
     commandHandlers.set("publish_readiness", () => []);
+    commandHandlers.set("publish_device_guards", args => Object.fromEntries(((args.udids ?? []) as string[]).map(id => [id, { blocking: [], linkReview: [] }])));
     commandHandlers.set("publish_get", () => null);
     // The page reads the Sheet config on mount; an unregistered mock here would put the red
     // Unknown-mock line straight into the Đăng bài baseline (§9.129's exact shape).
     commandHandlers.set("publish_sheet_get_config", () => ({
+      provider: "appsScript",
       webhookUrl: "",
       hasToken: false,
     }));
+    commandHandlers.set("google_sheets_status", () => ({ configured: false, connected: false, active: false,
+      clientId: "", pickerConfigured: false, phase: "idle" }));
     commandHandlers.set("publish_sheet_save_config", () => ({
       webhookUrl: "",
       hasToken: false,

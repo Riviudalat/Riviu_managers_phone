@@ -1,12 +1,12 @@
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import { operationDeviceLog, operationGetRun, operationQueryRuns } from "../../api";
+import { operationDeviceLog, operationGetRun, operationQueryRuns, operationStop, operationStopStatus } from "../../api";
 import type { OperationRunDetail, OperationRunSummary } from "../../types";
 import { OperationProgressCenter } from "./OperationProgressCenter";
 let narrowViewport = false;
 vi.mock("../../useMediaQuery", () => ({ useMediaQuery: () => narrowViewport }));
 
-vi.mock("../../api", () => ({ operationQueryRuns: vi.fn(), operationGetRun: vi.fn(), operationDeviceLog: vi.fn(), nurtureSessionStatus: vi.fn(async () => []) }));
+vi.mock("../../api", () => ({ operationQueryRuns: vi.fn(), operationGetRun: vi.fn(), operationDeviceLog: vi.fn(), nurtureSessionStatus: vi.fn(async () => []),operationStop:vi.fn(),operationStopStatus:vi.fn(async()=>null) }));
 const run: OperationRunSummary = { id: "publish:run", sourceId: "run", kind: "publish", title: "Đăng bài", state: "running", targetCount: 2, totalItems: 2, completedItems: 1, issueCount: 0, retryableCount: 0, retryScope: null, createdAt: null, updatedAt: null };
 const detail: OperationRunDetail = { summary: run, items: ["a", "b"].map((udid, i) => ({ id: udid, udid, label: `Bài ${i + 1}`, kind: "assignment", state: i ? "running" : "succeeded", detail: null, errorCode: null, evidence: null, retryable: false })) };
 const labels = new Map([["a", "Máy 2 · Nội dung"], ["b", "Máy 5 · Đăng bài"]]);
@@ -15,10 +15,28 @@ beforeEach(() => {
   narrowViewport = false;
   localStorage.clear();
   vi.clearAllMocks();
+  vi.mocked(operationStopStatus).mockResolvedValue(null);
   HTMLElement.prototype.setPointerCapture = vi.fn();
   vi.mocked(operationQueryRuns).mockResolvedValue({ runs: [run], total: 1, counts: { active: 1, succeeded: 0, attention: 0 }, hasMore: false });
   vi.mocked(operationGetRun).mockResolvedValue(detail);
   vi.mocked(operationDeviceLog).mockResolvedValue({ entries: [{ id: "log", at: "2026-09-07T12:34:56", action: "publish", state: "posting", text: null, detail: null }], truncated: false });
+});
+
+it("stops only the selected operation and waits for a backend cleanup result",async()=>{
+ await openDevices();
+ vi.mocked(operationStop).mockResolvedValue({operationId:run.id,state:"stopping",devices:[{udid:"a",closed:false,message:"waiting"}]});
+ fireEvent.click(screen.getByRole("button",{name:"Dừng tác vụ và về màn hình chính"}));
+ await waitFor(()=>expect(operationStop).toHaveBeenCalledWith(run.id));
+ expect(await screen.findByText("Đang dừng các máy và đóng TikTok…")).toBeVisible();
+ expect(screen.getByRole("button",{name:"Dừng tác vụ và về màn hình chính"})).toBeDisabled();
+ expect(operationStop).toHaveBeenCalledTimes(1);
+});
+
+it("reports a rejected stop without removing the run",async()=>{
+ await openDevices();vi.mocked(operationStop).mockRejectedValue(new Error("cannot persist stop"));
+ fireEvent.click(screen.getByRole("button",{name:"Dừng tác vụ và về màn hình chính"}));
+ expect(await screen.findByText("cannot persist stop")).toBeVisible();
+ expect(screen.getByRole("combobox",{name:"Chọn tác vụ theo dõi"})).toHaveValue(run.id);
 });
 
 it("drags the title without a separate grip and does not toggle on release", async () => {

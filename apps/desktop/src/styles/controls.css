@@ -140,6 +140,7 @@ button:disabled {
 
 /* ——— ProfileToolbar (Swarmote) ——— */
 .profile-toolbar {
+  position: relative;
   margin-top: 0;
   min-height: 52px;
   display: flex;
@@ -156,6 +157,42 @@ button:disabled {
   flex: 1;
   min-width: 0.5rem;
 }
+.toolbar-sync-panel {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  z-index: 50;
+  width: min(520px, 100%);
+  max-height: min(620px, 64vh);
+  overflow: auto;
+  padding: 16px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--bg-elevated);
+  box-shadow: 0 12px 30px rgb(0 0 0 / 14%);
+}
+.toolbar-sync-heading {
+  display: flex;
+  align-items: start;
+  justify-content: space-between;
+  gap: 12px;
+}
+.toolbar-sync-heading span {
+  display: block;
+  color: var(--text-3);
+  font-size: var(--text-xs);
+  margin-top: 5px;
+}
+.toolbar-sync-master { display: grid; gap: 6px; margin: 12px 0; }
+.toolbar-sync-master select { width: 100%; min-width: 0; }
+.toolbar-sync-targets { display: flex; flex-wrap: wrap; gap: 6px; max-height: 80px; overflow: auto; margin-bottom: 12px; }
+.toolbar-sync-targets span { background: var(--bg-subtle); border-radius: 4px; padding: 4px 7px; font-size: var(--text-xs); overflow-wrap: anywhere; }
+.toolbar-sync-options { border-top: 1px solid var(--line); margin-top: 12px; padding-top: 12px; }
+.toolbar-sync-options > summary { cursor: pointer; }
+.toolbar-sync-options .settings-section { border: 0; padding: 12px 0 0; box-shadow: none; }
+.toolbar-sync-options .row { display: flex; flex-wrap: wrap; gap: 12px; margin: 12px 0; }
+.toolbar-sync-options .row label { display: grid; flex: 1 1 180px; gap: 6px; min-width: 0; }
+.toolbar-sync-options input { width: 100%; min-width: 0; min-height: 36px; padding: 7px 10px; border: 1px solid var(--line-strong); border-radius: 7px; background: var(--bg-elevated); color: var(--text-1); }
 .profile-toolbar .tb-btn {
   border: none;
   background: transparent;

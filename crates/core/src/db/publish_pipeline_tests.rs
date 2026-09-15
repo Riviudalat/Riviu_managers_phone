@@ -3,7 +3,7 @@ use crate::{
     PublishBundle, PublishCampaignRequest, PublishCampaignState as S, PublishCleanupPolicy,
     PublishSoundPolicy, PublishVisibility,
 };
-fn fixture() -> (
+pub(in crate::db) fn fixture() -> (
     Database,
     PathBuf,
     String,

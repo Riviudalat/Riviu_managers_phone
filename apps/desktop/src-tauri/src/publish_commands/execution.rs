@@ -258,6 +258,7 @@ pub async fn publish_create_campaign(
     target_ref: Option<riviu_core::TargetRef>,
     confirmed: Option<bool>,
     approved_input_digest: String,
+    request_id: Option<String>,
 ) -> Result<PublishCampaignRecord, CommandError> {
     let _admission = state.ensure_accepting_work()?;
     source_root = source_root.trim().to_string();
@@ -279,6 +280,21 @@ pub async fn publish_create_campaign(
             .collect(),
         sound_policy: sound_policy.clone(),
     };
+    let request_id = request_id.unwrap_or_else(|| Uuid::new_v4().to_string());
+    Uuid::parse_str(&request_id).map_err(err)?;
+    let request_fingerprint = frame_sha256(
+        &serde_json::to_vec(
+            &serde_json::json!({"request":&preflight_request,"confirmed":confirmed}),
+        )
+        .map_err(err)?,
+    );
+    if let Some(prior) = state
+        .db
+        .replay_publish_create(&request_id, &request_fingerprint)
+        .map_err(err)?
+    {
+        return Ok(prior);
+    }
     let prepared = build_publish_preflight(
         &state.control,
         &state.registry,
@@ -301,8 +317,12 @@ pub async fn publish_create_campaign(
         )));
     }
     let selected = prepared.bundles;
-    let request_id = Uuid::new_v4().to_string();
-    let staging_root = state.artifacts_dir.join("publish").join(&request_id);
+    // Concurrent copies belong to separate preparation attempts. Only the
+    // winner's managed media is committed; cleanup never deletes another caller's copy.
+    let staging_root = state
+        .artifacts_dir
+        .join("publish")
+        .join(Uuid::new_v4().to_string());
     let mut managed = Vec::with_capacity(selected.len());
     for bundle in selected {
         let source_bundle_id = bundle.id.clone();
@@ -355,11 +375,16 @@ pub async fn publish_create_campaign(
         retry_scope: riviu_core::PublishRetryScope::FullPipeline,
         report_json: serde_json::to_value(&prepared.report).map_err(err)?,
     };
-    match state
-        .db
-        .create_publish_campaign_with_snapshot(&request, &managed, &initial_snapshot)
-    {
-        Ok(campaign) => {
+    match state.db.create_publish_with_receipt(
+        &request,
+        &managed,
+        &initial_snapshot,
+        &request_fingerprint,
+    ) {
+        Ok((campaign, created)) => {
+            if !created {
+                let _ = fs::remove_dir_all(&staging_root);
+            }
             let _ = state.db.log_op("publish.campaign.create", &campaign.id);
             Ok(campaign)
         }
@@ -453,16 +478,18 @@ pub(super) fn persist_reconciled_publish_execution(
     let request = db
         .publish_campaign_request(campaign_id)?
         .context("publish campaign request not found")?;
-    let detail = db
-        .get_publish_campaign(campaign_id)?
-        .context("publish campaign not found")?;
     // A campaign transition may happen after the last projection was written (for example, the
     // process can die after the Post effect-intent CAS). Never return that old snapshot blindly:
     // the typed campaign/assignment states are the durable authority after restart.
-    let input_digest = previous
-        .as_ref()
-        .map(|snapshot| snapshot.input_digest.clone())
-        .unwrap_or(stored_campaign_input_digest(&request, &detail)?);
+    let input_digest = match previous {
+        Some(snapshot) => snapshot.input_digest,
+        None => {
+            let detail = db
+                .get_publish_campaign(campaign_id)?
+                .context("publish campaign not found")?;
+            stored_campaign_input_digest(&request, &detail)?
+        }
+    };
     let (status, retry_scope) = db.reconciled_publish_execution_status(campaign_id)?;
     db.save_publish_execution_snapshot(
         campaign_id,
@@ -1131,6 +1158,27 @@ pub(crate) async fn execute_publish_campaign_inner(
                 None,
                 &format!("{error:#}"),
             ));
+        }
+        if db.has_active_publish_pipeline(&campaign_id)? {
+            let output = riviu_core::PublishCampaignExecutionResult {
+                campaign_id: campaign_id.clone(),
+                status: riviu_core::PublishExecutionStatus::Partial,
+                retry_scope: riviu_core::PublishRetryScope::None,
+                issues,
+                detail: db
+                    .get_publish_campaign(&campaign_id)?
+                    .context("campaign missing after enqueue")?,
+            };
+            persist_publish_snapshot_then_announce(&db, &events, &campaign_id, || {
+                db.save_publish_execution_snapshot(
+                    &campaign_id,
+                    &input_digest,
+                    output.status,
+                    output.retry_scope,
+                    &publish_execution_report(&request, &output)?,
+                )
+            })?;
+            return Ok(output);
         }
     }
 
@@ -1932,6 +1980,9 @@ pub(super) async fn capture_confirmed_assignment_link(
         });
         let package = control.resolve_tiktok_package(&assignment.udid).await?;
         control.foreground_session_app(&context, &package).await?;
+        if let Err(error) = control.request_app_completion(&assignment.udid, &package) {
+            log::warn!("publication completion intent {}: {error}", assignment.id);
+        }
         let language = session
             .ui_language()
             .await
@@ -2297,30 +2348,24 @@ async fn post_one_assignment_owned(
         claim_refused: false,
         final_revision: initial_revision,
     };
-    match db.publish_campaign_request(campaign_id) {
+    let request = match db.publish_campaign_request(campaign_id) {
         Ok(Some(request))
             if request.verification_contract_version == Some(1)
                 && (!request.sheet_enabled
                     || request
                         .sheet_delivery
                         .as_ref()
-                        .is_some_and(|target| target.version == 2)) => {}
+                        .is_some_and(|target| target.version == 2)) =>
+        {
+            request
+        }
         _ => return finish(PostOutcome::NothingPublished(
             "Lượt đăng chưa qua kiểm tra theo cơ chế mới; kiểm tra lại và tạo lượt mới trước Đăng"
                 .into(),
         )),
-    }
-    let (cleanup_policy, defer_link_capture) = match db.get_publish_campaign(campaign_id) {
-        Ok(Some(detail)) => (
-            detail.campaign.cleanup_policy,
-            detail.campaign.run_at.is_some(),
-        ),
-        _ => {
-            return finish(PostOutcome::NothingPublished(
-                "Không đọc được chính sách dọn nội dung của chiến dịch".into(),
-            ))
-        }
     };
+    let cleanup_policy = request.cleanup_policy;
+    let defer_link_capture = run.is_some() || request.run_at.is_some();
     // **Everything before the phone opens is a refusal, not an unknown.** These used to be
     // `bail!`s that the caller turned into `uncertain` — permanently unclaimable — for a
     // caption nobody could have posted and a phone nobody had touched.
@@ -2696,6 +2741,11 @@ async fn release_pending_publish_context(
     context: riviu_core::UiWithStreamContext,
     import: &str,
 ) -> anyhow::Result<serde_json::Value> {
+    if let Ok(package) = control.resolve_tiktok_package(context.udid()).await {
+        if let Err(error) = control.request_app_completion(context.udid(), &package) {
+            log::warn!("pending publication completion intent: {error}");
+        }
+    }
     let proof = control.close_ui_context(context).await?;
     Ok(serde_json::json!({
         "state": "kept",
@@ -2727,7 +2777,7 @@ async fn finish_import_with_policy(
     }
     let proof = close_publish_context(control, context, udid).await?;
     Ok(
-        serde_json::json!({"state":"kept","importId":import,"reason":if post_confirmed {"operator_choice"} else {"post_not_confirmed"},"appCleanup":{"state":"processAbsent","proof":proof}}),
+        serde_json::json!({"state":"kept","importId":import,"reason":if post_confirmed {"operator_choice"} else {"post_not_confirmed"},"appCleanup":proof}),
     )
 }
 
@@ -2776,10 +2826,7 @@ pub(super) async fn tidy_up_the_imported_media(
     let proof = shutdown?;
     let mut cleanup = cleanup;
     if let Some(object) = cleanup.as_object_mut() {
-        object.insert(
-            "appCleanup".into(),
-            serde_json::json!({"state":"processAbsent","proof":proof}),
-        );
+        object.insert("appCleanup".into(), serde_json::to_value(proof)?);
     }
     Ok(cleanup)
 }
@@ -2788,10 +2835,10 @@ async fn close_publish_context(
     control: &DeviceControlPlane,
     context: riviu_core::UiWithStreamContext,
     udid: &str,
-) -> anyhow::Result<riviu_core::ProcessAbsenceProof> {
+) -> anyhow::Result<riviu_core::AppCompletionDisposition> {
     match control.resolve_tiktok_package(udid).await {
         Ok(package) => control
-            .finish_app_session(context, &package)
+            .complete_app_session(context, &package)
             .await
             .map_err(anyhow::Error::new),
         Err(error) => {
@@ -3696,7 +3743,7 @@ pub(super) async fn capture_or_defer_submission(
 ) -> PostOutcome {
     if defer {
         evidence["linkCaptureReason"] = serde_json::json!(
-            "Đã gửi bài hẹn giờ; sẽ kiểm tra liên kết sau 2 phút rồi định kỳ ở nền, tối đa 4 giờ"
+            "Đã gửi bài; bộ xác minh sẽ kiểm tra liên kết riêng và thử lại sau 5 phút nếu TikTok còn xử lý"
         );
         evidence["publicationVerified"] = serde_json::json!(false);
         return PostOutcome::Submitted(evidence);

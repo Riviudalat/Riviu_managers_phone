@@ -43,13 +43,39 @@ fn backoff_ms(attempts: i64) -> i64 {
 }
 
 fn seed_states(conn: &Connection) -> anyhow::Result<()> {
+    let reset_pending: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM publish_reporting_epochs WHERE paused=1)",
+        [],
+        |r| r.get(0),
+    )?;
+    if reset_pending {
+        return Ok(());
+    }
     conn.execute_batch(
         "INSERT OR IGNORE INTO publish_sheet_sync_state(assignment_id)
       SELECT a.id FROM publish_assignments a JOIN publish_campaigns c ON c.id=a.campaign_id
       WHERE json_valid(c.request_json) AND json_extract(c.request_json,'$.sheetDelivery.version')=2
         AND json_extract(c.request_json,'$.sheetEnabled')=1;
       INSERT OR IGNORE INTO publish_sheet_sync_state(assignment_id)
-      SELECT assignment_id FROM publish_sheet_outbox WHERE delivery_target_json IS NOT NULL;",
+      SELECT assignment_id FROM publish_sheet_outbox WHERE delivery_target_json IS NOT NULL;
+      WITH targets AS (
+        SELECT assignment_id,delivery_target_json AS target FROM publish_sheet_outbox
+          WHERE delivery_target_json IS NOT NULL AND json_valid(delivery_target_json)
+        UNION ALL
+        SELECT a.id,json_extract(c.request_json,'$.sheetDelivery')
+          FROM publish_assignments a JOIN publish_campaigns c ON c.id=a.campaign_id
+          WHERE json_valid(c.request_json) AND json_extract(c.request_json,'$.sheetDelivery.version')=2
+            AND NOT EXISTS(SELECT 1 FROM publish_sheet_outbox o WHERE o.assignment_id=a.id AND o.delivery_target_json IS NOT NULL)
+      ), closed AS (
+        SELECT t.assignment_id,e.epoch FROM targets t JOIN publish_reporting_epochs e
+          ON e.spreadsheet_id=json_extract(t.target,'$.spreadsheetId')
+          AND e.sheet_gid=json_extract(t.target,'$.sheetGid')
+          WHERE e.paused=0 AND COALESCE(json_extract(t.target,'$.reportingEpoch'),'legacy')<>e.epoch
+      )
+      UPDATE publish_sheet_sync_state SET
+        superseded_epoch=(SELECT epoch FROM closed WHERE closed.assignment_id=publish_sheet_sync_state.assignment_id),
+        claim_token=NULL,claim_until_ms=NULL,claim_kind=NULL
+        WHERE superseded_epoch IS NULL AND assignment_id IN(SELECT assignment_id FROM closed);",
     )?;
     Ok(())
 }
@@ -90,14 +116,22 @@ impl Database {
             [now_ms],
             |r| Ok((r.get(0)?, r.get(1)?)),
         )?;
-        if active >= 2 || (kind == SheetDeliveryKind::Report && reports >= 1) {
+        let paused: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM publish_reporting_epochs WHERE paused=1)",
+            [],
+            |r| r.get(0),
+        )?;
+        let migrating:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM settings WHERE key='google.sheets.migration.v1' AND value<>'')",[],|r|r.get(0))?;
+        if paused || migrating || active >= 2 || (kind == SheetDeliveryKind::Report && reports >= 1)
+        {
+            tx.commit()?;
             return Ok(None);
         }
         let candidate:Option<(String,String)> = match kind {
             SheetDeliveryKind::Canonical => tx.query_row(
                 "SELECT o.assignment_id,o.delivery_target_json FROM publish_sheet_outbox o
                  JOIN publish_sheet_sync_state s ON s.assignment_id=o.assignment_id
-                 WHERE o.delivery_target_json IS NOT NULL AND o.state<>'sent' AND o.next_attempt_at_ms<=?1
+                 WHERE s.superseded_epoch IS NULL AND o.delivery_target_json IS NOT NULL AND o.state<>'sent' AND o.next_attempt_at_ms<=?1
                    AND (s.claim_token IS NULL OR s.claim_until_ms<=?1) AND (?2 IS NULL OR o.assignment_id=?2)
                  ORDER BY o.next_attempt_at_ms,o.created_at,o.assignment_id LIMIT 1",
                 params![now_ms,assignment_id],|r|Ok((r.get(0)?,r.get(1)?))).optional()?,
@@ -105,7 +139,7 @@ impl Database {
                 "SELECT a.id,json_extract(c.request_json,'$.sheetDelivery')
                  FROM publish_assignments a JOIN publish_campaigns c ON c.id=a.campaign_id
                  JOIN publish_sheet_sync_state s ON s.assignment_id=a.id
-                 WHERE json_valid(c.request_json) AND json_extract(c.request_json,'$.sheetDelivery.version')=2
+                 WHERE s.superseded_epoch IS NULL AND json_valid(c.request_json) AND json_extract(c.request_json,'$.sheetDelivery.version')=2
                    AND json_extract(c.request_json,'$.sheetDelivery.internalReporting')=1
                    AND json_extract(c.request_json,'$.sheetEnabled')=1
                    AND a.revision+c.revision>s.report_acked_revision
@@ -117,6 +151,7 @@ impl Database {
                 params![now_ms,assignment_id],|r|Ok((r.get(0)?,r.get(1)?))).optional()?,
         };
         let Some((id, raw_target)) = candidate else {
+            tx.commit()?;
             return Ok(None);
         };
         let prepared = (|| {
@@ -182,7 +217,8 @@ impl Database {
         let conn = self.conn()?;
         Ok(conn.execute(
             "UPDATE publish_sheet_outbox SET next_attempt_at_ms=?2 WHERE assignment_id=?1
-          AND delivery_target_json IS NOT NULL AND state<>'sent'",
+          AND delivery_target_json IS NOT NULL AND state<>'sent'
+          AND NOT EXISTS(SELECT 1 FROM publish_sheet_sync_state s WHERE s.assignment_id=?1 AND s.superseded_epoch IS NOT NULL)",
             params![id, now_ms],
         )? > 0)
     }
@@ -274,7 +310,7 @@ fn claim_current(
 ) -> anyhow::Result<bool> {
     Ok(conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM publish_sheet_sync_state WHERE assignment_id=?1
-      AND claim_token=?2 AND claim_kind=?3 AND claim_until_ms>?4)",
+      AND superseded_epoch IS NULL AND claim_token=?2 AND claim_kind=?3 AND claim_until_ms>?4)",
         params![
             claim.assignment_id,
             claim.token,
@@ -386,6 +422,7 @@ mod tests {
     }
     fn target(internal_reporting: bool) -> SheetDeliveryTarget {
         SheetDeliveryTarget {
+            reporting_epoch: None,
             version: 2,
             spreadsheet_id: "fixture-book".into(),
             sheet_gid: 0,
@@ -596,6 +633,62 @@ mod tests {
     }
 
     #[test]
+    fn stale_targets_appearing_after_reset_are_superseded_before_delivery() {
+        let f = Fixture::new();
+        let epoch = Uuid::new_v4().to_string();
+        f.db.begin_publish_sheet_reset(&target(true), &epoch)
+            .unwrap();
+        f.db.finish_publish_sheet_reset(&target(true), &epoch, "verified-backup")
+            .unwrap();
+        let id = f.report();
+        f.canonical("late-detached", true);
+        assert!(claim(&f.db, SheetDeliveryKind::Report, Some(&id), 0).is_none());
+        assert!(claim(
+            &f.db,
+            SheetDeliveryKind::Canonical,
+            Some("late-detached"),
+            0
+        )
+        .is_none());
+        f.db.configure_bound_sheet_delivery("new-connection", 1)
+            .unwrap();
+        assert!(!f
+            .db
+            .retry_bound_sheet_assignment("late-detached", 1)
+            .unwrap());
+        let reopened = Database::open(&f.path).unwrap();
+        assert!(claim(&reopened, SheetDeliveryKind::Report, Some(&id), 2).is_none());
+        assert!(reopened
+            .pending_publish_sheet_row("late-detached")
+            .unwrap()
+            .is_none());
+        assert!(reopened.pending_publish_sheet_rows(100).unwrap().is_empty());
+        assert_eq!(
+            reopened
+                .conn()
+                .unwrap()
+                .query_row(
+                    "SELECT superseded_epoch FROM publish_sheet_sync_state WHERE assignment_id=?1",
+                    [&id],
+                    |row| row.get::<_, String>(0)
+                )
+                .unwrap(),
+            epoch
+        );
+        f.canonical("current", true);
+        f.db.conn().unwrap().execute(
+            "UPDATE publish_sheet_outbox SET delivery_target_json=json_set(delivery_target_json,'$.reportingEpoch',?1) WHERE assignment_id='current'",
+            [&epoch]
+        ).unwrap();
+        assert_eq!(
+            claim(&reopened, SheetDeliveryKind::Canonical, None, 3)
+                .unwrap()
+                .assignment_id,
+            "current"
+        );
+    }
+
+    #[test]
     fn bound_outbox_pins_target_and_submission_time_and_survives_campaign_deletion() {
         let f = Fixture::new();
         let id = f.report();
@@ -675,6 +768,14 @@ mod tests {
         };
         assert_eq!(row.posted_at.as_deref(), Some("2026-09-12T00:00:00Z"));
         assert_eq!(metadata.as_ref().unwrap().status, "Đã xác minh");
+        assert_eq!(
+            f.db.pending_publish_sheet_row(&id)
+                .unwrap()
+                .unwrap()
+                .posted_at
+                .as_deref(),
+            Some("2026-09-12T00:00:00Z")
+        );
         assert!(matches!(
             f.db.settle_bound_sheet_delivery(&delivery, None, None, 1)
                 .unwrap(),

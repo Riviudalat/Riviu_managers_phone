@@ -126,9 +126,19 @@ pub struct DeviceControlPlane {
     background_gate: Mutex<()>,
     plane_id: Uuid,
     clean_start_guard: Mutex<Option<Arc<CleanStartGuard>>>,
+    app_completion_handler: Mutex<Option<Arc<AppCompletionHandler>>>,
 }
 
 type CleanStartGuard = dyn Fn(&str) -> Result<(), String> + Send + Sync;
+type AppCompletionHandler = dyn Fn(&str, &str) -> Result<(), String> + Send + Sync;
+
+/// A completed phone task may release its session before other tasks allow app closure.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "state", content = "proof", rename_all = "camelCase")]
+pub enum AppCompletionDisposition {
+    ProcessAbsent(ProcessAbsenceProof),
+    Deferred,
+}
 
 mod apps;
 mod leases;
@@ -189,6 +199,7 @@ impl DeviceControlPlane {
             background_gate: Mutex::new(()),
             plane_id: Uuid::new_v4(),
             clean_start_guard: Mutex::new(None),
+            app_completion_handler: Mutex::new(None),
         }
     }
 
@@ -202,6 +213,30 @@ impl DeviceControlPlane {
     /// Manual viewing and warm verification keep working while a submitted upload is pending.
     pub fn set_clean_start_guard(&self, guard: Arc<CleanStartGuard>) {
         *self.clean_start_guard.lock() = Some(guard);
+    }
+
+    /// The desktop persists an intent here; its worker closes only after all device work settles.
+    pub fn set_app_completion_handler(&self, handler: Arc<AppCompletionHandler>) {
+        *self.app_completion_handler.lock() = Some(handler);
+    }
+
+    /// Record before releasing the task's lease. False preserves standalone harness behavior.
+    pub fn request_app_completion(
+        &self,
+        udid: &str,
+        bundle_id: &str,
+    ) -> Result<bool, DeviceControlError> {
+        let handler = self.app_completion_handler.lock().clone();
+        if let Some(handler) = handler {
+            handler(udid, bundle_id).map_err(|message| DeviceControlError::Driver {
+                udid: udid.into(),
+                operation: "requestAppCompletion",
+                message,
+            })?;
+            Ok(true)
+        } else {
+            Ok(false)
+        }
     }
 
     fn ensure_clean_start_allowed(&self, udid: &str) -> Result<(), DeviceControlError> {
@@ -2653,6 +2688,88 @@ mod tests {
         assert_eq!(
             driver.lifecycle_calls.lock().last().unwrap(),
             "stop:a:com.fixture"
+        );
+        assert_eq!(control.current_work_owner("a"), None);
+        control.shutdown_cleanup().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn clean_app_session_completion_defers_until_device_work_settles() {
+        let driver = Arc::new(TestDriver::default());
+        driver.allow_stop.add_permits(4);
+        let control = control_plane(driver.clone(), 1);
+        let intents = Arc::new(Mutex::new(Vec::new()));
+        let captured = intents.clone();
+        control.set_app_completion_handler(Arc::new(move |udid, package| {
+            captured.lock().push((udid.to_owned(), package.to_owned()));
+            Ok(())
+        }));
+        let lease = control
+            .acquire_exclusive("a", DeviceWorkOwner::Nurture)
+            .await
+            .unwrap();
+        let (lease, capacity) = control.reserve_ui_capacity(lease).await.unwrap();
+        let context = control
+            .start_clean_app_session(
+                lease,
+                capacity,
+                "com.fixture",
+                InteractionSessionKind::Ordinary,
+            )
+            .await
+            .unwrap();
+        let result = control
+            .complete_app_session(context, "com.fixture")
+            .await
+            .unwrap();
+        assert!(matches!(result, AppCompletionDisposition::Deferred));
+        assert_eq!(*intents.lock(), vec![("a".into(), "com.fixture".into())]);
+        assert_eq!(
+            driver
+                .lifecycle_calls
+                .lock()
+                .iter()
+                .filter(|c| c.starts_with("stop:"))
+                .count(),
+            1
+        );
+        assert_eq!(control.current_work_owner("a"), None);
+        assert_eq!(control.reserved_stream_capacity(), 0);
+        control.shutdown_cleanup().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn clean_app_session_completion_persistence_error_releases_without_stopping() {
+        let driver = Arc::new(TestDriver::default());
+        driver.allow_stop.add_permits(4);
+        let control = control_plane(driver.clone(), 1);
+        control.set_app_completion_handler(Arc::new(|_, _| Err("DB unavailable".into())));
+        let lease = control
+            .acquire_exclusive("a", DeviceWorkOwner::Nurture)
+            .await
+            .unwrap();
+        let (lease, capacity) = control.reserve_ui_capacity(lease).await.unwrap();
+        let context = control
+            .start_clean_app_session(
+                lease,
+                capacity,
+                "com.fixture",
+                InteractionSessionKind::Ordinary,
+            )
+            .await
+            .unwrap();
+        assert!(control
+            .complete_app_session(context, "com.fixture")
+            .await
+            .is_err());
+        assert_eq!(
+            driver
+                .lifecycle_calls
+                .lock()
+                .iter()
+                .filter(|c| c.starts_with("stop:"))
+                .count(),
+            1
         );
         assert_eq!(control.current_work_owner("a"), None);
         control.shutdown_cleanup().await.unwrap();

@@ -18,6 +18,8 @@ pub mod feed_ladder;
 pub mod flow;
 pub mod frame_source;
 pub mod frame_text;
+pub mod google_oauth;
+pub mod google_sheets;
 pub mod group_sync;
 pub mod human_behavior;
 pub mod interaction;
@@ -69,9 +71,9 @@ pub use automation::*;
 pub use automation_schedule_runtime::*;
 pub use device_capabilities::*;
 pub use device_control::{
-    ContextReleaseProof, DeviceControlError, DeviceControlPlane, DeviceExclusiveContext,
-    DeviceLeaseRef, DeviceReleaseProof, ForegroundAppProof, InteractionAcquireResult,
-    UiCapacityReservation, UiSessionContext, UiWithStreamContext,
+    AppCompletionDisposition, ContextReleaseProof, DeviceControlError, DeviceControlPlane,
+    DeviceExclusiveContext, DeviceLeaseRef, DeviceReleaseProof, ForegroundAppProof,
+    InteractionAcquireResult, UiCapacityReservation, UiSessionContext, UiWithStreamContext,
 };
 pub use device_work::{
     DeviceBusy, DeviceWorkAcquireError, DeviceWorkCoordinator, DeviceWorkLease, DeviceWorkOwner,

@@ -401,12 +401,57 @@ pub struct ComposerPlan {
 const NEVER_MEASURED: ElementQuery<'static> =
     ElementQuery::ResourceIdSuffix(":id/riviu_never_measured");
 
+fn trill_text_post_button(
+    tree: &crate::ui_automation::tree::Tree,
+    caption: &str,
+) -> Option<ElementBox> {
+    const PACKAGE: &str = "com.ss.android.ugc.trill";
+    // Phone8, Trill38.3.2/en, 15/09/2026: keyboard-focused caption changes
+    // Post from bottom desc=Post into top :id/mr6 Button text=Post at
+    // [891,79][1038,163]. Caption :id/eej remains full and title :id/eek
+    // stays distinct. Geometry is always read from this current snapshot.
+    let captions = tree.matching(PACKAGE, ElementQuery::ResourceIdSuffix(":id/eej"));
+    let [index] = captions.as_slice() else {
+        return None;
+    };
+    let field = &tree.nodes[*index];
+    if field.attr("class") != "android.widget.EditText"
+        || field.attr("showing-hint") == "true"
+        || field.attr("text").trim() != caption.trim()
+        || !field
+            .rect()
+            .is_some_and(|field| field.enabled && field.clickable)
+    {
+        return None;
+    }
+    let buttons = tree.matching(
+        PACKAGE,
+        ElementQuery::Text {
+            value: "Post",
+            exact: true,
+        },
+    );
+    let [index] = buttons.as_slice() else {
+        return None;
+    };
+    let button = &tree.nodes[*index];
+    if button.attr("class") != "android.widget.Button"
+        || button.attr("resource-id") != "com.ss.android.ugc.trill:id/mr6"
+    {
+        return None;
+    }
+    button
+        .rect()
+        .filter(|button| button.enabled && button.clickable)
+}
+
 /// The three locators that turn a reachable edit step into a published post.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct PublishTail {
     edit_next: ElementQuery<'static>,
     caption: ElementQuery<'static>,
     post_button: ElementQuery<'static>,
+    trill_text_post: bool,
 }
 
 impl ComposerPlan {
@@ -450,6 +495,9 @@ impl ComposerPlan {
                     edit_next,
                     caption,
                     post_button,
+                    trill_text_post: labels.package() == "com.ss.android.ugc.trill"
+                        && labels.resource_version() == Some("38.3.2")
+                        && labels.language() == "en",
                 }),
                 _ => None,
             },
@@ -1498,16 +1546,29 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
     where
         F: FnMut() -> anyhow::Result<()>,
     {
-        let Some(query) = self.plan.publish.map(|tail| tail.post_button) else {
+        if self.plan.publish.is_none() {
             return Ok(ComposerVerdict::PostUnmeasured);
-        };
+        }
         if stop.load(Ordering::Relaxed) {
             return Ok(ComposerVerdict::Stopped);
         }
-        let Some(mut button) = self
-            .await_condition(COMPOSER_WINDOW, query, stop, |_| true)
-            .await?
-        else {
+        let deadline = Instant::now() + COMPOSER_WINDOW;
+        let button = loop {
+            if stop.load(Ordering::Relaxed) {
+                return Ok(ComposerVerdict::Stopped);
+            }
+            if self.resolve_post_button(caption).await?.is_some() {
+                break true;
+            }
+            if Instant::now() >= deadline {
+                break false;
+            }
+            sleep(POLL, stop).await;
+        };
+        if !button {
+            #[cfg(debug_assertions)]
+            self.trace_missing_post_button("before-sound-reproof", caption)
+                .await;
             return Ok(ComposerVerdict::NoPostButton);
         };
         if let Some((sound_plan, expected_title)) = self.pending_sound_proof.clone() {
@@ -1551,13 +1612,15 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
             } else {
                 confirm_sound(self.session, sound_plan, &expected_title).await?;
             }
-            // Resolve Post again after sound/continuity readback. Never keep the old rectangle.
-            let buttons = self.session.locate_all(query).await?;
-            let [current] = buttons.as_slice() else {
-                return Ok(ComposerVerdict::NoPostButton);
-            };
-            button = current.clone();
         }
+        // Resolve after all sound/continuity reads even without a sound policy.
+        // A changed caption or disappearing text-only toolbar cannot reuse a prior target.
+        let Some(button) = self.await_final_post_button(caption, stop).await? else {
+            #[cfg(debug_assertions)]
+            self.trace_missing_post_button("after-sound-reproof", caption)
+                .await;
+            return Ok(ComposerVerdict::NoPostButton);
+        };
         // The last point at which stopping is still free.
         if stop.load(Ordering::Relaxed) {
             return Ok(ComposerVerdict::Stopped);
@@ -1584,6 +1647,68 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
         } else {
             ComposerVerdict::PostNotConfirmed
         })
+    }
+
+    async fn resolve_post_button(&self, caption: &str) -> anyhow::Result<Option<ElementBox>> {
+        let Some(tail) = self.plan.publish else {
+            return Ok(None);
+        };
+        let normal = self.session.locate_all(tail.post_button).await?;
+        match normal.as_slice() {
+            [_] => {
+                // Android's list API deliberately leaves clickable=false because
+                // it reads geometry only. The list proves uniqueness; locate()
+                // reads actual enabled/clickable flags and current geometry.
+                return Ok(self
+                    .session
+                    .locate(tail.post_button)
+                    .await?
+                    .filter(|button| button.enabled && button.clickable));
+            }
+            [] => {}
+            _ => return Ok(None),
+        }
+        if !tail.trill_text_post {
+            return Ok(None);
+        }
+        let tree = crate::ui_automation::tree::Tree::parse(
+            self.session.hierarchy_source_snapshot().await?,
+        )?;
+        Ok(trill_text_post_button(&tree, caption))
+    }
+
+    async fn await_final_post_button(
+        &self,
+        caption: &str,
+        stop: &AtomicBool,
+    ) -> anyhow::Result<Option<ElementBox>> {
+        let deadline = Instant::now() + COMPOSER_WINDOW;
+        let mut waited = false;
+        loop {
+            if stop.load(Ordering::Relaxed) || Instant::now() >= deadline {
+                return Ok(None);
+            }
+            if let Some(button) = self.resolve_post_button(caption).await? {
+                // Phone8,15/09: keyboard toolbar mr6 disappeared during sound
+                // reproof; normal bottom mr_ was visible in the later trace.
+                // After any wait, reprove caption and resolve once more so
+                // neither text nor geometry comes from before that transition.
+                let button = if waited {
+                    self.require_caption_unchanged(caption).await?;
+                    self.resolve_post_button(caption).await?
+                } else {
+                    Some(button)
+                };
+                if stop.load(Ordering::Relaxed) || Instant::now() >= deadline {
+                    return Ok(None);
+                }
+                if button.is_some() {
+                    return Ok(button);
+                }
+            }
+            waited = true;
+            sleep(POLL, stop).await;
+        }
     }
 
     async fn require_caption_unchanged(&self, caption: &str) -> anyhow::Result<()> {
@@ -1682,6 +1807,45 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
                 return false;
             }
             tokio::time::sleep(POLL).await;
+        }
+    }
+
+    /// One latest XML per device and refusal branch, captured before leave()
+    /// changes the failed screen. Diagnostics never replace the primary verdict.
+    #[cfg(debug_assertions)]
+    async fn trace_missing_post_button(&self, stage: &str, caption: &str) {
+        let Some(folder) = std::env::var_os("RIVIU_PUBLISH_PICKER_TRACE") else {
+            return;
+        };
+        let result = async {
+            use sha2::{Digest, Sha256};
+            let folder = std::path::PathBuf::from(folder);
+            anyhow::ensure!(folder.is_absolute(), "Post trace directory must be absolute");
+            let scope = self.session.gui_scope();
+            let device = scope.as_ref().map(|scope| scope.device_id.as_str()).unwrap_or("unscoped");
+            let snapshot = self.session.hierarchy_source_snapshot().await?;
+            let xml_hash = format!("{:x}", Sha256::digest(snapshot.xml.as_bytes()));
+            let metadata = serde_json::json!({
+                "stage":stage,
+                "scope":scope,
+                "sessionEpoch":self.session.gui_session_epoch(),
+                "snapshotGeneration":snapshot.generation,
+                "snapshotSha256":xml_hash,
+                "captionSha256":format!("{:x}",Sha256::digest(caption.as_bytes())),
+                "postQuery":format!("{:?}",self.plan.post_button()),
+            });
+            let name = format!("post-button-{:x}-{stage}.xml", Sha256::digest(device.as_bytes()));
+            // JSON strings may contain XML-comment separators; escape the entire
+            // metadata into a comment without altering the captured hierarchy.
+            let comment = metadata.to_string().replace("--", "\\u002d\\u002d");
+            let xml = format!("{}\n<!-- {comment} -->", snapshot.xml);
+            std::fs::create_dir_all(&folder)?;
+            std::fs::write(folder.join(&name), xml)?;
+            tracing::warn!(stage, path=%folder.join(name).display(), "captured missing Post button before cleanup");
+            Ok::<_, anyhow::Error>(())
+        }.await;
+        if let Err(error) = result {
+            tracing::warn!(stage, %error, "could not capture missing Post button diagnostics");
         }
     }
 
@@ -2404,6 +2568,234 @@ mod tests {
             .expect("everything up to the edit step is measured")
     }
 
+    fn trill_focused_caption_xml() -> String {
+        r#"<hierarchy>
+          <node package="com.ss.android.ugc.trill" resource-id="com.ss.android.ugc.trill:id/mr6" class="android.widget.Button" text="Post" bounds="[891,79][1038,163]" displayed="true" enabled="true" clickable="true"/>
+          <node package="com.ss.android.ugc.trill" resource-id="com.ss.android.ugc.trill:id/eek" class="android.widget.EditText" text="Add a catchy title" showing-hint="true" bounds="[42,320][1038,375]" displayed="true" enabled="true" clickable="true"/>
+          <node package="com.ss.android.ugc.trill" resource-id="com.ss.android.ugc.trill:id/eej" class="android.widget.EditText" text="Caption đầy đủ ✨" focused="true" bounds="[42,440][1038,986]" displayed="true" enabled="true" clickable="true"/>
+        </hierarchy>"#.into()
+    }
+
+    #[test]
+    fn text_post_requires_exact_measured_button_and_full_unique_caption() {
+        let xml = trill_focused_caption_xml();
+        let read = |xml: String| {
+            crate::ui_automation::tree::Tree::parse(crate::HierarchySourceSnapshot {
+                generation: 1,
+                xml,
+            })
+            .unwrap()
+        };
+        let button = trill_text_post_button(&read(xml.clone()), "Caption đầy đủ ✨").unwrap();
+        assert_eq!(
+            (button.x, button.y, button.width, button.height),
+            (891.0, 79.0, 147.0, 84.0)
+        );
+        for changed in [
+            xml.replace("Caption đầy đủ ✨", "Caption khác"),
+            xml.replace(":id/eej", ":id/other"),
+            xml.replace("android.widget.Button", "android.widget.TextView"),
+            xml.replace(":id/mr6", ":id/otherPost"),
+            xml.replace("text=\"Post\"", "text=\"Post comment\""),
+            xml.replace("enabled=\"true\"", "enabled=\"false\""),
+            xml.replace("displayed=\"true\"", "displayed=\"false\""),
+            xml.replace("com.ss.android.ugc.trill", "other.package"),
+            xml.replace("</hierarchy>", r#"<node package="com.ss.android.ugc.trill" class="android.widget.Button" text="Post" bounds="[0,0][10,10]" displayed="true" enabled="true" clickable="true"/></hierarchy>"#),
+        ] {
+            assert!(trill_text_post_button(&read(changed), "Caption đầy đủ ✨").is_none());
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn focused_caption_text_post_revalidates_before_intent_and_never_reuses_changed_caption()
+    {
+        for changed in [false, true] {
+            let labels = controls_for("com.ss.android.ugc.trill", "en", "38.3.2").unwrap();
+            let plan = ComposerPlan::resolve(&labels).unwrap();
+            let post = ElementBox {
+                x: 891.0,
+                y: 79.0,
+                width: 147.0,
+                height: 84.0,
+                enabled: true,
+                clickable: true,
+                description: Some("Post".into()),
+            };
+            let xml = trill_focused_caption_xml();
+            let session = FakeSession {
+                snapshot_overrides: Mutex::new(std::collections::VecDeque::from([
+                    xml.clone(),
+                    if changed {
+                        xml.replace("Caption đầy đủ ✨", "Changed after first read")
+                    } else {
+                        xml
+                    },
+                ])),
+                ..FakeSession::with(vec![
+                    scene(vec![], None).leaving_by(post),
+                    scene(vec![("Create", box_at(900.0, 2000.0))], None),
+                ])
+            };
+            let mut composer = Composer::new(&session, plan, |button: &ElementBox| button.centre());
+            let mut intents = 0;
+            let result = composer
+                .post_with_effect_intent(
+                    "Caption đầy đủ ✨",
+                    &AtomicBool::new(false),
+                    &mut || {
+                        intents += 1;
+                        Ok(())
+                    },
+                )
+                .await
+                .unwrap();
+            assert_eq!(intents, usize::from(!changed));
+            assert_eq!(session.taps.lock().len(), usize::from(!changed));
+            assert_eq!(
+                result,
+                if changed {
+                    ComposerVerdict::NoPostButton
+                } else {
+                    ComposerVerdict::Submitted
+                }
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn text_post_variant_is_not_enabled_for_an_unmeasured_plan() {
+        let session = FakeSession {
+            snapshot_overrides: Mutex::new(std::collections::VecDeque::from([
+                trill_focused_caption_xml(),
+            ])),
+            ..FakeSession::with(vec![scene(vec![], None)])
+        };
+        let composer = Composer::new(&session, plan(), |button: &ElementBox| button.centre());
+        assert!(composer
+            .resolve_post_button("Caption đầy đủ ✨")
+            .await
+            .unwrap()
+            .is_none());
+        assert_eq!(session.snapshot_overrides.lock().len(), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn normal_post_uses_fresh_armed_flags_when_android_list_marks_them_unread() {
+        let session = FakeSession {
+            list_omits_armed_flags: true,
+            stale_list_geometry: true,
+            ..FakeSession::with(vec![post_screen(), feed()])
+        };
+        let post_query = plan().post_button().unwrap();
+        let listed = session.locate_all(post_query).await.unwrap();
+        assert_eq!(listed.len(), 1);
+        assert!(!listed[0].clickable, "actual Android list contract");
+        assert_ne!(listed[0].x, box_at(900.0, 2000.0).x);
+        let mut composer = Composer::new(&session, plan(), |button: &ElementBox| button.centre());
+        let mut intents = 0;
+        let verdict = composer
+            .post_with_effect_intent("caption", &AtomicBool::new(false), &mut || {
+                intents += 1;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        assert_eq!(verdict, ComposerVerdict::Submitted);
+        assert_eq!(intents, 1);
+        assert_eq!(post_button_taps(&session), 1);
+    }
+
+    #[tokio::test]
+    async fn normal_post_refuses_when_fresh_control_is_disabled_or_not_clickable() {
+        for (enabled, clickable) in [(false, true), (true, false)] {
+            let mut screen = post_screen();
+            let post = screen.elements.get_mut("fixture-post").unwrap();
+            post.enabled = enabled;
+            post.clickable = clickable;
+            let session = FakeSession {
+                list_omits_armed_flags: true,
+                ..FakeSession::with(vec![screen])
+            };
+            let composer = Composer::new(&session, plan(), |button: &ElementBox| button.centre());
+            assert!(composer
+                .resolve_post_button("caption")
+                .await
+                .unwrap()
+                .is_none());
+            assert!(session.taps.lock().is_empty());
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn sound_reproof_waits_for_normal_post_after_text_toolbar_disappears_and_rechecks_caption(
+    ) {
+        for changed in [false, true] {
+            let mut measured = plan();
+            let tail = measured.publish.as_mut().unwrap();
+            tail.post_button = ElementQuery::Description {
+                value: "Post",
+                exact: true,
+            };
+            tail.trill_text_post = true;
+            let mut initial = post_screen();
+            initial.elements.remove("fixture-post");
+            initial
+                .elements
+                .insert(":id/aun".into(), box_at(20.0, 70.0));
+            initial.exit = Some(":id/aun".into());
+            let final_caption = scene(
+                vec![
+                    ("fixture-caption", box_at(100.0, 300.0)),
+                    ("Post", box_at(900.0, 2000.0)),
+                ],
+                Some("Post"),
+            );
+            let session = FakeSession {
+                snapshot_overrides: Mutex::new(std::collections::VecDeque::from([
+                    trill_focused_caption_xml(),
+                    "<hierarchy/>".into(),
+                ])),
+                post_reproof_gaps: Mutex::new(std::collections::VecDeque::from([
+                    true, true, false,
+                ])),
+                change_caption_during_post_gap: changed,
+                ..FakeSession::with(vec![
+                    initial,
+                    sound_edit_step("Sound A"),
+                    final_caption,
+                    feed(),
+                ])
+            };
+            *session.typed.lock() = Some("Caption đầy đủ ✨".into());
+            let mut composer =
+                Composer::new(&session, measured, |button: &ElementBox| button.centre());
+            composer.pending_sound_proof = Some((
+                SoundPickerPlan::resolve("com.ss.android.ugc.trill", "en", "38.3.2").unwrap(),
+                "Sound A".into(),
+            ));
+            let started = Instant::now();
+            let mut intents = 0;
+            let result = composer
+                .post_with_effect_intent(
+                    "Caption đầy đủ ✨",
+                    &AtomicBool::new(false),
+                    &mut || {
+                        intents += 1;
+                        Ok(())
+                    },
+                )
+                .await;
+            assert_eq!(intents, usize::from(!changed));
+            assert_eq!(post_button_taps(&session), usize::from(!changed));
+            assert!(started.elapsed() >= POLL * 2);
+            if changed {
+                assert!(result.unwrap_err().to_string().contains("caption changed"));
+            } else {
+                assert_eq!(result.unwrap(), ComposerVerdict::Submitted);
+            }
+        }
+    }
+
     #[test]
     fn selected_sound_is_reproved_after_caption_and_before_the_post_boundary() {
         let source = include_str!("tiktok_composer.rs").replace("\r\n", "\n");
@@ -2416,13 +2808,13 @@ mod tests {
             .expect("Post routine boundary");
         let body = &source[start..end];
         let button = body
-            .find("await_condition(COMPOSER_WINDOW, query")
+            .find("self.resolve_post_button(caption)")
             .expect("initial Post locator");
         let sound = body
             .find("confirm_sound(self.session")
             .expect("final sound readback");
         let refreshed_button = body[sound..]
-            .find("self.session.locate_all(query)")
+            .find("self.await_final_post_button(caption, stop)")
             .map(|offset| sound + offset)
             .expect("post rectangle refresh");
         let boundary = body.find("before_post()?").expect("write-ahead boundary");
@@ -2627,6 +3019,11 @@ mod tests {
     /// a per-query queue cannot say.
     #[derive(Default)]
     struct FakeSession {
+        snapshot_overrides: Mutex<std::collections::VecDeque<String>>,
+        list_omits_armed_flags: bool,
+        stale_list_geometry: bool,
+        post_reproof_gaps: Mutex<std::collections::VecDeque<bool>>,
+        change_caption_during_post_gap: bool,
         screens: Vec<Scene>,
         at: Mutex<usize>,
         taps: Mutex<Vec<TapPoint>>,
@@ -2665,6 +3062,8 @@ mod tests {
         /// before the Post tap, propagating is right — nothing has been published. After it,
         /// "I could not read the screen" and "the post did not go" are different facts.
         locate_fails_at: Option<usize>,
+        fail_first_read_after_tap: bool,
+        post_read_failed: Mutex<bool>,
         locates: Mutex<usize>,
         selected_cells: Mutex<usize>,
         hide_selection_count: bool,
@@ -2765,6 +3164,16 @@ mod tests {
         async fn hierarchy_source_snapshot(
             &self,
         ) -> anyhow::Result<crate::driver::HierarchySourceSnapshot> {
+            {
+                let mut snapshots = self.snapshot_overrides.lock();
+                if let Some(xml) = if snapshots.len() > 1 {
+                    snapshots.pop_front()
+                } else {
+                    snapshots.front().cloned()
+                } {
+                    return Ok(crate::driver::HierarchySourceSnapshot { generation: 1, xml });
+                }
+            }
             let count = *self.selected_cells.lock();
             let scene = self.screens.get(*self.at.lock());
             let album = scene
@@ -2791,7 +3200,32 @@ mod tests {
             })
         }
         async fn locate_all(&self, query: ElementQuery<'_>) -> anyhow::Result<Vec<ElementBox>> {
-            Ok(self.locate(query).await?.into_iter().collect())
+            if *self.at.lock() == 2
+                && query
+                    == (ElementQuery::Description {
+                        value: "Post",
+                        exact: true,
+                    })
+                && self.post_reproof_gaps.lock().pop_front().unwrap_or(false)
+            {
+                if self.change_caption_during_post_gap {
+                    *self.typed.lock() = Some("Caption changed during toolbar transition".into());
+                }
+                return Ok(Vec::new());
+            }
+            let mut found: Vec<_> = self.locate(query).await?.into_iter().collect();
+            if self.list_omits_armed_flags {
+                for element in &mut found {
+                    element.enabled = true;
+                    element.clickable = false;
+                }
+            }
+            if self.stale_list_geometry {
+                for element in &mut found {
+                    element.x += 1000.0;
+                }
+            }
+            Ok(found)
         }
         async fn tap(&self, point: TapPoint) -> anyhow::Result<()> {
             if self
@@ -2881,6 +3315,13 @@ mod tests {
             self.tap(target.centre()).await
         }
         async fn locate(&self, query: ElementQuery<'_>) -> anyhow::Result<Option<ElementBox>> {
+            if self.fail_first_read_after_tap && !self.taps.lock().is_empty() {
+                let mut failed = self.post_read_failed.lock();
+                if !*failed {
+                    *failed = true;
+                    anyhow::bail!("the agent dropped its first read after the Post tap");
+                }
+            }
             {
                 let mut seen = self.locates.lock();
                 let at = *seen;
@@ -4919,20 +5360,20 @@ mod tests {
     /// poll of a twenty-second wait.
     #[tokio::test(start_paused = true)]
     async fn a_transient_read_after_the_post_tap_does_not_end_the_wait() {
-        // Call 0 finds the Post button; call 1 is the first confirmation read, which is the
-        // one that must survive a drop.
+        // Fail at the effect boundary, independent of how many pre-Post
+        // readbacks the selector requires. Confirmation must survive this drop.
         let session = FakeSession {
-            locate_fails_at: Some(1),
+            fail_first_read_after_tap: true,
             ..FakeSession::with(vec![post_screen(), feed()])
         };
         let mut composer = Composer::new(&session, plan(), |element: &ElementBox| element.centre());
         let stop = AtomicBool::new(false);
-        // The first read fails; the Post button is found on the retry, tapped, and the feed
-        // comes back.
         assert_eq!(
             composer.post("", &stop).await.expect("no error"),
             ComposerVerdict::Submitted
         );
+        assert!(*session.post_read_failed.lock());
+        assert_eq!(session.taps.lock().len(), 1);
     }
 
     /// **An unconfirmed post is left on screen, not backed out of.**

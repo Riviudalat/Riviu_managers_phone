@@ -144,19 +144,29 @@ fn picker_snapshot(
     })?;
     let mut selectors = Vec::new();
     let mut next = Vec::new();
+    // Resolve each structural role once per immutable tree, not once per node.
+    let semantic_indices = |query| match query {
+        ElementQuery::Semantic(role) => {
+            crate::app_automation::tiktok_roles::indices(&tree, controls.package, role)
+        }
+        _ => Vec::new(),
+    };
+    let selection_indices = semantic_indices(controls.selector);
+    let next_indices = semantic_indices(controls.next);
     for (index, node) in tree.nodes.iter().enumerate() {
         if !node.visible(controls.package) || !tree.ancestors_visible(index) {
             continue;
         }
-        let semantic = |query| match query {
-            ElementQuery::Semantic(role) => {
-                crate::app_automation::tiktok_roles::indices(&tree, controls.package, role)
-                    .contains(&index)
-            }
-            _ => node.matches(query),
+        let selector = if matches!(controls.selector, ElementQuery::Semantic(_)) {
+            selection_indices.contains(&index)
+        } else {
+            node.matches(controls.selector)
         };
-        let selector = semantic(controls.selector);
-        let is_next = semantic(controls.next);
+        let is_next = if matches!(controls.next, ElementQuery::Semantic(_)) {
+            next_indices.contains(&index)
+        } else {
+            node.matches(controls.next)
+        };
         if !selector && !is_next {
             continue;
         }
@@ -360,7 +370,57 @@ fn visible_selection(
     {
         return None;
     }
-    let rows = ordered_controls(rows, screen, next.y)?;
+    let mut rows = ordered_controls(rows, screen, next.y)?;
+    // Trill 38.3.2, phones 2/3, 15/09/2026: after selecting 12 of 13 photos,
+    // the scrolled top row (ordinals 4..6) is clipped from 63px to 8px.
+    // Only discard that already-selected prefix after proving its original
+    // geometry against a fully visible selected ordinal in this same snapshot.
+    let clipped = rows
+        .iter()
+        .take_while(|row| {
+            row.description
+                .as_deref()
+                .and_then(|s| s.trim().parse::<usize>().ok())
+                .and_then(|n| n.checked_sub(1))
+                .and_then(|i| grid.cells.get(i))
+                .is_some_and(|known| row.height > 0.0 && row.height < known.height)
+        })
+        .count();
+    if clipped > 0 {
+        if !clipped.is_multiple_of(grid.columns()) {
+            return None;
+        }
+        let anchor = rows.get(clipped)?;
+        let ordinal = anchor
+            .description
+            .as_deref()?
+            .trim()
+            .parse::<usize>()
+            .ok()?;
+        if ordinal > count {
+            return None;
+        }
+        let reference = grid.cells.get(ordinal.checked_sub(1)?)?;
+        if anchor.height != reference.height {
+            return None;
+        }
+        let shift = anchor.y - reference.y;
+        let first = ordinal.checked_sub(clipped)?;
+        for (index, row) in rows[..clipped].iter().enumerate() {
+            let ordinal = first + index;
+            let known = grid.cells.get(ordinal.checked_sub(1)?)?;
+            if ordinal > count
+                || row.description.as_deref()?.trim().parse::<usize>().ok()? != ordinal
+                || row.x != known.x
+                || row.width != known.width
+                || row.y <= known.y + shift
+                || row.y + row.height != known.y + shift + known.height
+            {
+                return None;
+            }
+        }
+        rows.drain(..clipped);
+    }
     let offset = if count == 0 {
         0
     } else {
@@ -440,6 +500,19 @@ impl<P: TapPlanner> Composer<'_, P> {
         let album_query = self.plan.album_menu;
         let read = || async {
             let snapshot = session.hierarchy_source_snapshot().await?;
+            #[cfg(debug_assertions)]
+            if let Some(folder) = std::env::var_os("RIVIU_PUBLISH_PICKER_TRACE") {
+                use sha2::{Digest, Sha256};
+                let folder = std::path::PathBuf::from(folder);
+                anyhow::ensure!(
+                    folder.is_absolute(),
+                    "picker trace directory must be absolute"
+                );
+                std::fs::create_dir_all(&folder)?;
+                let name = format!("{:x}.xml", Sha256::digest(album.as_bytes()));
+                // One latest snapshot per isolated album; no unbounded capture stream.
+                std::fs::write(folder.join(name), &snapshot.xml)?;
+            }
             let parsed = picker_snapshot(&snapshot.xml, controls)?;
             Ok::<_, anyhow::Error>(
                 snapshot_has_album(&snapshot.xml, controls, album_query, album)?.then_some(parsed),
@@ -553,6 +626,71 @@ impl<P: TapPlanner> Composer<'_, P> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn clipped_selected_top_row_preserves_order_and_selects_only_the_thirteenth_photo() {
+        use super::*;
+        let screen = Screen::new(1080.0, 2220.0).unwrap();
+        let initial: Vec<_> = (0..13)
+            .map(|i| ElementBox {
+                x: 280.0 + (i % 3) as f64 * 358.0,
+                y: 365.0 + (i / 3) as f64 * 362.0,
+                width: 63.0,
+                height: 63.0,
+                enabled: true,
+                clickable: true,
+                description: Some(String::new()),
+            })
+            .collect();
+        let mut grid = KnownGrid::from_initial(initial.clone(), 13).unwrap();
+        let mut rows: Vec<_> = initial[3..]
+            .iter()
+            .enumerate()
+            .map(|(i, row)| ElementBox {
+                y: row.y - 475.0,
+                description: Some(if i < 9 {
+                    (i + 4).to_string()
+                } else {
+                    String::new()
+                }),
+                ..row.clone()
+            })
+            .collect();
+        for row in &mut rows[..3] {
+            row.y = 307.0;
+            row.height = 8.0;
+        }
+        let next = ElementBox {
+            x: 550.0,
+            y: 1936.0,
+            width: 498.0,
+            height: 116.0,
+            enabled: true,
+            clickable: true,
+            description: Some("Next (12)".into()),
+        };
+        let (visible, _) = visible_selection(
+            rows.clone(),
+            std::slice::from_ref(&next),
+            screen,
+            &mut grid,
+            12,
+        )
+        .unwrap();
+        assert_eq!(visible[0].description.as_deref(), Some("7"));
+        assert_eq!(
+            visible
+                .iter()
+                .filter(|r| r.description.as_deref() == Some(""))
+                .count(),
+            1
+        );
+        assert_eq!(visible.last().unwrap().y, 1338.0);
+        rows[0].description = Some("3".into());
+        assert!(
+            visible_selection(rows, std::slice::from_ref(&next), screen, &mut grid, 12).is_none()
+        );
+    }
+
     #[test]
     fn measured_global_videos_have_one_corner_ordinal_and_one_next_count() {
         for (version, xml) in [

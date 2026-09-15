@@ -161,11 +161,14 @@ function doPost(request) {
     if (payload.token !== CONFIG.TOKEN) {
       return reply({ ok: false, error: 'token sai' });
     }
+    if (payload.rowKind === 'retireToDirect') return reply(retireToDirect(payload));
+    if (payload.rowKind === 'resetReporting') return reply(resetReporting(payload));
     if (payload.rowKind === 'check') return reply(checkTarget(payload));
     if (payload.rowKind === 'prepare') return reply(prepareTarget(payload));
     if (payload.rowKind === 'flowRead' || payload.rowKind === 'flowWrite') return reply(flowConnectorRange(payload));
     const postUrl = String(payload.postUrl || '').trim();
-    const assignmentId = String(payload.assignmentId || '').trim();
+    const assignmentId = String(payload.publicationId || payload.assignmentId || '').trim();
+    if (payload.publicationId && payload.publicationId !== payload.assignmentId) throw new Error('publicationId khác assignmentId');
     if (!postUrl && payload.rowKind !== 'internalReport') {
       return reply({ ok: false, error: 'thiếu postUrl' });
     }
@@ -188,6 +191,7 @@ function doPost(request) {
       if (!sheet) {
         return reply({ ok: false, error: 'không mở được sheet — kiểm tra SPREADSHEET_ID' });
       }
+      assertLegacyWriterActive();
 
       const currentLayout = compactLayout(sheet);
       validateDeliveryTarget(sheet, payload);
@@ -259,8 +263,20 @@ function doPost(request) {
   } catch (error) {
     // Trả JSON kể cả khi hỏng, vì phía desktop phân biệt "script từ chối" với
     // "Google trả trang lỗi HTML" bằng đúng chuyện body có phải JSON hay không.
-    return reply({ ok: false, error: String(error), retryable: Boolean(error && error.sheetRetryable) });
+    return reply({ ok: false, error: String(error), retryable: typeof (error && error.sheetRetryable) === 'boolean'
+      ? error.sheetRetryable : knownGoogleTransientError(String(error)) });
   }
+}
+
+/** Known Google service failures can occur while opening/reading, before batchUpdate. */
+function knownGoogleTransientError(message) {
+  const text = String(message).normalize('NFC').trim().toLowerCase().replace(/^(?:(?:exception|error):\s*)+/, '');
+  return text === "we're sorry, a server error occurred. please wait a bit and try again."
+    || text === 'xin lỗi bạn, máy chủ đã gặp lỗi. vui lòng chờ một lát và thử lại.'
+    || /^service (?:spreadsheets|spreadsheet) (?:failed|timed out) while accessing document with id /.test(text)
+    || /^service (?:timed out|unavailable): spreadsheets\.?$/.test(text)
+    || /^service invoked too many times in a short time: spreadsheets\./.test(text)
+    || (text.startsWith('quota exceeded for quota metric ') && text.includes('per minute') && text.includes('sheets.googleapis.com'));
 }
 
 /**
@@ -296,6 +312,8 @@ function flowConnectorRange(payload) {
   lock.waitLock(30000);
   try {
     if (write) {
+      assertLegacyWriterActive();
+      if (sheet.getSheetId() === 0) assertReportingReady();
       Sheets.Spreadsheets.batchUpdate({ requests: [{ updateCells: {
         start: { sheetId: sheet.getSheetId(), rowIndex: top - 1, columnIndex: left - 1 },
         rows: payload.values.map(row => ({ values: row.map(value => ({ userEnteredValue: { stringValue: value } })) })),
@@ -350,6 +368,7 @@ function checkTarget(payload) {
     throw new Error('Header legacy chưa khớp mẫu Đăng bài');
   }
   return { ok: true, checkVersion: 1, deliveryVersion: compact ? 2 : 1, spreadsheetId, sheetGid,
+    reportingEpoch: currentReportingEpoch(), reportingReady: !pendingReportingResetId() && !directWriterRetirement(),
     layout: compact ? (compact.internal ? 'internal' : 'compact') : 'legacy', columns };
 }
 
@@ -363,7 +382,9 @@ function prepareTarget(payload) {
   try {
     const sheet = targetSheet();
     if (!sheet || String(payload.spreadsheetId || '') !== sheet.getParent().getId() || payload.sheetGid !== sheet.getSheetId()) throw new Error('Bảng hoặc tab không khớp kết nối');
+    assertLegacyWriterActive();
     if (sheet.getLastRow() === 0 && sheet.getLastColumn() === 0) {
+      assertReportingReady();
       if (!['auto', 'internal'].includes(CONFIG.LAYOUT_MODE) || CONFIG.LINK_COLUMN !== 4 || CONFIG.POSTER_COLUMN !== 2) throw new Error('Chuẩn bị bảng trống cần cấu hình mẫu nội bộ với cột B/D');
       const header = ['STT', 'Người air', 'Ngày', 'Link', 'Máy', 'Tài khoản TikTok', 'Trạng thái', 'Lỗi hoặc ghi chú', 'Đối tác'];
       if (typeof Sheets === 'undefined' || !Sheets.Spreadsheets?.batchUpdate) throw new Error('Bật dịch vụ Google Sheets API trước khi chuẩn bị bảng');
@@ -387,6 +408,11 @@ function planPartnerColumns(layout, partners) {
 }
 
 function validateDeliveryTarget(sheet, payload) {
+  assertLegacyWriterActive();
+  assertReportingReady();
+  const epoch = currentReportingEpoch();
+  if ((payload.reportingEpoch || 'legacy') !== epoch) throw new Error('reportingEpoch đã kết thúc');
+  if (epoch !== 'legacy' && (!payload.publicationId || payload.publicationId !== payload.assignmentId)) throw new Error('thiếu publicationId');
   if (payload.deliveryVersion === undefined) return;
   if (payload.deliveryVersion !== 2 || !Number.isSafeInteger(payload.deliveryRevision) || payload.deliveryRevision < 0
     || !['canonical', 'internalReport'].includes(payload.rowKind)) throw new Error('deliveryVersion, deliveryRevision hoặc rowKind không hợp lệ');
@@ -425,6 +451,7 @@ function commitSheetBatch(sheet, layout, row, requests) {
 
 function validateStoredDelivery(stored, payload, values, sheet) {
   if (!stored || stored.deliveryVersion !== 2) return;
+  if ((stored.reportingEpoch || 'legacy') !== (payload.reportingEpoch || 'legacy')) throw new Error('Hàng thuộc reportingEpoch khác');
   if (stored.spreadsheetId !== sheet.getParent().getId() || stored.sheetGid !== sheet.getSheetId()
     || !rowFingerprintMatches(values, stored.rowFingerprint)) throw new Error('Đích hoặc nội dung hàng đã ghi bị thay đổi');
   if (payload.deliveryVersion === 2 && payload.rowKind === 'canonical' && stored.canonicalDeliveryRevision !== undefined
@@ -440,6 +467,8 @@ function deliveryNote(payload, stored, values) {
   note.kind = 'riviu-publish';
   note.deliveryVersion = 2;
   note.assignmentId = payload.assignmentId;
+  note.publicationId = payload.publicationId || payload.assignmentId;
+  note.reportingEpoch = payload.reportingEpoch || 'legacy';
   note.spreadsheetId = payload.spreadsheetId;
   note.sheetGid = payload.sheetGid;
   if (payload.rowKind === 'canonical') {
@@ -500,6 +529,7 @@ function finishDelivery(sheet, layout, payload, result) {
   const revision = payload.rowKind === 'canonical' ? stored.canonicalDeliveryRevision : stored.rowRevision;
   if (!Number.isSafeInteger(revision) || revision < 0) throw new Error('Hàng đã lưu thiếu deliveryRevision');
   return Object.assign({}, result, { deliveryVersion: stored.deliveryVersion, spreadsheetId: stored.spreadsheetId,
+    reportingEpoch: stored.reportingEpoch || 'legacy', publicationId: stored.publicationId || stored.assignmentId,
     sheetGid: stored.sheetGid, assignmentId: stored.assignmentId, deliveryRevision: revision, postUrl: values[3] });
 }
 
@@ -938,4 +968,128 @@ function thuGhiMotDong() {
     },
   });
   Logger.log(out.getContent());
+}
+
+
+function currentReportingEpoch() {
+  return PropertiesService.getScriptProperties().getProperty('riviu.reportingEpoch') || 'legacy';
+}
+
+function directWriterRetirement() {
+  const raw = PropertiesService.getScriptProperties().getProperty('riviu.directWriterRetirement');
+  if (!raw) return null;
+  const value = JSON.parse(raw);
+  if (value.schemaVersion !== 1 || !value.requestId || !value.writerId) throw new Error('Trạng thái chuyển Google Sheets chưa hợp lệ');
+  return value;
+}
+function assertLegacyWriterActive() {
+  if (directWriterRetirement()) throw new Error('Bảng đã chuyển sang Google Sheets trực tiếp; Apps Script ngừng ghi');
+}
+function retireToDirect(payload) {
+  const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+  if (!uuid.test(payload.requestId || '') || !uuid.test(payload.writerId || '')) throw new Error('Thiếu danh tính chuyển kết nối');
+  const lock = LockService.getScriptLock(); lock.waitLock(30000);
+  try {
+    const sheet = targetSheet();
+    if (!sheet || payload.spreadsheetId !== sheet.getParent().getId() || payload.sheetGid !== sheet.getSheetId()) throw new Error('Đích chuyển kết nối không khớp');
+    const existing = directWriterRetirement();
+    if (existing) {
+      if (existing.requestId !== payload.requestId || existing.writerId !== payload.writerId || existing.reportingEpoch !== payload.reportingEpoch) throw new Error('Bảng đã chuyển bởi yêu cầu khác');
+      return Object.assign({ok:true,rowKind:'retireToDirect',retired:true}, existing);
+    }
+    if (pendingReportingResetId() || currentReportingEpoch() !== (payload.reportingEpoch || 'legacy')) throw new Error('Đợt báo cáo đã đổi hoặc đang dọn');
+    const value = {schemaVersion:1,requestId:payload.requestId,writerId:payload.writerId,spreadsheetId:payload.spreadsheetId,sheetGid:payload.sheetGid,reportingEpoch:payload.reportingEpoch || 'legacy'};
+    const store=PropertiesService.getScriptProperties();store.setProperty('riviu.directWriterRetirement',JSON.stringify(value));
+    if (JSON.stringify(directWriterRetirement()) !== JSON.stringify(value)) throw new Error('Chưa xác nhận dừng đường ghi Apps Script');
+    return Object.assign({ok:true,rowKind:'retireToDirect',retired:true},value);
+  } finally {lock.releaseLock();}
+}
+
+function pendingReportingResetId() {
+  const properties = PropertiesService.getScriptProperties();
+  const active = properties.getProperty('riviu.pendingReportingReset');
+  if (active) return active;
+  // Recover an interrupted reset created by an earlier deployment, before the
+  // explicit pending gate existed. Its saved backup still owns the next clear.
+  const epoch = currentReportingEpoch();
+  const saved = JSON.parse(properties.getProperty('riviu.reset.' + epoch) || 'null');
+  return saved && !saved.complete ? epoch : null;
+}
+
+function assertReportingReady() {
+  assertLegacyWriterActive();
+  if (pendingReportingResetId()) {
+    const error = new Error('Đợt dọn Sheet chưa hoàn tất; tiếp tục bằng cùng resetId');
+    error.sheetRetryable = true;
+    throw error;
+  }
+}
+
+/** A resumable reset closes the old epoch BEFORE clearing. A failed or ambiguous
+ * clear leaves that epoch closed; the same resetId resumes from its saved backup. */
+function resetReporting(payload) {
+  assertLegacyWriterActive();
+  if (payload.sheetGid !== 0 || CONFIG.SHEET_GID !== 0 || payload.spreadsheetId !== CONFIG.SPREADSHEET_ID) throw new Error('Reset chỉ dành cho đúng tab gid=0');
+  if (typeof payload.resetId !== 'string' || !/^[a-zA-Z0-9-]{16,128}$/.test(payload.resetId)) throw new Error('resetId không hợp lệ');
+  const lock = LockService.getScriptLock();
+  lock.waitLock(30000);
+  try {
+    assertLegacyWriterActive();
+    const properties = PropertiesService.getScriptProperties();
+    const key = 'riviu.reset.' + payload.resetId;
+    let saved = JSON.parse(properties.getProperty(key) || 'null');
+    const sheet = targetSheet();
+    if (!sheet || !compactLayout(sheet)) throw new Error('Reset cần header chuẩn');
+    const pending = pendingReportingResetId();
+    if (pending && pending !== payload.resetId) throw new Error('Một đợt dọn Sheet đang chờ hoàn tất bằng cùng resetId');
+    if (saved && saved.complete) {
+      if (currentReportingEpoch() !== saved.reportingEpoch) throw new Error('Đợt reset này đã kết thúc');
+      if (pending === payload.resetId) properties.setProperty('riviu.pendingReportingReset', '');
+      return saved;
+    }
+    if (!saved) {
+      if (payload.reportingEpoch !== currentReportingEpoch()) throw new Error('reportingEpoch đã thay đổi');
+      // Persist admission closure before making the backup: even a process crash
+      // between copy/readback/property writes cannot admit unbacked-up rows.
+      properties.setProperty('riviu.pendingReportingReset', payload.resetId);
+      const source = sheet.getParent();
+      const backup = source.copy('Riviu backup ' + payload.resetId);
+      const copy = backup.getSheets().find(tab => tab.getName() === sheet.getName());
+      if (!copy || copy.getMaxRows() !== sheet.getMaxRows() || copy.getMaxColumns() !== sheet.getMaxColumns()) throw new Error('Kích thước backup không khớp');
+      // Compare entered values (including formulas), cell formats and dedup notes.
+      const grid = id => Sheets.Spreadsheets.get(id, { includeGridData: true,
+        fields: 'sheets(properties(title,gridProperties),data(rowData(values(userEnteredValue,userEnteredFormat,note,dataValidation,textFormatRuns)),rowMetadata,columnMetadata))' }).sheets;
+      const difference = backupGridDifference(grid(source.getId()), grid(backup.getId()), 'sheets');
+      if (difference) throw new Error('Backup đọc lại không khớp tại ' + difference + '; backup=' + backup.getId());
+      saved = { ok: true, rowKind: 'resetReporting', spreadsheetId: source.getId(), sheetGid: 0,
+        oldReportingEpoch: payload.reportingEpoch, reportingEpoch: payload.resetId,
+        backupSpreadsheetId: backup.getId(), complete: false };
+      properties.setProperty(key, JSON.stringify(saved));
+    }
+    if (currentReportingEpoch() !== saved.oldReportingEpoch && currentReportingEpoch() !== saved.reportingEpoch) throw new Error('Một đợt reset khác đã thay đổi epoch');
+    properties.setProperty('riviu.reportingEpoch', saved.reportingEpoch);
+    Sheets.Spreadsheets.batchUpdate({ requests: [{ updateCells: {
+      range: { sheetId: 0, startRowIndex: 1, endRowIndex: sheet.getMaxRows(), startColumnIndex: 0, endColumnIndex: sheet.getMaxColumns() },
+      fields: 'userEnteredValue,note'
+    } }] }, saved.spreadsheetId);
+    const cleared = readCommittedGrid(sheet, 2, 1, sheet.getMaxRows() - 1, sheet.getMaxColumns());
+    if (cleared.some(row => row.some(cell => cell.note || cell.userEnteredValue || cell.formattedValue))) throw new Error('Sheet chưa xác nhận đã dọn hết dữ liệu và ghi chú');
+    saved.complete = true;
+    properties.setProperty(key, JSON.stringify(saved));
+    properties.setProperty('riviu.pendingReportingReset', '');
+    return saved;
+  } finally { lock.releaseLock(); }
+}
+
+/** API object key ordering is not data. Compare every requested value by path. */
+function backupGridDifference(left, right, path) {
+  if (left === right) return null;
+  if (left === null || right === null || typeof left !== 'object' || typeof right !== 'object') return path;
+  const a = Object.keys(left).sort(), b = Object.keys(right).sort();
+  if (JSON.stringify(a) !== JSON.stringify(b)) return path + '.keys';
+  for (const key of a) {
+    const difference = backupGridDifference(left[key], right[key], path + '.' + key);
+    if (difference) return difference;
+  }
+  return null;
 }

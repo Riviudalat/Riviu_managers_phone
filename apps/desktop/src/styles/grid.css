@@ -25,6 +25,15 @@
   white-space: nowrap;
   text-shadow: 0 1px 6px rgb(0 0 0 / 70%);
 }
+.dev-phone-handle {
+  max-width: 100%;
+  font-size: clamp(10px, 6cqw, 15px);
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-shadow: 0 1px 6px rgb(0 0 0 / 85%);
+}
 .dev-phone-status {
   max-width: 100%;
   font-size: clamp(9px, 5.2cqw, 12px);

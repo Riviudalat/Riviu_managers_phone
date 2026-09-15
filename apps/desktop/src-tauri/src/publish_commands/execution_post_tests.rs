@@ -7,6 +7,9 @@ fn metadata_retry_never_posts_an_untouched_sibling_of_a_submitted_post() {
         PublishAssignmentRecord, PublishCampaignState as State, PublishRetryScope as Scope,
     };
     let assignment = |id: &str, state| PublishAssignmentRecord {
+        publication_id: String::new(),
+        attempt_id: None,
+        dispatch: None,
         sheet_delivery: None,
         id: id.into(),
         campaign_id: "mixed-campaign".into(),

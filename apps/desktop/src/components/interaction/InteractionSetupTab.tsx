@@ -79,6 +79,7 @@ export function InteractionSetupTab({
   hierarchyActors: DeviceInfo[];
   largestCohort: number;
   handles: Record<string, string>;
+  savedHandles?: Record<string, string>;
   handleErrors?: Record<string, string>;
   savingHandles?: Record<string, boolean>;
   onHandleChange: (udid: string, value: string) => void;

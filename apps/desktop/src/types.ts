@@ -533,6 +533,9 @@ export interface PublishCampaignRecord {
 }
 
 export interface PublishAssignmentRecord {
+  publicationId?: string;
+  attemptId?: string;
+  dispatch?: { phase: "transfer" | "compose"; state: string; queuedAtMs: number; startedAtMs: number | null; owner: string | null; reason: string | null; revision: number };
   sheetDelivery?: PublishSheetDeliveryProgress;
   id: string;
   campaignId: string;
@@ -597,6 +600,7 @@ export interface PublishPreflightAssignmentReport {
 }
 
 export interface SheetDeliveryTarget {
+  reportingEpoch?: string;
   version: number;
   spreadsheetId: string;
   sheetGid: number;
@@ -604,7 +608,7 @@ export interface SheetDeliveryTarget {
 }
 
 export interface PublishSheetDeliveryProgress {
-  state: "pending" | "failed" | "sent";
+  state: "pending" | "failed" | "sent" | "superseded";
   attempts: number;
   lastError?: string | null;
   nextAttemptAtMs?: number | null;
@@ -633,6 +637,7 @@ export interface PublishScheduleRequest {
   deleteAfterPublish: boolean;
 }
 export interface PublishScheduleReport {
+  warnings?: string[];
   inputDigest: string;
   canExecute: boolean;
   slots: PublishPreflightReport[];
@@ -726,6 +731,9 @@ export interface NurtureWindow {
 export type SocialNetwork = "tiktok" | "instagram" | "threads";
 
 export interface NurtureSettings {
+  actionSelection?: "independent" | "exclusive";
+  feedSource?: "forYou" | "search";
+  searchKeyword?: string;
   workflowActionOrder?: string[];
   baseUrl: string;
   model: string;
@@ -850,6 +858,9 @@ export const LIVE_TUNABLE_FIELDS = new Set<keyof NurtureSettings>([
 /// Each reason is a fact about the session, not a policy: it built something out of the
 /// value and cannot rebuild it mid-run.
 export const RESTART_REQUIRED_REASONS = {
+  actionSelection: "Cách phân bổ hành động được chốt khi bắt đầu phiên",
+  feedSource: "Nguồn video được giữ cố định trong phiên",
+  searchKeyword: "Đổi từ khóa áp dụng từ phiên tiếp theo",
   numVideos: "Mục tiêu của phiên được tính lúc bắt đầu",
   numRounds: "Mục tiêu của phiên được tính lúc bắt đầu",
   persona: "Mô hình hành vi được dựng một lần từ persona",
@@ -941,7 +952,7 @@ export type NurturePhase =
 /// failed to open the app, and rendered both as the same grey row.
 export type NurtureOutcome = "done" | "partial" | "failed" | "stopped";
 
-export type NurtureCleanupState = "pending" | "processAbsent" | "failed";
+export type NurtureCleanupState = "pending" | "deferred" | "processAbsent" | "failed";
 
 export interface ProcessAbsenceProof {
   bundleId: string;
@@ -1448,6 +1459,7 @@ export interface ThreadPlan {
 }
 
 export interface ThreadPreview {
+  conversationAccounts?: { roleId: string; udid: string; savedUsername: string; issues: string[] }[];
   conversationTimeline?: [string,number,number][];
   lines: TikTokLinkLine[];
   plan: ThreadPlan | null;
@@ -2388,11 +2400,49 @@ export interface DevicePublishReadiness {
 
 /** Sheet delivery config — the token itself never crosses the wire, only whether one is set. */
 export interface PublishSheetConfig {
+  provider?: "appsScript" | "googleDirect";
   webhookUrl: string;
   hasToken: boolean;
   internalReporting?: boolean;
   sheetUrl?: string;
 }
+
+export interface PublishDeviceGuardItem {
+  assignmentId: string;
+  campaignId: string;
+  updatedAt: string;
+  reason: string;
+}
+export interface PublishDeviceGuard {
+  blocking: PublishDeviceGuardItem[];
+  linkReview: PublishDeviceGuardItem[];
+}
+export type PublishDeviceGuards = Record<string, PublishDeviceGuard>;
+
+export interface GoogleSheetsStatus {
+  configured: boolean;
+  connected: boolean;
+  active: boolean;
+  email?: string | null;
+  accountId?: string | null;
+  clientId: string;
+  pickerConfigured: boolean;
+  selectedFileId?: string | null;
+  selectedFileName?: string | null;
+  sheetUrl?: string | null;
+  writerId?: string | null;
+  phase: "idle" | "authorizing" | "picking";
+  error?: string | null;
+}
+
+export interface GoogleSheetsConfiguration {
+  clientId: string;
+  clientSecret?: string;
+  pickerApiKey?: string;
+  projectNumber?: string;
+}
+
+export interface GoogleSheetTab { sheetId: number; title: string }
 
 export interface PublishSheetCheckResult {
   sheetUrl: string;
@@ -2400,6 +2450,8 @@ export interface PublishSheetCheckResult {
   sheetGid: number;
   readable: boolean;
   connectionVerified: boolean;
+  reportingReady?: boolean;
+  reportingEpoch?: string | null;
   layout: "internal" | "compact" | "legacy" | null;
   columns: string[];
   message: string;

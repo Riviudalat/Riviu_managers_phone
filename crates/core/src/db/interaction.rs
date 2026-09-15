@@ -48,6 +48,22 @@ impl Database {
             transaction.commit()?;
             return Ok((existing_id, false));
         }
+        if let Some(script) = &request.scripted_conversation {
+            let checks = Self::conversation_account_checks_on(&transaction, script)?;
+            let errors: Vec<_> = checks
+                .iter()
+                .filter(|c| !c.issues.is_empty())
+                .map(|c| {
+                    format!(
+                        "Vai {} / máy {}: {}",
+                        c.role_id,
+                        c.udid,
+                        c.issues.join("; ")
+                    )
+                })
+                .collect();
+            anyhow::ensure!(errors.is_empty(), "{}", errors.join("\n"));
+        }
         let now = Utc::now().to_rfc3339();
         transaction.execute(
             "INSERT INTO interaction_campaigns

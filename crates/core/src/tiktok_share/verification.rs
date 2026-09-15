@@ -171,6 +171,7 @@ pub enum VerificationReason {
     ClipboardUnwritable,
     ClipboardUnreadable,
     ClipboardUnchanged,
+    Processing,
     ClipboardNotPostLink,
     RedirectFailed,
     MultipleMatchingPosts,
@@ -211,6 +212,7 @@ impl VerificationReason {
             Self::ClipboardUnwritable => "clipboardUnwritable",
             Self::ClipboardUnreadable => "clipboardUnreadable",
             Self::ClipboardUnchanged => "clipboardUnchanged",
+            Self::Processing => "tiktokProcessing",
             Self::ClipboardNotPostLink => "clipboardNotPostLink",
             Self::RedirectFailed => "redirectFailed",
             Self::MultipleMatchingPosts => "multipleMatchingPosts",
@@ -250,7 +252,8 @@ impl VerificationReason {
             Self::CopyAmbiguous => "Có nhiều nút Sao chép liên kết cùng khớp; chưa chọn nút để tránh lấy nhầm liên kết.",
             Self::ClipboardUnwritable => "Chưa ghi và đọc lại được giá trị kiểm chứng clipboard; chưa bấm Sao chép liên kết.",
             Self::ClipboardUnreadable => "Không đọc được clipboard sau thao tác; chưa xác nhận đã sao chép liên kết.",
-            Self::ClipboardUnchanged => "Đã thử Sao chép liên kết hai lần nhưng clipboard vẫn giữ giá trị kiểm chứng.",
+            Self::ClipboardUnchanged => "Đã mở đúng nội dung và bấm Sao chép liên kết nhưng TikTok chưa trả link; tự kiểm tra lại sau 5 phút.",
+            Self::Processing => "TikTok báo bài đang được xử lý; chưa trả liên kết. Tự kiểm tra lại sau 5 phút.",
             Self::ClipboardNotPostLink => "Clipboard đã đổi nhưng nội dung không phải liên kết bài TikTok hợp lệ.",
             Self::RedirectFailed => "Đã sao chép liên kết nhưng chưa chuẩn hóa được đường dẫn đến bài TikTok.",
             Self::MultipleMatchingPosts => "Có nhiều bài cùng khớp caption và thời gian trong lưới hồ sơ; chưa chọn liên kết để tránh gán nhầm lượt đăng.",
@@ -295,6 +298,7 @@ enum Screen {
     Feed,
     Post,
     Share,
+    Comments,
     Dialog,
     Composer,
     Login,
@@ -327,8 +331,39 @@ fn classify(tree: &Tree, plan: &PublishVerificationPlan) -> Screen {
     }) {
         return Screen::Login;
     }
-    if has(TikTokControl::DialogDismiss) {
+    if has(TikTokControl::DialogDismiss) || decline_facebook_permission(tree, plan).is_some() {
         return Screen::Dialog;
+    }
+    // Trill 38.3.2/en, phone 4, 15/09/2026: tapping a video caption
+    // opens a Comments/Likes drawer above :id/cnd Add comment. The
+    // underlying video's nodes can remain visible, so classify the drawer
+    // before Post. This authorizes Back only, never writing to the input.
+    if package == "com.ss.android.ugc.trill"
+        && plan.labels.resource_version() == Some("38.3.2")
+        && plan.labels.language() == "en"
+    {
+        let counted_header = |prefix: &str| {
+            tree.nodes.iter().enumerate().any(|(index, node)| {
+                node.visible(package)
+                    && tree.ancestors_visible(index)
+                    && node.attr("class") == "android.widget.TextView"
+                    && node.rect().is_some()
+                    && node.attr("text").strip_prefix(prefix).is_some_and(|count| {
+                        !count.is_empty() && count.bytes().all(|byte| byte.is_ascii_digit())
+                    })
+            })
+        };
+        let inputs = tree.matching(package, ElementQuery::ResourceIdSuffix(":id/cnd"));
+        if counted_header("Comments ")
+            && counted_header("Likes ")
+            && inputs.len() == 1
+            && tree.nodes[inputs[0]].attr("class") == "android.widget.EditText"
+            && tree.nodes[inputs[0]]
+                .rect()
+                .is_some_and(|input| input.enabled && input.clickable)
+        {
+            return Screen::Comments;
+        }
     }
     if package == "com.ss.android.ugc.trill"
         && has(TikTokControl::Comments)
@@ -433,6 +468,39 @@ fn classify(tree: &Tree, plan: &PublishVerificationPlan) -> Screen {
     Screen::Unknown
 }
 
+fn decline_facebook_permission(tree: &Tree, plan: &PublishVerificationPlan) -> Option<ElementBox> {
+    let package = plan.labels.package();
+    if package != "com.ss.android.ugc.trill" || plan.labels.resource_version() != Some("38.3.2") {
+        return None;
+    }
+    let prompt = tree.matching(package, ElementQuery::ResourceIdSuffix(":id/d2o"));
+    let [index] = prompt.as_slice() else {
+        return None;
+    };
+    if !tree.nodes[*index]
+        .attr("text")
+        .contains("Give TikTok access to your Facebook friends list and email?")
+    {
+        return None;
+    }
+    let controls = tree.matching(
+        package,
+        ElementQuery::Text {
+            value: "Don’t allow",
+            exact: true,
+        },
+    );
+    let [index] = controls.as_slice() else {
+        return None;
+    };
+    if tree.nodes[*index].attr("class") != "android.widget.Button" {
+        return None;
+    }
+    tree.nodes[*index]
+        .rect()
+        .filter(|r| r.enabled && r.clickable)
+}
+
 fn submission_identity_valid(identity: &SubmissionIdentity) -> bool {
     let handle = identity.account.trim().trim_start_matches('@');
     !handle.is_empty()
@@ -452,9 +520,24 @@ struct Capture<'a> {
     started: Instant,
     diagnostic: VerificationDiagnostic,
     caption_expanded: bool,
+    public_link: Option<String>,
 }
 
 impl Capture<'_> {
+    fn matched_photo_failure(&mut self, error: &anyhow::Error) -> Option<VerificationReason> {
+        self.diagnostic.expanded_photo_error = Some(error.to_string());
+        let failure = error.downcast_ref::<super::photo_proof::MatchedPhotoCopyFailure>()?;
+        Some(match &failure.0 {
+            LinkCapture::Processing(_) => VerificationReason::Processing,
+            LinkCapture::CopyDidNotLand => VerificationReason::ClipboardUnchanged,
+            LinkCapture::NoCopyRow => VerificationReason::CopyUnavailable,
+            LinkCapture::AmbiguousCopyRow => VerificationReason::CopyAmbiguous,
+            LinkCapture::ClipboardUnwritable(_) => VerificationReason::ClipboardUnwritable,
+            LinkCapture::NotAPostLink(_) => VerificationReason::ClipboardNotPostLink,
+            LinkCapture::ReadFailed(_) => VerificationReason::ReadFailed,
+            _ => VerificationReason::ShareUnavailable,
+        })
+    }
     fn expired(&self) -> bool {
         self.started.elapsed() >= CAPTURE_WINDOW
     }
@@ -567,6 +650,9 @@ impl Capture<'_> {
                 {
                     let mut button =
                         tree.control(self.plan.labels.package(), self.plan.labels.label(control));
+                    if button.is_none() && control == TikTokControl::DialogDismiss {
+                        button = decline_facebook_permission(&tree, self.plan);
+                    }
                     if button.is_none() && control == TikTokControl::ProfileTab {
                         let budget = RECOVERY_WINDOW
                             .saturating_sub(start.elapsed())
@@ -613,11 +699,11 @@ impl Capture<'_> {
                 }
                 last_screen = Some(screen);
                 last_action_at = Some(Instant::now());
-            } else if matches!(screen, Screen::Post | Screen::Share)
+            } else if matches!(screen, Screen::Post | Screen::Share | Screen::Comments)
                 && (last_screen.as_ref() != Some(&screen)
                     || last_action_at.is_some_and(|at| at.elapsed() >= Duration::from_secs(5)))
             {
-                // Back only from a proved post detail/share surface, never a
+                // Back only from a proved post detail/share/comments surface, never a
                 // composer, arbitrary activity, or unlabelled screen.
                 self.session
                     .back()
@@ -633,6 +719,9 @@ impl Capture<'_> {
     }
 
     fn post_proof(&mut self, tree: &Tree) -> Result<(), VerificationReason> {
+        if tree.publication_removed(self.plan.labels.package()) {
+            return Err(VerificationReason::CaptionMismatch);
+        }
         let captions = tree.matching(
             self.plan.labels.package(),
             ElementQuery::ResourceIdSuffix(self.plan.caption_id),
@@ -720,7 +809,22 @@ impl Capture<'_> {
         let start = Instant::now();
         loop {
             let tree = self.read().await?;
-            match self.post_proof(&tree) {
+            let proof = self.post_proof(&tree);
+            // A tile tap can first return the profile while the viewer opens.
+            // Recheck the settled video before expanding its caption into the
+            // comments drawer. Only the full public proof may populate this link.
+            if matches!(
+                proof,
+                Err(VerificationReason::CaptionTruncated | VerificationReason::TimestampMissing)
+            ) && tree.nodes.iter().any(|node| {
+                node.visible(self.plan.labels.package()) && node.attr("content-desc") == "Video"
+            }) {
+                if let Some(link) = self.visible_video().await? {
+                    self.public_link = Some(link);
+                    return Ok(tree);
+                }
+            }
+            match proof {
                 Ok(()) => return Ok(tree),
                 Err(VerificationReason::CaptionTruncated) if !self.caption_expanded => {
                     let controls = tree.matching(
@@ -863,12 +967,46 @@ impl Capture<'_> {
         }
     }
 
-    async fn capture(&mut self) -> Result<String, VerificationReason> {
-        match super::capture_expanded_photo_link(
+    async fn visible_video(&mut self) -> Result<Option<String>, VerificationReason> {
+        if self.expired() {
+            return Err(VerificationReason::SearchBudgetExhausted);
+        }
+        let result = super::photo_proof::capture_visible_video_link_counted(
             self.session,
             self.plan.labels.package(),
             self.caption,
             self.identity,
+            &mut self.diagnostic.copy_attempts,
+        )
+        .await;
+        if self.expired() {
+            return Err(VerificationReason::SearchBudgetExhausted);
+        }
+        match result {
+            Ok(link) => {
+                self.diagnostic.stage = "videoPublicProof";
+                Ok(Some(link))
+            }
+            Err(error) => {
+                self.diagnostic.expanded_photo_error = Some(format!("video: {error:#}"));
+                match self.matched_photo_failure(&error) {
+                    Some(reason) => Err(reason),
+                    None => Ok(None),
+                }
+            }
+        }
+    }
+
+    async fn capture(&mut self) -> Result<String, VerificationReason> {
+        if let Some(link) = self.visible_video().await? {
+            return Ok(link);
+        }
+        match super::photo_proof::capture_expanded_photo_link_counted(
+            self.session,
+            self.plan.labels.package(),
+            self.caption,
+            self.identity,
+            &mut self.diagnostic.copy_attempts,
         )
         .await
         {
@@ -876,7 +1014,11 @@ impl Capture<'_> {
                 self.diagnostic.stage = "expandedPhotoPublicProof";
                 return Ok(link);
             }
-            Err(error) => self.diagnostic.expanded_photo_error = Some(error.to_string()),
+            Err(error) => {
+                if let Some(reason) = self.matched_photo_failure(&error) {
+                    return Err(reason);
+                }
+            }
         }
         self.diagnostic.stage = "profile";
         let mut tree = self.profile(false).await?;
@@ -914,12 +1056,23 @@ impl Capture<'_> {
                 self.diagnostic.candidates_visited += 1;
                 self.diagnostic.stage = "postProof";
                 self.caption_expanded = false;
+                self.public_link = None;
                 self.session
                     .tap(tile.centre())
                     .await
                     .map_err(|_| VerificationReason::ReadFailed)?;
+                // A video caption opens Comments on measured Trill builds. Copy
+                // the visible video only through exact public metadata proof,
+                // before any caption expansion hides its Share control.
+                if let Some(link) = self.visible_video().await? {
+                    return Ok(link);
+                }
                 match self.prove_post().await {
                     Ok(mut post) => {
+                        if let Some(link) = self.public_link.take() {
+                            self.diagnostic.stage = "videoPublicProof";
+                            return Ok(link);
+                        }
                         if candidate.is_some() {
                             return Err(VerificationReason::MultipleMatchingPosts);
                         }
@@ -936,23 +1089,46 @@ impl Capture<'_> {
                                 Err(VerificationReason::ClipboardUnchanged) if attempt == 0 => {
                                     closed?;
                                     post = self.prove_post().await?;
+                                    if let Some(link) = self.public_link.take() {
+                                        self.diagnostic.stage = "videoPublicProof";
+                                        return Ok(link);
+                                    }
                                 }
                                 Err(reason) => return Err(reason),
                             }
                         }
                     }
                     Err(reason) => {
+                        // The delayed-viewer path may already have attempted
+                        // Copy through public video proof. Preserve that exact
+                        // failure instead of searching older tiles and replacing
+                        // its diagnosis with a caption/navigation mismatch.
+                        if matches!(
+                            reason,
+                            VerificationReason::Processing
+                                | VerificationReason::ClipboardUnchanged
+                                | VerificationReason::ClipboardUnreadable
+                                | VerificationReason::ClipboardUnwritable
+                                | VerificationReason::ClipboardNotPostLink
+                                | VerificationReason::CopyUnavailable
+                                | VerificationReason::CopyAmbiguous
+                                | VerificationReason::ShareUnavailable
+                                | VerificationReason::ReadFailed
+                        ) {
+                            return Err(reason);
+                        }
                         if matches!(
                             reason,
                             VerificationReason::CaptionMissing
                                 | VerificationReason::TimestampMissing
                                 | VerificationReason::CaptionTruncated
                         ) {
-                            match super::capture_expanded_photo_link(
+                            match super::photo_proof::capture_expanded_photo_link_counted(
                                 self.session,
                                 self.plan.labels.package(),
                                 self.caption,
                                 self.identity,
+                                &mut self.diagnostic.copy_attempts,
                             )
                             .await
                             {
@@ -961,7 +1137,9 @@ impl Capture<'_> {
                                     return Ok(link);
                                 }
                                 Err(error) => {
-                                    self.diagnostic.expanded_photo_error = Some(error.to_string())
+                                    if let Some(reason) = self.matched_photo_failure(&error) {
+                                        return Err(reason);
+                                    }
                                 }
                             }
                         }
@@ -1041,6 +1219,7 @@ pub async fn capture_submission_link(
         identity,
         started: Instant::now(),
         caption_expanded: false,
+        public_link: None,
         diagnostic: VerificationDiagnostic {
             contract_version: CONTRACT_VERSION,
             package: plan.labels.package().into(),
@@ -1088,6 +1267,7 @@ pub async fn capture_submission_link(
                 VerificationReason::ClipboardUnchanged => {
                     OwnPostLink::Sheet(LinkCapture::CopyDidNotLand)
                 }
+                VerificationReason::Processing => OwnPostLink::ReadFailed(reason.message().into()),
                 VerificationReason::ClipboardUnreadable => {
                     OwnPostLink::Sheet(LinkCapture::ReadFailed("Không đọc được clipboard".into()))
                 }

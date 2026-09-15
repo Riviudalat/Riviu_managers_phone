@@ -39,64 +39,70 @@ pub(super) async fn read_account(
     db: &riviu_core::db::Database,
     udid: &str,
 ) -> anyhow::Result<AccountReading> {
-    let expected = db.get_device_meta(udid)?.handle;
     let device = open_interaction_context(control, udid).await?;
     let result = async {
-        let labels = labels(control, udid).await?;
-        anyhow::ensure!(
-            riviu_core::tiktok_account::account_read_supported(labels),
-            "Chưa hỗ trợ đọc tài khoản trên bản TikTok/ngôn ngữ này"
-        );
         let session = control.streaming_session(&device.context)?;
-        let profile = labels
-            .label(TikTokControl::ProfileTab)
-            .ok_or_else(|| anyhow::anyhow!("Chưa đo tab Hồ sơ"))?;
-        let button = session
-            .locate(profile.to_query())
-            .await?
-            .ok_or_else(|| anyhow::anyhow!("Không thấy tab Hồ sơ"))?;
-        session.tap(button.centre()).await?;
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(4);
-        let observed = loop {
-            let observed =
-                riviu_core::tiktok_account::observe_own_account(session.as_ref(), labels).await?;
-            if observed.is_some() || tokio::time::Instant::now() >= deadline {
-                break observed;
-            }
-            tokio::time::sleep(Duration::from_millis(250)).await;
-        };
-        let current = db.get_device_meta(udid)?.handle;
-        anyhow::ensure!(
-            current == expected,
-            "Nick đã gán vừa thay đổi; kiểm tra lại"
-        );
-        let status = match &observed {
-            None => "unknown",
-            Some(_) if expected.trim().is_empty() => "unassigned",
-            Some(handle)
-                if handle.eq_ignore_ascii_case(expected.trim().trim_start_matches('@')) =>
-            {
-                "matched"
-            }
-            Some(_) => "mismatch",
-        };
-        Ok(AccountReading {
-            udid: udid.into(),
-            expected_handle: expected,
-            observed_handle: observed,
-            status,
-            checked_at: chrono::Utc::now().to_rfc3339(),
-            snapshot_sha256: format!(
-                "{:x}",
-                Sha256::digest(session.hierarchy_source_snapshot().await?.xml.as_bytes())
-            ),
-        })
+        read_account_from_session(control, db, udid, session.as_ref()).await
     }
     .await;
     let closed = control.close_ui_context(device.context).await;
     let reading = result?;
     closed?;
     Ok(reading)
+}
+
+pub(super) async fn read_account_from_session(
+    control: &DeviceControlPlane,
+    db: &riviu_core::db::Database,
+    udid: &str,
+    session: &dyn riviu_core::driver::UiSession,
+) -> anyhow::Result<AccountReading> {
+    let expected = db.get_device_meta(udid)?.handle;
+    let labels = labels(control, udid).await?;
+    anyhow::ensure!(
+        riviu_core::tiktok_account::account_read_supported(labels),
+        "Chưa hỗ trợ đọc tài khoản trên bản TikTok/ngôn ngữ này"
+    );
+    let profile = labels
+        .label(TikTokControl::ProfileTab)
+        .ok_or_else(|| anyhow::anyhow!("Chưa đo tab Hồ sơ"))?;
+    let button = session
+        .locate(profile.to_query())
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("Không thấy tab Hồ sơ"))?;
+    session.tap(button.centre()).await?;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(4);
+    let observed = loop {
+        let observed = riviu_core::tiktok_account::observe_own_account(session, labels).await?;
+        if observed.is_some() || tokio::time::Instant::now() >= deadline {
+            break observed;
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    };
+    let current = db.get_device_meta(udid)?.handle;
+    anyhow::ensure!(
+        current == expected,
+        "Nick đã gán vừa thay đổi; kiểm tra lại"
+    );
+    let status = match &observed {
+        None => "unknown",
+        Some(_) if expected.trim().is_empty() => "unassigned",
+        Some(handle) if handle.eq_ignore_ascii_case(expected.trim().trim_start_matches('@')) => {
+            "matched"
+        }
+        Some(_) => "mismatch",
+    };
+    Ok(AccountReading {
+        udid: udid.into(),
+        expected_handle: expected,
+        observed_handle: observed,
+        status,
+        checked_at: chrono::Utc::now().to_rfc3339(),
+        snapshot_sha256: format!(
+            "{:x}",
+            Sha256::digest(session.hierarchy_source_snapshot().await?.xml.as_bytes())
+        ),
+    })
 }
 
 pub(super) async fn readback(

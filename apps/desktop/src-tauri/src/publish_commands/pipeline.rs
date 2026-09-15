@@ -3,8 +3,8 @@ use super::execution::{self, PhoneFailure};
 use super::*;
 use riviu_core::db::PublishPipelineRun;
 use riviu_core::{PublishAssignmentRecord, PublishBundle, PublishCampaignState as Stage};
-use std::sync::{Mutex, OnceLock};
-use tokio::sync::{OwnedSemaphorePermit, Semaphore};
+
+use tokio::sync::Semaphore;
 
 #[derive(Debug)]
 pub(super) struct PipelineClaimRejected;
@@ -14,61 +14,6 @@ impl std::fmt::Display for PipelineClaimRejected {
     }
 }
 impl std::error::Error for PipelineClaimRejected {}
-
-const DEFAULT_TRANSFER_DEVICES: usize = 4;
-fn transfer_slots() -> Arc<Semaphore> {
-    static SLOTS: OnceLock<Arc<Semaphore>> = OnceLock::new();
-    SLOTS
-        .get_or_init(|| {
-            let limit = if cfg!(debug_assertions) {
-                std::env::var("RIVIU_BENCH_PIPELINE_TRANSFERS")
-                    .ok()
-                    .and_then(|v| v.parse::<usize>().ok())
-                    .filter(|v| (1..=10).contains(v))
-                    .unwrap_or(DEFAULT_TRANSFER_DEVICES)
-            } else {
-                DEFAULT_TRANSFER_DEVICES
-            };
-            Arc::new(Semaphore::new(limit))
-        })
-        .clone()
-}
-fn post_slots() -> Arc<Semaphore> {
-    static SLOTS: OnceLock<Arc<Semaphore>> = OnceLock::new();
-    SLOTS.get_or_init(|| Arc::new(Semaphore::new(10))).clone()
-}
-fn device_slot(udid: &str) -> Arc<Semaphore> {
-    static SLOTS: OnceLock<Mutex<HashMap<String, std::sync::Weak<Semaphore>>>> = OnceLock::new();
-    let mut slots = SLOTS
-        .get_or_init(Mutex::default)
-        .lock()
-        .expect("device slots");
-    slots.retain(|_, v| v.strong_count() > 0);
-    if let Some(slot) = slots.get(udid).and_then(std::sync::Weak::upgrade) {
-        return slot;
-    }
-    let slot = Arc::new(Semaphore::new(1));
-    slots.insert(udid.into(), Arc::downgrade(&slot));
-    slot
-}
-async fn admitted(
-    db: &Database,
-    run: &PublishPipelineRun,
-    slots: Arc<Semaphore>,
-) -> anyhow::Result<OwnedSemaphorePermit> {
-    let acquire = slots.acquire_owned();
-    tokio::pin!(acquire);
-    loop {
-        anyhow::ensure!(
-            db.publish_pipeline_current(run)?,
-            "publish pipeline cancelled or replaced"
-        );
-        tokio::select! {
-            permit=&mut acquire=>return permit.context("publish queue closed"),
-            _=tokio::time::sleep(Duration::from_millis(100))=>{}
-        }
-    }
-}
 
 #[derive(Clone)]
 struct Runtime {
@@ -114,11 +59,11 @@ impl Runtime {
             return Ok(());
         }
         self.progress(a, progress::PublishProgress::WaitingTransfer);
-        let _slot = admitted(&self.db, &self.run, transfer_slots()).await?;
+
         // All prerequisites belong to this device; its failure must not end another device.
         let mut single = self
             .db
-            .get_publish_campaign(&self.run.campaign_id)?
+            .get_publish_assignment_detail(&self.run.campaign_id, &a.id)?
             .context("campaign disappeared")?;
         single.assignments = vec![a.clone()];
         single.bundles = vec![bundle.clone()];
@@ -178,49 +123,16 @@ impl Runtime {
         drop(context);
         result
     }
-    async fn one(self, a: PublishAssignmentRecord, bundle: PublishBundle) -> anyhow::Result<()> {
-        let _device = admitted(&self.db, &self.run, device_slot(&a.udid)).await?;
-        let ready = async {
-            let mut revision = self.db.publish_assignment_revision(&a.id)?;
-            if let Err(error) = self.transfer(&a, &bundle, &mut revision).await {
-                let current = self
-                    .db
-                    .get_publish_campaign(&self.run.campaign_id)?
-                    .context("campaign missing")?;
-                if let Some(row) = current.assignments.iter().find(|r| r.id == a.id) {
-                    if row.effect_intent.is_none() {
-                        let _ = self.advance(
-                            row,
-                            &mut revision,
-                            row.state.clone(),
-                            Stage::FailedBeforeDispatch,
-                            Some("media_transfer_failed"),
-                            Some(&serde_json::json!({"message":format!("{error:#}")}).to_string()),
-                        );
-                    }
-                }
-                self.progress(
-                    &a,
-                    progress::PublishProgress::FailedBeforePost {
-                        reason: format!("{error:#}"),
-                    },
-                );
-                return Err(error);
-            }
-            Ok((self, a, bundle))
-        };
-        continue_after_transfer(ready, |(runtime, a, bundle)| runtime.post(a, bundle)).await
-    }
     async fn post(self, a: PublishAssignmentRecord, bundle: PublishBundle) -> anyhow::Result<()> {
         self.progress(&a, progress::PublishProgress::WaitingControl);
-        let _post = admitted(&self.db, &self.run, post_slots()).await?;
+
         anyhow::ensure!(
             self.db.publish_pipeline_current(&self.run)?,
             "pipeline stopped before composer"
         );
         let detail = self
             .db
-            .get_publish_campaign(&self.run.campaign_id)?
+            .get_publish_assignment_detail(&self.run.campaign_id, &a.id)?
             .context("campaign missing")?;
         let fresh = detail
             .assignments
@@ -290,75 +202,188 @@ pub(crate) async fn execute_pipeline(
         .claim_publish_pipeline(&campaign)?
         .ok_or(PipelineClaimRejected)?;
     execution::announce(&events, &db, &campaign);
-    // A dropped IPC caller must not abort workers holding device requests or public effects.
-    tokio::spawn(async move {
+    // Work lives in SQLite; an IPC disconnect does not discard it or create another Post.
+    let _ = (control, frames, agent, sound);
+    let _ = run;
+    Ok(())
+}
+
+/// One application dispatcher serves immediate and scheduled campaigns. Queue rows
+/// hold IDs only; media and driver sessions are loaded after global stage admission.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn run_dispatcher(
+    control: Arc<DeviceControlPlane>,
+    db: Arc<Database>,
+    frames: Arc<dyn FrameSource>,
+    events: riviu_core::events::EventBus,
+    agent: String,
+    admission: Arc<crate::state::CommandAdmissionState>,
+    stop: Arc<std::sync::atomic::AtomicBool>,
+) {
+    let mut tasks = tokio::task::JoinSet::<anyhow::Result<()>>::new();
+    let mut owned = HashMap::new();
+    let mut interval = tokio::time::interval(Duration::from_millis(250));
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    loop {
+        tokio::select! {
+            _ = interval.tick() => {},
+            Some(result) = tasks.join_next_with_id(), if !tasks.is_empty() => {
+                let (id, error) = match result {
+                    Ok((id, result)) => (id, result.err().map(|e: anyhow::Error| format!("{e:#}"))),
+                    Err(e) => (e.id(), Some(e.to_string())),
+                };
+                if let Some(job) = owned.remove(&id) {
+                    if let Err(e) = db.finish_publish_dispatch(&job,error.as_deref()) {
+                        log::error!("publish dispatch settlement: {e:#}");
+                    }
+                }
+            }
+        }
+        if stop.load(std::sync::atomic::Ordering::Acquire) {
+            while let Some(result) = tasks.join_next_with_id().await {
+                let (id, error) = match result {
+                    Ok((id, r)) => (id, r.err().map(|e| e.to_string())),
+                    Err(e) => (e.id(), Some(e.to_string())),
+                };
+                if let Some(job) = owned.remove(&id) {
+                    let _ = db.finish_publish_dispatch(&job, error.as_deref());
+                }
+            }
+            break;
+        }
         let result = async {
-            let detail = db
-                .get_publish_campaign(&campaign)?
-                .context("campaign missing")?;
-            let runtime = Runtime {
-                control,
-                db: db.clone(),
-                frames,
-                events: events.clone(),
-                agent,
-                run: run.clone(),
-                sound,
-            };
-            let mut errors = Vec::new();
-            let mut jobs = tokio::task::JoinSet::new();
-            let barrier_benchmark = cfg!(debug_assertions)
-                && std::env::var("RIVIU_BENCH_PIPELINE_MODE").as_deref() == Ok("barrier")
-                && db.get_setting("publish.rehearsal")?.as_deref() == Some("stopBeforePost");
-            let mut staged = Vec::new();
-            for a in detail.assignments {
-                if a.effect_intent.is_some()
-                    || !matches!(
-                        a.state,
-                        Stage::Queued
-                            | Stage::Scheduled
-                            | Stage::Ready
-                            | Stage::Imported
-                            | Stage::FailedBeforeDispatch
-                    )
-                {
+            let now = chrono::Local::now()
+                .naive_local()
+                .and_utc()
+                .timestamp_millis();
+            db.expire_publish_dispatch(now)?;
+            for run in db.finished_publish_dispatch_runs()? {
+                db.finish_publish_pipeline(&run)?;
+                execution::reconcile_publish_execution_and_announce(
+                    &db,
+                    &events,
+                    &run.campaign_id,
+                )?;
+            }
+            for job in db.pending_publish_dispatch(128)? {
+                // Completed tasks still occupy a worker slot until joined. Fast failures
+                // must not accumulate an unbounded JoinSet while permits are released.
+                if tasks.len() >= db.publish_limits()?.device_total {
+                    break;
+                }
+                if control.current_work_owner(&job.udid).is_some() {
+                    db.defer_publish_dispatch(&job, "device_busy")?;
                     continue;
                 }
-                let Some(b) = detail.bundles.iter().find(|b| b.id == a.bundle_id).cloned() else {
-                    errors.push(format!("bundle missing for {}", a.id));
+                let Some(permit) = db.try_publish_work(&job.udid, &job.phase, &job.attempt_id)?
+                else {
+                    db.defer_publish_dispatch(&job, "stage_capacity")?;
                     continue;
                 };
-                if barrier_benchmark {
-                    let mut revision = db.publish_assignment_revision(&a.id)?;
-                    match runtime.transfer(&a, &b, &mut revision).await {
-                        Ok(()) => staged.push((a, b)),
-                        Err(error) => errors.push(format!("{error:#}")),
+                let Ok(admitted) = admission.ensure_accepting_work() else {
+                    break;
+                };
+                // Loading candidates and waiting for SQLite can cross the schedule's
+                // deadline. Admission uses the clock at this individual claim.
+                let claimed_at = chrono::Local::now()
+                    .naive_local()
+                    .and_utc()
+                    .timestamp_millis();
+                if !db.claim_publish_dispatch(&job, claimed_at)? {
+                    continue;
+                }
+                let (work_db, work_control, work_frames, work_events, work_agent) = (
+                    db.clone(),
+                    control.clone(),
+                    frames.clone(),
+                    events.clone(),
+                    agent.clone(),
+                );
+                let task_job = job.clone();
+                let task = tasks.spawn(async move {
+                    let _admitted = admitted;
+                    let _permit = permit;
+                    let detail = work_db
+                        .get_publish_assignment_detail(
+                            &task_job.run.campaign_id,
+                            &task_job.assignment_id,
+                        )?
+                        .context("campaign missing")?;
+                    let a = detail
+                        .assignments
+                        .into_iter()
+                        .find(|a| a.id == task_job.assignment_id)
+                        .context("assignment missing")?;
+                    let bundle = detail
+                        .bundles
+                        .into_iter()
+                        .find(|b| b.id == a.bundle_id)
+                        .context("bundle missing")?;
+                    let request = work_db
+                        .publish_campaign_request(&task_job.run.campaign_id)?
+                        .context("request missing")?;
+                    anyhow::ensure!(
+                        request.execution_confirmed
+                            && request.verification_contract_version == Some(1)
+                            && (!request.sheet_enabled
+                                || request
+                                    .sheet_delivery
+                                    .as_ref()
+                                    .is_some_and(|t| t.version == 2)),
+                        "publish approval or verification contract missing"
+                    );
+                    let runtime = Runtime {
+                        control: work_control,
+                        db: work_db,
+                        frames: work_frames,
+                        events: work_events,
+                        agent: work_agent,
+                        run: task_job.run.clone(),
+                        sound: request.sound_policy,
+                    };
+                    if task_job.phase == "compose" {
+                        return runtime.post(a, bundle).await;
                     }
-                } else {
-                    jobs.spawn(runtime.clone().one(a, b));
-                }
+                    let mut revision = runtime.db.publish_assignment_revision(&a.id)?;
+                    let result = runtime.transfer(&a, &bundle, &mut revision).await;
+                    if let Err(error) = &result {
+                        if let Some(current) = runtime
+                            .db
+                            .get_publish_assignment_detail(&task_job.run.campaign_id, &a.id)?
+                        {
+                            if let Some(row) = current
+                                .assignments
+                                .iter()
+                                .find(|r| r.id == a.id && r.effect_intent.is_none())
+                            {
+                                let _ = runtime.advance(
+                                    row,
+                                    &mut revision,
+                                    row.state.clone(),
+                                    Stage::FailedBeforeDispatch,
+                                    Some("media_transfer_failed"),
+                                    Some(
+                                        &serde_json::json!({"message":format!("{error:#}")})
+                                            .to_string(),
+                                    ),
+                                );
+                            }
+                        }
+                    }
+                    result
+                });
+                owned.insert(task.id(), job);
             }
-            for (a, b) in staged {
-                jobs.spawn(runtime.clone().post(a, b));
-            }
-            while let Some(result) = jobs.join_next().await {
-                match result {
-                    Ok(Ok(())) => {}
-                    Ok(Err(error)) => errors.push(format!("{error:#}")),
-                    Err(error) => errors.push(error.to_string()),
-                }
-            }
-            anyhow::ensure!(errors.is_empty(), "{}", errors.join("; "));
             Ok::<_, anyhow::Error>(())
         }
         .await;
-        db.finish_publish_pipeline(&run)?;
-        execution::announce(&events, &db, &campaign);
-        result
-    })
-    .await?
+        if let Err(error) = result {
+            log::error!("publish dispatch: {error:#}");
+        }
+    }
 }
 
+#[cfg(test)]
 async fn continue_after_transfer<T, F, P>(
     transfer: impl std::future::Future<Output = anyhow::Result<T>>,
     post: F,
@@ -434,13 +459,5 @@ mod tests {
             })
             .await;
         assert!(result.is_err());
-        assert!(Arc::ptr_eq(&transfer_slots(), &transfer_slots()));
-        assert!(Arc::ptr_eq(&post_slots(), &post_slots()));
-        let same = device_slot("same");
-        assert!(Arc::ptr_eq(&same, &device_slot("same")));
-        let held = same.clone().acquire_owned().await.unwrap();
-        assert!(device_slot("same").try_acquire_owned().is_err());
-        assert!(device_slot("other").try_acquire_owned().is_ok());
-        drop(held);
     }
 }

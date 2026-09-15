@@ -18,7 +18,8 @@ pub async fn publish_check_links(
         .filter(|row| udid.as_ref().is_none_or(|id| id == &row.udid))
     {
         let result =
-            verify_pending_assignment(&state.control, &state.db, &state.events, &row).await;
+            verify_pending_assignment_inner(&state.control, &state.db, &state.events, &row, true)
+                .await;
         outcomes.push(serde_json::json!({"assignmentId":row.assignment_id,"udid":row.udid,"verified":matches!(result,Ok(true)),"error":result.err().map(|e|e.to_string())}));
     }
     Ok(serde_json::json!({"campaignId":campaign_id,"outcomes":outcomes}))
@@ -37,35 +38,73 @@ impl std::fmt::Display for VerificationObservation {
 }
 impl std::error::Error for VerificationObservation {}
 
+/// Only this observer's publication is hydrated. Other devices' media and the
+/// campaign event history do not belong in each concurrent verification task.
+pub(super) fn verification_input(
+    db: &Database,
+    candidate: &riviu_core::db::PendingPublishVerification,
+) -> anyhow::Result<
+    Option<(
+        riviu_core::PublishAssignmentRecord,
+        riviu_core::PublishBundle,
+    )>,
+> {
+    let detail = db
+        .get_publish_assignment_detail(&candidate.campaign_id, &candidate.assignment_id)?
+        .context("campaign missing")?;
+    let assignment = detail
+        .assignments
+        .into_iter()
+        .find(|a| a.id == candidate.assignment_id)
+        .context("assignment missing")?;
+    if assignment.effect_intent != candidate.effect_intent
+        || assignment.evidence_json != candidate.evidence_json
+    {
+        return Ok(None);
+    }
+    let bundle = detail
+        .bundles
+        .into_iter()
+        .find(|b| b.id == candidate.bundle_id)
+        .context("bundle missing")?;
+    Ok(Some((assignment, bundle)))
+}
+
 pub(crate) async fn verify_pending_assignment(
     control: &DeviceControlPlane,
     db: &Database,
     events: &riviu_core::events::EventBus,
     candidate: &riviu_core::db::PendingPublishVerification,
 ) -> anyhow::Result<bool> {
+    if db.publish_operation_stopped(&candidate.campaign_id)? {
+        return Ok(false);
+    }
+    verify_pending_assignment_inner(control, db, events, candidate, false).await
+}
+
+async fn verify_pending_assignment_inner(
+    control: &DeviceControlPlane,
+    db: &Database,
+    events: &riviu_core::events::EventBus,
+    candidate: &riviu_core::db::PendingPublishVerification,
+    manual: bool,
+) -> anyhow::Result<bool> {
+    if db.publish_operation_stopped(&candidate.campaign_id)? {
+        return Ok(false);
+    }
     if control.current_work_owner(&candidate.udid).is_some() {
         return Ok(false);
     }
-    let detail = db
-        .get_publish_campaign(&candidate.campaign_id)?
-        .context("campaign missing")?;
-    let assignment = detail
-        .assignments
-        .iter()
-        .find(|a| a.id == candidate.assignment_id)
-        .context("assignment missing")?;
-    if assignment.effect_intent != candidate.effect_intent
-        || assignment.evidence_json != candidate.evidence_json
-    {
+    let Some(permit) = db.try_publish_work(&candidate.udid, "verify", &candidate.assignment_id)?
+    else {
         return Ok(false);
-    }
-    let bundle = detail
-        .bundles
-        .iter()
-        .find(|b| b.id == candidate.bundle_id)
-        .context("bundle missing")?;
+    };
+    let Some((assignment, bundle)) = verification_input(db, candidate)? else {
+        return Ok(false);
+    };
     let capture =
-        execution::capture_confirmed_assignment_link(db, control, assignment, bundle).await;
+        execution::capture_confirmed_assignment_link(db, control, &assignment, &bundle).await;
+    drop(permit);
     match capture {
         Ok(captured) => {
             let link = captured.url;
@@ -79,6 +118,7 @@ pub(crate) async fn verify_pending_assignment(
             evidence["verificationDiagnostic"] = captured.diagnostic;
             let expanded =
                 evidence["verificationDiagnostic"]["stage"] == "expandedPhotoPublicProof";
+            let video_public = evidence["verificationDiagnostic"]["stage"] == "videoPublicProof";
             let post = if evidence.get("post").is_some() {
                 &mut evidence["post"]
             } else {
@@ -86,7 +126,9 @@ pub(crate) async fn verify_pending_assignment(
             };
             post["publicationVerified"] = serde_json::json!(true);
             post["state"] = serde_json::json!("posted");
-            post["verificationMethod"] = if expanded {
+            post["verificationMethod"] = if video_public {
+                serde_json::json!("videoCanonicalPublicMetadata")
+            } else if expanded {
                 serde_json::json!("expandedPhotoCaptionCanonicalPublicMetadata")
             } else {
                 serde_json::json!("ownProfileCaptionAndCanonicalLink")
@@ -106,28 +148,6 @@ pub(crate) async fn verify_pending_assignment(
                     riviu_core::tiktok_composer::PublishProgress::PostConfirmed,
                 );
                 execution::announce(events, db, &candidate.campaign_id);
-                if let Err(error) =
-                    sheet::deliver_assignment_sheet_row(db, events, &candidate.assignment_id).await
-                {
-                    log::warn!(
-                        "verified post {} owes Sheet delivery: {error}",
-                        candidate.assignment_id
-                    );
-                }
-                // Link settlement creates a separate durable media obligation. The
-                // cleanup worker reacquires the same device lease and rechecks revision.
-                if let Some(cleanup) = db.pending_publish_cleanup(&candidate.assignment_id)? {
-                    if let Err(error) = super::verified_cleanup::cleanup_verified_assignment(
-                        control, db, events, &cleanup,
-                    )
-                    .await
-                    {
-                        log::warn!(
-                            "verified post {} still owes media cleanup: {error}",
-                            candidate.assignment_id
-                        );
-                    }
-                }
             }
             Ok(changed)
         }
@@ -143,7 +163,13 @@ pub(crate) async fn verify_pending_assignment(
             let code = error
                 .downcast_ref::<VerificationObservation>()
                 .map_or("readFailed", |o| o.code);
-            if db.record_publish_verification_diagnostic(
+            let record = if manual {
+                Database::record_manual_publish_verification_diagnostic
+            } else {
+                Database::record_publish_verification_diagnostic
+            };
+            if record(
+                db,
                 candidate,
                 &reason,
                 code,

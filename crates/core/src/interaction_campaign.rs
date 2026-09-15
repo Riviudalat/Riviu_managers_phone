@@ -350,7 +350,7 @@ async fn collect_target_evidence_frames(
     let session = match control.streaming_session(&context) {
         Ok(session) => session,
         Err(error) => {
-            let cleanup = control.finish_app_session(context, &target_package).await;
+            let cleanup = control.complete_app_session(context, &target_package).await;
             return Err(anyhow::anyhow!("{error}; cleanup: {cleanup:?}"));
         }
     };
@@ -408,7 +408,7 @@ async fn collect_target_evidence_frames(
     .await;
     // Closed on every path, including the failing ones: leaving the context open would
     // strand the lease and the stream for a target we are about to give up on.
-    let closed = control.finish_app_session(context, &target_package).await;
+    let closed = control.complete_app_session(context, &target_package).await;
     let shot = frames?;
     closed?;
     if shot.frames.is_empty() {
@@ -2421,7 +2421,7 @@ async fn run_cohort(
             let session = match control.streaming_session(&context) {
                 Ok(session) => session,
                 Err(error) => {
-                    let cleanup = control.finish_app_session(context, &opened_package).await;
+                    let cleanup = control.complete_app_session(context, &opened_package).await;
                     tracing::warn!("interaction session access {error}; cleanup: {cleanup:?}");
                     return Err(error.into());
                 }
@@ -2456,6 +2456,7 @@ async fn run_cohort(
                 )
                 .await?;
                 if let Some(script)=&request.scripted_conversation {
+                    db.require_conversation_step_accounts(script, &target.target_key, prepared.ordinal)?;
                     let now=chrono::Utc::now().timestamp_millis();
                     anyhow::ensure!(db.conversation_session(&campaign_id)?.is_some_and(|session|now<session.ends_at_ms),"Phiên đã hết giờ");
                     anyhow::ensure!(session.supports_element_bounds(),"Hội thoại tag thật cần máy Android");
@@ -2675,6 +2676,9 @@ async fn run_cohort(
                 };
                 let comment_armed_revision = std::sync::Mutex::new(None);
                 let mut effect_gate = EffectGate::new(|| {
+                    if let Some(script) = &request.scripted_conversation {
+                        db.require_conversation_step_accounts(script, &target.target_key, prepared.ordinal)?;
+                    }
                     let armed = db.begin_interaction_comment_action_effect(
                         id,
                         *ownership_revision,
@@ -2843,9 +2847,14 @@ async fn run_cohort(
                 generation,
                 watermark,
             );
-            let cleanup = control.finish_app_session(context, &opened_package).await;
+            let cleanup = control.complete_app_session(context, &opened_package).await;
             let cleanup_evidence = match &cleanup {
-                Ok(proof) => serde_json::json!({"state":"processAbsent","proof":proof}),
+                Ok(crate::device_control::AppCompletionDisposition::ProcessAbsent(proof)) => {
+                    serde_json::json!({"state":"processAbsent","proof":proof})
+                }
+                Ok(crate::device_control::AppCompletionDisposition::Deferred) => {
+                    serde_json::json!({"state":"deferred","reason":"device_work_pending"})
+                }
                 Err(error) => serde_json::json!({"state":"failed","error":error.to_string()}),
             };
             let _ = db.add_interaction_artifact(

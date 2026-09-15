@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { DeviceInfo } from "../types";
 import {
@@ -104,6 +104,20 @@ function mockRect(el: Element, box: { left: number; top: number; width: number; 
 }
 
 describe("FocusStream hit mapping", () => {
+  it("opens the shared nick action on right click without sending a tap, and Escape closes only the menu",async()=>{
+    const read=vi.fn(),onClose=vi.fn();
+    const view=render(<FocusStream device={fixture} index={2} onClose={onClose} groupUdids={[]} groupMode={false} devices={[fixture]} onSelectDevice={vi.fn()} functions={[{id:"read-tiktok-account",label:"Đọc và gán nick TikTok",run:read}]}/>);
+    fireEvent.contextMenu(view.getByTestId("focus-screen"),{clientX:100,clientY:100});
+    const menu=view.getByRole("menu");
+    expect(deviceTap).not.toHaveBeenCalled();
+    fireEvent.keyDown(within(menu).getByRole("textbox"),{key:"Escape"});
+    expect(view.queryByRole("menu")).toBeNull();
+    expect(onClose).not.toHaveBeenCalled();
+    fireEvent.contextMenu(view.getByTestId("focus-screen"),{clientX:100,clientY:100});
+    fireEvent.click(view.getByRole("menuitem",{name:"Đọc và gán nick TikTok"}));
+    expect(read).toHaveBeenCalledOnce();
+    expect(view.queryByRole("menu")).toBeNull();
+  });
   beforeEach(() => {
     vi.mocked(deviceTap).mockClear();
     vi.mocked(deviceSwipe).mockClear();

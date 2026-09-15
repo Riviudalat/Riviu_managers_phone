@@ -1,4 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type ReactElement } from "react";
+import { createPortal } from "react-dom";
+import { DeviceContextMenu } from "./DeviceContextMenu";
 import type { DeviceInfo, GroupInputReport, HardwareKey } from "../types";
 import { groupInputOutcome } from "../groupInput";
 import { getGroupSync } from "../groupSync";
@@ -735,7 +737,12 @@ export function FocusStream({
   /// read `busy`, `showDevices`, `showPhrases` — so a memo keyed on anything less than the
   /// array itself would hand back stale rows, and one keyed on the array would never hit.
   /// Concatenating forty objects costs nothing next to the render it happens inside.
-  const panelNodes = [...menuRows, ...overlayFunctions];
+  const panelNodes = [
+    ...overlayFunctions.filter(node => node.id === "read-tiktok-account"),
+    ...menuRows,
+    ...overlayFunctions.filter(node => node.id !== "read-tiktok-account"),
+  ];
+  const [contextMenu, setContextMenu] = useState<{x:number;y:number;udid:string}|null>(null);
 
   const navKeys: {
     key: HardwareKey;
@@ -763,8 +770,9 @@ export function FocusStream({
       aria-busy={busy}
       aria-label={`Điều khiển ${device.name}`}
       onPointerDownCapture={onActivate}
-      onKeyDown={event => { if (event.key === "Escape" && active && !event.defaultPrevented) { event.stopPropagation(); onClose(); } }}
+      onKeyDown={event => { if (event.key === "Escape" && active && !event.defaultPrevented) { event.stopPropagation(); if(contextMenu) setContextMenu(null); else onClose(); } }}
     >
+      {contextMenu?.udid===device.udid && createPortal(<DeviceContextMenu device={device} groups={[]} x={contextMenu.x} y={contextMenu.y} nodes={panelNodes} onAddToGroup={()=>{}} onClose={()=>setContextMenu(null)} />,document.body)}
       <div ref={stageRef} className={`focus-stage${layout.stacked ? " is-stacked" : ""}${layout.landscape ? " is-landscape" : ""}`} onClick={(event) => event.stopPropagation()}>
         <div
           ref={screenRef}
@@ -773,6 +781,7 @@ export function FocusStream({
           // restyle is about to change a lot of them; a test that breaks because a colour
           // moved is a test that stops meaning anything.
           data-testid="focus-screen"
+          onContextMenu={event=>{event.preventDefault();event.stopPropagation();setContextMenu({x:event.clientX,y:event.clientY,udid:device.udid});}}
           style={{ width: layout.screenWidth, height: layout.screenHeight }}
           title="Ctrl + lăn chuột để phóng to / thu nhỏ"
           onPointerDown={(e) => {

@@ -7,7 +7,7 @@ type AccountDraft = { saved: string; draft: string; edited: boolean; busy: boole
 const empty = (): AccountDraft => ({ saved: "", draft: "", edited: false, busy: false });
 
 /** One authoritative saved value per UDID; late reads cannot overwrite newer saves/reloads. */
-export function useDeviceHandles(udids: string[]) {
+export function useDeviceHandles(udids: string[], revision = "") {
   const [accounts, setAccounts] = useState<Record<string, AccountDraft>>({});
   const current = useRef(accounts);
   const tickets = useRef<Record<string, number>>({});
@@ -42,7 +42,7 @@ export function useDeviceHandles(udids: string[]) {
     const activeWrites = writes.current;
     for (const udid of scope) if (!activeWrites.has(udid)) void load(udid, false);
     return () => { for (const udid of scope) if (!activeWrites.has(udid)) nextTicket(udid); };
-  }, [scopeKey, load]);
+  }, [scopeKey, load, revision]);
 
   const change = useCallback((udid: string, draft: string) => {
     update(udid, (value) => ({ ...value, draft, edited: true }));

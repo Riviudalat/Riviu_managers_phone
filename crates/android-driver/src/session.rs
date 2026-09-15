@@ -576,14 +576,9 @@ impl UiSession for AndroidUiSession {
     }
 
     async fn launch_app_foreground(&self, bundle_id: &str) -> anyhow::Result<()> {
-        let bundle_id = crate::adb::validate_package_name(bundle_id)?;
         self.adb
-            .shell(
-                &self.serial,
-                &format!("monkey -p {bundle_id} -c android.intent.category.LAUNCHER 1"),
-            )
+            .launch_foreground_checked(&self.serial, bundle_id)
             .await
-            .map(|_| ())
     }
 
     /// `am force-stop` and then launch, which on this platform is a real restart.

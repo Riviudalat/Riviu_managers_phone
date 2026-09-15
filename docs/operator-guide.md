@@ -13,6 +13,18 @@ phạm vi máy rõ ràng và kết quả có thể đọc lại. Chọn hồ sơ
 - Trạng thái ngắn hạn nằm trong vùng hoạt động; lịch sử bền nằm ở Tác vụ/Dữ liệu và monitor nguồn.
 - Mất thiết bị hoặc lỗi quyền phải hiện lỗi ở vùng liên quan. Không dùng ảnh preview còn lưu làm bằng chứng máy đang sẵn sàng.
 
+Sau khi Nuôi TikTok, Tương tác hoặc Đăng bài kết thúc, Riviu tự đóng TikTok trên
+**từng điện thoại khi máy đó đã hết việc**; Riviu trên PC vẫn chạy. Máy còn lượt
+đang chạy/chờ trong cùng quy trình, bài đang tải hoặc chưa xác minh được link sẽ
+chờ. Với bước Điều phối chạy theo nhóm, máy chờ bước hiện tại chốt kết quả.
+Yêu cầu đóng được lưu qua restart, chỉ ghi đã đóng khi thiết bị trả bằng chứng
+TikTok không còn chạy. Lỗi đóng không đổi kết quả đăng hoặc tự đăng lại bài.
+
+Trong Đăng bài, thẻ máy hiện ngay bài còn chờ lấy link và nút **Xem bài đang chờ**.
+Bài đang tải/chưa rõ kết quả chặn lượt đăng mới trên máy đó. Bài cũ được xác nhận
+không còn giữ máy vẫn hiện cảnh báo kiểm tra link, theo điều kiện của lượt cũ.
+Không đọc được trạng thái thì chờ kiểm tra lại trước khi đăng.
+
 ## Thiết bị
 
 Sidebar giữ chiều rộng và tên mục. Bấm tiêu đề **Automation**, **Tài nguyên** hoặc
@@ -71,6 +83,18 @@ Mỗi kết nối chỉ có một lần thử cài, không lặp cài liên tụ
 chấp nhận gỡ lỗi USB hoặc mất kết nối chưa bắt đầu cài.
 
 Thanh công cụ đặt **Mở máy**, **Đồng bộ**, **Nhóm** và **Công cụ** cạnh phạm vi máy.
+**Đồng bộ** mở bảng chọn máy chính, xem các máy nhận thao tác và bật/tắt đồng bộ.
+Chọn ít nhất hai máy, bật đồng bộ rồi mở màn hình máy chính để điều khiển.
+Mục **Độ trễ và độ lệch thao tác** dùng chung cấu hình trong Cài đặt; bấm Áp dụng
+để lưu. Mở hoặc đóng bảng không tự bật đồng bộ.
+
+Chuột phải trên ô máy hoặc ngay trên màn hình stream, chọn **Đọc và gán nick TikTok**
+để mở Hồ sơ và lưu username vào danh sách thiết bị. Chuột phải trên một máy đã chọn
+sẽ đọc lần lượt toàn bộ nhóm đang chọn; máy ngoài nhóm chỉ đọc riêng máy đó.
+Username hiện thêm dưới tên máy, không thay số máy, tên máy hay trạng thái.
+Máy đọc lỗi, mất kết nối, username trùng hoặc vừa được sửa sẽ báo riêng và giữ nick cũ;
+các máy còn lại vẫn tiếp tục. Android đang mở điều khiển dùng lại phiên hiện có;
+máy còn bài đăng cần giữ chưa được mở Hồ sơ để đọc nick. iOS chưa hỗ trợ thao tác này.
 Lệnh **Sửa Riviu Agent** nằm trong **Bảo trì**; hộp xác nhận nêu rõ số máy và việc
 khởi động lại stream. Nút quét thiết bị nằm bên phải toolbar. Trạng thái **Toàn hệ
 thống** trên header khác phạm vi **Máy thực hiện** của từng tác vụ.
@@ -182,17 +206,35 @@ Khung máy đã thu hẹp, phần cấu hình phiên có thêm chỗ hiển th�
 Header ghi **Đã chọn X** cùng số máy sẵn sàng và tổng máy; tên/model mỗi máy hiện một lần. Cuộn trong danh sách
 máy hoặc phần cấu hình độc lập, thanh tab và nút bắt đầu giữ ở vị trí cố định.
 
-**Thiết lập** chứa cấu hình phiên; **Tuỳ chỉnh nâng cao** chứa Hành vi, AI và Bình luận.
-Nút **Sửa thiết lập** tự mở phần nâng cao và đưa focus về trường cần sửa.
+Nút **Dừng** cạnh danh sách trong cửa sổ **Theo dõi tác vụ** dừng toàn bộ máy của
+tác vụ đang chọn và đóng TikTok về màn hình chính. Đây là dừng/hủy phần việc còn lại,
+không phải tạm ngưng để tự chạy tiếp. App chờ thao tác đang thực hiện trả quyền máy,
+báo từng máy đã đóng hoặc cần kiểm tra. Kết quả đã đăng/gửi và bằng chứng vẫn giữ;
+kiểm tra link tự động của tác vụ Đăng bài đã dừng cũng được dừng qua lần mở app sau.
+Nếu máy đang có tác vụ khác, app báo rõ thay vì đóng ứng dụng của tác vụ đó.
+
+**Thiết lập** có các tab trực tiếp **Phiên nuôi · Hành vi · AI**. Lịch sử bình luận
+và token AI nằm trong **Theo dõi → Bình luận & chi phí AI**, bên cạnh **Tiến độ máy**.
+Nút **Sửa thiết lập** mở đúng tab và đưa focus về trường cần sửa.
 Mỗi máy hiển thị trạng thái bằng chữ cùng lý do khi chưa sẵn sàng. Tab **Hẹn giờ** chứa lịch
 tự chạy và các khung giờ riêng; bấm **Áp dụng hẹn giờ** để lưu lịch xuống ứng dụng.
 Chuyển tab hoặc sửa bản nháp chưa bắt đầu phiên; **Kiểm tra & bắt đầu** vẫn là
 thao tác riêng. Giữ máy tính và Riviu đang mở để lịch chạy.
 
-Trang Thiết lập đặt cấu hình phiên cạnh danh sách máy. Chọn Nhẹ nhàng/Cân bằng
-hoặc chỉnh từng tỷ lệ, chọn máy rồi bấm **Kiểm tra & bắt đầu**. Thời lượng trên
-trang được gửi vào phiên thật; Nhẹ nhàng là 15 phút, Cân bằng 20 phút. Phần AI, nhịp
-và cấu hình nằm trong **Thiết lập**, lịch nằm trong **Hẹn giờ**. Theo dõi có log riêng từng máy.
+Trang Thiết lập đặt cấu hình phiên cạnh danh sách máy. Bộ tỷ lệ mặc định là Tim 20%,
+Lưu 5%, Bình luận 2%, Theo dõi 1%; khi bật đủ bốn hành động, **Chỉ xem là 72%**.
+Mỗi video chọn tối đa một hành động. Phần Chỉ xem tự bù để tổng luôn là 100%; tắt
+một hành động trả tỷ lệ về Chỉ xem và giữ số đã đặt. Bình luận cần bật riêng khi có AI.
+Hồ sơ cũ chỉ chuyển sang phân bổ này khi bạn lưu bản thiết lập đã duyệt; lượt đang
+chạy giữ chế độ của mình. Chọn máy rồi bấm **Kiểm tra & bắt đầu**.
+Thời lượng trên trang được gửi vào phiên thật. Lịch nằm trong **Hẹn giờ**; Theo dõi
+có log riêng từng máy.
+
+Trong **Phiên nuôi → Nguồn video**, chọn **Lướt theo từ khóa**, nhập ví dụ `đà lạt`.
+Android mở Tìm kiếm, nhập đúng từ khóa, chuyển sang Videos và mở một kết quả để lướt.
+App xác nhận ô tìm kiếm trước khi mở kết quả; không thấy nút/kết quả hoặc rời màn video
+tìm kiếm thì báo lỗi/dừng, không chuyển ngầm sang FYP. Đổi từ khóa áp dụng từ phiên
+tiếp theo. Giới hạn video, thời lượng, tỷ lệ và đóng TikTok cuối phiên vẫn áp dụng.
 
 **Đầu vào:** phạm vi máy, thời gian xem, giới hạn phiên, nhịp, hành động và lịch.
 Credential AI được lưu riêng.
@@ -246,7 +288,14 @@ chạy rồi theo dõi kết quả từng hành động.
 **Hội thoại theo kịch bản** cho mỗi link một nội dung riêng. Chọn bài trong mục kịch bản,
 dán các dòng `@vai: nội dung`, bấm Phân tích rồi sửa câu, chủ đề, parent và tag.
 AI có thể soạn trước từ mô tả/caption do bạn nhập; toàn bộ câu vẫn phải duyệt trước chạy.
-Gán mỗi vai vào một máy Android và username. Một vai luôn giữ cùng máy, kể cả khi
+Chọn máy Android cho từng vai; bảng Vai → Máy → Username lấy username đã lưu
+trong danh sách thiết bị, không lấy tên máy hay tên hiển thị TikTok. Máy thiếu nick
+có nút Gán tài khoản mở ô sửa hiện có. Thiếu, trùng, không hợp lệ, chưa lưu hoặc
+lỗi đọc tài khoản đều chặn chạy. Sửa nick đã lưu cập nhật bản nháp và kiểm tra lại.
+Username là cấu hình: đổi tài khoản trực tiếp trên máy được tag mà chưa cập nhật
+danh sách sẽ không được phát hiện bằng tra danh sách. Dùng Đọc tài khoản từ máy
+khi cần đối chiếu; app vẫn kiểm tra tài khoản thực tế trên máy gửi.
+Một vai luôn giữ cùng máy và username trong lượt đã tạo, kể cả khi
 quay lại link sau nhiều lượt. Reply chờ parent đã xác nhận; mọi tag phải được chọn
 và xác nhận từ gợi ý TikTok trước Send. Tag được gắn sau phần chữ để giữ token.
 
@@ -300,6 +349,29 @@ phần được hệ thống xác định còn hợp lệ, không gửi lại m�
 
 ## Đăng bài
 
+Mục **Giới hạn chạy đồng thời** trên trang Đăng bài cho phép xem và lưu giới hạn
+chuyển media, thao tác TikTok, xác minh link và tổng lượt điều khiển theo máy chủ.
+Sau khi đổi giới hạn, kiểm tra lại lịch trước khi lưu; lịch quá tải có cảnh báo.
+
+Đăng ngay và hẹn giờ dùng chung hàng chờ bền vững theo từng bài/máy. Mặc định toàn
+ứng dụng có 4 lượt chuyển media, 4 lượt thao tác TikTok, 4 lượt xác minh liên kết;
+tổng lượt điều khiển thiết bị tối đa 8. Sheet có tối đa 2 request, trong đó tối đa
+1 request báo tiến độ. Theo dõi hiển thị giai đoạn, thời điểm vào hàng và lý do chờ.
+Sau khi gửi, app trả lượt thao tác TikTok rồi xác minh riêng; retry trước gửi giữ
+nguyên bài dự kiến, retry lấy link hoặc ghi Sheet không gửi bài lần nữa.
+
+Giờ hẹn là lúc bắt đầu xử lý. Bài chưa được cấp lượt trong 30 giây hoặc app mở lại
+sau giờ hẹn được ghi **Lỡ lịch**, không tự đăng bù. Công việc đã bắt đầu đúng cửa
+sổ tiếp tục, và bài đã gửi vẫn được xác minh. Kiểm tra lịch cảnh báo số bài cùng
+thời điểm vượt số lượt chuyển media đang cấu hình.
+
+Mỗi bài dự kiến trên một tài khoản có `publicationId` cố định; các lần thử có
+`attemptId` riêng. Mỗi bài chỉ chiếm một dòng Sheet. Sau khi mở đợt báo cáo mới,
+Theo dõi hiển thị **Đợt báo cáo đã đóng** cho nghĩa vụ cũ; lịch sử và xác minh bài
+vẫn được giữ trong app, kể cả khi link về muộn. Trạng thái này không có nghĩa
+Sheet đã xác nhận bài.
+
+
 Kết quả kiểm tra liệt kê riêng nội dung, luồng soạn, nhạc, dung lượng, kết nối,
 chuyển media, khả năng xác minh link và lượt trước đang chờ. Các mục tài khoản,
 clipboard và kết quả xuất bản ghi **Chưa quan sát** cho tới khi chạy bước tương ứng.
@@ -318,17 +390,23 @@ target; **Khôi phục gói tương thích trước** áp dụng cho các phiên
 Các tab chính là **Thiết lập · Hẹn giờ · Theo dõi**. Thiết lập mở **Bàn đăng nhanh**:
 nội dung, caption/đối tác và máy thực hiện nằm trên cùng màn hình. Ở cửa sổ nhỏ,
 cuộn trong vùng làm việc để xem phần dưới; nút **Kiểm tra & đăng** ở cuối vẫn giữ vị trí.
-Thanh đầu đặt **Chọn thư mục** cạnh **Quét**, cùng ô **Link Google Sheet** và nút
-**Kết nối Sheet**. Đăng bài không còn phần hồ sơ hoặc tab cài đặt riêng. Nhập link Sheet
-rồi kiểm tra; đọc được bảng chưa đồng nghĩa đã xác minh đúng kết nối ghi kết quả.
-Nút này tự tạo tiêu đề nếu tab hoàn toàn trống; không thêm hàng thử. Kết quả chỉ
-xanh khi kết nối ghi xác nhận đúng bảng, tab và phiên bản giao nhận hiện tại. Nếu
-báo cần cập nhật Apps Script, làm theo [hướng dẫn Sheet](apps-script/README.md)
-rồi kết nối lại. Bản nội bộ giữ cấu hình webhook/token đi kèm; token được đưa vào
-kho xác thực hệ điều hành. Ô Link Sheet để trống trên máy mới. Khi nâng cấp, link
-mặc định cũ được xóa đúng một lần; cấu hình kết nối giữ nguyên. Link bạn nhập và
-kết nối sau đó được lưu bình thường. Mở trang chỉ kiểm tra; nút Kết nối mới chuẩn
-bị header nếu bảng trống.
+Thanh đầu đặt **Chọn thư mục** cạnh **Quét**. Phần Google Sheets chỉ gồm ô
+**Link Google Sheet**, nút **Đăng nhập Google** và nút **Kiểm tra kết nối**.
+Dán link của đúng tab (`gid` trong link), đăng nhập trên trình duyệt rồi kiểm tra.
+Link không có `gid` dùng tab `0`. Sửa link sẽ bỏ trạng thái sẵn sàng của link cũ.
+
+Với bảng chưa được cấp quyền, nút kiểm tra mở Google Picker; chọn đúng bảng vừa
+dán để cấp quyền và tiếp tục. Chọn một bảng khác sẽ báo lỗi, không tự thay link
+hoặc ghi sang bảng đó. Không cần chọn tab lần nữa nếu link đã chứa `gid`.
+Đăng nhập xong chưa có nghĩa bảng đã sẵn sàng ghi: chờ trạng thái xác minh màu
+xanh. Tab hoàn toàn trống được chuẩn bị header chuẩn, không thêm hàng thử.
+
+Mục Apps Script cũ, form thông tin OAuth và các bước chọn tab riêng đã được bỏ
+khỏi màn Đăng bài. Cấu hình Google do quản trị viên thiết lập; client secret và
+token nằm trong kho thông tin xác thực hệ điều hành, không kèm bộ cài. Trong lúc
+đăng nhập hoặc chọn bảng, có thể hủy bằng nút Google; lượt chuyển kết nối đã được
+nhận sẽ hoàn tất hoặc giữ trạng thái để tiếp tục. Một tab chỉ nhận ghi từ PC đã
+liên kết; việc chuyển PC cần bàn giao rõ ràng để không có hai bộ ghi cùng lúc.
 Khi đã nhập link, cần xác minh thành công trước khi đăng hoặc lưu lịch có bật ghi
 Sheet. Có thể tắt **Ghi kết quả lên Sheet** để chạy lượt không ghi bảng.
 Khi kiểm tra trước đăng hoặc lưu lịch, Riviu chốt đúng bảng/tab và chế độ báo cáo
@@ -353,7 +431,11 @@ Trước nút Đăng, Riviu kiểm tra clipboard của Helper rồi khôi phục
 Phiên bản TikTok phải khớp lần kiểm tra đã duyệt. Mỗi tài khoản chỉ có một bài
 đang chờ xác minh link, kể cả khi đăng nhập trên nhiều máy; bài sau chờ bài trước
 có link. Chờ ghi Sheet không giữ tài khoản. Lượt cũ chưa qua cơ chế kiểm tra mới
-cần kiểm tra và tạo lại trước khi chạy; bài đã gửi trong lịch sử không tự kiểm lại.
+cần kiểm tra và tạo lại trước khi chạy. Với bài đã gửi trong lịch sử, bấm kiểm tra
+liên kết để tiếp tục xác minh. Khi còn đủ bằng chứng tài khoản và thời điểm gửi,
+lượt kiểm tra chủ động sẽ lưu lịch kiểm tra lại mỗi 5 phút, kể cả sau khi mở lại
+app. Bài thiếu bằng chứng hoặc đang ở màn nháp/soạn bài vẫn cần kiểm tra riêng;
+app không gửi lại bài đã có intent Đăng.
 
 Khi tìm link, app đọc toàn bộ caption, tài khoản và thời gian của bài. Caption bị
 rút gọn chỉ được mở khi chính vùng caption có thể bấm và nhận diện đúng; sau đó
@@ -362,14 +444,26 @@ cần kiểm tra. App không tự bấm Đăng lần nữa để giải quyết 
 
 Sau Đăng, Theo dõi hiển thị lý do chưa xác minh, lần kiểm gần nhất và lần kiểm
 kế tiếp. App giữ TikTok/media khi chờ; link xác minh xong được gửi Sheet ngay.
+Lỗi đọc clipboard được hiển thị riêng với trường hợp đọc thành công nhưng chưa
+có link mới. Thông báo TikTok đang xử lý có ảnh đối chiếu sau Copy; trạng thái
+này vẫn là chờ, chưa tính là xuất bản hoặc ghi link thành công.
+Khi TikTok hiện “Post is being processed” sau Sao chép liên kết và app đọc được
+thông báo đó, Theo dõi ghi **TikTok báo bài đang được xử lý**. Nếu không đọc được
+thông báo, app chỉ ghi **TikTok chưa trả link**; không suy đoán bài đã xuất bản.
+Sau khi đọc đủ caption của bài đang mở, lỗi sao chép được giữ làm lý do chờ;
+app không quay sang tìm bài khác rồi ghi đè bằng lỗi caption hoặc hồ sơ.
 Với bài **hẹn giờ**, phiên đăng trả quyền điều khiển trước khi lấy link. Lần kiểm
-tra đầu sau 2 phút kể từ Đăng, sau đó 5 phút/lần, tối đa 4 giờ. Lỗi đọc/kết nối
-giãn nhịp tối đa 20 phút; mở lại app vẫn giữ mốc Đăng và lịch kiểm tra. Hết 4 giờ
-thì chuyển Cần kiểm tra; nút kiểm tra link thủ công vẫn dùng được, không đăng lại.
+tra đầu sau 2 phút kể từ Đăng. Bài đã gửi nhưng chưa có link, kể cả **đăng ngay**,
+được kiểm tra lại mỗi 5 phút đến khi xác minh được link. Nhịp chờ tính từ lúc kết
+thúc lần kiểm tra trước; lỗi đọc/kết nối vẫn chờ 5 phút. Mở lại app giữ mốc Đăng và
+lần kiểm tra tiếp theo. Máy mất kết nối hoặc đang bận được kiểm khi sẵn sàng.
+Bài từng dừng vì giới hạn 30 phút/4 giờ tự tiếp tục nếu còn đủ tài khoản và thời
+điểm gửi đã ghi nhận. Bài thiếu bằng chứng hoặc cần kiểm tra vì lý do khác vẫn
+hiển thị Cần kiểm tra. Việc tìm link không bấm Đăng lại.
 Mọi máy đang chờ liên kết kiểm tra độc lập khi Ready (một observer mỗi máy), chỉ
 chiếm quyền điều khiển trong từng lần đọc. Cột Link trên Sheet chỉ có giá trị khi
-trạng thái **Đã xác minh**; trước đó trống là đúng — đọc Trạng thái / Lỗi. Hết ngân
-sách tự kiểm thì bấm **Kiểm tra liên kết** (không đăng lại).
+trạng thái **Đã xác minh**; trước đó trống là đúng — đọc Trạng thái / Lỗi. Có thể
+bấm **Kiểm tra liên kết** để kiểm ngay mà không chờ lượt tiếp theo.
 Sheet nội bộ cập nhật đúng dòng/STT của mỗi bài dù link về ngược thứ tự. Cột Link
 chỉ có giá trị khi trạng thái **Đã xác minh**; trước đó cột trống là đúng — đọc cột
 Trạng thái / Lỗi để biết đang chờ hay đã dừng tự kiểm tra. Mẫu chỉ ghi bài đã xác
@@ -681,3 +775,8 @@ nguồn trước khi lặp lệnh. Không ghi token/password vào report. Khi ki
 đọc [ràng buộc WDA](agents/02-wda-doc-truoc-khi-sua.md) và không chạy harness đồng thời
 với desktop đang sở hữu thiết bị. Hướng dẫn này mô tả hợp đồng; nghiệm thu có ngày ở
 [kho lịch sử](archive/README.md), không tự cấp chứng nhận cho mọi thiết bị/bản cài.
+
+
+Khi dọn Sheet bị gián đoạn, kết nối hiển thị chưa sẵn sàng nhận bài. Tiếp tục cùng
+đợt dọn để giữ bản sao và hoàn tất; các dòng mới được nhận sau khi đọc lại xác nhận
+đã dọn. Gửi lại yêu cầu tạo bài bị mất phản hồi sẽ mở đúng chiến dịch đã tạo.

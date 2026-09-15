@@ -14,3 +14,12 @@ it("counts only proof-backed cleanup from this run, not merely finished machines
   ] as NurtureSessionStatus[]} />);
   expect(screen.getByText("TikTok đã tắt: 1/3 máy trong phiên")).toBeVisible();
 });
+it("keeps deferred cleanup separate from proof-backed process closure", () => {
+  const base = { runId: "current", runSize: 2, phase: "finished", running: false, outcome: "done", videoTarget: 1, videosDone: 1, startedAt: "2026-09-07T00:00:00Z", updatedAt: "2026-09-07T00:01:00Z" };
+  render(<NurtureRunProgress now={Date.now()} statuses={[
+    { ...base, udid: "a", cleanupState: "processAbsent", cleanupProof: { bundleId: "com.fixture", oldPid: 12 } },
+    { ...base, udid: "b", cleanupState: "deferred", cleanupProof: null },
+  ] as NurtureSessionStatus[]} />);
+  expect(screen.getByText("TikTok đã tắt: 1/2 máy trong phiên")).toBeVisible();
+  expect(screen.getByText("Đã lên lịch đóng TikTok khi máy rảnh: 1 máy")).toBeVisible();
+});

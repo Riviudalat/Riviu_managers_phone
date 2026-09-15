@@ -275,7 +275,81 @@ const MIGRATIONS: &[Migration] = &[
         apply: apply_migration_40,
         rebuilds_tables: false,
     },
+    Migration {
+        version: 41,
+        name: "publication-dispatch-and-reporting-epochs",
+        apply: apply_migration_41,
+        rebuilds_tables: false,
+    },
+    Migration {
+        version: 42,
+        name: "publish-create-request-idempotency",
+        apply: apply_migration_42,
+        rebuilds_tables: false,
+    },
+    Migration {
+        version: 43,
+        name: "explicit-phone-app-completion-queue",
+        apply: apply_migration_43,
+        rebuilds_tables: false,
+    },
 ];
+
+fn apply_migration_43(tx: &Transaction<'_>) -> anyhow::Result<()> {
+    tx.execute_batch("CREATE TABLE app_completion_queue (
+        udid TEXT NOT NULL CHECK(length(trim(udid)) BETWEEN 1 AND 256),
+        bundle_id TEXT NOT NULL CHECK(length(trim(bundle_id)) BETWEEN 1 AND 255),
+        revision INTEGER NOT NULL CHECK(revision>0),
+        state TEXT NOT NULL CHECK(state IN ('pending','completed')),
+        attempts INTEGER NOT NULL DEFAULT 0 CHECK(attempts>=0),
+        next_attempt_at_ms INTEGER NOT NULL,reason TEXT,proof_json TEXT CHECK(proof_json IS NULL OR json_valid(proof_json)),
+        requested_at_ms INTEGER NOT NULL,updated_at_ms INTEGER NOT NULL,
+        PRIMARY KEY(udid,bundle_id));
+        CREATE INDEX app_completion_due ON app_completion_queue(state,next_attempt_at_ms,requested_at_ms);
+        CREATE INDEX nurture_status_device_latest ON nurture_run_status_events(udid,run_id,sequence DESC);")?;
+    Ok(())
+}
+
+fn apply_migration_42(tx: &Transaction<'_>) -> anyhow::Result<()> {
+    tx.execute_batch("CREATE TABLE publish_create_requests (
+        request_id TEXT PRIMARY KEY, campaign_id TEXT NOT NULL UNIQUE REFERENCES publish_campaigns(id),
+        request_fingerprint TEXT NOT NULL, created_at TEXT NOT NULL);")?;
+    Ok(())
+}
+
+fn apply_migration_41(tx: &Transaction<'_>) -> anyhow::Result<()> {
+    tx.execute_batch("ALTER TABLE publish_assignments ADD COLUMN publication_id TEXT;
+        UPDATE publish_assignments SET publication_id=id;
+        CREATE UNIQUE INDEX publish_publication_id ON publish_assignments(publication_id);
+        CREATE TRIGGER publish_publication_insert AFTER INSERT ON publish_assignments
+          WHEN NEW.publication_id IS NULL BEGIN
+          UPDATE publish_assignments SET publication_id=NEW.id WHERE id=NEW.id; END;
+        CREATE TRIGGER publish_publication_immutable BEFORE UPDATE OF publication_id ON publish_assignments
+          WHEN OLD.publication_id IS NOT NULL AND NEW.publication_id IS NOT OLD.publication_id
+          BEGIN SELECT RAISE(ABORT,'publicationId is immutable'); END;
+        CREATE TABLE publish_dispatch_jobs (
+          assignment_id TEXT PRIMARY KEY REFERENCES publish_assignments(id),
+          campaign_id TEXT NOT NULL, run_token TEXT NOT NULL, attempt_id TEXT NOT NULL UNIQUE,
+          udid TEXT NOT NULL, phase TEXT NOT NULL CHECK(phase IN ('transfer','compose')),
+          state TEXT NOT NULL CHECK(state IN ('queued','running','finished','missed','cancelled','paused')),
+          queued_at_ms INTEGER NOT NULL, started_at_ms INTEGER, finished_at_ms INTEGER,
+          deadline_ms INTEGER, owner TEXT, reason TEXT, revision INTEGER NOT NULL DEFAULT 0);
+        CREATE INDEX publish_dispatch_due ON publish_dispatch_jobs(state,queued_at_ms);
+        CREATE INDEX publish_dispatch_campaign ON publish_dispatch_jobs(campaign_id,run_token,state);
+        CREATE INDEX publish_dispatch_device ON publish_dispatch_jobs(udid,state,started_at_ms);
+        CREATE TABLE publish_attempts (
+          attempt_id TEXT PRIMARY KEY, publication_id TEXT NOT NULL, campaign_id TEXT NOT NULL,
+          started_at_ms INTEGER NOT NULL, finished_at_ms INTEGER, result TEXT, evidence_json TEXT);
+        CREATE TABLE publish_dispatch_turns (udid TEXT PRIMARY KEY,last_turn INTEGER NOT NULL);
+        CREATE TABLE publish_work_claims (
+          token TEXT PRIMARY KEY,udid TEXT NOT NULL UNIQUE,stage TEXT NOT NULL,
+          owner TEXT NOT NULL,claimed_at_ms INTEGER NOT NULL);
+        CREATE TABLE publish_reporting_epochs (
+          spreadsheet_id TEXT NOT NULL,sheet_gid INTEGER NOT NULL,epoch TEXT NOT NULL,
+          paused INTEGER NOT NULL DEFAULT 0,pending_epoch TEXT,PRIMARY KEY(spreadsheet_id,sheet_gid));
+        ALTER TABLE publish_sheet_sync_state ADD COLUMN superseded_epoch TEXT;")?;
+    Ok(())
+}
 
 fn apply_migration_40(tx: &Transaction<'_>) -> anyhow::Result<()> {
     tx.execute_batch("CREATE TABLE app_workflow_documents(id TEXT PRIMARY KEY,revision INTEGER NOT NULL CHECK(revision>0),archived INTEGER NOT NULL DEFAULT 0,document_json TEXT NOT NULL CHECK(json_valid(document_json)),updated_at TEXT NOT NULL);

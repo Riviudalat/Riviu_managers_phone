@@ -519,6 +519,9 @@ fn test_video_bundle(id: &str) -> riviu_core::PublishBundle {
 
 fn test_assignment(id: &str, bundle_id: &str, udid: &str) -> riviu_core::PublishAssignmentRecord {
     riviu_core::PublishAssignmentRecord {
+        publication_id: String::new(),
+        attempt_id: None,
+        dispatch: None,
         sheet_delivery: None,
         id: id.into(),
         campaign_id: "campaign-1".into(),
@@ -530,6 +533,114 @@ fn test_assignment(id: &str, bundle_id: &str, udid: &str) -> riviu_core::Publish
         evidence_json: None,
         error_code: None,
     }
+}
+
+#[test]
+fn verification_and_stored_reconciliation_hydrate_only_the_selected_publication() {
+    let path = std::env::temp_dir().join(format!(
+        "riviu-verification-hydration-{}.db",
+        Uuid::new_v4()
+    ));
+    let db = super::Database::open(&path).unwrap();
+    let mut bundles = vec![
+        test_bundle("healthy-publication"),
+        test_bundle("unrelated-publication"),
+    ];
+    for bundle in &mut bundles {
+        bundle.caption_sha256 = super::frame_sha256(bundle.caption.as_bytes());
+    }
+    let request = riviu_core::PublishCampaignRequest {
+        sheet_delivery: None,
+        verification_contract_version: None,
+        verification_builds: vec![],
+        sheet_enabled: false,
+        request_id: Uuid::new_v4().to_string(),
+        source_root: "C:/fixture".into(),
+        bundle_ids: bundles.iter().map(|bundle| bundle.id.clone()).collect(),
+        udids: vec!["healthy-phone".into(), "other-phone".into()],
+        run_at: None,
+        visibility: riviu_core::PublishVisibility::Public,
+        cleanup_policy: riviu_core::PublishCleanupPolicy::KeepImportedAssets,
+        network: riviu_core::SocialNetwork::TikTok,
+        sound_policy: riviu_core::PublishSoundPolicy::Default,
+        execution_confirmed: true,
+        target_snapshot: None,
+    };
+    let snapshot = riviu_core::PublishExecutionSnapshotDraft {
+        input_digest: "b".repeat(64),
+        status: riviu_core::PublishExecutionStatus::Partial,
+        retry_scope: riviu_core::PublishRetryScope::FullPipeline,
+        report_json: serde_json::json!({"fixture":"stored identity"}),
+    };
+    let campaign = db
+        .create_publish_campaign_with_snapshot(&request, &bundles, &snapshot)
+        .unwrap();
+    let original = db.get_publish_campaign(&campaign.id).unwrap().unwrap();
+    let assignment = &original.assignments[0];
+    let candidate = riviu_core::db::PendingPublishVerification {
+        assignment_id: assignment.id.clone(),
+        campaign_id: campaign.id.clone(),
+        bundle_id: assignment.bundle_id.clone(),
+        udid: assignment.udid.clone(),
+        scheduled: false,
+        revision: db.publish_assignment_revision(&assignment.id).unwrap(),
+        effect_intent: assignment.effect_intent.clone(),
+        evidence_json: assignment.evidence_json.clone(),
+    };
+    let raw = rusqlite::Connection::open(&path).unwrap();
+    raw.execute(
+        "UPDATE publish_bundles SET manifest_json='malformed unrelated media' WHERE id=?1",
+        [&bundles[1].id],
+    )
+    .unwrap();
+    let events_before: i64 = raw
+        .query_row(
+            "SELECT COUNT(*) FROM publish_events WHERE campaign_id=?1",
+            [&campaign.id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(
+        db.get_publish_campaign(&campaign.id).is_err(),
+        "full campaign hydration must encounter the poisoned sibling"
+    );
+    let (loaded, bundle) = super::verification::verification_input(&db, &candidate)
+        .unwrap()
+        .unwrap();
+    assert_eq!(loaded.id, assignment.id);
+    assert_eq!(bundle.id, bundles[0].id);
+    assert_eq!(bundle.caption, bundles[0].caption);
+    let mut stale = candidate.clone();
+    stale.effect_intent = Some("changed submission".into());
+    assert!(super::verification::verification_input(&db, &stale)
+        .unwrap()
+        .is_none());
+    let refreshed =
+        super::execution::persist_reconciled_publish_execution(&db, &campaign.id).unwrap();
+    assert_eq!(refreshed.input_digest, snapshot.input_digest);
+    let events_after: i64 = raw
+        .query_row(
+            "SELECT COUNT(*) FROM publish_events WHERE campaign_id=?1",
+            [&campaign.id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        events_after, events_before,
+        "existing event history remains intact"
+    );
+    raw.execute(
+        "UPDATE publish_bundles SET manifest_json='malformed selected media' WHERE id=?1",
+        [&bundles[0].id],
+    )
+    .unwrap();
+    assert!(
+        super::verification::verification_input(&db, &candidate).is_err(),
+        "selected corruption must still fail"
+    );
+    drop(raw);
+    drop(db);
+    std::fs::remove_file(path).unwrap();
 }
 
 #[test]
@@ -1110,7 +1221,7 @@ fn hierarchy_video_uses_the_typed_sound_and_one_shot_post_state_machine() {
 fn scheduled_campaigns_use_the_same_typed_runtime_as_the_manual_command() {
     let source = include_str!("../state.rs");
     let start = source
-        .find("for (campaign_id, raw) in scheduled")
+        .find("for (id, raw) in scheduled")
         .expect("scheduled publish loop");
     let end = source[start..]
         .find("// Flow orphan sweep")
@@ -1118,9 +1229,10 @@ fn scheduled_campaigns_use_the_same_typed_runtime_as_the_manual_command() {
         .expect("end of scheduled publish loop");
     let body = &source[start..end];
     assert!(
-        body.contains("execute_scheduled_publish_campaign_inner"),
-        "the scheduler must enter the typed one-confirm runtime"
+        body.contains("claim_publish_pipeline") && body.contains("pipeline::run_dispatcher"),
+        "the scheduler must enqueue in the same durable pipeline consumed by the app dispatcher"
     );
+    assert!(include_str!("pipeline.rs").contains(".claim_publish_pipeline(&campaign)"));
     assert!(
         !body.contains("park_legacy_scheduled_publish")
             && !body.contains("transfer_publish_campaign_inner")

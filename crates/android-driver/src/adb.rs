@@ -839,6 +839,120 @@ impl AdbProgram {
     pub async fn foreground_package(&self, serial: &str) -> anyhow::Result<String> {
         read_foreground_package_with(|source| self.shell(serial, source)).await
     }
+
+    /// A launcher intent can resume another app's activity above this package.
+    /// Samsung Android 9 / TikTok 46.2.42: SMS recipient picker remained in the
+    /// TikTok task after sharing. Bring the existing launcher activity to the top by removing activities
+    /// above it, without stopping the process; accept only observed foreground.
+    pub async fn launch_foreground_checked(
+        &self,
+        serial: &str,
+        package: &str,
+    ) -> anyhow::Result<()> {
+        let package = validate_package_name(package)?;
+        if self
+            .foreground_package(serial)
+            .await
+            .is_ok_and(|p| p == package)
+        {
+            return Ok(());
+        }
+        let launch_receipt = self
+            .shell(
+                serial,
+                &format!("monkey -p {package} -c android.intent.category.LAUNCHER 1"),
+            )
+            .await?;
+        for _ in 0..4 {
+            if self
+                .foreground_package(serial)
+                .await
+                .is_ok_and(|p| p == package)
+            {
+                return Ok(());
+            }
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
+        let resolved=self.shell(serial,&format!("cmd package resolve-activity --brief -a android.intent.action.MAIN -c android.intent.category.LAUNCHER {package}")).await?;
+        let command = foreground_activity_command(package, &resolved)?;
+        let activity_receipt = self.shell(serial, &command).await?;
+        // A fixed number of reads gave fast ADB devices only three seconds to
+        // cold-launch. Observe for a wall-clock window, leaving each ADB request
+        // to its own deadline; never relaunch again or clear the process here.
+        wait_for_foreground_with(package, Duration::from_secs(20), || {
+            self.foreground_package(serial)
+        })
+        .await
+        .with_context(|| {
+            let receipt = |value: &str| value.trim().chars().take(512).collect::<String>();
+            format!(
+                "mở launcher: {}; mở activity: {}",
+                receipt(&launch_receipt),
+                receipt(&activity_receipt)
+            )
+        })
+    }
+}
+
+async fn wait_for_foreground_with<F, Fut>(
+    package: &str,
+    budget: Duration,
+    mut read: F,
+) -> anyhow::Result<()>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = anyhow::Result<String>>,
+{
+    let started = tokio::time::Instant::now();
+    let mut observations = 0;
+    let mut last = String::from("chưa có quan sát");
+    loop {
+        if started.elapsed() >= budget {
+            break;
+        }
+        let observed = read().await;
+        observations += 1;
+        let elapsed = started.elapsed();
+        if elapsed <= budget && observed.as_deref().is_ok_and(|value| value == package) {
+            return Ok(());
+        }
+        last = match observed {
+            Ok(package) => package,
+            Err(error) => format!("lỗi đọc: {error:#}"),
+        };
+        tokio::time::sleep(Duration::from_millis(250).min(budget.saturating_sub(elapsed))).await;
+    }
+    anyhow::bail!(
+        "Ứng dụng {package} chưa ở foreground sau khi mở; đã đọc {observations} lần trong {} ms, quan sát cuối: {}; giữ nguyên phiên và không thao tác UI",
+        started.elapsed().as_millis(),
+        last.chars().take(512).collect::<String>()
+    );
+}
+
+fn foreground_activity_command(package: &str, resolved: &str) -> anyhow::Result<String> {
+    validate_package_name(package)?;
+    let components: Vec<_> = resolved
+        .lines()
+        .map(str::trim)
+        .filter(|s| s.contains('/'))
+        .collect();
+    let [component] = components.as_slice() else {
+        anyhow::bail!("launcher component is not unique");
+    };
+    let (owner, activity) = component
+        .split_once('/')
+        .context("launcher component missing")?;
+    anyhow::ensure!(
+        owner == package
+            && !activity.is_empty()
+            && activity
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'$')),
+        "launcher belongs to another package or contains invalid characters"
+    );
+    // NEW_TASK | SINGLE_TOP | CLEAR_TOP. Measured on phone13: PID30572 stayed
+    // alive while SMS activities above TikTok closed. No CLEAR_TASK or force-stop.
+    Ok(format!("am start -W -a android.intent.action.MAIN -c android.intent.category.LAUNCHER -n '{component}' -f 0x34000000"))
 }
 
 /// `windows` works on the Android 9 fleet; `displays` works on Android 15.
@@ -2224,6 +2338,90 @@ pub fn classify_ls_output(stdout: &str, stderr: &str, exit_code: i32) -> LsOutco
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test(start_paused = true)]
+    async fn foreground_wait_observes_cold_launch_past_old_twelve_read_limit() {
+        let started = tokio::time::Instant::now();
+        let mut reads = 0;
+        super::wait_for_foreground_with("app.test", std::time::Duration::from_secs(20), || {
+            reads += 1;
+            let package = if started.elapsed() >= std::time::Duration::from_secs(8) {
+                "app.test"
+            } else {
+                "com.sec.android.app.launcher"
+            };
+            std::future::ready(Ok(package.into()))
+        })
+        .await
+        .unwrap();
+        assert_eq!(started.elapsed(), std::time::Duration::from_secs(8));
+        assert!(reads > 12);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn foreground_wait_reports_launcher_or_transport_error_at_absolute_deadline() {
+        for unreadable in [false, true] {
+            let started = tokio::time::Instant::now();
+            let mut reads = 0;
+            let error = super::wait_for_foreground_with(
+                "app.test",
+                std::time::Duration::from_secs(20),
+                || {
+                    reads += 1;
+                    std::future::ready(if unreadable {
+                        Err(anyhow::anyhow!("fixture disconnected"))
+                    } else {
+                        Ok("com.sec.android.app.launcher".into())
+                    })
+                },
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(started.elapsed(), std::time::Duration::from_secs(20));
+            assert_eq!(reads, 80);
+            let message = error.to_string();
+            assert!(message.contains("20000 ms"));
+            assert!(message.contains(if unreadable {
+                "fixture disconnected"
+            } else {
+                "com.sec.android.app.launcher"
+            }));
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn foreground_wait_never_accepts_a_read_that_completed_after_deadline() {
+        let started = tokio::time::Instant::now();
+        let mut reads = 0;
+        let error =
+            super::wait_for_foreground_with("app.test", std::time::Duration::from_secs(20), || {
+                reads += 1;
+                async {
+                    tokio::time::sleep(std::time::Duration::from_secs(21)).await;
+                    Ok("app.test".into())
+                }
+            })
+            .await
+            .unwrap_err();
+        assert_eq!(reads, 1);
+        assert_eq!(started.elapsed(), std::time::Duration::from_secs(21));
+        assert!(error.to_string().contains("21000 ms"));
+    }
+
+    #[test]
+    fn foreground_launcher_is_exact_package_and_preserves_process() {
+        let command =
+            super::foreground_activity_command("app.test", "priority=0\napp.test/.MainActivity\n")
+                .unwrap();
+        assert_eq!(command,"am start -W -a android.intent.action.MAIN -c android.intent.category.LAUNCHER -n 'app.test/.MainActivity' -f 0x34000000");
+        for invalid in [
+            "other.app/.MainActivity",
+            "app.test/.MainActivity\napp.test/.Other",
+            "app.test/.Main';input keyevent 3",
+            "No activity found",
+        ] {
+            assert!(super::foreground_activity_command("app.test", invalid).is_err());
+        }
+    }
     #[test]
     fn device_commands_and_stream_children_use_each_serials_server() {
         use super::*;

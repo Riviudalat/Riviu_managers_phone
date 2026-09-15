@@ -1616,6 +1616,8 @@ pub struct InteractionCampaignDetail {
 #[serde(rename_all = "camelCase")]
 pub struct ThreadPreview {
     #[serde(default)]
+    pub conversation_accounts: Vec<crate::conversation::ConversationAccountCheck>,
+    #[serde(default)]
     pub conversation_timeline: Vec<(String, u8, i64)>,
     pub lines: Vec<TikTokLinkLine>,
     pub plan: Option<ThreadPlan>,
@@ -1651,6 +1653,7 @@ mod tests {
         #[test]
         fn the_preview_wire_shape_is_what_the_frontend_types_say() {
             let preview = ThreadPreview {
+                conversation_accounts: Vec::new(),
                 conversation_timeline: Vec::new(),
                 lines: Vec::new(),
                 plan: Some(ThreadPlan {

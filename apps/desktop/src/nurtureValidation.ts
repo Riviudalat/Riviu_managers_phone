@@ -8,6 +8,16 @@ export interface NurtureSettingsIssue {
 
 /** Shared by readiness, profile saving and the final save-before-start check. */
 export function validateNurtureSettings(s: NurtureSettings): NurtureSettingsIssue | null {
+  if(s.actionSelection === "exclusive") {
+    const total=(s.likeEnabled===false?0:s.likeProb)+(s.saveEnabled===false?0:s.saveProb??0)+(s.commentEnabled===false?0:s.commentProb)+(s.followEnabled===false?0:s.followProb);
+    if(total>100)return {field:"likeProb",tab:"behaviour",message:"Tổng các hành động không được vượt 100%; phần còn lại là Chỉ xem."};
+  }
+  if (s.feedSource !== undefined && s.feedSource !== "forYou" && s.feedSource !== "search") {
+    return {field:"feedSource",tab:"behaviour",message:"Chọn nguồn video Đề xuất hoặc Từ khóa."};
+  }
+  if (s.feedSource === "search" && (typeof s.searchKeyword !== "string" || !s.searchKeyword.trim() || [...s.searchKeyword.trim()].length > 100 || [...s.searchKeyword].some(c=>c.charCodeAt(0)<32||c.charCodeAt(0)===127))) {
+    return {field:"searchKeyword",tab:"behaviour",message:"Nhập từ khóa tìm kiếm từ 1 đến 100 ký tự, trên một dòng."};
+  }
   if (!Number.isInteger(s.maxCommentWords) || s.maxCommentWords < 4 || s.maxCommentWords > 30) {
     return { field: "maxCommentWords", tab: "ai", message: "Giới hạn comment phải từ 4 đến 30 từ" };
   }

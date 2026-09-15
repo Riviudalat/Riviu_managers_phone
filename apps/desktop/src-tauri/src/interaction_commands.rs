@@ -70,6 +70,38 @@ pub async fn interaction_read_account(
     udid: String,
 ) -> Result<inspection::AccountReading, CommandError> {
     let _admission = state.ensure_accepting_work()?;
+    if state
+        .db
+        .has_pending_publish_for_device(&udid)
+        .map_err(interaction_error)?
+    {
+        return Err(interaction_error(
+            "Máy còn bài đăng cần giữ; chưa mở Hồ sơ để đọc nick",
+        ));
+    }
+    // A stream control window already owns this phone. Borrow its session for this
+    // explicit menu action; keep the hold alive until every observation has finished.
+    if let Some(hold) = state.overlay_ui_session(&udid).await {
+        let package = state
+            .control
+            .resolve_tiktok_package(&udid)
+            .await
+            .map_err(interaction_error)?;
+        let session = hold.session();
+        session
+            .launch_app_foreground(&package)
+            .await
+            .map_err(interaction_error)?;
+        let reading = inspection::read_account_from_session(
+            &state.control,
+            &state.db,
+            &udid,
+            session.as_ref(),
+        )
+        .await;
+        drop(hold);
+        return reading.map_err(interaction_error);
+    }
     inspection::read_account(&state.control, &state.db, &udid)
         .await
         .map_err(interaction_error)
@@ -231,11 +263,25 @@ pub fn interaction_preview_thread(
             error: None,
         })
         .collect::<Vec<_>>();
-    let plan = plan_threads(&request).map_err(interaction_error)?;
+    let conversation_accounts = request
+        .scripted_conversation
+        .as_ref()
+        .map(|script| state.db.conversation_account_checks(script))
+        .transpose()
+        .map_err(CommandError::operation)?
+        .unwrap_or_default();
+    let accounts_valid = conversation_accounts.iter().all(|c| c.issues.is_empty());
+    let plan = if accounts_valid {
+        Some(plan_threads(&request).map_err(interaction_error)?)
+    } else {
+        None
+    };
     Ok(ThreadPreview {
+        conversation_accounts,
         conversation_timeline: request
             .scripted_conversation
             .as_ref()
+            .filter(|_| accounts_valid)
             .map(|script| {
                 let starts = script
                     .starts_at
@@ -259,7 +305,7 @@ pub fn interaction_preview_thread(
             as u32,
         stream_capacity: state.control.stream_capacity() as u32,
         lines,
-        plan: Some(plan),
+        plan,
     })
 }
 

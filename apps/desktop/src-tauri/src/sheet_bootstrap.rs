@@ -1,35 +1,15 @@
-//! Local installer connection. Never selects a spreadsheet for the operator.
-use anyhow::Context;
+//! Migrate a retired default link without importing installer-side connections.
 use riviu_core::db::Database;
-use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use std::path::Path;
 
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct Connection {
-    webhook_url: String,
-    token: String,
+pub(crate) fn apply(db: &Database, _sidecars: &Path) -> anyhow::Result<()> {
+    // Only explicit operator configuration may supply webhook credentials.
+    // A leftover connection beside a raw build must never enroll a clean profile.
+    migrate_legacy_link(db, LEGACY_PATH_DIGEST)
 }
 
-pub(crate) fn apply(db: &Database, sidecars: &Path) -> anyhow::Result<()> {
-    let saved = db.publish_sheet_delivery_settings()?;
-    let file = sidecars.join("publish-sheet/connection.json");
-    if saved.webhook_url.is_empty() && saved.token.is_empty() && file.is_file() {
-        let bytes = std::fs::read(file).context("Không đọc được cấu hình kết nối Sheet đi kèm")?;
-        let connection: Connection =
-            serde_json::from_slice(&bytes).context("Cấu hình kết nối Sheet chưa hợp lệ")?;
-        anyhow::ensure!(
-            riviu_core::publish_sheet::is_acceptable_webhook(&connection.webhook_url)
-                && !connection.token.trim().is_empty(),
-            "Kết nối Sheet đi kèm thiếu webhook hoặc token"
-        );
-        db.set_publish_sheet_config_with_reporting(
-            &connection.webhook_url,
-            Some(&connection.token),
-            Some(true),
-        )?;
-    }
+fn migrate_legacy_link(db: &Database, legacy_path_digest: &str) -> anyhow::Result<()> {
     if db
         .get_setting("publish_sheet_default_link_removed_v1")?
         .is_none()
@@ -44,7 +24,7 @@ pub(crate) fn apply(db: &Database, sidecars: &Path) -> anyhow::Result<()> {
             let tab_is_default =
                 riviu_core::publish_sheet::SheetDeliveryTarget::from_sheet_url(&url, true)
                     .is_ok_and(|target| target.sheet_gid == 0);
-            if digest == LEGACY_PATH_DIGEST && tab_is_default {
+            if digest == legacy_path_digest && tab_is_default {
                 db.set_setting(riviu_core::publish_sheet::SHEET_URL_SETTING, "")?;
             }
         }
@@ -59,19 +39,38 @@ const LEGACY_PATH_DIGEST: &str = "e178a970e8af67436378d474c62830776dcb9bd6d1e915
 mod tests {
     use super::*;
     #[test]
-    fn connection_restores_without_setting_link_and_later_user_link_persists() {
+    fn clean_profile_never_imports_valid_or_malformed_sidecar_connection() {
         let dir = std::env::temp_dir().join(format!("sheet-bootstrap-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(dir.join("publish-sheet")).unwrap();
-        std::fs::write(dir.join("publish-sheet/connection.json"),r#"{"webhookUrl":"https://script.google.com/macros/s/fixture/exec","token":"fixture-token"}"#).unwrap();
+        for (index, content) in [r#"{"webhookUrl":"https://script.google.com/macros/s/fixture/exec","token":"fixture-token"}"#, "malformed JSON"].into_iter().enumerate() {
+            std::fs::write(dir.join("publish-sheet/connection.json"),content).unwrap();
+            let db=Database::open(dir.join(format!("clean-{index}.db"))).unwrap();
+            apply(&db,&dir).unwrap();
+            let config=db.publish_sheet_delivery_settings().unwrap();
+            assert!(config.webhook_url.is_empty());
+            assert!(config.token.is_empty());
+            assert!(!config.internal_reporting);
+            assert!(db.get_setting(riviu_core::publish_sheet::SHEET_URL_SETTING).unwrap().unwrap_or_default().is_empty());
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn existing_operator_connection_and_chosen_link_survive_startup() {
+        let dir = std::env::temp_dir().join(format!("sheet-existing-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(dir.join("publish-sheet")).unwrap();
+        std::fs::write(
+            dir.join("publish-sheet/connection.json"),
+            r#"{"webhookUrl":"https://fixture.invalid/other","token":"other"}"#,
+        )
+        .unwrap();
         let db = Database::open(dir.join("test.db")).unwrap();
-        apply(&db, &dir).unwrap();
-        let config = db.publish_sheet_delivery_settings().unwrap();
-        assert_eq!(config.token, "fixture-token");
-        assert!(db
-            .get_setting(riviu_core::publish_sheet::SHEET_URL_SETTING)
-            .unwrap()
-            .unwrap_or_default()
-            .is_empty());
+        db.set_publish_sheet_config_with_reporting(
+            "https://fixture.invalid/chosen",
+            Some("operator-token"),
+            Some(true),
+        )
+        .unwrap();
         db.set_setting(
             riviu_core::publish_sheet::SHEET_URL_SETTING,
             "https://docs.google.com/spreadsheets/d/chosen/edit#gid=0",
@@ -83,6 +82,10 @@ mod tests {
             .unwrap()
             .unwrap()
             .contains("chosen"));
+        let config = db.publish_sheet_delivery_settings().unwrap();
+        assert_eq!(config.webhook_url, "https://fixture.invalid/chosen");
+        assert_eq!(config.token, "operator-token");
+        assert!(config.internal_reporting);
         drop(db);
         std::fs::remove_dir_all(dir).unwrap();
     }
@@ -91,7 +94,11 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("sheet-reset-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         let db = Database::open(dir.join("test.db")).unwrap();
-        let old="https://docs.google.com/spreadsheets/d/1HUcp3DMPTLfQVjhxRnXa_4xvyXd3-EF3LAbYsl0Wwxc/edit?gid=0#gid=0";
+        let old = "https://docs.google.com/spreadsheets/d/retired-fixture/edit?gid=0#gid=0";
+        let legacy_digest = format!(
+            "{:x}",
+            Sha256::digest(b"spreadsheets/d/retired-fixture/edit")
+        );
         db.set_publish_sheet_config_with_reporting(
             "https://script.google.com/macros/s/fixture/exec",
             Some("keep-token"),
@@ -100,7 +107,7 @@ mod tests {
         .unwrap();
         db.set_setting(riviu_core::publish_sheet::SHEET_URL_SETTING, old)
             .unwrap();
-        apply(&db, &dir).unwrap();
+        migrate_legacy_link(&db, &legacy_digest).unwrap();
         assert_eq!(
             db.get_setting(riviu_core::publish_sheet::SHEET_URL_SETTING)
                 .unwrap()
@@ -113,7 +120,7 @@ mod tests {
         );
         db.set_setting(riviu_core::publish_sheet::SHEET_URL_SETTING, old)
             .unwrap();
-        apply(&db, &dir).unwrap();
+        migrate_legacy_link(&db, &legacy_digest).unwrap();
         assert_eq!(
             db.get_setting(riviu_core::publish_sheet::SHEET_URL_SETTING)
                 .unwrap()

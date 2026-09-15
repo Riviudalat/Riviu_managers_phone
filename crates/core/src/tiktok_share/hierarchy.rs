@@ -3,6 +3,20 @@ use super::*;
 pub(crate) use crate::ui_automation::tree::{Node, Tree};
 
 impl Tree {
+    pub(crate) fn publication_removed(&self, package: &str) -> bool {
+        // Trill 38.3.2, machine 7, 14/09/2026: Share on a removed post opens
+        // a Delete sheet. This banner is evidence to skip that candidate entirely.
+        self.nodes.iter().enumerate().any(|(index, node)| {
+            node.visible(package)
+                && self.ancestors_visible(index)
+                && matches!(
+                    node.attr("text"),
+                    "Removed for violating Community Guidelines"
+                        | "Community Guidelines violation: View details"
+                )
+        })
+    }
+
     pub fn control(
         &self,
         package: &str,
@@ -105,10 +119,24 @@ impl Tree {
             })
             .filter_map(Node::rect)
             .collect();
+        // S8 Trill 38.3.2, machine 1, 14/09/2026: visible-to-user covers
+        // extend below the bottom tabs. Clip against their observed upper edge,
+        // otherwise a cover centre hits Create and opens the camera.
+        let navigation_top = [TikTokControl::ProfileTab, TikTokControl::FeedTab]
+            .into_iter()
+            .filter_map(|control| self.control(package, plan.labels.label(control)))
+            .map(|rect| rect.y)
+            .min_by(f64::total_cmp);
         self.matching(package, tile.to_query())
             .into_iter()
             .filter_map(|index| self.nodes[index].rect())
             .filter(|tile| tile.enabled && !badges.iter().any(|badge| contains(tile, badge)))
+            .filter_map(|mut tile| {
+                if let Some(top) = navigation_top {
+                    tile.height = tile.height.min(top - tile.y);
+                }
+                (tile.height > 0.0).then_some(tile)
+            })
             .collect()
     }
 
@@ -150,9 +178,9 @@ impl Tree {
                 let rect = node.rect()?;
                 // Both endpoints are centres of visible measured covers inside
                 // the declared scroll container; no absolute screen geometry.
-                let boxes: Vec<_> = tiles
-                    .iter()
-                    .filter_map(|i| self.nodes[*i].rect())
+                let boxes: Vec<_> = self
+                    .grid(plan)
+                    .into_iter()
                     .filter(|b| contains(&rect, b))
                     .collect();
                 let top = boxes.iter().min_by(|a, b| a.y.total_cmp(&b.y))?;

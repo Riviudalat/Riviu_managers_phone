@@ -3,9 +3,33 @@ use parking_lot::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 const PACKAGE: &str = "com.zhiliaoapp.musically";
+const TRILL: &str = "com.ss.android.ugc.trill";
 const CAPTION: &str =
     "Fixture caption identifies this new publication with sufficient unique detail";
 const URL: &str = "https://www.tiktok.com/@fixture.account/photo/123456789";
+
+#[test]
+fn facebook_permission_only_selects_the_measured_decline_button() {
+    let plan =
+        PublishVerificationPlan::for_build("com.ss.android.ugc.trill", "en", "38.3.2").unwrap();
+    let xml = r#"<hierarchy><node package="com.ss.android.ugc.trill" resource-id="com.ss.android.ugc.trill:id/d2o" text="Give TikTok access to your Facebook friends list and email?" bounds="[100,900][900,1200]" displayed="true"/>
+    <node package="com.ss.android.ugc.trill" class="android.widget.Button" text="Don’t allow" clickable="true" enabled="true" bounds="[172,1299][539,1424]" displayed="true"/>
+    <node package="com.ss.android.ugc.trill" class="android.widget.Button" text="OK" clickable="true" enabled="true" bounds="[540,1299][905,1424]" displayed="true"/></hierarchy>"#;
+    let observed = tree(xml.into());
+    assert_eq!(
+        decline_facebook_permission(&observed, &plan).unwrap().x,
+        172.0
+    );
+    assert_eq!(classify(&observed, &plan), Screen::Dialog);
+    assert!(decline_facebook_permission(
+        &tree(xml.replace("Facebook friends list and email", "payment details")),
+        &plan
+    )
+    .is_none());
+    assert!(
+        decline_facebook_permission(&tree(xml.replace("Don’t allow", "Allow")), &plan).is_none()
+    );
+}
 
 #[test]
 fn short_ellipsized_caption_requests_expansion_without_accepting_a_prefix() {
@@ -19,6 +43,7 @@ fn short_ellipsized_caption_requests_expansion_without_accepting_a_prefix() {
         identity: &identity,
         started: Instant::now(),
         caption_expanded: false,
+        public_link: None,
         diagnostic: VerificationDiagnostic {
             expanded_photo_error: None,
             contract_version: 1,
@@ -52,6 +77,31 @@ fn short_ellipsized_caption_requests_expansion_without_accepting_a_prefix() {
         capture.post_proof(&observed),
         Err(VerificationReason::CaptionTruncated)
     );
+    let failure = anyhow::Error::new(super::super::photo_proof::MatchedPhotoCopyFailure(
+        LinkCapture::Processing(ProcessingNotice {
+            text: "Post is being processed".into(),
+            before_sha256: "before".into(),
+            after_sha256: "after".into(),
+        }),
+    ));
+    assert_eq!(
+        capture.matched_photo_failure(&failure),
+        Some(VerificationReason::Processing)
+    );
+    assert!(capture
+        .diagnostic
+        .expanded_photo_error
+        .as_deref()
+        .unwrap()
+        .contains("after"));
+    let failure = anyhow::Error::new(super::super::photo_proof::MatchedPhotoCopyFailure(
+        LinkCapture::CopyDidNotLand,
+    ));
+    assert_eq!(
+        capture.matched_photo_failure(&failure),
+        Some(VerificationReason::ClipboardUnchanged)
+    );
+    assert!(session.actions.lock().is_empty());
 }
 
 fn node(id: &str, text: &str, description: &str, bounds: &str, clickable: bool) -> String {
@@ -62,6 +112,114 @@ fn node(id: &str, text: &str, description: &str, bounds: &str, clickable: bool) 
 
 fn tree(xml: String) -> Tree {
     Tree::parse(crate::HierarchySourceSnapshot { generation: 1, xml }).unwrap()
+}
+
+fn comments_drawer_xml() -> String {
+    // Sanitized semantic/geometry extract of phone 4's retained 15/09/2026
+    // Trill 38.3.2 observation: the two header tabs and bottom comment input.
+    format!(
+        r#"<node package="{TRILL}" class="android.widget.TextView" text="Comments 0" bounds="[63,710][282,757]" enabled="true" displayed="true"/>
+        <node package="{TRILL}" class="android.widget.TextView" text="Likes 0" bounds="[324,710][444,757]" enabled="true" displayed="true"/>
+        <node package="{TRILL}" class="android.widget.TextView" text="Creator" bounds="[292,829][417,871]" enabled="true" displayed="true"/>
+        <node package="{TRILL}" class="android.widget.EditText" resource-id="{TRILL}:id/cnd" text="Add comment..." bounds="[189,1961][721,2039]" enabled="true" clickable="true" displayed="true"/>"#
+    )
+}
+
+#[test]
+fn measured_comments_drawer_requires_both_headers_input_and_exact_build() {
+    let plan = PublishVerificationPlan::for_build(TRILL, "en", "38.3.2").unwrap();
+    let xml = format!("<hierarchy>{}</hierarchy>", comments_drawer_xml());
+    assert_eq!(classify(&tree(xml.clone()), &plan), Screen::Comments);
+    for changed in [
+        xml.replace("Comments 0", "Comments will appear here"),
+        xml.replace("Likes 0", "Liked videos"),
+        xml.replace(":id/cnd", ":id/other"),
+        xml.replace("android.widget.EditText", "android.widget.TextView"),
+        xml.replace("displayed=\"true\"", "displayed=\"false\""),
+        xml.replace(TRILL, PACKAGE),
+        format!(
+            "<hierarchy><node displayed=\"false\">{}</node></hierarchy>",
+            comments_drawer_xml()
+        ),
+    ] {
+        assert_eq!(classify(&tree(changed), &plan), Screen::Unknown);
+    }
+    let different_build = PublishVerificationPlan::for_runtime(TRILL, "en", "99.9.9").unwrap();
+    assert_eq!(classify(&tree(xml), &different_build), Screen::Unknown);
+    let composer = format!(
+        "<hierarchy>{}{}</hierarchy>",
+        comments_drawer_xml(),
+        node(":id/eej", "Prepared post", "", "[42,652][1038,986]", true).replace(PACKAGE, TRILL)
+    );
+    assert_eq!(classify(&tree(composer), &plan), Screen::Composer);
+}
+
+#[tokio::test(start_paused = true)]
+async fn comments_recovery_observes_post_before_grid_and_never_backs_from_composer_or_unknown() {
+    for (target, expected, backs) in [
+        ("post", Ok(()), 2),
+        ("composer", Err(VerificationReason::ComposerOrUpload), 1),
+        ("unknown", Err(VerificationReason::GridNotRestored), 1),
+        (
+            "comments",
+            Err(VerificationReason::NavigationBudgetExhausted),
+            5,
+        ),
+    ] {
+        let session = Session {
+            trill: true,
+            page: Mutex::new("comments"),
+            comments_back_target: target,
+            ..Default::default()
+        };
+        let plan = PublishVerificationPlan::for_build(TRILL, "en", "38.3.2").unwrap();
+        let identity = identity();
+        let mut capture = Capture {
+            session: &session,
+            plan: &plan,
+            caption: CAPTION,
+            identity: &identity,
+            started: Instant::now(),
+            caption_expanded: false,
+            public_link: None,
+            diagnostic: VerificationDiagnostic {
+                contract_version: 1,
+                package: TRILL.into(),
+                locale: "en".into(),
+                version: "38.3.2".into(),
+                stage: "restoreProfile",
+                reason_code: VerificationReason::Verified,
+                snapshot_generation: 0,
+                caption_candidates: 0,
+                time_candidates: 0,
+                time_label: None,
+                navigation_actions: 0,
+                candidates_visited: 0,
+                viewports_visited: 0,
+                copy_attempts: 0,
+                expanded_photo_error: None,
+                elapsed_ms: 0,
+                navigation_matches: 0,
+                navigation_enabled: 0,
+                navigation_clickable: 0,
+                screen_state: String::new(),
+            },
+        };
+        assert_eq!(
+            capture.profile(true).await.map(|_| ()),
+            expected,
+            "{target}"
+        );
+        assert_eq!(
+            session.actions.lock().as_slice(),
+            vec!["back"; backs],
+            "{target}"
+        );
+        assert!(session.writes.lock().is_empty());
+        if target == "post" {
+            assert_eq!(*session.page.lock(), "profile");
+        }
+    }
 }
 
 fn plan() -> PublishVerificationPlan {
@@ -77,6 +235,8 @@ fn identity() -> SubmissionIdentity {
 }
 
 struct Session {
+    trill: bool,
+    comments_back_target: &'static str,
     page: Mutex<&'static str>,
     page_number: Mutex<u32>,
     current_tile: Mutex<u32>,
@@ -95,6 +255,9 @@ struct Session {
     multiple_matches: bool,
     other_caption_same_but_old: bool,
     rendered_caption: Option<String>,
+    video_surface: bool,
+    tile_opens_later: bool,
+    pending_post_reads: AtomicU64,
     expand_to: Option<String>,
     caption_clickable: bool,
     expanded: Mutex<bool>,
@@ -103,6 +266,8 @@ struct Session {
 impl Default for Session {
     fn default() -> Self {
         Self {
+            trill: false,
+            comments_back_target: "post",
             page: Mutex::new("feed"),
             page_number: Mutex::new(0),
             current_tile: Mutex::new(0),
@@ -121,6 +286,9 @@ impl Default for Session {
             multiple_matches: false,
             other_caption_same_but_old: false,
             rendered_caption: None,
+            video_surface: false,
+            tile_opens_later: false,
+            pending_post_reads: AtomicU64::new(0),
             expand_to: None,
             caption_clickable: false,
             expanded: Mutex::new(false),
@@ -129,7 +297,19 @@ impl Default for Session {
 }
 
 impl Session {
+    fn package(&self) -> &'static str {
+        if self.trill {
+            TRILL
+        } else {
+            PACKAGE
+        }
+    }
+
     fn xml(&self) -> String {
+        self.xml_for(*self.page.lock())
+    }
+
+    fn xml_for(&self, page: &str) -> String {
         let caption = node(
             ":id/desc",
             if (self.matching_page == 0 || *self.page_number.lock() == self.matching_page)
@@ -151,18 +331,19 @@ impl Session {
             "[0,800][600,900]",
             self.caption_clickable,
         );
-        let content = match *self.page.lock() {
+        let content = match page {
             "feed" => node(":id/profile", "", "Profile", "[800,1800][1000,1900]", true),
             "dialog" => node("", "Not now", "", "[0,1200][300,1300]", true),
             "composer" => node(":id/gx_", "Draft text", "", "[0,500][600,650]", true),
             "login" => node("", "Log in", "", "[0,500][600,650]", true),
+            "comments" => comments_drawer_xml(),
             "profile" => {
                 // Account controls reproduce the already retained 46.2.1 fixture;
                 // the scroll container is an explicit synthetic observation.
                 format!("{}{}{}<node package=\"{PACKAGE}\" enabled=\"true\" scrollable=\"true\" bounds=\"[0,500][900,1750]\">{}{}</node>", node("", "Edit", "", "[600,100][750,150]", true), node(":id/scn", "@fixture.account", "", "[300,160][600,210]", true), node("", "", "Profile menu", "[800,100][900,150]", true), node(":id/cover", "", "", "[0,550][400,1000]", true), node(":id/cover", "", "", "[0,1050][400,1500]", true))
             }
             "post" => format!(
-                "{}{}{}{}",
+                "{}{}{}{}{}",
                 caption,
                 if self.duplicate_caption {
                     node(":id/desc", CAPTION, "", "[0,910][600,960]", false)
@@ -182,7 +363,18 @@ impl Session {
                     "[0,970][600,1010]",
                     false
                 ),
-                node("", "", "Share video", "[800,1000][950,1100]", true)
+                node("", "", "Share video", "[800,1000][950,1100]", true),
+                if self.video_surface {
+                    node(
+                        ":id/long_press_layout",
+                        "",
+                        "Video",
+                        "[0,0][1080,1800]",
+                        false,
+                    )
+                } else {
+                    String::new()
+                }
             ),
             "share" => format!(
                 r#"<node package="{PACKAGE}" class="android.widget.Button" content-desc="Copy link" enabled="true" clickable="true" bounds="[100,1300][300,1450]">{}</node>"#,
@@ -190,15 +382,53 @@ impl Session {
             ),
             _ => node("", "No recognized screen", "", "[0,0][500,500]", false),
         };
-        format!("<hierarchy>{content}</hierarchy>")
+        let xml = format!("<hierarchy>{content}</hierarchy>");
+        if self.trill {
+            xml.replace(PACKAGE, TRILL)
+                .replace(":id/scn", ":id/mjf")
+                .replace(":id/gx_", ":id/eej")
+                .replace("text=\"Edit\"", "text=\"Edit profile\"")
+                .replace(":id/desc", ":id/dmk")
+                .replace(":id/tv_post_time", ":id/qrp")
+        } else {
+            xml
+        }
     }
 }
 
 #[async_trait::async_trait]
 impl UiSession for Session {
+    async fn locate(
+        &self,
+        query: crate::ElementQuery<'_>,
+    ) -> anyhow::Result<Option<crate::ElementBox>> {
+        let found = self.locate_all_described(query).await?;
+        anyhow::ensure!(found.len() <= 1, "fixture locate target not unique");
+        Ok(found.into_iter().next())
+    }
+
+    async fn locate_all(
+        &self,
+        query: crate::ElementQuery<'_>,
+    ) -> anyhow::Result<Vec<crate::ElementBox>> {
+        self.locate_all_described(query).await
+    }
+
+    async fn locate_all_described(
+        &self,
+        query: crate::ElementQuery<'_>,
+    ) -> anyhow::Result<Vec<crate::ElementBox>> {
+        let snapshot = tree(self.xml());
+        Ok(snapshot
+            .matching(self.package(), query)
+            .into_iter()
+            .filter_map(|index| snapshot.nodes[index].rect())
+            .collect())
+    }
+
     async fn activate_element(&self, query: crate::ElementQuery<'_>) -> anyhow::Result<()> {
         let snapshot = tree(self.xml());
-        let found = snapshot.matching(PACKAGE, query);
+        let found = snapshot.matching(self.package(), query);
         let [index] = found.as_slice() else {
             anyhow::bail!("fixture target not unique");
         };
@@ -211,6 +441,9 @@ impl UiSession for Session {
             "feed" if point.x > 800.0 => "profile",
             "dialog" => "feed",
             "profile" => {
+                if self.tile_opens_later {
+                    self.pending_post_reads.store(1, Ordering::Relaxed);
+                }
                 *self.current_tile.lock() = u32::from(point.y > 1000.0);
                 *self.expanded.lock() = false;
                 "post"
@@ -253,6 +486,7 @@ impl UiSession for Session {
         *page = match *page {
             "post" => "profile",
             "share" => "post",
+            "comments" => self.comments_back_target,
             _ => anyhow::bail!("unproved Back"),
         };
         self.actions.lock().push("back".into());
@@ -277,13 +511,23 @@ impl UiSession for Session {
         true
     }
     async fn active_app_bundle(&self) -> anyhow::Result<String> {
-        Ok(PACKAGE.into())
+        Ok(self.package().into())
     }
     async fn hierarchy_source_snapshot(&self) -> anyhow::Result<crate::HierarchySourceSnapshot> {
         tokio::time::sleep(self.snapshot_delay).await;
+        let pending = self
+            .pending_post_reads
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |left| {
+                left.checked_sub(1)
+            })
+            .is_ok();
         Ok(crate::HierarchySourceSnapshot {
             generation: self.generation.fetch_add(1, Ordering::Relaxed) + 1,
-            xml: self.xml(),
+            xml: if pending {
+                self.xml_for("profile")
+            } else {
+                self.xml()
+            },
         })
     }
     async fn set_clipboard(&self, _: &str, bytes: &[u8]) -> anyhow::Result<()> {
@@ -307,6 +551,73 @@ impl UiSession for Session {
         }
         Ok(("plaintext".into(), self.clipboard.lock().clone()))
     }
+}
+
+#[tokio::test(start_paused = true)]
+async fn delayed_video_viewer_copies_before_caption_drawer_and_preserves_copy_failure() {
+    let session = Session {
+        trill: true,
+        video_surface: true,
+        tile_opens_later: true,
+        rendered_caption: Some(format!(
+            "{}...",
+            CAPTION.chars().take(35).collect::<String>()
+        )),
+        caption_clickable: true,
+        copy_misses: u32::MAX,
+        ..Default::default()
+    };
+    let plan = PublishVerificationPlan::for_build(TRILL, "en", "38.3.2").unwrap();
+    let captured = capture_submission_link(&session, &plan, CAPTION, &identity()).await;
+    assert_eq!(
+        captured.diagnostic.reason_code,
+        VerificationReason::ClipboardUnchanged,
+        "diagnostic={:?}, actions={:?}",
+        captured.diagnostic,
+        session.actions.lock()
+    );
+    assert_eq!(captured.diagnostic.candidates_visited, 1);
+    assert_eq!(session.copies.load(Ordering::Relaxed), 1);
+    assert_eq!(captured.diagnostic.copy_attempts, 1);
+    assert!(!session
+        .actions
+        .lock()
+        .iter()
+        .any(|action| action == "expandCaption" || action == "scroll"));
+    assert_eq!(
+        session
+            .actions
+            .lock()
+            .iter()
+            .filter(|action| action.as_str() == "tap:post")
+            .count(),
+        2
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn delayed_video_with_wrong_caption_never_opens_copy_or_caption_drawer() {
+    let session = Session {
+        trill: true,
+        video_surface: true,
+        tile_opens_later: true,
+        rendered_caption: Some("Different caption belongs to an older video...".into()),
+        caption_clickable: true,
+        ..Default::default()
+    };
+    let plan = PublishVerificationPlan::for_build(TRILL, "en", "38.3.2").unwrap();
+    let captured = capture_submission_link(&session, &plan, CAPTION, &identity()).await;
+    assert_ne!(
+        captured.diagnostic.reason_code,
+        VerificationReason::Verified
+    );
+    assert_eq!(session.copies.load(Ordering::Relaxed), 0);
+    assert!(session.writes.lock().is_empty());
+    assert!(!session
+        .actions
+        .lock()
+        .iter()
+        .any(|action| action == "expandCaption" || action == "tap:share"));
 }
 
 #[tokio::test(start_paused = true)]
@@ -715,6 +1026,49 @@ fn measured_draft_cover_is_excluded_and_without_ancestor_grid_does_not_scroll() 
 }
 
 #[test]
+fn profile_covers_and_scroll_never_touch_observed_bottom_navigation() {
+    // The overlapping 1942..2076 cover and tabs starting at 1929 reproduce the
+    // machine 1 observation; no screen-size constant is added to the runtime.
+    let observed = tree(format!("<hierarchy><node package=\"{PACKAGE}\" enabled=\"true\" scrollable=\"true\" bounds=\"[0,1200][1080,2076]\">{}{}</node>{}</hierarchy>",
+        node(":id/cover", "", "", "[0,1462][358,1939]", false),
+        node(":id/cover", "", "", "[0,1942][358,2076]", false),
+        node(":id/profile", "", "Profile", "[864,1929][1080,2076]", true)));
+    let covers = observed.grid(&plan());
+    assert_eq!(covers.len(), 1);
+    assert!(covers[0].centre().y < 1929.0);
+    assert_eq!(covers[0].y + covers[0].height, 1929.0);
+    assert!(observed.grid_scroll(&plan()).is_none());
+}
+
+#[test]
+fn removed_post_banner_prevents_share_capture() {
+    let observed = tree(format!(
+        "<hierarchy>{}</hierarchy>",
+        node(
+            ":id/ssu",
+            "Removed for violating Community Guidelines",
+            "",
+            "[0,1000][1000,1100]",
+            false
+        )
+    ));
+    assert!(observed.publication_removed(PACKAGE));
+    assert!(!observed.publication_removed("another.package"));
+    let hidden = tree(format!(
+        "<hierarchy>{}</hierarchy>",
+        node(
+            ":id/ssu",
+            "Removed for violating Community Guidelines",
+            "",
+            "[0,1000][1000,1100]",
+            false
+        )
+        .replace("displayed=\"true\"", "displayed=\"false\"")
+    ));
+    assert!(!hidden.publication_removed(PACKAGE));
+}
+
+#[test]
 fn snapshot_parser_rejects_invalid_unbounded_or_stale_identity() {
     assert!(Tree::parse(crate::HierarchySourceSnapshot {
         generation: 0,
@@ -767,6 +1121,7 @@ fn a_changed_post_snapshot_cannot_combine_prior_caption_with_new_time() {
         identity: &identity,
         started: Instant::now(),
         caption_expanded: false,
+        public_link: None,
         diagnostic: VerificationDiagnostic {
             expanded_photo_error: None,
             navigation_matches: 0,

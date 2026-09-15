@@ -13,6 +13,7 @@ for (const width of [1440,820]) {
       const invoke=w.__TAURI_INTERNALS__.invoke;w.__effects=[];
       w.__TAURI_INTERNALS__.invoke=async(command,args)=>{
         if(command==="startup_error")return null;
+        if(command==="get_device_meta")return {udid:args.udid,handle:args.udid==="MOCK-FLEET-1"?"actual_a":"actual_b",alias:"",number:null,notes:"",tags:[],groupId:null};
         if(command==="interaction_parse_links")return String(args.rawText).split("\n").filter(Boolean).map((url,index)=>{const match=url.match(/@([^/]+)\/(video|photo)\/(\d+)/)!;return {lineNo:index+1,original:url,error:null,target:{originalUrl:url,normalizedUrl:url,author:match[1],kind:match[2],contentId:match[3],targetKey:`content:${match[3]}`}};});
         if(command==="interaction_preview_thread")return {lines:[],plan:null,validTargetCount:2,cohortCount:1,streamCapacity:2};
         if(["interaction_start_thread","interaction_retry","interaction_read_account"].includes(command)){w.__effects.push(command);throw Error("unexpected public action");}
@@ -23,13 +24,19 @@ for (const width of [1440,820]) {
     await page.goto("/");await openOperatorPage(page, 'Tương tác');
     const workspace=page.getByRole("region",{name:"Không gian Tương tác"});
     await workspace.getByRole("button",{name:"Chọn hành động & máy →"}).click();
+    await workspace.getByRole("combobox",{name:"Phạm vi thiết bị"}).selectOption("all");
+    await workspace.getByRole("button",{name:"Chọn tất cả sẵn sàng",exact:true}).click();
     await expect(page.getByLabel("Thời lượng phiên (phút)")).toHaveValue("120");
+    await expect(page.getByLabel("Máy cho vai b").locator("option:checked")).toContainText("@actual_b");
+    await expect.poll(()=>page.evaluate(()=>JSON.parse(JSON.parse(localStorage.getItem("riviu.form-draft.v1.interaction")!).value.conversationJson).roleBindings[1].username)).toBe("actual_b");
     await expect(page.getByLabel("Nội dung câu 1")).toHaveValue("Cho mình hỏi địa chỉ?");
     await page.getByLabel("Kịch bản của bài").selectOption("content:456");
     await expect(page.getByLabel("Nội dung câu 1")).toHaveValue("Cho mình hỏi địa chỉ? Bài hai");
     await page.getByLabel("Dán hội thoại: @vai: nội dung").fill("@a: bản nháp chưa phân tích");
     await page.getByLabel("Thời lượng phiên (phút)").fill("180");
     await page.screenshot({path:test.info().outputPath(`conversation-${width}.png`)});
+    await page.getByLabel("Máy cho vai b").scrollIntoViewIfNeeded();
+    await page.screenshot({path:test.info().outputPath(`conversation-roles-${width}.png`)});
     await expect.poll(()=>page.evaluate(()=>JSON.parse(JSON.parse(localStorage.getItem("riviu.form-draft.v1.interaction")!).value.conversationJson).durationMinutes)).toBe(180);
     await page.reload();await openOperatorPage(page, 'Tương tác');
     await page.getByRole("region",{name:"Không gian Tương tác"}).getByRole("button",{name:"Chọn hành động & máy →"}).click();

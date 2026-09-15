@@ -12,9 +12,11 @@ import { assignDevice } from "./publishAssignments";
 import "../../styles/publish-quick.css";
 import { allocateQuickPosts } from "./publishQuickAllocation";
 import { publishSelectionStatus } from "./publishSelectionStatus";
+import { deviceGuardBlock, deviceGuardPending } from "./publishDeviceGuardState";
+import type { PublishDeviceGuards } from "../../types";
 
 /** Concept 01: source, caption and devices share one screen; PublishPage owns effects. */
-export function PublishQuickSetup(p: PublishWizardProps & { blockingReason?: string; onAssignmentChange?: (ids: string[], assignments: Record<string, string>) => void }) {
+export function PublishQuickSetup(p: PublishWizardProps & { blockingReason?: string; deviceGuards?: PublishDeviceGuards; onPendingPublication?: (campaignId: string) => void; onAssignmentChange?: (ids: string[], assignments: Record<string, string>) => void }) {
   const [query, setQuery] = useState("");
   const [deviceQuery, setDeviceQuery] = useState("");
   const [activeId, setActiveId] = useState<string>();
@@ -30,9 +32,12 @@ export function PublishQuickSetup(p: PublishWizardProps & { blockingReason?: str
   const selected = bundles.filter(b => p.selectedIds.includes(b.id));
   const active = bundles.find(b => b.id === activeId) ?? selected[0] ?? bundles[0];
   const devices = useMemo(() => orderDevicesByNumber(p.devices, p.metas), [p.devices, p.metas]);
-  const ready = devices.filter(d => d.status === "ready" && p.eligible.includes(d.udid));
+  const selectable = devices.filter(d => d.status === "ready" && p.eligible.includes(d.udid));
+  const ready = selectable.filter(d => !deviceGuardBlock(p.deviceGuards, d.udid));
+  const pendingBlock = selected.map(bundle => p.assignments[bundle.id]).filter(Boolean)
+    .map(udid => deviceGuardBlock(p.deviceGuards, udid)).find(Boolean);
   const selection = publishSelectionStatus({ selectedIds: p.selectedIds, bundles, assignments: p.assignments,
-    captions: p.captions, eligible: p.eligible, ready: ready.map(d => d.udid), blockingReason: p.blockingReason });
+    captions: p.captions, eligible: p.eligible, ready: selectable.map(d => d.udid), blockingReason: pendingBlock ?? p.blockingReason });
   const mapped = selection.mapped;
   const locked = p.busy || p.scanning || p.preflightLoading;
   const complete = selection.ready;
@@ -72,25 +77,27 @@ export function PublishQuickSetup(p: PublishWizardProps & { blockingReason?: str
   const chooseFolder = async () => { try { const path = await pickDirectory(); if (path) p.onSource(path); } catch (e) { setError(describeError(e)); } };
   const deviceIndex = new Map(devices.map((d, i) => [d.udid, { device: d, index: i }]));
   const assignedByDevice = new Map(selected.map(b => [p.assignments[b.id], b]));
-  const readyIds = new Set(ready.map(d => d.udid));
+  const readyIds = new Set(selectable.map(d => d.udid));
   const label = (udid: string) => {
     const found = deviceIndex.get(udid);
     return found ? `Máy ${tileNumber(found.index + 1, p.metas.get(udid))} · ${tileName(found.device, p.metas.get(udid))}` : "Chưa ghép máy";
   };
   const clearDevice = (udid: string) => p.onAssign(Object.fromEntries(Object.entries(p.assignments).filter(([,id]) => id !== udid)));
+  const selectedBlockedDevice = selected.map(bundle => p.assignments[bundle.id]).find(udid => !!udid && !!deviceGuardBlock(p.deviceGuards, udid));
+  const selectedPending = selectedBlockedDevice ? deviceGuardPending(p.deviceGuards?.[selectedBlockedDevice]) : undefined;
   return <div className="publish-quick" hidden={p.active === false}>
     <div className="pq-setup-tools">
       <div className="pq-source"><label htmlFor="publish-source-folder">Thư mục bài đăng</label><div className="pq-source-controls"><input id="publish-source-folder" aria-label="Thư mục nguồn" value={p.sourceRoot} onChange={e => p.onSource(e.target.value)} disabled={p.busy} placeholder="Đường dẫn thư mục chứa bài đăng"/><button type="button" disabled={p.busy} onClick={() => void chooseFolder()}><FolderOpen size={16}/>Chọn thư mục</button><button type="button" disabled={locked || !p.sourceRoot} onClick={() => void p.onScan(p.sourceRoot)}>{p.scanning ? "Đang quét…" : "Quét"}</button></div></div>
       {p.settings}
     </div>
-    {p.blockingReason && <p className="pq-blocking-reason" role="status">{p.blockingReason}</p>}
+    {p.blockingReason && !pendingBlock && <p className="pq-blocking-reason" role="status">{p.blockingReason}</p>}
     {error && <div className="pq-error" role="alert">{error}<button type="button" aria-label="Đóng lỗi" onClick={() => setError("")}><X size={14}/></button></div>}
     <div className="pq-columns">
       <section className="pq-library pq-panel" aria-label="Nội dung đăng">
         <header><div><span className="automation-section-kicker">Nguồn đăng</span><h2>Nội dung</h2></div><span>{bundles.length} bài</span></header>
         <label className="pq-search"><Search size={15}/><input aria-label="Tìm bài đăng" placeholder="Tìm bài đăng" value={query} onChange={e => setQuery(e.target.value)}/></label>
         <div className="pq-tools"><button type="button" className="ghost" disabled={locked || !bundles.length} onClick={() => p.onSelect(bundles.map(b => b.id))}>Chọn tất cả bài</button><button type="button" className="ghost" disabled={locked} onClick={() => p.onSelect([])}>Bỏ chọn</button><small>{selected.length} đã chọn</small></div>
-        <div className="pq-posts">{visibleBundles.map(b => <article key={b.id} className={b.id === active?.id ? "is-active" : ""}>
+        <div className="pq-posts" tabIndex={0} aria-label="Danh sách bài đăng">{visibleBundles.map(b => <article key={b.id} className={b.id === active?.id ? "is-active" : ""}>
           <input type="checkbox" aria-label={`Chọn ${b.name}`} checked={p.selectedIds.includes(b.id)} disabled={locked} onChange={e => select(b.id,e.target.checked)}/>
           <button type="button" className="pq-post-pick" onClick={() => {setActiveId(b.id);setPhoto(0);}}><PublishMedia bundle={b}/><span><strong>{b.name}</strong><small>{b.mediaKind === "video" ? "Video MP4" : `${b.images.length} ảnh`} · {p.assignments[b.id] ? label(p.assignments[b.id]) : "Chưa ghép máy"}</small></span></button>
         </article>)}
@@ -105,7 +112,7 @@ export function PublishQuickSetup(p: PublishWizardProps & { blockingReason?: str
           <label className="pq-field"><span>Nội dung bài đăng</span><textarea aria-label="Nội dung bài đăng" rows={5} value={p.captions[active.id] ?? active.caption} disabled={locked} onChange={e => p.onCaption(active.id,e.target.value)}/></label>
           <small className="pq-char-count">{(p.captions[active.id] ?? active.caption).length} ký tự · lưu trong bản nháp</small>
           <div className="pq-sound"><Music2 size={20}/><div><strong>Nhạc thịnh hành</strong><small>Chọn và xác nhận nhạc trong TikTok khi đăng</small></div></div>
-          <label className="pq-field"><span>Máy nhận bài này</span><select aria-label="Máy nhận bài đang chỉnh" disabled={locked || !p.selectedIds.includes(active.id)} value={p.assignments[active.id] ?? ""} onChange={e => { if (e.target.value) p.onAssign(assignDevice(p.assignments,active.id,e.target.value)); else p.onAssign(Object.fromEntries(Object.entries(p.assignments).filter(([id]) => id !== active.id))); }}><option value="">Chọn máy</option>{ready.map(d => <option key={d.udid} value={d.udid}>{label(d.udid)}</option>)}</select></label>
+          <label className="pq-field"><span>Máy nhận bài này</span><select aria-label="Máy nhận bài đang chỉnh" disabled={locked || !p.selectedIds.includes(active.id)} value={p.assignments[active.id] ?? ""} onChange={e => { if (e.target.value) p.onAssign(assignDevice(p.assignments,active.id,e.target.value)); else p.onAssign(Object.fromEntries(Object.entries(p.assignments).filter(([id]) => id !== active.id))); }}><option value="">Chọn máy</option>{selectable.map(d => <option key={d.udid} value={d.udid}>{label(d.udid)}{deviceGuardBlock(p.deviceGuards, d.udid) ? " · Có bài đang chờ" : ""}</option>)}</select></label>
           <div className="pq-partners"><strong>Đối tác của bài</strong><p>{active.partners?.length ? active.partners.join(" · ") : "Không có thông tin đối tác trong file nguồn"}</p><small>Người đăng trên Sheet: bot</small></div>
           <div className="pq-options"><label><input type="checkbox" checked={p.sheet} disabled={locked} onChange={e => p.onSheet(e.target.checked)}/> Ghi kết quả lên Sheet</label><label><input type="checkbox" checked={p.cleanup} disabled={locked} onChange={e => p.onCleanup(e.target.checked)}/> Xóa bản chuyển sau khi đăng thành công</label></div>
         </div> : <div className="pq-empty"><Image size={34}/><strong>Nội dung và đối tác hiện tại đây</strong><p>Chọn một bài trong danh sách bên trái.</p></div>}
@@ -119,12 +126,18 @@ export function PublishQuickSetup(p: PublishWizardProps & { blockingReason?: str
         {!p.eligible.length && <p className="pq-hint">Chọn Toàn bộ máy hoặc một nhóm để ghép bài.</p>}
         <div className="pq-machine-grid machine-choice-grid">{devices.filter(d => `${label(d.udid)} ${p.metas.get(d.udid)?.handle ?? ""}`.toLocaleLowerCase().includes(deviceQuery.toLocaleLowerCase())).map(d => {
           const i=deviceIndex.get(d.udid)!.index, assigned=assignedByDevice.get(d.udid),checked=picked.includes(d.udid)||Boolean(assigned);
-          return <MachineChoice key={d.udid} number={tileNumber(i+1,p.metas.get(d.udid))} name={tileName(d,p.metas.get(d.udid))} status={d.status} reason={d.lastError} label={`Chọn ${label(d.udid)}`} checked={checked} disabled={locked || (!checked && !readyIds.has(d.udid))} onChange={value=>{setPicked(value?[...new Set([...picked,d.udid])]:picked.filter(id=>id!==d.udid));if(!value)clearDevice(d.udid);}} detail={assigned?<span title={assigned.name}>{assigned.name}</span>:undefined}/>;
+          const block=deviceGuardBlock(p.deviceGuards,d.udid),pending=deviceGuardPending(p.deviceGuards?.[d.udid]);
+          return <MachineChoice key={d.udid} number={tileNumber(i+1,p.metas.get(d.udid))} name={tileName(d,p.metas.get(d.udid))} status={d.status} reason={d.lastError} label={`Chọn ${label(d.udid)}`} checked={checked} disabled={locked || (!checked && !readyIds.has(d.udid))} onChange={value=>{setPicked(value?[...new Set([...picked,d.udid])]:picked.filter(id=>id!==d.udid));if(!value)clearDevice(d.udid);}} detail={<>
+            {assigned && <span title={assigned.name}>{assigned.name}</span>}
+            {(block || pending) && <div className="publish-device-pending" role="status"><strong>{block ?? "Bài cũ còn cần kiểm tra link"}</strong>
+              {pending && <><span>{pending.reason}</span>{p.onPendingPublication && <button type="button" disabled={locked} aria-label={`Xem bài đang chờ · ${label(d.udid)}`} onClick={()=>p.onPendingPublication?.(pending.campaignId)}>Xem bài đang chờ</button>}</>}
+            </div>}
+          </>}/>;
         })}</div>
         <footer><small>{ready.length} máy sẵn sàng trong phạm vi · {devices.length} tổng</small></footer>
       </section>
     </div>
-    <footer className="pq-footer"><div><strong>{selected.length} bài đã chọn</strong><span>{mapped}/{selected.length} bài có máy · mỗi máy một bài · Sheet {p.sheet ? "bật" : "tắt"}</span>{checkReason && <small id="publish-check-reason" role="status">{checkReason}</small>}</div><button type="button" className="primary" aria-describedby={checkReason ? "publish-check-reason" : undefined} disabled={locked || !complete || !captionsValid} onClick={()=>{setReportPage(0);setDialog("check");void p.onPreflight();}}>{p.preflightLoading?"Đang kiểm tra…":"Kiểm tra & đăng"}<ArrowRight size={16}/></button></footer>
+    <footer className="pq-footer"><div><strong>{selected.length} bài đã chọn</strong><span>{mapped}/{selected.length} bài có máy · mỗi máy một bài · Sheet {p.sheet ? "bật" : "tắt"}</span>{checkReason && <small id="publish-check-reason" role="status">{selectedBlockedDevice ? `${label(selectedBlockedDevice)}: ${checkReason}` : checkReason}</small>}{selectedPending && p.onPendingPublication && <button type="button" className="pq-pending-action" disabled={locked} onClick={()=>p.onPendingPublication?.(selectedPending.campaignId)}>Xem bài đang chờ</button>}</div><button type="button" className="primary" aria-describedby={checkReason ? "publish-check-reason" : undefined} disabled={locked || !complete || !captionsValid} onClick={()=>{setReportPage(0);setDialog("check");void p.onPreflight();}}>{p.preflightLoading?"Đang kiểm tra…":"Kiểm tra & đăng"}<ArrowRight size={16}/></button></footer>
     {dialog==="preview" && active && <PublishDialog title={`Xem trước · ${active.name}`} onClose={()=>setDialog(null)}><div className="pq-large-preview"><PublishMedia bundle={active} index={Math.min(photo,Math.max(0,active.images.length-1))} expanded/></div><div className="pq-photo-nav"><button type="button" aria-label="Ảnh trước" disabled={photo===0} onClick={()=>setPhoto(photo-1)}><ArrowLeft size={16}/></button><span>{photo+1} / {active.images.length}</span><button type="button" aria-label="Ảnh tiếp" disabled={photo+1>=active.images.length} onClick={()=>setPhoto(photo+1)}><ArrowRight size={16}/></button></div></PublishDialog>}
     {dialog==="check" && <PublishDialog title="Kiểm tra đợt đăng" wide onClose={()=>setDialog(null)} actions={<><button type="button" onClick={()=>setDialog(null)}>Quay lại</button><button type="button" className="primary" disabled={locked || !p.preflight?.canExecute || !complete} onClick={()=>void p.onExecute()}><Check size={16}/> Xác nhận đăng {selected.length} bài</button></>}>
       {p.preflightLoading?<p>Đang kiểm tra nội dung và máy thực hiện…</p>:p.preflightError?<p role="alert">{p.preflightError}</p>:p.preflight?<PublishPreflightResult report={p.preflight} machineName={label} bundleName={id => bundles.find(bundle => bundle.id === id)?.name ?? id} page={reportPage} onPage={setReportPage} onRetry={() => void p.onPreflight()} busy={locked}/>:<p>Chưa có kết quả kiểm tra.</p>}

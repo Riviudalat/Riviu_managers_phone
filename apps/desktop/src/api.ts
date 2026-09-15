@@ -1047,6 +1047,7 @@ export async function publishCreateCampaign(
   approvedInputDigest: string,
   sheetEnabled = true,
   deleteAfterPublish = true,
+  requestId?: string,
 ) {
   return invoke<PublishCampaignRecord>("publish_create_campaign", {
     sourceRoot,
@@ -1060,6 +1061,7 @@ export async function publishCreateCampaign(
     approvedInputDigest,
     sheetEnabled,
     deleteAfterPublish,
+    requestId: requestId ?? null,
   });
 }
 
@@ -1069,6 +1071,22 @@ export async function publishList(limit = 50) {
 
 export async function publishCancel(campaignId: string) {
   return invoke<void>("publish_cancel", { campaignId });
+}
+
+export interface OperationStopResult {
+  operationId: string;
+  state: "stopping" | "closed" | "needsAttention" | "failed";
+  devices: { udid: string; closed: boolean; message: string }[];
+}
+export function operationStop(operationId:string) { return invoke<OperationStopResult>("operation_stop",{operationId}); }
+export function operationStopStatus(operationId:string) { return invoke<OperationStopResult|null>("operation_stop_status",{operationId}); }
+
+export function publishDeviceGuards(udids: string[]) {
+  return invoke<import("./types").PublishDeviceGuards>("publish_device_guards", { udids });
+}
+
+export async function publishRetryAssignment(assignmentId: string, confirmed: boolean) {
+  return invoke<void>("publish_retry_assignment", { assignmentId, confirmed });
 }
 
 /**
@@ -1599,3 +1617,36 @@ export function interactionParseConversation(raw: string): Promise<import("./typ
 export function interactionDraftConversation(context: string, direction: string, roles: string[], count: number): Promise<import("./types").ConversationStep[]> {
   return invoke("interaction_draft_conversation", { context, direction, roles, count });
 }
+
+export function publishSheetResetReporting(resetId: string) {
+  return invoke<{ reportingEpoch: string; backupSpreadsheetId: string; sheetGid: number; complete: boolean }>("publish_sheet_reset_reporting", { resetId });
+}
+
+export function googleSheetsStatus() {
+  return invoke<import("./types").GoogleSheetsStatus>("google_sheets_status");
+}
+export function googleSheetsConfigure(config: import("./types").GoogleSheetsConfiguration) {
+  return invoke<import("./types").GoogleSheetsStatus>("google_sheets_configure", { ...config });
+}
+export function googleSheetsLogin() {
+  return invoke<import("./types").GoogleSheetsStatus>("google_sheets_login");
+}
+export function googleSheetsCancel() {
+  return invoke<import("./types").GoogleSheetsStatus>("google_sheets_cancel");
+}
+export function googleSheetsPickFile() {
+  return invoke<import("./types").GoogleSheetsStatus>("google_sheets_pick_file");
+}
+export function googleSheetsListTabs(spreadsheetId: string) {
+  return invoke<import("./types").GoogleSheetTab[]>("google_sheets_list_tabs", { spreadsheetId });
+}
+export function googleSheetsConnect(spreadsheetId: string, sheetId: number, confirmed: boolean) {
+  return invoke<PublishSheetCheckResult>("google_sheets_connect", { spreadsheetId, sheetId, confirmed });
+}
+export function googleSheetsDisconnect() {
+  return invoke<import("./types").GoogleSheetsStatus>("google_sheets_disconnect");
+}
+
+export interface PublishLimits { transfer: number; compose: number; verify: number; deviceTotal: number }
+export function publishGetLimits() { return invoke<PublishLimits>("publish_get_limits"); }
+export function publishSetLimits(limits: PublishLimits) { return invoke<void>("publish_set_limits", { limits }); }

@@ -5,7 +5,6 @@ import { useImperativeHandle } from "react";
 import { NurturePopup } from "./NurturePopup";
 import { validateNurtureSettings } from "../nurtureValidation";
 import { requestWorkspaceLeave, hasWorkspaceDrafts } from "../workspaceDraft";
-import { requestConfirm } from "../confirmStore";
 import type { DeviceInfo, DeviceMeta, NurtureSessionStatus, NurtureSettings } from "../types";
 
 /**
@@ -256,71 +255,31 @@ const slider = (name: string) => screen.getByLabelText(`${name} thanh kéo phầ
 const box = (name: string) => screen.getByLabelText(`${name} phần trăm`);
 
 describe("NurturePopup", () => {
-  it("opens advanced settings and focuses the invalid field from the repair action", async () => {
+  it("shows direct tabs and keyword settings without starting a session", async () => {
     const api = await import("../api");
-    vi.mocked(api.nurtureGetSettings).mockResolvedValueOnce({ ...settings, watchMin: 0 });
     render(<NurturePopup devices={devices} selected={[]} metas={new Map()} surface="page" />);
-    const summary = await screen.findByText("Tuỳ chỉnh nâng cao");
-    expect(summary.closest("details")).not.toHaveAttribute("open");
-    fireEvent.click(screen.getByRole("button", { name: "Sửa thiết lập" }));
-    await waitFor(() => expect(summary.closest("details")).toHaveAttribute("open"));
-    expect(document.activeElement).toHaveAttribute("data-nurture-field", "watchMin");
+    await screen.findByRole("tab", {name: "Phiên nuôi"});
+    expect(screen.queryByText("Tuỳ chỉnh nâng cao")).toBeNull();
+    expect(screen.queryByRole("button", {name: /Cân bằng/})).toBeNull();
+    expect(screen.queryByText(/Các tỷ lệ độc lập/)).toBeNull();
+    expect(screen.queryByText(/Kết thúc: đóng TikTok và kiểm tra đã tắt/)).toBeNull();
+    fireEvent.change(screen.getByLabelText("Nguồn video"), {target:{value:"search"}});
+    fireEvent.change(screen.getByLabelText("Từ khóa tìm kiếm"), {target:{value:"đà lạt"}});
+    fireEvent.click(screen.getByRole("tab",{name:"AI"}));
+    fireEvent.click(screen.getByRole("tab",{name:"Phiên nuôi"}));
+    expect(screen.getByLabelText("Từ khóa tìm kiếm")).toHaveValue("đà lạt");
     expect(api.nurtureStart).not.toHaveBeenCalled();
   });
 
-  it("reviews the captured settings and leaves cancelled sessions undispatched", async () => {
-    const api = await import("../api");
-    vi.mocked(requestConfirm).mockResolvedValueOnce(false);
-    render(<NurturePopup devices={devices} selected={[]} metas={new Map()} surface="page" />);
-    fireEvent.click(await screen.findByRole("button", { name: "Kiểm tra & bắt đầu" }));
-    await waitFor(() => expect(requestConfirm).toHaveBeenCalledWith(expect.objectContaining({
-      title: "Kiểm tra phiên Nuôi TikTok", confirmLabel: "Bắt đầu 1 máy", message: expect.stringContaining("120 bài / máy"),
-    })));
-    expect(api.nurtureSaveSettings).not.toHaveBeenCalled();
-    expect(api.nurtureStart).not.toHaveBeenCalled();
-  });
-
-  it("sends the reviewed preset duration to manual Start and keeps public action switches coupled to their rates", async () => {
-    const api = await import("../api");
-    saved.saveSettings.mockImplementationOnce(async value => value);
-    render(<NurturePopup devices={devices} selected={[]} metas={new Map()} surface="page" />);
-    fireEvent.click(await screen.findByRole("button", { name: /Cân bằng/ }));
-    fireEvent.click(screen.getByRole("button", { name: "Kiểm tra & bắt đầu" }));
-    await waitFor(() => expect(api.nurtureStart).toHaveBeenCalledWith(["mock-1"], 20));
-    expect(api.nurtureSaveSettings).toHaveBeenCalledWith(expect.objectContaining({
-      scheduleDurationMinutes: 20, numVideos: 30, numRounds: 1,
-      likeEnabled: true, likeProb: 20, saveEnabled: true, saveProb: 10,
-      commentEnabled: false, followEnabled: false,
-    }));
-    expect(requestConfirm).toHaveBeenCalledWith(expect.objectContaining({ message: expect.stringContaining("Tối đa 20 phút") }));
-  });
-
-  it("applies compact presets without dispatch and preserves AI, schedule and disabled rates", async () => {
-    const api = await import("../api");
-    vi.mocked(api.nurtureGetSettings).mockResolvedValueOnce({ ...settings, commentProb: 17, commentEnabled: false, followProb: 23 });
-    render(<NurturePopup devices={devices} selected={[]} metas={new Map()} surface="page" />);
-    await screen.findByRole("button", { name: /Cân bằng/ });
-    fireEvent.click(screen.getByText("Tuỳ chỉnh nâng cao"));
-    expect(screen.getByRole("tab", { name: "AI" })).toBeVisible();
-    fireEvent.click(screen.getByRole("button", { name: /Cân bằng/ }));
-    expect(screen.getByRole("spinbutton", { name: /Thời lượng tối đa/ })).toHaveValue(20);
-    expect(screen.getByRole("spinbutton", { name: /Tổng số video muốn lướt/ })).toHaveValue(30);
-    expect(screen.getByRole("checkbox", { name: "Tim" })).toBeChecked();
-    expect(screen.getByRole("checkbox", { name: "Bình luận" })).not.toBeChecked();
-    expect(screen.getByRole("spinbutton", { name: "Phần trăm Bình luận" })).toHaveValue(17);
-    fireEvent.click(screen.getByRole("button", { name: /Nhẹ nhàng/ }));
-    expect(screen.getByRole("spinbutton", { name: /Thời lượng tối đa/ })).toHaveValue(15);
-    expect(screen.getByRole("checkbox", { name: "Tim" })).not.toBeChecked();
-    expect(screen.getByRole("spinbutton", { name: "Phần trăm Tim" })).toHaveValue(20);
-    fireEvent.change(screen.getByRole("spinbutton", { name: "Phần trăm Tim" }), { target: { value: "71" } });
-    fireEvent.click(screen.getByRole("checkbox", { name: "Tim" }));
-    expect(screen.getByRole("spinbutton", { name: "Phần trăm Tim" })).toHaveValue(71);
-    await act(async () => { await requestWorkspaceLeave(["nurture"]); });
-    const draft = JSON.parse(localStorage.getItem("riviu.form-draft.v1.nurture")!).value.settings;
-    expect(draft).toMatchObject({ likeProb: 71, commentProb: 17, followProb: 23, model: settings.model, scheduleEveryMinutes: settings.scheduleEveryMinutes });
-    expect(draft).not.toHaveProperty("apiKey");
-    expect(api.nurtureStart).not.toHaveBeenCalled();
-    expect(api.nurtureSaveSettings).not.toHaveBeenCalled();
+  it("blocks an empty keyword and saves the reviewed query with the settings",async()=>{
+    saved.saveSettings.mockImplementation(async value=>value);
+    render(<NurturePopup devices={devices} selected={[]} metas={new Map()} surface="page"/>);
+    await screen.findByLabelText("Nguồn video");
+    fireEvent.change(screen.getByLabelText("Nguồn video"),{target:{value:"search"}});
+    expect(screen.getByRole("button",{name:"Kiểm tra & bắt đầu"})).toBeDisabled();
+    fireEvent.change(screen.getByLabelText("Từ khóa tìm kiếm"),{target:{value:"đà lạt"}});
+    fireEvent.click(screen.getByRole("button",{name:"Lưu thiết lập"}));
+    await waitFor(()=>expect(saved.saveSettings).toHaveBeenCalledWith(expect.objectContaining({feedSource:"search",searchKeyword:"đà lạt"})));
   });
 
   it("shows the total video count and keeps it when moving between configuration and scheduling", async () => {
@@ -515,8 +474,7 @@ describe("NurturePopup", () => {
 
   it("restores autosaved settings without applying them to a live session or storing credentials", async () => {
     const view = render(<NurturePopup devices={devices} selected={[]} metas={new Map()} surface="page" />);
-    fireEvent.click(await screen.findByText("Tuỳ chỉnh nâng cao"));
-    fireEvent.click(await screen.findByRole("tab", { name: "Hành vi" }));
+    fireEvent.click(await screen.findByRole("tab", { name: "Phiên nuôi" }));
     await screen.findByLabelText("Tổng số video muốn lướt", { selector: "input" });
     fireEvent.change(screen.getByLabelText("Tổng số video muốn lướt", { selector: "input" }), { target: { value: "27" } });
     await act(async () => { expect(await requestWorkspaceLeave(["nurture"])).toBe(true); });
@@ -526,8 +484,7 @@ describe("NurturePopup", () => {
     expect(stored.value.settings).not.toHaveProperty("hasApiKey");
     view.unmount();
     render(<NurturePopup devices={devices} selected={[]} metas={new Map()} surface="page" />);
-    fireEvent.click(await screen.findByText("Tuỳ chỉnh nâng cao"));
-    fireEvent.click(await screen.findByRole("tab", { name: "Hành vi" }));
+    fireEvent.click(await screen.findByRole("tab", { name: "Phiên nuôi" }));
     await waitFor(() => expect(screen.getByLabelText("Tổng số video muốn lướt", { selector: "input" })).toHaveValue(27));
     expect(saved.saveSettings).not.toHaveBeenCalled();
   });
@@ -535,7 +492,6 @@ describe("NurturePopup", () => {
   it("saves credentials without applying an obsolete profile", async () => {
     saved.saveSettings.mockImplementationOnce(async value => value);
     render(<NurturePopup devices={devices} selected={[]} targetUdids={["mock-1"]} metas={new Map()} surface="page" />);
-    fireEvent.click(await screen.findByText("Tuỳ chỉnh nâng cao"));
     fireEvent.click(await screen.findByRole("tab", {name:"AI"}));
     fireEvent.change(document.querySelector<HTMLInputElement>('[data-nurture-field="apiKey"]')!, {target:{value:"new-fixture-key"}});
     fireEvent.click(screen.getByRole("button", {name:"Lưu thiết lập"}));
@@ -587,14 +543,13 @@ describe("NurturePopup", () => {
     );
 
     fireEvent.click(screen.getByRole("tab", { name: "Thiết lập" }));
-    fireEvent.click(screen.getByText("Tuỳ chỉnh nâng cao"));
     const settingsTabs = within(workspace).getByRole("tablist", {
       name: "Nhóm thiết lập Nuôi TikTok",
     });
     expect(within(settingsTabs).getAllByRole("tab").map((tab) => tab.textContent)).toEqual([
+      "Phiên nuôi",
       "Hành vi",
       "AI",
-      "Bình luận",
     ]);
     expect(screen.queryByText("feed đã lên")).toBeNull();
 
@@ -611,7 +566,7 @@ describe("NurturePopup", () => {
 
     fireEvent.click(within(modes).getByRole("tab", { name: "Thiết lập" }));
     expect(within(workspace).getByRole("tab", { name: "Hành vi" })).toBeVisible();
-    expect(within(workspace).getByRole("tab", { name: "Hành vi" })).toHaveAttribute(
+    expect(within(workspace).getByRole("tab", { name: "Phiên nuôi" })).toHaveAttribute(
       "aria-selected",
       "true",
     );
@@ -665,17 +620,16 @@ describe("NurturePopup", () => {
     expect(setup).toHaveFocus();
 
     fireEvent.click(screen.getByRole("tab", { name: "Thiết lập" }));
-    fireEvent.click(screen.getByText("Tuỳ chỉnh nâng cao"));
     const settingsTabs = within(workspace).getByRole("tablist", {
       name: "Nhóm thiết lập Nuôi TikTok",
     });
     const behaviour = within(settingsTabs).getByRole("tab", { name: "Hành vi" });
+    const session = within(settingsTabs).getByRole("tab", { name: "Phiên nuôi" });
     const ai = within(settingsTabs).getByRole("tab", { name: "AI" });
-    const comments = within(settingsTabs).getByRole("tab", { name: "Bình luận" });
-    expect(behaviour).toHaveAttribute("tabindex", "0");
+    expect(session).toHaveAttribute("tabindex", "0");
+    expect(behaviour).toHaveAttribute("tabindex", "-1");
     expect(ai).toHaveAttribute("tabindex", "-1");
-    expect(comments).toHaveAttribute("tabindex", "-1");
-    for (const settingsTab of [behaviour, ai, comments]) {
+    for (const settingsTab of [session, behaviour, ai]) {
       expect(document.getElementById(settingsTab.getAttribute("aria-controls")!)).toHaveAttribute(
         "aria-labelledby",
         settingsTab.id,
@@ -687,13 +641,13 @@ describe("NurturePopup", () => {
     expect(ai).toHaveFocus();
     expect(ai).toHaveAttribute("aria-selected", "true");
     fireEvent.keyDown(ai, { key: "End" });
-    expect(comments).toHaveFocus();
-    fireEvent.keyDown(comments, { key: "ArrowRight" });
-    expect(behaviour).toHaveFocus();
-    fireEvent.keyDown(behaviour, { key: "ArrowLeft" });
-    expect(comments).toHaveFocus();
-    fireEvent.keyDown(comments, { key: "Home" });
-    expect(behaviour).toHaveFocus();
+    expect(ai).toHaveFocus();
+    fireEvent.keyDown(ai, { key: "ArrowRight" });
+    expect(session).toHaveFocus();
+    fireEvent.keyDown(session, { key: "ArrowLeft" });
+    expect(ai).toHaveFocus();
+    fireEvent.keyDown(ai, { key: "Home" });
+    expect(session).toHaveFocus();
   });
 
   it("opens page monitoring after a nurture run starts", async () => {

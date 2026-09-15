@@ -73,7 +73,7 @@ TEMURIN_SOURCE = (
 ANDROID_PACKAGE_TOOLS_TREE_SHA256 = (
     "de003f9f8b872ba8a9e2bb57d0539e04c0c7116e409619ded42941aaf85a3762"
 )
-EXPECTED_DATABASE_VERSION = 40
+EXPECTED_DATABASE_VERSION = 42
 BRANDING_LOGO = REPOSITORY_ROOT / "logo.jpg"
 TAURI_CONFIG = REPOSITORY_ROOT / "apps" / "desktop" / "src-tauri" / "tauri.conf.json"
 # The release build runs with this overlay, so *this* is the version the shipped binary
@@ -1683,6 +1683,7 @@ def validate_deployment_report_binding(
 
 
 def verify_clean_room_installed_tree(install_root: Path) -> None:
+    verify_no_operational_payload(install_root)
     try:
         from scripts import check_xiaowei_provenance as provenance
     except ImportError:
@@ -1694,6 +1695,78 @@ def verify_clean_room_installed_tree(install_root: Path) -> None:
             "installed tree violates the clean-room provenance gate: "
             + json.dumps(findings, ensure_ascii=False)
         )
+
+
+def verify_no_operational_payload(install_root: Path) -> None:
+    """Inspect extracted payloads, including extras outside the resource map.
+
+    Runtime SQLite libraries, source, manifests, documentation, logos and CSV
+    reference tables remain valid. Databases, publication inputs/evidence and
+    configured Sheet connections and OAuth credentials belong only in the operator's
+    data directory. Parse JSON data rather than matching SDK source/schema text.
+    Report paths and categories, never credential values or database contents.
+    """
+    blocked_suffixes = {".db", ".sqlite", ".sqlite3", ".xls", ".xlsx", ".ods",
+                        ".mp4", ".mov", ".webm", ".avi", ".mkv"}
+    operational_prefixes = ("publication-acceptance-", "publication-followthrough-")
+    operational_folders = {"publish-media", "test-media", "acceptance-media"}
+    for path in install_root.rglob("*"):
+        if not path.is_file():
+            continue
+        relative = path.relative_to(install_root)
+        parts = tuple(part.casefold() for part in relative.parts)
+        reason = None
+        name = parts[-1]
+        database_name = re.sub(r"-(?:wal|shm|journal)$", "", name)
+        if Path(database_name).suffix in blocked_suffixes:
+            reason = "database, workbook or publication media file"
+        elif any(part in operational_folders or part.startswith(operational_prefixes)
+                 for part in parts[:-1]):
+            reason = "publication acceptance inputs or evidence"
+        elif any(parts[index:index + 2] == ("publish-sheet", "connection.json")
+                 for index in range(len(parts) - 1)):
+            reason = "bundled Sheet connection"
+        prefix = b""
+        if reason is None:
+            with path.open("rb") as stream:
+                prefix = stream.read(4096)
+                if prefix[:16] == b"SQLite format 3\x00":
+                    reason = "SQLite database with a renamed extension"
+        json_content = prefix.lstrip(b"\xef\xbb\xbf \t\r\n")[:1] in (b"{", b"[")
+        if (reason is None and (path.suffix.casefold() == ".json" or json_content)
+                and path.stat().st_size <= 2 * 1024 * 1024):
+            try:
+                value = json.loads(path.read_text(encoding="utf-8-sig"))
+            except (ValueError, UnicodeError):
+                value = None
+            pending = [value]
+            while pending and reason is None:
+                entry = pending.pop()
+                if isinstance(entry, dict):
+                    fields = {str(key).casefold(): value for key, value in entry.items()}
+                    webhook, token = fields.get("webhookurl"), fields.get("token")
+                    sheet_url = fields.get("sheeturl")
+                    if ((isinstance(webhook, str) and webhook.strip()
+                         and isinstance(token, str) and token.strip())
+                        or (isinstance(sheet_url, str)
+                            and re.match(r"https://docs\.google\.com/spreadsheets/d/[^/]+", sheet_url))):
+                        reason = "configured Sheet destination or credential"
+                    # Schemas have object values for these fields; source files
+                    # are not JSON. Only configured string values are credentials.
+                    oauth_fields = {key.replace("_", ""): value for key, value in fields.items()}
+                    configured = {
+                        key for key, value in oauth_fields.items()
+                        if isinstance(value, str) and value.strip()
+                    }
+                    if (configured & {"clientsecret", "refreshtoken", "accesstoken"}
+                            or ("clientid" in configured
+                                and configured & {"apikey", "pickerapikey"})):
+                        reason = "Google OAuth credential or token"
+                    pending.extend(entry.values())
+                elif isinstance(entry, list):
+                    pending.extend(entry)
+        if reason:
+            raise ArtifactError(f"installed payload contains operational data: {relative.as_posix()} ({reason})")
 
 
 def run_installed_deployment_check(
@@ -2072,6 +2145,7 @@ def verify_macos_package(
                 f"mounted DMG must contain exactly one app bundle, found {len(app_bundles)}"
             )
         app = app_bundles[0]
+        verify_no_operational_payload(app)
         resources_root = app / "Contents" / "Resources"
         sidecars_root = resources_root / "sidecars"
         evidence = verify_packaged_resources(sidecars_root, runtime_dir, runtime)

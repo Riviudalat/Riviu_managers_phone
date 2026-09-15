@@ -498,7 +498,7 @@ pub async fn post_comment(
 
 /// The steps that need an open drawer. Split out so [`post_comment`] can close it on every
 /// exit without repeating the call at each early return, and without a `?` bypassing it.
-async fn post_into_drawer<P: TapPlanner>(
+pub(crate) async fn post_into_drawer<P: TapPlanner>(
     drawer: &mut CommentDrawer<'_, P>,
     text: &str,
     stop: &AtomicBool,

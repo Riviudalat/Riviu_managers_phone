@@ -180,17 +180,26 @@ pub(super) async fn verify_sheet_delivery_choice(
         let url = db
             .get_setting(riviu_core::publish_sheet::SHEET_URL_SETTING)?
             .unwrap_or_default();
-        let result = riviu_core::publish_sheet::check_sheet(&url, &config).await?;
+        let result = crate::google_sheet_commands::check_current(db,&url).await?;
         anyhow::ensure!(result.connection_verified, "{}", result.message);
         anyhow::ensure!(
-            config.internal_reporting == (result.layout.as_deref() == Some("internal")),
+            result.reporting_ready,
+            "Sheet chưa sẵn sàng nhận bài mới. Hoàn tất lần dọn bảng đang chờ bằng cùng resetId; nếu chưa hỗ trợ, cập nhật Apps Script rồi kiểm tra lại kết nối."
+        );
+        anyhow::ensure!(
+            db.sheet_uses_google_direct()? || config.internal_reporting == (result.layout.as_deref() == Some("internal")),
             "Chế độ báo cáo không khớp bố cục Sheet; kiểm tra lại kết nối trong Thiết lập"
         );
+        anyhow::ensure!(
+            result.reporting_epoch.is_some(),
+            "Cập nhật Apps Script để hỗ trợ reportingEpoch trước đợt đăng mới"
+        );
         Ok::<_, anyhow::Error>(riviu_core::publish_sheet::SheetDeliveryTarget {
+            reporting_epoch: result.reporting_epoch,
             version: 2,
             spreadsheet_id: result.spreadsheet_id,
             sheet_gid: result.sheet_gid,
-            internal_reporting: config.internal_reporting,
+            internal_reporting: result.layout.as_deref()==Some("internal"),
         })
     }
     .await;
@@ -563,6 +572,7 @@ mod sheet_choice_tests {
         // No endpoint is configured. The shared result must be consumed as given,
         // rather than performing another network/database connection check per slot.
         let target = riviu_core::publish_sheet::SheetDeliveryTarget {
+            reporting_epoch: None,
             version: 2,
             spreadsheet_id: "fixture-book".into(),
             sheet_gid: 0,

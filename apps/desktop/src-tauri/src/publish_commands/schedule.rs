@@ -3,6 +3,27 @@ use super::*;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
+#[tauri::command]
+pub fn publish_get_limits(
+    state: State<'_, AppState>,
+) -> Result<riviu_core::db::PublishLimits, CommandError> {
+    state.db.publish_limits().map_err(preflight::err)
+}
+
+#[tauri::command]
+pub fn publish_set_limits(
+    state: State<'_, AppState>,
+    limits: riviu_core::db::PublishLimits,
+) -> Result<(), CommandError> {
+    let _admission = state.ensure_accepting_work()?;
+    limits.validate().map_err(preflight::err)?;
+    let raw = serde_json::to_string(&limits).map_err(preflight::err)?;
+    state
+        .db
+        .set_setting("publish.dispatch.limits", &raw)
+        .map_err(preflight::err)
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct PublishScheduleSlot {
@@ -24,6 +45,7 @@ pub struct PublishScheduleRequest {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PublishScheduleReport {
+    pub warnings: Vec<String>,
     pub input_digest: String,
     pub can_execute: bool,
     pub slots: Vec<riviu_core::PublishPreflightReport>,
@@ -59,6 +81,42 @@ fn slot_id(request: &PublishScheduleRequest, index: usize) -> String {
 }
 fn request_digest(request: &PublishScheduleRequest) -> anyhow::Result<String> {
     Ok(execution::frame_sha256(&serde_json::to_vec(request)?))
+}
+
+fn schedule_capacity_warnings(
+    request: &PublishScheduleRequest,
+    existing: &[(String, String, usize)],
+    limits: riviu_core::db::PublishLimits,
+) -> anyhow::Result<Vec<String>> {
+    // The UI sends minute precision, while persisted schedules include seconds.
+    // Compare instants so the same start time cannot evade the host capacity warning.
+    let parse = |raw: &str| {
+        NaiveDateTime::parse_from_str(raw.trim(), "%Y-%m-%dT%H:%M")
+            .or_else(|_| NaiveDateTime::parse_from_str(raw.trim(), "%Y-%m-%dT%H:%M:%S"))
+    };
+    let mut load = std::collections::BTreeMap::new();
+    for slot in &request.slots {
+        *load.entry(parse(&slot.run_at)?).or_insert(0usize) += 1;
+    }
+    let own_prefix = format!("schedule-{}-", request.request_id);
+    for (id, at, count) in existing {
+        if id.starts_with(&own_prefix) {
+            continue;
+        }
+        if let Some(load) = load.get_mut(&parse(at)?) {
+            *load += count;
+        }
+    }
+    Ok(load
+        .iter()
+        .filter_map(|(at, count)| {
+            crate::publish_scheduler::capacity_warning(
+                &at.format("%Y-%m-%dT%H:%M:%S").to_string(),
+                *count,
+                limits,
+            )
+        })
+        .collect())
 }
 
 async fn prepare_schedule(
@@ -127,11 +185,41 @@ async fn prepare_schedule(
         .iter()
         .map(|p| p.report.clone())
         .collect::<Vec<_>>();
+    let limits = state.db.publish_limits()?;
+    let mut existing = Vec::new();
+    let request_times = request
+        .slots
+        .iter()
+        .map(|slot| execution::parse_run_at(&slot.run_at).map_err(anyhow::Error::msg))
+        .collect::<anyhow::Result<HashSet<_>>>()?;
+    for (id, at) in state.db.scheduled_publish_campaigns()? {
+        if id.starts_with(&format!("schedule-{}-", request.request_id)) {
+            continue;
+        }
+        if let Some(at) = at {
+            let normalized = NaiveDateTime::parse_from_str(at.trim(), "%Y-%m-%dT%H:%M:%S")
+                .or_else(|_| NaiveDateTime::parse_from_str(at.trim(), "%Y-%m-%dT%H:%M"))?;
+            if !request_times.contains(&normalized) {
+                continue;
+            }
+            existing.push((
+                id.clone(),
+                at,
+                state
+                    .db
+                    .get_publish_campaign(&id)?
+                    .map_or(0, |d| d.assignments.len()),
+            ));
+        }
+    }
+    let warnings = schedule_capacity_warnings(request, &existing, limits)?;
+    // A host limit or same-time load change requires reviewing the new warning.
     let digest = execution::frame_sha256(&serde_json::to_vec(
-        &serde_json::json!({"request":request,"digests":slots.iter().map(|r|&r.input_digest).collect::<Vec<_>>()}),
+        &serde_json::json!({"request":request,"digests":slots.iter().map(|r|&r.input_digest).collect::<Vec<_>>(),"limits":limits,"warnings":warnings}),
     )?);
     Ok((
         PublishScheduleReport {
+            warnings,
             input_digest: digest,
             can_execute: slots.iter().all(|r| r.can_execute),
             slots,
@@ -301,6 +389,52 @@ pub fn publish_schedule_reschedule(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn schedule_capacity_counts_persisted_seconds_with_new_minute_precision() {
+        let request = PublishScheduleRequest {
+            request_id: Uuid::new_v4().to_string(),
+            source_root: "fixture".into(),
+            slots: vec![PublishScheduleSlot {
+                bundle_id: "new-post".into(),
+                udid: "new-device".into(),
+                run_at: "2099-09-10T20:00".into(),
+            }],
+            caption_overrides: Default::default(),
+            sound_policy: Default::default(),
+            sheet_enabled: false,
+            delete_after_publish: false,
+        };
+        let existing = vec![
+            ("older-batch".into(), "2099-09-10T20:00:00".into(), 4),
+            ("different-time".into(), "2099-09-10T20:01:00".into(), 99),
+            (slot_id(&request, 0), "2099-09-10T20:00:00".into(), 1),
+        ];
+        let warnings = schedule_capacity_warnings(
+            &request,
+            &existing,
+            riviu_core::db::PublishLimits::default(),
+        )
+        .unwrap();
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("5 bài cùng giờ"), "{warnings:?}");
+        assert!(warnings[0].contains("30 giây"));
+        let mut mixed = request;
+        mixed.slots.push(PublishScheduleSlot {
+            bundle_id: "second-post".into(),
+            udid: "second-device".into(),
+            run_at: " 2099-09-10T20:00:00 ".into(),
+        });
+        let limits = riviu_core::db::PublishLimits {
+            transfer: 8,
+            device_total: 1,
+            ..Default::default()
+        };
+        let warnings = schedule_capacity_warnings(&mixed, &[], limits).unwrap();
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("2 bài cùng giờ"));
+        assert!(warnings[0].contains("tối đa 1 lượt"));
+    }
+
     #[test]
     fn schedule_requires_distinct_posts_and_distinct_times_per_phone() {
         let at = Local::now().naive_local() + chrono::Duration::days(1);

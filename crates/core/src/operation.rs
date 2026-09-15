@@ -493,15 +493,22 @@ fn nurture_item_state(status: &NurtureSessionStatus) -> OperationRunState {
         return OperationRunState::Running;
     }
     match status.outcome {
-        Some(Outcome::Done) if status.cleanup_state == NurtureCleanupState::ProcessAbsent => {
+        Some(Outcome::Done)
+            if matches!(
+                status.cleanup_state,
+                NurtureCleanupState::ProcessAbsent | NurtureCleanupState::Deferred
+            ) =>
+        {
             OperationRunState::Succeeded
         }
         Some(Outcome::Done | Outcome::Partial) => OperationRunState::Partial,
         Some(Outcome::Failed) => OperationRunState::Failed,
         Some(Outcome::Stopped)
-            if status.cleanup_state == NurtureCleanupState::ProcessAbsent
-                || (status.cleanup_state == NurtureCleanupState::Pending
-                    && status.started_at.is_none()) =>
+            if matches!(
+                status.cleanup_state,
+                NurtureCleanupState::ProcessAbsent | NurtureCleanupState::Deferred
+            ) || (status.cleanup_state == NurtureCleanupState::Pending
+                && status.started_at.is_none()) =>
         {
             OperationRunState::Cancelled
         }
@@ -1058,6 +1065,35 @@ mod tests {
     }
 
     #[test]
+    fn completed_nurture_with_deferred_close_keeps_task_success_without_absence_proof() {
+        for (outcome, expected) in [
+            (Outcome::Done, OperationRunState::Succeeded),
+            (Outcome::Stopped, OperationRunState::Cancelled),
+            (Outcome::Partial, OperationRunState::Partial),
+            (Outcome::Failed, OperationRunState::Failed),
+        ] {
+            let mut status = NurtureSessionStatus::new("phone-a");
+            status.started_at = Some(chrono::Utc::now());
+            status.cleanup_state = NurtureCleanupState::Deferred;
+            status.last_message = "chờ đóng TikTok khi máy hết công việc".into();
+            status.finish(outcome);
+            let detail = project_nurture("run-a", &[status.clone()]);
+            assert_eq!(detail.summary.state, expected);
+            assert_eq!(detail.items[0].state, expected);
+            assert!(detail.items[0].evidence.is_none());
+            assert!(detail.items[0]
+                .detail
+                .as_deref()
+                .unwrap()
+                .contains("chờ đóng TikTok"));
+            assert_eq!(
+                serde_json::to_value(status).unwrap()["cleanupState"],
+                "deferred"
+            );
+        }
+    }
+
+    #[test]
     fn stopped_nurture_with_failed_cleanup_requires_attention() {
         let mut status = NurtureSessionStatus::new("phone-a");
         status.started_at = Some(chrono::Utc::now());
@@ -1179,6 +1215,9 @@ mod tests {
             },
             bundles: Vec::new(),
             assignments: vec![crate::PublishAssignmentRecord {
+                publication_id: String::new(),
+                attempt_id: None,
+                dispatch: None,
                 sheet_delivery: None,
                 id: "assignment-a".into(),
                 campaign_id: campaign_id.clone(),
@@ -1297,6 +1336,9 @@ mod tests {
             },
             bundles: Vec::new(),
             assignments: vec![crate::PublishAssignmentRecord {
+                publication_id: String::new(),
+                attempt_id: None,
+                dispatch: None,
                 sheet_delivery: None,
                 id: "assignment-a".into(),
                 campaign_id: campaign_id.clone(),

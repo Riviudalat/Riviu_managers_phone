@@ -1,5 +1,7 @@
 import {
   deviceGetClipboard,
+  interactionReadAccount,
+  saveDeviceHandle,
   deviceKey,
   deviceSetClipboard,
   deviceShell,
@@ -30,7 +32,7 @@ import {
 import { requestConfirm, requestPrompt } from "./confirmStore";
 import { pushToast, toastError } from "./toastStore";
 import type { DeviceMenuNode } from "./deviceMenu";
-import { parseDeviceNumber } from "./deviceNaming";
+import { parseDeviceNumber, tileName } from "./deviceNaming";
 import { parseCurrentInputMethod, parseInputMethods } from "./imeList";
 import {
   IconApp,
@@ -53,6 +55,44 @@ import {
 import type { DeviceInfo, DeviceMeta, HardwareKey } from "./types";
 import { pickDirectory, pickFile } from "./pickFile";
 
+const accountReads = new Set<string>();
+let accountMetaReadRevision = 0;
+
+/** Reserve the whole selection before reading so a second click cannot repeat queued phones. */
+export async function readAndAssignTikTokAccounts(targets: DeviceInfo[], deps: DeviceActionDeps) {
+  const unique = [...new Map(targets.map(device => [device.udid, device])).values()];
+  const pending = unique.filter(device => !accountReads.has(device.udid));
+  if (pending.length < unique.length) pushToast("info", "Máy đang đọc nick sẽ giữ lượt hiện có");
+  pending.forEach(device => accountReads.add(device.udid));
+  let savedCount = 0;
+  try {
+    for (const target of pending) {
+      const meta = deps.metaMap.get(target.udid);
+      const number = deps.deviceNumbers?.get(target.udid) ?? meta?.number;
+      const label = `${number ? `Máy ${number}` : target.udid} · ${tileName(target, meta)}`;
+      try {
+        if (target.platform !== "android") throw new Error("Đọc nick hiện chỉ hỗ trợ Android");
+        pushToast("info", `Đang đọc nick TikTok · ${label}`);
+        const reading = await interactionReadAccount(target.udid);
+        if (reading.udid !== target.udid || !reading.observedHandle || reading.status === "unknown") {
+          throw new Error("Chưa đọc được username TikTok của đúng máy");
+        }
+        const saved = await saveDeviceHandle(target.udid, reading.expectedHandle, reading.observedHandle);
+        savedCount++;
+        pushToast("ok", `${label} · @${saved}`);
+        // Refresh after the saved value is acknowledged. Never substitute stale metadata on error.
+        try {
+          const revision = ++accountMetaReadRevision;
+          const metas = await listDeviceMetas();
+          if (revision === accountMetaReadRevision) deps.setMetas(metas);
+        }
+        catch (error) { toastError(`Đã lưu nick nhưng chưa cập nhật danh sách · ${label}`, error); }
+      } catch (error) { toastError(`Đọc/gán nick thất bại · ${label}`, error); }
+    }
+    if (pending.length) pushToast(savedCount === pending.length ? "ok" : "warn", `Đã gán nick TikTok ${savedCount}/${pending.length} máy`);
+  } finally { pending.forEach(device => accountReads.delete(device.udid)); }
+}
+
 /**
  * Everything the catalog needs from the shell that renders it.
  *
@@ -62,6 +102,8 @@ import { pickDirectory, pickFile } from "./pickFile";
  * entire application.
  */
 export interface DeviceActionDeps {
+  selectedDevices?: DeviceInfo[];
+  deviceNumbers?: Map<string, number>;
   /** Re-read devices and jobs from the backend. */
   reload: () => Promise<void>;
   metaMap: Map<string, DeviceMeta>;
@@ -155,6 +197,18 @@ export function buildDeviceActions(
   };
 
   return [
+    {
+      id: "read-tiktok-account",
+      label: deps.selectedDevices?.some(d => d.udid === device.udid) && deps.selectedDevices.length > 1
+        ? `Đọc và gán nick TikTok (${deps.selectedDevices.length} máy đã chọn)` : "Đọc và gán nick TikTok",
+      keywords: "username tai khoan tiktok nick",
+      androidOnly: true,
+      Icon: IconUsers,
+      run: () => {
+        const targets = deps.selectedDevices?.some(d => d.udid === device.udid) ? [...deps.selectedDevices] : [device];
+        void readAndAssignTikTokAccounts(targets, deps);
+      },
+    },
     {
       id: "open",
       label: "Mở điều khiển",

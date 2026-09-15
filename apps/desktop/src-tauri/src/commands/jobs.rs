@@ -219,7 +219,7 @@ pub fn operation_device_log(
         .map_err(err)
 }
 
-fn read_operation_run(
+pub(crate) fn read_operation_run(
     state: &AppState,
     operation_id: &str,
 ) -> Result<Option<OperationRunDetail>, CommandError> {
@@ -310,13 +310,17 @@ fn read_operation_run(
                 .get_publish_execution_snapshot(source_id)
                 .map_err(err)?;
             let request = state.db.publish_campaign_request(source_id).map_err(err)?;
-            Ok(Some(project_publish_detail_with_target(
+            let mut projected = project_publish_detail_with_target(
                 &detail,
                 snapshot.as_ref(),
                 request
                     .as_ref()
                     .and_then(|request| request.target_snapshot.as_ref()),
-            )))
+            );
+            if state.db.publish_operation_stopped(source_id).map_err(err)? {
+                projected.summary.state = OperationRunState::Cancelled;
+            }
+            Ok(Some(projected))
         }
         _ => Err(CommandError::invalid_argument(
             "operationId source prefix is unknown",

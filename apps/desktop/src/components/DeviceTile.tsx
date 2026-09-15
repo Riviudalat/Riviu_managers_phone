@@ -25,6 +25,7 @@ interface Props {
    * by `deviceNaming.tileName`. Technical identity stays in the details drawer.
    */
   name?: string;
+  handle?: string;
   /** Shared operator-facing status; omitted only by isolated legacy/test callers. */
   operational?: DeviceOperationalView;
   selected: boolean;
@@ -44,6 +45,7 @@ function DeviceTileInner({
   width,
   index,
   name,
+  handle,
   operational: providedOperational,
   selected,
   focused,
@@ -54,6 +56,7 @@ function DeviceTileInner({
 }: Props) {
   const operational = providedOperational ?? deviceOperationalView(device, null);
   const displayName = name ?? device.name;
+  const username = handle?.trim().replace(/^@+/, "");
   const operationalLabel = operational.ownerLabel
     ? `${operational.label} · ${operational.ownerLabel}`
     : operational.label;
@@ -147,6 +150,7 @@ function DeviceTileInner({
           <span className="dev-phone-name" title={displayName}>
             {displayName}
           </span>
+          {username && <span className="dev-phone-handle" title={`@${username}`}>@{username}</span>}
           <span className={`dev-phone-status is-${operational.kind}`}>
             {operationalLabel}
           </span>

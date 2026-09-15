@@ -41,6 +41,13 @@ pub struct NurtureApiTestResult {
 }
 
 pub(crate) fn validate_nurture_settings(settings: &NurtureSettings) -> Result<(), String> {
+    if settings.feed_source == riviu_core::types::NurtureFeedSource::Search
+        && (settings.search_keyword.trim().is_empty()
+            || settings.search_keyword.trim().chars().count() > 100
+            || settings.search_keyword.chars().any(char::is_control))
+    {
+        return Err("Từ khóa tìm kiếm cần 1–100 ký tự trên một dòng".into());
+    }
     if !(1..=10_000).contains(&settings.num_videos) {
         return Err("num_videos phải nằm trong khoảng 1..=10000".into());
     }
@@ -58,10 +65,21 @@ pub(crate) fn validate_nurture_settings(settings: &NurtureSettings) -> Result<()
             return Err(format!("{label} phải nằm trong khoảng 0..=100"));
         }
     }
+    if settings.action_selection == riviu_core::NurtureActionSelection::Exclusive {
+        let effective = settings.clone().into_effective();
+        if u64::from(effective.like_prob)
+            + u64::from(effective.save_prob)
+            + u64::from(effective.comment_prob)
+            + u64::from(effective.follow_prob)
+            > 100
+        {
+            return Err("Tổng tỷ lệ hành động vượt 100%".into());
+        }
+    }
     if !(4..=30).contains(&settings.max_comment_words) {
         return Err("max_comment_words phải nằm trong khoảng 4..=30".into());
     }
-    if settings.comment_prob > 0 && settings.api_key.trim().is_empty() {
+    if settings.comment_enabled && settings.comment_prob > 0 && settings.api_key.trim().is_empty() {
         return Err("Đã bật bình luận nhưng API key còn trống".into());
     }
     if settings.base_url.trim().is_empty() || settings.model.trim().is_empty() {
@@ -472,18 +490,20 @@ pub(crate) async fn preflight_comment_job(
     udids: &[String],
     settings: &NurtureSettings,
 ) -> CommentPreflight {
-    if !settings.comment_enabled || settings.comment_prob == 0 {
-        // Comments are off, so no phone needs an agent for them. Every device is eligible
-        // and nothing is probed -- taking a lease per phone to answer a question nobody
-        // asked would be its own way of blocking a start.
-        return CommentPreflight {
-            ready: udids.to_vec(),
-            skipped: Vec::new(),
-        };
-    }
-
     let mut preflight = CommentPreflight::default();
     for udid in udids {
+        if settings.feed_source == riviu_core::types::NurtureFeedSource::Search
+            && !control.reports_element_bounds(udid)
+        {
+            preflight
+                .skipped
+                .push(format!("{udid}: lướt từ khóa cần máy Android"));
+            continue;
+        }
+        if !settings.comment_enabled || settings.comment_prob == 0 {
+            preflight.ready.push(udid.clone());
+            continue;
+        }
         let context = match control
             .try_acquire_exclusive(udid, DeviceWorkOwner::Nurture)
             .await
@@ -1002,6 +1022,7 @@ mod tests {
         let runtime = NurtureRuntime::new();
         let settings = NurtureSettings {
             comment_prob: 1,
+            comment_enabled: true,
             ..Default::default()
         };
 
@@ -1044,6 +1065,7 @@ mod tests {
             .expect("hold the busy device");
         let settings = NurtureSettings {
             comment_prob: 1,
+            comment_enabled: true,
             ..Default::default()
         };
 
@@ -1122,6 +1144,7 @@ mod tests {
     #[test]
     fn independent_public_action_probabilities_can_all_be_hundred_percent() {
         let settings = NurtureSettings {
+            action_selection: riviu_core::NurtureActionSelection::Independent,
             like_prob: 100,
             comment_prob: 100,
             save_prob: 100,

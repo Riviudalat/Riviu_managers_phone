@@ -20,6 +20,34 @@ async function assignAll() {
   fireEvent.change(screen.getByLabelText("Giờ chung"), { target: { value: "20:00" } });
 }
 describe("schedule assignment workspace", () => {
+  it("keeps pending publication warnings visible and skips blocked devices before preflight", async () => {
+    const blocked = { assignmentId: "old", campaignId: "prior-campaign", updatedAt: "now", reason: "TikTok đang xử lý bài trước" };
+    const open = vi.fn();
+    render(<PublishSchedulePlanner {...props} deviceGuards={{ "phone-1": { blocking: [blocked], linkReview: [] }, "phone-2": { blocking: [], linkReview: [] }, "phone-3": { blocking: [], linkReview: [blocked] } }} onPendingPublication={open} />);
+    await userEvent.click(screen.getByRole("button", { name: "Chọn nhanh" }));
+    expect(screen.getByLabelText("Máy nhận Bài 1")).toHaveValue("phone-2");
+    expect(screen.getByLabelText("Máy nhận Bài 2")).toHaveValue("phone-3");
+    expect(screen.queryByLabelText("Máy nhận Bài 3")).toBeNull();
+    expect(screen.getByText("Máy còn bài chưa lấy được link")).toBeVisible();
+    fireEvent.click(screen.getAllByRole("button", { name: "Xem bài đang chờ" })[0]);
+    expect(open).toHaveBeenCalledExactlyOnceWith("prior-campaign");
+    expect(publishSchedulePreflight).not.toHaveBeenCalled();
+  });
+  it("shows capacity warnings before confirmation and invalidates review when host limits change", async () => {
+    const warning = "2099-09-10T20:00:00: 5 bài cùng giờ, tối đa 4 lượt chuyển media đồng thời. Bài chưa được cấp lượt sau 30 giây sẽ Lỡ lịch; nên giãn giờ.";
+    vi.mocked(publishSchedulePreflight).mockResolvedValueOnce({ ...report(), warnings: [warning] });
+    const view = render(<PublishSchedulePlanner {...props} limitsRevision={0} />);
+    await assignAll();
+    await userEvent.click(screen.getByRole("button", { name: "Kiểm tra lịch" }));
+    expect(await screen.findByText(warning)).toBeVisible();
+    expect(screen.getByText(/Giờ hẹn là lúc bắt đầu xử lý, chưa phải lúc TikTok xuất bản/)).toHaveTextContent("không tự đăng bù");
+    expect(screen.getByRole("button", { name: "Lưu lịch 3 bài" })).toBeDisabled();
+    await userEvent.click(screen.getByRole("checkbox", { name: /Tôi xác nhận/ }));
+    expect(screen.getByRole("button", { name: "Lưu lịch 3 bài" })).toBeEnabled();
+    view.rerender(<PublishSchedulePlanner {...props} limitsRevision={1} />);
+    expect(screen.getByRole("button", { name: "Lưu lịch 3 bài" })).toBeDisabled();
+    expect(publishScheduleCreate).not.toHaveBeenCalled();
+  });
   it("quick-selects ten posts onto ten machines and expands when more phones are ready", async () => {
     const ten = Array.from({ length: 10 }, (_, i) => ({ ...bundles[0], id: `q${i}`, name: `Quick ${i}` }));
     const twelve = Array.from({ length: 12 }, (_, i) => ({ ...devices[0], udid: `m${i}` }));

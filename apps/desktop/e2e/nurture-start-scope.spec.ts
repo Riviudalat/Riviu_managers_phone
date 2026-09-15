@@ -19,7 +19,7 @@ test("partial nurture start names excluded devices and counts only proven cleanu
   });
   await page.goto("/");
   await openOperatorPage(page, 'Nuôi TikTok');
-  await page.getByRole("button", { name: /Cân bằng/ }).click();
+  await page.getByRole("spinbutton", { name: /Thời lượng tối đa/ }).fill("20");
   await page.getByRole("combobox", { name: "Phạm vi thiết bị" }).selectOption("all");
   await page.getByRole("button", { name: "Kiểm tra & bắt đầu", exact: true }).click();
   await page.getByRole("button", { name: "Bắt đầu 2 máy", exact: true }).click();

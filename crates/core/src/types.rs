@@ -1007,9 +1007,11 @@ pub struct NurtureWindowBehaviour {
     pub num_rounds: u32,
     pub like_prob: u32,
     pub comment_prob: u32,
+    #[serde(default)]
     pub save_prob: u32,
     /// Additive for compatibility: a window written before Save existed must not start
     /// saving merely because the global switch is enabled later.
+    #[serde(default)]
     pub save_enabled: bool,
     pub follow_prob: u32,
 }
@@ -1082,9 +1084,29 @@ impl Default for NurtureWindow {
     }
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum NurtureFeedSource {
+    #[default]
+    ForYou,
+    Search,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum NurtureActionSelection {
+    #[default]
+    Independent,
+    Exclusive,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct NurtureSettings {
+    #[serde(default)]
+    pub action_selection: NurtureActionSelection,
+    pub feed_source: NurtureFeedSource,
+    pub search_keyword: String,
     /// Optional operator-authored order for actions on the current post.
     /// Empty retains the legacy Like -> Save -> Comment sequence.
     #[serde(default)]
@@ -1231,6 +1253,9 @@ fn default_carousel_portion_percent() -> u32 {
 impl Default for NurtureSettings {
     fn default() -> Self {
         Self {
+            action_selection: NurtureActionSelection::Exclusive,
+            feed_source: NurtureFeedSource::ForYou,
+            search_keyword: String::new(),
             // OpenRouter chat/completions + Luna vision. The operator only
             // fills the key. A custom gateway still works by changing these.
             base_url: "https://openrouter.ai/api/v1".into(),
@@ -1243,13 +1268,13 @@ impl Default for NurtureSettings {
             // legacy fixture ceiling for callers that do not pass a duration.
             num_videos: 120,
             num_rounds: 1,
-            like_prob: 35,
+            like_prob: 20,
             workflow_action_order: Vec::new(),
             // Comments are opt-in because a fresh install has no AI key. Once
             // a key is configured, the operator can enable a small comment rate.
-            comment_prob: 0,
-            save_prob: 0,
-            follow_prob: 3,
+            comment_prob: 2,
+            save_prob: 5,
+            follow_prob: 1,
             frenzy_prob: 6,
             watch_min: 3.0,
             watch_max: 18.0,
@@ -1275,8 +1300,8 @@ impl Default for NurtureSettings {
             schedule_windows: Vec::new(),
             steady_mood: String::new(),
             like_enabled: true,
-            comment_enabled: true,
-            save_enabled: false,
+            comment_enabled: false,
+            save_enabled: true,
             follow_enabled: true,
             frenzy_enabled: true,
             carousel_enabled: true,
@@ -1468,7 +1493,7 @@ impl NurtureSettings {
 
 #[cfg(test)]
 mod nurture_settings_tests {
-    use super::NurtureSettings;
+    use super::{NurtureFeedSource, NurtureSettings};
 
     #[test]
     fn the_ceiling_and_the_portion_are_two_different_numbers() {
@@ -1499,14 +1524,33 @@ mod nurture_settings_tests {
         assert_eq!(settings.base_url, "https://openrouter.ai/api/v1");
         assert_eq!(settings.model, "openai/gpt-5.6-luna");
         assert!(settings.api_key.is_empty());
-        assert_eq!(settings.comment_prob, 0);
-        assert_eq!(settings.like_prob, 35);
-        assert_eq!(settings.follow_prob, 3);
+        assert_eq!(settings.comment_prob, 2);
+        assert!(!settings.comment_enabled);
+        assert_eq!(settings.like_prob, 20);
+        assert_eq!(settings.save_prob, 5);
+        assert_eq!(settings.follow_prob, 1);
         assert_eq!(settings.frenzy_prob, 6);
         assert_eq!((settings.watch_min, settings.watch_max), (3.0, 18.0));
         assert!(!settings.schedule_enabled);
         assert_eq!(settings.schedule_every_minutes, 240);
         assert_eq!(settings.schedule_duration_minutes, 150);
+    }
+
+    #[test]
+    fn keyword_source_roundtrips_and_remains_fixed_during_live_rate_changes() {
+        let legacy: NurtureSettings = serde_json::from_str("{}").unwrap();
+        assert_eq!(legacy.feed_source, NurtureFeedSource::ForYou);
+        let mut running = NurtureSettings {
+            feed_source: NurtureFeedSource::Search,
+            search_keyword: "đà lạt".into(),
+            ..Default::default()
+        };
+        let restored: NurtureSettings =
+            serde_json::from_str(&serde_json::to_string(&running).unwrap()).unwrap();
+        assert_eq!(restored.search_keyword, "đà lạt");
+        running.absorb_live_changes(&NurtureSettings::default());
+        assert_eq!(running.feed_source, NurtureFeedSource::Search);
+        assert_eq!(running.search_keyword, "đà lạt");
     }
 
     #[test]
@@ -1529,9 +1573,9 @@ mod nurture_settings_tests {
 
         assert!(settings.migrate_legacy_defaults());
         assert_eq!(settings.num_videos, 120);
-        assert_eq!(settings.like_prob, 35);
-        assert_eq!(settings.comment_prob, 0);
-        assert_eq!(settings.follow_prob, 3);
+        assert_eq!(settings.like_prob, 20);
+        assert_eq!(settings.comment_prob, 2);
+        assert_eq!(settings.follow_prob, 1);
         assert_eq!(settings.frenzy_prob, 6);
         assert_eq!((settings.watch_min, settings.watch_max), (3.0, 18.0));
         assert_eq!(settings.schedule_every_minutes, 240);
@@ -1656,6 +1700,8 @@ pub enum NurtureCleanupState {
     /// No termination result has been recorded yet.
     #[default]
     Pending,
+    /// A durable close request waits for all work on this device to settle.
+    Deferred,
     /// The driver returned a [`crate::ProcessAbsenceProof`] for the exact package.
     ProcessAbsent,
     /// Termination could not be proved.
@@ -2871,9 +2917,9 @@ mod task4_nurture_save_wire_tests {
         assert_eq!(settings.save_prob, 0);
 
         let defaults = NurtureSettings::default();
-        assert!(!defaults.save_enabled);
-        assert_eq!(defaults.save_prob, 0);
-        assert_eq!(NurtureWindowBehaviour::default().save_prob, 0);
+        assert!(defaults.save_enabled);
+        assert_eq!(defaults.save_prob, 5);
+        assert_eq!(NurtureWindowBehaviour::default().save_prob, 5);
     }
 
     #[test]

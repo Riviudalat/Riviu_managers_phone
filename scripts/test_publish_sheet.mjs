@@ -15,7 +15,7 @@ function harness({ config = {}, headers = ["STT", "Người air", "Ngày", "Link
   const cells = (headers.length ? [headers, ...rows] : rows).map(row => [...row]);
   const notes = new Map();
   const formulas = new Map();
-  const state = { writes: 0, batches: [], lostResponse: false, rejectBatch: false, locks: 0, afterCommit: null, frozenRows: 0, staleReads: false, cache: null };
+  const state = { backups: [], backupMismatch: false, failClear: false, resetReadback: false, writes: 0, batches: [], lostResponse: false, rejectBatch: false, locks: 0, afterCommit: null, frozenRows: 0, staleReads: false, cache: null };
   let maxRows = 20;
   let maxColumns = Math.max(1, headers.length, ...rows.map(row => row.length));
   const read = (r, c) => cells[r - 1]?.[c - 1] ?? "";
@@ -48,7 +48,14 @@ function harness({ config = {}, headers = ["STT", "Người air", "Ngày", "Link
     },
   };
   const book = { getId: () => "fixture-book", getSheets: () => [sheet], getSheetByName: () => sheet, getSpreadsheetTimeZone: () => "Asia/Ho_Chi_Minh" };
+  const properties = new Map();
+  book.copy = () => {
+    const snapshot = { cells: structuredClone(cells), notes: [...notes], formulas: [...formulas] };
+    state.backups.push(snapshot);
+    return {getId:()=>"backup-book",getSheets:()=>[{getName:()=>"Fixture",getMaxRows:()=>maxRows,getMaxColumns:()=>maxColumns}]};
+  };
   const context = vm.createContext({
+    PropertiesService: { getScriptProperties: () => ({ getProperty: key => properties.get(key) ?? null, setProperty: (key,value) => properties.set(key,value) }) },
     SpreadsheetApp: { openById: () => book },
     LockService: { getScriptLock: () => ({ waitLock: () => { state.locks++; }, releaseLock: () => { state.locks--; } }) },
     ContentService: { MimeType: { JSON: "json" }, createTextOutput: text => ({ setMimeType: () => ({ getContent: () => text }) }) },
@@ -58,15 +65,31 @@ function harness({ config = {}, headers = ["STT", "Người air", "Ngày", "Link
       computeDigest: (_algorithm, value) => [...createHash("sha256").update(value, "utf8").digest()],
     },
     Sheets: { Spreadsheets: { get(id, options) {
+      if (!options.ranges) {
+        const saved=id==="backup-book"?state.backups.at(-1):{cells,notes:[...notes],formulas:[...formulas]};
+        return {sheets:[{properties:{title:"Fixture",gridProperties:{rowCount:maxRows,columnCount:maxColumns}},data:saved,
+          mismatch:id==="backup-book"&&state.backupMismatch}]};
+      }
       assert.equal(id, 'fixture-book');
       const match=/!([A-Z]+)(\d+):([A-Z]+)(\d+)$/.exec(options.ranges[0]);assert.ok(match);
       const col=s=>[...s].reduce((n,c)=>n*26+c.charCodeAt(0)-64,0);
       const top=Number(match[2]),bottom=Number(match[4]),left=col(match[1]),right=col(match[3]);
-      return {spreadsheetId:id,sheets:[{properties:{sheetId:gid},data:[{startRow:top-1,startColumn:left-1,rowData:Array.from({length:bottom-top+1},(_,y)=>({values:Array.from({length:right-left+1},(_,x)=>({formattedValue:String(read(top+y,left+x)),note:notes.get(`${top+y}:${left+x}`),userEnteredValue:formulas.has(`${top+y}:${left+x}`)?{formulaValue:formulas.get(`${top+y}:${left+x}`)}:{stringValue:String(read(top+y,left+x))}}))}))}]}]};
+      return {spreadsheetId:id,sheets:[{properties:{sheetId:gid},data:[{startRow:top-1,startColumn:left-1,rowData:Array.from({length:bottom-top+1},(_,y)=>({values:Array.from({length:right-left+1},(_,x)=>({formattedValue:String(read(top+y,left+x)),note:notes.get(`${top+y}:${left+x}`),userEnteredValue:state.resetReadback&&read(top+y,left+x)===""?undefined:formulas.has(`${top+y}:${left+x}`)?{formulaValue:formulas.get(`${top+y}:${left+x}`)}:{stringValue:String(read(top+y,left+x))}}))}))}]}]};
     }, batchUpdate(batch) {
       assert.equal(state.locks, 1, "each atomic row write must hold the shared script lock");
       state.batches.push(batch);
       if (state.rejectBatch) throw new Error("fixture batch rejected before commit");
+      if (batch.requests[0]?.updateCells?.range) {
+        const update=batch.requests[0].updateCells;
+        assert.equal(batch.requests.length,1);
+        assert.equal(update.range.sheetId,0);
+        assert.equal(update.range.startRowIndex,1);
+        assert.equal(update.fields,"userEnteredValue,note");
+        if (state.failClear) throw new Error("fixture clear interrupted");
+        cells.splice(1);
+        notes.clear();formulas.clear();state.writes++;state.resetReadback=true;
+        return {};
+      }
       let nextColumns = maxColumns, nextRows = maxRows;
       for (const request of batch.requests) {
         if (request.insertDimension) {
@@ -495,7 +518,7 @@ test("check returns the authenticated exact target and layout without any writes
     const h = harness({ headers, gid: 37 });
     const before = JSON.stringify(h.cells);
     const result = h.deliver({ rowKind: "check", checkVersion: 1, spreadsheetId: "fixture-book", sheetGid: 37, assignmentId: undefined, postUrl: undefined });
-    assert.deepEqual(result, { ok: true, checkVersion: 1, deliveryVersion: 2, spreadsheetId: "fixture-book", sheetGid: 37, layout, columns: headers });
+    assert.deepEqual(result, { ok: true, checkVersion: 1, deliveryVersion: 2, spreadsheetId: "fixture-book", sheetGid: 37, reportingEpoch: "legacy", reportingReady: true, layout, columns: headers });
     assert.equal(h.state.writes, 0); assert.equal(h.state.locks, 0); assert.equal(h.notes.size, 0);
     assert.equal(JSON.stringify(h.cells), before);
   }
@@ -572,7 +595,7 @@ test("v2 canonical ACK contains the committed target identity revision and actua
   const h = harness();
   const ack = h.deliver(deliveryV2);
   assert.deepEqual(ack, { ok: true, row: 2, deliveryVersion: 2, spreadsheetId: "fixture-book", sheetGid: 0,
-    assignmentId: "assignment-1", deliveryRevision: 1, postUrl: h.cells[1][3] });
+    assignmentId: "assignment-1", publicationId: "assignment-1", reportingEpoch: "legacy", deliveryRevision: 1, postUrl: h.cells[1][3] });
   assert.equal(h.state.batches.length, 1);
   const note = JSON.parse(h.notes.get("2:4"));
   assert.equal(note.canonicalDeliveryRevision, 1);
@@ -748,4 +771,238 @@ test("v2 canonical metadata still requires the immutable send timestamp", () => 
   const h = harness({ headers: internalHeaders });
   assert.equal(h.deliver({ ...deliveryV2, ...internalRow, rowKind: "canonical", status: "Đã xác minh", postUrl: "https://www.tiktok.com/@test/photo/123456" }).ok, false);
   assert.equal(h.state.writes, 0);
+});
+
+
+test("closed reporting epoch rejects old in-flight requests and late links before writes", () => {
+  const h = harness();
+  h.context.PropertiesService.getScriptProperties().setProperty("riviu.reportingEpoch", "acceptance-epoch-2");
+  for (const patch of [{}, { reportingEpoch: "legacy" }, { reportingEpoch: "acceptance-epoch-1" }]) {
+    const ack=h.deliver({ ...deliveryV2, publicationId: "assignment-1", ...patch });
+    assert.equal(ack.ok,false);
+    assert.match(ack.error,/reportingEpoch/);
+  }
+  assert.equal(h.state.writes,0);
+  const request={...deliveryV2,publicationId:"assignment-1",reportingEpoch:"acceptance-epoch-2"};
+  const ack=h.deliver(request);
+  assert.equal(ack.ok,true);
+  assert.equal(ack.reportingEpoch,"acceptance-epoch-2");
+  assert.equal(ack.publicationId,"assignment-1");
+  assert.equal(h.deliver(request).duplicate,true);
+  assert.equal(h.cells.length,2);
+});
+
+test("publication key mismatch never writes a second row", () => {
+  const h=harness();
+  assert.equal(h.deliver({...deliveryV2,publicationId:"different"}).ok,false);
+  assert.equal(h.state.writes,0);
+});
+
+
+test("reporting reset backs up before clearing only gid zero and repeated reset preserves new rows", () => {
+  const h=harness({rows:[[1,"bot","1/9/2026","old-link","partner"]]});
+  h.notes.set("2:4","old-key");h.formulas.set("2:6","=1+1");
+  const before=JSON.stringify(h.cells);
+  const reset={rowKind:"resetReporting",spreadsheetId:"fixture-book",sheetGid:0,reportingEpoch:"legacy",resetId:"reset-acceptance-2026"};
+  const ack=h.deliver(reset);
+  assert.equal(ack.complete,true);
+  assert.equal(ack.backupSpreadsheetId,"backup-book");
+  assert.equal(h.state.backups.length,1);
+  assert.equal(JSON.stringify(h.state.backups[0].cells),before);
+  assert.deepEqual(h.state.backups[0].notes,[["2:4","old-key"]]);
+  assert.deepEqual(h.state.backups[0].formulas,[["2:6","=1+1"]]);
+  assert.equal(h.cells.length,1);assert.equal(h.notes.size,0);
+  h.state.resetReadback=false;
+  assert.equal(h.deliver({...deliveryV2,reportingEpoch:reset.resetId,publicationId:"assignment-1"}).ok,true);
+  assert.equal(h.cells[1][0],1);
+  const newRows=JSON.stringify(h.cells);
+  assert.equal(h.deliver(reset).complete,true);
+  assert.equal(JSON.stringify(h.cells),newRows);
+  assert.equal(h.deliver(deliveryV2).ok,false);
+});
+
+test("reset backup mismatch preserves old data and a failed clear closes old epoch until same reset resumes", () => {
+  const reset={rowKind:"resetReporting",spreadsheetId:"fixture-book",sheetGid:0,reportingEpoch:"legacy",resetId:"reset-acceptance-2026"};
+  const h=harness({rows:[[1,"bot","date","old","partner"]]});
+  h.state.backupMismatch=true;
+  assert.equal(h.deliver(reset).ok,false);
+  assert.equal(h.state.writes,0);
+  assert.equal(h.context.currentReportingEpoch(),"legacy");
+  h.state.backupMismatch=false;h.state.failClear=true;
+  assert.equal(h.deliver(reset).ok,false);
+  assert.equal(h.context.currentReportingEpoch(),reset.resetId);
+  assert.equal(h.deliver(deliveryV2).ok,false);
+  h.state.failClear=false;
+  assert.equal(h.deliver(reset).complete,true);
+  assert.equal(h.cells.length,1);
+  const later={...reset,resetId:"reset-acceptance-2027",reportingEpoch:reset.resetId};
+  assert.equal(h.deliver(later).complete,true);
+  assert.equal(h.deliver(reset).ok,false);
+});
+
+test("reset refuses another tab before backup or mutation", () => {
+ const h=harness({gid:37});
+ assert.equal(h.deliver({rowKind:"resetReporting",spreadsheetId:"fixture-book",sheetGid:37,reportingEpoch:"legacy",resetId:"reset-acceptance-2026"}).ok,false);
+ assert.equal(h.state.backups.length,0);assert.equal(h.state.writes,0);
+});
+
+test('direct handoff retires every legacy write under the lock and replays without changing rows', () => {
+  const h=harness();
+  assert.equal(h.deliver().ok,true);
+  const before=structuredClone(h.cells),notes=[...h.notes],writes=h.state.writes;
+  const handoff={rowKind:'retireToDirect',spreadsheetId:'fixture-book',sheetGid:0,reportingEpoch:'legacy',requestId:'26e6a3ba-6638-4c48-8e66-18e64a421f0e',writerId:'d2c2a440-33fa-4649-9bc6-d7a6eff7b4b5'};
+  const first=h.deliver(handoff);assert.equal(first.retired,true);assert.equal(first.writerId,handoff.writerId);
+  assert.deepEqual(h.deliver(handoff),first);
+  for(const payload of [{},{rowKind:'prepare',checkVersion:1,spreadsheetId:'fixture-book',sheetGid:0},{rowKind:'flowWrite',connectorVersion:1,spreadsheetId:'fixture-book',tab:'Fixture',range:'A2:B2',values:[['bad','bad']]},{rowKind:'resetReporting',spreadsheetId:'fixture-book',sheetGid:0,reportingEpoch:'legacy',resetId:'99c49825-7418-4b59-bf44-e4878bcab064'}]) assert.equal(h.deliver(payload).ok,false);
+  assert.equal(h.deliver({rowKind:'check',checkVersion:1,spreadsheetId:'fixture-book',sheetGid:0}).reportingReady,false);
+  assert.equal(h.deliver({...handoff,writerId:'76a3cdbc-3a27-41b1-a5a5-f74946dd3a94'}).ok,false);
+  assert.deepEqual(h.cells,before);assert.deepEqual([...h.notes],notes);assert.equal(h.state.writes,writes);assert.equal(h.state.locks,0);
+});
+
+test('wrong direct handoff identity target or epoch never retires the active legacy writer', () => {
+  const valid={rowKind:'retireToDirect',spreadsheetId:'fixture-book',sheetGid:0,reportingEpoch:'legacy',requestId:'26e6a3ba-6638-4c48-8e66-18e64a421f0e',writerId:'d2c2a440-33fa-4649-9bc6-d7a6eff7b4b5'};
+  for(const changed of [{token:'wrong'},{sheetGid:17},{spreadsheetId:'other'},{reportingEpoch:'closed'},{writerId:'not-uuid'}]) {
+    const h=harness();assert.equal(h.deliver({...valid,...changed}).ok,false);assert.equal(h.deliver().ok,true);assert.equal(h.state.locks,0);
+  }
+});
+
+test("Google transient failures while opening and reading are retryable before any batch", () => {
+  const messages = [
+    "Exception: Xin lỗi bạn, máy chủ đã gặp lỗi. Vui lòng chờ một lát và thử lại.",
+    "Exception: We're sorry, a server error occurred. Please wait a bit and try again.",
+    "Exception: Service timed out: Spreadsheets.",
+    "Exception: Service invoked too many times in a short time: spreadsheets. Try Utilities.sleep(1000) between calls.",
+    "Quota exceeded for quota metric 'Read requests' and limit 'Read requests per minute per user' of service 'sheets.googleapis.com'",
+  ];
+  for (const message of messages) for (const stage of ["open", "read"]) {
+    const h = harness();
+    const open = h.context.SpreadsheetApp.openById;
+    if (stage === "open") h.context.SpreadsheetApp.openById = () => { throw new Error(message); };
+    else {
+      const sheet = open().getSheets()[0];
+      sheet.getRange = () => { throw new Error(message); };
+    }
+    const ack = h.deliver(deliveryV2);
+    assert.equal(ack.ok, false, `${stage}: ${message}`);
+    assert.equal(ack.retryable, true, `${stage}: ${message}`);
+    assert.equal(h.state.writes, 0); assert.equal(h.state.batches.length, 0); assert.equal(h.state.locks, 0);
+  }
+});
+
+test("validation and explicit permanent failures never become Google transient retries", () => {
+  for (const patch of [{ spreadsheetId: "other" }, { sheetGid: 77 }, { reportingEpoch: "obsolete" },
+    { publicationId: "different" }, { deliveryRevision: -1 }]) {
+    const h = harness(); const ack = h.deliver({ ...deliveryV2, ...patch });
+    assert.equal(ack.ok, false); assert.notEqual(ack.retryable, true); assert.equal(h.state.writes, 0);
+  }
+  for (const message of ["Exception: You do not have permission to access the requested document.",
+    "Exception: Service invoked too many times for one day: spreadsheets.", "reportingEpoch mismatch; try again", "unknown error"]) {
+    const h = harness(); h.context.SpreadsheetApp.openById = () => { throw new Error(message); };
+    assert.equal(h.deliver(deliveryV2).retryable, false, message);
+  }
+  const h = harness(); h.context.SpreadsheetApp.openById = () => {
+    const error = new Error("Exception: Service timed out: Spreadsheets."); error.sheetRetryable = false; throw error;
+  };
+  assert.equal(h.deliver(deliveryV2).retryable, false);
+});
+
+test("reset transient open failure preserves epoch and resumes only the same reset transaction", () => {
+  const h = harness({ rows: [[1, "bot", "old date", "old link"]] });
+  const reset = { rowKind: "resetReporting", spreadsheetId: "fixture-book", sheetGid: 0, reportingEpoch: "legacy", resetId: "reset-transient-2033" };
+  const open = h.context.SpreadsheetApp.openById;
+  h.context.SpreadsheetApp.openById = () => { throw new Error("Exception: Service timed out: Spreadsheets."); };
+  const failed = h.deliver(reset);
+  assert.equal(failed.ok, false); assert.equal(failed.retryable, true);
+  assert.equal(h.context.currentReportingEpoch(), "legacy"); assert.equal(h.cells.length, 2);
+  h.context.SpreadsheetApp.openById = open;
+  assert.equal(h.deliver(reset).complete, true);
+  assert.equal(h.context.currentReportingEpoch(), reset.resetId);
+  const old = h.deliver(deliveryV2); assert.equal(old.ok, false); assert.notEqual(old.retryable, true);
+  assert.equal(h.state.backups.length, 1);
+});
+
+test("unfinished reset rejects new-epoch rows and competing reset until the same reset resumes", () => {
+  const h = harness({rows:[[1,"bot","old date","old link"]]});
+  const reset = {rowKind:"resetReporting",spreadsheetId:"fixture-book",sheetGid:0,reportingEpoch:"legacy",resetId:"reset-acceptance-2028"};
+  h.state.failClear = true;
+  assert.equal(h.deliver(reset).ok, false);
+  const writes = h.state.writes;
+  const newEpochRow = {...deliveryV2,publicationId:"assignment-1",reportingEpoch:reset.resetId};
+  assert.equal(h.deliver(newEpochRow).ok, false, "new epoch remains closed until clear readback succeeds");
+  assert.equal(h.deliver({...reset,reportingEpoch:reset.resetId,resetId:"reset-acceptance-2029"}).ok, false);
+  assert.equal(h.state.backups.length, 1, "another reset must not replace the recovery backup");
+  assert.equal(h.state.writes, writes);
+  h.state.failClear = false;
+  assert.equal(h.deliver(reset).complete, true);
+  h.state.resetReadback = false;
+  assert.equal(h.deliver(newEpochRow).ok, true);
+  const published = JSON.stringify(h.cells);
+  assert.equal(h.deliver(reset).complete, true);
+  assert.equal(JSON.stringify(h.cells), published);
+});
+
+test("pending reset also blocks Flow writes while preserving read-only recovery checks", () => {
+  const h = harness();
+  h.state.failClear = true;
+  assert.equal(h.deliver({rowKind:"resetReporting",spreadsheetId:"fixture-book",sheetGid:0,reportingEpoch:"legacy",resetId:"reset-acceptance-2030"}).ok,false);
+  const flow = {rowKind:"flowWrite",connectorVersion:1,spreadsheetId:"fixture-book",tab:"Fixture",range:"A2:B2",values:[["new","data"]]};
+  assert.equal(h.deliver(flow).ok,false);
+  assert.equal(h.state.writes,0);
+  assert.equal(h.deliver({...flow,rowKind:"flowRead",range:"A1:B1"}).ok,true);
+  const checked = h.deliver({rowKind:"check",checkVersion:1,spreadsheetId:"fixture-book",sheetGid:0});
+  assert.equal(checked.ok,true);
+  assert.equal(checked.reportingReady,false);
+});
+
+test("reset completion property failure keeps writes closed and resumes without replacing backup", () => {
+  const h = harness({rows:[[1,"bot","old date","old link"]]});
+  const reset = {rowKind:"resetReporting",spreadsheetId:"fixture-book",sheetGid:0,reportingEpoch:"legacy",resetId:"reset-acceptance-2031"};
+  const properties = h.context.PropertiesService.getScriptProperties();
+  const setProperty = properties.setProperty;
+  properties.setProperty = (key,value) => {
+    if (key === "riviu.reset." + reset.resetId && JSON.parse(value).complete) throw new Error("fixture completion property lost");
+    return setProperty(key,value);
+  };
+  h.context.PropertiesService.getScriptProperties = () => properties;
+  assert.equal(h.deliver(reset).ok,false);
+  assert.equal(h.cells.length,1);
+  assert.equal(h.deliver({...deliveryV2,reportingEpoch:reset.resetId,publicationId:"assignment-1"}).ok,false);
+  properties.setProperty = setProperty;
+  assert.equal(h.deliver(reset).complete,true);
+  assert.equal(h.deliver({rowKind:"check",checkVersion:1,spreadsheetId:"fixture-book",sheetGid:0}).reportingReady,true);
+  assert.equal(h.state.backups.length,1);
+  h.state.resetReadback=false;
+  assert.equal(h.deliver({...deliveryV2,reportingEpoch:reset.resetId,publicationId:"assignment-1"}).ok,true);
+});
+
+test("deployment upgrade recovers an incomplete reset without its new pending marker", () => {
+  const h = harness();
+  const reset = {rowKind:"resetReporting",spreadsheetId:"fixture-book",sheetGid:0,reportingEpoch:"legacy",resetId:"reset-acceptance-2032"};
+  h.state.failClear=true;
+  assert.equal(h.deliver(reset).ok,false);
+  h.context.PropertiesService.getScriptProperties().setProperty("riviu.pendingReportingReset", "");
+  assert.equal(h.deliver({...deliveryV2,reportingEpoch:reset.resetId,publicationId:"assignment-1"}).ok,false);
+  h.state.failClear=false;
+  assert.equal(h.deliver(reset).complete,true);
+  assert.equal(h.state.backups.length,1);
+});
+
+test("backup comparison ignores API object key order but catches every changed field", () => {
+  const h=harness();
+  const a={properties:{title:"tab",gridProperties:{rowCount:20}},data:[{note:"key",userEnteredFormat:{numberFormat:{type:"TEXT"}}}]};
+  const b={data:[{userEnteredFormat:{numberFormat:{type:"TEXT"}},note:"key"}],properties:{gridProperties:{rowCount:20},title:"tab"}};
+  assert.equal(h.context.backupGridDifference(a,b,"sheets"),null);
+  b.data[0].note="other";
+  assert.equal(h.context.backupGridDifference(a,b,"sheets"),"sheets.data.0.note");
+});
+
+
+test("epoch-bound ACK rejects altered stored epoch or publication identity", () => {
+  const h=harness();
+  const request={...deliveryV2,reportingEpoch:"legacy",publicationId:"assignment-1"};
+  assert.equal(h.deliver(request).ok,true);
+  const note=JSON.parse(h.notes.get("2:4"));
+  note.reportingEpoch="different";h.notes.set("2:4",JSON.stringify(note));
+  assert.equal(h.deliver(request).ok,false);
+  assert.equal(h.state.writes,1);
 });

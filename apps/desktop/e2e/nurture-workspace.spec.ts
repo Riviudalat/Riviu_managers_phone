@@ -7,7 +7,10 @@ test("nurture tabs and one machine grid preserve drafts at three viewports", asy
   await installTauriMock(page, { androidRoster: true, fleetSize: 38 });
   await page.goto("/");
   await openOperatorPage(page, 'Nuôi TikTok');
-  await page.getByRole("button", { name: /Cân bằng/ }).click();
+  await expect(page.getByRole("button", { name: /Cân bằng/ })).toHaveCount(0);
+  await expect(page.getByText("Tuỳ chỉnh nâng cao", {exact:true})).toHaveCount(0);
+  await page.getByLabel("Nguồn video").selectOption("search");
+  await page.getByLabel("Từ khóa tìm kiếm").fill("đà lạt");
   await page.getByRole("region", { name: "Máy thực hiện", exact: true }).getByRole("button", { name: "Chọn tất cả sẵn sàng", exact: true }).click();
   const machines = page.getByRole("group", { name: "Danh sách chọn máy Nuôi TikTok" });
   await expect(page.getByRole("tablist", { name: "Chế độ Nuôi TikTok" }).getByRole("tab")).toHaveText(["Thiết lập", "Hẹn giờ", "Theo dõi"]);
@@ -23,8 +26,8 @@ test("nurture tabs and one machine grid preserve drafts at three viewports", asy
   await expect(page.getByRole("spinbutton", { name: "Vòng", exact: true })).toHaveCount(0);
   await expect(page.locator('.nurture-workspace input[data-nurture-field="numVideos"]')).toHaveCount(1);
   await total.fill("75");
-  await expect(page.getByRole("spinbutton", { name: /Thời lượng tối đa/ })).toHaveValue("20");
-  await expect(page.locator(".nurture-advanced")).not.toHaveAttribute("open", "");
+  await expect(page.getByRole("spinbutton", { name: /Thời lượng tối đa/ })).toHaveValue("30");
+  await expect(page.locator(".nurture-advanced")).toHaveCount(0);
   expect((await new AxeBuilder({ page }).include(".nurture-workspace").withTags(["wcag2a", "wcag2aa"]).analyze()).violations).toEqual([]);
   for (const viewport of [{ width: 1440, height: 900 }, { width: 900, height: 900 }, { width: 820, height: 560 }]) {
     await page.setViewportSize(viewport);
@@ -54,15 +57,18 @@ test("nurture tabs and one machine grid preserve drafts at three viewports", asy
     await page.screenshot({ path: test.info().outputPath(`nurture-setup-${viewport.width}.png`) });
   }
   await page.getByRole("tab", { name: "Thiết lập", exact: true }).click();
-  await page.locator(".nurture-advanced > summary").click();
   await expect(page.getByRole("tab", { name: "Hành vi", exact: true })).toBeVisible();
   await page.getByRole("tab", { name: "AI", exact: true }).click();
   await expect(page.locator('input[list="riviu-comment-models"]')).toBeVisible();
+  await page.getByRole("tab",{name:"Theo dõi",exact:true}).click();
+  await page.getByRole("tab",{name:"Bình luận & chi phí AI",exact:true}).click();
+  await page.screenshot({path:test.info().outputPath("nurture-comment-tab.png")});
   await page.getByRole("tab", { name: "Hẹn giờ", exact: true }).click();
   await expect(page.getByRole("checkbox", { name: /Lịch tự chạy/ })).toBeVisible();
   await page.getByRole("button", { name: "+ Thêm khung giờ", exact: true }).click();
   await expect(page.getByLabel("Giờ bắt đầu khung 1", { exact: true })).toBeVisible();
   await page.getByRole("tab", { name: "Thiết lập", exact: true }).click();
+  await page.getByRole("tab", { name: "Phi\u00ean nu\u00f4i", exact: true }).click();
   await expect(total).toHaveValue("75");
   await expect(machines.getByRole("checkbox", { checked: true })).toHaveCount(38);
   await page.getByRole("searchbox", { name: "Tìm máy Nuôi TikTok" }).fill("38");

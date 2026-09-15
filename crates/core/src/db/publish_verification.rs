@@ -4,6 +4,10 @@ use super::publish_sheet::{
 };
 use super::*;
 
+#[cfg(test)]
+#[path = "publish_verification_resume_tests.rs"]
+mod resume_tests;
+
 #[derive(Debug, Clone)]
 pub struct PendingPublishVerification {
     pub assignment_id: String,
@@ -58,7 +62,7 @@ fn completed_upload_with_link_debt(
         && post["verdict"] == "Posted"
         && DateTime::parse_from_rfc3339(updated_at).is_ok_and(|updated| {
             now.signed_duration_since(updated)
-                >= chrono::Duration::minutes(SCHEDULED_REVIEW_AFTER_MINUTES)
+                >= chrono::Duration::minutes(UPLOAD_IDLE_AFTER_MINUTES)
         })
 }
 
@@ -124,24 +128,10 @@ fn may_verify(state: &str, intent: Option<&str>, evidence: Option<&str>) -> bool
     }
 }
 
-const VERIFICATION_REVIEW_AFTER_MINUTES: i64 = 30;
-/// Scheduled posts release the phone before the profile is ready; give the fleet
-/// longer than an immediate post so a busy VerificationQueue can still catch up.
-const SCHEDULED_REVIEW_AFTER_MINUTES: i64 = 240;
+// Upload-idle proof has a separate age threshold; link polling has no total deadline.
+const UPLOAD_IDLE_AFTER_MINUTES: i64 = 240;
 const SCHEDULED_FIRST_CHECK_SECONDS: i64 = 120;
-const SCHEDULED_CHECK_SECONDS: i64 = 300;
-
-fn deadline_review_reason(scheduled: bool) -> String {
-    if scheduled {
-        format!(
-            "Hết {SCHEDULED_REVIEW_AFTER_MINUTES} phút tự kiểm tra bài hẹn giờ; Sheet chưa có link. Tự kiểm tra đã dừng — chọn Kiểm tra liên kết (không đăng lại)."
-        )
-    } else {
-        format!(
-            "Hết {VERIFICATION_REVIEW_AFTER_MINUTES} phút tự kiểm tra; Sheet chưa có link. Tự kiểm tra đã dừng — chọn Kiểm tra liên kết (không đăng lại)."
-        )
-    }
-}
+const VERIFICATION_CHECK_SECONDS: i64 = 300;
 
 pub(super) fn needs_review(evidence: Option<&str>) -> bool {
     evidence
@@ -169,18 +159,24 @@ fn submission_identity_complete(intent: Option<&str>) -> bool {
         })
 }
 
-fn review_deadline_reached(intent: Option<&str>, now: DateTime<Utc>, scheduled: bool) -> bool {
-    intent
+fn explicitly_resumed_verification(candidate: &PendingPublishVerification) -> bool {
+    use sha2::Digest;
+    let Some(intent) = candidate.effect_intent.as_deref() else {
+        return false;
+    };
+    if !has_post_intent(Some(intent)) || !submission_identity_complete(Some(intent)) {
+        return false;
+    }
+    candidate
+        .evidence_json
+        .as_deref()
         .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
-        .and_then(|value| value["submittedAt"].as_str().map(str::to_owned))
-        .and_then(|value| DateTime::parse_from_rfc3339(&value).ok())
-        .is_some_and(|submitted| {
-            now.signed_duration_since(submitted)
-                >= chrono::Duration::minutes(if scheduled {
-                    SCHEDULED_REVIEW_AFTER_MINUTES
-                } else {
-                    VERIFICATION_REVIEW_AFTER_MINUTES
-                })
+        .is_some_and(|evidence| {
+            let marker = &evidence["verificationResume"];
+            marker["version"] == 1
+                && marker["assignmentId"] == candidate.assignment_id
+                && marker["intentSha256"]
+                    == format!("{:x}", sha2::Sha256::digest(intent.as_bytes()))
         })
 }
 
@@ -192,26 +188,82 @@ fn first_scheduled_check(intent: Option<&str>) -> Option<DateTime<Utc>> {
         .checked_add_signed(chrono::Duration::seconds(SCHEDULED_FIRST_CHECK_SECONDS))
 }
 
-/// Only reviews caused by the old thirty-minute policy are reopened automatically.
-fn scheduled_deadline_review(
-    scheduled: bool,
-    intent: Option<&str>,
-    evidence: Option<&str>,
-) -> bool {
-    scheduled
+/// Reopen only the retired age-limit reviews with a complete immutable Post identity.
+/// Missing identity, an operator pause or other explicit review must stay parked.
+fn obsolete_deadline_review(intent: Option<&str>, evidence: Option<&str>) -> bool {
+    has_post_intent(intent)
         && submission_identity_complete(intent)
         && needs_review(evidence)
-        && !review_deadline_reached(intent, Utc::now(), true)
         && evidence
             .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
             .is_some_and(|value| {
-                value["verificationStatus"]["cause"] == "verificationDeadline"
-                    && value["verificationStatus"]["reviewAfterMinutes"]
-                        == VERIFICATION_REVIEW_AFTER_MINUTES
+                let status = &value["verificationStatus"];
+                status["cause"] == "verificationDeadline"
+                    && matches!(status["reviewAfterMinutes"].as_i64(), Some(30 | 240))
             })
 }
 
 impl Database {
+    /// Explicit operator stop: preserve Post intents/receipts, invalidate pending observers,
+    /// and park automatic verification. Never make submitted rows retryable for Post.
+    pub fn stop_publish_operation(&self, campaign_id: &str) -> anyhow::Result<Vec<String>> {
+        let mut conn = self.conn()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let exists: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM publish_campaigns WHERE id=?1)",
+            [campaign_id],
+            |r| r.get(0),
+        )?;
+        anyhow::ensure!(exists, "Không tìm thấy tác vụ đăng bài");
+        let mut statement=tx.prepare("SELECT id,udid,state,evidence_json,effect_intent FROM publish_assignments WHERE campaign_id=?1")?;
+        let rows = statement
+            .query_map([campaign_id], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, Option<String>>(3)?,
+                    r.get::<_, Option<String>>(4)?,
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        drop(statement);
+        let now = Utc::now().to_rfc3339();
+        let mut devices = Vec::new();
+        for (id, udid, state, raw, intent) in rows {
+            if !devices.contains(&udid) {
+                devices.push(udid);
+            }
+            if state == "succeeded" {
+                continue;
+            }
+            let mut evidence = raw
+                .as_deref()
+                .map(serde_json::from_str::<serde_json::Value>)
+                .transpose()?
+                .unwrap_or_else(|| serde_json::json!({}));
+            evidence["verificationStatus"] = serde_json::json!({"state":"needsReview","cause":"operatorStopped","reasonCode":"operatorStopped","reason":"Người dùng đã dừng tác vụ; giữ kết quả đã đăng, không tự gửi lại","checkedAt":now,"nextCheckAt":null});
+            let next = if intent.is_some()
+                || matches!(state.as_str(), "posting" | "verifying" | "uncertain")
+            {
+                "uncertain"
+            } else {
+                "cancelled"
+            };
+            tx.execute("UPDATE publish_assignments SET state=?2,evidence_json=?3,revision=revision+1,updated_at=?4 WHERE id=?1",params![id,next,evidence.to_string(),now])?;
+        }
+        tx.execute("UPDATE publish_campaigns SET state=CASE WHEN state='succeeded' THEN state ELSE 'cancelled' END,revision=revision+1,updated_at=?2 WHERE id=?1",params![campaign_id,now])?;
+        tx.execute("UPDATE publish_dispatch_jobs SET state='cancelled' WHERE campaign_id=?1 AND state='queued'",[campaign_id])?;
+        tx.execute("INSERT INTO settings(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",params![format!("operation.stop.publish:{campaign_id}"),serde_json::json!({"requestedAt":now}).to_string()])?;
+        tx.commit()?;
+        Ok(devices)
+    }
+
+    pub fn publish_operation_stopped(&self, campaign_id: &str) -> anyhow::Result<bool> {
+        Ok(self
+            .get_setting(&format!("operation.stop.publish:{campaign_id}"))?
+            .is_some())
+    }
     /// A stale submission is still unresolved, but a fresh own-profile observation
     /// proves this old receipt is no longer an active upload blocking the phone.
     /// This does not settle publication, create a link or reopen its Send claim.
@@ -275,16 +327,14 @@ impl Database {
         let mut evidence: serde_json::Value = serde_json::from_str(evidence_json)?;
         evidence["verificationStatus"] = serde_json::json!({
             "state":"pending",
-            "reason":format!(
-                "Đã gửi bài hẹn giờ; tự kiểm tra liên kết sau 2 phút rồi định kỳ ở nền, tối đa {SCHEDULED_REVIEW_AFTER_MINUTES} phút"
-            ),
+            "reason":"Đã gửi bài hẹn giờ; tự kiểm tra liên kết sau 2 phút rồi mỗi 5 phút đến khi xác minh được link",
             "cause":"deferredScheduledLink", "attempts":0, "readFailures":0,
-            "reviewAfterMinutes":SCHEDULED_REVIEW_AFTER_MINUTES, "nextCheckAt":first_scheduled_check(intent.as_deref()).map(|at|at.to_rfc3339()),
+            "checkIntervalSeconds":VERIFICATION_CHECK_SECONDS, "reviewAfterMinutes":null, "deadlineAt":null, "nextCheckAt":first_scheduled_check(intent.as_deref()).map(|at|at.to_rfc3339()),
         });
         Ok(evidence.to_string())
     }
 
-    /// Automatic checks omit explicit review except the obsolete scheduled deadline.
+    /// Automatic checks omit explicit review except the retired age limits.
     pub fn pending_publish_verifications(
         &self,
         limit: usize,
@@ -322,11 +372,15 @@ impl Database {
         let now = Utc::now();
         let conn = self.conn()?;
         let mut statement = conn.prepare(
-            "SELECT a.id,a.campaign_id,a.bundle_id,a.udid,a.revision,a.effect_intent,a.evidence_json,a.state,c.run_at IS NOT NULL
+            "SELECT a.id,a.campaign_id,a.bundle_id,a.udid,a.revision,a.effect_intent,a.evidence_json,a.state,c.run_at IS NOT NULL,
+             COALESCE(json_extract(c.request_json,'$.verificationContractVersion')=1,0)
              FROM publish_assignments a JOIN publish_campaigns c ON c.id=a.campaign_id
+             LEFT JOIN publish_dispatch_turns t ON t.udid=a.udid
              WHERE a.state IN ('verifying','uncertain','succeeded') AND (?1 IS NULL OR a.campaign_id=?1)
-             AND (?2=0 OR json_extract(c.request_json,'$.verificationContractVersion')=1)
-             ORDER BY a.updated_at,a.campaign_id,a.ordinal"
+             AND NOT EXISTS(SELECT 1 FROM settings s WHERE s.key='operation.stop.publish:'||a.campaign_id)
+             AND (?2=0 OR json_extract(c.request_json,'$.verificationContractVersion')=1
+                 OR (json_valid(a.evidence_json) AND json_extract(a.evidence_json,'$.verificationResume.version')=1))
+             ORDER BY COALESCE(t.last_turn,0),a.updated_at,a.campaign_id,a.ordinal"
         )?;
         let rows = statement.query_map(params![campaign_id, current_contract_only], |row| {
             Ok((
@@ -341,6 +395,7 @@ impl Database {
                     evidence_json: row.get(6)?,
                 },
                 row.get::<_, String>(7)?,
+                row.get::<_, bool>(9)?,
             ))
         })?;
         // Prefer due rows so a long not-due schedule tail cannot starve the worker / expire
@@ -348,11 +403,16 @@ impl Database {
         let mut due = Vec::new();
         let mut later = Vec::new();
         for row in rows {
-            let (candidate, state) = row?;
+            let (candidate, state, current_contract) = row?;
+            if current_contract_only
+                && !current_contract
+                && !explicitly_resumed_verification(&candidate)
+            {
+                continue;
+            }
             if !(include_review
                 || !needs_review(candidate.evidence_json.as_deref())
-                || scheduled_deadline_review(
-                    candidate.scheduled,
+                || obsolete_deadline_review(
                     candidate.effect_intent.as_deref(),
                     candidate.evidence_json.as_deref(),
                 ))
@@ -366,7 +426,10 @@ impl Database {
             }
             if candidate.is_due(now) {
                 due.push(candidate);
-            } else {
+                if due.len() == limit {
+                    break;
+                }
+            } else if later.len() < limit {
                 later.push(candidate);
             }
         }
@@ -480,7 +543,7 @@ impl Database {
         Ok(guard)
     }
 
-    /// Resume obsolete scheduled deadlines; enforce each submission verification budget.
+    /// Resume retired age-limit reviews and park receipts missing submission identity.
     /// This is a worker mutation, never a UI read. Existing uploads and imports remain owned.
     pub fn expire_due_publish_verifications(&self) -> anyhow::Result<Vec<String>> {
         self.expire_publish_verifications(false)
@@ -498,40 +561,19 @@ impl Database {
         for candidate in
             self.publish_verification_candidates(1000, None, false, current_contract_only)?
         {
-            let reopen = scheduled_deadline_review(
-                candidate.scheduled,
+            let reopen = obsolete_deadline_review(
                 candidate.effect_intent.as_deref(),
                 candidate.evidence_json.as_deref(),
             );
-            if !reopen
-                && submission_identity_complete(candidate.effect_intent.as_deref())
-                && !review_deadline_reached(
-                    candidate.effect_intent.as_deref(),
-                    Utc::now(),
-                    candidate.scheduled,
-                )
-            {
+            if !reopen && submission_identity_complete(candidate.effect_intent.as_deref()) {
                 continue;
             }
-            let evidence = candidate
-                .evidence_json
-                .as_deref()
-                .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok());
             let reason = if reopen {
-                evidence
-                    .as_ref()
-                    .and_then(|value| value["verificationStatus"]["reason"].as_str())
-                    .or_else(|| {
-                        evidence.as_ref().and_then(|value| {
-                            value.get("post").unwrap_or(value)["linkCaptureReason"].as_str()
-                        })
-                    })
-                    .unwrap_or("TikTok vẫn đang xử lý; tiếp tục kiểm tra liên kết")
-                    .to_owned()
+                "Tiếp tục tự kiểm tra liên kết mỗi 5 phút; bài đã gửi chưa được xác minh"
             } else {
-                deadline_review_reason(candidate.scheduled)
+                LEGACY_IDENTITY_REVIEW_REASON
             };
-            if self.record_publish_verification_pending(&candidate, &reason)?
+            if self.record_publish_verification_pending(&candidate, reason)?
                 && !campaigns.contains(&candidate.campaign_id)
             {
                 campaigns.push(candidate.campaign_id);
@@ -566,14 +608,49 @@ impl Database {
         reason_code: &str,
         diagnostic: Option<&serde_json::Value>,
     ) -> anyhow::Result<bool> {
+        self.record_publish_verification_diagnostic_inner(
+            candidate,
+            reason,
+            reason_code,
+            diagnostic,
+            false,
+        )
+    }
+
+    /// Only an explicit warm check may enroll an old publication into periodic
+    /// verification. The marker binds its unchanged Post identity, not its epoch.
+    pub fn record_manual_publish_verification_diagnostic(
+        &self,
+        candidate: &PendingPublishVerification,
+        reason: &str,
+        reason_code: &str,
+        diagnostic: Option<&serde_json::Value>,
+    ) -> anyhow::Result<bool> {
+        self.record_publish_verification_diagnostic_inner(
+            candidate,
+            reason,
+            reason_code,
+            diagnostic,
+            true,
+        )
+    }
+
+    fn record_publish_verification_diagnostic_inner(
+        &self,
+        candidate: &PendingPublishVerification,
+        reason: &str,
+        reason_code: &str,
+        diagnostic: Option<&serde_json::Value>,
+        manual: bool,
+    ) -> anyhow::Result<bool> {
         let mut conn = self.conn()?;
         let transaction = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let current: Option<(String,Option<String>,Option<String>,bool)> = transaction.query_row(
-            "SELECT a.state,a.effect_intent,a.evidence_json,c.run_at IS NOT NULL FROM publish_assignments a JOIN publish_campaigns c ON c.id=a.campaign_id WHERE a.id=?1 AND a.campaign_id=?2 AND a.revision=?3",
+        let current: Option<(String,Option<String>,Option<String>)> = transaction.query_row(
+            "SELECT a.state,a.effect_intent,a.evidence_json FROM publish_assignments a WHERE a.id=?1 AND a.campaign_id=?2 AND a.revision=?3",
             params![candidate.assignment_id,candidate.campaign_id,candidate.revision],
-            |row|Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?))
+            |row|Ok((row.get(0)?,row.get(1)?,row.get(2)?))
         ).optional()?;
-        let Some((state, intent, prior, scheduled)) = current else {
+        let Some((state, intent, prior)) = current else {
             return Ok(false);
         };
         if !may_verify(&state, intent.as_deref(), prior.as_deref())
@@ -594,21 +671,30 @@ impl Database {
         }
         let checked = Utc::now();
         let identity_missing = !submission_identity_complete(intent.as_deref());
-        let deadline_hit = review_deadline_reached(intent.as_deref(), checked, scheduled);
+        let legacy: bool = transaction.query_row(
+            "SELECT COALESCE(json_extract(request_json,'$.verificationContractVersion'),0)<>1 FROM publish_campaigns WHERE id=?1",
+            [&candidate.campaign_id],|row|row.get(0))?;
+        let legacy_review = legacy
+            && matches!(
+                reason_code,
+                "draftsObserved" | "composerOrUpload" | "submissionIdentityMissing"
+            );
         let review = identity_missing
+            || legacy_review
             || (needs_review(prior.as_deref())
-                && !scheduled_deadline_review(scheduled, intent.as_deref(), prior.as_deref()))
-            || deadline_hit;
+                && !obsolete_deadline_review(intent.as_deref(), prior.as_deref()));
+        if manual && legacy && !review && has_post_intent(intent.as_deref()) {
+            use sha2::Digest;
+            evidence["verificationResume"] = serde_json::json!({"version":1,"assignmentId":candidate.assignment_id,
+                "intentSha256":format!("{:x}",sha2::Sha256::digest(intent.as_deref().unwrap_or_default().as_bytes())),
+                "requestedAt":checked.to_rfc3339()});
+        }
         let now = checked.to_rfc3339();
         let observation_reason: String = reason.chars().take(512).collect();
         let reason = if identity_missing {
             LEGACY_IDENTITY_REVIEW_REASON.to_owned()
-        } else if deadline_hit && !needs_review(prior.as_deref()) {
-            // Crossing the budget for the first time — replace the last capture note so Sheet H
-            // and Theo dõi both say auto-check stopped instead of the last transient fail.
-            deadline_review_reason(scheduled)
         } else if review && needs_review(prior.as_deref()) {
-            // Keep an existing needsReview reason (or the clearer deadline text if already set).
+            // Preserve the reason for a non-deadline explicit review.
             prior
                 .as_deref()
                 .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
@@ -638,37 +724,29 @@ impl Database {
         } else {
             0
         };
-        let base_delay = if scheduled {
-            SCHEDULED_CHECK_SECONDS
-        } else {
-            30
-        };
-        let delay = base_delay * (1_i64 << read_failures.saturating_sub(1).min(2));
-        let budget_minutes = if scheduled {
-            SCHEDULED_REVIEW_AFTER_MINUTES
-        } else {
-            VERIFICATION_REVIEW_AFTER_MINUTES
-        };
-        let deadline = submitted
-            .as_ref()
-            .and_then(serde_json::Value::as_str)
-            .and_then(|at| DateTime::parse_from_rfc3339(at).ok())
-            .and_then(|at| {
-                at.with_timezone(&Utc)
-                    .checked_add_signed(chrono::Duration::minutes(budget_minutes))
-            });
+        // Each observation is bounded by the driver deadline; between attempts the
+        // phone is released. Persist this cadence, including read failures and restart.
         let next_check = (!review).then(|| {
-            let next = checked + chrono::Duration::seconds(delay);
-            deadline.map_or(next, |end| next.min(end)).to_rfc3339()
+            (checked + chrono::Duration::seconds(VERIFICATION_CHECK_SECONDS)).to_rfc3339()
         });
+        let cause = if identity_missing {
+            "submissionIdentityMissing"
+        } else if review {
+            evidence["verificationStatus"]["cause"]
+                .as_str()
+                .unwrap_or("explicitReview")
+        } else {
+            reason_code
+        }
+        .to_owned();
         evidence["verificationStatus"] = serde_json::json!({
             "state":if review {"needsReview"} else {"pending"},
             "reason":reason,"checkedAt":now,"submittedAt":submitted,
-            "reviewAfterMinutes":if identity_missing {None} else {Some(if scheduled { SCHEDULED_REVIEW_AFTER_MINUTES } else { VERIFICATION_REVIEW_AFTER_MINUTES })},
-            "cause":if identity_missing {"submissionIdentityMissing"} else if review {"verificationDeadline"} else {reason_code},
+            "reviewAfterMinutes":null,"checkIntervalSeconds":VERIFICATION_CHECK_SECONDS,
+            "cause":cause,
             "observationReason":observation_reason,"reasonCode":reason_code,
             "attempts":attempts,"readFailures":read_failures,"nextCheckAt":next_check,
-            "deadlineAt":deadline.map(|at|at.to_rfc3339())
+            "deadlineAt":null
         });
         let next_state = if review { "uncertain" } else { "verifying" };
         let error = if review {

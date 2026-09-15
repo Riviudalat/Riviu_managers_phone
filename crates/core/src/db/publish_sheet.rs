@@ -96,9 +96,10 @@ pub(super) fn reconciled_sheet_delivery_status(
         return Ok((Status::Partial, Scope::None));
     }
     let mut statement = connection.prepare(
-        "SELECT a.state,a.evidence_json,o.state
+        "SELECT a.state,a.evidence_json,CASE WHEN s.superseded_epoch IS NOT NULL THEN 'superseded' ELSE o.state END
          FROM publish_assignments a
          LEFT JOIN publish_sheet_outbox o ON o.assignment_id=a.id
+         LEFT JOIN publish_sheet_sync_state s ON s.assignment_id=a.id
          WHERE a.campaign_id=?1
          ORDER BY a.ordinal",
     )?;
@@ -157,6 +158,13 @@ pub(super) fn reconciled_sheet_delivery_status(
     let all_links_known = rows
         .iter()
         .all(|(_, evidence, _)| evidence_has_post_link(evidence.as_deref()));
+    if all_links_known
+        && rows
+            .iter()
+            .any(|(_, _, state)| state.as_deref() == Some("superseded"))
+    {
+        return Ok((Status::Partial, Scope::None));
+    }
     let sheet_owed = rows
         .iter()
         .any(|(_, _, state)| matches!(state.as_deref(), Some("pending" | "failed")));
@@ -381,9 +389,10 @@ impl Database {
         let limit = crate::publish_sheet::sweep_limit(limit);
         let mut statement = conn.prepare(
             "SELECT assignment_id,campaign_id,post_url,poster,partners_json,attempts,revision,\
-                    last_error,(SELECT COALESCE(CASE WHEN json_valid(a.evidence_json) THEN json_extract(a.evidence_json,'$.post.submittedAt') END,CASE WHEN json_valid(a.evidence_json) THEN json_extract(a.evidence_json,'$.submittedAt') END,CASE WHEN json_valid(a.effect_intent) THEN json_extract(a.effect_intent,'$.submittedAt') END,a.created_at) FROM publish_assignments a WHERE a.id=publish_sheet_outbox.assignment_id)
+                    last_error,COALESCE(posted_at,(SELECT COALESCE(CASE WHEN json_valid(a.effect_intent) THEN json_extract(a.effect_intent,'$.submittedAt') END,CASE WHEN json_valid(a.evidence_json) THEN json_extract(a.evidence_json,'$.post.submittedAt') END,CASE WHEN json_valid(a.evidence_json) THEN json_extract(a.evidence_json,'$.submittedAt') END,a.created_at) FROM publish_assignments a WHERE a.id=publish_sheet_outbox.assignment_id))
              FROM publish_sheet_outbox
              WHERE state <> 'sent'
+             AND NOT EXISTS(SELECT 1 FROM publish_sheet_sync_state s WHERE s.assignment_id=publish_sheet_outbox.assignment_id AND s.superseded_epoch IS NOT NULL)
              ORDER BY created_at ASC
              LIMIT ?1",
         )?;
@@ -417,9 +426,10 @@ impl Database {
         let conn = self.conn()?;
         conn.query_row(
             "SELECT assignment_id,campaign_id,post_url,poster,partners_json,attempts,revision,\
-                    last_error,(SELECT COALESCE(CASE WHEN json_valid(a.evidence_json) THEN json_extract(a.evidence_json,'$.post.submittedAt') END,CASE WHEN json_valid(a.evidence_json) THEN json_extract(a.evidence_json,'$.submittedAt') END,CASE WHEN json_valid(a.effect_intent) THEN json_extract(a.effect_intent,'$.submittedAt') END,a.created_at) FROM publish_assignments a WHERE a.id=publish_sheet_outbox.assignment_id)
+                    last_error,COALESCE(posted_at,(SELECT COALESCE(CASE WHEN json_valid(a.effect_intent) THEN json_extract(a.effect_intent,'$.submittedAt') END,CASE WHEN json_valid(a.evidence_json) THEN json_extract(a.evidence_json,'$.post.submittedAt') END,CASE WHEN json_valid(a.evidence_json) THEN json_extract(a.evidence_json,'$.submittedAt') END,a.created_at) FROM publish_assignments a WHERE a.id=publish_sheet_outbox.assignment_id))
              FROM publish_sheet_outbox
-             WHERE assignment_id=?1 AND state <> 'sent'",
+             WHERE assignment_id=?1 AND state <> 'sent'
+             AND NOT EXISTS(SELECT 1 FROM publish_sheet_sync_state s WHERE s.assignment_id=publish_sheet_outbox.assignment_id AND s.superseded_epoch IS NOT NULL)",
             params![assignment_id],
             |row| {
                 let partners: String = row.get(4)?;
@@ -586,6 +596,10 @@ pub(super) fn queue_sheet_row(
         params![assignment_id,post_url],
     )?;
     if !campaign_sheet_enabled(conn, campaign_id)? {
+        return Ok(());
+    }
+    let retired: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM publish_sheet_sync_state WHERE assignment_id=?1 AND superseded_epoch IS NOT NULL)", [assignment_id], |r|r.get(0))?;
+    if retired {
         return Ok(());
     }
     let delivery_target: Option<String> = conn.query_row(
@@ -790,6 +804,40 @@ mod tests {
     }
 
     #[test]
+    fn periodic_verification_keeps_old_submissions_and_restarts_at_five_minutes() {
+        for scheduled in [false, true] {
+            let (db, path, campaign, assignment, intent) = review_fixture(24 * 60);
+            if scheduled {
+                mark_scheduled(&db, &campaign);
+            }
+            assert!(db.expire_due_publish_verifications().unwrap().is_empty());
+            let row = db.pending_publish_verifications(10).unwrap().remove(0);
+            assert!(db
+                .record_publish_verification_observation(&row, "processing", "linkUnavailable")
+                .unwrap());
+            drop(db);
+            let db = Database::open(&path).unwrap();
+            db.interrupt_orphaned_publish_campaigns().unwrap();
+            let row = db.pending_publish_verifications(10).unwrap().remove(0);
+            let e: serde_json::Value =
+                serde_json::from_str(row.evidence_json.as_deref().unwrap()).unwrap();
+            let status = &e["verificationStatus"];
+            let checked =
+                DateTime::parse_from_rfc3339(status["checkedAt"].as_str().unwrap()).unwrap();
+            assert!(!row.is_due((checked + chrono::Duration::seconds(299)).into()));
+            assert!(row.is_due((checked + chrono::Duration::seconds(300)).into()));
+            assert!(status["deadlineAt"].is_null());
+            assert_eq!(row.effect_intent.as_deref(), Some(intent.as_str()));
+            assert!(!db
+                .claim_publish_assignment_for_posting(&assignment, &intent)
+                .unwrap());
+            assert!(db.pending_publish_sheet_row(&assignment).unwrap().is_none());
+            drop(db);
+            std::fs::remove_file(path).unwrap();
+        }
+    }
+
+    #[test]
     fn scheduled_verification_waits_two_minutes_before_the_first_link_check() {
         let (db, path, campaign, _, intent) = review_fixture(0);
         mark_scheduled(&db, &campaign);
@@ -812,9 +860,9 @@ mod tests {
         for (code, delay) in [
             ("linkUnavailable", 300),
             ("readFailed", 300),
-            ("readFailed", 600),
-            ("readFailed", 1200),
-            ("readFailed", 1200),
+            ("readFailed", 300),
+            ("readFailed", 300),
+            ("readFailed", 300),
             ("linkUnavailable", 300),
         ] {
             let candidate = db.pending_publish_verifications(10).unwrap().remove(0);
@@ -834,7 +882,7 @@ mod tests {
             let next =
                 DateTime::parse_from_rfc3339(status["nextCheckAt"].as_str().unwrap()).unwrap();
             assert_eq!((next - checked).num_seconds(), delay);
-            assert_eq!(status["reviewAfterMinutes"], 240);
+            assert!(status["reviewAfterMinutes"].is_null());
             assert!(!row.is_due(checked.into()));
             assert!(row.is_due(next.into()));
         }
@@ -862,35 +910,17 @@ mod tests {
     }
 
     #[test]
-    fn scheduled_verification_stops_at_four_hours_and_retains_explicit_link_recovery() {
-        for age in [239, 240] {
+    fn scheduled_verification_continues_after_four_hours() {
+        for age in [239, 240, 1440] {
             let (db, path, campaign, assignment, intent) = review_fixture(age);
             mark_scheduled(&db, &campaign);
-            let expired = db.expire_due_publish_verifications().unwrap();
-            if age == 239 {
-                assert!(expired.is_empty());
-                assert_eq!(db.pending_publish_verifications(10).unwrap().len(), 1);
-            } else {
-                assert_eq!(expired, vec![campaign.clone()]);
-                assert!(db.pending_publish_verifications(10).unwrap().is_empty());
-                assert!(db.expire_due_publish_verifications().unwrap().is_empty());
-                let manual = db
-                    .publish_verifications_for_campaign(&campaign, 10)
-                    .unwrap()
-                    .remove(0);
-                let e: serde_json::Value =
-                    serde_json::from_str(manual.evidence_json.as_deref().unwrap()).unwrap();
-                assert_eq!(e["verificationStatus"]["state"], "needsReview");
-                assert_eq!(e["verificationStatus"]["reviewAfterMinutes"], 240);
-                assert!(e["verificationStatus"]["reason"]
-                    .as_str()
-                    .unwrap()
-                    .contains("Tự kiểm tra đã dừng"));
-                assert_eq!(manual.effect_intent.as_deref(), Some(intent.as_str()));
-                assert!(!db
-                    .claim_publish_assignment_for_posting(&assignment, &intent)
-                    .unwrap());
-            }
+            assert!(db.expire_due_publish_verifications().unwrap().is_empty());
+            let candidate = db.pending_publish_verifications(10).unwrap().remove(0);
+            assert!(candidate.is_due(Utc::now()));
+            assert_eq!(candidate.effect_intent.as_deref(), Some(intent.as_str()));
+            assert!(!db
+                .claim_publish_assignment_for_posting(&assignment, &intent)
+                .unwrap());
             drop(db);
             std::fs::remove_file(path).unwrap();
         }
@@ -914,7 +944,7 @@ mod tests {
         assert_eq!(e["post"]["importId"], "keep");
         assert_eq!(e["cleanup"]["state"], "kept");
         assert_eq!(e["verificationStatus"]["attempts"], 0);
-        assert_eq!(e["verificationStatus"]["reviewAfterMinutes"], 240);
+        assert!(e["verificationStatus"]["reviewAfterMinutes"].is_null());
         assert!(e["verificationStatus"]["nextCheckAt"].as_str().is_some());
         assert!(db.pending_publish_sheet_row(&assignment).unwrap().is_none());
         drop(db);
@@ -922,52 +952,80 @@ mod tests {
     }
 
     #[test]
-    fn scheduled_verification_resumes_only_legacy_deadline_review() {
-        let (db, path, campaign, assignment, intent) = review_fixture(31);
-        assert_eq!(
-            db.expire_due_publish_verifications().unwrap(),
-            vec![campaign.clone()]
-        );
-        assert!(db.pending_publish_verifications(10).unwrap().is_empty());
-        mark_scheduled(&db, &campaign);
-        assert_eq!(db.pending_publish_verifications(10).unwrap().len(), 1);
-        assert_eq!(
-            db.expire_due_publish_verifications().unwrap(),
-            vec![campaign.clone()]
-        );
-        let row = db.pending_publish_verifications(10).unwrap().remove(0);
-        assert!(!row.is_due(Utc::now()));
-        assert_eq!(row.effect_intent.as_deref(), Some(intent.as_str()));
-        assert_eq!(
-            db.get_publish_campaign(&campaign)
-                .unwrap()
-                .unwrap()
-                .assignments[0]
-                .state,
-            crate::PublishCampaignState::Verifying
-        );
-        assert!(!db
-            .claim_publish_assignment_for_posting(&assignment, &intent)
-            .unwrap());
-        // A review parked for another reason stays parked, including after startup.
-        let mut e: serde_json::Value =
-            serde_json::from_str(row.evidence_json.as_deref().unwrap()).unwrap();
-        e["verificationStatus"]["state"] = serde_json::json!("needsReview");
-        e["verificationStatus"]["cause"] = serde_json::json!("submissionIdentityMissing");
-        db.update_publish_assignment_state(
-            &assignment,
-            crate::PublishCampaignState::Uncertain,
-            Some("post_verification_needs_review"),
-            Some(&e.to_string()),
-        )
-        .unwrap();
-        assert!(db.pending_publish_verifications(10).unwrap().is_empty());
-        drop(db);
-        std::fs::remove_file(path).unwrap();
+    fn periodic_verification_resumes_only_obsolete_deadlines_and_preserves_explicit_review() {
+        for scheduled in [false, true] {
+            for budget in [30, 240] {
+                let (db, path, campaign, assignment, intent) = review_fixture(1440);
+                if scheduled {
+                    mark_scheduled(&db, &campaign);
+                }
+                let legacy = serde_json::json!({"post":{"state":"submitted"},"cleanup":{"state":"kept"},"verificationStatus":{"state":"needsReview","cause":"verificationDeadline","reviewAfterMinutes":budget,"reason":"old deadline"}});
+                db.update_publish_assignment_state(
+                    &assignment,
+                    crate::PublishCampaignState::Uncertain,
+                    Some("post_verification_needs_review"),
+                    Some(&legacy.to_string()),
+                )
+                .unwrap();
+                assert_eq!(
+                    db.expire_due_publish_verifications().unwrap(),
+                    vec![campaign.clone()]
+                );
+                assert!(db.expire_due_publish_verifications().unwrap().is_empty());
+                let row = db.pending_publish_verifications(10).unwrap().remove(0);
+                assert!(!row.is_due(Utc::now()));
+                assert_eq!(row.effect_intent.as_deref(), Some(intent.as_str()));
+                assert_eq!(
+                    db.get_publish_campaign(&campaign)
+                        .unwrap()
+                        .unwrap()
+                        .assignments[0]
+                        .state,
+                    crate::PublishCampaignState::Verifying
+                );
+                assert!(!db
+                    .claim_publish_assignment_for_posting(&assignment, &intent)
+                    .unwrap());
+                assert!(db.pending_publish_sheet_row(&assignment).unwrap().is_none());
+                // An explicit non-age review must stay parked even after a manual failed read.
+                let mut e: serde_json::Value =
+                    serde_json::from_str(row.evidence_json.as_deref().unwrap()).unwrap();
+                e["verificationStatus"]["state"] = serde_json::json!("needsReview");
+                e["verificationStatus"]["cause"] = serde_json::json!("operatorReview");
+                db.update_publish_assignment_state(
+                    &assignment,
+                    crate::PublishCampaignState::Uncertain,
+                    Some("post_verification_needs_review"),
+                    Some(&e.to_string()),
+                )
+                .unwrap();
+                let row = db
+                    .publish_verifications_for_campaign(&campaign, 10)
+                    .unwrap()
+                    .remove(0);
+                assert!(db
+                    .record_publish_verification_observation(&row, "read failed", "readFailed")
+                    .unwrap());
+                drop(db);
+                let db = Database::open(&path).unwrap();
+                assert!(db.expire_due_publish_verifications().unwrap().is_empty());
+                assert!(db.pending_publish_verifications(10).unwrap().is_empty());
+                let row = db
+                    .publish_verifications_for_campaign(&campaign, 10)
+                    .unwrap()
+                    .remove(0);
+                let e: serde_json::Value =
+                    serde_json::from_str(row.evidence_json.as_deref().unwrap()).unwrap();
+                assert_eq!(e["verificationStatus"]["cause"], "operatorReview");
+                assert!(e["verificationStatus"]["nextCheckAt"].is_null());
+                drop(db);
+                std::fs::remove_file(path).unwrap();
+            }
+        }
     }
 
     #[test]
-    fn verification_review_deadline_stops_automatic_checks_and_preserves_effect_after_restart() {
+    fn verification_periodic_wait_preserves_effect_and_cleanup_after_restart() {
         let (db, path, campaign, assignment, intent) = review_fixture(31);
         let candidate = db.pending_publish_verifications(10).unwrap().remove(0);
         assert!(db
@@ -979,11 +1037,11 @@ mod tests {
         let detail = db.get_publish_campaign(&campaign).unwrap().unwrap();
         assert_eq!(
             detail.assignments[0].state,
-            crate::PublishCampaignState::Uncertain
+            crate::PublishCampaignState::Verifying
         );
         assert_eq!(
             detail.assignments[0].error_code.as_deref(),
-            Some("post_verification_needs_review")
+            Some("post_verification_pending")
         );
         assert_eq!(
             detail.assignments[0].effect_intent.as_deref(),
@@ -993,22 +1051,19 @@ mod tests {
             serde_json::from_str(detail.assignments[0].evidence_json.as_deref().unwrap()).unwrap();
         assert_eq!(evidence["importId"], "keep-import");
         assert_eq!(evidence["cleanup"]["state"], "kept");
-        assert_eq!(evidence["verificationStatus"]["state"], "needsReview");
+        assert_eq!(evidence["verificationStatus"]["state"], "pending");
         assert_eq!(
             detail.campaign.state,
-            crate::PublishCampaignState::Uncertain
+            crate::PublishCampaignState::Verifying
         );
         let snapshot = db
             .get_publish_execution_snapshot(&campaign)
             .unwrap()
             .unwrap();
-        assert_eq!(snapshot.status, crate::PublishExecutionStatus::Uncertain);
+        assert_eq!(snapshot.status, crate::PublishExecutionStatus::Partial);
         assert_eq!(snapshot.retry_scope, crate::PublishRetryScope::LinkAndSheet);
         let summary = crate::operation::project_publish_summary(&detail, Some(&snapshot));
-        assert_eq!(
-            summary.state,
-            crate::operation::OperationRunState::Uncertain
-        );
+        assert_eq!(summary.state, crate::operation::OperationRunState::Running);
         assert_eq!(
             summary.retry_scope,
             Some(crate::PublishRetryScope::LinkAndSheet)
@@ -1019,7 +1074,7 @@ mod tests {
         drop(db);
         let db = Database::open(&path).unwrap();
         db.interrupt_orphaned_publish_campaigns().unwrap();
-        assert!(db.pending_publish_verifications(10).unwrap().is_empty());
+        assert_eq!(db.pending_publish_verifications(10).unwrap().len(), 1);
         assert!(db.has_pending_publish_for_device(&candidate.udid).unwrap());
         assert!(!db
             .claim_publish_assignment_for_posting(&assignment, &intent)
@@ -1054,9 +1109,9 @@ mod tests {
     }
 
     #[test]
-    fn verification_backoff_survives_restart_and_resets_after_a_readable_observation() {
+    fn verification_five_minute_cadence_survives_read_failures_and_restart() {
         let (db, path, campaign, _, intent) = review_fixture(1);
-        for seconds in [30, 60, 120, 120] {
+        for seconds in [300, 300, 300, 300] {
             let candidate = db.pending_publish_verifications(10).unwrap().remove(0);
             assert!(db
                 .record_publish_verification_observation(
@@ -1106,14 +1161,11 @@ mod tests {
     }
 
     #[test]
-    fn verification_review_expiry_ignores_device_presence_and_late_link_settles_once() {
+    fn verification_late_link_settles_once_and_stops_periodic_checks() {
         let (db, path, campaign, assignment, intent) = review_fixture(31);
-        assert_eq!(
-            db.expire_due_publish_verifications().unwrap(),
-            vec![campaign.clone()]
-        );
         assert!(db.expire_due_publish_verifications().unwrap().is_empty());
-        assert!(db.pending_publish_verifications(10).unwrap().is_empty());
+        assert!(db.expire_due_publish_verifications().unwrap().is_empty());
+        assert_eq!(db.pending_publish_verifications(10).unwrap().len(), 1);
         let review = db
             .publish_verifications_for_campaign(&campaign, 10)
             .unwrap()
@@ -1147,6 +1199,7 @@ mod tests {
         assert_eq!(evidence["importId"], "keep-import");
         assert_eq!(db.pending_publish_sheet_rows(10).unwrap().len(), 1);
         assert!(!db.has_pending_publish_for_device(&review.udid).unwrap());
+        assert!(db.pending_publish_verifications(10).unwrap().is_empty());
         assert!(!db
             .claim_publish_assignment_for_posting(&assignment, &intent)
             .unwrap());

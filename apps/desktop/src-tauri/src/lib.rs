@@ -13,6 +13,7 @@ pub mod deployment_check;
 mod farm_commands;
 mod flow_commands;
 mod flow_connector_commands;
+mod google_sheet_commands;
 mod gui_service;
 mod idle_sweeper;
 mod inspector_commands;
@@ -24,6 +25,7 @@ mod nurture_schedule;
 mod operator_commands;
 mod orchestration_commands;
 mod peripherals;
+mod phone_app_completion;
 mod public_cleanup_commands;
 mod publish_commands;
 mod publish_scheduler;
@@ -371,6 +373,14 @@ pub fn run() {
             agent_commands::agent_repair,
             agent_commands::agent_bulk_repair,
             commands::list_devices,
+            google_sheet_commands::google_sheets_status,
+            google_sheet_commands::google_sheets_configure,
+            google_sheet_commands::google_sheets_login,
+            google_sheet_commands::google_sheets_cancel,
+            google_sheet_commands::google_sheets_disconnect,
+            google_sheet_commands::google_sheets_pick_file,
+            google_sheet_commands::google_sheets_list_tabs,
+            google_sheet_commands::google_sheets_connect,
             commands::list_device_work_states,
             commands::refresh_devices,
             commands::prepare_device,
@@ -449,6 +459,8 @@ pub fn run() {
             commands::operation_query_runs,
             farm_commands::operation_cancel_batch,
             commands::operation_get_run,
+            commands::operation_stop,
+            commands::operation_stop_status,
             commands::operation_device_log,
             commands::run_script,
             commands::cancel_job,
@@ -592,11 +604,13 @@ pub fn run() {
             publish_commands::publish_schedule_create,
             publish_commands::publish_schedule_reschedule,
             publish_commands::publish_list,
+            publish_commands::publish_device_guards,
             publish_commands::publish_get,
             publish_commands::publish_reconcile,
             publish_commands::publish_check_links,
             publish_commands::publish_cancel,
             publish_commands::publish_execute,
+            publish_commands::publish_retry_assignment,
             publish_commands::publish_readiness,
             publish_commands::publish_sheet_get_config,
             gui_service::gui_service_status,
@@ -609,6 +623,9 @@ pub fn run() {
             gui_service::gui_diagnostics_export,
             publish_commands::publish_sheet_check,
             publish_commands::publish_sheet_prepare,
+            publish_commands::publish_sheet_reset_reporting,
+            publish_commands::publish_get_limits,
+            publish_commands::publish_set_limits,
             publish_commands::publish_sheet_save_config,
         ])
         .build(tauri::generate_context!())
@@ -1058,6 +1075,10 @@ mod tests {
         ),
         ("commands/device.rs", include_str!("commands/device.rs")),
         ("commands/jobs.rs", include_str!("commands/jobs.rs")),
+        (
+            "commands/operation_stop.rs",
+            include_str!("commands/operation_stop.rs"),
+        ),
         ("commands/system.rs", include_str!("commands/system.rs")),
         ("commands/view.rs", include_str!("commands/view.rs")),
         ("farm_commands.rs", include_str!("farm_commands.rs")),
@@ -1092,6 +1113,10 @@ mod tests {
         ("nurture_commands.rs", include_str!("nurture_commands.rs")),
         ("peripherals.rs", include_str!("peripherals.rs")),
         (
+            "publish_commands/mod.rs",
+            include_str!("publish_commands/mod.rs"),
+        ),
+        (
             "publish_commands/preview.rs",
             include_str!("publish_commands/preview.rs"),
         ),
@@ -1108,8 +1133,16 @@ mod tests {
             include_str!("publish_commands/schedule.rs"),
         ),
         (
+            "publish_commands/retry.rs",
+            include_str!("publish_commands/retry.rs"),
+        ),
+        (
             "publish_commands/sheet.rs",
             include_str!("publish_commands/sheet.rs"),
+        ),
+        (
+            "google_sheet_commands.rs",
+            include_str!("google_sheet_commands.rs"),
         ),
         (
             "publish_commands/legacy.rs",
@@ -1152,6 +1185,7 @@ mod tests {
         ("local_api_status", "read: configured and active API status"),
         ("operation_get_run", "read: normalized DB/runtime detail"),
         ("operation_device_log", "read: run/device-scoped source history"),
+        ("operation_stop_status", "read: stop acknowledgement and per-device cleanup"),
         ("list_scripts", "read: DB"),
         ("example_script", "read: a static fixture"),
         (
@@ -1186,6 +1220,7 @@ mod tests {
              admission, cùng posture với is_rooted",
         ),
         ("publish_sheet_get_config", "read: DB, và không bao giờ trả token"),
+        ("publish_get_limits", "read: host dispatch limits in DB"),
         ("publish_image_preview", "read: bounded local bundle image, hash-verified; touches no device"),
         ("flow_action_catalog", "read: static catalog"),
         ("flow_connector_info", "read: workspace path and credential names; never returns credential values"),
@@ -1237,6 +1272,7 @@ mod tests {
             "drops an in-memory ring the operator asked to clear; touches no device",
         ),
         ("publish_list", "read: DB"),
+        ("publish_device_guards", "read: DB"),
         ("publish_get", "read: DB"),
         // Not reads, and not oversights — each guards differently, on purpose.
         (

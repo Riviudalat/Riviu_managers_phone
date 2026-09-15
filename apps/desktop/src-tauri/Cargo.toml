@@ -1,6 +1,6 @@
 [package]
 name = "riviu-managers-phone"
-version = "0.2.32"
+version = "0.2.34"
 description = "Riviu Manager â€” iPhone and Android device farm"
 authors = ["Riviu"]
 edition = "2021"
@@ -72,6 +72,7 @@ windows = { version = "0.58", features = [
 ] }
 
 [dev-dependencies]
+rusqlite = { workspace = true }
 syn = { version = "2", features = ["full"] }
 proc-macro2 = { version = "1", features = ["span-locations"] }
 # `test-util` only, and only for tests â€” the same line `riviu-core` carries: it unlocks

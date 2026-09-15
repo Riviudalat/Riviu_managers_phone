@@ -1,0 +1,103 @@
+<hierarchy index="0" class="hierarchy" rotation="0" width="1080" height="2094">
+
+  <android.widget.FrameLayout index="0" package="com.ss.android.ugc.trill" class="android.widget.FrameLayout" text="" checkable="false" checked="false" clickable="false" enabled="true" focusable="false" focused="false" long-clickable="false" password="false" scrollable="false" selected="false" bounds="[0,0][996,2136]" displayed="true" a11y-important="true" screen-reader-focusable="false" drawing-order="0" showing-hint="false" dismissable="false" a11y-focused="false" heading="false" live-region="0" context-clickable="false" content-invalid="false" window-id="381">
+
+    <android.widget.LinearLayout index="0" package="com.ss.android.ugc.trill" class="android.widget.LinearLayout" text="" checkable="false" checked="false" clickable="false" enabled="true" focusable="false" focused="false" long-clickable="false" password="false" scrollable="false" selected="false" bounds="[0,0][996,2136]" displayed="true" a11y-important="false" screen-reader-focusable="false" drawing-order="1" showing-hint="false" dismissable="false" a11y-focused="false" heading="false" live-region="0" context-clickable="false" content-invalid="false" window-id="381">
+
+      <android.widget.FrameLayout index="0" package="com.ss.android.ugc.trill" class="android.widget.FrameLayout" text="" checkable="false" checked="false" clickable="false" enabled="true" focusable="false" focused="false" long-clickable="false" password="false" scrollable="false" selected="false" bounds="[0,0][996,2136]" displayed="true" a11y-important="false" screen-reader-focusable="false" drawing-order="2" showing-hint="false" dismissable="false" a11y-focused="false" heading="false" live-region="0" context-clickable="false" content-invalid="false" window-id="381">
+
+        <android.widget.FrameLayout index="0" package="com.ss.android.ugc.trill" class="android.widget.FrameLayout" text="" resource-id="com.ss.android.ugc.trill:id/t7" checkable="false" checked="false" clickable="false" enabled="true" focusable="false" focused="false" long-clickable="false" password="false" scrollable="false" selected="false" bounds="[0,0][996,2136]" displayed="true" a11y-important="false" screen-reader-focusable="false" drawing-order="1" showing-hint="false" dismissable="false" a11y-focused="false" heading="false" live-region="0" context-clickable="false" content-invalid="false" window-id="381">
+
+          <android.widget.FrameLayout index="0" package="com.ss.android.ugc.trill" class="android.widget.FrameLayout" text="" resource-id="android:id/content" checkable="false" checked="false" clickable="false" enabled="true" focusable="false" focused="false" long-clickable="false" password="false" scrollable="false" selected="false" bounds="[0,0][996,2136]" displayed="true" a11y-important="false" screen-reader-focusable="false" drawing-order="1" showing-hint="false" dismissable="false" a11y-focused="false" heading="false" live-region="0" context-clickable="false" content-invalid="false" window-id="381">
+
+            <android.widget.FrameLayout index="0" package="com.ss.android.ugc.trill" class="android.widget.FrameLayout" text="" resource-id="com.ss.android.ugc.trill:id/cyv" checkable="false" checked="false" clickable="false" enabled="true" focusable="false" focused="false" long-clickable="false" password="false" scrollable="false" selected="false" bounds="[0,0][996,2136]" displayed="true" a11y-important="false" screen-reader-focusable="false" drawing-order="1" showing-hint="false" dismissable="false" a11y-focused="false" heading="false" live-region="0" context-clickable="false" content-invalid="false" window-id="381">
+
+              <android.view.ViewGroup index="0" package="com.ss.android.ugc.trill" class="android.view.ViewGroup" text="" resource-id="com.ss.android.ugc.trill:id/d3l" checkable="false" checked="false" clickable="false" enabled="true" focusable="false" focused="false" long-clickable="false" password="false" scrollable="false" selected="false" bounds="[0,63][996,2094]" displayed="true" a11y-important="true" screen-reader-focusable="false" drawing-order="1" showing-hint="false" dismissable="false" a11y-focused="false" heading="false" live-region="0" context-clickable="false" content-invalid="false" window-id="381">
+
+                <android.view.View index="0" package="com.ss.android.ugc.trill" class="android.view.View" text="" resource-id="com.ss.android.ugc.trill:id/r76" checkable="false" checked="false" clickable="true" enabled="true" focusable="false" focused="false" long-clickable="false" password="false" scrollable="false" selected="false" bounds="[0,63][996,2094]" displayed="true" a11y-important="false" screen-reader-focusable="false" drawing-order="1" showing-hint="false" dismissable="false" a11y-focused="false" heading="false" live-region="0" context-clickable="false" content-invalid="false" window-id="381" />
+
+                <android.widget.FrameLayout index="1" package="com.ss.android.ugc.trill" class="android.widget.FrameLayout" text="" content-desc="Bottom sheet" resource-id="com.ss.android.ugc.trill:id/dox" checkable="false" checked="false" clickable="false" enabled="true" focusable="false" focused="false" long-clickable="false" password="false" scrollable="false" selected="false" bounds="[0,1537][996,2094]" displayed="true" a11y-important="false" screen-reader-focusable="false" drawing-order="2" showing-hint="false" dismissable="true" a11y-focused="false" heading="false" live-region="0" context-clickable="false" content-invalid="false" window-id="381">
+
+                  <android.widget.FrameLayout index="0" package="com.ss.android.ugc.trill" class="android.widget.FrameLayout" text="" resource-id="com.ss.android.ugc.trill:id/mxx" checkable="false" checked="false" clickable="false" enabled="true" focusable="false" focused="false" long-clickable="false" password="false" scrollable="false" selected="false" bounds="[0,1537][996,2094]" displayed="true" a11y-important="false" screen-reader-focusable="false" drawing-order="1" showing-hint="false" dismissable="false" a11y-focused="false" heading="false" live-region="0" context-clickable="false" content-invalid="false" window-id="381">
+
+                    <android.widget.RelativeLayout index="0" package="com.ss.android.ugc.trill" class="android.widget.RelativeLayout" text="" resource-id="com.ss.android.ugc.trill:id/osx" checkable="false" checked="false" clickable="false" enabled="true" focusable="false" focused="false" long-clickable="false" password="false" scrollable="false" selected="false" bounds="[0,1537][996,2094]" displayed="true" a11y-important="false" screen-reader-focusable="false" drawing-order="1" showing-hint="false" dismissable="false" a11y-focused="false" heading="false" live-region="0" context-clickable="false" content-invalid="false" window-id="381">
+
+                      <android.widget.FrameLayout index="0" package="com.ss.android.ugc.trill" class="android.widget.FrameLayout" text="" resource-id="com.ss.android.ugc.trill:id/otb" checkable="false" checked="false" clickable="false" enabled="true" focusable="false" focused="false" long-clickable="false" password="false" scrollable="false" selected="false" bounds="[0,1537][996,1674]" displayed="true" a11y-important="false" screen-reader-focusable="false" drawing-order="1" showing-hint="false" dismissable="false" a11y-focused="false" heading="false" live-region="0" context-clickable="false" content-invalid="false" window-id="381">
+
+                        <android.widget.FrameLayout index="0" package="com.ss.android.ugc.trill" class="android.widget.FrameLayout" text="" checkable="false" checked="false" clickable="false" enabled="true" focusable="false" focused="false" long-clickable="false" password="false" scrollable="false" selected="false" bounds="[0,1537][996,1674]" displayed="true" a11y-important="false" screen-reader-focusable="false" drawing-order="2" showing-hint="false" dismissable="false" a11y-focused="false" heading="false" live-region="0" context-clickable="false" content-invalid="false" window-id="381">
+
+                          <android.view.ViewGroup index="0" package="com.ss.android.ugc.trill" class="android.view.ViewGroup" text="" resource-id="com.ss.android.ugc.trill:id/ke7" checkable="false" checked="false" clickable="false" enabled="true" focusable="false" focused="false" long-clickable="false" password="false" scrollable="false" selected="false" bounds="[0,1537][996,1674]" displayed="true" a11y-important="false" screen-reader-focusable="false" drawing-order="1" showing-hint="false" dismissable="false" a11y-focused="false" heading="false" live-region="0" context-clickable="false" content-invalid="false" window-id="381">
+
+                            <android.widget.LinearLayout index="1" package="com.ss.android.ugc.trill" class="android.widget.LinearLayout" text="" resource-id="com.ss.android.ugc.trill:id/kdw" checkable="false" checked="false" clickable="false" enabled="true" focusable="false" focused="false" long-clickable="false" password="false" scrollable="false" selected="false" bounds="[126,1577][954,1635]" displayed="true" a11y-important="true" screen-reader-focusable="false" drawing-order="2" showing-hint="false" dismissable="false" a11y-focused="false" heading="false" live-region="0" context-clickable="false" content-invalid="false" window-id="381">
+
+                              <android.widget.Button index="0" package="com.ss.android.ugc.trill" class="android.widget.Button" text="Switch account" resource-id="com.ss.android.ugc.trill:id/kdu" checkable="false" checked="false" clickable="true" enabled="true" focusable="true" focused="false" long-clickable="false" password="false" scrollable="false" selected="false" bounds="[372,1577][707,1635]" displayed="true" a11y-important="true" screen-reader-focusable="false" drawing-order="1" showing-hint="false" dismissable="false" a11y-focused="false" heading="true" live-region="0" context-clickable="false" content-invalid="false" window-id="381" />
+
+                            </android.widget.LinearLayout>
+
+                            <android.widget.LinearLayout index="2" package="com.ss.android.ugc.trill" class="android.widget.LinearLayout" text="" resource-id="com.ss.android.ugc.trill:id/ke4" checkable="false" checked="false" clickable="false" enabled="true" focusable="false" focused="false" long-clickable="false" password="false" scrollable="false" selected="false" bounds="[954,1553][996,1658]" displayed="true" a11y-important="false" screen-reader-focusable="false" drawing-order="3" showing-hint="false" dismissable="false" a11y-focused="false" heading="false" live-region="0" context-clickable="false" content-invalid="false" window-id="381">
+
+                              <android.widget.Button index="0" package="com.ss.android.ugc.trill" class="android.widget.Button" text="" content-desc="Close" checkable="false" checked="false" clickable="true" enabled="true" focusable="true" focused="false" long-clickable="false" password="false" scrollable="false" selected="false" bounds="[954,1553][996,1658]" displayed="true" a11y-important="true" screen-reader-focusable="false" drawing-order="1" showing-hint="false" dismissable="false" a11y-focused="false" heading="false" live-region="0" context-clickable="false" content-invalid="false" window-id="381" />
+
+                            </android.widget.LinearLayout>
+
+                          </android.view.ViewGroup>
+
+                        </android.widget.FrameLayout>
+
+                      </android.widget.FrameLayout>
+
+                      <android.widget.FrameLayout index="1" package="com.ss.android.ugc.trill" class="android.widget.FrameLayout" text="" resource-id="com.ss.android.ugc.trill:id/ot0" checkable="false" checked="false" clickable="false" enabled="true" focusable="false" focused="false" long-clickable="false" password="false" scrollable="false" selected="false" bounds="[0,1674][996,2094]" displayed="true" a11y-important="false" screen-reader-focusable="false" drawing-order="2" showing-hint="false" dismissable="false" a11y-focused="false" heading="false" live-region="0" context-clickable="false" content-invalid="false" window-id="381">
+
+                        <androidx.recyclerview.widget.RecyclerView index="0" package="com.ss.android.ugc.trill" class="androidx.recyclerview.widget.RecyclerView" text="" checkable="false" checked="false" clickable="false" enabled="true" focusable="true" focused="false" long-clickable="false" password="false" scrollable="false" selected="false" bounds="[0,1674][996,2094]" displayed="true" a11y-important="true" screen-reader-focusable="false" drawing-order="1" showing-hint="false" dismissable="false" a11y-focused="false" heading="false" live-region="0" context-clickable="false" content-invalid="false" window-id="381" is-collection="true">
+
+                          <android.widget.Button index="0" package="com.ss.android.ugc.trill" class="android.widget.Button" text="" content-desc="fixture.account" resource-id="com.ss.android.ugc.trill:id/hms" checkable="false" checked="false" clickable="true" enabled="true" focusable="true" focused="false" long-clickable="false" password="false" scrollable="false" selected="true" bounds="[0,1695][996,1884]" displayed="true" a11y-important="true" screen-reader-focusable="false" drawing-order="1" showing-hint="false" dismissable="false" a11y-focused="false" heading="false" live-region="0" context-clickable="false" content-invalid="false" window-id="381">
+
+                            <android.widget.ImageView index="0" package="com.ss.android.ugc.trill" class="android.widget.ImageView" text="" resource-id="com.ss.android.ugc.trill:id/apz" checkable="false" checked="false" clickable="false" enabled="true" focusable="false" focused="false" long-clickable="false" password="false" scrollable="false" selected="true" bounds="[42,1716][189,1863]" displayed="true" a11y-important="false" screen-reader-focusable="false" drawing-order="1" showing-hint="false" dismissable="false" a11y-focused="false" heading="false" live-region="0" context-clickable="false" content-invalid="false" window-id="381" />
+
+                            <android.widget.LinearLayout index="1" package="com.ss.android.ugc.trill" class="android.widget.LinearLayout" text="" checkable="false" checked="false" clickable="false" enabled="true" focusable="false" focused="false" long-clickable="false" password="false" scrollable="false" selected="true" bounds="[221,1763][922,1816]" displayed="true" a11y-important="false" screen-reader-focusable="false" drawing-order="2" showing-hint="false" dismissable="false" a11y-focused="false" heading="false" live-region="0" context-clickable="false" content-invalid="false" window-id="381">
+
+                              <android.widget.TextView index="0" package="com.ss.android.ugc.trill" class="android.widget.TextView" text="fixture.account" resource-id="com.ss.android.ugc.trill:id/iss" checkable="false" checked="false" clickable="false" enabled="true" focusable="false" focused="false" long-clickable="false" password="false" scrollable="false" selected="true" bounds="[221,1763][488,1816]" displayed="true" a11y-important="true" screen-reader-focusable="false" drawing-order="1" showing-hint="false" dismissable="false" a11y-focused="false" heading="false" live-region="0" context-clickable="false" content-invalid="false" window-id="381" />
+
+                            </android.widget.LinearLayout>
+
+                            <android.widget.ImageView index="2" package="com.ss.android.ugc.trill" class="android.widget.ImageView" text="" resource-id="com.ss.android.ugc.trill:id/dci" checkable="false" checked="false" clickable="false" enabled="true" focusable="false" focused="false" long-clickable="false" password="false" scrollable="false" selected="true" bounds="[975,1758][996,1821]" displayed="true" a11y-important="false" screen-reader-focusable="false" drawing-order="3" showing-hint="false" dismissable="false" a11y-focused="false" heading="false" live-region="0" context-clickable="false" content-invalid="false" window-id="381" />
+
+                          </android.widget.Button>
+
+                          <android.widget.Button index="1" package="com.ss.android.ugc.trill" class="android.widget.Button" text="" content-desc="Add account" resource-id="com.ss.android.ugc.trill:id/hms" checkable="false" checked="false" clickable="true" enabled="true" focusable="true" focused="false" long-clickable="false" password="false" scrollable="false" selected="false" bounds="[0,1884][996,2073]" displayed="true" a11y-important="true" screen-reader-focusable="false" drawing-order="2" showing-hint="false" dismissable="false" a11y-focused="false" heading="false" live-region="0" context-clickable="false" content-invalid="false" window-id="381">
+
+                            <android.widget.ImageView index="0" package="com.ss.android.ugc.trill" class="android.widget.ImageView" text="" resource-id="com.ss.android.ugc.trill:id/apz" checkable="false" checked="false" clickable="false" enabled="true" focusable="false" focused="false" long-clickable="false" password="false" scrollable="false" selected="false" bounds="[42,1905][189,2052]" displayed="true" a11y-important="false" screen-reader-focusable="false" drawing-order="1" showing-hint="false" dismissable="false" a11y-focused="false" heading="false" live-region="0" context-clickable="false" content-invalid="false" window-id="381" />
+
+                            <android.widget.LinearLayout index="1" package="com.ss.android.ugc.trill" class="android.widget.LinearLayout" text="" checkable="false" checked="false" clickable="false" enabled="true" focusable="false" focused="false" long-clickable="false" password="false" scrollable="false" selected="false" bounds="[221,1952][922,2005]" displayed="true" a11y-important="false" screen-reader-focusable="false" drawing-order="2" showing-hint="false" dismissable="false" a11y-focused="false" heading="false" live-region="0" context-clickable="false" content-invalid="false" window-id="381">
+
+                              <android.widget.TextView index="0" package="com.ss.android.ugc.trill" class="android.widget.TextView" text="Add account" resource-id="com.ss.android.ugc.trill:id/iss" checkable="false" checked="false" clickable="false" enabled="true" focusable="false" focused="false" long-clickable="false" password="false" scrollable="false" selected="false" bounds="[221,1952][474,2005]" displayed="true" a11y-important="true" screen-reader-focusable="false" drawing-order="1" showing-hint="false" dismissable="false" a11y-focused="false" heading="false" live-region="0" context-clickable="false" content-invalid="false" window-id="381" />
+
+                            </android.widget.LinearLayout>
+
+                          </android.widget.Button>
+
+                        </androidx.recyclerview.widget.RecyclerView>
+
+                      </android.widget.FrameLayout>
+
+                    </android.widget.RelativeLayout>
+
+                  </android.widget.FrameLayout>
+
+                </android.widget.FrameLayout>
+
+              </android.view.ViewGroup>
+
+            </android.widget.FrameLayout>
+
+          </android.widget.FrameLayout>
+
+        </android.widget.FrameLayout>
+
+      </android.widget.FrameLayout>
+
+    </android.widget.LinearLayout>
+
+  </android.widget.FrameLayout>
+
+</hierarchy>

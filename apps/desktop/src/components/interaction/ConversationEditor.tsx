@@ -1,4 +1,4 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { interactionDraftConversation, interactionParseConversation } from "../../api";
 import { conversationOf, type InteractionDraft } from "../../interactionPlan";
 import type { ConversationStep, DeviceInfo, ResolvedTikTokTarget, ScriptedConversation } from "../../types";
@@ -6,12 +6,24 @@ import { describeError } from "../../describeError";
 
 const empty = (): ScriptedConversation => ({schemaVersion:1,durationMinutes:120,seed:1,targetScripts:[],roleBindings:[]});
 
-export function ConversationEditor({draft, onChange, onRawChange, targets, devices, handles}: {
+export function ConversationEditor({draft, onChange, onRawChange, targets, devices, handles, deviceNumber, deviceLabel, onAssignAccount}: {
   draft: InteractionDraft; onChange:(json:string)=>void; onRawChange?:(json:string)=>void; targets:ResolvedTikTokTarget[];
   devices:DeviceInfo[]; handles:Record<string,string>;
+  deviceNumber?: Map<string,number>; deviceLabel?: Map<string,string>; onAssignAccount?: (udid:string)=>void;
 }) {
   const current=conversationOf(draft) ?? empty();
   const currentRef=useRef(current);currentRef.current=current;
+  const savedKey=JSON.stringify(handles);
+  useEffect(()=>{
+    const saved=JSON.parse(savedKey) as Record<string,string>;
+    const value=currentRef.current;
+    const roleBindings=value.roleBindings.map(role=>Object.hasOwn(saved,role.udid)
+      ? {...role,username:saved[role.udid].trim().replace(/^@+/,"")} : role);
+    if(JSON.stringify(roleBindings)!==JSON.stringify(value.roleBindings)) {
+      generation.current+=1;
+      onChange(JSON.stringify({...value,roleBindings}));
+    }
+  },[savedKey,onChange]);
   const [selected,setSelected]=useState("");const targetKey=targets.some(t=>t.targetKey===selected)?selected:targets[0]?.targetKey ?? "";
   const [raw,setRaw]=useState<Record<string,string>>(()=>{try { const data=JSON.parse(draft.conversationRawJson||"{}"); return data && typeof data==="object" && !Array.isArray(data) ? Object.fromEntries(Object.entries(data).filter((entry):entry is [string,string]=>typeof entry[1]==="string")) : {}; } catch { return {}; }});const [contexts,setContexts]=useState<Record<string,string>>({});const context=contexts[targetKey]??"";const setContext=(value:string)=>{generation.current+=1;setContexts({...contexts,[targetKey]:value});};
   const [direction,setDirection]=useState("Nói tự nhiên, nội dung nối đúng câu trước");
@@ -72,9 +84,11 @@ export function ConversationEditor({draft, onChange, onRawChange, targets, devic
     </tr>)}</tbody></table></div>}
     {roles.length>0&&<><h4>Vai → máy → tài khoản</h4><div className="iw-fields">{roles.map(role=>{
       const binding=current.roleBindings.find(r=>r.roleId===role);return <label className="iw-field" key={role}><span>@{role}</span><select aria-label={`Máy cho vai ${role}`} value={binding?.udid??""} onChange={e=>save({...current,roleBindings:[...current.roleBindings.filter(r=>r.roleId!==role),{roleId:role,udid:e.target.value,username:(handles[e.target.value]??"").replace(/^@/,"")}]})}>
-        <option value="">Chọn máy</option>{devices.filter(d=>d.platform==="android").map(d=><option key={d.udid} value={d.udid}>{d.name} · @{handles[d.udid]||"chưa có nick"}</option>)}
-      </select></label>;
+        <option value="">Chọn máy</option>{devices.filter(d=>d.platform==="android").map(d=><option key={d.udid} value={d.udid}>Máy {deviceNumber?.get(d.udid)??d.udid} · {deviceLabel?.get(d.udid)??d.name} · {handles[d.udid]?`@${handles[d.udid].replace(/^@+/,"")}`:"chưa gán username"}</option>)}
+      </select><span>{binding?.username?`@${binding.username}`:binding?.udid?`Máy ${deviceNumber?.get(binding.udid)??binding.udid} chưa gán username TikTok`:"Chưa chọn máy"}</span>
+      {binding?.udid&&!handles[binding.udid]&&onAssignAccount&&<button type="button" onClick={()=>onAssignAccount(binding.udid)}>Gán tài khoản</button>}</label>;
     })}</div></>}
     <p className="iw-help">Mỗi bài dùng nội dung riêng. Các câu chạy xen kẽ trong cùng khung giờ; reply chờ đúng câu cha và tag được TikTok xác nhận.</p>
+    <p className="iw-help">Username là cấu hình đã lưu trong danh sách thiết bị. Đổi tài khoản trực tiếp trên máy chưa cập nhật danh sách sẽ không tự được phát hiện ở máy được tag. Dùng Đọc tài khoản từ máy để đối chiếu khi cần. Đổi username đã lưu sẽ cập nhật bản nháp và kiểm tra lại trước khi chạy.</p>
   </section>;
 }

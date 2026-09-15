@@ -30,6 +30,7 @@ mod actions;
 mod hierarchy;
 mod live;
 mod recovery;
+mod search;
 // Crate-visible, not private, because the Interaction path needs the *same* jitter
 // history rather than its own: two touch planners on one device would produce a tap
 // distribution neither of them intended. `crate::interaction_hierarchy` is the second
@@ -52,7 +53,7 @@ use crate::driver::{ui_error_kind, UiError, UiErrorKind, UiSession};
 use crate::frame_source::FrameSource;
 use crate::frame_text::{FrameTextSource, NullFrameTextSource};
 use crate::human_behavior::{
-    in_night_window, roll_bool, roll_feed_actions_in_mood, FeedAction, HumanBehavior,
+    in_night_window, roll_bool, roll_nurture_actions, FeedAction, HumanBehavior,
     HumanSessionPolicy, Mood, MoodCycle, PolicyAction,
 };
 use crate::interaction::{
@@ -736,6 +737,15 @@ struct TikTokShutdown {
     error: Option<String>,
 }
 
+impl TikTokShutdown {
+    fn deferred() -> Self {
+        Self {
+            proof: None,
+            error: None,
+        }
+    }
+}
+
 impl NurtureEngine {
     pub fn new(
         db: Arc<Database>,
@@ -806,39 +816,32 @@ impl NurtureEngine {
             .await
     }
 
-    /// Stop TikTok before releasing the session and stream that prove which device and app
-    /// this nurture run owns. Closing the UI context first loses the only safe termination
-    /// route and leaves TikTok alive in the background after the row says the run is done.
-    /// Both operations are attempted so a failed terminate never leaks the control-plane
-    /// capacity as a second problem.
+    /// Record completion while the session still proves the owned device and package.
+    /// Desktop completion releases the context after persisting a request, then closes
+    /// TikTok when the shared gate finds no remaining device work. Standalone engines
+    /// retain immediate termination and actual process-absence proof.
     async fn shutdown_tiktok(
         &self,
         ui_context: UiWithStreamContext,
         bundle_id: &str,
     ) -> TikTokShutdown {
-        let terminate = self
+        match self
             .control
-            .terminate_streaming_app(&ui_context, bundle_id)
-            .await;
-        let close = self.control.close_ui_context(ui_context).await;
-        match (terminate, close) {
-            (Ok(proof), Ok(_)) => TikTokShutdown {
-                proof: Some(proof),
-                error: None,
-            },
-            (Err(terminate), Ok(_)) => TikTokShutdown {
+            .complete_app_session(ui_context, bundle_id)
+            .await
+        {
+            Ok(crate::device_control::AppCompletionDisposition::ProcessAbsent(proof)) => {
+                TikTokShutdown {
+                    proof: Some(proof),
+                    error: None,
+                }
+            }
+            Ok(crate::device_control::AppCompletionDisposition::Deferred) => {
+                TikTokShutdown::deferred()
+            }
+            Err(error) => TikTokShutdown {
                 proof: None,
-                error: Some(format!("không tắt được TikTok: {terminate}")),
-            },
-            (Ok(proof), Err(close)) => TikTokShutdown {
-                proof: Some(proof),
-                error: Some(format!("không đóng được phiên điều khiển: {close}")),
-            },
-            (Err(terminate), Err(close)) => TikTokShutdown {
-                proof: None,
-                error: Some(format!(
-                    "không tắt được TikTok: {terminate}; không đóng được phiên điều khiển: {close}"
-                )),
+                error: Some(format!("không hoàn tất dọn TikTok: {error}")),
             },
         }
     }
@@ -850,6 +853,16 @@ impl NurtureEngine {
         udid: &str,
         bundle_id: &str,
     ) -> TikTokShutdown {
+        match self.control.request_app_completion(udid, bundle_id) {
+            Ok(true) => return TikTokShutdown::deferred(),
+            Ok(false) => {}
+            Err(error) => {
+                return TikTokShutdown {
+                    proof: None,
+                    error: Some(format!("không ghi được yêu cầu đóng TikTok: {error}")),
+                }
+            }
+        }
         let context = match self
             .control
             .acquire_exclusive(udid, DeviceWorkOwner::Nurture)
@@ -919,32 +932,45 @@ impl NurtureEngine {
         }
         let cleanup = match self.control.resolve_tiktok_package(&status.udid).await {
             Ok(bundle_id) => {
-                let context = match self
+                match self
                     .control
-                    .acquire_exclusive(&status.udid, DeviceWorkOwner::Nurture)
-                    .await
+                    .request_app_completion(&status.udid, &bundle_id)
                 {
-                    Ok(context) => context,
-                    Err(error) => {
-                        status.finish(Outcome::Partial);
-                        status.last_message =
-                            "Phiên Nuôi bị gián đoạn khi ứng dụng khởi động lại".to_string();
-                        status.updated_at = Some(chrono::Utc::now());
-                        Self::record_cleanup(
-                            &mut status,
-                            TikTokShutdown {
-                                proof: None,
-                                error: Some(format!(
+                    Ok(true) => TikTokShutdown::deferred(),
+                    Err(error) => TikTokShutdown {
+                        proof: None,
+                        error: Some(format!(
+                            "không ghi được yêu cầu đóng TikTok sau khởi động lại: {error}"
+                        )),
+                    },
+                    Ok(false) => {
+                        let context = match self
+                            .control
+                            .acquire_exclusive(&status.udid, DeviceWorkOwner::Nurture)
+                            .await
+                        {
+                            Ok(context) => context,
+                            Err(error) => {
+                                status.finish(Outcome::Partial);
+                                status.last_message =
+                                    "Phiên Nuôi bị gián đoạn khi ứng dụng khởi động lại"
+                                        .to_string();
+                                status.updated_at = Some(chrono::Utc::now());
+                                Self::record_cleanup(
+                                    &mut status,
+                                    TikTokShutdown {
+                                        proof: None,
+                                        error: Some(format!(
                                     "không lấy được lease để tắt TikTok sau khởi động lại: {error}"
                                 )),
-                            },
-                        );
-                        return status;
-                    }
-                };
-                let terminate = self.control.terminate_app(&context, &bundle_id).await;
-                let close = self.control.close_exclusive_context(context);
-                match (terminate, close) {
+                                    },
+                                );
+                                return status;
+                            }
+                        };
+                        let terminate = self.control.terminate_app(&context, &bundle_id).await;
+                        let close = self.control.close_exclusive_context(context);
+                        match (terminate, close) {
                     (Ok(proof), Ok(_)) => TikTokShutdown {
                         proof: Some(proof),
                         error: None,
@@ -968,6 +994,8 @@ impl NurtureEngine {
                         )),
                     },
                 }
+                    }
+                }
             }
             Err(error) => TikTokShutdown {
                 proof: None,
@@ -990,6 +1018,11 @@ impl NurtureEngine {
         }
         status.updated_at = Some(chrono::Utc::now());
         Self::record_cleanup(&mut status, cleanup);
+        if status.cleanup_state == NurtureCleanupState::Deferred {
+            status
+                .last_message
+                .push_str("; chờ đóng TikTok khi máy hết công việc");
+        }
         status
     }
 
@@ -999,6 +1032,8 @@ impl NurtureEngine {
     ) -> Option<String> {
         status.cleanup_state = if cleanup.proof.is_some() {
             NurtureCleanupState::ProcessAbsent
+        } else if cleanup.error.is_none() {
+            NurtureCleanupState::Deferred
         } else {
             NurtureCleanupState::Failed
         };
@@ -1851,13 +1886,7 @@ impl NurtureEngine {
         pool: &[String],
     ) -> anyhow::Result<(FeedStep, CommentRecoveryAction)> {
         let mut comment_recovery_action = CommentRecoveryAction::None;
-        let plan = roll_feed_actions_in_mood(
-            settings.like_prob,
-            settings.comment_prob,
-            settings.save_prob,
-            settings.follow_prob,
-            mood,
-        );
+        let plan = roll_nurture_actions(settings, mood);
         for selected in
             crate::human_behavior::ordered_feed_actions(&plan, &settings.workflow_action_order)
         {
@@ -2666,7 +2695,9 @@ impl NurtureEngine {
                 return Ok(progress.status.clone());
             }
             // The ordinary iOS case: no geometry, so use pixels.
-            hierarchy::HierarchySession::NotSupported => {}
+            hierarchy::HierarchySession::NotSupported => {
+                anyhow::ensure!(settings.feed_source != crate::types::NurtureFeedSource::Search,"Keyword search requires Android accessibility");
+            }
             // Geometry works but something measured is missing. Stop, rather than
             // falling through to a pixel engine whose only calibrated layout is an
             // iPhone 8. The reason is already in `progress.status.last_message`.
@@ -3186,6 +3217,9 @@ impl NurtureEngine {
                     }
                 }
                 match Self::record_cleanup(&mut status, shutdown) {
+                    None if status.cleanup_state == NurtureCleanupState::Deferred => status
+                        .last_message
+                        .push_str(", chờ đóng TikTok khi máy hết công việc"),
                     None => status.last_message.push_str(", đã tắt sạch TikTok"),
                     Some(error) => {
                         let outcome = if status.videos_done == 0 {
@@ -3238,6 +3272,10 @@ impl NurtureEngine {
                     status
                         .last_message
                         .push_str(&format!("; lỗi dọn TikTok: {cleanup}"));
+                } else if status.cleanup_state == NurtureCleanupState::Deferred {
+                    status
+                        .last_message
+                        .push_str(", chờ đóng TikTok khi máy hết công việc");
                 } else {
                     status.last_message.push_str(", đã tắt sạch TikTok");
                 }
@@ -3786,6 +3824,7 @@ mod tests {
         );
         let settings = NurtureSettings {
             comment_prob: 1,
+            comment_enabled: true,
             ..Default::default()
         };
 
@@ -4075,15 +4114,9 @@ mod tests {
             .split("async fn shutdown_tiktok")
             .nth(1)
             .expect("shutdown helper");
-        let terminate = helper
-            .find("terminate_streaming_app")
-            .expect("terminate TikTok first");
-        let close = helper
-            .find("close_ui_context")
-            .expect("then release the UI context");
         assert!(
-            terminate < close,
-            "TikTok must stop before its session is released"
+            helper.contains("complete_app_session(ui_context, bundle_id)"),
+            "completion must use the shared owned-session boundary"
         );
     }
 
@@ -4123,6 +4156,98 @@ mod tests {
         assert_eq!(status.cleanup_state, NurtureCleanupState::Failed);
         assert!(status.cleanup_proof.is_none());
         assert_eq!(status.cleanup_error, error);
+    }
+
+    #[tokio::test]
+    async fn pending_completion_preserves_app_during_open_failure_and_orphan_recovery() {
+        let driver = Arc::new(MissingTextDriver::default());
+        let control = Arc::new(DeviceControlPlane::new(
+            driver.clone(),
+            Arc::new(crate::DeviceWorkCoordinator::new()),
+            Arc::new(crate::StreamBudgetManager::default()),
+        ));
+        let requested = Arc::new(Mutex::new(Vec::new()));
+        let recorded = requested.clone();
+        control.set_app_completion_handler(Arc::new(move |udid, package| {
+            recorded.lock().push((udid.to_owned(), package.to_owned()));
+            Ok(())
+        }));
+        let db_path =
+            std::env::temp_dir().join(format!("nurture-deferred-{}.db", uuid::Uuid::new_v4()));
+        let engine = NurtureEngine::new(
+            Arc::new(Database::open(&db_path).unwrap()),
+            control.clone(),
+            Arc::new(NullFrameSource),
+            std::env::temp_dir(),
+        );
+        let cleanup = engine
+            .shutdown_tiktok_after_open_failure("open-failure-device", "com.ss.android.ugc.trill")
+            .await;
+        let mut failed_open = NurtureSessionStatus::new("open-failure-device");
+        assert!(NurtureEngine::record_cleanup(&mut failed_open, cleanup).is_none());
+        assert_eq!(failed_open.cleanup_state, NurtureCleanupState::Deferred);
+        assert!(failed_open.cleanup_proof.is_none());
+        let mut orphaned = NurtureSessionStatus::new("orphaned-device");
+        orphaned.running = true;
+        orphaned.phase = NurturePhase::Watching;
+        orphaned.started_at = Some(chrono::Utc::now());
+        let recovered = engine.recover_orphaned_session(orphaned).await;
+        assert!(!recovered.running);
+        assert_eq!(recovered.cleanup_state, NurtureCleanupState::Deferred);
+        assert!(recovered.cleanup_proof.is_none());
+        assert!(recovered.cleanup_error.is_none());
+        assert!(recovered.last_message.contains("chờ đóng TikTok"));
+        assert!(!recovered.last_message.contains("đã tắt sạch"));
+        let queued = engine
+            .recover_orphaned_session(NurtureSessionStatus::new("queued-device"))
+            .await;
+        assert_eq!(queued.cleanup_state, NurtureCleanupState::Pending);
+        assert_eq!(
+            requested.lock().as_slice(),
+            &[
+                (
+                    "open-failure-device".into(),
+                    "com.ss.android.ugc.trill".into()
+                ),
+                (
+                    "orphaned-device".into(),
+                    crate::tiktok_target::IOS_TIKTOK_BUNDLE.into()
+                ),
+            ]
+        );
+        assert_eq!(driver.terminate_calls.load(Ordering::Relaxed), 0);
+        assert!(control.current_work_owner("open-failure-device").is_none());
+        assert!(control.current_work_owner("orphaned-device").is_none());
+    }
+
+    #[tokio::test]
+    async fn completion_persistence_failure_does_not_fall_back_to_termination() {
+        let driver = Arc::new(MissingTextDriver::default());
+        let control = Arc::new(DeviceControlPlane::new(
+            driver.clone(),
+            Arc::new(crate::DeviceWorkCoordinator::new()),
+            Arc::new(crate::StreamBudgetManager::default()),
+        ));
+        control.set_app_completion_handler(Arc::new(|_, _| {
+            Err("fixture database write failed".into())
+        }));
+        let db_path =
+            std::env::temp_dir().join(format!("nurture-defer-failed-{}.db", uuid::Uuid::new_v4()));
+        let engine = NurtureEngine::new(
+            Arc::new(Database::open(&db_path).unwrap()),
+            control,
+            Arc::new(NullFrameSource),
+            std::env::temp_dir(),
+        );
+        let cleanup = engine
+            .shutdown_tiktok_after_open_failure("fixture-device", "com.ss.android.ugc.trill")
+            .await;
+        let mut status = NurtureSessionStatus::new("fixture-device");
+        let error = NurtureEngine::record_cleanup(&mut status, cleanup).unwrap();
+        assert!(error.contains("fixture database write failed"));
+        assert_eq!(status.cleanup_state, NurtureCleanupState::Failed);
+        assert!(status.cleanup_proof.is_none());
+        assert_eq!(driver.terminate_calls.load(Ordering::Relaxed), 0);
     }
 
     #[test]

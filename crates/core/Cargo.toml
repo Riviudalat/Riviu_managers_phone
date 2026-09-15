@@ -19,6 +19,7 @@ thiserror = { workspace = true }
 anyhow = { workspace = true }
 tokio = { workspace = true }
 chrono = { workspace = true }
+chrono-tz = { workspace = true }
 uuid = { workspace = true }
 rusqlite = { workspace = true }
 tracing = { workspace = true }

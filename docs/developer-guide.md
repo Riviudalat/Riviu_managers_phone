@@ -3,9 +3,29 @@
 Stack giữ nguyên: Rust workspace, Tauri 2, React/TypeScript/Vite. `src/api.ts` là biên
 IPC frontend. Không thêm một control plane riêng để đi vòng ownership/admission hiện có.
 
+Google Sheets trực tiếp dùng OAuth Desktop PKCE S256 và callback loopback có
+state, timeout và hủy; đăng nhập/Picker mở trình duyệt ngoài. Scope `drive.file`
+được cấp theo file do Picker chọn. Refresh token và client config dùng SecretStore
+hiện có; IPC chỉ trả identity/trạng thái, không trả token. Mỗi tab có writer UUID
+và reportingEpoch trong developer metadata; ghi updateCells cùng receipt note rồi
+đọc lại. Không dùng append không khóa để xử lý retry timeout. API không có CAS cho
+sửa tay; app từ chối khi giá trị/công thức/receipt trước ghi đã thay đổi.
+
+Chuyển Apps Script sang direct ghi intent local trước, dừng nhận claim, drain,
+gọi retirement dưới ScriptLock, rồi nhận writer trên tab và commit provider. Lượt
+cũ giữ publicationId và đích/epoch; logout giữ provider để không fallback sang
+webhook. Login mới thay authorization generation để mở lại nghĩa vụ ghi bị dừng
+do hết quyền. API request chung trần hai slot và nhịp tối đa một request/giây;
+delivery có deadline 90 giây, đọc theo trang giới hạn 16.000 ô. Backup/reset giữ
+gid0, sao lưu toàn workbook, dừng epoch cũ và xác minh lại trước khi mở epoch mới.
+
 Bình luận Android đọc tài khoản trong phiên điều khiển trước khi mở bài đích;
 chỉ cập nhật trường handle, giữ các metadata khác. Reply giải username người được
 tag tại thời điểm gửi và giữ identity của câu gốc để mở nhánh khi đọc lại.
+Kịch bản dùng `device_meta.handle` và snapshot `roleBindings` trong request. Preview
+trả `conversationAccounts`; tạo campaign kiểm cùng bộ validator trong transaction
+SQLite, áp dụng cả lịch và Điều phối. Trước câu và tại gate Send kiểm lại metadata
+của người gửi và các vai được tag; không sửa snapshot lịch sử.
 Worker xác minh dùng chung `open_exact_target_by_hierarchy`, không mở URL lần nữa
 trước resolver. Trong cửa sổ 30 giây, chỉ mở lại cùng link một lần nếu đọc được
 Home/Profile và thẻ LIVE sau ít nhất 10 giây mà chưa có nút bình luận. Không mở
@@ -245,13 +265,13 @@ lịch sử không phụ thuộc số thứ tự của riêng nhóm đã chọn.
 
 ## Xác minh Publish và kết quả qua restart
 
-Dev §9.209 dùng VerificationQueue mọi UDID đang due/Ready (một observer mỗi máy,
-không trần số máy), không chặn chéo khi một máy đọc chậm. Cleanup media đã xác minh
-chạy mỗi tick worker, không chờ queue rỗng. Candidates ưu tiên `is_due` trước trần 1000.
-Nhãn thời gian own-post chấp nhận EN và VI (`N phút trước` / `vừa xong`). evidence.verificationStatus giữ reasonCode, attempts,
-readFailures, checkedAt và nextCheckAt; legacy thiếu nextCheckAt kiểm ngay.
-Pending lỗi đọc backoff30/60/120giây, quan sát khác30giây; giữ submittedAt và hạn
-review30phút. Hoàn tất observer đánh thức chọn máy tiếp; stop drain task đã admitted.
+VerificationQueue dùng giới hạn máy chủ, mặc định4 observer, một observer mỗi máy.
+Cleanup media chạy worker riêng; một máy đọc chậm không chặn dispatcher hoặc Sheet.
+Candidates được phân trang hữu hạn, ưu tiên bài tới hạn và luân phiên giữa các máy.
+Nhãn thời gian own-post chấp nhận EN và VI (`N phút trước` / `vừa xong`).
+`evidence.verificationStatus` giữ reasonCode, attempts, readFailures, checkedAt và
+nextCheckAt. Mọi bài đã gửi còn thiếu link được kiểm sau300giây tính từ cuối lượt
+trước; không đặt tổng hạn chờ. Stop chờ task đã được cấp quyền hoàn tất.
 AccessibilityReadUnavailable chỉ dành read-only sau Android recovery; sound observer
 cho một lần đọc bổ sung/phase trong ngân sách và xóa snapshot cũ trước readback.
 
@@ -290,14 +310,35 @@ và caption hợp lệ; đổi ID không nới khoảng thời gian hoặc nhậ
 Hồ sơ Global46.2.1/en dùng chung `:id/cover` cho bài đăng và bản nháp. Khi lấy link,
 đọc badge nháp `:id/zq_`, loại cover chứa badge trước khi chọn ứng viên. Lỗi đọc
 badge phải dừng trước tap cover; mở nháp rồi Back không bảo đảm quay về lưới hồ sơ.
+Ô cover được cắt theo mép trên của thanh Home/Profile đang quan sát, kể cả khi
+accessibility vẫn đánh dấu ô phía dưới là visible. Cả điểm chạm và điểm vuốt phân
+trang dùng phần còn hiển thị đó. Bài có banner TikTok báo đã bị gỡ được bỏ qua trước
+khi mở Share; không dùng nút chia sẻ của bài đã bị gỡ để tìm link bài khác.
 
 `publish_commands/verification.rs` chạy warm session trong control plane; DB CAS ghi
 proof, outbox và snapshot cùng transaction. `verified_cleanup.rs` xử lý riêng media
 đã xác minh theo delete policy và importId, giữ khả năng thử lại qua restart.
-Worker chuyển bài có submittedAt hợp lệ quá 30 phút (đăng ngay) hoặc 240 phút (hẹn giờ)
-sang Uncertain/needsReview trong một transaction, kể cả máy offline hoặc đang backoff. Bỏ khỏi hàng tự kiểm tra;
-kiểm link chủ động giữ scope LinkAndSheet, không tái phát Post. Một số nháp nhìn
+Worker lưu `nextCheckAt` bằng thời điểm kết thúc quan sát cộng 300 giây cho mọi bài
+đã gửi còn thiếu link, kể cả lỗi đọc. Không đặt tổng hạn chờ liên kết; mỗi lần quan
+sát vẫn có deadline và lease riêng. Restart giữ nguyên mốc gửi và lần kiểm tiếp.
+Android ở trạng thái Connected sau restart vẫn được kiểm khi agent đã sẵn sàng;
+worker mở warm session qua control plane, không đòi mở điều khiển bằng tay để đổi
+trạng thái thành Ready. Máy Busy/Preparing/Error/offline vẫn chờ; iOS giữ điều kiện Ready.
+Review cũ có cause `verificationDeadline` và ngân sách 30/240 phút được tiếp tục
+bằng CAS khi effect intent còn đủ tài khoản/thời điểm gửi; review vì lý do khác giữ
+nguyên, kể cả sau một lần kiểm chủ động thất bại. Đổi trạng thái không tái phát Post
+hoặc tạo outbox trước khi có proof. Kiểm link chủ động giữ scope LinkAndSheet. Một số nháp nhìn
 thấy trên hồ sơ chỉ là quan sát, không là bằng chứng assignment đã thành nháp.
+Photo viewer đã khớp toàn caption trả lỗi sao chép có kiểu; verifier kết thúc lượt
+với nguyên nhân đó, không để navigation sau ghi đè. OCR cục bộ kiểm vùng phía trên
+ảnh chụp trước/sau Copy, chỉ nhận câu xử lý chính xác với confidence >= 0.9, không
+có ở ảnh trước và đúng binding session/hash. Mã `tiktokProcessing` chỉ là quan sát
+chờ, không tạo link hoặc thay thế proof tài khoản/caption/content ID. Clipboard
+có link thật vẫn được ưu tiên và đi qua verifier như cũ.
+Trill 38.3.2 khi header bị cuộn mất dùng bảng Switch account đã đo để đọc hàng
+`selected=true`: description hàng và text con phải trùng qua hai snapshot mới.
+Chỉ mở và đóng bảng, không bấm hàng tài khoản; đóng xong phải về hồ sơ. Nhiều hàng
+được chọn, sai package hoặc text lệch đều không tạo bằng chứng tài khoản.
 Nếu receipt cũ thiếu tài khoản hoặc thời điểm gửi hợp lệ, worker yêu cầu kiểm tra
 thủ công với lý do thiếu bằng chứng, không đoán tuổi của bài từ createdAt/updatedAt.
 Xem AGENTS.md §9.202.
@@ -544,3 +585,69 @@ Tìm parent và nội dung dùng snapshot chung, mở vùng `View folded comment
 `Community-flagged comments` qua hitbox cha đã đo. Không thấy parent được quan sát
 lại tối đa hai lần trong giờ chạy; link khác tiếp tục. Lịch sử thiếu identity chỉ
 hiện cần kiểm tra; người vận hành chủ động yêu cầu đọc lại, không tự phát lại lịch sử.
+
+
+Điều phối Đăng bài dùng `publish_dispatch_jobs` trong SQLite (migration41), cùng
+claim theo thiết bị và giới hạn giai đoạn. Worker chỉ tạo task sau admission;
+media được tải theo bài đã nhận, hàng chờ chỉ giữ ID. `publish_attempts` giữ lịch
+sử lần thử; `publication_id` được backfill bằng assignment ID và bất biến, không
+nhóm lại dữ liệu cũ theo caption, thư mục hoặc tên máy. Intent và revision của
+pipeline vẫn kiểm tại nút Đăng. Worker đã lỗi sau effect chỉ chuyển sang xác minh.
+
+`publish_get_limits`/`publish_set_limits` nhận `{transfer,compose,verify,deviceTotal}`,
+lưu ở `publish.dispatch.limits` theo database máy chủ, mỗi giá trị từ 1 đến 64.
+Giảm giới hạn chặn cấp lượt mới đến khi số đang chạy xuống mức mới; không cắt request
+thiết bị đang thực hiện. Worker đọc lại giới hạn verify ở vòng điều phối tiếp theo; phiên đang chạy được hoàn tất.
+Lịch quá 30 giây được CAS sang missed khi chưa bắt đầu; shutdown giữ hàng chưa chạy
+và restart không tự phát lại effect đã có intent. Trước migration40→41 tạo và đọc
+lại bản sao SQLite `pre-publication-v40.db`.
+
+`publish_sheet_reset_reporting` nhận UUID `resetId`, dừng cấp claim Sheet mới và
+đợi claim đang chạy kết thúc. Apps Script backup/readback workbook, đóng epoch cũ
+rồi xóa userEnteredValue/note dưới header của gid0; giữ định dạng/header/tab khác.
+Reset bị mất phản hồi phải tiếp tục bằng cùng ID. `reportingEpoch` nằm trong target
+đã chốt, payload, note và ACK; ACK sai epoch/publication không settle. Local reset
+đánh dấu nghĩa vụ cũ superseded, không sửa thành sent và không xóa post evidence.
+URL, credential, bản sao DB/Sheet và media nghiệm thu chỉ thuộc dữ liệu vận hành.
+
+
+Picker Trill 38.3.2 có thể cắt hàng ordinal đã chọn ở mép trên khi tự cuộn.
+`visible_selection` chỉ bỏ phần prefix này khi ordinal liên tiếp, x/width và mép
+đáy khớp grid gốc qua shift của một ordinal đã chọn còn hiển thị đầy đủ. Không
+bỏ ô chưa chọn hoặc dùng tọa độ extrapolate để tap. Test giữ ca chọn 12→13 ảnh.
+Chế độ dev `RIVIU_PUBLISH_PICKER_TRACE` nhận đường dẫn tuyệt đối và chỉ giữ một
+XML cuối cho mỗi album; bản phát hành không ghi trace này.
+
+
+Android mở ứng dụng đọc lại foreground. Nếu launcher chỉ đưa một task chứa ứng dụng
+chia sẻ ngoài lên trước, driver giải launcher component của đúng package rồi mở
+với NEW_TASK|SINGLE_TOP|CLEAR_TOP và đọc lại. Đường này giữ tiến trình TikTok, không
+force-stop hoặc CLEAR_TASK; lỗi không xác nhận foreground dừng trước thao tác UI.
+Ca SMS recipient picker nằm trên TikTok46.2.42 giữ nguyên PID khi phục hồi.
+
+
+Migration42 lưu receipt tạo chiến dịch theo requestId và fingerprint đầu vào bất
+biến; UI giữ UUID khi mất ACK, backend trả chiến dịch cũ trước khi chạy preflight
+lại. Đổi nội dung với cùng requestId bị từ chối; nhấn tạo lượt mới dùng UUID mới.
+Bộ điều phối cấp claim theo transaction và giữ quyền giữa hai stage cùng máy,
+tránh danh sách candidate cũ nhận hai bài. Công việc paused không bị kết thúc khi
+shutdown; restart cấp token mới và đối soát missed tới cấp chiến dịch.
+Reset Sheet gián đoạn giữ `reportingReady=false`; check đọc vẫn hoạt động để tiếp
+tục cùng resetId nhưng preflight mới và các đường ghi bị chặn tới khi clear/readback
+xong. Mọi HTTP Sheet (kể cả check/Flow/CSV) dùng chung semaphore2.
+
+
+Xác minh video chỉ lấy Copy từ viewer có nhãn Video, đúng package và caption
+khớp đầy đủ hoặc prefix rút gọn đã đo. Prefix không xác minh xuất bản: link phải
+qua metadata công khai khớp toàn caption/tác giả/content ID và cửa sổ gửi đã lưu.
+Khay bình luận Trill38.3.2 được nhận diện bằng header Comments/Likes và ô cnd;
+chỉ Back khỏi đúng khay rồi phân loại lại, không đoán nút hoặc nhập bình luận.
+
+
+Trill38.3.2/en có hai nút Post tùy trạng thái bàn phím: description Post ở dưới và
+Button text Post/mr6 ở trên. Nhánh mr6 chỉ nhận khi caption eej đầy đủ, nút duy
+nhất và actionable. Sau kiểm tra nhạc phải chờ nút hiện ổn định, đọc lại caption
+rồi giải lại nút trước intent. Không giữ tọa độ từ màn bàn phím trước đó.
+Video sau chạm ô hồ sơ có thể trả cây profile cũ một lần; chỉ Copy khi cây viewer
+Video/caption/Share đã hiện. Global…more là prefix cho quyền đọc link, không là
+proof caption; metadata công khai vẫn cần toàn văn, tác giả, content ID và thời gian.

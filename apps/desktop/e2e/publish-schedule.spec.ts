@@ -177,17 +177,16 @@ test("after quick selection a direct drag moves only its origin and reveals matc
   expect(await page.locator(".ps-plan-table select").evaluateAll(nodes => nodes.map(n => (n as HTMLSelectElement).value))).toEqual(before);
   expect(await page.evaluate(() => (window as unknown as { scheduleCalls: unknown[] }).scheduleCalls)).toEqual([]);
 });
-test("footer takes the operator to the Sheet field in Setup", async ({ page }) => {
+test("footer takes the operator to the Google connection in Setup", async ({ page }) => {
   await page.setViewportSize({ width: 820, height: 560 }); await fixture(page, 3, 3);
   await page.getByRole("tab", { name: "Thiết lập", exact: true }).click();
   await page.getByRole("checkbox", { name: "Ghi kết quả lên Sheet", exact: true }).check();
-  await page.getByRole("textbox", { name: "Link Google Sheet", exact: true }).fill("https://docs.google.com/spreadsheets/d/fixture/edit");
   await page.getByRole("tab", { name: "Hẹn giờ", exact: true }).click();
   await page.getByRole("button", { name: "Chọn nhanh", exact: true }).click();
   await page.getByLabel("Ngày đăng", { exact: true }).fill("2099-09-10");
   await page.getByLabel("Giờ chung", { exact: true }).fill("20:00");
   await page.getByRole("button", { name: "Kiểm tra Sheet", exact: true }).click();
   await expect(page.getByRole("tab", { name: "Thiết lập", exact: true })).toHaveAttribute("aria-selected", "true");
-  await expect(page.getByRole("textbox", { name: "Link Google Sheet", exact: true })).toBeFocused();
+  await expect(page.locator("[data-google-sheet-focus]")).toBeFocused();
   expect(await page.evaluate(() => (window as unknown as { scheduleCalls: unknown[] }).scheduleCalls)).toEqual([]);
 });

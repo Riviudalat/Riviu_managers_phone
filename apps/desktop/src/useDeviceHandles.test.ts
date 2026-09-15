@@ -9,6 +9,29 @@ const deferred = <T>() => { let resolve!: (value: T) => void; return { promise: 
 beforeEach(() => { vi.resetAllMocks(); vi.mocked(getDeviceMeta).mockResolvedValue(meta("old.account")); });
 
 describe("useDeviceHandles", () => {
+  it("refreshes saved metadata without replacing an unsaved edit", async () => {
+    const {result,rerender}=renderHook(({revision})=>useDeviceHandles(["a"],revision),{initialProps:{revision:"one"}});
+    await waitFor(()=>expect(result.current.savedHandles.a).toBe("old.account"));
+    act(()=>result.current.change("a","unsaved.account"));
+    vi.mocked(getDeviceMeta).mockResolvedValue(meta("external.account"));
+    rerender({revision:"two"});
+    await waitFor(()=>expect(result.current.savedHandles.a).toBe("external.account"));
+    expect(result.current.handles.a).toBe("unsaved.account");
+  });
+
+  it("keeps the saved username and exposes failed saves and failed reads",async()=>{
+    const {result}=renderHook(()=>useDeviceHandles(["a"]));
+    await waitFor(()=>expect(result.current.savedHandles.a).toBe("old.account"));
+    vi.mocked(saveDeviceHandle).mockRejectedValue(new Error("write failed"));
+    act(()=>result.current.change("a","new.account"));
+    await act(()=>result.current.persist("a","new.account"));
+    expect(result.current.savedHandles.a).toBe("old.account");
+    expect(result.current.handleErrors.a).toContain("write failed");
+    vi.mocked(getDeviceMeta).mockRejectedValue(new Error("read failed"));
+    await act(()=>result.current.reload("a"));
+    expect(result.current.handleErrors.a).toContain("read failed");
+    expect(result.current.savedHandles.a).toBe("old.account");
+  });
   it("updates display and mention source together on scope return", async () => {
     const { result, rerender } = renderHook(({ ids }) => useDeviceHandles(ids), { initialProps: { ids: ["a"] } });
     await waitFor(() => expect(result.current.savedHandles.a).toBe("old.account"));

@@ -9,6 +9,8 @@ import "../styles/publish-workspace.css";
 import { PublishScheduleRetime } from "../components/publish/PublishScheduleRetime";
 import { reconcileAssignments } from "../components/publish/publishAssignments";
 import { publishSelectionStatus } from "../components/publish/publishSelectionStatus";
+import { usePublishDeviceGuards } from "../components/publish/usePublishDeviceGuards";
+import { deviceGuardBlock, UNKNOWN_PUBLISH_GUARD } from "../components/publish/publishDeviceGuardState";
 
 import {
   listenRiviuEvents,
@@ -18,10 +20,14 @@ import {
   publishCreateCampaign,
   publishExecute,
   publishGet,
+  publishGetLimits,
   publishList,
   publishPreflight,
   publishReconcile,
+  publishRetryAssignment,
   publishScanFolder,
+  publishSetLimits,
+  type PublishLimits,
 } from "../api";
 import { useWorkspaceDraft } from "../workspaceDraft";
 import { writeFormDraft } from "../formDraftStorage";
@@ -129,7 +135,9 @@ function verificationDetail(evidenceJson?: string | null): string | null {
       && !/tự kiểm tra đã dừng/i.test(reason)
       ? "Tự kiểm tra đã dừng · chọn Kiểm tra liên kết"
       : null;
-    const budget = typeof status?.reviewAfterMinutes === "number"
+    const budget = status?.checkIntervalSeconds === 300
+      ? "Tự kiểm tra mỗi 5 phút đến khi có link"
+      : typeof status?.reviewAfterMinutes === "number"
       ? `Ngân sách tự kiểm: ${status.reviewAfterMinutes} phút`
       : null;
     return [
@@ -146,6 +154,7 @@ function campaignView(
   campaign: PublishCampaignRecord,
   operation?: OperationRunSummary,
   snapshot?: PublishExecutionSnapshot,
+  detail?: PublishCampaignDetail,
 ): {
   label: string;
   tone: StatusTone;
@@ -176,6 +185,9 @@ function campaignView(
       tone: campaignTone(campaign.state),
       retryScope: "none",
     };
+  }
+  if (campaign.state === "succeeded" && detail?.assignments.some(assignment => assignment.sheetDelivery?.state === "superseded")) {
+    return { label: "Đã đăng · đợt báo cáo đã đóng", tone: "warning", retryScope: "none" };
   }
   const newestSnapshot =
     snapshot &&
@@ -219,6 +231,89 @@ function snapshotSheetEnabled(snapshot?: PublishExecutionSnapshot): boolean {
     !Array.isArray(report) &&
     report.sheetEnabled === false
   );
+}
+
+function canRetryAssignment(assignment: PublishAssignmentRecord, campaign: PublishCampaignRecord): boolean {
+  return assignment.state === "failedBeforeDispatch"
+    && assignment.effectIntent == null
+    && !["cancelled", "missed"].includes(campaign.state)
+    && !["queued", "running"].includes(assignment.dispatch?.state ?? "");
+}
+
+function dispatchDetail(assignment: PublishAssignmentRecord): string | null {
+  const dispatch = assignment.dispatch;
+  const reason = dispatch?.reason ?? assignment.errorCode;
+  const reasons: Record<string, string> = {
+    device_busy: "Máy đang bận",
+    account_busy: "Tài khoản đang được sử dụng",
+    schedule_capacity_deadline: "Chưa được cấp lượt trong cửa sổ 30 giây; không tự đăng bù",
+    app_opened_after_deadline: "Ứng dụng mở sau giờ hẹn; không tự đăng bù",
+    app_closing: "Ứng dụng đang đóng",
+    campaign_cancelled: "Chiến dịch đã hủy",
+  };
+  if (assignment.state === "missed") return reasons[reason ?? ""] ?? "Chưa bắt đầu đúng cửa sổ giờ hẹn; không tự đăng bù";
+  if (!dispatch || !["queued", "running", "paused"].includes(dispatch.state)) return null;
+  const time = new Date(dispatch.queuedAtMs);
+  return [
+    `${dispatch.state === "running" ? "Đang" : "Chờ"} ${dispatch.phase === "transfer" ? "chuyển media" : "thao tác TikTok"}`,
+    Number.isFinite(time.getTime()) && `Vào hàng: ${time.toLocaleString("vi-VN")}`,
+    dispatch.owner && `Đang giữ lượt: ${dispatch.owner}`,
+    dispatch.state !== "running" && (reasons[reason ?? ""] ?? "Chờ lượt điều phối"),
+  ].filter(Boolean).join(" · ");
+}
+
+const PUBLISH_LIMIT_FIELDS: { key: keyof PublishLimits; label: string }[] = [
+  { key: "transfer", label: "Lượt chuyển media" },
+  { key: "compose", label: "Phiên thao tác TikTok" },
+  { key: "verify", label: "Lượt xác minh liên kết" },
+  { key: "deviceTotal", label: "Tổng lượt điều khiển thiết bị" },
+];
+
+function PublishHostLimits({ onSaved }: { onSaved: () => void }) {
+  const [limits, setLimits] = useState<PublishLimits | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [message, setMessage] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const flight = useRef(false);
+  const valid = limits !== null && Object.values(limits).every(value => Number.isInteger(value) && value >= 1 && value <= 64);
+  const read = async () => {
+    if (flight.current) return;
+    flight.current = true; setBusy(true); setError(null); setMessage(null);
+    try { setLimits(await publishGetLimits()); }
+    catch (e) { setError(describeError(e)); }
+    finally { flight.current = false; setBusy(false); }
+  };
+  const save = async () => {
+    if (flight.current || !valid || !limits) return;
+    flight.current = true; setBusy(true); setError(null); setMessage(null);
+    try {
+      await publishSetLimits(limits);
+      setLimits(await publishGetLimits());
+      onSaved();
+      setMessage("Đã lưu giới hạn cho toàn ứng dụng trên máy tính này.");
+    } catch (e) { setError(describeError(e)); }
+    finally { flight.current = false; setBusy(false); }
+  };
+  return <details className="publish-workspace-section" style={{ flex: "0 0 auto", maxHeight: "45%", padding: "6px 12px" }} onToggle={event => {
+    if (event.currentTarget.open && !limits && !flight.current) void read();
+  }}>
+    <summary>Giới hạn chạy đồng thời</summary>
+    <p>Đăng ngay và hẹn giờ dùng chung các giới hạn này. Sheet giữ tối đa 2 yêu cầu, gồm tối đa 1 yêu cầu báo tiến độ.</p>
+    {busy && <p role="status">Đang đọc hoặc lưu giới hạn…</p>}
+    {error && <p role="alert">{error}</p>}
+    {limits && <fieldset disabled={busy}><legend>Giới hạn của máy tính này</legend>
+      {PUBLISH_LIMIT_FIELDS.map(({ key, label }) => <label key={key}>{label}
+        <input type="number" min={1} max={64} step={1} value={Number.isNaN(limits[key]) ? "" : limits[key]} onChange={event => {
+          setLimits({ ...limits, [key]: event.target.valueAsNumber }); setMessage(null);
+        }} />
+      </label>)}
+      {!valid && <p role="alert">Mỗi giới hạn phải là số nguyên từ 1 đến 64.</p>}
+      <button type="button" disabled={!valid} onClick={() => void save()}>Lưu giới hạn</button>
+    </fieldset>}
+    {error && <button type="button" disabled={busy} onClick={() => void read()}>Đọc lại giới hạn</button>}
+    {message && <p role="status">{message}</p>}
+    <p>Giảm giới hạn chỉ áp dụng khi cấp lượt mới. Mở lại Riviu sau khi đổi lượt xác minh để cập nhật số phiên xác minh.</p>
+  </details>;
 }
 
 function pendingPublicationMessage(detail: PublishCampaignDetail, sheetEnabled: boolean): string | null {
@@ -393,6 +488,7 @@ export function PublishPage({
   const [workspaceTab, setWorkspaceTab] = useState<AutomationMode>(
     "setup",
   );
+  const { guards: deviceGuards, failed: guardsFailed, refresh: refreshDeviceGuards } = usePublishDeviceGuards(devices.map(device => device.udid));
   const [restoredForm] = useState(readPublishForm);
   const [restoringForm, setRestoringForm] = useState(Boolean(restoredForm?.sourceRoot));
   const [sourceRoot, setSourceRoot] = useState(restoredForm?.sourceRoot ?? "");
@@ -422,6 +518,8 @@ export function PublishPage({
     null,
   );
   const [operationBusy, setBusy] = useState(false);
+  const publishInFlight = useRef(false);
+  const [limitsRevision, setLimitsRevision] = useState(0);
   const [scanning, setScanning] = useState(false);
   const busy = operationBusy || scanning;
   const [scanError, setScanError] = useState<PublishScanErrorView | null>(null);
@@ -497,6 +595,7 @@ export function PublishPage({
       setOperationError(projection.error);
       if (snapshot) setExecutionSnapshots((current) => ({ ...current, [campaignId]: snapshot }));
       setDetails((current) => ({ ...current, [campaignId]: detail }));
+      setCampaigns(current => current.some(campaign => campaign.id === campaignId) ? current : [detail.campaign, ...current]);
       setSourceCampaign((current) => current?.id === campaignId ? detail.campaign : current);
     } catch (error) {
       if (isCurrent()) setDetailErrors((current) => ({ ...current, [campaignId]: describeError(error) }));
@@ -598,7 +697,9 @@ export function PublishPage({
   };
   const sheetBlocked = sheetEnabled && !sheetConnectionReady;
   const sheetBlockingReason = sheetBlocked ? "Kiểm tra và xác minh link Sheet trong tab Thiết lập trước khi ghi kết quả." : undefined;
-  const inputKey = JSON.stringify({ request: preflightRequest, sheetBlocked, sheetConnectionRevision: sheetEnabled ? sheetConnectionRevision : 0 });
+  const pendingBlockingReason = targets.filter(Boolean).map(udid => deviceGuardBlock(deviceGuards, udid)).find(Boolean);
+  const publishBlockingReason = pendingBlockingReason ?? sheetBlockingReason;
+  const inputKey = JSON.stringify({ request: preflightRequest, sheetBlocked, pendingGuards: targets.map(udid => deviceGuards[udid]?.blocking ?? null), sheetConnectionRevision: sheetEnabled ? sheetConnectionRevision : 0 });
   const latestInputKey = useRef(inputKey);
   latestInputKey.current = inputKey;
   const preflightTicket = useRef(0);
@@ -672,7 +773,7 @@ export function PublishPage({
   });
   const selectionStatus = publishSelectionStatus({ selectedIds: bundleIds, bundles: manifest?.bundles ?? [],
     assignments, captions: currentCaptionOverrides, eligible: eligibleTargets,
-    ready: devices.filter(device => device.status === "ready").map(device => device.udid), blockingReason: sheetBlockingReason });
+    ready: devices.filter(device => device.status === "ready").map(device => device.udid), blockingReason: publishBlockingReason });
   const selectionReady = selectionStatus.ready;
   const currentPreflight =
     preflightSnapshot?.inputKey === inputKey ? preflightSnapshot.report : null;
@@ -745,6 +846,7 @@ export function PublishPage({
     listenRiviuEvents((event) => {
       if (!live || event.type !== "publishUpdated") return;
       void reload();
+      void refreshDeviceGuards();
       if (openDetailIds.current.has(event.campaignId)) {
         // A previous retry projection is not evidence for a new campaign revision.
         setExecutionSnapshots((current) => {
@@ -765,7 +867,7 @@ export function PublishPage({
       reloadTicket.current += 1;
       unlisten?.();
     };
-  }, [loadCampaignDetail]);
+  }, [loadCampaignDetail, refreshDeviceGuards]);
 
   // Assignment transfer/progress commits can precede the next campaign event.
   // Refresh only the visible monitor; never reconcile or dispatch from this poll.
@@ -864,29 +966,43 @@ export function PublishPage({
   };
 
   const executeNewCampaign = async () => {
-    if (!currentPreflight?.canExecute || sheetBlocked) return;
-    const approvedDraftKey = latestDraftKey.current;
-    const confirmed = await requestConfirm({
-      title: "Xác nhận đăng công khai?",
-      message: `${selectedBundles.length} bài sẽ được đăng công khai trên ${targets.length} máy. Nhạc sẽ được chọn sau khi mở TikTok và xác nhận lại trước Đăng.`,
-      confirmLabel: "Đăng bài",
-      cancelLabel: "Huỷ",
-      danger: true,
-    });
-    if (!confirmed) return;
-    if (
-      latestDraftKey.current !== approvedDraftKey ||
-      latestInputKey.current !== inputKey
-    ) {
-      setNotice({
-        tone: "warning",
-        text: "Thiết lập đã đổi trong lúc xác nhận. Kiểm tra lại trước khi đăng.",
-      });
-      return;
-    }
+    if (publishInFlight.current || operationBusy || !currentPreflight?.canExecute || sheetBlocked || pendingBlockingReason) return;
+    publishInFlight.current = true;
     setBusy(true);
     setNotice(null);
     try {
+      const approvedDraftKey = latestDraftKey.current;
+      const confirmed = await requestConfirm({
+        title: "Xác nhận đăng công khai?",
+        message: `${selectedBundles.length} bài sẽ được đăng công khai trên ${targets.length} máy. Nhạc sẽ được chọn sau khi mở TikTok và xác nhận lại trước Đăng.`,
+        confirmLabel: "Đăng bài",
+        cancelLabel: "Huỷ",
+        danger: true,
+      });
+      if (!confirmed) return;
+      if (
+        latestDraftKey.current !== approvedDraftKey ||
+        latestInputKey.current !== inputKey
+      ) {
+        setNotice({
+          tone: "warning",
+          text: "Thiết lập đã đổi trong lúc xác nhận. Kiểm tra lại trước khi đăng.",
+        });
+        return;
+      }
+        // Persist before the IPC call; an ACK can be lost after campaign creation.
+      // Only an acknowledged create retires this identity, so restart and retry
+      // return the same campaign rather than preparing a second publication.
+      const createKey = JSON.stringify(preflightRequest);
+      const storageKey = "riviu.publish.pending-create.v1";
+      let pending: { key: string; requestId: string } | null = null;
+      const stored = localStorage.getItem(storageKey);
+      if (stored) {
+        try { pending = JSON.parse(stored); } catch { /* Replace malformed local draft metadata. */ }
+      }
+      const requestId = pending?.key === createKey && typeof pending.requestId === "string"
+        ? pending.requestId : crypto.randomUUID();
+      localStorage.setItem(storageKey, JSON.stringify({ key: createKey, requestId }));
       const campaign = await publishCreateCampaign(
         sourceRoot.trim(),
         orderedBundleIds,
@@ -899,7 +1015,9 @@ export function PublishPage({
         currentPreflight.inputDigest,
         sheetEnabled,
         deleteAfterPublish,
+        requestId,
       );
+      localStorage.removeItem(storageKey);
       setBaseline(draftSnapshot);
       setBaselineManifest(manifest);
       setCreatedCampaignId(campaign.id);
@@ -928,67 +1046,99 @@ export function PublishPage({
     } catch (error) {
       setNotice({ tone: "error", text: describeError(error) });
     } finally {
+      publishInFlight.current = false;
       setBusy(false);
     }
   };
 
   const retryCampaign = async (campaign: PublishCampaignRecord) => {
-    setBusy(true);
-    setNotice(null);
-    let snapshot: PublishExecutionSnapshot;
+    if (publishInFlight.current || operationBusy) return;
+    publishInFlight.current = true;
     try {
-      snapshot = await publishReconcile(campaign.id);
-      setExecutionSnapshots((current) => ({
-        ...current,
-        [campaign.id]: snapshot,
-      }));
-      if (snapshot.retryScope === "none" || ((campaign.state === "verifying" || needsPublicationReview(campaign)) && snapshot.retryScope !== "linkAndSheet")) {
+      setBusy(true);
+      setNotice(null);
+      let snapshot: PublishExecutionSnapshot;
+      try {
+        snapshot = await publishReconcile(campaign.id);
+        setExecutionSnapshots((current) => ({
+          ...current,
+          [campaign.id]: snapshot,
+        }));
+        if (snapshot.retryScope === "none" || ((campaign.state === "verifying" || needsPublicationReview(campaign)) && snapshot.retryScope !== "linkAndSheet")) {
+          setNotice({
+            tone: "warning",
+            text: "Trạng thái đã được đối chiếu và không có bước nào được phép tự chạy lại.",
+          });
+          return;
+        }
+      } catch (error) {
         setNotice({
-          tone: "warning",
-          text: "Trạng thái đã được đối chiếu và không có bước nào được phép tự chạy lại.",
+          tone: "error",
+          text: `Không đối chiếu được chiến dịch: ${describeError(error)}`,
         });
         return;
+      } finally {
+        setBusy(false);
       }
-    } catch (error) {
-      setNotice({
-        tone: "error",
-        text: `Không đối chiếu được chiến dịch: ${describeError(error)}`,
+      const confirmed = await requestConfirm({
+        title: "Xác nhận tiếp tục đăng bài?",
+        message: `${retryScopeLabel(snapshot.retryScope, snapshotSheetEnabled(snapshot))}. Trạng thái chưa chắc chắn không được tự đăng lại.`,
+        confirmLabel: "Tiếp tục",
       });
-      return;
-    } finally {
-      setBusy(false);
-    }
-    const confirmed = await requestConfirm({
-      title: "Xác nhận tiếp tục đăng bài?",
-      message: `${retryScopeLabel(snapshot.retryScope, snapshotSheetEnabled(snapshot))}. Trạng thái chưa chắc chắn không được tự đăng lại.`,
-      confirmLabel: "Tiếp tục",
-    });
-    if (!confirmed) return;
+      if (!confirmed) return;
+      setBusy(true);
+      setNotice(null);
+      try {
+        const result = await publishExecute(campaign.id, true);
+        setDetails((current) => ({ ...current, [campaign.id]: result.detail }));
+        await reload();
+        setNotice({
+          tone:
+            result.status === "complete"
+              ? "success"
+              : result.status === "uncertain"
+                ? "warning"
+                : "info",
+          text:
+            pendingPublicationMessage(result.detail, snapshotSheetEnabled(snapshot)) ?? (result.status === "complete"
+              ? snapshotSheetEnabled(snapshot)
+                ? "Đã hoàn tất đăng bài và ghi Sheet."
+                : "Đã đăng và lấy liên kết. Không ghi Sheet."
+              : result.status === "uncertain"
+                ? "Kết quả sau thao tác Đăng chưa chắc chắn; app không tự đăng lại."
+                : "Quy trình còn bước chưa hoàn tất. Xem chi tiết để xử lý tiếp."),
+        });
+      } catch (error) {
+        setNotice({ tone: "error", text: describeError(error) });
+      } finally {
+        setBusy(false);
+      }
+    } finally { publishInFlight.current = false; }
+  };
+
+  const retryAssignment = async (assignment: PublishAssignmentRecord, campaign: PublishCampaignRecord) => {
+    if (publishInFlight.current || operationBusy || !canRetryAssignment(assignment, campaign)) return;
+    publishInFlight.current = true;
     setBusy(true);
     setNotice(null);
     try {
-      const result = await publishExecute(campaign.id, true);
-      setDetails((current) => ({ ...current, [campaign.id]: result.detail }));
-      await reload();
-      setNotice({
-        tone:
-          result.status === "complete"
-            ? "success"
-            : result.status === "uncertain"
-              ? "warning"
-              : "info",
-        text:
-          pendingPublicationMessage(result.detail, snapshotSheetEnabled(snapshot)) ?? (result.status === "complete"
-            ? snapshotSheetEnabled(snapshot)
-              ? "Đã hoàn tất đăng bài và ghi Sheet."
-              : "Đã đăng và lấy liên kết. Không ghi Sheet."
-            : result.status === "uncertain"
-              ? "Kết quả sau thao tác Đăng chưa chắc chắn; app không tự đăng lại."
-              : "Quy trình còn bước chưa hoàn tất. Xem chi tiết để xử lý tiếp."),
+      const machine = deviceDisplayName(devices, metas, assignment.udid);
+      const confirmed = await requestConfirm({
+        title: `Thử lại bài của ${machine}?`,
+        message: `Bài của ${machine} đã dừng trước khi bấm Đăng. Chỉ bài này được kiểm tra và xếp lại vào hàng chờ; các bài khác tiếp tục trạng thái hiện tại.`,
+        confirmLabel: "Thử lại máy này",
+        cancelLabel: "Huỷ",
+        danger: true,
       });
+      if (!confirmed) return;
+      await publishRetryAssignment(assignment.id, true);
+      await reload();
+      await loadCampaignDetail(campaign.id, true);
+      setNotice({ tone: "info", text: `Đã nhận yêu cầu thử lại bài của ${machine}. Theo dõi trạng thái từng máy để xem kết quả.` });
     } catch (error) {
       setNotice({ tone: "error", text: describeError(error) });
     } finally {
+      publishInFlight.current = false;
       setBusy(false);
     }
   };
@@ -1013,10 +1163,17 @@ export function PublishPage({
     openDetailIds.current.add(campaign.id);
     await loadCampaignDetail(campaign.id, true);
   };
+  const openPendingPublication = (campaignId: string) => {
+    setCreatedCampaignId(campaignId); setWorkspaceTab("monitor");
+    openDetailIds.current.add(campaignId);
+    void loadCampaignDetail(campaignId, true);
+  };
 
   return (
     <main className="panel publish-page">
       <AutomationTabs id="publish" label="Chế độ Đăng bài" value={workspaceTab} onChange={setWorkspaceTab} />
+      <PublishHostLimits onSaved={() => setLimitsRevision(revision => revision + 1)} />
+      {guardsFailed && <div className="publish-global-notice"><StatusNotice tone="warning">{UNKNOWN_PUBLISH_GUARD}. <button type="button" onClick={() => void refreshDeviceGuards()}>Kiểm tra lại trạng thái bài</button></StatusNotice></div>}
       {notice && (
         <div className="publish-global-notice">
           <StatusNotice tone={notice.tone}>{notice.text}</StatusNotice>
@@ -1040,12 +1197,17 @@ export function PublishPage({
       <div className="publish-tab-panel" role="tabpanel" id="publish-panel-schedule" aria-labelledby="publish-tab-schedule" hidden={workspaceTab !== "schedule"}>
         <PublishSchedulePlanner key={sourceRoot}
           active={workspaceTab === "schedule"} sourceReady={!scanning && !restoringForm}
+          limitsRevision={limitsRevision}
           selectedIds={bundleIds} assignments={assignments} eligible={eligibleTargets}
+          deviceGuards={deviceGuards} onPendingPublication={openPendingPublication}
           sourceRoot={sourceRoot} bundles={manifest?.bundles ?? []} devices={devices} metas={metas}
           captions={captionDrafts} sound={currentSoundPolicy} sheet={sheetEnabled} cleanup={deleteAfterPublish}
           blockingReason={sheetBlockingReason}
           onSource={()=>setWorkspaceTab("setup")} onCreated={()=>{void reload();}}
-          onSheetSetup={() => { setWorkspaceTab("setup"); requestAnimationFrame(() => document.getElementById("publish-sheet-link")?.focus()); }}
+          onSheetSetup={() => { setWorkspaceTab("setup"); requestAnimationFrame(() => {
+            const target = document.querySelector<HTMLElement>("[data-google-sheet-focus]") ?? document.getElementById("publish-sheet-link");
+            target?.scrollIntoView({ block: "nearest" }); target?.focus({ preventScroll: true });
+          }); }}
           onHistory={()=>setWorkspaceTab("monitor")}
         />
       </div>
@@ -1061,12 +1223,13 @@ export function PublishPage({
           devices={devices}
           metas={metas}
           eligible={eligibleTargets}
+          deviceGuards={deviceGuards} onPendingPublication={openPendingPublication}
           busy={operationBusy}
           scanning={scanning || restoringForm}
           preflightLoading={preflightState === "loading"}
           preflight={currentPreflight}
-          preflightError={sheetBlockingReason ?? preflightError}
-          blockingReason={sheetBlockingReason}
+          preflightError={publishBlockingReason ?? preflightError}
+          blockingReason={publishBlockingReason}
           sound={currentSoundPolicy}
           sheet={sheetEnabled}
           cleanup={deleteAfterPublish}
@@ -1207,6 +1370,7 @@ export function PublishPage({
             devices={devices}
             metas={metas}
             retryCampaign={retryCampaign}
+            retryAssignment={retryAssignment}
             toggleDetail={toggleCampaignDetail}
             cancel={async (campaign) => {
               setBusy(true);
@@ -1239,6 +1403,7 @@ function CampaignMonitor({
   devices,
   metas,
   retryCampaign,
+  retryAssignment,
   toggleDetail,
   cancel,
 }: {
@@ -1254,15 +1419,17 @@ function CampaignMonitor({
   devices: SelProps["devices"];
   metas: Map<string, import("../types").DeviceMeta>;
   retryCampaign: (campaign: PublishCampaignRecord) => Promise<void>;
+  retryAssignment: (assignment: PublishAssignmentRecord, campaign: PublishCampaignRecord) => Promise<void>;
   toggleDetail: (campaign: PublishCampaignRecord) => Promise<void>;
   cancel: (campaign: PublishCampaignRecord) => Promise<void>;
 }) {
   const [filter, setFilter] = useState<"all" | "scheduled" | "active" | "attention" | "done">("all");
   const [query, setQuery] = useState("");
   const [selectedId, setSelectedId] = useState<string | null | undefined>(initialSelectedId);
+  useEffect(() => { if (initialSelectedId) setSelectedId(initialSelectedId); }, [initialSelectedId]);
   const bucket = (campaign: PublishCampaignRecord) => {
     if (campaign.state === "scheduled") return "scheduled";
-    const view = campaignView(campaign, operations[campaign.id], executionSnapshots[campaign.id]);
+    const view = campaignView(campaign, operations[campaign.id], executionSnapshots[campaign.id], details[campaign.id]);
     if (view.label === "Hoàn tất") return "done";
     if (view.tone === "error" || view.tone === "warning" || campaign.state === "uncertain") return "attention";
     return "active";
@@ -1272,7 +1439,7 @@ function CampaignMonitor({
   const selected = selectedId === undefined
     ? filtered.find(campaign => details[campaign.id])
     : filtered.find(campaign => campaign.id === selectedId);
-  const selectedView = selected ? campaignView(selected, operations[selected.id], executionSnapshots[selected.id]) : null;
+  const selectedView = selected ? campaignView(selected, operations[selected.id], executionSnapshots[selected.id], details[selected.id]) : null;
   const name = (campaign: PublishCampaignRecord) => campaign.sourceRoot.split(/[\\/]/).filter(Boolean).at(-1) ?? "Nguồn bài đăng";
   const choose = (campaign: PublishCampaignRecord) => {
     if (selected && selected.id !== campaign.id && (details[selected.id] || detailLoading[selected.id])) void toggleDetail(selected);
@@ -1290,7 +1457,7 @@ function CampaignMonitor({
     <div className="publish-monitor-layout">
       <div className="publish-run-list" role="list" aria-label="Chiến dịch đăng bài">
         {filtered.map(campaign => {
-          const view = campaignView(campaign, operations[campaign.id], executionSnapshots[campaign.id]);
+          const view = campaignView(campaign, operations[campaign.id], executionSnapshots[campaign.id], details[campaign.id]);
           return <div role="listitem" key={campaign.id} className={`publish-run-card ${selected?.id === campaign.id ? "is-selected" : ""}`}>
             <button type="button" className="publish-run-title" aria-current={selected?.id === campaign.id ? "true" : undefined} onClick={() => choose(campaign)}>
               <span><strong>Chiến dịch {campaigns.indexOf(campaign) + 1}</strong><small>{campaign.assignments.length} bài · {new Date(campaign.createdAt).toLocaleString("vi-VN")}</small></span>
@@ -1313,7 +1480,8 @@ function CampaignMonitor({
             </div>
           </div>
           <CampaignDetail detail={details[selected.id]} error={detailErrors[selected.id]} loading={detailLoading[selected.id] === true}
-            snapshot={executionSnapshots[selected.id]} devices={devices} metas={metas} retry={() => void toggleDetail(selected)}/>
+            snapshot={executionSnapshots[selected.id]} devices={devices} metas={metas} retry={() => void toggleDetail(selected)}
+            busy={busy} retryAssignment={assignment => void retryAssignment(assignment, selected)}/>
         </> : <div className="publish-monitor-placeholder"><ListChecks size={30}/><strong>Chọn một chiến dịch để theo dõi</strong><span>Kết quả từng máy, link và ghi chú sẽ hiện tại đây.</span></div>}
       </div>
     </div>
@@ -1334,6 +1502,8 @@ function CampaignDetail({
   devices,
   metas,
   retry,
+  busy,
+  retryAssignment,
 }: {
   detail?: PublishCampaignDetail;
   error?: string;
@@ -1342,6 +1512,8 @@ function CampaignDetail({
   devices: SelProps["devices"];
   metas: Map<string, import("../types").DeviceMeta>;
   retry: () => void;
+  busy: boolean;
+  retryAssignment: (assignment: PublishAssignmentRecord) => void;
 }) {
   if (!detail && !error && !loading) return null;
   // Current assignment evidence outranks a completed snapshot from before the
@@ -1349,6 +1521,7 @@ function CampaignDetail({
   const pendingPost = detail?.campaign.state === "verifying"
     || detail?.assignments.some((assignment) => assignment.state === "verifying") === true;
   const reviewPost = detail?.assignments.some(needsPublicationReview) === true;
+  const supersededSheet = detail?.assignments.some(assignment => assignment.sheetDelivery?.state === "superseded") === true;
   return (
     <section
       className="publish-campaign-detail"
@@ -1375,14 +1548,14 @@ function CampaignDetail({
             <div className="publish-reconcile-summary">
               <StatusChip
                 tone={
-                  reviewPost ? "warning" : pendingPost ? "info" : snapshot.status === "complete"
+                  reviewPost || supersededSheet ? "warning" : pendingPost ? "info" : snapshot.status === "complete"
                     ? "success"
                     : snapshot.status === "uncertain"
                       ? "warning"
                       : "info"
                 }
               >
-                {reviewPost ? "Cần kiểm tra bài đăng" : pendingPost ? "Đang chờ xác minh bài đăng" : snapshot.status === "complete"
+                {reviewPost ? "Cần kiểm tra bài đăng" : pendingPost ? "Đang chờ xác minh bài đăng" : supersededSheet ? "Đợt báo cáo đã đóng" : snapshot.status === "complete"
                   ? "Đã hoàn tất"
                   : snapshot.status === "uncertain"
                     ? "Kết quả chưa chắc chắn"
@@ -1390,7 +1563,8 @@ function CampaignDetail({
               </StatusChip>
               <span>{reviewPost ? "Đã dừng kiểm tra tự động; mở TikTok kiểm tra bài đăng hoặc bản nháp" : pendingPost ? "Bài đang chờ xác minh sẽ không được đăng lại" : retryScopeLabel(snapshot.retryScope, snapshotSheetEnabled(snapshot))}</span>
               <span>
-                {!snapshotSheetEnabled(snapshot)
+                {supersededSheet ? "Nghĩa vụ ghi Sheet cũ đã đóng; kết quả giữ trong app"
+                  : !snapshotSheetEnabled(snapshot)
                   ? "Không ghi Sheet"
                   : reviewPost || pendingPost ? "Sheet chờ liên kết đã xác minh" : snapshot.status === "complete"
                     ? "Sheet đã xác nhận"
@@ -1407,7 +1581,7 @@ function CampaignDetail({
             <span>{detail.assignments.filter(isComposing).length} máy đang chuẩn bị bài trên TikTok</span>
             <span>{detail.assignments.filter(a => a.state === "posting").length} máy đang gửi bài</span>
             <span>{detail.assignments.filter(a => a.state === "verifying").length} máy chờ liên kết</span>
-            <span>{detail.assignments.filter(a => ["uncertain", "failedBeforeDispatch"].includes(a.state)).length} máy cần xử lý</span>
+            <span>{detail.assignments.filter(a => ["uncertain", "failedBeforeDispatch", "missed"].includes(a.state)).length} máy cần xử lý</span>
           </div>
           <ResponsiveTable
             label="Kết quả theo máy"
@@ -1438,7 +1612,11 @@ function CampaignDetail({
                 label: "Kết quả",
                 render: (assignment: PublishAssignmentRecord) => needsPublicationReview(assignment)
                   ? <span>Cần kiểm tra bài đăng<p>{publicationReviewReason(assignment.evidenceJson) ?? "Chưa có đủ bằng chứng xác nhận bài; kiểm tra TikTok trước khi tiếp tục."}</p></span>
-                  : <span>{isComposing(assignment) ? "Đang chuẩn bị bài trên TikTok" : PUBLISH_STATE_LABELS[assignment.state] ?? "Trạng thái chưa nhận diện"}{verificationDetail(assignment.evidenceJson) && <p>{verificationDetail(assignment.evidenceJson)}</p>}</span>,
+                  : <span>{isComposing(assignment) ? "Đang chuẩn bị bài trên TikTok" : PUBLISH_STATE_LABELS[assignment.state] ?? "Trạng thái chưa nhận diện"}{dispatchDetail(assignment) && <p>{dispatchDetail(assignment)}</p>}{verificationDetail(assignment.evidenceJson) && <p>{verificationDetail(assignment.evidenceJson)}</p>}
+                    {canRetryAssignment(assignment, detail.campaign) && <button type="button" disabled={busy || loading}
+                      aria-label={`Thử lại trước khi Đăng · ${deviceDisplayName(devices, metas, assignment.udid)}`}
+                      onClick={() => retryAssignment(assignment)}>Thử lại máy này</button>}
+                  </span>,
               },
               {
                 id: "link",
@@ -1461,6 +1639,7 @@ function CampaignDetail({
                   const delivery = assignment.sheetDelivery;
                   if (!delivery) return snapshot && !snapshotSheetEnabled(snapshot)
                     ? "Không ghi Sheet" : "Chờ liên kết đã xác minh";
+                  if (delivery.state === "superseded") return "Đợt báo cáo đã đóng · giữ lịch sử trong app";
                   const next = delivery.nextAttemptAtMs == null ? null
                     : new Date(delivery.nextAttemptAtMs).toLocaleTimeString("vi-VN");
                   return <span>
@@ -1567,6 +1746,8 @@ function assignmentRaw(assignment: PublishAssignmentRecord): string {
   return [
     `UDID: ${assignment.udid}`,
     `state: ${assignment.state}`,
+    assignment.publicationId ? `publicationId: ${assignment.publicationId}` : null,
+    assignment.attemptId ? `attemptId: ${assignment.attemptId}` : null,
     assignment.errorCode ? `error: ${assignment.errorCode}` : null,
   ]
     .filter(Boolean)

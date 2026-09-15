@@ -2,6 +2,39 @@
 
 use super::*;
 
+#[tauri::command]
+pub async fn publish_sheet_reset_reporting(
+    state: State<'_, AppState>,
+    reset_id: String,
+) -> Result<serde_json::Value, CommandError> {
+    let _admission = state.ensure_accepting_work()?;
+    if state.db.sheet_uses_google_direct().map_err(err)? {
+        return crate::google_sheet_commands::reset_reporting(&state.db, &reset_id)
+            .await
+            .map_err(err);
+    }
+    let result=async {
+        let settings=state.db.publish_sheet_delivery_settings()?;
+        let url=state.db.get_setting(riviu_core::publish_sheet::SHEET_URL_SETTING)?.context("Chưa chọn Sheet")?;
+        let checked=riviu_core::publish_sheet::check_sheet(&url,&settings).await?;
+        anyhow::ensure!(checked.connection_verified,"{}",checked.message);
+        let target=riviu_core::publish_sheet::SheetDeliveryTarget{
+            version:2,spreadsheet_id:checked.spreadsheet_id,sheet_gid:checked.sheet_gid,
+            internal_reporting:settings.internal_reporting,reporting_epoch:checked.reporting_epoch,
+        };
+        state.db.begin_publish_sheet_reset(&target,&reset_id)?;
+        let until=Instant::now()+Duration::from_secs(125);
+        while !state.db.publish_sheet_requests_drained()? {
+            anyhow::ensure!(Instant::now()<until,"Sheet còn request đang chạy; tiếp tục bằng cùng resetId");
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
+        let backup=riviu_core::publish_sheet::reset_reporting_sheet(&settings,&target,&reset_id).await?;
+        state.db.finish_publish_sheet_reset(&target,&reset_id,&backup)?;
+        Ok::<_,anyhow::Error>(serde_json::json!({"reportingEpoch":reset_id,"backupSpreadsheetId":backup,"sheetGid":0,"complete":true}))
+    }.await;
+    result.map_err(preflight::err)
+}
+
 #[cfg(test)]
 pub(super) fn settle_publish_sheet_delivery_and_announce(
     db: &Database,
@@ -80,37 +113,41 @@ async fn deliver_bound_claim(
     let mut transport_accepted = false;
     let delivered = async {
         let settings = db.publish_sheet_delivery_settings()?;
-        anyhow::ensure!(
-            !settings.webhook_url.trim().is_empty() && !settings.token.trim().is_empty(),
-            "Sheet chưa cấu hình kết nối ghi"
-        );
-        match &claim.payload {
-            SheetDeliveryPayload::Canonical { row, metadata } => {
-                let payload = riviu_core::publish_sheet::SheetRow {
-                    token: settings.token.clone(),
-                    post_url: row.post_url.clone(),
-                    poster: row.poster.clone(),
-                    partners: row.partners.clone(),
-                    assignment_id: row.assignment_id.clone(),
-                    posted_at: row.posted_at.clone(),
-                };
-                riviu_core::publish_sheet::push_bound_canonical(
-                    &settings.webhook_url,
-                    &payload,
-                    &claim.target,
-                    row.revision,
-                    metadata.as_ref(),
-                )
-                .await?;
-            }
-            SheetDeliveryPayload::Report(row) => {
-                riviu_core::publish_sheet::push_bound_internal_report(
-                    &settings.webhook_url,
-                    &settings.token,
-                    row,
-                    &claim.target,
-                )
-                .await?
+        if db.sheet_uses_google_direct()? {
+            crate::google_sheet_commands::deliver(db, &claim).await?;
+        } else {
+            anyhow::ensure!(
+                !settings.webhook_url.trim().is_empty() && !settings.token.trim().is_empty(),
+                "Sheet chưa cấu hình kết nối ghi"
+            );
+            match &claim.payload {
+                SheetDeliveryPayload::Canonical { row, metadata } => {
+                    let payload = riviu_core::publish_sheet::SheetRow {
+                        token: settings.token.clone(),
+                        post_url: row.post_url.clone(),
+                        poster: row.poster.clone(),
+                        partners: row.partners.clone(),
+                        assignment_id: row.assignment_id.clone(),
+                        posted_at: row.posted_at.clone(),
+                    };
+                    riviu_core::publish_sheet::push_bound_canonical(
+                        &settings.webhook_url,
+                        &payload,
+                        &claim.target,
+                        row.revision,
+                        metadata.as_ref(),
+                    )
+                    .await?;
+                }
+                SheetDeliveryPayload::Report(row) => {
+                    riviu_core::publish_sheet::push_bound_internal_report(
+                        &settings.webhook_url,
+                        &settings.token,
+                        row,
+                        &claim.target,
+                    )
+                    .await?
+                }
             }
         }
         transport_accepted = true;
@@ -141,7 +178,8 @@ async fn deliver_bound_claim(
     .await;
     if let Err(error) = &delivered {
         let retryable = transport_accepted
-            || riviu_core::publish_sheet::sheet_delivery_error_is_retryable(error);
+            || riviu_core::publish_sheet::sheet_delivery_error_is_retryable(error)
+            || crate::google_sheet_commands::retryable(error);
         db.fail_bound_sheet_delivery(
             &claim,
             &format!("{error:#}"),
@@ -163,6 +201,7 @@ async fn deliver_bound_claim(
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PublishSheetConfig {
+    pub provider: String,
     pub webhook_url: String,
     pub has_token: bool,
     pub internal_reporting: bool,
@@ -174,6 +213,12 @@ pub(super) fn publish_sheet_config_of(db: &Database) -> Result<PublishSheetConfi
     let webhook_url = settings.webhook_url;
     let has_token = !settings.token.trim().is_empty();
     Ok(PublishSheetConfig {
+        provider: if db.sheet_uses_google_direct().map_err(err)? {
+            "googleDirect"
+        } else {
+            "appsScript"
+        }
+        .into(),
         webhook_url,
         has_token,
         internal_reporting: settings.internal_reporting,
@@ -198,7 +243,7 @@ pub async fn publish_sheet_check(
 ) -> Result<riviu_core::publish_sheet::SheetCheckResult, CommandError> {
     let _admission = state.ensure_accepting_work()?;
     let settings = state.db.publish_sheet_delivery_settings().map_err(err)?;
-    let result = riviu_core::publish_sheet::check_sheet(&sheet_url, &settings)
+    let result = crate::google_sheet_commands::check_current(&state.db, &sheet_url)
         .await
         .map_err(err)?;
     if result.connection_verified {
@@ -230,6 +275,11 @@ pub async fn publish_sheet_prepare(
     sheet_url: String,
 ) -> Result<riviu_core::publish_sheet::SheetCheckResult, CommandError> {
     let _admission = state.ensure_accepting_work()?;
+    if state.db.sheet_uses_google_direct().map_err(err)? {
+        return crate::google_sheet_commands::check_current(&state.db, &sheet_url)
+            .await
+            .map_err(err);
+    }
     let settings = state.db.publish_sheet_delivery_settings().map_err(err)?;
     let result = riviu_core::publish_sheet::prepare_sheet(&sheet_url, &settings)
         .await
@@ -293,6 +343,11 @@ pub fn publish_sheet_save_config(
 ) -> Result<PublishSheetConfig, CommandError> {
     let _admission = state.ensure_accepting_work()?;
     let webhook_url = webhook_url.trim().to_string();
+    if state.db.sheet_uses_google_direct().map_err(err)? {
+        return Err(err(
+            "Kết nối Google trực tiếp đang được chọn; cấu hình Apps Script chỉ còn trong lịch sử",
+        ));
+    }
     if !webhook_url.is_empty() && !riviu_core::publish_sheet::is_acceptable_webhook(&webhook_url) {
         return Err(err(format!(
             "webhook không nhận được: cần HTTPS kèm host thật — token và link bài đi trong \
@@ -347,13 +402,32 @@ pub(crate) async fn run_bound_sheet_worker(
                 continue;
             }
         };
-        if settings.webhook_url.trim().is_empty() || settings.token.trim().is_empty() {
+        let direct = db.sheet_uses_google_direct().unwrap_or(false);
+        if direct && db.google_oauth_tokens().ok().flatten().is_none() {
+            continue;
+        }
+        if !direct && (settings.webhook_url.trim().is_empty() || settings.token.trim().is_empty()) {
             continue;
         }
         let mut digest = sha2::Sha256::new();
-        digest.update(settings.webhook_url.as_bytes());
-        digest.update([0]);
-        digest.update(settings.token.as_bytes());
+        if direct {
+            if let Ok(Some(connection)) = db.google_sheet_connection() {
+                digest.update(serde_json::to_vec(&connection).unwrap_or_default());
+                digest.update(
+                    db.get_setting("google.sheets.authorization-generation")
+                        .ok()
+                        .flatten()
+                        .unwrap_or_default()
+                        .as_bytes(),
+                );
+            } else {
+                continue;
+            }
+        } else {
+            digest.update(settings.webhook_url.as_bytes());
+            digest.update([0]);
+            digest.update(settings.token.as_bytes());
+        }
         let fingerprint = format!("{:x}", digest.finalize());
         let now = chrono::Utc::now().timestamp_millis();
         if let Err(error) = db.configure_bound_sheet_delivery(&fingerprint, now) {

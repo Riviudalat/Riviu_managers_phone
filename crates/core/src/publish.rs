@@ -347,6 +347,12 @@ pub struct PublishSheetDeliveryProgress {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct PublishAssignmentRecord {
+    #[serde(default)]
+    pub publication_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attempt_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dispatch: Option<serde_json::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sheet_delivery: Option<PublishSheetDeliveryProgress>,
     pub id: String,

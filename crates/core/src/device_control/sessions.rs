@@ -4,6 +4,27 @@
 use super::*;
 
 impl DeviceControlPlane {
+    /// Persist the final-close obligation before releasing ownership. Never assert process
+    /// absence for a deferred close, and always release the session on a persistence failure.
+    pub async fn complete_app_session(
+        &self,
+        context: UiWithStreamContext,
+        bundle_id: &str,
+    ) -> Result<AppCompletionDisposition, DeviceControlError> {
+        self.validate_stream(&context)?;
+        let requested = self.request_app_completion(context.udid(), bundle_id);
+        if matches!(requested, Ok(false)) {
+            return self
+                .finish_app_session(context, bundle_id)
+                .await
+                .map(AppCompletionDisposition::ProcessAbsent);
+        }
+        let closed = self.close_ui_context(context).await;
+        requested?;
+        closed?;
+        Ok(AppCompletionDisposition::Deferred)
+    }
+
     /// New automation attempt only. Reserve capacity before any stop; keep ownership on errors.
     /// This does not reset a campaign journal or authorize retry after a public effect.
     pub async fn start_clean_app_session(

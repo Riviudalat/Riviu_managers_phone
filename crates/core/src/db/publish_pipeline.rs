@@ -20,6 +20,8 @@ impl Database {
         let changed=tx.execute("UPDATE publish_campaigns SET state='posting',error_code=NULL,revision=revision+1,updated_at=?2
             WHERE id=?1 AND state IN ('queued','scheduled','ready','imported','failed_before_dispatch','verifying')
             AND (run_at IS NULL OR datetime(run_at)<=datetime(?3))
+            AND (run_at IS NULL OR datetime(?3)<=datetime(run_at,'+30 seconds')
+                OR EXISTS(SELECT 1 FROM publish_dispatch_jobs j WHERE j.campaign_id=?1 AND j.started_at_ms IS NOT NULL))
             AND NOT EXISTS(SELECT 1 FROM publish_pipeline_runs r WHERE r.campaign_id=?1)
             AND NOT EXISTS(SELECT 1 FROM publish_assignments a WHERE a.campaign_id=?1 AND a.state IN ('posting','uncertain'))
             AND EXISTS(SELECT 1 FROM publish_assignments a WHERE a.campaign_id=?1 AND a.effect_intent IS NULL AND a.state IN ('queued','scheduled','ready','imported','failed_before_dispatch'))",
@@ -30,6 +32,14 @@ impl Database {
         tx.execute(
             "INSERT INTO publish_pipeline_runs(campaign_id,token,created_at) VALUES(?1,?2,?3)",
             params![campaign_id, token, now],
+        )?;
+        Self::enqueue_publish_jobs(
+            &tx,
+            &PublishPipelineRun {
+                campaign_id: campaign_id.into(),
+                token: token.clone(),
+            },
+            Utc::now().timestamp_millis(),
         )?;
         pipeline_event(&tx, campaign_id, &now)?;
         tx.commit()?;
@@ -185,6 +195,8 @@ impl Database {
             "uncertain"
         } else if rows.iter().any(|s| s == "verifying") {
             "verifying"
+        } else if !rows.is_empty() && rows.iter().all(|s| s == "missed") {
+            "missed"
         } else if !rows.is_empty() && rows.iter().all(|s| s == "succeeded") {
             "succeeded"
         } else {
@@ -194,6 +206,7 @@ impl Database {
             "succeeded" => None,
             "verifying" => Some("post_verification_pending"),
             "uncertain" => Some("post_or_cleanup_failed"),
+            "missed" => Some("schedule_capacity_deadline"),
             _ => Some("publish_assignment_failed"),
         };
         if tx.execute("UPDATE publish_campaigns SET state=?1,error_code=?2,revision=revision+1,updated_at=?3 WHERE id=?4 AND state='posting'",params![state,error,now,run.campaign_id])?==1{pipeline_event(&tx,&run.campaign_id,&now)?;}
@@ -208,4 +221,4 @@ fn pipeline_event(tx: &rusqlite::Transaction<'_>, campaign: &str, now: &str) -> 
 
 #[cfg(test)]
 #[path = "publish_pipeline_tests.rs"]
-mod tests;
+pub(super) mod tests;

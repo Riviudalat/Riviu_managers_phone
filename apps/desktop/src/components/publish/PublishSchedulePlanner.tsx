@@ -3,7 +3,8 @@ import { CalendarClock, GripVertical, Search, Undo2, Unlink, X, Zap } from "luci
 import { publishScheduleCreate, publishSchedulePreflight } from "../../api";
 import { describeError } from "../../describeError";
 import { orderDevicesByNumber, tileNumber, tileName } from "../../deviceNaming";
-import type { DeviceInfo, DeviceMeta, PublishBundle, PublishScheduleReport, PublishScheduleRequest, PublishSoundPolicy } from "../../types";
+import type { DeviceInfo, DeviceMeta, PublishBundle, PublishDeviceGuards, PublishScheduleReport, PublishScheduleRequest, PublishSoundPolicy } from "../../types";
+import { deviceGuardBlock, deviceGuardPending } from "./publishDeviceGuardState";
 import { PublishMedia } from "./PublishMedia";
 import { machineStatusLabel } from "../machineChoiceState";
 import { localDateTime, scheduleDateIssue } from "./publishScheduleTimes";
@@ -16,6 +17,8 @@ type Props = {
   captions: Record<string, string>; sound: PublishSoundPolicy; sheet: boolean; cleanup: boolean;
   selectedIds?: string[]; assignments?: Record<string, string>; eligible?: string[];
   active?: boolean; sourceReady?: boolean; blockingReason?: string;
+  limitsRevision?: number;
+  deviceGuards?: PublishDeviceGuards; onPendingPublication?: (campaignId: string) => void;
   onCreated: () => void; onSource: () => void; onHistory?: () => void; onSheetSetup?: () => void;
 };
 const emptyDraft = (sourceRoot: string): ScheduleDraft => ({ version: 2, sourceRoot, date: localDateTime(new Date()).slice(0, 10), commonTime: "", rows: [], selectedMachines: [], requestId: crypto.randomUUID() });
@@ -52,7 +55,7 @@ export function PublishSchedulePlanner(p: Props) {
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; generation.current += 1; }; }, []);
   const ordered = useMemo(() => orderDevicesByNumber(p.devices, p.metas), [p.devices, p.metas]);
   const inScope = ordered.filter(d => !p.eligible || p.eligible.includes(d.udid));
-  const readyIds = inScope.filter(d => d.status === "ready").map(d => d.udid);
+  const readyIds = inScope.filter(d => d.status === "ready" && !deviceGuardBlock(p.deviceGuards,d.udid)).map(d => d.udid);
   const label = (udid: string) => {
     const index = ordered.findIndex(d => d.udid === udid);
     return index >= 0 ? `Máy ${tileNumber(index + 1, p.metas.get(udid))}` : "Máy đã ngắt kết nối";
@@ -90,9 +93,9 @@ export function PublishSchedulePlanner(p: Props) {
     captionOverrides: Object.fromEntries(draft.rows.filter(r => p.captions[r.bundleId] !== undefined).map(r => [r.bundleId, p.captions[r.bundleId]])),
     soundPolicy: p.sound, sheetEnabled: p.sheet, deleteAfterPublish: p.cleanup };
   const key = JSON.stringify({ request,
-    readiness: draft.rows.map(row => [row.udid, readyIds.includes(row.udid)]),
+    readiness: draft.rows.map(row => [row.udid, readyIds.includes(row.udid), p.deviceGuards?.[row.udid]?.blocking]),
     source: draft.rows.map(row => p.bundles.find(bundle => bundle.id === row.bundleId) ?? null),
-    sourceReady: p.sourceReady !== false, blockingReason: p.blockingReason ?? "" });
+    sourceReady: p.sourceReady !== false, blockingReason: p.blockingReason ?? "", limitsRevision: p.limitsRevision ?? 0 });
   const latest = useRef(key);
   if (latest.current !== key) { latest.current = key; generation.current += 1; }
   const reviewed = review?.key === key && review.generation === generation.current && !p.blockingReason ? review : null;
@@ -170,6 +173,8 @@ export function PublishSchedulePlanner(p: Props) {
   const rowIssue = (row: ScheduleRow) => {
     if (!p.bundles.some(b => b.id === row.bundleId)) return "Bài không còn trong nguồn";
     if (!row.udid) return "Chưa có máy";
+    const pending = deviceGuardBlock(p.deviceGuards,row.udid);
+    if (pending) return pending;
     if (!readyIds.includes(row.udid)) return "Máy chưa sẵn sàng trong phạm vi";
     if (machineHasScheduleConflict(draft.rows, row.bundleId, row.udid, draft.commonTime)) return "Trùng máy và giờ";
     const time = scheduleTime(row, draft.commonTime);
@@ -275,9 +280,10 @@ export function PublishSchedulePlanner(p: Props) {
             const assigned = draft.rows.filter(r => r.udid === d.udid);
             const willReceive = preview?.assigned.filter(a => a.udid === d.udid) ?? [];
             return <div key={d.udid} data-schedule-device={d.udid} className={`ps-machine ${draft.selectedMachines.includes(d.udid) ? "is-picked" : ""} ${willReceive.length ? "is-drop-target" : ""} ${assigned.some(r => r.bundleId === activePost) ? "is-linked" : ""} ${d.status !== "ready" ? "is-unavailable" : ""}`}>
-              <label><input type="checkbox" checked={draft.selectedMachines.includes(d.udid)} disabled={locked || d.status !== "ready"} aria-label={`Chọn máy hẹn giờ ${label(d.udid)}`} onChange={e => edit(current => ({ ...current, selectedMachines: e.target.checked ? [...new Set([...current.selectedMachines, d.udid])] : current.selectedMachines.filter(id => id !== d.udid) }))}/><strong>{label(d.udid)}</strong><span>{d.status === "ready" ? assigned.length ? `${assigned.length} bài` : "Trống" : machineStatusLabel(d.status)}</span></label>
+              <label><input type="checkbox" checked={draft.selectedMachines.includes(d.udid)} disabled={locked || d.status !== "ready" || (!draft.selectedMachines.includes(d.udid) && !!deviceGuardBlock(p.deviceGuards,d.udid))} aria-label={`Chọn máy hẹn giờ ${label(d.udid)}`} onChange={e => edit(current => ({ ...current, selectedMachines: e.target.checked ? [...new Set([...current.selectedMachines, d.udid])] : current.selectedMachines.filter(id => id !== d.udid) }))}/><strong>{label(d.udid)}</strong><span>{d.status === "ready" ? assigned.length ? `${assigned.length} bài` : "Trống" : machineStatusLabel(d.status)}</span></label>
               {assigned.length ? <p className="ps-machine-post" title={assigned.map(r => name(r.bundleId)).join(", ")}>{assigned.map(r => name(r.bundleId)).join(", ")}</p> : <p className="ps-machine-empty">{d.status === "ready" ? "Thả để gán bài" : "Không nhận bài"}</p>}
               {d.status !== "ready" && d.lastError && <p className="ps-machine-reason">{d.lastError}</p>}
+              {(deviceGuardBlock(p.deviceGuards,d.udid) || deviceGuardPending(p.deviceGuards?.[d.udid])) && <div className="publish-device-pending" role="status"><strong>{deviceGuardBlock(p.deviceGuards,d.udid) ?? "Bài cũ còn cần kiểm tra link"}</strong><span>{deviceGuardPending(p.deviceGuards?.[d.udid])?.reason}</span>{p.onPendingPublication && deviceGuardPending(p.deviceGuards?.[d.udid]) && <button type="button" onClick={()=>p.onPendingPublication?.(deviceGuardPending(p.deviceGuards?.[d.udid])!.campaignId)}>Xem bài đang chờ</button>}</div>}
               {willReceive.length > 0 && <p className="ps-drop-preview">Nhận {willReceive.map(a => name(a.bundleId)).join(", ")}</p>}
             </div>;
           })}{!inScope.length ? <p className="ps-empty">Chọn phạm vi máy trong Thiết lập để phân công.</p> : !filteredMachines.length && <div className="ps-empty ps-empty-machines"><p>Không có máy khớp từ khóa.</p><button type="button" onClick={() => { setMachineQuery(""); drag.root.current?.querySelector<HTMLInputElement>('[aria-label="Tìm máy hẹn giờ"]')?.focus(); }}>Xóa tìm kiếm</button></div>}</div>
@@ -295,8 +301,9 @@ export function PublishSchedulePlanner(p: Props) {
             <td><div className="ps-row-actions"><button type="button" disabled={locked || !row.udid} aria-label={`Gỡ gán ${name(row.bundleId)}`} onClick={() => setMachine(row, "")}><Unlink size={15} aria-hidden="true"/></button><button type="button" disabled={locked} aria-label={`Bỏ bài ${name(row.bundleId)}`} onClick={() => selection(row.bundleId, false)}><X size={15} aria-hidden="true"/></button></div></td>
           </tr>)}
         </tbody></table>{!draft.rows.length && <p className="ps-empty">Chọn hoặc kéo bài vào vùng máy để tạo bảng phân công.</p>}</div>
-        <p className="ps-time-note">Giờ máy tính: {Intl.DateTimeFormat().resolvedOptions().timeZone}. Lịch bắt đầu xử lý lúc đã đặt; các bài cùng máy chạy lần lượt. Giữ Riviu mở và máy kết nối. Nếu mở Riviu sau giờ hẹn, lịch được đánh dấu lỡ lịch.</p>
+        <p className="ps-time-note">Giờ máy tính: {Intl.DateTimeFormat().resolvedOptions().timeZone}. Giờ hẹn là lúc bắt đầu xử lý, chưa phải lúc TikTok xuất bản. Giữ Riviu mở và máy kết nối. Lịch chưa được cấp lượt trong 30 giây hoặc mở Riviu sau giờ hẹn được đánh dấu Lỡ lịch, không tự đăng bù.</p>
         {(p.blockingReason || notice) && <p className="ps-notice" role="status">{p.blockingReason || notice}</p>}
+        {reviewed?.report.warnings?.map(warning => <p role="status" key={warning}>{warning}</p>)}
         {reviewed && <div className="ps-review"><strong>{reviewed.report.canExecute ? "Các bài đã đạt kiểm tra" : "Có bài cần xử lý trong bảng phân công"}</strong>{reviewed.report.canExecute && <label className="ps-inline-check"><input data-schedule-field="confirm" type="checkbox" checked={confirmed} disabled={locked} onChange={e => setConfirmed(e.target.checked)}/>Tôi xác nhận đăng công khai các bài đúng lịch trên</label>}</div>}
       </section>
     </div>

@@ -32,6 +32,15 @@ pub struct ConversationRole {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct ConversationAccountCheck {
+    pub role_id: String,
+    pub udid: String,
+    pub saved_username: String,
+    pub issues: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ScriptedConversation {
     pub schema_version: u8,
     pub duration_minutes: u32,

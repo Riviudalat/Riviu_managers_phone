@@ -401,7 +401,32 @@ mod tests {
             .await
             .unwrap();
         let request = request();
-        let result = service.template_match(request.clone()).await;
+        // This case exercises local inference with the AI feature disabled. Its
+        // 10s image request must not also benchmark a cold Python/NumPy/OpenCV
+        // import on a busy build host. Readiness has its own bounded handshake
+        // and health checks in connection_for; no retry or larger budget hides
+        // failures in the actual image request below.
+        let startup = std::time::Instant::now();
+        let result = async {
+            service
+                .connection_for(false)
+                .await
+                .context("local template service readiness")?;
+            let status = service.status().await?;
+            assert!(status.running);
+            assert!(!status.provider_ready);
+            assert!(!status.config.enabled);
+            let ready_ms = startup.elapsed().as_millis();
+            let matching = std::time::Instant::now();
+            let response = service.template_match(request.clone()).await;
+            eprintln!(
+                "local template readiness_ms={ready_ms} match_ms={} request_budget_ms={}",
+                matching.elapsed().as_millis(),
+                request.remaining_ms
+            );
+            response
+        }
+        .await;
         service.stop().await;
         let result = result.unwrap();
         result.validate_binding(&request).unwrap();
@@ -415,5 +440,33 @@ mod tests {
                 height: 19
             }
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn template_capacity_wait_obeys_request_deadline_without_starting_a_process() {
+        let directory =
+            std::env::temp_dir().join(format!("riviu-template-deadline-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let db =
+            std::sync::Arc::new(super::super::Database::open(directory.join("test.db")).unwrap());
+        let service = GuiService::new(db, None, directory.join("gui"));
+        let held = service
+            .capacity
+            .clone()
+            .acquire_many_owned(2)
+            .await
+            .unwrap();
+        let mut request = request();
+        request.remaining_ms = 20;
+        let started = tokio::time::Instant::now();
+        let error = service.template_match(request).await.unwrap_err();
+        assert_eq!(error.to_string(), "gui_deadline");
+        assert_eq!(started.elapsed(), Duration::from_millis(20));
+        assert!(service.running.lock().await.is_none());
+        assert!(service.starts.lock().await.is_empty());
+        drop(held);
+        assert_eq!(service.capacity.available_permits(), 2);
+        drop(service);
+        std::fs::remove_dir_all(directory).unwrap();
     }
 }

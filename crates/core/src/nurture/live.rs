@@ -602,6 +602,7 @@ mod tests {
     #[test]
     fn a_later_success_recovers_rates_after_a_failed_refresh() {
         let mut settings = NurtureSettings {
+            comment_enabled: true,
             like_prob: 100,
             comment_prob: 100,
             follow_prob: 100,
@@ -628,6 +629,7 @@ mod tests {
         let saved = Saved(NurtureSettings {
             like_prob: 100,
             comment_prob: 100,
+            comment_enabled: true,
             follow_prob: 100,
             human_limits: true,
             ..NurtureSettings::default()

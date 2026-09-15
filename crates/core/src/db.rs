@@ -7,7 +7,9 @@ use uuid::Uuid;
 
 use crate::types::{JobRecord, JobStatus, JobStepRecord};
 
+mod app_completion;
 mod app_workflow;
+pub use app_completion::{AppCompletionRecord, AppCompletionStatus};
 mod automation;
 mod comment_verification;
 mod conversation;
@@ -15,6 +17,7 @@ mod fleet;
 mod flow_connectors;
 mod flow_runs;
 mod flows;
+mod google_connection;
 mod gui;
 mod interaction;
 pub use conversation::{ConversationAlreadyRunning, ConversationSession};
@@ -30,9 +33,17 @@ mod operator_workspace;
 mod orchestration;
 mod public_cleanup;
 mod publish;
+mod publish_dispatch;
+mod publish_epoch;
 mod publish_pipeline;
+pub use google_connection::{
+    GoogleSheetConnection, GOOGLE_CONNECTION_SETTING, GOOGLE_MIGRATION_SETTING,
+    SHEET_PROVIDER_SETTING,
+};
+pub use publish_dispatch::{PublishDispatchJob, PublishLimits, PublishWorkPermit};
 pub use publish_pipeline::PublishPipelineRun;
 mod publish_cleanup;
+mod publish_create;
 mod publish_report;
 mod publish_sheet;
 mod publish_sheet_delivery;
@@ -75,6 +86,7 @@ pub const SECRET_AI_API_KEY: &str = "nurture-ai-api-key";
 pub struct Database {
     path: PathBuf,
     secrets: Option<std::sync::Arc<dyn SecretStore>>,
+    dispatch_connection: parking_lot::Mutex<Option<std::sync::Arc<parking_lot::Mutex<Connection>>>>,
 }
 
 const NURTURE_SETTINGS_MIGRATION_V2: &str = "nurture.settings.migration.v2";
@@ -90,6 +102,7 @@ impl Database {
         let db = Self {
             path,
             secrets: None,
+            dispatch_connection: parking_lot::Mutex::new(None),
         };
         db.migrate()?;
         Ok(db)
@@ -108,6 +121,17 @@ impl Database {
         Ok(connection)
     }
 
+    // One short-lived transaction at a time; never held across a device await.
+    fn dispatch_conn(&self) -> anyhow::Result<std::sync::Arc<parking_lot::Mutex<Connection>>> {
+        let mut cached = self.dispatch_connection.lock();
+        if let Some(conn) = cached.as_ref() {
+            return Ok(conn.clone());
+        }
+        let conn = std::sync::Arc::new(parking_lot::Mutex::new(self.conn()?));
+        *cached = Some(conn.clone());
+        Ok(conn)
+    }
+
     fn migrate(&self) -> anyhow::Result<()> {
         let mut conn = self.conn()?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
@@ -116,6 +140,16 @@ impl Database {
                 r.get(0)
             })
             .unwrap_or(None);
+        if version == Some(40) {
+            let backup = self.path.with_extension("pre-publication-v40.db");
+            if !backup.exists() {
+                conn.execute("VACUUM INTO ?1", [backup.to_string_lossy().as_ref()])?;
+                let check = Connection::open(&backup)?;
+                let integrity: String =
+                    check.query_row("PRAGMA integrity_check", [], |r| r.get(0))?;
+                anyhow::ensure!(integrity == "ok", "Database backup integrity check failed");
+            }
+        }
         if version == Some(36) {
             let backup = self.path.with_extension("pre-comment-verification-v36.db");
             if !backup.exists() {
@@ -1040,9 +1074,9 @@ mod nurture_settings_migration_tests {
 
         let migrated = db.get_nurture_settings().expect("load migrated profile");
         assert_eq!(migrated.num_videos, 120);
-        assert_eq!(migrated.like_prob, 35);
-        assert_eq!(migrated.comment_prob, 0);
-        assert_eq!(migrated.follow_prob, 3);
+        assert_eq!(migrated.like_prob, 20);
+        assert_eq!(migrated.comment_prob, 2);
+        assert_eq!(migrated.follow_prob, 1);
         assert_eq!(migrated.frenzy_prob, 6);
         assert_eq!((migrated.watch_min, migrated.watch_max), (3.0, 18.0));
         assert_eq!(migrated.schedule_every_minutes, 240);

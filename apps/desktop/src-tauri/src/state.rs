@@ -396,7 +396,7 @@ pub struct AppState {
     background_shutdown_error: Arc<RwLock<Option<String>>>,
 }
 
-struct CommandAdmissionState {
+pub(crate) struct CommandAdmissionState {
     accepting_work: AtomicBool,
     in_flight: AtomicUsize,
     changed: Notify,
@@ -444,7 +444,9 @@ impl CommandAdmissionState {
         self.changed.notify_waiters();
     }
 
-    fn ensure_accepting_work(self: &Arc<Self>) -> Result<CommandAdmission, CommandError> {
+    pub(crate) fn ensure_accepting_work(
+        self: &Arc<Self>,
+    ) -> Result<CommandAdmission, CommandError> {
         if !self.accepting_work.load(Ordering::Acquire) {
             return Err(CommandError::application_shutting_down());
         }
@@ -796,7 +798,7 @@ impl AppState {
             Arc::new(database.with_secrets(Arc::new(KeyringSecrets::new(credentials.clone()))));
         // Existing operator configuration remains local to this Windows profile. Re-saving it
         // migrates a legacy SQLite token into Credential Manager before a worker can deliver.
-        // The installer connection is restored separately and never selects a Sheet URL.
+        // Startup never imports installer-side connections or selects a Sheet URL.
         let sheet = db.publish_sheet_delivery_settings()?;
         if !sheet.webhook_url.is_empty() && !sheet.token.is_empty() {
             db.set_publish_sheet_config_with_reporting(
@@ -934,6 +936,13 @@ impl AppState {
             ios.interaction_capabilities.clone(),
         ));
         let publish_guard_db = db.clone();
+        let completion_db = db.clone();
+        control.set_app_completion_handler(Arc::new(move |udid, bundle_id| {
+            completion_db
+                .request_app_completion(udid, bundle_id)
+                .map(|_| ())
+                .map_err(|error| error.to_string())
+        }));
         control.set_clean_start_guard(Arc::new(move |udid| {
             match publish_guard_db.has_pending_publish_for_device(udid) {
                 Ok(false) => Ok(()),
@@ -1369,6 +1378,9 @@ impl AppState {
 
     pub(crate) fn reject_new_work(&self) {
         self.command_admission.reject_new_work();
+        if let Err(error) = self.db.pause_publish_dispatch() {
+            log::error!("pause publish queue: {error:#}");
+        }
     }
 
     pub(crate) async fn wait_for_mutating_commands(&self) {
@@ -1376,6 +1388,12 @@ impl AppState {
     }
 
     pub fn spawn_background_tasks(&self, app: AppHandle) {
+        crate::phone_app_completion::spawn(
+            self.control.clone(),
+            self.db.clone(),
+            self.command_admission.clone(),
+            self.background_stop.clone(),
+        );
         crate::orchestration_commands::resume_orchestration_runs(app.clone(), self);
         crate::orchestration_commands::start_automation_schedule_runner(app.clone(), self);
 
@@ -1392,7 +1410,9 @@ impl AppState {
             tauri::async_runtime::spawn(async move {
                 let mut interval = tokio::time::interval(Duration::from_secs(30));
                 interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-                let mut queue = crate::publish_commands::VerificationQueue::default();
+                let mut queue = crate::publish_commands::VerificationQueue::with_capacity(
+                    db.publish_limits().map(|v| v.verify).unwrap_or(4),
+                );
                 let mut failed_until = std::collections::HashMap::new();
                 loop {
                     tokio::select! {
@@ -1431,13 +1451,29 @@ impl AppState {
                         }
                     };
                     failed_until.retain(|_, until| *until > Instant::now());
+                    match db.publish_limits() {
+                        Ok(limits) => queue.set_capacity(limits.verify),
+                        Err(error) => {
+                            log::error!("publish limits: {error:#}");
+                            continue;
+                        }
+                    }
+                    // Rotate the inspected device page, including offline phones, so a
+                    // large disconnected prefix cannot conceal later due publications.
+                    if let Err(error) = db.rotate_publish_devices(
+                        &pending.iter().map(|r| r.udid.clone()).collect::<Vec<_>>(),
+                    ) {
+                        log::warn!("publish verification fairness: {error:#}");
+                    }
                     for row in pending {
                         if stop.load(Ordering::Relaxed) {
                             break;
                         }
                         if !queue.available(&row.udid)
                             || !registry.get(&row.udid).is_some_and(|device| {
-                                device.status == riviu_core::DeviceStatus::Ready
+                                crate::publish_commands::VerificationQueue::device_can_observe(
+                                    &device,
+                                )
                             })
                             || control.current_work_owner(&row.udid).is_some()
                             || failed_until.contains_key(&row.udid)
@@ -1457,20 +1493,35 @@ impl AppState {
                             .await
                         });
                     }
-                    // Cleanup must not wait for an empty verification queue: with every
-                    // Ready phone observing in parallel the queue is rarely empty, and
-                    // verified media debt would starve.
-                    if !stop.load(Ordering::Relaxed) {
-                        if let Ok(_admitted) = admission.ensure_accepting_work() {
-                            if let Err(error) =
-                                crate::publish_commands::cleanup_verified_assignments(
-                                    &control, &db, &events, 20,
-                                )
-                                .await
-                            {
-                                log::warn!("verified publish media cleanup: {error}");
-                            }
-                        }
+                }
+            });
+        }
+
+        {
+            let (control, db, events, admission, stop) = (
+                self.control.clone(),
+                self.db.clone(),
+                self.events.clone(),
+                self.command_admission.clone(),
+                self.background_stop.clone(),
+            );
+            tauri::async_runtime::spawn(async move {
+                let mut interval = tokio::time::interval(Duration::from_secs(30));
+                interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+                loop {
+                    interval.tick().await;
+                    if stop.load(Ordering::Acquire) {
+                        break;
+                    }
+                    let Ok(_admitted) = admission.ensure_accepting_work() else {
+                        break;
+                    };
+                    if let Err(error) = crate::publish_commands::cleanup_verified_assignments(
+                        &control, &db, &events, 20,
+                    )
+                    .await
+                    {
+                        log::warn!("verified publish media cleanup: {error:#}");
                     }
                 }
             });
@@ -2085,220 +2136,65 @@ impl AppState {
             }
         });
 
-        // One-time publish schedules are intentionally conservative: opening
-        // the desktop after the deadline marks the campaign missed instead
-        // of surprise-posting. A campaign that is due while this process is
-        // open runs the same typed one-confirm runtime as the manual command,
-        // using the sound policy and approval captured in request_json.
+        // Both modes enqueue the same durable assignment stages. This clock loop never
+        // starts a campaign task and never waits for a device or a Sheet request.
         let publish_db = self.db.clone();
-        let publish_control = self.control.clone();
-        let publish_registry = self.registry.clone();
         let publish_events = self.events.clone();
-        let publish_agent_bundle_id = self.active_agent_bundle_id.clone();
-        let publish_streams = self.streams.clone();
-        let publish_admission = self.command_admission.clone();
-        let publish_background_stop = self.background_stop.clone();
+        let publish_stop = self.background_stop.clone();
         let publish_started_at = chrono::Local::now().naive_local();
         tauri::async_runtime::spawn(async move {
-            let mut dispatch = crate::publish_scheduler::PublishScheduleDispatch::default();
-            let mut tasks = tokio::task::JoinSet::new();
-            let mut task_campaigns = std::collections::HashMap::<tokio::task::Id, String>::new();
-            let mut interval = tokio::time::interval(Duration::from_secs(15));
+            let mut interval = tokio::time::interval(Duration::from_secs(1));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             loop {
                 interval.tick().await;
-                if publish_background_stop.load(Ordering::Acquire) {
+                if publish_stop.load(Ordering::Acquire) {
                     break;
                 }
-                while let Some(completed) = tasks.try_join_next_with_id() {
-                    let (task_id, failed) = match completed {
-                        Ok((id, ())) => (id, false),
-                        Err(error) => {
-                            log::warn!("publish schedule worker stopped: {error}");
-                            (error.id(), true)
-                        }
-                    };
-                    if let Some(campaign) = task_campaigns.remove(&task_id) {
-                        dispatch.release(&campaign);
-                        if failed {
-                            if publish_db
-                                .get_publish_campaign(&campaign)
-                                .ok()
-                                .flatten()
-                                .is_some_and(|detail| {
-                                    detail.campaign.state
-                                        == riviu_core::PublishCampaignState::Queued
-                                })
-                            {
-                                let _ = publish_db.update_publish_campaign_state(
-                                    &campaign,
-                                    riviu_core::PublishCampaignState::FailedBeforeDispatch,
-                                    Some("schedule_worker_failed"),
-                                );
-                            }
-                            let _ =
-                                crate::publish_commands::reconcile_publish_execution_and_announce(
-                                    &publish_db,
-                                    &publish_events,
-                                    &campaign,
-                                );
-                        }
-                    }
-                }
-                // **Asked for by state, not taken from the newest page.** This used to read
-                // two hundred campaigns and pick the scheduled ones out of them — so once two
-                // hundred newer rows existed, an older scheduled campaign fell off the end of
-                // every page and was never run and never marked missed. It just sat there,
-                // scheduled, forever.
                 let Ok(scheduled) = publish_db.scheduled_publish_campaigns() else {
                     continue;
                 };
                 let now = chrono::Local::now().naive_local();
-                // Every settle in this loop first refreshes the durable execution projection,
-                // then wakes the page. Emitting only the campaign revision left Operations
-                // reading the previous snapshot forever when no later event followed.
-                let settle_projection = |campaign_id: &str| {
-                    if let Err(error) =
-                        crate::publish_commands::reconcile_publish_execution_and_announce(
-                            &publish_db,
-                            &publish_events,
-                            campaign_id,
-                        )
-                    {
-                        log::warn!(
-                            "publish schedule: không hội tụ được snapshot của {campaign_id} ({error:#})"
-                        );
-                    }
-                };
-                for (campaign_id, raw) in scheduled {
-                    let Some(raw_run_at) = raw
-                        .as_deref()
-                        .map(str::trim)
-                        .filter(|value| !value.is_empty())
-                    else {
-                        let _ = publish_db.update_publish_campaign_state(
-                            &campaign_id,
-                            riviu_core::PublishCampaignState::FailedBeforeDispatch,
-                            Some("missing_run_at"),
-                        );
-                        settle_projection(&campaign_id);
+                for (id, raw) in scheduled {
+                    let Some(raw) = raw else {
                         continue;
                     };
-                    let Ok(run_at) =
-                        chrono::NaiveDateTime::parse_from_str(raw_run_at, "%Y-%m-%dT%H:%M")
-                            .or_else(|_| {
-                                chrono::NaiveDateTime::parse_from_str(
-                                    raw_run_at,
-                                    "%Y-%m-%dT%H:%M:%S",
-                                )
-                            })
-                    else {
-                        let _ = publish_db.update_publish_campaign_state(
-                            &campaign_id,
-                            riviu_core::PublishCampaignState::FailedBeforeDispatch,
-                            Some("invalid_run_at"),
-                        );
-                        settle_projection(&campaign_id);
-                        continue;
-                    };
-                    if run_at < publish_started_at {
-                        let _ = publish_db.update_publish_campaign_state(
-                            &campaign_id,
-                            riviu_core::PublishCampaignState::Missed,
-                            Some("app_opened_after_deadline"),
-                        );
-                        let _ = publish_db.log_op("publish.missed", &campaign_id);
-                        settle_projection(&campaign_id);
-                        continue;
-                    }
-                    if run_at > now {
-                        continue;
-                    }
-                    let Some(request) = publish_db
-                        .publish_campaign_request(&campaign_id)
-                        .ok()
-                        .flatten()
+                    let Ok(at) = chrono::NaiveDateTime::parse_from_str(&raw, "%Y-%m-%dT%H:%M:%S")
+                        .or_else(|_| chrono::NaiveDateTime::parse_from_str(&raw, "%Y-%m-%dT%H:%M"))
                     else {
                         continue;
                     };
-                    if request
-                        .udids
-                        .iter()
-                        .any(|udid| publish_control.current_work_owner(udid).is_some())
-                    {
+                    if at > now {
                         continue;
                     }
-                    if !dispatch.reserve(&campaign_id, &request.udids) {
-                        continue;
-                    }
-                    let Ok(admission) = publish_admission.ensure_accepting_work() else {
-                        dispatch.release(&campaign_id);
-                        break;
+                    let result = if at < publish_started_at {
+                        publish_db.miss_publish_schedule(&id, &raw, "app_opened_after_deadline")
+                    } else if now.signed_duration_since(at).num_milliseconds() > 30_000 {
+                        publish_db.miss_publish_schedule(&id, &raw, "schedule_capacity_deadline")
+                    } else {
+                        publish_db
+                            .claim_publish_pipeline(&id)
+                            .map(|run| run.is_some())
                     };
-                    if !publish_db
-                        .claim_due_publish_schedule(
-                            &campaign_id,
-                            raw_run_at,
-                            &now.format("%Y-%m-%dT%H:%M:%S").to_string(),
-                        )
-                        .unwrap_or(false)
-                    {
-                        dispatch.release(&campaign_id);
-                        continue;
+                    if let Err(error) = result {
+                        log::error!("publish schedule {id}: {error:#}");
                     }
-                    settle_projection(&campaign_id);
-                    let control = publish_control.clone();
-                    let registry = publish_registry.clone();
-                    let db = publish_db.clone();
-                    let events = publish_events.clone();
-                    let agent_bundle_id = publish_agent_bundle_id.clone();
-                    let frames = Arc::new(publish_streams.clone());
-                    let task_campaign = campaign_id.clone();
-                    let task = tasks.spawn(async move {
-                        let _admission = admission;
-                        if let Err(error) =
-                            crate::publish_commands::execute_scheduled_publish_campaign_inner(
-                                control,
-                                registry,
-                                db.clone(),
-                                events.clone(),
-                                agent_bundle_id,
-                                frames,
-                                task_campaign.clone(),
-                            )
-                            .await
-                        {
-                            let _ = db.log_op(
-                                "publish.schedule.error",
-                                &format!("{task_campaign}: {error}"),
-                            );
-                            // A failure before transfer must not stay queued forever or run on the next tick.
-                            if db
-                                .get_publish_campaign(&task_campaign)
-                                .ok()
-                                .flatten()
-                                .is_some_and(|detail| {
-                                    detail.campaign.state
-                                        == riviu_core::PublishCampaignState::Queued
-                                })
-                            {
-                                let _ = db.update_publish_campaign_state(
-                                    &task_campaign,
-                                    riviu_core::PublishCampaignState::FailedBeforeDispatch,
-                                    Some("schedule_start_failed"),
-                                );
-                            }
-                            let _ =
-                                crate::publish_commands::reconcile_publish_execution_and_announce(
-                                    &db,
-                                    &events,
-                                    &task_campaign,
-                                );
-                        }
-                    });
-                    task_campaigns.insert(task.id(), campaign_id);
+                    let _ = crate::publish_commands::reconcile_publish_execution_and_announce(
+                        &publish_db,
+                        &publish_events,
+                        &id,
+                    );
                 }
             }
         });
+        tauri::async_runtime::spawn(crate::publish_commands::pipeline::run_dispatcher(
+            self.control.clone(),
+            self.db.clone(),
+            Arc::new(self.streams.clone()),
+            self.events.clone(),
+            self.active_agent_bundle_id.clone(),
+            self.command_admission.clone(),
+            self.background_stop.clone(),
+        ));
 
         // Flow orphan sweep. Startup recovery settles what it finds at boot; this loop is
         // for the run whose WORKER died while the app stayed up — a panicked task skips
@@ -2752,7 +2648,7 @@ mod tests {
             "the scheduler no longer binds its rows from the by-state query"
         );
         assert!(
-            scheduler.contains("for (campaign_id, raw) in scheduled"),
+            scheduler.contains("for (id, raw) in scheduled"),
             "the scheduler no longer iterates the rows the by-state query returned"
         );
         assert!(

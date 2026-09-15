@@ -1,8 +1,21 @@
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import { waitFor } from "@testing-library/react";
+import * as api from "./api";
+import { pushToast, toastError } from "./toastStore";
 
-import { buildDeviceActions, type DeviceActionDeps } from "./deviceActions";
+import { buildDeviceActions, readAndAssignTikTokAccounts, type DeviceActionDeps } from "./deviceActions";
 import { gateDeviceMenu, isSubmenu, menuLeaves, type DeviceMenuNode } from "./deviceMenu";
 import type { DeviceInfo } from "./types";
+
+vi.mock("./api", async importOriginal => ({...await importOriginal<typeof api>(), interactionReadAccount:vi.fn(),saveDeviceHandle:vi.fn(),listDeviceMetas:vi.fn()}));
+vi.mock("./toastStore",()=>({pushToast:vi.fn(),toastError:vi.fn()}));
+
+beforeEach(()=>{
+  vi.clearAllMocks();
+  vi.mocked(api.interactionReadAccount).mockImplementation(async udid=>({udid,expectedHandle:"old",observedHandle:`nick_${udid}`,status:"mismatch",checkedAt:"2026-09-16T00:00:00Z",snapshotSha256:"proof"}));
+  vi.mocked(api.saveDeviceHandle).mockImplementation(async (_id,_expected,handle)=>handle);
+  vi.mocked(api.listDeviceMetas).mockResolvedValue([]);
+});
 
 /**
  * The catalog moved out of `App.tsx` so it could be reached without mounting the app.
@@ -51,6 +64,44 @@ function deps(over: Partial<DeviceActionDeps> = {}): DeviceActionDeps {
 }
 
 describe("buildDeviceActions", () => {
+  it("reads the selected group when invoked on its tile, and only the clicked phone outside it",async()=>{
+    const a=device({udid:"a"}), b=device({udid:"b"}), c=device({udid:"c"});
+    const d=deps({selectedDevices:[a,b]});
+    buildDeviceActions(a,d).find(n=>n.id==="read-tiktok-account")!.run!();
+    await waitFor(()=>expect(api.saveDeviceHandle).toHaveBeenCalledTimes(2));
+    expect(api.interactionReadAccount).toHaveBeenNthCalledWith(1,"a");
+    expect(api.interactionReadAccount).toHaveBeenNthCalledWith(2,"b");
+    await waitFor(()=>expect(pushToast).toHaveBeenCalledWith("ok","Đã gán nick TikTok 2/2 máy"));
+    buildDeviceActions(c,d).find(n=>n.id==="read-tiktok-account")!.run!();
+    await waitFor(()=>expect(api.saveDeviceHandle).toHaveBeenCalledWith("c","old","nick_c"));
+  });
+
+  it("reserves queued phones across repeated clicks and keeps the captured selection",async()=>{
+    const a=device({udid:"a"}),b=device({udid:"b"});
+    let finish!: (value:api.AccountReading)=>void;
+    vi.mocked(api.interactionReadAccount).mockImplementationOnce(()=>new Promise(resolve=>{finish=resolve;}));
+    const d=deps({selectedDevices:[a,b]});
+    const first=readAndAssignTikTokAccounts([...d.selectedDevices!],d);
+    await readAndAssignTikTokAccounts([a,b],d);
+    d.selectedDevices=[device({udid:"c"})];
+    expect(api.interactionReadAccount).toHaveBeenCalledTimes(1);
+    finish({udid:"a",expectedHandle:"old",observedHandle:"nick_a",status:"mismatch",checkedAt:"",snapshotSha256:"proof"});
+    await first;
+    expect(api.interactionReadAccount).toHaveBeenCalledTimes(2);
+    expect(api.saveDeviceHandle).toHaveBeenNthCalledWith(2,"b","old","nick_b");
+  });
+
+  it("keeps failed or unknown accounts and continues after stale saves and disconnects",async()=>{
+    const targets=["a","b","c","d"].map(udid=>device({udid}));
+    vi.mocked(api.interactionReadAccount).mockRejectedValueOnce(new Error("disconnected"))
+      .mockResolvedValueOnce({udid:"b",expectedHandle:"old",observedHandle:null,status:"unknown",checkedAt:"",snapshotSha256:"proof"});
+    vi.mocked(api.saveDeviceHandle).mockRejectedValueOnce(new Error("stale account"));
+    await readAndAssignTikTokAccounts(targets,deps());
+    expect(api.saveDeviceHandle).toHaveBeenCalledTimes(2);
+    expect(api.saveDeviceHandle).toHaveBeenLastCalledWith("d","old","nick_d");
+    expect(toastError).toHaveBeenCalledTimes(3);
+    expect(pushToast).toHaveBeenLastCalledWith("warn","Đã gán nick TikTok 1/4 máy");
+  });
   it("still offers the whole catalog after the move", () => {
     // A guard on the four tests below: every one of them would pass vacuously against an
     // empty list, and an extraction that silently dropped rows is exactly the failure this

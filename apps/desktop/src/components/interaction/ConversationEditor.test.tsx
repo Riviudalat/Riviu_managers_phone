@@ -3,12 +3,29 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { ConversationEditor } from "./ConversationEditor";
 import { DEFAULT_DRAFT, buildRequest, validateDraft } from "../../interactionPlan";
 import { interactionParseConversation } from "../../api";
-import type { ResolvedTikTokTarget, ScriptedConversation } from "../../types";
+import type { DeviceInfo, ResolvedTikTokTarget, ScriptedConversation } from "../../types";
 vi.mock("../../api",()=>({interactionParseConversation:vi.fn(),interactionDraftConversation:vi.fn()}));
 afterEach(cleanup);
 const target=(id:string)=>({targetKey:id,kind:"video",author:id,contentId:id,normalizedUrl:`https://www.tiktok.com/@${id}/video/123`,originalUrl:`https://www.tiktok.com/@${id}/video/123`}) as ResolvedTikTokTarget;
 const script:ScriptedConversation={schemaVersion:1,durationMinutes:120,seed:1,roleBindings:[{roleId:"a",udid:"phone-a",username:"actual_a"},{roleId:"b",udid:"phone-b",username:"actual_b"}],targetScripts:[{targetKey:"one",steps:[{id:"s1",topic:"Vibe",speakerId:"a",text:"Ở đâu vậy?",parentStepId:null,mentionRoleIds:[]},{id:"s2",topic:"Vibe",speakerId:"b",text:"Có địa chỉ trong bài",parentStepId:"s1",mentionRoleIds:["a"]}]}]};
 describe("scripted conversation",()=>{
+ it("uses saved usernames and operator numbers, and refreshes a changed binding",async()=>{
+  const onChange=vi.fn();
+  const props={draft:{...DEFAULT_DRAFT,textSource:"script" as const,conversationJson:JSON.stringify(script)},onChange,targets:[target("one")],devices:[{udid:"phone-b",name:"Display name",platform:"android"} as DeviceInfo],deviceNumber:new Map([["phone-b",7]]),deviceLabel:new Map([["phone-b","Máy phụ"]])};
+  const {rerender}=render(<ConversationEditor {...props} handles={{"phone-b":"actual_b"}}/>);
+  expect(screen.getAllByRole("option",{name:"Máy 7 · Máy phụ · @actual_b"})).toHaveLength(2);
+  expect(onChange).not.toHaveBeenCalled();
+  rerender(<ConversationEditor {...props} handles={{"phone-b":"updated_b"}}/>);
+  await waitFor(()=>expect(onChange).toHaveBeenCalled());
+  expect(JSON.parse(onChange.mock.calls[0][0]).roleBindings[1].username).toBe("updated_b");
+ });
+ it("opens the existing account editor for a numbered device missing its username",()=>{
+  const onAssignAccount=vi.fn();
+  render(<ConversationEditor draft={{...DEFAULT_DRAFT,textSource:"script",conversationJson:JSON.stringify({...script,roleBindings:[{roleId:"a",udid:"phone-a",username:"actual_a"},{roleId:"b",udid:"phone-b",username:""}]})}} onChange={vi.fn()} onAssignAccount={onAssignAccount} targets={[target("one")]} devices={[]} handles={{"phone-a":"actual_a","phone-b":""}} deviceNumber={new Map([["phone-b",7]])}/>);
+  expect(screen.getByText("Máy 7 chưa gán username TikTok")).toBeTruthy();
+  fireEvent.click(screen.getByRole("button",{name:"Gán tài khoản"}));
+  expect(onAssignAccount).toHaveBeenCalledWith("phone-b");
+ });
  it("preserves per-post text and fixed role bindings in preview and execution",()=>{
   const draft={...DEFAULT_DRAFT,textSource:"script" as const,conversationJson:JSON.stringify(script)};
   const context={requestId:"r",targets:[target("one")],actorUdids:["phone-a","phone-b"],mentions:[],largestCohort:2};

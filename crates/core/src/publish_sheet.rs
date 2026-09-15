@@ -65,6 +65,12 @@ pub const INTERNAL_REPORTING_SETTING: &str = "publish_sheet_internal_reporting";
 /// on a background pass, and a hung request there would hold the pass open indefinitely.
 pub const WEBHOOK_TIMEOUT: Duration = Duration::from_secs(30);
 
+// Preflight checks, CSV exports, initialization, Flow and outbox delivery share
+// one process-wide transport budget. Redirect/body read stays in the same slot;
+// retry backoff is outside it. Durable delivery claims additionally reserve at
+// most one progress request, so progress cannot fill both transport slots.
+pub(crate) static SHEET_HTTP_SLOTS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(2);
+
 /// One row, as the script receives it.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -136,6 +142,8 @@ pub struct SheetDeliverySettings {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct SheetDeliveryTarget {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reporting_epoch: Option<String>,
     pub version: u32,
     pub spreadsheet_id: String,
     pub sheet_gid: u64,
@@ -144,6 +152,12 @@ pub struct SheetDeliveryTarget {
 
 impl SheetDeliveryTarget {
     pub fn validate(&self) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            self.reporting_epoch.as_ref().is_none_or(|s| !s.is_empty()
+                && s.len() <= 128
+                && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')),
+            "reportingEpoch không hợp lệ"
+        );
         anyhow::ensure!(self.version == 2, "Sheet deliveryVersion phải là 2");
         anyhow::ensure!(
             !self.spreadsheet_id.is_empty()
@@ -161,6 +175,7 @@ impl SheetDeliveryTarget {
     pub fn from_sheet_url(value: &str, internal_reporting: bool) -> anyhow::Result<Self> {
         let parsed = parse_sheet_url(value)?;
         Ok(Self {
+            reporting_epoch: None,
             version: 2,
             spreadsheet_id: parsed.spreadsheet_id,
             sheet_gid: parsed.sheet_gid,
@@ -318,6 +333,13 @@ async fn sheet_post_once(
     webhook: &str,
     payload: &serde_json::Value,
 ) -> Result<String, SheetTransportError> {
+    let _permit = SHEET_HTTP_SLOTS
+        .acquire()
+        .await
+        .map_err(|_| SheetTransportError {
+            message: "Hàng đợi kết nối Sheet đã đóng".into(),
+            retryable: true,
+        })?;
     let mut response = http
         .post(webhook)
         .json(payload)
@@ -543,6 +565,9 @@ fn bind_payload(
         (0..=MAX_SHEET_REVISION).contains(&revision),
         "Revision Sheet vượt giới hạn số nguyên an toàn"
     );
+    payload["publicationId"] = payload["assignmentId"].clone();
+    payload["reportingEpoch"] =
+        serde_json::json!(target.reporting_epoch.as_deref().unwrap_or("legacy"));
     payload["deliveryVersion"] = serde_json::json!(2);
     payload["spreadsheetId"] = serde_json::json!(target.spreadsheet_id);
     payload["sheetGid"] = serde_json::json!(target.sheet_gid);
@@ -644,6 +669,12 @@ fn validate_bound_ack(
 ) -> anyhow::Result<()> {
     let ack: serde_json::Value = serde_json::from_str(body)?;
     let delivered_revision = ack["deliveryRevision"].as_i64();
+    anyhow::ensure!(
+        ack["reportingEpoch"].as_str()
+            == Some(target.reporting_epoch.as_deref().unwrap_or("legacy"))
+            && ack["publicationId"].as_str() == Some(assignment_id),
+        "ACK Sheet khác reportingEpoch hoặc publicationId"
+    );
     anyhow::ensure!(ack["ok"] == true && ack["deliveryVersion"] == 2
         && ack["spreadsheetId"].as_str() == Some(target.spreadsheet_id.as_str())
         && ack["sheetGid"].as_u64() == Some(target.sheet_gid)
@@ -737,8 +768,9 @@ async fn send_bound_payload(
         report_revision,
         serde_json::json!({
             "ok":ack["ok"],"assignmentId":ack["assignmentId"],
+            "publicationId":ack["publicationId"],"reportingEpoch":ack["reportingEpoch"],"row":ack["row"],
             "deliveryRevision":ack["deliveryRevision"],"rowRevision":ack["rowRevision"],
-            "postUrl":ack["postUrl"],"error":redact_token(ack["error"].as_str().unwrap_or_default(), token),
+            "postUrl":ack["postUrl"],"retryable":ack["retryable"],"error":redact_token(ack["error"].as_str().unwrap_or_default(), token),
         }),
     );
     if ack["ok"] != true {
@@ -747,7 +779,7 @@ async fn send_bound_payload(
                 "Sheet từ chối: {}",
                 redact_token(ack["error"].as_str().unwrap_or("không nói lý do"), token)
             ),
-            retryable: ack["retryable"] == true,
+            retryable: bound_ack_error_is_retryable(&ack),
         }));
     }
     validate_bound_ack(
@@ -759,6 +791,51 @@ async fn send_bound_payload(
         report_revision,
         internal_report,
     )
+}
+
+fn bound_ack_error_is_retryable(ack: &serde_json::Value) -> bool {
+    // A deployed script may omit this flag for Google exceptions outside its
+    // write batch. Honor an explicit false; infer only known legacy failures.
+    ack["retryable"]
+        .as_bool()
+        .unwrap_or_else(|| known_google_transient_error(ack["error"].as_str().unwrap_or_default()))
+}
+
+fn known_google_transient_error(message: &str) -> bool {
+    let lower = message.trim().to_lowercase();
+    let mut text = lower.as_str();
+    while let Some(value) = text
+        .strip_prefix("exception:")
+        .or_else(|| text.strip_prefix("error:"))
+    {
+        text = value.trim();
+    }
+    // Google returned mixed composed/decomposed Vietnamese in the measured
+    // 15/09/2026 service error. Keep this allowlist narrow instead of treating
+    // arbitrary validation text containing "try again" as transport failure.
+    let vietnamese = text
+        .replace("a\u{301}", "á")
+        .replace("u\u{309}", "ủ")
+        .replace("o\u{300}", "ò")
+        .replace("ơ\u{300}", "ờ");
+    text == "we're sorry, a server error occurred. please wait a bit and try again."
+        || vietnamese == "xin lỗi bạn, máy chủ đã gặp lỗi. vui lòng chờ một lát và thử lại."
+        || [
+            "service spreadsheets failed while accessing document with id ",
+            "service spreadsheet failed while accessing document with id ",
+            "service spreadsheets timed out while accessing document with id ",
+            "service spreadsheet timed out while accessing document with id ",
+            "service invoked too many times in a short time: spreadsheets.",
+        ]
+        .iter()
+        .any(|prefix| text.starts_with(prefix))
+        || matches!(
+            text.trim_end_matches('.'),
+            "service timed out: spreadsheets" | "service unavailable: spreadsheets"
+        )
+        || (text.starts_with("quota exceeded for quota metric ")
+            && text.contains("per minute")
+            && text.contains("sheets.googleapis.com"))
 }
 
 async fn send_sheet_payload(
@@ -798,12 +875,16 @@ fn validate_internal_ack(body: &str, assignment_id: &str, revision: i64) -> anyh
 
 /// The user-facing Google Sheet address, independent of the Apps Script endpoint.
 pub const SHEET_URL_SETTING: &str = "publish_sheet_url";
-const CHECK_TIMEOUT: Duration = Duration::from_secs(20);
+// Authenticated check measured 30.17s on the deployed script during reset recovery.
+const CHECK_TIMEOUT: Duration = Duration::from_secs(60);
 const CHECK_BODY_LIMIT: usize = 2 * 1024 * 1024;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct SheetCheckResult {
+    pub reporting_epoch: Option<String>,
+    #[serde(default)]
+    pub reporting_ready: bool,
     pub sheet_url: String,
     pub spreadsheet_id: String,
     pub sheet_gid: u64,
@@ -814,7 +895,7 @@ pub struct SheetCheckResult {
     pub message: String,
 }
 
-fn parse_sheet_url(value: &str) -> anyhow::Result<SheetCheckResult> {
+pub fn parse_sheet_url(value: &str) -> anyhow::Result<SheetCheckResult> {
     let parsed = url::Url::parse(value.trim()).context("Link Google Sheet không hợp lệ")?;
     anyhow::ensure!(
         parsed.scheme() == "https"
@@ -873,6 +954,8 @@ fn parse_sheet_url(value: &str) -> anyhow::Result<SheetCheckResult> {
     }
     let gid = gid.unwrap_or(0);
     Ok(SheetCheckResult {
+        reporting_epoch: None,
+        reporting_ready: false,
         sheet_url: format!("https://docs.google.com/spreadsheets/d/{id}/edit#gid={gid}"),
         spreadsheet_id: id.into(),
         sheet_gid: gid,
@@ -1039,16 +1122,9 @@ fn validate_sheet_check_ack(
 }
 
 /// Check read access and the configured writer's actual target without writing a Sheet row.
-pub async fn check_sheet(
-    value: &str,
-    settings: &SheetDeliverySettings,
-) -> anyhow::Result<SheetCheckResult> {
-    let mut result = parse_sheet_url(value)?;
-    let read = async {
-        let url = format!(
-            "https://docs.google.com/spreadsheets/d/{}/export?format=csv&gid={}",
-            result.spreadsheet_id, result.sheet_gid
-        );
+async fn sheet_csv_columns(url: &str) -> anyhow::Result<(String, Vec<String>)> {
+    tokio::time::timeout(CHECK_TIMEOUT, async {
+        let _permit = SHEET_HTTP_SLOTS.acquire().await?;
         let response = public_check_client()?.get(url).send().await?;
         anyhow::ensure!(
             response.status().is_success(),
@@ -1064,6 +1140,22 @@ pub async fn check_sheet(
         let body = limited_body(response).await?;
         let columns = csv_columns(&body, &kind)?;
         Ok::<_, anyhow::Error>((check_columns(&columns)?, columns))
+    })
+    .await
+    .context("Hết thời gian chờ đọc Sheet")?
+}
+
+pub async fn check_sheet(
+    value: &str,
+    settings: &SheetDeliverySettings,
+) -> anyhow::Result<SheetCheckResult> {
+    let mut result = parse_sheet_url(value)?;
+    let read = async {
+        let url = format!(
+            "https://docs.google.com/spreadsheets/d/{}/export?format=csv&gid={}",
+            result.spreadsheet_id, result.sheet_gid
+        );
+        sheet_csv_columns(&url).await
     }
     .await;
     let mut details = Vec::new();
@@ -1079,7 +1171,11 @@ pub async fn check_sheet(
         let checked=async {
             let payload=serde_json::json!({"rowKind":"check","checkVersion":1,"token":settings.token,"spreadsheetId":result.spreadsheet_id,"sheetGid":result.sheet_gid});
             let body = sheet_post_body(&settings.webhook_url, &payload, CHECK_TIMEOUT, 3).await?;
-            validate_sheet_check_ack(&body, &result, &settings.token)
+            let checked=validate_sheet_check_ack(&body, &result, &settings.token)?;
+            let ack:serde_json::Value=serde_json::from_str(&body)?;
+            result.reporting_epoch=ack["reportingEpoch"].as_str().map(str::to_owned);
+            result.reporting_ready=ack["reportingReady"]==true;
+            Ok::<_,anyhow::Error>(checked)
         }.await;
         match checked {
             Ok((layout, columns)) => {
@@ -1093,7 +1189,9 @@ pub async fn check_sheet(
     } else {
         details.push("Chưa cấu hình kết nối ghi cho bảng này".into());
     }
-    result.message = if result.connection_verified {
+    result.message = if result.connection_verified && !result.reporting_ready {
+        "Kết nối đúng bảng nhưng đợt báo cáo chưa sẵn sàng; hoàn tất đợt dọn bằng cùng resetId hoặc cập nhật Apps Script".into()
+    } else if result.connection_verified {
         "Đã kiểm tra đúng bảng và tab qua kết nối ghi; không thêm dữ liệu thử".into()
     } else if result.readable {
         format!(
@@ -1119,12 +1217,83 @@ pub async fn prepare_sheet(
     let payload = serde_json::json!({"rowKind":"prepare","checkVersion":1,"token":settings.token,"spreadsheetId":result.spreadsheet_id,"sheetGid":result.sheet_gid});
     let body = sheet_post_body(&settings.webhook_url, &payload, Duration::from_secs(45), 3).await?;
     let (layout, columns) = validate_sheet_check_ack(&body, &result, &settings.token)?;
+    let ack: serde_json::Value = serde_json::from_str(&body)?;
+    result.reporting_epoch = ack["reportingEpoch"].as_str().map(str::to_owned);
+    result.reporting_ready = ack["reportingReady"] == true;
     result.readable = true;
     result.connection_verified = true;
     result.layout = Some(layout);
     result.columns = columns;
-    result.message = "Sheet đã sẵn sàng ghi kết quả".into();
+    result.message = if result.reporting_ready {
+        "Sheet đã sẵn sàng ghi kết quả"
+    } else {
+        "Đợt báo cáo chưa sẵn sàng; hoàn tất đợt dọn bằng cùng resetId hoặc cập nhật Apps Script"
+    }
+    .into();
     Ok(result)
+}
+
+/// Returns only after the server reopens its full backup and reads the cleared tab.
+pub async fn reset_reporting_sheet(
+    settings: &SheetDeliverySettings,
+    target: &SheetDeliveryTarget,
+    reset_id: &str,
+) -> anyhow::Result<String> {
+    target.validate()?;
+    anyhow::ensure!(target.sheet_gid == 0, "Reset chỉ dành cho tab gid=0");
+    uuid::Uuid::parse_str(reset_id)?;
+    let payload = serde_json::json!({"rowKind":"resetReporting","token":settings.token,
+        "spreadsheetId":target.spreadsheet_id,"sheetGid":0,
+        "reportingEpoch":target.reporting_epoch.as_deref().unwrap_or("legacy"),"resetId":reset_id});
+    let body =
+        sheet_post_body(&settings.webhook_url, &payload, Duration::from_secs(120), 1).await?;
+    let ack: serde_json::Value = serde_json::from_str(&body)?;
+    anyhow::ensure!(
+        ack["ok"] == true
+            && ack["complete"] == true
+            && ack["rowKind"] == "resetReporting"
+            && ack["spreadsheetId"] == target.spreadsheet_id
+            && ack["sheetGid"] == 0
+            && ack["reportingEpoch"] == reset_id,
+        "Sheet chưa xác nhận dọn đợt báo cáo: {}",
+        redact_token(
+            ack["error"].as_str().unwrap_or("ACK không khớp"),
+            &settings.token
+        )
+    );
+    let backup = ack["backupSpreadsheetId"]
+        .as_str()
+        .filter(|s| !s.is_empty())
+        .context("ACK thiếu backup Sheet")?;
+    Ok(backup.to_owned())
+}
+
+/// Authenticated one-time handoff. The server serializes retirement with all
+/// writes so a late legacy request cannot recreate a row after direct adoption.
+pub async fn retire_apps_script_writer(
+    settings: &SheetDeliverySettings,
+    target: &SheetDeliveryTarget,
+    request_id: &str,
+    writer_id: &str,
+) -> anyhow::Result<()> {
+    target.validate()?;
+    uuid::Uuid::parse_str(request_id)?;
+    uuid::Uuid::parse_str(writer_id)?;
+    let payload = serde_json::json!({"rowKind":"retireToDirect","token":settings.token,"spreadsheetId":target.spreadsheet_id,"sheetGid":target.sheet_gid,"reportingEpoch":target.reporting_epoch.as_deref().unwrap_or("legacy"),"requestId":request_id,"writerId":writer_id});
+    let body = sheet_post_body(&settings.webhook_url, &payload, Duration::from_secs(90), 3).await?;
+    let ack: serde_json::Value = serde_json::from_str(&body)?;
+    anyhow::ensure!(
+        ack["ok"] == true
+            && ack["retired"] == true
+            && ack["rowKind"] == "retireToDirect"
+            && ack["requestId"] == request_id
+            && ack["writerId"] == writer_id
+            && ack["spreadsheetId"] == target.spreadsheet_id
+            && ack["sheetGid"] == target.sheet_gid
+            && ack["reportingEpoch"] == target.reporting_epoch.as_deref().unwrap_or("legacy"),
+        "Chưa xác nhận Apps Script ngừng ghi; cập nhật script rồi tiếp tục chuyển kết nối"
+    );
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1134,13 +1303,14 @@ mod tests {
     fn bound_fixture() -> (SheetDeliveryTarget, serde_json::Value) {
         (
             SheetDeliveryTarget {
+                reporting_epoch: None,
                 version: 2,
                 spreadsheet_id: "fixture-book".into(),
                 sheet_gid: 37,
                 internal_reporting: true,
             },
             serde_json::json!({"ok":true,"deliveryVersion":2,"spreadsheetId":"fixture-book","sheetGid":37,
-                "assignmentId":"assignment-1","deliveryRevision":1,"row":2,"postUrl":"https://www.tiktok.com/@test/photo/123"}),
+                "assignmentId":"assignment-1","publicationId":"assignment-1","reportingEpoch":"legacy","deliveryRevision":1,"row":2,"postUrl":"https://www.tiktok.com/@test/photo/123"}),
         )
     }
 
@@ -1164,6 +1334,8 @@ mod tests {
             "spreadsheetId",
             "sheetGid",
             "assignmentId",
+            "publicationId",
+            "reportingEpoch",
             "deliveryRevision",
             "row",
             "postUrl",
@@ -1285,12 +1457,13 @@ mod tests {
         bind_payload(&mut payload, &target, 5).unwrap();
         assert_eq!(
             payload,
-            serde_json::json!({"deliveryVersion":2,"spreadsheetId":"fixture-book","sheetGid":37,"deliveryRevision":5})
+            serde_json::json!({"deliveryVersion":2,"spreadsheetId":"fixture-book","sheetGid":37,"deliveryRevision":5,"reportingEpoch":"legacy","publicationId":null})
         );
         assert!(bind_payload(&mut payload, &target, MAX_SHEET_REVISION + 1).is_err());
         assert!(bind_payload(&mut payload, &target, -1).is_err());
         for wrong in [
             SheetDeliveryTarget {
+                reporting_epoch: None,
                 version: 1,
                 ..target.clone()
             },
@@ -1323,6 +1496,38 @@ mod tests {
         assert!(!sheet_delivery_error_is_retryable(&anyhow::anyhow!(
             "ACK version missing"
         )));
+    }
+
+    #[test]
+    fn legacy_google_service_ack_retries_only_known_transient_errors() {
+        for message in [
+            "Exception: Xin lỗi bạn, máy chủ đã gặp lỗi. Vui lòng chờ một lát và thử lại.",
+            "Exception: We're sorry, a server error occurred. Please wait a bit and try again.",
+            "Exception: Service timed out: Spreadsheets.",
+            "Exception: Service Spreadsheets failed while accessing document with id fixture.",
+            "Exception: Service invoked too many times in a short time: spreadsheets. Try Utilities.sleep(1000) between calls.",
+            "Quota exceeded for quota metric 'Read requests' and limit 'Read requests per minute per user' of service 'sheets.googleapis.com'",
+        ] {
+            let mut ack = serde_json::json!({"ok":false,"error":message});
+            assert!(bound_ack_error_is_retryable(&ack), "{message}");
+            ack["retryable"] = serde_json::json!(false);
+            assert!(!bound_ack_error_is_retryable(&ack));
+        }
+        for message in [
+            "reportingEpoch mismatch; try again",
+            "target mismatch",
+            "Exception: Service invoked too many times for one day: spreadsheets.",
+            "Exception: You do not have permission to access the requested document.",
+            "unknown error",
+        ] {
+            assert!(
+                !bound_ack_error_is_retryable(&serde_json::json!({"ok":false,"error":message})),
+                "{message}"
+            );
+        }
+        assert!(bound_ack_error_is_retryable(
+            &serde_json::json!({"ok":false,"retryable":true,"error":"lost batch response"})
+        ));
     }
 
     /// **The two halves of this wire are in different languages, and nothing else checks
@@ -1375,6 +1580,12 @@ mod tests {
                 // The range connector is a distinct protocol branch in the same
                 // Apps Script. Publish payloads do not carry these fields.
                 "connectorVersion",
+                "publicationId",
+                "reportingEpoch",
+                "resetId",
+                // Authenticated transport retirement is separate from a row.
+                "requestId",
+                "writerId",
                 "tab",
                 "range",
                 "values",
@@ -1779,6 +1990,97 @@ mod tests {
 mod connection_recovery_tests {
     use super::*;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    #[tokio::test]
+    async fn all_sheet_transports_share_two_http_slots() {
+        use std::sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc,
+        };
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/exec", listener.local_addr().unwrap());
+        let active = Arc::new(AtomicUsize::new(0));
+        let maximum = Arc::new(AtomicUsize::new(0));
+        let peak = maximum.clone();
+        let server = tokio::spawn(async move {
+            let mut handlers = tokio::task::JoinSet::new();
+            for _ in 0..14 {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let active = active.clone();
+                let peak = peak.clone();
+                handlers.spawn(async move {
+                    let mut data = Vec::new();
+                    loop {
+                        let mut buffer = [0; 4096];
+                        let read = socket.read(&mut buffer).await.unwrap();
+                        assert!(read > 0);
+                        data.extend_from_slice(&buffer[..read]);
+                        if data.windows(4).any(|part| part == b"\r\n\r\n") { break; }
+                    }
+                    let concurrent = active.fetch_add(1, Ordering::SeqCst) + 1;
+                    peak.fetch_max(concurrent, Ordering::SeqCst);
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                    let (kind, body) = if data.starts_with(b"GET ") {
+                        ("text/csv; charset=utf-8", "STT,Người air,Ngày,Link,Đối tác\n")
+                    } else {
+                        ("application/json", r#"{"ok":true}"#)
+                    };
+                    let reply = format!("HTTP/1.1 200 OK\r\nContent-Type: {kind}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+                    active.fetch_sub(1, Ordering::SeqCst);
+                    socket.write_all(reply.as_bytes()).await.unwrap();
+                });
+            }
+            while let Some(result) = handlers.join_next().await {
+                result.unwrap();
+            }
+        });
+        let mut clients = tokio::task::JoinSet::new();
+        for index in 0..14 {
+            let url = url.clone();
+            clients.spawn(async move {
+                match index % 7 {
+                    0 => {
+                        sheet_csv_columns(&url).await.unwrap();
+                    }
+                    1 => {
+                        flow_connector_request(&url, &serde_json::json!({"rowKind":"flowRead"}))
+                            .await
+                            .unwrap();
+                    }
+                    kind => {
+                        let kind = [
+                            "canonical",
+                            "internalReport",
+                            "check",
+                            "prepare",
+                            "resetReporting",
+                        ][kind - 2];
+                        sheet_post_body(
+                            &url,
+                            &serde_json::json!({"rowKind":kind}),
+                            Duration::from_secs(10),
+                            1,
+                        )
+                        .await
+                        .unwrap();
+                    }
+                }
+            });
+        }
+        tokio::time::timeout(Duration::from_secs(15), async {
+            while let Some(result) = clients.join_next().await {
+                result.unwrap();
+            }
+            server.await.unwrap();
+        })
+        .await
+        .unwrap();
+        let peak = maximum.load(Ordering::SeqCst);
+        assert!(
+            (1..=2).contains(&peak),
+            "measured {peak} simultaneous Sheet requests"
+        );
+    }
 
     async fn endpoint(statuses: Vec<u16>) -> (String, tokio::task::JoinHandle<Vec<String>>) {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

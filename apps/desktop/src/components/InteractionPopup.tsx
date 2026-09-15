@@ -22,6 +22,7 @@ import { parseMentions, resolveMentionActors, unionActors } from "../interaction
 import { useDeviceHandles } from "../useDeviceHandles";
 import {
   buildRequest,
+  conversationOf,
   DEFAULT_DRAFT,
   draftWarnings,
   groupPlanByCohort,
@@ -199,7 +200,7 @@ export function InteractionPopup({
   const [parseRevision, setParseRevision] = useState(0);
   const [preview, setPreview] = useState<ThreadPreview | null>(null);
   const [planError, setPlanError] = useState<string | null>(null);
-  const { handles, savedHandles, handleErrors, savingHandles, change: changeHandle, persist: persistHandle, reload: reloadHandle } = useDeviceHandles(inScope.map((device) => device.udid));
+  const { handles, savedHandles, handleErrors, savingHandles, change: changeHandle, persist: persistHandle, reload: reloadHandle } = useDeviceHandles(inScope.map((device) => device.udid), JSON.stringify(inScope.map(d => metas.get(d.udid)?.handle)));
   const [openCampaignId, setOpenCampaignId] = useState<string | null>(null);
   useEffect(() => {
     if (operationSource?.kind !== "interaction") return;
@@ -298,8 +299,8 @@ export function InteractionPopup({
   const inScopeKey = useMemo(() => inScope.map((device) => device.udid).join(","), [inScope]);
 
   const mentions = useMemo(
-    () => (draft.actions.comment ? parseMentions(draft.mentionText) : []),
-    [draft.actions.comment, draft.mentionText],
+    () => (draft.actions.comment && draft.textSource !== "script" ? parseMentions(draft.mentionText) : []),
+    [draft.actions.comment, draft.textSource, draft.mentionText],
   );
   /// The phones a tag names, by matching each tag to a phone's @handle. These join the actor
   /// set so the tagged account comments on the post itself.
@@ -417,10 +418,11 @@ export function InteractionPopup({
   ///
   /// Everything the partition depends on, and nothing else — a changed instruction or word
   /// limit does not move the cohorts, so it must not disable the run button either.
+  const accountRevision = JSON.stringify([savedHandles, handles, savingHandles, handleErrors]);
   const previewKey = useMemo(
     () =>
-      JSON.stringify([validTargets.map((target) => target.targetKey), effectiveActors, draft.actions, draft.threadKind, draft.messageCount, draft.textSource, draft.conversationJson]),
-    [validTargets, effectiveActors, draft.actions, draft.threadKind, draft.messageCount, draft.textSource, draft.conversationJson],
+      JSON.stringify([validTargets.map((target) => target.targetKey), effectiveActors, draft.actions, draft.threadKind, draft.messageCount, draft.textSource, draft.conversationJson, accountRevision]),
+    [validTargets, effectiveActors, draft.actions, draft.threadKind, draft.messageCount, draft.textSource, draft.conversationJson, accountRevision],
   );
   const [previewFor, setPreviewFor] = useState<string | null>(null);
   const previewGeneration = useRef(0);
@@ -506,13 +508,27 @@ export function InteractionPopup({
   const issues = useMemo(
     () => {
       const issues = validateDraft(draft, validationContext);
+      const script = conversationOf(draft);
+      if (draft.actions.comment && script) {
+        for (const role of script.roleBindings) {
+          const prefix = `Vai ${role.roleId} / Máy ${deviceNumber.get(role.udid) ?? role.udid}`;
+          const error = handleErrors[role.udid];
+          if (error) issues.push({field:"actors",message:`${prefix}: ${error}`});
+          if (savingHandles[role.udid] || (handles[role.udid] ?? "") !== (savedHandles[role.udid] ?? "")) {
+            issues.push({field:"actors",message:`${prefix}: dữ liệu tài khoản chưa lưu hoặc đang đọc/lưu`});
+          }
+        }
+      }
+      for (const check of preview?.conversationAccounts ?? []) {
+        for (const message of check.issues) issues.push({field: "actors", message: `Vai ${check.roleId} / Máy ${deviceNumber.get(check.udid) ?? check.udid}: ${message}`});
+      }
       if (draft.actions.comment && inScope.some((device) => savingHandles[device.udid] || handleErrors[device.udid]
         || (handles[device.udid] ?? "") !== (savedHandles[device.udid] ?? ""))) {
         issues.push({ field: "actors", message: "Tài khoản máy còn thay đổi chưa lưu hoặc đang lỗi. Lưu lại nick trước khi chạy." });
       }
       return issues;
     },
-    [draft, validationContext, inScope, handles, savedHandles, savingHandles, handleErrors],
+    [draft, validationContext, inScope, handles, savedHandles, savingHandles, handleErrors, preview, deviceNumber],
   );
   // Advice rather than refusals: these never disable the run button.
   const warnings = useMemo(
@@ -707,6 +723,7 @@ export function InteractionPopup({
     hierarchyActors,
     largestCohort,
     handles,
+    savedHandles,
     handleErrors,
     savingHandles,
     onHandleChange: changeHandle,

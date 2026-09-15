@@ -112,9 +112,27 @@ impl Database {
     ) -> anyhow::Result<bool> {
         let changed = self.conn()?.execute(
             "UPDATE publish_campaigns SET state='queued',revision=revision+1,updated_at=?4
-             WHERE id=?1 AND state='scheduled' AND run_at=?2 AND datetime(run_at)<=datetime(?3)",
+             WHERE id=?1 AND state='scheduled' AND run_at=?2 AND datetime(run_at)<=datetime(?3)
+             AND datetime(?3)<=datetime(run_at,'+30 seconds')",
             params![campaign_id, expected_run_at, now, Utc::now().to_rfc3339()],
         )?;
+        Ok(changed == 1)
+    }
+
+    pub fn miss_publish_schedule(
+        &self,
+        id: &str,
+        run_at: &str,
+        reason: &str,
+    ) -> anyhow::Result<bool> {
+        let mut conn = self.conn()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let changed=tx.execute("UPDATE publish_campaigns SET state='missed',error_code=?3,revision=revision+1,updated_at=?4
+            WHERE id=?1 AND state='scheduled' AND run_at=?2",params![id,run_at,reason,Utc::now().to_rfc3339()])?;
+        if changed == 1 {
+            tx.execute("UPDATE publish_assignments SET state='missed',error_code=?2,revision=revision+1 WHERE campaign_id=?1 AND effect_intent IS NULL AND state='scheduled'",params![id,reason])?;
+        }
+        tx.commit()?;
         Ok(changed == 1)
     }
 
@@ -291,7 +309,7 @@ impl Database {
         Ok((record, created))
     }
 
-    fn insert_publish_campaign(
+    pub(super) fn insert_publish_campaign(
         transaction: &rusqlite::Transaction<'_>,
         campaign_id: &str,
         request: &crate::PublishCampaignRequest,
@@ -465,6 +483,29 @@ impl Database {
         conn: &Connection,
         id: &str,
     ) -> anyhow::Result<Option<crate::publish::PublishCampaignDetail>> {
+        Self::get_publish_campaign_selection_from_connection(conn, id, None)
+    }
+
+    /// A stage worker loads only its publication's media/evidence. Campaign UI
+    /// still requests the complete detail; a large campaign does not multiply
+    /// every bundle and historical event by its number of concurrent workers.
+    pub fn get_publish_assignment_detail(
+        &self,
+        campaign_id: &str,
+        assignment_id: &str,
+    ) -> anyhow::Result<Option<crate::publish::PublishCampaignDetail>> {
+        Self::get_publish_campaign_selection_from_connection(
+            &self.conn()?,
+            campaign_id,
+            Some(assignment_id),
+        )
+    }
+
+    fn get_publish_campaign_selection_from_connection(
+        conn: &Connection,
+        id: &str,
+        assignment_id: Option<&str>,
+    ) -> anyhow::Result<Option<crate::publish::PublishCampaignDetail>> {
         let Some((campaign, request)) = conn
             .query_row(
                 "SELECT id,request_id,source_root,state,run_at,request_json,created_at,updated_at,error_code
@@ -504,10 +545,11 @@ impl Database {
         };
 
         let mut bundle_stmt = conn.prepare(
-            "SELECT manifest_json FROM publish_bundles WHERE campaign_id=?1 ORDER BY ordinal",
+            "SELECT manifest_json FROM publish_bundles WHERE campaign_id=?1
+             AND (?2 IS NULL OR id=(SELECT bundle_id FROM publish_assignments WHERE id=?2 AND campaign_id=?1)) ORDER BY ordinal",
         )?;
         let bundles = bundle_stmt
-            .query_map(params![id], |row| {
+            .query_map(params![id, assignment_id], |row| {
                 let json: String = row.get(0)?;
                 serde_json::from_str(&json).map_err(|error| {
                     rusqlite::Error::FromSqlConversionFailure(
@@ -521,22 +563,33 @@ impl Database {
 
         let mut assignment_stmt = conn.prepare(
             "SELECT a.id,a.bundle_id,a.ordinal,a.udid,a.state,a.effect_intent,a.evidence_json,a.error_code,
-             o.state,o.attempts,o.last_error,o.next_attempt_at_ms,o.updated_at
+             CASE WHEN sync.superseded_epoch IS NOT NULL THEN 'superseded' ELSE o.state END,o.attempts,o.last_error,o.next_attempt_at_ms,o.updated_at,
+             a.publication_id,j.attempt_id,
+             CASE WHEN j.assignment_id IS NULL THEN NULL ELSE json_object('phase',j.phase,'state',j.state,'queuedAtMs',j.queued_at_ms,
+             'startedAtMs',j.started_at_ms,'owner',j.owner,'reason',j.reason,'revision',j.revision) END
              FROM publish_assignments a LEFT JOIN publish_sheet_outbox o ON o.assignment_id=a.id
-             AND o.delivery_target_json IS NOT NULL WHERE a.campaign_id=?1 ORDER BY a.ordinal",
+             AND o.delivery_target_json IS NOT NULL LEFT JOIN publish_dispatch_jobs j ON j.assignment_id=a.id LEFT JOIN publish_sheet_sync_state sync ON sync.assignment_id=a.id WHERE a.campaign_id=?1 AND (?2 IS NULL OR a.id=?2) ORDER BY a.ordinal",
         )?;
         let assignments = assignment_stmt
-            .query_map(params![id], |row| {
+            .query_map(params![id, assignment_id], |row| {
                 Ok(crate::publish::PublishAssignmentRecord {
+                    publication_id: row.get(13)?,
+                    attempt_id: row.get(14)?,
+                    dispatch: row
+                        .get::<_, Option<String>>(15)?
+                        .map(|raw| serde_json::from_str(&raw).unwrap_or_default()),
                     sheet_delivery: row
                         .get::<_, Option<String>>(8)?
                         .map(|state| {
                             Ok::<_, rusqlite::Error>(crate::publish::PublishSheetDeliveryProgress {
                                 state,
-                                attempts: narrow(row.get::<_, i64>(9)?, "attempts")?,
+                                attempts: narrow(
+                                    row.get::<_, Option<i64>>(9)?.unwrap_or(0),
+                                    "attempts",
+                                )?,
                                 last_error: row.get(10)?,
                                 next_attempt_at_ms: row.get(11)?,
-                                updated_at: row.get(12)?,
+                                updated_at: row.get::<_, Option<String>>(12)?.unwrap_or_default(),
                             })
                         })
                         .transpose()?,
@@ -554,10 +607,10 @@ impl Database {
             .collect::<Result<Vec<_>, _>>()?;
 
         let mut event_stmt = conn.prepare(
-            "SELECT revision,kind,payload_json,created_at FROM publish_events WHERE campaign_id=?1 ORDER BY revision",
+            "SELECT revision,kind,payload_json,created_at FROM publish_events WHERE campaign_id=?1 AND ?2 IS NULL ORDER BY revision",
         )?;
         let events = event_stmt
-            .query_map(params![id], |row| {
+            .query_map(params![id, assignment_id], |row| {
                 Ok(crate::publish::PublishEventRecord {
                     revision: row.get::<_, i64>(0)? as u64,
                     kind: row.get(1)?,
@@ -583,6 +636,11 @@ impl Database {
                 },
             )
             .collect();
+        if assignment_id.is_some() {
+            campaign
+                .assignments
+                .retain(|plan| assignments.iter().any(|row| row.ordinal == plan.ordinal));
+        }
         Ok(Some(crate::publish::PublishCampaignDetail {
             campaign,
             bundles,
@@ -793,6 +851,43 @@ impl Database {
                 ],
             )?;
         }
+        transaction.execute("UPDATE publish_dispatch_jobs SET state='queued',reason=NULL,revision=revision+1 WHERE state='paused'",[])?;
+        // Retain unstarted immediate jobs across restart; effects are never replayed.
+        transaction.execute("DELETE FROM publish_work_claims", [])?;
+        transaction.execute("UPDATE publish_dispatch_jobs SET state='queued',owner=NULL,reason='resume_before_send',revision=revision+1
+          WHERE state='running' AND EXISTS(SELECT 1 FROM publish_assignments a WHERE a.id=assignment_id AND a.effect_intent IS NULL)",[])?;
+        transaction.execute("UPDATE publish_dispatch_jobs SET state='finished',owner=NULL,reason='app_interrupted_after_send',revision=revision+1
+          WHERE state IN ('running','queued') AND EXISTS(SELECT 1 FROM publish_assignments a WHERE a.id=assignment_id AND a.effect_intent IS NOT NULL)",[])?;
+        transaction.execute("UPDATE publish_dispatch_jobs SET state='missed',reason='app_opened_after_deadline',revision=revision+1
+          WHERE state='queued' AND deadline_ms IS NOT NULL AND started_at_ms IS NULL",[])?;
+        transaction.execute("UPDATE publish_assignments SET state='missed',error_code='app_opened_after_deadline',revision=revision+1
+          WHERE effect_intent IS NULL AND id IN(SELECT assignment_id FROM publish_dispatch_jobs WHERE state='missed') AND state<>'missed'",[])?;
+        // Queue expiry follows orphan reconciliation, so a campaign with only
+        // unstarted scheduled children must be reconciled once more to Missed.
+        let missed_campaigns: Vec<String> = transaction
+            .prepare("SELECT c.id FROM publish_campaigns c WHERE c.state NOT IN ('cancelled','missed')
+                AND EXISTS(SELECT 1 FROM publish_dispatch_jobs j WHERE j.campaign_id=c.id AND j.state='missed')
+                AND NOT EXISTS(SELECT 1 FROM publish_assignments a WHERE a.campaign_id=c.id AND a.state<>'missed')")?
+            .query_map([], |row| row.get(0))?
+            .collect::<Result<_, _>>()?;
+        for campaign_id in missed_campaigns {
+            transaction.execute("UPDATE publish_campaigns SET state='missed',error_code='app_opened_after_deadline',revision=revision+1,updated_at=?2 WHERE id=?1",
+                params![campaign_id,now])?;
+            transaction.execute("INSERT INTO publish_events(campaign_id,revision,kind,payload_json,created_at)
+                SELECT id,revision,'state',json_object('state',state,'errorCode',error_code,'source','dispatch_recovery'),?2 FROM publish_campaigns WHERE id=?1",
+                params![campaign_id,now])?;
+        }
+        transaction.execute("UPDATE publish_dispatch_jobs SET state='cancelled',reason='campaign_cancelled',revision=revision+1
+          WHERE state='queued' AND EXISTS(SELECT 1 FROM publish_campaigns c WHERE c.id=campaign_id AND c.state IN ('cancelled','missed'))",[])?;
+        transaction.execute(
+            "INSERT OR IGNORE INTO publish_pipeline_runs(campaign_id,token,created_at)
+          SELECT campaign_id,lower(hex(randomblob(16))),?1 FROM publish_dispatch_jobs WHERE state='queued' GROUP BY campaign_id",
+            [&now],
+        )?;
+        transaction.execute("UPDATE publish_dispatch_jobs SET run_token=(SELECT token FROM publish_pipeline_runs r WHERE r.campaign_id=publish_dispatch_jobs.campaign_id),revision=revision+1 WHERE state='queued'",[])?;
+        transaction.execute("UPDATE publish_campaigns SET state='posting',revision=revision+1 WHERE id IN(SELECT campaign_id FROM publish_pipeline_runs)",[])?;
+        transaction.execute("UPDATE publish_attempts SET finished_at_ms=?1,result=(SELECT reason FROM publish_dispatch_jobs j WHERE j.attempt_id=publish_attempts.attempt_id)
+          WHERE finished_at_ms IS NULL AND attempt_id IN(SELECT attempt_id FROM publish_dispatch_jobs WHERE state IN ('missed','finished','cancelled'))",[Utc::now().timestamp_millis()])?;
         transaction.commit()?;
         Ok(stranded.len())
     }

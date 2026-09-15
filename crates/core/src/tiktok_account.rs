@@ -212,6 +212,11 @@ pub async fn restore_own_profile_header(
             return Ok(None);
         }
         if attempt == 0 {
+            if let Some(account) = selected_profile_account(session, labels, &tree).await? {
+                return Ok(Some(account));
+            }
+        }
+        if attempt == 0 {
             if let Some(home) = labels.label(crate::tiktok_labels::TikTokControl::HomeTab) {
                 if let Some(tab) = session.locate(home.to_query()).await? {
                     session.tap(tab.centre()).await?;
@@ -258,9 +263,152 @@ pub async fn restore_own_profile_header(
     Ok(None)
 }
 
+fn selected_account(tree: &crate::ui_automation::tree::Tree, package: &str) -> Option<String> {
+    let heading = tree.matching(
+        package,
+        ElementQuery::Text {
+            value: "Switch account",
+            exact: true,
+        },
+    );
+    if heading.len() != 1 {
+        return None;
+    }
+    let rows: Vec<_> = tree
+        .matching(package, ElementQuery::ResourceIdSuffix(":id/hms"))
+        .into_iter()
+        .filter(|i| tree.nodes[*i].attr("selected") == "true")
+        .collect();
+    let [index] = rows.as_slice() else {
+        return None;
+    };
+    let row = &tree.nodes[*index];
+    if !row.rect().is_some_and(|r| r.enabled && r.clickable) {
+        return None;
+    }
+    let username = row.attr("content-desc");
+    let labels: Vec<_> = tree
+        .matching(package, ElementQuery::ResourceIdSuffix(":id/iss"))
+        .into_iter()
+        .filter(|i| tree.inside(*i, *index) && tree.nodes[*i].attr("selected") == "true")
+        .collect();
+    let [text] = labels.as_slice() else {
+        return None;
+    };
+    if tree.nodes[*text].attr("text") != username {
+        return None;
+    }
+    let mut rect = row.rect()?;
+    rect.description = Some(format!("@{username}"));
+    single_username(&[rect])
+}
+
+async fn selected_profile_account(
+    session: &dyn UiSession,
+    labels: TikTokControls,
+    profile: &crate::ui_automation::tree::Tree,
+) -> anyhow::Result<Option<String>> {
+    // Trill 38.3.2, machine 7, 14/09/2026: collapsed header cannot be expanded
+    // by grid scrolling; Switch account exposes the current row as selected=true.
+    // Only open/close this sheet. Never click an account row or Add account.
+    if labels.package() != "com.ss.android.ugc.trill"
+        || labels.resource_version() != Some("38.3.2")
+        || !session.supports_accessibility_readback()
+    {
+        return Ok(None);
+    }
+    let profile_tab = labels.label(crate::tiktok_labels::TikTokControl::ProfileTab);
+    if profile.control(labels.package(), profile_tab).is_none() {
+        return Ok(None);
+    }
+    let query = ElementQuery::ResourceIdSuffix(":id/kdu");
+    let titles = profile.matching(labels.package(), query);
+    let [index] = titles.as_slice() else {
+        return Ok(None);
+    };
+    if !profile.nodes[*index]
+        .rect()
+        .is_some_and(|r| r.enabled && r.clickable)
+    {
+        return Ok(None);
+    }
+    session.activate_element(query).await?;
+    let observed = async {
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        let first =
+            crate::ui_automation::tree::Tree::parse(session.hierarchy_source_snapshot().await?)?;
+        let second =
+            crate::ui_automation::tree::Tree::parse(session.hierarchy_source_snapshot().await?)?;
+        anyhow::ensure!(
+            second.generation > first.generation,
+            "account selection snapshot stale"
+        );
+        anyhow::ensure!(
+            session.active_app_bundle().await? == labels.package(),
+            "account sheet app changed"
+        );
+        let handle = selected_account(&first, labels.package());
+        Ok::<_, anyhow::Error>(
+            handle.filter(|h| Some(h) == selected_account(&second, labels.package()).as_ref()),
+        )
+    }
+    .await;
+    let close = session
+        .activate_element(ElementQuery::Description {
+            value: "Close",
+            exact: true,
+        })
+        .await;
+    close?;
+    let restored =
+        crate::ui_automation::tree::Tree::parse(session.hierarchy_source_snapshot().await?)?;
+    anyhow::ensure!(
+        restored.control(labels.package(), profile_tab).is_some(),
+        "account sheet did not return to profile"
+    );
+    observed
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn collapsed_profile_account_requires_selected_row_and_matching_label() {
+        let xml = include_str!("../fixtures/tiktok-publish/trill-38.3.2-selected-account.xml");
+        let parse = |xml: String| {
+            crate::ui_automation::tree::Tree::parse(crate::HierarchySourceSnapshot {
+                generation: 1,
+                xml,
+            })
+            .unwrap()
+        };
+        let package = "com.ss.android.ugc.trill";
+        let good = parse(xml.into());
+        assert_eq!(
+            selected_account(&good, package).as_deref(),
+            Some("fixture.account")
+        );
+        assert!(selected_account(
+            &parse(xml.replace("selected=\"true\"", "selected=\"false\"")),
+            package
+        )
+        .is_none());
+        assert!(selected_account(
+            &parse(xml.replace("text=\"fixture.account\"", "text=\"someone.else\"")),
+            package
+        )
+        .is_none());
+        assert!(selected_account(&good, "another.package").is_none());
+        let mut duplicate = good.clone();
+        let row = duplicate
+            .nodes
+            .iter()
+            .find(|n| n.attr("resource-id").ends_with(":id/hms") && n.attr("selected") == "true")
+            .unwrap()
+            .clone();
+        duplicate.nodes.push(row);
+        assert!(selected_account(&duplicate, package).is_none());
+    }
     #[test]
     fn new_fleet_accounts_require_their_measured_username_id_and_own_profile_controls() {
         for (version, xml) in [

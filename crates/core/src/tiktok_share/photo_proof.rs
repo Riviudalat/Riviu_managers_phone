@@ -7,6 +7,15 @@ fn normalize(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
+#[derive(Debug)]
+pub(super) struct MatchedPhotoCopyFailure(pub LinkCapture);
+impl std::fmt::Display for MatchedPhotoCopyFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} ({:?})", self.0.reason(), self.0)
+    }
+}
+impl std::error::Error for MatchedPhotoCopyFailure {}
+
 fn validate_photo_identity(
     canonical: &str,
     identity: &SubmissionIdentity,
@@ -80,29 +89,56 @@ fn validate_public_metadata(
     Ok(())
 }
 
+fn viewer_controls(package: &str, version: &str) -> anyhow::Result<(&'static str, &'static str)> {
+    match (package, version) {
+        ("com.ss.android.ugc.trill", _) => Ok((":id/m3q", ":id/m3h")),
+        // Phone13, Global46.2.42, 15/09/2026: complete caption rqb and
+        // ImageView rpr with content-desc=Share on PostModeDetailActivity.
+        ("com.zhiliaoapp.musically", "46.2.42") => Ok((":id/rqb", ":id/rpr")),
+        ("com.zhiliaoapp.musically", _) => Ok((":id/rs_", ":id/rrp")),
+        _ => anyhow::bail!("photo viewer not measured for package"),
+    }
+}
+
 pub async fn capture_expanded_photo_link(
     session: &dyn UiSession,
     package: &str,
     caption: &str,
     identity: &SubmissionIdentity,
 ) -> anyhow::Result<String> {
+    capture_expanded_photo_link_counted(session, package, caption, identity, &mut 0).await
+}
+
+pub(super) async fn capture_expanded_photo_link_counted(
+    session: &dyn UiSession,
+    package: &str,
+    caption: &str,
+    identity: &SubmissionIdentity,
+    copy_attempts: &mut u32,
+) -> anyhow::Result<String> {
     let tree = Tree::parse(session.hierarchy_source_snapshot().await?)?;
-    let (caption_id, share_id) = match package {
-        "com.ss.android.ugc.trill" => (":id/m3q", ":id/m3h"),
-        "com.zhiliaoapp.musically" => (":id/rs_", ":id/rrp"),
-        _ => anyhow::bail!("photo viewer not measured for package"),
-    };
+    anyhow::ensure!(
+        !tree.publication_removed(package),
+        "publication removed; skip sharing"
+    );
+    let version = session
+        .app_version(package)
+        .await
+        .context("photo viewer version missing")?;
+    let (caption_id, share_id) = viewer_controls(package, &version)?;
     let captions = tree.matching(package, ElementQuery::ResourceIdSuffix(caption_id));
+    let matched_caption = matches!(captions.as_slice(), [_]);
     let link = if let [index] = captions.as_slice() {
         anyhow::ensure!(
             normalize(tree.nodes[*index].attr("text")) == normalize(caption),
             "expanded caption differs"
         );
         let mut opened = false;
-        let link = super::read_through_sheet(
+        let link = super::read_through_sheet_counted(
             session,
             ElementQuery::ResourceIdSuffix(share_id),
             &mut opened,
+            copy_attempts,
         )
         .await;
         if opened {
@@ -136,12 +172,46 @@ pub async fn capture_expanded_photo_link(
                     .is_some_and(|q| !tree.matching(package, q.to_query()).is_empty()),
             "not a measured post detail"
         );
-        super::capture_post_link(session, &labels).await
+        if let Some(share) = labels.label(TikTokControl::Share) {
+            let mut opened = false;
+            let link = super::read_through_sheet_counted(
+                session,
+                share.to_query(),
+                &mut opened,
+                copy_attempts,
+            )
+            .await;
+            if opened {
+                super::close_sheet(session).await;
+            }
+            link
+        } else {
+            LinkCapture::ShareUnmeasured
+        }
     };
+    if matched_caption && link.link().is_none() {
+        return Err(MatchedPhotoCopyFailure(link).into());
+    }
     let canonical =
         resolve_canonical_post_link(link.link().context("expanded viewer did not return link")?)
             .await?;
-    let id = validate_photo_identity(&canonical, identity)?;
+    validate_photo_identity(&canonical, identity)?;
+    validate_public_link(&canonical, caption, identity)
+        .await
+        .map_err(|error| {
+            MatchedPhotoCopyFailure(LinkCapture::ReadFailed(format!(
+                "public metadata for {canonical}: {error:#}"
+            )))
+        })?;
+    Ok(canonical)
+}
+
+async fn validate_public_link(
+    canonical: &str,
+    caption: &str,
+    identity: &SubmissionIdentity,
+) -> anyhow::Result<()> {
+    let id = validate_photo_identity(canonical, identity)?;
     // Measured 14/09/2026: photo ID 7685155573721025810 is exposed by video oEmbed.
     let video_url = format!(
         "https://www.tiktok.com/@{}/video/{id}",
@@ -168,12 +238,250 @@ pub async fn capture_expanded_photo_link(
     }
     let embed: serde_json::Value = serde_json::from_slice(&bytes)?;
     validate_public_metadata(&embed, caption, &identity.account, &id)?;
+    Ok(())
+}
+
+/// The video viewer truncates its caption and opens a comment drawer on expansion.
+/// A prefix authorizes Copy only; publication proof comes from full public metadata
+/// and the immutable account/content-id/time window of this submitted attempt.
+pub async fn capture_visible_video_link(
+    session: &dyn UiSession,
+    package: &str,
+    caption: &str,
+    identity: &SubmissionIdentity,
+) -> anyhow::Result<String> {
+    capture_visible_video_link_counted(session, package, caption, identity, &mut 0).await
+}
+
+pub(super) async fn capture_visible_video_link_counted(
+    session: &dyn UiSession,
+    package: &str,
+    caption: &str,
+    identity: &SubmissionIdentity,
+    copy_attempts: &mut u32,
+) -> anyhow::Result<String> {
+    let observed_at = std::time::Instant::now();
+    anyhow::ensure!(
+        session.active_app_bundle().await? == package,
+        "video viewer foreground changed"
+    );
+    let tree = Tree::parse(session.hierarchy_source_snapshot().await?)?;
+    let (caption_id, share) = video_viewer_caption(&tree, package, caption)?;
+    let _ = caption_id;
+    let mut opened = false;
+    anyhow::ensure!(
+        observed_at.elapsed() < Duration::from_secs(20)
+            && session.active_app_bundle().await? == package,
+        "video viewer observation expired or foreground changed"
+    );
+    let captured =
+        super::read_through_sheet_counted(session, share, &mut opened, copy_attempts).await;
+    if opened {
+        super::close_sheet(session).await;
+    }
+    // A matching candidate whose Copy failed remains unresolved. Navigating
+    // through older posts must not replace its processing/clipboard diagnosis.
+    if captured.link().is_none() {
+        return Err(MatchedPhotoCopyFailure(captured).into());
+    }
+    let canonical = resolve_canonical_post_link(
+        captured
+            .link()
+            .context("video viewer did not return link")?,
+    )
+    .await
+    .map_err(|error| {
+        MatchedPhotoCopyFailure(LinkCapture::ReadFailed(format!(
+            "matched video candidate link resolution: {error:#}"
+        )))
+    })?;
+    anyhow::ensure!(
+        url::Url::parse(&canonical)?.path().contains("/video/"),
+        "copied content is not a video"
+    );
+    validate_photo_identity(&canonical, identity)?;
+    validate_public_link(&canonical, caption, identity)
+        .await
+        .map_err(|error| {
+            MatchedPhotoCopyFailure(LinkCapture::ReadFailed(format!(
+                "public metadata for {canonical}: {error:#}"
+            )))
+        })?;
     Ok(canonical)
+}
+
+fn video_viewer_caption(
+    tree: &Tree,
+    package: &str,
+    caption: &str,
+) -> anyhow::Result<(&'static str, ElementQuery<'static>)> {
+    anyhow::ensure!(!tree.publication_removed(package), "video removed");
+    anyhow::ensure!(
+        tree.nodes
+            .iter()
+            .any(|n| n.visible(package) && n.attr("content-desc") == "Video"),
+        "not a video viewer"
+    );
+    let (caption_id, share) = match package {
+        "com.ss.android.ugc.trill" => (
+            ":id/dmk",
+            ElementQuery::Description {
+                value: "Share video",
+                exact: false,
+            },
+        ),
+        "com.zhiliaoapp.musically" => (
+            ":id/desc",
+            ElementQuery::Description {
+                value: "Share video",
+                exact: false,
+            },
+        ),
+        _ => anyhow::bail!("video viewer package unmeasured"),
+    };
+    let rows = tree.matching(package, ElementQuery::ResourceIdSuffix(caption_id));
+    let [index] = rows.as_slice() else {
+        anyhow::bail!("video caption missing or ambiguous");
+    };
+    // Android accessibility can add direction marks at the caption edges.
+    // Ignore only that presentation boundary for candidate selection; exact
+    // complete public caption/account/content-id/time proof remains unchanged.
+    let ui_caption = |value: &str| {
+        normalize(
+            value.trim_matches(|c: char| c.is_whitespace() || matches!(c, '\u{200e}' | '\u{200f}')),
+        )
+    };
+    let visible = ui_caption(tree.nodes[*index].attr("text"));
+    let expected = ui_caption(caption);
+    let prefix = visible
+        .strip_suffix("...")
+        .or_else(|| visible.strip_suffix('…'))
+        // Global 46.2.42/en, phone13 (15/09/2026): desc carries the
+        // expansion affordance as one literal suffix, not a separate node.
+        .or_else(|| {
+            (package == "com.zhiliaoapp.musically")
+                .then(|| visible.strip_suffix("…more"))
+                .flatten()
+        })
+        .map(str::trim_end);
+    anyhow::ensure!(
+        visible == expected
+            || prefix.is_some_and(|p| p.chars().count() >= 20 && expected.starts_with(p)),
+        "video caption differs"
+    );
+    anyhow::ensure!(
+        tree.matching(package, share).len() == 1,
+        "video share control missing or ambiguous"
+    );
+    Ok((caption_id, share))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn video_prefix_only_allows_copy_and_public_metadata_still_requires_full_identity() {
+        let package = "com.ss.android.ugc.trill";
+        let xml = r#"<hierarchy><node package="com.ss.android.ugc.trill" content-desc="Video" bounds="[0,0][1080,1965]" displayed="true"/>
+        <node package="com.ss.android.ugc.trill" resource-id="com.ss.android.ugc.trill:id/dmk" text="A complete matching caption with..." bounds="[10,1500][900,1700]" displayed="true"/>
+        <node package="com.ss.android.ugc.trill" content-desc="Share video. 0 shares" bounds="[950,1200][1030,1300]" displayed="true" clickable="true" enabled="true"/></hierarchy>"#;
+        let tree = Tree::parse(crate::HierarchySourceSnapshot {
+            generation: 1,
+            xml: xml.into(),
+        })
+        .unwrap();
+        let caption = "A complete matching caption with the required suffix";
+        assert!(video_viewer_caption(&tree, package, caption).is_ok());
+        assert!(video_viewer_caption(&tree, package, "A totally different publication").is_err());
+        let embed = serde_json::json!({"title":"A complete matching caption with DIFFERENT suffix","author_url":"https://www.tiktok.com/@fixture","html":"<blockquote data-video-id=\"123\">"});
+        assert!(validate_public_metadata(&embed, caption, "fixture", "123").is_err());
+    }
+    #[test]
+    fn video_candidate_caption_accepts_only_explicit_ellipsis_and_edge_direction_marks() {
+        let package = "com.ss.android.ugc.trill";
+        let expected =
+            "Lưu list này rồi đi Đà Lạt cho đỡ mò từng nơi nhé. Lưu list này để chọn điểm";
+        let observed = "Lưu list này rồi đi Đà Lạt cho đỡ mò từng nơi nhé. Lưu list ...";
+        let xml = |text: &str, description: &str| {
+            format!(
+                r#"<hierarchy>
+            <node package="{package}" content-desc="{description}" bounds="[0,0][1080,1965]" displayed="true"/>
+            <node package="{package}" resource-id="{package}:id/dmk" text="{text}" bounds="[10,1500][900,1700]" displayed="true"/>
+            <node package="{package}" content-desc="Share video.  shares" bounds="[950,1200][1030,1300]" displayed="true" clickable="true" enabled="true"/>
+            </hierarchy>"#
+            )
+        };
+        let parse =
+            |xml| Tree::parse(crate::HierarchySourceSnapshot { generation: 1, xml }).unwrap();
+        for caption in [
+            observed.to_owned(),
+            format!(" \u{200e}{observed}\u{200f} "),
+            observed.replace("...", "…"),
+        ] {
+            assert!(
+                video_viewer_caption(&parse(xml(&caption, "Video")), package, expected).is_ok()
+            );
+        }
+        for caption in [
+            "Lưu list ...",
+            "Lưu list này rồi đi Đà Lạt nhưng nội dung khác...",
+            "Lưu list này rồi đi Đà Lạt cho đỡ mò từng nơi nhé. Lưu list ...more",
+        ] {
+            assert!(
+                video_viewer_caption(&parse(xml(caption, "Video")), package, expected).is_err()
+            );
+        }
+        assert!(video_viewer_caption(&parse(xml(observed, "Videos")), package, expected).is_err());
+        let good = xml(observed, "Video");
+        let duplicate=good.replace("</hierarchy>",&format!(r#"<node package="{package}" resource-id="{package}:id/dmk" text="{observed}" bounds="[10,1200][900,1400]" displayed="true"/></hierarchy>"#));
+        assert!(video_viewer_caption(&parse(duplicate), package, expected).is_err());
+    }
+    #[test]
+    fn global_video_literal_more_suffix_only_authorizes_copy_not_publication_proof() {
+        let package = "com.zhiliaoapp.musically";
+        let visible = "Lưu list này rồi đi Đà Lạt cho đỡ mò từng nơi nhé.…more";
+        let caption = "Lưu list này rồi đi Đà Lạt cho đỡ mò từng nơi nhé. Lưu list này để có lịch đi Đà Lạt gọn hơn, dễ chọn điểm theo buổi và đỡ mất thời gian mò từng nơi. #riviudalat #dalat #dalatreview #72hdalat #dulichdalat";
+        let xml = format!(
+            r#"<hierarchy>
+          <node package="{package}" content-desc="Video" resource-id="{package}:id/long_press_layout" bounds="[0,0][1080,1965]" displayed="true"/>
+          <node package="{package}" resource-id="{package}:id/desc" text="{visible}" bounds="[10,1500][900,1700]" displayed="true"/>
+          <node package="{package}" content-desc="Share video.  shares" resource-id="{package}:id/fwo" bounds="[950,1200][1030,1300]" displayed="true" clickable="true" enabled="true"/>
+        </hierarchy>"#
+        );
+        let tree = Tree::parse(crate::HierarchySourceSnapshot { generation: 1, xml }).unwrap();
+        assert!(video_viewer_caption(&tree, package, caption).is_ok());
+        assert!(video_viewer_caption(&tree, package, "Một bài khác cùng tài khoản").is_err());
+        let embed = serde_json::json!({"title":visible,"author_url":"https://www.tiktok.com/@fixture","html":"<blockquote data-video-id=\"123\">"});
+        assert!(validate_public_metadata(&embed, caption, "fixture", "123").is_err());
+        let mut full = embed;
+        full["title"] = caption.into();
+        assert!(validate_public_metadata(&full, caption, "fixture", "123").is_ok());
+        full["author_url"] = "https://www.tiktok.com/@different".into();
+        assert!(validate_public_metadata(&full, caption, "fixture", "123").is_err());
+    }
+    #[test]
+    fn global_46_2_42_viewer_uses_its_own_caption_and_share_controls() {
+        let package = "com.zhiliaoapp.musically";
+        let (caption, share) = viewer_controls(package, "46.2.42").unwrap();
+        let tree=Tree::parse(crate::HierarchySourceSnapshot{generation:1,xml:r#"<hierarchy>
+          <node package="com.zhiliaoapp.musically" resource-id="com.zhiliaoapp.musically:id/rqb" class="android.widget.TextView" text="Complete caption" bounds="[0,1704][1080,1965]" displayed="true"/>
+          <node package="com.zhiliaoapp.musically" resource-id="com.zhiliaoapp.musically:id/rpr" class="android.widget.ImageView" content-desc="Share" bounds="[959,1982][1027,2050]" clickable="true" enabled="true" displayed="true"/>
+        </hierarchy>"#.into()}).unwrap();
+        assert_eq!(
+            tree.matching(package, ElementQuery::ResourceIdSuffix(caption))
+                .len(),
+            1
+        );
+        assert_eq!(
+            tree.matching(package, ElementQuery::ResourceIdSuffix(share))
+                .len(),
+            1
+        );
+        assert_ne!(
+            viewer_controls(package, "46.2.1").unwrap(),
+            (caption, share)
+        );
+    }
     fn identity() -> SubmissionIdentity {
         SubmissionIdentity {
             account: "fixture".into(),
