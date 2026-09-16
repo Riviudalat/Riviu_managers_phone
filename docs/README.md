@@ -8,6 +8,7 @@ Tài liệu hiện tại phân biệt hợp đồng sản phẩm với bằng ch
 | Vận hành 12 trang, hiểu đầu vào và kết quả | [Hướng dẫn vận hành](operator-guide.md) |
 | Sửa code, chọn cổng và chạy ứng dụng | [Hướng dẫn phát triển](developer-guide.md) |
 | Tiếp nhận thay đổi, bảo toàn bằng chứng | [Runbook agent](agents/agent-runbook.md) |
+| Thiết lập và chọn skill/MCP cho toàn dự án | [Bộ công cụ agent](agent-toolkit-setup.md) |
 | Ràng buộc kỹ thuật (WDA, kiến trúc, fleet) | [docs/agents](agents/README.md) |
 | Bố cục, trạng thái và nguồn tham chiếu UI | [Hợp đồng UI](ui-reference-matrix.md) |
 | Lý do thiết kế và kế hoạch có ngày | [Kho lịch sử](archive/README.md) |

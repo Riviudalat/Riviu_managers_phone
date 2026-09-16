@@ -15,6 +15,10 @@ node_modules/
 .vscode
 .claude/*
 !.claude/skills/
+.claude/skills/**/.installation.json
+!.claude/rules/
+.claude/rules/*
+!.claude/rules/riviu-toolkit.md
 *.db-journal
 __pycache__/
 *.py[cod]
