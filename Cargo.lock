@@ -3545,7 +3545,7 @@ dependencies = [
 
 [[package]]
 name = "riviu-managers-phone"
-version = "0.2.34"
+version = "0.2.35"
 dependencies = [
  "anyhow",
  "apk-info",
