@@ -18,6 +18,9 @@
 @media(prefers-reduced-motion:reduce){.publish-check-spinner{animation:none}}
 
 .publish-page .pq-panel > header > div { min-width:0; }
+.publish-page .pq-setup-scroll{display:flex;flex-direction:column;flex:1;min-height:0;min-width:0;overflow:auto;gap:14px;padding-bottom:2px}
+.publish-page .pq-setup-scroll>.pq-columns{flex:1 0 380px}
+@media(max-width:1050px){.publish-page .pq-setup-scroll>.pq-columns{flex:1 0 auto;overflow:visible}.publish-page .pq-setup-scroll .pq-devices{position:static;max-height:none}.publish-page .pq-setup-scroll .pq-machine-grid{min-height:240px}}
 .publish-page .pq-footer > div { min-width:0; }
 .publish-page .pq-footer small { color:var(--text-2);font-size:var(--text-xs);line-height:1.5; }
 .google-sheet-compact-controls{display:grid;grid-template-columns:minmax(0,1fr) auto auto;gap:6px;align-items:center;min-width:0}

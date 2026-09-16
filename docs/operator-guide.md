@@ -418,7 +418,9 @@ form tự ẩn; tiếp tục **Đăng nhập Google** rồi **Kiểm tra kết n
 Phiên đăng nhập và cấu hình nhập tay lưu trong kho xác thực hệ điều hành. Trong lúc
 đăng nhập hoặc chọn bảng, có thể hủy bằng nút Google; lượt chuyển kết nối đã được
 nhận sẽ hoàn tất hoặc giữ trạng thái để tiếp tục. Một tab chỉ nhận ghi từ PC đã
-liên kết; việc chuyển PC cần bàn giao rõ ràng để không có hai bộ ghi cùng lúc.
+liên kết. Khi chuyển sang PC mới, chọn tab Sheet mới; app chưa có thao tác bàn giao
+tab đang thuộc PC cũ. Chọn nhầm tab đó sẽ báo rõ xung đột và giữ kết nối hiện tại,
+không làm kẹt việc chọn tab khác.
 Khi đã nhập link, cần xác minh thành công trước khi đăng hoặc lưu lịch có bật ghi
 Sheet. Có thể tắt **Ghi kết quả lên Sheet** để chạy lượt không ghi bảng.
 Khi kiểm tra trước đăng hoặc lưu lịch, Riviu chốt đúng bảng/tab và chế độ báo cáo

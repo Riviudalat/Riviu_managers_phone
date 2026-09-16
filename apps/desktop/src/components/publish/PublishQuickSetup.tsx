@@ -86,6 +86,7 @@ export function PublishQuickSetup(p: PublishWizardProps & { blockingReason?: str
   const selectedBlockedDevice = selected.map(bundle => p.assignments[bundle.id]).find(udid => !!udid && !!deviceGuardBlock(p.deviceGuards, udid));
   const selectedPending = selectedBlockedDevice ? deviceGuardPending(p.deviceGuards?.[selectedBlockedDevice]) : undefined;
   return <div className="publish-quick" hidden={p.active === false}>
+    <div className="pq-setup-scroll">
     <div className="pq-setup-tools">
       <div className="pq-source"><label htmlFor="publish-source-folder">Thư mục bài đăng</label><div className="pq-source-controls"><input id="publish-source-folder" aria-label="Thư mục nguồn" value={p.sourceRoot} onChange={e => p.onSource(e.target.value)} disabled={p.busy} placeholder="Đường dẫn thư mục chứa bài đăng"/><button type="button" disabled={p.busy} onClick={() => void chooseFolder()}><FolderOpen size={16}/>Chọn thư mục</button><button type="button" disabled={locked || !p.sourceRoot} onClick={() => void p.onScan(p.sourceRoot)}>{p.scanning ? "Đang quét…" : "Quét"}</button></div></div>
       {p.settings}
@@ -136,6 +137,7 @@ export function PublishQuickSetup(p: PublishWizardProps & { blockingReason?: str
         })}</div>
         <footer><small>{ready.length} máy sẵn sàng trong phạm vi · {devices.length} tổng</small></footer>
       </section>
+    </div>
     </div>
     <footer className="pq-footer"><div><strong>{selected.length} bài đã chọn</strong><span>{mapped}/{selected.length} bài có máy · mỗi máy một bài · Sheet {p.sheet ? "bật" : "tắt"}</span>{checkReason && <small id="publish-check-reason" role="status">{selectedBlockedDevice ? `${label(selectedBlockedDevice)}: ${checkReason}` : checkReason}</small>}{selectedPending && p.onPendingPublication && <button type="button" className="pq-pending-action" disabled={locked} onClick={()=>p.onPendingPublication?.(selectedPending.campaignId)}>Xem bài đang chờ</button>}</div><button type="button" className="primary" aria-describedby={checkReason ? "publish-check-reason" : undefined} disabled={locked || !complete || !captionsValid} onClick={()=>{setReportPage(0);setDialog("check");void p.onPreflight();}}>{p.preflightLoading?"Đang kiểm tra…":"Kiểm tra & đăng"}<ArrowRight size={16}/></button></footer>
     {dialog==="preview" && active && <PublishDialog title={`Xem trước · ${active.name}`} onClose={()=>setDialog(null)}><div className="pq-large-preview"><PublishMedia bundle={active} index={Math.min(photo,Math.max(0,active.images.length-1))} expanded/></div><div className="pq-photo-nav"><button type="button" aria-label="Ảnh trước" disabled={photo===0} onClick={()=>setPhoto(photo-1)}><ArrowLeft size={16}/></button><span>{photo+1} / {active.images.length}</span><button type="button" aria-label="Ảnh tiếp" disabled={photo+1>=active.images.length} onClick={()=>setPhoto(photo+1)}><ArrowRight size={16}/></button></div></PublishDialog>}

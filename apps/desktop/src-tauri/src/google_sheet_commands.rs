@@ -496,7 +496,7 @@ async fn connect(
         anyhow::ensure!(old.connection_verified, "{}", old.message);
         target.reporting_epoch = old.reporting_epoch;
     }
-    db.begin_google_sheet_migration(&target, &request_id)?;
+    begin_checked_migration(db, &initial, &target, &writer, &request_id)?;
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(125);
     while !db.publish_sheet_requests_drained()? {
         anyhow::ensure!(
@@ -529,6 +529,35 @@ async fn connect(
     )?;
     sessions().lock().await.error = None;
     checked_result(ready, &writer)
+}
+
+fn begin_checked_migration(
+    db: &Database,
+    initial: &DirectTargetCheck,
+    target: &SheetDeliveryTarget,
+    writer: &str,
+    request_id: &str,
+) -> anyhow::Result<()> {
+    // Refuse a known conflict before persisting the migration barrier. That
+    // barrier pauses every Sheet delivery and must not strand an existing
+    // connection merely because the operator selected another PC's tab.
+    anyhow::ensure!(
+        initial.spreadsheet_id == target.spreadsheet_id && initial.sheet_gid == target.sheet_gid,
+        "Kết quả kiểm tra không khớp bảng và tab đã chọn"
+    );
+    if let Some(owner) = initial.writer_id.as_deref() {
+        anyhow::ensure!(
+            owner == writer,
+            "Tab này đang được liên kết với máy tính khác. Chọn tab mới hoặc dùng máy đã liên kết để tiếp tục ghi; app chưa đổi kết nối hiện tại."
+        );
+        anyhow::ensure!(
+            initial.reporting_ready
+                && target.reporting_epoch.as_ref().is_none_or(|epoch| Some(epoch) == initial.reporting_epoch.as_ref())
+                && initial.layout.as_deref() == Some(if target.internal_reporting { "internal" } else { "compact" }),
+            "Tab đang dọn dữ liệu hoặc đợt báo cáo/bố cục đã đổi; hoàn tất trên máy đã liên kết rồi thử lại"
+        );
+    }
+    db.begin_google_sheet_migration(target, request_id)
 }
 pub(crate) async fn deliver(
     db: &Database,
