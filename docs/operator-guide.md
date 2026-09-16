@@ -619,6 +619,92 @@ Global còn phụ thuộc mapping riêng, không suy từ Đã đăng sang Đã 
 còn thiếu; không mở lại full pipeline cho bài đã đăng. Cleanup là tập effect cụ thể,
 không phải xoá tùy ý theo tên thư mục.
 
+### Tiếp tục xác minh bài đã gửi sau khi Dừng
+
+Trong **Theo dõi → Chi tiết máy**, bài thuộc chiến dịch đã Dừng có thể hiện
+**Tiếp tục xác minh bài đã gửi** khi backend xác nhận còn đủ identity của lần Đăng.
+Đọc xác nhận trước khi tiếp tục: chỉ kiểm tra bài cũ trên máy đó, không đăng lại,
+không tiếp tục những bài chưa gửi của máy khác. Thiếu tài khoản/thời điểm gửi hoặc
+cần kiểm tra thủ công vì lý do khác thì không được mở quyền này. Nếu trạng thái
+vừa thay đổi, app yêu cầu đọc lại thay vì áp dụng xác nhận cũ.
+Nếu tác vụ vẫn đang Dừng/nhả máy hoặc lần dừng bị gián đoạn, hoàn tất **Dừng** trước
+khi tiếp tục xác minh. Không mở lại observer trong khi lệnh đóng phiên cũ còn chạy.
+
+Nhận yêu cầu không có nghĩa đã lấy được link. App dùng worker hiện có để kiểm tra
+lại sau mỗi 5 phút tính từ cuối lần kiểm trước, kể cả sau restart; máy offline/bận
+chờ khi sẵn sàng. Campaign vẫn có thể mang nhãn **Đã huỷ** dù một bài trong đó đang
+được tiếp tục xác minh. Bài và lịch sử Đăng, các máy chưa gửi, cùng đích Sheet/đợt
+báo cáo ban đầu không đổi. **Kiểm tra liên kết** chỉ quan sát bài đã gửi; báo máy
+bận, đã dừng, chưa đủ điều kiện hoặc chưa có link không phải thành công.
+
+Để dừng lại, bấm **Dừng kiểm tra lại** và xác nhận. Nút này dừng quyền xác minh đã
+được tiếp tục của **cả chiến dịch đang chọn**, không chỉ máy đang xem. Bài đã gửi,
+link đã có và trạng thái chiến dịch được giữ; dừng kiểm tra không hoàn tác bài hoặc
+cho phép đăng lại.
+
+**Tiếp tục xác minh không phải nút mở khoá máy.** Máy còn upload/chưa rõ kết quả vẫn
+bị giữ. Với bài Submitted cũ, app chỉ có thể nhả giữ khi đã qua ít nhất 4 giờ từ lần
+Đăng, không có pipeline đang chạy và có quan sát mới đúng Hồ sơ/tài khoản/package,
+khớp identity của bài; bằng chứng này chỉ có hiệu lực 24 giờ. Máy còn khoản giữ khác
+vẫn chưa được dùng cho lượt mới. Không dùng ảnh cũ, thời gian chờ riêng lẻ hoặc xóa
+lượt để vượt điều kiện an toàn.
+
+Bài **Dừng trước khi đăng** có thao tác **Thử lại máy này**, chỉ dành đúng bài chưa
+qua Post. Khi backend báo pipeline còn chạy, máy bận hoặc chưa đọc được quyền thử
+lại, nút bị khoá kèm lý do; chờ/đọc lại chi tiết, không tạo campaign khác để né guard.
+Thao tác này khác tiếp tục xác minh, kiểm tra link và ghi lại Sheet.
+
+### Đọc cảnh báo nguồn trước khi xác nhận
+
+Trong Bàn đăng nhanh, mở **Cảnh báo nguồn (N)** để đọc thông báo và đường dẫn bài/file
+cụ thể, gồm thông tin đối tác thiếu, rỗng hoặc không đọc được do scanner báo. Con số
+N thuộc lần quét hiện tại, không phải số máy lỗi. Thiếu đối tác không tự sửa nguồn:
+bài hợp lệ vẫn có thể đăng, còn phần tên đối tác tương ứng sẽ trống.
+
+Thông báo **caption trùng** chỉ tính các bài đang chọn theo nội dung bạn đang chỉnh;
+đổi caption trong bản nháp sẽ cập nhật cảnh báo. Đây là lưu ý không chặn mặc định,
+không tự thay chữ hoặc sửa file nguồn. Kiểm tra/preflight vẫn có thể chặn vì lỗi
+nội dung hoặc điều kiện máy thật. Các hướng dẫn này mô tả chức năng, không khẳng
+định một lượt đăng thật đã thành công.
+
+### Đọc báo cáo nghiệm thu mà không chiếm chuột
+
+Kỹ thuật có thể dùng `scripts/publish_acceptance.mjs` qua IPC của Riviu đang chạy,
+không mở app/driver thứ hai hoặc đưa cửa sổ lên trước. Mặc định **inspect** chỉ đọc
+roster/metadata và campaign đã chỉ định. **Observe** chỉ theo dõi bài cũ, không gửi
+lệnh kiểm tra thiết bị, không tiếp tục bài đã Dừng, không đăng lại. Hết thời gian
+báo cáo không dừng app hoặc worker đang xác minh; giữ máy tính/Riviu chạy và điện
+thoại có mạng. Không restart app đang giữ upload chỉ để mở cổng debug.
+
+**Preflight** là bước riêng, có kiểm thiết bị và kết nối Sheet. **Submit** có thể
+đăng thật, chỉ dùng sau khi bạn duyệt đúng nguồn, cặp bài–UDID, số bài và Sheet/tab;
+phải nhập hash xác nhận của chính preflight. Không lấy số máy làm ID. Báo cáo giữ
+đủ roster và danh sách máy không nằm trong yêu cầu, không tự bỏ máy lỗi để đổi mẫu số.
+Xem lệnh và tham số trong [hướng dẫn phát triển](developer-guide.md#nghiệm-thu-publish-qua-ứng-dụng-đang-chạy).
+
+Đọc từng mốc, không gộp thành một dấu thành công:
+
+1. **Enqueued**: đã thấy công việc trong pipeline; chưa chứng minh Đăng.
+2. **Submitted**: receipt đã gửi; chưa chứng minh TikTok cấp link.
+3. **Verified**: backend lưu proof xuất bản và canonical URL; chỉ URL hiện trên dòng
+   hoặc state succeeded cũ không đủ.
+4. **Sheet sent**: backend đã settle delivery, tách khỏi trạng thái bài.
+5. **URL readback**: đối chứng đọc ô Sheet. Harness hiện chưa có IPC đọc lại hàng
+   private/receipt identity, nên báo **unsupported**, không xuất token và không giả
+   xanh. CSV công khai cũng không thay bằng chứng đúng writer/target/epoch.
+
+Mã thoát `2` là còn chờ/hết hạn hoặc ACK chưa rõ; `1` là lỗi/bị chặn; `3` là đã có
+verified + sent nhưng chưa đủ readback bổ sung. `0` của inspect/preflight chỉ nghĩa
+bước đọc/kiểm đầu vào xong, **không** là nghiệm thu post→Sheet. Khi mất ACK tạo, giữ
+nguyên report-dir và requestId đã lưu; kỹ thuật tiếp tục cùng request. Đã có Execute
+intent thì harness không tự gửi Execute lần nữa, kể cả chưa biết backend đã nhận.
+Không xóa intent, tạo thư mục khác hoặc đổi requestId để “thử lại”. Bài pending được
+app kiểm theo lịch hiện có; không đóng TikTok hoặc gửi lại để giải quyết thiếu link.
+
+Canary Rust cũ chỉ dùng cô lập để khảo sát/rehearsal, Sheet tắt và thiếu worker đầy
+đủ; không dùng làm chứng cứ nghiệm thu OAuth end-to-end. Không chạy nó song song
+Riviu trên cùng điện thoại hoặc nhập DB thử vào dữ liệu đang vận hành.
+
 ## Flow
 
 **My Apps → Mở trình thiết kế** mở graph riêng của ứng dụng. Thư viện bước ở bên trái,

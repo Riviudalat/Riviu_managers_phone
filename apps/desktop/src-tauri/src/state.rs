@@ -431,7 +431,7 @@ pub(crate) struct CommandAdmission {
 }
 
 impl CommandAdmissionState {
-    fn new(accepting_work: bool) -> Self {
+    pub(crate) fn new(accepting_work: bool) -> Self {
         Self {
             accepting_work: AtomicBool::new(accepting_work),
             in_flight: AtomicUsize::new(0),

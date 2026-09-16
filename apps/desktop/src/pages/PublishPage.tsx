@@ -17,6 +17,10 @@ import {
   operationGetRun,
   operationListRuns,
   publishCancel,
+  publishCheckLinks,
+  publishRecoveryCapabilities,
+  publishResumeVerification,
+  operationStop,
   publishCreateCampaign,
   publishExecute,
   publishGet,
@@ -55,6 +59,7 @@ import { targetsOf } from "../selectionTargets";
 import type { OperationSourceRef } from "../operationSource";
 import type {
   PublishAssignmentRecord,
+  PublishRecoveryCapability,
   PublishCampaignDetail,
   PublishCampaignRecord,
   PublishFolderManifest,
@@ -231,6 +236,28 @@ function snapshotSheetEnabled(snapshot?: PublishExecutionSnapshot): boolean {
     !Array.isArray(report) &&
     report.sheetEnabled === false
   );
+}
+
+function recoveryReason(reason: string | null | undefined): string | null {
+  if (!reason) return null;
+  const labels: Record<string, string> = {
+    activePipeline: "Chờ các máy còn lại kết thúc lượt chạy",
+    stopInProgress: "Tác vụ đang dừng và nhả máy; hoàn tất Dừng trước khi tiếp tục xác minh",
+    notRetryableBeforePost: "Bài không đủ điều kiện thử lại trước Đăng",
+    notSubmitted: "Bài chưa có bằng chứng đã gửi; không thể tiếp tục xác minh",
+    submissionIdentityMissing: "Thiếu tài khoản hoặc thời điểm của lần Đăng; cần kiểm tra thủ công",
+    operatorStopped: "Người dùng đã dừng kiểm tra; cần xác nhận tiếp tục xác minh",
+    explicitReview: "Bài cần kiểm tra thủ công; không tự gỡ trạng thái cần xử lý",
+    alreadyPending: "Bài đang được xác minh định kỳ; không khởi động lại lượt kiểm tra",
+    alreadyVerified: "Bài đã được xác minh; không đăng lại",
+    revisionChanged: "Trạng thái bài đã thay đổi; tải lại chi tiết trước khi tiếp tục",
+    confirmationRequired: "Cần xác nhận phạm vi chỉ kiểm tra bài đã gửi",
+    assignmentMissing: "Không tìm thấy bài trong lượt đăng",
+    noCandidate: "Không có bài đủ điều kiện kiểm tra liên kết",
+    verificationNeedsReview: "Bài cần kiểm tra thủ công; tự kiểm tra đã dừng",
+    deviceBusy: "Máy đang bận; chờ nhả máy để kiểm tra",
+  };
+  return labels[reason] ?? reason;
 }
 
 function canRetryAssignment(assignment: PublishAssignmentRecord, campaign: PublishCampaignRecord): boolean {
@@ -551,6 +578,8 @@ export function PublishPage({
   const [details, setDetails] = useState<Record<string, PublishCampaignDetail>>(
     {},
   );
+  const [recoveryCapabilities, setRecoveryCapabilities] = useState<Record<string, PublishRecoveryCapability[]>>({});
+  const [recoveryErrors, setRecoveryErrors] = useState<Record<string, string>>({});
   const [detailErrors, setDetailErrors] = useState<Record<string, string>>({});
   const [detailLoading, setDetailLoading] = useState<Record<string, boolean>>(
     {},
@@ -583,22 +612,31 @@ export function PublishPage({
       // instead of calling reconcile again and creating a feedback loop.
       const snapshot = reconcile ? await publishReconcile(campaignId) : null;
       if (!isCurrent()) return;
-      const [detail, projection] = await Promise.all([
+      const [detail, projection, recovery] = await Promise.all([
         publishGet(campaignId),
         operationGetRun(`publish:${campaignId}`)
           .then((operation) => ({ operation, error: null as string | null }))
           .catch((error) => ({ operation: null, error: describeError(error) })),
+        publishRecoveryCapabilities(campaignId)
+          .then(capabilities => ({ capabilities, error: "" }))
+          .catch(error => ({ capabilities: [] as PublishRecoveryCapability[], error: describeError(error) })),
       ]);
       if (!isCurrent()) return;
       if (!detail || detail.campaign.id !== campaignId) throw new Error("Chiến dịch không còn trong dữ liệu hoặc kết quả trả về không khớp.");
       if (projection.operation) setOperations((current) => ({ ...current, [campaignId]: projection.operation!.summary }));
       setOperationError(projection.error);
+      setRecoveryCapabilities(current => ({ ...current, [campaignId]: recovery.capabilities }));
+      setRecoveryErrors(current => ({ ...current, [campaignId]: recovery.error }));
       if (snapshot) setExecutionSnapshots((current) => ({ ...current, [campaignId]: snapshot }));
       setDetails((current) => ({ ...current, [campaignId]: detail }));
       setCampaigns(current => current.some(campaign => campaign.id === campaignId) ? current : [detail.campaign, ...current]);
       setSourceCampaign((current) => current?.id === campaignId ? detail.campaign : current);
     } catch (error) {
-      if (isCurrent()) setDetailErrors((current) => ({ ...current, [campaignId]: describeError(error) }));
+      if (isCurrent()) {
+        setDetailErrors((current) => ({ ...current, [campaignId]: describeError(error) }));
+        setRecoveryCapabilities(current => ({ ...current, [campaignId]: [] }));
+        setRecoveryErrors(current => ({ ...current, [campaignId]: describeError(error) }));
+      }
     } finally {
       if (isCurrent()) setDetailLoading((current) => ({ ...current, [campaignId]: false }));
     }
@@ -627,9 +665,13 @@ export function PublishPage({
     setSourceCampaign(null);
     setSourceError(null);
     setSourceLoading(true);
-    void publishGet(sourceId)
-      .then((detail) => {
+    void Promise.all([publishGet(sourceId), publishRecoveryCapabilities(sourceId)
+      .then(capabilities => ({ capabilities, error: "" }))
+      .catch(error => ({ capabilities: [] as PublishRecoveryCapability[], error: describeError(error) }))])
+      .then(([detail, recovery]) => {
         if (!active) return;
+        setRecoveryCapabilities(current => ({ ...current, [sourceId]: recovery.capabilities }));
+        setRecoveryErrors(current => ({ ...current, [sourceId]: recovery.error }));
         if (!detail || detail.campaign.id !== sourceId)
           throw new Error(
             "Chiến dịch được chọn không còn trong nguồn dữ liệu.",
@@ -1080,8 +1122,23 @@ export function PublishPage({
       } finally {
         setBusy(false);
       }
+      if (snapshot.retryScope === "linkAndSheet") {
+        try {
+          const capabilities = await publishRecoveryCapabilities(campaign.id);
+          setRecoveryCapabilities(current => ({ ...current, [campaign.id]: capabilities }));
+          if (!capabilities.some(item => item.checkLink.allowed)) {
+            setNotice({ tone: "warning", text: recoveryReason(capabilities.find(item => item.checkLink.reason)?.checkLink.reason)
+              ?? "Chưa xác nhận được quyền kiểm tra liên kết; tải lại chi tiết." });
+            return;
+          }
+        } catch (error) {
+          setRecoveryCapabilities(current => ({ ...current, [campaign.id]: [] }));
+          setNotice({ tone: "warning", text: `Chưa đọc được quyền kiểm tra liên kết: ${describeError(error)}` });
+          return;
+        }
+      }
       const confirmed = await requestConfirm({
-        title: "Xác nhận tiếp tục đăng bài?",
+        title: snapshot.retryScope === "linkAndSheet" ? "Kiểm tra liên kết bài đã gửi?" : snapshot.retryScope === "sheetOnly" ? "Ghi lại kết quả lên Sheet?" : "Xác nhận tiếp tục đăng bài?",
         message: `${retryScopeLabel(snapshot.retryScope, snapshotSheetEnabled(snapshot))}. Trạng thái chưa chắc chắn không được tự đăng lại.`,
         confirmLabel: "Tiếp tục",
       });
@@ -1089,6 +1146,29 @@ export function PublishPage({
       setBusy(true);
       setNotice(null);
       try {
+        if (snapshot.retryScope === "linkAndSheet") {
+          const checked = await publishCheckLinks(campaign.id);
+          await reload();
+          await loadCampaignDetail(campaign.id, false);
+          void refreshDeviceGuards();
+          const verified = checked.outcomes.filter(outcome => outcome.verified).length;
+          const pending = checked.outcomes.filter(outcome => outcome.status === "pending").length;
+          const errors = checked.outcomes.flatMap(outcome => outcome.error ? [recoveryReason(outcome.error) ?? outcome.error] : []);
+          const skipped = checked.outcomes.filter(outcome => !outcome.verified && outcome.status !== "pending");
+          const explanations = {
+            busy: "Máy đang bận; chưa kiểm tra được liên kết",
+            stopped: "Lượt xác minh đã dừng; cần tiếp tục xác minh rõ ràng",
+            stale: "Kết quả đã thay đổi; tải lại chi tiết",
+            noCandidate: "Không có bài đủ điều kiện kiểm tra",
+            ineligible: "Bài chưa đủ điều kiện kiểm tra liên kết",
+          };
+          const skippedText = [...new Set(skipped.map(outcome => explanations[outcome.status as keyof typeof explanations] ?? "Chưa xác nhận kết quả kiểm tra"))].join(". ");
+          setNotice({ tone: errors.length || skipped.length || !checked.outcomes.length ? "warning" : "info",
+            text: !checked.outcomes.length ? (recoveryReason(checked.reason) || "Không có bài đủ điều kiện kiểm tra liên kết; xem trạng thái và lý do của từng máy.")
+              : [`${verified} bài đã xác minh liên kết.`, pending ? `${pending} bài đã bấm Đăng, chưa lấy được liên kết xác minh; Riviu tự kiểm tra khi máy rảnh, không đăng lại.${snapshotSheetEnabled(snapshot) ? " Sheet chờ liên kết đã xác minh." : ""}` : "",
+                skippedText, ...errors].filter(Boolean).join(" ") });
+          return;
+        }
         const result = await publishExecute(campaign.id, true);
         setDetails((current) => ({ ...current, [campaign.id]: result.detail }));
         await reload();
@@ -1117,7 +1197,8 @@ export function PublishPage({
   };
 
   const retryAssignment = async (assignment: PublishAssignmentRecord, campaign: PublishCampaignRecord) => {
-    if (publishInFlight.current || operationBusy || !canRetryAssignment(assignment, campaign)) return;
+    if (publishInFlight.current || operationBusy || !canRetryAssignment(assignment, campaign)
+      || !recoveryCapabilities[campaign.id]?.find(item => item.assignmentId === assignment.id)?.retryBeforePost.allowed) return;
     publishInFlight.current = true;
     setBusy(true);
     setNotice(null);
@@ -1141,6 +1222,50 @@ export function PublishPage({
       publishInFlight.current = false;
       setBusy(false);
     }
+  };
+
+  const resumeVerification = async (assignment: PublishAssignmentRecord, capability: PublishRecoveryCapability) => {
+    if (publishInFlight.current || operationBusy || !capability.resumeVerification.allowed) return;
+    publishInFlight.current = true;
+    setBusy(true);
+    try {
+      const confirmed = await requestConfirm({
+        title: "Tiếp tục xác minh bài đã gửi?",
+        message: "Chỉ kiểm tra bài cũ trên máy này và thử lại mỗi 5 phút khi chưa có link. Không đăng lại, không tiếp tục các bài chưa gửi. Quyền đăng bài mới chỉ mở khi có đủ bằng chứng máy đã an toàn.",
+        confirmLabel: "Tiếp tục xác minh", cancelLabel: "Huỷ",
+      });
+      if (!confirmed) return;
+      const result = await publishResumeVerification(assignment.id, true, capability.revision);
+      await reload();
+      await loadCampaignDetail(assignment.campaignId, false);
+      void refreshDeviceGuards();
+      const refused = result.state === "stale" || result.state === "ineligible";
+      setNotice({ tone: refused ? "warning" : "info", text: recoveryReason(result.reason) || (refused
+        ? "Trạng thái bài đã thay đổi hoặc chưa đủ điều kiện xác minh; không khởi động lại Post."
+        : result.state === "alreadyVerified" ? "Bài đã được xác minh; không thực hiện lại Post."
+          : "Đã nhận yêu cầu xác minh bài đã gửi. Khi chưa có link, hệ thống thử lại mỗi 5 phút; không đăng lại.") });
+    } catch (error) { setNotice({ tone: "error", text: describeError(error) }); }
+    finally { publishInFlight.current = false; setBusy(false); }
+  };
+
+  const stopVerification = async (campaign: PublishCampaignRecord) => {
+    if (publishInFlight.current || operationBusy) return;
+    publishInFlight.current = true;
+    setBusy(true);
+    try {
+      const confirmed = await requestConfirm({ title: "Dừng kiểm tra lại?",
+        message: "Dừng các lượt xác minh được tiếp tục trong chiến dịch này. Bài đã gửi và liên kết đã có được giữ nguyên; không đăng lại.",
+        confirmLabel: "Dừng kiểm tra", cancelLabel: "Huỷ" });
+      if (!confirmed) return;
+      const result = await operationStop(`publish:${campaign.id}`);
+      await reload();
+      await loadCampaignDetail(campaign.id, false);
+      void refreshDeviceGuards();
+      setNotice({ tone: result.state === "failed" || result.state === "needsAttention" ? "warning" : "info",
+        text: result.state === "closed" ? "Đã dừng kiểm tra lại; giữ nguyên bài đã gửi." : result.state === "stopping"
+          ? "Đã nhận yêu cầu dừng kiểm tra; đang chờ nhả máy." : "Chưa hoàn tất dừng kiểm tra. Xem trạng thái tác vụ, không gửi lại Post." });
+    } catch (error) { setNotice({ tone: "error", text: describeError(error) }); }
+    finally { publishInFlight.current = false; setBusy(false); }
   };
 
   const toggleCampaignDetail = async (campaign: PublishCampaignRecord) => {
@@ -1371,6 +1496,10 @@ export function PublishPage({
             metas={metas}
             retryCampaign={retryCampaign}
             retryAssignment={retryAssignment}
+            recoveryCapabilities={recoveryCapabilities}
+            recoveryErrors={recoveryErrors}
+            resumeVerification={resumeVerification}
+            stopVerification={stopVerification}
             toggleDetail={toggleCampaignDetail}
             cancel={async (campaign) => {
               setBusy(true);
@@ -1404,6 +1533,10 @@ function CampaignMonitor({
   metas,
   retryCampaign,
   retryAssignment,
+  recoveryCapabilities,
+  recoveryErrors,
+  resumeVerification,
+  stopVerification,
   toggleDetail,
   cancel,
 }: {
@@ -1420,6 +1553,10 @@ function CampaignMonitor({
   metas: Map<string, import("../types").DeviceMeta>;
   retryCampaign: (campaign: PublishCampaignRecord) => Promise<void>;
   retryAssignment: (assignment: PublishAssignmentRecord, campaign: PublishCampaignRecord) => Promise<void>;
+  recoveryCapabilities: Record<string, PublishRecoveryCapability[]>;
+  recoveryErrors: Record<string, string>;
+  resumeVerification: (assignment: PublishAssignmentRecord, capability: PublishRecoveryCapability) => Promise<void>;
+  stopVerification: (campaign: PublishCampaignRecord) => Promise<void>;
   toggleDetail: (campaign: PublishCampaignRecord) => Promise<void>;
   cancel: (campaign: PublishCampaignRecord) => Promise<void>;
 }) {
@@ -1440,6 +1577,11 @@ function CampaignMonitor({
     ? filtered.find(campaign => details[campaign.id])
     : filtered.find(campaign => campaign.id === selectedId);
   const selectedView = selected ? campaignView(selected, operations[selected.id], executionSnapshots[selected.id], details[selected.id]) : null;
+  const selectedRecovery = selected ? recoveryCapabilities[selected.id] : undefined;
+  const checkingLinks = selected && selectedView && (selected.state === "verifying" || needsPublicationReview(selected) || selectedView.retryScope === "linkAndSheet");
+  const linkAllowed = selectedRecovery?.some(item => item.checkLink.allowed) === true;
+  const linkBlockedReason = recoveryReason(selectedRecovery?.find(item => item.checkLink.reason)?.checkLink.reason)
+    ?? "Chưa xác nhận được quyền kiểm tra liên kết; tải lại chi tiết.";
   const name = (campaign: PublishCampaignRecord) => campaign.sourceRoot.split(/[\\/]/).filter(Boolean).at(-1) ?? "Nguồn bài đăng";
   const choose = (campaign: PublishCampaignRecord) => {
     if (selected && selected.id !== campaign.id && (details[selected.id] || detailLoading[selected.id])) void toggleDetail(selected);
@@ -1473,15 +1615,19 @@ function CampaignMonitor({
         {selected && selectedView ? <>
           <div className="publish-monitor-detail-head"><div><h3>Chiến dịch {campaigns.indexOf(selected) + 1}</h3><p>{selected.assignments.length} bài · {name(selected)}</p></div>
             <div className="publish-row-actions">
-              {selectedView.retryScope !== "none" && <button type="button" className="primary" disabled={busy} onClick={() => void retryCampaign(selected)}>{selected.state === "verifying" || needsPublicationReview(selected) ? "Kiểm tra liên kết" : retryActionLabel(selectedView.retryScope, snapshotSheetEnabled(executionSnapshots[selected.id]))}</button>}
+              {selectedView.retryScope !== "none" && <button type="button" className="primary" disabled={busy || detailLoading[selected.id] || (!!checkingLinks && !linkAllowed)} title={checkingLinks && !linkAllowed ? linkBlockedReason : undefined} onClick={() => void retryCampaign(selected)}>{selected.state === "verifying" || needsPublicationReview(selected) ? "Kiểm tra liên kết" : retryActionLabel(selectedView.retryScope, snapshotSheetEnabled(executionSnapshots[selected.id]))}</button>}
+              {recoveryCapabilities[selected.id]?.some(capability => capability.verificationResumed) && <button type="button" className="ghost" disabled={busy} onClick={() => void stopVerification(selected)}>Dừng kiểm tra lại</button>}
               <PublishScheduleRetime key={selected.id} campaign={selected} onSaved={onScheduleChanged}/>
               {CANCELLABLE_STATES.includes(selected.state) && <button type="button" className="ghost" onClick={() => void cancel(selected)}>Huỷ</button>}
               <button type="button" className="ghost" onClick={() => { setSelectedId(null); if (details[selected.id] || detailLoading[selected.id]) void toggleDetail(selected); }}>Ẩn chi tiết máy</button>
             </div>
           </div>
+          {checkingLinks && !linkAllowed && <p role="status">{linkBlockedReason}</p>}
           <CampaignDetail detail={details[selected.id]} error={detailErrors[selected.id]} loading={detailLoading[selected.id] === true}
             snapshot={executionSnapshots[selected.id]} devices={devices} metas={metas} retry={() => void toggleDetail(selected)}
-            busy={busy} retryAssignment={assignment => void retryAssignment(assignment, selected)}/>
+            busy={busy} retryAssignment={assignment => void retryAssignment(assignment, selected)}
+            recoveryCapabilities={recoveryCapabilities[selected.id]} recoveryError={recoveryErrors[selected.id]}
+            resumeVerification={(assignment, capability) => void resumeVerification(assignment, capability)}/>
         </> : <div className="publish-monitor-placeholder"><ListChecks size={30}/><strong>Chọn một chiến dịch để theo dõi</strong><span>Kết quả từng máy, link và ghi chú sẽ hiện tại đây.</span></div>}
       </div>
     </div>
@@ -1504,6 +1650,9 @@ function CampaignDetail({
   retry,
   busy,
   retryAssignment,
+  recoveryCapabilities,
+  recoveryError,
+  resumeVerification,
 }: {
   detail?: PublishCampaignDetail;
   error?: string;
@@ -1514,6 +1663,9 @@ function CampaignDetail({
   retry: () => void;
   busy: boolean;
   retryAssignment: (assignment: PublishAssignmentRecord) => void;
+  recoveryCapabilities?: PublishRecoveryCapability[];
+  recoveryError?: string;
+  resumeVerification: (assignment: PublishAssignmentRecord, capability: PublishRecoveryCapability) => void;
 }) {
   if (!detail && !error && !loading) return null;
   // Current assignment evidence outranks a completed snapshot from before the
@@ -1544,6 +1696,7 @@ function CampaignDetail({
       )}
       {detail && (
         <>
+          {recoveryError && <StatusNotice tone="warning">Chưa đọc được quyền phục hồi: {recoveryError}. Các thao tác phục hồi tạm khóa; tải lại chi tiết để kiểm tra.</StatusNotice>}
           {snapshot && (
             <div className="publish-reconcile-summary">
               <StatusChip
@@ -1610,13 +1763,26 @@ function CampaignDetail({
               {
                 id: "state",
                 label: "Kết quả",
-                render: (assignment: PublishAssignmentRecord) => needsPublicationReview(assignment)
-                  ? <span>Cần kiểm tra bài đăng<p>{publicationReviewReason(assignment.evidenceJson) ?? "Chưa có đủ bằng chứng xác nhận bài; kiểm tra TikTok trước khi tiếp tục."}</p></span>
-                  : <span>{isComposing(assignment) ? "Đang chuẩn bị bài trên TikTok" : PUBLISH_STATE_LABELS[assignment.state] ?? "Trạng thái chưa nhận diện"}{dispatchDetail(assignment) && <p>{dispatchDetail(assignment)}</p>}{verificationDetail(assignment.evidenceJson) && <p>{verificationDetail(assignment.evidenceJson)}</p>}
-                    {canRetryAssignment(assignment, detail.campaign) && <button type="button" disabled={busy || loading}
+                render: (assignment: PublishAssignmentRecord) => {
+                  const capability = recoveryCapabilities?.find(item => item.assignmentId === assignment.id);
+                  const retryable = canRetryAssignment(assignment, detail.campaign);
+                  const retryReason = recoveryReason(capability?.retryBeforePost.reason) ?? "Chưa xác nhận được quyền thử lại; tải lại chi tiết.";
+                  return <span>
+                    {needsPublicationReview(assignment) ? <>Cần kiểm tra bài đăng<p>{publicationReviewReason(assignment.evidenceJson) ?? "Chưa có đủ bằng chứng xác nhận bài; kiểm tra TikTok trước khi tiếp tục."}</p></>
+                      : <>{isComposing(assignment) ? "Đang chuẩn bị bài trên TikTok" : PUBLISH_STATE_LABELS[assignment.state] ?? "Trạng thái chưa nhận diện"}{dispatchDetail(assignment) && <p>{dispatchDetail(assignment)}</p>}{verificationDetail(assignment.evidenceJson) && <p>{verificationDetail(assignment.evidenceJson)}</p>}</>}
+                    <PrePostFailureEvidence assignment={assignment}/>
+                    {retryable && <><button type="button" disabled={busy || loading || !capability?.retryBeforePost.allowed}
                       aria-label={`Thử lại trước khi Đăng · ${deviceDisplayName(devices, metas, assignment.udid)}`}
-                      onClick={() => retryAssignment(assignment)}>Thử lại máy này</button>}
-                  </span>,
+                      onClick={() => retryAssignment(assignment)}>Thử lại máy này</button>
+                      {!capability?.retryBeforePost.allowed && <p>{retryReason}</p>}</>}
+                    {capability?.resumeVerification.allowed && <button type="button" disabled={busy || loading}
+                      aria-label={`Tiếp tục xác minh bài đã gửi · ${deviceDisplayName(devices, metas, assignment.udid)}`}
+                      onClick={() => resumeVerification(assignment, capability)}>Tiếp tục xác minh bài đã gửi</button>}
+                    {capability && !capability.resumeVerification.allowed && capability.resumeVerification.reason && assignment.effectIntent && !capability.verificationResumed
+                      && assignment.state !== "succeeded" && <p>{recoveryReason(capability.resumeVerification.reason)}</p>}
+                    {capability?.verificationResumed && <p role="status">Đã tiếp tục xác minh bài cũ; không mở lại quyền Đăng.</p>}
+                  </span>;
+                },
               },
               {
                 id: "link",
@@ -1740,6 +1906,31 @@ function retryScopeLabel(
     case "none":
       return "Không có bước được phép tự chạy lại";
   }
+}
+
+function PrePostFailureEvidence({ assignment }: { assignment: PublishAssignmentRecord }) {
+  if (assignment.state !== "failedBeforeDispatch") return null;
+  let value: Record<string, unknown>;
+  try {
+    const parsed: unknown = JSON.parse(assignment.evidenceJson ?? "null");
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
+    value = parsed as Record<string, unknown>;
+  } catch { return null; }
+  const message = typeof value.message === "string" ? value.message.slice(0, 2000) : null;
+  const raw = value.selectionDiagnostic;
+  const diagnostic = raw && typeof raw === "object" && !Array.isArray(raw) ? raw as Record<string, unknown> : null;
+  if (!message && !diagnostic) return null;
+  const count = (key: string) => typeof diagnostic?.[key] === "number" && Number.isSafeInteger(diagnostic[key]) && Number(diagnostic[key]) >= 0 ? Number(diagnostic[key]) : null;
+  const expected = count("expectedCount"), selected = count("lastVerifiedCount"), scrolls = count("scrollCount");
+  const reason = typeof diagnostic?.reasonCode === "string" ? diagnostic.reasonCode.slice(0, 120) : null;
+  const stage = typeof diagnostic?.stage === "string" ? diagnostic.stage.slice(0, 80) : null;
+  return <details className="publish-technical-details">
+    <summary>Bằng chứng lỗi trước Đăng</summary>
+    {message && <p>{message}</p>}
+    {selected !== null && expected !== null && <p>Đã xác nhận {selected}/{expected} ảnh{scrolls !== null ? ` · ${scrolls} lần cuộn` : ""}</p>}
+    {reason && <p><code>{stage ? `${stage} · ` : ""}{reason}</code></p>}
+    {diagnostic?.artifactWriteFailed === true && <p>Không lưu đủ artifact; không coi lượt chọn ảnh là thành công.</p>}
+  </details>;
 }
 
 function assignmentRaw(assignment: PublishAssignmentRecord): string {

@@ -30,6 +30,13 @@ export function PublishQuickSetup(p: PublishWizardProps & { blockingReason?: str
   const bundles = p.manifest?.bundles ?? [];
   const visibleBundles = bundles.filter(b => `${b.name} ${p.captions[b.id] ?? b.caption}`.toLocaleLowerCase().includes(query.toLocaleLowerCase()));
   const selected = bundles.filter(b => p.selectedIds.includes(b.id));
+  const captionCounts = new Map<string, number>();
+  for (const bundle of selected) {
+    const caption = (p.captions[bundle.id] ?? bundle.caption).trim().replace(/\s+/g, " ");
+    if (caption) captionCounts.set(caption, (captionCounts.get(caption) ?? 0) + 1);
+  }
+  const duplicateCaptions = [...captionCounts.values()].filter(count => count > 1).reduce((total, count) => total + count, 0);
+  const sourceWarnings = p.manifest?.notices ?? [];
   const active = bundles.find(b => b.id === activeId) ?? selected[0] ?? bundles[0];
   const devices = useMemo(() => orderDevicesByNumber(p.devices, p.metas), [p.devices, p.metas]);
   const selectable = devices.filter(d => d.status === "ready" && p.eligible.includes(d.udid));
@@ -93,6 +100,11 @@ export function PublishQuickSetup(p: PublishWizardProps & { blockingReason?: str
     </div>
     {p.blockingReason && !pendingBlock && <p className="pq-blocking-reason" role="status">{p.blockingReason}</p>}
     {error && <div className="pq-error" role="alert">{error}<button type="button" aria-label="Đóng lỗi" onClick={() => setError("")}><X size={14}/></button></div>}
+    {sourceWarnings.length > 0 && <details className="pq-hint"><summary>Cảnh báo nguồn ({sourceWarnings.length})</summary>
+      <ul>{sourceWarnings.map((warning, index) => <li key={`${warning.path}:${index}`}><span>{warning.message}</span><br/><small style={{ overflowWrap: "anywhere" }}>{warning.path}</small></li>)}</ul>
+      <p>Cảnh báo không sửa dữ liệu nguồn. Bài thiếu đối tác vẫn có thể đăng và ghi link; tên đối tác tương ứng sẽ trống.</p>
+    </details>}
+    {duplicateCaptions > 0 && <p className="pq-hint" role="status">{duplicateCaptions} bài đã chọn có caption trùng. Nếu cùng tài khoản đã đăng nội dung tương tự, việc xác minh có thể lâu hơn; nội dung giữ nguyên và không tự sửa.</p>}
     <div className="pq-columns">
       <section className="pq-library pq-panel" aria-label="Nội dung đăng">
         <header><div><span className="automation-section-kicker">Nguồn đăng</span><h2>Nội dung</h2></div><span>{bundles.length} bài</span></header>

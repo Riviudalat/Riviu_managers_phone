@@ -20,6 +20,10 @@ import {
   publishCancel,
   publishReconcile,
   publishRetryAssignment,
+  publishCheckLinks,
+  publishRecoveryCapabilities,
+  publishResumeVerification,
+  operationStop,
   publishScanFolder,
   publishSheetGetConfig,
   publishSheetCheck,
@@ -198,6 +202,11 @@ vi.mock("../api", () => ({
     preflightCampaign(...(args as [PublishPreflightRequest])),
   publishReadiness: vi.fn(async () => []),
   publishRetryAssignment: vi.fn(async () => undefined),
+  publishCheckLinks: vi.fn(async (campaignId: string) => ({ campaignId, state: "pending", reason: null,
+    outcomes: [{ assignmentId: "assignment", udid: "PHONE-A", verified: false, error: null, status: "pending" }] })),
+  publishRecoveryCapabilities: vi.fn(async () => []),
+  publishResumeVerification: vi.fn(),
+  operationStop: vi.fn(),
   publishReconcile: vi.fn(async (campaignId: string) => ({
     campaignId,
     inputDigest: "approved-digest-1",
@@ -236,6 +245,7 @@ const devices = [iphone("PHONE-A"), iphone("PHONE-B"), iphone("PHONE-C")];
 
 beforeEach(() => {
   vi.mocked(publishList).mockReset().mockResolvedValue([]);
+  vi.mocked(publishGet).mockReset().mockResolvedValue(null);
   HTMLDialogElement.prototype.showModal = function () {
     this.setAttribute("open", "");
   };
@@ -249,6 +259,12 @@ beforeEach(() => {
   vi.mocked(publishGetLimits).mockReset().mockResolvedValue({ transfer: 4, compose: 4, verify: 4, deviceTotal: 8 });
   vi.mocked(publishSetLimits).mockReset().mockResolvedValue(undefined);
   executeCampaign.mockClear();
+  vi.mocked(publishCheckLinks).mockReset().mockImplementation(async campaignId => ({ campaignId, state: "pending", reason: null,
+    outcomes: [{ assignmentId: "assignment", udid: "PHONE-A", verified: false, error: null, status: "pending" }] }));
+  vi.mocked(publishRecoveryCapabilities).mockReset().mockResolvedValue([{ assignmentId: "assignment", revision: 1, verificationResumed: false,
+    checkLink: { allowed: true, reason: null }, resumeVerification: { allowed: false, reason: null }, retryBeforePost: { allowed: false, reason: null } }]);
+  vi.mocked(publishResumeVerification).mockReset();
+  vi.mocked(operationStop).mockReset();
   preflightCampaign.mockClear();
   vi.mocked(publishReconcile)
     .mockReset()
@@ -719,6 +735,8 @@ describe("publish campaign monitoring", () => {
       createdAt: "2026-09-10T00:00:00Z", updatedAt: "2026-09-10T00:00:00Z" };
     const failed = { id: "failed-child", campaignId: campaign.id, udid: "PHONE-A", state: "failedBeforeDispatch", effectIntent: null };
     const pending = { id: "pending-child", campaignId: campaign.id, udid: "PHONE-B", state: "verifying", effectIntent: "post-intent" };
+    vi.mocked(publishRecoveryCapabilities).mockResolvedValue([{ assignmentId: failed.id, revision: 3, verificationResumed: false,
+      checkLink: { allowed: false, reason: null }, resumeVerification: { allowed: false, reason: null }, retryBeforePost: { allowed: true, reason: null } }]);
     vi.mocked(publishList).mockResolvedValue([campaign] as never);
     vi.mocked(publishGet).mockResolvedValue({ campaign, bundles: [], assignments: [failed, pending], events: [] } as never);
     vi.mocked(publishReconcile).mockResolvedValue({ campaignId: campaign.id, inputDigest: "digest", status: "partial",
@@ -870,6 +888,7 @@ describe("publish campaign monitoring", () => {
         updatedAt: campaign.updatedAt,
       },
     ]);
+    vi.mocked(publishGet).mockResolvedValue({ campaign, bundles: [], events: [], assignments: [] } as never);
     vi.mocked(publishReconcile).mockResolvedValue({
       campaignId: campaign.id,
       inputDigest: "digest",
@@ -885,6 +904,7 @@ describe("publish campaign monitoring", () => {
     expect(await screen.findByText("Hoàn tất một phần")).toBeVisible();
     expect(within(screen.getByRole("list", { name: "Chiến dịch đăng bài" })).queryByText("Hoàn tất", { exact: true })).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "Chi tiết máy" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: "Ghi lại Sheet" })).toBeEnabled());
     fireEvent.click(screen.getByRole("button", { name: "Ghi lại Sheet" }));
     await waitFor(() =>
       expect(executeCampaign).toHaveBeenCalledWith(campaign.id, true),
@@ -1042,6 +1062,169 @@ describe("publish campaign monitoring", () => {
     expect(executeCampaign).not.toHaveBeenCalled();
   });
 
+  it("resumes only verification of one stopped assignment and can stop its observers again", async () => {
+    const campaign = { id: "stopped", requestId: "old-request", sourceRoot: "C:/fixture", state: "cancelled",
+      visibility: "public", cleanupPolicy: "keepImportedAssets", assignments: [], createdAt: "2026-09-09T00:00:00Z", updatedAt: "2026-09-09T01:00:00Z" };
+    const assignment = { id: "stopped-child", campaignId: campaign.id, bundleId: "bundle", udid: "PHONE-A", ordinal: 0,
+      state: "uncertain", effectIntent: "durable-post-intent", evidenceJson: JSON.stringify({ verificationStatus: { state: "needsReview", cause: "operatorStopped", reason: "Người dùng đã dừng kiểm tra" } }) };
+    vi.mocked(publishList).mockResolvedValue([campaign] as never);
+    vi.mocked(publishGet).mockResolvedValue({ campaign, bundles: [], events: [], assignments: [assignment] } as never);
+    const capability = { assignmentId: assignment.id, revision: 7, verificationResumed: false,
+      resumeVerification: { allowed: true, reason: null }, checkLink: { allowed: false, reason: "Đã dừng" }, retryBeforePost: { allowed: false, reason: "Bài đã gửi" } };
+    vi.mocked(publishRecoveryCapabilities).mockResolvedValue([capability]);
+    vi.mocked(publishResumeVerification).mockImplementation(async () => {
+      vi.mocked(publishRecoveryCapabilities).mockResolvedValue([{ ...capability, revision: 8, verificationResumed: true, resumeVerification: { allowed: false, reason: "Đang kiểm tra" } }]);
+      return { assignmentId: assignment.id, state: "accepted", reason: null };
+    });
+    vi.mocked(operationStop).mockResolvedValue({ operationId: "publish:stopped", state: "closed", devices: [] });
+    render(<PublishPage devices={devices} selected={[]} onSelectUdids={() => {}} />);
+    fireEvent.click(screen.getByRole("tab", { name: "Theo dõi" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Chi tiết máy" }));
+    fireEvent.click(await screen.findByRole("button", { name: /^Tiếp tục xác minh bài đã gửi/ }));
+    await waitFor(() => expect(publishResumeVerification).toHaveBeenCalledExactlyOnceWith(assignment.id, true, 7));
+    expect(requestConfirm).toHaveBeenCalledWith(expect.objectContaining({ message: expect.stringContaining("Không đăng lại") }));
+    fireEvent.click(await screen.findByRole("button", { name: "Dừng kiểm tra lại" }));
+    await waitFor(() => expect(operationStop).toHaveBeenCalledWith("publish:stopped"));
+    expect(createCampaign).not.toHaveBeenCalled();
+    expect(executeCampaign).not.toHaveBeenCalled();
+    expect(publishRetryAssignment).not.toHaveBeenCalled();
+  });
+
+  it.each(["cancel", "stale", "unreadable"] as const)("keeps stopped recovery safe when confirmation is %s", async outcome => {
+    const campaign = { id: "stopped-safe", requestId: "r", sourceRoot: "C:/fixture", state: "cancelled", assignments: [],
+      createdAt: "2026-09-09T00:00:00Z", updatedAt: "2026-09-09T01:00:00Z" };
+    const assignment = { id: "old-child", campaignId: campaign.id, bundleId: "bundle", udid: "PHONE-A", ordinal: 0,
+      state: "uncertain", effectIntent: "post-intent" };
+    vi.mocked(publishList).mockResolvedValue([campaign] as never);
+    vi.mocked(publishGet).mockResolvedValue({ campaign, bundles: [], events: [], assignments: [assignment] } as never);
+    if (outcome === "unreadable") vi.mocked(publishRecoveryCapabilities).mockRejectedValue(new Error("Capability offline"));
+    else vi.mocked(publishRecoveryCapabilities).mockResolvedValue([{ assignmentId: assignment.id, revision: 3, verificationResumed: false,
+      resumeVerification: { allowed: true, reason: null }, checkLink: { allowed: false, reason: null }, retryBeforePost: { allowed: false, reason: null } }]);
+    vi.mocked(requestConfirm).mockResolvedValue(outcome !== "cancel");
+    vi.mocked(publishResumeVerification).mockResolvedValue({ assignmentId: assignment.id, state: "stale", reason: "Phiên xác minh đã thay đổi" });
+    render(<PublishPage devices={devices} selected={[]} onSelectUdids={() => {}} />);
+    fireEvent.click(screen.getByRole("tab", { name: "Theo dõi" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Chi tiết máy" }));
+    if (outcome === "unreadable") {
+      expect(await screen.findByText(/Chưa đọc được quyền phục hồi/)).toBeVisible();
+      expect(screen.queryByRole("button", { name: /^Tiếp tục xác minh bài đã gửi/ })).toBeNull();
+    } else {
+      const button = await screen.findByRole("button", { name: /^Tiếp tục xác minh bài đã gửi/ });
+      fireEvent.click(button); fireEvent.click(button);
+      if (outcome === "stale") {
+        expect(await screen.findByText("Phiên xác minh đã thay đổi")).toBeVisible();
+        expect(publishResumeVerification).toHaveBeenCalledExactlyOnceWith(assignment.id, true, 3);
+        expect(screen.queryByRole("button", { name: "Dừng kiểm tra lại" })).toBeNull();
+      } else await waitFor(() => expect(button).toBeEnabled());
+    }
+    if (outcome !== "stale") expect(publishResumeVerification).not.toHaveBeenCalled();
+    expect(executeCampaign).not.toHaveBeenCalled();
+    expect(createCampaign).not.toHaveBeenCalled();
+    expect(publishRetryAssignment).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["busy", "Máy đang bận; chưa kiểm tra được liên kết"],
+    ["stopped", "Lượt xác minh đã dừng; cần tiếp tục xác minh rõ ràng"],
+    ["stale", "Kết quả đã thay đổi; tải lại chi tiết"],
+  ] as const)("reports %s link checks without claiming a verification was performed", async (status, message) => {
+    const campaign = { id: "observer-only", requestId: "r", sourceRoot: "C:/fixture", state: "verifying", assignments: [],
+      createdAt: "2026-09-09T00:00:00Z", updatedAt: "2026-09-09T01:00:00Z" };
+    vi.mocked(publishList).mockResolvedValue([campaign] as never);
+    vi.mocked(publishGet).mockResolvedValue({ campaign, bundles: [], events: [], assignments: [] } as never);
+    vi.mocked(publishReconcile).mockResolvedValue({ campaignId: campaign.id, inputDigest: "digest", status: "partial",
+      retryScope: "linkAndSheet", reportJson: { sheetEnabled: true }, updatedAt: campaign.updatedAt });
+    vi.mocked(publishCheckLinks).mockResolvedValue({ campaignId: campaign.id, state: status, outcomes: [
+      { assignmentId: "assignment", udid: "PHONE-A", status, verified: false, error: null },
+    ] });
+    render(<PublishPage devices={devices} selected={[]} onSelectUdids={() => {}} />);
+    fireEvent.click(screen.getByRole("tab", { name: "Theo dõi" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Chi tiết máy" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: "Kiểm tra liên kết" })).toBeEnabled());
+    fireEvent.click(screen.getByRole("button", { name: "Kiểm tra liên kết" }));
+    expect(await screen.findByText(new RegExp(message))).toBeVisible();
+    expect(executeCampaign).not.toHaveBeenCalled();
+  });
+
+  it.each(["denied", "unreadable"] as const)("blocks link checking when recovery capability is %s", async mode => {
+    const campaign = { id: "blocked-check", requestId: "r", sourceRoot: "C:/fixture", state: "verifying", assignments: [],
+      createdAt: "2026-09-09T00:00:00Z", updatedAt: "2026-09-09T01:00:00Z" };
+    vi.mocked(publishList).mockResolvedValue([campaign] as never);
+    vi.mocked(publishGet).mockResolvedValue({ campaign, bundles: [], events: [], assignments: [] } as never);
+    vi.mocked(publishReconcile).mockResolvedValue({ campaignId: campaign.id, inputDigest: "d", status: "partial", retryScope: "linkAndSheet", reportJson: {}, updatedAt: campaign.updatedAt });
+    if (mode === "unreadable") vi.mocked(publishRecoveryCapabilities).mockRejectedValue(new Error("không đọc được"));
+    else vi.mocked(publishRecoveryCapabilities).mockResolvedValue([{ assignmentId: "a", revision: 1, verificationResumed: false,
+      checkLink: { allowed: false, reason: "operatorStopped" }, resumeVerification: { allowed: false, reason: null }, retryBeforePost: { allowed: false, reason: null } }]);
+    render(<PublishPage devices={devices} selected={[]} onSelectUdids={() => {}} />);
+    fireEvent.click(screen.getByRole("tab", { name: "Theo dõi" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Chi tiết máy" }));
+    const check = await screen.findByRole("button", { name: "Kiểm tra liên kết" });
+    expect(check).toBeDisabled();
+    fireEvent.click(check);
+    expect(publishCheckLinks).not.toHaveBeenCalled();
+    expect(executeCampaign).not.toHaveBeenCalled();
+  });
+
+  it("revokes displayed recovery capability after a failed current detail refresh", async () => {
+    let listener!: (event: AppEvent) => void;
+    vi.mocked(listenRiviuEvents).mockImplementationOnce(async callback => { listener = callback; return () => {}; });
+    const campaign = { id: "stale-caps", requestId: "r", sourceRoot: "C:/fixture", state: "cancelled", assignments: [],
+      createdAt: "2026-09-09T00:00:00Z", updatedAt: "2026-09-09T01:00:00Z" };
+    const assignment = { id: "a", campaignId: campaign.id, udid: "PHONE-A", state: "uncertain", effectIntent: "post" };
+    vi.mocked(publishList).mockResolvedValue([campaign] as never);
+    vi.mocked(publishGet).mockResolvedValue({ campaign, bundles: [], events: [], assignments: [assignment] } as never);
+    vi.mocked(publishRecoveryCapabilities).mockResolvedValue([{ assignmentId: "a", revision: 1, verificationResumed: false,
+      checkLink: { allowed: false, reason: null }, resumeVerification: { allowed: true, reason: null }, retryBeforePost: { allowed: false, reason: null } }]);
+    render(<PublishPage devices={devices} selected={[]} onSelectUdids={() => {}} />);
+    fireEvent.click(screen.getByRole("tab", { name: "Theo dõi" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Chi tiết máy" }));
+    expect(await screen.findByRole("button", { name: /^Tiếp tục xác minh bài đã gửi/ })).toBeEnabled();
+    vi.mocked(publishGet).mockRejectedValue(new Error("Đọc chi tiết thất bại"));
+    await act(async () => listener({ type: "publishUpdated", campaignId: campaign.id } as AppEvent));
+    await screen.findByText("Đọc chi tiết thất bại");
+    expect(screen.queryByRole("button", { name: /^Tiếp tục xác minh bài đã gửi/ })).toBeNull();
+    expect(publishResumeVerification).not.toHaveBeenCalled();
+  });
+
+  it("shows the bounded picker evidence for a refusal without declaring success", async () => {
+    const campaign = { id: "picker-failure", requestId: "r", sourceRoot: "C:/fixture", state: "failedBeforeDispatch", assignments: [],
+      createdAt: "2026-09-09T00:00:00Z", updatedAt: "2026-09-09T01:00:00Z" };
+    vi.mocked(publishList).mockResolvedValue([campaign] as never);
+    vi.mocked(publishGet).mockResolvedValue({ campaign, bundles: [], events: [], assignments: [{
+      id: "picker-child", campaignId: campaign.id, bundleId: "bundle", udid: "PHONE-A", ordinal: 0,
+      state: "failedBeforeDispatch", effectIntent: null, evidenceJson: JSON.stringify({ message: "Chưa chứng minh đủ ảnh", selectionDiagnostic: {
+        stage: "scrollReadback", reasonCode: "scrollReadbackUnproven", expectedCount: 14, lastVerifiedCount: 12,
+        scrollCount: 1, snapshotGeneration: 17, snapshotSha256: "abcd", artifactWriteFailed: false,
+      } }),
+    }] } as never);
+    render(<PublishPage devices={devices} selected={[]} onSelectUdids={() => {}} />);
+    fireEvent.click(screen.getByRole("tab", { name: "Theo dõi" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Chi tiết máy" }));
+    fireEvent.click(await screen.findByText("Bằng chứng lỗi trước Đăng"));
+    expect(screen.getByText("Chưa chứng minh đủ ảnh")).toBeVisible();
+    expect(screen.getByText("Đã xác nhận 12/14 ảnh · 1 lần cuộn")).toBeVisible();
+    expect(screen.getByText(/scrollReadbackUnproven/)).toBeVisible();
+    expect(executeCampaign).not.toHaveBeenCalled();
+  });
+
+  it("keeps retry disabled with a backend reason while sibling work is running", async () => {
+    const campaign = { id: "busy-pipeline", requestId: "r", sourceRoot: "C:/fixture", state: "posting", assignments: [],
+      createdAt: "2026-09-09T00:00:00Z", updatedAt: "2026-09-09T01:00:00Z" };
+    const assignment = { id: "failed-child", campaignId: campaign.id, bundleId: "bundle", udid: "PHONE-A", ordinal: 0,
+      state: "failedBeforeDispatch", effectIntent: null };
+    vi.mocked(publishList).mockResolvedValue([campaign] as never);
+    vi.mocked(publishGet).mockResolvedValue({ campaign, bundles: [], events: [], assignments: [assignment] } as never);
+    vi.mocked(publishRecoveryCapabilities).mockResolvedValue([{ assignmentId: assignment.id, revision: 2, verificationResumed: false,
+      resumeVerification: { allowed: false, reason: null }, checkLink: { allowed: false, reason: null },
+      retryBeforePost: { allowed: false, reason: "activePipeline" } }]);
+    render(<PublishPage devices={devices} selected={[]} onSelectUdids={() => {}} />);
+    fireEvent.click(screen.getByRole("tab", { name: "Theo dõi" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Chi tiết máy" }));
+    expect(await screen.findByRole("button", { name: /^Thử lại trước khi Đăng/ })).toBeDisabled();
+    expect(screen.getByText("Chờ các máy còn lại kết thúc lượt chạy")).toBeVisible();
+    expect(publishRetryAssignment).not.toHaveBeenCalled();
+  });
+
   it("shows expired publication as needs review and permits only an explicit link check", async () => {
     const campaign = {
       id: "review-post", requestId: "request", sourceRoot: "C:/fixture", state: "uncertain",
@@ -1074,7 +1257,8 @@ describe("publish campaign monitoring", () => {
     expect(screen.getByText(/Tự kiểm tra đã dừng · chọn Kiểm tra liên kết/)).toBeVisible();
     expect(screen.queryByText("Đang chờ xác minh bài đăng")).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "Kiểm tra liên kết" }));
-    await waitFor(() => expect(executeCampaign).toHaveBeenCalledWith(campaign.id, true));
+    await waitFor(() => expect(publishCheckLinks).toHaveBeenCalledWith(campaign.id));
+    expect(executeCampaign).not.toHaveBeenCalled();
     expect(requestConfirm).toHaveBeenCalledWith(expect.objectContaining({ message: expect.stringContaining("Chỉ tiếp tục lấy liên kết") }));
     expect(createCampaign).not.toHaveBeenCalled();
   });
@@ -1083,6 +1267,7 @@ describe("publish campaign monitoring", () => {
     const campaign = { id: "review-stale", requestId: "r", sourceRoot: "C:/fixture", state: "uncertain",
       errorCode: "post_verification_needs_review", assignments: [], createdAt: "2026-09-09T00:00:00Z", updatedAt: "2026-09-09T01:00:00Z" };
     vi.mocked(publishList).mockResolvedValue([campaign] as never);
+    vi.mocked(publishGet).mockResolvedValue({ campaign, bundles: [], events: [], assignments: [] } as never);
     vi.mocked(operationListRuns).mockResolvedValue([{ id: "publish:review-stale", sourceId: campaign.id, kind: "publish",
       state: "uncertain", retryScope: "linkAndSheet", updatedAt: campaign.updatedAt } as never]);
     vi.mocked(publishReconcile).mockResolvedValue({ campaignId: campaign.id, inputDigest: "digest", status: "uncertain",
@@ -1090,7 +1275,8 @@ describe("publish campaign monitoring", () => {
     render(<PublishPage devices={devices} selected={[]} onSelectUdids={() => {}} />);
     fireEvent.click(screen.getByRole("tab", { name: "Theo dõi" }));
     fireEvent.click(await screen.findByRole("button", { name: "Chi tiết máy" }));
-    fireEvent.click(await screen.findByRole("button", { name: "Kiểm tra liên kết" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: "Kiểm tra liên kết" })).toBeEnabled());
+    fireEvent.click(screen.getByRole("button", { name: "Kiểm tra liên kết" }));
     await screen.findByText(/không có bước nào được phép tự chạy lại/);
     expect(executeCampaign).not.toHaveBeenCalled();
     expect(requestConfirm).not.toHaveBeenCalled();
@@ -1104,6 +1290,7 @@ describe("publish campaign monitoring", () => {
       createdAt: "2026-09-09T00:00:00Z", updatedAt: "2026-09-09T00:01:00Z",
     };
     vi.mocked(publishList).mockResolvedValue([campaign] as never);
+    vi.mocked(publishGet).mockResolvedValue({ campaign, bundles: [], events: [], assignments: [] } as never);
     vi.mocked(operationListRuns).mockResolvedValue([{
       id: `publish:${campaign.id}`, sourceId: campaign.id, kind: "publish", title: "Đăng bài",
       state: "running", targetCount: 1, totalItems: 1, completedItems: 0, issueCount: 0,
@@ -1119,9 +1306,11 @@ describe("publish campaign monitoring", () => {
     expect(publishReconcile).not.toHaveBeenCalled();
     expect(publishGet).not.toHaveBeenCalled();
     fireEvent.click(screen.getByRole("button", { name: "Chi tiết máy" }));
-    expect(await screen.findByRole("button", { name: "Kiểm tra liên kết" })).toBeEnabled();
-    fireEvent.click(await screen.findByRole("button", { name: "Kiểm tra liên kết" }));
-    await waitFor(() => expect(executeCampaign).toHaveBeenCalledWith(campaign.id, true));
+    await waitFor(() => expect(screen.getByRole("button", { name: "Kiểm tra liên kết" })).toBeEnabled());
+    await waitFor(() => expect(screen.getByRole("button", { name: "Kiểm tra liên kết" })).toBeEnabled());
+    fireEvent.click(screen.getByRole("button", { name: "Kiểm tra liên kết" }));
+    await waitFor(() => expect(publishCheckLinks).toHaveBeenCalledWith(campaign.id));
+    expect(executeCampaign).not.toHaveBeenCalled();
     expect(requestConfirm).toHaveBeenCalledWith(expect.objectContaining({ message: expect.stringContaining("Chỉ tiếp tục lấy liên kết") }));
     expect(createCampaign).not.toHaveBeenCalled();
     expect(screen.queryByRole("button", { name: "Chạy lại từ đầu" })).toBeNull();
@@ -1134,6 +1323,7 @@ describe("publish campaign monitoring", () => {
       createdAt: "2026-09-09T00:00:00Z", updatedAt: "2026-09-09T00:01:00Z",
     };
     vi.mocked(publishList).mockResolvedValue([campaign] as never);
+    vi.mocked(publishGet).mockResolvedValue({ campaign, bundles: [], events: [], assignments: [] } as never);
     vi.mocked(operationListRuns).mockResolvedValue([{
       id: `publish:${campaign.id}`, sourceId: campaign.id, kind: "publish", title: "Đăng bài", state: "running",
       targetCount: 1, totalItems: 1, completedItems: 0, issueCount: 0, retryableCount: 1,
@@ -1146,9 +1336,10 @@ describe("publish campaign monitoring", () => {
     render(<PublishPage devices={devices} selected={[]} onSelectUdids={() => {}} />);
     fireEvent.click(screen.getByRole("tab", { name: "Theo dõi" }));
     fireEvent.click(await screen.findByRole("button", { name: "Chi tiết máy" }));
-    fireEvent.click(await screen.findByRole("button", { name: "Kiểm tra liên kết" }));
-    expect(await screen.findByText(/1 bài đã bấm Đăng, đang chờ TikTok hoàn tất/)).toHaveTextContent("Riviu tự kiểm tra khi máy rảnh");
-    expect(screen.getByText(/1 bài đã bấm Đăng, đang chờ TikTok hoàn tất/)).toHaveTextContent("Sheet chờ liên kết đã xác minh.");
+    await waitFor(() => expect(screen.getByRole("button", { name: "Kiểm tra liên kết" })).toBeEnabled());
+    fireEvent.click(screen.getByRole("button", { name: "Kiểm tra liên kết" }));
+    expect(await screen.findByText(/1 bài đã bấm Đăng, chưa lấy được liên kết xác minh/)).toHaveTextContent("Riviu tự kiểm tra khi máy rảnh");
+    expect(screen.getByText(/1 bài đã bấm Đăng, chưa lấy được liên kết xác minh/)).toHaveTextContent("Sheet chờ liên kết đã xác minh.");
     expect(createCampaign).not.toHaveBeenCalled();
   });
 

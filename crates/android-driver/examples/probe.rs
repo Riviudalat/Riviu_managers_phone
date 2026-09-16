@@ -855,18 +855,26 @@ async fn measure_liked_label(ui: &dyn UiSession, labels: TikTokControls) -> anyh
     let now = ui
         .locate(riviu_core::ElementQuery::description_contains(&root))
         .await?;
-    match now.as_ref().and_then(|element| element.description.as_deref()) {
+    let measure_error = match now
+        .as_ref()
+        .and_then(|element| element.description.as_deref())
+    {
         Some(label) if label != not_liked.value() => {
             println!("  LIKED label = {label:?}   <-- add this to TIKTOK_LABEL_SETS");
+            None
         }
-        Some(label) => println!("  label unchanged ({label:?}) — the tap did not register"),
-        None => println!(
-            "  no element contains {root:?} any more; the liked label does not share the verb root, \
-             so dump the tree to read it"
-        ),
+        Some(label) => Some(format!(
+            "label unchanged ({label:?}) — the tap did not register"
+        )),
+        None => Some(format!(
+            "no element contains {root:?} any more; the liked label does not share the verb root"
+        )),
+    };
+    if let Some(error) = &measure_error {
+        println!("  FAILED: {error}");
     }
 
-    // Put it back.
+    // Put it back before reporting either a measurement or restoration failure.
     ui.tap(centre).await?;
     tokio::time::sleep(Duration::from_millis(1_500)).await;
     let restored = ui
@@ -878,11 +886,14 @@ async fn measure_liked_label(ui: &dyn UiSession, labels: TikTokControls) -> anyh
     if restored.is_some() {
         println!("  unliked again — {:?} is back", not_liked.value());
     } else {
-        println!(
-            "  WARNING: {:?} did not come back. The post may still be liked on this account; \
-             check it by hand",
+        anyhow::bail!(
+            "measurement failed ({}) and {:?} did not come back; the post may still be liked",
+            measure_error.as_deref().unwrap_or("measurement completed"),
             not_liked.value()
         );
+    }
+    if let Some(error) = measure_error {
+        anyhow::bail!("{error}");
     }
     Ok(())
 }
@@ -1453,7 +1464,7 @@ async fn measure_comment_list(
     let Some(sample) = confirmed else {
         println!("  ! no comment row on screen to resolve against");
         session.agent().press_key(KEYCODE_BACK).await.ok();
-        return Ok(());
+        anyhow::bail!("no comment row on screen to resolve against");
     };
     println!("  resolving against row text {sample:?}");
     let identity = riviu_core::CommentLocatorIdentity {
@@ -1462,17 +1473,28 @@ async fn measure_comment_list(
         locator_version: "android-hierarchy-v1".into(),
         frame_sha256: "0".repeat(64),
     };
-    match riviu_core::locate_parent_in_elements(&bodies, &reply_boxes, &authors, &identity) {
-        Some(found) => println!(
-            "  RESOLVED author={:?} reply at {:.0},{:.0}",
-            found.identity.author_label, found.reply.x, found.reply.y
-        ),
-        None => println!(
-            "  refused — no unambiguous row for that text ({} bodies, {} replies, {} authors)",
-            bodies.len(),
-            reply_boxes.len(),
-            authors.len()
-        ),
+    let resolved =
+        match riviu_core::locate_parent_in_elements(&bodies, &reply_boxes, &authors, &identity) {
+            Some(found) => {
+                println!(
+                    "  RESOLVED author={:?} reply at {:.0},{:.0}",
+                    found.identity.author_label, found.reply.x, found.reply.y
+                );
+                true
+            }
+            None => {
+                println!(
+                "  refused — no unambiguous row for that text ({} bodies, {} replies, {} authors)",
+                bodies.len(),
+                reply_boxes.len(),
+                authors.len()
+            );
+                false
+            }
+        };
+    if !resolved {
+        session.agent().press_key(KEYCODE_BACK).await.ok();
+        anyhow::bail!("no unambiguous comment row resolved for {sample:?}");
     }
 
     // The read the confirmation polls **after** the tap. It has to find a filled heart in this
@@ -1535,6 +1557,19 @@ async fn like_one_comment_row(
     tokio::time::sleep(Duration::from_millis(2_500)).await;
 
     let source = session.agent().source().await?;
+    let result = like_one_comment_in_source(ui, labels, source).await;
+    session.agent().press_key(KEYCODE_BACK).await.ok();
+    tokio::time::sleep(Duration::from_millis(1_000)).await;
+    result
+}
+
+/// The same row selection, production tap and readback used by the device probe, without
+/// opening or closing the Android drawer, so its public-effect limit can be tested offline.
+async fn like_one_comment_in_source(
+    ui: &dyn UiSession,
+    labels: TikTokControls,
+    source: String,
+) -> anyhow::Result<()> {
     let tree = riviu_core::ui_automation::tree::Tree::parse(riviu_core::HierarchySourceSnapshot {
         generation: 1,
         xml: source.clone(),
@@ -1545,6 +1580,8 @@ async fn like_one_comment_row(
         .collect();
     let size = ui.window_size().await?;
     let stop = std::sync::atomic::AtomicBool::new(false);
+    let mut confirmed_like = false;
+    let mut safe_row_found = false;
 
     for candidate in rows.iter() {
         let text = candidate.text.trim();
@@ -1573,13 +1610,26 @@ async fn like_one_comment_row(
         // a tap on a filled one removes somebody's like. `None` (a state nobody could read) is
         // refused by the policy as well — this skips to a row where the answer can be proved.
         if like.liked != Some(false) {
-            println!("  skipping: {:?} is not a state a tap can be proved from", like.liked);
+            println!(
+                "  skipping: {:?} is not a state a tap can be proved from",
+                like.liked
+            );
             continue;
         }
-        let note =
-            riviu_core::interaction_hierarchy::like_comment_row(ui, labels, size, &stop, Some(&like))
-                .await;
+        safe_row_found = true;
+        let note = riviu_core::interaction_hierarchy::like_comment_row(
+            ui,
+            labels,
+            size,
+            &stop,
+            Some(&like),
+        )
+        .await;
         println!("  LIKE -> {note}");
+        if !note.starts_with("đã tim") {
+            println!("  FAILED: production like confirmation was not successful");
+            break;
+        }
 
         // Read the row straight back, in the same drawer, with the policy's own confirmation
         // query — so what is printed is what the campaign would have recorded. One query, two
@@ -1596,23 +1646,29 @@ async fn like_one_comment_row(
         let near: Vec<String> = icons
             .iter()
             .filter(|icon| {
-                (icon.y - like.element.y).abs() <= 120.0
-                    && (icon.x - like.element.x).abs() <= 120.0
+                (icon.y - like.element.y).abs() <= 120.0 && (icon.x - like.element.x).abs() <= 120.0
             })
             .map(|icon| format!("{:.0},{:.0}", icon.x, icon.y))
             .collect();
         let in_row = icons.iter().any(|icon| {
             (icon.y - like.element.y).abs() <= 24.0 && (icon.x - like.element.x).abs() <= 24.0
         });
+        confirmed_like = in_row;
         println!(
             "  after: filled heart in this row = {in_row} (near: {near:?}, whole screen: {} node(s))",
             icons.len()
         );
+        // A tap has already happened. Missing readback is an uncertain result, not permission
+        // to like another row from the pre-tap snapshot.
         break;
     }
 
-    session.agent().press_key(KEYCODE_BACK).await.ok();
-    tokio::time::sleep(Duration::from_millis(1_000)).await;
+    if !safe_row_found {
+        anyhow::bail!("no comment row with a confirmed not-liked state was found");
+    }
+    if !confirmed_like {
+        anyhow::bail!("comment like was not confirmed in the tapped row");
+    }
     Ok(())
 }
 
@@ -3443,6 +3499,120 @@ async fn measure_frames(serial: &str, apk: &std::path::Path) -> anyhow::Result<(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct CommentHeartSession {
+        taps: parking_lot::Mutex<Vec<riviu_core::TapPoint>>,
+        observations: parking_lot::Mutex<std::collections::VecDeque<Vec<riviu_core::ElementBox>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl UiSession for CommentHeartSession {
+        async fn tap(&self, point: riviu_core::TapPoint) -> anyhow::Result<()> {
+            self.taps.lock().push(point);
+            Ok(())
+        }
+        async fn locate_all(
+            &self,
+            query: riviu_core::ElementQuery<'_>,
+        ) -> anyhow::Result<Vec<riviu_core::ElementBox>> {
+            assert!(matches!(
+                query,
+                riviu_core::ElementQuery::ResourceIdSuffix(":id/i0c")
+            ));
+            Ok(self
+                .observations
+                .lock()
+                .pop_front()
+                .expect("unexpected read"))
+        }
+        async fn window_size(&self) -> anyhow::Result<(f64, f64)> {
+            Ok((1080.0, 2400.0))
+        }
+        async fn swipe(&self, _: riviu_core::SwipeGesture) -> anyhow::Result<()> {
+            unreachable!("liking a comment must not swipe")
+        }
+        async fn type_text(&self, _: &str) -> anyhow::Result<()> {
+            unreachable!("liking a comment must not type")
+        }
+        async fn home(&self) -> anyhow::Result<()> {
+            unreachable!()
+        }
+        async fn find_and_tap(&self, _: &str) -> anyhow::Result<()> {
+            unreachable!()
+        }
+        async fn assert_visible(&self, _: &str) -> anyhow::Result<()> {
+            unreachable!()
+        }
+        fn stream_url(&self) -> Option<String> {
+            None
+        }
+    }
+
+    fn two_not_liked_comment_rows() -> String {
+        let package = "com.ss.android.ugc.trill";
+        format!(
+            r#"<hierarchy>
+<node package="{package}" bounds="[0,850][1080,1080]">
+  <node package="{package}" class="android.widget.Button" text="Alice" content-desc="" bounds="[155,880][600,930]"/>
+  <node package="{package}" class="android.widget.TextView" text="First comment" bounds="[155,940][800,990]"/>
+  <node package="{package}" class="android.widget.TextView" text="Reply" bounds="[242,1010][334,1052]"/>
+  <node package="{package}" class="android.widget.Button" content-desc="Like or undo like" bounds="[819,1000][971,1063]">
+    <node package="{package}" resource-id="{package}:id/hur" bounds="[845,1000][898,1063]"/>
+  </node>
+</node>
+<node package="{package}" bounds="[0,1150][1080,1380]">
+  <node package="{package}" class="android.widget.Button" text="Bob" content-desc="" bounds="[155,1180][600,1230]"/>
+  <node package="{package}" class="android.widget.TextView" text="Second comment" bounds="[155,1240][800,1290]"/>
+  <node package="{package}" class="android.widget.TextView" text="Reply" bounds="[242,1310][334,1352]"/>
+  <node package="{package}" class="android.widget.Button" content-desc="Like or undo like" bounds="[819,1300][971,1363]">
+    <node package="{package}" resource-id="{package}:id/hur" bounds="[845,1300][898,1363]"/>
+  </node>
+</node>
+</hierarchy>"#
+        )
+    }
+
+    fn filled_comment_heart(y: f64) -> riviu_core::ElementBox {
+        riviu_core::ElementBox {
+            x: 845.0,
+            y,
+            width: 53.0,
+            height: 63.0,
+            description: None,
+            enabled: true,
+            clickable: false,
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn missing_secondary_readback_never_likes_a_second_comment() {
+        // Both rows are eligible in the initial source. The shipped policy confirms the first
+        // tap, then the probe's extra read loses the icon. That must not authorize another tap.
+        let session = CommentHeartSession {
+            taps: parking_lot::Mutex::new(Vec::new()),
+            observations: parking_lot::Mutex::new(std::collections::VecDeque::from([
+                vec![filled_comment_heart(1000.0)],
+                vec![],
+                vec![filled_comment_heart(1300.0)],
+                vec![],
+            ])),
+        };
+        let labels = tiktok_labels::controls_for("com.ss.android.ugc.trill", "en", "38.3.2")
+            .expect("measured fleet build");
+
+        let result =
+            like_one_comment_in_source(&session, labels, two_not_liked_comment_rows()).await;
+
+        let taps = session.taps.lock();
+        assert_eq!(taps.len(), 1, "one probe must cause at most one heart tap");
+        assert!((845.0..=898.0).contains(&taps[0].x));
+        assert!((1000.0..=1063.0).contains(&taps[0].y));
+        assert_eq!(session.observations.lock().len(), 2);
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("comment like was not confirmed in the tapped row"));
+    }
 
     /// Every unlabelled rectangle whose centre is right of the shutter, read off
     /// `target/composer-2s.xml` — the camera screen of `com.ss.android.ugc.trill` 38.3.2,

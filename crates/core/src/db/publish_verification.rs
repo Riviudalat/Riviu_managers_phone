@@ -18,6 +18,44 @@ pub struct PendingPublishVerification {
     pub revision: i64,
     pub effect_intent: Option<String>,
     pub evidence_json: Option<String>,
+    /// Exact durable stop marker observed at selection, including legacy markers.
+    pub stop_marker: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PublishRecoveryCapability {
+    pub allowed: bool,
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PublishRecoveryCapabilities {
+    pub assignment_id: String,
+    pub revision: i64,
+    pub check_link: PublishRecoveryCapability,
+    pub resume_verification: PublishRecoveryCapability,
+    pub retry_before_post: PublishRecoveryCapability,
+    pub verification_resumed: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum PublishResumeVerificationState {
+    Accepted,
+    AlreadyPending,
+    AlreadyVerified,
+    Stale,
+    Ineligible,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PublishResumeVerificationResult {
+    pub assignment_id: String,
+    pub state: PublishResumeVerificationState,
+    pub reason: Option<String>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -173,10 +211,60 @@ fn explicitly_resumed_verification(candidate: &PendingPublishVerification) -> bo
         .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
         .is_some_and(|evidence| {
             let marker = &evidence["verificationResume"];
-            marker["version"] == 1
-                && marker["assignmentId"] == candidate.assignment_id
+            let identity_matches = marker["assignmentId"] == candidate.assignment_id
                 && marker["intentSha256"]
-                    == format!("{:x}", sha2::Sha256::digest(intent.as_bytes()))
+                    == format!("{:x}", sha2::Sha256::digest(intent.as_bytes()));
+            identity_matches
+                && ((marker["version"] == 1 && candidate.stop_marker.is_none())
+                    || (marker["version"] == 2
+                        && marker["campaignId"] == candidate.campaign_id
+                        && marker["stopGeneration"].as_str()
+                            == stop_generation(candidate.stop_marker.as_deref()).as_deref()
+                        && marker["authorizationId"]
+                            .as_str()
+                            .is_some_and(|s| Uuid::parse_str(s).is_ok())
+                        && marker["requestedAt"]
+                            .as_str()
+                            .is_some_and(|s| DateTime::parse_from_rfc3339(s).is_ok())))
+        })
+}
+
+fn stop_generation(marker: Option<&str>) -> Option<String> {
+    marker
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
+        .and_then(|v| v["generation"].as_str().map(str::to_owned))
+}
+
+fn stop_marker(conn: &Connection, campaign: &str) -> anyhow::Result<Option<String>> {
+    Ok(conn
+        .query_row(
+            "SELECT value FROM settings WHERE key=?1",
+            [format!("operation.stop.publish:{campaign}")],
+            |r| r.get(0),
+        )
+        .optional()?)
+}
+
+fn observer_authorized(
+    conn: &Connection,
+    candidate: &PendingPublishVerification,
+) -> anyhow::Result<bool> {
+    let marker = stop_marker(conn, &candidate.campaign_id)?;
+    Ok(marker == candidate.stop_marker
+        && (marker.is_none()
+            || (stop_generation(marker.as_deref()).is_some()
+                && explicitly_resumed_verification(candidate))))
+}
+
+fn explicit_non_stop_review(evidence: Option<&str>) -> bool {
+    evidence
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
+        .is_some_and(|v| {
+            let review = &v["verificationStatus"];
+            (review["state"] == "needsReview"
+                && review["cause"] != "operatorStopped"
+                && review["cause"] != "verificationDeadline")
+                || v.get("verificationReviewBeforeStop").is_some()
         })
 }
 
@@ -203,10 +291,289 @@ fn obsolete_deadline_review(intent: Option<&str>, evidence: Option<&str>) -> boo
             })
 }
 
+fn store_idle_observation(
+    conn: &Connection,
+    candidate: &PendingPublishVerification,
+    account: &str,
+    package: &str,
+    snapshot_sha256: &str,
+) -> anyhow::Result<bool> {
+    use sha2::Digest;
+    anyhow::ensure!(
+        snapshot_sha256.len() == 64 && snapshot_sha256.bytes().all(|b| b.is_ascii_hexdigit()),
+        "idle observation hash missing"
+    );
+    let Some(intent) = candidate.effect_intent.as_deref() else {
+        return Ok(false);
+    };
+    let parsed: serde_json::Value = serde_json::from_str(intent)?;
+    let now = Utc::now();
+    if !has_post_intent(Some(intent))
+        || !submission_identity_complete(Some(intent))
+        || parsed["submittedAt"]
+            .as_str()
+            .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
+            .is_none_or(|at| now.signed_duration_since(at) < chrono::Duration::hours(4))
+        || !parsed["expectedAccount"].as_str().is_some_and(|a| {
+            a.trim_start_matches('@')
+                .eq_ignore_ascii_case(account.trim_start_matches('@'))
+        })
+        || parsed["package"].as_str() != Some(package)
+    {
+        return Ok(false);
+    }
+    let evidence: serde_json::Value = candidate
+        .evidence_json
+        .as_deref()
+        .and_then(|s| serde_json::from_str(s).ok())
+        .unwrap_or_default();
+    let proof = serde_json::json!({"assignmentId":candidate.assignment_id,"campaignId":candidate.campaign_id,"udid":candidate.udid,"account":account,"package":package,"observedAt":now.to_rfc3339(),"sourceSha256":snapshot_sha256,"intentSha256":format!("{:x}",sha2::Sha256::digest(intent.as_bytes())),"stopMarker":candidate.stop_marker,"authorizationId":evidence["verificationResume"]["authorizationId"],"observerRevision":candidate.revision});
+    conn.execute("INSERT INTO settings(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",params![format!("publish.idle.{}",candidate.assignment_id),proof.to_string()])?;
+    Ok(true)
+}
+
+fn recovery_row(
+    conn: &Connection,
+    id: &str,
+) -> anyhow::Result<Option<(PendingPublishVerification, String, bool)>> {
+    Ok(conn.query_row("SELECT a.campaign_id,a.bundle_id,a.udid,a.revision,a.effect_intent,a.evidence_json,a.state,c.run_at IS NOT NULL,(SELECT value FROM settings WHERE key='operation.stop.publish:'||a.campaign_id),EXISTS(SELECT 1 FROM publish_pipeline_runs p WHERE p.campaign_id=a.campaign_id) FROM publish_assignments a JOIN publish_campaigns c ON c.id=a.campaign_id WHERE a.id=?1",[id],|r|Ok((PendingPublishVerification {assignment_id:id.into(),campaign_id:r.get(0)?,bundle_id:r.get(1)?,udid:r.get(2)?,revision:r.get(3)?,effect_intent:r.get(4)?,evidence_json:r.get(5)?,scheduled:r.get(7)?,stop_marker:r.get(8)?},r.get(6)?,r.get(9)?))).optional()?)
+}
+
+fn publish_close_pending(conn: &Connection, campaign: &str) -> anyhow::Result<bool> {
+    let result: Option<String> = conn
+        .query_row(
+            "SELECT value FROM settings WHERE key=?1",
+            [format!("operation.stop.result:publish:{campaign}")],
+            |r| r.get(0),
+        )
+        .optional()?;
+    if let Some(result) = result {
+        return Ok(serde_json::from_str::<serde_json::Value>(&result)
+            .ok()
+            .is_none_or(|v| v["state"] != "closed"));
+    }
+    Ok(stop_marker(conn, campaign)?
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+        .is_some_and(|v| v["closePending"] == true))
+}
+
+fn already_pending(
+    conn: &Connection,
+    candidate: &PendingPublishVerification,
+) -> anyhow::Result<bool> {
+    if needs_review(candidate.evidence_json.as_deref()) {
+        return Ok(false);
+    }
+    let current: bool = conn.query_row("SELECT COALESCE(json_extract(request_json,'$.verificationContractVersion')=1,0) FROM publish_campaigns WHERE id=?1",[&candidate.campaign_id],|r|r.get(0))?;
+    Ok(explicitly_resumed_verification(candidate)
+        || (current
+            && candidate.stop_marker.is_none()
+            && has_post_intent(candidate.effect_intent.as_deref())
+            && submission_identity_complete(candidate.effect_intent.as_deref())))
+}
+
+fn resume_refusal(
+    candidate: &PendingPublishVerification,
+    state: &str,
+    active: bool,
+) -> Option<&'static str> {
+    if active {
+        Some("activePipeline")
+    } else if !matches!(state, "verifying" | "uncertain" | "succeeded")
+        || !has_post_intent(candidate.effect_intent.as_deref())
+    {
+        Some("notSubmitted")
+    } else if !submission_identity_complete(candidate.effect_intent.as_deref()) {
+        Some("submissionIdentityMissing")
+    } else if explicit_non_stop_review(candidate.evidence_json.as_deref()) {
+        Some("explicitReview")
+    } else {
+        None
+    }
+}
+
 impl Database {
+    /// Confirmation authorizes observation only, never changes the Post intent or dispatch jobs.
+    pub fn resume_publish_verification(
+        &self,
+        assignment_id: &str,
+        confirmed: bool,
+        expected_revision: i64,
+    ) -> anyhow::Result<PublishResumeVerificationResult> {
+        use PublishResumeVerificationState as State;
+        let result = |state, reason: Option<&str>| PublishResumeVerificationResult {
+            assignment_id: assignment_id.into(),
+            state,
+            reason: reason.map(str::to_owned),
+        };
+        if !confirmed {
+            return Ok(result(State::Ineligible, Some("confirmationRequired")));
+        }
+        let mut conn = self.conn()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let Some((mut candidate, state, active_pipeline)) = recovery_row(&tx, assignment_id)?
+        else {
+            return Ok(result(State::Ineligible, Some("assignmentMissing")));
+        };
+        if evidence_has_post_link(candidate.evidence_json.as_deref()) {
+            return Ok(result(State::AlreadyVerified, None));
+        }
+        if publish_close_pending(&tx, &candidate.campaign_id)? {
+            return Ok(result(State::Ineligible, Some("stopInProgress")));
+        }
+        if candidate.revision != expected_revision {
+            // Lost ACK replay is tied to the exact revision the operator confirmed.
+            let replay = candidate
+                .evidence_json
+                .as_deref()
+                .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
+                .is_some_and(|v| {
+                    v["verificationResume"]["version"] == 2
+                        && v["verificationResume"]["expectedRevision"].as_i64()
+                            == Some(expected_revision)
+                });
+            if replay
+                && explicitly_resumed_verification(&candidate)
+                && !needs_review(candidate.evidence_json.as_deref())
+            {
+                return Ok(result(State::AlreadyPending, None));
+            }
+            return Ok(result(State::Stale, Some("revisionChanged")));
+        }
+        if let Some(reason) = resume_refusal(&candidate, &state, active_pipeline) {
+            return Ok(result(State::Ineligible, Some(reason)));
+        }
+        if already_pending(&tx, &candidate)? {
+            return Ok(result(State::AlreadyPending, None));
+        }
+        let now = Utc::now().to_rfc3339();
+        // Legacy stop markers never grant access; upgrade their generation only after
+        // an explicit confirmation. Keep the stop marker and cancelled campaign intact.
+        if candidate.stop_marker.is_some()
+            && stop_generation(candidate.stop_marker.as_deref()).is_none()
+        {
+            let mut marker = candidate
+                .stop_marker
+                .as_deref()
+                .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
+                .filter(serde_json::Value::is_object)
+                .unwrap_or_else(|| serde_json::json!({}));
+            marker["generation"] = serde_json::json!(Uuid::new_v4().to_string());
+            marker["version"] = serde_json::json!(2);
+            let raw = marker.to_string();
+            tx.execute(
+                "UPDATE settings SET value=?2 WHERE key=?1",
+                params![
+                    format!("operation.stop.publish:{}", candidate.campaign_id),
+                    raw
+                ],
+            )?;
+            candidate.stop_marker = Some(raw);
+        }
+        use sha2::Digest;
+        let mut evidence = candidate
+            .evidence_json
+            .as_deref()
+            .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
+            .filter(serde_json::Value::is_object)
+            .unwrap_or_else(|| serde_json::json!({}));
+        evidence["verificationResume"] = serde_json::json!({"version":2,"assignmentId":assignment_id,"campaignId":candidate.campaign_id,
+            "intentSha256":format!("{:x}",sha2::Sha256::digest(candidate.effect_intent.as_deref().unwrap_or_default().as_bytes())),
+            "stopGeneration":stop_generation(candidate.stop_marker.as_deref()),"authorizationId":Uuid::new_v4().to_string(),"requestedAt":now,"expectedRevision":expected_revision});
+        let attempts = evidence["verificationStatus"]["attempts"]
+            .as_u64()
+            .unwrap_or(0);
+        evidence["verificationStatus"] = serde_json::json!({"state":"pending","cause":"operatorResumed","reasonCode":"operatorResumed","reason":"Tiếp tục xác minh bài đã gửi; không đăng lại","attempts":attempts,"checkIntervalSeconds":VERIFICATION_CHECK_SECONDS,"nextCheckAt":now,"deadlineAt":null});
+        tx.execute("UPDATE publish_assignments SET state='verifying',error_code='post_verification_pending',evidence_json=?2,revision=revision+1,updated_at=?3 WHERE id=?1 AND revision=?4",params![assignment_id,evidence.to_string(),now,expected_revision])?;
+        reconcile_verification_snapshot(&tx, &candidate.campaign_id, &now)?;
+        tx.commit()?;
+        Ok(result(State::Accepted, None))
+    }
+
+    /// Advisory only: mutations repeat these checks under an immediate transaction.
+    pub fn publish_recovery_capabilities(
+        &self,
+        campaign_id: &str,
+    ) -> anyhow::Result<Vec<PublishRecoveryCapabilities>> {
+        let mut conn = self.conn()?;
+        let tx = conn.transaction()?;
+        let ids = tx
+            .prepare("SELECT id FROM publish_assignments WHERE campaign_id=?1 ORDER BY ordinal")?
+            .query_map([campaign_id], |r| r.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let mut capabilities = Vec::new();
+        for id in ids {
+            let Some((candidate, state, active_pipeline)) = recovery_row(&tx, &id)? else {
+                continue;
+            };
+            let resumed = explicitly_resumed_verification(&candidate)
+                && !evidence_has_post_link(candidate.evidence_json.as_deref());
+            let check_reason = if evidence_has_post_link(candidate.evidence_json.as_deref()) {
+                Some("alreadyVerified")
+            } else if candidate.stop_marker.is_some() && !resumed {
+                Some("operatorStopped")
+            } else if !may_verify(
+                &state,
+                candidate.effect_intent.as_deref(),
+                candidate.evidence_json.as_deref(),
+            ) {
+                Some("noCandidate")
+            } else if !submission_identity_complete(candidate.effect_intent.as_deref()) {
+                Some("submissionIdentityMissing")
+            } else {
+                None
+            };
+            // Exact claim_publish_assignment_retry predicate, including the live parent
+            // and assignment job guard; do not make retry look safer than its DB claim.
+            let retry: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM publish_assignments a JOIN publish_campaigns c ON c.id=a.campaign_id WHERE a.id=?1 AND a.state='failed_before_dispatch' AND a.effect_intent IS NULL AND c.state IN ('failed_before_dispatch','verifying','uncertain') AND NOT EXISTS(SELECT 1 FROM publish_pipeline_runs r WHERE r.campaign_id=c.id) AND NOT EXISTS(SELECT 1 FROM publish_dispatch_jobs j WHERE j.assignment_id=a.id AND j.state IN ('running','paused')))",[&id],|r|r.get(0))?;
+            let capability = |reason: Option<&str>| PublishRecoveryCapability {
+                allowed: reason.is_none(),
+                reason: reason.map(str::to_owned),
+            };
+            let resume_reason = if evidence_has_post_link(candidate.evidence_json.as_deref()) {
+                Some("alreadyVerified")
+            } else if publish_close_pending(&tx, &candidate.campaign_id)? {
+                Some("stopInProgress")
+            } else if already_pending(&tx, &candidate)? {
+                Some("alreadyPending")
+            } else {
+                resume_refusal(&candidate, &state, active_pipeline)
+            };
+            capabilities.push(PublishRecoveryCapabilities {
+                assignment_id: id,
+                revision: candidate.revision,
+                check_link: capability(check_reason),
+                resume_verification: capability(resume_reason),
+                retry_before_post: capability(if retry {
+                    None
+                } else if active_pipeline {
+                    Some("activePipeline")
+                } else {
+                    Some("notRetryableBeforePost")
+                }),
+                verification_resumed: resumed,
+            });
+        }
+        Ok(capabilities)
+    }
+
+    /// Arms the durable close barrier in the SAME transaction as observer revocation.
+    /// A crash before the command writes its async result still cannot permit resume.
+    pub fn begin_publish_operation_stop(&self, campaign_id: &str) -> anyhow::Result<Vec<String>> {
+        self.stop_publish_operation_inner(campaign_id, true)
+    }
+
     /// Explicit operator stop: preserve Post intents/receipts, invalidate pending observers,
     /// and park automatic verification. Never make submitted rows retryable for Post.
     pub fn stop_publish_operation(&self, campaign_id: &str) -> anyhow::Result<Vec<String>> {
+        self.stop_publish_operation_inner(campaign_id, false)
+    }
+
+    fn stop_publish_operation_inner(
+        &self,
+        campaign_id: &str,
+        will_close: bool,
+    ) -> anyhow::Result<Vec<String>> {
         let mut conn = self.conn()?;
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let exists: bool = tx.query_row(
@@ -234,7 +601,7 @@ impl Database {
             if !devices.contains(&udid) {
                 devices.push(udid);
             }
-            if state == "succeeded" {
+            if state == "succeeded" && evidence_has_post_link(raw.as_deref()) {
                 continue;
             }
             let mut evidence = raw
@@ -242,8 +609,15 @@ impl Database {
                 .map(serde_json::from_str::<serde_json::Value>)
                 .transpose()?
                 .unwrap_or_else(|| serde_json::json!({}));
+            if explicit_non_stop_review(raw.as_deref())
+                && evidence.get("verificationReviewBeforeStop").is_none()
+            {
+                evidence["verificationReviewBeforeStop"] = evidence["verificationStatus"].clone();
+            }
             evidence["verificationStatus"] = serde_json::json!({"state":"needsReview","cause":"operatorStopped","reasonCode":"operatorStopped","reason":"Người dùng đã dừng tác vụ; giữ kết quả đã đăng, không tự gửi lại","checkedAt":now,"nextCheckAt":null});
-            let next = if intent.is_some()
+            let next = if state == "succeeded" {
+                "succeeded"
+            } else if intent.is_some()
                 || matches!(state.as_str(), "posting" | "verifying" | "uncertain")
             {
                 "uncertain"
@@ -254,7 +628,19 @@ impl Database {
         }
         tx.execute("UPDATE publish_campaigns SET state=CASE WHEN state='succeeded' THEN state ELSE 'cancelled' END,revision=revision+1,updated_at=?2 WHERE id=?1",params![campaign_id,now])?;
         tx.execute("UPDATE publish_dispatch_jobs SET state='cancelled' WHERE campaign_id=?1 AND state='queued'",[campaign_id])?;
-        tx.execute("INSERT INTO settings(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",params![format!("operation.stop.publish:{campaign_id}"),serde_json::json!({"requestedAt":now}).to_string()])?;
+        let result: Option<String> = tx
+            .query_row(
+                "SELECT value FROM settings WHERE key=?1",
+                [format!("operation.stop.result:publish:{campaign_id}")],
+                |r| r.get(0),
+            )
+            .optional()?;
+        let already_closed = result
+            .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+            .is_some_and(|v| v["state"] == "closed");
+        let close_pending =
+            (will_close && !already_closed) || publish_close_pending(&tx, campaign_id)?;
+        tx.execute("INSERT INTO settings(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",params![format!("operation.stop.publish:{campaign_id}"),serde_json::json!({"version":2,"requestedAt":now,"generation":Uuid::new_v4().to_string(),"closePending":close_pending}).to_string()])?;
         tx.commit()?;
         Ok(devices)
     }
@@ -264,6 +650,53 @@ impl Database {
             .get_setting(&format!("operation.stop.publish:{campaign_id}"))?
             .is_some())
     }
+    pub fn publish_verification_is_current(
+        &self,
+        candidate: &PendingPublishVerification,
+    ) -> anyhow::Result<bool> {
+        let conn = self.conn()?;
+        let Some((current, state, _)) = recovery_row(&conn, &candidate.assignment_id)? else {
+            return Ok(false);
+        };
+        Ok(current.campaign_id == candidate.campaign_id
+            && current.revision == candidate.revision
+            && current.effect_intent == candidate.effect_intent
+            && current.evidence_json == candidate.evidence_json
+            && may_verify(
+                &state,
+                current.effect_intent.as_deref(),
+                current.evidence_json.as_deref(),
+            )
+            && observer_authorized(&conn, candidate)?)
+    }
+
+    pub fn observe_stale_publish_idle_for_candidate(
+        &self,
+        candidate: &PendingPublishVerification,
+        account: &str,
+        package: &str,
+        snapshot_sha256: &str,
+    ) -> anyhow::Result<bool> {
+        let mut conn = self.conn()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let Some((current, state, active)) = recovery_row(&tx, &candidate.assignment_id)? else {
+            return Ok(false);
+        };
+        if active
+            || !matches!(state.as_str(), "uncertain" | "verifying")
+            || current.revision != candidate.revision
+            || current.campaign_id != candidate.campaign_id
+            || current.effect_intent != candidate.effect_intent
+            || current.evidence_json != candidate.evidence_json
+            || !observer_authorized(&tx, candidate)?
+        {
+            return Ok(false);
+        }
+        let changed = store_idle_observation(&tx, candidate, account, package, snapshot_sha256)?;
+        tx.commit()?;
+        Ok(changed)
+    }
+
     /// A stale submission is still unresolved, but a fresh own-profile observation
     /// proves this old receipt is no longer an active upload blocking the phone.
     /// This does not settle publication, create a link or reopen its Send claim.
@@ -274,39 +707,22 @@ impl Database {
         package: &str,
         snapshot_sha256: &str,
     ) -> anyhow::Result<bool> {
-        use sha2::Digest;
-        anyhow::ensure!(
-            snapshot_sha256.len() == 64 && snapshot_sha256.bytes().all(|b| b.is_ascii_hexdigit()),
-            "idle observation hash missing"
-        );
-        let conn = self.conn()?;
-        let raw:Option<(String,String,String)>=conn.query_row("SELECT a.udid,a.effect_intent,a.campaign_id FROM publish_assignments a WHERE a.id=?1 AND a.state IN ('uncertain','verifying') AND NOT EXISTS(SELECT 1 FROM publish_pipeline_runs p WHERE p.campaign_id=a.campaign_id)",[assignment_id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional()?;
-        let Some((udid, intent, _campaign)) = raw else {
+        // Compatibility for synchronous callers. Stopped work requires the snapshot
+        // API; callers spanning a device await must never acquire fresh authority here.
+        let mut conn = self.conn()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let Some((candidate, state, active)) = recovery_row(&tx, assignment_id)? else {
             return Ok(false);
         };
-        let parsed: serde_json::Value = serde_json::from_str(&intent)?;
-        let now = Utc::now();
-        let old = parsed["submittedAt"]
-            .as_str()
-            .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
-            .is_some_and(|s| now.signed_duration_since(s) >= chrono::Duration::hours(4));
-        if !old
-            || !parsed["expectedAccount"].as_str().is_some_and(|a| {
-                a.trim_start_matches('@')
-                    .eq_ignore_ascii_case(account.trim_start_matches('@'))
-            })
+        if active
+            || candidate.stop_marker.is_some()
+            || !matches!(state.as_str(), "uncertain" | "verifying")
         {
             return Ok(false);
         }
-        if parsed["package"].as_str().is_some_and(|p| p != package) {
-            return Ok(false);
-        }
-        let observation = serde_json::json!({"assignmentId":assignment_id,"udid":udid,"account":account,"package":package,"observedAt":now.to_rfc3339(),"sourceSha256":snapshot_sha256,"intentSha256":format!("{:x}",sha2::Sha256::digest(intent.as_bytes()))});
-        self.set_setting(
-            &format!("publish.idle.{assignment_id}"),
-            &observation.to_string(),
-        )?;
-        Ok(true)
+        let changed = store_idle_observation(&tx, &candidate, account, package, snapshot_sha256)?;
+        tx.commit()?;
+        Ok(changed)
     }
 
     /// Stamp the first background observation before a submitted assignment becomes visible.
@@ -373,13 +789,13 @@ impl Database {
         let conn = self.conn()?;
         let mut statement = conn.prepare(
             "SELECT a.id,a.campaign_id,a.bundle_id,a.udid,a.revision,a.effect_intent,a.evidence_json,a.state,c.run_at IS NOT NULL,
-             COALESCE(json_extract(c.request_json,'$.verificationContractVersion')=1,0)
+             COALESCE(json_extract(c.request_json,'$.verificationContractVersion')=1,0),
+             (SELECT value FROM settings WHERE key='operation.stop.publish:'||a.campaign_id)
              FROM publish_assignments a JOIN publish_campaigns c ON c.id=a.campaign_id
              LEFT JOIN publish_dispatch_turns t ON t.udid=a.udid
              WHERE a.state IN ('verifying','uncertain','succeeded') AND (?1 IS NULL OR a.campaign_id=?1)
-             AND NOT EXISTS(SELECT 1 FROM settings s WHERE s.key='operation.stop.publish:'||a.campaign_id)
              AND (?2=0 OR json_extract(c.request_json,'$.verificationContractVersion')=1
-                 OR (json_valid(a.evidence_json) AND json_extract(a.evidence_json,'$.verificationResume.version')=1))
+                 OR (json_valid(a.evidence_json) AND json_extract(a.evidence_json,'$.verificationResume.version') IN (1,2)))
              ORDER BY COALESCE(t.last_turn,0),a.updated_at,a.campaign_id,a.ordinal"
         )?;
         let rows = statement.query_map(params![campaign_id, current_contract_only], |row| {
@@ -393,6 +809,7 @@ impl Database {
                     revision: row.get(4)?,
                     effect_intent: row.get(5)?,
                     evidence_json: row.get(6)?,
+                    stop_marker: row.get(10)?,
                 },
                 row.get::<_, String>(7)?,
                 row.get::<_, bool>(9)?,
@@ -404,6 +821,12 @@ impl Database {
         let mut later = Vec::new();
         for row in rows {
             let (candidate, state, current_contract) = row?;
+            if candidate.stop_marker.is_some()
+                && (stop_generation(candidate.stop_marker.as_deref()).is_none()
+                    || !explicitly_resumed_verification(&candidate))
+            {
+                continue;
+            }
             if current_contract_only
                 && !current_contract
                 && !explicitly_resumed_verification(&candidate)
@@ -508,6 +931,15 @@ impl Database {
                             |r| r.get(0),
                         )
                         .optional()?;
+                    let marker = stop_marker(&conn, &campaign_id)?;
+                    let authorization = evidence
+                        .as_deref()
+                        .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
+                        .and_then(|v| {
+                            v["verificationResume"]["authorizationId"]
+                                .as_str()
+                                .map(str::to_owned)
+                        });
                     completed = raw
                         .and_then(|r| serde_json::from_str::<serde_json::Value>(&r).ok())
                         .is_some_and(|o| {
@@ -517,6 +949,8 @@ impl Database {
                             o["assignmentId"] == assignment_id
                                 && o["udid"] == udid
                                 && o["intentSha256"].as_str() == digest.as_deref()
+                                && o["stopMarker"].as_str() == marker.as_deref()
+                                && o["authorizationId"].as_str() == authorization.as_deref()
                                 && o["observedAt"]
                                     .as_str()
                                     .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
@@ -655,6 +1089,8 @@ impl Database {
         };
         if !may_verify(&state, intent.as_deref(), prior.as_deref())
             || intent != candidate.effect_intent
+            || prior != candidate.evidence_json
+            || !observer_authorized(&transaction, candidate)?
         {
             return Ok(false);
         }
@@ -683,7 +1119,12 @@ impl Database {
             || legacy_review
             || (needs_review(prior.as_deref())
                 && !obsolete_deadline_review(intent.as_deref(), prior.as_deref()));
-        if manual && legacy && !review && has_post_intent(intent.as_deref()) {
+        if manual
+            && legacy
+            && !review
+            && has_post_intent(intent.as_deref())
+            && !explicitly_resumed_verification(candidate)
+        {
             use sha2::Digest;
             evidence["verificationResume"] = serde_json::json!({"version":1,"assignmentId":candidate.assignment_id,
                 "intentSha256":format!("{:x}",sha2::Sha256::digest(intent.as_deref().unwrap_or_default().as_bytes())),
@@ -816,7 +1257,11 @@ impl Database {
         let Some((state, intent, prior)) = current else {
             return Ok(false);
         };
-        if !may_verify(&state, intent.as_deref(), prior.as_deref()) {
+        if !may_verify(&state, intent.as_deref(), prior.as_deref())
+            || intent != candidate.effect_intent
+            || prior != candidate.evidence_json
+            || !observer_authorized(&transaction, candidate)?
+        {
             return Ok(false);
         }
         // Verification may run hours later or after a scheduled run. The submitted day

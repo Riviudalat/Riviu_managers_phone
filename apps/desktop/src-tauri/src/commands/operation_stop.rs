@@ -30,6 +30,116 @@ fn key(id: &str) -> String {
     format!("operation.stop.result:{id}")
 }
 
+fn cached_stop_result(
+    db: &riviu_core::db::Database,
+    kind: riviu_core::OperationRunKind,
+    source: &str,
+    operation: &str,
+) -> anyhow::Result<Option<OperationStopResult>> {
+    // Revocation precedes the cached close result: a later resume must not inherit
+    // an earlier stop's authority, but closing devices remains idempotent.
+    if kind == riviu_core::OperationRunKind::Publish {
+        db.begin_publish_operation_stop(source)?;
+    }
+    db.get_setting(&key(operation))?
+        .map(|raw| serde_json::from_str(&raw).map_err(Into::into))
+        .transpose()
+}
+
+fn claim_stop_result(
+    db: &riviu_core::db::Database,
+    kind: riviu_core::OperationRunKind,
+    source: &str,
+    initial: OperationStopResult,
+    active_stops: &parking_lot::Mutex<HashSet<String>>,
+) -> anyhow::Result<(OperationStopResult, bool)> {
+    // One synchronous claim phase. Never use a cached 'stopping' read after the
+    // old closer can drop its active claim; that would spawn a second closer.
+    let mut active = active_stops.lock();
+    if let Some(current) = cached_stop_result(db, kind, source, &initial.operation_id)? {
+        if current.state == "closed" || active.contains(&initial.operation_id) {
+            return Ok((current, false));
+        }
+    }
+    if active.contains(&initial.operation_id) {
+        return Ok((initial, false));
+    }
+    db.set_setting(
+        &key(&initial.operation_id),
+        &serde_json::to_string(&initial)?,
+    )?;
+    active.insert(initial.operation_id.clone());
+    Ok((initial, true))
+}
+
+#[cfg(test)]
+mod recovery_tests {
+    use super::*;
+    #[test]
+    fn stale_stopping_read_cannot_claim_another_closer_after_first_closes() {
+        let path =
+            std::env::temp_dir().join(format!("stop-interleave-{}.db", uuid::Uuid::new_v4()));
+        let db = riviu_core::db::Database::open(&path).unwrap();
+        let raw = rusqlite::Connection::open(&path).unwrap();
+        raw.execute("INSERT INTO publish_campaigns(id,request_id,source_root,request_json,state,created_at,updated_at) VALUES('c','r','fixture','{}','cancelled','now','now')",[]).unwrap();
+        let initial = OperationStopResult {
+            operation_id: "publish:c".into(),
+            state: "stopping".into(),
+            devices: vec![],
+        };
+        db.set_setting(&key("publish:c"), &serde_json::to_string(&initial).unwrap())
+            .unwrap();
+        let stale =
+            cached_stop_result(&db, riviu_core::OperationRunKind::Publish, "c", "publish:c")
+                .unwrap()
+                .unwrap();
+        assert_eq!(stale.state, "stopping");
+        // Deterministic interleaving: A completes and drops its runtime claim after
+        // B's old read; B's actual claim must re-read under the shared gate.
+        db.set_setting(
+            &key("publish:c"),
+            r#"{"operationId":"publish:c","state":"closed","devices":[]}"#,
+        )
+        .unwrap();
+        let active = parking_lot::Mutex::new(HashSet::new());
+        let (current, claimed) = claim_stop_result(
+            &db,
+            riviu_core::OperationRunKind::Publish,
+            "c",
+            initial,
+            &active,
+        )
+        .unwrap();
+        assert!(!claimed, "stale stopping cannot start a second closer");
+        assert_eq!(current.state, "closed");
+        assert!(active.lock().is_empty());
+    }
+
+    #[test]
+    fn cached_closed_stop_revokes_observer_generation_without_reclosing_devices() {
+        let path = std::env::temp_dir().join(format!("stop-recovery-{}.db", uuid::Uuid::new_v4()));
+        let db = riviu_core::db::Database::open(&path).unwrap();
+        let raw = rusqlite::Connection::open(&path).unwrap();
+        raw.execute("INSERT INTO publish_campaigns(id,request_id,source_root,request_json,state,created_at,updated_at) VALUES('c','r','fixture','{}','cancelled','now','now')",[]).unwrap();
+        db.set_setting(
+            "operation.stop.publish:c",
+            "{\"generation\":\"old-observer\"}",
+        )
+        .unwrap();
+        db.set_setting(&key("publish:c"), r#"{"operationId":"publish:c","state":"closed","devices":[{"udid":"phone","closed":true,"message":"previous close"}]}"#).unwrap();
+        let cached =
+            cached_stop_result(&db, riviu_core::OperationRunKind::Publish, "c", "publish:c")
+                .unwrap()
+                .unwrap();
+        assert_ne!(
+            db.get_setting("operation.stop.publish:c").unwrap().unwrap(),
+            "{\"generation\":\"old-observer\"}"
+        );
+        assert_eq!(cached.state, "closed");
+        assert_eq!(cached.devices[0].message, "previous close");
+    }
+}
+
 #[tauri::command]
 pub fn operation_stop_status(
     state: State<'_, AppState>,
@@ -85,27 +195,27 @@ pub async fn operation_stop(
             .collect(),
     };
     // Claim before spawning. Repeated clicks share the current stop request.
-    if let Some(raw) = state.db.get_setting(&key(&operation_id)).map_err(err)? {
-        let current: OperationStopResult = serde_json::from_str(&raw).map_err(err)?;
-        if (current.state == "stopping" && ACTIVE_STOPS.lock().contains(&operation_id))
-            || current.state == "closed"
-        {
-            return Ok(current);
-        }
-    }
-    {
-        let mut active = ACTIVE_STOPS.lock();
-        if active.contains(&operation_id) {
-            return Ok(result);
-        }
+    let (result, claimed) = claim_stop_result(
+        &state.db,
+        detail.summary.kind,
+        &source,
+        result,
+        &ACTIVE_STOPS,
+    )
+    .map_err(err)?;
+    if detail.summary.kind == Kind::Publish {
         state
-            .db
-            .set_setting(
-                &key(&operation_id),
-                &serde_json::to_string(&result).map_err(err)?,
-            )
-            .map_err(err)?;
-        active.insert(operation_id.clone());
+            .events
+            .emit(riviu_core::events::AppEvent::PublishUpdated {
+                campaign_id: source.clone(),
+                revision: state
+                    .db
+                    .publish_campaign_revision(&source)
+                    .unwrap_or_default(),
+            });
+    }
+    if !claimed {
+        return Ok(result);
     }
     let guard = StopGuard(operation_id.clone());
     let initial = result.clone();
@@ -127,9 +237,7 @@ pub async fn operation_stop(
                         state.nurture.stop(&status.udid);
                     }
                 }
-                Kind::Publish => {
-                    state.db.stop_publish_operation(&source).map_err(err)?;
-                }
+                Kind::Publish => {} // Revoked synchronously before reading the cached result.
                 Kind::Interaction => {
                     state.db.cancel_interaction_campaign(&source).map_err(err)?;
                 }

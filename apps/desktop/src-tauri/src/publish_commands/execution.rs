@@ -109,6 +109,7 @@ pub(super) async fn post_one_phone(
             .to_string(),
         ),
     };
+    evidence = attach_selection_diagnostic(&evidence, attempt.selection_diagnostic.as_ref());
     if matches!(outcome, PostOutcome::Submitted(_) | PostOutcome::Unknown(_)) {
         evidence = db
             .with_initial_scheduled_verification(&campaign_id, &assignment.id, &evidence)
@@ -1579,10 +1580,15 @@ impl riviu_core::PublishRuntimePort for DesktopPublishRuntimePort {
         &mut self,
         bundle: &riviu_core::PublishBundle,
     ) -> Result<String, String> {
-        let link =
-            capture_confirmed_assignment_link(&self.db, &self.control, &self.assignment, bundle)
-                .await
-                .map_err(|error| error.to_string())?;
+        let link = capture_confirmed_assignment_link(
+            &self.db,
+            &self.control,
+            &self.assignment,
+            bundle,
+            None,
+        )
+        .await
+        .map_err(|error| error.to_string())?;
         let diagnostic = link.diagnostic;
         let link = riviu_core::tiktok_share::resolve_canonical_post_link(&link.url)
             .await
@@ -1951,6 +1957,7 @@ pub(super) async fn capture_confirmed_assignment_link(
     control: &DeviceControlPlane,
     assignment: &riviu_core::PublishAssignmentRecord,
     bundle: &riviu_core::PublishBundle,
+    observer: Option<&riviu_core::db::PendingPublishVerification>,
 ) -> anyhow::Result<ConfirmedAssignmentLink> {
     anyhow::ensure!(
         matches!(
@@ -2027,12 +2034,14 @@ pub(super) async fn capture_confirmed_assignment_link(
         {
             let snapshot = session.hierarchy_source_snapshot().await?;
             use sha2::Digest;
-            db.observe_stale_publish_idle(
-                &assignment.id,
-                &account,
-                &package,
-                &format!("{:x}", sha2::Sha256::digest(snapshot.xml.as_bytes())),
-            )?;
+            if let Some(observer) = observer {
+                db.observe_stale_publish_idle_for_candidate(
+                    observer,
+                    &account,
+                    &package,
+                    &format!("{:x}", sha2::Sha256::digest(snapshot.xml.as_bytes())),
+                )?;
+            }
         }
         let capture = riviu_core::tiktok_share::capture_submission_link(
             session.as_ref(),
@@ -2289,10 +2298,30 @@ pub(super) enum PostOutcome {
     Unknown(String),
 }
 
+pub(super) fn attach_selection_diagnostic(
+    evidence: &str,
+    diagnostic: Option<&serde_json::Value>,
+) -> String {
+    let Some(diagnostic) = diagnostic else {
+        return evidence.to_owned();
+    };
+    match serde_json::from_str::<serde_json::Value>(evidence) {
+        Ok(mut value) if value.is_object() => {
+            value["selectionDiagnostic"] = diagnostic.clone();
+            value.to_string()
+        }
+        _ => {
+            log::warn!("picker diagnostic not attached: assignment evidence is not an object");
+            evidence.to_owned()
+        }
+    }
+}
+
 pub(super) struct AssignmentPostAttempt {
     outcome: PostOutcome,
     claim_refused: bool,
     final_revision: Option<i64>,
+    selection_diagnostic: Option<serde_json::Value>,
 }
 
 #[cfg(any(test, feature = "diagnostics"))]
@@ -2330,6 +2359,14 @@ async fn post_one_assignment_owned(
     sound_policy: &riviu_core::PublishSoundPolicy,
     run: Option<&riviu_core::db::PublishPipelineRun>,
 ) -> AssignmentPostAttempt {
+    let selection_diagnostic = parking_lot::Mutex::new(None);
+    let diagnostics =
+        |diagnostic: &riviu_core::tiktok_composer::SelectionDiagnostic| match serde_json::to_value(
+            diagnostic,
+        ) {
+            Ok(value) => *selection_diagnostic.lock() = Some(value),
+            Err(error) => log::warn!("picker diagnostic serialization failed: {error}"),
+        };
     let initial_revision = match run {
         Some(_) => match db.publish_assignment_revision(&assignment.id) {
             Ok(revision) => Some(revision),
@@ -2338,6 +2375,7 @@ async fn post_one_assignment_owned(
                     outcome: PostOutcome::NothingPublished(error.to_string()),
                     claim_refused: true,
                     final_revision: None,
+                    selection_diagnostic: None,
                 }
             }
         },
@@ -2347,6 +2385,7 @@ async fn post_one_assignment_owned(
         outcome,
         claim_refused: false,
         final_revision: initial_revision,
+        selection_diagnostic: None,
     };
     let request = match db.publish_campaign_request(campaign_id) {
         Ok(Some(request))
@@ -2571,6 +2610,7 @@ async fn post_one_assignment_owned(
                 defer_link_capture,
                 &mut before_post,
                 &progress,
+                &diagnostics,
             )
             .await
         } else {
@@ -2636,6 +2676,7 @@ async fn post_one_assignment_owned(
         outcome: fold_cleanup_into(action_result, cleanup),
         claim_refused,
         final_revision: initial_revision.map(|r| r + i64::from(effect_claimed)),
+        selection_diagnostic: selection_diagnostic.into_inner(),
     }
 }
 
@@ -3441,9 +3482,10 @@ pub(super) async fn post_through_the_composer(
     defer_link_capture: bool,
     before_post: &mut BeforePublish<'_>,
     progress: &riviu_core::tiktok_composer::PublishProgressObserver<'_>,
+    diagnostics: &(dyn Fn(&riviu_core::tiktok_composer::SelectionDiagnostic) + Send + Sync),
 ) -> PostOutcome {
     use riviu_core::tiktok_composer::{
-        publish_carousel_with_sound_effect_intent_and_progress, CarouselRequest, ComposerPlan,
+        publish_carousel_with_sound_effect_intent_and_diagnostics, CarouselRequest, ComposerPlan,
         ComposerVerdict, Screen,
     };
 
@@ -3596,7 +3638,7 @@ pub(super) async fn post_through_the_composer(
                 caption: &bundle.caption,
                 screen,
             };
-            publish_carousel_with_sound_effect_intent_and_progress(
+            publish_carousel_with_sound_effect_intent_and_diagnostics(
                 session,
                 plan,
                 sound_plan,
@@ -3606,19 +3648,20 @@ pub(super) async fn post_through_the_composer(
                 &stop,
                 &mut record_effect_intent,
                 progress,
+                diagnostics,
             )
             .await
         }
         riviu_core::PublishMediaKind::Video => {
             use riviu_core::tiktok_composer::{
-                publish_video_with_sound_effect_intent_and_progress, VideoRequest,
+                publish_video_with_sound_effect_intent_and_diagnostics, VideoRequest,
             };
             let request = VideoRequest {
                 album: import,
                 caption: &bundle.caption,
                 screen,
             };
-            publish_video_with_sound_effect_intent_and_progress(
+            publish_video_with_sound_effect_intent_and_diagnostics(
                 session,
                 plan,
                 video_plan.expect("video branch resolves its tuple before the first tap"),
@@ -3629,6 +3672,7 @@ pub(super) async fn post_through_the_composer(
                 &stop,
                 &mut record_effect_intent,
                 progress,
+                diagnostics,
             )
             .await
         }

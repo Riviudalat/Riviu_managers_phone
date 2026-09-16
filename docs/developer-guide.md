@@ -407,6 +407,143 @@ bản triển khai cũ chưa hỗ trợ check không được coi là kết nố
 Webhook và token cấu hình theo host; không đóng phiên Google/credential máy phát triển
 vào bộ cài. CI chạy `node --test scripts/test_publish_sheet.mjs`.
 
+### Phục hồi chỉ xác minh trong Theo dõi
+
+`publish_recovery_capabilities(campaignId)` trả quyền và lý do riêng cho `checkLink`,
+`resumeVerification`, `retryBeforePost` theo assignment/revision. UI chỉ hiển thị
+**Tiếp tục xác minh bài đã gửi** khi backend cho phép; nút xác nhận nói rõ chỉ bài
+cũ trên máy đó, không tiếp tục sibling chưa gửi. Mutation gọi
+`publish_resume_verification(assignmentId, confirmed, expectedRevision)`; revision
+cũ hoặc bài không đủ identity trả stale/ineligible, không mở lại đường Post. Backend
+vẫn kiểm quyền tại transaction; capability chỉ hướng dẫn UI, không là giấy phép
+vượt điều kiện khi trạng thái đã đổi.
+
+Resume giữ campaign cancelled, publication/effect intent, jobs và đích Sheet/epoch
+ban đầu. Bài còn thiếu link dùng worker hiện có, `nextCheckAt = checkedAt + 300 giây`,
+không có tổng hạn buộc bỏ bài pending; từng observation vẫn hữu hạn. Gọi lặp không
+reset lịch hoặc gửi lại bài. **Kiểm tra liên kết** gọi `publish_check_links`, không
+`publish_execute`; phản hồi pending/busy/stopped/stale/noCandidate không được coi là
+verified. **Dừng kiểm tra lại** gọi `operation_stop` theo `publish:<campaignId>` để
+dừng quyền quan sát đã tiếp tục trong cả campaign, không chỉ dòng đang xem; các
+receipt và trạng thái cancelled vẫn giữ. Intent đóng phiên được ghi cùng transaction
+thu hồi quyền; resume từ chối `stopInProgress` trong khi kết quả đóng còn stopping,
+needsAttention hoặc failed, kể cả sau restart. Chỉ kết quả closed sau khi các worker
+đóng đã kết thúc mới cho phép resume. Refresh detail/capabilities/guards không được
+tự tạo, Execute hoặc resume. Observation đã lưu needsReview không trả pending và
+không hứa retry định kỳ khi không có nextCheckAt.
+
+Resume không giải guard thiết bị. Khoản chờ Submitted cũ chỉ có thể nhả giữ theo
+policy riêng: đủ ít nhất 4 giờ từ submittedAt, không active pipeline, quan sát mới
+own-profile đúng tài khoản/package và binding intent; idle proof có hiệu lực hữu hạn
+24 giờ. Còn guard khác của cùng máy thì máy vẫn bị giữ. Không lấy tuổi campaign,
+ảnh cũ hoặc việc bấm nút resume thay proof; không xoá stop marker để né admission.
+
+**Thử lại trước khi Đăng** là mutation riêng `publish_retry_assignment`, chỉ cho bài
+failedBeforeDispatch chưa có effect intent và có `retryBeforePost.allowed`. Pipeline
+còn chạy hoặc capability chưa đọc được thì nút bị khoá và hiển thị lý do, không
+nới atomic claim của backend. UI đọc lại trạng thái khi API trả stale/busy thay vì
+gán ready hoặc chuyển sang retry toàn campaign.
+
+Bàn đăng nhanh hiển thị `manifest.notices` cùng đường dẫn bundle/file trong **Cảnh
+báo nguồn**, kể cả cảnh báo thiếu, rỗng hoặc không đọc được file đối tác theo kết quả
+scanner. Cảnh báo caption trùng chỉ xét tập bài đã chọn và caption override hiện
+tại, chuẩn hoá khoảng trắng để so sánh; không sửa caption gốc. Các cảnh báo này tự
+chúng không chặn đăng, không xoá dữ liệu hoặc đổi mapping; lỗi input/preflight thật
+vẫn có quyền chặn. Số cảnh báo là dữ liệu của lần quét, không cố định theo một nguồn.
+Các mô tả này là hợp đồng chức năng, không chứng nhận đã nghiệm thu live trên fleet.
+
+## Nghiệm thu Publish qua ứng dụng đang chạy
+
+`scripts/publish_acceptance.mjs` chỉ nối CDP loopback vào **một WebView Tauri đang
+chạy**, rồi gọi IPC production. Không mở app/browser, không focus/click màn hình,
+không mở driver/ADB, không đọc SQLite hay credential. Cần Node và Playwright đã cài
+trong `apps/desktop/node_modules`. Không bật/restart debug app thứ hai để nghiệm thu
+khi production đang giữ máy. CDP không có sẵn thì dừng; việc chạy script không tự
+cấp quyền tạo thêm lượt public.
+
+| Mode | Hành vi | Điều không thực hiện |
+|---|---|---|
+| `inspect` (mặc định) | Đọc roster + device metadata; nếu có campaign ID/receipt thì đọc `publish_get` | Không preflight, quét nguồn, Sheet check, mở thiết bị hoặc mutate |
+| `preflight` | Kiểm OAuth writer/target/epoch và gọi `publish_preflight`; lưu hash xác nhận | Không create/execute/Post |
+| `submit` | Dùng hash đã duyệt; persist request trước create và intent trước Execute | Không tự replay Execute khi intent đã tồn tại |
+| `observe` | Poll `publish_get` đến hạn báo cáo | Không gọi kiểm link chủ động, retry, resume, terminate hoặc Post |
+
+`publish_sheet_check` có thể lưu cấu hình kết nối đã xác minh và làm network I/O;
+chỉ gọi trong preflight/submit, **không** thuộc inspect read-only. Script không chuẩn
+bị/reset Sheet, đổi writer hay lấy token. OAuth direct phải active và đúng file,
+check phải xác minh đúng gid/epoch, preflight phải có Sheet enabled + target v2.
+Lượt harness mới luôn giữ media (`deleteAfterPublish=false`), nhạc trending pool5;
+đây không phải công cụ sửa caption, lịch hoặc cấu hình fleet.
+
+Ví dụ dưới dùng biến do người vận hành điền từ roster và nguồn đã quét trong UI;
+`$udids` và `$bundleIds` là chuỗi ID phân cách dấu phẩy **cùng thứ tự một-một**, không
+phải số máy hoặc index. `$reportDir` dành riêng cho một lượt. Đọc hết `report.json`,
+đặc biệt `roster.excluded`/issues, trước khi duyệt. Script không thu nhỏ tập khi một
+máy bị chặn. Số máy lấy từ metadata, thiếu thì `null`, không đoán theo vị trí.
+
+```powershell
+# Chỉ đọc ứng dụng hiện có; port phải là CDP loopback đã được phép.
+node scripts/publish_acceptance.mjs --report-dir $reportDir --udids $udids --cdp $cdp
+
+# Có đọc thiết bị/network qua AppState production; không tạo bài.
+node scripts/publish_acceptance.mjs --mode preflight --report-dir $reportDir --udids $udids --source $source --bundle-ids $bundleIds --sheet-id $sheetId --sheet-gid $sheetGid --cdp $cdp
+
+# CHỈ sau khi phạm vi/nội dung/số bài được người vận hành cho phép đăng public.
+# $confirmation là đúng hash report.confirmation từ preflight trên.
+node scripts/publish_acceptance.mjs --mode submit --report-dir $reportDir --udids $udids --source $source --bundle-ids $bundleIds --sheet-id $sheetId --sheet-gid $sheetGid --cdp $cdp --confirm $confirmation
+
+# Quan sát bài đã gửi; hết hạn báo cáo không dừng worker của app.
+node scripts/publish_acceptance.mjs --mode observe --report-dir $reportDir --udids $udids --campaign-id $campaignId --cdp $cdp --wait-seconds 600 --poll-seconds 10
+
+# Test local, mock duy nhất biên IPC; không nối app hoặc thiết bị.
+node --test scripts/publish_acceptance.test.mjs
+```
+
+`--cdp` mặc định `http://127.0.0.1:9277`, chỉ nhận IP loopback/cổng. Nếu có nhiều
+WebView, thêm `--page-url` đúng URL loopback và giữ giá trị ấy ở cả preflight/submit.
+Không truyền lệnh IPC tùy ý. `--wait-seconds` chỉ dành observe (0–86400); poll 5–3600
+giây chỉ đọc metadata, **không đổi nhịp verifier 300 giây**. Observe cần đúng danh sách
+UDID của toàn campaign; thiếu/dư assignment là scope mismatch, không báo pass.
+
+Intent ghi exclusive + fsync trước IPC. `create-intent.json` giữ UUID requestId,
+fingerprint toàn request và confirmation; mất ACK create thì chạy lại **cùng submit,
+cùng thư mục, cùng hash** để backend trả receipt cũ. Không đổi ID hoặc sửa/xóa intent.
+Có `execute-intent.json` thì submit sau chỉ đọc campaign, kể cả process chết trước
+khi biết Execute đã tới backend hay chưa. Khi chưa có intent local nhưng backend
+đã có effect/dispatch hoặc campaign/assignment không còn queued/ready, harness cũng
+chỉ observe, không Execute dựa vào việc mất file local. Trường hợp này có thể chưa được enqueued:
+đối chiếu trong app, không tự phát lại lệnh. Report directory có lock chống chạy
+đồng thời; lock còn sau crash cần kiểm tiến trình đã kết thúc trước khi người vận
+hành gỡ lock, không gỡ intent. Không dùng report directory khác để né bảo vệ.
+
+Báo cáo phân biệt `enqueued`, receipt `submitted`, `publicationVerified` + canonical
+URL, `sheetSent` từ settlement backend và `urlReadback`. URL trần hoặc state succeeded
+không thay proof. `publish_get` chưa trả receipt identity writer/target/epoch hay ô
+Sheet đọc lại cho harness; vì vậy **URL readback bổ sung hiện là unsupported**, kể
+cả bảng public. Không trích token để đọc bảng private. CSV chỉ là đối chứng URL,
+không thay bằng chứng delivery writer. Harness hiện không chứng nhận end-to-end xanh.
+
+| Exit | Ý nghĩa |
+|---|---|
+| `0` | Inspect không có campaign hoặc preflight đạt; **không** là bài đã đăng/Sheet đã ghi |
+| `1` | Bị chặn/lỗi, sai scope, review, cancelled, failed hoặc superseded |
+| `2` | Còn pending/hết hạn quan sát hoặc ACK create chưa rõ; không retry Post |
+| `3` | Backend báo tất cả verified + Sheet sent nhưng thiếu readback bổ sung/receipt identity |
+
+Canary Rust `publish_commands/live_canary.rs` là **scout cô lập**, dùng DB scratch,
+Sheet disabled, không có verifier/Sheet worker đầy đủ. Không dùng làm nghiệm thu
+OAuth. Mode `publish-one`/`link-only` cũ bị từ chối trước tạo driver; inspect/rehearse/
+scout cần `RIVIU_PUBLISH_CANARY_ISOLATED=confirmed-no-production-owner`, cùng
+`RIVIU_PUBLISH_UDID`, `RIVIU_PUBLISH_HANDLE`, `RIVIU_PUBLISH_BUNDLE`, nguồn và thư mục
+report riêng. Đây là xác nhận do người vận hành chịu trách nhiệm, không phải phép
+dò chứng minh máy rảnh; không chạy song song production trên cùng máy.
+Canary không còn dispatcher công khai hoặc unconditional terminate TikTok; link-scout
+mở warm session, không dùng cold-start cho bài đã gửi. Scout trước Post vẫn dùng
+chuẩn bị phiên publish nên chỉ dành máy cô lập đã xác nhận không có upload; rehearsal
+chỉ dọn media khi kết quả chắc chắn chưa đăng, còn uncertain thì giữ. Khi kết thúc
+chỉ nhả session/process do nó sở hữu, không tự kết luận upload đã xong. Không chuyển
+DB canary vào production hay lấy credential production cho canary.
+
 ## Bộ cài Windows
 
 Binaries chẩn đoán cần feature `diagnostics`; checker cần `deployment-check` và được
@@ -493,8 +630,10 @@ phạm vi. Không bỏ một cổng vì unit của ngôn ngữ khác đã xanh.
 5. Xem screenshot desktop/laptop, kiểm tra keyboard/focus/contrast/scroll; không chấp nhận snapshot lỗi làm chuẩn.
 6. Cập nhật hướng dẫn sản phẩm hoặc README khi hành vi người dùng đổi. Đọc lại artifact trước bàn giao.
 
-Không chạy harness song song desktop trên cùng USB. Thao tác công khai/cài app/chuyển
-nội dung không thuộc smoke điều hướng read-only. Số lượng test và kết quả live là số
+Không chạy harness **có driver/control plane riêng** song song desktop trên cùng USB.
+Harness Publish qua IPC ở trên dùng chính AppState của desktop, không phải ngoại lệ
+cho phép mở driver thứ hai. Thao tác công khai/cài app/chuyển nội dung không thuộc
+smoke điều hướng read-only. Số lượng test và kết quả live là số
 đo của một lần chạy, không chép thành năng lực tuyệt đối.
 
 ## Hội thoại theo phiên

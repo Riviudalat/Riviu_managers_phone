@@ -703,6 +703,126 @@ fn validate_publish_media_shape(entries: &[std::path::PathBuf]) -> anyhow::Resul
     Ok(())
 }
 
+/// Device text is untrusted. Redact credential-bearing lines before bounding, and flatten
+/// controls so one command cannot forge subsequent log entries. Do not log host source paths.
+fn diagnostic_excerpt(text: &str) -> String {
+    let mut result = String::new();
+    for line in text.lines() {
+        let lower = line.to_ascii_lowercase();
+        let sensitive = [
+            "authorization",
+            "bearer ",
+            "token",
+            "password",
+            "secret",
+            "cookie",
+            "://",
+        ]
+        .iter()
+        .filter_map(|key| lower.find(key))
+        .min();
+        let safe = sensitive.map_or(line, |end| &line[..end]);
+        for ch in safe.chars().filter(|c| !c.is_control()) {
+            if result.len() + ch.len_utf8() > 512 {
+                return result;
+            }
+            result.push(ch);
+        }
+        if sensitive.is_some() && result.len() + 10 <= 512 {
+            result.push_str("[redacted]");
+        }
+        if result.len() < 512 {
+            result.push(' ');
+        }
+        if result.len() >= 512 {
+            break;
+        }
+    }
+    result.trim().to_string()
+}
+
+fn command_reason(text: &str, fallback: &'static str) -> &'static str {
+    let lower = text.to_ascii_lowercase();
+    if lower.contains("timed out") || lower.contains("timeout") {
+        "timeout"
+    } else if lower.contains("device offline")
+        || lower.contains("device not found")
+        || (lower.contains("error: device '") && lower.contains("' not found"))
+        || lower.contains("no devices/emulators found")
+    {
+        "offline"
+    } else if lower.contains("unauthorized") {
+        "unauthorized"
+    } else {
+        fallback
+    }
+}
+
+fn checked_readback_output(
+    remote: &str,
+    operation: &str,
+    result: anyhow::Result<crate::adb::ShellOutput>,
+) -> anyhow::Result<crate::adb::ShellOutput> {
+    let output = result.map_err(|error| {
+        // AdbProgram's Err contains timeout/spawn context, not stdout/stderr. Preserve every
+        // cause in sanitized form rather than attaching an unbounded secret-bearing source.
+        let chain = format!("{error:#}");
+        anyhow!(
+            "publish transfer operation={operation} path={} reason={} cause={}",
+            diagnostic_excerpt(remote),
+            command_reason(&chain, "transportError"),
+            diagnostic_excerpt(&chain)
+        )
+    })?;
+    anyhow::ensure!(
+        output.exit_code == 0,
+        "publish transfer operation={operation} path={} reason={} exit={} stdout={} stderr={}",
+        diagnostic_excerpt(remote),
+        command_reason(&format!("{} {}", output.stderr, output.stdout), "exitError"),
+        output.exit_code,
+        diagnostic_excerpt(&output.stdout),
+        diagnostic_excerpt(&output.stderr)
+    );
+    Ok(output)
+}
+
+// Readback seam: the stage path and injected transport tests execute these same gates.
+async fn verify_staged_file<F, Fut>(
+    remote: &str,
+    expected: u64,
+    local_sha: &str,
+    mut read: F,
+) -> anyhow::Result<u64>
+where
+    F: FnMut(String) -> Fut,
+    Fut: std::future::Future<Output = anyhow::Result<crate::adb::ShellOutput>>,
+{
+    let output = checked_readback_output(remote, "wc", read(format!("wc -c < {remote}")).await)?;
+    let size = output.stdout.trim().parse::<u64>().with_context(|| {
+        format!(
+            "publish transfer operation=wc path={} reason=stdoutMalformed stdout={} stderr={}",
+            diagnostic_excerpt(remote),
+            diagnostic_excerpt(&output.stdout),
+            diagnostic_excerpt(&output.stderr)
+        )
+    })?;
+    anyhow::ensure!(size == expected,
+        "publish transfer operation=wc path={} reason=sizeMismatch expected={expected} observed={size} stdout={} stderr={}",
+        diagnostic_excerpt(remote), diagnostic_excerpt(&output.stdout), diagnostic_excerpt(&output.stderr));
+    let output = checked_readback_output(
+        remote,
+        "sha256sum",
+        read(format!("sha256sum {remote}")).await,
+    )?;
+    let device_sha = parse_sha256sum(&output.stdout).ok_or_else(|| anyhow!(
+        "publish transfer operation=sha256sum path={} reason=stdoutMalformed stdout={} stderr={}",
+        diagnostic_excerpt(remote), diagnostic_excerpt(&output.stdout), diagnostic_excerpt(&output.stderr)))?;
+    anyhow::ensure!(device_sha == local_sha,
+        "publish transfer operation=sha256sum path={} reason=hashMismatch expected={local_sha} observed={device_sha} stdout={} stderr={}",
+        diagnostic_excerpt(remote), diagnostic_excerpt(&output.stdout), diagnostic_excerpt(&output.stderr));
+    Ok(size)
+}
+
 pub async fn stage(
     adb: &AdbProgram,
     serial: &str,
@@ -763,29 +883,16 @@ pub async fn stage(
         .with_context(|| format!("push {} to {remote}", path.display()))?;
 
         // The push's own success is not evidence. Read both back.
-        let size = adb
-            .shell(serial, &format!("wc -c < {remote}"))
-            .await
-            .context("read back the staged size")?
-            .trim()
-            .parse::<u64>()
-            .unwrap_or_default();
-        anyhow::ensure!(
-            size == bytes.len() as u64,
-            "{remote} is {size} bytes on the device, {} locally",
-            bytes.len()
-        );
-        let device_sha = adb
-            .shell(serial, &format!("sha256sum {remote}"))
-            .await
-            .context("read back the staged sha256")
-            .ok()
-            .and_then(|stdout| parse_sha256sum(&stdout))
-            .ok_or_else(|| anyhow!("could not read a sha256 for {remote}"))?;
-        anyhow::ensure!(
-            device_sha == local_sha,
-            "{remote} hashes {device_sha} on the device, {local_sha} locally"
-        );
+        let size = verify_staged_file(
+            &remote,
+            bytes.len() as u64,
+            &local_sha,
+            |script| async move {
+                adb.shell_output(serial, &script, crate::adb::DEFAULT_TIMEOUT)
+                    .await
+            },
+        )
+        .await?;
         staged.push(StagedFile {
             name: safe,
             bytes: size,
@@ -1281,6 +1388,202 @@ async fn rows_under_collection(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn readback_output(
+        code: i32,
+        stdout: &str,
+        stderr: &str,
+    ) -> anyhow::Result<crate::adb::ShellOutput> {
+        Ok(crate::adb::ShellOutput {
+            exit_code: code,
+            stdout: stdout.into(),
+            stderr: stderr.into(),
+        })
+    }
+
+    // Removing the command/parse distinction or dropping the original SHA cause breaks this.
+    #[tokio::test]
+    async fn stage_readback_failures_keep_operation_cause_and_never_invent_measurements() {
+        for (operation, response, reason, detail) in [
+            (
+                "wc",
+                readback_output(0, "garbled", "wc warning"),
+                "stdoutMalformed",
+                "garbled",
+            ),
+            (
+                "wc",
+                readback_output(1, "", "wc: Permission denied"),
+                "exitError",
+                "Permission denied",
+            ),
+            (
+                "sha256sum",
+                Err(anyhow!("adb shell timed out after 15s").context("run adb shell")),
+                "timeout",
+                "timed out",
+            ),
+            (
+                "sha256sum",
+                readback_output(1, "", "error: device offline"),
+                "offline",
+                "device offline",
+            ),
+            (
+                "sha256sum",
+                readback_output(1, "", "error: device 'fixture' not found"),
+                "offline",
+                "not found",
+            ),
+            (
+                "wc",
+                readback_output(1, "", "error: device unauthorized"),
+                "unauthorized",
+                "device unauthorized",
+            ),
+            (
+                "wc",
+                Err(
+                    anyhow!("The system cannot find the file specified (os error 2)")
+                        .context("run adb shell"),
+                ),
+                "transportError",
+                "os error 2",
+            ),
+            (
+                "sha256sum",
+                readback_output(0, "bad hash", "sha warning"),
+                "stdoutMalformed",
+                "bad hash",
+            ),
+        ] {
+            let mut responses = std::collections::VecDeque::new();
+            if operation == "sha256sum" {
+                responses.push_back(readback_output(0, "7\n", ""));
+            }
+            responses.push_back(response);
+            let mut commands = Vec::new();
+            let error = verify_staged_file(
+                "/sdcard/Pictures/.riviu-publish/run/01.jpg",
+                7,
+                &"a".repeat(64),
+                |script| {
+                    commands.push(script);
+                    std::future::ready(responses.pop_front().expect("no retries"))
+                },
+            )
+            .await
+            .unwrap_err();
+            let text = format!("{error:#}");
+            assert!(text.contains(reason), "{operation}: {text}");
+            assert!(text.contains(detail), "{text}");
+            assert!(
+                text.contains("01.jpg") && text.contains(operation),
+                "{text}"
+            );
+            assert!(
+                !text.contains("observed=0"),
+                "unreadable is not zero: {text}"
+            );
+            assert_eq!(commands.len(), if operation == "wc" { 1 } else { 2 });
+            assert_eq!(
+                commands[0],
+                "wc -c < /sdcard/Pictures/.riviu-publish/run/01.jpg"
+            );
+            if operation == "sha256sum" {
+                assert_eq!(
+                    commands[1],
+                    "sha256sum /sdcard/Pictures/.riviu-publish/run/01.jpg"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn stage_readback_mismatches_still_fail_and_exact_proof_passes() {
+        for (size, hash, reason) in [
+            (6, 'a', Some("sizeMismatch")),
+            (7, 'b', Some("hashMismatch")),
+            (7, 'a', None),
+        ] {
+            let mut calls = 0;
+            let result = verify_staged_file(
+                "/sdcard/Pictures/.riviu-publish/run/01.jpg",
+                7,
+                &"a".repeat(64),
+                |script| {
+                    calls += 1;
+                    std::future::ready(if script.starts_with("wc -c < ") {
+                        readback_output(0, &size.to_string(), "")
+                    } else {
+                        assert!(script.starts_with("sha256sum "));
+                        readback_output(0, &format!("{}  01.jpg", hash.to_string().repeat(64)), "")
+                    })
+                },
+            )
+            .await;
+            if let Some(reason) = reason {
+                let text = format!("{:#}", result.unwrap_err());
+                assert!(text.contains(reason), "{text}");
+                assert!(
+                    text.contains("expected=") && text.contains("observed="),
+                    "{text}"
+                );
+            } else {
+                assert_eq!(result.unwrap(), 7);
+            }
+            assert_eq!(calls, if size == 6 { 1 } else { 2 });
+        }
+    }
+
+    #[tokio::test]
+    async fn stage_readback_evidence_is_bounded_sanitized_and_retains_both_streams() {
+        let mut calls = 0;
+        let error = verify_staged_file(
+            "/sdcard/Pictures/.riviu-publish/run/01.jpg",
+            7,
+            &"a".repeat(64),
+            |_| {
+                calls += 1;
+                std::future::ready(readback_output(
+                    1,
+                    "wc failed\u{1b}[31m\nAuthorization: Bearer private-token",
+                    &format!("Permission denied token=private-token {}", "x".repeat(4000)),
+                ))
+            },
+        )
+        .await
+        .unwrap_err();
+        let text = format!("{error:#}");
+        assert!(
+            text.contains("stdout=") && text.contains("stderr="),
+            "{text}"
+        );
+        assert!(
+            text.contains("wc failed") && text.contains("Permission denied"),
+            "{text}"
+        );
+        assert!(
+            !text.contains("private-token") && !text.contains('\u{1b}'),
+            "{text}"
+        );
+        assert!(text.len() < 1800, "{}", text.len());
+        assert_eq!(calls, 1);
+    }
+
+    #[tokio::test]
+    async fn stage_readback_sanitizes_unicode_without_slicing_at_a_non_character_boundary() {
+        let result = verify_staged_file(
+            "/sdcard/Pictures/.riviu-publish/run/01.jpg",
+            7,
+            &"a".repeat(64),
+            |_| std::future::ready(readback_output(1, "", "İtoken=private-value")),
+        )
+        .await;
+        let detail = result.unwrap_err().to_string();
+        assert!(detail.contains("exitError"), "{detail}");
+        assert!(!detail.contains("private-value"), "{detail}");
+    }
 
     #[test]
     fn the_managed_bundle_layout_is_what_gets_staged() {

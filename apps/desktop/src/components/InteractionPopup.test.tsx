@@ -550,6 +550,21 @@ describe("InteractionPopup", () => {
     expect(screen.getByRole("tab", { name: "Theo dõi" })).toBeVisible();
   });
 
+  it("keeps the comment like reachable on the workspace page in script mode", async () => {
+    // The workspace page used to draw this switch inside its advanced block, which is not
+    // rendered at all for a scripted conversation — while the floating panel draws it for every
+    // text source. A scripted run's parents come from the script and its replies still answer
+    // each other, so a setting the operator turned on has to be reachable on both surfaces.
+    render(<InteractionPopup metas={noMeta} devices={devices} selected={[]} surface="page" />);
+    await pasteLink();
+    await nextPageStep();
+    fireEvent.change(screen.getByLabelText(/Nội dung bình luận/), { target: { value: "script" } });
+
+    const like = await screen.findByLabelText("Tim bình luận của máy trước");
+    fireEvent.click(like);
+    expect(like).toBeChecked();
+  });
+
   it("moves and activates workspace tabs with the complete horizontal keyboard pattern", () => {
     render(
       <InteractionPopup

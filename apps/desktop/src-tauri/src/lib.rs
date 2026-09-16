@@ -608,6 +608,8 @@ pub fn run() {
             publish_commands::publish_get,
             publish_commands::publish_reconcile,
             publish_commands::publish_check_links,
+            publish_commands::publish_recovery_capabilities,
+            publish_commands::publish_resume_verification,
             publish_commands::publish_cancel,
             publish_commands::publish_execute,
             publish_commands::publish_retry_assignment,

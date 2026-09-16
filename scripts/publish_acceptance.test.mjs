@@ -1,0 +1,401 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { parseArgs, runAcceptance, connectIPC } from './publish_acceptance.mjs';
+
+// Mock only Tauri IPC. The command runner, safety decisions and files are real.
+const source = path.resolve('fixture-source');
+const base = ['--udids', 'phone-b,phone-a', '--source', source,
+  '--bundle-ids', 'bundle-b,bundle-a', '--sheet-id', 'sheet_fixture', '--sheet-gid', '0'];
+const postUrl = 'https://www.tiktok.com/@fixture/photo/123456789';
+const sheet = { version: 2, spreadsheetId: 'sheet_fixture', sheetGid: 0,
+  reportingEpoch: 'epoch-1', internalReporting: true };
+function environment(t) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'publish-acceptance-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const options = (mode = 'inspect', more = []) => parseArgs([
+    '--mode', mode, '--report-dir', dir, ...base, ...more]);
+  const calls = [];
+  let created;
+  let lostCreate = false;
+  let lostExecute = false;
+  const detail = { campaign: { id: 'campaign-fixture', requestId: '', sourceRoot: source,
+    state: 'verifying', visibility: 'public', cleanupPolicy: 'keepImportedAssets',
+    assignments: [{ bundleId: 'managed-b', udid: 'phone-b', ordinal: 0 }, { bundleId: 'managed-a', udid: 'phone-a', ordinal: 1 }],
+    createdAt: '2026-09-17T00:00:00Z', updatedAt: '2026-09-17T00:01:00Z' },
+    bundles: [], events: [], assignments: ['phone-b', 'phone-a'].map((udid, ordinal) => ({
+      id: `assignment-${ordinal}`, campaignId: 'campaign-fixture', bundleId: `managed-${ordinal}`,
+      ordinal, udid, publicationId: `assignment-${ordinal}`, state: 'verifying',
+      dispatch: { phase: 'compose', state: 'finished', queuedAtMs: 100, startedAtMs: 200, owner: null, reason: null, revision: 2 },
+      effectIntent: JSON.stringify({ expectedAccount: 'fixture', submittedAt: '2026-09-17T00:00:30Z' }),
+      evidenceJson: JSON.stringify({ post: { state: 'submitted', verdict: 'Submitted', publicationVerified: false,
+        expectedAccount: 'fixture', submittedAt: '2026-09-17T00:00:30Z' },
+        verificationStatus: { state: 'pending', checkedAt: '2026-09-17T00:02:00Z', nextCheckAt: '2026-09-17T00:07:00Z' } }),
+      sheetDelivery: { state: 'pending', attempts: 0, lastError: null, nextAttemptAtMs: null, updatedAt: '2026-09-17T00:00:30Z' }, errorCode: null,
+    })) };
+  const submittedAssignments = structuredClone(detail.assignments);
+  const preflight = { inputDigest: 'digest-fixture', canExecute: true, sheetConfigured: true,
+    sheetEnabled: true, sheetDelivery: sheet, issues: [],
+    targetSnapshot: { udids: ['phone-b', 'phone-a'] },
+    assignments: ['phone-b', 'phone-a'].map((udid, ordinal) => ({ udid, ordinal,
+      bundleId: ordinal === 0 ? 'bundle-b' : 'bundle-a', media: 'pass', composer: 'pass', soundPicker: 'pass',
+      storage: 'pass', requiredBytes: 123, availableBytes: 1000, issues: [], packageName: 'fixture.tiktok', version: '1', locale: 'en' })) };
+  const invoke = async (command, args = {}) => {
+    calls.push({ command, args: structuredClone(args) });
+    switch (command) {
+      case 'list_devices': return [
+        { udid: 'phone-a', platform: 'android', status: 'ready', name: 'A' },
+        { udid: 'phone-b', platform: 'android', status: 'ready', name: 'B' },
+        { udid: 'excluded', platform: 'android', status: 'disconnected', name: 'Off' }];
+      case 'list_device_metas': return [{ udid: 'phone-a', number: 42 }, { udid: 'phone-b', number: 7 }, { udid: 'metadata-only', number: 99 }];
+      case 'google_sheets_status': return { configured: true, connected: true, active: true, writerId: 'writer-fixture',
+        selectedFileId: 'sheet_fixture', sheetUrl: 'https://docs.google.com/spreadsheets/d/sheet_fixture/edit#gid=0',
+        phase: 'idle', pickerConfigured: true, clientId: 'fixture-client' };
+      case 'publish_sheet_check': return { sheetUrl: args.sheetUrl, spreadsheetId: 'sheet_fixture', sheetGid: 0,
+        readable: true, connectionVerified: true, reportingReady: true, reportingEpoch: 'epoch-1',
+        layout: 'internal', columns: ['Link'], message: 'ready' };
+      case 'publish_preflight': return structuredClone(preflight);
+      case 'publish_create_campaign': {
+        // A lost response is AFTER server commit; same requestId must recover this row.
+        const intent = JSON.parse(fs.readFileSync(path.join(dir, 'create-intent.json'), 'utf8'));
+        assert.equal(intent.args.requestId, args.requestId, 'intent exists before create');
+        assert.match(intent.requestFingerprint, /^[a-f0-9]{64}$/);
+        if (created) assert.deepEqual(args, created, 'replay must preserve the whole request');
+        created = structuredClone(args);
+        detail.campaign.requestId = args.requestId;
+        detail.campaign.assignments.forEach((a, i) => { a.bundleId = `${args.requestId}:${args.bundleIds[i]}`; });
+        detail.assignments.forEach((a, i) => {
+          a.bundleId = `${args.requestId}:${args.bundleIds[i]}`;
+          a.state = 'queued'; a.dispatch = null; a.effectIntent = null; a.evidenceJson = null;
+        });
+        detail.campaign.state = 'queued';
+        if (lostCreate) { lostCreate = false; throw new Error('create ACK lost'); }
+        return structuredClone(detail.campaign);
+      }
+      case 'publish_execute': {
+        const intent = JSON.parse(fs.readFileSync(path.join(dir, 'execute-intent.json'), 'utf8'));
+        assert.equal(intent.campaignId, args.campaignId, 'intent exists before Execute');
+        assert.deepEqual(intent.assignmentIds, ['assignment-0', 'assignment-1']);
+        detail.campaign.state = 'verifying';
+        detail.assignments.forEach((a, i) => {
+          const submitted = submittedAssignments[i];
+          a.state = submitted.state; a.dispatch = submitted.dispatch;
+          a.effectIntent = submitted.effectIntent; a.evidenceJson = submitted.evidenceJson;
+        });
+        if (lostExecute) { lostExecute = false; throw new Error('execute ACK lost'); }
+        return { campaignId: args.campaignId, status: 'partial', retryScope: 'linkAndSheet', issues: [], detail };
+      }
+      case 'publish_get': assert.equal(args.campaignId, 'campaign-fixture'); return structuredClone(detail);
+      default: assert.fail(`unsafe or unexpected IPC: ${command}`);
+    }
+  };
+  return { dir, options, invoke, calls, detail, preflight,
+    loseCreate: () => { lostCreate = true; }, loseExecute: () => { lostExecute = true; } };
+}
+
+// Break caught: inspect starts preflight (device/network work), refresh or any mutation.
+test('default inspect reads full roster metadata only and never invents machine numbers', async t => {
+  const e = environment(t);
+  const options = parseArgs(['--report-dir', e.dir, '--udids', 'phone-b,phone-a']);
+  const result = await runAcceptance(options, { invoke: e.invoke });
+  assert.equal(result.report.mode, 'inspect');
+  assert.deepEqual(e.calls.map(c => c.command), ['list_devices', 'list_device_metas']);
+  assert.deepEqual(result.report.roster.selected.map(r => [r.udid, r.number]), [['phone-b', 7], ['phone-a', 42]]);
+  assert.deepEqual(result.report.roster.excluded.map(r => r.udid).sort(), ['excluded', 'metadata-only']);
+  assert.equal(result.report.acceptance, 'notEvaluated');
+  assert.equal(fs.existsSync(path.join(e.dir, 'create-intent.json')), false);
+});
+
+// Break caught: permissive argument parsing turns a typo/remote endpoint into a write.
+test('arguments reject ambiguous, duplicate, remote and unconfirmed inputs before IPC', () => {
+  for (const args of [ ['--bogus', 'x'], ['--mode', 'wat'], ['--mode', 'inspect', '--mode', 'submit'],
+    ['--udids', 'a,a'], ['--sheet-gid', '0oops'], ['--sheet-gid', '-1'], ['--cdp', 'http://example.com:9277'],
+    ['--cdp', 'http://127.0.0.1:9277/redirect'], ['--mode', 'submit'], ['--confirm', 'yes'] ]) {
+    assert.throws(() => parseArgs(['--report-dir', 'out', ...args]));
+  }
+});
+
+test('preflight binds explicit mapping and Sheet identity but never creates', async t => {
+  const e = environment(t);
+  const result = await runAcceptance(e.options('preflight'), { invoke: e.invoke });
+  assert.equal(result.exitCode, 0);
+  assert.match(result.report.confirmation, /^[a-f0-9]{64}$/);
+  const request = e.calls.find(c => c.command === 'publish_preflight').args.request;
+  assert.deepEqual(request.udids, ['phone-b', 'phone-a']);
+  assert.deepEqual(request.bundleIds, ['bundle-b', 'bundle-a']);
+  assert.deepEqual(request.targetRef, { type: 'explicit', udids: ['phone-b', 'phone-a'] });
+  assert.equal(request.sheetEnabled, true);
+  assert.equal(e.calls.some(c => c.command === 'publish_create_campaign'), false);
+});
+
+test('failed preflight never removes selected devices to pretend complete coverage', async t => {
+  const e = environment(t);
+  e.preflight.canExecute = false;
+  e.preflight.issues = [{ code: 'busy', udid: 'phone-a', message: 'held by upload' }];
+  const result = await runAcceptance(e.options('preflight'), { invoke: e.invoke });
+  assert.equal(result.exitCode, 1);
+  assert.equal(result.report.roster.requestedCount, 2);
+  assert.equal(result.report.confirmation, undefined);
+  assert.equal(e.calls.some(c => c.command === 'publish_create_campaign'), false);
+});
+
+test('lost create ACK resumes same durable request and never creates a different campaign', async t => {
+  const e = environment(t);
+  const prepared = await runAcceptance(e.options('preflight'), { invoke: e.invoke });
+  const options = e.options('submit', ['--confirm', prepared.report.confirmation]);
+  e.loseCreate();
+  const first = await runAcceptance(options, { invoke: e.invoke });
+  assert.equal(first.exitCode, 2);
+  assert.equal(e.calls.some(c => c.command === 'publish_execute'), false);
+  const firstIntent = fs.readFileSync(path.join(e.dir, 'create-intent.json'), 'utf8');
+  const resumed = await runAcceptance(options, { invoke: e.invoke });
+  assert.equal(resumed.exitCode, 2, 'submitted pending is not complete');
+  assert.equal(fs.readFileSync(path.join(e.dir, 'create-intent.json'), 'utf8'), firstIntent);
+  assert.equal(e.calls.filter(c => c.command === 'publish_create_campaign').length, 2);
+  assert.equal(e.calls.filter(c => c.command === 'publish_execute').length, 1);
+  assert.deepEqual(resumed.report.counts, { requested: 2, enqueued: 2, submitted: 2, verified: 0, sheetSent: 0, urlReadback: 0 });
+});
+
+test('lost execute ACK and subsequent submit only observe; persisted intent is never replayed', async t => {
+  const e = environment(t);
+  const prepared = await runAcceptance(e.options('preflight'), { invoke: e.invoke });
+  const options = e.options('submit', ['--confirm', prepared.report.confirmation]);
+  e.loseExecute();
+  await runAcceptance(options, { invoke: e.invoke });
+  const previous = e.calls.length;
+  const result = await runAcceptance(options, { invoke: e.invoke });
+  assert.equal(result.exitCode, 2);
+  assert.ok(e.calls.slice(previous).some(c => c.command === 'publish_get'));
+  assert.equal(e.calls.filter(c => c.command === 'publish_execute').length, 1);
+  assert.equal(e.calls.filter(c => c.command === 'publish_create_campaign').length, 1);
+});
+
+test('changed scope or confirmation cannot reuse a saved create intent', async t => {
+  const e = environment(t);
+  const prepared = await runAcceptance(e.options('preflight'), { invoke: e.invoke });
+  const good = e.options('submit', ['--confirm', prepared.report.confirmation]);
+  e.loseCreate();
+  await runAcceptance(good, { invoke: e.invoke });
+  const before = e.calls.length;
+  const changed = { ...good, udids: ['other', 'phone-a'] };
+  assert.equal((await runAcceptance(changed, { invoke: e.invoke })).exitCode, 1);
+  assert.equal((await runAcceptance({ ...good, confirm: '0'.repeat(64) }, { invoke: e.invoke })).exitCode, 1);
+  assert.equal(e.calls.slice(before).some(c => /create|execute/.test(c.command)), false);
+});
+
+test('a successful-looking state or URL never substitutes for canonical proof', async t => {
+  const e = environment(t);
+  e.detail.assignments[0].state = 'succeeded';
+  e.detail.assignments[0].evidenceJson = JSON.stringify({ post: { postUrl, publicationVerified: false } });
+  const result = await runAcceptance(e.options('observe', ['--campaign-id', 'campaign-fixture']), { invoke: e.invoke });
+  assert.equal(result.report.counts.verified, 0);
+  assert.notEqual(result.exitCode, 0);
+  assert.ok(e.calls.every(c => ['list_devices', 'list_device_metas', 'publish_get'].includes(c.command)));
+});
+
+test('Sheet sent remains distinct from supplementary URL readback, private readback is unsupported', async t => {
+  const e = environment(t);
+  for (const row of e.detail.assignments) {
+    row.state = 'succeeded';
+    row.evidenceJson = JSON.stringify({ post: { postUrl, publicationVerified: true, state: 'posted',
+      expectedAccount: 'fixture', submittedAt: '2026-09-17T00:00:30Z' } });
+    row.sheetDelivery.state = 'sent';
+  }
+  const result = await runAcceptance(e.options('observe', ['--campaign-id', 'campaign-fixture']), { invoke: e.invoke });
+  assert.equal(result.report.counts.verified, 2);
+  assert.equal(result.report.counts.sheetSent, 2);
+  assert.equal(result.report.counts.urlReadback, 0);
+  assert.equal(result.report.rows[0].urlReadback, 'unsupported');
+  assert.equal(result.exitCode, 3);
+});
+
+test('existing submission without local Execute intent is observed, never executed again', async t => {
+  const e = environment(t);
+  const prepared = await runAcceptance(e.options('preflight'), { invoke: e.invoke });
+  const invoke = async (cmd, args) => {
+    const response = await e.invoke(cmd, args);
+    if (cmd === 'publish_get') {
+      response.assignments[0].state = 'verifying';
+      response.assignments[0].effectIntent = JSON.stringify({ effectIntent: 'post', expectedAccount: 'fixture', submittedAt: '2026-09-17T00:00:30Z' });
+      response.assignments[0].evidenceJson = JSON.stringify({ post: { state: 'submitted', verdict: 'Submitted' } });
+    }
+    return response;
+  };
+  const result = await runAcceptance(e.options('submit', ['--confirm', prepared.report.confirmation]), { invoke });
+  assert.equal(e.calls.some(c => c.command === 'publish_execute'), false);
+  assert.equal(fs.existsSync(path.join(e.dir, 'execute-intent.json')), false);
+  assert.equal(result.report.execute, 'existingWorkObserveOnly');
+});
+
+test('report write remains under lock even when persistence fails', async t => {
+  const e = environment(t);
+  const originalRename = fs.renameSync;
+  let sawReport = false;
+  fs.renameSync = (from, to) => {
+    if (to === path.join(e.dir, 'report.json')) {
+      sawReport = true;
+      assert.equal(fs.existsSync(path.join(e.dir, 'harness.lock')), true, 'report replacement owns the same lock');
+      throw new Error('report disk failure');
+    }
+    return originalRename(from, to);
+  };
+  try { await assert.rejects(runAcceptance(e.options(), { invoke: e.invoke }), /report disk failure/); }
+  finally { fs.renameSync = originalRename; }
+  assert.equal(sawReport, true);
+  assert.equal(fs.existsSync(path.join(e.dir, 'harness.lock')), false, 'failed report still releases lock');
+});
+
+test('tampered durable request is rejected before any create replay', async t => {
+  const e = environment(t);
+  const prepared = await runAcceptance(e.options('preflight'), { invoke: e.invoke });
+  const options = e.options('submit', ['--confirm', prepared.report.confirmation]);
+  e.loseCreate();
+  await runAcceptance(options, { invoke: e.invoke });
+  const file = path.join(e.dir, 'create-intent.json');
+  const intent = JSON.parse(fs.readFileSync(file, 'utf8'));
+  intent.args.udids = ['foreign-phone', 'phone-a'];
+  fs.writeFileSync(file, JSON.stringify(intent));
+  const before = e.calls.length;
+  assert.equal((await runAcceptance(options, { invoke: e.invoke })).exitCode, 1);
+  assert.equal(e.calls.slice(before).some(c => /create|execute/.test(c.command)), false);
+});
+
+test('foreign content in a create receipt cannot be executed on otherwise matching machines', async t => {
+  const e = environment(t);
+  const prepared = await runAcceptance(e.options('preflight'), { invoke: e.invoke });
+  const invoke = async (cmd, args) => {
+    const response = await e.invoke(cmd, args);
+    if (cmd === 'publish_create_campaign') response.assignments[0].bundleId = 'foreign-content';
+    return response;
+  };
+  const result = await runAcceptance(e.options('submit', ['--confirm', prepared.report.confirmation]), { invoke });
+  assert.equal(result.exitCode, 1);
+  assert.equal(e.calls.some(c => c.command === 'publish_execute'), false);
+});
+
+test('empty or altered assignment identity on get blocks execute', async t => {
+  const e = environment(t);
+  const prepared = await runAcceptance(e.options('preflight'), { invoke: e.invoke });
+  const invoke = async (cmd, args) => {
+    const response = await e.invoke(cmd, args);
+    if (cmd === 'publish_get') response.assignments[0].id = '';
+    return response;
+  };
+  const result = await runAcceptance(e.options('submit', ['--confirm', prepared.report.confirmation]), { invoke });
+  assert.equal(result.exitCode, 1);
+  assert.equal(e.calls.some(c => c.command === 'publish_execute'), false);
+});
+
+test('intent without a Submitted receipt is not reported as a submitted post', async t => {
+  const e = environment(t);
+  e.detail.assignments[0].evidenceJson = null;
+  const result = await runAcceptance(e.options('observe', ['--campaign-id', 'campaign-fixture']), { invoke: e.invoke });
+  assert.equal(result.report.counts.submitted, 1);
+  assert.equal(result.report.rows[0].submitted, false);
+});
+
+test('blocked verification review is not mislabeled as ordinary pending', async t => {
+  const e = environment(t);
+  e.detail.assignments[0].evidenceJson = JSON.stringify({ post: { state: 'submitted' }, verificationStatus: { state: 'needsReview', reasonCode: 'missingIdentity' } });
+  const result = await runAcceptance(e.options('observe', ['--campaign-id', 'campaign-fixture']), { invoke: e.invoke });
+  assert.equal(result.exitCode, 1);
+});
+
+test('persistence error before execute leaves campaign but never dispatches', async t => {
+  const e = environment(t);
+  const prepared = await runAcceptance(e.options('preflight'), { invoke: e.invoke });
+  const invoke = async (cmd, args) => {
+    const response = await e.invoke(cmd, args);
+    if (cmd === 'publish_get') fs.mkdirSync(path.join(e.dir, 'execute-intent.json'), { recursive: true });
+    return response;
+  };
+  const result = await runAcceptance(e.options('submit', ['--confirm', prepared.report.confirmation]), { invoke });
+  assert.equal(result.exitCode, 1);
+  assert.ok(fs.existsSync(path.join(e.dir, 'campaign.json')));
+  assert.equal(e.calls.some(c => c.command === 'publish_execute'), false);
+});
+
+test('a live harness lock blocks every IPC rather than racing another submit', async t => {
+  const e = environment(t);
+  fs.writeFileSync(path.join(e.dir, 'harness.lock'), 'another owner');
+  const result = await runAcceptance(e.options(), { invoke: e.invoke });
+  assert.equal(result.exitCode, 1);
+  assert.deepEqual(e.calls, []);
+});
+
+test('connection settings reject credentials or nonloopback page selectors', () => {
+  for (const url of ['https://example.com/app', 'http://user:pass@localhost:5173/']) {
+    assert.throws(() => parseArgs(['--report-dir', 'out', '--udids', 'a', '--page-url', url]));
+  }
+});
+
+test('observe deadline only reads persisted status and never commands device verification', async t => {
+  const e = environment(t);
+  let clock = 1000;
+  const result = await runAcceptance(e.options('observe', ['--campaign-id', 'campaign-fixture', '--wait-seconds', '10', '--poll-seconds', '5']),
+    { invoke: e.invoke, now: () => clock, sleep: async ms => { clock += ms; } });
+  assert.equal(result.exitCode, 2);
+  assert.equal(result.report.acceptance, 'pendingDeadline');
+  assert.equal(e.calls.filter(c => c.command === 'publish_get').length, 3);
+  assert.ok(e.calls.every(c => ['list_devices', 'list_device_metas', 'publish_get'].includes(c.command)));
+});
+
+test('invalid or changed writer epoch prevents create even with approved hash', async t => {
+  const e = environment(t);
+  const prepared = await runAcceptance(e.options('preflight'), { invoke: e.invoke });
+  const invoke = async (cmd, args) => {
+    const response = await e.invoke(cmd, args);
+    return cmd === 'publish_sheet_check' ? { ...response, reportingEpoch: 'epoch-2' } : response;
+  };
+  const result = await runAcceptance(e.options('submit', ['--confirm', prepared.report.confirmation]), { invoke });
+  assert.equal(result.exitCode, 1);
+  assert.equal(fs.existsSync(path.join(e.dir, 'create-intent.json')), false);
+});
+
+test('CDP refuses ambiguous pages and disconnects without touching any page', async () => {
+  let disconnected = false;
+  const page = { url: () => 'http://localhost:5173/', evaluate: () => assert.fail('ambiguous IPC') };
+  const chromium = { connectOverCDP: async () => ({ contexts: () => [{ pages: () => [page, page] }],
+    close: async () => { disconnected = true; } }) };
+  await assert.rejects(connectIPC({ cdp: 'http://127.0.0.1:9277' }, chromium), /WebView/);
+  assert.equal(disconnected, true);
+});
+
+test('CDP adapter only invokes allowlisted production IPC and never starts a browser', async () => {
+  const seen = [];
+  const page = { url: () => 'http://tauri.localhost/', evaluate: async (fn, args) => {
+    seen.push(args);
+    return args ? { campaign: { id: args.args.campaignId } } : true;
+  } };
+  let disconnected = false;
+  const chromium = { connectOverCDP: async () => ({ contexts: () => [{ pages: () => [page] }],
+    close: async () => { disconnected = true; } }) };
+  const ipc = await connectIPC({ cdp: 'http://127.0.0.1:9277' }, chromium);
+  assert.deepEqual(await ipc.invoke('publish_get', { campaignId: 'fixture' }), { campaign: { id: 'fixture' } });
+  assert.throws(() => ipc.invoke('terminate_app', {}));
+  await ipc.close();
+  assert.equal(disconnected, true);
+  assert.deepEqual(seen[1], { command: 'publish_get', args: { campaignId: 'fixture' } });
+});
+
+test('an armed execute intent alone forbids create even when campaign receipt is missing', async t => {
+  const e = environment(t);
+  const prepared = await runAcceptance(e.options('preflight'), { invoke: e.invoke });
+  const opts = e.options('submit', ['--confirm', prepared.report.confirmation]);
+  await runAcceptance(opts, { invoke: e.invoke });
+  fs.unlinkSync(path.join(e.dir, 'campaign.json'));
+  const previous = e.calls.length;
+  const result = await runAcceptance(opts, { invoke: e.invoke });
+  assert.equal(result.exitCode, 1);
+  assert.equal(e.calls.slice(previous).some(c => /create|execute/.test(c.command)), false);
+});
+
+test('empty assignments and failed rows are blocked, not vacuous success or endless pending', async t => {
+  const e = environment(t);
+  e.detail.assignments = [];
+  assert.equal((await runAcceptance(e.options('observe', ['--campaign-id', 'campaign-fixture']), { invoke: e.invoke })).exitCode, 1);
+  e.detail.assignments = [{ id: 'failed', campaignId: 'campaign-fixture', udid: 'phone-b', state: 'failedBeforeDispatch', errorCode: 'pickerRefused' }];
+  assert.equal((await runAcceptance(e.options('observe', ['--campaign-id', 'campaign-fixture']), { invoke: e.invoke })).exitCode, 1);
+});

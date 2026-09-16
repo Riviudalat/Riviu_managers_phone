@@ -1,6 +1,77 @@
 //! A thumbnail opens preview; the measured corner button selects the photo.
 use super::*;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum SelectionStage {
+    Initial,
+    TapReadback,
+    Scroll,
+    ScrollReadback,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum SelectionReason {
+    InvalidRequestedCount,
+    AlbumMismatch,
+    NextControlAmbiguous,
+    InitialBoundsInvalid,
+    InitialSelectionNotEmpty,
+    InitialGridInvalid,
+    InitialProofInvalid,
+    SelectionReadbackUnproven,
+    ScrollBudgetExhausted,
+    ScrollAnchorMissing,
+    ScrollGeometryMissing,
+    ScrollReadbackUnproven,
+    HierarchyReadFailed,
+    SnapshotParseFailed,
+    TapFailed,
+    ScrollFailed,
+    Stopped,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SelectionBounds {
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SelectionArtifact {
+    pub role: String,
+    pub generation: u64,
+    pub sha256: String,
+    pub xml_path: Option<String>,
+    pub screenshot_path: Option<String>,
+}
+
+/// Observation only: this never grants selection or Post permission. No XML or caption in DTO.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SelectionDiagnostic {
+    pub stage: SelectionStage,
+    pub reason_code: SelectionReason,
+    pub expected_count: usize,
+    pub last_verified_count: usize,
+    pub observed_ordinals: Vec<Option<usize>>,
+    pub next_count: Option<usize>,
+    pub album_matches: Option<bool>,
+    pub scroll_count: usize,
+    pub viewport: SelectionBounds,
+    pub snapshot_generation: Option<u64>,
+    pub snapshot_sha256: Option<String>,
+    pub selector_bounds: Vec<SelectionBounds>,
+    pub next_bounds: Vec<SelectionBounds>,
+    pub artifacts: Vec<SelectionArtifact>,
+    pub artifact_write_failed: bool,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct PickerControls {
     pub package: &'static str,
@@ -477,6 +548,159 @@ fn visible_selection(
     Some((rows, next.clone()))
 }
 
+impl From<&ElementBox> for SelectionBounds {
+    fn from(row: &ElementBox) -> Self {
+        Self {
+            x: row.x,
+            y: row.y,
+            width: row.width,
+            height: row.height,
+        }
+    }
+}
+
+struct PickerTrace {
+    diagnostic: SelectionDiagnostic,
+    directory: Option<std::path::PathBuf>,
+    key: String,
+    // Three roles, not an append-only stream. Retain XML only when explicitly enabled.
+    baseline: Option<crate::HierarchySourceSnapshot>,
+    verified: Option<crate::HierarchySourceSnapshot>,
+    latest: Option<crate::HierarchySourceSnapshot>,
+}
+
+impl PickerTrace {
+    fn new(wanted: usize, screen: Screen, album: &str) -> Self {
+        let directory = if cfg!(debug_assertions) {
+            std::env::var_os("RIVIU_PUBLISH_PICKER_TRACE").map(std::path::PathBuf::from)
+        } else {
+            None
+        };
+        Self {
+            diagnostic: SelectionDiagnostic {
+                stage: SelectionStage::Initial,
+                reason_code: SelectionReason::InvalidRequestedCount,
+                expected_count: wanted,
+                last_verified_count: 0,
+                observed_ordinals: Vec::new(),
+                next_count: None,
+                album_matches: None,
+                scroll_count: 0,
+                viewport: SelectionBounds {
+                    x: 0.0,
+                    y: 0.0,
+                    width: screen.width(),
+                    height: screen.height(),
+                },
+                snapshot_generation: None,
+                snapshot_sha256: None,
+                selector_bounds: Vec::new(),
+                next_bounds: Vec::new(),
+                artifacts: Vec::new(),
+                artifact_write_failed: false,
+            },
+            directory,
+            key: crate::frame_sha256(album.as_bytes()),
+            baseline: None,
+            verified: None,
+            latest: None,
+        }
+    }
+
+    fn reason(&mut self, reason: SelectionReason) {
+        self.diagnostic.reason_code = reason;
+    }
+
+    async fn read(
+        &mut self,
+        session: &dyn UiSession,
+        controls: PickerControls,
+        album_query: ElementQuery<'_>,
+        album: &str,
+    ) -> anyhow::Result<Option<(Vec<ElementBox>, Vec<ElementBox>)>> {
+        self.reason(SelectionReason::HierarchyReadFailed);
+        // Missing current evidence must not be confused with the preceding valid snapshot.
+        self.diagnostic.snapshot_generation = None;
+        self.diagnostic.snapshot_sha256 = None;
+        self.diagnostic.album_matches = None;
+        self.diagnostic.next_count = None;
+        self.diagnostic.observed_ordinals.clear();
+        self.diagnostic.selector_bounds.clear();
+        self.diagnostic.next_bounds.clear();
+        self.latest = None;
+        let snapshot = session.hierarchy_source_snapshot().await?;
+        self.diagnostic.snapshot_generation = Some(snapshot.generation);
+        self.diagnostic.snapshot_sha256 = Some(crate::frame_sha256(snapshot.xml.as_bytes()));
+        if self.directory.is_some() {
+            if snapshot.xml.len() <= 1024 * 1024 {
+                self.latest = Some(snapshot.clone());
+                if self.baseline.is_none() {
+                    self.baseline = Some(snapshot.clone());
+                }
+            } else {
+                self.diagnostic.artifact_write_failed = true;
+            }
+        }
+        self.reason(SelectionReason::SnapshotParseFailed);
+        let parsed = picker_snapshot(&snapshot.xml, controls)?;
+        self.diagnostic.observed_ordinals = parsed
+            .0
+            .iter()
+            .take(crate::publish::MAX_CAROUSEL_IMAGES)
+            .map(|r| r.description.as_deref().and_then(|v| v.trim().parse().ok()))
+            .collect();
+        self.diagnostic.selector_bounds = parsed
+            .0
+            .iter()
+            .take(crate::publish::MAX_CAROUSEL_IMAGES)
+            .map(SelectionBounds::from)
+            .collect();
+        self.diagnostic.next_bounds = parsed.1.iter().take(3).map(SelectionBounds::from).collect();
+        self.diagnostic.next_count = explicit_count(&parsed.1);
+        let matched = snapshot_has_album(&snapshot.xml, controls, album_query, album)?;
+        self.diagnostic.album_matches = Some(matched);
+        if !matched {
+            self.reason(SelectionReason::AlbumMismatch);
+        }
+        Ok(matched.then_some(parsed))
+    }
+
+    fn verified(&mut self, count: usize) {
+        self.diagnostic.last_verified_count = count;
+        self.verified = self.latest.clone();
+    }
+
+    fn persist(&mut self) {
+        let Some(folder) = self.directory.as_ref() else {
+            return;
+        };
+        // Invalid trace configuration is diagnostic failure only, never picker failure.
+        if !folder.is_absolute() || std::fs::create_dir_all(folder).is_err() {
+            self.diagnostic.artifact_write_failed = true;
+            return;
+        }
+        for (role, snapshot) in [
+            ("baseline", &self.baseline),
+            ("lastVerified", &self.verified),
+            ("failure", &self.latest),
+        ] {
+            let Some(snapshot) = snapshot else {
+                continue;
+            };
+            let path = folder.join(format!("{}-{role}.xml", self.key));
+            let written = std::fs::write(&path, &snapshot.xml).is_ok();
+            self.diagnostic.artifact_write_failed |= !written;
+            self.diagnostic.artifacts.push(SelectionArtifact {
+                role: role.into(),
+                generation: snapshot.generation,
+                sha256: crate::frame_sha256(snapshot.xml.as_bytes()),
+                xml_path: written.then(|| path.to_string_lossy().into_owned()),
+                screenshot_path: None,
+            });
+        }
+    }
+}
+
 impl<P: TapPlanner> Composer<'_, P> {
     /// One selection algorithm for 1..=35 photos — TikTok's own carousel ceiling — including
     /// TikTok's automatic scrolling and our own, one measured row at a time, when the album
@@ -490,52 +714,75 @@ impl<P: TapPlanner> Composer<'_, P> {
         album: &str,
         stop: &AtomicBool,
     ) -> anyhow::Result<Selection> {
+        let trace = PickerTrace::new(wanted, screen, album);
+        self.select_verified_recorded(controls, screen, album, stop, trace)
+            .await
+    }
+
+    async fn select_verified_recorded(
+        &mut self,
+        controls: PickerControls,
+        screen: Screen,
+        album: &str,
+        stop: &AtomicBool,
+        mut trace: PickerTrace,
+    ) -> anyhow::Result<Selection> {
+        self.last_selection_diagnostic = None;
+        let result = self
+            .select_verified_inner(controls, screen, album, stop, &mut trace)
+            .await;
+        if !matches!(&result, Ok(Selection::Armed { .. })) {
+            trace.persist();
+            if let Some(observer) = self.selection_diagnostics {
+                observer(&trace.diagnostic);
+            }
+            self.last_selection_diagnostic = Some(trace.diagnostic);
+        }
+        result
+    }
+
+    async fn select_verified_inner(
+        &mut self,
+        controls: PickerControls,
+        screen: Screen,
+        album: &str,
+        stop: &AtomicBool,
+        trace: &mut PickerTrace,
+    ) -> anyhow::Result<Selection> {
+        let wanted = trace.diagnostic.expected_count;
         if !(1..=crate::publish::MAX_CAROUSEL_IMAGES).contains(&wanted) {
             return Ok(Selection::NotEnoughSelected);
         }
         if stop.load(Ordering::Relaxed) {
+            trace.reason(SelectionReason::Stopped);
             return Ok(Selection::Stopped);
         }
         let session = self.session;
         let album_query = self.plan.album_menu;
-        let read = || async {
-            let snapshot = session.hierarchy_source_snapshot().await?;
-            #[cfg(debug_assertions)]
-            if let Some(folder) = std::env::var_os("RIVIU_PUBLISH_PICKER_TRACE") {
-                use sha2::{Digest, Sha256};
-                let folder = std::path::PathBuf::from(folder);
-                anyhow::ensure!(
-                    folder.is_absolute(),
-                    "picker trace directory must be absolute"
-                );
-                std::fs::create_dir_all(&folder)?;
-                let name = format!("{:x}.xml", Sha256::digest(album.as_bytes()));
-                // One latest snapshot per isolated album; no unbounded capture stream.
-                std::fs::write(folder.join(name), &snapshot.xml)?;
-            }
-            let parsed = picker_snapshot(&snapshot.xml, controls)?;
-            Ok::<_, anyhow::Error>(
-                snapshot_has_album(&snapshot.xml, controls, album_query, album)?.then_some(parsed),
-            )
-        };
-        let Some((initial, next)) = read().await? else {
+        let Some((initial, next)) = trace.read(session, controls, album_query, album).await? else {
             return Ok(Selection::NotEnoughSelected);
         };
         let [next_button] = next.as_slice() else {
+            trace.reason(SelectionReason::NextControlAmbiguous);
             return Ok(Selection::NotEnoughSelected);
         };
         let Some(initial) = ordered_controls(initial, screen, next_button.y) else {
+            trace.reason(SelectionReason::InitialBoundsInvalid);
             return Ok(Selection::NotEnoughSelected);
         };
         if !selected_prefix(&initial, 0) || explicit_count(&next).is_some_and(|n| n != 0) {
+            trace.reason(SelectionReason::InitialSelectionNotEmpty);
             return Ok(Selection::NotEnoughSelected);
         }
         let Some(mut grid) = KnownGrid::from_initial(initial.clone(), wanted) else {
+            trace.reason(SelectionReason::InitialGridInvalid);
             return Ok(Selection::NotEnoughSelected);
         };
         let Some(mut current) = visible_selection(initial, &next, screen, &mut grid, 0) else {
+            trace.reason(SelectionReason::InitialProofInvalid);
             return Ok(Selection::NotEnoughSelected);
         };
+        trace.verified(0);
         // One scroll reveals one row, so an album of `wanted` cells needs at most one fewer
         // scroll than it has rows; one more absorbs TikTok's own scroll on the first tap.
         let scroll_budget = wanted.div_ceil(grid.columns());
@@ -543,6 +790,7 @@ impl<P: TapPlanner> Composer<'_, P> {
         let mut scrolls = 0;
         loop {
             if stop.load(Ordering::Relaxed) {
+                trace.reason(SelectionReason::Stopped);
                 return Ok(Selection::Stopped);
             }
             let (rows, next) = current;
@@ -556,14 +804,19 @@ impl<P: TapPlanner> Composer<'_, P> {
                 .iter()
                 .find(|row| row.description.as_deref().unwrap_or("").trim().is_empty())
             {
+                trace.diagnostic.stage = SelectionStage::TapReadback;
+                trace.reason(SelectionReason::TapFailed);
                 self.tap_inside(row).await?;
                 let expected = count + 1;
                 let deadline = Instant::now() + ARM_WINDOW;
                 current = loop {
                     if stop.load(Ordering::Relaxed) {
+                        trace.reason(SelectionReason::Stopped);
                         return Ok(Selection::Stopped);
                     }
-                    let Some((rows, next)) = read().await? else {
+                    let Some((rows, next)) =
+                        trace.read(session, controls, album_query, album).await?
+                    else {
                         return Ok(Selection::NotEnoughSelected);
                     };
                     if let Some(observed) =
@@ -572,12 +825,15 @@ impl<P: TapPlanner> Composer<'_, P> {
                         break observed;
                     }
                     if Instant::now() >= deadline {
+                        trace.reason(SelectionReason::SelectionReadbackUnproven);
                         return Ok(Selection::NotEnoughSelected);
                     }
                     sleep(POLL, stop).await;
                 };
                 count = expected;
+                trace.verified(count);
             } else {
+                trace.diagnostic.stage = SelectionStage::Scroll;
                 // The selected tail is visible but the next cell is below the viewport.
                 // Scroll only one measured row so overlapping ordinals retain identity.
                 if scrolls >= scroll_budget
@@ -587,8 +843,14 @@ impl<P: TapPlanner> Composer<'_, P> {
                         .and_then(|text| text.trim().parse::<usize>().ok())
                         != Some(count)
                 {
+                    trace.reason(if scrolls >= scroll_budget {
+                        SelectionReason::ScrollBudgetExhausted
+                    } else {
+                        SelectionReason::ScrollAnchorMissing
+                    });
                     return Ok(Selection::NotEnoughSelected);
                 }
+                trace.reason(SelectionReason::ScrollGeometryMissing);
                 let row_height = rows
                     .windows(2)
                     .map(|rows| rows[1].y - rows[0].y)
@@ -596,6 +858,7 @@ impl<P: TapPlanner> Composer<'_, P> {
                     .or_else(|| grid.row_pitch())
                     .context("picker rows missing")?;
                 let from = rows.last().unwrap().y;
+                trace.reason(SelectionReason::ScrollFailed);
                 self.session
                     .swipe(crate::SwipeGesture {
                         from: crate::TapPoint {
@@ -610,14 +873,19 @@ impl<P: TapPlanner> Composer<'_, P> {
                     })
                     .await?;
                 scrolls += 1;
+                trace.diagnostic.scroll_count = scrolls;
+                trace.diagnostic.stage = SelectionStage::ScrollReadback;
                 sleep(Duration::from_millis(450), stop).await;
-                let Some((rows, next)) = read().await? else {
+                let Some((rows, next)) = trace.read(session, controls, album_query, album).await?
+                else {
                     return Ok(Selection::NotEnoughSelected);
                 };
                 let Some(observed) = visible_selection(rows, &next, screen, &mut grid, count)
                 else {
+                    trace.reason(SelectionReason::ScrollReadbackUnproven);
                     return Ok(Selection::NotEnoughSelected);
                 };
+                trace.verified(count);
                 current = observed;
             }
         }
@@ -800,6 +1068,8 @@ mod tests {
         /// A row the album grows after this many swipes, off the grid: `"column"` shifts the
         /// new row's x, `"pitch"` its y, `"extra"` appends photos the bundle does not have.
         corrupt_scrolled_row: Option<&'static str>,
+        fail_swipe: bool,
+        fail_read_after: Option<usize>,
         swipes: Mutex<usize>,
     }
     impl Picker {
@@ -816,6 +1086,8 @@ mod tests {
                 visible_rows: None,
                 tray_hides_row: false,
                 corrupt_scrolled_row: None,
+                fail_swipe: false,
+                fail_read_after: None,
                 swipes: Mutex::new(0),
             }
         }
@@ -927,7 +1199,10 @@ mod tests {
         async fn hierarchy_source_snapshot(
             &self,
         ) -> anyhow::Result<crate::driver::HierarchySourceSnapshot> {
-            self.reads.fetch_add(1, Ordering::Relaxed);
+            let reads = self.reads.fetch_add(1, Ordering::Relaxed);
+            if self.fail_read_after.is_some_and(|limit| reads >= limit) {
+                anyhow::bail!("fixture hierarchy offline");
+            }
             let rows = self.rows();
             let count = *self.selected.lock();
             let album =
@@ -965,6 +1240,9 @@ mod tests {
             Ok(())
         }
         async fn swipe(&self, gesture: crate::SwipeGesture) -> anyhow::Result<()> {
+            if self.fail_swipe {
+                anyhow::bail!("fixture swipe offline");
+            }
             assert!(
                 self.visible_rows.is_some(),
                 "scroll only when the selected tail hides the next image"
@@ -1076,6 +1354,268 @@ mod tests {
             .await
             .unwrap()
     }
+    // A refusal without the observed state, or a tap count masquerading as proof, fails here.
+    #[tokio::test(start_paused = true)]
+    async fn picker_diagnostics_keep_refusal_branch_and_last_verified_not_attempted_count() {
+        for (corruption, expected_reason, verified, next, album) in [
+            (
+                "drop",
+                SelectionReason::SelectionReadbackUnproven,
+                2,
+                Some(2),
+                Some(true),
+            ),
+            (
+                "album",
+                SelectionReason::AlbumMismatch,
+                9,
+                Some(10),
+                Some(false),
+            ),
+            (
+                "scroll",
+                SelectionReason::ScrollReadbackUnproven,
+                15,
+                Some(15),
+                Some(true),
+            ),
+        ] {
+            let mut session = if corruption == "scroll" {
+                Picker::with_tray(16)
+            } else {
+                Picker::new(Some(2))
+            };
+            if corruption == "album" {
+                session.drop_at = None;
+                session.total = 11;
+                session.autoscroll = true;
+                session.corrupt_after_ten = Some("album");
+            }
+            if corruption == "scroll" {
+                session.corrupt_scrolled_row = Some("column");
+            }
+            let plan =
+                ComposerPlan::resolve(&crate::tiktok_labels::every_publish_control_measured())
+                    .unwrap();
+            let mut composer = Composer::new(&session, plan, |r: &ElementBox| r.centre());
+            let verdict = composer
+                .select_verified(
+                    PickerControls {
+                        package: "fixture",
+                        selector: ElementQuery::ResourceIdSuffix(":id/h4b"),
+                        next: ElementQuery::ResourceIdSuffix(":id/q4g"),
+                    },
+                    Screen::new(1080.0, 2220.0).unwrap(),
+                    session.total,
+                    "album",
+                    &AtomicBool::new(false),
+                )
+                .await
+                .unwrap();
+            assert_eq!(verdict, Selection::NotEnoughSelected);
+            let diagnostic = composer
+                .last_selection_diagnostic()
+                .expect("persistable refusal diagnostic");
+            assert_eq!(diagnostic.reason_code, expected_reason, "{corruption}");
+            assert_eq!(diagnostic.last_verified_count, verified);
+            assert_eq!(diagnostic.expected_count, session.total);
+            assert_eq!(diagnostic.next_count, next);
+            assert_eq!(diagnostic.album_matches, album);
+            assert_eq!(diagnostic.snapshot_generation, Some(1));
+            assert_eq!(diagnostic.snapshot_sha256.as_ref().unwrap().len(), 64);
+            assert!(!diagnostic.selector_bounds.is_empty());
+            assert!(diagnostic.artifacts.len() <= 3);
+            let json = serde_json::to_value(diagnostic).unwrap();
+            assert_eq!(json["lastVerifiedCount"], verified);
+            assert!(!json.to_string().contains("<hierarchy>"));
+            if corruption == "scroll" {
+                assert_eq!(diagnostic.scroll_count, 2);
+            }
+            assert_eq!(
+                session.taps.lock().len(),
+                if corruption == "scroll" {
+                    15
+                } else {
+                    verified + 1
+                }
+            );
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn picker_success_clears_a_prior_refusal_on_the_same_composer() {
+        let session = Picker::new(None);
+        let plan =
+            ComposerPlan::resolve(&crate::tiktok_labels::every_publish_control_measured()).unwrap();
+        let mut composer = Composer::new(&session, plan, |r: &ElementBox| r.centre());
+        let controls = PickerControls {
+            package: "fixture",
+            selector: ElementQuery::ResourceIdSuffix(":id/h4b"),
+            next: ElementQuery::ResourceIdSuffix(":id/q4g"),
+        };
+        let screen = Screen::new(1080.0, 2220.0).unwrap();
+        let stop = AtomicBool::new(false);
+        assert_eq!(
+            composer
+                .select_verified(controls, screen, 36, "album", &stop)
+                .await
+                .unwrap(),
+            Selection::NotEnoughSelected
+        );
+        assert_eq!(
+            composer.last_selection_diagnostic().unwrap().reason_code,
+            SelectionReason::InvalidRequestedCount
+        );
+        assert!(matches!(
+            composer
+                .select_verified(controls, screen, 6, "album", &stop)
+                .await
+                .unwrap(),
+            Selection::Armed {
+                counted: Some(6),
+                ..
+            }
+        ));
+        assert!(composer.last_selection_diagnostic().is_none());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn picker_observer_receives_diagnostic_before_owner_drops_without_changing_refusal() {
+        let session = Picker::new(Some(2));
+        let saved = Mutex::new(Vec::new());
+        let observer = |diagnostic: &SelectionDiagnostic| saved.lock().push(diagnostic.clone());
+        {
+            let plan =
+                ComposerPlan::resolve(&crate::tiktok_labels::every_publish_control_measured())
+                    .unwrap();
+            let mut composer = Composer::new(&session, plan, |r: &ElementBox| r.centre())
+                .with_selection_diagnostics(&observer);
+            let result = composer
+                .select_verified(
+                    PickerControls {
+                        package: "fixture",
+                        selector: ElementQuery::ResourceIdSuffix(":id/h4b"),
+                        next: ElementQuery::ResourceIdSuffix(":id/q4g"),
+                    },
+                    Screen::new(1080.0, 2220.0).unwrap(),
+                    6,
+                    "album",
+                    &AtomicBool::new(false),
+                )
+                .await
+                .unwrap();
+            assert_eq!(result, Selection::NotEnoughSelected);
+        }
+        assert_eq!(saved.lock().len(), 1);
+        assert_eq!(saved.lock()[0].last_verified_count, 2);
+        assert_eq!(
+            saved.lock()[0].reason_code,
+            SelectionReason::SelectionReadbackUnproven
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn picker_trace_keeps_three_roles_and_io_failure_cannot_replace_original_error() {
+        let root = std::env::temp_dir().join(format!("picker-diagnostic-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let blocker = root.join("not-a-directory");
+        std::fs::write(&blocker, b"fixture").unwrap();
+        let screen = Screen::new(1080.0, 2220.0).unwrap();
+        let controls = PickerControls {
+            package: "fixture",
+            selector: ElementQuery::ResourceIdSuffix(":id/h4b"),
+            next: ElementQuery::ResourceIdSuffix(":id/q4g"),
+        };
+        for (mode, directory) in [
+            ("drop", root.join("trace")),
+            ("dropIo", blocker.clone()),
+            ("swipe", blocker.clone()),
+            ("read", blocker.clone()),
+            ("success", blocker),
+        ] {
+            let mut session = Picker::with_tray(14);
+            if mode == "drop" || mode == "dropIo" {
+                session.drop_at = Some(12);
+            }
+            if mode == "swipe" {
+                session.fail_swipe = true;
+            }
+            if mode == "read" {
+                session.fail_read_after = Some(3);
+            }
+            let plan =
+                ComposerPlan::resolve(&crate::tiktok_labels::every_publish_control_measured())
+                    .unwrap();
+            let mut composer = Composer::new(&session, plan, |r: &ElementBox| r.centre());
+            let mut trace = PickerTrace::new(14, screen, "album");
+            trace.directory = Some(directory.clone());
+            let result = composer
+                .select_verified_recorded(controls, screen, "album", &AtomicBool::new(false), trace)
+                .await;
+            if mode == "success" {
+                assert!(matches!(
+                    result.unwrap(),
+                    Selection::Armed {
+                        counted: Some(14),
+                        ..
+                    }
+                ));
+                assert!(composer.last_selection_diagnostic().is_none());
+                continue;
+            }
+            let diagnostic = composer.last_selection_diagnostic().unwrap();
+            if mode == "dropIo" {
+                assert_eq!(result.unwrap(), Selection::NotEnoughSelected);
+                assert_eq!(diagnostic.last_verified_count, 12);
+                assert_eq!(
+                    diagnostic.reason_code,
+                    SelectionReason::SelectionReadbackUnproven
+                );
+                assert!(diagnostic.artifact_write_failed);
+                assert!(diagnostic.artifacts.is_empty());
+                continue;
+            }
+            if mode == "drop" {
+                assert_eq!(result.unwrap(), Selection::NotEnoughSelected);
+                assert_eq!(diagnostic.last_verified_count, 12);
+                assert_eq!(diagnostic.artifacts.len(), 3);
+                assert_eq!(std::fs::read_dir(&directory).unwrap().count(), 3);
+                for artifact in &diagnostic.artifacts {
+                    let bytes = std::fs::read(artifact.xml_path.as_ref().unwrap()).unwrap();
+                    assert_eq!(crate::frame_sha256(&bytes), artifact.sha256);
+                }
+            } else {
+                let detail = result.unwrap_err().to_string();
+                assert!(
+                    detail.contains(if mode == "swipe" {
+                        "fixture swipe offline"
+                    } else {
+                        "fixture hierarchy offline"
+                    }),
+                    "{detail}"
+                );
+                assert!(diagnostic.artifact_write_failed);
+                assert_eq!(
+                    diagnostic.reason_code,
+                    if mode == "swipe" {
+                        SelectionReason::ScrollFailed
+                    } else {
+                        SelectionReason::HierarchyReadFailed
+                    }
+                );
+                assert_eq!(
+                    diagnostic.last_verified_count,
+                    if mode == "swipe" { 12 } else { 2 }
+                );
+                if mode == "read" {
+                    assert_eq!(diagnostic.snapshot_generation, None);
+                    assert_eq!(diagnostic.next_count, None);
+                }
+            }
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     #[tokio::test(start_paused = true)]
     async fn eleven_photos_follow_measured_automatic_scroll_after_tenth_tap() {
         let mut session = Picker::new(None);

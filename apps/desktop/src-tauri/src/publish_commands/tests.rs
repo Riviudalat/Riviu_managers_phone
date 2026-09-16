@@ -485,6 +485,245 @@ fn the_participant_filters_step_over_exactly_the_settled_states() {
     }
 }
 
+fn stopped_resume_fixture() -> (super::Database, std::path::PathBuf, String, String) {
+    let path = std::env::temp_dir().join(format!("resume-event-{}.db", Uuid::new_v4()));
+    let db = super::Database::open(&path).unwrap();
+    let mut bundle = test_bundle("resume-event");
+    bundle.caption_sha256 = super::frame_sha256(bundle.caption.as_bytes());
+    let request = riviu_core::PublishCampaignRequest {
+        request_id: Uuid::new_v4().to_string(),
+        source_root: "C:/fixture".into(),
+        bundle_ids: vec![bundle.id.clone()],
+        udids: vec!["phone".into()],
+        run_at: None,
+        visibility: riviu_core::PublishVisibility::Public,
+        cleanup_policy: riviu_core::PublishCleanupPolicy::KeepImportedAssets,
+        network: riviu_core::SocialNetwork::TikTok,
+        sound_policy: riviu_core::PublishSoundPolicy::Default,
+        sheet_enabled: false,
+        execution_confirmed: true,
+        target_snapshot: None,
+        sheet_delivery: None,
+        verification_contract_version: None,
+        verification_builds: vec![],
+    };
+    let campaign = db.create_publish_campaign(&request, &[bundle]).unwrap();
+    let id = db
+        .get_publish_campaign(&campaign.id)
+        .unwrap()
+        .unwrap()
+        .assignments[0]
+        .id
+        .clone();
+    let raw = rusqlite::Connection::open(&path).unwrap();
+    raw.execute("UPDATE publish_assignments SET state='verifying',effect_intent=?2,evidence_json='{}' WHERE id=?1",rusqlite::params![id,serde_json::json!({"effectIntent":"post","expectedAccount":"actor","submittedAt":"2026-09-10T00:00:00Z"}).to_string()]).unwrap();
+    db.stop_publish_operation(&campaign.id).unwrap();
+    (db, path, campaign.id, id)
+}
+
+#[test]
+fn committed_explicit_review_is_not_reported_as_periodic_pending() {
+    let (db, path, campaign, id) = stopped_resume_fixture();
+    let raw = rusqlite::Connection::open(path).unwrap();
+    raw.execute(
+        "DELETE FROM settings WHERE key=?1",
+        [format!("operation.stop.publish:{campaign}")],
+    )
+    .unwrap();
+    raw.execute(
+        "UPDATE publish_assignments SET evidence_json='{}' WHERE id=?1",
+        [&id],
+    )
+    .unwrap();
+    let candidate = db
+        .publish_verifications_for_campaign(&campaign, 100)
+        .unwrap()
+        .remove(0);
+    assert!(db
+        .record_manual_publish_verification_diagnostic(
+            &candidate,
+            "Observed drafts; manual review needed",
+            "draftsObserved",
+            None
+        )
+        .unwrap());
+    let (status, reason) =
+        super::verification::committed_observation_outcome(&db, &candidate).unwrap();
+    assert_eq!(status, super::verification::CheckStatus::Ineligible);
+    assert_eq!(
+        reason.as_deref(),
+        Some("Observed drafts; manual review needed")
+    );
+}
+
+#[test]
+fn durable_close_intent_precedes_async_result_persistence_and_revokes_observers() {
+    let (db, _, campaign, id) = stopped_resume_fixture();
+    let revision = db.publish_assignment_revision(&id).unwrap();
+    db.resume_publish_verification(&id, true, revision).unwrap();
+    let observer = db
+        .pending_current_publish_verifications(100)
+        .unwrap()
+        .remove(0);
+    // Command has revoked observation but has not written operation.stop.result yet.
+    db.begin_publish_operation_stop(&campaign).unwrap();
+    assert!(db
+        .get_setting(&format!("operation.stop.result:publish:{campaign}"))
+        .unwrap()
+        .is_none());
+    let result = db
+        .resume_publish_verification(&id, true, db.publish_assignment_revision(&id).unwrap())
+        .unwrap();
+    assert_eq!(
+        result.state,
+        riviu_core::db::PublishResumeVerificationState::Ineligible
+    );
+    assert_eq!(result.reason.as_deref(), Some("stopInProgress"));
+    assert!(!db
+        .record_publish_verification_pending(&observer, "late callback")
+        .unwrap());
+    db.set_setting(
+        &format!("operation.stop.result:publish:{campaign}"),
+        "{\"state\":\"closed\"}",
+    )
+    .unwrap();
+    assert_eq!(
+        db.resume_publish_verification(&id, true, db.publish_assignment_revision(&id).unwrap())
+            .unwrap()
+            .state,
+        riviu_core::db::PublishResumeVerificationState::Accepted
+    );
+    db.begin_publish_operation_stop(&campaign).unwrap();
+    assert!(db
+        .pending_current_publish_verifications(100)
+        .unwrap()
+        .is_empty());
+    assert!(
+        db.publish_recovery_capabilities(&campaign).unwrap()[0]
+            .resume_verification
+            .allowed,
+        "cached closed revokes without arming a second closer"
+    );
+}
+
+#[test]
+fn already_verified_check_has_no_error() {
+    assert_eq!(
+        super::verification::unavailable_check_outcome(Some("alreadyVerified".into())),
+        (super::verification::CheckStatus::Verified, None)
+    );
+}
+
+#[test]
+fn pending_close_blocks_resume_and_capability_until_closed() {
+    let (db, _, campaign, id) = stopped_resume_fixture();
+    let revision = db.publish_assignment_revision(&id).unwrap();
+    for state in ["stopping", "needsAttention", "failed", "unknown"] {
+        db.set_setting(
+            &format!("operation.stop.result:publish:{campaign}"),
+            &serde_json::json!({"state":state}).to_string(),
+        )
+        .unwrap();
+        let cap = db
+            .publish_recovery_capabilities(&campaign)
+            .unwrap()
+            .remove(0);
+        assert!(
+            !cap.resume_verification.allowed,
+            "closure {state} is not complete"
+        );
+        assert_eq!(
+            cap.resume_verification.reason.as_deref(),
+            Some("stopInProgress")
+        );
+        let result = db.resume_publish_verification(&id, true, revision).unwrap();
+        assert_eq!(
+            result.state,
+            riviu_core::db::PublishResumeVerificationState::Ineligible
+        );
+        assert_eq!(result.reason.as_deref(), Some("stopInProgress"));
+    }
+    db.set_setting(
+        &format!("operation.stop.result:publish:{campaign}"),
+        "malformed",
+    )
+    .unwrap();
+    assert_eq!(
+        db.resume_publish_verification(&id, true, revision)
+            .unwrap()
+            .reason
+            .as_deref(),
+        Some("stopInProgress")
+    );
+    assert!(
+        !db.publish_recovery_capabilities(&campaign).unwrap()[0]
+            .resume_verification
+            .allowed
+    );
+    db.set_setting(
+        &format!("operation.stop.result:publish:{campaign}"),
+        "{\"state\":\"closed\"}",
+    )
+    .unwrap();
+    assert_eq!(
+        db.resume_publish_verification(&id, true, revision)
+            .unwrap()
+            .state,
+        riviu_core::db::PublishResumeVerificationState::Accepted
+    );
+}
+
+#[test]
+fn accepted_resume_announces_once_after_persistence() {
+    let (db, _, campaign, id) = stopped_resume_fixture();
+    let revision = db.publish_assignment_revision(&id).unwrap();
+    let events = riviu_core::events::EventBus::new(8);
+    let mut receiver = events.subscribe();
+    let result =
+        super::verification::resume_verification_and_announce(&db, &events, &id, true, revision)
+            .unwrap();
+    assert_eq!(
+        result.state,
+        riviu_core::db::PublishResumeVerificationState::Accepted
+    );
+    assert!(
+        matches!(receiver.try_recv(),Ok(riviu_core::events::AppEvent::PublishUpdated { campaign_id,.. }) if campaign_id==campaign)
+    );
+    assert_eq!(
+        db.pending_current_publish_verifications(100).unwrap().len(),
+        1
+    );
+    super::verification::resume_verification_and_announce(&db, &events, &id, true, revision)
+        .unwrap();
+    assert!(receiver.try_recv().is_err());
+}
+
+#[test]
+fn selection_diagnostic_is_attached_without_changing_failure_verdict() {
+    let diagnostic = serde_json::json!({"stage":"picker","reasonCode":"selectionLost","expectedCount":14,"lastVerifiedCount":13});
+    let evidence = super::execution::attach_selection_diagnostic(
+        "{\"message\":\"picker refused\",\"state\":\"not_posted\"}",
+        Some(&diagnostic),
+    );
+    let value: serde_json::Value = serde_json::from_str(&evidence).unwrap();
+    assert_eq!(value["selectionDiagnostic"]["lastVerifiedCount"], 13);
+    assert_eq!(value["message"], "picker refused");
+    assert_eq!(value["state"], "not_posted");
+    assert!(value.get("publicationVerified").is_none());
+}
+
+#[test]
+fn empty_or_partial_link_checks_never_report_verified() {
+    use super::verification::{check_summary, CheckStatus as S};
+    assert_eq!(check_summary(&[]), S::NoCandidate);
+    assert_eq!(check_summary(&[S::Verified, S::Pending]), S::Pending);
+    assert_eq!(check_summary(&[S::Verified, S::Busy]), S::Busy);
+    assert_eq!(check_summary(&[S::Stopped]), S::Stopped);
+    assert_eq!(check_summary(&[S::Stale]), S::Stale);
+    assert_eq!(check_summary(&[S::Ineligible]), S::Ineligible);
+    assert_eq!(check_summary(&[S::Verified, S::Verified]), S::Verified);
+}
+
 fn test_bundle(id: &str) -> riviu_core::PublishBundle {
     riviu_core::PublishBundle {
         id: id.into(),
@@ -586,6 +825,7 @@ fn verification_and_stored_reconciliation_hydrate_only_the_selected_publication(
         revision: db.publish_assignment_revision(&assignment.id).unwrap(),
         effect_intent: assignment.effect_intent.clone(),
         evidence_json: assignment.evidence_json.clone(),
+        stop_marker: None,
     };
     let raw = rusqlite::Connection::open(&path).unwrap();
     raw.execute(
@@ -1206,7 +1446,7 @@ fn video_snapshot_is_validated_and_picker_readiness_is_tuple_scoped() {
 fn hierarchy_video_uses_the_typed_sound_and_one_shot_post_state_machine() {
     let body = code_of("async fn post_through_the_composer(");
     let joined = body.join("\n");
-    assert!(joined.contains("publish_video_with_sound_effect_intent_and_progress("));
+    assert!(joined.contains("publish_video_with_sound_effect_intent_and_diagnostics("));
     assert!(joined.contains("video_plan_for_build(&package, &language, &version)"));
     assert!(joined.contains("&mut record_effect_intent"));
     assert!(joined.contains("crossed_effect_boundary = true"));

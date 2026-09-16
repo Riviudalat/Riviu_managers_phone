@@ -81,7 +81,7 @@ impl DeviceControlPlane {
         self.driver
             .stage_publish_media(lease.udid(), agent_bundle_id, campaign_id, source_root)
             .await
-            .map_err(|error| driver_error(lease.udid(), "stagePublishMedia", error))
+            .map_err(|error| stage_publish_error(lease.udid(), error))
     }
     pub fn supports_push_media(&self, udid: &str) -> bool {
         self.driver.supports_push_media(udid)

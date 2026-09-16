@@ -431,6 +431,15 @@ impl DeviceControlPlane {
     }
 }
 
+// Publish staging needs the readback's inner cause; other driver operations retain their API.
+fn stage_publish_error(udid: &str, error: anyhow::Error) -> DeviceControlError {
+    DeviceControlError::Driver {
+        udid: udid.to_string(),
+        operation: "stagePublishMedia",
+        message: format!("{error:#}"),
+    }
+}
+
 fn driver_error(udid: &str, operation: &'static str, error: anyhow::Error) -> DeviceControlError {
     DeviceControlError::Driver {
         udid: udid.to_string(),
@@ -2292,6 +2301,18 @@ mod tests {
 
     #[async_trait]
     impl crate::DeviceDriver for TestDriver {
+        async fn stage_publish_media(
+            &self,
+            _udid: &str,
+            _agent_bundle_id: &str,
+            _campaign_id: &str,
+            _source_root: &Path,
+        ) -> anyhow::Result<serde_json::Value> {
+            Err(anyhow::anyhow!("device offline")
+                .context("sha256sum /sdcard/Pictures/.riviu-publish/fixture/01.jpg")
+                .context("read back the staged sha256"))
+        }
+
         async fn shutdown_owned_processes(&self) -> anyhow::Result<()> {
             self.shutdown_owned_process_calls
                 .fetch_add(1, Ordering::SeqCst);
@@ -2612,6 +2633,27 @@ mod tests {
             Arc::new(crate::DeviceWorkCoordinator::new()),
             Arc::new(crate::StreamBudgetManager::new(limit).expect("valid test stream limit")),
         )
+    }
+
+    // Dropping anyhow's inner causes at the leased stage boundary must fail this test.
+    #[tokio::test]
+    async fn stage_publish_failure_preserves_the_complete_readback_cause() {
+        let control = control_plane(Arc::new(TestDriver::default()), 1);
+        let lease = control
+            .acquire_exclusive("fixture", DeviceWorkOwner::Script)
+            .await
+            .unwrap();
+        let error = control
+            .stage_publish_media(&lease, "agent", "campaign", Path::new("unused"))
+            .await
+            .unwrap_err();
+        let detail = error.to_string();
+        assert!(detail.contains("stagePublishMedia"), "{detail}");
+        assert!(detail.contains("read back the staged sha256"), "{detail}");
+        assert!(detail.contains("01.jpg"), "{detail}");
+        assert!(detail.contains("device offline"), "{detail}");
+        control.close_exclusive_context(lease).unwrap();
+        control.shutdown_cleanup().await.unwrap();
     }
 
     #[tokio::test]

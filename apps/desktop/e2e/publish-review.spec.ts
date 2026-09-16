@@ -30,7 +30,10 @@ for (const width of [1440, 820]) {
         if (command === "publish_reconcile") return snapshot;
         if (command === "operation_list_runs") return [summary];
         if (command === "operation_get_run") return { summary, items: [], batch: null };
-        if (command === "publish_execute") { w.reviewCalls.push(command); return { ...snapshot, issues: [], detail }; }
+        if (command === "publish_recovery_capabilities") return [{ assignmentId: "assignment", revision: 1, verificationResumed: false,
+          checkLink: { allowed: true, reason: null }, resumeVerification: { allowed: false, reason: null }, retryBeforePost: { allowed: false, reason: null } }];
+        if (command === "publish_check_links") { w.reviewCalls.push(command); return { campaignId: "review", state: "pending", outcomes: [{ assignmentId: "assignment", udid: "snapshot-phone-2", status: "pending", verified: false, error: null }] }; }
+        if (command === "publish_execute") { w.reviewCalls.push(command); throw Error("Không được dispatch khi chỉ kiểm tra link"); }
         if (command === "publish_create_campaign") { w.reviewCalls.push(command); throw Error("Unexpected fresh Post campaign"); }
         return original(command, args);
       };
@@ -56,6 +59,6 @@ for (const width of [1440, 820]) {
     const confirm = page.getByRole("alertdialog");
     await expect(confirm).toContainText("Chỉ tiếp tục lấy liên kết và ghi Sheet");
     await confirm.getByRole("button", { name: "Tiếp tục", exact: true }).click();
-    await expect.poll(() => page.evaluate(() => (window as unknown as { reviewCalls: string[] }).reviewCalls)).toEqual(["publish_execute"]);
+    await expect.poll(() => page.evaluate(() => (window as unknown as { reviewCalls: string[] }).reviewCalls)).toEqual(["publish_check_links"]);
   });
 }

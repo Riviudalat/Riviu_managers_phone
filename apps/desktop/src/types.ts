@@ -2439,6 +2439,28 @@ export interface PublishDeviceGuard {
 }
 export type PublishDeviceGuards = Record<string, PublishDeviceGuard>;
 
+export interface PublishRecoveryPermission { allowed: boolean; reason: string | null }
+export interface PublishRecoveryCapability {
+  assignmentId: string;
+  revision: number;
+  checkLink: PublishRecoveryPermission;
+  resumeVerification: PublishRecoveryPermission;
+  retryBeforePost: PublishRecoveryPermission;
+  verificationResumed: boolean;
+}
+export interface PublishVerificationResumeResult {
+  assignmentId: string;
+  state: "accepted" | "alreadyPending" | "alreadyVerified" | "stale" | "ineligible";
+  reason: string | null;
+}
+export type PublishLinkCheckStatus = "verified" | "pending" | "busy" | "stopped" | "stale" | "noCandidate" | "ineligible";
+export interface PublishLinkCheckResult {
+  campaignId: string;
+  state: PublishLinkCheckStatus;
+  reason?: string | null;
+  outcomes: { assignmentId: string; udid: string; verified: boolean; error: string | null; status: PublishLinkCheckStatus }[];
+}
+
 export interface GoogleSheetsStatus {
   configured: boolean;
   connected: boolean;

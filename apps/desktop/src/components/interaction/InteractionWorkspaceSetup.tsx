@@ -107,6 +107,13 @@ export function InteractionWorkspaceSetup({ setup: p, profiles, scopeControl, ef
             {draft.textSource === "script" ? <ConversationEditor draft={draft} onChange={value=>patch("conversationJson",value)} onRawChange={value=>patch("conversationRawJson",value)} targets={targets} devices={p.devices.filter(device=>effectiveActors.includes(device.udid))} handles={p.savedHandles ?? {}} deviceNumber={p.deviceNumber} deviceLabel={p.deviceLabel} onAssignAccount={setAccount}/> : draft.textSource === "ai" ? <label className="iw-field"><span>Hướng dẫn giọng điệu cho AI</span><textarea rows={3} value={draft.instruction} onChange={(event) => patch("instruction", event.target.value)} /></label>
               : <label className="iw-field"><span>Danh sách bình luận — mỗi dòng một câu</span><textarea rows={4} value={draft.manualText} onChange={(event) => patch("manualText", event.target.value)} /><small>{manualCommentsOf(draft).length} câu · {draft.threadKind === "chain" ? `cần ít nhất ${messages}` : `quay vòng cho ${messages} lượt`}</small></label>}
             <p className="iw-help">{draft.textSource === "script" ? "Các vai giữ đúng máy; mỗi link có hội thoại riêng và được thực hiện xen kẽ." : draft.threadKind === "standalone" ? "Mỗi máy tự mở bài và gửi bình luận riêng." : "Cần ít nhất 2 máy cùng loại. Một máy gửi gốc trước khi các máy còn lại trả lời."} {draft.textSource === "ai" && "AI chỉ gửi khi đọc đủ nội dung bài."}</p>
+            <label className="iw-checkbox"><input type="checkbox" checked={draft.likeParent} onChange={(event) => patch("likeParent", event.target.checked)} />Tim bình luận của máy trước</label>
+            {/* Outside the advanced block, and outside the script guard, for the same reason the
+                tag switch is shape-guarded and this one is not: a scripted run's parents come
+                from the script, but its messages still answer each other, so the switch means
+                exactly what it means on a shape the form picked. A root comment has nothing to
+                like, which the engine no-ops rather than the form hiding the setting. */}
+            <p className="iw-help">Máy trả lời tim đúng bình luận nó đang trả lời trước khi bấm Trả lời. Bình luận gốc không có gì để tim nên không bị ảnh hưởng. Máy đã tim rồi thì bỏ qua, không bỏ tim. Kết quả hiện ở dòng riêng trong Theo dõi.</p>
             {draft.textSource !== "script" && <button type="button" className="ghost iw-advanced-button" aria-expanded={p.advancedOpen} onClick={() => p.setAdvancedOpen(!p.advancedOpen)}>{p.advancedOpen ? "Ẩn tuỳ chỉnh nâng cao" : "Tuỳ chỉnh nâng cao"}</button>}
             {p.advancedOpen && draft.textSource !== "script" && <div className="iw-advanced">
               <div className="iw-fields">
@@ -116,8 +123,6 @@ export function InteractionWorkspaceSetup({ setup: p, profiles, scopeControl, ef
               </div>
               <p className="iw-help">Để trống số bình luận để tự lấy bằng số máy đã chọn. Giữ bài là số giây máy ở lại bài sau khi làm xong, tối đa 60.</p>
               {draft.threadKind !== "standalone" && <label className="iw-checkbox"><input type="checkbox" checked={draft.mentionParent} onChange={(event) => patch("mentionParent", event.target.checked)} />Các máy tag nhau khi trả lời</label>}
-              <label className="iw-checkbox"><input type="checkbox" checked={draft.likeParent} onChange={(event) => patch("likeParent", event.target.checked)} />Tim bình luận của máy trước</label>
-              <p className="iw-help">Máy trả lời tim đúng bình luận nó đang trả lời trước khi bấm Trả lời. Bình luận gốc không có gì để tim nên không bị ảnh hưởng. Máy đã tim rồi thì bỏ qua, không bỏ tim.</p>
               <label className="iw-field"><span>Tag thêm tài khoản (@handle)</span><input value={draft.mentionText} onChange={(event) => patch("mentionText", event.target.value)} placeholder="Cách nhau bằng dấu cách hoặc phẩy" /></label>
               {p.mentions.length > 0 && <p className="iw-help">{p.mentionActorCount} tài khoản đã gán khớp tag được thêm vào lượt chạy. Android chọn tag từ gợi ý; iPhone chỉ chèn chữ. Xem kết quả tại Theo dõi.</p>}
               <InteractionThreshold controls={p.threshold} />

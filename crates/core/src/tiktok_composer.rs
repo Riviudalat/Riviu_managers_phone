@@ -69,6 +69,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 mod progress;
 mod selection;
 pub use progress::{PublishProgress, PublishProgressObserver};
+pub use selection::{
+    SelectionArtifact, SelectionBounds, SelectionDiagnostic, SelectionReason, SelectionStage,
+};
 use std::time::Duration;
 
 // `tokio`'s clock for the same reason `tiktok_drawer` uses it: a
@@ -916,6 +919,8 @@ pub struct Composer<'a, P: TapPlanner> {
     plan_tap: P,
     pending_sound_proof: Option<(SoundPickerPlan, String)>,
     progress: &'a PublishProgressObserver<'a>,
+    last_selection_diagnostic: Option<SelectionDiagnostic>,
+    selection_diagnostics: Option<&'a (dyn Fn(&SelectionDiagnostic) + Send + Sync)>,
 }
 
 impl<'a, P: TapPlanner> Composer<'a, P> {
@@ -926,11 +931,26 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
             plan_tap,
             pending_sound_proof: None,
             progress: &|_| {},
+            last_selection_diagnostic: None,
+            selection_diagnostics: None,
         }
+    }
+
+    /// Diagnostic from the last verified-picker refusal; never selection proof.
+    pub fn last_selection_diagnostic(&self) -> Option<&SelectionDiagnostic> {
+        self.last_selection_diagnostic.as_ref()
     }
 
     pub fn plan(&self) -> ComposerPlan {
         self.plan
+    }
+
+    pub fn with_selection_diagnostics(
+        mut self,
+        diagnostics: &'a (dyn Fn(&SelectionDiagnostic) + Send + Sync),
+    ) -> Self {
+        self.selection_diagnostics = Some(diagnostics);
+        self
     }
 
     pub fn with_progress(mut self, progress: &'a PublishProgressObserver<'a>) -> Self {
@@ -2110,6 +2130,38 @@ pub async fn publish_carousel_with_sound_effect_intent_and_progress<F>(
 where
     F: FnMut(&SoundSelectionEvidence) -> anyhow::Result<()>,
 {
+    publish_carousel_with_sound_effect_intent_and_diagnostics(
+        session,
+        plan,
+        sound_plan,
+        sound_policy,
+        plan_tap,
+        request,
+        stop,
+        before_post,
+        progress,
+        &|_| {},
+    )
+    .await
+}
+
+/// Additive diagnostic observer; its callback cannot replace the composer verdict.
+#[allow(clippy::too_many_arguments)]
+pub async fn publish_carousel_with_sound_effect_intent_and_diagnostics<F>(
+    session: &dyn UiSession,
+    plan: ComposerPlan,
+    sound_plan: SoundPickerPlan,
+    sound_policy: &PublishSoundPolicy,
+    plan_tap: impl TapPlanner,
+    request: &CarouselRequest<'_>,
+    stop: &AtomicBool,
+    before_post: F,
+    progress: &PublishProgressObserver<'_>,
+    diagnostics: &(dyn Fn(&SelectionDiagnostic) + Send + Sync),
+) -> anyhow::Result<(ComposerVerdict, Option<SoundSelectionEvidence>)>
+where
+    F: FnMut(&SoundSelectionEvidence) -> anyhow::Result<()>,
+{
     publish_selected_media_with_sound_effect_intent(
         session,
         plan,
@@ -2121,6 +2173,7 @@ where
         stop,
         before_post,
         progress,
+        diagnostics,
     )
     .await
 }
@@ -2177,6 +2230,39 @@ pub async fn publish_video_with_sound_effect_intent_and_progress<F>(
 where
     F: FnMut(&SoundSelectionEvidence) -> anyhow::Result<()>,
 {
+    publish_video_with_sound_effect_intent_and_diagnostics(
+        session,
+        plan,
+        video_plan,
+        sound_plan,
+        sound_policy,
+        plan_tap,
+        request,
+        stop,
+        before_post,
+        progress,
+        &|_| {},
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn publish_video_with_sound_effect_intent_and_diagnostics<F>(
+    session: &dyn UiSession,
+    plan: ComposerPlan,
+    video_plan: VideoPickerPlan,
+    sound_plan: SoundPickerPlan,
+    sound_policy: &PublishSoundPolicy,
+    plan_tap: impl TapPlanner,
+    request: &VideoRequest<'_>,
+    stop: &AtomicBool,
+    before_post: F,
+    progress: &PublishProgressObserver<'_>,
+    diagnostics: &(dyn Fn(&SelectionDiagnostic) + Send + Sync),
+) -> anyhow::Result<(ComposerVerdict, Option<SoundSelectionEvidence>)>
+where
+    F: FnMut(&SoundSelectionEvidence) -> anyhow::Result<()>,
+{
     let _measured_video_tuple = video_plan.provenance();
     publish_selected_media_with_sound_effect_intent(
         session,
@@ -2189,6 +2275,7 @@ where
         stop,
         before_post,
         progress,
+        diagnostics,
     )
     .await
 }
@@ -2205,6 +2292,7 @@ async fn publish_selected_media_with_sound_effect_intent<P, F>(
     stop: &AtomicBool,
     mut before_post: F,
     progress: &PublishProgressObserver<'_>,
+    diagnostics: &(dyn Fn(&SelectionDiagnostic) + Send + Sync),
 ) -> anyhow::Result<(ComposerVerdict, Option<SoundSelectionEvidence>)>
 where
     P: TapPlanner,
@@ -2213,7 +2301,9 @@ where
     if !plan.can_publish() || (!requested_media.video && !plan.can_publish_carousel()) {
         return Ok((ComposerVerdict::PostUnmeasured, None));
     }
-    let mut composer = Composer::new(session, plan, plan_tap).with_progress(progress);
+    let mut composer = Composer::new(session, plan, plan_tap)
+        .with_progress(progress)
+        .with_selection_diagnostics(diagnostics);
     let outcome = async {
         match reach_selected_media_edit_step(&mut composer, requested_media, stop).await? {
             ComposerVerdict::Stopped => {}
@@ -3573,6 +3663,49 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn production_diagnostic_wrapper_exports_picker_refusal_without_post_callback() {
+        let session = FakeSession::full_walk("album");
+        let mut plan = plan();
+        plan.selection_controls = Some(selection::PickerControls {
+            package: "com.ss.android.ugc.trill",
+            selector: ElementQuery::ResourceIdSuffix(":id/h4b"),
+            next: ElementQuery::ResourceIdSuffix(":id/q4g"),
+        });
+        let saved = Mutex::new(Vec::new());
+        let result = publish_carousel_with_sound_effect_intent_and_diagnostics(
+            &session,
+            plan,
+            SoundPickerPlan::resolve("com.ss.android.ugc.trill", "en", "38.3.2").unwrap(),
+            &PublishSoundPolicy::TrendingAny {
+                pool_size: 5,
+                seed: 1,
+            },
+            |r: &ElementBox| r.centre(),
+            &CarouselRequest {
+                album: "album",
+                images: 14,
+                screen: screen(),
+                caption: "fixture",
+            },
+            &AtomicBool::new(false),
+            |_| panic!("refusal must remain before Post"),
+            &|_| {},
+            &|diagnostic| saved.lock().push(diagnostic.clone()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(result, (ComposerVerdict::NotEnoughSelected, None));
+        assert_eq!(saved.lock().len(), 1);
+        assert_eq!(
+            saved.lock()[0].reason_code,
+            SelectionReason::InitialGridInvalid
+        );
+        assert_eq!(saved.lock()[0].last_verified_count, 0);
+        assert_eq!(saved.lock()[0].expected_count, 14);
+        assert!(session.typed.lock().is_none());
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn production_carousel_without_selection_proof_refuses_before_any_tap() {
         let session = FakeSession::with(vec![feed()]);
         let result = publish_selected_media_with_sound_effect_intent(
@@ -3593,6 +3726,7 @@ mod tests {
             "fixture caption",
             &AtomicBool::new(false),
             |_| anyhow::bail!("Post gate must not be reached"),
+            &|_| {},
             &|_| {},
         )
         .await

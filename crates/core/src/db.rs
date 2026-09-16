@@ -60,7 +60,8 @@ pub use publish_sheet::{SheetOutboxRow, SheetOutboxSettlement, SheetOutboxState}
 pub use publish_sheet_delivery::{SheetDeliveryClaim, SheetDeliveryKind, SheetDeliveryPayload};
 pub use publish_verification::{
     publish_campaign_input_digest, PendingPublishVerification, PublishDeviceGuard,
-    PublishDeviceHold,
+    PublishDeviceHold, PublishRecoveryCapabilities, PublishRecoveryCapability,
+    PublishResumeVerificationResult, PublishResumeVerificationState,
 };
 
 /// Somewhere to keep a secret that is **not** the SQLite file.

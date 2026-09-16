@@ -1324,7 +1324,13 @@ export async function interactionRetry(campaignId: string, assignmentIds?: strin
 }
 
 export async function publishCheckLinks(campaignId:string,udid?:string) {
-  return invoke<{campaignId:string;outcomes:{assignmentId:string;udid:string;verified:boolean;error:string|null}[]}>("publish_check_links",{campaignId,udid:udid??null});
+  return invoke<import("./types").PublishLinkCheckResult>("publish_check_links",{campaignId,udid:udid??null});
+}
+export function publishRecoveryCapabilities(campaignId: string) {
+  return invoke<import("./types").PublishRecoveryCapability[]>("publish_recovery_capabilities", { campaignId });
+}
+export function publishResumeVerification(assignmentId: string, confirmed: boolean, expectedRevision: number) {
+  return invoke<import("./types").PublishVerificationResumeResult>("publish_resume_verification", { assignmentId, confirmed, expectedRevision });
 }
 
 export async function interactionVerifyComment(campaignId: string, assignmentId: string) {
