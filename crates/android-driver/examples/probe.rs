@@ -83,6 +83,7 @@ const KNOWN_FLAGS: &[&str] = &[
     "--copy-link",
     "--measure-mention",
     "--measure-comment-list",
+    "--like-comment-row",
     "--measure-reply",
     "--measure-target-open",
     "--measure-carousel",
@@ -465,6 +466,8 @@ async fn main() -> anyhow::Result<()> {
     // The seam the Interaction reply path needs: many matches for one label, and a
     // geometric choice among them. Opens the drawer, reads the rows, and runs the
     // real `locate_parent_in_elements` against a body it read off this phone.
+    // Reads each row's heart with the production reader too, so a build whose comment
+    // controls cannot be named says so here rather than mid-campaign.
     // Sends nothing and taps nothing but the comment opener.
     if args.iter().any(|arg| arg == "--measure-comment-list") {
         println!("\n== comment list rows ==");
@@ -476,7 +479,29 @@ async fn main() -> anyhow::Result<()> {
             }
         }
     } else {
-        println!("\n(skipping the comment-list measurement; pass --measure-comment-list)");
+        println!(
+            "\n(skipping the comment-list measurement; pass --measure-comment-list — it opens \
+             the drawer, resolves the rows, reads each row's heart state with the production \
+             reader, and presses Back)"
+        );
+    }
+
+    // ⚠ Taps one real comment's heart — a public like, and the only step in this probe that
+    // changes something on a post. Sends and types nothing.
+    if args.iter().any(|arg| arg == "--like-comment-row") {
+        println!("\n== like one comment row ==");
+        match like_one_comment_row(&session, ui, labels).await {
+            Ok(()) => {}
+            Err(error) => {
+                failed_steps += 1;
+                println!("  FAILED: {error:#}")
+            }
+        }
+    } else {
+        println!(
+            "\n(skipping the comment like; pass --like-comment-row — it LIKES one real comment \
+             on the post on screen)"
+        );
     }
 
     // The last unknown in the Interaction reply path: what tapping `Trả lời` opens.
@@ -1290,16 +1315,6 @@ async fn measure_comment_list(
         .filter(|node| node.class.ends_with("TextView") && !node.text.trim().is_empty())
         .collect();
     println!("  {} TextView rows carry text", rows.len());
-    let Some(sample) = rows
-        .iter()
-        .filter(|node| node.text.chars().count() >= 6 && !node.text.contains("bình luận"))
-        .nth(1)
-    else {
-        println!("  ! not enough comment rows on screen to test the resolver");
-        session.agent().press_key(KEYCODE_BACK).await.ok();
-        return Ok(());
-    };
-    println!("  resolving against row text {:?}", sample.text);
 
     // Rebuild the three candidate lists in `ElementBox` shape, carrying each node's
     // own text in `description` — which is what `locate_parent_in_elements` reads.
@@ -1338,9 +1353,112 @@ async fn measure_comment_list(
             .filter(|node| node.text == reply.value())
             .collect(),
     );
+
+    // **The comment heart, read the way the campaign reads it**: every candidate body goes
+    // through the production row finder (`search::row`) — which reads the row's heart and its
+    // state with the shipped catalogue — so what is printed below came off this phone, through
+    // the code that will tap, and not from a guessed sample.
+    //
+    // The reply is the row the campaign would answer and the heart is the control it would tap,
+    // printed as **the point a tap lands on**: a tap on the wrong row removes a stranger's like,
+    // and geometry is the only thing that decides whether it does.
+    let tree = riviu_core::ui_automation::tree::Tree::parse(riviu_core::HierarchySourceSnapshot {
+        generation: 1,
+        xml: source.clone(),
+    })?;
+    let mut confirmed: Option<String> = None;
+    let mut skipped = 0usize;
+    let mut strips = 0usize;
+    for candidate in rows.iter() {
+        let text = candidate.text.trim();
+        if text.chars().count() < 6 {
+            continue;
+        }
+        let short: String = text.chars().take(40).collect();
+        match riviu_core::comment_verification::search::row(&tree, labels.package(), text, None) {
+            Ok(Some(found)) => {
+                let reply = found
+                    .reply
+                    .as_ref()
+                    .map(|reply| format!("{:.0},{:.0}", reply.x, reply.y))
+                    .unwrap_or_else(|| "none".to_string());
+                // `row()` fills BOTH the body and the reply and leaves `like` to its caller —
+                // the control's name is catalogue data and the finder matches on strings this
+                // file already knows. This is the same composition `find_with_options` makes on
+                // the shipped path, so the heart printed here is the one the campaign would tap.
+                let heart = match riviu_core::comment_verification::search::row_like_control(
+                    &tree,
+                    labels,
+                    &found.body,
+                    found.reply.as_ref(),
+                ) {
+                    Some(like) => {
+                        let centre = like.element.centre();
+                        format!(
+                            "heart {:>4},{:>5} {:>3}x{:<3} state={:?} — a tap would land \
+                             {:.0},{:.0}",
+                            like.element.x,
+                            like.element.y,
+                            like.element.width,
+                            like.element.height,
+                            like.liked,
+                            centre.x,
+                            centre.y
+                        )
+                    }
+                    None => "heart refused: this row's strip does not hold exactly one like \
+                             control, or this build cannot name one — the campaign would skip \
+                             the like and say so"
+                        .to_string(),
+                };
+                println!("  ROW {short:?} reply {reply}  {heart}");
+                // **What the row actually holds**, so a refusal above can be answered with this
+                // phone's own nodes instead of a guess: the rule wants exactly one control
+                // named `Like or undo like` inside the reply's band, and every node in that
+                // band is printed here to show which part of that the build disagrees with.
+                // Two rows only — it is one line per neighbour.
+                if strips < 2 {
+                    strips += 1;
+                    if let Some(reply) = found.reply.as_ref() {
+                        let top = reply.y - 80.0;
+                        let bottom = reply.y + reply.height + 80.0;
+                        for node in all.iter() {
+                            let Some((_, y, _, node_bottom)) = parse_bounds(&node.bounds) else {
+                                continue;
+                            };
+                            if node_bottom <= top || y >= bottom {
+                                continue;
+                            }
+                            let class = node.class.rsplit('.').next().unwrap_or(&node.class);
+                            println!(
+                                "      {class:<12} desc={:?} id={:?} {}",
+                                node.desc, node.resource_id, node.bounds
+                            );
+                        }
+                    }
+                }
+                confirmed.get_or_insert_with(|| text.to_string());
+            }
+            // A tab, a timestamp, the post's caption: not a comment row, and the finder says so
+            // rather than guessing one. Counted rather than printed one per line — the count is
+            // the same fact without burying the rows that did resolve.
+            Ok(None) => skipped += 1,
+            Err(error) => println!("  {short:?}: {error}"),
+        }
+    }
+    if skipped > 0 {
+        println!("  ({skipped} candidate text(s) were not comment rows)");
+    }
+
+    let Some(sample) = confirmed else {
+        println!("  ! no comment row on screen to resolve against");
+        session.agent().press_key(KEYCODE_BACK).await.ok();
+        return Ok(());
+    };
+    println!("  resolving against row text {sample:?}");
     let identity = riviu_core::CommentLocatorIdentity {
         author_label: String::new(),
-        text: sample.text.clone(),
+        text: sample.clone(),
         locator_version: "android-hierarchy-v1".into(),
         frame_sha256: "0".repeat(64),
     };
@@ -1355,6 +1473,142 @@ async fn measure_comment_list(
             reply_boxes.len(),
             authors.len()
         ),
+    }
+
+    // The read the confirmation polls **after** the tap. It has to find a filled heart in this
+    // row's own band, so the geometry printed here is what decides whether a like on another
+    // comment could be mistaken for this one's — and the count is what the band filter drops.
+    for control in [TikTokControl::CommentLiked, TikTokControl::CommentNotLiked] {
+        let Some(label) = labels.label(control) else {
+            println!("  {control:?}: not catalogued for this build");
+            continue;
+        };
+        let started = Instant::now();
+        let icons = ui.locate_all(label.to_query()).await?;
+        let rects: Vec<String> = icons
+            .iter()
+            .map(|icon| {
+                format!(
+                    "{:.0},{:.0} {:.0}x{:.0}",
+                    icon.x, icon.y, icon.width, icon.height
+                )
+            })
+            .collect();
+        println!(
+            "  {control:?} {:?}: {} node(s) in {} ms  [{}]",
+            label.value(),
+            icons.len(),
+            started.elapsed().as_millis(),
+            rects.join("; ")
+        );
+    }
+
+    session.agent().press_key(KEYCODE_BACK).await.ok();
+    tokio::time::sleep(Duration::from_millis(1_000)).await;
+    Ok(())
+}
+
+/// **Likes one real comment, with the shipped policy.**
+///
+/// ⚠ **This taps a real comment on a real post, from the account the phone is signed into.**
+/// It sends nothing and types nothing; the like is public and is not undone.
+///
+/// The point is the tap. `--measure-comment-list` proves the state read and the geometry
+/// without touching anything, and what a tap *does* to the row — whether this build's icon
+/// really swaps, and whether the confirmation can see it — is not observable any other way. The
+/// call below is [`riviu_core::interaction_hierarchy::like_comment_row`] itself, so a pass here
+/// is evidence about the campaign's code rather than about a copy of it.
+async fn like_one_comment_row(
+    session: &riviu_android_driver::AndroidUiSession,
+    ui: &dyn UiSession,
+    labels: TikTokControls,
+) -> anyhow::Result<()> {
+    const KEYCODE_BACK: i64 = 4;
+    let Some(opener) = labels.label(TikTokControl::Comments) else {
+        anyhow::bail!("no measured comment label on this build");
+    };
+    let element = ui
+        .locate(opener.to_query())
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("the comment control is not on screen"))?;
+    ui.tap(element.centre()).await?;
+    tokio::time::sleep(Duration::from_millis(2_500)).await;
+
+    let source = session.agent().source().await?;
+    let tree = riviu_core::ui_automation::tree::Tree::parse(riviu_core::HierarchySourceSnapshot {
+        generation: 1,
+        xml: source.clone(),
+    })?;
+    let rows: Vec<Node> = scan_source(&source)
+        .into_iter()
+        .filter(|node| node.class.ends_with("TextView") && !node.text.trim().is_empty())
+        .collect();
+    let size = ui.window_size().await?;
+    let stop = std::sync::atomic::AtomicBool::new(false);
+
+    for candidate in rows.iter() {
+        let text = candidate.text.trim();
+        if text.chars().count() < 6 {
+            continue;
+        }
+        let Ok(Some(found)) =
+            riviu_core::comment_verification::search::row(&tree, labels.package(), text, None)
+        else {
+            continue;
+        };
+        let Some(like) = riviu_core::comment_verification::search::row_like_control(
+            &tree,
+            labels,
+            &found.body,
+            found.reply.as_ref(),
+        ) else {
+            continue;
+        };
+        let short: String = text.chars().take(48).collect();
+        println!(
+            "  row {short:?} heart {:>4},{:>5} state={:?}",
+            like.element.x, like.element.y, like.liked
+        );
+        // Only a heart this build *read as not liked* may be tapped: the control is a toggle, so
+        // a tap on a filled one removes somebody's like. `None` (a state nobody could read) is
+        // refused by the policy as well — this skips to a row where the answer can be proved.
+        if like.liked != Some(false) {
+            println!("  skipping: {:?} is not a state a tap can be proved from", like.liked);
+            continue;
+        }
+        let note =
+            riviu_core::interaction_hierarchy::like_comment_row(ui, labels, size, &stop, Some(&like))
+                .await;
+        println!("  LIKE -> {note}");
+
+        // Read the row straight back, in the same drawer, with the policy's own confirmation
+        // query — so what is printed is what the campaign would have recorded. One query, two
+        // answers: the band the policy accepts (24 px) and a wider ring that shows whether a
+        // filled heart appeared *near* the row rather than in it.
+        let icons = ui
+            .locate_all(
+                labels
+                    .label(TikTokControl::CommentLiked)
+                    .ok_or_else(|| anyhow::anyhow!("no liked-heart id for this build"))?
+                    .to_query(),
+            )
+            .await?;
+        let near: Vec<String> = icons
+            .iter()
+            .filter(|icon| {
+                (icon.y - like.element.y).abs() <= 120.0
+                    && (icon.x - like.element.x).abs() <= 120.0
+            })
+            .map(|icon| format!("{:.0},{:.0}", icon.x, icon.y))
+            .collect();
+        let in_row = icons.iter().any(|icon| {
+            (icon.y - like.element.y).abs() <= 24.0 && (icon.x - like.element.x).abs() <= 24.0
+        });
+        println!(
+            "  after: filled heart in this row = {in_row} (near: {near:?}, whole screen: {} node(s))",
+            icons.len()
+        );
+        break;
     }
 
     session.agent().press_key(KEYCODE_BACK).await.ok();
