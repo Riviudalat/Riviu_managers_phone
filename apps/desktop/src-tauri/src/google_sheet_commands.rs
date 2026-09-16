@@ -18,6 +18,8 @@ use tokio::sync::Mutex;
 const PICKED_FILE: &str = "google.sheets.picked-file.v1";
 static TOKEN_LOCK: Mutex<()> = Mutex::const_new(());
 static CONNECTION_LOCK: Mutex<()> = Mutex::const_new(());
+#[path = "google_sheet_app_config.rs"]
+mod app_config;
 #[cfg(test)]
 #[path = "google_sheet_commands_tests.rs"]
 mod tests;
@@ -59,7 +61,7 @@ pub struct GoogleSheetsStatus {
     error: Option<String>,
 }
 async fn status(db: &Database) -> anyhow::Result<GoogleSheetsStatus> {
-    let config = db.google_oauth_config()?;
+    let config = app_config::configured(db)?;
     let tokens = db.google_oauth_tokens()?;
     let connection = db.google_sheet_connection()?;
     let selected = picked(db)?;
@@ -112,8 +114,7 @@ pub(crate) async fn access_tokens(db: &Database) -> anyhow::Result<GoogleOAuthTo
         return Ok(tokens);
     }
     let client = GoogleOAuthClient::new(
-        db.google_oauth_config()?
-            .context("Chưa cấu hình Google OAuth Desktop")?,
+        app_config::configured(db)?.context("Chưa cấu hình Google OAuth Desktop")?,
     )?;
     match client.refresh(&tokens).await {
         Ok(next) => {
@@ -179,7 +180,7 @@ pub async fn google_sheets_configure(
     if pending.phase != "idle" {
         return Err(err("Hoàn tất hoặc hủy cửa sổ Google đang mở"));
     }
-    let previous = state.db.google_oauth_config().map_err(err)?;
+    let previous = app_config::configured(&state.db).map_err(err)?;
     let same = previous
         .as_ref()
         .is_some_and(|c| c.client_id == client_id.trim());
@@ -223,15 +224,14 @@ pub async fn google_sheets_login(
     if slot.phase != "idle" {
         return Err(err("Đang có cửa sổ Google chờ hoàn tất"));
     }
-    let client = GoogleOAuthClient::new(
-        state
-            .db
-            .google_oauth_config()
-            .map_err(err)?
-            .context("Chưa cấu hình OAuth Client Desktop")
-            .map_err(err)?,
-    )
-    .map_err(err)?;
+    let config = app_config::configured(&state.db)
+        .map_err(err)?
+        .context("Mở Thiết lập Google để cấu hình ứng dụng trước khi đăng nhập")
+        .map_err(err)?;
+    // Pin the application's client alongside the local login. A later binary with
+    // another bundled client must not refresh this account under that client.
+    state.db.set_google_oauth_config(&config).map_err(err)?;
+    let client = GoogleOAuthClient::new(config).map_err(err)?;
     let session = client.authorization_session().await.map_err(err)?;
     open_browser(session.authorization_url()).map_err(err)?;
     slot.generation += 1;
@@ -315,9 +315,7 @@ pub async fn google_sheets_pick_file(
         return Err(err("Đang có cửa sổ Google chờ hoàn tất"));
     }
     let client = GoogleOAuthClient::new(
-        state
-            .db
-            .google_oauth_config()
+        app_config::configured(&state.db)
             .map_err(err)?
             .context("Chưa cấu hình Google")
             .map_err(err)?,

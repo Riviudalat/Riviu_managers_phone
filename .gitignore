@@ -20,6 +20,8 @@ __pycache__/
 *.py[cod]
 .env
 .env.*
+# Application OAuth build input stays local; CI uses its repository secret.
+apps/desktop/src-tauri/google-oauth.local.json
 sidecars/wda/DerivedData/
 sidecars/wda/build_payload/
 # Helper APK build output. Both paths are intermediates — the shipped artifact is the copy

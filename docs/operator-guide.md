@@ -406,9 +406,16 @@ hoặc ghi sang bảng đó. Không cần chọn tab lần nữa nếu link đã
 Đăng nhập xong chưa có nghĩa bảng đã sẵn sàng ghi: chờ trạng thái xác minh màu
 xanh. Tab hoàn toàn trống được chuẩn bị header chuẩn, không thêm hàng thử.
 
-Mục Apps Script cũ, form thông tin OAuth và các bước chọn tab riêng đã được bỏ
-khỏi màn Đăng bài. Cấu hình Google do quản trị viên thiết lập; client secret và
-token nằm trong kho thông tin xác thực hệ điều hành, không kèm bộ cài. Trong lúc
+Mục Apps Script cũ và các bước chọn tab riêng đã được bỏ khỏi màn Đăng bài.
+Bản release mới mang sẵn cấu hình ứng dụng Google; mỗi máy vẫn đăng nhập tài khoản
+Google riêng rồi kiểm tra đúng Sheet. Quy trình build dừng nếu thiếu cấu hình.
+Chép `.exe` hoặc thư mục app không chép phiên đăng nhập đã lưu trong kho
+thông tin xác thực của máy cũ. Nếu dùng bản dev chưa có cấu hình, mở **Thiết lập Google**
+ngay dưới ô kết nối, nhập OAuth Client ID loại Desktop, client secret (nếu có),
+Picker API key và project number do quản trị viên cung cấp rồi bấm **Lưu cấu hình Google**.
+Các trường này thuộc ứng dụng, không phải mật khẩu tài khoản. Sau khi đủ cấu hình,
+form tự ẩn; tiếp tục **Đăng nhập Google** rồi **Kiểm tra kết nối**.
+Phiên đăng nhập và cấu hình nhập tay lưu trong kho xác thực hệ điều hành. Trong lúc
 đăng nhập hoặc chọn bảng, có thể hủy bằng nút Google; lượt chuyển kết nối đã được
 nhận sẽ hoàn tất hoặc giữ trạng thái để tiếp tục. Một tab chỉ nhận ghi từ PC đã
 liên kết; việc chuyển PC cần bàn giao rõ ràng để không có hai bộ ghi cùng lúc.

@@ -23,4 +23,12 @@
 .google-sheet-compact-controls{display:grid;grid-template-columns:minmax(0,1fr) auto auto;gap:6px;align-items:center;min-width:0}
 .google-sheet-compact-controls input{width:100%;min-width:0;height:36px;box-sizing:border-box;font-size:var(--text-sm)}
 .google-sheet-compact-controls button{display:inline-flex;align-items:center;justify-content:center;gap:5px;min-height:36px;padding:6px 9px;font-size:var(--text-sm);white-space:nowrap}
+.google-app-setup{border-top:1px solid var(--line);padding-top:8px;font-size:var(--text-sm)}
+.google-app-setup summary{cursor:pointer;font-weight:600;padding:4px 0}
+.google-app-setup p{margin:8px 0;color:var(--text-3);line-height:1.5}
+.google-app-setup fieldset{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;margin:0;padding:0;border:0;min-width:0}
+.google-app-setup label{display:grid;gap:4px;min-width:0}
+.google-app-setup input{width:100%;min-width:0;box-sizing:border-box}
+.google-app-setup button{justify-self:start;min-height:36px}
+@media(max-width:640px){.google-app-setup fieldset{grid-template-columns:minmax(0,1fr)}}
 @media(max-width:1099px){.google-sheet-compact-controls{grid-template-columns:1fr 1fr}.google-sheet-compact-controls input{grid-column:1/-1}}

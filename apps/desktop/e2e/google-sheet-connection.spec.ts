@@ -9,17 +9,17 @@ type GoogleFixture = {
   completeGoogleBrowser: (selectedId?: string) => void;
 };
 
-async function installGoogleFixture(page: Page, connected = true, selectedFileId = "selected-file") {
+async function installGoogleFixture(page: Page, connected = true, selectedFileId = "selected-file", configured = true) {
   await installTauriMock(page, { androidRoster: true, fleetSize: 20 });
-  await page.addInitScript(({ connected, selectedFileId }) => {
+  await page.addInitScript(({ connected, selectedFileId, configured }) => {
     const w = window as unknown as GoogleFixture & {
       __TAURI_INTERNALS__: { invoke: (command: string, args: Record<string, unknown>) => Promise<unknown> };
     };
     const original = w.__TAURI_INTERNALS__.invoke;
     w.googleCalls = [];
     const status = {
-      configured: true, connected, active: connected, clientId: "fixture.apps.googleusercontent.com",
-      pickerConfigured: true, phase: "idle", error: null as string | null,
+      configured, connected, active: connected, clientId: configured ? "fixture.apps.googleusercontent.com" : "",
+      pickerConfigured: configured, phase: "idle", error: null as string | null,
       accountId: connected ? "account-a" : null, email: connected ? "operator@example.test" : null,
       selectedFileId: connected ? selectedFileId : null, selectedFileName: connected ? "Kết quả đăng bài" : null,
       sheetUrl: connected ? "https://docs.google.com/spreadsheets/d/selected-file/edit#gid=0" : null,
@@ -47,6 +47,10 @@ async function installGoogleFixture(page: Page, connected = true, selectedFileId
       if (command === "google_sheets_status") return { ...status };
       if (command.startsWith("google_sheets_") || command === "publish_sheet_check") w.googleCalls.push({ command, args });
       if (command === "google_sheets_login") { status.phase = "authorizing"; return { ...status }; }
+      if (command === "google_sheets_configure") {
+        status.configured = true; status.pickerConfigured = true; status.clientId = String(args.clientId);
+        return { ...status };
+      }
       if (command === "google_sheets_pick_file") {
         if (!status.connected || status.phase !== "idle") throw Error("Picker requires idle authenticated session");
         status.phase = "picking"; return { ...status };
@@ -74,7 +78,7 @@ async function installGoogleFixture(page: Page, connected = true, selectedFileId
       }
       return original(command, args);
     };
-  }, { connected, selectedFileId });
+  }, { connected, selectedFileId, configured });
   await page.goto("/");
   await openOperatorPage(page, "Đăng bài");
 }
@@ -83,6 +87,26 @@ const calls = (page: Page, command: string) => page.evaluate(command =>
   (window as unknown as GoogleFixture).googleCalls.filter(call => call.command === command), command);
 
 for (const viewport of [{ width: 1440, height: 900 }, { width: 820, height: 560 }]) {
+  test(`a copied app offers Google setup on a clean PC at ${viewport.width}`, async ({ page }) => {
+    await page.setViewportSize(viewport);
+    await installGoogleFixture(page, false, "selected-file", false);
+    const panel = page.locator(".google-sheet-connection");
+    await panel.getByRole("button", { name: "Đăng nhập Google", exact: true }).click();
+    await expect(panel.getByRole("alert")).toContainText("Mở Thiết lập Google");
+    await panel.getByLabel("OAuth Client ID (Desktop)").fill("fixture.apps.googleusercontent.com");
+    await panel.getByLabel("Client secret", { exact: true }).fill("app-secret");
+    await panel.getByLabel("Google Picker API key").fill("picker-key");
+    await panel.getByLabel("Google Cloud project number").fill("12345");
+    await expect(panel.getByRole("button", { name: "Lưu cấu hình Google" })).toBeEnabled();
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+    expect((await new AxeBuilder({ page }).include(".google-sheet-connection").analyze()).violations).toEqual([]);
+    await page.screenshot({ path: test.info().outputPath(`google-setup-${viewport.width}.png`) });
+    await panel.getByRole("button", { name: "Lưu cấu hình Google" }).click();
+    await expect(panel.locator(".google-app-setup")).toHaveCount(0);
+    await expect(panel.getByRole("status")).toContainText("Chưa đăng nhập Google");
+    expect(await calls(page, "google_sheets_configure")).toHaveLength(1);
+    expect(await calls(page, "google_sheets_login")).toEqual([]);
+  });
   test(`compact Google controls connect the pasted exact gid at ${viewport.width}`, async ({ page }) => {
     await page.setViewportSize(viewport);
     await installGoogleFixture(page);

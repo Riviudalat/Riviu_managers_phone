@@ -1,10 +1,10 @@
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { googleSheetsCancel, googleSheetsConnect, googleSheetsLogin, googleSheetsPickFile, googleSheetsStatus, publishSheetCheck, publishSheetGetConfig } from "../../api";
+import { googleSheetsCancel, googleSheetsConfigure, googleSheetsConnect, googleSheetsLogin, googleSheetsPickFile, googleSheetsStatus, publishSheetCheck, publishSheetGetConfig } from "../../api";
 import type { GoogleSheetsStatus, PublishSheetCheckResult } from "../../types";
 import { GoogleSheetConnection } from "./GoogleSheetConnection";
 import { parseGoogleSheetUrl } from "./googleSheetUrl";
-vi.mock("../../api", () => ({ googleSheetsCancel: vi.fn(), googleSheetsConnect: vi.fn(), googleSheetsLogin: vi.fn(), googleSheetsPickFile: vi.fn(), googleSheetsStatus: vi.fn(), publishSheetCheck: vi.fn(), publishSheetGetConfig: vi.fn() }));
+vi.mock("../../api", () => ({ googleSheetsCancel: vi.fn(), googleSheetsConfigure: vi.fn(), googleSheetsConnect: vi.fn(), googleSheetsLogin: vi.fn(), googleSheetsPickFile: vi.fn(), googleSheetsStatus: vi.fn(), publishSheetCheck: vi.fn(), publishSheetGetConfig: vi.fn() }));
 const url = "https://docs.google.com/spreadsheets/d/file-a/edit#gid=7";
 const status = (patch: Partial<GoogleSheetsStatus> = {}): GoogleSheetsStatus => ({ configured: true, connected: true, active: false, accountId: "account-a", email: "operator@example.test", clientId: "id", pickerConfigured: true, phase: "idle", ...patch });
 const active = (patch: Partial<GoogleSheetsStatus> = {}) => status({ active: true, selectedFileId: "file-a", writerId: "writer-a", sheetUrl: url, ...patch });
@@ -15,6 +15,38 @@ afterEach(() => { cleanup(); vi.useRealTimers(); });
 async function editUrl(value = url) { await waitFor(() => expect(screen.getByRole("button", { name: "Đăng nhập Google" })).toBeEnabled()); fireEvent.change(screen.getByRole("textbox", { name: "Link Google Sheet" }), { target: { value } }); }
 
 describe("compact Google Sheet connection", () => {
+  async function fillSetup() {
+    fireEvent.click(await screen.findByText("Thiết lập Google"));
+    fireEvent.change(screen.getByLabelText("OAuth Client ID (Desktop)"), { target: { value: " fixture.apps.googleusercontent.com " } });
+    fireEvent.change(screen.getByLabelText("Client secret"), { target: { value: " app-secret " } });
+    fireEvent.change(screen.getByLabelText("Google Picker API key"), { target: { value: " picker-key " } });
+    fireEvent.change(screen.getByLabelText("Google Cloud project number"), { target: { value: "12345" } });
+  }
+  it("lets a clean PC save application config without starting a Google login or claiming readiness", async () => {
+    vi.mocked(googleSheetsStatus).mockResolvedValue(status({ configured: false, connected: false, pickerConfigured: false, clientId: "" }));
+    const save = deferred<GoogleSheetsStatus>(); vi.mocked(googleSheetsConfigure).mockReturnValue(save.promise);
+    const ready = vi.fn(); render(<GoogleSheetConnection onReadyChange={ready} />); await fillSetup();
+    const button = screen.getByRole("button", { name: "Lưu cấu hình Google" }); fireEvent.click(button); fireEvent.click(button);
+    await waitFor(() => expect(googleSheetsConfigure).toHaveBeenCalledExactlyOnceWith({ clientId: "fixture.apps.googleusercontent.com", clientSecret: "app-secret", pickerApiKey: "picker-key", projectNumber: "12345" }));
+    expect(screen.getByLabelText("Client secret")).toBeDisabled();
+    await act(async () => save.resolve(status({ connected: false })));
+    expect(screen.queryByText("Thiết lập Google")).toBeNull(); expect(ready).toHaveBeenLastCalledWith(false);
+    expect(googleSheetsLogin).not.toHaveBeenCalled(); expect(googleSheetsConnect).not.toHaveBeenCalled();
+  });
+  it("keeps setup available and reports a credential-store write failure", async () => {
+    vi.mocked(googleSheetsStatus).mockResolvedValue(status({ configured: false, connected: false, pickerConfigured: false }));
+    vi.mocked(googleSheetsConfigure).mockRejectedValue(Error("Không lưu được cấu hình vào kho thông tin xác thực"));
+    render(<GoogleSheetConnection />); await fillSetup(); fireEvent.click(screen.getByRole("button", { name: "Lưu cấu hình Google" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("Không lưu được");
+    expect(screen.getByRole("button", { name: "Lưu cấu hình Google" })).toBeEnabled(); expect(googleSheetsLogin).not.toHaveBeenCalled();
+  });
+  it("shows setup for missing Picker while preserving the configured client ID", async () => {
+    vi.mocked(googleSheetsStatus).mockResolvedValue(status({ pickerConfigured: false, clientId: "existing.apps.googleusercontent.com" }));
+    render(<GoogleSheetConnection />); await editUrl(); fireEvent.click(screen.getByRole("button", { name: "Kiểm tra kết nối" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("bổ sung cấu hình Google Picker");
+    expect(screen.getByLabelText("OAuth Client ID (Desktop)")).toHaveValue("existing.apps.googleusercontent.com");
+    expect(googleSheetsPickFile).not.toHaveBeenCalled();
+  });
   it("shows exactly one URL input and two buttons without old configuration", async () => {
     render(<GoogleSheetConnection />); await editUrl();
     expect(screen.getAllByRole("textbox")).toHaveLength(1); expect(screen.getAllByRole("button")).toHaveLength(2);

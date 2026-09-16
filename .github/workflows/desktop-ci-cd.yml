@@ -388,6 +388,9 @@ jobs:
         shell: bash
         env:
           RIVIU_DEFAULT_AGENT_MODE: full
+          # Application identity only; never include an account access/refresh token.
+          # Release builds fail if this application configuration is missing.
+          RIVIU_GOOGLE_OAUTH_CONFIG_JSON: ${{ secrets.RIVIU_GOOGLE_OAUTH_CONFIG_JSON }}
         run: |
           set -euo pipefail
           cargo build --release --locked \
@@ -448,6 +451,7 @@ jobs:
       - name: Build Tauri installers
         working-directory: apps/desktop
         env:
+          RIVIU_GOOGLE_OAUTH_CONFIG_JSON: ${{ secrets.RIVIU_GOOGLE_OAUTH_CONFIG_JSON }}
           # Release artifacts must select the standalone Riviu Agent. The
           # sidecar overlay below supplies the frozen Python/tidevice runtime.
           RIVIU_DEFAULT_AGENT_MODE: full

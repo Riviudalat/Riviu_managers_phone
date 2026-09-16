@@ -1,13 +1,14 @@
 import { useEffect, useRef, useState } from "react";
 import { LoaderCircle } from "lucide-react";
-import { googleSheetsCancel, googleSheetsConnect, googleSheetsLogin, googleSheetsPickFile,
+import { googleSheetsCancel, googleSheetsConfigure, googleSheetsConnect, googleSheetsLogin, googleSheetsPickFile,
   googleSheetsStatus, publishSheetCheck, publishSheetGetConfig } from "../../api";
 import { describeError } from "../../describeError";
 import { parseGoogleSheetUrl, type GoogleSheetTarget } from "./googleSheetUrl";
-import type { GoogleSheetsStatus, PublishSheetCheckResult } from "../../types";
+import type { GoogleSheetsConfiguration, GoogleSheetsStatus, PublishSheetCheckResult } from "../../types";
+import { GoogleAppSetup } from "./GoogleAppSetup";
 
 type Target = GoogleSheetTarget;
-type Action = "loading" | "login" | "check" | "picking" | "cancel" | null;
+type Action = "loading" | "login" | "check" | "picking" | "cancel" | "configure" | null;
 type Props = { onReadyChange?: (ready: boolean) => void };
 const sameTarget = (a: Target | null, b: Target | null) => !!a && !!b && a.spreadsheetId === b.spreadsheetId && a.sheetId === b.sheetId;
 const accountKey = (s: GoogleSheetsStatus) => JSON.stringify([s.accountId, s.connected, s.active, s.writerId,
@@ -18,6 +19,7 @@ export function GoogleSheetConnection({ onReadyChange }: Props) {
   const [status, setStatus] = useState<GoogleSheetsStatus | null>(null);
   const [action, setAction] = useState<Action>("loading");
   const [error, setError] = useState<string | null>(null);
+  const [setupOpen, setSetupOpen] = useState(false);
   const [result, setResult] = useState<{ value: PublishSheetCheckResult; account: string } | null>(null);
   const mounted = useRef(true), edited = useRef(false);
   const generation = useRef(0), flight = useRef<number | null>(null);
@@ -80,7 +82,10 @@ export function GoogleSheetConnection({ onReadyChange }: Props) {
     const ticket = ++generation.current; flight.current = ticket; browserInvoked.current = false; setAction("login"); setError(null); setResult(null);
     try {
       const current = await googleSheetsStatus(); if (!valid(ticket)) return; applyStatus(current);
-      if (!current.configured) throw Error("Chưa có cấu hình Google trên máy này.");
+      if (!current.configured) {
+        setSetupOpen(true);
+        throw Error("Chưa có cấu hình Google trên máy này. Mở Thiết lập Google bên dưới để bổ sung.");
+      }
       browserInvoked.current = true;
       await awaitBrowser(current.phase !== "idle" ? current : await googleSheetsLogin(), ticket);
     } catch (e) { if (valid(ticket)) setError(describeError(e)); }
@@ -92,6 +97,19 @@ export function GoogleSheetConnection({ onReadyChange }: Props) {
     const ticket = ++generation.current; flight.current = ticket; stopWait(); setAction("cancel"); setResult(null);
     try { const next = await googleSheetsCancel(); if (valid(ticket)) { applyStatus(next); setError(null); } }
     catch (e) { if (valid(ticket)) setError(describeError(e)); }
+    finally { finish(ticket); }
+  };
+  const configure = async (config: GoogleSheetsConfiguration) => {
+    if (flight.current !== null) return false;
+    const ticket = ++generation.current; flight.current = ticket;
+    setAction("configure"); setError(null); setResult(null);
+    try {
+      const next = await googleSheetsConfigure(config);
+      if (!valid(ticket)) return false;
+      applyStatus(next);
+      if (!next.configured || !next.pickerConfigured) throw Error("Cấu hình Google chưa đầy đủ; kiểm tra lại thông tin đã nhập.");
+      setSetupOpen(false); return true;
+    } catch (e) { if (valid(ticket)) setError(describeError(e)); return false; }
     finally { finish(ticket); }
   };
   const check = async () => {
@@ -108,7 +126,10 @@ export function GoogleSheetConnection({ onReadyChange }: Props) {
         verifiedResult(await publishSheetCheck(target.url), target, current, ticket, revision); return;
       }
       if (current.selectedFileId !== target.spreadsheetId) {
-        if (!current.pickerConfigured) throw Error("Chưa có cấu hình Google Picker trên máy này.");
+        if (!current.pickerConfigured) {
+          setSetupOpen(true);
+          throw Error("Mở Thiết lập Google bên dưới để bổ sung cấu hình Google Picker.");
+        }
         setAction("picking"); browserInvoked.current = true; const selected = await awaitBrowser(await googleSheetsPickFile(), ticket);
         if (!selected || urlRevision.current !== revision) return; current = selected;
         if (current.selectedFileId !== target.spreadsheetId) throw Error("Bảng đã chọn không khớp link. Chọn đúng bảng trong cửa sổ Google rồi kiểm tra lại.");
@@ -129,7 +150,8 @@ export function GoogleSheetConnection({ onReadyChange }: Props) {
   const canCancel = action === "login" || action === "picking";
   const message = error || (action === "picking" ? "Chọn đúng bảng trong cửa sổ Google để cấp quyền." : action === "login" ? "Hoàn tất đăng nhập trong trình duyệt Google."
     : action === "loading" ? "Đang đọc kết nối Google…" : action ? "Đang kiểm tra kết nối…" : ready ? "Kết nối đã xác minh."
-      : result?.value.message || (status?.connected ? "Chưa xác minh kết nối bảng." : "Chưa đăng nhập Google."));
+      : result?.value.message || (status && !status.configured ? "Bản app chưa có cấu hình Google. Mở Thiết lập Google để bổ sung."
+        : status?.connected ? "Chưa xác minh kết nối bảng." : "Chưa đăng nhập Google."));
   return <div className="publish-sheet-connection google-sheet-connection" data-google-sheet-focus tabIndex={-1}>
     <label htmlFor="publish-sheet-link">Link Google Sheet</label>
     <div className="google-sheet-compact-controls">
@@ -140,5 +162,7 @@ export function GoogleSheetConnection({ onReadyChange }: Props) {
       <button type="button" disabled={action !== null || !url.trim()} onClick={() => void check()}>{(action === "check" || action === "picking") && <LoaderCircle className="publish-check-spinner" size={14} aria-hidden="true" />}Kiểm tra kết nối</button>
     </div>
     <p role={error ? "alert" : "status"} className={`publish-sheet-result ${ready ? "is-verified" : "needs-attention"}`}>{status?.email ? `${status.email} · ` : ""}{message}</p>
+    {status && (!status.configured || !status.pickerConfigured) && <GoogleAppSetup key={status.clientId} clientId={status.clientId}
+      busy={action !== null || status.phase !== "idle"} open={setupOpen} onOpenChange={setSetupOpen} onSave={configure} />}
   </div>;
 }

@@ -11,6 +11,26 @@ và reportingEpoch trong developer metadata; ghi updateCells cùng receipt note 
 đọc lại. Không dùng append không khóa để xử lý retry timeout. API không có CAS cho
 sửa tay; app từ chối khi giá trị/công thức/receipt trước ghi đã thay đổi.
 
+Cấu hình ứng dụng Google bắt buộc đi kèm binary release. `build.rs` đọc biến
+`RIVIU_GOOGLE_OAUTH_CONFIG_JSON` (CI đọc GitHub Actions secret cùng tên tại cả bước
+build deployment checker và đóng gói app). Build tại máy phát triển có thể dùng
+`apps/desktop/src-tauri/google-oauth.local.json` đã gitignore, hoặc đường dẫn qua
+`RIVIU_GOOGLE_OAUTH_CONFIG_FILE`. Biến JSON có ưu tiên cao nhất, kể cả khi rỗng.
+JSON gồm
+`clientId`, `clientSecret` (tùy chọn), `pickerApiKey`, `projectNumber`; client ID
+phải thuộc OAuth Desktop. Không đưa access token, refresh token hay tài khoản vào
+JSON này; các trường lạ bị từ chối. Đây là cấu hình phân phối trong binary, không
+phải nơi giữ bí mật server. Cấu hình đã lưu trên PC luôn được ưu tiên; trước đăng
+nhập app ghim cấu hình vào SecretStore để nâng cấp binary không đổi client của
+phiên cũ. Build release dừng nếu cấu hình thiếu, sai hoặc chưa đủ Picker; debug
+không cấu hình vẫn dùng được để phát triển phần khác. Đặt
+`RIVIU_REQUIRE_GOOGLE_CONFIG=1` để kiểm tra cùng điều kiện trong bản dev.
+Cấu hình được ghi vào OUT_DIR rồi nhúng vào binary, không in giá trị ra log.
+Không đưa file cấu hình local vào source, log hay gói chứng cứ.
+Chép `.exe` đã build đủ cấu hình không cần chép SecretStore; máy đích tự đăng
+nhập tài khoản Google của mình. Build không tự đọc credential của người dùng.
+Kiểm tra OAuth/Picker thật cần người vận hành tự đăng nhập.
+
 Chuyển Apps Script sang direct ghi intent local trước, dừng nhận claim, drain,
 gọi retirement dưới ScriptLock, rồi nhận writer trên tab và commit provider. Lượt
 cũ giữ publicationId và đích/epoch; logout giữ provider để không fallback sang
