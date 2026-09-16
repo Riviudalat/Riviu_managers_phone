@@ -239,6 +239,7 @@ impl Database {
                 // the same answer without parsing it again.
                 like: None,
                 mention: None,
+                comment_like: None,
                 parent_was_folded: false,
                 actions: Vec::new(),
             })
@@ -249,6 +250,7 @@ impl Database {
             .map(|mut assignment| {
                 assignment.like = assignment.like_note();
                 assignment.mention = assignment.mention_note();
+                assignment.comment_like = assignment.comment_like_note();
                 assignment.parent_was_folded = assignment.parent_was_folded_from_evidence();
                 assignment
             })
@@ -1098,6 +1100,8 @@ mod settlement_tests {
                 },
                 mentions: Vec::new(),
                 mention_parent: false,
+                like_parent: false,
+                post_dwell_seconds: None,
             };
             let plan = plan_threads(&request).expect("fixture plan");
             let campaign = db

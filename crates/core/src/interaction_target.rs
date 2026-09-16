@@ -300,6 +300,15 @@ pub(crate) trait TargetDriver: Send + Sync {
     /// Implementations must classify their failures honestly — see [`SendFailure`]. The
     /// steps that locate the parent all happen before anything is typed, and reporting
     /// them as `AfterEffect` blocks retry for a message that was never posted.
+    ///
+    /// `like_parent` asks the implementation to like the comment being answered, before the
+    /// composer opens over it. Whatever happened is written into `comment_like` **as soon as it
+    /// is known**, not on the way back through `SendOutcome`: a heart tapped while the reply
+    /// then fails is still a like that happened, and returning it only on success would lose
+    /// exactly the case the note exists for.
+    // The two like arguments are separate proof inputs at the effect boundary, the same way
+    // this trait's other steps keep theirs explicit rather than bundled.
+    #[allow(clippy::too_many_arguments)]
     async fn send_reply(
         &self,
         session: &dyn UiSession,
@@ -307,5 +316,7 @@ pub(crate) trait TargetDriver: Send + Sync {
         prepared: &PreparedThreadMessage,
         stop: &AtomicBool,
         effect_gate: &mut EffectGate<'_>,
+        like_parent: bool,
+        comment_like: &mut Option<String>,
     ) -> Result<SendOutcome, SendFailure>;
 }

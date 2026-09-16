@@ -103,6 +103,8 @@ export function interactionDraftFromProfile(config: JsonValue, actors: string[])
     manualText: manual.join("\n"),
     mentionParent: request.mentionParent === true,
     mentionText: Array.isArray(request.mentions) ? request.mentions.filter((item) => typeof item === "string").join(" ") : "",
+    likeParent: request.likeParent === true,
+    postDwellSeconds: typeof request.postDwellSeconds === "number" ? request.postDwellSeconds : null,
   };
 }
 

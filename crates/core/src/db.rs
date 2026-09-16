@@ -1212,6 +1212,8 @@ mod interaction_tests {
             cohort_size: None,
             mentions: Vec::new(),
             mention_parent: false,
+            like_parent: false,
+            post_dwell_seconds: None,
         }
     }
 
@@ -1295,10 +1297,11 @@ mod interaction_tests {
     }
 
     /// A reply can succeed under TikTok's folded section, which means it posted but nobody
-    /// else can see it. The runner stores that distinction in evidence; loading a campaign
-    /// must turn it into a typed desktop field without exposing the evidence blob itself.
+    /// else can see it, and it can carry a heart on the comment it answered. The runner stores
+    /// both in evidence; loading a campaign must turn them into typed desktop fields without
+    /// exposing the evidence blob itself.
     #[test]
-    fn a_folded_parent_survives_database_hydration_and_desktop_serialization() {
+    fn a_folded_parent_and_a_comment_heart_survive_database_hydration() {
         let (db, path) = fixture();
         let request = request();
         let plan = plan_threads(&request).expect("plan");
@@ -1320,7 +1323,9 @@ mod interaction_tests {
             ThreadMessageState::Succeeded,
             None,
             None,
-            Some(r#"{"parentWasFolded":true}"#),
+            Some(
+                r#"{"parentWasFolded":true,"commentLike":"đã tim bình luận trả lời (nhãn đổi trạng thái)"}"#,
+            ),
         )
         .expect("store folded evidence");
         db.update_interaction_assignment_state(
@@ -1351,6 +1356,13 @@ mod interaction_tests {
 
         assert_eq!(folded_wire["parentWasFolded"], true);
         assert_eq!(legacy_wire["parentWasFolded"], false);
+        assert_eq!(
+            folded_wire["commentLike"],
+            "đã tim bình luận trả lời (nhãn đổi trạng thái)"
+        );
+        // Absent, not empty: the desktop has to be able to tell "no like was asked for" from a
+        // like whose outcome was recorded, which is why the accessor returns `Option`.
+        assert_eq!(legacy_wire["commentLike"], serde_json::Value::Null);
         assert!(
             folded_wire.get("evidenceJson").is_none(),
             "desktop still must not receive internal evidence"

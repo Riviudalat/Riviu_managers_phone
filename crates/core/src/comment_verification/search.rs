@@ -19,8 +19,112 @@ pub struct FoundComment {
     pub body: ElementBox,
     pub author: ElementBox,
     pub reply: Option<ElementBox>,
+    /// The row's own like control and its state — see [`row_like_control`]. `None` means this
+    /// build cannot identify a comment heart at all, which is a refusal, not a "not liked".
+    pub like: Option<RowLike>,
     pub identity: CommentLocatorIdentity,
     pub snapshot: String,
+}
+
+/// One comment row's like control, and what state it was in when this was read.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RowLike {
+    /// The control to tap. The **heart icon**, not the `Button` around it: measured on
+    /// `trill` 38.3.2 the button spans `[819,1000][971,1063]`, the icon `[845,1000][898,1063]`
+    /// and the count `[903,1000][971,1063]`, and a tap in the button's own centre — the gap
+    /// between icon and count — changed nothing at all.
+    ///
+    /// Measured again on a second handset of the same build (98895a3355424e484f, UI en, the
+    /// comment drawer of a real post): the button is `[781,1140][955,1212]` and its outline
+    /// heart `[811,1140][871,1212]` — the same 174x72 button, 38 px further left and 140 px
+    /// lower than the first phone. So the absolutes belong to one handset and every rule built
+    /// on this control is **relative** for that reason: the icon inside the control's own
+    /// rectangle, and the control inside the row's reply strip.
+    pub element: ElementBox,
+    /// `Some(true)` liked, `Some(false)` not liked, `None` when the row carries neither
+    /// measured icon — a row whose state cannot be read, which is not the same as one that is
+    /// not liked, because tapping a liked heart *removes* the like.
+    pub liked: Option<bool>,
+}
+
+/// How far above and below a row's `Reply` control its heart may sit.
+///
+/// Measured on `trill` 38.3.2: heart `[819,1000][971,1063]` against that row's reply control
+/// `[242,1010][334,1052]` — 10 px proud at the top and 11 px at the bottom. 24 covers both and
+/// stays far under the ~300 px row pitch, which is what keeps the *next* row's heart out.
+///
+/// `pub(crate)` because the tap's confirmation re-reads the same band from a fresh
+/// observation — see `like_comment_row`.
+pub(crate) const LIKE_STRIP_SLACK: f64 = 24.0;
+
+/// The like control of the row `body` belongs to, with its state.
+///
+/// `None` when this build's catalogue cannot name a comment heart (`CommentLike` missing), or
+/// when the strip the row occupies does not hold exactly one — the same "one row, or refuse"
+/// rule the reply control is found by, for the same reason: every row on screen carries both,
+/// so more than one candidate means the row was not identified.
+pub fn row_like_control(
+    tree: &Tree,
+    labels: TikTokControls,
+    body: &ElementBox,
+    reply: Option<&ElementBox>,
+) -> Option<RowLike> {
+    let control_label = labels.label(TikTokControl::CommentLike)?;
+    // The row's action strip. Anchored on the row's own `Reply` control when there is one; a
+    // build with no measured Reply label falls back to the body and the reach the reply path
+    // already uses for it.
+    let (top, bottom) = match reply {
+        Some(reply) => (
+            reply.y - LIKE_STRIP_SLACK,
+            reply.y + reply.height + LIKE_STRIP_SLACK,
+        ),
+        None => (
+            body.y + body.height - LIKE_STRIP_SLACK,
+            body.y + body.height + crate::interaction_hierarchy::REPLY_REACH,
+        ),
+    };
+    let rects = |label: crate::tiktok_labels::LabelMatch| -> Vec<ElementBox> {
+        tree.matching(labels.package(), label.to_query())
+            .into_iter()
+            .filter(|index| tree.ancestors_visible(*index))
+            .filter_map(|index| tree.nodes[index].rect())
+            .collect()
+    };
+    let mut controls: Vec<ElementBox> = rects(control_label)
+        .into_iter()
+        .filter(|control| control.y < bottom && control.y + control.height > top)
+        .collect();
+    if controls.len() != 1 {
+        return None;
+    }
+    let control = controls.pop().expect("checked to be exactly one");
+    // The icons are the control's own children — measured inside its rectangle, sharing its
+    // top and bottom — so a same-strip heart of another row cannot be read as this one's state.
+    let icon = |label: Option<crate::tiktok_labels::LabelMatch>| -> Option<ElementBox> {
+        let mut found: Vec<ElementBox> = rects(label?)
+            .into_iter()
+            .filter(|icon| {
+                icon.x >= control.x
+                    && icon.x + icon.width <= control.x + control.width
+                    && icon.y >= control.y
+                    && icon.y + icon.height <= control.y + control.height
+            })
+            .collect();
+        (found.len() == 1).then(|| found.pop().expect("checked to be exactly one"))
+    };
+    let liked = icon(labels.label(TikTokControl::CommentLiked));
+    let not_liked = icon(labels.label(TikTokControl::CommentNotLiked));
+    let (element, state) = match (liked, not_liked) {
+        // Both present is not a state this build produces; reading it as liked means the caller
+        // does not tap, which is the direction that cannot remove somebody's like.
+        (Some(icon), _) => (icon, Some(true)),
+        (None, Some(icon)) => (icon, Some(false)),
+        (None, None) => (control, None),
+    };
+    Some(RowLike {
+        element,
+        liked: state,
+    })
 }
 
 /// Trill 38.3.2 adds U+200B at a visual wrap after "Đà Lạt". Ignore only
@@ -147,6 +251,9 @@ pub fn row(
                 body,
                 author: a.clone(),
                 reply: replies.first().cloned(),
+                // Filled by the caller that has the label set: `row()` matches on strings the
+                // file already knows (`Reply`), and the like control's name is catalogue data.
+                like: None,
                 identity: CommentLocatorIdentity {
                     author_label: label,
                     text: text.into(),
@@ -268,6 +375,7 @@ async fn find_with_options(
                 .filter(|found| !require_reply || found.reply.is_some())
             {
                 found.hidden = opened.contains("hidden-comments");
+                found.like = row_like_control(&tree, labels, &found.body, found.reply.as_ref());
                 found.identity.frame_sha256 = format!("{:x}", Sha256::digest(xml.as_bytes()));
                 found.snapshot = xml;
                 return Ok(found);

@@ -23,8 +23,12 @@ use crate::ActionFailure;
 use sha2::{Digest, Sha256};
 
 /// How long the like state gets to flip after the tap, and how often to look.
-const LIKE_CONFIRM_WINDOW: Duration = Duration::from_millis(2_500);
-const LIKE_CONFIRM_POLL: Duration = Duration::from_millis(250);
+///
+/// `pub(crate)` because the comment-row heart confirms itself on the same rhythm: it is the
+/// same device, the same list and the same kind of state change, and two copies of these
+/// numbers would drift into reporting the two likes differently.
+pub(crate) const LIKE_CONFIRM_WINDOW: Duration = Duration::from_millis(2_500);
+pub(crate) const LIKE_CONFIRM_POLL: Duration = Duration::from_millis(250);
 
 /// The outcome of one like attempt, named for what was actually proved.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

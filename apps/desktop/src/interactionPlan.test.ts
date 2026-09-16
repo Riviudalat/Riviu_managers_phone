@@ -102,10 +102,10 @@ describe("validateDraft", () => {
     expect(issue.message).toContain("3 dòng");
   });
 
-  it("enforces the manual pool the hint has always advertised", () => {
-    // Advertised in a hint and enforced nowhere, so the campaign row existed before the
-    // backend refused it with TooFewManualComments.
-    const short = draft({ textSource: "manual", manualText: "đẹp quá" });
+  it("refuses a chain whose pool cannot cover its own replies", () => {
+    // Only `chain` needs a pool as long as the message count: message N answers N-1 there, so a
+    // short pool makes an account answer with its own words.
+    const short = draft({ textSource: "manual", manualText: "đẹp quá", threadKind: "chain" });
     const [issue] = validateDraft(short, context({ largestCohort: 2 }));
     expect(issue.field).toBe("manual");
     expect(issue.message).toContain("1 câu");
@@ -113,8 +113,22 @@ describe("validateDraft", () => {
     const enough = draft({
       textSource: "manual",
       manualText: "đẹp quá\nchỗ này ở đâu ạ\n\n",
+      threadKind: "chain",
     });
     expect(validateDraft(enough, context())).toEqual([]);
+  });
+
+  it("wraps a short pool where no message answers another", () => {
+    // `star` and `standalone` have no such relation — every reply answers the root, or every
+    // phone writes its own comment — so one authored sentence may cover the whole cluster.
+    // Refusing there was the panel disagreeing with the shape the operator picked.
+    for (const threadKind of ["star", "standalone"] as const) {
+      const short = draft({ textSource: "manual", manualText: "đẹp quá", threadKind });
+      const manual = validateDraft(short, context({ largestCohort: 2 })).filter(
+        (issue) => issue.field === "manual",
+      );
+      expect(manual).toEqual([]);
+    }
   });
 
   it("offers the one number that would fix a too-small message count", () => {

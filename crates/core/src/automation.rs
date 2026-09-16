@@ -465,6 +465,10 @@ pub struct InteractionCampaignTemplateV1 {
     pub mentions: Vec<String>,
     #[serde(default)]
     pub mention_parent: bool,
+    #[serde(default)]
+    pub like_parent: bool,
+    #[serde(default)]
+    pub post_dwell_seconds: Option<u8>,
     /// Which social app this interaction campaign targets. Defaults to TikTok.
     #[serde(default)]
     pub network: crate::SocialNetwork,
@@ -499,6 +503,8 @@ impl InteractionAutomationProfileConfigV1 {
             actions: self.request.actions,
             mentions: self.request.mentions,
             mention_parent: self.request.mention_parent,
+            like_parent: self.request.like_parent,
+            post_dwell_seconds: self.request.post_dwell_seconds,
         }
     }
 }

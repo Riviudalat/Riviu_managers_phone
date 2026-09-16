@@ -54,6 +54,11 @@ pub struct ElementReplyTarget {
     pub identity: CommentLocatorIdentity,
     /// The reply control, for the touch planner to jitter inside.
     pub reply: ElementBox,
+    /// The same row's like control, when the caller could read one — see
+    /// [`crate::comment_verification::search::RowLike`]. `None` on the paths that have no
+    /// label set and no tree to read a state from, which is reported as "no control" rather
+    /// than guessed at.
+    pub like: Option<crate::comment_verification::search::RowLike>,
 }
 
 /// Vertical slack when deciding whether a label sits "above" a body, in pixels.
@@ -74,7 +79,10 @@ pub(crate) const AUTHOR_REACH: f64 = 140.0;
 /// Measured gap is ~70 px (body y=1077, reply y=1149). 200 px covers a two-line
 /// body while staying under the row pitch — past that lies the *next* comment's
 /// reply button, and tapping it posts the reply under a stranger's comment.
-const REPLY_REACH: f64 = 200.0;
+///
+/// `pub(crate)` because the comment search reads the same reach when it has no measured
+/// `Reply` label to anchor a row's like control on.
+pub(crate) const REPLY_REACH: f64 = 200.0;
 
 fn bottom(element: &ElementBox) -> f64 {
     element.y + element.height
@@ -219,6 +227,10 @@ pub fn locate_parent_in_elements(
             frame_sha256: identity.frame_sha256.clone(),
         },
         reply: reply.clone(),
+        // This path matches on strings this file already knows and has no label set, so it
+        // cannot read the heart or its state. Reported as "no control" upstream; the reply
+        // still goes out.
+        like: None,
     })
 }
 
@@ -2187,6 +2199,7 @@ pub(crate) async fn send_reply_by_hierarchy_with_gate<F>(
 where
     F: FnMut() -> String,
 {
+    let mut unused_note = None;
     send_reply_by_hierarchy_with_gate_options(
         session,
         labels,
@@ -2199,8 +2212,101 @@ where
         &[],
         false,
         None,
+        // The wrappers are the test/probe entry points; a caller that wants the heart passes
+        // `like_parent` to the options form and a place to write the note.
+        false,
+        &mut unused_note,
     )
     .await
+}
+
+/// Like the comment this reply answers, and say what happened.
+///
+/// **Never a reason to lose the comment.** Every outcome is reported in the returned note and
+/// the reply carries on: a missing like is a smaller loss than a reply that never went out, and
+/// the one thing worse than both is *removing* somebody's like by tapping a heart that was
+/// already filled — which is why the state is read before the tap and an unreadable state is
+/// refused rather than assumed.
+///
+/// The note is one line for the operator, in the same shape and the same words as
+/// [`crate::tiktok_like::LikeVerdict::reason`] — this is the same control on the same list, and
+/// the two reads have to be recognisable as the same answer:
+/// - `đã tim bình luận trả lời` — tapped, and the row reads as liked afterwards;
+/// - `bình luận trả lời đã tim từ trước` — read as liked, so nothing was tapped;
+/// - `không đọc được trạng thái tim…` — a control was found but neither measured icon was
+///   inside it, so nothing was tapped;
+/// - `không có nút tim` — this build or this route has no comment heart we can name;
+/// - `tap gửi được nhưng bình luận chưa đổi…` — tapped, and the row never read as liked.
+///
+/// Public for the same reason [`locate_parent_in_elements`] is: it is the shipped policy, and
+/// the only honest way to measure what a tap does to a real row is to let the device probe call
+/// this exact function rather than a copy of it.
+pub async fn like_comment_row(
+    session: &dyn UiSession,
+    labels: TikTokControls,
+    screen: (f64, f64),
+    stop: &AtomicBool,
+    like: Option<&crate::comment_verification::search::RowLike>,
+) -> String {
+    use crate::comment_verification::search::LIKE_STRIP_SLACK;
+    let Some(like) = like else {
+        return "bình luận này không có nút tim để đọc".to_string();
+    };
+    match like.liked {
+        Some(true) => return "bình luận trả lời đã tim từ trước".to_string(),
+        None => {
+            return "không đọc được trạng thái tim của bình luận — KHÔNG tap, vì tap nhầm lên \
+                    tim đã thả là gỡ mất tim"
+                .to_string()
+        }
+        Some(false) => {}
+    }
+    let Some(liked_label) = labels.label(TikTokControl::CommentLiked) else {
+        // The state could be read (it said "not liked") but nothing can confirm the tap, so
+        // tapping would leave a like nobody can prove. Refused, and the reply goes out.
+        return "không đọc được trạng thái tim của bình luận — KHÔNG tap, vì tap nhầm lên tim \
+                đã thả là gỡ mất tim"
+            .to_string();
+    };
+    let point = {
+        let mut planner = crate::nurture::touch::TouchPointPlanner::new(screen);
+        planner.next(like.element.centre(), like.element.jitter_radius())
+    };
+    if session.tap(point).await.is_err() {
+        return "tap gửi được nhưng bình luận chưa đổi trạng thái — không tính là đã tim"
+            .to_string();
+    }
+    // Same window and poll as the post's like: the same device, the same list, the same kind of
+    // state change. The row is identified by **where** the filled heart is — the icon this build
+    // keeps inside the control's own rectangle — because other rows on screen already have
+    // theirs filled and the first match is as likely to be one of those.
+    let in_row = |icon: &ElementBox| {
+        (icon.y - like.element.y).abs() <= LIKE_STRIP_SLACK
+            && (icon.x - like.element.x).abs() <= LIKE_STRIP_SLACK
+    };
+    let deadline = Instant::now() + crate::tiktok_like::LIKE_CONFIRM_WINDOW;
+    loop {
+        crate::nurture::sleep_interruptible(crate::tiktok_like::LIKE_CONFIRM_POLL, stop).await;
+        let icons = match session.locate_all(liked_label.to_query()).await {
+            Ok(icons) => icons,
+            // A backend with only the single-match read still answers the common case, and
+            // `in_row` throws away the rest — a wrong row cannot be read as this one's.
+            Err(_) => session
+                .locate(liked_label.to_query())
+                .await
+                .ok()
+                .flatten()
+                .into_iter()
+                .collect(),
+        };
+        if icons.iter().any(in_row) {
+            return "đã tim bình luận trả lời (nhãn đổi trạng thái)".to_string();
+        }
+        if Instant::now() >= deadline || stop.load(Ordering::Relaxed) {
+            return "tap gửi được nhưng bình luận chưa đổi trạng thái — không tính là đã tim"
+                .to_string();
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2216,6 +2322,8 @@ pub(crate) async fn send_reply_by_hierarchy_with_gate_options<F>(
     mentions: &[String],
     strict_mentions: bool,
     root: Option<&CommentLocatorIdentity>,
+    like_parent: bool,
+    comment_like: &mut Option<String>,
 ) -> Result<Result<HierarchySendOutcome, ReplyRefusal>, HierarchySendFailure>
 where
     F: FnMut() -> String,
@@ -2267,6 +2375,7 @@ where
                 .reply
                 .context("comment_reply_control_missing")
                 .map_err(HierarchySendFailure::before)?,
+            like: found.like,
         }
     } else {
         loop {
@@ -2391,6 +2500,15 @@ where
         Ok(before) => before.unwrap_or_default(),
         Err(_) => return Ok(Ok(HierarchySendOutcome::interrupted_before_send())),
     };
+
+    // **The heart, before the Reply tap.** Once the composer is open it covers the row, so a
+    // later tap lands on the composer or dismisses it — and the order is the one the operator
+    // asked for ("like that comment, then answer it"). Nothing has been typed at this point,
+    // so anything that goes wrong here is a `before` failure and the reply is still retryable.
+    if like_parent {
+        *comment_like =
+            Some(like_comment_row(session, labels, screen, stop, target.like.as_ref()).await);
+    }
 
     // Tap this comment's own Reply control.
     let point = {
@@ -7355,5 +7473,289 @@ mod tests {
         );
         assert_eq!(swipes, 1);
         assert_eq!(backs, 1, "the walk has to undo the navigation it caused");
+    }
+
+    /// `trill` 38.3.2 — the only build whose two heart icons have been measured.
+    fn trill_38() -> TikTokControls {
+        controls_for("com.ss.android.ugc.trill", "en", "38.3.2").expect("the fleet's build")
+    }
+
+    /// The measured heart icon of one comment row: `[845,1000][898,1063]` inside the row's
+    /// `[819,1000][971,1063]` like button.
+    fn heart_icon() -> ElementBox {
+        node(845.0, 1000.0, 53.0, 63.0, "")
+    }
+
+    /// A session for one comment row's heart: what the row reads as, and what a tap does to it.
+    ///
+    /// The filled heart is what the policy polls — `:id/i0c`, the query a real session answers —
+    /// so this stub is the whole of what the flow can see. What it *cannot* see is the point:
+    /// a tap that would have removed somebody's like looks exactly like one that added ours.
+    #[derive(Default)]
+    struct HeartSession {
+        /// Filled hearts on screen right now.
+        filled: parking_lot::Mutex<Vec<ElementBox>>,
+        /// The filled heart a landed tap leaves on the row, or `None` when it changes nothing.
+        fill_on_tap: Option<ElementBox>,
+        /// Whether the tap itself comes back as a transport error.
+        tap_fails: bool,
+        /// Whether the list read refuses, leaving only the single-match query.
+        single_match_only: bool,
+        taps: parking_lot::Mutex<Vec<TapPoint>>,
+    }
+
+    impl HeartSession {
+        fn filling_on_tap(mut self, icon: ElementBox) -> Self {
+            self.fill_on_tap = Some(icon);
+            self
+        }
+
+        fn already_showing(self, icons: Vec<ElementBox>) -> Self {
+            *self.filled.lock() = icons;
+            self
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl UiSession for HeartSession {
+        async fn tap(&self, point: TapPoint) -> anyhow::Result<()> {
+            self.taps.lock().push(point);
+            if self.tap_fails {
+                anyhow::bail!("transport error: gesture refused");
+            }
+            if let Some(icon) = self.fill_on_tap.clone() {
+                self.filled.lock().push(icon);
+            }
+            Ok(())
+        }
+        async fn swipe(&self, _gesture: SwipeGesture) -> anyhow::Result<()> {
+            unreachable!("liking a comment never gestures")
+        }
+        async fn type_text(&self, _text: &str) -> anyhow::Result<()> {
+            unreachable!("liking a comment never types")
+        }
+        async fn home(&self) -> anyhow::Result<()> {
+            unreachable!()
+        }
+        async fn find_and_tap(&self, _accessibility_id: &str) -> anyhow::Result<()> {
+            unreachable!()
+        }
+        async fn assert_visible(&self, _accessibility_id: &str) -> anyhow::Result<()> {
+            unreachable!()
+        }
+        fn stream_url(&self) -> Option<String> {
+            None
+        }
+        async fn locate(&self, query: ElementQuery<'_>) -> anyhow::Result<Option<ElementBox>> {
+            if !query_value(query).ends_with(":id/i0c") {
+                return Ok(None);
+            }
+            Ok(self.filled.lock().first().cloned())
+        }
+        async fn locate_all(&self, query: ElementQuery<'_>) -> anyhow::Result<Vec<ElementBox>> {
+            if !query_value(query).ends_with(":id/i0c") {
+                return Ok(Vec::new());
+            }
+            if self.single_match_only {
+                anyhow::bail!("locateAll is not supported by this backend");
+            }
+            Ok(self.filled.lock().clone())
+        }
+    }
+
+    async fn like(session: &HeartSession, labels: TikTokControls, liked: Option<bool>) -> String {
+        like_comment_row(
+            session,
+            labels,
+            (1080.0, 2400.0),
+            &AtomicBool::new(false),
+            Some(&crate::comment_verification::search::RowLike {
+                element: heart_icon(),
+                liked,
+            }),
+        )
+        .await
+    }
+
+    /// **The tap goes on the icon, and only a row that reads as liked afterwards counts.**
+    ///
+    /// The coordinate is the whole reason `RowLike` carries the icon rather than the control:
+    /// measured on this build, a tap in the button's own centre — the gap between the heart and
+    /// the count — changed nothing at all, so a policy that aimed there would report a like that
+    /// never happened, or report an unconfirmed tap on every single reply.
+    #[tokio::test(start_paused = true)]
+    async fn the_heart_is_tapped_on_the_icon_and_confirmed_on_the_row() {
+        let icon = heart_icon();
+        let session = HeartSession::default().filling_on_tap(icon.clone());
+        let note = like(&session, trill_38(), Some(false)).await;
+
+        assert!(
+            note.contains("đã tim bình luận trả lời"),
+            "the note itself is the evidence: {note}"
+        );
+        let taps = session.taps.lock();
+        assert_eq!(taps.len(), 1);
+        let point = taps[0].clone();
+        assert!(
+            point.x >= icon.x
+                && point.x <= icon.x + icon.width
+                && point.y >= icon.y
+                && point.y <= icon.y + icon.height,
+            "the tap landed at {point:?}, outside the heart icon — the control's own centre is \
+             the gap between heart and count and changes nothing"
+        );
+    }
+
+    /// The rule that makes removing somebody's like impossible: read first, and never tap a
+    /// heart that is already filled.
+    #[tokio::test(start_paused = true)]
+    async fn an_already_liked_comment_is_left_alone() {
+        let session = HeartSession::default();
+        assert!(like(&session, trill_38(), Some(true))
+            .await
+            .contains("đã tim từ trước"));
+        assert!(
+            session.taps.lock().is_empty(),
+            "a second tap on a filled heart removes the like it was asked to add"
+        );
+    }
+
+    /// A row whose state cannot be read, and a build that cannot name the filled heart, are the
+    /// same refusal: nothing is tapped, because the only alternative is guessing which way.
+    #[tokio::test(start_paused = true)]
+    async fn a_state_that_cannot_be_read_is_refused_rather_than_tapped() {
+        let unreadable = HeartSession::default();
+        assert!(like(&unreadable, trill_38(), None)
+            .await
+            .contains("KHÔNG tap"));
+        assert!(unreadable.taps.lock().is_empty());
+
+        // The Redmi's build: a measured set with no heart icons catalogued, so the state can be
+        // read as "not liked" but a tap could never be confirmed. Tapping anyway would leave a
+        // like nobody can prove, on the one phone shape that cannot tell whether it landed.
+        let unnameable = HeartSession::default().filling_on_tap(heart_icon());
+        let labels =
+            controls_for("com.ss.android.ugc.trill", "vi", "46.3.3").expect("measured set");
+        assert!(like(&unnameable, labels, Some(false))
+            .await
+            .contains("KHÔNG tap"));
+        assert!(unnameable.taps.lock().is_empty());
+    }
+
+    /// No heart on this route at all — the pixel path, or a build with no comment heart
+    /// measured. Said out loud rather than silently skipped.
+    #[tokio::test(start_paused = true)]
+    async fn a_route_with_no_heart_reports_it_and_taps_nothing() {
+        let session = HeartSession::default();
+        let note = like_comment_row(
+            &session,
+            trill_38(),
+            (1080.0, 2400.0),
+            &AtomicBool::new(false),
+            None,
+        )
+        .await;
+        assert!(note.contains("không có nút tim"), "{note}");
+        assert!(session.taps.lock().is_empty());
+    }
+
+    /// **A filled heart on somebody else's row is not ours.**
+    ///
+    /// This is the case a first-match read gets wrong, and rows are 300 px apart on this build:
+    /// the query answers with the *nearest* filled heart on screen, which on a busy post is
+    /// routinely another comment's. Reading that as confirmation would record a like for a
+    /// comment that was never liked — the reply goes out under a comment the operator asked to
+    /// like, and nothing anywhere says it did not happen.
+    #[tokio::test(start_paused = true)]
+    async fn a_filled_heart_on_another_row_is_not_this_rows_like() {
+        let mut elsewhere = heart_icon();
+        elsewhere.y += 300.0;
+        let session = HeartSession::default().already_showing(vec![elsewhere]);
+        assert!(like(&session, trill_38(), Some(false))
+            .await
+            .contains("không tính là đã tim"));
+        assert_eq!(
+            session.taps.lock().len(),
+            1,
+            "the tap itself still went out"
+        );
+
+        // And the same screen one band down *is* ours, so the rule is "this row", not "never".
+        let mut on_our_row = heart_icon();
+        on_our_row.x += 10.0;
+        let ours = HeartSession::default().already_showing(vec![on_our_row]);
+        assert!(like(&ours, trill_38(), Some(false))
+            .await
+            .contains("đã tim bình luận trả lời"));
+    }
+
+    /// A tap the transport refused, and a tap that simply did not change the screen: neither is
+    /// a like, and the reply is not held up over either.
+    #[tokio::test(start_paused = true)]
+    async fn a_tap_that_does_not_land_is_not_confirmed() {
+        let refused = HeartSession {
+            tap_fails: true,
+            ..HeartSession::default()
+        };
+        assert!(like(&refused, trill_38(), Some(false))
+            .await
+            .contains("không tính là đã tim"));
+        assert_eq!(refused.taps.lock().len(), 1);
+
+        let landed_but_nothing_changed = HeartSession::default();
+        assert!(like(&landed_but_nothing_changed, trill_38(), Some(false))
+            .await
+            .contains("không tính là đã tim"));
+    }
+
+    /// A backend without the list read still confirms through the single-match query — it is the
+    /// row band that decides, not which of the two calls answered.
+    #[tokio::test(start_paused = true)]
+    async fn the_single_match_read_confirms_the_same_way() {
+        let session = HeartSession {
+            single_match_only: true,
+            ..HeartSession::default()
+        }
+        .filling_on_tap(heart_icon());
+        assert!(like(&session, trill_38(), Some(false))
+            .await
+            .contains("đã tim bình luận trả lời"));
+    }
+
+    /// A cancelled run stops waiting for the heart — but a row that already reads as liked is
+    /// still reported as liked. The like is on the comment whatever happens to the reply, and
+    /// throwing away a state the device has already shown would lose the only record of it.
+    #[tokio::test(start_paused = true)]
+    async fn a_cancelled_run_stops_waiting_and_still_reports_what_it_can_see() {
+        let stop = AtomicBool::new(true);
+        let row = |liked| crate::comment_verification::search::RowLike {
+            element: heart_icon(),
+            liked: Some(liked),
+        };
+
+        let already_filled = HeartSession::default().already_showing(vec![heart_icon()]);
+        assert!(like_comment_row(
+            &already_filled,
+            trill_38(),
+            (1080.0, 2400.0),
+            &stop,
+            Some(&row(false)),
+        )
+        .await
+        .contains("đã tim bình luận trả lời"));
+
+        let nothing_changed = HeartSession::default();
+        let note = like_comment_row(
+            &nothing_changed,
+            trill_38(),
+            (1080.0, 2400.0),
+            &stop,
+            Some(&row(false)),
+        )
+        .await;
+        assert!(
+            note.contains("không tính là đã tim"),
+            "a cancelled wait must not claim a like it never saw: {note}"
+        );
     }
 }

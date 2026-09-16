@@ -1034,6 +1034,7 @@ mod tests {
             evidence_json: None,
             like: None,
             mention: None,
+            comment_like: None,
             parent_was_folded: false,
             actions: Vec::new(),
         };

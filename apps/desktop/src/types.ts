@@ -1251,6 +1251,16 @@ export interface ThreadCampaignRequest {
   mentions?: string[];
   /** Each reply tags the account it answers; ignored for `standalone`. */
   mentionParent?: boolean;
+  /**
+   * Each reply also likes the comment it answers. Only a message with a parent has anything
+   * to like, so ordinal 0 and `standalone` are unaffected (Rust `#[serde(default)]`).
+   */
+  likeParent?: boolean;
+  /**
+   * Seconds a machine rests on the post after its actions, before the app is torn down.
+   * `null`/absent/0 means leave immediately. Rust caps it at 60.
+   */
+  postDwellSeconds?: number | null;
 }
 
 export type ThreadMessageState =
@@ -1380,6 +1390,16 @@ export interface InteractionAssignmentRecord {
    * comment itself looks the same either way, which is why this is reported separately.
    */
   mention?: string | null;
+  /**
+   * What happened to the heart **on the comment this reply answers**, when the campaign asked
+   * for one.
+   *
+   * A third note beside `like` and `mention`, and a different control from `like`: that one is
+   * the post's, this is the parent comment's. It is here because a comment like is a toggle —
+   * a tap on a heart that was already filled *removes* somebody's like — and neither the reply
+   * that was posted nor the comment it answers shows which of those happened.
+   */
+  commentLike?: string | null;
   /**
    * The reply was posted beneath a parent in TikTok's folded section. Optional because
    * campaign payloads produced before this field existed do not carry it.

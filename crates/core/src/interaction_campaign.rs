@@ -2704,15 +2704,34 @@ async fn run_cohort(
                     let draft_db=db.clone();let draft_id=id.clone();
                     effect_gate.record_draft_with(move |text|{let mut context=verification.clone();context.text=text.into();draft_db.prepare_comment_verification(&draft_id,&context)});
                 }
+                let mut comment_like = None;
                 let send_result = if let Some(parent) = parent_identity.as_ref() {
                     driver
-                        .send_reply(session.as_ref(), parent, prepared, &stop, &mut effect_gate)
+                        .send_reply(
+                            session.as_ref(),
+                            parent,
+                            prepared,
+                            &stop,
+                            &mut effect_gate,
+                            request.like_parent,
+                            &mut comment_like,
+                        )
                         .await
                 } else {
                     driver
                         .send_root(session.as_ref(), prepared, &stop, &mut effect_gate)
                         .await
                 };
+                // The evidence blob below is only written on the paths that settle, and a heart
+                // tapped just before a refused send would be lost there. One log line makes a
+                // like that really happened findable either way — the like itself is not undone
+                // by the reply failing.
+                if let Some(note) = comment_like.as_deref() {
+                    let _ = db.log_op(
+                        "interaction.comment_like",
+                        &format!("{} {} {note}", prepared.actor_udid, target.target_key),
+                    );
+                }
                 // A driver can prove that retry is unsafe even when the CAS itself failed:
                 // after typing, an unverified composer cleanup leaves the next attempt able
                 // to publish stale text. Preserve the driver's AfterEffect classification so
@@ -2814,6 +2833,10 @@ async fn run_cohort(
                         // reply — filed beside the like note because both are outcomes the
                         // comment's own text cannot show.
                         "mention": sent.mention_note,
+                        // The heart **on the comment being answered**, which is a different
+                        // control from the `like` above (that one is the post's). `None` when the
+                        // campaign did not ask for it.
+                        "commentLike": comment_like,
                         // A reply posted under a folded comment is confirmed but invisible.
                         // Recorded so the operator can tell it from a normal reply — the one
                         // outcome the comment's own text and the thread view cannot show.
@@ -3354,7 +3377,16 @@ impl TargetDriver for PixelTargetDriver<'_> {
         prepared: &PreparedThreadMessage,
         stop: &AtomicBool,
         effect_gate: &mut EffectGate<'_>,
+        like_parent: bool,
+        comment_like: &mut Option<String>,
     ) -> Result<SendOutcome, SendFailure> {
+        // This route drives by pixels over OCR'd frames: it has no hierarchy to read a
+        // comment row's heart or its state from, and a heart tapped on a guess is a heart
+        // tapped on somebody else's comment. Refused, and said out loud.
+        if like_parent {
+            *comment_like =
+                Some("đường pixel không đọc được nút tim của bình luận nên bỏ qua".into());
+        }
         // Everything down to the reply tap is `BeforeEffect`: it opens the drawer,
         // scrolls, and reads frames. Nothing is typed and no Send tap goes out, so a
         // failure here must stay retryable — the parent genuinely may not be in the list,
@@ -3616,6 +3648,8 @@ impl TargetDriver for HierarchyTargetDriver<'_> {
         prepared: &PreparedThreadMessage,
         stop: &AtomicBool,
         effect_gate: &mut EffectGate<'_>,
+        like_parent: bool,
+        comment_like: &mut Option<String>,
     ) -> Result<SendOutcome, SendFailure> {
         let outcome = crate::interaction_hierarchy::send_reply_by_hierarchy_with_gate_options(
             session,
@@ -3629,6 +3663,8 @@ impl TargetDriver for HierarchyTargetDriver<'_> {
             &prepared.mentions,
             prepared.strict_mentions,
             prepared.root_identity.as_ref(),
+            like_parent,
+            comment_like,
         )
         .await
         .map_err(map_hierarchy_send_failure)?;
@@ -3976,6 +4012,8 @@ mod tests {
                 cohort_size: None,
                 mentions: Vec::new(),
                 mention_parent: false,
+                like_parent: false,
+                post_dwell_seconds: None,
             }
         }
 
@@ -4037,6 +4075,7 @@ mod tests {
                 evidence_json: None,
                 like: None,
                 mention: None,
+                comment_like: None,
                 parent_was_folded: false,
                 actions: Vec::new(),
             }
@@ -4119,6 +4158,8 @@ mod tests {
                 cohort_size: None,
                 mentions: Vec::new(),
                 mention_parent: false,
+                like_parent: false,
+                post_dwell_seconds: None,
             }
         }
 
@@ -4292,6 +4333,8 @@ mod tests {
                 cohort_size: None,
                 mentions: Vec::new(),
                 mention_parent: false,
+                like_parent: false,
+                post_dwell_seconds: None,
             };
             let plan = plan_threads(&request).expect("plan");
             let campaign = db
@@ -4442,6 +4485,8 @@ mod tests {
             cohort_size: None,
             mentions: Vec::new(),
             mention_parent: false,
+            like_parent: false,
+            post_dwell_seconds: None,
         };
         let plan = plan_threads(&request).expect("plan");
         let campaign = db
@@ -4637,6 +4682,7 @@ mod tests {
             evidence_json: None,
             like: None,
             mention: None,
+            comment_like: None,
             parent_was_folded: false,
             actions: Vec::new(),
         }
@@ -4806,6 +4852,8 @@ mod mention_tests {
             actions: crate::interaction::InteractionActionSet::default(),
             mentions: mentions.iter().map(|m| (*m).to_string()).collect(),
             mention_parent,
+            like_parent: false,
+            post_dwell_seconds: None,
         }
     }
 

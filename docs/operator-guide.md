@@ -323,6 +323,20 @@ Tim/Lưu và bình luận thủ công không phụ thuộc cấu hình AI. “B�
 trạng thái” không có nghĩa đã Tim/Lưu; xem lý do và bằng chứng trước khi chạy lượt mới.
 Nếu tên hiển thị khác handle, ứng dụng có thể đối chiếu link từ chính bài trước hành động.
 
+Công tắc **Tim bình luận của máy trước** cho máy trả lời tim đúng bình luận mà nó sắp
+trả lời, trước khi bấm Trả lời. Tim là bật/tắt nên app đọc trạng thái trước: bình luận
+đã được tim thì bỏ qua chứ không bỏ tim của người khác; không đọc được trạng thái thì
+không bấm. Bình luận gốc của lượt không có ai để tim. Máy không đọc được nút tim (bản
+TikTok chưa đo, hoặc chạy bằng đường pixel) thì bỏ qua và ghi lý do — câu trả lời vẫn
+được gửi. Kết quả tim hiện thành dòng riêng trong **Theo dõi**, tách khỏi Tim của bài.
+
+**Giữ bài (giây)** là số giây máy ở lại bài sau khi đã làm xong hành động, trước khi
+app đóng TikTok; để trống hoặc 0 là rời ngay, tối đa 60 giây.
+
+Danh sách bình luận thủ công chỉ cần đủ số câu bằng số bình luận mỗi link ở kiểu
+`Nối tiếp`, vì ở đó câu sau trả lời câu trước; `Toả` và `Riêng lẻ` không có quan hệ đó
+nên danh sách quay vòng cho đủ lượt, dùng ít câu hơn vẫn chạy.
+
 Ô tài khoản cạnh từng máy nhận **username TikTok**, ví dụ `@ten.nick`, không phải
 tên hiển thị. Tên/số máy vẫn giữ riêng; nick được gắn với định danh máy. Rời ô sẽ lưu;
 nếu báo lỗi, sửa hoặc bấm **Tải lại nick đã lưu** trước khi chạy. Không gán cùng nick

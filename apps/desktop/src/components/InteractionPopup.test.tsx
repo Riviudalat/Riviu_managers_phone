@@ -69,8 +69,12 @@ const { parseLinks, resolveLinks, startThread, previewThread, measurePost } = vi
     // Modelled here because leaving it out is what hid a deadlock: the panel guessed the fleet
     // count, the preview was refused against that guess, so the real cohort size never arrived
     // and the guess never improved.
+    //
+    // Only the chain shape is refused: message N answers N-1 there, so a short pool has an
+    // account reply with its own words. Star and standalone wrap the pool instead.
     const manual = request.manualComments ?? [];
-    if (manual.length > 0 && manual.length < request.messageCount) {
+    const chained = request.mode === "threaded" && (request.shape ?? "chain") === "chain";
+    if (chained && manual.length > 0 && manual.length < request.messageCount) {
       throw new Error("InteractionFailed: manual mode needs as many comments as messages");
     }
     const size = request.cohortSize ?? 0;
@@ -913,9 +917,10 @@ describe("InteractionPopup", () => {
     expect(request.actorUdids).toEqual(["actor-a", "actor-b"]);
   });
 
-  it("keeps the manual pool rule it has always advertised", async () => {
-    // The hint said "cần ≥ N" and nothing enforced it, so the campaign row was written and
-    // the backend refused it afterwards.
+  it("refuses a short pool only where a message answers another", async () => {
+    // The panel and the backend used to agree on one rule for every shape — `cần ≥ N`. Only a
+    // chain needs it (message N answers N-1); where nothing answers anything the pool wraps, and
+    // holding the run over a rule that does not apply is the panel inventing a constraint.
     render(<InteractionPopup metas={noMeta} devices={devices} selected={[]} onClose={() => undefined} />);
     await pasteLink();
     fireEvent.change(screen.getByLabelText(/Nội dung bình luận/), {
@@ -924,6 +929,18 @@ describe("InteractionPopup", () => {
     fireEvent.change(screen.getByLabelText(/Danh sách bình luận/, { selector: "textarea" }), {
       target: { value: "đẹp quá" },
     });
+
+    // `Toả`, the default shape: one sentence covers both messages, and the panel does not hold
+    // the run over it. Waited for rather than asserted — the preview settles a moment later.
+    await waitFor(() =>
+      expect(screen.getByText(/1 câu · quay vòng cho 2 lượt/)).toBeVisible(),
+    );
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "Chạy ngay" })).toBeEnabled(),
+    );
+
+    // `Nối tiếp`: the second message answers the first, so the shortfall is real.
+    fireEvent.click(screen.getByRole("radio", { name: /Nối tiếp/ }));
     await waitFor(() =>
       expect(screen.getByText(/1 câu · cần ≥ 2/)).toBeVisible(),
     );

@@ -259,6 +259,8 @@ mod tests {
             },
             mentions: vec![],
             mention_parent: true,
+            like_parent: false,
+            post_dwell_seconds: None,
         };
         for role in &script.role_bindings {
             db.set_device_handle(&role.udid, "", &role.username)

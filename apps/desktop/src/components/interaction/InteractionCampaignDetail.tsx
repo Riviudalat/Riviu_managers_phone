@@ -465,6 +465,22 @@ export function InteractionCampaignDetailView({
                       {assignment.mention}
                     </small>
                   )}
+                  {/* The heart on the comment being answered, and its own line because it is
+                      its own control: the `like` above is the post's. Anything that is not a
+                      confirmed like reads as an error — a like nobody could prove, or a heart
+                      that was deliberately left alone, is a fact the operator has to act on
+                      rather than a reassuring line. */}
+                  {assignment.commentLike && (
+                    <small
+                      className={
+                        assignment.commentLike.startsWith("đã tim bình luận")
+                          ? "hint"
+                          : "interaction-error"
+                      }
+                    >
+                      {assignment.commentLike}
+                    </small>
+                  )}
                   {assignment.parentWasFolded && (
                     <small className="interaction-error">
                       Bình luận cha nằm trong khu vực bị ẩn. Khả năng hiển thị có thể khác giữa các tài khoản.

@@ -79,7 +79,7 @@
 .nurture-settings-tabs .nurture-tab.is-on { background: none; border-bottom-color: var(--primary); color: var(--primary); }
 .nurture-action-heading > div { display: grid; gap: 6px; }
 .nurture-action-heading small { font-weight: 400; color: var(--text-3); font-size: var(--text-xs); }
-.nurture-workspace .nurture-action-heading > .nurture-total-rate { font-size: 22px; font-weight: 650; color: var(--text-1); font-variant-numeric: tabular-nums; }
+.nurture-workspace .nurture-action-heading > .nurture-total-rate { font-size: var(--text-2xl); font-weight: 650; color: var(--text-1); font-variant-numeric: tabular-nums; }
 .nurture-distribution { display:flex; gap:3px; height:14px; overflow:hidden; border-radius:4px; margin:16px 0; }
 .nurture-distribution > span { flex-basis:0; min-width:0; }
 .nurture-distribution .is-watch { background:#dce2e8; }

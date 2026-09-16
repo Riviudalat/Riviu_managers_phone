@@ -226,6 +226,26 @@ export function InteractionSetupTab({
           </span>
         </label>
       )}
+      {/* Not guarded by shape the way the tag switch is: a scripted run keeps whatever
+          `threadKind` it was left on while its parents come from the script, and a root
+          comment simply has nothing to like — the engine no-ops it rather than the form
+          hiding a setting the operator asked for. */}
+      <label className="nu-switch">
+        <input
+          type="checkbox"
+          checked={draft.likeParent}
+          onChange={(event) => patch("likeParent", event.target.checked)}
+          aria-label="Tim bình luận của máy trước"
+        />
+        <span className="nu-switch-track" aria-hidden="true" />
+        <span className="nu-switch-label">
+          Tim bình luận của máy trước
+          <Info
+            of="Tim bình luận của máy trước"
+            what="Máy trả lời tim đúng bình luận mà nó sắp trả lời, trước khi bấm Trả lời. Bình luận gốc của lượt không có ai để tim nên không đổi. Máy đã tim bình luận đó rồi thì bỏ qua chứ không bỏ tim — tim là bật/tắt. Tim không xác nhận được thì câu trả lời vẫn gửi và lý do được ghi lại."
+          />
+        </span>
+      </label>
       <div className="nu-group-head">Nội dung</div>
       <label className="nu-field">
         <span className="nu-label">Nội dung bình luận</span>
@@ -252,7 +272,7 @@ export function InteractionSetupTab({
               Danh sách bình luận — mỗi dòng một câu
               <Info
                 of="Danh sách bình luận"
-                what="Chia lần lượt theo từng link nên nhiều link không mở đầu bằng cùng một câu; chạy lại cùng chiến dịch sẽ gửi đúng chữ đó. Cần ít nhất số câu bằng số bình luận mỗi link."
+                what="Chia lần lượt theo từng link nên nhiều link không mở đầu bằng cùng một câu; chạy lại cùng chiến dịch sẽ gửi đúng chữ đó. Nối tiếp cần ít nhất số câu bằng số bình luận mỗi link, vì câu sau trả lời câu trước; Toả và Riêng lẻ không có quan hệ đó nên dùng ít câu hơn được — danh sách quay vòng cho đủ lượt."
               />
             </span>
             <textarea
@@ -263,7 +283,7 @@ export function InteractionSetupTab({
             />
           </label>
           <p className="hint">
-            {manualCount} câu · cần ≥ {messages}
+            {manualCount} câu · {draft.threadKind === "chain" ? `cần ≥ ${messages}` : `quay vòng cho ${messages} lượt`}
           </p>
         </>
       )}
@@ -346,6 +366,25 @@ export function InteractionSetupTab({
               max={20}
               value={draft.maxWords}
               onChange={(event) => patch("maxWords", wholeNumber(event.target.value))}
+            />
+          </label>
+          <label className="nu-field">
+            <span className="nu-label">
+              Giữ bài (giây)
+              <Info
+                of="Giữ bài (giây)"
+                what="Số giây máy ở lại bài sau khi đã Tim/Lưu/Bình luận xong, trước khi app đóng TikTok. Để trống hoặc 0 là rời ngay. Tối đa 60 giây: nhịp của bản kế hoạch là 120 giây mỗi câu, ở lâu hơn thế làm máy lệch khỏi lượt đã xếp."
+              />
+            </span>
+            <input
+              type="number"
+              min={0}
+              max={60}
+              placeholder="0 · rời ngay"
+              value={draft.postDwellSeconds ?? ""}
+              onChange={(event) =>
+                patch("postDwellSeconds", event.target.value === "" ? null : wholeNumber(event.target.value))
+              }
             />
           </label>
         </div>

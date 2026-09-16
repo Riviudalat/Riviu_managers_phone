@@ -301,7 +301,38 @@ pub struct ThreadCampaignRequest {
     /// Off by default, which is what every campaign stored before this reads as.
     #[serde(default)]
     pub mention_parent: bool,
+    /// Whether each reply also likes the comment it is answering.
+    ///
+    /// The cluster shape the operator asked for: one account opens with a comment, the rest
+    /// of the team likes *that comment* and then answers it. Only a message with a parent has
+    /// anything to like, so ordinal 0 — and every message of a `Standalone` run — is
+    /// unaffected.
+    ///
+    /// **A comment heart is a toggle, not a switch**: tapping one that is already liked
+    /// removes the like. So the state is read first (`TikTokControl::CommentLiked` /
+    /// `CommentNotLiked`) and the tap is refused unless the row reads as *not* liked —
+    /// `checked` does not carry this state and the description reads "like or undo like" in
+    /// both. A like that cannot be performed is reported and the reply still goes out: a
+    /// failed heart is not a reason to lose the comment.
+    ///
+    /// Off by default, which is what every campaign stored before this reads as.
+    #[serde(default)]
+    pub like_parent: bool,
+    /// How long a machine stays on the post after it has finished its actions, in seconds.
+    ///
+    /// `None` and `Some(0)` both mean "leave as soon as the work is done", which is what
+    /// every campaign stored before this reads as.
+    ///
+    /// Capped at [`MAX_POST_DWELL_SECONDS`]: the planner interpolates one message every 120
+    /// seconds, and a rest longer than that would push a machine's next turn past the slot
+    /// the plan gave it with nothing anywhere to absorb the difference.
+    #[serde(default)]
+    pub post_dwell_seconds: Option<u8>,
 }
+
+/// The longest a machine may be told to rest on a post — see
+/// [`ThreadCampaignRequest::post_dwell_seconds`].
+pub const MAX_POST_DWELL_SECONDS: u8 = 60;
 
 /// Deserialize-only compatibility shape. New serialization always emits `actions` and never
 /// writes the retired `likeTarget` field; old stored rows still map it into the same behavior.
@@ -332,6 +363,10 @@ struct ThreadCampaignRequestWire {
     mentions: Vec<String>,
     #[serde(default)]
     mention_parent: bool,
+    #[serde(default)]
+    like_parent: bool,
+    #[serde(default)]
+    post_dwell_seconds: Option<u8>,
 }
 
 impl<'de> Deserialize<'de> for ThreadCampaignRequest {
@@ -360,6 +395,8 @@ impl<'de> Deserialize<'de> for ThreadCampaignRequest {
             actions,
             mentions: wire.mentions,
             mention_parent: wire.mention_parent,
+            like_parent: wire.like_parent,
+            post_dwell_seconds: wire.post_dwell_seconds,
         })
     }
 }
@@ -390,6 +427,8 @@ pub enum ThreadValidationError {
     DuplicateTarget,
     #[error("comment length must be between four and twenty words")]
     InvalidMaxWords,
+    #[error("post dwell must be between zero and sixty seconds")]
+    InvalidPostDwell,
     #[error("a manual comment is empty")]
     EmptyManualComment,
     #[error("manual mode needs at least as many comments as there are messages")]
@@ -477,6 +516,12 @@ impl ThreadCampaignRequest {
         if !(4..=20).contains(&self.max_words) {
             return Err(ThreadValidationError::InvalidMaxWords);
         }
+        if self
+            .post_dwell_seconds
+            .is_some_and(|seconds| seconds > MAX_POST_DWELL_SECONDS)
+        {
+            return Err(ThreadValidationError::InvalidPostDwell);
+        }
         if self.is_manual() {
             if self
                 .manual_comments
@@ -488,7 +533,17 @@ impl ThreadCampaignRequest {
             // A chain shorter than the pool is fine; a pool shorter than the chain is not.
             // Threaded means message N answers N-1, so a pool of two on a chain of three
             // would have an account reply to a comment word-for-word identical to its own.
-            if self.manual_comments.len() < self.message_count as usize {
+            //
+            // **That hazard is `Chain`'s alone, and only `Chain` is held to the rule.** In
+            // `Star` every reply answers ordinal 0 and in `Standalone` nothing has a parent,
+            // so no message can answer its own words — and a pool shorter than the message
+            // count is the whole point of authoring once and letting the fleet share it. The
+            // deal is a deterministic wrap (`manual_comment_for`), so a short pool still gives
+            // every `(target, ordinal)` a text and the run stays replayable.
+            if self.mode == ThreadMode::Threaded
+                && self.shape == ThreadShape::Chain
+                && self.manual_comments.len() < self.message_count as usize
+            {
                 return Err(ThreadValidationError::TooFewManualComments);
             }
         }
@@ -1350,6 +1405,14 @@ pub struct InteractionAssignmentRecord {
     /// What happened to the `@` tags — see [`Self::mention_note`]. Same shape, same reason.
     #[serde(default)]
     pub mention: Option<String>,
+    /// What happened to the heart **on the comment this reply answers** — see
+    /// [`Self::comment_like_note`].
+    ///
+    /// A separate field from [`Self::like`] because it is a separate control: `like` is the
+    /// post's, this is the parent comment's, and a reply can carry one, the other, both or
+    /// neither depending on what the operator asked for.
+    #[serde(default)]
+    pub comment_like: Option<String>,
     /// Whether this reply was posted below a parent TikTok had moved into its folded section.
     /// Hydrated from evidence for the desktop; old evidence has no key and therefore reads
     /// `false` rather than making an old campaign fail to load.
@@ -1389,6 +1452,20 @@ impl InteractionAssignmentRecord {
         serde_json::from_str::<serde_json::Value>(self.evidence_json.as_deref()?)
             .ok()?
             .get("mention")?
+            .as_str()
+            .map(str::to_string)
+    }
+
+    /// What happened to the heart on the comment this reply answers, if one was asked for.
+    ///
+    /// The third note read out of the same blob, for the same reason as the other two: the like
+    /// is a control on a comment that is not ours, a tap on a filled heart *removes* a like, and
+    /// none of that is visible in the reply that was posted. `None` when the campaign did not
+    /// ask for a comment like — which is different from a like that did not land.
+    pub fn comment_like_note(&self) -> Option<String> {
+        serde_json::from_str::<serde_json::Value>(self.evidence_json.as_deref()?)
+            .ok()?
+            .get("commentLike")?
             .as_str()
             .map(str::to_string)
     }
@@ -1716,6 +1793,8 @@ mod tests {
                 },
                 mentions: Vec::new(),
                 mention_parent: false,
+                like_parent: false,
+                post_dwell_seconds: None,
             };
             let brief = InteractionCampaignBrief::from_request(&request);
             assert_eq!(
@@ -1769,6 +1848,8 @@ mod tests {
                 actions: InteractionActionSet::default(),
                 mentions: Vec::new(),
                 mention_parent: false,
+                like_parent: false,
+                post_dwell_seconds: None,
             }
         }
 
@@ -1841,6 +1922,31 @@ mod tests {
         }
 
         #[test]
+        fn a_short_pool_wraps_outside_a_chain_instead_of_being_refused() {
+            // The hazard the rule protects against is `Chain`'s alone: only there does a
+            // message answer the one before it. Star answers ordinal 0 and standalone has no
+            // parents, so authoring one sentence and letting the cluster share it is exactly
+            // what those shapes are for — and the deal wraps, so every (target, ordinal) still
+            // gets a text.
+            let mut star = request(vec!["một câu duy nhất"]);
+            star.shape = ThreadShape::Star;
+            star.message_count = 3;
+            assert!(star.validate().is_ok());
+            for ordinal in 0..3 {
+                assert_eq!(
+                    star.manual_comment_for(0, ordinal),
+                    Some("một câu duy nhất")
+                );
+            }
+
+            let mut standalone = request(vec!["một câu duy nhất"]);
+            standalone.mode = ThreadMode::Standalone;
+            standalone.message_count = 3;
+            assert!(standalone.validate().is_ok());
+            assert!(!standalone.needs_ai_evidence_frames());
+        }
+
+        #[test]
         fn a_blank_comment_is_refused_rather_than_sent() {
             let blank = request(vec!["ổn", "   "]);
             assert_eq!(
@@ -1905,6 +2011,8 @@ mod tests {
             cohort_size: None,
             mentions: Vec::new(),
             mention_parent: false,
+            like_parent: false,
+            post_dwell_seconds: None,
         }
     }
 
@@ -2759,6 +2867,7 @@ mod tests {
             evidence_json: evidence.map(str::to_string),
             like: None,
             mention: None,
+            comment_like: None,
             parent_was_folded: false,
             actions: Vec::new(),
         }

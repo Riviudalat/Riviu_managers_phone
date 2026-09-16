@@ -161,6 +161,34 @@ pub enum TikTokControl {
     /// The like control once the post **is** liked. This is the state evidence
     /// that replaces pixel matching, so it has to be measured, not assumed.
     Liked,
+    /// The like control **on one comment row** — the heart beside `Trả lời` / `Reply`.
+    ///
+    /// Measured 16/09/2026 on `9889db374744474635` (`com.ss.android.ugc.trill`, UI en 38.3.2),
+    /// in the comment drawer of a post with three comments: one per row, a
+    /// `android.widget.Button` reading `content-desc="Like or undo like"` (nowhere else on the
+    /// screen), `resource-id` ending `id/is4`, bounds `[819,1000][971,1063]` on the first row
+    /// and the same shape down the list — the same band the row's `Reply` control sits in.
+    ///
+    /// **The description does not carry the state** — it reads "like *or undo like*" in both —
+    /// which is why the two icon labels below exist. Tapping the row's heart is a **toggle**:
+    /// tapping one that is already liked removes the like, so a caller must read the state
+    /// first and refuse rather than tap blind.
+    CommentLike,
+    /// The filled heart inside [`Self::CommentLike`] — the comment **is** liked.
+    ///
+    /// Measured 16/09/2026 on the same row and build: after one tap the heart's inner
+    /// `ImageView` was `resource-id` ending `id/i0c` and the row grew a `TextView` reading
+    /// `1` (its like count); before the tap that `ImageView` was `id/hur` and there was no
+    /// count. So the state is a **drawable swap**, readable from the icon's id — `checked`
+    /// stays `false` on the button in both states, and the state is *not* in `checked`.
+    CommentLiked,
+    /// The outline heart inside [`Self::CommentLike`] — the comment is **not** liked.
+    ///
+    /// The other half of the same measurement. Both icon ids are catalogued rather than one,
+    /// because "the liked icon is absent" is also what a dump that dropped the children looks
+    /// like; requiring the *not-liked* id to be present is what keeps an unreadable row from
+    /// being read as "not liked" and tapped.
+    CommentNotLiked,
     /// Opens the comment drawer. The label embeds the count, so it is a substring
     /// match.
     Comments,
@@ -362,11 +390,14 @@ impl TikTokControl {
     /// are here now, the ordinals run 0–28 with no holes, and `every_control_appears_in_all`
     /// is finally strong enough to notice: with `seen` sized from this array, a variant
     /// whose ordinal exceeds it now panics on the index instead of passing quietly.
-    pub const ALL: [Self; 34] = [
+    pub const ALL: [Self; 37] = [
         Self::FeedTab,
         Self::PhotoBadge,
         Self::Like,
         Self::Liked,
+        Self::CommentLike,
+        Self::CommentLiked,
+        Self::CommentNotLiked,
         Self::Comments,
         Self::Share,
         Self::Bookmark,
@@ -441,6 +472,13 @@ impl TikTokControl {
             Self::ComposerShutter => 31,
             Self::ComposerCaption => 32,
             Self::ComposerDiscard => 33,
+            // Appended rather than inserted beside `Like`/`Liked`, and on purpose: the only
+            // requirement is that the numbers stay unique and cover `0..ALL.len()`, so
+            // renumbering the thirty-three above would be churn that could hide a typo.
+            // A control's ordinal is meant to be stable, and this is what stable costs.
+            Self::CommentLike => 34,
+            Self::CommentLiked => 35,
+            Self::CommentNotLiked => 36,
         }
     }
 }
@@ -673,6 +711,10 @@ pub struct TikTokLabels {
     author_profile_link: Option<LabelMatch>,
     /// The like control that states a total — see [`TikTokControl::LikeCount`].
     like_count: Option<LabelMatch>,
+    /// The comment row's like control — see [`TikTokControl::CommentLike`]. A **string**
+    /// (the row's heart reads `Like or undo like`), so it lives here; the two icon states
+    /// are `resource-id`s and live in [`TikTokResourceLabels`] instead.
+    comment_like: Option<LabelMatch>,
     /// Our own profile tab. `Exact` when measured — see [`TikTokControl::ProfileTab`].
     profile_tab: Option<LabelMatch>,
     composer_next: Option<LabelMatch>,
@@ -712,6 +754,13 @@ impl TikTokLabels {
             TikTokControl::PhotoBadge => self.photo_badge,
             TikTokControl::Like => self.like,
             TikTokControl::Liked => self.liked,
+            TikTokControl::CommentLike => self.comment_like,
+            // Resource-only, and listed here so this match stays exhaustive rather than
+            // catching them in a wildcard: neither node carries `text` or `content-desc` on
+            // any build measured, so there is no string to return and `label()` reads them
+            // out of [`TikTokResourceLabels`]. Returning `None` is the honest answer, and a
+            // build whose ids nobody has read refuses rather than reaching for a translation.
+            TikTokControl::CommentLiked | TikTokControl::CommentNotLiked => None,
             TikTokControl::Comments => self.comments,
             TikTokControl::Share => self.share,
             TikTokControl::Bookmark => self.bookmark,
@@ -831,6 +880,19 @@ pub struct TikTokResourceLabels {
     /// string is not; a tile whose rectangle contains one of these is skipped before it
     /// costs a page load.
     pinned_badge: Option<LabelMatch>,
+    /// The two states of a comment row's heart — see [`TikTokControl::CommentLiked`] and
+    /// [`TikTokControl::CommentNotLiked`].
+    ///
+    /// Ids, and here rather than in a language set, by this struct's own rule: the two nodes
+    /// are the heart's `ImageView` and carry **no `text` and no `content-desc`**, so no string
+    /// could ever describe them and only the build they were read from can name them.
+    ///
+    /// Both are catalogued rather than just the liked one. "The liked icon is absent" is also
+    /// what a dump that dropped the children looks like, and a row read as *not* liked when it
+    /// is actually unreadable is a row whose heart gets tapped — which, the control being a
+    /// toggle, removes a like instead of adding one.
+    comment_liked: Option<LabelMatch>,
+    comment_not_liked: Option<LabelMatch>,
 }
 
 impl TikTokResourceLabels {
@@ -840,6 +902,8 @@ impl TikTokResourceLabels {
             TikTokControl::PickerAlbumMenu => self.picker_album_menu,
             TikTokControl::ComposerCaption => self.composer_caption,
             TikTokControl::ComposerShutter => self.composer_shutter,
+            TikTokControl::CommentLiked => self.comment_liked,
+            TikTokControl::CommentNotLiked => self.comment_not_liked,
             _ => None,
         }
     }
@@ -859,6 +923,8 @@ pub const TIKTOK_RESOURCE_SETS: &[TikTokResourceLabels] = &[
         // Own profile measured in fleet compatibility probe 08/09/2026.
         post_tile: Some(LabelMatch::ResourceId(":id/cover")),
         pinned_badge: None,
+        comment_liked: None,
+        comment_not_liked: None,
     },
     TikTokResourceLabels {
         package: "com.zhiliaoapp.musically",
@@ -872,6 +938,8 @@ pub const TIKTOK_RESOURCE_SETS: &[TikTokResourceLabels] = &[
         // Own profile measured in fleet compatibility probe 08/09/2026.
         post_tile: Some(LabelMatch::ResourceId(":id/cover")),
         pinned_badge: None,
+        comment_liked: None,
+        comment_not_liked: None,
     },
     TikTokResourceLabels {
         package: "com.zhiliaoapp.musically",
@@ -885,6 +953,8 @@ pub const TIKTOK_RESOURCE_SETS: &[TikTokResourceLabels] = &[
         // Own profile cover measured 09/09/2026; sanitized fixture accompanies this tuple.
         post_tile: Some(LabelMatch::ResourceId(":id/cover")),
         pinned_badge: None,
+        comment_liked: None,
+        comment_not_liked: None,
     },
 
     TikTokResourceLabels {
@@ -903,6 +973,8 @@ pub const TIKTOK_RESOURCE_SETS: &[TikTokResourceLabels] = &[
         // SM-G955N ce041714d44264230d,45.7.3/en,10/09/2026: three tv_top
         // badges inside first-row covers; the newly posted carousel is in the next row.
         pinned_badge: Some(LabelMatch::ResourceId(":id/tv_top")),
+        comment_liked: None,
+        comment_not_liked: None,
     },
     // 08/09/2026, remote Windows fleet, ce011711c354be2005, Android 9/en-US.
     // versionCode 2024600410: three selected photos -> Hot sound -> caption ->
@@ -920,6 +992,8 @@ pub const TIKTOK_RESOURCE_SETS: &[TikTokResourceLabels] = &[
         // 09/09/2026 phone1 own profile: cover grid and tv_top Pinned badge.
         post_tile: Some(LabelMatch::ResourceId(":id/cover")),
         pinned_badge: Some(LabelMatch::ResourceId(":id/tv_top")),
+        comment_liked: None,
+        comment_not_liked: None,
     },
     // The four `com.zhiliaoapp.musically` phones on this farm. Both versions here leave the
     // Send button as an unresolved reference, the way 46.3.3 and 46.4.3 do — unlike
@@ -979,7 +1053,15 @@ pub const TIKTOK_RESOURCE_SETS: &[TikTokResourceLabels] = &[
         // `TextView …:id/so6` reading `Pinned`, [16,1286][143,1325] — INSIDE the first
         // tile's rectangle on this account. The string is translated and the id is not, so
         // the id is the locator. Same trip.
+        // The heart of one comment row, measured 16/09/2026 on `9889db374744474635` (this
+        // build): tapping the first row’s heart swapped the inner `ImageView` from `…:id/hur`
+        // to `…:id/i0c` and the row grew a like-count `TextView` reading `1`; `checked` stayed
+        // `false` on the button in **both** states, so the drawable swap is the only readable
+        // signal. One tap back restored `hur`, which is what proved the pair is the state and
+        // not an artefact of a single dump.
         pinned_badge: Some(LabelMatch::ResourceId(":id/so6")),
+        comment_liked: Some(LabelMatch::ResourceId(":id/i0c")),
+        comment_not_liked: Some(LabelMatch::ResourceId(":id/hur")),
     },
     TikTokResourceLabels {
         package: "com.zhiliaoapp.musically",
@@ -1017,6 +1099,8 @@ pub const TIKTOK_RESOURCE_SETS: &[TikTokResourceLabels] = &[
         // Own profile cover measured 09/09/2026; sanitized fixture accompanies this tuple.
         post_tile: Some(LabelMatch::ResourceId(":id/cover")),
         pinned_badge: None,
+        comment_liked: None,
+        comment_not_liked: None,
     },
     TikTokResourceLabels {
         package: "com.zhiliaoapp.musically",
@@ -1050,6 +1134,8 @@ pub const TIKTOK_RESOURCE_SETS: &[TikTokResourceLabels] = &[
         gallery_entry: Some(LabelMatch::ResourceId(":id/upload_hot_area")),
         post_tile: Some(LabelMatch::ResourceId(":id/cover")),
         pinned_badge: None,
+        comment_liked: None,
+        comment_not_liked: None,
     },
     TikTokResourceLabels {
         package: "com.ss.android.ugc.trill",
@@ -1064,6 +1150,8 @@ pub const TIKTOK_RESOURCE_SETS: &[TikTokResourceLabels] = &[
         gallery_entry: None,
         post_tile: None,
         pinned_badge: None,
+        comment_liked: None,
+        comment_not_liked: None,
     },
     TikTokResourceLabels {
         package: "com.ss.android.ugc.trill",
@@ -1081,6 +1169,8 @@ pub const TIKTOK_RESOURCE_SETS: &[TikTokResourceLabels] = &[
         gallery_entry: None,
         post_tile: None,
         pinned_badge: None,
+        comment_liked: None,
+        comment_not_liked: None,
     },
 ];
 
@@ -1122,6 +1212,7 @@ pub(crate) fn nothing_measured() -> TikTokControls {
         photo_badge: None,
         like: None,
         liked: None,
+        comment_like: None,
         comments: None,
         share: None,
         bookmark: None,
@@ -1175,6 +1266,7 @@ static ALL: TikTokLabels = TikTokLabels {
     photo_badge: None,
     like: None,
     liked: None,
+    comment_like: None,
     comments: None,
     share: Some(LabelMatch::Exact("fixture-share")),
     bookmark: None,
@@ -1233,6 +1325,8 @@ pub(crate) fn every_publish_control_measured() -> TikTokControls {
         gallery_entry: None,
         post_tile: None,
         pinned_badge: None,
+        comment_liked: None,
+        comment_not_liked: None,
     };
     TikTokControls {
         adaptive: false,
@@ -1260,6 +1354,8 @@ pub(crate) fn every_publish_control_measured_with_gallery_id() -> TikTokControls
         gallery_entry: Some(LabelMatch::ResourceId("fixture-gallery-entry")),
         post_tile: None,
         pinned_badge: None,
+        comment_liked: None,
+        comment_not_liked: None,
     };
     TikTokControls {
         adaptive: false,
@@ -1307,6 +1403,7 @@ pub(crate) fn every_publish_control_but_post_measured() -> TikTokControls {
         photo_badge: None,
         like: None,
         liked: None,
+        comment_like: None,
         comments: None,
         share: Some(LabelMatch::Exact("fixture-share")),
         bookmark: None,
@@ -1345,6 +1442,8 @@ pub(crate) fn every_publish_control_but_post_measured() -> TikTokControls {
         gallery_entry: None,
         post_tile: None,
         pinned_badge: None,
+        comment_liked: None,
+        comment_not_liked: None,
     };
     TikTokControls {
         adaptive: false,
@@ -1378,6 +1477,7 @@ pub(crate) fn every_publish_control_but_caption_measured() -> TikTokControls {
         photo_badge: None,
         like: None,
         liked: None,
+        comment_like: None,
         comments: None,
         share: Some(LabelMatch::Exact("fixture-share")),
         bookmark: None,
@@ -1414,6 +1514,8 @@ pub(crate) fn every_publish_control_but_caption_measured() -> TikTokControls {
         gallery_entry: None,
         post_tile: None,
         pinned_badge: None,
+        comment_liked: None,
+        comment_not_liked: None,
     };
     TikTokControls {
         adaptive: false,
@@ -1466,6 +1568,13 @@ impl TikTokControls {
                 .and_then(|set| set.resource(control))
                 .or_else(|| self.translated.translated(control)),
             TikTokControl::PickerAlbumMenu => self.resources.and_then(|set| set.resource(control)),
+            // Resource-only, for the same shape of reason: both nodes are the heart's own
+            // `ImageView`, with no `text` and no `content-desc` on any build measured so far,
+            // so there is no translation to fall through to and inventing one would name a
+            // node that does not exist. A build without a measured id refuses instead.
+            TikTokControl::CommentLiked | TikTokControl::CommentNotLiked => {
+                self.resources.and_then(|set| set.resource(control))
+            }
             // Own Profile tab observed independently on these English Global builds.
             // Exact description excludes the author's "<name> profile" rail control.
             TikTokControl::ProfileTab
@@ -1843,6 +1952,10 @@ pub const TIKTOK_LABEL_SETS: &[TikTokLabels] = &[
         photo_badge: Some(LabelMatch::Text("Photo")),
         like: Some(LabelMatch::Exact("Like")),
         liked: Some(LabelMatch::Exact("Video liked")),
+        // The comment row's heart and its two icon states were read on `trill` 38.3.2 (see
+        // that set). Not measured on `musically`: absent means the platform tags nothing
+        // rather than tagging from a guess — the rule this table exists for.
+        comment_like: None,
         comments: Some(LabelMatch::Contains("comments")),
         // `Share video.  shares` on the same 18/08/2026 feed dump — the count sits between
         // the two words on a card with no shares yet, so only the prefix can be matched.
@@ -1967,6 +2080,10 @@ pub const TIKTOK_LABEL_SETS: &[TikTokLabels] = &[
         // noting how far it is from a guess: not `Đã thích`, and the word order is
         // reversed relative to the English `Video liked`.
         liked: Some(LabelMatch::Exact("Đã thích video")),
+        // Not measured on this build — the heart's two icon states were read on `trill` en
+        // 38.3.2 (see that set). `None` here means the Vietnamese build refuses to tag a
+        // comment rather than tagging from a string nobody has seen on it.
+        comment_like: None,
         comments: Some(LabelMatch::Contains("bình luận")),
         share: Some(LabelMatch::Contains("Chia sẻ video")),
         bookmark: Some(LabelMatch::Contains("Yêu thích")),
@@ -2132,6 +2249,13 @@ pub const TIKTOK_LABEL_SETS: &[TikTokLabels] = &[
         // `AlreadyLiked` guard runs *before* the tap, so with nothing to recognise, the
         // loop tapped Like on a post it had already liked — which removes the like.
         liked: Some(LabelMatch::Exact("Video liked")),
+        // The comment row's heart, measured 16/09/2026 on `9889db374744474635` (this build,
+        // this language) in the drawer of a three-comment post: one `content-desc="Like or
+        // undo like"` per row and nowhere else on the screen, on a `Button` at
+        // `[819,1000][971,1063]` for the first row. The string says "or undo", so it is the
+        // **control**, not the state — the two icon states are ids, and those live in this
+        // build's `TIKTOK_RESOURCE_SETS` row where every other resource-id belongs.
+        comment_like: Some(LabelMatch::Exact("Like or undo like")),
         comments: Some(LabelMatch::Contains("comments")),
         share: Some(LabelMatch::Contains("Share video")),
         bookmark: Some(LabelMatch::Contains("Favorites")),

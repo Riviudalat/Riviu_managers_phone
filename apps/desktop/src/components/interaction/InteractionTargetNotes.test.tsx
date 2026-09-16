@@ -237,4 +237,43 @@ describe("assignment evidence", () => {
       ),
     ).toBeInTheDocument();
   });
+
+  it("keeps a proven comment heart apart from one it could not prove", () => {
+    // The heart on the *answered* comment is its own control: `like` above is the post's. A
+    // confirmed tap is a note; anything else — a tap that never showed, a state that could not
+    // be read, a row with no heart — is a warning, because the comment still posted and the
+    // thread shows nothing about it either way.
+    const base = {
+      id: "assignment-comment-like",
+      targetKey: "content:1",
+      ordinal: 2,
+      actorUdid: "actor-a",
+      parentAssignmentId: "assignment-root",
+      state: "succeeded" as const,
+      preparedText: "Mình cũng thấy vậy",
+      errorCode: null,
+    };
+    show([], {
+      ...detail,
+      assignments: [
+        { ...base, commentLike: "đã tim bình luận trả lời (nhãn đổi trạng thái)" },
+        {
+          ...base,
+          id: "assignment-comment-like-unproven",
+          ordinal: 3,
+          commentLike:
+            "tap gửi được nhưng bình luận chưa đổi trạng thái — không tính là đã tim",
+        },
+      ],
+    });
+
+    expect(
+      screen.getByText("đã tim bình luận trả lời (nhãn đổi trạng thái)").className,
+    ).toContain("hint");
+    expect(
+      screen
+        .getByText("tap gửi được nhưng bình luận chưa đổi trạng thái — không tính là đã tim")
+        .className,
+    ).toContain("interaction-error");
+  });
 });

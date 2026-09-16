@@ -369,6 +369,8 @@ mod tests {
             actions,
             mentions: Vec::new(),
             mention_parent: false,
+            like_parent: false,
+            post_dwell_seconds: None,
         };
         let plan = plan_threads(&request).expect("plan");
         let campaign_id = db

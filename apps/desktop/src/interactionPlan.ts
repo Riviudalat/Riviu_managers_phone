@@ -49,6 +49,10 @@ export interface InteractionDraft {
   /** Each reply tags the account it answers — the fleet talking to itself. */
   mentionParent: boolean;
   mentionText: string;
+  /** Each reply also likes the comment it answers — the cluster shape. */
+  likeParent: boolean;
+  /** Seconds to rest on the post once the actions are done; `null` leaves immediately. */
+  postDwellSeconds: number | null;
   actors: string[];
 }
 
@@ -67,6 +71,8 @@ export const DEFAULT_DRAFT: InteractionDraft = {
   actions: { like: false, comment: true, save: false },
   mentionParent: false,
   mentionText: "",
+  likeParent: false,
+  postDwellSeconds: null,
   actors: [],
 };
 
@@ -187,6 +193,14 @@ export function buildRequest(
     actions: draft.actions,
     mentionParent:
       draft.actions.comment && draft.threadKind !== "standalone" ? draft.mentionParent : false,
+    // Not zeroed for `standalone` the way `mentionParent` is: a root comment has no parent to
+    // like, so the engine no-ops it — and a scripted run keeps `threadKind` at whatever it was
+    // while its parents come from the script, so a UI-side guard would silently drop a setting
+    // the operator turned on.
+    likeParent: draft.actions.comment ? draft.likeParent : false,
+    // Gated on a comment because that is where the control lives: the advanced block that
+    // offers it renders inside the comment section.
+    postDwellSeconds: draft.actions.comment ? (draft.postDwellSeconds ?? undefined) : undefined,
     mentions: draft.actions.comment ? context.mentions : [],
   };
 }
@@ -287,7 +301,11 @@ export function validateDraft(
 
   // Advertised in a hint since the feature shipped and enforced nowhere, so the run started
   // and the backend refused it — `TooFewManualComments`, after the campaign row existed.
-  if (draft.actions.comment && draft.textSource === "manual") {
+  //
+  // Only `chain` still needs a pool as long as the message count: there, message N answers
+  // N-1, so a short pool makes an account answer its own words. `star` and `standalone` have
+  // no such relation, so one authored sentence may cover the whole cluster — the deal wraps.
+  if (draft.actions.comment && draft.textSource === "manual" && draft.threadKind === "chain") {
     const pool = manualCommentsOf(draft).length;
     if (pool < messages) {
       issues.push({
