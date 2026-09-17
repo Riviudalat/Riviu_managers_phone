@@ -9,6 +9,32 @@ const CAPTION: &str =
 const URL: &str = "https://www.tiktok.com/@fixture.account/photo/123456789";
 
 #[test]
+fn measured_global_45_4_3_expanded_photo_is_a_safe_back_surface() {
+    let plan = PublishVerificationPlan::for_build(PACKAGE, "en", "45.4.3").unwrap();
+    let xml = include_str!("../../../fixtures/tiktok-publish/expanded-photo-45.4.3.fixture");
+    assert_eq!(classify(&tree(xml.into()), &plan), Screen::Post);
+    let other = PublishVerificationPlan::for_build(PACKAGE, "en", "46.0.41").unwrap();
+    assert_eq!(classify(&tree(xml.into()), &other), Screen::Unknown);
+}
+
+#[test]
+fn measured_global_46_0_41_expanded_photo_is_a_safe_back_surface() {
+    let plan = PublishVerificationPlan::for_build(PACKAGE, "en", "46.0.41").unwrap();
+    let xml = include_str!("../../../fixtures/tiktok-publish/expanded-photo-46.0.41.fixture");
+    assert_eq!(classify(&tree(xml.into()), &plan), Screen::Post);
+    for changed in [
+        xml.replace(":id/rki", ":id/other"),
+        xml.replace(":id/rjy", ":id/other"),
+        xml.replace("displayed=\"true\"", "displayed=\"false\""),
+        xml.replace(PACKAGE, TRILL),
+    ] {
+        assert_eq!(classify(&tree(changed), &plan), Screen::Unknown);
+    }
+    let other = PublishVerificationPlan::for_build(PACKAGE, "en", "46.2.1").unwrap();
+    assert_eq!(classify(&tree(xml.into()), &other), Screen::Unknown);
+}
+
+#[test]
 fn facebook_permission_only_selects_the_measured_decline_button() {
     let plan =
         PublishVerificationPlan::for_build("com.ss.android.ugc.trill", "en", "38.3.2").unwrap();

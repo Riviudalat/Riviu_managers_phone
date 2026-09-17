@@ -92,12 +92,37 @@ fn validate_public_metadata(
 fn viewer_controls(package: &str, version: &str) -> anyhow::Result<(&'static str, &'static str)> {
     match (package, version) {
         ("com.ss.android.ugc.trill", _) => Ok((":id/m3q", ":id/m3h")),
+        // SM-G955N Android9/en-US, 18/09/2026: second restart canary;
+        // retained sanitized fixture expanded-photo-45.4.3.fixture.
+        ("com.zhiliaoapp.musically", "45.4.3") => Ok((":id/r55", ":id/r4k")),
+        // SM-G955F Android9/en-US, 18/09/2026: full-caption expanded photo
+        // surface; retained sanitized fixture expanded-photo-46.0.41.fixture.
+        ("com.zhiliaoapp.musically", "46.0.41") => Ok((":id/rki", ":id/rjy")),
         // Phone13, Global46.2.42, 15/09/2026: complete caption rqb and
         // ImageView rpr with content-desc=Share on PostModeDetailActivity.
         ("com.zhiliaoapp.musically", "46.2.42") => Ok((":id/rqb", ":id/rpr")),
         ("com.zhiliaoapp.musically", _) => Ok((":id/rs_", ":id/rrp")),
         _ => anyhow::bail!("photo viewer not measured for package"),
     }
+}
+
+/// Recognize only the measured full-caption surface. This permits navigation
+/// back to the profile; publication still needs caption/account/ID/time proof.
+pub(super) fn expanded_photo_surface(tree: &Tree, package: &str, version: &str) -> bool {
+    let Ok((caption_id, share_id)) = viewer_controls(package, version) else {
+        return false;
+    };
+    let captions = tree.matching(package, ElementQuery::ResourceIdSuffix(caption_id));
+    let shares = tree.matching(package, ElementQuery::ResourceIdSuffix(share_id));
+    let ([caption], [share]) = (captions.as_slice(), shares.as_slice()) else {
+        return false;
+    };
+    tree.nodes[*caption].attr("class") == "android.widget.TextView"
+        && !tree.nodes[*caption].attr("text").trim().is_empty()
+        && tree.nodes[*share].attr("content-desc") == "Share"
+        && tree.nodes[*share]
+            .rect()
+            .is_some_and(|rect| rect.enabled && rect.clickable)
 }
 
 pub async fn capture_expanded_photo_link(
@@ -458,6 +483,83 @@ mod tests {
         assert!(validate_public_metadata(&full, caption, "fixture", "123").is_ok());
         full["author_url"] = "https://www.tiktok.com/@different".into();
         assert!(validate_public_metadata(&full, caption, "fixture", "123").is_err());
+    }
+    #[test]
+    fn measured_global_46_0_41_expanded_photo_matches_caption_and_share() {
+        let package = "com.zhiliaoapp.musically";
+        let tree = Tree::parse(crate::HierarchySourceSnapshot {
+            generation: 1,
+            xml: include_str!("../../fixtures/tiktok-publish/expanded-photo-46.0.41.fixture")
+                .into(),
+        })
+        .unwrap();
+        let (caption, share) = viewer_controls(package, "46.0.41").unwrap();
+        let captions = tree.matching(package, ElementQuery::ResourceIdSuffix(caption));
+        assert_eq!(
+            captions.len(),
+            1,
+            "Full caption must be recognized before Copy"
+        );
+        assert_eq!(
+            tree.nodes[captions[0]].attr("text"),
+            "Complete fixture caption identifying the submitted photo post"
+        );
+        let shares = tree.matching(package, ElementQuery::ResourceIdSuffix(share));
+        assert_eq!(shares.len(), 1);
+        assert!(tree.nodes[shares[0]]
+            .rect()
+            .is_some_and(|r| r.enabled && r.clickable));
+        assert_ne!(
+            viewer_controls(package, "46.2.1").unwrap(),
+            (caption, share)
+        );
+    }
+    #[test]
+    fn measured_global_45_4_3_expanded_photo_requires_its_exact_controls() {
+        let package = "com.zhiliaoapp.musically";
+        let xml = include_str!("../../fixtures/tiktok-publish/expanded-photo-45.4.3.fixture");
+        let observed = |xml: String| {
+            Tree::parse(crate::HierarchySourceSnapshot { generation: 1, xml }).unwrap()
+        };
+        let tree = observed(xml.into());
+        let (caption, share) = viewer_controls(package, "45.4.3").unwrap();
+        assert_eq!(
+            tree.matching(package, ElementQuery::ResourceIdSuffix(caption))
+                .len(),
+            1
+        );
+        assert_eq!(
+            tree.matching(package, ElementQuery::ResourceIdSuffix(share))
+                .len(),
+            1
+        );
+        assert!(expanded_photo_surface(&tree, package, "45.4.3"));
+        for changed in [
+            xml.replace(":id/r55", ":id/other"),
+            xml.replace(":id/r4k", ":id/other"),
+            xml.replace("displayed=\"true\"", "displayed=\"false\""),
+            xml.replace("clickable=\"true\"", "clickable=\"false\""),
+            xml.replace("content-desc=\"Share\"", "content-desc=\"Like\""),
+            xml.replace(
+                "</hierarchy>",
+                &format!(
+                    "{} </hierarchy>",
+                    xml.split("<hierarchy>")
+                        .nth(1)
+                        .unwrap()
+                        .split("</hierarchy>")
+                        .next()
+                        .unwrap()
+                ),
+            ),
+        ] {
+            assert!(!expanded_photo_surface(
+                &observed(changed),
+                package,
+                "45.4.3"
+            ));
+        }
+        assert!(!expanded_photo_surface(&tree, package, "46.0.41"));
     }
     #[test]
     fn global_46_2_42_viewer_uses_its_own_caption_and_share_controls() {

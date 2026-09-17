@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Sanitized semantic/geometry extract: SM-G955F Android9/en-US,
+     Global46.0.41, 18/09/2026. Inspector snapshot f0579090-d82e-4e0f-9559-5d18f3b65c37.
+     Caption/account content replaced; measured resource IDs and bounds retained. -->
+<hierarchy>
+  <node package="com.zhiliaoapp.musically" resource-id="com.zhiliaoapp.musically:id/rki" class="android.widget.TextView" text="Complete fixture caption identifying the submitted photo post" bounds="[0,1616][1080,1965]" enabled="true" clickable="true" displayed="true"/>
+  <node package="com.zhiliaoapp.musically" resource-id="com.zhiliaoapp.musically:id/rjy" class="android.widget.ImageView" content-desc="Share" bounds="[959,1982][1027,2050]" enabled="true" clickable="true" displayed="true"/>
+</hierarchy>

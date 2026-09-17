@@ -386,6 +386,13 @@ fn classify(tree: &Tree, plan: &PublishVerificationPlan) -> Screen {
     if tree.copy_control(package).is_err() || tree.copy_control(package).ok().flatten().is_some() {
         return Screen::Share;
     }
+    if plan
+        .labels
+        .resource_version()
+        .is_some_and(|version| super::photo_proof::expanded_photo_surface(tree, package, version))
+    {
+        return Screen::Post;
+    }
     let own_profile = if package == "com.zhiliaoapp.musically" {
         !tree
             .matching(
