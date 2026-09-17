@@ -304,7 +304,7 @@ cho một lần đọc bổ sung/phase trong ngân sách và xóa snapshot cũ t
 
 
 `Submitted` chỉ chứng minh thao tác Đăng đã qua biên hiệu lực và TikTok trở lại feed.
-`Verifying` giữ TikTok/media đang tải; `Succeeded` đòi canonical link, đúng tài khoản
+`Verifying` giữ media và nhịp xác minh (Android restart TikTok trước Copy); `Succeeded` đòi canonical link, đúng tài khoản
 đã đọc trước Post, caption và khoảng thời gian xuất bản sau intent. `effect_intent`
 giữ `expectedAccount`/`submittedAt` để phép xác minh sau restart không dựa đồng hồ lúc
 retry. Thiếu bằng chứng không được cold-start hoặc bấm Post lại.
@@ -342,15 +342,21 @@ accessibility vẫn đánh dấu ô phía dưới là visible. Cả điểm ch�
 trang dùng phần còn hiển thị đó. Bài có banner TikTok báo đã bị gỡ được bỏ qua trước
 khi mở Share; không dùng nút chia sẻ của bài đã bị gỡ để tìm link bài khác.
 
-`publish_commands/verification.rs` chạy warm session trong control plane; DB CAS ghi
+`publish_commands/verification.rs` chạy phiên xác minh trong control plane; DB CAS ghi
 proof, outbox và snapshot cùng transaction. `verified_cleanup.rs` xử lý riêng media
 đã xác minh theo delete policy và importId, giữ khả năng thử lại qua restart.
 Worker lưu `nextCheckAt` bằng thời điểm kết thúc quan sát cộng 300 giây cho mọi bài
 đã gửi còn thiếu link, kể cả lỗi đọc. Không đặt tổng hạn chờ liên kết; mỗi lần quan
 sát vẫn có deadline và lease riêng. Restart giữ nguyên mốc gửi và lần kiểm tiếp.
 Android ở trạng thái Connected sau restart vẫn được kiểm khi agent đã sẵn sàng;
-worker mở warm session qua control plane, không đòi mở điều khiển bằng tay để đổi
+worker mở session qua control plane, không đòi mở điều khiển bằng tay để đổi
 trạng thái thành Ready. Máy Busy/Preparing/Error/offline vẫn chờ; iOS giữ điều kiện Ready.
+Với receipt Android `submitted`/`posted` chưa có link, `verification_restart` tắt đúng
+package đã ghi trong intent, kiểm proof hết tiến trình, mở lại và kiểm tiến trình đang
+chạy trước Copy. Cùng lease giữ suốt chu kỳ; kiểm revision/stop trước và sau các await,
+không đóng máy còn bài khác đang giữ. Proof restart ghi vào `verificationDiagnostic.appRestart`.
+Android hẹn giờ bắt đầu kiểm khi phiên đăng nhả máy; lỗi restart cũng giữ nhịp 300 giây.
+Unknown receipt và iOS giữ đường đọc không restart. LinkAndSheet không quay lại Post.
 Review cũ có cause `verificationDeadline` và ngân sách 30/240 phút được tiếp tục
 bằng CAS khi effect intent còn đủ tài khoản/thời điểm gửi; review vì lý do khác giữ
 nguyên, kể cả sau một lần kiểm chủ động thất bại. Đổi trạng thái không tái phát Post

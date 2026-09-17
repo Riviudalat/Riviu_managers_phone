@@ -853,6 +853,51 @@ mod tests {
     }
 
     #[test]
+    fn android_scheduled_verification_starts_after_submit_then_waits_five_minutes() {
+        let (db, path, campaign, assignment, intent) = review_fixture(0);
+        mark_scheduled(&db, &campaign);
+        let mut intent: serde_json::Value = serde_json::from_str(&intent).unwrap();
+        intent["package"] = "com.zhiliaoapp.musically".into();
+        db.conn()
+            .unwrap()
+            .execute(
+                "UPDATE publish_assignments SET effect_intent=?2 WHERE id=?1",
+                params![assignment, intent.to_string()],
+            )
+            .unwrap();
+        let row = db.pending_publish_verifications(10).unwrap().remove(0);
+        let submitted = DateTime::parse_from_rfc3339(intent["submittedAt"].as_str().unwrap())
+            .unwrap()
+            .with_timezone(&Utc);
+        assert!(!row.is_due(submitted - chrono::Duration::seconds(1)));
+        assert!(row.is_due(submitted));
+        assert!(db
+            .record_publish_verification_observation(
+                &row,
+                "restart complete, link pending",
+                "clipboardUnchanged"
+            )
+            .unwrap());
+        let row = db.pending_publish_verifications(10).unwrap().remove(0);
+        let evidence: serde_json::Value =
+            serde_json::from_str(row.evidence_json.as_deref().unwrap()).unwrap();
+        let checked = DateTime::parse_from_rfc3339(
+            evidence["verificationStatus"]["checkedAt"]
+                .as_str()
+                .unwrap(),
+        )
+        .unwrap()
+        .with_timezone(&Utc);
+        assert!(!row.is_due(checked + chrono::Duration::seconds(299)));
+        assert!(row.is_due(checked + chrono::Duration::seconds(300)));
+        assert!(!db
+            .claim_publish_assignment_for_posting(&assignment, &intent.to_string())
+            .unwrap());
+        drop(db);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
     fn scheduled_verification_keeps_checking_after_thirty_minutes_and_restart() {
         let (db, path, campaign, assignment, intent) = review_fixture(60);
         mark_scheduled(&db, &campaign);

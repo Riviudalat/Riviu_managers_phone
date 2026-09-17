@@ -270,10 +270,18 @@ fn explicit_non_stop_review(evidence: Option<&str>) -> bool {
 
 fn first_scheduled_check(intent: Option<&str>) -> Option<DateTime<Utc>> {
     let intent: serde_json::Value = serde_json::from_str(intent?).ok()?;
+    let first_delay = if matches!(
+        intent["package"].as_str(),
+        Some("com.zhiliaoapp.musically" | "com.ss.android.ugc.trill")
+    ) {
+        0
+    } else {
+        SCHEDULED_FIRST_CHECK_SECONDS
+    };
     DateTime::parse_from_rfc3339(intent["submittedAt"].as_str()?)
         .ok()?
         .with_timezone(&Utc)
-        .checked_add_signed(chrono::Duration::seconds(SCHEDULED_FIRST_CHECK_SECONDS))
+        .checked_add_signed(chrono::Duration::seconds(first_delay))
 }
 
 /// Reopen only the retired age-limit reviews with a complete immutable Post identity.
@@ -743,7 +751,7 @@ impl Database {
         let mut evidence: serde_json::Value = serde_json::from_str(evidence_json)?;
         evidence["verificationStatus"] = serde_json::json!({
             "state":"pending",
-            "reason":"Đã gửi bài hẹn giờ; tự kiểm tra liên kết sau 2 phút rồi mỗi 5 phút đến khi xác minh được link",
+            "reason":"Đã gửi bài hẹn giờ; Android mở lại TikTok để lấy link, nếu chưa được sẽ thử lại sau 5 phút",
             "cause":"deferredScheduledLink", "attempts":0, "readFailures":0,
             "checkIntervalSeconds":VERIFICATION_CHECK_SECONDS, "reviewAfterMinutes":null, "deadlineAt":null, "nextCheckAt":first_scheduled_check(intent.as_deref()).map(|at|at.to_rfc3339()),
         });

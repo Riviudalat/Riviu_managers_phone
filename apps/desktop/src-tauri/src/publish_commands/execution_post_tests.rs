@@ -218,6 +218,10 @@ fn only_verified_or_never_submitted_posts_allow_app_shutdown() {
 struct UploadDriver {
     terminations: std::sync::atomic::AtomicUsize,
     stream_stops: std::sync::atomic::AtomicUsize,
+    restart_test: bool,
+    fail_stop: bool,
+    wrong_proof: bool,
+    actions: parking_lot::Mutex<Vec<String>>,
 }
 
 struct UploadSession;
@@ -268,16 +272,44 @@ impl riviu_core::DeviceDriver for UploadDriver {
         anyhow::bail!("unexpected syslog")
     }
     async fn launch_app(&self, _: &str, _: &str) -> anyhow::Result<()> {
+        if self.restart_test {
+            self.actions.lock().push("launch".into());
+            return Ok(());
+        }
         anyhow::bail!("unexpected launch")
     }
     async fn terminate_app(
         &self,
         _: &str,
-        _: &str,
+        package: &str,
     ) -> anyhow::Result<riviu_core::ProcessAbsenceProof> {
         self.terminations
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if self.restart_test {
+            self.actions.lock().push("terminate".into());
+            anyhow::ensure!(!self.fail_stop, "fixture termination failed");
+            return Ok(riviu_core::ProcessAbsenceProof {
+                bundle_id: if self.wrong_proof {
+                    "other.app".into()
+                } else {
+                    package.into()
+                },
+                old_pid: Some(10),
+            });
+        }
         anyhow::bail!("pending upload was terminated")
+    }
+    async fn inspect_app_process(
+        &self,
+        _: &str,
+        package: &str,
+    ) -> anyhow::Result<riviu_core::AppProcessState> {
+        self.actions.lock().push("inspect".into());
+        Ok(riviu_core::AppProcessState {
+            bundle_id: package.into(),
+            pid: Some(20),
+            running: true,
+        })
     }
     async fn reboot(&self, _: &str) -> anyhow::Result<()> {
         anyhow::bail!("unexpected reboot")
@@ -327,6 +359,153 @@ impl riviu_core::DeviceDriver for UploadDriver {
     async fn prepare_device(&self, _: &str) -> anyhow::Result<()> {
         anyhow::bail!("unexpected prepare")
     }
+}
+
+#[tokio::test]
+async fn verification_restart_stops_relaunches_and_checks_each_attempt_without_post() {
+    let driver = Arc::new(UploadDriver {
+        restart_test: true,
+        ..Default::default()
+    });
+    let control = DeviceControlPlane::new(
+        driver.clone(),
+        Arc::new(riviu_core::DeviceWorkCoordinator::new()),
+        Arc::new(riviu_core::StreamBudgetManager::new(1).unwrap()),
+    );
+    for _ in 0..2 {
+        let context = control
+            .open_manual_session("phone", DeviceWorkOwner::Script)
+            .await
+            .unwrap();
+        let proof = super::super::verification_restart::foreground(
+            &control,
+            &context,
+            "com.zhiliaoapp.musically",
+            true,
+            || Ok(()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(proof.unwrap()["state"], "restarted");
+        control.close_manual_session(context).unwrap();
+    }
+    assert_eq!(
+        *driver.actions.lock(),
+        [
+            "terminate",
+            "launch",
+            "inspect",
+            "terminate",
+            "launch",
+            "inspect"
+        ]
+    );
+    assert!(control.current_work_owner("phone").is_none());
+}
+
+#[tokio::test]
+async fn verification_restart_never_launches_after_stop_failure_foreign_proof_or_cancellation() {
+    for fault in ["stop", "proof", "cancel-before", "cancel-after"] {
+        let driver = Arc::new(UploadDriver {
+            restart_test: true,
+            fail_stop: fault == "stop",
+            wrong_proof: fault == "proof",
+            ..Default::default()
+        });
+        let control = DeviceControlPlane::new(
+            driver.clone(),
+            Arc::new(riviu_core::DeviceWorkCoordinator::new()),
+            Arc::new(riviu_core::StreamBudgetManager::new(1).unwrap()),
+        );
+        let context = control
+            .open_manual_session("phone", DeviceWorkOwner::Script)
+            .await
+            .unwrap();
+        let mut checks = 0;
+        let result = super::super::verification_restart::foreground(
+            &control,
+            &context,
+            "com.zhiliaoapp.musically",
+            true,
+            || {
+                checks += 1;
+                anyhow::ensure!(
+                    fault != "cancel-before" && !(fault == "cancel-after" && checks > 1),
+                    "cancelled"
+                );
+                Ok(())
+            },
+        )
+        .await;
+        assert!(result.is_err(), "{fault}");
+        assert!(
+            !driver.actions.lock().iter().any(|a| a == "launch"),
+            "{fault}"
+        );
+        control.close_manual_session(context).unwrap();
+    }
+}
+
+#[test]
+fn verification_restart_requires_submitted_android_receipt_without_verified_link() {
+    let mut row: riviu_core::PublishAssignmentRecord = serde_json::from_value(serde_json::json!({
+        "id":"one","campaignId":"campaign","bundleId":"bundle","ordinal":0,"udid":"phone","state":"verifying"
+    })).unwrap();
+    for evidence in [
+        "{}",
+        r#"{"post":{"state":"unknown"}}"#,
+        r#"{"post":{"state":"posted","publicationVerified":true}}"#,
+        r#"{"post":{"state":"posted","postUrl":"https://www.tiktok.com/@a/photo/1"}}"#,
+    ] {
+        row.evidence_json = Some(evidence.into());
+        assert!(!super::super::verification_restart::requested(
+            &row,
+            "com.zhiliaoapp.musically"
+        ));
+    }
+    row.evidence_json =
+        Some(r#"{"post":{"state":"submitted","publicationVerified":false}}"#.into());
+    assert!(super::super::verification_restart::requested(
+        &row,
+        "com.zhiliaoapp.musically"
+    ));
+    assert!(super::super::verification_restart::requested(
+        &row,
+        "com.ss.android.ugc.trill"
+    ));
+    assert!(!super::super::verification_restart::requested(
+        &row,
+        "com.ss.iphone.ugc.Ame"
+    ));
+}
+
+#[tokio::test]
+async fn verification_restart_keeps_unconfirmed_or_ios_recovery_warm() {
+    let driver = Arc::new(UploadDriver {
+        restart_test: true,
+        ..Default::default()
+    });
+    let control = DeviceControlPlane::new(
+        driver.clone(),
+        Arc::new(riviu_core::DeviceWorkCoordinator::new()),
+        Arc::new(riviu_core::StreamBudgetManager::new(1).unwrap()),
+    );
+    let context = control
+        .open_manual_session("phone", DeviceWorkOwner::Script)
+        .await
+        .unwrap();
+    assert!(super::super::verification_restart::foreground(
+        &control,
+        &context,
+        "com.ss.iphone.ugc.Ame",
+        false,
+        || Ok(())
+    )
+    .await
+    .unwrap()
+    .is_none());
+    assert_eq!(*driver.actions.lock(), ["launch"]);
+    control.close_manual_session(context).unwrap();
 }
 
 #[tokio::test]

@@ -1972,8 +1972,8 @@ pub(super) async fn capture_confirmed_assignment_link(
         !bundle.caption.trim().is_empty(),
         "caption missing for own-post proof"
     );
-    // A recovery read must preserve an upload already accepted by TikTok. In particular,
-    // open_publish_context cold-starts the package and is never used on this path.
+    // This remains a verification-only session. A submitted Android receipt
+    // restarts its exact TikTok package here; no composer or Post is reachable.
     let context = control
         .open_manual_session(&assignment.udid, DeviceWorkOwner::Script)
         .await?;
@@ -1986,10 +1986,6 @@ pub(super) async fn capture_confirmed_assignment_link(
             deadline_ms: None,
         });
         let package = control.resolve_tiktok_package(&assignment.udid).await?;
-        control.foreground_session_app(&context, &package).await?;
-        if let Err(error) = control.request_app_completion(&assignment.udid, &package) {
-            log::warn!("publication completion intent {}: {error}", assignment.id);
-        }
         let language = session
             .ui_language()
             .await
@@ -2024,6 +2020,26 @@ pub(super) async fn capture_confirmed_assignment_link(
                 .context("Post timestamp missing")?
                 .into(),
         };
+        let restart = super::verification_restart::requested(assignment, &package);
+        if restart {
+            anyhow::ensure!(intent["package"].as_str() == Some(package.as_str()),
+                "Gói TikTok đã đổi so với lúc gửi; chưa khởi động lại");
+            anyhow::ensure!(chrono::DateTime::parse_from_rfc3339(&identity.submitted_at).is_ok()
+                && !identity.account.trim().is_empty(), "Thiếu định danh bài đã gửi");
+        }
+        let restart_proof = super::verification_restart::foreground(control, &context, &package, restart, || {
+            super::verification_restart::authorize(db, assignment, observer)
+        }).await.map_err(|error| anyhow::Error::new(super::verification::VerificationObservation {
+            code: "readFailed",
+            reason: format!("Chưa mở lại TikTok để lấy link: {error}; thử lại sau 5 phút"),
+            diagnostic: Some(serde_json::json!({"appRestart":{"state":"failed","package":package,"error":error.to_string()}})),
+        }))?;
+        if let Some(proof) = &restart_proof {
+            log::info!("publish verification restart assignment={} proof={}", assignment.id, proof);
+        }
+        if let Err(error) = control.request_app_completion(&assignment.udid, &package) {
+            log::warn!("publication completion intent {}: {error}", assignment.id);
+        }
         let plan = riviu_core::tiktok_share::PublishVerificationPlan::for_runtime(
             &package, &language, &version,
         )?;
@@ -2050,18 +2066,20 @@ pub(super) async fn capture_confirmed_assignment_link(
             &identity,
         )
         .await;
+        let mut diagnostic = serde_json::to_value(&capture.diagnostic).unwrap_or_default();
+        if let Some(proof) = restart_proof { diagnostic["appRestart"] = proof; }
         capture
             .outcome
             .link()
             .map(|url| ConfirmedAssignmentLink {
                 url: url.to_owned(),
-                diagnostic: serde_json::to_value(&capture.diagnostic).unwrap_or_default(),
+                diagnostic: diagnostic.clone(),
             })
             .ok_or_else(|| {
                 anyhow::Error::new(super::verification::VerificationObservation {
                     code: capture.diagnostic.reason_code.code(),
                     reason: capture.diagnostic.reason_code.message().into(),
-                    diagnostic: serde_json::to_value(&capture.diagnostic).ok(),
+                    diagnostic: Some(diagnostic),
                 })
             })
     }

@@ -263,8 +263,8 @@ chỉ tính các máy trong phiên có chứng cứ tiến trình, không tính 
 Khi bắt đầu phiên mới, Nuôi/Tương tác/Đăng bài lấy quyền sử dụng máy và tắt riêng TikTok
 có kiểm chứng trước khi mở lại. Chỉ mở tab không làm việc này. Không xóa dữ liệu/cache,
 không đăng xuất, không tắt app khác. Kết thúc công việc thì tắt TikTok và đóng stream;
-riêng bài đã bấm Đăng nhưng chưa xác minh được liên kết giữ TikTok chạy và giữ nội dung
-đã chuyển để quá trình tải tiếp tục. Máy còn bài đang tải hoặc chưa rõ kết quả Đăng
+riêng bài đã gửi giữ nội dung đã chuyển. Android sẽ tắt/mở lại TikTok khi tới lượt
+xác minh link, lặp sau 5 phút nếu chưa thành công. Máy còn bài đang tải hoặc chưa rõ kết quả Đăng
 chưa bắt đầu phiên tự động mới có bước tắt TikTok. Riêng bản ghi đã có `Posted`, đã
 dừng tự xác minh và không có pipeline hoạt động: sau ít nhất 4 giờ kể từ cập nhật cuối,
 việc thiếu link chuyển thành lưu ý **Liên kết bài cũ**, không giữ máy mãi. Bài cũ vẫn
@@ -471,7 +471,11 @@ rút gọn chỉ được mở khi chính vùng caption có thể bấm và nh�
 cần kiểm tra. App không tự bấm Đăng lần nữa để giải quyết lỗi lấy link.
 
 Sau Đăng, Theo dõi hiển thị lý do chưa xác minh, lần kiểm gần nhất và lần kiểm
-kế tiếp. App giữ TikTok/media khi chờ; link xác minh xong được gửi Sheet ngay.
+kế tiếp. Trên Android, sau khi nhận kết quả đã gửi và máy rảnh, app tắt hẳn đúng
+TikTok rồi mở lại trước khi lấy link. Nếu chưa có link, chu kỳ tắt/mở và kiểm tra
+lặp sau 5 phút, tính từ cuối lần kiểm trước. Media được giữ; link xác minh xong
+được gửi Sheet ngay. Không đăng lại, không restart khi máy đang bận, tác vụ đã dừng
+hoặc link đã xác minh. Tắt/mở lỗi cũng giữ bài và chờ lần kiểm kế tiếp.
 Lỗi đọc clipboard được hiển thị riêng với trường hợp đọc thành công nhưng chưa
 có link mới. Thông báo TikTok đang xử lý có ảnh đối chiếu sau Copy; trạng thái
 này vẫn là chờ, chưa tính là xuất bản hoặc ghi link thành công.
@@ -481,7 +485,8 @@ thông báo, app chỉ ghi **TikTok chưa trả link**; không suy đoán bài �
 Sau khi đọc đủ caption của bài đang mở, lỗi sao chép được giữ làm lý do chờ;
 app không quay sang tìm bài khác rồi ghi đè bằng lỗi caption hoặc hồ sơ.
 Với bài **hẹn giờ**, phiên đăng trả quyền điều khiển trước khi lấy link. Lần kiểm
-tra đầu sau 2 phút kể từ Đăng. Bài đã gửi nhưng chưa có link, kể cả **đăng ngay**,
+tra Android đầu tiên bắt đầu khi phiên đăng đã nhả máy; iOS giữ mốc sau 2 phút.
+Bài đã gửi nhưng chưa có link, kể cả **đăng ngay**,
 được kiểm tra lại mỗi 5 phút đến khi xác minh được link. Nhịp chờ tính từ lúc kết
 thúc lần kiểm tra trước; lỗi đọc/kết nối vẫn chờ 5 phút. Mở lại app giữ mốc Đăng và
 lần kiểm tra tiếp theo. Máy mất kết nối hoặc đang bận được kiểm khi sẵn sàng.
@@ -575,7 +580,7 @@ gán cho từng bài. **Thao tác:** preflight trước dispatch; đối chiếu
 
 **Kết quả:** bằng chứng Post, URL, nhạc, Sheet và cleanup riêng biệt. **Đã bấm Đăng · chờ xác minh**
 nghĩa TikTok đã nhận thao tác nhưng Riviu chưa xác nhận bài đã xuất bản. Về bảng tin
-không phải bằng chứng tải xong. Riviu giữ TikTok chạy, chờ máy rảnh rồi tự kiểm tra liên kết;
+không phải bằng chứng tải xong. Riviu chờ máy rảnh rồi mở lại TikTok trên Android để kiểm tra liên kết;
 quá trình tiếp tục khi mở lại app và kết nối lại máy. Nút **Kiểm tra liên kết** cho kiểm tra
 sớm, chỉ lấy liên kết/ghi Sheet, không đăng lại bài hay đăng các bài còn lại trong lượt đó.
 Giữ Riviu chạy, máy tính không ngủ và điện thoại có mạng. Không có thời gian hoàn tất cố định

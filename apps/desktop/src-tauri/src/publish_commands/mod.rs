@@ -24,6 +24,7 @@ mod execution;
 pub(crate) mod pipeline;
 mod verification;
 mod verification_queue;
+mod verification_restart;
 pub(crate) use verification::verify_pending_assignment;
 pub use verification::*;
 pub(crate) use verification_queue::VerificationQueue;
