@@ -356,7 +356,9 @@ pub struct AppState {
     pub interaction_artifacts: FlowArtifactStore,
     pub db: Arc<Database>,
     pub gui_service: Arc<crate::gui_service::GuiService>,
-    pub comment_verifications: riviu_core::comment_verification::worker::VerificationWorker,
+    pub comment_verifications: Option<riviu_core::comment_verification::worker::VerificationWorker>,
+    #[cfg(debug_assertions)]
+    ui_smoke: bool,
     pub signing: SigningService,
     /// The OS credential store, for secrets that must not sit in the SQLite file.
     pub secrets: CredentialStore,
@@ -763,6 +765,135 @@ impl OverlayHold {
 }
 
 impl AppState {
+    /// An idle AppState, not live bootstrap with a few environment overrides. All paths
+    /// are minted by the early debug policy; no driver resolver, recovery or worker starts.
+    #[cfg(debug_assertions)]
+    pub(crate) async fn bootstrap_ui_smoke(
+        attempt: crate::ui_smoke::SmokeAttempt,
+    ) -> anyhow::Result<Self> {
+        let credentials = crate::ui_smoke::memory_credentials();
+        let db = Arc::new(
+            Database::open(attempt.data.join("riviu.db"))?
+                .with_secrets(Arc::new(KeyringSecrets::new(credentials.clone()))),
+        );
+        let artifacts_dir = attempt.data.join("artifacts");
+        std::fs::create_dir(&artifacts_dir)?;
+        // Direct mock construction does not consult token env, manifests, sidecars or USB.
+        let mock = riviu_ios_driver::MockIosDriver::new();
+        let streams = mock.stream_hub();
+        let control = Arc::new(DeviceControlPlane::new_with_capability_registry(
+            Arc::new(mock),
+            Arc::new(DeviceWorkCoordinator::new()),
+            Arc::new(StreamBudgetManager::new(DEFAULT_DESKTOP_STREAM_CAPACITY)?),
+            Arc::new(DeviceCapabilityRegistry::empty()),
+        ));
+        // The constructor creates an internal cleanup receiver. Join it immediately,
+        // while the only possible backend is the direct mock above. Cached roster/settings
+        // still read normally, but even a missed command gate cannot acquire a device lease.
+        control.shutdown_cleanup().await?;
+        let events = EventBus::new(512);
+        let registry = DeviceRegistry::new(events.clone());
+        registry.upsert_many(control.list_devices().await?);
+        let jobs = JobQueue::new(
+            db.clone(),
+            events.clone(),
+            registry.clone(),
+            control.clone(),
+            artifacts_dir.clone(),
+        );
+        // Constructors below are idle. In particular, never call Flow recover_startup.
+        let flow_artifacts = FlowArtifactStore::new(artifacts_dir.join("flows"))?;
+        let interaction_artifacts = FlowArtifactStore::new(artifacts_dir.join("interactions"))?;
+        let flows = FlowRuntime::new(FlowRuntimeDeps {
+            reasoner: None,
+            database: db.clone(),
+            events: events.clone(),
+            registry: registry.clone(),
+            control: control.clone(),
+            frames: Arc::new(streams.clone()),
+            artifacts: flow_artifacts.clone(),
+        });
+        let gui_service = Arc::new(crate::gui_service::GuiService::new(
+            db.clone(),
+            None,
+            artifacts_dir.join("gui"),
+        ));
+        let nurture_engine = NurtureEngine::new(
+            db.clone(),
+            control.clone(),
+            Arc::new(streams.clone()),
+            artifacts_dir.clone(),
+        );
+        Ok(Self {
+            ui_smoke: true,
+            comment_verifications: None,
+            registry,
+            events,
+            control,
+            streams,
+            driver_mode: DriverMode::Mock,
+            driver_degraded_reason: Some(
+                "UI smoke: chỉ có thiết bị mock, điều khiển thật bị khóa".into(),
+            ),
+            driver_list_error: None,
+            android_unavailable_reason: Some("UI smoke: không khởi động Android/USB".into()),
+            android_tool_problems: Vec::new(),
+            android: None,
+            view_hub: crate::view_hub::ViewHub::new(),
+            view_paint: crate::view_watchdog::ViewPaintLedger::new(),
+            view_recovery: crate::view_watchdog::ViewRecoveryGate::new(),
+            jobs,
+            flows,
+            flow_artifacts,
+            interaction_artifacts,
+            db: db.clone(),
+            gui_service,
+            signing: SigningService::with_credentials(
+                attempt.data.join("disabled-sidecars/signer"),
+                credentials.clone(),
+            ),
+            secrets: credentials,
+            agent_token_configured: false,
+            active_agent_artifact_id: "ui-smoke-mock".into(),
+            active_agent_artifact_version: String::new(),
+            active_agent_bundle_id: String::new(),
+            stream_settings: Arc::new(RwLock::new(StreamSettings::default())),
+            local_api_runtime: Arc::new(RwLock::new(crate::local_api::LocalApiRuntime::default())),
+            artifacts_dir,
+            legacy_wda_bundle: attempt.data.join("disabled-sidecars/absent.ipa"),
+            nurture: NurtureRuntime::with_database(db),
+            nurture_engine,
+            orchestration: crate::orchestration_commands::OrchestrationChildRuntime::new(),
+            flow_mutations: FlowMutationCoordinator::default(),
+            overlay_sessions: AsyncMutex::new(HashMap::new()),
+            overlay_gates: AsyncMutex::new(HashMap::new()),
+            command_admission: Arc::new(CommandAdmissionState::new(false)),
+            background_stop: Arc::new(AtomicBool::new(true)),
+            background_stopped: Arc::new(AtomicBool::new(true)),
+            background_stopped_notify: Arc::new(Notify::new()),
+            background_shutdown_error: Arc::new(RwLock::new(None)),
+        })
+    }
+
+    pub(crate) fn is_ui_smoke(&self) -> bool {
+        #[cfg(debug_assertions)]
+        {
+            self.ui_smoke
+        }
+        #[cfg(not(debug_assertions))]
+        {
+            false
+        }
+    }
+
+    pub(crate) async fn shutdown_ui_smoke(&self) -> anyhow::Result<()> {
+        anyhow::ensure!(self.is_ui_smoke(), "not an isolated UI smoke state");
+        self.command_admission.reject_new_work();
+        self.wait_for_mutating_commands().await;
+        // No sampler was ever started; this must not wait for a nonexistent task.
+        self.shutdown_background_sampler().await
+    }
+
     pub async fn bootstrap(resource_dir: Option<PathBuf>) -> anyhow::Result<Self> {
         let mock_requested = std::env::var("RIVIU_MOCK_DEVICES")
             .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
@@ -1089,13 +1220,16 @@ impl AppState {
         command_admission.start_accepting();
 
         let state = Self {
-            comment_verifications:
+            #[cfg(debug_assertions)]
+            ui_smoke: false,
+            comment_verifications: Some(
                 riviu_core::comment_verification::worker::VerificationWorker::start(
                     db.clone(),
                     control.clone(),
                     events.clone(),
                     artifacts_dir.clone(),
                 ),
+            ),
             registry,
             events,
             control,
@@ -1388,6 +1522,9 @@ impl AppState {
     }
 
     pub fn spawn_background_tasks(&self, app: AppHandle) {
+        if self.is_ui_smoke() {
+            return;
+        }
         crate::phone_app_completion::spawn(
             self.control.clone(),
             self.db.clone(),

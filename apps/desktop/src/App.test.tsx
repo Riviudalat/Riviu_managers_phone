@@ -267,6 +267,18 @@ const iphone: DeviceInfo = {
 };
 
 describe("toolbar Start", () => {
+  it("báo lỗi xác nhận frontend trong Hoạt động mà không retry hoặc chặn điều hướng", async () => {
+    const api = await import("./api");
+    vi.mocked(api.deploymentFrontendReady).mockRejectedValueOnce({
+      code: "UiSmokeUnavailable", message: "UI smoke không cho phép xác nhận bộ cài",
+    });
+    render(<App />);
+    await waitFor(() => expect(screen.getByText("Không thể xác nhận giao diện sẵn sàng")).toBeInTheDocument());
+    await userEvent.click(screen.getByRole("button", { name: "API" }));
+    await waitFor(() => expect(screen.getByRole("heading", { level: 1, name: "API" })).toBeInTheDocument());
+    expect(api.deploymentFrontendReady).toHaveBeenCalledTimes(1);
+  });
+
   it("signals deployment readiness only after the first fleet load settles", async () => {
     const api = await import("./api");
     let resolveDevices: (devices: DeviceInfo[]) => void = () => undefined;

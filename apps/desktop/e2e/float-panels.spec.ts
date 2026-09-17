@@ -46,13 +46,18 @@ test("picking phones in Tương tác never scrolls its tabs away", async ({ page
   const before = await edges(page, ".interaction-workspace-inner", ".automation-page-tabs");
   expect(before.tabs).toBeGreaterThanOrEqual(before.card);
 
-  // Real checkbox interaction may scroll the machine panel; the page tabs stay fixed.
-  const tiles = page.locator(".interaction-workspace .iw-machine-scroll input[type=checkbox]");
+  // Real checkbox interaction may scroll the picker; the page tabs stay fixed.
+  const choose = page.getByRole("button", { name: "Chọn máy", exact: true });
+  await choose.click();
+  const picker = page.getByRole("dialog", { name: "Chọn máy Tương tác", exact: true });
+  const tiles = picker.getByRole("group", { name: "Danh sách máy thực hiện", exact: true }).getByRole("checkbox");
   const count = await tiles.count();
   expect(count).toBeGreaterThan(0);
   for (let i = 0; i < count; i += 1) {
     await tiles.nth(i).click();
   }
+  await picker.getByRole("button", { name: "Xong", exact: true }).click();
+  await expect(choose).toBeFocused();
 
   const after = await edges(page, ".interaction-workspace-inner", ".automation-page-tabs");
   expect(after.scrollTop, "the workspace itself must never scroll").toBe(0);
@@ -71,9 +76,15 @@ test("the Tương tác panels scroll while wizard tabs and actions stay fixed", 
     const card = document.querySelector(".interaction-workspace-inner") as HTMLElement;
     const panel = document.querySelector(".iw-links") as HTMLElement;
     const table = document.querySelector(".iw-links .iw-table-scroll") as HTMLElement;
+    const footer = document.querySelector(".iw-footer")!.getBoundingClientRect();
+    const stage = document.querySelector(".iw-stage")!.getBoundingClientRect();
     card.scrollTop = 500;
+    body.scrollTop = 500;
     return {
       cardScrolled: Math.round(card.scrollTop),
+      bodyScrolled: Math.round(body.scrollTop),
+      footerFits: footer.bottom <= innerHeight,
+      panelsAboveFooter: stage.bottom <= footer.top,
       cardOverflow: getComputedStyle(card).overflowY,
       bodyOverflow: getComputedStyle(body).overflowY,
       panelOverflow: getComputedStyle(panel).overflowY,
@@ -82,13 +93,20 @@ test("the Tương tác panels scroll while wizard tabs and actions stay fixed", 
   });
   expect(scroll.cardScrolled, "the card must not").toBe(0);
   expect(scroll.cardOverflow).toBe("clip");
-  expect(scroll.bodyOverflow, "the body leaves scrolling to its bounded panels").toBe("visible");
+  expect(scroll.bodyOverflow, "the body bounds the panels without scrolling its controls").toBe("hidden");
+  expect(scroll.bodyScrolled, "the body itself has no overflow to scroll").toBe(0);
+  expect(scroll.footerFits, "the actions remain in the viewport").toBe(true);
+  expect(scroll.panelsAboveFooter, "panels never cover the actions").toBe(true);
   expect(scroll.panelOverflow, "the content panel scrolls").toBe("auto");
   expect(scroll.tableOverflow, "long lists scroll inside their panel").toBe("auto");
 });
 
 test("the Nuôi TikTok workspace cannot be scrolled as a whole", async ({ page }) => {
   await openWorkspace(page, "Nuôi TikTok", "Không gian Nuôi TikTok");
+  const choose = page.getByRole("button", { name: "Chọn máy", exact: true });
+  await choose.click();
+  const picker = page.getByRole("dialog", { name: "Chọn máy Nuôi TikTok", exact: true });
+  await expect(picker.getByRole("group", { name: "Danh sách chọn máy Nuôi TikTok" })).toBeVisible();
 
   const result = await page.evaluate(() => {
     const card = document.querySelector(".nurture-workspace-inner") as HTMLElement;
@@ -108,4 +126,6 @@ test("the Nuôi TikTok workspace cannot be scrolled as a whole", async ({ page }
   expect(result.bodyOverflow, "the body keeps tabs and footer fixed").toBe("hidden");
   expect(result.settingsOverflow).toBe("auto");
   expect(result.machinesOverflow).toBe("auto");
+  await picker.getByRole("button", { name: "Xong", exact: true }).click();
+  await expect(choose).toBeFocused();
 });

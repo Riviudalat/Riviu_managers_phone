@@ -202,14 +202,13 @@ còn hồ sơ nhiều vòng vẫn hiển thị tổng đã nhân để dễ ki�
 Trang chỉ có một ô nhập tổng video; phần Hành vi giữ các tùy chỉnh nhịp xem, không
 hiển thị lại giới hạn/vòng hay các tỷ lệ tương tác đã có ở thiết lập phiên.
 
-**Máy thực hiện** hiển thị tất cả máy trong một khung **hai cột** có ô tick, không phân trang.
-**Chọn tất cả sẵn sàng** chọn các máy sẵn sàng trong danh sách, kể cả ngoài kết quả tìm kiếm;
-**Bỏ chọn** xóa lựa chọn. Máy bận/chưa sẵn sàng không được chọn thêm. Ô máy tự gọn
-khi danh sách đông; cuộn trong khung khi cần, số máy luôn giữ nguyên khi tìm kiếm.
-Ô **Phạm vi thiết bị** nằm cùng hàng Chọn tất cả sẵn sàng/Bỏ chọn để chọn nhóm hoặc toàn bộ.
-Khung máy đã thu hẹp, phần cấu hình phiên có thêm chỗ hiển thị.
-Header ghi **Đã chọn X** cùng số máy sẵn sàng và tổng máy; tên/model mỗi máy hiện một lần. Cuộn trong danh sách
-máy hoặc phần cấu hình độc lập, thanh tab và nút bắt đầu giữ ở vị trí cố định.
+Thanh **Máy thực hiện** ở đầu Thiết lập giữ **Phạm vi thiết bị**, số máy đã chọn
+và nút **Chọn máy**. Nút này mở bảng chọn hai cột có tìm kiếm và cuộn riêng;
+**Xong** hoặc Escape đóng bảng nhưng giữ lựa chọn. **Chọn tất cả sẵn sàng** gồm
+cả máy ngoài kết quả tìm kiếm; **Bỏ chọn** xóa lựa chọn. Máy bận/chưa sẵn sàng
+không được chọn thêm. Tìm kiếm không đổi số máy hay phạm vi của lượt.
+Cấu hình và tóm tắt phiên đọc từ thiết lập hiện tại; thanh tab và nút bắt đầu
+nằm ngoài vùng cuộn. Phạm vi Nuôi không thay lựa chọn của Tương tác hoặc Đăng bài.
 
 Nút **Dừng** cạnh danh sách trong cửa sổ **Theo dõi tác vụ** dừng toàn bộ máy của
 tác vụ đang chọn và đóng TikTok về màn hình chính. Đây là dừng/hủy phần việc còn lại,
@@ -226,7 +225,9 @@ tự chạy và các khung giờ riêng; bấm **Áp dụng hẹn giờ** để 
 Chuyển tab hoặc sửa bản nháp chưa bắt đầu phiên; **Kiểm tra & bắt đầu** vẫn là
 thao tác riêng. Giữ máy tính và Riviu đang mở để lịch chạy.
 
-Trang Thiết lập đặt cấu hình phiên cạnh danh sách máy. Bộ tỷ lệ mặc định là Tim 20%,
+Trang Thiết lập đặt cấu hình phiên cạnh tóm tắt; danh sách máy mở bằng **Chọn máy**.
+Tắt một hành vi khóa các ô tỷ lệ của hành vi đó nhưng giữ số đã đặt để dùng khi bật lại.
+Bộ tỷ lệ mặc định là Tim 20%,
 Lưu 5%, Bình luận 2%, Theo dõi 1%; khi bật đủ bốn hành động, **Chỉ xem là 72%**.
 Mỗi video chọn tối đa một hành động. Phần Chỉ xem tự bù để tổng luôn là 100%; tắt
 một hành động trả tỷ lệ về Chỉ xem và giữ số đã đặt. Bình luận cần bật riêng khi có AI.
@@ -278,9 +279,10 @@ Các tab chính là **Thiết lập · Hẹn giờ · Theo dõi**; cấu hình n
 Thiết lập, Hẹn giờ lưu bản chụp thiết lập hiện tại. Các phần Chọn bài viết/Hành động & máy/
 Kiểm tra & chạy dùng tab ngang; nút chạy chỉ bật khi đã đủ điều kiện.
 
-Khung **Máy thực hiện** dùng cùng ô chọn hai cột như Nuôi: tìm máy, Chọn tất cả,
-Bỏ chọn và cuộn trong một khung. Tài khoản vẫn mở từ dòng dưới tên máy. Máy được
-thêm bởi tag chỉ gỡ khi sửa tag; nút Bỏ chọn bỏ các máy được tick trực tiếp.
+Thanh **Máy thực hiện** giữ phạm vi và số máy ở đầu workspace. **Chọn máy** mở
+bảng hai cột dùng cùng kiểu ô chọn như Nuôi: tìm máy, Chọn tất cả, Bỏ chọn và cuộn
+trong bảng. **Xong** hoặc Escape đóng bảng, giữ lựa chọn; tài khoản mở từ dòng dưới
+tên máy. Máy được thêm bởi tag chỉ gỡ khi sửa tag; Bỏ chọn bỏ các máy tick trực tiếp.
 
 Ba bước trên trang là **Chọn bài viết → Hành động & máy → Kiểm tra & chạy**.
 Tắt Bình luận thì chỉ cần chọn Tim/Lưu và máy; phần AI được ẩn. Theo dõi hiển thị
@@ -406,35 +408,58 @@ giao thức; kết quả model phải được đối chiếu với màn hình t
 phát lại. **Nhập gói tương thích** yêu cầu fixture đúng và thiếu/mơ hồ cho từng
 target; **Khôi phục gói tương thích trước** áp dụng cho các phiên mới.
 
-Các tab chính là **Thiết lập · Hẹn giờ · Theo dõi**. Thiết lập mở **Bàn đăng nhanh**:
-nội dung, caption/đối tác và máy thực hiện nằm trên cùng màn hình. Ở cửa sổ nhỏ,
-cuộn trong vùng làm việc để xem phần dưới; nút **Kiểm tra & đăng** ở cuối vẫn giữ vị trí.
+Các tab chính là **Thiết lập · Hẹn giờ · Theo dõi**. Thiết lập mở **Bàn đăng nhanh**
+với ba khung nhìn đồng thời: **Chọn bài đăng → Bài ↔ máy → Thiết bị**. Tìm bài ở
+khung trái, kiểm/đổi từng cặp ở khung giữa và chọn/gán thiết bị ở khung phải.
+Danh sách trong mỗi khung cuộn riêng; thanh **Kiểm tra & đăng** có hàng riêng ở cuối,
+không che trường nhập. Nút **Xem ảnh và sửa caption** hoặc **Sửa caption** mở ảnh,
+nội dung, đối tác và thông tin nhạc của đúng bài. Escape/Đóng giữ bản nháp, trả focus
+về nút đã mở; đổi nguồn không được chuyển nội dung đang sửa sang bài khác.
 Thanh đầu đặt **Chọn thư mục** cạnh **Quét**. Phần Google Sheets chỉ gồm ô
 **Link Google Sheet**, nút **Đăng nhập Google** và nút **Kiểm tra kết nối**.
 Dán link của đúng tab (`gid` trong link), đăng nhập trên trình duyệt rồi kiểm tra.
 Link không có `gid` dùng tab `0`. Sửa link sẽ bỏ trạng thái sẵn sàng của link cũ.
+Trên màn hẹp, bấm **Thiết lập Google Sheet** để mở các control kết nối; Escape đóng
+phần này và trả focus. Trạng thái kết nối/lỗi thật vẫn hiển thị khi thu gọn. Các
+lựa chọn **Ghi kết quả lên Sheet / Xóa bản chuyển** nằm trong **Tùy chọn** ở thanh
+cuối, kèm tóm tắt trạng thái đã chọn; thu gọn không đổi lựa chọn.
 
-Với bảng chưa được cấp quyền, nút kiểm tra mở Google Picker; chọn đúng bảng vừa
-dán để cấp quyền và tiếp tục. Chọn một bảng khác sẽ báo lỗi, không tự thay link
-hoặc ghi sang bảng đó. Không cần chọn tab lần nữa nếu link đã chứa `gid`.
-Đăng nhập xong chưa có nghĩa bảng đã sẵn sàng ghi: chờ trạng thái xác minh màu
-xanh. Tab hoàn toàn trống được chuẩn bị header chuẩn, không thêm hàng thử.
+Kết nối kiểm tra trực tiếp bảng và tab trong link, không mở Google Picker.
+Khi đăng nhập, cấp quyền Google Sheets cho tài khoản có quyền sửa bảng đó; phiên
+cũ chỉ cấp quyền theo file cần đăng nhập lại. Quyền Sheets rộng hơn quyền một file
+của bản cũ, nhưng không thay quyền chia sẻ/sửa của bảng. Không cần chọn tab lần
+nữa nếu link đã chứa `gid`. Đăng nhập xong chưa có nghĩa bảng đã sẵn sàng ghi:
+chờ trạng thái xác minh màu xanh. Tab hoàn toàn trống được chuẩn bị header chuẩn,
+không thêm hàng thử.
 
 Mục Apps Script cũ và các bước chọn tab riêng đã được bỏ khỏi màn Đăng bài.
 Bản release mới mang sẵn cấu hình ứng dụng Google; mỗi máy vẫn đăng nhập tài khoản
 Google riêng rồi kiểm tra đúng Sheet. Quy trình build dừng nếu thiếu cấu hình.
 Chép `.exe` hoặc thư mục app không chép phiên đăng nhập đã lưu trong kho
 thông tin xác thực của máy cũ. Nếu dùng bản dev chưa có cấu hình, mở **Thiết lập Google**
-ngay dưới ô kết nối, nhập OAuth Client ID loại Desktop, client secret (nếu có),
-Picker API key và project number do quản trị viên cung cấp rồi bấm **Lưu cấu hình Google**.
-Các trường này thuộc ứng dụng, không phải mật khẩu tài khoản. Sau khi đủ cấu hình,
-form tự ẩn; tiếp tục **Đăng nhập Google** rồi **Kiểm tra kết nối**.
+ngay dưới ô kết nối, nhập OAuth Client ID loại Desktop và client secret (nếu có)
+do quản trị viên cung cấp rồi bấm **Lưu cấu hình Google**. Không cần Picker API key
+hoặc project number. Các trường này thuộc ứng dụng, không phải mật khẩu tài khoản.
+Sau khi đủ cấu hình, form tự ẩn; tiếp tục **Đăng nhập Google** rồi **Kiểm tra kết nối**.
 Phiên đăng nhập và cấu hình nhập tay lưu trong kho xác thực hệ điều hành. Trong lúc
-đăng nhập hoặc chọn bảng, có thể hủy bằng nút Google; lượt chuyển kết nối đã được
-nhận sẽ hoàn tất hoặc giữ trạng thái để tiếp tục. Một tab chỉ nhận ghi từ PC đã
-liên kết. Khi chuyển sang PC mới, chọn tab Sheet mới; app chưa có thao tác bàn giao
-tab đang thuộc PC cũ. Chọn nhầm tab đó sẽ báo rõ xung đột và giữ kết nối hiện tại,
-không làm kẹt việc chọn tab khác.
+đăng nhập, có thể hủy bằng nút Google; lượt chuyển kết nối đã được nhận sẽ hoàn tất
+hoặc giữ trạng thái để tiếp tục.
+
+Tab đã liên kết với bản cũ cần nâng cấp một lần để các PC cùng dùng giao thức ghi
+chung. **Trước khi bấm “Đã dừng bản cũ · Nâng cấp”, dừng ghi Sheet trên mọi bản app
+cũ và đợi các lượt đang gửi kết thúc.** Nâng cấp giữ dữ liệu và link sẵn có, không
+cần tạo tab khác. Hủy xác nhận thì chưa nâng cấp; đừng cho bản cũ tiếp tục ghi sau
+nâng cấp. Mỗi PC mới tự đăng nhập và kiểm tra cùng link bằng bản hỗ trợ giao thức mới.
+Tab đã chuyển sang OAuth trực tiếp không cần dừng Apps Script thêm lần nữa trên
+PC mới, kể cả khi PC đó còn cấu hình webhook cũ. Nếu bản 0.2.37 báo “Chưa xác nhận
+Apps Script ngừng ghi” với tab đã chuyển, cập nhật bản sửa rồi kiểm tra lại cùng
+link; không xóa dữ liệu hay tạo tab khác để né lỗi. Tab thực sự còn dùng Apps
+Script vẫn cần xác nhận ngừng đường ghi cũ trước khi chuyển.
+Nếu app báo PC khác đang ghi hoặc lượt ghi chưa rõ kết quả, không tự xóa khóa trên
+Sheet hoặc cho rằng chờ lâu là được chiếm khóa; cần đối chiếu lượt cũ trước. Chức
+năng reset cũ không hỗ trợ tab giao thức mới (schema 2), sẽ từ chối trước sao lưu
+hoặc xóa. Đây là quy trình và giới hạn giao thức, không phải xác nhận đã nghiệm thu
+ghi đồng thời trên nhiều PC thật.
 Khi đã nhập link, cần xác minh thành công trước khi đăng hoặc lưu lịch có bật ghi
 Sheet. Có thể tắt **Ghi kết quả lên Sheet** để chạy lượt không ghi bảng.
 Khi kiểm tra trước đăng hoặc lưu lịch, Riviu chốt đúng bảng/tab và chế độ báo cáo
@@ -448,7 +473,13 @@ trước chỉ gán một phần mà sau đó thêm máy sẵn sàng, bấm lạ
 bài còn trong nguồn — không kẹt ở tập bài/máy của lần gán cũ. Bài đang chọn chưa đủ máy
 vẫn chỉ dùng tập đó cho đến khi đã ghép xong. Thiếu máy thì ghép phần đủ và báo số bài
 còn lại vì hết máy. **Hoàn tác** trả lại lần gán nhanh gần nhất nếu chưa sửa ánh xạ.
-Bỏ tick máy gỡ bài của máy đó; **Máy nhận bài đang chỉnh** cho đổi riêng từng bài.
+Bỏ tick máy gỡ bài của máy đó; dropdown **Máy nhận bài …** ở từng dòng cho đổi riêng
+bài được nêu tên. Hai bài đã có máy hợp lệ dùng **Đổi chỗ**; bài chưa có máy hợp lệ
+lấy máy của bài khác phải xác nhận **Thay bài**, bài bị thay trở về chờ ghép.
+Nếu nguồn, phân công hoặc trạng thái máy đổi trong lúc xác nhận, app không áp quyết
+định cũ. Máy đã ghép bị offline/ra phạm vi vẫn được giữ để chỉ rõ lỗi, không âm thầm
+bỏ cặp. Bài đang gán bị bộ lọc ẩn sẽ khóa Gán/Đổi ở khung phải và có **Hiện bài**;
+không tự gán sang bài khác. **Bỏ chọn toàn bộ bài/máy** tác động cả phần bị tìm kiếm ẩn.
 Dòng tổng kết và hộp kiểm tra ghi rõ Sheet đang bật hay tắt. Có thể Hủy khi đang
 chuyển nội dung trước Đăng. Theo dõi tự đọc lại kết quả mỗi5giây khi đang mở.
 Đăng nhiều máy chạy theo từng máy: máy nào tải đủ và xác nhận ảnh xong sẽ bắt đầu

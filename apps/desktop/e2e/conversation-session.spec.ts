@@ -25,7 +25,10 @@ for (const width of [1440,820]) {
     const workspace=page.getByRole("region",{name:"Không gian Tương tác"});
     await workspace.getByRole("button",{name:"Chọn hành động & máy →"}).click();
     await workspace.getByRole("combobox",{name:"Phạm vi thiết bị"}).selectOption("all");
-    await workspace.getByRole("button",{name:"Chọn tất cả sẵn sàng",exact:true}).click();
+    await workspace.getByRole("button",{name:"Chọn máy",exact:true}).click();
+    const picker=workspace.getByRole("dialog",{name:"Chọn máy Tương tác",exact:true});
+    await picker.getByRole("button",{name:"Chọn tất cả sẵn sàng",exact:true}).click();
+    await picker.getByRole("button",{name:"Xong",exact:true}).click();
     await expect(page.getByLabel("Thời lượng phiên (phút)")).toHaveValue("120");
     await expect(page.getByLabel("Máy cho vai b").locator("option:checked")).toContainText("@actual_b");
     await expect.poll(()=>page.evaluate(()=>JSON.parse(JSON.parse(localStorage.getItem("riviu.form-draft.v1.interaction")!).value.conversationJson).roleBindings[1].username)).toBe("actual_b");

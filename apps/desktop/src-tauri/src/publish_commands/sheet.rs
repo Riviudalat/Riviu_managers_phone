@@ -245,7 +245,7 @@ pub async fn publish_sheet_check(
     let settings = state.db.publish_sheet_delivery_settings().map_err(err)?;
     let result = crate::google_sheet_commands::check_current(&state.db, &sheet_url)
         .await
-        .map_err(err)?;
+        .map_err(crate::google_sheet_commands::connection_error)?;
     if result.connection_verified {
         state
             .db
@@ -278,7 +278,7 @@ pub async fn publish_sheet_prepare(
     if state.db.sheet_uses_google_direct().map_err(err)? {
         return crate::google_sheet_commands::check_current(&state.db, &sheet_url)
             .await
-            .map_err(err);
+            .map_err(crate::google_sheet_commands::connection_error);
     }
     let settings = state.db.publish_sheet_delivery_settings().map_err(err)?;
     let result = riviu_core::publish_sheet::prepare_sheet(&sheet_url, &settings)

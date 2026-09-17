@@ -5,6 +5,7 @@ fn meta(internal: bool) -> Metadata {
     let layout = Layout::standard(internal);
     Metadata {
         spreadsheet_id: "fixture-book".into(),
+        spreadsheet_name: "Fixture book".into(),
         gid: 0,
         title: "Fixture".into(),
         time_zone: "Asia/Ho_Chi_Minh".into(),
@@ -19,6 +20,7 @@ fn meta(internal: bool) -> Metadata {
             backup_spreadsheet_id: None,
             backup_fingerprint: None,
         }),
+        owner_raw: None,
         header: layout
             .headers
             .iter()
@@ -87,6 +89,17 @@ fn fixture() -> (Metadata, Layout, Vec<Row>) {
         },
     ];
     (m, l, rows)
+}
+
+// Break caught: a legacy path must never accept the shared schema, even when
+// its diagnostic writer UUID happens to match this installation.
+#[test]
+fn legacy_owner_match_refuses_shared_schema_even_for_original_writer() {
+    let mut m = meta(true);
+    m.owner.as_mut().unwrap().schema_version = 2;
+    assert!(m
+        .owner_matches("550e8400-e29b-41d4-a716-446655440000", "fixture-epoch")
+        .is_err());
 }
 
 #[test]

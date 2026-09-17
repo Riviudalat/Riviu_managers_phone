@@ -1330,8 +1330,12 @@ export function PublishPage({
           blockingReason={sheetBlockingReason}
           onSource={()=>setWorkspaceTab("setup")} onCreated={()=>{void reload();}}
           onSheetSetup={() => { setWorkspaceTab("setup"); requestAnimationFrame(() => {
-            const target = document.querySelector<HTMLElement>("[data-google-sheet-focus]") ?? document.getElementById("publish-sheet-link");
-            target?.scrollIntoView({ block: "nearest" }); target?.focus({ preventScroll: true });
+            const toggle = document.querySelector<HTMLButtonElement>(".pq-settings-toggle");
+            if (toggle?.getClientRects().length && toggle.getAttribute("aria-expanded") === "false") toggle.click();
+            requestAnimationFrame(() => {
+              const target = document.querySelector<HTMLElement>("[data-google-sheet-focus]") ?? document.getElementById("publish-sheet-link");
+              target?.scrollIntoView({ block: "nearest" }); target?.focus({ preventScroll: true });
+            });
           }); }}
           onHistory={()=>setWorkspaceTab("monitor")}
         />

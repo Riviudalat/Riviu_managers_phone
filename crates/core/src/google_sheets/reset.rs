@@ -172,6 +172,11 @@ impl DirectSheetsClient {
             .owner
             .clone()
             .ok_or_else(|| DirectSheetsError::conflict("Tab has no writer owner"))?;
+        if owner.schema_version != 1 {
+            return Err(DirectSheetsError::conflict(
+                "Reset is disabled for shared-v2 tabs; no backup or clear was started",
+            ));
+        }
         if owner.writer_id != writer_id {
             return Err(DirectSheetsError::conflict(
                 "Reset belongs to another installation",

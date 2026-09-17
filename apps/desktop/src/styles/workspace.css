@@ -26,9 +26,9 @@
   margin: 0;
   color: var(--text-1);
   font-size: var(--text-xl);
-  font-weight: var(--weight-bold);
+  font-weight: var(--weight-semibold);
   line-height: var(--leading-tight);
-  letter-spacing: 0;
+  letter-spacing: -0.02em;
 }
 
 .page-header-copy p {
@@ -274,7 +274,8 @@
 .summary-rail {
   min-width: 0;
   padding: var(--space-4);
-  border-left: 1px solid var(--line);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
   background: var(--bg-elevated);
 }
 
@@ -293,7 +294,7 @@
   margin: 0;
   color: var(--text-1);
   font-size: var(--text-base);
-  font-weight: var(--weight-bold);
+  font-weight: var(--weight-semibold);
   letter-spacing: 0;
 }
 
@@ -555,7 +556,9 @@
   }
 
   .workspace-command-copy span {
-    display: none;
+    display: block;
+    font-size: var(--text-xs);
+    line-height: var(--leading-normal);
   }
 
   .workflow-step + .workflow-step {

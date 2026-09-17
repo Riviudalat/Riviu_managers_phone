@@ -1763,13 +1763,20 @@ mod tests {
 
     #[test]
     fn package_tools_manifest_detects_an_extra_installed_payload() {
-        let source = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("..")
-            .join("..")
-            .join("..")
-            .join("target")
-            .join("android-package-tools");
+        let staged_fixture = std::env::var_os("RIVIU_TEST_PACKAGE_TOOLS");
+        let source = staged_fixture
+            .as_ref()
+            .map(PathBuf::from)
+            .unwrap_or_else(|| {
+                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .join("../../..")
+                    .join("target/android-package-tools")
+            });
         if !source.is_dir() {
+            assert!(
+                staged_fixture.is_none(),
+                "explicit package-tools fixture is missing"
+            );
             return;
         }
         let sidecars = std::env::temp_dir().join(format!(

@@ -62,7 +62,11 @@ async fn pkce_sessions_have_distinct_state_verifier_and_ephemeral_loopback_ports
         fields["code_challenge"],
         URL_SAFE_NO_PAD.encode(Sha256::digest(first.verifier.as_bytes()))
     );
-    assert_eq!(fields["scope"], GOOGLE_SHEETS_SCOPES);
+    let scopes: Vec<_> = fields["scope"].split_whitespace().collect();
+    assert!(scopes.contains(&"openid"));
+    assert!(scopes.contains(&"email"));
+    assert!(scopes.contains(&"https://www.googleapis.com/auth/spreadsheets"));
+    assert!(!scopes.contains(&"https://www.googleapis.com/auth/drive"));
     let addr = first.listener.local_addr().unwrap();
     drop(first);
     assert!(tokio::net::TcpStream::connect(addr).await.is_err());
@@ -178,6 +182,39 @@ fn refresh_retains_original_refresh_token_and_rejects_invalid_grants_or_scopes()
         ..identity
     };
     assert!(identity.validate(None).is_err());
+}
+
+#[test]
+fn initial_login_accepts_sheets_scope_without_drive_and_rejects_legacy_only_grant() {
+    for (scope, accepted) in [
+        ("openid email https://www.googleapis.com/auth/spreadsheets", true),
+        ("openid https://www.googleapis.com/auth/userinfo.email https://www.googleapis.com/auth/spreadsheets", true),
+        ("openid email https://www.googleapis.com/auth/drive.file", false),
+        ("openid email https://www.googleapis.com/auth/spreadsheets.readonly", false),
+    ] {
+        let response: TokenResponse = serde_json::from_value(serde_json::json!({
+            "access_token":"access", "refresh_token":"refresh", "token_type":"Bearer", "expires_in":3600, "scope":scope
+        })).unwrap();
+        assert_eq!(response.into_tokens(None).is_ok(), accepted, "{scope}");
+    }
+}
+
+#[test]
+fn refresh_legacy_scope_preserves_grant_without_silently_adding_sheets() {
+    let mut previous = tokens();
+    previous.scope = "openid email https://www.googleapis.com/auth/drive.file".into();
+    let response: TokenResponse = serde_json::from_value(serde_json::json!({
+        "access_token":"access", "token_type":"Bearer", "expires_in":3600
+    }))
+    .unwrap();
+    let next = response.into_tokens(Some(&previous)).unwrap();
+    assert_eq!(
+        next.scope,
+        "openid email https://www.googleapis.com/auth/drive.file"
+    );
+    assert_eq!(next.refresh_token, previous.refresh_token);
+    assert!(!next.has_sheets_scope());
+    assert!(tokens().has_sheets_scope());
 }
 
 #[tokio::test]

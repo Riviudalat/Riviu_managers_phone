@@ -1648,8 +1648,8 @@ export function googleSheetsPickFile() {
 export function googleSheetsListTabs(spreadsheetId: string) {
   return invoke<import("./types").GoogleSheetTab[]>("google_sheets_list_tabs", { spreadsheetId });
 }
-export function googleSheetsConnect(spreadsheetId: string, sheetId: number, confirmed: boolean) {
-  return invoke<PublishSheetCheckResult>("google_sheets_connect", { spreadsheetId, sheetId, confirmed });
+export function googleSheetsConnect(spreadsheetId: string, sheetId: number, confirmed: boolean, legacyWritersStopped = false) {
+  return invoke<PublishSheetCheckResult>("google_sheets_connect", { spreadsheetId, sheetId, confirmed, legacyWritersStopped });
 }
 export function googleSheetsDisconnect() {
   return invoke<import("./types").GoogleSheetsStatus>("google_sheets_disconnect");

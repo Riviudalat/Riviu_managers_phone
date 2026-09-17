@@ -2463,6 +2463,7 @@ export interface PublishLinkCheckResult {
 
 export interface GoogleSheetsStatus {
   configured: boolean;
+  hasSheetsScope?: boolean;
   connected: boolean;
   active: boolean;
   email?: string | null;

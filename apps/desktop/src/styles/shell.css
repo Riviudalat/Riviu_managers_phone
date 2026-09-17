@@ -55,9 +55,10 @@
   margin-top: 1.25rem;
 }
 
-/* ——— Aside 240 / 64 ——— */
+/* Điều hướng nền sáng; hình học tile/stream do component thiết bị sở hữu. */
 .aside {
   width: var(--aside-w);
+  min-width: var(--aside-w);
   flex-shrink: 0;
   display: flex;
   flex-direction: column;
@@ -70,8 +71,9 @@
   display: flex;
   align-items: center;
   gap: 0.55rem;
-  padding: var(--space-3) var(--space-4);
+  padding: var(--space-3);
   min-height: var(--header-height);
+  border-bottom: 1px solid var(--nav-line);
 }
 .aside-logo img {
   width: 32px;
@@ -90,10 +92,14 @@
   color: var(--text-1);
 }
 
+.aside-logo small { display: none; }
+
 .aside-scroll {
   flex: 1;
+  min-height: 0;
   overflow: auto;
-  padding: var(--space-3);
+  padding: var(--space-2);
+  scrollbar-width: thin;
 }
 
 .menu-group + .menu-group {
@@ -118,14 +124,17 @@
   border: none;
   background: transparent;
   color: var(--nav-text);
-  /* Flush left: the old 2.15rem indent existed to sit under a group title. */
-  padding: 0.48rem 0.55rem;
+  padding: var(--space-2) var(--space-3);
   border-radius: 6px;
   text-align: left;
   font-weight: 500;
   font-size: var(--text-base);
   margin: 1px 0;
-  height: 36px;
+  min-height: 36px;
+  height: auto;
+  line-height: var(--leading-normal);
+  /* Mục đang chọn phải có chữ/nền tương phản ngay, không chờ hết fade. */
+  transition: box-shadow var(--duration-fast) var(--ease);
 }
 .menu-item:hover {
   background: var(--nav-bg-hover);
@@ -133,10 +142,10 @@
 }
 .menu-item.active,
 .menu-item.active:hover {
-  background: var(--nav-bg-hover);
-  color: var(--nav-active);
+  background: var(--primary);
+  color: var(--text-inverse);
   font-weight: var(--weight-semibold);
-  box-shadow: inset 3px 0 0 var(--primary);
+  box-shadow: var(--shadow-sm);
 }
 .menu-item .mi {
   width: 20px;
@@ -172,6 +181,15 @@
   color: var(--nav-text);
   font-variant-numeric: tabular-nums;
   font-size: var(--text-sm);
+}
+
+@media (max-width: 1100px) {
+  .aside {
+    width: var(--aside-w-compact);
+    min-width: var(--aside-w-compact);
+  }
+  .aside-logo img { width: 28px; height: 28px; }
+  .menu-item { font-size: var(--text-sm); gap: var(--space-2); }
 }
 
 /* ——— Main column ——— */

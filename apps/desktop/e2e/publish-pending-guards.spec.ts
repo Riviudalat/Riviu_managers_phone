@@ -8,7 +8,7 @@ for (const width of [1440, 820]) {
     await installTauriMock(page, { androidRoster: true, fleetSize: 3 });
     await page.addInitScript(() => {
       const w = window as unknown as { __TAURI_INTERNALS__: { invoke: (cmd: string, args: Record<string, unknown>) => Promise<unknown> }; pendingResolved: boolean; publishCalls: string[] };
-      const invoke = w.__TAURI_INTERNALS__.invoke; w.pendingResolved = false; w.publishCalls = [];
+      const invoke = w.__TAURI_INTERNALS__.invoke; w.pendingResolved = true; w.publishCalls = [];
       w.__TAURI_INTERNALS__.invoke = async (cmd, args = {}) => {
         if (cmd === "plugin:dialog|open") return "C:/fixture";
         if (cmd === "publish_scan_folder") return { sourceRoot: "C:/fixture", scannedAt: new Date().toISOString(), notices: [], ignoredPartnerFiles: 0, ignoredHiddenFiles: 0,
@@ -21,20 +21,33 @@ for (const width of [1440, 820]) {
     await page.goto("/"); await openOperatorPage(page, "Đăng bài");
     await page.getByRole("button", { name: "Chọn thư mục", exact: true }).click(); await page.getByRole("button", { name: "Quét", exact: true }).click();
     await page.getByRole("checkbox", { name: "Chọn Bài 1", exact: true }).check();
-    const machine = page.getByRole("combobox", { name: "Máy nhận bài đang chỉnh" });
+    const machine = page.getByRole("combobox", { name: "Máy nhận bài Bài 1", exact: true });
     const first = await machine.locator("option").nth(1).getAttribute("value"); await machine.selectOption(first!);
+    await page.evaluate(() => { (window as unknown as { pendingResolved: boolean }).pendingResolved = false; window.dispatchEvent(new Event("focus")); });
     await expect(page.getByRole("button", { name: "Kiểm tra & đăng", exact: true })).toBeDisabled();
+    await expect(machine).toHaveValue(first!);
     const warning = page.locator(".machine-choice").filter({ hasText: "Máy còn bài chưa lấy được link" });
     await expect(warning).toHaveCount(1); await expect(warning).toContainText("TikTok báo bài đang được xử lý");
     await warning.scrollIntoViewIfNeeded();
     await page.screenshot({ path: test.info().outputPath(`pending-warning-${width}.png`) });
     await page.getByRole("button", { name: "Chọn nhanh", exact: true }).click();
     await expect(machine).not.toHaveValue(first!);
-    await machine.selectOption(first!);
+    await expect(machine.locator(`option[value="${first}"]`)).toHaveJSProperty("disabled", true);
     await page.evaluate(() => { (window as unknown as { pendingResolved: boolean }).pendingResolved = true; window.dispatchEvent(new Event("focus")); });
+    await expect(machine.locator(`option[value="${first}"]`)).toHaveJSProperty("disabled", false);
+    await machine.selectOption(first!);
     await expect(page.getByRole("button", { name: "Kiểm tra & đăng", exact: true })).toBeEnabled();
     await expect(page.getByText("Máy còn bài chưa lấy được link", { exact: true })).toHaveCount(0);
     expect(await page.evaluate(() => (window as unknown as { publishCalls: string[] }).publishCalls)).toEqual([]);
+    const sheetStatus = page.locator(".publish-sheet-result");
+    await expect(sheetStatus).toContainText("Bản app chưa có cấu hình Google");
+    if (width === 820) {
+      await page.getByRole("button", { name: "Thiết lập Google Sheet", exact: true }).focus();
+      await page.keyboard.press("Tab");
+      await expect(sheetStatus).toBeFocused();
+      await page.keyboard.press("End");
+      await expect.poll(() => sheetStatus.evaluate(node => node.scrollTop)).toBeGreaterThan(0);
+    }
     expect((await new AxeBuilder({ page }).include(".publish-page").analyze()).violations).toEqual([]);
     await page.screenshot({ path: test.info().outputPath(`pending-cleared-${width}.png`) });
   });

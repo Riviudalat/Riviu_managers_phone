@@ -34,7 +34,7 @@ import { NurtureDeviceLog } from "./nurture/NurtureDeviceLog";
 import { NurtureDeviceProgress, NurtureRunProgress } from "./nurture/NurtureProgress";
 import { NurtureBehaviourTab } from "./nurture/NurtureBehaviourTab";
 import { NurtureWindows } from "./nurture/NurtureWindows";
-import { NurtureMachinePicker, NurtureSessionSetup } from "./nurture/NurtureSessionSetup";
+import { NurtureMachinePicker, NurtureSessionSetup, NurtureSetupSummary } from "./nurture/NurtureSessionSetup";
 import { AutomationSettingsSchedule } from "./AutomationSettingsSchedule";
 import { AutomationTabs } from "./AutomationTabs";
 import "../styles/nurture-workspace.css";
@@ -118,8 +118,8 @@ export function Switch({
  * The switch is not a second way to write 0. Turning a feature off by zeroing its
  * percentage destroys the tuned number, so an operator pausing comments for one run has to
  * remember what 4 was. The switch stops the behaviour and keeps the number — which is what
- * the backend's `like_enabled`/`comment_enabled`/… fields are for. The number therefore
- * stays editable while the switch is off.
+ * the backend's `like_enabled`/`comment_enabled`/… fields are for. Inactive controls
+ * are disabled without changing that saved number.
  */
 export function FeatureRow({
   label,
@@ -159,6 +159,7 @@ export function FeatureRow({
         max={100}
         step={1}
         value={percent}
+        disabled={!enabled}
         data-ceiling={100}
         style={
           {
@@ -176,6 +177,7 @@ export function FeatureRow({
           min={0}
           max={100}
           value={percent}
+          disabled={!enabled}
           onChange={(e) => onPercent(Number(e.target.value) || 0)}
           aria-label={`${label} phần trăm`}
         />
@@ -954,6 +956,7 @@ export function NurturePopup({
                   aria-labelledby="nurture-page-tab-setup"
                   hidden={pageMode !== "setup"}
                 >
+                  <NurtureMachinePicker devices={devices} metas={metas} targets={targets} onTargetRefChange={onTargetRefChange} scopeControl={scopeControl} />
                   <div className="nurture-session-layout">
                     <div className="nurture-setup-fields">
                     <section className="nurture-config-body nurture-settings-tabs" aria-label="Thiết lập Nuôi TikTok">
@@ -970,7 +973,7 @@ export function NurturePopup({
                       </div>
                     </section>
                     </div>
-                    <NurtureMachinePicker devices={devices} metas={metas} targets={targets} onTargetRefChange={onTargetRefChange} scopeControl={scopeControl} />
+                    <NurtureSetupSummary settings={settings} targetCount={targets.length} />
                   </div>
                 </div>
               )}
@@ -990,8 +993,10 @@ export function NurturePopup({
               </div>}
               {pageSurface && pageMode !== "monitor" && (
                   <footer className="nurture-session-footer">
-                    <div><strong>{targets.length} máy được chọn</strong><span>Tối đa {settings.scheduleDurationMinutes} phút hoặc {settings.numVideos * settings.numRounds} bài / máy</span></div>
-                    {actionControls}
+                    <CommandBar title={`${targets.length} máy được chọn`}
+                      detail={`Tối đa ${settings.scheduleDurationMinutes} phút hoặc ${settings.numVideos * settings.numRounds} bài / máy`}
+                      tone={!targets.length || settingsIssue ? "warning" : "neutral"}
+                      actions={actionControls} />
                   </footer>
               )}
 

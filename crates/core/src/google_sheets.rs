@@ -1,6 +1,6 @@
 //! Direct Google Sheets transport. OAuth acquisition/refresh and durable claims
-//! belong to the caller. A tab has one installation writer; Sheets has no CAS
-//! against human edits, so every write verifies its exact row before and after.
+//! belong to the caller. Shared-v2 writers serialize through remote metadata;
+//! Sheets has no CAS against human edits, so exact row verification still applies.
 use crate::publish_sheet::SheetDeliveryTarget;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -9,6 +9,9 @@ use std::{collections::BTreeSet, time::Duration};
 
 mod planner;
 mod reset;
+mod shared_writer;
+#[cfg(test)]
+mod shared_writer_tests;
 use planner::{Cell, Layout, Row, Scan, WritePlan};
 pub use reset::{BackupReceipt, ResetReceipt};
 #[cfg(test)]
@@ -46,6 +49,8 @@ pub enum DirectSheetsErrorKind {
     Transport,
     Conflict,
     Invalid,
+    Busy,
+    SharedUpgradeRequired,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -62,6 +67,7 @@ impl DirectSheetsError {
             DirectSheetsErrorKind::RateLimited
                 | DirectSheetsErrorKind::Server
                 | DirectSheetsErrorKind::Transport
+                | DirectSheetsErrorKind::Busy
         )
     }
     fn invalid(message: impl Into<String>) -> Self {
@@ -115,6 +121,12 @@ pub struct DirectTargetCheck {
     pub reporting_epoch: Option<String>,
     pub reporting_ready: bool,
     pub writer_id: Option<String>,
+    #[serde(default)]
+    pub writer_schema_version: Option<u32>,
+    #[serde(default)]
+    pub spreadsheet_name: String,
+    #[serde(default)]
+    pub writable: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -153,12 +165,14 @@ struct Owner {
 #[derive(Clone)]
 struct Metadata {
     spreadsheet_id: String,
+    spreadsheet_name: String,
     gid: u64,
     title: String,
     time_zone: String,
     row_count: u32,
     column_count: u32,
     owner: Option<Owner>,
+    owner_raw: Option<String>,
     header: Vec<Cell>,
 }
 impl Metadata {
@@ -174,13 +188,20 @@ impl Metadata {
             reporting_epoch: self.owner.as_ref().map(|o| o.reporting_epoch.clone()),
             reporting_ready: self.owner.as_ref().is_some_and(|o| o.state == "ready"),
             writer_id: self.owner.as_ref().map(|o| o.writer_id.clone()),
+            writer_schema_version: self.owner.as_ref().map(|o| o.schema_version),
+            spreadsheet_name: self.spreadsheet_name.clone(),
+            writable: false,
         }
     }
     fn owner_matches(&self, writer: &str, epoch: &str) -> Result<()> {
         let owner = self.owner.as_ref().ok_or_else(|| {
             DirectSheetsError::conflict("Tab has not been prepared for this installation")
         })?;
-        if owner.writer_id != writer || owner.reporting_epoch != epoch || owner.state != "ready" {
+        if owner.schema_version != 1
+            || owner.writer_id != writer
+            || owner.reporting_epoch != epoch
+            || owner.state != "ready"
+        {
             return Err(DirectSheetsError::conflict(
                 "Tab writer or reporting epoch changed",
             ));
@@ -319,8 +340,20 @@ impl DirectSheetsClient {
     }
 
     async fn metadata(&self, book: &str, gid: u64) -> Result<Metadata> {
+        let mut meta = self.metadata_only(book, gid).await?;
+        meta.header = self
+            .rows(&meta, 0, 1, meta.column_count.min(MAX_COLUMNS))
+            .await?
+            .remove(0)
+            .cells;
+        Ok(meta)
+    }
+
+    // Shared writer preflight reads identity/owner only; header/row scans must
+    // occur after its remote mutex has been acquired.
+    async fn metadata_only(&self, book: &str, gid: u64) -> Result<Metadata> {
         validate_target(book, gid)?;
-        let value = self.request(reqwest::Method::GET,book,&[("fields","spreadsheetId,properties(timeZone),sheets(properties(sheetId,title,gridProperties(rowCount,columnCount)),developerMetadata),developerMetadata".into())],None).await?;
+        let value = self.request(reqwest::Method::GET,book,&[("fields","spreadsheetId,properties(title,timeZone),sheets(properties(sheetId,title,gridProperties(rowCount,columnCount)),developerMetadata),developerMetadata".into())],None).await?;
         if value["spreadsheetId"] != book {
             return Err(DirectSheetsError::conflict("Spreadsheet identity mismatch"));
         }
@@ -384,14 +417,18 @@ impl DirectSheetsClient {
             })
             .transpose()?;
         if owner.as_ref().is_some_and(|o| {
-            o.schema_version != 1
+            !matches!(o.schema_version, 1 | 2)
                 || uuid::Uuid::parse_str(&o.writer_id).is_err()
                 || o.reporting_epoch.is_empty()
         }) {
             return Err(DirectSheetsError::conflict("Unsupported writer metadata"));
         }
-        let mut result = Metadata {
+        let result = Metadata {
             spreadsheet_id: book.into(),
+            spreadsheet_name: value["properties"]["title"]
+                .as_str()
+                .unwrap_or_default()
+                .into(),
             gid,
             title,
             time_zone: value["properties"]["timeZone"]
@@ -401,13 +438,9 @@ impl DirectSheetsClient {
             row_count,
             column_count,
             owner,
+            owner_raw: owners.first().cloned(),
             header: vec![],
         };
-        result.header = self
-            .rows(&result, 0, 1, column_count.min(MAX_COLUMNS))
-            .await?
-            .remove(0)
-            .cells;
         Ok(result)
     }
 
@@ -539,7 +572,8 @@ impl DirectSheetsClient {
             .metadata(&target.spreadsheet_id, target.sheet_gid)
             .await?;
         if let Some(owner) = &meta.owner {
-            if owner.writer_id != writer_id
+            if owner.schema_version != 1
+                || owner.writer_id != writer_id
                 || target
                     .reporting_epoch
                     .as_ref()

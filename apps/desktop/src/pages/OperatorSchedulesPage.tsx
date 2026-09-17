@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useState } from "react";
 import { CalendarClock, RefreshCw } from "lucide-react";
 import {
   automationList,
@@ -6,47 +6,43 @@ import {
   automationScheduleUpdate,
 } from "../api";
 import { AutomationScheduleControl } from "../components/AutomationScheduleControl";
-import type {
-  AutomationDefinition,
-  AutomationSchedule,
-  AutomationScheduleV1,
-} from "../types";
+import type { AutomationScheduleV1 } from "../types";
 import { describeError } from "../describeError";
+import { EmptyState, LoadingState, StatusNotice } from "../components/States";
+import { useAsyncList } from "../useAsyncList";
+
+async function readSchedules() {
+  const [profiles, rows] = await Promise.all([automationList(), automationScheduleList()]);
+  return { profiles, rows };
+}
 
 export function OperatorSchedulesPage() {
-  const [profiles, setProfiles] = useState<AutomationDefinition[]>([]),
-    [rows, setRows] = useState<AutomationSchedule[]>([]),
-    [selected, setSelected] = useState("");
+  const [selected, setSelected] = useState("");
   const [error, setError] = useState<string | null>(null),
     [busy, setBusy] = useState(false);
-  const load = useCallback(async () => {
-    try {
-      const [a, b] = await Promise.all([
-        automationList(),
-        automationScheduleList(),
-      ]);
-      setProfiles(a);
-      setRows(b);
-      setError(null);
-    } catch (cause) {
-      setError(describeError(cause));
-    }
-  }, []);
-  useEffect(() => {
-    void load();
-  }, [load]);
+  const { data, error: loadError, loading, initialLoading, refreshing, load } = useAsyncList(readSchedules);
+  const profiles = data?.profiles ?? [];
+  const rows = data?.rows ?? [];
   return (
     <section className="operator-schedules">
       <div className="operator-toolbar">
         <CalendarClock size={20} />
         <strong>Lịch tự động</strong>
-        <button type="button" onClick={() => void load()}>
-          <RefreshCw size={16} />
+        <div className="grow" />
+        <button type="button" aria-label="Làm mới lịch chạy" disabled={loading} onClick={() => void load()}>
+          <RefreshCw size={16} aria-hidden="true" />
           Làm mới
         </button>
       </div>
-      {error && <p role="alert">{error}</p>}
-      <table>
+      {error && <StatusNotice tone="error">{error}</StatusNotice>}
+      {initialLoading && <LoadingState label="Đang tải lịch chạy…" />}
+      {refreshing && <LoadingState label="Đang làm mới lịch chạy…" />}
+      {loadError && (
+        <StatusNotice tone="error" action={<button type="button" onClick={() => void load()}>Thử lại</button>}>
+          Không tải được lịch chạy: {loadError}{data !== undefined && " · Đang giữ dữ liệu lần tải trước."}
+        </StatusNotice>
+      )}
+      {rows.length > 0 && <table aria-label="Lịch chạy" aria-busy={refreshing}>
         <thead>
           <tr>
             <th>Tên lịch</th>
@@ -86,6 +82,7 @@ export function OperatorSchedulesPage() {
                         !row.enabled,
                         row.schedule as AutomationScheduleV1,
                       );
+                      setError(null);
                       await load();
                     } catch (cause) {
                       setError(describeError(cause));
@@ -106,11 +103,9 @@ export function OperatorSchedulesPage() {
             </tr>
           ))}
         </tbody>
-      </table>
-      {!rows.length && (
-        <p className="operator-empty">
-          Chưa có lịch. Chọn cấu hình ứng dụng để tạo lịch chạy.
-        </p>
+      </table>}
+      {!loading && !loadError && data !== undefined && rows.length === 0 && (
+        <EmptyState compact title="Chưa có lịch" hint="Chọn cấu hình ứng dụng để tạo lịch chạy." />
       )}
       <label>
         Cấu hình ứng dụng

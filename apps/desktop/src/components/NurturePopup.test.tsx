@@ -360,7 +360,11 @@ describe("NurturePopup", () => {
     const roster = Array.from({ length: 8 }, (_, index) => ({ ...devices[0], udid: `scope-${index}`, name: `Phone ${index + 1}`, status: index === 1 ? "busy" as const : "ready" as const }));
     const metas = new Map([["scope-6", { udid: "scope-6", alias: "Đà Lạt", number: 7, notes: "", tags: [], handle: "dalat" }]]);
     render(<NurturePopup devices={roster} selected={[]} targetUdids={[]} targetRef={{ type: "explicit", udids: [] }} onTargetRefChange={onTargetRefChange} metas={metas} surface="page" />);
-    fireEvent.click(await screen.findByRole("button", { name: "Chọn tất cả sẵn sàng" }));
+    const picker = await screen.findByRole("button", { name: "Chọn máy" });
+    expect(picker).toHaveAttribute("aria-expanded", "false");
+    expect(screen.queryByRole("searchbox", { name: "Tìm máy Nuôi TikTok" })).toBeNull();
+    fireEvent.click(picker);
+    fireEvent.click(screen.getByRole("button", { name: "Chọn tất cả sẵn sàng" }));
     expect(new Set(onTargetRefChange.mock.calls[0][0].udids)).toEqual(new Set(roster.filter(device => device.status === "ready").map(device => device.udid)));
     fireEvent.change(screen.getByRole("searchbox", { name: "Tìm máy Nuôi TikTok" }), { target: { value: "dalat" } });
     expect(screen.getByText("Đà Lạt")).toBeVisible();
@@ -929,9 +933,13 @@ describe("NurturePopup", () => {
     const like = screen.getByLabelText("Bật Thích");
     fireEvent.click(like);
     expect(like).not.toBeChecked();
-    // …and the 35 is still there, still editable.
+    // Pausing an action preserves its tuned rate, but inactive controls cannot edit it.
     expect(screen.getByLabelText("Thích phần trăm")).toHaveValue(35);
+    expect(screen.getByLabelText("Thích phần trăm")).toBeDisabled();
+    expect(slider("Thích")).toBeDisabled();
+    fireEvent.click(like);
     expect(screen.getByLabelText("Thích phần trăm")).toBeEnabled();
+    expect(screen.getByLabelText("Thích phần trăm")).toHaveValue(35);
   });
 
   it("renders the carousel as one switched row with its portion", async () => {
@@ -1091,6 +1099,7 @@ describe("independent nurture rates", () => {
 
   it("lets all public actions and frenzy be 100 without changing neighbours", async () => {
     await open();
+    fireEvent.click(screen.getByLabelText("Bật Lưu"));
     for (const name of ["Thích", "Lưu", "Bình luận", "Theo dõi", "Vuốt nhanh"]) {
       fireEvent.change(slider(name), { target: { value: "100" } });
       expect(box(name)).toHaveValue(100);
@@ -1103,13 +1112,33 @@ describe("independent nurture rates", () => {
     expect(box("Vuốt nhanh")).toHaveValue(100);
   });
 
-  it("keeps a switched-off rate editable and preserves its tuned number", async () => {
+  it("disables a switched-off rate and restores its tuned number when enabled again", async () => {
     await open();
     const saveSwitch = screen.getByLabelText("Bật Lưu");
     expect(saveSwitch).not.toBeChecked();
+    expect(slider("Lưu")).toBeDisabled();
+    expect(box("Lưu")).toBeDisabled();
+    fireEvent.click(saveSwitch);
     fireEvent.change(slider("Lưu"), { target: { value: "73" } });
+    fireEvent.click(saveSwitch);
     expect(box("Lưu")).toHaveValue(73);
-    expect(saveSwitch).not.toBeChecked();
+    expect(box("Lưu")).toBeDisabled();
+    fireEvent.click(saveSwitch);
+    expect(box("Lưu")).toBeEnabled();
+    expect(box("Lưu")).toHaveValue(73);
+    expect(box("Thích")).toHaveValue(35);
+  });
+
+  it("disables an inactive carousel percentage without erasing its portion", async () => {
+    await open();
+    const portion = screen.getByLabelText("Xem bao nhiêu phần trăm bài ảnh");
+    fireEvent.change(portion, { target: { value: "65" } });
+    fireEvent.click(screen.getByLabelText("Bật vuốt ngang bài ảnh"));
+    expect(portion).toBeDisabled();
+    expect(portion).toHaveValue(65);
+    fireEvent.click(screen.getByLabelText("Bật vuốt ngang bài ảnh"));
+    expect(portion).toBeEnabled();
+    expect(portion).toHaveValue(65);
   });
 
   it("does not demand an API key for comments it will never post", async () => {

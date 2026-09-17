@@ -2,6 +2,7 @@
 
 /* Riviu orange identity; reference products inform layout and interaction. */
 :root {
+  color-scheme: only light;
   --motion-ui: 180ms;
   --ease-ui: cubic-bezier(.2,.75,.25,1);
   --primary: #c2410c;
@@ -181,7 +182,8 @@
   --control-height: 36px;
   --header-height: 56px;
 
-  --aside-w: 240px;
+  --aside-w: 196px;
+  --aside-w-compact: 184px;
   --aside-w-collapsed: 64px;
   --font-display: "Noto Sans", "PingFang SC", "Helvetica Neue", sans-serif;
   --font-body: "Noto Sans", "PingFang SC", "Helvetica Neue", sans-serif;

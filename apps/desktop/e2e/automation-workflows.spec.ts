@@ -89,8 +89,13 @@ test("interaction action-only setup fits desktop and narrow layouts without hidd
   await expect(page.getByRole("checkbox",{name:"Lưu",exact:true})).toBeChecked();
   await expect(page.getByRole("radiogroup",{name:"Kiểu tương tác"})).toHaveCount(0);
   await expect(page.getByRole("button",{name:"Kiểm tra lượt chạy →"})).toBeEnabled();
-  await expect(page.getByRole("checkbox", { name: "Máy Android 01", exact: true })).toBeChecked();
-  await expect(page.getByRole("checkbox", { name: "Máy Android 02", exact: true })).toHaveCount(0);
+  const choose = page.getByRole("button", { name: "Chọn máy", exact: true });
+  await choose.click();
+  const picker = page.getByRole("dialog", { name: "Chọn máy Tương tác", exact: true });
+  await expect(picker.getByRole("checkbox", { name: "Máy Android 01", exact: true })).toBeChecked();
+  await expect(picker.getByRole("checkbox", { name: "Máy Android 02", exact: true })).toHaveCount(0);
+  await picker.getByRole("button", { name: "Xong", exact: true }).click();
+  await expect(choose).toBeFocused();
   for(const viewport of [{width:1440,height:900},{width:820,height:560}]) {
     await page.setViewportSize(viewport);
     expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true);
@@ -105,8 +110,10 @@ test("interaction maps nick by device and keeps duplicate errors inline across v
   await page.getByPlaceholder("Dán link TikTok, mỗi dòng một bài").fill("https://www.tiktok.com/@fixture/video/111");
   await page.getByRole("button", { name: "Chọn hành động & máy →" }).click();
   await page.getByRole("combobox", { name: "Phạm vi thiết bị" }).selectOption("all");
-  await page.getByRole("button", { name: "Tài khoản TikTok của Máy Android 01", exact: true }).click();
-  const input = page.getByRole("textbox", { name: "Nick đã gán", exact: true });
+  await page.getByRole("button", { name: "Chọn máy", exact: true }).click();
+  const picker = page.getByRole("dialog", { name: "Chọn máy Tương tác", exact: true });
+  await picker.getByRole("button", { name: "Tài khoản TikTok của Máy Android 01", exact: true }).click();
+  const input = picker.getByRole("textbox", { name: "Nick đã gán", exact: true });
   await input.fill("@test.account");
   await input.press("Tab");
   await expect(input).toHaveValue("test.account");
@@ -125,6 +132,7 @@ test("interaction maps nick by device and keeps duplicate errors inline across v
   await page.getByRole("button", { name: "Tải lại nick đã lưu" }).click();
   await expect(input).toHaveValue("");
   await expect(input).toHaveAttribute("aria-invalid", "false");
+  await picker.getByRole("button", { name: "Xong", exact: true }).click();
 });
 
 test("interaction accepts direct links and account proof without dispatching", async ({ page }) => {
@@ -141,11 +149,14 @@ test("interaction accepts direct links and account proof without dispatching", a
   await expect(page.getByPlaceholder("Dán link TikTok, mỗi dòng một bài")).toHaveValue("https://www.tiktok.com/@fixture/video/111");
   await page.getByRole("button", { name: "Chọn hành động & máy →" }).click();
   await page.getByRole("combobox", { name: "Phạm vi thiết bị" }).selectOption("all");
-  await page.getByRole("button", { name: "Tài khoản TikTok của Máy Android 01", exact: true }).click();
-  const input = page.getByRole("textbox", { name: "Nick đã gán", exact: true });
+  await page.getByRole("button", { name: "Chọn máy", exact: true }).click();
+  const picker = page.getByRole("dialog", { name: "Chọn máy Tương tác", exact: true });
+  await picker.getByRole("button", { name: "Tài khoản TikTok của Máy Android 01", exact: true }).click();
+  const input = picker.getByRole("textbox", { name: "Nick đã gán", exact: true });
   await input.fill("test.account"); await input.press("Tab");
   await page.getByRole("button", { name: "Đọc tài khoản từ máy", exact: true }).first().click();
-  await expect(page.getByText("Khớp tài khoản · @test.account")).toBeVisible();
+  await expect(picker.getByText("Khớp tài khoản · @test.account")).toBeVisible();
+  await picker.getByRole("button", { name: "Xong", exact: true }).click();
   expect(await page.evaluate(() => (window as unknown as { __AUTOMATION_CALLS__: { command: string }[] }).__AUTOMATION_CALLS__.filter((call) => call.command !== "save_device_handle"))).toEqual([]);
 });
 
@@ -185,6 +196,8 @@ test("publish Sheet toggle is keyboard accessible and fits both workspace sizes"
   await page.getByRole("textbox", { name: "Thư mục nguồn" }).fill("C:/toggle");
   await page.getByRole("button", { name: "Quét", exact: true }).click();
   await expect(page.getByRole("checkbox", { name: "Chọn Bài thử" })).toBeVisible();
+  await page.locator(".pq-run-options > summary").focus();
+  await page.keyboard.press("Enter");
   const toggle = page.getByRole("checkbox", { name: "Ghi kết quả lên Sheet" });
   await expect(toggle).not.toBeChecked();
   await toggle.focus();
@@ -204,9 +217,11 @@ test("publish Sheet toggle is keyboard accessible and fits both workspace sizes"
       if (!text) throw new Error("Visible checkbox label text missing");
       const range = document.createRange(); range.selectNodeContents(text);
       const label = range.getBoundingClientRect();
-      return { width: box.width, x: box.right, labelX: label.left, deltaY: Math.abs(box.top + box.height / 2 - label.top - label.height / 2) };
+      return { width: box.width, height: box.height, x: box.right, labelX: label.left, deltaY: Math.abs(box.top + box.height / 2 - label.top - label.height / 2) };
     });
-    expect(geometry.width).toBe(15); // Current inline editor checkbox, .pq-options input.
+    expect(geometry.width).toBeGreaterThanOrEqual(14);
+    expect(geometry.width).toBeLessThanOrEqual(18);
+    expect(geometry.height).toBe(geometry.width);
     expect(geometry.labelX).toBeGreaterThan(geometry.x);
     expect(geometry.deltaY).toBeLessThan(2);
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);

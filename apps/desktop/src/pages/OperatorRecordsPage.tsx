@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Download, Plus, RefreshCw, Save, Trash2, X } from "lucide-react";
 import {
   operatorArchive,
@@ -15,6 +15,8 @@ import { requestConfirm } from "../confirmStore";
 import type { DeviceInfo, JsonObject } from "../types";
 import { useWorkspaceDraft } from "../workspaceDraft";
 import { flowConnectorInfo, interactionReadAccount } from "../api";
+import { EmptyState, LoadingState, StatusNotice } from "../components/States";
+import { useAsyncList } from "../useAsyncList";
 
 const EMPTY: Record<OperatorRecordKind, JsonObject> = {
   account: {
@@ -47,8 +49,11 @@ export function OperatorRecordsPage({
   kind: OperatorRecordKind;
   devices: DeviceInfo[];
 }) {
-  const [records, setRecords] = useState<OperatorRecord[]>([]),
-    [search, setSearch] = useState("");
+  const [search, setSearch] = useState("");
+  const importInput = useRef<HTMLInputElement>(null);
+  const readRecords = useCallback(() => operatorList(kind), [kind]);
+  const { data, error: loadError, loading, initialLoading, refreshing, load } = useAsyncList(readRecords);
+  const records = data ?? [];
   const [draft, setDraft] = useState<{
     id: string;
     name: string;
@@ -60,20 +65,14 @@ export function OperatorRecordsPage({
     [busy, setBusy] = useState(false);
   const [result, setResult] = useState("");
   const [secrets, setSecrets] = useState<string[]>([]);
-  const load = useCallback(async () => {
-    try {
-      setRecords(await operatorList(kind));
-      setError(null);
-    } catch (cause) {
-      setError(describeError(cause));
-    }
-  }, [kind]);
   useEffect(() => {
-    void load();
+    let active = true;
+    setSecrets([]);
     void flowConnectorInfo()
-      .then((info) => setSecrets(info.credentialNames))
+      .then((info) => { if (active) setSecrets(info.credentialNames); })
       .catch(() => {});
-  }, [load]);
+    return () => { active = false; };
+  }, [kind]);
   const dirty = draft !== null && JSON.stringify(draft) !== baseline;
   const save = async () => {
     if (!draft || busy) return false;
@@ -155,27 +154,63 @@ export function OperatorRecordsPage({
           value={search}
           onChange={(e) => setSearch(e.target.value)}
         />
-        <span>{visible.length} bản ghi</span>
-        <button type="button" onClick={() => void load()}>
-          <RefreshCw size={16} />
+        <span>{data !== undefined ? `${visible.length} bản ghi` : "Bản ghi"}</span>
+        <button type="button" aria-label="Làm mới bản ghi" title="Làm mới bản ghi" disabled={loading} onClick={() => void load()}>
+          <RefreshCw size={16} aria-hidden="true" />
         </button>
-        <button type="button" onClick={exportRows}>
+        <button type="button" disabled={data === undefined} onClick={exportRows}>
           <Download size={16} />
           Xuất
         </button>
-        <label className="operator-import">Nhập JSON<input type="file" accept=".json" onChange={async event=>{const file=event.target.files?.[0];if(!file)return;setBusy(true);try{if(file.size>4_000_000)throw new Error("Tệp vượt quá 4 MB");const payload=JSON.parse(await file.text()) as {schemaVersion:number;kind:OperatorRecordKind;records:{name:string;data:JsonObject}[]};if(payload.schemaVersion!==1||payload.kind!==kind||!Array.isArray(payload.records))throw new Error("Tệp không đúng loại dữ liệu");const imported=await operatorImport(kind,payload.records);setResult(`Đã nhập ${imported.length} bản ghi`);await load();}catch(cause){setError(describeError(cause));}finally{setBusy(false);event.target.value="";}}}/></label>
+        <button type="button" aria-label="Nhập bản ghi từ JSON" disabled={busy} onClick={() => importInput.current?.click()}>
+          Nhập JSON
+        </button>
+        <input
+          ref={importInput}
+          type="file"
+          accept=".json"
+          hidden
+          onChange={async (event) => {
+            const input = event.currentTarget;
+            const file = input.files?.[0];
+            if (!file) return;
+            setBusy(true);
+            try {
+              if (file.size > 4_000_000) throw new Error("Tệp vượt quá 4 MB");
+              const payload = JSON.parse(await file.text()) as {
+                schemaVersion: number;
+                kind: OperatorRecordKind;
+                records: { name: string; data: JsonObject }[];
+              };
+              if (payload.schemaVersion !== 1 || payload.kind !== kind || !Array.isArray(payload.records))
+                throw new Error("Tệp không đúng loại dữ liệu");
+              const imported = await operatorImport(kind, payload.records);
+              setResult(`Đã nhập ${imported.length} bản ghi`);
+              setError(null);
+              await load();
+            } catch (cause) {
+              setError(describeError(cause));
+            } finally {
+              setBusy(false);
+              input.value = "";
+            }
+          }}
+        />
         <button className="primary" type="button" onClick={() => edit()}>
           <Plus size={16} />
           Thêm {kind === "account" ? "tài khoản" : "kết nối"}
         </button>
       </div>
-      {error && (
-        <p role="alert" className="control-stream-error">
-          {error}
-        </p>
+      {error && <StatusNotice tone="error">{error}</StatusNotice>}
+      {result && <StatusNotice tone="info">{result}</StatusNotice>}
+      {initialLoading && <LoadingState label="Đang tải bản ghi…" />}
+      {refreshing && <LoadingState label="Đang làm mới bản ghi…" />}
+      {loadError && (
+        <StatusNotice tone="error" action={<button type="button" onClick={() => void load()}>Thử lại</button>}>
+          Không tải được bản ghi: {loadError}{data !== undefined && " · Đang giữ dữ liệu lần tải trước."}
+        </StatusNotice>
       )}
-      {result && <p role="status">{result}</p>}
-      <table>
+      {visible.length > 0 && <table aria-label="Bản ghi" aria-busy={refreshing}>
         <thead>
           <tr>
             <th>Tên</th>
@@ -310,6 +345,7 @@ export function OperatorRecordsPage({
                     ) {
                       try {
                         await operatorArchive(record);
+                        setError(null);
                         await load();
                       } catch (cause) {
                         setError(describeError(cause));
@@ -323,11 +359,12 @@ export function OperatorRecordsPage({
             </tr>
           ))}
         </tbody>
-      </table>
-      {!visible.length && (
-        <p className="operator-empty">
-          Chưa có bản ghi. Bấm Thêm để tạo và gắn thiết bị.
-        </p>
+      </table>}
+      {!loading && !loadError && data !== undefined && records.length === 0 && (
+        <EmptyState compact title="Chưa có bản ghi" hint="Bấm Thêm để tạo và gắn thiết bị." />
+      )}
+      {records.length > 0 && visible.length === 0 && (
+        <EmptyState compact title="Không có bản ghi khớp tìm kiếm" action={<button type="button" onClick={() => setSearch("")}>Xóa tìm kiếm</button>} />
       )}
       {draft && (
         <aside className="operator-record-editor" aria-label="Chỉnh bản ghi">

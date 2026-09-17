@@ -24,7 +24,9 @@ mod tests;
 const AUTHORIZATION_ENDPOINT: &str = "https://accounts.google.com/o/oauth2/v2/auth";
 const TOKEN_ENDPOINT: &str = "https://oauth2.googleapis.com/token";
 const USERINFO_ENDPOINT: &str = "https://openidconnect.googleapis.com/v1/userinfo";
-pub const GOOGLE_SHEETS_SCOPES: &str = "openid email https://www.googleapis.com/auth/drive.file";
+pub const GOOGLE_SHEETS_SCOPES: &str = "openid email https://www.googleapis.com/auth/spreadsheets";
+const SHEETS_SCOPE: &str = "https://www.googleapis.com/auth/spreadsheets";
+const LEGACY_FILE_SCOPE: &str = "https://www.googleapis.com/auth/drive.file";
 const SESSION_TIMEOUT: Duration = Duration::from_secs(300);
 const BODY_LIMIT: usize = 64 * 1024;
 
@@ -153,6 +155,12 @@ impl fmt::Debug for GoogleOAuthTokens {
     }
 }
 impl GoogleOAuthTokens {
+    /// Scope is not file permission: callers must still prove edit access at the target.
+    pub fn has_sheets_scope(&self) -> bool {
+        self.scope
+            .split_whitespace()
+            .any(|scope| scope == SHEETS_SCOPE)
+    }
     pub fn needs_refresh(&self) -> bool {
         self.expires_at_ms <= chrono::Utc::now().timestamp_millis().saturating_add(60_000)
     }
@@ -428,15 +436,14 @@ impl TokenResponse {
             .or_else(|| prior.map(|p| p.scope.clone()))
             .context("Google chưa trả các quyền đã cấp")?;
         anyhow::ensure!(
-            scope
-                .split_whitespace()
-                .any(|s| s == "https://www.googleapis.com/auth/drive.file")
+            (scope.split_whitespace().any(|s| s == SHEETS_SCOPE)
+                || (prior.is_some() && scope.split_whitespace().any(|s| s == LEGACY_FILE_SCOPE)))
                 && scope.split_whitespace().any(|s| s == "openid")
                 && scope.split_whitespace().any(|s| matches!(
                     s,
                     "email" | "https://www.googleapis.com/auth/userinfo.email"
                 )),
-            "Google chưa cấp quyền cho Sheet được chọn"
+            "Google chưa cấp quyền Google Sheets; đăng nhập lại và chấp thuận quyền truy cập bảng tính"
         );
         Ok(GoogleOAuthTokens {
             access_token: self.access_token,

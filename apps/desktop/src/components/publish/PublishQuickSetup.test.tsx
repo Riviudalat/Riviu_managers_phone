@@ -50,6 +50,6 @@ it("quick assignment skips blocked machines but nonblocking review remains selec
 });
 it("unknown guard data keeps the existing assignment and prevents new posting", () => {
   const p = props(); render(<PublishQuickSetup {...p} deviceGuards={{}} />);
-  expect(screen.getByRole("combobox", { name: "Máy nhận bài đang chỉnh" })).toHaveValue("a");
+  expect(screen.getByRole("combobox", { name: "Máy nhận bài one" })).toHaveValue("a");
   expect(screen.getByRole("button", { name: "Kiểm tra & đăng" })).toBeDisabled(); expect(screen.getAllByText("Chưa kiểm tra được bài đang chờ").length).toBeGreaterThan(0);
 });

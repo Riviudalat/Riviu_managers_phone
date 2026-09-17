@@ -18,6 +18,7 @@ mod flow_connectors;
 mod flow_runs;
 mod flows;
 mod google_connection;
+mod google_shared_writer;
 mod gui;
 mod interaction;
 pub use conversation::{ConversationAlreadyRunning, ConversationSession};

@@ -10,6 +10,11 @@ const PAGES = [
   "Nuôi TikTok",
   "Tương tác",
   "Đăng bài",
+  "My Apps",
+  "Tác vụ đã lưu",
+  "Quản lý tài khoản",
+  "Lịch chạy",
+  "Trợ giúp",
   "Flow",
   "Tác vụ",
   "Kho nội dung",
@@ -171,15 +176,15 @@ test("nurture readiness blocks invalid values and links to the repair field", as
   await open(page, "Nuôi TikTok");
   await page.getByRole("combobox", { name: "Phạm vi thiết bị" }).selectOption("all");
   await page.getByRole("tab", { name: "Thiết lập", exact: true }).click();
-  await page.locator(".nurture-advanced > summary").click();
+  await page.getByRole("tab", { name: "Hành vi", exact: true }).click();
   const input = page.locator('input[data-nurture-field="watchMax"]');
   await input.fill("1");
   await expect(
     page.getByRole("button", { name: "Kiểm tra & bắt đầu", exact: true }),
   ).toBeDisabled();
-  await page.locator(".nurture-advanced > summary").click();
+  await page.getByRole("tab", { name: "Phiên nuôi", exact: true }).click();
   await page.getByRole("button", { name: "Sửa thiết lập" }).click();
-  await expect(page.locator(".nurture-advanced")).toHaveAttribute("open", "");
+  await expect(page.getByRole("tab", { name: "Hành vi", exact: true })).toHaveAttribute("aria-selected", "true");
   await expect(input).toBeFocused();
   await expect(input).toHaveAttribute("aria-invalid", "true");
   await input.fill("20");
@@ -340,7 +345,7 @@ test("publish workflow stays inside the viewport at supported widths", async ({
     await expect(
       page.getByRole("heading", { level: 1, name: "Đăng bài" }),
     ).toHaveCount(1);
-    for (const name of ["Nội dung đăng", "Bài đang chỉnh", "Máy thực hiện"]) {
+    for (const name of ["Nội dung đăng", "Liên kết bài và máy", "Máy thực hiện"]) {
       await expect(page.getByRole("region", { name, exact: true })).toBeVisible();
     }
     await expect(page.getByRole("button", { name: "Kiểm tra & đăng", exact: true })).toBeDisabled();
@@ -368,7 +373,6 @@ test("nurture rhythm controls stay compact and aligned", async ({ page }) => {
   ]) {
     await page.setViewportSize(viewport);
     await open(page, "Nuôi TikTok");
-    await page.locator(".nurture-advanced > summary").click();
     await page.getByRole("tab", { name: "Hành vi", exact: true }).click();
 
     const rhythm = page.locator(".nu-group").filter({
@@ -405,6 +409,10 @@ test("nurture rhythm controls stay compact and aligned", async ({ page }) => {
         ),
         toggleHeight: toggleRect.height,
         nightHeight: nightRect.height,
+        nightInputs: Array.from(night.querySelectorAll("input"), input => ({
+          height: input.getBoundingClientRect().height,
+          fontSize: parseFloat(getComputedStyle(input).fontSize),
+        })),
         nightGap: nightRect.top - toggleRect.bottom,
       };
     });
@@ -427,20 +435,44 @@ test("nurture rhythm controls stay compact and aligned", async ({ page }) => {
       76,
     );
     expect(geometry.nightGap, JSON.stringify(geometry)).toBeLessThanOrEqual(12);
-    expect(geometry.nightHeight, JSON.stringify(geometry)).toBeLessThanOrEqual(
-      48,
-    );
+    // Control 36px và nhãn phía trên theo hợp đồng UI mới, không dùng chiều cao ô cũ.
+    expect(geometry.nightInputs).toHaveLength(2);
+    for (const input of geometry.nightInputs) {
+      expect(input.height).toBe(36);
+      expect(input.fontSize).toBeGreaterThanOrEqual(13);
+    }
+    expect(geometry.nightHeight, JSON.stringify(geometry)).toBeLessThanOrEqual(60);
 
-    await expect(rhythm).toHaveScreenshot(
-      `nurture-rhythm-${viewport.width}x${viewport.height}.png`,
-      { animations: "disabled", maxDiffPixelRatio: 0.002 },
-    );
+    if (viewport.width > 1100) {
+      await expect(rhythm).toHaveScreenshot(
+        `nurture-rhythm-${viewport.width}x${viewport.height}.png`,
+        { animations: "disabled", maxDiffPixelRatio: 0.002 },
+      );
+    } else {
+      // Khối cao hơn vùng cuộn: chụp viewport và giờ nghỉ riêng, không nhận ảnh crop mất control.
+      await rhythm.locator(".nu-group-head").evaluate(node => node.scrollIntoView({ block: "start" }));
+      await expect(page).toHaveScreenshot(`nurture-behaviour-${viewport.width}x${viewport.height}.png`, {
+        animations: "disabled", maxDiffPixelRatio: 0.002,
+      });
+      const night = rhythm.locator(".nu-night-setting");
+      await night.scrollIntoViewIfNeeded();
+      const nightBounds = await night.boundingBox();
+      const footerBounds = await page.locator(".nurture-session-footer").boundingBox();
+      expect(nightBounds!.y).toBeGreaterThanOrEqual(0);
+      expect(nightBounds!.y + nightBounds!.height).toBeLessThanOrEqual(footerBounds!.y);
+      await expect(night).toHaveScreenshot(`nurture-night-${viewport.width}x${viewport.height}.png`, {
+        animations: "disabled", maxDiffPixelRatio: 0.002,
+      });
+    }
 
     const stack = page.locator(".automation-page-stack");
     const setupHeight = await stack.evaluate(
       (element) => element.getBoundingClientRect().height,
     );
-    for (const tabName of ["AI", "Bình luận"]) {
+    for (const tabName of ["AI", "Bình luận & chi phí AI"]) {
+      if (tabName === "Bình luận & chi phí AI") {
+        await page.getByRole("tab", { name: "Theo dõi", exact: true }).click();
+      }
       await page.getByRole("tab", { name: tabName, exact: true }).click();
       const tabHeight = await stack.evaluate(
         (element) => element.getBoundingClientRect().height,

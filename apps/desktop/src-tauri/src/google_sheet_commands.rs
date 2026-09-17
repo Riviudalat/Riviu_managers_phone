@@ -29,6 +29,84 @@ struct SessionState {
     phase: &'static str,
     error: Option<String>,
     cancel: Option<GoogleSessionCancel>,
+    staged: Option<StagedAuthorization>,
+}
+struct StagedAuthorization {
+    tokens: GoogleOAuthTokens,
+}
+#[derive(PartialEq, Eq)]
+struct LoginSnapshot {
+    connection: Option<GoogleSheetConnection>,
+    saved_url: Option<String>,
+}
+impl LoginSnapshot {
+    fn capture(db: &Database) -> anyhow::Result<Self> {
+        Ok(Self {
+            connection: db.google_sheet_connection()?,
+            saved_url: db
+                .get_setting(riviu_core::publish_sheet::SHEET_URL_SETTING)?
+                .filter(|url| !url.trim().is_empty()),
+        })
+    }
+}
+impl LoginSnapshot {
+    fn target(&self) -> anyhow::Result<Option<(String, u64)>> {
+        if let Some(connection) = &self.connection {
+            return Ok(Some((
+                connection.target.spreadsheet_id.clone(),
+                connection.target.sheet_gid,
+            )));
+        }
+        self.saved_url
+            .as_deref()
+            .map(riviu_core::publish_sheet::parse_sheet_url)
+            .transpose()
+            .map(|parsed| parsed.map(|p| (p.spreadsheet_id, p.sheet_gid)))
+    }
+}
+fn complete_authorization(
+    db: &Database,
+    slot: &mut SessionState,
+    generation: u64,
+    snapshot: &LoginSnapshot,
+    tokens: GoogleOAuthTokens,
+    check: Option<DirectTargetCheck>,
+) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        slot.generation == generation && *snapshot == LoginSnapshot::capture(db)?,
+        "Kết nối đã thay đổi hoặc đăng nhập đã hủy; phiên trước vẫn được giữ"
+    );
+    anyhow::ensure!(
+        tokens.has_sheets_scope(),
+        "Đăng nhập lại và cấp quyền Google Sheets để kết nối bằng link"
+    );
+    if let Some((book, gid)) = snapshot.target()? {
+        let check = check.context("Chưa kiểm tra quyền truy cập bảng đã lưu")?;
+        anyhow::ensure!(
+            check.spreadsheet_id == book && check.sheet_gid == gid,
+            "Kết quả Google không khớp bảng đã lưu"
+        );
+        if let Some(connection) = &snapshot.connection {
+            checked_bound_result(check, connection)?;
+        }
+        // Reading does not prove editing. Keep the previous credential until
+        // explicit connect obtains a fresh shared lock with these exact tokens.
+        slot.staged = Some(StagedAuthorization { tokens });
+    } else {
+        db.set_google_oauth_tokens(Some(&tokens))?;
+    }
+    Ok(())
+}
+fn ensure_target_scope(
+    db: &Database,
+    tokens: &GoogleOAuthTokens,
+    book: &str,
+    gid: u64,
+) -> anyhow::Result<()> {
+    anyhow::ensure!(tokens.has_sheets_scope() || db.google_sheet_connection()?.is_some_and(|c|
+        c.target.spreadsheet_id == book && c.target.sheet_gid == gid && c.account_id == tokens.account_id),
+        "Phiên Google cũ chỉ có quyền theo file; đăng nhập lại và cấp quyền Google Sheets để dùng link này");
+    Ok(())
 }
 fn sessions() -> &'static Mutex<SessionState> {
     static STATE: OnceLock<Mutex<SessionState>> = OnceLock::new();
@@ -42,6 +120,42 @@ fn sessions() -> &'static Mutex<SessionState> {
 fn err(e: impl std::fmt::Display) -> CommandError {
     CommandError::operation(e)
 }
+#[derive(Debug)]
+struct SharedSheetUpgradeRequired;
+impl std::fmt::Display for SharedSheetUpgradeRequired {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Cần nâng cấp tab để nhiều máy cùng ghi. Dừng và chờ hoàn tất ghi trên tất cả bản Riviu cũ trước khi xác nhận; dữ liệu và đợt báo cáo được giữ nguyên.")
+    }
+}
+impl std::error::Error for SharedSheetUpgradeRequired {}
+pub(crate) fn connection_error(error: anyhow::Error) -> CommandError {
+    if error.is::<SharedSheetUpgradeRequired>()
+        || error
+            .downcast_ref::<riviu_core::google_sheets::DirectSheetsError>()
+            .is_some_and(|e| {
+                e.kind == riviu_core::google_sheets::DirectSheetsErrorKind::SharedUpgradeRequired
+            })
+    {
+        return CommandError::code(
+            "SharedSheetUpgradeRequired",
+            SharedSheetUpgradeRequired.to_string(),
+        );
+    }
+    if let Some(sheet) = error.downcast_ref::<riviu_core::google_sheets::DirectSheetsError>() {
+        use riviu_core::google_sheets::DirectSheetsErrorKind;
+        let message = match sheet.kind {
+            DirectSheetsErrorKind::Busy => Some("Google Sheet đang có lượt ghi hoặc lượt trước chưa được xác minh. Giữ nguyên hàng chờ và thử lại; không tự xóa khóa của máy khác."),
+            DirectSheetsErrorKind::Forbidden => Some("Tài khoản Google chưa được phép chỉnh sửa bảng này. Kiểm tra quyền chia sẻ và quyền Google Sheets; phiên trước vẫn được giữ."),
+            DirectSheetsErrorKind::Unauthorized => Some("Phiên Google không còn hiệu lực. Đăng nhập lại để tiếp tục; hàng chờ vẫn được giữ."),
+            DirectSheetsErrorKind::NotFound => Some("Không tìm thấy bảng/tab hoặc tài khoản chưa có quyền truy cập. Kiểm tra đúng link và quyền chia sẻ."),
+            _ => None,
+        };
+        if let Some(message) = message {
+            return CommandError::operation(message);
+        }
+    }
+    err(error)
+}
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -53,6 +167,7 @@ pub struct GoogleSheetsStatus {
     account_id: Option<String>,
     client_id: String,
     picker_configured: bool,
+    has_sheets_scope: bool,
     selected_file_id: Option<String>,
     selected_file_name: Option<String>,
     sheet_url: Option<String>,
@@ -66,14 +181,19 @@ async fn status(db: &Database) -> anyhow::Result<GoogleSheetsStatus> {
     let connection = db.google_sheet_connection()?;
     let selected = picked(db)?;
     let session = sessions().lock().await;
+    let tokens = session
+        .staged
+        .as_ref()
+        .map(|stage| &stage.tokens)
+        .or(tokens.as_ref());
     let connected = tokens.is_some();
-    let active = db.sheet_uses_google_direct()?;
+    let active = session.staged.is_none() && db.sheet_uses_google_direct()?;
     Ok(GoogleSheetsStatus {
         configured: config.is_some(),
         connected,
         active,
-        email: tokens.as_ref().map(|t| t.email.clone()),
-        account_id: tokens.as_ref().map(|t| t.account_id.clone()),
+        email: tokens.map(|t| t.email.clone()),
+        account_id: tokens.map(|t| t.account_id.clone()),
         client_id: config
             .as_ref()
             .map(|c| c.client_id.clone())
@@ -83,16 +203,18 @@ async fn status(db: &Database) -> anyhow::Result<GoogleSheetsStatus> {
             .is_some_and(|c| c.picker_api_key.is_some() && c.project_number.is_some()),
         selected_file_id: selected.as_ref().map(|s| s.id.clone()),
         selected_file_name: selected.as_ref().map(|s| s.name.clone()),
-        sheet_url: if active {
-            connection.as_ref().map(|c| {
-                format!(
-                    "https://docs.google.com/spreadsheets/d/{}/edit#gid={}",
-                    c.target.spreadsheet_id, c.target.sheet_gid
-                )
-            })
-        } else {
-            None
-        },
+        has_sheets_scope: tokens.is_some_and(GoogleOAuthTokens::has_sheets_scope),
+        sheet_url: db
+            .get_setting(riviu_core::publish_sheet::SHEET_URL_SETTING)?
+            .filter(|url| !url.trim().is_empty())
+            .or_else(|| {
+                connection.as_ref().map(|c| {
+                    format!(
+                        "https://docs.google.com/spreadsheets/d/{}/edit#gid={}",
+                        c.target.spreadsheet_id, c.target.sheet_gid
+                    )
+                })
+            }),
         writer_id: connection.map(|c| c.writer_id),
         phase: session.phase.into(),
         error: session.error.clone(),
@@ -209,6 +331,8 @@ pub async fn google_sheets_configure(
         state.db.set_google_oauth_tokens(None).map_err(err)?;
         state.db.set_setting(PICKED_FILE, "").map_err(err)?;
     }
+    pending.generation += 1;
+    pending.staged = None;
     pending.error = None;
     drop(pending);
     drop(_guard);
@@ -231,41 +355,49 @@ pub async fn google_sheets_login(
     // Pin the application's client alongside the local login. A later binary with
     // another bundled client must not refresh this account under that client.
     state.db.set_google_oauth_config(&config).map_err(err)?;
+    let snapshot = LoginSnapshot::capture(&state.db).map_err(err)?;
     let client = GoogleOAuthClient::new(config).map_err(err)?;
     let session = client.authorization_session().await.map_err(err)?;
     open_browser(session.authorization_url()).map_err(err)?;
     slot.generation += 1;
     let generation = slot.generation;
     slot.phase = "authorizing";
+    slot.staged = None;
     slot.error = None;
     slot.cancel = Some(session.cancel_handle());
     let db = state.db.clone();
     drop(slot);
     tokio::spawn(async move {
-        let result = session.wait().await;
+        let result: anyhow::Result<_> = async {
+            let tokens = session.wait().await?;
+            anyhow::ensure!(
+                sessions().lock().await.generation == generation,
+                "Đăng nhập Google đã hủy"
+            );
+            let check = if let Some((book, gid)) = snapshot.target()? {
+                Some(
+                    DirectSheetsClient::new(tokens.access_token.clone())?
+                        .check_target(&book, gid)
+                        .await?,
+                )
+            } else {
+                None
+            };
+            Ok((tokens, check))
+        }
+        .await;
         let _connection = CONNECTION_LOCK.lock().await;
         let _token = TOKEN_LOCK.lock().await;
         let mut slot = sessions().lock().await;
         if slot.generation != generation {
             return;
         }
-        let result = result.and_then(|tokens| {
-            if let Some(c) = db.google_sheet_connection()? {
-                anyhow::ensure!(
-                    c.account_id == tokens.account_id,
-                    "Đăng nhập đúng tài khoản Google đã liên kết với bảng này"
-                );
-            }
-            db.set_google_oauth_tokens(Some(&tokens))?;
-            db.set_setting(
-                "google.sheets.authorization-generation",
-                &uuid::Uuid::new_v4().to_string(),
-            )?;
-            Ok(())
+        let result = result.and_then(|(tokens, check)| {
+            complete_authorization(&db, &mut slot, generation, &snapshot, tokens, check)
         });
         slot.phase = "idle";
         slot.cancel = None;
-        slot.error = result.err().map(|e| e.to_string());
+        slot.error = result.err().map(|e| connection_error(e).message.into());
     });
     status(&state.db).await.map_err(err)
 }
@@ -280,6 +412,7 @@ pub async fn google_sheets_cancel(
     }
     slot.generation += 1;
     slot.phase = "idle";
+    slot.staged = None;
     slot.error = None;
     drop(slot);
     status(&state.db).await.map_err(err)
@@ -297,6 +430,7 @@ pub async fn google_sheets_disconnect(
     }
     slot.generation += 1;
     slot.phase = "idle";
+    slot.staged = None;
     slot.error = None;
     state.db.set_google_oauth_tokens(None).map_err(err)?;
     drop(slot);
@@ -341,7 +475,7 @@ pub async fn google_sheets_pick_file(
             result.and_then(|file| db.set_setting(PICKED_FILE, &serde_json::to_string(&file)?));
         slot.phase = "idle";
         slot.cancel = None;
-        slot.error = result.err().map(|e| e.to_string());
+        slot.error = result.err().map(|e| connection_error(e).message.into());
     });
     status(&state.db).await.map_err(err)
 }
@@ -351,35 +485,31 @@ pub async fn google_sheets_list_tabs(
     spreadsheet_id: String,
 ) -> Result<Vec<riviu_core::google_sheets::DirectSheetTab>, CommandError> {
     let _a = state.ensure_accepting_work()?;
-    let file = picked(&state.db)
-        .map_err(err)?
-        .context("Chọn Sheet qua Google trước")
-        .map_err(err)?;
-    if file.id != spreadsheet_id {
-        return Err(err("Lựa chọn Sheet đã thay đổi"));
-    }
     let tokens = access_tokens(&state.db).await.map_err(err)?;
+    ensure_target_scope(&state.db, &tokens, &spreadsheet_id, 0).map_err(err)?;
     DirectSheetsClient::new(tokens.access_token)
         .map_err(err)?
         .list_tabs(&spreadsheet_id)
         .await
         .map_err(err)
 }
-fn checked_result(check: DirectTargetCheck, writer: &str) -> anyhow::Result<SheetCheckResult> {
+fn checked_result(check: DirectTargetCheck, _writer: &str) -> anyhow::Result<SheetCheckResult> {
     let mut result = riviu_core::publish_sheet::parse_sheet_url(&format!(
         "https://docs.google.com/spreadsheets/d/{}/edit#gid={}",
         check.spreadsheet_id, check.sheet_gid
     ))?;
     result.readable = true;
-    result.connection_verified = check.writer_id.as_deref() == Some(writer);
+    result.connection_verified = check.writer_schema_version == Some(2) && check.writable;
     result.reporting_ready = check.reporting_ready && result.connection_verified;
     result.reporting_epoch = check.reporting_epoch;
     result.layout = check.layout;
     result.columns = check.columns;
     result.message = if result.reporting_ready {
         "Google Sheets đã sẵn sàng ghi trực tiếp"
+    } else if check.writer_schema_version == Some(1) {
+        "Cần xác nhận tất cả bản Riviu cũ đã dừng ghi để nâng cấp tab dùng chung"
     } else {
-        "Bảng chưa được liên kết để ghi trên máy tính này"
+        "Chưa xác minh quyền chỉnh sửa và khóa ghi Google Sheet; kết nối lại để kiểm tra"
     }
     .into();
     Ok(result)
@@ -403,6 +533,7 @@ fn checked_bound_result(
     checked_result(check, &connection.writer_id)
 }
 pub(crate) async fn check_current(db: &Database, url: &str) -> anyhow::Result<SheetCheckResult> {
+    let _connection = CONNECTION_LOCK.lock().await;
     if !db.sheet_uses_google_direct()? {
         return riviu_core::publish_sheet::check_sheet(url, &db.publish_sheet_delivery_settings()?)
             .await;
@@ -421,8 +552,23 @@ pub(crate) async fn check_current(db: &Database, url: &str) -> anyhow::Result<Sh
         tokens.account_id == connection.account_id,
         "Đăng nhập đúng tài khoản Google đã liên kết"
     );
-    let check = DirectSheetsClient::new(tokens.access_token)?
+    anyhow::ensure!(
+        sessions().lock().await.staged.is_none(),
+        "Tài khoản mới đang chờ kiểm tra quyền ghi; kết nối lại bảng"
+    );
+    let client = DirectSheetsClient::new(tokens.access_token)?;
+    let initial = client
         .check_target(&parsed.spreadsheet_id, parsed.sheet_gid)
+        .await?;
+    checked_bound_result(initial.clone(), &connection)?;
+    if initial.writer_schema_version == Some(1) {
+        return Err(SharedSheetUpgradeRequired.into());
+    }
+    if initial.writer_schema_version != Some(2) {
+        return checked_bound_result(initial, &connection);
+    }
+    let check = client
+        .prepare_shared_target(&connection.target, &connection.writer_id, false, db)
         .await?;
     checked_bound_result(check, &connection)
 }
@@ -433,26 +579,52 @@ pub async fn google_sheets_connect(
     spreadsheet_id: String,
     sheet_id: u64,
     confirmed: bool,
+    legacy_writers_stopped: Option<bool>,
 ) -> Result<SheetCheckResult, CommandError> {
     let _a = state.ensure_accepting_work()?;
     let _guard = CONNECTION_LOCK.lock().await;
-    let result = connect(&state.db, &spreadsheet_id, sheet_id, confirmed).await;
-    result.map_err(err)
+    let result = connect(
+        &state.db,
+        &spreadsheet_id,
+        sheet_id,
+        confirmed,
+        legacy_writers_stopped.unwrap_or(false),
+    )
+    .await;
+    result.map_err(connection_error)
+}
+fn needs_legacy_retirement(configured: bool, remote_schema: Option<u32>) -> bool {
+    // Schema 1/2 đã thuộc đường direct; PC mới không được retire lại Apps Script
+    // bằng request/writer khác. Xác nhận dừng writer cũ vẫn do guard nâng cấp giữ.
+    configured && !matches!(remote_schema, Some(1 | 2))
 }
 async fn connect(
     db: &Database,
     book: &str,
     gid: u64,
     confirmed: bool,
+    legacy_writers_stopped: bool,
 ) -> anyhow::Result<SheetCheckResult> {
-    anyhow::ensure!(
-        sessions().lock().await.phase == "idle",
-        "Hoàn tất hoặc hủy đăng nhập/chọn bảng trước khi kết nối"
-    );
+    let (generation, staged) = {
+        let mut session = sessions().lock().await;
+        anyhow::ensure!(
+            session.phase == "idle",
+            "Hoàn tất hoặc hủy đăng nhập/chọn bảng trước khi kết nối"
+        );
+        session.error = None;
+        (
+            session.generation,
+            session.staged.as_ref().map(|stage| stage.tokens.clone()),
+        )
+    };
     anyhow::ensure!(confirmed, "Xác nhận kết nối bảng để ghi kết quả");
-    let file = picked(db)?.context("Chọn bảng bằng Google Picker")?;
-    anyhow::ensure!(file.id == book, "Bảng được chọn đã thay đổi");
-    let tokens = access_tokens(db).await?;
+    let staged_login = staged.is_some();
+    let tokens = if let Some(tokens) = staged {
+        tokens
+    } else {
+        access_tokens(db).await?
+    };
+    ensure_target_scope(db, &tokens, book, gid)?;
     let client = DirectSheetsClient::new(tokens.access_token.clone())?;
     let initial = client.check_target(book, gid).await?;
     let writer = db.google_writer_id()?;
@@ -473,16 +645,23 @@ async fn connect(
         reporting_epoch: initial.reporting_epoch.clone(),
         internal_reporting: initial.layout.as_deref() != Some("compact"),
     };
+    if let Some(current) = db.google_sheet_connection()? {
+        if current.target.spreadsheet_id == book && current.target.sheet_gid == gid {
+            target = current.target;
+        }
+    }
     let legacy = db.publish_sheet_delivery_settings()?;
     let saved = db
         .get_setting(riviu_core::publish_sheet::SHEET_URL_SETTING)?
         .and_then(|url| riviu_core::publish_sheet::parse_sheet_url(&url).ok());
-    let migrating_legacy = !db.sheet_uses_google_direct()?
+    let legacy_configured = !db.sheet_uses_google_direct()?
         && saved
             .as_ref()
             .is_some_and(|s| s.spreadsheet_id == book && s.sheet_gid == gid)
         && !legacy.webhook_url.is_empty()
         && !legacy.token.is_empty();
+    let migrating_legacy =
+        needs_legacy_retirement(legacy_configured, initial.writer_schema_version);
     if let Some(pending) = &pending {
         target = serde_json::from_value(pending["target"].clone())?;
         anyhow::ensure!(
@@ -496,16 +675,20 @@ async fn connect(
         anyhow::ensure!(old.connection_verified, "{}", old.message);
         target.reporting_epoch = old.reporting_epoch;
     }
-    begin_checked_migration(db, &initial, &target, &writer, &request_id)?;
-    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(125);
-    while !db.publish_sheet_requests_drained()? {
-        anyhow::ensure!(
-            tokio::time::Instant::now() < deadline,
-            "Còn yêu cầu Sheet đang chạy; tiếp tục kết nối để hoàn tất"
-        );
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    if migrating_legacy && !legacy_writers_stopped {
+        return Err(SharedSheetUpgradeRequired.into());
     }
+    validate_migration_target(&initial, &target, legacy_writers_stopped)?;
     if migrating_legacy {
+        begin_checked_migration(
+            db,
+            &initial,
+            &target,
+            &writer,
+            &request_id,
+            legacy_writers_stopped,
+        )?;
+        drain_sheet_requests(db).await?;
         riviu_core::publish_sheet::retire_apps_script_writer(
             &legacy,
             &target,
@@ -514,41 +697,128 @@ async fn connect(
         )
         .await?;
     }
-    let ready = client.prepare_target(&target, &writer).await?;
-    anyhow::ensure!(ready.reporting_ready, "Google Sheet chưa sẵn sàng");
+    let ready = client
+        .prepare_shared_target(&target, &writer, legacy_writers_stopped, db)
+        .await?;
+    // Shared preparation has its own durable lock. Do not pause unrelated
+    // outboxes until this target's real edit permission has been proved.
+    if !migrating_legacy {
+        anyhow::ensure!(
+            sessions().lock().await.generation == generation,
+            "Kết nối đã hủy; phiên trước vẫn được giữ"
+        );
+        begin_checked_migration(
+            db,
+            &ready,
+            &target,
+            &writer,
+            &request_id,
+            legacy_writers_stopped,
+        )?;
+        if let Err(error) = drain_sheet_requests(db).await {
+            if pending.is_none() {
+                db.abort_google_sheet_migration(&request_id)?;
+            }
+            return Err(error);
+        }
+    }
+    let result = checked_result(ready.clone(), &writer)?;
+    anyhow::ensure!(
+        result.reporting_ready,
+        "Google Sheet chưa xác minh quyền ghi"
+    );
     target.reporting_epoch = ready.reporting_epoch.clone();
     target.internal_reporting = ready.layout.as_deref() == Some("internal");
-    db.finish_google_sheet_migration(
-        &GoogleSheetConnection {
-            target,
-            account_id: tokens.account_id,
-            writer_id: writer.clone(),
-            spreadsheet_name: file.name,
-        },
+    let connection = GoogleSheetConnection {
+        target,
+        account_id: tokens.account_id.clone(),
+        writer_id: writer.clone(),
+        spreadsheet_name: ready.spreadsheet_name,
+    };
+    let _token = TOKEN_LOCK.lock().await;
+    let mut session = sessions().lock().await;
+    finish_checked_connection(
+        db,
+        &mut session,
+        generation,
+        &connection,
         &request_id,
+        staged_login.then_some(&tokens),
+        pending.is_none() && !migrating_legacy,
     )?;
-    sessions().lock().await.error = None;
-    checked_result(ready, &writer)
+    Ok(result)
+}
+fn finish_checked_connection(
+    db: &Database,
+    session: &mut SessionState,
+    generation: u64,
+    connection: &GoogleSheetConnection,
+    request_id: &str,
+    tokens: Option<&GoogleOAuthTokens>,
+    can_abandon: bool,
+) -> anyhow::Result<()> {
+    let result = (|| {
+        anyhow::ensure!(
+            session.generation == generation,
+            "Kết nối đã hủy hoặc tài khoản đã thay đổi; phiên trước vẫn được giữ"
+        );
+        if let Some(tokens) = tokens {
+            db.finish_google_sheet_authorization(connection, request_id, tokens)?;
+        } else {
+            db.finish_google_sheet_migration(connection, request_id)?;
+        }
+        Ok(())
+    })();
+    if result.is_err() && can_abandon {
+        db.abort_google_sheet_migration(request_id)?;
+    }
+    result?;
+    if tokens.is_some() {
+        session.staged = None;
+    }
+    session.error = None;
+    Ok(())
 }
 
 fn begin_checked_migration(
     db: &Database,
     initial: &DirectTargetCheck,
     target: &SheetDeliveryTarget,
-    writer: &str,
+    _writer: &str,
     request_id: &str,
+    legacy_writers_stopped: bool,
 ) -> anyhow::Result<()> {
-    // Refuse a known conflict before persisting the migration barrier. That
-    // barrier pauses every Sheet delivery and must not strand an existing
-    // connection merely because the operator selected another PC's tab.
+    validate_migration_target(initial, target, legacy_writers_stopped)?;
+    db.begin_google_sheet_migration(target, request_id)
+}
+
+async fn drain_sheet_requests(db: &Database) -> anyhow::Result<()> {
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(125);
+    while !db.publish_sheet_requests_drained()? {
+        anyhow::ensure!(
+            tokio::time::Instant::now() < deadline,
+            "Còn yêu cầu Sheet đang chạy; tiếp tục kết nối để hoàn tất"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    }
+    Ok(())
+}
+fn validate_migration_target(
+    initial: &DirectTargetCheck,
+    target: &SheetDeliveryTarget,
+    legacy_writers_stopped: bool,
+) -> anyhow::Result<()> {
     anyhow::ensure!(
         initial.spreadsheet_id == target.spreadsheet_id && initial.sheet_gid == target.sheet_gid,
         "Kết quả kiểm tra không khớp bảng và tab đã chọn"
     );
-    if let Some(owner) = initial.writer_id.as_deref() {
+    if initial.writer_schema_version == Some(1) && !legacy_writers_stopped {
+        return Err(SharedSheetUpgradeRequired.into());
+    }
+    if initial.writer_id.is_some() {
         anyhow::ensure!(
-            owner == writer,
-            "Tab này đang được liên kết với máy tính khác. Chọn tab mới hoặc dùng máy đã liên kết để tiếp tục ghi; app chưa đổi kết nối hiện tại."
+            matches!(initial.writer_schema_version, Some(1 | 2)),
+            "Phiên bản kết nối Google Sheet chưa được hỗ trợ"
         );
         anyhow::ensure!(
             initial.reporting_ready
@@ -557,7 +827,7 @@ fn begin_checked_migration(
             "Tab đang dọn dữ liệu hoặc đợt báo cáo/bố cục đã đổi; hoàn tất trên máy đã liên kết rồi thử lại"
         );
     }
-    db.begin_google_sheet_migration(target, request_id)
+    Ok(())
 }
 pub(crate) async fn deliver(
     db: &Database,
@@ -596,10 +866,11 @@ pub(crate) async fn deliver(
         serde_json::json!(claim.target.reporting_epoch.as_deref().unwrap_or("legacy"));
     let result = tokio::time::timeout(
         std::time::Duration::from_secs(95),
-        DirectSheetsClient::new(tokens.access_token)?.deliver(
+        DirectSheetsClient::new(tokens.access_token)?.deliver_shared(
             &claim.target,
             &payload,
             &connection.writer_id,
+            db,
         ),
     )
     .await
@@ -651,6 +922,22 @@ pub(crate) fn retryable(error: &anyhow::Error) -> bool {
             .is_some()
 }
 
+fn begin_checked_reset(
+    db: &Database,
+    connection: &GoogleSheetConnection,
+    check: &DirectTargetCheck,
+    reset_id: &str,
+) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        check.spreadsheet_id == connection.target.spreadsheet_id
+            && check.sheet_gid == connection.target.sheet_gid,
+        "Kết quả kiểm tra không khớp bảng cần dọn"
+    );
+    anyhow::ensure!(check.writer_schema_version != Some(2),
+        "Tab đang dùng chế độ nhiều máy. Bản 0.2.37 tạm khóa dọn toàn bảng để bảo vệ dữ liệu và hàng chờ trên các máy khác.");
+    db.begin_publish_sheet_reset(&connection.target, reset_id)
+}
+
 pub(crate) async fn reset_reporting(
     db: &Database,
     reset_id: &str,
@@ -664,7 +951,19 @@ pub(crate) async fn reset_reporting(
         connection.target.sheet_gid == 0,
         "Dọn bảng chỉ dành cho tab gid=0"
     );
-    db.begin_publish_sheet_reset(&connection.target, reset_id)?;
+    let tokens = access_tokens(db).await?;
+    anyhow::ensure!(
+        tokens.account_id == connection.account_id,
+        "Tài khoản Google khác bảng đã chọn"
+    );
+    let client = DirectSheetsClient::new(tokens.access_token)?;
+    let check = client
+        .check_target(
+            &connection.target.spreadsheet_id,
+            connection.target.sheet_gid,
+        )
+        .await?;
+    begin_checked_reset(db, &connection, &check, reset_id)?;
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(125);
     while !db.publish_sheet_requests_drained()? {
         anyhow::ensure!(
@@ -673,12 +972,7 @@ pub(crate) async fn reset_reporting(
         );
         tokio::time::sleep(std::time::Duration::from_millis(250)).await;
     }
-    let tokens = access_tokens(db).await?;
-    anyhow::ensure!(
-        tokens.account_id == connection.account_id,
-        "Tài khoản Google khác bảng đã chọn"
-    );
-    let reset = DirectSheetsClient::new(tokens.access_token)?
+    let reset = client
         .reset_target(&connection.target, &connection.writer_id, reset_id)
         .await?;
     anyhow::ensure!(

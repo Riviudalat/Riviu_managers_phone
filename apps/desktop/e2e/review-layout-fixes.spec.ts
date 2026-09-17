@@ -17,6 +17,8 @@ async function fullyReachable(control: Locator): Promise<boolean> {
       const bounds = parent.getBoundingClientRect();
       if (/auto|scroll|hidden|clip/.test(style.overflowY) && (box.top < bounds.top - 1 || box.bottom > bounds.bottom + 1)) return false;
       if (/auto|scroll|hidden|clip/.test(style.overflowX) && (box.left < bounds.left - 1 || box.right > bounds.right + 1)) return false;
+      // Drawer fixed thuộc viewport, không bị vùng cuộn workspace phía sau cắt.
+      if (style.position === "fixed") break;
     }
     return element.contains(document.elementFromPoint(box.x + box.width / 2, box.y + box.height / 2));
   });
@@ -28,9 +30,12 @@ async function wheelToControl(page: Page, control: Locator, host: Locator): Prom
       const box = element.getBoundingClientRect();
       let top = Math.max(0, box.top), bottom = Math.min(innerHeight, box.bottom);
       for (let parent = element.parentElement; parent; parent = parent.parentElement) {
-        if (!/auto|scroll|hidden|clip/.test(getComputedStyle(parent).overflowY)) continue;
-        const bounds = parent.getBoundingClientRect();
-        top = Math.max(top, bounds.top); bottom = Math.min(bottom, bounds.bottom);
+        const style = getComputedStyle(parent);
+        if (/auto|scroll|hidden|clip/.test(style.overflowY)) {
+          const bounds = parent.getBoundingClientRect();
+          top = Math.max(top, bounds.top); bottom = Math.min(bottom, bounds.bottom);
+        }
+        if (style.position === "fixed") break;
       }
       return { x: box.left + 6, y: (top + bottom) / 2 };
     });
@@ -95,6 +100,8 @@ for (const viewport of [{ width: 820, height: 560 }, { width: 900, height: 900 }
     await page.getByPlaceholder("Dán link TikTok, mỗi dòng một bài").fill("https://www.tiktok.com/@fixture/video/111");
     await page.getByRole("button", { name: "Chọn hành động & máy →" }).click();
     await page.getByRole("combobox", { name: "Phạm vi thiết bị" }).selectOption("all");
+    await page.getByRole("button", { name: "Chọn máy", exact: true }).click();
+    await expect(page.getByRole("dialog", { name: "Chọn máy Tương tác", exact: true })).toBeVisible();
     await page.getByRole("button", { name: "Tài khoản TikTok của Máy thử 1", exact: true }).click();
     const machines = page.getByRole("region", { name: "Máy thực hiện", exact: true });
     const editor = machines.locator(".iw-account-editor");
@@ -134,6 +141,9 @@ for (const viewport of [{ width: 820, height: 560 }, { width: 900, height: 900 }
     await expect(machines).toBeFocused();
     await machines.press("Home");
     await expect.poll(() => machines.evaluate((element) => element.scrollTop)).toBe(0);
+    await page.keyboard.press("Escape");
+    await expect(page.getByRole("dialog", { name: "Chọn máy Tương tác", exact: true })).toHaveCount(0);
+    await expect(page.getByRole("button", { name: "Chọn máy", exact: true })).toBeFocused();
     await expect(page.locator(".iw-footer")).toBeInViewport();
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
     await page.screenshot({ path: test.info().outputPath(`interaction-account-keyboard-${viewport.width}.png`) });

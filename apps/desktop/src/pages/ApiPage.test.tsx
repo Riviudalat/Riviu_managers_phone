@@ -92,6 +92,18 @@ describe("ApiPage load states", () => {
     expect(await screen.findByText("OK")).toBeInTheDocument();
   });
 
+  it("keeps the last documentation and listener context when a refresh fails", async () => {
+    loadDocs.mockResolvedValueOnce("## Devices\n- list_devices").mockRejectedValueOnce(new Error("Đọc tạm thời thất bại"));
+    render(<ApiPage />);
+    await userEvent.click(await screen.findByText("Thiết bị"));
+    expect(screen.getByText("list_devices")).toBeVisible();
+    await userEvent.click(screen.getByRole("button", { name: "Làm mới tài liệu API" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("Đọc tạm thời thất bại");
+    expect(screen.getByText("list_devices")).toBeVisible();
+    expect(screen.getByRole("complementary", { name: "Trạng thái API" })).toBeVisible();
+    expect(screen.getByRole("button", { name: "Thử lại" })).toBeEnabled();
+  });
+
   it("distinguishes an empty response from loading and offers a reload", async () => {
     loadDocs.mockResolvedValue("   \n");
 

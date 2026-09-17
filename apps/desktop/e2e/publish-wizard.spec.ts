@@ -125,7 +125,11 @@ for (const viewport of [
     ).not.toBeChecked();
 
     await page.getByRole("button", { name: "Chọn tất cả bài", exact: true }).click();
+    const editCaption = page.getByRole("button", { name: "Xem ảnh và sửa caption · Bài Đà Lạt 1", exact: true });
+    await editCaption.click();
     await expect(page.getByRole("textbox", { name: "Nội dung bài đăng", exact: true })).toHaveValue("Nội dung bài 1");
+    await page.keyboard.press("Escape");
+    await expect(editCaption).toBeFocused();
     const checkLayout = async (label: string) => {
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
       const root = page.locator(".publish-quick");
@@ -142,8 +146,8 @@ for (const viewport of [
       await page.screenshot({ path: test.info().outputPath(`${label}-${viewport.width}.png`) });
     };
     await checkLayout("source");
-    await page.getByRole("button", { name: "Phóng to ảnh", exact: true }).click();
-    const imagePreview = page.getByRole("dialog", { name: "Xem trước · Bài Đà Lạt 1" });
+    await editCaption.click();
+    const imagePreview = page.getByRole("dialog", { name: "Ảnh & caption · Bài Đà Lạt 1" });
     await expect(imagePreview).toBeVisible();
     await expect(imagePreview.getByRole("img")).toHaveAttribute("alt", "1.png");
     await imagePreview.getByRole("button", { name: "Ảnh tiếp", exact: true }).click();
@@ -156,53 +160,62 @@ for (const viewport of [
     expect(previewDimensions!.y + previewDimensions!.height).toBeLessThanOrEqual(viewport.height);
     await page.keyboard.press("Escape");
     await expect(imagePreview).toHaveCount(0);
-    await expect(page.getByRole("button", { name: "Phóng to ảnh", exact: true })).toBeFocused();
+    await expect(editCaption).toBeFocused();
     const machines = page.getByRole("region", { name: "Máy thực hiện", exact: true });
-    await expect(machines.getByRole("checkbox")).toHaveCount(20);
-    expect(await machines.locator(".pq-machine-grid").evaluate(element => getComputedStyle(element).gridTemplateColumns.split(" ").length)).toBe(2);
+    const machineList = machines.locator(".pq-machine-grid");
+    await expect(machineList.getByRole("checkbox")).toHaveCount(20);
+    expect(await machineList.evaluate(element => element.scrollHeight >= element.clientHeight)).toBe(true);
+    await machines.locator(".pq-device-filters > summary").click();
     await machines.getByRole("button", { name: "Chọn tất cả sẵn sàng", exact: true }).click();
     await page.getByRole("button", { name: "Chọn tất cả bài", exact: true }).click();
     await page.getByRole("button", { name: "Chọn nhanh", exact: true }).click();
     await expect(page.locator(".pq-footer")).toContainText("10/10 bài có máy");
     await checkLayout("board");
     // Swapping the active post keeps the other post assigned to the displaced phone.
-    const assignmentSelect = page.getByRole("combobox", { name: "Máy nhận bài đang chỉnh" });
+    const assignmentSelect = page.getByRole("combobox", { name: "Máy nhận bài Bài Đà Lạt 1", exact: true });
     const firstPhone = await assignmentSelect.inputValue();
     const secondPhone = await assignmentSelect.locator("option").nth(2).getAttribute("value");
     await assignmentSelect.selectOption(secondPhone!);
     await expect(assignmentSelect).toHaveValue(secondPhone!);
     await assignmentSelect.selectOption(firstPhone);
-    await machines.getByRole("button", { name: "Bỏ chọn", exact: true }).click();
-    await expect(machines.getByRole("checkbox", { checked: true })).toHaveCount(0);
+    await machines.getByRole("button", { name: "Bỏ chọn toàn bộ máy", exact: true }).click();
+    await expect(machineList.getByRole("checkbox", { checked: true })).toHaveCount(0);
+    await machines.locator(".pq-device-filters > summary").click();
     await machines.getByRole("checkbox", { name: /Chọn Máy 20 ·/ }).check();
-    await expect(machines.getByRole("checkbox", { checked: true })).toHaveCount(1);
+    await expect(machineList.getByRole("checkbox", { checked: true })).toHaveCount(1);
     await page.getByRole("button", { name: "Chọn nhanh", exact: true }).click();
     // Quick allocation uses ready machines in the workspace scope, regardless of checked capacity.
-    await expect(machines.getByRole("status").filter({ hasText: /^Đã gán/ })).toContainText("Đã gán 10 bài cho 10 máy");
+    await expect(page.locator(".pq-footer").getByRole("status").filter({ hasText: /^Đã gán/ })).toContainText("Đã gán 10 bài cho 10 máy");
     await expect(page.locator(".pq-footer")).toContainText("10/10 bài có máy");
     await page.getByRole("combobox", { name: "Phạm vi thiết bị" }).selectOption("group:publish-one");
     await page.getByRole("button", { name: "Chọn nhanh", exact: true }).click();
-    await expect(machines.getByRole("status").filter({ hasText: /^Đã gán/ })).toContainText("Đã gán 1 bài cho 1 máy");
-    await expect(machines.getByRole("checkbox", { checked: true })).toHaveCount(1);
+    await expect(page.locator(".pq-footer").getByRole("status").filter({ hasText: /^Đã gán/ })).toContainText("Đã gán 1 bài cho 1 máy");
+    await expect(machineList.getByRole("checkbox", { checked: true })).toHaveCount(1);
     await expect(machines.getByRole("checkbox", { name: /Chọn Máy 20 ·/ })).toBeChecked();
     await expect(assignmentSelect).toHaveValue("MOCK-FLEET-20");
     await expect(page.locator(".pq-footer")).toContainText("1/1 bài có máy");
     await page.getByRole("combobox", { name: "Phạm vi thiết bị" }).selectOption("all");
     await page.getByRole("button", { name: "Chọn tất cả bài", exact: true }).click();
+    await machines.locator(".pq-device-filters > summary").click();
     await machines.getByRole("button", { name: "Chọn tất cả sẵn sàng", exact: true }).click();
+    await machines.locator(".pq-device-filters > summary").click();
     await page.getByRole("button", { name: "Chọn nhanh", exact: true }).click();
     await expect(page.locator(".pq-footer")).toContainText("10/10 bài có máy");
     await page.getByRole("tab", { name: "Hẹn giờ", exact: true }).click();
     await expect(page.getByRole("tabpanel", { name: "Hẹn giờ", exact: true })).toBeVisible();
     await page.getByRole("tab", { name: "Thiết lập", exact: true }).click();
     await expect(page.locator(".pq-footer")).toContainText("10/10 bài có máy");
+    await page.locator(".pq-run-options > summary").click();
     await page.getByRole("checkbox", { name: "Xóa bản chuyển sau khi đăng thành công" }).check();
     for (const label of ["Ghi kết quả lên Sheet", "Xóa bản chuyển sau khi đăng thành công"]) {
       const row = await page.getByRole("checkbox", { name: label }).evaluate(input => {
         const parent = input.parentElement!;
         return { direction: getComputedStyle(parent).flexDirection, width: input.getBoundingClientRect().width, height: input.getBoundingClientRect().height };
       });
-      expect(row).toEqual({ direction: "row", width: 15, height: 15 });
+      expect(row.direction).toBe("row");
+      expect(row.width).toBeGreaterThanOrEqual(14);
+      expect(row.height).toBeGreaterThanOrEqual(14);
+      expect(row.width).toBe(row.height);
     }
     await page.getByRole("button", { name: "Kiểm tra & đăng", exact: true }).click();
     await expect(page.getByRole("button", { name: "Xác nhận đăng 10 bài", exact: true })).toBeEnabled();

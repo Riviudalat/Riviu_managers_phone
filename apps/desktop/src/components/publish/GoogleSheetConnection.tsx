@@ -1,17 +1,18 @@
 import { useEffect, useRef, useState } from "react";
 import { LoaderCircle } from "lucide-react";
-import { googleSheetsCancel, googleSheetsConfigure, googleSheetsConnect, googleSheetsLogin, googleSheetsPickFile,
+import { googleSheetsCancel, googleSheetsConfigure, googleSheetsConnect, googleSheetsLogin,
   googleSheetsStatus, publishSheetCheck, publishSheetGetConfig } from "../../api";
 import { describeError } from "../../describeError";
 import { parseGoogleSheetUrl, type GoogleSheetTarget } from "./googleSheetUrl";
 import type { GoogleSheetsConfiguration, GoogleSheetsStatus, PublishSheetCheckResult } from "../../types";
 import { GoogleAppSetup } from "./GoogleAppSetup";
+import { requestConfirm } from "../../confirmStore";
 
 type Target = GoogleSheetTarget;
 type Action = "loading" | "login" | "check" | "picking" | "cancel" | "configure" | null;
 type Props = { onReadyChange?: (ready: boolean) => void };
 const sameTarget = (a: Target | null, b: Target | null) => !!a && !!b && a.spreadsheetId === b.spreadsheetId && a.sheetId === b.sheetId;
-const accountKey = (s: GoogleSheetsStatus) => JSON.stringify([s.accountId, s.connected, s.active, s.writerId,
+const accountKey = (s: GoogleSheetsStatus) => JSON.stringify([s.accountId, s.connected, s.active, s.writerId, s.hasSheetsScope,
   s.active ? parseGoogleSheetUrl(s.sheetUrl || "")?.url ?? s.sheetUrl : null]);
 
 export function GoogleSheetConnection({ onReadyChange }: Props) {
@@ -77,9 +78,39 @@ export function GoogleSheetConnection({ onReadyChange }: Props) {
       if (valid(ticket) && flight.current === null) { applyStatus(next); if (next.error) setError(next.error); }
     }).catch(e => { if (valid(ticket) && flight.current === null) { setResult(null); setError(describeError(e)); } });
   };
+  const connectTarget = async (target: Target, ticket: number, revision: number) => {
+    if (!valid(ticket) || urlRevision.current !== revision) return;
+    setAction("check");
+    let checked: PublishSheetCheckResult;
+    try { checked = await googleSheetsConnect(target.spreadsheetId, target.sheetId, true, false); }
+    catch (cause) {
+      if (!valid(ticket) || urlRevision.current !== revision) return;
+      const code = cause && typeof cause === "object" && "code" in cause ? cause.code : null;
+      if (code !== "SharedSheetUpgradeRequired") throw cause;
+      const confirmed = await requestConfirm({
+        title: "Nâng cấp tab để nhiều máy cùng ghi?",
+        message: "Hãy dừng ghi Sheet trên tất cả bản app cũ trước khi nâng cấp tab này. Dữ liệu và liên kết đang có được giữ nguyên; sau nâng cấp, chỉ các bản app hỗ trợ ghi đa máy được tiếp tục. Không cần tạo tab mới.",
+        confirmLabel: "Đã dừng bản cũ · Nâng cấp", cancelLabel: "Chưa nâng cấp", danger: true,
+      });
+      if (!valid(ticket) || urlRevision.current !== revision) return;
+      if (!confirmed) {
+        const previous = await googleSheetsCancel();
+        if (!valid(ticket) || urlRevision.current !== revision) return;
+        applyStatus(previous);
+        throw Error("Chưa nâng cấp tab. Dừng ghi từ bản app cũ rồi kiểm tra lại kết nối; dữ liệu giữ nguyên.");
+      }
+      checked = await googleSheetsConnect(target.spreadsheetId, target.sheetId, true, true);
+    }
+    if (!valid(ticket) || urlRevision.current !== revision) return;
+    const connected = await googleSheetsStatus();
+    if (!valid(ticket) || urlRevision.current !== revision) return;
+    applyStatus(connected);
+    if (!connected.connected || !connected.active || !sameTarget(target, parseGoogleSheetUrl(connected.sheetUrl || ""))) throw Error("Google chưa xác nhận đúng bảng và tab. Kiểm tra lại quyền sửa của tài khoản.");
+    verifiedResult(checked, target, connected, ticket, revision);
+  };
   const login = async () => {
     if (flight.current !== null) return;
-    const ticket = ++generation.current; flight.current = ticket; browserInvoked.current = false; setAction("login"); setError(null); setResult(null);
+    const ticket = ++generation.current, revision = urlRevision.current; flight.current = ticket; browserInvoked.current = false; setAction("login"); setError(null); setResult(null);
     try {
       const current = await googleSheetsStatus(); if (!valid(ticket)) return; applyStatus(current);
       if (!current.configured) {
@@ -87,7 +118,10 @@ export function GoogleSheetConnection({ onReadyChange }: Props) {
         throw Error("Chưa có cấu hình Google trên máy này. Mở Thiết lập Google bên dưới để bổ sung.");
       }
       browserInvoked.current = true;
-      await awaitBrowser(current.phase !== "idle" ? current : await googleSheetsLogin(), ticket);
+      const loggedIn = await awaitBrowser(current.phase !== "idle" ? current : await googleSheetsLogin(), ticket);
+      if (!loggedIn || !valid(ticket) || urlRevision.current !== revision) return;
+      const target = parseGoogleSheetUrl(urlRef.current);
+      if (target) await connectTarget(target, ticket, revision);
     } catch (e) { if (valid(ticket)) setError(describeError(e)); }
     finally { finish(ticket); }
   };
@@ -107,7 +141,7 @@ export function GoogleSheetConnection({ onReadyChange }: Props) {
       const next = await googleSheetsConfigure(config);
       if (!valid(ticket)) return false;
       applyStatus(next);
-      if (!next.configured || !next.pickerConfigured) throw Error("Cấu hình Google chưa đầy đủ; kiểm tra lại thông tin đã nhập.");
+      if (!next.configured) throw Error("Cấu hình Google chưa đầy đủ; kiểm tra lại thông tin đã nhập.");
       setSetupOpen(false); return true;
     } catch (e) { if (valid(ticket)) setError(describeError(e)); return false; }
     finally { finish(ticket); }
@@ -118,28 +152,19 @@ export function GoogleSheetConnection({ onReadyChange }: Props) {
     if (!target) { setError("Nhập link Google Sheet hợp lệ; tab lấy từ gid trong link."); return; }
     const ticket = ++generation.current, revision = urlRevision.current; flight.current = ticket; setAction("check");
     try {
-      let current = await googleSheetsStatus(); if (!valid(ticket) || urlRevision.current !== revision) return; applyStatus(current);
+      const current = await googleSheetsStatus(); if (!valid(ticket) || urlRevision.current !== revision) return; applyStatus(current);
       if (!current.connected) throw Error("Đăng nhập Google trước khi kiểm tra kết nối.");
-      if (current.error) throw Error(current.error);
       if (current.phase !== "idle") throw Error("Hoàn tất hoặc hủy cửa sổ Google đang mở rồi kiểm tra lại.");
       if (current.active && sameTarget(target, parseGoogleSheetUrl(current.sheetUrl || ""))) {
-        verifiedResult(await publishSheetCheck(target.url), target, current, ticket, revision); return;
-      }
-      if (current.selectedFileId !== target.spreadsheetId) {
-        if (!current.pickerConfigured) {
-          setSetupOpen(true);
-          throw Error("Mở Thiết lập Google bên dưới để bổ sung cấu hình Google Picker.");
+        try {
+          const checked = await publishSheetCheck(target.url);
+          if (!valid(ticket) || urlRevision.current !== revision) return;
+          verifiedResult(checked, target, current, ticket, revision); return;
+        } catch (cause) {
+          if (!cause || typeof cause !== "object" || !("code" in cause) || cause.code !== "SharedSheetUpgradeRequired") throw cause;
         }
-        setAction("picking"); browserInvoked.current = true; const selected = await awaitBrowser(await googleSheetsPickFile(), ticket);
-        if (!selected || urlRevision.current !== revision) return; current = selected;
-        if (current.selectedFileId !== target.spreadsheetId) throw Error("Bảng đã chọn không khớp link. Chọn đúng bảng trong cửa sổ Google rồi kiểm tra lại.");
       }
-      if (!valid(ticket) || urlRevision.current !== revision) return; setAction("check");
-      const checked = await googleSheetsConnect(target.spreadsheetId, target.sheetId, true);
-      if (!valid(ticket) || urlRevision.current !== revision) return;
-      const connected = await googleSheetsStatus(); if (!valid(ticket)) return; applyStatus(connected);
-      if (!connected.connected || !connected.active || !sameTarget(target, parseGoogleSheetUrl(connected.sheetUrl || ""))) throw Error("Kết nối Google chưa xác nhận đúng bảng và tab. Kiểm tra lại.");
-      verifiedResult(checked, target, connected, ticket, revision);
+      await connectTarget(target, ticket, revision);
     } catch (e) { if (valid(ticket)) setError(describeError(e)); }
     finally { finish(ticket); }
   };
@@ -161,8 +186,8 @@ export function GoogleSheetConnection({ onReadyChange }: Props) {
       <button type="button" disabled={!canCancel && action !== null} title={status?.email || "Đăng nhập Google"} onClick={() => void (canCancel ? cancel() : login())}>{canCancel ? "Hủy đăng nhập" : "Đăng nhập Google"}</button>
       <button type="button" disabled={action !== null || !url.trim()} onClick={() => void check()}>{(action === "check" || action === "picking") && <LoaderCircle className="publish-check-spinner" size={14} aria-hidden="true" />}Kiểm tra kết nối</button>
     </div>
-    <p role={error ? "alert" : "status"} className={`publish-sheet-result ${ready ? "is-verified" : "needs-attention"}`}>{status?.email ? `${status.email} · ` : ""}{message}</p>
-    {status && (!status.configured || !status.pickerConfigured) && <GoogleAppSetup key={status.clientId} clientId={status.clientId}
+    <p tabIndex={0} role={error ? "alert" : "status"} className={`publish-sheet-result ${ready ? "is-verified" : "needs-attention"}`}>{status?.email ? `${status.email} · ` : ""}{message}</p>
+    {status && !status.configured && <GoogleAppSetup key={status.clientId} clientId={status.clientId}
       busy={action !== null || status.phase !== "idle"} open={setupOpen} onOpenChange={setSetupOpen} onSave={configure} />}
   </div>;
 }

@@ -1,4 +1,4 @@
-import { lazy, Suspense, useCallback, useEffect, useState } from "react";
+import { lazy, Suspense, useRef, useState } from "react";
 import {
   Copy,
   Download,
@@ -25,6 +25,8 @@ const AppWorkflowEditor = lazy(async()=>({default:(await import("../components/A
 import type { AutomationKind, DeviceInfo } from "../types";
 import { describeError } from "../describeError";
 import { requestConfirm } from "../confirmStore";
+import { EmptyState, LoadingState, StatusNotice } from "../components/States";
+import { useAsyncList } from "../useAsyncList";
 const APPS = [
   { kind: "nurture", name: "Nuôi TikTok", Icon: Sprout },
   { kind: "interaction", name: "Tương tác", Icon: MessagesSquare },
@@ -37,23 +39,16 @@ export function MyAppsPage({
   devices: DeviceInfo[];
   onOpenApp: (kind: AutomationKind) => void;
 }) {
-  const [newKind,setNewKind]=useState<AutomationKind>("nurture");
-  const [rows, setRows] = useState<AppWorkflowSummary[]>([]),
-    [editor, setEditor] = useState<AppWorkflowV1 | null>(null),
+  const [newKind, setNewKind] = useState<AutomationKind>("nurture");
+  const [editor, setEditor] = useState<AppWorkflowV1 | null>(null),
     [search, setSearch] = useState(""),
     [error, setError] = useState<string | null>(null),
     [busy, setBusy] = useState(false);
-  const load = useCallback(async () => {
-    try {
-      setRows(await appWorkflowList());
-      setError(null);
-    } catch (cause) {
-      setError(describeError(cause));
-    }
-  }, []);
-  useEffect(() => {
-    void load();
-  }, [load]);
+  const importInput = useRef<HTMLInputElement>(null);
+  const { data, error: loadError, loading, initialLoading, refreshing, load } = useAsyncList(appWorkflowList);
+  const rows = data ?? [];
+  const visible = rows.filter((row) => row.name.toLowerCase().includes(search.toLowerCase()));
+  const visibleApps = APPS.filter((app) => app.name.toLowerCase().includes(search.toLowerCase()));
   const open = async (kind: AutomationKind, id?: string) => {
     setBusy(true);
     try {
@@ -100,7 +95,7 @@ export function MyAppsPage({
   };
   if (editor)
     return (
-      <Suspense fallback={<p className="operator-empty">Đang mở trình thiết kế…</p>}><AppWorkflowEditor
+      <Suspense fallback={<LoadingState label="Đang mở trình thiết kế…" />}><AppWorkflowEditor
         key={editor.id}
         initial={editor}
         devices={devices}
@@ -115,8 +110,9 @@ export function MyAppsPage({
     <section className="my-app-library" aria-label="My Apps">
       <header className="operator-toolbar">
         <label>
-          <Search size={17} />
+          <Search size={17} aria-hidden="true" />
           <input
+            type="search"
             aria-label="Tìm ứng dụng"
             placeholder="Tìm ứng dụng…"
             value={search}
@@ -124,8 +120,8 @@ export function MyAppsPage({
           />
         </label>
         <div className="grow" />
-        <button type="button" onClick={() => void load()}>
-          <RefreshCw size={16} />
+        <button type="button" aria-label="Làm mới ứng dụng" title="Làm mới ứng dụng" disabled={loading} onClick={() => void load()}>
+          <RefreshCw size={16} aria-hidden="true" />
         </button>
         <select aria-label="Loại ứng dụng mới" value={newKind} onChange={event=>setNewKind(event.target.value as AutomationKind)}>{APPS.map(app=><option key={app.kind} value={app.kind}>{app.name}</option>)}</select>
         <button
@@ -137,35 +133,36 @@ export function MyAppsPage({
           Ứng dụng mới
         </button>
       </header>
-      {error && (
-        <p role="alert" className="app-editor-notice" data-error>
-          {error}
-        </p>
-      )}
+      {error && <StatusNotice tone="error">{error}</StatusNotice>}
       <div className="operator-toolbar">
-        <label className="operator-import">
-          <Upload size={15} />
+        <button type="button" aria-label="Nhập ứng dụng từ JSON" onClick={() => importInput.current?.click()}>
+          <Upload size={15} aria-hidden="true" />
           Nhập ứng dụng
-          <input
-            type="file"
-            accept=".json"
-            onChange={async (event) => {
-              const file = event.target.files?.[0];
-              if (!file) return;
-              try {
-                if (file.size > 2_000_000)
-                  throw new Error("Tệp ứng dụng vượt quá 2 MB");
-                const doc = JSON.parse(await file.text()) as AppWorkflowV1;
-                await appWorkflowValidate(doc);
-                setEditor({ ...doc, id: crypto.randomUUID(), revision: 0 });
-              } catch (cause) {
-                setError(describeError(cause));
-              }
-              event.target.value = "";
-            }}
-          />
-        </label>
-        <span>{rows.length + 3} ứng dụng</span>
+        </button>
+        <input
+          ref={importInput}
+          type="file"
+          accept=".json"
+          hidden
+          onChange={async (event) => {
+            const input = event.currentTarget;
+            const file = input.files?.[0];
+            if (!file) return;
+            try {
+              if (file.size > 2_000_000)
+                throw new Error("Tệp ứng dụng vượt quá 2 MB");
+              const doc = JSON.parse(await file.text()) as AppWorkflowV1;
+              await appWorkflowValidate(doc);
+              setEditor({ ...doc, id: crypto.randomUUID(), revision: 0 });
+              setError(null);
+            } catch (cause) {
+              setError(describeError(cause));
+            } finally {
+              input.value = "";
+            }
+          }}
+        />
+        <span>3 ứng dụng có sẵn{data !== undefined ? ` · ${rows.length} quy trình đã lưu` : " · Chưa tải quy trình đã lưu"}</span>
       </div>
       <table className="builtin-app-list">
         <thead>
@@ -177,9 +174,7 @@ export function MyAppsPage({
           </tr>
         </thead>
         <tbody>
-          {APPS.filter((app) =>
-            app.name.toLowerCase().includes(search.toLowerCase()),
-          ).map(({ kind, name, Icon }) => {
+          {visibleApps.map(({ kind, name, Icon }) => {
             const current = rows.find((row) => row.kind === kind);
             return (
               <tr key={kind}>
@@ -213,8 +208,21 @@ export function MyAppsPage({
           })}
         </tbody>
       </table>
-      {!!rows.length && (
-        <table>
+      {initialLoading && <LoadingState label="Đang tải quy trình đã lưu…" />}
+      {refreshing && <LoadingState label="Đang làm mới quy trình đã lưu…" />}
+      {loadError && (
+        <StatusNotice tone="error" action={<button type="button" onClick={() => void load()}>Thử lại</button>}>
+          Không tải được quy trình đã lưu: {loadError}{data !== undefined && " · Đang giữ dữ liệu lần tải trước."}
+        </StatusNotice>
+      )}
+      {!loading && !loadError && data !== undefined && rows.length === 0 && (
+        <EmptyState compact title="Chưa có quy trình đã lưu" hint="Tạo ứng dụng mới hoặc nhập JSON để thêm quy trình. Ba ứng dụng có sẵn vẫn sử dụng được." />
+      )}
+      {data !== undefined && search !== "" && visible.length === 0 && (rows.length > 0 || visibleApps.length === 0) && (
+        <EmptyState compact title={visibleApps.length > 0 ? "Không có quy trình đã lưu khớp tìm kiếm" : "Không có ứng dụng khớp tìm kiếm"} action={<button type="button" onClick={() => setSearch("")}>Xóa tìm kiếm</button>} />
+      )}
+      {visible.length > 0 && (
+        <table aria-label="Quy trình đã lưu" aria-busy={refreshing}>
           <thead>
             <tr>
               <th>Quy trình đã lưu</th>
@@ -225,11 +233,7 @@ export function MyAppsPage({
             </tr>
           </thead>
           <tbody>
-            {rows
-              .filter((row) =>
-                row.name.toLowerCase().includes(search.toLowerCase()),
-              )
-              .map((row) => (
+            {visible.map((row) => (
                 <tr key={row.id}>
                   <td>
                     <button
@@ -274,6 +278,7 @@ export function MyAppsPage({
                               row.id,
                               row.latestRevision,
                             );
+                            setError(null);
                             await load();
                           } catch (cause) {
                             setError(describeError(cause));

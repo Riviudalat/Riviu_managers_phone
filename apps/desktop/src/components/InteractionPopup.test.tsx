@@ -238,6 +238,23 @@ it("keeps obsolete profiles out of setup and exposes schedules from settings", a
   expect(await screen.findByRole("region",{name:"Hẹn giờ từ thiết lập"})).toBeVisible();
 });
 
+it("keeps actor choices when the compact picker closes and reopens without starting a run", async () => {
+  render(<InteractionPopup metas={noMeta} devices={devices} selected={[]} surface="page" />);
+  const choose = screen.getByRole("button", { name: "Chọn máy" });
+  expect(choose).toHaveAttribute("aria-expanded", "false");
+  expect(screen.queryByRole("searchbox", { name: "Tìm máy Tương tác" })).toBeNull();
+  fireEvent.click(choose);
+  const picker = screen.getByRole("dialog", { name: "Chọn máy Tương tác" });
+  fireEvent.click(within(picker).getByRole("button", { name: "Bỏ chọn" }));
+  fireEvent.click(within(picker).getByRole("checkbox", { name: /^Phone A$/ }));
+  fireEvent.click(within(picker).getByRole("button", { name: "Xong" }));
+  expect(screen.queryByRole("dialog")).toBeNull();
+  fireEvent.click(choose);
+  expect(screen.getByRole("checkbox", { name: /^Phone A$/ })).toBeChecked();
+  expect(screen.getByRole("checkbox", { name: /^Phone B$/ })).not.toBeChecked();
+  expect(startThread).not.toHaveBeenCalled();
+});
+
 it("allows switching setup tabs while keeping execution gated until the draft is ready", async () => {
   render(
     <InteractionPopup

@@ -31,6 +31,7 @@ mod publish_commands;
 mod publish_scheduler;
 mod sheet_bootstrap;
 mod state;
+mod ui_smoke;
 mod view_hub;
 mod view_watchdog;
 mod window_placement;
@@ -172,8 +173,13 @@ async fn retry_startup(
         *state.error.lock() = None;
         return Ok(None);
     }
-    let resource_dir = app.path().resource_dir().ok();
-    match AppState::bootstrap(resource_dir).await {
+    let policy = app.state::<ui_smoke::StartupPolicy>();
+    let resource_dir = if policy.is_smoke() {
+        None
+    } else {
+        app.path().resource_dir().ok()
+    };
+    match policy.bootstrap(resource_dir).await {
         Ok(fresh) => {
             if app.manage(fresh) {
                 app.state::<AppState>().spawn_background_tasks(app.clone());
@@ -264,17 +270,36 @@ fn install_panic_logging() {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    // First, before anything that can panic -- including the `expect` on the next line.
+    // Fail closed before logs, process ownership, Tauri/WebView, credentials or live bootstrap.
+    let policy = match ui_smoke::StartupPolicy::from_environment() {
+        Ok(policy) => policy,
+        Err(error) => {
+            eprintln!("desktop UI smoke policy refused: {error:#}");
+            return;
+        }
+    };
     install_panic_logging();
-    riviu_ios_driver::install_process_tree_guard()
-        .expect("failed to establish process-tree ownership");
-    let app = tauri::Builder::default()
-        .plugin(tauri_plugin_dialog::init())
-        // Registered, but nothing checks on its own. A farm machine is often offline and
-        // nobody asked it to phone home at startup, so the check is an explicit operator
-        // action — see `update_check`.
-        .plugin(tauri_plugin_updater::Builder::new().build())
+    if !policy.is_smoke() {
+        riviu_ios_driver::install_process_tree_guard()
+            .expect("failed to establish process-tree ownership");
+    }
+    let mut context = tauri::generate_context!();
+    if let Err(error) = policy.configure_context(&mut context) {
+        eprintln!("desktop UI smoke context refused: {error:#}");
+        return;
+    }
+    let builder = tauri::Builder::default();
+    // Production keeps the existing plugins. Smoke never registers updater/dialog.
+    let builder = if policy.is_smoke() {
+        builder
+    } else {
+        builder
+            .plugin(tauri_plugin_dialog::init())
+            .plugin(tauri_plugin_updater::Builder::new().build())
+    };
+    let app = builder.manage(policy)
         .setup(|app| {
+            let policy = app.state::<ui_smoke::StartupPolicy>();
             let deployment_smoke = DeploymentSmokeState::from_process_args();
             let smoke_active = deployment_smoke.active();
             let background_dev = cfg!(debug_assertions) && std::env::var("RIVIU_DEV_BACKGROUND").as_deref() == Ok("1");
@@ -283,6 +308,9 @@ pub fn run() {
                 format!("--remote-debugging-address=127.0.0.1 --remote-debugging-port={port} --disable-background-timer-throttling --disable-renderer-backgrounding --disable-backgrounding-occluded-windows")
             } else { String::new() };
             let window = if let Some(window) = app.get_webview_window("main") {
+                if policy.is_smoke() {
+                    return Err("UI smoke refuses a pre-created WebView profile".into());
+                }
                 window
             } else {
                 let builder = WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
@@ -293,6 +321,11 @@ pub fn run() {
                     .visible(false)
                     .focused(!background_dev);
                 let builder = if background_dev { builder.additional_browser_args(&dev_browser_args) } else { builder };
+                let builder = if let Some(directory) = policy.webview_directory() {
+                    builder.data_directory(directory)
+                        .on_new_window(|_, _| tauri::webview::NewWindowResponse::Deny)
+                        .on_navigation(|url| matches!(url.host_str(), Some("localhost" | "127.0.0.1" | "tauri.localhost")) || url.scheme() == "tauri")
+                } else { builder };
                 builder.build()?
             };
             window_placement::fit_initial_window(&window)?;
@@ -306,9 +339,14 @@ pub fn run() {
             // an operator hitting a driver failure had no record of it anywhere -- and
             // the driver's warnings are exactly the ones worth keeping: a scrcpy server
             // that ignored SIGTERM, a reclaimed leaked forward, a producer restart.
+            let logger = tauri_plugin_log::Builder::default();
+            let logger = if let Some(path) = policy.log_directory() {
+                logger.targets([tauri_plugin_log::Target::new(tauri_plugin_log::TargetKind::Folder {
+                    path, file_name: Some("ui-smoke".into()),
+                })])
+            } else { logger };
             app.handle().plugin(
-                tauri_plugin_log::Builder::default()
-                    .level(if cfg!(debug_assertions) {
+                logger.level(if cfg!(debug_assertions) {
                         log::LevelFilter::Info
                     } else {
                         log::LevelFilter::Warn
@@ -333,9 +371,9 @@ pub fn run() {
             )?;
 
             let handle = app.handle().clone();
-            let resource_dir = app.path().resource_dir().ok();
+            let resource_dir = if policy.is_smoke() { None } else { app.path().resource_dir().ok() };
             let startup_state =
-                match tauri::async_runtime::block_on(AppState::bootstrap(resource_dir)) {
+                match tauri::async_runtime::block_on(policy.bootstrap(resource_dir)) {
                     Ok(state) => {
                         if !handle.manage(state) {
                             return Err(
@@ -362,7 +400,21 @@ pub fn run() {
 
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![
+        .invoke_handler(|invoke| {
+            // Plugin IPC is separately default-denied by the smoke Context ACL.
+            let app = invoke.message.webview_ref().app_handle();
+            let policy = app.state::<ui_smoke::StartupPolicy>();
+            if let Err(error) = policy.check_command(invoke.message.command()) {
+                invoke.resolver.reject(error);
+                return true;
+            }
+            if invoke.message.command() == "app_log_directory" {
+                if let Some(directory) = policy.log_directory() {
+                    invoke.resolver.resolve(directory.display().to_string());
+                    return true;
+                }
+            }
+            let dispatch: fn(tauri::ipc::Invoke<tauri::Wry>) -> bool = tauri::generate_handler![
             startup_error,
             retry_startup,
             deployment_frontend_ready,
@@ -629,8 +681,10 @@ pub fn run() {
             publish_commands::publish_get_limits,
             publish_commands::publish_set_limits,
             publish_commands::publish_sheet_save_config,
-        ])
-        .build(tauri::generate_context!())
+            ];
+            dispatch(invoke)
+        })
+        .build(context)
         .expect("error while building tauri application");
 
     app.run(|handle, event| {
@@ -701,9 +755,17 @@ pub(crate) fn graceful_shutdown(handle: &tauri::AppHandle) {
     let Some(state) = handle.try_state::<AppState>() else {
         return;
     };
+    if state.is_ui_smoke() {
+        if let Err(error) = tauri::async_runtime::block_on(state.shutdown_ui_smoke()) {
+            log::error!("UI smoke shutdown failed: {error:#}");
+        }
+        return;
+    }
     {
         state.reject_new_work();
-        tauri::async_runtime::block_on(state.comment_verifications.shutdown());
+        if let Some(worker) = &state.comment_verifications {
+            tauri::async_runtime::block_on(worker.shutdown());
+        }
         tauri::async_runtime::block_on(
             orchestration_commands::shutdown_automation_schedule_runner(&state),
         );

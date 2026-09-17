@@ -56,6 +56,7 @@ for (const width of [1440, 820]) {
     await expect(controls.getByRole("button", { name: "Chọn thư mục", exact: true })).toBeVisible();
     await expect(controls.getByRole("button", { name: "Quét", exact: true })).toBeVisible();
     await expect(page.getByRole("button", { name: "Chọn thư mục", exact: true })).toHaveCount(1);
+    if (width <= 1000) await page.getByRole("button", { name: "Thiết lập Google Sheet", exact: true }).click();
     const panel = page.locator(".google-sheet-connection");
     const link = panel.getByRole("textbox", { name: "Link Google Sheet" });
     const check = panel.getByRole("button", { name: "Kiểm tra kết nối", exact: true });

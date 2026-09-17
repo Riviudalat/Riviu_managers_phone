@@ -29,7 +29,7 @@ async function fixture(page: Page, count = 10, fleetSize = 10) {
   await page.getByRole("button", { name: "Quét", exact: true }).click();
   await expect(page.getByRole("checkbox", { name: "Chọn Bài Đà Lạt 1", exact: true })).toBeVisible();
   await expect(page.getByRole("button", { name: "Xem trước bài đăng", exact: true })).toHaveCount(0);
-  await expect(page.getByRole("button", { name: "Phóng to ảnh", exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Xem ảnh và sửa caption · Bài Đà Lạt 1", exact: true })).toBeVisible();
   await page.getByRole("tab", { name: "Hẹn giờ", exact: true }).click();
 }
 async function drag(page: Page, source: Locator, target: Locator, cancel = false) {
@@ -180,6 +180,7 @@ test("after quick selection a direct drag moves only its origin and reveals matc
 test("footer takes the operator to the Google connection in Setup", async ({ page }) => {
   await page.setViewportSize({ width: 820, height: 560 }); await fixture(page, 3, 3);
   await page.getByRole("tab", { name: "Thiết lập", exact: true }).click();
+  await page.locator(".pq-run-options > summary").click();
   await page.getByRole("checkbox", { name: "Ghi kết quả lên Sheet", exact: true }).check();
   await page.getByRole("tab", { name: "Hẹn giờ", exact: true }).click();
   await page.getByRole("button", { name: "Chọn nhanh", exact: true }).click();

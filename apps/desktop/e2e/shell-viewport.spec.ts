@@ -6,11 +6,13 @@ test("nurture keeps the document at viewport height while its columns scroll", a
   await installTauriMock(page, { androidRoster: true, fleetSize: 30 });
   await page.goto("/");
   await openOperatorPage(page, 'Nuôi TikTok');
+  await page.getByRole("button", { name: "Chọn máy", exact: true }).click();
   await expect(page.locator(".nurture-machine-grid input")).toHaveCount(30);
-  await page.locator(".nurture-advanced > summary").click();
+  await page.keyboard.press("Escape");
+  await page.getByRole("tab", { name: "Hành vi", exact: true }).click();
   for (const viewport of [{ width: 1440, height: 900 }, { width: 820, height: 560 }, { width: 1440, height: 1000 }]) {
     await page.setViewportSize(viewport);
-    const settings = viewport.width < 1024 ? page.locator("#nurture-page-panel-setup") : page.locator(".nurture-setup-fields");
+    const settings = viewport.width <= 1100 ? page.locator(".nurture-session-layout") : page.locator(".nurture-setup-fields");
     for (const position of [0, 100000]) {
       await settings.evaluate((element, top) => { element.scrollTop = top; }, position);
       await page.evaluate(() => { window.scrollTo(0, 100000); });

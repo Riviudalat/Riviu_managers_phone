@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useState } from "react";
 import {
   Plus,
   Play,
@@ -10,7 +10,6 @@ import {
 import {
   appWorkflowList,
   appWorkflowRun,
-  type AppWorkflowSummary,
 } from "../appWorkflow";
 import {
   operatorList,
@@ -22,11 +21,16 @@ import type { DeviceInfo } from "../types";
 import { describeError } from "../describeError";
 import { requestConfirm } from "../confirmStore";
 import { invoke } from "@tauri-apps/api/core";
+import { EmptyState, LoadingState, StatusNotice } from "../components/States";
+import { useAsyncList } from "../useAsyncList";
+
+async function readSavedTasks() {
+  const [rows, apps] = await Promise.all([operatorList("savedTask"), appWorkflowList()]);
+  return { rows, apps };
+}
 
 export function SavedTasksPage({ devices }: { devices: DeviceInfo[] }) {
-  const [rows, setRows] = useState<OperatorRecord[]>([]),
-    [apps, setApps] = useState<AppWorkflowSummary[]>([]),
-    [name, setName] = useState(""),
+  const [name, setName] = useState(""),
     [appId, setAppId] = useState(""),
     [udids, setUdids] = useState<string[]>([]),
     [editing, setEditing] = useState<OperatorRecord | null>(null),
@@ -34,21 +38,9 @@ export function SavedTasksPage({ devices }: { devices: DeviceInfo[] }) {
     [busy, setBusy] = useState(false),
     [message, setMessage] = useState(""),
     [error, setError] = useState<string | null>(null);
-  const load = useCallback(async () => {
-    try {
-      const [tasks, applications] = await Promise.all([
-        operatorList("savedTask"),
-        appWorkflowList(),
-      ]);
-      setRows(tasks);
-      setApps(applications);
-    } catch (cause) {
-      setError(describeError(cause));
-    }
-  }, []);
-  useEffect(() => {
-    void load();
-  }, [load]);
+  const { data, error: loadError, loading, initialLoading, refreshing, load } = useAsyncList(readSavedTasks);
+  const rows = data?.rows ?? [];
+  const apps = data?.apps ?? [];
   const run = async (record: OperatorRecord) => {
     if (
       !(await requestConfirm({
@@ -80,10 +72,10 @@ export function SavedTasksPage({ devices }: { devices: DeviceInfo[] }) {
   return (
     <section className="operator-records">
       <header className="operator-toolbar">
-        <strong>{rows.length} tác vụ đã lưu</strong>
+        <strong>{data !== undefined ? `${rows.length} tác vụ đã lưu` : "Tác vụ đã lưu"}</strong>
         <div className="grow" />
-        <button type="button" onClick={() => void load()}>
-          <RefreshCw size={16} />
+        <button type="button" aria-label="Làm mới tác vụ đã lưu" title="Làm mới tác vụ đã lưu" disabled={loading} onClick={() => void load()}>
+          <RefreshCw size={16} aria-hidden="true" />
         </button>
         <button
           type="button"
@@ -100,9 +92,16 @@ export function SavedTasksPage({ devices }: { devices: DeviceInfo[] }) {
           Tác vụ mới
         </button>
       </header>
-      {error && <p role="alert">{error}</p>}
-      {message && <p role="status">{message}</p>}
-      <table>
+      {error && <StatusNotice tone="error">{error}</StatusNotice>}
+      {message && <StatusNotice tone="success">{message}</StatusNotice>}
+      {initialLoading && <LoadingState label="Đang tải tác vụ đã lưu…" />}
+      {refreshing && <LoadingState label="Đang làm mới tác vụ đã lưu…" />}
+      {loadError && (
+        <StatusNotice tone="error" action={<button type="button" onClick={() => void load()}>Thử lại</button>}>
+          Không tải được tác vụ đã lưu: {loadError}{data !== undefined && " · Đang giữ dữ liệu lần tải trước."}
+        </StatusNotice>
+      )}
+      {rows.length > 0 && <table aria-label="Tác vụ đã lưu" aria-busy={refreshing}>
         <thead>
           <tr>
             <th>Tên tác vụ</th>
@@ -202,12 +201,9 @@ export function SavedTasksPage({ devices }: { devices: DeviceInfo[] }) {
             </tr>
           ))}
         </tbody>
-      </table>
-      {!rows.length && (
-        <p className="operator-empty">
-          Lưu tác vụ để giữ ứng dụng, phiên bản và phạm vi thiết bị cho lần chạy
-          sau.
-        </p>
+      </table>}
+      {!loading && !loadError && data !== undefined && rows.length === 0 && (
+        <EmptyState compact title="Chưa có tác vụ đã lưu" hint="Lưu tác vụ để giữ ứng dụng, phiên bản và phạm vi thiết bị cho lần chạy sau." />
       )}
       {form && (
         <aside className="operator-record-editor">

@@ -77,6 +77,7 @@ import { ApiPage } from "./pages/ApiPage";
 import { AppsPage } from "./pages/AppsPage";
 import { DataPage } from "./pages/DataPage";
 import { MaterialPage } from "./pages/MaterialPage";
+import { HelpPage } from "./pages/HelpPage";
 import type { DeviceInfo, DeviceWorkOwner, PageId, TargetRef } from "./types";
 import type { ActiveGroupSync, GroupSyncReadiness } from "./groupSync";
 import { MoreHorizontal } from "lucide-react";
@@ -262,7 +263,9 @@ function App() {
 
   useEffect(() => {
     if (startupIssue !== null || !fleetSettled || bootError) return;
-    void deploymentFrontendReady();
+    void deploymentFrontendReady().catch((error) => {
+      toastError("Không thể xác nhận giao diện sẵn sàng", error);
+    });
   }, [bootError, fleetSettled, startupIssue]);
 
   const updateFlowDirty = useCallback((_dirty: boolean) => {}, []);
@@ -1385,7 +1388,7 @@ function App() {
           {page === "networks" && <OperatorRecordsPage kind="network" devices={devices} />}
           {page === "schedules" && <OperatorSchedulesPage />}
           {page === "savedTasks" && <SavedTasksPage devices={devices} />}
-          {page === "help" && <section className="operator-help"><h2>Bắt đầu với Riviu Manager</h2><ol><li>Control Center: kết nối, chia nhóm và mở các cửa sổ điện thoại.</li><li>My Apps: mở ứng dụng, chỉnh cấu hình và quy trình từng bước.</li><li>Tác vụ đã lưu: giữ cấu hình và phạm vi máy để dùng lại.</li><li>Lịch chạy và Lượt chạy: đặt giờ và theo dõi kết quả từng thiết bị.</li></ol><button type="button" onClick={()=>void requestPage("diagnostics")}>Kiểm tra thiết bị</button><button type="button" onClick={()=>void requestPage("api")}>Tham chiếu API</button></section>}
+          {page === "help" && <HelpPage onOpenPage={(destination) => void requestPage(destination)} />}
           {page === "data" && <DataPage />}
           {page === "api" && <ApiPage onOpenSettings={() => {
             setSettingsSection("integration");

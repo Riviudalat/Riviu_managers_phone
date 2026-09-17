@@ -114,12 +114,15 @@ test("approved quick desk scans, selects, assigns and checks without public disp
   await page.getByRole("button",{name:"Chọn nhanh",exact:true}).click();
   await page.getByRole("button",{name:"Chọn nhanh",exact:true}).click();
   await expect(page.getByRole("button",{name:"Kiểm tra & đăng",exact:true})).toBeEnabled();
-  for(const size of [{width:1440,height:900},{width:820,height:560}]){
+  for(const size of [{width:1440,height:900},{width:1024,height:768},{width:820,height:560}]){
     await page.setViewportSize(size);
     await page.screenshot({path:test.info().outputPath(`quick-${size.width}.png`)});
     expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true);
+    await expect(page.getByRole("region", {name:"Liên kết bài và máy"})).toBeVisible();
+    await expect(page.getByRole("textbox", {name:"Tìm số máy"})).toBeVisible();
   }
   await page.getByRole("button",{name:"Kiểm tra & đăng",exact:true}).click();
   await expect(page.getByRole("button",{name:"Xác nhận đăng 10 bài",exact:true})).toBeEnabled();
   await expect(page.getByRole("dialog", {name:"Kiểm tra đợt đăng"})).toContainText("Ghi Sheet đang tắt");
+  expect(await page.evaluate(() => (window as unknown as { __PUBLISH_CALLS__: { command: string }[] }).__PUBLISH_CALLS__.map(call => call.command))).toEqual(["publish_preflight"]);
 });

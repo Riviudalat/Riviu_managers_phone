@@ -162,6 +162,83 @@ impl Database {
         tx.commit()?;
         Ok(())
     }
+    pub fn finish_google_sheet_authorization(
+        &self,
+        connection: &GoogleSheetConnection,
+        request_id: &str,
+        tokens: &GoogleOAuthTokens,
+    ) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            connection.account_id == tokens.account_id,
+            "Tài khoản không khớp đích Google đã kiểm tra"
+        );
+        let previous = self.google_oauth_tokens()?;
+        let generation = self.get_setting("google.sheets.authorization-generation")?;
+        let result = (|| {
+            self.set_google_oauth_tokens(Some(tokens))?;
+            self.set_setting(
+                "google.sheets.authorization-generation",
+                &Uuid::new_v4().to_string(),
+            )?;
+            self.finish_google_sheet_migration(connection, request_id)
+        })();
+        if let Err(error) = result {
+            // SecretStore and SQLite cannot share a transaction. Compensate any
+            // failed local commit; never strand the old connection on new secrets.
+            let store = self
+                .secrets
+                .as_ref()
+                .context("Kho thông tin xác thực chưa sẵn sàng")?;
+            let raw = previous
+                .as_ref()
+                .map(serde_json::to_string)
+                .transpose()?
+                .unwrap_or_default();
+            store
+                .set_secret("google-oauth-tokens-v1", &raw)
+                .context("Không khôi phục được phiên Google trước đó; cần đăng nhập lại")?;
+            anyhow::ensure!(
+                store
+                    .get_secret("google-oauth-tokens-v1")?
+                    .unwrap_or_default()
+                    == raw,
+                "Không đọc lại được phiên Google đã khôi phục"
+            );
+            if let Some(generation) = generation {
+                self.set_setting("google.sheets.authorization-generation", &generation)?;
+            } else {
+                self.conn()?.execute(
+                    "DELETE FROM settings WHERE key='google.sheets.authorization-generation'",
+                    [],
+                )?;
+            }
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    /// Only abandon a pre-effect rejection; uncertain remote work keeps its barrier.
+    pub fn abort_google_sheet_migration(&self, request_id: &str) -> anyhow::Result<()> {
+        let mut conn = self.conn()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let raw: String = tx.query_row(
+            "SELECT value FROM settings WHERE key=?1",
+            [GOOGLE_MIGRATION_SETTING],
+            |r| r.get(0),
+        )?;
+        let pending: serde_json::Value = serde_json::from_str(&raw)?;
+        anyhow::ensure!(
+            pending["requestId"].as_str() == Some(request_id),
+            "Lần chuyển kết nối đã thay đổi"
+        );
+        tx.execute(
+            "UPDATE settings SET value='' WHERE key=?1",
+            [GOOGLE_MIGRATION_SETTING],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
     pub fn finish_google_sheet_migration(
         &self,
         connection: &GoogleSheetConnection,
@@ -222,10 +299,9 @@ impl Database {
             .map(|s| serde_json::from_str::<Vec<GoogleSheetConnection>>(&s))
             .transpose()?
             .unwrap_or_default();
-        map.retain(|c| {
-            c.target.spreadsheet_id != connection.target.spreadsheet_id
-                || c.target.sheet_gid != connection.target.sheet_gid
-        });
+        // A new account only replaces this exact verified destination. Older
+        // epochs and unrelated outboxes retain their original account binding.
+        map.retain(|c| c.target != connection.target);
         map.push(connection.clone());
         let fields = [
             (
@@ -457,6 +533,140 @@ mod tests {
             Some(second)
         );
     }
+    #[test]
+    fn reconnecting_same_tab_keeps_old_epoch_binding_for_its_unrelated_outbox() {
+        let path = std::env::temp_dir().join(format!("google-epoch-map-{}.db", Uuid::new_v4()));
+        let db = Database::open(path).unwrap();
+        let first = fixture_connection(&db, "same-book", "original-epoch");
+        let mut next = fixture_connection(&db, "same-book", "new-epoch");
+        next.account_id = "other-account".into();
+        for connection in [&first, &next] {
+            let request = Uuid::new_v4().to_string();
+            db.begin_google_sheet_migration(&connection.target, &request)
+                .unwrap();
+            db.finish_google_sheet_migration(connection, &request)
+                .unwrap();
+        }
+        assert_eq!(
+            db.google_connection_for_target(&first.target).unwrap(),
+            Some(first)
+        );
+        assert_eq!(db.google_sheet_connection().unwrap(), Some(next));
+    }
+
+    #[test]
+    fn failed_authorization_commit_restores_previous_credentials_and_generation() {
+        let path = std::env::temp_dir().join(format!("google-auth-rollback-{}.db", Uuid::new_v4()));
+        let db = Database::open(path)
+            .unwrap()
+            .with_secrets(Arc::new(Memory::default()));
+        let prior = GoogleOAuthTokens {
+            access_token: "old-access".into(),
+            refresh_token: "old-refresh".into(),
+            expires_at_ms: 123,
+            scope: crate::google_oauth::GOOGLE_SHEETS_SCOPES.into(),
+            account_id: "old-account".into(),
+            email: "old@example.test".into(),
+        };
+        db.set_google_oauth_tokens(Some(&prior)).unwrap();
+        let generation = db
+            .get_setting("google.sheets.authorization-generation")
+            .unwrap();
+        let next = GoogleOAuthTokens {
+            account_id: "new-account".into(),
+            refresh_token: "new-refresh".into(),
+            ..prior.clone()
+        };
+        let mut connection = fixture_connection(&db, "book", "epoch");
+        connection.account_id = next.account_id.clone();
+        // No matching pending migration: the DB commit must fail after credential staging.
+        assert!(db
+            .finish_google_sheet_authorization(&connection, &Uuid::new_v4().to_string(), &next)
+            .is_err());
+        let stored = db.google_oauth_tokens().unwrap().unwrap();
+        assert_eq!(stored.account_id, "old-account");
+        assert_eq!(stored.refresh_token, "old-refresh");
+        assert_eq!(
+            db.get_setting("google.sheets.authorization-generation")
+                .unwrap(),
+            generation
+        );
+        assert!(db.google_sheet_connection().unwrap().is_none());
+    }
+
+    #[test]
+    fn verified_account_rebind_changes_only_exact_destination_not_old_outbox() {
+        let path = std::env::temp_dir().join(format!("google-rebind-{}.db", Uuid::new_v4()));
+        let db = Database::open(path)
+            .unwrap()
+            .with_secrets(Arc::new(Memory::default()));
+        let first = fixture_connection(&db, "first-book", "original-epoch");
+        let second = fixture_connection(&db, "second-book", "other-epoch");
+        for connection in [&first, &second] {
+            let request = Uuid::new_v4().to_string();
+            db.begin_google_sheet_migration(&connection.target, &request)
+                .unwrap();
+            db.finish_google_sheet_migration(connection, &request)
+                .unwrap();
+        }
+        db.conn().unwrap().execute("INSERT INTO publish_sheet_sync_state(assignment_id,connection_fingerprint,report_next_attempt_at_ms,report_last_error) VALUES('unchanged-debt','original-fingerprint',42,'unchanged-error')", []).unwrap();
+        let tokens = GoogleOAuthTokens {
+            access_token: "new-access".into(),
+            refresh_token: "new-refresh".into(),
+            expires_at_ms: 1000,
+            scope: crate::google_oauth::GOOGLE_SHEETS_SCOPES.into(),
+            account_id: "new-account".into(),
+            email: "new@example.test".into(),
+        };
+        let rebound = GoogleSheetConnection {
+            account_id: tokens.account_id.clone(),
+            ..second.clone()
+        };
+        let request = Uuid::new_v4().to_string();
+        db.begin_google_sheet_migration(&second.target, &request)
+            .unwrap();
+        db.finish_google_sheet_authorization(&rebound, &request, &tokens)
+            .unwrap();
+        assert_eq!(
+            db.google_connection_for_target(&first.target).unwrap(),
+            Some(first)
+        );
+        assert_eq!(
+            db.google_connection_for_target(&second.target).unwrap(),
+            Some(rebound)
+        );
+        let debt: (String, i64, String) = db.conn().unwrap().query_row("SELECT connection_fingerprint,report_next_attempt_at_ms,report_last_error FROM publish_sheet_sync_state WHERE assignment_id='unchanged-debt'", [], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).unwrap();
+        assert_eq!(
+            debt,
+            ("original-fingerprint".into(), 42, "unchanged-error".into())
+        );
+    }
+
+    #[test]
+    fn abort_migration_removes_only_the_exact_pending_request() {
+        let path =
+            std::env::temp_dir().join(format!("google-migration-abort-{}.db", Uuid::new_v4()));
+        let db = Database::open(path).unwrap();
+        let connection = fixture_connection(&db, "book", "epoch");
+        let request = Uuid::new_v4().to_string();
+        db.begin_google_sheet_migration(&connection.target, &request)
+            .unwrap();
+        assert!(db
+            .abort_google_sheet_migration(&Uuid::new_v4().to_string())
+            .is_err());
+        assert!(!db
+            .get_setting(GOOGLE_MIGRATION_SETTING)
+            .unwrap()
+            .unwrap()
+            .is_empty());
+        db.abort_google_sheet_migration(&request).unwrap();
+        assert!(db
+            .get_setting(GOOGLE_MIGRATION_SETTING)
+            .unwrap()
+            .unwrap()
+            .is_empty());
+    }
+
     #[test]
     fn google_secrets_never_enter_sqlite_and_connection_migration_preserves_outbox_identity() {
         let path = std::env::temp_dir().join(format!("google-connection-{}.db", Uuid::new_v4()));

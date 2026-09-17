@@ -4,40 +4,60 @@ Stack giữ nguyên: Rust workspace, Tauri 2, React/TypeScript/Vite. `src/api.ts
 IPC frontend. Không thêm một control plane riêng để đi vòng ownership/admission hiện có.
 
 Google Sheets trực tiếp dùng OAuth Desktop PKCE S256 và callback loopback có
-state, timeout và hủy; đăng nhập/Picker mở trình duyệt ngoài. Scope `drive.file`
-được cấp theo file do Picker chọn. Refresh token và client config dùng SecretStore
-hiện có; IPC chỉ trả identity/trạng thái, không trả token. Mỗi tab có writer UUID
-và reportingEpoch trong developer metadata; ghi updateCells cùng receipt note rồi
-đọc lại. Không dùng append không khóa để xử lý retry timeout. API không có CAS cho
-sửa tay; app từ chối khi giá trị/công thức/receipt trước ghi đã thay đổi.
+state, timeout và hủy; đăng nhập mở trình duyệt ngoài. Scope là `openid`, `email`
+và `https://www.googleapis.com/auth/spreadsheets`; kết nối bằng link, không mở
+Picker. Scope này rộng hơn `drive.file`: tài khoản vẫn phải có quyền sửa Sheet.
+Phiên cũ chỉ có `drive.file` cần đăng nhập lại và cấp quyền Sheets. Refresh token
+và client config dùng SecretStore hiện có; IPC chỉ trả identity/trạng thái,
+không trả token.
+
+Hợp đồng shared-v2 dùng writer UUID riêng từng PC, reportingEpoch và khóa bền
+trên developer metadata để tuần tự hóa các client cùng giao thức. Journal local
+ghi intent trước request; updateCells, receipt và dấu commit được ghi cùng batch
+rồi đọc lại. Không append không khóa, replay POST mơ hồ hoặc lấy khóa của PC khác
+chỉ vì quá TTL. Khi chưa rõ request đã áp dụng chưa, giữ pending để đối chiếu,
+không tự xóa khóa. Đây không phải CAS chống sửa tay và không chặn được request
+của client cũ đã bay trước nâng cấp.
+
+Tab schema 1 trả mã lỗi typed `SharedSheetUpgradeRequired`; UI chỉ gửi
+`legacyWritersStopped=true` sau xác nhận nâng cấp một lần. Người vận hành phải
+dừng mọi writer cũ và đợi request đang bay kết thúc trước xác nhận. Giữ dữ liệu,
+publicationId và epoch; chỉ các client shared-v2 được tiếp tục ghi. Reset/backup
+qua luồng reset cũ bị từ chối với schema 2, trước khi sao lưu hoặc xóa. Hợp đồng
+và test mô phỏng không thay nghiệm thu ghi đồng thời trên nhiều PC thật.
 
 Cấu hình ứng dụng Google bắt buộc đi kèm binary release. `build.rs` đọc biến
 `RIVIU_GOOGLE_OAUTH_CONFIG_JSON` (CI đọc GitHub Actions secret cùng tên tại cả bước
 build deployment checker và đóng gói app). Build tại máy phát triển có thể dùng
 `apps/desktop/src-tauri/google-oauth.local.json` đã gitignore, hoặc đường dẫn qua
 `RIVIU_GOOGLE_OAUTH_CONFIG_FILE`. Biến JSON có ưu tiên cao nhất, kể cả khi rỗng.
-JSON gồm
-`clientId`, `clientSecret` (tùy chọn), `pickerApiKey`, `projectNumber`; client ID
+JSON gồm `clientId`, `clientSecret` (tùy chọn); `pickerApiKey` và `projectNumber`
+cũ vẫn được chấp nhận nhưng không bắt buộc cho kết nối bằng link. Client ID
 phải thuộc OAuth Desktop. Không đưa access token, refresh token hay tài khoản vào
 JSON này; các trường lạ bị từ chối. Đây là cấu hình phân phối trong binary, không
 phải nơi giữ bí mật server. Cấu hình đã lưu trên PC luôn được ưu tiên; trước đăng
 nhập app ghim cấu hình vào SecretStore để nâng cấp binary không đổi client của
-phiên cũ. Build release dừng nếu cấu hình thiếu, sai hoặc chưa đủ Picker; debug
+phiên cũ. Build release dừng nếu cấu hình OAuth thiếu hoặc sai; debug
 không cấu hình vẫn dùng được để phát triển phần khác. Đặt
 `RIVIU_REQUIRE_GOOGLE_CONFIG=1` để kiểm tra cùng điều kiện trong bản dev.
 Cấu hình được ghi vào OUT_DIR rồi nhúng vào binary, không in giá trị ra log.
 Không đưa file cấu hình local vào source, log hay gói chứng cứ.
 Chép `.exe` đã build đủ cấu hình không cần chép SecretStore; máy đích tự đăng
 nhập tài khoản Google của mình. Build không tự đọc credential của người dùng.
-Kiểm tra OAuth/Picker thật cần người vận hành tự đăng nhập.
+Kiểm tra OAuth thật cần người vận hành tự đăng nhập; không dùng credential của
+máy phát triển để chứng minh kết nối trên PC khác.
 
-Chuyển Apps Script sang direct ghi intent local trước, dừng nhận claim, drain,
-gọi retirement dưới ScriptLock, rồi nhận writer trên tab và commit provider. Lượt
-cũ giữ publicationId và đích/epoch; logout giữ provider để không fallback sang
-webhook. Login mới thay authorization generation để mở lại nghĩa vụ ghi bị dừng
+Chuyển Apps Script sang direct trên tab chưa có direct owner ghi intent local
+trước, dừng nhận claim, drain, gọi retirement dưới ScriptLock, rồi nhận writer
+trên tab và commit provider. Metadata direct schema 1/2 đã xác thực đi theo luồng
+nâng cấp/join, không gọi retirement lại bằng request/writer của PC mới dù cấu hình
+webhook cũ còn lưu; schema 1 vẫn bắt buộc xác nhận dừng và drain writer cũ.
+Checkpoint đang chờ giữ nguyên requestId, đích, epoch và bố cục. Lượt cũ giữ
+publicationId và đích/epoch; logout giữ provider để không fallback sang webhook. Login mới thay authorization generation để mở lại nghĩa vụ ghi bị dừng
 do hết quyền. API request chung trần hai slot và nhịp tối đa một request/giây;
-delivery có deadline 90 giây, đọc theo trang giới hạn 16.000 ô. Backup/reset giữ
-gid0, sao lưu toàn workbook, dừng epoch cũ và xác minh lại trước khi mở epoch mới.
+delivery có deadline 90 giây, đọc theo trang giới hạn 16.000 ô. Luồng backup/reset
+schema 1 giữ gid0, sao lưu toàn workbook, dừng epoch cũ và xác minh lại trước khi
+mở epoch mới; không áp dụng luồng này cho tab shared-v2.
 
 Bình luận Android đọc tài khoản trong phiên điều khiển trước khi mở bài đích;
 chỉ cập nhật trường handle, giữ các metadata khác. Reply giải username người được
@@ -247,8 +267,10 @@ Ba workspace dùng phần trình bày riêng: `nurture/NurtureSessionSetup`,
 `interaction/InteractionWorkspaceSetup` và `publish/PublishQuickSetup`; API/state owners
 vẫn ở Popup/Page. `AutomationWorkspace` đưa `scopeControl` vào Nuôi/Tươngtác để
 không duplicate selector. Native popup giữ đường cũ; page xác nhận trước dispatch.
-Các khung chọn máy dùng chung `MachineChoice` và `machine-choice.css`: luôn hai cột,
-cuộn toàn danh sách, không phân trang máy. State vẫn thuộc workspace; riêng Đăng bài
+Các khung chọn máy dùng chung `MachineChoice` và `machine-choice.css`: Nuôi/Tương tác
+mở drawer hai cột, Đăng bài dùng danh sách hàng trong khung Thiết bị của bàn ba khung.
+Danh sách cuộn riêng, không phân trang máy; drawer Tương tác cho cuộn tiếp tới phần
+tài khoản khi hết danh sách trên cửa sổ thấp. State vẫn thuộc workspace; riêng Đăng bài
 checked phản ánh assignments, tick là ghép bài còn trống và bỏ tick là gỡ ghép.
 Toolbar máy chứa select phạm vi controlled bằng targetRef, không có selector phụ
 dưới lưới. Ba trang dùng Thiết lập/Hẹn giờ/Theo dõi. Từ0.2.21 Nuôi/Tương tác lưu
@@ -590,6 +612,27 @@ khởi động cố định. Khởi chạy dev không tự cho phép thực hi�
 
 Skill được theo dõi tại `.claude/skills/run-riviu-managers-phone/SKILL.md`; `.agents`
 là bản sao runtime ignored, không phải nơi sửa nguồn chuẩn.
+
+### Smoke giao diện Tauri cô lập
+
+Debug có chế độ `RIVIU_UI_SMOKE=1`, bắt buộc đi cùng `RIVIU_MOCK_DEVICES=1` và
+`RIVIU_UI_SMOKE_DIR` là đường dẫn tuyệt đối tới thư mục **chưa tồn tại**, trong một
+thư mục cha có sẵn trên đĩa local. Thiếu điều kiện, đường dẫn symlink/junction hoặc
+WebView environment override sẽ bị từ chối trước bootstrap. Mỗi lần khởi động cần
+thư mục mới; retry startup tạo DB mới bên trong cùng scratch đã nhận.
+
+Chế độ này dùng driver mock trực tiếp, DB/log/WebView profile riêng và credential
+chỉ trong bộ nhớ; không đọc kho credential vận hành, khởi USB/sidecar/API listener
+hay worker nghiệp vụ. IPC dùng allowlist cụ thể; plugin ngoài event listen/unlisten
+bị khóa. Đường production và release không dùng mode này. Chỉ đặt mock/data-dir ở
+đường khởi động thường **không thay thế** ranh giới cô lập trên.
+
+Có thể dùng `RIVIU_DEV_BACKGROUND=1` và cổng loopback `RIVIU_DEV_CDP_PORT` của bản
+debug để kiểm renderer/điều hướng qua WebView2 mà không chiếm chuột. Chỉ nối đúng
+process/scratch đã xác nhận. Các lệnh bị từ chối phải hiện unavailable, không giả
+thành sẵn sàng; lỗi xác nhận frontend được ghi vào Hoạt động, không tự retry hoặc
+đánh dấu deployment đạt. Smoke này không chứng nhận loaded-state dữ liệu thật,
+OAuth/Google, automation điện thoại hoặc bộ cài.
 
 ## Cổng theo thay đổi
 

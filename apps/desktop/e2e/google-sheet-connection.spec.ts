@@ -57,9 +57,10 @@ async function installGoogleFixture(page: Page, connected = true, selectedFileId
       }
       if (command === "google_sheets_cancel") { status.phase = "idle"; return { ...status }; }
       if (command === "google_sheets_connect") {
-        if (status.phase !== "idle" || args.spreadsheetId !== status.selectedFileId || args.confirmed !== true) {
-          throw Error("Connection must match the completed Picker grant");
+        if (status.phase !== "idle" || !status.connected || args.confirmed !== true) {
+          throw Error("Connection requires authenticated OAuth");
         }
+        if (args.spreadsheetId === "denied-file") throw { code: "OperationFailed", message: "Tài khoản không có quyền sửa bảng này" };
         const checked = result(String(args.spreadsheetId), Number(args.sheetId));
         status.active = true; status.sheetUrl = checked.sheetUrl; status.writerId = "fixture-writer";
         return checked;
@@ -90,6 +91,7 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 820, height: 560 
   test(`a copied app offers Google setup on a clean PC at ${viewport.width}`, async ({ page }) => {
     await page.setViewportSize(viewport);
     await installGoogleFixture(page, false, "selected-file", false);
+    if (viewport.width <= 1000) await page.getByRole("button", { name: "Thiết lập Google Sheet", exact: true }).click();
     const panel = page.locator(".google-sheet-connection");
     await panel.getByRole("button", { name: "Đăng nhập Google", exact: true }).click();
     await expect(panel.getByRole("alert")).toContainText("Mở Thiết lập Google");
@@ -110,6 +112,7 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 820, height: 560 
   test(`compact Google controls connect the pasted exact gid at ${viewport.width}`, async ({ page }) => {
     await page.setViewportSize(viewport);
     await installGoogleFixture(page);
+    if (viewport.width <= 1000) await page.getByRole("button", { name: "Thiết lập Google Sheet", exact: true }).click();
     const panel = page.locator(".google-sheet-connection");
     const link = panel.getByRole("textbox", { name: "Link Google Sheet" });
     await expect(link).toBeEditable();
@@ -122,7 +125,7 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 820, height: 560 
     await panel.getByRole("button", { name: "Kiểm tra kết nối", exact: true }).click();
     await expect(panel.locator(".publish-sheet-result.is-verified")).toBeVisible();
     expect(await calls(page, "google_sheets_connect")).toEqual([
-      { command: "google_sheets_connect", args: { spreadsheetId: "selected-file", sheetId: 7, confirmed: true } },
+      { command: "google_sheets_connect", args: { spreadsheetId: "selected-file", sheetId: 7, confirmed: true, legacyWritersStopped: false } },
     ]);
     expect(await calls(page, "google_sheets_pick_file")).toEqual([]);
     await expect(link).toHaveValue("https://docs.google.com/spreadsheets/d/selected-file/edit#gid=7");
@@ -132,7 +135,7 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 820, height: 560 
   });
 }
 
-test("checking a new pasted file obtains its Picker grant and continues with its original gid", async ({ page }) => {
+test("OAuth completion connects a pasted file directly with its original gid", async ({ page }) => {
   await installGoogleFixture(page, false);
   const panel = page.locator(".google-sheet-connection");
   const link = panel.getByRole("textbox", { name: "Link Google Sheet" });
@@ -142,31 +145,25 @@ test("checking a new pasted file obtains its Picker grant and continues with its
   await page.evaluate(() => (window as unknown as GoogleFixture).completeGoogleBrowser());
   await expect(panel.getByRole("button", { name: "Đăng nhập Google", exact: true })).toBeEnabled();
   expect(await calls(page, "google_sheets_pick_file")).toEqual([]);
-  expect(await calls(page, "google_sheets_connect")).toEqual([]);
-  await panel.getByRole("button", { name: "Kiểm tra kết nối", exact: true }).click();
-  await expect.poll(() => calls(page, "google_sheets_pick_file")).toHaveLength(1);
-  expect(await calls(page, "google_sheets_connect")).toEqual([]);
-  await page.evaluate(() => (window as unknown as GoogleFixture).completeGoogleBrowser("new-file"));
   await expect(panel.locator(".publish-sheet-result.is-verified")).toBeVisible();
   expect(await calls(page, "google_sheets_connect")).toEqual([
-    { command: "google_sheets_connect", args: { spreadsheetId: "new-file", sheetId: 12, confirmed: true } },
+    { command: "google_sheets_connect", args: { spreadsheetId: "new-file", sheetId: 12, confirmed: true, legacyWritersStopped: false } },
   ]);
   await expect(link).toHaveValue("https://docs.google.com/spreadsheets/d/new-file/edit#gid=12");
 });
 
-test("a mismatched Picker selection never connects or replaces the pasted target", async ({ page }) => {
+test("denied edit permission preserves the URL without claiming readiness", async ({ page }) => {
   await installGoogleFixture(page);
   const panel = page.locator(".google-sheet-connection");
   const link = panel.getByRole("textbox", { name: "Link Google Sheet" });
-  const url = "https://docs.google.com/spreadsheets/d/wanted-file/edit#gid=12";
+  const url = "https://docs.google.com/spreadsheets/d/denied-file/edit#gid=12";
   await link.fill(url);
   await panel.getByRole("button", { name: "Kiểm tra kết nối", exact: true }).click();
-  await expect.poll(() => calls(page, "google_sheets_pick_file")).toHaveLength(1);
-  await page.evaluate(() => (window as unknown as GoogleFixture).completeGoogleBrowser("other-file"));
-  await expect(panel.getByRole("alert")).toBeVisible();
+  await expect(panel.getByRole("alert")).toContainText("không có quyền sửa");
   await expect(link).toHaveValue(url);
   await expect(panel.locator(".publish-sheet-result.is-verified")).toHaveCount(0);
-  expect(await calls(page, "google_sheets_connect")).toEqual([]);
+  expect(await calls(page, "google_sheets_pick_file")).toEqual([]);
+  expect(await calls(page, "google_sheets_connect")).toEqual([{ command: "google_sheets_connect", args: { spreadsheetId: "denied-file", sheetId: 12, confirmed: true, legacyWritersStopped: false } }]);
 });
 
 test("an active target remains checkable after a different Picker file was last selected", async ({ page }) => {

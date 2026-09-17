@@ -37,36 +37,50 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 900, height: 700 
     const workspace = page.getByRole("region", { name: "Không gian Tương tác" });
     await workspace.getByLabel("Link TikTok — mỗi dòng một link").fill("https://www.tiktok.com/@studio.trips/video/7512030405060708011\nhttps://www.tiktok.com/@coffee.corner/photo/7512030405060708022");
     await expect(workspace.getByText("Đúng định dạng", { exact: true })).toHaveCount(2);
+    const context = workspace.getByRole("complementary", { name: "Đầu vào và kết quả" });
+    await expect(context).toBeVisible();
+    await context.scrollIntoViewIfNeeded();
+    await expect(context).toBeInViewport();
+    await expect(context).toContainText("2");
+    expect(await workspace.evaluate(element => {
+      const footer = element.querySelector(".iw-footer")!.getBoundingClientRect();
+      const stage = element.querySelector(".iw-stage")!.getBoundingClientRect();
+      return stage.bottom <= footer.top && footer.bottom <= innerHeight;
+    })).toBe(true);
     await page.screenshot({ path: test.info().outputPath(`interaction-links-${viewport.width}.png`) });
     await workspace.getByRole("button", { name: "Chọn hành động & máy →" }).click();
+    await expect(workspace.locator("#iw-panel-1 .iw-links")).toBeHidden();
     await workspace.getByRole("combobox", { name: "Phạm vi thiết bị" }).selectOption("all");
     await workspace.getByRole("button", { name: "Tuỳ chỉnh nâng cao" }).focus();
     await page.keyboard.press("Enter");
     await expect(workspace.getByLabel("Số từ tối đa mỗi câu")).toBeVisible();
     await workspace.getByRole("button", { name: "Ẩn tuỳ chỉnh nâng cao" }).click();
-    if (viewport.width < 1024) {
-      const sections = await workspace.evaluate(element => {
-        const settings = element.querySelector(".iw-settings")!;
-        const machines = element.querySelector(".iw-machines")!;
-        const actions = element.querySelector(".iw-action-choices")!;
-        return { settingsBottom: settings.getBoundingClientRect().bottom, machinesTop: machines.getBoundingClientRect().top, actionsBottom: actions.getBoundingClientRect().bottom };
-      });
-      expect(sections.settingsBottom).toBeLessThanOrEqual(sections.machinesTop);
-      expect(sections.actionsBottom).toBeLessThanOrEqual(sections.settingsBottom);
-    }
+    const actionSummary = workspace.getByRole("complementary", { name: "Tóm tắt hành động" });
+    await expect(actionSummary).toBeVisible();
+    await actionSummary.scrollIntoViewIfNeeded();
+    await expect(actionSummary).toBeInViewport();
     await workspace.getByRole("checkbox", { name: "Tim", exact: true }).check();
     await workspace.getByRole("checkbox", { name: "Lưu", exact: true }).check();
     await workspace.getByRole("checkbox", { name: "Bình luận", exact: true }).uncheck();
     await expect(workspace.getByLabel("Nội dung bình luận", { exact: true })).toHaveCount(0);
-    const machines = workspace.getByRole("group", { name: "Danh sách máy thực hiện" });
+    const choose = workspace.getByRole("button", { name: "Chọn máy", exact: true });
+    await choose.click();
+    const picker = workspace.getByRole("dialog", { name: "Chọn máy Tương tác" });
+    const machines = picker.getByRole("group", { name: "Danh sách máy thực hiện" });
     await expect(machines.getByRole("checkbox")).toHaveCount(20);
     expect(await machines.evaluate(element => getComputedStyle(element).gridTemplateColumns.split(" ").length)).toBe(2);
     await expect(workspace.getByRole("button", { name: "Trang máy sau" })).toHaveCount(0);
     await workspace.getByRole("button", { name: "Chọn tất cả sẵn sàng", exact: true }).click();
     await expect(machines.getByRole("checkbox", { checked: true })).toHaveCount(20);
+    await machines.getByRole("checkbox").last().scrollIntoViewIfNeeded();
+    await expect(machines.getByRole("checkbox").last()).toBeInViewport();
+    await page.screenshot({ path: test.info().outputPath(`interaction-picker-${viewport.width}.png`) });
+    await picker.getByRole("button", { name: "Xong", exact: true }).click();
+    await expect(choose).toBeFocused();
     await workspace.getByRole("tab", { name: "Hẹn giờ", exact: true }).click();
     await expect(workspace.getByRole("tabpanel", { name: "Hẹn giờ", exact: true })).toBeVisible();
     await workspace.getByRole("tab", { name: "Thiết lập", exact: true }).click();
+    await choose.click();
     await expect(machines.getByRole("checkbox", { checked: true })).toHaveCount(20);
     await workspace.getByRole("button", { name: "Bỏ chọn", exact: true }).click();
     await workspace.getByRole("checkbox", { name: "Máy thử 9", exact: true }).check();
@@ -75,11 +89,16 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 900, height: 700 
     await machines.getByRole("checkbox").check();
     await workspace.getByRole("searchbox", { name: "Tìm máy Tương tác" }).fill("");
     await workspace.getByRole("checkbox", { name: "Máy thử 20", exact: true }).uncheck();
+    await page.keyboard.press("Escape");
+    await expect(picker).toHaveCount(0);
+    await expect(choose).toBeFocused();
     await expect(workspace.getByRole("button", { name: "Kiểm tra lượt chạy →" })).toBeEnabled();
     await page.screenshot({ path: test.info().outputPath(`interaction-actions-${viewport.width}.png`) });
     const accessibility = await new AxeBuilder({ page }).include(".interaction-workspace").withTags(["wcag2a", "wcag2aa"]).analyze();
     expect(accessibility.violations).toEqual([]);
     await workspace.getByRole("button", { name: "Kiểm tra lượt chạy →" }).click();
+    await expect(workspace.locator("#iw-panel-1 .iw-links")).toBeHidden();
+    await expect(workspace.locator("#iw-panel-2 .iw-settings")).toBeHidden();
     await expect(workspace.getByRole("tabpanel", { name: "Kiểm tra & chạy" })).toContainText("Máy thử 9");
     await page.screenshot({ path: test.info().outputPath(`interaction-review-${viewport.width}.png`) });
     expect(await page.evaluate(() => {

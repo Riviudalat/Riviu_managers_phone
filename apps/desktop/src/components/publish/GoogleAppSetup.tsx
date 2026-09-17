@@ -28,11 +28,11 @@ export function GoogleAppSetup({ clientId, busy, open, onOpenChange, onSave }: P
         onChange={event => setClient(event.target.value)} placeholder="…apps.googleusercontent.com" /></label>
       <label>Client secret<input aria-label="Client secret" type="password" autoComplete="new-password" value={secret}
         onChange={event => setSecret(event.target.value)} placeholder="Nếu ứng dụng có cung cấp" /></label>
-      <label>Google Picker API key<input aria-label="Google Picker API key" type="password" autoComplete="new-password" value={key}
+      <label>Google Picker API key (tùy chọn)<input aria-label="Google Picker API key" type="password" autoComplete="new-password" value={key}
         onChange={event => setKey(event.target.value)} /></label>
-      <label>Google Cloud project number<input aria-label="Google Cloud project number" inputMode="numeric" autoComplete="off" value={project}
+      <label>Google Cloud project number (tùy chọn, đi cùng Picker key)<input aria-label="Google Cloud project number" inputMode="numeric" autoComplete="off" value={project}
         onChange={event => setProject(event.target.value)} /></label>
-      <button type="button" disabled={busy || !client.trim() || !key.trim() || !/^\d{1,32}$/.test(project.trim())} onClick={() => void save()}>
+      <button type="button" disabled={busy || !client.trim() || (!!project.trim() && !/^\d{1,32}$/.test(project.trim())) || Boolean(key.trim()) !== Boolean(project.trim())} onClick={() => void save()}>
         {busy ? "Đang lưu…" : "Lưu cấu hình Google"}
       </button>
     </fieldset>

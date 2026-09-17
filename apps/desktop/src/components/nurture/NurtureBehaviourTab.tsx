@@ -239,6 +239,7 @@ export function NurtureBehaviourTab({
               max={100}
               step={5}
               value={settings.carouselPortionPercent ?? 100}
+              disabled={settings.carouselEnabled === false}
               onChange={(e) =>
                 patch("carouselPortionPercent", Number(e.target.value) || 100)
               }

@@ -1,6 +1,7 @@
 # Hợp đồng UI và ma trận tham chiếu
 
-Thiết kế hiện tại: shell trắng, nền trung tính `#F5F6F8`, primary
+Thiết kế hiện tại: giao diện sáng cố định kể cả khi hệ điều hành dùng dark mode;
+shell trắng, nền trung tính `#F5F6F8`, primary
 cam Riviu `#C2410C`; control 36 px, body 14 px, chữ phụ 13 px, chú thích tối thiểu 12 px,
 heading trang 20 px. Noto Sans/Noto Sans Mono đóng gói cùng app. Control bo 6 px,
 panel bo 8 px; khoảng cách theo thang 4/8/12/16/24 px. Giữ Tauri/React/Rust,
@@ -9,7 +10,8 @@ monitor nguồn và ActivityCenter. Đây là tiêu chí triển khai, không t�
 màn hình đã vượt cổng screenshot/accessibility.
 
 Sidebar cố định 196 px (184 px trên màn hẹp); tiêu đề nhóm ẩn/hiện các mục bên trong,
-không thu toàn sidebar thành icon. Automation có ba trang Nuôi TikTok, Tương tác,
+không thu toàn sidebar thành icon. Mục đang chọn dùng cam đặc/chữ trắng ngay khi
+đổi trang, không chờ fade mới đủ tương phản. Automation có ba trang Nuôi TikTok, Tương tác,
 Đăng bài cùng My Apps, Lượt chạy, Tác vụ đã lưu và Flow thiết bị. Header cao tối thiểu 56 px, trạng thái có nhãn **Toàn hệ thống**;
 máy thực hiện của mỗi workspace là một phạm vi riêng. Mỗi vùng có một hành động
 chính màu cam, thao tác phụ trung tính. **Bảo trì → Sửa Riviu Agent** tách khỏi
@@ -62,14 +64,24 @@ quyết định thiết kế Riviu, không phải tuyên bố parity toàn bộ 
 | Chẩn đoán | bảng điều kiện, detail bằng chứng | máy/phạm vi | readiness/lỗi; sửa đúng điều kiện | không tự repair từ health false-negative |
 | Nuôi | Thiết lập/Theo dõi, hồ sơ | scope, nhịp, effect, lịch | phiên/máy/effect; đọc bằng chứng | credential riêng, draft/readiness, target isolation |
 | Tương tác | Thiết lập/Theo dõi, assignment | URL hiện tại, actors, nội dung | campaign/outcome; source retry | URL parse stale, profile identity, uncertain |
-| Đăng bài | input/assignment, preflight, monitor | media/caption/nhạc/Sheet/máy | Post/URL/Sheet/cleanup; retry phạm vi thiếu | không đăng lại Partial, target-bound digest |
+| Đăng bài | ba khung chọn bài / bài↔máy / thiết bị; caption dialog | nguồn/caption/nhạc/Sheet/máy | preflight, Post/URL/Sheet/cleanup; retry phạm vi thiếu | không đăng lại Partial; active bị lọc ẩn, confirm stale, focus caption, target-bound digest |
 | Flow | editor mở, mode/device/fleet, execution detail | graph/node/target/revision | run/node history; mở lỗi | Save/Archive/import identity, guard, node effects |
-| Tác vụ | bảng dense, filters, detail | source/status/time | total/page/source link | bài khác máy; active cũ; pagination |
+| Lượt chạy | bảng dense, filters, detail | source/status/time | total/page/source link | bài khác máy; active cũ; pagination |
+| My Apps | thư viện tích hợp + quy trình đã lưu | tìm, nhập JSON, tạo/chỉnh | mở chức năng hoặc editor | tải quy trình không giả thành rỗng; import bàn phím |
+| Tác vụ đã lưu | bảng và form cấu hình | ứng dụng, revision, scope | chạy/lịch có xác nhận | pending/error không báo 0; giữ revision và target |
+| Quản lý tài khoản | bảng và form tài khoản | tên, handle, nền tảng, máy | bản ghi đã lưu/đối chiếu | response kind cũ không ghi đè; không coi handle nhập là login proof |
+| Lịch chạy | bảng lịch và cấu hình | thời gian local, trạng thái | lần chạy kế tiếp/kết quả | lưu/bật lịch không chạy ngay; giữ revision |
 | Kho nội dung | bảng metadata, bulk toolbar | artifact và target | ledger từng máy | restore monitor, cancel queued, no uncertain retry |
 | Trung tâm ứng dụng | bảng package, contextual action | package/version/target | batch/item result | artifact snapshot, restart uncertainty |
 | Dữ liệu | năng lực, tác vụ 24 giờ, nhật ký gần nhất | tìm kiếm trong tối đa 200 log đã tải | số liệu theo phạm vi; tra cứu sâu tại Tác vụ | hiển thị giới hạn và phạm vi lọc/xuất |
 | API | listener status, config section | địa chỉ/credential | actual bind/restart | config khác listener; lỗi bind hiển thị |
 | Cài đặt | section rõ, lưu từng vùng | form/credential | persisted readback | stale response, draft guard, restart indication |
+| Trợ giúp | hướng dẫn theo nhiệm vụ | lối vào theo việc cần làm | điều hướng tới màn thật | không phát tác vụ khi bấm lối tắt |
+
+Sidebar có 16 page; editor My Apps, Điều phối và Macro là subview. Dữ liệu và
+Mạng/Proxy còn nhánh render nhưng chưa có lối vào sidebar; không tự mở thêm menu.
+Danh sách phải tách initial loading, refresh, lỗi có retry, rỗng thật và không khớp
+bộ lọc. Refresh lỗi giữ dữ liệu cũ khi còn hợp lệ; response cũ không được đổi view mới.
 
 ## Quy tắc thành phần
 

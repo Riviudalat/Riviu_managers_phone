@@ -5,11 +5,11 @@
 }
 
 /* Runs is a full-width table; details open only after choosing a row. */
-.runs-list-page { background:var(--bg-elevated);min-height:440px;padding:12px 8px; }
+.runs-list-page { background:var(--bg-elevated);min-height:320px;padding:var(--space-4);border:1px solid var(--line);border-radius:var(--radius); }
 .runs-list-page .operations-monitor {display:block;border:0;background:transparent;min-height:0;}
 .runs-list-page .operations-monitor-list {border:0;padding:0;overflow:visible;}
 .runs-list-page .operations-filterbar {display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:16px;}
-.runs-list-page .operations-filterbar > label {display:flex;flex-direction:row;align-items:center;gap:6px;margin:0;min-width:220px;border:1px solid var(--line);border-radius:4px;padding:8px;}
+.runs-list-page .operations-filterbar > label {display:flex;flex-direction:row;align-items:center;gap:var(--space-2);margin:0;min-width:min(220px,100%);min-height:var(--control-height);border:1px solid var(--line-strong);border-radius:var(--radius-sm);padding:var(--space-1) var(--space-2);}
 .runs-list-page .operations-filterbar > label > input {flex:1;min-width:0;border:0;padding:0;background:transparent;outline-offset:4px;}
 .runs-list-page .operations-filterbar select {width:auto;min-height:36px;padding:6px 8px;border:1px solid var(--line);border-radius:4px;color:var(--text-2);background:var(--bg-elevated);font:inherit;font-size:var(--text-sm);}
 .runs-list-page .operations-pagination {justify-content:flex-end;order:2;margin:14px 0;}

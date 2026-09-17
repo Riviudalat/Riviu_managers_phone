@@ -304,13 +304,17 @@ describe("production publish wizard", () => {
     let listener!: (event: AppEvent) => void;
     vi.mocked(listenRiviuEvents).mockImplementationOnce(async callback => { listener = callback; return () => {}; });
     const blocked = { assignmentId: "pending-a", campaignId: "prior-campaign", updatedAt: "2026-09-15T00:00:00Z", reason: "TikTok đang xử lý bài trước" };
-    vi.mocked(publishDeviceGuards).mockImplementation(async ids => Object.fromEntries(ids.map(id => [id, { blocking: id === "PHONE-A" ? [blocked] : [], linkReview: [] }])));
+    let blocking = false;
+    vi.mocked(publishDeviceGuards).mockImplementation(async ids => Object.fromEntries(ids.map(id => [id, { blocking: blocking && id === "PHONE-A" ? [blocked] : [], linkReview: [] }])));
     render(<PublishPage devices={devices} selected={[]} onSelectUdids={() => {}} />);
     await userEvent.click(screen.getByRole("button", { name: "Chọn thư mục" }));
     await userEvent.click(screen.getByRole("button", { name: "Quét" }));
     await userEvent.click(await screen.findByRole("checkbox", { name: "Chọn bo1" }));
-    fireEvent.change(screen.getByRole("combobox", { name: "Máy nhận bài đang chỉnh" }), { target: { value: "PHONE-A" } });
-    expect(screen.getByRole("button", { name: "Kiểm tra & đăng" })).toBeDisabled();
+    fireEvent.change(screen.getByRole("combobox", { name: "Máy nhận bài bo1" }), { target: { value: "PHONE-A" } });
+    blocking = true;
+    await act(async () => listener({ type: "publishUpdated", campaignId: "prior-campaign" } as AppEvent));
+    await waitFor(() => expect(screen.getByRole("button", { name: "Kiểm tra & đăng" })).toBeDisabled());
+    expect(screen.getByRole("combobox", { name: "Máy nhận bài bo1" })).toHaveValue("PHONE-A");
     expect(screen.getAllByText("Máy còn bài chưa lấy được link").length).toBeGreaterThan(0);
     expect(preflightCampaign).not.toHaveBeenCalled();
     vi.mocked(publishDeviceGuards).mockImplementation(async ids => Object.fromEntries(ids.map(id => [id, { blocking: [], linkReview: [] }])));
@@ -415,6 +419,7 @@ describe("production publish wizard", () => {
   it("autosaves mapping and caption, rescans on remount and requires fresh preflight", async () => {
     const view = render(<PublishPage devices={devices} selected={[]} onSelectUdids={() => {}} />);
     await prepareOne();
+    await userEvent.click(screen.getByText(/^Tùy chọn · Sheet/));
     await userEvent.click(screen.getByRole("checkbox", { name: "Xóa bản chuyển sau khi đăng thành công" }));
     await act(async () => { expect(await requestWorkspaceLeave()).toBe(true); });
     expect(requestConfirm).not.toHaveBeenCalled();
@@ -423,7 +428,8 @@ describe("production publish wizard", () => {
     render(<PublishPage devices={devices} selected={[]} onSelectUdids={() => {}} />);
     await waitFor(() => expect(screen.getByRole("checkbox", { name: "Chọn bo1" })).toBeChecked());
     expect(publishScanFolder).toHaveBeenCalledTimes(2);
-    expect(screen.getByRole("combobox", { name: "Máy nhận bài đang chỉnh" })).toHaveValue("PHONE-A");
+    expect(screen.getByRole("combobox", { name: "Máy nhận bài bo1" })).toHaveValue("PHONE-A");
+    await userEvent.click(screen.getByText(/^Tùy chọn · Sheet/));
     expect(screen.getByRole("checkbox", { name: "Xóa bản chuyển sau khi đăng thành công" })).toBeChecked();
     expect(preflightCampaign).not.toHaveBeenCalled();
     expect(executeCampaign).not.toHaveBeenCalled();
@@ -477,6 +483,7 @@ describe("production publish wizard", () => {
       <PublishPage devices={devices} selected={[]} onSelectUdids={() => {}} />,
     );
     await prepareOne();
+    await userEvent.click(screen.getByText(/^Tùy chọn · Sheet/));
     await userEvent.click(
       screen.getByRole("checkbox", { name: "Xóa bản chuyển sau khi đăng thành công" }),
     );
@@ -712,12 +719,14 @@ describe("production publish wizard", () => {
     );
     await userEvent.click(screen.getByRole("button", { name: "Chọn thư mục" }));
     await userEvent.click(screen.getByRole("button", { name: "Quét" }));
+    await userEvent.click(await screen.findByRole("button", { name: "Xem ảnh và sửa caption · bo1" }));
     await screen.findByRole("textbox", { name: "Nội dung bài đăng" });
     fireEvent.change(
       screen.getByRole("textbox", { name: "Nội dung bài đăng" }),
       { target: { value: "Nội dung mới" } },
     );
     expect(manifest.bundles[0].caption).toBe("caption for bo1");
+    await userEvent.click(screen.getByRole("button", { name: "Đóng · giữ bản nháp" }));
     await userEvent.click(screen.getByRole("checkbox", { name: "Chọn bo1" }));
       await userEvent.click(screen.getByRole("button", { name: "Chọn nhanh" }));
     await userEvent.click(

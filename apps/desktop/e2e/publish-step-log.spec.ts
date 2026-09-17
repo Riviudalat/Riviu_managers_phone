@@ -8,9 +8,14 @@ test("submitted posts show incomplete progress and processing evidence without a
     const w = window as unknown as { __TAURI_INTERNALS__: { invoke: (command: string, args: Record<string, unknown>) => Promise<unknown> } };
     const original = w.__TAURI_INTERNALS__.invoke;
     const now = new Date().toISOString();
+    const campaign = { id: "pending", requestId: "request", sourceRoot: "C:/fixture", state: "verifying", visibility: "public", cleanupPolicy: "keepImportedAssets", assignments: [{ bundleId: "pending", udid: "snapshot-phone-2", ordinal: 0 }], createdAt: now, updatedAt: now };
     const summary = { id: "publish:pending", sourceId: "pending", kind: "publish", title: "Đăng bài", state: "running", targetCount: 2, totalItems: 2, completedItems: 1, issueCount: 0, retryableCount: 1, retryScope: "linkAndSheet", createdAt: now, updatedAt: now };
     w.__TAURI_INTERNALS__.invoke = async (command, args) => {
-      if (command === "publish_list") return [{ id: "pending", requestId: "request", sourceRoot: "C:/fixture", state: "verifying", visibility: "public", cleanupPolicy: "keepImportedAssets", assignments: [{ bundleId: "pending", udid: "snapshot-phone-2", ordinal: 0 }], createdAt: now, updatedAt: now }];
+      if (command === "publish_list") return [campaign];
+      if (command === "publish_reconcile") return { campaignId: campaign.id, inputDigest: "fixture", status: "partial", retryScope: "linkAndSheet", reportJson: { sheetEnabled: true }, updatedAt: now };
+      if (command === "publish_get") return { campaign, bundles: [], events: [], assignments: [{ id: "pending", campaignId: "pending", bundleId: "pending", udid: "snapshot-phone-2", ordinal: 0, state: "verifying", errorCode: "post_verification_pending" }] };
+      if (command === "publish_recovery_capabilities") return [{ assignmentId: "pending", revision: 1, verificationResumed: false,
+        checkLink: { allowed: true, reason: null }, resumeVerification: { allowed: false, reason: null }, retryBeforePost: { allowed: false, reason: "Bài đã gửi" } }];
       if (command === "operation_list_runs") return [summary];
       if (command === "operation_query_runs") return { runs: [summary], total: 1, counts: { active: 1, succeeded: 0, attention: 0 }, hasMore: false };
       if (command === "operation_get_run") return { summary, items: [

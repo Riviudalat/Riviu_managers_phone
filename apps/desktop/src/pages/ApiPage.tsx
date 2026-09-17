@@ -175,8 +175,8 @@ export function ApiPage({ onOpenSettings }: { onOpenSettings?: () => void } = {}
           action={<button type="button" className="ghost" onClick={() => void load()}>Tải lại</button>}
         />
       )}
-      {!error && docs !== null && !isEmpty && (
-        <div className="admin-split">
+      {docs !== null && !isEmpty && (
+        <div className="admin-split" aria-busy={loading}>
           <main className="admin-main">
             <div className="admin-toolbar">
               <div className="admin-toolbar-copy">

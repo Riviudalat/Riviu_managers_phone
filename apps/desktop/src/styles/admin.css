@@ -1,5 +1,18 @@
 /* Production surfaces for read-heavy system workspaces. These pages share the
    same visual grammar without sharing state or save boundaries. */
+.operator-help { display:grid; gap:var(--space-4); width:100%; max-width:1040px; min-width:0; }
+.operator-help-heading h2 { margin:0; font-size:var(--text-lg); font-weight:var(--weight-semibold); }
+.operator-help-heading p, .operator-help-api p { margin:var(--space-1) 0 0; font-size:var(--text-sm); color:var(--text-3); line-height:var(--leading-normal); }
+.operator-help-topics { border:1px solid var(--line); border-radius:var(--radius); background:var(--bg-elevated); }
+.operator-help-topic { display:grid; grid-template-columns:24px minmax(0,1fr) auto; gap:var(--space-3); align-items:center; padding:var(--space-4); }
+.operator-help-topic + .operator-help-topic { border-top:1px solid var(--line); }
+.operator-help-topic > svg { color:var(--primary); }
+.operator-help-topic h3, .operator-help-api h3 { margin:0; font-size:var(--text-base); font-weight:var(--weight-semibold); }
+.operator-help-topic p { margin:var(--space-1) 0 0; max-width:65ch; color:var(--text-3); font-size:var(--text-sm); line-height:var(--leading-normal); }
+.operator-help-topic button { white-space:nowrap; font-size:var(--text-sm); }
+.operator-help-api { display:flex; flex-wrap:wrap; align-items:center; gap:var(--space-4); padding:var(--space-4); border:1px solid var(--line); border-radius:var(--radius); background:var(--bg-elevated); }
+.operator-help-api > div { flex:1; min-width:220px; }
+@media(max-width:960px) { .operator-help-topic { grid-template-columns:24px minmax(0,1fr); } .operator-help-topic button { grid-column:2; justify-self:start; } }
 .admin-workspace {
   display: grid;
   min-width: 0;
@@ -164,14 +177,14 @@
 .admin-split {
   display: grid;
   min-width: 0;
-  grid-template-columns: minmax(0, 1fr) minmax(236px, 280px);
-  gap: var(--space-5);
+  grid-template-columns: minmax(0, 1fr) minmax(236px, 264px);
+  gap: var(--space-4);
   align-items: start;
 }
 
 .admin-main {
   min-width: 0;
-  padding: var(--space-5);
+  padding: var(--space-4);
   border: 1px solid var(--line);
   border-radius: var(--radius);
   background: var(--bg-elevated);
@@ -501,8 +514,8 @@
 .settings-page {
   display: grid;
   min-width: 0;
-  grid-template-columns: 208px minmax(0, 1fr);
-  gap: var(--space-5);
+  grid-template-columns: 180px minmax(0, 1fr);
+  gap: var(--space-4);
   align-items: start;
 }
 
