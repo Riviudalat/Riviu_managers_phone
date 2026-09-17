@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Sanitized fleet observation, SM-G955F Android9/en, Global46.1.3,
+     18/09/2026. Caption content replaced; IDs and geometry retained. -->
+<hierarchy>
+  <node package="com.zhiliaoapp.musically" resource-id="com.zhiliaoapp.musically:id/rnb" class="android.widget.TextView" text="Complete fixture caption identifying the submitted photo post" bounds="[0,1704][1080,1965]" enabled="true" clickable="true" displayed="true"/>
+  <node package="com.zhiliaoapp.musically" resource-id="com.zhiliaoapp.musically:id/rmr" class="android.widget.ImageView" content-desc="Share" bounds="[959,1982][1027,2050]" enabled="true" clickable="true" displayed="true"/>
+</hierarchy>

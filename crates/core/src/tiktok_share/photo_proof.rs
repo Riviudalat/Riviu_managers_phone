@@ -95,9 +95,15 @@ fn viewer_controls(package: &str, version: &str) -> anyhow::Result<(&'static str
         // SM-G955N Android9/en-US, 18/09/2026: second restart canary;
         // retained sanitized fixture expanded-photo-45.4.3.fixture.
         ("com.zhiliaoapp.musically", "45.4.3") => Ok((":id/r55", ":id/r4k")),
+        // SM-G955F fleet18/09/2026: complete caption rey and Share red.
+        // Retained sanitized fixture expanded-photo-45.7.3.fixture.
+        ("com.zhiliaoapp.musically", "45.7.3") => Ok((":id/rey", ":id/red")),
         // SM-G955F Android9/en-US, 18/09/2026: full-caption expanded photo
         // surface; retained sanitized fixture expanded-photo-46.0.41.fixture.
         ("com.zhiliaoapp.musically", "46.0.41") => Ok((":id/rki", ":id/rjy")),
+        // SM-G955F fleet18/09/2026: complete caption rnb and Share rmr.
+        // Retained sanitized fixture expanded-photo-46.1.3.fixture.
+        ("com.zhiliaoapp.musically", "46.1.3") => Ok((":id/rnb", ":id/rmr")),
         // Phone13, Global46.2.42, 15/09/2026: complete caption rqb and
         // ImageView rpr with content-desc=Share on PostModeDetailActivity.
         ("com.zhiliaoapp.musically", "46.2.42") => Ok((":id/rqb", ":id/rpr")),
@@ -513,6 +519,41 @@ mod tests {
             viewer_controls(package, "46.2.1").unwrap(),
             (caption, share)
         );
+    }
+    #[test]
+    fn measured_global_45_7_3_expanded_photo_requires_its_exact_controls() {
+        let package = "com.zhiliaoapp.musically";
+        let xml = include_str!("../../fixtures/tiktok-publish/expanded-photo-45.7.3.fixture");
+        let observed = |xml: String| {
+            Tree::parse(crate::HierarchySourceSnapshot { generation: 1, xml }).unwrap()
+        };
+        let tree = observed(xml.into());
+        let (caption, share) = viewer_controls(package, "45.7.3").unwrap();
+        assert_eq!(
+            tree.matching(package, ElementQuery::ResourceIdSuffix(caption))
+                .len(),
+            1
+        );
+        assert_eq!(
+            tree.matching(package, ElementQuery::ResourceIdSuffix(share))
+                .len(),
+            1
+        );
+        assert!(expanded_photo_surface(&tree, package, "45.7.3"));
+        for changed in [
+            xml.replace(":id/rey", ":id/other"),
+            xml.replace(":id/red", ":id/other"),
+            xml.replace("displayed=\"true\"", "displayed=\"false\""),
+            xml.replace("clickable=\"true\"", "clickable=\"false\""),
+            xml.replace("content-desc=\"Share\"", "content-desc=\"Like\""),
+        ] {
+            assert!(!expanded_photo_surface(
+                &observed(changed),
+                package,
+                "45.7.3"
+            ));
+        }
+        assert!(!expanded_photo_surface(&tree, package, "46.0.41"));
     }
     #[test]
     fn measured_global_45_4_3_expanded_photo_requires_its_exact_controls() {

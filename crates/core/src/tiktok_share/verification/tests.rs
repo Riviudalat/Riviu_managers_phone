@@ -9,6 +9,31 @@ const CAPTION: &str =
 const URL: &str = "https://www.tiktok.com/@fixture.account/photo/123456789";
 
 #[test]
+fn measured_global_46_1_3_expanded_photo_is_a_safe_back_surface() {
+    let plan = PublishVerificationPlan::for_build(PACKAGE, "en", "46.1.3").unwrap();
+    let xml = include_str!("../../../fixtures/tiktok-publish/expanded-photo-46.1.3.fixture");
+    assert_eq!(classify(&tree(xml.into()), &plan), Screen::Post);
+    let other = PublishVerificationPlan::for_build(PACKAGE, "en", "46.0.41").unwrap();
+    assert_eq!(classify(&tree(xml.into()), &other), Screen::Unknown);
+    assert_eq!(
+        classify(
+            &tree(xml.replace("content-desc=\"Share\"", "content-desc=\"Like\"")),
+            &plan
+        ),
+        Screen::Unknown
+    );
+}
+
+#[test]
+fn measured_global_45_7_3_expanded_photo_is_a_safe_back_surface() {
+    let plan = PublishVerificationPlan::for_build(PACKAGE, "en", "45.7.3").unwrap();
+    let xml = include_str!("../../../fixtures/tiktok-publish/expanded-photo-45.7.3.fixture");
+    assert_eq!(classify(&tree(xml.into()), &plan), Screen::Post);
+    let other = PublishVerificationPlan::for_build(PACKAGE, "en", "46.0.41").unwrap();
+    assert_eq!(classify(&tree(xml.into()), &other), Screen::Unknown);
+}
+
+#[test]
 fn measured_global_45_4_3_expanded_photo_is_a_safe_back_surface() {
     let plan = PublishVerificationPlan::for_build(PACKAGE, "en", "45.4.3").unwrap();
     let xml = include_str!("../../../fixtures/tiktok-publish/expanded-photo-45.4.3.fixture");
