@@ -203,6 +203,8 @@ async fn main() -> anyhow::Result<()> {
         actions: riviu_core::InteractionActionSet::default(),
         mentions: Vec::new(),
         mention_parent: false,
+        like_parent: false,
+        post_dwell_seconds: None,
     };
     if riviu_core::interaction_campaign::ai_key_missing(&request, &settings.api_key) {
         say("chưa có khoá AI — dừng trước khi mở máy nào");
