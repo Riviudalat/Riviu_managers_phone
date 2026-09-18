@@ -108,7 +108,7 @@ impl PublishProgress {
                 if *video { "video" } else { "ảnh" }
             ),
             Self::OpeningEditor => "Bấm Tiếp để mở màn chỉnh sửa".into(),
-            Self::OpeningSounds => "Mở bảng nhạc và đọc danh sách nhạc đề xuất".into(),
+            Self::OpeningSounds => "Đang chờ TikTok tải nhạc… (tối đa 3 phút)".into(),
             Self::SelectingSound { title } => format!("Đang chọn nhạc: {title}"),
             Self::SoundConfirmed { title } => format!("Đã xác nhận nhạc: {title}"),
             Self::OpeningCaption => "Bấm Tiếp để mở màn nhập nội dung bài đăng".into(),

@@ -6,9 +6,9 @@ use super::*;
 // local 45.7.3 phones 2/3. Android source reads take multiple seconds; the
 // driver's measured worst root-query regime is 11 seconds. Two stable reads,
 // one missed tap, two fresh reads for the retry and its confirmation need five
-// such reads plus polling. Keep both observation phases bounded independently.
+// such reads plus polling. Production shares one three-minute budget across all phases.
 const SECTION_WINDOW: Duration = Duration::from_secs(60);
-const SNAPSHOT_POOL_WINDOW: Duration = Duration::from_secs(30);
+const SNAPSHOT_POOL_WINDOW: Duration = SOUND_WINDOW;
 
 /// One extra observation per phase after the driver's exhausted read recovery.
 /// Clear the previous generation before waiting; a stale rectangle cannot authorize a tap.
@@ -18,12 +18,11 @@ async fn read_snapshot(
     recovery_used: &mut bool,
 ) -> anyhow::Result<Option<String>> {
     let started = Instant::now();
-    match session.hierarchy_source_snapshot().await {
+    check_wait()?;
+    match read_sound(session.hierarchy_source_snapshot()).await {
         Ok(snapshot) => Ok(Some(snapshot.xml)),
         Err(error)
-            if error
-                .downcast_ref::<crate::driver::AccessibilityReadUnavailable>()
-                .is_some()
+            if transient_sound_read(&error)
                 && !*recovery_used
                 && Instant::now() + POLL < deadline =>
         {
@@ -110,7 +109,7 @@ pub(super) async fn select_section_tab(
     session: &dyn UiSession,
     plan: SoundPickerPlan,
 ) -> anyhow::Result<()> {
-    let deadline = Instant::now() + SECTION_WINDOW;
+    let deadline = phase_deadline(SECTION_WINDOW);
     let mut previous: Option<ElementBox> = None;
     let mut attempts = 0;
     let mut retry_after = Instant::now();
@@ -140,8 +139,7 @@ pub(super) async fn select_section_tab(
                         attempts,
                         "select sound section"
                     );
-                    session
-                        .tap(tab.centre())
+                    sound_tap(session, tab.centre())
                         .await
                         .context("select measured sound section")?;
                     retry_after = Instant::now() + Duration::from_secs(1);
@@ -228,7 +226,7 @@ pub(super) async fn observe(
     plan: SoundPickerPlan,
     maximum: usize,
 ) -> anyhow::Result<ObservedSoundPool> {
-    let deadline = Instant::now() + SNAPSHOT_POOL_WINDOW;
+    let deadline = phase_deadline(SNAPSHOT_POOL_WINDOW);
     let mut previous: Option<ObservedSoundPool> = None;
     let mut recovery_used = false;
     loop {
@@ -239,7 +237,7 @@ pub(super) async fn observe(
         let observed = pool(&xml, plan, maximum);
         match observed {
             Ok(current) => {
-                if previous.as_ref().is_some_and(|p| p == &current) {
+                if previous.as_ref().is_some_and(|p| p.stable_with(&current)) {
                     return Ok(current);
                 }
                 previous = Some(current);
@@ -505,6 +503,89 @@ mod tests {
         let pool = observe(&s, plan(), 5).await.unwrap();
         assert_eq!(s.taps.load(Ordering::Relaxed), 2);
         assert_eq!(pool.candidates.len(), 2);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn sound_load_after_150_seconds_is_still_observed_before_three_minute_limit() {
+        let mut s = session(false);
+        s.hot.store(true, Ordering::Relaxed);
+        s.snapshot_delay = Duration::from_secs(75);
+        let pool = observe(&s, plan(), 5).await.unwrap();
+        assert_eq!(pool.candidates.len(), 2);
+        assert_eq!(s.taps.load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn stable_sound_identity_can_use_fresh_bounds_after_layout_moves() {
+        let mut s = session(false);
+        s.hot.store(true, Ordering::Relaxed);
+        s.snapshot_filter = |xml, n| {
+            if n % 2 == 0 {
+                xml.replace("[60,65]", "[60,66]")
+            } else {
+                xml
+            }
+        };
+        let pool = observe(&s, plan(), 5).await.unwrap();
+        assert_eq!(pool.candidates.len(), 2);
+        assert_eq!(s.snapshots.load(Ordering::Relaxed), 2);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn sound_budget_caps_total_wait_and_never_taps_after_cancel() {
+        let mut s = session(false);
+        s.hot.store(true, Ordering::Relaxed);
+        s.snapshot_delay = Duration::from_secs(100);
+        let stop = AtomicBool::new(false);
+        let at = Instant::now();
+        let e = with_sound_budget(&stop, observe(&s, plan(), 5))
+            .await
+            .unwrap_err();
+        assert!(format!("{e:#}").contains("3 phút"));
+        assert_eq!(at.elapsed(), SOUND_WINDOW);
+        assert_eq!(s.taps.load(Ordering::Relaxed), 0);
+        let at = Instant::now();
+        let work = with_sound_budget(&stop, observe(&s, plan(), 5));
+        let cancel = async {
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            stop.store(true, Ordering::Relaxed);
+        };
+        let (r, ()) = tokio::join!(work, cancel);
+        assert!(r.unwrap_err().is::<SoundStopped>());
+        assert!(at.elapsed() < Duration::from_secs(3));
+        assert_eq!(s.taps.load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn sound_budget_is_shared_across_phases_instead_of_reset() {
+        let mut s = session(false);
+        s.hot.store(true, Ordering::Relaxed);
+        s.snapshot_delay = Duration::from_secs(25);
+        let stop = AtomicBool::new(false);
+        let at = Instant::now();
+        let r = with_sound_budget(&stop, async {
+            tokio::time::sleep(Duration::from_secs(140)).await;
+            observe(&s, plan(), 5).await
+        })
+        .await;
+        assert!(r.is_err());
+        assert_eq!(at.elapsed(), SOUND_WINDOW);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn selected_sound_uses_latest_target_but_rejects_changed_identity() {
+        let first = pool(&fixture(true, false), plan(), 5).unwrap();
+        let shifted = pool(
+            &fixture(true, false).replace("[60,65]", "[60,66]"),
+            plan(),
+            5,
+        )
+        .unwrap();
+        assert!(first.stable_with(&shifted));
+        assert_eq!(reproof_target(&first, &shifted, 0).unwrap().y, 66.0);
+        let changed = pool(&fixture(true, false).replace("One", "Different"), plan(), 5).unwrap();
+        assert!(!first.stable_with(&changed));
+        assert!(reproof_target(&first, &changed, 0).is_err());
     }
 
     #[tokio::test(start_paused = true)]

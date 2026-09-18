@@ -210,7 +210,7 @@ không được chọn thêm. Tìm kiếm không đổi số máy hay phạm vi 
 Cấu hình và tóm tắt phiên đọc từ thiết lập hiện tại; thanh tab và nút bắt đầu
 nằm ngoài vùng cuộn. Phạm vi Nuôi không thay lựa chọn của Tương tác hoặc Đăng bài.
 
-Nút **Dừng** cạnh danh sách trong cửa sổ **Theo dõi tác vụ** dừng toàn bộ máy của
+Nút **Tạm dừng** của phiên đăng bài (các tác vụ khác là **Dừng**) cạnh danh sách trong cửa sổ **Theo dõi tác vụ** dừng toàn bộ máy của
 tác vụ đang chọn và đóng TikTok về màn hình chính. Đây là dừng/hủy phần việc còn lại,
 không phải tạm ngưng để tự chạy tiếp. App chờ thao tác đang thực hiện trả quyền máy,
 báo từng máy đã đóng hoặc cần kiểm tra. Kết quả đã đăng/gửi và bằng chứng vẫn giữ;
@@ -238,6 +238,8 @@ có log riêng từng máy.
 
 Trong **Phiên nuôi → Nguồn video**, chọn **Lướt theo từ khóa**, nhập ví dụ `đà lạt`.
 Android mở Tìm kiếm, nhập đúng từ khóa, chuyển sang Videos và mở một kết quả để lướt.
+Tab Videos có thể đổi vị trí khi TikTok tải kết quả; app chờ vị trí ổn định và kiểm tra
+tab đã chọn trước khi mở video. Kết quả phải giữ đúng từ khóa đã nhập.
 App xác nhận ô tìm kiếm trước khi mở kết quả; không thấy nút/kết quả hoặc rời màn video
 tìm kiếm thì báo lỗi/dừng, không chuyển ngầm sang FYP. Đổi từ khóa áp dụng từ phiên
 tiếp theo. Giới hạn video, thời lượng, tỷ lệ và đóng TikTok cuối phiên vẫn áp dụng.
@@ -545,6 +547,20 @@ trước khi chuẩn bị đăng. Nếu thấy địa chỉ máy phụ, ngắt k
 phone đang cắm cáp có thể chuyển sang ADB USB. Wi-Fi Internet vẫn dùng để tải bài.
 Các máy mới cần đăng nhập TikTok, giờ hệ thống đúng và mạng truy cập được TikTok;
 chỉ có biểu tượng Wi-Fi chưa đủ để tải danh sách nhạc.
+
+Khi chọn nhạc, app chờ TikTok tải xong và danh sách ổn định, tối đa **3 phút** cho
+toàn bộ bước mở bảng, chọn và xác nhận nhạc. App dùng vị trí vừa đọc lại để chọn;
+không bỏ qua nhạc khi tải chậm. Quá thời hạn hoặc mất kết nối thì dừng trước Đăng
+và hiện nguyên nhân. Bấm **Tạm dừng** sẽ kết thúc cả vòng chờ nhạc.
+Khi quay lại từ phần nhạc, app đối chiếu lại toàn bộ caption. Khoảng trắng cuối dòng
+do TikTok thêm sau hashtag được chấp nhận; thay đổi chữ, hashtag hoặc xuống dòng vẫn
+bị từ chối trước Đăng.
+
+Với bài đã gửi nhưng còn thiếu link, **Tạm dừng** kết thúc kiểm tra tự động, đóng
+TikTok và nhả từng máy sau khi đã đóng được phiên của máy đó. Bài cũ vẫn nằm trong
+lịch sử cần kiểm tra link, nhưng không chặn gán nội dung mới cho máy đã nhả. Máy
+còn việc của phiên khác hoặc chưa đóng được sẽ báo riêng. Mở lại app không tự
+đăng hay kiểm tra tiếp phiên đã dừng; chỉ tiếp tục kiểm tra khi bạn yêu cầu.
 
 **Hẹn giờ** dùng nguồn đã quét trong Thiết lập. Khi chưa có bản nháp lịch, những
 bài và cặp bài–máy đã chọn được mang sang. Bản nháp hiện có được giữ khi chuyển tab.

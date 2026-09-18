@@ -24,10 +24,11 @@ beforeEach(() => {
 
 it("stops only the selected operation and waits for a backend cleanup result",async()=>{
  await openDevices();
+ expect(screen.getByRole("button",{name:"Dừng tác vụ và về màn hình chính"})).toHaveTextContent("Tạm dừng");
  vi.mocked(operationStop).mockResolvedValue({operationId:run.id,state:"stopping",devices:[{udid:"a",closed:false,message:"waiting"}]});
  fireEvent.click(screen.getByRole("button",{name:"Dừng tác vụ và về màn hình chính"}));
  await waitFor(()=>expect(operationStop).toHaveBeenCalledWith(run.id));
- expect(await screen.findByText("Đang dừng các máy và đóng TikTok…")).toBeVisible();
+ expect((await screen.findAllByText("Đang dừng và nhả máy…")).length).toBeGreaterThan(0);
  expect(screen.getByRole("button",{name:"Dừng tác vụ và về màn hình chính"})).toBeDisabled();
  expect(operationStop).toHaveBeenCalledTimes(1);
 });
@@ -37,6 +38,14 @@ it("reports a rejected stop without removing the run",async()=>{
  fireEvent.click(screen.getByRole("button",{name:"Dừng tác vụ và về màn hình chính"}));
  expect(await screen.findByText("cannot persist stop")).toBeVisible();
  expect(screen.getByRole("combobox",{name:"Chọn tác vụ theo dõi"})).toHaveValue(run.id);
+});
+
+it("offers pause for a legacy stopped publication that has not released its devices",async()=>{
+ const stopped={...run,state:"cancelled" as const};
+ vi.mocked(operationQueryRuns).mockResolvedValue({runs:[stopped],total:1,counts:{active:0,succeeded:0,attention:1},hasMore:false});
+ vi.mocked(operationStopStatus).mockResolvedValue({operationId:run.id,state:"closed",devices:[]});
+ await openDevices();
+ expect(screen.getByRole("button",{name:"Dừng tác vụ và về màn hình chính"})).toHaveTextContent("Tạm dừng");
 });
 
 it("drags the title without a separate grip and does not toggle on release", async () => {

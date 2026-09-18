@@ -41,6 +41,8 @@ export function OperationProgressCenter({ deviceLabels }: { deviceLabels: Readon
   const selectedRun = runs.find((run) => run.id === selectedId) ?? runs[0] ?? null;
   const resolvedSelectedId = selectedRun?.id;
   const selectedStop=stopResult?.operationId===resolvedSelectedId?stopResult:null;
+  const canPausePublish=selectedRun?.kind==="publish" && selectedRun.state!=="succeeded"
+    && !(selectedStop?.state==="closed" && selectedStop.stopMarker);
   selectionRef.current=resolvedSelectedId;
   useEffect(()=>{
     setStopResult(null);setStopError(null);
@@ -130,7 +132,7 @@ export function OperationProgressCenter({ deviceLabels }: { deviceLabels: Readon
           {!runs.length && <option value="">Không còn bản ghi</option>}
           {runs.map((run) => <option key={run.id} value={run.id}>{runOptionLabel(run)}</option>)}
         </select>
-        {selectedRun&&(activeRun(selectedRun)||selectedStop?.state==="needsAttention"||selectedStop?.state==="failed")&&<button type="button" className="run-monitor-stop" title="Dừng toàn bộ máy của tác vụ đang chọn và đóng TikTok" aria-label="Dừng tác vụ và về màn hình chính" disabled={stopping||selectedStop?.state==="stopping"||!!state.error} onClick={()=>void stopSelected()}><Square size={14}/>{stopping||selectedStop?.state==="stopping"?"Đang dừng…":"Dừng"}</button>}
+        {selectedRun&&(activeRun(selectedRun)||canPausePublish||selectedStop?.state==="needsAttention"||selectedStop?.state==="failed")&&<button type="button" className="run-monitor-stop" title="Dừng toàn bộ máy của tác vụ đang chọn và đóng TikTok" aria-label="Dừng tác vụ và về màn hình chính" disabled={stopping||selectedStop?.state==="stopping"||!!state.error} onClick={()=>void stopSelected()}><Square size={14}/>{stopping||selectedStop?.state==="stopping"?"Đang dừng và nhả máy…":selectedRun.kind==="publish"?"Tạm dừng":"Dừng"}</button>}
         {selectedRun && <button type="button" className="icon-btn" title="Xoá bản ghi đang xem khỏi cửa sổ theo dõi" aria-label={`Xoá bản ghi ${selectedRun.title}`}
           disabled={!!state.error || activeRun(selectedRun)} onClick={() => dismiss([selectedRun])}><Trash2 size={16} /></button>}
         <details ref={menuRef} className="run-monitor-history-menu"><summary aria-label="Tuỳ chọn bản ghi" title="Tuỳ chọn bản ghi"><MoreHorizontal size={18} aria-hidden="true" /></summary>
@@ -139,7 +141,7 @@ export function OperationProgressCenter({ deviceLabels }: { deviceLabels: Readon
       </div>
       {stopError&&<p className="run-stop-feedback is-error" role="alert">{stopError}</p>}
       {stopResult&&stopResult.operationId===selectedRun?.id&&<div className="run-stop-feedback" role="status">
-        <strong>{stopResult.state==="stopping"?"Đang dừng các máy và đóng TikTok…":stopResult.state==="closed"?`Đã dừng · TikTok đã tắt trên ${stopResult.devices.length} máy`:"Đã yêu cầu dừng · Có máy cần kiểm tra"}</strong>
+        <strong>{stopResult.state==="stopping"?"Đang dừng và nhả máy…":stopResult.state==="closed"?`Đã dừng · TikTok đã tắt trên ${stopResult.devices.length} máy`:"Đã yêu cầu dừng · Có máy cần kiểm tra"}</strong>
         {stopResult.state!=="stopping"&&stopResult.devices.filter(d=>!d.closed).map(d=><span key={d.udid}>{deviceLabels.get(d.udid)??d.udid}: {d.message}</span>)}
       </div>}
       {undoKeys.length > 0 && <div className="run-monitor-undo" role="status"><span>Đã xoá {undoKeys.length} bản ghi khỏi cửa sổ.</span><button type="button" className="ghost" onClick={undo}><Undo2 size={14} /> Hoàn tác xoá</button></div>}

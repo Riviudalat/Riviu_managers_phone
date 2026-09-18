@@ -698,8 +698,10 @@ async fn run_group_input_target(
         (action.image_w, action.image_h),
         (Some(w), Some(h)) if w > 0.0 && h > 0.0
     );
-    let bound_w = scale.then_some(action.image_w.expect("scale validates image width"));
-    let bound_h = scale.then_some(action.image_h.expect("scale validates image height"));
+    // then_some evaluates its argument even for Home/key/text, which carry no dimensions.
+    // Keep the dimensions optional until the scaled tap/swipe branch actually needs them.
+    let bound_w = action.image_w.filter(|_| scale);
+    let bound_h = action.image_h.filter(|_| scale);
     let effect = match action.kind.as_str() {
         "tap" => {
             let (x, y) = apply_offset(

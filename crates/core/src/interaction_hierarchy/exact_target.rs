@@ -502,6 +502,43 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn shared_cleanup_navigation_pins_package_and_refuses_wrong_canonical_post() {
+        let target = crate::parse_tiktok_links(TARGET_URL)
+            .remove(0)
+            .target
+            .unwrap();
+        let session = ExactSession::new(false, TARGET_URL);
+        let proof = crate::interaction_campaign::open_hierarchy_target_confirmed(
+            &session,
+            labels(),
+            &target,
+            PACKAGE,
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            proof,
+            crate::interaction_campaign::TargetProof::Identified
+        ));
+        assert_eq!(
+            *session.opens.lock(),
+            vec![(TARGET_URL.into(), PACKAGE.into())]
+        );
+
+        let wrong = ExactSession::new(false, WRONG_URL);
+        assert!(
+            crate::interaction_campaign::open_hierarchy_target_confirmed(
+                &wrong,
+                labels(),
+                &target,
+                PACKAGE,
+            )
+            .await
+            .is_err()
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn already_target_requires_exact_link_and_dispatches_no_url() {
         let session = ExactSession::new(true, TARGET_URL);
         assert!(matches!(

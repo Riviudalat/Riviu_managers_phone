@@ -24,12 +24,15 @@ pub struct OperationStopResult {
     pub operation_id: String,
     pub state: String,
     pub devices: Vec<StopDeviceResult>,
+    #[serde(default)]
+    pub stop_marker: Option<String>,
 }
 
 fn key(id: &str) -> String {
     format!("operation.stop.result:{id}")
 }
 
+#[cfg(test)]
 fn cached_stop_result(
     db: &riviu_core::db::Database,
     kind: riviu_core::OperationRunKind,
@@ -50,16 +53,39 @@ fn claim_stop_result(
     db: &riviu_core::db::Database,
     kind: riviu_core::OperationRunKind,
     source: &str,
-    initial: OperationStopResult,
+    mut initial: OperationStopResult,
     active_stops: &parking_lot::Mutex<HashSet<String>>,
 ) -> anyhow::Result<(OperationStopResult, bool)> {
     // One synchronous claim phase. Never use a cached 'stopping' read after the
     // old closer can drop its active claim; that would spawn a second closer.
     let mut active = active_stops.lock();
-    if let Some(current) = cached_stop_result(db, kind, source, &initial.operation_id)? {
-        if current.state == "closed" || active.contains(&initial.operation_id) {
+    if active.contains(&initial.operation_id) {
+        let current = db
+            .get_setting(&key(&initial.operation_id))?
+            .map(|raw| serde_json::from_str(&raw))
+            .transpose()?
+            .unwrap_or(initial);
+        return Ok((current, false));
+    }
+    let cached: Option<OperationStopResult> = db
+        .get_setting(&key(&initial.operation_id))?
+        .map(|raw| serde_json::from_str(&raw))
+        .transpose()?;
+    if let Some(current) = cached {
+        let closed_current = kind != riviu_core::OperationRunKind::Publish
+            || (current.stop_marker.is_some()
+                && current.stop_marker
+                    == db.get_setting(&format!("operation.stop.publish:{source}"))?
+                && db
+                    .publish_verifications_for_campaign(source, 1000)?
+                    .is_empty());
+        if current.state == "closed" && closed_current {
             return Ok((current, false));
         }
+    }
+    if kind == riviu_core::OperationRunKind::Publish {
+        db.begin_publish_operation_stop(source)?;
+        initial.stop_marker = db.get_setting(&format!("operation.stop.publish:{source}"))?;
     }
     if active.contains(&initial.operation_id) {
         return Ok((initial, false));
@@ -86,6 +112,7 @@ mod recovery_tests {
             operation_id: "publish:c".into(),
             state: "stopping".into(),
             devices: vec![],
+            stop_marker: None,
         };
         db.set_setting(&key("publish:c"), &serde_json::to_string(&initial).unwrap())
             .unwrap();
@@ -99,6 +126,18 @@ mod recovery_tests {
         db.set_setting(
             &key("publish:c"),
             r#"{"operationId":"publish:c","state":"closed","devices":[]}"#,
+        )
+        .unwrap();
+        let marker = db.get_setting("operation.stop.publish:c").unwrap();
+        db.set_setting(
+            &key("publish:c"),
+            &serde_json::to_string(&OperationStopResult {
+                operation_id: "publish:c".into(),
+                state: "closed".into(),
+                devices: vec![],
+                stop_marker: marker,
+            })
+            .unwrap(),
         )
         .unwrap();
         let active = parking_lot::Mutex::new(HashSet::new());
@@ -185,6 +224,7 @@ pub async fn operation_stop(
     let result = OperationStopResult {
         operation_id: operation_id.clone(),
         state: "stopping".into(),
+        stop_marker: None,
         devices: udids
             .iter()
             .map(|udid| StopDeviceResult {
@@ -276,10 +316,20 @@ pub async fn operation_stop(
                 device.message = error.message.to_string();
             }
         } else {
-            let futures = udids
-                .iter()
-                .map(|udid| close_stopped_device(&state, &operation_id, udid));
-            result.devices = futures_util::future::join_all(futures).await;
+            let stop_marker = result.stop_marker.clone();
+            let futures = udids.iter().map(|udid| {
+                close_stopped_device(&state, &operation_id, udid, stop_marker.as_deref())
+            });
+            use futures_util::StreamExt;
+            let mut pending: futures_util::stream::FuturesUnordered<_> = futures.collect();
+            while let Some(device) = pending.next().await {
+                if let Some(row) = result.devices.iter_mut().find(|r| r.udid == device.udid) {
+                    *row = device;
+                }
+                if let Ok(raw) = serde_json::to_string(&result) {
+                    let _ = state.db.set_setting(&key(&operation_id), &raw);
+                }
+            }
             result.state = if result.devices.iter().all(|d| d.closed) {
                 "closed"
             } else {
@@ -298,10 +348,12 @@ async fn close_stopped_device(
     state: &AppState,
     operation_id: &str,
     udid: &str,
+    expected_publish_marker: Option<&str>,
 ) -> StopDeviceResult {
     let control = &state.control;
     let db = &state.db;
     let result: Result<(), String> = async {
+        let publish_marker = expected_publish_marker;
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
         loop {
             match control
@@ -310,6 +362,20 @@ async fn close_stopped_device(
             {
                 Ok(context) => {
                     let closed: Result<(), String> = async {
+                        if let Some(campaign) = operation_id.strip_prefix("publish:") {
+                            if publish_marker.is_none()
+                                || db
+                                    .get_setting(&format!("operation.stop.publish:{campaign}"))
+                                    .map_err(|e| e.to_string())?
+                                    .as_deref()
+                                    != publish_marker
+                            {
+                                return Err(
+                                    "Lần dừng đã thay đổi; không đóng ứng dụng bằng yêu cầu cũ"
+                                        .into(),
+                                );
+                            }
+                        }
                         // A queued or newly started operation after cancellation still owns
                         // its target scope even during a gap between device leases.
                         for id in db
@@ -370,6 +436,26 @@ async fn close_stopped_device(
                         .map_err(|e| e.to_string());
                     closed?;
                     released?;
+                    if let (Some(campaign), Some(marker)) =
+                        (operation_id.strip_prefix("publish:"), publish_marker)
+                    {
+                        if !db
+                            .record_publish_stopped_device_release(campaign, udid, marker)
+                            .map_err(|e| e.to_string())?
+                        {
+                            return Err(
+                                "Phiên đã thay đổi; không dùng kết quả dừng cũ để nhả máy".into()
+                            );
+                        }
+                        state
+                            .events
+                            .emit(riviu_core::events::AppEvent::PublishUpdated {
+                                campaign_id: campaign.into(),
+                                revision: db
+                                    .publish_campaign_revision(campaign)
+                                    .unwrap_or_default(),
+                            });
+                    }
                     return Ok(());
                 }
                 Err(riviu_core::DeviceControlError::Busy(_))

@@ -80,6 +80,40 @@ pub(super) async fn foreground(
         "Bằng chứng tắt app không khớp TikTok của lượt đã gửi"
     );
     authorize()?;
+    // Samsung Android 9 / Global 46.2.42: a Share recipient picker can remain on
+    // top after TikTok is stopped. Launch receipts say OK but TikTok stays behind it.
+    // Back only from the measured empty recipient picker; never select a recipient
+    // or interact with a message composer or another application.
+    let session = control.session(context)?;
+    for _ in 0..2 {
+        if session.active_app_bundle().await.ok().as_deref()
+            != Some("com.samsung.android.messaging")
+        {
+            break;
+        }
+        let rows = session
+            .locate_all(riviu_core::ElementQuery::Text {
+                value: "Select recipients",
+                exact: true,
+            })
+            .await?;
+        if rows.len() != 1 {
+            break;
+        }
+        let empty = session
+            .locate_all(riviu_core::ElementQuery::Text {
+                value: "No contacts",
+                exact: true,
+            })
+            .await?;
+        if empty.len() != 1 {
+            break;
+        }
+        authorize()?;
+        session.back().await?;
+        tokio::time::sleep(std::time::Duration::from_millis(350)).await;
+    }
+    authorize()?;
     control.foreground_session_app(context, package).await?;
     authorize()?;
     let running = control

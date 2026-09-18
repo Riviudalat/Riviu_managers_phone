@@ -444,7 +444,9 @@ fn driver_error(udid: &str, operation: &'static str, error: anyhow::Error) -> De
     DeviceControlError::Driver {
         udid: udid.to_string(),
         operation,
-        message: error.to_string(),
+        // Launcher receipts can say "Status: ok" while foreground verification fails.
+        // Preserve the cause chain when crossing into the serializable driver error.
+        message: format!("{error:#}"),
     }
 }
 
@@ -2030,6 +2032,16 @@ async fn clean_ticket(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn driver_error_keeps_foreground_failure_beneath_successful_launch_receipt() {
+        let source = anyhow::anyhow!("foreground blocked by StatusBar: keyguard showing")
+            .context("mở launcher: Events injected: 1; mở activity: Status: ok");
+        let error =
+            super::driver_error("fixture-phone", "startInteractionSession", source).to_string();
+        assert!(error.contains("Status: ok"));
+        assert!(error.contains("foreground blocked by StatusBar: keyguard showing"));
+    }
+
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
     use std::sync::Arc;

@@ -348,6 +348,7 @@ fn recovery_row(
 }
 
 fn publish_close_pending(conn: &Connection, campaign: &str) -> anyhow::Result<bool> {
+    let marker = stop_marker(conn, campaign)?;
     let result: Option<String> = conn
         .query_row(
             "SELECT value FROM settings WHERE key=?1",
@@ -356,6 +357,17 @@ fn publish_close_pending(conn: &Connection, campaign: &str) -> anyhow::Result<bo
         )
         .optional()?;
     if let Some(result) = result {
+        if marker
+            .as_deref()
+            .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
+            .is_some_and(|m| m["version"] == 3 && m["closePending"] == true)
+        {
+            return Ok(serde_json::from_str::<serde_json::Value>(&result)
+                .ok()
+                .is_none_or(|r| {
+                    r["state"] != "closed" || r["stopMarker"].as_str() != marker.as_deref()
+                }));
+        }
         return Ok(serde_json::from_str::<serde_json::Value>(&result)
             .ok()
             .is_none_or(|v| v["state"] != "closed"));
@@ -493,6 +505,10 @@ impl Database {
             .unwrap_or(0);
         evidence["verificationStatus"] = serde_json::json!({"state":"pending","cause":"operatorResumed","reasonCode":"operatorResumed","reason":"Tiếp tục xác minh bài đã gửi; không đăng lại","attempts":attempts,"checkIntervalSeconds":VERIFICATION_CHECK_SECONDS,"nextCheckAt":now,"deadlineAt":null});
         tx.execute("UPDATE publish_assignments SET state='verifying',error_code='post_verification_pending',evidence_json=?2,revision=revision+1,updated_at=?3 WHERE id=?1 AND revision=?4",params![assignment_id,evidence.to_string(),now,expected_revision])?;
+        tx.execute(
+            "DELETE FROM settings WHERE key=?1",
+            [format!("publish.stop-release.{assignment_id}")],
+        )?;
         reconcile_verification_snapshot(&tx, &candidate.campaign_id, &now)?;
         tx.commit()?;
         Ok(result(State::Accepted, None))
@@ -647,8 +663,8 @@ impl Database {
             .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
             .is_some_and(|v| v["state"] == "closed");
         let close_pending =
-            (will_close && !already_closed) || publish_close_pending(&tx, campaign_id)?;
-        tx.execute("INSERT INTO settings(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",params![format!("operation.stop.publish:{campaign_id}"),serde_json::json!({"version":2,"requestedAt":now,"generation":Uuid::new_v4().to_string(),"closePending":close_pending}).to_string()])?;
+            will_close || (!already_closed && publish_close_pending(&tx, campaign_id)?);
+        tx.execute("INSERT INTO settings(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",params![format!("operation.stop.publish:{campaign_id}"),serde_json::json!({"version":if will_close {3}else{2},"requestedAt":now,"generation":Uuid::new_v4().to_string(),"closePending":close_pending}).to_string()])?;
         tx.commit()?;
         Ok(devices)
     }
@@ -657,6 +673,43 @@ impl Database {
         Ok(self
             .get_setting(&format!("operation.stop.publish:{campaign_id}"))?
             .is_some())
+    }
+
+    /// Called only after the exact device closer has ended its exclusive context.
+    /// The stop marker fences a delayed closer from releasing a resumed attempt.
+    pub fn record_publish_stopped_device_release(
+        &self,
+        campaign_id: &str,
+        udid: &str,
+        expected_marker: &str,
+    ) -> anyhow::Result<bool> {
+        use sha2::Digest;
+        let mut conn = self.conn()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        if stop_marker(&tx, campaign_id)?.as_deref() != Some(expected_marker) {
+            return Ok(false);
+        }
+        let rows = tx.prepare("SELECT id,effect_intent,evidence_json FROM publish_assignments WHERE campaign_id=?1 AND udid=?2")?
+            .query_map(params![campaign_id,udid], |r| Ok((r.get::<_,String>(0)?,r.get::<_,Option<String>>(1)?,r.get::<_,Option<String>>(2)?)))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        for (id, intent, evidence) in rows {
+            if evidence_has_post_link(evidence.as_deref()) {
+                continue;
+            }
+            let stopped = evidence
+                .as_deref()
+                .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+                .is_some_and(|e| e["verificationStatus"]["cause"] == "operatorStopped");
+            if !stopped {
+                return Ok(false);
+            }
+            let proof = serde_json::json!({"assignmentId":id,"udid":udid,"stopMarker":expected_marker,
+                "intentSha256":intent.as_ref().map(|s|format!("{:x}",sha2::Sha256::digest(s.as_bytes())))});
+            tx.execute("INSERT INTO settings(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                params![format!("publish.stop-release.{id}"),proof.to_string()])?;
+        }
+        tx.commit()?;
+        Ok(true)
     }
     pub fn publish_verification_is_current(
         &self,
@@ -927,6 +980,36 @@ impl Database {
                     active_pipeline,
                     now,
                 );
+                // A closer proves this device drained even while a sibling is
+                // still releasing its own lease in the cancelled pipeline.
+                if !completed && state != "posting" {
+                    use sha2::Digest;
+                    let marker = stop_marker(&conn, &campaign_id)?;
+                    let raw: Option<String> = conn
+                        .query_row(
+                            "SELECT value FROM settings WHERE key=?1",
+                            [format!("publish.stop-release.{assignment_id}")],
+                            |r| r.get(0),
+                        )
+                        .optional()?;
+                    let stopped = evidence
+                        .as_deref()
+                        .and_then(|r| serde_json::from_str::<serde_json::Value>(r).ok())
+                        .is_some_and(|e| e["verificationStatus"]["cause"] == "operatorStopped");
+                    completed = stopped
+                        && marker.is_some()
+                        && raw
+                            .and_then(|r| serde_json::from_str::<serde_json::Value>(&r).ok())
+                            .is_some_and(|p| {
+                                let digest = intent
+                                    .as_ref()
+                                    .map(|s| format!("{:x}", sha2::Sha256::digest(s.as_bytes())));
+                                p["assignmentId"] == assignment_id
+                                    && p["udid"] == udid
+                                    && p["stopMarker"].as_str() == marker.as_deref()
+                                    && p["intentSha256"].as_str() == digest.as_deref()
+                            });
+                }
                 if !completed
                     && !active_pipeline
                     && matches!(state.as_str(), "uncertain" | "verifying")

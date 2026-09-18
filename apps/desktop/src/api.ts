@@ -1077,6 +1077,7 @@ export async function publishCancel(campaignId: string) {
 
 export interface OperationStopResult {
   operationId: string;
+  stopMarker?: string | null;
   state: "stopping" | "closed" | "needsAttention" | "failed";
   devices: { udid: string; closed: boolean; message: string }[];
 }

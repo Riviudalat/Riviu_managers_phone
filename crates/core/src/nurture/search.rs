@@ -40,6 +40,59 @@ fn query_matches(tree: &Tree, package: &str, keyword: &str) -> bool {
             && fold(n.attr("text")) == fold(keyword)
     })
 }
+
+fn result_cards(tree: &Tree, package: &str, version: &str) -> Vec<ElementBox> {
+    let mut results = nodes(tree, package, |n| {
+        n.attr("clickable") == "true"
+            && (n.attr("content-desc").starts_with("Video by ")
+                || n.attr("content-desc").starts_with("Video của "))
+    });
+    // Global 45.7.3/en, ce021712aaf9533405, 18/09: Videos has unlabeled
+    // clickable cards directly under this GridView, each with a caption and author.
+    // Do not apply obfuscated IDs to another build or select a user/Shop result.
+    if results.is_empty() && package == "com.zhiliaoapp.musically" && version == "45.7.3" {
+        for (index, card) in tree.nodes.iter().enumerate() {
+            if !card.visible(package)
+                || !tree.ancestors_visible(index)
+                || card.attr("resource-id") != "com.zhiliaoapp.musically:id/u_u"
+                || card.attr("clickable") != "true"
+                || !card.parent.is_some_and(|parent| {
+                    let grid = &tree.nodes[parent];
+                    grid.attr("class") == "android.widget.GridView"
+                        && grid.attr("resource-id") == "com.zhiliaoapp.musically:id/mo3"
+                })
+            {
+                continue;
+            }
+            let descendant_has = |suffix: &str| {
+                tree.nodes.iter().enumerate().any(|(child, node)| {
+                    if !node.visible(package)
+                        || !tree.ancestors_visible(child)
+                        || !node.attr("resource-id").ends_with(suffix)
+                        || node.attr("text").trim().is_empty()
+                    {
+                        return false;
+                    }
+                    let mut parent = node.parent;
+                    while let Some(p) = parent {
+                        if p == index {
+                            return true;
+                        }
+                        parent = tree.nodes[p].parent;
+                    }
+                    false
+                })
+            };
+            if descendant_has(":id/desc") && descendant_has(":id/b96") {
+                if let Some(rect) = card.rect().filter(|r| r.enabled) {
+                    results.push(rect);
+                }
+            }
+        }
+    }
+    results.sort_by(|a, b| a.y.total_cmp(&b.y).then(a.x.total_cmp(&b.x)));
+    results
+}
 async fn read(session: &dyn UiSession, package: &str) -> anyhow::Result<Tree> {
     ensure!(
         session.active_app_bundle().await? == package,
@@ -124,22 +177,24 @@ pub(super) async fn open(
     .context("Không thấy nút xác nhận Tìm kiếm")?;
     check(stop, deadline)?;
     session.tap(search.centre()).await?;
-    let videos = loop {
+    loop {
         check(stop, deadline)?;
         tree = read(session, package).await?;
         ensure!(
             query_matches(&tree, package, keyword),
             "Từ khóa đã thay đổi khi tìm kiếm"
         );
-        if let Some(tab) = unique(nodes(&tree, package, |n| {
+        if unique(nodes(&tree, package, |n| {
             ["videos", "video"].contains(&fold(n.attr("content-desc")).as_str())
-        }))? {
-            break tab;
+        }))?
+        .is_some()
+        {
+            break;
         }
         super::sleep_interruptible(Duration::from_millis(400), stop).await;
-    };
-    check(stop, deadline)?;
-    session.tap(videos.centre()).await?;
+    }
+    let mut prior_tab: Option<ElementBox> = None;
+    let mut tab_taps = 0;
     let first = loop {
         check(stop, deadline)?;
         tree = read(session, package).await?;
@@ -153,15 +208,33 @@ pub(super) async fn open(
                 && (n.attr("selected") == "true" || n.attr("clickable") == "false")
         });
         if !videos_selected {
+            let tab = unique(nodes(&tree, package, |n| {
+                ["videos", "video"].contains(&fold(n.attr("content-desc")).as_str())
+            }))?;
+            if let Some(tab) = tab {
+                // TikTok inserts LIVE before Videos after loading results. Require two
+                // agreeing fresh geometries and verify selection before touching a card.
+                if prior_tab.as_ref().is_some_and(|prior| {
+                    (prior.x - tab.x).abs() < 2.0
+                        && (prior.y - tab.y).abs() < 2.0
+                        && (prior.width - tab.width).abs() < 2.0
+                        && (prior.height - tab.height).abs() < 2.0
+                }) {
+                    ensure!(tab_taps < 3, "Tab Videos không giữ được trạng thái đã chọn");
+                    check(stop, deadline)?;
+                    session.tap(tab.centre()).await?;
+                    tab_taps += 1;
+                    prior_tab = None;
+                } else {
+                    prior_tab = Some(tab);
+                }
+            } else {
+                prior_tab = None;
+            }
             super::sleep_interruptible(Duration::from_millis(400), stop).await;
             continue;
         }
-        let mut results = nodes(&tree, package, |n| {
-            n.attr("clickable") == "true"
-                && (n.attr("content-desc").starts_with("Video by ")
-                    || n.attr("content-desc").starts_with("Video của "))
-        });
-        results.sort_by(|a, b| a.y.total_cmp(&b.y).then(a.x.total_cmp(&b.x)));
+        let results = result_cards(&tree, package, &version);
         if let Some(first) = results.into_iter().next() {
             break first;
         }
@@ -220,7 +293,9 @@ fn video_matches(tree: &Tree, package: &str, _keyword: &str) -> bool {
     .map(|r| r.y + r.height)
     .max_by(f64::total_cmp);
     let inline_comment = nodes(tree, package, |n| {
-        n.attr("class") == "android.widget.EditText" && n.attr("resource-id").ends_with(":id/cnd")
+        n.attr("class") == "android.widget.EditText"
+            && (n.attr("resource-id").ends_with(":id/cnd")
+                || n.attr("resource-id") == "com.zhiliaoapp.musically:id/e7q")
     })
     .iter()
     .any(|r| video_bottom.is_some_and(|bottom| r.y >= bottom));
@@ -239,6 +314,29 @@ mod tests {
     use super::*;
     use std::sync::Mutex;
     const PACKAGE: &str = "com.ss.android.ugc.trill";
+    #[test]
+    fn global_search_cards_require_measured_build_grid_caption_and_author() {
+        const PKG: &str = "com.zhiliaoapp.musically";
+        let source = format!(
+            r#"<hierarchy><node package="{PKG}" class="android.widget.GridView" resource-id="{PKG}:id/mo3" enabled="true" bounds="[0,304][1080,2094]">
+          <node package="{PKG}" class="android.widget.FrameLayout" resource-id="{PKG}:id/u_u" clickable="true" enabled="true" bounds="[11,315][535,1373]">
+            <node package="{PKG}" resource-id="{PKG}:id/desc" text="Đà Lạt" enabled="true" bounds="[32,1169][503,1263]"/>
+            <node package="{PKG}" resource-id="{PKG}:id/b96" text="QR HOTEL DALAT" enabled="true" bounds="[106,1279][366,1318]"/>
+          </node></node></hierarchy>"#
+        );
+        let tree = xml(&source);
+        assert_eq!(result_cards(&tree, PKG, "45.7.3").len(), 1);
+        assert!(result_cards(&tree, PKG, "46.2.1").is_empty());
+        assert!(
+            result_cards(&xml(&source.replace(":id/b96", ":id/other")), PKG, "45.7.3").is_empty()
+        );
+        assert!(result_cards(
+            &xml(&source.replace("android.widget.GridView", "android.widget.ListView")),
+            PKG,
+            "45.7.3"
+        )
+        .is_empty());
+    }
     fn xml(body: &str) -> Tree {
         Tree::parse(crate::HierarchySourceSnapshot {
             xml: format!("<hierarchy>{body}</hierarchy>"),

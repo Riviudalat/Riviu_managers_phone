@@ -1,6 +1,152 @@
 use super::*;
 
 #[test]
+fn stopped_device_release_removes_only_its_hold_and_survives_restart() {
+    use sha2::Digest;
+    let (db, path, campaign, assignments) = legacy_pending();
+    db.begin_publish_operation_stop(&campaign).unwrap();
+    let marker = db
+        .get_setting(&format!("operation.stop.publish:{campaign}"))
+        .unwrap()
+        .unwrap();
+    let a = &db
+        .get_publish_campaign(&campaign)
+        .unwrap()
+        .unwrap()
+        .assignments[0];
+    db.set_setting(&format!("publish.stop-release.{}", a.id), &serde_json::json!({
+        "assignmentId":a.id,"udid":a.udid,"stopMarker":marker,
+        "intentSha256":a.effect_intent.as_ref().map(|s|format!("{:x}",sha2::Sha256::digest(s.as_bytes())))
+    }).to_string()).unwrap();
+    let guard = db.publish_device_guard(&a.udid).unwrap();
+    assert!(
+        guard.blocking.is_empty(),
+        "Stopped and closed device must be available for new content"
+    );
+    assert_eq!(guard.link_review.len(), 1);
+    assert!(db
+        .has_pending_publish_for_device(&assignments[1].udid)
+        .unwrap());
+    let udid = a.udid.clone();
+    drop(db);
+    assert!(!Database::open(path)
+        .unwrap()
+        .has_pending_publish_for_device(&udid)
+        .unwrap());
+}
+
+#[test]
+fn stopped_device_is_released_while_sibling_pipeline_is_still_draining() {
+    let (db, _, campaign, assignments) = legacy_pending();
+    db.begin_publish_operation_stop(&campaign).unwrap();
+    let marker = db
+        .get_setting(&format!("operation.stop.publish:{campaign}"))
+        .unwrap()
+        .unwrap();
+    assert!(db
+        .record_publish_stopped_device_release(&campaign, &assignments[0].udid, &marker)
+        .unwrap());
+    db.conn().unwrap().execute("INSERT INTO publish_pipeline_runs(campaign_id,token,created_at) VALUES(?1,'sibling-closing','now')",[&campaign]).unwrap();
+    assert!(!db
+        .has_pending_publish_for_device(&assignments[0].udid)
+        .unwrap());
+    assert!(db
+        .has_pending_publish_for_device(&assignments[1].udid)
+        .unwrap());
+}
+
+#[test]
+fn stopped_release_is_fenced_by_marker_intent_and_explicit_resume() {
+    let (db, _, campaign, assignments) = legacy_pending();
+    let a = &assignments[0];
+    db.begin_publish_operation_stop(&campaign).unwrap();
+    let marker = db
+        .get_setting(&format!("operation.stop.publish:{campaign}"))
+        .unwrap()
+        .unwrap();
+    assert!(db
+        .record_publish_stopped_device_release(&campaign, &a.udid, &marker)
+        .unwrap());
+    assert!(!db.has_pending_publish_for_device(&a.udid).unwrap());
+    db.set_setting(
+        &format!("operation.stop.result:publish:{campaign}"),
+        &serde_json::json!({"state":"closed","stopMarker":marker}).to_string(),
+    )
+    .unwrap();
+    let revision = db.publish_assignment_revision(&a.id).unwrap();
+    assert_eq!(
+        db.resume_publish_verification(&a.id, true, revision)
+            .unwrap()
+            .state,
+        PublishResumeVerificationState::Accepted
+    );
+    assert!(db.has_pending_publish_for_device(&a.udid).unwrap());
+    assert!(!db
+        .record_publish_stopped_device_release(&campaign, &a.udid, &marker)
+        .unwrap());
+    db.begin_publish_operation_stop(&campaign).unwrap();
+    assert!(!db
+        .record_publish_stopped_device_release(&campaign, &a.udid, &marker)
+        .unwrap());
+    let marker = db
+        .get_setting(&format!("operation.stop.publish:{campaign}"))
+        .unwrap()
+        .unwrap();
+    assert!(db
+        .record_publish_stopped_device_release(&campaign, &a.udid, &marker)
+        .unwrap());
+    db.conn()
+        .unwrap()
+        .execute(
+            "UPDATE publish_assignments SET effect_intent='changed' WHERE id=?1",
+            [&a.id],
+        )
+        .unwrap();
+    assert!(db.has_pending_publish_for_device(&a.udid).unwrap());
+}
+
+#[test]
+fn stopped_release_does_not_cover_a_second_campaign_on_same_phone() {
+    let (db, _, campaign, assignments) = legacy_pending();
+    let a = &assignments[0];
+    db.begin_publish_operation_stop(&campaign).unwrap();
+    let marker = db
+        .get_setting(&format!("operation.stop.publish:{campaign}"))
+        .unwrap()
+        .unwrap();
+    assert!(db
+        .record_publish_stopped_device_release(&campaign, &a.udid, &marker)
+        .unwrap());
+    db.conn().unwrap().execute("INSERT INTO publish_campaigns(id,request_id,source_root,request_json,state,created_at,updated_at) VALUES('other','other','fixture','{}','verifying','now','now')",[]).unwrap();
+    db.conn().unwrap().execute("INSERT INTO publish_assignments(id,campaign_id,bundle_id,udid,ordinal,state,created_at,updated_at) VALUES('other','other',?2,?1,0,'verifying','now','now')",params![a.udid,a.bundle_id]).unwrap();
+    let guard = db.publish_device_guard(&a.udid).unwrap();
+    assert_eq!(guard.blocking.len(), 1);
+    assert_eq!(guard.blocking[0].campaign_id, "other");
+    assert_eq!(guard.link_review.len(), 1);
+}
+
+#[test]
+fn old_closed_result_cannot_allow_resume_while_new_stop_is_closing() {
+    let (db, _, campaign, assignments) = legacy_pending();
+    db.begin_publish_operation_stop(&campaign).unwrap();
+    let marker = db
+        .get_setting(&format!("operation.stop.publish:{campaign}"))
+        .unwrap()
+        .unwrap();
+    db.set_setting(
+        &format!("operation.stop.result:publish:{campaign}"),
+        &serde_json::json!({"state":"closed","stopMarker":marker}).to_string(),
+    )
+    .unwrap();
+    db.begin_publish_operation_stop(&campaign).unwrap();
+    let revision = db.publish_assignment_revision(&assignments[0].id).unwrap();
+    let result = db
+        .resume_publish_verification(&assignments[0].id, true, revision)
+        .unwrap();
+    assert_eq!(result.reason.as_deref(), Some("stopInProgress"));
+}
+
+#[test]
 fn operator_stop_preserves_post_intent_rejects_stale_observer_and_parks_checks_after_restart() {
     let (db, path, campaign, assignments) = legacy_pending();
     let before = db

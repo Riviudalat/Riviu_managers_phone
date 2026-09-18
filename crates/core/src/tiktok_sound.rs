@@ -8,6 +8,10 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use anyhow::Context;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
 use tokio::time::Instant;
 
 use crate::driver::{ElementBox, ElementQuery, UiSession};
@@ -15,9 +19,95 @@ use crate::publish::SoundCandidate;
 
 mod snapshot;
 
-const PICKER_WINDOW: Duration = Duration::from_secs(8);
 const READBACK_WINDOW: Duration = Duration::from_secs(8);
 const POLL: Duration = Duration::from_millis(250);
+const SOUND_WINDOW: Duration = Duration::from_secs(180);
+
+struct SoundBudget {
+    deadline: Instant,
+    stopped: Arc<AtomicBool>,
+}
+tokio::task_local! { static SOUND_BUDGET: SoundBudget; }
+
+#[derive(Debug, thiserror::Error)]
+#[error("Đã tạm dừng trong lúc chờ TikTok tải nhạc")]
+pub(crate) struct SoundStopped;
+
+/// One budget spans opening, loading, selecting and confirming. The scoped flag
+/// lets nested observations honor cancellation without abandoning a live tap.
+pub(crate) async fn with_sound_budget<T>(
+    stop: &AtomicBool,
+    work: impl std::future::Future<Output = anyhow::Result<T>>,
+) -> anyhow::Result<T> {
+    let stopped = Arc::new(AtomicBool::new(stop.load(Ordering::Relaxed)));
+    let budget = SoundBudget {
+        deadline: Instant::now() + SOUND_WINDOW,
+        stopped: stopped.clone(),
+    };
+    let task = SOUND_BUDGET.scope(budget, work);
+    tokio::pin!(task);
+    let mut poll = tokio::time::interval(POLL);
+    loop {
+        tokio::select! {
+            result=&mut task => return result,
+            _=poll.tick()=>stopped.store(stop.load(Ordering::Relaxed),Ordering::Relaxed),
+        }
+    }
+}
+
+fn phase_deadline(window: Duration) -> Instant {
+    SOUND_BUDGET
+        .try_with(|b| b.deadline)
+        .unwrap_or_else(|_| Instant::now() + window)
+}
+fn check_wait() -> anyhow::Result<()> {
+    SOUND_BUDGET
+        .try_with(|b| {
+            if b.stopped.load(Ordering::Relaxed) {
+                return Err(SoundStopped.into());
+            }
+            anyhow::ensure!(
+                Instant::now() < b.deadline,
+                "TikTok chưa tải hoặc xác nhận được nhạc sau 3 phút; chưa bấm Đăng"
+            );
+            Ok(())
+        })
+        .unwrap_or(Ok(()))
+}
+async fn read_sound<T>(
+    work: impl std::future::Future<Output = anyhow::Result<T>>,
+) -> anyhow::Result<T> {
+    check_wait()?;
+    let value = if let Ok(deadline) = SOUND_BUDGET.try_with(|b| b.deadline) {
+        let task = tokio::time::timeout_at(deadline, work);
+        tokio::pin!(task);
+        let mut poll = tokio::time::interval(POLL);
+        loop {
+            tokio::select! {
+                r=&mut task => break r.map_err(|_|anyhow::anyhow!("TikTok chưa tải hoặc xác nhận được nhạc sau 3 phút; chưa bấm Đăng"))??,
+                _=poll.tick()=>check_wait()?,
+            }
+        }
+    } else {
+        work.await?
+    };
+    check_wait()?;
+    Ok(value)
+}
+async fn sound_tap(session: &dyn UiSession, point: crate::TapPoint) -> anyhow::Result<()> {
+    check_wait()?;
+    session.tap(point).await?;
+    check_wait()
+}
+fn transient_sound_read(error: &anyhow::Error) -> bool {
+    error
+        .downcast_ref::<crate::driver::AccessibilityReadUnavailable>()
+        .is_some()
+        || error.chain().any(|e| {
+            e.downcast_ref::<reqwest::Error>()
+                .is_some_and(reqwest::Error::is_timeout)
+        })
+}
 
 /// The exact hierarchy shape measured for one TikTok build.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -321,6 +411,23 @@ pub struct ObservedSoundPool {
 }
 
 impl ObservedSoundPool {
+    fn stable_with(&self, other: &Self) -> bool {
+        self.candidates == other.candidates
+            && self.selected_index == other.selected_index
+            && self.targets.len() == other.targets.len()
+            && self.targets.iter().zip(&other.targets).all(|(a, b)| {
+                a.enabled
+                    && b.enabled
+                    && a.width > 0.0
+                    && a.height > 0.0
+                    && b.width > 0.0
+                    && b.height > 0.0
+                    && (a.x - b.x).abs() <= 4.0
+                    && (a.y - b.y).abs() <= 4.0
+                    && (a.width - b.width).abs() <= 4.0
+                    && (a.height - b.height).abs() <= 4.0
+            })
+    }
     pub fn effective_plan(&self, fallback: SoundPickerPlan) -> SoundPickerPlan {
         self.effective_plan.unwrap_or(fallback)
     }
@@ -342,16 +449,33 @@ pub async fn open_and_observe_sounds(
     if plan.dynamic {
         return open_dynamic_sounds(session, plan, maximum_visible).await;
     }
-    let entries = session
-        .locate_all(ElementQuery::ResourceIdSuffix(plan.entry_id))
-        .await
-        .context("locate sound-picker entry")?;
-    if entries.is_empty() && !session.gui_session_epoch().is_empty() {
-        return open_dynamic_sounds(session, plan, maximum_visible).await;
-    }
-    let entry = exactly_one(entries, "sound-picker entry")?;
-    session
-        .tap(entry.centre())
+    let deadline = phase_deadline(SOUND_WINDOW);
+    let entry = loop {
+        check_wait()?;
+        let entries =
+            read_sound(session.locate_all(ElementQuery::ResourceIdSuffix(plan.entry_id))).await?;
+        if let [only] = entries.as_slice() {
+            if only.enabled && only.width > 0.0 && only.height > 0.0 {
+                break only.clone();
+            }
+        }
+        if entries.is_empty() && !session.gui_session_epoch().is_empty() {
+            return open_dynamic_sounds(session, plan, maximum_visible).await;
+        }
+        // A fresh tree removes hidden ancestors and duplicate nested wrappers.
+        let tree = crate::ui_automation::tree::Tree::parse(
+            read_sound(session.hierarchy_source_snapshot()).await?,
+        )?;
+        if let Some(button) = unique_sound_entry(&tree, plan.package, &[plan.entry_id]) {
+            break button;
+        }
+        anyhow::ensure!(
+            Instant::now() < deadline,
+            "Chưa tìm được duy nhất nút nhạc sẵn sàng; chưa bấm Đăng"
+        );
+        tokio::time::sleep(POLL).await;
+    };
+    sound_tap(session, entry.centre())
         .await
         .context("open sound picker")?;
 
@@ -362,38 +486,68 @@ pub async fn open_and_observe_sounds(
     observe_sound_pool(session, plan, maximum_visible).await
 }
 
+fn unique_sound_entry(
+    tree: &crate::ui_automation::tree::Tree,
+    package: &str,
+    ids: &[&str],
+) -> Option<ElementBox> {
+    let mut boxes: Vec<ElementBox> = Vec::new();
+    for id in ids {
+        for index in tree.matching(package, ElementQuery::ResourceIdSuffix(id)) {
+            if !tree.nodes[index].visible(package) || !tree.ancestors_visible(index) {
+                continue;
+            }
+            let Some(rect) = tree.nodes[index]
+                .rect()
+                .filter(|r| r.enabled && r.clickable && r.width > 0.0 && r.height > 0.0)
+            else {
+                continue;
+            };
+            if !boxes.iter().any(|b| {
+                b.x == rect.x && b.y == rect.y && b.width == rect.width && b.height == rect.height
+            }) {
+                boxes.push(rect);
+            }
+        }
+    }
+    if boxes.len() == 1 {
+        boxes.pop()
+    } else {
+        None
+    }
+}
+
 async fn open_dynamic_sounds(
     session: &dyn UiSession,
     plan: SoundPickerPlan,
     maximum: usize,
 ) -> anyhow::Result<ObservedSoundPool> {
-    let source =
-        crate::ui_automation::tree::Tree::parse(session.hierarchy_source_snapshot().await?)?;
-    let mut entries = Vec::new();
-    let mut seen = std::collections::HashSet::new();
-    for candidate in MEASURED_SOUND_PICKERS
+    let ids: Vec<_> = MEASURED_SOUND_PICKERS
         .iter()
         .filter(|p| p.plan.package == plan.package)
-    {
-        if seen.insert(candidate.plan.entry_id) {
-            entries.extend(source.matching(
-                plan.package,
-                ElementQuery::ResourceIdSuffix(candidate.plan.entry_id),
-            ));
+        .map(|p| p.plan.entry_id)
+        .collect();
+    let deadline = phase_deadline(SOUND_WINDOW);
+    let button = loop {
+        let source = crate::ui_automation::tree::Tree::parse(
+            read_sound(session.hierarchy_source_snapshot()).await?,
+        )?;
+        if let Some(button) = unique_sound_entry(&source, plan.package, &ids) {
+            break button;
         }
-    }
-    entries.sort_unstable();
-    entries.dedup();
-    let [index] = entries.as_slice() else {
-        anyhow::bail!("sound_entry_ambiguous: giao diện chưa có duy nhất nút nhạc");
+        anyhow::ensure!(
+            Instant::now() < deadline,
+            "sound_entry_ambiguous: giao diện chưa có duy nhất nút nhạc"
+        );
+        tokio::time::sleep(POLL).await;
     };
-    let button = source.nodes[*index].rect().context("sound entry bounds")?;
-    anyhow::ensure!(button.enabled && button.clickable, "sound entry disabled");
-    session.tap(button.centre()).await?;
-    let deadline = Instant::now() + std::time::Duration::from_secs(30);
+    sound_tap(session, button.centre()).await?;
+    let deadline = phase_deadline(SOUND_WINDOW);
     let selected = loop {
-        let tree =
-            crate::ui_automation::tree::Tree::parse(session.hierarchy_source_snapshot().await?)?;
+        check_wait()?;
+        let tree = crate::ui_automation::tree::Tree::parse(
+            read_sound(session.hierarchy_source_snapshot()).await?,
+        )?;
         let mut matches = Vec::new();
         for candidate in MEASURED_SOUND_PICKERS
             .iter()
@@ -445,44 +599,34 @@ async fn observe_sound_pool(
     if plan.snapshot_layout().is_some() {
         return snapshot::observe(session, plan, maximum_visible).await;
     }
-    let deadline = Instant::now() + PICKER_WINDOW;
+    let deadline = phase_deadline(SOUND_WINDOW);
+    let mut previous: Option<ObservedSoundPool> = None;
     loop {
-        let section = session
-            .locate_all_described(ElementQuery::Text {
-                value: plan.section_label,
-                exact: true,
-            })
-            .await
-            .unwrap_or_default();
-        let rows = session
-            .locate_all(ElementQuery::ResourceIdSuffix(plan.row_id))
-            .await
-            .unwrap_or_default();
-        let titles = session
-            .locate_all_described(ElementQuery::ResourceIdSuffix(plan.title_id))
-            .await
-            .unwrap_or_default();
-        let artists = session
-            .locate_all_described(ElementQuery::ResourceIdSuffix(plan.artist_id))
-            .await
-            .unwrap_or_default();
+        check_wait()?;
+        let section = read_sound(session.locate_all_described(ElementQuery::Text {
+            value: plan.section_label,
+            exact: true,
+        }))
+        .await?;
+        let rows =
+            read_sound(session.locate_all(ElementQuery::ResourceIdSuffix(plan.row_id))).await?;
+        let titles =
+            read_sound(session.locate_all_described(ElementQuery::ResourceIdSuffix(plan.title_id)))
+                .await?;
+        let artists = read_sound(
+            session.locate_all_described(ElementQuery::ResourceIdSuffix(plan.artist_id)),
+        )
+        .await?;
         let choices = match plan.choose_id {
-            Some(id) => session
-                .locate_all(ElementQuery::ResourceIdSuffix(id))
-                .await
-                .unwrap_or_default(),
+            Some(id) => read_sound(session.locate_all(ElementQuery::ResourceIdSuffix(id))).await?,
             None => Vec::new(),
         };
         let mut markers = Vec::new();
         for id in plan.selected_marker_ids() {
             // An equalizer or trim control can prove the selected row without
             // becoming a tap target. The measured plan names both independently.
-            markers.extend(
-                session
-                    .locate_all(ElementQuery::ResourceIdSuffix(id))
-                    .await
-                    .unwrap_or_default(),
-            );
+            markers
+                .extend(read_sound(session.locate_all(ElementQuery::ResourceIdSuffix(id))).await?);
         }
         if section.len() == 1 && !rows.is_empty() && !titles.is_empty() {
             match assemble_pool(
@@ -494,15 +638,23 @@ async fn observe_sound_pool(
                 markers,
                 maximum_visible,
             ) {
-                Ok(pool) => return Ok(pool),
+                Ok(pool) => {
+                    if previous.as_ref().is_some_and(|p| p.stable_with(&pool)) {
+                        return Ok(pool);
+                    }
+                    previous = Some(pool);
+                }
                 Err(error) if Instant::now() >= deadline => return Err(error.context(
                     "sound_candidates_incomplete: bảng nhạc chưa tải đủ row/title/artist/choose",
                 )),
                 Err(_) => {
+                    previous = None;
                     tokio::time::sleep(POLL).await;
                     continue;
                 }
             }
+        } else {
+            previous = None;
         }
         if Instant::now() >= deadline {
             anyhow::bail!("sound picker did not expose one measured section with candidate rows");
@@ -526,15 +678,14 @@ pub async fn choose_and_confirm_sound(
     let fresh = observe_sound_pool(session, plan, pool.maximum_visible).await?;
     let target = reproof_target(pool, &fresh, index)?;
     if fresh.selected_index != Some(index) {
-        session
-            .tap(target.centre())
+        sound_tap(session, target.centre())
             .await
             .context("select observed sound")?;
     }
     if plan.closes_with_back() {
         // The measured Android sheet selects inline; Back closes only that sheet.
         // Prove the same pool remains before dismissing it, then prove the editor chip.
-        let deadline = Instant::now() + READBACK_WINDOW;
+        let deadline = phase_deadline(READBACK_WINDOW);
         loop {
             let selected_pool = observe_sound_pool(session, plan, pool.maximum_visible).await?;
             reproof_target(pool, &selected_pool, index)?;
@@ -547,6 +698,7 @@ pub async fn choose_and_confirm_sound(
             );
             tokio::time::sleep(POLL).await;
         }
+        check_wait()?;
         session.back().await.context("close inline sound picker")?;
     }
     confirm_sound(session, plan, &candidate.title)
@@ -579,8 +731,9 @@ pub async fn confirm_sound(
 ) -> anyhow::Result<()> {
     let expected = expected_title.trim();
     anyhow::ensure!(!expected.is_empty(), "selected sound title is empty");
-    let deadline = Instant::now() + READBACK_WINDOW;
+    let deadline = phase_deadline(READBACK_WINDOW);
     loop {
+        check_wait()?;
         let rows = if plan.dynamic {
             let mut observed = Vec::new();
             let mut ids = std::collections::HashSet::new();
@@ -590,21 +743,19 @@ pub async fn confirm_sound(
             {
                 if ids.insert(candidate.plan.current_title_id) {
                     observed.extend(
-                        session
-                            .locate_all_described(ElementQuery::ResourceIdSuffix(
-                                candidate.plan.current_title_id,
-                            ))
-                            .await
-                            .unwrap_or_default(),
+                        read_sound(session.locate_all_described(ElementQuery::ResourceIdSuffix(
+                            candidate.plan.current_title_id,
+                        )))
+                        .await?,
                     );
                 }
             }
             observed
         } else {
-            session
-                .locate_all_described(ElementQuery::ResourceIdSuffix(plan.current_title_id))
-                .await
-                .unwrap_or_default()
+            read_sound(
+                session.locate_all_described(ElementQuery::ResourceIdSuffix(plan.current_title_id)),
+            )
+            .await?
         };
         if matches!(rows.as_slice(), [only] if only.description.as_deref().is_some_and(|value| value.trim() == expected))
         {
@@ -733,6 +884,37 @@ fn normalize_artist(value: &str) -> String {
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    #[test]
+    fn sound_entry_excludes_hidden_nodes_and_collapses_only_identical_bounds() {
+        let package = "com.zhiliaoapp.musically";
+        let node = |bounds: &str, displayed: bool| {
+            format!(
+                r#"<node package="{package}" resource-id="{package}:id/dou" bounds="{bounds}" enabled="true" clickable="true" displayed="{displayed}"/>"#
+            )
+        };
+        let tree = |body: String| {
+            crate::ui_automation::tree::Tree::parse(crate::HierarchySourceSnapshot {
+                generation: 1,
+                xml: format!("<hierarchy>{body}</hierarchy>"),
+            })
+            .unwrap()
+        };
+        let one = node("[0,0][40,40]", true);
+        assert!(unique_sound_entry(
+            &tree(one.clone() + &node("[50,0][90,40]", false)),
+            package,
+            &[":id/dou"]
+        )
+        .is_some());
+        assert!(unique_sound_entry(&tree(one.clone() + &one), package, &[":id/dou"]).is_some());
+        assert!(unique_sound_entry(
+            &tree(one + &node("[50,0][90,40]", true)),
+            package,
+            &[":id/dou"]
+        )
+        .is_none());
+    }
 
     struct InlineSession {
         selected: AtomicBool,

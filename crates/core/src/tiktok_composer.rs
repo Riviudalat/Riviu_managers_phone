@@ -1734,8 +1734,14 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
     async fn require_caption_unchanged(&self, caption: &str) -> anyhow::Result<()> {
         let query = self.plan.publish.context("caption plan missing")?.caption;
         let rows = self.session.locate_all_described(query).await?;
+        #[cfg(debug_assertions)]
+        if !matches!(rows.as_slice(), [only] if only.description.as_deref().is_some_and(|value| caption_readback_matches(value, caption)))
+        {
+            self.trace_missing_post_button("caption-reproof-mismatch", caption)
+                .await;
+        }
         anyhow::ensure!(
-            matches!(rows.as_slice(), [only] if only.description.as_deref().is_some_and(|value| value.trim() == caption.trim())),
+            matches!(rows.as_slice(), [only] if only.description.as_deref().is_some_and(|value| caption_readback_matches(value, caption))),
             "sound reproof: caption changed or unreadable"
         );
         Ok(())
@@ -2311,13 +2317,23 @@ where
         }
         let visible_pool = sound_policy.pool_size()?.min(5);
         progress(PublishProgress::OpeningSounds);
-        let pool = open_and_observe_sounds(session, sound_plan, visible_pool).await?;
-        let sound_plan = pool.effective_plan(sound_plan);
-        let mut selection = select_sound_candidate(sound_policy, &pool.candidates)?;
-        progress(PublishProgress::SelectingSound {
-            title: selection.title.clone(),
-        });
-        choose_and_confirm_sound(session, sound_plan, &pool, selection.index).await?;
+        let chosen = crate::tiktok_sound::with_sound_budget(stop, async {
+            let pool = open_and_observe_sounds(session, sound_plan, visible_pool).await?;
+            let sound_plan = pool.effective_plan(sound_plan);
+            let selection = select_sound_candidate(sound_policy, &pool.candidates)?;
+            progress(PublishProgress::SelectingSound {
+                title: selection.title.clone(),
+            });
+            choose_and_confirm_sound(session, sound_plan, &pool, selection.index).await?;
+            Ok((sound_plan, selection))
+        })
+        .await;
+        let (sound_plan, mut selection) = match chosen {
+            Err(error) if error.is::<crate::tiktok_sound::SoundStopped>() => {
+                return Ok((ComposerVerdict::Stopped, None))
+            }
+            other => other?,
+        };
         progress(PublishProgress::SoundConfirmed {
             title: selection.title.clone(),
         });
@@ -2636,8 +2652,38 @@ async fn sleep(duration: Duration, stop: &AtomicBool) {
     }
 }
 
+// Global 46.2.1 video, 18/09: returning from the sound editor adds a space after
+// a hashtag immediately before a newline. Preserve every word, tag and line break;
+// only horizontal padding at the end of a line is insignificant.
+fn caption_readback_matches(observed: &str, expected: &str) -> bool {
+    observed
+        .trim()
+        .lines()
+        .map(|line| line.trim_end_matches([' ', '\t']))
+        .eq(expected
+            .trim()
+            .lines()
+            .map(|line| line.trim_end_matches([' ', '\t'])))
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn caption_reproof_accepts_tiktok_hashtag_line_padding_but_rejects_content_changes() {
+        let expected = "Đà Lạt\n\n#dalat #hookdalat\n\nKiểm tra video Riviu 18/09.";
+        assert!(super::caption_readback_matches(
+            &expected.replace("#hookdalat\n", "#hookdalat \n"),
+            expected
+        ));
+        for changed in [
+            expected.replace("#hookdalat", "#other"),
+            expected.replace("Đà Lạt", "ĐàLạt"),
+            expected.replace("\n\n", "\n"),
+            expected.replace("18/09.", ""),
+        ] {
+            assert!(!super::caption_readback_matches(&changed, expected));
+        }
+    }
     use super::*;
     use crate::driver::ElementBox;
     use crate::tiktok_labels::{

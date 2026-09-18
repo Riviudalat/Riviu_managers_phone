@@ -3114,6 +3114,22 @@ pub async fn open_target_confirmed(
     target: &crate::ResolvedTikTokTarget,
     target_package: &str,
 ) -> anyhow::Result<TargetProof> {
+    if session.supports_accessibility_readback() {
+        let version = session
+            .app_version(target_package)
+            .await
+            .context("target_link_proof: build unreadable")?;
+        let language = session
+            .ui_language()
+            .await
+            .context("target_link_proof: language unreadable")?;
+        let labels =
+            crate::tiktok_labels::controls_for_runtime(target_package, &language, &version)
+                .context("target_link_proof: unmeasured TikTok build or language")?;
+        // Manual opens and cleanup need the same canonical-link proof as the campaign.
+        // A bare VIEW opens Android's app chooser; OCR of an author is not post identity.
+        return open_hierarchy_target_confirmed(session, labels, target, target_package).await;
+    }
     // The screen as it was before the request, so "nothing happened" is
     // distinguishable from "the post loaded".
     let before = engine
@@ -3199,6 +3215,31 @@ pub async fn open_target_confirmed(
         "mở link {} nhưng máy không chuyển sang bài viết nào",
         target.normalized_url
     )
+}
+
+pub(crate) async fn open_hierarchy_target_confirmed(
+    session: &dyn crate::UiSession,
+    labels: crate::tiktok_labels::TikTokControls,
+    target: &crate::ResolvedTikTokTarget,
+    target_package: &str,
+) -> anyhow::Result<TargetProof> {
+    let never = AtomicBool::new(false);
+    match crate::interaction_hierarchy::open_exact_target_by_hierarchy(
+        session,
+        labels,
+        target_package,
+        target,
+        &never,
+    )
+    .await?
+    {
+        crate::interaction_hierarchy::TargetArrival::Identified { .. } => {
+            Ok(TargetProof::Identified)
+        }
+        crate::interaction_hierarchy::TargetArrival::Structural => {
+            anyhow::bail!("target_link_proof: exact post identity not confirmed")
+        }
+    }
 }
 
 async fn open_comment_for_ocr(
@@ -3596,26 +3637,11 @@ impl TargetDriver for HierarchyTargetDriver<'_> {
         session: &dyn crate::UiSession,
         target: &crate::ResolvedTikTokTarget,
     ) -> anyhow::Result<TargetProof> {
-        use crate::interaction_hierarchy::TargetArrival;
         // The campaign's stop flag is deliberately not threaded in here: aborting an
         // arrival check is safe, but the flag this campaign holds is permanently false
         // on purpose (see `execute_thread_campaign`), so passing it would only add a
         // parameter that never changes.
-        let never = AtomicBool::new(false);
-        let arrival = crate::interaction_hierarchy::open_exact_target_by_hierarchy(
-            session,
-            self.labels,
-            self.target_package,
-            target,
-            &never,
-        )
-        .await?;
-        match arrival {
-            TargetArrival::Identified { .. } => Ok(TargetProof::Identified),
-            TargetArrival::Structural => {
-                anyhow::bail!("target_link_proof: exact post identity not confirmed")
-            }
-        }
+        open_hierarchy_target_confirmed(session, self.labels, target, self.target_package).await
     }
 
     async fn send_root(

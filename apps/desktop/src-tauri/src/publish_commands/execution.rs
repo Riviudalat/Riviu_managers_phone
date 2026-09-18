@@ -3648,51 +3648,68 @@ pub(super) async fn post_through_the_composer(
         crossed_effect_boundary = true;
         Ok(())
     };
-    let result = match bundle.media_kind {
-        riviu_core::PublishMediaKind::Image => {
-            let request = CarouselRequest {
-                album: import,
-                images: bundle.images.len(),
-                caption: &bundle.caption,
-                screen,
-            };
-            publish_carousel_with_sound_effect_intent_and_diagnostics(
-                session,
-                plan,
-                sound_plan,
-                sound_policy,
-                plan_tap,
-                &request,
-                &stop,
-                &mut record_effect_intent,
-                progress,
-                diagnostics,
-            )
-            .await
-        }
-        riviu_core::PublishMediaKind::Video => {
-            use riviu_core::tiktok_composer::{
-                publish_video_with_sound_effect_intent_and_diagnostics, VideoRequest,
-            };
-            let request = VideoRequest {
-                album: import,
-                caption: &bundle.caption,
-                screen,
-            };
-            publish_video_with_sound_effect_intent_and_diagnostics(
-                session,
-                plan,
-                video_plan.expect("video branch resolves its tuple before the first tap"),
-                sound_plan,
-                sound_policy,
-                plan_tap,
-                &request,
-                &stop,
-                &mut record_effect_intent,
-                progress,
-                diagnostics,
-            )
-            .await
+    let result = {
+        let work = async {
+            match bundle.media_kind {
+                riviu_core::PublishMediaKind::Image => {
+                    let request = CarouselRequest {
+                        album: import,
+                        images: bundle.images.len(),
+                        caption: &bundle.caption,
+                        screen,
+                    };
+                    publish_carousel_with_sound_effect_intent_and_diagnostics(
+                        session,
+                        plan,
+                        sound_plan,
+                        sound_policy,
+                        plan_tap,
+                        &request,
+                        &stop,
+                        &mut record_effect_intent,
+                        progress,
+                        diagnostics,
+                    )
+                    .await
+                }
+                riviu_core::PublishMediaKind::Video => {
+                    use riviu_core::tiktok_composer::{
+                        publish_video_with_sound_effect_intent_and_diagnostics, VideoRequest,
+                    };
+                    let request = VideoRequest {
+                        album: import,
+                        caption: &bundle.caption,
+                        screen,
+                    };
+                    publish_video_with_sound_effect_intent_and_diagnostics(
+                        session,
+                        plan,
+                        video_plan.expect("video branch resolves its tuple before the first tap"),
+                        sound_plan,
+                        sound_policy,
+                        plan_tap,
+                        &request,
+                        &stop,
+                        &mut record_effect_intent,
+                        progress,
+                        diagnostics,
+                    )
+                    .await
+                }
+            }
+        };
+        tokio::pin!(work);
+        let mut cancellation_poll = tokio::time::interval(Duration::from_millis(250));
+        loop {
+            tokio::select! {
+                result = &mut work => break result,
+                _ = cancellation_poll.tick() => {
+                    let stopped = db.publish_operation_stopped(campaign_id).unwrap_or(true)
+                    || db.publish_campaign_state(campaign_id).ok().flatten()
+                        .is_none_or(|state|state == riviu_core::PublishCampaignState::Cancelled);
+                    if stopped { stop.store(true, std::sync::atomic::Ordering::Relaxed); }
+                }
+            }
         }
     };
     let (verdict, sound_selection) = match result {
