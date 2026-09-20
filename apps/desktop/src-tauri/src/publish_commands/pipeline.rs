@@ -266,6 +266,26 @@ pub(crate) async fn run_dispatcher(
                 )?;
             }
             for job in db.pending_publish_dispatch(128)? {
+                if cfg!(debug_assertions)
+                    && std::env::var("RIVIU_DEV_MANUAL_ACCEPTANCE").as_deref() == Ok("1")
+                {
+                    let allowed =
+                        std::env::var("RIVIU_DEV_ACCEPTANCE_CAMPAIGNS").unwrap_or_default();
+                    let scoped = std::env::var_os("RIVIU_DEV_ACCEPTANCE_SCOPE")
+                        .and_then(|p| std::fs::read(p).ok())
+                        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+                        .is_some_and(|scope| {
+                            scope["campaignIds"].as_array().is_some_and(|ids| {
+                                ids.iter()
+                                    .any(|id| id.as_str() == Some(&job.run.campaign_id))
+                            }) && scope["udids"].as_array().is_some_and(|ids| {
+                                ids.iter().any(|id| id.as_str() == Some(&job.udid))
+                            })
+                        });
+                    if !scoped && !allowed.split(',').any(|id| id == job.run.campaign_id) {
+                        continue;
+                    }
+                }
                 // Completed tasks still occupy a worker slot until joined. Fast failures
                 // must not accumulate an unbounded JoinSet while permits are released.
                 if tasks.len() >= db.publish_limits()?.device_total {

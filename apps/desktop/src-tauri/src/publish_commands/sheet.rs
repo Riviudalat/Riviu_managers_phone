@@ -78,20 +78,26 @@ pub(crate) fn mark_publish_sheet_sent_and_reconcile(
 }
 
 pub(super) async fn deliver_assignment_sheet_row(
-    db: &Database,
+    db: &Arc<Database>,
     events: &riviu_core::events::EventBus,
     assignment_id: &str,
 ) -> Result<(), String> {
+    let claim_assignment = assignment_id.to_owned();
     let Some(claim) = db
-        .claim_bound_sheet_delivery(
-            riviu_core::db::SheetDeliveryKind::Canonical,
-            Some(assignment_id),
-            chrono::Utc::now().timestamp_millis(),
-        )
+        .storage_write(move |db| {
+            db.claim_bound_sheet_delivery(
+                riviu_core::db::SheetDeliveryKind::Canonical,
+                Some(&claim_assignment),
+                chrono::Utc::now().timestamp_millis(),
+            )
+        })
+        .await
         .map_err(|e| e.to_string())?
     else {
+        let assignment_id = assignment_id.to_owned();
         if db
-            .pending_publish_sheet_row(assignment_id)
+            .storage_read(move |db| db.pending_publish_sheet_row(&assignment_id))
+            .await
             .map_err(|e| e.to_string())?
             .is_some()
         {
@@ -105,15 +111,22 @@ pub(super) async fn deliver_assignment_sheet_row(
 }
 
 async fn deliver_bound_claim(
-    db: &Database,
+    db: &Arc<Database>,
     events: &riviu_core::events::EventBus,
     claim: riviu_core::db::SheetDeliveryClaim,
 ) -> anyhow::Result<()> {
     use riviu_core::db::{SheetDeliveryPayload, SheetOutboxSettlement};
     let mut transport_accepted = false;
     let delivered = async {
-        let settings = db.publish_sheet_delivery_settings()?;
-        if db.sheet_uses_google_direct()? {
+        let (settings, direct) = db
+            .storage_read(|db| {
+                Ok((
+                    db.publish_sheet_delivery_settings()?,
+                    db.sheet_uses_google_direct()?,
+                ))
+            })
+            .await?;
+        if direct {
             crate::google_sheet_commands::deliver(db, &claim).await?;
         } else {
             anyhow::ensure!(
@@ -151,44 +164,69 @@ async fn deliver_bound_claim(
             }
         }
         transport_accepted = true;
-        let (campaign, input_digest, target_snapshot) = match &claim.payload {
-            SheetDeliveryPayload::Canonical { row, .. } => {
-                let (digest, target) = publish_reconciliation_identity(db, &row.campaign_id)?;
-                (Some(row.campaign_id.as_str()), digest, target)
+        let settling_claim = claim.clone();
+        let events = events.clone();
+        db.storage_write(move |db| {
+            let (campaign, input_digest, target_snapshot) = match &settling_claim.payload {
+                SheetDeliveryPayload::Canonical { row, .. } => {
+                    let (digest, target) = publish_reconciliation_identity(db, &row.campaign_id)?;
+                    (Some(row.campaign_id.as_str()), digest, target)
+                }
+                SheetDeliveryPayload::Report(_) => (None, None, None),
+            };
+            let settlement = db.settle_bound_sheet_delivery(
+                &settling_claim,
+                input_digest.as_deref(),
+                target_snapshot.as_ref(),
+                chrono::Utc::now().timestamp_millis(),
+            )?;
+            if matches!(settlement, SheetOutboxSettlement::Delivered(_)) {
+                if let Some(campaign) = campaign {
+                    announce(&events, db, campaign);
+                }
             }
-            SheetDeliveryPayload::Report(_) => (None, None, None),
-        };
-        let settlement = db.settle_bound_sheet_delivery(
-            &claim,
-            input_digest.as_deref(),
-            target_snapshot.as_ref(),
-            chrono::Utc::now().timestamp_millis(),
-        )?;
-        if matches!(settlement, SheetOutboxSettlement::Delivered(_)) {
-            if let Some(campaign) = campaign {
-                announce(events, db, campaign);
-            }
-        }
-        anyhow::ensure!(
-            !matches!(settlement, SheetOutboxSettlement::StaleRevision),
-            "Sheet đã trả kết quả nhưng quyền gửi đã thay đổi; hàng hiện tại vẫn được giữ"
-        );
-        Ok::<_, anyhow::Error>(())
+            anyhow::ensure!(
+                !matches!(settlement, SheetOutboxSettlement::StaleRevision),
+                "Sheet đã trả kết quả nhưng quyền gửi đã thay đổi; hàng hiện tại vẫn được giữ"
+            );
+            Ok::<_, anyhow::Error>(())
+        })
+        .await
     }
     .await;
     if let Err(error) = &delivered {
+        if error
+            .downcast_ref::<riviu_core::google_sheets::DirectSheetsError>()
+            .is_some_and(|error| {
+                error.kind == riviu_core::google_sheets::DirectSheetsErrorKind::Pending
+            })
+        {
+            let deferred = claim.clone();
+            db.storage_write(move |db| {
+                db.defer_bound_sheet_delivery(&deferred, chrono::Utc::now().timestamp_millis())
+            })
+            .await?;
+            return delivered;
+        }
         let retryable = transport_accepted
             || riviu_core::publish_sheet::sheet_delivery_error_is_retryable(error)
             || crate::google_sheet_commands::retryable(error);
-        db.fail_bound_sheet_delivery(
-            &claim,
-            &format!("{error:#}"),
-            retryable,
-            chrono::Utc::now().timestamp_millis(),
-        )?;
-        if let SheetDeliveryPayload::Canonical { row, .. } = &claim.payload {
-            announce(events, db, &row.campaign_id);
-        }
+        let message = format!("{error:#}");
+        let failed = claim.clone();
+        let events = events.clone();
+        db.storage_write(move |db| {
+            db.fail_bound_sheet_delivery(
+                &failed,
+                &message,
+                retryable,
+                chrono::Utc::now().timestamp_millis(),
+            )?;
+            if let SheetDeliveryPayload::Canonical { row, .. } = &failed.payload {
+                announce(&events, db, &row.campaign_id);
+            }
+            Ok(())
+        })
+        .await?;
     }
     delivered
 }
@@ -383,6 +421,7 @@ pub(crate) async fn run_bound_sheet_worker(
     use riviu_core::db::SheetDeliveryKind;
     use sha2::Digest;
     let mut tasks = tokio::task::JoinSet::new();
+    let mut configured_fingerprint = None;
     let mut tick = tokio::time::interval(Duration::from_secs(1));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
@@ -395,44 +434,59 @@ pub(crate) async fn run_bound_sheet_worker(
         if stop.load(std::sync::atomic::Ordering::Acquire) {
             break;
         }
-        let settings = match db.publish_sheet_delivery_settings() {
-            Ok(settings) => settings,
+        let fingerprint = match db
+            .storage_read(|db| {
+                let settings = db.publish_sheet_delivery_settings()?;
+                let direct = db.sheet_uses_google_direct()?;
+                if direct && db.google_oauth_tokens()?.is_none() {
+                    return Ok(None);
+                }
+                if !direct
+                    && (settings.webhook_url.trim().is_empty() || settings.token.trim().is_empty())
+                {
+                    return Ok(None);
+                }
+                let mut digest = sha2::Sha256::new();
+                if direct {
+                    if let Ok(Some(connection)) = db.google_sheet_connection() {
+                        digest.update(serde_json::to_vec(&connection).unwrap_or_default());
+                        digest.update(
+                            db.get_setting("google.sheets.authorization-generation")
+                                .ok()
+                                .flatten()
+                                .unwrap_or_default()
+                                .as_bytes(),
+                        );
+                    } else {
+                        return Ok(None);
+                    }
+                } else {
+                    digest.update(settings.webhook_url.as_bytes());
+                    digest.update([0]);
+                    digest.update(settings.token.as_bytes());
+                }
+                Ok(Some(format!("{:x}", digest.finalize())))
+            })
+            .await
+        {
+            Ok(Some(fingerprint)) => fingerprint,
+            Ok(None) => continue,
             Err(error) => {
-                log::warn!("Sheet: không đọc được kết nối: {error:#}");
+                log::warn!("Sheet configuration read failed: {error:#}");
                 continue;
             }
         };
-        let direct = db.sheet_uses_google_direct().unwrap_or(false);
-        if direct && db.google_oauth_tokens().ok().flatten().is_none() {
-            continue;
-        }
-        if !direct && (settings.webhook_url.trim().is_empty() || settings.token.trim().is_empty()) {
-            continue;
-        }
-        let mut digest = sha2::Sha256::new();
-        if direct {
-            if let Ok(Some(connection)) = db.google_sheet_connection() {
-                digest.update(serde_json::to_vec(&connection).unwrap_or_default());
-                digest.update(
-                    db.get_setting("google.sheets.authorization-generation")
-                        .ok()
-                        .flatten()
-                        .unwrap_or_default()
-                        .as_bytes(),
-                );
-            } else {
+        let now = chrono::Utc::now().timestamp_millis();
+        if configured_fingerprint.as_ref() != Some(&fingerprint) {
+            let current = fingerprint.clone();
+            if let Err(error) = db
+                .storage_write(move |db| db.configure_bound_sheet_delivery(&current, now))
+                .await
+            {
+                log::warn!("Sheet: không cập nhật được lịch gửi: {error:#}");
                 continue;
             }
-        } else {
-            digest.update(settings.webhook_url.as_bytes());
-            digest.update([0]);
-            digest.update(settings.token.as_bytes());
-        }
-        let fingerprint = format!("{:x}", digest.finalize());
-        let now = chrono::Utc::now().timestamp_millis();
-        if let Err(error) = db.configure_bound_sheet_delivery(&fingerprint, now) {
-            log::warn!("Sheet: không cập nhật được lịch gửi: {error:#}");
-            continue;
+            configured_fingerprint = Some(fingerprint);
         }
         for kind in [
             SheetDeliveryKind::Canonical,
@@ -442,7 +496,10 @@ pub(crate) async fn run_bound_sheet_worker(
             if tasks.len() >= 2 {
                 break;
             }
-            match db.claim_bound_sheet_delivery(kind, None, now) {
+            match db
+                .storage_write(move |db| db.claim_bound_sheet_delivery(kind, None, now))
+                .await
+            {
                 Ok(Some(claim)) => {
                     let db = db.clone();
                     let events = events.clone();

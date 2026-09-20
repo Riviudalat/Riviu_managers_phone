@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen as testingScreen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen as testingScreen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { DeviceInfo } from "../types";
 import { defaultGroupSync, setGroupSync, type ActiveGroupSync } from "../groupSync";
@@ -281,8 +281,8 @@ describe("FocusStream hit mapping", () => {
     expect(deviceSwipe).not.toHaveBeenCalled();
 
     // Control opens; let the begin's continuation register readiness, then the tick scrolls.
-    openControl();
-    await new Promise((resolve) => setTimeout(resolve, 20));
+    await waitFor(() => expect(deviceControlBegin).toHaveBeenCalled());
+    await act(async () => { openControl(); });
     fireEvent.wheel(screen, { deltaY: 120 });
     await waitFor(() => expect(deviceSwipe).toHaveBeenCalled());
     expect((deviceSwipe as unknown as { mock: { calls: unknown[][] } }).mock.calls[0][0]).toBe("ce06");

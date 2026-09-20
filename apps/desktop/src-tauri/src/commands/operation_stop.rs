@@ -1,5 +1,4 @@
 use super::*;
-use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use tauri::Manager;
 static ACTIVE_STOPS: std::sync::LazyLock<parking_lot::Mutex<HashSet<String>>> =
@@ -11,25 +10,47 @@ impl Drop for StopGuard {
     }
 }
 
-#[derive(Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct StopDeviceResult {
-    pub udid: String,
-    pub closed: bool,
-    pub message: String,
-}
-#[derive(Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct OperationStopResult {
-    pub operation_id: String,
-    pub state: String,
-    pub devices: Vec<StopDeviceResult>,
-    #[serde(default)]
-    pub stop_marker: Option<String>,
-}
+pub use riviu_core::ipc_contract::{OperationStopResult, StopDeviceResult};
 
 fn key(id: &str) -> String {
     format!("operation.stop.result:{id}")
+}
+
+fn source_devices(
+    db: &riviu_core::db::Database,
+    detail: &riviu_core::OperationRunDetail,
+) -> anyhow::Result<Vec<String>> {
+    use anyhow::Context;
+    use riviu_core::OperationRunKind;
+    let mut devices = match detail.summary.kind {
+        OperationRunKind::Script => {
+            db.get_job(uuid::Uuid::parse_str(&detail.summary.source_id)?)?
+                .context("Script source snapshot missing")?
+                .udids
+        }
+        OperationRunKind::Orchestration => {
+            let source = db
+                .get_orchestration_run(uuid::Uuid::parse_str(&detail.summary.source_id)?)?
+                .context("Orchestration source snapshot missing")?;
+            std::iter::once(&source.run.target)
+                .chain(source.run.node_targets.values())
+                .chain(source.attempts.iter().map(|a| &a.snapshot.target))
+                .flat_map(|target| target.included.iter().map(|d| d.udid.clone()))
+                .collect()
+        }
+        _ => detail
+            .items
+            .iter()
+            .filter_map(|item| item.udid.clone())
+            .collect(),
+    };
+    devices.sort();
+    devices.dedup();
+    Ok(devices)
+}
+
+fn all_devices_closed(devices: &[StopDeviceResult]) -> bool {
+    !devices.is_empty() && devices.iter().all(|d| d.closed)
 }
 
 #[cfg(test)]
@@ -79,7 +100,15 @@ fn claim_stop_result(
                 && db
                     .publish_verifications_for_campaign(source, 1000)?
                     .is_empty());
-        if current.state == "closed" && closed_current {
+        if current.state == "closed"
+            && all_devices_closed(&current.devices)
+            && current
+                .devices
+                .iter()
+                .map(|d| &d.udid)
+                .eq(initial.devices.iter().map(|d| &d.udid))
+            && closed_current
+        {
             return Ok((current, false));
         }
     }
@@ -102,6 +131,29 @@ fn claim_stop_result(
 mod recovery_tests {
     use super::*;
     #[test]
+    fn regression_script_stop_uses_source_roster_and_empty_is_not_closed() {
+        let path = std::env::temp_dir().join(format!("stop-roster-{}.db", uuid::Uuid::new_v4()));
+        let db = riviu_core::db::Database::open(&path).unwrap();
+        let now = chrono::Utc::now();
+        let job = riviu_core::JobRecord {
+            id: uuid::Uuid::new_v4(),
+            script_name: "fixture".into(),
+            udids: vec!["b".into(), "a".into(), "a".into()],
+            status: riviu_core::JobStatus::Running,
+            created_at: now,
+            updated_at: now,
+            steps: vec![],
+            error: None,
+        };
+        db.save_job(&job).unwrap();
+        let detail = riviu_core::project_job(&job);
+        assert!(detail.items.is_empty());
+        assert_eq!(source_devices(&db, &detail).unwrap(), vec!["a", "b"]);
+        assert!(!all_devices_closed(&[]));
+        drop(db);
+        std::fs::remove_file(path).unwrap();
+    }
+    #[test]
     fn stale_stopping_read_cannot_claim_another_closer_after_first_closes() {
         let path =
             std::env::temp_dir().join(format!("stop-interleave-{}.db", uuid::Uuid::new_v4()));
@@ -111,7 +163,11 @@ mod recovery_tests {
         let initial = OperationStopResult {
             operation_id: "publish:c".into(),
             state: "stopping".into(),
-            devices: vec![],
+            devices: vec![StopDeviceResult {
+                udid: "phone".into(),
+                closed: false,
+                message: "waiting".into(),
+            }],
             stop_marker: None,
         };
         db.set_setting(&key("publish:c"), &serde_json::to_string(&initial).unwrap())
@@ -134,7 +190,11 @@ mod recovery_tests {
             &serde_json::to_string(&OperationStopResult {
                 operation_id: "publish:c".into(),
                 state: "closed".into(),
-                devices: vec![],
+                devices: vec![StopDeviceResult {
+                    udid: "phone".into(),
+                    closed: true,
+                    message: "closed".into(),
+                }],
                 stop_marker: marker,
             })
             .unwrap(),
@@ -214,13 +274,7 @@ pub async fn operation_stop(
         .ok_or_else(|| err("Không tìm thấy tác vụ"))?;
     use riviu_core::OperationRunKind as Kind;
     let source = detail.summary.source_id.clone();
-    let mut udids: Vec<_> = detail
-        .items
-        .iter()
-        .filter_map(|item| item.udid.clone())
-        .collect();
-    udids.sort();
-    udids.dedup();
+    let udids = source_devices(&state.db, &detail).map_err(err)?;
     let result = OperationStopResult {
         operation_id: operation_id.clone(),
         state: "stopping".into(),
@@ -330,7 +384,7 @@ pub async fn operation_stop(
                     let _ = state.db.set_setting(&key(&operation_id), &raw);
                 }
             }
-            result.state = if result.devices.iter().all(|d| d.closed) {
+            result.state = if all_devices_closed(&result.devices) {
                 "closed"
             } else {
                 "needsAttention"
@@ -389,10 +443,10 @@ async fn close_stopped_device(
                                 .map_err(|e| e.message.to_string())?
                             {
                                 if !other.summary.state.is_terminal()
-                                    && other.items.iter().any(|item| {
-                                        item.udid.as_deref() == Some(udid)
-                                            && !item.state.is_terminal()
-                                    })
+                                    && source_devices(db, &other)
+                                        .map_err(|e| e.to_string())?
+                                        .iter()
+                                        .any(|id| id == udid)
                                 {
                                     return Err(format!(
                                         "Máy còn tác vụ khác: {}",

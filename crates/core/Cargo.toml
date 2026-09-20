@@ -8,6 +8,7 @@ edition.workspace = true
 publish = false
 
 [dependencies]
+ts-rs = { version = "=12.0.1", features = ["chrono-impl", "uuid-impl", "serde-json-impl"] }
 serde = { workspace = true }
 url = { workspace = true }
 serde_json = { workspace = true }

@@ -337,6 +337,7 @@ pub struct PublishCampaignRecord {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct PublishSheetDeliveryProgress {
+    pub revision: i64,
     pub state: String,
     pub attempts: u32,
     pub last_error: Option<String>,

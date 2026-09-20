@@ -34,6 +34,15 @@ struct Operation {
     width: Option<u32>,
     duplicate: bool,
     receipt: Option<DeliveryReceipt>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    scan: Option<ScanCheckpoint>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+struct ScanCheckpoint {
+    metadata_hash: String,
+    next_row: u32,
+    scan: Scan,
 }
 fn busy(message: &str) -> DirectSheetsError {
     DirectSheetsError {
@@ -54,6 +63,9 @@ fn protect_pending_error<T>(
     db: &Database,
 ) -> Result<T> {
     if let Err(error) = result {
+        if error.kind == DirectSheetsErrorKind::Pending {
+            return Err(error);
+        }
         let active = db
             .google_shared_journal_read(&journal_key(target))
             .map_err(|_| journal_error())?
@@ -134,6 +146,54 @@ impl Operation {
 }
 
 impl DirectSheetsClient {
+    async fn scan_shared(
+        &self,
+        op: &mut Operation,
+        meta: &Metadata,
+        width: usize,
+        payload: Option<&Value>,
+        db: &Database,
+    ) -> Result<Scan> {
+        let fingerprint = digest(serde_json::to_string(&json!({"header":meta.header,"owner":meta.owner,"rows":meta.row_count,"columns":meta.column_count,"width":width})).expect("scan metadata").as_bytes());
+        let mut checkpoint = op.scan.clone().unwrap_or(ScanCheckpoint {
+            metadata_hash: fingerprint.clone(),
+            next_row: 1,
+            scan: Scan::default(),
+        });
+        if checkpoint.metadata_hash != fingerprint {
+            return Err(DirectSheetsError::conflict(
+                "Owner/header/grid changed during checkpointed scan",
+            ));
+        }
+        let page_rows = PAGE_ROWS.min((16_000 / width.max(1)) as u32).max(1);
+        let started = std::time::Instant::now();
+        let mut pages = 0;
+        while checkpoint.next_row < meta.row_count {
+            let count = page_rows.min(meta.row_count - checkpoint.next_row);
+            for row in self
+                .rows(meta, checkpoint.next_row, count, width as u32)
+                .await?
+            {
+                checkpoint.scan.observe(row, payload)?;
+            }
+            checkpoint.next_row += count;
+            let prior = op.serialized();
+            op.scan = Some(checkpoint.clone());
+            op.save_changes(db, &prior)?;
+            pages += 1;
+            if checkpoint.next_row < meta.row_count
+                && (pages >= 32 || started.elapsed() >= Duration::from_secs(45))
+            {
+                return Err(DirectSheetsError {
+                    kind: DirectSheetsErrorKind::Pending,
+                    status: None,
+                    message: "Sheet scan checkpoint saved; continue the same journal".into(),
+                });
+            }
+        }
+        Ok(checkpoint.scan)
+    }
+
     /// Upgrading v1 requires an operator-confirmed drain of every old writer.
     /// Metadata cannot fence a v1 HTTP write which was already in flight.
     pub async fn prepare_shared_target(
@@ -204,7 +264,34 @@ impl DirectSheetsClient {
             {
                 return Ok(old);
             }
+            if old.phase == Phase::AcquirePending {
+                // Recover the exact persisted token and payload before accepting a
+                // coalesced revision. acquire_shared only reads in this phase; it
+                // never repeats an ambiguous create or steals another writer's lock.
+                self.acquire_shared(&mut old, db).await?;
+            }
             if old.phase == Phase::Acquired {
+                if old.scan.is_some() {
+                    if let Some(previous_payload) = &old.payload {
+                        Box::pin(self.shared_deliver(
+                            &old.target,
+                            previous_payload,
+                            &old.writer,
+                            db,
+                        ))
+                        .await?;
+                    } else {
+                        Box::pin(self.shared_prepare(
+                            &old.target,
+                            &old.writer,
+                            old.upgrade_confirmed,
+                            db,
+                        ))
+                        .await?;
+                    }
+                    return Box::pin(self.begin_shared(target, payload, writer, confirmed, db))
+                        .await;
+                }
                 self.abandon_shared(&mut old, db).await?;
                 return Box::pin(self.begin_shared(target, payload, writer, confirmed, db)).await;
             }
@@ -249,6 +336,7 @@ impl DirectSheetsClient {
             width: None,
             duplicate: false,
             receipt: None,
+            scan: None,
         };
         if !db
             .google_shared_journal_cas(&key, prior.as_deref(), &operation.serialized())
@@ -457,6 +545,10 @@ impl DirectSheetsClient {
                 .map_err(|_| uncertain())?
                 .remove(0);
             op.receipt = Some(planner::receipt(&row, payload, op.duplicate)?);
+            if let Some(receipt) = &op.receipt {
+                db.save_sheet_receipt(&op.target, receipt)
+                    .map_err(|_| journal_error())?;
+            }
         }
         op.phase = Phase::Settled;
         op.save_changes(db, &prior)
@@ -546,11 +638,17 @@ impl DirectSheetsClient {
                     ));
                 }
                 planner::validate_payload(payload, target, &layout)?;
-                let scan = self.scan(&meta, layout.width, Some(payload)).await?;
+                let scan = self
+                    .scan_shared(&mut op, &meta, layout.width, Some(payload), db)
+                    .await?;
                 let plan = planner::plan(&meta, &layout, &scan, payload)?;
                 let before = self.metadata(&meta.spreadsheet_id, meta.gid).await?;
                 self.validate_shared_owner(&before, target, false, false)?;
-                if before.header != meta.header {
+                if before.header != meta.header
+                    || before.row_count != meta.row_count
+                    || before.column_count != meta.column_count
+                    || before.owner_raw != meta.owner_raw
+                {
                     return Err(DirectSheetsError::conflict(
                         "Header changed during shared row planning",
                     ));
@@ -578,6 +676,9 @@ impl DirectSheetsClient {
             let requests = match planning {
                 Ok(requests) => requests,
                 Err(error) => {
+                    if error.kind == DirectSheetsErrorKind::Pending {
+                        return Err(error);
+                    }
                     self.abandon_shared(&mut op, db).await?;
                     return Err(error);
                 }
@@ -611,7 +712,7 @@ impl DirectSheetsClient {
             if empty && meta.column_count>MAX_COLUMNS {return Err(DirectSheetsError::invalid("Blank-header preparation exceeds inspected columns"))}
             let layout=if empty {Layout::standard(target.internal_reporting)} else {Layout::from_header(&meta.header)?};
             if layout.internal!=target.internal_reporting {return Err(DirectSheetsError::conflict("Configured reporting layout differs from the tab"))}
-            let scan=self.scan(&meta,if empty {meta.column_count.min(MAX_COLUMNS) as usize}else{layout.width},None).await?;
+            let scan=self.scan_shared(&mut op,&meta,if empty {meta.column_count.min(MAX_COLUMNS) as usize}else{layout.width},None,db).await?;
             if empty && scan.last_nonempty.is_some() {return Err(DirectSheetsError::conflict("Blank header has existing data below it"))}
             let epoch=op.epoch.clone().or_else(||scan.epochs.iter().next().cloned()).unwrap_or_else(||uuid::Uuid::new_v4().to_string());
             if scan.epochs.iter().any(|e|e!=&epoch) {return Err(DirectSheetsError::conflict("Existing row epoch differs from selected target"))}
@@ -632,6 +733,9 @@ impl DirectSheetsClient {
             let requests = match planning {
                 Ok(requests) => requests,
                 Err(error) => {
+                    if error.kind == DirectSheetsErrorKind::Pending {
+                        return Err(error);
+                    }
                     self.abandon_shared(&mut op, db).await?;
                     return Err(error);
                 }

@@ -6,6 +6,26 @@
 
 use super::*;
 
+#[tauri::command]
+pub async fn device_action_capabilities(
+    state: State<'_, AppState>,
+    udid: String,
+) -> Result<riviu_core::ipc_contract::DeviceActionCapabilities, CommandError> {
+    let _admission = state.ensure_accepting_work()?;
+    let device = state
+        .registry
+        .list()
+        .into_iter()
+        .find(|d| d.udid == udid)
+        .ok_or_else(|| err("Thiết bị không còn kết nối"))?;
+    if device.platform != riviu_core::DevicePlatform::Android {
+        return Ok(riviu_core::app_automation::action_capabilities(
+            &udid, "", "", "", false,
+        ));
+    }
+    Ok(state.control.tiktok_action_capabilities(&udid).await)
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DeviceWorkState {

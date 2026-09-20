@@ -211,6 +211,18 @@ impl<'a, P: TapPlanner> CommentDrawer<'a, P> {
             .map(|label| label.to_query())
     }
 
+    async fn locate_send(&self, query: ElementQuery<'_>) -> anyhow::Result<Option<ElementBox>> {
+        if !self.session.supports_accessibility_readback() {
+            return self.session.locate(query).await;
+        }
+        anyhow::ensure!(
+            self.session.active_app_bundle().await? == self.labels.package(),
+            "Send foreground changed"
+        );
+        let snapshot = self.session.hierarchy_source_snapshot().await?;
+        snapshot_send_control(snapshot, self.labels.package(), query)
+    }
+
     async fn tap_inside(&mut self, element: &ElementBox) -> anyhow::Result<()> {
         let point = (self.plan_tap)(element);
         self.session.tap(point).await
@@ -345,17 +357,19 @@ impl<'a, P: TapPlanner> CommentDrawer<'a, P> {
         if button.enabled {
             return Ok(TypedInto::SendPreArmed);
         }
+        anyhow::ensure!(
+            !stop.load(Ordering::Relaxed),
+            "Comment stopped before typing"
+        );
         self.session.type_text(text).await?;
         Ok(TypedInto::Typed)
     }
 
     /// Wait for Send to arm, and return it so the caller can tap it.
     ///
-    /// "Armed" is the located element's `enabled` flag, and on Android that flag reads
-    /// as enabled when the attribute cannot be read at all — a deliberate fail-open in
-    /// the driver, because guessing *disabled* on a flaky read would silently drop every
-    /// comment on a build whose dump lacks the attribute. What keeps that default from
-    /// fabricating a success is fenced on both sides of here: **upstream**,
+    /// Android reads geometry and the literal `enabled` bit from one hierarchy
+    /// snapshot; missing state or ambiguous nodes fail. The other driver path uses
+    /// `locate`. What keeps either path from fabricating a success is fenced on both sides: **upstream**,
     /// [`Self::focus_and_type`] refuses a button that reads armed before a character was
     /// typed — the measured contract is a `false → true` flip across the typing, so a
     /// pre-lit button is last run's draft or a masked read; **downstream**, the tap only
@@ -363,8 +377,7 @@ impl<'a, P: TapPlanner> CommentDrawer<'a, P> {
     /// TikTok clears the field on send, so re-tapping an already-sent comment has nothing
     /// left to send.
     ///
-    /// One read is load-bearing about *which* locate answers: `locate` re-reads the
-    /// attribute on every poll, while the driver's `locate_all*` list paths fabricate
+    /// List lookups are never state proof: the driver's `locate_all*` list paths fabricate
     /// `enabled: true` without asking the device — nothing that feeds this wait may ever
     /// come from a list result.
     pub async fn await_armed(&self, stop: &AtomicBool) -> anyhow::Result<Option<ElementBox>> {
@@ -396,7 +409,7 @@ impl<'a, P: TapPlanner> CommentDrawer<'a, P> {
         if disarmed {
             return Ok(true);
         }
-        Ok(self.session.locate(query).await?.is_none())
+        Ok(self.locate_send(query).await?.is_none())
     }
 
     /// Back out until the feed tab is visible again.
@@ -455,7 +468,12 @@ impl<'a, P: TapPlanner> CommentDrawer<'a, P> {
             if stop.load(Ordering::Relaxed) {
                 return Ok(None);
             }
-            if let Some(element) = self.session.locate(query).await? {
+            let observed = if self.send_query() == Some(query) {
+                self.locate_send(query).await?
+            } else {
+                self.session.locate(query).await?
+            };
+            if let Some(element) = observed {
                 if ready(&element) {
                     return Ok(Some(element));
                 }
@@ -466,6 +484,35 @@ impl<'a, P: TapPlanner> CommentDrawer<'a, P> {
             sleep(DRAWER_POLL, stop).await;
         }
     }
+}
+
+/// Keep identity, geometry and the arm/disarm bit from one fresh source. Android
+/// element attribute calls can outlive the node generation after keyboard focus.
+fn snapshot_send_control(
+    snapshot: crate::HierarchySourceSnapshot,
+    package: &str,
+    query: ElementQuery<'_>,
+) -> anyhow::Result<Option<ElementBox>> {
+    let tree = crate::ui_automation::tree::Tree::parse(snapshot)?;
+    let matches = if let ElementQuery::Semantic(role) = query {
+        crate::app_automation::tiktok_roles::indices(&tree, package, role)
+    } else {
+        tree.matching(package, query)
+    };
+    anyhow::ensure!(matches.len() <= 1, "Send control ambiguous");
+    let Some(index) = matches.first() else {
+        return Ok(None);
+    };
+    let node = &tree.nodes[*index];
+    anyhow::ensure!(
+        matches!(node.attr("enabled"), "true" | "false"),
+        "Send enabled state missing"
+    );
+    let button = node
+        .rect()
+        .ok_or_else(|| anyhow::anyhow!("Send geometry missing"))?;
+    anyhow::ensure!(button.clickable, "Send control not clickable");
+    Ok(Some(button))
 }
 
 /// Post one comment and close the drawer behind it.
@@ -555,6 +602,35 @@ async fn sleep(duration: Duration, stop: &AtomicBool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn observed_global_send_state_is_atomic_and_missing_or_duplicate_nodes_refuse() {
+        const PKG: &str = "com.zhiliaoapp.musically";
+        let source = include_str!("../fixtures/tiktok-comment/global45.7.3-empty-send.fixture");
+        let query = ElementQuery::ResourceIdSuffix(":id/cqf");
+        let read = |xml: String| {
+            snapshot_send_control(
+                crate::HierarchySourceSnapshot { generation: 1, xml },
+                PKG,
+                query,
+            )
+        };
+        let button = read(source.into()).unwrap().unwrap();
+        assert!(!button.enabled);
+        assert!(button.clickable);
+        assert_eq!(button.x, 911.0);
+        assert!(
+            read(source.replace("enabled=\"false\"", "enabled=\"true\""))
+                .unwrap()
+                .unwrap()
+                .enabled
+        );
+        assert!(read(source.replace("enabled=\"false\"", "enabled=\"unknown\"")).is_err());
+        assert!(read(source.replace(":id/k8w", ":id/cqf")).is_err());
+        assert!(read(source.replace(":id/cqf", ":id/unrelated"))
+            .unwrap()
+            .is_none());
+    }
 
     use crate::tiktok_labels::controls_for;
     use crate::types::TapPoint;

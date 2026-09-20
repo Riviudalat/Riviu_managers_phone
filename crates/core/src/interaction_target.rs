@@ -214,6 +214,17 @@ impl SendFailure {
 /// The three device-specific steps of an Interaction assignment.
 #[async_trait::async_trait]
 pub(crate) trait TargetDriver: Send + Sync {
+    async fn follow_target(
+        &self,
+        _session: &dyn UiSession,
+        _target: &ResolvedTikTokTarget,
+        _account: &str,
+        _gate: &mut ActionEffectGate<'_>,
+    ) -> Result<&'static str, crate::ActionFailure> {
+        Err(crate::ActionFailure::before(anyhow::anyhow!(
+            "Follow profile adapter unavailable"
+        )))
+    }
     /// A short name for logs and refusal messages.
     fn kind(&self) -> &'static str;
 

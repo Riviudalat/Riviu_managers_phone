@@ -584,7 +584,7 @@ fn durable_close_intent_precedes_async_result_persistence_and_revokes_observers(
         .unwrap());
     db.set_setting(
         &format!("operation.stop.result:publish:{campaign}"),
-        "{\"state\":\"closed\"}",
+        &serde_json::json!({"state":"closed","stopMarker":db.get_setting(&format!("operation.stop.publish:{campaign}")).unwrap()}).to_string(),
     )
     .unwrap();
     assert_eq!(
@@ -599,10 +599,10 @@ fn durable_close_intent_precedes_async_result_persistence_and_revokes_observers(
         .unwrap()
         .is_empty());
     assert!(
-        db.publish_recovery_capabilities(&campaign).unwrap()[0]
+        !db.publish_recovery_capabilities(&campaign).unwrap()[0]
             .resume_verification
             .allowed,
-        "cached closed revokes without arming a second closer"
+        "an earlier close marker cannot authorize observation during a new stop"
     );
 }
 
@@ -1566,7 +1566,7 @@ fn fresh_executor_accepts_structurally_valid_video_and_defers_to_the_live_tuple_
 #[tokio::test]
 async fn missing_sheet_config_keeps_the_confirmed_post_in_a_pending_outbox() {
     let path = std::env::temp_dir().join(format!("riviu-publish-pending-{}.db", Uuid::new_v4()));
-    let db = super::Database::open(&path).expect("open fixture database");
+    let db = std::sync::Arc::new(super::Database::open(&path).expect("open fixture database"));
     let mut bundle = test_bundle("bundle-pending");
     bundle.caption = "caption".into();
     bundle.caption_sha256 = super::frame_sha256(bundle.caption.as_bytes());

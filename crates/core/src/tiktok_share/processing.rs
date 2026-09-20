@@ -1,6 +1,6 @@
 //! A fresh visual notice after Copy is a pending observation, never publication proof.
 use super::*;
-use crate::ui_automation::{OcrImage, OcrRequest, OcrResponse};
+use crate::ui_automation::{OcrImage, OcrRect, OcrRequest, OcrResponse};
 use base64::Engine;
 use sha2::{Digest, Sha256};
 
@@ -45,13 +45,15 @@ pub(super) async fn frame(session: &dyn UiSession) -> Option<OcrImage> {
 
 /// Retain only three fresh upper-quarter observations around the measured toast
 /// onset. Capture precedes clipboard/IME reads, which can cover a transient toast.
+/// Start immediately, but let the first native image finish transferring: on the
+/// measured Android fleet that takes 2.5s, longer than the toast itself.
 pub(super) async fn frames_after_copy(
     session: &dyn UiSession,
     started: tokio::time::Instant,
 ) -> Vec<OcrImage> {
-    let deadline = started + Duration::from_millis(2000);
+    let deadline = started + Duration::from_secs(5);
     let mut frames = Vec::with_capacity(3);
-    for delay_ms in [150, 450, 900] {
+    for delay_ms in [0, 450, 900] {
         if tokio::time::Instant::now() >= deadline {
             break;
         }
@@ -101,7 +103,7 @@ pub(super) async fn observe_frames(
     }
     let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
     let observe_id = uuid::Uuid::new_v4().to_string();
-    let request = |image, generation| OcrRequest {
+    let request = |image, generation, roi| OcrRequest {
         protocol_version: 1,
         request_id: uuid::Uuid::new_v4().to_string(),
         observation_id: observe_id.clone(),
@@ -109,47 +111,77 @@ pub(super) async fn observe_frames(
         generation,
         remaining_ms: 15_000,
         screenshot: image,
-        roi: None,
+        roi,
         languages: vec!["en".into(), "vi".into()],
         min_confidence: 0.9,
     };
-    let mut detected = None;
+    let mut regions = vec![None];
+    // Global45.7.3/en, native1080x2220: the processing toast overlaps the
+    // search bar. OCR of the full upper quarter merges them into one line.
+    // The measured crop only classifies pending; it cannot prove publication.
+    if (before.width, before.height) == (1080, 555) {
+        let measured = tokio::time::timeout_at(
+            deadline.min(tokio::time::Instant::now() + Duration::from_secs(5)),
+            async {
+                let package = "com.zhiliaoapp.musically";
+                session.active_app_bundle().await.ok().as_deref() == Some(package)
+                    && session.app_version(package).await.as_deref() == Some("45.7.3")
+                    && session.ui_language().await.as_deref() == Some("en")
+            },
+        )
+        .await
+        .unwrap_or(false);
+        if measured {
+            regions.push(Some(OcrRect {
+                x: 300,
+                y: 100,
+                width: 490,
+                height: 85,
+            }));
+        }
+    }
     for (index, image) in after.into_iter().take(3).enumerate() {
         if before.sha256 == image.sha256 || session.gui_session_epoch() != epoch {
             continue;
         }
-        let after_request = request(image, index as u64 + 2);
-        let result = tokio::time::timeout_at(
-            deadline.min(tokio::time::Instant::now() + Duration::from_secs(7)),
-            reasoner.ocr(after_request.clone()),
-        )
-        .await;
-        let Ok(Ok(result)) = result else {
-            continue;
-        };
-        if result.validate_binding(&after_request).is_err() {
-            continue;
-        }
-        if let Some(text) = notice(&result) {
-            detected = Some((text.to_owned(), after_request.screenshot.sha256));
-            break;
+        for roi in regions.iter().copied() {
+            if roi.is_some() && (image.width, image.height) != (1080, 555) {
+                continue;
+            }
+            let after_request = request(image.clone(), index as u64 + 2, roi);
+            let result = tokio::time::timeout_at(
+                deadline.min(tokio::time::Instant::now() + Duration::from_secs(7)),
+                reasoner.ocr(after_request.clone()),
+            )
+            .await;
+            let Ok(Ok(result)) = result else {
+                continue;
+            };
+            if result.validate_binding(&after_request).is_err() {
+                continue;
+            }
+            let Some(text) = notice(&result) else {
+                continue;
+            };
+            // Reject a notice that was already present, using the same region
+            // and binding checks on the pre-action image.
+            let before_request = request(before.clone(), 1, roi);
+            let prior = tokio::time::timeout_at(deadline, reasoner.ocr(before_request.clone()))
+                .await
+                .ok()?
+                .ok()?;
+            prior.validate_binding(&before_request).ok()?;
+            if notice(&prior).is_some() || session.gui_session_epoch() != epoch {
+                return None;
+            }
+            return Some(ProcessingNotice {
+                text: text.to_owned(),
+                before_sha256: before_request.screenshot.sha256,
+                after_sha256: after_request.screenshot.sha256,
+            });
         }
     }
-    let (text, after_sha256) = detected?;
-    let before_request = request(before, 1);
-    let prior = tokio::time::timeout_at(deadline, reasoner.ocr(before_request.clone()))
-        .await
-        .ok()?
-        .ok()?;
-    prior.validate_binding(&before_request).ok()?;
-    if notice(&prior).is_some() || session.gui_session_epoch() != epoch {
-        return None;
-    }
-    Some(ProcessingNotice {
-        text,
-        before_sha256: before_request.screenshot.sha256,
-        after_sha256,
-    })
+    None
 }
 
 #[cfg(test)]
@@ -159,6 +191,7 @@ mod tests {
     use std::sync::Arc;
 
     struct Reasoner {
+        require_roi: bool,
         before_has_notice: bool,
         corrupt_binding: bool,
         calls: parking_lot::Mutex<Vec<String>>,
@@ -170,8 +203,13 @@ mod tests {
         }
         async fn ocr(&self, r: OcrRequest) -> anyhow::Result<OcrResponse> {
             self.calls.lock().push(r.screenshot.sha256.clone());
-            let present = r.screenshot.sha256 == "toast"
-                || (r.screenshot.sha256 == "before" && self.before_has_notice);
+            let in_roi = r
+                .roi
+                .as_ref()
+                .is_some_and(|roi| (roi.x, roi.y, roi.width, roi.height) == (300, 100, 490, 85));
+            let present = (!self.require_roi || in_roi)
+                && (r.screenshot.sha256 == "toast"
+                    || (r.screenshot.sha256 == "before" && self.before_has_notice));
             let text = if present {
                 "Post is being processed"
             } else {
@@ -195,8 +233,8 @@ mod tests {
                     vec![OcrLine {
                         text,
                         bounds: OcrRect {
-                            x: 0,
-                            y: 0,
+                            x: r.roi.map_or(0, |roi| roi.x),
+                            y: r.roi.map_or(0, |roi| roi.y),
                             width: 100,
                             height: 10,
                         },
@@ -213,6 +251,25 @@ mod tests {
     struct Session(Arc<Reasoner>);
     #[async_trait::async_trait]
     impl UiSession for Session {
+        fn supports_accessibility_readback(&self) -> bool {
+            true
+        }
+        async fn screenshot_png(&self) -> anyhow::Result<Vec<u8>> {
+            tokio::time::sleep(Duration::from_millis(2500)).await;
+            Ok(include_bytes!(
+                "../../fixtures/tiktok-publish/musically-45.7.3-en/processing-toast-upper.png"
+            )
+            .to_vec())
+        }
+        async fn active_app_bundle(&self) -> anyhow::Result<String> {
+            Ok("com.zhiliaoapp.musically".into())
+        }
+        async fn app_version(&self, _: &str) -> Option<String> {
+            Some("45.7.3".into())
+        }
+        async fn ui_language(&self) -> Option<String> {
+            Some("en".into())
+        }
         fn gui_reasoner(&self) -> Option<crate::ui_automation::SharedReasoner> {
             Some(self.0.clone())
         }
@@ -251,6 +308,22 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn slow_screenshot_transfer_retains_the_fresh_post_copy_frame() {
+        let session = Session(Arc::new(Reasoner {
+            require_roi: false,
+            before_has_notice: false,
+            corrupt_binding: false,
+            calls: parking_lot::Mutex::new(vec![]),
+        }));
+        let images = frames_after_copy(&session, tokio::time::Instant::now()).await;
+        assert!(
+            !images.is_empty(),
+            "2.5s transfer must not discard the capture"
+        );
+        assert_eq!(images[0].width, 1080);
+    }
+
+    #[tokio::test]
     async fn later_fresh_frame_finds_transient_notice_but_old_or_mismatched_frames_do_not() {
         for (before_has_notice, corrupt_binding, expected) in [
             (false, false, true),
@@ -258,6 +331,7 @@ mod tests {
             (false, true, false),
         ] {
             let reasoner = Arc::new(Reasoner {
+                require_roi: false,
                 before_has_notice,
                 corrupt_binding,
                 calls: parking_lot::Mutex::new(vec![]),
@@ -275,11 +349,12 @@ mod tests {
                 assert_eq!(notice.after_sha256, "toast");
                 assert_eq!(
                     reasoner.calls.lock().as_slice(),
-                    ["early", "toast", "before"]
+                    ["early", "early", "toast", "before"]
                 );
             }
         }
         let reasoner = Arc::new(Reasoner {
+            require_roi: false,
             before_has_notice: false,
             corrupt_binding: false,
             calls: parking_lot::Mutex::new(vec![]),
@@ -293,6 +368,29 @@ mod tests {
         .is_none());
         assert!(reasoner.calls.lock().is_empty());
     }
+    #[tokio::test]
+    async fn toast_crop_separates_search_text_and_rejects_prior_notice_or_stale_binding() {
+        for (before_has_notice, corrupt_binding, expected) in [
+            (false, false, true),
+            (true, false, false),
+            (false, true, false),
+        ] {
+            let reasoner = Arc::new(Reasoner {
+                require_roi: true,
+                before_has_notice,
+                corrupt_binding,
+                calls: parking_lot::Mutex::new(vec![]),
+            });
+            let result = observe_frames(
+                &Session(reasoner),
+                Some(image("before")),
+                vec![image("toast")],
+            )
+            .await;
+            assert_eq!(result.is_some(), expected);
+        }
+    }
+
     #[test]
     fn processing_notice_requires_exact_high_confidence_text() {
         let mut response: OcrResponse = serde_json::from_value(serde_json::json!({
@@ -302,6 +400,11 @@ mod tests {
             "engine":"fixture","elapsedMs":1
         })).unwrap();
         assert!(notice(&response).is_some());
+        for text in ["bài đăng đang được xử lý", "bài viết đang được xử lý"] {
+            response.lines[0].text = text.into();
+            assert!(notice(&response).is_some());
+        }
+        response.lines[0].text = "Post is being processed".into();
         response.lines[0].confidence = 0.89;
         assert!(notice(&response).is_none());
         response.lines[0].confidence = 0.99;

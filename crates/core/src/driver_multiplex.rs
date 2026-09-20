@@ -332,6 +332,10 @@ impl DeviceDriver for MultiplexDriver {
         self.route(udid)?.tiktok_build(udid).await
     }
 
+    async fn verify_automation_readiness(&self, udid: &str) -> anyhow::Result<()> {
+        self.route(udid)?.verify_automation_readiness(udid).await
+    }
+
     async fn available_storage_bytes(&self, udid: &str) -> anyhow::Result<u64> {
         self.route(udid)?.available_storage_bytes(udid).await
     }

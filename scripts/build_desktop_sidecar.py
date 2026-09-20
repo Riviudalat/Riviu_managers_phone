@@ -70,6 +70,8 @@ def dependency_closure() -> dict[str, str]:
         if not line or line.startswith("#"):
             continue
         requirement = Requirement(line)
+        if requirement.marker is not None and not requirement.marker.evaluate():
+            continue
         name = canonicalize_name(requirement.name)
         if name in locked:
             raise RuntimeError(

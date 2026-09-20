@@ -38,7 +38,7 @@ pub struct StreamHandoffProof {
     pub generation: u64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(ts_rs::TS, Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub enum ConnectionKind {
     Usb,
@@ -46,7 +46,7 @@ pub enum ConnectionKind {
     Mock,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(ts_rs::TS, Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub enum DeviceStatus {
     Disconnected,
@@ -58,7 +58,7 @@ pub enum DeviceStatus {
     Error,
 }
 
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(ts_rs::TS, Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub enum TileStreamState {
     Live,
@@ -78,7 +78,7 @@ pub enum TileStreamState {
 /// default is `Ios`, which is exactly the bug this field exists to remove: an
 /// Android phone rendered as "iOS 15". A backend that cannot answer must fail to
 /// compile, and a payload that omits the key must fail to decode.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(ts_rs::TS, Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub enum DevicePlatform {
     Ios,
@@ -102,7 +102,7 @@ pub enum HardwareKey {
     Notification,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(ts_rs::TS, Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DeviceInfo {
     pub udid: String,
@@ -373,6 +373,7 @@ pub enum JobStatus {
     Succeeded,
     Failed,
     Cancelled,
+    Uncertain,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -383,6 +384,7 @@ pub enum StepStatus {
     Succeeded,
     Failed,
     Skipped,
+    Uncertain,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1103,6 +1105,7 @@ pub enum NurtureActionSelection {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct NurtureSettings {
+    pub revision: u64,
     #[serde(default)]
     pub action_selection: NurtureActionSelection,
     pub feed_source: NurtureFeedSource,
@@ -1122,6 +1125,9 @@ pub struct NurtureSettings {
     /// meaningfully.
     #[serde(default)]
     pub has_api_key: bool,
+    /// Resolved from the separate TypeSafe credential/settings store; never sent over IPC.
+    #[serde(skip)]
+    pub typesafe: Option<crate::typesafe::Client>,
     pub bundle_id: String,
     /// Which social app this nurture session drives. Defaults to TikTok.
     #[serde(default)]
@@ -1253,6 +1259,7 @@ fn default_carousel_portion_percent() -> u32 {
 impl Default for NurtureSettings {
     fn default() -> Self {
         Self {
+            revision: 0,
             action_selection: NurtureActionSelection::Exclusive,
             feed_source: NurtureFeedSource::ForYou,
             search_keyword: String::new(),
@@ -1262,6 +1269,7 @@ impl Default for NurtureSettings {
             model: "openai/gpt-5.6-luna".into(),
             api_key: String::new(),
             has_api_key: false,
+            typesafe: None,
             bundle_id: "com.ss.iphone.ugc.Ame".into(),
             network: crate::SocialNetwork::TikTok,
             // Manual runs use a varied 2–3 hour horizon; this remains the

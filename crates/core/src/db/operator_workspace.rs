@@ -116,8 +116,8 @@ impl Database {
             updated_at: now,
         };
         let raw = serde_json::to_string(&record)?;
-        tx.execute("INSERT INTO operator_records(id,kind,name,revision,archived,record_json,updated_at) VALUES(?1,?2,?3,?4,0,?5,?6) ON CONFLICT(id) DO UPDATE SET name=excluded.name,revision=excluded.revision,record_json=excluded.record_json,updated_at=excluded.updated_at",params![record.id.to_string(),record.kind.as_str(),record.name,record.revision,raw,record.updated_at])?;
-        tx.execute("INSERT INTO operator_record_revisions(record_id,revision,record_json) VALUES(?1,?2,?3)",params![record.id.to_string(),record.revision,raw])?;
+        tx.execute("INSERT INTO operator_records(id,kind,name,revision,archived,record_json,updated_at) VALUES(?1,?2,?3,?4,0,?5,?6) ON CONFLICT(id) DO UPDATE SET name=excluded.name,revision=excluded.revision,record_json=excluded.record_json,updated_at=excluded.updated_at",params![record.id.to_string(),record.kind.as_str(),record.name,i64::try_from(record.revision)?,raw,record.updated_at])?;
+        tx.execute("INSERT INTO operator_record_revisions(record_id,revision,record_json) VALUES(?1,?2,?3)",params![record.id.to_string(),i64::try_from(record.revision)?,raw])?;
         tx.commit()?;
         Ok(record)
     }
@@ -142,8 +142,8 @@ impl Database {
         record.archived = true;
         record.updated_at = chrono::Utc::now().to_rfc3339();
         let raw = serde_json::to_string(&record)?;
-        tx.execute("UPDATE operator_records SET archived=1,revision=?2,record_json=?3,updated_at=?4 WHERE id=?1", params![id.to_string(),record.revision,raw,record.updated_at])?;
-        tx.execute("INSERT INTO operator_record_revisions(record_id,revision,record_json) VALUES(?1,?2,?3)",params![id.to_string(),record.revision,raw])?;
+        tx.execute("UPDATE operator_records SET archived=1,revision=?2,record_json=?3,updated_at=?4 WHERE id=?1", params![id.to_string(),i64::try_from(record.revision)?,raw,record.updated_at])?;
+        tx.execute("INSERT INTO operator_record_revisions(record_id,revision,record_json) VALUES(?1,?2,?3)",params![id.to_string(),i64::try_from(record.revision)?,raw])?;
         tx.commit()?;
         Ok(())
     }

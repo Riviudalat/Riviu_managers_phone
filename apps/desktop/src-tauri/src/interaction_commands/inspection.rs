@@ -25,6 +25,7 @@ pub struct ActionReadback {
     pub checked_at: String,
     pub like: &'static str,
     pub save: riviu_core::BookmarkState,
+    pub follow: Option<&'static str>,
     pub snapshot_sha256: String,
 }
 
@@ -131,26 +132,46 @@ pub(super) async fn readback(
         .iter()
         .find(|t| t.target_key == row.target_key)
         .ok_or_else(|| anyhow::anyhow!("Thiếu bài gốc"))?;
-    let device = open_interaction_context(control, &row.actor_udid).await?;
+    let device = if request.actions.follow {
+        // TikTok can retain a profile destination from an earlier feed card.
+        // Match the production runner's clean app session before account/link
+        // proof; this remains navigation only and cannot re-arm an action.
+        riviu_core::interaction_campaign::open_clean_interaction_context(control, &row.actor_udid)
+            .await?
+    } else {
+        open_interaction_context(control, &row.actor_udid).await?
+    };
     let result = async {
         let labels = labels(control, &row.actor_udid).await?;
         let session = control.streaming_session(&device.context)?;
-        let arrival = riviu_core::interaction_hierarchy::open_target_by_hierarchy(
+        session.set_gui_scope(riviu_core::ui_automation::GuiScope {
+            run_id: campaign.into(),
+            assignment_id: Some(assignment.into()),
+            device_id: row.actor_udid.clone(),
+            deadline_ms: None,
+        });
+        let actor = if request.actions.follow {
+            let expected = db.get_device_meta(&row.actor_udid)?.handle;
+            let observed =
+                riviu_core::tiktok_share::observe_publish_account(session.as_ref(), &labels)
+                    .await?;
+            anyhow::ensure!(
+                !expected.is_empty()
+                    && observed.eq_ignore_ascii_case(expected.trim_start_matches('@')),
+                "Tài khoản đã đổi; chưa thể đối chiếu Follow"
+            );
+            Some(observed)
+        } else {
+            None
+        };
+        // Readback uses the same exact URL resolver as comment verification;
+        // it needs no initial feed card and never re-arms a public action.
+        riviu_core::interaction_hierarchy::open_pinned_target_by_hierarchy(
             session.as_ref(),
             labels,
             &device.target_package,
-            &target.normalized_url,
-            &target.author,
-            &std::sync::atomic::AtomicBool::new(false),
-        )
-        .await
-        .map_err(|e| anyhow::anyhow!(e.code()))?;
-        // Even a matching author can own several posts: this readback requires the exact URL.
-        let _ = arrival;
-        riviu_core::interaction_hierarchy::confirm_target_from_share_link(
-            session.as_ref(),
-            labels,
             target,
+            &std::sync::atomic::AtomicBool::new(false),
         )
         .await?;
         let mut adapter = riviu_core::HierarchySaveAdapter::new(session.as_ref(), labels);
@@ -168,6 +189,18 @@ pub(super) async fn readback(
             before.identity.is_some() && before.identity == after.identity,
             "Bài đã đổi trong lúc kiểm tra"
         );
+        let follow = match actor {
+            Some(account) => Some(
+                riviu_core::tiktok_follow_target::observe_follow_profile(
+                    session.as_ref(),
+                    labels,
+                    target,
+                    &account,
+                )
+                .await?,
+            ),
+            None => None,
+        };
         Ok(ActionReadback {
             assignment_id: assignment.into(),
             target_url: target.normalized_url.clone(),
@@ -180,6 +213,7 @@ pub(super) async fn readback(
                 "unknown"
             },
             save: after.state,
+            follow,
             snapshot_sha256: format!(
                 "{:x}",
                 Sha256::digest(session.hierarchy_source_snapshot().await?.xml.as_bytes())

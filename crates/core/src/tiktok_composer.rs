@@ -66,6 +66,9 @@
 //! each selection; a bare Next no longer authorizes a photo carousel.
 
 use std::sync::atomic::{AtomicBool, Ordering};
+mod editor_recovery;
+#[cfg(test)]
+mod editor_recovery_tests;
 mod progress;
 mod selection;
 pub use progress::{PublishProgress, PublishProgressObserver};
@@ -356,6 +359,7 @@ impl std::error::Error for ComposerUnready {}
 /// Every locator the publish path needs, resolved before anything is opened.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ComposerPlan {
+    wait_rendered_editor: bool,
     open: ElementQuery<'static>,
     shutter: ElementQuery<'static>,
     album_menu: ElementQuery<'static>,
@@ -471,15 +475,44 @@ impl ComposerPlan {
             |control: TikTokControl| labels.label(control).expect("checked above").to_query();
         let optional = |control: TikTokControl| labels.label(control).map(|label| label.to_query());
         Ok(Self {
+            wait_rendered_editor: labels.package() == "com.zhiliaoapp.musically"
+                && labels.resource_version() == Some("45.7.3")
+                && labels.language() == "en",
             open: query(TikTokControl::ComposerOpen),
             shutter: query(TikTokControl::ComposerShutter),
             album_menu: query(TikTokControl::PickerAlbumMenu),
             // SM-G955N ce011711c354be2005, 08/09/2026: 46.0.41 album RecyclerView
             // :id/kbh bounds [0,210][1080,2094]; one upward swipe reveals the new
             // exact import below eight older albums. Other builds require measurement.
-            album_scroll: (labels.package() == "com.zhiliaoapp.musically"
-                && labels.resource_version() == Some("46.0.41"))
-            .then_some(ElementQuery::ResourceIdSuffix(":id/kbh")),
+            album_scroll: match (
+                labels.package(),
+                labels.resource_version(),
+                labels.language(),
+            ) {
+                ("com.zhiliaoapp.musically", Some("45.4.3"), "en") => {
+                    Some(ElementQuery::ResourceIdSuffix(":id/k0h"))
+                }
+                // ce031713b0c610ab0c, 20/09/2026: measured album RecyclerView
+                // k7u spans [0,210][1080,2094], with older imports above target.
+                ("com.zhiliaoapp.musically", Some("45.7.3"), "en") => {
+                    Some(ElementQuery::ResourceIdSuffix(":id/k7u"))
+                }
+                ("com.zhiliaoapp.musically", Some("46.0.41"), "en") => {
+                    Some(ElementQuery::ResourceIdSuffix(":id/kbh"))
+                }
+                ("com.zhiliaoapp.musically", Some("46.1.3"), "en") => {
+                    Some(ElementQuery::ResourceIdSuffix(":id/kch"))
+                }
+                ("com.zhiliaoapp.musically", Some("46.4.3"), "en") => {
+                    Some(ElementQuery::ResourceIdSuffix(":id/kkn"))
+                }
+                // ce031713f3d3ec1d0c, 19/09/2026: h27 is the album RecyclerView.
+                // One scroll revealed the exact already-imported campaign album.
+                ("com.ss.android.ugc.trill", Some("38.3.2"), "en") => {
+                    Some(ElementQuery::ResourceIdSuffix(":id/h27"))
+                }
+                _ => None,
+            },
             tabs: query(TikTokControl::PickerTabPhotos),
             multi_select: query(TikTokControl::PickerMultiSelect),
             picker_next: selection::PickerControls::for_labels(labels)
@@ -541,6 +574,7 @@ impl ComposerPlan {
         let query =
             |control: TikTokControl| labels.label(control).expect("checked above").to_query();
         Ok(Self {
+            wait_rendered_editor: false,
             open: query(TikTokControl::ComposerOpen),
             shutter: query(TikTokControl::ComposerShutter),
             album_menu: NEVER_MEASURED,
@@ -1400,12 +1434,29 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
         next: &ElementBox,
         stop: &AtomicBool,
     ) -> anyhow::Result<bool> {
+        if stop.load(Ordering::Relaxed) {
+            return Ok(false);
+        }
         self.tap_inside(next).await?;
+        if self.plan.wait_rendered_editor && self.session.gui_reasoner().is_some() {
+            return editor_recovery::wait_rendered(self.session, stop).await;
+        }
         match self.plan.edit_step_marker {
-            Some(edit_next) => Ok(self
+            Some(edit_next) => match self
                 .await_condition(COMPOSER_WINDOW, edit_next, stop, |_| true)
-                .await?
-                .is_some()),
+                .await
+            {
+                Ok(found) => Ok(!stop.load(Ordering::Relaxed) && found.is_some()),
+                Err(error) if editor_recovery::transient_read(&error) => {
+                    let Some(controls) = self.plan.selection_controls else {
+                        return Err(error);
+                    };
+                    editor_recovery::observe(self.session, controls.package, edit_next, stop)
+                        .await
+                        .with_context(|| format!("editor arrival read failed: {error}"))
+                }
+                Err(error) => Err(error),
+            },
             None => {
                 self.await_absent(COMPOSER_WINDOW, self.plan.multi_select, stop)
                     .await
@@ -4143,40 +4194,50 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn measured_album_list_scrolls_to_exact_import_without_tapping_another_album() {
-        let mut menu = picker("All", None).leaving_by(box_at(0.0, 400.0));
-        menu.elements.insert(
-            ":id/kbh".into(),
-            ElementBox {
-                x: 0.0,
-                y: 210.0,
-                width: 1080.0,
-                height: 1884.0,
-                description: None,
-                enabled: true,
-                clickable: false,
-            },
-        );
-        let session = FakeSession {
-            album_requires_scroll: true,
-            ..FakeSession::with(vec![
-                picker("All", Some("fixture-album-menu")),
-                menu,
-                picker("riviu-late-album", None),
-            ])
-            .rows("riviu-late-album", vec![box_at(0.0, 400.0)])
-        };
-        let mut measured = plan();
-        measured.album_scroll = Some(ElementQuery::ResourceIdSuffix(":id/kbh"));
-        let mut composer = Composer::new(&session, measured, |e: &ElementBox| e.centre());
-        assert_eq!(
-            composer
-                .select_album("riviu-late-album", &AtomicBool::new(false))
-                .await
-                .unwrap(),
-            AlbumChoice::Confirmed
-        );
-        assert_eq!(*session.swipes.lock(), 1);
-        assert_eq!(session.taps.lock().len(), 2);
+        for (package, version, list_id) in [
+            ("com.zhiliaoapp.musically", "45.4.3", ":id/k0h"),
+            ("com.zhiliaoapp.musically", "45.7.3", ":id/k7u"),
+            ("com.zhiliaoapp.musically", "46.0.41", ":id/kbh"),
+            ("com.zhiliaoapp.musically", "46.1.3", ":id/kch"),
+            ("com.zhiliaoapp.musically", "46.4.3", ":id/kkn"),
+            ("com.ss.android.ugc.trill", "38.3.2", ":id/h27"),
+        ] {
+            let mut menu = picker("All", None).leaving_by(box_at(0.0, 400.0));
+            menu.elements.insert(
+                list_id.into(),
+                ElementBox {
+                    x: 0.0,
+                    y: 210.0,
+                    width: 1080.0,
+                    height: 1884.0,
+                    description: None,
+                    enabled: true,
+                    clickable: false,
+                },
+            );
+            let session = FakeSession {
+                album_requires_scroll: true,
+                ..FakeSession::with(vec![
+                    picker("All", Some("fixture-album-menu")),
+                    menu,
+                    picker("riviu-late-album", None),
+                ])
+                .rows("riviu-late-album", vec![box_at(0.0, 400.0)])
+            };
+            let mut measured = plan();
+            let labels = controls_for(package, "en", version).unwrap();
+            measured.album_scroll = ComposerPlan::resolve(&labels).unwrap().album_scroll;
+            let mut composer = Composer::new(&session, measured, |e: &ElementBox| e.centre());
+            assert_eq!(
+                composer
+                    .select_album("riviu-late-album", &AtomicBool::new(false))
+                    .await
+                    .unwrap(),
+                AlbumChoice::Confirmed
+            );
+            assert_eq!(*session.swipes.lock(), 1);
+            assert_eq!(session.taps.lock().len(), 2);
+        }
     }
 
     #[tokio::test(start_paused = true)]

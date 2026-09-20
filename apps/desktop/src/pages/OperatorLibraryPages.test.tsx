@@ -148,6 +148,12 @@ describe.each(pages)("$name — trạng thái đọc", (page) => {
     const read = vi.fn().mockReturnValueOnce(older.promise).mockReturnValueOnce(newer.promise);
     listRead(page.command, read);
     render(<StrictMode>{page.render()}</StrictMode>);
+    if (page.command === "automation_schedule_list") {
+      expect(read).toHaveBeenCalledTimes(1);
+      await act(async () => older.resolve([page.row]));
+      expect(screen.getByText(page.row.name)).toBeInTheDocument();
+      return;
+    }
     expect(read).toHaveBeenCalledTimes(2);
     await act(async () => newer.resolve([page.row]));
     expect(screen.getByText(page.row.name)).toBeInTheDocument();
@@ -162,6 +168,14 @@ describe.each(pages)("$name — trạng thái đọc", (page) => {
     listRead(page.command, read);
     render(<StrictMode>{page.render()}</StrictMode>);
     await act(async () => older.reject(new Error("Lỗi của lượt cũ")));
+    if (page.command === "automation_schedule_list") {
+      expect(read).toHaveBeenCalledTimes(1);
+      expect(screen.getByRole("alert")).toHaveTextContent("Lỗi của lượt cũ");
+      await userEvent.click(screen.getByRole("button", { name: "Thử lại" }));
+      await act(async () => newer.resolve([page.row]));
+      expect(screen.getByText(page.row.name)).toBeInTheDocument();
+      return;
+    }
     expect(screen.getByRole("status")).toHaveTextContent(page.loading);
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
     expect(screen.queryByText(page.empty)).not.toBeInTheDocument();

@@ -363,6 +363,11 @@ pub trait DeviceDriver: Send + Sync {
         Ok(())
     }
 
+    /// Read-only readiness. Does not wake, unlock, open a session or repair an agent.
+    async fn verify_automation_readiness(&self, udid: &str) -> anyhow::Result<()> {
+        self.verify_automation_transport(udid).await
+    }
+
     /// Bytes available on the filesystem used to stage publish media.
     async fn available_storage_bytes(&self, _udid: &str) -> anyhow::Result<u64> {
         unsupported("availableStorageBytes")

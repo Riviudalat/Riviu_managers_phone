@@ -2,6 +2,7 @@ import "@testing-library/jest-dom/vitest";
 import { configure } from "@testing-library/dom";
 import { cleanup } from "@testing-library/react";
 import { afterEach } from "vitest";
+import { readQueryClient } from "../readQuery";
 
 /**
  * **Unmount what a test rendered, because nothing else does.**
@@ -25,6 +26,7 @@ import { afterEach } from "vitest";
  */
 afterEach(() => {
   cleanup();
+  readQueryClient.clear();
   // Each test owns one application installation; remounts within a test retain drafts.
   for (const key of Object.keys(localStorage)) {
     if (key.startsWith("riviu.form-draft.v1.")) localStorage.removeItem(key);

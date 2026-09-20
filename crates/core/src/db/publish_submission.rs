@@ -1,6 +1,28 @@
 use super::*;
 use crate::publish_submission::{normalize_publish_account, PublishSubmissionProof};
 
+fn require_assigned_account(
+    conn: &Connection,
+    assignment: &str,
+    observed: &str,
+) -> anyhow::Result<()> {
+    let assigned: String = conn.query_row(
+        "SELECT COALESCE(m.handle,'') FROM publish_assignments a
+         LEFT JOIN device_meta m ON m.udid=a.udid WHERE a.id=?1",
+        [assignment],
+        |row| row.get(0),
+    )?;
+    // Older imported records can lack operator metadata. A configured identity
+    // is authoritative and may never be silently replaced by an observed one.
+    if !assigned.trim().is_empty() {
+        anyhow::ensure!(
+            normalize_publish_account(&assigned)? == normalize_publish_account(observed)?,
+            "Tài khoản trên máy không khớp nick đã gán; chưa Đăng"
+        );
+    }
+    Ok(())
+}
+
 impl Database {
     /// Reserve across every device and both TikTok packages. No clock expiry after dispatch.
     pub fn reserve_publish_account(&self, assignment: &str, account: &str) -> anyhow::Result<()> {
@@ -16,6 +38,7 @@ impl Database {
             eligible,
             "Lượt đăng cần kiểm tra lại trước khi giữ tài khoản"
         );
+        require_assigned_account(&tx, assignment, &account)?;
         let owner: Option<String> = tx
             .query_row(
                 "SELECT assignment_id FROM publish_account_reservations WHERE account=?1",
@@ -105,6 +128,7 @@ pub(super) fn validate_submission_claim(
         "TikTok đã thay đổi so với lần kiểm tra; kiểm tra lại trước Đăng"
     );
     let account = normalize_publish_account(&proof.expected_account)?;
+    require_assigned_account(conn, assignment, &account)?;
     let owns: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM publish_account_reservations WHERE account=?1 AND assignment_id=?2)",
         params![account,assignment], |r| r.get(0))?;
     anyhow::ensure!(owns, "Lượt đăng chưa giữ tài khoản để xác minh liên kết");
@@ -256,6 +280,55 @@ mod tests {
             media_kind: crate::PublishMediaKind::Image,
         };
         (db, path, campaign.id, assignments, proof)
+    }
+
+    #[test]
+    fn assigned_account_mismatch_cannot_reserve_or_cross_post_intent() {
+        let (db, _path, campaign, assignments, proof) = setup();
+        let a = &assignments[0];
+        db.conn()
+            .unwrap()
+            .execute(
+                "INSERT INTO device_meta(udid,handle) VALUES(?1,'different.account')",
+                [&a.udid],
+            )
+            .unwrap();
+        assert!(db
+            .reserve_publish_account(&a.id, &proof.expected_account)
+            .is_err());
+        assert_eq!(
+            db.conn()
+                .unwrap()
+                .query_row(
+                    "SELECT COUNT(*) FROM publish_account_reservations WHERE assignment_id=?1",
+                    [&a.id],
+                    |r| r.get::<_, i64>(0),
+                )
+                .unwrap(),
+            0
+        );
+        db.conn()
+            .unwrap()
+            .execute(
+                "UPDATE device_meta SET handle='@Fixture.Account' WHERE udid=?1",
+                [&a.udid],
+            )
+            .unwrap();
+        db.reserve_publish_account(&a.id, &proof.expected_account)
+            .unwrap();
+        db.conn()
+            .unwrap()
+            .execute(
+                "UPDATE device_meta SET handle='changed.after.reserve' WHERE udid=?1",
+                [&a.udid],
+            )
+            .unwrap();
+        assert!(db
+            .claim_publish_assignment_for_posting(&a.id, &intent(&proof))
+            .is_err());
+        let current = db.get_publish_campaign(&campaign).unwrap().unwrap();
+        assert!(current.assignments[0].effect_intent.is_none());
+        assert_eq!(current.assignments[0].state, S::Imported);
     }
 
     #[test]

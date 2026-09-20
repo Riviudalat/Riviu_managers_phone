@@ -460,7 +460,8 @@ class DependencyContractTests(unittest.TestCase):
             encoding="utf-8"
         )
 
-        self.assertIn("cryptography==48.0.0", lock.splitlines())
+        self.assertIn('cryptography==48.0.0; sys_platform != "win32"', lock.splitlines())
+        self.assertIn('cryptography==50.0.1; sys_platform == "win32"', lock.splitlines())
         self.assertNotIn("cryptography==49.0.0", lock.splitlines())
 
 

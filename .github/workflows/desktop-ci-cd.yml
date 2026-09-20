@@ -88,6 +88,10 @@ jobs:
         run: |
           python -c "import sys; assert sys.prefix != sys.base_prefix, 'quality Python must be isolated'"
           python -m pip install --disable-pip-version-check --only-binary=cryptography -r sidecars/pymobiledevice3/requirements-build.txt
+          python scripts/check_dependency_drift.py --toolchains --python-runtime
+          python scripts/check_generated_ipc.py
+          python -m pip install --upgrade pip==26.2 pip-audit==2.10.0
+          python -m pip_audit
           python -m pip check
 
       - name: Install frontend dependencies
@@ -136,6 +140,9 @@ jobs:
 
       - name: Verify Sheet delivery transaction and layout
         run: node --test scripts/test_publish_sheet.mjs
+
+      - name: Verify build-once Windows packaging
+        run: python -m unittest scripts.test_bundle_windows_installers -v
 
       - name: Verify release tag matches application version
         if: startsWith(github.ref, 'refs/tags/v')
@@ -472,21 +479,24 @@ jobs:
           if [ "${{ runner.os }}" = "Windows" ]; then
             npm run tauri -- build --ci \
               --target "${{ matrix.target }}" \
-              --bundles nsis \
+              --no-bundle \
               --config "${{ github.workspace }}/apps/desktop/src-tauri/tauri.full.conf.json" \
               --config "${{ github.workspace }}/target/tauri-sidecar.conf.json" \
               --config "${{ github.workspace }}/target/tauri-android-package-tools.conf.json" \
               --config "${{ github.workspace }}/target/tauri-gui-service.conf.json" \
               -- --locked
-            npm run tauri -- build --ci \
+            # Reuse one build, restoring Tauri's marker before each installer so
+            # MSI cannot inherit NSIS's updater identity after a bundle/retry.
+            python ../../scripts/bundle_windows_installers.py \
+              --desktop-dir . \
               --target "${{ matrix.target }}" \
-              --bundles msi \
+              --executable "${{ github.workspace }}/target/${{ matrix.target }}/release/riviu-managers-phone.exe" \
               --config "${{ github.workspace }}/apps/desktop/src-tauri/tauri.full.conf.json" \
               --config "${{ github.workspace }}/target/tauri-sidecar.conf.json" \
               --config "${{ github.workspace }}/target/tauri-android-package-tools.conf.json" \
               --config "${{ github.workspace }}/target/tauri-gui-service.conf.json" \
-              --config "${{ github.workspace }}/target/tauri-per-user-msi.conf.json" \
-              -- --locked
+              --msi-config "${{ github.workspace }}/target/tauri-per-user-msi.conf.json" \
+              --report "${{ github.workspace }}/target/windows-bundle-timings.json"
           else
             npm run tauri -- build --ci \
               --target "${{ matrix.target }}" \

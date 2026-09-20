@@ -28,7 +28,7 @@
 //!
 //! So the baseline is **written, not observed**. A unique sentinel goes into the clipboard
 //! first; the copy row is tapped; the clipboard must then hold something that is *not* the
-//! sentinel. A value that is still the sentinel proves the tap did not land, and a failure
+//! sentinel. A value that is still the sentinel leaves delivery unresolved, and a failure
 //! to write the sentinel at all is a refusal rather than a guess.
 //!
 //! **What that still does not prove**, stated plainly so nobody reads more into it: the
@@ -109,8 +109,8 @@ pub enum LinkCapture {
     AmbiguousCopyRow,
     /// The copy row was tapped and the clipboard still holds the sentinel.
     ///
-    /// Which is the proof the tap did not land — a much stronger statement than the old
-    /// "the value did not change", and it cannot be confused with a stale link.
+    /// The action may have landed while TikTok is processing the post. This is
+    /// unresolved delivery, never permission to replay Post or accept a stale link.
     CopyDidNotLand,
     /// Fresh processing message observed immediately after Copy, bound to before/after images.
     Processing(ProcessingNotice),
@@ -453,15 +453,28 @@ pub async fn observe_publish_account(
     let profile = labels
         .label(TikTokControl::ProfileTab)
         .ok_or_else(|| anyhow::anyhow!("profile tab unmeasured"))?;
-    let tab = match session.locate(profile.to_query()).await? {
-        Some(tab) => tab,
-        None => crate::ui_automation::runtime::resolve_navigation(
-            session,
-            "profile",
-            Duration::from_secs(30),
-        )
-        .await?
-        .ok_or_else(|| anyhow::anyhow!("profile tab absent"))?,
+    let mut spend = crate::feed_ladder::LadderSpend::new(2);
+    spend.allow_back = true;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    let tab = loop {
+        anyhow::ensure!(
+            session.active_app_bundle().await? == labels.package(),
+            "account navigation left TikTok"
+        );
+        if let Some(tab) = session.locate(profile.to_query()).await? {
+            break tab;
+        }
+        anyhow::ensure!(tokio::time::Instant::now() < deadline, "profile tab absent");
+        let step = crate::feed_ladder::step(session, *labels, &mut spend).await;
+        anyhow::ensure!(
+            !matches!(
+                step,
+                crate::feed_ladder::LadderStep::Stuck
+                    | crate::feed_ladder::LadderStep::TapFailed { .. }
+            ),
+            "profile navigation unavailable"
+        );
+        tokio::time::sleep(Duration::from_millis(300)).await;
     };
     session.tap(tab.centre()).await?;
     let deadline = tokio::time::Instant::now() + PROFILE_WINDOW;
@@ -805,7 +818,6 @@ async fn read_through_sheet_counted(
     };
     let before_copy = processing::frame(session).await;
     *copy_attempts = copy_attempts.saturating_add(1);
-    let copy_started = tokio::time::Instant::now();
     let copy_tap = if session.supports_accessibility_readback() {
         let mut query = None;
         for label in ["Copy link", "Sao chép liên kết", "Sao chép link"] {
@@ -832,6 +844,9 @@ async fn read_through_sheet_counted(
     if let Err(error) = copy_tap {
         return LinkCapture::ReadFailed(error.to_string());
     }
+    // Locator/activation can wait for Android idle. Give the post-action
+    // observations their full window after the dispatch has acknowledged.
+    let copy_started = tokio::time::Instant::now();
     // Capture the transient toast before clipboard/helper reads can hide it.
     let after_copy = if before_copy.is_some() {
         processing::frames_after_copy(session, copy_started).await
@@ -1227,6 +1242,104 @@ mod tests {
     use crate::types::TapPoint;
     use parking_lot::Mutex;
 
+    struct OwnProfileRoute {
+        page: Mutex<&'static str>,
+        backs: Mutex<usize>,
+        taps: Mutex<usize>,
+    }
+    #[async_trait::async_trait]
+    impl UiSession for OwnProfileRoute {
+        async fn tap(&self, _: TapPoint) -> anyhow::Result<()> {
+            let mut page = self.page.lock();
+            *page = match *page {
+                "feed" => "own",
+                "own" => "feed",
+                _ => anyhow::bail!("foreign profile is not own Profile tab"),
+            };
+            *self.taps.lock() += 1;
+            Ok(())
+        }
+        async fn swipe(&self, _: crate::SwipeGesture) -> anyhow::Result<()> {
+            anyhow::bail!("must not scroll foreign profile")
+        }
+        async fn type_text(&self, _: &str) -> anyhow::Result<()> {
+            unreachable!()
+        }
+        async fn home(&self) -> anyhow::Result<()> {
+            unreachable!()
+        }
+        async fn find_and_tap(&self, _: &str) -> anyhow::Result<()> {
+            unreachable!()
+        }
+        async fn assert_visible(&self, _: &str) -> anyhow::Result<()> {
+            unreachable!()
+        }
+        fn stream_url(&self) -> Option<String> {
+            None
+        }
+        async fn back(&self) -> anyhow::Result<()> {
+            *self.backs.lock() += 1;
+            *self.page.lock() = "feed";
+            Ok(())
+        }
+        async fn active_app_bundle(&self) -> anyhow::Result<String> {
+            Ok("com.ss.android.ugc.trill".into())
+        }
+        async fn locate(&self, query: ElementQuery<'_>) -> anyhow::Result<Option<ElementBox>> {
+            let page = *self.page.lock();
+            let text = match query {
+                ElementQuery::Description { value, .. } | ElementQuery::Text { value, .. } => value,
+                _ => "",
+            };
+            Ok(match (page, text) {
+                ("feed", "Profile") | ("own", "Home") => Some(labelled(text, 1900.0)),
+                _ => None,
+            })
+        }
+        async fn hierarchy_source_snapshot(
+            &self,
+        ) -> anyhow::Result<crate::HierarchySourceSnapshot> {
+            Ok(crate::HierarchySourceSnapshot {
+                generation: 1,
+                xml: "<hierarchy/>".into(),
+            })
+        }
+        async fn locate_all_described(
+            &self,
+            query: ElementQuery<'_>,
+        ) -> anyhow::Result<Vec<ElementBox>> {
+            if *self.page.lock() != "own" {
+                return Ok(vec![]);
+            }
+            Ok(match query {
+                ElementQuery::Text {
+                    value: "Edit profile",
+                    exact: true,
+                } => vec![labelled("Edit profile", 500.0)],
+                ElementQuery::ResourceIdSuffix(":id/mjf") => {
+                    vec![labelled("@fixture.actor", 300.0)]
+                }
+                _ => vec![],
+            })
+        }
+    }
+    #[tokio::test(start_paused = true)]
+    async fn own_account_navigation_backs_out_of_foreign_profile_before_own_tab() {
+        let labels = controls_for("com.ss.android.ugc.trill", "en", "38.3.2").unwrap();
+        let phone = OwnProfileRoute {
+            page: Mutex::new("foreign"),
+            backs: Mutex::new(0),
+            taps: Mutex::new(0),
+        };
+        assert_eq!(
+            observe_publish_account(&phone, &labels).await.unwrap(),
+            "fixture.actor"
+        );
+        assert_eq!(*phone.backs.lock(), 1);
+        assert_eq!(*phone.taps.lock(), 2);
+        assert_eq!(*phone.page.lock(), "feed");
+    }
+
     /// A phone whose clipboard changes **because something tapped the copy row**.
     ///
     /// The causal model is the whole point of this fake. An earlier one popped a queued
@@ -1256,6 +1369,9 @@ mod tests {
         dismissed: Mutex<bool>,
         auto_dismiss_copy: bool,
         post_nodes: Option<Vec<(String, ElementBox)>>,
+        copy_dispatch_delay: Duration,
+        copy_ready_at: Mutex<Option<tokio::time::Instant>>,
+        clipboard_delivery_delay: Duration,
     }
 
     fn labelled(label: &str, y: f64) -> ElementBox {
@@ -1325,7 +1441,9 @@ mod tests {
             let hit = self.hits_copy_row(&point);
             self.taps.lock().push(point);
             if hit && !self.copies.is_empty() {
-                *self.clipboard.lock() = Some((self.kind.clone(), self.copies.clone()));
+                tokio::time::sleep(self.copy_dispatch_delay).await;
+                *self.copy_ready_at.lock() =
+                    Some(tokio::time::Instant::now() + self.clipboard_delivery_delay);
                 if self.auto_dismiss_copy {
                     *self.dismissed.lock() = true;
                 }
@@ -1376,6 +1494,13 @@ mod tests {
                         .as_deref()
                         .unwrap_or("fixture clipboard helper disconnected")
                 );
+            }
+            if self
+                .copy_ready_at
+                .lock()
+                .is_some_and(|ready| tokio::time::Instant::now() >= ready)
+            {
+                *self.clipboard.lock() = Some((self.kind.clone(), self.copies.clone()));
             }
             let held = self.clipboard.lock().clone();
             let (kind, value) = held.ok_or_else(|| anyhow::anyhow!("clipboard unreadable"))?;
@@ -1706,6 +1831,27 @@ mod tests {
             LinkCapture::AmbiguousCopyRow
         );
         assert_eq!(session.taps.lock().len(), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn slow_copy_dispatch_preserves_the_post_dispatch_observation_window() {
+        let session = FakeSession {
+            copy_dispatch_delay: Duration::from_secs(5),
+            clipboard_delivery_delay: Duration::from_millis(600),
+            ..FakeSession::sheet(
+                vec![labelled("Copy link", 1800.0)],
+                "https://www.tiktok.com/@fixture/video/123",
+            )
+        };
+        assert_eq!(
+            capture_post_link(&session, &english()).await,
+            LinkCapture::Captured("https://www.tiktok.com/@fixture/video/123".into())
+        );
+        assert_eq!(
+            session.taps.lock().len(),
+            2,
+            "one Share and one Copy, no retry"
+        );
     }
 
     // -------------------------------------------------------------- the happy path

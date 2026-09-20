@@ -259,7 +259,7 @@ impl ScriptedConversation {
             assignments,
         })
     }
-    pub fn mentions(&self, target: &str, ordinal: u8) -> Vec<String> {
+    pub fn effective_mention_roles(&self, target: &str, ordinal: u8) -> Vec<String> {
         let Some(step) = self.step(target, ordinal) else {
             return vec![];
         };
@@ -277,6 +277,9 @@ impl ScriptedConversation {
             }
         }
         roles
+    }
+    pub fn mentions(&self, target: &str, ordinal: u8) -> Vec<String> {
+        self.effective_mention_roles(target, ordinal)
             .iter()
             .filter_map(|id| self.role(id))
             .map(|role| role.username.trim_start_matches('@').to_owned())

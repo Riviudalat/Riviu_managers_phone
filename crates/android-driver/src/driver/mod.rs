@@ -791,6 +791,7 @@ fn select_foreground_tiktok_package(
 }
 
 pub struct AndroidDriver {
+    trace: Mutex<Option<riviu_core::ui_automation::trace::TraceRecorder>>,
     gui_reasoner: Mutex<Option<riviu_core::ui_automation::SharedReasoner>>,
     adb: AdbProgram,
     adb_origin: adb::AdbOrigin,
@@ -943,6 +944,18 @@ impl AndroidDriver {
     pub fn set_gui_reasoner(&self, reasoner: riviu_core::ui_automation::SharedReasoner) {
         *self.gui_reasoner.lock() = Some(reasoner);
     }
+
+    pub fn set_trace_recorder(&self, recorder: riviu_core::ui_automation::trace::TraceRecorder) {
+        *self.trace.lock() = Some(recorder);
+    }
+
+    pub async fn flush_traces(&self) -> anyhow::Result<()> {
+        let recorder = self.trace.lock().clone();
+        if let Some(recorder) = recorder {
+            recorder.flush().await?;
+        }
+        Ok(())
+    }
     pub fn new(config: &AndroidDriverConfig) -> anyhow::Result<Self> {
         let (adb, origin) = AdbProgram::resolve_for_policy(
             adb::AdbResolutionPolicy::current_build(),
@@ -1084,6 +1097,7 @@ impl AndroidDriver {
             agent_apks,
             frame_sink: Mutex::new(None),
             gui_reasoner: Mutex::new(None),
+            trace: Mutex::new(None),
             view_sink: Mutex::new(None),
             streams: tokio::sync::Mutex::new(HashMap::new()),
             views: tokio::sync::Mutex::new(HashMap::new()),
@@ -1347,12 +1361,7 @@ fn trust_reading_for_roster(reading: &crate::adb::DeviceListReading) -> Result<(
 #[async_trait]
 impl DeviceDriver for AndroidDriver {
     async fn shutdown_owned_processes(&self) -> anyhow::Result<()> {
-        let agents = self
-            .agents
-            .lock()
-            .drain()
-            .map(|(_, agent)| agent)
-            .collect::<Vec<_>>();
+        let agents = self.agents.lock().drain().collect::<Vec<_>>();
         let helpers = self
             .helpers
             .lock()
@@ -1363,9 +1372,16 @@ impl DeviceDriver for AndroidDriver {
         let ports = self.ports.lock().clone();
         let mut failures = Vec::new();
 
-        for agent in agents {
-            if let Err(error) = agent.close().await {
-                failures.push(format!("close UIAutomator session: {error}"));
+        let mut owned_serials = agents
+            .iter()
+            .map(|(serial, _)| serial.clone())
+            .collect::<std::collections::BTreeSet<_>>();
+        for (serial, agent) in agents {
+            match tokio::time::timeout(Duration::from_secs(5), agent.close()).await {
+                Ok(Ok(())) => {}
+                result => {
+                    tracing::warn!(serial, result=?result, "agent DELETE did not confirm close; checking owned process teardown")
+                }
             }
         }
 
@@ -1376,9 +1392,21 @@ impl DeviceDriver for AndroidDriver {
                 Vec::new()
             }
         };
-        for serial in &instrumented {
+        owned_serials.extend(instrumented.iter().cloned());
+        for serial in &owned_serials {
             if let Err(error) = self.stop_instrumentation(serial).await {
                 failures.push(format!("stop UIAutomator on {serial}: {error}"));
+            }
+            for package in [AGENT_PACKAGE, AGENT_TEST_PACKAGE] {
+                match self.pid_of(serial, package).await {
+                    Ok(None) => {}
+                    Ok(Some(pid)) => failures.push(format!(
+                        "owned agent {package} on {serial} still running with pid {pid}"
+                    )),
+                    Err(error) => failures.push(format!(
+                        "cannot verify owned agent absence on {serial}: {error:#}"
+                    )),
+                }
             }
         }
 
@@ -2129,6 +2157,15 @@ impl DeviceDriver for AndroidDriver {
     /// phone's real (package, version, locale) instead of on the package alone.
     async fn tiktok_build(&self, udid: &str) -> anyhow::Result<(String, String, String)> {
         AndroidDriver::tiktok_build(self, udid).await
+    }
+
+    async fn verify_automation_readiness(&self, udid: &str) -> anyhow::Result<()> {
+        let screen = self.screen_guard_state(udid).await?;
+        anyhow::ensure!(
+            screen.locked == Some(false),
+            "Màn hình đang khóa hoặc chưa đọc được trạng thái khóa"
+        );
+        self.verify_automation_transport(udid).await
     }
 
     async fn available_storage_bytes(&self, udid: &str) -> anyhow::Result<u64> {

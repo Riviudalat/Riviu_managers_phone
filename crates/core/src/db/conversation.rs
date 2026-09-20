@@ -88,9 +88,10 @@ impl Database {
             .step(target, ordinal)
             .context("Không tìm thấy câu trong kịch bản")?;
         let checks = self.conversation_account_checks(script)?;
+        let mentioned = script.effective_mention_roles(target, ordinal);
         for check in checks
             .iter()
-            .filter(|c| c.role_id == step.speaker_id || step.mention_role_ids.contains(&c.role_id))
+            .filter(|c| c.role_id == step.speaker_id || mentioned.contains(&c.role_id))
         {
             anyhow::ensure!(
                 check.issues.is_empty(),
@@ -253,6 +254,7 @@ mod tests {
             cohort_size: None,
             manual_comments: vec![],
             actions: crate::InteractionActionSet {
+                follow: false,
                 like: false,
                 save: false,
                 comment: true,
@@ -346,6 +348,38 @@ mod tests {
         assert!(checks[..2]
             .iter()
             .all(|c| c.issues.iter().any(|i| i.contains("trùng"))));
+    }
+
+    #[test]
+    fn regression_implicit_parent_tag_rechecks_saved_account_before_send() {
+        let (db, _, _, mut script) = fixture();
+        // The UI exposes parent selection independently from the explicit Tag input.
+        script.target_scripts[0].steps[1].mention_role_ids.clear();
+        assert_eq!(
+            script.target_scripts[0].steps[1].parent_step_id.as_deref(),
+            Some("step-1")
+        );
+        let target = script.target_scripts[0].target_key.clone();
+        let actors = script
+            .role_bindings
+            .iter()
+            .map(|r| r.udid.clone())
+            .collect::<Vec<_>>();
+        let targets = crate::parse_tiktok_links("https://www.tiktok.com/@a/video/123")
+            .into_iter()
+            .map(|r| r.target.unwrap())
+            .collect::<Vec<_>>();
+        script.validate(&targets, &actors).unwrap();
+        assert_eq!(script.mentions(&target, 1), vec!["a"]);
+        db.set_device_handle("phone-a", "a", "changed_a").unwrap();
+        let checks = db.conversation_account_checks(&script).unwrap();
+        println!("all-role-checks={checks:?}");
+        let gate = db.require_conversation_step_accounts(&script, &target, 1);
+        println!(
+            "actual-tags={:?} send-gate={gate:?}",
+            script.mentions(&target, 1)
+        );
+        assert!(gate.is_err(), "Parent is automatically tagged but its changed stored account is omitted from the pre-send gate");
     }
 
     #[test]

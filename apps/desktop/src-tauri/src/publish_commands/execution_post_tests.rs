@@ -465,6 +465,11 @@ fn verification_restart_requires_submitted_android_receipt_without_verified_link
     }
     row.evidence_json =
         Some(r#"{"post":{"state":"submitted","publicationVerified":false}}"#.into());
+    assert!(
+        !super::super::verification_restart::requested(&row, "com.zhiliaoapp.musically"),
+        "Legacy intent missing package stays observational without restarting"
+    );
+    row.effect_intent = Some(r#"{"package":"com.zhiliaoapp.musically"}"#.into());
     assert!(super::super::verification_restart::requested(
         &row,
         "com.zhiliaoapp.musically"

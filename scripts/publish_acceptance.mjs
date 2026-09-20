@@ -6,9 +6,10 @@ import { setTimeout as delay } from 'node:timers/promises';
 
 const MODES = ['inspect', 'preflight', 'submit', 'observe'];
 const FLAGS = ['mode', 'report-dir', 'udids', 'source', 'bundle-ids', 'sheet-id', 'sheet-gid',
-  'cdp', 'page-url', 'campaign-id', 'confirm', 'wait-seconds', 'poll-seconds'];
+  'cdp', 'page-url', 'campaign-id', 'confirm', 'wait-seconds', 'poll-seconds', 'content-snapshot'];
 const check = (condition, message) => { if (!condition) throw new Error(message); };
 const hash = value => createHash('sha256').update(JSON.stringify(value)).digest('hex');
+const handle = value => typeof value === 'string' ? value.trim().replace(/^@/, '').toLowerCase() : '';
 const read = file => {
   try { return JSON.parse(fs.readFileSync(file, 'utf8')); }
   catch (error) { if (error.code === 'ENOENT') return null; throw error; }
@@ -50,6 +51,7 @@ export function parseArgs(argv) {
   const options = { mode, reportDir: path.resolve(flags['report-dir']), cdp: cdp.origin,
     pageUrl: flags['page-url'] ?? null, udids: list(flags.udids, '--udids'),
     source: flags.source ? path.resolve(flags.source) : null,
+    contentSnapshot: flags['content-snapshot'] ? read(path.resolve(flags['content-snapshot'])) : null,
     bundleIds: flags['bundle-ids'] ? list(flags['bundle-ids'], '--bundle-ids') : [],
     sheetId: flags['sheet-id'] ?? null, sheetGid: flags['sheet-gid'] === undefined ? null
       : integer(flags['sheet-gid'], 0, 2147483647, '--sheet-gid'),
@@ -78,11 +80,12 @@ export function parseArgs(argv) {
 }
 function scope(options) {
   return { cdp: options.cdp, pageUrl: options.pageUrl, source: options.source,
-    udids: options.udids, bundleIds: options.bundleIds, sheetId: options.sheetId, sheetGid: options.sheetGid };
+    contentSnapshot: options.contentSnapshot, udids: options.udids, bundleIds: options.bundleIds, sheetId: options.sheetId, sheetGid: options.sheetGid };
 }
 function roster(devices, metas, udids) {
   const ids = [...new Set([...devices.map(d => d.udid), ...metas.map(m => m.udid)])];
   const rows = ids.map(udid => ({ udid, number: metas.find(m => m.udid === udid)?.number ?? null,
+    assignedHandle: handle(metas.find(m => m.udid === udid)?.handle),
     name: devices.find(d => d.udid === udid)?.name ?? null,
     status: devices.find(d => d.udid === udid)?.status ?? 'absent',
     platform: devices.find(d => d.udid === udid)?.platform ?? null }));
@@ -114,36 +117,59 @@ function parseEvidence(raw) {
   if (!raw) return {};
   try { return JSON.parse(raw); } catch { return {}; }
 }
-function summarize(detail, options) {
+async function summarize(detail, options, invoke, accounts) {
   check(detail?.campaign?.id && Array.isArray(detail.assignments), 'Không đọc được campaign');
   const rows = detail.assignments.map(a => {
     const evidence = parseEvidence(a.evidenceJson), post = evidence.post ?? evidence;
     const canonical = typeof post.postUrl === 'string'
       && /^https:\/\/www\.tiktok\.com\/@[A-Za-z0-9_.]+\/(photo|video)\/\d+$/.test(post.postUrl);
     const verified = post.publicationVerified === true && canonical;
+    const assigned = handle(accounts[a.udid]);
+    const expected = handle(parseEvidence(a.effectIntent).expectedAccount);
+    const author = canonical ? handle(new URL(post.postUrl).pathname.split('/')[1]) : '';
+    const accountState = !assigned || !expected ? 'unknown'
+      : assigned !== expected || (author && assigned !== author) ? 'mismatch' : 'matched';
     const submitted = verified || post.state === 'submitted' || post.verdict === 'Submitted'
       || post.state === 'posted' || post.verdict === 'Posted';
+    const retryInProgress = a.state === 'failedBeforeDispatch' && !a.effectIntent
+      && a.dispatch?.phase === 'compose' && ['queued', 'running'].includes(a.dispatch?.state);
     return { assignmentId: a.id, publicationId: a.publicationId ?? null, udid: a.udid,
-      state: a.state, error: a.errorCode ?? null, enqueued: Boolean(a.dispatch), submitted, verified,
+      state: a.state, error: a.errorCode ?? null, retryInProgress, enqueued: Boolean(a.dispatch), submitted, verified,
+      assignedAccount: assigned, submittedAccount: expected, accountState,
       sheetSent: a.sheetDelivery?.state === 'sent', sheetState: a.sheetDelivery?.state ?? 'notReported',
       postUrl: canonical ? post.postUrl : null, urlReadback: 'unsupported',
       verification: evidence.verificationStatus ?? null };
   });
+  for (const row of rows.filter(r => r.verified && r.sheetSent)) {
+    const assignment = detail.assignments.find(a => a.id === row.assignmentId);
+    if (!Number.isSafeInteger(assignment.sheetDelivery?.revision)) continue;
+    try {
+      const proof = await invoke('publish_sheet_readback', { assignmentId: row.assignmentId, expectedRevision: assignment.sheetDelivery.revision });
+      check(proof.assignmentId === row.assignmentId && proof.url === row.postUrl
+        && proof.revision === assignment.sheetDelivery.revision && proof.epoch && proof.range && proof.checkedAt
+        && proof.receipt?.publicationId === (row.publicationId || row.assignmentId)
+        && proof.receipt?.postUrl === row.postUrl && proof.receipt?.revision === proof.revision
+        && proof.receipt?.reportingEpoch === proof.epoch, 'Sheet receipt/readback mismatch');
+      row.urlReadback = 'matched'; row.sheetProof = proof;
+    } catch (error) { row.urlReadback = 'pending'; row.readbackError = String(error); }
+  }
   const counts = { requested: options.udids.length, enqueued: rows.filter(r => r.enqueued).length,
     submitted: rows.filter(r => r.submitted).length, verified: rows.filter(r => r.verified).length,
-    sheetSent: rows.filter(r => r.sheetSent).length, urlReadback: 0 };
+    sheetSent: rows.filter(r => r.sheetSent).length, urlReadback: rows.filter(r => r.urlReadback === 'matched').length };
   const exact = rows.length === options.udids.length && new Set(rows.map(r => r.udid)).size === rows.length
     && rows.every(r => options.udids.includes(r.udid));
-  const failed = rows.some(r => ['failedBeforeDispatch', 'uncertain', 'cancelled', 'missed'].includes(r.state)
-    || ['failed', 'superseded'].includes(r.sheetState) || r.verification?.state === 'needsReview');
+  const failed = rows.some(r => (r.state === 'failedBeforeDispatch' && !r.retryInProgress)
+    || ['uncertain', 'cancelled', 'missed'].includes(r.state)
+    || ['failed', 'superseded'].includes(r.sheetState) || r.verification?.state === 'needsReview'
+    || r.accountState === 'mismatch');
   // publish_get exposes settlement state, not the writer's raw ACK/target receipt or Sheet cells.
   // Neither a URL nor 'sent' alone is a supplementary end-to-end readback.
-  const allSent = rows.length > 0 && rows.every(r => r.verified && r.sheetSent);
+  const allSent = rows.length > 0 && rows.every(r => r.verified && r.sheetSent && r.accountState === 'matched');
   return { rows, counts, campaignId: detail.campaign.id,
-    acceptance: !exact || failed ? 'blockedFailed' : allSent ? 'readbackUnsupported' : 'pending',
-    exitCode: !exact || failed ? 1 : allSent ? 3 : 2,
-    scopeMatches: exact, deliveryEvidence: 'backendSettlementOnly',
-    urlReadback: { status: 'unsupported', reason: 'IPC hiện tại không trả authenticated row readback/receipt identity; không lấy token hoặc coi CSV/connection check là proof delivery.' } };
+    acceptance: exact && !failed && allSent && counts.urlReadback === rows.length ? 'passed' : !exact || failed ? 'blockedFailed' : allSent ? 'readbackUnsupported' : 'pending',
+    exitCode: exact && !failed && allSent && counts.urlReadback === rows.length ? 0 : !exact || failed ? 1 : allSent ? 3 : 2,
+    scopeMatches: exact, deliveryEvidence: counts.urlReadback === rows.length ? 'canonicalReceiptAndCell' : 'backendSettlementOnly',
+    urlReadback: { status: allSent && counts.urlReadback === rows.length ? 'matched' : 'pending', reason: 'Cần canonical post proof, receipt đúng revision/epoch và ô Sheet khớp.' } };
 }
 
 /** Same runner for CLI and tests. Only invoke is replaced in tests; files are durable. */
@@ -170,13 +196,20 @@ export async function runAcceptance(options, { invoke, sleep = delay, now = Date
     const devices = await invoke('list_devices');
     const metas = await invoke('list_device_metas');
     report.roster = roster(devices, metas, options.udids);
+    const currentAccounts = Object.fromEntries(report.roster.selected.map(r => [r.udid, r.assignedHandle ?? '']));
+    const accounts = prepared?.approval.accounts ?? currentAccounts;
+    report.accountSnapshot = prepared?.approval.accounts ? 'approvedPreflight' : 'currentMetadata';
+    if (options.mode === 'submit' && prepared?.approval.accounts) {
+      check(options.udids.every(id => handle(accounts[id]) === currentAccounts[id]),
+        'Nick gán đã đổi sau preflight; không Create/Execute');
+    }
     let campaign = read(file('campaign.json'));
     if (options.mode === 'preflight') {
       check(!intent && !campaign && !read(file('execute-intent.json')), 'Report directory đã có lượt tạo; không thay preflight');
       const writer = await checkSheet(invoke, options);
       const request = { sourceRoot: options.source, bundleIds: options.bundleIds, udids: options.udids,
-        targetRef: { type: 'explicit', udids: options.udids }, runAt: null, captionOverrides: {},
-        soundPolicy: { kind: 'trendingAny', poolSize: 5, seed: 0 }, sheetEnabled: true, deleteAfterPublish: false };
+        targetRef: { type: 'explicit', udids: options.udids }, runAt: null, captionOverrides: options.contentSnapshot?.captionOverrides ?? {},
+        soundPolicy: options.contentSnapshot?.soundPolicy ?? { kind: 'default' }, sheetEnabled: true, deleteAfterPublish: false };
       const preflight = await invoke('publish_preflight', { request });
       report.preflight = preflight;
       const target = preflight.sheetDelivery;
@@ -185,7 +218,8 @@ export async function runAcceptance(options, { invoke, sleep = delay, now = Date
         && target.reportingEpoch === writer.reportingEpoch, 'Preflight bị chặn hoặc sai đích Sheet/epoch');
       check(preflight.assignments?.length === options.udids.length && preflight.assignments.every((a, i) =>
         a.udid === options.udids[i] && a.bundleId === options.bundleIds[i] && a.ordinal === i), 'Preflight thay đổi mapping đã yêu cầu');
-      const approval = { scope: scope(options), request, inputDigest: preflight.inputDigest, sheetDelivery: target, writer };
+      check(options.udids.every(id => /^[a-z0-9_.]{1,24}$/.test(currentAccounts[id])), 'Thiếu nick gán trong roster nghiệm thu');
+      const approval = { scope: scope(options), accounts: currentAccounts, request, inputDigest: preflight.inputDigest, sheetDelivery: target, writer };
       report.confirmation = hash(approval);
       write(file('preflight.json'), { approval, confirmation: report.confirmation });
       report.acceptance = 'preflightOnly';
@@ -212,7 +246,7 @@ export async function runAcceptance(options, { invoke, sleep = delay, now = Date
       validateCampaign(campaign, durable);
       const before = await invoke('publish_get', { campaignId: campaign.id });
       check(before?.campaign?.id === campaign.id, 'Campaign đọc lại không khớp receipt');
-      const summary = summarize(before, options);
+      const summary = await summarize(before, options, invoke, accounts);
       check(summary.scopeMatches && new Set(before.assignments.map(a => a.id)).size === before.assignments.length
         && before.assignments.every((a, i) => a.id && a.campaignId === campaign.id
           && a.udid === campaign.assignments[i].udid && a.ordinal === i
@@ -241,7 +275,7 @@ export async function runAcceptance(options, { invoke, sleep = delay, now = Date
       }
       const detail = await invoke('publish_get', { campaignId: campaign.id });
       write(file('detail.json'), detail);
-      const result = summarize(detail, options);
+      const result = await summarize(detail, options, invoke, accounts);
       exitCode = result.exitCode; Object.assign(report, result);
     } else {
       const campaignId = options.campaignId ?? campaign?.id;
@@ -252,7 +286,7 @@ export async function runAcceptance(options, { invoke, sleep = delay, now = Date
           const detail = await invoke('publish_get', { campaignId });
           check(detail?.campaign?.id === campaignId, 'Campaign đọc lại không khớp ID');
           write(file('detail.json'), detail);
-          const result = summarize(detail, options);
+          const result = await summarize(detail, options, invoke, accounts);
           Object.assign(report, result); exitCode = result.exitCode;
           if (options.mode !== 'observe' || exitCode !== 2 || now() >= deadline) break;
           await sleep(Math.min(options.pollSeconds * 1000, deadline - now()));
@@ -277,7 +311,7 @@ export async function runAcceptance(options, { invoke, sleep = delay, now = Date
 }
 
 const ALLOWED_IPC = new Set(['list_devices', 'list_device_metas', 'publish_get', 'google_sheets_status',
-  'publish_sheet_check', 'publish_preflight', 'publish_create_campaign', 'publish_execute']);
+  'publish_sheet_readback', 'publish_sheet_check', 'publish_preflight', 'publish_create_campaign', 'publish_execute']);
 export async function connectIPC(options, chromium) {
   const browser = await chromium.connectOverCDP(options.cdp, { timeout: 15000 });
   try {

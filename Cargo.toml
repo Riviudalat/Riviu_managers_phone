@@ -41,7 +41,7 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"
 chrono = { version = "0.4", features = ["serde"] }
 chrono-tz = "0.10"
 uuid = { version = "1", features = ["v4", "serde"] }
-rusqlite = { version = "0.32", features = ["bundled"] }
+rusqlite = { version = "=0.40.2", features = ["bundled"] }
 # `log` feature, not just the bare crate: every driver diagnostic in this workspace is a
 # `tracing::` macro, and with no subscriber installed those events went **nowhere** --
 # measured, `tauri-dev.log` contained not one line while two phones restarted their video
@@ -73,3 +73,9 @@ codegen-units = 1
 lto = "thin"
 opt-level = 3
 strip = "symbols"
+
+# Live dev tracing validates JPEG evidence from concurrent phones. The measured
+# unoptimized decoder took 588 ms/frame and overflowed the bounded writer queue.
+# Compile the decoder once with optimization; keep application debuggability.
+[profile.dev.package.zune-jpeg]
+opt-level = 3

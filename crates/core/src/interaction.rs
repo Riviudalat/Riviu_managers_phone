@@ -203,6 +203,8 @@ pub enum ThreadShape {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct InteractionActionSet {
+    #[serde(default)]
+    pub follow: bool,
     pub like: bool,
     pub comment: bool,
     pub save: bool,
@@ -210,13 +212,14 @@ pub struct InteractionActionSet {
 
 impl InteractionActionSet {
     pub fn any(self) -> bool {
-        self.like || self.comment || self.save
+        self.like || self.comment || self.save || self.follow
     }
 
     pub fn ordered(self) -> impl Iterator<Item = InteractionActionKind> {
         [
             self.like.then_some(InteractionActionKind::Like),
             self.save.then_some(InteractionActionKind::Save),
+            self.follow.then_some(InteractionActionKind::Follow),
             self.comment.then_some(InteractionActionKind::Comment),
         ]
         .into_iter()
@@ -228,6 +231,7 @@ impl Default for InteractionActionSet {
     fn default() -> Self {
         Self {
             like: false,
+            follow: false,
             comment: true,
             save: false,
         }
@@ -376,6 +380,7 @@ impl<'de> Deserialize<'de> for ThreadCampaignRequest {
     {
         let wire = ThreadCampaignRequestWire::deserialize(deserializer)?;
         let actions = wire.actions.unwrap_or(InteractionActionSet {
+            follow: false,
             like: wire.like_target,
             comment: true,
             save: false,
@@ -1787,6 +1792,7 @@ mod tests {
                 cohort_size: Some(3),
                 manual_comments: Vec::new(),
                 actions: InteractionActionSet {
+                    follow: false,
                     like: true,
                     comment: true,
                     save: false,
@@ -2070,6 +2076,7 @@ mod tests {
         assert_eq!(
             request.actions,
             InteractionActionSet {
+                follow: false,
                 like: true,
                 comment: true,
                 save: false,
@@ -2253,6 +2260,7 @@ mod tests {
     fn public_actions_have_one_canonical_execution_order() {
         assert_eq!(
             InteractionActionSet {
+                follow: false,
                 like: true,
                 comment: true,
                 save: true,

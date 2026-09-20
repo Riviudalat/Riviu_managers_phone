@@ -339,7 +339,7 @@ pub async fn execute(app: &AppHandle, command: TaskCommand) -> Result<Value, Api
             serialized(json!({ "runId": id, "cancellationRequested": true }))
         }
         TaskCommand::ListGroups => serialized(farm_commands::list_groups(app.state())?),
-        TaskCommand::ListJobs => serialized(commands::list_jobs(app.state())?),
+        TaskCommand::ListJobs => serialized(commands::list_jobs(app.state()).await?),
     }
 }
 

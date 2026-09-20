@@ -8,6 +8,17 @@ pub(super) fn requested(assignment: &PublishAssignmentRecord, package: &str) -> 
     ) {
         return false;
     }
+    // Older publication intents did not persist a package. They can still be
+    // observed and matched by account/caption/time, but cannot authorize a
+    // package restart. Missing provenance is not evidence that the app changed.
+    let intent: serde_json::Value = assignment
+        .effect_intent
+        .as_deref()
+        .and_then(|raw| serde_json::from_str(raw).ok())
+        .unwrap_or_default();
+    if intent["package"].as_str().is_none_or(str::is_empty) {
+        return false;
+    }
     let evidence: serde_json::Value = assignment
         .evidence_json
         .as_deref()

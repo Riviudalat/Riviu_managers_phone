@@ -22,6 +22,7 @@ mod google_shared_writer;
 mod gui;
 mod interaction;
 pub use conversation::{ConversationAlreadyRunning, ConversationSession};
+mod executor;
 mod interaction_actions;
 mod inventory;
 mod jobs;
@@ -37,6 +38,7 @@ mod publish;
 mod publish_dispatch;
 mod publish_epoch;
 mod publish_pipeline;
+mod typesafe;
 pub use google_connection::{
     GoogleSheetConnection, GOOGLE_CONNECTION_SETTING, GOOGLE_MIGRATION_SETTING,
     SHEET_PROVIDER_SETTING,
@@ -86,6 +88,7 @@ pub trait SecretStore: Send + Sync {
 pub const SECRET_AI_API_KEY: &str = "nurture-ai-api-key";
 
 pub struct Database {
+    storage: executor::StorageExecutor,
     path: PathBuf,
     secrets: Option<std::sync::Arc<dyn SecretStore>>,
     dispatch_connection: parking_lot::Mutex<Option<std::sync::Arc<parking_lot::Mutex<Connection>>>>,
@@ -102,6 +105,7 @@ impl Database {
             std::fs::create_dir_all(parent)?;
         }
         let db = Self {
+            storage: executor::StorageExecutor::default(),
             path,
             secrets: None,
             dispatch_connection: parking_lot::Mutex::new(None),
@@ -2525,6 +2529,34 @@ mod secret_store_tests {
             .expect("open fixture database")
             .with_secrets(store.clone());
         (db, store, path)
+    }
+
+    #[test]
+    fn typesafe_credentials_never_enter_db_or_settings_output() {
+        let (db, store, _path) = fixture();
+        let key = "fixture-typesafe-secret";
+        let status = db.update_typesafe_credential(key).unwrap();
+        assert!(status.has_api_key);
+        assert!(!status.enabled);
+        let enabled = db.update_typesafe_settings(true, 0).unwrap();
+        assert_eq!(enabled.revision, 1);
+        assert!(db.update_typesafe_settings(false, 0).is_err());
+        let settings = db.get_nurture_settings().unwrap();
+        assert!(settings.typesafe.is_some());
+        assert!(!format!("{settings:?}").contains(key));
+        assert!(!serde_json::to_string(&settings).unwrap().contains(key));
+        assert!(!db
+            .get_setting("typesafe.settings")
+            .unwrap()
+            .unwrap()
+            .contains(key));
+        db.update_typesafe_credential("").unwrap();
+        assert!(!db.typesafe_settings().unwrap().has_api_key);
+        assert!(db.typesafe_settings().unwrap().enabled);
+        assert_eq!(
+            store.get_secret("typesafe-api-key").unwrap().as_deref(),
+            Some("")
+        );
     }
 
     /// What the whole seam is for: the key must not be in the SQLite file.

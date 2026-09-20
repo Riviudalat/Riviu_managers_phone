@@ -901,6 +901,7 @@ pub(crate) async fn deliver(
             && receipt.post_url == payload["postUrl"].as_str().unwrap_or_default(),
         "Google Sheet trả bằng chứng khác bài đang ghi"
     );
+    db.save_sheet_receipt(&claim.target, &receipt)?;
     log::info!(
         "Google Sheets receipt publication={} row={} revision={} epoch={}",
         receipt.publication_id,
@@ -920,6 +921,52 @@ pub(crate) fn retryable(error: &anyhow::Error) -> bool {
         || error
             .downcast_ref::<tokio::time::error::Elapsed>()
             .is_some()
+}
+
+pub use riviu_core::ipc_contract::PublishSheetReadback;
+
+#[tauri::command]
+pub async fn publish_sheet_readback(
+    state: State<'_, AppState>,
+    assignment_id: String,
+    expected_revision: i64,
+) -> Result<PublishSheetReadback, CommandError> {
+    let _admission = state.ensure_accepting_work()?;
+    let (target, expected) = state
+        .db
+        .sheet_readback_input(&assignment_id, expected_revision)
+        .map_err(err)?;
+    let connection = state
+        .db
+        .google_connection_for_target(&target)
+        .map_err(err)?
+        .context("No OAuth connection for publication target")
+        .map_err(err)?;
+    let tokens = access_tokens(&state.db).await.map_err(err)?;
+    if tokens.account_id != connection.account_id {
+        return Err(err("Google account changed"));
+    }
+    let client = DirectSheetsClient::new(tokens.access_token).map_err(err)?;
+    let receipt = tokio::time::timeout(
+        std::time::Duration::from_secs(90),
+        client.readback_receipt(&target, &expected),
+    )
+    .await
+    .map_err(err)?
+    .map_err(err)?;
+    state
+        .db
+        .sheet_readback_input(&assignment_id, expected_revision)
+        .map_err(err)?;
+    Ok(PublishSheetReadback {
+        assignment_id,
+        url: receipt.post_url.clone(),
+        range: format!("gid={}:D{}", target.sheet_gid, receipt.row),
+        revision: receipt.revision,
+        epoch: receipt.reporting_epoch.clone(),
+        checked_at: chrono::Utc::now().to_rfc3339(),
+        receipt,
+    })
 }
 
 fn begin_checked_reset(

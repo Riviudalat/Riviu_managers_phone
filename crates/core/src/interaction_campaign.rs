@@ -946,6 +946,29 @@ pub async fn execute_thread_campaign(
 ) -> anyhow::Result<()> {
     // Held for the whole run: the idle sweeper reads this and stands down.
     let _running = RunningCampaign::start();
+    // Schedule/orchestration/retry enter the same runtime gate. A retry checks
+    // only its frozen assignment actors, never unrelated campaign devices.
+    let actors = if let Some(ids) = &only_assignments {
+        db.get_interaction_campaign(&campaign_id)?
+            .context("campaign missing")?
+            .assignments
+            .into_iter()
+            .filter(|row| ids.contains(&row.id))
+            .map(|row| row.actor_udid)
+            .collect::<std::collections::BTreeSet<_>>()
+    } else {
+        request.actor_udids.iter().cloned().collect()
+    };
+    for udid in actors {
+        if control.reports_element_bounds(&udid) {
+            control
+                .preflight_tiktok_actions(
+                    &udid,
+                    &crate::app_automation::interaction_actions(request.actions),
+                )
+                .await?;
+        }
+    }
     if let Some(script) = request.scripted_conversation.as_ref() {
         let token = uuid::Uuid::new_v4().to_string();
         let session = match db.claim_conversation_session(
@@ -1904,6 +1927,86 @@ async fn execute_save_action(
     )
 }
 
+async fn execute_follow_action(
+    db: &crate::db::Database,
+    assignment_id: &str,
+    driver: &dyn TargetDriver,
+    session: &dyn crate::UiSession,
+    target: &crate::ResolvedTikTokTarget,
+    account: &str,
+) -> anyhow::Result<crate::PublicActionResult> {
+    use crate::{InteractionActionKind as Kind, InteractionActionState as State};
+    let revision = match claim_action_or_reuse_terminal(db, assignment_id, Kind::Follow)? {
+        ActionClaim::Owned(r) => r,
+        ActionClaim::Reused(r) => return Ok(r),
+    };
+    let proof = driver.open_target(session, target).await;
+    if !proof
+        .as_ref()
+        .is_ok_and(|p| target_proof_authorizes_public_effect(*p))
+    {
+        return settle_claimed_action(
+            db,
+            assignment_id,
+            Kind::Follow,
+            revision,
+            None,
+            ActionSettlement {
+                state: State::FailedBeforeEffect,
+                evidence: serde_json::json!({"phase":"targetProof"}),
+                error: Some("Follow target post not proved".into()),
+            },
+        );
+    }
+    let armed_revision = std::sync::Mutex::new(None);
+    let mut gate = ActionEffectGate::new(|| {
+        let armed = db.arm_interaction_action(
+            assignment_id,
+            Kind::Follow,
+            revision,
+            "follow_exact_author",
+        )?;
+        *armed_revision.lock().expect("follow revision mutex") = armed;
+        Ok(armed.is_some())
+    });
+    let result = driver
+        .follow_target(session, target, account, &mut gate)
+        .await;
+    let crossed = gate.crossed();
+    drop(gate);
+    let (state, verdict, error) = match result {
+        Ok("alreadyFollowing") => (State::NoOp, "alreadyFollowing", None),
+        Ok("followed") => (State::Confirmed, "followed", None),
+        Ok(_) => (
+            State::Uncertain,
+            "unknown",
+            Some("Follow verdict unknown".into()),
+        ),
+        Err(error) => (
+            if crossed || error.effect_may_have_gone_out() {
+                State::Uncertain
+            } else {
+                State::FailedBeforeEffect
+            },
+            "failed",
+            Some(error.to_string()),
+        ),
+    };
+    let armed = *armed_revision.lock().expect("follow revision mutex");
+    settle_claimed_action(
+        db,
+        assignment_id,
+        Kind::Follow,
+        revision,
+        armed,
+        ActionSettlement {
+            state,
+            evidence: serde_json::json!({"verdict":verdict,"author":target.author,"arrival":"identified"}),
+            error,
+        },
+    )
+}
+
 fn save_action_evidence(
     verdict: crate::SaveVerdict,
     proof: TargetProof,
@@ -2466,11 +2569,15 @@ async fn run_cohort(
                     let account=crate::tiktok_share::observe_publish_account(session.as_ref(),&labels).await?;
                     anyhow::ensure!(account.eq_ignore_ascii_case(role.username.trim_start_matches('@')),"Tài khoản trên máy không khớp vai {}",role.role_id);
                     db.record_observed_interaction_account(&prepared.actor_udid,&account)?;
-                } else if request.actions.comment && session.supports_accessibility_readback() {
+                } else if request.actions.any() && session.supports_accessibility_readback() {
                     let language=session.ui_language().await.context("Chưa đọc được ngôn ngữ TikTok")?;
                     let version=session.app_version(&opened_package).await.context("Chưa đọc được phiên bản TikTok")?;
                     let labels=crate::tiktok_labels::controls_for_runtime(&opened_package,&language,&version).context("Chưa nhận diện TikTok trên máy")?;
                     let account=crate::tiktok_share::observe_publish_account(session.as_ref(),&labels).await?;
+                    {
+                        let expected=db.get_device_meta(&prepared.actor_udid)?.handle;
+                        anyhow::ensure!(!expected.is_empty()&&account.eq_ignore_ascii_case(expected.trim().trim_start_matches('@')), "Tài khoản trên máy không khớp nick đã gán; chưa tương tác");
+                    }
                     db.record_observed_interaction_account(&prepared.actor_udid,&account)?;
                 }
                 if request.actions.comment && request.mention_parent && prepared.parent_ordinal.is_some() {
@@ -2554,6 +2661,18 @@ async fn run_cohort(
                     }
                 }
 
+                if request.actions.follow {
+                    let account=db.get_device_meta(&prepared.actor_udid)?.handle;
+                    let action=match execute_follow_action(db.as_ref(),id,driver.as_ref(),session.as_ref(),target,&account).await {
+                        Ok(action)=>action,
+                        Err(error)=>{effect_intent |= failed_action_may_have_crossed_effect(db.as_ref(),id,crate::InteractionActionKind::Follow);return Err(error);}
+                    };
+                    let stops=action_stops_assignment(&action);
+                    effect_intent |= action_requires_uncertain_assignment(&action);
+                    let reason=stops.then(||stopped_action_reason(&action));
+                    action_results.push(action);notify(&events,&campaign_id);
+                    if let Some(reason)=reason{anyhow::bail!(reason);}
+                }
                 // A missing reply parent prevents only Comment. Like and Save above remain
                 // independent desired-state actions and retain their own outcomes.
                 if let Some(broke_at) = skipped_parent_at {
@@ -3574,6 +3693,16 @@ fn map_hierarchy_send_failure(
 
 #[async_trait::async_trait]
 impl TargetDriver for HierarchyTargetDriver<'_> {
+    async fn follow_target(
+        &self,
+        session: &dyn crate::UiSession,
+        target: &crate::ResolvedTikTokTarget,
+        account: &str,
+        gate: &mut ActionEffectGate<'_>,
+    ) -> Result<&'static str, crate::ActionFailure> {
+        crate::tiktok_follow_target::follow_profile(session, self.labels, target, account, gate)
+            .await
+    }
     fn kind(&self) -> &'static str {
         "hierarchy"
     }
@@ -4062,6 +4191,7 @@ mod tests {
             assert!(settings_for_request(&db, &manual).is_ok());
             let mut action_only = request(vec![]);
             action_only.actions = crate::InteractionActionSet {
+                follow: false,
                 like: true,
                 save: true,
                 comment: false,
@@ -4350,6 +4480,7 @@ mod tests {
                 max_words: 0,
                 manual_comments: Vec::new(),
                 actions: InteractionActionSet {
+                    follow: false,
                     like: true,
                     comment: false,
                     save: false,
@@ -4502,6 +4633,7 @@ mod tests {
             max_words: 0,
             manual_comments: Vec::new(),
             actions: InteractionActionSet {
+                follow: false,
                 like: true,
                 comment: false,
                 save: true,
@@ -4988,6 +5120,7 @@ mod boundary_tests {
         use crate::interaction::{InteractionActionSet, ThreadMode};
 
         let action_only = InteractionActionSet {
+            follow: false,
             like: true,
             comment: false,
             save: true,

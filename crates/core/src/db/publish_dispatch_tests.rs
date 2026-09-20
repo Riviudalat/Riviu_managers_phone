@@ -417,10 +417,10 @@ fn seed_load(db: &Database, campaign: &str, devices: usize, total: usize) {
         }
         let id = format!("load-{n:05}");
         tx.execute("INSERT INTO publish_bundles(id,campaign_id,ordinal,name,source_path,caption,caption_sha256,manifest_json,created_at)
-            SELECT ?1,?2,?3,name,source_path,caption,caption_sha256,manifest_json,created_at FROM publish_bundles WHERE id='b0'",params![id,group,n%devices]).unwrap();
+            SELECT ?1,?2,?3,name,source_path,caption,caption_sha256,manifest_json,created_at FROM publish_bundles WHERE id='b0'",params![id,group,i64::try_from(n%devices).unwrap()]).unwrap();
         tx.execute("INSERT INTO publish_assignments(id,campaign_id,bundle_id,ordinal,udid,state,revision,created_at,updated_at)
             VALUES(?1,?2,?1,?3,?4,'queued',0,'2026-09-14T00:00:00Z','2026-09-14T00:00:00Z')",
-            params![id,group,n%devices,format!("phone-{:03}",n%devices)]).unwrap();
+            params![id,group,i64::try_from(n%devices).unwrap(),format!("phone-{:03}",n%devices)]).unwrap();
     }
     tx.commit().unwrap();
     for id in campaigns {

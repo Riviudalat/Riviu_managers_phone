@@ -1,5 +1,227 @@
 //! Application-specific interpretation. The UI runtime does not depend on these adapters.
+pub mod dialogs;
 pub mod tiktok_roles;
+
+/// Uses the same catalog and plans as production preflight. A catalog match is
+/// never a substitute for unique targets and postconditions in the live session.
+pub fn action_capabilities(
+    udid: &str,
+    package: &str,
+    version: &str,
+    locale: &str,
+    ready: bool,
+) -> crate::ipc_contract::DeviceActionCapabilities {
+    use crate::ipc_contract::{
+        ActionCapability, CapabilityEvidenceState as S, DeviceActionCapabilities,
+    };
+    use crate::tiktok_labels::controls_for_runtime;
+    use crate::tiktok_labels::TikTokControl;
+    let controls = controls_for_runtime(package, locale, version);
+    let supported = controls.is_some();
+    let labelled = |needed: &[TikTokControl]| {
+        controls.is_some_and(|c| needed.iter().all(|control| c.label(*control).is_some()))
+    };
+    let plans = [
+        ("feed", supported, false),
+        ("search", supported, false),
+        (
+            "photo",
+            controls.as_ref().is_some_and(|c| {
+                crate::tiktok_composer::ComposerPlan::missing_for_carousel(c).is_empty()
+            }),
+            controls.as_ref().is_some_and(|c| {
+                !c.adaptive()
+                    && crate::tiktok_composer::ComposerPlan::missing_for_carousel(c).is_empty()
+            }),
+        ),
+        (
+            "video",
+            crate::tiktok_composer::VideoPickerPlan::resolve_runtime(package, locale, version)
+                .is_some(),
+            crate::tiktok_composer::VideoPickerPlan::resolve(package, locale, version).is_some(),
+        ),
+        (
+            "sound",
+            crate::tiktok_sound::SoundPickerPlan::resolve_runtime(package, locale, version)
+                .is_some(),
+            crate::tiktok_sound::SoundPickerPlan::resolve(package, locale, version).is_some(),
+        ),
+        (
+            "like",
+            labelled(&[TikTokControl::Like, TikTokControl::Liked]),
+            false,
+        ),
+        (
+            "save",
+            labelled(&[TikTokControl::Bookmark])
+                || crate::tiktok_save::hierarchy::global_supported(package, version, locale),
+            false,
+        ),
+        (
+            "follow",
+            crate::tiktok_follow_target::supported(package, version, locale),
+            false,
+        ),
+        (
+            "feedFollow",
+            package == crate::tiktok_follow_cleanup::MEASURED_FOLLOW_PACKAGE
+                && version == crate::tiktok_follow_cleanup::MEASURED_FOLLOW_VERSION
+                && locale.split(['-', '_']).next()
+                    == Some(crate::tiktok_follow_cleanup::MEASURED_FOLLOW_LOCALE),
+            false,
+        ),
+        (
+            "mentionReply",
+            labelled(&[
+                TikTokControl::Comments,
+                TikTokControl::CommentSend,
+                TikTokControl::CommentReply,
+            ]),
+            false,
+        ),
+    ];
+    DeviceActionCapabilities {
+        udid: udid.into(),
+        package: package.into(),
+        version: version.into(),
+        locale: locale.into(),
+        actions: plans
+            .into_iter()
+            .map(|(action, available, measured)| {
+                let (state, reason) = if !ready {
+                    (
+                        S::DeviceNotReady,
+                        "Thiết bị chưa sẵn sàng hoặc đang có owner",
+                    )
+                } else if !available {
+                    (
+                        S::Unsupported,
+                        "Chưa có adapter cho package/build/ngôn ngữ này",
+                    )
+                } else if measured {
+                    (
+                        S::Measured,
+                        "Đã đo adapter; vẫn phải kiểm đúng account, target và hậu điều kiện",
+                    )
+                } else {
+                    (
+                        S::RuntimeProofRequired,
+                        "Cần chứng minh target duy nhất và trạng thái trước/sau trong phiên",
+                    )
+                };
+                ActionCapability {
+                    action: action.into(),
+                    state,
+                    reason: reason.into(),
+                }
+            })
+            .collect(),
+    }
+}
+
+/// Static capability permits entering the runtime proof path, never a public tap.
+pub fn require_actions(
+    report: &crate::ipc_contract::DeviceActionCapabilities,
+    requested: &[&str],
+) -> anyhow::Result<()> {
+    use crate::ipc_contract::CapabilityEvidenceState as S;
+    let refusals = requested
+        .iter()
+        .filter_map(
+            |requested| match report.actions.iter().find(|row| row.action == *requested) {
+                Some(row) if matches!(row.state, S::Measured | S::RuntimeProofRequired) => None,
+                Some(row) => Some(format!("{} / {}: {}", report.udid, requested, row.reason)),
+                None => Some(format!(
+                    "{} / {}: hành động chưa được khai báo",
+                    report.udid, requested
+                )),
+            },
+        )
+        .collect::<Vec<_>>();
+    anyhow::ensure!(refusals.is_empty(), "{}", refusals.join("; "));
+    Ok(())
+}
+
+pub fn nurture_actions(settings: &crate::NurtureSettings) -> Vec<&'static str> {
+    let mut actions = vec![
+        if settings.feed_source == crate::types::NurtureFeedSource::Search {
+            "search"
+        } else {
+            "feed"
+        },
+    ];
+    if settings.like_enabled && settings.like_prob > 0 {
+        actions.push("like");
+    }
+    if settings.save_enabled && settings.save_prob > 0 {
+        actions.push("save");
+    }
+    if settings.follow_enabled && settings.follow_prob > 0 {
+        actions.push("feedFollow");
+    }
+    if settings.comment_enabled && settings.comment_prob > 0 {
+        actions.push("mentionReply");
+    }
+    actions
+}
+
+pub fn interaction_actions(actions: crate::InteractionActionSet) -> Vec<&'static str> {
+    let mut requested = vec!["feed"];
+    if actions.like {
+        requested.push("like");
+    }
+    if actions.save {
+        requested.push("save");
+    }
+    if actions.follow {
+        requested.push("follow");
+    }
+    if actions.comment {
+        requested.push("mentionReply");
+    }
+    requested
+}
+
+#[cfg(test)]
+mod capability_preflight_tests {
+    use super::*;
+    #[test]
+    fn profile_follow_does_not_admit_an_unmeasured_feed_follow_adapter() {
+        let report = action_capabilities("phone", "com.zhiliaoapp.musically", "45.7.3", "en", true);
+        let settings = crate::NurtureSettings {
+            like_enabled: false,
+            save_enabled: false,
+            follow_enabled: true,
+            follow_prob: 100,
+            comment_enabled: false,
+            ..Default::default()
+        };
+        assert!(require_actions(&report, &["follow"]).is_ok());
+        assert!(require_actions(&report, &nurture_actions(&settings)).is_err());
+    }
+    #[test]
+    fn shared_action_preflight_refuses_unknown_action_locked_phone_and_unmeasured_follow() {
+        let report = action_capabilities("phone", "com.ss.android.ugc.trill", "38.3.2", "en", true);
+        assert!(require_actions(&report, &["feed", "follow"]).is_ok());
+        assert!(require_actions(&report, &["madeUp"]).is_err());
+        let locked =
+            action_capabilities("phone", "com.ss.android.ugc.trill", "38.3.2", "en", false);
+        assert!(require_actions(&locked, &["feed"]).is_err());
+        let global = action_capabilities("phone", "com.zhiliaoapp.musically", "45.7.3", "en", true);
+        assert!(require_actions(&global, &["follow"]).is_ok());
+        let unknown =
+            action_capabilities("phone", "com.zhiliaoapp.musically", "45.7.4", "en", true);
+        assert!(require_actions(&unknown, &["follow"]).is_err());
+        let settings = crate::NurtureSettings {
+            like_enabled: false,
+            save_enabled: false,
+            follow_enabled: false,
+            comment_enabled: false,
+            ..Default::default()
+        };
+        assert_eq!(nurture_actions(&settings), vec!["feed"]);
+    }
+}
 use crate::ui_automation::{profile::CompatibilityPack, tree::Tree, AppContext};
 use serde::{Deserialize, Serialize};
 

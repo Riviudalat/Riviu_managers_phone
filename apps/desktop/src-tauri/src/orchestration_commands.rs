@@ -1303,6 +1303,10 @@ pub async fn orchestration_cancel_run(
 }
 
 pub(crate) fn start_automation_schedule_runner(app: AppHandle, state: &AppState) {
+    if cfg!(debug_assertions) && std::env::var("RIVIU_DEV_MANUAL_ACCEPTANCE").as_deref() == Ok("1")
+    {
+        return;
+    }
     if !state.orchestration.start_schedule_runner() {
         return;
     }

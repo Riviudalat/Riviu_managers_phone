@@ -85,6 +85,23 @@ pub(super) fn insert_interaction_action_runs(
 }
 
 impl Database {
+    /// Only the live Save caller can prove that its cancellation gate returned
+    /// before dispatch. Startup recovery must keep an armed intent uncertain.
+    pub fn cancel_armed_nurture_save(
+        &self,
+        owner: &crate::TikTokActionOwner,
+        revision: i64,
+        evidence: &crate::tiktok_save::SaveEvidence,
+    ) -> anyhow::Result<bool> {
+        anyhow::ensure!(
+            owner.kind == crate::TikTokActionOwnerKind::Nurture
+                && evidence.verdict == crate::tiktok_save::SaveVerdict::FailedBeforeEffect
+                && !evidence.effect_boundary_crossed,
+            "Save cancellation requires live before-effect evidence"
+        );
+        Ok(self.conn()?.execute("UPDATE tiktok_action_runs SET state='failed_before_effect',error_code='cancelled_before_tap',revision=revision+1,updated_at=?4 WHERE owner_kind='nurture' AND owner_id=?1 AND device_udid=?2 AND action_kind='save' AND state='armed' AND revision=?3",
+            params![owner.owner_id,owner.device_udid,revision,Utc::now().to_rfc3339()])? == 1)
+    }
     /// Atomically arm both the legacy comment assignment and its independent action row.
     pub fn begin_interaction_comment_action_effect(
         &self,
@@ -561,6 +578,7 @@ mod tests {
     fn campaign_creation_persists_only_the_requested_actions_per_assignment() {
         let (db, path) = fixture();
         let request = request(InteractionActionSet {
+            follow: false,
             like: true,
             comment: false,
             save: true,
@@ -606,6 +624,7 @@ mod tests {
         for mask in 1_u8..=7 {
             let (db, path) = fixture();
             let actions = InteractionActionSet {
+                follow: false,
                 like: mask & 0b001 != 0,
                 comment: mask & 0b010 != 0,
                 save: mask & 0b100 != 0,
@@ -651,6 +670,7 @@ mod tests {
     fn typed_cleanup_uncertainty_is_durable_and_not_retryable() {
         let (db, path) = fixture();
         let request = request(InteractionActionSet {
+            follow: false,
             like: false,
             comment: true,
             save: false,
@@ -712,6 +732,7 @@ mod tests {
     fn action_claim_arm_and_settle_are_revision_guarded_and_one_shot() {
         let (db, path) = fixture();
         let request = request(InteractionActionSet {
+            follow: false,
             like: false,
             comment: false,
             save: true,
@@ -799,6 +820,7 @@ mod tests {
     fn action_claim_and_arm_require_a_running_campaign_and_preparing_assignment() {
         let (db, path) = fixture();
         let request = request(InteractionActionSet {
+            follow: false,
             like: false,
             comment: false,
             save: true,
@@ -862,6 +884,7 @@ mod tests {
 
         let (db, path) = fixture();
         let request = request(InteractionActionSet {
+            follow: false,
             like: true,
             comment: false,
             save: true,
@@ -957,6 +980,7 @@ mod tests {
         let (db, path) = fixture();
 
         let terminal_first = request(InteractionActionSet {
+            follow: false,
             like: true,
             comment: false,
             save: false,
@@ -1029,6 +1053,7 @@ mod tests {
     fn cancel_keeps_an_armed_action_and_its_assignment_non_retryable() {
         let (db, path) = fixture();
         let request = request(InteractionActionSet {
+            follow: false,
             like: false,
             comment: false,
             save: true,
@@ -1093,6 +1118,7 @@ mod tests {
     fn comment_effect_boundary_arms_assignment_and_action_in_one_transaction() {
         let (db, path) = fixture();
         let request = request(InteractionActionSet {
+            follow: false,
             like: false,
             comment: true,
             save: false,
@@ -1185,6 +1211,7 @@ mod tests {
     fn each_action_settles_without_erasing_its_siblings() {
         let (db, path) = fixture();
         let request = request(InteractionActionSet {
+            follow: false,
             like: true,
             comment: true,
             save: true,
@@ -1243,6 +1270,7 @@ mod tests {
     fn restart_releases_pre_effect_claims_but_makes_armed_actions_uncertain() {
         let (db, path) = fixture();
         let request = request(InteractionActionSet {
+            follow: false,
             like: true,
             comment: false,
             save: true,

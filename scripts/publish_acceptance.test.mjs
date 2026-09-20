@@ -49,7 +49,7 @@ function environment(t) {
         { udid: 'phone-a', platform: 'android', status: 'ready', name: 'A' },
         { udid: 'phone-b', platform: 'android', status: 'ready', name: 'B' },
         { udid: 'excluded', platform: 'android', status: 'disconnected', name: 'Off' }];
-      case 'list_device_metas': return [{ udid: 'phone-a', number: 42 }, { udid: 'phone-b', number: 7 }, { udid: 'metadata-only', number: 99 }];
+      case 'list_device_metas': return [{ udid: 'phone-a', number: 42, handle: 'fixture' }, { udid: 'phone-b', number: 7, handle: 'fixture' }, { udid: 'metadata-only', number: 99 }];
       case 'google_sheets_status': return { configured: true, connected: true, active: true, writerId: 'writer-fixture',
         selectedFileId: 'sheet_fixture', sheetUrl: 'https://docs.google.com/spreadsheets/d/sheet_fixture/edit#gid=0',
         phase: 'idle', pickerConfigured: true, clientId: 'fixture-client' };
@@ -398,4 +398,75 @@ test('empty assignments and failed rows are blocked, not vacuous success or endl
   assert.equal((await runAcceptance(e.options('observe', ['--campaign-id', 'campaign-fixture']), { invoke: e.invoke })).exitCode, 1);
   e.detail.assignments = [{ id: 'failed', campaignId: 'campaign-fixture', udid: 'phone-b', state: 'failedBeforeDispatch', errorCode: 'pickerRefused' }];
   assert.equal((await runAcceptance(e.options('observe', ['--campaign-id', 'campaign-fixture']), { invoke: e.invoke })).exitCode, 1);
+});
+
+test('observe keeps polling an active retry whose prior failure projection has not settled', async t => {
+  const e = environment(t);
+  let clock = 1000, gets = 0;
+  const invoke = async (cmd, args) => {
+    const result = await e.invoke(cmd, args);
+    if (cmd === 'publish_get' && ++gets === 1) {
+      Object.assign(result.assignments[0], { state: 'failedBeforeDispatch', effectIntent: null,
+        evidenceJson: null, errorCode: 'post_refused_before_dispatch',
+        dispatch: { phase: 'compose', state: 'running', revision: 3 } });
+    }
+    return result;
+  };
+  const result = await runAcceptance(e.options('observe', ['--campaign-id', 'campaign-fixture', '--wait-seconds', '10', '--poll-seconds', '5']),
+    { invoke, now: () => clock, sleep: async ms => { clock += ms; } });
+  assert.equal(gets, 3);
+  assert.equal(result.exitCode, 2);
+  assert.equal(result.report.acceptance, 'pendingDeadline');
+  assert.ok(e.calls.every(c => ['list_devices', 'list_device_metas', 'publish_get'].includes(c.command)));
+});
+
+test('a terminal retry failure remains failed and is never polled as active work', async t => {
+  const e = environment(t);
+  Object.assign(e.detail.assignments[0], { state: 'failedBeforeDispatch', effectIntent: null,
+    evidenceJson: null, dispatch: { phase: 'compose', state: 'finished', revision: 3 } });
+  const result = await runAcceptance(e.options('observe', ['--campaign-id', 'campaign-fixture', '--wait-seconds', '10']), { invoke: e.invoke });
+  assert.equal(result.exitCode, 1);
+  assert.equal(e.calls.filter(c => c.command === 'publish_get').length, 1);
+});
+
+test('a changed assigned account after approval blocks create and Execute', async t => {
+  const e = environment(t);
+  const approved = await runAcceptance(e.options('preflight'), { invoke: e.invoke });
+  const before = e.calls.length;
+  const invoke = async (command, args) => {
+    const value = await e.invoke(command, args);
+    if (command === 'list_device_metas') value[0].handle = 'changed.after.approval';
+    return value;
+  };
+  const result = await runAcceptance(e.options('submit', ['--confirm', approved.report.confirmation]), { invoke });
+  assert.equal(result.exitCode, 1);
+  assert.equal(e.calls.slice(before).some(c => /create|execute/.test(c.command)), false);
+});
+
+test('acceptance needs matching canonical proof, durable receipt and authenticated cell', async t => {
+  const e = environment(t);
+  for (const row of e.detail.assignments) {
+    row.state = 'succeeded';
+    row.evidenceJson = JSON.stringify({ post: { postUrl, publicationVerified: true, state: 'posted' } });
+    row.sheetDelivery = { state: 'sent', revision: 4 };
+  }
+  const invoke = async (command, args) => command === 'publish_sheet_readback'
+    ? { assignmentId: args.assignmentId, url: postUrl, revision: 4, epoch: 'epoch-1', range: 'gid=0:D2', checkedAt: '2026-09-19T00:00:00Z',
+      receipt: { publicationId: args.assignmentId, postUrl, revision: 4, reportingEpoch: 'epoch-1' } }
+    : e.invoke(command, args);
+  const result = await runAcceptance(e.options('observe', ['--campaign-id', 'campaign-fixture']), { invoke });
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.report.counts.urlReadback, 2);
+  const wrongAccount = async (command, args) => {
+    const value = await invoke(command, args);
+    if (command === 'list_device_metas') for (const row of value) row.handle = 'different.account';
+    return value;
+  };
+  assert.notEqual((await runAcceptance(e.options('observe', ['--campaign-id', 'campaign-fixture']), { invoke: wrongAccount })).exitCode, 0);
+  const wrong = async (command, args) => {
+    const value = await invoke(command, args);
+    if (command === 'publish_sheet_readback') value.receipt.publicationId = 'other';
+    return value;
+  };
+  assert.notEqual((await runAcceptance(e.options('observe', ['--campaign-id', 'campaign-fixture']), { invoke: wrong })).exitCode, 0);
 });

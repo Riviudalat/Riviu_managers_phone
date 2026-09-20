@@ -2021,6 +2021,9 @@ pub(super) async fn capture_confirmed_assignment_link(
                 .into(),
         };
         let restart = super::verification_restart::requested(assignment, &package);
+        if let Some(recorded) = intent["package"].as_str().filter(|value| !value.is_empty()) {
+            anyhow::ensure!(recorded == package, "Gói TikTok đã đổi so với lúc gửi; chưa tiếp tục xác minh");
+        }
         if restart {
             anyhow::ensure!(intent["package"].as_str() == Some(package.as_str()),
                 "Gói TikTok đã đổi so với lúc gửi; chưa khởi động lại");
@@ -2066,6 +2069,16 @@ pub(super) async fn capture_confirmed_assignment_link(
             &identity,
         )
         .await;
+        // A verifier uses a manual session and may have no JPEG stream. Keep
+        // one bounded diagnostic image before releasing this same owned session.
+        // It cannot turn a pending observation into canonical publication proof.
+        if session.supports_accessibility_readback() {
+            match tokio::time::timeout(Duration::from_secs(5), session.screenshot_png()).await {
+                Ok(Ok(_)) => {},
+                Ok(Err(error)) => log::warn!("verification screenshot unavailable: {error:#}"),
+                Err(_) => log::warn!("verification screenshot deadline expired"),
+            }
+        }
         let mut diagnostic = serde_json::to_value(&capture.diagnostic).unwrap_or_default();
         if let Some(proof) = restart_proof { diagnostic["appRestart"] = proof; }
         capture

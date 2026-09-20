@@ -379,8 +379,11 @@ pub async fn remove_forward(adb: &AdbProgram, serial: &str, port: u16) -> anyhow
 
 /// The command that runs minicap without installing it.
 pub fn launch_command(options: &MinicapOptions) -> String {
+    // The pinned Java APK defaults to unlimited FPS; -S does not limit its
+    // encoder. Keep native geometry while bounding capture work (about 89% CPU
+    // measured on ce051715ab9fee2002 during the 45.7.3 video composer).
     let mut command = format!(
-        "CLASSPATH={REMOTE_APK} app_process / {MAIN_CLASS} -n {} -P {} -Q {}",
+        "CLASSPATH={REMOTE_APK} app_process / {MAIN_CLASS} -n {} -P {} -Q {} -r 2",
         options.socket,
         options.projection.to_arg(),
         options.quality
@@ -581,6 +584,8 @@ serialA tcp:60001 localabstract:riviu_minicap
         assert!(command.contains("-n riviu-minicap-SERIAL"));
         assert!(command.contains("-P 1080x2400@540x1200/0"));
         assert!(command.contains("-Q 70"));
+        // The APK otherwise encodes every display frame, even with -S enabled.
+        assert!(command.contains(" -r 2 "));
         // Skipping is the default: a slow consumer must not build a backlog.
         assert!(command.ends_with(" -S"));
         // `pm install` is what MIUI blocks; this path must never need it.

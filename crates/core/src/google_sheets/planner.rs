@@ -31,7 +31,7 @@ impl Cell {
         self.user_entered_value.get("formulaValue").is_some()
     }
 }
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub(super) struct Row {
     pub index: u32,
     pub cells: Vec<Cell>,
@@ -127,7 +127,7 @@ impl Layout {
     }
 }
 
-#[derive(Default)]
+#[derive(Default, Clone, Serialize, Deserialize)]
 pub(super) struct Scan {
     pub epochs: BTreeSet<String>,
     pub last_nonempty: Option<u32>,

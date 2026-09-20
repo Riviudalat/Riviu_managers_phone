@@ -1094,6 +1094,7 @@ mod settlement_tests {
                 cohort_size: None,
                 manual_comments: vec!["first fixture".into(), "second fixture".into()],
                 actions: InteractionActionSet {
+                    follow: false,
                     like: true,
                     save: true,
                     comment: true,

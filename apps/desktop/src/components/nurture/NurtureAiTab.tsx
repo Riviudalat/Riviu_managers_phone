@@ -8,6 +8,7 @@ import { COMMENT_MODEL_SUGGESTIONS } from "../../commentModels";
 import { evidenceLabel } from "../../commentEvidence";
 import { InfoDot as Info } from "../InfoDot";
 import { nurtureFieldValidation, type NurtureSettingsIssue } from "../../nurtureValidation";
+import { TypeSafeSettingsCard } from "./TypeSafeSettingsCard";
 
 /**
  * Where the comments come from: endpoint, model, key, price, and the test that proves it.
@@ -62,6 +63,7 @@ export function NurtureAiTab({ settings, patch, devices, targets, save, onMessag
 
   return (
     <div className="nurture-sect">
+      <TypeSafeSettingsCard />
       <label>
         <span className="nu-inline">
           Địa chỉ API

@@ -17,7 +17,11 @@ use tokio::time::Instant;
 use crate::driver::{ElementBox, ElementQuery, UiSession};
 use crate::publish::SoundCandidate;
 
+mod selection_recovery;
+#[cfg(test)]
+mod selection_recovery_tests;
 mod snapshot;
+mod visual;
 
 const READBACK_WINDOW: Duration = Duration::from_secs(8);
 const POLL: Duration = Duration::from_millis(250);
@@ -403,6 +407,7 @@ impl SoundPickerPlan {
 /// One observed pool plus the exact row targets that produced it.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ObservedSoundPool {
+    visual: bool,
     effective_plan: Option<SoundPickerPlan>,
     pub candidates: Vec<SoundCandidate>,
     maximum_visible: usize,
@@ -449,6 +454,9 @@ pub async fn open_and_observe_sounds(
     if plan.dynamic {
         return open_dynamic_sounds(session, plan, maximum_visible).await;
     }
+    if visual::open_loading_entry(session, plan).await? {
+        return visual::observe(session, plan, maximum_visible, true).await;
+    }
     let deadline = phase_deadline(SOUND_WINDOW);
     let entry = loop {
         check_wait()?;
@@ -479,6 +487,9 @@ pub async fn open_and_observe_sounds(
         .await
         .context("open sound picker")?;
 
+    if selection_recovery::measured(plan) && session.gui_reasoner().is_some() {
+        return visual::observe(session, plan, maximum_visible, true).await;
+    }
     if plan.snapshot_layout().is_some() {
         snapshot::select_section_tab(session, plan).await?;
     }
@@ -671,6 +682,9 @@ pub async fn choose_and_confirm_sound(
     index: usize,
 ) -> anyhow::Result<()> {
     let plan = pool.effective_plan.unwrap_or(plan);
+    if pool.visual {
+        return visual::choose(session, plan, pool, index).await;
+    }
     let candidate = pool
         .candidates
         .get(index)
@@ -686,8 +700,26 @@ pub async fn choose_and_confirm_sound(
         // The measured Android sheet selects inline; Back closes only that sheet.
         // Prove the same pool remains before dismissing it, then prove the editor chip.
         let deadline = phase_deadline(READBACK_WINDOW);
+        let mut recovered = false;
         loop {
-            let selected_pool = observe_sound_pool(session, plan, pool.maximum_visible).await?;
+            let observation = if selection_recovery::measured(plan) {
+                snapshot::observe_after_selection(session, plan, pool.maximum_visible).await
+            } else {
+                observe_sound_pool(session, plan, pool.maximum_visible).await
+            };
+            let selected_pool = match observation {
+                Ok(pool) => pool,
+                Err(error)
+                    if transient_sound_read(&error) && selection_recovery::measured(plan) =>
+                {
+                    selection_recovery::prove_sheet(session, plan)
+                        .await
+                        .with_context(|| format!("sound selection read unavailable: {error}"))?;
+                    recovered = true;
+                    break;
+                }
+                Err(error) => return Err(error),
+            };
             reproof_target(pool, &selected_pool, index)?;
             if selected_pool.selected_index == Some(index) {
                 break;
@@ -700,6 +732,9 @@ pub async fn choose_and_confirm_sound(
         }
         check_wait()?;
         session.back().await.context("close inline sound picker")?;
+        if recovered {
+            return selection_recovery::confirm_editor(session, plan, &candidate.title).await;
+        }
     }
     confirm_sound(session, plan, &candidate.title)
         .await
@@ -841,6 +876,7 @@ fn assemble_pool(
     let targets = unique_targets;
     let selected_index = unique_selected;
     Ok(ObservedSoundPool {
+        visual: false,
         effective_plan: None,
         candidates,
         maximum_visible,
@@ -1123,6 +1159,7 @@ mod tests {
     #[test]
     fn sound_reproof_rejects_changed_pool_and_uses_fresh_position() {
         let expected = ObservedSoundPool {
+            visual: false,
             effective_plan: None,
             maximum_visible: 5,
             selected_index: None,

@@ -48,7 +48,7 @@ impl Database {
             .and_then(|row| row["number"].as_u64())
             .map(|number| format!("máy {number}"))
             .unwrap_or_else(|| "thiết bị này".into());
-        let ordinal: u64 = tx.query_row(
+        let ordinal: i64 = tx.query_row(
             "SELECT COUNT(*)+1 FROM operation_device_events
              WHERE source_kind='publish' AND source_id=?1 AND udid=?2 AND action='publishStep'",
             params![campaign_id, udid],
@@ -103,9 +103,11 @@ impl Database {
                 SELECT i.udid,NULL,b.kind,i.state,i.detail,i.error_code
                 FROM library_batch_items i JOIN library_batches b ON b.id=i.batch_id
                 WHERE i.batch_id=?1 AND i.udid=?2",
-            // These sources do not store per-device step times. Do not copy fleet events
-            // into a device log or manufacture a timeline from the polling clock.
-            OperationRunKind::Script | OperationRunKind::Orchestration => {
+            OperationRunKind::Script => "
+                SELECT CAST(sequence AS TEXT),recorded_at,action,state,text,detail
+                FROM operation_device_events WHERE source_kind='script' AND source_id=?1 AND udid=?2",
+            // Parent orchestration references its children's actual device timelines.
+            OperationRunKind::Orchestration => {
                 return Ok(OperationDeviceLog { entries: vec![], truncated: false });
             }
         };

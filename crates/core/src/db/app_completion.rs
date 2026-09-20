@@ -56,7 +56,7 @@ mod tests {
     #[test]
     fn explicit_intents_survive_restart_retry_is_same_row_and_stale_results_lose() {
         let f = Fixture::new();
-        assert_eq!(f.db.schema_version().unwrap(), 43);
+        assert_eq!(f.db.schema_version().unwrap(), 44);
         assert!(f.db.list_due_app_completions(32).unwrap().is_empty());
         let first = f.db.request_app_completion("a", PACKAGE).unwrap();
         assert_eq!(first, 1);
@@ -369,7 +369,7 @@ impl Database {
             ("comment verification", "SELECT EXISTS(SELECT 1 FROM interaction_comment_verification WHERE device_id=?1 AND state='pending')"),
             ("public action", "SELECT EXISTS(SELECT 1 FROM tiktok_action_runs WHERE device_udid=?1 AND state IN ('planned','preparing','armed','uncertain'))"),
             ("Flow", "SELECT EXISTS(SELECT 1 FROM flow_device_runs d WHERE d.udid=?1 AND (d.state IN ('queued','preflight','running') OR EXISTS(SELECT 1 FROM flow_node_attempts a WHERE a.device_run_id=d.id AND a.state IN ('intentCommitted','effectDispatched','verifying','uncertain','interrupted'))))"),
-            ("job", "SELECT EXISTS(SELECT 1 FROM jobs j WHERE j.status NOT IN ('\"succeeded\"','\"failed\"','\"cancelled\"','succeeded','failed','cancelled') AND CASE WHEN json_valid(j.udids_json) THEN EXISTS(SELECT 1 FROM json_each(j.udids_json) u WHERE u.value=?1) ELSE 1 END)"),
+            ("job", "SELECT EXISTS(SELECT 1 FROM jobs j WHERE j.status NOT IN ('\"succeeded\"','\"failed\"','\"cancelled\"','succeeded','failed','cancelled','\"uncertain\"','uncertain') AND CASE WHEN json_valid(j.udids_json) THEN EXISTS(SELECT 1 FROM json_each(j.udids_json) u WHERE u.value=?1) ELSE 1 END)"),
             ("orchestration", "SELECT EXISTS(SELECT 1 FROM orchestration_runs r WHERE r.state IN ('queued','running','uncertain') AND (EXISTS(SELECT 1 FROM orchestration_attempts a JOIN json_each(a.snapshot_json,'$.target.included') t WHERE a.run_id=r.id AND a.state IN ('queued','dispatching','waiting_child','uncertain') AND json_extract(t.value,'$.udid')=?1) OR EXISTS(SELECT 1 FROM json_each(r.node_targets_json) n JOIN json_each(n.value,'$.included') t WHERE json_extract(t.value,'$.udid')=?1 AND NOT EXISTS(SELECT 1 FROM orchestration_attempts a WHERE a.run_id=r.id AND a.node_id=n.key AND a.state IN ('done','partial','failed','cancelled'))) OR (NOT EXISTS(SELECT 1 FROM json_each(r.node_targets_json)) AND EXISTS(SELECT 1 FROM json_each(r.target_json,'$.included') t WHERE json_extract(t.value,'$.udid')=?1))))"),
         ];
         for (name, sql) in checks {

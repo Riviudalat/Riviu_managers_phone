@@ -185,12 +185,12 @@ fn recover_actions(
            AND (?1 IS NULL OR action.device_udid=?1)
            AND (?2 IS NULL OR substr(action.owner_id,1,length(?2))=?2)",
         params![device_udid, owner_prefix],
-        |row| row.get(0),
+        |row| row.get::<_, i64>(0),
     )?;
     Ok(NurtureFollowRecovery {
         failed_before_effect,
         uncertain,
-        possible_effects,
+        possible_effects: usize::try_from(possible_effects)?,
     })
 }
 

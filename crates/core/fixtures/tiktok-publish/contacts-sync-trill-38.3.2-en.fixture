@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Projection of inspector observation 78381915-256e-40c5-83bf-acb9a73e3b4c,
+     2026-09-19, SM-G955U1, Trill 38.3.2, en-US. Retains measured nodes 8/14/19/20
+     with exact labels, classes, rectangles and ancestry; intermediate layouts omitted.
+     Original tree SHA256 b41911e445fb4bc6bccc438d67b31f3f9f284c6cabed4e282c362ee8d52641ac. -->
+<hierarchy><node package="com.ss.android.ugc.trill" content-desc="Dialog" class="android.widget.FrameLayout" displayed="true" enabled="true" bounds="[120,770][960,1377]">
+<node package="com.ss.android.ugc.trill" class="android.widget.TextView" text="TikTok is more fun with friends. By syncing your phone contacts, you can find and get discovered by people you know." displayed="true" enabled="true" bounds="[180,842][888,1172]"/>
+<node package="com.ss.android.ugc.trill" class="android.widget.Button" text="OK" enabled="true" clickable="true" displayed="true" bounds="[541,1234][960,1377]"/>
+<node package="com.ss.android.ugc.trill" class="android.widget.Button" text="Don’t allow" enabled="true" clickable="true" displayed="true" bounds="[120,1234][539,1377]"/>
+</node></hierarchy>

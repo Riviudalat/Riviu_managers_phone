@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { operationDeviceLog, operationGetRun, operationQueryRuns, operationStop, operationStopStatus } from "../../api";
 import type { OperationRunDetail, OperationRunSummary } from "../../types";
@@ -38,6 +38,20 @@ it("reports a rejected stop without removing the run",async()=>{
  fireEvent.click(screen.getByRole("button",{name:"Dừng tác vụ và về màn hình chính"}));
  expect(await screen.findByText("cannot persist stop")).toBeVisible();
  expect(screen.getByRole("combobox",{name:"Chọn tác vụ theo dõi"})).toHaveValue(run.id);
+});
+
+it("keeps an acknowledged stop pending when a later status read returns no record", async () => {
+ vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+ try {
+  await openDevices();
+  vi.mocked(operationStop).mockResolvedValue({operationId:run.id,state:"stopping",devices:[{udid:"a",closed:false,message:"waiting"}]});
+  fireEvent.click(screen.getByRole("button",{name:"Dừng tác vụ và về màn hình chính"}));
+  await waitFor(()=>expect(operationStop).toHaveBeenCalledWith(run.id));
+  await act(async()=>{await vi.advanceTimersByTimeAsync(2100);});
+  expect(operationStopStatus).toHaveBeenCalledTimes(2);
+  expect(screen.getByRole("button",{name:"Dừng tác vụ và về màn hình chính"})).toBeDisabled();
+  expect(operationStop).toHaveBeenCalledTimes(1);
+ } finally { vi.useRealTimers(); }
 });
 
 it("offers pause for a legacy stopped publication that has not released its devices",async()=>{

@@ -2031,6 +2031,22 @@ async fn grounded_verify(
     text: PostBrief<'_>,
     text_only: bool,
 ) -> anyhow::Result<GroundedVerification> {
+    if let Some(client) = &settings.typesafe {
+        let has_text = text.caption.is_some_and(|v| !v.trim().is_empty())
+            || text.transcript.is_some_and(|v| !v.trim().is_empty());
+        if has_text {
+            let verdict = client
+                .check(candidate, text.caption, text.transcript)
+                .await?;
+            anyhow::ensure!(
+                verdict.accepts(text_only),
+                "typesafe_text_evidence_rejected: {:?}",
+                verdict.support
+            );
+        } else {
+            anyhow::ensure!(!text_only, "typesafe_no_text_evidence");
+        }
+    }
     let direction = direction.unwrap_or("tự nhiên");
     let layout = sheet.layout_note();
     let text_evidence_instruction = verifier_text_evidence_instruction(text);
@@ -2093,6 +2109,8 @@ async fn grounded_verify(
                 .get("uiTextConfusion")
                 .and_then(|v| v.as_bool())
                 .unwrap_or(true),
+            // Generation gateway usage only. TypeSafe records its tokens and latency
+            // separately; no billed USD value is inferred from those tokens.
             prompt_tokens: p,
             completion_tokens: c,
             cost_usd: cost,
@@ -4017,6 +4035,53 @@ mod tests {",
         // any more: the USD this used to assert on was two hand-typed numbers multiplied by
         // exactly these counts.
         assert!(result.prompt_tokens > 0 && result.completion_tokens > 0);
+    }
+
+    #[tokio::test]
+    async fn typesafe_rejects_a_contradiction_before_the_generation_verifier() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}/v1/systemone", listener.local_addr().unwrap());
+        let server = serve_mock_gateway_capturing(
+            listener,
+            vec![json!({
+                "model":"jev-fixture","answers":{"grounding":{"type":"choice","choice":"contradicted","confidence":0.99,
+                    "probabilities":{"supported":0.0,"contradicted":0.99,"insufficient":0.01}}},
+                "usage":{"input_tokens":100,"output_tokens":20}
+            })],
+        );
+        let settings = NurtureSettings {
+            typesafe: Some(crate::typesafe::Client::fixture(endpoint)),
+            api_key: "fixture".into(),
+            base_url: "http://127.0.0.1:1".into(),
+            ..Default::default()
+        };
+        let sheet = ContactSheet {
+            jpeg: vec![],
+            distinct_frames: 1,
+            kind: EvidenceKind::Moments,
+            coverage: None,
+        };
+        let result = grounded_verify(
+            &settings,
+            &sheet,
+            "Quán ở Hà Nội",
+            None,
+            PostBrief {
+                caption: Some("Quán ở Đà Lạt"),
+                ..Default::default()
+            },
+            true,
+        )
+        .await;
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("typesafe_text_evidence_rejected"));
+        let requests = server.await.unwrap();
+        assert_eq!(requests.len(), 1);
+        let request: serde_json::Value = serde_json::from_str(&requests[0]).unwrap();
+        assert_eq!(request["state"]["evidence"]["caption"], "Quán ở Đà Lạt");
+        assert!(request["state"].get("apiKey").is_none());
     }
 
     /// The widths the budget doc quotes, measured rather than reasoned about.

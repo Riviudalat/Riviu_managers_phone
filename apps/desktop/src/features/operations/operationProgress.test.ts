@@ -4,6 +4,12 @@ import { compactLogEntries, deviceRows, deviceStateCounts, logMessage, logTime, 
 
 const run = { sourceId: "one", kind: "nurture", state: "running", totalItems: 2, completedItems: 0, targetCount: 2 } as OperationRunSummary;
 describe("operation progress", () => {
+  it("uses explicit device rows instead of presenting global script steps as a device", () => {
+    const common = { id: "0", kind: "step", udid: null, state: "succeeded" } as OperationRunItem;
+    const device = { id: "device:a", kind: "device", udid: "a", state: "uncertain" } as OperationRunItem;
+    expect(deviceRows([common,device]).map(r=>r.udid)).toEqual(["a"]);
+    expect(deviceRows([common])[0].udid).toBe("");
+  });
   it("shows persisted publish steps and preserves real timestamps and failure details", () => {
     const step = { id: "12", at: "2026-09-08T12:34:56", action: "publishStep", state: "selecting_sound", text: "[8] Đang chọn nhạc: Đến Khi Nào", detail: null };
     expect(logMessage(step)).toBe(step.text);

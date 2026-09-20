@@ -343,28 +343,39 @@ impl Database {
     }
 
     pub fn get_nurture_settings(&self) -> anyhow::Result<crate::types::NurtureSettings> {
-        match self.get_setting("nurture.settings")? {
-            Some(raw) => {
-                let mut settings: crate::types::NurtureSettings = serde_json::from_str(&raw)
-                    .context("invalid JSON in stored setting nurture.settings")?;
-                let need_v2 = self.get_setting(NURTURE_SETTINGS_MIGRATION_V2)?.is_none();
-                let need_v3 = self.get_setting(NURTURE_SETTINGS_MIGRATION_V3)?.is_none();
-                if need_v2 {
-                    settings.migrate_legacy_defaults();
+        let result: anyhow::Result<crate::NurtureSettings> =
+            match self.get_setting("nurture.settings")? {
+                Some(raw) => {
+                    let mut settings: crate::types::NurtureSettings = serde_json::from_str(&raw)
+                        .context("invalid JSON in stored setting nurture.settings")?;
+                    let need_v2 = self.get_setting(NURTURE_SETTINGS_MIGRATION_V2)?.is_none();
+                    let need_v3 = self.get_setting(NURTURE_SETTINGS_MIGRATION_V3)?.is_none();
+                    if need_v2 {
+                        settings.migrate_legacy_defaults();
+                    }
+                    if need_v3 {
+                        settings.adopt_openrouter_luna_if_still_shipped_deepseek();
+                    }
+                    if need_v2 || need_v3 {
+                        // Re-serializing also drops obsolete risk-guard keys that
+                        // were accepted by the old profile schema.
+                        self.save_nurture_settings(&settings)?;
+                        settings.revision = self
+                            .get_setting("nurture.settings")?
+                            .map(|raw| serde_json::from_str::<crate::NurtureSettings>(&raw))
+                            .transpose()?
+                            .map_or(0, |saved| saved.revision);
+                    }
+                    self.resolve_api_key(&mut settings)?;
+                    Ok(settings)
                 }
-                if need_v3 {
-                    settings.adopt_openrouter_luna_if_still_shipped_deepseek();
-                }
-                if need_v2 || need_v3 {
-                    // Re-serializing also drops obsolete risk-guard keys that
-                    // were accepted by the old profile schema.
-                    self.save_nurture_settings(&settings)?;
-                }
-                self.resolve_api_key(&mut settings)?;
-                Ok(settings)
-            }
-            None => Ok(crate::types::NurtureSettings::default()),
+                None => Ok(crate::types::NurtureSettings::default()),
+            };
+        let mut result = result?;
+        if self.typesafe_settings()?.enabled {
+            result.typesafe = Some(self.typesafe_client()?);
         }
+        Ok(result)
     }
     /// Put the API key back on the settings the engine is about to use.
     ///
@@ -401,6 +412,11 @@ impl Database {
             //
             // Found by an independent review on 27/08/2026.
             self.save_nurture_settings(settings)?;
+            settings.revision = self
+                .get_setting("nurture.settings")?
+                .map(|raw| serde_json::from_str::<crate::NurtureSettings>(&raw))
+                .transpose()?
+                .map_or(0, |saved| saved.revision);
             return Ok(());
         }
         if let Some(key) = store.get_secret(SECRET_AI_API_KEY)? {
@@ -424,6 +440,24 @@ impl Database {
         // place. Faithful rather than clever: an empty key here really does clear the stored
         // one, so "leave it unchanged" is a decision for the caller that owns the form, not a
         // silent rule buried in the database layer.
+        let mut conn = self.conn()?;
+        let transaction = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let prior: Option<String> = transaction
+            .query_row(
+                "SELECT value FROM settings WHERE key='nurture.settings'",
+                [],
+                |r| r.get(0),
+            )
+            .optional()?;
+        let prior: crate::NurtureSettings = prior
+            .map(|s| serde_json::from_str(&s))
+            .transpose()?
+            .unwrap_or_default();
+        let mut settings = settings.clone();
+        settings.revision = prior
+            .revision
+            .checked_add(1)
+            .context("Nurture revision overflow")?;
         let payload = match self.secrets.as_ref() {
             Some(store) => {
                 store.set_secret(SECRET_AI_API_KEY, &settings.api_key)?;
@@ -431,10 +465,9 @@ impl Database {
                 without.api_key.clear();
                 serde_json::to_string(&without)?
             }
-            None => serde_json::to_string(settings)?,
+            None => serde_json::to_string(&settings)?,
         };
-        let mut conn = self.conn()?;
-        let transaction = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+
         for (key, value) in [
             ("nurture.settings", payload.as_str()),
             (NURTURE_SETTINGS_MIGRATION_V2, "2026-08-06-human-v2"),
@@ -450,6 +483,74 @@ impl Database {
             )?;
         }
         transaction.commit()?;
+        Ok(())
+    }
+
+    pub fn update_nurture_credential(&self, api_key: &str) -> anyhow::Result<bool> {
+        if let Some(store) = &self.secrets {
+            store.set_secret(SECRET_AI_API_KEY, api_key)?;
+        } else {
+            let mut conn = self.conn()?;
+            let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            let raw: Option<String> = tx
+                .query_row(
+                    "SELECT value FROM settings WHERE key='nurture.settings'",
+                    [],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            let mut settings: crate::NurtureSettings = raw
+                .map(|v| serde_json::from_str(&v))
+                .transpose()?
+                .unwrap_or_default();
+            settings.api_key = api_key.into();
+            tx.execute("INSERT INTO settings(key,value) VALUES('nurture.settings',?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value", [serde_json::to_string(&settings)?])?;
+            tx.commit()?;
+        }
+        Ok(!api_key.trim().is_empty())
+    }
+
+    /// Credentials have a separate writer. A stale form cannot restore a deleted
+    /// key or overwrite a newer behavioral revision.
+    pub fn save_nurture_settings_cas(
+        &self,
+        settings: &crate::NurtureSettings,
+        expected_revision: u64,
+    ) -> anyhow::Result<()> {
+        let mut conn = self.conn()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let raw: Option<String> = tx
+            .query_row(
+                "SELECT value FROM settings WHERE key='nurture.settings'",
+                [],
+                |r| r.get(0),
+            )
+            .optional()?;
+        let previous: crate::NurtureSettings = raw
+            .map(|v| serde_json::from_str(&v))
+            .transpose()?
+            .unwrap_or_default();
+        anyhow::ensure!(
+            previous.revision == expected_revision,
+            "NurtureSettingsConflict: settings changed; reload before saving"
+        );
+        let mut next = settings.clone();
+        next.revision = expected_revision
+            .checked_add(1)
+            .context("Nurture revision overflow")?;
+        next.api_key = previous.api_key;
+        next.has_api_key = false;
+        tx.execute("INSERT INTO settings(key,value) VALUES('nurture.settings',?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value", [serde_json::to_string(&next)?])?;
+        for (key, value) in [
+            (NURTURE_SETTINGS_MIGRATION_V2, "2026-08-06-human-v2"),
+            (
+                NURTURE_SETTINGS_MIGRATION_V3,
+                NURTURE_SETTINGS_MIGRATION_V3_VALUE,
+            ),
+        ] {
+            tx.execute("INSERT INTO settings(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value", params![key,value])?;
+        }
+        tx.commit()?;
         Ok(())
     }
     pub fn get_agent_settings(&self) -> anyhow::Result<crate::types::AgentSettings> {
@@ -639,6 +740,28 @@ impl Database {
 mod history_tests {
     use super::*;
     use crate::types::{NurtureCleanupState, NurturePhase, NurtureSessionStatus};
+
+    #[test]
+    fn regression_credential_update_preserves_settings_and_stale_cas_is_rejected() {
+        let (db, path) = fixture();
+        let mut initial = crate::NurtureSettings::default();
+        db.save_nurture_settings(&initial).unwrap();
+        initial.num_videos = 27;
+        db.save_nurture_settings_cas(&initial, 1).unwrap();
+        db.update_nurture_credential("fixture-key").unwrap();
+        let current = db.get_nurture_settings().unwrap();
+        assert_eq!(current.num_videos, 27);
+        assert_eq!(current.revision, 2);
+        assert_eq!(current.api_key, "fixture-key");
+        initial.num_videos = 120;
+        assert!(db.save_nurture_settings_cas(&initial, 0).is_err());
+        assert_eq!(db.get_nurture_settings().unwrap().num_videos, 27);
+        db.update_nurture_credential("").unwrap();
+        db.save_nurture_settings_cas(&current, 2).unwrap();
+        assert!(db.get_nurture_settings().unwrap().api_key.is_empty());
+        drop(db);
+        std::fs::remove_file(path).unwrap();
+    }
 
     fn fixture() -> (Database, PathBuf) {
         let path =

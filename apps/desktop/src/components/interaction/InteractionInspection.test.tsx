@@ -28,10 +28,11 @@ it("discards account proof when the assigned nick changes during a read", async 
 });
 
 it("readback keeps unknown distinct from absent and does not retry actions", async () => {
-  vi.mocked(interactionReadback).mockResolvedValue({ assignmentId: "a", targetUrl: "https://www.tiktok.com/@a/video/123", checkedAt: "2026-09-06T00:00:00Z", like: "unknown", save: "saved", snapshotSha256: "proof" });
+  vi.mocked(interactionReadback).mockResolvedValue({ assignmentId: "a", targetUrl: "https://www.tiktok.com/@a/video/123", checkedAt: "2026-09-06T00:00:00Z", like: "unknown", save: "saved", follow: "present", snapshotSha256: "proof" });
   render(<InteractionReadbackControl campaignId="c" assignmentId="a" disabled={false} />);
   fireEvent.click(screen.getByRole("button", { name: "Kiểm tra lại kết quả" }));
   expect(await screen.findByRole("status")).toHaveTextContent("Tim chưa rõ; Lưu đang có");
+  expect(screen.getByRole("status")).toHaveTextContent("Theo dõi đang có");
   expect(interactionReadback).toHaveBeenCalledExactlyOnceWith("c", "a");
 });
 

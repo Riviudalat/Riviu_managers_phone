@@ -943,10 +943,6 @@ impl FlowExecutor {
         special_launch: bool,
     ) -> Result<Option<String>, FlowExecutionError> {
         self.verify_live_node_capabilities(node, context)?;
-        let baseline_deadline = tokio::time::Instant::now() + EVIDENCE_TIMEOUT;
-        let baseline = self
-            .capture_node_baseline(node, context, baseline_deadline)
-            .await?;
         if attempt.device_run_id != device_run_id
             || attempt.node_id != node.id
             || attempt.action_kind != node.kind
@@ -959,6 +955,18 @@ impl FlowExecutor {
             ));
         }
         let attempt_id = attempt.id;
+        if let Ok(session) = context.session(&self.deps.control) {
+            session.set_gui_scope(crate::ui_automation::GuiScope {
+                run_id: self.deps.run_id.to_string(),
+                assignment_id: Some(attempt_id.to_string()),
+                device_id: self.deps.udid.clone(),
+                deadline_ms: None,
+            });
+        }
+        let baseline_deadline = tokio::time::Instant::now() + EVIDENCE_TIMEOUT;
+        let baseline = self
+            .capture_node_baseline(node, context, baseline_deadline)
+            .await?;
         self.deps
             .database
             .transition_attempt(

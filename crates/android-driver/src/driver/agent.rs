@@ -358,6 +358,7 @@ impl AndroidDriver {
     /// Pure, because the value is the *parsing*: `pm list instrumentation` prints
     /// `instrumentation:<pkg>/<runner> (target=<pkg>)`, and a listing read wrongly would either
     /// accuse an innocent phone or clear a guilty one.
+    #[cfg(test)]
     pub(super) fn foreign_instrumentations(listing: &str, ours: &[&str]) -> Vec<String> {
         let mut found = Vec::new();
         for line in listing.lines() {
@@ -426,30 +427,19 @@ impl AndroidDriver {
         Ok(())
     }
 
-    /// Turn "something else may be holding UiAutomation" into the name of that something.
-    ///
-    /// The two messages below already carried the right hypothesis and never checked it, so an
-    /// operator was told to go looking for an unnamed automation tool. One `pm list
-    /// instrumentation` settles it.
-    ///
-    /// Best-effort by design: this runs on a path that is already failing, and a phone that
-    /// cannot answer this question must not turn a useful error into a different error. No
-    /// answer means the sentence simply keeps its old, weaker form.
+    /// Report observed live runners. Installed packages do not prove an owner.
+    /// A failed ActivityManager read leaves the cause unknown.
     async fn foreign_instrumentation_note(&self, serial: &str) -> String {
-        let Ok(listing) = self.adb.shell(serial, "pm list instrumentation").await else {
-            return String::new();
+        let Ok(dump) = self.adb.shell(serial, "dumpsys activity").await else {
+            return " Chưa đọc được chủ instrumentation; chưa xác định nguyên nhân.".into();
         };
-        let foreign =
-            Self::foreign_instrumentations(&listing, &[AGENT_PACKAGE, AGENT_TEST_PACKAGE]);
+        let foreign = Self::active_instrumentations(&dump, &[AGENT_PACKAGE, AGENT_TEST_PACKAGE]);
         if foreign.is_empty() {
-            // Worth saying too: it rules out the most likely cause, which is what stops the
-            // next hour being spent on it.
-            return " Không có instrumentation lạ nào trên máy này, nên nguyên nhân nằm ở chỗ khác."
-                .to_string();
+            return " Không thấy instrumentation khác đang hoạt động; cây UI của app có thể chưa phản hồi.".into();
         }
         format!(
-            " Máy này còn instrumentation của tool khác: {}. Android chỉ cho MỘT UiAutomator giữ \
-             accessibility, nên phải xoá hoặc dừng nó trước.",
+            " ActivityManager ghi nhận instrumentation khác đang hoạt động: {}. Hãy dừng phiên \
+             điều khiển đó trước khi thử lại.",
             foreign.join(", ")
         )
     }
@@ -571,7 +561,8 @@ impl AndroidDriver {
             AndroidUiSession::new(agent, self.adb.clone(), udid.to_string(), (0.0, 0.0))
                 .with_screen_cache(screen)
                 .with_helper(helper)
-                .with_gui_reasoner(self.gui_reasoner.lock().clone()),
+                .with_gui_reasoner(self.gui_reasoner.lock().clone())
+                .with_trace_recorder(self.trace.lock().clone()),
         )
     }
     /// Attach the helper when it is already on the phone, or when an APK is
@@ -860,15 +851,14 @@ impl AndroidDriver {
                     self.instrumentation_children.retain(serial, child).await;
                     return Ok(agent);
                 }
-                // Bound to the port but blind. Reported rather than retried forever: a
-                // second restart would race the same holder of `UiAutomation`, and the
-                // operator needs to know something else on the phone has it.
+                // Listening does not prove the foreground app exposes a readable root.
+                // Keep the observed failure separate from an unproven ownership diagnosis.
                 let _ = agent.close().await;
                 self.agents.lock().remove(serial);
                 return Err(anyhow!(
                     "the agent on {serial} is listening but cannot read the accessibility \
-                     tree even after a restart. Something else holds UiAutomation — an \
-                     `adb shell uiautomator dump`, or another automation tool on the phone"
+                     tree even after a restart. The foreground app may not be responding to \
+                     accessibility reads; a competing UiAutomation owner has not been proven"
                 ));
             }
             tokio::time::sleep(AGENT_READY_POLL_EVERY).await;

@@ -43,8 +43,9 @@ use anyhow::Context;
 
 mod composer;
 mod exact_target;
+mod mention_token;
 pub(crate) mod replies;
-pub use exact_target::open_exact_target_by_hierarchy;
+pub use exact_target::{open_exact_target_by_hierarchy, open_pinned_target_by_hierarchy};
 
 /// Where to tap to reply to one specific comment, and whose comment it is.
 #[derive(Debug, Clone, PartialEq)]
@@ -1175,10 +1176,7 @@ where
         posted = match composer_text(session).await {
             Ok(value) => value.filter(|value| {
                 value.contains(text)
-                    && (!strict_mentions
-                        || mentions
-                            .iter()
-                            .all(|handle| composer::has_handle(value, handle)))
+                    && (!strict_mentions || mention_outcome.matches_composer(value, mentions))
             }),
             Err(_) => {
                 drawer.leave(stop).await;
@@ -1277,6 +1275,7 @@ const MENTION_PICKER_POLL: Duration = Duration::from_millis(400);
 /// What became of each handle the operator asked to tag.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct MentionOutcome {
+    confirmed_composer: Option<String>,
     /// Picked out of TikTok's own list **and confirmed against the composer afterwards**,
     /// so the comment carries a real mention.
     pub linked: Vec<String>,
@@ -1294,6 +1293,13 @@ pub struct MentionOutcome {
 }
 
 impl MentionOutcome {
+    fn matches_composer(&self, value: &str, wanted: &[String]) -> bool {
+        self.all_linked(wanted)
+            && self
+                .confirmed_composer
+                .as_deref()
+                .is_some_and(|confirmed| confirmed.trim() == value.trim())
+    }
     pub fn all_linked(&self, wanted: &[String]) -> bool {
         self.literal.is_empty()
             && self.untyped.is_empty()
@@ -1403,6 +1409,14 @@ async fn append_mentions_checked(
         // come from *where* a row sits; it comes from the fact that a suggestion row was not
         // there before typing.
         let before = mention_rows(session, handle).await?;
+        if let Some(previous) = &outcome.confirmed_composer {
+            anyhow::ensure!(
+                composer::read(session)
+                    .await?
+                    .is_some_and(|current| current.trim() == previous.trim()),
+                "previous mention token changed before next selection"
+            );
+        }
         // A leading space, or the tag runs into the last word of the comment — measured
         // 24/08/2026: the first real run posted `…đi được ngay@ghin.lt.sng.sng`. TikTok adds
         // its own trailing space when it inserts the token, so consecutive tags separate
@@ -1410,8 +1424,64 @@ async fn append_mentions_checked(
         session.type_keys(&format!(" @{handle}")).await?;
         match await_mention_row(session, handle, &before, stop).await? {
             Some(row) => {
+                let epoch = session.gui_session_epoch();
+                let mut expected_nickname = None;
+                if session.supports_accessibility_readback() {
+                    let package = session.active_app_bundle().await?;
+                    let version = session.app_version(&package).await.unwrap_or_default();
+                    let locale = session.ui_language().await.unwrap_or_default();
+                    // Preserve the actual picker hierarchy in the session trace
+                    // before the choice. Also bind the tap to a fresh unique node;
+                    // row geometry returned by separate reads may already be stale.
+                    let snapshot = session.hierarchy_source_snapshot().await?;
+                    let composer_before = composer::from_snapshot(snapshot.clone())?;
+                    let tree = crate::ui_automation::tree::Tree::parse(snapshot)?;
+                    let matches = tree
+                        .nodes
+                        .iter()
+                        .enumerate()
+                        .filter(|(index, node)| {
+                            node.visible(node.attr("package"))
+                                && tree.ancestors_visible(*index)
+                                && matches!(
+                                    node.attr("package"),
+                                    "com.ss.android.ugc.trill" | "com.zhiliaoapp.musically"
+                                )
+                                && node.attr("class") == "android.widget.TextView"
+                                && node
+                                    .attr("text")
+                                    .trim()
+                                    .trim_start_matches('@')
+                                    .eq_ignore_ascii_case(handle)
+                                && node.rect().is_some_and(|rect| {
+                                    rect.x == row.x
+                                        && rect.y == row.y
+                                        && rect.width == row.width
+                                        && rect.height == row.height
+                                })
+                        })
+                        .count();
+                    anyhow::ensure!(matches == 1, "mention picker changed before selection");
+                    expected_nickname = composer_before.as_deref().and_then(|before| {
+                        mention_token::rendered_after_pick(
+                            &tree, &package, &version, &locale, handle, &row, before,
+                        )
+                    });
+                }
+                if stop.load(Ordering::Relaxed) {
+                    outcome.literal.push(handle.to_string());
+                    return Ok(outcome);
+                }
                 let point = planner.next(row.centre(), row.jitter_radius());
+                anyhow::ensure!(
+                    session.gui_session_epoch() == epoch,
+                    "mention session changed before selection"
+                );
                 session.tap(point).await?;
+                anyhow::ensure!(
+                    session.gui_session_epoch() == epoch,
+                    "mention session changed during selection"
+                );
                 // **Ask the field, not the list.** The old check read "the row is gone" as
                 // proof the pick landed — but a tap that misses the picker and opens somebody's
                 // profile also makes the row go away, and takes the drawer and the unsent draft
@@ -1425,7 +1495,12 @@ async fn append_mentions_checked(
                         outcome.unverified.push(handle.to_string());
                         return Ok(outcome);
                     }
-                    Some(field) if !composer::has_handle(&field, handle) => {
+                    Some(field)
+                        if !composer::has_handle(&field, handle)
+                            && expected_nickname
+                                .as_deref()
+                                .is_none_or(|expected| expected.trim() != field.trim()) =>
+                    {
                         // Still a drawer, but the handle is no longer in it: the tap changed
                         // the field into something this function did not ask for.
                         //
@@ -1436,7 +1511,7 @@ async fn append_mentions_checked(
                         outcome.unverified.push(handle.to_string());
                         return Ok(outcome);
                     }
-                    Some(_) => {
+                    Some(field) => {
                         // Drawer alive, handle still in the field. A fresh row that still
                         // offers the handle means the tap did nothing at all.
                         let offered =
@@ -1445,6 +1520,7 @@ async fn append_mentions_checked(
                             outcome.literal.push(handle.to_string());
                         } else {
                             outcome.linked.push(handle.to_string());
+                            outcome.confirmed_composer = Some(field);
                         }
                     }
                 }
@@ -2603,10 +2679,7 @@ where
     };
     if strict_mentions
         && !posted_text.as_deref().is_some_and(|value| {
-            value.contains(text)
-                && mentions
-                    .iter()
-                    .all(|handle| composer::has_handle(value, handle))
+            value.contains(text) && mention_outcome.matches_composer(value, mentions)
         })
     {
         let cleaned = drawer.leave(stop).await;

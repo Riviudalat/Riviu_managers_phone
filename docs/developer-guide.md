@@ -3,6 +3,121 @@
 Stack giữ nguyên: Rust workspace, Tauri 2, React/TypeScript/Vite. `src/api.ts` là biên
 IPC frontend. Không thêm một control plane riêng để đi vòng ownership/admission hiện có.
 
+DTO thiết bị, khả năng, Dừng, timeline và Sheet proof được sinh bằng ts-rs 12.0.1:
+`cargo run --locked -p riviu-core --example export_ipc -- apps/desktop/src/generated-ipc.ts`.
+`python scripts/check_generated_ipc.py` kiểm không có drift. TanStack Query chỉ
+giữ read model của monitor theo run/device/phạm vi; retry, focus và reconnect
+refetch bị tắt. Credential, preflight và effect không dùng query cache.
+
+Preflight Android dùng `DeviceControlPlane::tiktok_action_capabilities` và catalog
+`app_automation::action_capabilities` chung cho UI, Nuôi thủ công/lịch/Điều phối,
+Tương tác và Đăng bài. Readiness chỉ đọc khóa màn hình, transport và owner, không
+đánh thức máy hoặc mở session. Mỗi action thiếu locator/tuple bị từ chối riêng;
+`runtimeProofRequired` cho phép vào bước chứng minh target, chưa cấp quyền tap.
+Follow trong Tương tác dùng profile đã đo ở Trill38.3.2/en và Global
+45.4.3/45.7.3/46.0.41/46.1.3/46.4.3/en;
+source proof Follow ngẫu nhiên của Nuôi dùng capability `feedFollow` riêng ở
+Trill38.3.2/en. Capability `follow` của profile không cấp quyền Follow trong Nuôi.
+Action Follow mặc định false khi đọc request cũ. Worker xác nhận account người
+chạy, canonical bài đích, rồi đúng handle trên profile trước intent. Không tự Follow
+chính mình; quan hệ đã đạt là no-op. Tap chỉ đi qua action ledger một lần, kết quả
+chưa đọc lại được giữ uncertain, không biến thành quyền tap lại.
+`follow_profile` chỉ trả `followed` sau khi mở lại URL profile chuẩn và đọc hai
+snapshot mới có trạng thái Following. Trạng thái tức thời sau tap không đủ;
+thất bại ở bước mở lại là uncertainty sau effect, không cấp quyền thử Follow lần nữa.
+Đối chiếu Follow mở URL profile chuẩn của handle đã xác minh, đọc hai snapshot mới
+liên tiếp; không gọi tap hoặc gate Follow. Kết quả hiện tại không ghi đè journal uncertain.
+Điều hướng tác giả lấy định danh và tọa độ từ cùng snapshot XML, kiểm lại trên
+generation mới trước tap; không ghép kết quả find/rect của node đã tái sử dụng.
+Nếu máy đã có nick gán, transaction giữ account và transaction ghi intent Post
+đều so với account đọc được. Đổi nick giữa hai transaction làm lượt Đăng bị từ chối;
+không tự sửa metadata từ quan sát và không sửa bằng chứng bài đã đăng trước đó.
+Sau khi bấm Next của picker, lỗi accessibility/HTTP timeout ở bước chờ editor
+cho phép quan sát XML thêm tối đa 30 giây. Chỉ hai generation mới trong cùng phiên,
+cùng một nút Next đã đo và không có Loading mới chứng minh đã tới editor.
+Phục hồi này không bấm lại picker, không ghi intent và không gọi Đăng; Dừng vẫn
+được kiểm trước tap và sau mỗi lần đọc.
+Global 45.7.3/en có nhánh phục hồi riêng khi đã chọn nhạc nhưng không đọc được
+bảng nhạc: hai ảnh mới 1080×2220 qua OCR cục bộ phải nhận diện đủ bốn tab ổn định
+trong cùng phiên trước khi Back một lần. Sau đó hai snapshot XML mới phải xác
+nhận đúng tên nhạc duy nhất trên editor. Lỗi/mơ hồ/Dừng vẫn từ chối; không bấm
+chọn nhạc lại và không nới deadline chung ba phút.
+Khi nhánh XML gặp cây rỗng hoặc lỗi accessibility, hai ảnh mới cho phép chuyển
+tab Hot một lần. Nhánh này vẫn bắt buộc XML xác nhận Hot và danh sách đầy đủ.
+Trên 45.7.3/en, hai ảnh native mới có Next và Your Story chứng minh editor đã
+mở; nhạc gợi ý đang Loading là trạng thái riêng. Mẫu chữ Loading phải khớp
+hai ảnh mới trước khi mở nút nhạc đã đo. Bảng mở dở được quan sát tiếp; khi đủ
+bốn tab mới chuyển Hot, không đợi nội dung For You. Giữ ngân sách chung ba phút.
+Trên đúng 45.7.3/en ở 1080×2220, adapter ảnh dùng hai quan sát mới cùng phiên
+để chứng minh gạch chân Hot, tên và nghệ sĩ của từng hàng đầy đủ. Hàng hồng đã
+chọn, tên trùng và hàng bị cắt bị loại; trước chọn phải đọc lại cùng danh tính.
+Nhánh này chỉ chọn một lần rồi đóng bảng đã chứng minh bằng ảnh; hai XML mới
+trên editor phải khớp nguyên tên nhạc. Không khớp thì giữ lỗi trước Đăng.
+Tap từ ảnh dùng `tap_image` với đúng kích thước native, không thêm jitter.
+Nguồn ảnh minicap giữ kích thước native và giới hạn 2 FPS để giảm tải encode
+trên điện thoại; giới hạn này không thay chất lượng stream H.264 của ô thiết bị.
+Thông báo instrumentation Android chỉ nêu công cụ khác đang giữ phiên khi
+ActivityManager ghi nhận runner đang hoạt động. Danh sách package đã cài không
+phải bằng chứng tranh quyền accessibility.
+Like/Save/Follow/Comment trên Android cũng kiểm nick gán trước khi mở bài đích.
+Harness nghiệm thu khóa nick trong preflight và so account trong intent/canonical
+URL; receipt và ô Sheet khớp chưa đủ để công nhận đúng account.
+
+Timeline Script lưu bước và event của đúng máy trong cùng transaction, gồm session
+và thời gian thực thi; Dừng khi chờ admission không được ghi intent mới. Điều phối
+đọc timeline của đúng tác vụ con và snapshot máy của từng bước. Export kiểm hash
+ảnh/XML; replay chỉ dùng fake driver. Kết quả chung của bước không thay bằng chứng
+của từng máy.
+
+Tag nickname Global45.7.3/en chỉ được chấp nhận khi snapshot trước chọn chứa
+đúng handle trong hàng picker o3b/o2g, cùng tên hiển thị o2n. Sau chọn phải còn
+cùng session, picker đã rời và ô soạn khớp toàn bộ phép thay token đã dự kiến;
+đọc cuối trước Gửi phải khớp nguyên văn kết quả đã chứng minh. Không suy nickname
+thành username và không dùng mapping này cho build khác chưa đo.
+
+`RIVIU_DEV_MANUAL_ACCEPTANCE=1` trong bản debug giữ lịch tự chạy chờ và đóng băng
+hành vi Nuôi. Dispatcher chỉ nhận campaign có trong danh sách dấu phẩy
+`RIVIU_DEV_ACCEPTANCE_CAMPAIGNS`; biến môi trường không sửa lịch đã lưu.
+Harness nhận `--content-snapshot` JSON chứa `captionOverrides` và `soundPolicy`.
+Đạt end-to-end đòi canonical post proof, receipt đúng revision/epoch và đọc lại
+ô qua `publish_sheet_readback`; trạng thái sent một mình chưa đủ.
+
+Migration 44 backfill nghĩa vụ Sheet một lần; trigger cập nhật nghĩa vụ ngay
+trong transaction publication. Scan shared-v2 ghi checkpoint mỗi trang, nhường
+sau 32 trang hoặc 45 giây và giữ lock/token/payload qua lát 90 giây. Pending
+không tăng lỗi. Receipt giữ theo publication/revision/target/epoch. Storage
+executor cấp chỗ trước spawn_blocking với 1 ghi, 2 đọc, tối đa 64 yêu cầu chờ.
+Monitor list/query/detail/log, settings CAS/credential và các bước đọc cấu hình,
+nhận claim, settle/defer/fail Sheet dùng executor chung. HTTP và thao tác thiết bị
+chạy ngoài closure storage; không giữ transaction hoặc slot DB qua các bước đó.
+Danh sách publication dùng một kết nối và projection hiện có, không tải manifest
+media hoặc lịch sử event. DTO trả về vẫn giữ uncertainty, marker Dừng và quyền retry.
+Khôi phục schema bằng backup SQLite tương ứng; không mở binary cũ trên DB đã migrate.
+
+Phiên Android có `GuiScope` ghi quan sát vào `artifacts/traces` qua artifact store
+hiện có: run, device, assignment/step, session epoch, thứ tự, thời gian và lỗi.
+Các lần đọc hierarchy giữ XML/hash; ảnh là frame đang có trong stream, chỉ phục vụ
+chẩn đoán vì độ mới chưa được xác minh. ACK của tap không thay hậu điều kiện nghiệp vụ.
+Phiên đối soát publication không mở stream bằng chứng sẽ chụp một ảnh có deadline
+5 giây trước khi nhả owner; ảnh này cũng chỉ phục vụ chẩn đoán, không thay proof bài.
+Một worker ghi và hàng đợi 64 bản ghi tách I/O đĩa khỏi deadline điều khiển; lỗi
+ghi hoặc đầy hàng đợi làm export báo trace chưa đủ. Export và shutdown có flush.
+`operation_trace_export` kiểm scope thiết bị và hash, lưu bundle ở
+`artifacts/trace-exports` để không bị reconcile artifact Flow cách ly khi restart.
+`cargo run --locked -p riviu-core --example trace_replay -- TRACE_JSON` chỉ đọc
+timeline/XML bằng fake driver; không kết nối điện thoại hay phát lại public effect.
+
+Watchdog view giữ admission trong cả lượt kiểm và các task start/restart đã join.
+Shutdown ngừng cấp lượt mới trước khi drain và dừng view. Nếu DELETE session
+Android mất ACK, cleanup kiểm PID của đúng hai package agent trên từng serial
+đang sở hữu sau teardown; không coi lỗi transport là bằng chứng tiến trình đã vắng.
+
+Windows sidecar pin cryptography 50.0.1, tornado 6.5.10. macOS giữ cryptography
+48.0.0 vì đường wheel Intel; kết quả audit Windows không chứng nhận macOS.
+`scripts/check_dependency_drift.py --toolchains --python-runtime` kiểm pin thực tế.
+`scripts/dev_compile_cache.ps1 configure` bật sccache nếu đã cài, giới hạn 8 GB
+trong shell hiện tại và giữ nguyên tối ưu release.
+
 Google Sheets trực tiếp dùng OAuth Desktop PKCE S256 và callback loopback có
 state, timeout và hủy; đăng nhập mở trình duyệt ngoài. Scope là `openid`, `email`
 và `https://www.googleapis.com/auth/spreadsheets`; kết nối bằng link, không mở
@@ -97,6 +212,11 @@ phiên: TikTok có thể cấp ID trước nút Đăng; mốc dưới lấy từ
 chỉ dùng `submittedAt`, không tự nới khoảng thời gian. Caption, tác giả và content ID
 phải cùng khớp; lỗi mạng giữ trạng thái chờ xác minh. Riêng timestamp suy ra từ ID
 không đủ chứng minh xuất bản.
+Cửa sổ đọc clipboard và thông báo xử lý bắt đầu sau ACK của thao tác Copy;
+độ trễ tìm nút/dispatch không được ăn mất thời gian quan sát. Global 45.7.3/en
+ở 1080×2220 có vùng OCR thông báo riêng để tránh ghép chữ thanh tìm kiếm.
+Thông báo phải mới so với ảnh trước, đúng phiên và hash; chỉ cho kết quả chờ
+xử lý, không thay canonical URL, receipt hay quyền đăng lại.
 
 `Database::publish_device_guard` phân biệt upload cần bảo vệ và khoản thiếu link của
 bài cũ. Chỉ bỏ giữ máy khi receipt có `state=posted`/`verdict=Posted`, xác minh đã
@@ -576,6 +696,12 @@ DB canary vào production hay lấy credential production cho canary.
 
 Binaries chẩn đoán cần feature `diagnostics`; checker cần `deployment-check` và được
 build/stage riêng trước bundle. Bundle mặc định không mang các exe cũ dưới src/bin.
+Windows CI gọi `tauri build --no-bundle` một lần, rồi `bundle_windows_installers.py`
+đóng gói NSIS/MSI bằng cùng executable và chỉ thay overlay resource WiX. Script kiểm
+dấu bundle duy nhất, phục hồi đúng ba byte trước mỗi loại và từ chối nếu code bị đổi;
+điều này giữ đúng loại updater sau lỗi/gián đoạn bundler. Không build Rust lần hai. Overlay
+`tauri.fast-bundle.conf.json` là lựa chọn nén zlib cho bộ cài local, không bật mặc định
+trong release CI. Không dùng kết quả warm-cache để tuyên bố thời gian clean build.
 Mọi verifier kiểm hash/version app/checker, report mới, PATH hệ thống và temp cwd.
 Java staged launcher dùng manifest UTF-8 đã hash-pin để chạy đường dẫn có dấu;
 Windows tối thiểu10 build18362. NSIS hook kiểm trước cài. Đối số `/D` của NSIS phải
@@ -866,3 +992,45 @@ rồi giải lại nút trước intent. Không giữ tọa độ từ màn bàn
 Video sau chạm ô hồ sơ có thể trả cây profile cũ một lần; chỉ Copy khi cây viewer
 Video/caption/Share đã hiện. Global…more là prefix cho quyền đọc link, không là
 proof caption; metadata công khai vẫn cần toàn văn, tác giả, content ID và thời gian.
+# Tích hợp TypeSafe
+
+`core::typesafe::Client` gọi HTTP API System One với một Choice về bằng chứng chữ.
+Endpoint cố định, không redirect, tối đa bốn request đồng thời và deadline tổng 25
+giây gồm chờ admission. Kiểm schema, tập lựa chọn, xác suất và tổng phân phối trước
+khi sử dụng. Không ghi nội dung yêu cầu hoặc credential vào tracing; ghi verdict,
+confidence, token, model và thời gian. Không tự retry request trong đường bình luận.
+
+`typesafe_get_settings`, `typesafe_update_settings` dùng revision/CAS riêng;
+`typesafe_update_credential` chỉ ghi SecretStore, không có fallback SQLite.
+`typesafe_check_comment` là thao tác API rõ ràng, không auto-refetch. DTO sinh bằng
+ts-rs trong `generated-ipc.ts`. Client đính vào NurtureSettings ở backend có
+`serde(skip)` và Debug đã che khóa. Session snapshot không đổi vì settings toàn cục
+thay giữa lượt. Gate TypeSafe bổ sung cho `grounded_verify`; không thay vision,
+account/target proof, lease, intent hoặc cancellation. Phiên chỉ có chữ cần lựa chọn
+supported với confidence ≥ 0,80 và xác suất supported ≥ 0,85; cần đo lại trên dữ liệu
+tiếng Việt khi đổi model. Kết quả insufficient của phần chữ không phủ nhận chi tiết
+có thể được ảnh chứng minh, nên nhánh vision vẫn dùng verifier ảnh hiện có.
+
+Bản dev tối ưu riêng `zune-jpeg` ở mức 3 để kiểm ảnh trong trace theo kịp các máy
+chạy đồng thời; code ứng dụng vẫn giữ debug. `trace_bench INPUT_IMAGE OUTPUT_DIR`
+đo giải mã và ghi mười quan sát qua artifact store thật. Không bỏ giải mã, hash,
+atomic publish, fsync hoặc tăng hàng đợi để che trace bị thiếu.
+
+Tìm kiếm Android giữ mapping card/grid/author theo build Global 45.4.3, 45.7.3,
+46.0.41, 46.1.3 và 46.4.3; chỉ mở card sau khi đọc lại đúng từ khóa và tab Videos.
+Picker album Trill 38.3.2/en cuộn trong RecyclerView h27 khi album import chưa ở
+viewport; tên album vẫn phải khớp duy nhất và ổn định. Nút Gửi trên đường hierarchy
+được đọc từ một snapshot mới, gồm vị trí, định danh và bit enabled; thiếu bit hoặc
+nhiều node cùng khớp thì từ chối trước effect.
+
+Global 45.7.3/46.0.41 có thể hỏi mở Settings để cấp vị trí trong lúc chuyển tab
+tìm kiếm. Chỉ nhận đúng tiêu đề, lời giải thích và nút Cancel trong cùng panel;
+không mở Settings hoặc cấp quyền. Snapshot tạm thiếu ô tìm kiếm phải chờ trong
+deadline, chưa được chọn card; ô hiện lại phải vẫn khớp từ khóa nguyên vẹn.
+
+Save Global 45.4.3/45.7.3/46.0.41/46.1.3/46.4.3 dùng icon selected trong đúng
+chuỗi parent được đo. Follow đọc header/handle và nút quan hệ riêng theo build;
+counter Following không chứng minh quan hệ. Sau intent chưa đọc được kết quả thì
+giữ uncertain, chỉ mở profile chuẩn để đối soát, không bấm Follow lại. Picker tag
+45.4.3/45.7.3/46.0.41/46.1.3/46.4.3 nối username chính xác với nickname trong cùng
+hàng trước chọn; toàn bộ câu sau chọn vẫn phải khớp phép thay token đã chứng minh.

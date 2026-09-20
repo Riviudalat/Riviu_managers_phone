@@ -456,12 +456,15 @@ impl AndroidDriver {
         }
 
         if let Some(m) = mac {
-            let chain = format!(
-                "ip link set wlan0 down; ip link set wlan0 address {m}; ip link set wlan0 up"
-            );
+            let chain = mac_change_command(m);
             match self.as_privileged(serial, &chain).await {
                 Some(wrapped) => {
-                    if self.adb.shell(serial, &wrapped).await.is_ok() {
+                    let changed = self.adb.shell(serial, &wrapped).await.is_ok();
+                    let observed = self
+                        .adb
+                        .shell(serial, "cat /sys/class/net/wlan0/address")
+                        .await;
+                    if changed && observed.is_ok_and(|value| value.trim().eq_ignore_ascii_case(m)) {
                         done.push("wifi_mac".into());
                     } else {
                         failed.push("wifi_mac".into());
@@ -1079,6 +1082,12 @@ impl AndroidDriver {
             .await?;
         Ok(())
     }
+}
+
+fn mac_change_command(mac: &str) -> String {
+    // Always bring the interface back up, while retaining the failing step's
+    // exit status. The caller additionally checks the address readback.
+    format!("ip link set wlan0 down; down_status=$?; change_status=$down_status; if [ \"$down_status\" -eq 0 ]; then ip link set wlan0 address {mac}; change_status=$?; fi; ip link set wlan0 up; up_status=$?; if [ \"$change_status\" -ne 0 ]; then exit \"$change_status\"; fi; exit \"$up_status\"")
 }
 
 /// Read two root answers, where `None` is "the phone did not answer that question".

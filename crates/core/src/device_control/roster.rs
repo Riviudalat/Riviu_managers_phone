@@ -5,6 +5,59 @@
 use super::*;
 
 impl DeviceControlPlane {
+    pub async fn verify_automation_readiness(&self, udid: &str) -> Result<(), DeviceControlError> {
+        self.driver
+            .verify_automation_readiness(udid)
+            .await
+            .map_err(|error| driver_error(udid, "automationReadiness", error))
+    }
+
+    /// The same non-mutating capability read model used by UI and native starts.
+    pub async fn tiktok_action_capabilities(
+        &self,
+        udid: &str,
+    ) -> crate::ipc_contract::DeviceActionCapabilities {
+        use crate::ipc_contract::CapabilityEvidenceState;
+        let (package, version, locale, mut refusal) = match self.tiktok_build(udid).await {
+            Ok((package, version, locale)) => (package, version, locale, None),
+            Err(error) => (
+                String::new(),
+                String::new(),
+                String::new(),
+                Some(error.to_string()),
+            ),
+        };
+        if let Some(owner) = self.current_work_owner(udid) {
+            refusal = Some(format!("Thiết bị đang được {owner:?} giữ"));
+        } else if refusal.is_none() {
+            if let Err(error) = self.verify_automation_readiness(udid).await {
+                refusal = Some(error.to_string());
+            }
+        }
+        let mut report = crate::app_automation::action_capabilities(
+            udid,
+            &package,
+            &version,
+            &locale,
+            refusal.is_none(),
+        );
+        if let Some(reason) = refusal {
+            for action in &mut report.actions {
+                action.state = CapabilityEvidenceState::DeviceNotReady;
+                action.reason = reason.clone();
+            }
+        }
+        report
+    }
+
+    pub async fn preflight_tiktok_actions(
+        &self,
+        udid: &str,
+        actions: &[&str],
+    ) -> anyhow::Result<()> {
+        let report = self.tiktok_action_capabilities(udid).await;
+        crate::app_automation::require_actions(&report, actions)
+    }
     pub fn agent_settings(&self) -> AgentSettings {
         self.driver.agent_settings()
     }

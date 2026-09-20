@@ -293,7 +293,19 @@ const MIGRATIONS: &[Migration] = &[
         apply: apply_migration_43,
         rebuilds_tables: false,
     },
+    Migration {
+        version: 44,
+        name: "sheet-due-index-and-delivery-receipts",
+        apply: apply_migration_44,
+        rebuilds_tables: false,
+    },
 ];
+
+fn apply_migration_44(tx: &Transaction<'_>) -> anyhow::Result<()> {
+    super::publish_sheet_delivery::seed_states(tx)?;
+    tx.execute_batch(include_str!("sheet_delivery_v3.sql"))?;
+    Ok(())
+}
 
 fn apply_migration_43(tx: &Transaction<'_>) -> anyhow::Result<()> {
     tx.execute_batch("CREATE TABLE app_completion_queue (

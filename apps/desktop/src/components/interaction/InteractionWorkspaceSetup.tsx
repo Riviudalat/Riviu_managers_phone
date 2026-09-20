@@ -1,5 +1,5 @@
 import { useEffect, useState, type ComponentProps, type ReactNode } from "react";
-import { Bookmark, Check, Heart, Link2, MessageCircle, Search } from "lucide-react";
+import { Bookmark, Check, Heart, Link2, MessageCircle, Search, Users } from "lucide-react";
 import { listGroups } from "../../api";
 import { effectiveMessageCount, manualCommentsOf, wholeNumber, type ThreadKind } from "../../interactionPlan";
 import { linkErrorVi } from "../../interactionErrors";
@@ -16,8 +16,8 @@ import "../../styles/interaction-workspace.css";
 
 type Setup = ComponentProps<typeof InteractionSetupTab>;
 const STEPS = ["Chọn bài viết", "Hành động & máy", "Kiểm tra & chạy"];
-const ACTIONS = [["like", "Tim"], ["save", "Lưu"], ["comment", "Bình luận"]] as const;
-const ACTION_ICONS = { like: Heart, save: Bookmark, comment: MessageCircle };
+const ACTIONS = [["like", "Tim"], ["save", "Lưu"], ["follow", "Theo dõi"], ["comment", "Bình luận"]] as const;
+const ACTION_ICONS = { like: Heart, save: Bookmark, follow: Users, comment: MessageCircle };
 
 /** Presentation only: parsing, planning, persistence and dispatch stay in the shell. */
 export function InteractionWorkspaceSetup({ setup: p, profiles, scopeControl, effectiveActors, busy, onRun, onReparse }: {
@@ -105,7 +105,7 @@ export function InteractionWorkspaceSetup({ setup: p, profiles, scopeControl, ef
           <div className="iw-heading"><div><span className="automation-section-kicker">Cấu hình</span><h3>Hành động thực hiện</h3></div><StatusChip>{targets.length} bài</StatusChip></div>
           <div className="iw-action-choices" role="group" aria-label="Hành động">
             {ACTIONS.map(([key, label]) => { const Icon = ACTION_ICONS[key]; return <label key={key} className={draft.actions[key] ? "selected" : ""}>
-              <input type="checkbox" aria-label={label} checked={draft.actions[key]} disabled={draft.actions[key] && Object.values(draft.actions).filter(Boolean).length === 1}
+              <input type="checkbox" aria-label={label} checked={draft.actions[key] ?? false} disabled={draft.actions[key] && Object.values(draft.actions).filter(Boolean).length === 1}
                 onChange={(event) => { const checked = event.target.checked; patch("actions", (previous) => ({ ...previous, [key]: checked })); }} /><Icon size={17} aria-hidden="true"/>{label}
             </label>; })}
           </div>

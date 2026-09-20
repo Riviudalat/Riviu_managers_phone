@@ -1,0 +1,72 @@
+<hierarchy><android.widget.LinearLayout package="com.zhiliaoapp.musically" class="android.widget.LinearLayout" text="" resource-id="com.zhiliaoapp.musically:id/rok" clickable="false" enabled="true" bounds="[0,100][1079,943]" displayed="true">
+                              <android.widget.FrameLayout package="com.zhiliaoapp.musically" class="android.widget.FrameLayout" text="" clickable="false" enabled="true" bounds="[371,100][707,436]" displayed="true">
+                                <android.widget.FrameLayout package="com.zhiliaoapp.musically" class="android.widget.FrameLayout" text="" resource-id="com.zhiliaoapp.musically:id/bc0" clickable="true" enabled="true" bounds="[371,100][707,436]" displayed="true">
+                                  <android.widget.RelativeLayout package="com.zhiliaoapp.musically" class="android.widget.RelativeLayout" text="" resource-id="com.zhiliaoapp.musically:id/bd0" clickable="false" enabled="true" bounds="[371,142][707,436]" displayed="true">
+                                    <android.widget.ImageView package="com.zhiliaoapp.musically" class="android.widget.ImageView" text="" clickable="false" enabled="true" bounds="[413,163][665,415]" displayed="true" />
+                                  </android.widget.RelativeLayout>
+                                </android.widget.FrameLayout>
+                              </android.widget.FrameLayout>
+                              <android.widget.LinearLayout package="com.zhiliaoapp.musically" class="android.widget.LinearLayout" text="" clickable="false" enabled="true" bounds="[0,436][1079,668]" displayed="true">
+                                <android.widget.LinearLayout package="com.zhiliaoapp.musically" class="android.widget.LinearLayout" text="" clickable="false" enabled="true" bounds="[0,436][1079,547]" displayed="true">
+                                  <android.widget.RelativeLayout package="com.zhiliaoapp.musically" class="android.widget.RelativeLayout" text="" clickable="false" enabled="true" bounds="[79,436][1000,494]" displayed="true">
+                                    <android.widget.LinearLayout package="com.zhiliaoapp.musically" class="android.widget.LinearLayout" text="" resource-id="com.zhiliaoapp.musically:id/rq6" clickable="false" enabled="true" bounds="[251,436][827,494]" displayed="true">
+                                      <android.widget.Button package="com.zhiliaoapp.musically" class="android.widget.Button" text="" clickable="true" enabled="true" bounds="[251,436][827,494]" displayed="true" />
+                                    </android.widget.LinearLayout>
+                                  </android.widget.RelativeLayout>
+                                  <android.widget.LinearLayout package="com.zhiliaoapp.musically" class="android.widget.LinearLayout" text="" clickable="false" enabled="true" bounds="[403,494][676,536]" displayed="true">
+                                    <android.widget.Button package="com.zhiliaoapp.musically" class="android.widget.Button" text="@ghin.lt.sng.sng" resource-id="com.zhiliaoapp.musically:id/rq1" clickable="true" enabled="true" bounds="[403,494][676,533]" displayed="true" />
+                                  </android.widget.LinearLayout>
+                                </android.widget.LinearLayout>
+                                <android.widget.LinearLayout package="com.zhiliaoapp.musically" class="android.widget.LinearLayout" text="" clickable="false" enabled="true" bounds="[42,547][1037,668]" displayed="true">
+                                  <android.widget.LinearLayout package="com.zhiliaoapp.musically" class="android.widget.LinearLayout" text="" clickable="true" enabled="true" bounds="[144,560][407,655]" displayed="true">
+                                    <android.widget.TextView package="com.zhiliaoapp.musically" class="android.widget.TextView" text="" resource-id="com.zhiliaoapp.musically:id/ros" clickable="false" enabled="true" bounds="[144,560][407,618]" displayed="true" />
+                                    <android.widget.TextView package="com.zhiliaoapp.musically" class="android.widget.TextView" text="" resource-id="com.zhiliaoapp.musically:id/ror" clickable="false" enabled="true" bounds="[144,613][407,655]" displayed="true" />
+                                  </android.widget.LinearLayout>
+                                  <android.view.View package="com.zhiliaoapp.musically" class="android.view.View" text="" clickable="false" enabled="true" bounds="[407,586][408,628]" displayed="true" />
+                                  <android.view.ViewGroup package="com.zhiliaoapp.musically" class="android.view.ViewGroup" text="" clickable="true" enabled="true" bounds="[408,560][671,655]" displayed="true">
+                                    <android.widget.TextView package="com.zhiliaoapp.musically" class="android.widget.TextView" text="" resource-id="com.zhiliaoapp.musically:id/ros" clickable="false" enabled="true" bounds="[500,560][579,618]" displayed="true" />
+                                    <android.widget.TextView package="com.zhiliaoapp.musically" class="android.widget.TextView" text="" resource-id="com.zhiliaoapp.musically:id/ror" clickable="false" enabled="true" bounds="[465,618][615,655]" displayed="true" />
+                                  </android.view.ViewGroup>
+                                  <android.view.View package="com.zhiliaoapp.musically" class="android.view.View" text="" clickable="false" enabled="true" bounds="[671,586][672,628]" displayed="true" />
+                                  <android.widget.LinearLayout package="com.zhiliaoapp.musically" class="android.widget.LinearLayout" text="" clickable="true" enabled="true" bounds="[672,560][935,655]" displayed="true">
+                                    <android.widget.TextView package="com.zhiliaoapp.musically" class="android.widget.TextView" text="" resource-id="com.zhiliaoapp.musically:id/ros" clickable="false" enabled="true" bounds="[672,560][935,618]" displayed="true" />
+                                    <android.widget.TextView package="com.zhiliaoapp.musically" class="android.widget.TextView" text="" resource-id="com.zhiliaoapp.musically:id/ror" clickable="false" enabled="true" bounds="[672,613][935,655]" displayed="true" />
+                                  </android.widget.LinearLayout>
+                                </android.widget.LinearLayout>
+                              </android.widget.LinearLayout>
+                              <android.widget.LinearLayout package="com.zhiliaoapp.musically" class="android.widget.LinearLayout" text="" clickable="false" enabled="true" bounds="[251,668][828,810]" displayed="true">
+                                <android.widget.LinearLayout package="com.zhiliaoapp.musically" class="android.widget.LinearLayout" text="" clickable="true" enabled="true" bounds="[251,681][576,797]" displayed="true">
+                                  <android.widget.LinearLayout package="com.zhiliaoapp.musically" class="android.widget.LinearLayout" text="" clickable="false" enabled="true" bounds="[256,681][571,797]" displayed="true">
+                                    <android.widget.LinearLayout package="com.zhiliaoapp.musically" class="android.widget.LinearLayout" text="" resource-id="com.zhiliaoapp.musically:id/f4g" clickable="false" enabled="true" bounds="[256,681][571,797]" displayed="true">
+                                      <android.widget.LinearLayout package="com.zhiliaoapp.musically" class="android.widget.LinearLayout" text="" resource-id="com.zhiliaoapp.musically:id/f4o" clickable="false" enabled="true" bounds="[309,681][529,797]" displayed="true">
+                                        <android.widget.TextView package="com.zhiliaoapp.musically" class="android.widget.TextView" text=" Message" resource-id="com.zhiliaoapp.musically:id/f4m" clickable="false" enabled="true" bounds="[309,681][529,797]" displayed="true" />
+                                      </android.widget.LinearLayout>
+                                    </android.widget.LinearLayout>
+                                  </android.widget.LinearLayout>
+                                </android.widget.LinearLayout>
+                                <android.widget.LinearLayout package="com.zhiliaoapp.musically" class="android.widget.LinearLayout" text="" clickable="true" enabled="true" bounds="[576,681][702,797]" displayed="true">
+                                  <android.widget.LinearLayout package="com.zhiliaoapp.musically" class="android.widget.LinearLayout" text="" clickable="false" enabled="true" bounds="[581,681][697,797]" displayed="true">
+                                    <android.widget.LinearLayout package="com.zhiliaoapp.musically" class="android.widget.LinearLayout" text="" resource-id="com.zhiliaoapp.musically:id/f4g" clickable="false" enabled="true" bounds="[581,681][697,797]" displayed="true">
+                                      <android.widget.RelativeLayout package="com.zhiliaoapp.musically" class="android.widget.RelativeLayout" text="" resource-id="com.zhiliaoapp.musically:id/f4l" clickable="false" enabled="true" bounds="[581,681][697,797]" displayed="true">
+                                        <android.widget.ImageView package="com.zhiliaoapp.musically" class="android.widget.ImageView" text="" resource-id="com.zhiliaoapp.musically:id/f4i" clickable="false" enabled="true" bounds="[581,681][697,797]" displayed="true" />
+                                      </android.widget.RelativeLayout>
+                                    </android.widget.LinearLayout>
+                                  </android.widget.LinearLayout>
+                                </android.widget.LinearLayout>
+                                <android.widget.LinearLayout package="com.zhiliaoapp.musically" class="android.widget.LinearLayout" text="" clickable="true" enabled="true" bounds="[702,681][828,797]" displayed="true">
+                                  <android.widget.LinearLayout package="com.zhiliaoapp.musically" class="android.widget.LinearLayout" text="" clickable="false" enabled="true" bounds="[707,681][823,797]" displayed="true">
+                                    <android.widget.LinearLayout package="com.zhiliaoapp.musically" class="android.widget.LinearLayout" text="" resource-id="com.zhiliaoapp.musically:id/f4g" clickable="false" enabled="true" bounds="[707,681][823,797]" displayed="true">
+                                      <android.widget.RelativeLayout package="com.zhiliaoapp.musically" class="android.widget.RelativeLayout" text="" resource-id="com.zhiliaoapp.musically:id/f4l" clickable="false" enabled="true" bounds="[707,681][823,797]" displayed="true">
+                                        <android.widget.ImageView package="com.zhiliaoapp.musically" class="android.widget.ImageView" text="" resource-id="com.zhiliaoapp.musically:id/f4i" clickable="true" enabled="true" bounds="[707,681][823,797]" displayed="true" />
+                                      </android.widget.RelativeLayout>
+                                    </android.widget.LinearLayout>
+                                  </android.widget.LinearLayout>
+                                </android.widget.LinearLayout>
+                              </android.widget.LinearLayout>
+                              <android.widget.LinearLayout package="com.zhiliaoapp.musically" class="android.widget.LinearLayout" text="" clickable="false" enabled="true" bounds="[0,810][1079,932]" displayed="true">
+                                <android.widget.FrameLayout package="com.zhiliaoapp.musically" class="android.widget.FrameLayout" text="" clickable="true" enabled="true" bounds="[105,821][974,921]" displayed="true">
+                                  <android.widget.Button package="com.zhiliaoapp.musically" class="android.widget.Button" text="" clickable="true" enabled="true" bounds="[105,824][974,918]" displayed="true" />
+                                </android.widget.FrameLayout>
+                              </android.widget.LinearLayout>
+                            </android.widget.LinearLayout>
+                            </hierarchy>

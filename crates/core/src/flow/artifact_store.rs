@@ -192,6 +192,67 @@ impl FlowArtifactStore {
         Ok(artifact.relative_path.clone())
     }
 
+    /// Structured trace shares the managed path, staging, hash and atomic publish
+    /// checks used by screenshots. It contains observations, never driver commands.
+    pub fn prepare_trace(
+        &self,
+        run_id: Uuid,
+        device_run_id: Uuid,
+        attempt_id: Uuid,
+        value: &serde_json::Value,
+    ) -> anyhow::Result<PreparedArtifact> {
+        let bytes = serde_json::to_vec(value)?;
+        self.prepare_document(run_id, device_run_id, attempt_id, "json", &bytes)
+    }
+
+    pub fn prepare_hierarchy(
+        &self,
+        run_id: Uuid,
+        device_run_id: Uuid,
+        attempt_id: Uuid,
+        xml: &str,
+    ) -> anyhow::Result<PreparedArtifact> {
+        crate::ui_automation::tree::Tree::parse(crate::HierarchySourceSnapshot {
+            generation: 1,
+            xml: xml.to_owned(),
+        })?;
+        self.prepare_document(run_id, device_run_id, attempt_id, "xml", xml.as_bytes())
+    }
+
+    fn prepare_document(
+        &self,
+        run_id: Uuid,
+        device_run_id: Uuid,
+        attempt_id: Uuid,
+        kind: &str,
+        bytes: &[u8],
+    ) -> anyhow::Result<PreparedArtifact> {
+        ensure!(
+            bytes.len() <= MAX_READ_ARTIFACT_BYTES as usize,
+            "Trace too large"
+        );
+        let id = Uuid::new_v4();
+        let parent = self.ensure_artifact_directory_chain(&[run_id, device_run_id, attempt_id])?;
+        let final_path = parent.join(format!("{id}.{kind}"));
+        let relative_path = final_path.strip_prefix(&self.root)?.to_path_buf();
+        let temp_path = self.root.join(".staging").join(format!("{id}.tmp"));
+        let mut file = OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&temp_path)?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        Ok(PreparedArtifact {
+            id,
+            relative_path,
+            kind: kind.into(),
+            size: bytes.len() as u64,
+            sha256: sha256_bytes(bytes),
+            temp_path,
+            final_path,
+        })
+    }
+
     pub fn rollback_file(&self, artifact: &PreparedArtifact) -> anyhow::Result<()> {
         self.validate_prepared(artifact)?;
         self.remove_managed_file_if_present(&artifact.final_path)?;
@@ -684,7 +745,11 @@ fn validate_generated_relative_path(
         Uuid::parse_str(stem)? == artifact_id,
         "artifact file ID mismatch"
     );
-    let (_, expected_extension) = expected_image_format(kind)?;
+    let expected_extension = if matches!(kind, "json" | "xml") {
+        kind
+    } else {
+        expected_image_format(kind)?.1
+    };
     ensure!(
         extension == expected_extension,
         "artifact extension mismatch"
@@ -803,6 +868,36 @@ mod tests {
     /// a saved frame, so reading it back has to re-establish both facts the
     /// caller cannot check: that the file is still inside this store, and that
     /// it is still the file that was recorded.
+    #[test]
+    fn structured_trace_uses_atomic_store_and_detects_tampering() {
+        let root = std::env::temp_dir().join(format!("trace-{}", Uuid::new_v4()));
+        let store = FlowArtifactStore::new(&root).unwrap();
+        let record = store
+            .prepare_trace(
+                Uuid::new_v4(),
+                Uuid::new_v4(),
+                Uuid::new_v4(),
+                &serde_json::json!({"deviceEffects":0,"steps":[]}),
+            )
+            .unwrap();
+        let published = store.publish_file(&record).unwrap();
+        assert_eq!(
+            file_identity(&root.join(&published)).unwrap().1,
+            record.sha256
+        );
+        let pending = store
+            .prepare_trace(
+                Uuid::new_v4(),
+                Uuid::new_v4(),
+                Uuid::new_v4(),
+                &serde_json::json!({"deviceEffects":0}),
+            )
+            .unwrap();
+        std::fs::write(&pending.temp_path, b"changed").unwrap();
+        assert!(store.publish_file(&pending).is_err());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn a_published_artifact_reads_back_only_while_it_still_matches_its_record() {
         let root = temp_artifact_root();

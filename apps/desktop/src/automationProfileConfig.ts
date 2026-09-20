@@ -85,7 +85,8 @@ export function interactionDraftFromProfile(config: JsonValue, actors: string[])
   }
   const actions = request.actions ?? { like: request.likeTarget === true, comment: true, save: false };
   if (!actions || typeof actions !== "object" || Array.isArray(actions)
-    || typeof actions.like !== "boolean" || typeof actions.comment !== "boolean" || typeof actions.save !== "boolean") {
+    || typeof actions.like !== "boolean" || typeof actions.comment !== "boolean" || typeof actions.save !== "boolean"
+    || (actions.follow !== undefined && typeof actions.follow !== "boolean")) {
     throw new Error("Hồ sơ Tương tác thiếu lựa chọn hành động.");
   }
   const manual = Array.isArray(request.manualComments) ? request.manualComments.filter((item): item is string => typeof item === "string") : [];
@@ -93,7 +94,7 @@ export function interactionDraftFromProfile(config: JsonValue, actors: string[])
     ...DEFAULT_DRAFT,
     rawLinks: request.targets.map((target) => (target as { normalizedUrl: string }).normalizedUrl).join("\n"),
     actors,
-    actions: { like: actions.like, comment: actions.comment, save: actions.save },
+    actions: { like: actions.like, comment: actions.comment, save: actions.save, ...(typeof actions.follow === "boolean" ? {follow:actions.follow} : {}) },
     messageCount: typeof request.messageCount === "number" ? request.messageCount : null,
     maxWords: typeof request.maxWords === "number" ? request.maxWords : DEFAULT_DRAFT.maxWords,
     instruction: typeof request.instruction === "string" ? request.instruction : "",

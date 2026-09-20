@@ -50,6 +50,7 @@ pub enum DirectSheetsErrorKind {
     Conflict,
     Invalid,
     Busy,
+    Pending,
     SharedUpgradeRequired,
 }
 
@@ -68,6 +69,7 @@ impl DirectSheetsError {
                 | DirectSheetsErrorKind::Server
                 | DirectSheetsErrorKind::Transport
                 | DirectSheetsErrorKind::Busy
+                | DirectSheetsErrorKind::Pending
         )
     }
     fn invalid(message: impl Into<String>) -> Self {
@@ -129,7 +131,7 @@ pub struct DirectTargetCheck {
     pub writable: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(ts_rs::TS, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DeliveryReceipt {
     pub publication_id: String,
@@ -218,6 +220,37 @@ pub struct DirectSheetsClient {
 }
 
 impl DirectSheetsClient {
+    /// Read the exact saved receipt's row through OAuth. Never mutates the Sheet.
+    pub async fn readback_receipt(
+        &self,
+        target: &SheetDeliveryTarget,
+        expected: &DeliveryReceipt,
+    ) -> Result<DeliveryReceipt> {
+        let meta = self
+            .metadata(&target.spreadsheet_id, target.sheet_gid)
+            .await?;
+        if meta.owner.as_ref().is_none_or(|o| {
+            o.schema_version != 2
+                || o.state != "ready"
+                || o.reporting_epoch != expected.reporting_epoch
+        }) || expected.row < 2
+            || expected.row > meta.row_count
+        {
+            return Err(DirectSheetsError::conflict(
+                "Receipt owner, epoch or row changed",
+            ));
+        }
+        let layout = Layout::from_header(&meta.header)?;
+        let row = self
+            .rows(&meta, expected.row - 1, 1, layout.width as u32)
+            .await?
+            .remove(0);
+        let payload = json!({"rowKind":"canonical","publicationId":expected.publication_id,
+            "deliveryRevision":expected.revision,"spreadsheetId":target.spreadsheet_id,"sheetGid":target.sheet_gid,
+            "reportingEpoch":expected.reporting_epoch,"postUrl":expected.post_url});
+        planner::receipt(&row, &payload, expected.duplicate)
+    }
+
     pub fn new(access_token: impl Into<String>) -> Result<Self> {
         let token = access_token.into();
         if token.is_empty() || token.len() > 8192 || token.chars().any(char::is_control) {
@@ -264,7 +297,25 @@ impl DirectSheetsClient {
         if self.test_origin.is_none() {
             pace_requests(&REQUEST_START).await;
         }
-        let _permit = crate::publish_sheet::SHEET_HTTP_SLOTS
+        #[cfg(test)]
+        let fixture_slots = self.test_origin.as_ref().map(|origin| {
+            use std::sync::{Arc, LazyLock};
+            static SLOTS: LazyLock<
+                parking_lot::Mutex<std::collections::HashMap<String, Arc<tokio::sync::Semaphore>>>,
+            > = LazyLock::new(Default::default);
+            SLOTS
+                .lock()
+                .entry(origin.clone())
+                .or_insert_with(|| Arc::new(tokio::sync::Semaphore::new(2)))
+                .clone()
+        });
+        #[cfg(test)]
+        let slots = fixture_slots
+            .as_deref()
+            .unwrap_or(&crate::publish_sheet::SHEET_HTTP_SLOTS);
+        #[cfg(not(test))]
+        let slots = &crate::publish_sheet::SHEET_HTTP_SLOTS;
+        let _permit = slots
             .acquire()
             .await
             .map_err(|_| DirectSheetsError::transport())?;

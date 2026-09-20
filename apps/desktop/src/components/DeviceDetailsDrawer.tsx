@@ -1,4 +1,8 @@
 import { X } from "lucide-react";
+import { useState } from "react";
+import { deviceActionCapabilities } from "../api";
+import { describeError } from "../describeError";
+import type { DeviceActionCapabilities } from "../generated-ipc";
 import { useModalFocus } from "./useModalFocus";
 import { StatusChip } from "./WorkspacePrimitives";
 
@@ -20,6 +24,17 @@ export function DeviceDetailsDrawer({
   onClose: () => void;
 }) {
   const dialogRef = useModalFocus<HTMLElement>(onClose);
+  const [capabilities, setCapabilities] = useState<DeviceActionCapabilities | null>(null);
+  const [capabilityError, setCapabilityError] = useState<string | null>(null);
+  const [checking, setChecking] = useState(false);
+  const readCapabilities = async () => {
+    setChecking(true); setCapabilityError(null);
+    try { setCapabilities(await deviceActionCapabilities(device.udid)); }
+    catch (error) { setCapabilityError(describeError(error)); }
+    finally { setChecking(false); }
+  };
+  const stateLabels = { measured: "Đã đo", runtimeProofRequired: "Cần chứng minh trong phiên", unsupported: "Chưa hỗ trợ", deviceNotReady: "Máy chưa sẵn sàng" };
+  const actionLabels: Record<string, string> = { feed: "Lướt feed", search: "Tìm kiếm", photo: "Đăng ảnh", video: "Đăng video", sound: "Chọn nhạc", like: "Thích", save: "Lưu", follow: "Theo dõi tài khoản đích", feedFollow: "Theo dõi trong Nuôi", mentionReply: "Trả lời và tag" };
 
   const ownerLabel = ownerReadFailed
     ? "Chưa đọc được"
@@ -68,6 +83,17 @@ export function DeviceDetailsDrawer({
         <section className="device-detail-evidence" aria-label="Lỗi và bằng chứng gần nhất">
           <h3>Lỗi và bằng chứng gần nhất</h3>
           {device.lastError ? <pre>{device.lastError}</pre> : <p>Chưa ghi nhận lỗi.</p>}
+        </section>
+        <section className="device-detail-evidence" aria-label="Khả năng thiết bị">
+          <h3>Khả năng thiết bị</h3>
+          <button type="button" disabled={checking} onClick={() => void readCapabilities()}>{checking ? "Đang đọc…" : "Kiểm tra khả năng"}</button>
+          {capabilityError && <p role="alert">{capabilityError}</p>}
+          {capabilities?.udid === device.udid && <>
+            <p>{capabilities.package} · {capabilities.version} · {capabilities.locale}</p>
+            <dl className="device-detail-list">{capabilities.actions.map(action => <div key={action.action}>
+              <dt>{actionLabels[action.action] ?? action.action}</dt><dd>{stateLabels[action.state]}<small style={{ display: "block" }}>{action.reason}</small></dd>
+            </div>)}</dl>
+          </>}
         </section>
       </aside>
     </div>

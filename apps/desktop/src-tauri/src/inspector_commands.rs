@@ -42,6 +42,9 @@ pub struct InspectorSnapshot {
     pub height: f64,
     pub png_base64: String,
     pub tree_sha256: String,
+    /// Exact source for local adapter fixtures; hash refers to these bytes.
+    #[serde(default)]
+    pub hierarchy_xml: String,
     pub elements: Vec<InspectorElement>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -77,6 +80,7 @@ async fn capture(
     let package = session.active_app_bundle().await?;
     let source = session.hierarchy_source_snapshot().await?;
     let digest = format!("{:x}", Sha256::digest(source.xml.as_bytes()));
+    let hierarchy_xml = source.xml.clone();
     let tree = Tree::parse(source)?;
     let (width, height) = session.window_size().await?;
     let png = session.screenshot_png().await?;
@@ -145,6 +149,7 @@ async fn capture(
         height,
         png_base64: STANDARD.encode(png),
         tree_sha256: digest,
+        hierarchy_xml,
         elements,
     })
 }

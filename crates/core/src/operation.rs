@@ -120,7 +120,7 @@ pub struct OperationRunDetail {
 }
 
 /// A timestamp belongs to its source record, never to the time the monitor polled it.
-#[derive(Debug, Clone, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(ts_rs::TS, Debug, Clone, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OperationDeviceLogEntry {
     pub id: String,
@@ -252,6 +252,7 @@ pub fn project_job(job: &JobRecord) -> OperationRunDetail {
         JobStatus::Succeeded => OperationRunState::Succeeded,
         JobStatus::Failed => OperationRunState::Failed,
         JobStatus::Cancelled => OperationRunState::Cancelled,
+        JobStatus::Uncertain => OperationRunState::Uncertain,
     };
     let items = job
         .steps
@@ -266,6 +267,7 @@ pub fn project_job(job: &JobRecord) -> OperationRunDetail {
                 StepStatus::Succeeded => OperationRunState::Succeeded,
                 StepStatus::Failed => OperationRunState::Failed,
                 StepStatus::Skipped => OperationRunState::Skipped,
+                StepStatus::Uncertain => OperationRunState::Uncertain,
             },
             udid: None,
             error_code: step.error.clone(),

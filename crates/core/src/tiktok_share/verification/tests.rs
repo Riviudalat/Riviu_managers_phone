@@ -1,4 +1,35 @@
 use super::*;
+
+#[test]
+fn measured_profile_suggestions_hide_requires_exact_group_and_unique_control() {
+    let plan = PublishVerificationPlan::for_build(TRILL, "en", "38.3.2").unwrap();
+    let xml =
+        include_str!("../../../fixtures/tiktok-publish/profile-suggestions-trill-38.3.2.fixture");
+    let observed = tree(xml.into());
+    let button = observed
+        .profile_suggestions_hide(&plan)
+        .expect("measured collapse control");
+    assert_eq!(
+        (button.x, button.y, button.width, button.height),
+        (946.0, 1097.0, 86.0, 48.0)
+    );
+    for changed in [
+        xml.replace("Suggested accounts", "Contacts"),
+        xml.replace("text=\"Hide\"", "text=\"Find\""),
+        xml.replace(":id/oc5", ":id/other"),
+        xml.replace(":id/gg5", ":id/unrelated"),
+        xml.replace("displayed=\"true\"", "displayed=\"false\""),
+        xml.replace("clickable=\"true\"", "clickable=\"false\""),
+        xml.replace("</hierarchy>", "<node package=\"com.ss.android.ugc.trill\" resource-id=\"com.ss.android.ugc.trill:id/oc5\" text=\"Hide\" class=\"android.widget.Button\" enabled=\"true\" clickable=\"true\" bounds=\"[1,1][2,2]\"/></hierarchy>"),
+    ] {
+        assert!(tree(changed).profile_suggestions_hide(&plan).is_none());
+    }
+    assert!(observed
+        .profile_suggestions_hide(
+            &PublishVerificationPlan::for_build(PACKAGE, "en", "45.7.3").unwrap()
+        )
+        .is_none());
+}
 use parking_lot::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -79,6 +110,21 @@ fn facebook_permission_only_selects_the_measured_decline_button() {
     .is_none());
     assert!(
         decline_facebook_permission(&tree(xml.replace("Don’t allow", "Allow")), &plan).is_none()
+    );
+}
+
+#[test]
+fn contacts_prompt_enters_recovery_without_becoming_publication_proof() {
+    let plan = PublishVerificationPlan::for_build(TRILL, "en", "38.3.2").unwrap();
+    let xml =
+        include_str!("../../../fixtures/tiktok-publish/contacts-sync-trill-38.3.2-en.fixture");
+    assert_eq!(classify(&tree(xml.into()), &plan), Screen::Dialog);
+    assert_eq!(
+        classify(
+            &tree(xml.replace("syncing your phone contacts", "sharing your location")),
+            &plan
+        ),
+        Screen::Unknown
     );
 }
 

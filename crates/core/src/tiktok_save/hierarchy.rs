@@ -6,6 +6,25 @@ use std::collections::HashMap;
 
 const PACKAGE: &str = "com.ss.android.ugc.trill";
 
+fn global_ids(version: &str) -> Option<(&'static str, &'static str, &'static str, &'static str)> {
+    // Current fleet hierarchy captures, 19/09/2026. Unsaved was observed;
+    // every save still requires a fresh precondition and positive readback.
+    match version {
+        "45.4.3" => Some(("hft", "hfs", "hej", "hep")),
+        "45.7.3" => Some(("hly", "hlx", "hko", "hku")),
+        "46.0.41" => Some(("hqz", "hqy", "hpp", "hpv")),
+        "46.1.3" => Some(("hrt", "hrs", "hqj", "hqp")),
+        "46.4.3" => Some(("hxj", "hxi", "hw_", "hwf")),
+        _ => None,
+    }
+}
+
+pub(crate) fn global_supported(package: &str, version: &str, locale: &str) -> bool {
+    package == "com.zhiliaoapp.musically"
+        && locale.split(['-', '_']).next() == Some("en")
+        && global_ids(version).is_some()
+}
+
 #[derive(Default)]
 struct Node {
     attrs: HashMap<String, String>,
@@ -157,6 +176,10 @@ pub(crate) async fn read_bookmark_control(
     session: &dyn UiSession,
     labels: TikTokControls,
 ) -> anyhow::Result<Option<StatefulElementBox>> {
+    let version = labels.resource_version().unwrap_or_default();
+    if global_supported(labels.package(), version, labels.language()) {
+        return parse_global_control(&session.hierarchy_source_snapshot().await?.xml, version);
+    }
     if (
         labels.package(),
         labels.resource_version(),
@@ -179,9 +202,178 @@ pub(crate) async fn read_bookmark_control(
         }))
 }
 
+fn parse_global_control(xml: &str, version: &str) -> anyhow::Result<Option<StatefulElementBox>> {
+    let Some((button_id, host_id, icon_id, wrapper_id)) = global_ids(version) else {
+        return Ok(None);
+    };
+    use crate::ui_automation::tree::Tree;
+    let tree = Tree::parse(crate::HierarchySourceSnapshot {
+        generation: 1,
+        xml: xml.into(),
+    })?;
+    let package = "com.zhiliaoapp.musically";
+    let button_id = format!(":id/{button_id}");
+    let icon_id = format!(":id/{icon_id}");
+    let found = tree.matching(package, crate::ElementQuery::ResourceIdSuffix(&button_id));
+    let [button] = found.as_slice() else {
+        return Ok(None);
+    };
+    let node = &tree.nodes[*button];
+    if node.attr("class") != "android.widget.Button"
+        || node.attr("content-desc") != "Add or remove this video from Favorites."
+        || node.attr("enabled") != "true"
+    {
+        return Ok(None);
+    }
+    let Some(parent) = node.parent else {
+        return Ok(None);
+    };
+    let host = &tree.nodes[parent];
+    if host.attr("resource-id") != format!("{package}:id/{host_id}")
+        || host.attr("class") != "android.widget.FrameLayout"
+    {
+        return Ok(None);
+    }
+    let Some(element) = host.rect().filter(|r| r.enabled && r.clickable) else {
+        return Ok(None);
+    };
+    if node.rect().is_none_or(|r| {
+        (r.x, r.y, r.width, r.height) != (element.x, element.y, element.width, element.height)
+    }) {
+        return Ok(None);
+    }
+    let icons = tree
+        .matching(package, crate::ElementQuery::ResourceIdSuffix(&icon_id))
+        .into_iter()
+        .filter(|i| {
+            let icon = &tree.nodes[*i];
+            icon.attr("class") == "android.widget.ImageView"
+                && icon.parent.is_some_and(|p| {
+                    tree.nodes[p].parent == Some(*button)
+                        && tree.nodes[p].attr("resource-id") == format!("{package}:id/{wrapper_id}")
+                })
+        })
+        .collect::<Vec<_>>();
+    let selected = match icons.as_slice() {
+        [i] if tree.nodes[*i].rect().is_some_and(|r| {
+            r.x >= element.x
+                && r.y >= element.y
+                && r.x + r.width <= element.x + element.width
+                && r.y + r.height <= element.y + element.height
+        }) =>
+        {
+            match tree.nodes[*i].attr("selected") {
+                "true" => Some(true),
+                "false" => Some(false),
+                _ => None,
+            }
+        }
+        _ => None,
+    };
+    Ok(Some(StatefulElementBox {
+        element,
+        checked: None,
+        selected,
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn current_global_builds_use_exact_bookmark_ancestry_and_state() {
+        for (version, source) in [
+            (
+                "45.4.3",
+                include_str!("../../fixtures/tiktok-save/save-45.4.3-false.fixture"),
+            ),
+            (
+                "46.0.41",
+                include_str!("../../fixtures/tiktok-save/save-46.0.41-false.fixture"),
+            ),
+            (
+                "46.1.3",
+                include_str!("../../fixtures/tiktok-save/save-46.1.3-false.fixture"),
+            ),
+            (
+                "46.4.3",
+                include_str!("../../fixtures/tiktok-save/save-46.4.3-false.fixture"),
+            ),
+        ] {
+            let result = parse_global_control(source, version).unwrap().unwrap();
+            assert_eq!(result.selected, Some(false), "{version}");
+            assert!(result.element.clickable);
+            let (_, host, icon, _) = global_ids(version).unwrap();
+            let mut selected = source.to_string();
+            let start = selected
+                .find(&format!(
+                    "resource-id=\"com.zhiliaoapp.musically:id/{icon}\""
+                ))
+                .unwrap();
+            let position = start + selected[start..].find("selected=\"false\"").unwrap();
+            selected.replace_range(
+                position..position + "selected=\"false\"".len(),
+                "selected=\"true\"",
+            );
+            assert_eq!(
+                parse_global_control(&selected, version)
+                    .unwrap()
+                    .unwrap()
+                    .selected,
+                Some(true)
+            );
+            assert!(parse_global_control(
+                &source.replace(&format!(":id/{host}"), ":id/unrelated"),
+                version
+            )
+            .unwrap()
+            .is_none());
+            assert!(parse_global_control(source, "unknown").unwrap().is_none());
+        }
+    }
+    #[test]
+    fn global_bookmark_uses_measured_parent_and_icon_not_container_state() {
+        let xml = include_str!("../../fixtures/tiktok-save/global45.7.3-observed.fixture");
+        let state = parse_global_control(xml, "45.7.3").unwrap().unwrap();
+        assert_eq!(state.selected, Some(false));
+        assert!(state.element.clickable);
+        let icon_start = xml
+            .find("resource-id=\"com.zhiliaoapp.musically:id/hko\"")
+            .unwrap();
+        let state_start = icon_start + xml[icon_start..].find("selected=\"false\"").unwrap();
+        let mut changed = xml.to_owned();
+        changed.replace_range(
+            state_start..state_start + "selected=\"false\"".len(),
+            "selected=\"true\"",
+        );
+        // Synthetic positive state, not live attestation of this transition.
+        assert_ne!(changed, xml);
+        assert_eq!(
+            parse_global_control(&changed, "45.7.3")
+                .unwrap()
+                .unwrap()
+                .selected,
+            Some(true)
+        );
+        assert!(
+            parse_global_control(&xml.replace(":id/hlx", ":id/other"), "45.7.3")
+                .unwrap()
+                .is_none()
+        );
+        assert!(parse_global_control(
+            &xml.replace("displayed=\"true\"", "displayed=\"false\""),
+            "45.7.3"
+        )
+        .unwrap()
+        .is_none());
+        assert_eq!(
+            parse_global_control(&xml.replace(":id/hko", ":id/other"), "45.7.3")
+                .unwrap()
+                .unwrap()
+                .selected,
+            None
+        );
+    }
     use std::collections::VecDeque;
     use std::sync::{
         atomic::{AtomicUsize, Ordering},

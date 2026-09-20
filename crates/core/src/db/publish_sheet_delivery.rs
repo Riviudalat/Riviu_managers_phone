@@ -42,15 +42,9 @@ fn backoff_ms(attempts: i64) -> i64 {
         .min(900_000)
 }
 
-fn seed_states(conn: &Connection) -> anyhow::Result<()> {
-    let reset_pending: bool = conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM publish_reporting_epochs WHERE paused=1)",
-        [],
-        |r| r.get(0),
-    )?;
-    if reset_pending {
-        return Ok(());
-    }
+pub(super) fn seed_states(conn: &Connection) -> anyhow::Result<()> {
+    // Enrollment is a one-time migration even if a reset is pending. The claim
+    // gate pauses delivery; skipping enrollment would permanently lose other tabs.
     conn.execute_batch(
         "INSERT OR IGNORE INTO publish_sheet_sync_state(assignment_id)
       SELECT a.id FROM publish_assignments a JOIN publish_campaigns c ON c.id=a.campaign_id
@@ -81,6 +75,72 @@ fn seed_states(conn: &Connection) -> anyhow::Result<()> {
 }
 
 impl Database {
+    pub fn sheet_readback_input(
+        &self,
+        assignment_id: &str,
+        expected_revision: i64,
+    ) -> anyhow::Result<(SheetDeliveryTarget, crate::google_sheets::DeliveryReceipt)> {
+        let (target_json, revision, url, state): (String,i64,String,String) = self.conn()?.query_row(
+            "SELECT delivery_target_json,revision,post_url,state FROM publish_sheet_outbox WHERE assignment_id=?1", [assignment_id], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?)))?;
+        anyhow::ensure!(
+            revision == expected_revision && state == "sent",
+            "Sheet revision not settled or changed"
+        );
+        let target: SheetDeliveryTarget = serde_json::from_str(&target_json)?;
+        let receipt = self
+            .sheet_receipt(assignment_id, revision, &target)?
+            .context("No persisted delivery receipt for this revision")?;
+        anyhow::ensure!(
+            receipt.post_url == url && !url.is_empty(),
+            "Receipt does not match canonical post URL"
+        );
+        Ok((target, receipt))
+    }
+
+    pub fn defer_bound_sheet_delivery(
+        &self,
+        claim: &SheetDeliveryClaim,
+        now_ms: i64,
+    ) -> anyhow::Result<()> {
+        let mut conn = self.conn()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        if claim_current(&tx, claim, now_ms)? {
+            match &claim.payload {
+                SheetDeliveryPayload::Canonical { row, .. } => {
+                    tx.execute("UPDATE publish_sheet_outbox SET next_attempt_at_ms=?2 WHERE assignment_id=?1 AND revision=?3", params![row.assignment_id, now_ms + 1000, row.revision])?;
+                }
+                SheetDeliveryPayload::Report(_) => {
+                    tx.execute("UPDATE publish_sheet_sync_state SET report_next_attempt_at_ms=?2 WHERE assignment_id=?1", params![claim.assignment_id, now_ms + 1000])?;
+                }
+            }
+            release_claim(&tx, claim)?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn save_sheet_receipt(
+        &self,
+        target: &SheetDeliveryTarget,
+        receipt: &crate::google_sheets::DeliveryReceipt,
+    ) -> anyhow::Result<()> {
+        self.conn()?.execute("INSERT INTO publish_sheet_receipts(publication_id,revision,spreadsheet_id,sheet_gid,epoch,receipt_json,observed_at) VALUES(?1,?2,?3,?4,?5,?6,?7) ON CONFLICT(publication_id,revision,spreadsheet_id,sheet_gid,epoch) DO UPDATE SET receipt_json=excluded.receipt_json,observed_at=excluded.observed_at",
+            params![receipt.publication_id,receipt.revision,target.spreadsheet_id,i64::try_from(target.sheet_gid)?,receipt.reporting_epoch,serde_json::to_string(receipt)?,Utc::now().to_rfc3339()])?;
+        Ok(())
+    }
+
+    pub fn sheet_receipt(
+        &self,
+        publication: &str,
+        revision: i64,
+        target: &SheetDeliveryTarget,
+    ) -> anyhow::Result<Option<crate::google_sheets::DeliveryReceipt>> {
+        let raw: Option<String> = self.conn()?.query_row("SELECT receipt_json FROM publish_sheet_receipts WHERE publication_id=?1 AND revision=?2 AND spreadsheet_id=?3 AND sheet_gid=?4 AND epoch=?5",
+            params![publication,revision,target.spreadsheet_id,i64::try_from(target.sheet_gid)?,target.reporting_epoch.as_deref().unwrap_or("legacy")], |r|r.get(0)).optional()?;
+        raw.map(|s| serde_json::from_str(&s).map_err(Into::into))
+            .transpose()
+    }
+
     /// Changing the credential connection reopens paused v2 delivery only. No history is enrolled.
     pub fn configure_bound_sheet_delivery(
         &self,
@@ -89,7 +149,6 @@ impl Database {
     ) -> anyhow::Result<()> {
         let mut conn = self.conn()?;
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        seed_states(&tx)?;
         tx.execute("UPDATE publish_sheet_outbox SET next_attempt_at_ms=?2 WHERE state<>'sent'
           AND delivery_target_json IS NOT NULL AND assignment_id IN (
             SELECT assignment_id FROM publish_sheet_sync_state WHERE connection_fingerprint IS NOT ?1)",params![fingerprint,now_ms])?;
@@ -109,7 +168,6 @@ impl Database {
     ) -> anyhow::Result<Option<SheetDeliveryClaim>> {
         let mut conn = self.conn()?;
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        seed_states(&tx)?;
         let (active, reports): (i64, i64) = tx.query_row(
             "SELECT COUNT(*),COALESCE(SUM(claim_kind='report'),0)
           FROM publish_sheet_sync_state WHERE claim_token IS NOT NULL AND claim_until_ms>?1",
@@ -137,17 +195,13 @@ impl Database {
                 params![now_ms,assignment_id],|r|Ok((r.get(0)?,r.get(1)?))).optional()?,
             SheetDeliveryKind::Report => tx.query_row(
                 "SELECT a.id,json_extract(c.request_json,'$.sheetDelivery')
-                 FROM publish_assignments a JOIN publish_campaigns c ON c.id=a.campaign_id
-                 JOIN publish_sheet_sync_state s ON s.assignment_id=a.id
-                 WHERE s.superseded_epoch IS NULL AND json_valid(c.request_json) AND json_extract(c.request_json,'$.sheetDelivery.version')=2
-                   AND json_extract(c.request_json,'$.sheetDelivery.internalReporting')=1
-                   AND json_extract(c.request_json,'$.sheetEnabled')=1
-                   AND a.revision+c.revision>s.report_acked_revision
-                   AND (s.report_attempt_revision<>a.revision+c.revision OR s.report_next_attempt_at_ms<=?1)
+                 FROM publish_sheet_sync_state s INDEXED BY sheet_report_due
+                 JOIN publish_assignments a ON a.id=s.assignment_id JOIN publish_campaigns c ON c.id=a.campaign_id
+                 WHERE s.superseded_epoch IS NULL AND s.report_due_at_ms IS NOT NULL AND s.report_due_at_ms<=?1
                    AND (s.claim_token IS NULL OR s.claim_until_ms<=?1) AND (?2 IS NULL OR a.id=?2)
                    AND NOT EXISTS(SELECT 1 FROM publish_sheet_outbox o WHERE o.assignment_id=a.id
                      AND o.delivery_target_json IS NOT NULL AND o.state<>'sent')
-                 ORDER BY CASE WHEN s.report_attempt_revision<>a.revision+c.revision THEN 0 ELSE s.report_next_attempt_at_ms END,a.created_at,a.id LIMIT 1",
+                 ORDER BY s.report_due_at_ms,s.assignment_id LIMIT 1",
                 params![now_ms,assignment_id],|r|Ok((r.get(0)?,r.get(1)?))).optional()?,
         };
         let Some((id, raw_target)) = candidate else {

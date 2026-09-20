@@ -1,0 +1,62 @@
+[
+  {
+    "text": "Thương Nhau Đến Thế",
+    "bounds": {
+      "x": 268,
+      "y": 1384,
+      "width": 440,
+      "height": 44
+    },
+    "confidence": 0.9594877624511718
+  },
+  {
+    "text": "Nguyễn Trọng Phuc - 83.6K posts - 0:41",
+    "bounds": {
+      "x": 270,
+      "y": 1439,
+      "width": 578,
+      "height": 34
+    },
+    "confidence": 0.9139960479736328
+  },
+  {
+    "text": "Ăm Chả Húi (Short Mix)",
+    "bounds": {
+      "x": 268,
+      "y": 1539,
+      "width": 464,
+      "height": 45
+    },
+    "confidence": 0.9350515747070312
+  },
+  {
+    "text": "Lâm Than Lan - 548.3K posts - 0:24",
+    "bounds": {
+      "x": 270,
+      "y": 1597,
+      "width": 523,
+      "height": 34
+    },
+    "confidence": 0.9206918334960936
+  },
+  {
+    "text": "Thương Phận Hồng Nhan - remix",
+    "bounds": {
+      "x": 268,
+      "y": 1700,
+      "width": 647,
+      "height": 44
+    },
+    "confidence": 0.9522825622558594
+  },
+  {
+    "text": "Nguyễn Anh Tuấn - 124.6K posts - 0:48",
+    "bounds": {
+      "x": 270,
+      "y": 1755,
+      "width": 572,
+      "height": 34
+    },
+    "confidence": 0.9168467712402344
+  }
+]

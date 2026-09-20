@@ -26,7 +26,9 @@ export function runProgress(run: OperationRunSummary, sessions: NurtureSessionSt
 
 export function deviceRows(items: OperationRunItem[]) {
   const rows = new Map<string, OperationRunItem[]>();
+  const hasDeviceRows = items.some(item => item.kind === "device" && item.udid);
   for (const item of items) {
+    if (hasDeviceRows && !item.udid) continue;
     const key = item.udid ?? "";
     rows.set(key, [...(rows.get(key) ?? []), item]);
   }
@@ -74,6 +76,8 @@ const LOG_STATE: Record<string, string> = {
 };
 const LOG_ACTION: Record<string, string> = { nurture: "Nuôi TikTok", interaction: "Tương tác",
   publish: "Đăng bài", like: "Tim", save: "Lưu bài", comment: "Bình luận", follow: "Theo dõi",
+  wait: "Chờ", launchApp: "Mở ứng dụng", terminateApp: "Đóng ứng dụng", home: "Về Home",
+  tap: "Chạm", swipe: "Vuốt", typeText: "Nhập chữ", screenshot: "Chụp màn hình", assertVisible: "Kiểm tra hiển thị",
   appInstall: "Cài ứng dụng", materialTransfer: "Chuyển nội dung" };
 const EVIDENCE: Record<string, string> = { "tiktok-cleanup": "Đã ghi bằng chứng tắt TikTok",
   "frame": "Đã lưu ảnh kiểm tra", "before": "Đã lưu ảnh trước thao tác", "after": "Đã lưu ảnh sau thao tác" };

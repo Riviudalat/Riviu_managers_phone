@@ -432,6 +432,18 @@ pub async fn interaction_start_thread(
         &request.actor_udids,
     )?;
     let plan = plan_threads(&request).map_err(interaction_error)?;
+    for udid in &request.actor_udids {
+        if state.control.reports_element_bounds(udid) {
+            state
+                .control
+                .preflight_tiktok_actions(
+                    udid,
+                    &riviu_core::app_automation::interaction_actions(request.actions),
+                )
+                .await
+                .map_err(interaction_error)?;
+        }
+    }
     // Asked before anything is persisted. The engine checks this too, but by then the row
     // exists and the operator's history fills with campaigns that were Running for a second
     // and then Failed on a missing key — an AI campaign with no key never started, and the
@@ -916,6 +928,7 @@ mod tests {
             &control,
             ThreadMode::Standalone,
             InteractionActionSet {
+                follow: false,
                 like: true,
                 comment: false,
                 save: true,
@@ -937,6 +950,7 @@ mod tests {
             &control,
             ThreadMode::Standalone,
             InteractionActionSet {
+                follow: false,
                 like: true,
                 comment: false,
                 save: false,

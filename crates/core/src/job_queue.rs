@@ -44,9 +44,10 @@ impl JobQueue {
         registry: DeviceRegistry,
         control: Arc<DeviceControlPlane>,
         artifacts_dir: PathBuf,
-    ) -> Self {
+    ) -> anyhow::Result<Self> {
+        db.recover_script_jobs()?;
         std::fs::create_dir_all(&artifacts_dir).ok();
-        Self {
+        Ok(Self {
             db,
             events,
             registry,
@@ -56,7 +57,7 @@ impl JobQueue {
             cancel_changed: Arc::new(Notify::new()),
             runtime: Arc::new(Mutex::new(JobQueueRuntime::default())),
             shutdown_gate: Arc::new(tokio::sync::Mutex::new(())),
-        }
+        })
     }
 
     pub fn list_jobs(&self, limit: usize) -> anyhow::Result<Vec<JobRecord>> {
@@ -249,16 +250,37 @@ impl JobQueue {
                 if self.is_cancelled(job.id) {
                     anyhow::bail!("cancelled");
                 }
+                session.set_gui_scope(crate::ui_automation::GuiScope {
+                    run_id: job.id.to_string(),
+                    assignment_id: Some(index.to_string()),
+                    device_id: udid.into(),
+                    deadline_ms: None,
+                });
                 if let Some(step) = job.steps.get_mut(index) {
                     step.status = StepStatus::Running;
                 }
                 job.updated_at = Utc::now();
                 // The per-step intent, written before `execute_step` reaches the device.
-                self.persist(job)?;
+                let session_id = session.gui_session_epoch();
+                if let Err(error) = self
+                    .persist_device_step(job, udid, index, &session_id, 0)
+                    .await
+                {
+                    if self.is_cancelled(job.id) {
+                        if let Some(step) = job.steps.get_mut(index) {
+                            step.status = StepStatus::Skipped;
+                        }
+                    }
+                    return Err(error);
+                }
+                let began = std::time::Instant::now();
 
-                let result = self
-                    .execute_step(job.id, action, &context, session.as_ref(), &run_dir)
-                    .await;
+                let result = if self.is_cancelled(job.id) {
+                    Err(anyhow::anyhow!("cancelled"))
+                } else {
+                    self.execute_step(job.id, action, &context, session.as_ref(), &run_dir)
+                        .await
+                };
 
                 match result {
                     Ok(artifact) => {
@@ -279,14 +301,30 @@ impl JobQueue {
                             }
                         }
                         job.updated_at = Utc::now();
-                        self.persist_outcome(job);
+                        self.persist_device_step_outcome(
+                            job,
+                            udid,
+                            index,
+                            &session_id,
+                            began.elapsed().as_millis() as u64,
+                        )
+                        .await;
+                        capture_script_observation(session.as_ref()).await;
                         return Err(err);
                     }
                 }
                 job.updated_at = Utc::now();
                 // The step already ran, so this is a report rather than a checkpoint. A
                 // persistent database failure is caught by the next step's checkpoint above.
-                self.persist_outcome(job);
+                self.persist_device_step_outcome(
+                    job,
+                    udid,
+                    index,
+                    &session_id,
+                    began.elapsed().as_millis() as u64,
+                )
+                .await;
+                capture_script_observation(session.as_ref()).await;
             }
             Ok(())
         }
@@ -416,6 +454,56 @@ impl JobQueue {
         Ok(())
     }
 
+    async fn persist_device_step(
+        &self,
+        job: &JobRecord,
+        udid: &str,
+        index: usize,
+        session_id: &str,
+        elapsed_ms: u64,
+    ) -> anyhow::Result<()> {
+        let saved = job.clone();
+        let udid = udid.to_owned();
+        let session_id = session_id.to_owned();
+        let cancellation = self.cancelled.clone();
+        self.db
+            .storage_write(move |db| {
+                // Share the cancel mutex through the synchronous intent transaction;
+                // admission may have waited while Stop was acknowledged.
+                let cancelled = cancellation.lock();
+                anyhow::ensure!(
+                    saved.steps[index].status != StepStatus::Running
+                        || !cancelled.contains(&saved.id),
+                    "cancelled before script intent"
+                );
+                db.save_job_device_step(&saved, &udid, index, &session_id, elapsed_ms)
+            })
+            .await?;
+        self.events.emit(AppEvent::JobUpdated { job: job.clone() });
+        Ok(())
+    }
+
+    async fn persist_device_step_outcome(
+        &self,
+        job: &mut JobRecord,
+        udid: &str,
+        index: usize,
+        session_id: &str,
+        elapsed_ms: u64,
+    ) {
+        if let Err(error) = self
+            .persist_device_step(job, udid, index, session_id, elapsed_ms)
+            .await
+        {
+            tracing::error!("script timeline {}: {error:#}", job.id);
+            job.error = Some(format!(
+                "{} (script timeline not persisted: {error})",
+                job.error.as_deref().unwrap_or_default()
+            ));
+            self.persist_outcome(job);
+        }
+    }
+
     /// Report an outcome that already happened, saying so if it could not be stored.
     ///
     /// The mirror of [`Self::persist`]: the work is done, so silence would be the worse
@@ -467,6 +555,28 @@ impl JobQueue {
     }
 }
 
+async fn capture_script_observation(session: &dyn crate::UiSession) {
+    if !session.supports_accessibility_readback() {
+        return;
+    }
+    // Diagnostic reads may complete after Stop; no new input or intent is issued.
+    for result in [
+        tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            session.hierarchy_source_snapshot(),
+        )
+        .await
+        .map(|r| r.map(|_| ())),
+        tokio::time::timeout(std::time::Duration::from_secs(3), session.screenshot_png())
+            .await
+            .map(|r| r.map(|_| ())),
+    ] {
+        if !matches!(result, Ok(Ok(()))) {
+            tracing::warn!("script observation incomplete: {result:?}");
+        }
+    }
+}
+
 fn action_name(action: &ScriptAction) -> &'static str {
     match action {
         ScriptAction::LaunchApp { .. } => "launchApp",
@@ -495,6 +605,255 @@ mod tests {
         AgentInstallProof, DeviceDriver, DeviceInfo, DeviceWorkCoordinator, InstalledAgentIdentity,
         StreamBudgetManager, SwipeGesture, TapPoint, UiSession,
     };
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn script_cancel_during_storage_admission_records_no_new_intent() {
+        let root = std::env::temp_dir().join(format!("script-admission-stop-{}", Uuid::new_v4()));
+        let db = Arc::new(Database::open(root.join("jobs.db")).unwrap());
+        let events = EventBus::new(16);
+        let driver = Arc::new(QueueTestDriver::default());
+        let control = Arc::new(DeviceControlPlane::new(
+            driver.clone(),
+            Arc::new(DeviceWorkCoordinator::new()),
+            Arc::new(StreamBudgetManager::new(1).unwrap()),
+        ));
+        let queue = JobQueue::new(
+            db.clone(),
+            events.clone(),
+            DeviceRegistry::new(events),
+            control.clone(),
+            root.join("artifacts"),
+        )
+        .unwrap();
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let held = db.clone();
+        let writer = tokio::spawn(async move {
+            held.storage_write(move |_| {
+                let _ = entered_tx.send(());
+                release_rx.recv().unwrap();
+                Ok(())
+            })
+            .await
+        });
+        entered_rx.await.unwrap();
+        let job = queue
+            .enqueue(
+                AutomationScript {
+                    version: 1,
+                    name: "admission stop".into(),
+                    steps: vec![ScriptAction::Home],
+                },
+                vec!["phone-a".into()],
+            )
+            .await
+            .unwrap();
+        timeout(Duration::from_secs(2), async {
+            while driver.session_calls.load(Ordering::Relaxed) == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        queue.cancel(job.id);
+        release_tx.send(()).unwrap();
+        writer.await.unwrap().unwrap();
+        queue.shutdown().await.unwrap();
+        let saved = db.get_job(job.id).unwrap().unwrap();
+        assert_eq!(saved.status, JobStatus::Cancelled);
+        assert_ne!(saved.steps[0].status, StepStatus::Running);
+        assert!(db
+            .operation_device_log(
+                crate::OperationRunKind::Script,
+                &job.id.to_string(),
+                "phone-a"
+            )
+            .unwrap()
+            .entries
+            .is_empty());
+        control.shutdown_cleanup().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn script_timeline_records_each_devices_real_step_and_cancel_without_later_intent() {
+        let root = std::env::temp_dir().join(format!("riviu-script-timeline-{}", Uuid::new_v4()));
+        let db = Arc::new(Database::open(root.join("jobs.db")).unwrap());
+        let events = EventBus::new(16);
+        let control = Arc::new(DeviceControlPlane::new(
+            Arc::new(QueueTestDriver::default()),
+            Arc::new(DeviceWorkCoordinator::new()),
+            Arc::new(StreamBudgetManager::new(1).unwrap()),
+        ));
+        let queue = JobQueue::new(
+            db.clone(),
+            events.clone(),
+            DeviceRegistry::new(events),
+            control.clone(),
+            root.join("artifacts"),
+        )
+        .unwrap();
+        let job = queue
+            .enqueue(
+                AutomationScript {
+                    version: 1,
+                    name: "timeline fixture".into(),
+                    steps: vec![
+                        ScriptAction::Wait {
+                            milliseconds: u64::MAX,
+                        },
+                        ScriptAction::Home,
+                    ],
+                },
+                vec!["phone-a".into(), "phone-b".into()],
+            )
+            .await
+            .unwrap();
+        timeout(Duration::from_secs(2), async {
+            loop {
+                if db.get_job(job.id).unwrap().unwrap().steps[0].status == StepStatus::Running {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        queue.cancel(job.id);
+        queue.shutdown().await.unwrap();
+        let log = db
+            .operation_device_log(
+                crate::OperationRunKind::Script,
+                &job.id.to_string(),
+                "phone-a",
+            )
+            .unwrap();
+        assert_eq!(
+            log.entries
+                .iter()
+                .map(|r| r.state.as_str())
+                .collect::<Vec<_>>(),
+            ["running", "skipped"]
+        );
+        assert!(log
+            .entries
+            .iter()
+            .all(|r| r.action == "wait" && r.at.is_some()));
+        let detail: serde_json::Value =
+            serde_json::from_str(log.entries[1].detail.as_deref().unwrap()).unwrap();
+        assert_eq!(detail["stepIndex"], 0);
+        assert!(detail["elapsedMs"].as_u64().is_some());
+        assert!(detail["sessionId"].is_string());
+        assert!(db
+            .operation_device_log(
+                crate::OperationRunKind::Script,
+                &job.id.to_string(),
+                "phone-b"
+            )
+            .unwrap()
+            .entries
+            .is_empty());
+        assert!(db
+            .operation_device_log(
+                crate::OperationRunKind::Script,
+                &Uuid::new_v4().to_string(),
+                "phone-a"
+            )
+            .unwrap()
+            .entries
+            .is_empty());
+        control.shutdown_cleanup().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn regression_restart_then_cancel_settles_a_persisted_running_job() {
+        let root = std::env::temp_dir().join(format!("riviu-review-restart-{}", Uuid::new_v4()));
+        let path = root.join("jobs.db");
+        let now = Utc::now();
+        let job = JobRecord {
+            id: Uuid::new_v4(),
+            script_name: "interrupted script".into(),
+            udids: vec!["fixture-phone".into()],
+            status: JobStatus::Running,
+            created_at: now,
+            updated_at: now,
+            steps: vec![JobStepRecord {
+                index: 0,
+                action: "wait".into(),
+                status: StepStatus::Running,
+                error: None,
+                artifact_path: None,
+            }],
+            error: None,
+        };
+        {
+            let first = Database::open(&path).unwrap();
+            first
+                .save_job_device_step(&job, "fixture-phone", 0, "lost-session", 0)
+                .unwrap();
+        }
+        let db = Arc::new(Database::open(&path).unwrap());
+        let events = EventBus::new(16);
+        let driver = Arc::new(QueueTestDriver::default());
+        let control = Arc::new(DeviceControlPlane::new(
+            driver.clone(),
+            Arc::new(DeviceWorkCoordinator::new()),
+            Arc::new(StreamBudgetManager::new(1).unwrap()),
+        ));
+        let queue = JobQueue::new(
+            db.clone(),
+            events.clone(),
+            DeviceRegistry::new(events),
+            control.clone(),
+            root.join("artifacts"),
+        )
+        .unwrap();
+        println!(
+            "review restart: {:?}",
+            db.get_job(job.id).unwrap().unwrap().status
+        );
+        queue.cancel(job.id);
+        queue.shutdown().await.unwrap();
+        let after = db.get_job(job.id).unwrap().unwrap();
+        let log = db
+            .operation_device_log(
+                crate::OperationRunKind::Script,
+                &job.id.to_string(),
+                "fixture-phone",
+            )
+            .unwrap();
+        assert_eq!(
+            log.entries
+                .iter()
+                .map(|r| r.state.as_str())
+                .collect::<Vec<_>>(),
+            ["running", "uncertain"]
+        );
+        assert_eq!(db.recover_script_jobs().unwrap(), 0);
+        assert_eq!(
+            db.operation_device_log(
+                crate::OperationRunKind::Script,
+                &job.id.to_string(),
+                "fixture-phone"
+            )
+            .unwrap()
+            .entries
+            .len(),
+            2
+        );
+        println!(
+            "review cancel + shutdown: {:?}; driver_session_calls={}",
+            after.status,
+            driver.session_calls.load(Ordering::Relaxed)
+        );
+        control.shutdown_cleanup().await.unwrap();
+        drop(queue);
+        drop(db);
+        std::fs::remove_dir_all(&root).unwrap();
+        assert!(
+            !matches!(after.status, JobStatus::Running | JobStatus::Queued),
+            "cancel after restart must not leave a permanently live job"
+        );
+    }
 
     struct QueueTestSession;
 
@@ -663,7 +1022,8 @@ mod tests {
             DeviceRegistry::new(events),
             control,
             root.join("artifacts"),
-        );
+        )
+        .unwrap();
         let now = Utc::now();
         let stranded = JobRecord {
             id: Uuid::new_v4(),
@@ -735,7 +1095,8 @@ mod tests {
             DeviceRegistry::new(events),
             control.clone(),
             root.join("artifacts"),
-        );
+        )
+        .unwrap();
         let job = queue
             .enqueue(
                 AutomationScript {
@@ -791,7 +1152,8 @@ mod tests {
             DeviceRegistry::new(events),
             control.clone(),
             root.join("artifacts"),
-        );
+        )
+        .unwrap();
         let job = queue
             .enqueue(
                 AutomationScript {
@@ -854,7 +1216,8 @@ mod tests {
             DeviceRegistry::new(events),
             control.clone(),
             blocked_artifacts,
-        );
+        )
+        .unwrap();
         let job = queue
             .enqueue(
                 AutomationScript {

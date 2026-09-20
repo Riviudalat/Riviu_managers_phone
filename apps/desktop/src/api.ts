@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { readQueryClient } from "./readQuery";
 export interface GuiServiceConfig { enabled:boolean; baseUrl:string; model:string; maxRequests:number; }
 export interface GuiServiceStatus { config:GuiServiceConfig; running:boolean; providerReady:boolean; protocolVersion:number; lastError?:string|null; }
 export const guiServiceStatus=()=>invoke<GuiServiceStatus>("gui_service_status");
@@ -642,23 +643,23 @@ export async function saveViewSnapshot(udid: string, jpeg: number[]) {
 }
 
 export async function listJobs() {
-  return invoke<JobRecord[]>("list_jobs");
+  return readQueryClient.fetchQuery({ queryKey: ["jobs", "all"], queryFn: () => invoke<JobRecord[]>("list_jobs") });
 }
 
 export async function operationListRuns(limit = 100) {
-  return invoke<OperationRunSummary[]>("operation_list_runs", { limit });
+  return readQueryClient.fetchQuery({ queryKey: ["operationList", limit], queryFn: () => invoke<OperationRunSummary[]>("operation_list_runs", { limit }) });
 }
 
 export async function operationGetRun(operationId: string) {
-  return invoke<OperationRunDetail | null>("operation_get_run", { operationId });
+  return readQueryClient.fetchQuery({ queryKey: ["operationDetail", operationId], queryFn: () => invoke<OperationRunDetail | null>("operation_get_run", { operationId }) });
 }
 
 export async function operationDeviceLog(operationId: string, udid: string) {
-  return invoke<OperationDeviceLog>("operation_device_log", { operationId, udid });
+  return readQueryClient.fetchQuery({ queryKey: ["operationLog", operationId, udid], queryFn: () => invoke<OperationDeviceLog>("operation_device_log", { operationId, udid }) });
 }
 
 export async function operationQueryRuns(query: OperationRunQuery) {
-  return invoke<OperationRunPage>("operation_query_runs", { query });
+  return readQueryClient.fetchQuery({ queryKey: ["operationQuery", query], queryFn: () => invoke<OperationRunPage>("operation_query_runs", { query }) });
 }
 
 export async function operationCancelBatch(operationId: string) {
@@ -871,7 +872,7 @@ export async function getDeviceMeta(udid: string) {
 /// Every phone this app has a record for, in one call — what the grid reads to label and
 /// order tiles. Phones nobody has edited have no row, so an untouched fleet answers empty.
 export async function listDeviceMetas() {
-  return invoke<DeviceMeta[]>("list_device_metas");
+  return readQueryClient.fetchQuery({ queryKey: ["deviceMetadata", "all"], queryFn: () => invoke<DeviceMeta[]>("list_device_metas") });
 }
 
 export async function saveDeviceMeta(meta: DeviceMeta) {
@@ -896,7 +897,7 @@ export async function interactionReadAccount(udid: string) {
 }
 export interface InteractionReadback {
   assignmentId: string; targetUrl: string; checkedAt: string;
-  like: "present" | "absent" | "unknown"; save: "saved" | "unsaved" | "unreadable"; snapshotSha256: string;
+  like: "present" | "absent" | "unknown"; save: "saved" | "unsaved" | "unreadable"; follow?: "present" | "absent" | "unknown" | null; snapshotSha256: string;
 }
 export async function interactionReadback(campaignId: string, assignmentId: string) {
   return invoke<InteractionReadback>("interaction_readback", { campaignId, assignmentId });
@@ -987,7 +988,7 @@ export async function cancelAppInstallBatch(batchId: string) {
 }
 
 export async function listSchedules() {
-  return invoke<ScheduleItem[]>("list_schedules");
+  return readQueryClient.fetchQuery({ queryKey: ["schedules", "script", "all"], queryFn: () => invoke<ScheduleItem[]>("list_schedules") });
 }
 
 export async function saveSchedule(schedule: ScheduleItem) {
@@ -1075,14 +1076,24 @@ export async function publishCancel(campaignId: string) {
   return invoke<void>("publish_cancel", { campaignId });
 }
 
-export interface OperationStopResult {
-  operationId: string;
-  stopMarker?: string | null;
+export type OperationStopResult = Omit<import("./generated-ipc").OperationStopResult, "state" | "stopMarker"> & {
   state: "stopping" | "closed" | "needsAttention" | "failed";
-  devices: { udid: string; closed: boolean; message: string }[];
-}
+  stopMarker?: string | null;
+};
 export function operationStop(operationId:string) { return invoke<OperationStopResult>("operation_stop",{operationId}); }
 export function operationStopStatus(operationId:string) { return invoke<OperationStopResult|null>("operation_stop_status",{operationId}); }
+
+export function deviceActionCapabilities(udid: string) {
+  return invoke<import("./generated-ipc").DeviceActionCapabilities>("device_action_capabilities", { udid });
+}
+
+export function operationTraceExport(operationId: string, udid: string) {
+  return invoke<{ path: string; sha256: string; bytes: number }>("operation_trace_export", { operationId, udid });
+}
+
+export function publishSheetReadback(assignmentId: string, expectedRevision: number) {
+  return invoke<import("./generated-ipc").PublishSheetReadback>("publish_sheet_readback", { assignmentId, expectedRevision });
+}
 
 export function publishDeviceGuards(udids: string[]) {
   return invoke<import("./types").PublishDeviceGuards>("publish_device_guards", { udids });
@@ -1183,7 +1194,11 @@ export async function nurtureGetSettings() {
 }
 
 export async function nurtureSaveSettings(settings: NurtureSettings) {
-  return invoke<NurtureSettings>("nurture_save_settings", { settings });
+  return invoke<NurtureSettings>("nurture_save_settings", { settings, expectedRevision: settings.revision ?? 0 });
+}
+
+export function nurtureUpdateCredential(apiKey: string): Promise<Pick<NurtureSettings, "apiKey" | "hasApiKey">> {
+  return invoke("nurture_update_credential", { apiKey });
 }
 
 /// Draft one comment from what this device is showing, without sending anything.
@@ -1408,14 +1423,11 @@ export function listenRiviuEvents(handler: (event: AppEvent) => void): Promise<U
 }
 
 export async function automationList(includeArchived = false) {
-  return invoke<AutomationDefinition[]>("automation_list", { includeArchived });
+  return readQueryClient.fetchQuery({ queryKey: ["automations", "list", includeArchived], queryFn: () => invoke<AutomationDefinition[]>("automation_list", { includeArchived }) });
 }
 
 export async function automationGet(definitionId: string, revision: number) {
-  return invoke<AutomationDefinitionRecord | null>("automation_get", {
-    definitionId,
-    revision,
-  });
+  return readQueryClient.fetchQuery({ queryKey: ["automations", definitionId, revision], queryFn: () => invoke<AutomationDefinitionRecord | null>("automation_get", { definitionId, revision }) });
 }
 
 export async function automationCreate(
@@ -1446,7 +1458,7 @@ export async function automationArchive(definitionId: string) {
 }
 
 export async function automationScheduleList() {
-  return invoke<AutomationSchedule[]>("automation_schedule_list");
+  return readQueryClient.fetchQuery({ queryKey: ["schedules", "automation", "all"], queryFn: () => invoke<AutomationSchedule[]>("automation_schedule_list") });
 }
 
 export async function automationScheduleCreate(
@@ -1659,3 +1671,17 @@ export function googleSheetsDisconnect() {
 export interface PublishLimits { transfer: number; compose: number; verify: number; deviceTotal: number }
 export function publishGetLimits() { return invoke<PublishLimits>("publish_get_limits"); }
 export function publishSetLimits(limits: PublishLimits) { return invoke<void>("publish_set_limits", { limits }); }
+import type { TypeSafeSettings, TypeSafeVerdict } from "./generated-ipc";
+
+export function typesafeGetSettings() {
+  return invoke<TypeSafeSettings>("typesafe_get_settings");
+}
+export function typesafeUpdateSettings(enabled: boolean, expectedRevision: number) {
+  return invoke<TypeSafeSettings>("typesafe_update_settings", { enabled, expectedRevision });
+}
+export function typesafeUpdateCredential(apiKey: string) {
+  return invoke<TypeSafeSettings>("typesafe_update_credential", { apiKey });
+}
+export function typesafeCheckComment(candidate: string, caption: string | null, transcript: string | null = null) {
+  return invoke<TypeSafeVerdict>("typesafe_check_comment", { candidate, caption, transcript });
+}

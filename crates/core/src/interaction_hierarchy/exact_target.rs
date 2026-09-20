@@ -46,15 +46,27 @@ pub async fn open_exact_target_by_hierarchy(
     expected: &ResolvedTikTokTarget,
     stop: &AtomicBool,
 ) -> anyhow::Result<TargetArrival> {
+    open_target(session, labels, target_package, expected, stop, true).await
+}
+
+async fn open_target(
+    session: &dyn UiSession,
+    labels: TikTokControls,
+    target_package: &str,
+    expected: &ResolvedTikTokTarget,
+    stop: &AtomicBool,
+    inspect_current: bool,
+) -> anyhow::Result<TargetArrival> {
     ensure_not_cancelled(stop)?;
     anyhow::ensure!(
         labels.label(TikTokControl::Comments).is_some(),
         "target_exact_open: comments control unmeasured"
     );
 
-    if readable_card_in_foreground(session, labels, target_package, false)
-        .await
-        .is_ok()
+    if inspect_current
+        && readable_card_in_foreground(session, labels, target_package, false)
+            .await
+            .is_ok()
     {
         ensure_not_cancelled(stop)?;
         if let Ok(arrival) = confirm_target_from_share_link(session, labels, expected).await {
@@ -74,12 +86,29 @@ pub async fn open_exact_target_by_hierarchy(
     // both lack a changed author. The URL readback below is the only arrival authority.
     let deadline = Instant::now() + CARD_WINDOW;
     let mut redispatched = false;
+    let mut declined_contacts = false;
     tokio::time::sleep(DISPATCH_SETTLE).await;
     loop {
         ensure_not_cancelled(stop)?;
         let observation = readable_card_in_foreground(session, labels, target_package, true).await;
         if matches!(observation, Err(CardObservationError::PostUnavailable)) {
             return Err(CardObservationError::PostUnavailable.into());
+        }
+        if !declined_contacts
+            && matches!(observation, Err(CardObservationError::CommentsUnreadable))
+            && session.supports_accessibility_readback()
+        {
+            let tree = crate::ui_automation::tree::Tree::parse(
+                session.hierarchy_source_snapshot().await?,
+            )?;
+            if let Some(button) = crate::app_automation::dialogs::decline_contacts(&tree, labels) {
+                ensure_not_cancelled(stop)?;
+                ensure_foreground(session, target_package).await?;
+                session.tap(button.centre()).await?;
+                declined_contacts = true;
+                tokio::time::sleep(CARD_POLL).await;
+                continue;
+            }
         }
         // A cold Trill launch can consume the VIEW intent and remain on a LIVE
         // feed tile. Reopen the SAME pinned link once only after that observable
@@ -123,6 +152,17 @@ pub async fn open_exact_target_by_hierarchy(
         }
         tokio::time::sleep(CARD_POLL.min(deadline.saturating_duration_since(Instant::now()))).await;
     }
+}
+
+/// Open the saved target after a clean app start. The initial feed is not a candidate.
+pub async fn open_pinned_target_by_hierarchy(
+    session: &dyn UiSession,
+    labels: TikTokControls,
+    target_package: &str,
+    expected: &ResolvedTikTokTarget,
+    stop: &AtomicBool,
+) -> anyhow::Result<TargetArrival> {
+    open_target(session, labels, target_package, expected, stop, false).await
 }
 
 async fn live_feed_placeholder(session: &dyn UiSession, package: &str) -> bool {
@@ -547,6 +587,66 @@ mod tests {
         ));
         assert!(session.opens.lock().is_empty());
         assert_eq!(session.navigation_taps.load(Ordering::Relaxed), 2);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn pinned_readback_dispatches_before_probing_the_initial_feed() {
+        let session = ExactSession::new(true, TARGET_URL);
+        let target = crate::parse_tiktok_links(TARGET_URL)
+            .remove(0)
+            .target
+            .unwrap();
+        let result = open_pinned_target_by_hierarchy(
+            &session,
+            labels(),
+            PACKAGE,
+            &target,
+            &AtomicBool::new(false),
+        )
+        .await
+        .unwrap();
+        assert!(matches!(result, TargetArrival::Identified { .. }));
+        assert_eq!(
+            *session.opens.lock(),
+            vec![(TARGET_URL.into(), PACKAGE.into())]
+        );
+        let dispatched = session.dispatched_at.lock().unwrap();
+        assert!(session
+            .tapped_at
+            .lock()
+            .iter()
+            .all(|tap| *tap >= dispatched + DISPATCH_SETTLE));
+        assert_eq!(session.copies.load(Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn pinned_readback_still_rejects_wrong_post_and_observes_cancellation() {
+        let target = crate::parse_tiktok_links(TARGET_URL)
+            .remove(0)
+            .target
+            .unwrap();
+        let wrong = ExactSession::new(true, WRONG_URL);
+        assert!(open_pinned_target_by_hierarchy(
+            &wrong,
+            labels(),
+            PACKAGE,
+            &target,
+            &AtomicBool::new(false),
+        )
+        .await
+        .is_err());
+        let stopped = ExactSession::new(true, TARGET_URL);
+        assert!(open_pinned_target_by_hierarchy(
+            &stopped,
+            labels(),
+            PACKAGE,
+            &target,
+            &AtomicBool::new(true),
+        )
+        .await
+        .is_err());
+        assert!(stopped.opens.lock().is_empty());
+        assert_eq!(stopped.navigation_taps.load(Ordering::Relaxed), 0);
     }
 
     #[tokio::test(start_paused = true)]

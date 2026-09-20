@@ -171,6 +171,24 @@ IPA Agent là artifact ký riêng theo provisioning/UDID: muốn workflow đóng
 installer Windows không có hạn 7 ngày. Đổi sang iPhone mới hoặc hết hạn profile
 vẫn cần build/ký IPA trên Mac trước.
 
+### Dựng lại bộ cài nhanh hơn
+
+Dùng cùng thư mục source và `target/` cho các lần build để Cargo dùng lại cache.
+Giữ nguyên profile release tối ưu; không `cargo clean` trước mỗi bản cài.
+
+Nếu cần cả EXE và MSI trên Windows, chạy `tauri build --no-bundle` một lần, rồi dùng
+[`scripts/bundle_windows_installers.py`](scripts/bundle_windows_installers.py)
+với cùng target/cấu hình và overlay WiX per-user (`--help` liệt kê tham số). Script
+gọi `tauri bundle` cho từng loại, không chạy lại frontend hay Rust; phục hồi dấu loại
+bộ cài trước mỗi lần để MSI không nhận nhầm loại cập nhật NSIS. Không sửa source,
+feature hoặc cấu hình app giữa hai bước; nếu đã sửa thì phải build lại trước.
+
+Khi giao bộ cài nội bộ qua máy/LAN, có thể thêm
+`--config src-tauri/tauri.fast-bundle.conf.json` vào lệnh build/bundle NSIS. Overlay
+này dùng nén zlib nhanh hơn nhưng file EXE lớn hơn; không thay code, tài nguyên,
+chữ ký hay kiểm tra hash. CI phát hành vẫn dùng nén mặc định. Chỉ cần EXE thì chọn
+`--bundles nsis` để khỏi mất thêm thời gian tạo MSI.
+
 Luồng re-sign legacy trên Mac dùng source WDA 16.0.0 và asset đã khóa hash trong
 bundle, sau đó copy sang cache người dùng để build. Nó không tải source upstream
 không pin và không ghi vào app đã ký.

@@ -111,6 +111,7 @@ export function InteractionSetupTab({
   const actionOrder = [
     draft.actions.like && "Tim",
     draft.actions.save && "Lưu",
+    draft.actions.follow && "Theo dõi",
     draft.actions.comment && "Bình luận",
   ].filter(Boolean);
 
@@ -154,8 +155,9 @@ export function InteractionSetupTab({
           ["like", "Tim"],
           ["comment", "Bình luận"],
           ["save", "Lưu"],
+          ["follow", "Theo dõi"],
         ] as const).map(([action, label]) => {
-          const checked = draft.actions[action];
+          const checked = draft.actions[action] ?? false;
           return (
             <label key={action} className="nu-switch">
               <input

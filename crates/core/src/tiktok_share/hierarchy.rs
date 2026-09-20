@@ -3,6 +3,43 @@ use super::*;
 pub(crate) use crate::ui_automation::tree::{Node, Tree};
 
 impl Tree {
+    pub(crate) fn profile_suggestions_hide(
+        &self,
+        plan: &PublishVerificationPlan,
+    ) -> Option<ElementBox> {
+        let package = plan.labels.package();
+        if package != "com.ss.android.ugc.trill"
+            || plan.labels.resource_version() != Some("38.3.2")
+            || plan.labels.language() != "en"
+        {
+            return None;
+        }
+        let groups = self.matching(package, ElementQuery::ResourceIdSuffix(":id/gg5"));
+        let [group] = groups.as_slice() else {
+            return None;
+        };
+        let headings = self.matching(package, ElementQuery::ResourceIdSuffix(":id/qwr"));
+        let [heading] = headings.as_slice() else {
+            return None;
+        };
+        if self.nodes[*heading].attr("text") != "Suggested accounts"
+            || !self.inside(*heading, *group)
+        {
+            return None;
+        }
+        let controls = self.matching(package, ElementQuery::ResourceIdSuffix(":id/oc5"));
+        let [control] = controls.as_slice() else {
+            return None;
+        };
+        let node = &self.nodes[*control];
+        if !self.inside(*control, *group)
+            || node.attr("text") != "Hide"
+            || node.attr("class") != "android.widget.Button"
+        {
+            return None;
+        }
+        node.rect().filter(|r| r.enabled && r.clickable)
+    }
     pub(crate) fn publication_removed(&self, package: &str) -> bool {
         // Trill 38.3.2, machine 7, 14/09/2026: Share on a removed post opens
         // a Delete sheet. This banner is evidence to skip that candidate entirely.

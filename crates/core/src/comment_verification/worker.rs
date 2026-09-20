@@ -96,11 +96,13 @@ async fn observe(
     stop: &AtomicBool,
     directory: &std::path::Path,
 ) -> anyhow::Result<(crate::CommentLocatorIdentity, String, Vec<u8>)> {
-    let device = crate::interaction_campaign::open_clean_interaction_context(
-        control,
-        &job.context.device_id,
-    )
-    .await?;
+    // Reuse a ready app under a fresh owned session. Repeated clean starts on
+    // slower phones can spend the whole readback window loading the feed.
+    // Identity is still proved by the pinned post and the comment author's
+    // canonical profile below, never by the screen inherited from this session.
+    let device =
+        crate::interaction_campaign::open_interaction_context(control, &job.context.device_id)
+            .await?;
     let package = device.target_package;
     let context = device.context;
     let result = async {
@@ -126,9 +128,11 @@ async fn observe(
             !account.trim().is_empty(),
             "comment_verification_account_missing"
         );
-        // The exact-target resolver owns URL dispatch and readiness. Dispatching
-        // here too can interrupt the first load and replace it with the feed.
-        crate::interaction_hierarchy::open_exact_target_by_hierarchy(
+        // The inherited screen may be the feed. Dispatch the saved URL before
+        // attempting Share/Copy: proving the unrelated feed can consume the
+        // entire readback budget. The resolver still owns the single dispatch
+        // and requires the target's exact canonical URL before reading comments.
+        crate::interaction_hierarchy::open_pinned_target_by_hierarchy(
             session.as_ref(),
             labels,
             &package,

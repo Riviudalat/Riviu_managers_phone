@@ -357,8 +357,36 @@ pub(super) async fn build_publish_preflight_from_manifest_with_sheet(
         };
 
         let (package_name, version, locale, composer_ok, sound_picker_ok) = if android {
+            if let Err(error) = control.verify_automation_readiness(udid).await {
+                row_issues.push(preflight_issue(
+                    "device_not_ready",
+                    udid,
+                    &bundle.id,
+                    &error.to_string(),
+                ));
+            }
             match control.tiktok_build(udid).await {
                 Ok((package, version, locale)) => {
+                    let capabilities = riviu_core::app_automation::action_capabilities(
+                        udid, &package, &version, &locale, true,
+                    );
+                    let media_action =
+                        if matches!(bundle.media_kind, riviu_core::PublishMediaKind::Video) {
+                            "video"
+                        } else {
+                            "photo"
+                        };
+                    if let Err(error) = riviu_core::app_automation::require_actions(
+                        &capabilities,
+                        &[media_action, "sound"],
+                    ) {
+                        row_issues.push(preflight_issue(
+                            "action_unavailable",
+                            udid,
+                            &bundle.id,
+                            &error.to_string(),
+                        ));
+                    }
                     let base_composer_ok = matches!(
                         readiness_of_build(&package, &locale, &version),
                         PublishReadiness::HierarchyReady | PublishReadiness::HierarchyAdaptive
@@ -832,6 +860,10 @@ pub(super) fn sound_plan_for_build(
     locale: &str,
     version: &str,
 ) -> anyhow::Result<riviu_core::tiktok_sound::SoundPickerPlan> {
+    riviu_core::app_automation::require_actions(
+        &riviu_core::app_automation::action_capabilities("", package, version, locale, true),
+        &["sound"],
+    )?;
     riviu_core::tiktok_sound::SoundPickerPlan::resolve_runtime(package, locale, version).ok_or_else(
         || anyhow::anyhow!("sound picker chưa được đo cho {package} / {locale} / {version}"),
     )
@@ -842,6 +874,10 @@ pub(super) fn video_plan_for_build(
     locale: &str,
     version: &str,
 ) -> anyhow::Result<riviu_core::tiktok_composer::VideoPickerPlan> {
+    riviu_core::app_automation::require_actions(
+        &riviu_core::app_automation::action_capabilities("", package, version, locale, true),
+        &["video"],
+    )?;
     riviu_core::tiktok_composer::VideoPickerPlan::resolve_runtime(package, locale, version)
         .ok_or_else(|| {
             anyhow::anyhow!(

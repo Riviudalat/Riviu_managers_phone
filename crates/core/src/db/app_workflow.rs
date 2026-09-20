@@ -34,7 +34,7 @@ impl Database {
     ) -> anyhow::Result<Option<AppWorkflowV1>> {
         let conn = self.conn()?;
         let raw: Option<String> = if let Some(revision) = revision {
-            conn.query_row("SELECT document_json FROM app_workflow_revisions WHERE document_id=?1 AND revision=?2",params![id.to_string(),revision],|row|row.get(0)).optional()?
+            conn.query_row("SELECT document_json FROM app_workflow_revisions WHERE document_id=?1 AND revision=?2",params![id.to_string(),i64::try_from(revision)?],|row|row.get(0)).optional()?
         } else {
             conn.query_row(
                 "SELECT document_json FROM app_workflow_documents WHERE id=?1",
@@ -54,7 +54,7 @@ impl Database {
         compile_app_profile(&doc)?;
         let mut conn = self.conn()?;
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let current: Option<(u64, bool)> = tx
+        let current: Option<(i64, bool)> = tx
             .query_row(
                 "SELECT revision,archived FROM app_workflow_documents WHERE id=?1",
                 [doc.id.to_string()],
@@ -62,7 +62,7 @@ impl Database {
             )
             .optional()?;
         ensure!(
-            current.map(|r| r.0) == expected,
+            current.map(|r| r.0) == expected.map(i64::try_from).transpose()?,
             "App revision conflict; reload before saving"
         );
         ensure!(!current.is_some_and(|r| r.1), "App is archived");
@@ -72,13 +72,13 @@ impl Database {
             .context("Revision overflow")?;
         let raw = serde_json::to_string(&doc)?;
         let now = chrono::Utc::now().to_rfc3339();
-        tx.execute("INSERT INTO app_workflow_documents(id,revision,archived,document_json,updated_at) VALUES(?1,?2,0,?3,?4) ON CONFLICT(id) DO UPDATE SET revision=excluded.revision,document_json=excluded.document_json,updated_at=excluded.updated_at",params![doc.id.to_string(),doc.revision,raw,now])?;
-        tx.execute("INSERT INTO app_workflow_revisions(document_id,revision,document_json) VALUES(?1,?2,?3)",params![doc.id.to_string(),doc.revision,raw])?;
+        tx.execute("INSERT INTO app_workflow_documents(id,revision,archived,document_json,updated_at) VALUES(?1,?2,0,?3,?4) ON CONFLICT(id) DO UPDATE SET revision=excluded.revision,document_json=excluded.document_json,updated_at=excluded.updated_at",params![doc.id.to_string(),i64::try_from(doc.revision)?,raw,now])?;
+        tx.execute("INSERT INTO app_workflow_revisions(document_id,revision,document_json) VALUES(?1,?2,?3)",params![doc.id.to_string(),i64::try_from(doc.revision)?,raw])?;
         tx.commit()?;
         Ok(doc)
     }
     pub fn archive_app_workflow(&self, id: Uuid, revision: u64) -> anyhow::Result<()> {
-        ensure!(self.conn()?.execute("UPDATE app_workflow_documents SET archived=1 WHERE id=?1 AND revision=?2 AND archived=0",params![id.to_string(),revision])?==1,"App revision conflict");
+        ensure!(self.conn()?.execute("UPDATE app_workflow_documents SET archived=1 WHERE id=?1 AND revision=?2 AND archived=0",params![id.to_string(),i64::try_from(revision)?])?==1,"App revision conflict");
         Ok(())
     }
 }

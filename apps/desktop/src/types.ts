@@ -1,14 +1,18 @@
-export type ConnectionKind = "usb" | "wifi" | "mock";
-export type DeviceStatus =
-  | "disconnected"
-  | "pairing"
-  | "connected"
-  | "preparing"
-  | "ready"
-  | "busy"
-  | "error";
+import type {
+  DeviceInfo as DeviceInfoDto,
+  DevicePlatform,
+  DeviceStatus,
+  TileStreamState,
+} from "./generated-ipc";
 
-export type TileStreamState = "live" | "sampling" | "parked" | "stale" | "error";
+export type {
+  ConnectionKind,
+  DeviceStatus,
+  DevicePlatform,
+  TileStreamState,
+  OperationDeviceLogEntry,
+} from "./generated-ipc";
+import type { OperationDeviceLogEntry } from "./generated-ipc";
 
 const TILE_STREAM_LABELS: Record<TileStreamState, string> = {
   live: "Live",
@@ -26,8 +30,6 @@ export function tileStreamStateView(
   const resolved = state ?? (hasError ? "error" : hasFrame ? "live" : "parked");
   return { state: resolved, label: TILE_STREAM_LABELS[resolved] };
 }
-
-export type DevicePlatform = "ios" | "android";
 
 export type HardwareKey =
   | "home"
@@ -115,21 +117,16 @@ export interface GroupSyncPolicy {
   offset?: OffsetPolicy;
 }
 
-export interface DeviceInfo {
-  udid: string;
-  name: string;
-  model: string;
-  platform: DevicePlatform;
-  osVersion: string;
-  connection: ConnectionKind;
-  status: DeviceStatus;
-  battery?: number | null;
-  wdaReady: boolean;
-  wdaExpiresAt?: string | null;
-  streamUrl?: string | null;
-  tileStreamState?: TileStreamState;
-  lastError?: string | null;
-}
+// Older stored UI snapshots can omit nullable/defaulted fields. Their value
+// types still come from the Rust-generated wire contract.
+type OptionalDeviceFields =
+  | "battery"
+  | "wdaExpiresAt"
+  | "streamUrl"
+  | "tileStreamState"
+  | "lastError";
+export type DeviceInfo = Omit<DeviceInfoDto, OptionalDeviceFields>
+  & Partial<Pick<DeviceInfoDto, OptionalDeviceFields>>;
 
 export type StreamQuality = "low" | "medium" | "high" | "extra";
 
@@ -139,8 +136,8 @@ export interface StreamSettings {
   focusQuality: StreamQuality;
 }
 
-export type JobStatus = "queued" | "running" | "succeeded" | "failed" | "cancelled";
-export type StepStatus = "pending" | "running" | "succeeded" | "failed" | "skipped";
+export type JobStatus = "queued" | "running" | "succeeded" | "failed" | "cancelled" | "uncertain";
+export type StepStatus = "pending" | "running" | "succeeded" | "failed" | "skipped" | "uncertain";
 
 export interface JobStepRecord {
   index: number;
@@ -215,15 +212,6 @@ export interface OperationRunDetail {
   summary: OperationRunSummary;
   items: OperationRunItem[];
   batch?: { artifactId: string; target: ResolvedTargetSnapshot };
-}
-
-export interface OperationDeviceLogEntry {
-  id: string;
-  at: string | null;
-  action: string;
-  state: string;
-  text: string | null;
-  detail: string | null;
 }
 
 export interface OperationDeviceLog {
@@ -731,6 +719,7 @@ export interface NurtureWindow {
 export type SocialNetwork = "tiktok" | "instagram" | "threads";
 
 export interface NurtureSettings {
+  revision?: number;
   actionSelection?: "independent" | "exclusive";
   feedSource?: "forYou" | "search";
   searchKeyword?: string;
@@ -1090,6 +1079,7 @@ export type ThreadMode = "threaded" | "standalone";
 export type ThreadShape = "chain" | "star";
 
 export interface InteractionActionSet {
+  follow?: boolean;
   like: boolean;
   comment: boolean;
   save: boolean;

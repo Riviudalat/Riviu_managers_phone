@@ -800,7 +800,7 @@ impl AppState {
             registry.clone(),
             control.clone(),
             artifacts_dir.clone(),
-        );
+        )?;
         // Constructors below are idle. In particular, never call Flow recover_startup.
         let flow_artifacts = FlowArtifactStore::new(artifacts_dir.join("flows"))?;
         let interaction_artifacts = FlowArtifactStore::new(artifacts_dir.join("interactions"))?;
@@ -1088,6 +1088,10 @@ impl AppState {
         ));
         if let Some(android) = &android {
             android.set_gui_reasoner(gui_service.clone());
+            android.set_trace_recorder(riviu_core::ui_automation::trace::TraceRecorder::new(
+                artifacts_dir.join("traces"),
+                Arc::new(ios.streams.clone()),
+            )?);
         }
         let signing =
             SigningService::with_credentials(sidecar_root.join("signer"), credentials.clone());
@@ -1101,7 +1105,7 @@ impl AppState {
             registry.clone(),
             control.clone(),
             artifacts_dir.clone(),
-        );
+        )?;
 
         // The engine reads the screen from the frame stream the app already
         // runs for the device tiles, so it never has to ask WDA for a
@@ -1512,6 +1516,7 @@ impl AppState {
 
     pub(crate) fn reject_new_work(&self) {
         self.command_admission.reject_new_work();
+        self.background_stop.store(true, Ordering::Release);
         if let Err(error) = self.db.pause_publish_dispatch() {
             log::error!("pause publish queue: {error:#}");
         }
@@ -1531,7 +1536,11 @@ impl AppState {
             self.command_admission.clone(),
             self.background_stop.clone(),
         );
-        crate::orchestration_commands::resume_orchestration_runs(app.clone(), self);
+        if !(cfg!(debug_assertions)
+            && std::env::var("RIVIU_DEV_MANUAL_ACCEPTANCE").as_deref() == Ok("1"))
+        {
+            crate::orchestration_commands::resume_orchestration_runs(app.clone(), self);
+        }
         crate::orchestration_commands::start_automation_schedule_runner(app.clone(), self);
 
         // A submitted post may finish uploading after its command returns or after restart.
@@ -1716,6 +1725,7 @@ impl AppState {
 
         if let Some(android) = self.android.clone() {
             let registry = self.registry.clone();
+            let command_admission = self.command_admission.clone();
             let background_stop = self.background_stop.clone();
             let view_hub = self.view_hub.clone();
             let view_paint = self.view_paint.clone();
@@ -1731,9 +1741,13 @@ impl AppState {
                 loop {
                     interval.tick().await;
                     if background_stop.load(Ordering::Acquire) {
-                        android.stop_all_views().await;
                         return;
                     }
+                    // The entire pass, including joined starts, participates in
+                    // shutdown admission. No keeper can recreate a view after drain.
+                    let Ok(_admitted) = command_admission.ensure_accepting_work() else {
+                        return;
+                    };
                     // Say out loud whether the fine rule has anything to work with. When
                     // nobody is reporting paints the watchdog correctly falls back to the
                     // byte rule -- and that fallback is invisible, so a dead reporting path
@@ -1756,6 +1770,9 @@ impl AppState {
                     }
                     let mut starts = Vec::new();
                     for device in registry.list() {
+                        if background_stop.load(Ordering::Acquire) {
+                            break;
+                        }
                         if device.platform != riviu_core::DevicePlatform::Android {
                             continue;
                         }
@@ -2203,6 +2220,11 @@ impl AppState {
             let mut interval = tokio::time::interval(Duration::from_secs(30));
             loop {
                 interval.tick().await;
+                if cfg!(debug_assertions)
+                    && std::env::var("RIVIU_DEV_MANUAL_ACCEPTANCE").as_deref() == Ok("1")
+                {
+                    continue;
+                }
                 let Ok(schedules) = db.list_schedules() else {
                     continue;
                 };
@@ -2286,6 +2308,11 @@ impl AppState {
                 interval.tick().await;
                 if publish_stop.load(Ordering::Acquire) {
                     break;
+                }
+                if cfg!(debug_assertions)
+                    && std::env::var("RIVIU_DEV_MANUAL_ACCEPTANCE").as_deref() == Ok("1")
+                {
+                    continue;
                 }
                 let Ok(scheduled) = publish_db.scheduled_publish_campaigns() else {
                     continue;
@@ -2397,6 +2424,11 @@ impl AppState {
                 let Ok(settings) = db.get_nurture_settings() else {
                     continue;
                 };
+                if cfg!(debug_assertions)
+                    && std::env::var("RIVIU_DEV_MANUAL_ACCEPTANCE").as_deref() == Ok("1")
+                {
+                    continue;
+                }
                 if !settings.schedule_enabled {
                     continue;
                 }
@@ -3138,6 +3170,33 @@ mod tests {
             .await
             .expect("admitted retry released after runtime stop");
         retry.await.expect("join admitted retry");
+    }
+
+    #[test]
+    fn android_keeper_pass_is_drained_before_shutdown_tears_down_views() {
+        let source = include_str!("state.rs");
+        let keeper = source
+            .split("let mut view_retunes:")
+            .nth(1)
+            .unwrap()
+            .split("// One sampler owns")
+            .next()
+            .unwrap();
+        let admission = keeper
+            .find("command_admission.ensure_accepting_work()")
+            .unwrap();
+        let dispatch = keeper.find("starts.push(tokio::spawn").unwrap();
+        let join = keeper.find("for start in starts").unwrap();
+        assert!(admission < dispatch && dispatch < join);
+        assert!(!keeper.contains("stop_all_views().await"));
+        let reject = source
+            .split("pub(crate) fn reject_new_work(&self)")
+            .nth(1)
+            .unwrap()
+            .split("pub(crate) async fn wait_for_mutating_commands")
+            .next()
+            .unwrap();
+        assert!(reject.contains("background_stop.store(true"));
     }
 
     #[test]

@@ -19,6 +19,64 @@ fn err(e: impl std::fmt::Display) -> CommandError {
     CommandError::operation(e)
 }
 
+#[tauri::command]
+pub async fn typesafe_get_settings(
+    state: State<'_, AppState>,
+) -> Result<riviu_core::typesafe::Settings, CommandError> {
+    let _admission = state.ensure_accepting_work()?;
+    state
+        .db
+        .storage_read(|db| db.typesafe_settings())
+        .await
+        .map_err(err)
+}
+
+#[tauri::command]
+pub async fn typesafe_update_settings(
+    state: State<'_, AppState>,
+    enabled: bool,
+    expected_revision: u64,
+) -> Result<riviu_core::typesafe::Settings, CommandError> {
+    let _admission = state.ensure_accepting_work()?;
+    state
+        .db
+        .storage_write(move |db| db.update_typesafe_settings(enabled, expected_revision))
+        .await
+        .map_err(err)
+}
+
+#[tauri::command]
+pub async fn typesafe_update_credential(
+    state: State<'_, AppState>,
+    api_key: String,
+) -> Result<riviu_core::typesafe::Settings, CommandError> {
+    let _admission = state.ensure_accepting_work()?;
+    state
+        .db
+        .storage_write(move |db| db.update_typesafe_credential(&api_key))
+        .await
+        .map_err(err)
+}
+
+#[tauri::command]
+pub async fn typesafe_check_comment(
+    state: State<'_, AppState>,
+    candidate: String,
+    caption: Option<String>,
+    transcript: Option<String>,
+) -> Result<riviu_core::typesafe::Verdict, CommandError> {
+    let _admission = state.ensure_accepting_work()?;
+    let client = state
+        .db
+        .storage_read(|db| db.typesafe_client())
+        .await
+        .map_err(err)?;
+    client
+        .check(&candidate, caption.as_deref(), transcript.as_deref())
+        .await
+        .map_err(err)
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NurtureApiTestResult {
@@ -171,8 +229,14 @@ pub(crate) fn validate_nurture_settings(settings: &NurtureSettings) -> Result<()
 const API_KEY_UNCHANGED: &str = "__riviu_keep_stored_key__";
 
 #[tauri::command]
-pub fn nurture_get_settings(state: State<'_, AppState>) -> Result<NurtureSettings, CommandError> {
-    let mut settings = state.db.get_nurture_settings().map_err(err)?;
+pub async fn nurture_get_settings(
+    state: State<'_, AppState>,
+) -> Result<NurtureSettings, CommandError> {
+    let mut settings = state
+        .db
+        .storage_write(Database::get_nurture_settings)
+        .await
+        .map_err(err)?;
     // The key never leaves the backend. `has_api_key` is what the form needs to know.
     settings.has_api_key = !settings.api_key.trim().is_empty();
     if settings.has_api_key {
@@ -182,20 +246,34 @@ pub fn nurture_get_settings(state: State<'_, AppState>) -> Result<NurtureSetting
 }
 
 #[tauri::command]
-pub fn nurture_save_settings(
+pub async fn nurture_save_settings(
     state: State<'_, AppState>,
     settings: NurtureSettings,
+    expected_revision: u64,
+) -> Result<NurtureSettings, CommandError> {
+    let _admission = state.ensure_accepting_work()?;
+    state
+        .db
+        .storage_write(move |db| Ok(save_nurture_settings(db, settings, expected_revision)))
+        .await
+        .map_err(err)?
+}
+
+fn save_nurture_settings(
+    db: &Database,
+    settings: NurtureSettings,
+    expected_revision: u64,
 ) -> Result<NurtureSettings, CommandError> {
     let mut settings = settings;
-    let prev_for_key = state.db.get_nurture_settings().unwrap_or_default();
+    let prev_for_key = db.get_nurture_settings().map_err(err)?;
     if settings.api_key == API_KEY_UNCHANGED {
         settings.api_key = prev_for_key.api_key.clone();
     }
     let settings = settings;
     validate_nurture_settings(&settings)?;
-    let _admission = state.ensure_accepting_work()?;
     let prev = prev_for_key;
-    state.db.save_nurture_settings(&settings).map_err(err)?;
+    db.save_nurture_settings_cas(&settings, expected_revision)
+        .map_err(err)?;
     // When schedule is (re)enabled, schedule the next tick from now.
     if settings.schedule_enabled
         && (!prev.schedule_enabled
@@ -203,20 +281,54 @@ pub fn nurture_save_settings(
     {
         let every = settings.schedule_every_minutes.max(1) as i64;
         let next = (chrono::Utc::now() + chrono::Duration::minutes(every)).to_rfc3339();
-        let _ = state.db.set_setting("nurture.schedule.next_run_at", &next);
+        let _ = db.set_setting("nurture.schedule.next_run_at", &next);
     }
     if !settings.schedule_enabled {
-        let _ = state.db.set_setting("nurture.schedule.next_run_at", "");
+        let _ = db.set_setting("nurture.schedule.next_run_at", "");
     }
-    let _ = state.db.log_op("nurture.settings", &settings.model);
+    let _ = db.log_op("nurture.settings", &settings.model);
     // Answer with the same shape `nurture_get_settings` returns, so a save does not hand the
     // key back to the page that just stopped receiving it.
-    let mut echoed = settings;
+    let mut echoed = db.get_nurture_settings().map_err(err)?;
     echoed.has_api_key = !echoed.api_key.trim().is_empty();
     if echoed.has_api_key {
         echoed.api_key = API_KEY_UNCHANGED.to_string();
     }
     Ok(echoed)
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NurtureCredentialStatus {
+    api_key: String,
+    has_api_key: bool,
+}
+
+#[tauri::command]
+pub async fn nurture_update_credential(
+    state: State<'_, AppState>,
+    api_key: String,
+) -> Result<NurtureCredentialStatus, CommandError> {
+    let _admission = state.ensure_accepting_work()?;
+    let has_api_key = state
+        .db
+        .storage_write(move |db| {
+            if api_key == API_KEY_UNCHANGED {
+                Ok(!db.get_nurture_settings()?.api_key.trim().is_empty())
+            } else {
+                db.update_nurture_credential(&api_key)
+            }
+        })
+        .await
+        .map_err(err)?;
+    Ok(NurtureCredentialStatus {
+        api_key: if has_api_key {
+            API_KEY_UNCHANGED.into()
+        } else {
+            String::new()
+        },
+        has_api_key,
+    })
 }
 
 /// Whether a byte string starts with the JPEG SOI marker.
@@ -492,6 +604,13 @@ pub(crate) async fn preflight_comment_job(
 ) -> CommentPreflight {
     let mut preflight = CommentPreflight::default();
     for udid in udids {
+        if control.reports_element_bounds(udid) {
+            let actions = riviu_core::app_automation::nurture_actions(settings);
+            if let Err(error) = control.preflight_tiktok_actions(udid, &actions).await {
+                preflight.skipped.push(format!("{udid}: {error}"));
+                continue;
+            }
+        }
         if settings.feed_source == riviu_core::types::NurtureFeedSource::Search
             && !control.reports_element_bounds(udid)
         {

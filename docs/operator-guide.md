@@ -5,6 +5,16 @@ phạm vi máy rõ ràng và kết quả có thể đọc lại. Chọn hồ sơ
 
 ## Quy tắc chung
 
+Trong chi tiết thiết bị, **Kiểm tra khả năng** đọc package, phiên bản và ngôn ngữ
+TikTok qua controller. Các trạng thái phân biệt adapter đã đo, cần chứng minh
+trong phiên, chưa hỗ trợ và máy chưa sẵn sàng. Mỗi lần chạy vẫn phải qua preflight
+và xác minh đúng tài khoản, target và kết quả.
+
+Khóa API Nuôi được lưu riêng với cấu hình hành vi. Khi một cửa sổ khác đã lưu
+cấu hình mới hơn, lần lưu cũ bị từ chối; tải lại trước khi lưu tiếp. Script gián
+đoạn sau intent được giữ **chưa xác định**, không tự chạy lại. Dừng Script/Điều
+phối chờ kết quả đóng của từng máy trong snapshot, kể cả máy thuộc bước con.
+
 - Kiểm tra số máy, nhóm, ứng dụng và tài khoản đang hiển thị trước khi chạy.
 - Mỗi workspace automation giữ phạm vi riêng; đổi trang không biến một máy thành toàn bộ fleet.
 - Flow thiết bị/Điều phối giữ thao tác `Lưu`, `Bỏ thay đổi`, `Ở lại`. Các tab còn lại tự lưu thiết lập sau khi ngừng nhập và trước khi chuyển tab/đóng app; lỗi lưu xuất hiện tại vùng đang sửa.
@@ -326,6 +336,13 @@ khác nhau giữa các tài khoản; app báo chưa tìm thấy câu cha thay v�
 Tim/Lưu và bình luận thủ công không phụ thuộc cấu hình AI. “Bỏ qua: chưa đọc được
 trạng thái” không có nghĩa đã Tim/Lưu; xem lý do và bằng chứng trước khi chạy lượt mới.
 Nếu tên hiển thị khác handle, ứng dụng có thể đối chiếu link từ chính bài trước hành động.
+**Follow** theo dõi đúng tác giả của bài đích trên phiên bản đã hỗ trợ. App kiểm nick
+gán và profile trước thao tác; đã theo dõi thì bỏ qua, không đảo trạng thái. Sau khi bấm,
+app mở lại profile chuẩn và đọc trạng thái trước khi xác nhận thành công. Nếu TikTok
+hiện Following tạm thời rồi mất sau khi mở lại, kết quả giữ chưa chắc chắn và không bấm lại. Nếu kết
+quả chưa rõ, dùng **Kiểm tra lại kết quả** để đọc trạng thái hiện tại; nút này không
+Follow thêm và không xóa trạng thái chưa chắc chắn trong lịch sử. Account trên máy
+khác nick đã gán sẽ chặn tương tác; kiểm lại máy và nick trước khi tạo lượt mới.
 
 Công tắc **Tim bình luận của máy trước** cho máy trả lời tim đúng bình luận mà nó sắp
 trả lời, trước khi bấm Trả lời. Tim là bật/tắt nên app đọc trạng thái trước: bình luận
@@ -946,3 +963,21 @@ với desktop đang sở hữu thiết bị. Hướng dẫn này mô tả hợp 
 Khi dọn Sheet bị gián đoạn, kết nối hiển thị chưa sẵn sàng nhận bài. Tiếp tục cùng
 đợt dọn để giữ bản sao và hoàn tất; các dòng mới được nhận sau khi đọc lại xác nhận
 đã dọn. Gửi lại yêu cầu tạo bài bị mất phản hồi sẽ mở đúng chiến dịch đã tạo.
+# Kiểm bình luận bằng TypeSafe
+
+Trong **Nuôi TikTok → AI → TypeSafe**, lưu khóa TypeSafe rồi bấm **Kiểm tra bằng mẫu
+chữ** để kiểm kết nối. Phép kiểm này gọi dịch vụ bằng mẫu tiếng Việt, không bấm hoặc
+gửi nội dung trên điện thoại. Khóa nằm trong kho mật khẩu hệ điều hành; màn hình chỉ
+báo đã có khóa, không đọc lại giá trị. **Xóa khóa** không làm mất cấu hình Nuôi.
+
+Khi bật TypeSafe, các lượt tạo bình luận AI mới của Nuôi và Tương tác đối chiếu câu
+ứng viên với caption/lời thoại đã thu được. Phiên Nuôi lấy cấu hình TypeSafe lúc bắt
+đầu; muốn đổi cho phiên đang chạy, Dừng rồi chạy phiên mới. Bằng chứng chữ thiếu không
+thể thay kiểm ảnh. Bản chỉ có chữ phải đạt cả kiểm TypeSafe lẫn kiểm sinh nội dung;
+lỗi dịch vụ dừng lượt bình luận, không tự bỏ qua lớp kiểm để Gửi.
+
+Dịch vụ nhận phần chữ cần đối chiếu, không nhận khóa Google, ảnh màn hình hoặc thông
+tin USB. Số token và độ trễ TypeSafe được ghi riêng trong log backend; tổng USD của
+gateway sinh nội dung chưa bao gồm TypeSafe. TypeSafe không chứng minh đã Gửi, đúng
+account hoặc đã ghi Sheet; các bằng chứng đó vẫn do controller và verifier hiện có
+kiểm tra.

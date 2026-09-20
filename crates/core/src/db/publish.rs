@@ -483,7 +483,7 @@ impl Database {
         conn: &Connection,
         id: &str,
     ) -> anyhow::Result<Option<crate::publish::PublishCampaignDetail>> {
-        Self::get_publish_campaign_selection_from_connection(conn, id, None)
+        Self::get_publish_campaign_selection_from_connection(conn, id, None, true)
     }
 
     /// A stage worker loads only its publication's media/evidence. Campaign UI
@@ -498,6 +498,7 @@ impl Database {
             &self.conn()?,
             campaign_id,
             Some(assignment_id),
+            true,
         )
     }
 
@@ -505,6 +506,7 @@ impl Database {
         conn: &Connection,
         id: &str,
         assignment_id: Option<&str>,
+        include_history: bool,
     ) -> anyhow::Result<Option<crate::publish::PublishCampaignDetail>> {
         let Some((campaign, request)) = conn
             .query_row(
@@ -545,11 +547,11 @@ impl Database {
         };
 
         let mut bundle_stmt = conn.prepare(
-            "SELECT manifest_json FROM publish_bundles WHERE campaign_id=?1
+            "SELECT manifest_json FROM publish_bundles WHERE campaign_id=?1 AND ?3
              AND (?2 IS NULL OR id=(SELECT bundle_id FROM publish_assignments WHERE id=?2 AND campaign_id=?1)) ORDER BY ordinal",
         )?;
         let bundles = bundle_stmt
-            .query_map(params![id, assignment_id], |row| {
+            .query_map(params![id, assignment_id, include_history], |row| {
                 let json: String = row.get(0)?;
                 serde_json::from_str(&json).map_err(|error| {
                     rusqlite::Error::FromSqlConversionFailure(
@@ -566,7 +568,7 @@ impl Database {
              CASE WHEN sync.superseded_epoch IS NOT NULL THEN 'superseded' ELSE o.state END,o.attempts,o.last_error,o.next_attempt_at_ms,o.updated_at,
              a.publication_id,j.attempt_id,
              CASE WHEN j.assignment_id IS NULL THEN NULL ELSE json_object('phase',j.phase,'state',j.state,'queuedAtMs',j.queued_at_ms,
-             'startedAtMs',j.started_at_ms,'owner',j.owner,'reason',j.reason,'revision',j.revision) END
+             'startedAtMs',j.started_at_ms,'owner',j.owner,'reason',j.reason,'revision',j.revision) END,o.revision
              FROM publish_assignments a LEFT JOIN publish_sheet_outbox o ON o.assignment_id=a.id
              AND o.delivery_target_json IS NOT NULL LEFT JOIN publish_dispatch_jobs j ON j.assignment_id=a.id LEFT JOIN publish_sheet_sync_state sync ON sync.assignment_id=a.id WHERE a.campaign_id=?1 AND (?2 IS NULL OR a.id=?2) ORDER BY a.ordinal",
         )?;
@@ -582,6 +584,7 @@ impl Database {
                         .get::<_, Option<String>>(8)?
                         .map(|state| {
                             Ok::<_, rusqlite::Error>(crate::publish::PublishSheetDeliveryProgress {
+                                revision: row.get::<_, Option<i64>>(16)?.unwrap_or(0),
                                 state,
                                 attempts: narrow(
                                     row.get::<_, Option<i64>>(9)?.unwrap_or(0),
@@ -607,10 +610,10 @@ impl Database {
             .collect::<Result<Vec<_>, _>>()?;
 
         let mut event_stmt = conn.prepare(
-            "SELECT revision,kind,payload_json,created_at FROM publish_events WHERE campaign_id=?1 AND ?2 IS NULL ORDER BY revision",
+            "SELECT revision,kind,payload_json,created_at FROM publish_events WHERE campaign_id=?1 AND ?2 IS NULL AND ?3 ORDER BY revision",
         )?;
         let events = event_stmt
-            .query_map(params![id, assignment_id], |row| {
+            .query_map(params![id, assignment_id, include_history], |row| {
                 Ok(crate::publish::PublishEventRecord {
                     revision: row.get::<_, i64>(0)? as u64,
                     kind: row.get(1)?,
@@ -1265,6 +1268,13 @@ impl Database {
         campaign_id: &str,
     ) -> anyhow::Result<Option<crate::publish_runtime::PublishExecutionSnapshot>> {
         let conn = self.conn()?;
+        Self::get_publish_execution_snapshot_from_connection(&conn, campaign_id)
+    }
+
+    fn get_publish_execution_snapshot_from_connection(
+        conn: &Connection,
+        campaign_id: &str,
+    ) -> anyhow::Result<Option<crate::publish_runtime::PublishExecutionSnapshot>> {
         let row = conn
             .query_row(
                 "SELECT campaign_id,input_digest,status,retry_scope,report_json,updated_at
@@ -1299,6 +1309,37 @@ impl Database {
             },
         )
         .transpose()
+    }
+
+    /// Monitor projection omits media manifests/event history and reuses one
+    /// SQLite connection for the entire page. Retry decisions keep the same
+    /// typed assignment/snapshot projection as the detailed operation endpoint.
+    pub fn publish_operation_summaries(
+        &self,
+        ids: &[String],
+    ) -> anyhow::Result<Vec<crate::OperationRunSummary>> {
+        let conn = self.conn()?;
+        let mut summaries = Vec::with_capacity(ids.len());
+        for id in ids {
+            let Some(detail) =
+                Self::get_publish_campaign_selection_from_connection(&conn, id, None, false)?
+            else {
+                continue;
+            };
+            let snapshot = Self::get_publish_execution_snapshot_from_connection(&conn, id)?;
+            let mut summary =
+                crate::project_publish_detail_with_target(&detail, snapshot.as_ref(), None).summary;
+            let stopped = conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM settings WHERE key=?1)",
+                [format!("operation.stop.publish:{id}")],
+                |r| r.get::<_, bool>(0),
+            )?;
+            if stopped {
+                summary.state = crate::OperationRunState::Cancelled;
+            }
+            summaries.push(summary);
+        }
+        Ok(summaries)
     }
 
     /// Source bundle ids that some campaign has already **spoken for**.
@@ -1583,6 +1624,44 @@ impl Database {
 #[cfg(test)]
 mod claim_tests {
     use super::*;
+
+    #[test]
+    fn publication_monitor_projection_matches_detail_without_history_deserialization() {
+        let (db, path) = fixture();
+        let campaign = campaign(&db, &["phone-a", "phone-b"]);
+        let detail = db.get_publish_campaign(&campaign.id).unwrap().unwrap();
+        let expected = crate::project_publish_detail_with_target(&detail, None, None).summary;
+        let observed = db
+            .publish_operation_summaries(std::slice::from_ref(&campaign.id))
+            .unwrap();
+        assert_eq!(observed, vec![expected]);
+        let conn = db.conn().unwrap();
+        // Corrupt only data excluded from the monitor. Reading the full detail
+        // must still fail; monitoring must not deserialize media/event payloads.
+        conn.execute(
+            "UPDATE publish_bundles SET manifest_json='not-json' WHERE campaign_id=?1",
+            [&campaign.id],
+        )
+        .unwrap();
+        assert!(db.get_publish_campaign(&campaign.id).is_err());
+        assert_eq!(
+            db.publish_operation_summaries(std::slice::from_ref(&campaign.id))
+                .unwrap(),
+            observed
+        );
+        conn.execute(
+            "INSERT INTO settings(key,value) VALUES(?1,'{}')",
+            [format!("operation.stop.publish:{}", campaign.id)],
+        )
+        .unwrap();
+        assert_eq!(
+            db.publish_operation_summaries(&[campaign.id]).unwrap()[0].state,
+            crate::OperationRunState::Cancelled
+        );
+        drop(conn);
+        drop(db);
+        let _ = std::fs::remove_file(path);
+    }
 
     fn fixture() -> (Database, std::path::PathBuf) {
         let path = std::env::temp_dir().join(format!("riviu-publish-claim-{}.db", Uuid::new_v4()));

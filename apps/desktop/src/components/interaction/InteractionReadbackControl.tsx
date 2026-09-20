@@ -21,6 +21,7 @@ export function InteractionReadbackControl({ campaignId, assignmentId, disabled 
     {error && <small role="alert">{error}</small>}
     {reading && <div role="status">
       <small>Hiện tại: Tim {({ present: "đang có", absent: "chưa có", unknown: "chưa rõ" }[reading.like]) ?? "chưa rõ"}; Lưu {({ saved: "đang có", unsaved: "chưa có", unreadable: "chưa rõ" }[reading.save]) ?? "chưa rõ"}.</small>
+      {reading.follow && <small>Theo dõi {({ present: "đang có", absent: "chưa có", unknown: "chưa rõ" }[reading.follow]) ?? "chưa rõ"}.</small>}
       <small>Bình luận chưa được đối chiếu lại. Lịch sử gửi giữ nguyên.</small>
       <time dateTime={reading.checkedAt}>{new Date(reading.checkedAt).toLocaleString("vi-VN")}</time>
       <details><summary>Bằng chứng kiểm tra</summary><a href={reading.targetUrl} target="_blank" rel="noreferrer">Bài đã đối chiếu</a><code>{reading.snapshotSha256}</code></details>

@@ -2280,6 +2280,31 @@ mod tests {
 
     struct TestSession;
 
+    #[tokio::test]
+    async fn shared_tiktok_preflight_exposes_busy_locked_and_unknown_build_without_a_session() {
+        let driver = Arc::new(TestDriver::default());
+        let work = Arc::new(DeviceWorkCoordinator::new());
+        let control = DeviceControlPlane::new(
+            driver.clone(),
+            work.clone(),
+            Arc::new(StreamBudgetManager::default()),
+        );
+        assert!(control
+            .preflight_tiktok_actions("ready", &["feed", "follow"])
+            .await
+            .is_ok());
+        let _lease = work.try_acquire("busy", DeviceWorkOwner::Script).unwrap();
+        for udid in ["busy", "locked", "missing-build"] {
+            let report = control.tiktok_action_capabilities(udid).await;
+            assert!(crate::app_automation::require_actions(&report, &["feed"]).is_err());
+            assert!(report.actions.iter().all(|row| matches!(
+                row.state,
+                crate::ipc_contract::CapabilityEvidenceState::DeviceNotReady
+            )));
+        }
+        assert!(control.current_work_owner("ready").is_none());
+    }
+
     #[async_trait]
     impl crate::UiSession for TestSession {
         async fn tap(&self, _point: TapPoint) -> anyhow::Result<()> {
@@ -2313,6 +2338,18 @@ mod tests {
 
     #[async_trait]
     impl crate::DeviceDriver for TestDriver {
+        async fn tiktok_build(&self, udid: &str) -> anyhow::Result<(String, String, String)> {
+            anyhow::ensure!(udid != "missing-build", "fixture build unreadable");
+            Ok((
+                "com.ss.android.ugc.trill".into(),
+                "38.3.2".into(),
+                "en".into(),
+            ))
+        }
+        async fn verify_automation_readiness(&self, udid: &str) -> anyhow::Result<()> {
+            anyhow::ensure!(udid != "locked", "fixture screen locked");
+            Ok(())
+        }
         async fn stage_publish_media(
             &self,
             _udid: &str,

@@ -350,6 +350,7 @@ mod tests {
     ) -> (PublicCleanupSourceAction, ResolvedTikTokTarget) {
         let target = target(content_id);
         let actions = InteractionActionSet {
+            follow: false,
             like: kind == InteractionActionKind::Like,
             save: kind == InteractionActionKind::Save,
             comment: false,

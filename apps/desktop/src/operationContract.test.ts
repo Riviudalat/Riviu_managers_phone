@@ -46,6 +46,7 @@ describe("operations Rust/TypeScript contract", () => {
   });
 
   it("invokes the exact list and detail commands", async () => {
+    vi.mocked(invoke).mockResolvedValueOnce([]).mockResolvedValueOnce(null);
     await operationListRuns(25);
     await operationGetRun("flow:run-a");
 

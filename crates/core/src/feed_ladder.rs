@@ -268,6 +268,42 @@ pub async fn step(
         return LadderStep::OnFeed;
     }
 
+    // Read the full tree only behind the measured modal. A negative label alone
+    // is not enough to select a button in another prompt or an underlying page.
+    if labels.package() == "com.ss.android.ugc.trill"
+        && labels.resource_version() == Some("38.3.2")
+        && labels.language() == "en"
+        && session.supports_accessibility_readback()
+        && session
+            .locate(crate::ElementQuery::Description {
+                value: "Dialog",
+                exact: true,
+            })
+            .await
+            .ok()
+            .flatten()
+            .is_some()
+    {
+        if let Ok(tree) = session
+            .hierarchy_source_snapshot()
+            .await
+            .and_then(crate::ui_automation::tree::Tree::parse)
+        {
+            if let Some(button) = crate::app_automation::dialogs::decline_contacts(&tree, labels) {
+                return match session.tap(button.centre()).await {
+                    Ok(()) => LadderStep::Tapped {
+                        control: TikTokControl::DialogDismiss,
+                        says: "từ chối đồng bộ danh bạ trong hộp thoại TikTok",
+                    },
+                    Err(error) => LadderStep::TapFailed {
+                        control: TikTokControl::DialogDismiss,
+                        error: error.to_string(),
+                    },
+                };
+            }
+        }
+    }
+
     for (index, rung) in FEED_LADDER.iter().enumerate() {
         if !rung.repeatable && spend.already_fired(index) {
             continue;
@@ -356,6 +392,7 @@ mod tests {
         tapped: Mutex<Vec<TapPoint>>,
         backs: AtomicUsize,
         refuse_taps: bool,
+        xml: Option<String>,
     }
 
     impl FakePhone {
@@ -380,6 +417,22 @@ mod tests {
 
     #[async_trait::async_trait]
     impl UiSession for FakePhone {
+        fn supports_accessibility_readback(&self) -> bool {
+            self.xml.is_some()
+        }
+
+        async fn hierarchy_source_snapshot(
+            &self,
+        ) -> anyhow::Result<crate::HierarchySourceSnapshot> {
+            Ok(crate::HierarchySourceSnapshot {
+                generation: 1,
+                xml: self
+                    .xml
+                    .clone()
+                    .ok_or_else(|| anyhow::anyhow!("no fixture"))?,
+            })
+        }
+
         async fn tap(&self, point: TapPoint) -> anyhow::Result<()> {
             if self.refuse_taps {
                 anyhow::bail!("máy từ chối");
@@ -439,6 +492,38 @@ mod tests {
                 enabled: true,
                 clickable: true,
             }))
+        }
+    }
+
+    #[tokio::test]
+    async fn contacts_modal_declines_only_the_measured_prompt() {
+        let xml = include_str!("../fixtures/tiktok-publish/contacts-sync-trill-38.3.2-en.fixture");
+        for (xml, expected_taps) in [
+            (xml.to_owned(), 1),
+            (
+                xml.replace("syncing your phone contacts", "sharing your location"),
+                0,
+            ),
+            (xml.replace("Don’t allow", "Allow"), 0),
+        ] {
+            let mut phone = FakePhone::showing_desc(&["Dialog"]);
+            phone.xml = Some(xml);
+            let result = step(&phone, measured(), &mut LadderSpend::new(0)).await;
+            assert_eq!(phone.taps(), expected_taps);
+            if expected_taps == 1 {
+                assert!(matches!(
+                    result,
+                    LadderStep::Tapped {
+                        control: TikTokControl::DialogDismiss,
+                        ..
+                    }
+                ));
+                let points = phone.tapped.lock().unwrap();
+                let point = &points[0];
+                assert_eq!((point.x, point.y), (329.5, 1305.5));
+            } else {
+                assert_eq!(result, LadderStep::Stuck);
+            }
         }
     }
 

@@ -10,32 +10,37 @@ use super::*;
 const SECTION_WINDOW: Duration = Duration::from_secs(60);
 const SNAPSHOT_POOL_WINDOW: Duration = SOUND_WINDOW;
 
-/// One extra observation per phase after the driver's exhausted read recovery.
-/// Clear the previous generation before waiting; a stale rectangle cannot authorize a tap.
+/// A loading sheet may temporarily have no accessibility root. Keep observing
+/// within the existing phase/global deadline, clearing prior geometry each time.
+/// Only successful fresh snapshots can authorize a later navigation tap.
 async fn read_snapshot(
     session: &dyn UiSession,
     deadline: Instant,
-    recovery_used: &mut bool,
+    recoveries: &mut u32,
 ) -> anyhow::Result<Option<String>> {
     let started = Instant::now();
     check_wait()?;
-    match read_sound(session.hierarchy_source_snapshot()).await {
+    anyhow::ensure!(
+        started < deadline,
+        "đọc bảng nhạc hết thời gian chờ; chưa bấm Đăng"
+    );
+    let observed =
+        tokio::time::timeout_at(deadline, read_sound(session.hierarchy_source_snapshot()))
+            .await
+            .context("đọc bảng nhạc hết thời gian chờ 3 phút; chưa bấm Đăng")?;
+    match observed {
         Ok(snapshot) => Ok(Some(snapshot.xml)),
-        Err(error)
-            if transient_sound_read(&error)
-                && !*recovery_used
-                && Instant::now() + POLL < deadline =>
-        {
-            *recovery_used = true;
+        Err(error) if transient_sound_read(&error) && Instant::now() + POLL < deadline => {
+            *recoveries += 1;
             tracing::warn!(elapsed_ms = started.elapsed().as_millis() as u64,
-                    recovery = 1, remaining_ms = deadline.saturating_duration_since(Instant::now()).as_millis() as u64,
+                    recovery = *recoveries, remaining_ms = deadline.saturating_duration_since(Instant::now()).as_millis() as u64,
                     error = %error, "sound screen read unavailable; observing once more");
             tokio::time::sleep(POLL).await;
             Ok(None)
         }
         Err(error) => Err(error.context(format!(
             "đọc bảng nhạc thất bại sau {} lần phục hồi bổ sung; request {} ms",
-            usize::from(*recovery_used),
+            *recoveries,
             started.elapsed().as_millis()
         ))),
     }
@@ -112,15 +117,45 @@ pub(super) async fn select_section_tab(
     let deadline = phase_deadline(SECTION_WINDOW);
     let mut previous: Option<ElementBox> = None;
     let mut attempts = 0;
+    let mut used_image_navigation = false;
     let mut retry_after = Instant::now();
-    let mut recovery_used = false;
+    let mut recovery_used = 0;
+    let mut observation = "sound sheet not yet observed".to_string();
     loop {
-        let Some(xml) = read_snapshot(session, deadline, &mut recovery_used).await? else {
+        let xml = read_snapshot(session, deadline, &mut recovery_used)
+            .await
+            .with_context(|| {
+                format!(
+                    "{} sound section did not become selected after {attempts} tap(s): {observation}",
+                    plan.section_label
+                )
+            })?;
+        let parsed = xml.as_deref().map(|xml| parse(xml, plan)).transpose()?;
+        let Some(parsed) = parsed.filter(|nodes| !nodes.is_empty()) else {
             previous = None;
+            // 45.7.3 can render all four tabs while returning no accessibility
+            // root. Two bound native frames may navigate Hot once, but cannot
+            // stand in for the XML tab/row proof required below and by observe.
+            if attempts == 0
+                && !used_image_navigation
+                && selection_recovery::measured(plan)
+                && session.gui_reasoner().is_some()
+            {
+                let point = selection_recovery::prove_sheet(session, plan).await?;
+                anyhow::ensure!(Instant::now() < deadline, "sound tab recovery expired");
+                used_image_navigation = true;
+                attempts += 1;
+                tracing::info!(
+                    x = point.x,
+                    y = point.y,
+                    "sound Hot navigation proved by two fresh OCR frames"
+                );
+                sound_tap(session, point).await?;
+                observation = "Hot navigation dispatched; awaiting XML confirmation".into();
+            }
             continue;
         };
-        let parsed = parse(&xml, plan)?;
-        let observation = match section_tab(&parsed, plan) {
+        observation = match section_tab(&parsed, plan) {
             Ok((_, true)) => return Ok(()),
             Ok((tab, false)) => {
                 // LAN 46.0.41 campaigns stopped here without selecting Hot
@@ -129,6 +164,7 @@ pub(super) async fn select_section_tab(
                 // may authorize one retry. Sound rows themselves remain single-tap.
                 let now = Instant::now();
                 if previous.as_ref() == Some(tab)
+                    && !used_image_navigation
                     && attempts < 2
                     && now >= retry_after
                     && now < deadline
@@ -226,13 +262,38 @@ pub(super) async fn observe(
     plan: SoundPickerPlan,
     maximum: usize,
 ) -> anyhow::Result<ObservedSoundPool> {
+    observe_inner(session, plan, maximum, true).await
+}
+
+/// Once a sound has been tapped, propagate unreadable UI to the caller so it
+/// can prove the sheet visually and verify the editor instead of spending the
+/// entire remaining budget polling a broken root. Never repeat the selection.
+pub(super) async fn observe_after_selection(
+    session: &dyn UiSession,
+    plan: SoundPickerPlan,
+    maximum: usize,
+) -> anyhow::Result<ObservedSoundPool> {
+    observe_inner(session, plan, maximum, false).await
+}
+
+async fn observe_inner(
+    session: &dyn UiSession,
+    plan: SoundPickerPlan,
+    maximum: usize,
+    retry_unavailable: bool,
+) -> anyhow::Result<ObservedSoundPool> {
     let deadline = phase_deadline(SNAPSHOT_POOL_WINDOW);
     let mut previous: Option<ObservedSoundPool> = None;
-    let mut recovery_used = false;
+    let mut recovery_used = 0;
     loop {
-        let Some(xml) = read_snapshot(session, deadline, &mut recovery_used).await? else {
-            previous = None;
-            continue;
+        let xml = if retry_unavailable {
+            let Some(xml) = read_snapshot(session, deadline, &mut recovery_used).await? else {
+                previous = None;
+                continue;
+            };
+            xml
+        } else {
+            read_sound(session.hierarchy_source_snapshot()).await?.xml
         };
         let observed = pool(&xml, plan, maximum);
         match observed {
@@ -458,10 +519,40 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn repeated_source_failure_stops_without_any_tap() {
         let mut s = session(false);
-        s.failed_snapshots = vec![1, 2];
+        s.failed_snapshots = (1..=1000).collect();
+        s.snapshot_delay = Duration::from_secs(21);
+        let started = Instant::now();
         let error = select_section_tab(&s, plan()).await.unwrap_err();
-        assert!(format!("{error:#}").contains("1 lần phục hồi"));
-        assert_eq!(s.snapshots.load(Ordering::Relaxed), 2);
+        assert!(format!("{error:#}").contains("đọc bảng nhạc"));
+        assert!(started.elapsed() <= SECTION_WINDOW);
+        assert_eq!(s.taps.load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn loading_sound_sheet_keeps_observing_within_budget_and_discards_stale_geometry() {
+        let mut s = session(false);
+        s.failed_snapshots = vec![2, 3];
+        s.snapshot_delay = Duration::from_secs(4);
+        select_section_tab(&s, plan()).await.unwrap();
+        assert_eq!(*s.tap_snapshots.lock().unwrap(), vec![5]);
+        assert_eq!(s.taps.load(Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn loading_sound_read_recovery_still_honors_stop_without_a_tap() {
+        let mut s = session(false);
+        s.failed_snapshots = (1..=1000).collect();
+        s.snapshot_delay = Duration::from_secs(4);
+        let stop = AtomicBool::new(false);
+        let started = Instant::now();
+        let work = with_sound_budget(&stop, select_section_tab(&s, plan()));
+        let cancel = async {
+            tokio::time::sleep(Duration::from_secs(10)).await;
+            stop.store(true, Ordering::Relaxed);
+        };
+        let (result, ()) = tokio::join!(work, cancel);
+        assert!(result.unwrap_err().is::<SoundStopped>());
+        assert!(started.elapsed() < Duration::from_secs(11));
         assert_eq!(s.taps.load(Ordering::Relaxed), 0);
     }
 
@@ -648,6 +739,17 @@ mod tests {
         assert!(choose_and_confirm_sound(&s, plan(), &p, 1).await.is_err());
         assert_eq!(s.taps.load(Ordering::Relaxed), 2);
         assert!(!s.closed.load(Ordering::Relaxed));
+    }
+    #[tokio::test(start_paused = true)]
+    async fn other_measured_builds_keep_read_recovery_after_selection() {
+        let mut s = session(false);
+        select_section_tab(&s, plan()).await.unwrap();
+        let p = observe(&s, plan(), 5).await.unwrap();
+        // The next two reads reprove the pool before the single selection tap.
+        s.failed_snapshots = vec![s.snapshots.load(Ordering::Relaxed) + 3];
+        choose_and_confirm_sound(&s, plan(), &p, 1).await.unwrap();
+        assert_eq!(s.taps.load(Ordering::Relaxed), 2);
+        assert!(s.closed.load(Ordering::Relaxed));
     }
     #[tokio::test(start_paused = true)]
     async fn selected_marker_does_not_replace_exact_editor_readback() {

@@ -476,6 +476,17 @@ impl NurtureSaveJournal for NurtureSaveLedger<'_> {
             return Ok(());
         };
         let state = match evidence.verdict {
+            SaveVerdict::FailedBeforeEffect if !evidence.effect_boundary_crossed => {
+                anyhow::ensure!(
+                    self.db.cancel_armed_nurture_save(
+                        &lease.owner,
+                        lease.armed_revision,
+                        evidence
+                    )?,
+                    "Save cancellation lost ownership"
+                );
+                return Ok(());
+            }
             SaveVerdict::Saved => InteractionActionState::Confirmed,
             SaveVerdict::CardChangedAfterEffect
             | SaveVerdict::NotConfirmed
@@ -1270,6 +1281,11 @@ impl NurtureEngine {
     /// reopens those rates; only `NoSource` keeps the initial snapshot. Which fields are picked
     /// up, and why the rest are not, is [`NurtureSettings::absorb_live_changes`].
     fn absorb_live_settings(&self, settings: &mut NurtureSettings) -> anyhow::Result<()> {
+        if cfg!(debug_assertions)
+            && std::env::var("RIVIU_DEV_MANUAL_ACCEPTANCE").as_deref() == Ok("1")
+        {
+            return Ok(());
+        }
         let fresh = self.db.get_nurture_settings()?;
         settings.absorb_live_changes(&fresh);
         // Re-fold the switches: `absorb_live_changes` copies the stored probabilities, which
@@ -1415,7 +1431,10 @@ impl NurtureEngine {
         };
 
         session.set_gui_scope(crate::ui_automation::GuiScope {
-            run_id: ctx.session_id.into(),
+            run_id: status
+                .run_id
+                .map(|id| id.to_string())
+                .unwrap_or_else(|| ctx.session_id.into()),
             assignment_id: None,
             device_id: ctx.udid.into(),
             deadline_ms: status.deadline_at.map(|at| at.timestamp_millis()),
@@ -2020,7 +2039,15 @@ impl NurtureEngine {
                     let card_key = format!("card-{}", progress.status.videos_done);
                     let mut lease = None;
                     let evidence = tiktok_save(&mut adapter, |observation| {
+                        anyhow::ensure!(
+                            !ctx.stop.load(Ordering::Acquire),
+                            "nurture Save cancelled before intent"
+                        );
                         lease = Some(ledger.arm(&card_key, observation)?);
+                        anyhow::ensure!(
+                            !ctx.stop.load(Ordering::Acquire),
+                            "nurture Save cancelled before tap"
+                        );
                         Ok(())
                     })
                     .await;

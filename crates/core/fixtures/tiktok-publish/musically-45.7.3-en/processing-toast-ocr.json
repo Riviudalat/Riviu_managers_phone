@@ -1,0 +1,56 @@
+{
+  "package": "com.zhiliaoapp.musically",
+  "version": "45.7.3",
+  "locale": "en",
+  "sourceFrame": [
+    1080,
+    2220
+  ],
+  "crop": [
+    0,
+    0,
+    1080,
+    555
+  ],
+  "roi": {
+    "x": 300,
+    "y": 100,
+    "width": 490,
+    "height": 85
+  },
+  "purpose": "pending processing observation only; never publication proof",
+  "observations": [
+    {
+      "file": "processing-toast-upper.png",
+      "sha256": "ca917505f6a347b92fff141a76e24a7d677d0ce1abe0c0eb3a4093c587c8e92c",
+      "lines": [
+        {
+          "text": "Post is being processed",
+          "bounds": {
+            "x": 336,
+            "y": 125,
+            "width": 410,
+            "height": 36
+          },
+          "confidence": 0.9293498992919922
+        }
+      ]
+    },
+    {
+      "file": "processing-before-upper.png",
+      "sha256": "961c91d351c1c6382c3548213981e979b13ab878b048f444fe91eb3c7a0f7524",
+      "lines": [
+        {
+          "text": "d related content",
+          "bounds": {
+            "x": 300,
+            "y": 116,
+            "width": 313,
+            "height": 30
+          },
+          "confidence": 0.9518766021728516
+        }
+      ]
+    }
+  ]
+}

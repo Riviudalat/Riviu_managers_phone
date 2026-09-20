@@ -1,6 +1,7 @@
 import { Activity, useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import { ArrowDown, ArrowLeft, ArrowUp, CheckCircle2, CircleAlert, Clock3, FileSearch, Info, List, RefreshCw, Search } from "lucide-react";
-import { operationDeviceLog, operationGetRun } from "../../api";
+import { operationDeviceLog, operationGetRun, operationTraceExport } from "../../api";
+import { describeError } from "../../describeError";
 import { ProgressBar } from "../../components/ProgressBar";
 import { StatusChip, WorkspaceTabs } from "../../components/WorkspacePrimitives";
 import type { NurtureSessionStatus, OperationRunSummary } from "../../types";
@@ -15,17 +16,24 @@ export function MonitorReadError({ message, retry }: { message: string; retry: (
 
 function DeviceTimeline({ operationId, udid }: { operationId: string; udid: string }) {
   const read = useCallback(() => operationDeviceLog(operationId, udid), [operationId, udid]);
-  const state = useMonitorRead(read);
+  const state = useMonitorRead(read, 2000, ["deviceTimeline", operationId, udid]);
   const [newestFirst, setNewestFirst] = useState(true);
+  const [exportResult, setExportResult] = useState<string | null>(null);
+  const exportTrace = async () => {
+    try { const result = await operationTraceExport(operationId, udid); setExportResult(`${result.path}\nSHA-256 ${result.sha256}`); }
+    catch (error) { setExportResult(describeError(error)); }
+  };
   const rows = useMemo(() => compactLogEntries(timelineEntries(state.value?.entries ?? [])), [state.value]);
   if (state.error) return <MonitorReadError message={`Chưa đọc được nhật ký: ${state.error}`} retry={state.retry} />;
   if (!state.value) return <p className="run-monitor-empty" role="status">Đang đọc nhật ký…</p>;
   return <>
     <div className="run-log-toolbar"><span>{state.value.truncated ? "500 mốc gần nhất" : `${rows.length} mốc ghi nhận`}</span>
+      <button type="button" onClick={() => void exportTrace()}>Xuất bằng chứng</button>
       <button type="button" className="ghost" onClick={() => setNewestFirst((value) => !value)}>
         {newestFirst ? <ArrowDown size={14} /> : <ArrowUp size={14} />}{newestFirst ? "Mới nhất trước" : "Cũ nhất trước"}
       </button>
     </div>
+    {exportResult && <pre role="status">{exportResult}</pre>}
     <div className="run-log-scroll">
       {rows.length === 0 ? <p className="run-monitor-empty">Chưa có nhật ký cho máy này.</p> : <ol className="run-device-log" aria-label="Nhật ký theo thời gian">
         {(newestFirst ? [...rows].reverse() : rows).map(({ entry, count, lastAt }) => {
@@ -52,7 +60,7 @@ export function OperationRunDevices({ run, labels, sessions, compact = false }: 
     if (!next || next.summary.id !== run.id) throw new Error("Tác vụ không còn trong nguồn dữ liệu.");
     return next;
   }, [run.id]);
-  const state = useMonitorRead(read);
+  const state = useMonitorRead(read, 2000, ["run", run.id]);
   const [selected, setSelected] = useState<string | null>(null);
   const [tab, setTab] = useState("log");
   const [search, setSearch] = useState("");

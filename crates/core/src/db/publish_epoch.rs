@@ -14,14 +14,14 @@ impl Database {
         let mut conn = self.conn()?;
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let pending: Option<String>=tx.query_row("SELECT pending_epoch FROM publish_reporting_epochs WHERE spreadsheet_id=?1 AND sheet_gid=?2 AND paused=1",
-            params![target.spreadsheet_id,target.sheet_gid],|r|r.get(0)).optional()?.flatten();
+            params![target.spreadsheet_id,i64::try_from(target.sheet_gid)?],|r|r.get(0)).optional()?.flatten();
         anyhow::ensure!(
             pending.as_deref().is_none_or(|v| v == new_epoch),
             "Một đợt dọn Sheet đang chờ hoàn tất"
         );
         tx.execute("INSERT INTO publish_reporting_epochs(spreadsheet_id,sheet_gid,epoch,paused,pending_epoch) VALUES(?1,?2,?3,1,?4)
             ON CONFLICT(spreadsheet_id,sheet_gid) DO UPDATE SET paused=1,pending_epoch=excluded.pending_epoch",
-            params![target.spreadsheet_id,target.sheet_gid,target.reporting_epoch.as_deref().unwrap_or("legacy"),new_epoch])?;
+            params![target.spreadsheet_id,i64::try_from(target.sheet_gid)?,target.reporting_epoch.as_deref().unwrap_or("legacy"),new_epoch])?;
         tx.commit()?;
         Ok(())
     }
@@ -55,7 +55,7 @@ impl Database {
             "Request Sheet đang chạy; chờ kết thúc trước khi hoàn tất đợt dọn"
         );
         let pending:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM publish_reporting_epochs WHERE spreadsheet_id=?1 AND sheet_gid=?2 AND paused=1 AND pending_epoch=?3)",
-            params![target.spreadsheet_id,target.sheet_gid,new_epoch],|r|r.get(0))?;
+            params![target.spreadsheet_id,i64::try_from(target.sheet_gid)?,new_epoch],|r|r.get(0))?;
         anyhow::ensure!(pending, "Reset Sheet đã thay đổi; đọc lại trạng thái");
         tx.execute("INSERT OR IGNORE INTO publish_sheet_sync_state(assignment_id) SELECT assignment_id FROM publish_sheet_outbox WHERE delivery_target_json IS NOT NULL",[])?;
         // Enroll every old assignment now, including those whose link arrives later.
@@ -63,7 +63,7 @@ impl Database {
             SELECT a.id FROM publish_assignments a JOIN publish_campaigns c ON c.id=a.campaign_id
             WHERE json_extract(c.request_json,'$.sheetDelivery.spreadsheetId')=?1 AND json_extract(c.request_json,'$.sheetDelivery.sheetGid')=?2
             AND COALESCE(json_extract(c.request_json,'$.sheetDelivery.reportingEpoch'),'legacy')<>?3",
-            params![target.spreadsheet_id,target.sheet_gid,new_epoch])?;
+            params![target.spreadsheet_id,i64::try_from(target.sheet_gid)?,new_epoch])?;
         tx.execute("UPDATE publish_sheet_sync_state SET superseded_epoch=?3,claim_token=NULL,claim_until_ms=NULL,claim_kind=NULL
             WHERE assignment_id IN (SELECT a.id FROM publish_assignments a JOIN publish_campaigns c ON c.id=a.campaign_id
               WHERE json_extract(c.request_json,'$.sheetDelivery.spreadsheetId')=?1 AND json_extract(c.request_json,'$.sheetDelivery.sheetGid')=?2
@@ -71,9 +71,9 @@ impl Database {
             OR assignment_id IN(SELECT assignment_id FROM publish_sheet_outbox
               WHERE json_extract(delivery_target_json,'$.spreadsheetId')=?1 AND json_extract(delivery_target_json,'$.sheetGid')=?2
               AND COALESCE(json_extract(delivery_target_json,'$.reportingEpoch'),'legacy')<>?3)",
-            params![target.spreadsheet_id,target.sheet_gid,new_epoch])?;
+            params![target.spreadsheet_id,i64::try_from(target.sheet_gid)?,new_epoch])?;
         tx.execute("UPDATE publish_reporting_epochs SET epoch=?3,paused=0,pending_epoch=NULL WHERE spreadsheet_id=?1 AND sheet_gid=?2",
-            params![target.spreadsheet_id,target.sheet_gid,new_epoch])?;
+            params![target.spreadsheet_id,i64::try_from(target.sheet_gid)?,new_epoch])?;
         tx.execute("INSERT INTO settings(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
             params![format!("publish.sheet.backup.{new_epoch}"),backup_id])?;
         let direct: Option<String> = tx

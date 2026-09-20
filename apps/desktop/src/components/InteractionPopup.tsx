@@ -619,7 +619,7 @@ export function InteractionPopup({
       if (pageSurface) {
         const approved = await requestConfirm({
           title: "Xác nhận tương tác",
-          message: `${validTargets.length} bài sẽ được mở trên ${effectiveActors.length} máy. Thực hiện: ${[draft.actions.like && "Tim", draft.actions.save && "Lưu", draft.actions.comment && "Bình luận"].filter(Boolean).join(" → ")}. Khi kết quả chưa rõ, lượt đó dừng để kiểm tra và không tự gửi lại.`,
+          message: `${validTargets.length} bài sẽ được mở trên ${effectiveActors.length} máy. Thực hiện: ${[draft.actions.like && "Tim", draft.actions.save && "Lưu", draft.actions.follow && "Theo dõi", draft.actions.comment && "Bình luận"].filter(Boolean).join(" → ")}. Khi kết quả chưa rõ, lượt đó dừng để kiểm tra và không tự gửi lại.`,
           confirmLabel: "Bắt đầu tương tác",
           cancelLabel: "Quay lại",
         });

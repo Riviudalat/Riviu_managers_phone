@@ -17,6 +17,7 @@ import {
   listenRiviuEvents,
   nurtureGetSettings,
   nurtureSaveSettings,
+  nurtureUpdateCredential,
   nurtureSessionLogSummary,
   nurtureSessionStatus,
   nurtureStart,
@@ -580,7 +581,11 @@ export function NurturePopup({
       ...s,
       scheduleUdids: s.scheduleEnabled ? targets : s.scheduleUdids,
     };
-    const saved = await nurtureSaveSettings(payload);
+    // Credential writes cannot replace a settings revision. Flush an edited key
+    // explicitly before Start/Save as the debounced autosave may still be pending.
+    const credential = s.apiKey !== credentialBaseline ? await nurtureUpdateCredential(s.apiKey) : null;
+    const stored = await nurtureSaveSettings(payload);
+    const saved = credential ? { ...stored, ...credential } : stored;
     if (settingsRef.current !== settings || targetRefLatest.current !== targetRef) return false;
     setSettings(saved);
     if (!applyDefaultsOnly) setBaseline({ settings: saved, target: targetRef });
@@ -613,8 +618,7 @@ export function NurturePopup({
     autoSave: async () => {
       if (!settings) return false;
       const apiKey = settings.apiKey;
-      const persisted = await nurtureGetSettings();
-      const saved = await nurtureSaveSettings({ ...persisted, apiKey });
+      const saved = await nurtureUpdateCredential(apiKey);
       if (settingsRef.current?.apiKey !== apiKey) return false;
       setSettings(current => current ? { ...current, apiKey: saved.apiKey, hasApiKey: saved.hasApiKey } : current);
       setCredentialBaseline(saved.apiKey);
@@ -627,8 +631,7 @@ export function NurturePopup({
       if (!settings) return false;
       const apiKey = settings.apiKey;
       try {
-        const persisted = await nurtureGetSettings();
-        const saved = await nurtureSaveSettings({ ...persisted, apiKey });
+        const saved = await nurtureUpdateCredential(apiKey);
         if (settingsRef.current?.apiKey !== apiKey) return false;
         setSettings((current) => current ? { ...current, apiKey: saved.apiKey, hasApiKey: saved.hasApiKey } : current);
         setCredentialBaseline(saved.apiKey);

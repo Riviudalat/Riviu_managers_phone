@@ -110,6 +110,8 @@ impl ScreenCache {
 }
 
 pub struct AndroidUiSession {
+    trace: Option<riviu_core::ui_automation::trace::TraceRecorder>,
+    trace_sequence: AtomicU64,
     gui_scope: parking_lot::Mutex<Option<riviu_core::ui_automation::GuiScope>>,
     gui_reasoner: Option<riviu_core::ui_automation::SharedReasoner>,
     gui_epoch: String,
@@ -132,6 +134,8 @@ pub struct AndroidUiSession {
 impl AndroidUiSession {
     pub fn new(agent: AgentClient, adb: AdbProgram, serial: String, screen: (f64, f64)) -> Self {
         Self {
+            trace: None,
+            trace_sequence: AtomicU64::new(0),
             agent,
             gui_reasoner: None,
             gui_scope: parking_lot::Mutex::new(None),
@@ -159,6 +163,59 @@ impl AndroidUiSession {
 
     pub fn agent(&self) -> &AgentClient {
         &self.agent
+    }
+
+    pub(crate) fn with_trace_recorder(
+        mut self,
+        trace: Option<riviu_core::ui_automation::trace::TraceRecorder>,
+    ) -> Self {
+        self.trace = trace;
+        self
+    }
+
+    async fn record_trace(
+        &self,
+        action: &str,
+        started: std::time::Instant,
+        error: Option<String>,
+        snapshot: Option<&riviu_core::HierarchySourceSnapshot>,
+    ) {
+        let (Some(recorder), Some(scope)) = (&self.trace, self.gui_scope()) else {
+            return;
+        };
+        if scope.device_id != self.serial {
+            return;
+        }
+        let sequence = self.trace_sequence.fetch_add(1, Ordering::Relaxed);
+        let mut step = riviu_core::ui_automation::trace::new_step(
+            scope,
+            self.gui_session_epoch(),
+            sequence,
+            action,
+            started.elapsed().as_millis().min(u64::MAX as u128) as u64,
+            error,
+        );
+        step.hierarchy_generation = snapshot.map(|s| s.generation);
+        if let Err(error) = recorder.enqueue(step, snapshot.map(|s| s.xml.clone())) {
+            tracing::warn!("trace incomplete for {}: {error:#}", self.serial);
+        }
+    }
+
+    async fn traced<T: Send>(
+        &self,
+        action: &str,
+        work: impl std::future::Future<Output = anyhow::Result<T>> + Send,
+    ) -> anyhow::Result<T> {
+        let started = std::time::Instant::now();
+        let result = work.await;
+        self.record_trace(
+            action,
+            started,
+            result.as_ref().err().map(|e| e.to_string()),
+            None,
+        )
+        .await;
+        result
     }
     async fn semantic_nodes(&self, role: &str) -> anyhow::Result<Vec<riviu_core::ElementBox>> {
         let package = self.active_app_bundle().await?;
@@ -347,32 +404,39 @@ impl UiSession for AndroidUiSession {
         Some(pack)
     }
     async fn tap(&self, point: TapPoint) -> anyhow::Result<()> {
-        self.agent.tap(point.x, point.y).await
+        self.traced("tap", async { self.agent.tap(point.x, point.y).await })
+            .await
     }
     async fn activate_element(&self, query: riviu_core::ElementQuery<'_>) -> anyhow::Result<()> {
-        let ids = self.agent.find_all(&to_agent_locator(query)).await?;
-        let [id] = ids.as_slice() else {
-            anyhow::bail!("element activation requires one target");
-        };
-        anyhow::ensure!(
-            self.agent.attribute(id, "enabled").await?.as_deref() == Some("true"),
-            "element disabled"
-        );
-        anyhow::ensure!(
-            self.agent.attribute(id, "clickable").await?.as_deref() == Some("true"),
-            "element not clickable"
-        );
-        self.agent.click(id).await
+        self.traced("activate_element", async {
+            let ids = self.agent.find_all(&to_agent_locator(query)).await?;
+            let [id] = ids.as_slice() else {
+                anyhow::bail!("element activation requires one target");
+            };
+            anyhow::ensure!(
+                self.agent.attribute(id, "enabled").await?.as_deref() == Some("true"),
+                "element disabled"
+            );
+            anyhow::ensure!(
+                self.agent.attribute(id, "clickable").await?.as_deref() == Some("true"),
+                "element not clickable"
+            );
+            self.agent.click(id).await
+        })
+        .await
     }
 
     async fn swipe(&self, gesture: SwipeGesture) -> anyhow::Result<()> {
-        self.agent
-            .swipe(
-                (gesture.from.x, gesture.from.y),
-                (gesture.to.x, gesture.to.y),
-                gesture.duration_ms,
-            )
-            .await
+        self.traced("swipe", async {
+            self.agent
+                .swipe(
+                    (gesture.from.x, gesture.from.y),
+                    (gesture.to.x, gesture.to.y),
+                    gesture.duration_ms,
+                )
+                .await
+        })
+        .await
     }
 
     /// The real thing: one `pointerMove` per leg, each with its own duration.
@@ -381,7 +445,8 @@ impl UiSession for AndroidUiSession {
     /// receives as a straight line at constant speed; here the phone sees a curve whose
     /// velocity builds and eases, then a few milliseconds of contact before the lift.
     async fn swipe_path(&self, path: riviu_core::types::SwipePath) -> anyhow::Result<()> {
-        self.agent.swipe_path(&path).await
+        self.traced("swipe_path", async { self.agent.swipe_path(&path).await })
+            .await
     }
 
     /// Scale every point of the path, then send the whole curve in one round trip.
@@ -396,33 +461,39 @@ impl UiSession for AndroidUiSession {
         image_w: f64,
         image_h: f64,
     ) -> anyhow::Result<()> {
-        // Once for the whole path, before the closure. See `resolve_screen`.
-        let screen = self.resolve_screen(image_w, image_h).await;
-        let scale = |point: &riviu_core::types::TapPoint| {
-            let (x, y) = scale_to_screen(point.x, point.y, image_w, image_h, screen);
-            riviu_core::types::TapPoint { x, y }
-        };
-        let scaled = riviu_core::types::SwipePath {
-            start: scale(&path.start),
-            steps: path
-                .steps
-                .iter()
-                .map(|step| riviu_core::types::SwipeStep {
-                    point: scale(&step.point),
-                    duration_ms: step.duration_ms,
-                })
-                .collect(),
-            settle_ms: path.settle_ms,
-        };
-        self.agent.swipe_path(&scaled).await
+        self.traced("swipe_path_image", async {
+            // Once for the whole path, before the closure. See `resolve_screen`.
+            let screen = self.resolve_screen(image_w, image_h).await;
+            let scale = |point: &riviu_core::types::TapPoint| {
+                let (x, y) = scale_to_screen(point.x, point.y, image_w, image_h, screen);
+                riviu_core::types::TapPoint { x, y }
+            };
+            let scaled = riviu_core::types::SwipePath {
+                start: scale(&path.start),
+                steps: path
+                    .steps
+                    .iter()
+                    .map(|step| riviu_core::types::SwipeStep {
+                        point: scale(&step.point),
+                        duration_ms: step.duration_ms,
+                    })
+                    .collect(),
+                settle_ms: path.settle_ms,
+            };
+            self.agent.swipe_path(&scaled).await
+        })
+        .await
     }
 
     async fn tap_image(&self, x: f64, y: f64, image_w: f64, image_h: f64) -> anyhow::Result<()> {
-        let screen = self.resolve_screen(image_w, image_h).await;
-        let (x, y) = scale_to_screen(x, y, image_w, image_h, screen);
-        // Overlay / Open-on-Device: a 16 ms contact, no nurture drift.
-        // `tap()` keeps the 45–130 ms human contact for the farm loop.
-        self.agent.tap_direct(x, y).await
+        self.traced("tap_image", async {
+            let screen = self.resolve_screen(image_w, image_h).await;
+            let (x, y) = scale_to_screen(x, y, image_w, image_h, screen);
+            // Overlay / Open-on-Device: a 16 ms contact, no nurture drift.
+            // `tap()` keeps the 45–130 ms human contact for the farm loop.
+            self.agent.tap_direct(x, y).await
+        })
+        .await
     }
 
     async fn swipe_image(
@@ -433,11 +504,14 @@ impl UiSession for AndroidUiSession {
         image_h: f64,
         duration_ms: u64,
     ) -> anyhow::Result<()> {
-        // One resolve for both endpoints -- they are the same gesture on the same screen.
-        let screen = self.resolve_screen(image_w, image_h).await;
-        let from = scale_to_screen(from.x, from.y, image_w, image_h, screen);
-        let to = scale_to_screen(to.x, to.y, image_w, image_h, screen);
-        self.agent.swipe(from, to, duration_ms).await
+        self.traced("swipe_image", async {
+            // One resolve for both endpoints -- they are the same gesture on the same screen.
+            let screen = self.resolve_screen(image_w, image_h).await;
+            let from = scale_to_screen(from.x, from.y, image_w, image_h, screen);
+            let to = scale_to_screen(to.x, to.y, image_w, image_h, screen);
+            self.agent.swipe(from, to, duration_ms).await
+        })
+        .await
     }
 
     /// Type into whatever field currently holds focus.
@@ -448,13 +522,16 @@ impl UiSession for AndroidUiSession {
     /// armed its own send button. `adb shell input text` cannot do this — with
     /// diacritics the process is killed outright.
     async fn type_text(&self, text: &str) -> anyhow::Result<()> {
-        let locator = Locator::ClassName("android.widget.EditText".into()).focused();
-        let element = self
-            .agent
-            .find(&locator)
-            .await?
-            .ok_or_else(|| anyhow!("no focused text field to type into"))?;
-        self.agent.set_text(&element, text).await
+        self.traced("type_text", async {
+            let locator = Locator::ClassName("android.widget.EditText".into()).focused();
+            let element = self
+                .agent
+                .find(&locator)
+                .await?
+                .ok_or_else(|| anyhow!("no focused text field to type into"))?;
+            self.agent.set_text(&element, text).await
+        })
+        .await
     }
 
     /// Real key events, via `input text`.
@@ -474,11 +551,14 @@ impl UiSession for AndroidUiSession {
     /// It is also ASCII-only for a second reason: `input text` is *killed* by diacritics,
     /// which is why `type_text` goes through accessibility instead.
     async fn type_keys(&self, text: &str) -> anyhow::Result<()> {
-        let typed = keys_payload(text)?;
-        self.adb
-            .shell(&self.serial, &format!("input text {typed}"))
-            .await?;
-        Ok(())
+        self.traced("type_keys", async {
+            let typed = keys_payload(text)?;
+            self.adb
+                .shell(&self.serial, &format!("input text {typed}"))
+                .await?;
+            Ok(())
+        })
+        .await
     }
 
     async fn set_clipboard(&self, content_type: &str, bytes: &[u8]) -> anyhow::Result<()> {
@@ -507,15 +587,20 @@ impl UiSession for AndroidUiSession {
     }
 
     async fn home(&self) -> anyhow::Result<()> {
-        self.agent.press_key(KEYCODE_HOME).await
+        self.traced("home", async { self.agent.press_key(KEYCODE_HOME).await })
+            .await
     }
 
     async fn back(&self) -> anyhow::Result<()> {
-        self.agent.press_key(KEYCODE_BACK).await
+        self.traced("back", async { self.agent.press_key(KEYCODE_BACK).await })
+            .await
     }
 
     async fn press_hardware_key(&self, key: HardwareKey) -> anyhow::Result<()> {
-        self.agent.press_key(hardware_keycode(key)).await
+        self.traced("press_hardware_key", async {
+            self.agent.press_key(hardware_keycode(key)).await
+        })
+        .await
     }
 
     /// Sleep locks; wake then nudges past a swipe-only keyguard.
@@ -538,13 +623,16 @@ impl UiSession for AndroidUiSession {
     /// accessibility click, so the gesture goes through the same input path a
     /// person's does.
     async fn find_and_tap(&self, accessibility_id: &str) -> anyhow::Result<()> {
-        let locator = Locator::Description(accessibility_id.to_string());
-        let rect = self
-            .find_bounds(&locator)
-            .await?
-            .ok_or_else(|| anyhow!("element '{accessibility_id}' is not on screen"))?;
-        let (x, y) = rect.centre();
-        self.agent.tap(x, y).await
+        self.traced("find_and_tap", async {
+            let locator = Locator::Description(accessibility_id.to_string());
+            let rect = self
+                .find_bounds(&locator)
+                .await?
+                .ok_or_else(|| anyhow!("element '{accessibility_id}' is not on screen"))?;
+            let (x, y) = rect.centre();
+            self.agent.tap(x, y).await
+        })
+        .await
     }
 
     async fn assert_visible(&self, accessibility_id: &str) -> anyhow::Result<()> {
@@ -676,6 +764,7 @@ impl UiSession for AndroidUiSession {
     }
 
     async fn screenshot_png(&self) -> anyhow::Result<Vec<u8>> {
+        let started = std::time::Instant::now();
         // Raw bytes, never text. A `String` round trip replaces every invalid
         // UTF-8 byte with U+FFFD and hands back something PNG-sized that is no
         // longer a PNG — caught by the G1 probe rather than by review.
@@ -693,6 +782,21 @@ impl UiSession for AndroidUiSession {
             "screencap returned {} bytes that are not a PNG",
             png.len()
         );
+        if let (Some(recorder), Some(scope)) = (&self.trace, self.gui_scope()) {
+            if scope.device_id == self.serial {
+                let step = riviu_core::ui_automation::trace::new_step(
+                    scope,
+                    self.gui_session_epoch(),
+                    self.trace_sequence.fetch_add(1, Ordering::Relaxed),
+                    "screenshot",
+                    started.elapsed().as_millis().min(u64::MAX as u128) as u64,
+                    None,
+                );
+                if let Err(error) = recorder.enqueue_image(step, png.clone()) {
+                    tracing::warn!("screenshot trace incomplete for {}: {error:#}", self.serial);
+                }
+            }
+        }
         Ok(png)
     }
 
@@ -921,15 +1025,27 @@ impl UiSession for AndroidUiSession {
     async fn hierarchy_source_snapshot(
         &self,
     ) -> anyhow::Result<riviu_core::HierarchySourceSnapshot> {
-        let xml = self.agent.source().await?;
-        let generation = self
-            .hierarchy_generation
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
-                current.checked_add(1)
-            })
-            .map_err(|_| anyhow!("hierarchy source generation exhausted"))?
-            + 1;
-        Ok(riviu_core::HierarchySourceSnapshot { generation, xml })
+        let started = std::time::Instant::now();
+        let result = async {
+            let xml = self.agent.source().await?;
+            let generation = self
+                .hierarchy_generation
+                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+                    current.checked_add(1)
+                })
+                .map_err(|_| anyhow!("hierarchy source generation exhausted"))?
+                + 1;
+            Ok(riviu_core::HierarchySourceSnapshot { generation, xml })
+        }
+        .await;
+        self.record_trace(
+            "hierarchy",
+            started,
+            result.as_ref().err().map(|e: &anyhow::Error| e.to_string()),
+            result.as_ref().ok(),
+        )
+        .await;
+        result
     }
 
     /// True — this is the backend the primitive exists for.

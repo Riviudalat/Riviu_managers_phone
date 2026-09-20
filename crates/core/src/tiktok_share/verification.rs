@@ -331,7 +331,10 @@ fn classify(tree: &Tree, plan: &PublishVerificationPlan) -> Screen {
     }) {
         return Screen::Login;
     }
-    if has(TikTokControl::DialogDismiss) || decline_facebook_permission(tree, plan).is_some() {
+    if has(TikTokControl::DialogDismiss)
+        || decline_facebook_permission(tree, plan).is_some()
+        || crate::app_automation::dialogs::decline_contacts(tree, plan.labels).is_some()
+    {
         return Screen::Dialog;
     }
     // Trill 38.3.2/en, phone 4, 15/09/2026: tapping a video caption
@@ -658,7 +661,12 @@ impl Capture<'_> {
                     let mut button =
                         tree.control(self.plan.labels.package(), self.plan.labels.label(control));
                     if button.is_none() && control == TikTokControl::DialogDismiss {
-                        button = decline_facebook_permission(&tree, self.plan);
+                        button = decline_facebook_permission(&tree, self.plan).or_else(|| {
+                            crate::app_automation::dialogs::decline_contacts(
+                                &tree,
+                                self.plan.labels,
+                            )
+                        });
                     }
                     if button.is_none() && control == TikTokControl::ProfileTab {
                         let budget = RECOVERY_WINDOW
@@ -1029,6 +1037,28 @@ impl Capture<'_> {
         }
         self.diagnostic.stage = "profile";
         let mut tree = self.profile(false).await?;
+        // Trill38.3.2/en, SM-G955U1 (19/09): suggestions can push the entire
+        // Videos grid under bottom navigation. Account proof above is mandatory.
+        // Collapse only the measured suggestions group, once, then prove the
+        // profile again. This never grants publication proof or a new Post.
+        if tree.grid(self.plan).is_empty() {
+            if let Some(button) = tree.profile_suggestions_hide(self.plan) {
+                if self.expired() {
+                    return Err(VerificationReason::SearchBudgetExhausted);
+                }
+                self.diagnostic.stage = "profileSuggestionsHide";
+                self.session
+                    .tap(button.centre())
+                    .await
+                    .map_err(|_| VerificationReason::ReadFailed)?;
+                self.diagnostic.navigation_actions += 1;
+                tokio::time::sleep(POLL).await;
+                tree = self.profile(true).await?;
+                if tree.profile_suggestions_hide(self.plan).is_some() {
+                    return Err(VerificationReason::PostNotVisible);
+                }
+            }
+        }
         let mut last_reason = VerificationReason::PostNotVisible;
         for page in 0..MAX_VIEWPORTS {
             self.diagnostic.viewports_visited = page + 1;

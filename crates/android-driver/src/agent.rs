@@ -615,8 +615,9 @@ impl AgentClient {
             .ok_or_else(|| anyhow!("không thấy phần tử {locator:?} trên màn hình"))
     }
 
-    /// Re-resolve a node once if Android replaced it between find and geometry.
-    /// Only a stale element allows another read; session/transport errors still propagate.
+    /// Re-resolve a node once if Android replaced it or its cache entry expired
+    /// between find and geometry (including after a session was recreated).
+    /// Only explicit stale-element errors allow another lookup; other failures propagate.
     pub(crate) async fn find_with_rect(
         &self,
         locator: &Locator,
@@ -629,7 +630,13 @@ impl AgentClient {
                 Ok(rect) => return Ok(Some((id, rect))),
                 Err(error)
                     if attempt == 0
-                        && error.to_string().contains("does not exist in DOM anymore") => {}
+                        && [
+                            "does not exist in DOM anymore",
+                            "is not linked to the same object in DOM anymore",
+                            "is not present in the cache or has expired",
+                        ]
+                        .iter()
+                        .any(|message| error.to_string().contains(message)) => {}
                 Err(error) => return Err(error),
             }
         }
@@ -1038,6 +1045,93 @@ mod tests {
                 "GET /session/fixed/element/new/rect HTTP/1.1"
             ]
         );
+    }
+
+    async fn geometry_cache_fixture(
+        message: &str,
+        persistent: bool,
+    ) -> (anyhow::Result<Option<(String, Rect)>>, Vec<String>) {
+        use tokio::{
+            io::{AsyncReadExt, AsyncWriteExt},
+            net::TcpListener,
+        };
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let routes = Arc::new(Mutex::new(Vec::new()));
+        let calls = routes.clone();
+        let error = json!({"value":{"message":message}}).to_string();
+        let server = tokio::spawn(async move {
+            for (status, body) in [
+                ("200 OK", json!({"value":{"ELEMENT":"old"}}).to_string()),
+                ("404 Not Found", error.clone()),
+                ("200 OK", json!({"value":{"ELEMENT":"new"}}).to_string()),
+                (
+                    if persistent {
+                        "404 Not Found"
+                    } else {
+                        "200 OK"
+                    },
+                    if persistent {
+                        error
+                    } else {
+                        json!({"value":{"x":71,"y":83,"width":42,"height":24}}).to_string()
+                    },
+                ),
+            ] {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut bytes = [0; 8192];
+                let n = socket.read(&mut bytes).await.unwrap();
+                calls.lock().push(
+                    String::from_utf8_lossy(&bytes[..n])
+                        .lines()
+                        .next()
+                        .unwrap()
+                        .to_string(),
+                );
+                socket.write_all(format!("HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",body.len()).as_bytes()).await.unwrap();
+            }
+        });
+        let client = AgentClient {
+            http: reqwest::Client::builder()
+                .timeout(Duration::from_secs(2))
+                .build()
+                .unwrap(),
+            base,
+            serial: "fixture".into(),
+            session_id: Arc::new(Mutex::new("fixed".into())),
+        };
+        let result = client.find_with_rect(&Locator::Text("Next".into())).await;
+        server.abort();
+        let _ = server.await;
+        let observed = routes.lock().clone();
+        (result, observed)
+    }
+
+    #[tokio::test]
+    async fn expired_or_relinked_geometry_requeries_the_measured_locator_once() {
+        // Both errors are emitted by pinned Appium ElementsCache. A session
+        // replacement clears that cache; it does not mean the Next control vanished.
+        for message in ["The element identified by 'old' is not present in the cache or has expired. Try to find it again", "The element 'Next' is not linked to the same object in DOM anymore"] {
+            let(result,routes)=geometry_cache_fixture(message,false).await;
+            let(id,rect)=result.expect("requery the original locator after cache loss").unwrap();
+            assert_eq!(id,"new");assert_eq!(rect.x,71.0);
+            assert_eq!(routes,vec!["POST /session/fixed/element HTTP/1.1","GET /session/fixed/element/old/rect HTTP/1.1","POST /session/fixed/element HTTP/1.1","GET /session/fixed/element/new/rect HTTP/1.1"]);
+        }
+    }
+
+    #[tokio::test]
+    async fn persistent_expired_geometry_stops_after_one_requery_without_any_tap() {
+        let(result,routes)=geometry_cache_fixture("The element identified by 'old' is not present in the cache or has expired. Try to find it again",true).await;
+        assert!(result.is_err());
+        assert_eq!(routes.len(), 4);
+        assert!(routes.iter().all(|r| !r.contains("/actions")));
+    }
+
+    #[tokio::test]
+    async fn unrelated_geometry_error_is_not_retried_as_an_expired_element() {
+        let (result, routes) = geometry_cache_fixture("permission denied", false).await;
+        assert!(result.is_err());
+        assert_eq!(routes.len(), 2);
     }
 
     #[test]

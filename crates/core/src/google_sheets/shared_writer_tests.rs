@@ -385,7 +385,7 @@ impl Server {
                         json!({"spreadsheetId":"fixture-book","sheets":[{"properties":{"sheetId":0},"data":[{"startRow":nums[0]-1,"startColumn":0,"rowData":rows}]}]})
                     } else {
                         let state = s.lock();
-                        json!({"spreadsheetId":"fixture-book","properties":{"title":"Shared fixture","timeZone":"Asia/Ho_Chi_Minh"},"sheets":[{"properties":{"sheetId":0,"title":"Fixture","gridProperties":{"rowCount":20,"columnCount":state.columns}},"developerMetadata":state.metadata}]})
+                        json!({"spreadsheetId":"fixture-book","properties":{"title":"Shared fixture","timeZone":"Asia/Ho_Chi_Minh"},"sheets":[{"properties":{"sheetId":0,"title":"Fixture","gridProperties":{"rowCount":state.rows.len().max(20),"columnCount":state.columns}},"developerMetadata":state.metadata}]})
                     };
                     if lose {
                         return;
@@ -842,4 +842,98 @@ async fn lost_acquire_and_release_ack_are_resolved_by_exact_operation() {
         .metadata
         .iter()
         .all(|m| m["metadataKey"] != shared_writer::LOCK_KEY));
+}
+
+#[tokio::test]
+async fn regression_coalesced_revision_after_lost_acquire_recovers_frozen_operation() {
+    let server = Server::start(2).await;
+    let db = database();
+    // Existing HTTP fixture loses GET after any create when sentinel is set.
+    server.reject_acquire.store(usize::MAX, Ordering::SeqCst);
+    server.lose_acquire.store(true, Ordering::SeqCst);
+    server.lose_reconcile.store(true, Ordering::SeqCst);
+    let first = server
+        .client()
+        .deliver_shared(&target(), &tests::payload("one", 1, ""), WRITER, &db)
+        .await;
+    assert!(first.is_err());
+    assert_eq!(server.creates.load(Ordering::SeqCst), 1);
+    assert_eq!(server.mutations.load(Ordering::SeqCst), 0);
+    assert!(server
+        .state
+        .lock()
+        .metadata
+        .iter()
+        .any(|m| m["metadataKey"] == shared_writer::LOCK_KEY));
+    server.lose_reconcile.store(false, Ordering::SeqCst);
+    // Real progress reports coalesce to the current revision after the request.
+    for attempt in 0..3 {
+        let result = server
+            .client()
+            .deliver_shared(&target(), &tests::payload("one", 2, ""), WRITER, &db)
+            .await;
+        println!("new-revision attempt={attempt} result={result:?}");
+        if let Ok(receipt) = result {
+            assert_eq!(receipt.revision, 2);
+            return;
+        }
+    }
+    let other_db = database();
+    let other = server
+        .client()
+        .deliver_shared(&target(), &tests::payload("two", 1, ""), OTHER, &other_db)
+        .await;
+    println!("independent-writer result={other:?}");
+    // Exact old input can recover, proving the remote receipt is sufficient.
+    let exact_old = server
+        .client()
+        .deliver_shared(&target(), &tests::payload("one", 1, ""), WRITER, &db)
+        .await;
+    println!("frozen-old-revision result={exact_old:?}");
+    assert!(exact_old.is_ok());
+    panic!("Latest coalesced revision cannot recover an acquired lock; all new writes are wedged until the unavailable frozen payload is replayed");
+}
+
+#[tokio::test]
+async fn regression_large_sheet_scan_resumes_after_database_reopen_without_duplicate_mutation() {
+    let server = Server::start(2).await;
+    {
+        let mut remote = server.state.lock();
+        remote.columns = 20;
+        remote.rows.resize(100_000, vec![Cell::default(); 20]);
+        for column in 9..20 {
+            remote.rows[0].push(Cell {
+                user_entered_value: json!({"stringValue":format!("Đối tác {}",column-7)}),
+                ..Cell::default()
+            });
+        }
+        for (index, row) in remote.rows.iter_mut().enumerate().skip(1).take(99_998) {
+            row[0].user_entered_value = json!({"numberValue":index});
+            row[1].user_entered_value = json!({"stringValue":"19/9/2026"});
+        }
+    }
+    let path = std::env::temp_dir().join(format!("large-scan-{}.db", uuid::Uuid::new_v4()));
+    let payload = tests::payload("large", 1, "");
+    let mut pending = 0;
+    for _ in 0..30 {
+        let db = crate::db::Database::open(&path).unwrap();
+        match server
+            .client()
+            .deliver_shared(&target(), &payload, WRITER, &db)
+            .await
+        {
+            Ok(receipt) => {
+                assert_eq!(receipt.publication_id, "large");
+                assert!(pending > 0);
+                assert_eq!(server.creates.load(Ordering::SeqCst), 1);
+                assert_eq!(server.mutations.load(Ordering::SeqCst), 1);
+                return;
+            }
+            Err(error) => {
+                assert_eq!(error.kind, DirectSheetsErrorKind::Pending, "{error}");
+                pending += 1;
+            }
+        }
+    }
+    panic!("scan did not finish across slices");
 }

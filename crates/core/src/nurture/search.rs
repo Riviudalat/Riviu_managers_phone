@@ -47,19 +47,30 @@ fn result_cards(tree: &Tree, package: &str, version: &str) -> Vec<ElementBox> {
             && (n.attr("content-desc").starts_with("Video by ")
                 || n.attr("content-desc").starts_with("Video của "))
     });
-    // Global 45.7.3/en, ce021712aaf9533405, 18/09: Videos has unlabeled
-    // clickable cards directly under this GridView, each with a caption and author.
-    // Do not apply obfuscated IDs to another build or select a user/Shop result.
-    if results.is_empty() && package == "com.zhiliaoapp.musically" && version == "45.7.3" {
+    // Selected Videos grids captured on the current Android fleet, 19/09/2026.
+    // Cards have no description; both caption and author must be inside the
+    // measured card/grid pair. IDs never cross build boundaries.
+    let measured = match (package, version) {
+        ("com.zhiliaoapp.musically", "45.4.3") => Some(("ty7", "men", "b79")),
+        ("com.zhiliaoapp.musically", "45.7.3") => Some(("u_u", "mo3", "b96")),
+        ("com.zhiliaoapp.musically", "46.0.41") => Some(("ufz", "msw", "bc6")),
+        ("com.zhiliaoapp.musically", "46.1.3") => Some(("uhi", "mui", "bce")),
+        ("com.zhiliaoapp.musically", "46.4.3") => Some(("uu9", "n3c", "bdu")),
+        _ => None,
+    };
+    if let Some((card_id, grid_id, author_id)) = measured.filter(|_| results.is_empty()) {
+        let card_id = format!("{package}:id/{card_id}");
+        let grid_id = format!("{package}:id/{grid_id}");
+        let author_id = format!(":id/{author_id}");
         for (index, card) in tree.nodes.iter().enumerate() {
             if !card.visible(package)
                 || !tree.ancestors_visible(index)
-                || card.attr("resource-id") != "com.zhiliaoapp.musically:id/u_u"
+                || card.attr("resource-id") != card_id
                 || card.attr("clickable") != "true"
                 || !card.parent.is_some_and(|parent| {
                     let grid = &tree.nodes[parent];
                     grid.attr("class") == "android.widget.GridView"
-                        && grid.attr("resource-id") == "com.zhiliaoapp.musically:id/mo3"
+                        && grid.attr("resource-id") == grid_id
                 })
             {
                 continue;
@@ -83,7 +94,7 @@ fn result_cards(tree: &Tree, package: &str, version: &str) -> Vec<ElementBox> {
                     false
                 })
             };
-            if descendant_has(":id/desc") && descendant_has(":id/b96") {
+            if descendant_has(":id/desc") && descendant_has(&author_id) {
                 if let Some(rect) = card.rect().filter(|r| r.enabled) {
                     results.push(rect);
                 }
@@ -99,6 +110,57 @@ async fn read(session: &dyn UiSession, package: &str) -> anyhow::Result<Tree> {
         "Đã rời TikTok khi tìm kiếm"
     );
     Tree::parse(session.hierarchy_source_snapshot().await?)
+}
+
+fn location_cancel(tree: &Tree, package: &str, version: &str) -> Option<ElementBox> {
+    if package != "com.zhiliaoapp.musically" {
+        return None;
+    }
+    let panel_id = match version {
+        "45.7.3" => ":id/pwe",
+        "46.0.41" => ":id/q2t",
+        _ => return None,
+    };
+    let matching = |query| tree.matching(package, query);
+    let titles = matching(crate::ElementQuery::Text {
+        value: "See relevant content and places nearby",
+        exact: true,
+    });
+    let messages=matching(crate::ElementQuery::Text{value:"Open your device settings and go to Locations > While Using the App. You can turn this off at any time.",exact:true});
+    let controls = matching(crate::ElementQuery::ResourceIdSuffix(":id/button3"));
+    let ([title], [message], [control]) =
+        (titles.as_slice(), messages.as_slice(), controls.as_slice())
+    else {
+        return None;
+    };
+    let node = &tree.nodes[*control];
+    let panels = matching(crate::ElementQuery::ResourceIdSuffix(panel_id));
+    let [panel] = panels.as_slice() else {
+        return None;
+    };
+    let panel = *panel;
+    if !tree.inside(*title, panel) || !tree.inside(*message, panel) || node.attr("text") != "Cancel"
+    {
+        return None;
+    }
+    node.rect().filter(|r| r.enabled && r.clickable)
+}
+
+async fn read_search(
+    session: &dyn UiSession,
+    package: &str,
+    version: &str,
+    stop: &AtomicBool,
+    deadline: Instant,
+) -> anyhow::Result<Tree> {
+    let tree = read(session, package).await?;
+    if let Some(cancel) = location_cancel(&tree, package, version) {
+        check(stop, deadline)?;
+        session.tap(cancel.centre()).await?;
+        super::sleep_interruptible(Duration::from_millis(400), stop).await;
+        return read(session, package).await;
+    }
+    Ok(tree)
 }
 fn check(stop: &AtomicBool, deadline: Instant) -> anyhow::Result<()> {
     ensure!(!stop.load(Ordering::Relaxed), "Đã dừng tìm kiếm");
@@ -124,7 +186,7 @@ pub(super) async fn open(
     );
     let deadline = deadline.min(Instant::now() + Duration::from_secs(75));
     let version = session.app_version(package).await.unwrap_or_default();
-    let mut tree = read(session, package).await?;
+    let mut tree = read_search(session, package, &version, stop, deadline).await?;
     // Trill 38.3.2/en, SM-G955F, 2026-09-16: LIVE and Search share :id/gka.
     // Search is to the right of the located For You tab; LIVE is to its left.
     let feed_right = nodes(&tree, package, |n| {
@@ -153,7 +215,7 @@ pub(super) async fn open(
     }
     let input = loop {
         check(stop, deadline)?;
-        tree = read(session, package).await?;
+        tree = read_search(session, package, &version, stop, deadline).await?;
         if let Some(input) = unique(nodes(&tree, package, |n| {
             n.attr("class") == "android.widget.EditText"
         }))? {
@@ -165,7 +227,7 @@ pub(super) async fn open(
     session.tap(input.centre()).await?;
     check(stop, deadline)?;
     session.type_text(keyword.trim()).await?;
-    tree = read(session, package).await?;
+    tree = read_search(session, package, &version, stop, deadline).await?;
     ensure!(
         query_matches(&tree, package, keyword),
         "Ô tìm kiếm chưa chứa đúng từ khóa"
@@ -179,7 +241,15 @@ pub(super) async fn open(
     session.tap(search.centre()).await?;
     loop {
         check(stop, deadline)?;
-        tree = read(session, package).await?;
+        tree = read_search(session, package, &version, stop, deadline).await?;
+        if nodes(&tree, package, |n| {
+            n.attr("class") == "android.widget.EditText"
+        })
+        .is_empty()
+        {
+            super::sleep_interruptible(Duration::from_millis(400), stop).await;
+            continue;
+        }
         ensure!(
             query_matches(&tree, package, keyword),
             "Từ khóa đã thay đổi khi tìm kiếm"
@@ -197,7 +267,16 @@ pub(super) async fn open(
     let mut tab_taps = 0;
     let first = loop {
         check(stop, deadline)?;
-        tree = read(session, package).await?;
+        tree = read_search(session, package, &version, stop, deadline).await?;
+        if nodes(&tree, package, |n| {
+            n.attr("class") == "android.widget.EditText"
+        })
+        .is_empty()
+        {
+            prior_tab = None;
+            super::sleep_interruptible(Duration::from_millis(400), stop).await;
+            continue;
+        }
         ensure!(
             query_matches(&tree, package, keyword),
             "Kết quả không thuộc từ khóa đã nhập"
@@ -264,9 +343,23 @@ pub(super) async fn on_video(
     keyword: &str,
 ) -> anyhow::Result<bool> {
     let tree = read(session, package).await?;
-    Ok(video_matches(&tree, package, keyword))
+    let version = session.app_version(package).await.unwrap_or_default();
+    Ok(video_matches_build(&tree, package, keyword, &version))
 }
+#[cfg(test)]
 fn video_matches(tree: &Tree, package: &str, _keyword: &str) -> bool {
+    video_matches_build(
+        tree,
+        package,
+        _keyword,
+        if package == "com.ss.android.ugc.trill" {
+            "38.3.2"
+        } else {
+            "45.7.3"
+        },
+    )
+}
+fn video_matches_build(tree: &Tree, package: &str, _keyword: &str, version: &str) -> bool {
     let texts: Vec<_> = tree.nodes.iter().filter(|n| n.visible(package)).collect();
     // Trill 38.3.2/en, 2026-09-16: viewer replaces the original query with a
     // related suggestion. Exact query is proven in the results grid before entry;
@@ -292,10 +385,14 @@ fn video_matches(tree: &Tree, package: &str, _keyword: &str) -> bool {
     .into_iter()
     .map(|r| r.y + r.height)
     .max_by(f64::total_cmp);
+    let input_id = match (package, version) {
+        ("com.ss.android.ugc.trill", "38.3.2") => Some("com.ss.android.ugc.trill:id/cnd"),
+        ("com.zhiliaoapp.musically", "45.7.3") => Some("com.zhiliaoapp.musically:id/e7q"),
+        ("com.zhiliaoapp.musically", "46.0.41") => Some("com.zhiliaoapp.musically:id/eal"),
+        _ => None,
+    };
     let inline_comment = nodes(tree, package, |n| {
-        n.attr("class") == "android.widget.EditText"
-            && (n.attr("resource-id").ends_with(":id/cnd")
-                || n.attr("resource-id") == "com.zhiliaoapp.musically:id/e7q")
+        n.attr("class") == "android.widget.EditText" && input_id == Some(n.attr("resource-id"))
     })
     .iter()
     .any(|r| video_bottom.is_some_and(|bottom| r.y >= bottom));
@@ -314,6 +411,104 @@ mod tests {
     use super::*;
     use std::sync::Mutex;
     const PACKAGE: &str = "com.ss.android.ugc.trill";
+    #[test]
+    fn location_prompt_requires_exact_explanation_and_cancel_within_same_panel() {
+        let source =
+            include_str!("../../fixtures/tiktok-search/global45.7.3-location-dialog.fixture");
+        let pkg = "com.zhiliaoapp.musically";
+        assert!(location_cancel(&xml(source), pkg, "45.7.3").is_some());
+        assert!(location_cancel(
+            &xml(&source.replace("Cancel", "Open settings")),
+            pkg,
+            "45.7.3"
+        )
+        .is_none());
+        assert!(location_cancel(&xml(source), pkg, "unknown").is_none());
+        assert!(location_cancel(
+            &xml(&source.replace("places nearby", "private messages")),
+            pkg,
+            "45.7.3"
+        )
+        .is_none());
+        let newer =
+            include_str!("../../fixtures/tiktok-search/global46.0.41-location-dialog.fixture");
+        assert!(location_cancel(&xml(newer), pkg, "46.0.41").is_some());
+        assert!(location_cancel(&xml(newer), pkg, "45.7.3").is_none());
+    }
+    #[test]
+    fn global_46_scrolled_search_keeps_measured_input_proof_after_header_collapses() {
+        let source = include_str!("../../fixtures/tiktok-search/global-46.0.41-scrolled.fixture");
+        assert!(video_matches_build(
+            &xml(source),
+            "com.zhiliaoapp.musically",
+            "Đà Lạt",
+            "46.0.41"
+        ));
+        assert!(!video_matches_build(
+            &xml(source),
+            "com.zhiliaoapp.musically",
+            "Đà Lạt",
+            "unknown"
+        ));
+        assert!(!video_matches_build(
+            &xml(&source.replace(":id/eal", ":id/other")),
+            "com.zhiliaoapp.musically",
+            "Đà Lạt",
+            "46.0.41"
+        ));
+        let feed = source.replace("content-desc=\"Search\"", "content-desc=\"For You\"");
+        assert!(!video_matches_build(
+            &xml(&feed),
+            "com.zhiliaoapp.musically",
+            "Đà Lạt",
+            "46.0.41"
+        ));
+    }
+    #[test]
+    fn current_fleet_search_result_cards_are_recognized_only_on_measured_builds() {
+        let samples = [
+            (
+                "45.4.3",
+                "b79",
+                include_str!("../../fixtures/tiktok-search/global-45.4.3-videos.fixture"),
+            ),
+            (
+                "46.0.41",
+                "bc6",
+                include_str!("../../fixtures/tiktok-search/global-46.0.41-videos.fixture"),
+            ),
+            (
+                "46.1.3",
+                "bce",
+                include_str!("../../fixtures/tiktok-search/global-46.1.3-videos.fixture"),
+            ),
+            (
+                "46.4.3",
+                "bdu",
+                include_str!("../../fixtures/tiktok-search/global-46.4.3-videos.fixture"),
+            ),
+        ];
+        for (version, author, source) in samples {
+            let tree = xml(source);
+            assert!(
+                !result_cards(&tree, "com.zhiliaoapp.musically", version).is_empty(),
+                "{version}: selected Videos grid has measured cards"
+            );
+            assert!(result_cards(&tree, "com.zhiliaoapp.musically", "unknown").is_empty());
+            assert!(result_cards(
+                &xml(&source.replace(&format!(":id/{author}"), ":id/unrelated")),
+                "com.zhiliaoapp.musically",
+                version
+            )
+            .is_empty());
+            assert!(result_cards(
+                &xml(&source.replace("android.widget.GridView", "android.widget.FrameLayout")),
+                "com.zhiliaoapp.musically",
+                version
+            )
+            .is_empty());
+        }
+    }
     #[test]
     fn global_search_cards_require_measured_build_grid_caption_and_author() {
         const PKG: &str = "com.zhiliaoapp.musically";

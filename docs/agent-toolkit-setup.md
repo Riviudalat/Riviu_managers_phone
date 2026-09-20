@@ -70,6 +70,37 @@ Bản cài ngoài có thể yêu cầu đường dẫn plugin, namespace `superp
 - Mẫu Next.js/marketing không thay contract Tauri/Vite hoặc UI vận hành của Riviu.
 - Các bộ skill cá nhân không rõ nguồn không được tự động coi là dependency chuẩn của dự án.
 
+## TypeSafe cho Codex
+
+Skill `typesafe-ai` hướng dẫn thiết kế quyết định AI có kiểu dữ liệu và xác suất.
+Dùng cho phần AI của Riviu: phân loại nội dung, xếp hạng ứng viên, hoặc đối chiếu
+bình luận với caption/evidence dạng văn bản. Đọc tài liệu hiện hành từ
+[index TypeSafe](https://docs.typesafe.ai/llms.txt) trước khi triển khai API.
+
+Cài ở gốc dự án bằng một phương thức, chọn Codex:
+
+```powershell
+npx skills add typesafe-ai/skills --skill typesafe-ai --agent codex --copy --yes
+npx skills list --agent codex --json
+```
+
+Bản cục bộ nằm tại `.agents/skills/typesafe-ai/`, gồm `SKILL.md` và `LICENSE` MIT.
+Thư mục `.agents/` vẫn là runtime bị ignore; `skills-lock.json` ghi nguồn và hash
+nội dung. Bản đã đọc/kiểm tại commit upstream
+[`65a39f393687675ce170e6094757de20370365b9`](https://github.com/typesafe-ai/skills/tree/65a39f393687675ce170e6094757de20370365b9).
+Cài mới từ lệnh trên lấy upstream hiện hành; cần đối chiếu lại nội dung/lock khi cập nhật.
+
+Điểm thử phù hợp đầu tiên là đánh giá bình luận có được caption/transcript hỗ trợ
+hay không trong đường AI hiện có. Đánh giá bằng fixture tiếng Việt và dữ liệu đã
+loại thông tin nhạy cảm; đo độ chính xác, độ trễ và chi phí trước khi bật cho phiên chạy.
+Theo tài liệu [State](https://docs.typesafe.ai/concepts/state.md), Jev hiện nhận văn
+bản và JSON, chưa nhận ảnh/video; không thay lớp perception của Riviu. Confidence
+không thay bằng chứng đúng account, canonical URL, receipt, cancellation hay lease.
+Giữ `api.ts` làm biên IPC, credential ở backend, control plane và action ledger là
+nơi quyết định thao tác. Cài skill chỉ thiết lập hướng dẫn cho agent. Tích hợp runtime
+được cấu hình riêng tại Nuôi TikTok → AI → TypeSafe; mặc định tắt. Xem hướng dẫn
+vận hành trước khi bật gửi caption/lời thoại và bình luận đến dịch vụ.
+
 ## Nối Mobile MCP khi thực sự cần
 
 Đọc [runbook Mobile MCP](../tools/mobile-mcp/README.md) trước. Nó là dev-only, chỉ dành cho **Android canary riêng** theo phạm vi cho phép; không phải production controller và không được dùng cho TikTok Like/Save/Comment/Follow/Post ngoài Riviu.

@@ -101,7 +101,9 @@ vi.mock("../api", () => ({
   automationScheduleFromSettings: vi.fn(),
   automationScheduleUpdate: vi.fn(),
   nurtureGetSettings: vi.fn(async () => settings),
+  typesafeGetSettings: vi.fn(async () => ({ enabled: false, hasApiKey: false, revision: 0 })),
   nurtureSaveSettings: saved.saveSettings,
+  nurtureUpdateCredential: vi.fn(async (apiKey: string) => ({ apiKey: apiKey ? "__riviu_keep_stored_key__" : "", hasApiKey: !!apiKey })),
   nurtureSessionStatus: vi.fn(async () => []),
   nurtureSessionLog: logBook.read,
   nurtureSessionLogSummary: logBook.summary,
@@ -499,7 +501,9 @@ describe("NurturePopup", () => {
     fireEvent.click(await screen.findByRole("tab", {name:"AI"}));
     fireEvent.change(document.querySelector<HTMLInputElement>('[data-nurture-field="apiKey"]')!, {target:{value:"new-fixture-key"}});
     fireEvent.click(screen.getByRole("button", {name:"Lưu thiết lập"}));
-    await waitFor(() => expect(saved.saveSettings).toHaveBeenCalledWith(expect.objectContaining({apiKey:"new-fixture-key",likeProb:35})));
+    const api = await import("../api");
+    await waitFor(() => expect(api.nurtureUpdateCredential).toHaveBeenCalledWith("new-fixture-key"));
+    await waitFor(() => expect(saved.saveSettings).toHaveBeenCalledWith(expect.objectContaining({likeProb:35})));
     expect(profileControl.render).not.toHaveBeenCalled();
   });
 

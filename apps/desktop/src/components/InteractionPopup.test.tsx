@@ -446,6 +446,20 @@ describe("InteractionPopup", () => {
     expect(startThread).not.toHaveBeenCalled();
   });
 
+  it("confirms Follow explicitly and sends only the selected author action", async () => {
+    render(<><ConfirmHost /><InteractionPopup metas={noMeta} devices={devices} selected={[]} surface="page" targetRef={{type:"explicit",udids:["actor-a"]}} targetUdids={["actor-a"]} /></>);
+    await pasteLink(); await nextPageStep();
+    fireEvent.click(screen.getByRole("checkbox",{name:"Theo dõi"}));
+    fireEvent.click(screen.getByRole("checkbox",{name:"Bình luận"}));
+    await nextPageStep("Kiểm tra lượt chạy →");
+    fireEvent.click(screen.getByRole("button",{name:"Bắt đầu tương tác"}));
+    const confirmation=await screen.findByRole("alertdialog",{name:"Xác nhận tương tác"});
+    expect(confirmation).toHaveTextContent("Theo dõi");
+    expect(startThread).not.toHaveBeenCalled();
+    fireEvent.click(within(confirmation).getByRole("button",{name:"Bắt đầu tương tác"}));
+    await waitFor(()=>expect(startThread).toHaveBeenCalledWith(expect.objectContaining({actions:{like:false,save:false,comment:false,follow:true},actorUdids:["actor-a"]})));
+  });
+
   it("restores saved action settings without applying an automation profile", async () => {
     const view=render(<InteractionPopup metas={noMeta} devices={devices} selected={["actor-a"]} surface="page" />);
     await pasteLink();await nextPageStep();

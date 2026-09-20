@@ -10,6 +10,7 @@ mod automation_commands;
 mod command_error;
 mod commands;
 pub mod deployment_check;
+mod exit_coordinator;
 mod farm_commands;
 mod flow_commands;
 mod flow_connector_commands;
@@ -638,6 +639,14 @@ pub fn run() {
             public_cleanup_commands::public_cleanup_execute,
             nurture_commands::nurture_get_settings,
             nurture_commands::nurture_save_settings,
+            nurture_commands::nurture_update_credential,
+            nurture_commands::typesafe_get_settings,
+            nurture_commands::typesafe_update_settings,
+            nurture_commands::typesafe_update_credential,
+            nurture_commands::typesafe_check_comment,
+            google_sheet_commands::publish_sheet_readback,
+            commands::device_action_capabilities,
+            commands::operation_trace_export,
             nurture_commands::nurture_test_api,
             nurture_commands::nurture_list_comment_attempts,
             nurture_commands::nurture_cost_summary,
@@ -687,7 +696,8 @@ pub fn run() {
         .build(context)
         .expect("error while building tauri application");
 
-    app.run(|handle, event| {
+    let exit_coordinator = exit_coordinator::ExitCoordinator::default();
+    app.run(move |handle, event| {
         // Two events, one sequence, and both are needed.
         //
         // `ExitRequested` fires when something *asks* the app to quit — which is the path
@@ -697,13 +707,29 @@ pub fn run() {
         // after requesting the quit never reaches it, and every phone keeps its WDA relay,
         // its XCTest runner and its adb forward.
         //
-        // Calling it twice on a normal quit is harmless — see `graceful_shutdown`, every
-        // step is idempotent — and a doubled cleanup is a far better failure than a
-        // skipped one.
-        if !matches!(event, RunEvent::Exit | RunEvent::ExitRequested { .. }) {
-            return;
+        // Requested exits drain on a worker while the native event loop stays
+        // available. Exit remains the fallback for a path without ExitRequested.
+        match event {
+            RunEvent::ExitRequested { api, .. } if !exit_coordinator.completed() => {
+                // Device workers and WebView cleanup may dispatch back to this
+                // native event loop. Blocking it here deadlocks their drain.
+                api.prevent_exit();
+                let drain_handle = handle.clone();
+                let exit_handle = handle.clone();
+                if let Err(error) = exit_coordinator.request(
+                    move || {
+                        log::info!("graceful shutdown started");
+                        graceful_shutdown(&drain_handle);
+                        log::info!("graceful shutdown completed");
+                    },
+                    move || exit_handle.exit(0),
+                ) {
+                    log::error!("could not start graceful shutdown: {error}");
+                }
+            }
+            RunEvent::Exit if !exit_coordinator.completed() => graceful_shutdown(handle),
+            _ => {}
         }
-        graceful_shutdown(handle);
     });
 }
 
@@ -792,6 +818,11 @@ pub(crate) fn graceful_shutdown(handle: &tauri::AppHandle) {
         }
         if let Err(error) = tauri::async_runtime::block_on(control.shutdown_cleanup()) {
             log::error!("device cleanup shutdown failed: {error}");
+        }
+        if let Some(android) = &state.android {
+            if let Err(error) = tauri::async_runtime::block_on(android.flush_traces()) {
+                log::error!("trace shutdown incomplete: {error:#}");
+            }
         }
     }
 }

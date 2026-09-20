@@ -15,6 +15,10 @@ fn observed_account_preserves_operator_metadata_and_rejects_invalid_handles() {
     assert_eq!(read.alias, meta.alias);
     assert_eq!(read.number, meta.number);
     assert_eq!(read.notes, meta.notes);
+    assert!(db
+        .record_observed_interaction_account("phone", "another.account")
+        .is_err());
+    assert_eq!(db.get_device_meta("phone").unwrap().handle, "actual.user");
     for invalid in ["", " ", "display name", "ends."] {
         assert!(db
             .record_observed_interaction_account("phone", invalid)

@@ -299,6 +299,8 @@ pub(super) async fn capture_visible_video_link_counted(
     let tree = Tree::parse(session.hierarchy_source_snapshot().await?)?;
     let (caption_id, share) = video_viewer_caption(&tree, package, caption)?;
     let _ = caption_id;
+    let version = session.app_version(package).await.unwrap_or_default();
+    let photo_counter = measured_photo_counter(&tree, package, &version);
     let mut opened = false;
     anyhow::ensure!(
         observed_at.elapsed() < Duration::from_secs(20)
@@ -327,8 +329,8 @@ pub(super) async fn capture_visible_video_link_counted(
         )))
     })?;
     anyhow::ensure!(
-        url::Url::parse(&canonical)?.path().contains("/video/"),
-        "copied content is not a video"
+        viewer_kind_matches_link(&canonical, photo_counter)?,
+        "copied content kind does not match measured viewer"
     );
     validate_photo_identity(&canonical, identity)?;
     validate_public_link(&canonical, caption, identity)
@@ -339,6 +341,67 @@ pub(super) async fn capture_visible_video_link_counted(
             )))
         })?;
     Ok(canonical)
+}
+
+fn viewer_kind_matches_link(canonical: &str, photo_counter: bool) -> anyhow::Result<bool> {
+    let parsed = url::Url::parse(canonical)?;
+    let parts = parsed
+        .path_segments()
+        .context("post path missing")?
+        .collect::<Vec<_>>();
+    Ok(parts
+        .get(1)
+        .is_some_and(|kind| *kind == "video" || (*kind == "photo" && photo_counter)))
+}
+
+/// Trill calls both video and carousel surfaces "Video". Only this retained
+/// counter shape permits the carousel path; link kind alone cannot select it.
+fn measured_photo_counter(tree: &Tree, package: &str, version: &str) -> bool {
+    let counter_id = match (package, version) {
+        ("com.ss.android.ugc.trill", "38.3.2") => ":id/llz",
+        ("com.zhiliaoapp.musically", "46.4.3") => {
+            let labels = tree.matching(package, ElementQuery::ResourceIdSuffix(":id/tv_label"));
+            let [label] = labels.as_slice() else {
+                return false;
+            };
+            if tree.nodes[*label].attr("text") != "Photo" {
+                return false;
+            }
+            ":id/qrj"
+        }
+        _ => return false,
+    };
+    let rows = tree.matching(package, ElementQuery::ResourceIdSuffix(counter_id));
+    let [parent] = rows.as_slice() else {
+        return false;
+    };
+    if tree.nodes[*parent].attr("class") != "android.widget.LinearLayout" {
+        return false;
+    }
+    let parts = tree
+        .nodes
+        .iter()
+        .enumerate()
+        .filter(|(i, n)| {
+            n.parent == Some(*parent)
+                && n.visible(package)
+                && tree.ancestors_visible(*i)
+                && n.rect().is_some()
+                && n.attr("class") == "android.widget.TextView"
+        })
+        .map(|(_, n)| n.attr("text").trim())
+        .collect::<Vec<_>>();
+    let [current, separator, total] = parts.as_slice() else {
+        return false;
+    };
+    *separator == "/"
+        && current
+            .parse::<u32>()
+            .ok()
+            .zip(total.parse::<u32>().ok())
+            .is_some_and(|(current, total)| {
+                total > 1 && total <= 35 && current >= 1 && current <= total
+            })
 }
 
 fn video_viewer_caption(
@@ -410,6 +473,80 @@ fn video_viewer_caption(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn global464_photo_counter_requires_photo_label_and_measured_counter() {
+        let source =
+            include_str!("../../fixtures/tiktok-publish/photo-counter-global46.4.3.fixture");
+        let read = |source: &str| {
+            Tree::parse(crate::HierarchySourceSnapshot {
+                generation: 1,
+                xml: source.into(),
+            })
+            .unwrap()
+        };
+        let pkg = "com.zhiliaoapp.musically";
+        assert!(measured_photo_counter(&read(source), pkg, "46.4.3"));
+        assert!(!measured_photo_counter(&read(source), pkg, "unknown"));
+        assert!(!measured_photo_counter(
+            &read(&source.replace("text=\"Photo\"", "text=\"Video\"")),
+            pkg,
+            "46.4.3"
+        ));
+        assert!(!measured_photo_counter(
+            &read(&source.replace(":id/qrj", ":id/unrelated")),
+            pkg,
+            "46.4.3"
+        ));
+        assert!(
+            viewer_kind_matches_link("https://www.tiktok.com/@fixture/photo/123", true).unwrap()
+        );
+    }
+    #[test]
+    fn photo_link_on_video_marker_requires_measured_counter_and_keeps_full_metadata_gate() {
+        let xml = include_str!("../../fixtures/tiktok-publish/photo-counter-trill-38.3.2.fixture");
+        let tree = Tree::parse(crate::HierarchySourceSnapshot {
+            generation: 1,
+            xml: xml.into(),
+        })
+        .unwrap();
+        assert!(measured_photo_counter(
+            &tree,
+            "com.ss.android.ugc.trill",
+            "38.3.2"
+        ));
+        assert!(!measured_photo_counter(
+            &tree,
+            "com.ss.android.ugc.trill",
+            "38.3.3"
+        ));
+        assert!(
+            !viewer_kind_matches_link("https://www.tiktok.com/@fixture/photo/123", false).unwrap()
+        );
+        assert!(
+            viewer_kind_matches_link("https://www.tiktok.com/@fixture/photo/123", true).unwrap()
+        );
+        assert!(
+            !viewer_kind_matches_link("https://www.tiktok.com/@fixture/live/123", true).unwrap()
+        );
+        for changed in [
+            xml.replace("text=\"11\"", "text=\"0\""),
+            xml.replace("text=\" / \"", "text=\"likes\""),
+            xml.replace("displayed=\"true\"", "displayed=\"false\""),
+        ] {
+            let tree = Tree::parse(crate::HierarchySourceSnapshot {
+                generation: 1,
+                xml: changed,
+            })
+            .unwrap();
+            assert!(!measured_photo_counter(
+                &tree,
+                "com.ss.android.ugc.trill",
+                "38.3.2"
+            ));
+        }
+        let embed = serde_json::json!({"title":"wrong","author_url":"https://www.tiktok.com/@fixture","html":"<blockquote data-video-id=\"123\">"});
+        assert!(validate_public_metadata(&embed, "expected", "fixture", "123").is_err());
+    }
     #[test]
     fn video_prefix_only_allows_copy_and_public_metadata_still_requires_full_identity() {
         let package = "com.ss.android.ugc.trill";

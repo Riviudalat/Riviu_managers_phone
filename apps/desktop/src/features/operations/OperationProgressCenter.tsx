@@ -36,7 +36,7 @@ export function OperationProgressCenter({ deviceLabels }: { deviceLabels: Readon
     const sessions = page.runs.some((run) => run.kind === "nurture" && activeRun(run)) ? await nurtureSessionStatus() : [];
     return { page, sessions };
   }, []);
-  const state = useMonitorRead(read);
+  const state = useMonitorRead(read, 2000, ["runs", "last24h", 200, 0]);
   const runs = visibleMonitorRuns(state.value?.page.runs ?? [], dismissal.records);
   const selectedRun = runs.find((run) => run.id === selectedId) ?? runs[0] ?? null;
   const resolvedSelectedId = selectedRun?.id;
@@ -48,7 +48,30 @@ export function OperationProgressCenter({ deviceLabels }: { deviceLabels: Readon
     setStopResult(null);setStopError(null);
     if(!resolvedSelectedId)return;
     let live=true;
-    const read=async()=>{const ticket=stopTicket.current;try{const result=await operationStopStatus(resolvedSelectedId);if(live&&ticket===stopTicket.current)setStopResult(result);}catch(error){if(live&&ticket===stopTicket.current)setStopError(describeError(error));}};
+    let lastRead = 0;
+    let reading = false;
+    const read = async () => {
+      if (reading) return;
+      reading = true;
+      const ticket = stopTicket.current;
+      const readId = ++lastRead;
+      try {
+        const result = await operationStopStatus(resolvedSelectedId);
+        // An absent or stale row cannot retract an acknowledged Stop. Only a
+        // result for this operation may advance its cleanup status.
+        if (live && ticket === stopTicket.current && readId === lastRead && result?.operationId === resolvedSelectedId) {
+          setStopResult(result);
+        } else if (live && ticket === stopTicket.current && readId === lastRead && result === null) {
+          // A completed marker can be cleared by an explicit resume. A pending
+          // acknowledgement still requires a real terminal cleanup result.
+          setStopResult(current => current?.state === "stopping" ? current : null);
+        }
+      } catch (error) {
+        if (live && ticket === stopTicket.current && readId === lastRead) setStopError(describeError(error));
+      } finally {
+        reading = false;
+      }
+    };
     void read();const timer=window.setInterval(()=>void read(),2000);
     return()=>{live=false;clearInterval(timer);};
   },[resolvedSelectedId]);

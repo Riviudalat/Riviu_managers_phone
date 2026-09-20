@@ -66,6 +66,129 @@ use super::recovery::Outcome;
 use super::touch::TouchPointPlanner;
 use super::{sleep_interruptible, NurtureFollowJournal, NurtureSaveJournal, NurtureSaveLease};
 
+#[cfg(test)]
+mod review_stop_during_save {
+    use super::*;
+    use std::sync::atomic::AtomicUsize;
+
+    struct Phone {
+        stop: AtomicBool,
+        taps: AtomicUsize,
+    }
+    #[async_trait::async_trait]
+    impl UiSession for Phone {
+        async fn tap(&self, _: TapPoint) -> anyhow::Result<()> {
+            assert!(
+                self.stop.load(Ordering::Acquire),
+                "fixture must stop before tap"
+            );
+            self.taps.fetch_add(1, Ordering::Relaxed);
+            Ok(())
+        }
+        async fn swipe(&self, _: crate::SwipeGesture) -> anyhow::Result<()> {
+            panic!("unexpected swipe")
+        }
+        async fn type_text(&self, _: &str) -> anyhow::Result<()> {
+            panic!("unexpected typing")
+        }
+        async fn home(&self) -> anyhow::Result<()> {
+            panic!("unexpected home")
+        }
+        async fn find_and_tap(&self, _: &str) -> anyhow::Result<()> {
+            panic!("unexpected tap")
+        }
+        async fn assert_visible(&self, _: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn stream_url(&self) -> Option<String> {
+            None
+        }
+        async fn locate(&self, query: ElementQuery<'_>) -> anyhow::Result<Option<ElementBox>> {
+            let ElementQuery::Description { value, .. } = query else {
+                return Ok(None);
+            };
+            let description = match value {
+                " profile" => "author_a profile",
+                "Sound:" => "Sound: fixture",
+                "comments" => "Read or add comments. 12 comments",
+                "Share video" => "Share video. 3 shares",
+                _ => return Ok(None),
+            };
+            Ok(Some(ElementBox {
+                x: 10.0,
+                y: 10.0,
+                width: 10.0,
+                height: 10.0,
+                enabled: true,
+                clickable: true,
+                description: Some(description.into()),
+            }))
+        }
+        async fn hierarchy_source_snapshot(
+            &self,
+        ) -> anyhow::Result<crate::HierarchySourceSnapshot> {
+            // Operator presses Stop while the first observation is in progress.
+            self.stop.store(true, Ordering::Release);
+            Ok(crate::HierarchySourceSnapshot {
+                generation: 1,
+                xml: if self.taps.load(Ordering::Relaxed) > 0 {
+                    include_str!("../../../../fixtures/tiktok/bookmark-trill-38.3.2-en-saved.xml")
+                } else {
+                    include_str!("../../../../fixtures/tiktok/bookmark-trill-38.3.2-en-unsaved.xml")
+                }
+                .into(),
+            })
+        }
+    }
+    struct Journal(AtomicUsize);
+    impl NurtureSaveJournal for Journal {
+        fn arm(&self, _: &str, _: &SaveObservation) -> anyhow::Result<NurtureSaveLease> {
+            self.0.fetch_add(1, Ordering::Relaxed);
+            Ok(NurtureSaveLease {
+                owner: crate::TikTokActionOwner {
+                    kind: crate::TikTokActionOwnerKind::Nurture,
+                    owner_id: "review".into(),
+                    device_udid: "fixture".into(),
+                    card_identity: None,
+                },
+                armed_revision: 1,
+            })
+        }
+        fn settle(&self, _: Option<NurtureSaveLease>, _: &SaveEvidence) -> anyhow::Result<()> {
+            Ok(())
+        }
+    }
+    #[tokio::test]
+    async fn regression_nurture_save_cancels_before_intent() {
+        let phone = Phone {
+            stop: AtomicBool::new(false),
+            taps: AtomicUsize::new(0),
+        };
+        let journal = Journal(AtomicUsize::new(0));
+        let mut run = HierarchyRun {
+            session: &phone,
+            labels: crate::tiktok_labels::controls_for("com.ss.android.ugc.trill", "en", "38.3.2")
+                .unwrap(),
+            screen: (1080.0, 2220.0),
+            planner: TouchPointPlanner::new((1080.0, 2220.0)),
+            search_keyword: None,
+        };
+        assert!(wait_gap(&mut None, Duration::ZERO, &phone.stop).await);
+        let (evidence, _) = run.save(Some(&journal), "card-0", &phone.stop).await;
+        println!(
+            "stop={} journal_armed={} taps={} verdict={:?}",
+            phone.stop.load(Ordering::Relaxed),
+            journal.0.load(Ordering::Relaxed),
+            phone.taps.load(Ordering::Relaxed),
+            evidence.verdict
+        );
+        assert!(phone.stop.load(Ordering::Relaxed));
+        assert_eq!(journal.0.load(Ordering::Relaxed), 0);
+        assert_eq!(phone.taps.load(Ordering::Relaxed), 0);
+        assert!(!evidence.effect_boundary_crossed);
+    }
+}
+
 /// How many consecutive cards may lack the feed tab before the loop gives up.
 ///
 /// Same intent as the pixel engine's off-feed limit: a few cards can legitimately
@@ -742,6 +865,7 @@ impl<'a> HierarchyRun<'a> {
         &mut self,
         journal: Option<&dyn NurtureSaveJournal>,
         card_key: &str,
+        stop: &AtomicBool,
     ) -> (SaveEvidence, Option<NurtureSaveLease>) {
         let mut adapter = HierarchyNurtureSaveAdapter {
             session: self.session,
@@ -749,12 +873,22 @@ impl<'a> HierarchyRun<'a> {
             sequence: 0,
         };
         let mut lease = None;
-        let evidence = tiktok_save(&mut adapter, |observation| match journal {
-            Some(journal) => {
-                lease = Some(journal.arm(card_key, observation)?);
-                Ok(())
+        let evidence = tiktok_save(&mut adapter, |observation| {
+            anyhow::ensure!(
+                !stop.load(Ordering::Acquire),
+                "nurture Save cancelled before intent"
+            );
+            match journal {
+                Some(journal) => {
+                    lease = Some(journal.arm(card_key, observation)?);
+                    anyhow::ensure!(
+                        !stop.load(Ordering::Acquire),
+                        "nurture Save cancelled before tap"
+                    );
+                    Ok(())
+                }
+                None => anyhow::bail!("nurture Save has no durable journal"),
             }
-            None => anyhow::bail!("nurture Save has no durable journal"),
         })
         .await;
         (evidence, lease)
@@ -2232,7 +2366,7 @@ pub(super) async fn run_feed(
                     let reservation = policy.reserve_attempt(PolicyAction::Save);
                     report(status, "lưu video".into());
                     let card_key = format!("card-{}", status.videos_done);
-                    let (evidence, lease) = run.save(save_journal, &card_key).await;
+                    let (evidence, lease) = run.save(save_journal, &card_key, stop).await;
                     match super::settle_journaled_save(
                         &mut policy,
                         reservation,

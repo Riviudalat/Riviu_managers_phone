@@ -6,6 +6,7 @@ pub mod ocr;
 pub mod profile;
 pub mod resolver;
 pub mod runtime;
+pub mod trace;
 pub mod tree;
 pub use model::*;
 pub use ocr::*;
