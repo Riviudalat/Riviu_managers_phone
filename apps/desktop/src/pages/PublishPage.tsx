@@ -6,6 +6,7 @@ import { PublishQuickSetup as PublishWizard } from "../components/publish/Publis
 import { PublishSchedulePlanner } from "../components/publish/PublishSchedulePlanner";
 import { PublishSheetConnection } from "../components/publish/PublishSheetConnection";
 import "../styles/publish-workspace.css";
+import "../styles/threads-publish.css";
 import { PublishScheduleRetime } from "../components/publish/PublishScheduleRetime";
 import { reconcileAssignments } from "../components/publish/publishAssignments";
 import { publishSelectionStatus } from "../components/publish/publishSelectionStatus";
@@ -512,6 +513,7 @@ export function PublishPage({
   operationSource,
   scopeControl,
 }: PublishPageProps) {
+  const [publishNetwork, setPublishNetwork] = useState<"tiktok" | "threads">("threads");
   const [workspaceTab, setWorkspaceTab] = useState<AutomationMode>(
     "setup",
   );
@@ -727,6 +729,7 @@ export function PublishPage({
     ),
   };
   const preflightRequest: PublishPreflightRequest = {
+    network: publishNetwork,
     deleteAfterPublish,
     sheetEnabled,
     sourceRoot: sourceRoot.trim(),
@@ -1016,7 +1019,7 @@ export function PublishPage({
       const approvedDraftKey = latestDraftKey.current;
       const confirmed = await requestConfirm({
         title: "Xác nhận đăng công khai?",
-        message: `${selectedBundles.length} bài sẽ được đăng công khai trên ${targets.length} máy. Nhạc sẽ được chọn sau khi mở TikTok và xác nhận lại trước Đăng.`,
+        message: `${selectedBundles.length} bài sẽ được đăng công khai trên ${targets.length} máy. Nội dung sẽ được chuẩn bị trong ${publishNetwork === "threads" ? "Threads" : "TikTok"} và xác nhận lại trước Đăng.`,
         confirmLabel: "Đăng bài",
         cancelLabel: "Huỷ",
         danger: true,
@@ -1058,6 +1061,7 @@ export function PublishPage({
         sheetEnabled,
         deleteAfterPublish,
         requestId,
+        publishNetwork,
       );
       localStorage.removeItem(storageKey);
       setBaseline(draftSnapshot);
@@ -1296,8 +1300,13 @@ export function PublishPage({
 
   return (
     <main className="panel publish-page">
+      <div className="publish-network-tabs" role="tablist" aria-label="Mạng xã hội đăng bài">
+        <button type="button" role="tab" aria-selected={publishNetwork === "threads"} onClick={() => setPublishNetwork("threads")}>Threads</button>
+        <button type="button" role="tab" aria-selected={publishNetwork === "tiktok"} onClick={() => setPublishNetwork("tiktok")}>TikTok</button>
+      </div>
       <AutomationTabs id="publish" label="Chế độ Đăng bài" value={workspaceTab} onChange={setWorkspaceTab} />
       <PublishHostLimits onSaved={() => setLimitsRevision(revision => revision + 1)} />
+      {publishNetwork === "threads" && <div className="publish-global-notice"><StatusNotice tone="warning">Đang dùng sườn chiến dịch đăng bài cho Threads. Preflight sẽ giữ nút Đăng bị khóa cho tới khi package/build/locale, composer và bộ xác minh liên kết Threads được đo.</StatusNotice></div>}
       {guardsFailed && <div className="publish-global-notice"><StatusNotice tone="warning">{UNKNOWN_PUBLISH_GUARD}. <button type="button" onClick={() => void refreshDeviceGuards()}>Kiểm tra lại trạng thái bài</button></StatusNotice></div>}
       {notice && (
         <div className="publish-global-notice">
@@ -1321,6 +1330,7 @@ export function PublishPage({
 
       <div className="publish-tab-panel" role="tabpanel" id="publish-panel-schedule" aria-labelledby="publish-tab-schedule" hidden={workspaceTab !== "schedule"}>
         <PublishSchedulePlanner key={sourceRoot}
+          network={publishNetwork}
           active={workspaceTab === "schedule"} sourceReady={!scanning && !restoringForm}
           limitsRevision={limitsRevision}
           selectedIds={bundleIds} assignments={assignments} eligible={eligibleTargets}
@@ -1342,6 +1352,7 @@ export function PublishPage({
       </div>
       <div className="publish-tab-panel" role="tabpanel" id="publish-panel-setup" aria-labelledby="publish-tab-setup" hidden={workspaceTab !== "setup"}>
         <PublishWizard
+          network={publishNetwork}
           scopeControl={scopeControl}
           active={workspaceTab === "setup"}
           sourceRoot={sourceRoot}

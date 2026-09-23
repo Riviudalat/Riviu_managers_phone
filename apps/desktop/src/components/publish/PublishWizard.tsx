@@ -27,6 +27,7 @@ import { PublishAssignmentBoard } from "./PublishAssignmentBoard";
 import { PublishPreflightResult } from "./PublishPreflightResult";
 
 export interface PublishWizardProps {
+  network?: "tiktok" | "threads";
   active?: boolean;
   sourceRoot: string;
   manifest: PublishFolderManifest | null;

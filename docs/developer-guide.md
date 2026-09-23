@@ -328,11 +328,22 @@ Windows NSIS/MSI và WiX fragment cùng nhận overlay `tauri-gui-service.conf.j
 | Android | `crates/android-driver`, helper APK và pinned tools | package/permission/hierarchy -> typed observation/effect | không tap theo toạ độ chưa đo; driver tests, hash/version gates |
 
 **Platform vs mạng xã hội vs flow.** `DevicePlatform` là OS thiết bị (iOS/Android).
-`SocialNetwork` (`tiktok` | `instagram` | `threads`, mặc định TikTok) là app mục tiêu — seam
-dispatch package/link; Instagram/Threads từ chối rõ, chưa implement. Orchestration fleet
-(`OrchestrationDocumentV1`) là đồ thị gọi vào engine Nuôi / Tương tác / Đăng hiện có; nút
-“Tạo mẫu 3 chức năng” seed 3 hồ sơ + một điều phối Nuôi→Tương tác→Đăng. Engine vẫn là
-source of truth — không thay bằng node Flow V2 tap/swipe.
+`SocialNetwork` (`tiktok` | `instagram` | `threads`, mặc định TikTok) là app mục tiêu của
+automation trên thiết bị — seam dispatch package/link; Instagram/Threads vẫn từ chối rõ trên
+đường điều khiển máy. Preflight Đăng nhận `network` (mặc định TikTok cho dữ liệu cũ) và từ chối
+Threads trước mọi thao tác gây hiệu ứng khi chưa có composer/verifier đã đo. Threads dùng lại sườn UI
+setup/schedule/monitor của Đăng bài; `network` phải đi xuyên preflight, create và schedule,
+không đăng qua API song song. Orchestration fleet (`OrchestrationDocumentV1`) là đồ thị gọi
+vào engine Nuôi / Tương tác / Đăng hiện có; nút “Tạo mẫu 3 chức năng” seed 3 hồ sơ + một
+điều phối Nuôi→Tương tác→Đăng. Engine vẫn là source of truth — không thay bằng node Flow V2 tap/swipe.
+
+`threads_publish::THREADS_PUBLISH_FLOW` mô tả các trạng thái dự kiến của đường Android, không
+phải selector hay engine đã chạy: nhận diện app → composer → media → caption → trạng thái nút
+Đăng → intent bền vững → gửi một lần → xác minh bài của chính tài khoản → permalink. Preflight
+chỉ đọc `com.instagram.barcelona`/version/locale rồi fail-closed cho đến khi có fixture và verifier.
+Package Android theo [Google Play](https://play.google.com/store/apps/details?id=com.instagram.barcelona);
+giới hạn caption 500 ký tự và loại media theo [giới thiệu chính thức của Meta](https://about.fb.com/news/2023/07/introducing-threads-new-app-text-sharing/).
+Tài liệu này không xác nhận label accessibility của một build cụ thể.
 
 Bảng này là ranh giới trách nhiệm hiện có, không khẳng định đã tách hết module lớn.
 Khi tách module, giữ public contract và chuyển các test đọc `include_str!` cùng symbol.

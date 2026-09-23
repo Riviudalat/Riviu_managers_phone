@@ -1032,6 +1032,43 @@ impl AndroidDriver {
         Ok((package, version, locale))
     }
 
+    /// Threads Android identity from the official Google Play package, plus the same
+    /// read-only version/locale probes used by the publish compatibility catalogue.
+    pub async fn threads_build(&self, serial: &str) -> anyhow::Result<(String, String, String)> {
+        const PACKAGE: &str = riviu_core::threads_publish::ANDROID_PACKAGE;
+        let listed = self
+            .adb
+            .shell(serial, &format!("pm list packages {PACKAGE}"))
+            .await?;
+        anyhow::ensure!(
+            listed
+                .lines()
+                .any(|line| line.trim() == format!("package:{PACKAGE}")),
+            "Threads ({PACKAGE}) chưa được cài trên máy"
+        );
+        let version = self
+            .adb
+            .shell(serial, &format!("dumpsys package {PACKAGE}"))
+            .await
+            .ok()
+            .and_then(|out| riviu_core::tiktok_labels::parse_version_name(&out).map(str::to_string))
+            .unwrap_or_default();
+        let locale_property = self
+            .adb
+            .shell(serial, "getprop persist.sys.locale")
+            .await
+            .map(|out| out.trim().to_string())
+            .unwrap_or_default();
+        let locale_setting = self
+            .adb
+            .shell(serial, "settings get system system_locales")
+            .await
+            .unwrap_or_default();
+        let locale =
+            crate::adb::parse_locale(&locale_property, &locale_setting).unwrap_or_default();
+        Ok((PACKAGE.into(), version, locale))
+    }
+
     async fn available_storage_bytes_for(&self, serial: &str) -> anyhow::Result<u64> {
         let output = self.adb.shell(serial, "df -k /data/local/tmp").await?;
         parse_available_storage_bytes(&output)
@@ -2157,6 +2194,10 @@ impl DeviceDriver for AndroidDriver {
     /// phone's real (package, version, locale) instead of on the package alone.
     async fn tiktok_build(&self, udid: &str) -> anyhow::Result<(String, String, String)> {
         AndroidDriver::tiktok_build(self, udid).await
+    }
+
+    async fn threads_build(&self, udid: &str) -> anyhow::Result<(String, String, String)> {
+        AndroidDriver::threads_build(self, udid).await
     }
 
     async fn verify_automation_readiness(&self, udid: &str) -> anyhow::Result<()> {

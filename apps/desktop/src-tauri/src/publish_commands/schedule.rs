@@ -34,6 +34,8 @@ pub struct PublishScheduleSlot {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct PublishScheduleRequest {
+    #[serde(default)]
+    pub network: riviu_core::SocialNetwork,
     pub request_id: String,
     pub source_root: String,
     pub slots: Vec<PublishScheduleSlot>,
@@ -133,6 +135,7 @@ async fn prepare_schedule(
     let mut prepared = Vec::new();
     for (index, slot) in request.slots.iter().enumerate() {
         let input = riviu_core::PublishPreflightRequest {
+            network: request.network,
             source_root: request.source_root.clone(),
             bundle_ids: vec![slot.bundle_id.clone()],
             udids: vec![slot.udid.clone()],
@@ -282,6 +285,7 @@ pub async fn publish_schedule_create(
     confirmed: bool,
 ) -> Result<Vec<PublishCampaignRecord>, CommandError> {
     let _admission = state.ensure_accepting_work()?;
+    preflight::require_supported_publish_network(request.network).map_err(preflight::err)?;
     if !confirmed {
         return Err(preflight::err("cần xác nhận lịch đăng công khai"));
     }
@@ -332,7 +336,7 @@ pub async fn publish_schedule_create(
                 } else {
                     PublishCleanupPolicy::KeepImportedAssets
                 },
-                network: riviu_core::SocialNetwork::TikTok,
+                network: request.network,
                 sound_policy: request.sound_policy.clone(),
                 sheet_enabled: request.sheet_enabled,
                 execution_confirmed: true,
@@ -392,6 +396,7 @@ mod tests {
     #[test]
     fn schedule_capacity_counts_persisted_seconds_with_new_minute_precision() {
         let request = PublishScheduleRequest {
+            network: riviu_core::SocialNetwork::TikTok,
             request_id: Uuid::new_v4().to_string(),
             source_root: "fixture".into(),
             slots: vec![PublishScheduleSlot {
@@ -439,6 +444,7 @@ mod tests {
     fn schedule_requires_distinct_posts_and_distinct_times_per_phone() {
         let at = Local::now().naive_local() + chrono::Duration::days(1);
         let mut r = PublishScheduleRequest {
+            network: riviu_core::SocialNetwork::TikTok,
             request_id: Uuid::new_v4().to_string(),
             source_root: "fixture".into(),
             slots: vec![

@@ -1,0 +1,3 @@
+.publish-network-tabs{display:flex;gap:4px;padding:10px 14px 0;border-bottom:1px solid var(--line);background:var(--bg-panel);flex:none}
+.publish-network-tabs button{min-width:90px;min-height:34px;padding:6px 12px;border:0;border-bottom:2px solid transparent;border-radius:4px 4px 0 0;background:transparent;color:var(--text-3);font-weight:650}
+.publish-network-tabs button[aria-selected="true"]{border-bottom-color:var(--primary);color:var(--text-1);background:var(--bg-elevated)}

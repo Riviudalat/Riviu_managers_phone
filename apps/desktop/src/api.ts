@@ -1051,8 +1051,10 @@ export async function publishCreateCampaign(
   sheetEnabled = true,
   deleteAfterPublish = true,
   requestId?: string,
+  network: "tiktok" | "instagram" | "threads" = "tiktok",
 ) {
   return invoke<PublishCampaignRecord>("publish_create_campaign", {
+    network,
     sourceRoot,
     bundleIds,
     udids,
@@ -1671,6 +1673,7 @@ export function googleSheetsDisconnect() {
 export interface PublishLimits { transfer: number; compose: number; verify: number; deviceTotal: number }
 export function publishGetLimits() { return invoke<PublishLimits>("publish_get_limits"); }
 export function publishSetLimits(limits: PublishLimits) { return invoke<void>("publish_set_limits", { limits }); }
+
 import type { TypeSafeSettings, TypeSafeVerdict } from "./generated-ipc";
 
 export function typesafeGetSettings() {

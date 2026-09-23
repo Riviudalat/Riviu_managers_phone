@@ -1066,6 +1066,7 @@ fn a_failed_final_snapshot_write_emits_no_completion_event() {
 #[test]
 fn preflight_digest_binds_caption_target_and_observed_tiktok_build() {
     let request = riviu_core::PublishPreflightRequest {
+        network: riviu_core::SocialNetwork::TikTok,
         delete_after_publish: true,
         sheet_enabled: true,
         source_root: "C:/source".into(),
@@ -1269,6 +1270,7 @@ fn preflight_digest_binds_caption_target_and_observed_tiktok_build() {
 #[test]
 fn semantic_publish_target_keeps_disconnected_group_members_in_the_snapshot() {
     let request = riviu_core::PublishPreflightRequest {
+        network: riviu_core::SocialNetwork::TikTok,
         delete_after_publish: true,
         sheet_enabled: true,
         source_root: "C:/source".into(),
@@ -1307,6 +1309,7 @@ fn semantic_publish_target_keeps_disconnected_group_members_in_the_snapshot() {
 fn publish_snapshot_captures_fleet_numbers_not_assignment_positions() {
     let fleet = vec!["a".into(), "b".into(), "c".into(), "d".into()];
     let request = riviu_core::PublishPreflightRequest {
+        network: riviu_core::SocialNetwork::TikTok,
         source_root: "fixture".into(),
         bundle_ids: vec!["one".into(), "two".into()],
         udids: vec!["b".into(), "d".into()],

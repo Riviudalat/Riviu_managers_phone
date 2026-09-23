@@ -155,6 +155,7 @@ async fn live_publish_canary() -> anyhow::Result<()> {
         save(&out, "manifest.json", &manifest)?;
         let bundle = manifest.bundles.iter().find(|bundle| bundle.name == bundle_name).context("requested first image bundle missing")?;
         let request = riviu_core::PublishPreflightRequest {
+        network: riviu_core::SocialNetwork::TikTok,
         delete_after_publish: true,
             source_root: source.to_string_lossy().to_string(), bundle_ids: vec![bundle.id.clone()],
             udids: vec![serial.as_str().into()], target_ref: Some(riviu_core::TargetRef::Explicit { udids: vec![serial.as_str().into()] }),

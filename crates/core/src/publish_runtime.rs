@@ -135,6 +135,9 @@ pub struct PublishExecutionIssue {
 #[derive(Debug, Clone, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PublishPreflightRequest {
+    /// The preflight must never apply TikTok locators to another social app.
+    #[serde(default, skip_serializing_if = "is_default_publish_network")]
+    pub network: crate::SocialNetwork,
     #[serde(default = "crate::publish::default_sheet_enabled")]
     pub delete_after_publish: bool,
     #[serde(default = "crate::publish::default_sheet_enabled")]
@@ -152,6 +155,10 @@ pub struct PublishPreflightRequest {
     pub caption_overrides: BTreeMap<String, String>,
     #[serde(default)]
     pub sound_policy: PublishSoundPolicy,
+}
+
+fn is_default_publish_network(network: &crate::SocialNetwork) -> bool {
+    *network == crate::SocialNetwork::TikTok
 }
 
 /// Result of a bounded, read-only preflight check.
@@ -872,6 +879,7 @@ mod tests {
     #[test]
     fn preflight_and_snapshot_wire_contracts_are_camel_case_and_typed() {
         let request = PublishPreflightRequest {
+            network: crate::SocialNetwork::TikTok,
             delete_after_publish: true,
             sheet_enabled: true,
             source_root: "C:/fixture".into(),
@@ -891,7 +899,14 @@ mod tests {
         assert_eq!(request_json["targetRef"]["type"], "group");
         assert_eq!(request_json["captionOverrides"]["bundle-1"], "caption");
         assert_eq!(request_json["soundPolicy"]["kind"], "default");
+        assert!(request_json.get("network").is_none());
         assert!(request_json.get("runAt").is_none());
+        let mut threads_request = request.clone();
+        threads_request.network = crate::SocialNetwork::Threads;
+        assert_eq!(
+            serde_json::to_value(threads_request).unwrap()["network"],
+            "threads"
+        );
 
         let report = PublishPreflightReport {
             sheet_delivery: None,

@@ -140,6 +140,14 @@ it.each(["left", "middle"])("dialog caption ghim bundle và trả focus đúng t
   await waitFor(() => expect(trigger).toHaveFocus());
 });
 
+it("giải thích đúng vai trò txt và xlsx trong bài Threads", () => {
+  const p = props(); p.network = "threads"; mount(p);
+  fireEvent.click(screen.getByRole("button", { name: "Sửa caption · one" }));
+  expect(screen.getByText(/đọc từ caption\*\.txt/)).toBeVisible();
+  expect(screen.getByText("Ghi chú đối tác (.xlsx)")).toBeVisible();
+  expect(screen.getByText(/không tải file lên Threads và không ghép vào nội dung/)).toBeVisible();
+});
+
 it.each(["source", "removed"])("đóng caption khi %s đổi, không rơi sang bundle khác", async change => {
   const p = props(), view = mount(p);
   fireEvent.click(screen.getByRole("button", { name: "Sửa caption · one" }));

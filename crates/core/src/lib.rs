@@ -48,6 +48,7 @@ pub mod screen_watch;
 pub mod session_log;
 pub mod social_network;
 pub mod stream_budget;
+pub mod threads_publish;
 pub mod three_feature_template;
 pub mod tiktok_account;
 pub mod tiktok_comment_delete;

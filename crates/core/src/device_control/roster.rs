@@ -95,6 +95,16 @@ impl DeviceControlPlane {
             .await
             .map_err(|error| driver_error(udid, "tiktokBuild", error))
     }
+    /// Read-only Threads package/build/locale probe used by publish preflight.
+    pub async fn threads_build(
+        &self,
+        udid: &str,
+    ) -> Result<(String, String, String), DeviceControlError> {
+        self.driver
+            .threads_build(udid)
+            .await
+            .map_err(|error| driver_error(udid, "threadsBuild", error))
+    }
     /// Read-only storage check used by publish preflight; it never evicts active work.
     pub async fn available_storage_bytes(&self, udid: &str) -> Result<u64, DeviceControlError> {
         self.driver

@@ -555,6 +555,7 @@ export type PublishSoundPolicy =
   | { kind: "trendingAny"; poolSize: number; seed: number };
 
 export interface PublishPreflightRequest {
+    network?: "tiktok" | "instagram" | "threads";
   deleteAfterPublish?: boolean;
   sheetEnabled?: boolean;
   sourceRoot: string;
@@ -616,6 +617,7 @@ export interface PublishPreflightReport {
 
 export interface PublishScheduleSlot { bundleId: string; udid: string; runAt: string; }
 export interface PublishScheduleRequest {
+    network?: "tiktok" | "instagram" | "threads";
   requestId: string;
   sourceRoot: string;
   slots: PublishScheduleSlot[];

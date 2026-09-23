@@ -49,6 +49,16 @@ const report: PublishPreflightReport = {
 afterEach(cleanup);
 
 describe("publish preflight result", () => {
+  it("names Threads compatibility blockers without implying TikTok sound selection", () => {
+    const issue = { code: "threads_verification_unimplemented", udid: "phone-1", message: "Chưa có verifier" };
+    render(<PublishPreflightResult network="threads" report={{ ...report,
+      assignments: [{ ...row, packageName: "com.instagram.barcelona", soundPicker: "pass", issues: [issue] }],
+      issues: [issue],
+    }} machineName={() => "Máy 1"} page={0} onPage={vi.fn()} onRetry={vi.fn()} busy={false}/>);
+    expect(screen.getByText(/Threads · 45.7.3/)).toBeVisible();
+    expect(screen.getByText("Chưa có bộ xác minh bài Threads")).toBeVisible();
+    expect(screen.queryByText(/chọn nhạc trên bản TikTok/i)).toBeNull();
+  });
   it("shows the blocking link check when all four legacy checks pass",()=>{
     const issue={code:"link_verification_unmeasured",udid:"phone-1",message:"locale unsupported"};
     render(<PublishPreflightResult report={{...report,assignments:[{...row,composer:"pass",soundPicker:"pass",issues:[issue],checks:[{id:"link",label:"Nhận diện xác minh liên kết",status:"blocked",reason:issue.message}]}],issues:[issue]}} machineName={()=>"Máy 1"} page={0} onPage={vi.fn()} onRetry={vi.fn()} busy={false}/>);

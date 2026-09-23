@@ -120,6 +120,10 @@ pub(super) async fn build_publish_preflight(
     db: &Database,
     mut request: riviu_core::PublishPreflightRequest,
 ) -> anyhow::Result<PreparedPublishPreflight> {
+    anyhow::ensure!(
+        request.network != riviu_core::SocialNetwork::Instagram,
+        "Instagram chưa có luồng Đăng bài"
+    );
     request.source_root = request.source_root.trim().to_string();
     anyhow::ensure!(!request.source_root.is_empty(), "thư mục nguồn đang trống");
     if let Some(run_at) = request.run_at.as_deref() {
@@ -214,6 +218,11 @@ pub(super) async fn build_publish_preflight_from_manifest_with_sheet(
     manifest: &PublishFolderManifest,
     sheet_choice: VerifiedSheetChoice,
 ) -> anyhow::Result<PreparedPublishPreflight> {
+    if request.network == riviu_core::SocialNetwork::Threads {
+        return build_threads_preflight(control, registry, db, request, manifest, sheet_choice)
+            .await;
+    }
+    require_supported_publish_network(request.network)?;
     riviu_core::publish::validate_publish_mapping(&request.bundle_ids, &request.udids)
         .map_err(anyhow::Error::new)?;
     request.sound_policy.pool_size()?;
@@ -549,6 +558,287 @@ pub(super) async fn build_publish_preflight_from_manifest_with_sheet(
     Ok(PreparedPublishPreflight { report, bundles })
 }
 
+async fn build_threads_preflight(
+    control: &DeviceControlPlane,
+    registry: &riviu_core::DeviceRegistry,
+    db: &Database,
+    request: riviu_core::PublishPreflightRequest,
+    manifest: &PublishFolderManifest,
+    sheet_choice: VerifiedSheetChoice,
+) -> anyhow::Result<PreparedPublishPreflight> {
+    riviu_core::publish::validate_publish_mapping(&request.bundle_ids, &request.udids)
+        .map_err(anyhow::Error::new)?;
+    let mut bundles = request
+        .bundle_ids
+        .iter()
+        .map(|id| {
+            manifest
+                .bundles
+                .iter()
+                .find(|bundle| bundle.id == *id)
+                .cloned()
+                .with_context(|| format!("bundle không còn trong thư mục: {id}"))
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    let overrides = request
+        .caption_overrides
+        .iter()
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .collect::<HashMap<_, _>>();
+    apply_caption_overrides(&mut bundles, Some(&overrides))?;
+
+    let metas = db.list_device_metas()?;
+    let groups = db.list_groups()?;
+    let fleet_order = registry
+        .list()
+        .into_iter()
+        .map(|device| device.udid)
+        .collect::<Vec<_>>();
+    let target_snapshot = resolve_preflight_target(&request, &fleet_order, &metas, &groups)?;
+    let mut assignments = Vec::with_capacity(bundles.len());
+    let mut observations = Vec::with_capacity(bundles.len());
+    let mut issues = Vec::new();
+
+    for (ordinal, (bundle, udid)) in bundles.iter().zip(&request.udids).enumerate() {
+        let mut row_issues = Vec::new();
+        let guard = db.publish_device_guard(udid)?;
+        if let Some(hold) = guard.blocking.first() {
+            row_issues.push(preflight_issue(
+                "post_verification_pending",
+                udid,
+                &bundle.id,
+                &format!(
+                    "Máy đang giữ bài cũ ở chiến dịch {}: {}",
+                    hold.campaign_id, hold.reason
+                ),
+            ));
+        }
+        let required_bytes = bundle
+            .total_bytes
+            .saturating_mul(2)
+            .saturating_add(64 * 1024 * 1024);
+        if let Err(error) = riviu_core::threads_publish::validate_caption(&bundle.caption) {
+            row_issues.push(preflight_issue(
+                "threads_caption_invalid",
+                udid,
+                &bundle.id,
+                &error.to_string(),
+            ));
+        }
+        let media_ok = match &bundle.media_kind {
+            riviu_core::PublishMediaKind::Video => {
+                bundle.video.is_some() && bundle.images.is_empty()
+            }
+            riviu_core::PublishMediaKind::Image => {
+                bundle.video.is_none() && !bundle.images.is_empty()
+            }
+        };
+        if !media_ok {
+            row_issues.push(preflight_issue(
+                "threads_media_invalid",
+                udid,
+                &bundle.id,
+                "Bài Threads phải có ảnh hoặc đúng một video MP4, không trộn hai loại",
+            ));
+        }
+
+        let device = registry.get(udid);
+        let android = device
+            .as_ref()
+            .is_some_and(|item| item.platform == riviu_core::DevicePlatform::Android);
+        if device.is_none() {
+            row_issues.push(preflight_issue(
+                "device_missing",
+                udid,
+                &bundle.id,
+                "máy không còn trong roster hiện tại",
+            ));
+        } else if !android {
+            row_issues.push(preflight_issue(
+                "threads_android_required",
+                udid,
+                &bundle.id,
+                "luồng Threads hiện chỉ chuẩn bị hợp đồng cho Android",
+            ));
+        }
+        if android {
+            if let Err(error) = control.verify_automation_readiness(udid).await {
+                row_issues.push(preflight_issue(
+                    "device_not_ready",
+                    udid,
+                    &bundle.id,
+                    &error.to_string(),
+                ));
+            }
+        }
+        if !control.supports_push_media(udid) {
+            row_issues.push(preflight_issue(
+                "push_media_unavailable",
+                udid,
+                &bundle.id,
+                "Riviu helper trên máy chưa quảng bá khả năng chuyển media",
+            ));
+        }
+
+        let available_bytes = if android {
+            control.available_storage_bytes(udid).await.ok()
+        } else {
+            None
+        };
+        let storage_ok = available_bytes.is_some_and(|bytes| bytes >= required_bytes);
+        if android && !storage_ok {
+            row_issues.push(preflight_issue(
+                "storage_unready",
+                udid,
+                &bundle.id,
+                "không xác nhận đủ dung lượng để chuyển media Threads",
+            ));
+        }
+
+        let (package_name, version, locale, composer_ok) = if android {
+            match control.threads_build(udid).await {
+                Ok((package, version, locale)) => {
+                    if version.is_empty() || locale.is_empty() {
+                        row_issues.push(preflight_issue(
+                            "threads_build_unreadable",
+                            udid,
+                            &bundle.id,
+                            "không đọc đủ versionName và ngôn ngữ hiển thị của Threads",
+                        ));
+                    }
+                    let measured = riviu_core::threads_publish::measured_mobile_build(
+                        &package, &version, &locale,
+                    );
+                    if !measured {
+                        row_issues.push(preflight_issue(
+                            "threads_composer_unmeasured",
+                            udid,
+                            &bundle.id,
+                            &format!(
+                                "Threads {version} ({locale}) đã được nhận diện nhưng chưa có fixture locator composer và xác minh liên kết"
+                            ),
+                        ));
+                    }
+                    (Some(package), Some(version), Some(locale), measured)
+                }
+                Err(error) => {
+                    row_issues.push(preflight_issue(
+                        "threads_build_unreadable",
+                        udid,
+                        &bundle.id,
+                        &error.to_string(),
+                    ));
+                    (None, None, None, false)
+                }
+            }
+        } else {
+            (None, None, None, false)
+        };
+        row_issues.push(preflight_issue(
+            "threads_verification_unimplemented",
+            udid,
+            &bundle.id,
+            "Chưa có engine xác minh bài Threads và lấy permalink; chưa được phép gửi Đăng",
+        ));
+
+        observations.push(serde_json::json!({
+            "ordinal": ordinal,
+            "udid": udid,
+            "network": "threads",
+            "packageName": package_name,
+            "version": version,
+            "locale": locale,
+            "requiredBytes": required_bytes,
+            "availableBytes": available_bytes,
+        }));
+        issues.extend(row_issues.iter().cloned());
+        assignments.push(riviu_core::PublishPreflightAssignmentReport {
+            checks: Vec::new(),
+            ordinal: u32::try_from(ordinal)?,
+            bundle_id: bundle.id.clone(),
+            udid: udid.clone(),
+            package_name,
+            version,
+            locale,
+            media: if media_ok {
+                riviu_core::PublishPreflightCheck::Pass
+            } else {
+                riviu_core::PublishPreflightCheck::Fail
+            },
+            composer: if composer_ok {
+                riviu_core::PublishPreflightCheck::Pass
+            } else {
+                riviu_core::PublishPreflightCheck::Fail
+            },
+            // Threads has no TikTok-style sound-picker phase in this contract.
+            sound_picker: riviu_core::PublishPreflightCheck::Pass,
+            storage: if storage_ok {
+                riviu_core::PublishPreflightCheck::Pass
+            } else {
+                riviu_core::PublishPreflightCheck::Fail
+            },
+            required_bytes,
+            available_bytes,
+            issues: row_issues,
+        });
+    }
+
+    let mut sheet_delivery = None;
+    if request.sheet_enabled {
+        match sheet_choice
+            .and_then(|target| target.ok_or_else(|| "Chưa xác minh kết nối ghi Sheet".into()))
+        {
+            Ok(target) => sheet_delivery = Some(target),
+            Err(error) => issues.push(riviu_core::PublishExecutionIssue {
+                code: "sheet_connection_unverified".into(),
+                assignment_id: None,
+                udid: None,
+                bundle_id: None,
+                message: error,
+            }),
+        }
+    }
+    let input_digest =
+        publish_preflight_digest(&request, &bundles, &target_snapshot, &observations)?;
+    let report = riviu_core::PublishPreflightReport {
+        sheet_enabled: request.sheet_enabled,
+        sheet_configured: sheet_delivery.is_some(),
+        sheet_delivery,
+        input_digest,
+        target_snapshot,
+        can_execute: issues.is_empty(),
+        assignments,
+        issues,
+    };
+    Ok(PreparedPublishPreflight { report, bundles })
+}
+
+pub(super) fn require_supported_publish_network(
+    network: riviu_core::SocialNetwork,
+) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        network == riviu_core::SocialNetwork::TikTok,
+        "Chưa thể đăng lên {}: thiếu locator composer và bộ xác minh liên kết theo package/build/locale. Không dùng luồng TikTok cho mạng này",
+        network.display_name()
+    );
+    Ok(())
+}
+
+#[cfg(test)]
+mod network_gate_tests {
+    use super::require_supported_publish_network;
+    use riviu_core::SocialNetwork;
+
+    #[test]
+    fn only_measured_tiktok_pipeline_is_admitted() {
+        assert!(require_supported_publish_network(SocialNetwork::TikTok).is_ok());
+        for network in [SocialNetwork::Threads, SocialNetwork::Instagram] {
+            let error = require_supported_publish_network(network).unwrap_err();
+            assert!(error.to_string().contains(network.display_name()));
+        }
+    }
+}
+
 #[cfg(test)]
 mod sheet_choice_tests {
     use super::*;
@@ -587,6 +877,7 @@ mod sheet_choice_tests {
             ignored_hidden_files: 0,
         };
         let request = riviu_core::PublishPreflightRequest {
+            network: riviu_core::SocialNetwork::TikTok,
             source_root: "fixture".into(),
             bundle_ids: vec!["fixture".into()],
             udids: vec![udid],
@@ -670,6 +961,26 @@ mod sheet_choice_tests {
             verify_sheet_delivery_choice(&db, false).await.unwrap(),
             None
         );
+        let threads = build_publish_preflight_from_manifest_with_sheet(
+            &control,
+            &registry,
+            &db,
+            riviu_core::PublishPreflightRequest {
+                network: riviu_core::SocialNetwork::Threads,
+                sheet_enabled: false,
+                ..request
+            },
+            &manifest,
+            Ok(None),
+        )
+        .await
+        .unwrap();
+        assert!(!threads.report.can_execute);
+        assert!(threads
+            .report
+            .issues
+            .iter()
+            .any(|issue| issue.code == "threads_verification_unimplemented"));
         control.shutdown_cleanup().await.unwrap();
         drop(db);
         std::fs::remove_file(path).unwrap();

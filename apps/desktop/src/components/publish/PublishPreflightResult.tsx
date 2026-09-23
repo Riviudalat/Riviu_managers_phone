@@ -10,6 +10,7 @@ import {
 } from "./publishPreflightDisplay";
 
 export function PublishPreflightResult({
+  network = "tiktok",
   report,
   machineName,
   bundleName,
@@ -18,6 +19,7 @@ export function PublishPreflightResult({
   onRetry,
   busy,
 }: {
+  network?: "tiktok" | "threads";
   report: PublishPreflightReport;
   machineName: (udid: string) => string;
   bundleName?: (id: string) => string;
@@ -68,7 +70,7 @@ export function PublishPreflightResult({
               </header>
               <p>{bundleName?.(row.bundleId) ?? `Bài ${row.ordinal + 1}`}</p>
               <p className="pw-preflight-build">
-                {publishTikTokBuildLabel(row)}
+                {network === "threads" ? `Threads · ${row.version || "Chưa đọc được phiên bản"}` : publishTikTokBuildLabel(row)}
               </p>
               {Boolean(row.checks?.length) && (
                 <dl className="pw-preflight-checks">
@@ -124,8 +126,7 @@ export function PublishPreflightResult({
                   <dd>{row.udid}</dd>
                   <dt>Kiểm tra</dt>
                   <dd>
-                    Nội dung: {row.media}; luồng đăng: {row.composer}; nhạc:{" "}
-                    {row.soundPicker}; dung lượng: {row.storage}
+                    Nội dung: {row.media}; luồng đăng: {row.composer};{network === "tiktok" && <> nhạc: {row.soundPicker};</>} dung lượng: {row.storage}
                   </dd>
                 </dl>
                 {row.issues.map((issue, index) => (

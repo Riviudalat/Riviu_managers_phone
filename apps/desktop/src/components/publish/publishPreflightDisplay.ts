@@ -48,6 +48,20 @@ export function publishPreflightProblem(
   issue: PublishExecutionIssue,
 ): PublishPreflightProblem {
   switch (issue.code) {
+    case "threads_caption_invalid":
+      return { title: "Nội dung Threads chưa hợp lệ", action: issue.message };
+    case "threads_media_invalid":
+      return { title: "Media Threads chưa hợp lệ", action: issue.message };
+    case "threads_android_required":
+      return { title: "Cần máy Android", action: "Luồng đăng Threads trên thiết bị chưa hỗ trợ iPhone. Chọn một máy Android để kiểm tra lại." };
+    case "threads_build_unreadable":
+      return { title: "Chưa nhận diện được ứng dụng Threads", action: `${issue.message}. Kiểm tra máy đã cài Threads từ Play Store và đang mở khóa.` };
+    case "threads_composer_unmeasured":
+      return { title: "Chưa đo màn soạn bài Threads trên máy này", action: "Cần fixture accessibility đúng package, phiên bản và ngôn ngữ trước khi chọn media hoặc nhập nội dung." };
+    case "threads_verification_unimplemented":
+      return { title: "Chưa có bộ xác minh bài Threads", action: "Chưa thể gửi Đăng. Cần xác minh bài thuộc đúng tài khoản và lấy liên kết trước khi mở quyền chạy." };
+    case "storage_unready":
+      return { title: "Chưa xác nhận dung lượng máy", action: issue.message };
     case "link_verification_unmeasured":
       return {
         title: "Chưa xác minh được bài và lấy liên kết trên giao diện này",

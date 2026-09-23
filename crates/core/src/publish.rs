@@ -2077,6 +2077,7 @@ mod tests {
         let managed_path = root.path().join("managed");
         fs::create_dir(&bundle_path).expect("bundle");
         write_png(&bundle_path.join("01-cover.png"), [9, 8, 7]);
+        fs::write(bundle_path.join("partners-note.xlsx"), b"metadata only").expect("partner");
         let mut caption = fs::File::create(bundle_path.join("caption.txt")).expect("caption");
         writeln!(caption, "caption").expect("write");
         let manifest =
@@ -2088,6 +2089,10 @@ mod tests {
         );
         assert_eq!(managed.caption_sha256, manifest.bundles[0].caption_sha256);
         assert!(Path::new(&managed.images[0].path).is_file());
+        assert!(
+            !managed_path.join("partners-note.xlsx").exists(),
+            "the partner workbook is metadata and must never enter the upload staging folder"
+        );
     }
 
     #[test]

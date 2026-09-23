@@ -389,6 +389,30 @@ phần được hệ thống xác định còn hợp lệ, không gửi lại m�
 
 ## Đăng bài
 
+Trang **Đăng bài** mở ở tab Threads và dùng cùng sườn chiến dịch với TikTok: quét thư mục,
+chọn nội dung, ghép máy, kiểm tra trước khi đăng, hẹn giờ và theo dõi. Mạng đích được giữ trong
+yêu cầu preflight và lịch, không đổi tab bằng cách chỉ thay nhãn. Preflight Android đọc package
+`com.instagram.barcelona`, version và locale; kiểm nội dung tối đa 500 ký tự cùng media,
+rồi báo riêng các bước composer/xác minh chưa được đo. Threads không dùng bộ chọn nhạc TikTok.
+Hiện preflight Threads vẫn khóa thao tác **Đăng bài** vì chưa đo ứng dụng Threads trên thiết bị và chưa có cách xác minh
+liên kết sau khi gửi. Không có bài nào được gửi từ tab Threads cho tới khi đủ hai điều kiện này.
+
+Mỗi thư mục bài Threads dùng cấu trúc nguồn sau (tên phần sau dấu `-` có thể thay đổi):
+
+```text
+bai-01/
+├── 01-cover.jpg
+├── 02-detail.jpg
+├── caption-noi-dung.txt
+└── partners-ghi-chu.xlsx
+```
+
+`caption*.txt` là nội dung được đưa vào ô soạn bài. `partner*.xlsx` là ghi chú đối tác
+của riêng bài đó: Riviu đọc tên để ghi vào các cột đối tác trên Google Sheet sau khi
+xác minh bài đăng. Workbook không được tải lên Threads, không được ghép vào nội dung và
+không được chép vào thư mục media dùng để đăng. Mỗi bài dùng đúng một file caption và
+tối đa một workbook `partner*.xlsx`; file `.xlsx` có tên khác được xem là file không hỗ trợ.
+
 Mục **Giới hạn chạy đồng thời** trên trang Đăng bài cho phép xem và lưu giới hạn
 chuyển media, thao tác TikTok, xác minh link và tổng lượt điều khiển theo máy chủ.
 Sau khi đổi giới hạn, kiểm tra lại lịch trước khi lưu; lịch quá tải có cảnh báo.
@@ -615,6 +639,8 @@ Cách chạy một lượt trong Bàn đăng nhanh:
 
 1. Bấm **Chọn thư mục**, rồi **Quét**; đánh dấu từng bài hoặc **Chọn tất cả bài**.
    Một thư mục con là một bài gồm toàn bộ ảnh; có thể chọn trực tiếp thư mục của một bài.
+   Trong mỗi bài, `caption*.txt` là nội dung đăng còn `partner*.xlsx` chỉ là ghi chú
+   đối tác để ghi Sheet, không phải tệp đính kèm của bài.
    Ô Thư mục nguồn cho nhập đường dẫn và **Quét**. Đổi nguồn trong lúc quét sẽ bỏ kết quả
    trả muộn của nguồn cũ. Quét xong chưa tự chọn bài hoặc tạo chiến dịch.
 2. Bấm một bài để xem caption, ảnh/video và đối tác trong **Bài đang chỉnh**. Sửa trực tiếp

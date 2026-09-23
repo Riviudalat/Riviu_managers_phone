@@ -189,6 +189,7 @@ pub(crate) async fn execute_pipeline(
     let request = db
         .publish_campaign_request(&campaign)?
         .context("campaign missing")?;
+    preflight::require_supported_publish_network(request.network)?;
     anyhow::ensure!(
         request.verification_contract_version == Some(1)
             && (!request.sheet_enabled
@@ -342,6 +343,7 @@ pub(crate) async fn run_dispatcher(
                     let request = work_db
                         .publish_campaign_request(&task_job.run.campaign_id)?
                         .context("request missing")?;
+                    preflight::require_supported_publish_network(request.network)?;
                     anyhow::ensure!(
                         request.execution_confirmed
                             && request.verification_contract_version == Some(1)

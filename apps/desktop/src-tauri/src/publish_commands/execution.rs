@@ -248,6 +248,7 @@ pub fn publish_auto_assign(
 #[allow(clippy::too_many_arguments)] // Tauri exposes each wire field as a named command argument.
 pub async fn publish_create_campaign(
     state: State<'_, AppState>,
+    network: Option<riviu_core::SocialNetwork>,
     mut source_root: String,
     bundle_ids: Vec<String>,
     udids: Vec<String>,
@@ -262,11 +263,14 @@ pub async fn publish_create_campaign(
     request_id: Option<String>,
 ) -> Result<PublishCampaignRecord, CommandError> {
     let _admission = state.ensure_accepting_work()?;
+    let network = network.unwrap_or_default();
+    super::preflight::require_supported_publish_network(network).map_err(err)?;
     source_root = source_root.trim().to_string();
     let sound_policy = sound_policy.unwrap_or_default();
     let confirmed = confirmed.unwrap_or(false);
     let delete_after_publish = delete_after_publish.unwrap_or(true);
     let preflight_request = riviu_core::PublishPreflightRequest {
+        network,
         delete_after_publish,
         sheet_enabled: sheet_enabled.unwrap_or(true),
         source_root: source_root.clone(),
@@ -365,7 +369,7 @@ pub async fn publish_create_campaign(
         } else {
             PublishCleanupPolicy::KeepImportedAssets
         },
-        network: riviu_core::SocialNetwork::TikTok,
+        network,
         sound_policy,
         execution_confirmed: confirmed,
         target_snapshot: Some(prepared.report.target_snapshot.clone()),
@@ -684,6 +688,10 @@ pub(crate) async fn transfer_publish_campaign_inner(
     agent_bundle_id: String,
     campaign_id: String,
 ) -> anyhow::Result<PublishCampaignDetail> {
+    let request = db
+        .publish_campaign_request(&campaign_id)?
+        .ok_or_else(|| anyhow::anyhow!("publish campaign request not found"))?;
+    super::preflight::require_supported_publish_network(request.network)?;
     let detail = db
         .get_publish_campaign(&campaign_id)?
         .ok_or_else(|| anyhow::anyhow!("publish campaign not found"))?;
@@ -1106,6 +1114,7 @@ pub(crate) async fn execute_publish_campaign_inner(
     let request = db
         .publish_campaign_request(&campaign_id)?
         .ok_or_else(|| anyhow::anyhow!("publish campaign request not found"))?;
+    super::preflight::require_supported_publish_network(request.network)?;
     let mut detail = db
         .get_publish_campaign(&campaign_id)?
         .ok_or_else(|| anyhow::anyhow!("publish campaign not found"))?;
@@ -2135,6 +2144,7 @@ pub(crate) async fn post_publish_campaign_inner(
     let request = db
         .publish_campaign_request(&campaign_id)?
         .ok_or_else(|| anyhow::anyhow!("publish campaign request not found"))?;
+    super::preflight::require_supported_publish_network(request.network)?;
     let detail = db
         .get_publish_campaign(&campaign_id)?
         .ok_or_else(|| anyhow::anyhow!("publish campaign not found"))?;

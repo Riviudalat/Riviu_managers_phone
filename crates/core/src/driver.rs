@@ -358,6 +358,13 @@ pub trait DeviceDriver: Send + Sync {
     async fn tiktok_build(&self, _udid: &str) -> anyhow::Result<(String, String, String)> {
         anyhow::bail!("backend này không đọc được (gói, versionName, locale) của TikTok")
     }
+    /// The installed Threads `(package, versionName, locale)` tuple.
+    ///
+    /// The default refuses because the iOS bundle id has not been measured in this project.
+    /// Android overrides this with the official Play package and read-only device probes.
+    async fn threads_build(&self, _udid: &str) -> anyhow::Result<(String, String, String)> {
+        anyhow::bail!("backend này chưa đọc được (gói, versionName, locale) của Threads")
+    }
     /// Observe transport conflicts without opening or replacing a UI session.
     async fn verify_automation_transport(&self, _udid: &str) -> anyhow::Result<()> {
         Ok(())

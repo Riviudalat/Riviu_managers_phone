@@ -42,6 +42,7 @@ function canAssign(snapshot: AssignmentSnapshot, id: string, udid: string, conte
 
 /** Ba khung chỉ sửa bản nháp; PublishPage tiếp tục sở hữu preflight và mọi tác vụ thật. */
 export function PublishQuickSetup(p: QuickProps) {
+  const appName = p.network === "threads" ? "Threads" : "TikTok";
   const [query, setQuery] = useState("");
   const [deviceQuery, setDeviceQuery] = useState("");
   const [onlyFree, setOnlyFree] = useState(false);
@@ -288,15 +289,15 @@ export function PublishQuickSetup(p: QuickProps) {
       </div><div><label className="pq-field"><span>Nội dung bài đăng</span><textarea aria-label="Nội dung bài đăng" rows={5} value={p.captions[captionBundle.id] ?? captionBundle.caption} disabled={locked} onChange={e => {
         const current = latest.current;
         if (current && !current.locked && current.props.active !== false && current.props.sourceRoot === captionContext.source && current.props.manifest?.bundles.some(b => b.id === captionContext.id)) current.props.onCaption(captionContext.id, e.target.value);
-      }}/></label><small className="pq-char-count">{(p.captions[captionBundle.id] ?? captionBundle.caption).length} ký tự · lưu trong bản nháp, không sửa file nguồn</small>
-        <div className="pq-partners"><strong>Đối tác của bài</strong><p>{captionBundle.partners?.length ? captionBundle.partners.join(" · ") : "Không có thông tin đối tác trong file nguồn"}</p><small>Người đăng trên Sheet: bot</small></div>
-        <div className="pq-sound"><Music2 size={20}/><div><strong>Nhạc thịnh hành</strong><small>Chọn và xác nhận nhạc trong TikTok khi đăng</small></div></div>
+      }}/></label><small className="pq-char-count">{(p.captions[captionBundle.id] ?? captionBundle.caption).length} ký tự · đọc từ caption*.txt; bản nháp không sửa file nguồn</small>
+        <div className="pq-partners"><strong>Ghi chú đối tác (.xlsx)</strong><p>{captionBundle.partners?.length ? captionBundle.partners.join(" · ") : "Không có thông tin đối tác trong file nguồn"}</p><small>{p.network === "threads" ? "Chỉ dùng để ghi Sheet sau khi đăng; không tải file lên Threads và không ghép vào nội dung." : "Chỉ dùng để ghi Sheet sau khi đăng; không tải file lên TikTok và không ghép vào caption."}</small></div>
+        {p.network !== "threads" && <div className="pq-sound"><Music2 size={20}/><div><strong>Nhạc thịnh hành</strong><small>Chọn và xác nhận nhạc trong TikTok khi đăng</small></div></div>}
         {duplicateCaptions > 0 && <p className="pq-hint">{duplicateCaptions} bài đã chọn có caption trùng; nội dung giữ nguyên, không tự sửa.</p>}
       </div></div>
     </PublishDialog>}
     {dialog === "check" && <PublishDialog title="Kiểm tra đợt đăng" wide onClose={() => setDialog(null)} actions={<><button type="button" onClick={() => setDialog(null)}>Quay lại</button><button type="button" className="primary" disabled={locked || !p.preflight?.canExecute || !complete} onClick={() => void p.onExecute()}><Check size={16}/> Xác nhận đăng {selected.length} bài</button></>}>
-      {p.preflightLoading ? <p>Đang kiểm tra nội dung và máy thực hiện…</p> : p.preflightError ? <p role="alert">{p.preflightError}</p> : p.preflight ? <PublishPreflightResult report={p.preflight} machineName={label} bundleName={id => bundles.find(bundle => bundle.id === id)?.name ?? id} page={reportPage} onPage={setReportPage} onRetry={() => void p.onPreflight()} busy={locked}/> : <p>Chưa có kết quả kiểm tra.</p>}
-      <p className="pq-hint">Nhạc được chọn sau khi mở TikTok. {p.sheet ? "Ghi Sheet đang bật; link được ghi sau khi xác nhận bài đăng thành công." : "Ghi Sheet đang tắt; kết quả chỉ lưu trong ứng dụng."}</p>
+      {p.preflightLoading ? <p>Đang kiểm tra nội dung và máy thực hiện…</p> : p.preflightError ? <p role="alert">{p.preflightError}</p> : p.preflight ? <PublishPreflightResult network={p.network} report={p.preflight} machineName={label} bundleName={id => bundles.find(bundle => bundle.id === id)?.name ?? id} page={reportPage} onPage={setReportPage} onRetry={() => void p.onPreflight()} busy={locked}/> : <p>Chưa có kết quả kiểm tra.</p>}
+      <p className="pq-hint">{p.network === "threads" ? "Nội dung được chuẩn bị trong Threads sau khi preflight hỗ trợ thiết bị này." : `Nhạc được chọn sau khi mở ${appName}.`} {p.sheet ? "Ghi Sheet đang bật; link được ghi sau khi xác nhận bài đăng thành công." : "Ghi Sheet đang tắt; kết quả chỉ lưu trong ứng dụng."}</p>
     </PublishDialog>}
   </div>;
 }

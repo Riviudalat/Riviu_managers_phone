@@ -683,6 +683,7 @@ impl ProductionOrchestrationPort {
             &self.registry,
             &self.db,
             riviu_core::PublishPreflightRequest {
+                network: riviu_core::SocialNetwork::TikTok,
                 source_root: config.source_root.clone(),
                 bundle_ids: config.bundle_ids.clone(),
                 udids: Self::target_udids(request),

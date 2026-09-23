@@ -3,8 +3,11 @@
 ### 3.0 Phân tầng: OS, mạng xã hội, flow
 
 - **`DevicePlatform`** — OS của máy (iOS / Android). Không dùng để chọn TikTok vs Instagram.
-- **`SocialNetwork`** (`crates/core/src/social_network.rs`) — app mục tiêu. Mặc định TikTok;
-  Instagram/Threads chỉ là seam (package/link refuse) cho đợt sau. Module `tiktok_*` giữ tên.
+- **`SocialNetwork`** (`crates/core/src/social_network.rs`) — app mục tiêu của automation trên
+  thiết bị. Mặc định TikTok; Instagram/Threads vẫn là seam từ chối ở package/link/device driver.
+  Workspace Threads dùng lại sườn setup/schedule/monitor; preflight từ chối Threads trước khi gọi đường TikTok.
+  Chưa có locator và verifier Threads theo package/build/locale nên không bật thao tác Đăng.
+  Module `tiktok_*` giữ tên.
 - **Orchestration fleet** — đồ thị `runNurture` / `runInteraction` / `runPublish` gọi engine
   hiện có. Khác Flow V2 (tap/swipe trên một máy). Mẫu “3 chức năng” tạo bằng lệnh
   `orchestration_create_three_feature_template`, không ghi đè điều phối có sẵn.

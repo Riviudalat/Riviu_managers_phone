@@ -13,6 +13,7 @@ import { useScheduleDrag, type ScheduleDropTarget } from "./useScheduleDrag";
 import "../../styles/publish-schedule.css";
 
 type Props = {
+  network?: "tiktok" | "threads";
   sourceRoot: string; bundles: PublishBundle[]; devices: DeviceInfo[]; metas: Map<string, DeviceMeta>;
   captions: Record<string, string>; sound: PublishSoundPolicy; sheet: boolean; cleanup: boolean;
   selectedIds?: string[]; assignments?: Record<string, string>; eligible?: string[];
@@ -25,6 +26,7 @@ const emptyDraft = (sourceRoot: string): ScheduleDraft => ({ version: 2, sourceR
 const newRow = (bundleId: string): ScheduleRow => ({ id: crypto.randomUUID(), bundleId, udid: "", time: "", timeMode: "common" });
 
 export function PublishSchedulePlanner(p: Props) {
+  const appName = p.network === "threads" ? "Threads" : "TikTok";
   const [draft, setDraft] = useState(() => emptyDraft(p.sourceRoot));
   const draftRef = useRef(draft);
   const initialized = useRef(false);
@@ -89,6 +91,7 @@ export function PublishSchedulePlanner(p: Props) {
     draftRef.current = next; setDraft(next); setReview(null); setConfirmed(false); setNotice(null); persist(next);
   };
   const request: PublishScheduleRequest = { requestId: draft.requestId, sourceRoot: p.sourceRoot,
+    network: p.network ?? "tiktok",
     slots: draft.rows.map(r => ({ bundleId: r.bundleId, udid: r.udid, runAt: `${draft.date}T${scheduleTime(r, draft.commonTime)}` })),
     captionOverrides: Object.fromEntries(draft.rows.filter(r => p.captions[r.bundleId] !== undefined).map(r => [r.bundleId, p.captions[r.bundleId]])),
     soundPolicy: p.sound, sheetEnabled: p.sheet, deleteAfterPublish: p.cleanup };
@@ -301,7 +304,7 @@ export function PublishSchedulePlanner(p: Props) {
             <td><div className="ps-row-actions"><button type="button" disabled={locked || !row.udid} aria-label={`Gỡ gán ${name(row.bundleId)}`} onClick={() => setMachine(row, "")}><Unlink size={15} aria-hidden="true"/></button><button type="button" disabled={locked} aria-label={`Bỏ bài ${name(row.bundleId)}`} onClick={() => selection(row.bundleId, false)}><X size={15} aria-hidden="true"/></button></div></td>
           </tr>)}
         </tbody></table>{!draft.rows.length && <p className="ps-empty">Chọn hoặc kéo bài vào vùng máy để tạo bảng phân công.</p>}</div>
-        <p className="ps-time-note">Giờ máy tính: {Intl.DateTimeFormat().resolvedOptions().timeZone}. Giờ hẹn là lúc bắt đầu xử lý, chưa phải lúc TikTok xuất bản. Giữ Riviu mở và máy kết nối. Lịch chưa được cấp lượt trong 30 giây hoặc mở Riviu sau giờ hẹn được đánh dấu Lỡ lịch, không tự đăng bù.</p>
+        <p className="ps-time-note">Giờ máy tính: {Intl.DateTimeFormat().resolvedOptions().timeZone}. Giờ hẹn là lúc bắt đầu xử lý, chưa phải lúc {appName} xuất bản. Giữ Riviu mở và máy kết nối. Lịch chưa được cấp lượt trong 30 giây hoặc mở Riviu sau giờ hẹn được đánh dấu Lỡ lịch, không tự đăng bù.</p>
         {(p.blockingReason || notice) && <p className="ps-notice" role="status">{p.blockingReason || notice}</p>}
         {reviewed?.report.warnings?.map(warning => <p role="status" key={warning}>{warning}</p>)}
         {reviewed && <div className="ps-review"><strong>{reviewed.report.canExecute ? "Các bài đã đạt kiểm tra" : "Có bài cần xử lý trong bảng phân công"}</strong>{reviewed.report.canExecute && <label className="ps-inline-check"><input data-schedule-field="confirm" type="checkbox" checked={confirmed} disabled={locked} onChange={e => setConfirmed(e.target.checked)}/>Tôi xác nhận đăng công khai các bài đúng lịch trên</label>}</div>}
