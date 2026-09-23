@@ -287,6 +287,24 @@ không tự gửi/đăng lại; việc kiểm tra lại chỉ đi theo phạm vi
 
 ## Tương tác
 
+Trong **Thiết lập**, mở **Tương tác Threads · bản nháp riêng** để gán từng dòng:
+máy Android, username Threads thực hiện, link bài, hành động và nội dung do bạn nhập.
+Các lựa chọn gồm Thích, Trả lời, Đăng lại, Trích dẫn. Trả lời/Trích dẫn cần nội dung;
+Thích/Đăng lại không gửi nội dung. Username nhập ở đây chưa được xác minh trên máy.
+Link trực tiếp `https://www.threads.com/@ten/post/MA_BAI` và tên miền cũ `threads.net`
+được nhận; link rút gọn phải đổi sang link bài trực tiếp. Có thể dùng link bài của
+bạn hoặc tài khoản khác. Kiểm tra bản nháp báo trùng tài khoản/bài/hành động dù link
+khác tên miền. Bản nháp Threads lưu riêng trên máy tính, không đi vào engine TikTok.
+
+**Chưa chạy tự động:** giờ dự kiến chỉ thuộc bản nháp, chưa tạo lịch thực thi.
+Chưa nối trigger từ bài vừa đăng và chưa có adapter nhận diện/xác minh tương tác Threads
+trên điện thoại. Cần đo giao diện đúng phiên bản/ngôn ngữ trước khi mở quyền chạy.
+Thao tác **Chạy ngay/Hẹn giờ** của khu vực TikTok vẫn chỉ áp dụng cấu hình TikTok.
+
+Tham chiếu nghiệp vụ: [trả lời bài](https://www.postman.com/meta/threads/request/34203612-7abb4419-a216-4e06-8027-f9f4fcf8bee9)
+và [đăng lại](https://www.postman.com/meta/threads/request/34203612-013f1907-cee6-4625-859b-b90fd2faf351)
+trong tài liệu Meta. API không được dùng để suy ra selector giao diện Android.
+
 Các tab chính là **Thiết lập · Hẹn giờ · Theo dõi**; cấu hình nằm trong
 Thiết lập, Hẹn giờ lưu bản chụp thiết lập hiện tại. Các phần Chọn bài viết/Hành động & máy/
 Kiểm tra & chạy dùng tab ngang; nút chạy chỉ bật khi đã đủ điều kiện.

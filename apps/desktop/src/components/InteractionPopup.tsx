@@ -47,6 +47,7 @@ import { IconChat, IconClose } from "./Icons";
 import { InteractionMonitorTab } from "./interaction/InteractionMonitorTab";
 import { InteractionSetupTab } from "./interaction/InteractionSetupTab";
 import { InteractionWorkspaceSetup } from "./interaction/InteractionWorkspaceSetup";
+import { ThreadsInteractionSetup } from "./interaction/ThreadsInteractionSetup";
 import { AutomationTabs, type AutomationMode } from "./AutomationTabs";
 import { AutomationSettingsSchedule } from "./AutomationSettingsSchedule";
 import { CommandBar } from "./WorkspacePrimitives";
@@ -819,6 +820,7 @@ export function InteractionPopup({
           aria-labelledby="interaction-tab-setup"
           hidden={tab !== "setup"}
         >
+          <ThreadsInteractionSetup devices={inScope} labels={deviceLabel} />
           {pageSurface ? <InteractionWorkspaceSetup setup={setupProps} profiles={null} scopeControl={scopeControl}
             effectiveActors={effectiveActors} busy={runBusy} onRun={() => void run()}
             onReparse={() => setParseRevision((value) => value + 1)} /> : <InteractionSetupTab {...setupProps} />}
