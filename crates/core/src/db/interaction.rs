@@ -23,6 +23,16 @@ impl Database {
         plan: &crate::interaction::ThreadPlan,
     ) -> anyhow::Result<(String, bool)> {
         request.validate().map_err(|error| anyhow::anyhow!(error))?;
+        if let Some(s) = &request.seeding {
+            anyhow::ensure!(
+                !request.actions.comment
+                    || request.targets.iter().all(|t| s
+                        .comments
+                        .get(&t.target_key)
+                        .is_some_and(|v| v.len() == usize::from(request.message_count))),
+                "Duyệt đủ bình luận cho từng bài trước khi chạy"
+            );
+        }
         let expected_plan =
             crate::interaction::plan_threads(request).map_err(|error| anyhow::anyhow!(error))?;
         anyhow::ensure!(
@@ -141,7 +151,9 @@ impl Database {
                 campaign_id,
                 &assignment_id,
                 &assignment.actor_udid,
-                request.actions,
+                request.seeding.as_ref().map_or(request.actions, |s| {
+                    s.actions_for(request, assignment.ordinal)
+                }),
                 &now,
             )?;
             assignment_ids.insert(
@@ -297,7 +309,7 @@ impl Database {
             .iter()
             .flat_map(|assignment| assignment.actions.iter().cloned())
             .collect::<Vec<_>>();
-        let action_aggregate = (!action_results.is_empty())
+        let mut action_aggregate = (!action_results.is_empty())
             .then(|| crate::interaction::aggregate_interaction_actions(&action_results));
         // The detail already has the exact rows in memory. Re-derive through the canonical
         // helper so the row-level projection and the summary cannot drift.
@@ -308,8 +320,33 @@ impl Database {
             |r| r.get(0),
         )?;
         let request: crate::ThreadCampaignRequest = serde_json::from_str(&request_json)?;
+        if let Some(s) = &request.seeding {
+            let short = request.targets.iter().any(|t| {
+                [
+                    (crate::InteractionActionKind::Like, s.like_count),
+                    (crate::InteractionActionKind::Save, s.save_count),
+                    (crate::InteractionActionKind::Share, s.share_count),
+                ]
+                .iter()
+                .any(|(kind, wanted)| {
+                    assignments
+                        .iter()
+                        .filter(|a| a.target_key == t.target_key)
+                        .flat_map(|a| &a.actions)
+                        .filter(|a| {
+                            a.kind == *kind && a.state == crate::InteractionActionState::Confirmed
+                        })
+                        .count()
+                        < usize::from(*wanted)
+                })
+            });
+            if short && action_aggregate == Some(crate::InteractionRunAggregate::Done) {
+                action_aggregate = Some(crate::InteractionRunAggregate::Partial);
+            }
+        }
         let session=conn.query_row("SELECT started_at_ms,ends_at_ms,next_at_ms,cursor FROM interaction_conversation_sessions WHERE campaign_id=?1",[campaign_id],|r|Ok(super::ConversationSession{started_at_ms:r.get(0)?,ends_at_ms:r.get(1)?,next_at_ms:r.get(2)?,cursor:r.get::<_,i64>(3)? as usize})).optional()?;
         Ok(Some(crate::interaction::InteractionCampaignDetail {
+            seeding: request.seeding,
             scripted_conversation: request.scripted_conversation,
             conversation_session: session,
             summary,
@@ -1077,6 +1114,7 @@ mod settlement_tests {
                 .join(format!("riviu-assignment-settlement-{}.db", Uuid::new_v4()));
             let db = Database::open(&path).expect("fixture database");
             let request = ThreadCampaignRequest {
+                seeding: None,
                 scripted_conversation: None,
                 request_id: Uuid::new_v4().to_string(),
                 targets: vec![crate::parse_tiktok_links(
@@ -1094,6 +1132,7 @@ mod settlement_tests {
                 cohort_size: None,
                 manual_comments: vec!["first fixture".into(), "second fixture".into()],
                 actions: InteractionActionSet {
+                    share: false,
                     follow: false,
                     like: true,
                     save: true,

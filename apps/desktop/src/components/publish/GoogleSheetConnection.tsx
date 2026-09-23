@@ -15,6 +15,14 @@ const sameTarget = (a: Target | null, b: Target | null) => !!a && !!b && a.sprea
 const accountKey = (s: GoogleSheetsStatus) => JSON.stringify([s.accountId, s.connected, s.active, s.writerId, s.hasSheetsScope,
   s.active ? parseGoogleSheetUrl(s.sheetUrl || "")?.url ?? s.sheetUrl : null]);
 
+function boundedRead<T>(promise: Promise<T>, milliseconds = 15_000): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => reject(Error("Đã hết thời gian đọc kết nối Google. Kết nối đã lưu được giữ nguyên; kiểm tra lại khi dịch vụ phản hồi.")), milliseconds);
+    promise.then(resolve, reject).finally(() => clearTimeout(timeout));
+  });
+}
+const readGoogleStatus = () => boundedRead(googleSheetsStatus());
+
 export function GoogleSheetConnection({ onReadyChange }: Props) {
   const [url, setUrl] = useState("");
   const [status, setStatus] = useState<GoogleSheetsStatus | null>(null);
@@ -48,7 +56,7 @@ export function GoogleSheetConnection({ onReadyChange }: Props) {
       applyStatus(next);
       if (Date.now() >= deadline) { await googleSheetsCancel(); throw Error("Đã hết thời gian chờ Google. Vui lòng thử lại."); }
       await pause(); if (!valid(ticket)) return null;
-      next = await googleSheetsStatus();
+      next = await readGoogleStatus();
     }
     if (!valid(ticket)) return null;
     applyStatus(next); if (next.error) throw Error(next.error); return next;
@@ -56,17 +64,15 @@ export function GoogleSheetConnection({ onReadyChange }: Props) {
   useEffect(() => {
     mounted.current = true; const ticket = ++generation.current; flight.current = ticket;
     void (async () => {
-      const [google, config] = await Promise.allSettled([googleSheetsStatus(), publishSheetGetConfig()]);
+      const [google, config] = await Promise.allSettled([readGoogleStatus(), boundedRead(publishSheetGetConfig())]);
       if (!valid(ticket)) return;
       if (google.status === "rejected") throw google.reason;
       const next = google.value; applyStatus(next);
       const initial = next.sheetUrl || (config.status === "fulfilled" ? config.value.sheetUrl : "") || "";
       if (!edited.current) { urlRef.current = initial; setUrl(initial); }
       if (next.error) setError(next.error);
-      const target = parseGoogleSheetUrl(urlRef.current), revision = urlRevision.current;
-      if (next.active && next.connected && next.phase === "idle" && target && sameTarget(target, parseGoogleSheetUrl(next.sheetUrl || ""))) {
-        verifiedResult(await publishSheetCheck(target.url), target, next, ticket, revision);
-      }
+      // Loading the saved account must not acquire a shared writer lock or
+      // resume a Sheet mutation. Verification remains an explicit action.
     })().catch(e => { if (valid(ticket)) setError(describeError(e)); }).finally(() => finish(ticket));
     const onFocus = () => refreshFocus.current(); window.addEventListener("focus", onFocus);
     return () => { mounted.current = false; generation.current += 1; flight.current = null; stopWait(); window.removeEventListener("focus", onFocus); };
@@ -74,7 +80,7 @@ export function GoogleSheetConnection({ onReadyChange }: Props) {
   refreshFocus.current = () => {
     if (flight.current !== null) return;
     const ticket = generation.current;
-    void googleSheetsStatus().then(next => {
+    void readGoogleStatus().then(next => {
       if (valid(ticket) && flight.current === null) { applyStatus(next); if (next.error) setError(next.error); }
     }).catch(e => { if (valid(ticket) && flight.current === null) { setResult(null); setError(describeError(e)); } });
   };
@@ -102,7 +108,7 @@ export function GoogleSheetConnection({ onReadyChange }: Props) {
       checked = await googleSheetsConnect(target.spreadsheetId, target.sheetId, true, true);
     }
     if (!valid(ticket) || urlRevision.current !== revision) return;
-    const connected = await googleSheetsStatus();
+    const connected = await readGoogleStatus();
     if (!valid(ticket) || urlRevision.current !== revision) return;
     applyStatus(connected);
     if (!connected.connected || !connected.active || !sameTarget(target, parseGoogleSheetUrl(connected.sheetUrl || ""))) throw Error("Google chưa xác nhận đúng bảng và tab. Kiểm tra lại quyền sửa của tài khoản.");
@@ -112,7 +118,7 @@ export function GoogleSheetConnection({ onReadyChange }: Props) {
     if (flight.current !== null) return;
     const ticket = ++generation.current, revision = urlRevision.current; flight.current = ticket; browserInvoked.current = false; setAction("login"); setError(null); setResult(null);
     try {
-      const current = await googleSheetsStatus(); if (!valid(ticket)) return; applyStatus(current);
+      const current = await readGoogleStatus(); if (!valid(ticket)) return; applyStatus(current);
       if (!current.configured) {
         setSetupOpen(true);
         throw Error("Chưa có cấu hình Google trên máy này. Mở Thiết lập Google bên dưới để bổ sung.");
@@ -152,12 +158,12 @@ export function GoogleSheetConnection({ onReadyChange }: Props) {
     if (!target) { setError("Nhập link Google Sheet hợp lệ; tab lấy từ gid trong link."); return; }
     const ticket = ++generation.current, revision = urlRevision.current; flight.current = ticket; setAction("check");
     try {
-      const current = await googleSheetsStatus(); if (!valid(ticket) || urlRevision.current !== revision) return; applyStatus(current);
+      const current = await readGoogleStatus(); if (!valid(ticket) || urlRevision.current !== revision) return; applyStatus(current);
       if (!current.connected) throw Error("Đăng nhập Google trước khi kiểm tra kết nối.");
       if (current.phase !== "idle") throw Error("Hoàn tất hoặc hủy cửa sổ Google đang mở rồi kiểm tra lại.");
       if (current.active && sameTarget(target, parseGoogleSheetUrl(current.sheetUrl || ""))) {
         try {
-          const checked = await publishSheetCheck(target.url);
+          const checked = await boundedRead(publishSheetCheck(target.url), 120_000);
           if (!valid(ticket) || urlRevision.current !== revision) return;
           verifiedResult(checked, target, current, ticket, revision); return;
         } catch (cause) {

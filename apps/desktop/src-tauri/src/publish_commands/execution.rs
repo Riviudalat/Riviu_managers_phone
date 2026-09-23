@@ -247,6 +247,7 @@ pub fn publish_auto_assign(
 #[tauri::command]
 #[allow(clippy::too_many_arguments)] // Tauri exposes each wire field as a named command argument.
 pub async fn publish_create_campaign(
+    app: tauri::AppHandle,
     state: State<'_, AppState>,
     mut source_root: String,
     bundle_ids: Vec<String>,
@@ -289,12 +290,26 @@ pub async fn publish_create_campaign(
         )
         .map_err(err)?,
     );
+    // Recheck the owner at the final confirmation boundary. Preflight may have
+    // happened minutes ago and a link verifier can have acquired the phone since.
+    // Scheduled creation must not interrupt today's work. Hold this lock through
+    // receipt persistence, and replay an existing receipt without stopping itself.
+    let handoff = if confirmed && run_at.is_none() {
+        Some(crate::commands::lock_manual_handoff()?)
+    } else {
+        None
+    };
     if let Some(prior) = state
         .db
         .replay_publish_create(&request_id, &request_fingerprint)
         .map_err(err)?
     {
         return Ok(prior);
+    }
+    if let Some(handoff) = handoff.as_ref() {
+        let result =
+            crate::commands::prepare_manual_devices(&app, &state, udids.clone(), handoff).await?;
+        require_released_publish_devices(&udids, &result).map_err(err)?;
     }
     let prepared = build_publish_preflight(
         &state.control,
@@ -394,6 +409,25 @@ pub async fn publish_create_campaign(
             Err(err(error))
         }
     }
+}
+
+fn require_released_publish_devices(
+    udids: &[String],
+    result: &riviu_core::ipc_contract::OperationStopResult,
+) -> anyhow::Result<()> {
+    anyhow::ensure!(!udids.is_empty(), "Chưa chọn máy đăng bài");
+    for udid in udids {
+        let rows: Vec<_> = result
+            .devices
+            .iter()
+            .filter(|row| &row.udid == udid)
+            .collect();
+        let [row] = rows.as_slice() else {
+            anyhow::bail!("{udid}: chưa có kết quả nhả máy duy nhất; chưa đăng bài mới");
+        };
+        anyhow::ensure!(row.closed, "{udid}: {}", row.message);
+    }
+    Ok(())
 }
 
 /// Apply the editor's caption snapshot to the selected manifest before its managed copy.
@@ -2046,10 +2080,14 @@ pub(super) async fn capture_confirmed_assignment_link(
         let plan = riviu_core::tiktok_share::PublishVerificationPlan::for_runtime(
             &package, &language, &version,
         )?;
+        let authorize = || super::verification_restart::authorize(db, assignment, observer);
+        let guarded = super::verification_session::VerificationSession::new(session.as_ref(), &authorize);
+        guarded.check()?;
+        let session: &dyn riviu_core::UiSession = &guarded;
         let labels = riviu_core::tiktok_labels::controls_for_runtime(&package, &language, &version)
             .context("account labels missing")?;
         if let Some(account) =
-            riviu_core::tiktok_account::observe_own_account(session.as_ref(), labels).await?
+            riviu_core::tiktok_account::observe_own_account(session, labels).await?
         {
             let snapshot = session.hierarchy_source_snapshot().await?;
             use sha2::Digest;
@@ -2063,12 +2101,13 @@ pub(super) async fn capture_confirmed_assignment_link(
             }
         }
         let capture = riviu_core::tiktok_share::capture_submission_link(
-            session.as_ref(),
+            session,
             &plan,
             &bundle.caption,
             &identity,
         )
         .await;
+        guarded.check()?;
         // A verifier uses a manual session and may have no JPEG stream. Keep
         // one bounded diagnostic image before releasing this same owned session.
         // It cannot turn a pending observation into canonical publication proof.
@@ -3613,6 +3652,10 @@ pub(super) async fn post_through_the_composer(
             Err(error) => return refuse(format!("chưa xác minh tài khoản trước Đăng ({error})")),
         };
 
+    if let Err(error) = db.verify_publish_recovery_account(assignment_id, &expected_account) {
+        return refuse(error.to_string());
+    }
+
     if let Err(error) = db.reserve_publish_account(assignment_id, &expected_account) {
         return refuse(error.to_string());
     }
@@ -3644,6 +3687,7 @@ pub(super) async fn post_through_the_composer(
     let mut crossed_effect_boundary = false;
     let mut submitted_at = None;
     let mut record_effect_intent = |selection: &riviu_core::SoundSelectionEvidence| {
+        db.verify_publish_recovery_account(assignment_id, &expected_account)?;
         let at = chrono::Utc::now().to_rfc3339();
         let proof = riviu_core::publish_submission::PublishSubmissionProof {
             verification_contract_version: verification_plan.contract_version(),

@@ -26,7 +26,123 @@ use riviu_core::interaction_campaign::{
 mod live_canary;
 
 mod inspection;
+
+/// Capture the ID of a verified comment, or open/re-prove that exact ID on an actor.
+/// This command cannot create a comment, reply, Share message or Delete action.
+#[tauri::command]
+pub async fn interaction_comment_link(
+    state: State<'_, AppState>,
+    campaign_id: String,
+    assignment_id: String,
+    udid: Option<String>,
+    capture_udid: Option<String>,
+) -> Result<riviu_core::tiktok_comment_link::SharedCommentLink, CommandError> {
+    let _admission = state.ensure_accepting_work()?;
+    inspection::comment_link(
+        &state.control,
+        &state.db,
+        &campaign_id,
+        &assignment_id,
+        udid.as_deref(),
+        capture_udid.as_deref(),
+    )
+    .await
+    .map_err(interaction_error)
+}
 mod sheet;
+
+#[tauri::command]
+pub async fn interaction_draft_seeding(
+    state: State<'_, AppState>,
+    request: ThreadCampaignRequest,
+    contexts: std::collections::BTreeMap<String, String>,
+) -> Result<std::collections::BTreeMap<String, Vec<String>>, CommandError> {
+    let _admission = state.ensure_accepting_work()?;
+    let plan = plan_threads(&request).map_err(interaction_error)?;
+    let config = request
+        .seeding
+        .as_ref()
+        .ok_or_else(|| interaction_error("Thiếu kế hoạch seeding"))?;
+    let settings = state.db.get_nurture_settings().map_err(interaction_error)?;
+    let mut result = std::collections::BTreeMap::new();
+    for target in &request.targets {
+        let context = contexts
+            .get(&target.target_key)
+            .filter(|v| !v.trim().is_empty())
+            .ok_or_else(|| interaction_error("Nhập caption/mô tả thật của từng bài để AI soạn"))?;
+        let rows: Vec<_> = plan
+            .assignments
+            .iter()
+            .filter(|a| a.target_key == target.target_key && config.is_comment(&request, a.ordinal))
+            .collect();
+        let mut comments = vec![String::new(); rows.len()];
+        let groups: std::collections::BTreeSet<_> = rows.iter().map(|r| r.cohort).collect();
+        for group in groups {
+            let mine: Vec<_> = rows
+                .iter()
+                .enumerate()
+                .filter(|(_, r)| r.cohort == group)
+                .collect();
+            let mut roles: Vec<_> = mine
+                .iter()
+                .map(|(_, r)| r.actor_udid.clone())
+                .collect::<std::collections::BTreeSet<_>>()
+                .into_iter()
+                .collect();
+            if roles.len() == 1 {
+                roles.push(roles[0].clone());
+            }
+            let direction=format!("{}; {}. Thứ tự người nói do chương trình phân công: {:?}. Không chèn nhãn kiểm thử, không tự nhận đã đến quán.",request.instruction,if group==0 {"Các câu độc lập, không trả lời nhau"}else{"Một câu mở đầu, các câu sau trả lời câu ngay trước"},mine.iter().map(|(_,r)|&r.actor_udid).collect::<Vec<_>>());
+            let generated = riviu_core::openai_client::draft_conversation(
+                &settings,
+                context,
+                &direction,
+                &roles,
+                mine.len().max(2),
+            )
+            .await
+            .map_err(interaction_error)?;
+            for ((index, _), mut step) in mine.into_iter().zip(generated) {
+                if let Some(client) = &settings.typesafe {
+                    let mut accepted = false;
+                    for attempt in 0..3 {
+                        let verdict = client
+                            .check(&step.text, Some(context), None)
+                            .await
+                            .map_err(interaction_error)?;
+                        let duplicate = comments.iter().any(|s| {
+                            !s.is_empty() && s.trim().eq_ignore_ascii_case(step.text.trim())
+                        });
+                        if verdict.accepts(true) && !duplicate {
+                            accepted = true;
+                            break;
+                        }
+                        if attempt == 2 {
+                            break;
+                        }
+                        let correction=format!("{direction}; Viết lại một câu khác các câu đã có, chỉ hỏi hoặc phản hồi chi tiết trong caption. Không suy đoán giá, địa chỉ, trải nghiệm hay thời gian. Câu cần thay: {:?}; câu đã có: {:?}",step.text,comments.iter().filter(|s|!s.is_empty()).collect::<Vec<_>>());
+                        let revised = riviu_core::openai_client::draft_conversation(
+                            &settings,
+                            context,
+                            &correction,
+                            &roles,
+                            2,
+                        )
+                        .await
+                        .map_err(interaction_error)?;
+                        step.text = revised[0].text.clone();
+                    }
+                    if !accepted {
+                        return Err(interaction_error("AI soạn câu chưa đủ bám nội dung nguồn; sửa hoặc soạn lại trước khi duyệt"));
+                    }
+                }
+                comments[index] = step.text;
+            }
+        }
+        result.insert(target.target_key.clone(), comments);
+    }
+    Ok(result)
+}
 
 #[tauri::command]
 pub fn interaction_parse_conversation(
@@ -412,9 +528,30 @@ pub(crate) fn require_parent_locator(
 #[tauri::command]
 pub async fn interaction_start_thread(
     state: State<'_, AppState>,
-    request: ThreadCampaignRequest,
+    mut request: ThreadCampaignRequest,
 ) -> Result<InteractionStartResult, CommandError> {
     let admission = state.ensure_accepting_work()?;
+    if let Some(s) = request.seeding.as_mut() {
+        for actor in &request.actor_udids {
+            let handle = state
+                .db
+                .get_device_meta(actor)
+                .map_err(interaction_error)?
+                .handle;
+            if handle.is_empty() {
+                return Err(interaction_error(
+                    "Máy chưa có username; đọc tài khoản trước khi chạy",
+                ));
+            }
+            if s.expected_accounts
+                .get(actor)
+                .is_some_and(|h| !h.eq_ignore_ascii_case(&handle))
+            {
+                return Err(interaction_error("Tài khoản đã đổi so với kế hoạch"));
+            }
+            s.expected_accounts.insert(actor.clone(), handle);
+        }
+    }
     if request.scripted_conversation.is_some()
         && request
             .actor_udids
@@ -928,6 +1065,7 @@ mod tests {
             &control,
             ThreadMode::Standalone,
             InteractionActionSet {
+                share: false,
                 follow: false,
                 like: true,
                 comment: false,
@@ -950,6 +1088,7 @@ mod tests {
             &control,
             ThreadMode::Standalone,
             InteractionActionSet {
+                share: false,
                 follow: false,
                 like: true,
                 comment: false,

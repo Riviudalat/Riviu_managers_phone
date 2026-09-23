@@ -12,8 +12,8 @@ beforeEach(() => {
 
 describe("Publish API client", () => {
   it("retries exactly one assignment through its typed command", async () => {
-    await publishRetryAssignment("failed-assignment", true);
-    expect(invoke).toHaveBeenCalledExactlyOnceWith("publish_retry_assignment", { assignmentId: "failed-assignment", confirmed: true });
+    await publishRetryAssignment("failed-assignment", true, 3, "retry-request");
+    expect(invoke).toHaveBeenCalledExactlyOnceWith("publish_retry_assignment", { assignmentId: "failed-assignment", confirmed: true, expectedRevision:3, requestId:"retry-request" });
   });
   it("pins the preflight digest and restart reconciliation wire contract", async () => {
     const request: PublishPreflightRequest = {

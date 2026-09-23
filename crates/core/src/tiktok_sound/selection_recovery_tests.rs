@@ -295,6 +295,89 @@ impl GuiReasoner for LoadingOcr {
     }
 }
 
+struct TransientMissingTabOcr {
+    calls: AtomicUsize,
+}
+
+struct TransientSheetOcr {
+    calls: AtomicUsize,
+}
+#[async_trait::async_trait]
+impl GuiReasoner for TransientSheetOcr {
+    async fn resolve(&self, _: GuiRequest) -> anyhow::Result<GuiResponse> {
+        unreachable!()
+    }
+    async fn ocr(&self, r: OcrRequest) -> anyhow::Result<OcrResponse> {
+        let tabs = [(47, 63), (178, 132), (381, 162), (613, 126)];
+        let mut lines: Vec<_> = ["Hot", "For You", "Favorites", "Recent"]
+            .into_iter()
+            .zip(tabs)
+            .map(|(text, (x, width))| OcrLine {
+                text: text.into(),
+                confidence: 0.96,
+                bounds: OcrRect {
+                    x,
+                    y: 1129,
+                    width,
+                    height: 29,
+                },
+            })
+            .collect();
+        let rows: Vec<OcrLine> = serde_json::from_str(include_str!(
+            "../../fixtures/tiktok-publish/musically-45.7.3-en/hot-visual-ocr.json"
+        ))?;
+        lines.extend(
+            rows.into_iter()
+                .filter(|line| r.region().contains(&line.bounds)),
+        );
+        if self.calls.fetch_add(1, Ordering::Relaxed) == 0 {
+            lines.retain(|line| line.text != "Recent");
+        }
+        Ok(OcrResponse {
+            protocol_version: r.protocol_version,
+            request_id: r.request_id,
+            observation_id: r.observation_id,
+            session_epoch: r.session_epoch,
+            generation: r.generation,
+            screenshot_sha256: r.screenshot.sha256,
+            status: "resolved".into(),
+            text: lines
+                .iter()
+                .map(|line| line.text.as_str())
+                .collect::<Vec<_>>()
+                .join("\n"),
+            lines,
+            engine: "fixture local OCR".into(),
+            elapsed_ms: 1,
+        })
+    }
+}
+#[async_trait::async_trait]
+impl GuiReasoner for TransientMissingTabOcr {
+    async fn resolve(&self, _: GuiRequest) -> anyhow::Result<GuiResponse> {
+        unreachable!()
+    }
+    async fn ocr(&self, r: OcrRequest) -> anyhow::Result<OcrResponse> {
+        let mut response = Ocr {
+            bad_binding: false,
+            missing_tab: false,
+            stop: None,
+        }
+        .ocr(r)
+        .await?;
+        if self.calls.fetch_add(1, Ordering::Relaxed) == 0 {
+            response.lines.retain(|line| line.text != "Recent");
+            response.text = response
+                .lines
+                .iter()
+                .map(|line| line.text.as_str())
+                .collect::<Vec<_>>()
+                .join("\n");
+        }
+        Ok(response)
+    }
+}
+
 #[tokio::test(start_paused = true)]
 async fn sound_entry_waits_for_rendered_rows_before_first_accessibility_query() {
     let mut s = Session::new();
@@ -307,6 +390,58 @@ async fn sound_entry_waits_for_rendered_rows_before_first_accessibility_query() 
     assert_eq!(s.reads.load(Ordering::Relaxed), 0);
     assert_eq!(s.taps.load(Ordering::Relaxed), 0);
     assert_eq!(s.frames.load(Ordering::Relaxed), 4);
+}
+
+#[tokio::test(start_paused = true)]
+async fn sheet_proof_retries_one_transient_missing_tab_without_input() {
+    let mut session = Session::new();
+    session.ocr = Arc::new(TransientMissingTabOcr {
+        calls: AtomicUsize::new(0),
+    });
+
+    selection_recovery::prove_sheet(&session, plan())
+        .await
+        .unwrap();
+
+    assert_eq!(session.frames.load(Ordering::Relaxed), 3);
+    assert_eq!(session.taps.load(Ordering::Relaxed), 0);
+    assert_eq!(session.backs.load(Ordering::Relaxed), 0);
+}
+
+#[tokio::test(start_paused = true)]
+async fn sheet_resume_does_not_treat_one_missing_tab_frame_as_editor() {
+    let mut session = Session::new();
+    session.read_failure = false;
+    session.png =
+        include_bytes!("../../fixtures/tiktok-publish/musically-45.7.3-en/hot-visual.png").to_vec();
+    session.ocr = Arc::new(TransientSheetOcr {
+        calls: AtomicUsize::new(0),
+    });
+
+    resume_open_sounds(&session, plan(), 5).await.unwrap();
+
+    assert!(session.frames.load(Ordering::Relaxed) >= 3);
+    assert_eq!(session.taps.load(Ordering::Relaxed), 0);
+    assert_eq!(session.backs.load(Ordering::Relaxed), 0);
+}
+
+#[tokio::test(start_paused = true)]
+async fn sheet_resume_fails_closed_when_only_editor_xml_is_visible() {
+    let mut session = Session::new();
+    session.read_failure = false;
+    session.backs.store(1, Ordering::Relaxed);
+    session.ocr = Arc::new(Ocr {
+        bad_binding: false,
+        missing_tab: true,
+        stop: None,
+    });
+
+    assert!(resume_open_sounds(&session, plan(), 5).await.is_err());
+
+    assert!(session.frames.load(Ordering::Relaxed) > 2);
+    assert_eq!(session.taps.load(Ordering::Relaxed), 0);
+    assert_eq!(session.backs.load(Ordering::Relaxed), 1);
+    assert_eq!(session.reads.load(Ordering::Relaxed), 0);
 }
 fn plan() -> SoundPickerPlan {
     SoundPickerPlan::resolve("com.zhiliaoapp.musically", "en", "45.7.3").unwrap()

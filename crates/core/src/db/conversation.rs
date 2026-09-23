@@ -242,6 +242,7 @@ mod tests {
             ],
         };
         let request = crate::ThreadCampaignRequest {
+            seeding: None,
             scripted_conversation: Some(script.clone()),
             request_id: Uuid::new_v4().to_string(),
             targets: vec![target],
@@ -254,6 +255,7 @@ mod tests {
             cohort_size: None,
             manual_comments: vec![],
             actions: crate::InteractionActionSet {
+                share: false,
                 follow: false,
                 like: false,
                 save: false,

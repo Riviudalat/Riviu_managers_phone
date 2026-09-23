@@ -24,15 +24,15 @@ for (const width of [1440, 820]) {
     const machine = page.getByRole("combobox", { name: "Máy nhận bài Bài 1", exact: true });
     const first = await machine.locator("option").nth(1).getAttribute("value"); await machine.selectOption(first!);
     await page.evaluate(() => { (window as unknown as { pendingResolved: boolean }).pendingResolved = false; window.dispatchEvent(new Event("focus")); });
-    await expect(page.getByRole("button", { name: "Kiểm tra & đăng", exact: true })).toBeDisabled();
+    await expect(page.getByRole("button", { name: "Kiểm tra & đăng", exact: true })).toBeEnabled();
     await expect(machine).toHaveValue(first!);
     const warning = page.locator(".machine-choice").filter({ hasText: "Máy còn bài chưa lấy được link" });
     await expect(warning).toHaveCount(1); await expect(warning).toContainText("TikTok báo bài đang được xử lý");
     await warning.scrollIntoViewIfNeeded();
     await page.screenshot({ path: test.info().outputPath(`pending-warning-${width}.png`) });
     await page.getByRole("button", { name: "Chọn nhanh", exact: true }).click();
-    await expect(machine).not.toHaveValue(first!);
-    await expect(machine.locator(`option[value="${first}"]`)).toHaveJSProperty("disabled", true);
+    await expect(machine).toHaveValue(first!);
+    await expect(machine.locator(`option[value="${first}"]`)).toHaveJSProperty("disabled", false);
     await page.evaluate(() => { (window as unknown as { pendingResolved: boolean }).pendingResolved = true; window.dispatchEvent(new Event("focus")); });
     await expect(machine.locator(`option[value="${first}"]`)).toHaveJSProperty("disabled", false);
     await machine.selectOption(first!);

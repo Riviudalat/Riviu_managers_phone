@@ -1,6 +1,6 @@
 import { Banner } from "../States";
 import { groupPlanByCohort, type ThreadKind } from "../../interactionPlan";
-import type { DeviceInfo, ThreadPreview } from "../../types";
+import type { DeviceInfo, ThreadPreview, SeedingConfig } from "../../types";
 
 /**
  * What is about to run, drawn from the backend's own plan.
@@ -22,6 +22,7 @@ export function InteractionPlanPreview({
   deviceLabel,
   handles,
   commentEnabled = true,
+  seeding,
 }: {
   preview: ThreadPreview | null;
   devices: DeviceInfo[];
@@ -30,6 +31,7 @@ export function InteractionPlanPreview({
   deviceLabel?: Map<string, string>;
   handles?: Record<string, string>;
   commentEnabled?: boolean;
+  seeding?: SeedingConfig;
 }) {
   const cohorts = groupPlanByCohort(preview?.plan);
   if (!preview || !cohorts.length) return null;
@@ -48,7 +50,8 @@ export function InteractionPlanPreview({
   // would be refused, directly above a preview drawing exactly one, and advised raising the
   // cohort size to fix a problem that did not exist.
   const running = Math.min(preview.cohortCount, Math.max(1, preview.validTargetCount));
-  const overCapacity = preview.streamCapacity > 0 && running > preview.streamCapacity;
+  const overCapacity = !seeding && preview.streamCapacity > 0 && running > preview.streamCapacity;
+  const actionRows=seeding && (seeding.likeCount||seeding.saveCount||seeding.shareCount) ? new Set(preview.plan?.assignments.map(a=>a.actorUdid)).size : 0;
 
   return (
     <div className="interaction-preview">
@@ -57,7 +60,7 @@ export function InteractionPlanPreview({
         {preview.plan?.assignments.map((assignment) => <tr key={`${assignment.targetKey}:${assignment.ordinal}`}>
           <td>{label(assignment.actorUdid)}</td><td>{handles?.[assignment.actorUdid] ? `@${handles[assignment.actorUdid].replace(/^@+/, "")}` : "Chưa gán"}</td>
           <td>{preview.lines.find((line) => line.target?.targetKey === assignment.targetKey)?.target?.normalizedUrl ?? `Bài ${preview.plan!.assignments.findIndex((a) => a.targetKey === assignment.targetKey) + 1}`}</td>
-          <td>{!commentEnabled ? "Tim / Lưu" : assignment.parentOrdinal === null ? "Mở đầu" : `Trả lời lượt ${assignment.parentOrdinal + 1}`}</td>
+          <td>{!commentEnabled||assignment.ordinal<actionRows ? "Tim / Lưu / Share theo ngân sách" : <>{assignment.parentOrdinal === null ? (assignment.cohort===0&&seeding?"Bình luận đơn":"Mở đầu cụm") : `Trả lời lượt ${assignment.parentOrdinal + 1}`}<small>{seeding?.comments[assignment.targetKey]?.[assignment.ordinal-actionRows]}</small></>}</td>
         </tr>)}
       </tbody></table></div>
       {!!preview.conversationTimeline?.length && <details open><summary>Lịch xen kẽ dự kiến</summary><ol>{preview.conversationTimeline.map(([target,ordinal,at]) => <li key={`${target}:${ordinal}`}>
@@ -73,7 +76,7 @@ export function InteractionPlanPreview({
       {cohorts.map((team) => (
         <div key={team.cohort} className="interaction-cohort">
           <strong>
-            Cụm {team.cohort + 1} · {team.actorUdids.length} máy · {team.targetKeys.length} link
+            {seeding&&team.cohort===0?"Lượt riêng":`Cụm ${seeding ? team.cohort : team.cohort + 1}`} · {team.actorUdids.length} máy · {team.targetKeys.length} link
           </strong>
           <small>{team.actorUdids.map(label).join(" · ")}</small>
           <small className="hint">

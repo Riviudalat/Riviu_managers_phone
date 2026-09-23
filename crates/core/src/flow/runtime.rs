@@ -232,6 +232,25 @@ impl FlowRuntime {
         caller_result
     }
 
+    /// Leave durable pre-existing runs untouched while opening admission for an explicitly
+    /// scoped manual acceptance session. The harness may enqueue new work after this point;
+    /// no old device context, intent or verifier is replayed.
+    pub fn defer_startup_recovery(&self) -> anyhow::Result<()> {
+        self.require_lifecycle(FlowRuntimeLifecycle::Recovering)?;
+        self.inner
+            .lifecycle
+            .compare_exchange(
+                FlowRuntimeLifecycle::Recovering as u8,
+                FlowRuntimeLifecycle::Ready as u8,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .map_err(|_| {
+                anyhow::anyhow!("Flow runtime stopped while deferring startup recovery")
+            })?;
+        Ok(())
+    }
+
     /// Recover every interrupted run, and let a run that cannot be recovered fail alone.
     ///
     /// **One unrecoverable row used to stop the app from opening at all.** This loop was
@@ -3930,6 +3949,47 @@ mod tests {
                 .state,
             FlowAggregateState::Succeeded
         );
+        fixture.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn deferred_startup_recovery_keeps_old_work_untouched_and_opens_manual_admission() {
+        let fixture = RuntimeFixture::new_recovering(&["iphone-a"], single_wait_plan());
+        let (run, devices) = fixture
+            .database
+            .create_flow_run_with_devices(
+                &fixture.revision,
+                FlowSelectionSnapshot {
+                    requested: FlowTargetSelection::One {
+                        udid: "iphone-a".into(),
+                    },
+                    target_udids: vec!["iphone-a".into()],
+                },
+            )
+            .expect("seed deferred run");
+        fixture
+            .database
+            .transition_flow_device_run(
+                devices[0].id,
+                FlowDeviceRunState::Queued,
+                FlowDeviceRunState::Preflight,
+                None,
+            )
+            .expect("seed deferred device");
+
+        fixture
+            .runtime
+            .defer_startup_recovery()
+            .expect("open runtime without replaying old work");
+
+        assert_eq!(fixture.runtime.lifecycle(), FlowRuntimeLifecycle::Ready);
+        let detail = fixture
+            .database
+            .get_flow_run(run.id)
+            .expect("read deferred run")
+            .expect("deferred run remains");
+        assert_eq!(detail.device_runs[0].state, FlowDeviceRunState::Preflight);
+        assert!(detail.attempts.is_empty());
         fixture.shutdown().await;
     }
 

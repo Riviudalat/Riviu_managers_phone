@@ -62,7 +62,7 @@ export function NurtureMachinePicker({ devices, metas, targets, onTargetRefChang
   const ordered = orderDevicesByNumber(devices, metas).map((device, index) => ({ device, number: tileNumber(index + 1, metas.get(device.udid)), name: tileName(device, metas.get(device.udid)) }));
   const filtered = ordered.filter(({ device, number, name }) => `${number} ${name} ${metas.get(device.udid)?.handle ?? ""}`.toLocaleLowerCase("vi").includes(query.trim().toLocaleLowerCase("vi")));
   const selected = new Set(targets);
-  const available = ordered.filter(({ device }) => device.status === "ready");
+  const available = ordered.filter(({ device }) => device.status === "ready" || device.status === "busy" || device.status === "connected");
   const unavailable = devices.length - available.length;
   const setTargets = (udids: string[]) => onTargetRefChange?.({ type: "explicit", udids });
   const names = ordered.filter(({ device }) => selected.has(device.udid)).map(({ number, name }) => `${number} · ${name}`).join(", ");
@@ -80,15 +80,15 @@ export function NurtureMachinePicker({ devices, metas, targets, onTargetRefChang
     <header className="nurture-card-heading"><h2>Máy thực hiện</h2><span className="nurture-count" role="status">Đã chọn {targets.length}</span></header>
     <label className="nurture-machine-search"><Search size={16} aria-hidden="true" /><input type="search" aria-label="Tìm máy Nuôi TikTok" placeholder="Tìm số máy hoặc tên" value={query} onChange={(event) => setQuery(event.target.value)} /></label>
     <div className="nurture-machine-tools">
-      <button type="button" className="ghost" title="Chọn tất cả máy sẵn sàng, kể cả máy ngoài kết quả tìm kiếm" disabled={!onTargetRefChange || !available.length} onClick={() => setTargets(available.map(({device}) => device.udid))}>Chọn tất cả sẵn sàng</button>
+      <button type="button" className="ghost" title="Chọn tất cả máy đang kết nối, kể cả máy ngoài kết quả tìm kiếm; kiểm tra sẵn sàng khi bắt đầu" disabled={!onTargetRefChange || !available.length} onClick={() => setTargets(available.map(({device}) => device.udid))}>Chọn tất cả đang kết nối</button>
       <button type="button" className="ghost" disabled={!onTargetRefChange || !targets.length} onClick={() => setTargets([])}>Bỏ chọn</button>
-      <small className="nurture-machine-ready-hint">{available.length} sẵn sàng · {devices.length} tổng</small>
+      <small className="nurture-machine-ready-hint">{available.length} có thể chọn · {devices.length} tổng</small>
     </div>
     {query && <p className="nurture-machine-filter-count">{filtered.length} máy khớp tìm kiếm</p>}
     {unavailable > 0 && <p className="nurture-setup-note">{unavailable} máy chưa sẵn sàng, chưa thể chọn thêm.</p>}
     <div className={`nurture-machine-grid machine-choice-grid${devices.length > 12 ? " is-compact" : ""}`} role="group" aria-label="Danh sách chọn máy Nuôi TikTok">
       {filtered.map(({ device, number, name }) => {
-        const ready = device.status === "ready";
+        const ready = device.status === "ready" || device.status === "busy" || device.status === "connected";
         const checked = selected.has(device.udid);
         return <MachineChoice key={device.udid} number={number} name={name} status={device.status} reason={device.lastError} checked={checked}
           label={`Chọn Máy ${number} · ${name}`} disabled={!onTargetRefChange || (!ready && !checked)}

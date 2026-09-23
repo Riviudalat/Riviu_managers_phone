@@ -46,6 +46,12 @@ const nurtureSettings: NurtureSettings = {
 };
 
 describe("automation profile config v1", () => {
+  it("never persists or imports the database revision with a nurture draft", () => {
+    const current = { ...nurtureSettings, revision: 63 };
+    expect(nurtureProfileConfig(current)).not.toHaveProperty("settings.revision");
+    expect(nurtureSettingsFromProfile({ schemaVersion: 1, settings: { revision: 2, numVideos: 14 } }, current))
+      .toMatchObject({ revision: 63, numVideos: 14 });
+  });
   it("preserves an explicit actor subset and its order instead of broadening a profile", () => {
     expect(interactionProfileTarget({ type: "all" }, ["a", "b", "c"], ["b"])).toEqual({ type: "explicit", udids: ["b"] });
     expect(interactionProfileTarget({ type: "group", groupId: "g" }, ["a", "b"], ["b", "a"])).toEqual({ type: "explicit", udids: ["b", "a"] });

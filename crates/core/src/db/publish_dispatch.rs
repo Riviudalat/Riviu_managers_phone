@@ -86,30 +86,91 @@ impl Database {
         &self,
         assignment_id: &str,
     ) -> anyhow::Result<Option<PublishPipelineRun>> {
+        self.claim_publish_assignment_retry_inner(assignment_id, None)
+    }
+    pub fn claim_publish_assignment_retry_checked(
+        &self,
+        assignment_id: &str,
+        revision: i64,
+        request_id: &str,
+    ) -> anyhow::Result<Option<PublishPipelineRun>> {
+        Uuid::parse_str(request_id)?;
+        self.claim_publish_assignment_retry_inner(assignment_id, Some((revision, request_id)))
+    }
+    fn claim_publish_assignment_retry_inner(
+        &self,
+        assignment_id: &str,
+        request: Option<(i64, &str)>,
+    ) -> anyhow::Result<Option<PublishPipelineRun>> {
         let mut conn = self.conn()?;
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        if let Some((revision, request_id)) = request {
+            let prior:Option<(String,i64,String)>=tx.query_row("SELECT assignment_id,expected_revision,run_token FROM publish_retry_requests WHERE request_id=?1",[request_id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional()?;
+            if let Some((id, expected, token)) = prior {
+                anyhow::ensure!(
+                    id == assignment_id && expected == revision,
+                    "Retry request identity changed"
+                );
+                let campaign_id = tx.query_row(
+                    "SELECT campaign_id FROM publish_assignments WHERE id=?1",
+                    [assignment_id],
+                    |r| r.get(0),
+                )?;
+                return Ok(Some(PublishPipelineRun { campaign_id, token }));
+            }
+            let current: i64 = tx.query_row(
+                "SELECT revision FROM publish_assignments WHERE id=?1",
+                [assignment_id],
+                |r| r.get(0),
+            )?;
+            anyhow::ensure!(
+                current == revision,
+                "PublishRetryConflict: bài đã thay đổi; tải lại tiến độ"
+            );
+        }
         let eligible: Option<(String, String, String)> = tx.query_row(
             "SELECT a.campaign_id,a.publication_id,a.udid FROM publish_assignments a
              JOIN publish_campaigns c ON c.id=a.campaign_id
              WHERE a.id=?1 AND a.state='failed_before_dispatch' AND a.effect_intent IS NULL
-             AND c.state IN ('failed_before_dispatch','verifying','uncertain')
-             AND NOT EXISTS(SELECT 1 FROM publish_pipeline_runs r WHERE r.campaign_id=c.id)
-             AND NOT EXISTS(SELECT 1 FROM publish_dispatch_jobs j WHERE j.assignment_id=a.id AND j.state IN ('running','paused'))",
-            [assignment_id], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?)),
+             AND (c.state IN ('failed_before_dispatch','verifying','uncertain') OR (?2=1 AND c.state='posting'))
+             AND (?2=1 OR NOT EXISTS(SELECT 1 FROM publish_pipeline_runs r WHERE r.campaign_id=c.id))
+             AND NOT EXISTS(SELECT 1 FROM publish_dispatch_jobs j WHERE j.assignment_id=a.id AND j.state IN ('queued','running','paused'))",
+            params![assignment_id,request.is_some()], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?)),
         ).optional()?;
         let Some((campaign_id, publication_id, udid)) = eligible else {
             return Ok(None);
         };
         let now = Utc::now();
+        let agent_ready_at = tx
+            .query_row(
+                "SELECT reason,finished_at_ms FROM publish_dispatch_jobs WHERE assignment_id=?1 AND state='finished' ORDER BY finished_at_ms DESC LIMIT 1",
+                [assignment_id],
+                |row| Ok((row.get::<_, Option<String>>(0)?, row.get::<_, Option<i64>>(1)?)),
+            )
+            .optional()?
+            .and_then(|(reason, finished_at)| {
+                let delay = crate::publish_recovery::RecoveryFailure::legacy(reason?)
+                    .minimum_retry_delay()?;
+                Some(finished_at.unwrap_or_else(|| now.timestamp_millis()) + delay.as_millis() as i64)
+            })
+            .filter(|at| *at > now.timestamp_millis());
+        let token: Option<String> = tx
+            .query_row(
+                "SELECT token FROM publish_pipeline_runs WHERE campaign_id=?1",
+                [&campaign_id],
+                |r| r.get(0),
+            )
+            .optional()?;
         let run = PublishPipelineRun {
             campaign_id,
-            token: Uuid::new_v4().to_string(),
+            token: token.unwrap_or_else(|| Uuid::new_v4().to_string()),
         };
         let attempt_id = Uuid::new_v4().to_string();
         tx.execute("UPDATE publish_campaigns SET state='posting',error_code=NULL,revision=revision+1,updated_at=?2 WHERE id=?1",
             params![run.campaign_id,now.to_rfc3339()])?;
+        tx.execute("UPDATE publish_assignments SET state='queued',error_code=NULL,revision=revision+1,updated_at=?2 WHERE id=?1 AND effect_intent IS NULL",params![assignment_id,now.to_rfc3339()])?;
         tx.execute(
-            "INSERT INTO publish_pipeline_runs(campaign_id,token,created_at) VALUES(?1,?2,?3)",
+            "INSERT OR IGNORE INTO publish_pipeline_runs(campaign_id,token,created_at) VALUES(?1,?2,?3)",
             params![run.campaign_id, run.token, now.to_rfc3339()],
         )?;
         tx.execute("INSERT INTO publish_attempts(attempt_id,publication_id,campaign_id,started_at_ms) VALUES(?1,?2,?3,?4)",
@@ -123,6 +184,46 @@ impl Database {
         tx.execute("INSERT INTO publish_events(campaign_id,revision,kind,payload_json,created_at)
             SELECT id,revision,'state',json_object('state',state,'source','retry_failed_assignment','assignmentId',?2),?3
             FROM publish_campaigns WHERE id=?1", params![run.campaign_id,assignment_id,now.to_rfc3339()])?;
+        let mut recovery: crate::publish_recovery::PublishRecoveryState = tx
+            .query_row(
+                "SELECT payload FROM publish_recovery_state WHERE assignment_id=?1",
+                [assignment_id],
+                |r| r.get::<_, String>(0),
+            )
+            .optional()?
+            .map(|s| serde_json::from_str(&s))
+            .transpose()?
+            .unwrap_or_default();
+        recovery.manual = true;
+        let current_account: String = tx.query_row(
+            "SELECT COALESCE((SELECT handle FROM device_meta WHERE udid=?1),'')",
+            [&udid],
+            |r| r.get(0),
+        )?;
+        if recovery.expected_account.is_empty() {
+            recovery.expected_account = current_account.clone();
+        }
+        anyhow::ensure!(
+            recovery.expected_account == current_account,
+            "Tài khoản đã đổi; không thử lại bài cũ"
+        );
+        recovery.max_retries = 0;
+        recovery.state = if agent_ready_at.is_some() {
+            "retryWaiting"
+        } else {
+            "running"
+        }
+        .into();
+        recovery.next_retry_at = agent_ready_at.map(|at| at as f64);
+        recovery.reconnect_deadline = None;
+        recovery.reconnect_retry = false;
+        tx.execute("INSERT INTO publish_recovery_state VALUES(?1,?2,?3) ON CONFLICT(assignment_id) DO UPDATE SET run_token=excluded.run_token,payload=excluded.payload",params![assignment_id,run.token,serde_json::to_string(&recovery)?])?;
+        if let Some((revision, id)) = request {
+            tx.execute(
+                "INSERT INTO publish_retry_requests VALUES(?1,?2,?3,?4)",
+                params![id, assignment_id, revision, run.token],
+            )?;
+        }
         tx.commit()?;
         Ok(Some(run))
     }
@@ -242,6 +343,7 @@ impl Database {
           JOIN publish_campaigns c ON c.id=j.campaign_id
           LEFT JOIN publish_dispatch_turns t ON t.udid=j.udid
           WHERE j.state='queued' AND c.state='posting'
+          AND NOT EXISTS(SELECT 1 FROM publish_recovery_state retry WHERE retry.assignment_id=j.assignment_id AND CAST(json_extract(retry.payload,'$.nextRetryAt') AS REAL)>CAST(strftime('%s','now') AS INTEGER)*1000)
           AND ((j.phase='transfer' AND (SELECT COUNT(*) FROM publish_work_claims WHERE stage='transfer')<CAST(COALESCE((SELECT json_extract(value,'$.transfer') FROM settings WHERE key='publish.dispatch.limits'),4) AS INTEGER))
             OR (j.phase='compose' AND (SELECT COUNT(*) FROM publish_work_claims WHERE stage='compose')<CAST(COALESCE((SELECT json_extract(value,'$.compose') FROM settings WHERE key='publish.dispatch.limits'),4) AS INTEGER)))
           AND NOT EXISTS(SELECT 1 FROM publish_work_claims w WHERE w.udid=j.udid)
@@ -313,6 +415,11 @@ impl Database {
         job: &PublishDispatchJob,
         error: Option<&str>,
     ) -> anyhow::Result<bool> {
+        if let Some(error) = error {
+            if self.requeue_publish_recovery(job, error)? {
+                return Ok(true);
+            }
+        }
         let connection = self.dispatch_conn()?;
         let mut conn = connection.lock();
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -322,6 +429,7 @@ impl Database {
             params![job.assignment_id,job.attempt_id,job.revision+1,if to_compose {"queued"} else {"finished"},
                 if to_compose {"compose"} else {&job.phase},error,if to_compose {None} else {Some(Utc::now().timestamp_millis())}])?;
         if changed == 1 && !to_compose {
+            tx.execute("UPDATE publish_recovery_state SET payload=json_set(payload,'$.state',CASE WHEN json_extract(payload,'$.state') IN ('exhausted','stopped') THEN json_extract(payload,'$.state') ELSE ?2 END,'$.nextRetryAt',NULL,'$.reconnectDeadline',NULL) WHERE assignment_id=?1",params![job.assignment_id,if error.is_some(){"failed"}else{"finished"}])?;
             if let Some(error) = error {
                 tx.execute("UPDATE publish_assignments SET state='failed_before_dispatch',error_code=?2,revision=revision+1,updated_at=?3
                     WHERE id=?1 AND effect_intent IS NULL AND state IN ('queued','scheduled','ready','transferring','imported')",
@@ -330,6 +438,9 @@ impl Database {
             tx.execute("UPDATE publish_attempts SET finished_at_ms=?2,result=?3,evidence_json=(SELECT evidence_json FROM publish_assignments WHERE id=?4) WHERE attempt_id=?1",
                 params![job.attempt_id,Utc::now().timestamp_millis(),error.unwrap_or("submitted_or_settled"),job.assignment_id])?;
         }
+        if changed == 1 && to_compose {
+            tx.execute("UPDATE publish_recovery_state SET payload=json_set(payload,'$.checkpoint','mediaImported','$.state','running','$.nextRetryAt',NULL) WHERE assignment_id=?1",[&job.assignment_id])?;
+        }
         tx.commit()?;
         Ok(changed == 1)
     }
@@ -337,17 +448,35 @@ impl Database {
     /// Expiry affects only jobs that never obtained a stage. An already submitted
     /// publication remains eligible for verification regardless of its schedule.
     pub fn expire_publish_dispatch(&self, local_now_ms: i64) -> anyhow::Result<()> {
+        self.expire_publish_dispatch_scope(local_now_ms, None)
+    }
+
+    /// Same production deadline settlement for a frozen acceptance campaign;
+    /// unrelated persisted schedules are left untouched.
+    pub fn expire_publish_dispatch_for_campaign(
+        &self,
+        local_now_ms: i64,
+        campaign: &str,
+    ) -> anyhow::Result<()> {
+        self.expire_publish_dispatch_scope(local_now_ms, Some(campaign))
+    }
+
+    fn expire_publish_dispatch_scope(
+        &self,
+        local_now_ms: i64,
+        campaign: Option<&str>,
+    ) -> anyhow::Result<()> {
         let connection = self.dispatch_conn()?;
         let mut conn = connection.lock();
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         tx.execute("UPDATE publish_dispatch_jobs SET state='missed',reason='schedule_capacity_deadline',revision=revision+1
-            WHERE state='queued' AND started_at_ms IS NULL AND deadline_ms<?1",[local_now_ms])?;
+            WHERE state='queued' AND started_at_ms IS NULL AND deadline_ms<?1 AND (?2 IS NULL OR campaign_id=?2)",params![local_now_ms,campaign])?;
         tx.execute("UPDATE publish_dispatch_jobs SET state='cancelled',reason='campaign_cancelled',revision=revision+1
-            WHERE state='queued' AND EXISTS(SELECT 1 FROM publish_campaigns c WHERE c.id=campaign_id AND c.state='cancelled')",[])?;
+            WHERE state='queued' AND (?1 IS NULL OR campaign_id=?1) AND EXISTS(SELECT 1 FROM publish_campaigns c WHERE c.id=campaign_id AND c.state='cancelled')",[campaign])?;
         tx.execute("UPDATE publish_assignments SET state='missed',error_code='schedule_capacity_deadline',revision=revision+1
-            WHERE effect_intent IS NULL AND id IN(SELECT assignment_id FROM publish_dispatch_jobs WHERE state='missed') AND state<>'missed'",[])?;
+            WHERE effect_intent IS NULL AND (?1 IS NULL OR campaign_id=?1) AND id IN(SELECT assignment_id FROM publish_dispatch_jobs WHERE state='missed') AND state<>'missed'",[campaign])?;
         tx.execute("UPDATE publish_attempts SET finished_at_ms=?1,result=(SELECT reason FROM publish_dispatch_jobs j WHERE j.attempt_id=publish_attempts.attempt_id)
-            WHERE finished_at_ms IS NULL AND attempt_id IN(SELECT attempt_id FROM publish_dispatch_jobs WHERE state IN ('missed','cancelled'))",[Utc::now().timestamp_millis()])?;
+            WHERE finished_at_ms IS NULL AND attempt_id IN(SELECT attempt_id FROM publish_dispatch_jobs WHERE state IN ('missed','cancelled') AND (?2 IS NULL OR campaign_id=?2))",params![Utc::now().timestamp_millis(),campaign])?;
         tx.commit()?;
         Ok(())
     }

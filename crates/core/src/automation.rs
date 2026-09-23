@@ -445,6 +445,8 @@ pub struct NurtureAutomationProfileConfigV1 {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct InteractionCampaignTemplateV1 {
+    #[serde(default)]
+    pub seeding: Option<crate::seeding::SeedingConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scripted_conversation: Option<crate::conversation::ScriptedConversation>,
     pub targets: Vec<crate::ResolvedTikTokTarget>,
@@ -489,6 +491,7 @@ impl InteractionAutomationProfileConfigV1 {
         actor_udids: Vec<String>,
     ) -> crate::ThreadCampaignRequest {
         crate::ThreadCampaignRequest {
+            seeding: self.request.seeding,
             scripted_conversation: self.request.scripted_conversation,
             request_id,
             targets: self.request.targets,

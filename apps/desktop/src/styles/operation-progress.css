@@ -145,3 +145,8 @@
   .run-inspector-top { flex-wrap: wrap; }
   .run-monitor-detail { grid-template-columns: 200px minmax(0, 1fr); }
 }
+.run-device-recovery { display:flex; flex-direction:column; gap:4px; padding:0 10px 6px; }
+.run-device-recovery:empty { display:none; }
+.run-device-recovery > div { display:flex; flex-wrap:wrap; gap:6px; align-items:center; }
+.run-device-recovery small { overflow-wrap:anywhere; }
+.run-device-recovery button { min-height:30px; }

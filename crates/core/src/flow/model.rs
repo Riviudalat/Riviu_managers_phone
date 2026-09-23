@@ -162,7 +162,7 @@ pub enum ActionKind {
 )]
 pub enum EvidenceSpec {
     ElementVisible {
-        selector: crate::ui_automation::inspector::ElementSelector,
+        selector: Box<crate::ui_automation::inspector::ElementSelector>,
     },
     ActiveAppEquals {
         bundle_id: String,
@@ -816,7 +816,7 @@ pub enum CompiledTapTarget {
         value: String,
     },
     Element {
-        selector: crate::ui_automation::inspector::ElementSelector,
+        selector: Box<crate::ui_automation::inspector::ElementSelector>,
     },
 }
 

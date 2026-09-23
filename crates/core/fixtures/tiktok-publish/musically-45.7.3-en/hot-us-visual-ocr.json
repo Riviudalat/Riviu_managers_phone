@@ -1,0 +1,37 @@
+[
+  {
+    "text": "Vibin",
+    "bounds": { "x": 268, "y": 1388, "width": 97, "height": 31 },
+    "confidence": 0.9045755004882813
+  },
+  {
+    "text": "Wxoda - 746.3K posts - 0:12",
+    "bounds": { "x": 269, "y": 1444, "width": 414, "height": 29 },
+    "confidence": 0.9242615509033203
+  },
+  {
+    "text": "GGEZ",
+    "bounds": { "x": 269, "y": 1547, "width": 111, "height": 31 },
+    "confidence": 0.9279184722900391
+  },
+  {
+    "text": "Kaien Nuen & SUGAR & M.Sasuke - 63.2K ...",
+    "bounds": { "x": 270, "y": 1602, "width": 607, "height": 23 },
+    "confidence": 0.905748291015625
+  },
+  {
+    "text": "Nicole Kidman",
+    "bounds": { "x": 270, "y": 1704, "width": 283, "height": 31 },
+    "confidence": 0.9203924560546874
+  },
+  {
+    "text": "ADELA - 175.0K posts - 0:27",
+    "bounds": { "x": 268, "y": 1755, "width": 409, "height": 34 },
+    "confidence": 0.9038298034667969
+  },
+  {
+    "text": "nothing",
+    "bounds": { "x": 270, "y": 1862, "width": 147, "height": 38 },
+    "confidence": 0.9182280731201172
+  }
+]

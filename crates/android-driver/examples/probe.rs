@@ -1468,6 +1468,7 @@ async fn measure_comment_list(
     };
     println!("  resolving against row text {sample:?}");
     let identity = riviu_core::CommentLocatorIdentity {
+        comment_link: None,
         author_label: String::new(),
         text: sample.clone(),
         locator_version: "android-hierarchy-v1".into(),

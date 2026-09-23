@@ -5,7 +5,15 @@ use base64::Engine;
 use sha2::{Digest, Sha256};
 
 async fn tap_native_image(session: &dyn UiSession, point: crate::TapPoint) -> anyhow::Result<()> {
+    tap_native_image_armed(session, point, &mut || {}).await
+}
+async fn tap_native_image_armed(
+    session: &dyn UiSession,
+    point: crate::TapPoint,
+    before_tap: &mut (dyn FnMut() + Send),
+) -> anyhow::Result<()> {
     check_wait()?;
+    before_tap();
     session.tap_image(point.x, point.y, 1080., 2220.).await?;
     check_wait()
 }
@@ -33,6 +41,7 @@ fn loading_chip(img: &image::RgbImage) -> bool {
 pub(super) async fn open_loading_entry(
     session: &dyn UiSession,
     plan: SoundPickerPlan,
+    before_open: &mut (dyn FnMut() + Send),
 ) -> anyhow::Result<bool> {
     if !selection_recovery::measured(plan) || session.gui_reasoner().is_none() {
         return Ok(false);
@@ -58,7 +67,7 @@ pub(super) async fn open_loading_entry(
         session.gui_session_epoch() == epoch,
         "loading sound stale frame"
     );
-    tap_native_image(session, crate::TapPoint { x: 540., y: 158. }).await?;
+    tap_native_image_armed(session, crate::TapPoint { x: 540., y: 158. }, before_open).await?;
     Ok(true)
 }
 
@@ -120,23 +129,23 @@ fn pool_from_image(
                 && l.bounds.y >= 1320
                 && l.bounds.x + l.bounds.width < 1040
                 && l.bounds.y + l.bounds.height <= 1900
-                && l.bounds.width >= 120
+                && l.bounds.width >= 80
         })
         .collect();
     text.sort_by_key(|l| l.bounds.y);
     let titles: Vec<_> = text
         .iter()
         .copied()
-        .filter(|l| l.bounds.height >= 39 && l.bounds.y + l.bounds.height + 80 <= 1900)
+        // Tesseract 5.5.2 reports the same 45.7.3 title font as 28-45 px
+        // depending on glyphs and locale. Row geometry + a paired artist line
+        // distinguishes titles; a 39 px floor discarded every current US row.
+        .filter(|l| l.bounds.height >= 28 && l.bounds.y + l.bounds.height + 80 <= 1900)
         .collect();
     let mut candidates = Vec::new();
     let mut targets = Vec::new();
+    let mut selected_index = None;
     for title in titles.into_iter().take(maximum) {
-        // A red title is already selected. Never toggle it or guess text hidden
-        // by the inline equalizer/trim buttons. Other complete rows remain usable.
-        if red_fraction(image, title.bounds) > 0.5 {
-            continue;
-        }
+        let selected = red_fraction(image, title.bounds) > 0.5;
         anyhow::ensure!(
             !title.text.contains('…')
                 && !title.text.ends_with("...")
@@ -149,9 +158,13 @@ fn pool_from_image(
             .copied()
             .filter(|l| {
                 l.bounds.y >= bottom + 4
-                    && l.bounds.y <= bottom + 30
-                    && (20..39).contains(&l.bounds.height)
-                    && l.bounds.x.abs_diff(title.bounds.x) <= 16
+                        && l.bounds.y <= bottom + 30
+                        && (20..39).contains(&l.bounds.height)
+                        // The inline equalizer shifts the measured selected title
+                        // 51 px right. Its artist stays on the same row; unselected
+                        // rows retain the tighter pairing used for tap targets.
+                        && l.bounds.x.abs_diff(title.bounds.x)
+                            <= if selected { 64 } else { 16 }
             })
             .collect();
         let [artist] = artists.as_slice() else {
@@ -187,6 +200,12 @@ fn pool_from_image(
             enabled: true,
             clickable: true,
         });
+        if selected {
+            anyhow::ensure!(
+                selected_index.replace(candidates.len() - 1).is_none(),
+                "visual sound selected row ambiguous"
+            );
+        }
     }
     anyhow::ensure!(
         !candidates.is_empty(),
@@ -197,12 +216,24 @@ fn pool_from_image(
         candidates,
         maximum_visible: maximum,
         targets,
-        selected_index: None,
+        selected_index,
         visual: true,
     })
 }
 
 async fn capture(
+    session: &dyn UiSession,
+    plan: SoundPickerPlan,
+    generation: u64,
+) -> anyhow::Result<(image::RgbImage, Vec<OcrLine>, Vec<OcrRect>, String)> {
+    let result = capture_sheet(session, plan, generation).await?;
+    if network_unavailable(&result.1, &result.2) {
+        return Err(SoundNetworkUnavailable.into());
+    }
+    Ok(result)
+}
+
+async fn capture_sheet(
     session: &dyn UiSession,
     plan: SoundPickerPlan,
     generation: u64,
@@ -257,6 +288,67 @@ async fn capture(
     // This is a pending observation, never permission to tap or an adapter error.
     let tabs = selection_recovery::tabs(&response).unwrap_or_default();
     Ok((image, response.lines, tabs, epoch))
+}
+
+pub(super) async fn retry_network(
+    session: &dyn UiSession,
+    plan: SoundPickerPlan,
+) -> anyhow::Result<bool> {
+    let first = capture_sheet(session, plan, 1).await?;
+    if !network_unavailable(&first.1, &first.2) {
+        return Ok(false);
+    }
+    let second = capture_sheet(session, plan, 2).await?;
+    if first.3 != second.3 || !network_unavailable(&second.1, &second.2) {
+        return Ok(false);
+    }
+    let rows: Vec<_> = second
+        .1
+        .iter()
+        .filter(|line| {
+            line.confidence >= 0.9
+                && (1300..1900).contains(&line.bounds.y)
+                && line
+                    .text
+                    .contains("Your network is unstable. Please try again.")
+        })
+        .collect();
+    let [line] = rows.as_slice() else {
+        anyhow::bail!("music retry target ambiguous")
+    };
+    // 45.7.3/en, ce031713b0c610ab0c: the measured refresh row includes the
+    // circular retry icon and error text. Two fresh sheet observations gate this tap.
+    tap_native_image(
+        session,
+        crate::TapPoint {
+            x: f64::from(line.bounds.x + line.bounds.width / 2),
+            y: f64::from(line.bounds.y + line.bounds.height / 2),
+        },
+    )
+    .await?;
+    let deadline = phase_deadline(Duration::from_secs(15));
+    loop {
+        check_wait()?;
+        let (_, lines, tabs, _) = capture_sheet(session, plan, 3).await?;
+        if !network_unavailable(&lines, &tabs) {
+            return Ok(true);
+        }
+        if Instant::now() >= deadline {
+            return Ok(false);
+        }
+        tokio::time::sleep(POLL).await;
+    }
+}
+
+fn network_unavailable(lines: &[OcrLine], tabs: &[OcrRect]) -> bool {
+    tabs.len() == 4
+        && lines.iter().any(|line| {
+            line.confidence >= 0.9
+                && (1300..1900).contains(&line.bounds.y)
+                && line
+                    .text
+                    .contains("Your network is unstable. Please try again.")
+        })
 }
 
 pub(super) async fn observe(
@@ -319,14 +411,127 @@ pub(super) async fn choose(
         .get(index)
         .context("visual sound index out of range")?;
     let fresh = observe(session, plan, pool.maximum_visible, false).await?;
-    let target = reproof_target(pool, &fresh, index)?;
-    tap_native_image(session, target.centre()).await?;
+    if let Some(selected) = fresh.selected_index {
+        if selected != index {
+            anyhow::ensure!(
+                pool.selected_index == Some(selected)
+                    && pool.candidates.get(selected) == fresh.candidates.get(selected),
+                "a different sound row became selected after observation"
+            );
+            // A preselection already present in the original stable pool is
+            // TikTok's initial choice. The durable target may replace it once.
+            let target = reproof_target(pool, &fresh, index)?;
+            tap_native_image(session, target.centre()).await?;
+        } else {
+            reproof_target(pool, &fresh, index)?;
+        }
+    } else {
+        let target = reproof_target(pool, &fresh, index)?;
+        tap_native_image(session, target.centre()).await?;
+    }
+    wait_selected_row(session, plan, &fresh, index).await?;
     // One reversible selection only. Fresh sheet proof authorizes Back; exact
     // title on two XML editor snapshots is the final independent verification.
     selection_recovery::prove_sheet(session, plan).await?;
     check_wait()?;
     session.back().await?;
     selection_recovery::confirm_editor(session, plan, &candidate.title).await
+}
+
+pub(super) async fn recover(
+    session: &dyn UiSession,
+    plan: SoundPickerPlan,
+    pool: &ObservedSoundPool,
+    index: usize,
+) -> anyhow::Result<()> {
+    let candidate = pool.candidates.get(index).context("sound index missing")?;
+    let (image, _, tabs, _) = capture(session, plan, 1).await?;
+    if tabs.len() != 4 {
+        let source = read_sound(session.hierarchy_source_snapshot()).await?;
+        let tree = crate::ui_automation::tree::Tree::parse(source)?;
+        if tree
+            .matching(
+                plan.package,
+                ElementQuery::ResourceIdSuffix(plan.current_title_id),
+            )
+            .is_empty()
+        {
+            anyhow::bail!("composer state lost; rebuild approved media before retry");
+        }
+        return selection_recovery::confirm_editor(session, plan, &candidate.title).await;
+    }
+    if selected_row_ready(&image, &tabs, pool, index) {
+        wait_selected_row(session, plan, pool, index).await?;
+        selection_recovery::prove_sheet(session, plan).await?;
+        check_wait()?;
+        session.back().await?;
+        return selection_recovery::confirm_editor(session, plan, &candidate.title).await;
+    }
+    // choose reobserves two stable rows and either proves the same selected identity
+    // or performs one selection from a fully unselected pool.
+    choose(session, plan, pool, index).await
+}
+
+async fn wait_selected_row(
+    session: &dyn UiSession,
+    plan: SoundPickerPlan,
+    pool: &ObservedSoundPool,
+    index: usize,
+) -> anyhow::Result<()> {
+    let deadline =
+        phase_deadline(Duration::from_secs(60)).min(Instant::now() + Duration::from_secs(60));
+    let epoch = session.gui_session_epoch();
+    let mut stable = 0;
+    let mut generation = 0;
+    loop {
+        check_wait()?;
+        anyhow::ensure!(
+            Instant::now() < deadline,
+            "TikTok chưa xác nhận tải nhạc đã chọn; chưa bấm Đăng"
+        );
+        generation += 1;
+        let (image, _, tabs, current) = capture(session, plan, generation).await?;
+        anyhow::ensure!(current == epoch, "sound selection session changed");
+        if selected_row_ready(&image, &tabs, pool, index) {
+            stable += 1;
+            if stable == 2 {
+                return Ok(());
+            }
+        } else {
+            stable = 0;
+        }
+        tokio::time::sleep(POLL).await;
+    }
+}
+
+fn selected_row_ready(
+    image: &image::RgbImage,
+    tabs: &[OcrRect],
+    pool: &ObservedSoundPool,
+    index: usize,
+) -> bool {
+    if tabs.len() != 4 || !hot_selected(image, tabs) || index >= pool.targets.len() {
+        return false;
+    }
+    // Selection inserts an equalizer and trim controls, clipping even a title
+    // previously read in full. On measured 45.7.3 the red title can disappear
+    // from OCR entirely. A unique red row only acknowledges our single pick;
+    // choose() still requires the exact full title on two editor XML snapshots.
+    let selected: Vec<_> = pool
+        .targets
+        .iter()
+        .enumerate()
+        .filter_map(|(i, target)| {
+            let bounds = OcrRect {
+                x: target.x as u32,
+                y: target.y as u32,
+                width: target.width as u32,
+                height: target.height as u32,
+            };
+            (red_fraction(image, bounds) > 0.5).then_some(i)
+        })
+        .collect();
+    selected == [index]
 }
 
 #[cfg(test)]
@@ -369,6 +574,95 @@ mod tests {
         assert_eq!(pool.selected_index, None);
         assert!(pool.targets.iter().all(|t| t.x >= 250. && t.y >= 1300.));
     }
+
+    #[test]
+    fn live_us_sheet_accepts_complete_31px_titles_and_excludes_the_cut_row() {
+        let img = image::load_from_memory(include_bytes!(
+            "../../fixtures/tiktok-publish/musically-45.7.3-en/hot-us-visual.png"
+        ))
+        .unwrap()
+        .to_rgb8();
+        let lines: Vec<OcrLine> = serde_json::from_str(include_str!(
+            "../../fixtures/tiktok-publish/musically-45.7.3-en/hot-us-visual-ocr.json"
+        ))
+        .unwrap();
+        let tabs = [(46, 64), (179, 131), (381, 162), (613, 126)]
+            .into_iter()
+            .map(|(x, width)| OcrRect {
+                x,
+                y: 1128,
+                width,
+                height: 29,
+            })
+            .collect::<Vec<_>>();
+        let plan = SoundPickerPlan::resolve("com.zhiliaoapp.musically", "en", "45.7.3").unwrap();
+        let pool = pool_from_image(&img, &lines, &tabs, plan, 5).unwrap();
+        assert_eq!(
+            pool.candidates
+                .iter()
+                .map(|candidate| candidate.title.as_str())
+                .collect::<Vec<_>>(),
+            ["Vibin", "GGEZ", "Nicole Kidman"]
+        );
+        assert!(pool
+            .candidates
+            .iter()
+            .all(|candidate| candidate.title != "nothing"));
+    }
+
+    #[test]
+    fn clipped_selected_title_can_acknowledge_only_the_chosen_row() {
+        let (_, _, tabs, plan) = fixture();
+        let before = image::load_from_memory(include_bytes!(
+            "../../fixtures/tiktok-publish/musically-45.7.3-en/hot-before-third.png"
+        ))
+        .unwrap()
+        .to_rgb8();
+        let selected = image::load_from_memory(include_bytes!(
+            "../../fixtures/tiktok-publish/musically-45.7.3-en/hot-selected-third.png"
+        ))
+        .unwrap()
+        .to_rgb8();
+        let lines: Vec<OcrLine> = serde_json::from_str(include_str!(
+            "../../fixtures/tiktok-publish/musically-45.7.3-en/hot-before-third-ocr.json"
+        ))
+        .unwrap();
+        let after_lines: Vec<OcrLine> = serde_json::from_str(include_str!(
+            "../../fixtures/tiktok-publish/musically-45.7.3-en/hot-selected-third-ocr.json"
+        ))
+        .unwrap();
+        let pool = pool_from_image(&before, &lines, &tabs, plan, 5).unwrap();
+        assert_eq!(pool.candidates[2].title, "Thương Phận Hồng Nhan - remix");
+        assert!(!after_lines
+            .iter()
+            .any(|l| l.text == pool.candidates[2].title));
+        assert!(!selected_row_ready(&before, &tabs, &pool, 2));
+        assert!(selected_row_ready(&selected, &tabs, &pool, 2));
+        assert!(!selected_row_ready(&selected, &tabs, &pool, 0));
+        assert!(!selected_row_ready(&selected, &[], &pool, 2));
+        let mut ambiguous = pool.clone();
+        ambiguous.targets.push(pool.targets[2].clone());
+        assert!(!selected_row_ready(&selected, &tabs, &ambiguous, 2));
+    }
+
+    #[test]
+    fn music_network_error_requires_the_sheet_and_measured_message_region() {
+        let (_, _, tabs, _) = fixture();
+        let mut line = OcrLine {
+            text: "€ Your network is unstable. Please try again.".into(),
+            bounds: OcrRect {
+                x: 199,
+                y: 1622,
+                width: 681,
+                height: 37,
+            },
+            confidence: 0.9447,
+        };
+        assert!(network_unavailable(&[line.clone()], &tabs));
+        assert!(!network_unavailable(&[line.clone()], &[]));
+        line.bounds.y = 800;
+        assert!(!network_unavailable(&[line], &tabs));
+    }
     #[test]
     fn loading_chip_template_refuses_other_pixels_and_geometry() {
         let mut img = image::RgbImage::new(1080, 2220);
@@ -404,7 +698,7 @@ mod tests {
     }
 
     #[test]
-    fn selected_red_row_is_skipped_without_toggling_and_bottom_clipped_row_is_excluded() {
+    fn selected_red_row_is_retained_as_state_and_bottom_clipped_row_is_excluded() {
         let (_, mut lines, tabs, plan) = fixture();
         let img = image::load_from_memory(include_bytes!(
             "../../fixtures/tiktok-publish/musically-45.7.3-en/hot-visual-selected.png"
@@ -422,8 +716,9 @@ mod tests {
             },
         });
         let pool = pool_from_image(&img, &lines, &tabs, plan, 5).unwrap();
-        assert_eq!(pool.candidates.len(), 2);
-        assert_eq!(pool.candidates[0].title, "Ăm Chả Húi (Short Mix)");
+        assert_eq!(pool.candidates.len(), 3);
+        assert_eq!(pool.selected_index, Some(0));
+        assert_eq!(pool.candidates[0].title, "Thương Nhau Đến Thế");
     }
 
     struct Ocr;
@@ -433,7 +728,16 @@ mod tests {
             unreachable!()
         }
         async fn ocr(&self, r: OcrRequest) -> anyhow::Result<OcrResponse> {
-            let (_, rows, tabs, _) = fixture();
+            let (_, mut rows, tabs, _) = fixture();
+            let selected_hash = format!(
+                "{:x}",
+                Sha256::digest(include_bytes!(
+                    "../../fixtures/tiktok-publish/musically-45.7.3-en/hot-visual-selected.png"
+                ))
+            );
+            if r.screenshot.sha256 == selected_hash {
+                rows[0].bounds.x = 321;
+            }
             let mut lines: Vec<_> = ["Hot", "For You", "Favorites", "Recent"]
                 .into_iter()
                 .zip(tabs)
@@ -468,6 +772,9 @@ mod tests {
         backs: AtomicUsize,
         reads: AtomicUsize,
         wrong_title: bool,
+        selection_reads: AtomicUsize,
+        loading_frames: usize,
+        initially_selected: bool,
     }
     #[async_trait::async_trait]
     impl UiSession for Session {
@@ -484,6 +791,14 @@ mod tests {
             Ok("com.zhiliaoapp.musically".into())
         }
         async fn screenshot_png(&self) -> anyhow::Result<Vec<u8>> {
+            if (self.initially_selected || self.taps.load(Ordering::Relaxed) > 0)
+                && self.selection_reads.fetch_add(1, Ordering::Relaxed) >= self.loading_frames
+            {
+                return Ok(include_bytes!(
+                    "../../fixtures/tiktok-publish/musically-45.7.3-en/hot-visual-selected.png"
+                )
+                .to_vec());
+            }
             Ok(
                 include_bytes!("../../fixtures/tiktok-publish/musically-45.7.3-en/hot-visual.png")
                     .to_vec(),
@@ -495,6 +810,10 @@ mod tests {
         }
         async fn back(&self) -> anyhow::Result<()> {
             self.backs.fetch_add(1, Ordering::Relaxed);
+            anyhow::ensure!(
+                self.selection_reads.load(Ordering::Relaxed) > self.loading_frames,
+                "Back interrupted the pending sound download"
+            );
             Ok(())
         }
         async fn swipe(&self, _: crate::SwipeGesture) -> anyhow::Result<()> {
@@ -542,6 +861,9 @@ mod tests {
                 backs: AtomicUsize::new(0),
                 reads: AtomicUsize::new(0),
                 wrong_title,
+                selection_reads: AtomicUsize::new(0),
+                loading_frames: 0,
+                initially_selected: false,
             };
             let plan = fixture().3;
             let pool = observe(&s, plan, 5, false).await.unwrap();
@@ -551,5 +873,64 @@ mod tests {
             assert_eq!(s.backs.load(Ordering::Relaxed), 1);
             assert!(s.reads.load(Ordering::Relaxed) >= 2);
         }
+    }
+    #[tokio::test(start_paused = true)]
+    async fn slow_sound_download_is_observed_before_leaving_sheet_without_second_pick() {
+        let session = Session {
+            taps: AtomicUsize::new(0),
+            backs: AtomicUsize::new(0),
+            reads: AtomicUsize::new(0),
+            wrong_title: false,
+            selection_reads: AtomicUsize::new(0),
+            loading_frames: 3,
+            initially_selected: false,
+        };
+        let plan = fixture().3;
+        let pool = observe(&session, plan, 5, false).await.unwrap();
+        choose(&session, plan, &pool, 0).await.unwrap();
+        assert_eq!(session.taps.load(Ordering::Relaxed), 1);
+        assert_eq!(session.backs.load(Ordering::Relaxed), 1);
+        assert!(session.selection_reads.load(Ordering::Relaxed) >= 5);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn recovery_of_lost_selection_ack_observes_red_row_without_second_pick() {
+        let session = Session {
+            taps: AtomicUsize::new(0),
+            backs: AtomicUsize::new(0),
+            reads: AtomicUsize::new(0),
+            wrong_title: false,
+            selection_reads: AtomicUsize::new(0),
+            loading_frames: 0,
+            initially_selected: false,
+        };
+        let plan = fixture().3;
+        let pool = observe(&session, plan, 5, false).await.unwrap();
+        session.tap(pool.targets[0].centre()).await.unwrap();
+        recover(&session, plan, &pool, 0).await.unwrap();
+        assert_eq!(session.taps.load(Ordering::Relaxed), 1);
+        assert_eq!(session.backs.load(Ordering::Relaxed), 1);
+        assert!(session.reads.load(Ordering::Relaxed) >= 2);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_already_selected_visual_row_is_confirmed_without_toggling_it() {
+        let session = Session {
+            taps: AtomicUsize::new(0),
+            backs: AtomicUsize::new(0),
+            reads: AtomicUsize::new(0),
+            wrong_title: false,
+            selection_reads: AtomicUsize::new(0),
+            loading_frames: 0,
+            initially_selected: true,
+        };
+        let plan = fixture().3;
+        let pool = observe(&session, plan, 5, false).await.unwrap();
+        assert_eq!(pool.selected_index, Some(0));
+
+        choose(&session, plan, &pool, 0).await.unwrap();
+
+        assert_eq!(session.taps.load(Ordering::Relaxed), 0);
+        assert_eq!(session.backs.load(Ordering::Relaxed), 1);
     }
 }

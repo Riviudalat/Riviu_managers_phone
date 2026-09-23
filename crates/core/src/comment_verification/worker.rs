@@ -105,6 +105,9 @@ async fn observe(
             .await?;
     let package = device.target_package;
     let context = device.context;
+    let remaining =
+        (job.deadline_ms - chrono::Utc::now().timestamp_millis()).clamp(1, 115000) as u64;
+    let observation_end = tokio::time::Instant::now() + Duration::from_millis(remaining);
     let result = async {
         let session = control.streaming_session(&context)?;
         anyhow::ensure!(
@@ -151,10 +154,7 @@ async fn observe(
         )
         .await?;
         if let Some(parent) = &job.context.parent {
-            anyhow::ensure!(
-                search::parent_matches(&found, &package, parent)?,
-                "comment_parent_not_visible: chưa xác minh nhánh của câu đã gửi"
-            );
+            found = search::reveal_parent(session.as_ref(), labels, found, parent, stop).await?;
         }
         search::verify_author(session.as_ref(), labels, &found, account).await?;
         // Profile navigation invalidates the old tree; prove the row again on return.
@@ -168,19 +168,39 @@ async fn observe(
         )
         .await?;
         if let Some(parent) = &job.context.parent {
-            anyhow::ensure!(
-                search::parent_matches(&found, &package, parent)?,
-                "comment_parent_changed_after_profile"
-            );
+            found = search::reveal_parent(session.as_ref(), labels, found, parent, stop).await?;
         }
         let png = session.screenshot_png().await?;
         found.identity.frame_sha256 = format!("{:x}", Sha256::digest(&png));
+        // Optional enrichment after the comment and author are already proved.
+        // A missing link never changes that verdict or reopens the Send boundary.
+        let link_window = observation_end
+            .saturating_duration_since(tokio::time::Instant::now())
+            .saturating_sub(Duration::from_secs(3))
+            .min(Duration::from_secs(45));
+        if crate::tiktok_comment_link::supported(labels) && link_window >= Duration::from_secs(15) {
+            match tokio::time::timeout(
+                link_window,
+                crate::tiktok_comment_link::capture(
+                    session.as_ref(),
+                    labels,
+                    &found.identity,
+                    &job.context.target.content_id,
+                    stop,
+                ),
+            )
+            .await
+            {
+                Ok(Ok(link)) => found.identity.comment_link = Some(link),
+                _ => tracing::debug!(
+                    "comment link unavailable; retaining measured text/author identity"
+                ),
+            }
+        }
         Ok::<_, anyhow::Error>((found.identity, found.snapshot, png))
     };
-    let remaining =
-        (job.deadline_ms - chrono::Utc::now().timestamp_millis()).clamp(1, 75000) as u64;
     let result = tokio::select! {
-        r=tokio::time::timeout(Duration::from_millis(remaining),result)=>r.context("comment_verification_timeout").and_then(|r|r),
+        r=tokio::time::timeout_at(observation_end,result)=>r.context("comment_verification_timeout").and_then(|r|r),
         _=async {while !stop.load(Ordering::Relaxed){tokio::time::sleep(Duration::from_millis(50)).await}}=>Err(anyhow::anyhow!("comment_verification_stopped"))
     };
     if result.is_err() {

@@ -194,6 +194,89 @@ pub fn parent_matches(
     }))
 }
 
+/// Keep the reply and its parent in one fresh snapshot. On 45.7.3 the
+/// search's upward scroll can leave a found reply at the drawer's top with
+/// its parent just above the viewport. Scroll back a small bounded distance;
+/// this is observation only and retains the exact-text/author/branch checks.
+pub async fn reveal_parent(
+    session: &dyn UiSession,
+    labels: TikTokControls,
+    mut found: FoundComment,
+    parent: &CommentLocatorIdentity,
+    stop: &AtomicBool,
+) -> anyhow::Result<FoundComment> {
+    for attempt in 0..4 {
+        if parent_matches(&found, labels.package(), parent)? {
+            return Ok(found);
+        }
+        anyhow::ensure!(
+            attempt < 3,
+            "comment_parent_not_visible: chưa xác minh nhánh của câu đã gửi"
+        );
+        anyhow::ensure!(!stop.load(Ordering::Relaxed), "comment_search_cancelled");
+        let tree = Tree::parse(crate::HierarchySourceSnapshot {
+            generation: 1,
+            xml: found.snapshot.clone(),
+        })?;
+        // A visible different branch is a refusal, not a reason to scroll past it.
+        anyhow::ensure!(
+            row(
+                &tree,
+                labels.package(),
+                &parent.text,
+                Some(&parent.author_label)
+            )?
+            .is_none(),
+            "comment_parent_mismatch"
+        );
+        let field = tree
+            .matching(
+                labels.package(),
+                ElementQuery::ClassName("android.widget.EditText"),
+            )
+            .into_iter()
+            .filter_map(|i| tree.nodes[i].rect())
+            .max_by(|a, b| a.y.total_cmp(&b.y))
+            .context("comment_drawer_closed")?;
+        let (width, height) = session.window_size().await?;
+        let top = height * 0.35;
+        let bottom = field.y - 40.0;
+        anyhow::ensure!(
+            bottom - top > 300.0 && found.body.y < top + (bottom - top) * 0.55,
+            "comment_parent_not_visible"
+        );
+        let from = crate::TapPoint {
+            x: width * 0.5,
+            y: top + (bottom - top) * 0.30,
+        };
+        let to = crate::TapPoint {
+            x: width * 0.5,
+            y: top + (bottom - top) * 0.55,
+        };
+        session
+            .swipe(crate::SwipeGesture {
+                from,
+                to,
+                duration_ms: 350,
+            })
+            .await?;
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        let snapshot = session.hierarchy_source_snapshot().await?;
+        let xml = snapshot.xml.clone();
+        let tree = Tree::parse(snapshot)?;
+        let mut current = row(
+            &tree,
+            labels.package(),
+            &found.identity.text,
+            Some(&found.identity.author_label),
+        )?
+        .context("comment_reply_left_view")?;
+        current.snapshot = xml;
+        found = current;
+    }
+    unreachable!("bounded observations return or refuse")
+}
+
 pub fn row(
     tree: &Tree,
     package: &str,
@@ -255,6 +338,7 @@ pub fn row(
                 // file already knows (`Reply`), and the like control's name is catalogue data.
                 like: None,
                 identity: CommentLocatorIdentity {
+                    comment_link: None,
                     author_label: label,
                     text: text.into(),
                     locator_version: "android-snapshot-v2".into(),

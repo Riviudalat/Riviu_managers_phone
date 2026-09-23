@@ -10,6 +10,15 @@ beforeEach(() => {
   vi.mocked(api.typesafeGetSettings).mockResolvedValue({ enabled: false, hasApiKey: false, revision: 4 });
 });
 afterEach(() => { cleanup(); vi.clearAllMocks(); });
+it("does not test the old credential while an edited key is unsaved", async () => {
+  vi.mocked(api.typesafeGetSettings).mockResolvedValue({ enabled: true, hasApiKey: true, revision: 4 });
+  render(<TypeSafeSettingsCard />);
+  await waitFor(() => expect(screen.getByRole("button", { name: "Kiểm tra bằng mẫu chữ" })).toBeEnabled());
+  fireEvent.change(screen.getByLabelText("Khóa TypeSafe"), { target: { value: "new-key" } });
+  expect(screen.getByRole("button", { name: "Kiểm tra bằng mẫu chữ" })).toBeDisabled();
+  expect(screen.getByText(/Lưu khóa mới trước khi kiểm tra/)).toBeVisible();
+  expect(api.typesafeCheckComment).not.toHaveBeenCalled();
+});
 it("reads status without an automatic inference call and saves the credential separately", async () => {
   render(<TypeSafeSettingsCard />);
   await waitFor(() => expect(screen.getByRole("checkbox")).toBeEnabled());

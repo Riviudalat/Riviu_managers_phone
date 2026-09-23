@@ -417,6 +417,7 @@ pub(crate) async fn run_bound_sheet_worker(
     db: Arc<Database>,
     events: riviu_core::events::EventBus,
     stop: Arc<std::sync::atomic::AtomicBool>,
+    acceptance: crate::dev_acceptance::DevAcceptancePolicy,
 ) {
     use riviu_core::db::SheetDeliveryKind;
     use sha2::Digest;
@@ -433,6 +434,9 @@ pub(crate) async fn run_bound_sheet_worker(
         }
         if stop.load(std::sync::atomic::Ordering::Acquire) {
             break;
+        }
+        if !acceptance.allows_any(crate::dev_acceptance::AcceptanceCapability::SheetDelivery) {
+            continue;
         }
         let fingerprint = match db
             .storage_read(|db| {
@@ -496,8 +500,32 @@ pub(crate) async fn run_bound_sheet_worker(
             if tasks.len() >= 2 {
                 break;
             }
+            let acceptance = acceptance.clone();
             match db
-                .storage_write(move |db| db.claim_bound_sheet_delivery(kind, None, now))
+                .storage_write(move |db| {
+                    if acceptance.active() {
+                        for id in acceptance.scoped_campaign_ids() {
+                            if let Some(detail) = db.get_publish_campaign(&id)? {
+                                for a in detail.assignments {
+                                    if !acceptance.allows(
+                                        crate::dev_acceptance::AcceptanceCapability::SheetDelivery,
+                                        &id,
+                                        &a.udid,
+                                    ) {
+                                        continue;
+                                    }
+                                    if let Some(claim) =
+                                        db.claim_bound_sheet_delivery(kind, Some(&a.id), now)?
+                                    {
+                                        return Ok(Some(claim));
+                                    }
+                                }
+                            }
+                        }
+                        return Ok(None);
+                    }
+                    db.claim_bound_sheet_delivery(kind, None, now)
+                })
                 .await
             {
                 Ok(Some(claim)) => {

@@ -117,7 +117,7 @@ pub async fn publish_preflight(
 pub(super) async fn build_publish_preflight(
     control: &DeviceControlPlane,
     registry: &riviu_core::DeviceRegistry,
-    db: &Database,
+    db: &Arc<Database>,
     mut request: riviu_core::PublishPreflightRequest,
 ) -> anyhow::Result<PreparedPublishPreflight> {
     request.source_root = request.source_root.trim().to_string();
@@ -147,7 +147,7 @@ pub(super) async fn scan_preflight_source(
 pub(crate) async fn build_publish_preflight_from_manifest(
     control: &DeviceControlPlane,
     registry: &riviu_core::DeviceRegistry,
-    db: &Database,
+    db: &Arc<Database>,
     request: riviu_core::PublishPreflightRequest,
     manifest: &PublishFolderManifest,
 ) -> anyhow::Result<PreparedPublishPreflight> {
@@ -209,7 +209,7 @@ pub(super) async fn verify_sheet_delivery_choice(
 pub(super) async fn build_publish_preflight_from_manifest_with_sheet(
     control: &DeviceControlPlane,
     registry: &riviu_core::DeviceRegistry,
-    db: &Database,
+    db: &Arc<Database>,
     request: riviu_core::PublishPreflightRequest,
     manifest: &PublishFolderManifest,
     sheet_choice: VerifiedSheetChoice,
@@ -239,8 +239,21 @@ pub(super) async fn build_publish_preflight_from_manifest_with_sheet(
         .collect();
     apply_caption_overrides(&mut bundles, Some(&overrides))?;
 
-    let metas = db.list_device_metas()?;
-    let groups = db.list_groups()?;
+    let persisted_udids = request.udids.clone();
+    let persisted = db
+        .storage_read(move |db| {
+            let metas = db.list_device_metas()?;
+            let groups = db.list_groups()?;
+            let guards = persisted_udids
+                .into_iter()
+                .collect::<std::collections::BTreeSet<_>>()
+                .into_iter()
+                .map(|udid| db.publish_device_guard(&udid).map(|guard| (udid, guard)))
+                .collect::<anyhow::Result<HashMap<_, _>>>()?;
+            Ok((metas, groups, guards))
+        })
+        .await?;
+    let (metas, groups, guards) = persisted;
     let fleet_order = registry
         .list()
         .into_iter()
@@ -252,7 +265,9 @@ pub(super) async fn build_publish_preflight_from_manifest_with_sheet(
     let mut issues = Vec::new();
     for (ordinal, (bundle, udid)) in bundles.iter().zip(&request.udids).enumerate() {
         let mut row_issues = Vec::new();
-        let guard = db.publish_device_guard(udid)?;
+        let guard = guards
+            .get(udid)
+            .with_context(|| format!("thiếu snapshot guard cho máy {udid}"))?;
         if let Some(hold) = guard.blocking.first() {
             row_issues.push(preflight_issue(
                 "post_verification_pending",
@@ -505,7 +520,9 @@ pub(super) async fn build_publish_preflight_from_manifest_with_sheet(
 
     for row in &mut assignments {
         row.checks = riviu_core::ui_automation::checks::publish_checks(row);
-        let guard = db.publish_device_guard(&row.udid)?;
+        let guard = guards
+            .get(&row.udid)
+            .with_context(|| format!("thiếu snapshot guard cho máy {}", row.udid))?;
         if let Some(old) = guard.link_review.first() {
             row.checks.push(riviu_core::ui_automation::AutomationCheck {
                 id: "oldPostLink".into(),
@@ -556,7 +573,7 @@ mod sheet_choice_tests {
     #[tokio::test]
     async fn shared_sheet_choice_preserves_each_slot_target_failure_and_digest() {
         let path = std::env::temp_dir().join(format!("shared-sheet-choice-{}.db", Uuid::new_v4()));
-        let db = Database::open(&path).unwrap();
+        let db = Arc::new(Database::open(&path).unwrap());
         let control = DeviceControlPlane::new(
             Arc::new(riviu_ios_driver::MockIosDriver::new()),
             Arc::new(riviu_core::DeviceWorkCoordinator::new()),

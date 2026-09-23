@@ -1,6 +1,60 @@
 use super::*;
 
 #[test]
+fn verified_stop_releases_account_reservation_without_reopening_old_post() {
+    let (db, _, campaign, assignments) = legacy_pending();
+    let a = &assignments[0];
+    db.conn().unwrap().execute("INSERT INTO publish_account_reservations(account,assignment_id,claimed_at) VALUES('fixture',?1,'now')", [&a.id]).unwrap();
+    db.begin_publish_operation_stop(&campaign).unwrap();
+    let before = db
+        .get_publish_campaign(&campaign)
+        .unwrap()
+        .unwrap()
+        .assignments[0]
+        .effect_intent
+        .clone();
+    let marker = db
+        .get_setting(&format!("operation.stop.publish:{campaign}"))
+        .unwrap()
+        .unwrap();
+    assert!(db
+        .record_publish_stopped_device_release(&campaign, &a.udid, &marker)
+        .unwrap());
+    let remaining: i64 = db
+        .conn()
+        .unwrap()
+        .query_row(
+            "SELECT COUNT(*) FROM publish_account_reservations WHERE assignment_id=?1",
+            [&a.id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        remaining, 0,
+        "a closed device must not retain the old account reservation"
+    );
+    let after = db.get_publish_campaign(&campaign).unwrap().unwrap();
+    assert_eq!(after.assignments[0].effect_intent, before);
+    assert_eq!(
+        after.assignments[0].state,
+        crate::PublishCampaignState::Uncertain
+    );
+    assert!(
+        db.device_app_selection_block_reason(&a.udid)
+            .unwrap()
+            .is_none(),
+        "the same verified release must unblock app selection as well as new Publish"
+    );
+    db.begin_publish_operation_stop(&campaign).unwrap();
+    assert!(
+        db.device_app_selection_block_reason(&a.udid)
+            .unwrap()
+            .is_some(),
+        "a new Stop generation cannot reuse an earlier release proof"
+    );
+}
+
+#[test]
 fn stopped_device_release_removes_only_its_hold_and_survives_restart() {
     use sha2::Digest;
     let (db, path, campaign, assignments) = legacy_pending();
@@ -396,7 +450,7 @@ fn resume_rejects_unconfirmed_stale_incomplete_identity_active_pipeline_and_expl
 }
 
 #[test]
-fn retry_capability_matches_atomic_claim_and_active_pipeline_refusal() {
+fn retry_capability_matches_checked_claim_even_with_an_unrelated_live_sibling() {
     for active in [false, true] {
         let (db, _, campaign, assignments) = legacy_pending();
         db.conn().unwrap().execute("UPDATE publish_assignments SET state='failed_before_dispatch',effect_intent=NULL WHERE id=?1",[&assignments[0].id]).unwrap();
@@ -414,13 +468,15 @@ fn retry_capability_matches_atomic_claim_and_active_pipeline_refusal() {
             .iter()
             .find(|c| c.assignment_id == assignments[0].id)
             .unwrap();
-        assert_eq!(cap.retry_before_post.allowed, !active);
-        assert_eq!(
-            db.claim_publish_assignment_retry(&assignments[0].id)
-                .unwrap()
-                .is_some(),
-            !active
-        );
+        assert!(cap.retry_before_post.allowed);
+        assert!(db
+            .claim_publish_assignment_retry_checked(
+                &assignments[0].id,
+                cap.revision,
+                &Uuid::new_v4().to_string()
+            )
+            .unwrap()
+            .is_some());
     }
 }
 

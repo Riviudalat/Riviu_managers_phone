@@ -73,7 +73,7 @@ TEMURIN_SOURCE = (
 ANDROID_PACKAGE_TOOLS_TREE_SHA256 = (
     "de003f9f8b872ba8a9e2bb57d0539e04c0c7116e409619ded42941aaf85a3762"
 )
-EXPECTED_DATABASE_VERSION = 44
+EXPECTED_DATABASE_VERSION = 46
 BRANDING_LOGO = REPOSITORY_ROOT / "logo.jpg"
 TAURI_CONFIG = REPOSITORY_ROOT / "apps" / "desktop" / "src-tauri" / "tauri.conf.json"
 # The release build runs with this overlay, so *this* is the version the shipped binary
@@ -367,6 +367,7 @@ def verify_version_command(args: argparse.Namespace) -> dict[str, Any]:
             TAURI_CARGO_MANIFEST.read_text(encoding="utf-8")
         )
         cargo_version = cargo_document["package"]["version"]
+        checker_version = tomllib.loads((REPOSITORY_ROOT / "crates/deployment-checker/Cargo.toml").read_text(encoding="utf-8"))["package"]["version"]
     except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError, KeyError) as error:
         raise ArtifactError(f"invalid desktop Cargo version: {error}") from error
     versions = {
@@ -374,6 +375,7 @@ def verify_version_command(args: argparse.Namespace) -> dict[str, Any]:
         "tauriFull": tauri_full_version,
         "npm": npm_version,
         "cargo": cargo_version,
+        "checker": checker_version,
     }
     if any(not isinstance(version, str) or not version for version in versions.values()):
         raise ArtifactError(f"desktop version fields must be non-empty strings: {versions!r}")

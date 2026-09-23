@@ -25,6 +25,8 @@ pub struct ExpandedComposition {
 struct SubflowConfig {
     document: FlowDocumentV2,
     #[serde(default)]
+    library: Option<PublishedFlowReference>,
+    #[serde(default)]
     inputs: BTreeMap<String, String>,
     #[serde(default)]
     outputs: BTreeMap<String, String>,
@@ -34,11 +36,192 @@ struct SubflowConfig {
 #[serde(deny_unknown_fields)]
 struct RepeatConfig {
     document: FlowDocumentV2,
+    #[serde(default)]
+    library: Option<PublishedFlowReference>,
     count: u32,
     #[serde(default)]
     inputs: BTreeMap<String, String>,
     #[serde(default)]
     outputs: BTreeMap<String, String>,
+}
+
+/// Explicit library opt-in; historical composition configs have only `document`.
+/// The embedded document remains a portable preview and an immutable run snapshot.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct PublishedFlowReference {
+    flow_id: Uuid,
+    channel: PublicationChannel,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "camelCase")]
+enum PublicationChannel {
+    Published,
+}
+
+fn validate_reference(
+    reference: &Option<PublishedFlowReference>,
+    body: &FlowDocumentV2,
+    node_id: NodeId,
+) -> Result<(), Vec<FlowCompileError>> {
+    if let Some(reference) = reference {
+        let PublicationChannel::Published = reference.channel;
+        if reference.flow_id != body.id || body.revision == 0 {
+            return Err(error(
+                "CompositionLibraryIdentity",
+                "Library body must match its source Flow ID and a saved revision",
+                node_id,
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Return every published-library identity named by this portable snapshot.
+/// Archive and publication gates use this without consulting mutable library state.
+pub fn published_composition_references(
+    document: &FlowDocumentV2,
+) -> Result<BTreeSet<Uuid>, Vec<FlowCompileError>> {
+    fn collect(
+        document: &FlowDocumentV2,
+        references: &mut BTreeSet<Uuid>,
+        depth: usize,
+        remaining_nodes: &mut usize,
+    ) -> Result<(), Vec<FlowCompileError>> {
+        if depth > MAX_COMPOSITION_DEPTH {
+            return Err(error(
+                "CompositionDepthLimit",
+                "Flow nesting exceeds 8 levels",
+                document.entry_node_id,
+            ));
+        }
+        *remaining_nodes = remaining_nodes
+            .checked_sub(document.nodes.len())
+            .ok_or_else(|| {
+                error(
+                    "CompositionNodeLimit",
+                    "Library composition exceeds 2000 source nodes",
+                    document.entry_node_id,
+                )
+            })?;
+        for node in &document.nodes {
+            if !matches!(node.kind, ActionKind::Subflow | ActionKind::Repeat) {
+                continue;
+            }
+            let (body, reference) = if node.kind == ActionKind::Subflow {
+                let cfg: SubflowConfig = serde_json::from_value(node.config.clone())
+                    .map_err(|e| error("CompositionConfigInvalid", e.to_string(), node.id))?;
+                (cfg.document, cfg.library)
+            } else {
+                let cfg: RepeatConfig = serde_json::from_value(node.config.clone())
+                    .map_err(|e| error("CompositionConfigInvalid", e.to_string(), node.id))?;
+                (cfg.document, cfg.library)
+            };
+            validate_reference(&reference, &body, node.id)?;
+            if let Some(reference) = reference {
+                references.insert(reference.flow_id);
+            }
+            collect(&body, references, depth + 1, remaining_nodes)?;
+        }
+        Ok(())
+    }
+
+    let mut references = BTreeSet::new();
+    let mut remaining_nodes = MAX_EXPANDED_NODES;
+    collect(document, &mut references, 0, &mut remaining_nodes)?;
+    Ok(references)
+}
+
+/// Resolve once from one consistent DB publication snapshot, before compilation.
+/// The caller persists the resulting compiled plan as an immutable parent revision;
+/// neither the executor nor retries fetch library state while a run is in progress.
+/// `published` must exclude archived and unpublished sources.
+pub fn resolve_published_composition(
+    document: &FlowDocumentV2,
+    published: &BTreeMap<Uuid, FlowDocumentV2>,
+) -> Result<FlowDocumentV2, Vec<FlowCompileError>> {
+    fn resolve(
+        document: &FlowDocumentV2,
+        published: &BTreeMap<Uuid, FlowDocumentV2>,
+        active: &mut Vec<Uuid>,
+        depth: usize,
+        remaining_nodes: &mut usize,
+    ) -> Result<FlowDocumentV2, Vec<FlowCompileError>> {
+        if depth > MAX_COMPOSITION_DEPTH {
+            return Err(error(
+                "CompositionDepthLimit",
+                "Flow nesting exceeds 8 levels",
+                document.entry_node_id,
+            ));
+        }
+        *remaining_nodes = remaining_nodes
+            .checked_sub(document.nodes.len())
+            .ok_or_else(|| {
+                error(
+                    "CompositionNodeLimit",
+                    "Library composition exceeds 2000 source nodes",
+                    document.entry_node_id,
+                )
+            })?;
+        let mut resolved = document.clone();
+        for node in &mut resolved.nodes {
+            if !matches!(node.kind, ActionKind::Subflow | ActionKind::Repeat) {
+                continue;
+            }
+            let (body, reference) = if node.kind == ActionKind::Subflow {
+                let cfg: SubflowConfig = serde_json::from_value(node.config.clone())
+                    .map_err(|e| error("CompositionConfigInvalid", e.to_string(), node.id))?;
+                (cfg.document, cfg.library)
+            } else {
+                let cfg: RepeatConfig = serde_json::from_value(node.config.clone())
+                    .map_err(|e| error("CompositionConfigInvalid", e.to_string(), node.id))?;
+                (cfg.document, cfg.library)
+            };
+            validate_reference(&reference, &body, node.id)?;
+            let next = if let Some(reference) = reference {
+                if active.contains(&reference.flow_id) {
+                    return Err(error(
+                        "CompositionLibraryCycle",
+                        "Published Flow references form a cycle",
+                        node.id,
+                    ));
+                }
+                let source = published.get(&reference.flow_id).ok_or_else(|| {
+                    error("CompositionLibraryUnavailable", "Referenced Flow is unpublished, archived, or missing; reload its publication", node.id)
+                })?;
+                if source.id != reference.flow_id
+                    || source.revision == 0
+                    || source.schema_version != 2
+                {
+                    return Err(error(
+                        "CompositionLibraryIdentity",
+                        "Published source identity or revision is invalid",
+                        node.id,
+                    ));
+                }
+                active.push(reference.flow_id);
+                let result = resolve(source, published, active, depth + 1, remaining_nodes);
+                active.pop();
+                result?
+            } else {
+                resolve(&body, published, active, depth + 1, remaining_nodes)?
+            };
+            if next != body {
+                node.config["document"] = serde_json::to_value(next)
+                    .map_err(|e| error("CompositionConfigInvalid", e.to_string(), node.id))?;
+            }
+        }
+        Ok(resolved)
+    }
+    let mut remaining_nodes = MAX_EXPANDED_NODES;
+    resolve(
+        document,
+        published,
+        &mut vec![document.id],
+        0,
+        &mut remaining_nodes,
+    )
 }
 
 fn error(code: &str, message: impl Into<String>, node_id: NodeId) -> Vec<FlowCompileError> {
@@ -298,10 +481,12 @@ impl Builder {
                 let (body, count, inputs, outputs) = if source.kind == ActionKind::Subflow {
                     let cfg: SubflowConfig = serde_json::from_value(source.config.clone())
                         .map_err(|e| error("CompositionConfigInvalid", e.to_string(), source.id))?;
+                    validate_reference(&cfg.library, &cfg.document, source.id)?;
                     (cfg.document, 1, cfg.inputs, cfg.outputs)
                 } else {
                     let cfg: RepeatConfig = serde_json::from_value(source.config.clone())
                         .map_err(|e| error("CompositionConfigInvalid", e.to_string(), source.id))?;
+                    validate_reference(&cfg.library, &cfg.document, source.id)?;
                     if cfg.count == 0 || cfg.count > MAX_COMPOSITION_REPEAT {
                         return Err(error(
                             "CompositionRepeatLimit",
@@ -563,6 +748,138 @@ mod tests {
         let expanded = expand_composition(&doc).unwrap();
         assert_eq!(expanded.document, doc);
         assert!(expanded.source_paths.is_empty());
+    }
+
+    fn linked(body: &FlowDocumentV2) -> FlowDocumentV2 {
+        linear(vec![(
+            ActionKind::Subflow,
+            json!({
+                "document": body,
+                "library": {"flowId": body.id, "channel": "published"}
+            }),
+        )])
+    }
+
+    #[test]
+    fn publication_refreshes_new_compilation_and_preserves_existing_plan_and_legacy_snapshot() {
+        let mut source = linear(vec![(ActionKind::Wait, json!({"durationMs":100}))]);
+        source.revision = 1;
+        let parent = linked(&source);
+        let legacy = linear(vec![(ActionKind::Subflow, json!({"document":source}))]);
+        let catalog = riviu_core::release_one_catalog();
+        let initial = crate::compile_flow(&parent, &catalog).unwrap();
+        let original_json = initial.canonical_json.clone();
+        let legacy_json = serde_json::to_string(&legacy).unwrap();
+        source.revision = 2;
+        source.nodes[1].config = json!({"durationMs":250});
+        let publications = BTreeMap::from([(source.id, source.clone())]);
+        let resolved = resolve_published_composition(&parent, &publications).unwrap();
+        assert_eq!(resolved.nodes[1].config["document"]["revision"], 2);
+        assert_eq!(parent.nodes[1].config["document"]["revision"], 1);
+        assert!(resolved.nodes[1].config.get("library").is_some());
+        let updated = crate::compile_flow(&resolved, &catalog).unwrap();
+        assert_ne!(initial.sha256, updated.sha256);
+        assert_eq!(initial.canonical_json, original_json);
+        assert!(updated
+            .plan
+            .source_paths
+            .values()
+            .all(|path| path.path[0].revision == 2));
+        let frozen = resolve_published_composition(&legacy, &publications).unwrap();
+        assert_eq!(serde_json::to_string(&frozen).unwrap(), legacy_json);
+        assert_eq!(
+            crate::compile_flow(&legacy, &catalog).unwrap().sha256,
+            crate::compile_flow(&frozen, &catalog).unwrap().sha256
+        );
+    }
+
+    #[test]
+    fn reference_scan_finds_transitive_published_links_without_runtime_state() {
+        let mut leaf = linear(vec![(ActionKind::Wait, json!({"durationMs": 1}))]);
+        leaf.revision = 1;
+        let mut middle = linked(&leaf);
+        middle.revision = 2;
+        let parent = linked(&middle);
+        assert_eq!(
+            published_composition_references(&parent).unwrap(),
+            BTreeSet::from([leaf.id, middle.id])
+        );
+    }
+
+    #[test]
+    fn one_publication_snapshot_resolves_all_occurrences_and_transitive_references() {
+        let mut leaf = linear(vec![(ActionKind::Wait, json!({"durationMs":1}))]);
+        leaf.revision = 3;
+        let mut middle = linked(&leaf);
+        middle.revision = 2;
+        let parent = linear(vec![
+            (
+                ActionKind::Subflow,
+                json!({"document":middle,"library":{"flowId":middle.id,"channel":"published"}}),
+            ),
+            (
+                ActionKind::Repeat,
+                json!({"document":leaf,"library":{"flowId":leaf.id,"channel":"published"},"count":2}),
+            ),
+        ]);
+        leaf.revision = 4;
+        let resolved = resolve_published_composition(
+            &parent,
+            &BTreeMap::from([(leaf.id, leaf.clone()), (middle.id, middle)]),
+        )
+        .unwrap();
+        assert_eq!(
+            resolved.nodes[1].config["document"]["nodes"][1]["config"]["document"]["revision"],
+            4
+        );
+        assert_eq!(resolved.nodes[2].config["document"]["revision"], 4);
+        crate::compile_flow(&resolved, &riviu_core::release_one_catalog()).unwrap();
+    }
+
+    #[test]
+    fn missing_or_archived_publication_does_not_fall_back_and_cycles_fail_before_execution() {
+        let mut source = linear(vec![(ActionKind::Wait, json!({"durationMs":1}))]);
+        source.revision = 1;
+        let parent = linked(&source);
+        assert_eq!(
+            resolve_published_composition(&parent, &BTreeMap::new()).unwrap_err()[0].code,
+            "CompositionLibraryUnavailable"
+        );
+        let mut recursive = linked(&source);
+        recursive.id = source.id;
+        recursive.revision = 2;
+        assert_eq!(
+            resolve_published_composition(&parent, &BTreeMap::from([(source.id, recursive)]))
+                .unwrap_err()[0]
+                .code,
+            "CompositionLibraryCycle"
+        );
+        let mut wrong = source.clone();
+        wrong.id = Uuid::new_v4();
+        assert_eq!(
+            resolve_published_composition(&parent, &BTreeMap::from([(source.id, wrong)]))
+                .unwrap_err()[0]
+                .code,
+            "CompositionLibraryIdentity"
+        );
+    }
+
+    #[test]
+    fn library_config_rejects_unsupported_channels_and_mismatched_preview() {
+        let mut source = linear(vec![(ActionKind::Wait, json!({"durationMs":1}))]);
+        source.revision = 1;
+        let mut parent = linked(&source);
+        parent.nodes[1].config["library"]["channel"] = "latestDraft".into();
+        assert_eq!(
+            code(expand_composition(&parent)),
+            "CompositionConfigInvalid"
+        );
+        parent.nodes[1].config["library"]["channel"] = "published".into();
+        parent.nodes[1].config["library"]["flowId"] = Uuid::new_v4().to_string().into();
+        assert_eq!(
+            code(expand_composition(&parent)),
+            "CompositionLibraryIdentity"
+        );
     }
 
     #[test]

@@ -2,6 +2,39 @@ use super::super::publish_pipeline::tests::fixture;
 use super::*;
 
 #[test]
+fn transient_transfer_failure_is_requeued_without_touching_sibling_publications() {
+    let (db, _, campaign, assignments) = fixture();
+    db.claim_publish_pipeline(&campaign).unwrap().unwrap();
+    let job = db.pending_publish_dispatch(10).unwrap().remove(0);
+    assert!(db.claim_publish_dispatch(&job, 0).unwrap());
+    assert!(db
+        .finish_publish_dispatch(&job, Some("adb: connection reset"))
+        .unwrap());
+    let conn = db.conn().unwrap();
+    let state: String = conn
+        .query_row(
+            "SELECT state FROM publish_dispatch_jobs WHERE assignment_id=?1",
+            [&job.assignment_id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        state, "queued",
+        "transient pre-Post work must be retried by the durable dispatcher"
+    );
+    for a in assignments.iter().filter(|a| a.id != job.assignment_id) {
+        let intent: Option<String> = conn
+            .query_row(
+                "SELECT effect_intent FROM publish_assignments WHERE id=?1",
+                [&a.id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(intent.is_none());
+    }
+}
+
+#[test]
 fn explicit_failed_assignment_retry_preserves_identity_and_leaves_all_siblings_untouched() {
     let (db, _, campaign, assignments) = fixture();
     let prior_run = db.claim_publish_pipeline(&campaign).unwrap().unwrap();
@@ -241,6 +274,27 @@ fn schedule_expires_only_before_first_admission_and_never_replays_effect() {
             .unwrap(),
         2
     );
+}
+
+#[test]
+fn acceptance_deadline_settlement_does_not_touch_out_of_scope_schedules() {
+    let (db, _, campaign, _) = fixture();
+    db.claim_publish_pipeline(&campaign).unwrap().unwrap();
+    db.conn()
+        .unwrap()
+        .execute("UPDATE publish_dispatch_jobs SET deadline_ms=30000", [])
+        .unwrap();
+    db.expire_publish_dispatch_for_campaign(30001, "different-campaign")
+        .unwrap();
+    assert_eq!(db.pending_publish_dispatch(10).unwrap().len(), 3);
+    db.expire_publish_dispatch_for_campaign(30001, &campaign)
+        .unwrap();
+    assert!(db.pending_publish_dispatch(10).unwrap().is_empty());
+    let detail = db.get_publish_campaign(&campaign).unwrap().unwrap();
+    assert!(detail
+        .assignments
+        .iter()
+        .all(|a| a.state == crate::PublishCampaignState::Missed && a.effect_intent.is_none()));
 }
 
 #[test]

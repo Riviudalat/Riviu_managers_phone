@@ -24,6 +24,9 @@ fn require_assigned_account(
 }
 
 impl Database {
+    pub fn publish_campaign_has_account_reservation(&self, campaign: &str) -> anyhow::Result<bool> {
+        Ok(self.conn()?.query_row("SELECT EXISTS(SELECT 1 FROM publish_account_reservations r JOIN publish_assignments a ON a.id=r.assignment_id WHERE a.campaign_id=?1)", [campaign], |r| r.get(0))?)
+    }
     /// Reserve across every device and both TikTok packages. No clock expiry after dispatch.
     pub fn reserve_publish_account(&self, assignment: &str, account: &str) -> anyhow::Result<()> {
         let account = normalize_publish_account(account)?;

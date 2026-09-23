@@ -308,6 +308,11 @@
   color: var(--text-2);
 }
 
+.device-app-choice { display: grid; gap: var(--space-2); margin-bottom: var(--space-3); }
+.device-app-choice fieldset { display: grid; gap: var(--space-2); padding: var(--space-3); border: 1px solid var(--line); border-radius: var(--radius-sm); }
+.device-app-choice label { display: grid; grid-template-columns: auto 1fr; column-gap: var(--space-2); align-items: center; }
+.device-app-choice label small { grid-column: 2; overflow-wrap: anywhere; }
+
 /* The phone's own filesystem (xiaowei "Preview Mobile Files"). Wide, because a listing has
    four columns and a filename on this fleet can be sixty characters of Vietnamese. */
 .device-files {
@@ -517,6 +522,11 @@
   width: min(760px, calc(100vw - 3rem));
   max-height: calc(100dvh - 3rem);
 }
+
+.device-app-choice { display: grid; gap: var(--space-2); margin-bottom: var(--space-3); }
+.device-app-choice fieldset { display: grid; gap: var(--space-2); padding: var(--space-3); border: 1px solid var(--line); border-radius: var(--radius-sm); }
+.device-app-choice label { display: grid; grid-template-columns: auto 1fr; column-gap: var(--space-2); align-items: center; }
+.device-app-choice label small { grid-column: 2; overflow-wrap: anywhere; }
 .group-tools-layer[hidden] { display: none; }
 .macro-recording-bar {
   display: flex;

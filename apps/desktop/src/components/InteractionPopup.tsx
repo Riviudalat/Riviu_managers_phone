@@ -13,6 +13,7 @@ import {
   interactionPreviewThread,
   interactionResolveLinks,
   interactionStartThread,
+  operationPrepareDevices,
   interactionMeasurePost,
 } from "../api";
 import { describeError } from "../describeError";
@@ -168,7 +169,17 @@ export function InteractionPopup({
   );
 
   const [tab, setTab] = useState<AutomationMode>("setup");
-  const [restoredDraft] = useState(() => readFormDraft("interaction", value => restoreFormShape(value, DEFAULT_DRAFT)));
+  const [restoredDraft] = useState(() => readFormDraft("interaction", value => {
+    const draft=restoreFormShape(value,DEFAULT_DRAFT);
+    if(value && typeof value==='object' && 'seeding' in value && value.seeding && typeof value.seeding==='object') {
+      const s=value.seeding as InteractionDraft['seeding'];
+      if(s && [s.standaloneCount,s.likeCount,s.saveCount,s.shareCount,s.seed].every(Number.isSafeInteger)
+        && Array.isArray(s.preferredActors)&&s.preferredActors.every(a=>typeof a==='string')
+        && s.watchSeconds&&s.commentGapSeconds&&s.comments&&typeof s.comments==='object'
+        && Object.values(s.comments).every(v=>Array.isArray(v)&&v.every(t=>typeof t==='string'))) draft.seeding=s;
+    }
+    return draft;
+  }));
   const [draft, setDraft] = useState<InteractionDraft>(restoredDraft ?? DEFAULT_DRAFT);
   const [edited, setEdited] = useState(false);
   const [baseline, setBaseline] = useState({ draft: DEFAULT_DRAFT, targetRef });
@@ -629,6 +640,8 @@ export function InteractionPopup({
           return;
         }
       }
+      await operationPrepareDevices(effectiveActors);
+      if (latestRunRevision.current !== runRevision) return;
       const result = await interactionStartThread(
         buildRequest(draft, {
           requestId: requestIdRef.current,

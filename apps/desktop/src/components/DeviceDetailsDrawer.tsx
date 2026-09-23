@@ -1,8 +1,8 @@
 import { X } from "lucide-react";
 import { useState } from "react";
-import { deviceActionCapabilities } from "../api";
+import { deviceActionCapabilities, deviceAppCandidates, deviceAppSelect } from "../api";
 import { describeError } from "../describeError";
-import type { DeviceActionCapabilities } from "../generated-ipc";
+import type { DeviceActionCapabilities, DeviceAppChoices } from "../generated-ipc";
 import { useModalFocus } from "./useModalFocus";
 import { StatusChip } from "./WorkspacePrimitives";
 
@@ -27,11 +27,30 @@ export function DeviceDetailsDrawer({
   const [capabilities, setCapabilities] = useState<DeviceActionCapabilities | null>(null);
   const [capabilityError, setCapabilityError] = useState<string | null>(null);
   const [checking, setChecking] = useState(false);
+  const [apps, setApps] = useState<DeviceAppChoices | null>(null);
+  const [appError, setAppError] = useState<string | null>(null);
+  const [savingApp, setSavingApp] = useState(false);
   const readCapabilities = async () => {
     setChecking(true); setCapabilityError(null);
     try { setCapabilities(await deviceActionCapabilities(device.udid)); }
     catch (error) { setCapabilityError(describeError(error)); }
     finally { setChecking(false); }
+  };
+  const readApps = async () => {
+    setSavingApp(true); setAppError(null);
+    try { setApps(await deviceAppCandidates(device.udid)); }
+    catch (error) { setAppError(describeError(error)); }
+    finally { setSavingApp(false); }
+  };
+  const selectApp = async (packageName: string) => {
+    if (!apps) return;
+    setSavingApp(true); setAppError(null);
+    try {
+      const selected = await deviceAppSelect(device.udid, packageName, apps.revision);
+      setApps(selected);
+      setCapabilities(null);
+    } catch (error) { setAppError(describeError(error)); }
+    finally { setSavingApp(false); }
   };
   const stateLabels = { measured: "Đã đo", runtimeProofRequired: "Cần chứng minh trong phiên", unsupported: "Chưa hỗ trợ", deviceNotReady: "Máy chưa sẵn sàng" };
   const actionLabels: Record<string, string> = { feed: "Lướt feed", search: "Tìm kiếm", photo: "Đăng ảnh", video: "Đăng video", sound: "Chọn nhạc", like: "Thích", save: "Lưu", follow: "Theo dõi tài khoản đích", feedFollow: "Theo dõi trong Nuôi", mentionReply: "Trả lời và tag" };
@@ -86,6 +105,21 @@ export function DeviceDetailsDrawer({
         </section>
         <section className="device-detail-evidence" aria-label="Khả năng thiết bị">
           <h3>Khả năng thiết bị</h3>
+          {device.platform === "android" && <div className="device-app-choice">
+            <button type="button" disabled={savingApp || currentOwner !== null} onClick={() => void readApps()}>{savingApp ? "Đang đọc…" : "Chọn ứng dụng TikTok"}</button>
+            {appError && <p role="alert">{appError}</p>}
+            {apps?.udid === device.udid && <>
+              {apps.reason && <p>{apps.reason}</p>}
+              <fieldset disabled={savingApp || currentOwner !== null}>
+                <legend>Ứng dụng dùng cho máy này</legend>
+                {apps.installedPackages.map(packageName => <label key={packageName}>
+                  <input type="radio" name={`device-app-${device.udid}`} checked={apps.selectionValid && apps.selectedPackage === packageName} onChange={() => void selectApp(packageName)}/>
+                  <span>{packageName === "com.zhiliaoapp.musically" ? "TikTok Global" : packageName === "com.ss.android.ugc.trill" ? "TikTok Trill" : packageName}</span>
+                  <small className="mono">{packageName}</small>
+                </label>)}
+              </fieldset>
+            </>}
+          </div>}
           <button type="button" disabled={checking} onClick={() => void readCapabilities()}>{checking ? "Đang đọc…" : "Kiểm tra khả năng"}</button>
           {capabilityError && <p role="alert">{capabilityError}</p>}
           {capabilities?.udid === device.udid && <>

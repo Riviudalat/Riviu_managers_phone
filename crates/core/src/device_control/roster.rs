@@ -77,8 +77,9 @@ impl DeviceControlPlane {
     }
     /// Which TikTok build this device can be driven against.
     pub async fn resolve_tiktok_package(&self, udid: &str) -> Result<String, DeviceControlError> {
+        let preferred = self.selected_app_package(udid, "tiktok").await?;
         self.driver
-            .resolve_tiktok_package(udid)
+            .resolve_tiktok_package_with_preference(udid, preferred.as_deref())
             .await
             .map_err(|error| driver_error(udid, "resolveTikTokPackage", error))
     }
@@ -90,8 +91,9 @@ impl DeviceControlPlane {
         &self,
         udid: &str,
     ) -> Result<(String, String, String), DeviceControlError> {
+        let preferred = self.selected_app_package(udid, "tiktok").await?;
         self.driver
-            .tiktok_build(udid)
+            .tiktok_build_with_preference(udid, preferred.as_deref())
             .await
             .map_err(|error| driver_error(udid, "tiktokBuild", error))
     }

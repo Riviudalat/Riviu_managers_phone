@@ -9,6 +9,7 @@ import { activeRun, compactLogEntries, deviceRows, deviceStateCounts, issueState
 import { useMonitorRead } from "./useMonitorRead";
 import { deviceProgress } from "../../nurtureProgress";
 import { useMediaQuery } from "../../useMediaQuery";
+import { PublishDeviceRecovery } from "./PublishDeviceRecovery";
 
 export function MonitorReadError({ message, retry }: { message: string; retry: () => void }) {
   return <div className="run-monitor-error" role="alert"><span>{message}</span><button type="button" onClick={retry}><RefreshCw size={14} /> Thử lại</button></div>;
@@ -122,13 +123,13 @@ export function OperationRunDevices({ run, labels, sessions, compact = false }: 
             const status = sessions.find((session) => session.runId === run.sourceId && session.udid === row.udid);
             const fraction = status && activeRun(row) ? Math.min(.99, deviceProgress(status) ?? 0) : row.fraction;
             const Icon = row.state === "succeeded" ? CheckCircle2 : issueState(row.state) ? CircleAlert : Clock3;
-            return <button key={row.udid} type="button" className="run-device-row" aria-pressed={selected === row.udid} title={row.label} onClick={() => {
+            return <div key={row.udid}><button type="button" className="run-device-row" aria-pressed={selected === row.udid} title={row.label} onClick={() => {
               if (selected !== row.udid) { setSelected(row.udid); setTab("log"); }
             }}>
               <Icon size={16} className={row.state === "succeeded" ? "run-success" : issueState(row.state) ? "run-attention" : "run-state"} aria-hidden="true" />
               <span className="run-device-copy"><strong>{row.name}</strong><small>{row.reviewPublish ? "Cần kiểm tra bài đăng" : row.pendingPublish ? "Chờ xác minh bài đăng" : RUN_STATE_LABEL[row.state]}</small></span>
               {activeRun(row) && <span className="run-percent">{progressLabel(fraction)}</span>}
-            </button>;
+            </button>{run.kind==="publish"&&row.udid&&<PublishDeviceRecovery campaignId={run.sourceId} udid={row.udid}/>}</div>;
           })}
         </div>
       </aside>
@@ -137,6 +138,7 @@ export function OperationRunDevices({ run, labels, sessions, compact = false }: 
           <div className="run-inspector-top"><header className="run-device-heading">{singlePane && <button ref={backRef} type="button" className="icon-btn" onClick={showDevices} title="Về danh sách máy" aria-label="Về danh sách máy"><ArrowLeft size={18} /></button>}<div><strong title={selectedRow.label}>{selectedRow.name}</strong>{!compact && selectedRow.model && <small>{selectedRow.model}</small>}</div>
             <StatusChip tone={issueState(selectedRow.state) ? "warning" : selectedRow.state === "succeeded" ? "success" : "neutral"}>{selectedRow.reviewPublish ? "Cần kiểm tra bài đăng" : selectedRow.pendingPublish ? "Chờ xác minh bài đăng" : RUN_STATE_LABEL[selectedRow.state]}</StatusChip>
           </header>
+          {run.kind==="publish"&&selectedRow.udid&&<PublishDeviceRecovery campaignId={run.sourceId} udid={selectedRow.udid}/>}
           <WorkspaceTabs label="Chi tiết hoạt động máy" tabs={tabs} value={tab} onChange={setTab} /></div>
           <Activity mode={tab === "log" ? "visible" : "hidden"}><div role="tabpanel" aria-label="Nhật ký" id={`${panelId}-log`} className="run-timeline-panel">{selectedRow.udid ? <DeviceTimeline key={`${run.id}:${selectedRow.udid}`} operationId={run.id} udid={selectedRow.udid} /> : <p className="run-monitor-empty">Nguồn chưa ghi nhật ký theo máy.</p>}</div></Activity>
           {tab === "evidence" && <div role="tabpanel" aria-label="Bằng chứng" id={`${panelId}-evidence`} className="run-evidence-scroll"><ul className="run-item-statuses">

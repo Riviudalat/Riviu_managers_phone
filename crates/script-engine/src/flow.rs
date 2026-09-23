@@ -743,7 +743,9 @@ fn compile_config(kind: ActionKind, value: &Value) -> Result<CompiledActionConfi
                     selector
                         .validate()
                         .map_err(|e| ConfigError::invalid(e.to_string()))?;
-                    CompiledTapTarget::Element { selector }
+                    CompiledTapTarget::Element {
+                        selector: Box::new(selector),
+                    }
                 }
                 _ => {
                     return Err(ConfigError::invalid(

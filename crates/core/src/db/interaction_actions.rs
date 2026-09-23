@@ -24,6 +24,7 @@ fn action_kind_from_label(
         "save" => Ok(crate::interaction::InteractionActionKind::Save),
         "comment" => Ok(crate::interaction::InteractionActionKind::Comment),
         "follow" => Ok(crate::interaction::InteractionActionKind::Follow),
+        "share" => Ok(crate::interaction::InteractionActionKind::Share),
         _ => Err(rusqlite::Error::InvalidQuery),
     }
 }
@@ -85,6 +86,55 @@ pub(super) fn insert_interaction_action_runs(
 }
 
 impl Database {
+    /// A transactionally claimed candidate reserves one budget slot before any device
+    /// observation. Confirmed/armed/uncertain actions retain their slots after restart.
+    pub fn claim_seeding_action(
+        &self,
+        assignment_id: &str,
+        kind: crate::InteractionActionKind,
+        quota: u8,
+    ) -> anyhow::Result<bool> {
+        let mut conn = self.conn()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let (campaign, target, actor): (String, String, String) = tx.query_row(
+            "SELECT campaign_id,target_id,actor_udid FROM interaction_assignments WHERE id=?1",
+            [assignment_id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )?;
+        let state: Option<String> = tx
+            .query_row(
+                "SELECT state FROM tiktok_action_runs WHERE assignment_id=?1 AND action_kind=?2",
+                params![assignment_id, kind.as_str()],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if state
+            .as_deref()
+            .is_some_and(|s| !matches!(s, "planned" | "failed_before_effect"))
+        {
+            tx.commit()?;
+            return Ok(true);
+        }
+        let used:i64=tx.query_row("SELECT COUNT(*) FROM tiktok_action_runs r JOIN interaction_assignments a ON a.id=r.assignment_id WHERE a.campaign_id=?1 AND a.target_id=?2 AND r.action_kind=?3 AND (r.state IN ('preparing','armed','confirmed','uncertain') OR (r.action_kind='share' AND json_extract(r.evidence_json,'$.verdict')='noFriends'))",params![campaign,target,kind.as_str()],|r|r.get(0))?;
+        let prior:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM tiktok_action_runs r JOIN interaction_assignments a ON a.id=r.assignment_id WHERE a.campaign_id=?1 AND a.target_id=?2 AND a.actor_udid=?3 AND r.action_kind=?4 AND a.id<>?5 AND r.state NOT IN ('planned','failed_before_effect'))",params![campaign,target,actor,kind.as_str(),assignment_id],|r|r.get(0))?;
+        if prior || used >= i64::from(quota) {
+            tx.execute("UPDATE tiktok_action_runs SET state='no_op',evidence_json='{}',error_code='quotaSatisfied',revision=revision+1,updated_at=?3 WHERE assignment_id=?1 AND action_kind=?2 AND state IN ('planned','failed_before_effect')",params![assignment_id,kind.as_str(),Utc::now().to_rfc3339()])?;
+            tx.commit()?;
+            return Ok(false);
+        }
+        // Reservation is the existing action claim; the executor reuses this revision.
+        tx.execute("UPDATE tiktok_action_runs SET state='preparing',revision=revision+1,updated_at=?3 WHERE assignment_id=?1 AND action_kind=?2 AND state IN ('planned','failed_before_effect')",params![assignment_id,kind.as_str(),Utc::now().to_rfc3339()])?;
+        tx.commit()?;
+        Ok(true)
+    }
+
+    pub fn seeding_action_revision(
+        &self,
+        assignment_id: &str,
+        kind: crate::InteractionActionKind,
+    ) -> anyhow::Result<Option<i64>> {
+        Ok(self.conn()?.query_row("SELECT r.revision FROM tiktok_action_runs r JOIN interaction_assignments a ON a.id=r.assignment_id JOIN interaction_campaigns c ON c.id=a.campaign_id WHERE r.assignment_id=?1 AND r.action_kind=?2 AND r.state='preparing' AND c.state='running' AND json_type(c.request_json,'$.seeding')='object'",params![assignment_id,kind.as_str()],|r|r.get(0)).optional()?)
+    }
     /// Only the live Save caller can prove that its cancellation gate returned
     /// before dispatch. Startup recovery must keep an armed intent uncertain.
     pub fn cancel_armed_nurture_save(
@@ -536,6 +586,7 @@ mod tests {
 
     fn request(actions: InteractionActionSet) -> ThreadCampaignRequest {
         ThreadCampaignRequest {
+            seeding: None,
             scripted_conversation: None,
             request_id: "action-ledger-1".into(),
             targets: vec![ResolvedTikTokTarget {
@@ -575,9 +626,102 @@ mod tests {
     }
 
     #[test]
+    fn seeding_40_20_and_replacement_preserve_budget_after_restart() {
+        let (db, path) = fixture();
+        let mut req = request(InteractionActionSet {
+            like: true,
+            save: false,
+            share: false,
+            follow: false,
+            comment: true,
+        });
+        req.actor_udids = (1..=5).map(|i| format!("phone-{i}")).collect();
+        req.message_count = 40;
+        req.seeding = Some(crate::seeding::SeedingConfig {
+            standalone_count: 20,
+            like_count: 1,
+            save_count: 0,
+            share_count: 0,
+            seed: 7,
+            preferred_actors: vec![],
+            expected_accounts: Default::default(),
+            watch_seconds: crate::seeding::SecondsRange { min: 5, max: 15 },
+            comment_gap_seconds: crate::seeding::SecondsRange { min: 20, max: 45 },
+            comments: std::collections::BTreeMap::from([(
+                "content:123".into(),
+                (0..40).map(|i| format!("Câu {i}")).collect(),
+            )]),
+        });
+        let plan = plan_threads(&req).unwrap();
+        assert_eq!(plan.assignments.len(), 45);
+        assert_eq!(
+            plan.assignments
+                .iter()
+                .skip(5)
+                .filter(|a| a.parent_ordinal.is_none())
+                .count(),
+            22
+        );
+        let campaign = db.create_interaction_campaign(&req, &plan).unwrap();
+        let detail = db.get_interaction_campaign(&campaign).unwrap().unwrap();
+        let a = &detail.assignments[0].id;
+        start_assignment(&db, &campaign, a);
+        assert!(db
+            .claim_seeding_action(a, InteractionActionKind::Like, 1)
+            .unwrap());
+        let b = &detail.assignments[1].id;
+        start_assignment(&db, &campaign, b);
+        let revision = db
+            .seeding_action_revision(a, InteractionActionKind::Like)
+            .unwrap()
+            .unwrap();
+        assert!(db
+            .settle_interaction_action(
+                a,
+                InteractionActionKind::Like,
+                revision,
+                InteractionActionState::NoOp,
+                Some(r#"{"verdict":"alreadyLiked"}"#),
+                None
+            )
+            .unwrap());
+        assert!(db
+            .claim_seeding_action(b, InteractionActionKind::Like, 1)
+            .unwrap());
+        let revision = db
+            .seeding_action_revision(b, InteractionActionKind::Like)
+            .unwrap()
+            .unwrap();
+        let armed = db
+            .arm_interaction_action(b, InteractionActionKind::Like, revision, "like")
+            .unwrap()
+            .unwrap();
+        assert!(db
+            .settle_interaction_action(
+                b,
+                InteractionActionKind::Like,
+                armed,
+                InteractionActionState::Uncertain,
+                Some("{}"),
+                None
+            )
+            .unwrap());
+        drop(db);
+        let db = Database::open(&path).unwrap();
+        let c = &detail.assignments[2].id;
+        start_assignment(&db, &campaign, c);
+        assert!(!db
+            .claim_seeding_action(c, InteractionActionKind::Like, 1)
+            .unwrap());
+        drop(db);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
     fn campaign_creation_persists_only_the_requested_actions_per_assignment() {
         let (db, path) = fixture();
         let request = request(InteractionActionSet {
+            share: false,
             follow: false,
             like: true,
             comment: false,
@@ -624,6 +768,7 @@ mod tests {
         for mask in 1_u8..=7 {
             let (db, path) = fixture();
             let actions = InteractionActionSet {
+                share: false,
                 follow: false,
                 like: mask & 0b001 != 0,
                 comment: mask & 0b010 != 0,
@@ -670,6 +815,7 @@ mod tests {
     fn typed_cleanup_uncertainty_is_durable_and_not_retryable() {
         let (db, path) = fixture();
         let request = request(InteractionActionSet {
+            share: false,
             follow: false,
             like: false,
             comment: true,
@@ -732,6 +878,7 @@ mod tests {
     fn action_claim_arm_and_settle_are_revision_guarded_and_one_shot() {
         let (db, path) = fixture();
         let request = request(InteractionActionSet {
+            share: false,
             follow: false,
             like: false,
             comment: false,
@@ -820,6 +967,7 @@ mod tests {
     fn action_claim_and_arm_require_a_running_campaign_and_preparing_assignment() {
         let (db, path) = fixture();
         let request = request(InteractionActionSet {
+            share: false,
             follow: false,
             like: false,
             comment: false,
@@ -884,6 +1032,7 @@ mod tests {
 
         let (db, path) = fixture();
         let request = request(InteractionActionSet {
+            share: false,
             follow: false,
             like: true,
             comment: false,
@@ -980,6 +1129,7 @@ mod tests {
         let (db, path) = fixture();
 
         let terminal_first = request(InteractionActionSet {
+            share: false,
             follow: false,
             like: true,
             comment: false,
@@ -1053,6 +1203,7 @@ mod tests {
     fn cancel_keeps_an_armed_action_and_its_assignment_non_retryable() {
         let (db, path) = fixture();
         let request = request(InteractionActionSet {
+            share: false,
             follow: false,
             like: false,
             comment: false,
@@ -1118,6 +1269,7 @@ mod tests {
     fn comment_effect_boundary_arms_assignment_and_action_in_one_transaction() {
         let (db, path) = fixture();
         let request = request(InteractionActionSet {
+            share: false,
             follow: false,
             like: false,
             comment: true,
@@ -1211,6 +1363,7 @@ mod tests {
     fn each_action_settles_without_erasing_its_siblings() {
         let (db, path) = fixture();
         let request = request(InteractionActionSet {
+            share: false,
             follow: false,
             like: true,
             comment: true,
@@ -1270,6 +1423,7 @@ mod tests {
     fn restart_releases_pre_effect_claims_but_makes_armed_actions_uncertain() {
         let (db, path) = fixture();
         let request = request(InteractionActionSet {
+            share: false,
             follow: false,
             like: true,
             comment: false,

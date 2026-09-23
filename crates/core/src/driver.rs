@@ -343,6 +343,23 @@ pub trait DeviceDriver: Send + Sync {
     async fn resolve_tiktok_package(&self, _udid: &str) -> anyhow::Result<String> {
         Ok(crate::tiktok_target::IOS_TIKTOK_BUNDLE.to_string())
     }
+    /// Resolve TikTok while honoring an operator-persisted package choice.
+    /// Backends with multiple regional builds override this to prove that the
+    /// preferred package is still installed instead of trusting stale storage.
+    async fn resolve_tiktok_package_with_preference(
+        &self,
+        udid: &str,
+        preferred: Option<&str>,
+    ) -> anyhow::Result<String> {
+        let resolved = self.resolve_tiktok_package(udid).await?;
+        if let Some(preferred) = preferred {
+            anyhow::ensure!(
+                resolved == preferred,
+                "selected package {preferred} is not the installed TikTok package {resolved}"
+            );
+        }
+        Ok(resolved)
+    }
     /// The `(package, versionName, locale)` triple a label lookup is keyed by.
     ///
     /// Read from the device rather than assumed, because the catalogue is keyed on all
@@ -357,6 +374,21 @@ pub trait DeviceDriver: Send + Sync {
     /// treat as "unmeasured" — the two are different answers and only the device knows.
     async fn tiktok_build(&self, _udid: &str) -> anyhow::Result<(String, String, String)> {
         anyhow::bail!("backend này không đọc được (gói, versionName, locale) của TikTok")
+    }
+    async fn tiktok_build_with_preference(
+        &self,
+        udid: &str,
+        preferred: Option<&str>,
+    ) -> anyhow::Result<(String, String, String)> {
+        let build = self.tiktok_build(udid).await?;
+        if let Some(preferred) = preferred {
+            anyhow::ensure!(
+                build.0 == preferred,
+                "selected package {preferred} does not match observed package {}",
+                build.0
+            );
+        }
+        Ok(build)
     }
     /// Observe transport conflicts without opening or replacing a UI session.
     async fn verify_automation_transport(&self, _udid: &str) -> anyhow::Result<()> {

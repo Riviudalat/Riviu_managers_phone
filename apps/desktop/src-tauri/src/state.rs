@@ -357,6 +357,7 @@ pub struct AppState {
     pub db: Arc<Database>,
     pub gui_service: Arc<crate::gui_service::GuiService>,
     pub comment_verifications: Option<riviu_core::comment_verification::worker::VerificationWorker>,
+    pub(crate) dev_acceptance: crate::dev_acceptance::DevAcceptancePolicy,
     #[cfg(debug_assertions)]
     ui_smoke: bool,
     pub signing: SigningService,
@@ -415,15 +416,27 @@ impl FlowMutationCoordinator {
         events: &EventBus,
         persist: impl FnOnce() -> Result<(T, FlowId), E>,
     ) -> Result<T, E> {
+        self.synchronize(events, || {
+            persist().map(|(result, flow_id)| (result, Some(flow_id)))
+        })
+    }
+
+    pub(crate) fn synchronize<T, E>(
+        &self,
+        events: &EventBus,
+        persist: impl FnOnce() -> Result<(T, Option<FlowId>), E>,
+    ) -> Result<T, E> {
         let mut revision = self.event_revision.lock();
         let (result, flow_id) = persist()?;
-        *revision = revision
-            .checked_add(1)
-            .expect("Flow invalidation revision overflow");
-        events.emit(AppEvent::FlowUpdated {
-            flow_id,
-            revision: *revision,
-        });
+        if let Some(flow_id) = flow_id {
+            *revision = revision
+                .checked_add(1)
+                .expect("Flow invalidation revision overflow");
+            events.emit(AppEvent::FlowUpdated {
+                flow_id,
+                revision: *revision,
+            });
+        }
         Ok(result)
     }
 }
@@ -827,6 +840,7 @@ impl AppState {
         Ok(Self {
             ui_smoke: true,
             comment_verifications: None,
+            dev_acceptance: crate::dev_acceptance::DevAcceptancePolicy::from_process(),
             registry,
             events,
             control,
@@ -895,6 +909,7 @@ impl AppState {
     }
 
     pub async fn bootstrap(resource_dir: Option<PathBuf>) -> anyhow::Result<Self> {
+        let dev_acceptance = crate::dev_acceptance::DevAcceptancePolicy::from_process();
         let mock_requested = std::env::var("RIVIU_MOCK_DEVICES")
             .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
             .unwrap_or(false);
@@ -1074,6 +1089,20 @@ impl AppState {
                 .map(|_| ())
                 .map_err(|error| error.to_string())
         }));
+        let binding_db = db.clone();
+        control.set_app_binding_resolver(Arc::new(move |udid, app_key| {
+            let db = binding_db.clone();
+            let udid = udid.to_owned();
+            let app_key = app_key.to_owned();
+            Box::pin(async move {
+                db.storage_read(move |db| {
+                    db.device_app_binding(&udid, &app_key)
+                        .map(|binding| binding.map(|row| row.package))
+                })
+                .await
+                .map_err(|error| error.to_string())
+            })
+        }));
         control.set_clean_start_guard(Arc::new(move |udid| {
             match publish_guard_db.has_pending_publish_for_device(udid) {
                 Ok(false) => Ok(()),
@@ -1144,7 +1173,11 @@ impl AppState {
             frames: Arc::new(ios.streams.clone()),
             artifacts: flow_artifacts.clone(),
         });
-        flows.recover_startup().await?;
+        if dev_acceptance.active() {
+            flows.defer_startup_recovery()?;
+        } else {
+            flows.recover_startup().await?;
+        }
         // Interaction workers are `tokio::spawn`s inside this process. Durable orchestration
         // attempts and schedule occurrences are excluded here and restart their exact child;
         // detached/manual campaigns cannot resume and are closed so they do not remain stuck
@@ -1178,19 +1211,21 @@ impl AppState {
             ),
             Err(error) => log::warn!("không dọn được chiến dịch đăng bài dở: {error:#}"),
         }
-        match db.list_orphaned_nurture_statuses() {
-            Ok(orphaned) => {
-                for status in orphaned {
-                    let recovered = nurture_engine.recover_orphaned_session(status).await;
-                    if let Err(error) = db.append_nurture_status(&recovered) {
-                        log::warn!(
-                            "không lưu được bằng chứng cleanup Nuôi sau khởi động lại cho {}: {error:#}",
-                            recovered.udid
-                        );
+        if !dev_acceptance.automatic_device_workers_frozen() {
+            match db.list_orphaned_nurture_statuses() {
+                Ok(orphaned) => {
+                    for status in orphaned {
+                        let recovered = nurture_engine.recover_orphaned_session(status).await;
+                        if let Err(error) = db.append_nurture_status(&recovered) {
+                            log::warn!(
+                                "không lưu được bằng chứng cleanup Nuôi sau khởi động lại cho {}: {error:#}",
+                                recovered.udid
+                            );
+                        }
                     }
                 }
+                Err(error) => log::warn!("không đọc được phiên Nuôi cần cleanup: {error:#}"),
             }
-            Err(error) => log::warn!("không đọc được phiên Nuôi cần cleanup: {error:#}"),
         }
         // Catch action rows whose session status had already reached a terminal event before
         // the process died. Admission is still closed here, so no live worker can cross the
@@ -1226,14 +1261,15 @@ impl AppState {
         let state = Self {
             #[cfg(debug_assertions)]
             ui_smoke: false,
-            comment_verifications: Some(
+            comment_verifications: (!dev_acceptance.automatic_device_workers_frozen()).then(|| {
                 riviu_core::comment_verification::worker::VerificationWorker::start(
                     db.clone(),
                     control.clone(),
                     events.clone(),
                     artifacts_dir.clone(),
-                ),
-            ),
+                )
+            }),
+            dev_acceptance,
             registry,
             events,
             control,
@@ -1530,15 +1566,13 @@ impl AppState {
         if self.is_ui_smoke() {
             return;
         }
-        crate::phone_app_completion::spawn(
-            self.control.clone(),
-            self.db.clone(),
-            self.command_admission.clone(),
-            self.background_stop.clone(),
-        );
-        if !(cfg!(debug_assertions)
-            && std::env::var("RIVIU_DEV_MANUAL_ACCEPTANCE").as_deref() == Ok("1"))
-        {
+        if !self.dev_acceptance.automatic_device_workers_frozen() {
+            crate::phone_app_completion::spawn(
+                self.control.clone(),
+                self.db.clone(),
+                self.command_admission.clone(),
+                self.background_stop.clone(),
+            );
             crate::orchestration_commands::resume_orchestration_runs(app.clone(), self);
         }
         crate::orchestration_commands::start_automation_schedule_runner(app.clone(), self);
@@ -1553,6 +1587,7 @@ impl AppState {
             let registry = self.registry.clone();
             let admission = self.command_admission.clone();
             let stop = self.background_stop.clone();
+            let acceptance = self.dev_acceptance.clone();
             tauri::async_runtime::spawn(async move {
                 let mut interval = tokio::time::interval(Duration::from_secs(30));
                 interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -1576,18 +1611,20 @@ impl AppState {
                         while queue.next().await.is_some() {}
                         break;
                     }
-                    match db.expire_current_publish_verifications() {
-                        Ok(campaigns) => {
-                            for campaign_id in campaigns {
-                                events.emit(riviu_core::events::AppEvent::PublishUpdated {
-                                    revision: db
-                                        .publish_campaign_revision(&campaign_id)
-                                        .unwrap_or_default(),
-                                    campaign_id,
-                                });
+                    if !acceptance.active() {
+                        match db.expire_current_publish_verifications() {
+                            Ok(campaigns) => {
+                                for campaign_id in campaigns {
+                                    events.emit(riviu_core::events::AppEvent::PublishUpdated {
+                                        revision: db
+                                            .publish_campaign_revision(&campaign_id)
+                                            .unwrap_or_default(),
+                                        campaign_id,
+                                    });
+                                }
                             }
+                            Err(error) => log::warn!("publish verification deadline: {error}"),
                         }
-                        Err(error) => log::warn!("publish verification deadline: {error}"),
                     }
                     let pending = match db.pending_current_publish_verifications(1000) {
                         Ok(rows) => rows,
@@ -1614,6 +1651,13 @@ impl AppState {
                     for row in pending {
                         if stop.load(Ordering::Relaxed) {
                             break;
+                        }
+                        if !acceptance.allows(
+                            crate::dev_acceptance::AcceptanceCapability::PublishVerification,
+                            &row.campaign_id,
+                            &row.udid,
+                        ) {
+                            continue;
                         }
                         if !queue.available(&row.udid)
                             || !registry.get(&row.udid).is_some_and(|device| {
@@ -1643,7 +1687,7 @@ impl AppState {
             });
         }
 
-        {
+        if !self.dev_acceptance.automatic_device_workers_frozen() {
             let (control, db, events, admission, stop) = (
                 self.control.clone(),
                 self.db.clone(),
@@ -1697,16 +1741,18 @@ impl AppState {
                 }
             };
             if let Some(config) = config {
+                let local_api_allowed = !self.dev_acceptance.active();
                 {
                     let mut runtime = self.local_api_runtime.write();
                     runtime.startup = Some(config.clone());
-                    runtime.running = if config.enabled && !config.token.is_empty() {
-                        None
-                    } else {
-                        Some(false)
-                    };
+                    runtime.running =
+                        if local_api_allowed && config.enabled && !config.token.is_empty() {
+                            None
+                        } else {
+                            Some(false)
+                        };
                 }
-                if config.enabled && !config.token.is_empty() {
+                if local_api_allowed && config.enabled && !config.token.is_empty() {
                     let app = app.clone();
                     let runtime = Arc::clone(&self.local_api_runtime);
                     tauri::async_runtime::spawn(async move {
@@ -2011,14 +2057,18 @@ impl AppState {
         let helper_android = self.android.clone();
         let helper_admission = self.command_admission.clone();
         let helper_db = self.db.clone();
+        let automatic_device_workers_frozen = self.dev_acceptance.automatic_device_workers_frozen();
         tauri::async_runtime::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_millis(250));
             let mut last_scan = Instant::now() - Duration::from_secs(3);
             let mut sampler =
                 BackgroundStreamSampler::new(control.clone(), streams, registry.clone());
-            let mut helper_setup = helper_android.map(|android| {
-                AndroidHelperSetup::new(control.clone(), android, helper_admission, helper_db)
-            });
+            let mut helper_setup = (!automatic_device_workers_frozen)
+                .then_some(helper_android)
+                .flatten()
+                .map(|android| {
+                    AndroidHelperSetup::new(control.clone(), android, helper_admission, helper_db)
+                });
             loop {
                 interval.tick().await;
                 if background_stop.load(Ordering::Acquire) {
@@ -2203,26 +2253,27 @@ impl AppState {
         // Idle popup sweep. Clears TikTok's onboarding pages and modals off phones nobody
         // is driving — see `crate::idle_sweeper` for why it can never compete with real
         // work, park a stream, or touch a phone that is not in TikTok.
-        tauri::async_runtime::spawn(
-            crate::idle_sweeper::IdleSweeper::new(
-                self.control.clone(),
-                self.registry.clone(),
-                self.nurture.log(),
-            )
-            .run(),
-        );
+        if !self.dev_acceptance.automatic_device_workers_frozen() {
+            tauri::async_runtime::spawn(
+                crate::idle_sweeper::IdleSweeper::new(
+                    self.control.clone(),
+                    self.registry.clone(),
+                    self.nurture.log(),
+                )
+                .run(),
+            );
+        }
 
         // Local schedule runner
         let db = self.db.clone();
         let jobs = self.jobs.clone();
         let command_admission = self.command_admission.clone();
+        let acceptance = self.dev_acceptance.clone();
         tauri::async_runtime::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_secs(30));
             loop {
                 interval.tick().await;
-                if cfg!(debug_assertions)
-                    && std::env::var("RIVIU_DEV_MANUAL_ACCEPTANCE").as_deref() == Ok("1")
-                {
+                if acceptance.schedules_frozen() {
                     continue;
                 }
                 let Ok(schedules) = db.list_schedules() else {
@@ -2301,55 +2352,81 @@ impl AppState {
         let publish_events = self.events.clone();
         let publish_stop = self.background_stop.clone();
         let publish_started_at = chrono::Local::now().naive_local();
-        tauri::async_runtime::spawn(async move {
-            let mut interval = tokio::time::interval(Duration::from_secs(1));
-            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-            loop {
-                interval.tick().await;
-                if publish_stop.load(Ordering::Acquire) {
-                    break;
-                }
-                if cfg!(debug_assertions)
-                    && std::env::var("RIVIU_DEV_MANUAL_ACCEPTANCE").as_deref() == Ok("1")
-                {
-                    continue;
-                }
-                let Ok(scheduled) = publish_db.scheduled_publish_campaigns() else {
-                    continue;
-                };
-                let now = chrono::Local::now().naive_local();
-                for (id, raw) in scheduled {
-                    let Some(raw) = raw else {
-                        continue;
-                    };
-                    let Ok(at) = chrono::NaiveDateTime::parse_from_str(&raw, "%Y-%m-%dT%H:%M:%S")
-                        .or_else(|_| chrono::NaiveDateTime::parse_from_str(&raw, "%Y-%m-%dT%H:%M"))
-                    else {
-                        continue;
-                    };
-                    if at > now {
+        let publish_acceptance = self.dev_acceptance.clone();
+        {
+            tauri::async_runtime::spawn(async move {
+                let mut interval = tokio::time::interval(Duration::from_secs(1));
+                interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+                loop {
+                    interval.tick().await;
+                    if publish_stop.load(Ordering::Acquire) {
+                        break;
+                    }
+                    if !publish_acceptance
+                        .allows_any(crate::dev_acceptance::AcceptanceCapability::PublishSchedule)
+                    {
                         continue;
                     }
-                    let result = if at < publish_started_at {
-                        publish_db.miss_publish_schedule(&id, &raw, "app_opened_after_deadline")
-                    } else if now.signed_duration_since(at).num_milliseconds() > 30_000 {
-                        publish_db.miss_publish_schedule(&id, &raw, "schedule_capacity_deadline")
-                    } else {
-                        publish_db
-                            .claim_publish_pipeline(&id)
-                            .map(|run| run.is_some())
+                    let Ok(scheduled) = publish_db.scheduled_publish_campaigns() else {
+                        continue;
                     };
-                    if let Err(error) = result {
-                        log::error!("publish schedule {id}: {error:#}");
+                    let now = chrono::Local::now().naive_local();
+                    for (id, raw) in scheduled {
+                        if publish_acceptance.active() {
+                            let Ok(Some(request)) = publish_db.publish_campaign_request(&id) else {
+                                continue;
+                            };
+                            if request.udids.is_empty()
+                                || !request.udids.iter().all(|udid| {
+                                    publish_acceptance.allows(
+                                    crate::dev_acceptance::AcceptanceCapability::PublishSchedule,
+                                    &id,
+                                    udid,
+                                )
+                                })
+                            {
+                                continue;
+                            }
+                        }
+                        let Some(raw) = raw else {
+                            continue;
+                        };
+                        let Ok(at) =
+                            chrono::NaiveDateTime::parse_from_str(&raw, "%Y-%m-%dT%H:%M:%S")
+                                .or_else(|_| {
+                                    chrono::NaiveDateTime::parse_from_str(&raw, "%Y-%m-%dT%H:%M")
+                                })
+                        else {
+                            continue;
+                        };
+                        if at > now {
+                            continue;
+                        }
+                        let result = if at < publish_started_at {
+                            publish_db.miss_publish_schedule(&id, &raw, "app_opened_after_deadline")
+                        } else if now.signed_duration_since(at).num_milliseconds() > 30_000 {
+                            publish_db.miss_publish_schedule(
+                                &id,
+                                &raw,
+                                "schedule_capacity_deadline",
+                            )
+                        } else {
+                            publish_db
+                                .claim_publish_pipeline(&id)
+                                .map(|run| run.is_some())
+                        };
+                        if let Err(error) = result {
+                            log::error!("publish schedule {id}: {error:#}");
+                        }
+                        let _ = crate::publish_commands::reconcile_publish_execution_and_announce(
+                            &publish_db,
+                            &publish_events,
+                            &id,
+                        );
                     }
-                    let _ = crate::publish_commands::reconcile_publish_execution_and_announce(
-                        &publish_db,
-                        &publish_events,
-                        &id,
-                    );
                 }
-            }
-        });
+            });
+        }
         tauri::async_runtime::spawn(crate::publish_commands::pipeline::run_dispatcher(
             self.control.clone(),
             self.db.clone(),
@@ -2358,6 +2435,7 @@ impl AppState {
             self.active_agent_bundle_id.clone(),
             self.command_admission.clone(),
             self.background_stop.clone(),
+            self.dev_acceptance.clone(),
         ));
 
         // Flow orphan sweep. Startup recovery settles what it finds at boot; this loop is
@@ -2368,7 +2446,11 @@ impl AppState {
         // other janitor here uses. `RIVIU_FLOW_SWEEP=off|0|false|no` turns it off — an env
         // switch and not a setting, so it works even when the DB will not open.
         let sweep_flows = self.flows.clone();
+        let acceptance = self.dev_acceptance.clone();
         tauri::async_runtime::spawn(async move {
+            if acceptance.active() {
+                return;
+            }
             let off = std::env::var("RIVIU_FLOW_SWEEP")
                 .map(|value| {
                     matches!(
@@ -2407,6 +2489,7 @@ impl AppState {
             self.db.clone(),
             self.events.clone(),
             self.background_stop.clone(),
+            self.dev_acceptance.clone(),
         ));
 
         // TikTok nurture schedule ticks
@@ -2417,6 +2500,7 @@ impl AppState {
         let app_nurture = app.clone();
         let command_admission = self.command_admission.clone();
         let nurture_control = self.control.clone();
+        let acceptance = self.dev_acceptance.clone();
         tauri::async_runtime::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_secs(30));
             loop {
@@ -2424,9 +2508,7 @@ impl AppState {
                 let Ok(settings) = db.get_nurture_settings() else {
                     continue;
                 };
-                if cfg!(debug_assertions)
-                    && std::env::var("RIVIU_DEV_MANUAL_ACCEPTANCE").as_deref() == Ok("1")
-                {
+                if acceptance.schedules_frozen() {
                     continue;
                 }
                 if !settings.schedule_enabled {
@@ -2848,6 +2930,24 @@ mod tests {
             !scheduler.contains("AppEvent::PublishUpdated"),
             "the scheduler bypasses the save-before-event helper with a raw completion event"
         );
+    }
+
+    #[test]
+    fn manual_acceptance_routes_all_automatic_effects_through_one_policy() {
+        let source = include_str!("state.rs");
+        let production = &source[..source.find("mod tests {").expect("test module")];
+        assert!(production.contains("acceptance.schedules_frozen()"));
+        assert!(production
+            .contains(".allows_any(crate::dev_acceptance::AcceptanceCapability::PublishSchedule)"));
+        assert!(production.contains("publish_acceptance.allows("));
+        assert!(production.contains("dev_acceptance.automatic_device_workers_frozen()"));
+        assert!(production.contains("AcceptanceCapability::PublishVerification"));
+        assert!(production.contains("self.dev_acceptance.clone(),"));
+        assert!(production.contains("flows.defer_startup_recovery()?"));
+        assert!(production.contains("let local_api_allowed = !self.dev_acceptance.active()"));
+        assert!(production.contains("let automatic_device_workers_frozen ="));
+        assert!(production.contains("if acceptance.active() {\n                return;"));
+        assert_eq!(production.matches("RIVIU_DEV_MANUAL_ACCEPTANCE").count(), 0);
     }
 
     use super::*;

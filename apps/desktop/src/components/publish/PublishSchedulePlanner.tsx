@@ -24,6 +24,13 @@ type Props = {
 const emptyDraft = (sourceRoot: string): ScheduleDraft => ({ version: 2, sourceRoot, date: localDateTime(new Date()).slice(0, 10), commonTime: "", rows: [], selectedMachines: [], requestId: crypto.randomUUID() });
 const newRow = (bundleId: string): ScheduleRow => ({ id: crypto.randomUUID(), bundleId, udid: "", time: "", timeMode: "common" });
 
+async function scheduleResponse<T>(work: Promise<T>, saving = false): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([work, new Promise<never>((_,reject)=>{timer=setTimeout(()=>reject(new Error(saving ? "Chưa nhận được kết quả lưu lịch. Giữ nguyên lịch và bấm Lưu lại để đối chiếu cùng yêu cầu; không tạo lịch mới." : "Kiểm tra lịch quá thời gian. Bạn có thể chỉnh lại lịch và kiểm tra lại.")),90000);})]);
+  } finally { clearTimeout(timer); }
+}
+
 export function PublishSchedulePlanner(p: Props) {
   const [draft, setDraft] = useState(() => emptyDraft(p.sourceRoot));
   const draftRef = useRef(draft);
@@ -186,7 +193,7 @@ export function PublishSchedulePlanner(p: Props) {
     inFlight.current = true; setBusy(true); setReview(null); setConfirmed(false); setNotice(null);
     const at = key, revision = generation.current;
     try {
-      const report = await publishSchedulePreflight(request);
+      const report = await scheduleResponse(publishSchedulePreflight(request));
       if (mounted.current && latest.current === at && generation.current === revision) {
         if (report.slots.length !== request.slots.length) throw new Error("Kết quả kiểm tra không khớp số bài. Kiểm tra lại lịch.");
         setReview({ key: at, generation: revision, request, report });
@@ -201,7 +208,7 @@ export function PublishSchedulePlanner(p: Props) {
     }
     inFlight.current = true; setBusy(true); setNotice(null);
     try {
-      const records = await publishScheduleCreate(reviewed.request, reviewed.report.inputDigest, true);
+      const records = await scheduleResponse(publishScheduleCreate(reviewed.request, reviewed.report.inputDigest, true),true);
       if (records.length !== reviewed.request.slots.length) throw new Error("Kết quả lưu chưa khớp số bài. Giữ nguyên lịch và thử lại để đối chiếu, không tạo lịch mới.");
       p.onCreated();
       if (mounted.current) {

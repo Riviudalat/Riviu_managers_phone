@@ -24,6 +24,7 @@ import {
   publishRecoveryCapabilities,
   publishResumeVerification,
   operationStop,
+  operationPrepareDevices,
   publishScanFolder,
   publishSheetGetConfig,
   publishSheetCheck,
@@ -207,6 +208,7 @@ vi.mock("../api", () => ({
   publishRecoveryCapabilities: vi.fn(async () => []),
   publishResumeVerification: vi.fn(),
   operationStop: vi.fn(),
+  operationPrepareDevices: vi.fn(async () => ({ state: "closed", devices: [] })),
   publishReconcile: vi.fn(async (campaignId: string) => ({
     campaignId,
     inputDigest: "approved-digest-1",
@@ -300,6 +302,25 @@ async function prepareOne() {
 }
 
 describe("production publish wizard", () => {
+  it("still reaches final backend handoff when a link verifier starts after preflight", async () => {
+    let listener!: (event: AppEvent) => void;
+    vi.mocked(listenRiviuEvents).mockImplementationOnce(async callback => { listener = callback; return () => {}; });
+    render(<PublishPage devices={devices} selected={[]} onSelectUdids={() => {}} />);
+    await prepareOne();
+    await userEvent.click(screen.getByRole("button", { name: "Kiểm tra & đăng" }));
+    const confirm = await screen.findByRole("button", { name: "Xác nhận đăng 1 bài" });
+    await waitFor(() => expect(confirm).toBeEnabled());
+    vi.mocked(publishDeviceGuards).mockImplementation(async ids => Object.fromEntries(ids.map(id => [id, {
+      blocking: [{ assignmentId: "old-post", campaignId: "old-campaign", updatedAt: "2026-09-23T00:00:00Z", reason: "Đang lấy link bài cũ" }], linkReview: [],
+    }])));
+    await act(async () => listener({ type: "publishUpdated", campaignId: "old-campaign" } as AppEvent));
+    await waitFor(() => expect(screen.getAllByText("Máy còn bài chưa lấy được link").length).toBeGreaterThan(0));
+    createCampaign.mockRejectedValueOnce(new Error("Tác vụ cũ chưa nhả thiết bị; chưa đăng bài mới"));
+    await userEvent.click(confirm);
+    await waitFor(() => expect(createCampaign).toHaveBeenCalledOnce());
+    expect(executeCampaign).not.toHaveBeenCalled();
+    expect(screen.getAllByRole("alert").some(alert => alert.textContent?.includes("Tác vụ cũ chưa nhả thiết bị"))).toBe(true);
+  });
   it("shows a selected device's pending post immediately, then clears the block on publish update", async () => {
     let listener!: (event: AppEvent) => void;
     vi.mocked(listenRiviuEvents).mockImplementationOnce(async callback => { listener = callback; return () => {}; });
@@ -313,7 +334,7 @@ describe("production publish wizard", () => {
     fireEvent.change(screen.getByRole("combobox", { name: "Máy nhận bài bo1" }), { target: { value: "PHONE-A" } });
     blocking = true;
     await act(async () => listener({ type: "publishUpdated", campaignId: "prior-campaign" } as AppEvent));
-    await waitFor(() => expect(screen.getByRole("button", { name: "Kiểm tra & đăng" })).toBeDisabled());
+    await waitFor(() => expect(screen.getByRole("button", { name: "Kiểm tra & đăng" })).toBeEnabled());
     expect(screen.getByRole("combobox", { name: "Máy nhận bài bo1" })).toHaveValue("PHONE-A");
     expect(screen.getAllByText("Máy còn bài chưa lấy được link").length).toBeGreaterThan(0);
     expect(preflightCampaign).not.toHaveBeenCalled();
@@ -765,7 +786,7 @@ describe("publish campaign monitoring", () => {
     expect(requestConfirm).toHaveBeenCalledWith(expect.objectContaining({ message: expect.stringContaining("Chỉ bài này") }));
     expect(publishRetryAssignment).not.toHaveBeenCalled();
     await act(async () => confirmRetry(true));
-    await waitFor(() => expect(publishRetryAssignment).toHaveBeenCalledExactlyOnceWith("failed-child", true));
+    await waitFor(() => expect(publishRetryAssignment).toHaveBeenCalledExactlyOnceWith("failed-child", true, 3, expect.any(String)));
     await waitFor(() => expect(screen.queryByRole("button", { name: /^Thử lại trước khi Đăng/ })).toBeNull());
     expect(executeCampaign).not.toHaveBeenCalled();
     expect(createCampaign).not.toHaveBeenCalled();
@@ -931,10 +952,25 @@ describe("publish campaign monitoring", () => {
     vi.mocked(publishSheetCheck).mockResolvedValue({ sheetUrl: url, spreadsheetId: "fixture", sheetGid: 0,
       readable: true, connectionVerified: false, layout: "compact", columns: [], message: "Đọc được bảng; chưa xác minh kết nối ghi." });
     render(<PublishPage devices={devices} selected={[]} onSelectUdids={() => {}} />);
+    await waitFor(() => expect(screen.getByRole("button", { name: "Kiểm tra kết nối" })).toBeEnabled());
     fireEvent.change(screen.getByRole("textbox", { name: "Link Google Sheet" }), { target: { value: url } });
     fireEvent.click(screen.getByRole("button", { name: "Kiểm tra kết nối" }));
     await waitFor(() => expect(publishSheetCheck).toHaveBeenCalledWith(url));
     expect(await screen.findByText("Đọc được bảng; chưa xác minh kết nối ghi.")).toBeVisible();
+    expect(createCampaign).not.toHaveBeenCalled();
+    expect(executeCampaign).not.toHaveBeenCalled();
+  });
+
+  it("does not preflight or create a publication when the old device owner cannot stop", async () => {
+    vi.mocked(operationPrepareDevices).mockRejectedValueOnce(Error("Tác vụ cũ chưa nhả thiết bị"));
+    render(<PublishPage devices={devices} selected={[]} onSelectUdids={() => {}} />);
+    await userEvent.click(screen.getByRole("button", { name: "Chọn thư mục" }));
+    await userEvent.click(screen.getByRole("button", { name: "Quét" }));
+    await userEvent.click(await screen.findByRole("checkbox", { name: "Chọn bo1" }));
+    fireEvent.change(screen.getByRole("combobox", { name: "Máy nhận bài bo1" }), { target: { value: "PHONE-A" } });
+    await userEvent.click(screen.getByRole("button", { name: "Kiểm tra & đăng" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("Tác vụ cũ chưa nhả thiết bị");
+    expect(preflightCampaign).not.toHaveBeenCalled();
     expect(createCampaign).not.toHaveBeenCalled();
     expect(executeCampaign).not.toHaveBeenCalled();
   });
@@ -945,6 +981,8 @@ describe("publish campaign monitoring", () => {
     vi.mocked(publishSheetCheck).mockImplementation(() => new Promise(resolve => { answer = resolve; }));
     render(<PublishPage devices={devices} selected={[]} onSelectUdids={() => {}} />);
     const input = screen.getByRole("textbox", { name: "Link Google Sheet" });
+    await waitFor(() => expect(screen.getByRole("button", { name: "Kiểm tra kết nối" })).toBeEnabled());
+    fireEvent.click(screen.getByRole("button", { name: "Kiểm tra kết nối" }));
     await waitFor(() => expect(publishSheetCheck).toHaveBeenCalled());
     expect(input).toBeEnabled();
     fireEvent.change(input, { target: { value: "https://docs.google.com/spreadsheets/d/new/edit" } });

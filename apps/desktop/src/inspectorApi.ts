@@ -5,5 +5,6 @@ export interface InspectorSnapshot {id:string;udid:string;package:string;version
 export interface InspectorRecording {id:string;udid:string;name:string;active:boolean;steps:{selector:InspectorElementSelector;expected?:InspectorElementSelector|null;beforeId:string;afterId:string;verified:boolean;error:string|null}[]}
 export const inspectorObserve=(udid:string)=>invoke<InspectorSnapshot>("inspector_observe",{udid});
 export const inspectorTap=(udid:string,selector:InspectorElementSelector)=>invoke<InspectorSnapshot>("inspector_tap",{udid,selector});
+export const inspectorConfirmPostcondition=(udid:string,snapshotId:string,expected:InspectorElementSelector)=>invoke<InspectorRecording>("inspector_confirm_postcondition",{udid,snapshotId,expected});
 export const inspectorRecording=(udid:string)=>invoke<InspectorRecording|null>("inspector_recording",{udid});
 export const inspectorRecord=(udid:string,name:string,active:boolean)=>invoke<InspectorRecording>("inspector_record",{udid,name,active});

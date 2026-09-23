@@ -301,7 +301,19 @@ pub fn parse_partner_sheet(xml: &str, shown: &str) -> Result<PartnerRow, Partner
             });
         }
         if let Some((column, row)) = cell_reference(tag) {
-            let text = collect_text(inner, shown)?;
+            let text = if cell_type(tag).as_deref() == Some("str") {
+                // Some exporters store literal strings in <v>. A formula's cached
+                // result is not a frozen partner name and must not be trusted.
+                if inner.contains("<f") {
+                    return Err(PartnerReadError::BrokenXml {
+                        path: shown.to_string(),
+                        detail: "tên đối tác là công thức; cần xuất giá trị chữ cố định".into(),
+                    });
+                }
+                collect_text_element(inner, shown, "v")?
+            } else {
+                collect_text(inner, shown)?
+            };
             if !text.is_empty() {
                 cells.push((row, column, text));
             }
@@ -417,9 +429,19 @@ fn attribute(tag: &str, key: &str) -> Option<String> {
 /// when a single name carries mixed formatting, and taking the first run would return half a
 /// venue's name.
 fn collect_text(inner: &str, shown: &str) -> Result<String, PartnerReadError> {
+    collect_text_element(inner, shown, "t")
+}
+
+fn collect_text_element(
+    inner: &str,
+    shown: &str,
+    element: &str,
+) -> Result<String, PartnerReadError> {
     let mut out = String::new();
     let mut rest = inner;
-    while let Some(open) = rest.find("<t") {
+    let opening = format!("<{element}");
+    let closing = format!("</{element}>");
+    while let Some(open) = rest.find(&opening) {
         let after = &rest[open..];
         // `<t>` or `<t xml:space="preserve">`, but not `<text>`. **Any** whitespace counts as
         // the boundary, not only a space: a tab or a newline before the attributes made the
@@ -437,7 +459,7 @@ fn collect_text(inner: &str, shown: &str) -> Result<String, PartnerReadError> {
                 detail: "một thẻ <t ...> không đóng".into(),
             });
         };
-        let Some(close) = after.find("</t>") else {
+        let Some(close) = after.find(&closing) else {
             return Err(PartnerReadError::BrokenXml {
                 path: shown.to_string(),
                 detail: "một <t> thiếu </t>".into(),
@@ -450,7 +472,7 @@ fn collect_text(inner: &str, shown: &str) -> Result<String, PartnerReadError> {
             });
         }
         out.push_str(&unescape(&after[tag_end + 1..close], shown)?);
-        rest = &after[close + "</t>".len()..];
+        rest = &after[close + closing.len()..];
     }
     Ok(out)
 }
@@ -514,6 +536,25 @@ fn unescape(text: &str, shown: &str) -> Result<String, PartnerReadError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn exporter_literal_string_values_are_names_but_numbers_and_formulas_are_not() {
+        let xml = r#"<worksheet><sheetData><row r="1"><c r="B1" t="str"><v>Quán B &amp; C</v></c><c r="A1" t="str"><v>Đà Lạt</v></c><c r="C1" t="n"><v>123</v></c></row></sheetData></worksheet>"#;
+        assert_eq!(
+            parse_partner_sheet(xml, "fixture").unwrap().names,
+            vec!["Đà Lạt", "Quán B & C"]
+        );
+        let formula = xml.replace("<v>Đà Lạt</v>", "<f>CONCAT(A2,A3)</f><v>Đà Lạt</v>");
+        assert!(matches!(
+            parse_partner_sheet(&formula, "fixture"),
+            Err(PartnerReadError::BrokenXml { .. })
+        ));
+        let truncated = xml.replace("<v>Đà Lạt</v>", "<v>Đà Lạt");
+        assert!(matches!(
+            parse_partner_sheet(&truncated, "fixture"),
+            Err(PartnerReadError::BrokenXml { .. })
+        ));
+    }
 
     /// Write a real `.xlsx` to a temporary path, so the archive half is exercised too.
     ///

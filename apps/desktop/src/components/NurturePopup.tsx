@@ -22,6 +22,7 @@ import {
   nurtureSessionStatus,
   nurtureStart,
   nurtureStop,
+  operationPrepareDevices,
 } from "../api";
 import { targetsOf } from "../selectionTargets";
 import { nurtureProfileConfig, nurtureSettingsFromProfile } from "../automationProfileConfig";
@@ -318,7 +319,9 @@ export function NurturePopup({
   const [settings, setSettings] = useState<NurtureSettings | null>(null);
   const [baseline, setBaseline] = useState<{settings: NurtureSettings; target?: TargetRef} | null>(null);
   const [credentialBaseline, setCredentialBaseline] = useState<string | null>(null);
+  const [conflictingSettings, setConflictingSettings] = useState<NurtureSettings | null>(null);
   const settingsRef = useRef(settings);
+  const settingsSaveInFlight = useRef(false);
   settingsRef.current = settings;
   const targetRefLatest = useRef(targetRef);
   targetRefLatest.current = targetRef;
@@ -566,6 +569,7 @@ export function NurturePopup({
   };
 
   const save = async (next?: NurtureSettings, applyDefaultsOnly = false): Promise<boolean> => {
+    if (settingsSaveInFlight.current) return false;
     const s = next ?? settings;
     if (!s) return false;
     const issue = validateNurtureSettings(s);
@@ -583,14 +587,32 @@ export function NurturePopup({
     };
     // Credential writes cannot replace a settings revision. Flush an edited key
     // explicitly before Start/Save as the debounced autosave may still be pending.
-    const credential = s.apiKey !== credentialBaseline ? await nurtureUpdateCredential(s.apiKey) : null;
-    const stored = await nurtureSaveSettings(payload);
-    const saved = credential ? { ...stored, ...credential } : stored;
-    if (settingsRef.current !== settings || targetRefLatest.current !== targetRef) return false;
-    setSettings(saved);
-    if (!applyDefaultsOnly) setBaseline({ settings: saved, target: targetRef });
-    setCredentialBaseline(saved.apiKey);
-    return true;
+    settingsSaveInFlight.current = true;
+    try {
+      const credential = s.apiKey !== credentialBaseline ? await nurtureUpdateCredential(s.apiKey) : null;
+      const stored = await nurtureSaveSettings(payload);
+      const saved = credential ? { ...stored, ...credential } : stored;
+      if (!mounted.current) return false;
+      if (settingsRef.current !== settings || targetRefLatest.current !== targetRef) {
+        // The write committed even if editing continued while it was pending.
+        // Keep those edits, but do not make the next save reuse the old revision.
+        setSettings(current => current ? { ...current, revision: saved.revision } : current);
+        if (!applyDefaultsOnly) setBaseline({ settings: saved, target: targetRef });
+        setCredentialBaseline(saved.apiKey);
+        return false;
+      }
+      setSettings(saved);
+      if (!applyDefaultsOnly) setBaseline({ settings: saved, target: targetRef });
+      setCredentialBaseline(saved.apiKey);
+      return true;
+    } catch (error) {
+      if (describeError(error).includes("NurtureSettingsConflict")) {
+        try { setConflictingSettings(await nurtureGetSettings()); } catch { /* Keep the save failure visible. */ }
+        setMsg("Thiết lập đã được thay đổi ở lượt khác. Bản nháp của bạn được giữ; nạp bản mới rồi kiểm tra trước khi lưu lại.");
+        return false;
+      }
+      throw error;
+    } finally { settingsSaveInFlight.current = false; }
   };
 
   useWorkspaceDraft({
@@ -670,6 +692,8 @@ export function NurturePopup({
         if (!mounted.current || settingsRef.current !== runSettings || targetRefLatest.current !== runTargetRef) return;
       }
       if (settings && !(await save({ ...settings, scheduleUdids: runTargets }))) return;
+      await operationPrepareDevices(runTargets);
+      if (!mounted.current || targetRefLatest.current !== runTargetRef) return;
       // The manual command otherwise chooses its legacy 2–3 hour horizon. Send the
       // duration reviewed on this page explicitly; saved schedule settings alone do not.
       const started = pageSurface && runSettings
@@ -1235,7 +1259,17 @@ export function NurturePopup({
                   </div>
                 )}
               </div>
-              {msg && <p className="nurture-float-err">{msg}</p>}
+               {msg && <p className="nurture-float-err">{msg}</p>}
+               {conflictingSettings && <button type="button" onClick={() => {
+                 if (!settings || !baseline) return;
+                 const local = (nurtureProfileConfig(settings) as { settings: Record<string, unknown> }).settings;
+                 const prior = (nurtureProfileConfig(baseline.settings) as { settings: Record<string, unknown> }).settings;
+                 const edits = Object.fromEntries(Object.entries(local).filter(([key, value]) => JSON.stringify(value) !== JSON.stringify(prior[key])));
+                 setSettings({ ...conflictingSettings, ...edits, apiKey: settings.apiKey });
+                 setBaseline({ settings: conflictingSettings, target: baseline.target });
+                 setConflictingSettings(null);
+                 setMsg("Đã nạp thiết lập mới và giữ các trường bạn đang sửa. Kiểm tra rồi bấm Lưu thiết lập.");
+               }}>Nạp bản mới và giữ thay đổi của tôi</button>}
             </>
           )}
         </div>

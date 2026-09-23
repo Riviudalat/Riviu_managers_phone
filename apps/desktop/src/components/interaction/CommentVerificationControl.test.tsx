@@ -5,6 +5,12 @@ vi.mock("../../api",()=>({interactionVerifyComment:vi.fn().mockResolvedValue({st
 import {interactionVerifyComment} from "../../api";
 const base={attempts:1,nextCheckAtMs:null,deadlineMs:null,reason:null,evidence:null};
 describe("comment verification",()=>{
+ it("shows verified status without manual identity controls",()=>{
+  render(<CommentVerificationControl campaignId="c" assignmentId="a" value={{...base,state:"verified"}}/>);
+  expect(screen.getByRole("status")).toHaveTextContent("Đã xác minh nội dung");
+  expect(screen.queryByRole("button")).toBeNull();
+  expect(screen.queryByRole("textbox")).toBeNull();
+ });
  it("pending delivery is not called verified or offered a send retry",()=>{
   render(<CommentVerificationControl campaignId="c" assignmentId="a" value={{...base,state:"pending"}}/>);
   expect(screen.getByRole("status").textContent).toContain("đang xác minh");

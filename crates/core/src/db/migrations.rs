@@ -299,7 +299,106 @@ const MIGRATIONS: &[Migration] = &[
         apply: apply_migration_44,
         rebuilds_tables: false,
     },
+    Migration {
+        version: 45,
+        name: "bounded-publication-recovery",
+        apply: apply_migration_45,
+        rebuilds_tables: false,
+    },
+    Migration {
+        version: 46,
+        name: "seeding-share-action",
+        apply: apply_migration_46,
+        rebuilds_tables: true,
+    },
+    Migration {
+        version: 47,
+        name: "device-social-app-binding",
+        apply: apply_migration_47,
+        rebuilds_tables: false,
+    },
 ];
+
+fn apply_migration_47(tx: &Transaction<'_>) -> anyhow::Result<()> {
+    tx.execute_batch(
+        "CREATE TABLE device_app_bindings (
+            udid TEXT NOT NULL CHECK(length(trim(udid)) BETWEEN 1 AND 256),
+            app_key TEXT NOT NULL CHECK(length(trim(app_key)) BETWEEN 1 AND 64),
+            package TEXT NOT NULL CHECK(length(trim(package)) BETWEEN 1 AND 255),
+            revision INTEGER NOT NULL CHECK(revision > 0),
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY(udid,app_key)
+        );",
+    )?;
+    Ok(())
+}
+
+fn apply_migration_46(tx: &Transaction<'_>) -> anyhow::Result<()> {
+    // External triggers reference these parents. Preserve/drop them before the
+    // create-copy-drop-rename window so SQLite does not validate a missing parent.
+    let triggers:Vec<(String,String)>=tx.prepare("SELECT name,sql FROM sqlite_master WHERE type='trigger' AND (sql LIKE '%tiktok_action_runs%' OR sql LIKE '%interaction_assignments%')")?.query_map([],|r|Ok((r.get(0)?,r.get(1)?)))?.collect::<rusqlite::Result<_>>()?;
+    for (name, _) in &triggers {
+        tx.execute_batch(&format!("DROP TRIGGER \"{}\"", name.replace('"', "\"\"")))?;
+    }
+    let sql: String = tx.query_row(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='tiktok_action_runs'",
+        [],
+        |r| r.get(0),
+    )?;
+    let objects: Vec<String>=tx.prepare("SELECT sql FROM sqlite_master WHERE tbl_name='tiktok_action_runs' AND type IN ('index','trigger') AND sql IS NOT NULL")?.query_map([],|r|r.get(0))?.collect::<rusqlite::Result<_>>()?;
+    let changed = sql
+        .replace(
+            "CREATE TABLE tiktok_action_runs",
+            "CREATE TABLE tiktok_action_runs_v46",
+        )
+        .replace(
+            "'like','save','comment','follow'",
+            "'like','save','comment','follow','share'",
+        );
+    anyhow::ensure!(
+        changed != sql && changed.contains("'share'"),
+        "unexpected action table schema"
+    );
+    tx.execute_batch(&changed)?;
+    tx.execute_batch("INSERT INTO tiktok_action_runs_v46 SELECT * FROM tiktok_action_runs; DROP TABLE tiktok_action_runs; ALTER TABLE tiktok_action_runs_v46 RENAME TO tiktok_action_runs;")?;
+    for sql in objects {
+        tx.execute_batch(&sql)?;
+    }
+    let sql: String = tx.query_row(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='interaction_assignments'",
+        [],
+        |r| r.get(0),
+    )?;
+    let objects:Vec<String>=tx.prepare("SELECT sql FROM sqlite_master WHERE tbl_name='interaction_assignments' AND type IN ('index','trigger') AND sql IS NOT NULL")?.query_map([],|r|r.get(0))?.collect::<rusqlite::Result<_>>()?;
+    let (_, body) = sql.split_once('(').context("assignment schema missing")?;
+    let changed = format!("CREATE TABLE interaction_assignments_v46 ({body}").replace(
+        "message_ordinal BETWEEN 0 AND 63",
+        "message_ordinal BETWEEN 0 AND 127",
+    );
+    anyhow::ensure!(
+        changed.contains("BETWEEN 0 AND 127"),
+        "unexpected assignment ordinal schema"
+    );
+    tx.execute_batch(&changed)?;
+    tx.execute_batch("INSERT INTO interaction_assignments_v46 SELECT * FROM interaction_assignments; DROP TABLE interaction_assignments; ALTER TABLE interaction_assignments_v46 RENAME TO interaction_assignments;")?;
+    for sql in objects {
+        tx.execute_batch(&sql)?;
+    }
+    for (_, sql) in triggers {
+        tx.execute_batch(&sql)?;
+    }
+    Ok(())
+}
+
+fn apply_migration_45(tx: &Transaction<'_>) -> anyhow::Result<()> {
+    tx.execute_batch("CREATE TABLE publish_recovery_state (
+        assignment_id TEXT PRIMARY KEY REFERENCES publish_assignments(id) ON DELETE CASCADE,
+        run_token TEXT NOT NULL, payload TEXT NOT NULL);
+        CREATE TABLE publish_retry_requests (
+        request_id TEXT PRIMARY KEY, assignment_id TEXT NOT NULL REFERENCES publish_assignments(id) ON DELETE CASCADE,
+        expected_revision INTEGER NOT NULL, run_token TEXT NOT NULL);")?;
+    Ok(())
+}
 
 fn apply_migration_44(tx: &Transaction<'_>) -> anyhow::Result<()> {
     super::publish_sheet_delivery::seed_states(tx)?;
@@ -1116,7 +1215,29 @@ fn run_with_failpoint(
     run_internal(connection, failed_version)
 }
 
+#[cfg(test)]
+pub(super) fn initialize_through(connection: &mut Connection, version: i64) -> anyhow::Result<()> {
+    bootstrap_ledger(connection, None)?;
+    for migration in MIGRATIONS
+        .iter()
+        .filter(|migration| migration.version <= version)
+    {
+        apply_one(connection, migration, None)?;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+pub(super) fn initialize_exact_legacy_v1(connection: &Connection) -> anyhow::Result<()> {
+    apply_v1_schema(connection)
+}
+
 fn run_internal(connection: &mut Connection, failed_version: Option<i64>) -> anyhow::Result<()> {
+    // Migrations serialize through BEGIN IMMEDIATE. On a busy workstation another opener can
+    // legitimately spend more than the ordinary five-second query timeout applying a table
+    // rebuild; startup should wait for that owner and then re-read the ledger, not fail an
+    // otherwise healthy database with SQLITE_BUSY. Ordinary runtime connections keep 5 s.
+    connection.busy_timeout(std::time::Duration::from_secs(30))?;
     bootstrap_ledger(connection, failed_version)?;
     validate_ledger(connection)?;
 
@@ -2636,6 +2757,10 @@ fn expected_v1_fingerprint() -> anyhow::Result<SchemaFingerprint> {
     schema_fingerprint(&reference)
 }
 
+pub(super) fn is_exact_legacy_v1(connection: &Connection) -> anyhow::Result<bool> {
+    Ok(schema_fingerprint(connection)? == expected_v1_fingerprint()?)
+}
+
 fn schema_fingerprint(connection: &Connection) -> anyhow::Result<SchemaFingerprint> {
     let objects: Vec<(String, String)> = connection
         .prepare(
@@ -4014,7 +4139,7 @@ INSERT INTO tiktok_action_runs
                 [],
             )
             .is_err());
-        assert!(connection
+        connection
             .execute(
                 "INSERT INTO tiktok_action_runs
                  (id,owner_kind,owner_id,device_udid,campaign_id,assignment_id,
@@ -4023,7 +4148,8 @@ INSERT INTO tiktok_action_runs
                         'share','planned','now','now')",
                 [],
             )
-            .is_err());
+            .expect("migration 46 admits share");
+        assert!(connection.execute("INSERT INTO tiktok_action_runs(id,owner_kind,owner_id,device_udid,action_kind,state,created_at,updated_at) VALUES('invalid','interaction','assignment','device','unknown_action','planned','now','now')",[]).is_err());
     }
 
     fn column_exists(connection: &Connection, table: &str, column: &str) -> bool {
@@ -4273,7 +4399,8 @@ INSERT INTO tiktok_action_runs
             );
             assert_eq!(attempt.is_ok(), allowed, "message_count {message_count}");
         }
-        for (ordinal, allowed) in [(63_i64, true), (64, false)] {
+        // Migration 46 retains 64 comments and adds up to 64 action-only rows.
+        for (ordinal, allowed) in [(63_i64, true), (64, true), (127, true), (128, false)] {
             let attempt = connection.execute(
                 "INSERT INTO interaction_assignments
                  (id,campaign_id,target_id,message_ordinal,actor_udid,created_at,updated_at)

@@ -1110,7 +1110,10 @@ mod tests {
             )
             .await
             .expect("queued job");
-        timeout(Duration::from_secs(1), async {
+        // This includes SQLite migration/open plus one worker turn. It finishes in well under a
+        // second alone, but the full 1,900-test suite legitimately contends for the compiler and
+        // filesystem; keep the product deadlines untouched and give only this test a fair gate.
+        timeout(Duration::from_secs(5), async {
             while work.current_owner("iphone-a") != Some(DeviceWorkOwner::Script) {
                 tokio::task::yield_now().await;
             }

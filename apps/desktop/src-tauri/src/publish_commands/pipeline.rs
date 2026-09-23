@@ -25,6 +25,48 @@ struct Runtime {
     run: PublishPipelineRun,
     sound: riviu_core::PublishSoundPolicy,
 }
+struct Recovery {
+    db: Arc<Database>,
+    assignment: String,
+    run: PublishPipelineRun,
+}
+impl riviu_core::publish_recovery::RecoveryJournal for Recovery {
+    fn step(&self, step: &str, checkpoint: Option<&str>) -> anyhow::Result<()> {
+        self.db
+            .update_publish_recovery_step(&self.assignment, &self.run.token, step, checkpoint)
+    }
+    fn retry(
+        &self,
+        failure: &riviu_core::publish_recovery::RecoveryFailure,
+    ) -> anyhow::Result<Option<Duration>> {
+        let delay = self.db.reserve_publish_step_retry_failure(
+            &self.assignment,
+            &self.run.token,
+            failure,
+        )?;
+        if let Some(s) = self.db.publish_recovery_state(&self.assignment)? {
+            progress::record_progress(
+                &self.db,
+                &self.run.campaign_id,
+                &self.assignment,
+                progress::PublishProgress::RetryWaiting {
+                    step: s.step,
+                    attempt: s.retries_used,
+                    maximum: s.max_retries,
+                    reason: failure.message.clone(),
+                },
+            );
+        }
+        Ok(delay)
+    }
+    fn sound(
+        &self,
+        selection: Option<&riviu_core::SoundSelectionEvidence>,
+    ) -> anyhow::Result<Option<riviu_core::SoundSelectionEvidence>> {
+        self.db
+            .bind_publish_recovery_sound(&self.assignment, &self.run.token, selection)
+    }
+}
 impl Runtime {
     fn progress(&self, a: &PublishAssignmentRecord, step: progress::PublishProgress) {
         progress::record_progress(&self.db, &self.run.campaign_id, &a.id, step);
@@ -124,6 +166,7 @@ impl Runtime {
         result
     }
     async fn post(self, a: PublishAssignmentRecord, bundle: PublishBundle) -> anyhow::Result<()> {
+        riviu_core::publish_recovery::step("device", Some("mediaImported"))?;
         self.progress(&a, progress::PublishProgress::WaitingControl);
 
         anyhow::ensure!(
@@ -219,10 +262,14 @@ pub(crate) async fn run_dispatcher(
     agent: String,
     admission: Arc<crate::state::CommandAdmissionState>,
     stop: Arc<std::sync::atomic::AtomicBool>,
+    acceptance: crate::dev_acceptance::DevAcceptancePolicy,
 ) {
     let mut tasks = tokio::task::JoinSet::<anyhow::Result<()>>::new();
     let mut owned = HashMap::new();
     let mut interval = tokio::time::interval(Duration::from_millis(250));
+    let mut online = std::collections::HashSet::new();
+    let mut unavailable = HashMap::new();
+    let mut roster_at = None;
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
         tokio::select! {
@@ -256,8 +303,24 @@ pub(crate) async fn run_dispatcher(
                 .naive_local()
                 .and_utc()
                 .timestamp_millis();
-            db.expire_publish_dispatch(now)?;
+            if !acceptance.active() {
+                db.expire_publish_dispatch(now)?;
+            } else {
+                for campaign in acceptance.scoped_campaign_ids() {
+                    db.expire_publish_dispatch_for_campaign(now, &campaign)?;
+                }
+            }
             for run in db.finished_publish_dispatch_runs()? {
+                if acceptance.active() {
+                    let Some(detail) = db.get_publish_campaign(&run.campaign_id)? else {
+                        continue;
+                    };
+                    if !detail.assignments.iter().all(|assignment| {
+                        acceptance.allows_publish_dispatch(&run.campaign_id, &assignment.udid)
+                    }) {
+                        continue;
+                    }
+                }
                 db.finish_publish_pipeline(&run)?;
                 execution::reconcile_publish_execution_and_announce(
                     &db,
@@ -265,27 +328,50 @@ pub(crate) async fn run_dispatcher(
                     &run.campaign_id,
                 )?;
             }
-            for job in db.pending_publish_dispatch(128)? {
-                if cfg!(debug_assertions)
-                    && std::env::var("RIVIU_DEV_MANUAL_ACCEPTANCE").as_deref() == Ok("1")
-                {
-                    let allowed =
-                        std::env::var("RIVIU_DEV_ACCEPTANCE_CAMPAIGNS").unwrap_or_default();
-                    let scoped = std::env::var_os("RIVIU_DEV_ACCEPTANCE_SCOPE")
-                        .and_then(|p| std::fs::read(p).ok())
-                        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
-                        .is_some_and(|scope| {
-                            scope["campaignIds"].as_array().is_some_and(|ids| {
-                                ids.iter()
-                                    .any(|id| id.as_str() == Some(&job.run.campaign_id))
-                            }) && scope["udids"].as_array().is_some_and(|ids| {
-                                ids.iter().any(|id| id.as_str() == Some(&job.udid))
-                            })
-                        });
-                    if !scoped && !allowed.split(',').any(|id| id == job.run.campaign_id) {
-                        continue;
-                    }
-                }
+            let pending = db
+                .pending_publish_dispatch(128)?
+                .into_iter()
+                .filter(|job| acceptance.allows_publish_dispatch(&job.run.campaign_id, &job.udid))
+                .collect::<Vec<_>>();
+            if pending.is_empty() {
+                return Ok::<_, anyhow::Error>(());
+            }
+            if roster_at
+                .is_none_or(|at: tokio::time::Instant| at.elapsed() >= Duration::from_secs(2))
+            {
+                let roster = control.list_devices().await?;
+                unavailable = roster
+                    .iter()
+                    .filter(|d| {
+                        d.status == riviu_core::DeviceStatus::Pairing
+                            || d.last_error
+                                .as_ref()
+                                .is_some_and(|e| e.to_lowercase().contains("unauthorized"))
+                    })
+                    .map(|d| {
+                        (
+                            d.udid.clone(),
+                            d.last_error.clone().unwrap_or_else(|| {
+                                "Thiết bị chưa cho phép gỡ lỗi USB; xác nhận trên điện thoại".into()
+                            }),
+                        )
+                    })
+                    .collect();
+                online = roster
+                    .into_iter()
+                    .filter(|d| {
+                        matches!(
+                            d.status,
+                            riviu_core::DeviceStatus::Ready
+                                | riviu_core::DeviceStatus::Connected
+                                | riviu_core::DeviceStatus::Busy
+                        )
+                    })
+                    .map(|d| d.udid)
+                    .collect();
+                roster_at = Some(tokio::time::Instant::now());
+            }
+            for job in pending {
                 // Completed tasks still occupy a worker slot until joined. Fast failures
                 // must not accumulate an unbounded JoinSet while permits are released.
                 if tasks.len() >= db.publish_limits()?.device_total {
@@ -293,6 +379,18 @@ pub(crate) async fn run_dispatcher(
                 }
                 if control.current_work_owner(&job.udid).is_some() {
                     db.defer_publish_dispatch(&job, "device_busy")?;
+                    continue;
+                }
+                db.init_publish_recovery(&job.assignment_id, &job.run.token)?;
+                if let Some(reason) = unavailable.get(&job.udid) {
+                    db.fail_publish_queued_device(&job, reason)?;
+                    continue;
+                }
+                if !db.admit_publish_reconnect(
+                    &job,
+                    online.contains(&job.udid),
+                    chrono::Utc::now().timestamp_millis(),
+                )? {
                     continue;
                 }
                 let Some(permit) = db.try_publish_work(&job.udid, &job.phase, &job.attempt_id)?
@@ -362,8 +460,23 @@ pub(crate) async fn run_dispatcher(
                         sound: request.sound_policy,
                     };
                     if task_job.phase == "compose" {
-                        return runtime.post(a, bundle).await;
+                        let journal = Arc::new(Recovery {
+                            db: runtime.db.clone(),
+                            assignment: a.id.clone(),
+                            run: runtime.run.clone(),
+                        });
+                        return riviu_core::publish_recovery::scope(
+                            journal,
+                            runtime.post(a, bundle),
+                        )
+                        .await;
                     }
+                    runtime.db.update_publish_recovery_step(
+                        &a.id,
+                        &runtime.run.token,
+                        "transfer",
+                        None,
+                    )?;
                     let mut revision = runtime.db.publish_assignment_revision(&a.id)?;
                     let result = runtime.transfer(&a, &bundle, &mut revision).await;
                     if let Err(error) = &result {

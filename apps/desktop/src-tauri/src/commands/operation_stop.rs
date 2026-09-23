@@ -16,7 +16,40 @@ fn key(id: &str) -> String {
     format!("operation.stop.result:{id}")
 }
 
-fn source_devices(
+/// Stop can close both installed Android TikTok variants without selecting an
+/// account or granting either package permission to publish. Launch still needs
+/// an explicit binding when the foreground app cannot resolve the ambiguity.
+pub(super) async fn packages_to_stop(
+    control: &riviu_core::DeviceControlPlane,
+    udid: &str,
+) -> anyhow::Result<Vec<String>> {
+    match control.resolve_tiktok_package(udid).await {
+        Ok(package) => Ok(vec![package]),
+        Err(error)
+            if error
+                .to_string()
+                .contains("more than one measured TikTok build is installed") =>
+        {
+            let mut packages: Vec<_> = control
+                .list_installed_apps(udid)
+                .await?
+                .into_iter()
+                .map(|app| app.bundle_id)
+                .filter(|package| riviu_core::tiktok_target::is_measured_android_tiktok(package))
+                .collect();
+            packages.sort();
+            packages.dedup();
+            anyhow::ensure!(
+                packages.len() == 2,
+                "TikTok package inventory changed during Stop"
+            );
+            Ok(packages)
+        }
+        Err(error) => Err(error.into()),
+    }
+}
+
+pub(super) fn source_devices(
     db: &riviu_core::db::Database,
     detail: &riviu_core::OperationRunDetail,
 ) -> anyhow::Result<Vec<String>> {
@@ -92,7 +125,16 @@ fn claim_stop_result(
         .get_setting(&key(&initial.operation_id))?
         .map(|raw| serde_json::from_str(&raw))
         .transpose()?;
+    let mut reuse_stop_generation = false;
     if let Some(current) = cached {
+        let released_current = kind != riviu_core::OperationRunKind::Publish
+            || current
+                .devices
+                .iter()
+                .map(|d| db.publish_device_guard(&d.udid))
+                .collect::<anyhow::Result<Vec<_>>>()?
+                .iter()
+                .all(|guard| !guard.blocking.iter().any(|hold| hold.campaign_id == source));
         let closed_current = kind != riviu_core::OperationRunKind::Publish
             || (current.stop_marker.is_some()
                 && current.stop_marker
@@ -108,11 +150,28 @@ fn claim_stop_result(
                 .map(|d| &d.udid)
                 .eq(initial.devices.iter().map(|d| &d.udid))
             && closed_current
+            && released_current
+            && (kind != riviu_core::OperationRunKind::Publish
+                || !db.publish_campaign_has_account_reservation(source)?)
         {
             return Ok((current, false));
         }
+        // Retrying a failed closer in an already revoked publication must not
+        // revoke valid device-release proofs for its other phones. A resumed
+        // verifier or changed marker still requires a fresh Stop generation.
+        if kind == riviu_core::OperationRunKind::Publish
+            && closed_current
+            && current
+                .devices
+                .iter()
+                .map(|d| &d.udid)
+                .eq(initial.devices.iter().map(|d| &d.udid))
+        {
+            initial.stop_marker = current.stop_marker;
+            reuse_stop_generation = true;
+        }
     }
-    if kind == riviu_core::OperationRunKind::Publish {
+    if kind == riviu_core::OperationRunKind::Publish && !reuse_stop_generation {
         db.begin_publish_operation_stop(source)?;
         initial.stop_marker = db.get_setting(&format!("operation.stop.publish:{source}"))?;
     }
@@ -130,6 +189,85 @@ fn claim_stop_result(
 #[cfg(test)]
 mod recovery_tests {
     use super::*;
+    #[test]
+    fn retrying_failed_close_keeps_the_current_stop_generation() {
+        let path =
+            std::env::temp_dir().join(format!("stop-retry-generation-{}.db", uuid::Uuid::new_v4()));
+        let db = riviu_core::db::Database::open(&path).unwrap();
+        let raw = rusqlite::Connection::open(&path).unwrap();
+        raw.execute("INSERT INTO publish_campaigns(id,request_id,source_root,request_json,state,created_at,updated_at) VALUES('c','r','fixture','{}','cancelled','now','now')",[]).unwrap();
+        db.begin_publish_operation_stop("c").unwrap();
+        let marker = db.get_setting("operation.stop.publish:c").unwrap();
+        let cached = OperationStopResult {
+            operation_id: "publish:c".into(),
+            state: "needsAttention".into(),
+            stop_marker: marker.clone(),
+            devices: vec![StopDeviceResult {
+                udid: "phone".into(),
+                closed: false,
+                message: "transport failed".into(),
+            }],
+        };
+        db.set_setting(&key("publish:c"), &serde_json::to_string(&cached).unwrap())
+            .unwrap();
+        let mut initial = cached;
+        initial.stop_marker = None;
+        initial.state = "stopping".into();
+        let (claimed, run) = claim_stop_result(
+            &db,
+            riviu_core::OperationRunKind::Publish,
+            "c",
+            initial,
+            &parking_lot::Mutex::new(HashSet::new()),
+        )
+        .unwrap();
+        assert!(run);
+        assert_eq!(claimed.stop_marker, marker);
+        assert_eq!(db.get_setting("operation.stop.publish:c").unwrap(), marker);
+    }
+    #[test]
+    fn cached_closed_publish_without_device_release_proof_must_run_the_closer_again() {
+        let path =
+            std::env::temp_dir().join(format!("legacy-stop-proof-{}.db", uuid::Uuid::new_v4()));
+        let db = riviu_core::db::Database::open(&path).unwrap();
+        let raw = rusqlite::Connection::open(&path).unwrap();
+        raw.execute("INSERT INTO publish_campaigns(id,request_id,source_root,request_json,state,created_at,updated_at) VALUES('c','r','fixture','{}','cancelled','now','now')", []).unwrap();
+        raw.execute("INSERT INTO publish_bundles(id,campaign_id,ordinal,name,source_path,caption,caption_sha256,manifest_json,created_at) VALUES('b','c',0,'fixture','fixture','caption',?1,'{}','now')", ["a".repeat(64)]).unwrap();
+        raw.execute("INSERT INTO publish_assignments(id,campaign_id,bundle_id,ordinal,udid,state,effect_intent,created_at,updated_at) VALUES('a','c','b',0,'phone','uncertain','{}','now','now')", []).unwrap();
+        db.begin_publish_operation_stop("c").unwrap();
+        let initial = OperationStopResult {
+            operation_id: "publish:c".into(),
+            state: "stopping".into(),
+            stop_marker: db.get_setting("operation.stop.publish:c").unwrap(),
+            devices: vec![StopDeviceResult {
+                udid: "phone".into(),
+                closed: false,
+                message: "waiting".into(),
+            }],
+        };
+        let mut cached = initial.clone();
+        cached.state = "closed".into();
+        cached.devices[0].closed = true;
+        db.set_setting(&key("publish:c"), &serde_json::to_string(&cached).unwrap())
+            .unwrap();
+        assert!(db.has_pending_publish_for_device("phone").unwrap());
+        let (_, claimed) = claim_stop_result(
+            &db,
+            riviu_core::OperationRunKind::Publish,
+            "c",
+            initial,
+            &parking_lot::Mutex::new(HashSet::new()),
+        )
+        .unwrap();
+        assert!(
+            claimed,
+            "old closed result cannot stand in for a device release proof"
+        );
+        assert!(
+            db.has_pending_publish_for_device("phone").unwrap(),
+            "only a real closer may release the hold"
+        );
+    }
     #[test]
     fn regression_script_stop_uses_source_roster_and_empty_is_not_closed() {
         let path = std::env::temp_dir().join(format!("stop-roster-{}.db", uuid::Uuid::new_v4()));
@@ -465,14 +603,15 @@ async fn close_stopped_device(
                         {
                             return Err("Máy còn bài đăng của tác vụ khác; chưa đóng TikTok".into());
                         }
-                        let package = control
-                            .resolve_tiktok_package(udid)
+                        for package in packages_to_stop(control, udid)
                             .await
-                            .map_err(|e| e.to_string())?;
-                        control
-                            .terminate_app(&context, &package)
-                            .await
-                            .map_err(|e| e.to_string())?;
+                            .map_err(|e| e.to_string())?
+                        {
+                            control
+                                .terminate_app(&context, &package)
+                                .await
+                                .map_err(|e| e.to_string())?;
+                        }
                         if control.reports_element_bounds(udid) {
                             let home = control
                                 .device_shell(&context, "input keyevent KEYCODE_HOME")

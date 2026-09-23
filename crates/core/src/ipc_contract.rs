@@ -19,6 +19,19 @@ pub struct OperationStopResult {
     pub stop_marker: Option<String>,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct DeviceAppChoices {
+    pub udid: String,
+    pub app_key: String,
+    pub installed_packages: Vec<String>,
+    pub selected_package: Option<String>,
+    pub suggested_package: Option<String>,
+    pub revision: i64,
+    pub selection_valid: bool,
+    pub reason: Option<String>,
+}
+
 #[derive(Serialize, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct PublishSheetReadback {

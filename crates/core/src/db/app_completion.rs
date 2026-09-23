@@ -56,7 +56,7 @@ mod tests {
     #[test]
     fn explicit_intents_survive_restart_retry_is_same_row_and_stale_results_lose() {
         let f = Fixture::new();
-        assert_eq!(f.db.schema_version().unwrap(), 44);
+        assert_eq!(f.db.schema_version().unwrap(), 47);
         assert!(f.db.list_due_app_completions(32).unwrap().is_empty());
         let first = f.db.request_app_completion("a", PACKAGE).unwrap();
         assert_eq!(first, 1);
@@ -380,29 +380,16 @@ impl Database {
                 return Ok(Some(format!("Chờ công việc {name} trên thiết bị hoàn tất")));
             }
         }
+        // Share the same generation/intent-bound release proof as new Publish.
+        // An old unresolved post remains in linkReview after verified Stop; it
+        // must not permanently block selecting the next app on this device.
+        if !Self::publish_device_guard_from_connection(&tx, udid)?
+            .blocking
+            .is_empty()
         {
-            let mut statement=tx.prepare("SELECT state,effect_intent,evidence_json FROM publish_assignments WHERE udid=?1 AND state IN ('posting','verifying','uncertain','succeeded')")?;
-            let rows = statement.query_map([udid], |r| {
-                Ok((
-                    r.get::<_, String>(0)?,
-                    r.get::<_, Option<String>>(1)?,
-                    r.get::<_, Option<String>>(2)?,
-                ))
-            })?;
-            for row in rows {
-                let (state, intent, evidence) = row?;
-                let held = state == "posting"
-                    || state == "verifying"
-                    || state == "uncertain"
-                    || (state == "succeeded"
-                        && (intent.is_some() || evidence.is_some())
-                        && !super::publish_sheet::evidence_has_post_link(evidence.as_deref()));
-                if held {
-                    return Ok(Some(
-                        "Chờ tải bài hoặc xác minh liên kết trên thiết bị hoàn tất".into(),
-                    ));
-                }
-            }
+            return Ok(Some(
+                "Chờ tải bài hoặc xác minh liên kết trên thiết bị hoàn tất".into(),
+            ));
         }
         let pending:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM publish_assignments a JOIN publish_campaigns c ON c.id=a.campaign_id WHERE a.udid=?1 AND (
             a.state IN ('preparing','transferring') OR (a.state IN ('queued','scheduled','ready','imported') AND c.state NOT IN ('cancelled','missed','succeeded') AND (c.run_at IS NULL OR datetime(c.run_at)<=datetime(?2))) OR EXISTS(SELECT 1 FROM publish_dispatch_jobs j WHERE j.assignment_id=a.id AND j.state IN ('queued','running') AND (j.started_at_ms IS NOT NULL OR j.deadline_ms IS NULL OR j.deadline_ms-30000<=?3))))",params![udid,local,now],|r|r.get(0))?;

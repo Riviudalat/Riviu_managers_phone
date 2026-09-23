@@ -110,6 +110,7 @@ vi.mock("../api", () => ({
   nurtureClearSessionLog: logBook.clear,
   nurtureStart: vi.fn(async (udids: string[]) => udids),
   nurtureStop: vi.fn(async () => undefined),
+  operationPrepareDevices: vi.fn(async () => ({ state: "closed", devices: [] })),
   nurtureTestApi: vi.fn(async () => null),
   nurtureListCommentAttempts: vi.fn(async () => []),
   nurtureCostSummary: vi.fn(async () => ({
@@ -357,7 +358,7 @@ describe("NurturePopup", () => {
     expect(api.nurtureStart).not.toHaveBeenCalled();
   });
 
-  it("keeps machine selection explicit and only selects ready machines", async () => {
+  it("keeps machine selection explicit and includes busy machines for handoff", async () => {
     const onTargetRefChange = vi.fn();
     const roster = Array.from({ length: 8 }, (_, index) => ({ ...devices[0], udid: `scope-${index}`, name: `Phone ${index + 1}`, status: index === 1 ? "busy" as const : "ready" as const }));
     const metas = new Map([["scope-6", { udid: "scope-6", alias: "Đà Lạt", number: 7, notes: "", tags: [], handle: "dalat" }]]);
@@ -366,8 +367,8 @@ describe("NurturePopup", () => {
     expect(picker).toHaveAttribute("aria-expanded", "false");
     expect(screen.queryByRole("searchbox", { name: "Tìm máy Nuôi TikTok" })).toBeNull();
     fireEvent.click(picker);
-    fireEvent.click(screen.getByRole("button", { name: "Chọn tất cả sẵn sàng" }));
-    expect(new Set(onTargetRefChange.mock.calls[0][0].udids)).toEqual(new Set(roster.filter(device => device.status === "ready").map(device => device.udid)));
+    fireEvent.click(screen.getByRole("button", { name: "Chọn tất cả đang kết nối" }));
+    expect(new Set(onTargetRefChange.mock.calls[0][0].udids)).toEqual(new Set(roster.map(device => device.udid)));
     fireEvent.change(screen.getByRole("searchbox", { name: "Tìm máy Nuôi TikTok" }), { target: { value: "dalat" } });
     expect(screen.getByText("Đà Lạt")).toBeVisible();
     expect(screen.getByText("@dalat")).toBeVisible();
@@ -476,6 +477,44 @@ describe("NurturePopup", () => {
     fireEvent.click(screen.getByRole("button", {name:"Lưu thiết lập"}));
     await waitFor(() => expect(saved.saveSettings).toHaveBeenCalledWith(expect.objectContaining({numVideos:121})));
     expect(profileControl.save).not.toHaveBeenCalled();
+  });
+
+  it("keeps edits made during save but advances their database revision", async () => {
+    const api = await import("../api");
+    vi.mocked(api.nurtureGetSettings).mockResolvedValueOnce({ ...settings, revision: 8 });
+    let finish!: (value: NurtureSettings) => void;
+    saved.saveSettings.mockReturnValueOnce(new Promise<NurtureSettings>(resolve => { finish = resolve; }))
+      .mockImplementationOnce(async value => ({ ...value, revision: 10 }));
+    render(<NurturePopup devices={devices} selected={[]} targetUdids={["mock-1"]} metas={new Map()} surface="page" />);
+    const input = await screen.findByLabelText("Tổng số video muốn lướt", { selector: "input" });
+    fireEvent.change(input, { target: { value: "121" } });
+    fireEvent.click(screen.getByRole("button", { name: "Lưu thiết lập" }));
+    await waitFor(() => expect(saved.saveSettings).toHaveBeenCalled());
+    const payload = saved.saveSettings.mock.calls[0][0];
+    fireEvent.change(input, { target: { value: "122" } });
+    await act(async () => finish({ ...payload, revision: 9 }));
+    expect(input).toHaveValue(122);
+    await waitFor(() => expect(screen.getByRole("button", { name: "Lưu thiết lập" })).toBeEnabled());
+    fireEvent.click(screen.getByRole("button", { name: "Lưu thiết lập" }));
+    await waitFor(() => expect(saved.saveSettings).toHaveBeenLastCalledWith(expect.objectContaining({ numVideos: 122, revision: 9 })));
+  });
+
+  it("preserves a conflicting draft and only rebases it after the operator chooses", async () => {
+    const api = await import("../api");
+    vi.mocked(api.nurtureGetSettings).mockResolvedValueOnce({ ...settings, revision: 8 })
+      .mockResolvedValueOnce({ ...settings, revision: 9, aiDirections: "new external direction" });
+    saved.saveSettings.mockRejectedValueOnce(Error("NurtureSettingsConflict: settings changed; reload before saving"))
+      .mockImplementationOnce(async value => ({ ...value, revision: 10 }));
+    render(<NurturePopup devices={devices} selected={[]} targetUdids={["mock-1"]} metas={new Map()} surface="page" />);
+    const input = await screen.findByLabelText("Tổng số video muốn lướt", { selector: "input" });
+    fireEvent.change(input, { target: { value: "122" } });
+    fireEvent.click(screen.getByRole("button", { name: "Lưu thiết lập" }));
+    const rebase = await screen.findByRole("button", { name: "Nạp bản mới và giữ thay đổi của tôi" });
+    expect(input).toHaveValue(122);
+    expect(saved.saveSettings).toHaveBeenCalledTimes(1);
+    fireEvent.click(rebase);
+    fireEvent.click(screen.getByRole("button", { name: "Lưu thiết lập" }));
+    await waitFor(() => expect(saved.saveSettings).toHaveBeenLastCalledWith(expect.objectContaining({ revision: 9, numVideos: 122, aiDirections: "new external direction" })));
   });
 
   it("restores autosaved settings without applying them to a live session or storing credentials", async () => {

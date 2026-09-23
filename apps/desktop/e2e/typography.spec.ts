@@ -68,14 +68,14 @@ test.describe("the bundled typeface", () => {
     expect(carried.available).toBe(true);
   });
 
-  test("asks the network for nothing", async ({ page }) => {
+  test("asks the network for nothing", async ({ page, baseURL }) => {
     // The app runs on a farm machine that may have no route out. A stylesheet or font
     // fetched at startup is one the operator does not get, and the layout shifts under
     // whatever Windows substitutes.
     const external: string[] = [];
     page.on("request", (request) => {
       const url = request.url();
-      if (!url.startsWith("http://127.0.0.1:1421") && !url.startsWith("data:")) {
+      if (!url.startsWith("data:") && new URL(url).origin !== new URL(baseURL!).origin) {
         external.push(url);
       }
     });

@@ -156,12 +156,14 @@ async fn observe_rendered_sheet(
                 })
                 .count()
                 >= 4;
-        if require_rows && (observed.is_err() || !rows_ready) {
+        if observed.is_err() || !rows_ready {
             previous = None;
-            anyhow::ensure!(
-                Instant::now() < deadline,
-                "sound rows did not finish rendering"
-            );
+            if Instant::now() + POLL >= deadline {
+                if let Err(error) = observed {
+                    return Err(error);
+                }
+                anyhow::bail!("sound rows did not finish rendering");
+            }
             tokio::time::sleep(POLL).await;
             continue;
         }

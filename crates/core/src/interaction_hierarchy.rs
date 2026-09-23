@@ -212,6 +212,7 @@ pub fn locate_parent_in_elements(
 
     Some(ElementReplyTarget {
         identity: CommentLocatorIdentity {
+            comment_link: None,
             author_label: author
                 .description
                 .as_deref()
@@ -248,6 +249,7 @@ pub fn discover_identity_in_elements(
     locator_version: &str,
 ) -> Option<CommentLocatorIdentity> {
     let probe = CommentLocatorIdentity {
+        comment_link: None,
         author_label: String::new(),
         text: exact_text.to_string(),
         locator_version: locator_version.to_string(),
@@ -283,6 +285,7 @@ pub fn discover_identity_in_elements(
                 .total_cmp(&(body.y - bottom(b)).abs())
         })?;
     Some(CommentLocatorIdentity {
+        comment_link: None,
         author_label: author
             .description
             .as_deref()
@@ -2438,7 +2441,19 @@ where
     let mut unfolded = false;
     // Whether the list was ever legible at all — see the `unreadable` branch below.
     let mut saw_rows = false;
-    let target = if strict_mentions && session.supports_accessibility_readback() {
+    let target = if parent.comment_link.is_some() && session.supports_accessibility_readback() {
+        let found = crate::tiktok_comment_link::open_and_verify(session, labels, parent, stop)
+            .await
+            .map_err(HierarchySendFailure::before)?;
+        ElementReplyTarget {
+            identity: found.identity,
+            reply: found
+                .reply
+                .context("comment_reply_control_missing")
+                .map_err(HierarchySendFailure::before)?,
+            like: found.like,
+        }
+    } else if strict_mentions && session.supports_accessibility_readback() {
         let found = crate::comment_verification::search::find_for_reply(
             session, labels, parent, root, stop,
         )
@@ -4999,6 +5014,7 @@ mod tests {
     fn crash_stale_reply_retry_session() -> (DrawerSession, CommentLocatorIdentity) {
         let (bodies, replies, authors) = measured_rows();
         let parent = CommentLocatorIdentity {
+            comment_link: None,
             author_label: "Tồi nhưng tử tế".into(),
             text: "Vc cái phao câu".into(),
             locator_version: HIERARCHY_LOCATOR_VERSION.into(),
@@ -5140,6 +5156,7 @@ mod tests {
     async fn a_denied_effect_gate_cleans_a_typed_reply_without_sending() {
         let (bodies, replies, authors) = measured_rows();
         let parent = CommentLocatorIdentity {
+            comment_link: None,
             author_label: "Tồi nhưng tử tế".into(),
             text: "Vc cái phao câu".into(),
             locator_version: HIERARCHY_LOCATOR_VERSION.into(),
@@ -5251,6 +5268,7 @@ mod tests {
         // operator's account.
         let (bodies, replies, authors) = measured_rows();
         let parent = CommentLocatorIdentity {
+            comment_link: None,
             author_label: "Tồi nhưng tử tế".into(),
             text: "Vc cái phao câu".into(),
             locator_version: HIERARCHY_LOCATOR_VERSION.into(),
@@ -5304,6 +5322,7 @@ mod tests {
         // looks like. The right answer is `NoComposer` and nothing typed.
         let (bodies, replies, authors) = measured_rows();
         let parent = CommentLocatorIdentity {
+            comment_link: None,
             author_label: "Tồi nhưng tử tế".into(),
             text: "Vc cái phao câu".into(),
             locator_version: HIERARCHY_LOCATOR_VERSION.into(),
@@ -5347,6 +5366,7 @@ mod tests {
         // anchors never move — the end of the list.
         let (_, replies, authors) = measured_rows();
         let parent = CommentLocatorIdentity {
+            comment_link: None,
             author_label: "Tồi nhưng tử tế".into(),
             text: "a comment nobody posted".into(),
             locator_version: HIERARCHY_LOCATOR_VERSION.into(),
@@ -5384,6 +5404,7 @@ mod tests {
         // this, and the check is that the input field is gone afterwards.
         let (_, replies, authors) = measured_rows();
         let parent = CommentLocatorIdentity {
+            comment_link: None,
             author_label: "Tồi nhưng tử tế".into(),
             text: "not on this screen".into(),
             locator_version: HIERARCHY_LOCATOR_VERSION.into(),
@@ -5430,6 +5451,7 @@ mod tests {
         let english = crate::tiktok_labels::nothing_measured();
         let session = DrawerSession::default();
         let parent = CommentLocatorIdentity {
+            comment_link: None,
             author_label: "someone".into(),
             text: "parent".into(),
             locator_version: HIERARCHY_LOCATOR_VERSION.into(),
@@ -5718,6 +5740,7 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn a_reply_list_transport_error_before_send_is_an_interrupted_verdict() {
         let parent = CommentLocatorIdentity {
+            comment_link: None,
             author_label: "Tồi nhưng tử tế".into(),
             text: "Vc cái phao câu".into(),
             locator_version: HIERARCHY_LOCATOR_VERSION.into(),
@@ -5759,6 +5782,7 @@ mod tests {
     async fn a_reply_transport_error_after_send_stays_the_ambiguous_error() {
         let (bodies, replies, authors) = measured_rows();
         let parent = CommentLocatorIdentity {
+            comment_link: None,
             author_label: "Tồi nhưng tử tế".into(),
             text: "Vc cái phao câu".into(),
             locator_version: HIERARCHY_LOCATOR_VERSION.into(),
@@ -5808,6 +5832,7 @@ mod tests {
     async fn a_reply_found_after_expanding_folded_comments_marks_the_sent_outcome() {
         let (bodies, replies, authors) = measured_rows();
         let parent = CommentLocatorIdentity {
+            comment_link: None,
             author_label: "Tồi nhưng tử tế".into(),
             text: "Vc cái phao câu".into(),
             locator_version: HIERARCHY_LOCATOR_VERSION.into(),
@@ -5935,6 +5960,7 @@ mod tests {
                 &[reply],
                 &[rail_count],
                 &CommentLocatorIdentity {
+                    comment_link: None,
                     author_label: "Xuân".into(),
                     text: "Giới trẻ giờ mê chill giữa thiên nhiên".into(),
                     locator_version: "v1".into(),
@@ -5989,6 +6015,7 @@ mod tests {
             &[reply],
             &[rail_count, author],
             &CommentLocatorIdentity {
+                comment_link: None,
                 author_label: "Xuân".into(),
                 text: "Giới trẻ giờ mê chill giữa thiên nhiên".into(),
                 locator_version: "v1".into(),
@@ -6052,6 +6079,7 @@ mod tests {
 
     fn identity(text: &str) -> CommentLocatorIdentity {
         CommentLocatorIdentity {
+            comment_link: None,
             author_label: String::new(),
             text: text.to_string(),
             locator_version: "android-hierarchy-v1".into(),
@@ -6200,6 +6228,7 @@ mod tests {
         // where the alternative is refusing a reply whose parent is further down.
         let (_, replies, authors) = measured_rows();
         let parent = CommentLocatorIdentity {
+            comment_link: None,
             author_label: "Tồi nhưng tử tế".into(),
             text: "a comment nobody posted".into(),
             locator_version: HIERARCHY_LOCATOR_VERSION.into(),
@@ -6788,6 +6817,7 @@ mod tests {
         // carrying 22 comments: three replies refused after **one** scroll out of a budget of
         // ten, because the drawer opens before TikTok has rendered anything into it.
         let parent = CommentLocatorIdentity {
+            comment_link: None,
             author_label: "Tồi nhưng tử tế".into(),
             text: "a comment nobody posted".into(),
             locator_version: HIERARCHY_LOCATOR_VERSION.into(),

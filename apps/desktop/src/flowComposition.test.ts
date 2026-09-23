@@ -22,6 +22,37 @@ describe("frozen native composition",()=>{
     expect(updated.edges).toEqual(inserted.edges);
     expect(updated.nodes.find(n=>n.id===existing.id)?.config.count).toBe(4);
   });
+  it("opts into the published library without mutating the preview or legacy snapshots",()=>{
+    const parent=newFlowDocument();const body=newFlowDocument("shared");body.revision=3;
+    const library={flowId:body.id,channel:"published" as const};
+    const result=applyFlowComposition(parent,{kind:"subflow",document:body,count:1,inputs:{},outputs:{},library},null,ids());
+    const node=result.nodes.find(n=>n.kind==="subflow")!;
+    expect(node.config.library).toEqual(library);
+    expect(node.config.document).toEqual(body);
+    library.flowId="changed";body.revision=4;
+    expect((node.config.library as {flowId:string}).flowId).not.toBe("changed");
+    expect((node.config.document as {revision:number}).revision).toBe(3);
+  });
+  it("refuses unpersisted, mismatched, and self-referential library bodies",()=>{
+    const parent=newFlowDocument();const body=newFlowDocument();
+    const draft={kind:"subflow" as const,document:body,count:1,inputs:{},outputs:{},library:{flowId:body.id,channel:"published" as const}};
+    expect(()=>applyFlowComposition(parent,draft)).toThrow("đã công bố");
+    body.revision=1;draft.library.flowId=parent.id;
+    expect(()=>applyFlowComposition(parent,draft)).toThrow("đã công bố");
+    parent.revision=1;draft.document=parent;
+    expect(()=>applyFlowComposition(parent,draft)).toThrow("chính nó");
+  });
+  it("deep-freezes explicitly embedded snapshots and keeps shared nested references only in library mode",()=>{
+    const parent=newFlowDocument();const leaf=newFlowDocument("leaf");leaf.revision=1;
+    const middle=applyFlowComposition(newFlowDocument("middle"),{kind:"subflow",document:leaf,count:1,inputs:{},outputs:{},library:{flowId:leaf.id,channel:"published"}});middle.revision=2;
+    const snapshot=applyFlowComposition(parent,{kind:"subflow",document:middle,count:1,inputs:{},outputs:{}});
+    const body=snapshot.nodes.find(n=>n.kind==="subflow")!.config.document as unknown as typeof middle;
+    expect(body.nodes.find(n=>n.kind==="subflow")!.config.library).toBeUndefined();
+    expect(middle.nodes.find(n=>n.kind==="subflow")!.config.library).toEqual({flowId:leaf.id,channel:"published"});
+    const shared=applyFlowComposition(parent,{kind:"subflow",document:middle,count:1,inputs:{},outputs:{},library:{flowId:middle.id,channel:"published"}});
+    const sharedBody=shared.nodes.find(n=>n.kind==="subflow")!.config.document as unknown as typeof middle;
+    expect(sharedBody.nodes.find(n=>n.kind==="subflow")!.config.library).toEqual({flowId:leaf.id,channel:"published"});
+  });
   it("adds an explicit merge when inserting after converging branches",()=>{
     const parent=newFlowDocument();const body=newFlowDocument();
     const extra={...parent.nodes[0],id:"other",kind:"wait" as const,config:{durationMs:1}};parent.nodes.push(extra);parent.edges.push({...parent.edges[0],id:"other-edge",sourceNodeId:"other"});

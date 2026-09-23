@@ -47,7 +47,7 @@ it("đổi chỗ khi bài active có máy cũ hợp lệ, không mở confirm ho
   expect(p.onPreflight).not.toHaveBeenCalled(); expect(p.onExecute).not.toHaveBeenCalled();
 });
 
-it.each(["missing", "offline", "outside", "unknown", "pending"])("máy cũ %s không được đổi chỗ: thay bài cần xác nhận và đưa bài cũ về chờ", async kind => {
+it.each(["missing", "offline", "outside", "unknown"])("máy cũ %s không được đổi chỗ: thay bài cần xác nhận và đưa bài cũ về chờ", async kind => {
   const p = props();
   if (kind !== "missing") p.assignments.one = "a";
   if (kind === "offline") p.devices[0].status = "disconnected";
@@ -61,6 +61,15 @@ it.each(["missing", "offline", "outside", "unknown", "pending"])("máy cũ %s kh
   expect(p.onAssign).not.toHaveBeenCalled();
   await confirmReplacement();
   expect(p.onAssign).toHaveBeenCalledExactlyOnceWith({ one: "b" });
+});
+
+it("máy có bài chờ vẫn đổi phân công trong bản nháp, chưa dừng hoặc đăng", () => {
+  const p = props(); p.assignments.one = "a";
+  p.deviceGuards = { a: { blocking: [{ assignmentId: "x", campaignId: "c", updatedAt: "now", reason: "Đang xử lý" }], linkReview: [] }, b: { blocking: [], linkReview: [] } };
+  mount(p);
+  fireEvent.click(screen.getByRole("button", { name: "Đổi chỗ one · Máy 2 · b" }));
+  expect(p.onAssign).toHaveBeenCalledExactlyOnceWith({ one: "b", two: "a" });
+  expect(p.onPreflight).not.toHaveBeenCalled(); expect(p.onExecute).not.toHaveBeenCalled();
 });
 
 it("hủy thay bài giữ nguyên phân công", async () => {

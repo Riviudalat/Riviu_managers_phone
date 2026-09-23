@@ -25,6 +25,10 @@ mod jobs;
 pub use jobs::*;
 mod operation_stop;
 pub use operation_stop::*;
+mod device_handoff;
+pub use device_handoff::*;
+mod device_app;
+pub use device_app::*;
 mod system;
 pub use system::*;
 

@@ -854,6 +854,11 @@ impl Database {
                 ],
             )?;
         }
+        // New recovery-aware attempts require explicit operator continuation after
+        // process restart. Preserve counters and never resume a cached UI checkpoint.
+        transaction.execute("UPDATE publish_assignments SET state='failed_before_dispatch',error_code='retry_interrupted',revision=revision+1 WHERE effect_intent IS NULL AND id IN(SELECT j.assignment_id FROM publish_dispatch_jobs j JOIN publish_recovery_state r ON r.assignment_id=j.assignment_id WHERE j.state IN ('queued','running','paused'))",[])?;
+        transaction.execute("UPDATE publish_dispatch_jobs SET state='finished',owner=NULL,reason='retry_interrupted',revision=revision+1 WHERE state IN ('queued','running','paused') AND assignment_id IN(SELECT assignment_id FROM publish_recovery_state) AND EXISTS(SELECT 1 FROM publish_assignments a WHERE a.id=assignment_id AND a.effect_intent IS NULL)",[])?;
+        transaction.execute("UPDATE publish_recovery_state SET payload=json_set(payload,'$.state','interrupted','$.nextRetryAt',NULL) WHERE assignment_id IN(SELECT assignment_id FROM publish_dispatch_jobs WHERE reason='retry_interrupted')",[])?;
         transaction.execute("UPDATE publish_dispatch_jobs SET state='queued',reason=NULL,revision=revision+1 WHERE state='paused'",[])?;
         // Retain unstarted immediate jobs across restart; effects are never replayed.
         transaction.execute("DELETE FROM publish_work_claims", [])?;

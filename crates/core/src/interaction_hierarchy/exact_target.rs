@@ -84,7 +84,7 @@ async fn open_target(
 
     // Do not require a Home/feed baseline: cold launches and an already-open target can
     // both lack a changed author. The URL readback below is the only arrival authority.
-    let deadline = Instant::now() + CARD_WINDOW;
+    let mut deadline = Instant::now() + CARD_WINDOW;
     let mut redispatched = false;
     let mut declined_contacts = false;
     tokio::time::sleep(DISPATCH_SETTLE).await;
@@ -123,6 +123,7 @@ async fn open_target(
                 .reopen_url_in_app(&expected.normalized_url, target_package)
                 .await?;
             redispatched = true;
+            deadline = Instant::now() + CARD_WINDOW;
             tokio::time::sleep(DISPATCH_SETTLE).await;
             continue;
         }
@@ -133,6 +134,23 @@ async fn open_target(
             ensure_foreground(session, target_package).await?;
             match proof {
                 Ok(arrival) => return Ok(arrival),
+                Err(error)
+                    if error.downcast_ref::<TargetLinkMismatch>().is_some()
+                        && !redispatched
+                        && target_package == "com.zhiliaoapp.musically"
+                        && matches!(labels.resource_version(), Some("46.0.41" | "45.7.3")) =>
+                {
+                    // 46.0.41/en-US can retain a normal feed card after a VIEW intent,
+                    // not only a LIVE placeholder. Its copied different post ID proves
+                    // the intent was not consumed. Re-dispatch only the pinned URL once.
+                    ensure_not_cancelled(stop)?;
+                    session
+                        .reopen_url_in_app(&expected.normalized_url, target_package)
+                        .await?;
+                    redispatched = true;
+                    deadline = Instant::now() + CARD_WINDOW;
+                    tokio::time::sleep(DISPATCH_SETTLE).await;
+                }
                 Err(error)
                     if error.downcast_ref::<TargetLinkMismatch>().is_some()
                         && Instant::now() < deadline => {}

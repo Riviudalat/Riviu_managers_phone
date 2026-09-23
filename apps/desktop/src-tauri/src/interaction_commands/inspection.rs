@@ -1,10 +1,143 @@
 //! On-demand observation; does not settle or retry historical action journals.
 use super::*;
+use anyhow::Context;
 use riviu_core::{
     tiktok_labels::{TikTokControl, TikTokControls},
     SaveAdapter,
 };
 use sha2::{Digest, Sha256};
+
+pub(super) async fn comment_link(
+    control: &DeviceControlPlane,
+    db: &riviu_core::db::Database,
+    campaign: &str,
+    assignment: &str,
+    receiver: Option<&str>,
+    capture_device: Option<&str>,
+) -> anyhow::Result<riviu_core::tiktok_comment_link::SharedCommentLink> {
+    let detail = db
+        .get_interaction_campaign(campaign)?
+        .context("Campaign missing")?;
+    anyhow::ensure!(
+        detail.summary.state != ThreadCampaignState::Running,
+        "Chờ tác vụ đang chạy kết thúc"
+    );
+    let row = detail
+        .assignments
+        .iter()
+        .find(|a| a.id == assignment)
+        .context("Comment missing")?;
+    anyhow::ensure!(
+        row.comment_verification.as_ref().is_some_and(
+            |v| v.state == riviu_core::comment_verification::VerificationState::Verified
+        ),
+        "Chỉ lấy ID của bình luận đã xác minh"
+    );
+    let identity = row.posted_identity().context("Comment evidence missing")?;
+    if receiver.is_none() && capture_device.is_none() {
+        if let Some(link) = &identity.comment_link {
+            return Ok(link.clone());
+        }
+    }
+    let (request, _) = db
+        .get_interaction_campaign_request(campaign)?
+        .context("Request missing")?;
+    let target = request
+        .targets
+        .iter()
+        .find(|t| t.target_key == row.target_key)
+        .context("Post missing")?;
+    anyhow::ensure!(
+        receiver.is_none() || capture_device.is_none(),
+        "Chọn lấy ID hoặc mở ID, không dùng cả hai"
+    );
+    let actor = receiver.or(capture_device).unwrap_or(&row.actor_udid);
+    anyhow::ensure!(
+        request.actor_udids.iter().any(|s| s == actor),
+        "Máy nằm ngoài phạm vi chiến dịch"
+    );
+    let device = open_interaction_context(control, actor).await?;
+    let result = async {
+        let labels = labels(control, actor).await?;
+        anyhow::ensure!(
+            riviu_core::tiktok_comment_link::supported(labels),
+            "Chưa đo lấy ID bình luận trên bản TikTok này"
+        );
+        let session = control.streaming_session(&device.context)?;
+        let stop = std::sync::atomic::AtomicBool::new(false);
+        session.set_gui_scope(riviu_core::ui_automation::GuiScope {
+            run_id: campaign.into(),
+            assignment_id: Some(assignment.into()),
+            device_id: actor.into(),
+            deadline_ms: Some(chrono::Utc::now().timestamp_millis() + 150000),
+        });
+        if receiver.is_some() {
+            let found = riviu_core::tiktok_comment_link::open_and_verify(
+                session.as_ref(),
+                labels,
+                &identity,
+                &stop,
+            )
+            .await?;
+            return found
+                .identity
+                .comment_link
+                .context("Missing copied comment ID");
+        }
+        riviu_core::interaction_hierarchy::open_pinned_target_by_hierarchy(
+            session.as_ref(),
+            labels,
+            &device.target_package,
+            target,
+            &stop,
+        )
+        .await?;
+        riviu_core::comment_verification::search::open_drawer(session.as_ref(), labels).await?;
+        let root = row
+            .parent_assignment_id
+            .as_ref()
+            .and_then(|id| detail.assignments.iter().find(|a| &a.id == id))
+            .and_then(|a| a.posted_identity());
+        let found = riviu_core::comment_verification::search::find(
+            session.as_ref(),
+            labels,
+            &identity.text,
+            Some(&identity.author_label),
+            root.as_ref(),
+            &stop,
+        )
+        .await?;
+        let account = request
+            .seeding
+            .as_ref()
+            .and_then(|s| s.expected_accounts.get(&row.actor_udid))
+            .cloned()
+            .unwrap_or(db.get_device_meta(&row.actor_udid)?.handle);
+        anyhow::ensure!(!account.is_empty(), "Comment author account missing");
+        riviu_core::comment_verification::search::verify_author(
+            session.as_ref(),
+            labels,
+            &found,
+            &account,
+        )
+        .await?;
+        let link = riviu_core::tiktok_comment_link::capture(
+            session.as_ref(),
+            labels,
+            &identity,
+            &target.content_id,
+            &stop,
+        )
+        .await?;
+        db.store_comment_link(campaign, assignment, &identity, &link)?;
+        Ok(link)
+    }
+    .await;
+    let closed = control.close_ui_context(device.context).await;
+    let link = result?;
+    closed?;
+    Ok(link)
+}
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -64,14 +197,7 @@ pub(super) async fn read_account_from_session(
         riviu_core::tiktok_account::account_read_supported(labels),
         "Chưa hỗ trợ đọc tài khoản trên bản TikTok/ngôn ngữ này"
     );
-    let profile = labels
-        .label(TikTokControl::ProfileTab)
-        .ok_or_else(|| anyhow::anyhow!("Chưa đo tab Hồ sơ"))?;
-    let button = session
-        .locate(profile.to_query())
-        .await?
-        .ok_or_else(|| anyhow::anyhow!("Không thấy tab Hồ sơ"))?;
-    session.tap(button.centre()).await?;
+    riviu_core::tiktok_share::navigate_own_profile(session, &labels).await?;
     let deadline = tokio::time::Instant::now() + Duration::from_secs(4);
     let observed = loop {
         let observed = riviu_core::tiktok_account::observe_own_account(session, labels).await?;

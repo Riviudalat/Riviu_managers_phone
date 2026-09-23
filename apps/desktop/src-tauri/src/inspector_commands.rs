@@ -97,31 +97,8 @@ async fn capture(
                 return None;
             }
             let rect = n.rect()?;
-            let val = |s: &str| (!s.trim().is_empty()).then(|| s.to_owned());
-            let description = val(n.attr("content-desc"));
-            let text = if description.is_none() {
-                val(n.attr("text"))
-            } else {
-                None
-            };
-            let resource_id = if description.is_none() && text.is_none() {
-                val(n.attr("resource-id"))
-            } else {
-                None
-            };
-            let mut selector = ElementSelector {
-                package: package.clone(),
-                description,
-                text,
-                resource_id,
-                class_name: None,
-            };
-            if selector.matches(&tree).len() != 1 {
-                selector.class_name = val(n.attr("class"));
-                selector.resource_id = val(n.attr("resource-id"));
-            }
-            let selector = (selector.validate().is_ok() && selector.matches(&tree).len() == 1)
-                .then_some(selector);
+            let selector =
+                riviu_core::ui_automation::inspector::selector_for_node(&tree, index, &package);
             Some(InspectorElement {
                 index,
                 parent: n.parent,
@@ -249,6 +226,90 @@ pub async fn inspector_tap(
     let _admission = state.ensure_accepting_work()?;
     tap(&state, udid, selector).await
 }
+
+#[tauri::command]
+pub fn inspector_confirm_postcondition(
+    state: State<'_, AppState>,
+    udid: String,
+    snapshot_id: String,
+    expected: ElementSelector,
+) -> Result<InspectorRecording, CommandError> {
+    let _admission = state.ensure_accepting_work()?;
+    confirm_postcondition(&state, &udid, &snapshot_id, expected)
+}
+
+fn read_observation(state: &AppState, id: &str) -> Result<InspectorSnapshot, CommandError> {
+    if id.is_empty()
+        || id.len() > 64
+        || !id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+    {
+        return Err(CommandError::invalid_argument(
+            "Mã bằng chứng Inspector không hợp lệ",
+        ));
+    }
+    let root = state.artifacts_dir.join("inspector");
+    let path = root.join(format!("{id}.json"));
+    let bytes = std::fs::read(&path).map_err(err)?;
+    serde_json::from_slice(&bytes).map_err(err)
+}
+
+fn confirm_postcondition(
+    state: &AppState,
+    udid: &str,
+    snapshot_id: &str,
+    expected: ElementSelector,
+) -> Result<InspectorRecording, CommandError> {
+    expected.validate().map_err(err)?;
+    let mut record = recording(state, udid)?.ok_or_else(|| err("Chưa có phiên ghi"))?;
+    let step = record
+        .steps
+        .last_mut()
+        .ok_or_else(|| err("Chưa có bước cần xác minh"))?;
+    if step.verified
+        || step.after_id != snapshot_id
+        || step
+            .error
+            .as_deref()
+            .is_none_or(|v| v != "Chờ chọn phần tử kết quả")
+    {
+        return Err(err(
+            "Bước ghi đã thay đổi; đọc lại Inspector trước khi xác minh",
+        ));
+    }
+    let before = read_observation(state, &step.before_id)?;
+    let after = read_observation(state, &step.after_id)?;
+    if before.udid != udid || after.udid != udid || after.package != expected.package {
+        return Err(err("Bằng chứng không thuộc đúng máy hoặc ứng dụng"));
+    }
+    if !postcondition_appeared(&before.elements, &after.elements, &expected) {
+        return Err(err(
+            "Phần tử kết quả phải xuất hiện sau thao tác và chưa có trong màn hình trước đó",
+        ));
+    }
+    step.expected = Some(expected);
+    step.verified = true;
+    step.error = None;
+    state
+        .db
+        .set_setting(&key(udid), &serde_json::to_string(&record).map_err(err)?)
+        .map_err(err)?;
+    Ok(record)
+}
+
+fn postcondition_appeared(
+    before: &[InspectorElement],
+    after: &[InspectorElement],
+    expected: &ElementSelector,
+) -> bool {
+    after
+        .iter()
+        .any(|element| element.selector.as_ref() == Some(expected))
+        && !before
+            .iter()
+            .any(|element| element.selector.as_ref() == Some(expected))
+}
 pub async fn tap(
     state: &AppState,
     udid: String,
@@ -306,53 +367,83 @@ pub async fn tap(
     .await?;
     save_observation(state, &before)?;
     save_observation(state, &after)?;
-    let expected = after
-        .elements
-        .iter()
-        .filter(|e| e.selector.is_some() && (!e.text.is_empty() || !e.description.is_empty()))
-        .filter(|e| !before.elements.iter().any(|old| old.selector == e.selector))
-        // Prefer screen controls to account handles and changing counters so a
-        // navigation recording can be replayed on another device/account.
-        .min_by_key(|e| {
-            if [
-                "Edit profile",
-                "Edit",
-                "Sửa hồ sơ",
-                "Profile menu",
-                "Menu hồ sơ",
-                "For You",
-                "Dành cho bạn",
-            ]
-            .iter()
-            .any(|label| e.text == *label || e.description == *label)
-            {
-                0
-            } else if !e.description.is_empty() && e.clickable {
-                1
-            } else {
-                2
-            }
-        })
-        .and_then(|e| e.selector.clone());
-    let verified = action_error.is_none() && expected.is_some();
+    let verified = record.is_none() && action_error.is_none();
     if let Some(record) = record.as_mut() {
         record.steps.push(RecordedStep {
             selector,
             before_id: before.id,
             after_id: after.id.clone(),
-            verified,
-            expected,
-            error: action_error,
+            verified: false,
+            expected: None,
+            error: action_error.or_else(|| Some("Chờ chọn phần tử kết quả".into())),
         });
         state
             .db
             .set_setting(&key(&udid), &serde_json::to_string(record).map_err(err)?)
             .map_err(err)?;
     }
-    if !verified {
+    if record.is_none() && !verified {
         return Err(err(
-            "Đã thử bấm; chưa thấy thay đổi giao diện. Kiểm tra bằng chứng, không tự bấm lại.",
+            "Đã thử bấm nhưng driver chưa xác nhận thao tác; không tự bấm lại.",
         ));
     }
     Ok(after)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn selector(text: &str) -> ElementSelector {
+        ElementSelector {
+            package: "app.fixture".into(),
+            text: Some(text.into()),
+            description: None,
+            resource_id: None,
+            class_name: None,
+            schema_version: None,
+            text_prefix: None,
+            description_prefix: None,
+            scope: None,
+            action_target: None,
+        }
+    }
+
+    fn element(index: usize, selector: ElementSelector) -> InspectorElement {
+        InspectorElement {
+            index,
+            parent: None,
+            text: selector.text.clone().unwrap_or_default(),
+            description: String::new(),
+            resource_id: String::new(),
+            class_name: "android.widget.Button".into(),
+            x: 0.0,
+            y: 0.0,
+            width: 10.0,
+            height: 10.0,
+            enabled: true,
+            clickable: true,
+            selector: Some(selector),
+        }
+    }
+
+    #[test]
+    fn recorder_requires_an_explicit_new_postcondition() {
+        let expected = selector("Profile");
+        assert!(postcondition_appeared(
+            &[element(1, selector("Home"))],
+            &[element(2, expected.clone())],
+            &expected,
+        ));
+        assert!(!postcondition_appeared(
+            &[element(1, expected.clone())],
+            &[element(2, expected.clone())],
+            &expected,
+        ));
+        assert!(!postcondition_appeared(
+            &[element(1, selector("Home"))],
+            &[element(2, selector("Inbox"))],
+            &expected,
+        ));
+    }
 }

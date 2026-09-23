@@ -37,14 +37,14 @@ it("immediately names the blocked machine, disables posting and opens its exact 
   const card = screen.getByRole("checkbox", { name: "Chọn Máy 1 · a" }).closest("article")!;
   expect(within(card).getByText("Máy còn bài chưa lấy được link")).toBeVisible();
   expect(within(card).getByText(row.reason)).toBeVisible();
-  expect(screen.getByRole("button", { name: "Kiểm tra & đăng" })).toBeDisabled();
+  expect(screen.getByRole("button", { name: "Kiểm tra & đăng" })).toBeEnabled();
   fireEvent.click(within(card).getByRole("button", { name: /Xem bài đang chờ/ })); expect(open).toHaveBeenCalledExactlyOnceWith("campaign-a");
   view.rerender(<PublishQuickSetup {...p} deviceGuards={{ ...guards, a: { blocking: [], linkReview: [] } }} />);
   expect(screen.getByRole("button", { name: "Kiểm tra & đăng" })).toBeEnabled();
 });
-it("quick assignment skips blocked machines but nonblocking review remains selectable", () => {
+it("quick assignment retains pending machines for explicit stop-before-preflight", () => {
   const p = props(), assign = vi.fn(); const view = render(<PublishQuickSetup {...p} selectedIds={[]} assignments={{}} deviceGuards={guards} onAssignmentChange={assign} />);
-  fireEvent.click(screen.getByRole("button", { name: "Chọn nhanh" })); expect(assign).toHaveBeenCalledWith(["one"], { one: "b" });
+  fireEvent.click(screen.getByRole("button", { name: "Chọn nhanh" })); expect(assign).toHaveBeenCalledWith(["one", "two"], { one: "a", two: "b" });
   view.rerender(<PublishQuickSetup {...p} deviceGuards={{ ...guards, a: { blocking: [], linkReview: [row] } }} />);
   expect(screen.getByText("Bài cũ còn cần kiểm tra link")).toBeVisible(); expect(screen.getByRole("button", { name: "Kiểm tra & đăng" })).toBeEnabled();
 });

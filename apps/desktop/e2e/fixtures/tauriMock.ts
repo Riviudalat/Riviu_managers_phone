@@ -741,6 +741,8 @@ export async function installTauriMock(
     });
     commandHandlers.set("operation_get_run", (args) => clone(operations[String(args.operationId)] ?? null));
     commandHandlers.set("operation_stop_status", () => null);
+    commandHandlers.set("operation_prepare_devices", args => ({ operationId: "handoff:fixture", state: "closed", stopMarker: null,
+      devices: (args.udids as string[]).map(udid => ({ udid, closed: true, message: "Fixture owner released" })) }));
     commandHandlers.set("operation_device_log", () => ({ entries: [], truncated: false }));
     commandHandlers.set("nurture_get_settings", () => ({
       baseUrl: "https://api.openai.com/v1",

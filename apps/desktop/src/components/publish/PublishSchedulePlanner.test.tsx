@@ -265,7 +265,7 @@ describe("schedule assignment workspace", () => {
     elementFromPoint.mockReturnValue(zone);
     const start = (name: string) => {
       fireEvent.pointerDown(screen.getByRole("button", { name: `Kéo bài ${name}` }), { button: 0, pointerId: 1, clientX: 10, clientY: 10 });
-      fireEvent.pointerMove(root, { pointerId: 1, clientX: 80, clientY: 20 });
+      fireEvent.pointerMove(root, { pointerId: 1, buttons: 1, clientX: 80, clientY: 20 });
     };
     start("Bài 1");
     view.rerender(<PublishSchedulePlanner {...props} devices={devices.slice(1)} />);

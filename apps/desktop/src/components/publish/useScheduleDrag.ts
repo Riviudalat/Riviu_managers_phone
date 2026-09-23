@@ -30,10 +30,15 @@ export function useScheduleDrag({ disabled, getIds, onDrop }: {
     setView(null);
   };
   useEffect(() => {
+    const release = (event: globalThis.PointerEvent) => {
+      if (drag.current?.pointer === event.pointerId && !root.current?.contains(event.target as Node)) cancel();
+    };
     const escape = (event: KeyboardEvent) => { if (event.key === "Escape" && drag.current) { event.preventDefault(); cancel(); } };
     window.addEventListener("keydown", escape);
     window.addEventListener("blur", cancel);
-    return () => { window.removeEventListener("keydown", escape); window.removeEventListener("blur", cancel); cancel(); };
+    window.addEventListener("pointerup", release, true);
+    window.addEventListener("pointercancel", cancel, true);
+    return () => { window.removeEventListener("keydown", escape); window.removeEventListener("blur", cancel); window.removeEventListener("pointerup", release, true); window.removeEventListener("pointercancel", cancel, true); cancel(); };
   }, []);
   useEffect(() => { if (disabled) cancel(); }, [disabled]);
   const tick = () => {
@@ -51,6 +56,9 @@ export function useScheduleDrag({ disabled, getIds, onDrop }: {
     frame.current = requestAnimationFrame(tick);
   };
   return { root, view, cancel, bindings: {
+    // WebView's native image/text drag otherwise takes over before pointerup and
+    // leaves the schedule pointer state behind. This workspace owns its own drag.
+    onDragStart(event: React.DragEvent<HTMLElement>) { event.preventDefault(); },
     onPointerDown(event: ReactPointerEvent<HTMLElement>) {
       if (current.current.disabled || event.button !== 0) return;
       const source = (event.target as HTMLElement).closest<HTMLElement>("[data-schedule-drag]");
@@ -61,6 +69,7 @@ export function useScheduleDrag({ disabled, getIds, onDrop }: {
     onPointerMove(event: ReactPointerEvent<HTMLElement>) {
       const d = drag.current;
       if (!d || d.pointer !== event.pointerId || current.current.disabled) return;
+      if ((event.buttons & 1) === 0) { cancel(); suppressClick.current = false; return; }
       d.x = event.clientX; d.y = event.clientY;
       if (!d.active && Math.hypot(d.x - d.startX, d.y - d.startY) < 7) return;
       event.preventDefault();
@@ -77,6 +86,6 @@ export function useScheduleDrag({ disabled, getIds, onDrop }: {
     },
     onPointerCancel: cancel,
     onLostPointerCapture: cancel,
-    onClickCapture(event: React.MouseEvent<HTMLElement>) { if (suppressClick.current) { suppressClick.current = false; event.preventDefault(); event.stopPropagation(); } },
+    onClickCapture(event: React.MouseEvent<HTMLElement>) { if (suppressClick.current) { suppressClick.current = false; if(event.detail===0)return; event.preventDefault(); event.stopPropagation(); } },
   } };
 }

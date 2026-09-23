@@ -402,8 +402,8 @@ jobs:
           set -euo pipefail
           cargo build --release --locked \
             --target "${{ matrix.target }}" \
-            -p riviu-managers-phone \
-            --bin riviu-deployment-check --features deployment-check
+            -p riviu-deployment-checker \
+            --bin riviu-deployment-check
           if [ "${{ runner.os }}" = "Windows" ]; then
             checker="target/${{ matrix.target }}/release/riviu-deployment-check.exe"
           else

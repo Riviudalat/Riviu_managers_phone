@@ -26,7 +26,8 @@ type CaptionContext = { id: string; source: string; origin: HTMLButtonElement };
 type AssignmentSnapshot = { props: QuickProps; activeId?: string; activeVisible: boolean; locked: boolean; key: string };
 
 function canReceive(p: QuickProps, udid: string) {
-  return p.eligible.includes(udid) && p.devices.some(d => d.udid === udid && d.status === "ready") && !deviceGuardBlock(p.deviceGuards, udid);
+  return p.eligible.includes(udid) && p.devices.some(d => d.udid === udid && (d.status === "ready" || d.status === "busy" || d.status === "connected"))
+    && (p.deviceGuards === undefined || p.deviceGuards[udid] !== undefined);
 }
 function validOldMachine(p: QuickProps, id: string) {
   const old = p.assignments[id];
@@ -76,12 +77,16 @@ export function PublishQuickSetup(p: QuickProps) {
   const activeVisible = !!active && visibleBundles.some(b => b.id === active.id);
   const captionBundle = captionContext?.source === p.sourceRoot && p.active !== false ? bundles.find(b => b.id === captionContext.id) : undefined;
   const devices = useMemo(() => orderDevicesByNumber(p.devices, p.metas), [p.devices, p.metas]);
-  const selectable = devices.filter(d => d.status === "ready" && p.eligible.includes(d.udid));
-  const ready = selectable.filter(d => !deviceGuardBlock(p.deviceGuards, d.udid));
+  const selectable = devices.filter(d => (d.status === "ready" || d.status === "busy" || d.status === "connected") && p.eligible.includes(d.udid));
+  const ready = selectable.filter(d => canReceive(p, d.udid));
   const pendingBlock = selected.map(bundle => p.assignments[bundle.id]).filter(Boolean)
     .map(udid => deviceGuardBlock(p.deviceGuards, udid)).find(Boolean);
+  const unknownGuard = selected.some(bundle => {
+    const id = p.assignments[bundle.id];
+    return id && p.deviceGuards !== undefined && !p.deviceGuards[id];
+  }) ? "Chưa kiểm tra được bài đang chờ" : undefined;
   const selection = publishSelectionStatus({ selectedIds: p.selectedIds, bundles, assignments: p.assignments,
-    captions: p.captions, eligible: p.eligible, ready: selectable.map(d => d.udid), blockingReason: pendingBlock ?? p.blockingReason });
+    captions: p.captions, eligible: p.eligible, ready: selectable.map(d => d.udid), blockingReason: unknownGuard ?? p.blockingReason });
   const mapped = selection.mapped;
   const locked = p.busy || p.scanning || p.preflightLoading;
   const complete = selection.ready;
@@ -206,7 +211,7 @@ export function PublishQuickSetup(p: QuickProps) {
           <div id="publish-google-settings" className="pq-settings-content">{p.settings}</div>
         </div>
       </div>
-      {(sourceWarnings.length > 0 || duplicateCaptions > 0 || p.blockingReason || error || p.notices) && <div className="pq-messages">
+      {(sourceWarnings.length > 0 || duplicateCaptions > 0 || p.blockingReason || error || p.notices) && <div className="pq-messages" tabIndex={0} aria-label="Thông báo thiết lập đăng bài">
         {p.blockingReason && !pendingBlock && <p className="pq-blocking-reason" role="status">{p.blockingReason}</p>}
         {error && <div className="pq-error" role="alert">{error}<button type="button" aria-label="Đóng lỗi" onClick={() => setError("")}><X size={14}/></button></div>}
         {sourceWarnings.length > 0 && <details className="pq-hint"><summary>Cảnh báo nguồn ({sourceWarnings.length})</summary>
@@ -238,7 +243,7 @@ export function PublishQuickSetup(p: QuickProps) {
               <button type="button" className="pq-link-post" title={b.name} aria-label={`Chọn cặp bài · ${b.name}`} aria-pressed={b.id === active?.id} onClick={() => setActiveId(b.id)}><span>{String(index + 1).padStart(2, "0")}</span><strong>{b.name}</strong></button>
               <label className="pq-link-target"><span aria-hidden="true">→</span><select aria-label={`Máy nhận bài ${b.name}`} disabled={locked || confirming} value={udid ?? ""} onChange={e => void assign(b.id, e.target.value)}><option value="">Chưa ghép</option>
                 {udid && !selectable.some(d => d.udid === udid) && <option value={udid}>{label(udid)} · {p.eligible.includes(udid) ? "Chưa sẵn sàng" : "Ngoài phạm vi"}</option>}
-                {selectable.map(d => <option key={d.udid} value={d.udid} disabled={!!deviceGuardBlock(p.deviceGuards, d.udid)}>{label(d.udid)}{deviceGuardBlock(p.deviceGuards, d.udid) ? ` · ${deviceGuardBlock(p.deviceGuards, d.udid)}` : ""}</option>)}
+                {selectable.map(d => <option key={d.udid} value={d.udid} disabled={!canReceive(p, d.udid)}>{label(d.udid)}{deviceGuardBlock(p.deviceGuards, d.udid) ? ` · ${deviceGuardBlock(p.deviceGuards, d.udid)}` : ""}</option>)}
               </select></label>
               <div className="pq-link-detail"><span>{b.mediaKind === "video" ? "Video MP4" : `${b.images.length} ảnh`}</span><button type="button" className="ghost" aria-label={`Sửa caption · ${b.name}`} onClick={e => openCaption(b.id, e.currentTarget)}>Sửa caption</button></div>
               <div className="pq-link-account"><span title={handle || (udid ? label(udid) : "Cần chọn máy")}>{handle || (udid ? valid ? "Đã ghép máy" : "Máy chưa hợp lệ" : "Cần chọn máy")}</span><button type="button" className="pq-unlink ghost" aria-label={`Bỏ ghép bài ${b.name}`} title="Bỏ ghép bài này" disabled={locked || confirming || !udid} onClick={() => void assign(b.id, "")}><X size={14}/></button></div>

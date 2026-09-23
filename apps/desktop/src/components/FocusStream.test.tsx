@@ -823,7 +823,7 @@ describe("focus hardware controls", () => {
     vi.mocked(deviceControlBegin).mockRejectedValueOnce(new Error("device offline")).mockResolvedValue(undefined);
     const view = render(<FocusStream device={fixture} index={1} onClose={() => undefined} devices={[fixture]} onSelectDevice={() => undefined}/>);
     const retry = await view.findByRole("button", { name: "Thử lại điều khiển" });
-    expect(view.getByTestId("focus-control-status")).toHaveTextContent("device offline");
+    expect(view.getByTestId("focus-control-status")).toHaveTextContent("Không tìm thấy thiết bị trong ADB");
     expect(view.getByRole("button", { name: "Home" })).toBeDisabled();
     fireEvent.click(retry);
     await waitFor(() => expect(view.getByRole("button", { name: "Home" })).toBeEnabled());

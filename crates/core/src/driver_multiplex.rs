@@ -328,8 +328,28 @@ impl DeviceDriver for MultiplexDriver {
         self.route(udid)?.resolve_tiktok_package(udid).await
     }
 
+    async fn resolve_tiktok_package_with_preference(
+        &self,
+        udid: &str,
+        preferred: Option<&str>,
+    ) -> anyhow::Result<String> {
+        self.route(udid)?
+            .resolve_tiktok_package_with_preference(udid, preferred)
+            .await
+    }
+
     async fn tiktok_build(&self, udid: &str) -> anyhow::Result<(String, String, String)> {
         self.route(udid)?.tiktok_build(udid).await
+    }
+
+    async fn tiktok_build_with_preference(
+        &self,
+        udid: &str,
+        preferred: Option<&str>,
+    ) -> anyhow::Result<(String, String, String)> {
+        self.route(udid)?
+            .tiktok_build_with_preference(udid, preferred)
+            .await
     }
 
     async fn verify_automation_readiness(&self, udid: &str) -> anyhow::Result<()> {

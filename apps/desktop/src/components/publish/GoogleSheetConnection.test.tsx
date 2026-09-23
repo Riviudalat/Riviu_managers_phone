@@ -17,6 +17,28 @@ afterEach(() => { cleanup(); vi.useRealTimers(); });
 async function editUrl(value = url) { await waitFor(() => expect(screen.getByRole("button", { name: "Đăng nhập Google" })).toBeEnabled()); fireEvent.change(screen.getByRole("textbox", { name: "Link Google Sheet" }), { target: { value } }); }
 
 describe("compact Google Sheet connection", () => {
+  it("loads the saved account without automatically preparing the shared Sheet", async () => {
+    vi.mocked(googleSheetsStatus).mockResolvedValue(active());
+    const ready = vi.fn(); render(<GoogleSheetConnection onReadyChange={ready} />);
+    await waitFor(() => expect(screen.getByRole("button", { name: "Kiểm tra kết nối" })).toBeEnabled());
+    expect(publishSheetCheck).not.toHaveBeenCalled();
+    expect(googleSheetsConnect).not.toHaveBeenCalled();
+    expect(ready).toHaveBeenLastCalledWith(false);
+    fireEvent.click(screen.getByRole("button", { name: "Kiểm tra kết nối" }));
+    await waitFor(() => expect(ready).toHaveBeenLastCalledWith(true));
+  });
+  it("ends a stalled status read and ignores its late response", async () => {
+    vi.useFakeTimers();
+    const pending = deferred<GoogleSheetsStatus>();
+    vi.mocked(googleSheetsStatus).mockReturnValue(pending.promise);
+    render(<GoogleSheetConnection />);
+    await act(async () => vi.advanceTimersByTimeAsync(16_000));
+    expect(screen.getByRole("alert")).toHaveTextContent("hết thời gian");
+    expect(screen.getByRole("button", { name: "Đăng nhập Google" })).toBeEnabled();
+    await act(async () => pending.resolve(active()));
+    expect(screen.queryByText(/Kết nối đã xác minh/)).toBeNull();
+    expect(publishSheetCheck).not.toHaveBeenCalled();
+  });
   it("connects the saved URL automatically after OAuth without opening Picker", async () => {
     vi.mocked(googleSheetsStatus).mockResolvedValue(status({ connected: false, pickerConfigured: false, sheetUrl: url }));
     vi.mocked(googleSheetsLogin).mockResolvedValue(status({ pickerConfigured: false, sheetUrl: url }));
@@ -111,6 +133,8 @@ describe("compact Google Sheet connection", () => {
   it("reads an active exact target without picker or reconnect", async () => {
     vi.mocked(googleSheetsStatus).mockResolvedValue(active({ selectedFileId: "other-picked-file" }));
     const ready = vi.fn(); render(<GoogleSheetConnection onReadyChange={ready} />);
+    await waitFor(() => expect(screen.getByRole("button", { name: "Kiểm tra kết nối" })).toBeEnabled());
+    fireEvent.click(screen.getByRole("button", { name: "Kiểm tra kết nối" }));
     await waitFor(() => expect(ready).toHaveBeenLastCalledWith(true));
     expect(publishSheetCheck).toHaveBeenCalledExactlyOnceWith(url);
     expect(googleSheetsPickFile).not.toHaveBeenCalled(); expect(googleSheetsConnect).not.toHaveBeenCalled();
@@ -164,7 +188,10 @@ describe("compact Google Sheet connection", () => {
   });
   it("invalidates a late read after editing, even when the URL changes back", async () => {
     vi.mocked(googleSheetsStatus).mockResolvedValue(active()); const read = deferred<PublishSheetCheckResult>(); vi.mocked(publishSheetCheck).mockReturnValue(read.promise);
-    const ready = vi.fn(); render(<GoogleSheetConnection onReadyChange={ready} />); await waitFor(() => expect(publishSheetCheck).toHaveBeenCalled());
+    const ready = vi.fn(); render(<GoogleSheetConnection onReadyChange={ready} />);
+    await waitFor(() => expect(screen.getByRole("button", { name: "Kiểm tra kết nối" })).toBeEnabled());
+    fireEvent.click(screen.getByRole("button", { name: "Kiểm tra kết nối" }));
+    await waitFor(() => expect(publishSheetCheck).toHaveBeenCalled());
     const input = screen.getByRole("textbox", { name: "Link Google Sheet" }); fireEvent.change(input, { target: { value: url + "x" } }); fireEvent.change(input, { target: { value: url } });
     await act(async () => read.resolve(checked())); expect(ready).toHaveBeenLastCalledWith(false); expect(screen.getByRole("button", { name: "Kiểm tra kết nối" })).toBeEnabled();
   });
@@ -200,12 +227,16 @@ describe("compact Google Sheet connection", () => {
   });
   it("clears readiness when focus refresh observes expired credentials", async () => {
     vi.mocked(googleSheetsStatus).mockResolvedValue(active()); const ready = vi.fn(); render(<GoogleSheetConnection onReadyChange={ready} />);
+    await waitFor(() => expect(screen.getByRole("button", { name: "Kiểm tra kết nối" })).toBeEnabled());
+    fireEvent.click(screen.getByRole("button", { name: "Kiểm tra kết nối" }));
     await waitFor(() => expect(ready).toHaveBeenLastCalledWith(true));
     vi.mocked(googleSheetsStatus).mockResolvedValue(active({ connected: false, error: "Phiên Google hết hạn" })); fireEvent(window, new Event("focus"));
     await waitFor(() => expect(ready).toHaveBeenLastCalledWith(false)); expect(screen.getByRole("alert")).toHaveTextContent("hết hạn"); expect(screen.getByRole("button", { name: "Đăng nhập Google" })).toBeEnabled();
   });
   it("clears readiness if the active destination changes outside the current form", async () => {
     vi.mocked(googleSheetsStatus).mockResolvedValue(active()); const ready = vi.fn(); render(<GoogleSheetConnection onReadyChange={ready} />);
+    await waitFor(() => expect(screen.getByRole("button", { name: "Kiểm tra kết nối" })).toBeEnabled());
+    fireEvent.click(screen.getByRole("button", { name: "Kiểm tra kết nối" }));
     await waitFor(() => expect(ready).toHaveBeenLastCalledWith(true));
     vi.mocked(googleSheetsStatus).mockResolvedValue(active({ sheetUrl: "https://docs.google.com/spreadsheets/d/file-a/edit#gid=9" }));
     fireEvent(window, new Event("focus"));
