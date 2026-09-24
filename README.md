@@ -98,6 +98,37 @@ bản đóng gói là lưới an toàn cho máy sạch. `RIVIU_MINICAP_APK` cũn
 
 ## Chạy từ source
 
+### Windows: tự chuẩn bị máy mới và mở app
+
+Sau khi clone hoặc tải source, nhấp đúp **`START-RIVIU.cmd`** tại gốc dự án.
+Chạy bằng tài khoản Windows thường; chỉ trình cài thành phần cần quyền quản trị
+mới hiện yêu cầu UAC. Cần Internet và WinGet (App Installer trong Microsoft Store).
+
+Bộ khởi động kiểm tra Node/npm, Rustup, Python 3.12, WebView2, **MSVC và Windows SDK
+thực tế**; cài phần thiếu qua WinGet. Nếu đã có Build Tools 2022 nhưng thiếu C++, nó
+bổ sung workload rồi kiểm tra lại compiler/linker và thư viện SDK. Sau đó nạp môi
+trường C++, cài Rust theo `rust-toolchain.toml`, dependency Python, chạy `npm ci`
+và mở Tauri dev. Mỗi lần mở đều kiểm tra lại và đồng bộ dependency; lần build đầu
+có thể lâu và tốn vài GB. Không đóng cửa sổ terminal trong lúc dùng app.
+
+Nếu trình cài yêu cầu khởi động lại Windows, làm theo rồi mở lại cùng file. Nếu
+cài thất bại, bộ khởi động dừng và giữ thông báo lỗi, không báo đã sẵn sàng.
+Đóng các phiên Riviu khác trước khi chạy để tránh tranh thiết bị/dữ liệu.
+
+Trong CMD tại gốc source, có thể dùng:
+
+```bat
+START-RIVIU.cmd -CheckOnly
+START-RIVIU.cmd -SetupOnly
+```
+
+`-CheckOnly` chỉ kiểm tra các thành phần, không cài hay mở app; không thay thế việc
+build kiểm chứng. `-SetupOnly` cài môi trường/dependency rồi dừng. Bộ này dành cho
+Windows x64, không tự chạy khi đăng nhập Windows, không tự đăng bài/tương tác và
+không tự cấp quyền USB trên điện thoại. Chế độ này chạy source, không tạo bộ cài.
+
+### Chạy thủ công
+
 ```powershell
 # Windows PowerShell
 py -3.12 -m pip install -r sidecars/pymobiledevice3/requirements.txt
