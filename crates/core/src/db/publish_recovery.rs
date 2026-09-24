@@ -653,7 +653,7 @@ mod tests {
             .unwrap();
         assert_eq!(queued.state, "retryWaiting");
         assert!(queued.manual);
-        assert_eq!(queued.max_retries, 0);
+        assert_eq!(queued.max_retries, 3);
         assert!(queued.next_retry_at.unwrap() >= (before + 64_000) as f64);
         assert!(!db
             .pending_publish_dispatch(10)
@@ -775,7 +775,7 @@ mod tests {
             .is_err());
     }
     #[test]
-    fn manual_retry_ack_is_idempotent_and_has_no_automatic_retries() {
+    fn manual_retry_ack_is_idempotent_and_keeps_manual_requeue_policy() {
         let (db, _, campaign, a) = fixture();
         let run = db.claim_publish_pipeline(&campaign).unwrap().unwrap();
         let job = db.pending_publish_dispatch(10).unwrap().remove(0);
@@ -805,10 +805,13 @@ mod tests {
         assert!(db
             .acknowledged_publish_retry(id, revision, &request)
             .unwrap());
+        let recovery = db.publish_recovery_state(id).unwrap().unwrap();
+        assert!(recovery.manual);
+        assert_eq!(recovery.max_retries, 3);
         assert!(db
             .reserve_publish_step_retry(id, &first.token, "network")
             .unwrap()
-            .is_none());
+            .is_some());
         let other = a.iter().find(|a| a.id != *id).unwrap();
         assert!(db
             .acknowledged_publish_retry(&other.id, revision, &request)

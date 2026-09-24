@@ -99,6 +99,10 @@ pub struct NurtureApiTestResult {
 }
 
 pub(crate) fn validate_nurture_settings(settings: &NurtureSettings) -> Result<(), String> {
+    settings
+        .network
+        .ensure_implemented()
+        .map_err(|error| error.to_string())?;
     if settings.feed_source == riviu_core::types::NurtureFeedSource::Search
         && (settings.search_keyword.trim().is_empty()
             || settings.search_keyword.trim().chars().count() > 100
@@ -805,6 +809,7 @@ impl NurtureRuntime {
         settings: NurtureSettings,
         max_duration: Option<Duration>,
     ) -> anyhow::Result<Vec<String>> {
+        settings.network.ensure_implemented()?;
         // **The identity of this run, and the only place it exists.**
         //
         // `set_status` inserts by udid and nothing ever removes an entry, so the status list

@@ -6,7 +6,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 
 const MODES = ['inspect', 'preflight', 'submit', 'observe'];
 const FLAGS = ['mode', 'report-dir', 'udids', 'source', 'bundle-ids', 'sheet-id', 'sheet-gid',
-  'sheet-disabled', 'dev-scope', 'cdp', 'page-url', 'campaign-id', 'confirm', 'wait-seconds', 'poll-seconds', 'content-snapshot'];
+  'sheet-disabled', 'real-android', 'dev-scope', 'cdp', 'page-url', 'campaign-id', 'confirm', 'wait-seconds', 'poll-seconds', 'content-snapshot'];
 const check = (condition, message) => { if (!condition) throw new Error(message); };
 const hash = value => createHash('sha256').update(JSON.stringify(value)).digest('hex');
 const hashBytes = value => createHash('sha256').update(value).digest('hex');
@@ -147,6 +147,8 @@ export function parseArgs(argv) {
   const mode = flags.mode ?? 'inspect';
   check(flags['sheet-disabled'] === undefined || flags['sheet-disabled'] === 'true',
     '--sheet-disabled only accepts the explicit value true');
+  check(flags['real-android'] === undefined || flags['real-android'] === 'true',
+    '--real-android only accepts the explicit value true');
   const sheetDisabled = flags['sheet-disabled'] === 'true';
   check(MODES.includes(mode), 'mode phải là inspect, preflight, submit hoặc observe');
   check(flags['report-dir'], 'Thiếu --report-dir');
@@ -162,7 +164,8 @@ export function parseArgs(argv) {
     bundleIds: flags['bundle-ids'] ? list(flags['bundle-ids'], '--bundle-ids') : [],
     sheetId: flags['sheet-id'] ?? null, sheetGid: flags['sheet-gid'] === undefined ? null
       : integer(flags['sheet-gid'], 0, 2147483647, '--sheet-gid'),
-    sheetDisabled, devScope: flags['dev-scope'] ? path.normalize(flags['dev-scope']) : null,
+    sheetDisabled, realAndroid: flags['real-android'] === 'true',
+    devScope: flags['dev-scope'] ? path.normalize(flags['dev-scope']) : null,
     campaignId: flags['campaign-id'] ?? null, confirm: flags.confirm ?? null,
     waitSeconds: integer(flags['wait-seconds'] ?? '0', 0, 86400, '--wait-seconds'),
     pollSeconds: integer(flags['poll-seconds'] ?? '10', 5, 3600, '--poll-seconds') };
@@ -195,6 +198,7 @@ export function parseArgs(argv) {
 function scope(options) {
   return { cdp: options.cdp, pageUrl: options.pageUrl, source: options.source,
     contentSnapshot: options.contentSnapshot, udids: options.udids, bundleIds: options.bundleIds,
+    ...(options.realAndroid ? { realAndroid: true } : {}),
     sheetId: options.sheetId, sheetGid: options.sheetGid, ...(options.sheetDisabled ? { sheetDisabled: true } : {}),
     ...(options.devScope ? { devScope: options.devScope } : {}) };
 }
@@ -291,8 +295,8 @@ async function summarize(detail, options, invoke, accounts) {
     || ['uncertain', 'cancelled', 'missed'].includes(r.state)
     || ['failed', 'superseded'].includes(r.sheetState) || r.verification?.state === 'needsReview'
     || r.accountState === 'mismatch');
-  // publish_get exposes settlement state, not the writer's raw ACK/target receipt or Sheet cells.
-  // Neither a URL nor 'sent' alone is a supplementary end-to-end readback.
+  // publish_get alone exposes settlement state, not the authenticated Sheet cell.
+  // The separate readback above must match before this becomes end-to-end proof.
   const allSent = rows.length > 0 && rows.every(r => r.verified && r.sheetSent && r.accountState === 'matched');
   const allPhoneVerified = rows.length > 0 && rows.every(r => r.verified && r.accountState === 'matched');
   if (sheetDisabled) {
@@ -341,6 +345,13 @@ export async function runAcceptance(options, { invoke, sleep = delay, now = Date
     const devices = await invoke('list_devices');
     const metas = await invoke('list_device_metas');
     report.roster = roster(devices, metas, options.udids);
+    if (options.realAndroid) {
+      check(options.udids.every(udid => devices.some(device => device.udid === udid
+        && device.platform === 'android' && device.connection === 'usb'
+        && ['connected', 'ready'].includes(device.status))),
+      'Chưa có đủ Android USB thật trong AppState; không dùng mock hoặc serial absent');
+      report.realAndroidRoster = 'verified';
+    }
     const currentAccounts = Object.fromEntries(report.roster.selected.map(r => [r.udid, r.assignedHandle ?? '']));
     const accounts = prepared?.approval.accounts ?? currentAccounts;
     report.accountSnapshot = prepared?.approval.accounts ? 'approvedPreflight' : 'currentMetadata';

@@ -350,6 +350,8 @@ pub const MAX_POST_DWELL_SECONDS: u8 = 60;
 #[serde(rename_all = "camelCase")]
 struct ThreadCampaignRequestWire {
     #[serde(default)]
+    network: crate::SocialNetwork,
+    #[serde(default)]
     seeding: Option<crate::seeding::SeedingConfig>,
     #[serde(default)]
     scripted_conversation: Option<crate::conversation::ScriptedConversation>,
@@ -387,6 +389,9 @@ impl<'de> Deserialize<'de> for ThreadCampaignRequest {
         D: serde::Deserializer<'de>,
     {
         let wire = ThreadCampaignRequestWire::deserialize(deserializer)?;
+        wire.network
+            .ensure_implemented()
+            .map_err(serde::de::Error::custom)?;
         let actions = wire.actions.unwrap_or(InteractionActionSet {
             share: false,
             follow: false,
@@ -2140,6 +2145,22 @@ mod tests {
         assert_eq!(encoded["actions"]["comment"], true);
         assert_eq!(encoded["actions"]["save"], false);
         assert!(encoded.get("likeTarget").is_none());
+    }
+
+    #[test]
+    fn direct_request_does_not_drop_explicit_unsupported_network() {
+        let base = action_request_json(true, false, false);
+        for network in ["threads", "instagram"] {
+            let mut raw = base.clone();
+            raw["network"] = serde_json::json!(network);
+            assert!(
+                serde_json::from_value::<ThreadCampaignRequest>(raw).is_err(),
+                "{network} must not dispatch TikTok interaction"
+            );
+        }
+        let mut tiktok = base;
+        tiktok["network"] = serde_json::json!("tiktok");
+        assert!(serde_json::from_value::<ThreadCampaignRequest>(tiktok).is_ok());
     }
 
     #[test]

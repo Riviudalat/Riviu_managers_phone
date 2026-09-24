@@ -1,5 +1,5 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { ArrowLeft, ArrowRight, Check, FolderOpen, ListFilter, Music2, Pencil, Search, Undo2, Zap, X } from "lucide-react";
+import { ArrowLeft, ArrowRight, Check, FolderOpen, ListFilter, LoaderCircle, Music2, Pencil, Search, Undo2, Zap, X } from "lucide-react";
 import type { PublishWizardProps } from "./PublishWizard";
 import { PublishMedia } from "./PublishMedia";
 import { PublishDialog } from "./PublishDialog";
@@ -18,6 +18,7 @@ import type { PublishDeviceGuards } from "../../types";
 
 type QuickProps = PublishWizardProps & {
   blockingReason?: string;
+  preflightStage?: "preparing" | "checking" | null;
   deviceGuards?: PublishDeviceGuards;
   onPendingPublication?: (campaignId: string) => void;
   onAssignmentChange?: (ids: string[], assignments: Record<string, string>) => void;
@@ -46,6 +47,7 @@ export function PublishQuickSetup(p: QuickProps) {
   const [query, setQuery] = useState("");
   const [deviceQuery, setDeviceQuery] = useState("");
   const [onlyFree, setOnlyFree] = useState(false);
+  const [showOutOfScope, setShowOutOfScope] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [activeId, setActiveId] = useState<string>();
   const [photo, setPhoto] = useState(0);
@@ -200,14 +202,15 @@ export function PublishQuickSetup(p: QuickProps) {
   };
   const selectedBlockedDevice = selected.map(bundle => p.assignments[bundle.id]).find(udid => !!udid && !!deviceGuardBlock(p.deviceGuards, udid));
   const selectedPending = selectedBlockedDevice ? deviceGuardPending(p.deviceGuards?.[selectedBlockedDevice]) : undefined;
-  const filteredDevices = devices.filter(d => `${label(d.udid)} ${p.metas.get(d.udid)?.handle ?? ""}`.toLocaleLowerCase().includes(deviceQuery.toLocaleLowerCase())
+  const filteredDevices = devices.filter(d => (!p.scopeControl || showOutOfScope || p.eligible.includes(d.udid) || assignedByDevice.has(d.udid))
+    && `${label(d.udid)} ${p.metas.get(d.udid)?.handle ?? ""}`.toLocaleLowerCase().includes(deviceQuery.toLocaleLowerCase())
     && (!onlyFree || (canReceive(p, d.udid) && !assignedByDevice.has(d.udid))));
   return <div ref={rootRef} className="publish-quick" hidden={p.active === false}>
     <div className="pq-setup-scroll">
       <div className="pq-setup-tools">
         <div className="pq-source"><label htmlFor="publish-source-folder">Thư mục bài đăng</label><div className="pq-source-controls"><input id="publish-source-folder" aria-label="Thư mục nguồn" value={p.sourceRoot} onChange={e => { if (!p.busy) p.onSource(e.target.value); }} disabled={p.busy} placeholder="Đường dẫn thư mục chứa bài đăng"/><button type="button" disabled={p.busy} onClick={() => void chooseFolder()}><FolderOpen size={16}/>Chọn thư mục</button><button type="button" disabled={locked || !p.sourceRoot} onClick={() => { if (!locked && p.sourceRoot) void p.onScan(p.sourceRoot); }}>{p.scanning ? "Đang quét…" : "Quét"}</button></div></div>
         <div className={`pq-settings${settingsOpen ? " is-open" : ""}`} onKeyDown={e => { if (e.key === "Escape") { setSettingsOpen(false); e.currentTarget.querySelector<HTMLButtonElement>(".pq-settings-toggle")?.focus(); } }}>
-          <button type="button" className="pq-settings-toggle" aria-expanded={settingsOpen} aria-controls="publish-google-settings" onClick={() => setSettingsOpen(open => !open)}>Thiết lập Google Sheet</button>
+          <button type="button" className="pq-settings-toggle" aria-label="Thiết lập Google Sheet" aria-expanded={settingsOpen} aria-controls="publish-google-settings" onClick={() => setSettingsOpen(open => !open)}><span className="pq-settings-label-full">Thiết lập Google Sheet</span><span className="pq-settings-label-short" aria-hidden="true">Sheet</span></button>
           <div id="publish-google-settings" className="pq-settings-content">{p.settings}</div>
         </div>
       </div>
@@ -257,6 +260,7 @@ export function PublishQuickSetup(p: QuickProps) {
             <div className="pq-device-searchbar"><label className="pq-search"><Search size={15}/><input aria-label="Tìm số máy" value={deviceQuery} onChange={e => setDeviceQuery(e.target.value)} placeholder="Tìm máy / tài khoản"/></label>
             <details className="pq-device-filters" onKeyDown={e => { if (e.key === "Escape") { e.currentTarget.open = false; e.currentTarget.querySelector("summary")?.focus(); } }}><summary aria-label="Bộ lọc thiết bị" title="Bộ lọc thiết bị"><ListFilter size={15}/><span>Bộ lọc thiết bị</span></summary><div>
               <label><input type="checkbox" checked={onlyFree} onChange={e => setOnlyFree(e.target.checked)}/>Chỉ hiện máy sẵn sàng chưa có bài</label>
+              {p.scopeControl && <label><input type="checkbox" checked={showOutOfScope} onChange={e => setShowOutOfScope(e.target.checked)}/>Hiện máy ngoài phạm vi</label>}
               <button type="button" className="ghost" title="Chọn tất cả máy sẵn sàng trong phạm vi, kể cả ngoài kết quả tìm kiếm" disabled={locked || confirming || !ready.length} onClick={() => { if (!locked && !confirming) setPicked(ready.map(d => d.udid)); }}>Chọn tất cả sẵn sàng</button>
               <button type="button" className="ghost" disabled={locked || confirming || (!picked.length && !selected.some(b => p.assignments[b.id]))} onClick={() => { if (!locked && !confirming) { setPicked([]); p.onAssign({}); } }}>Bỏ chọn toàn bộ máy</button>
               <small>{mapped} bài đã ghép · {ready.length} máy sẵn sàng / {devices.length} tổng. Bộ lọc chỉ đổi danh sách đang xem, không đổi Chọn nhanh.</small>
@@ -299,8 +303,13 @@ export function PublishQuickSetup(p: QuickProps) {
         {duplicateCaptions > 0 && <p className="pq-hint">{duplicateCaptions} bài đã chọn có caption trùng; nội dung giữ nguyên, không tự sửa.</p>}
       </div></div>
     </PublishDialog>}
-    {dialog === "check" && <PublishDialog title="Kiểm tra đợt đăng" wide onClose={() => setDialog(null)} actions={<><button type="button" onClick={() => setDialog(null)}>Quay lại</button><button type="button" className="primary" disabled={locked || !p.preflight?.canExecute || !complete} onClick={() => void p.onExecute()}><Check size={16}/> Xác nhận đăng {selected.length} bài</button></>}>
-      {p.preflightLoading ? <p>Đang kiểm tra nội dung và máy thực hiện…</p> : p.preflightError ? <p role="alert">{p.preflightError}</p> : p.preflight ? <PublishPreflightResult report={p.preflight} machineName={label} bundleName={id => bundles.find(bundle => bundle.id === id)?.name ?? id} page={reportPage} onPage={setReportPage} onRetry={() => void p.onPreflight()} busy={locked}/> : <p>Chưa có kết quả kiểm tra.</p>}
+    {dialog === "check" && <PublishDialog title="Kiểm tra đợt đăng" wide onClose={() => setDialog(null)} actions={<><button type="button" onClick={() => setDialog(null)}>Quay lại</button>{(p.preflightError || (p.preflight && !p.preflight.canExecute)) && !p.preflightLoading && <button type="button" disabled={locked} onClick={() => { setReportPage(0); void p.onPreflight(); }}>Kiểm tra lại</button>}<button type="button" className="primary" disabled={locked || !p.preflight?.canExecute || !complete} onClick={() => void p.onExecute()}><Check size={16}/> Xác nhận đăng {selected.length} bài</button></>}>
+      {p.preflightLoading ? <div className="pw-preflight-pending">
+        <div className="pw-preflight-phase" role="status"><LoaderCircle size={18} aria-hidden="true"/><div><strong>{p.preflightStage === "preparing" ? "Đang chuẩn bị thiết bị…" : "Đang kiểm tra từng máy…"}</strong><span>{selected.length} bài · {mapped} máy đã ghép · Chưa đăng bài</span></div></div>
+        <div className="pw-preflight-pending-list" role="region" aria-label="Máy đang chờ kết quả kiểm tra" tabIndex={0}>
+          {selected.map(bundle => { const udid = p.assignments[bundle.id]; return <div key={bundle.id}><strong>{udid ? label(udid) : "Chưa ghép máy"}</strong><span>{bundle.name}</span><small>Chờ kết quả</small></div>; })}
+        </div>
+      </div> : p.preflightError ? <p role="alert">{p.preflightError}</p> : p.preflight ? <PublishPreflightResult report={p.preflight} machineName={label} bundleName={id => bundles.find(bundle => bundle.id === id)?.name ?? id} page={reportPage} onPage={setReportPage} onRetry={() => void p.onPreflight()} busy={locked} hideRetry/> : <p>Chưa có kết quả kiểm tra.</p>}
       <p className="pq-hint">Nhạc được chọn sau khi mở TikTok. {p.sheet ? "Ghi Sheet đang bật; link được ghi sau khi xác nhận bài đăng thành công." : "Ghi Sheet đang tắt; kết quả chỉ lưu trong ứng dụng."}</p>
     </PublishDialog>}
   </div>;

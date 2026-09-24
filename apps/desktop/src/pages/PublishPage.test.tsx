@@ -290,7 +290,7 @@ beforeEach(() => {
   resetToasts();
 });
 
-afterEach(cleanup);
+afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
 
 async function prepareOne() {
   await userEvent.click(screen.getByRole("button", { name: "Chọn thư mục" }));
@@ -302,6 +302,28 @@ async function prepareOne() {
 }
 
 describe("production publish wizard", () => {
+  it("shows preparation and device-check phases without claiming a device passed early", async () => {
+    let finishPreparation!: (value: { operationId: string; state: "closed"; devices: []; stopMarker: null }) => void;
+    let finishCheck!: (value: PublishPreflightReport) => void;
+    const defaultPreflight = preflightCampaign.getMockImplementation()!;
+    vi.mocked(operationPrepareDevices).mockImplementationOnce(() => new Promise(resolve => { finishPreparation = resolve; }));
+    preflightCampaign.mockImplementationOnce(() => new Promise(resolve => { finishCheck = resolve; }));
+    render(<PublishPage devices={devices} selected={[]} onSelectUdids={() => {}} />);
+    await prepareOne();
+    await userEvent.click(screen.getByRole("button", { name: "Kiểm tra & đăng" }));
+    expect(await screen.findByText("Đang chuẩn bị thiết bị…")).toBeVisible();
+    expect(preflightCampaign).not.toHaveBeenCalled();
+    await act(async () => finishPreparation({ operationId: "handoff", state: "closed", devices: [], stopMarker: null }));
+    expect(await screen.findByText("Đang kiểm tra từng máy…")).toBeVisible();
+    expect(screen.queryByText("Đạt kiểm tra")).toBeNull();
+    const request = preflightCampaign.mock.calls[0]?.[0];
+    expect(request).toBeDefined();
+    const approved = await defaultPreflight(request);
+    await act(async () => finishCheck(approved));
+    expect(await screen.findByText("Đầu vào đã đạt kiểm tra. Chưa đăng bài.")).toBeVisible();
+    expect(createCampaign).not.toHaveBeenCalled();
+  });
+
   it("still reaches final backend handoff when a link verifier starts after preflight", async () => {
     let listener!: (event: AppEvent) => void;
     vi.mocked(listenRiviuEvents).mockImplementationOnce(async callback => { listener = callback; return () => {}; });
@@ -1835,6 +1857,20 @@ describe("publish campaign monitoring", () => {
     expect(screen.queryByRole("region", { name: "Chi tiết chiến dịch đang chọn" })).toBeNull();
     expect(createCampaign).not.toHaveBeenCalled();
     expect(executeCampaign).not.toHaveBeenCalled();
+  });
+  it("brings the selected campaign detail into view in the stacked monitor", async () => {
+    const campaign = { id: "stacked-monitor", requestId: "r", sourceRoot: "C:/fixture", state: "scheduled",
+      assignments: [], createdAt: "2026-09-09T00:00:00Z", updatedAt: "2026-09-09T00:00:00Z" };
+    vi.mocked(publishList).mockResolvedValue([campaign] as never);
+    vi.mocked(publishGet).mockResolvedValue({ campaign, bundles: [], events: [], assignments: [] } as never);
+    const scrollIntoView = vi.spyOn(Element.prototype, "scrollIntoView").mockImplementation(() => {});
+    vi.stubGlobal("matchMedia", vi.fn().mockReturnValue({ matches: true }));
+    render(<PublishPage devices={devices} selected={[]} onSelectUdids={() => {}} />);
+    await userEvent.click(screen.getByRole("tab", { name: "Theo dõi" }));
+    await userEvent.click(await screen.findByRole("button", { name: "Chi tiết máy" }));
+    await waitFor(() => expect(scrollIntoView).toHaveBeenCalledWith({ block: "start" }));
+    expect(publishGet).toHaveBeenCalledWith(campaign.id);
+    expect(createCampaign).not.toHaveBeenCalled();
   });
   it("hides selected campaign actions when a monitor filter excludes that campaign", async () => {
     const campaign = { id: "hidden-by-filter", requestId: "r", sourceRoot: "C:/needs-review", state: "failedBeforeDispatch",

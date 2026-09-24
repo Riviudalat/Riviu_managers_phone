@@ -27,7 +27,9 @@ executor; transaction không được giữ qua await HTTP hoặc thiết bị.
 Publish recovery dùng migration 45 và dispatcher hiện có. `publish_retry_assignment`
 nhận `assignmentId`, `confirmed`, `expectedRevision`, `requestId`; replay cùng request
 chỉ trả ACK, không tạo attempt khác. Retry tự động tối đa ba lần mỗi bước, thủ công
-chỉ một lượt. Counters, checkpoint, account và ứng viên nhạc được giữ trong SQLite.
+chỉ tạo một lượt bài nhưng vẫn cho tối đa ba retry tạm thời trong từng bước của
+lượt đó. Lượt thủ công không tự requeue cả bài khi worker kết thúc. Counters,
+checkpoint, account và ứng viên nhạc được giữ trong SQLite.
 Reconnect đúng serial tối đa 120 giây nhường work permit; startup không tự chạy lại
 lượt recovery gián đoạn. Có Post intent thì chỉ xác minh; `publish_retry_sheet_assignment`
 chỉ mở lại outbox của bài đã có canonical proof, không đi vào composer.
@@ -84,6 +86,9 @@ bốn tab mới chuyển Hot, không đợi nội dung For You. Giữ ngân sác
 Trên đúng 45.7.3/en ở 1080×2220, adapter ảnh dùng hai quan sát mới cùng phiên
 để chứng minh gạch chân Hot, tên và nghệ sĩ của từng hàng đầy đủ. Hàng hồng đã
 chọn, tên trùng và hàng bị cắt bị loại; trước chọn phải đọc lại cùng danh tính.
+Nếu OCR không dựng được pool trong 60 giây, nhánh này xác nhận lại sheet bằng
+hai quan sát mới rồi dùng snapshot XML chỉ khi Hot đã chọn và hàng nhạc đầy đủ,
+ổn định. XML không rõ trả lỗi có thể retry trước Post, không tap hàng nào.
 Nhánh này chỉ chọn một lần, chờ hai ảnh mới có đúng tên nhạc chuyển hồng để
 xác nhận lựa chọn đã tải xong, rồi đóng bảng đã chứng minh bằng ảnh; hai XML mới
 trên editor phải khớp nguyên tên nhạc. Không khớp thì giữ lỗi trước Đăng.
@@ -334,6 +339,11 @@ preparing/active/degraded và chặn input khi chưa active. Mọi `group_input`
 này mang `masterUdid`; backend khử trùng, đặt master đầu tiên, áp policy chỉ cho follower
 và poll fan-out đồng thời. Đổi selection/master/roster tắt phiên; retry chỉ mở session,
 không replay input không idempotent.
+Điều khiển trực tiếp Android gửi `DOWN` qua scrcpy ngay khi pointer-down, giữ cùng
+contact tới `UP` hoặc cancel; thời gian nhấn giữ tính sau ACK của `DOWN`. Touch dùng
+overlay session/ManualControl owner hiện có, không mở lease mới trên mỗi sự kiện.
+Ô nhập chữ thủ công gửi một lần qua `device_type_text` hoặc `group_input(type)` sau
+xác nhận Enter/nút gửi; IME composition và Shift+Enter không kích hoạt gửi.
 
 Ba workspace cũ vẫn là đích mặc định; graph chỉ mở qua Thêm Flow. Trạng thái ẩn từng
 nhóm sidebar và bảng Hiển thị là preference cục bộ, không đổi cấu hình chiến dịch.
@@ -405,10 +415,20 @@ Windows NSIS/MSI và WiX fragment cùng nhận overlay `tauri-gui-service.conf.j
 
 **Platform vs mạng xã hội vs flow.** `DevicePlatform` là OS thiết bị (iOS/Android).
 `SocialNetwork` (`tiktok` | `instagram` | `threads`, mặc định TikTok) là app mục tiêu — seam
-dispatch package/link; Instagram/Threads từ chối rõ, chưa implement. Orchestration fleet
+dispatch package/link; Instagram/Threads từ chối rõ, chưa implement. Các điểm lưu
+settings/profile/campaign, claim job và worker phục hồi phải từ chối network
+chưa hỗ trợ trước effect; chỉ thêm enum/adapter GUI không cấp quyền chạy Nuôi,
+Tương tác hoặc Đăng trên Threads. Orchestration fleet
 (`OrchestrationDocumentV1`) là đồ thị gọi vào engine Nuôi / Tương tác / Đăng hiện có; nút
 “Tạo mẫu 3 chức năng” seed 3 hồ sơ + một điều phối Nuôi→Tương tác→Đăng. Engine vẫn là
 source of truth — không thay bằng node Flow V2 tap/swipe.
+
+Lịch Script cũ claim mốc và tạo job trong cùng transaction; crash sau claim giữ
+job chưa xác định/hủy theo bằng chứng, không tạo job thứ hai cho cùng mốc. Lịch Nuôi
+cũ ghi intent và tiến mốc trước `start_many`; intent chưa settle cần đối soát thủ
+công, không tự phát lại. Dev manual acceptance vẫn quét roster và tự mở ảnh xem
+trước Android thụ động, nhưng không tự chạy lịch/worker có hiệu ứng hoặc nền iPhone;
+lệnh thủ công vẫn có thể tác động máy nên không coi chế độ này là read-only toàn cục.
 
 Bảng này là ranh giới trách nhiệm hiện có, không khẳng định đã tách hết module lớn.
 Khi tách module, giữ public contract và chuyển các test đọc `include_str!` cùng symbol.
@@ -442,6 +462,11 @@ foreground thuộc tập đã đọc từ Package Manager; launcher, system wind
 không được biến thành chọn package đầu tiên. Preflight UI trình bày issue theo máy và
 phiên bản; `canExecute` vẫn do backend quyết định. Chỉ thêm tuple composer/nhạc khi đã
 đo đủ bước chọn nhiều ảnh, nhạc và readback; một ảnh XML picker chưa chứng nhận Post.
+Publish preflight đọc điều kiện của tối đa bốn Android cùng lúc, dưới trần admission
+ADB của host; trong mỗi máy vẫn giữ thứ tự transport, dung lượng, trạng thái khóa
+và package/build. Kết quả được ráp lại theo thứ tự ghép bài, giữ đúng issue của
+từng máy. Sheet vẫn có một lượt kiểm tra writer/target/epoch riêng mỗi preflight;
+cache hiển thị trên frontend chỉ cho phép bắt đầu kiểm tra, không thay kết quả này.
 
 `ComposerPlan::missing_for_carousel` kiểm đủ opening/tail/selection cho preflight
 ảnh; `can_publish_carousel` là guard trước effect của pipeline ảnh có nhạc. Bảng
@@ -684,6 +709,11 @@ không mở driver/ADB, không đọc SQLite hay credential. Cần Node và Play
 trong `apps/desktop/node_modules`. Không bật/restart debug app thứ hai để nghiệm thu
 khi production đang giữ máy. CDP không có sẵn thì dừng; việc chạy script không tự
 cấp quyền tạo thêm lượt public.
+Khi nghiệm thu Android cắm USB, thêm `--real-android true`: harness đối chiếu từng
+serial với roster Android USB `connected/ready` của chính AppState trước mọi
+preflight/Create/Execute. Thiếu máy, app đang chạy mock hoặc roster cũ đều bị từ
+chối; `inspect` không mang cờ này chỉ là phép đọc trạng thái, exit 0 không chứng
+nhận máy thật. Cờ được ghim trong fingerprint của preflight và submit.
 
 | Mode | Hành vi | Điều không thực hiện |
 |---|---|---|
@@ -742,10 +772,13 @@ hành gỡ lock, không gỡ intent. Không dùng report directory khác để n
 
 Báo cáo phân biệt `enqueued`, receipt `submitted`, `publicationVerified` + canonical
 URL, `sheetSent` từ settlement backend và `urlReadback`. URL trần hoặc state succeeded
-không thay proof. `publish_get` chưa trả receipt identity writer/target/epoch hay ô
-Sheet đọc lại cho harness; vì vậy **URL readback bổ sung hiện là unsupported**, kể
-cả bảng public. Không trích token để đọc bảng private. CSV chỉ là đối chứng URL,
-không thay bằng chứng delivery writer. Harness hiện không chứng nhận end-to-end xanh.
+không thay proof. Khi đã có bài verified và delivery sent, harness gọi
+`publish_sheet_readback` qua OAuth backend để đọc receipt và ô Sheet đúng
+assignment/revision/epoch; chỉ đánh dấu `matched` khi URL, identity và revision
+khớp. Thiếu OAuth, readback lỗi hoặc chưa tới lượt thì giữ `pending`, không tự
+gửi Post hay Sheet lại. Không trích token để đọc bảng private. CSV chỉ là đối
+chứng URL, không thay bằng chứng delivery writer. Harness chỉ chứng nhận
+end-to-end khi có đủ ba lớp proof trên đúng máy và tài khoản.
 
 | Exit | Ý nghĩa |
 |---|---|

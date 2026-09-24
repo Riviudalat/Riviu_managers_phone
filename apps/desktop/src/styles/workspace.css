@@ -120,8 +120,36 @@
   white-space: nowrap;
 }
 
-@media (max-width: 1024px) {
-  .fleet-status-label { display: none; }
+.shell > .main-col > .page-header > .page-header-icon {
+  display: none;
+}
+
+@media (max-width: 980px) {
+  .shell > .main-col > .page-header {
+    flex-wrap: wrap;
+    gap: var(--space-1) var(--space-2);
+    padding: var(--space-2) var(--space-3);
+  }
+
+  .shell > .main-col > .page-header .page-header-drag {
+    flex-basis: 8px;
+    min-width: 8px;
+  }
+
+  .shell > .main-col > .page-header .page-header-actions {
+    order: 1;
+  }
+
+  .shell > .main-col > .page-header .page-header-meta {
+    order: 2;
+    flex: 0 0 100%;
+    flex-wrap: wrap;
+    gap: var(--space-1);
+  }
+
+  .shell > .main-col > .page-header .status-chip {
+    overflow-wrap: anywhere;
+  }
 }
 
 .workspace-tabs {

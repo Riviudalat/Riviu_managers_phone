@@ -141,6 +141,9 @@ jobs:
       - name: Verify Sheet delivery transaction and layout
         run: node --test scripts/test_publish_sheet.mjs
 
+      - name: Verify publish acceptance intent and readback contract
+        run: node --test scripts/publish_acceptance.test.mjs
+
       - name: Verify build-once Windows packaging
         run: python -m unittest scripts.test_bundle_windows_installers -v
 

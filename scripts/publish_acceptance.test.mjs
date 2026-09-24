@@ -161,6 +161,35 @@ test('preflight binds explicit mapping and Sheet identity but never creates', as
   assert.equal(e.calls.some(c => c.command === 'publish_create_campaign'), false);
 });
 
+test('real Android inspect refuses mock or absent devices before any effect command', async t => {
+  const e = environment(t);
+  const options = e.options('inspect', ['--real-android', 'true']);
+  const invoke = async (command, args) => {
+    if (command === 'list_devices') return [{ udid: 'phone-b', platform: 'ios', connection: 'mock', status: 'ready' }];
+    return e.invoke(command, args);
+  };
+  const result = await runAcceptance(options, { invoke });
+  assert.equal(result.exitCode, 1);
+  assert.match(result.report.error, /Android USB thật/);
+  assert.equal(e.calls.some(call => /preflight|create|execute/.test(call.command)), false);
+});
+
+test('real Android inspect accepts the exact connected USB roster without effects', async t => {
+  const e = environment(t);
+  const options = e.options('inspect', ['--real-android', 'true']);
+  const invoke = async (command, args) => {
+    if (command === 'list_devices') return [
+      { udid: 'phone-a', platform: 'android', connection: 'usb', status: 'connected' },
+      { udid: 'phone-b', platform: 'android', connection: 'usb', status: 'ready' },
+    ];
+    return e.invoke(command, args);
+  };
+  const result = await runAcceptance(options, { invoke });
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.report.acceptance, 'notEvaluated');
+  assert.equal(e.calls.some(call => /preflight|create|execute/.test(call.command)), false);
+});
+
 test('phone-only preflight is explicit, durable and never contacts Google or Sheet IPC', async t => {
   const e = environment(t);
   Object.assign(e.preflight, { sheetConfigured: false, sheetEnabled: false, sheetDelivery: null });
@@ -403,7 +432,7 @@ test('a successful-looking state or URL never substitutes for canonical proof', 
   assert.ok(e.calls.every(c => ['list_devices', 'list_device_metas', 'publish_get'].includes(c.command)));
 });
 
-test('Sheet sent remains distinct from supplementary URL readback, private readback is unsupported', async t => {
+test('Sheet sent remains distinct from authenticated URL readback when the cell is unavailable', async t => {
   const e = environment(t);
   for (const row of e.detail.assignments) {
     row.state = 'succeeded';

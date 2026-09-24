@@ -118,6 +118,13 @@ async fn deliver_bound_claim(
     use riviu_core::db::{SheetDeliveryPayload, SheetOutboxSettlement};
     let mut transport_accepted = false;
     let delivered = async {
+        let campaign_id = db
+            .publication_campaign_id(&claim.assignment_id)?
+            .context("Sheet assignment has no campaign")?;
+        db.publish_campaign_request(&campaign_id)?
+            .context("Sheet campaign request not found")?
+            .network
+            .ensure_implemented()?;
         let (settings, direct) = db
             .storage_read(|db| {
                 Ok((

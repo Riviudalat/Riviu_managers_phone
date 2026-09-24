@@ -155,7 +155,13 @@
   padding: 0;
 }
 .shell:has(.app-workflow-editor) > .aside {
+  display: flex;
+}
+.shell:has(.app-workflow-editor) > .aside .aside-rail-toggle {
   display: none;
+}
+.shell:has(.app-workflow-editor) > .aside .aside-logo > img {
+  display: block;
 }
 .shell:has(.app-workflow-editor) > .main-col > header {
   display: none;
@@ -298,19 +304,61 @@
   position: relative;
   min-height: 400px;
 }
+.operator-record-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  min-width: 0;
+  gap: var(--space-3);
+  align-items: start;
+}
+.operator-record-layout[data-editor-open="true"] {
+  grid-template-columns: minmax(0, 1fr) minmax(320px, 340px);
+}
+.operator-record-main { min-width: 0; overflow-x: auto; }
 .operator-record-editor {
-  position: absolute;
-  right: 0;
-  top: 0;
-  width: min(360px, 100%);
-  max-height: calc(100dvh - 100px);
+  min-width: 0;
+  max-height: calc(100dvh - 132px);
   overflow: auto;
   background: var(--bg-elevated);
   border: 1px solid var(--line);
   padding: var(--space-4);
   border-radius: var(--radius);
-  box-shadow: var(--shadow-lg);
-  z-index: var(--z-raised);
+  position: sticky;
+  top: 0;
+}
+.operator-record-editor-backdrop { display: none; }
+.operator-record-editor-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  position: sticky;
+  bottom: calc(-1 * var(--space-4));
+  margin-top: var(--space-3);
+  padding: var(--space-3) 0 var(--space-4);
+  border-top: 1px solid var(--line);
+  background: var(--bg-elevated);
+}
+@media (max-width: 1120px) {
+  .operator-record-layout[data-editor-open="true"] { grid-template-columns: minmax(0, 1fr); }
+  .operator-record-editor-backdrop {
+    display: block;
+    position: fixed;
+    inset: 0;
+    z-index: var(--z-modal-backdrop);
+    background: rgb(15 23 42 / 30%);
+  }
+  .operator-record-editor {
+    position: fixed;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    z-index: calc(var(--z-modal-backdrop) + 1);
+    width: min(390px, calc(100vw - 32px));
+    max-height: 100dvh;
+    border-radius: 0;
+    box-shadow: var(--shadow-lg);
+  }
 }
 .operator-record-editor > header,
 .app-step-inspector > header {

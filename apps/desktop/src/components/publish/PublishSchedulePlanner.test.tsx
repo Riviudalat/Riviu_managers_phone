@@ -20,6 +20,25 @@ async function assignAll() {
   fireEvent.change(screen.getByLabelText("Giờ chung"), { target: { value: "20:00" } });
 }
 describe("schedule assignment workspace", () => {
+  it("keeps the assignment command visible as the next step and distinguishes mapped from available machines", async () => {
+    render(<PublishSchedulePlanner {...props} />);
+    await userEvent.click(screen.getByRole("button", { name: "Chọn tất cả bài" }));
+    await userEvent.click(screen.getByRole("button", { name: "Chọn tất cả sẵn sàng" }));
+    expect(screen.getByRole("button", { name: /^Gán bài$/ })).toBeVisible();
+    await userEvent.click(screen.getByRole("button", { name: /^Gán bài$/ }));
+    expect(screen.getByText("3/3 bài có máy khả dụng")).toBeVisible();
+    expect(screen.getByText("3 bài · 3 máy đã ghép")).toBeVisible();
+    expect(publishSchedulePreflight).not.toHaveBeenCalled();
+    expect(publishScheduleCreate).not.toHaveBeenCalled();
+  });
+  it("sends a stale machine mapping to its selector instead of offering an ineffective group assignment", async () => {
+    render(<PublishSchedulePlanner {...props} selectedIds={["b0"]} assignments={{ b0: "phone-1" }} eligible={["phone-2", "phone-3"]} />);
+    await userEvent.click(screen.getByRole("checkbox", { name: "Chọn máy hẹn giờ Máy 2" }));
+    expect(screen.queryByRole("button", { name: /^Gán bài$/ })).toBeNull();
+    await userEvent.click(screen.getByRole("button", { name: "Đổi máy" }));
+    expect(screen.getByLabelText("Máy nhận Bài 1")).toHaveFocus();
+    expect(publishSchedulePreflight).not.toHaveBeenCalled();
+  });
   it("keeps pending publication warnings visible and skips blocked devices before preflight", async () => {
     const blocked = { assignmentId: "old", campaignId: "prior-campaign", updatedAt: "now", reason: "TikTok đang xử lý bài trước" };
     const open = vi.fn();

@@ -18,6 +18,8 @@ static RECORD_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 pub struct InspectorElement {
     pub index: usize,
     pub parent: Option<usize>,
+    #[serde(default)]
+    pub package: String,
     pub text: String,
     pub description: String,
     pub resource_id: String,
@@ -28,6 +30,22 @@ pub struct InspectorElement {
     pub height: f64,
     pub enabled: bool,
     pub clickable: bool,
+    #[serde(default)]
+    pub checkable: Option<bool>,
+    #[serde(default)]
+    pub checked: Option<bool>,
+    #[serde(default)]
+    pub selected: Option<bool>,
+    #[serde(default)]
+    pub focusable: Option<bool>,
+    #[serde(default)]
+    pub focused: Option<bool>,
+    #[serde(default)]
+    pub scrollable: Option<bool>,
+    #[serde(default)]
+    pub long_clickable: Option<bool>,
+    #[serde(default)]
+    pub password: Option<bool>,
     pub selector: Option<ElementSelector>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -88,33 +106,8 @@ async fn capture(
         package == session.active_app_bundle().await?,
         "inspector_app_changed"
     );
-    let elements = tree
-        .nodes
-        .iter()
-        .enumerate()
-        .filter_map(|(index, n)| {
-            if !n.visible(&package) || !tree.ancestors_visible(index) {
-                return None;
-            }
-            let rect = n.rect()?;
-            let selector =
-                riviu_core::ui_automation::inspector::selector_for_node(&tree, index, &package);
-            Some(InspectorElement {
-                index,
-                parent: n.parent,
-                text: n.attr("text").into(),
-                description: n.attr("content-desc").into(),
-                resource_id: n.attr("resource-id").into(),
-                class_name: n.attr("class").into(),
-                x: rect.x,
-                y: rect.y,
-                width: rect.width,
-                height: rect.height,
-                enabled: rect.enabled,
-                clickable: rect.clickable,
-                selector,
-            })
-        })
+    let elements = (0..tree.nodes.len())
+        .filter_map(|index| element_from_tree(&tree, index, &package))
         .collect();
     Ok(InspectorSnapshot {
         id: uuid::Uuid::new_v4().to_string(),
@@ -128,6 +121,45 @@ async fn capture(
         tree_sha256: digest,
         hierarchy_xml,
         elements,
+    })
+}
+fn xml_bool(value: &str) -> Option<bool> {
+    match value {
+        "true" => Some(true),
+        "false" => Some(false),
+        _ => None,
+    }
+}
+fn element_from_tree(tree: &Tree, index: usize, package: &str) -> Option<InspectorElement> {
+    let node = tree.nodes.get(index)?;
+    if !node.visible(package) || !tree.ancestors_visible(index) {
+        return None;
+    }
+    let rect = node.rect()?;
+    let selector = riviu_core::ui_automation::inspector::selector_for_node(tree, index, package);
+    Some(InspectorElement {
+        index,
+        parent: node.parent,
+        package: node.attr("package").into(),
+        text: node.attr("text").into(),
+        description: node.attr("content-desc").into(),
+        resource_id: node.attr("resource-id").into(),
+        class_name: node.attr("class").into(),
+        x: rect.x,
+        y: rect.y,
+        width: rect.width,
+        height: rect.height,
+        enabled: rect.enabled,
+        clickable: rect.clickable,
+        checkable: xml_bool(node.attr("checkable")),
+        checked: xml_bool(node.attr("checked")),
+        selected: xml_bool(node.attr("selected")),
+        focusable: xml_bool(node.attr("focusable")),
+        focused: xml_bool(node.attr("focused")),
+        scrollable: xml_bool(node.attr("scrollable")),
+        long_clickable: xml_bool(node.attr("long-clickable")),
+        password: xml_bool(node.attr("password")),
+        selector,
     })
 }
 fn save_observation(state: &AppState, snapshot: &InspectorSnapshot) -> Result<(), CommandError> {
@@ -413,6 +445,7 @@ mod tests {
         InspectorElement {
             index,
             parent: None,
+            package: "app.fixture".into(),
             text: selector.text.clone().unwrap_or_default(),
             description: String::new(),
             resource_id: String::new(),
@@ -423,8 +456,68 @@ mod tests {
             height: 10.0,
             enabled: true,
             clickable: true,
+            checkable: None,
+            checked: None,
+            selected: None,
+            focusable: None,
+            focused: None,
+            scrollable: None,
+            long_clickable: None,
+            password: None,
             selector: Some(selector),
         }
+    }
+
+    #[test]
+    fn element_properties_preserve_true_false_and_missing_xml_attributes() {
+        let tree = Tree::parse(riviu_core::HierarchySourceSnapshot {
+            generation: 1,
+            xml: concat!(
+                "<hierarchy>",
+                "<node package=\"app.fixture\" bounds=\"[10,20][30,40]\" enabled=\"true\" clickable=\"false\" ",
+                "checkable=\"true\" checked=\"false\" selected=\"true\" focusable=\"false\" focused=\"true\" ",
+                "scrollable=\"false\" long-clickable=\"true\" password=\"false\" />",
+                "<node package=\"app.fixture\" bounds=\"[30,40][50,60]\" />",
+                "</hierarchy>"
+            )
+            .into(),
+        })
+        .unwrap();
+
+        let full = element_from_tree(&tree, 1, "app.fixture").unwrap();
+        assert_eq!(full.package, "app.fixture");
+        assert_eq!(full.checkable, Some(true));
+        assert_eq!(full.checked, Some(false));
+        assert_eq!(full.selected, Some(true));
+        assert_eq!(full.focusable, Some(false));
+        assert_eq!(full.focused, Some(true));
+        assert_eq!(full.scrollable, Some(false));
+        assert_eq!(full.long_clickable, Some(true));
+        assert_eq!(full.password, Some(false));
+        let json = serde_json::to_value(&full).unwrap();
+        assert_eq!(json["longClickable"], true);
+
+        let missing = element_from_tree(&tree, 2, "app.fixture").unwrap();
+        assert_eq!(missing.checkable, None);
+        assert_eq!(missing.long_clickable, None);
+
+        let mut old_json = serde_json::to_value(element(1, selector("Home"))).unwrap();
+        for key in [
+            "package",
+            "checkable",
+            "checked",
+            "selected",
+            "focusable",
+            "focused",
+            "scrollable",
+            "longClickable",
+            "password",
+        ] {
+            old_json.as_object_mut().unwrap().remove(key);
+        }
+        let old: InspectorElement = serde_json::from_value(old_json).unwrap();
+        assert_eq!(old.package, "");
+        assert_eq!(old.checkable, None);
     }
 
     #[test]

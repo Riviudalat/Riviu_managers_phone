@@ -316,6 +316,7 @@ impl Database {
         bundles: &[crate::PublishBundle],
         initial_snapshot: Option<&crate::PublishExecutionSnapshotDraft>,
     ) -> anyhow::Result<bool> {
+        request.network.ensure_implemented()?;
         if let Some(target) = &request.sheet_delivery {
             target.validate()?;
             anyhow::ensure!(
@@ -3095,6 +3096,49 @@ mod execution_snapshot_tests {
             target_snapshot: None,
         };
         (request, bundle)
+    }
+
+    #[test]
+    fn publish_creation_rejects_unsupported_network_before_write() {
+        let path =
+            std::env::temp_dir().join(format!("riviu-publish-network-{}.db", Uuid::new_v4()));
+        let db = Database::open(&path).expect("open fixture database");
+        for network in [
+            crate::SocialNetwork::Threads,
+            crate::SocialNetwork::Instagram,
+        ] {
+            let (mut request, bundle) = campaign_input();
+            request.network = network;
+            let error = db
+                .create_publish_campaign(&request, &[bundle])
+                .expect_err("unsupported network must not create assignments");
+            assert!(
+                error.to_string().contains(network.display_name()),
+                "{error}"
+            );
+        }
+        assert!(db.list_publish_campaigns(10).unwrap().is_empty());
+        drop(db);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn pipeline_claim_rejects_unsupported_persisted_network() {
+        let (db, path, campaign_id) = fixture();
+        db.conn()
+            .unwrap()
+            .execute(
+                "UPDATE publish_campaigns SET request_json=json_set(request_json, '$.network', 'threads') WHERE id=?1",
+                [&campaign_id],
+            )
+            .unwrap();
+        let error = db
+            .claim_publish_pipeline(&campaign_id)
+            .expect_err("old Threads row must not enqueue TikTok workers");
+        assert!(error.to_string().contains("Threads"), "{error}");
+        assert!(!db.has_active_publish_pipeline(&campaign_id).unwrap());
+        drop(db);
+        let _ = std::fs::remove_file(path);
     }
 
     fn fixture() -> (Database, std::path::PathBuf, String) {

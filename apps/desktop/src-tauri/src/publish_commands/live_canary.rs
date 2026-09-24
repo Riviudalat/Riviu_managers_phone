@@ -177,8 +177,8 @@ async fn live_publish_canary() -> anyhow::Result<()> {
             let snapshot = session.hierarchy_source_snapshot().await?;
             fs::write(out.join("account.xml"), snapshot.xml)?;
             if let Some(frame) = frames.latest(serial.as_str()) { fs::write(out.join("account.jpg"), frame.as_ref())?; }
-            let handles = session.locate_all_described(ElementQuery::Text { value: handle.as_str(), exact: true }).await?;
-            anyhow::ensure!(handles.len() == 1 && handles[0].description.as_deref() == Some(handle.as_str()), "canary account not proven");
+            let observed = riviu_core::tiktok_account::observe_own_account(session.as_ref(), labels).await?;
+            anyhow::ensure!(observed.as_deref() == Some(handle.trim().trim_start_matches('@')), "canary account not proven");
             save(&out, "account.json", &serde_json::json!({"serial":serial.as_str(),"handle":handle.as_str(),"package":package,"version":version,"locale":locale,"proved":true}))?;
             Ok(())
         }.await;

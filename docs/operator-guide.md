@@ -5,6 +5,14 @@ phạm vi máy rõ ràng và kết quả có thể đọc lại. Chọn hồ sơ
 
 ## Quy tắc chung
 
+Sidebar giữ trạng thái kết nối ở chân cửa sổ khi danh sách trang được cuộn; nhóm
+chứa trang đang mở vẫn được đánh dấu khi thu gọn. Trên màn hẹp, tiêu đề và trạng
+thái toàn hệ thống tự xuống hàng để các nút header không bị che.
+Nút ở đầu sidebar thu gọn thành dải icon để dành chỗ cho vùng làm việc; rê hoặc
+focus vào icon để đọc tên trang. Dải vẫn cho chuyển trang và hiện số máy sẵn sàng;
+trạng thái thu gọn được nhớ cho lần mở sau. My Apps mở trình thiết kế thì dải icon
+tự giữ lại cạnh canvas, không che thư viện bước.
+
 Trong chi tiết thiết bị, **Kiểm tra khả năng** đọc package, phiên bản và ngôn ngữ
 TikTok qua controller. Các trạng thái phân biệt adapter đã đo, cần chứng minh
 trong phiên, chưa hỗ trợ và máy chưa sẵn sàng. Mỗi lần chạy vẫn phải qua preflight
@@ -15,6 +23,9 @@ cấu hình mới hơn, lần lưu cũ bị từ chối; chọn **Nạp bản m�
 kiểm tra lại rồi lưu. Bản nháp/hồ sơ không mang revision DB sang lần mở khác. Script gián
 đoạn sau intent được giữ **chưa xác định**, không tự chạy lại. Dừng Script/Điều
 phối chờ kết quả đóng của từng máy trong snapshot, kể cả máy thuộc bước con.
+Lịch Script tạo job cùng giao dịch tiến mốc; lịch Nuôi ghi intent trước khi mở
+phiên. Nếu khởi động lại giữa lượt Nuôi, mốc đó không tự chạy lần nữa; xem lịch
+sử/nhật ký và đối soát intent chưa chốt trước khi đặt lượt mới.
 
 - Kiểm tra số máy, nhóm, ứng dụng và tài khoản đang hiển thị trước khi chạy.
 - Mỗi workspace automation giữ phạm vi riêng; đổi trang không biến một máy thành toàn bộ fleet.
@@ -58,7 +69,7 @@ nếu vừa nhập khóa mới, lưu trước khi kiểm tra. Lỗi 401 nghĩa l
 
 ## Thiết bị
 
-Sidebar giữ chiều rộng và tên mục. Bấm tiêu đề **Automation**, **Tài nguyên** hoặc
+Sidebar mặc định hiện tên mục. Bấm tiêu đề **Automation**, **Tài nguyên** hoặc
 **Hệ thống** để ẩn/hiện các mục trong nhóm; lựa chọn được giữ cho lần mở sau.
 **Nuôi TikTok**, **Tương tác**, **Đăng bài** trên sidebar mở ba trang vận hành cũ.
 Trong **My Apps**, tên ứng dụng và **Mở chức năng** cũng mở trang cũ;
@@ -67,11 +78,16 @@ Control Center chỉ chứa quản lý thiết bị. Sidebar bỏ Dữ liệu v�
 chọn tên hoặc Chi tiết để mở ngăn kết quả. Monitor rỗng tự ẩn.
 
 Trong Control Center, bảng **Hiển thị** có thanh đổi kích thước ô xem trước và màn
-hình điều khiển; hình điện thoại phóng theo ô và giữ tỷ lệ. Rê chuột vào thẻ **Hiển thị**
-để bung bảng nổi, đưa chuột ra ngoài để tự ẩn. Bấm **Ghim bảng Hiển thị** để giữ bảng
+hình điều khiển; hình điện thoại phóng theo ô và giữ tỷ lệ. Ảnh xem trước Android
+tự mở khi máy kết nối, kể cả trong chế độ dev nghiệm thu thủ công; không cần mở
+từng máy. Việc tự mở ảnh không khởi chạy
+Nuôi, Tương tác, Đăng bài hay lịch đã lưu. Rê chuột vào thẻ **Hiển thị** để bung bảng
+nổi, đưa chuột ra ngoài để tự ẩn. Bấm **Ghim bảng Hiển thị** để giữ bảng
 cạnh lưới; bỏ ghim để trở lại hover. Bàn phím mở bảng bằng Tab/Enter, Escape đóng
 bảng chưa ghim. Dấu **+** cạnh **Nhóm thiết bị** mở quản lý để tạo và phân máy vào nhóm.
 Bấm tên nhóm để lọc lưới và bung/thu các số máy thuộc nhóm; số bên phải là đã chọn/tổng.
+Bộ lọc Tất cả/USB/WIFI hiển thị số máy của nhóm đang chọn, kể cả khi nhóm trống;
+đổi bộ lọc không tự chọn hoặc điều khiển máy.
 Các lựa chọn hiển thị được giữ cho lần mở sau. Chất lượng/FPS Android áp dụng
 ngay khi thả thanh trượt; lỗi đọc hoặc áp dụng hiển thị tại bảng. Bộ lọc USB/Wi-Fi, nhóm và bảng số
 máy chỉ thay tập đang xem/chọn, không tự thay phạm vi chiến dịch đã cấu hình. Trên
@@ -144,8 +160,13 @@ chọn khi máy đang bị tác vụ giữ hoặc còn nghĩa vụ đóng ứng 
 
 ### Ghi Macro
 
-**Bắt thuộc tính & ghi Flow:** mở màn hình một máy Android, chọn mục cùng tên trong
-menu bên phải. Rê chuột để tô phần tử; cây có tìm kiếm, chọn cha/con, selector và XML.
+**Bắt thuộc tính & ghi Flow:** bấm biểu tượng Inspector trên header để chọn một máy
+Android đang kết nối, hoặc mở màn hình máy Android và chọn mục cùng tên trong menu
+bên phải. Inspector đặt ảnh màn hình, bảng thuộc tính và cây giao diện ở ba vùng
+riêng; trên cửa sổ hẹp, bảng thuộc tính và cây xếp cạnh ảnh. Rê chuột để tô phần tử;
+chọn trên ảnh hoặc trong cây sẽ đồng bộ vùng tô và bảng thuộc tính. Cây giữ cả node
+không bấm được, có tìm kiếm và bung/thu nhánh; bảng phân biệt giá trị `false` với thuộc
+tính không có trong cây XML. Có thể sao chép nguyên XML của lần quan sát hiện tại.
 Nhãn có số động được lưu bằng phần ổn định khi vẫn xác định duy nhất. Với node mang
 nghĩa nhưng không nhận tap, Inspector chỉ dùng cha clickable khi quan hệ gần và có
 định danh rõ; node trang trí không tự leo lên khung lớn. **Bấm phần tử** mới gửi thao
@@ -206,6 +227,10 @@ Mặc định cửa sổ gọn: mỗi máy một dòng, chọn máy mới mở n
 Trong cửa sổ điều khiển, nút hình điện thoại **Đưa về màn hình dọc** yêu cầu máy đổi
 về dọc và đọc lại kết quả. Máy đang ngang vẫn giữ đúng tỉ lệ ảnh và menu cuộn riêng;
 không cần đóng/mở cửa sổ để bố cục theo hướng mới.
+Giữ chuột trên màn hình máy Android để nhấn giữ trong ứng dụng; thả chuột để kết thúc,
+kéo khi đang giữ để vuốt. Để nhập chữ, chọn ô trên màn hình máy, gõ vào ô **Nhập chữ**
+trong cửa sổ điều khiển rồi bấm nút gửi hoặc Enter. Shift+Enter xuống dòng; ứng dụng
+chỉ gửi chữ khi người vận hành xác nhận, không tự bấm tìm kiếm hoặc gửi bình luận.
 
 **Đầu vào:** kết nối USB, nhóm, bộ lọc trạng thái, từ khoá và các máy được chọn.
 Danh sách/lưới dùng cùng tập sau lọc; các ô chia đều chiều ngang, giữ tỷ lệ màn hình và
@@ -486,6 +511,11 @@ Thanh đầu đặt **Chọn thư mục** cạnh **Quét**. Phần Google Sheets
 **Link Google Sheet**, nút **Đăng nhập Google** và nút **Kiểm tra kết nối**.
 Dán link của đúng tab (`gid` trong link), đăng nhập trên trình duyệt rồi kiểm tra.
 Link không có `gid` dùng tab `0`. Sửa link sẽ bỏ trạng thái sẵn sàng của link cũ.
+Chuyển sang trang khác rồi quay lại giữ kết quả đã kiểm trong phiên app. Sau khi
+khởi động lại, kết nối Google và đích đã lưu cho phép đi tiếp tới bước kiểm tra
+trước đăng; nhãn trung tính **Đã liên kết Google Sheet** chưa phải xác minh quyền
+ghi hiện tại. Backend kiểm tra lại bảng, tab và quyền ghi trong preflight; lỗi tại
+đó chặn đăng. Nút **Kiểm tra kết nối** vẫn dùng để đối chiếu ngay khi cần.
 Trên màn hẹp, bấm **Thiết lập Google Sheet** để mở các control kết nối; Escape đóng
 phần này và trả focus. Trạng thái kết nối/lỗi thật vẫn hiển thị khi thu gọn. Các
 lựa chọn **Ghi kết quả lên Sheet / Xóa bản chuyển** nằm trong **Tùy chọn** ở thanh
@@ -527,15 +557,22 @@ Sheet hoặc cho rằng chờ lâu là được chiếm khóa; cần đối chi�
 năng reset cũ không hỗ trợ tab giao thức mới (schema 2), sẽ từ chối trước sao lưu
 hoặc xóa. Đây là quy trình và giới hạn giao thức, không phải xác nhận đã nghiệm thu
 ghi đồng thời trên nhiều PC thật.
-Khi đã nhập link, cần xác minh thành công trước khi đăng hoặc lưu lịch có bật ghi
-Sheet. Có thể tắt **Ghi kết quả lên Sheet** để chạy lượt không ghi bảng.
+Khi đã nhập link, preflight phải xác minh thành công trước khi đăng hoặc lưu lịch
+có bật ghi Sheet. Có thể tắt **Ghi kết quả lên Sheet** để chạy lượt không ghi bảng.
 Khi kiểm tra trước đăng hoặc lưu lịch, Riviu chốt đúng bảng/tab và chế độ báo cáo
 của lượt đó. Đổi kết nối cho lượt mới không chuyển các bài cũ sang bảng khác.
+Hộp **Kiểm tra đợt đăng** tách pha chuẩn bị thiết bị và kiểm tra từng máy. Khi chờ,
+danh sách bài–máy chỉ ghi **Chờ kết quả**, chưa coi máy là đạt. Khi có kết quả,
+điều kiện Sheet chung và máy cần xử lý xuất hiện trước; bộ lọc chuyển giữa
+**Cần xử lý / Đạt / Tất cả**. Trên cửa sổ hẹp, **Kiểm tra lại** nằm ở chân hộp
+để không phải cuộn qua toàn bộ danh sách máy.
 Lượt cũ chưa có đích đã chốt giữ nguyên lịch sử để kiểm tra, không tự gửi sang
 kết nối mới.
 
 Khung **Máy thực hiện** có nút **Chọn nhanh**: lấy bài trong nguồn (tối đa 100) và
-mọi máy sẵn sàng trong phạm vi; mỗi máy một bài. Cặp đã ghép hợp lệ được giữ. Nếu đợt
+mọi máy sẵn sàng trong phạm vi; mỗi máy một bài. Khi đã chọn phạm vi máy, khung
+mặc định chỉ hiện máy trong phạm vi và máy đã ghép cần sửa; mở **Bộ lọc thiết bị →
+Hiện máy ngoài phạm vi** để xem toàn dàn. Cặp đã ghép hợp lệ được giữ. Nếu đợt
 trước chỉ gán một phần mà sau đó thêm máy sẵn sàng, bấm lại sẽ lấp tiếp máy trống bằng
 bài còn trong nguồn — không kẹt ở tập bài/máy của lần gán cũ. Bài đang chọn chưa đủ máy
 vẫn chỉ dùng tập đó cho đến khi đã ghép xong. Thiếu máy thì ghép phần đủ và báo số bài
@@ -619,6 +656,9 @@ không bỏ qua nhạc khi tải chậm. Quá thời hạn hoặc mất kết n�
 và hiện nguyên nhân. Bấm **Tạm dừng** sẽ kết thúc cả vòng chờ nhạc.
 Nếu TikTok hiện lỗi mạng trong danh sách nhạc, app báo rõ lỗi đó và dừng trước Đăng.
 Tên nhạc bị rút gọn ở hàng đã chọn vẫn phải được xác nhận đầy đủ trên màn soạn bài.
+Trên Global 45.7.3 tiếng Anh, nếu bảng nhạc đã hiện mà OCR không đọc đủ tên hàng,
+app chỉ chuyển sang cây giao diện khi đã xác nhận đúng bảng, tab Hot và các hàng ổn
+định. Không chứng minh được thì báo lỗi trước Đăng; không tự chạm vào một hàng bất kỳ.
 
 Lỗi tạm thời trước Đăng được **tự thử lại tối đa 3 lần ngoài lần chạy đầu**, chờ lần
 lượt 2, 5 và 10 giây. Nếu agent Android không đọc được cây UI hoặc không trả `/status`,
@@ -630,7 +670,9 @@ Máy mất kết nối được chờ đúng serial tối đa **2 phút**, khôn
 Sai account, chưa cho phép USB, thiếu quyền hoặc phiên bản chưa hỗ trợ cần xử lý trước.
 
 Trong **Theo dõi tiến trình**, mỗi máy lỗi có nút **Thử lại**. Bấm nút này chỉ chạy
-thêm **một lần**, không mở thêm ba lượt tự retry. Nếu agent đang phục hồi, lệnh được ghi nhận
+thêm **một lượt bài**; trong lượt đó lỗi tạm thời trước Đăng vẫn được thử lại tối đa
+ba lần ở đúng bước. Không tự tạo lượt bài khác nếu lượt thủ công này thất bại.
+Nếu agent đang phục hồi, lệnh được ghi nhận
 nhưng chờ hết cooldown của máy trước khi mở phiên mới. Khi đang tự phục hồi, nút bị khóa và
 hiện bước cùng số lần. Bài đã Post chỉ có **Kiểm tra liên kết** hoặc **Ghi lại Sheet**;
 không gửi lại Post. Dừng hủy cả lượt đang chờ. Mở lại app giữ bộ đếm và yêu cầu bấm
@@ -660,6 +702,9 @@ Thả trực tiếp lên máy trống chỉ chuyển đúng bài đang kéo, k�
 nhóm và máy đích chưa tick. Thả vào vùng chung mới phân nhóm đang chọn.
 Máy đã nhận bài cùng giờ giữ nguyên; phần thiếu chỗ nằm ở **Chưa có máy**. Kéo tiếp
 chỉ lấp chỗ trống. Có thể dùng bàn phím chọn bài/máy và bấm **Gán bài đã chọn**.
+Khi đã chọn bài và máy còn chỗ, thanh cuối cũng hiện **Gán bài** để không phải
+cuộn xuống tìm nút trong cửa sổ thấp. Số **máy đã ghép** chỉ đếm cặp trong bản nháp;
+chỉ số **bài có máy khả dụng** mới tính máy đang đủ điều kiện để kiểm tra lịch.
 
 Chọn **Ngày đăng** và **Giờ chung** một lần cho cả lượt. **Chỉnh giờ từng bài**
 cho đặt giờ khác; đổi giờ chung không sửa giờ riêng. Một máy có thể nhận nhiều bài
@@ -708,6 +753,7 @@ Kết quả kiểm tra và quyền xác nhận đăng không được khôi ph�
 
 **Theo dõi** có bộ lọc **Tất cả / Đang chạy / Cần xử lý / Hoàn tất** và ô tìm nguồn
 hoặc ngày đăng. Chọn chiến dịch ở danh sách để xem kết quả từng máy bên cạnh;
+nếu cửa sổ hẹp, app đưa khung chi tiết vào tầm nhìn ngay sau khi chọn chiến dịch.
 nút kiểm tra liên kết, ghi lại Sheet hoặc hủy nằm trong chi tiết của lượt đã chọn.
 Chuyển về tab **Thiết lập** giữ nguyên bài và máy đang ghép.
 
@@ -836,9 +882,10 @@ Sheet. Mất ACK handoff/Create/Execute đều giữ intent và không tự phá
 3. **Verified**: backend lưu proof xuất bản và canonical URL; chỉ URL hiện trên dòng
    hoặc state succeeded cũ không đủ.
 4. **Sheet sent**: backend đã settle delivery, tách khỏi trạng thái bài.
-5. **URL readback**: đối chứng đọc ô Sheet. Harness hiện chưa có IPC đọc lại hàng
-   private/receipt identity, nên báo **unsupported**, không xuất token và không giả
-   xanh. CSV công khai cũng không thay bằng chứng đúng writer/target/epoch.
+5. **URL readback**: harness gọi `publish_sheet_readback` qua kết nối OAuth backend
+   để đối chứng ô Sheet và receipt đúng assignment/revision/epoch. Chỉ `matched`
+   khi URL và identity khớp; lỗi mạng/quyền hoặc chưa có receipt vẫn là `pending`.
+   Không xuất token; CSV công khai không thay bằng chứng đúng writer/target/epoch.
 
 Mã thoát `2` là còn chờ/hết hạn hoặc ACK chưa rõ; `1` là lỗi/bị chặn; `3` là đã có
 verified + sent nhưng chưa đủ readback bổ sung. `0` của inspect/preflight chỉ nghĩa
@@ -857,6 +904,9 @@ Riviu trên cùng điện thoại hoặc nhập DB thử vào dữ liệu đang 
 **My Apps → Mở trình thiết kế** mở graph riêng của ứng dụng. Thư viện bước ở bên trái,
 canvas ở giữa; chọn bước để chỉnh thông số bên phải. Kéo bước, nối cổng, xóa bước,
 hoàn tác/làm lại và lưu tạo revision. Tìm node bằng tên/ID rồi Enter để đưa vào vùng nhìn.
+Ở danh sách My Apps, tìm kiếm khớp tên quy trình hoặc loại ứng dụng; có thể sắp
+xếp quy trình đã lưu theo mới nhất, cũ nhất hoặc tên. Ba ứng dụng có sẵn vẫn giữ
+nguyên vị trí và thao tác mở riêng.
 **Cấu hình ứng dụng** nhận hồ sơ đã lưu hoặc nguồn/link/nội dung đầu vào. **Chạy** yêu
 cầu lưu trước và chọn phạm vi thiết bị; theo dõi và hủy trong bảng chạy.
 
@@ -866,11 +916,17 @@ của engine; nối sai bị báo khi kiểm tra/lưu. Chờ và Ghi nhật ký 
 lịch theo hồ sơ chưa nhận các bước Chờ/Ghi nhật ký bao quanh. Graph này chưa thay thế
 thư viện thao tác thấp của **Flow thiết bị** và không chứng nhận tương đương mọi node GenFarmer.
 
-**Tác vụ đã lưu** ghim ứng dụng/revision cùng máy thực hiện; **Lịch chạy** quản lý
-lịch của các hồ sơ, hiển thị lần chạy kế tiếp và lỗi gần nhất. **Quản lý tài khoản**
+**Tác vụ đã lưu** ghim ứng dụng/revision cùng máy thực hiện; tìm theo tên tác vụ
+hoặc tên ứng dụng mà không gọi lại backend. **Lịch chạy** quản lý
+lịch của các hồ sơ, hiển thị lần chạy kế tiếp và lỗi gần nhất. Bảng lịch và cấu hình
+đặt cạnh nhau trên màn rộng; màn hẹp hiện tên, trạng thái, lần chạy, thao tác ở bảng
+trên và cấu hình ở dưới. **Quản lý tài khoản**
 giữ metadata, nhóm và máy; đọc tài khoản là thao tác riêng. Nhập/xuất JSON không gửi
 lệnh vào điện thoại. **Mạng & Router** giữ hồ sơ kết nối, thử TCP và áp dụng/xóa proxy
 HTTP không xác thực trên Android; kết quả phải đọc lại khớp trên từng máy.
+Biểu mẫu sửa tài khoản/tác vụ đặt cạnh danh sách trên màn rộng; màn hẹp mở ngăn bên
+phải có thể đóng bằng Escape, giữ thao tác Lưu trong vùng nhìn thấy. Đóng bản nháp
+tài khoản chưa lưu vẫn yêu cầu xác nhận bỏ thay đổi.
 Phần chợ ứng dụng chưa được thêm trong đợt này.
 
 **Đầu vào:** graph thiết bị hoặc điều phối fleet, cấu hình node, target và profile.

@@ -6,6 +6,7 @@ import {
   inspectorConfirmPostcondition,
   inspectorObserve,
   inspectorRecording,
+  inspectorTap,
 } from "../inspectorApi";
 
 vi.mock("../inspectorApi", () => ({
@@ -63,4 +64,51 @@ it("shows the hierarchy evidence, parent-backed action and explicit recorded pos
   await waitFor(() => expect(inspectorConfirmPostcondition).toHaveBeenCalledWith(
     "phone-a", "after", profileSelector,
   ));
+});
+
+it("keeps screenshot, properties and a complete expandable hierarchy in separate panes", async () => {
+  vi.mocked(inspectorObserve).mockResolvedValue({
+    ...snapshot,
+    elements: [
+      { index: 0, parent: null, text: "", description: "", resourceId: "", className: "android.widget.FrameLayout", x: 0, y: 0, width: 1080, height: 2220, enabled: true, clickable: false, selector: null },
+      { ...snapshot.elements[0], parent: 0 },
+      { ...snapshot.elements[1], parent: 0 },
+    ],
+  });
+  render(<DeviceInspector udid="phone-a" onClose={vi.fn()} />);
+
+  const tree = await screen.findByRole("tree", { name: "Cây phần tử" });
+  const container = screen.getByRole("treeitem", { name: /android.widget.FrameLayout/ });
+  expect(container).toHaveAttribute("aria-expanded", "true");
+  expect(screen.getByRole("table", { name: "Thuộc tính phần tử" })).toBeVisible();
+  expect(screen.getByRole("img", { name: "Màn hình thiết bị" })).toBeVisible();
+  expect(tree).toContainElement(screen.getByRole("treeitem", { name: /Favorites/ }));
+
+  fireEvent.click(screen.getByRole("button", { name: "Thu gọn android.widget.FrameLayout" }));
+  expect(container).toHaveAttribute("aria-expanded", "false");
+  expect(screen.queryByRole("treeitem", { name: /Favorites/ })).toBeNull();
+  fireEvent.click(screen.getByRole("button", { name: "Mở rộng android.widget.FrameLayout" }));
+  fireEvent.click(screen.getByRole("treeitem", { name: /Favorites/ }));
+  expect(screen.getByRole("row", { name: /resource-id app:id\/hly/ })).toBeVisible();
+  expect(screen.getByRole("row", { name: /clickable false/ })).toBeVisible();
+  expect(inspectorTap).not.toHaveBeenCalled();
+});
+
+it("selects the smallest element on the screenshot and copies the exact XML", async () => {
+  const writeText = vi.fn().mockResolvedValue(undefined);
+  Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText } });
+  render(<DeviceInspector udid="phone-a" onClose={vi.fn()} />);
+  const screenImage = await screen.findByRole("img", { name: "Màn hình thiết bị" });
+  vi.spyOn(screenImage, "getBoundingClientRect").mockReturnValue({ x: 0, y: 0, left: 0, top: 0, right: 800, bottom: 1110, width: 800, height: 1110, toJSON: () => ({}) });
+  fireEvent.pointerMove(screenImage, { clientX: 580, clientY: 725 });
+  fireEvent.click(screenImage, { clientX: 580, clientY: 725 });
+  expect(screen.getByRole("treeitem", { name: /Favorites/ })).toHaveAttribute("aria-selected", "true");
+  expect(screen.getByRole("row", { name: /resource-id app:id\/hly/ })).toBeVisible();
+  expect(inspectorTap).not.toHaveBeenCalled();
+
+  fireEvent.click(screenImage, { clientX: 40, clientY: 725 });
+  expect(screen.getByRole("treeitem", { name: /Favorites/ })).toHaveAttribute("aria-selected", "false");
+
+  fireEvent.click(screen.getByRole("button", { name: "Sao chép XML" }));
+  expect(writeText).toHaveBeenCalledWith(snapshot.hierarchyXml);
 });

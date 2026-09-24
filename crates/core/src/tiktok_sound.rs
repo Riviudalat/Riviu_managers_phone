@@ -505,7 +505,7 @@ pub async fn open_and_observe_sounds_armed(
         return open_dynamic_sounds(session, plan, maximum_visible, before_open).await;
     }
     if visual::open_loading_entry(session, plan, before_open).await? {
-        return visual::observe(session, plan, maximum_visible, true).await;
+        return observe_measured_sound_pool(session, plan, maximum_visible).await;
     }
     let deadline = phase_deadline(SOUND_WINDOW);
     let entry = loop {
@@ -538,7 +538,7 @@ pub async fn open_and_observe_sounds_armed(
         .context("open sound picker")?;
 
     if selection_recovery::measured(plan) && session.gui_reasoner().is_some() {
-        return visual::observe(session, plan, maximum_visible, true).await;
+        return observe_measured_sound_pool(session, plan, maximum_visible).await;
     }
     if plan.snapshot_layout().is_some() {
         snapshot::select_section_tab(session, plan).await?;
@@ -555,7 +555,7 @@ pub async fn resume_open_sounds(
     maximum: usize,
 ) -> anyhow::Result<ObservedSoundPool> {
     if selection_recovery::measured(plan) && session.gui_reasoner().is_some() {
-        return visual::observe(session, plan, maximum, true).await;
+        return observe_measured_sound_pool(session, plan, maximum).await;
     }
     if let Some(layout) = plan.snapshot_layout() {
         if !read_sound(session.locate_all(ElementQuery::ResourceIdSuffix(layout.tab_id)))
@@ -572,6 +572,65 @@ pub async fn resume_open_sounds(
         return observe_sound_pool(session, plan, maximum).await;
     }
     anyhow::bail!("sound sheet is not proven open; refusing to replay its editor entry")
+}
+
+async fn observe_measured_sound_pool(
+    session: &dyn UiSession,
+    plan: SoundPickerPlan,
+    maximum: usize,
+) -> anyhow::Result<ObservedSoundPool> {
+    let epoch = session.gui_session_epoch();
+    anyhow::ensure!(!epoch.is_empty(), "sound sheet session missing");
+    let visual = visual::observe_initial(session, plan, maximum).await;
+    match checked_measured_sound_observation(session, plan, &epoch, visual).await {
+        Ok(pool) => return Ok(pool),
+        Err(error) if error.is::<visual::VisualSoundPoolUnavailable>() => {}
+        Err(error) => return Err(error),
+    }
+
+    // OCR must still prove the same sheet before XML can take over. The XML
+    // path itself requires a selected Hot tab and two complete, stable pools;
+    // it never selects a row on this fallback.
+    let sheet = selection_recovery::prove_sheet(session, plan).await;
+    checked_measured_sound_observation(session, plan, &epoch, sheet).await?;
+    let pool = tokio::time::timeout(
+        Duration::from_secs(45),
+        snapshot::observe(session, plan, maximum),
+    )
+    .await
+    .map_err(|_| {
+        crate::publish_recovery::retryable_error(
+            "sound_hierarchy_unavailable",
+            "TikTok chưa cung cấp hàng nhạc ổn định sau khi OCR không đọc được; chưa bấm Đăng",
+        )
+    })?;
+    checked_measured_sound_observation(session, plan, &epoch, pool).await
+}
+
+async fn checked_measured_sound_observation<T>(
+    session: &dyn UiSession,
+    plan: SoundPickerPlan,
+    epoch: &str,
+    observation: anyhow::Result<T>,
+) -> anyhow::Result<T> {
+    if observation
+        .as_ref()
+        .is_err_and(|error| error.is::<SoundStopped>())
+    {
+        return observation;
+    }
+    check_wait()?;
+    anyhow::ensure!(
+        read_sound(session.active_app_bundle()).await? == plan.package,
+        "sound app changed; refusing selection"
+    );
+    if session.gui_session_epoch() != epoch {
+        return Err(crate::publish_recovery::retryable_error(
+            "sound_session_replaced",
+            "Phiên điều khiển đổi khi đọc bảng nhạc; sẽ kiểm lại TikTok và bảng nhạc trước khi chọn, chưa bấm Đăng",
+        ));
+    }
+    observation
 }
 pub async fn recover_sound_selection(
     session: &dyn UiSession,

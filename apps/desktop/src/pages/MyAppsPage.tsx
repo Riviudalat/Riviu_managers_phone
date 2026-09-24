@@ -1,4 +1,4 @@
-import { lazy, Suspense, useRef, useState } from "react";
+import { lazy, Suspense, useEffect, useRef, useState } from "react";
 import {
   Copy,
   Download,
@@ -35,20 +35,38 @@ const APPS = [
 export function MyAppsPage({
   devices,
   onOpenApp,
+  onEditorChange,
 }: {
   devices: DeviceInfo[];
   onOpenApp: (kind: AutomationKind) => void;
+  onEditorChange?: (open: boolean) => void;
 }) {
   const [newKind, setNewKind] = useState<AutomationKind>("nurture");
+  const [sort, setSort] = useState<"recent" | "oldest" | "name">("recent");
   const [editor, setEditor] = useState<AppWorkflowV1 | null>(null),
     [search, setSearch] = useState(""),
     [error, setError] = useState<string | null>(null),
     [busy, setBusy] = useState(false);
+  useEffect(() => {
+    onEditorChange?.(editor !== null);
+    return () => onEditorChange?.(false);
+  }, [editor, onEditorChange]);
   const importInput = useRef<HTMLInputElement>(null);
   const { data, error: loadError, loading, initialLoading, refreshing, load } = useAsyncList(appWorkflowList);
   const rows = data ?? [];
-  const visible = rows.filter((row) => row.name.toLowerCase().includes(search.toLowerCase()));
-  const visibleApps = APPS.filter((app) => app.name.toLowerCase().includes(search.toLowerCase()));
+  const query = search.trim().toLocaleLowerCase("vi-VN");
+  const visible = rows
+    .filter((row) =>
+      row.name.toLocaleLowerCase("vi-VN").includes(query) ||
+      APPS.find((app) => app.kind === row.kind)?.name.toLocaleLowerCase("vi-VN").includes(query),
+    )
+    .sort((a, b) => {
+      const byName = a.name.localeCompare(b.name, "vi-VN") || a.id.localeCompare(b.id);
+      if (sort === "name") return byName;
+      const byDate = Date.parse(b.updatedAt) - Date.parse(a.updatedAt);
+      return (sort === "oldest" ? -byDate : byDate) || byName;
+    });
+  const visibleApps = APPS.filter((app) => app.name.toLocaleLowerCase("vi-VN").includes(query));
   const open = async (kind: AutomationKind, id?: string) => {
     setBusy(true);
     try {
@@ -163,6 +181,12 @@ export function MyAppsPage({
           }}
         />
         <span>3 ứng dụng có sẵn{data !== undefined ? ` · ${rows.length} quy trình đã lưu` : " · Chưa tải quy trình đã lưu"}</span>
+        <div className="grow" />
+        <select aria-label="Sắp xếp quy trình" value={sort} onChange={(event) => setSort(event.target.value as typeof sort)}>
+          <option value="recent">Cập nhật mới nhất</option>
+          <option value="oldest">Cập nhật cũ nhất</option>
+          <option value="name">Tên A–Z</option>
+        </select>
       </div>
       <table className="builtin-app-list">
         <thead>

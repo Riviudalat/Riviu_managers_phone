@@ -276,10 +276,276 @@ impl Database {
         )?;
         Ok(())
     }
+
+    /// Advance a due legacy Script slot and persist its job in one transaction.
+    /// A stale tick or restarted process cannot create a second job for that slot.
+    pub fn claim_script_schedule_job(
+        &self,
+        schedule: &crate::types::ScheduleItem,
+        next_run_at: &str,
+        job: &crate::types::JobRecord,
+    ) -> anyhow::Result<bool> {
+        anyhow::ensure!(
+            job.udids == schedule.udids,
+            "scheduled job does not match its snapshot"
+        );
+        let mut conn = self.conn()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let changed = tx.execute(
+            "UPDATE schedules SET last_run_at=?3,next_run_at=?4,last_error=NULL
+             WHERE id=?1 AND enabled=1 AND script_name=?2 AND udids_json=?5
+             AND every_minutes=?6 AND next_run_at IS ?7",
+            params![
+                schedule.id,
+                schedule.script_name,
+                job.created_at.to_rfc3339(),
+                next_run_at,
+                serde_json::to_string(&schedule.udids)?,
+                i64::from(schedule.every_minutes),
+                schedule.next_run_at
+            ],
+        )?;
+        if changed == 1 {
+            tx.execute(
+                "INSERT INTO jobs (id,script_name,udids_json,status,created_at,updated_at,steps_json,error)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,NULL)",
+                params![job.id.to_string(), job.script_name, serde_json::to_string(&job.udids)?,
+                    serde_json::to_string(&job.status)?, job.created_at.to_rfc3339(),
+                    job.updated_at.to_rfc3339(), serde_json::to_string(&job.steps)?],
+            )?;
+        }
+        tx.commit()?;
+        Ok(changed == 1)
+    }
+
+    pub fn advance_failed_script_schedule(
+        &self,
+        schedule: &crate::types::ScheduleItem,
+        next_run_at: &str,
+        error: &str,
+    ) -> anyhow::Result<bool> {
+        let changed = self.conn()?.execute(
+            "UPDATE schedules SET next_run_at=?2,last_error=?3
+             WHERE id=?1 AND enabled=1 AND script_name=?4 AND udids_json=?5
+             AND every_minutes=?6 AND next_run_at IS ?7",
+            params![
+                schedule.id,
+                next_run_at,
+                error,
+                schedule.script_name,
+                serde_json::to_string(&schedule.udids)?,
+                i64::from(schedule.every_minutes),
+                schedule.next_run_at
+            ],
+        )?;
+        Ok(changed == 1)
+    }
+
+    /// Claim a Nuoi schedule slot before any device action. Its journal row is
+    /// intentionally retained on restart: an uncertain slot must never auto-replay.
+    pub fn claim_nurture_schedule_mark(
+        &self,
+        key: &str,
+        observed: Option<&str>,
+        next_run_at: &str,
+        settings_revision: u64,
+        udids: &[String],
+    ) -> anyhow::Result<Option<String>> {
+        anyhow::ensure!(
+            key.starts_with("nurture.schedule.next_run_at"),
+            "invalid Nuoi schedule key"
+        );
+        let mut conn = self.conn()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let raw_settings: Option<String> = tx
+            .query_row(
+                "SELECT value FROM settings WHERE key='nurture.settings'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let current_settings: crate::NurtureSettings = raw_settings
+            .as_deref()
+            .map(serde_json::from_str)
+            .transpose()?
+            .unwrap_or_default();
+        if !current_settings.schedule_enabled || current_settings.revision != settings_revision {
+            return Ok(None);
+        }
+        let current: Option<String> = tx
+            .query_row("SELECT value FROM settings WHERE key=?1", [key], |row| {
+                row.get(0)
+            })
+            .optional()?;
+        if current.as_deref() != observed {
+            return Ok(None);
+        }
+        let claim_id = Uuid::new_v4().to_string();
+        tx.execute(
+            "INSERT INTO op_logs(id,action,detail,created_at) VALUES(?1,'nurture.schedule.intent',?2,?3)",
+            params![claim_id, serde_json::json!({"markKey":key,"observed":observed,
+                "nextRunAt":next_run_at,"settingsRevision":settings_revision,
+                "udids":udids,"state":"uncertainUntilSettled"}).to_string(), Utc::now().to_rfc3339()],
+        )?;
+        tx.execute(
+            "INSERT INTO settings(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            params![key, next_run_at],
+        )?;
+        tx.commit()?;
+        Ok(Some(claim_id))
+    }
+
+    pub fn settle_nurture_schedule_mark(
+        &self,
+        claim_id: &str,
+        started_udids: &[String],
+    ) -> anyhow::Result<()> {
+        let changed = self.conn()?.execute(
+            "UPDATE op_logs SET action='nurture.schedule.settled',
+             detail=json_set(detail,'$.state','settled','$.startedUdids',json(?2))
+             WHERE id=?1 AND action='nurture.schedule.intent'",
+            params![claim_id, serde_json::to_string(started_udids)?],
+        )?;
+        anyhow::ensure!(
+            changed == 1,
+            "Nuoi schedule claim missing or already settled"
+        );
+        Ok(())
+    }
     pub fn delete_schedule(&self, id: &str) -> anyhow::Result<()> {
         let conn = self.conn()?;
         conn.execute("DELETE FROM schedules WHERE id = ?1", params![id])?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod schedule_claim_tests {
+    use super::*;
+    use crate::types::{JobRecord, JobStatus, ScheduleItem};
+
+    fn db() -> Database {
+        Database::open(std::env::temp_dir().join(format!("schedule-claim-{}.db", Uuid::new_v4())))
+            .unwrap()
+    }
+
+    fn schedule() -> ScheduleItem {
+        ScheduleItem {
+            id: Uuid::new_v4().to_string(),
+            name: "fixture".into(),
+            script_name: "script".into(),
+            udids: vec!["device-a".into()],
+            every_minutes: 15,
+            enabled: true,
+            last_run_at: None,
+            next_run_at: Some("2026-09-24T01:00:00Z".into()),
+            last_error: None,
+        }
+    }
+
+    fn job() -> JobRecord {
+        let now = Utc::now();
+        JobRecord {
+            id: Uuid::new_v4(),
+            script_name: "script".into(),
+            udids: vec!["device-a".into()],
+            status: JobStatus::Queued,
+            created_at: now,
+            updated_at: now,
+            steps: Vec::new(),
+            error: None,
+        }
+    }
+
+    #[test]
+    fn script_schedule_claim_commits_one_job_and_one_advance() {
+        let db = db();
+        let schedule = schedule();
+        db.upsert_schedule(&schedule).unwrap();
+        let first = job();
+        let second = job();
+        assert!(db
+            .claim_script_schedule_job(&schedule, "2026-09-24T01:15:00Z", &first)
+            .unwrap());
+        assert!(!db
+            .claim_script_schedule_job(&schedule, "2026-09-24T01:15:00Z", &second)
+            .unwrap());
+        assert!(db.get_job(first.id).unwrap().is_some());
+        assert!(db.get_job(second.id).unwrap().is_none());
+        assert_eq!(
+            db.list_schedules().unwrap()[0].next_run_at.as_deref(),
+            Some("2026-09-24T01:15:00Z")
+        );
+        assert_eq!(db.recover_script_jobs().unwrap(), 1);
+        assert_eq!(
+            db.get_job(first.id).unwrap().unwrap().status,
+            JobStatus::Cancelled
+        );
+        assert!(!db
+            .claim_script_schedule_job(&schedule, "2026-09-24T01:15:00Z", &job())
+            .unwrap());
+    }
+
+    #[test]
+    fn nurture_schedule_claim_fences_repeated_or_stale_marks() {
+        let db = db();
+        let key = "nurture.schedule.next_run_at.fixture";
+        let settings = crate::NurtureSettings {
+            schedule_enabled: true,
+            ..Default::default()
+        };
+        db.save_nurture_settings(&settings).unwrap();
+        let first = db
+            .claim_nurture_schedule_mark(key, None, "2026-09-24T01:15:00Z", 1, &["device-a".into()])
+            .unwrap()
+            .unwrap();
+        let intent: String = db
+            .conn()
+            .unwrap()
+            .query_row(
+                "SELECT detail FROM op_logs WHERE id=?1 AND action='nurture.schedule.intent'",
+                [&first],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let intent: serde_json::Value = serde_json::from_str(&intent).unwrap();
+        assert_eq!(intent["udids"], serde_json::json!(["device-a"]));
+        assert_eq!(intent["state"], "uncertainUntilSettled");
+        assert!(db
+            .claim_nurture_schedule_mark(key, None, "2026-09-24T01:15:00Z", 1, &["device-a".into()])
+            .unwrap()
+            .is_none());
+        db.settle_nurture_schedule_mark(&first, &["device-a".into()])
+            .unwrap();
+        assert!(db
+            .claim_nurture_schedule_mark(
+                key,
+                Some("2026-09-24T01:15:00Z"),
+                "2026-09-24T01:30:00Z",
+                1,
+                &["device-a".into()]
+            )
+            .unwrap()
+            .is_some());
+        assert_eq!(
+            db.get_setting(key).unwrap().as_deref(),
+            Some("2026-09-24T01:30:00Z")
+        );
+        db.save_nurture_settings(&crate::NurtureSettings {
+            schedule_enabled: false,
+            ..settings
+        })
+        .unwrap();
+        assert!(db
+            .claim_nurture_schedule_mark(
+                key,
+                Some("2026-09-24T01:30:00Z"),
+                "2026-09-24T01:45:00Z",
+                1,
+                &["device-a".into()]
+            )
+            .unwrap()
+            .is_none());
     }
 }
 

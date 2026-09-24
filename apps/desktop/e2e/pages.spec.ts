@@ -564,3 +564,44 @@ test.describe("every page in the sidebar", () => {
     });
   }
 });
+
+test.describe("operator record editors", () => {
+  for (const item of [
+    { page: "Quản lý tài khoản", open: "Thêm tài khoản", save: "Lưu bản ghi" },
+    { page: "Tác vụ đã lưu", open: "Tác vụ mới", save: "Lưu tác vụ" },
+  ]) {
+    test(`${item.page} keeps its editor beside the list on desktop`, async ({ page }) => {
+      await page.setViewportSize({ width: 1440, height: 900 });
+      await open(page, item.page);
+      await page.getByRole("button", { name: item.open, exact: true }).click();
+      const list = await page.locator(".operator-record-main").boundingBox();
+      const editor = await page.locator(".operator-record-editor").boundingBox();
+      expect(list).not.toBeNull();
+      expect(editor).not.toBeNull();
+      expect(list!.x + list!.width).toBeLessThanOrEqual(editor!.x + 1);
+      await expect(page.getByRole("button", { name: item.save })).toBeVisible();
+      if (process.env.RIVIU_UI_CAPTURE) await page.screenshot({
+        path: `${process.env.RIVIU_UI_CAPTURE}/${screenshotName(item.page)}-editor-desktop.png`,
+      });
+    });
+
+    test(`${item.page} opens a keyboard-owned drawer in the compact viewport`, async ({ page }) => {
+      await page.setViewportSize({ width: 820, height: 560 });
+      await open(page, item.page);
+      await page.getByRole("button", { name: item.open, exact: true }).click();
+      const editor = page.getByRole("dialog", { name: /Chỉnh bản ghi|Tác vụ mới/ });
+      await expect(editor).toBeVisible();
+      await expect(editor).toHaveAttribute("aria-modal", "true");
+      await expect(editor.getByRole("textbox", { name: "Tên" })).toBeFocused();
+      const save = await editor.getByRole("button", { name: item.save }).boundingBox();
+      expect(save).not.toBeNull();
+      expect(save!.y + save!.height).toBeLessThanOrEqual(560);
+      if (process.env.RIVIU_UI_CAPTURE) await page.screenshot({
+        path: `${process.env.RIVIU_UI_CAPTURE}/${screenshotName(item.page)}-editor-compact.png`,
+      });
+      await page.keyboard.press("Escape");
+      await expect(editor).toHaveCount(0);
+      await expect(page.getByRole("button", { name: item.open, exact: true })).toBeFocused();
+    });
+  }
+});

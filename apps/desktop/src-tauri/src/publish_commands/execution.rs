@@ -718,6 +718,10 @@ pub(crate) async fn transfer_publish_campaign_inner(
     agent_bundle_id: String,
     campaign_id: String,
 ) -> anyhow::Result<PublishCampaignDetail> {
+    db.publish_campaign_request(&campaign_id)?
+        .context("publish campaign request not found")?
+        .network
+        .ensure_implemented()?;
     let detail = db
         .get_publish_campaign(&campaign_id)?
         .ok_or_else(|| anyhow::anyhow!("publish campaign not found"))?;
@@ -1140,6 +1144,7 @@ pub(crate) async fn execute_publish_campaign_inner(
     let request = db
         .publish_campaign_request(&campaign_id)?
         .ok_or_else(|| anyhow::anyhow!("publish campaign request not found"))?;
+    request.network.ensure_implemented()?;
     let mut detail = db
         .get_publish_campaign(&campaign_id)?
         .ok_or_else(|| anyhow::anyhow!("publish campaign not found"))?;
@@ -1993,6 +1998,10 @@ pub(super) async fn capture_confirmed_assignment_link(
     bundle: &riviu_core::PublishBundle,
     observer: Option<&riviu_core::db::PendingPublishVerification>,
 ) -> anyhow::Result<ConfirmedAssignmentLink> {
+    db.publish_campaign_request(&assignment.campaign_id)?
+        .context("publish campaign request not found")?
+        .network
+        .ensure_implemented()?;
     anyhow::ensure!(
         matches!(
             assignment.state,
@@ -2174,6 +2183,7 @@ pub(crate) async fn post_publish_campaign_inner(
     let request = db
         .publish_campaign_request(&campaign_id)?
         .ok_or_else(|| anyhow::anyhow!("publish campaign request not found"))?;
+    request.network.ensure_implemented()?;
     let detail = db
         .get_publish_campaign(&campaign_id)?
         .ok_or_else(|| anyhow::anyhow!("publish campaign not found"))?;
@@ -2459,7 +2469,8 @@ async fn post_one_assignment_owned(
     };
     let request = match db.publish_campaign_request(campaign_id) {
         Ok(Some(request))
-            if request.verification_contract_version == Some(1)
+            if request.network.is_implemented()
+                && request.verification_contract_version == Some(1)
                 && (!request.sheet_enabled
                     || request
                         .sheet_delivery

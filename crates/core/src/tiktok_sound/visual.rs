@@ -221,6 +221,18 @@ fn pool_from_image(
     })
 }
 
+fn visual_rejection_code(error: &anyhow::Error) -> &'static str {
+    match error.to_string().as_str() {
+        "visual sound tuple unmeasured" => "tuple_unmeasured",
+        "visual sound Hot tab not selected" => "hot_not_selected",
+        "visual sound title clipped" => "title_clipped",
+        "visual sound identity ambiguous" => "identity_ambiguous",
+        "visual sound selected row ambiguous" => "selected_row_ambiguous",
+        "visual sound has no complete unselected row" => "no_complete_row",
+        _ => "other",
+    }
+}
+
 async fn capture(
     session: &dyn UiSession,
     plan: SoundPickerPlan,
@@ -351,28 +363,83 @@ fn network_unavailable(lines: &[OcrLine], tabs: &[OcrRect]) -> bool {
         })
 }
 
+#[derive(Debug, thiserror::Error)]
+#[error("visual sound pool did not stabilize")]
+pub(super) struct VisualSoundPoolUnavailable;
+
+/// Reserve time for a hierarchy read when OCR sees the sheet but cannot bind
+/// its rows. Later selection/readback still uses the full shared sound budget.
+pub(super) async fn observe_initial(
+    session: &dyn UiSession,
+    plan: SoundPickerPlan,
+    maximum: usize,
+) -> anyhow::Result<ObservedSoundPool> {
+    let saw_hot = AtomicBool::new(false);
+    let result = tokio::time::timeout(
+        Duration::from_secs(60),
+        observe_inner(session, plan, maximum, true, &saw_hot),
+    )
+    .await;
+    check_wait()?;
+    match result {
+        Ok(result) => result,
+        Err(_) => visual_pool_timeout(&saw_hot),
+    }
+}
+
+fn visual_pool_timeout(saw_hot: &AtomicBool) -> anyhow::Result<ObservedSoundPool> {
+    if saw_hot.load(Ordering::Relaxed) {
+        Err(VisualSoundPoolUnavailable.into())
+    } else {
+        Err(crate::publish_recovery::retryable_error(
+            "sound_tab_unavailable",
+            "TikTok chưa xác nhận tab Hot của bảng nhạc; chưa chọn nhạc hoặc bấm Đăng",
+        ))
+    }
+}
+
 pub(super) async fn observe(
     session: &dyn UiSession,
     plan: SoundPickerPlan,
     maximum: usize,
     navigate: bool,
 ) -> anyhow::Result<ObservedSoundPool> {
+    observe_inner(session, plan, maximum, navigate, &AtomicBool::new(false)).await
+}
+
+async fn observe_inner(
+    session: &dyn UiSession,
+    plan: SoundPickerPlan,
+    maximum: usize,
+    navigate: bool,
+    saw_hot: &AtomicBool,
+) -> anyhow::Result<ObservedSoundPool> {
     let deadline = phase_deadline(Duration::from_secs(60));
     let mut prior: Option<(String, ObservedSoundPool)> = None;
     let mut navigated = !navigate;
     let mut generation = 0;
+    let mut last_rejection = None;
     loop {
         check_wait()?;
-        anyhow::ensure!(
-            Instant::now() < deadline,
-            "visual sound pool did not stabilize"
-        );
+        if Instant::now() >= deadline {
+            return visual_pool_timeout(saw_hot);
+        }
         generation += 1;
         let (img, lines, tabs, epoch) = capture(session, plan, generation).await?;
         if tabs.len() != 4 {
+            if last_rejection != Some("tabs_unreadable") {
+                tracing::warn!(
+                    reason = "tabs_unreadable",
+                    "visual sound row proof is incomplete"
+                );
+                last_rejection = Some("tabs_unreadable");
+            }
             prior = None;
             tokio::time::sleep(POLL).await;
             continue;
+        }
+        if hot_selected(&img, &tabs) {
+            saw_hot.store(true, Ordering::Relaxed);
         }
         if !hot_selected(&img, &tabs) && !navigated {
             let point = selection_recovery::prove_sheet(session, plan).await?;
@@ -383,6 +450,7 @@ pub(super) async fn observe(
         }
         match pool_from_image(&img, &lines, &tabs, plan, maximum) {
             Ok(pool) => {
+                last_rejection = None;
                 if prior
                     .as_ref()
                     .is_some_and(|(old, p)| old == &epoch && p.stable_with(&pool))
@@ -392,7 +460,11 @@ pub(super) async fn observe(
                 prior = Some((epoch, pool));
             }
             Err(error) => {
-                tracing::debug!(%error, "visual sound rows are not yet complete");
+                let reason = visual_rejection_code(&error);
+                if last_rejection != Some(reason) {
+                    tracing::warn!(reason, "visual sound row proof is incomplete");
+                    last_rejection = Some(reason);
+                }
                 prior = None;
             }
         }
@@ -573,6 +645,20 @@ mod tests {
         assert_eq!(pool.candidates[0].title, "Thương Nhau Đến Thế");
         assert_eq!(pool.selected_index, None);
         assert!(pool.targets.iter().all(|t| t.x >= 250. && t.y >= 1300.));
+    }
+
+    #[test]
+    fn visual_rejection_logging_never_includes_ocr_content() {
+        assert_eq!(
+            visual_rejection_code(&anyhow::anyhow!(
+                "visual sound has no complete unselected row"
+            )),
+            "no_complete_row"
+        );
+        assert_eq!(
+            visual_rejection_code(&anyhow::anyhow!("private sound title: account name")),
+            "other"
+        );
     }
 
     #[test]

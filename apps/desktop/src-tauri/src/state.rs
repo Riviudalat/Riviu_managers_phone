@@ -1769,6 +1769,7 @@ impl AppState {
             }
         }
 
+        // Passive scrcpy previews remain available while manual acceptance freezes jobs.
         if let Some(android) = self.android.clone() {
             let registry = self.registry.clone();
             let command_admission = self.command_admission.clone();
@@ -2128,7 +2129,9 @@ impl AppState {
                     }
                 }
 
-                let _ = sampler.tick().await;
+                if !automatic_device_workers_frozen {
+                    let _ = sampler.tick().await;
+                }
             }
         });
 
@@ -2280,7 +2283,7 @@ impl AppState {
                     continue;
                 };
                 let now = chrono::Utc::now();
-                for mut s in schedules {
+                for s in schedules {
                     if !s.enabled {
                         continue;
                     }
@@ -2306,12 +2309,16 @@ impl AppState {
                     // why one did not. `next_run_at` still advances either way: a schedule
                     // that stopped ticking would look paused, and it is not — it is trying
                     // once an interval and failing, which is a different thing.
+                    let next_run_at =
+                        (now + chrono::Duration::minutes(s.every_minutes as i64)).to_rfc3339();
                     let outcome = match db.get_script(&s.script_name) {
                         Ok(Some(body)) => match riviu_script_engine::parse_script(&body) {
-                            Ok(script) => match jobs.enqueue(script, s.udids.clone()).await {
-                                Ok(_) => Ok(()),
-                                Err(error) => Err(format!("không xếp được tác vụ: {error}")),
-                            },
+                            Ok(script) => {
+                                match jobs.enqueue_scheduled(script, &s, &next_run_at).await {
+                                    Ok(claimed) => Ok(claimed),
+                                    Err(error) => Err(format!("không xếp được tác vụ: {error}")),
+                                }
+                            }
                             Err(error) => Err(format!(
                                 "kịch bản `{}` không đọc được: {error}",
                                 s.script_name
@@ -2327,21 +2334,20 @@ impl AppState {
                         )),
                     };
                     match outcome {
-                        Ok(()) => {
-                            s.last_run_at = Some(now.to_rfc3339());
-                            s.last_error = None;
+                        Ok(true) => {
                             let _ = db.log_op("schedule.run", &s.name);
                         }
+                        Ok(false) => continue,
                         Err(reason) => {
                             log::warn!("lịch `{}` không chạy được: {reason}", s.name);
                             let _ = db.log_op("schedule.failed", &format!("{}: {reason}", s.name));
-                            s.last_error = Some(reason);
+                            if let Err(error) =
+                                db.advance_failed_script_schedule(&s, &next_run_at, &reason)
+                            {
+                                log::error!("không chốt được lỗi lịch `{}`: {error:#}", s.name);
+                            }
                         }
                     }
-                    s.next_run_at = Some(
-                        (now + chrono::Duration::minutes(s.every_minutes as i64)).to_rfc3339(),
-                    );
-                    let _ = db.upsert_schedule(&s);
                 }
             }
         });
@@ -2612,6 +2618,20 @@ impl AppState {
                 // The window's cap, or the panel's when there are no windows —
                 // `decide` already picked which, so this must not re-read the panel.
                 let duration = Duration::from_secs(duration_minutes as u64 * 60);
+                let claim_id = match db.claim_nurture_schedule_mark(
+                    &mark_key,
+                    marks.get(&mark_key).map(String::as_str),
+                    &next_run_at.to_rfc3339(),
+                    settings.revision,
+                    &preflight.ready,
+                ) {
+                    Ok(Some(id)) => id,
+                    Ok(None) => continue,
+                    Err(error) => {
+                        log::error!("không giữ được lượt lịch Nuôi; chưa mở phiên: {error:#}");
+                        continue;
+                    }
+                };
                 let started = nurture
                     .start_many(
                         app_nurture.clone(),
@@ -2623,16 +2643,22 @@ impl AppState {
                     .await;
                 match started {
                     Ok(started) if !started.is_empty() => {
+                        if let Err(error) = db.settle_nurture_schedule_mark(&claim_id, &started) {
+                            log::error!("không chốt được intent lịch Nuôi {claim_id}: {error:#}");
+                        }
                         let _ =
                             db.log_op("nurture.schedule", &format!("{} devices", started.len()));
                     }
-                    Ok(_) => {}
+                    Ok(started) => {
+                        if let Err(error) = db.settle_nurture_schedule_mark(&claim_id, &started) {
+                            log::error!("không chốt được intent lịch Nuôi {claim_id}: {error:#}");
+                        }
+                    }
                     Err(error) => {
                         log::error!("không lưu được lịch sử phiên Nuôi đã lên lịch: {error:#}");
                         let _ = db.log_op("nurture.schedule.failed", &format!("{error:#}"));
                     }
                 }
-                let _ = db.set_setting(&mark_key, &next_run_at.to_rfc3339());
             }
         });
     }
@@ -3270,6 +3296,27 @@ mod tests {
             .await
             .expect("admitted retry released after runtime stop");
         retry.await.expect("join admitted retry");
+    }
+
+    #[test]
+    fn manual_acceptance_keeps_roster_and_passive_android_previews() {
+        let source = include_str!("state.rs");
+        let watchdog = source.split("// One sampler owns").next().unwrap();
+        let watchdog: String = watchdog.split_whitespace().collect();
+        assert!(watchdog.contains("ifletSome(android)=self.android.clone(){"));
+        assert!(watchdog.contains("view_watchdog::start_android_view("));
+        let sampler = source
+            .split("// One sampler owns")
+            .nth(1)
+            .unwrap()
+            .split("// Forward a bounded latest-frame preview")
+            .next()
+            .unwrap();
+        assert!(sampler.contains("control.list_devices().await"));
+        assert!(sampler.contains("registry.upsert_many(merged)"));
+        let sampler: String = sampler.split_whitespace().collect();
+        assert!(sampler.contains("if!automatic_device_workers_frozen{let_=sampler.tick().await;"));
+        assert!(sampler.contains("sampler.stop().await"));
     }
 
     #[test]

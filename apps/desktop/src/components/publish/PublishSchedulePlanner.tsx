@@ -227,13 +227,19 @@ export function PublishSchedulePlanner(p: Props) {
     return issue || (reviewed ? reviewed.report.slots[index].canExecute ? "Sẵn sàng" : reviewed.report.slots[index].issues.map(i => i.message).join("; ") || "Cần kiểm tra lại" : "Chưa kiểm tra");
   };
   const filteredMachines = inScope.filter(d => `${label(d.udid)} ${tileName(d, p.metas.get(d.udid))}`.toLocaleLowerCase().includes(machineQuery.toLocaleLowerCase()));
-  type NextStep = { text: string; action: string; target?: NonNullable<typeof focusTarget>; sheet?: boolean; source?: boolean };
+  type NextStep = { text: string; action: string; target?: NonNullable<typeof focusTarget>; sheet?: boolean; source?: boolean; assign?: boolean };
   const nextStep = (): NextStep | null => {
     if (!draft.rows.length) return p.bundles.length ? { text: "Chọn bài hoặc bấm Chọn nhanh để phân công", action: "Chọn bài", target: { field: "posts" } } : { text: "Quét thư mục bài trước khi lập lịch", action: "Chọn nguồn bài", source: true };
     const sourceMissing = draft.rows.find(r => !p.bundles.some(b => b.id === r.bundleId));
     if (sourceMissing) return { text: `${name(sourceMissing.bundleId)}: kiểm tra lại thư mục`, action: "Kiểm tra nguồn", source: true };
     const missingMachine = draft.rows.find(r => !r.udid || !readyIds.includes(r.udid));
-    if (missingMachine) return { text: `${missing} bài chưa có máy sẵn sàng`, action: "Bổ sung máy", target: { field: "rowMachine", bundleId: missingMachine.bundleId } };
+    if (missingMachine) {
+      if (missingMachine.udid) return { text: `${name(missingMachine.bundleId)}: máy cũ không khả dụng`, action: "Đổi máy", target: { field: "rowMachine", bundleId: missingMachine.bundleId } };
+      const freeSelectedMachine = draft.selectedMachines.some(id => readyIds.includes(id)
+        && !machineHasScheduleConflict(draft.rows, missingMachine.bundleId, id, draft.commonTime));
+      if (freeSelectedMachine) return { text: `${missing} bài chưa được gán vào máy đã chọn`, action: "Gán bài", assign: true };
+      return { text: `${missing} bài chưa có máy khả dụng`, action: "Bổ sung máy", target: { field: "rowMachine", bundleId: missingMachine.bundleId } };
+    }
     const invalid = draft.rows.find(r => !!rowIssue(r));
     if (invalid) {
       const issue = rowIssue(invalid);
@@ -255,6 +261,7 @@ export function PublishSchedulePlanner(p: Props) {
     if (!next || locked) return;
     if (next.source) { p.onSource(); return; }
     if (next.sheet) { (p.onSheetSetup ?? p.onSource)(); return; }
+    if (next.assign) { drop(chosen.map(bundle => bundle.id), {}); return; }
     if (next.target?.field === "rowTime") setIndividualTimes(true);
     if (next.target) setFocusTarget(next.target);
   };
@@ -298,7 +305,7 @@ export function PublishSchedulePlanner(p: Props) {
         </section>
       </div>
       <section className="ps-plan" aria-label="Bảng phân công lịch đăng">
-        <div className="ps-plan-heading"><h3>Phân công</h3><span>{assignmentsCount}/{draft.rows.length} bài có máy</span></div>
+        <div className="ps-plan-heading"><h3>Phân công</h3><span>{assignmentsCount}/{draft.rows.length} bài có máy khả dụng</span></div>
         <div className="ps-table-scroll"><table className="ps-plan-table" aria-label="Bảng phân công"><thead><tr><th>Bài đăng</th><th>Máy nhận</th><th>Giờ đăng</th><th>Kết quả kiểm tra</th><th><span className="ps-sr-only">Thao tác</span></th></tr></thead><tbody>
           {draft.rows.map((row, index) => <tr key={row.id} data-schedule-row={row.bundleId} className={activePost === row.bundleId ? "is-linked" : ""} onMouseEnter={() => setHoveredPost(row.bundleId)} onMouseLeave={() => setHoveredPost(null)} onFocusCapture={() => setFocusedPost(row.bundleId)} onBlurCapture={e => { if (!e.currentTarget.contains(e.relatedTarget)) setFocusedPost(null); }}>
             <td data-schedule-field="verdict" tabIndex={-1}><strong title={name(row.bundleId)}>{name(row.bundleId)}</strong><small className="ps-mobile-result">{rowStatus(row, index)}</small></td>
@@ -314,7 +321,7 @@ export function PublishSchedulePlanner(p: Props) {
         {reviewed && <div className="ps-review"><strong>{reviewed.report.canExecute ? "Các bài đã đạt kiểm tra" : "Có bài cần xử lý trong bảng phân công"}</strong>{reviewed.report.canExecute && <label className="ps-inline-check"><input data-schedule-field="confirm" type="checkbox" checked={confirmed} disabled={locked} onChange={e => setConfirmed(e.target.checked)}/>Tôi xác nhận đăng công khai các bài đúng lịch trên</label>}</div>}
       </section>
     </div>
-    <footer className="ps-footer"><div><strong>{draft.rows.length} bài · {new Set(draft.rows.filter(r => r.udid).map(r => r.udid)).size} máy</strong><span aria-live="polite">{busy ? "Đang xử lý lịch…" : next?.text ?? "Lịch đã sẵn sàng để lưu"}</span></div><div>{next && next.target?.field !== "check" && <button className="ps-next-step" type="button" disabled={locked} onClick={goToNext}>{next.action}</button>}<button data-schedule-field="check" type="button" disabled={locked || !valid || !!p.blockingReason} onClick={() => void check()}>{busy ? "Đang xử lý…" : "Kiểm tra lịch"}</button><button type="button" className="primary" disabled={locked || !valid || !reviewed?.report.canExecute || !confirmed} onClick={() => void save()}>Lưu lịch {draft.rows.length} bài</button></div></footer>
+    <footer className="ps-footer"><div><strong>{draft.rows.length} bài · {new Set(draft.rows.filter(r => r.udid).map(r => r.udid)).size} máy đã ghép</strong><span aria-live="polite">{busy ? "Đang xử lý lịch…" : next?.text ?? "Lịch đã sẵn sàng để lưu"}</span></div><div>{next && next.target?.field !== "check" && <button className="ps-next-step" type="button" disabled={locked} onClick={goToNext}>{next.action}</button>}<button data-schedule-field="check" type="button" disabled={locked || !valid || !!p.blockingReason} onClick={() => void check()}>{busy ? "Đang xử lý…" : "Kiểm tra lịch"}</button><button type="button" className="primary" disabled={locked || !valid || !reviewed?.report.canExecute || !confirmed} onClick={() => void save()}>Lưu lịch {draft.rows.length} bài</button></div></footer>
     {drag.view && <div className="ps-drag-ghost" aria-hidden="true" style={{ left: Math.min(drag.view.x + 14, window.innerWidth - 205), top: Math.max(8, drag.view.y - 42) }}><GripVertical size={16}/>{drag.view.ids.length} bài{preview && <small>{preview.assigned.length} bài sẽ được gán{preview.missing.length ? ` · thiếu ${preview.missing.length} chỗ` : ""}</small>}</div>}
   </section>;
 }

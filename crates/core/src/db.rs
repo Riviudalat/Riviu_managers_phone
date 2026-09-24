@@ -1196,6 +1196,24 @@ mod nurture_settings_migration_tests {
     }
 
     #[test]
+    fn nurture_settings_reject_unsupported_network_before_write() {
+        let (db, path) = fixture();
+        for network in [
+            crate::SocialNetwork::Threads,
+            crate::SocialNetwork::Instagram,
+        ] {
+            let settings = NurtureSettings {
+                network,
+                ..NurtureSettings::default()
+            };
+            assert!(db.save_nurture_settings(&settings).is_err());
+            assert!(db.save_nurture_settings_cas(&settings, 0).is_err());
+            assert!(db.get_setting("nurture.settings").unwrap().is_none());
+        }
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
     fn stored_legacy_profile_is_migrated_once_and_obsolete_keys_are_removed() {
         let (db, path) = fixture();
         let legacy = serde_json::json!({

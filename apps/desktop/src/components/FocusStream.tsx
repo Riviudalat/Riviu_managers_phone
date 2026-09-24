@@ -60,6 +60,7 @@ import {
 } from "./Icons";
 import { withoutMenuIds, type DeviceMenuNode } from "../deviceMenu";
 import { DeviceFunctionList } from "./DeviceFunctionList";
+import { FocusTextInput } from "./focus/FocusTextInput";
 import { focusLayout } from "./focus/focusLayout";
 import { acquireControlSession } from "./focus/controlSessions";
 
@@ -158,6 +159,8 @@ export function FocusStream({
   /// taken. Held in a ref rather than state because a pointer fires far too often to
   /// re-render on, and none of it is rendered.
   const drag = useRef<{
+    pointerId: number;
+    startedAt: number;
     start: { x: number; y: number };
     steps: { x: number; y: number; durationMs: number }[];
     lastAt: number;
@@ -167,6 +170,8 @@ export function FocusStream({
     live: LiveDragGroup | null;
   } | null>(null);
   const inFlight = useRef(false);
+  const pointerBusyRef = useRef(false);
+  const [pointerBusy, setPointerBusy] = useState(false);
   const [actionPending, setActionPending] = useState(false);
   const [controlState, setControlState] = useState<{ key: string; ready: string[]; errors: Record<string, string> }>({ key: "", ready: [], errors: {} });
   const [actionFailures, setActionFailures] = useState<Record<string, string>>({});
@@ -202,7 +207,11 @@ export function FocusStream({
     controlState.key === targetKey &&
     controlState.ready.length === targets.length &&
     failureCount === 0;
-  const keyDisabled = busy || actionPending || !sessionReady;
+  const keyDisabled = busy || actionPending || pointerBusy || !sessionReady;
+  const finishPointer = () => {
+    pointerBusyRef.current = false;
+    setPointerBusy(false);
+  };
   const isIos = device.platform === "ios";
 
   /// Report a group action that did not reach every phone.
@@ -254,7 +263,14 @@ export function FocusStream({
     const held = drag.current;
     drag.current = null;
     const last = held?.steps.at(-1) ?? held?.start;
-    if (held?.live && last) void held.live.end(last.x, last.y);
+    if (held?.live && last) void held.live.end(last.x, last.y, held.steps.length > 0).finally(() => {
+      pointerBusyRef.current = false;
+      setPointerBusy(false);
+    });
+    else if (held) {
+      pointerBusyRef.current = false;
+      setPointerBusy(false);
+    }
   }, [device.udid, encodedW, encodedH, viewSize?.generation]);
   const decodeFailed = useViewDecodeFailed(device.udid);
   const placeholder = streamPlaceholder({
@@ -340,8 +356,8 @@ export function FocusStream({
     setControlRetry((value) => value + 1);
   };
 
-  const runExclusive = async (work: () => Promise<void>) => {
-    if (inFlight.current) {
+  const runExclusive = async (work: () => Promise<void>, allowPointer = false) => {
+    if (inFlight.current || (pointerBusyRef.current && !allowPointer)) {
       pushToast("warn", "Máy đang xử lý thao tác trước", "Chờ thao tác hoàn tất rồi bấm lại.");
       return;
     }
@@ -369,7 +385,7 @@ export function FocusStream({
   ///
   /// Returns whether the work ran, so a caller cannot claim an outcome it did not get.
   const runBusy = async (work: () => Promise<void>): Promise<boolean> => {
-    if (inFlight.current) {
+    if (inFlight.current || pointerBusyRef.current) {
       pushToast(
         "warn",
         "Máy đang bận",
@@ -402,7 +418,7 @@ export function FocusStream({
     const wheelTargets = targetKey.split("\0").filter(Boolean);
     const masterUdid = activeSync?.masterUdid;
     const drain = async () => {
-      if (sending || disposed || inFlight.current || !pendingTicks || !sessionReady) return;
+      if (sending || disposed || inFlight.current || pointerBusyRef.current || !pendingTicks || !sessionReady) return;
       sending = true;
       try {
         while (pendingTicks && !disposed) {
@@ -459,7 +475,7 @@ export function FocusStream({
         return;
       }
       if (!encodedW || !encodedH || !sessionReady) return;
-      if (inFlight.current && !sending) return;
+      if (pointerBusyRef.current || (inFlight.current && !sending)) return;
       pendingTicks = Math.max(-3, Math.min(3, pendingTicks + Math.sign(event.deltaY)));
       void drain();
     };
@@ -483,6 +499,8 @@ export function FocusStream({
   /// purpose: if the live path started before `runGesture` stopped calling it a tap, a short
   /// drag would be injected live *and* replayed as a tap on release.
   const TAP_SLOP = 10;
+  const LONG_PRESS_MS = 500;
+  const MIN_TAP_MS = 60;
 
   const runGesture = async (
     start: { x: number; y: number },
@@ -520,8 +538,10 @@ export function FocusStream({
               ),
             })),
           );
+          const uncertain = outcomes.filter((row) => row.outcome === "uncertain");
+          if (uncertain.length) pushToast("warn", "Không chắc thao tác đã tới máy", `${uncertain.map(row => row.udid).join(", ")}: không gửi lại tap để tránh thao tác hai lần.`);
           remaining = outcomes
-            .filter((row) => row.outcome !== "live")
+            .filter((row) => row.outcome === "fallback")
             .map((row) => row.udid);
           if (remaining.length === 0) return;
         }
@@ -576,7 +596,7 @@ export function FocusStream({
           160,
         );
       }
-    });
+    }, true);
   };
 
   // The nine actions live in `focus/useFocusActions` — 195 lines for six symbols. They are
@@ -866,7 +886,7 @@ export function FocusStream({
           style={{ width: layout.screenWidth, height: layout.screenHeight }}
           title="Ctrl + lăn chuột để phóng to / thu nhỏ"
           onPointerDown={(e) => {
-            if (busy || inFlight.current || !sessionReady || e.button !== 0) return;
+            if (busy || inFlight.current || pointerBusyRef.current || !sessionReady || e.button !== 0 || drag.current) return;
             // Said out loud rather than dropped. A gesture needs the encoded frame size to
             // map through, and without it this handler used to return in silence -- so on a
             // phone that had not painted yet the operator could click the picture as long as
@@ -891,19 +911,31 @@ export function FocusStream({
             if (!start) return;
             e.preventDefault();
             drag.current = {
+              pointerId: e.pointerId,
+              startedAt: performance.now(),
               start,
               steps: [],
               lastAt: performance.now(),
               live: null,
             };
             e.currentTarget.setPointerCapture(e.pointerId);
+            pointerBusyRef.current = true;
+            setPointerBusy(true);
+            if (canDragLive && (!activeSync || isNoopGroupSync(getGroupSync()))) {
+              const held = drag.current;
+              held.live = createLiveDragGroup(
+                targets.map((udid) => ({ udid, send: (action, x, y) => viewInjectTouch(udid, action, x, y, encodedW, encodedH) })),
+                (reason) => console.warn(`live touch fell back: ${reason}`),
+              );
+              held.live.begin(start.x, start.y);
+            }
           }}
           onPointerMove={(e) => {
             // The whole point of this handler: without it the gesture is decided at release
             // from two samples, so every drag reaches the phone as a straight line at
             // constant speed no matter what the finger did.
             const held = drag.current;
-            if (!held || !encodedW || !encodedH) return;
+            if (!held || held.pointerId !== e.pointerId || !encodedW || !encodedH) return;
             const now = performance.now();
             const elapsed = now - held.lastAt;
             // Ignore a sample that is neither far enough nor late enough to carry
@@ -960,13 +992,14 @@ export function FocusStream({
             // holding a pointer down forever. Releasing past the edge of the preview is the
             // natural end of a fast flick, so this was not a corner case.
             const held = drag.current;
+            if (!held || held.pointerId !== e.pointerId) return;
             drag.current = null;
-            const lift = () => {
+            const lift = async () => {
               const last = held?.steps.at(-1) ?? held?.start;
-              if (held?.live && last) void held.live.end(last.x, last.y);
+              if (held?.live && last) await held.live.end(last.x, last.y, held.steps.length > 0);
             };
-            if (e.button !== 0 || !held || !encodedW || !encodedH) {
-              lift();
+            if (e.button !== 0 || !encodedW || !encodedH) {
+              try { await lift(); } finally { finishPointer(); }
               return;
             }
             e.preventDefault();
@@ -978,12 +1011,15 @@ export function FocusStream({
               encodedH,
             );
             if (!end) {
-              lift();
+              try { await lift(); } finally { finishPointer(); }
               return;
             }
             // The release point is always the last step, so the gesture ends exactly where
             // the operator let go even if that sample was filtered out above.
             const steps = [...held.steps];
+            const heldMs = performance.now() - held.startedAt;
+            const distance = Math.hypot(end.x - held.start.x, end.y - held.start.y);
+            const stationary = distance < TAP_SLOP;
             const lastElapsed = Math.max(1, performance.now() - held.lastAt);
             const tail = steps.at(-1);
             if (tail && tail.x === end.x && tail.y === end.y) {
@@ -997,23 +1033,39 @@ export function FocusStream({
               if (held.live) {
                 // The split, not a single verdict: the phones that ran it live already have
                 // the gesture, and replaying it on them would scroll everything twice.
-                const split = await held.live.end(end.x, end.y);
-                if (split.fallback.length === 0) return;
-                await runGesture(held.start, end, steps, split.fallback);
+                const split = await held.live.end(end.x, end.y, !stationary, stationary ? heldMs >= LONG_PRESS_MS ? LONG_PRESS_MS : MIN_TAP_MS : 0);
+                if (split.uncertain.length) pushToast("warn", "Không chắc thao tác đã tới máy", `${split.uncertain.join(", ")}: không gửi lại để tránh thao tác hai lần.`);
+                if (stationary && heldMs >= LONG_PRESS_MS) {
+                  if (split.fallback.length) pushToast("warn", "Không gửi được nhấn giữ", "Máy không có luồng điều khiển trực tiếp; không đổi nhấn giữ thành tap.");
+                  return;
+                }
+                if (split.fallback.length) await runGesture(held.start, end, steps, split.fallback);
+                else if (split.live.length) {
+                  if (stationary) recordTap(end.x, end.y, encodedW, encodedH);
+                  else recordSwipe(held.start.x, held.start.y, end.x, end.y, encodedW, encodedH);
+                }
+                return;
+              }
+              if (stationary && heldMs >= LONG_PRESS_MS) {
+                pushToast("warn", "Không gửi được nhấn giữ", "Thiết bị hoặc chế độ đồng bộ này chưa có đường nhấn giữ; không đổi thành tap.");
                 return;
               }
               await runGesture(held.start, end, steps);
             } catch (error) {
               toastError("Điều khiển thất bại", error);
+            } finally {
+              finishPointer();
             }
           }}
-          onPointerCancel={() => {
+          onPointerCancel={(e) => {
             const held = drag.current;
+            if (!held || held.pointerId !== e.pointerId) return;
             drag.current = null;
             // A cancelled drag has a finger on the phone that nothing else will lift, and a
             // pointer left down joins itself to whatever the operator does next.
             const last = held?.steps.at(-1) ?? held?.start;
-            if (held?.live && last) void held.live.end(last.x, last.y);
+            if (held?.live && last) void held.live.end(last.x, last.y, held.steps.length > 0).finally(finishPointer);
+            else finishPointer();
           }}
         >
           <PhoneCanvas
@@ -1095,6 +1147,7 @@ export function FocusStream({
             </button>
           </header>
           {recordingControls}
+          <FocusTextInput key={device.udid} udid={device.udid} targets={targets} masterUdid={activeSync?.masterUdid} ready={sessionReady} busy={busy || actionPending || pointerBusy} runBusy={runBusy} reportGroup={reportGroup} />
           {(activeSync || failureCount > 0) && (
             <div className="focus-control-status" aria-live="polite" data-testid="focus-control-status">
               <strong>

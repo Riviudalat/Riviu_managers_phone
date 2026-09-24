@@ -436,6 +436,7 @@ impl Database {
         &self,
         settings: &crate::types::NurtureSettings,
     ) -> anyhow::Result<()> {
+        settings.network.ensure_implemented()?;
         // The API key goes to the secret store, and the blob keeps an empty string in its
         // place. Faithful rather than clever: an empty key here really does clear the stored
         // one, so "leave it unchanged" is a decision for the caller that owns the form, not a
@@ -517,6 +518,7 @@ impl Database {
         settings: &crate::NurtureSettings,
         expected_revision: u64,
     ) -> anyhow::Result<()> {
+        settings.network.ensure_implemented()?;
         let mut conn = self.conn()?;
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let raw: Option<String> = tx

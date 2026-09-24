@@ -135,6 +135,30 @@ it("bulk bỏ chọn nói rõ toàn bộ và tác động cả bài/máy ngoài 
   expect(p.onAssign).toHaveBeenCalledWith({});
 });
 
+it("mặc định chỉ hiện máy trong phạm vi đã chọn, vẫn cho xem máy ngoài phạm vi khi cần", () => {
+  const p = props();
+  p.eligible = ["a"];
+  p.assignments = {};
+  p.scopeControl = <button type="button">Chọn thiết bị</button>;
+  mount(p);
+  expect(screen.getByRole("checkbox", { name: "Chọn Máy 1 · a" })).toBeVisible();
+  expect(screen.queryByRole("checkbox", { name: "Chọn Máy 2 · b" })).toBeNull();
+  fireEvent.click(screen.getByText("Bộ lọc thiết bị"));
+  fireEvent.click(screen.getByRole("checkbox", { name: "Hiện máy ngoài phạm vi" }));
+  expect(screen.getByRole("checkbox", { name: "Chọn Máy 2 · b" })).toBeVisible();
+  expect(screen.getByRole("button", { name: "Gán one · Máy 2 · b" })).toBeDisabled();
+  expect(p.onAssign).not.toHaveBeenCalled();
+});
+
+it("vẫn hiện máy đã gán nếu máy đó rời phạm vi để người dùng sửa cặp gán", () => {
+  const p = props();
+  p.eligible = ["a"];
+  p.scopeControl = <button type="button">Chọn thiết bị</button>;
+  mount(p);
+  expect(screen.getByRole("checkbox", { name: "Chọn Máy 2 · b" })).toBeVisible();
+  expect(screen.getByRole("button", { name: "Kiểm tra & đăng" })).toBeDisabled();
+});
+
 it.each(["left", "middle"])("dialog caption ghim bundle và trả focus đúng trigger %s", async origin => {
   const p = props(), view = mount(p);
   const trigger = screen.getByRole("button", { name: origin === "left" ? "Xem ảnh và sửa caption · one" : "Sửa caption · one" });

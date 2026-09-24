@@ -8,7 +8,7 @@ và macOS Intel.
 Phần mềm của người khác đi kèm trong bộ cài được liệt kê ở [`NOTICE`](NOTICE),
 gồm cả một mục ghi rõ chỗ giấy phép **chưa được thẩm định**.
 
-Tài liệu hiện tại ở [docs/README.md](docs/README.md): hướng dẫn vận hành 12 trang,
+Tài liệu hiện tại ở [docs/README.md](docs/README.md): hướng dẫn vận hành 16 trang,
 runbook phát triển, hợp đồng UI và kho lịch sử. [AGENTS.md](AGENTS.md) là cửa ngắn
 cho agent; ràng buộc kỹ thuật ở [docs/agents/](docs/agents/README.md).
 Báo cáo có ngày ở [archive](docs/archive/README.md) không phải trạng thái hiện tại.

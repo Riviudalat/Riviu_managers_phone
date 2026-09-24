@@ -50,6 +50,43 @@ async function measureBoard(page: Page) {
       overflow: document.documentElement.scrollWidth > innerWidth };
   });
 }
+
+for (const viewport of [{ width: 1440, height: 900 }, { width: 820, height: 560 }]) {
+  test(`publish device scope and picker remain readable at ${viewport.width}`, async ({ page }) => {
+    await page.setViewportSize(viewport);
+    await openBoard(page);
+    const geometry = await page.locator(".pq-devices-header").evaluate(header => {
+      const select = header.querySelector<HTMLSelectElement>(".machine-scope-select")!;
+      const pick = header.querySelector<HTMLButtonElement>(".machine-scope-pick")!;
+      const title = header.querySelector<HTMLHeadingElement>("h2")!;
+      const context = header.querySelector<HTMLElement>(".pq-active-post")!;
+      const rect = (element: Element) => {
+        const box = element.getBoundingClientRect();
+        return { left: box.left, right: box.right, top: box.top, bottom: box.bottom, width: box.width };
+      };
+      const style = getComputedStyle(select);
+      const canvas = document.createElement("canvas");
+      const measure = canvas.getContext("2d")!;
+      measure.font = style.font;
+      const labelWidth = measure.measureText(select.selectedOptions[0].text).width;
+      const padding = parseFloat(style.paddingLeft) + parseFloat(style.paddingRight);
+      return { header: rect(header), select: rect(select), pick: rect(pick), title: rect(title), context: rect(context),
+        labelWidth, padding };
+    });
+    await test.info().attach("Publish device header geometry", { body: JSON.stringify(geometry, null, 2), contentType: "application/json" });
+    expect(geometry.select.width, JSON.stringify(geometry)).toBeGreaterThanOrEqual(geometry.labelWidth + geometry.padding + 20);
+    expect(geometry.select.right, JSON.stringify(geometry)).toBeLessThanOrEqual(geometry.pick.left);
+    expect(geometry.select.left, JSON.stringify(geometry)).toBeGreaterThanOrEqual(geometry.header.left);
+    expect(geometry.pick.right, JSON.stringify(geometry)).toBeLessThanOrEqual(geometry.header.right);
+    expect(geometry.title.right <= geometry.context.left || geometry.title.bottom <= geometry.context.top,
+      JSON.stringify(geometry)).toBe(true);
+    expect(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth)).toBe(false);
+    await page.getByRole("button", { name: "Chọn thiết bị", exact: true }).click();
+    await expect(page.getByRole("dialog", { name: "Chọn thiết bị thực hiện" })).toBeVisible();
+    await page.getByRole("button", { name: "Xong", exact: true }).click();
+    expect(await page.evaluate(() => (window as unknown as { publishBoardCalls: string[] }).publishBoardCalls)).toEqual([]);
+  });
+}
 for (const viewport of [{ width: 1440, height: 900 }, { width: 1024, height: 768 }, { width: 820, height: 560 }]) {
   test(`ba khung và Google thật giữ vùng danh sách tại ${viewport.width}`, async ({ page }) => {
     await page.setViewportSize(viewport); await openBoard(page);
@@ -62,7 +99,8 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 1024, height: 768
     expect(geometry.panels[1].right).toBeLessThanOrEqual(geometry.panels[2].x);
     expect(Math.max(...geometry.panels.map(r => r.y)) - Math.min(...geometry.panels.map(r => r.y))).toBeLessThanOrEqual(1);
     expect(Math.max(...geometry.rows)).toBeLessThanOrEqual(100);
-    expect(geometry.roster.height).toBeGreaterThanOrEqual(150);
+    // The compact shell leaves less vertical space at 820x560; the next check requires two complete rows.
+    expect(geometry.roster.height).toBeGreaterThanOrEqual(viewport.width <= 820 ? 116 : 150);
     expect(geometry.fullyVisibleDevices).toBeGreaterThanOrEqual(2);
     expect(geometry.roster.bottom).toBeLessThanOrEqual(geometry.footer.y);
     expect(geometry.search.bottom).toBeLessThanOrEqual(geometry.roster.y);

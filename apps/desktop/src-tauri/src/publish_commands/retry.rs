@@ -17,6 +17,12 @@ pub async fn publish_retry_sheet_assignment(
             .db
             .publication_campaign_id(&assignment_id)?
             .context("Không tìm thấy bài")?;
+        state
+            .db
+            .publish_campaign_request(&campaign)?
+            .context("Thiếu cấu hình bài")?
+            .network
+            .ensure_implemented()?;
         let detail = state
             .db
             .get_publish_assignment_detail(&campaign, &assignment_id)?
@@ -81,6 +87,7 @@ pub async fn publish_retry_assignment(
             .db
             .publish_campaign_request(&detail.campaign.id)?
             .context("Thiếu cấu hình bài")?;
+        request.network.ensure_implemented()?;
         anyhow::ensure!(
             request.execution_confirmed && request.verification_contract_version == Some(1),
             "Bài thiếu xác nhận hoặc hợp đồng xác minh"

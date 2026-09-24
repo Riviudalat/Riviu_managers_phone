@@ -489,8 +489,9 @@ impl InteractionAutomationProfileConfigV1 {
         self,
         request_id: String,
         actor_udids: Vec<String>,
-    ) -> crate::ThreadCampaignRequest {
-        crate::ThreadCampaignRequest {
+    ) -> anyhow::Result<crate::ThreadCampaignRequest> {
+        self.request.network.ensure_implemented()?;
+        Ok(crate::ThreadCampaignRequest {
             seeding: self.request.seeding,
             scripted_conversation: self.request.scripted_conversation,
             request_id,
@@ -508,7 +509,7 @@ impl InteractionAutomationProfileConfigV1 {
             mention_parent: self.request.mention_parent,
             like_parent: self.request.like_parent,
             post_dwell_seconds: self.request.post_dwell_seconds,
-        }
+        })
     }
 }
 
@@ -546,20 +547,28 @@ pub fn validate_automation_profile_config(
     validate_automation_config(config)?;
     match kind {
         AutomationKind::Nurture => {
-            serde_json::from_value::<NurtureAutomationProfileConfigV1>(config.clone()).map_err(
-                |error| anyhow::anyhow!("invalid nurture automation profile config: {error}"),
-            )?;
+            let profile =
+                serde_json::from_value::<NurtureAutomationProfileConfigV1>(config.clone())
+                    .map_err(|error| {
+                        anyhow::anyhow!("invalid nurture automation profile config: {error}")
+                    })?;
+            profile.settings.network.ensure_implemented()?;
         }
         AutomationKind::Interaction => {
-            serde_json::from_value::<InteractionAutomationProfileConfigV1>(config.clone())
-                .map_err(|error| {
-                    anyhow::anyhow!("invalid interaction automation profile config: {error}")
-                })?;
+            let profile =
+                serde_json::from_value::<InteractionAutomationProfileConfigV1>(config.clone())
+                    .map_err(|error| {
+                        anyhow::anyhow!("invalid interaction automation profile config: {error}")
+                    })?;
+            profile.request.network.ensure_implemented()?;
         }
         AutomationKind::Publish => {
-            serde_json::from_value::<PublishAutomationProfileConfigV1>(config.clone()).map_err(
-                |error| anyhow::anyhow!("invalid publish automation profile config: {error}"),
-            )?;
+            let profile =
+                serde_json::from_value::<PublishAutomationProfileConfigV1>(config.clone())
+                    .map_err(|error| {
+                        anyhow::anyhow!("invalid publish automation profile config: {error}")
+                    })?;
+            profile.network.ensure_implemented()?;
         }
     }
     Ok(())
@@ -872,10 +881,12 @@ mod tests {
                 }
             }))
             .expect("typed interaction profile");
-        let request = interaction.into_campaign_request(
-            "attempt-key".into(),
-            vec!["phone-1".into(), "phone-2".into()],
-        );
+        let request = interaction
+            .into_campaign_request(
+                "attempt-key".into(),
+                vec!["phone-1".into(), "phone-2".into()],
+            )
+            .expect("TikTok interaction profile");
         assert_eq!(request.request_id, "attempt-key");
         assert_eq!(request.actor_udids, ["phone-1", "phone-2"]);
 
@@ -919,5 +930,58 @@ mod tests {
             }))
             .is_err()
         );
+    }
+
+    #[test]
+    fn profiles_refuse_unimplemented_networks_before_persistence() {
+        let cases = [
+            (
+                AutomationKind::Nurture,
+                serde_json::json!({ "schemaVersion": 1, "settings": { "network": "threads" } }),
+                "Threads",
+            ),
+            (
+                AutomationKind::Interaction,
+                serde_json::json!({
+                    "schemaVersion": 1,
+                    "request": {
+                        "targets": [], "messageCount": 1, "instruction": "fixture",
+                        "maxWords": 12, "network": "instagram"
+                    }
+                }),
+                "Instagram",
+            ),
+            (
+                AutomationKind::Publish,
+                serde_json::json!({
+                    "schemaVersion": 1, "sourceRoot": "C:/fixture", "bundleIds": [],
+                    "soundPolicy": { "kind": "default" },
+                    "executionConfirmed": true, "network": "threads"
+                }),
+                "Threads",
+            ),
+        ];
+        for (kind, config, name) in cases {
+            let error = validate_automation_profile_config(kind, &config)
+                .expect_err("unimplemented network must not be saved");
+            assert!(error.to_string().contains(name), "{error}");
+        }
+    }
+
+    #[test]
+    fn interaction_profile_conversion_refuses_network_it_cannot_carry() {
+        let config: InteractionAutomationProfileConfigV1 =
+            serde_json::from_value(serde_json::json!({
+                "schemaVersion": 1,
+                "request": {
+                    "targets": [], "messageCount": 1, "instruction": "fixture",
+                    "maxWords": 12, "network": "instagram"
+                }
+            }))
+            .unwrap();
+        let error = config
+            .into_campaign_request("attempt-key".into(), vec!["phone-1".into()])
+            .expect_err("conversion must not drop Instagram");
+        assert!(error.to_string().contains("Instagram"));
     }
 }

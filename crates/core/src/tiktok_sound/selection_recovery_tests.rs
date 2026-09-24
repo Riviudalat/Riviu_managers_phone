@@ -67,6 +67,7 @@ struct Session {
     title: &'static str,
     read_failure: bool,
     selected_marker: bool,
+    select_on_tap: bool,
     changed_app: bool,
     unreadable_tab: bool,
     missing_tab_readback: bool,
@@ -74,6 +75,7 @@ struct Session {
     ocr: crate::ui_automation::SharedReasoner,
     loading_entry: bool,
     png: Vec<u8>,
+    epoch_changed: Arc<AtomicBool>,
 }
 impl Session {
     fn new() -> Self {
@@ -89,6 +91,7 @@ impl Session {
             title: "One",
             read_failure: true,
             selected_marker: false,
+            select_on_tap: false,
             changed_app: false,
             unreadable_tab: false,
             missing_tab_readback: false,
@@ -100,6 +103,7 @@ impl Session {
                 stop: None,
             }),
             png: bytes.into_inner(),
+            epoch_changed: Arc::new(AtomicBool::new(false)),
         }
     }
 }
@@ -157,7 +161,11 @@ impl UiSession for Session {
         None
     }
     fn gui_session_epoch(&self) -> String {
-        "owned-session".into()
+        if self.epoch_changed.load(Ordering::Relaxed) {
+            "replacement-session".into()
+        } else {
+            "owned-session".into()
+        }
     }
     fn gui_reasoner(&self) -> Option<crate::ui_automation::SharedReasoner> {
         Some(self.ocr.clone())
@@ -217,7 +225,10 @@ impl UiSession for Session {
                 self.title
             )
         } else {
-            sound_xml(self.selected_marker)
+            sound_xml(
+                self.selected_marker
+                    || (self.select_on_tap && self.taps.load(Ordering::Relaxed) > 0),
+            )
         };
         Ok(crate::HierarchySourceSnapshot {
             generation: n as u64,
@@ -301,6 +312,64 @@ struct TransientMissingTabOcr {
 
 struct TransientSheetOcr {
     calls: AtomicUsize,
+}
+struct TabsWithoutRowsOcr;
+struct SwitchEpochOnSheetProofOcr {
+    changed: Arc<AtomicBool>,
+    proofs: AtomicUsize,
+}
+#[async_trait::async_trait]
+impl GuiReasoner for SwitchEpochOnSheetProofOcr {
+    async fn resolve(&self, _: GuiRequest) -> anyhow::Result<GuiResponse> {
+        unreachable!()
+    }
+    async fn ocr(&self, request: OcrRequest) -> anyhow::Result<OcrResponse> {
+        let sheet_proof = request.roi.is_some_and(|region| region.height == 555);
+        let response = TabsWithoutRowsOcr.ocr(request).await?;
+        if sheet_proof && self.proofs.fetch_add(1, Ordering::Relaxed) == 1 {
+            self.changed.store(true, Ordering::Relaxed);
+        }
+        Ok(response)
+    }
+}
+#[async_trait::async_trait]
+impl GuiReasoner for TabsWithoutRowsOcr {
+    async fn resolve(&self, _: GuiRequest) -> anyhow::Result<GuiResponse> {
+        unreachable!()
+    }
+    async fn ocr(&self, r: OcrRequest) -> anyhow::Result<OcrResponse> {
+        let lines: Vec<_> = ["Hot", "For You", "Favorites", "Recent"]
+            .into_iter()
+            .zip([(47, 63), (178, 132), (381, 162), (613, 126)])
+            .map(|(text, (x, width))| OcrLine {
+                text: text.into(),
+                confidence: 0.96,
+                bounds: OcrRect {
+                    x,
+                    y: 1129,
+                    width,
+                    height: 29,
+                },
+            })
+            .collect();
+        Ok(OcrResponse {
+            protocol_version: r.protocol_version,
+            request_id: r.request_id,
+            observation_id: r.observation_id,
+            session_epoch: r.session_epoch,
+            generation: r.generation,
+            screenshot_sha256: r.screenshot.sha256,
+            status: "resolved".into(),
+            text: lines
+                .iter()
+                .map(|line| line.text.as_str())
+                .collect::<Vec<_>>()
+                .join("\n"),
+            lines,
+            engine: "fixture local OCR".into(),
+            elapsed_ms: 1,
+        })
+    }
 }
 #[async_trait::async_trait]
 impl GuiReasoner for TransientSheetOcr {
@@ -426,6 +495,136 @@ async fn sheet_resume_does_not_treat_one_missing_tab_frame_as_editor() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn loaded_sheet_uses_proven_hierarchy_rows_when_ocr_cannot_read_them() {
+    let mut session = Session::new();
+    session.read_failure = false;
+    session.png =
+        include_bytes!("../../fixtures/tiktok-publish/musically-45.7.3-en/hot-visual.png").to_vec();
+    session.ocr = Arc::new(TabsWithoutRowsOcr);
+    let stop = AtomicBool::new(false);
+
+    let pool = tokio::time::timeout(
+        Duration::from_secs(70),
+        with_sound_budget(&stop, resume_open_sounds(&session, plan(), 5)),
+    )
+    .await
+    .expect("a rendered sheet must not wait through the entire sound budget")
+    .unwrap();
+
+    assert_eq!(pool.candidates.len(), 1);
+    assert_eq!(pool.candidates[0].title, "One");
+    assert!(!pool.visual);
+    assert_eq!(session.taps.load(Ordering::Relaxed), 0);
+    assert_eq!(session.backs.load(Ordering::Relaxed), 0);
+    assert!(session.reads.load(Ordering::Relaxed) >= 2);
+}
+
+#[tokio::test(start_paused = true)]
+async fn replaced_session_during_sound_proof_retries_from_fresh_sheet_without_tapping() {
+    let mut session = Session::new();
+    session.read_failure = false;
+    session.png =
+        include_bytes!("../../fixtures/tiktok-publish/musically-45.7.3-en/hot-visual.png").to_vec();
+    session.ocr = Arc::new(SwitchEpochOnSheetProofOcr {
+        changed: session.epoch_changed.clone(),
+        proofs: AtomicUsize::new(0),
+    });
+
+    let first = resume_open_sounds(&session, plan(), 5).await.unwrap_err();
+    let failure = crate::publish_recovery::describe(&first);
+    assert_eq!(failure.code, "sound_session_replaced");
+    assert_eq!(
+        failure.kind,
+        crate::publish_recovery::FailureKind::Retryable
+    );
+    assert_eq!(session.taps.load(Ordering::Relaxed), 0);
+
+    let pool = resume_open_sounds(&session, plan(), 5).await.unwrap();
+    assert_eq!(pool.candidates[0].title, "One");
+    assert_eq!(session.taps.load(Ordering::Relaxed), 0);
+    assert_eq!(session.backs.load(Ordering::Relaxed), 0);
+}
+
+#[tokio::test(start_paused = true)]
+async fn other_foreground_app_during_sound_observation_stays_terminal() {
+    let mut session = Session::new();
+    session.changed_app = true;
+    let error = resume_open_sounds(&session, plan(), 5).await.unwrap_err();
+    let failure = crate::publish_recovery::describe(&error);
+    assert_eq!(failure.kind, crate::publish_recovery::FailureKind::Terminal);
+    assert_eq!(session.taps.load(Ordering::Relaxed), 0);
+    assert_eq!(session.backs.load(Ordering::Relaxed), 0);
+}
+
+#[tokio::test]
+async fn stop_during_sound_observation_is_not_masked_by_foreground_check() {
+    let mut session = Session::new();
+    session.changed_app = true;
+    let error = checked_measured_sound_observation::<()>(
+        &session,
+        plan(),
+        "owned-session",
+        Err(SoundStopped.into()),
+    )
+    .await
+    .unwrap_err();
+    assert!(error.is::<SoundStopped>());
+    assert_eq!(session.taps.load(Ordering::Relaxed), 0);
+}
+
+#[tokio::test(start_paused = true)]
+async fn hierarchy_fallback_selects_once_and_confirms_exact_editor_sound() {
+    let mut session = Session::new();
+    session.read_failure = false;
+    session.select_on_tap = true;
+    session.png =
+        include_bytes!("../../fixtures/tiktok-publish/musically-45.7.3-en/hot-visual.png").to_vec();
+    session.ocr = Arc::new(TabsWithoutRowsOcr);
+    let stop = AtomicBool::new(false);
+
+    tokio::time::timeout(
+        Duration::from_secs(120),
+        with_sound_budget(&stop, async {
+            let pool = resume_open_sounds(&session, plan(), 5).await?;
+            anyhow::ensure!(!pool.visual, "expected measured hierarchy fallback");
+            choose_and_confirm_sound(&session, plan(), &pool, 0).await
+        }),
+    )
+    .await
+    .expect("selection and readback must fit the sound budget")
+    .unwrap();
+
+    assert_eq!(session.taps.load(Ordering::Relaxed), 1);
+    assert_eq!(session.backs.load(Ordering::Relaxed), 1);
+}
+
+#[tokio::test(start_paused = true)]
+async fn unreadable_hierarchy_after_ocr_timeout_returns_retryable_without_a_tap() {
+    let mut session = Session::new();
+    session.read_failure = false;
+    session.unreadable_tab = true;
+    session.png =
+        include_bytes!("../../fixtures/tiktok-publish/musically-45.7.3-en/hot-visual.png").to_vec();
+    session.ocr = Arc::new(TabsWithoutRowsOcr);
+    let stop = AtomicBool::new(false);
+
+    let error = tokio::time::timeout(
+        Duration::from_secs(120),
+        with_sound_budget(&stop, resume_open_sounds(&session, plan(), 5)),
+    )
+    .await
+    .expect("unreadable hierarchy must not hang until the full 180-second budget")
+    .unwrap_err();
+
+    assert_eq!(
+        crate::publish_recovery::describe(&error).code,
+        "sound_hierarchy_unavailable"
+    );
+    assert_eq!(session.taps.load(Ordering::Relaxed), 0);
+    assert_eq!(session.backs.load(Ordering::Relaxed), 0);
+}
+
+#[tokio::test(start_paused = true)]
 async fn sheet_resume_fails_closed_when_only_editor_xml_is_visible() {
     let mut session = Session::new();
     session.read_failure = false;
@@ -436,7 +635,11 @@ async fn sheet_resume_fails_closed_when_only_editor_xml_is_visible() {
         stop: None,
     });
 
-    assert!(resume_open_sounds(&session, plan(), 5).await.is_err());
+    let error = resume_open_sounds(&session, plan(), 5).await.unwrap_err();
+    assert_eq!(
+        crate::publish_recovery::describe(&error).code,
+        "sound_tab_unavailable"
+    );
 
     assert!(session.frames.load(Ordering::Relaxed) > 2);
     assert_eq!(session.taps.load(Ordering::Relaxed), 0);

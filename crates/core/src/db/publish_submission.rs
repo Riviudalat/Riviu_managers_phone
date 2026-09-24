@@ -79,6 +79,7 @@ pub(super) fn validate_submission_claim(
         "SELECT c.request_json,a.bundle_id FROM publish_assignments a JOIN publish_campaigns c ON c.id=a.campaign_id WHERE a.id=?1",
         [assignment], |r| Ok((r.get(0)?,r.get(1)?)))?;
     let request: crate::PublishCampaignRequest = serde_json::from_str(&request)?;
+    request.network.ensure_implemented()?;
     if request.verification_contract_version.is_none() {
         return Ok(());
     }

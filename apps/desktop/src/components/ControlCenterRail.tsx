@@ -11,6 +11,7 @@ import {
   Plus,
 } from "lucide-react";
 import { FOCUS_ZOOM, TILE_ZOOM, loadZoom, storeZoom } from "../zoom";
+import type { ConnectionKind } from "../types";
 import { useEffect, useRef, useState } from "react";
 import { ControlStreamSettings } from "./ControlStreamSettings";
 
@@ -22,7 +23,7 @@ interface Props {
   groups: { id: string; label: string; count: number; udids?: string[] }[];
   group: string;
   onGroup: (id: string) => void;
-  machines: { id: string; number: number; name: string; selected: boolean }[];
+  machines: { id: string; number: number; name: string; selected: boolean; connection: ConnectionKind }[];
   onSelect: (id: string) => void;
   onSettings: () => void;
   onGroups?: () => void;
@@ -49,6 +50,15 @@ export function ControlCenterRail(p: Props) {
   };
   useEffect(() => () => { if (leaveTimer.current) clearTimeout(leaveTimer.current); }, []);
   const open = p.pinned || peek;
+  const activeGroup = p.groups.find(group => group.id === p.group);
+  const members = activeGroup?.udids
+    ? p.machines.filter(machine => activeGroup.udids?.includes(machine.id))
+    : p.machines;
+  const connectionCounts = {
+    all: members.length,
+    usb: members.filter(machine => machine.connection === "usb").length,
+    wifi: members.filter(machine => machine.connection === "wifi").length,
+  };
   return (
     <aside
       className={`control-center-rail rail-hover${p.pinned ? " is-pinned" : " is-unpinned"}${open ? " is-open" : ""}`}
@@ -116,6 +126,7 @@ export function ControlCenterRail(p: Props) {
           <button
             type="button"
             key={c}
+            aria-label={`${c === "all" ? "Tất cả" : c.toUpperCase()} · ${connectionCounts[c]} máy`}
             aria-pressed={p.connection === c}
             onClick={() => p.onConnection(c)}
           >
@@ -125,6 +136,7 @@ export function ControlCenterRail(p: Props) {
               <Wifi size={14} />
             ) : null}
             {c === "all" ? "Tất cả" : c.toUpperCase()}
+            <small className="connection-count" aria-hidden="true">{connectionCounts[c]}</small>
           </button>
         ))}
       </div>

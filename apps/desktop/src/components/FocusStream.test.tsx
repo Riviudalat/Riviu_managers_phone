@@ -160,6 +160,7 @@ describe("FocusStream hit mapping", () => {
     mockRect(view.container.querySelector("canvas")!, { left: 0, top: 0, width: 800, height: 384 });
     fireEvent.pointerUp(screen, { button: 0, clientX: 200, clientY: 200, pointerId: 1 });
     expect(deviceTap).not.toHaveBeenCalled();
+    await waitFor(() => expect(view.getByRole("button", { name: "Home" })).toBeEnabled());
     fireEvent.pointerDown(screen, { button: 0, clientX: 400, clientY: 192, pointerId: 2 });
     fireEvent.pointerUp(screen, { button: 0, clientX: 400, clientY: 192, pointerId: 2 });
     await waitFor(() => expect(deviceTap).toHaveBeenCalledWith("ce06", 300, 144, 600, 288));
@@ -470,6 +471,8 @@ describe("overlay panel rows", () => {
 describe("FocusStream never leaves a finger down", () => {
   beforeEach(() => {
     vi.mocked(viewInjectTouch).mockClear();
+    vi.mocked(deviceTap).mockClear();
+    vi.mocked(deviceSwipe).mockClear();
     // This block is about the live path, so the phone has a producer here.
     liveTouchAvailable = true;
     HTMLElement.prototype.setPointerCapture = vi.fn();
@@ -513,6 +516,131 @@ describe("FocusStream never leaves a finger down", () => {
         vi.mocked(viewInjectTouch).mock.calls.some((call) => call[1] === "up"),
       ).toBe(true),
     );
+  });
+
+  it("holds a stationary pointer on the phone for a long press, then lifts without a second tap", async () => {
+    vi.mocked(deviceTap).mockClear();
+    const view = render(<FocusStream device={fixture} index={2} onClose={() => undefined} devices={[fixture]} onSelectDevice={() => undefined} />);
+    const pane = view.getByTestId("focus-screen");
+    mockRect(view.container.querySelector("canvas")!, { left: 0, top: 0, width: 288, height: 600 });
+    await waitForControlReady();
+    fireEvent.pointerDown(pane, { button: 0, clientX: 100, clientY: 200, pointerId: 1 });
+    await waitFor(() => expect(viewInjectTouch).toHaveBeenCalledWith("ce06", "down", 100, 200, 288, 600));
+    await new Promise(resolve => setTimeout(resolve, 520));
+    fireEvent.pointerUp(pane, { button: 0, clientX: 100, clientY: 200, pointerId: 1 });
+    await waitFor(() => expect(viewInjectTouch).toHaveBeenCalledWith("ce06", "up", 100, 200, 288, 600));
+    expect(vi.mocked(viewInjectTouch).mock.calls.map(call => call[1])).toEqual(["down", "up"]);
+    expect(deviceTap).not.toHaveBeenCalled();
+  });
+
+  it("does not let another pointer release the held finger", async () => {
+    const view = render(<FocusStream device={fixture} index={2} onClose={() => undefined} devices={[fixture]} onSelectDevice={() => undefined} />);
+    const pane = view.getByTestId("focus-screen");
+    mockRect(view.container.querySelector("canvas")!, { left: 0, top: 0, width: 288, height: 600 });
+    await waitForControlReady();
+    fireEvent.pointerDown(pane, { button: 0, clientX: 100, clientY: 200, pointerId: 1 });
+    await waitFor(() => expect(viewInjectTouch).toHaveBeenCalledWith("ce06", "down", 100, 200, 288, 600));
+    fireEvent.pointerUp(pane, { button: 0, clientX: 100, clientY: 200, pointerId: 2 });
+    expect(vi.mocked(viewInjectTouch).mock.calls.map(call => call[1])).toEqual(["down"]);
+    fireEvent.pointerUp(pane, { button: 0, clientX: 100, clientY: 200, pointerId: 1 });
+    await waitFor(() => expect(vi.mocked(viewInjectTouch).mock.calls.map(call => call[1])).toEqual(["down", "up"]));
+  });
+
+  it("uses one DOWN when a held pointer becomes a drag, and cancel lifts it", async () => {
+    const view = render(<FocusStream device={fixture} index={2} onClose={() => undefined} devices={[fixture]} onSelectDevice={() => undefined} />);
+    const pane = view.getByTestId("focus-screen");
+    mockRect(view.container.querySelector("canvas")!, { left: 0, top: 0, width: 288, height: 600 });
+    await waitForControlReady();
+    fireEvent.pointerDown(pane, { button: 0, clientX: 100, clientY: 200, pointerId: 1 });
+    await waitFor(() => expect(viewInjectTouch).toHaveBeenCalledWith("ce06", "down", 100, 200, 288, 600));
+    await new Promise(resolve => setTimeout(resolve, 12));
+    fireEvent.pointerMove(pane, { clientX: 100, clientY: 300, pointerId: 1 });
+    fireEvent.pointerCancel(pane, { pointerId: 1 });
+    await waitFor(() => expect(vi.mocked(viewInjectTouch).mock.calls.some(call => call[1] === "up")).toBe(true));
+    expect(vi.mocked(viewInjectTouch).mock.calls.filter(call => call[1] === "down")).toHaveLength(1);
+    expect(deviceSwipe).not.toHaveBeenCalled();
+    expect(deviceTap).not.toHaveBeenCalled();
+  });
+
+  it("lifts a held pointer on unmount without replaying it", async () => {
+    const view = render(<FocusStream device={fixture} index={2} onClose={() => undefined} devices={[fixture]} onSelectDevice={() => undefined} />);
+    const pane = view.getByTestId("focus-screen");
+    mockRect(view.container.querySelector("canvas")!, { left: 0, top: 0, width: 288, height: 600 });
+    await waitForControlReady();
+    fireEvent.pointerDown(pane, { button: 0, clientX: 100, clientY: 200, pointerId: 1 });
+    await waitFor(() => expect(viewInjectTouch).toHaveBeenCalledWith("ce06", "down", 100, 200, 288, 600));
+    view.unmount();
+    await waitFor(() => expect(vi.mocked(viewInjectTouch).mock.calls.some(call => call[1] === "up")).toBe(true));
+    expect(deviceTap).not.toHaveBeenCalled();
+  });
+
+  it("blocks a hardware key while a touch is held", async () => {
+    vi.mocked(deviceKey).mockClear();
+    const view = render(<FocusStream device={fixture} index={2} onClose={() => undefined} devices={[fixture]} onSelectDevice={() => undefined} />);
+    const pane = view.getByTestId("focus-screen");
+    mockRect(view.container.querySelector("canvas")!, { left: 0, top: 0, width: 288, height: 600 });
+    await waitForControlReady();
+    fireEvent.pointerDown(pane, { button: 0, clientX: 100, clientY: 200, pointerId: 1 });
+    await waitFor(() => expect(viewInjectTouch).toHaveBeenCalledWith("ce06", "down", 100, 200, 288, 600));
+    expect(view.getByRole("button", { name: "Home" })).toBeDisabled();
+    fireEvent.click(view.getByRole("button", { name: "Home" }));
+    expect(deviceKey).not.toHaveBeenCalled();
+    fireEvent.pointerCancel(pane, { pointerId: 1 });
+  });
+
+  it("keeps input blocked when a stray release or cancel arrives before the live UP completes", async () => {
+    let finishUp!: () => void;
+    vi.mocked(viewInjectTouch).mockImplementation(async (_udid, action) => {
+      if (action === "up") await new Promise<void>(resolve => { finishUp = resolve; });
+      return true;
+    });
+    const view = render(<FocusStream device={fixture} index={2} onClose={() => undefined} devices={[fixture]} onSelectDevice={() => undefined} />);
+    const pane = view.getByTestId("focus-screen");
+    mockRect(view.container.querySelector("canvas")!, { left: 0, top: 0, width: 288, height: 600 });
+    await waitForControlReady();
+
+    try {
+      fireEvent.pointerDown(pane, { button: 0, clientX: 100, clientY: 200, pointerId: 1 });
+      fireEvent.pointerUp(pane, { button: 0, clientX: 100, clientY: 200, pointerId: 1 });
+      await waitFor(() => expect(vi.mocked(viewInjectTouch).mock.calls.map(call => call[1])).toEqual(["down", "up"]));
+      expect(view.getByRole("button", { name: "Home" })).toBeDisabled();
+
+      fireEvent.pointerCancel(pane, { pointerId: 1 });
+      fireEvent.pointerUp(pane, { button: 0, clientX: 100, clientY: 200, pointerId: 1 });
+      expect(view.getByRole("button", { name: "Home" })).toBeDisabled();
+      fireEvent.pointerDown(pane, { button: 0, clientX: 100, clientY: 200, pointerId: 2 });
+      expect(vi.mocked(viewInjectTouch).mock.calls.map(call => call[1])).toEqual(["down", "up"]);
+    } finally {
+      finishUp?.();
+      vi.mocked(viewInjectTouch).mockImplementation(async () => liveTouchAvailable);
+    }
+    await waitFor(() => expect(view.getByRole("button", { name: "Home" })).toBeEnabled());
+  });
+
+  it("does not turn a long press into an agent tap when the live producer refuses DOWN", async () => {
+    vi.mocked(viewInjectTouch).mockResolvedValueOnce(false);
+    const view = render(<FocusStream device={fixture} index={2} onClose={() => undefined} devices={[fixture]} onSelectDevice={() => undefined} />);
+    const pane = view.getByTestId("focus-screen");
+    mockRect(view.container.querySelector("canvas")!, { left: 0, top: 0, width: 288, height: 600 });
+    await waitForControlReady();
+    fireEvent.pointerDown(pane, { button: 0, clientX: 100, clientY: 200, pointerId: 1 });
+    await new Promise(resolve => setTimeout(resolve, 520));
+    fireEvent.pointerUp(pane, { button: 0, clientX: 100, clientY: 200, pointerId: 1 });
+    await waitFor(() => expect(view.getByRole("button", { name: "Home" })).toBeEnabled());
+    expect(deviceTap).not.toHaveBeenCalled();
+  });
+
+  it("does not replay a tap when the live DOWN may have reached the phone but ACK was lost", async () => {
+    vi.mocked(viewInjectTouch).mockRejectedValueOnce(new Error("lost ACK"));
+    const view = render(<FocusStream device={fixture} index={2} onClose={() => undefined} devices={[fixture]} onSelectDevice={() => undefined} />);
+    const pane = view.getByTestId("focus-screen");
+    mockRect(view.container.querySelector("canvas")!, { left: 0, top: 0, width: 288, height: 600 });
+    await waitForControlReady();
+    fireEvent.pointerDown(pane, { button: 0, clientX: 100, clientY: 200, pointerId: 1 });
+    fireEvent.pointerUp(pane, { button: 0, clientX: 100, clientY: 200, pointerId: 1 });
+    await waitFor(() => expect(view.getByRole("button", { name: "Home" })).toBeEnabled());
+    expect(deviceTap).not.toHaveBeenCalled();
+    expect(vi.mocked(viewInjectTouch).mock.calls.map(call => call[1])).toEqual(["down", "up"]);
   });
 });
 

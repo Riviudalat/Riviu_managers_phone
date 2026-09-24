@@ -643,6 +643,7 @@ export function PublishPage({
     }
   }, []);
   const [preflightState, setPreflightState] = useState<AsyncState>("idle");
+  const [preflightStage, setPreflightStage] = useState<"preparing" | "checking" | null>(null);
   const [preflightError, setPreflightError] = useState<string | null>(null);
   const [preflightSnapshot, setPreflightSnapshot] = useState<{
     inputKey: string;
@@ -749,6 +750,7 @@ export function PublishPage({
   useEffect(() => {
     preflightTicket.current += 1;
     setPreflightState("idle");
+    setPreflightStage(null);
     setPreflightError(null);
     setPreflightSnapshot(null);
   }, [inputKey]);
@@ -837,6 +839,7 @@ export function PublishPage({
     setSoundPolicyOverride(null);
     setPreflightSnapshot(null);
     setPreflightState("idle");
+    setPreflightStage(null);
     setPreflightError(null);
   };
 
@@ -981,6 +984,7 @@ export function PublishPage({
       return;
     }
     setPreflightState("loading");
+    setPreflightStage("preparing");
     setPreflightError(null);
     const ticket = ++preflightTicket.current;
     const requestKey = inputKey;
@@ -989,6 +993,7 @@ export function PublishPage({
       await operationPrepareDevices(targets);
       await refreshDeviceGuards();
       if (!mounted.current || ticket !== preflightTicket.current || latestInputKey.current !== requestKey) return;
+      setPreflightStage("checking");
       const report = await publishPreflight(request);
       if (
         !mounted.current ||
@@ -998,6 +1003,7 @@ export function PublishPage({
         return;
       setPreflightSnapshot({ inputKey: requestKey, report });
       setPreflightState("ready");
+      setPreflightStage(null);
     } catch (error) {
       if (
         !mounted.current ||
@@ -1008,6 +1014,7 @@ export function PublishPage({
       setPreflightSnapshot(null);
       setPreflightError(describeError(error));
       setPreflightState("error");
+      setPreflightStage(null);
     }
   };
 
@@ -1362,6 +1369,7 @@ export function PublishPage({
           busy={operationBusy}
           scanning={scanning || restoringForm}
           preflightLoading={preflightState === "loading"}
+          preflightStage={preflightStage}
           preflight={currentPreflight}
           preflightError={publishBlockingReason ?? preflightError}
           blockingReason={sheetBlockingReason}
@@ -1573,6 +1581,7 @@ function CampaignMonitor({
   const [filter, setFilter] = useState<"all" | "scheduled" | "active" | "attention" | "done">("all");
   const [query, setQuery] = useState("");
   const [selectedId, setSelectedId] = useState<string | null | undefined>(initialSelectedId);
+  const detailRef = useRef<HTMLDivElement>(null);
   useEffect(() => { if (initialSelectedId) setSelectedId(initialSelectedId); }, [initialSelectedId]);
   const bucket = (campaign: PublishCampaignRecord) => {
     if (campaign.state === "scheduled") return "scheduled";
@@ -1597,6 +1606,7 @@ function CampaignMonitor({
     if (selected && selected.id !== campaign.id && (details[selected.id] || detailLoading[selected.id])) void toggleDetail(selected);
     setSelectedId(campaign.id);
     if (!details[campaign.id] && !detailLoading[campaign.id]) void toggleDetail(campaign);
+    if (window.matchMedia?.("(max-width: 900px)").matches) detailRef.current?.scrollIntoView({ block: "start" });
   };
   return <div className="publish-campaigns">
     <div className="publish-monitor-toolbar">
@@ -1621,7 +1631,7 @@ function CampaignMonitor({
         })}
         {!filtered.length && <div className="publish-monitor-placeholder"><Search size={24}/><strong>Không có chiến dịch phù hợp</strong><span>Đổi bộ lọc hoặc từ khóa để xem các lượt khác.</span></div>}
       </div>
-      <div className="publish-monitor-detail">
+      <div className="publish-monitor-detail" ref={detailRef}>
         {selected && selectedView ? <>
           <div className="publish-monitor-detail-head"><div><h3>Chiến dịch {campaigns.indexOf(selected) + 1}</h3><p>{selected.assignments.length} bài · {name(selected)}</p></div>
             <div className="publish-row-actions">

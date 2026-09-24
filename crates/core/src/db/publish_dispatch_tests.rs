@@ -92,6 +92,81 @@ fn explicit_failed_assignment_retry_preserves_identity_and_leaves_all_siblings_u
 }
 
 #[test]
+fn explicit_retry_restores_three_sound_retries_without_reopening_post() {
+    let (db, _, campaign, assignments) = fixture();
+    let prior_run = db.claim_publish_pipeline(&campaign).unwrap().unwrap();
+    let prior = db
+        .pending_publish_dispatch(10)
+        .unwrap()
+        .into_iter()
+        .find(|job| job.assignment_id == assignments[0].id)
+        .unwrap();
+    assert!(db.claim_publish_dispatch(&prior, 0).unwrap());
+    db.init_publish_recovery(&prior.assignment_id, &prior_run.token)
+        .unwrap();
+    db.update_publish_recovery_step(&prior.assignment_id, &prior_run.token, "sound", None)
+        .unwrap();
+    for _ in 0..3 {
+        assert!(db
+            .reserve_publish_step_retry(&prior.assignment_id, &prior_run.token, "network")
+            .unwrap()
+            .is_some());
+    }
+    assert!(db
+        .reserve_publish_step_retry(&prior.assignment_id, &prior_run.token, "network")
+        .unwrap()
+        .is_none());
+    assert!(db
+        .finish_publish_dispatch(&prior, Some("sound identity changed"))
+        .unwrap());
+    db.finish_publish_pipeline(&prior_run).unwrap();
+
+    let revision = db
+        .publish_assignment_revision(&prior.assignment_id)
+        .unwrap();
+    let run = db
+        .claim_publish_assignment_retry_checked(
+            &prior.assignment_id,
+            revision,
+            &Uuid::new_v4().to_string(),
+        )
+        .unwrap()
+        .unwrap();
+    let recovery = db
+        .publish_recovery_state(&prior.assignment_id)
+        .unwrap()
+        .unwrap();
+    assert!(recovery.manual);
+    assert_eq!(recovery.max_retries, 3);
+    assert_eq!(recovery.retries_used, 0);
+    assert!(recovery.counts.is_empty());
+    db.init_publish_recovery(&prior.assignment_id, &run.token)
+        .unwrap();
+    db.update_publish_recovery_step(&prior.assignment_id, &run.token, "sound", None)
+        .unwrap();
+    for _ in 0..3 {
+        assert!(db
+            .reserve_publish_step_retry(&prior.assignment_id, &run.token, "network")
+            .unwrap()
+            .is_some());
+    }
+    assert!(db
+        .reserve_publish_step_retry(&prior.assignment_id, &run.token, "network")
+        .unwrap()
+        .is_none());
+    db.conn()
+        .unwrap()
+        .execute(
+            "UPDATE publish_assignments SET effect_intent='post' WHERE id=?1",
+            [&prior.assignment_id],
+        )
+        .unwrap();
+    assert!(db
+        .reserve_publish_step_retry(&prior.assignment_id, &run.token, "network")
+        .is_err());
+}
+
+#[test]
 fn explicit_failed_retry_rejects_effects_completed_assignments_and_terminal_parents() {
     for (state, intent, parent) in [
         (

@@ -45,8 +45,10 @@ for (const width of [1440, 820]) {
       await page.getByRole("button", { name: "Thiết lập Google Sheet", exact: true }).focus();
       await page.keyboard.press("Tab");
       await expect(sheetStatus).toBeFocused();
-      await page.keyboard.press("End");
-      await expect.poll(() => sheetStatus.evaluate(node => node.scrollTop)).toBeGreaterThan(0);
+      await page.getByRole("button", { name: "Thiết lập Google Sheet", exact: true }).click();
+      await expect(page.locator(".pq-settings.is-open")).toBeVisible();
+      await expect(sheetStatus).toContainText("Mở Thiết lập Google để bổ sung.");
+      expect(await sheetStatus.evaluate(node => node.scrollWidth <= node.clientWidth)).toBe(true);
     }
     expect((await new AxeBuilder({ page }).include(".publish-page").analyze()).violations).toEqual([]);
     await page.screenshot({ path: test.info().outputPath(`pending-cleared-${width}.png`) });

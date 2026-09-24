@@ -46,6 +46,7 @@ import { DeviceDetailsDrawer } from "./components/DeviceDetailsDrawer";
 import { FleetDiagnosticsPage } from "./components/FleetDiagnosticsPage";
 import { ALL_DEVICES_TAB, devicesInTab, groupTabs, withDeviceAdded } from "./deviceGroups";
 import { FocusStream } from "./components/FocusStream";
+import { InspectorLauncher } from "./components/InspectorLauncher";
 import { useDeviceWindows } from "./components/useDeviceWindows";
 import { IconPhone, IconRefresh } from "./components/Icons";
 import { Banner, EmptyState, LoadingState } from "./components/States";
@@ -188,6 +189,7 @@ function App() {
   const [groupsOpen, setGroupsOpen] = useState(false);
   const workspaceDirty = useWorkspaceDirty();
   const [automationView, setAutomationView] = useState<"device" | "orchestration">("device");
+  const [myAppsEditorOpen, setMyAppsEditorOpen] = useState(false);
   const automationViewRef = useRef(automationView);
   automationViewRef.current = automationView;
   const pendingNavigationRef = useRef<PendingNavigation | null>(null);
@@ -754,6 +756,7 @@ function App() {
     <div className="shell">
       <Sidebar
         page={page}
+        forceCompact={myAppsEditorOpen && page === "myApps"}
         selectedCount={selected.length}
         total={devices.length}
         readyCount={readyCount}
@@ -782,6 +785,7 @@ function App() {
           }
           actions={
             <>
+              <InspectorLauncher devices={orderedDevices} deviceLabels={automationDeviceLabels} />
               <ActivityCenter />
               {page !== "control" && <button
               type="button"
@@ -866,7 +870,7 @@ function App() {
               <ControlCenterRail tileWidth={tileWidth} onTileWidth={setTileWidth} connection={connectionFilter} onConnection={setConnectionFilter}
                 pinned={displayPinned} onPinnedChange={next => { setDisplayPinned(next); try { localStorage.setItem("riviu.control.displayPinned", String(next)); } catch { /* optional preference */ } }}
                 groups={tabs.map(tab => ({ ...tab, udids: groups.find(group => group.id === tab.id)?.udids }))} group={groupTab} onGroup={setGroupTab}
-                machines={devices.map(d=>({id:d.udid,number:fleetNumberByUdid.get(d.udid)??1,name:tileName(d,metaMap.get(d.udid)),selected:selected.includes(d.udid)}))}
+                machines={devices.map(d=>({id:d.udid,number:fleetNumberByUdid.get(d.udid)??1,name:tileName(d,metaMap.get(d.udid)),selected:selected.includes(d.udid),connection:d.connection}))}
                 onSelect={id=>onSelect(id,true)} onSettings={()=>{setSettingsSection("control");void requestPage("settings");}}
                 onGroups={()=>setGroupsOpen(true)} onRotate={()=>void(async()=>{const targets=selectedDevices.filter(device=>device.platform==="android");if(!targets.length){pushToast("info","Chọn máy Android để xoay");return;}const results=await Promise.allSettled(targets.map(device=>setScreenRotation(device.udid,1)));const confirmed=results.filter(result=>result.status==="fulfilled"&&result.value===1).length;pushToast(confirmed===targets.length?"ok":"warn",`Đã xác nhận xoay ${confirmed}/${targets.length} máy`);})()}/>
               <div className="device-browser-toolbar">
@@ -1277,7 +1281,7 @@ function App() {
               onSelectUdids={setSelected}
             />
           )}
-          {page === "myApps" && <MyAppsPage devices={devices} onOpenApp={(next) => void requestPage(next)}/>}
+          {page === "myApps" && <MyAppsPage devices={devices} onOpenApp={(next) => void requestPage(next)} onEditorChange={setMyAppsEditorOpen}/>}
           {page === "scripts" && (
             <section className="automation-surface">
               {(operationSource?.kind === "flow" || operationSource?.kind === "orchestration") && (

@@ -600,7 +600,8 @@ impl ProductionOrchestrationPort {
                 ))
             })?;
         let campaign = config
-            .into_campaign_request(request.idempotency_key.clone(), Self::target_udids(request));
+            .into_campaign_request(request.idempotency_key.clone(), Self::target_udids(request))
+            .map_err(|error| OrchestrationChildFailure::before_effect(error.to_string()))?;
         crate::interaction_commands::require_parent_locator(
             &self.control,
             campaign.mode,
@@ -671,6 +672,10 @@ impl ProductionOrchestrationPort {
                     "invalid pinned publish profile: {error}"
                 ))
             })?;
+        config
+            .network
+            .ensure_implemented()
+            .map_err(|error| OrchestrationChildFailure::before_effect(error.to_string()))?;
         if !config.execution_confirmed {
             return Err(OrchestrationChildFailure::before_effect(
                 "publish automation profile has no execution confirmation",

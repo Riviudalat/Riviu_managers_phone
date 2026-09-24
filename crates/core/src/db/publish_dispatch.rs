@@ -207,7 +207,11 @@ impl Database {
             recovery.expected_account == current_account,
             "Tài khoản đã đổi; không thử lại bài cũ"
         );
-        recovery.max_retries = 0;
+        // The operator grants a new pre-Post attempt, including bounded retries
+        // inside a step. `manual` still forbids requeueing the whole job.
+        recovery.max_retries = 3;
+        recovery.retries_used = 0;
+        recovery.counts.clear();
         recovery.state = if agent_ready_at.is_some() {
             "retryWaiting"
         } else {

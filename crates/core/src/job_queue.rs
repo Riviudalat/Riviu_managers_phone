@@ -108,6 +108,36 @@ impl JobQueue {
             anyhow::bail!("job queue is shutting down");
         }
         runtime.tasks.retain(|_, task| !task.is_finished());
+        let job = Self::prepare_job(&script, &udids);
+        self.db.save_job(&job)?;
+        self.start_prepared_job(&mut runtime, job.clone(), script, udids);
+        Ok(job)
+    }
+
+    pub async fn enqueue_scheduled(
+        &self,
+        script: AutomationScript,
+        schedule: &crate::types::ScheduleItem,
+        next_run_at: &str,
+    ) -> anyhow::Result<bool> {
+        let mut runtime = self.runtime.lock();
+        if runtime.stopping {
+            anyhow::bail!("job queue is shutting down");
+        }
+        runtime.tasks.retain(|_, task| !task.is_finished());
+        let udids = schedule.udids.clone();
+        let job = Self::prepare_job(&script, &udids);
+        if !self
+            .db
+            .claim_script_schedule_job(schedule, next_run_at, &job)?
+        {
+            return Ok(false);
+        }
+        self.start_prepared_job(&mut runtime, job, script, udids);
+        Ok(true)
+    }
+
+    fn prepare_job(script: &AutomationScript, udids: &[String]) -> JobRecord {
         let now = Utc::now();
         let steps: Vec<JobStepRecord> = script
             .steps
@@ -122,17 +152,25 @@ impl JobQueue {
             })
             .collect();
 
-        let job = JobRecord {
+        JobRecord {
             id: Uuid::new_v4(),
             script_name: script.name.clone(),
-            udids: udids.clone(),
+            udids: udids.to_vec(),
             status: JobStatus::Queued,
             created_at: now,
             updated_at: now,
             steps,
             error: None,
-        };
-        self.db.save_job(&job)?;
+        }
+    }
+
+    fn start_prepared_job(
+        &self,
+        runtime: &mut JobQueueRuntime,
+        job: JobRecord,
+        script: AutomationScript,
+        udids: Vec<String>,
+    ) {
         self.events.emit(AppEvent::JobUpdated { job: job.clone() });
 
         let this = self.clone();
@@ -150,9 +188,6 @@ impl JobQueue {
             }
         });
         runtime.tasks.insert(job_id, task);
-        drop(runtime);
-
-        Ok(job)
     }
 
     async fn run_job(
@@ -163,9 +198,7 @@ impl JobQueue {
     ) -> anyhow::Result<()> {
         let mut job = self
             .db
-            .list_jobs(200)?
-            .into_iter()
-            .find(|j| j.id == job_id)
+            .get_job(job_id)?
             .ok_or_else(|| anyhow::anyhow!("job missing"))?;
 
         job.status = JobStatus::Running;
@@ -428,10 +461,10 @@ impl JobQueue {
     /// case (a transient lock during the `Running` checkpoint, a device that would not
     /// lease) now ends as a `failed` row the operator can see and re-run.
     fn settle_job_after_error(&self, job_id: Uuid, error: &anyhow::Error) {
-        let stranded = match self.db.list_jobs(200) {
-            Ok(jobs) => jobs.into_iter().find(|job| {
-                job.id == job_id && matches!(job.status, JobStatus::Queued | JobStatus::Running)
-            }),
+        let stranded = match self.db.get_job(job_id) {
+            Ok(job) => {
+                job.filter(|job| matches!(job.status, JobStatus::Queued | JobStatus::Running))
+            }
             Err(read_error) => {
                 tracing::error!("settle job {job_id}: không đọc được hàng ({read_error:#})");
                 return;
