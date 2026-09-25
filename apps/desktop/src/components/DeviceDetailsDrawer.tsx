@@ -1,6 +1,6 @@
 import { X } from "lucide-react";
 import { useState } from "react";
-import { deviceActionCapabilities } from "../api";
+import { deviceActionCapabilities, deviceThreadsBuild, type ThreadsBuildInfo } from "../api";
 import { describeError } from "../describeError";
 import type { DeviceActionCapabilities } from "../generated-ipc";
 import { useModalFocus } from "./useModalFocus";
@@ -27,12 +27,29 @@ export function DeviceDetailsDrawer({
   const [capabilities, setCapabilities] = useState<DeviceActionCapabilities | null>(null);
   const [capabilityError, setCapabilityError] = useState<string | null>(null);
   const [checking, setChecking] = useState(false);
+  const [threadsCheck, setThreadsCheck] = useState<{
+    udid: string;
+    loading: boolean;
+    build: ThreadsBuildInfo | null;
+    error: string | null;
+  } | null>(null);
   const readCapabilities = async () => {
     setChecking(true); setCapabilityError(null);
     try { setCapabilities(await deviceActionCapabilities(device.udid)); }
     catch (error) { setCapabilityError(describeError(error)); }
     finally { setChecking(false); }
   };
+  const readThreadsBuild = async () => {
+    const udid = device.udid;
+    setThreadsCheck({ udid, loading: true, build: null, error: null });
+    try {
+      const build = await deviceThreadsBuild(udid);
+      setThreadsCheck({ udid, loading: false, build, error: null });
+    } catch (error) {
+      setThreadsCheck({ udid, loading: false, build: null, error: describeError(error) });
+    }
+  };
+  const currentThreadsCheck = threadsCheck?.udid === device.udid ? threadsCheck : null;
   const stateLabels = { measured: "Đã đo", runtimeProofRequired: "Cần chứng minh trong phiên", unsupported: "Chưa hỗ trợ", deviceNotReady: "Máy chưa sẵn sàng" };
   const actionLabels: Record<string, string> = { feed: "Lướt feed", search: "Tìm kiếm", photo: "Đăng ảnh", video: "Đăng video", sound: "Chọn nhạc", like: "Thích", save: "Lưu", follow: "Theo dõi tài khoản đích", feedFollow: "Theo dõi trong Nuôi", mentionReply: "Trả lời và tag" };
 
@@ -95,6 +112,18 @@ export function DeviceDetailsDrawer({
             </div>)}</dl>
           </>}
         </section>
+        {device.platform === "android" && <section className="device-detail-evidence" aria-label="Phiên bản Threads">
+          <h3>Phiên bản Threads</h3>
+          <button type="button" disabled={currentThreadsCheck?.loading} onClick={() => void readThreadsBuild()}>
+            {currentThreadsCheck?.loading ? "Đang đọc…" : "Kiểm tra phiên bản"}
+          </button>
+          {currentThreadsCheck?.error && <p role="alert">{currentThreadsCheck.error}</p>}
+          {currentThreadsCheck?.build && <dl className="device-detail-list">
+            <div><dt>Phiên bản hiện tại</dt><dd>{currentThreadsCheck.build.version}</dd></div>
+            <div><dt>Gói ứng dụng</dt><dd className="mono">{currentThreadsCheck.build.packageName}</dd></div>
+            <div><dt>Ngôn ngữ máy</dt><dd>{currentThreadsCheck.build.locale || "Chưa đọc được"}</dd></div>
+          </dl>}
+        </section>}
       </aside>
     </div>
   );

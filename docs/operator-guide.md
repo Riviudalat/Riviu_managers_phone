@@ -45,6 +45,10 @@ Trong **My Apps**, tên ứng dụng và **Mở chức năng** cũng mở trang 
 Control Center chỉ chứa quản lý thiết bị. Sidebar bỏ Dữ liệu và Mạng & Router. Trang **Lượt chạy** hiển thị bảng;
 chọn tên hoặc Chi tiết để mở ngăn kết quả. Monitor rỗng tự ẩn.
 
+Chọn **Chi tiết** của một máy Android, rồi bấm **Kiểm tra phiên bản** trong mục
+**Phiên bản Threads** để đọc bản Threads đang cài. Kết quả lấy trực tiếp từ máy;
+Threads chưa cài hoặc không đọc được phiên bản sẽ hiện lý do. Thao tác này không mở app.
+
 Trong Control Center, bảng **Hiển thị** có thanh đổi kích thước ô xem trước và màn
 hình điều khiển; hình điện thoại phóng theo ô và giữ tỷ lệ. Rê chuột vào thẻ **Hiển thị**
 để bung bảng nổi, đưa chuột ra ngoài để tự ẩn. Bấm **Ghim bảng Hiển thị** để giữ bảng

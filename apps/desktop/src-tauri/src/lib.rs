@@ -441,6 +441,7 @@ pub fn run() {
             commands::install_ipa_to_group,
             commands::uninstall_app,
             commands::list_installed_apps,
+            commands::device_threads_build,
             commands::device_shell,
             commands::import_media,
             commands::export_media,

@@ -820,6 +820,16 @@ export async function listInstalledApps(udid: string) {
   return invoke<InstalledApp[]>("list_installed_apps", { udid });
 }
 
+export interface ThreadsBuildInfo {
+  packageName: string;
+  version: string;
+  locale: string;
+}
+
+export async function deviceThreadsBuild(udid: string) {
+  return invoke<ThreadsBuildInfo>("device_threads_build", { udid });
+}
+
 /**
  * Run one operator-typed shell command on a device.
  *

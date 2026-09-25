@@ -28,6 +28,41 @@ pub async fn device_action_capabilities(
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct ThreadsBuildInfo {
+    pub package_name: String,
+    pub version: String,
+    pub locale: String,
+}
+
+/// Reads the installed Threads build without opening the app or taking a device lease.
+#[tauri::command]
+pub async fn device_threads_build(
+    state: State<'_, AppState>,
+    udid: String,
+) -> Result<ThreadsBuildInfo, CommandError> {
+    let _admission = state.ensure_accepting_work()?;
+    let device = state
+        .registry
+        .list()
+        .into_iter()
+        .find(|device| device.udid == udid)
+        .ok_or_else(|| err("Thiết bị không còn kết nối"))?;
+    if device.platform != riviu_core::DevicePlatform::Android {
+        return Err(err("Chỉ đọc được phiên bản Threads trên thiết bị Android"));
+    }
+    let (package_name, version, locale) = state.control.threads_build(&udid).await?;
+    if version.is_empty() {
+        return Err(err("Threads đã cài nhưng chưa đọc được phiên bản"));
+    }
+    Ok(ThreadsBuildInfo {
+        package_name,
+        version,
+        locale,
+    })
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct DeviceWorkState {
     pub udid: String,
     pub current_owner: Option<DeviceWorkOwner>,
