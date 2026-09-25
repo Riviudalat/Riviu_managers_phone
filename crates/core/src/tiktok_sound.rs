@@ -504,8 +504,16 @@ pub async fn open_and_observe_sounds_armed(
     if plan.dynamic {
         return open_dynamic_sounds(session, plan, maximum_visible, before_open).await;
     }
-    if visual::open_loading_entry(session, plan, before_open).await? {
-        return observe_measured_sound_pool(session, plan, maximum_visible).await;
+    match visual::open_loading_entry(session, plan, before_open).await {
+        Ok(true) => return observe_measured_sound_pool(session, plan, maximum_visible).await,
+        Err(error)
+            if selection_recovery::measured(plan)
+                && error.is::<crate::driver::ScreenshotReadUnavailable>() =>
+        {
+            return open_sound_without_image(session, plan, maximum_visible, before_open).await;
+        }
+        Err(error) => return Err(error),
+        Ok(false) => {}
     }
     let deadline = phase_deadline(SOUND_WINDOW);
     let entry = loop {
@@ -545,6 +553,72 @@ pub async fn open_and_observe_sounds_armed(
     }
 
     observe_sound_pool(session, plan, maximum_visible).await
+}
+
+async fn open_sound_without_image(
+    session: &dyn UiSession,
+    plan: SoundPickerPlan,
+    maximum_visible: usize,
+    before_open: &mut (dyn FnMut() + Send),
+) -> anyhow::Result<ObservedSoundPool> {
+    let epoch = session.gui_session_epoch();
+    anyhow::ensure!(!epoch.is_empty(), "sound sheet session missing");
+    let deadline = phase_deadline(SOUND_WINDOW);
+    let mut previous: Option<(u64, ElementBox)> = None;
+    let (generation, entry) = loop {
+        check_wait()?;
+        anyhow::ensure!(
+            session.gui_session_epoch() == epoch
+                && read_sound(session.active_app_bundle()).await? == plan.package,
+            "sound app/session changed before opening picker"
+        );
+        let source = read_sound(session.hierarchy_source_snapshot()).await?;
+        let tree = crate::ui_automation::tree::Tree::parse(source.clone())?;
+        let current = unique_sound_entry(&tree, plan.package, &[plan.entry_id]);
+        if let Some(button) = current {
+            if previous
+                .as_ref()
+                .is_some_and(|(generation, old)| source.generation > *generation && old == &button)
+            {
+                break (source.generation, button);
+            }
+            previous = Some((source.generation, button));
+        } else {
+            previous = None;
+        }
+        anyhow::ensure!(
+            Instant::now() < deadline,
+            "sound entry unavailable without screenshot; no Post was sent"
+        );
+        tokio::time::sleep(POLL).await;
+    };
+    check_wait()?;
+    anyhow::ensure!(
+        session.gui_session_epoch() == epoch
+            && read_sound(session.active_app_bundle()).await? == plan.package,
+        "sound app/session changed before opening picker"
+    );
+    let fresh = read_sound(session.hierarchy_source_snapshot()).await?;
+    let tree = crate::ui_automation::tree::Tree::parse(fresh)?;
+    anyhow::ensure!(
+        session.gui_session_epoch() == epoch
+            && read_sound(session.active_app_bundle()).await? == plan.package,
+        "sound app/session changed before opening picker"
+    );
+    anyhow::ensure!(
+        tree.generation > generation
+            && unique_sound_entry(&tree, plan.package, &[plan.entry_id]).as_ref() == Some(&entry),
+        "sound entry changed before tap; no Post was sent"
+    );
+    sound_tap_armed(session, entry.centre(), before_open).await?;
+    // With no screenshot, only an already-selected Hot tab in two fresh XML
+    // pools can authorize a row. Do not enter the image-based tab recovery.
+    let pool = async {
+        snapshot::select_section_tab_xml_only(session, plan).await?;
+        snapshot::observe_xml_only(session, plan, maximum_visible).await
+    }
+    .await;
+    checked_measured_sound_observation(session, plan, &epoch, pool).await
 }
 
 /// Observe a sheet that this attempt may already have opened. This path never
@@ -603,6 +677,14 @@ async fn observe_measured_sound_pool(
     match checked_measured_sound_observation(session, plan, &epoch, visual).await {
         Ok(pool) => return Ok(pool),
         Err(error) if error.is::<visual::VisualSoundPoolUnavailable>() => {}
+        Err(error) if error.is::<crate::driver::ScreenshotReadUnavailable>() => {
+            let pool = async {
+                snapshot::select_section_tab_xml_only(session, plan).await?;
+                snapshot::observe_xml_only(session, plan, maximum).await
+            }
+            .await;
+            return checked_measured_sound_observation(session, plan, &epoch, pool).await;
+        }
         Err(error) => return Err(error),
     }
 

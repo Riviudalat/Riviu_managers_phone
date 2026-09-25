@@ -13,6 +13,13 @@ pub struct AccessibilityReadUnavailable {
     pub message: String,
 }
 
+/// An Android screenshot returned bytes that cannot be used as a PNG.
+#[derive(Debug, Error)]
+#[error("screencap returned {bytes} bytes that are not a PNG")]
+pub struct ScreenshotReadUnavailable {
+    pub bytes: usize,
+}
+
 use crate::device_capabilities::{
     validate_clipboard_read_limit, AgentInstallProof, ClipboardAccessMode,
     DeviceCapabilitySnapshot, UiCapabilities,

@@ -79,6 +79,11 @@ nhận đúng tên nhạc duy nhất trên editor. Lỗi/mơ hồ/Dừng vẫn t
 chọn nhạc lại và không nới deadline chung ba phút.
 Khi nhánh XML gặp cây rỗng hoặc lỗi accessibility, hai ảnh mới cho phép chuyển
 tab Hot một lần. Nhánh này vẫn bắt buộc XML xác nhận Hot và danh sách đầy đủ.
+Riêng Global 45.7.3/en, nếu Android trả ảnh chụp không phải PNG (kể cả 0 byte),
+không dùng ảnh đó để suy vị trí. Nhánh mở nhạc chỉ nhận một nút entry qua hai XML
+mới cùng app/phiên, đọc lại đúng nút và app ngay trước một tap. Sau khi mở, chỉ
+tiếp tục khi XML chứng minh Hot đã chọn và hàng nhạc ổn định; không có ảnh thì
+không gọi đường chọn tab bằng ảnh/OCR. Hết hạn hoặc XML đổi thì dừng trước Post.
 Trên 45.7.3/en, hai ảnh native mới có Next và Your Story chứng minh editor đã
 mở; nhạc gợi ý đang Loading là trạng thái riêng. Mẫu chữ Loading phải khớp
 hai ảnh mới trước khi mở nút nhạc đã đo. Bảng mở dở được quan sát tiếp; khi đủ

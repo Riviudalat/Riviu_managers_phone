@@ -79,6 +79,9 @@ struct Session {
     xml_override: Option<String>,
     fixed_xml_generation: bool,
     incomplete_direct_reads: bool,
+    screenshot_unavailable: bool,
+    editor_before_sound: bool,
+    hot_requires_tap: bool,
 }
 impl Session {
     fn new() -> Self {
@@ -110,18 +113,22 @@ impl Session {
             xml_override: None,
             fixed_xml_generation: false,
             incomplete_direct_reads: false,
+            screenshot_unavailable: false,
+            editor_before_sound: false,
+            hot_requires_tap: false,
         }
     }
 }
-fn sound_xml(selected: bool) -> String {
+fn sound_xml(selected: bool, hot_selected: bool) -> String {
     let node = |id: &str, text: &str, bounds: &str, selected: bool| {
         format!(
             r#"<node package="com.zhiliaoapp.musically" resource-id="com.zhiliaoapp.musically{id}" text="{text}" bounds="{bounds}" displayed="true" enabled="true" clickable="true" selected="{selected}"/>"#
         )
     };
     format!(
-        "<hierarchy>{}{}{}{}{}{}</hierarchy>",
-        node(":id/wrv", "Hot", "[40,1100][140,1150]", true),
+        "<hierarchy>{}{}{}{}{}{}{}</hierarchy>",
+        node(":id/wrv", "Hot", "[40,1100][140,1150]", hot_selected),
+        node(":id/wrv", "For You", "[175,1100][313,1150]", !hot_selected),
         node(":id/viewpager_container", "", "[0,1200][1080,1900]", false),
         node(
             ":id/vertical_item_music_new_rl",
@@ -186,14 +193,26 @@ impl UiSession for Session {
     }
     async fn screenshot_png(&self) -> anyhow::Result<Vec<u8>> {
         self.frames.fetch_add(1, Ordering::Relaxed);
+        if self.screenshot_unavailable {
+            return Err(crate::driver::ScreenshotReadUnavailable { bytes: 0 }.into());
+        }
         Ok(self.png.clone())
     }
     async fn hierarchy_source_snapshot(&self) -> anyhow::Result<crate::HierarchySourceSnapshot> {
         let n = self.reads.fetch_add(1, Ordering::Relaxed) + 1;
-        if self.incomplete_direct_reads && n <= 2 {
+        if self.incomplete_direct_reads
+            && ((!self.editor_before_sound && n <= 2)
+                || (self.editor_before_sound && self.taps.load(Ordering::Relaxed) > 0 && n <= 5))
+        {
             return Ok(crate::HierarchySourceSnapshot {
                 generation: n as u64,
                 xml: "<hierarchy/>".into(),
+            });
+        }
+        if self.editor_before_sound && self.taps.load(Ordering::Relaxed) == 0 {
+            return Ok(crate::HierarchySourceSnapshot {
+                generation: n as u64,
+                xml: "<hierarchy><node package=\"com.zhiliaoapp.musically\" resource-id=\"com.zhiliaoapp.musically:id/dou\" bounds=\"[350,100][720,216]\" enabled=\"true\" clickable=\"true\" displayed=\"true\"/></hierarchy>".into(),
             });
         }
         if let Some(xml) = &self.xml_override {
@@ -229,7 +248,7 @@ impl UiSession for Session {
             }
             return Ok(crate::HierarchySourceSnapshot {
                 generation: n as u64,
-                xml: sound_xml(false),
+                xml: sound_xml(false, true),
             });
         }
         if self.taps.load(Ordering::Relaxed) > 0
@@ -250,6 +269,7 @@ impl UiSession for Session {
             sound_xml(
                 self.selected_marker
                     || (self.select_on_tap && self.taps.load(Ordering::Relaxed) > 0),
+                !self.hot_requires_tap || self.taps.load(Ordering::Relaxed) >= 2,
             )
         };
         Ok(crate::HierarchySourceSnapshot {
@@ -283,6 +303,61 @@ impl UiSession for Session {
             clickable: true,
         }])
     }
+}
+
+#[tokio::test(start_paused = true)]
+async fn secure_capture_failure_uses_measured_entry_and_xml_without_replaying_open() {
+    let mut session = Session::new();
+    session.screenshot_unavailable = true;
+    session.read_failure = false;
+    session.editor_before_sound = true;
+
+    let pool = open_and_observe_sounds(&session, plan(), 5).await.unwrap();
+
+    assert_eq!(pool.candidates.len(), 1);
+    assert_eq!(pool.candidates[0].title, "One");
+    assert_eq!(session.frames.load(Ordering::Relaxed), 1);
+    assert_eq!(session.taps.load(Ordering::Relaxed), 1);
+    assert_eq!(session.reads.load(Ordering::Relaxed), 7);
+}
+
+#[tokio::test(start_paused = true)]
+async fn secure_capture_fallback_refuses_changed_app_before_sound_open() {
+    let mut session = Session::new();
+    session.screenshot_unavailable = true;
+    session.editor_before_sound = true;
+    session.changed_app = true;
+    let error = open_and_observe_sounds(&session, plan(), 5)
+        .await
+        .unwrap_err();
+    assert!(format!("{error:#}").contains("sound app/session changed"));
+    assert_eq!(session.taps.load(Ordering::Relaxed), 0);
+}
+
+#[tokio::test(start_paused = true)]
+async fn secure_capture_waits_for_loading_hot_xml_without_image_or_second_open() {
+    let mut session = Session::new();
+    session.screenshot_unavailable = true;
+    session.editor_before_sound = true;
+    session.incomplete_direct_reads = true;
+    session.read_failure = false;
+    let pool = open_and_observe_sounds(&session, plan(), 5).await.unwrap();
+    assert_eq!(pool.candidates[0].title, "One");
+    assert_eq!(session.taps.load(Ordering::Relaxed), 1);
+    assert_eq!(session.frames.load(Ordering::Relaxed), 1);
+}
+
+#[tokio::test(start_paused = true)]
+async fn secure_capture_selects_for_you_to_hot_once_then_reproves_rows() {
+    let mut session = Session::new();
+    session.screenshot_unavailable = true;
+    session.editor_before_sound = true;
+    session.hot_requires_tap = true;
+    session.read_failure = false;
+    let pool = open_and_observe_sounds(&session, plan(), 5).await.unwrap();
+    assert_eq!(pool.candidates[0].title, "One");
+    assert_eq!(session.taps.load(Ordering::Relaxed), 2);
+    assert_eq!(session.frames.load(Ordering::Relaxed), 1);
 }
 
 struct Ocr429;

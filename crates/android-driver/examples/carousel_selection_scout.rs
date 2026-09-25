@@ -21,10 +21,19 @@ async fn capture(session: &dyn UiSession, out: &std::path::Path, name: &str) -> 
         out.join(format!("{name}.xml")),
         session.hierarchy_source_snapshot().await?.xml,
     )?;
-    std::fs::write(
-        out.join(format!("{name}.png")),
-        session.screenshot_png().await?,
-    )?;
+    match session.screenshot_png().await {
+        Ok(png) => std::fs::write(out.join(format!("{name}.png")), png)?,
+        Err(error) if error.is::<riviu_core::driver::ScreenshotReadUnavailable>() => {
+            std::fs::write(
+                out.join(format!("{name}.capture-unavailable.json")),
+                serde_json::to_vec(&serde_json::json!({
+                    "reason": "screenshot_unavailable",
+                    "xmlAvailable": true,
+                }))?,
+            )?;
+        }
+        Err(error) => return Err(error),
+    }
     Ok(())
 }
 

@@ -777,11 +777,9 @@ impl UiSession for AndroidUiSession {
             )
             .await
             .context("capture an Android screenshot")?;
-        anyhow::ensure!(
-            png.starts_with(&[0x89, b'P', b'N', b'G']),
-            "screencap returned {} bytes that are not a PNG",
-            png.len()
-        );
+        if !png.starts_with(&[0x89, b'P', b'N', b'G']) {
+            return Err(riviu_core::driver::ScreenshotReadUnavailable { bytes: png.len() }.into());
+        }
         if let (Some(recorder), Some(scope)) = (&self.trace, self.gui_scope()) {
             if scope.device_id == self.serial {
                 let step = riviu_core::ui_automation::trace::new_step(
