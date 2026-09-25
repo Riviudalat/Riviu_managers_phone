@@ -1140,6 +1140,12 @@ export function publishSheetReadback(assignmentId: string, expectedRevision: num
   return invoke<import("./generated-ipc").PublishSheetReadback>("publish_sheet_readback", { assignmentId, expectedRevision });
 }
 
+export function publishSheetDiagnoseFailed(assignmentId: string, expectedRevision: number, startRow = 2) {
+  return invoke<import("./generated-ipc").PublishSheetFailedDiagnostic>("publish_sheet_diagnose_failed", {
+    assignmentId, expectedRevision, startRow,
+  });
+}
+
 export function publishDeviceGuards(udids: string[]) {
   return invoke<import("./types").PublishDeviceGuards>("publish_device_guards", { udids });
 }

@@ -655,6 +655,7 @@ pub fn run() {
             nurture_commands::typesafe_update_credential,
             nurture_commands::typesafe_check_comment,
             google_sheet_commands::publish_sheet_readback,
+            google_sheet_commands::publish_sheet_diagnose_failed,
             commands::device_action_capabilities,
             commands::operation_trace_export,
             nurture_commands::nurture_test_api,

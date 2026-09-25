@@ -314,6 +314,18 @@ struct TransientSheetOcr {
     calls: AtomicUsize,
 }
 struct TabsWithoutRowsOcr;
+struct SlowOcr;
+#[async_trait::async_trait]
+impl GuiReasoner for SlowOcr {
+    async fn resolve(&self, _: GuiRequest) -> anyhow::Result<GuiResponse> {
+        unreachable!()
+    }
+
+    async fn ocr(&self, _: OcrRequest) -> anyhow::Result<OcrResponse> {
+        tokio::time::sleep(Duration::from_secs(31)).await;
+        unreachable!()
+    }
+}
 struct SwitchEpochOnSheetProofOcr {
     changed: Arc<AtomicBool>,
     proofs: AtomicUsize,
@@ -619,6 +631,25 @@ async fn unreadable_hierarchy_after_ocr_timeout_returns_retryable_without_a_tap(
     assert_eq!(
         crate::publish_recovery::describe(&error).code,
         "sound_hierarchy_unavailable"
+    );
+    assert_eq!(session.taps.load(Ordering::Relaxed), 0);
+    assert_eq!(session.backs.load(Ordering::Relaxed), 0);
+}
+
+#[tokio::test(start_paused = true)]
+async fn sound_recovery_deadline_is_retryable_before_any_tap() {
+    let mut session = Session::new();
+    session.read_failure = false;
+    session.ocr = Arc::new(SlowOcr);
+    let error = selection_recovery::prove_sheet(&session, plan())
+        .await
+        .unwrap_err();
+
+    let failure = crate::publish_recovery::describe(&error);
+    assert_eq!(failure.code, "sound_load_timeout");
+    assert_eq!(
+        failure.kind,
+        crate::publish_recovery::FailureKind::Retryable
     );
     assert_eq!(session.taps.load(Ordering::Relaxed), 0);
     assert_eq!(session.backs.load(Ordering::Relaxed), 0);

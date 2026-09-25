@@ -29,9 +29,7 @@ pub async fn publish_check_links(
         if udid.as_ref().is_some_and(|id| id != &assignment.udid) {
             continue;
         }
-        let row = rows
-            .iter()
-            .find(|r| r.assignment_id == capability.assignment_id);
+        let row = eligible_check_candidate(&capability, &rows);
         let (status, error) = if let Some(row) = row {
             match verify_pending_assignment_inner(
                 &state.control,
@@ -55,6 +53,21 @@ pub async fn publish_check_links(
     Ok(
         serde_json::json!({"campaignId":campaign_id,"state":status,"reason":if statuses.is_empty(){Some("noCandidate")}else{None},"outcomes":outcomes}),
     )
+}
+
+pub(super) fn eligible_check_candidate<'a>(
+    capability: &riviu_core::db::PublishRecoveryCapabilities,
+    candidates: &'a [riviu_core::db::PendingPublishVerification],
+) -> Option<&'a riviu_core::db::PendingPublishVerification> {
+    capability
+        .check_link
+        .allowed
+        .then(|| {
+            candidates
+                .iter()
+                .find(|row| row.assignment_id == capability.assignment_id)
+        })
+        .flatten()
 }
 
 #[tauri::command]

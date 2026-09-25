@@ -142,6 +142,115 @@ fn committed_timeout_retry_and_restart_select_the_same_row() {
 }
 
 #[test]
+fn failed_diagnostic_projects_only_exact_publication_note_without_raw_cell_data() {
+    let (m, l, mut rows) = fixture();
+    let url = "https://www.tiktok.com/@fixture/photo/111";
+    let mut p = payload("diagnostic-id", 7, url);
+    p["rowKind"] = json!("canonical");
+    let write = planner::plan(&m, &l, &scan(&rows[1..], &p), &p).unwrap();
+    apply(&mut rows, &write);
+    let projection = planner::diagnose_row(
+        &rows[1],
+        "diagnostic-id",
+        7,
+        "fixture-book",
+        0,
+        "fixture-epoch",
+        (url, Some("2026-09-15T18:30:00Z")),
+    )
+    .unwrap();
+    assert_eq!(projection.row, 2);
+    assert_eq!(projection.note_revision, Some(7));
+    assert!(projection.identity_matches);
+    assert!(projection.url_matches);
+    assert!(!projection.d_cell_empty);
+    assert!(projection.d_cell_has_canonical_url);
+    assert!(projection.posted_at_matches);
+    assert!(!serde_json::to_string(&projection).unwrap().contains(url));
+    assert!(planner::diagnose_row(
+        &rows[1],
+        "other-id",
+        7,
+        "fixture-book",
+        0,
+        "fixture-epoch",
+        (url, Some("2026-09-15T18:30:00Z"))
+    )
+    .is_none());
+    let stale = planner::diagnose_row(
+        &rows[1],
+        "diagnostic-id",
+        8,
+        "fixture-book",
+        0,
+        "fixture-epoch",
+        (url, Some("2026-09-15T18:30:00Z")),
+    )
+    .unwrap();
+    assert_eq!(stale.note_revision, Some(7));
+    assert!(!stale.revision_matches);
+    let wrong_time = planner::diagnose_row(
+        &rows[1],
+        "diagnostic-id",
+        7,
+        "fixture-book",
+        0,
+        "fixture-epoch",
+        (url, Some("2026-09-15T18:31:00Z")),
+    )
+    .unwrap();
+    assert!(!wrong_time.posted_at_matches);
+    let mut mismatched_note = rows[1].clone();
+    let mut note: Value = serde_json::from_str(&mismatched_note.cells[3].note).unwrap();
+    note["canonicalPostedAt"] = json!("2026-09-15T18:31:00Z");
+    mismatched_note.cells[3].note = note.to_string();
+    let mismatched = planner::diagnose_row(
+        &mismatched_note,
+        "diagnostic-id",
+        7,
+        "fixture-book",
+        0,
+        "fixture-epoch",
+        (url, Some("2026-09-15T18:30:00Z")),
+    )
+    .unwrap();
+    assert!(!mismatched.posted_at_matches);
+}
+
+#[test]
+fn failed_diagnostic_distinguishes_empty_d_from_a_different_canonical_url() {
+    let (m, l, mut rows) = fixture();
+    let mut report = payload("diagnostic-id", 7, "");
+    report["status"] = json!("Đã gửi");
+    let write = planner::plan(&m, &l, &scan(&rows[1..], &report), &report).unwrap();
+    apply(&mut rows, &write);
+    let expected = "https://www.tiktok.com/@fixture/photo/111";
+    let inspect = |row: &Row| {
+        planner::diagnose_row(
+            row,
+            "diagnostic-id",
+            7,
+            "fixture-book",
+            0,
+            "fixture-epoch",
+            (expected, Some("2026-09-15T18:30:00Z")),
+        )
+        .unwrap()
+    };
+    let empty = inspect(&rows[1]);
+    assert!(empty.d_cell_empty);
+    assert!(!empty.d_cell_has_canonical_url);
+    assert!(empty.posted_at_matches);
+    assert_eq!(empty.note_revision, None);
+    rows[1].cells[3].formatted_value = "https://www.tiktok.com/@other/photo/222".into();
+    let other = inspect(&rows[1]);
+    assert!(!other.d_cell_empty);
+    assert!(other.d_cell_has_canonical_url);
+    assert!(!other.url_matches);
+    assert!(!other.fingerprint_matches);
+}
+
+#[test]
 fn late_links_and_reverse_revision_arrival_never_create_new_rows_or_clear_links() {
     let (m, l, mut rows) = fixture();
     for id in ["one", "two"] {
@@ -196,6 +305,66 @@ fn presend_report_late_arrival_and_older_canonical_completion_preserve_newer_pro
     apply(&mut rows, &plan);
     assert_eq!(receipt(&rows[1], &current, true).unwrap().revision, 9);
     assert_eq!(receipt(&rows[1], &canonical, true).unwrap().revision, 0);
+}
+
+#[test]
+fn older_canonical_completion_fills_empty_link_without_reverting_newer_report() {
+    let (m, l, mut rows) = fixture();
+    let mut report = payload("one", 9, "");
+    report["machine"] = json!("Machine 9");
+    report["stateNotes"] = json!("Newer report note");
+    let write = planner::plan(&m, &l, &scan(&rows[1..], &report), &report).unwrap();
+    apply(&mut rows, &write);
+    let before = rows[1].clone();
+    let before_note = before.note().unwrap();
+
+    let url = "https://www.tiktok.com/@fixture/video/111";
+    let mut canonical = payload("one", 7, url);
+    canonical["rowKind"] = json!("canonical");
+    canonical["deliveryRevision"] = json!(0);
+    let write = planner::plan(&m, &l, &scan(&rows[1..], &canonical), &canonical).unwrap();
+    assert_eq!(write.row, 1);
+    assert_eq!(write.requests.len(), 2);
+    assert_eq!(write.requests[0]["updateCells"]["start"]["columnIndex"], 3);
+    assert_eq!(
+        write.requests[0]["updateCells"]["fields"],
+        "userEnteredValue"
+    );
+    assert_eq!(write.requests[1]["updateCells"]["start"]["columnIndex"], 3);
+    assert_eq!(write.requests[1]["updateCells"]["fields"], "note");
+    apply(&mut rows, &write);
+
+    let after = &rows[1];
+    assert_eq!(after.cells[3].display(), url);
+    for column in (0..l.width).filter(|column| *column != 3) {
+        assert_eq!(after.cells[column], before.cells[column]);
+    }
+    let after_note = after.note().unwrap();
+    assert_eq!(after_note["rowRevision"], before_note["rowRevision"]);
+    assert_eq!(
+        after_note["payloadFingerprint"],
+        before_note["payloadFingerprint"]
+    );
+    assert_eq!(after_note["canonicalDeliveryRevision"], 0);
+    assert_ne!(after_note["rowFingerprint"], before_note["rowFingerprint"]);
+    assert_eq!(receipt(after, &canonical, true).unwrap().post_url, url);
+    assert_eq!(receipt(after, &report, true).unwrap().revision, 9);
+    let retry = planner::plan(&m, &l, &scan(&rows[1..], &canonical), &canonical).unwrap();
+    assert!(retry.requests.is_empty());
+}
+
+#[test]
+fn older_canonical_completion_rejects_a_different_stored_account() {
+    let (m, l, mut rows) = fixture();
+    let mut report = payload("one", 9, "");
+    report["tiktokAccount"] = json!("@other");
+    let write = planner::plan(&m, &l, &scan(&rows[1..], &report), &report).unwrap();
+    apply(&mut rows, &write);
+
+    let mut canonical = payload("one", 7, "https://www.tiktok.com/@fixture/video/111");
+    canonical["rowKind"] = json!("canonical");
+    canonical["deliveryRevision"] = json!(0);
+    assert!(planner::plan(&m, &l, &scan(&rows[1..], &canonical), &canonical).is_err());
 }
 
 #[test]
@@ -500,4 +669,62 @@ async fn actual_transport_lost_commit_response_restarts_and_reads_existing_recei
     let moved = server.client().deliver(&target, &p, writer).await.unwrap();
     assert_eq!(moved.row, 4);
     assert_eq!(server.writes.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn failed_diagnostic_reads_only_google_rows_and_reports_exact_d_cell_match() {
+    use std::sync::atomic::Ordering;
+    let server = Server::start().await;
+    let (m, l, mut rows) = fixture();
+    let url = "https://www.tiktok.com/@fixture/photo/111";
+    let mut p = payload("diagnostic-id", 7, url);
+    p["rowKind"] = json!("canonical");
+    let write = planner::plan(&m, &l, &scan(&rows[1..], &p), &p).unwrap();
+    apply(&mut rows, &write);
+    *server.rows.lock() = rows;
+    let target = SheetDeliveryTarget {
+        version: 2,
+        spreadsheet_id: "fixture-book".into(),
+        sheet_gid: 0,
+        internal_reporting: true,
+        reporting_epoch: Some("fixture-epoch".into()),
+    };
+    let result = server
+        .client()
+        .diagnose_failed(
+            &target,
+            "diagnostic-id",
+            7,
+            url,
+            Some("2026-09-15T18:30:00Z"),
+            2,
+        )
+        .await
+        .unwrap();
+    assert!(result.complete);
+    assert_eq!(result.matches.len(), 1);
+    assert!(result.matches[0].url_matches);
+    assert_eq!(server.writes.load(Ordering::SeqCst), 0);
+
+    {
+        let mut duplicate = server.rows.lock();
+        let mut second = duplicate[1].clone();
+        second.index = 2;
+        duplicate.push(second);
+    }
+    let result = server
+        .client()
+        .diagnose_failed(
+            &target,
+            "diagnostic-id",
+            7,
+            url,
+            Some("2026-09-15T18:30:00Z"),
+            2,
+        )
+        .await
+        .unwrap();
+    assert_eq!(result.matches.len(), 2);
+    assert!(result.duplicate_found);
+    assert_eq!(server.writes.load(Ordering::SeqCst), 0);
 }

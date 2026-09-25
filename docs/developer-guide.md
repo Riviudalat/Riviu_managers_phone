@@ -780,6 +780,15 @@ gửi Post hay Sheet lại. Không trích token để đọc bảng private. CSV
 chứng URL, không thay bằng chứng delivery writer. Harness chỉ chứng nhận
 end-to-end khi có đủ ba lớp proof trên đúng máy và tài khoản.
 
+Outbox canonical `failed` chưa có receipt dùng `publish_sheet_diagnose_failed`
+với `assignmentId`, `expectedRevision`, `startRow` (bắt đầu từ 2). Lệnh GET chỉ
+đọc target/epoch/account đã ghim, tối đa 32 trang hoặc 45 giây một lát; trả
+`nextRow` để đọc tiếp cho tới `complete`. Kết quả chỉ có số hàng và các cờ
+identity/revision/fingerprint/ô D khớp, không trả URL, note gốc hoặc dữ liệu
+đối tác. `complete` chỉ có nghĩa đã quét hết grid hiện tại; note hỏng, hàng bị
+chỉnh hoặc writer khác đang ghi vẫn cần đối soát thủ công. Lệnh không nhận
+receipt, không đánh dấu `sent` và không mở retry.
+
 | Exit | Ý nghĩa |
 |---|---|
 | `0` | Inspect không có campaign hoặc preflight đạt; **không** là bài đã đăng/Sheet đã ghi |

@@ -142,6 +142,35 @@ pub struct DeliveryReceipt {
     pub duplicate: bool,
 }
 
+/// Redacted read-only projection of a D-column publication note.
+#[derive(ts_rs::TS, Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SheetDiagnosticMatch {
+    pub row: u32,
+    pub note_revision: Option<i64>,
+    pub identity_matches: bool,
+    pub revision_matches: bool,
+    pub note_epoch_matches: bool,
+    pub note_target_matches: bool,
+    pub fingerprint_matches: bool,
+    pub url_matches: bool,
+    pub d_cell_empty: bool,
+    pub d_cell_has_canonical_url: bool,
+    pub posted_at_matches: bool,
+}
+
+#[derive(ts_rs::TS, Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SheetDiagnosticSlice {
+    pub start_row: u32,
+    pub next_row: u32,
+    pub complete: bool,
+    pub pages_scanned: u32,
+    pub damaged_note_possible: bool,
+    pub duplicate_found: bool,
+    pub matches: Vec<SheetDiagnosticMatch>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DirectSheetTab {
@@ -220,6 +249,94 @@ pub struct DirectSheetsClient {
 }
 
 impl DirectSheetsClient {
+    /// Inspect one bounded slice of a pinned failed obligation without claiming or writing it.
+    pub async fn diagnose_failed(
+        &self,
+        target: &SheetDeliveryTarget,
+        assignment_id: &str,
+        expected_revision: i64,
+        expected_url: &str,
+        expected_posted_at: Option<&str>,
+        start_row: u32,
+    ) -> Result<SheetDiagnosticSlice> {
+        target
+            .validate()
+            .map_err(|_| DirectSheetsError::invalid("Invalid pinned Sheet target"))?;
+        if assignment_id.is_empty() || expected_revision < 0 || expected_url.is_empty() {
+            return Err(DirectSheetsError::invalid(
+                "Invalid failed obligation identity",
+            ));
+        }
+        let epoch = target
+            .reporting_epoch
+            .as_deref()
+            .ok_or_else(|| DirectSheetsError::invalid("Pinned Sheet epoch missing"))?;
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(45);
+        let meta = self
+            .metadata(&target.spreadsheet_id, target.sheet_gid)
+            .await?;
+        if meta
+            .owner
+            .as_ref()
+            .is_none_or(|owner| owner.state != "ready" || owner.reporting_epoch != epoch)
+        {
+            return Err(DirectSheetsError::conflict("Sheet owner or epoch changed"));
+        }
+        let layout = Layout::from_header(&meta.header)?;
+        if !(2..=meta.row_count + 1).contains(&start_row) {
+            return Err(DirectSheetsError::invalid(
+                "Diagnostic start row is out of range",
+            ));
+        }
+        let page_rows = PAGE_ROWS.min((16_000 / layout.width.max(1)) as u32).max(1);
+        let mut cursor = start_row - 1;
+        let mut result = SheetDiagnosticSlice {
+            start_row,
+            next_row: start_row,
+            complete: false,
+            pages_scanned: 0,
+            damaged_note_possible: false,
+            duplicate_found: false,
+            matches: Vec::new(),
+        };
+        while cursor < meta.row_count
+            && result.pages_scanned < 32
+            && tokio::time::Instant::now() < deadline
+        {
+            let count = page_rows.min(meta.row_count - cursor);
+            for row in self.rows(&meta, cursor, count, layout.width as u32).await? {
+                if row
+                    .cells
+                    .get(3)
+                    .is_some_and(|cell| cell.note.contains("riviu-publish") && row.note().is_none())
+                {
+                    result.damaged_note_possible = true;
+                }
+                if let Some(found) = planner::diagnose_row(
+                    &row,
+                    assignment_id,
+                    expected_revision,
+                    &target.spreadsheet_id,
+                    target.sheet_gid,
+                    epoch,
+                    (expected_url, expected_posted_at),
+                ) {
+                    if result.matches.len() < 2 {
+                        result.matches.push(found);
+                    }
+                    if result.matches.len() > 1 {
+                        result.duplicate_found = true;
+                    }
+                }
+            }
+            cursor += count;
+            result.pages_scanned += 1;
+        }
+        result.next_row = cursor + 1;
+        result.complete = cursor >= meta.row_count;
+        Ok(result)
+    }
+
     /// Read the exact saved receipt's row through OAuth. Never mutates the Sheet.
     pub async fn readback_receipt(
         &self,

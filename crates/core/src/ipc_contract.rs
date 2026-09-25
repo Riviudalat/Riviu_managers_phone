@@ -44,6 +44,15 @@ pub struct PublishSheetReadback {
     pub receipt: crate::google_sheets::DeliveryReceipt,
 }
 
+#[derive(Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct PublishSheetFailedDiagnostic {
+    pub assignment_id: String,
+    pub expected_revision: i64,
+    pub checked_at: String,
+    pub slice: crate::google_sheets::SheetDiagnosticSlice,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 pub enum CapabilityEvidenceState {

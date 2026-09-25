@@ -3,6 +3,7 @@ use super::*;
 use anyhow::Context;
 use hierarchy::Tree;
 use serde::Serialize;
+use sha2::Digest;
 use std::collections::HashSet;
 use tokio::time::Instant;
 
@@ -284,6 +285,21 @@ pub struct VerificationDiagnostic {
     pub navigation_clickable: usize,
     pub screen_state: String,
     pub expanded_photo_error: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub(crate) candidate_trace: Vec<VerificationCandidateTrace>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct VerificationCandidateTrace {
+    pub(crate) viewport: u32,
+    pub(crate) index: u32,
+    pub(crate) profile_snapshot_generation: u64,
+    pub(crate) post_snapshot_generation: Option<u64>,
+    pub(crate) tile_bounds: [f64; 4],
+    pub(crate) caption_digest: Option<String>,
+    pub(crate) time_digest: Option<String>,
+    pub(crate) reason_code: Option<VerificationReason>,
 }
 
 #[derive(Debug)]
@@ -531,9 +547,28 @@ struct Capture<'a> {
     diagnostic: VerificationDiagnostic,
     caption_expanded: bool,
     public_link: Option<String>,
+    trace_nonce: [u8; 16],
 }
 
 impl Capture<'_> {
+    fn trace_enabled(&self) -> bool {
+        self.plan.labels.package() == "com.zhiliaoapp.musically"
+            && self.plan.labels.resource_version() == Some("45.7.3")
+    }
+
+    fn trace_digest(&self, value: &str) -> String {
+        let mut digest = sha2::Sha256::new();
+        digest.update(self.trace_nonce);
+        digest.update(value.as_bytes());
+        format!("{:x}", digest.finalize())
+    }
+
+    fn mark_candidate(&mut self, reason: VerificationReason) {
+        if let Some(last) = self.diagnostic.candidate_trace.last_mut() {
+            last.reason_code = Some(reason);
+        }
+    }
+
     fn matched_photo_failure(&mut self, error: &anyhow::Error) -> Option<VerificationReason> {
         self.diagnostic.expanded_photo_error = Some(error.to_string());
         let failure = error.downcast_ref::<super::photo_proof::MatchedPhotoCopyFailure>()?;
@@ -761,6 +796,21 @@ impl Capture<'_> {
         }
         self.diagnostic.caption_candidates = captions.len();
         self.diagnostic.time_candidates = times.len();
+        if self.trace_enabled() {
+            let caption_digest = captions
+                .first()
+                .filter(|_| captions.len() == 1)
+                .map(|index| self.trace_digest(tree.nodes[*index].attr("text")));
+            let time_digest = times
+                .first()
+                .filter(|_| times.len() == 1)
+                .map(|index| self.trace_digest(tree.nodes[*index].attr("text")));
+            if let Some(last) = self.diagnostic.candidate_trace.last_mut() {
+                last.post_snapshot_generation = Some(tree.generation);
+                last.caption_digest = caption_digest;
+                last.time_digest = time_digest;
+            }
+        }
         let [caption] = captions.as_slice() else {
             return Err(if captions.is_empty() {
                 VerificationReason::CaptionMissing
@@ -825,6 +875,9 @@ impl Capture<'_> {
         loop {
             let tree = self.read().await?;
             let proof = self.post_proof(&tree);
+            if let Err(reason) = proof {
+                self.mark_candidate(reason);
+            }
             // A tile tap can first return the profile while the viewer opens.
             // Recheck the settled video before expanding its caption into the
             // comments drawer. Only the full public proof may populate this link.
@@ -840,7 +893,10 @@ impl Capture<'_> {
                 }
             }
             match proof {
-                Ok(()) => return Ok(tree),
+                Ok(()) => {
+                    self.mark_candidate(VerificationReason::Verified);
+                    return Ok(tree);
+                }
                 Err(VerificationReason::CaptionTruncated) if !self.caption_expanded => {
                     let controls = tree.matching(
                         self.plan.labels.package(),
@@ -1065,6 +1121,7 @@ impl Capture<'_> {
             let mut visited = HashSet::new();
             let mut candidate = None;
             let mut unresolved_candidate = None;
+            let mut page_index = 0;
             loop {
                 if self.expired() || self.diagnostic.candidates_visited >= MAX_CANDIDATES {
                     return Err(VerificationReason::SearchBudgetExhausted);
@@ -1091,6 +1148,21 @@ impl Capture<'_> {
                     tile.height.to_bits(),
                 ));
                 self.diagnostic.candidates_visited += 1;
+                page_index += 1;
+                if self.trace_enabled() {
+                    self.diagnostic
+                        .candidate_trace
+                        .push(VerificationCandidateTrace {
+                            viewport: page + 1,
+                            index: page_index,
+                            profile_snapshot_generation: tree.generation,
+                            post_snapshot_generation: None,
+                            tile_bounds: [tile.x, tile.y, tile.width, tile.height],
+                            caption_digest: None,
+                            time_digest: None,
+                            reason_code: None,
+                        });
+                }
                 self.diagnostic.stage = "postProof";
                 self.caption_expanded = false;
                 self.public_link = None;
@@ -1101,12 +1173,21 @@ impl Capture<'_> {
                 // A video caption opens Comments on measured Trill builds. Copy
                 // the visible video only through exact public metadata proof,
                 // before any caption expansion hides its Share control.
-                if let Some(link) = self.visible_video().await? {
-                    return Ok(link);
+                match self.visible_video().await {
+                    Ok(Some(link)) => {
+                        self.mark_candidate(VerificationReason::Verified);
+                        return Ok(link);
+                    }
+                    Ok(None) => {}
+                    Err(reason) => {
+                        self.mark_candidate(reason);
+                        return Err(reason);
+                    }
                 }
                 match self.prove_post().await {
                     Ok(mut post) => {
                         if let Some(link) = self.public_link.take() {
+                            self.mark_candidate(VerificationReason::Verified);
                             self.diagnostic.stage = "videoPublicProof";
                             return Ok(link);
                         }
@@ -1120,6 +1201,7 @@ impl Capture<'_> {
                             match copied {
                                 Ok(link) => {
                                     closed?;
+                                    self.mark_candidate(VerificationReason::Verified);
                                     candidate = Some(link);
                                     break;
                                 }
@@ -1131,11 +1213,15 @@ impl Capture<'_> {
                                         return Ok(link);
                                     }
                                 }
-                                Err(reason) => return Err(reason),
+                                Err(reason) => {
+                                    self.mark_candidate(reason);
+                                    return Err(reason);
+                                }
                             }
                         }
                     }
                     Err(reason) => {
+                        self.mark_candidate(reason);
                         // The delayed-viewer path may already have attempted
                         // Copy through public video proof. Preserve that exact
                         // failure instead of searching older tiles and replacing
@@ -1170,6 +1256,7 @@ impl Capture<'_> {
                             .await
                             {
                                 Ok(link) => {
+                                    self.mark_candidate(VerificationReason::Verified);
                                     self.diagnostic.stage = "expandedPhotoPublicProof";
                                     return Ok(link);
                                 }
@@ -1191,7 +1278,13 @@ impl Capture<'_> {
                     }
                 }
                 self.diagnostic.stage = "restoreProfile";
-                tree = self.profile(true).await?;
+                tree = match self.profile(true).await {
+                    Ok(tree) => tree,
+                    Err(reason) => {
+                        self.mark_candidate(reason);
+                        return Err(reason);
+                    }
+                };
             }
             if let Some((link, winning_proof)) = candidate {
                 if let Some(reason) = unresolved_candidate {
@@ -1257,6 +1350,7 @@ pub async fn capture_submission_link(
         started: Instant::now(),
         caption_expanded: false,
         public_link: None,
+        trace_nonce: *uuid::Uuid::new_v4().as_bytes(),
         diagnostic: VerificationDiagnostic {
             contract_version: CONTRACT_VERSION,
             package: plan.labels.package().into(),
@@ -1273,6 +1367,7 @@ pub async fn capture_submission_link(
             viewports_visited: 0,
             copy_attempts: 0,
             expanded_photo_error: None,
+            candidate_trace: Vec::new(),
             elapsed_ms: 0,
             navigation_matches: 0,
             navigation_enabled: 0,

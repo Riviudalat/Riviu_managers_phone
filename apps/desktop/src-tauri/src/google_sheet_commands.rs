@@ -923,7 +923,70 @@ pub(crate) fn retryable(error: &anyhow::Error) -> bool {
             .is_some()
 }
 
+pub use riviu_core::ipc_contract::PublishSheetFailedDiagnostic;
 pub use riviu_core::ipc_contract::PublishSheetReadback;
+
+#[tauri::command]
+pub async fn publish_sheet_diagnose_failed(
+    state: State<'_, AppState>,
+    assignment_id: String,
+    expected_revision: i64,
+    start_row: u32,
+) -> Result<PublishSheetFailedDiagnostic, CommandError> {
+    let _admission = state.ensure_accepting_work()?;
+    let (target, url, posted_at) = state
+        .db
+        .failed_sheet_diagnostic_input(&assignment_id, expected_revision)
+        .map_err(err)?;
+    let connection = state
+        .db
+        .google_connection_for_target(&target)
+        .map_err(err)?
+        .context("No OAuth connection for publication target")
+        .map_err(err)?;
+    let tokens = state
+        .db
+        .google_oauth_tokens()
+        .map_err(err)?
+        .context("Google OAuth connection required")
+        .map_err(err)?;
+    if tokens.needs_refresh() {
+        return Err(err(
+            "Google OAuth token expired; reconnect before read-only diagnosis",
+        ));
+    }
+    if tokens.account_id != connection.account_id {
+        return Err(err("Google account changed"));
+    }
+    let client = DirectSheetsClient::new(tokens.access_token).map_err(err)?;
+    let slice = tokio::time::timeout(
+        std::time::Duration::from_secs(90),
+        client.diagnose_failed(
+            &target,
+            &assignment_id,
+            expected_revision,
+            &url,
+            posted_at.as_deref(),
+            start_row,
+        ),
+    )
+    .await
+    .map_err(err)?
+    .map_err(err)?;
+    let (target_after, url_after, posted_at_after) = state
+        .db
+        .failed_sheet_diagnostic_input(&assignment_id, expected_revision)
+        .map_err(err)?;
+    if target_after != target || url_after != url || posted_at_after != posted_at {
+        return Err(err("Failed Sheet obligation changed during diagnosis"));
+    }
+    Ok(PublishSheetFailedDiagnostic {
+        assignment_id,
+        expected_revision,
+        checked_at: chrono::Utc::now().to_rfc3339(),
+        slice,
+    })
+}
 
 #[tauri::command]
 pub async fn publish_sheet_readback(

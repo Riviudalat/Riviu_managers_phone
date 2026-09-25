@@ -615,6 +615,57 @@ fn already_verified_check_has_no_error() {
 }
 
 #[test]
+fn missing_submission_identity_cannot_enter_manual_link_observer() {
+    let (db, path, campaign, id) = stopped_resume_fixture();
+    let raw = rusqlite::Connection::open(path).unwrap();
+    raw.execute(
+        "DELETE FROM settings WHERE key=?1",
+        [format!("operation.stop.publish:{campaign}")],
+    )
+    .unwrap();
+    raw.execute(
+        "UPDATE publish_assignments SET effect_intent=NULL,evidence_json=?2 WHERE id=?1",
+        rusqlite::params![
+            id,
+            serde_json::json!({"post":{"state":"posted","verdict":"Posted"},"verificationStatus":{"state":"needsReview","cause":"submissionIdentityMissing"}}).to_string()
+        ],
+    )
+    .unwrap();
+
+    let candidates = db
+        .publish_verifications_for_campaign(&campaign, 100)
+        .unwrap();
+    let capability = db
+        .publish_recovery_capabilities(&campaign)
+        .unwrap()
+        .remove(0);
+    assert_eq!(candidates.len(), 1);
+    assert_eq!(
+        capability.check_link.reason.as_deref(),
+        Some("submissionIdentityMissing")
+    );
+    assert!(super::verification::eligible_check_candidate(&capability, &candidates).is_none());
+
+    raw.execute(
+        "UPDATE publish_assignments SET effect_intent=?2 WHERE id=?1",
+        rusqlite::params![
+            id,
+            serde_json::json!({"effectIntent":"post","expectedAccount":"actor","submittedAt":"2026-09-10T00:00:00Z"}).to_string()
+        ],
+    )
+    .unwrap();
+    let candidates = db
+        .publish_verifications_for_campaign(&campaign, 100)
+        .unwrap();
+    let capability = db
+        .publish_recovery_capabilities(&campaign)
+        .unwrap()
+        .remove(0);
+    assert!(capability.check_link.allowed);
+    assert!(super::verification::eligible_check_candidate(&capability, &candidates).is_some());
+}
+
+#[test]
 fn pending_close_blocks_resume_and_capability_until_closed() {
     let (db, _, campaign, id) = stopped_resume_fixture();
     let revision = db.publish_assignment_revision(&id).unwrap();

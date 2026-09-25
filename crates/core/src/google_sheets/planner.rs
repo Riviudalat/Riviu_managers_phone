@@ -40,7 +40,7 @@ impl Row {
     fn values(&self) -> Vec<String> {
         self.cells.iter().map(Cell::display).collect()
     }
-    fn note(&self) -> Option<Value> {
+    pub(super) fn note(&self) -> Option<Value> {
         parse_note(self.cells.get(3)?.note.as_str())
     }
 }
@@ -207,6 +207,47 @@ fn parse_note(raw: &str) -> Option<Value> {
         && (value["deliveryVersion"] == 2 || value["reportVersion"] == 1)
         && value["assignmentId"].is_string())
     .then_some(value)
+}
+
+pub(super) fn diagnose_row(
+    row: &Row,
+    assignment_id: &str,
+    expected_revision: i64,
+    spreadsheet_id: &str,
+    gid: u64,
+    epoch: &str,
+    expected_content: (&str, Option<&str>),
+) -> Option<super::SheetDiagnosticMatch> {
+    let (expected_url, expected_posted_at) = expected_content;
+    let note = row.note()?;
+    if note["assignmentId"].as_str()? != assignment_id {
+        return None;
+    }
+    let note_revision = note["canonicalDeliveryRevision"].as_i64();
+    let values = row.values();
+    let d_cell = values.get(3).map(String::as_str).unwrap_or_default();
+    Some(super::SheetDiagnosticMatch {
+        row: row.index + 1,
+        note_revision,
+        identity_matches: note["kind"] == "riviu-publish"
+            && note["deliveryVersion"] == 2
+            && note["publicationId"] == assignment_id,
+        revision_matches: note_revision == Some(expected_revision),
+        note_epoch_matches: note["reportingEpoch"] == epoch,
+        note_target_matches: note["spreadsheetId"] == spreadsheet_id
+            && note["sheetGid"].as_u64() == Some(gid),
+        fingerprint_matches: !row.cells.iter().any(Cell::formula)
+            && matches_fingerprint(&values, note["rowFingerprint"].as_str().unwrap_or_default()),
+        url_matches: d_cell == expected_url,
+        d_cell_empty: d_cell.is_empty(),
+        d_cell_has_canonical_url: canonical(d_cell),
+        posted_at_matches: expected_posted_at.is_some_and(|expected| {
+            note["postedAt"].as_str() == Some(expected)
+                && note
+                    .get("canonicalPostedAt")
+                    .is_none_or(|value| value.as_str() == Some(expected))
+        }),
+    })
 }
 fn fingerprint(value: &Value) -> String {
     format!(
@@ -558,21 +599,44 @@ pub(super) fn plan(meta: &Metadata, layout: &Layout, scan: &Scan, p: &Value) -> 
                 });
             }
             if new < old && p["rowKind"] == "canonical" {
-                if original[3] != url || note["postedAt"] != p["postedAt"] || extra > 0 {
+                if (!original[3].is_empty() && original[3] != url)
+                    || note["postedAt"] != p["postedAt"]
+                    || extra > 0
+                {
                     return Err(DirectSheetsError::conflict(
                         "Canonical completion conflicts with newer stored report",
                     ));
                 }
+                let fill_link = original[3].is_empty();
+                if fill_link {
+                    let account = original[5].trim_start_matches('@');
+                    let url_account = url::Url::parse(url)
+                        .expect("validated canonical URL")
+                        .path()
+                        .split('/')
+                        .nth(1)
+                        .expect("validated canonical URL")
+                        .trim_start_matches('@')
+                        .to_owned();
+                    if account.is_empty() || !account.eq_ignore_ascii_case(&url_account) {
+                        return Err(DirectSheetsError::conflict(
+                            "Canonical completion belongs to another account",
+                        ));
+                    }
+                }
                 let mut upgraded = note.clone();
                 upgraded["canonicalDeliveryRevision"] = p["deliveryRevision"].clone();
                 upgraded["canonicalPostedAt"] = p["postedAt"].clone();
-                let requests = if note.get("canonicalDeliveryRevision").is_some() {
-                    vec![]
-                } else {
-                    vec![
-                        json!({"updateCells":{"start":{"sheetId":meta.gid,"rowIndex":row.index,"columnIndex":3},"rows":[{"values":[{"note":serde_json::to_string(&upgraded).expect("note JSON")}]}],"fields":"note"}}),
-                    ]
-                };
+                let mut requests = Vec::new();
+                if fill_link {
+                    let mut updated_values = original.clone();
+                    updated_values[3] = url.into();
+                    upgraded["rowFingerprint"] = json!(row_fingerprint(&updated_values));
+                    requests.push(json!({"updateCells":{"start":{"sheetId":meta.gid,"rowIndex":row.index,"columnIndex":3},"rows":[{"values":[{"userEnteredValue":{"stringValue":url}}]}],"fields":"userEnteredValue"}}));
+                }
+                if fill_link || note.get("canonicalDeliveryRevision").is_none() {
+                    requests.push(json!({"updateCells":{"start":{"sheetId":meta.gid,"rowIndex":row.index,"columnIndex":3},"rows":[{"values":[{"note":serde_json::to_string(&upgraded).expect("note JSON")}]}],"fields":"note"}}));
+                }
                 return Ok(WritePlan {
                     row: row.index,
                     width: layout.width,

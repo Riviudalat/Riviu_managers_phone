@@ -882,7 +882,12 @@ impl AdbProgram {
                     package,
                     error,
                     Duration::from_secs(8),
-                    || self.foreground_package(serial),
+                    |source_timeout| {
+                        read_foreground_package_with(move |source| async move {
+                            self.device(serial, &["shell", source], source_timeout)
+                                .await
+                        })
+                    },
                 )
                 .await;
             }
@@ -944,16 +949,27 @@ async fn confirm_foreground_after_launch_error_with<F, Fut>(
     package: &str,
     error: anyhow::Error,
     budget: Duration,
-    read: F,
+    mut read: F,
 ) -> anyhow::Result<()>
 where
-    F: FnMut() -> Fut,
+    F: FnMut(Duration) -> Fut,
     Fut: std::future::Future<Output = anyhow::Result<String>>,
 {
     if classify_fault(&format!("{error:#}")) != AdbFault::Timeout {
         return Err(error);
     }
-    match tokio::time::timeout(budget, wait_for_foreground_with(package, budget, read)).await {
+    // A normal foreground read can try three dumpsys forms, each with the
+    // 60-second lifecycle timeout. Bound each source separately so one stuck
+    // form cannot consume the entire post-timeout confirmation window.
+    let source_timeout = (budget / 4)
+        .min(Duration::from_secs(2))
+        .max(Duration::from_millis(1));
+    match tokio::time::timeout(
+        budget,
+        wait_for_foreground_with(package, budget, || read(source_timeout)),
+    )
+    .await
+    {
         Ok(Ok(())) => Ok(()),
         Ok(Err(observed)) => Err(error.context(format!(
             "activity launch ACK timed out and foreground was not confirmed: {observed:#}"
@@ -2449,7 +2465,7 @@ mod tests {
             "app.test",
             anyhow::anyhow!("adb shell am start -W timed out after 60s"),
             std::time::Duration::from_millis(100),
-            || {
+            |_| {
                 reads += 1;
                 async { Ok("app.test".into()) }
             },
@@ -2462,7 +2478,7 @@ mod tests {
             "app.test",
             anyhow::anyhow!("adb shell am start -W timed out after 60s"),
             std::time::Duration::from_millis(100),
-            || async { Ok("other.app".into()) },
+            |_| async { Ok("other.app".into()) },
         )
         .await
         .unwrap_err();
@@ -2474,7 +2490,7 @@ mod tests {
             "app.test",
             anyhow::anyhow!("adb shell am start -W timed out after 60s"),
             std::time::Duration::from_millis(100),
-            || async {
+            |_| async {
                 tokio::time::sleep(std::time::Duration::from_millis(200)).await;
                 anyhow::bail!("foreground read did not answer")
             },
@@ -2488,7 +2504,7 @@ mod tests {
             "app.test",
             anyhow::anyhow!("permission denied"),
             std::time::Duration::from_millis(100),
-            || {
+            |_| {
                 unexpected_reads += 1;
                 async { Ok("app.test".into()) }
             },
@@ -2497,6 +2513,24 @@ mod tests {
         .unwrap_err();
         assert_eq!(unexpected_reads, 0);
         assert!(error.to_string().contains("permission denied"));
+    }
+
+    #[tokio::test]
+    async fn timed_out_activity_launch_bounds_each_foreground_source_read() {
+        let mut reads = 0;
+        super::confirm_foreground_after_launch_error_with(
+            "app.test",
+            anyhow::anyhow!("adb shell am start -W timed out after 60s"),
+            std::time::Duration::from_secs(8),
+            |source_timeout| {
+                reads += 1;
+                assert_eq!(source_timeout, std::time::Duration::from_secs(2));
+                async { Ok("app.test".into()) }
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(reads, 1);
     }
 
     #[test]
