@@ -120,8 +120,49 @@ describe("live drag", () => {
     const done = drag.end(3, 3);
     await releaseAll();
 
-    expect(await done).toBe("fallback");
+    expect(await done).toBe("uncertain");
     expect(calls.filter((c) => c.startsWith("up"))).toHaveLength(1);
+  });
+
+  it("never requests fallback when DOWN may have reached the phone before its ACK failed", async () => {
+    const { calls, releaseAll, send } = recorder((action) => action === "down" ? new Error("lost ACK") : true);
+    const drag = createLiveDrag(send);
+    drag.begin(10, 20);
+    const done = drag.end(10, 20, false);
+    await releaseAll();
+    expect(await done).toBe("uncertain");
+    expect(calls).toEqual(["down 10,20", "up 10,20"]);
+  });
+
+  it("ends a stationary hold without injecting a synthetic MOVE", async () => {
+    const { calls, releaseAll, send } = recorder();
+    const drag = createLiveDrag(send);
+    drag.begin(10, 20);
+    const done = drag.end(10, 20, false);
+    await releaseAll();
+    expect(await done).toBe("live");
+    expect(calls).toEqual(["down 10,20", "up 10,20"]);
+  });
+
+  it("holds for the requested time after a delayed DOWN acknowledgement", async () => {
+    let confirmDown!: () => void;
+    let acknowledgedAt = 0;
+    let releasedAt = 0;
+    const send: SendTouch = async (action) => {
+      if (action === "down") {
+        await new Promise<void>(resolve => { confirmDown = resolve; });
+        acknowledgedAt = performance.now();
+      }
+      if (action === "up") releasedAt = performance.now();
+      return true;
+    };
+    const drag = createLiveDrag(send);
+    drag.begin(4, 5);
+    const done = drag.end(4, 5, false, 35);
+    await Promise.resolve();
+    confirmDown();
+    expect(await done).toBe("live");
+    expect(releasedAt - acknowledgedAt).toBeGreaterThanOrEqual(32);
   });
 
   it("taps by pressing and releasing the same point, in that order", async () => {
@@ -156,7 +197,7 @@ describe("live drag", () => {
       if (action === "up") throw new Error("socket closed");
       return true;
     };
-    expect(await liveTap(send, 1, 1, (reason) => reasons.push(reason))).toBe("live");
+    expect(await liveTap(send, 1, 1, (reason) => reasons.push(reason))).toBe("uncertain");
     expect(reasons[0]).toContain("stuck");
   });
 

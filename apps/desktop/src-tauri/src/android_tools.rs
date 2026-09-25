@@ -729,8 +729,10 @@ mod tests {
         // without regenerating the pin cannot reach a release. Skipped rather than
         // failed when the tree is absent, because a shallow checkout is legitimate.
         let repo = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../..")
-            .join("sidecars");
+            .ancestors()
+            .map(|p| p.join("sidecars"))
+            .find(|p| p.join("android").join(MANIFEST_NAME).is_file())
+            .unwrap_or_else(|| PathBuf::from("sidecars"));
         if !repo.join("android").join(MANIFEST_NAME).is_file() {
             eprintln!("sidecars/android not present, skipping");
             return;

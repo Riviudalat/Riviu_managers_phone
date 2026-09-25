@@ -47,7 +47,7 @@ it("đổi chỗ khi bài active có máy cũ hợp lệ, không mở confirm ho
   expect(p.onPreflight).not.toHaveBeenCalled(); expect(p.onExecute).not.toHaveBeenCalled();
 });
 
-it.each(["missing", "offline", "outside", "unknown", "pending"])("máy cũ %s không được đổi chỗ: thay bài cần xác nhận và đưa bài cũ về chờ", async kind => {
+it.each(["missing", "offline", "outside", "unknown"])("máy cũ %s không được đổi chỗ: thay bài cần xác nhận và đưa bài cũ về chờ", async kind => {
   const p = props();
   if (kind !== "missing") p.assignments.one = "a";
   if (kind === "offline") p.devices[0].status = "disconnected";
@@ -61,6 +61,15 @@ it.each(["missing", "offline", "outside", "unknown", "pending"])("máy cũ %s kh
   expect(p.onAssign).not.toHaveBeenCalled();
   await confirmReplacement();
   expect(p.onAssign).toHaveBeenCalledExactlyOnceWith({ one: "b" });
+});
+
+it("máy có bài chờ vẫn đổi phân công trong bản nháp, chưa dừng hoặc đăng", () => {
+  const p = props(); p.assignments.one = "a";
+  p.deviceGuards = { a: { blocking: [{ assignmentId: "x", campaignId: "c", updatedAt: "now", reason: "Đang xử lý" }], linkReview: [] }, b: { blocking: [], linkReview: [] } };
+  mount(p);
+  fireEvent.click(screen.getByRole("button", { name: "Đổi chỗ one · Máy 2 · b" }));
+  expect(p.onAssign).toHaveBeenCalledExactlyOnceWith({ one: "b", two: "a" });
+  expect(p.onPreflight).not.toHaveBeenCalled(); expect(p.onExecute).not.toHaveBeenCalled();
 });
 
 it("hủy thay bài giữ nguyên phân công", async () => {
@@ -124,6 +133,30 @@ it("bulk bỏ chọn nói rõ toàn bộ và tác động cả bài/máy ngoài 
   fireEvent.click(screen.getByText("Bộ lọc thiết bị"));
   fireEvent.click(screen.getByRole("button", { name: "Bỏ chọn toàn bộ máy" }));
   expect(p.onAssign).toHaveBeenCalledWith({});
+});
+
+it("mặc định chỉ hiện máy trong phạm vi đã chọn, vẫn cho xem máy ngoài phạm vi khi cần", () => {
+  const p = props();
+  p.eligible = ["a"];
+  p.assignments = {};
+  p.scopeControl = <button type="button">Chọn thiết bị</button>;
+  mount(p);
+  expect(screen.getByRole("checkbox", { name: "Chọn Máy 1 · a" })).toBeVisible();
+  expect(screen.queryByRole("checkbox", { name: "Chọn Máy 2 · b" })).toBeNull();
+  fireEvent.click(screen.getByText("Bộ lọc thiết bị"));
+  fireEvent.click(screen.getByRole("checkbox", { name: "Hiện máy ngoài phạm vi" }));
+  expect(screen.getByRole("checkbox", { name: "Chọn Máy 2 · b" })).toBeVisible();
+  expect(screen.getByRole("button", { name: "Gán one · Máy 2 · b" })).toBeDisabled();
+  expect(p.onAssign).not.toHaveBeenCalled();
+});
+
+it("vẫn hiện máy đã gán nếu máy đó rời phạm vi để người dùng sửa cặp gán", () => {
+  const p = props();
+  p.eligible = ["a"];
+  p.scopeControl = <button type="button">Chọn thiết bị</button>;
+  mount(p);
+  expect(screen.getByRole("checkbox", { name: "Chọn Máy 2 · b" })).toBeVisible();
+  expect(screen.getByRole("button", { name: "Kiểm tra & đăng" })).toBeDisabled();
 });
 
 it.each(["left", "middle"])("dialog caption ghim bundle và trả focus đúng trigger %s", async origin => {

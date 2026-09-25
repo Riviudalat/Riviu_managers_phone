@@ -1,0 +1,13 @@
+{
+  "package": "com.zhiliaoapp.musically",
+  "version": "45.7.3",
+  "locale": "en",
+  "size": [
+    1080,
+    2220
+  ],
+  "at": "2026-09-20T23:00:40.540761800+00:00",
+  "runId": "942859a9-d122-4786-a6ad-52410949044d",
+  "description": "Original screenshot pixels retained from y=888 downward; content above sound sheet blacked out. Selected title is clipped and absent from OCR at confidence 0.9; full editor title remains mandatory.",
+  "sourceSha256": "d36918cb806c048bb99297aae07a30f8d3897d97fcc6c5f6e07cc4e97f515162"
+}

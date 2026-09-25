@@ -8,7 +8,7 @@ import { OperatorRecordsPage } from "./OperatorRecordsPage";
 import { OperatorSchedulesPage } from "./OperatorSchedulesPage";
 import type { AppWorkflowSummary, AppWorkflowV1 } from "../appWorkflow";
 import type { OperatorRecord } from "../operatorRecords";
-import type { AutomationDefinition, AutomationSchedule } from "../types";
+import type { AutomationDefinition, AutomationSchedule, DeviceInfo } from "../types";
 
 const { invoke, confirm } = vi.hoisted(() => ({ invoke: vi.fn(), confirm: vi.fn() }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke }));
@@ -38,6 +38,10 @@ const account: OperatorRecord = {
 const task: OperatorRecord = {
   ...account, id: "task-1", kind: "savedTask", name: "Tác vụ kiểm thử",
   data: { appId: "app-1", appRevision: 3, target: { type: "explicit", udids: ["phone-test"] }, inputs: {} },
+};
+const taskDevice: DeviceInfo = {
+  udid: "phone-test", name: "Máy thử", model: "Fixture", platform: "android",
+  osVersion: "15", connection: "mock", status: "ready", wdaReady: false,
 };
 const profile: AutomationDefinition = {
   id: "profile-1", name: "Hồ sơ kiểm thử", kind: "nurture", latestRevision: 8,
@@ -275,6 +279,40 @@ it("refresh bản ghi giữ nguyên nháp và không tự đọc tài khoản ha
   expect(invoke.mock.calls.every(([command]) => readonlyCommands.includes(command))).toBe(true);
 });
 
+it("editor tài khoản giữ xác nhận bỏ nháp và lưu bằng revision cũ", async () => {
+  invoke.mockImplementation(async (command: string) => {
+    if (command === "operator_list") return [account];
+    if (command === "operator_save") return { ...account, revision: 5 };
+    return defaultRead(command);
+  });
+  render(<OperatorRecordsPage kind="account" devices={[]} />);
+  await screen.findByText(account.name);
+  await userEvent.click(screen.getByRole("button", { name: "Chỉnh sửa" }));
+  await userEvent.type(screen.getByRole("textbox", { name: "Tên" }), " mới");
+  await userEvent.click(screen.getByRole("button", { name: "Đóng bản ghi" }));
+  expect(confirm).toHaveBeenCalledWith(expect.objectContaining({ title: "Bỏ thay đổi?" }));
+  expect(screen.getByRole("textbox", { name: "Tên" })).toHaveValue("Tài khoản kiểm thử mới");
+  await userEvent.click(screen.getByRole("button", { name: "Lưu bản ghi" }));
+  await waitFor(() => expect(invoke).toHaveBeenCalledWith("operator_save", expect.objectContaining({
+    input: expect.objectContaining({ id: account.id, expectedRevision: account.revision, name: "Tài khoản kiểm thử mới" }),
+  })));
+});
+
+it("editor tác vụ giữ revision đã ghim khi lưu", async () => {
+  invoke.mockImplementation(async (command: string) => {
+    if (command === "operator_list") return [task];
+    if (command === "operator_save") return { ...task, revision: 5 };
+    return defaultRead(command);
+  });
+  render(<SavedTasksPage devices={[taskDevice]} />);
+  await screen.findByText(task.name);
+  await userEvent.click(screen.getByRole("button", { name: "Chỉnh sửa" }));
+  await userEvent.click(screen.getByRole("button", { name: "Lưu tác vụ" }));
+  await waitFor(() => expect(invoke).toHaveBeenCalledWith("operator_save", expect.objectContaining({
+    input: expect.objectContaining({ id: task.id, expectedRevision: task.revision, name: task.name }),
+  })));
+});
+
 it("nhập bản ghi vẫn từ chối sai kind và gửi đúng metadata khi JSON hợp lệ", async () => {
   invoke.mockImplementation(async (command: string) => command === "operator_import" ? [account] : defaultRead(command));
   const user = userEvent.setup({ applyAccept: false });
@@ -383,4 +421,19 @@ it("bật/tắt lịch giữ revision, chu kỳ và kết quả gần nhất tha
     definitionRevision: 2, enabled: false, schedule: { schemaVersion: 1, kind: "interval", everyMinutes: 60 },
   }));
   expect(confirm).not.toHaveBeenCalled();
+});
+
+it("lịch đặt bảng và cấu hình trong hai vùng riêng, chọn hàng mở đúng hồ sơ", async () => {
+  invoke.mockImplementation(async (command: string) => {
+    if (command === "automation_schedule_list") return [schedule];
+    return defaultRead(command);
+  });
+  render(<OperatorSchedulesPage />);
+  const list = await screen.findByRole("region", { name: "Danh sách lịch" });
+  const detail = screen.getByRole("region", { name: "Cấu hình lịch" });
+  expect(list).toContainElement(screen.getByText(schedule.name));
+  expect(detail).toContainElement(screen.getByRole("combobox", { name: "Cấu hình ứng dụng" }));
+  await userEvent.click(screen.getByRole("button", { name: "Chỉnh sửa" }));
+  expect(screen.getByRole("combobox", { name: "Cấu hình ứng dụng" })).toHaveValue(profile.id);
+  expect(detail).toContainElement(await screen.findByRole("region", { name: "Lịch tự động" }));
 });

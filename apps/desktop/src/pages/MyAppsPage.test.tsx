@@ -1,4 +1,4 @@
-import { act, render, screen } from "@testing-library/react";
+import { act, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, expect, it, vi } from "vitest";
 import { MyAppsPage } from "./MyAppsPage";
@@ -27,4 +27,40 @@ it("reject muộn từ màn hình đã rời không gắn lỗi vào lần mở 
   await act(async () => rejectOld(new Error("Lỗi trang đã rời")));
   expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   expect(screen.getByText("Chưa có quy trình đã lưu")).toBeInTheDocument();
+});
+
+it("tìm quy trình theo loại trong khi vẫn giữ ứng dụng có sẵn", async () => {
+  const open = vi.fn();
+  invoke.mockResolvedValue([
+    { id: "interaction-flow", kind: "interaction", name: "Bình luận buổi sáng", latestRevision: 1, updatedAt: "2026-09-17T08:00:00Z" },
+    { id: "publish-flow", kind: "publish", name: "Bản nháp buổi tối", latestRevision: 2, updatedAt: "2026-09-18T08:00:00Z" },
+  ]);
+  render(<MyAppsPage devices={[]} onOpenApp={open} />);
+  await screen.findByRole("button", { name: "Bình luận buổi sáng" });
+  await userEvent.type(screen.getByRole("searchbox", { name: "Tìm ứng dụng" }), "Tương tác");
+  expect(screen.getByRole("button", { name: "Bình luận buổi sáng" })).toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "Bản nháp buổi tối" })).not.toBeInTheDocument();
+  await userEvent.click(screen.getByRole("button", { name: "Tương tác" }));
+  expect(open).toHaveBeenCalledWith("interaction");
+});
+
+it("sắp xếp quy trình theo cập nhật hoặc tên mà không đổi thứ tự ứng dụng có sẵn", async () => {
+  invoke.mockResolvedValue([
+    { id: "a", kind: "nurture", name: "Alpha", latestRevision: 1, updatedAt: "2026-09-17T08:00:00Z" },
+    { id: "z", kind: "publish", name: "Zeta", latestRevision: 1, updatedAt: "2026-09-19T08:00:00Z" },
+    { id: "b", kind: "interaction", name: "Beta", latestRevision: 1, updatedAt: "2026-09-16T08:00:00Z" },
+  ]);
+  render(<MyAppsPage devices={[]} onOpenApp={() => undefined} />);
+  await screen.findByRole("button", { name: "Alpha" });
+  const savedNames = () => within(screen.getByRole("table", { name: "Quy trình đã lưu" }))
+    .getAllByRole("row").slice(1).map((row) => row.querySelector("td")?.textContent);
+  const fixedNames = () => within(document.querySelector(".builtin-app-list") as HTMLTableElement)
+    .getAllByRole("row").slice(1).map((row) => row.querySelector("td")?.textContent?.trim());
+  expect(savedNames()).toEqual(["Zeta", "Alpha", "Beta"]);
+  expect(fixedNames()).toEqual(["Nuôi TikTok", "Tương tác", "Đăng bài"]);
+  await userEvent.selectOptions(screen.getByRole("combobox", { name: "Sắp xếp quy trình" }), "name");
+  expect(savedNames()).toEqual(["Alpha", "Beta", "Zeta"]);
+  expect(fixedNames()).toEqual(["Nuôi TikTok", "Tương tác", "Đăng bài"]);
+  await userEvent.selectOptions(screen.getByRole("combobox", { name: "Sắp xếp quy trình" }), "oldest");
+  expect(savedNames()).toEqual(["Beta", "Alpha", "Zeta"]);
 });

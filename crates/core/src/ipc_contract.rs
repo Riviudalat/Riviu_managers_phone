@@ -19,6 +19,19 @@ pub struct OperationStopResult {
     pub stop_marker: Option<String>,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct DeviceAppChoices {
+    pub udid: String,
+    pub app_key: String,
+    pub installed_packages: Vec<String>,
+    pub selected_package: Option<String>,
+    pub suggested_package: Option<String>,
+    pub revision: i64,
+    pub selection_valid: bool,
+    pub reason: Option<String>,
+}
+
 #[derive(Serialize, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct PublishSheetReadback {
@@ -29,6 +42,15 @@ pub struct PublishSheetReadback {
     pub epoch: String,
     pub checked_at: String,
     pub receipt: crate::google_sheets::DeliveryReceipt,
+}
+
+#[derive(Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct PublishSheetFailedDiagnostic {
+    pub assignment_id: String,
+    pub expected_revision: i64,
+    pub checked_at: String,
+    pub slice: crate::google_sheets::SheetDiagnosticSlice,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, TS)]

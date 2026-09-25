@@ -86,6 +86,20 @@ fn read_back_locator_schema() -> Value {
     })
 }
 
+fn selector_ancestor_schema() -> Value {
+    serde_json::json!({
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["maxDepth"],
+        "properties": {
+            "maxDepth": { "type": "integer", "minimum": 1, "maximum": 4 },
+            "resourceId": { "type": ["string", "null"], "maxLength": 2048 },
+            "resourceIdSuffix": { "type": ["string", "null"], "maxLength": 2048 },
+            "className": { "type": ["string", "null"], "maxLength": 2048 }
+        }
+    })
+}
+
 pub fn config_schema(kind: ActionKind) -> Value {
     match kind {
         ActionKind::Start | ActionKind::End | ActionKind::Home | ActionKind::Join => {
@@ -118,7 +132,19 @@ pub fn config_schema(kind: ActionKind) -> Value {
                 "point": coordinate_schema(),
                 "accessibilityId": { "type": "string", "minLength": 1, "maxLength": 512 },
                 "selector": { "type":"object", "required":["package"], "additionalProperties":false, "properties": {
-                    "package":{"type":"string"}, "text":{"type":["string","null"]}, "description":{"type":["string","null"]}, "resourceId":{"type":["string","null"]}, "className":{"type":["string","null"]}
+                    "package":{"type":"string","minLength":1,"maxLength":256},
+                    "text":{"type":["string","null"],"maxLength":2048},
+                    "description":{"type":["string","null"],"maxLength":2048},
+                    "resourceId":{"type":["string","null"],"maxLength":2048},
+                    "className":{"type":["string","null"],"maxLength":2048},
+                    "schemaVersion":{"type":["integer","null"],"enum":[2,null]},
+                    "textPrefix":{"type":["string","null"],"maxLength":2048},
+                    "descriptionPrefix":{"type":["string","null"],"maxLength":2048},
+                    "scope": selector_ancestor_schema(),
+                    "actionTarget": {"type":["object","null"],"additionalProperties":false,"required":["kind","ancestor"],"properties":{
+                        "kind":{"type":"string","enum":["clickableAncestor"]},
+                        "ancestor":selector_ancestor_schema()
+                    }}
                 }}
             },
             "oneOf": [
@@ -229,7 +255,7 @@ pub fn config_schema(kind: ActionKind) -> Value {
             serde_json::json!({"type":"object","additionalProperties":false,"required":["name","source"],"properties":{"name":{"type":"string","maxLength":64},"source":{"type":"string","maxLength":64}}})
         }
         ActionKind::Subflow | ActionKind::Repeat => {
-            serde_json::json!({"type":"object","additionalProperties":false,"required":["document"],"properties":{"document":{"type":"object"},"count":{"type":"integer","minimum":1,"maximum":100},"inputs":{"type":"object"},"outputs":{"type":"object"}}})
+            serde_json::json!({"type":"object","additionalProperties":false,"required":["document"],"properties":{"document":{"type":"object"},"library":{"type":"object","additionalProperties":false,"required":["flowId","channel"],"properties":{"flowId":{"type":"string","format":"uuid"},"channel":{"type":"string","enum":["published"]}}},"count":{"type":"integer","minimum":1,"maximum":50},"inputs":{"type":"object"},"outputs":{"type":"object"}}})
         }
         ActionKind::OcrReadText => {
             serde_json::json!({"type":"object","additionalProperties":false,"required":["name"],"properties":{"name":{"type":"string","maxLength":64},"minConfidence":{"type":"number","minimum":0,"maximum":1},"languages":{"type":"array","items":{"type":"string"}},"region":{"type":"object"}}})

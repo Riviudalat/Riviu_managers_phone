@@ -25,13 +25,14 @@ pub(crate) mod pipeline;
 mod verification;
 mod verification_queue;
 mod verification_restart;
+mod verification_session;
 pub(crate) use verification::verify_pending_assignment;
 pub use verification::*;
 pub(crate) use verification_queue::VerificationQueue;
 mod verified_cleanup;
 /// Batched read for the device picker. No phone access and no state mutation.
 #[tauri::command]
-pub fn publish_device_guards(
+pub async fn publish_device_guards(
     state: State<'_, AppState>,
     udids: Vec<String>,
 ) -> Result<HashMap<String, riviu_core::db::PublishDeviceGuard>, CommandError> {
@@ -40,18 +41,17 @@ pub fn publish_device_guards(
             "Danh sách kiểm tra máy không hợp lệ".to_owned(),
         ));
     }
-    udids
-        .into_iter()
-        .collect::<std::collections::BTreeSet<_>>()
-        .into_iter()
-        .map(|udid| {
-            state
-                .db
-                .publish_device_guard(&udid)
-                .map(|guard| (udid, guard))
-                .map_err(preflight::err)
+    let udids = udids.into_iter().collect::<std::collections::BTreeSet<_>>();
+    state
+        .db
+        .storage_read(move |db| {
+            udids
+                .into_iter()
+                .map(|udid| db.publish_device_guard(&udid).map(|guard| (udid, guard)))
+                .collect()
         })
-        .collect()
+        .await
+        .map_err(preflight::err)
 }
 
 pub(crate) use verified_cleanup::cleanup_verified_assignments;

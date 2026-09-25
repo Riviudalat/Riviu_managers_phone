@@ -12,6 +12,12 @@ import { describeError } from "./describeError";
  * here.
  */
 describe("describeError", () => {
+  it("explains a TypeSafe rejected key without suggesting a device retry", () => {
+    for (const error of ["typesafe_http_401", new Error("typesafe_http_401"), { code: "OperationFailed", message: "typesafe_http_401" }]) {
+      expect(describeError(error)).toContain("Khóa TypeSafe không được chấp nhận");
+      expect(describeError(error)).toContain("Lưu khóa TypeSafe");
+    }
+  });
   it("reads a Tauri rejection, which is the case String() gets wrong", () => {
     expect(describeError({ code: "DeviceBusy", message: "máy đang bận" })).toBe(
       "DeviceBusy: máy đang bận",
@@ -21,6 +27,14 @@ describe("describeError", () => {
     // The two other field names the Rust side has used.
     expect(describeError({ error: "không kết nối được" })).toBe("không kết nối được");
     expect(describeError({ detail: "adb offline" })).toBe("adb offline");
+  });
+
+  it("turns an ambiguous TikTok package into an actionable per-device instruction", () => {
+    expect(describeError({
+      code: "DeviceAppSelectionRequired",
+      udid: "dual-phone",
+      message: "resolveTikTokPackage failed",
+    })).toBe("Máy dual-phone có nhiều ứng dụng TikTok. Mở Chi tiết thiết bị, chọn ứng dụng cần dùng rồi kiểm tra lại.");
   });
 
   it("never answers [object Object], even for a shape it does not know", () => {

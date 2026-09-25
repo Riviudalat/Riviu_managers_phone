@@ -2593,6 +2593,7 @@ impl NurtureEngine {
         max_duration: Option<Duration>,
         on_status: impl Fn(NurtureSessionStatus) + Send + Sync,
     ) -> anyhow::Result<NurtureSessionStatus> {
+        settings.network.ensure_implemented()?;
         // Folded once here so the whole loop below reads effective values: a feature whose
         // switch is off arrives as probability 0, and no call site has to remember the
         // switch exists (`NurtureSettings::into_effective`). Refreshed the same way.

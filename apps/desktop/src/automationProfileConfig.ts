@@ -15,7 +15,7 @@ export function nurtureProfileConfig(
   settings: NurtureSettings,
   durationMinutes?: number,
 ): JsonValue {
-  const { apiKey: _apiKey, hasApiKey: _hasApiKey, ...publicSettings } = settings;
+  const { apiKey: _apiKey, hasApiKey: _hasApiKey, revision: _revision, ...publicSettings } = settings;
   return cloneJson({
     schemaVersion: 1,
     settings: publicSettings,
@@ -35,7 +35,7 @@ export function nurtureSettingsFromProfile(config: JsonValue, current: NurtureSe
     carouselPortionPercent: 100, humanLimits: false,
   };
   for (const [key, value] of Object.entries(values)) {
-    if (key === "apiKey" || key === "hasApiKey") continue;
+    if (key === "apiKey" || key === "hasApiKey" || key === "revision") continue;
     if (key === "scheduleWindows") {
       if (!Array.isArray(value) || !value.every((window) => {
         if (!window || typeof window !== "object" || Array.isArray(window)) return false;
@@ -55,7 +55,7 @@ export function nurtureSettingsFromProfile(config: JsonValue, current: NurtureSe
       throw new Error("Hồ sơ Nuôi TikTok có thiết lập sai kiểu dữ liệu.");
     }
   }
-  return { ...current, ...values, apiKey: current.apiKey, hasApiKey: current.hasApiKey } as NurtureSettings;
+  return { ...current, ...values, revision: current.revision, apiKey: current.apiKey, hasApiKey: current.hasApiKey } as NurtureSettings;
 }
 
 export function interactionProfileConfig(request: ThreadCampaignRequest): JsonValue {
@@ -106,6 +106,7 @@ export function interactionDraftFromProfile(config: JsonValue, actors: string[])
     mentionText: Array.isArray(request.mentions) ? request.mentions.filter((item) => typeof item === "string").join(" ") : "",
     likeParent: request.likeParent === true,
     postDwellSeconds: typeof request.postDwellSeconds === "number" ? request.postDwellSeconds : null,
+    seeding: request.seeding as unknown as InteractionDraft["seeding"],
   };
 }
 

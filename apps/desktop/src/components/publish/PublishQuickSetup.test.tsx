@@ -1,5 +1,5 @@
 import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
-import { afterEach, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { PublishQuickSetup } from "./PublishQuickSetup";
 import type { PublishWizardProps } from "./PublishWizard";
 import type { PublishDeviceGuards } from "../../types";
@@ -10,7 +10,13 @@ function props(): PublishWizardProps {
   const bundles = ["one", "two"].map(id => ({ id, name: id, sourcePath: id, mediaKind: "image" as const, images: [], captionPath: "caption", caption: "Caption", captionSha256: id, totalBytes: 1 }));
   return { sourceRoot: "fixture", manifest: { sourceRoot: "fixture", scannedAt: "now", bundles, notices: [], ignoredPartnerFiles: 0, ignoredHiddenFiles: 0 }, selectedIds: ["one"], assignments: { one: "a" }, captions: {}, devices: ["a", "b"].map(udid => ({ udid, name: udid, platform: "android", model: "test", osVersion: "9", connection: "usb", status: "ready", wdaReady: true })), metas: new Map(), eligible: ["a", "b"], busy: false, scanning: false, preflightLoading: false, preflight: null, preflightError: null, sound: { kind: "default" }, sheet: false, cleanup: false, runAt: "", onSource: vi.fn(), onScan: vi.fn(), onSelect: vi.fn(), onAssign: vi.fn(), onCaption: vi.fn(), onSheet: vi.fn(), onCleanup: vi.fn(), onRunAt: vi.fn(), onPreflight: vi.fn(), onExecute: vi.fn(), onHistory: vi.fn(), settings: null };
 }
-afterEach(cleanup);
+beforeEach(() => {
+  if (!HTMLDialogElement.prototype.showModal) Object.defineProperty(HTMLDialogElement.prototype, "showModal", { configurable: true, writable: true, value() {} });
+  if (!HTMLDialogElement.prototype.close) Object.defineProperty(HTMLDialogElement.prototype, "close", { configurable: true, writable: true, value() {} });
+  vi.spyOn(HTMLDialogElement.prototype, "showModal").mockImplementation(function (this: HTMLDialogElement) { this.setAttribute("open", ""); });
+  vi.spyOn(HTMLDialogElement.prototype, "close").mockImplementation(function (this: HTMLDialogElement) { this.removeAttribute("open"); });
+});
+afterEach(() => { cleanup(); vi.restoreAllMocks(); });
 it("shows source partner warnings without blocking valid publishing or changing source data", () => {
   const p = props();
   p.manifest!.notices = [{ severity: "warning", path: "fixture/one/partners.xlsx", message: "File đối tác rỗng; bài vẫn có thể đăng" }];
@@ -37,14 +43,14 @@ it("immediately names the blocked machine, disables posting and opens its exact 
   const card = screen.getByRole("checkbox", { name: "Chọn Máy 1 · a" }).closest("article")!;
   expect(within(card).getByText("Máy còn bài chưa lấy được link")).toBeVisible();
   expect(within(card).getByText(row.reason)).toBeVisible();
-  expect(screen.getByRole("button", { name: "Kiểm tra & đăng" })).toBeDisabled();
+  expect(screen.getByRole("button", { name: "Kiểm tra & đăng" })).toBeEnabled();
   fireEvent.click(within(card).getByRole("button", { name: /Xem bài đang chờ/ })); expect(open).toHaveBeenCalledExactlyOnceWith("campaign-a");
   view.rerender(<PublishQuickSetup {...p} deviceGuards={{ ...guards, a: { blocking: [], linkReview: [] } }} />);
   expect(screen.getByRole("button", { name: "Kiểm tra & đăng" })).toBeEnabled();
 });
-it("quick assignment skips blocked machines but nonblocking review remains selectable", () => {
+it("quick assignment retains pending machines for explicit stop-before-preflight", () => {
   const p = props(), assign = vi.fn(); const view = render(<PublishQuickSetup {...p} selectedIds={[]} assignments={{}} deviceGuards={guards} onAssignmentChange={assign} />);
-  fireEvent.click(screen.getByRole("button", { name: "Chọn nhanh" })); expect(assign).toHaveBeenCalledWith(["one"], { one: "b" });
+  fireEvent.click(screen.getByRole("button", { name: "Chọn nhanh" })); expect(assign).toHaveBeenCalledWith(["one", "two"], { one: "a", two: "b" });
   view.rerender(<PublishQuickSetup {...p} deviceGuards={{ ...guards, a: { blocking: [], linkReview: [row] } }} />);
   expect(screen.getByText("Bài cũ còn cần kiểm tra link")).toBeVisible(); expect(screen.getByRole("button", { name: "Kiểm tra & đăng" })).toBeEnabled();
 });
@@ -52,4 +58,19 @@ it("unknown guard data keeps the existing assignment and prevents new posting", 
   const p = props(); render(<PublishQuickSetup {...p} deviceGuards={{}} />);
   expect(screen.getByRole("combobox", { name: "Máy nhận bài one" })).toHaveValue("a");
   expect(screen.getByRole("button", { name: "Kiểm tra & đăng" })).toBeDisabled(); expect(screen.getAllByText("Chưa kiểm tra được bài đang chờ").length).toBeGreaterThan(0);
+});
+it("lists assigned machines as awaiting a result while preflight is running without implying posting started", () => {
+  const p = props();
+  const view = render(<PublishQuickSetup {...p} selectedIds={["one", "two"]} assignments={{ one: "a", two: "b" }} />);
+  fireEvent.click(screen.getByRole("button", { name: "Kiểm tra & đăng" }));
+  view.rerender(<PublishQuickSetup {...p} selectedIds={["one", "two"]} assignments={{ one: "a", two: "b" }} preflightLoading />);
+  const pending = screen.getByRole("region", { name: "Máy đang chờ kết quả kiểm tra" });
+  expect(within(pending).getByText("Máy 1 · a")).toBeVisible();
+  expect(within(pending).getByText("Máy 2 · b")).toBeVisible();
+  expect(screen.getByRole("button", { name: "Xác nhận đăng 2 bài" })).toBeDisabled();
+  view.rerender(<PublishQuickSetup {...p} selectedIds={["one", "two"]} assignments={{ one: "a", two: "b" }} preflightLoading preflightStage="preparing" />);
+  expect(screen.getByText("Đang chuẩn bị thiết bị…")).toBeVisible();
+  view.rerender(<PublishQuickSetup {...p} selectedIds={["one", "two"]} assignments={{ one: "a", two: "b" }} preflightLoading preflightStage="checking" />);
+  expect(screen.getByText("Đang kiểm tra từng máy…")).toBeVisible();
+  expect(p.onExecute).not.toHaveBeenCalled();
 });

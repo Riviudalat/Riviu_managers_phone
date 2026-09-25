@@ -6,7 +6,7 @@ import { OperationProgressCenter } from "./OperationProgressCenter";
 let narrowViewport = false;
 vi.mock("../../useMediaQuery", () => ({ useMediaQuery: () => narrowViewport }));
 
-vi.mock("../../api", () => ({ operationQueryRuns: vi.fn(), operationGetRun: vi.fn(), operationDeviceLog: vi.fn(), nurtureSessionStatus: vi.fn(async () => []),operationStop:vi.fn(),operationStopStatus:vi.fn(async()=>null) }));
+vi.mock("../../api", () => ({ listDevices:vi.fn(async()=>[]),publishGet:vi.fn(async()=>({assignments:[]})),publishRecoveryCapabilities:vi.fn(async()=>[]),publishRetryAssignment:vi.fn(),publishRetrySheetAssignment:vi.fn(),publishCheckLinks:vi.fn(),publishResumeVerification:vi.fn(),operationQueryRuns: vi.fn(), operationGetRun: vi.fn(), operationDeviceLog: vi.fn(), nurtureSessionStatus: vi.fn(async () => []),operationStop:vi.fn(),operationStopStatus:vi.fn(async()=>null) }));
 const run: OperationRunSummary = { id: "publish:run", sourceId: "run", kind: "publish", title: "Đăng bài", state: "running", targetCount: 2, totalItems: 2, completedItems: 1, issueCount: 0, retryableCount: 0, retryScope: null, createdAt: null, updatedAt: null };
 const detail: OperationRunDetail = { summary: run, items: ["a", "b"].map((udid, i) => ({ id: udid, udid, label: `Bài ${i + 1}`, kind: "assignment", state: i ? "running" : "succeeded", detail: null, errorCode: null, evidence: null, retryable: false })) };
 const labels = new Map([["a", "Máy 2 · Nội dung"], ["b", "Máy 5 · Đăng bài"]]);

@@ -1,12 +1,6 @@
 name: Desktop CI/CD
 
 on:
-  push:
-    branches:
-      - main
-    tags:
-      - "v*"
-  pull_request:
   workflow_dispatch:
 
 permissions:
@@ -140,6 +134,9 @@ jobs:
 
       - name: Verify Sheet delivery transaction and layout
         run: node --test scripts/test_publish_sheet.mjs
+
+      - name: Verify publish acceptance intent and readback contract
+        run: node --test scripts/publish_acceptance.test.mjs
 
       - name: Verify build-once Windows packaging
         run: python -m unittest scripts.test_bundle_windows_installers -v
@@ -402,8 +399,8 @@ jobs:
           set -euo pipefail
           cargo build --release --locked \
             --target "${{ matrix.target }}" \
-            -p riviu-managers-phone \
-            --bin riviu-deployment-check --features deployment-check
+            -p riviu-deployment-checker \
+            --bin riviu-deployment-check
           if [ "${{ runner.os }}" = "Windows" ]; then
             checker="target/${{ matrix.target }}/release/riviu-deployment-check.exe"
           else

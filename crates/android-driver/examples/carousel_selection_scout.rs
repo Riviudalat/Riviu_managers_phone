@@ -21,10 +21,19 @@ async fn capture(session: &dyn UiSession, out: &std::path::Path, name: &str) -> 
         out.join(format!("{name}.xml")),
         session.hierarchy_source_snapshot().await?.xml,
     )?;
-    std::fs::write(
-        out.join(format!("{name}.png")),
-        session.screenshot_png().await?,
-    )?;
+    match session.screenshot_png().await {
+        Ok(png) => std::fs::write(out.join(format!("{name}.png")), png)?,
+        Err(error) if error.is::<riviu_core::driver::ScreenshotReadUnavailable>() => {
+            std::fs::write(
+                out.join(format!("{name}.capture-unavailable.json")),
+                serde_json::to_vec(&serde_json::json!({
+                    "reason": "screenshot_unavailable",
+                    "xmlAvailable": true,
+                }))?,
+            )?;
+        }
+        Err(error) => return Err(error),
+    }
     Ok(())
 }
 
@@ -94,6 +103,14 @@ async fn main() -> anyhow::Result<()> {
                 anyhow::ensure!(reached_post && outcome.is_err(),"rehearsal did not reach the blocked Post boundary: {outcome:?}");
             } else if matches!(args[3].as_str(),"production"|"sound-scout"|"sound-measure") {
                 let verdict=reach_edit_step(&mut composer,&request,&stop).await?;
+                if verdict != ComposerVerdict::Stopped {
+                    capture(&session,&out,"before-cleanup-failure").await?;
+                    std::fs::write(out.join("before-cleanup-state.json"),serde_json::to_vec_pretty(&serde_json::json!({
+                        "verdict":format!("{verdict:?}"),
+                        "foreground":session.active_app_bundle().await.ok(),
+                        "publicPost":false
+                    }))?)?;
+                }
                 capture(&session,&out,"production-editor").await?;
                 std::fs::write(out.join("result.json"),serde_json::to_vec_pretty(&serde_json::json!({"verdict":format!("{verdict:?}"),"requestedImages":request.images,"publicPost":false}))?)?;
                 anyhow::ensure!(verdict==ComposerVerdict::Stopped,"selection refused: {}",verdict.reason());

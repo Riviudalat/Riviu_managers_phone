@@ -3527,6 +3527,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "riviu-deployment-checker"
+version = "0.2.51"
+dependencies = [
+ "anyhow",
+ "dirs",
+ "log",
+ "riviu-android-driver",
+ "riviu-core",
+ "riviu-signing",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "uuid",
+]
+
+[[package]]
 name = "riviu-ios-driver"
 version = "0.1.0"
 dependencies = [
@@ -3549,7 +3566,7 @@ dependencies = [
 
 [[package]]
 name = "riviu-managers-phone"
-version = "0.2.41"
+version = "0.2.51"
 dependencies = [
  "anyhow",
  "apk-info",

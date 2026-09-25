@@ -1,3 +1,4 @@
+import { useState } from "react";
 import type {
   PublishExecutionIssue,
   PublishPreflightReport,
@@ -18,6 +19,7 @@ export function PublishPreflightResult({
   onPage,
   onRetry,
   busy,
+  hideRetry = false,
 }: {
   network?: "tiktok" | "threads";
   report: PublishPreflightReport;
@@ -27,11 +29,23 @@ export function PublishPreflightResult({
   onPage: (page: number) => void;
   onRetry: () => void;
   busy: boolean;
+  hideRetry?: boolean;
 }) {
+  const [view, setView] = useState<"blocked" | "passed" | "all">("blocked");
+  const blocked = report.assignments.filter((row) => !publishPreflightRowPassed(row));
+  const passed = report.assignments.filter(publishPreflightRowPassed);
+  const globalIssues = report.issues.filter((issue) => !issue.udid);
+  const currentView = view === "blocked" && !blocked.length ? "all" : view;
+  const visibleRows = currentView === "blocked" ? blocked : currentView === "passed" ? passed : [...blocked, ...passed];
+  const pageSize = 8;
   const currentPage = Math.min(
     page,
-    Math.max(0, Math.ceil(report.assignments.length / 3) - 1),
+    Math.max(0, Math.ceil(visibleRows.length / pageSize) - 1),
   );
+  const changeView = (next: "blocked" | "passed" | "all") => {
+    setView(next);
+    onPage(0);
+  };
   return (
     <>
       <p
@@ -40,16 +54,38 @@ export function PublishPreflightResult({
       >
         {report.canExecute
           ? "Đầu vào đã đạt kiểm tra. Chưa đăng bài."
-          : "Chưa thể đăng. Xử lý điều kiện chưa đạt ở từng máy rồi kiểm tra lại."}
+          : "Chưa thể đăng. Xử lý điều kiện chưa đạt bên dưới rồi kiểm tra lại."}
       </p>
+      <div className="pw-preflight-overview" role="group" aria-label="Lọc kết quả kiểm tra">
+        <span>{globalIssues.length ? `${globalIssues.length} điều kiện chung · ` : ""}{blocked.length} máy cần xử lý · {passed.length} máy đạt</span>
+        <div className="pw-preflight-views">
+          <button type="button" aria-pressed={currentView === "blocked"} onClick={() => changeView("blocked")}>Cần xử lý ({blocked.length})</button>
+          <button type="button" aria-pressed={currentView === "passed"} onClick={() => changeView("passed")}>Đạt ({passed.length})</button>
+          <button type="button" aria-pressed={currentView === "all"} onClick={() => changeView("all")}>Tất cả ({report.assignments.length})</button>
+        </div>
+      </div>
+      {globalIssues.length > 0 && (
+        <div className="pw-preflight-global" role="region" aria-label="Điều kiện chung chưa đạt">
+          <strong>Điều kiện chung</strong>
+          {globalIssues.map((issue, index) => (
+            <div key={`${issue.code}:${index}`}>
+              <Problem issue={issue} />
+              <details className="pw-preflight-technical">
+                <summary>Chi tiết kỹ thuật</summary>
+                <p><code>{issue.code}</code>: {issue.message}</p>
+              </details>
+            </div>
+          ))}
+        </div>
+      )}
       <div
         className="pw-check-results"
         tabIndex={0}
         role="region"
         aria-label="Kết quả kiểm tra từng máy"
       >
-        {report.assignments
-          .slice(currentPage * 3, (currentPage + 1) * 3)
+        {visibleRows
+          .slice(currentPage * pageSize, (currentPage + 1) * pageSize)
           .map((row) => (
             <article
               className="pw-preflight-device"
@@ -137,29 +173,17 @@ export function PublishPreflightResult({
               </details>
             </article>
           ))}
-        {report.issues
-          .filter((issue) => !issue.udid)
-          .map((issue, index) => (
-            <article className="pw-preflight-device" key={`global:${index}`}>
-              <Problem issue={issue} />
-              <details className="pw-preflight-technical">
-                <summary>Chi tiết kỹ thuật</summary>
-                <p>
-                  <code>{issue.code}</code>: {issue.message}
-                </p>
-              </details>
-            </article>
-          ))}
+        {!visibleRows.length && <p className="pw-preflight-empty">Không có máy trong nhóm này.</p>}
       </div>
       <PublishPager
         label="Kết quả kiểm tra"
         page={currentPage}
-        size={3}
-        total={report.assignments.length}
+        size={pageSize}
+        total={visibleRows.length}
         onPage={onPage}
       />
-      {!report.canExecute && (
-        <button type="button" disabled={busy} onClick={onRetry}>
+      {!report.canExecute && !hideRetry && (
+        <button type="button" disabled={busy} onClick={() => { setView("blocked"); onPage(0); onRetry(); }}>
           Kiểm tra lại
         </button>
       )}

@@ -85,9 +85,7 @@ use crate::driver::{ElementBox, ElementQuery, UiSession};
 use crate::publish::{select_sound_candidate, PublishSoundPolicy, SoundSelectionEvidence};
 use crate::tiktok_drawer::TapPlanner;
 use crate::tiktok_labels::{TikTokControl, TikTokControls};
-use crate::tiktok_sound::{
-    choose_and_confirm_sound, confirm_sound, open_and_observe_sounds, SoundPickerPlan,
-};
+use crate::tiktok_sound::{choose_and_confirm_sound, confirm_sound, SoundPickerPlan};
 use anyhow::Context;
 
 /// How long the composer may take to appear after its tab is tapped.
@@ -1679,6 +1677,8 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
                     self.advance_to_post_screen(stop).await?,
                     "sound reproof: caption page did not return"
                 );
+                self.restore_caption_cleared_by_editor(caption, stop)
+                    .await?;
                 self.require_caption_unchanged(caption).await?;
             } else {
                 confirm_sound(self.session, sound_plan, &expected_title).await?;
@@ -1780,6 +1780,39 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
             waited = true;
             sleep(POLL, stop).await;
         }
+    }
+
+    async fn restore_caption_cleared_by_editor(
+        &mut self,
+        caption: &str,
+        stop: &AtomicBool,
+    ) -> anyhow::Result<()> {
+        if caption.trim().is_empty() || self.require_caption_unchanged(caption).await.is_ok() {
+            return Ok(());
+        }
+        anyhow::ensure!(
+            !stop.load(Ordering::Relaxed),
+            "Đã dừng; không nhập lại caption"
+        );
+        let query = self.plan.publish.context("caption plan missing")?.caption;
+        let package = self.session.active_app_bundle().await?;
+        let tree = crate::ui_automation::tree::Tree::parse(
+            self.session.hierarchy_source_snapshot().await?,
+        )?;
+        anyhow::ensure!(
+            caption_is_empty_after_editor(&tree, &package, query),
+            "sound reproof: caption changed or unreadable"
+        );
+        // Only the previously approved caption may be restored, before the
+        // effect boundary, after the editor cleared an otherwise proved draft.
+        anyhow::ensure!(
+            matches!(
+                self.type_caption(caption, stop).await?,
+                CaptionOutcome::Typed
+            ),
+            "caption restore was not confirmed; chưa bấm Đăng"
+        );
+        Ok(())
     }
 
     async fn require_caption_unchanged(&self, caption: &str) -> anyhow::Result<()> {
@@ -2362,23 +2395,104 @@ where
         .with_progress(progress)
         .with_selection_diagnostics(diagnostics);
     let outcome = async {
+        crate::publish_recovery::step("media", None)?;
         match reach_selected_media_edit_step(&mut composer, requested_media, stop).await? {
             ComposerVerdict::Stopped => {}
             refusal => return Ok((refusal, None)),
         }
+        crate::publish_recovery::step("sound", Some("mediaSelected"))?;
         let visible_pool = sound_policy.pool_size()?.min(5);
         progress(PublishProgress::OpeningSounds);
-        let chosen = crate::tiktok_sound::with_sound_budget(stop, async {
-            let pool = open_and_observe_sounds(session, sound_plan, visible_pool).await?;
-            let sound_plan = pool.effective_plan(sound_plan);
-            let selection = select_sound_candidate(sound_policy, &pool.candidates)?;
-            progress(PublishProgress::SelectingSound {
-                title: selection.title.clone(),
-            });
-            choose_and_confirm_sound(session, sound_plan, &pool, selection.index).await?;
-            Ok((sound_plan, selection))
-        })
-        .await;
+        let mut observed = None;
+        let mut selected = crate::publish_recovery::stored_sound()?;
+        let mut selection_may_have_landed = selected.is_some();
+        let mut sound_sheet_may_be_open = false;
+        let mut reopen_network_sheet = false;
+        let chosen = loop {
+            let attempt = crate::tiktok_sound::with_sound_budget(stop, async {
+                if reopen_network_sheet {
+                    sound_sheet_may_be_open =
+                        crate::tiktok_sound::reopen_failed_sound_sheet(session, sound_plan).await?;
+                    reopen_network_sheet = false;
+                    observed = None;
+                }
+                if observed.is_none() {
+                    if sound_sheet_may_be_open {
+                        observed = Some(
+                            crate::tiktok_sound::resume_open_sounds(
+                                session,
+                                sound_plan,
+                                visible_pool,
+                            )
+                            .await?,
+                        );
+                    } else {
+                        let mut before_open = || sound_sheet_may_be_open = true;
+                        observed = Some(
+                            crate::tiktok_sound::open_and_observe_sounds_armed(
+                                session,
+                                sound_plan,
+                                visible_pool,
+                                &mut before_open,
+                            )
+                            .await?,
+                        );
+                    }
+                }
+                let pool = observed.as_ref().context("sound pool missing")?;
+                let sound_plan = pool.effective_plan(sound_plan);
+                if selected.is_none() {
+                    // This is the first observed pool, before our first row tap.
+                    // TikTok may have auto-selected a row on editor entry. Bind
+                    // the policy's exact title/artist first; choose/recover then
+                    // re-proves that identity and the final editor chip.
+                    let proposed = select_sound_candidate(sound_policy, &pool.candidates)?;
+                    selected = Some(crate::publish_recovery::bind_sound(&proposed)?);
+                }
+                let selection = selected.clone().context("sound selection missing")?;
+                let current_index = current_sound_target_index(&selection, &pool.candidates)?;
+                let recovering = enter_sound_selection_attempt(&mut selection_may_have_landed);
+                progress(PublishProgress::SelectingSound {
+                    title: selection.title.clone(),
+                });
+                if recovering {
+                    crate::tiktok_sound::recover_sound_selection(
+                        session,
+                        sound_plan,
+                        pool,
+                        current_index,
+                    )
+                    .await?;
+                } else {
+                    choose_and_confirm_sound(session, sound_plan, pool, current_index).await?;
+                }
+                Ok((sound_plan, selection))
+            })
+            .await;
+            match attempt {
+                Err(error) if format!("{error:#}").contains("composer state lost") => {
+                    break Err(error)
+                }
+                Err(error) => {
+                    if session
+                        .active_app_bundle()
+                        .await
+                        .is_ok_and(|bundle| bundle != sound_plan.package())
+                    {
+                        break Err(error.context(
+                            "composer state lost; reconstruct approved media before retry",
+                        ));
+                    }
+                    if crate::publish_recovery::retry(&error, stop).await? {
+                        reopen_network_sheet =
+                            error.is::<crate::tiktok_sound::SoundNetworkUnavailable>();
+                        continue;
+                    }
+                    break Err(error);
+                }
+                result => break result,
+            }
+        };
         let (sound_plan, mut selection) = match chosen {
             Err(error) if error.is::<crate::tiktok_sound::SoundStopped>() => {
                 return Ok((ComposerVerdict::Stopped, None))
@@ -2389,6 +2503,7 @@ where
             title: selection.title.clone(),
         });
         selection.confirmed = true;
+        crate::publish_recovery::step("caption", Some("soundConfirmed"))?;
         composer.pending_sound_proof = Some((sound_plan, selection.title.clone()));
         let mut record_selected_sound = || before_post(&selection);
         let verdict = continue_from_edit_step_with_effect_intent(
@@ -2405,6 +2520,30 @@ where
         composer.leave().await;
     }
     outcome
+}
+
+fn enter_sound_selection_attempt(selection_may_have_landed: &mut bool) -> bool {
+    let recovering = *selection_may_have_landed;
+    *selection_may_have_landed = true;
+    recovering
+}
+
+fn current_sound_target_index(
+    selection: &SoundSelectionEvidence,
+    candidates: &[crate::publish::SoundCandidate],
+) -> anyhow::Result<usize> {
+    let matches: Vec<_> = candidates
+        .iter()
+        .enumerate()
+        .filter(|(_, candidate)| {
+            candidate.title == selection.title && candidate.artist == selection.artist
+        })
+        .map(|(index, _)| index)
+        .collect();
+    let [index] = matches.as_slice() else {
+        anyhow::bail!("sound identity changed; không đổi sang nhạc khác")
+    };
+    Ok(*index)
 }
 
 /// Drive as far as the edit step and stop there, publishing nothing.
@@ -2487,20 +2626,64 @@ where
     if !composer.plan.can_publish() {
         return Ok(ComposerVerdict::PostUnmeasured);
     }
+    crate::publish_recovery::step("caption", None)?;
     (composer.progress)(PublishProgress::OpeningCaption);
-    if !composer.advance_to_post_screen(stop).await? {
-        return Ok(ComposerVerdict::PostScreenDidNotOpen);
+    loop {
+        // A lost Next ACK may already have reached the caption page.
+        let arrived = if let Some(tail) = composer
+            .plan
+            .publish
+            .filter(|_| crate::publish_recovery::active())
+        {
+            composer.session.locate_all(tail.post_button).await?.len() == 1
+        } else {
+            false
+        };
+        if arrived || composer.advance_to_post_screen(stop).await? {
+            break;
+        }
+        let error = crate::publish_recovery::retryable_error(
+            "caption_navigation_timeout",
+            "caption navigation timeout before Post",
+        );
+        if !crate::publish_recovery::retry(&error, stop).await? {
+            return Ok(ComposerVerdict::PostScreenDidNotOpen);
+        }
     }
     if !caption.trim().is_empty() {
         (composer.progress)(PublishProgress::EnteringCaption);
     }
-    match composer.type_caption(caption, stop).await? {
-        CaptionOutcome::Typed => (composer.progress)(PublishProgress::CaptionConfirmed),
-        CaptionOutcome::NothingToSay => {}
-        CaptionOutcome::Unmeasured => return Ok(ComposerVerdict::PostUnmeasured),
-        CaptionOutcome::NoField => return Ok(ComposerVerdict::NoCaptionField),
-        CaptionOutcome::NotConfirmed => return Ok(ComposerVerdict::CaptionNotConfirmed),
+    loop {
+        if crate::publish_recovery::active()
+            && composer.require_caption_unchanged(caption).await.is_ok()
+        {
+            break;
+        }
+        match composer.type_caption(caption, stop).await {
+            Err(error) if crate::publish_recovery::retry(&error, stop).await? => continue,
+            Err(error) => return Err(error),
+            Ok(CaptionOutcome::NotConfirmed) => {
+                if crate::publish_recovery::retry(
+                    &crate::publish_recovery::retryable_error(
+                        "caption_readback_timeout",
+                        "caption readback timeout before Post",
+                    ),
+                    stop,
+                )
+                .await?
+                {
+                    continue;
+                }
+                return Ok(ComposerVerdict::CaptionNotConfirmed);
+            }
+            Ok(CaptionOutcome::Typed) => (composer.progress)(PublishProgress::CaptionConfirmed),
+            Ok(CaptionOutcome::NothingToSay) => {}
+            Ok(CaptionOutcome::Unmeasured) => return Ok(ComposerVerdict::PostUnmeasured),
+            Ok(CaptionOutcome::NoField) => return Ok(ComposerVerdict::NoCaptionField),
+        }
+        break;
     }
+    crate::publish_recovery::step("prePost", Some("captionConfirmed"))?;
     (composer.progress)(PublishProgress::CheckingBeforePost);
     composer
         .post_with_effect_intent(caption, stop, before_post)
@@ -2717,8 +2900,98 @@ fn caption_readback_matches(observed: &str, expected: &str) -> bool {
             .map(|line| line.trim_end_matches([' ', '\t'])))
 }
 
+fn caption_is_empty_after_editor(
+    tree: &crate::ui_automation::tree::Tree,
+    package: &str,
+    query: ElementQuery<'_>,
+) -> bool {
+    let matches = tree.matching(package, query);
+    let [index] = matches.as_slice() else {
+        return false;
+    };
+    let node = &tree.nodes[*index];
+    node.attr("class") == "android.widget.EditText"
+        && node.attr("enabled") == "true"
+        && (node.attr("text").is_empty()
+            || (node.attr("showing-hint") == "true"
+                && !node.attr("hint").is_empty()
+                && node.attr("text") == node.attr("hint")))
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn caption_restore_requires_unique_empty_field_not_different_existing_text() {
+        use crate::ui_automation::tree::Tree;
+        let source = r#"<hierarchy><node package="com.zhiliaoapp.musically" class="android.widget.EditText" resource-id="com.zhiliaoapp.musically:id/guf" text="Writing a long description can help get 3x more views on average." hint="Writing a long description can help get 3x more views on average." showing-hint="true" displayed="true" enabled="true" bounds="[42,614][1038,986]"/></hierarchy>"#;
+        let parse =
+            |xml| Tree::parse(crate::HierarchySourceSnapshot { generation: 1, xml }).unwrap();
+        let query = ElementQuery::ResourceIdSuffix(":id/guf");
+        assert!(super::caption_is_empty_after_editor(
+            &parse(source.into()),
+            "com.zhiliaoapp.musically",
+            query
+        ));
+        for changed in [
+            source.replace("showing-hint=\"true\"", "showing-hint=\"false\""),
+            source.replace(
+                "text=\"Writing a long description can help get 3x more views on average.\"",
+                "text=\"Different operator caption\"",
+            ),
+            source.replace("enabled=\"true\"", "enabled=\"false\""),
+            source.replace("</hierarchy>", &source["<hierarchy>".len()..]),
+        ] {
+            assert!(!super::caption_is_empty_after_editor(
+                &parse(changed),
+                "com.zhiliaoapp.musically",
+                query
+            ));
+        }
+    }
+
+    #[test]
+    fn sound_attempt_recovers_after_a_durable_or_prior_selection_intent() {
+        let mut durable_selection_may_have_landed = true;
+        assert!(super::enter_sound_selection_attempt(
+            &mut durable_selection_may_have_landed
+        ));
+
+        let mut fresh_selection = false;
+        assert!(!super::enter_sound_selection_attempt(&mut fresh_selection));
+        assert!(super::enter_sound_selection_attempt(&mut fresh_selection));
+    }
+
+    #[test]
+    fn reordered_pool_uses_a_current_target_without_rewriting_durable_evidence() {
+        let selection = SoundSelectionEvidence {
+            section: crate::publish::SoundSectionKind::Trending,
+            title: "Vibin".into(),
+            artist: "Wxoda".into(),
+            index: 0,
+            candidates_digest: "original-pool".into(),
+            confirmed: false,
+        };
+        let candidates = vec![
+            crate::publish::SoundCandidate {
+                section: "trending".into(),
+                title: "Other".into(),
+                artist: "Artist".into(),
+            },
+            crate::publish::SoundCandidate {
+                section: "trending".into(),
+                title: "Vibin".into(),
+                artist: "Wxoda".into(),
+            },
+        ];
+
+        assert_eq!(
+            super::current_sound_target_index(&selection, &candidates).unwrap(),
+            1
+        );
+        assert_eq!(selection.index, 0);
+        assert_eq!(selection.candidates_digest, "original-pool");
+    }
+
     #[test]
     fn caption_reproof_accepts_tiktok_hashtag_line_padding_but_rejects_content_changes() {
         let expected = "Đà Lạt\n\n#dalat #hookdalat\n\nKiểm tra video Riviu 18/09.";

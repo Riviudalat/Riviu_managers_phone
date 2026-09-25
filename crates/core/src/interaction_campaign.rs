@@ -930,6 +930,7 @@ impl Drop for RunningCampaign {
 /// siblings were still posting.
 #[path = "interaction_campaign/conversation.rs"]
 mod conversation;
+mod seeding;
 
 #[allow(clippy::too_many_arguments)]
 pub async fn execute_thread_campaign(
@@ -968,6 +969,23 @@ pub async fn execute_thread_campaign(
                 )
                 .await?;
         }
+    }
+    if request.seeding.is_some() {
+        // One owner for this campaign; different clusters are independent dependencies,
+        // while the existing session/controller remains the only device executor.
+        let task = tokio::spawn(seeding::run(
+            db.clone(),
+            control,
+            engine,
+            events.clone(),
+            campaign_id.clone(),
+            request,
+            plan,
+            only_assignments,
+            artifacts,
+            frame_source,
+        ));
+        return join_campaign(db, events, campaign_id, vec![task]).await;
     }
     if let Some(script) = request.scripted_conversation.as_ref() {
         let token = uuid::Uuid::new_v4().to_string();
@@ -1563,6 +1581,9 @@ fn claim_action_or_reuse_terminal(
     assignment_id: &str,
     kind: crate::InteractionActionKind,
 ) -> anyhow::Result<ActionClaim> {
+    if let Some(revision) = db.seeding_action_revision(assignment_id, kind)? {
+        return Ok(ActionClaim::Owned(revision));
+    }
     if let Some(revision) = db.claim_interaction_action(assignment_id, kind)? {
         return Ok(ActionClaim::Owned(revision));
     }
@@ -1712,6 +1733,7 @@ fn stopped_action_reason(result: &crate::PublicActionResult) -> String {
         crate::InteractionActionKind::Save => "save",
         crate::InteractionActionKind::Comment => "comment",
         crate::InteractionActionKind::Follow => "follow",
+        crate::InteractionActionKind::Share => "share",
     };
     format!(
         "{kind}_action_stopped: {}",
@@ -1837,6 +1859,104 @@ async fn execute_like_action(
         ActionSettlement {
             state,
             evidence: serde_json::json!({"verdict":verdict,"arrival":proof.as_str()}),
+            error,
+        },
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn execute_share_action(
+    db: &crate::db::Database,
+    id: &str,
+    driver: &dyn TargetDriver,
+    session: &dyn crate::UiSession,
+    target: &crate::ResolvedTikTokTarget,
+    package: &str,
+    seed: u64,
+) -> anyhow::Result<crate::PublicActionResult> {
+    use crate::{InteractionActionKind as K, InteractionActionState as S};
+    let revision = match claim_action_or_reuse_terminal(db, id, K::Share)? {
+        ActionClaim::Owned(r) => r,
+        ActionClaim::Reused(r) => return Ok(r),
+    };
+    let selected = async {
+        let proof = driver.open_target(session, target).await?;
+        anyhow::ensure!(
+            target_proof_authorizes_public_effect(proof),
+            "Share chưa xác định đúng bài"
+        );
+        crate::tiktok_friend_share::select_friend(session, package, seed, id).await
+    }
+    .await;
+    let handle = match selected {
+        Ok(Some(h)) => h,
+        Ok(None) => {
+            return settle_claimed_action(
+                db,
+                id,
+                K::Share,
+                revision,
+                None,
+                ActionSettlement {
+                    state: S::NoOp,
+                    evidence: serde_json::json!({"verdict":"noFriends"}),
+                    error: None,
+                },
+            )
+        }
+        Err(e) => {
+            return settle_claimed_action(
+                db,
+                id,
+                K::Share,
+                revision,
+                None,
+                ActionSettlement {
+                    state: S::FailedBeforeEffect,
+                    evidence: serde_json::json!({"verdict":"recipientUnavailable"}),
+                    error: Some(format!("{e:#}")),
+                },
+            )
+        }
+    };
+    let armed = std::sync::Mutex::new(None);
+    let mut gate = ActionEffectGate::new(|| {
+        let r = db.arm_interaction_action(
+            id,
+            K::Share,
+            revision,
+            &format!("share:{}:{}", target.content_id, handle),
+        )?;
+        *armed.lock().expect("share revision") = r;
+        Ok(r.is_some())
+    });
+    let result =
+        crate::tiktok_friend_share::send_selected(session, package, &handle, &mut gate).await;
+    let crossed = gate.crossed();
+    drop(gate);
+    let (state, verdict, error) = match result {
+        Ok(true) => (S::Confirmed, "sent", None),
+        Ok(false) => (S::Uncertain, "sendNotConfirmed", None),
+        Err(e) => (
+            if crossed {
+                S::Uncertain
+            } else {
+                S::FailedBeforeEffect
+            },
+            "failed",
+            Some(e.to_string()),
+        ),
+    };
+    let armed_revision = *armed.lock().expect("share revision");
+    settle_claimed_action(
+        db,
+        id,
+        K::Share,
+        revision,
+        armed_revision,
+        ActionSettlement {
+            state,
+            evidence: serde_json::json!({"recipient":handle,"postId":target.content_id,"verdict":verdict}),
             error,
         },
     )
@@ -2066,7 +2186,13 @@ async fn run_cohort(
     // Backfill action rows lazily for campaigns created before migration 21. New campaigns
     // already have them; INSERT OR IGNORE keeps this restart-safe.
     for assignment in &detail.assignments {
-        db.ensure_interaction_action_runs(&campaign_id, &assignment.id, request.actions)?;
+        db.ensure_interaction_action_runs(
+            &campaign_id,
+            &assignment.id,
+            request.seeding.as_ref().map_or(request.actions, |s| {
+                s.actions_for(&request, assignment.ordinal)
+            }),
+        )?;
     }
     let protected = protected_assignment_ids(&detail.assignments);
     // Who posted each message, so a reply can tag the account it answers.
@@ -2093,6 +2219,12 @@ async fn run_cohort(
     let posted: HashMap<(String, u8), CommentLocatorIdentity> = detail
         .assignments
         .iter()
+        .filter(|a| {
+            request.seeding.is_none()
+                || a.comment_verification.as_ref().is_none_or(|v| {
+                    v.state == crate::comment_verification::VerificationState::Verified
+                })
+        })
         .filter_map(|assignment| {
             Some((
                 (assignment.target_key.clone(), assignment.ordinal),
@@ -2271,7 +2403,12 @@ async fn run_cohort(
             let Some(ownership_revision) = db.claim_interaction_assignment_for_send(id)? else {
                 continue;
             };
-            if !request.actions.comment {
+            if !request.actions.comment
+                || request
+                    .seeding
+                    .as_ref()
+                    .is_some_and(|s| !s.is_comment(&request, assignment.ordinal))
+            {
                 // This assignment carries only desired-state actions. Keep the legacy envelope
                 // claimed for aggregate/retry ownership, but do not invent or persist comment
                 // text that no caller requested.
@@ -2446,6 +2583,19 @@ async fn run_cohort(
                 prepared.strict_mentions = true;
             }
             let prepared = &prepared;
+            let actions = request.seeding.as_ref().map_or(request.actions, |s| {
+                s.actions_for(&request, prepared.ordinal)
+            });
+            if let Some(s) = request.seeding.as_ref().filter(|_| actions.comment) {
+                let seconds = s.comment_gap_seconds.sample(s.seed, &format!("gap:{id}"));
+                let end = tokio::time::Instant::now() + Duration::from_secs(seconds);
+                while tokio::time::Instant::now() < end {
+                    if campaign_is_cancelled(&db, &campaign_id)? {
+                        return Ok((succeeded, failed));
+                    }
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+            }
             // A retry runs the same plan but must not re-send anything already
             // posted; the caller decides which assignments are in scope.
             if only_assignments
@@ -2575,12 +2725,12 @@ async fn run_cohort(
                     let labels=crate::tiktok_labels::controls_for_runtime(&opened_package,&language,&version).context("Chưa nhận diện TikTok trên máy")?;
                     let account=crate::tiktok_share::observe_publish_account(session.as_ref(),&labels).await?;
                     {
-                        let expected=db.get_device_meta(&prepared.actor_udid)?.handle;
+                        let expected=request.seeding.as_ref().and_then(|s|s.expected_accounts.get(&prepared.actor_udid)).cloned().unwrap_or(db.get_device_meta(&prepared.actor_udid)?.handle);
                         anyhow::ensure!(!expected.is_empty()&&account.eq_ignore_ascii_case(expected.trim().trim_start_matches('@')), "Tài khoản trên máy không khớp nick đã gán; chưa tương tác");
                     }
                     db.record_observed_interaction_account(&prepared.actor_udid,&account)?;
                 }
-                if request.actions.comment && request.mention_parent && prepared.parent_ordinal.is_some() {
+                if actions.comment && request.mention_parent && prepared.parent_ordinal.is_some() {
                     anyhow::ensure!(!prepared.mentions.is_empty(),"Chưa xác định username của người được trả lời; chưa gửi bình luận");
                 }
                 // A process can die after arming a composer but before the durable effect
@@ -2588,7 +2738,7 @@ async fn run_cohort(
                 // phone keeps the draft. Clear that state before opening anything for this
                 // attempt; cleanup returns to the feed, and `open_target` below rebuilds the
                 // target proof (and, for replies, the parent proof) from fresh UI.
-                if request.actions.comment {
+                if actions.comment {
                     if let Err(failure) =
                         driver.clear_stale_comment_ui(session.as_ref(), &stop).await
                     {
@@ -2602,7 +2752,17 @@ async fn run_cohort(
                 // valid proof does not cost a later action; uncertainty, or losing the proof
                 // itself, stops only this assignment.
                 let mut action_results = Vec::with_capacity(3);
-                if request.actions.like {
+                if let Some(s)=&request.seeding {
+                    let proof=driver.open_target(session.as_ref(),target).await?;
+                    anyhow::ensure!(target_proof_authorizes_public_effect(proof),"Chưa xác định đúng bài trước khi xem");
+                    let seconds=s.watch_seconds.sample(s.seed,id);
+                    let deadline=tokio::time::Instant::now()+Duration::from_secs(seconds);
+                    while tokio::time::Instant::now()<deadline {
+                        anyhow::ensure!(!campaign_is_cancelled(&db,&campaign_id)?,"Đã dừng trong lúc xem bài");
+                        tokio::time::sleep(Duration::from_millis(100)).await;
+                    }
+                }
+                if actions.like && request.seeding.as_ref().map_or(Ok(true),|s|db.claim_seeding_action(id,crate::InteractionActionKind::Like,s.like_count))? {
                     let action = match execute_like_action(
                         db.as_ref(),
                         id,
@@ -2631,7 +2791,7 @@ async fn run_cohort(
                         anyhow::bail!(reason);
                     }
                 }
-                if request.actions.save {
+                if actions.save && request.seeding.as_ref().map_or(Ok(true),|s|db.claim_seeding_action(id,crate::InteractionActionKind::Save,s.save_count))? {
                     let action = match execute_save_action(
                         db.as_ref(),
                         id,
@@ -2661,7 +2821,16 @@ async fn run_cohort(
                     }
                 }
 
-                if request.actions.follow {
+                if actions.share && request.seeding.as_ref().map_or(Ok(true),|s|db.claim_seeding_action(id,crate::InteractionActionKind::Share,s.share_count))? {
+                    let action=match execute_share_action(db.as_ref(),id,driver.as_ref(),session.as_ref(),target,&opened_package,request.seeding.as_ref().map_or(0,|s|s.seed)).await {
+                        Ok(action)=>action,
+                        Err(error)=>{effect_intent|=failed_action_may_have_crossed_effect(db.as_ref(),id,crate::InteractionActionKind::Share);return Err(error);}
+                    };
+                    let stops=action_stops_assignment(&action);effect_intent|=action_requires_uncertain_assignment(&action);
+                    let reason=stops.then(||stopped_action_reason(&action));action_results.push(action);notify(&events,&campaign_id);
+                    if let Some(reason)=reason {anyhow::bail!(reason);}
+                }
+                if actions.follow {
                     let account=db.get_device_meta(&prepared.actor_udid)?.handle;
                     let action=match execute_follow_action(db.as_ref(),id,driver.as_ref(),session.as_ref(),target,&account).await {
                         Ok(action)=>action,
@@ -2706,7 +2875,7 @@ async fn run_cohort(
                     ));
                 }
 
-                if !request.actions.comment {
+                if !actions.comment {
                     let aggregate = crate::aggregate_interaction_actions(&action_results);
                     if aggregate == crate::InteractionRunAggregate::Failed {
                         anyhow::bail!("mọi public action đều thất bại trước effect");
@@ -2825,17 +2994,19 @@ async fn run_cohort(
                 }
                 let mut comment_like = None;
                 let send_result = if let Some(parent) = parent_identity.as_ref() {
-                    driver
-                        .send_reply(
-                            session.as_ref(),
-                            parent,
-                            prepared,
-                            &stop,
-                            &mut effect_gate,
-                            request.like_parent,
-                            &mut comment_like,
-                        )
-                        .await
+                    anyhow::ensure!(parent.comment_link.as_ref().is_none_or(|link|link.post_id==target.content_id),"Comment ID belongs to another post; reply refused");
+                    let until=tokio::time::Instant::now()+Duration::from_secs(60);
+                    let mut attempt=0;
+                    loop {
+                        attempt+=1;
+                        if campaign_is_cancelled(&db,&campaign_id)? {break Err(SendFailure::before(anyhow::anyhow!("Đã dừng trước reply")));}
+                        let result=driver.send_reply(session.as_ref(),parent,prepared,&stop,&mut effect_gate,request.like_parent,&mut comment_like).await;
+                        let retry=request.seeding.is_some() && attempt<3 && tokio::time::Instant::now()<until && !effect_gate.crossed()
+                            && result.as_ref().err().is_some_and(|e|!e.effect_may_have_gone_out() && (e.detail().contains("parent_not_found")||e.detail().contains("comment_not_visible")));
+                        if !retry {break result;}
+                        let proof=driver.open_target(session.as_ref(),target).await?;
+                        if !target_proof_authorizes_public_effect(proof){break Err(SendFailure::before(anyhow::anyhow!("Refresh chưa xác minh đúng bài")));}
+                    }
                 } else {
                     driver
                         .send_root(session.as_ref(), prepared, &stop, &mut effect_gate)
@@ -3071,7 +3242,7 @@ async fn run_cohort(
                         notify(&events, &campaign_id);
                         continue;
                     }
-                    let artifact_kind = if !request.actions.comment || skipped_parent_at.is_some() {
+                    let artifact_kind = if !actions.comment || skipped_parent_at.is_some() {
                         "public-action-evidence"
                     } else if prepared.parent_ordinal.is_some() {
                         "comment-reply-evidence"
@@ -4146,6 +4317,7 @@ mod tests {
 
         fn request(manual_comments: Vec<String>) -> ThreadCampaignRequest {
             ThreadCampaignRequest {
+                seeding: None,
                 scripted_conversation: None,
                 request_id: "ai-key".into(),
                 targets: vec![ResolvedTikTokTarget {
@@ -4191,6 +4363,7 @@ mod tests {
             assert!(settings_for_request(&db, &manual).is_ok());
             let mut action_only = request(vec![]);
             action_only.actions = crate::InteractionActionSet {
+                share: false,
                 follow: false,
                 like: true,
                 save: true,
@@ -4293,6 +4466,7 @@ mod tests {
 
         fn request() -> ThreadCampaignRequest {
             ThreadCampaignRequest {
+                seeding: None,
                 scripted_conversation: None,
                 request_id: "cancelled-preparations".into(),
                 targets: vec![ResolvedTikTokTarget {
@@ -4464,6 +4638,7 @@ mod tests {
             ));
             let db = crate::db::Database::open(&path).expect("open fixture database");
             let request = ThreadCampaignRequest {
+                seeding: None,
                 scripted_conversation: None,
                 request_id: "settlement-recovery".into(),
                 targets: vec![ResolvedTikTokTarget {
@@ -4480,6 +4655,7 @@ mod tests {
                 max_words: 0,
                 manual_comments: Vec::new(),
                 actions: InteractionActionSet {
+                    share: false,
                     follow: false,
                     like: true,
                     comment: false,
@@ -4617,6 +4793,7 @@ mod tests {
         ));
         let db = crate::db::Database::open(&path).expect("open fixture database");
         let request = ThreadCampaignRequest {
+            seeding: None,
             scripted_conversation: None,
             request_id: "cancel-between-actions".into(),
             targets: vec![ResolvedTikTokTarget {
@@ -4633,6 +4810,7 @@ mod tests {
             max_words: 0,
             manual_comments: Vec::new(),
             actions: InteractionActionSet {
+                share: false,
                 follow: false,
                 like: true,
                 comment: false,
@@ -4996,6 +5174,7 @@ mod mention_tests {
 
     fn request(mentions: &[&str], mention_parent: bool) -> ThreadCampaignRequest {
         ThreadCampaignRequest {
+            seeding: None,
             scripted_conversation: None,
             request_id: "r".into(),
             targets: Vec::new(),
@@ -5120,6 +5299,7 @@ mod boundary_tests {
         use crate::interaction::{InteractionActionSet, ThreadMode};
 
         let action_only = InteractionActionSet {
+            share: false,
             follow: false,
             like: true,
             comment: false,

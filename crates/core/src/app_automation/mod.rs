@@ -63,6 +63,11 @@ pub fn action_capabilities(
             false,
         ),
         (
+            "share",
+            crate::tiktok_friend_share::supported(package, version, locale),
+            false,
+        ),
+        (
             "feedFollow",
             package == crate::tiktok_follow_cleanup::MEASURED_FOLLOW_PACKAGE
                 && version == crate::tiktok_follow_cleanup::MEASURED_FOLLOW_VERSION
@@ -172,6 +177,9 @@ pub fn interaction_actions(actions: crate::InteractionActionSet) -> Vec<&'static
     }
     if actions.save {
         requested.push("save");
+    }
+    if actions.share {
+        requested.push("share");
     }
     if actions.follow {
         requested.push("follow");

@@ -46,7 +46,7 @@ pub fn three_feature_interaction_config() -> Value {
             "maxWords": 12,
             "mode": "threaded",
             "shape": "chain",
-            "actions": InteractionActionSet { follow: false,
+            "actions": InteractionActionSet { share: false, follow: false,
                 like: true,
                 comment: false,
                 save: true,

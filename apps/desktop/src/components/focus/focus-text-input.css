@@ -1,0 +1,7 @@
+.focus-text-entry { flex: none; padding: 8px 10px; border-bottom: 1px solid var(--line); }
+.focus-text-entry-row { display: grid; grid-template-columns: minmax(0, 1fr) 32px; gap: 6px; align-items: stretch; }
+.focus-text-entry textarea { width: 100%; min-width: 0; resize: vertical; max-height: 120px; padding: 6px 8px; border: 1px solid var(--line-strong); border-radius: var(--radius-sm); background: var(--bg-elevated); color: var(--text); font: inherit; font-size: var(--text-sm); }
+.focus-text-entry button { width: 32px; min-height: 32px; display: grid; place-items: center; border: 1px solid var(--line-strong); border-radius: var(--radius-sm); background: var(--primary); color: white; }
+.focus-text-entry button:disabled { opacity: .42; cursor: not-allowed; }
+.focus-text-entry p { margin: 5px 0 0; color: var(--text-2); font-size: var(--text-xs); overflow-wrap: anywhere; }
+.focus-text-entry p.is-error { color: var(--warn-strong); }

@@ -1081,6 +1081,7 @@ export type ThreadMode = "threaded" | "standalone";
 export type ThreadShape = "chain" | "star";
 
 export interface InteractionActionSet {
+  share?: boolean;
   follow?: boolean;
   like: boolean;
   comment: boolean;
@@ -1102,7 +1103,7 @@ export type SaveVerdict =
   | "notConfirmed"
   | "uncertainAfterEffect";
 
-export type InteractionActionKind = "like" | "save" | "comment" | "follow";
+export type InteractionActionKind = "like" | "save" | "comment" | "follow" | "share";
 
 export type PublicCleanupKind = "like" | "save" | "comment" | "follow" | "post";
 export type PublicCleanupCapabilityStatus =
@@ -1201,6 +1202,7 @@ export interface ScriptedConversation {
   seed: number; targetScripts: TargetConversation[]; roleBindings: ConversationRole[];
 }
 export interface ThreadCampaignRequest {
+  seeding?: SeedingConfig;
   scriptedConversation?: ScriptedConversation;
   requestId: string;
   targets: ResolvedTikTokTarget[];
@@ -1253,6 +1255,13 @@ export interface ThreadCampaignRequest {
    * `null`/absent/0 means leave immediately. Rust caps it at 60.
    */
   postDwellSeconds?: number | null;
+}
+
+export interface SeedingConfig {
+  standaloneCount: number; likeCount: number; saveCount: number; shareCount: number;
+  seed: number; preferredActors: string[];
+  watchSeconds: {min:number;max:number}; commentGapSeconds: {min:number;max:number};
+  comments: Record<string,string[]>;
 }
 
 export type ThreadMessageState =
@@ -1411,6 +1420,7 @@ export interface CommentVerification {
 }
 
 export interface InteractionCampaignDetail {
+  seeding?: SeedingConfig | null;
   scriptedConversation?: ScriptedConversation;
   conversationSession?: { startedAtMs:number; endsAtMs:number; nextAtMs:number; cursor:number };
   summary: InteractionCampaignSummary;
@@ -1849,7 +1859,24 @@ export type QualifiedElementLocator =
   | { strategy: "accessibilityId"; value: string }
   | { strategy: "className"; value: string };
 
-export interface InspectorElementSelector { package:string; text?:string|null; description?:string|null; resourceId?:string|null; className?:string|null; }
+export interface InspectorAncestorConstraint {
+  maxDepth: number;
+  resourceId?: string | null;
+  resourceIdSuffix?: string | null;
+  className?: string | null;
+}
+export interface InspectorElementSelector {
+  package:string;
+  text?:string|null;
+  description?:string|null;
+  resourceId?:string|null;
+  className?:string|null;
+  schemaVersion?:number|null;
+  textPrefix?:string|null;
+  descriptionPrefix?:string|null;
+  scope?:InspectorAncestorConstraint|null;
+  actionTarget?:{kind:"clickableAncestor";ancestor:InspectorAncestorConstraint}|null;
+}
 
 export type EvidenceSpec =
   | { kind: "elementVisible"; selector: InspectorElementSelector }
@@ -2433,6 +2460,7 @@ export type PublishDeviceGuards = Record<string, PublishDeviceGuard>;
 
 export interface PublishRecoveryPermission { allowed: boolean; reason: string | null }
 export interface PublishRecoveryCapability {
+  recovery?: import("./generated-ipc").PublishRecoveryState | null;
   assignmentId: string;
   revision: number;
   checkLink: PublishRecoveryPermission;

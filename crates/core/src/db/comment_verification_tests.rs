@@ -163,6 +163,7 @@ fn verification_atomically_settles_identity_and_never_double_counts() {
         .unwrap()
         .unwrap();
     let identity = crate::CommentLocatorIdentity {
+        comment_link: None,
         author_label: "Actor".into(),
         text: "hello".into(),
         locator_version: "snapshot".into(),
@@ -178,6 +179,68 @@ fn verification_atomically_settles_identity_and_never_double_counts() {
     assert_eq!(detail.summary.action_counters.confirmed, 1);
     assert_eq!(detail.assignments[0].posted_identity(), Some(identity));
     assert_eq!(detail.summary.state, crate::ThreadCampaignState::Succeeded);
+}
+
+#[test]
+fn comment_link_enrichment_preserves_verified_effect_and_rejects_wrong_post_or_stale_identity() {
+    let (db, campaign, id, context) = fixture();
+    let now = armed(&db, &id, &context);
+    let job = db
+        .claim_comment_verification(&id, now + 5000)
+        .unwrap()
+        .unwrap();
+    let identity = crate::CommentLocatorIdentity {
+        author_label: "Actor".into(),
+        text: "hello".into(),
+        locator_version: "snapshot".into(),
+        frame_sha256: "hash".into(),
+        comment_link: None,
+    };
+    let link = crate::tiktok_comment_link::parse(
+        "https://www.tiktok.com/@creator/photo/123?share_item_id=123&share_comment_id=456",
+    )
+    .unwrap();
+    assert!(db
+        .store_comment_link(&campaign, &id, &identity, &link)
+        .is_err());
+    db.settle_comment_verification(&job, Some(&identity), "{}", None, now + 6000)
+        .unwrap();
+    let wrong = crate::tiktok_comment_link::parse("aweme://aweme/detail?id=999&cid=456").unwrap();
+    assert!(db
+        .store_comment_link(&campaign, &id, &identity, &wrong)
+        .is_err());
+    db.store_comment_link(&campaign, &id, &identity, &link)
+        .unwrap();
+    assert!(
+        db.store_comment_link(&campaign, &id, &identity, &link)
+            .is_err(),
+        "stale identity cannot overwrite enrichment"
+    );
+    let detail = db.get_interaction_campaign(&campaign).unwrap().unwrap();
+    assert_eq!(
+        detail.assignments[0]
+            .posted_identity()
+            .unwrap()
+            .comment_link,
+        Some(link)
+    );
+    assert_eq!(
+        detail.assignments[0].state,
+        crate::ThreadMessageState::Succeeded
+    );
+    assert_eq!(
+        detail.assignments[0]
+            .comment_verification
+            .as_ref()
+            .unwrap()
+            .state,
+        VerificationState::Verified
+    );
+    assert_eq!(detail.summary.action_counters.confirmed, 1);
+    assert!(db
+        .claim_interaction_assignment_for_send(&id)
+        .unwrap()
+        .is_none());
 }
 #[test]
 fn exhausted_readback_keeps_uncertain_and_does_not_send_again() {
@@ -227,6 +290,7 @@ fn stale_observer_transaction_does_not_partially_confirm() {
         )
         .unwrap();
     let identity = crate::CommentLocatorIdentity {
+        comment_link: None,
         author_label: "Actor".into(),
         text: "hello".into(),
         locator_version: "snapshot".into(),
@@ -255,6 +319,7 @@ fn manual_reply_recheck_restores_root_from_durable_parent_without_changing_text(
     let (db, campaign, id, mut context) = fixture();
     let parent_id = Uuid::new_v4().to_string();
     let root = crate::CommentLocatorIdentity {
+        comment_link: None,
         author_label: "Root author".into(),
         text: "Root text".into(),
         locator_version: "android-snapshot-v2".into(),

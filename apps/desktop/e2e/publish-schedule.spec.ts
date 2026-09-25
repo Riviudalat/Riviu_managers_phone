@@ -33,13 +33,25 @@ async function fixture(page: Page, count = 10, fleetSize = 10) {
   await page.getByRole("tab", { name: "Hẹn giờ", exact: true }).click();
 }
 async function drag(page: Page, source: Locator, target: Locator, cancel = false) {
-  await source.scrollIntoViewIfNeeded();
-  const start = (await source.boundingBox())!;
+  const visiblePoint = () => source.evaluate(node => {
+    const box = node.getBoundingClientRect();
+    const list = node.closest(".ps-post-list")!.getBoundingClientRect();
+    const content = node.closest(".ps-content")!.getBoundingClientRect();
+    const top = Math.max(0, box.top, list.top, content.top);
+    const bottom = Math.min(innerHeight, box.bottom, list.bottom, content.bottom);
+    return { x: box.left + box.width / 2, y: (top + bottom) / 2, height: bottom - top };
+  });
+  let start = await visiblePoint();
+  if (start.height < 8) { await source.scrollIntoViewIfNeeded(); start = await visiblePoint(); }
+  expect(start.height).toBeGreaterThanOrEqual(8);
   const end = (await target.boundingBox())!;
-  await page.mouse.move(start.x + start.width / 2, start.y + start.height / 2);
+  const endX = end.x + end.width / 2;
+  const endY = end.y + end.height / 2;
+  expect(await target.evaluate((node, { x, y }) => node.contains(document.elementFromPoint(x, y)), { x: endX, y: endY })).toBe(true);
+  await page.mouse.move(start.x, start.y);
   await page.mouse.down();
-  await page.mouse.move(start.x + start.width / 2 + 12, start.y + start.height / 2, { steps: 2 });
-  await page.mouse.move(end.x + end.width / 2, end.y + end.height / 2, { steps: 6 });
+  await page.mouse.move(start.x + 12, start.y, { steps: 2 });
+  await page.mouse.move(endX, endY, { steps: 6 });
   await expect(page.locator(".ps-drag-ghost")).toBeVisible();
   if (cancel) await page.keyboard.press("Escape");
   await page.mouse.up();

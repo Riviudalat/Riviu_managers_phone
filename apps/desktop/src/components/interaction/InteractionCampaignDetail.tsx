@@ -25,6 +25,7 @@ import type {
 } from "../../types";
 
 const ACTION_KIND_VI: Record<InteractionActionKind, string> = {
+  share: "Share",
   like: "Tim",
   save: "Lưu",
   comment: "Bình luận",
@@ -79,6 +80,8 @@ function actionView(action: PublicActionResult, assignment: InteractionAssignmen
   try { verdict = JSON.parse(action.evidence ?? "null")?.verdict; } catch { /* Evidence remains available in details. */ }
   if (verdict === "alreadyLiked") return { label: "Đã tim từ trước", tone: "ok" };
   if (verdict === "alreadySaved") return { label: "Đã lưu từ trước", tone: "ok" };
+  if (verdict === "noFriends") return { label: "Bỏ qua: không có bạn bè", tone: "info" };
+  if (action.error === "quotaSatisfied") return { label: "Đã đủ lượt, không thao tác", tone: "info" };
   if (verdict === "stateUnreadable") return { label: "Bỏ qua: chưa đọc được trạng thái", tone: "warn" };
   if (verdict === "noControl") return { label: "Bỏ qua: không thấy nút", tone: "warn" };
   if (verdict === "cardChangedBeforeEffect") return { label: "Bỏ qua: bài đã đổi", tone: "warn" };
@@ -569,6 +572,14 @@ export function InteractionCampaignDetailView({
           failedBeforeEffect={actionFailedBeforeEffect}
         />
       )}
+      {detail.seeding && <section aria-label="Ngân sách seeding"><h4>Lượt mới theo từng bài</h4>{[...new Set(detail.assignments.map(a=>a.targetKey))].map(target=><div key={target}>{(['like','save','share'] as const).map(kind=>{
+        const wanted=detail.seeding![`${kind}Count`];if(!wanted)return null;
+        const results=detail.assignments.filter(a=>a.targetKey===target).flatMap(a=>a.actions??[]).filter(a=>a.kind===kind);
+        const done=results.filter(a=>a.state==='confirmed').length;
+        const uncertain=results.filter(a=>a.state==='uncertain'||a.state==='armed').length;
+        const prior=results.filter(a=>a.state==='noOp'&&/alreadyLiked|alreadySaved/.test(a.evidence??'')).length;
+        return <p key={kind}>{ACTION_KIND_VI[kind]}: {done}/{wanted} lượt mới · {prior} đã có · {uncertain} chưa rõ · còn {Math.max(0,wanted-done-uncertain)} lượt chưa đạt</p>;
+      })}</div>)}</section>}
       <ProgressBar
         fraction={
           hasActionCounters

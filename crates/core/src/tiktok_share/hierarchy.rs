@@ -213,27 +213,97 @@ impl Tree {
                 && tiles.iter().all(|tile| self.inside(*tile, index))
             {
                 let rect = node.rect()?;
-                // Both endpoints are centres of visible measured covers inside
-                // the declared scroll container; no absolute screen geometry.
-                let boxes: Vec<_> = self
-                    .grid(plan)
-                    .into_iter()
-                    .filter(|b| contains(&rect, b))
-                    .collect();
-                let top = boxes.iter().min_by(|a, b| a.y.total_cmp(&b.y))?;
-                let bottom = boxes.iter().max_by(|a, b| a.y.total_cmp(&b.y))?;
-                if bottom.y <= top.y {
-                    return None;
+                if plan.labels.package() != "com.zhiliaoapp.musically"
+                    || plan.labels.resource_version() != Some("45.7.3")
+                {
+                    let boxes: Vec<_> = self
+                        .grid(plan)
+                        .into_iter()
+                        .filter(|box_| contains(&rect, box_))
+                        .collect();
+                    let top = boxes.iter().min_by(|a, b| a.y.total_cmp(&b.y))?;
+                    let bottom = boxes.iter().max_by(|a, b| a.y.total_cmp(&b.y))?;
+                    if bottom.y <= top.y {
+                        return None;
+                    }
+                    let x = rect.centre().x;
+                    return Some(crate::SwipeGesture {
+                        from: crate::TapPoint {
+                            x,
+                            y: bottom.centre().y,
+                        },
+                        to: crate::TapPoint {
+                            x,
+                            y: top.centre().y,
+                        },
+                        duration_ms: 600,
+                    });
                 }
-                let x = rect.centre().x;
+                let navigation_top = [TikTokControl::ProfileTab, TikTokControl::FeedTab]
+                    .into_iter()
+                    .filter_map(|control| {
+                        self.control(plan.labels.package(), plan.labels.label(control))
+                    })
+                    .map(|button| button.y)
+                    .min_by(f64::total_cmp)
+                    .unwrap_or(rect.y + rect.height);
+                let clip = |mut cover: ElementBox| {
+                    let left = cover.x.max(rect.x);
+                    let right = (cover.x + cover.width).min(rect.x + rect.width);
+                    let top = cover.y.max(rect.y);
+                    let bottom = (cover.y + cover.height)
+                        .min(rect.y + rect.height)
+                        .min(navigation_top);
+                    if right <= left || bottom <= top {
+                        return None;
+                    }
+                    cover.x = left;
+                    cover.y = top;
+                    cover.width = right - left;
+                    cover.height = bottom - top;
+                    Some(cover)
+                };
+                let mut boxes: Vec<_> = self.grid(plan).into_iter().filter_map(clip).collect();
+                // A pinned cover is excluded from the candidate search, but its
+                // measured rectangle can anchor a longer swipe inside this grid.
+                if let Some(label) = plan.labels.pinned_badge_id() {
+                    let badges: Vec<_> = self
+                        .matching(plan.labels.package(), label.to_query())
+                        .into_iter()
+                        .filter_map(|badge| self.nodes[badge].rect())
+                        .collect();
+                    for tile in &tiles {
+                        let Some(cover) = self.nodes[*tile].rect() else {
+                            continue;
+                        };
+                        if cover.enabled && badges.iter().any(|badge| contains(&cover, badge)) {
+                            if let Some(cover) = clip(cover) {
+                                boxes.push(cover);
+                            }
+                        }
+                    }
+                }
+                let (top, bottom, left, right) = boxes
+                    .iter()
+                    .flat_map(|top| {
+                        boxes.iter().filter_map(move |bottom| {
+                            let left = top.x.max(bottom.x);
+                            let right = (top.x + top.width).min(bottom.x + bottom.width);
+                            (bottom.y > top.y && right > left).then_some((top, bottom, left, right))
+                        })
+                    })
+                    .max_by(|(top_a, bottom_a, _, _), (top_b, bottom_b, _, _)| {
+                        (bottom_a.y - top_a.y).total_cmp(&(bottom_b.y - top_b.y))
+                    })?;
+                let x = (left + right) / 2.0;
                 return Some(crate::SwipeGesture {
                     from: crate::TapPoint {
                         x,
-                        y: bottom.centre().y,
+                        y: bottom.y + bottom.height * 0.9,
                     },
                     to: crate::TapPoint {
                         x,
-                        y: top.centre().y,
+                        y: top.y + top.height * 0.1,
                     },
                     duration_ms: 600,
                 });
@@ -241,5 +311,61 @@ impl Tree {
             current = node.parent;
         }
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn measured_pinned_row_extends_profile_scroll_without_crossing_navigation() {
+        let plan =
+            PublishVerificationPlan::for_build("com.zhiliaoapp.musically", "en", "45.7.3").unwrap();
+        let xml = r#"<hierarchy>
+            <node package="com.zhiliaoapp.musically" enabled="true" scrollable="true" bounds="[0,923][1080,1965]">
+                <node package="com.zhiliaoapp.musically" resource-id="com.zhiliaoapp.musically:id/cover" enabled="true" bounds="[361,923][719,1400]">
+                    <node package="com.zhiliaoapp.musically" resource-id="com.zhiliaoapp.musically:id/tv_top" text="Pinned" enabled="true" bounds="[377,940][483,977]"/>
+                </node>
+                <node package="com.zhiliaoapp.musically" resource-id="com.zhiliaoapp.musically:id/cover" enabled="true" bounds="[361,1403][719,1880]"/>
+                <node package="com.zhiliaoapp.musically" resource-id="com.zhiliaoapp.musically:id/cover" enabled="true" bounds="[361,1883][719,2360]"/>
+            </node>
+            <node package="com.zhiliaoapp.musically" content-desc="Profile" enabled="true" clickable="true" bounds="[864,1965][1080,2094]"/>
+        </hierarchy>"#;
+        let observed = Tree::parse(crate::HierarchySourceSnapshot {
+            generation: 1,
+            xml: xml.into(),
+        })
+        .unwrap();
+        assert_eq!(observed.grid(&plan).len(), 2);
+        let gesture = observed.grid_scroll(&plan).expect("measured grid swipe");
+        assert!((361.0..719.0).contains(&gesture.from.x));
+        assert_eq!(gesture.from.x, gesture.to.x);
+        assert!((1883.0..1965.0).contains(&gesture.from.y));
+        assert!((923.0..1400.0).contains(&gesture.to.y));
+        assert!(gesture.from.y - gesture.to.y > 950.0);
+    }
+
+    #[test]
+    fn trill_profile_scroll_keeps_original_visible_cover_centres() {
+        let plan =
+            PublishVerificationPlan::for_build("com.ss.android.ugc.trill", "en", "38.3.2").unwrap();
+        let xml = r#"<hierarchy>
+            <node package="com.ss.android.ugc.trill" enabled="true" scrollable="true" bounds="[0,500][1080,1800]">
+                <node package="com.ss.android.ugc.trill" resource-id="com.ss.android.ugc.trill:id/cover" enabled="true" bounds="[0,550][350,1000]"/>
+                <node package="com.ss.android.ugc.trill" resource-id="com.ss.android.ugc.trill:id/cover" enabled="true" bounds="[0,1050][350,1500]"/>
+            </node>
+        </hierarchy>"#;
+        let observed = Tree::parse(crate::HierarchySourceSnapshot {
+            generation: 1,
+            xml: xml.into(),
+        })
+        .unwrap();
+        let gesture = observed
+            .grid_scroll(&plan)
+            .expect("measured Trill grid swipe");
+        assert_eq!(gesture.from.x, 540.0);
+        assert_eq!(gesture.from.y, 1275.0);
+        assert_eq!(gesture.to.y, 775.0);
     }
 }

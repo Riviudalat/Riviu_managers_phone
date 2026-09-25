@@ -790,6 +790,23 @@ fn select_foreground_tiktok_package(
     Ok(package)
 }
 
+fn select_preferred_tiktok_package(
+    udid: &str,
+    installed: &[String],
+    preferred: &str,
+) -> anyhow::Result<String> {
+    let preferred = adb::validate_package_name(preferred)?;
+    anyhow::ensure!(
+        riviu_core::tiktok_target::is_measured_android_tiktok(preferred),
+        "selected package {preferred} has no measured TikTok adapter"
+    );
+    anyhow::ensure!(
+        installed.iter().any(|package| package == preferred),
+        "selected package {preferred} is no longer installed on {udid}"
+    );
+    Ok(preferred.to_string())
+}
+
 pub struct AndroidDriver {
     trace: Mutex<Option<riviu_core::ui_automation::trace::TraceRecorder>>,
     gui_reasoner: Mutex<Option<riviu_core::ui_automation::SharedReasoner>>,
@@ -1007,7 +1024,17 @@ impl AndroidDriver {
     /// but not `dumpsys`/`getprop` — the caller renders "không đọc được" from empty,
     /// and an error here should not hide the package that DID resolve.
     pub async fn tiktok_build(&self, serial: &str) -> anyhow::Result<(String, String, String)> {
-        let package = DeviceDriver::resolve_tiktok_package(self, serial).await?;
+        self.tiktok_build_with_preference(serial, None).await
+    }
+
+    async fn tiktok_build_with_preference(
+        &self,
+        serial: &str,
+        preferred: Option<&str>,
+    ) -> anyhow::Result<(String, String, String)> {
+        let package = self
+            .resolve_tiktok_package_with_preference(serial, preferred)
+            .await?;
         let checked = adb::validate_package_name(&package)?;
         let version = self
             .adb
@@ -1067,6 +1094,60 @@ impl AndroidDriver {
         let locale =
             crate::adb::parse_locale(&locale_property, &locale_setting).unwrap_or_default();
         Ok((PACKAGE.into(), version, locale))
+    }
+
+    async fn installed_tiktok_packages(&self, udid: &str) -> anyhow::Result<Vec<String>> {
+        let mut readings = Vec::new();
+        let mut seen = HashSet::new();
+        for candidate in riviu_core::tiktok_target::measured_android_packages() {
+            let candidate = adb::validate_package_name(candidate)?;
+            if !seen.insert(candidate) {
+                continue;
+            }
+            let reading = self
+                .adb
+                .shell_output(
+                    udid,
+                    &format!("pm list packages {candidate}"),
+                    adb::DEFAULT_TIMEOUT,
+                )
+                .await;
+            readings.push((candidate, reading));
+        }
+        let listing = complete_tiktok_package_listing(udid, readings)?;
+        match riviu_core::tiktok_target::resolve_installed_android_tiktok(&listing) {
+            Ok(package) => Ok(vec![package]),
+            Err(riviu_core::tiktok_target::TargetResolution::Ambiguous(found)) => Ok(found),
+            Err(error) => Err(anyhow!("{udid}: {error}")),
+        }
+    }
+
+    async fn resolve_tiktok_package_with_preference(
+        &self,
+        udid: &str,
+        preferred: Option<&str>,
+    ) -> anyhow::Result<String> {
+        if preferred.is_none() {
+            if let Some(known) = self.tiktok_packages.lock().get(udid) {
+                return Ok(known.clone());
+            }
+        }
+        let installed = self.installed_tiktok_packages(udid).await?;
+        let resolved = if let Some(preferred) = preferred {
+            select_preferred_tiktok_package(udid, &installed, preferred)?
+        } else if installed.len() == 1 {
+            installed[0].clone()
+        } else {
+            select_foreground_tiktok_package(
+                udid,
+                &installed,
+                self.adb.foreground_package(udid).await,
+            )?
+        };
+        self.tiktok_packages
+            .lock()
+            .insert(udid.to_string(), resolved.clone());
+        Ok(resolved)
     }
 
     async fn available_storage_bytes_for(&self, serial: &str) -> anyhow::Result<u64> {
@@ -2200,6 +2281,14 @@ impl DeviceDriver for AndroidDriver {
         AndroidDriver::threads_build(self, udid).await
     }
 
+    async fn tiktok_build_with_preference(
+        &self,
+        udid: &str,
+        preferred: Option<&str>,
+    ) -> anyhow::Result<(String, String, String)> {
+        AndroidDriver::tiktok_build_with_preference(self, udid, preferred).await
+    }
+
     async fn verify_automation_readiness(&self, udid: &str) -> anyhow::Result<()> {
         let screen = self.screen_guard_state(udid).await?;
         anyhow::ensure!(
@@ -2214,51 +2303,16 @@ impl DeviceDriver for AndroidDriver {
     }
 
     async fn resolve_tiktok_package(&self, udid: &str) -> anyhow::Result<String> {
-        if let Some(known) = self.tiktok_packages.lock().get(udid) {
-            return Ok(known.clone());
-        }
-        let mut readings = Vec::new();
-        let mut seen = HashSet::new();
-        for candidate in riviu_core::tiktok_target::measured_android_packages() {
-            let candidate = adb::validate_package_name(candidate)?;
-            if !seen.insert(candidate) {
-                continue;
-            }
-            let reading = self
-                .adb
-                .shell_output(
-                    udid,
-                    &format!("pm list packages {candidate}"),
-                    adb::DEFAULT_TIMEOUT,
-                )
-                .await;
-            readings.push((candidate, reading));
-        }
-        // One unreadable candidate makes both absence and uniqueness unproved.
-        let listing = complete_tiktok_package_listing(udid, readings)?;
-        let resolved = match riviu_core::tiktok_target::resolve_installed_android_tiktok(&listing) {
-            Ok(package) => package,
-            Err(riviu_core::tiktok_target::TargetResolution::Ambiguous(found)) => {
-                // Two measured builds side by side. Whichever is in front is the one
-                // the operator is working with; anything else would be a coin flip.
-                //
-                // Read through adb rather than opening a session: resolving a package
-                // must not have the side effect of creating one, and `mCurrentFocus`
-                // needs no agent.
-                select_foreground_tiktok_package(
-                    udid,
-                    &found,
-                    self.adb.foreground_package(udid).await,
-                )?
-            }
-            Err(error) => {
-                return Err(anyhow!("{udid}: {error}"));
-            }
-        };
-        self.tiktok_packages
-            .lock()
-            .insert(udid.to_string(), resolved.clone());
-        Ok(resolved)
+        self.resolve_tiktok_package_with_preference(udid, None)
+            .await
+    }
+
+    async fn resolve_tiktok_package_with_preference(
+        &self,
+        udid: &str,
+        preferred: Option<&str>,
+    ) -> anyhow::Result<String> {
+        AndroidDriver::resolve_tiktok_package_with_preference(self, udid, preferred).await
     }
 
     async fn inspect_app_process(
@@ -2713,6 +2767,29 @@ mod tests {
         .is_err());
     }
 
+    #[test]
+    fn persisted_package_choice_must_be_measured_and_still_installed() {
+        let installed = vec![
+            "com.ss.android.ugc.trill".to_string(),
+            "com.zhiliaoapp.musically".to_string(),
+        ];
+        assert_eq!(
+            select_preferred_tiktok_package("fixture", &installed, "com.zhiliaoapp.musically")
+                .unwrap(),
+            "com.zhiliaoapp.musically"
+        );
+        let missing =
+            select_preferred_tiktok_package("fixture", &installed[..1], "com.zhiliaoapp.musically")
+                .unwrap_err()
+                .to_string();
+        assert!(missing.contains("no longer installed"));
+        let unsupported =
+            select_preferred_tiktok_package("fixture", &installed, "com.example.fake")
+                .unwrap_err()
+                .to_string();
+        assert!(unsupported.contains("no measured TikTok adapter"));
+    }
+
     #[tokio::test]
     async fn dual_package_foreground_probe_preserves_transport_failure_details() {
         let installed = vec![
@@ -2857,14 +2934,14 @@ mod tests {
     #[test]
     fn tiktok_package_resolution_checks_complete_readings_before_caching() {
         let source = include_str!("mod.rs");
-        let start = source.find("async fn resolve_tiktok_package(").unwrap();
+        let start = source.find("async fn installed_tiktok_packages(").unwrap();
         let body = &source[start..];
-        let body = &body[..body.find("async fn inspect_app_process(").unwrap()];
+        let body = &body[..body.find("async fn available_storage_bytes_for(").unwrap()];
         let checked = body
             .find("complete_tiktok_package_listing(udid, readings)?")
             .unwrap();
         let resolved = body
-            .find("resolve_installed_android_tiktok(&listing)")
+            .find("let installed = self.installed_tiktok_packages(udid).await?")
             .unwrap();
         let cached = body
             .find(".insert(udid.to_string(), resolved.clone())")

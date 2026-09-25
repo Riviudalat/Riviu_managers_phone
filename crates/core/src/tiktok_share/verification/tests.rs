@@ -141,8 +141,10 @@ fn short_ellipsized_caption_requests_expansion_without_accepting_a_prefix() {
         started: Instant::now(),
         caption_expanded: false,
         public_link: None,
+        trace_nonce: [0; 16],
         diagnostic: VerificationDiagnostic {
             expanded_photo_error: None,
+            candidate_trace: Vec::new(),
             contract_version: 1,
             package: PACKAGE.into(),
             locale: "en".into(),
@@ -279,7 +281,9 @@ async fn comments_recovery_observes_post_before_grid_and_never_backs_from_compos
             started: Instant::now(),
             caption_expanded: false,
             public_link: None,
+            trace_nonce: [0; 16],
             diagnostic: VerificationDiagnostic {
+                candidate_trace: Vec::new(),
                 contract_version: 1,
                 package: TRILL.into(),
                 locale: "en".into(),
@@ -333,6 +337,7 @@ fn identity() -> SubmissionIdentity {
 
 struct Session {
     trill: bool,
+    global_45_7_3: bool,
     comments_back_target: &'static str,
     page: Mutex<&'static str>,
     page_number: Mutex<u32>,
@@ -364,6 +369,7 @@ impl Default for Session {
     fn default() -> Self {
         Self {
             trill: false,
+            global_45_7_3: false,
             comments_back_target: "post",
             page: Mutex::new("feed"),
             page_number: Mutex::new(0),
@@ -437,7 +443,7 @@ impl Session {
             "profile" => {
                 // Account controls reproduce the already retained 46.2.1 fixture;
                 // the scroll container is an explicit synthetic observation.
-                format!("{}{}{}<node package=\"{PACKAGE}\" enabled=\"true\" scrollable=\"true\" bounds=\"[0,500][900,1750]\">{}{}</node>", node("", "Edit", "", "[600,100][750,150]", true), node(":id/scn", "@fixture.account", "", "[300,160][600,210]", true), node("", "", "Profile menu", "[800,100][900,150]", true), node(":id/cover", "", "", "[0,550][400,1000]", true), node(":id/cover", "", "", "[0,1050][400,1500]", true))
+                format!("{}{}{}<node package=\"{PACKAGE}\" enabled=\"true\" scrollable=\"true\" bounds=\"[0,500][900,1750]\">{}{}</node>", node("", "Edit", "", "[600,100][750,150]", true), node(if self.global_45_7_3 { ":id/s0v" } else { ":id/scn" }, "@fixture.account", "", "[300,160][600,210]", true), node("", "", "Profile menu", "[800,100][900,150]", true), node(":id/cover", "", "", "[0,550][400,1000]", true), node(":id/cover", "", "", "[0,1050][400,1500]", true))
             }
             "post" => format!(
                 "{}{}{}{}{}",
@@ -448,7 +454,11 @@ impl Session {
                     String::new()
                 },
                 node(
-                    ":id/tv_post_time",
+                    if self.global_45_7_3 {
+                        ":id/zwj"
+                    } else {
+                        ":id/tv_post_time"
+                    },
                     if self.other_caption_same_but_old && *self.current_tile.lock() == 1 {
                         "2h ago"
                     } else if self.malformed_time {
@@ -1048,6 +1058,63 @@ async fn matching_post_on_second_viewport_requires_grid_restoration() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn global_45_7_3_candidate_trace_is_bounded_and_redacts_caption_and_time() {
+    let session = Session {
+        global_45_7_3: true,
+        matching_page: 1,
+        ..Default::default()
+    };
+    let plan = PublishVerificationPlan::for_build(PACKAGE, "en", "45.7.3").unwrap();
+    let captured = capture_submission_link(&session, &plan, CAPTION, &identity()).await;
+    assert_eq!(captured.outcome, OwnPostLink::Captured(URL.into()));
+    let trace = &captured.diagnostic.candidate_trace;
+    assert_eq!(trace.len(), captured.diagnostic.candidates_visited as usize);
+    assert!(trace.len() <= MAX_CANDIDATES as usize);
+    assert_eq!((trace[0].viewport, trace[0].index), (1, 1));
+    assert_eq!((trace[2].viewport, trace[2].index), (2, 1));
+    assert_eq!(
+        trace[0].reason_code,
+        Some(VerificationReason::CaptionMismatch)
+    );
+    assert_eq!(trace[0].caption_digest, trace[1].caption_digest);
+    assert!(trace.iter().all(|entry| {
+        entry
+            .caption_digest
+            .as_ref()
+            .is_some_and(|digest| digest.len() == 64)
+            && entry
+                .time_digest
+                .as_ref()
+                .is_some_and(|digest| digest.len() == 64)
+            && entry.profile_snapshot_generation > 0
+    }));
+    let serialized = serde_json::to_string(trace).unwrap();
+    assert!(!serialized.contains(CAPTION));
+    assert!(!serialized.contains("Another publication"));
+    assert!(!serialized.contains("5m ago"));
+}
+
+#[tokio::test(start_paused = true)]
+async fn global_45_7_3_candidate_trace_records_rejections_without_copying() {
+    let session = Session {
+        global_45_7_3: true,
+        matching_page: 99,
+        ..Default::default()
+    };
+    let plan = PublishVerificationPlan::for_build(PACKAGE, "en", "45.7.3").unwrap();
+    let captured = capture_submission_link(&session, &plan, CAPTION, &identity()).await;
+    assert!(captured.outcome.link().is_none());
+    assert_eq!(captured.diagnostic.copy_attempts, 0);
+    assert!(session.writes.lock().is_empty());
+    let trace = &captured.diagnostic.candidate_trace;
+    assert_eq!(trace.len(), captured.diagnostic.candidates_visited as usize);
+    assert!(trace.len() <= MAX_CANDIDATES as usize);
+    assert!(trace
+        .iter()
+        .all(|entry| { entry.reason_code == Some(VerificationReason::CaptionMismatch) }));
+}
+
+#[tokio::test(start_paused = true)]
 async fn ambiguous_caption_or_unmeasured_time_never_reaches_share() {
     for (duplicate_caption, malformed_time, reason) in [
         (true, false, VerificationReason::CaptionAmbiguous),
@@ -1219,8 +1286,10 @@ fn a_changed_post_snapshot_cannot_combine_prior_caption_with_new_time() {
         started: Instant::now(),
         caption_expanded: false,
         public_link: None,
+        trace_nonce: [0; 16],
         diagnostic: VerificationDiagnostic {
             expanded_photo_error: None,
+            candidate_trace: Vec::new(),
             navigation_matches: 0,
             navigation_enabled: 0,
             navigation_clickable: 0,

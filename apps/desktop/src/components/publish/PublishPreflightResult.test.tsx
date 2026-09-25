@@ -59,6 +59,58 @@ describe("publish preflight result", () => {
     expect(screen.getByText("Chưa có bộ xác minh bài Threads")).toBeVisible();
     expect(screen.queryByText(/chọn nhạc trên bản TikTok/i)).toBeNull();
   });
+
+  it("opens on blocked machines, keeps global blockers visible, and lets the operator inspect passed machines", async () => {
+    const passed = (ordinal: number): PublishPreflightAssignmentReport => ({
+      ...row,
+      ordinal,
+      udid: `phone-${ordinal + 1}`,
+      bundleId: `bundle-${ordinal + 1}`,
+      media: "pass",
+      composer: "pass",
+      soundPicker: "pass",
+      storage: "pass",
+      issues: [],
+    });
+    const blocked = {
+      ...row,
+      ordinal: 4,
+      udid: "phone-5",
+      bundleId: "bundle-5",
+    };
+    const sheetIssue = {
+      code: "sheet_connection_unverified",
+      message: "Sheet chưa được xác minh",
+    };
+    render(
+      <PublishPreflightResult
+        report={{
+          ...report,
+          assignments: [passed(0), passed(1), passed(2), passed(3), blocked],
+          issues: [sheetIssue, ...blocked.issues],
+        }}
+        machineName={(udid) => `Máy ${udid.split("-")[1]}`}
+        page={0}
+        onPage={vi.fn()}
+        onRetry={vi.fn()}
+        busy={false}
+      />,
+    );
+    expect(screen.getByText("Kết nối Sheet chưa được xác minh")).toBeVisible();
+    expect(screen.getByText("1 điều kiện chung · 1 máy cần xử lý · 4 máy đạt")).toBeVisible();
+    expect(screen.getByRole("article", { name: "Máy 5" })).toBeVisible();
+    expect(screen.queryByRole("article", { name: "Máy 1" })).toBeNull();
+    expect(screen.getByRole("button", { name: "Đạt (4)" })).toBeVisible();
+    await userEvent.click(screen.getByRole("button", { name: "Đạt (4)" }));
+    expect(screen.getByRole("article", { name: "Máy 1" })).toBeVisible();
+    expect(screen.queryByRole("article", { name: "Máy 5" })).toBeNull();
+  });
+
+  it("explains an empty passed-machine filter instead of leaving a blank list", async () => {
+    render(<PublishPreflightResult report={report} machineName={() => "Máy 1"} page={0} onPage={vi.fn()} onRetry={vi.fn()} busy={false} />);
+    await userEvent.click(screen.getByRole("button", { name: "Đạt (0)" }));
+    expect(screen.getByText("Không có máy trong nhóm này.")).toBeVisible();
+  });
   it("shows the blocking link check when all four legacy checks pass",()=>{
     const issue={code:"link_verification_unmeasured",udid:"phone-1",message:"locale unsupported"};
     render(<PublishPreflightResult report={{...report,assignments:[{...row,composer:"pass",soundPicker:"pass",issues:[issue],checks:[{id:"link",label:"Nhận diện xác minh liên kết",status:"blocked",reason:issue.message}]}],issues:[issue]}} machineName={()=>"Máy 1"} page={0} onPage={vi.fn()} onRetry={vi.fn()} busy={false}/>);

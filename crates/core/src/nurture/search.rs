@@ -254,10 +254,11 @@ pub(super) async fn open(
             query_matches(&tree, package, keyword),
             "Từ khóa đã thay đổi khi tìm kiếm"
         );
-        if unique(nodes(&tree, package, |n| {
+        if nodes(&tree, package, |n| {
             ["videos", "video"].contains(&fold(n.attr("content-desc")).as_str())
-        }))?
-        .is_some()
+        })
+        .len()
+            == 1
         {
             break;
         }
@@ -281,16 +282,26 @@ pub(super) async fn open(
             query_matches(&tree, package, keyword),
             "Kết quả không thuộc từ khóa đã nhập"
         );
-        let videos_selected = tree.nodes.iter().any(|n| {
+        let tabs = nodes(&tree, package, |n| {
+            ["videos", "video"].contains(&fold(n.attr("content-desc")).as_str())
+        });
+        // During insertion of LIVE, TikTok briefly exposes both old and new
+        // Videos tab geometries. This is pending rendering, not permission to
+        // pick one arbitrarily or a permanent search failure.
+        let [tab] = tabs.as_slice() else {
+            prior_tab = None;
+            super::sleep_interruptible(Duration::from_millis(400), stop).await;
+            continue;
+        };
+        let videos_selected = tree.nodes.iter().enumerate().any(|(i, n)| {
             n.visible(package)
+                && tree.ancestors_visible(i)
+                && n.attr("enabled") == "true"
                 && ["videos", "video"].contains(&fold(n.attr("content-desc")).as_str())
                 && (n.attr("selected") == "true" || n.attr("clickable") == "false")
         });
         if !videos_selected {
-            let tab = unique(nodes(&tree, package, |n| {
-                ["videos", "video"].contains(&fold(n.attr("content-desc")).as_str())
-            }))?;
-            if let Some(tab) = tab {
+            {
                 // TikTok inserts LIVE before Videos after loading results. Require two
                 // agreeing fresh geometries and verify selection before touching a card.
                 if prior_tab.as_ref().is_some_and(|prior| {
@@ -305,10 +316,8 @@ pub(super) async fn open(
                     tab_taps += 1;
                     prior_tab = None;
                 } else {
-                    prior_tab = Some(tab);
+                    prior_tab = Some(tab.clone());
                 }
-            } else {
-                prior_tab = None;
             }
             super::sleep_interruptible(Duration::from_millis(400), stop).await;
             continue;
@@ -625,6 +634,7 @@ mod tests {
         stage: Mutex<usize>,
         typed: Mutex<String>,
         wrong_query: bool,
+        duplicate_tabs: Mutex<usize>,
     }
     #[async_trait::async_trait]
     impl UiSession for Phone {
@@ -633,7 +643,14 @@ mod tests {
             match *stage {
                 0 => *stage = 1,
                 1 if p.x > 500.0 => *stage = 2,
-                2 => *stage = 3,
+                2 => {
+                    assert_eq!(
+                        *self.duplicate_tabs.lock().unwrap(),
+                        0,
+                        "no tap while tab is ambiguous"
+                    );
+                    *stage = 3;
+                }
                 3 => *stage = 4,
                 _ => {}
             }
@@ -714,7 +731,21 @@ mod tests {
                         )
                 }
                 2 => {
+                    let mut remaining = self.duplicate_tabs.lock().unwrap();
+                    let duplicate = if *remaining > 0 {
+                        *remaining -= 1;
+                        node(
+                            "",
+                            "Videos",
+                            "android.widget.FrameLayout",
+                            "[178,200][358,300]",
+                            "",
+                        )
+                    } else {
+                        String::new()
+                    };
                     input
+                        + &duplicate
                         + &node(
                             "",
                             "Videos",
@@ -754,6 +785,7 @@ mod tests {
             stage: Mutex::new(0),
             typed: Mutex::new(String::new()),
             wrong_query: false,
+            duplicate_tabs: Mutex::new(2),
         };
         open(
             &phone,
@@ -773,6 +805,7 @@ mod tests {
             stage: Mutex::new(0),
             typed: Mutex::new(String::new()),
             wrong_query: true,
+            duplicate_tabs: Mutex::new(0),
         };
         assert!(open(
             &phone,
@@ -788,6 +821,7 @@ mod tests {
             stage: Mutex::new(0),
             typed: Mutex::new(String::new()),
             wrong_query: false,
+            duplicate_tabs: Mutex::new(0),
         };
         assert!(open(
             &phone,

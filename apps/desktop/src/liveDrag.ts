@@ -27,7 +27,9 @@ export type DragOutcome =
   /// not post a swipe on top of it.
   | "live"
   /// Nothing usable was injected. The caller should send the gesture the old way.
-  | "fallback";
+  | "fallback"
+  /// A DOWN may have reached the phone. Never replay through the agent.
+  | "uncertain";
 
 export interface LiveDrag {
   /// Begin injecting, at the point the gesture *started* rather than where it is now — the
@@ -35,7 +37,7 @@ export interface LiveDrag {
   /// needs the finger to land where the operator put it.
   begin(x: number, y: number): void;
   move(x: number, y: number): void;
-  end(x: number, y: number): Promise<DragOutcome>;
+  end(x: number, y: number, moveBeforeUp?: boolean, minHoldMs?: number): Promise<DragOutcome>;
 }
 
 /// Told once per drag when the live path gives up, and why.
@@ -81,16 +83,21 @@ export async function liveTap(
     }
   } catch (error) {
     onFallback?.(`tap down threw: ${describeError(error)}`);
-    return "fallback";
+    try { await send("up", x, y); } catch { /* Producer loss can prevent rescue. */ }
+    return "uncertain";
   }
   await new Promise((resolve) => setTimeout(resolve, TAP_HOLD_MS));
   try {
-    await send("up", x, y);
+    if (!(await send("up", x, y))) {
+      onFallback?.("tap up refused; the pointer may be stuck");
+      return "uncertain";
+    }
   } catch (error) {
     // The finger is down and this is the only thing that lifts it. Nothing left to try, and
     // reporting a fallback would be worse than useless: the caller would tap again on top of
     // a pointer that never came up.
     onFallback?.(`tap up threw, the pointer may be stuck: ${describeError(error)}`);
+    return "uncertain";
   }
   return "live";
 }
@@ -104,7 +111,8 @@ export function createLiveDrag(send: SendTouch, onFallback?: OnFallback): LiveDr
   /// Whether a DOWN actually reached the phone. Not the same as `began`, which only says the
   /// caller asked: if the DOWN itself failed there is no finger on the screen, and the
   /// rescue UP in `end` would be a release of something that never touched down.
-  let landed = false;
+  let mayHaveLanded = false;
+  let downAcknowledgedAt = 0;
   let told = false;
 
   const giveUp = (reason: string) => {
@@ -118,10 +126,13 @@ export function createLiveDrag(send: SendTouch, onFallback?: OnFallback): LiveDr
     chain = chain.then(async () => {
       if (!live) return;
       try {
+        if (action === "down") mayHaveLanded = true;
         // `false` is the phone saying it has no producer to touch -- a fallback, not a
         // failure. A throw is a real one. Both end the live path the same way.
-        if (!(await send(action, x, y))) giveUp(`${action} refused: no producer`);
-        else if (action === "down") landed = true;
+        if (!(await send(action, x, y))) {
+          if (action === "down") mayHaveLanded = false;
+          giveUp(`${action} refused: no producer`);
+        } else if (action === "down") downAcknowledgedAt = performance.now();
       } catch (error) {
         giveUp(`${action} threw: ${describeError(error)}`);
       }
@@ -161,7 +172,7 @@ export function createLiveDrag(send: SendTouch, onFallback?: OnFallback): LiveDr
       pending = { x, y };
       flush();
     },
-    async end(x, y) {
+    async end(x, y, moveBeforeUp = true, minHoldMs = 0) {
       if (!began) return "fallback";
       // Drain rather than discard. If the pointer's last sample is still waiting behind the
       // DOWN, dropping it would collapse the whole gesture into a single jump to the release
@@ -170,21 +181,28 @@ export function createLiveDrag(send: SendTouch, onFallback?: OnFallback): LiveDr
       // The release point then goes as a MOVE before the UP even though the UP carries
       // coordinates of its own: some views read the release position, others integrate the
       // path, and a flick that ends off the last MOVE is a flick at the wrong speed.
-      step("move", x, y);
+      if (moveBeforeUp) step("move", x, y);
+      if (minHoldMs > 0) {
+        chain = chain.then(async () => {
+          if (!live || !downAcknowledgedAt) return;
+          const remaining = minHoldMs - (performance.now() - downAcknowledgedAt);
+          if (remaining > 0) await new Promise(resolve => setTimeout(resolve, remaining));
+        });
+      }
       step("up", x, y);
       await chain;
       // A drag that died halfway has already put a finger on the phone and moved it. Lifting
       // it is not optional -- without this the phone keeps a pointer down forever and every
       // later gesture joins the abandoned one.
       if (!live) {
-        if (landed) {
+        if (mayHaveLanded) {
           try {
             await send("up", x, y);
           } catch {
             // Nothing left to try. The producer restarting will clear it.
           }
         }
-        return "fallback";
+        return mayHaveLanded ? "uncertain" : "fallback";
       }
       return "live";
     },
@@ -205,12 +223,13 @@ export interface LiveDragMember {
 export interface LiveDragSplit {
   live: string[];
   fallback: string[];
+  uncertain: string[];
 }
 
 export interface LiveDragGroup {
   begin(x: number, y: number): void;
   move(x: number, y: number): void;
-  end(x: number, y: number): Promise<LiveDragSplit>;
+  end(x: number, y: number, moveBeforeUp?: boolean, minHoldMs?: number): Promise<LiveDragSplit>;
 }
 
 /// Drive one live drag per phone off a single pointer stream.
@@ -246,16 +265,17 @@ export function createLiveDragGroup(
     move(x, y) {
       for (const { drag } of drags) drag.move(x, y);
     },
-    async end(x, y) {
+    async end(x, y, moveBeforeUp = true, minHoldMs = 0) {
       const outcomes = await Promise.all(
         drags.map(async ({ udid, drag }) => ({
           udid,
-          outcome: await drag.end(x, y),
+          outcome: await drag.end(x, y, moveBeforeUp, minHoldMs),
         })),
       );
       return {
         live: outcomes.filter((row) => row.outcome === "live").map((row) => row.udid),
-        fallback: outcomes.filter((row) => row.outcome !== "live").map((row) => row.udid),
+        fallback: outcomes.filter((row) => row.outcome === "fallback").map((row) => row.udid),
+        uncertain: outcomes.filter((row) => row.outcome === "uncertain").map((row) => row.udid),
       };
     },
   };

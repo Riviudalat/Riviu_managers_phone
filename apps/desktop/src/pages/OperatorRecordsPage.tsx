@@ -17,6 +17,8 @@ import { useWorkspaceDraft } from "../workspaceDraft";
 import { flowConnectorInfo, interactionReadAccount } from "../api";
 import { EmptyState, LoadingState, StatusNotice } from "../components/States";
 import { useAsyncList } from "../useAsyncList";
+import { useMediaQuery } from "../useMediaQuery";
+import { useModalFocus } from "../components/useModalFocus";
 
 const EMPTY: Record<OperatorRecordKind, JsonObject> = {
   account: {
@@ -51,6 +53,8 @@ export function OperatorRecordsPage({
 }) {
   const [search, setSearch] = useState("");
   const importInput = useRef<HTMLInputElement>(null);
+  const nameInput = useRef<HTMLInputElement>(null);
+  const compactEditor = useMediaQuery("(max-width: 1120px)");
   const readRecords = useCallback(() => operatorList(kind), [kind]);
   const { data, error: loadError, loading, initialLoading, refreshing, load } = useAsyncList(readRecords);
   const records = data ?? [];
@@ -74,6 +78,16 @@ export function OperatorRecordsPage({
     return () => { active = false; };
   }, [kind]);
   const dirty = draft !== null && JSON.stringify(draft) !== baseline;
+  const closeEditor = async () => {
+    if (!dirty || await requestConfirm({
+      title: "Bỏ thay đổi?",
+      message: "Bản ghi chưa lưu.",
+      confirmLabel: "Bỏ thay đổi",
+    })) setDraft(null);
+  };
+  const editorRef = useModalFocus<HTMLElement>(() => void closeEditor(), Boolean(draft) && compactEditor, {
+    initialFocus: () => nameInput.current,
+  });
   const save = async () => {
     if (!draft || busy) return false;
     setBusy(true);
@@ -210,6 +224,8 @@ export function OperatorRecordsPage({
           Không tải được bản ghi: {loadError}{data !== undefined && " · Đang giữ dữ liệu lần tải trước."}
         </StatusNotice>
       )}
+      <div className="operator-record-layout" data-editor-open={Boolean(draft)}>
+      <div className="operator-record-main">
       {visible.length > 0 && <table aria-label="Bản ghi" aria-busy={refreshing}>
         <thead>
           <tr>
@@ -366,24 +382,19 @@ export function OperatorRecordsPage({
       {records.length > 0 && visible.length === 0 && (
         <EmptyState compact title="Không có bản ghi khớp tìm kiếm" action={<button type="button" onClick={() => setSearch("")}>Xóa tìm kiếm</button>} />
       )}
+      </div>
+      {draft && compactEditor && <div className="operator-record-editor-backdrop" onMouseDown={(event) => {
+        if (event.target === event.currentTarget) void closeEditor();
+      }} />}
       {draft && (
-        <aside className="operator-record-editor" aria-label="Chỉnh bản ghi">
+        <aside ref={editorRef} className="operator-record-editor" role={compactEditor ? "dialog" : undefined}
+          aria-modal={compactEditor ? "true" : undefined} aria-label="Chỉnh bản ghi" tabIndex={compactEditor ? -1 : undefined}>
           <header>
             <strong>{draft.expectedRevision ? "Chỉnh sửa" : "Thêm mới"}</strong>
             <button
               type="button"
               aria-label="Đóng bản ghi"
-              onClick={async () => {
-                if (
-                  !dirty ||
-                  (await requestConfirm({
-                    title: "Bỏ thay đổi?",
-                    message: "Bản ghi chưa lưu.",
-                    confirmLabel: "Bỏ thay đổi",
-                  }))
-                )
-                  setDraft(null);
-              }}
+              onClick={() => void closeEditor()}
             >
               <X size={17} />
             </button>
@@ -391,6 +402,7 @@ export function OperatorRecordsPage({
           <label>
             Tên
             <input
+              ref={nameInput}
               value={draft.name}
               onChange={(e) => setDraft({ ...draft, name: e.target.value })}
             />
@@ -495,17 +507,20 @@ export function OperatorRecordsPage({
               </label>
             ))}
           </fieldset>
-          <button
-            type="button"
-            className="primary"
-            disabled={busy || !draft.name.trim()}
-            onClick={() => void save()}
-          >
-            <Save size={16} />
-            Lưu bản ghi
-          </button>
+          <div className="operator-record-editor-actions">
+            <button
+              type="button"
+              className="primary"
+              disabled={busy || !draft.name.trim()}
+              onClick={() => void save()}
+            >
+              <Save size={16} />
+              Lưu bản ghi
+            </button>
+          </div>
         </aside>
       )}
+      </div>
     </section>
   );
 }

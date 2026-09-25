@@ -1,6 +1,6 @@
 [package]
 name = "riviu-managers-phone"
-version = "0.2.41"
+version = "0.2.51"
 description = "Riviu Manager â€” iPhone and Android device farm"
 authors = ["Riviu"]
 edition = "2021"
@@ -18,7 +18,9 @@ publish = false
 
 [lib]
 name = "app_lib"
-crate-type = ["staticlib", "cdylib", "rlib"]
+# Windows/macOS desktop binaries consume the Rust library only. No packaged
+# product loads app_lib as a C ABI library; avoid two unused optimized links.
+crate-type = ["rlib"]
 
 [build-dependencies]
 tauri-build = { version = "2.6.3", features = [] }
@@ -131,11 +133,6 @@ required-features = ["diagnostics"]
 name = "live_nurture_test"
 path = "src/bin/live_nurture_test.rs"
 required-features = ["diagnostics"]
-
-[[bin]]
-name = "riviu-deployment-check"
-path = "src/bin/riviu-deployment-check.rs"
-required-features = ["deployment-check"]
 
 [[bin]]
 name = "swipe_probe"

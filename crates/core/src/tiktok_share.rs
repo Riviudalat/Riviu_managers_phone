@@ -38,6 +38,7 @@
 //! carousel back to its own post page is **not measured on any build**, which is why nothing
 //! in the publish path calls this yet.
 
+use anyhow::Context;
 use std::time::Duration;
 
 use crate::driver::{ElementBox, ElementQuery, UiSession};
@@ -221,10 +222,16 @@ pub fn looks_like_a_post_link(value: &str) -> bool {
 /// Resolve only TikTok HTTPS redirects; retain the canonical post path, not tracking data.
 pub async fn resolve_canonical_post_link(value: &str) -> anyhow::Result<String> {
     let mut url = url::Url::parse(value.trim())?;
-    let client = reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
-        .timeout(Duration::from_secs(8))
-        .build()?;
+    static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+    let client = CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .connect_timeout(Duration::from_secs(8))
+            .timeout(Duration::from_secs(25))
+            .build()
+            .expect("TikTok read-only redirect client")
+    });
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(45);
     for _ in 0..5 {
         anyhow::ensure!(
             url.scheme() == "https"
@@ -250,7 +257,9 @@ pub async fn resolve_canonical_post_link(value: &str) -> anyhow::Result<String> 
             matches!(url.host_str(), Some("vt.tiktok.com" | "vm.tiktok.com")),
             "TikTok redirect did not identify a post"
         );
-        let response = client.get(url.clone()).send().await?;
+        let response = tokio::time::timeout_at(deadline, client.get(url.clone()).send())
+            .await
+            .context("TikTok short link resolution deadline")??;
         anyhow::ensure!(
             response.status().is_redirection(),
             "TikTok short link did not redirect"
@@ -450,6 +459,38 @@ pub async fn observe_publish_account(
     session: &dyn UiSession,
     labels: &TikTokControls,
 ) -> anyhow::Result<String> {
+    navigate_own_profile(session, labels).await?;
+    let deadline = tokio::time::Instant::now() + PROFILE_WINDOW;
+    let account = loop {
+        if let Some(account) =
+            crate::tiktok_account::restore_own_profile_header(session, *labels).await?
+        {
+            break account;
+        }
+        anyhow::ensure!(
+            tokio::time::Instant::now() < deadline,
+            "own account was not proven before Post"
+        );
+        tokio::time::sleep(POLL).await;
+    };
+    let home = labels
+        .label(TikTokControl::HomeTab)
+        .ok_or_else(|| anyhow::anyhow!("Home tab unmeasured"))?;
+    let tab = session
+        .locate(home.to_query())
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("Home tab absent"))?;
+    session.tap(tab.centre()).await?;
+    Ok(account)
+}
+
+/// Shared account navigation for manual account reads and publication preflight.
+/// A cold-start advertisement may hide Profile; use the same bounded navigation
+/// ladder instead of treating the first missing tab as an account failure.
+pub async fn navigate_own_profile(
+    session: &dyn UiSession,
+    labels: &TikTokControls,
+) -> anyhow::Result<()> {
     let profile = labels
         .label(TikTokControl::ProfileTab)
         .ok_or_else(|| anyhow::anyhow!("profile tab unmeasured"))?;
@@ -476,29 +517,7 @@ pub async fn observe_publish_account(
         );
         tokio::time::sleep(Duration::from_millis(300)).await;
     };
-    session.tap(tab.centre()).await?;
-    let deadline = tokio::time::Instant::now() + PROFILE_WINDOW;
-    let account = loop {
-        if let Some(account) =
-            crate::tiktok_account::restore_own_profile_header(session, *labels).await?
-        {
-            break account;
-        }
-        anyhow::ensure!(
-            tokio::time::Instant::now() < deadline,
-            "own account was not proven before Post"
-        );
-        tokio::time::sleep(POLL).await;
-    };
-    let home = labels
-        .label(TikTokControl::HomeTab)
-        .ok_or_else(|| anyhow::anyhow!("Home tab unmeasured"))?;
-    let tab = session
-        .locate(home.to_query())
-        .await?
-        .ok_or_else(|| anyhow::anyhow!("Home tab absent"))?;
-    session.tap(tab.centre()).await?;
-    Ok(account)
+    session.tap(tab.centre()).await
 }
 
 pub async fn capture_own_post_link_for_submission(
@@ -1246,6 +1265,7 @@ mod tests {
         page: Mutex<&'static str>,
         backs: Mutex<usize>,
         taps: Mutex<usize>,
+        package: &'static str,
     }
     #[async_trait::async_trait]
     impl UiSession for OwnProfileRoute {
@@ -1283,7 +1303,7 @@ mod tests {
             Ok(())
         }
         async fn active_app_bundle(&self) -> anyhow::Result<String> {
-            Ok("com.ss.android.ugc.trill".into())
+            Ok(self.package.into())
         }
         async fn locate(&self, query: ElementQuery<'_>) -> anyhow::Result<Option<ElementBox>> {
             let page = *self.page.lock();
@@ -1330,6 +1350,7 @@ mod tests {
             page: Mutex::new("foreign"),
             backs: Mutex::new(0),
             taps: Mutex::new(0),
+            package: "com.ss.android.ugc.trill",
         };
         assert_eq!(
             observe_publish_account(&phone, &labels).await.unwrap(),
@@ -1338,6 +1359,31 @@ mod tests {
         assert_eq!(*phone.backs.lock(), 1);
         assert_eq!(*phone.taps.lock(), 2);
         assert_eq!(*phone.page.lock(), "feed");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn manual_account_navigation_waits_for_profile_after_startup_ad() {
+        let labels = controls_for("com.zhiliaoapp.musically", "en", "45.7.3").unwrap();
+        let phone = OwnProfileRoute {
+            page: Mutex::new("startup_ad"),
+            backs: Mutex::new(0),
+            taps: Mutex::new(0),
+            package: "com.zhiliaoapp.musically",
+        };
+        navigate_own_profile(&phone, &labels).await.unwrap();
+        assert_eq!(*phone.backs.lock(), 1);
+        assert_eq!(*phone.taps.lock(), 1);
+        assert_eq!(*phone.page.lock(), "own");
+        // No navigation is authorized when another app owns the screen.
+        let wrong_app = OwnProfileRoute {
+            page: Mutex::new("startup_ad"),
+            backs: Mutex::new(0),
+            taps: Mutex::new(0),
+            package: "com.android.settings",
+        };
+        assert!(navigate_own_profile(&wrong_app, &labels).await.is_err());
+        assert_eq!(*wrong_app.backs.lock(), 0);
+        assert_eq!(*wrong_app.taps.lock(), 0);
     }
 
     /// A phone whose clipboard changes **because something tapped the copy row**.

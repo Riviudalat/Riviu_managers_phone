@@ -47,6 +47,14 @@ impl SocialNetwork {
         matches!(self, Self::TikTok)
     }
 
+    pub fn ensure_implemented(self) -> anyhow::Result<()> {
+        if self.is_implemented() {
+            Ok(())
+        } else {
+            Err(self.refuse_unimplemented())
+        }
+    }
+
     fn refuse_unimplemented(self) -> anyhow::Error {
         anyhow::anyhow!("{} chưa được hỗ trợ; hiện chỉ TikTok", self.display_name())
     }

@@ -139,6 +139,17 @@ impl CommandError {
 impl From<DeviceControlError> for CommandError {
     fn from(error: DeviceControlError) -> Self {
         match error {
+            DeviceControlError::Driver {
+                udid,
+                operation,
+                message,
+            } if riviu_core::publish_recovery::classify(&message)
+                == riviu_core::publish_recovery::FailureKind::Disconnected =>
+            {
+                let mut error=Self::code("DeviceDisconnected",format!("Máy {udid} mất kết nối ADB; kiểm tra USB và chờ đúng máy kết nối lại. Chi tiết: {operation}: {message}"));
+                error.udid = Some(udid.into_boxed_str());
+                error
+            }
             DeviceControlError::Busy(busy) => Self {
                 code: "DeviceBusy".to_string(),
                 message: busy.to_string().into_boxed_str(),
@@ -149,6 +160,24 @@ impl From<DeviceControlError> for CommandError {
                 field: None,
                 attempt_id: None,
             },
+            DeviceControlError::Driver {
+                udid,
+                operation,
+                message,
+            } => {
+                let ambiguous = message.contains("more than one measured TikTok build")
+                    || message.contains("foreground package must break the tie");
+                let mut error = Self::code(
+                    if ambiguous {
+                        "DeviceAppSelectionRequired"
+                    } else {
+                        "DeviceControlFailed"
+                    },
+                    format!("{operation}: {message}"),
+                );
+                error.udid = Some(udid.into_boxed_str());
+                error
+            }
             other => Self {
                 code: "DeviceControlFailed".to_string(),
                 message: other.to_string().into_boxed_str(),
@@ -198,5 +227,25 @@ mod tests {
         assert_eq!(json["udid"], "fixture");
         assert_eq!(json["requestedOwner"], "manualControl");
         assert_eq!(json["currentOwner"], "script");
+    }
+
+    #[test]
+    fn ambiguous_app_driver_error_preserves_device_and_requests_selection() {
+        let error = CommandError::from(DeviceControlError::Driver {
+            udid: "dual-phone".into(),
+            operation: "resolveTikTokPackage",
+            message: "more than one measured TikTok build is installed".into(),
+        });
+        assert_eq!(error.code, "DeviceAppSelectionRequired");
+        assert_eq!(error.udid.as_deref(), Some("dual-phone"));
+        assert!(error.message.contains("resolveTikTokPackage"));
+
+        let ordinary = CommandError::from(DeviceControlError::Driver {
+            udid: "other-phone".into(),
+            operation: "readHierarchy",
+            message: "unreadable".into(),
+        });
+        assert_eq!(ordinary.code, "DeviceControlFailed");
+        assert_eq!(ordinary.udid.as_deref(), Some("other-phone"));
     }
 }

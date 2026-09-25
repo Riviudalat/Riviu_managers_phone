@@ -204,6 +204,8 @@ pub enum ThreadShape {
 #[serde(rename_all = "camelCase")]
 pub struct InteractionActionSet {
     #[serde(default)]
+    pub share: bool,
+    #[serde(default)]
     pub follow: bool,
     pub like: bool,
     pub comment: bool,
@@ -212,7 +214,7 @@ pub struct InteractionActionSet {
 
 impl InteractionActionSet {
     pub fn any(self) -> bool {
-        self.like || self.comment || self.save || self.follow
+        self.like || self.comment || self.save || self.follow || self.share
     }
 
     pub fn ordered(self) -> impl Iterator<Item = InteractionActionKind> {
@@ -220,6 +222,7 @@ impl InteractionActionSet {
             self.like.then_some(InteractionActionKind::Like),
             self.save.then_some(InteractionActionKind::Save),
             self.follow.then_some(InteractionActionKind::Follow),
+            self.share.then_some(InteractionActionKind::Share),
             self.comment.then_some(InteractionActionKind::Comment),
         ]
         .into_iter()
@@ -230,6 +233,7 @@ impl InteractionActionSet {
 impl Default for InteractionActionSet {
     fn default() -> Self {
         Self {
+            share: false,
             like: false,
             follow: false,
             comment: true,
@@ -241,6 +245,8 @@ impl Default for InteractionActionSet {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ThreadCampaignRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seeding: Option<crate::seeding::SeedingConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scripted_conversation: Option<crate::conversation::ScriptedConversation>,
     pub request_id: String,
@@ -344,6 +350,10 @@ pub const MAX_POST_DWELL_SECONDS: u8 = 60;
 #[serde(rename_all = "camelCase")]
 struct ThreadCampaignRequestWire {
     #[serde(default)]
+    network: crate::SocialNetwork,
+    #[serde(default)]
+    seeding: Option<crate::seeding::SeedingConfig>,
+    #[serde(default)]
     scripted_conversation: Option<crate::conversation::ScriptedConversation>,
     request_id: String,
     targets: Vec<ResolvedTikTokTarget>,
@@ -379,13 +389,18 @@ impl<'de> Deserialize<'de> for ThreadCampaignRequest {
         D: serde::Deserializer<'de>,
     {
         let wire = ThreadCampaignRequestWire::deserialize(deserializer)?;
+        wire.network
+            .ensure_implemented()
+            .map_err(serde::de::Error::custom)?;
         let actions = wire.actions.unwrap_or(InteractionActionSet {
+            share: false,
             follow: false,
             like: wire.like_target,
             comment: true,
             save: false,
         });
         Ok(Self {
+            seeding: wire.seeding,
             scripted_conversation: wire.scripted_conversation,
             request_id: wire.request_id,
             targets: wire.targets,
@@ -451,7 +466,13 @@ impl ThreadCampaignRequest {
         if !self.actions.any() {
             return Err(ThreadValidationError::NoActions);
         }
-        let minimum_actors = if self.actions.comment && self.mode == ThreadMode::Threaded {
+        let minimum_actors = if self.actions.comment
+            && self.mode == ThreadMode::Threaded
+            && self
+                .seeding
+                .as_ref()
+                .is_none_or(|s| s.standalone_count < self.message_count)
+        {
             MIN_ACTOR_COUNT
         } else {
             1
@@ -474,6 +495,11 @@ impl ThreadCampaignRequest {
             .any(|target| !targets.insert(target.target_key.as_str()))
         {
             return Err(ThreadValidationError::DuplicateTarget);
+        }
+        if let Some(seeding) = &self.seeding {
+            return seeding
+                .validate(self)
+                .map_err(|e| ThreadValidationError::InvalidScript(e.to_string()));
         }
         if let Some(script) = &self.scripted_conversation {
             if !self.actions.comment {
@@ -562,7 +588,13 @@ impl ThreadCampaignRequest {
     /// then run as AI.
     pub fn is_manual(&self) -> bool {
         self.actions.comment
-            && (self.scripted_conversation.is_some() || !self.manual_comments.is_empty())
+            && (self.scripted_conversation.is_some()
+                || !self.manual_comments.is_empty()
+                || self.seeding.as_ref().is_some_and(|s| {
+                    self.targets
+                        .iter()
+                        .all(|t| s.comments.contains_key(&t.target_key))
+                }))
     }
 
     /// Which of the operator's comments this message uses.
@@ -573,6 +605,13 @@ impl ThreadCampaignRequest {
     ///
     /// Returns `None` in AI mode so a caller cannot silently get an empty string.
     pub fn manual_comment_for(&self, target_index: usize, ordinal: u8) -> Option<&str> {
+        if let Some(s) = &self.seeding {
+            let i = usize::from(ordinal).checked_sub(s.action_rows(self))?;
+            if let Some(texts) = s.comments.get(&self.targets.get(target_index)?.target_key) {
+                return texts.get(i).map(String::as_str);
+            }
+            return self.manual_comments.get(i).map(String::as_str);
+        }
         if let Some(script) = &self.scripted_conversation {
             return script
                 .step(&self.targets.get(target_index)?.target_key, ordinal)
@@ -616,6 +655,7 @@ pub enum InteractionActionKind {
     Save,
     Comment,
     Follow,
+    Share,
 }
 
 impl InteractionActionKind {
@@ -625,6 +665,7 @@ impl InteractionActionKind {
             Self::Save => "save",
             Self::Comment => "comment",
             Self::Follow => "follow",
+            Self::Share => "share",
         }
     }
 }
@@ -906,6 +947,9 @@ pub fn partition_actors(actors: &[String], cohort_size: Option<u8>) -> Vec<Vec<S
 /// actor than link one.
 pub fn plan_threads(request: &ThreadCampaignRequest) -> Result<ThreadPlan, ThreadValidationError> {
     request.validate()?;
+    if let Some(seeding) = &request.seeding {
+        return Ok(seeding.plan(request));
+    }
     if let Some(script) = &request.scripted_conversation {
         return script
             .compile(request)
@@ -1076,6 +1120,10 @@ pub struct CommentLocatorIdentity {
     pub text: String,
     pub locator_version: String,
     pub frame_sha256: String,
+    /// Optional exact identity from TikTok's comment share link (`cid`).
+    /// Text/author remain the fallback when a build does not expose a share link.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub comment_link: Option<crate::tiktok_comment_link::SharedCommentLink>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1206,6 +1254,7 @@ pub fn locate_parent_comment(
         })?;
     Some(CommentParentMatch {
         identity: CommentLocatorIdentity {
+            comment_link: None,
             author_label: author.text.clone(),
             text: text.text.clone(),
             locator_version: identity.locator_version.clone(),
@@ -1264,6 +1313,7 @@ pub fn discover_comment_identity(
         })
         .map(|(_, observation)| observation)?;
     Some(CommentLocatorIdentity {
+        comment_link: None,
         author_label: author.text.clone(),
         text: text.text.clone(),
         locator_version: locator_version.into(),
@@ -1683,6 +1733,8 @@ impl InteractionTargetNote {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct InteractionCampaignDetail {
+    #[serde(default)]
+    pub seeding: Option<crate::seeding::SeedingConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scripted_conversation: Option<crate::conversation::ScriptedConversation>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1780,6 +1832,7 @@ mod tests {
         #[test]
         fn a_brief_names_the_campaign_by_its_first_link() {
             let mut request = ThreadCampaignRequest {
+                seeding: None,
                 scripted_conversation: None,
                 request_id: "r".into(),
                 targets: vec![super::target("7668947001618320660")],
@@ -1792,6 +1845,7 @@ mod tests {
                 cohort_size: Some(3),
                 manual_comments: Vec::new(),
                 actions: InteractionActionSet {
+                    share: false,
                     follow: false,
                     like: true,
                     comment: true,
@@ -1840,6 +1894,7 @@ mod tests {
 
         fn request(pool: Vec<&str>) -> ThreadCampaignRequest {
             ThreadCampaignRequest {
+                seeding: None,
                 scripted_conversation: None,
                 request_id: "r".into(),
                 targets: vec![super::target("1"), super::target("2")],
@@ -2001,6 +2056,7 @@ mod tests {
         count: u8,
     ) -> ThreadCampaignRequest {
         ThreadCampaignRequest {
+            seeding: None,
             scripted_conversation: None,
             request_id: "req-1".into(),
             targets,
@@ -2076,6 +2132,7 @@ mod tests {
         assert_eq!(
             request.actions,
             InteractionActionSet {
+                share: false,
                 follow: false,
                 like: true,
                 comment: true,
@@ -2088,6 +2145,22 @@ mod tests {
         assert_eq!(encoded["actions"]["comment"], true);
         assert_eq!(encoded["actions"]["save"], false);
         assert!(encoded.get("likeTarget").is_none());
+    }
+
+    #[test]
+    fn direct_request_does_not_drop_explicit_unsupported_network() {
+        let base = action_request_json(true, false, false);
+        for network in ["threads", "instagram"] {
+            let mut raw = base.clone();
+            raw["network"] = serde_json::json!(network);
+            assert!(
+                serde_json::from_value::<ThreadCampaignRequest>(raw).is_err(),
+                "{network} must not dispatch TikTok interaction"
+            );
+        }
+        let mut tiktok = base;
+        tiktok["network"] = serde_json::json!("tiktok");
+        assert!(serde_json::from_value::<ThreadCampaignRequest>(tiktok).is_ok());
     }
 
     #[test]
@@ -2260,6 +2333,7 @@ mod tests {
     fn public_actions_have_one_canonical_execution_order() {
         assert_eq!(
             InteractionActionSet {
+                share: false,
                 follow: false,
                 like: true,
                 comment: true,
@@ -2379,6 +2453,7 @@ mod tests {
             },
         ];
         let identity = CommentLocatorIdentity {
+            comment_link: None,
             author_label: "creator_a".into(),
             text: " quán   này xinh quá ".into(),
             locator_version: "vision-v1".into(),
@@ -2390,6 +2465,7 @@ mod tests {
         assert!(locate_parent_comment(
             &observations,
             &CommentLocatorIdentity {
+                comment_link: None,
                 author_label: "other".into(),
                 ..identity
             }
@@ -2442,6 +2518,7 @@ mod tests {
             },
         ];
         let identity = CommentLocatorIdentity {
+            comment_link: None,
             author_label: "creator_a".into(),
             text: "Quán này xinh quá".into(),
             locator_version: "vision-v1".into(),
@@ -2640,6 +2717,7 @@ mod tests {
             },
         ];
         let identity = CommentLocatorIdentity {
+            comment_link: None,
             author_label: "creator_a".into(),
             text: "Quán này xinh quá".into(),
             locator_version: "vision-v1".into(),

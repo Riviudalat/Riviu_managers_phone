@@ -5,10 +5,25 @@ use chrono::{DateTime, Utc};
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use uuid::Uuid;
 
+static MIGRATION_GATE: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
+
+#[must_use]
+pub struct CrossProcessFlowMutationGate {
+    connection: Connection,
+}
+
+impl Drop for CrossProcessFlowMutationGate {
+    fn drop(&mut self) {
+        let _ = self.connection.execute_batch("ROLLBACK");
+    }
+}
+
 use crate::types::{JobRecord, JobStatus, JobStepRecord};
 
+mod app_binding;
 mod app_completion;
 mod app_workflow;
+pub use app_binding::{DeviceAppBinding, DeviceAppBindingConflict};
 pub use app_completion::{AppCompletionRecord, AppCompletionStatus};
 mod automation;
 mod comment_verification;
@@ -38,6 +53,7 @@ mod publish;
 mod publish_dispatch;
 mod publish_epoch;
 mod publish_pipeline;
+mod publish_recovery;
 mod typesafe;
 pub use google_connection::{
     GoogleSheetConnection, GOOGLE_CONNECTION_SETTING, GOOGLE_MIGRATION_SETTING,
@@ -138,14 +154,92 @@ impl Database {
         Ok(conn)
     }
 
+    /// Serialize Flow validation and mutation across desktop processes sharing one DB.
+    pub fn acquire_flow_mutation_gate(&self) -> anyhow::Result<CrossProcessFlowMutationGate> {
+        let connection = if self.path == Path::new(":memory:") {
+            Connection::open_in_memory()?
+        } else {
+            Connection::open(self.path.with_extension("flow-mutation-lock.db"))
+                .context("open cross-process Flow mutation gate")?
+        };
+        connection.busy_timeout(std::time::Duration::from_secs(120))?;
+        connection.execute_batch(
+            "CREATE TABLE IF NOT EXISTS flow_mutation_gate(
+                lock_id INTEGER PRIMARY KEY CHECK(lock_id=1)
+            );
+            BEGIN IMMEDIATE;",
+        )?;
+        Ok(CrossProcessFlowMutationGate { connection })
+    }
+
     fn migrate(&self) -> anyhow::Result<()> {
+        let _migration_gate = MIGRATION_GATE.lock();
+        let mut migration_lock = if self.path == Path::new(":memory:") {
+            Connection::open_in_memory()?
+        } else {
+            Connection::open(self.path.with_extension("migration-lock.db"))
+                .context("open cross-process migration gate")?
+        };
+        migration_lock.busy_timeout(std::time::Duration::from_secs(120))?;
+        migration_lock.execute_batch(
+            "CREATE TABLE IF NOT EXISTS migration_gate(
+                lock_id INTEGER PRIMARY KEY CHECK(lock_id=1)
+            );",
+        )?;
+        let cross_process_gate = migration_lock
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .context("acquire cross-process migration gate")?;
         let mut conn = self.conn()?;
+        // Startup/schema work is serialized separately from ordinary five-second runtime
+        // queries. Concurrent openers wait for the migration/backup owner, then re-read the
+        // ledger, instead of failing an otherwise healthy database with SQLITE_BUSY.
+        conn.busy_timeout(std::time::Duration::from_secs(30))?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
-        let version: Option<i64> = conn
-            .query_row("SELECT MAX(version) FROM schema_migrations", [], |r| {
-                r.get(0)
-            })
-            .unwrap_or(None);
+        let has_ledger: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='schema_migrations')",
+            [],
+            |row| row.get(0),
+        )?;
+        let has_user_tables: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%')",
+            [],
+            |row| row.get(0),
+        )?;
+        let version: Option<i64> = if has_ledger {
+            conn.query_row("SELECT MAX(version) FROM schema_migrations", [], |row| {
+                row.get(0)
+            })?
+        } else {
+            None
+        };
+        let device_app_backup_source = match version {
+            Some(source_version @ 1..=46) => Some((source_version, Some(source_version))),
+            None if !has_ledger && has_user_tables && migrations::is_exact_legacy_v1(&conn)? => {
+                Some((1, None))
+            }
+            _ => None,
+        };
+        if let Some((source_version, expected_ledger_version)) = device_app_backup_source {
+            let backup = self
+                .path
+                .with_extension(format!("pre-device-app-v{source_version}.db"));
+            let name = backup
+                .file_name()
+                .and_then(|name| name.to_str())
+                .context("device app backup path has no file name")?;
+            let temporary = backup.with_file_name(format!(".{name}.{}.tmp", uuid::Uuid::new_v4()));
+            conn.execute("VACUUM INTO ?1", [temporary.to_string_lossy().as_ref()])
+                .context("backup before device app binding migration")?;
+            if let Err(error) = verify_device_app_backup(&temporary, expected_ledger_version) {
+                let _ = std::fs::remove_file(&temporary);
+                return Err(error);
+            }
+            // A previous migration attempt may have failed at this same schema version,
+            // and the old binary may have written new rows since then. Never reuse its
+            // integrity-valid but stale backup. Replacement failure blocks the upgrade.
+            replace_backup(&temporary, &backup)?;
+            verify_device_app_backup(&backup, expected_ledger_version)?;
+        }
         if version == Some(40) {
             let backup = self.path.with_extension("pre-publication-v40.db");
             if !backup.exists() {
@@ -170,7 +264,11 @@ impl Database {
                     .context("backup before Flow connector ledger migration")?;
             }
         }
-        migrations::run(&mut conn)
+        migrations::run(&mut conn)?;
+        cross_process_gate
+            .commit()
+            .context("release cross-process migration gate")?;
+        Ok(())
     }
 
     /// Schema version recorded by the production migration ledger.
@@ -190,6 +288,69 @@ impl Database {
     pub fn latest_schema_version() -> i64 {
         migrations::latest_version()
     }
+}
+
+fn replace_backup(temporary: &Path, backup: &Path) -> anyhow::Result<()> {
+    if !backup.exists() {
+        return std::fs::rename(temporary, backup)
+            .context("commit fresh device app migration backup");
+    }
+    let name = backup
+        .file_name()
+        .and_then(|name| name.to_str())
+        .context("device app backup path has no file name")?;
+    let previous = backup.with_file_name(format!(".{name}.{}.previous", uuid::Uuid::new_v4()));
+    std::fs::rename(backup, &previous).context("stage previous device app backup")?;
+    if let Err(error) = std::fs::rename(temporary, backup) {
+        let restored = std::fs::rename(&previous, backup);
+        let _ = std::fs::remove_file(temporary);
+        if let Err(restore_error) = restored {
+            return Err(anyhow::anyhow!(
+                "commit fresh device app migration backup failed: {error}; restore previous backup failed: {restore_error}"
+            ));
+        }
+        return Err(error).context("commit fresh device app migration backup");
+    }
+    std::fs::remove_file(previous).context("remove superseded device app backup")?;
+    Ok(())
+}
+
+fn verify_device_app_backup(path: &Path, expected_version: Option<i64>) -> anyhow::Result<()> {
+    let check = Connection::open(path)?;
+    let integrity: String = check.query_row("PRAGMA integrity_check", [], |row| row.get(0))?;
+    anyhow::ensure!(integrity == "ok", "Database backup integrity check failed");
+    let has_ledger: bool = check.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='schema_migrations')",
+        [],
+        |row| row.get(0),
+    )?;
+    match expected_version {
+        Some(expected_version) => {
+            anyhow::ensure!(
+                has_ledger,
+                "Device app backup is missing its migration ledger"
+            );
+            let version: Option<i64> =
+                check.query_row("SELECT MAX(version) FROM schema_migrations", [], |row| {
+                    row.get(0)
+                })?;
+            anyhow::ensure!(
+                version == Some(expected_version),
+                "Device app backup must contain schema version {expected_version}"
+            );
+        }
+        None => anyhow::ensure!(
+            !has_ledger,
+            "Legacy device app backup unexpectedly contains a migration ledger"
+        ),
+    }
+    let has_binding: bool = check.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='device_app_bindings')",
+        [],
+        |row| row.get(0),
+    )?;
+    anyhow::ensure!(!has_binding, "Device app backup already contains schema 47");
+    Ok(())
 }
 
 /// A value in the database does not fit the type the row is read into.
@@ -1035,6 +1196,24 @@ mod nurture_settings_migration_tests {
     }
 
     #[test]
+    fn nurture_settings_reject_unsupported_network_before_write() {
+        let (db, path) = fixture();
+        for network in [
+            crate::SocialNetwork::Threads,
+            crate::SocialNetwork::Instagram,
+        ] {
+            let settings = NurtureSettings {
+                network,
+                ..NurtureSettings::default()
+            };
+            assert!(db.save_nurture_settings(&settings).is_err());
+            assert!(db.save_nurture_settings_cas(&settings, 0).is_err());
+            assert!(db.get_setting("nurture.settings").unwrap().is_none());
+        }
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
     fn stored_legacy_profile_is_migrated_once_and_obsolete_keys_are_removed() {
         let (db, path) = fixture();
         let legacy = serde_json::json!({
@@ -1194,6 +1373,7 @@ mod interaction_tests {
 
     fn request() -> ThreadCampaignRequest {
         ThreadCampaignRequest {
+            seeding: None,
             scripted_conversation: None,
             request_id: "interaction-db-1".into(),
             targets: vec![ResolvedTikTokTarget {

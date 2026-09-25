@@ -75,6 +75,33 @@ pub(super) fn seed_states(conn: &Connection) -> anyhow::Result<()> {
 }
 
 impl Database {
+    /// Pin a failed canonical obligation for read-only OAuth diagnosis.
+    pub fn failed_sheet_diagnostic_input(
+        &self,
+        assignment_id: &str,
+        expected_revision: i64,
+    ) -> anyhow::Result<(SheetDeliveryTarget, String, Option<String>)> {
+        let (raw_target, revision, url, state, posted_at):
+            (String, i64, String, String, Option<String>) = self
+            .conn()?
+            .query_row(
+                "SELECT delivery_target_json,revision,post_url,state,posted_at FROM publish_sheet_outbox WHERE assignment_id=?1",
+                [assignment_id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+            )?;
+        anyhow::ensure!(
+            revision == expected_revision && state == "failed",
+            "Failed Sheet obligation changed or is not failed"
+        );
+        let target: SheetDeliveryTarget = serde_json::from_str(&raw_target)?;
+        target.validate()?;
+        anyhow::ensure!(
+            target.reporting_epoch.is_some() && !url.is_empty(),
+            "Failed Sheet obligation has no pinned epoch or canonical URL"
+        );
+        Ok((target, url, posted_at))
+    }
+
     pub fn sheet_readback_input(
         &self,
         assignment_id: &str,
@@ -468,6 +495,39 @@ mod tests {
                 .id
                 .clone()
         }
+    }
+
+    #[test]
+    fn failed_sheet_diagnostic_is_bound_to_exact_outbox_revision_and_target() {
+        let fixture = Fixture::new();
+        fixture.canonical("diagnostic-id", true);
+        let conn = fixture.db.conn().unwrap();
+        conn.execute(
+            "UPDATE publish_sheet_outbox SET state='failed',revision=1,delivery_target_json=json_set(delivery_target_json,'$.reportingEpoch','fixture-epoch') WHERE assignment_id='diagnostic-id'",
+            [],
+        )
+        .unwrap();
+        let (target, url, posted_at) = fixture
+            .db
+            .failed_sheet_diagnostic_input("diagnostic-id", 1)
+            .unwrap();
+        assert_eq!(target.reporting_epoch.as_deref(), Some("fixture-epoch"));
+        assert_eq!(target.spreadsheet_id, "fixture-book");
+        assert_eq!(url, "https://www.tiktok.com/@fixture/photo/diagnostic-id");
+        assert_eq!(posted_at.as_deref(), Some("2026-09-12T00:00:00Z"));
+        assert!(fixture
+            .db
+            .failed_sheet_diagnostic_input("diagnostic-id", 2)
+            .is_err());
+        conn.execute(
+            "UPDATE publish_sheet_outbox SET state='sent' WHERE assignment_id='diagnostic-id'",
+            [],
+        )
+        .unwrap();
+        assert!(fixture
+            .db
+            .failed_sheet_diagnostic_input("diagnostic-id", 1)
+            .is_err());
     }
     impl Drop for Fixture {
         fn drop(&mut self) {

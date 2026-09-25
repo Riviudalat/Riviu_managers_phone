@@ -122,6 +122,7 @@ vi.mock("../api", () => ({
   interactionMeasurePost: measurePost,
   interactionResolveLinks: resolveLinks,
   interactionStartThread: startThread,
+  operationPrepareDevices: vi.fn(async () => ({ state: "closed", devices: [] })),
   listenRiviuEvents: vi.fn(async () => () => undefined),
   listGroups: vi.fn(async () => []),
   // Reached on mount, once per in-scope device, to load each phone's @handle.

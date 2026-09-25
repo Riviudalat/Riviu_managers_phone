@@ -10,6 +10,7 @@ import { Banner } from "../States";
 import { AccountReadControl } from "./AccountReadControl";
 import { InteractionPlanPreview } from "./InteractionPlanPreview";
 import { ConversationEditor } from "./ConversationEditor";
+import { SeedingControls } from "./SeedingControls";
 import { InteractionThreshold } from "./InteractionThreshold";
 import type { InteractionSetupTab } from "./InteractionSetupTab";
 import "../../styles/interaction-workspace.css";
@@ -35,13 +36,14 @@ export function InteractionWorkspaceSetup({ setup: p, profiles, scopeControl, ef
   const openAccount = (udid: string | null) => { setAccount(udid); if (udid) setPickerOpen(true); };
   const { draft, patch } = p;
   const targets = p.lines.flatMap((line) => line.target ? [line.target] : []);
-  const actionOrder = ACTIONS.filter(([key]) => draft.actions[key]).map(([, label]) => label).join(" → ");
+  const actionOrder = [...ACTIONS.filter(([key]) => draft.actions[key]).map(([, label]) => label), ...(draft.actions.share ? ["Share"] : [])].join(" → ");
   const linkIssues = p.issues.filter((issue) => issue.field === "links");
   const linksReady = targets.length > 0 && !p.lines.some((line) => !line.target) && !p.linkBusy && !p.linkError && !linkIssues.length;
   const ready = linksReady && p.issues.length === 0;
   const stepIssues = step === 1 ? linkIssues : p.issues;
   const messages = effectiveMessageCount(draft, p.largestCohort);
-  const assignmentCount = p.preview?.plan?.assignments.length ?? 0;
+  const assignmentCount = draft.seeding ? targets.length * messages : p.preview?.plan?.assignments.length ?? 0;
+  const actionCount = targets.length * (draft.seeding ? draft.seeding.likeCount + draft.seeding.saveCount + draft.seeding.shareCount : effectiveActors.length * Object.values(draft.actions).filter(Boolean).length);
   const changeStep = (next: number) => {
     if (busy) return;
     setStep(next);
@@ -104,15 +106,17 @@ export function InteractionWorkspaceSetup({ setup: p, profiles, scopeControl, ef
         <section className="iw-panel iw-settings" aria-label="Hành động thực hiện">
           <div className="iw-heading"><div><span className="automation-section-kicker">Cấu hình</span><h3>Hành động thực hiện</h3></div><StatusChip>{targets.length} bài</StatusChip></div>
           <div className="iw-action-choices" role="group" aria-label="Hành động">
-            {ACTIONS.map(([key, label]) => { const Icon = ACTION_ICONS[key]; return <label key={key} className={draft.actions[key] ? "selected" : ""}>
+            {ACTIONS.filter(([key]) => !draft.seeding || key === "comment").map(([key, label]) => { const Icon = ACTION_ICONS[key]; return <label key={key} className={draft.actions[key] ? "selected" : ""}>
               <input type="checkbox" aria-label={label} checked={draft.actions[key] ?? false} disabled={draft.actions[key] && Object.values(draft.actions).filter(Boolean).length === 1}
                 onChange={(event) => { const checked = event.target.checked; patch("actions", (previous) => ({ ...previous, [key]: checked })); }} /><Icon size={17} aria-hidden="true"/>{label}
             </label>; })}
           </div>
           <p className="iw-order"><span>Thứ tự</span><strong>{actionOrder}</strong></p>
+          <SeedingControls draft={draft} actors={effectiveActors} targets={targets} onChange={next=>{patch("seeding",next.seeding);patch("messageCount",next.messageCount);patch("threadKind",next.threadKind);patch("textSource",next.textSource);patch("actions",next.actions);}}/>
           {draft.actions.comment ? <>
+            {!draft.seeding && <>
             <div className="iw-fields">
-              {draft.textSource !== "script" && <label className="iw-field"><span>Cách bình luận</span><select value={draft.threadKind} onChange={(event) => patch("threadKind", event.target.value as ThreadKind)}>
+              {!draft.seeding && draft.textSource !== "script" && <label className="iw-field"><span>Cách bình luận</span><select value={draft.threadKind} onChange={(event) => patch("threadKind", event.target.value as ThreadKind)}>
                 <option value="standalone">Riêng lẻ · mỗi máy một bình luận</option><option value="star">Cùng trả lời bình luận gốc</option><option value="chain">Trả lời nối tiếp</option>
               </select></label>}
               <label className="iw-field"><span>Nội dung bình luận</span><select value={draft.textSource} onChange={(event) => patch("textSource", event.target.value as "ai" | "manual" | "script")}><option value="ai">AI viết theo bài</option><option value="manual">Nội dung tự nhập</option><option value="script">Hội thoại theo kịch bản</option></select></label>
@@ -120,6 +124,7 @@ export function InteractionWorkspaceSetup({ setup: p, profiles, scopeControl, ef
             {draft.textSource === "script" ? <ConversationEditor draft={draft} onChange={value=>patch("conversationJson",value)} onRawChange={value=>patch("conversationRawJson",value)} targets={targets} devices={p.devices.filter(device=>effectiveActors.includes(device.udid))} handles={p.savedHandles ?? {}} deviceNumber={p.deviceNumber} deviceLabel={p.deviceLabel} onAssignAccount={openAccount}/> : draft.textSource === "ai" ? <label className="iw-field"><span>Hướng dẫn giọng điệu cho AI</span><textarea rows={3} value={draft.instruction} onChange={(event) => patch("instruction", event.target.value)} /></label>
               : <label className="iw-field"><span>Danh sách bình luận — mỗi dòng một câu</span><textarea rows={4} value={draft.manualText} onChange={(event) => patch("manualText", event.target.value)} /><small>{manualCommentsOf(draft).length} câu · {draft.threadKind === "chain" ? `cần ít nhất ${messages}` : `quay vòng cho ${messages} lượt`}</small></label>}
             <p className="iw-help">{draft.textSource === "script" ? "Các vai giữ đúng máy; mỗi link có hội thoại riêng và được thực hiện xen kẽ." : draft.threadKind === "standalone" ? "Mỗi máy tự mở bài và gửi bình luận riêng." : "Cần ít nhất 2 máy cùng loại. Một máy gửi gốc trước khi các máy còn lại trả lời."} {draft.textSource === "ai" && "AI chỉ gửi khi đọc đủ nội dung bài."}</p>
+            </>}
             <label className="iw-checkbox"><input type="checkbox" checked={draft.likeParent} onChange={(event) => patch("likeParent", event.target.checked)} />Tim bình luận của máy trước</label>
             {/* Outside the advanced block, and outside the script guard, for the same reason the
                 tag switch is shape-guarded and this one is not: a scripted run's parents come
@@ -130,11 +135,11 @@ export function InteractionWorkspaceSetup({ setup: p, profiles, scopeControl, ef
             {draft.textSource !== "script" && <button type="button" className="ghost iw-advanced-button" aria-expanded={p.advancedOpen} onClick={() => p.setAdvancedOpen(!p.advancedOpen)}>{p.advancedOpen ? "Ẩn tuỳ chỉnh nâng cao" : "Tuỳ chỉnh nâng cao"}</button>}
             {p.advancedOpen && draft.textSource !== "script" && <div className="iw-advanced">
               <div className="iw-fields">
-                <label className="iw-field"><span>Số bình luận mỗi link</span><input type="number" min={draft.threadKind === "standalone" ? 1 : 2} max={64} placeholder={`${messages} · tự động`} value={draft.messageCount ?? ""} onChange={(event) => patch("messageCount", event.target.value === "" ? null : wholeNumber(event.target.value))} /></label>
+                {!draft.seeding && <label className="iw-field"><span>Số bình luận mỗi link</span><input type="number" min={draft.threadKind === "standalone" ? 1 : 2} max={64} placeholder={`${messages} · tự động`} value={draft.messageCount ?? ""} onChange={(event) => patch("messageCount", event.target.value === "" ? null : wholeNumber(event.target.value))} /></label>}
                 <label className="iw-field"><span>Số từ tối đa mỗi câu</span><input type="number" min={4} max={20} value={draft.maxWords} onChange={(event) => patch("maxWords", wholeNumber(event.target.value))} /></label>
                 <label className="iw-field"><span>Giữ bài (giây)</span><input type="number" min={0} max={60} placeholder="0 · rời ngay" value={draft.postDwellSeconds ?? ""} onChange={(event) => patch("postDwellSeconds", event.target.value === "" ? null : wholeNumber(event.target.value))} /></label>
               </div>
-              <p className="iw-help">Để trống số bình luận để tự lấy bằng số máy đã chọn. Giữ bài là số giây máy ở lại bài sau khi làm xong, tối đa 60.</p>
+              <p className="iw-help">{!draft.seeding && "Để trống số bình luận để tự lấy bằng số máy đã chọn. "}Giữ bài là số giây máy ở lại bài sau khi làm xong, tối đa 60.</p>
               {draft.threadKind !== "standalone" && <label className="iw-checkbox"><input type="checkbox" checked={draft.mentionParent} onChange={(event) => patch("mentionParent", event.target.checked)} />Các máy tag nhau khi trả lời</label>}
               <label className="iw-field"><span>Tag thêm tài khoản (@handle)</span><input value={draft.mentionText} onChange={(event) => patch("mentionText", event.target.value)} placeholder="Cách nhau bằng dấu cách hoặc phẩy" /></label>
               {p.mentions.length > 0 && <p className="iw-help">{p.mentionActorCount} tài khoản đã gán khớp tag được thêm vào lượt chạy. Android chọn tag từ gợi ý; iPhone chỉ chèn chữ. Xem kết quả tại Theo dõi.</p>}
@@ -148,7 +153,7 @@ export function InteractionWorkspaceSetup({ setup: p, profiles, scopeControl, ef
             <div><dt>Bài viết</dt><dd>{targets.length} bài hợp lệ</dd></div>
             <div><dt>Máy thực hiện</dt><dd>{effectiveActors.length} máy{p.mentionActorCount > 0 ? ` · ${p.mentionActorCount} từ tag` : ""}</dd></div>
             <div><dt>Thứ tự</dt><dd>{actionOrder}</dd></div>
-            {draft.actions.comment && <div><dt>Nội dung</dt><dd>{draft.textSource === "script" ? "Hội thoại theo kịch bản" : draft.textSource === "ai" ? "AI viết theo bài" : `${manualCommentsOf(draft).length} câu tự nhập`}</dd></div>}
+            {draft.actions.comment && <div><dt>Nội dung</dt><dd>{draft.seeding ? "Câu đã duyệt theo kế hoạch" : draft.textSource === "script" ? "Hội thoại theo kịch bản" : draft.textSource === "ai" ? "AI viết theo bài" : `${manualCommentsOf(draft).length} câu tự nhập`}</dd></div>}
           </dl>
           <p className="iw-context-end">Kiểm tra phân công ở bước tiếp theo. Tài khoản được gán trong Chọn máy; nick đã lưu không chứng minh tài khoản đang đăng nhập.</p>
         </aside>
@@ -156,13 +161,13 @@ export function InteractionWorkspaceSetup({ setup: p, profiles, scopeControl, ef
       <section className="iw-panel iw-review" role="tabpanel" id="iw-panel-3" aria-labelledby="iw-tab-3" aria-label="Kiểm tra lượt chạy" hidden={step !== 3}>
         <div className="iw-review-summary">
           <div><strong>{targets.length}</strong><span>bài viết</span></div><div><strong>{effectiveActors.length}</strong><span>máy thực hiện</span></div>
-          <div><strong>{draft.actions.comment ? assignmentCount : targets.length * effectiveActors.length * Object.values(draft.actions).filter(Boolean).length}</strong><span>{draft.actions.comment ? "lượt bình luận dự kiến" : "hành động dự kiến"}</span></div>
+          <div><strong>{draft.actions.comment ? assignmentCount : actionCount}</strong><span>{draft.actions.comment ? "lượt bình luận dự kiến" : "hành động dự kiến"}</span></div>
           <div className="iw-review-order"><span>Trên mỗi bài, mỗi máy</span><strong>{actionOrder}</strong></div>
         </div>
         <div className="iw-table-scroll" tabIndex={0} aria-label="Máy và hành động đã chọn"><table className="iw-table"><thead><tr><th>Máy / tài khoản</th><th>Bài viết</th><th>Thực hiện</th><th>Chuẩn bị</th></tr></thead><tbody>
           {effectiveActors.map((udid) => <tr key={udid}><td><strong>{p.deviceNumber.get(udid)} · {p.deviceLabel.get(udid) ?? "Máy chưa đặt tên"}</strong><small>{p.handles[udid] ? `@${p.handles[udid].replace(/^@+/, "")}` : "Chưa gán tài khoản"}</small></td><td>{targets.length} bài</td><td>{actionOrder}</td><td><StatusChip tone={ready ? "success" : "warning"}>{ready ? "Đã lập kế hoạch" : "Cần kiểm tra"}</StatusChip></td></tr>)}
         </tbody></table></div>
-        {draft.actions.comment && <details className="iw-plan"><summary>Thứ tự bình luận theo kế hoạch</summary><InteractionPlanPreview preview={p.preview} devices={p.devices} deviceNumber={p.deviceNumber} deviceLabel={p.deviceLabel} handles={p.handles} threadKind={draft.threadKind} commentEnabled /></details>}
+        {draft.actions.comment && <details className="iw-plan"><summary>Thứ tự bình luận theo kế hoạch</summary><InteractionPlanPreview preview={p.preview} devices={p.devices} deviceNumber={p.deviceNumber} deviceLabel={p.deviceLabel} handles={p.handles} threadKind={draft.threadKind} commentEnabled seeding={draft.seeding}/></details>}
         {p.warnings.length > 0 && <details className="iw-plan"><summary>{p.warnings.length} lưu ý trước khi chạy</summary>{p.warnings.map((warning) => <p key={warning}>{warning}</p>)}</details>}
         <p className="iw-run-note">Hành động sẽ thực hiện trên tài khoản đã chọn. Khi kết quả chưa rõ, lượt đó dừng để kiểm tra và không tự gửi lại.</p>
       </section>
@@ -198,7 +203,7 @@ function WorkspaceActors({ setup: p, effectiveActors, account, setAccount }: { s
   return <section className="iw-panel iw-machines" tabIndex={0} aria-label="Máy thực hiện">
     <div className="iw-heading"><div><span className="automation-section-kicker">Phạm vi</span><h2>Máy thực hiện</h2></div><span className="machine-select-count" role="status">Đã chọn {effectiveActors.length}</span></div>
     <label className="iw-search"><Search size={16} aria-hidden="true" /><input type="search" aria-label="Tìm máy Tương tác" placeholder="Tìm số máy hoặc tên" value={query} onChange={(event) => setQuery(event.target.value)} /></label>
-    <div className="iw-picker-tools"><button type="button" className="ghost" title="Chọn tất cả máy sẵn sàng trong phạm vi, kể cả ngoài kết quả tìm kiếm" disabled={!choices.some(device => device.status === "ready")} onClick={() => replaceActors(choices.filter((device) => device.status === "ready"))}>Chọn tất cả sẵn sàng</button><button type="button" className="ghost" disabled={!p.draft.actors.length} onClick={() => replaceActors([])}>Bỏ chọn</button><small>{choices.filter(d => d.status === "ready").length} sẵn sàng · {choices.length} tổng</small></div>
+    <div className="iw-picker-tools"><button type="button" className="ghost" title="Chọn máy sẵn sàng hoặc đang chạy; tác vụ cũ được dừng khi bắt đầu lượt mới" disabled={!choices.some(device => device.status === "ready" || device.status === "busy" || device.status === "connected")} onClick={() => replaceActors(choices.filter((device) => device.status === "ready" || device.status === "busy" || device.status === "connected"))}>Chọn tất cả sẵn sàng</button><button type="button" className="ghost" disabled={!p.draft.actors.length} onClick={() => replaceActors([])}>Bỏ chọn</button><small>{choices.filter(d => d.status === "ready").length} sẵn sàng · {choices.length} tổng</small></div>
     {thread && groups.length > 0 && <label className="iw-field"><span>Lấy từ nhóm</span><select value="" onChange={(event) => { const group = groups.find((entry) => entry.id === event.target.value); if (group) replaceActors(choices.filter((device) => group.udids.includes(device.udid))); }}><option value="">Chọn nhóm…</option>{groups.map((group) => <option key={group.id} value={group.id}>{group.name} ({group.udids.length})</option>)}</select></label>}
     <div className={`iw-machine-scroll machine-choice-grid${choices.length > 12 ? " is-compact" : ""}`} role="group" aria-label="Danh sách máy thực hiện">
       {filtered.length ? filtered.map((device) => {
@@ -206,7 +211,7 @@ function WorkspaceActors({ setup: p, effectiveActors, account, setAccount }: { s
         const tagged = !p.draft.actors.includes(device.udid) && effectiveActors.includes(device.udid);
         const checked = effectiveActors.includes(device.udid);
         return <MachineChoice key={device.udid} number={p.deviceNumber.get(device.udid) ?? 0} name={name} status={device.status} reason={device.lastError}
-          label={name} checked={checked} disabled={tagged || (device.status !== "ready" && !checked)}
+          label={name} checked={checked} disabled={tagged || (device.status !== "ready" && device.status !== "busy" && device.status !== "connected" && !checked)}
           title={tagged ? "Được thêm bởi tag tài khoản; sửa tag trong tuỳ chỉnh nâng cao" : undefined}
           onChange={() => p.patch("actors", (previous) => previous.includes(device.udid) ? previous.filter((id) => id !== device.udid) : [...previous, device.udid])}
           detail={p.draft.actions.comment ? <button type="button" className="iw-account-link" aria-label={`Tài khoản TikTok của ${name}`} onClick={() => setAccount(account === device.udid ? null : device.udid)}>{p.handles[device.udid] ? `@${p.handles[device.udid].replace(/^@+/, "")}` : "Gán tài khoản"}{tagged ? " · từ tag" : ""}</button> : <span>{device.platform === "android" ? "Android" : "iPhone"}</span>} />;

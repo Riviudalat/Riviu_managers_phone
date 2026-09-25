@@ -8,21 +8,22 @@ và macOS Intel.
 Phần mềm của người khác đi kèm trong bộ cài được liệt kê ở [`NOTICE`](NOTICE),
 gồm cả một mục ghi rõ chỗ giấy phép **chưa được thẩm định**.
 
-Tài liệu hiện tại ở [docs/README.md](docs/README.md): hướng dẫn vận hành 12 trang,
+Tài liệu hiện tại ở [docs/README.md](docs/README.md): hướng dẫn vận hành 16 trang,
 runbook phát triển, hợp đồng UI và kho lịch sử. [AGENTS.md](AGENTS.md) là cửa ngắn
 cho agent; ràng buộc kỹ thuật ở [docs/agents/](docs/agents/README.md).
 Báo cáo có ngày ở [archive](docs/archive/README.md) không phải trạng thái hiện tại.
 
 ## Cài bản dựng
 
-Mỗi lần push lên `main`, workflow **Desktop CI/CD** tạo ba artifact trong trang
-GitHub Actions:
+Workflow **Desktop CI/CD** đang tạm dừng chạy tự động khi push/PR/tag. Khi cần,
+chạy thủ công bằng **Run workflow** trên GitHub Actions để tạo ba artifact:
 
 - `desktop-windows-x64`: bộ cài `.msi` và `.exe` (NSIS).
 - `desktop-macos-arm64`: `.dmg` cho Mac Apple Silicon.
 - `desktop-macos-x64`: `.dmg` cho Mac Intel.
 
-Artifact được giữ 30 ngày. Tag dạng `v*` (ví dụ `v0.1.0`) tạo GitHub Release và
+Artifact được giữ 30 ngày. Khi bật lại trigger tag, tag dạng `v*` (ví dụ `v0.1.0`)
+tạo GitHub Release và
 đính kèm toàn bộ bộ cài, manifest cùng SHA-256. Tag phải khớp chính xác version
 trong Tauri, npm và Cargo; lệch version thì pipeline dừng trước khi phát hành.
 Release đã tồn tại không bị ghi đè; muốn phát hành lại phải tăng version và tạo tag
@@ -193,9 +194,9 @@ ghi `runtime-manifest.json`. Package Python không liên quan trong môi trườ
 được bỏ qua, nhưng mọi dependency đang hoạt động của runtime phải có mặt và đúng
 exact version trong lock. Bản release chính thức dùng Python 3.12.10, Node 24.15.0
 và Rust 1.95.0. Không commit thư mục `target/`; CI dựng lại sạch trên từng hệ điều
-hành. Push lên `main` không đưa bundle trong `target/` vào Git; workflow sẽ dựng
-`desktop-windows-x64` và upload bộ cài `.msi`/NSIS trong Actions trong 30 ngày. Tag
-`v<version>` sẽ đính kèm các bộ cài đã verify vào GitHub Release.
+hành. Push lên `main` không đưa bundle trong `target/` vào Git. Trong thời gian
+workflow chạy thủ công, chỉ lệnh **Run workflow** mới dựng và upload bộ cài;
+trigger tag `v<version>` và tạo GitHub Release đang tạm dừng.
 IPA Agent là artifact ký riêng theo provisioning/UDID: muốn workflow đóng gói
 đúng bản Full thì phải commit `sidecars/wda/RiviuAgent-text.ipa` cùng
 `text-manifest.json`; IPA hiện tại dùng profile Xcode-managed 7 ngày, còn
@@ -304,9 +305,9 @@ cargo run -p riviu-android-driver --example root_route_gate -- [serial]
 Cả hai in `adb` nào đã giải được và từ đâu trước khi làm gì khác: `0 device(s)` vì
 "không thấy máy" và vì "không có adb nào" đã từng bị đọc lẫn nhau một lần.
 
-CI chạy đúng bộ trên, cộng ba job dựng bộ cài cho ba nền tảng. **Push một nhánh
-thường không kích hoạt CI** (workflow chỉ nghe `main`, tag `v*`, `pull_request` và
-`workflow_dispatch`); chạy đủ cổng trên một nhánh mà không mở PR:
+CI chạy đúng bộ trên, cộng ba job dựng bộ cài cho ba nền tảng. Hiện workflow
+chỉ có `workflow_dispatch`, nên push nhánh, push `main`, tag và PR đều không
+tự kích hoạt. Để chạy đủ cổng trên một nhánh mà không mở PR:
 
 ```powershell
 gh workflow run "Desktop CI/CD" --ref <tên-nhánh>

@@ -15,6 +15,18 @@ impl Database {
     ) -> anyhow::Result<Option<PublishPipelineRun>> {
         let mut conn = self.conn()?;
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let request: Option<String> = tx
+            .query_row(
+                "SELECT request_json FROM publish_campaigns WHERE id=?1",
+                [campaign_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if let Some(request) = request {
+            serde_json::from_str::<crate::PublishCampaignRequest>(&request)?
+                .network
+                .ensure_implemented()?;
+        }
         let now = Utc::now().to_rfc3339();
         let token = Uuid::new_v4().to_string();
         let changed=tx.execute("UPDATE publish_campaigns SET state='posting',error_code=NULL,revision=revision+1,updated_at=?2

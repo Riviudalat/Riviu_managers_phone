@@ -1,0 +1,92 @@
+[
+  {
+    "text": "Hot",
+    "bounds": {
+      "x": 46,
+      "y": 1128,
+      "width": 64,
+      "height": 28
+    },
+    "confidence": 0.9615153503417968
+  },
+  {
+    "text": "For You",
+    "bounds": {
+      "x": 179,
+      "y": 1129,
+      "width": 131,
+      "height": 27
+    },
+    "confidence": 0.9649897003173828
+  },
+  {
+    "text": "Favorites",
+    "bounds": {
+      "x": 381,
+      "y": 1127,
+      "width": 162,
+      "height": 29
+    },
+    "confidence": 0.964318389892578
+  },
+  {
+    "text": "Recent",
+    "bounds": {
+      "x": 613,
+      "y": 1129,
+      "width": 126,
+      "height": 27
+    },
+    "confidence": 0.9588765716552734
+  },
+  {
+    "text": "Thương Nhau Đến Thế",
+    "bounds": {
+      "x": 268,
+      "y": 1384,
+      "width": 440,
+      "height": 44
+    },
+    "confidence": 0.9594877624511718
+  },
+  {
+    "text": "Nguyễn Trọng Phúc - 108.3K posts - 0:41",
+    "bounds": {
+      "x": 270,
+      "y": 1439,
+      "width": 594,
+      "height": 35
+    },
+    "confidence": 0.9127518463134766
+  },
+  {
+    "text": "Am Cha Hui (Short Mix)",
+    "bounds": {
+      "x": 268,
+      "y": 1539,
+      "width": 464,
+      "height": 45
+    },
+    "confidence": 0.9502515411376952
+  },
+  {
+    "text": "Lâm Than Lan - 559.4K posts - 0:24",
+    "bounds": {
+      "x": 270,
+      "y": 1597,
+      "width": 515,
+      "height": 34
+    },
+    "confidence": 0.9153265380859374
+  },
+  {
+    "text": "Nguyễn Anh Tuấn - 129.0K p... - 0:48",
+    "bounds": {
+      "x": 270,
+      "y": 1755,
+      "width": 539,
+      "height": 35
+    },
+    "confidence": 0.9248694610595704
+  }
+]

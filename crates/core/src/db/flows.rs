@@ -1,6 +1,7 @@
 use anyhow::Context;
 use chrono::{SecondsFormat, Utc};
 use rusqlite::{params, OptionalExtension, TransactionBehavior};
+use std::collections::BTreeMap;
 use uuid::Uuid;
 
 use super::Database;
@@ -11,6 +12,163 @@ use crate::{
 };
 
 impl Database {
+    const FLOW_LIBRARY_PREFIX: &'static str = "flow.library.published.";
+
+    fn flow_library_key(id: FlowId) -> String {
+        format!("{}{id}", Self::FLOW_LIBRARY_PREFIX)
+    }
+
+    pub fn published_flow_revision(
+        &self,
+        id: FlowId,
+    ) -> anyhow::Result<Option<FlowRevisionRecord>> {
+        Ok(self.published_flow_revisions()?.remove(&id))
+    }
+
+    /// One consistent read of every public library pointer used to resolve a new run.
+    pub fn published_flow_revisions(&self) -> anyhow::Result<BTreeMap<FlowId, FlowRevisionRecord>> {
+        let mut connection = self.conn()?;
+        let transaction = connection.transaction()?;
+        let mut statement = transaction.prepare(
+            "SELECT s.key,s.value FROM settings s
+             JOIN flow_documents d ON d.id=substr(s.key,?2) AND d.archived=0
+             WHERE s.key LIKE ?1 ORDER BY s.key",
+        )?;
+        let rows = statement.query_map(
+            params![
+                format!("{}%", Self::FLOW_LIBRARY_PREFIX),
+                i64::try_from(Self::FLOW_LIBRARY_PREFIX.len() + 1)?
+            ],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        )?;
+        let mut pointers = Vec::new();
+        for row in rows {
+            let (key, revision) = row?;
+            let id = key
+                .strip_prefix(Self::FLOW_LIBRARY_PREFIX)
+                .context("published Flow key is invalid")?;
+            pointers.push((
+                Uuid::parse_str(id).context("published Flow ID is invalid")?,
+                revision
+                    .parse::<u64>()
+                    .context("published Flow revision is invalid")?,
+            ));
+        }
+        drop(statement);
+        let mut published = BTreeMap::new();
+        for (id, revision) in pointers {
+            let row: Option<FlowRevisionRow> = transaction
+                .query_row(
+                    "SELECT revision,authoring_json,compiled_json,plan_sha256,created_at
+                     FROM flow_revisions WHERE flow_id=?1 AND revision=?2",
+                    params![
+                        id.to_string(),
+                        revision_to_sql(revision, "published Flow revision")?
+                    ],
+                    |row| {
+                        Ok(FlowRevisionRow {
+                            revision: row.get(0)?,
+                            authoring_json: row.get(1)?,
+                            compiled_json: row.get(2)?,
+                            plan_hash: row.get(3)?,
+                            created_at: row.get(4)?,
+                        })
+                    },
+                )
+                .optional()?;
+            let record = row.context("published Flow revision no longer exists")?;
+            published.insert(id, record.into_record(id)?);
+        }
+        transaction.commit()?;
+        Ok(published)
+    }
+
+    pub fn publish_flow_library_revision(
+        &self,
+        id: FlowId,
+        revision: u64,
+        expected_published_revision: Option<u64>,
+    ) -> anyhow::Result<FlowRevisionRecord> {
+        let mut connection = self.conn()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let key = Self::flow_library_key(id);
+        let current: Option<String> = transaction
+            .query_row("SELECT value FROM settings WHERE key=?1", [&key], |row| {
+                row.get(0)
+            })
+            .optional()?;
+        let current = current
+            .map(|value| {
+                value
+                    .parse::<u64>()
+                    .context("published Flow revision is invalid")
+            })
+            .transpose()?;
+        if current != expected_published_revision {
+            return Err(RevisionConflict {
+                expected: expected_published_revision.unwrap_or(0),
+                actual: current.unwrap_or(0),
+            }
+            .into());
+        }
+        let exists: bool = transaction.query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM flow_revisions r
+                JOIN flow_documents d ON d.id=r.flow_id
+                WHERE r.flow_id=?1 AND r.revision=?2 AND d.archived=0
+             )",
+            params![
+                id.to_string(),
+                revision_to_sql(revision, "published Flow revision")?
+            ],
+            |row| row.get(0),
+        )?;
+        anyhow::ensure!(exists, "Flow revision does not exist or is archived");
+        transaction.execute(
+            "INSERT INTO settings(key,value) VALUES(?1,?2)
+             ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            params![key, revision.to_string()],
+        )?;
+        transaction.commit()?;
+        self.get_flow_revision(id, Some(revision))?
+            .context("published Flow revision disappeared")
+    }
+
+    pub fn unpublish_flow_library_revision(
+        &self,
+        id: FlowId,
+        expected_published_revision: u64,
+    ) -> anyhow::Result<()> {
+        let mut connection = self.conn()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let key = Self::flow_library_key(id);
+        let current: Option<String> = transaction
+            .query_row("SELECT value FROM settings WHERE key=?1", [&key], |row| {
+                row.get(0)
+            })
+            .optional()?;
+        let current = current
+            .map(|value| {
+                value
+                    .parse::<u64>()
+                    .context("published Flow revision is invalid")
+            })
+            .transpose()?;
+        if current != Some(expected_published_revision) {
+            return Err(RevisionConflict {
+                expected: expected_published_revision,
+                actual: current.unwrap_or(0),
+            }
+            .into());
+        }
+        anyhow::ensure!(
+            transaction.execute("DELETE FROM settings WHERE key=?1", [&key])? == 1,
+            "published Flow pointer disappeared"
+        );
+        transaction.commit()?;
+        Ok(())
+    }
+
     pub fn save_flow_revision(
         &self,
         expected_revision: Option<u64>,
@@ -406,6 +564,72 @@ mod tests {
             .expect_err("stale conflict precedes payload validation");
         assert!(error.downcast_ref::<crate::RevisionConflict>().is_some());
 
+        drop(database);
+        cleanup(&path);
+    }
+
+    #[test]
+    fn published_flow_pointer_is_cas_guarded_and_returns_one_consistent_map() {
+        let (database, path) = flow_database_fixture();
+        let (document, compiled, hash) = revision_one("Shared sound picker");
+        let saved = database
+            .save_flow_revision(None, &document, &compiled, &hash)
+            .expect("revision one");
+        assert!(database
+            .published_flow_revision(saved.document.id)
+            .unwrap()
+            .is_none());
+        let published = database
+            .publish_flow_library_revision(saved.document.id, 1, None)
+            .expect("initial publication");
+        assert_eq!(published.document.revision, 1);
+        assert_eq!(
+            database
+                .published_flow_revisions()
+                .unwrap()
+                .get(&saved.document.id)
+                .unwrap()
+                .document
+                .revision,
+            1
+        );
+        let conflict = database
+            .publish_flow_library_revision(saved.document.id, 1, None)
+            .unwrap_err();
+        let conflict = conflict.downcast_ref::<crate::RevisionConflict>().unwrap();
+        assert_eq!((conflict.expected, conflict.actual), (0, 1));
+        let conflict = database
+            .unpublish_flow_library_revision(saved.document.id, 2)
+            .unwrap_err();
+        assert!(conflict.downcast_ref::<crate::RevisionConflict>().is_some());
+        database
+            .unpublish_flow_library_revision(saved.document.id, 1)
+            .expect("CAS unpublish");
+        assert!(database
+            .published_flow_revision(saved.document.id)
+            .unwrap()
+            .is_none());
+        drop(database);
+        cleanup(&path);
+    }
+
+    #[test]
+    fn archived_or_missing_flow_cannot_be_published() {
+        let (database, path) = flow_database_fixture();
+        let (document, compiled, hash) = revision_one("Archived library");
+        let id = document.id;
+        database
+            .save_flow_revision(None, &document, &compiled, &hash)
+            .unwrap();
+        database.archive_flow(id).unwrap();
+        assert!(database
+            .publish_flow_library_revision(id, 1, None)
+            .unwrap_err()
+            .to_string()
+            .contains("archived"));
+        assert!(database
+            .publish_flow_library_revision(Uuid::new_v4(), 1, None)
+            .is_err());
         drop(database);
         cleanup(&path);
     }

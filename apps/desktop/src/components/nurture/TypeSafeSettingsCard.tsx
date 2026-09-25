@@ -38,11 +38,12 @@ export function TypeSafeSettingsCard() {
     <div className="nurture-row">
       <button type="button" disabled={!key.trim()} onClick={() => void act(async () => { setSettings(await typesafeUpdateCredential(key)); setKey(""); setMessage("Đã lưu khóa TypeSafe."); })}>Lưu khóa TypeSafe</button>
       <button type="button" disabled={!settings?.hasApiKey} onClick={() => void act(async () => { setSettings(await typesafeUpdateCredential("")); setKey(""); setMessage("Đã xóa khóa TypeSafe."); })}>Xóa khóa</button>
-      <button type="button" disabled={!settings?.hasApiKey} onClick={() => void act(async () => {
+      <button type="button" disabled={!settings?.hasApiKey || key.length > 0} onClick={() => void act(async () => {
         const result = await typesafeCheckComment("Quán phở này ở đâu vậy?", "Hôm nay ghé quán phở bò ở Đà Lạt.");
         setMessage(`TypeSafe: ${result.support === "supported" ? "mẫu kiểm có bằng chứng phù hợp" : "mẫu kiểm chưa đạt"} · ${result.elapsedMs} ms · ${result.inputTokens + result.outputTokens} token.`);
       })}>Kiểm tra bằng mẫu chữ</button>
     </div>
+    {key.length > 0 && <p role="status">Lưu khóa mới trước khi kiểm tra. Phép kiểm dùng khóa đã lưu.</p>}
     <small>Chỉ gửi câu bình luận, caption và lời thoại cần đối chiếu đến TypeSafe. Phép kiểm mẫu gọi API, không thao tác điện thoại. Chi phí TypeSafe chưa có số tiền đối soát.</small>
     {message && <p role="status">{message}</p>}
   </fieldset>;

@@ -18,6 +18,8 @@ static RECORD_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 pub struct InspectorElement {
     pub index: usize,
     pub parent: Option<usize>,
+    #[serde(default)]
+    pub package: String,
     pub text: String,
     pub description: String,
     pub resource_id: String,
@@ -28,6 +30,22 @@ pub struct InspectorElement {
     pub height: f64,
     pub enabled: bool,
     pub clickable: bool,
+    #[serde(default)]
+    pub checkable: Option<bool>,
+    #[serde(default)]
+    pub checked: Option<bool>,
+    #[serde(default)]
+    pub selected: Option<bool>,
+    #[serde(default)]
+    pub focusable: Option<bool>,
+    #[serde(default)]
+    pub focused: Option<bool>,
+    #[serde(default)]
+    pub scrollable: Option<bool>,
+    #[serde(default)]
+    pub long_clickable: Option<bool>,
+    #[serde(default)]
+    pub password: Option<bool>,
     pub selector: Option<ElementSelector>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -88,56 +106,8 @@ async fn capture(
         package == session.active_app_bundle().await?,
         "inspector_app_changed"
     );
-    let elements = tree
-        .nodes
-        .iter()
-        .enumerate()
-        .filter_map(|(index, n)| {
-            if !n.visible(&package) || !tree.ancestors_visible(index) {
-                return None;
-            }
-            let rect = n.rect()?;
-            let val = |s: &str| (!s.trim().is_empty()).then(|| s.to_owned());
-            let description = val(n.attr("content-desc"));
-            let text = if description.is_none() {
-                val(n.attr("text"))
-            } else {
-                None
-            };
-            let resource_id = if description.is_none() && text.is_none() {
-                val(n.attr("resource-id"))
-            } else {
-                None
-            };
-            let mut selector = ElementSelector {
-                package: package.clone(),
-                description,
-                text,
-                resource_id,
-                class_name: None,
-            };
-            if selector.matches(&tree).len() != 1 {
-                selector.class_name = val(n.attr("class"));
-                selector.resource_id = val(n.attr("resource-id"));
-            }
-            let selector = (selector.validate().is_ok() && selector.matches(&tree).len() == 1)
-                .then_some(selector);
-            Some(InspectorElement {
-                index,
-                parent: n.parent,
-                text: n.attr("text").into(),
-                description: n.attr("content-desc").into(),
-                resource_id: n.attr("resource-id").into(),
-                class_name: n.attr("class").into(),
-                x: rect.x,
-                y: rect.y,
-                width: rect.width,
-                height: rect.height,
-                enabled: rect.enabled,
-                clickable: rect.clickable,
-                selector,
-            })
-        })
+    let elements = (0..tree.nodes.len())
+        .filter_map(|index| element_from_tree(&tree, index, &package))
         .collect();
     Ok(InspectorSnapshot {
         id: uuid::Uuid::new_v4().to_string(),
@@ -151,6 +121,45 @@ async fn capture(
         tree_sha256: digest,
         hierarchy_xml,
         elements,
+    })
+}
+fn xml_bool(value: &str) -> Option<bool> {
+    match value {
+        "true" => Some(true),
+        "false" => Some(false),
+        _ => None,
+    }
+}
+fn element_from_tree(tree: &Tree, index: usize, package: &str) -> Option<InspectorElement> {
+    let node = tree.nodes.get(index)?;
+    if !node.visible(package) || !tree.ancestors_visible(index) {
+        return None;
+    }
+    let rect = node.rect()?;
+    let selector = riviu_core::ui_automation::inspector::selector_for_node(tree, index, package);
+    Some(InspectorElement {
+        index,
+        parent: node.parent,
+        package: node.attr("package").into(),
+        text: node.attr("text").into(),
+        description: node.attr("content-desc").into(),
+        resource_id: node.attr("resource-id").into(),
+        class_name: node.attr("class").into(),
+        x: rect.x,
+        y: rect.y,
+        width: rect.width,
+        height: rect.height,
+        enabled: rect.enabled,
+        clickable: rect.clickable,
+        checkable: xml_bool(node.attr("checkable")),
+        checked: xml_bool(node.attr("checked")),
+        selected: xml_bool(node.attr("selected")),
+        focusable: xml_bool(node.attr("focusable")),
+        focused: xml_bool(node.attr("focused")),
+        scrollable: xml_bool(node.attr("scrollable")),
+        long_clickable: xml_bool(node.attr("long-clickable")),
+        password: xml_bool(node.attr("password")),
+        selector,
     })
 }
 fn save_observation(state: &AppState, snapshot: &InspectorSnapshot) -> Result<(), CommandError> {
@@ -249,6 +258,90 @@ pub async fn inspector_tap(
     let _admission = state.ensure_accepting_work()?;
     tap(&state, udid, selector).await
 }
+
+#[tauri::command]
+pub fn inspector_confirm_postcondition(
+    state: State<'_, AppState>,
+    udid: String,
+    snapshot_id: String,
+    expected: ElementSelector,
+) -> Result<InspectorRecording, CommandError> {
+    let _admission = state.ensure_accepting_work()?;
+    confirm_postcondition(&state, &udid, &snapshot_id, expected)
+}
+
+fn read_observation(state: &AppState, id: &str) -> Result<InspectorSnapshot, CommandError> {
+    if id.is_empty()
+        || id.len() > 64
+        || !id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+    {
+        return Err(CommandError::invalid_argument(
+            "Mã bằng chứng Inspector không hợp lệ",
+        ));
+    }
+    let root = state.artifacts_dir.join("inspector");
+    let path = root.join(format!("{id}.json"));
+    let bytes = std::fs::read(&path).map_err(err)?;
+    serde_json::from_slice(&bytes).map_err(err)
+}
+
+fn confirm_postcondition(
+    state: &AppState,
+    udid: &str,
+    snapshot_id: &str,
+    expected: ElementSelector,
+) -> Result<InspectorRecording, CommandError> {
+    expected.validate().map_err(err)?;
+    let mut record = recording(state, udid)?.ok_or_else(|| err("Chưa có phiên ghi"))?;
+    let step = record
+        .steps
+        .last_mut()
+        .ok_or_else(|| err("Chưa có bước cần xác minh"))?;
+    if step.verified
+        || step.after_id != snapshot_id
+        || step
+            .error
+            .as_deref()
+            .is_none_or(|v| v != "Chờ chọn phần tử kết quả")
+    {
+        return Err(err(
+            "Bước ghi đã thay đổi; đọc lại Inspector trước khi xác minh",
+        ));
+    }
+    let before = read_observation(state, &step.before_id)?;
+    let after = read_observation(state, &step.after_id)?;
+    if before.udid != udid || after.udid != udid || after.package != expected.package {
+        return Err(err("Bằng chứng không thuộc đúng máy hoặc ứng dụng"));
+    }
+    if !postcondition_appeared(&before.elements, &after.elements, &expected) {
+        return Err(err(
+            "Phần tử kết quả phải xuất hiện sau thao tác và chưa có trong màn hình trước đó",
+        ));
+    }
+    step.expected = Some(expected);
+    step.verified = true;
+    step.error = None;
+    state
+        .db
+        .set_setting(&key(udid), &serde_json::to_string(&record).map_err(err)?)
+        .map_err(err)?;
+    Ok(record)
+}
+
+fn postcondition_appeared(
+    before: &[InspectorElement],
+    after: &[InspectorElement],
+    expected: &ElementSelector,
+) -> bool {
+    after
+        .iter()
+        .any(|element| element.selector.as_ref() == Some(expected))
+        && !before
+            .iter()
+            .any(|element| element.selector.as_ref() == Some(expected))
+}
 pub async fn tap(
     state: &AppState,
     udid: String,
@@ -306,53 +399,144 @@ pub async fn tap(
     .await?;
     save_observation(state, &before)?;
     save_observation(state, &after)?;
-    let expected = after
-        .elements
-        .iter()
-        .filter(|e| e.selector.is_some() && (!e.text.is_empty() || !e.description.is_empty()))
-        .filter(|e| !before.elements.iter().any(|old| old.selector == e.selector))
-        // Prefer screen controls to account handles and changing counters so a
-        // navigation recording can be replayed on another device/account.
-        .min_by_key(|e| {
-            if [
-                "Edit profile",
-                "Edit",
-                "Sửa hồ sơ",
-                "Profile menu",
-                "Menu hồ sơ",
-                "For You",
-                "Dành cho bạn",
-            ]
-            .iter()
-            .any(|label| e.text == *label || e.description == *label)
-            {
-                0
-            } else if !e.description.is_empty() && e.clickable {
-                1
-            } else {
-                2
-            }
-        })
-        .and_then(|e| e.selector.clone());
-    let verified = action_error.is_none() && expected.is_some();
+    let verified = record.is_none() && action_error.is_none();
     if let Some(record) = record.as_mut() {
         record.steps.push(RecordedStep {
             selector,
             before_id: before.id,
             after_id: after.id.clone(),
-            verified,
-            expected,
-            error: action_error,
+            verified: false,
+            expected: None,
+            error: action_error.or_else(|| Some("Chờ chọn phần tử kết quả".into())),
         });
         state
             .db
             .set_setting(&key(&udid), &serde_json::to_string(record).map_err(err)?)
             .map_err(err)?;
     }
-    if !verified {
+    if record.is_none() && !verified {
         return Err(err(
-            "Đã thử bấm; chưa thấy thay đổi giao diện. Kiểm tra bằng chứng, không tự bấm lại.",
+            "Đã thử bấm nhưng driver chưa xác nhận thao tác; không tự bấm lại.",
         ));
     }
     Ok(after)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn selector(text: &str) -> ElementSelector {
+        ElementSelector {
+            package: "app.fixture".into(),
+            text: Some(text.into()),
+            description: None,
+            resource_id: None,
+            class_name: None,
+            schema_version: None,
+            text_prefix: None,
+            description_prefix: None,
+            scope: None,
+            action_target: None,
+        }
+    }
+
+    fn element(index: usize, selector: ElementSelector) -> InspectorElement {
+        InspectorElement {
+            index,
+            parent: None,
+            package: "app.fixture".into(),
+            text: selector.text.clone().unwrap_or_default(),
+            description: String::new(),
+            resource_id: String::new(),
+            class_name: "android.widget.Button".into(),
+            x: 0.0,
+            y: 0.0,
+            width: 10.0,
+            height: 10.0,
+            enabled: true,
+            clickable: true,
+            checkable: None,
+            checked: None,
+            selected: None,
+            focusable: None,
+            focused: None,
+            scrollable: None,
+            long_clickable: None,
+            password: None,
+            selector: Some(selector),
+        }
+    }
+
+    #[test]
+    fn element_properties_preserve_true_false_and_missing_xml_attributes() {
+        let tree = Tree::parse(riviu_core::HierarchySourceSnapshot {
+            generation: 1,
+            xml: concat!(
+                "<hierarchy>",
+                "<node package=\"app.fixture\" bounds=\"[10,20][30,40]\" enabled=\"true\" clickable=\"false\" ",
+                "checkable=\"true\" checked=\"false\" selected=\"true\" focusable=\"false\" focused=\"true\" ",
+                "scrollable=\"false\" long-clickable=\"true\" password=\"false\" />",
+                "<node package=\"app.fixture\" bounds=\"[30,40][50,60]\" />",
+                "</hierarchy>"
+            )
+            .into(),
+        })
+        .unwrap();
+
+        let full = element_from_tree(&tree, 1, "app.fixture").unwrap();
+        assert_eq!(full.package, "app.fixture");
+        assert_eq!(full.checkable, Some(true));
+        assert_eq!(full.checked, Some(false));
+        assert_eq!(full.selected, Some(true));
+        assert_eq!(full.focusable, Some(false));
+        assert_eq!(full.focused, Some(true));
+        assert_eq!(full.scrollable, Some(false));
+        assert_eq!(full.long_clickable, Some(true));
+        assert_eq!(full.password, Some(false));
+        let json = serde_json::to_value(&full).unwrap();
+        assert_eq!(json["longClickable"], true);
+
+        let missing = element_from_tree(&tree, 2, "app.fixture").unwrap();
+        assert_eq!(missing.checkable, None);
+        assert_eq!(missing.long_clickable, None);
+
+        let mut old_json = serde_json::to_value(element(1, selector("Home"))).unwrap();
+        for key in [
+            "package",
+            "checkable",
+            "checked",
+            "selected",
+            "focusable",
+            "focused",
+            "scrollable",
+            "longClickable",
+            "password",
+        ] {
+            old_json.as_object_mut().unwrap().remove(key);
+        }
+        let old: InspectorElement = serde_json::from_value(old_json).unwrap();
+        assert_eq!(old.package, "");
+        assert_eq!(old.checkable, None);
+    }
+
+    #[test]
+    fn recorder_requires_an_explicit_new_postcondition() {
+        let expected = selector("Profile");
+        assert!(postcondition_appeared(
+            &[element(1, selector("Home"))],
+            &[element(2, expected.clone())],
+            &expected,
+        ));
+        assert!(!postcondition_appeared(
+            &[element(1, expected.clone())],
+            &[element(2, expected.clone())],
+            &expected,
+        ));
+        assert!(!postcondition_appeared(
+            &[element(1, selector("Home"))],
+            &[element(2, selector("Inbox"))],
+            &expected,
+        ));
+    }
 }

@@ -1,6 +1,8 @@
 use std::collections::{BTreeSet, HashMap};
 use std::fmt;
+use std::future::Future;
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
 use std::sync::Arc;
 
 use parking_lot::Mutex;
@@ -127,10 +129,14 @@ pub struct DeviceControlPlane {
     plane_id: Uuid,
     clean_start_guard: Mutex<Option<Arc<CleanStartGuard>>>,
     app_completion_handler: Mutex<Option<Arc<AppCompletionHandler>>>,
+    app_binding_resolver: Mutex<Option<Arc<DeviceAppBindingResolver>>>,
 }
 
 type CleanStartGuard = dyn Fn(&str) -> Result<(), String> + Send + Sync;
 type AppCompletionHandler = dyn Fn(&str, &str) -> Result<(), String> + Send + Sync;
+pub type DeviceAppBindingFuture =
+    Pin<Box<dyn Future<Output = Result<Option<String>, String>> + Send + 'static>>;
+pub type DeviceAppBindingResolver = dyn Fn(&str, &str) -> DeviceAppBindingFuture + Send + Sync;
 
 /// A completed phone task may release its session before other tasks allow app closure.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -200,7 +206,33 @@ impl DeviceControlPlane {
             plane_id: Uuid::new_v4(),
             clean_start_guard: Mutex::new(None),
             app_completion_handler: Mutex::new(None),
+            app_binding_resolver: Mutex::new(None),
         }
+    }
+
+    /// Install the single persistence-backed resolver used by every TikTok
+    /// feature. The control plane remains the only owner of package selection;
+    /// the Android driver only validates the selected package against the phone.
+    pub fn set_app_binding_resolver(&self, resolver: Arc<DeviceAppBindingResolver>) {
+        *self.app_binding_resolver.lock() = Some(resolver);
+    }
+
+    async fn selected_app_package(
+        &self,
+        udid: &str,
+        app_key: &str,
+    ) -> Result<Option<String>, DeviceControlError> {
+        let resolver = self.app_binding_resolver.lock().clone();
+        let Some(resolver) = resolver else {
+            return Ok(None);
+        };
+        resolver(udid, app_key)
+            .await
+            .map_err(|message| DeviceControlError::Driver {
+                udid: udid.to_string(),
+                operation: "resolveAppBinding",
+                message,
+            })
     }
 
     /// Returns the task that currently owns the device without probing or waking it.
@@ -2305,6 +2337,34 @@ mod tests {
         assert!(control.current_work_owner("ready").is_none());
     }
 
+    #[tokio::test]
+    async fn persisted_app_binding_is_used_by_package_and_build_resolution() {
+        let driver = Arc::new(TestDriver::default());
+        let work = Arc::new(DeviceWorkCoordinator::new());
+        let control =
+            DeviceControlPlane::new(driver, work, Arc::new(StreamBudgetManager::default()));
+        control.set_app_binding_resolver(Arc::new(|udid, app_key| {
+            let result = if udid == "bound" && app_key == "tiktok" {
+                Ok(Some("com.ss.android.ugc.trill".to_string()))
+            } else {
+                Ok(None)
+            };
+            Box::pin(async move { result })
+        }));
+        assert_eq!(
+            control.resolve_tiktok_package("bound").await.unwrap(),
+            "com.ss.android.ugc.trill"
+        );
+        let build = control.tiktok_build("bound").await.unwrap();
+        assert_eq!(build.0, "com.ss.android.ugc.trill");
+
+        control.set_app_binding_resolver(Arc::new(|_, _| {
+            Box::pin(async { Ok(Some("com.zhiliaoapp.musically".to_string())) })
+        }));
+        let error = control.tiktok_build("bound").await.unwrap_err().to_string();
+        assert!(error.contains("does not match observed package"));
+    }
+
     #[async_trait]
     impl crate::UiSession for TestSession {
         async fn tap(&self, _point: TapPoint) -> anyhow::Result<()> {
@@ -2338,6 +2398,13 @@ mod tests {
 
     #[async_trait]
     impl crate::DeviceDriver for TestDriver {
+        async fn resolve_tiktok_package_with_preference(
+            &self,
+            _udid: &str,
+            preferred: Option<&str>,
+        ) -> anyhow::Result<String> {
+            Ok(preferred.unwrap_or("com.ss.android.ugc.trill").to_string())
+        }
         async fn tiktok_build(&self, udid: &str) -> anyhow::Result<(String, String, String)> {
             anyhow::ensure!(udid != "missing-build", "fixture build unreadable");
             Ok((

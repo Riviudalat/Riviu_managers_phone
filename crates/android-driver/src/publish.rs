@@ -823,6 +823,75 @@ where
     Ok(size)
 }
 
+async fn reuse_verified_import(
+    adb: &AdbProgram,
+    serial: &str,
+    campaign_id: &str,
+    source: &Path,
+) -> anyhow::Result<Option<Value>> {
+    let mut entries = collect_source_files(source)?;
+    entries.sort();
+    validate_publish_media_shape(&entries)?;
+    let mut files: Vec<StagedFile> = Vec::new();
+    for path in entries {
+        let name = sanitise_id(
+            path.file_name()
+                .and_then(|n| n.to_str())
+                .context("invalid media filename")?,
+        );
+        validate_shell_id(&name)?;
+        anyhow::ensure!(
+            !files.iter().any(|f| f.name == name),
+            "duplicate media filename"
+        );
+        let bytes = std::fs::read(path)?;
+        files.push(StagedFile {
+            name,
+            bytes: bytes.len() as u64,
+            sha256: riviu_core::frame_sha256(&bytes),
+        });
+    }
+    let manifest = json!({"schemaVersion":1,"campaignId":campaign_id,"files":files.iter().map(|f|json!({"name":f.name,"bytes":f.bytes,"sha256":f.sha256})).collect::<Vec<_>>()});
+    let bytes = serde_json::to_vec(&manifest)?;
+    let hash = riviu_core::frame_sha256(&bytes);
+    let visible = import_dir(&import_id(campaign_id, &hash));
+    let rows = media_rows_under(adb, serial, &visible).await?;
+    if rows.len() != files.len() || files.is_empty() {
+        return Ok(None);
+    }
+    for file in &files {
+        if rows
+            .iter()
+            .filter(|r| r.data.ends_with(&format!("/{}", file.name)))
+            .count()
+            != 1
+        {
+            return Ok(None);
+        }
+        let remote = format!("{visible}/{}", file.name);
+        if let Err(error) =
+            verify_staged_file(&remote, file.bytes, &file.sha256, |script| async move {
+                adb.shell_output(serial, &script, crate::adb::DEFAULT_TIMEOUT)
+                    .await
+            })
+            .await
+        {
+            if matches!(
+                crate::adb::classify_fault(&format!("{error:#}")),
+                crate::adb::AdbFault::UnknownDevice
+                    | crate::adb::AdbFault::Offline
+                    | crate::adb::AdbFault::Unauthorized
+            ) {
+                return Err(error);
+            }
+            return Ok(None);
+        }
+    }
+    Ok(Some(
+        json!({"ok":true,"udid":serial,"campaignId":campaign_id,"remoteRoot":visible,"fileCount":files.len(),"manifestSha256":hash,"manifestBytes":bytes.len(),"readback":"size+sha256+MediaStore","hiddenFromMediaStore":false,"reusedImport":true}),
+    ))
+}
+
 pub async fn stage(
     adb: &AdbProgram,
     serial: &str,
@@ -837,6 +906,12 @@ pub async fn stage(
     let campaign = sanitise_id(campaign_id);
     let campaign = validate_shell_id(&campaign)?;
     let remote_root = stage_dir(campaign);
+
+    // A pre-Post retry keeps the same import identity. Verify every byte and the
+    // exact MediaStore membership before deciding that a push is unnecessary.
+    if let Some(reused) = reuse_verified_import(adb, serial, campaign_id, source_root).await? {
+        return Ok(reused);
+    }
 
     // Start from empty: a re-stage after a partial failure must not inherit files the
     // new manifest does not list.
@@ -943,6 +1018,12 @@ pub async fn prepare(
     let campaign = sanitise_id(campaign_id);
     let campaign = validate_shell_id(&campaign)?;
     let remote_root = stage_dir(campaign);
+    let visible = import_dir(&import_id(campaign_id, manifest_sha256));
+    if !media_rows_under(adb, serial, &visible).await?.is_empty() {
+        return Ok(
+            json!({"campaignId":campaign_id,"importId":import_id(campaign_id,manifest_sha256),"state":"ready","reused":true}),
+        );
+    }
     let listing = adb
         .shell(serial, &format!("ls -1 {remote_root} 2>/dev/null"))
         .await

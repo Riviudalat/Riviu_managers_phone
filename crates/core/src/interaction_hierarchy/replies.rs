@@ -134,6 +134,7 @@ mod tests {
     }
     fn root() -> CommentLocatorIdentity {
         CommentLocatorIdentity {
+            comment_link: None,
             author_label: "Same author".into(),
             text: "root".into(),
             locator_version: "test".into(),

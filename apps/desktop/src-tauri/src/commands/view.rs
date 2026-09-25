@@ -223,10 +223,12 @@ pub async fn view_request_keyframe(
 /// let go — `FocusStream` buffered the samples and posted a single swipe on release, so the
 /// picture stood still under a moving finger. See AGENTS.md 9.77.
 ///
+/// Borrow the overlay's existing ManualControl lease without opening another session.
 /// Deliberately outside `with_manual_session`. That helper claims device ownership and opens
 /// a uiautomator2 session, neither of which this path needs — and a pointer at 60 Hz would be
 /// claiming and releasing ownership sixty times a second. The control socket already belongs
-/// to the producer that is drawing the picture being touched.
+/// to the producer that is drawing the picture being touched. Holding the overlay guard
+/// through the socket write prevents its ManualControl lease from ending mid-gesture.
 ///
 /// `Ok(false)` means the phone is not streaming, so the caller should fall back to the agent
 /// rather than report a failure. A refusal to admit work still throws, because a drag during
@@ -247,10 +249,105 @@ pub async fn view_inject_touch(
     };
     let action =
         riviu_android_driver::TouchAction::parse(&action).map_err(CommandError::operation)?;
-    android
+    let hold = require_overlay_touch_lease(
+        &udid,
+        state.overlay_ui_session(&udid).await,
+        state.control.current_work_owner(&udid),
+    )?;
+    let result = android
         .inject_touch(&udid, action, x, y, image_w, image_h)
         .await
-        .map_err(CommandError::operation)
+        .map_err(CommandError::operation);
+    drop(hold);
+    result
+}
+
+fn require_overlay_touch_lease<T>(
+    udid: &str,
+    hold: Option<T>,
+    owner: Option<DeviceWorkOwner>,
+) -> Result<T, CommandError> {
+    if let Some(current_owner) = owner.filter(|owner| *owner != DeviceWorkOwner::ManualControl) {
+        let mut error =
+            CommandError::code("DeviceBusy", format!("{udid} is held by {current_owner:?}"));
+        error.udid = Some(udid.into());
+        error.requested_owner = Some(DeviceWorkOwner::ManualControl);
+        error.current_owner = Some(current_owner);
+        return Err(error);
+    }
+    if owner.is_none() {
+        return Err(overlay_touch_not_ready(udid));
+    }
+    hold.ok_or_else(|| overlay_touch_not_ready(udid))
+}
+
+fn overlay_touch_not_ready(udid: &str) -> CommandError {
+    let mut error = CommandError::code(
+        "DeviceControlNotReady",
+        format!("{udid}: open the control overlay before sending touch input"),
+    );
+    error.udid = Some(udid.into());
+    error.requested_owner = Some(DeviceWorkOwner::ManualControl);
+    error
+}
+
+#[cfg(test)]
+mod touch_lease_tests {
+    use super::*;
+
+    #[test]
+    fn raw_touch_requires_this_overlay_manual_control_lease() {
+        let missing = require_overlay_touch_lease::<()>("phone-a", None, None).unwrap_err();
+        assert_eq!(missing.code, "DeviceControlNotReady");
+        assert_eq!(missing.udid.as_deref(), Some("phone-a"));
+
+        let borrowed_by_other =
+            require_overlay_touch_lease("phone-a", Some(()), Some(DeviceWorkOwner::Interaction))
+                .unwrap_err();
+        assert_eq!(borrowed_by_other.code, "DeviceBusy");
+        assert_eq!(
+            borrowed_by_other.current_owner,
+            Some(DeviceWorkOwner::Interaction)
+        );
+
+        let wrong_overlay = require_overlay_touch_lease::<()>(
+            "phone-b",
+            None,
+            Some(DeviceWorkOwner::ManualControl),
+        )
+        .unwrap_err();
+        assert_eq!(wrong_overlay.code, "DeviceControlNotReady");
+
+        let unowned = require_overlay_touch_lease("phone-a", Some(()), None).unwrap_err();
+        assert_eq!(unowned.code, "DeviceControlNotReady");
+
+        assert!(require_overlay_touch_lease(
+            "phone-a",
+            Some(()),
+            Some(DeviceWorkOwner::ManualControl),
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn raw_touch_borrows_overlay_guard_across_socket_write() {
+        let source = include_str!("view.rs");
+        let command = source
+            .split("pub async fn view_inject_touch(")
+            .nth(1)
+            .unwrap()
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+        let borrow = command
+            .find("state.overlay_ui_session(&udid).await")
+            .unwrap();
+        let check = command.find("require_overlay_touch_lease(").unwrap();
+        let inject = command.find(".inject_touch(&udid").unwrap();
+        let release = command.find("drop(hold)").unwrap();
+        assert!(check < borrow && borrow < inject && inject < release);
+        assert!(!command.contains("open_manual_session"));
+    }
 }
 
 #[tauri::command]

@@ -2,24 +2,43 @@
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PublishProgress {
+    RetryWaiting {
+        step: String,
+        attempt: u32,
+        maximum: u32,
+        reason: String,
+    },
     RehearsalReady,
     WaitingTransfer,
     WaitingControl,
     CheckingDevice,
     DeviceReady,
-    TransferringMedia { count: usize, video: bool },
+    TransferringMedia {
+        count: usize,
+        video: bool,
+    },
     MediaTransferred,
     OpeningApp,
     AppReady,
     OpeningComposer,
     OpeningGallery,
     SelectingAlbum,
-    SelectingMedia { count: usize, video: bool },
-    MediaSelected { count: usize, video: bool },
+    SelectingMedia {
+        count: usize,
+        video: bool,
+    },
+    MediaSelected {
+        count: usize,
+        video: bool,
+    },
     OpeningEditor,
     OpeningSounds,
-    SelectingSound { title: String },
-    SoundConfirmed { title: String },
+    SelectingSound {
+        title: String,
+    },
+    SoundConfirmed {
+        title: String,
+    },
     OpeningCaption,
     EnteringCaption,
     CaptionConfirmed,
@@ -30,12 +49,18 @@ pub enum PublishProgress {
     PostConfirmed,
     CapturingLink,
     LinkCaptured,
-    LinkPending { reason: String },
+    LinkPending {
+        reason: String,
+    },
     Finishing,
     ReleasingPendingUpload,
     Finished,
-    FailedBeforePost { reason: String },
-    PostUncertain { reason: String },
+    FailedBeforePost {
+        reason: String,
+    },
+    PostUncertain {
+        reason: String,
+    },
 }
 
 pub type PublishProgressObserver<'a> = dyn Fn(PublishProgress) + Send + Sync + 'a;
@@ -43,6 +68,7 @@ pub type PublishProgressObserver<'a> = dyn Fn(PublishProgress) + Send + Sync + '
 impl PublishProgress {
     pub fn state(&self) -> &'static str {
         match self {
+            Self::RetryWaiting { .. } => "retry_waiting",
             Self::RehearsalReady => "rehearsal_ready",
             Self::WaitingTransfer => "waiting_transfer",
             Self::WaitingControl => "waiting_control",
@@ -82,6 +108,12 @@ impl PublishProgress {
 
     pub fn message(&self, device: &str) -> String {
         match self {
+            Self::RetryWaiting {
+                step,
+                attempt,
+                maximum,
+                ..
+            } => format!("Thử lại {attempt}/{maximum} · {step}"),
             Self::RehearsalReady => "Đã kiểm tra tới trước nút Đăng".into(),
             Self::WaitingTransfer => "Đang chờ lượt tải nội dung vào máy".into(),
             Self::WaitingControl => "Đã tải xong; chờ lượt điều khiển để đăng".into(),
@@ -144,6 +176,7 @@ impl PublishProgress {
 
     pub fn detail(&self) -> Option<&str> {
         match self {
+            Self::RetryWaiting { reason, .. } => Some(reason),
             Self::LinkPending { reason }
             | Self::FailedBeforePost { reason }
             | Self::PostUncertain { reason } => Some(reason),

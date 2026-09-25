@@ -1041,6 +1041,7 @@ mod tests {
             actions: Vec::new(),
         };
         let detail = project_interaction_detail(&InteractionCampaignDetail {
+            seeding: None,
             scripted_conversation: None,
             conversation_session: None,
             summary,

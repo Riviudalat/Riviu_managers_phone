@@ -38,6 +38,7 @@ pub mod orchestration;
 pub mod orchestration_runtime;
 pub mod publish;
 pub mod publish_partners;
+pub mod publish_recovery;
 pub mod publish_runtime;
 pub mod publish_sheet;
 pub mod publish_submission;
@@ -45,6 +46,7 @@ pub mod registry;
 pub mod screen;
 pub mod screen_match;
 pub mod screen_watch;
+pub mod seeding;
 pub mod session_log;
 pub mod social_network;
 pub mod stream_budget;
@@ -52,10 +54,12 @@ pub mod threads_publish;
 pub mod three_feature_template;
 pub mod tiktok_account;
 pub mod tiktok_comment_delete;
+pub mod tiktok_comment_link;
 pub mod tiktok_composer;
 pub mod tiktok_drawer;
 pub mod tiktok_follow_cleanup;
 pub mod tiktok_follow_target;
+pub mod tiktok_friend_share;
 pub mod tiktok_labels;
 pub mod tiktok_like;
 pub mod tiktok_post_delete;
@@ -75,9 +79,10 @@ pub use automation::*;
 pub use automation_schedule_runtime::*;
 pub use device_capabilities::*;
 pub use device_control::{
-    AppCompletionDisposition, ContextReleaseProof, DeviceControlError, DeviceControlPlane,
-    DeviceExclusiveContext, DeviceLeaseRef, DeviceReleaseProof, ForegroundAppProof,
-    InteractionAcquireResult, UiCapacityReservation, UiSessionContext, UiWithStreamContext,
+    AppCompletionDisposition, ContextReleaseProof, DeviceAppBindingFuture,
+    DeviceAppBindingResolver, DeviceControlError, DeviceControlPlane, DeviceExclusiveContext,
+    DeviceLeaseRef, DeviceReleaseProof, ForegroundAppProof, InteractionAcquireResult,
+    UiCapacityReservation, UiSessionContext, UiWithStreamContext,
 };
 pub use device_work::{
     DeviceBusy, DeviceWorkAcquireError, DeviceWorkCoordinator, DeviceWorkLease, DeviceWorkOwner,

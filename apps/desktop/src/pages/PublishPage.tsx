@@ -28,6 +28,7 @@ import {
   publishGetLimits,
   publishList,
   publishPreflight,
+  operationPrepareDevices,
   publishReconcile,
   publishRetryAssignment,
   publishScanFolder,
@@ -644,6 +645,7 @@ export function PublishPage({
     }
   }, []);
   const [preflightState, setPreflightState] = useState<AsyncState>("idle");
+  const [preflightStage, setPreflightStage] = useState<"preparing" | "checking" | null>(null);
   const [preflightError, setPreflightError] = useState<string | null>(null);
   const [preflightSnapshot, setPreflightSnapshot] = useState<{
     inputKey: string;
@@ -744,13 +746,14 @@ export function PublishPage({
   const sheetBlockingReason = sheetBlocked ? "Kiểm tra và xác minh link Sheet trong tab Thiết lập trước khi ghi kết quả." : undefined;
   const pendingBlockingReason = targets.filter(Boolean).map(udid => deviceGuardBlock(deviceGuards, udid)).find(Boolean);
   const publishBlockingReason = pendingBlockingReason ?? sheetBlockingReason;
-  const inputKey = JSON.stringify({ request: preflightRequest, sheetBlocked, pendingGuards: targets.map(udid => deviceGuards[udid]?.blocking ?? null), sheetConnectionRevision: sheetEnabled ? sheetConnectionRevision : 0 });
+  const inputKey = JSON.stringify({ request: preflightRequest, sheetBlocked, sheetConnectionRevision: sheetEnabled ? sheetConnectionRevision : 0 });
   const latestInputKey = useRef(inputKey);
   latestInputKey.current = inputKey;
   const preflightTicket = useRef(0);
   useEffect(() => {
     preflightTicket.current += 1;
     setPreflightState("idle");
+    setPreflightStage(null);
     setPreflightError(null);
     setPreflightSnapshot(null);
   }, [inputKey]);
@@ -818,7 +821,7 @@ export function PublishPage({
   });
   const selectionStatus = publishSelectionStatus({ selectedIds: bundleIds, bundles: manifest?.bundles ?? [],
     assignments, captions: currentCaptionOverrides, eligible: eligibleTargets,
-    ready: devices.filter(device => device.status === "ready").map(device => device.udid), blockingReason: publishBlockingReason });
+    ready: devices.filter(device => device.status === "ready" || device.status === "busy" || device.status === "connected").map(device => device.udid), blockingReason: sheetBlockingReason });
   const selectionReady = selectionStatus.ready;
   const currentPreflight =
     preflightSnapshot?.inputKey === inputKey ? preflightSnapshot.report : null;
@@ -839,6 +842,7 @@ export function PublishPage({
     setSoundPolicyOverride(null);
     setPreflightSnapshot(null);
     setPreflightState("idle");
+    setPreflightStage(null);
     setPreflightError(null);
   };
 
@@ -983,11 +987,16 @@ export function PublishPage({
       return;
     }
     setPreflightState("loading");
+    setPreflightStage("preparing");
     setPreflightError(null);
     const ticket = ++preflightTicket.current;
     const requestKey = inputKey;
     try {
       const request = preflightRequest;
+      await operationPrepareDevices(targets);
+      await refreshDeviceGuards();
+      if (!mounted.current || ticket !== preflightTicket.current || latestInputKey.current !== requestKey) return;
+      setPreflightStage("checking");
       const report = await publishPreflight(request);
       if (
         !mounted.current ||
@@ -997,6 +1006,7 @@ export function PublishPage({
         return;
       setPreflightSnapshot({ inputKey: requestKey, report });
       setPreflightState("ready");
+      setPreflightStage(null);
     } catch (error) {
       if (
         !mounted.current ||
@@ -1007,11 +1017,12 @@ export function PublishPage({
       setPreflightSnapshot(null);
       setPreflightError(describeError(error));
       setPreflightState("error");
+      setPreflightStage(null);
     }
   };
 
   const executeNewCampaign = async () => {
-    if (publishInFlight.current || operationBusy || !currentPreflight?.canExecute || sheetBlocked || pendingBlockingReason) return;
+    if (publishInFlight.current || operationBusy || !currentPreflight?.canExecute || sheetBlocked) return;
     publishInFlight.current = true;
     setBusy(true);
     setNotice(null);
@@ -1216,7 +1227,9 @@ export function PublishPage({
         danger: true,
       });
       if (!confirmed) return;
-      await publishRetryAssignment(assignment.id, true);
+      const capability=recoveryCapabilities[campaign.id]?.find(item=>item.assignmentId===assignment.id);
+      if (!capability) throw Error("Tải lại quyền thử lại của bài này.");
+      await publishRetryAssignment(assignment.id, true, capability.revision, crypto.randomUUID());
       await reload();
       await loadCampaignDetail(campaign.id, true);
       setNotice({ tone: "info", text: `Đã nhận yêu cầu thử lại bài của ${machine}. Theo dõi trạng thái từng máy để xem kết quả.` });
@@ -1367,9 +1380,10 @@ export function PublishPage({
           busy={operationBusy}
           scanning={scanning || restoringForm}
           preflightLoading={preflightState === "loading"}
+          preflightStage={preflightStage}
           preflight={currentPreflight}
           preflightError={publishBlockingReason ?? preflightError}
-          blockingReason={publishBlockingReason}
+          blockingReason={sheetBlockingReason}
           sound={currentSoundPolicy}
           sheet={sheetEnabled}
           cleanup={deleteAfterPublish}
@@ -1578,6 +1592,7 @@ function CampaignMonitor({
   const [filter, setFilter] = useState<"all" | "scheduled" | "active" | "attention" | "done">("all");
   const [query, setQuery] = useState("");
   const [selectedId, setSelectedId] = useState<string | null | undefined>(initialSelectedId);
+  const detailRef = useRef<HTMLDivElement>(null);
   useEffect(() => { if (initialSelectedId) setSelectedId(initialSelectedId); }, [initialSelectedId]);
   const bucket = (campaign: PublishCampaignRecord) => {
     if (campaign.state === "scheduled") return "scheduled";
@@ -1602,6 +1617,7 @@ function CampaignMonitor({
     if (selected && selected.id !== campaign.id && (details[selected.id] || detailLoading[selected.id])) void toggleDetail(selected);
     setSelectedId(campaign.id);
     if (!details[campaign.id] && !detailLoading[campaign.id]) void toggleDetail(campaign);
+    if (window.matchMedia?.("(max-width: 900px)").matches) detailRef.current?.scrollIntoView({ block: "start" });
   };
   return <div className="publish-campaigns">
     <div className="publish-monitor-toolbar">
@@ -1626,7 +1642,7 @@ function CampaignMonitor({
         })}
         {!filtered.length && <div className="publish-monitor-placeholder"><Search size={24}/><strong>Không có chiến dịch phù hợp</strong><span>Đổi bộ lọc hoặc từ khóa để xem các lượt khác.</span></div>}
       </div>
-      <div className="publish-monitor-detail">
+      <div className="publish-monitor-detail" ref={detailRef}>
         {selected && selectedView ? <>
           <div className="publish-monitor-detail-head"><div><h3>Chiến dịch {campaigns.indexOf(selected) + 1}</h3><p>{selected.assignments.length} bài · {name(selected)}</p></div>
             <div className="publish-row-actions">
@@ -1783,6 +1799,8 @@ function CampaignDetail({
                   const retryable = canRetryAssignment(assignment, detail.campaign);
                   const retryReason = recoveryReason(capability?.retryBeforePost.reason) ?? "Chưa xác nhận được quyền thử lại; tải lại chi tiết.";
                   return <span>
+                    {capability?.recovery?.state==="waitingDevice"&&<p>Mất kết nối · chờ đúng máy kết nối lại, còn {Math.max(0,Math.ceil(((capability.recovery.reconnectDeadline??0)-Date.now())/1000))} giây</p>}
+                    {capability?.recovery?.state==="retryWaiting"&&<p>Thử lại {capability.recovery.retriesUsed}/{capability.recovery.maxRetries} · {capability.recovery.step}</p>}
                     {needsPublicationReview(assignment) ? <>Cần kiểm tra bài đăng<p>{publicationReviewReason(assignment.evidenceJson) ?? "Chưa có đủ bằng chứng xác nhận bài; kiểm tra TikTok trước khi tiếp tục."}</p></>
                       : <>{isComposing(assignment) ? "Đang chuẩn bị bài trên TikTok" : PUBLISH_STATE_LABELS[assignment.state] ?? "Trạng thái chưa nhận diện"}{dispatchDetail(assignment) && <p>{dispatchDetail(assignment)}</p>}{verificationDetail(assignment.evidenceJson) && <p>{verificationDetail(assignment.evidenceJson)}</p>}</>}
                     <PrePostFailureEvidence assignment={assignment}/>

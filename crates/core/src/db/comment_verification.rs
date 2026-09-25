@@ -24,6 +24,39 @@ fn view(row: &rusqlite::Row<'_>) -> rusqlite::Result<CommentVerification> {
 }
 
 impl Database {
+    /// Enrich an already verified identity; never changes Send/verification state.
+    pub fn store_comment_link(
+        &self,
+        campaign: &str,
+        assignment: &str,
+        expected: &crate::CommentLocatorIdentity,
+        link: &crate::tiktok_comment_link::SharedCommentLink,
+    ) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            crate::tiktok_comment_link::parse(&link.source_url).as_ref() == Some(link),
+            "Invalid comment link"
+        );
+        let mut conn = self.conn()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let (raw,post):(String,String)=tx.query_row("SELECT a.evidence_json,t.content_id FROM interaction_assignments a JOIN interaction_targets t ON t.id=a.target_id JOIN interaction_comment_verification v ON v.assignment_id=a.id WHERE a.id=?1 AND a.campaign_id=?2 AND a.state='succeeded' AND v.state='verified'",params![assignment,campaign],|r|Ok((r.get(0)?,r.get(1)?)))?;
+        let mut data: serde_json::Value = serde_json::from_str(&raw)?;
+        let stored: crate::CommentLocatorIdentity =
+            serde_json::from_value(data["postedIdentity"].clone())?;
+        anyhow::ensure!(
+            &stored == expected && post == link.post_id,
+            "Comment changed during link capture"
+        );
+        let mut identity = stored;
+        identity.comment_link = Some(link.clone());
+        data["postedIdentity"] = serde_json::to_value(&identity)?;
+        tx.execute(
+            "UPDATE interaction_assignments SET evidence_json=?2,revision=revision+1 WHERE id=?1",
+            params![assignment, data.to_string()],
+        )?;
+        tx.execute("UPDATE tiktok_action_runs SET evidence_json=json_set(COALESCE(evidence_json,'{}'),'$.postedIdentity',json(?2)),revision=revision+1 WHERE assignment_id=?1 AND action_kind='comment' AND state='confirmed'",params![assignment,serde_json::to_string(&identity)?])?;
+        tx.commit()?;
+        Ok(())
+    }
     /// Store an account observed in the owned UI session without overwriting
     /// operator edits to aliases, numbers, groups or notes.
     pub fn record_observed_interaction_account(

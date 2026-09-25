@@ -2,6 +2,32 @@ use super::*;
 use riviu_core::tiktok_share::{LinkCapture, OwnPostLink};
 
 #[test]
+fn new_publish_requires_one_successful_release_for_every_selected_phone() {
+    use riviu_core::ipc_contract::{OperationStopResult, StopDeviceResult};
+    let selected = vec!["phone-a".into(), "phone-b".into()];
+    let mut result = OperationStopResult {
+        operation_id: "handoff".into(),
+        state: "closed".into(),
+        devices: vec![],
+        stop_marker: None,
+    };
+    assert!(require_released_publish_devices(&selected, &result).is_err());
+    for id in &selected {
+        result.devices.push(StopDeviceResult {
+            udid: id.clone(),
+            closed: true,
+            message: "released".into(),
+        });
+    }
+    assert!(require_released_publish_devices(&selected, &result).is_ok());
+    result.devices[1].closed = false;
+    assert!(require_released_publish_devices(&selected, &result).is_err());
+    result.devices[1].closed = true;
+    result.devices.push(result.devices[1].clone());
+    assert!(require_released_publish_devices(&selected, &result).is_err());
+}
+
+#[test]
 fn metadata_retry_never_posts_an_untouched_sibling_of_a_submitted_post() {
     use riviu_core::{
         PublishAssignmentRecord, PublishCampaignState as State, PublishRetryScope as Scope,

@@ -1,0 +1,12 @@
+{
+  "capturedAt": "2026-09-22T16:28:17Z",
+  "device": "ce021712aaf9533405",
+  "package": "com.zhiliaoapp.musically",
+  "version": "45.7.3",
+  "locale": "en",
+  "screen": "1080x2220",
+  "source": "bounded phone-only publish canary before Post",
+  "redaction": "pixels above y=970 replaced with black; sound sheet unchanged",
+  "sha256": "ebc1dc9ecdf8f74d6b59f02ae9c64b74a5d5106168d64b5f671a5cfa40f30b8f",
+  "effectIntent": false
+}

@@ -10,6 +10,7 @@ mod automation_commands;
 mod command_error;
 mod commands;
 pub mod deployment_check;
+mod dev_acceptance;
 mod exit_coordinator;
 mod farm_commands;
 mod flow_commands;
@@ -514,7 +515,10 @@ pub fn run() {
             farm_commands::operation_cancel_batch,
             commands::operation_get_run,
             commands::operation_stop,
+            commands::operation_prepare_devices,
             commands::operation_stop_status,
+            commands::device_app_candidates,
+            commands::device_app_select,
             commands::operation_device_log,
             commands::run_script,
             commands::cancel_job,
@@ -575,6 +579,9 @@ pub fn run() {
             flow_connector_commands::flow_connector_import_file,
             flow_commands::flow_list,
             flow_commands::flow_get,
+            flow_commands::flow_library_get,
+            flow_commands::flow_library_publish,
+            flow_commands::flow_library_unpublish,
             flow_commands::flow_validate,
             flow_commands::flow_save_revision,
             flow_commands::flow_archive,
@@ -588,6 +595,7 @@ pub fn run() {
             flow_commands::flow_coordinate_frame,
             inspector_commands::inspector_observe,
             inspector_commands::inspector_tap,
+            inspector_commands::inspector_confirm_postcondition,
             inspector_commands::inspector_record,
             inspector_commands::inspector_recording,
             flow_commands::flow_read_artifact,
@@ -622,9 +630,11 @@ pub fn run() {
             interaction_commands::interaction_preview_thread,
             interaction_commands::interaction_parse_conversation,
             interaction_commands::interaction_draft_conversation,
+            interaction_commands::interaction_draft_seeding,
             interaction_commands::interaction_measure_post,
             interaction_commands::interaction_read_account,
             interaction_commands::interaction_readback,
+            interaction_commands::interaction_comment_link,
             interaction_commands::interaction_verify_comment,
             interaction_commands::interaction_import_sheet,
             interaction_commands::interaction_start_thread,
@@ -646,6 +656,7 @@ pub fn run() {
             nurture_commands::typesafe_update_credential,
             nurture_commands::typesafe_check_comment,
             google_sheet_commands::publish_sheet_readback,
+            google_sheet_commands::publish_sheet_diagnose_failed,
             commands::device_action_capabilities,
             commands::operation_trace_export,
             nurture_commands::nurture_test_api,
@@ -675,6 +686,7 @@ pub fn run() {
             publish_commands::publish_cancel,
             publish_commands::publish_execute,
             publish_commands::publish_retry_assignment,
+            publish_commands::publish_retry_sheet_assignment,
             publish_commands::publish_readiness,
             publish_commands::publish_sheet_get_config,
             gui_service::gui_service_status,
@@ -1170,6 +1182,14 @@ mod tests {
             include_str!("commands/android_ops.rs"),
         ),
         ("commands/device.rs", include_str!("commands/device.rs")),
+        (
+            "commands/device_app.rs",
+            include_str!("commands/device_app.rs"),
+        ),
+        (
+            "commands/device_handoff.rs",
+            include_str!("commands/device_handoff.rs"),
+        ),
         ("commands/jobs.rs", include_str!("commands/jobs.rs")),
         (
             "commands/operation_stop.rs",
@@ -1322,6 +1342,7 @@ mod tests {
         ("flow_connector_info", "read: workspace path and credential names; never returns credential values"),
         ("flow_list", "read: DB"),
         ("flow_get", "read: DB"),
+        ("flow_library_get", "read: published Flow revision in DB"),
         ("flow_validate", "pure: compiles a document, no I/O"),
         (
             "flow_import_legacy",

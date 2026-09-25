@@ -16,7 +16,7 @@ test("nurture compact scope and machine picker preserve drafts at three viewport
   await workspace.getByLabel("Nguồn video").selectOption("search");
   await workspace.getByLabel("Từ khóa tìm kiếm").fill("đà lạt");
   await choose.click();
-  await picker.getByRole("button", { name: "Chọn tất cả sẵn sàng", exact: true }).click();
+  await picker.getByRole("button", { name: "Chọn tất cả đang kết nối", exact: true }).click();
   await expect(machines.getByRole("checkbox")).toHaveCount(38);
   await expect(machines.getByRole("checkbox", { checked: true })).toHaveCount(38);
   await expect(picker.getByRole("button", { name: "Trang máy tiếp" })).toHaveCount(0);

@@ -144,6 +144,47 @@ mod tests {
     }
 
     #[test]
+    fn boxed_element_selectors_keep_the_existing_wire_shape() {
+        let selector = crate::ui_automation::inspector::ElementSelector {
+            package: "app.test".into(),
+            text: Some("Profile".into()),
+            description: None,
+            resource_id: None,
+            class_name: None,
+            schema_version: None,
+            text_prefix: None,
+            description_prefix: None,
+            scope: None,
+            action_target: None,
+        };
+        let evidence = EvidenceSpec::ElementVisible {
+            selector: Box::new(selector.clone()),
+        };
+        let target = CompiledTapTarget::Element {
+            selector: Box::new(selector.clone()),
+        };
+
+        assert_eq!(
+            serde_json::to_value(&evidence).unwrap(),
+            json!({"kind":"elementVisible","selector":selector})
+        );
+        assert_eq!(
+            serde_json::to_value(&target).unwrap(),
+            json!({"mode":"element","selector":selector})
+        );
+        assert_eq!(
+            serde_json::from_value::<EvidenceSpec>(serde_json::to_value(&evidence).unwrap())
+                .unwrap(),
+            evidence
+        );
+        assert_eq!(
+            serde_json::from_value::<CompiledTapTarget>(serde_json::to_value(&target).unwrap())
+                .unwrap(),
+            target
+        );
+    }
+
+    #[test]
     fn canonical_compiled_plan_json_matches_golden_and_keeps_revision() {
         let plan = compiled_plan_fixture(1);
 
@@ -369,6 +410,20 @@ mod tests {
         let tap = config_schema(ActionKind::Tap);
         assert_eq!(tap["oneOf"].as_array().unwrap().len(), 3);
         assert_eq!(tap["properties"]["selector"]["additionalProperties"], false);
+        assert_eq!(
+            tap["properties"]["selector"]["properties"]["schemaVersion"]["enum"],
+            json!([2, null])
+        );
+        assert_eq!(
+            tap["properties"]["selector"]["properties"]["scope"]["properties"]["maxDepth"]
+                ["maximum"],
+            4
+        );
+        assert_eq!(
+            tap["properties"]["selector"]["properties"]["actionTarget"]["properties"]["kind"]
+                ["enum"],
+            json!(["clickableAncestor"])
+        );
         assert_eq!(tap["properties"]["point"]["additionalProperties"], false);
         assert_eq!(
             tap["properties"]["point"]["properties"]["profileId"]["pattern"],

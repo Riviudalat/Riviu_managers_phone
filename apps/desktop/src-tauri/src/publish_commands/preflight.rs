@@ -1,6 +1,76 @@
 //! Manifest scanning, target preflight and measured device readiness.
 
 use super::*;
+use futures_util::stream::{self, StreamExt};
+
+// Stay below the host ADB admission cap while probing different phones together.
+const PUBLISH_PREFLIGHT_DEVICE_LIMIT: usize = 4;
+
+struct PreflightDeviceObservation {
+    exists: bool,
+    android: bool,
+    transport_error: Option<String>,
+    storage: Option<Result<u64, String>>,
+    readiness_error: Option<String>,
+    tiktok_build: Result<(String, String, String), String>,
+}
+
+async fn collect_bounded_device_observations<Fut>(
+    observations: impl IntoIterator<Item = Fut>,
+) -> Vec<Fut::Output>
+where
+    Fut: std::future::Future,
+{
+    stream::iter(observations)
+        .buffered(PUBLISH_PREFLIGHT_DEVICE_LIMIT)
+        .collect()
+        .await
+}
+
+async fn observe_preflight_device(
+    control: &DeviceControlPlane,
+    registry: &riviu_core::DeviceRegistry,
+    udid: &str,
+) -> PreflightDeviceObservation {
+    let device = registry.get(udid);
+    let android = device
+        .as_ref()
+        .is_some_and(|device| matches!(device.platform, riviu_core::DevicePlatform::Android));
+    if !android {
+        return PreflightDeviceObservation {
+            exists: device.is_some(),
+            android,
+            transport_error: None,
+            storage: None,
+            readiness_error: None,
+            tiktok_build: Err("Android required".into()),
+        };
+    }
+    PreflightDeviceObservation {
+        exists: true,
+        android,
+        transport_error: control
+            .verify_automation_transport(udid)
+            .await
+            .err()
+            .map(|error| error.to_string()),
+        storage: Some(
+            control
+                .available_storage_bytes(udid)
+                .await
+                .map_err(|error| error.to_string()),
+        ),
+        readiness_error: control
+            .verify_automation_readiness(udid)
+            .await
+            .err()
+            .map(|error| error.to_string()),
+        tiktok_build: control
+            .tiktok_build(udid)
+            .await
+            .map_err(|error| error.to_string()),
+    }
+}
 
 // A scan reads and hashes every bundle. Limit simultaneous scans without occupying
 // async runtime threads needed by device I/O and background workers.
@@ -117,7 +187,7 @@ pub async fn publish_preflight(
 pub(super) async fn build_publish_preflight(
     control: &DeviceControlPlane,
     registry: &riviu_core::DeviceRegistry,
-    db: &Database,
+    db: &Arc<Database>,
     mut request: riviu_core::PublishPreflightRequest,
 ) -> anyhow::Result<PreparedPublishPreflight> {
     anyhow::ensure!(
@@ -151,7 +221,7 @@ pub(super) async fn scan_preflight_source(
 pub(crate) async fn build_publish_preflight_from_manifest(
     control: &DeviceControlPlane,
     registry: &riviu_core::DeviceRegistry,
-    db: &Database,
+    db: &Arc<Database>,
     request: riviu_core::PublishPreflightRequest,
     manifest: &PublishFolderManifest,
 ) -> anyhow::Result<PreparedPublishPreflight> {
@@ -213,7 +283,7 @@ pub(super) async fn verify_sheet_delivery_choice(
 pub(super) async fn build_publish_preflight_from_manifest_with_sheet(
     control: &DeviceControlPlane,
     registry: &riviu_core::DeviceRegistry,
-    db: &Database,
+    db: &Arc<Database>,
     request: riviu_core::PublishPreflightRequest,
     manifest: &PublishFolderManifest,
     sheet_choice: VerifiedSheetChoice,
@@ -248,20 +318,47 @@ pub(super) async fn build_publish_preflight_from_manifest_with_sheet(
         .collect();
     apply_caption_overrides(&mut bundles, Some(&overrides))?;
 
-    let metas = db.list_device_metas()?;
-    let groups = db.list_groups()?;
+    let persisted_udids = request.udids.clone();
+    let persisted = db
+        .storage_read(move |db| {
+            let metas = db.list_device_metas()?;
+            let groups = db.list_groups()?;
+            let guards = persisted_udids
+                .into_iter()
+                .collect::<std::collections::BTreeSet<_>>()
+                .into_iter()
+                .map(|udid| db.publish_device_guard(&udid).map(|guard| (udid, guard)))
+                .collect::<anyhow::Result<HashMap<_, _>>>()?;
+            Ok((metas, groups, guards))
+        })
+        .await?;
+    let (metas, groups, guards) = persisted;
     let fleet_order = registry
         .list()
         .into_iter()
         .map(|device| device.udid)
         .collect::<Vec<_>>();
     let target_snapshot = resolve_preflight_target(&request, &fleet_order, &metas, &groups)?;
+    let device_observations =
+        collect_bounded_device_observations(
+            request.udids.clone().into_iter().map(|udid| async move {
+                observe_preflight_device(control, registry, &udid).await
+            }),
+        )
+        .await;
     let mut assignments = Vec::with_capacity(bundles.len());
     let mut observations = Vec::with_capacity(bundles.len());
     let mut issues = Vec::new();
-    for (ordinal, (bundle, udid)) in bundles.iter().zip(&request.udids).enumerate() {
+    for (ordinal, ((bundle, udid), observed)) in bundles
+        .iter()
+        .zip(&request.udids)
+        .zip(device_observations)
+        .enumerate()
+    {
         let mut row_issues = Vec::new();
-        let guard = db.publish_device_guard(udid)?;
+        let guard = guards
+            .get(udid)
+            .with_context(|| format!("thiếu snapshot guard cho máy {udid}"))?;
         if let Some(hold) = guard.blocking.first() {
             row_issues.push(preflight_issue(
                 "post_verification_pending",
@@ -297,8 +394,7 @@ pub(super) async fn build_publish_preflight_from_manifest_with_sheet(
             row_issues.push(preflight_issue("media_unready", udid, &bundle.id, &message));
         }
 
-        let device = registry.get(udid);
-        if device.is_none() {
+        if !observed.exists {
             row_issues.push(preflight_issue(
                 "device_missing",
                 udid,
@@ -306,9 +402,7 @@ pub(super) async fn build_publish_preflight_from_manifest_with_sheet(
                 "máy không còn trong roster hiện tại",
             ));
         }
-        let android = device
-            .as_ref()
-            .is_some_and(|device| matches!(device.platform, riviu_core::DevicePlatform::Android));
+        let android = observed.android;
         if !android {
             row_issues.push(preflight_issue(
                 "android_required",
@@ -317,15 +411,13 @@ pub(super) async fn build_publish_preflight_from_manifest_with_sheet(
                 "đợt đăng có chọn nhạc này chỉ chứng nhận trên Android",
             ));
         }
-        if android {
-            if let Err(error) = control.verify_automation_transport(udid).await {
-                row_issues.push(preflight_issue(
-                    "automation_transport_conflict",
-                    udid,
-                    &bundle.id,
-                    &error.to_string(),
-                ));
-            }
+        if let Some(error) = observed.transport_error {
+            row_issues.push(preflight_issue(
+                "automation_transport_conflict",
+                udid,
+                &bundle.id,
+                &error,
+            ));
         }
         if !control.supports_push_media(udid) {
             row_issues.push(preflight_issue(
@@ -336,8 +428,8 @@ pub(super) async fn build_publish_preflight_from_manifest_with_sheet(
             ));
         }
 
-        let available_bytes = if android {
-            match control.available_storage_bytes(udid).await {
+        let available_bytes = if let Some(storage) = observed.storage {
+            match storage {
                 Ok(available) => {
                     if available < required_bytes {
                         row_issues.push(preflight_issue(
@@ -366,15 +458,15 @@ pub(super) async fn build_publish_preflight_from_manifest_with_sheet(
         };
 
         let (package_name, version, locale, composer_ok, sound_picker_ok) = if android {
-            if let Err(error) = control.verify_automation_readiness(udid).await {
+            if let Some(error) = observed.readiness_error {
                 row_issues.push(preflight_issue(
                     "device_not_ready",
                     udid,
                     &bundle.id,
-                    &error.to_string(),
+                    &error,
                 ));
             }
-            match control.tiktok_build(udid).await {
+            match observed.tiktok_build {
                 Ok((package, version, locale)) => {
                     let capabilities = riviu_core::app_automation::action_capabilities(
                         udid, &package, &version, &locale, true,
@@ -514,7 +606,9 @@ pub(super) async fn build_publish_preflight_from_manifest_with_sheet(
 
     for row in &mut assignments {
         row.checks = riviu_core::ui_automation::checks::publish_checks(row);
-        let guard = db.publish_device_guard(&row.udid)?;
+        let guard = guards
+            .get(&row.udid)
+            .with_context(|| format!("thiếu snapshot guard cho máy {}", row.udid))?;
         if let Some(old) = guard.link_review.first() {
             row.checks.push(riviu_core::ui_automation::AutomationCheck {
                 id: "oldPostLink".into(),
@@ -846,7 +940,7 @@ mod sheet_choice_tests {
     #[tokio::test]
     async fn shared_sheet_choice_preserves_each_slot_target_failure_and_digest() {
         let path = std::env::temp_dir().join(format!("shared-sheet-choice-{}.db", Uuid::new_v4()));
-        let db = Database::open(&path).unwrap();
+        let db = Arc::new(Database::open(&path).unwrap());
         let control = DeviceControlPlane::new(
             Arc::new(riviu_ios_driver::MockIosDriver::new()),
             Arc::new(riviu_core::DeviceWorkCoordinator::new()),
@@ -981,6 +1075,122 @@ mod sheet_choice_tests {
             .issues
             .iter()
             .any(|issue| issue.code == "threads_verification_unimplemented"));
+        control.shutdown_cleanup().await.unwrap();
+        drop(db);
+        std::fs::remove_file(path).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod bounded_device_observation_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[tokio::test]
+    async fn device_observations_are_bounded_and_return_in_assignment_order() {
+        let active = AtomicUsize::new(0);
+        let peak = AtomicUsize::new(0);
+        let observed = collect_bounded_device_observations((0..10).map(|ordinal| {
+            let active = &active;
+            let peak = &peak;
+            async move {
+                let now = active.fetch_add(1, Ordering::SeqCst) + 1;
+                peak.fetch_max(now, Ordering::SeqCst);
+                tokio::time::sleep(Duration::from_millis((10 - ordinal) * 5)).await;
+                active.fetch_sub(1, Ordering::SeqCst);
+                (ordinal, ordinal == 2)
+            }
+        }))
+        .await;
+
+        assert_eq!(
+            observed,
+            (0..10)
+                .map(|ordinal| (ordinal, ordinal == 2))
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(peak.load(Ordering::SeqCst), 4);
+        assert_eq!(active.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn preflight_keeps_device_failures_on_their_original_assignments() {
+        let path = std::env::temp_dir().join(format!("ordered-preflight-{}.db", Uuid::new_v4()));
+        let db = Arc::new(Database::open(&path).unwrap());
+        let control = DeviceControlPlane::new(
+            Arc::new(riviu_ios_driver::MockIosDriver::new()),
+            Arc::new(riviu_core::DeviceWorkCoordinator::new()),
+            Arc::new(riviu_core::StreamBudgetManager::new(2).unwrap()),
+        );
+        let mut device = control.list_devices().await.unwrap().remove(0);
+        device.platform = riviu_core::DevicePlatform::Android;
+        let registry = riviu_core::DeviceRegistry::new(riviu_core::EventBus::new(8));
+        let ids = ["mock-phone-1", "mock-phone-2", "mock-phone-3"];
+        registry.upsert_many(
+            ids.iter()
+                .map(|udid| {
+                    let mut row = device.clone();
+                    row.udid = (*udid).into();
+                    row
+                })
+                .collect(),
+        );
+        let bundles = ids
+            .iter()
+            .map(|udid| riviu_core::PublishBundle {
+                id: format!("bundle-{udid}"),
+                source_path: format!("fixture/{udid}"),
+                name: (*udid).into(),
+                media_kind: riviu_core::PublishMediaKind::Image,
+                images: vec![],
+                video: None,
+                caption_path: "caption.txt".into(),
+                caption: "caption".into(),
+                caption_sha256: "a".repeat(64),
+                total_bytes: 0,
+                partners: vec![],
+            })
+            .collect::<Vec<_>>();
+        let request = riviu_core::PublishPreflightRequest {
+            source_root: "fixture".into(),
+            bundle_ids: bundles.iter().map(|bundle| bundle.id.clone()).collect(),
+            udids: ids.iter().map(|udid| (*udid).into()).collect(),
+            target_ref: None,
+            run_at: None,
+            caption_overrides: Default::default(),
+            sound_policy: Default::default(),
+            sheet_enabled: false,
+            delete_after_publish: false,
+        };
+        let manifest = PublishFolderManifest {
+            source_root: "fixture".into(),
+            scanned_at: chrono::Utc::now(),
+            bundles,
+            notices: vec![],
+            ignored_partner_files: 0,
+            ignored_hidden_files: 0,
+        };
+        let report = build_publish_preflight_from_manifest_with_sheet(
+            &control,
+            &registry,
+            &db,
+            request,
+            &manifest,
+            Ok(None),
+        )
+        .await
+        .unwrap()
+        .report;
+
+        assert_eq!(report.assignments.len(), ids.len());
+        for (index, row) in report.assignments.iter().enumerate() {
+            assert_eq!(row.udid, ids[index]);
+            assert_eq!(row.bundle_id, format!("bundle-{}", ids[index]));
+            assert!(row
+                .issues
+                .iter()
+                .all(|issue| issue.udid.as_deref() == Some(ids[index])));
+        }
         control.shutdown_cleanup().await.unwrap();
         drop(db);
         std::fs::remove_file(path).unwrap();

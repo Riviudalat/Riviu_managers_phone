@@ -4,6 +4,7 @@ members = [
   "apps/desktop/src-tauri",
   "crates/android-driver",
   "crates/core",
+  "crates/deployment-checker",
   "crates/ios-driver",
   "crates/signing",
   "crates/script-engine",

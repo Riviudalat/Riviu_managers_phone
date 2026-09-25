@@ -350,12 +350,14 @@ mod tests {
     ) -> (PublicCleanupSourceAction, ResolvedTikTokTarget) {
         let target = target(content_id);
         let actions = InteractionActionSet {
+            share: false,
             follow: false,
             like: kind == InteractionActionKind::Like,
             save: kind == InteractionActionKind::Save,
             comment: false,
         };
         let request = ThreadCampaignRequest {
+            seeding: None,
             scripted_conversation: None,
             request_id: format!("request-{content_id}"),
             targets: vec![target.clone()],

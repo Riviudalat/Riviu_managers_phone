@@ -2,6 +2,39 @@ use super::super::publish_pipeline::tests::fixture;
 use super::*;
 
 #[test]
+fn transient_transfer_failure_is_requeued_without_touching_sibling_publications() {
+    let (db, _, campaign, assignments) = fixture();
+    db.claim_publish_pipeline(&campaign).unwrap().unwrap();
+    let job = db.pending_publish_dispatch(10).unwrap().remove(0);
+    assert!(db.claim_publish_dispatch(&job, 0).unwrap());
+    assert!(db
+        .finish_publish_dispatch(&job, Some("adb: connection reset"))
+        .unwrap());
+    let conn = db.conn().unwrap();
+    let state: String = conn
+        .query_row(
+            "SELECT state FROM publish_dispatch_jobs WHERE assignment_id=?1",
+            [&job.assignment_id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        state, "queued",
+        "transient pre-Post work must be retried by the durable dispatcher"
+    );
+    for a in assignments.iter().filter(|a| a.id != job.assignment_id) {
+        let intent: Option<String> = conn
+            .query_row(
+                "SELECT effect_intent FROM publish_assignments WHERE id=?1",
+                [&a.id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(intent.is_none());
+    }
+}
+
+#[test]
 fn explicit_failed_assignment_retry_preserves_identity_and_leaves_all_siblings_untouched() {
     let (db, _, campaign, assignments) = fixture();
     let prior_run = db.claim_publish_pipeline(&campaign).unwrap().unwrap();
@@ -56,6 +89,81 @@ fn explicit_failed_assignment_retry_preserves_identity_and_leaves_all_siblings_u
             serde_json::to_value(&before.assignments[index]).unwrap()
         );
     }
+}
+
+#[test]
+fn explicit_retry_restores_three_sound_retries_without_reopening_post() {
+    let (db, _, campaign, assignments) = fixture();
+    let prior_run = db.claim_publish_pipeline(&campaign).unwrap().unwrap();
+    let prior = db
+        .pending_publish_dispatch(10)
+        .unwrap()
+        .into_iter()
+        .find(|job| job.assignment_id == assignments[0].id)
+        .unwrap();
+    assert!(db.claim_publish_dispatch(&prior, 0).unwrap());
+    db.init_publish_recovery(&prior.assignment_id, &prior_run.token)
+        .unwrap();
+    db.update_publish_recovery_step(&prior.assignment_id, &prior_run.token, "sound", None)
+        .unwrap();
+    for _ in 0..3 {
+        assert!(db
+            .reserve_publish_step_retry(&prior.assignment_id, &prior_run.token, "network")
+            .unwrap()
+            .is_some());
+    }
+    assert!(db
+        .reserve_publish_step_retry(&prior.assignment_id, &prior_run.token, "network")
+        .unwrap()
+        .is_none());
+    assert!(db
+        .finish_publish_dispatch(&prior, Some("sound identity changed"))
+        .unwrap());
+    db.finish_publish_pipeline(&prior_run).unwrap();
+
+    let revision = db
+        .publish_assignment_revision(&prior.assignment_id)
+        .unwrap();
+    let run = db
+        .claim_publish_assignment_retry_checked(
+            &prior.assignment_id,
+            revision,
+            &Uuid::new_v4().to_string(),
+        )
+        .unwrap()
+        .unwrap();
+    let recovery = db
+        .publish_recovery_state(&prior.assignment_id)
+        .unwrap()
+        .unwrap();
+    assert!(recovery.manual);
+    assert_eq!(recovery.max_retries, 3);
+    assert_eq!(recovery.retries_used, 0);
+    assert!(recovery.counts.is_empty());
+    db.init_publish_recovery(&prior.assignment_id, &run.token)
+        .unwrap();
+    db.update_publish_recovery_step(&prior.assignment_id, &run.token, "sound", None)
+        .unwrap();
+    for _ in 0..3 {
+        assert!(db
+            .reserve_publish_step_retry(&prior.assignment_id, &run.token, "network")
+            .unwrap()
+            .is_some());
+    }
+    assert!(db
+        .reserve_publish_step_retry(&prior.assignment_id, &run.token, "network")
+        .unwrap()
+        .is_none());
+    db.conn()
+        .unwrap()
+        .execute(
+            "UPDATE publish_assignments SET effect_intent='post' WHERE id=?1",
+            [&prior.assignment_id],
+        )
+        .unwrap();
+    assert!(db
+        .reserve_publish_step_retry(&prior.assignment_id, &run.token, "network")
+        .is_err());
 }
 
 #[test]
@@ -241,6 +349,27 @@ fn schedule_expires_only_before_first_admission_and_never_replays_effect() {
             .unwrap(),
         2
     );
+}
+
+#[test]
+fn acceptance_deadline_settlement_does_not_touch_out_of_scope_schedules() {
+    let (db, _, campaign, _) = fixture();
+    db.claim_publish_pipeline(&campaign).unwrap().unwrap();
+    db.conn()
+        .unwrap()
+        .execute("UPDATE publish_dispatch_jobs SET deadline_ms=30000", [])
+        .unwrap();
+    db.expire_publish_dispatch_for_campaign(30001, "different-campaign")
+        .unwrap();
+    assert_eq!(db.pending_publish_dispatch(10).unwrap().len(), 3);
+    db.expire_publish_dispatch_for_campaign(30001, &campaign)
+        .unwrap();
+    assert!(db.pending_publish_dispatch(10).unwrap().is_empty());
+    let detail = db.get_publish_campaign(&campaign).unwrap().unwrap();
+    assert!(detail
+        .assignments
+        .iter()
+        .all(|a| a.state == crate::PublishCampaignState::Missed && a.effect_intent.is_none()));
 }
 
 #[test]

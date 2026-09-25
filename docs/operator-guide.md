@@ -5,15 +5,27 @@ phạm vi máy rõ ràng và kết quả có thể đọc lại. Chọn hồ sơ
 
 ## Quy tắc chung
 
+Sidebar giữ trạng thái kết nối ở chân cửa sổ khi danh sách trang được cuộn; nhóm
+chứa trang đang mở vẫn được đánh dấu khi thu gọn. Trên màn hẹp, tiêu đề và trạng
+thái toàn hệ thống tự xuống hàng để các nút header không bị che.
+Nút ở đầu sidebar thu gọn thành dải icon để dành chỗ cho vùng làm việc; rê hoặc
+focus vào icon để đọc tên trang. Dải vẫn cho chuyển trang và hiện số máy sẵn sàng;
+trạng thái thu gọn được nhớ cho lần mở sau. My Apps mở trình thiết kế thì dải icon
+tự giữ lại cạnh canvas, không che thư viện bước.
+
 Trong chi tiết thiết bị, **Kiểm tra khả năng** đọc package, phiên bản và ngôn ngữ
 TikTok qua controller. Các trạng thái phân biệt adapter đã đo, cần chứng minh
 trong phiên, chưa hỗ trợ và máy chưa sẵn sàng. Mỗi lần chạy vẫn phải qua preflight
 và xác minh đúng tài khoản, target và kết quả.
 
 Khóa API Nuôi được lưu riêng với cấu hình hành vi. Khi một cửa sổ khác đã lưu
-cấu hình mới hơn, lần lưu cũ bị từ chối; tải lại trước khi lưu tiếp. Script gián
+cấu hình mới hơn, lần lưu cũ bị từ chối; chọn **Nạp bản mới và giữ thay đổi của tôi**,
+kiểm tra lại rồi lưu. Bản nháp/hồ sơ không mang revision DB sang lần mở khác. Script gián
 đoạn sau intent được giữ **chưa xác định**, không tự chạy lại. Dừng Script/Điều
 phối chờ kết quả đóng của từng máy trong snapshot, kể cả máy thuộc bước con.
+Lịch Script tạo job cùng giao dịch tiến mốc; lịch Nuôi ghi intent trước khi mở
+phiên. Nếu khởi động lại giữa lượt Nuôi, mốc đó không tự chạy lần nữa; xem lịch
+sử/nhật ký và đối soát intent chưa chốt trước khi đặt lượt mới.
 
 - Kiểm tra số máy, nhóm, ứng dụng và tài khoản đang hiển thị trước khi chạy.
 - Mỗi workspace automation giữ phạm vi riêng; đổi trang không biến một máy thành toàn bộ fleet.
@@ -31,13 +43,33 @@ Yêu cầu đóng được lưu qua restart, chỉ ghi đã đóng khi thiết b
 TikTok không còn chạy. Lỗi đóng không đổi kết quả đăng hoặc tự đăng lại bài.
 
 Trong Đăng bài, thẻ máy hiện ngay bài còn chờ lấy link và nút **Xem bài đang chờ**.
-Bài đang tải/chưa rõ kết quả chặn lượt đăng mới trên máy đó. Bài cũ được xác nhận
-không còn giữ máy vẫn hiện cảnh báo kiểm tra link, theo điều kiện của lượt cũ.
+Khi bấm **Kiểm tra & đăng**, Riviu dừng các tác vụ cũ liên quan trên máy được chọn,
+chờ nhả phiên rồi mới kiểm tra lượt mới. Tác vụ có các bước phụ thuộc nhau được
+dừng theo cả lượt; lịch hẹn chưa chạy không bị hủy. Nuôi/Tương tác thực hiện bước
+chuyển giao này khi bắt đầu. Chỉ chọn máy không dừng tác vụ.
+Khi xác nhận **Đăng bài**, backend kiểm tra và nhả tác vụ cũ thêm một lần trước
+khi tạo lượt mới, kể cả việc lấy link vừa chạy sau bước kiểm tra. Tiến trình lấy
+link nhận lệnh Dừng giữa các thao tác; thao tác thiết bị đang gửi được chờ hoàn
+tất trước khi nhả phiên. Nếu chưa nhả được máy, lượt mới chưa được tạo.
+Bài cũ vẫn giữ kết quả và cảnh báo kiểm tra link; không tự đăng lại. Đóng TikTok
+khi bài còn upload có thể ngắt upload nên kết quả được giữ chưa xác định.
 Không đọc được trạng thái thì chờ kiểm tra lại trước khi đăng.
+Nếu Android cài cả TikTok Global và Trill mà không có gói nào đang mở, **Dừng**
+kiểm và đóng cả hai gói TikTok trên đúng máy trước khi nhả phiên. Khi đã có bằng
+chứng nhả máy của lượt Dừng hiện tại, bài cũ chờ link không khóa vĩnh viễn mục
+chọn ứng dụng; việc đăng mới vẫn phải chọn đúng gói và đối chiếu tài khoản.
+
+**Chọn thiết bị** mở danh sách toàn bộ máy, kể cả khi phạm vi hiện tại đang rỗng;
+có thể chọn từng máy, theo nhóm hoặc toàn bộ. Máy đang bận được chọn cho lượt mới,
+nhưng chỉ được chạy sau khi tác vụ cũ nhả máy thành công.
+
+Mở phần Google chỉ đọc kết nối đã lưu. Bấm **Kiểm tra kết nối** để xác minh Sheet;
+lỗi mạng/hết thời gian giữ nguyên tài khoản và dữ liệu. TypeSafe dùng khóa đã lưu:
+nếu vừa nhập khóa mới, lưu trước khi kiểm tra. Lỗi 401 nghĩa là khóa bị dịch vụ từ chối.
 
 ## Thiết bị
 
-Sidebar giữ chiều rộng và tên mục. Bấm tiêu đề **Automation**, **Tài nguyên** hoặc
+Sidebar mặc định hiện tên mục. Bấm tiêu đề **Automation**, **Tài nguyên** hoặc
 **Hệ thống** để ẩn/hiện các mục trong nhóm; lựa chọn được giữ cho lần mở sau.
 **Nuôi TikTok**, **Tương tác**, **Đăng bài** trên sidebar mở ba trang vận hành cũ.
 Trong **My Apps**, tên ứng dụng và **Mở chức năng** cũng mở trang cũ;
@@ -50,11 +82,16 @@ Chọn **Chi tiết** của một máy Android, rồi bấm **Kiểm tra phiên 
 Threads chưa cài hoặc không đọc được phiên bản sẽ hiện lý do. Thao tác này không mở app.
 
 Trong Control Center, bảng **Hiển thị** có thanh đổi kích thước ô xem trước và màn
-hình điều khiển; hình điện thoại phóng theo ô và giữ tỷ lệ. Rê chuột vào thẻ **Hiển thị**
-để bung bảng nổi, đưa chuột ra ngoài để tự ẩn. Bấm **Ghim bảng Hiển thị** để giữ bảng
+hình điều khiển; hình điện thoại phóng theo ô và giữ tỷ lệ. Ảnh xem trước Android
+tự mở khi máy kết nối, kể cả trong chế độ dev nghiệm thu thủ công; không cần mở
+từng máy. Việc tự mở ảnh không khởi chạy
+Nuôi, Tương tác, Đăng bài hay lịch đã lưu. Rê chuột vào thẻ **Hiển thị** để bung bảng
+nổi, đưa chuột ra ngoài để tự ẩn. Bấm **Ghim bảng Hiển thị** để giữ bảng
 cạnh lưới; bỏ ghim để trở lại hover. Bàn phím mở bảng bằng Tab/Enter, Escape đóng
 bảng chưa ghim. Dấu **+** cạnh **Nhóm thiết bị** mở quản lý để tạo và phân máy vào nhóm.
 Bấm tên nhóm để lọc lưới và bung/thu các số máy thuộc nhóm; số bên phải là đã chọn/tổng.
+Bộ lọc Tất cả/USB/WIFI hiển thị số máy của nhóm đang chọn, kể cả khi nhóm trống;
+đổi bộ lọc không tự chọn hoặc điều khiển máy.
 Các lựa chọn hiển thị được giữ cho lần mở sau. Chất lượng/FPS Android áp dụng
 ngay khi thả thanh trượt; lỗi đọc hoặc áp dụng hiển thị tại bảng. Bộ lọc USB/Wi-Fi, nhóm và bảng số
 máy chỉ thay tập đang xem/chọn, không tự thay phạm vi chiến dịch đã cấu hình. Trên
@@ -120,14 +157,27 @@ thống** trên header khác phạm vi **Máy thực hiện** của từng tác 
 
 Các cửa sổ chi tiết giữ thao tác bàn phím bên trong; Escape đóng cửa sổ trên cùng
 và trả focus về nơi mở. Cửa sổ tiến trình cho phép tiếp tục làm việc với trang chính.
+Trong **Chi tiết thiết bị → Khả năng thiết bị**, **Chọn ứng dụng TikTok** liệt kê
+các gói TikTok thực sự đang cài. Máy có cả Global và Trill phải chọn một lần trước
+khi kiểm tra khả năng hoặc chạy; lựa chọn được lưu theo serial. Không đổi được lựa
+chọn khi máy đang bị tác vụ giữ hoặc còn nghĩa vụ đóng ứng dụng/bài đăng cũ.
 
 ### Ghi Macro
 
-**Bắt thuộc tính & ghi Flow:** mở màn hình một máy Android, chọn mục cùng tên trong
-menu bên phải. Rê chuột để tô phần tử; bấm chọn chỉ xem chữ, mô tả, ID và loại.
-**Bấm và kiểm tra kết quả** mới gửi thao tác. Bật **Bắt đầu ghi**, thực hiện các bước,
-**Dừng ghi** rồi **Lưu thành Flow**. Mở Flow thiết bị để chỉnh selector/hậu điều kiện
-và chạy. Phiên có bước chưa thấy phần tử kết quả cần được kiểm tra trước khi lưu.
+**Bắt thuộc tính & ghi Flow:** bấm biểu tượng Inspector trên header để chọn một máy
+Android đang kết nối, hoặc mở màn hình máy Android và chọn mục cùng tên trong menu
+bên phải. Inspector đặt ảnh màn hình, bảng thuộc tính và cây giao diện ở ba vùng
+riêng; trên cửa sổ hẹp, bảng thuộc tính và cây xếp cạnh ảnh. Rê chuột để tô phần tử;
+chọn trên ảnh hoặc trong cây sẽ đồng bộ vùng tô và bảng thuộc tính. Cây giữ cả node
+không bấm được, có tìm kiếm và bung/thu nhánh; bảng phân biệt giá trị `false` với thuộc
+tính không có trong cây XML. Có thể sao chép nguyên XML của lần quan sát hiện tại.
+Nhãn có số động được lưu bằng phần ổn định khi vẫn xác định duy nhất. Với node mang
+nghĩa nhưng không nhận tap, Inspector chỉ dùng cha clickable khi quan hệ gần và có
+định danh rõ; node trang trí không tự leo lên khung lớn. **Bấm phần tử** mới gửi thao
+tác. Khi đang ghi, sau mỗi bấm hãy chọn phần tử chỉ xuất hiện trên màn kết quả và bấm
+**Dùng làm kết quả của bước vừa bấm**; app không tự lấy một node mới sau 350 ms để
+gọi là thành công. **Dừng ghi** rồi **Lưu thành Flow**. Mở Flow thiết bị để chỉnh và
+chạy. Phiên còn bước chờ xác minh không được lưu.
 Macro tọa độ bên dưới vẫn dùng cho thao tác cử chỉ; Flow Inspector tìm lại phần tử.
 
 Agent có thể dùng MCP Riviu khi API cục bộ đã bật. Chạy `npm run agent-mcp` trong
@@ -181,6 +231,10 @@ Mặc định cửa sổ gọn: mỗi máy một dòng, chọn máy mới mở n
 Trong cửa sổ điều khiển, nút hình điện thoại **Đưa về màn hình dọc** yêu cầu máy đổi
 về dọc và đọc lại kết quả. Máy đang ngang vẫn giữ đúng tỉ lệ ảnh và menu cuộn riêng;
 không cần đóng/mở cửa sổ để bố cục theo hướng mới.
+Giữ chuột trên màn hình máy Android để nhấn giữ trong ứng dụng; thả chuột để kết thúc,
+kéo khi đang giữ để vuốt. Để nhập chữ, chọn ô trên màn hình máy, gõ vào ô **Nhập chữ**
+trong cửa sổ điều khiển rồi bấm nút gửi hoặc Enter. Shift+Enter xuống dòng; ứng dụng
+chỉ gửi chữ khi người vận hành xác nhận, không tự bấm tìm kiếm hoặc gửi bình luận.
 
 **Đầu vào:** kết nối USB, nhóm, bộ lọc trạng thái, từ khoá và các máy được chọn.
 Danh sách/lưới dùng cùng tập sau lọc; các ô chia đều chiều ngang, giữ tỷ lệ màn hình và
@@ -218,9 +272,10 @@ hiển thị lại giới hạn/vòng hay các tỷ lệ tương tác đã có �
 
 Thanh **Máy thực hiện** ở đầu Thiết lập giữ **Phạm vi thiết bị**, số máy đã chọn
 và nút **Chọn máy**. Nút này mở bảng chọn hai cột có tìm kiếm và cuộn riêng;
-**Xong** hoặc Escape đóng bảng nhưng giữ lựa chọn. **Chọn tất cả sẵn sàng** gồm
-cả máy ngoài kết quả tìm kiếm; **Bỏ chọn** xóa lựa chọn. Máy bận/chưa sẵn sàng
-không được chọn thêm. Tìm kiếm không đổi số máy hay phạm vi của lượt.
+**Xong** hoặc Escape đóng bảng nhưng giữ lựa chọn. **Chọn tất cả đang kết nối** gồm
+cả máy ngoài kết quả tìm kiếm; **Bỏ chọn** xóa lựa chọn. Có thể chọn máy đang bận
+hoặc chưa chuẩn bị; khi bắt đầu, app dừng tác vụ cũ liên quan, chờ nhả máy rồi kiểm tra
+sẵn sàng. Máy mất kết nối không được chọn thêm. Tìm kiếm không đổi phạm vi của lượt.
 Cấu hình và tóm tắt phiên đọc từ thiết lập hiện tại; thanh tab và nút bắt đầu
 nằm ngoài vùng cuộn. Phạm vi Nuôi không thay lựa chọn của Tương tác hoặc Đăng bài.
 
@@ -308,6 +363,23 @@ Thao tác **Chạy ngay/Hẹn giờ** của khu vực TikTok vẫn chỉ áp d�
 Tham chiếu nghiệp vụ: [trả lời bài](https://www.postman.com/meta/threads/request/34203612-7abb4419-a216-4e06-8027-f9f4fcf8bee9)
 và [đăng lại](https://www.postman.com/meta/threads/request/34203612-013f1907-cee6-4625-859b-b90fd2faf351)
 trong tài liệu Meta. API không được dùng để suy ra selector giao diện Android.
+Riviu tự lấy và lưu ID bình luận sau khi xác minh trên TikTok Android `45.7.3/en`.
+Khi có ID đã lưu, lượt reply mở và đối chiếu lại ID của câu đang hiển thị; người dùng
+không cần lấy ID thủ công. Nếu không lấy được ID trong thời hạn, Riviu giữ cách tìm
+bằng nội dung và tác giả đã xác minh. Câu không xuất hiện trên tài khoản trả lời vẫn
+báo lỗi/chờ kiểm tra, và bình luận đã gửi không tự gửi lại.
+
+**Phân bổ số lượt và cụm hội thoại** cho nhập Tim/Lưu/Share riêng trên mỗi bài.
+Tim/Lưu đã có được bỏ qua và bù bằng máy khác trong phạm vi đã chọn; hết máy thì
+báo số còn thiếu. Share gửi một người có nhãn Bạn bè trên TikTok; không có bạn
+thì bỏ qua. Không gửi lại hành động đã qua Send mà chưa rõ kết quả.
+
+Tổng bình luận gồm bình luận đơn và hội thoại (tính cả câu gốc). Ví dụ 40 tổng,
+20 đơn thì còn 20 câu hội thoại. App chia cụm tối đa 4 tài khoản, chia lại phần
+dư để không có cụm một người. Nhập caption/mô tả thật để AI soạn, kiểm từng câu
+và bảng phân công trước chạy; có thể sửa trực tiếp. Mỗi lượt giữ nguyên nội dung
+và tài khoản khi thử lại. Xem trước hành động và nghỉ giữa bình luận có khoảng
+giây riêng; đây là điều tiết nhịp chạy, không bảo đảm tránh giới hạn của TikTok.
 
 Các tab chính là **Thiết lập · Hẹn giờ · Theo dõi**; cấu hình nằm trong
 Thiết lập, Hẹn giờ lưu bản chụp thiết lập hiện tại. Các phần Chọn bài viết/Hành động & máy/
@@ -484,6 +556,11 @@ Thanh đầu đặt **Chọn thư mục** cạnh **Quét**. Phần Google Sheets
 **Link Google Sheet**, nút **Đăng nhập Google** và nút **Kiểm tra kết nối**.
 Dán link của đúng tab (`gid` trong link), đăng nhập trên trình duyệt rồi kiểm tra.
 Link không có `gid` dùng tab `0`. Sửa link sẽ bỏ trạng thái sẵn sàng của link cũ.
+Chuyển sang trang khác rồi quay lại giữ kết quả đã kiểm trong phiên app. Sau khi
+khởi động lại, kết nối Google và đích đã lưu cho phép đi tiếp tới bước kiểm tra
+trước đăng; nhãn trung tính **Đã liên kết Google Sheet** chưa phải xác minh quyền
+ghi hiện tại. Backend kiểm tra lại bảng, tab và quyền ghi trong preflight; lỗi tại
+đó chặn đăng. Nút **Kiểm tra kết nối** vẫn dùng để đối chiếu ngay khi cần.
 Trên màn hẹp, bấm **Thiết lập Google Sheet** để mở các control kết nối; Escape đóng
 phần này và trả focus. Trạng thái kết nối/lỗi thật vẫn hiển thị khi thu gọn. Các
 lựa chọn **Ghi kết quả lên Sheet / Xóa bản chuyển** nằm trong **Tùy chọn** ở thanh
@@ -525,15 +602,22 @@ Sheet hoặc cho rằng chờ lâu là được chiếm khóa; cần đối chi�
 năng reset cũ không hỗ trợ tab giao thức mới (schema 2), sẽ từ chối trước sao lưu
 hoặc xóa. Đây là quy trình và giới hạn giao thức, không phải xác nhận đã nghiệm thu
 ghi đồng thời trên nhiều PC thật.
-Khi đã nhập link, cần xác minh thành công trước khi đăng hoặc lưu lịch có bật ghi
-Sheet. Có thể tắt **Ghi kết quả lên Sheet** để chạy lượt không ghi bảng.
+Khi đã nhập link, preflight phải xác minh thành công trước khi đăng hoặc lưu lịch
+có bật ghi Sheet. Có thể tắt **Ghi kết quả lên Sheet** để chạy lượt không ghi bảng.
 Khi kiểm tra trước đăng hoặc lưu lịch, Riviu chốt đúng bảng/tab và chế độ báo cáo
 của lượt đó. Đổi kết nối cho lượt mới không chuyển các bài cũ sang bảng khác.
+Hộp **Kiểm tra đợt đăng** tách pha chuẩn bị thiết bị và kiểm tra từng máy. Khi chờ,
+danh sách bài–máy chỉ ghi **Chờ kết quả**, chưa coi máy là đạt. Khi có kết quả,
+điều kiện Sheet chung và máy cần xử lý xuất hiện trước; bộ lọc chuyển giữa
+**Cần xử lý / Đạt / Tất cả**. Trên cửa sổ hẹp, **Kiểm tra lại** nằm ở chân hộp
+để không phải cuộn qua toàn bộ danh sách máy.
 Lượt cũ chưa có đích đã chốt giữ nguyên lịch sử để kiểm tra, không tự gửi sang
 kết nối mới.
 
 Khung **Máy thực hiện** có nút **Chọn nhanh**: lấy bài trong nguồn (tối đa 100) và
-mọi máy sẵn sàng trong phạm vi; mỗi máy một bài. Cặp đã ghép hợp lệ được giữ. Nếu đợt
+mọi máy sẵn sàng trong phạm vi; mỗi máy một bài. Khi đã chọn phạm vi máy, khung
+mặc định chỉ hiện máy trong phạm vi và máy đã ghép cần sửa; mở **Bộ lọc thiết bị →
+Hiện máy ngoài phạm vi** để xem toàn dàn. Cặp đã ghép hợp lệ được giữ. Nếu đợt
 trước chỉ gán một phần mà sau đó thêm máy sẵn sàng, bấm lại sẽ lấp tiếp máy trống bằng
 bài còn trong nguồn — không kẹt ở tập bài/máy của lần gán cũ. Bài đang chọn chưa đủ máy
 vẫn chỉ dùng tập đó cho đến khi đã ghép xong. Thiếu máy thì ghép phần đủ và báo số bài
@@ -615,6 +699,29 @@ Khi chọn nhạc, app chờ TikTok tải xong và danh sách ổn định, tố
 toàn bộ bước mở bảng, chọn và xác nhận nhạc. App dùng vị trí vừa đọc lại để chọn;
 không bỏ qua nhạc khi tải chậm. Quá thời hạn hoặc mất kết nối thì dừng trước Đăng
 và hiện nguyên nhân. Bấm **Tạm dừng** sẽ kết thúc cả vòng chờ nhạc.
+Nếu TikTok hiện lỗi mạng trong danh sách nhạc, app báo rõ lỗi đó và dừng trước Đăng.
+Tên nhạc bị rút gọn ở hàng đã chọn vẫn phải được xác nhận đầy đủ trên màn soạn bài.
+Trên Global 45.7.3 tiếng Anh, nếu bảng nhạc đã hiện mà OCR không đọc đủ tên hàng,
+app chỉ chuyển sang cây giao diện khi đã xác nhận đúng bảng, tab Hot và các hàng ổn
+định. Không chứng minh được thì báo lỗi trước Đăng; không tự chạm vào một hàng bất kỳ.
+
+Lỗi tạm thời trước Đăng được **tự thử lại tối đa 3 lần ngoài lần chạy đầu**, chờ lần
+lượt 2, 5 và 10 giây. Nếu agent Android không đọc được cây UI hoặc không trả `/status`,
+lượt kế tiếp chờ ít nhất đến hết khoảng phục hồi của phiên (tối đa khoảng 65 giây),
+không tiêu hết lượt thử trong lúc instrumentation còn cooldown. Mỗi lần chọn nhạc vẫn có thời hạn riêng 3 phút. App ưu tiên
+tiếp tục bước đang lỗi, giữ bài, caption và nhạc đã chọn; nếu mất màn soạn thì dựng
+lại từ bản đã duyệt. Media còn đúng hash và MediaStore được dùng lại.
+Máy mất kết nối được chờ đúng serial tối đa **2 phút**, không giữ slot của máy khác.
+Sai account, chưa cho phép USB, thiếu quyền hoặc phiên bản chưa hỗ trợ cần xử lý trước.
+
+Trong **Theo dõi tiến trình**, mỗi máy lỗi có nút **Thử lại**. Bấm nút này chỉ chạy
+thêm **một lượt bài**; trong lượt đó lỗi tạm thời trước Đăng vẫn được thử lại tối đa
+ba lần ở đúng bước. Không tự tạo lượt bài khác nếu lượt thủ công này thất bại.
+Nếu agent đang phục hồi, lệnh được ghi nhận
+nhưng chờ hết cooldown của máy trước khi mở phiên mới. Khi đang tự phục hồi, nút bị khóa và
+hiện bước cùng số lần. Bài đã Post chỉ có **Kiểm tra liên kết** hoặc **Ghi lại Sheet**;
+không gửi lại Post. Dừng hủy cả lượt đang chờ. Mở lại app giữ bộ đếm và yêu cầu bấm
+Thử lại cho lượt phục hồi bị gián đoạn. **Tải lại tiến độ** chỉ đọc lại màn hình theo dõi.
 Khi quay lại từ phần nhạc, app đối chiếu lại toàn bộ caption. Khoảng trắng cuối dòng
 do TikTok thêm sau hashtag được chấp nhận; thay đổi chữ, hashtag hoặc xuống dòng vẫn
 bị từ chối trước Đăng.
@@ -640,6 +747,9 @@ Thả trực tiếp lên máy trống chỉ chuyển đúng bài đang kéo, k�
 nhóm và máy đích chưa tick. Thả vào vùng chung mới phân nhóm đang chọn.
 Máy đã nhận bài cùng giờ giữ nguyên; phần thiếu chỗ nằm ở **Chưa có máy**. Kéo tiếp
 chỉ lấp chỗ trống. Có thể dùng bàn phím chọn bài/máy và bấm **Gán bài đã chọn**.
+Khi đã chọn bài và máy còn chỗ, thanh cuối cũng hiện **Gán bài** để không phải
+cuộn xuống tìm nút trong cửa sổ thấp. Số **máy đã ghép** chỉ đếm cặp trong bản nháp;
+chỉ số **bài có máy khả dụng** mới tính máy đang đủ điều kiện để kiểm tra lịch.
 
 Chọn **Ngày đăng** và **Giờ chung** một lần cho cả lượt. **Chỉnh giờ từng bài**
 cho đặt giờ khác; đổi giờ chung không sửa giờ riêng. Một máy có thể nhận nhiều bài
@@ -661,8 +771,14 @@ Cách chạy một lượt trong Bàn đăng nhanh:
 
 1. Bấm **Chọn thư mục**, rồi **Quét**; đánh dấu từng bài hoặc **Chọn tất cả bài**.
    Một thư mục con là một bài gồm toàn bộ ảnh; có thể chọn trực tiếp thư mục của một bài.
-   Trong mỗi bài, `caption*.txt` là nội dung đăng còn `partner*.xlsx` chỉ là ghi chú
-   đối tác để ghi Sheet, không phải tệp đính kèm của bài.
+   Caption nhận `caption*.txt`, tên có từ `caption` như `Tiktok_Caption.txt`, hoặc
+   tệp `.txt` duy nhất trong bài. File đối tác nhận `partners*.xlsx` hoặc `.xlsx`
+   duy nhất, chẳng hạn `DanhSach_DoiTac.xlsx`; bỏ qua file khóa Excel `~$...`.
+   Nếu có nhiều caption/Excel cùng phù hợp, app báo lỗi thay vì tự đoán.
+   Ảnh PNG/JPG/JPEG có tiền tố số vẫn cần đủ thứ tự 01, 02…; nếu toàn bộ ảnh
+   không có tiền tố số, app xếp theo tên tự nhiên (ảnh 2 trước ảnh 10) và nhắc
+   kiểm tra thứ tự trong xem trước. Không trộn hai cách đặt tên trong cùng bài.
+   File đối tác chỉ dùng để ghi Sheet, không đính kèm vào bài.
    Ô Thư mục nguồn cho nhập đường dẫn và **Quét**. Đổi nguồn trong lúc quét sẽ bỏ kết quả
    trả muộn của nguồn cũ. Quét xong chưa tự chọn bài hoặc tạo chiến dịch.
 2. Bấm một bài để xem caption, ảnh/video và đối tác trong **Bài đang chỉnh**. Sửa trực tiếp
@@ -683,6 +799,7 @@ Kết quả kiểm tra và quyền xác nhận đăng không được khôi ph�
 
 **Theo dõi** có bộ lọc **Tất cả / Đang chạy / Cần xử lý / Hoàn tất** và ô tìm nguồn
 hoặc ngày đăng. Chọn chiến dịch ở danh sách để xem kết quả từng máy bên cạnh;
+nếu cửa sổ hẹp, app đưa khung chi tiết vào tầm nhìn ngay sau khi chọn chiến dịch.
 nút kiểm tra liên kết, ghi lại Sheet hoặc hủy nằm trong chi tiết của lượt đã chọn.
 Chuyển về tab **Thiết lập** giữ nguyên bài và máy đang ghép.
 
@@ -799,6 +916,11 @@ phải nhập hash xác nhận của chính preflight. Không lấy số máy l�
 đủ roster và danh sách máy không nằm trong yêu cầu, không tự bỏ máy lỗi để đổi mẫu số.
 Xem lệnh và tham số trong [hướng dẫn phát triển](developer-guide.md#nghiệm-thu-publish-qua-ứng-dụng-đang-chạy).
 
+Canary kỹ thuật có thể bật Sheet-disabled rõ ràng cho tối đa hai máy. Harness phải
+nhả tác vụ cũ trước Create, scope dev phải có activation ngẫu nhiên khớp process,
+và kết quả chỉ được gọi `phoneOnly/sheetDisabled`, không phải nghiệm thu end-to-end
+Sheet. Mất ACK handoff/Create/Execute đều giữ intent và không tự phát lại.
+
 Đọc từng mốc, không gộp thành một dấu thành công:
 
 1. **Enqueued**: đã thấy công việc trong pipeline; chưa chứng minh Đăng.
@@ -806,9 +928,10 @@ Xem lệnh và tham số trong [hướng dẫn phát triển](developer-guide.md
 3. **Verified**: backend lưu proof xuất bản và canonical URL; chỉ URL hiện trên dòng
    hoặc state succeeded cũ không đủ.
 4. **Sheet sent**: backend đã settle delivery, tách khỏi trạng thái bài.
-5. **URL readback**: đối chứng đọc ô Sheet. Harness hiện chưa có IPC đọc lại hàng
-   private/receipt identity, nên báo **unsupported**, không xuất token và không giả
-   xanh. CSV công khai cũng không thay bằng chứng đúng writer/target/epoch.
+5. **URL readback**: harness gọi `publish_sheet_readback` qua kết nối OAuth backend
+   để đối chứng ô Sheet và receipt đúng assignment/revision/epoch. Chỉ `matched`
+   khi URL và identity khớp; lỗi mạng/quyền hoặc chưa có receipt vẫn là `pending`.
+   Không xuất token; CSV công khai không thay bằng chứng đúng writer/target/epoch.
 
 Mã thoát `2` là còn chờ/hết hạn hoặc ACK chưa rõ; `1` là lỗi/bị chặn; `3` là đã có
 verified + sent nhưng chưa đủ readback bổ sung. `0` của inspect/preflight chỉ nghĩa
@@ -827,6 +950,9 @@ Riviu trên cùng điện thoại hoặc nhập DB thử vào dữ liệu đang 
 **My Apps → Mở trình thiết kế** mở graph riêng của ứng dụng. Thư viện bước ở bên trái,
 canvas ở giữa; chọn bước để chỉnh thông số bên phải. Kéo bước, nối cổng, xóa bước,
 hoàn tác/làm lại và lưu tạo revision. Tìm node bằng tên/ID rồi Enter để đưa vào vùng nhìn.
+Ở danh sách My Apps, tìm kiếm khớp tên quy trình hoặc loại ứng dụng; có thể sắp
+xếp quy trình đã lưu theo mới nhất, cũ nhất hoặc tên. Ba ứng dụng có sẵn vẫn giữ
+nguyên vị trí và thao tác mở riêng.
 **Cấu hình ứng dụng** nhận hồ sơ đã lưu hoặc nguồn/link/nội dung đầu vào. **Chạy** yêu
 cầu lưu trước và chọn phạm vi thiết bị; theo dõi và hủy trong bảng chạy.
 
@@ -836,11 +962,17 @@ của engine; nối sai bị báo khi kiểm tra/lưu. Chờ và Ghi nhật ký 
 lịch theo hồ sơ chưa nhận các bước Chờ/Ghi nhật ký bao quanh. Graph này chưa thay thế
 thư viện thao tác thấp của **Flow thiết bị** và không chứng nhận tương đương mọi node GenFarmer.
 
-**Tác vụ đã lưu** ghim ứng dụng/revision cùng máy thực hiện; **Lịch chạy** quản lý
-lịch của các hồ sơ, hiển thị lần chạy kế tiếp và lỗi gần nhất. **Quản lý tài khoản**
+**Tác vụ đã lưu** ghim ứng dụng/revision cùng máy thực hiện; tìm theo tên tác vụ
+hoặc tên ứng dụng mà không gọi lại backend. **Lịch chạy** quản lý
+lịch của các hồ sơ, hiển thị lần chạy kế tiếp và lỗi gần nhất. Bảng lịch và cấu hình
+đặt cạnh nhau trên màn rộng; màn hẹp hiện tên, trạng thái, lần chạy, thao tác ở bảng
+trên và cấu hình ở dưới. **Quản lý tài khoản**
 giữ metadata, nhóm và máy; đọc tài khoản là thao tác riêng. Nhập/xuất JSON không gửi
 lệnh vào điện thoại. **Mạng & Router** giữ hồ sơ kết nối, thử TCP và áp dụng/xóa proxy
 HTTP không xác thực trên Android; kết quả phải đọc lại khớp trên từng máy.
+Biểu mẫu sửa tài khoản/tác vụ đặt cạnh danh sách trên màn rộng; màn hẹp mở ngăn bên
+phải có thể đóng bằng Escape, giữ thao tác Lưu trong vùng nhìn thấy. Đóng bản nháp
+tài khoản chưa lưu vẫn yêu cầu xác nhận bỏ thay đổi.
 Phần chợ ứng dụng chưa được thêm trong đợt này.
 
 **Đầu vào:** graph thiết bị hoặc điều phối fleet, cấu hình node, target và profile.
@@ -883,10 +1015,15 @@ không tự chọn tọa độ thay thế. Home nhập từ ngoài cần đặt 
 có ID và lịch sử riêng. Flow có rẽ nhánh cần chỉnh cấu trúc trước khi dùng chức năng
 này. **Hoàn tác** trả lại toàn bộ graph trước khi lặp.
 
-**Ghép hoặc chỉnh Flow con** lưu trọn nội dung một Flow vào bước **Flow con** hoặc
-**Lặp Flow con**. Chọn Flow đã lưu và **Phiên bản nguồn**, bấm **Nạp đúng phiên bản**;
-hoặc nạp tệp/chỉnh **JSON Flow con** trong hộp thoại. Bản nguồn đổi sau đó không đổi
-nội dung đã ghép. Chọn bước đã ghép rồi mở lại nút này để sửa body hoặc ánh xạ biến.
+**Ghép hoặc chỉnh Flow con** có hai chế độ. **Bản sao cố định** lưu trọn nội dung
+và đóng băng cả các liên kết Flow con bên trong; nguồn đổi sau đó không đổi bản sao.
+**Bản công bố dùng chung** liên kết một Flow đã lưu: nạp đúng revision, công bố bằng
+CAS rồi liên kết. Mọi lượt chạy mới tự resolve bản công bố hiện tại thành một revision
+cha bất biến trước khi chạy; lượt đang chạy, retry và startup recovery giữ manifest
+cũ. Công bố bị từ chối nếu tạo vòng phụ thuộc, thiếu nguồn hoặc làm consumer hiện tại
+không compile. Chọn bước đã ghép rồi mở lại để sửa chế độ/body hoặc ánh xạ biến.
+Muốn lưu trữ Flow nguồn, dùng **Bỏ công bố** trong hộp ghép; lệnh bị chặn cho tới
+khi mọi Flow hiện hành/publication đã gỡ liên kết tới nguồn đó.
 Biến đầu vào dùng `biến con: biến cha`; đầu ra dùng `biến cha: biến con`. Mỗi lượt
 có biến riêng, truyền đầu vào trước khi chạy body và trả đầu ra sau khi hoàn tất.
 Ví dụ đầu vào `{"noiDung":"caption"}` lấy biến `caption` của cha vào `noiDung`

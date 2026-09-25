@@ -8,7 +8,11 @@ use riviu_core::{
     FlowRetryError, FlowRevisionRecord, FlowRunDetail, FlowRunRecord, FlowRuntimeError,
     FlowSelectionError, FlowSummary, FlowTargetSelection, RevisionConflict, ScreenOrientation,
 };
-use riviu_script_engine::{compile_flow, import_legacy_v1, CompiledRevision, LegacyImportResult};
+use riviu_script_engine::{
+    compile_flow,
+    flow_composition::{published_composition_references, resolve_published_composition},
+    import_legacy_v1, CompiledRevision, LegacyImportResult,
+};
 use serde::Serialize;
 use tauri::State;
 use uuid::Uuid;
@@ -66,6 +70,138 @@ pub fn flow_get(
 }
 
 #[tauri::command]
+pub fn flow_library_get(
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<Option<FlowRevisionRecord>, CommandError> {
+    state
+        .db
+        .published_flow_revision(parse_uuid(&id, "flow ID")?)
+        .map_err(map_service_error)
+}
+
+#[tauri::command]
+pub fn flow_library_publish(
+    state: State<'_, AppState>,
+    id: String,
+    revision: u64,
+    expected_published_revision: Option<u64>,
+) -> Result<FlowRevisionRecord, CommandError> {
+    let _admission = state.ensure_accepting_work()?;
+    let id = parse_uuid(&id, "flow ID")?;
+    state.flow_mutations.commit(&state.events, || {
+        let _cross_process = state
+            .db
+            .acquire_flow_mutation_gate()
+            .map_err(map_service_error)?;
+        let candidate = state
+            .db
+            .get_flow_revision(id, Some(revision))
+            .map_err(map_service_error)?
+            .ok_or_else(|| CommandError::code("FlowNotFound", "Flow revision does not exist"))?;
+        let mut published = state
+            .db
+            .published_flow_revisions()
+            .map_err(map_service_error)?;
+        published.insert(id, candidate.clone());
+        let documents = published
+            .iter()
+            .map(|(flow_id, record)| (*flow_id, record.document.clone()))
+            .collect();
+        let resolved = resolve_published_composition(&candidate.document, &documents)
+            .map_err(|errors| {
+                errors
+                    .into_iter()
+                    .map(CommandError::from_compile)
+                    .collect::<Vec<_>>()
+            })
+            .map_err(|errors| errors.into_iter().next().expect("resolution error"))?;
+        compile_flow(&resolved, &release_one_catalog())
+            .map_err(|errors| {
+                errors
+                    .into_iter()
+                    .map(CommandError::from_compile)
+                    .collect::<Vec<_>>()
+            })
+            .map_err(|errors| errors.into_iter().next().expect("compile error"))?;
+
+        // A dependency update must preserve every other published snapshot, not only the
+        // latest editable revision of each Flow.
+        for consumer in published.values() {
+            let resolved_consumer = resolve_published_composition(&consumer.document, &documents)
+                .map_err(|errors| {
+                    errors
+                        .into_iter()
+                        .map(CommandError::from_compile)
+                        .collect::<Vec<_>>()
+                })
+                .map_err(|errors| errors.into_iter().next().expect("resolution error"))?;
+            compile_flow(&resolved_consumer, &release_one_catalog())
+                .map_err(|errors| {
+                    errors
+                        .into_iter()
+                        .map(CommandError::from_compile)
+                        .collect::<Vec<_>>()
+                })
+                .map_err(|errors| errors.into_iter().next().expect("compile error"))?;
+        }
+
+        // Validate every current consumer before moving the shared pointer. One bad update must
+        // not become the next-run default for a parent that has incompatible bindings.
+        for summary in state.db.list_flows(false).map_err(map_service_error)? {
+            let consumer = state
+                .db
+                .get_flow_revision(summary.id, Some(summary.latest_revision))
+                .map_err(map_service_error)?
+                .ok_or_else(|| CommandError::code("FlowNotFound", "Flow consumer disappeared"))?;
+            let resolved_consumer = resolve_published_composition(&consumer.document, &documents)
+                .map_err(|errors| {
+                    errors
+                        .into_iter()
+                        .map(CommandError::from_compile)
+                        .collect::<Vec<_>>()
+                })
+                .map_err(|errors| errors.into_iter().next().expect("resolution error"))?;
+            compile_flow(&resolved_consumer, &release_one_catalog())
+                .map_err(|errors| {
+                    errors
+                        .into_iter()
+                        .map(CommandError::from_compile)
+                        .collect::<Vec<_>>()
+                })
+                .map_err(|errors| errors.into_iter().next().expect("compile error"))?;
+        }
+        let published = state
+            .db
+            .publish_flow_library_revision(id, revision, expected_published_revision)
+            .map_err(map_service_error)?;
+        Ok((published, id))
+    })
+}
+
+#[tauri::command]
+pub fn flow_library_unpublish(
+    state: State<'_, AppState>,
+    id: String,
+    expected_published_revision: u64,
+) -> Result<(), CommandError> {
+    let _admission = state.ensure_accepting_work()?;
+    let id = parse_uuid(&id, "flow ID")?;
+    state.flow_mutations.commit(&state.events, || {
+        let _cross_process = state
+            .db
+            .acquire_flow_mutation_gate()
+            .map_err(map_service_error)?;
+        ensure_no_flow_library_consumers(&state, id)?;
+        state
+            .db
+            .unpublish_flow_library_revision(id, expected_published_revision)
+            .map_err(map_service_error)?;
+        Ok(((), id))
+    })
+}
+
+#[tauri::command]
 pub fn flow_validate(document: FlowDocumentV2) -> Result<CompiledRevision, Vec<CommandError>> {
     compile_flow(&document, &release_one_catalog())
         .map_err(|errors| errors.into_iter().map(CommandError::from_compile).collect())
@@ -78,8 +214,20 @@ pub fn flow_save_revision(
     expected_revision: Option<u64>,
 ) -> Result<FlowRevisionRecord, CommandError> {
     let _admission = state.ensure_accepting_work()?;
-    let (document, compiled) = compile_for_save(document, expected_revision)?;
     state.flow_mutations.commit(&state.events, || {
+        let _cross_process = state
+            .db
+            .acquire_flow_mutation_gate()
+            .map_err(map_service_error)?;
+        let published = state
+            .db
+            .published_flow_revisions()
+            .map_err(map_service_error)?
+            .into_iter()
+            .map(|(flow_id, record)| (flow_id, record.document))
+            .collect();
+        let (document, compiled) =
+            compile_for_save_with_publications(document, expected_revision, &published)?;
         let saved = state
             .db
             .save_flow_revision(
@@ -99,12 +247,91 @@ pub fn flow_archive(state: State<'_, AppState>, id: String) -> Result<(), Comman
     let _admission = state.ensure_accepting_work()?;
     let id = parse_uuid(&id, "flow ID")?;
     state.flow_mutations.commit(&state.events, || {
+        let _cross_process = state
+            .db
+            .acquire_flow_mutation_gate()
+            .map_err(map_service_error)?;
+        let published = state
+            .db
+            .published_flow_revisions()
+            .map_err(map_service_error)?;
+        if published.contains_key(&id) {
+            return Err(CommandError::code(
+                "FlowLibraryInUse",
+                "Bỏ xuất bản Flow trước khi lưu trữ",
+            ));
+        }
+        for record in published.values() {
+            if published_composition_references(&record.document)
+                .map_err(first_compile_error)?
+                .contains(&id)
+            {
+                return Err(CommandError::code(
+                    "FlowLibraryInUse",
+                    "Flow còn được một publication dùng chung tham chiếu",
+                ));
+            }
+        }
+        for summary in state.db.list_flows(false).map_err(map_service_error)? {
+            let record = state
+                .db
+                .get_flow_revision(summary.id, Some(summary.latest_revision))
+                .map_err(map_service_error)?
+                .ok_or_else(|| CommandError::code("FlowNotFound", "Flow consumer disappeared"))?;
+            if published_composition_references(&record.document)
+                .map_err(first_compile_error)?
+                .contains(&id)
+            {
+                return Err(CommandError::code(
+                    "FlowLibraryInUse",
+                    "Flow còn được một bản hiện hành tham chiếu",
+                ));
+            }
+        }
         let archived = state
             .db
             .archive_flow_atomic(id)
             .map_err(map_service_error)?;
         Ok(((), archived.flow_id))
     })
+}
+
+fn ensure_no_flow_library_consumers(state: &AppState, id: Uuid) -> Result<(), CommandError> {
+    let published = state
+        .db
+        .published_flow_revisions()
+        .map_err(map_service_error)?;
+    for record in published.values().filter(|record| record.document.id != id) {
+        if published_composition_references(&record.document)
+            .map_err(first_compile_error)?
+            .contains(&id)
+        {
+            return Err(CommandError::code(
+                "FlowLibraryInUse",
+                "Flow còn được một publication dùng chung tham chiếu",
+            ));
+        }
+    }
+    for summary in state.db.list_flows(false).map_err(map_service_error)? {
+        if summary.id == id {
+            continue;
+        }
+        let record = state
+            .db
+            .get_flow_revision(summary.id, Some(summary.latest_revision))
+            .map_err(map_service_error)?
+            .ok_or_else(|| CommandError::code("FlowNotFound", "Flow consumer disappeared"))?;
+        if published_composition_references(&record.document)
+            .map_err(first_compile_error)?
+            .contains(&id)
+        {
+            return Err(CommandError::code(
+                "FlowLibraryInUse",
+                "Flow còn được một bản hiện hành tham chiếu",
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// The same ceiling the V2 JSON dialog enforces (`MAX_FLOW_JSON_BYTES` in
@@ -159,11 +386,74 @@ pub async fn flow_run(
 ) -> Result<FlowRunRecord, CommandError> {
     let _admission = state.ensure_accepting_work()?;
     let id = parse_uuid(&id, "flow ID")?;
-    let record = state
-        .db
-        .get_flow_revision(id, revision)
-        .map_err(map_service_error)?
-        .ok_or_else(|| CommandError::code("FlowNotFound", "Flow revision does not exist"))?;
+    let record = state.flow_mutations.synchronize(&state.events, || {
+        let _cross_process = state
+            .db
+            .acquire_flow_mutation_gate()
+            .map_err(map_service_error)?;
+        let mut record = state
+            .db
+            .get_flow_revision(id, revision)
+            .map_err(map_service_error)?
+            .ok_or_else(|| CommandError::code("FlowNotFound", "Flow revision does not exist"))?;
+        let latest = state
+            .db
+            .get_flow_revision(id, None)
+            .map_err(map_service_error)?
+            .ok_or_else(|| CommandError::code("FlowNotFound", "Flow disappeared"))?;
+        // UI passes its saved revision explicitly. Only an older revision is a
+        // reproducibility request; the current revision consumes new publications.
+        if revision.is_some() && record.document.revision != latest.document.revision {
+            return Ok((record, None));
+        }
+        let published = state
+            .db
+            .published_flow_revisions()
+            .map_err(map_service_error)?
+            .into_iter()
+            .map(|(flow_id, record)| (flow_id, record.document))
+            .collect();
+        let mut resolved = resolve_published_composition(&record.document, &published)
+            .map_err(|errors| {
+                errors
+                    .into_iter()
+                    .map(CommandError::from_compile)
+                    .collect::<Vec<_>>()
+            })
+            .map_err(|errors| errors.into_iter().next().expect("resolution error"))?;
+        let mut changed = None;
+        if resolved != record.document {
+            let latest = state
+                .db
+                .get_flow_revision(id, None)
+                .map_err(map_service_error)?
+                .ok_or_else(|| CommandError::code("FlowNotFound", "Flow disappeared"))?;
+            if latest.document.revision != record.document.revision {
+                return Err(CommandError::code(
+                    "FlowLibraryParentStale",
+                    "Flow có liên kết dùng chung phải chạy từ phiên bản cha mới nhất",
+                ));
+            }
+            let expected = record.document.revision;
+            resolved.revision = expected
+                .checked_add(1)
+                .ok_or_else(|| CommandError::code("RevisionOverflow", "Flow revision overflow"))?;
+            let compiled = compile_flow(&resolved, &release_one_catalog())
+                .map_err(|errors| {
+                    errors
+                        .into_iter()
+                        .map(CommandError::from_compile)
+                        .collect::<Vec<_>>()
+                })
+                .map_err(|errors| errors.into_iter().next().expect("compile error"))?;
+            record = state
+                .db
+                .save_flow_revision(Some(expected), &resolved, &compiled.plan, &compiled.sha256)
+                .map_err(map_service_error)?;
+            changed = Some(id);
+        }
+        Ok((record, changed))
+    })?;
     state
         .flows
         .enqueue(record, selection)
@@ -331,16 +621,35 @@ fn compile_one(document: &FlowDocumentV2) -> Result<CompiledRevision, CommandErr
     })
 }
 
+#[cfg(test)]
 fn compile_for_save(
+    document: FlowDocumentV2,
+    expected_revision: Option<u64>,
+) -> Result<(FlowDocumentV2, CompiledRevision), CommandError> {
+    compile_for_save_with_publications(document, expected_revision, &Default::default())
+}
+
+fn compile_for_save_with_publications(
     mut document: FlowDocumentV2,
     expected_revision: Option<u64>,
+    published: &std::collections::BTreeMap<Uuid, FlowDocumentV2>,
 ) -> Result<(FlowDocumentV2, CompiledRevision), CommandError> {
     document.revision = expected_revision
         .unwrap_or(0)
         .checked_add(1)
         .ok_or_else(|| CommandError::invalid_argument("Flow revision exceeds u64"))?;
-    let compiled = compile_one(&document)?;
+    let resolved =
+        resolve_published_composition(&document, published).map_err(first_compile_error)?;
+    let compiled = compile_one(&resolved)?;
     Ok((document, compiled))
+}
+
+fn first_compile_error(errors: Vec<riviu_script_engine::FlowCompileError>) -> CommandError {
+    errors
+        .into_iter()
+        .next()
+        .map(CommandError::from_compile)
+        .unwrap_or_else(|| CommandError::code("CompileFailed", "Flow compilation failed"))
 }
 
 fn parse_uuid(value: &str, field: &str) -> Result<Uuid, CommandError> {
@@ -556,6 +865,44 @@ mod tests {
         let overflow = compile_for_save(FlowDocumentV2::empty("Overflow"), Some(u64::MAX))
             .expect_err("revision overflow");
         assert_eq!(overflow.code, "InvalidArgument");
+    }
+
+    #[test]
+    fn flow_save_refuses_an_unpublished_shared_dependency() {
+        let mut source = FlowDocumentV2::empty("Shared source");
+        source.revision = 1;
+        let mut parent = FlowDocumentV2::empty("Parent");
+        let end = parent.nodes.pop().expect("end");
+        parent.nodes.push(riviu_core::FlowNode::new(
+            riviu_core::ActionKind::Subflow,
+            serde_json::json!({
+                "document": source,
+                "library": {"flowId": source.id, "channel": "published"}
+            }),
+        ));
+        parent.nodes.push(end);
+        parent.edges = parent
+            .nodes
+            .windows(2)
+            .map(|nodes| riviu_core::FlowEdge::flow(nodes[0].id, nodes[1].id))
+            .collect();
+
+        let error = compile_for_save_with_publications(
+            parent.clone(),
+            None,
+            &std::collections::BTreeMap::new(),
+        )
+        .expect_err("unpublished dependency");
+        assert_eq!(error.code, "CompositionLibraryUnavailable");
+
+        let (saved, compiled) = compile_for_save_with_publications(
+            parent,
+            None,
+            &std::collections::BTreeMap::from([(source.id, source)]),
+        )
+        .expect("published dependency");
+        assert_eq!(saved.revision, 1);
+        assert_eq!(compiled.plan.revision, 1);
     }
 
     #[test]

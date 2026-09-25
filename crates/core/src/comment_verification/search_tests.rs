@@ -52,6 +52,7 @@ impl UiSession for ClippedParent {
 async fn parent_with_reply_below_viewport_keeps_scrolling_without_typing() {
     let session = ClippedParent(std::sync::atomic::AtomicUsize::new(0));
     let parent = CommentLocatorIdentity {
+        comment_link: None,
         author_label: "Alice".into(),
         text: "parent".into(),
         locator_version: "test".into(),
@@ -163,6 +164,7 @@ fn parent_proof_rejects_a_reply_under_a_different_root() {
     let mut found = row(&t, PKG, "reply", Some("Bob")).unwrap().unwrap();
     found.snapshot = format!("<hierarchy>{xml}</hierarchy>");
     let parent = CommentLocatorIdentity {
+        comment_link: None,
         author_label: "Alice".into(),
         text: "root".into(),
         locator_version: "test".into(),

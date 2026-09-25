@@ -257,6 +257,148 @@ fn pool(xml: &str, plan: SoundPickerPlan, maximum: usize) -> anyhow::Result<Obse
     assemble_pool(plan, rows, titles, artists, choices, markers, maximum)
 }
 
+/// Probe only two fresh XML generations before spending time on visual OCR.
+/// Incomplete/loading roots are not candidates and do not authorize a tap.
+pub(super) async fn observe_direct(
+    session: &dyn UiSession,
+    plan: SoundPickerPlan,
+    maximum: usize,
+) -> anyhow::Result<Option<ObservedSoundPool>> {
+    let epoch = session.gui_session_epoch();
+    let mut previous: Option<(u64, ObservedSoundPool)> = None;
+    for _ in 0..2 {
+        check_wait()?;
+        anyhow::ensure!(
+            session.gui_session_epoch() == epoch,
+            "sound session replaced"
+        );
+        let source = match tokio::time::timeout(
+            Duration::from_secs(12),
+            read_sound(session.hierarchy_source_snapshot()),
+        )
+        .await
+        {
+            Ok(Ok(source)) => source,
+            Ok(Err(error)) if error.is::<SoundStopped>() => return Err(error),
+            _ => return Ok(None),
+        };
+        let current = match pool(&source.xml, plan, maximum) {
+            Ok(pool) => pool,
+            Err(_) => return Ok(None),
+        };
+        if let Some((generation, prior)) = &previous {
+            return Ok(
+                (source.generation > *generation && prior.stable_with(&current)).then_some(current),
+            );
+        }
+        previous = Some((source.generation, current));
+        tokio::time::sleep(POLL).await;
+    }
+    Ok(None)
+}
+
+/// Image-unavailable path for the measured Global 45.7.3 sheet only.
+/// It never infers a tab or row from a missing screenshot.
+pub(super) async fn select_section_tab_xml_only(
+    session: &dyn UiSession,
+    plan: SoundPickerPlan,
+) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        selection_recovery::measured(plan),
+        "sound XML-only tab unmeasured"
+    );
+    let epoch = session.gui_session_epoch();
+    anyhow::ensure!(!epoch.is_empty(), "sound sheet session missing");
+    let deadline = phase_deadline(SECTION_WINDOW);
+    let mut previous: Option<(u64, ElementBox, bool)> = None;
+    let mut tapped = false;
+    loop {
+        check_wait()?;
+        anyhow::ensure!(
+            session.gui_session_epoch() == epoch
+                && read_sound(session.active_app_bundle()).await? == plan.package,
+            "sound app/session changed during XML-only tab proof"
+        );
+        let source =
+            tokio::time::timeout_at(deadline, read_sound(session.hierarchy_source_snapshot()))
+                .await
+                .context("sound XML-only tab deadline")??;
+        let tab = parse(&source.xml, plan).and_then(|nodes| {
+            section_tab(&nodes, plan).map(|(rect, selected)| (rect.clone(), selected))
+        });
+        if let Ok((rect, selected)) = tab {
+            if let Some((generation, before, was_selected)) = &previous {
+                if source.generation > *generation && before == &rect && *was_selected == selected {
+                    if selected {
+                        return Ok(());
+                    }
+                    if !tapped {
+                        anyhow::ensure!(
+                            session.gui_session_epoch() == epoch
+                                && read_sound(session.active_app_bundle()).await? == plan.package,
+                            "sound app/session changed before Hot tap"
+                        );
+                        sound_tap(session, rect.centre()).await?;
+                        tapped = true;
+                        previous = None;
+                    }
+                } else {
+                    previous = Some((source.generation, rect, selected));
+                }
+            } else {
+                previous = Some((source.generation, rect, selected));
+            }
+        } else {
+            previous = None;
+        }
+        anyhow::ensure!(Instant::now() < deadline, "sound Hot XML did not stabilize");
+        tokio::time::sleep(POLL).await;
+    }
+}
+
+pub(super) async fn observe_xml_only(
+    session: &dyn UiSession,
+    plan: SoundPickerPlan,
+    maximum: usize,
+) -> anyhow::Result<ObservedSoundPool> {
+    anyhow::ensure!(
+        selection_recovery::measured(plan),
+        "sound XML-only pool unmeasured"
+    );
+    let epoch = session.gui_session_epoch();
+    anyhow::ensure!(!epoch.is_empty(), "sound sheet session missing");
+    let deadline = phase_deadline(SNAPSHOT_POOL_WINDOW);
+    let mut previous: Option<(u64, ObservedSoundPool)> = None;
+    loop {
+        check_wait()?;
+        anyhow::ensure!(
+            session.gui_session_epoch() == epoch
+                && read_sound(session.active_app_bundle()).await? == plan.package,
+            "sound app/session changed during XML-only pool proof"
+        );
+        let source =
+            tokio::time::timeout_at(deadline, read_sound(session.hierarchy_source_snapshot()))
+                .await
+                .context("sound XML-only pool deadline")??;
+        match pool(&source.xml, plan, maximum) {
+            Ok(current) => {
+                if previous.as_ref().is_some_and(|(generation, before)| {
+                    source.generation > *generation && before.stable_with(&current)
+                }) {
+                    return Ok(current);
+                }
+                previous = Some((source.generation, current));
+            }
+            Err(_) => previous = None,
+        }
+        anyhow::ensure!(
+            Instant::now() < deadline,
+            "sound Hot XML pool did not stabilize"
+        );
+        tokio::time::sleep(POLL).await;
+    }
+}
+
 pub(super) async fn observe(
     session: &dyn UiSession,
     plan: SoundPickerPlan,

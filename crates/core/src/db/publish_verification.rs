@@ -38,6 +38,7 @@ pub struct PublishRecoveryCapabilities {
     pub resume_verification: PublishRecoveryCapability,
     pub retry_before_post: PublishRecoveryCapability,
     pub verification_resumed: bool,
+    pub recovery: Option<crate::publish_recovery::PublishRecoveryState>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
@@ -549,7 +550,7 @@ impl Database {
             };
             // Exact claim_publish_assignment_retry predicate, including the live parent
             // and assignment job guard; do not make retry look safer than its DB claim.
-            let retry: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM publish_assignments a JOIN publish_campaigns c ON c.id=a.campaign_id WHERE a.id=?1 AND a.state='failed_before_dispatch' AND a.effect_intent IS NULL AND c.state IN ('failed_before_dispatch','verifying','uncertain') AND NOT EXISTS(SELECT 1 FROM publish_pipeline_runs r WHERE r.campaign_id=c.id) AND NOT EXISTS(SELECT 1 FROM publish_dispatch_jobs j WHERE j.assignment_id=a.id AND j.state IN ('running','paused')))",[&id],|r|r.get(0))?;
+            let retry: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM publish_assignments a JOIN publish_campaigns c ON c.id=a.campaign_id WHERE a.id=?1 AND a.state='failed_before_dispatch' AND a.effect_intent IS NULL AND c.state IN ('failed_before_dispatch','verifying','uncertain','posting') AND NOT EXISTS(SELECT 1 FROM publish_dispatch_jobs j WHERE j.assignment_id=a.id AND j.state IN ('queued','running','paused')))",[&id],|r|r.get(0))?;
             let capability = |reason: Option<&str>| PublishRecoveryCapability {
                 allowed: reason.is_none(),
                 reason: reason.map(str::to_owned),
@@ -564,6 +565,15 @@ impl Database {
                 resume_refusal(&candidate, &state, active_pipeline)
             };
             capabilities.push(PublishRecoveryCapabilities {
+                recovery: tx
+                    .query_row(
+                        "SELECT payload FROM publish_recovery_state WHERE assignment_id=?1",
+                        [&id],
+                        |r| r.get::<_, String>(0),
+                    )
+                    .optional()?
+                    .map(|s| serde_json::from_str(&s))
+                    .transpose()?,
                 assignment_id: id,
                 revision: candidate.revision,
                 check_link: capability(check_reason),
@@ -652,6 +662,7 @@ impl Database {
         }
         tx.execute("UPDATE publish_campaigns SET state=CASE WHEN state='succeeded' THEN state ELSE 'cancelled' END,revision=revision+1,updated_at=?2 WHERE id=?1",params![campaign_id,now])?;
         tx.execute("UPDATE publish_dispatch_jobs SET state='cancelled' WHERE campaign_id=?1 AND state='queued'",[campaign_id])?;
+        tx.execute("UPDATE publish_recovery_state SET payload=json_set(payload,'$.state','stopped','$.nextRetryAt',NULL,'$.reconnectDeadline',NULL) WHERE assignment_id IN(SELECT id FROM publish_assignments WHERE campaign_id=?1)",[campaign_id])?;
         let result: Option<String> = tx
             .query_row(
                 "SELECT value FROM settings WHERE key=?1",
@@ -707,6 +718,10 @@ impl Database {
                 "intentSha256":intent.as_ref().map(|s|format!("{:x}",sha2::Sha256::digest(s.as_bytes())))});
             tx.execute("INSERT INTO settings(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
                 params![format!("publish.stop-release.{id}"),proof.to_string()])?;
+            tx.execute(
+                "DELETE FROM publish_account_reservations WHERE assignment_id=?1",
+                [&id],
+            )?;
         }
         tx.commit()?;
         Ok(true)
@@ -936,6 +951,13 @@ impl Database {
     /// missing-link obligation. Never edits state, evidence, retry scope or outbox.
     pub fn publish_device_guard(&self, udid: &str) -> anyhow::Result<PublishDeviceGuard> {
         let conn = self.conn()?;
+        Self::publish_device_guard_from_connection(&conn, udid)
+    }
+
+    pub(super) fn publish_device_guard_from_connection(
+        conn: &Connection,
+        udid: &str,
+    ) -> anyhow::Result<PublishDeviceGuard> {
         let mut statement = conn.prepare(
             "SELECT a.state,a.effect_intent,a.evidence_json,a.id,a.campaign_id,a.updated_at,
              EXISTS(SELECT 1 FROM publish_pipeline_runs p WHERE p.campaign_id=a.campaign_id)
@@ -984,7 +1006,7 @@ impl Database {
                 // still releasing its own lease in the cancelled pipeline.
                 if !completed && state != "posting" {
                     use sha2::Digest;
-                    let marker = stop_marker(&conn, &campaign_id)?;
+                    let marker = stop_marker(conn, &campaign_id)?;
                     let raw: Option<String> = conn
                         .query_row(
                             "SELECT value FROM settings WHERE key=?1",
@@ -1022,7 +1044,7 @@ impl Database {
                             |r| r.get(0),
                         )
                         .optional()?;
-                    let marker = stop_marker(&conn, &campaign_id)?;
+                    let marker = stop_marker(conn, &campaign_id)?;
                     let authorization = evidence
                         .as_deref()
                         .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())

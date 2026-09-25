@@ -5789,12 +5789,17 @@ mod tests {
                 description: None,
                 resource_id: None,
                 class_name: None,
+                schema_version: None,
+                text_prefix: None,
+                description_prefix: None,
+                scope: None,
+                action_target: None,
             };
             let (database, path, run_id, attempt_id, node) = attempt_fixture(
                 ActionKind::Tap,
                 CompiledActionConfig::Tap {
                     target: crate::CompiledTapTarget::Element {
-                        selector: selector.clone(),
+                        selector: Box::new(selector.clone()),
                     },
                 },
                 SideEffectClass::AmbiguousUi,

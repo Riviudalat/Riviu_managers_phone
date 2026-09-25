@@ -9,6 +9,7 @@ fn main() -> anyhow::Result<()> {
         .ok_or_else(|| anyhow::anyhow!("usage: export_ipc OUTPUT"))?;
     let config = ts_rs::Config::default().with_large_int("number");
     let declarations = [
+        publish_recovery::PublishRecoveryState::decl(&config),
         TraceArtifact::decl(&config),
         ui_automation::trace::DeviceTraceStep::decl(&config),
         OperationTrace::decl(&config),
@@ -19,8 +20,12 @@ fn main() -> anyhow::Result<()> {
         DeviceInfo::decl(&config),
         StopDeviceResult::decl(&config),
         OperationStopResult::decl(&config),
+        DeviceAppChoices::decl(&config),
         DeliveryReceipt::decl(&config),
         PublishSheetReadback::decl(&config),
+        PublishSheetFailedDiagnostic::decl(&config),
+        google_sheets::SheetDiagnosticMatch::decl(&config),
+        google_sheets::SheetDiagnosticSlice::decl(&config),
         CapabilityEvidenceState::decl(&config),
         ActionCapability::decl(&config),
         DeviceActionCapabilities::decl(&config),

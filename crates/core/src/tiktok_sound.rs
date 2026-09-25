@@ -37,6 +37,28 @@ tokio::task_local! { static SOUND_BUDGET: SoundBudget; }
 #[error("Đã tạm dừng trong lúc chờ TikTok tải nhạc")]
 pub(crate) struct SoundStopped;
 
+#[derive(Debug, thiserror::Error)]
+#[error("TikTok báo mạng không ổn định khi tải danh sách nhạc; chưa bấm Đăng")]
+pub(crate) struct SoundNetworkUnavailable;
+
+pub(crate) async fn reopen_failed_sound_sheet(
+    session: &dyn UiSession,
+    plan: SoundPickerPlan,
+) -> anyhow::Result<bool> {
+    anyhow::ensure!(
+        selection_recovery::measured(plan),
+        "sound network recovery unmeasured"
+    );
+    selection_recovery::prove_sheet(session, plan).await?;
+    if visual::retry_network(session, plan).await? {
+        return Ok(true);
+    }
+    check_wait()?;
+    session.back().await?;
+    check_wait()?;
+    Ok(false)
+}
+
 /// One budget spans opening, loading, selecting and confirming. The scoped flag
 /// lets nested observations honor cancellation without abandoning a live tap.
 pub(crate) async fn with_sound_budget<T>(
@@ -70,10 +92,12 @@ fn check_wait() -> anyhow::Result<()> {
             if b.stopped.load(Ordering::Relaxed) {
                 return Err(SoundStopped.into());
             }
-            anyhow::ensure!(
-                Instant::now() < b.deadline,
-                "TikTok chưa tải hoặc xác nhận được nhạc sau 3 phút; chưa bấm Đăng"
-            );
+            if Instant::now() >= b.deadline {
+                return Err(crate::publish_recovery::retryable_error(
+                    "sound_load_timeout",
+                    "TikTok chưa tải hoặc xác nhận được nhạc sau 3 phút; chưa bấm Đăng",
+                ));
+            }
             Ok(())
         })
         .unwrap_or(Ok(()))
@@ -88,7 +112,10 @@ async fn read_sound<T>(
         let mut poll = tokio::time::interval(POLL);
         loop {
             tokio::select! {
-                r=&mut task => break r.map_err(|_|anyhow::anyhow!("TikTok chưa tải hoặc xác nhận được nhạc sau 3 phút; chưa bấm Đăng"))??,
+                r=&mut task => break r.map_err(|_|crate::publish_recovery::retryable_error(
+                    "sound_load_timeout",
+                    "TikTok chưa tải hoặc xác nhận được nhạc sau 3 phút; chưa bấm Đăng",
+                ))??,
                 _=poll.tick()=>check_wait()?,
             }
         }
@@ -99,7 +126,15 @@ async fn read_sound<T>(
     Ok(value)
 }
 async fn sound_tap(session: &dyn UiSession, point: crate::TapPoint) -> anyhow::Result<()> {
+    sound_tap_armed(session, point, &mut || {}).await
+}
+async fn sound_tap_armed(
+    session: &dyn UiSession,
+    point: crate::TapPoint,
+    before_tap: &mut (dyn FnMut() + Send),
+) -> anyhow::Result<()> {
     check_wait()?;
+    before_tap();
     session.tap(point).await?;
     check_wait()
 }
@@ -347,6 +382,9 @@ const MEASURED_SOUND_PICKERS: &[MeasuredSoundPicker] = &[
 ];
 
 impl SoundPickerPlan {
+    pub fn package(self) -> &'static str {
+        self.package
+    }
     pub fn resolve_runtime(package: &str, locale: &str, version: &str) -> Option<Self> {
         Self::resolve(package, locale, version).or_else(|| {
             let language = crate::tiktok_labels::normalise_language(locale);
@@ -439,6 +477,9 @@ impl ObservedSoundPool {
     pub fn target(&self, index: usize) -> Option<&ElementBox> {
         self.targets.get(index)
     }
+    pub fn selected_index(&self) -> Option<usize> {
+        self.selected_index
+    }
 }
 
 /// Open the measured picker and read at most `maximum_visible` rows without selecting one.
@@ -447,15 +488,32 @@ pub async fn open_and_observe_sounds(
     plan: SoundPickerPlan,
     maximum_visible: usize,
 ) -> anyhow::Result<ObservedSoundPool> {
+    open_and_observe_sounds_armed(session, plan, maximum_visible, &mut || {}).await
+}
+
+pub async fn open_and_observe_sounds_armed(
+    session: &dyn UiSession,
+    plan: SoundPickerPlan,
+    maximum_visible: usize,
+    before_open: &mut (dyn FnMut() + Send),
+) -> anyhow::Result<ObservedSoundPool> {
     anyhow::ensure!(
         (1..=5).contains(&maximum_visible),
         "sound observer limit must be within 1..=5"
     );
     if plan.dynamic {
-        return open_dynamic_sounds(session, plan, maximum_visible).await;
+        return open_dynamic_sounds(session, plan, maximum_visible, before_open).await;
     }
-    if visual::open_loading_entry(session, plan).await? {
-        return visual::observe(session, plan, maximum_visible, true).await;
+    match visual::open_loading_entry(session, plan, before_open).await {
+        Ok(true) => return observe_measured_sound_pool(session, plan, maximum_visible).await,
+        Err(error)
+            if selection_recovery::measured(plan)
+                && error.is::<crate::driver::ScreenshotReadUnavailable>() =>
+        {
+            return open_sound_without_image(session, plan, maximum_visible, before_open).await;
+        }
+        Err(error) => return Err(error),
+        Ok(false) => {}
     }
     let deadline = phase_deadline(SOUND_WINDOW);
     let entry = loop {
@@ -468,7 +526,7 @@ pub async fn open_and_observe_sounds(
             }
         }
         if entries.is_empty() && !session.gui_session_epoch().is_empty() {
-            return open_dynamic_sounds(session, plan, maximum_visible).await;
+            return open_dynamic_sounds(session, plan, maximum_visible, before_open).await;
         }
         // A fresh tree removes hidden ancestors and duplicate nested wrappers.
         let tree = crate::ui_automation::tree::Tree::parse(
@@ -483,18 +541,213 @@ pub async fn open_and_observe_sounds(
         );
         tokio::time::sleep(POLL).await;
     };
-    sound_tap(session, entry.centre())
+    sound_tap_armed(session, entry.centre(), before_open)
         .await
         .context("open sound picker")?;
 
     if selection_recovery::measured(plan) && session.gui_reasoner().is_some() {
-        return visual::observe(session, plan, maximum_visible, true).await;
+        return observe_measured_sound_pool(session, plan, maximum_visible).await;
     }
     if plan.snapshot_layout().is_some() {
         snapshot::select_section_tab(session, plan).await?;
     }
 
     observe_sound_pool(session, plan, maximum_visible).await
+}
+
+async fn open_sound_without_image(
+    session: &dyn UiSession,
+    plan: SoundPickerPlan,
+    maximum_visible: usize,
+    before_open: &mut (dyn FnMut() + Send),
+) -> anyhow::Result<ObservedSoundPool> {
+    let epoch = session.gui_session_epoch();
+    anyhow::ensure!(!epoch.is_empty(), "sound sheet session missing");
+    let deadline = phase_deadline(SOUND_WINDOW);
+    let mut previous: Option<(u64, ElementBox)> = None;
+    let (generation, entry) = loop {
+        check_wait()?;
+        anyhow::ensure!(
+            session.gui_session_epoch() == epoch
+                && read_sound(session.active_app_bundle()).await? == plan.package,
+            "sound app/session changed before opening picker"
+        );
+        let source = read_sound(session.hierarchy_source_snapshot()).await?;
+        let tree = crate::ui_automation::tree::Tree::parse(source.clone())?;
+        let current = unique_sound_entry(&tree, plan.package, &[plan.entry_id]);
+        if let Some(button) = current {
+            if previous
+                .as_ref()
+                .is_some_and(|(generation, old)| source.generation > *generation && old == &button)
+            {
+                break (source.generation, button);
+            }
+            previous = Some((source.generation, button));
+        } else {
+            previous = None;
+        }
+        anyhow::ensure!(
+            Instant::now() < deadline,
+            "sound entry unavailable without screenshot; no Post was sent"
+        );
+        tokio::time::sleep(POLL).await;
+    };
+    check_wait()?;
+    anyhow::ensure!(
+        session.gui_session_epoch() == epoch
+            && read_sound(session.active_app_bundle()).await? == plan.package,
+        "sound app/session changed before opening picker"
+    );
+    let fresh = read_sound(session.hierarchy_source_snapshot()).await?;
+    let tree = crate::ui_automation::tree::Tree::parse(fresh)?;
+    anyhow::ensure!(
+        session.gui_session_epoch() == epoch
+            && read_sound(session.active_app_bundle()).await? == plan.package,
+        "sound app/session changed before opening picker"
+    );
+    anyhow::ensure!(
+        tree.generation > generation
+            && unique_sound_entry(&tree, plan.package, &[plan.entry_id]).as_ref() == Some(&entry),
+        "sound entry changed before tap; no Post was sent"
+    );
+    sound_tap_armed(session, entry.centre(), before_open).await?;
+    // With no screenshot, only an already-selected Hot tab in two fresh XML
+    // pools can authorize a row. Do not enter the image-based tab recovery.
+    let pool = async {
+        snapshot::select_section_tab_xml_only(session, plan).await?;
+        snapshot::observe_xml_only(session, plan, maximum_visible).await
+    }
+    .await;
+    checked_measured_sound_observation(session, plan, &epoch, pool).await
+}
+
+/// Observe a sheet that this attempt may already have opened. This path never
+/// taps the editor entry, so a lost open ACK cannot open a second surface.
+pub async fn resume_open_sounds(
+    session: &dyn UiSession,
+    plan: SoundPickerPlan,
+    maximum: usize,
+) -> anyhow::Result<ObservedSoundPool> {
+    if selection_recovery::measured(plan) && session.gui_reasoner().is_some() {
+        return observe_measured_sound_pool(session, plan, maximum).await;
+    }
+    if let Some(layout) = plan.snapshot_layout() {
+        if !read_sound(session.locate_all(ElementQuery::ResourceIdSuffix(layout.tab_id)))
+            .await?
+            .is_empty()
+        {
+            snapshot::select_section_tab(session, plan).await?;
+            return observe_sound_pool(session, plan, maximum).await;
+        }
+    } else if !read_sound(session.locate_all(ElementQuery::ResourceIdSuffix(plan.row_id)))
+        .await?
+        .is_empty()
+    {
+        return observe_sound_pool(session, plan, maximum).await;
+    }
+    anyhow::bail!("sound sheet is not proven open; refusing to replay its editor entry")
+}
+
+async fn observe_measured_sound_pool(
+    session: &dyn UiSession,
+    plan: SoundPickerPlan,
+    maximum: usize,
+) -> anyhow::Result<ObservedSoundPool> {
+    anyhow::ensure!(
+        selection_recovery::measured(plan)
+            && plan.package == "com.zhiliaoapp.musically"
+            && plan.snapshot_layout().is_some(),
+        "direct sound XML proof is restricted to measured Global 45.7.3"
+    );
+    let epoch = session.gui_session_epoch();
+    anyhow::ensure!(!epoch.is_empty(), "sound sheet session missing");
+    // The measured 45.7.3 sheet can expose a complete Hot hierarchy even
+    // when local OCR is unavailable. Require two fresh, stable XML pools from
+    // this same app/session before returning; an incomplete root falls back
+    // to the existing visual route and never authorizes a row tap.
+    let direct = snapshot::observe_direct(session, plan, maximum).await;
+    match direct {
+        Ok(Some(pool)) => {
+            return checked_measured_sound_observation(session, plan, &epoch, Ok(pool)).await;
+        }
+        Err(error) if error.is::<SoundStopped>() => return Err(error),
+        _ => checked_measured_sound_observation(session, plan, &epoch, Ok(())).await?,
+    }
+    let visual = visual::observe_initial(session, plan, maximum).await;
+    match checked_measured_sound_observation(session, plan, &epoch, visual).await {
+        Ok(pool) => return Ok(pool),
+        Err(error) if error.is::<visual::VisualSoundPoolUnavailable>() => {}
+        Err(error) if error.is::<crate::driver::ScreenshotReadUnavailable>() => {
+            let pool = async {
+                snapshot::select_section_tab_xml_only(session, plan).await?;
+                snapshot::observe_xml_only(session, plan, maximum).await
+            }
+            .await;
+            return checked_measured_sound_observation(session, plan, &epoch, pool).await;
+        }
+        Err(error) => return Err(error),
+    }
+
+    // If the direct XML probe failed to stabilize, OCR must prove the same
+    // sheet before a later XML read can take over.
+    let sheet = selection_recovery::prove_sheet(session, plan).await;
+    checked_measured_sound_observation(session, plan, &epoch, sheet).await?;
+    let pool = tokio::time::timeout(
+        Duration::from_secs(45),
+        snapshot::observe(session, plan, maximum),
+    )
+    .await
+    .map_err(|_| {
+        crate::publish_recovery::retryable_error(
+            "sound_hierarchy_unavailable",
+            "TikTok chưa cung cấp hàng nhạc ổn định sau khi OCR không đọc được; chưa bấm Đăng",
+        )
+    })?;
+    checked_measured_sound_observation(session, plan, &epoch, pool).await
+}
+
+async fn checked_measured_sound_observation<T>(
+    session: &dyn UiSession,
+    plan: SoundPickerPlan,
+    epoch: &str,
+    observation: anyhow::Result<T>,
+) -> anyhow::Result<T> {
+    if observation
+        .as_ref()
+        .is_err_and(|error| error.is::<SoundStopped>())
+    {
+        return observation;
+    }
+    check_wait()?;
+    anyhow::ensure!(
+        read_sound(session.active_app_bundle()).await? == plan.package,
+        "sound app changed; refusing selection"
+    );
+    if session.gui_session_epoch() != epoch {
+        return Err(crate::publish_recovery::retryable_error(
+            "sound_session_replaced",
+            "Phiên điều khiển đổi khi đọc bảng nhạc; sẽ kiểm lại TikTok và bảng nhạc trước khi chọn, chưa bấm Đăng",
+        ));
+    }
+    observation
+}
+pub async fn recover_sound_selection(
+    session: &dyn UiSession,
+    plan: SoundPickerPlan,
+    pool: &ObservedSoundPool,
+    index: usize,
+) -> anyhow::Result<()> {
+    if pool.visual {
+        return visual::recover(session, plan, pool, index).await;
+    }
+    // The measured hierarchy path checks the current selected index before any tap.
+    if confirm_sound(session, plan, &pool.candidates[index].title)
+        .await
+        .is_ok()
+    {
+        return Ok(());
+    }
+    choose_and_confirm_sound(session, plan, pool, index).await
 }
 
 fn unique_sound_entry(
@@ -532,6 +785,7 @@ async fn open_dynamic_sounds(
     session: &dyn UiSession,
     plan: SoundPickerPlan,
     maximum: usize,
+    before_open: &mut (dyn FnMut() + Send),
 ) -> anyhow::Result<ObservedSoundPool> {
     let ids: Vec<_> = MEASURED_SOUND_PICKERS
         .iter()
@@ -552,7 +806,7 @@ async fn open_dynamic_sounds(
         );
         tokio::time::sleep(POLL).await;
     };
-    sound_tap(session, button.centre()).await?;
+    sound_tap_armed(session, button.centre(), before_open).await?;
     let deadline = phase_deadline(SOUND_WINDOW);
     let selected = loop {
         check_wait()?;
@@ -950,6 +1204,105 @@ mod tests {
             &[":id/dou"]
         )
         .is_none());
+    }
+
+    struct OpeningSession {
+        entry_ready: bool,
+        taps: AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl UiSession for OpeningSession {
+        async fn tap(&self, _: crate::TapPoint) -> anyhow::Result<()> {
+            self.taps.fetch_add(1, Ordering::Relaxed);
+            anyhow::bail!("fixture loses the open acknowledgement")
+        }
+        async fn swipe(&self, _: crate::SwipeGesture) -> anyhow::Result<()> {
+            unreachable!()
+        }
+        async fn type_text(&self, _: &str) -> anyhow::Result<()> {
+            unreachable!()
+        }
+        async fn home(&self) -> anyhow::Result<()> {
+            unreachable!()
+        }
+        async fn back(&self) -> anyhow::Result<()> {
+            unreachable!()
+        }
+        async fn find_and_tap(&self, _: &str) -> anyhow::Result<()> {
+            unreachable!()
+        }
+        async fn assert_visible(&self, _: &str) -> anyhow::Result<()> {
+            unreachable!()
+        }
+        fn stream_url(&self) -> Option<String> {
+            None
+        }
+        async fn locate_all(&self, query: ElementQuery<'_>) -> anyhow::Result<Vec<ElementBox>> {
+            if !self.entry_ready {
+                anyhow::bail!("fixture read failed before the open tap")
+            }
+            Ok(match query {
+                ElementQuery::ResourceIdSuffix(":id/dou") => vec![ElementBox {
+                    x: 10.0,
+                    y: 10.0,
+                    width: 100.0,
+                    height: 50.0,
+                    description: None,
+                    enabled: true,
+                    clickable: true,
+                }],
+                _ => vec![],
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn open_intent_is_armed_at_the_tap_boundary_not_during_entry_reads() {
+        let plan = SoundPickerPlan::resolve("com.zhiliaoapp.musically", "en", "45.7.3")
+            .expect("measured plan");
+        for entry_ready in [false, true] {
+            let session = OpeningSession {
+                entry_ready,
+                taps: AtomicUsize::new(0),
+            };
+            let armed = AtomicBool::new(false);
+            let result = open_and_observe_sounds_armed(&session, plan, 5, &mut || {
+                armed.store(true, Ordering::Relaxed)
+            })
+            .await;
+            assert!(result.is_err());
+            assert_eq!(armed.load(Ordering::Relaxed), entry_ready);
+            assert_eq!(
+                session.taps.load(Ordering::Relaxed),
+                usize::from(entry_ready)
+            );
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn expired_budget_does_not_arm_or_dispatch_the_open_tap() {
+        let session = OpeningSession {
+            entry_ready: true,
+            taps: AtomicUsize::new(0),
+        };
+        let armed = AtomicBool::new(false);
+        let budget = SoundBudget {
+            deadline: Instant::now(),
+            stopped: Arc::new(AtomicBool::new(false)),
+        };
+        let result = SOUND_BUDGET
+            .scope(
+                budget,
+                sound_tap_armed(&session, crate::TapPoint { x: 10.0, y: 10.0 }, &mut || {
+                    armed.store(true, Ordering::Relaxed)
+                }),
+            )
+            .await;
+
+        assert!(result.is_err());
+        assert!(!armed.load(Ordering::Relaxed));
+        assert_eq!(session.taps.load(Ordering::Relaxed), 0);
     }
 
     struct InlineSession {

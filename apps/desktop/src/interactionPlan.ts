@@ -26,6 +26,7 @@ import type {
 export type ThreadKind = "standalone" | "chain" | "star";
 
 export interface InteractionDraft {
+  seeding?: import("./types").SeedingConfig;
   rawLinks: string;
   /**
    * How many comments each link gets, or `null` for "as many as the biggest cohort".
@@ -172,6 +173,7 @@ export function buildRequest(
   const storedScript = draft.actions.comment ? conversationOf(draft) : null;
   const script = storedScript ? {...storedScript,targetScripts:context.targets.flatMap(target=>storedScript.targetScripts.filter(s=>s.targetKey===target.targetKey))} : null;
   return {
+    seeding: draft.seeding,
     scriptedConversation: script ?? undefined,
     requestId: context.requestId,
     targets: context.targets,
@@ -179,7 +181,7 @@ export function buildRequest(
     messageCount: script ? Math.max(2, ...script.targetScripts.map(target => target.steps.length)) : effectiveMessageCount(draft, context.largestCohort),
     instruction: draft.instruction,
     maxWords: draft.maxWords,
-    ...requestShapeOf(script ? "chain" : draft.actions.comment ? draft.threadKind : "standalone"),
+    ...requestShapeOf(script ? "chain" : draft.seeding ? (draft.seeding.standaloneCount === effectiveMessageCount(draft,context.largestCohort) ? "standalone" : "chain") : draft.actions.comment ? draft.threadKind : "standalone"),
     // **No cohort size is sent, so the actor list is always one cohort.**
     //
     // It used to be an advanced field, and it quietly outranked the thing above it: load a
@@ -190,7 +192,7 @@ export function buildRequest(
     // a single cohort: the group, whole.
     cohortSize: undefined,
     manualComments: context.purpose === "preview" ? [] : manualCommentsOf(draft),
-    actions: draft.actions,
+    actions: draft.seeding ? {...draft.actions,like:draft.seeding.likeCount>0,save:draft.seeding.saveCount>0,share:draft.seeding.shareCount>0} : draft.actions,
     mentionParent:
       draft.actions.comment && draft.threadKind !== "standalone" ? draft.mentionParent : false,
     // Not zeroed for `standalone` the way `mentionParent` is: a root comment has no parent to
@@ -261,7 +263,7 @@ export function validateDraft(
   }
 
   const actors = context.actorUdids.length;
-  const minimumActors = draft.actions.comment && draft.threadKind !== "standalone" ? 2 : 1;
+  const minimumActors = draft.actions.comment && draft.threadKind !== "standalone" && (!draft.seeding || draft.seeding.standaloneCount !== effectiveMessageCount(draft,context.largestCohort)) ? 2 : 1;
   if (actors < minimumActors || actors > 64) {
     issues.push({
       field: "actors",
@@ -298,6 +300,18 @@ export function validateDraft(
     return issues;
   }
   const messages = effectiveMessageCount(draft, context.largestCohort);
+  if(draft.seeding) {
+    const s=draft.seeding;
+    if([s.likeCount,s.saveCount,s.shareCount].some(n=>n<0||n>actors))issues.push({field:"actors",message:"Số Tim/Lưu/Share không được vượt số máy đã chọn"});
+    if(draft.actions.comment){
+      const thread=messages-s.standaloneCount;
+      if(messages<1||messages>64||s.standaloneCount<0||thread<0||thread===1||(thread>0&&actors<2))issues.push({field:"messageCount",message:"Tổng từ 1–64; phần hội thoại cần ít nhất 2 câu và 2 tài khoản"});
+      if(context.targets.some(t=>s.comments[t.targetKey]?.length!==messages))issues.push({field:"manual",message:"Soạn và duyệt đủ câu cho từng bài trước khi chạy"});
+    }
+    if([s.watchSeconds,s.commentGapSeconds].some(r=>r.min<0||r.max>600||r.min>r.max))issues.push({field:"plan",message:"Khoảng chờ phải hợp lệ trong 0–600 giây"});
+    if(context.planError)issues.push({field:"plan",message:interactionErrorVi(context.planError).title});
+    return issues;
+  }
 
   // Advertised in a hint since the feature shipped and enforced nowhere, so the run started
   // and the backend refused it — `TooFewManualComments`, after the campaign row existed.

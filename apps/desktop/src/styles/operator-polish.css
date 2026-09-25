@@ -51,7 +51,14 @@ select:disabled { cursor: default; opacity: .55; }
 .rail-hover .control-shortcuts { gap: 5px; }
 .rail-hover .control-shortcuts button { min-height: 30px; padding: 5px 8px; font-size: var(--text-xs); }
 .rail-hover .control-stream-status { margin: 6px 0 10px; font-size: var(--text-xs); }
-.rail-hover .control-connections { padding: 10px 0; margin: 8px 0 12px; }
+.rail-hover .control-connections { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 2px; padding: 10px 0; margin: 8px 0 12px; }
+.rail-hover .control-connections button { justify-content: center; min-width: 0; padding: 5px 2px; gap: 2px; white-space: nowrap; }
+.rail-hover .control-connections .connection-count { min-width: 14px; text-align: center; font-size: var(--text-xs); font-variant-numeric: tabular-nums; color: var(--text-3); }
+.rail-hover .control-connections button[aria-pressed="true"] .connection-count { color: var(--primary); }
+@media (max-width: 900px) {
+  .rail-hover .control-connections button { flex-direction: column; min-height: 38px; gap: 0; }
+  .rail-hover .control-connections button svg { display: none; }
+}
 .rail-hover .control-rail-content > header { margin-bottom: 8px; font-size: var(--text-sm); }
 .rail-hover .control-group-list { border: 0; padding: 0; gap: 7px; }
 .rail-group { border: 1px solid var(--line); border-radius: 5px; overflow: clip; }

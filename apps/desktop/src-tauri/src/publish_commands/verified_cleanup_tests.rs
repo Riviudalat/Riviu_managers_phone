@@ -145,6 +145,32 @@ fn native_cleanup_requires_cleaned_state_for_exact_import() {
 }
 
 #[tokio::test]
+async fn unsupported_network_never_dispatches_cleanup_after_restart() {
+    for network in ["threads", "instagram"] {
+        let (db, path, _assignment_id) = fixture();
+        rusqlite::Connection::open(&path)
+            .unwrap()
+            .execute(
+                "UPDATE publish_campaigns SET request_json=json_set(request_json, '$.network', ?1)",
+                [network],
+            )
+            .unwrap();
+        let driver = Arc::new(CleanupDriver::default());
+        let events = riviu_core::events::EventBus::new(16);
+        assert_eq!(
+            cleanup_verified_assignments(&control(driver.clone()), &db, &events, 1)
+                .await
+                .unwrap(),
+            0,
+            "{network} must not run a TikTok cleanup worker"
+        );
+        assert_eq!(driver.deletes.load(Ordering::SeqCst), 0);
+        drop(db);
+        let _ = std::fs::remove_file(path);
+    }
+}
+
+#[tokio::test]
 async fn deferred_cleanup_retains_warm_app_and_resumes_failed_import_after_restart() {
     let (db, path, id) = fixture();
     let driver = Arc::new(CleanupDriver::default());

@@ -7,3 +7,8 @@ export const readQueryClient = new QueryClient({
     staleTime: 0, gcTime: 60_000,
   } },
 });
+
+/** Mark one persisted read-model family stale after its owning mutation succeeds. */
+export async function invalidateReadScope(scope: readonly unknown[]) {
+  await readQueryClient.invalidateQueries({ queryKey: scope });
+}

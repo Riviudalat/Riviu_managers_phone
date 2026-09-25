@@ -3,17 +3,52 @@
 Stack giữ nguyên: Rust workspace, Tauri 2, React/TypeScript/Vite. `src/api.ts` là biên
 IPC frontend. Không thêm một control plane riêng để đi vòng ownership/admission hiện có.
 
+Seeding dùng `ThreadCampaignRequest.seeding`, planner và ledger Tương tác hiện có;
+migration 46 thêm Share và khoảng ordinal cho lượt hành động độc lập bên cạnh tối
+đa 64 bình luận. Lịch cũ không có `seeding` giữ hành vi cũ. Bù Tim/Lưu phải claim
+ngân sách trong transaction; armed/uncertain vẫn chiếm lượt. Reply chờ bằng chứng
+câu cha và không replay Send khi chưa rõ kết quả.
+
+Deployment checker được build từ crate `riviu-deployment-checker`, dùng lại mã
+kiểm package của desktop mà không link Tauri. Stage đúng checker sau lần compile
+cuối và đối chiếu hash trước bundle; EXE/MSI dùng chung app đã compile một lần.
+
 DTO thiết bị, khả năng, Dừng, timeline và Sheet proof được sinh bằng ts-rs 12.0.1:
 `cargo run --locked -p riviu-core --example export_ipc -- apps/desktop/src/generated-ipc.ts`.
 `python scripts/check_generated_ipc.py` kiểm không có drift. TanStack Query chỉ
-giữ read model của monitor theo run/device/phạm vi; retry, focus và reconnect
-refetch bị tắt. Credential, preflight và effect không dùng query cache.
+giữ read model persisted theo run/device/phạm vi; metadata thiết bị cache 2 giây,
+revision bất biến có thể cache lâu, còn danh sách thay đổi nhanh luôn stale. Mutation
+làm stale đúng family liên quan. Retry, focus và reconnect refetch bị tắt. Credential,
+preflight, probe thiết bị và effect không dùng query cache.
+SQLite async đi qua `StorageExecutor`: tối đa một writer, hai reader và 64 yêu cầu
+chờ; admission xảy ra trước `spawn_blocking`. Các monitor/guard đọc theo lô trong
+executor; transaction không được giữ qua await HTTP hoặc thiết bị.
+
+Publish recovery dùng migration 45 và dispatcher hiện có. `publish_retry_assignment`
+nhận `assignmentId`, `confirmed`, `expectedRevision`, `requestId`; replay cùng request
+chỉ trả ACK, không tạo attempt khác. Retry tự động tối đa ba lần mỗi bước, thủ công
+chỉ tạo một lượt bài nhưng vẫn cho tối đa ba retry tạm thời trong từng bước của
+lượt đó. Lượt thủ công không tự requeue cả bài khi worker kết thúc. Counters,
+checkpoint, account và ứng viên nhạc được giữ trong SQLite.
+Reconnect đúng serial tối đa 120 giây nhường work permit; startup không tự chạy lại
+lượt recovery gián đoạn. Có Post intent thì chỉ xác minh; `publish_retry_sheet_assignment`
+chỉ mở lại outbox của bài đã có canonical proof, không đi vào composer.
+Recovery state lưu thêm `lastErrorCode` và `lastErrorKind`. Các đường mới truyền
+`RecoveryFailure` có kiểu; parser chuỗi chỉ là compatibility boundary cho journal/lỗi
+cũ. Thay chữ hiển thị không được đổi retry policy. Retry vẫn chỉ trước Post và tối đa
+ba lần mỗi bước.
 
 Preflight Android dùng `DeviceControlPlane::tiktok_action_capabilities` và catalog
 `app_automation::action_capabilities` chung cho UI, Nuôi thủ công/lịch/Điều phối,
 Tương tác và Đăng bài. Readiness chỉ đọc khóa màn hình, transport và owner, không
 đánh thức máy hoặc mở session. Mỗi action thiếu locator/tuple bị từ chối riêng;
 `runtimeProofRequired` cho phép vào bước chứng minh target, chưa cấp quyền tap.
+Migration 47 lưu `device_app_bindings` theo `(udid, appKey)` với CAS. Resolver nằm
+trong `DeviceControlPlane`; Android luôn đọc lại danh sách package để chứng minh lựa
+chọn còn cài và có adapter. `tiktok_build` và resolve package dùng cùng binding. Máy
+chưa có binding giữ foreground fallback cũ; UI buộc chọn khi fallback còn mơ hồ.
+Handoff đóng package từ completion journal trước fallback và trả kết quả từng máy;
+frontend không dispatch lượt mới nếu còn một máy `closed=false`.
 Follow trong Tương tác dùng profile đã đo ở Trill38.3.2/en và Global
 45.4.3/45.7.3/46.0.41/46.1.3/46.4.3/en;
 source proof Follow ngẫu nhiên của Nuôi dùng capability `feedFollow` riêng ở
@@ -44,6 +79,11 @@ nhận đúng tên nhạc duy nhất trên editor. Lỗi/mơ hồ/Dừng vẫn t
 chọn nhạc lại và không nới deadline chung ba phút.
 Khi nhánh XML gặp cây rỗng hoặc lỗi accessibility, hai ảnh mới cho phép chuyển
 tab Hot một lần. Nhánh này vẫn bắt buộc XML xác nhận Hot và danh sách đầy đủ.
+Riêng Global 45.7.3/en, nếu Android trả ảnh chụp không phải PNG (kể cả 0 byte),
+không dùng ảnh đó để suy vị trí. Nhánh mở nhạc chỉ nhận một nút entry qua hai XML
+mới cùng app/phiên, đọc lại đúng nút và app ngay trước một tap. Sau khi mở, chỉ
+tiếp tục khi XML chứng minh Hot đã chọn và hàng nhạc ổn định; không có ảnh thì
+không gọi đường chọn tab bằng ảnh/OCR. Hết hạn hoặc XML đổi thì dừng trước Post.
 Trên 45.7.3/en, hai ảnh native mới có Next và Your Story chứng minh editor đã
 mở; nhạc gợi ý đang Loading là trạng thái riêng. Mẫu chữ Loading phải khớp
 hai ảnh mới trước khi mở nút nhạc đã đo. Bảng mở dở được quan sát tiếp; khi đủ
@@ -51,7 +91,16 @@ bốn tab mới chuyển Hot, không đợi nội dung For You. Giữ ngân sác
 Trên đúng 45.7.3/en ở 1080×2220, adapter ảnh dùng hai quan sát mới cùng phiên
 để chứng minh gạch chân Hot, tên và nghệ sĩ của từng hàng đầy đủ. Hàng hồng đã
 chọn, tên trùng và hàng bị cắt bị loại; trước chọn phải đọc lại cùng danh tính.
-Nhánh này chỉ chọn một lần rồi đóng bảng đã chứng minh bằng ảnh; hai XML mới
+Nếu bảng Hot đã lộ đủ XML trên Global 45.7.3/en, hai snapshot XML mới tăng
+generation và có cùng danh sách hàng hoàn chỉnh được đọc trước OCR. Nhánh này
+không cần OCR khi dịch vụ OCR báo 429; nó vẫn loại tên trùng/hàng bị cắt, kiểm
+app và phiên, rồi đọc lại cùng hàng trước khi tap. XML chưa đủ hoặc không ổn
+định thì tiếp tục đường ảnh/OCR cũ; không suy hàng từ ảnh hay tap theo vị trí.
+Nếu OCR không dựng được pool trong 60 giây, nhánh này xác nhận lại sheet bằng
+hai quan sát mới rồi dùng snapshot XML chỉ khi Hot đã chọn và hàng nhạc đầy đủ,
+ổn định. XML không rõ trả lỗi có thể retry trước Post, không tap hàng nào.
+Nhánh này chỉ chọn một lần, chờ hai ảnh mới có đúng tên nhạc chuyển hồng để
+xác nhận lựa chọn đã tải xong, rồi đóng bảng đã chứng minh bằng ảnh; hai XML mới
 trên editor phải khớp nguyên tên nhạc. Không khớp thì giữ lỗi trước Đăng.
 Tap từ ảnh dùng `tap_image` với đúng kích thước native, không thêm jitter.
 Nguồn ảnh minicap giữ kích thước native và giới hạn 2 FPS để giảm tải encode
@@ -75,9 +124,47 @@ cùng session, picker đã rời và ô soạn khớp toàn bộ phép thay toke
 đọc cuối trước Gửi phải khớp nguyên văn kết quả đã chứng minh. Không suy nickname
 thành username và không dùng mapping này cho build khác chưa đo.
 
-`RIVIU_DEV_MANUAL_ACCEPTANCE=1` trong bản debug giữ lịch tự chạy chờ và đóng băng
-hành vi Nuôi. Dispatcher chỉ nhận campaign có trong danh sách dấu phẩy
-`RIVIU_DEV_ACCEPTANCE_CAMPAIGNS`; biến môi trường không sửa lịch đã lưu.
+`RIVIU_DEV_MANUAL_ACCEPTANCE=1` trong bản debug giữ mọi lịch tự chạy ở trạng thái
+chờ và không sửa lịch đã lưu. Chế độ này cũng không tự resume Flow/Điều phối,
+không chạy cleanup/idle sweep/comment verifier, không tự đóng app và không bind
+Local API đã lưu. Dispatcher chỉ nhận đúng cặp campaign/máy trong file tuyệt đối
+`RIVIU_DEV_ACCEPTANCE_SCOPE`; `RIVIU_DEV_ACCEPTANCE_ACTIVATION` phải khớp
+`activationId` trong file. Thiếu file/activation, JSON lỗi hoặc ID không khớp đều
+đóng kín. Backend chụp danh sách tối đa 100 máy lúc khởi động và pin toàn bộ danh
+sách campaign được kích hoạt (tối đa 100); thay campaign hoặc danh sách máy giữa
+phiên làm toàn bộ gate đóng lại. Giới hạn concurrent production vẫn được giữ.
+Nghiệm thu hẹn giờ phải bật riêng `capabilities.publishSchedule`; chỉ lịch có
+campaign và toàn bộ máy nằm trong scope mới được clock production nhận khi tới
+giờ. Các lịch khác, Nuôi và Điều phối vẫn đóng băng, không sửa lịch đã lưu.
+
+Scope tối thiểu chỉ mở dispatch do harness đã xác nhận; verifier và Sheet vẫn tắt:
+
+```json
+{
+  "activationId": "acceptance-20260922-random-id",
+  "campaignIds": ["campaign-id"],
+  "deviceIds": ["android-serial"],
+  "capabilities": {
+    "publishVerification": false,
+    "sheetDelivery": false
+  }
+}
+```
+
+Khởi động debug với cùng giá trị, ví dụ
+`RIVIU_DEV_ACCEPTANCE_ACTIVATION=acceptance-20260922-random-id`. File ban đầu phải
+có `campaignIds: []`, đúng danh sách máy và cả hai capability tắt; harness chỉ thay
+atomic sang một campaign sau khi đã lưu create receipt. Production/release không
+đọc quyền này.
+
+Chỉ bật từng capability trong lần kích hoạt atomic khi lượt nghiệm thu thật cần nó;
+backend pin bộ cờ ở lần đọc active đầu tiên, muốn đổi phải dừng và tạo activation mới.
+`publishVerification` cho phép worker đọc lại đúng publication trên đúng máy;
+`sheetDelivery` cho phép gửi đúng assignment của campaign/máy trong scope. Hai cờ
+mặc định `false` và không được suy ra từ việc campaign đã nằm trong scope. Scheduler
+Đăng bài luôn đứng yên;
+harness phải gọi lệnh Execute đã xác nhận. Thay scope chỉ ảnh hưởng claim kế tiếp,
+không hủy effect đang in-flight vì hủy giữa intent và hậu kiểm sẽ làm mất trạng thái.
 Harness nhận `--content-snapshot` JSON chứa `captionOverrides` và `soundPolicy`.
 Đạt end-to-end đòi canonical post proof, receipt đúng revision/epoch và đọc lại
 ô qua `publish_sheet_readback`; trạng thái sent một mình chưa đủ.
@@ -194,8 +281,12 @@ Inspector dùng `ui_automation::inspector::ElementSelector` và `inspector_comma
 UI và `scripts/riviu_agent_mcp.mjs` gọi cùng observe/tap/record qua Tauri hoặc
 `POST /v1/inspector/{observe,tap,record,recording}`. MCP dùng URL loopback và token
 API hiện có, không mở ADB server hoặc phiên driver thứ hai. Mỗi thao tác giải lại
-selector duy nhất theo package; recorder ghi intent trước tap, lưu ảnh/cây trước
-và sau. Bước chưa có phần tử kết quả mới giữ unverified và không xuất Flow tự chạy.
+selector duy nhất theo package; schema selector v2 hỗ trợ prefix, scope ancestor và
+clickable ancestor có định danh/độ sâu/geometry hữu hạn. Schema v1 thiếu các trường mới
+vẫn khớp exact như cũ. Recorder ghi intent trước tap, lưu ảnh/cây trước và sau. Nó
+không tự chọn node mới sau delay: UI gọi `inspector_confirm_postcondition` với selector
+người dùng chọn; backend kiểm selector đó chỉ có ở snapshot sau. Bước chưa xác minh giữ
+unverified và không xuất Flow tự chạy.
 Flow tap dạng `selector` có hậu điều kiện `elementVisible`, được kiểm cả compiler,
 runtime và ledger. Ledger nhận baseline `none` chỉ khi cấu hình là tap phần tử và
 hậu điều kiện là `elementVisible` trong cùng package; tap theo ảnh vẫn giữ baseline
@@ -258,6 +349,11 @@ preparing/active/degraded và chặn input khi chưa active. Mọi `group_input`
 này mang `masterUdid`; backend khử trùng, đặt master đầu tiên, áp policy chỉ cho follower
 và poll fan-out đồng thời. Đổi selection/master/roster tắt phiên; retry chỉ mở session,
 không replay input không idempotent.
+Điều khiển trực tiếp Android gửi `DOWN` qua scrcpy ngay khi pointer-down, giữ cùng
+contact tới `UP` hoặc cancel; thời gian nhấn giữ tính sau ACK của `DOWN`. Touch dùng
+overlay session/ManualControl owner hiện có, không mở lease mới trên mỗi sự kiện.
+Ô nhập chữ thủ công gửi một lần qua `device_type_text` hoặc `group_input(type)` sau
+xác nhận Enter/nút gửi; IME composition và Shift+Enter không kích hoạt gửi.
 
 Ba workspace cũ vẫn là đích mặc định; graph chỉ mở qua Thêm Flow. Trạng thái ẩn từng
 nhóm sidebar và bảng Hiển thị là preference cục bộ, không đổi cấu hình chiến dịch.
@@ -328,14 +424,12 @@ Windows NSIS/MSI và WiX fragment cùng nhận overlay `tauri-gui-service.conf.j
 | Android | `crates/android-driver`, helper APK và pinned tools | package/permission/hierarchy -> typed observation/effect | không tap theo toạ độ chưa đo; driver tests, hash/version gates |
 
 **Platform vs mạng xã hội vs flow.** `DevicePlatform` là OS thiết bị (iOS/Android).
-`SocialNetwork` (`tiktok` | `instagram` | `threads`, mặc định TikTok) là app mục tiêu của
-automation trên thiết bị — seam dispatch package/link; Instagram/Threads vẫn từ chối rõ trên
-đường điều khiển máy. Preflight Đăng nhận `network` (mặc định TikTok cho dữ liệu cũ) và từ chối
-Threads trước mọi thao tác gây hiệu ứng khi chưa có composer/verifier đã đo. Threads dùng lại sườn UI
-setup/schedule/monitor của Đăng bài; `network` phải đi xuyên preflight, create và schedule,
-không đăng qua API song song. Orchestration fleet (`OrchestrationDocumentV1`) là đồ thị gọi
-vào engine Nuôi / Tương tác / Đăng hiện có; nút “Tạo mẫu 3 chức năng” seed 3 hồ sơ + một
-điều phối Nuôi→Tương tác→Đăng. Engine vẫn là source of truth — không thay bằng node Flow V2 tap/swipe.
+`SocialNetwork` (`tiktok` | `instagram` | `threads`, mặc định TikTok) là app mục tiêu
+trên thiết bị. Threads dùng lại sườn UI setup/schedule/monitor của Đăng bài; `network`
+đi xuyên preflight, create và schedule. Preflight có thể đọc package/build/locale,
+nhưng các điểm lưu settings/profile/campaign, claim job và worker phục hồi phải từ
+chối network chưa hỗ trợ trước effect. Chỉ thêm enum hoặc adapter GUI không cấp quyền
+chạy Nuôi, Tương tác hay Đăng trên Threads.
 
 `threads_publish::THREADS_PUBLISH_FLOW` mô tả các trạng thái dự kiến của đường Android, không
 phải selector hay engine đã chạy: nhận diện app → composer → media → caption → trạng thái nút
@@ -344,6 +438,16 @@ chỉ đọc `com.instagram.barcelona`/version/locale rồi fail-closed cho đ�
 Package Android theo [Google Play](https://play.google.com/store/apps/details?id=com.instagram.barcelona);
 giới hạn caption 500 ký tự và loại media theo [giới thiệu chính thức của Meta](https://about.fb.com/news/2023/07/introducing-threads-new-app-text-sharing/).
 Tài liệu này không xác nhận label accessibility của một build cụ thể.
+Orchestration fleet (`OrchestrationDocumentV1`) là đồ thị gọi vào engine Nuôi /
+Tương tác / Đăng hiện có; nút “Tạo mẫu 3 chức năng” seed 3 hồ sơ + một điều phối
+Nuôi→Tương tác→Đăng. Engine vẫn là source of truth, không thay bằng node Flow V2 tap/swipe.
+
+Lịch Script cũ claim mốc và tạo job trong cùng transaction; crash sau claim giữ
+job chưa xác định/hủy theo bằng chứng, không tạo job thứ hai cho cùng mốc. Lịch Nuôi
+cũ ghi intent và tiến mốc trước `start_many`; intent chưa settle cần đối soát thủ
+công, không tự phát lại. Dev manual acceptance vẫn quét roster và tự mở ảnh xem
+trước Android thụ động, nhưng không tự chạy lịch/worker có hiệu ứng hoặc nền iPhone;
+lệnh thủ công vẫn có thể tác động máy nên không coi chế độ này là read-only toàn cục.
 
 Bảng này là ranh giới trách nhiệm hiện có, không khẳng định đã tách hết module lớn.
 Khi tách module, giữ public contract và chuyển các test đọc `include_str!` cùng symbol.
@@ -377,6 +481,11 @@ foreground thuộc tập đã đọc từ Package Manager; launcher, system wind
 không được biến thành chọn package đầu tiên. Preflight UI trình bày issue theo máy và
 phiên bản; `canExecute` vẫn do backend quyết định. Chỉ thêm tuple composer/nhạc khi đã
 đo đủ bước chọn nhiều ảnh, nhạc và readback; một ảnh XML picker chưa chứng nhận Post.
+Publish preflight đọc điều kiện của tối đa bốn Android cùng lúc, dưới trần admission
+ADB của host; trong mỗi máy vẫn giữ thứ tự transport, dung lượng, trạng thái khóa
+và package/build. Kết quả được ráp lại theo thứ tự ghép bài, giữ đúng issue của
+từng máy. Sheet vẫn có một lượt kiểm tra writer/target/epoch riêng mỗi preflight;
+cache hiển thị trên frontend chỉ cho phép bắt đầu kiểm tra, không thay kết quả này.
 
 `ComposerPlan::missing_for_carousel` kiểm đủ opening/tail/selection cho preflight
 ảnh; `can_publish_carousel` là guard trước effect của pipeline ảnh có nhạc. Bảng
@@ -619,6 +728,11 @@ không mở driver/ADB, không đọc SQLite hay credential. Cần Node và Play
 trong `apps/desktop/node_modules`. Không bật/restart debug app thứ hai để nghiệm thu
 khi production đang giữ máy. CDP không có sẵn thì dừng; việc chạy script không tự
 cấp quyền tạo thêm lượt public.
+Khi nghiệm thu Android cắm USB, thêm `--real-android true`: harness đối chiếu từng
+serial với roster Android USB `connected/ready` của chính AppState trước mọi
+preflight/Create/Execute. Thiếu máy, app đang chạy mock hoặc roster cũ đều bị từ
+chối; `inspect` không mang cờ này chỉ là phép đọc trạng thái, exit 0 không chứng
+nhận máy thật. Cờ được ghim trong fingerprint của preflight và submit.
 
 | Mode | Hành vi | Điều không thực hiện |
 |---|---|---|
@@ -677,10 +791,22 @@ hành gỡ lock, không gỡ intent. Không dùng report directory khác để n
 
 Báo cáo phân biệt `enqueued`, receipt `submitted`, `publicationVerified` + canonical
 URL, `sheetSent` từ settlement backend và `urlReadback`. URL trần hoặc state succeeded
-không thay proof. `publish_get` chưa trả receipt identity writer/target/epoch hay ô
-Sheet đọc lại cho harness; vì vậy **URL readback bổ sung hiện là unsupported**, kể
-cả bảng public. Không trích token để đọc bảng private. CSV chỉ là đối chứng URL,
-không thay bằng chứng delivery writer. Harness hiện không chứng nhận end-to-end xanh.
+không thay proof. Khi đã có bài verified và delivery sent, harness gọi
+`publish_sheet_readback` qua OAuth backend để đọc receipt và ô Sheet đúng
+assignment/revision/epoch; chỉ đánh dấu `matched` khi URL, identity và revision
+khớp. Thiếu OAuth, readback lỗi hoặc chưa tới lượt thì giữ `pending`, không tự
+gửi Post hay Sheet lại. Không trích token để đọc bảng private. CSV chỉ là đối
+chứng URL, không thay bằng chứng delivery writer. Harness chỉ chứng nhận
+end-to-end khi có đủ ba lớp proof trên đúng máy và tài khoản.
+
+Outbox canonical `failed` chưa có receipt dùng `publish_sheet_diagnose_failed`
+với `assignmentId`, `expectedRevision`, `startRow` (bắt đầu từ 2). Lệnh GET chỉ
+đọc target/epoch/account đã ghim, tối đa 32 trang hoặc 45 giây một lát; trả
+`nextRow` để đọc tiếp cho tới `complete`. Kết quả chỉ có số hàng và các cờ
+identity/revision/fingerprint/ô D khớp, không trả URL, note gốc hoặc dữ liệu
+đối tác. `complete` chỉ có nghĩa đã quét hết grid hiện tại; note hỏng, hàng bị
+chỉnh hoặc writer khác đang ghi vẫn cần đối soát thủ công. Lệnh không nhận
+receipt, không đánh dấu `sent` và không mở retry.
 
 | Exit | Ý nghĩa |
 |---|---|
@@ -878,6 +1004,18 @@ trả đường đi này để monitor hiển thị lượt lặp. Các bước 
 ledger, không chạy lại body để dựng biến sau restart. `Transform` hỗ trợ xử lý
 chuỗi/dòng, JSON pointer và regex có ngân sách bộ nhớ, đầu ra tối đa4.096ký tự.
 
+Composition có thêm opt-in `library: { flowId, channel: "published" }`. Con trỏ
+publication nằm trong DB và cập nhật bằng CAS; trước khi chuyển con trỏ, backend resolve
+một snapshot tất cả publication và compile mọi Flow hiện hành. `flow_run` là cửa production
+duy nhất resolve dependency mới: khi hash thay đổi, nó ghi một revision cha bất biến rồi
+enqueue. Retry/recovery chỉ đọc compiled plan đã ghim, tuyệt đối không lấy publication mới.
+Chế độ snapshot xóa sâu metadata `library` trên bản sao để toàn subtree thật sự đóng băng;
+Flow lịch sử không có metadata giữ nguyên bytes và semantics.
+`flow_library_unpublish` cũng dùng CAS và bị chặn khi còn publication hoặc bản hiện hành
+tham chiếu nguồn. Publish/Unpublish/Save/Archive/resolve-new-run giữ cùng gate SQLite liên
+process; hai desktop dùng chung DB không thể xen kẽ tạo reference treo. Chỉ sau khi bỏ
+công bố và gỡ consumer mới được Archive.
+
 Local API task routes gọi cùng Flow command handler của UI; không tạo scheduler
 riêng. POST chạy Flow không tự retry khi mất response. API status/cancel luôn dùng
 run ID trả về; contract/schema ở trang API và module `local_api/tasks.rs`.
@@ -918,6 +1056,18 @@ kế tiếp và tìm vùng cha clickable của nhãn. Nhãn `View N replies` có
 clickable; nhiều bình luận cùng tác giả không thay thế bằng chứng nội dung gốc.
 
 ## Xác minh bình luận Android
+
+`CommentLocatorIdentity.commentLink` là trường tùy chọn tương thích dữ liệu cũ,
+chứa `postId`, `commentId`, URL đã bỏ tracking. Adapter `tiktok_comment_link`
+đo trên musically45.7.3/en: giữ đúng hàng → Share with → Copy link, clipboard có
+sentinel mới; redirect chỉ HTTPS trên các host TikTok cho phép. Không nhận link
+bài thiếu ID, ID trùng tham số, hoặc post khác. Worker bổ sung link sau khi chứng
+minh nội dung/tác giả, trong deadline còn lại; thiếu link không đảo trạng thái gửi.
+`interaction_comment_link` lấy ID cho lượt đã verified; `captureUdid` cho phép lấy
+trên máy khác cùng campaign sau khi chứng minh tác giả. `udid` kiểm mở ID trên máy
+thuộc campaign; không dùng cùng `captureUdid`. Không có thao tác gửi/xóa. Reply mở link HTTPS
+chứa `share_item_id`/`share_comment_id` (musically45.7.3 không nhận scheme `aweme`),
+sao chép lại link của hàng vừa tới và yêu cầu ID khớp trước dùng nút Reply.
 
 Migration37 thêm `interaction_comment_verification` và lịch quan sát lại parent.
 Trước khi nâng từ schema36, DB được sao lưu bằng SQLite `VACUUM INTO` sang file

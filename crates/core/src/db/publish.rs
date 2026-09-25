@@ -316,6 +316,7 @@ impl Database {
         bundles: &[crate::PublishBundle],
         initial_snapshot: Option<&crate::PublishExecutionSnapshotDraft>,
     ) -> anyhow::Result<bool> {
+        request.network.ensure_implemented()?;
         if let Some(target) = &request.sheet_delivery {
             target.validate()?;
             anyhow::ensure!(
@@ -854,6 +855,11 @@ impl Database {
                 ],
             )?;
         }
+        // New recovery-aware attempts require explicit operator continuation after
+        // process restart. Preserve counters and never resume a cached UI checkpoint.
+        transaction.execute("UPDATE publish_assignments SET state='failed_before_dispatch',error_code='retry_interrupted',revision=revision+1 WHERE effect_intent IS NULL AND id IN(SELECT j.assignment_id FROM publish_dispatch_jobs j JOIN publish_recovery_state r ON r.assignment_id=j.assignment_id WHERE j.state IN ('queued','running','paused'))",[])?;
+        transaction.execute("UPDATE publish_dispatch_jobs SET state='finished',owner=NULL,reason='retry_interrupted',revision=revision+1 WHERE state IN ('queued','running','paused') AND assignment_id IN(SELECT assignment_id FROM publish_recovery_state) AND EXISTS(SELECT 1 FROM publish_assignments a WHERE a.id=assignment_id AND a.effect_intent IS NULL)",[])?;
+        transaction.execute("UPDATE publish_recovery_state SET payload=json_set(payload,'$.state','interrupted','$.nextRetryAt',NULL) WHERE assignment_id IN(SELECT assignment_id FROM publish_dispatch_jobs WHERE reason='retry_interrupted')",[])?;
         transaction.execute("UPDATE publish_dispatch_jobs SET state='queued',reason=NULL,revision=revision+1 WHERE state='paused'",[])?;
         // Retain unstarted immediate jobs across restart; effects are never replayed.
         transaction.execute("DELETE FROM publish_work_claims", [])?;
@@ -3090,6 +3096,49 @@ mod execution_snapshot_tests {
             target_snapshot: None,
         };
         (request, bundle)
+    }
+
+    #[test]
+    fn publish_creation_rejects_unsupported_network_before_write() {
+        let path =
+            std::env::temp_dir().join(format!("riviu-publish-network-{}.db", Uuid::new_v4()));
+        let db = Database::open(&path).expect("open fixture database");
+        for network in [
+            crate::SocialNetwork::Threads,
+            crate::SocialNetwork::Instagram,
+        ] {
+            let (mut request, bundle) = campaign_input();
+            request.network = network;
+            let error = db
+                .create_publish_campaign(&request, &[bundle])
+                .expect_err("unsupported network must not create assignments");
+            assert!(
+                error.to_string().contains(network.display_name()),
+                "{error}"
+            );
+        }
+        assert!(db.list_publish_campaigns(10).unwrap().is_empty());
+        drop(db);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn pipeline_claim_rejects_unsupported_persisted_network() {
+        let (db, path, campaign_id) = fixture();
+        db.conn()
+            .unwrap()
+            .execute(
+                "UPDATE publish_campaigns SET request_json=json_set(request_json, '$.network', 'threads') WHERE id=?1",
+                [&campaign_id],
+            )
+            .unwrap();
+        let error = db
+            .claim_publish_pipeline(&campaign_id)
+            .expect_err("old Threads row must not enqueue TikTok workers");
+        assert!(error.to_string().contains("Threads"), "{error}");
+        assert!(!db.has_active_publish_pipeline(&campaign_id).unwrap());
+        drop(db);
+        let _ = std::fs::remove_file(path);
     }
 
     fn fixture() -> (Database, std::path::PathBuf, String) {

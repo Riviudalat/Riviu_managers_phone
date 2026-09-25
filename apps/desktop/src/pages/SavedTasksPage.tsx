@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import {
   Plus,
   Play,
@@ -6,6 +6,7 @@ import {
   CalendarClock,
   RefreshCw,
   Trash2,
+  X,
 } from "lucide-react";
 import {
   appWorkflowList,
@@ -23,6 +24,8 @@ import { requestConfirm } from "../confirmStore";
 import { invoke } from "@tauri-apps/api/core";
 import { EmptyState, LoadingState, StatusNotice } from "../components/States";
 import { useAsyncList } from "../useAsyncList";
+import { useMediaQuery } from "../useMediaQuery";
+import { useModalFocus } from "../components/useModalFocus";
 
 async function readSavedTasks() {
   const [rows, apps] = await Promise.all([operatorList("savedTask"), appWorkflowList()]);
@@ -30,7 +33,10 @@ async function readSavedTasks() {
 }
 
 export function SavedTasksPage({ devices }: { devices: DeviceInfo[] }) {
-  const [name, setName] = useState(""),
+  const nameInput = useRef<HTMLInputElement>(null);
+  const compactEditor = useMediaQuery("(max-width: 1120px)");
+  const [search, setSearch] = useState(""),
+    [name, setName] = useState(""),
     [appId, setAppId] = useState(""),
     [udids, setUdids] = useState<string[]>([]),
     [editing, setEditing] = useState<OperatorRecord | null>(null),
@@ -38,9 +44,18 @@ export function SavedTasksPage({ devices }: { devices: DeviceInfo[] }) {
     [busy, setBusy] = useState(false),
     [message, setMessage] = useState(""),
     [error, setError] = useState<string | null>(null);
+  const editorRef = useModalFocus<HTMLElement>(() => setForm(false), form && compactEditor, {
+    initialFocus: () => nameInput.current,
+  });
   const { data, error: loadError, loading, initialLoading, refreshing, load } = useAsyncList(readSavedTasks);
   const rows = data?.rows ?? [];
   const apps = data?.apps ?? [];
+  const appNames = new Map(apps.map((app) => [app.id, app.name]));
+  const query = search.trim().toLowerCase();
+  const visible = rows.filter((record) =>
+    `${record.name} ${appNames.get(String(record.data.appId)) ?? String(record.data.appId)}`
+      .toLowerCase().includes(query),
+  );
   const run = async (record: OperatorRecord) => {
     if (
       !(await requestConfirm({
@@ -72,7 +87,9 @@ export function SavedTasksPage({ devices }: { devices: DeviceInfo[] }) {
   return (
     <section className="operator-records">
       <header className="operator-toolbar">
-        <strong>{data !== undefined ? `${rows.length} tác vụ đã lưu` : "Tác vụ đã lưu"}</strong>
+        <input type="search" aria-label="Tìm tác vụ đã lưu" placeholder="Tìm tên hoặc ứng dụng…"
+          value={search} onChange={(event) => setSearch(event.target.value)} />
+        <strong>{data !== undefined ? `${visible.length} tác vụ đã lưu` : "Tác vụ đã lưu"}</strong>
         <div className="grow" />
         <button type="button" aria-label="Làm mới tác vụ đã lưu" title="Làm mới tác vụ đã lưu" disabled={loading} onClick={() => void load()}>
           <RefreshCw size={16} aria-hidden="true" />
@@ -101,7 +118,9 @@ export function SavedTasksPage({ devices }: { devices: DeviceInfo[] }) {
           Không tải được tác vụ đã lưu: {loadError}{data !== undefined && " · Đang giữ dữ liệu lần tải trước."}
         </StatusNotice>
       )}
-      {rows.length > 0 && <table aria-label="Tác vụ đã lưu" aria-busy={refreshing}>
+      <div className="operator-record-layout" data-editor-open={form}>
+      <div className="operator-record-main">
+      {visible.length > 0 && <table aria-label="Tác vụ đã lưu" aria-busy={refreshing}>
         <thead>
           <tr>
             <th>Tên tác vụ</th>
@@ -111,12 +130,11 @@ export function SavedTasksPage({ devices }: { devices: DeviceInfo[] }) {
           </tr>
         </thead>
         <tbody>
-          {rows.map((record) => (
+          {visible.map((record) => (
             <tr key={record.id}>
               <td>{record.name}</td>
               <td>
-                {apps.find((a) => a.id === record.data.appId)?.name ??
-                  String(record.data.appId)}
+                {appNames.get(String(record.data.appId)) ?? String(record.data.appId)}
               </td>
               <td>{String(record.data.appRevision)}</td>
               <td>
@@ -205,12 +223,23 @@ export function SavedTasksPage({ devices }: { devices: DeviceInfo[] }) {
       {!loading && !loadError && data !== undefined && rows.length === 0 && (
         <EmptyState compact title="Chưa có tác vụ đã lưu" hint="Lưu tác vụ để giữ ứng dụng, phiên bản và phạm vi thiết bị cho lần chạy sau." />
       )}
+      {rows.length > 0 && visible.length === 0 && (
+        <EmptyState compact title="Không có tác vụ khớp tìm kiếm" action={<button type="button" onClick={() => setSearch("")}>Xóa tìm kiếm</button>} />
+      )}
+      </div>
+      {form && compactEditor && <div className="operator-record-editor-backdrop" onMouseDown={(event) => {
+        if (event.target === event.currentTarget) setForm(false);
+      }} />}
       {form && (
-        <aside className="operator-record-editor">
-          <h3>{editing ? "Chỉnh tác vụ" : "Tác vụ mới"}</h3>
+        <aside ref={editorRef} className="operator-record-editor" role={compactEditor ? "dialog" : undefined}
+          aria-modal={compactEditor ? "true" : undefined} aria-label={editing ? "Chỉnh tác vụ" : "Tác vụ mới"}
+          tabIndex={compactEditor ? -1 : undefined}>
+          <header><strong>{editing ? "Chỉnh tác vụ" : "Tác vụ mới"}</strong>
+            <button type="button" aria-label="Đóng tác vụ" title="Đóng tác vụ" onClick={() => setForm(false)}><X size={17} /></button>
+          </header>
           <label>
             Tên
-            <input value={name} onChange={(e) => setName(e.target.value)} />
+            <input ref={nameInput} value={name} onChange={(e) => setName(e.target.value)} />
           </label>
           <label>
             Ứng dụng
@@ -242,7 +271,7 @@ export function SavedTasksPage({ devices }: { devices: DeviceInfo[] }) {
               </label>
             ))}
           </fieldset>
-          <button
+          <div className="operator-record-editor-actions"><button
             type="button"
             disabled={!name.trim() || !appId || !udids.length || busy}
             className="primary"
@@ -277,9 +306,10 @@ export function SavedTasksPage({ devices }: { devices: DeviceInfo[] }) {
           </button>
           <button type="button" onClick={() => setForm(false)}>
             Đóng
-          </button>
+          </button></div>
         </aside>
       )}
+      </div>
     </section>
   );
 }

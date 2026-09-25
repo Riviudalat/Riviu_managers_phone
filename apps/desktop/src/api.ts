@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import { readQueryClient } from "./readQuery";
+import { invalidateReadScope, readQueryClient } from "./readQuery";
 export interface GuiServiceConfig { enabled:boolean; baseUrl:string; model:string; maxRequests:number; }
 export interface GuiServiceStatus { config:GuiServiceConfig; running:boolean; providerReady:boolean; protocolVersion:number; lastError?:string|null; }
 export const guiServiceStatus=()=>invoke<GuiServiceStatus>("gui_service_status");
@@ -152,6 +152,8 @@ export async function retryStartup() {
 export async function listDevices() {
   return invoke<DeviceInfo[]>("list_devices");
 }
+
+export const interactionDraftSeeding = (request: import("./types").ThreadCampaignRequest, contexts: Record<string,string>) => invoke<Record<string,string[]>>("interaction_draft_seeding", {request,contexts});
 
 export async function listDeviceWorkStates() {
   return invoke<DeviceWorkState[]>("list_device_work_states");
@@ -882,20 +884,26 @@ export async function getDeviceMeta(udid: string) {
 /// Every phone this app has a record for, in one call — what the grid reads to label and
 /// order tiles. Phones nobody has edited have no row, so an untouched fleet answers empty.
 export async function listDeviceMetas() {
-  return readQueryClient.fetchQuery({ queryKey: ["deviceMetadata", "all"], queryFn: () => invoke<DeviceMeta[]>("list_device_metas") });
+  return readQueryClient.fetchQuery({ queryKey: ["deviceMetadata", "all"], staleTime: 2_000, queryFn: () => invoke<DeviceMeta[]>("list_device_metas") });
 }
 
 export async function saveDeviceMeta(meta: DeviceMeta) {
-  return invoke<void>("save_device_meta", { meta });
+  const result = await invoke<void>("save_device_meta", { meta });
+  await invalidateReadScope(["deviceMetadata"]);
+  return result;
 }
 
 export async function saveDeviceHandle(udid: string, expectedHandle: string, handle: string) {
-  return invoke<string>("save_device_handle", { udid, expectedHandle, handle });
+  const result = await invoke<string>("save_device_handle", { udid, expectedHandle, handle });
+  await invalidateReadScope(["deviceMetadata"]);
+  return result;
 }
 
 export type DeviceMetaChange = { field: "alias"; value: string } | { field: "number"; value: number | null };
 export async function patchDeviceMeta(udid: string, change: DeviceMetaChange) {
-  return invoke<DeviceMeta>("patch_device_meta", { udid, change });
+  const result = await invoke<DeviceMeta>("patch_device_meta", { udid, change });
+  await invalidateReadScope(["deviceMetadata"]);
+  return result;
 }
 
 export interface AccountReading {
@@ -1002,11 +1010,15 @@ export async function listSchedules() {
 }
 
 export async function saveSchedule(schedule: ScheduleItem) {
-  return invoke<ScheduleItem>("save_schedule", { schedule });
+  const result = await invoke<ScheduleItem>("save_schedule", { schedule });
+  await invalidateReadScope(["schedules", "script"]);
+  return result;
 }
 
 export async function deleteSchedule(id: string) {
-  return invoke<void>("delete_schedule", { id });
+  const result = await invoke<void>("delete_schedule", { id });
+  await invalidateReadScope(["schedules", "script"]);
+  return result;
 }
 
 /**
@@ -1092,11 +1104,44 @@ export type OperationStopResult = Omit<import("./generated-ipc").OperationStopRe
   state: "stopping" | "closed" | "needsAttention" | "failed";
   stopMarker?: string | null;
 };
-export function operationStop(operationId:string) { return invoke<OperationStopResult>("operation_stop",{operationId}); }
+export async function operationStop(operationId:string) {
+  const result = await invoke<OperationStopResult>("operation_stop",{operationId});
+  await Promise.all([
+    invalidateReadScope(["operationList"]),
+    invalidateReadScope(["operationQuery"]),
+    invalidateReadScope(["operationDetail", operationId]),
+    invalidateReadScope(["operationLog", operationId]),
+  ]);
+  return result;
+}
+/** Explicit new-run preparation: stop previous owners, preserve their effects, wait for release. */
+export async function operationPrepareDevices(udids:string[]) {
+  const result = await invoke<OperationStopResult>("operation_prepare_devices",{udids});
+  const refused = result.devices.filter(device => !device.closed);
+  if (refused.length) {
+    throw new Error(refused.map(device => `${device.udid}: ${device.message}`).join("\n"));
+  }
+  return result;
+}
 export function operationStopStatus(operationId:string) { return invoke<OperationStopResult|null>("operation_stop_status",{operationId}); }
 
 export function deviceActionCapabilities(udid: string) {
   return invoke<import("./generated-ipc").DeviceActionCapabilities>("device_action_capabilities", { udid });
+}
+
+export function deviceAppCandidates(udid: string, appKey = "tiktok") {
+  return invoke<import("./generated-ipc").DeviceAppChoices>("device_app_candidates", { udid, appKey });
+}
+
+export async function deviceAppSelect(udid: string, packageName: string, expectedRevision: number, appKey = "tiktok") {
+  const result = await invoke<import("./generated-ipc").DeviceAppChoices>("device_app_select", {
+    udid,
+    appKey,
+    package: packageName,
+    expectedRevision,
+  });
+  await invalidateReadScope(["deviceApp", udid, appKey]);
+  return result;
 }
 
 export function operationTraceExport(operationId: string, udid: string) {
@@ -1107,13 +1152,20 @@ export function publishSheetReadback(assignmentId: string, expectedRevision: num
   return invoke<import("./generated-ipc").PublishSheetReadback>("publish_sheet_readback", { assignmentId, expectedRevision });
 }
 
+export function publishSheetDiagnoseFailed(assignmentId: string, expectedRevision: number, startRow = 2) {
+  return invoke<import("./generated-ipc").PublishSheetFailedDiagnostic>("publish_sheet_diagnose_failed", {
+    assignmentId, expectedRevision, startRow,
+  });
+}
+
 export function publishDeviceGuards(udids: string[]) {
   return invoke<import("./types").PublishDeviceGuards>("publish_device_guards", { udids });
 }
 
-export async function publishRetryAssignment(assignmentId: string, confirmed: boolean) {
-  return invoke<void>("publish_retry_assignment", { assignmentId, confirmed });
+export async function publishRetryAssignment(assignmentId: string, confirmed: boolean, expectedRevision: number, requestId: string) {
+  return invoke<void>("publish_retry_assignment", { assignmentId, confirmed, expectedRevision, requestId });
 }
+export const publishRetrySheetAssignment=(assignmentId:string,expectedRevision:number)=>invoke<void>("publish_retry_sheet_assignment",{assignmentId,expectedRevision});
 
 /**
  * One operator confirmation for preflight through Sheet completion.
@@ -1286,6 +1338,26 @@ export async function interactionResolveLinks(rawText: string) {
   return invoke<TikTokLinkLine[]>("interaction_resolve_links", { rawText });
 }
 
+export interface SharedCommentLink {
+  postId: string;
+  commentId: string;
+  sourceUrl: string;
+}
+
+/** Internal interaction primitive; the UI does not expose a standalone capture button. */
+export async function interactionCommentLink(
+  campaignId: string,
+  assignmentId: string,
+  options: { udid?: string | null; captureUdid?: string | null } = {},
+) {
+  return invoke<SharedCommentLink>("interaction_comment_link", {
+    campaignId,
+    assignmentId,
+    udid: options.udid ?? null,
+    captureUdid: options.captureUdid ?? null,
+  });
+}
+
 /**
  * Plan a campaign without running it, and ask what the fleet could actually carry.
  *
@@ -1439,7 +1511,7 @@ export async function automationList(includeArchived = false) {
 }
 
 export async function automationGet(definitionId: string, revision: number) {
-  return readQueryClient.fetchQuery({ queryKey: ["automations", definitionId, revision], queryFn: () => invoke<AutomationDefinitionRecord | null>("automation_get", { definitionId, revision }) });
+  return readQueryClient.fetchQuery({ queryKey: ["automations", definitionId, revision], staleTime: Number.POSITIVE_INFINITY, queryFn: () => invoke<AutomationDefinitionRecord | null>("automation_get", { definitionId, revision }) });
 }
 
 export async function automationCreate(
@@ -1448,7 +1520,9 @@ export async function automationCreate(
   target: TargetRef,
   config: JsonValue,
 ) {
-  return invoke<AutomationDefinitionRecord>("automation_create", { name, kind, target, config });
+  const result = await invoke<AutomationDefinitionRecord>("automation_create", { name, kind, target, config });
+  await invalidateReadScope(["automations"]);
+  return result;
 }
 
 export async function automationRevise(
@@ -1457,16 +1531,20 @@ export async function automationRevise(
   target: TargetRef,
   config: JsonValue,
 ) {
-  return invoke<AutomationDefinitionRecord>("automation_revise", {
+  const result = await invoke<AutomationDefinitionRecord>("automation_revise", {
     definitionId,
     expectedRevision,
     target,
     config,
   });
+  await invalidateReadScope(["automations"]);
+  return result;
 }
 
 export async function automationArchive(definitionId: string) {
-  return invoke<void>("automation_archive", { definitionId });
+  const result = await invoke<void>("automation_archive", { definitionId });
+  await invalidateReadScope(["automations"]);
+  return result;
 }
 
 export async function automationScheduleList() {
@@ -1480,17 +1558,21 @@ export async function automationScheduleCreate(
   enabled: boolean,
   schedule: AutomationScheduleV1,
 ) {
-  return invoke<AutomationSchedule>("automation_schedule_create", {
+  const result = await invoke<AutomationSchedule>("automation_schedule_create", {
     name,
     definitionId,
     definitionRevision,
     enabled,
     schedule,
   });
+  await invalidateReadScope(["schedules", "automation"]);
+  return result;
 }
 
 export async function automationScheduleFromSettings(name: string, kind: AutomationKind, target: TargetRef, config: JsonValue, schedule: AutomationScheduleV1): Promise<AutomationSchedule> {
-  return invoke<AutomationSchedule>("automation_schedule_from_settings", { name, kind, target, config, schedule });
+  const result = await invoke<AutomationSchedule>("automation_schedule_from_settings", { name, kind, target, config, schedule });
+  await invalidateReadScope(["schedules", "automation"]);
+  return result;
 }
 
 export async function automationScheduleUpdate(
@@ -1502,7 +1584,7 @@ export async function automationScheduleUpdate(
   enabled: boolean,
   schedule: AutomationScheduleV1,
 ) {
-  return invoke<AutomationSchedule>("automation_schedule_update", {
+  const result = await invoke<AutomationSchedule>("automation_schedule_update", {
     scheduleId,
     expectedRevision,
     name,
@@ -1511,6 +1593,8 @@ export async function automationScheduleUpdate(
     enabled,
     schedule,
   });
+  await invalidateReadScope(["schedules", "automation"]);
+  return result;
 }
 
 export async function orchestrationList(includeArchived = false) {
@@ -1584,6 +1668,18 @@ export async function flowList(includeArchived = false) {
 
 export async function flowGet(id: string, revision: number | null = null) {
   return invoke<FlowRevisionRecord | null>("flow_get", { id, revision });
+}
+
+export async function flowLibraryGet(id: string) {
+  return invoke<FlowRevisionRecord | null>("flow_library_get", { id });
+}
+
+export async function flowLibraryPublish(id: string, revision: number, expectedPublishedRevision: number | null) {
+  return invoke<FlowRevisionRecord>("flow_library_publish", { id, revision, expectedPublishedRevision });
+}
+
+export async function flowLibraryUnpublish(id: string, expectedPublishedRevision: number) {
+  return invoke<void>("flow_library_unpublish", { id, expectedPublishedRevision });
 }
 
 export async function flowValidate(document: FlowDocumentV2) {

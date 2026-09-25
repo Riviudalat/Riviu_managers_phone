@@ -11,9 +11,12 @@ async fn bounded<T>(
     work: impl std::future::Future<Output = anyhow::Result<T>>,
 ) -> anyhow::Result<T> {
     read_sound(async {
-        tokio::time::timeout_at(deadline, work)
-            .await
-            .context("sound recovery deadline")?
+        tokio::time::timeout_at(deadline, work).await.map_err(|_| {
+            crate::publish_recovery::retryable_error(
+                "sound_load_timeout",
+                "TikTok sound recovery observation timed out; no Post was sent",
+            )
+        })?
     })
     .await
 }
@@ -156,12 +159,14 @@ async fn observe_rendered_sheet(
                 })
                 .count()
                 >= 4;
-        if require_rows && (observed.is_err() || !rows_ready) {
+        if observed.is_err() || !rows_ready {
             previous = None;
-            anyhow::ensure!(
-                Instant::now() < deadline,
-                "sound rows did not finish rendering"
-            );
+            if Instant::now() + POLL >= deadline {
+                if let Err(error) = observed {
+                    return Err(error);
+                }
+                anyhow::bail!("sound rows did not finish rendering");
+            }
             tokio::time::sleep(POLL).await;
             continue;
         }

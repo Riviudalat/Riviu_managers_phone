@@ -672,9 +672,9 @@ pub enum PublishScanError {
     NoBundles,
     #[error("publish folder contains duplicate bundle id: {0}")]
     DuplicateBundleId(String),
-    #[error("bundle {bundle} has no caption*.txt file")]
+    #[error("bundle {bundle} has no caption text file; add one .txt file")]
     MissingCaption { bundle: String },
-    #[error("bundle {bundle} has more than one caption*.txt file")]
+    #[error("bundle {bundle} has multiple possible caption files; keep one caption .txt file")]
     MultipleCaptions { bundle: String },
     #[error("bundle {bundle} has an empty caption: {path}")]
     EmptyCaption { bundle: String, path: String },
@@ -842,6 +842,8 @@ fn scan_bundle(
     let mut images = Vec::new();
     let mut videos = Vec::new();
     let mut captions = Vec::new();
+    let mut other_text = Vec::new();
+    let mut other_workbooks = Vec::new();
     let mut partner_files: Vec<std::path::PathBuf> = Vec::new();
     let mut notices = Vec::new();
     let mut ignored_partner_files = 0;
@@ -858,7 +860,7 @@ fn scan_bundle(
             continue;
         }
         let file_name = entry.file_name().to_string_lossy().to_string();
-        if file_name.starts_with('.') {
+        if file_name.starts_with('.') || file_name.starts_with("~$") {
             ignored_hidden_files += 1;
         } else if is_partner_file(&file_name) {
             // Still counted as "not an image or caption" — the manifest field keeps its
@@ -868,6 +870,10 @@ fn scan_bundle(
             partner_files.push(file_path);
         } else if is_caption_file(&file_name) {
             captions.push(file_path);
+        } else if file_name.to_ascii_lowercase().ends_with(".txt") {
+            other_text.push(file_path);
+        } else if file_name.to_ascii_lowercase().ends_with(".xlsx") {
+            other_workbooks.push(file_path);
         } else if is_supported_image(&file_name) {
             images.push(file_path);
         } else if is_supported_video(&file_name) {
@@ -881,6 +887,16 @@ fn scan_bundle(
         }
     }
 
+    // Explicit names keep their established meaning. Otherwise a single file of the
+    // right type is unambiguous, regardless of the exporter language/naming scheme.
+    // Multiple candidates still fail below rather than attaching the wrong content.
+    if captions.is_empty() {
+        captions = other_text;
+    }
+    if partner_files.is_empty() {
+        ignored_partner_files += other_workbooks.len();
+        partner_files = other_workbooks;
+    }
     if images.is_empty() && videos.is_empty() {
         return Err(PublishScanError::EmptyBundle {
             bundle: bundle_name,
@@ -922,14 +938,25 @@ fn scan_bundle(
         });
     }
 
+    let named_images = !images.is_empty() && images.iter().all(|p| numeric_prefix(p).is_none());
+    if named_images {
+        notices.push(PublishScanNotice {
+            severity: PublishScanSeverity::Warning,
+            path: path.display().to_string(),
+            message: "Ảnh không có số thứ tự ở đầu tên: sắp theo tên tự nhiên (ảnh 2 trước ảnh 10). Kiểm tra thứ tự trong phần xem trước; dùng 01, 02… để chỉ định thứ tự khác.".into(),
+        });
+    }
     let mut ordered = Vec::with_capacity(images.len());
     for (expected, image_path) in images.into_iter().enumerate() {
-        let order =
+        let expected_order = (expected + 1) as u32;
+        let order = if named_images {
+            expected_order
+        } else {
             numeric_prefix(&image_path).ok_or_else(|| PublishScanError::InvalidImageOrder {
                 bundle: bundle_name.clone(),
                 message: format!("{} thiếu tiền tố số", image_path.display()),
-            })?;
-        let expected_order = (expected + 1) as u32;
+            })?
+        };
         if order != expected_order {
             return Err(PublishScanError::InvalidImageOrder {
                 bundle: bundle_name.clone(),
@@ -969,6 +996,7 @@ fn scan_bundle(
         .map_err(|_| PublishScanError::InvalidCaptionEncoding {
             path: caption_path.display().to_string(),
         })?
+        .trim_start_matches('\u{feff}')
         .replace("\r\n", "\n")
         .replace('\r', "\n")
         .trim_end_matches('\n')
@@ -1184,7 +1212,12 @@ fn is_supported_video(name: &str) -> bool {
 
 fn is_caption_file(name: &str) -> bool {
     let lower = name.to_ascii_lowercase();
-    lower.starts_with("caption") && lower.ends_with(".txt")
+    lower.ends_with(".txt")
+        && (lower.starts_with("caption")
+            || lower
+                .trim_end_matches(".txt")
+                .split(['_', '-', ' ', '.'])
+                .any(|part| part == "caption"))
 }
 
 fn is_partner_file(name: &str) -> bool {
@@ -1720,6 +1753,92 @@ mod tests {
             Err(PublishAssignError::Mapping(
                 PublishPlanError::DuplicateUdid(_)
             ))
+        ));
+    }
+
+    #[test]
+    fn exporter_names_scan_with_caption_alias_and_arbitrary_workbook_name() {
+        let root = TempDir::new();
+        let bundle = root.path().join("Set_1");
+        fs::create_dir(&bundle).unwrap();
+        for n in (1..=10).rev() {
+            write_png(&bundle.join(format!("{n}_Featured.png")), [1, 2, 3]);
+        }
+        fs::write(
+            bundle.join("Tiktok_Caption.txt"),
+            "\u{feff}Nội dung\r\n#tag\r\n",
+        )
+        .unwrap();
+        fs::write(bundle.join("readme.txt"), "not the caption").unwrap();
+        fs::write(
+            bundle.join("DanhSach_DoiTac.xlsx"),
+            "invalid workbook fixture",
+        )
+        .unwrap();
+        fs::write(bundle.join("~$DanhSach_DoiTac.xlsx"), "Excel lock").unwrap();
+        let parent = scan_publish_folder(root.path(), PublishScanOptions::default()).unwrap();
+        let direct = scan_publish_folder(&bundle, PublishScanOptions::default()).unwrap();
+        assert_eq!(parent.bundles, direct.bundles);
+        assert_eq!(direct.bundles[0].caption, "Nội dung\n#tag");
+        assert_eq!(direct.bundles[0].images.len(), 10);
+        assert_eq!(direct.bundles[0].images[9].file_name, "10_Featured.png");
+        assert_eq!(direct.ignored_partner_files, 1);
+        assert!(direct
+            .notices
+            .iter()
+            .any(|n| n.path.ends_with("DanhSach_DoiTac.xlsx")
+                && n.message.contains("không đọc được")));
+        fs::write(bundle.join("caption.txt"), "another caption").unwrap();
+        assert!(matches!(
+            scan_publish_folder(&bundle, PublishScanOptions::default()),
+            Err(PublishScanError::MultipleCaptions { .. })
+        ));
+    }
+
+    #[test]
+    fn arbitrary_names_use_unique_text_and_natural_image_order_without_changing_source() {
+        let root = TempDir::new();
+        for name in ["Ảnh 10.png", "Ảnh 2.png", "Ảnh 1.png"] {
+            write_png(&root.path().join(name), [1, 2, 3]);
+        }
+        fs::write(root.path().join("Nội dung bài đăng.TXT"), "Đà Lạt").unwrap();
+        let result = scan_publish_folder(root.path(), PublishScanOptions::default()).unwrap();
+        let bundle = &result.bundles[0];
+        assert_eq!(bundle.caption, "Đà Lạt");
+        assert_eq!(
+            bundle
+                .images
+                .iter()
+                .map(|i| (i.file_name.as_str(), i.order))
+                .collect::<Vec<_>>(),
+            vec![("Ảnh 1.png", 1), ("Ảnh 2.png", 2), ("Ảnh 10.png", 3)]
+        );
+        assert!(result.notices.iter().any(|n| n.message.contains("thứ tự")));
+        let copied = copy_bundle_to_managed(bundle, &root.path().join("managed")).unwrap();
+        assert_eq!(
+            copied.images.iter().map(|i| &i.sha256).collect::<Vec<_>>(),
+            bundle.images.iter().map(|i| &i.sha256).collect::<Vec<_>>()
+        );
+        assert!(root.path().join("Ảnh 10.png").is_file());
+    }
+
+    #[test]
+    fn generic_caption_and_partner_candidates_refuse_ambiguity() {
+        let root = TempDir::new();
+        write_png(&root.path().join("01.png"), [1, 2, 3]);
+        fs::write(root.path().join("nội dung.txt"), "first").unwrap();
+        fs::write(root.path().join("ghi chú.txt"), "second").unwrap();
+        assert!(matches!(
+            scan_publish_folder(root.path(), PublishScanOptions::default()),
+            Err(PublishScanError::MultipleCaptions { .. })
+        ));
+        fs::remove_file(root.path().join("ghi chú.txt")).unwrap();
+        for name in ["danh sách.xlsx", "bảng khác.xlsx"] {
+            fs::write(root.path().join(name), "fixture").unwrap();
+        }
+        assert!(matches!(
+            scan_publish_folder(root.path(), PublishScanOptions::default()),
+            Err(PublishScanError::MultiplePartnerFiles { .. })
         ));
     }
 

@@ -12,7 +12,10 @@ pub(crate) async fn cleanup_verified_assignments(
     for candidate in candidates {
         if db
             .publish_campaign_request(&candidate.campaign_id)?
-            .is_none_or(|request| request.verification_contract_version != Some(1))
+            .is_none_or(|request| {
+                !request.network.is_implemented()
+                    || request.verification_contract_version != Some(1)
+            })
         {
             continue;
         }
@@ -29,6 +32,10 @@ pub(super) async fn cleanup_verified_assignment(
     events: &riviu_core::events::EventBus,
     candidate: &riviu_core::db::PendingPublishCleanup,
 ) -> anyhow::Result<bool> {
+    db.publish_campaign_request(&candidate.campaign_id)?
+        .context("publish campaign request not found")?
+        .network
+        .ensure_implemented()?;
     let Some(_permit) =
         db.try_publish_work(&candidate.udid, "cleanup", &candidate.assignment_id)?
     else {
