@@ -86,6 +86,11 @@ bốn tab mới chuyển Hot, không đợi nội dung For You. Giữ ngân sác
 Trên đúng 45.7.3/en ở 1080×2220, adapter ảnh dùng hai quan sát mới cùng phiên
 để chứng minh gạch chân Hot, tên và nghệ sĩ của từng hàng đầy đủ. Hàng hồng đã
 chọn, tên trùng và hàng bị cắt bị loại; trước chọn phải đọc lại cùng danh tính.
+Nếu bảng Hot đã lộ đủ XML trên Global 45.7.3/en, hai snapshot XML mới tăng
+generation và có cùng danh sách hàng hoàn chỉnh được đọc trước OCR. Nhánh này
+không cần OCR khi dịch vụ OCR báo 429; nó vẫn loại tên trùng/hàng bị cắt, kiểm
+app và phiên, rồi đọc lại cùng hàng trước khi tap. XML chưa đủ hoặc không ổn
+định thì tiếp tục đường ảnh/OCR cũ; không suy hàng từ ảnh hay tap theo vị trí.
 Nếu OCR không dựng được pool trong 60 giây, nhánh này xác nhận lại sheet bằng
 hai quan sát mới rồi dùng snapshot XML chỉ khi Hot đã chọn và hàng nhạc đầy đủ,
 ổn định. XML không rõ trả lỗi có thể retry trước Post, không tap hàng nào.

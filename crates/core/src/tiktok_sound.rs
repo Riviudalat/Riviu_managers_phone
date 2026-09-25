@@ -579,8 +579,26 @@ async fn observe_measured_sound_pool(
     plan: SoundPickerPlan,
     maximum: usize,
 ) -> anyhow::Result<ObservedSoundPool> {
+    anyhow::ensure!(
+        selection_recovery::measured(plan)
+            && plan.package == "com.zhiliaoapp.musically"
+            && plan.snapshot_layout().is_some(),
+        "direct sound XML proof is restricted to measured Global 45.7.3"
+    );
     let epoch = session.gui_session_epoch();
     anyhow::ensure!(!epoch.is_empty(), "sound sheet session missing");
+    // The measured 45.7.3 sheet can expose a complete Hot hierarchy even
+    // when local OCR is unavailable. Require two fresh, stable XML pools from
+    // this same app/session before returning; an incomplete root falls back
+    // to the existing visual route and never authorizes a row tap.
+    let direct = snapshot::observe_direct(session, plan, maximum).await;
+    match direct {
+        Ok(Some(pool)) => {
+            return checked_measured_sound_observation(session, plan, &epoch, Ok(pool)).await;
+        }
+        Err(error) if error.is::<SoundStopped>() => return Err(error),
+        _ => checked_measured_sound_observation(session, plan, &epoch, Ok(())).await?,
+    }
     let visual = visual::observe_initial(session, plan, maximum).await;
     match checked_measured_sound_observation(session, plan, &epoch, visual).await {
         Ok(pool) => return Ok(pool),
@@ -588,9 +606,8 @@ async fn observe_measured_sound_pool(
         Err(error) => return Err(error),
     }
 
-    // OCR must still prove the same sheet before XML can take over. The XML
-    // path itself requires a selected Hot tab and two complete, stable pools;
-    // it never selects a row on this fallback.
+    // If the direct XML probe failed to stabilize, OCR must prove the same
+    // sheet before a later XML read can take over.
     let sheet = selection_recovery::prove_sheet(session, plan).await;
     checked_measured_sound_observation(session, plan, &epoch, sheet).await?;
     let pool = tokio::time::timeout(

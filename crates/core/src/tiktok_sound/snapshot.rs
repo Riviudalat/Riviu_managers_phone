@@ -257,6 +257,46 @@ fn pool(xml: &str, plan: SoundPickerPlan, maximum: usize) -> anyhow::Result<Obse
     assemble_pool(plan, rows, titles, artists, choices, markers, maximum)
 }
 
+/// Probe only two fresh XML generations before spending time on visual OCR.
+/// Incomplete/loading roots are not candidates and do not authorize a tap.
+pub(super) async fn observe_direct(
+    session: &dyn UiSession,
+    plan: SoundPickerPlan,
+    maximum: usize,
+) -> anyhow::Result<Option<ObservedSoundPool>> {
+    let epoch = session.gui_session_epoch();
+    let mut previous: Option<(u64, ObservedSoundPool)> = None;
+    for _ in 0..2 {
+        check_wait()?;
+        anyhow::ensure!(
+            session.gui_session_epoch() == epoch,
+            "sound session replaced"
+        );
+        let source = match tokio::time::timeout(
+            Duration::from_secs(12),
+            read_sound(session.hierarchy_source_snapshot()),
+        )
+        .await
+        {
+            Ok(Ok(source)) => source,
+            Ok(Err(error)) if error.is::<SoundStopped>() => return Err(error),
+            _ => return Ok(None),
+        };
+        let current = match pool(&source.xml, plan, maximum) {
+            Ok(pool) => pool,
+            Err(_) => return Ok(None),
+        };
+        if let Some((generation, prior)) = &previous {
+            return Ok(
+                (source.generation > *generation && prior.stable_with(&current)).then_some(current),
+            );
+        }
+        previous = Some((source.generation, current));
+        tokio::time::sleep(POLL).await;
+    }
+    Ok(None)
+}
+
 pub(super) async fn observe(
     session: &dyn UiSession,
     plan: SoundPickerPlan,

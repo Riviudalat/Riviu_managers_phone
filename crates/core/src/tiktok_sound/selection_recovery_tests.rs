@@ -76,6 +76,9 @@ struct Session {
     loading_entry: bool,
     png: Vec<u8>,
     epoch_changed: Arc<AtomicBool>,
+    xml_override: Option<String>,
+    fixed_xml_generation: bool,
+    incomplete_direct_reads: bool,
 }
 impl Session {
     fn new() -> Self {
@@ -104,6 +107,9 @@ impl Session {
             }),
             png: bytes.into_inner(),
             epoch_changed: Arc::new(AtomicBool::new(false)),
+            xml_override: None,
+            fixed_xml_generation: false,
+            incomplete_direct_reads: false,
         }
     }
 }
@@ -184,6 +190,22 @@ impl UiSession for Session {
     }
     async fn hierarchy_source_snapshot(&self) -> anyhow::Result<crate::HierarchySourceSnapshot> {
         let n = self.reads.fetch_add(1, Ordering::Relaxed) + 1;
+        if self.incomplete_direct_reads && n <= 2 {
+            return Ok(crate::HierarchySourceSnapshot {
+                generation: n as u64,
+                xml: "<hierarchy/>".into(),
+            });
+        }
+        if let Some(xml) = &self.xml_override {
+            return Ok(crate::HierarchySourceSnapshot {
+                generation: if self.fixed_xml_generation {
+                    1
+                } else {
+                    n as u64
+                },
+                xml: xml.clone(),
+            });
+        }
         if self.loading_entry && self.frames.load(Ordering::Relaxed) < 4 {
             return Err(crate::driver::AccessibilityReadUnavailable {
                 message: "accessibility queried before rendered sound rows settled".into(),
@@ -261,6 +283,84 @@ impl UiSession for Session {
             clickable: true,
         }])
     }
+}
+
+struct Ocr429;
+#[async_trait::async_trait]
+impl GuiReasoner for Ocr429 {
+    async fn resolve(&self, _: GuiRequest) -> anyhow::Result<GuiResponse> {
+        unreachable!()
+    }
+
+    async fn ocr(&self, _: OcrRequest) -> anyhow::Result<OcrResponse> {
+        anyhow::bail!("gui_ocr_http_429")
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn measured_hot_xml_precedes_unavailable_ocr_and_keeps_duplicate_rows_unselectable() {
+    let mut session = Session::new();
+    session.xml_override = Some(
+        include_str!(
+            "../../fixtures/tiktok-publish/musically-45.7.3-en/hot-machine10-redacted.txt"
+        )
+        .into(),
+    );
+    session.ocr = Arc::new(Ocr429);
+    let pool = resume_open_sounds(&session, plan(), 5).await.unwrap();
+
+    assert_eq!(pool.candidates.len(), 1);
+    assert_eq!(pool.candidates[0].title, "Song One");
+    assert!(!pool.visual);
+    assert_eq!(session.frames.load(Ordering::Relaxed), 0);
+    assert_eq!(session.reads.load(Ordering::Relaxed), 2);
+    assert_eq!(session.taps.load(Ordering::Relaxed), 0);
+}
+
+#[tokio::test(start_paused = true)]
+async fn direct_sound_xml_refuses_stale_or_unselected_hot_before_ocr_fallback() {
+    let measured = include_str!(
+        "../../fixtures/tiktok-publish/musically-45.7.3-en/hot-machine10-redacted.txt"
+    );
+    for (xml, fixed_generation) in [
+        (measured.to_string(), true),
+        (
+            measured.replace(
+                "text=\"Hot\" selected=\"true\"",
+                "text=\"Hot\" selected=\"false\"",
+            ),
+            false,
+        ),
+    ] {
+        let mut session = Session::new();
+        session.xml_override = Some(xml);
+        session.fixed_xml_generation = fixed_generation;
+        session.ocr = Arc::new(Ocr429);
+        let error = resume_open_sounds(&session, plan(), 5).await.unwrap_err();
+        assert!(format!("{error:#}").contains("gui_ocr_http_429"));
+        assert_eq!(session.taps.load(Ordering::Relaxed), 0);
+        assert_eq!(session.backs.load(Ordering::Relaxed), 0);
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn direct_sound_xml_rejects_changed_foreground_and_other_builds() {
+    let mut session = Session::new();
+    session.xml_override = Some(
+        include_str!(
+            "../../fixtures/tiktok-publish/musically-45.7.3-en/hot-machine10-redacted.txt"
+        )
+        .into(),
+    );
+    session.changed_app = true;
+    let error = resume_open_sounds(&session, plan(), 5).await.unwrap_err();
+    assert!(format!("{error:#}").contains("sound app changed"));
+    assert_eq!(session.taps.load(Ordering::Relaxed), 0);
+    let trill = SoundPickerPlan::resolve("com.ss.android.ugc.trill", "en", "38.3.2").unwrap();
+    assert!(!selection_recovery::measured(trill));
+    let global_other =
+        SoundPickerPlan::resolve("com.zhiliaoapp.musically", "en", "46.2.1").unwrap();
+    assert!(!selection_recovery::measured(global_other));
 }
 
 struct LoadingOcr {
@@ -501,7 +601,8 @@ async fn sheet_resume_does_not_treat_one_missing_tab_frame_as_editor() {
 
     resume_open_sounds(&session, plan(), 5).await.unwrap();
 
-    assert!(session.frames.load(Ordering::Relaxed) >= 3);
+    assert_eq!(session.frames.load(Ordering::Relaxed), 0);
+    assert!(session.reads.load(Ordering::Relaxed) >= 2);
     assert_eq!(session.taps.load(Ordering::Relaxed), 0);
     assert_eq!(session.backs.load(Ordering::Relaxed), 0);
 }
@@ -535,6 +636,7 @@ async fn loaded_sheet_uses_proven_hierarchy_rows_when_ocr_cannot_read_them() {
 async fn replaced_session_during_sound_proof_retries_from_fresh_sheet_without_tapping() {
     let mut session = Session::new();
     session.read_failure = false;
+    session.incomplete_direct_reads = true;
     session.png =
         include_bytes!("../../fixtures/tiktok-publish/musically-45.7.3-en/hot-visual.png").to_vec();
     session.ocr = Arc::new(SwitchEpochOnSheetProofOcr {
@@ -675,7 +777,7 @@ async fn sheet_resume_fails_closed_when_only_editor_xml_is_visible() {
     assert!(session.frames.load(Ordering::Relaxed) > 2);
     assert_eq!(session.taps.load(Ordering::Relaxed), 0);
     assert_eq!(session.backs.load(Ordering::Relaxed), 1);
-    assert_eq!(session.reads.load(Ordering::Relaxed), 0);
+    assert_eq!(session.reads.load(Ordering::Relaxed), 1);
 }
 fn plan() -> SoundPickerPlan {
     SoundPickerPlan::resolve("com.zhiliaoapp.musically", "en", "45.7.3").unwrap()

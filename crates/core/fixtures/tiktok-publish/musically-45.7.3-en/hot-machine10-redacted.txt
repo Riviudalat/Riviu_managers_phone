@@ -1,0 +1,26 @@
+<hierarchy rotation="0">
+  <node package="com.zhiliaoapp.musically" bounds="[0,0][1080,2094]">
+    <node package="com.zhiliaoapp.musically" resource-id="com.zhiliaoapp.musically:id/wrv" text="Hot" selected="true" enabled="true" bounds="[43,1117][111,1167]"/>
+    <node package="com.zhiliaoapp.musically" resource-id="com.zhiliaoapp.musically:id/wrv" text="For You" selected="false" enabled="true" bounds="[175,1117][313,1167]"/>
+    <node package="com.zhiliaoapp.musically" resource-id="com.zhiliaoapp.musically:id/wrv" text="Favorites" selected="false" enabled="true" bounds="[377,1117][545,1167]"/>
+    <node package="com.zhiliaoapp.musically" resource-id="com.zhiliaoapp.musically:id/wrv" text="Recent" selected="false" enabled="true" bounds="[609,1117][740,1167]"/>
+    <node package="com.zhiliaoapp.musically" resource-id="com.zhiliaoapp.musically:id/viewpager_container" bounds="[0,1201][1080,1931]">
+      <node package="com.zhiliaoapp.musically" resource-id="com.zhiliaoapp.musically:id/vertical_item_music_new_rl" bounds="[68,1348][1080,1506]">
+        <node package="com.zhiliaoapp.musically" resource-id="com.zhiliaoapp.musically:id/title" text="Song One" enabled="true" bounds="[267,1378][980,1431]"/>
+        <node package="com.zhiliaoapp.musically" resource-id="com.zhiliaoapp.musically:id/z3k" text="Artist One" bounds="[267,1436][673,1475]"/>
+      </node>
+      <node package="com.zhiliaoapp.musically" resource-id="com.zhiliaoapp.musically:id/vertical_item_music_new_rl" bounds="[68,1506][1080,1664]">
+        <node package="com.zhiliaoapp.musically" resource-id="com.zhiliaoapp.musically:id/title" text="Duplicate Song" enabled="true" bounds="[267,1536][708,1589]"/>
+        <node package="com.zhiliaoapp.musically" resource-id="com.zhiliaoapp.musically:id/z3k" text="Artist Two" bounds="[267,1594][536,1633]"/>
+      </node>
+      <node package="com.zhiliaoapp.musically" resource-id="com.zhiliaoapp.musically:id/vertical_item_music_new_rl" bounds="[68,1664][1080,1822]">
+        <node package="com.zhiliaoapp.musically" resource-id="com.zhiliaoapp.musically:id/title" text="Duplicate Song" enabled="true" bounds="[267,1694][708,1747]"/>
+        <node package="com.zhiliaoapp.musically" resource-id="com.zhiliaoapp.musically:id/z3k" text="Artist Three" bounds="[267,1752][757,1791]"/>
+      </node>
+      <node package="com.zhiliaoapp.musically" resource-id="com.zhiliaoapp.musically:id/vertical_item_music_new_rl" bounds="[68,1822][1080,1931]">
+        <node package="com.zhiliaoapp.musically" resource-id="com.zhiliaoapp.musically:id/title" text="Clipped Song" enabled="true" bounds="[267,1852][736,1905]"/>
+        <node package="com.zhiliaoapp.musically" resource-id="com.zhiliaoapp.musically:id/z3k" text="Clipped Artist" bounds="[267,1910][691,1931]"/>
+      </node>
+    </node>
+  </node>
+</hierarchy>
