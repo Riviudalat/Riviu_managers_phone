@@ -1155,6 +1155,17 @@ export async function publishRetryAssignment(assignmentId: string, confirmed: bo
 }
 export const publishRetrySheetAssignment=(assignmentId:string,expectedRevision:number)=>invoke<void>("publish_retry_sheet_assignment",{assignmentId,expectedRevision});
 
+export function publishCleanupVerifiedAssignment(assignmentId: string, expectedRevision: number) {
+  return invoke<{
+    assignmentId: string;
+    campaignId: string;
+    udid: string;
+    revision: number;
+    state: "cleaned" | "pending";
+    proof: { publicationVerified: true; postUrl: string; cleanupState: "cleaned" | "notCleaned"; checkedAt: string | null };
+  }>("publish_cleanup_verified_assignment", { assignmentId, expectedRevision });
+}
+
 /**
  * One operator confirmation for preflight through Sheet completion.
  *

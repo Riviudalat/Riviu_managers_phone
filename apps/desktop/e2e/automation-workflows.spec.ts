@@ -178,7 +178,7 @@ test("publish monitor keeps partial delivery actionable and shows evidence at fl
   expect(await page.evaluate(() => (window as unknown as { __AUTOMATION_CALLS__: unknown[] }).__AUTOMATION_CALLS__)).toEqual([]);
 });
 
-test("publish Sheet toggle is keyboard accessible and fits both workspace sizes", async ({ page }) => {
+test("publish mandatory Sheet status fits both workspace sizes and blocks unconnected dispatch", async ({ page }) => {
   await installTauriMock(page, { androidRoster: true });
   await page.addInitScript(() => {
     const w = window as unknown as { __TAURI_INTERNALS__: { invoke: (command: string, args: Record<string, unknown>) => Promise<unknown> }; __PUBLISH_TOGGLE_EFFECTS__: string[] };
@@ -196,36 +196,26 @@ test("publish Sheet toggle is keyboard accessible and fits both workspace sizes"
   await page.getByRole("textbox", { name: "Thư mục nguồn" }).fill("C:/toggle");
   await page.getByRole("button", { name: "Quét", exact: true }).click();
   await expect(page.getByRole("checkbox", { name: "Chọn Bài thử" })).toBeVisible();
-  await page.locator(".pq-run-options > summary").focus();
-  await page.keyboard.press("Enter");
   const toggle = page.getByRole("checkbox", { name: "Ghi kết quả lên Sheet" });
-  await expect(toggle).not.toBeChecked();
-  await toggle.focus();
-  await page.keyboard.press("Space");
-  await expect(toggle).toBeChecked();
-  await toggle.focus();
-  await page.keyboard.press("Space");
-  await expect(toggle).not.toBeChecked();
-  await expect(page.getByText("Sheet chờ cấu hình", { exact: true })).toHaveCount(0);
+  await expect(toggle).toHaveCount(0);
+  const status = page.locator(".pq-run-options");
+  await expect(status).toHaveText("Sheet bật · Dọn bản chuyển bật");
   await expect(page.getByRole("button", { name: "Kiểm tra & đăng", exact: true })).toBeDisabled();
   for (const viewport of [{ width: 1440, height: 900 }, { width: 820, height: 560 }]) {
     await page.setViewportSize(viewport);
-    await toggle.scrollIntoViewIfNeeded();
-    const geometry = await toggle.evaluate((input) => {
-      const box = input.getBoundingClientRect();
-      const text = [...input.parentElement!.childNodes].find(node => node.nodeType === Node.TEXT_NODE && node.textContent?.trim());
-      if (!text) throw new Error("Visible checkbox label text missing");
-      const range = document.createRange(); range.selectNodeContents(text);
-      const label = range.getBoundingClientRect();
-      return { width: box.width, height: box.height, x: box.right, labelX: label.left, deltaY: Math.abs(box.top + box.height / 2 - label.top - label.height / 2) };
+    await status.scrollIntoViewIfNeeded();
+    const geometry = await status.evaluate((node) => {
+      const box = node.getBoundingClientRect();
+      return { width: box.width, height: box.height, right: box.right, left: box.left,
+        scrollWidth: node.scrollWidth, clientWidth: node.clientWidth };
     });
-    expect(geometry.width).toBeGreaterThanOrEqual(14);
-    expect(geometry.width).toBeLessThanOrEqual(18);
-    expect(geometry.height).toBe(geometry.width);
-    expect(geometry.labelX).toBeGreaterThan(geometry.x);
-    expect(geometry.deltaY).toBeLessThan(2);
+    expect(geometry.width).toBeGreaterThan(0);
+    expect(geometry.height).toBeGreaterThan(0);
+    expect(geometry.left).toBeGreaterThanOrEqual(0);
+    expect(geometry.right).toBeLessThanOrEqual(viewport.width);
+    expect(geometry.scrollWidth).toBeLessThanOrEqual(geometry.clientWidth);
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
-    await page.screenshot({ path: test.info().outputPath(`publish-sheet-off-${viewport.width}.png`), fullPage: true });
+    await page.screenshot({ path: test.info().outputPath(`publish-sheet-required-${viewport.width}.png`), fullPage: true });
   }
   expect(await page.evaluate(() => (window as unknown as { __PUBLISH_TOGGLE_EFFECTS__: string[] }).__PUBLISH_TOGGLE_EFFECTS__)).toEqual([]);
 });

@@ -1,6 +1,39 @@
 use super::*;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+struct ManualScope(PathBuf);
+
+impl Drop for ManualScope {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+fn manual_policy(
+    campaign: &str,
+    udid: &str,
+    cleanup: bool,
+) -> (crate::dev_acceptance::DevAcceptancePolicy, ManualScope) {
+    let path = std::env::temp_dir().join(format!("manual-cleanup-{}.json", Uuid::new_v4()));
+    std::fs::write(
+        &path,
+        serde_json::to_vec(&serde_json::json!({
+            "activationId": "cleanup-test", "campaignIds": [campaign], "deviceIds": [udid],
+            "capabilities": {"publishCleanup": cleanup}
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    (
+        crate::dev_acceptance::DevAcceptancePolicy::from_parts(
+            true,
+            Some(path.clone()),
+            Some(Arc::from("cleanup-test")),
+        ),
+        ManualScope(path),
+    )
+}
+
 #[derive(Default)]
 struct CleanupDriver {
     deletes: AtomicUsize,
@@ -258,6 +291,118 @@ async fn stale_or_unverified_assignment_never_deletes_media() {
     );
     assert_eq!(driver.deletes.load(Ordering::SeqCst), 0);
     assert_eq!(control.current_work_owner("phone"), None);
+    drop(db);
+    let _ = std::fs::remove_file(path);
+}
+
+#[tokio::test]
+async fn manual_cleanup_is_exact_scoped_and_returns_only_redacted_readback() {
+    let (db, path, id) = fixture();
+    let campaign = db.publication_campaign_id(&id).unwrap().unwrap();
+    let revision = db.publish_assignment_revision(&id).unwrap();
+    let (policy, _scope) = manual_policy(&campaign, "phone", true);
+    let driver = Arc::new(CleanupDriver::default());
+    let control = control(driver.clone());
+    let events = riviu_core::events::EventBus::new(16);
+    let result = manual_cleanup_verified_assignment(&policy, &control, &db, &events, &id, revision)
+        .await
+        .unwrap();
+    assert_eq!(result["state"], "cleaned");
+    assert_eq!(result["proof"]["publicationVerified"], true);
+    assert_eq!(result["proof"]["cleanupState"], "cleaned");
+    assert!(!result.to_string().contains("nativeProof"));
+    assert!(!result.to_string().contains("riviu-fixture-aa"));
+    assert_eq!(driver.deletes.load(Ordering::SeqCst), 1);
+    let repeat = manual_cleanup_verified_assignment(
+        &policy,
+        &control,
+        &db,
+        &events,
+        &id,
+        db.publish_assignment_revision(&id).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(repeat["state"], "cleaned");
+    assert_eq!(driver.deletes.load(Ordering::SeqCst), 1);
+    drop(db);
+    let _ = std::fs::remove_file(path);
+}
+
+#[tokio::test]
+async fn manual_cleanup_rejects_old_scope_stale_revision_and_unverified_post() {
+    let (db, path, id) = fixture();
+    let campaign = db.publication_campaign_id(&id).unwrap().unwrap();
+    let revision = db.publish_assignment_revision(&id).unwrap();
+    let driver = Arc::new(CleanupDriver::default());
+    let control = control(driver.clone());
+    let events = riviu_core::events::EventBus::new(16);
+    let (old_policy, _scope) = manual_policy(&campaign, "phone", false);
+    assert!(
+        manual_cleanup_verified_assignment(&old_policy, &control, &db, &events, &id, revision,)
+            .await
+            .is_err()
+    );
+    let (policy, _scope) = manual_policy(&campaign, "phone", true);
+    assert!(
+        manual_cleanup_verified_assignment(&policy, &control, &db, &events, &id, revision - 1,)
+            .await
+            .is_err()
+    );
+    let nonmanual = crate::dev_acceptance::DevAcceptancePolicy::from_parts(false, None, None);
+    assert!(
+        manual_cleanup_verified_assignment(&nonmanual, &control, &db, &events, &id, revision,)
+            .await
+            .is_err()
+    );
+    db.update_publish_assignment_state(
+        &id,
+        riviu_core::PublishCampaignState::Verifying,
+        None,
+        None,
+    )
+    .unwrap();
+    assert!(manual_cleanup_verified_assignment(
+        &policy,
+        &control,
+        &db,
+        &events,
+        &id,
+        db.publish_assignment_revision(&id).unwrap(),
+    )
+    .await
+    .is_err());
+    assert_eq!(driver.deletes.load(Ordering::SeqCst), 0);
+    drop(db);
+    let _ = std::fs::remove_file(path);
+}
+
+#[tokio::test]
+async fn immediate_nested_native_cleanup_reads_cleaned_without_deleting_again() {
+    let (db, path, id) = fixture();
+    db.update_publish_assignment_state(
+        &id, riviu_core::PublishCampaignState::Succeeded, None,
+        Some(&serde_json::json!({
+            "post":{"state":"posted","publicationVerified":true,"postUrl":"https://www.tiktok.com/@fixture/photo/123","importId":"riviu-fixture-aa"},
+            "cleanup":{"state":"kept","reason":"post_verification_pending","importId":"riviu-fixture-aa",
+                "value":{"state":"cleaned","importId":"riviu-fixture-aa"}}
+        }).to_string()),
+    ).unwrap();
+    let campaign = db.publication_campaign_id(&id).unwrap().unwrap();
+    let (policy, _scope) = manual_policy(&campaign, "phone", true);
+    let driver = Arc::new(CleanupDriver::default());
+    let result = manual_cleanup_verified_assignment(
+        &policy,
+        &control(driver.clone()),
+        &db,
+        &riviu_core::events::EventBus::new(16),
+        &id,
+        db.publish_assignment_revision(&id).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(result["state"], "cleaned");
+    assert_eq!(driver.deletes.load(Ordering::SeqCst), 0);
     drop(db);
     let _ = std::fs::remove_file(path);
 }

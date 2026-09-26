@@ -42,16 +42,12 @@ export interface PublishWizardProps {
   preflight: PublishPreflightReport | null;
   preflightError: string | null;
   sound: PublishSoundPolicy;
-  sheet: boolean;
-  cleanup: boolean;
   runAt: string;
   onSource: (path: string) => void;
   onScan: (path: string) => Promise<void>;
   onSelect: (ids: string[]) => void;
   onAssign: (value: Record<string, string>) => void;
   onCaption: (id: string, value: string) => void;
-  onSheet: (value: boolean) => void;
-  onCleanup: (value: boolean) => void;
   onRunAt: (value: string) => void;
   onPreflight: () => Promise<void>;
   onExecute: () => Promise<void>;
@@ -511,15 +507,7 @@ export function PublishWizard(p: PublishWizardProps) {
               </fieldset>
               <fieldset>
                 <legend>Báo cáo</legend>
-                <label>
-                  <input
-                    type="checkbox"
-                    checked={p.sheet}
-                    disabled={locked}
-                    onChange={(e) => p.onSheet(e.target.checked)}
-                  />{" "}
-                  Ghi kết quả lên Sheet
-                </label>
+                <p>Ghi kết quả lên Sheet</p>
                 <button
                   type="button"
                   className="ghost pw-detail-link"
@@ -530,18 +518,7 @@ export function PublishWizard(p: PublishWizardProps) {
               </fieldset>
               <fieldset>
                 <legend>Sau khi đăng</legend>
-                <label>
-                  <input
-                    type="checkbox"
-                    checked={p.cleanup}
-                    disabled={locked}
-                    onChange={(e) => p.onCleanup(e.target.checked)}
-                  />{" "}
-                  Xóa ảnh đã chuyển trên máy
-                </label>
-                <small>
-                  Chỉ xóa bản chuyển sau khi xác nhận đăng thành công.
-                </small>
+                <p>Xóa ảnh đã chuyển trên máy sau khi xác minh bài đăng.</p>
               </fieldset>
             </div>
             <ReviewList
@@ -809,14 +786,9 @@ export function PublishWizard(p: PublishWizardProps) {
             </p>
           )}
           <p className="pw-run-order">
-            Mở TikTok → Chọn nội dung → Chọn nhạc → Đăng → Lấy liên kết
-            {p.sheet ? " → Sheet" : ""}
+            Mở TikTok → Chọn nội dung → Chọn nhạc → Đăng → Lấy liên kết → Sheet
           </p>
-          <p>
-            {p.cleanup
-              ? "Xóa bản chuyển sau khi xác nhận đăng thành công."
-              : "Giữ nội dung đã chuyển trên điện thoại."}
-          </p>
+          <p>Xóa bản chuyển sau khi xác minh bài đăng thành công.</p>
         </PublishDialog>
       )}
     </div>

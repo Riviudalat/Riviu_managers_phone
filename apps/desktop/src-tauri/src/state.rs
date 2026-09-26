@@ -1580,7 +1580,7 @@ impl AppState {
         // A submitted post may finish uploading after its command returns or after restart.
         // Recover only its identity/link, inside the same per-device ownership as the UI.
         // No external watcher, global app-closed check, or second Post is involved.
-        {
+        if !self.dev_acceptance.automatic_device_workers_frozen() {
             let db = self.db.clone();
             let control = self.control.clone();
             let events = self.events.clone();
@@ -2962,6 +2962,21 @@ mod tests {
     fn manual_acceptance_routes_all_automatic_effects_through_one_policy() {
         let source = include_str!("state.rs");
         let production = &source[..source.find("mod tests {").expect("test module")];
+        let verifier = production
+            .split("// A submitted post may finish uploading after its command returns or after restart.")
+            .nth(1)
+            .expect("publish verification worker");
+        assert!(
+            verifier
+                .split(
+                    "// No external watcher, global app-closed check, or second Post is involved."
+                )
+                .nth(1)
+                .expect("publish verification scope")
+                .trim_start()
+                .starts_with("if !self.dev_acceptance.automatic_device_workers_frozen() {"),
+            "manual acceptance must not launch a verifier before explicit scoped IPC"
+        );
         assert!(production.contains("acceptance.schedules_frozen()"));
         assert!(production
             .contains(".allows_any(crate::dev_acceptance::AcceptanceCapability::PublishSchedule)"));

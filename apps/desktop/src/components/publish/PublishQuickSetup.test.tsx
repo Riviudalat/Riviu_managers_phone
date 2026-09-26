@@ -8,8 +8,23 @@ const row = { assignmentId: "pending-a", campaignId: "campaign-a", updatedAt: "2
 const guards: PublishDeviceGuards = { a: { blocking: [row], linkReview: [] }, b: { blocking: [], linkReview: [] } };
 function props(): PublishWizardProps {
   const bundles = ["one", "two"].map(id => ({ id, name: id, sourcePath: id, mediaKind: "image" as const, images: [], captionPath: "caption", caption: "Caption", captionSha256: id, totalBytes: 1 }));
-  return { sourceRoot: "fixture", manifest: { sourceRoot: "fixture", scannedAt: "now", bundles, notices: [], ignoredPartnerFiles: 0, ignoredHiddenFiles: 0 }, selectedIds: ["one"], assignments: { one: "a" }, captions: {}, devices: ["a", "b"].map(udid => ({ udid, name: udid, platform: "android", model: "test", osVersion: "9", connection: "usb", status: "ready", wdaReady: true })), metas: new Map(), eligible: ["a", "b"], busy: false, scanning: false, preflightLoading: false, preflight: null, preflightError: null, sound: { kind: "default" }, sheet: false, cleanup: false, runAt: "", onSource: vi.fn(), onScan: vi.fn(), onSelect: vi.fn(), onAssign: vi.fn(), onCaption: vi.fn(), onSheet: vi.fn(), onCleanup: vi.fn(), onRunAt: vi.fn(), onPreflight: vi.fn(), onExecute: vi.fn(), onHistory: vi.fn(), settings: null };
+  return { sourceRoot: "fixture", manifest: { sourceRoot: "fixture", scannedAt: "now", bundles, notices: [], ignoredPartnerFiles: 0, ignoredHiddenFiles: 0 }, selectedIds: ["one"], assignments: { one: "a" }, captions: {}, devices: ["a", "b"].map(udid => ({ udid, name: udid, platform: "android", model: "test", osVersion: "9", connection: "usb", status: "ready", wdaReady: true })), metas: new Map(), eligible: ["a", "b"], busy: false, scanning: false, preflightLoading: false, preflight: null, preflightError: null, sound: { kind: "default" }, runAt: "", onSource: vi.fn(), onScan: vi.fn(), onSelect: vi.fn(), onAssign: vi.fn(), onCaption: vi.fn(), onRunAt: vi.fn(), onPreflight: vi.fn(), onExecute: vi.fn(), onHistory: vi.fn(), settings: null };
 }
+
+it("keeps Sheet delivery and verified media cleanup mandatory for new posts", () => {
+  render(<PublishQuickSetup {...props()} />);
+  expect(screen.getByText(/Sheet bật · Dọn bản chuyển bật/)).toBeVisible();
+  expect(screen.queryByRole("checkbox", { name: "Ghi kết quả lên Sheet" })).toBeNull();
+  expect(screen.queryByRole("checkbox", { name: "Xóa bản chuyển sau khi đăng thành công" })).toBeNull();
+});
+it("renders a shared blocker once beside the disabled publish command without an empty notice band", () => {
+  const reason = "Kiểm tra và xác minh link Sheet trước khi ghi kết quả.";
+  render(<PublishQuickSetup {...props()} blockingReason={reason} />);
+  expect(screen.getAllByText(reason)).toHaveLength(1);
+  expect(screen.getByRole("button", { name: "Kiểm tra & đăng" })).toBeDisabled();
+  expect(screen.getByRole("button", { name: "Kiểm tra & đăng" })).toHaveAttribute("aria-describedby", "publish-check-reason");
+  expect(screen.queryByLabelText("Thông báo thiết lập đăng bài")).toBeNull();
+});
 beforeEach(() => {
   if (!HTMLDialogElement.prototype.showModal) Object.defineProperty(HTMLDialogElement.prototype, "showModal", { configurable: true, writable: true, value() {} });
   if (!HTMLDialogElement.prototype.close) Object.defineProperty(HTMLDialogElement.prototype, "close", { configurable: true, writable: true, value() {} });

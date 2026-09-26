@@ -185,6 +185,37 @@ impl Database {
         Ok(())
     }
 
+    /// Manual acceptance must not reopen obligations outside its frozen assignments.
+    pub fn configure_scoped_bound_sheet_delivery(
+        &self,
+        fingerprint: &str,
+        now_ms: i64,
+        assignment_ids: &[String],
+    ) -> anyhow::Result<()> {
+        if assignment_ids.is_empty() {
+            return Ok(());
+        }
+        let mut conn = self.conn()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        for id in assignment_ids {
+            tx.execute(
+                "UPDATE publish_sheet_outbox SET next_attempt_at_ms=?3 WHERE assignment_id=?1 AND state<>'sent'
+                 AND delivery_target_json IS NOT NULL AND EXISTS(
+                   SELECT 1 FROM publish_sheet_sync_state s WHERE s.assignment_id=?1
+                   AND s.connection_fingerprint IS NOT ?2)",
+                params![id, fingerprint, now_ms],
+            )?;
+            tx.execute(
+                "UPDATE publish_sheet_sync_state SET connection_fingerprint=?2,report_next_attempt_at_ms=?3,
+                 report_attempts=0,report_last_error=NULL WHERE assignment_id=?1
+                 AND connection_fingerprint IS NOT ?2",
+                params![id, fingerprint, now_ms],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
     /// Both manual delivery and the sweeper acquire here. At most two HTTP requests,
     /// including at most one report, can hold a live claim across the database.
     pub fn claim_bound_sheet_delivery(
@@ -744,6 +775,70 @@ mod tests {
             "1"
         );
         assert!(claim(&f.db, SheetDeliveryKind::Canonical, Some("history"), 3).is_none());
+    }
+
+    #[test]
+    fn scoped_connection_change_preserves_unselected_sheet_obligations() {
+        let f = Fixture::new();
+        let selected = f.report();
+        let other = f.report();
+        f.canonical(&selected, true);
+        f.canonical(&other, true);
+        f.db.configure_bound_sheet_delivery("old-connection", 1)
+            .unwrap();
+        let conn = f.db.conn().unwrap();
+        for id in [&selected, &other] {
+            conn.execute(
+                "UPDATE publish_sheet_outbox SET next_attempt_at_ms=NULL WHERE assignment_id=?1",
+                [id],
+            )
+            .unwrap();
+            conn.execute(
+                "UPDATE publish_sheet_sync_state SET report_next_attempt_at_ms=NULL,report_attempts=3,report_last_error='paused' WHERE assignment_id=?1",
+                [id],
+            )
+            .unwrap();
+        }
+        drop(conn);
+
+        f.db.configure_scoped_bound_sheet_delivery(
+            "new-connection",
+            5,
+            std::slice::from_ref(&selected),
+        )
+        .unwrap();
+        let conn = f.db.conn().unwrap();
+        for (id, expected_due, expected_fingerprint, expected_attempts) in [
+            (&selected, Some(5), "new-connection", 0),
+            (&other, None, "old-connection", 3),
+        ] {
+            let due: Option<i64> = conn
+                .query_row(
+                    "SELECT next_attempt_at_ms FROM publish_sheet_outbox WHERE assignment_id=?1",
+                    [id],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            let (fingerprint, report_due, attempts, error): (String, Option<i64>, i64, Option<String>) = conn
+                .query_row(
+                    "SELECT connection_fingerprint,report_next_attempt_at_ms,report_attempts,report_last_error FROM publish_sheet_sync_state WHERE assignment_id=?1",
+                    [id],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                )
+                .unwrap();
+            assert_eq!(due, expected_due);
+            assert_eq!(fingerprint, expected_fingerprint);
+            assert_eq!(report_due, expected_due);
+            assert_eq!(attempts, expected_attempts);
+            assert_eq!(
+                error.as_deref(),
+                if expected_due.is_some() {
+                    None
+                } else {
+                    Some("paused")
+                }
+            );
+        }
     }
 
     #[test]

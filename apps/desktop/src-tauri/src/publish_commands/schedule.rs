@@ -127,6 +127,7 @@ async fn prepare_schedule(
     Vec<preflight::PreparedPublishPreflight>,
 )> {
     validate_schedule(request)?;
+    preflight::require_new_publish_delivery(request.sheet_enabled, request.delete_after_publish)?;
     let manifest = preflight::scan_preflight_source(&request.source_root).await?;
     let sheet_choice =
         preflight::verify_sheet_delivery_choice(&state.db, request.sheet_enabled).await;

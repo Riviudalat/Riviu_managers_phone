@@ -536,8 +536,10 @@ export function PublishPage({
   const [createdCampaignId, setCreatedCampaignId] = useState<string>();
   const [soundPolicyOverride, setSoundPolicyOverride] =
     useState<PublishSoundPolicy | null>(restoredForm?.soundPolicyOverride ?? null);
-  const [sheetEnabled, setSheetEnabled] = useState(restoredForm?.sheetEnabled ?? false);
-  const [deleteAfterPublish, setDeleteAfterPublish] = useState(restoredForm?.deleteAfterPublish ?? false);
+  // New campaigns always bind Sheet delivery and remove their imported device media
+  // only after the public post is verified. Historical campaign flags remain untouched.
+  const sheetEnabled = true;
+  const deleteAfterPublish = true;
   const [campaigns, setCampaigns] = useState<PublishCampaignRecord[]>([]);
   const [campaignLoadState, setCampaignLoadState] = useState<
     "loading" | "ready" | "error"
@@ -807,10 +809,8 @@ export function PublishPage({
       setSourceRoot(baseline.sourceRoot);
       setBundleIds(baseline.bundleIds);
       setAssignments(baseline.assignments);
-      setDeleteAfterPublish(baseline.deleteAfterPublish);
       setCaptionDrafts(baseline.captionDrafts);
       setSoundPolicyOverride(baseline.soundPolicyOverride);
-      setSheetEnabled(baseline.sheetEnabled);
       setManifest(baselineManifest);
       onTargetRefChange?.(baseline.targetRef);
       setPreflightSnapshot(null);
@@ -1217,7 +1217,7 @@ export function PublishPage({
       const machine = deviceDisplayName(devices, metas, assignment.udid);
       const confirmed = await requestConfirm({
         title: `Thử lại bài của ${machine}?`,
-        message: `Bài của ${machine} đã dừng trước khi bấm Đăng. Chỉ bài này được kiểm tra và xếp lại vào hàng chờ; các bài khác tiếp tục trạng thái hiện tại.`,
+        message: `Bài của ${machine} đã dừng trước khi bấm Đăng. Chỉ bài này được kiểm tra và xếp lại vào hàng chờ; các bài khác tiếp tục trạng thái hiện tại. Nhạc tự chọn chưa xác minh sẽ được chọn lại theo cấu hình của bài.`,
         confirmLabel: "Thử lại máy này",
         cancelLabel: "Huỷ",
         danger: true,
@@ -1339,7 +1339,7 @@ export function PublishPage({
           selectedIds={bundleIds} assignments={assignments} eligible={eligibleTargets}
           deviceGuards={deviceGuards} onPendingPublication={openPendingPublication}
           sourceRoot={sourceRoot} bundles={manifest?.bundles ?? []} devices={devices} metas={metas}
-          captions={captionDrafts} sound={currentSoundPolicy} sheet={sheetEnabled} cleanup={deleteAfterPublish}
+          captions={captionDrafts} sound={currentSoundPolicy}
           blockingReason={sheetBlockingReason}
           onSource={()=>setWorkspaceTab("setup")} onCreated={()=>{void reload();}}
           onSheetSetup={() => { setWorkspaceTab("setup"); requestAnimationFrame(() => {
@@ -1374,8 +1374,6 @@ export function PublishPage({
           preflightError={publishBlockingReason ?? preflightError}
           blockingReason={sheetBlockingReason}
           sound={currentSoundPolicy}
-          sheet={sheetEnabled}
-          cleanup={deleteAfterPublish}
           runAt=""
           onSource={(path) => {
             editSourceRoot(path);
@@ -1401,14 +1399,6 @@ export function PublishPage({
           }}
           onCaption={(id, value) => {
             setCaptionDrafts((current) => ({ ...current, [id]: value }));
-            invalidatePreflight();
-          }}
-          onSheet={(value) => {
-            setSheetEnabled(value);
-            invalidatePreflight();
-          }}
-          onCleanup={(value) => {
-            setDeleteAfterPublish(value);
             invalidatePreflight();
           }}
           onRunAt={() => {}}

@@ -597,7 +597,12 @@ khi mở Share; không dùng nút chia sẻ của bài đã bị gỡ để tìm
 
 `publish_commands/verification.rs` chạy phiên xác minh trong control plane; DB CAS ghi
 proof, outbox và snapshot cùng transaction. `verified_cleanup.rs` xử lý riêng media
-đã xác minh theo delete policy và importId, giữ khả năng thử lại qua restart.
+đã nhập vào điện thoại theo `importId`, chỉ sau proof bài và canonical URL. Mọi
+chiến dịch Đăng ngay/Hẹn giờ mới yêu cầu đích Google Sheet được preflight xác minh
+và bật dọn bản chuyển; UI không nhận lựa chọn tắt hai nghĩa vụ này. Chính sách
+Sheet/dọn media của chiến dịch cũ bất biến theo snapshot đã lưu, không áp mặc định
+mới hồi tố. Không xóa tệp nguồn trên desktop; lỗi dọn được thử lại độc lập qua
+restart, không phát lại Post.
 Worker lưu `nextCheckAt` bằng thời điểm kết thúc quan sát cộng 300 giây cho mọi bài
 đã gửi còn thiếu link, kể cả lỗi đọc. Không đặt tổng hạn chờ liên kết; mỗi lần quan
 sát vẫn có deadline và lease riêng. Restart giữ nguyên mốc gửi và lần kiểm tiếp.

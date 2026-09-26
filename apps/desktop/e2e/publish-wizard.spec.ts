@@ -10,7 +10,7 @@ for (const viewport of [
 ]) {
   test(`production publish quick workspace ${viewport.width}`, async ({ page }) => {
     await page.setViewportSize(viewport);
-    await installTauriMock(page, { androidRoster: true, fleetSize: 20 });
+    await installTauriMock(page, { androidRoster: true, fleetSize: 20, publishSheetReady: true });
     await page.addInitScript(() => {
       const w = window as unknown as {
         __TAURI_INTERNALS__: {
@@ -76,8 +76,8 @@ for (const viewport of [
           };
           return {
             inputDigest: "digest",
-            sheetEnabled: false,
-            sheetConfigured: false,
+            sheetEnabled: true,
+            sheetConfigured: true,
             canExecute: true,
             targetSnapshot: {
               targetRef: r.targetRef,
@@ -205,17 +205,9 @@ for (const viewport of [
     await expect(page.getByRole("tabpanel", { name: "Hẹn giờ", exact: true })).toBeVisible();
     await page.getByRole("tab", { name: "Thiết lập", exact: true }).click();
     await expect(page.locator(".pq-footer")).toContainText("10/10 bài có máy");
-    await page.locator(".pq-run-options > summary").click();
-    await page.getByRole("checkbox", { name: "Xóa bản chuyển sau khi đăng thành công" }).check();
+    await expect(page.locator(".pq-run-options")).toHaveText("Sheet bật · Dọn bản chuyển bật");
     for (const label of ["Ghi kết quả lên Sheet", "Xóa bản chuyển sau khi đăng thành công"]) {
-      const row = await page.getByRole("checkbox", { name: label }).evaluate(input => {
-        const parent = input.parentElement!;
-        return { direction: getComputedStyle(parent).flexDirection, width: input.getBoundingClientRect().width, height: input.getBoundingClientRect().height };
-      });
-      expect(row.direction).toBe("row");
-      expect(row.width).toBeGreaterThanOrEqual(14);
-      expect(row.height).toBeGreaterThanOrEqual(14);
-      expect(row.width).toBe(row.height);
+      await expect(page.getByRole("checkbox", { name: label })).toHaveCount(0);
     }
     await page.getByRole("button", { name: "Kiểm tra & đăng", exact: true }).click();
     await expect(page.getByRole("button", { name: "Xác nhận đăng 10 bài", exact: true })).toBeEnabled();
@@ -230,11 +222,12 @@ for (const viewport of [
     await publicConfirm.getByRole("button", { name: "Huỷ", exact: true }).click();
     const checkDialog = page.getByRole("dialog", { name: "Kiểm tra đợt đăng" });
     await expect(checkDialog).toBeVisible();
-    const calls = await page.evaluate(() => (window as unknown as { __PUBLISH_CALLS__: { command: string; args: { request?: { udids: string[]; bundleIds: string[]; deleteAfterPublish: boolean } } }[] }).__PUBLISH_CALLS__);
+    const calls = await page.evaluate(() => (window as unknown as { __PUBLISH_CALLS__: { command: string; args: { request?: { udids: string[]; bundleIds: string[]; deleteAfterPublish: boolean; sheetEnabled: boolean } } }[] }).__PUBLISH_CALLS__);
     expect(calls).toHaveLength(1);
     expect(calls[0].args.request?.udids).toHaveLength(10);
     expect(calls[0].args.request?.bundleIds).toHaveLength(10);
     expect(calls[0].args.request?.deleteAfterPublish).toBe(true);
+    expect(calls[0].args.request?.sheetEnabled).toBe(true);
     expect(errors).toEqual([]);
     await checkDialog.getByRole("button", { name: "Đóng" }).click();
     await page.getByRole("button", { name: "API", exact: true }).click();

@@ -37,6 +37,7 @@ import { requestWorkspaceLeave } from "../workspaceDraft";
 import { resetToasts } from "../toastStore";
 import { pickDirectory } from "../pickFile";
 import { writeFormDraft } from "../formDraftStorage";
+import { clearSheetVerificationSession } from "../components/publish/sheetVerificationSession";
 import type {
   AppEvent,
   DeviceInfo,
@@ -246,6 +247,7 @@ function iphone(udid: string): DeviceInfo {
 const devices = [iphone("PHONE-A"), iphone("PHONE-B"), iphone("PHONE-C")];
 
 beforeEach(() => {
+  clearSheetVerificationSession();
   vi.mocked(publishList).mockReset().mockResolvedValue([]);
   vi.mocked(publishGet).mockReset().mockResolvedValue(null);
   HTMLDialogElement.prototype.showModal = function () {
@@ -283,8 +285,9 @@ beforeEach(() => {
     .mockReset()
     .mockResolvedValue({ webhookUrl: "", hasToken: false });
   vi.mocked(publishSheetCheck).mockReset();
-  vi.mocked(googleSheetsStatus).mockReset().mockResolvedValue({ configured: false, connected: false, active: false,
-    clientId: "", pickerConfigured: false, phase: "idle" });
+  vi.mocked(googleSheetsStatus).mockReset().mockResolvedValue({ configured: true, connected: true, active: true,
+    accountId: "operator", writerId: "writer", clientId: "id", hasSheetsScope: true,
+    pickerConfigured: true, phase: "idle", sheetUrl: "https://docs.google.com/spreadsheets/d/fixture/edit#gid=0" });
   vi.mocked(publishScanFolder).mockReset().mockResolvedValue(manifest);
   vi.mocked(pickDirectory).mockReset().mockResolvedValue("C:/carousels");
   resetToasts();
@@ -457,13 +460,16 @@ describe("production publish wizard", () => {
     await userEvent.click(confirm);
     await waitFor(() => expect(createCampaign).toHaveBeenCalledOnce());
     expect((createCampaign.mock.calls[0] as unknown[])[3]).toBeNull();
+    expect(preflightCampaign).toHaveBeenLastCalledWith(expect.objectContaining({
+      sheetEnabled: true, deleteAfterPublish: true,
+    }));
+    expect((createCampaign.mock.calls[0] as unknown[]).slice(9, 11)).toEqual([true, true]);
     expect(executeCampaign).toHaveBeenCalledWith("campaign-1", true);
   });
   it("autosaves mapping and caption, rescans on remount and requires fresh preflight", async () => {
     const view = render(<PublishPage devices={devices} selected={[]} onSelectUdids={() => {}} />);
     await prepareOne();
-    await userEvent.click(screen.getByText(/^Tùy chọn · Sheet/));
-    await userEvent.click(screen.getByRole("checkbox", { name: "Xóa bản chuyển sau khi đăng thành công" }));
+    expect(screen.getByText("Sheet bật · Dọn bản chuyển bật")).toBeVisible();
     await act(async () => { expect(await requestWorkspaceLeave()).toBe(true); });
     expect(requestConfirm).not.toHaveBeenCalled();
     expect(createCampaign).not.toHaveBeenCalled();
@@ -472,8 +478,7 @@ describe("production publish wizard", () => {
     await waitFor(() => expect(screen.getByRole("checkbox", { name: "Chọn bo1" })).toBeChecked());
     expect(publishScanFolder).toHaveBeenCalledTimes(2);
     expect(screen.getByRole("combobox", { name: "Máy nhận bài bo1" })).toHaveValue("PHONE-A");
-    await userEvent.click(screen.getByText(/^Tùy chọn · Sheet/));
-    expect(screen.getByRole("checkbox", { name: "Xóa bản chuyển sau khi đăng thành công" })).toBeChecked();
+    expect(screen.getByText("Sheet bật · Dọn bản chuyển bật")).toBeVisible();
     expect(preflightCampaign).not.toHaveBeenCalled();
     expect(executeCampaign).not.toHaveBeenCalled();
   });
@@ -526,10 +531,6 @@ describe("production publish wizard", () => {
       <PublishPage devices={devices} selected={[]} onSelectUdids={() => {}} />,
     );
     await prepareOne();
-    await userEvent.click(screen.getByText(/^Tùy chọn · Sheet/));
-    await userEvent.click(
-      screen.getByRole("checkbox", { name: "Xóa bản chuyển sau khi đăng thành công" }),
-    );
     await userEvent.click(
       screen.getByRole("button", { name: "Kiểm tra & đăng" }),
     );
@@ -543,7 +544,7 @@ describe("production publish wizard", () => {
         bundleIds: ["b1"],
         udids: ["PHONE-A"],
         deleteAfterPublish: true,
-        sheetEnabled: false,
+        sheetEnabled: true,
       }),
     );
     await userEvent.click(confirm);
@@ -558,7 +559,7 @@ describe("production publish wizard", () => {
       { type: "explicit", udids: ["PHONE-A"] },
       true,
       "approved-digest-1",
-      false,
+      true,
       true,
       expect.any(String),
     );
@@ -712,7 +713,7 @@ describe("production publish wizard", () => {
     await userEvent.click(confirm);
     expect(createCampaign).not.toHaveBeenCalled();
   });
-  it("changing cleanup invalidates the approved digest", async () => {
+  it("changing caption invalidates the approved digest", async () => {
     render(
       <PublishPage devices={devices} selected={[]} onSelectUdids={() => {}} />,
     );
@@ -726,16 +727,18 @@ describe("production publish wizard", () => {
       ).toBeEnabled(),
     );
     await userEvent.click(screen.getByRole("button", { name: "Đóng" }));
-    await userEvent.click(
-      screen.getByRole("checkbox", { name: "Xóa bản chuyển sau khi đăng thành công" }),
-    );
+    await userEvent.click(screen.getByRole("button", { name: "Xem ảnh và sửa caption · bo1" }));
+    fireEvent.change(screen.getByRole("textbox", { name: "Nội dung bài đăng" }), {
+      target: { value: "Nội dung mới" },
+    });
+    await userEvent.click(screen.getByRole("button", { name: "Đóng · giữ bản nháp" }));
     await userEvent.click(
       screen.getByRole("button", { name: "Kiểm tra & đăng" }),
     );
     await waitFor(() => expect(preflightCampaign).toHaveBeenCalledTimes(2));
-    expect(preflightCampaign.mock.calls.at(-1)![0].deleteAfterPublish).toBe(
-      true,
-    );
+    expect(preflightCampaign.mock.calls.at(-1)![0]).toMatchObject({
+      captionOverrides: { b1: "Nội dung mới" }, sheetEnabled: true, deleteAfterPublish: true,
+    });
   });
   it("keeps bundle identity when a sibling is removed", async () => {
     render(
@@ -1022,7 +1025,6 @@ describe("publish campaign monitoring", () => {
 
     render(<PublishPage devices={devices} selected={[]} onSelectUdids={() => {}} />);
     await prepareOne();
-    await userEvent.click(screen.getByRole("checkbox", { name: "Ghi kết quả lên Sheet" }));
     const input = screen.getByRole("textbox", { name: "Link Google Sheet" });
     fireEvent.change(input, { target: { value: url } });
     const publish = screen.getByRole("button", { name: "Kiểm tra & đăng" });

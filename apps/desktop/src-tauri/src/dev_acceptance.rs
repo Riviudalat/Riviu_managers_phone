@@ -14,6 +14,7 @@ pub(crate) enum AcceptanceCapability {
     PublishVerification,
     SheetDelivery,
     PublishSchedule,
+    PublishCleanup,
 }
 
 #[derive(Clone, Debug)]
@@ -23,7 +24,7 @@ pub(crate) struct DevAcceptancePolicy {
     activation_id: Option<Arc<str>>,
     approved_device_ids: Option<Arc<[String]>>,
     pinned_campaign_ids: Arc<OnceLock<Vec<String>>>,
-    pinned_capabilities: Arc<OnceLock<(bool, bool, bool)>>,
+    pinned_capabilities: Arc<OnceLock<(bool, bool, bool, bool)>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -46,6 +47,8 @@ struct AcceptanceCapabilities {
     sheet_delivery: bool,
     #[serde(default)]
     publish_schedule: bool,
+    #[serde(default)]
+    publish_cleanup: bool,
 }
 
 impl DevAcceptancePolicy {
@@ -60,7 +63,7 @@ impl DevAcceptancePolicy {
         Self::from_parts(active, scope_path, activation_id)
     }
 
-    fn from_parts(
+    pub(crate) fn from_parts(
         active: bool,
         scope_path: Option<PathBuf>,
         activation_id: Option<Arc<str>>,
@@ -77,6 +80,7 @@ impl DevAcceptancePolicy {
                         !scope.capabilities.publish_verification
                             && !scope.capabilities.sheet_delivery
                             && !scope.capabilities.publish_schedule
+                            && !scope.capabilities.publish_cleanup
                     } else {
                         valid_ids(&scope.campaign_ids, MAX_SCOPE_CAMPAIGNS)
                     })
@@ -88,6 +92,7 @@ impl DevAcceptancePolicy {
                         scope.capabilities.publish_verification,
                         scope.capabilities.sheet_delivery,
                         scope.capabilities.publish_schedule,
+                        scope.capabilities.publish_cleanup,
                     ));
                 }
                 Arc::<[String]>::from(scope.device_ids)
@@ -129,6 +134,7 @@ impl DevAcceptancePolicy {
                 AcceptanceCapability::PublishVerification => capabilities.publish_verification,
                 AcceptanceCapability::SheetDelivery => capabilities.sheet_delivery,
                 AcceptanceCapability::PublishSchedule => capabilities.publish_schedule,
+                AcceptanceCapability::PublishCleanup => capabilities.publish_cleanup,
             })
     }
 
@@ -154,6 +160,7 @@ impl DevAcceptancePolicy {
                     }
                     AcceptanceCapability::SheetDelivery => scope.capabilities.sheet_delivery,
                     AcceptanceCapability::PublishSchedule => scope.capabilities.publish_schedule,
+                    AcceptanceCapability::PublishCleanup => scope.capabilities.publish_cleanup,
                 }
         })
     }
@@ -196,6 +203,7 @@ impl DevAcceptancePolicy {
             scope.capabilities.publish_verification,
             scope.capabilities.sheet_delivery,
             scope.capabilities.publish_schedule,
+            scope.capabilities.publish_cleanup,
         );
         if let Some(pinned) = self.pinned_capabilities.get() {
             if *pinned != capabilities {
@@ -293,6 +301,11 @@ mod tests {
         assert!(policy.automatic_device_workers_frozen());
         assert!(!policy.allows_publish_dispatch("campaign-a", "phone-a"));
         assert!(!policy.allows(AcceptanceCapability::SheetDelivery, "campaign-a", "phone-a"));
+        assert!(!policy.allows(
+            AcceptanceCapability::PublishCleanup,
+            "campaign-a",
+            "phone-a"
+        ));
     }
 
     #[test]
@@ -333,6 +346,50 @@ mod tests {
         ));
         assert!(policy.allows(AcceptanceCapability::SheetDelivery, "campaign-a", "phone-a"));
         assert!(!policy.allows(AcceptanceCapability::SheetDelivery, "campaign-a", "phone-b"));
+        assert!(!policy.allows(
+            AcceptanceCapability::PublishCleanup,
+            "campaign-a",
+            "phone-a"
+        ));
+    }
+
+    #[test]
+    fn verified_cleanup_requires_a_separate_pinned_capability() {
+        let scope = write_scope(serde_json::json!({
+            "campaignIds": ["campaign-a"], "deviceIds": ["phone-a"],
+            "capabilities": {"publishCleanup": true}
+        }));
+        let policy = active(Some(scope.0.clone()));
+        assert!(policy.allows(
+            AcceptanceCapability::PublishCleanup,
+            "campaign-a",
+            "phone-a"
+        ));
+        assert!(!policy.allows(
+            AcceptanceCapability::PublishCleanup,
+            "campaign-a",
+            "phone-b"
+        ));
+        assert!(!policy.allows(
+            AcceptanceCapability::PublishCleanup,
+            "campaign-b",
+            "phone-a"
+        ));
+        std::fs::write(
+            &scope.0,
+            serde_json::to_vec(&serde_json::json!({
+                "activationId": ACTIVATION,
+                "campaignIds": ["campaign-a"], "deviceIds": ["phone-a"],
+                "capabilities": {"publishCleanup": false}
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        assert!(!policy.allows(
+            AcceptanceCapability::PublishCleanup,
+            "campaign-a",
+            "phone-a"
+        ));
     }
 
     #[test]

@@ -167,6 +167,68 @@ fn explicit_retry_restores_three_sound_retries_without_reopening_post() {
 }
 
 #[test]
+fn checked_pre_post_retry_rebinds_only_unconfirmed_random_sound_and_audits_prior_choice() {
+    for (confirmed, step, reset) in [
+        (false, "sound", true),
+        (true, "sound", false),
+        (false, "caption", false),
+    ] {
+        let (db, _, campaign, assignments) = fixture();
+        let run = db.claim_publish_pipeline(&campaign).unwrap().unwrap();
+        let job = db.pending_publish_dispatch(10).unwrap().remove(0);
+        assert!(db.claim_publish_dispatch(&job, 0).unwrap());
+        db.init_publish_recovery(&job.assignment_id, &run.token)
+            .unwrap();
+        let sound = crate::SoundSelectionEvidence {
+            section: crate::publish::SoundSectionKind::Trending,
+            title: "A stale Hot recommendation".into(),
+            artist: "Artist".into(),
+            index: 0,
+            candidates_digest: "frozen-pool".into(),
+            confirmed,
+        };
+        db.bind_publish_recovery_sound(&job.assignment_id, &run.token, Some(&sound))
+            .unwrap();
+        db.update_publish_recovery_step(&job.assignment_id, &run.token, step, None)
+            .unwrap();
+        assert!(db
+            .finish_publish_dispatch(&job, Some("sound identity changed"))
+            .unwrap());
+        db.finish_publish_pipeline(&run).unwrap();
+        let revision = db.publish_assignment_revision(&job.assignment_id).unwrap();
+        let request = Uuid::new_v4().to_string();
+        db.claim_publish_assignment_retry_checked(&job.assignment_id, revision, &request)
+            .unwrap()
+            .unwrap();
+        let recovery = db
+            .publish_recovery_state(&job.assignment_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(recovery.sound, (!reset).then_some(sound.clone()));
+        let conn = db.conn().unwrap();
+        let archived: Option<String> = conn.query_row(
+            "SELECT detail FROM operation_device_events WHERE source_kind='publish' AND source_id=?1 AND action='publishSoundRebind' ORDER BY rowid DESC LIMIT 1",
+            [&campaign], |row| row.get(0),
+        ).optional().unwrap();
+        assert_eq!(archived.is_some(), reset);
+        if let Some(payload) = archived {
+            let payload: serde_json::Value = serde_json::from_str(&payload).unwrap();
+            assert_eq!(payload["assignmentId"], job.assignment_id);
+            assert_eq!(payload["requestId"], request);
+            assert_eq!(payload["priorSound"], serde_json::to_value(sound).unwrap());
+        }
+        assert!(assignments.iter().all(|assignment| {
+            db.get_publish_assignment_detail(&campaign, &assignment.id)
+                .unwrap()
+                .unwrap()
+                .assignments[0]
+                .effect_intent
+                .is_none()
+        }));
+    }
+}
+
+#[test]
 fn explicit_failed_retry_rejects_effects_completed_assignments_and_terminal_parents() {
     for (state, intent, parent) in [
         (

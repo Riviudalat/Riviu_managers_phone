@@ -8,6 +8,15 @@ pub async fn publish_retry_sheet_assignment(
     expected_revision: i64,
 ) -> Result<(), CommandError> {
     let _admission = state.ensure_accepting_work()?;
+    if state.dev_acceptance.active() {
+        verification::ensure_assignment_allowed(&state.db, &assignment_id, |campaign, udid| {
+            state.dev_acceptance.allows(
+                crate::dev_acceptance::AcceptanceCapability::SheetDelivery,
+                campaign,
+                udid,
+            )
+        })?;
+    }
     let result = async {
         anyhow::ensure!(
             state.db.publish_assignment_revision(&assignment_id)? == expected_revision,
@@ -61,6 +70,11 @@ pub async fn publish_retry_assignment(
     request_id: String,
 ) -> Result<(), CommandError> {
     let _admission = state.ensure_accepting_work()?;
+    if state.dev_acceptance.active() {
+        verification::ensure_assignment_allowed(&state.db, &assignment_id, |campaign, udid| {
+            state.dev_acceptance.allows_publish_dispatch(campaign, udid)
+        })?;
+    }
     let result = async {
         anyhow::ensure!(confirmed, "Cần xác nhận thử lại đúng bài trên máy đã chọn");
         if state

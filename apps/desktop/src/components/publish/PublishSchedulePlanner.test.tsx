@@ -8,7 +8,7 @@ import { SCHEDULE_DRAFT_KEY } from "./publishScheduleAllocation";
 vi.mock("../../api", () => ({ publishScheduleCreate: vi.fn(), publishSchedulePreflight: vi.fn(), publishImagePreview: vi.fn() }));
 const bundles: PublishBundle[] = Array.from({ length: 3 }, (_, i) => ({ id: `b${i}`, name: `Bài ${i + 1}`, sourcePath: `C:/posts/${i}`, mediaKind: "image", images: [], captionPath: "caption.txt", caption: `Caption ${i}`, captionSha256: "a".repeat(64), totalBytes: 100 }));
 const devices: DeviceInfo[] = Array.from({ length: 3 }, (_, i) => ({ udid: `phone-${i + 1}`, name: "Android", model: "SM-G955N", platform: "android", osVersion: "9", connection: "usb", status: "ready", wdaReady: true }));
-const props = { sourceRoot: "C:/posts", bundles, devices, metas: new Map(), captions: {}, sound: { kind: "default" as const }, sheet: false, cleanup: false, onCreated: vi.fn(), onSource: vi.fn() };
+const props = { sourceRoot: "C:/posts", bundles, devices, metas: new Map(), captions: {}, sound: { kind: "default" as const }, onCreated: vi.fn(), onSource: vi.fn() };
 const report = (count = 3): PublishScheduleReport => ({ inputDigest: "approved", canExecute: true, slots: Array.from({ length: count }, () => ({ inputDigest: "slot", canExecute: true, issues: [], assignments: [], sheetConfigured: false, targetSnapshot: { targetRef: { type: "explicit", udids: [] }, included: [], excluded: [], rosterSha256: "hash" } })) });
 beforeEach(() => { localStorage.clear(); vi.clearAllMocks(); vi.mocked(publishSchedulePreflight).mockImplementation(async request => report(request.slots.length)); vi.mocked(publishScheduleCreate).mockResolvedValue([{ id: "one" }, { id: "two" }, { id: "three" }] as never); });
 afterEach(() => { cleanup(); vi.restoreAllMocks(); });
@@ -177,6 +177,7 @@ describe("schedule assignment workspace", () => {
     expect(screen.getByRole("button", { name: "Lưu lịch 3 bài" })).toBeDisabled();
     await userEvent.click(screen.getByRole("button", { name: "Kiểm tra lịch" }));
     const request = vi.mocked(publishSchedulePreflight).mock.calls[0][0];
+    expect(request).toMatchObject({ sheetEnabled: true, deleteAfterPublish: true });
     expect(request.slots.map(s => s.runAt)).toEqual(Array(3).fill("2099-09-10T20:00"));
     expect(new Set(request.slots.map(s => s.udid)).size).toBe(3);
     expect(publishScheduleCreate).not.toHaveBeenCalled();

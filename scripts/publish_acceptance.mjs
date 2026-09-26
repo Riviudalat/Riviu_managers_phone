@@ -53,7 +53,7 @@ function validateInactiveDevScope(file, udids) {
     '--dev-scope deviceIds không khớp đúng thứ tự máy yêu cầu');
   if (Object.hasOwn(policy, 'capabilities')) {
     check(plainObject(policy.capabilities)
-      && Object.keys(policy.capabilities).every(key => ['publishVerification', 'sheetDelivery'].includes(key))
+      && Object.keys(policy.capabilities).every(key => ['publishVerification', 'sheetDelivery', 'publishCleanup', 'publishSchedule'].includes(key))
       && Object.values(policy.capabilities).every(value => value === false),
     '--dev-scope preflight chỉ nhận capability false hoặc absent');
   }
@@ -61,22 +61,23 @@ function validateInactiveDevScope(file, udids) {
 }
 function activeDevScope(campaignId, udids, activationId) {
   return { activationId, campaignIds: [campaignId], deviceIds: [...udids],
-    capabilities: { publishVerification: true } };
+    capabilities: { publishVerification: true, sheetDelivery: true, publishCleanup: true } };
 }
-function isActiveDevScope(policy, campaignId, udids, activationId) {
+function isActiveDevScope(policy, campaignId, udids, activationId, legacyPhoneOnly = false) {
   return plainObject(policy) && exactKeys(policy, ['activationId', 'campaignIds', 'deviceIds', 'capabilities'])
     && policy.activationId === activationId
     && JSON.stringify(policy.campaignIds) === JSON.stringify([campaignId])
     && JSON.stringify(policy.deviceIds) === JSON.stringify(udids)
     && plainObject(policy.capabilities)
-    && exactKeys(policy.capabilities, ['publishVerification'])
-    && policy.capabilities.publishVerification === true;
+    && exactKeys(policy.capabilities, legacyPhoneOnly ? ['publishVerification'] : ['publishVerification', 'sheetDelivery', 'publishCleanup'])
+    && policy.capabilities.publishVerification === true
+    && (legacyPhoneOnly || (policy.capabilities.sheetDelivery === true && policy.capabilities.publishCleanup === true));
 }
 function inspectDevScope(file, udids) {
   const current = validateInactiveDevScope(file, udids);
   return { path: file, contentHash: hashBytes(current.raw), activationId: current.value.activationId };
 }
-function validateDevScopeForSubmit(binding, campaign, udids) {
+function validateDevScopeForSubmit(binding, campaign, udids, legacyPhoneOnly = false) {
   check(binding?.path && binding.contentHash && /^[a-f0-9]{64}$/.test(binding.contentHash)
     && /^[A-Za-z0-9_-]{16,128}$/.test(binding.activationId ?? ''),
     'Preflight thiếu binding --dev-scope');
@@ -85,7 +86,7 @@ function validateDevScopeForSubmit(binding, campaign, udids) {
     validateInactiveDevScope(binding.path, udids);
     return 'inactiveApproved';
   }
-  check(campaign?.id && isActiveDevScope(current.value, campaign.id, udids, binding.activationId),
+  check(campaign?.id && isActiveDevScope(current.value, campaign.id, udids, binding.activationId, legacyPhoneOnly),
     '--dev-scope đã đổi sau preflight');
   return 'activeForCampaign';
 }
@@ -178,17 +179,15 @@ export function parseArgs(argv) {
   check(!options.sheetId || /^[A-Za-z0-9_-]{1,128}$/.test(options.sheetId), 'Sheet ID không hợp lệ');
   check(Boolean(options.sheetId) === (options.sheetGid !== null), '--sheet-id và --sheet-gid phải đi cùng nhau');
   check(!options.sheetDisabled || !options.sheetId, '--sheet-disabled true không nhận --sheet-id/--sheet-gid');
-  check(!options.devScope || options.sheetDisabled, '--dev-scope chỉ dùng cùng --sheet-disabled true');
   check(!options.campaignId || /^[A-Za-z0-9_-]{1,128}$/.test(options.campaignId), 'Campaign ID không hợp lệ');
   check(mode === 'submit' ? /^[a-f0-9]{64}$/.test(options.confirm ?? '') : !options.confirm,
     'submit cần --confirm SHA-256 từ preflight; mode khác không nhận --confirm');
   if (mode === 'submit' || mode === 'preflight') {
     check(options.source && options.bundleIds.length === options.udids.length,
       'preflight/submit cần --source và --bundle-ids một-một với --udids');
-    check(options.sheetDisabled || options.sheetId,
-      'preflight/submit cần đích Sheet; chỉ bỏ qua khi có --sheet-disabled true');
-    check(!options.sheetDisabled || options.udids.length <= 2,
-      'Canary --sheet-disabled true chỉ nhận tối đa 2 publication');
+    check(!options.sheetDisabled && options.sheetId,
+      'Lượt đăng mới bắt buộc ghi Sheet; --sheet-disabled chỉ dùng để quan sát hồ sơ cũ');
+    check(options.devScope, 'preflight/submit cần --dev-scope nghiệm thu thủ công');
     check(!options.campaignId, 'Không submit/preflight campaign cũ; dùng observe');
   }
   check(mode === 'observe' || (options.waitSeconds === 0 && flags['poll-seconds'] === undefined),
@@ -227,8 +226,19 @@ function roster(devices, metas, udids) {
 async function checkSheet(invoke, options) {
   const status = await invoke('google_sheets_status');
   const url = `https://docs.google.com/spreadsheets/d/${options.sheetId}/edit#gid=${options.sheetGid}`;
+  let activeTarget = null;
+  try {
+    const saved = new URL(status.sheetUrl);
+    const parts = saved.pathname.split('/').filter(Boolean);
+    if (saved.protocol === 'https:' && saved.hostname === 'docs.google.com'
+      && !saved.username && !saved.password && parts[0] === 'spreadsheets'
+      && parts[1] === 'd' && parts[3] === 'edit') {
+      activeTarget = { spreadsheetId: parts[2], sheetGid: Number(new URLSearchParams(saved.hash.slice(1)).get('gid')) };
+    }
+  } catch { /* An unparseable saved target is not an active Sheet. */ }
   check(status.connected === true && status.active === true && status.writerId
-    && status.selectedFileId === options.sheetId, 'OAuth direct chưa sẵn sàng hoặc sai writer/Sheet');
+    && activeTarget?.spreadsheetId === options.sheetId && activeTarget?.sheetGid === options.sheetGid,
+  'OAuth direct chưa sẵn sàng hoặc sai writer/Sheet');
   // This command may persist validated connection settings. Never called by inspect/observe.
   const result = await invoke('publish_sheet_check', { sheetUrl: url });
   check(result.connectionVerified === true && result.reportingReady === true && result.reportingEpoch
@@ -253,6 +263,10 @@ async function summarize(detail, options, invoke, accounts) {
   const sheetDisabled = options.sheetDisabled === true;
   const rows = detail.assignments.map(a => {
     const evidence = parseEvidence(a.evidenceJson), post = evidence.post ?? evidence;
+    const cleanup = evidence.cleanup ?? null;
+    const cleanedImport = cleanup?.importId ?? cleanup?.value?.importId;
+    const mediaCleaned = post.importId && cleanedImport === post.importId
+      && (cleanup?.state === 'cleaned' || cleanup?.value?.state === 'cleaned');
     const canonical = typeof post.postUrl === 'string'
       && /^https:\/\/www\.tiktok\.com\/@[A-Za-z0-9_.]+\/(photo|video)\/\d+$/.test(post.postUrl);
     const verified = post.publicationVerified === true && canonical;
@@ -270,6 +284,7 @@ async function summarize(detail, options, invoke, accounts) {
       assignedAccount: assigned, submittedAccount: expected, accountState,
       sheetSent: !sheetDisabled && a.sheetDelivery?.state === 'sent',
       sheetState: sheetDisabled ? 'disabled' : a.sheetDelivery?.state ?? 'notReported',
+      mediaCleaned: mediaCleaned === true,
       postUrl: canonical ? post.postUrl : null, urlReadback: 'unsupported',
       verification: evidence.verificationStatus ?? null };
   });
@@ -288,7 +303,8 @@ async function summarize(detail, options, invoke, accounts) {
   }
   const counts = { requested: options.udids.length, enqueued: rows.filter(r => r.enqueued).length,
     submitted: rows.filter(r => r.submitted).length, verified: rows.filter(r => r.verified).length,
-    sheetSent: rows.filter(r => r.sheetSent).length, urlReadback: rows.filter(r => r.urlReadback === 'matched').length };
+    sheetSent: rows.filter(r => r.sheetSent).length, urlReadback: rows.filter(r => r.urlReadback === 'matched').length,
+    mediaCleaned: rows.filter(r => r.mediaCleaned).length };
   const exact = rows.length === options.udids.length && new Set(rows.map(r => r.udid)).size === rows.length
     && rows.every(r => options.udids.includes(r.udid));
   const failed = rows.some(r => (r.state === 'failedBeforeDispatch' && !r.retryInProgress)
@@ -299,6 +315,8 @@ async function summarize(detail, options, invoke, accounts) {
   // The separate readback above must match before this becomes end-to-end proof.
   const allSent = rows.length > 0 && rows.every(r => r.verified && r.sheetSent && r.accountState === 'matched');
   const allPhoneVerified = rows.length > 0 && rows.every(r => r.verified && r.accountState === 'matched');
+  const cleanupRequired = detail.campaign.cleanupPolicy === 'deleteImportedAssetsAfterVerified';
+  const cleanupComplete = !cleanupRequired || counts.mediaCleaned === rows.length;
   if (sheetDisabled) {
     const accepted = exact && !failed && allPhoneVerified;
     return { rows, counts, campaignId: detail.campaign.id,
@@ -309,8 +327,12 @@ async function summarize(detail, options, invoke, accounts) {
       urlReadback: { status: 'notApplicable', reason: 'Sheet was explicitly disabled for this bounded phone-only acceptance.' } };
   }
   return { rows, counts, campaignId: detail.campaign.id,
-    acceptance: exact && !failed && allSent && counts.urlReadback === rows.length ? 'passed' : !exact || failed ? 'blockedFailed' : allSent ? 'readbackUnsupported' : 'pending',
-    exitCode: exact && !failed && allSent && counts.urlReadback === rows.length ? 0 : !exact || failed ? 1 : allSent ? 3 : 2,
+    acceptance: exact && !failed && allSent && counts.urlReadback === rows.length && cleanupComplete ? 'passed'
+      : !exact || failed ? 'blockedFailed'
+      : allSent && counts.urlReadback === rows.length && !cleanupComplete ? 'pendingCleanup'
+      : allSent ? 'readbackUnsupported' : 'pending',
+    exitCode: exact && !failed && allSent && counts.urlReadback === rows.length && cleanupComplete ? 0
+      : !exact || failed ? 1 : allSent && counts.urlReadback === rows.length && !cleanupComplete ? 2 : allSent ? 3 : 2,
     scopeMatches: exact, deliveryEvidence: counts.urlReadback === rows.length ? 'canonicalReceiptAndCell' : 'backendSettlementOnly',
     urlReadback: { status: allSent && counts.urlReadback === rows.length ? 'matched' : 'pending', reason: 'Cần canonical post proof, receipt đúng revision/epoch và ô Sheet khớp.' } };
 }
@@ -334,11 +356,13 @@ export async function runAcceptance(options, { invoke, sleep = delay, now = Date
       check(prepared && hash(prepared.approval) === prepared.confirmation
         && prepared.confirmation === options.confirm, 'Confirmation/preflight không khớp');
       check(hash(scope(options)) === hash(prepared.approval.scope), 'Phạm vi khác preflight đã duyệt');
-      if (options.sheetDisabled) check(prepared.approval.sheetDisabled === true
-        && prepared.approval.writer === null && prepared.approval.sheetDelivery === null,
-      'Preflight phone-only không ghi nhận Sheet disabled');
+      check(prepared.approval.request?.sheetEnabled === true
+        && prepared.approval.request?.deleteAfterPublish === true
+        && prepared.approval.sheetDelivery?.version === 2
+        && prepared.approval.writer, 'Preflight thiếu Sheet hoặc cleanup bắt buộc');
       if (intent) check(intent.confirmation === options.confirm
-        && (intent.sheetDisabled === true) === options.sheetDisabled
+        && intent.sheetDisabled !== true
+        && intent.args.sheetEnabled === true && intent.args.deleteAfterPublish === true
         && requestFingerprint(intent.args, intent.sheetDisabled === true) === intent.requestFingerprint,
         'Create intent không khớp confirmation/fingerprint');
     }
@@ -370,26 +394,20 @@ export async function runAcceptance(options, { invoke, sleep = delay, now = Date
       check(!intent && !campaign && !read(file('execute-intent.json')), 'Report directory đã có lượt tạo; không thay preflight');
       const devScope = options.devScope ? inspectDevScope(options.devScope, options.udids) : null;
       if (devScope) report.devScope = { ...devScope, state: 'inactiveApproved' };
-      const writer = options.sheetDisabled ? null : await checkSheet(invoke, options);
+      const writer = await checkSheet(invoke, options);
       const request = { sourceRoot: options.source, bundleIds: options.bundleIds, udids: options.udids,
         targetRef: { type: 'explicit', udids: options.udids }, runAt: null, captionOverrides: options.contentSnapshot?.captionOverrides ?? {},
-        soundPolicy: options.contentSnapshot?.soundPolicy ?? { kind: 'default' }, sheetEnabled: !options.sheetDisabled, deleteAfterPublish: false };
+        soundPolicy: options.contentSnapshot?.soundPolicy ?? { kind: 'default' }, sheetEnabled: true, deleteAfterPublish: true };
       const preflight = await invoke('publish_preflight', { request });
       report.preflight = preflight;
       const target = preflight.sheetDelivery ?? null;
-      if (options.sheetDisabled) {
-        check(preflight.canExecute === true && preflight.sheetEnabled === false && target === null,
-          'Preflight phone-only phải xác nhận sheetEnabled=false và sheetDelivery=null');
-      } else {
-        check(preflight.canExecute === true && preflight.sheetEnabled === true && target?.version === 2
-          && target.spreadsheetId === writer.spreadsheetId && target.sheetGid === writer.sheetGid
-          && target.reportingEpoch === writer.reportingEpoch, 'Preflight bị chặn hoặc sai đích Sheet/epoch');
-      }
+      check(preflight.canExecute === true && preflight.sheetEnabled === true && target?.version === 2
+        && target.spreadsheetId === writer.spreadsheetId && target.sheetGid === writer.sheetGid
+        && target.reportingEpoch === writer.reportingEpoch, 'Preflight bị chặn hoặc sai đích Sheet/epoch');
       check(preflight.assignments?.length === options.udids.length && preflight.assignments.every((a, i) =>
         a.udid === options.udids[i] && a.bundleId === options.bundleIds[i] && a.ordinal === i), 'Preflight thay đổi mapping đã yêu cầu');
       check(options.udids.every(id => /^[a-z0-9_.]{1,24}$/.test(currentAccounts[id])), 'Thiếu nick gán trong roster nghiệm thu');
-      const approval = { scope: scope(options), ...(options.sheetDisabled ? { sheetDisabled: true } : {}),
-        ...(devScope ? { devScope } : {}), accounts: currentAccounts, request,
+      const approval = { scope: scope(options), devScope, accounts: currentAccounts, request,
         inputDigest: preflight.inputDigest, sheetDelivery: target, writer };
       report.confirmation = hash(approval);
       write(file('preflight.json'), { approval, confirmation: report.confirmation });
@@ -398,11 +416,9 @@ export async function runAcceptance(options, { invoke, sleep = delay, now = Date
       let durable = intent;
       if (!durable) {
         check(!campaign && !read(file('execute-intent.json')), 'Có receipt không có create intent; không tạo lại');
-        if (!options.sheetDisabled) {
-          const writer = await checkSheet(invoke, options);
-          check(hash(writer) === hash(prepared.approval.writer), 'Writer/target/epoch đã đổi; không tạo');
-        }
-        if (options.sheetDisabled) {
+        const writer = await checkSheet(invoke, options);
+        check(hash(writer) === hash(prepared.approval.writer), 'Writer/target/epoch đã đổi; không tạo');
+        {
           const handoffIntent = read(file('handoff-intent.json'));
           const handoff = read(file('handoff.json'));
           const expectedHandoff = {
@@ -456,7 +472,7 @@ export async function runAcceptance(options, { invoke, sleep = delay, now = Date
         }
         const args = { ...prepared.approval.request, requestId: randomUUID(), confirmed: true,
           approvedInputDigest: prepared.approval.inputDigest };
-        durable = { confirmation: options.confirm, ...(options.sheetDisabled ? { sheetDisabled: true } : {}),
+        durable = { confirmation: options.confirm,
           requestFingerprint: requestFingerprint(args, options.sheetDisabled), args };
         write(file('create-intent.json'), durable, true);
       }
@@ -525,7 +541,7 @@ export async function runAcceptance(options, { invoke, sleep = delay, now = Date
             'Observe phone-only campaign does not match its local receipt');
           validateCampaign(campaign, intent);
           check(prepared.approval.devScope?.path === options.devScope
-            && validateDevScopeForSubmit(prepared.approval.devScope, campaign, options.udids)
+            && validateDevScopeForSubmit(prepared.approval.devScope, campaign, options.udids, true)
               === 'activeForCampaign',
           'Observe phone-only requires the active approved dev scope');
         }
@@ -539,7 +555,7 @@ export async function runAcceptance(options, { invoke, sleep = delay, now = Date
           if (options.mode !== 'observe' || exitCode !== 2 || now() >= deadline) break;
           await sleep(Math.min(options.pollSeconds * 1000, deadline - now()));
         } while (true);
-        if (exitCode === 2) report.acceptance = 'pendingDeadline';
+        if (exitCode === 2 && report.acceptance === 'pending') report.acceptance = 'pendingDeadline';
       }
     }
   } catch (error) {

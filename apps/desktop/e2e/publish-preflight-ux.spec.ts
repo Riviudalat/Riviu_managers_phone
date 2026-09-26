@@ -72,8 +72,8 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 820, height: 560 
     await page.getByRole("button", { name: "Chọn nhanh", exact: true }).click();
     await expect(page.locator(".pq-footer")).toContainText("10/10 bài có máy");
     await expect(page.locator(".publish-sheet-result.is-linked")).toContainText("Đã liên kết Google Sheet");
-    await page.locator(".pq-run-options > summary").click();
-    await page.getByRole("checkbox", { name: "Ghi kết quả lên Sheet" }).check();
+    await expect(page.locator(".pq-run-options")).toHaveText("Sheet bật · Dọn bản chuyển bật");
+    await expect(page.getByRole("checkbox", { name: "Ghi kết quả lên Sheet" })).toHaveCount(0);
     await page.getByRole("button", { name: "Kiểm tra & đăng", exact: true }).click();
 
     const dialog = page.getByRole("dialog", { name: "Kiểm tra đợt đăng" });

@@ -11,6 +11,7 @@ export interface TauriMockOptions {
   androidRoster?: boolean;
   libraryBatchRunning?: boolean;
   fleetSize?: number;
+  publishSheetReady?: boolean;
 }
 
 export interface MockCommandCall {
@@ -1129,12 +1130,20 @@ export async function installTauriMock(
     commandHandlers.set("publish_get", () => null);
     // The page reads the Sheet config on mount; an unregistered mock here would put the red
     // Unknown-mock line straight into the Đăng bài baseline (§9.129's exact shape).
-    commandHandlers.set("publish_sheet_get_config", () => ({
+    commandHandlers.set("publish_sheet_get_config", () => fixtureOptions.publishSheetReady ? ({
+      provider: "googleDirect", webhookUrl: "", hasToken: true, internalReporting: true,
+      sheetUrl: "https://docs.google.com/spreadsheets/d/FIXTURE/edit#gid=0",
+    }) : ({
       provider: "appsScript",
       webhookUrl: "",
       hasToken: false,
     }));
-    commandHandlers.set("google_sheets_status", () => ({ configured: false, connected: false, active: false,
+    commandHandlers.set("google_sheets_status", () => fixtureOptions.publishSheetReady ? ({
+      configured: true, connected: true, active: true, clientId: "fixture.apps.googleusercontent.com",
+      pickerConfigured: true, phase: "idle", error: null, email: "operator@example.test", accountId: "account-a",
+      selectedFileId: "FIXTURE", selectedFileName: "Results", writerId: "fixture-writer", hasSheetsScope: true,
+      sheetUrl: "https://docs.google.com/spreadsheets/d/FIXTURE/edit#gid=0",
+    }) : ({ configured: false, connected: false, active: false,
       clientId: "", pickerConfigured: false, phase: "idle" }));
     commandHandlers.set("publish_sheet_save_config", () => ({
       webhookUrl: "",

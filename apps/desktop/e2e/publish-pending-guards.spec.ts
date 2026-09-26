@@ -5,7 +5,7 @@ import { openOperatorPage } from "./fixtures/operatorNavigation";
 for (const width of [1440, 820]) {
   test(`publish warns on the exact pending machine before preflight at ${width}`, async ({ page }) => {
     await page.setViewportSize({ width, height: width === 820 ? 560 : 900 });
-    await installTauriMock(page, { androidRoster: true, fleetSize: 3 });
+    await installTauriMock(page, { androidRoster: true, fleetSize: 3, publishSheetReady: true });
     await page.addInitScript(() => {
       const w = window as unknown as { __TAURI_INTERNALS__: { invoke: (cmd: string, args: Record<string, unknown>) => Promise<unknown> }; pendingResolved: boolean; publishCalls: string[] };
       const invoke = w.__TAURI_INTERNALS__.invoke; w.pendingResolved = true; w.publishCalls = [];
@@ -40,14 +40,14 @@ for (const width of [1440, 820]) {
     await expect(page.getByText("Máy còn bài chưa lấy được link", { exact: true })).toHaveCount(0);
     expect(await page.evaluate(() => (window as unknown as { publishCalls: string[] }).publishCalls)).toEqual([]);
     const sheetStatus = page.locator(".publish-sheet-result");
-    await expect(sheetStatus).toContainText("Bản app chưa có cấu hình Google");
+    await expect(sheetStatus).toContainText("Đã liên kết Google Sheet");
     if (width === 820) {
       await page.getByRole("button", { name: "Thiết lập Google Sheet", exact: true }).focus();
       await page.keyboard.press("Tab");
       await expect(sheetStatus).toBeFocused();
       await page.getByRole("button", { name: "Thiết lập Google Sheet", exact: true }).click();
       await expect(page.locator(".pq-settings.is-open")).toBeVisible();
-      await expect(sheetStatus).toContainText("Mở Thiết lập Google để bổ sung.");
+      await expect(sheetStatus).toContainText("Đã liên kết Google Sheet");
       expect(await sheetStatus.evaluate(node => node.scrollWidth <= node.clientWidth)).toBe(true);
     }
     expect((await new AxeBuilder({ page }).include(".publish-page").analyze()).violations).toEqual([]);

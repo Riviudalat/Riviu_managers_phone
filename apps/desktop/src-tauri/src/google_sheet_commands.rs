@@ -944,17 +944,7 @@ pub async fn publish_sheet_diagnose_failed(
         .map_err(err)?
         .context("No OAuth connection for publication target")
         .map_err(err)?;
-    let tokens = state
-        .db
-        .google_oauth_tokens()
-        .map_err(err)?
-        .context("Google OAuth connection required")
-        .map_err(err)?;
-    if tokens.needs_refresh() {
-        return Err(err(
-            "Google OAuth token expired; reconnect before read-only diagnosis",
-        ));
-    }
+    let tokens = access_tokens(&state.db).await.map_err(err)?;
     if tokens.account_id != connection.account_id {
         return Err(err("Google account changed"));
     }

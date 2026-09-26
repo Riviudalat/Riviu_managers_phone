@@ -490,8 +490,29 @@ pub(crate) async fn run_bound_sheet_worker(
         let now = chrono::Utc::now().timestamp_millis();
         if configured_fingerprint.as_ref() != Some(&fingerprint) {
             let current = fingerprint.clone();
+            let scope = acceptance.clone();
             if let Err(error) = db
-                .storage_write(move |db| db.configure_bound_sheet_delivery(&current, now))
+                .storage_write(move |db| {
+                    if scope.active() {
+                        let mut assignment_ids = Vec::new();
+                        for campaign_id in scope.scoped_campaign_ids() {
+                            if let Some(detail) = db.get_publish_campaign(&campaign_id)? {
+                                for assignment in detail.assignments {
+                                    if scope.allows(
+                                        crate::dev_acceptance::AcceptanceCapability::SheetDelivery,
+                                        &campaign_id,
+                                        &assignment.udid,
+                                    ) {
+                                        assignment_ids.push(assignment.id);
+                                    }
+                                }
+                            }
+                        }
+                        db.configure_scoped_bound_sheet_delivery(&current, now, &assignment_ids)
+                    } else {
+                        db.configure_bound_sheet_delivery(&current, now)
+                    }
+                })
                 .await
             {
                 log::warn!("Sheet: không cập nhật được lịch gửi: {error:#}");

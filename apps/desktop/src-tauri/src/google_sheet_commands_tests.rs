@@ -2,6 +2,20 @@ use super::*;
 
 static SESSION_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
+#[test]
+fn failed_sheet_diagnosis_uses_the_shared_oauth_refresh_path() {
+    let source = include_str!("google_sheet_commands.rs");
+    let command = source
+        .split("pub async fn publish_sheet_diagnose_failed(")
+        .nth(1)
+        .expect("failed Sheet diagnosis command")
+        .split("pub async fn publish_sheet_readback(")
+        .next()
+        .expect("readback command boundary");
+    assert!(command.contains("access_tokens(&state.db).await"));
+    assert!(!command.contains("tokens.needs_refresh()"));
+}
+
 #[tokio::test]
 async fn status_keeps_saved_sheet_url_before_direct_provider_is_active() {
     let _session = SESSION_TEST_LOCK.lock().await;

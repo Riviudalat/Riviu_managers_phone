@@ -2,7 +2,7 @@ import { openOperatorPage } from "./fixtures/operatorNavigation";
 import { expect, test } from "@playwright/test";
 import { installTauriMock } from "./fixtures/tauriMock";
 test("approved quick desk scans, selects, assigns and checks without public dispatch", async ({page})=>{
-  await installTauriMock(page,{androidRoster:true,fleetSize:20});
+  await installTauriMock(page,{androidRoster:true,fleetSize:20,publishSheetReady:true});
     await page.addInitScript(() => {
       const w = window as unknown as {
         __TAURI_INTERNALS__: {
@@ -67,8 +67,8 @@ test("approved quick desk scans, selects, assigns and checks without public disp
           };
           return {
             inputDigest: "digest",
-            sheetEnabled: false,
-            sheetConfigured: false,
+            sheetEnabled: true,
+            sheetConfigured: true,
             canExecute: true,
             targetSnapshot: {
               targetRef: r.targetRef,
@@ -123,6 +123,7 @@ test("approved quick desk scans, selects, assigns and checks without public disp
   }
   await page.getByRole("button",{name:"Kiểm tra & đăng",exact:true}).click();
   await expect(page.getByRole("button",{name:"Xác nhận đăng 10 bài",exact:true})).toBeEnabled();
-  await expect(page.getByRole("dialog", {name:"Kiểm tra đợt đăng"})).toContainText("Ghi Sheet đang tắt");
+  await expect(page.locator(".pq-run-options")).toHaveText("Sheet bật · Dọn bản chuyển bật");
+  await expect(page.getByRole("dialog", {name:"Kiểm tra đợt đăng"})).not.toContainText("Ghi Sheet đang tắt");
   expect(await page.evaluate(() => (window as unknown as { __PUBLISH_CALLS__: { command: string }[] }).__PUBLISH_CALLS__.map(call => call.command))).toEqual(["publish_preflight"]);
 });

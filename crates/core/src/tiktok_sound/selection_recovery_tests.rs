@@ -82,6 +82,8 @@ struct Session {
     screenshot_unavailable: bool,
     editor_before_sound: bool,
     hot_requires_tap: bool,
+    auto_close_on_tap: bool,
+    post_tap_reads: AtomicUsize,
 }
 impl Session {
     fn new() -> Self {
@@ -116,6 +118,8 @@ impl Session {
             screenshot_unavailable: false,
             editor_before_sound: false,
             hot_requires_tap: false,
+            auto_close_on_tap: false,
+            post_tap_reads: AtomicUsize::new(0),
         }
     }
 }
@@ -230,6 +234,21 @@ impl UiSession for Session {
                 message: "accessibility queried before rendered sound rows settled".into(),
             }
             .into());
+        }
+        if self.auto_close_on_tap && self.taps.load(Ordering::Relaxed) > 0 {
+            if self.post_tap_reads.fetch_add(1, Ordering::Relaxed) == 0 {
+                return Err(crate::driver::AccessibilityReadUnavailable {
+                    message: "sheet closed while accessibility root changed".into(),
+                }
+                .into());
+            }
+            return Ok(crate::HierarchySourceSnapshot {
+                generation: n as u64,
+                xml: format!(
+                    r#"<hierarchy><node package="com.zhiliaoapp.musically" resource-id="com.zhiliaoapp.musically:id/tv_top_text" text="{}" bounds="[350,100][720,216]" enabled="true" displayed="true"/></hierarchy>"#,
+                    self.title
+                ),
+            });
         }
         if self.unreadable_tab {
             if self.empty_tab_before_navigation && self.taps.load(Ordering::Relaxed) == 0 {
@@ -416,6 +435,30 @@ async fn direct_sound_xml_refuses_stale_or_unselected_hot_before_ocr_fallback() 
         assert_eq!(session.taps.load(Ordering::Relaxed), 0);
         assert_eq!(session.backs.load(Ordering::Relaxed), 0);
     }
+}
+
+#[tokio::test(start_paused = true)]
+async fn measured_sound_reproof_does_not_accept_two_reads_of_one_xml_generation() {
+    let mut session = Session::new();
+    session.xml_override = Some(
+        include_str!(
+            "../../fixtures/tiktok-publish/musically-45.7.3-en/hot-machine10-redacted.txt"
+        )
+        .into(),
+    );
+    session.fixed_xml_generation = true;
+
+    let result = tokio::time::timeout(
+        Duration::from_secs(5),
+        snapshot::observe(&session, plan(), 5),
+    )
+    .await;
+
+    assert!(
+        result.is_err(),
+        "one cached XML generation cannot reprove a sound row"
+    );
+    assert_eq!(session.taps.load(Ordering::Relaxed), 0);
 }
 
 #[tokio::test(start_paused = true)]
@@ -785,6 +828,33 @@ async fn hierarchy_fallback_selects_once_and_confirms_exact_editor_sound() {
 
     assert_eq!(session.taps.load(Ordering::Relaxed), 1);
     assert_eq!(session.backs.load(Ordering::Relaxed), 1);
+}
+
+#[tokio::test(start_paused = true)]
+async fn auto_closed_sound_sheet_accepts_exact_stable_editor_without_back_or_second_tap() {
+    let mut session = Session::new();
+    session.read_failure = false;
+    session.auto_close_on_tap = true;
+    session.select_on_tap = true;
+    session.png =
+        include_bytes!("../../fixtures/tiktok-publish/musically-45.7.3-en/hot-visual.png").to_vec();
+    session.ocr = Arc::new(TabsWithoutRowsOcr);
+    let stop = AtomicBool::new(false);
+
+    tokio::time::timeout(
+        Duration::from_secs(120),
+        with_sound_budget(&stop, async {
+            let pool = resume_open_sounds(&session, plan(), 5).await?;
+            choose_and_confirm_sound(&session, plan(), &pool, 0).await
+        }),
+    )
+    .await
+    .expect("the exact editor chip must settle within the sound budget")
+    .unwrap();
+
+    assert_eq!(session.taps.load(Ordering::Relaxed), 1);
+    assert_eq!(session.backs.load(Ordering::Relaxed), 0);
+    assert!(session.post_tap_reads.load(Ordering::Relaxed) >= 3);
 }
 
 #[tokio::test(start_paused = true)]

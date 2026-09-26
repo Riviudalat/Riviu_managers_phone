@@ -8,6 +8,24 @@ pub async fn publish_check_links(
     udid: Option<String>,
 ) -> Result<serde_json::Value, CommandError> {
     let _admission = state.ensure_accepting_work()?;
+    if state.dev_acceptance.active()
+        && (!state
+            .dev_acceptance
+            .scoped_campaign_ids()
+            .contains(&campaign_id)
+            || !state
+                .dev_acceptance
+                .allows_any(crate::dev_acceptance::AcceptanceCapability::PublishVerification)
+            || udid.as_ref().is_some_and(|id| {
+                !state.dev_acceptance.allows(
+                    crate::dev_acceptance::AcceptanceCapability::PublishVerification,
+                    &campaign_id,
+                    id,
+                )
+            }))
+    {
+        return Err(acceptance_scope_denied());
+    }
     let rows = state
         .db
         .publish_verifications_for_campaign(&campaign_id, 1000)
@@ -29,7 +47,12 @@ pub async fn publish_check_links(
         if udid.as_ref().is_some_and(|id| id != &assignment.udid) {
             continue;
         }
-        let row = eligible_check_candidate(&capability, &rows);
+        let allowed = state.dev_acceptance.allows(
+            crate::dev_acceptance::AcceptanceCapability::PublishVerification,
+            &campaign_id,
+            &assignment.udid,
+        );
+        let row = eligible_check_candidate(&capability, &rows, allowed);
         let (status, error) = if let Some(row) = row {
             match verify_pending_assignment_inner(
                 &state.control,
@@ -43,6 +66,11 @@ pub async fn publish_check_links(
                 Ok(outcome) => outcome,
                 Err(error) => (CheckStatus::Ineligible, Some(error.to_string())),
             }
+        } else if !allowed {
+            (
+                CheckStatus::Ineligible,
+                Some("acceptanceScopeDenied".into()),
+            )
         } else {
             unavailable_check_outcome(capability.check_link.reason)
         };
@@ -58,10 +86,9 @@ pub async fn publish_check_links(
 pub(super) fn eligible_check_candidate<'a>(
     capability: &riviu_core::db::PublishRecoveryCapabilities,
     candidates: &'a [riviu_core::db::PendingPublishVerification],
+    allowed: bool,
 ) -> Option<&'a riviu_core::db::PendingPublishVerification> {
-    capability
-        .check_link
-        .allowed
+    (allowed && capability.check_link.allowed)
         .then(|| {
             candidates
                 .iter()
@@ -90,6 +117,15 @@ pub fn publish_resume_verification(
     expected_revision: i64,
 ) -> Result<riviu_core::db::PublishResumeVerificationResult, CommandError> {
     let _admission = state.ensure_accepting_work()?;
+    if state.dev_acceptance.active() {
+        ensure_assignment_allowed(&state.db, &assignment_id, |campaign, udid| {
+            state.dev_acceptance.allows(
+                crate::dev_acceptance::AcceptanceCapability::PublishVerification,
+                campaign,
+                udid,
+            )
+        })?;
+    }
     resume_verification_and_announce(
         &state.db,
         &state.events,
@@ -98,6 +134,38 @@ pub fn publish_resume_verification(
         expected_revision,
     )
     .map_err(preflight::err)
+}
+
+pub(super) fn acceptance_scope_denied() -> CommandError {
+    CommandError::code(
+        "AcceptanceScopeDenied",
+        "Bài hoặc máy nằm ngoài phạm vi nghiệm thu thủ công đã khóa",
+    )
+}
+
+pub(super) fn ensure_assignment_allowed(
+    db: &Database,
+    assignment_id: &str,
+    allowed: impl FnOnce(&str, &str) -> bool,
+) -> Result<(), CommandError> {
+    let campaign = db
+        .publication_campaign_id(assignment_id)
+        .map_err(preflight::err)?
+        .ok_or_else(|| CommandError::invalid_argument("Không tìm thấy bài"))?;
+    let detail = db
+        .get_publish_assignment_detail(&campaign, assignment_id)
+        .map_err(preflight::err)?
+        .ok_or_else(|| CommandError::invalid_argument("Không tìm thấy bài"))?;
+    let assignment = detail
+        .assignments
+        .iter()
+        .find(|assignment| assignment.id == assignment_id)
+        .ok_or_else(|| CommandError::invalid_argument("Không tìm thấy bài"))?;
+    if allowed(&campaign, &assignment.udid) {
+        Ok(())
+    } else {
+        Err(acceptance_scope_denied())
+    }
 }
 
 pub(super) fn resume_verification_and_announce(

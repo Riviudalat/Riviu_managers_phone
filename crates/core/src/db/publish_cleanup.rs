@@ -60,6 +60,24 @@ fn cleanup_import(evidence: &serde_json::Value) -> Option<String> {
         if cleanup.get("state").and_then(|value| value.as_str()) == Some("cleaned") {
             return None;
         }
+        let expected_import = cleanup
+            .get("importId")
+            .and_then(|value| value.as_str())
+            .or_else(|| post.get("importId").and_then(|value| value.as_str()));
+        if cleanup
+            .get("value")
+            .and_then(|value| value.get("state"))
+            .and_then(|value| value.as_str())
+            == Some("cleaned")
+            && cleanup
+                .get("value")
+                .and_then(|value| value.get("importId"))
+                .and_then(|value| value.as_str())
+                == expected_import
+            && expected_import.is_some()
+        {
+            return None;
+        }
         if cleanup.get("reason").and_then(|value| value.as_str())
             != Some("post_verification_pending")
             && cleanup.get("source").and_then(|value| value.as_str()) != Some("verified_deferred")
@@ -298,6 +316,26 @@ mod tests {
     fn proof() -> serde_json::Value {
         serde_json::json!({"post":{"state":"posted","publicationVerified":true,"postUrl":"https://www.tiktok.com/@fixture/photo/123","importId":"riviu-fixture-aa"},
             "cleanup":{"state":"kept","reason":"post_verification_pending","importId":"riviu-fixture-aa","appCleanup":{"state":"leftRunning"}}})
+    }
+
+    #[test]
+    fn nested_native_cleaned_proof_does_not_create_media_debt() {
+        let path = std::env::temp_dir().join(format!("cleanup-native-{}.db", Uuid::new_v4()));
+        let db = Database::open(&path).unwrap();
+        let mut evidence = proof();
+        evidence["cleanup"] = serde_json::json!({
+            "state": "kept", "reason": "post_verification_pending", "importId": "riviu-fixture-aa",
+            "value": {"state": "cleaned", "importId": "riviu-fixture-aa"}
+        });
+        let id = seed(
+            &db,
+            crate::PublishCleanupPolicy::DeleteImportedAssetsAfterVerified,
+            crate::PublishCampaignState::Succeeded,
+            &evidence,
+        );
+        assert!(db.pending_publish_cleanup(&id).unwrap().is_none());
+        drop(db);
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]

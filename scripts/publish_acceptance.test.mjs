@@ -22,7 +22,8 @@ function environment(t) {
     capabilities: { publishVerification: false, sheetDelivery: false } };
   fs.writeFileSync(devScope, JSON.stringify(initialDevScope) + '\n');
   const options = (mode = 'inspect', more = []) => parseArgs([
-    '--mode', mode, '--report-dir', dir, ...base, ...more]);
+    '--mode', mode, '--report-dir', dir, ...base,
+    ...(['preflight', 'submit'].includes(mode) ? ['--dev-scope', devScope] : []), ...more]);
   const phoneOnlyOptions = (mode = 'inspect', more = []) => parseArgs([
     '--mode', mode, '--report-dir', dir, '--udids', 'phone-b,phone-a', '--source', source,
     '--bundle-ids', 'bundle-b,bundle-a', '--sheet-disabled', 'true', '--dev-scope', devScope, ...more]);
@@ -99,9 +100,9 @@ function environment(t) {
         return structuredClone(detail.campaign);
       }
       case 'publish_execute': {
-        if (created?.sheetEnabled === false) assert.deepEqual(JSON.parse(fs.readFileSync(devScope, 'utf8')),
+        if (created) assert.deepEqual(JSON.parse(fs.readFileSync(devScope, 'utf8')),
           { activationId, campaignIds: ['campaign-fixture'], deviceIds: ['phone-b', 'phone-a'],
-            capabilities: { publishVerification: true } }, 'scope opens verification before Execute');
+            capabilities: { publishVerification: true, sheetDelivery: true, publishCleanup: true } }, 'scope opens verification, Sheet and cleanup before Execute');
         const intent = JSON.parse(fs.readFileSync(path.join(dir, 'execute-intent.json'), 'utf8'));
         assert.equal(intent.campaignId, args.campaignId, 'intent exists before Execute');
         assert.deepEqual(intent.assignmentIds, ['assignment-0', 'assignment-1']);
@@ -156,9 +157,41 @@ test('preflight binds explicit mapping and Sheet identity but never creates', as
   assert.deepEqual(request.bundleIds, ['bundle-b', 'bundle-a']);
   assert.deepEqual(request.targetRef, { type: 'explicit', udids: ['phone-b', 'phone-a'] });
   assert.equal(request.sheetEnabled, true);
+  assert.equal(request.deleteAfterPublish, true);
   assert.ok(e.calls.some(c => c.command === 'google_sheets_status'));
   assert.ok(e.calls.some(c => c.command === 'publish_sheet_check'));
   assert.equal(e.calls.some(c => c.command === 'publish_create_campaign'), false);
+});
+
+test('active Sheet can preflight without a last Picker selection', async t => {
+  const e = environment(t);
+  const invoke = async (command, args) => {
+    const value = await e.invoke(command, args);
+    if (command === 'google_sheets_status') value.selectedFileId = null;
+    return value;
+  };
+  const result = await runAcceptance(e.options('preflight'), { invoke });
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.report.preflight.sheetDelivery.spreadsheetId, 'sheet_fixture');
+  assert.ok(e.calls.some(call => call.command === 'publish_sheet_check'));
+});
+
+test('Sheet-enabled scoped acceptance keeps handoff, cleanup and Sheet delivery together', async t => {
+  const e = environment(t);
+  const prepared = await runAcceptance(e.options('preflight'), { invoke: e.invoke });
+  assert.equal(prepared.exitCode, 0);
+  const submitted = await runAcceptance(e.options('submit', ['--confirm', prepared.report.confirmation]), { invoke: e.invoke });
+  assert.equal(submitted.exitCode, 2);
+  assert.deepEqual(JSON.parse(fs.readFileSync(e.devScope, 'utf8')),
+    { activationId: 'fixture-activation-20260922', campaignIds: ['campaign-fixture'],
+      deviceIds: ['phone-b', 'phone-a'], capabilities: { publishVerification: true, sheetDelivery: true, publishCleanup: true } });
+  assert.equal(e.calls.filter(c => c.command === 'operation_prepare_devices').length, 1);
+  assert.equal(e.calls.filter(c => c.command === 'interaction_read_account').length, 2);
+  const created = e.calls.find(c => c.command === 'publish_create_campaign');
+  assert.equal(created.args.sheetEnabled, true);
+  assert.equal(created.args.deleteAfterPublish, true);
+  assert.ok(e.calls.findIndex(c => c.command === 'interaction_read_account')
+    < e.calls.findIndex(c => c.command === 'publish_create_campaign'));
 });
 
 test('real Android inspect refuses mock or absent devices before any effect command', async t => {
@@ -190,85 +223,74 @@ test('real Android inspect accepts the exact connected USB roster without effect
   assert.equal(e.calls.some(call => /preflight|create|execute/.test(call.command)), false);
 });
 
-test('phone-only preflight is explicit, durable and never contacts Google or Sheet IPC', async t => {
+test('Sheet-disabled preflight and submit cannot create new campaigns', t => {
   const e = environment(t);
-  Object.assign(e.preflight, { sheetConfigured: false, sheetEnabled: false, sheetDelivery: null });
-  const result = await runAcceptance(e.phoneOnlyOptions('preflight'), { invoke: e.invoke });
-  assert.equal(result.exitCode, 0);
-  assert.equal(result.report.acceptance, 'preflightOnly');
-  assert.equal(result.report.acceptanceScope, 'phoneOnly');
-  assert.equal(result.report.sheetAcceptance, 'sheetDisabled');
-  assert.ok(e.calls.every(c => !['google_sheets_status', 'publish_sheet_check', 'publish_sheet_readback'].includes(c.command)));
-  const request = e.calls.find(c => c.command === 'publish_preflight').args.request;
-  assert.equal(request.sheetEnabled, false);
-  const prepared = JSON.parse(fs.readFileSync(path.join(e.dir, 'preflight.json'), 'utf8'));
-  assert.equal(prepared.approval.scope.sheetDisabled, true);
-  assert.equal(prepared.approval.sheetDisabled, true);
-  assert.equal(prepared.approval.writer, null);
-  assert.equal(prepared.approval.sheetDelivery, null);
-  assert.equal(prepared.approval.devScope.path, e.devScope);
-  assert.match(prepared.approval.devScope.contentHash, /^[a-f0-9]{64}$/);
+  assert.throws(() => e.phoneOnlyOptions('preflight'), /bắt buộc ghi Sheet/);
+  assert.throws(() => e.phoneOnlyOptions('submit', ['--confirm', 'a'.repeat(64)]), /bắt buộc ghi Sheet/);
+  assert.equal(fs.existsSync(path.join(e.dir, 'create-intent.json')), false);
 });
 
-test('phone-only preflight accepts the backend omitting an optional Sheet target', async t => {
+test('historical phone-only campaign remains observable without Sheet or device commands', async t => {
   const e = environment(t);
-  e.preflight.sheetEnabled = false;
-  delete e.preflight.sheetDelivery;
-  const result = await runAcceptance(e.phoneOnlyOptions('preflight'), { invoke: e.invoke });
-  assert.equal(result.exitCode, 0);
-  const prepared = JSON.parse(fs.readFileSync(path.join(e.dir, 'preflight.json'), 'utf8'));
-  assert.equal(prepared.approval.sheetDelivery, null);
-});
-
-test('phone-only submit fingerprints the disabled Sheet decision and reports bounded success only', async t => {
-  const e = environment(t);
-  Object.assign(e.preflight, { sheetConfigured: false, sheetEnabled: false, sheetDelivery: null });
-  const prepared = await runAcceptance(e.phoneOnlyOptions('preflight'), { invoke: e.invoke });
-  const submitted = await runAcceptance(e.phoneOnlyOptions('submit', ['--confirm', prepared.report.confirmation]), { invoke: e.invoke });
-  assert.equal(submitted.exitCode, 2);
-  const intent = JSON.parse(fs.readFileSync(path.join(e.dir, 'create-intent.json'), 'utf8'));
-  assert.equal(intent.sheetDisabled, true);
-  assert.equal(intent.requestFingerprint, createHash('sha256')
-    .update(JSON.stringify({ sheetDisabled: true, args: intent.args })).digest('hex'));
-  assert.ok(e.calls.every(c => !['google_sheets_status', 'publish_sheet_check', 'publish_sheet_readback'].includes(c.command)));
-  assert.deepEqual(JSON.parse(fs.readFileSync(e.devScope, 'utf8')),
-    { activationId: 'fixture-activation-20260922', campaignIds: ['campaign-fixture'], deviceIds: ['phone-b', 'phone-a'],
-      capabilities: { publishVerification: true } });
-  const resumed = await runAcceptance(e.phoneOnlyOptions('submit', ['--confirm', prepared.report.confirmation]), { invoke: e.invoke });
-  assert.equal(resumed.exitCode, 2);
-  assert.equal(e.calls.filter(c => c.command === 'publish_execute').length, 1,
-    'an already-active scope never authorizes Execute replay');
-  assert.equal(e.calls.filter(c => c.command === 'operation_prepare_devices').length, 1,
-    'a persisted handoff receipt is never replayed');
-  assert.ok(e.calls.findIndex(c => c.command === 'operation_prepare_devices')
-    < e.calls.findIndex(c => c.command === 'publish_create_campaign'),
-  'handoff must precede campaign creation');
-  assert.equal(e.calls.filter(c => c.command === 'interaction_read_account').length, 2);
-  assert.ok(e.calls.findIndex(c => c.command === 'interaction_read_account')
-    < e.calls.findIndex(c => c.command === 'publish_create_campaign'),
-  'fresh account proof must precede campaign creation');
-
+  const options = e.phoneOnlyOptions('observe', ['--campaign-id', 'campaign-fixture']);
+  const approvalScope = { cdp: options.cdp, pageUrl: options.pageUrl, source: options.source,
+    contentSnapshot: options.contentSnapshot, udids: options.udids, bundleIds: options.bundleIds,
+    sheetId: null, sheetGid: null, sheetDisabled: true, devScope: e.devScope };
+  const digest = value => createHash('sha256').update(JSON.stringify(value)).digest('hex');
+  const binding = { path: e.devScope,
+    contentHash: createHash('sha256').update(fs.readFileSync(e.devScope)).digest('hex'),
+    activationId: e.initialDevScope.activationId };
+  const approval = { scope: approvalScope, sheetDisabled: true, writer: null, sheetDelivery: null,
+    devScope: binding, request: { sheetEnabled: false } };
+  const confirmation = digest(approval);
+  fs.writeFileSync(path.join(e.dir, 'preflight.json'), JSON.stringify({ approval, confirmation }));
+  const args = { requestId: 'legacy-request', bundleIds: options.bundleIds, udids: options.udids };
+  fs.writeFileSync(path.join(e.dir, 'create-intent.json'), JSON.stringify({
+    confirmation, sheetDisabled: true, args, requestFingerprint: digest({ sheetDisabled: true, args }),
+  }));
+  const campaign = e.detail.campaign;
+  campaign.requestId = args.requestId;
+  campaign.assignments.forEach((row, index) => { row.bundleId = `${args.requestId}:${args.bundleIds[index]}`; });
+  fs.writeFileSync(path.join(e.dir, 'campaign.json'), JSON.stringify(campaign));
+  fs.writeFileSync(e.devScope, JSON.stringify({ activationId: binding.activationId,
+    campaignIds: [campaign.id], deviceIds: options.udids,
+    capabilities: { publishVerification: true } }));
   for (const row of e.detail.assignments) {
     row.state = 'succeeded';
+    row.bundleId = `${args.requestId}:${args.bundleIds[row.ordinal]}`;
     row.evidenceJson = JSON.stringify({ post: { postUrl, publicationVerified: true, state: 'posted' } });
     row.sheetDelivery = null;
   }
-  const observed = await runAcceptance(e.phoneOnlyOptions('observe', ['--campaign-id', 'campaign-fixture']), { invoke: e.invoke });
-  assert.equal(observed.exitCode, 0);
-  assert.equal(observed.report.acceptance, 'phoneOnly/sheetDisabled');
-  assert.equal(observed.report.acceptanceScope, 'phoneOnly');
-  assert.equal(observed.report.sheetAcceptance, 'sheetDisabled');
-  assert.equal(observed.report.deliveryEvidence, 'sheetDisabled');
-  assert.notEqual(observed.report.acceptance, 'passed');
-  assert.ok(e.calls.every(c => c.command !== 'publish_sheet_readback'));
+  const result = await runAcceptance(options, { invoke: e.invoke });
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.report.acceptance, 'phoneOnly/sheetDisabled');
+  assert.ok(e.calls.every(call => ['list_devices', 'list_device_metas', 'publish_get'].includes(call.command)));
 });
 
-test('phone-only handoff failure is durable and blocks campaign creation', async t => {
+test('Sheet-enabled scoped submit reuses handoff, proof, request and Execute intent exactly once', async t => {
   const e = environment(t);
-  Object.assign(e.preflight, { sheetConfigured: false, sheetEnabled: false, sheetDelivery: null });
-  const prepared = await runAcceptance(e.phoneOnlyOptions('preflight'), { invoke: e.invoke });
+  const prepared = await runAcceptance(e.options('preflight'), { invoke: e.invoke });
+  const submitted = await runAcceptance(e.options('submit', ['--confirm', prepared.report.confirmation]), { invoke: e.invoke });
+  assert.equal(submitted.exitCode, 2);
+  const intent = JSON.parse(fs.readFileSync(path.join(e.dir, 'create-intent.json'), 'utf8'));
+  assert.equal(intent.args.sheetEnabled, true);
+  assert.equal(intent.args.deleteAfterPublish, true);
+  const resumed = await runAcceptance(e.options('submit', ['--confirm', prepared.report.confirmation]), { invoke: e.invoke });
+  assert.equal(resumed.exitCode, 2);
+  assert.equal(e.calls.filter(c => c.command === 'publish_execute').length, 1);
+  assert.equal(e.calls.filter(c => c.command === 'operation_prepare_devices').length, 1);
+  assert.equal(e.calls.filter(c => c.command === 'interaction_read_account').length, 2);
+  assert.ok(e.calls.findIndex(c => c.command === 'operation_prepare_devices')
+    < e.calls.findIndex(c => c.command === 'publish_create_campaign'));
+  assert.ok(e.calls.findIndex(c => c.command === 'interaction_read_account')
+    < e.calls.findIndex(c => c.command === 'publish_create_campaign'));
+});
+
+test('Sheet-enabled handoff failure is durable and blocks campaign creation', async t => {
+  const e = environment(t);
+  const prepared = await runAcceptance(e.options('preflight'), { invoke: e.invoke });
   e.failHandoff();
-  const options = e.phoneOnlyOptions('submit', ['--confirm', prepared.report.confirmation]);
+  const options = e.options('submit', ['--confirm', prepared.report.confirmation]);
   const first = await runAcceptance(options, { invoke: e.invoke });
   const second = await runAcceptance(options, { invoke: e.invoke });
   assert.equal(first.exitCode, 1);
@@ -278,12 +300,11 @@ test('phone-only handoff failure is durable and blocks campaign creation', async
   assert.equal(fs.existsSync(path.join(e.dir, 'create-intent.json')), false);
 });
 
-test('phone-only lost handoff ACK is never replayed and never creates a campaign', async t => {
+test('Sheet-enabled lost handoff ACK is never replayed and never creates a campaign', async t => {
   const e = environment(t);
-  Object.assign(e.preflight, { sheetConfigured: false, sheetEnabled: false, sheetDelivery: null });
-  const prepared = await runAcceptance(e.phoneOnlyOptions('preflight'), { invoke: e.invoke });
+  const prepared = await runAcceptance(e.options('preflight'), { invoke: e.invoke });
   e.loseHandoff();
-  const options = e.phoneOnlyOptions('submit', ['--confirm', prepared.report.confirmation]);
+  const options = e.options('submit', ['--confirm', prepared.report.confirmation]);
   const first = await runAcceptance(options, { invoke: e.invoke });
   const second = await runAcceptance(options, { invoke: e.invoke });
   assert.equal(first.exitCode, 2);
@@ -292,12 +313,11 @@ test('phone-only lost handoff ACK is never replayed and never creates a campaign
   assert.equal(e.calls.some(c => c.command === 'publish_create_campaign'), false);
 });
 
-test('phone-only account mismatch after handoff blocks campaign creation', async t => {
+test('Sheet-enabled account mismatch after handoff blocks campaign creation', async t => {
   const e = environment(t);
-  Object.assign(e.preflight, { sheetConfigured: false, sheetEnabled: false, sheetDelivery: null });
-  const prepared = await runAcceptance(e.phoneOnlyOptions('preflight'), { invoke: e.invoke });
+  const prepared = await runAcceptance(e.options('preflight'), { invoke: e.invoke });
   e.mismatchAccount();
-  const result = await runAcceptance(e.phoneOnlyOptions('submit', [
+  const result = await runAcceptance(e.options('submit', [
     '--confirm', prepared.report.confirmation,
   ]), { invoke: e.invoke });
   assert.equal(result.exitCode, 1);
@@ -306,7 +326,7 @@ test('phone-only account mismatch after handoff blocks campaign creation', async
   assert.equal(fs.existsSync(path.join(e.dir, 'create-intent.json')), false);
 });
 
-test('Sheet-disabled mode rejects ambiguous false values, Sheet targets and implicit omission', () => {
+test('new campaigns require Sheet target and absolute manual scope', () => {
   const common = ['--mode', 'preflight', '--report-dir', 'out', '--udids', 'phone-a',
     '--source', source, '--bundle-ids', 'bundle-a'];
   assert.throws(() => parseArgs([...common, '--sheet-disabled', 'false']));
@@ -317,24 +337,26 @@ test('Sheet-disabled mode rejects ambiguous false values, Sheet targets and impl
     '--sheet-disabled', 'true']));
   assert.throws(() => parseArgs([...common, '--sheet-disabled', 'true', '--dev-scope', 'relative.json']));
   assert.throws(() => parseArgs([...common, '--sheet-id', 'sheet_fixture', '--sheet-gid', '0',
-    '--dev-scope', path.resolve('scope.json')]));
+    '--dev-scope', 'relative.json']));
+  assert.throws(() => parseArgs([...common, '--sheet-id', 'sheet_fixture', '--sheet-gid', '0']),
+    /--dev-scope/);
+  assert.equal(parseArgs([...common, '--sheet-id', 'sheet_fixture', '--sheet-gid', '0',
+    '--dev-scope', path.resolve('scope.json')]).sheetDisabled, false);
 });
 
-test('phone-only scope rejects drift and never creates or executes', async t => {
+test('Sheet-enabled scope rejects drift and never creates or executes', async t => {
   const e = environment(t);
-  Object.assign(e.preflight, { sheetConfigured: false, sheetEnabled: false, sheetDelivery: null });
-  const prepared = await runAcceptance(e.phoneOnlyOptions('preflight'), { invoke: e.invoke });
+  const prepared = await runAcceptance(e.options('preflight'), { invoke: e.invoke });
   fs.writeFileSync(e.devScope, JSON.stringify(e.initialDevScope, null, 2) + '\n');
   const before = e.calls.length;
-  const result = await runAcceptance(e.phoneOnlyOptions('submit', ['--confirm', prepared.report.confirmation]), { invoke: e.invoke });
+  const result = await runAcceptance(e.options('submit', ['--confirm', prepared.report.confirmation]), { invoke: e.invoke });
   assert.equal(result.exitCode, 1);
   assert.equal(e.calls.slice(before).some(c => ['publish_create_campaign', 'publish_execute'].includes(c.command)), false);
 });
 
-test('phone-only scope replacement failure persists campaign receipt but never executes', async t => {
+test('Sheet-enabled scope replacement failure persists campaign receipt but never executes', async t => {
   const e = environment(t);
-  Object.assign(e.preflight, { sheetConfigured: false, sheetEnabled: false, sheetDelivery: null });
-  const prepared = await runAcceptance(e.phoneOnlyOptions('preflight'), { invoke: e.invoke });
+  const prepared = await runAcceptance(e.options('preflight'), { invoke: e.invoke });
   const rename = fs.renameSync;
   fs.renameSync = (from, to) => {
     if (to === e.devScope) throw new Error('scope replace failed');
@@ -342,7 +364,7 @@ test('phone-only scope replacement failure persists campaign receipt but never e
   };
   let result;
   try {
-    result = await runAcceptance(e.phoneOnlyOptions('submit', ['--confirm', prepared.report.confirmation]), { invoke: e.invoke });
+    result = await runAcceptance(e.options('submit', ['--confirm', prepared.report.confirmation]), { invoke: e.invoke });
   } finally { fs.renameSync = rename; }
   assert.equal(result.exitCode, 1);
   assert.equal(fs.existsSync(path.join(e.dir, 'campaign.json')), true);
@@ -351,9 +373,8 @@ test('phone-only scope replacement failure persists campaign receipt but never e
   assert.deepEqual(JSON.parse(fs.readFileSync(e.devScope, 'utf8')), e.initialDevScope);
 });
 
-test('phone-only preflight accepts only the exact inactive DevAcceptancePolicy schema', async t => {
+test('Sheet-enabled preflight accepts only the exact inactive DevAcceptancePolicy schema', async t => {
   const e = environment(t);
-  Object.assign(e.preflight, { sheetConfigured: false, sheetEnabled: false, sheetDelivery: null });
   for (const policy of [
     { campaignIds: ['other'], deviceIds: ['phone-b', 'phone-a'] },
     { campaignIds: [], deviceIds: ['phone-a', 'phone-b'] },
@@ -361,7 +382,7 @@ test('phone-only preflight accepts only the exact inactive DevAcceptancePolicy s
     { campaignIds: [], deviceIds: ['phone-b', 'phone-a'], capabilities: {}, extra: true },
   ]) {
     fs.writeFileSync(e.devScope, JSON.stringify(policy) + '\n');
-    const result = await runAcceptance(e.phoneOnlyOptions('preflight'), { invoke: e.invoke });
+    const result = await runAcceptance(e.options('preflight'), { invoke: e.invoke });
     assert.equal(result.exitCode, 1);
     assert.equal(fs.existsSync(path.join(e.dir, 'preflight.json')), false);
   }
@@ -392,7 +413,7 @@ test('lost create ACK resumes same durable request and never creates a different
   assert.equal(fs.readFileSync(path.join(e.dir, 'create-intent.json'), 'utf8'), firstIntent);
   assert.equal(e.calls.filter(c => c.command === 'publish_create_campaign').length, 2);
   assert.equal(e.calls.filter(c => c.command === 'publish_execute').length, 1);
-  assert.deepEqual(resumed.report.counts, { requested: 2, enqueued: 2, submitted: 2, verified: 0, sheetSent: 0, urlReadback: 0 });
+  assert.deepEqual(resumed.report.counts, { requested: 2, enqueued: 2, submitted: 2, verified: 0, sheetSent: 0, urlReadback: 0, mediaCleaned: 0 });
 });
 
 test('lost execute ACK and subsequent submit only observe; persisted intent is never replayed', async t => {
@@ -637,6 +658,24 @@ test('empty assignments and failed rows are blocked, not vacuous success or endl
   assert.equal((await runAcceptance(e.options('observe', ['--campaign-id', 'campaign-fixture']), { invoke: e.invoke })).exitCode, 1);
 });
 
+test('tampered create intent cannot disable Sheet or verified media cleanup', async t => {
+  for (const field of ['sheetEnabled', 'deleteAfterPublish']) {
+    const e = environment(t);
+    const prepared = await runAcceptance(e.options('preflight'), { invoke: e.invoke });
+    const options = e.options('submit', ['--confirm', prepared.report.confirmation]);
+    e.loseCreate();
+    await runAcceptance(options, { invoke: e.invoke });
+    const file = path.join(e.dir, 'create-intent.json');
+    const intent = JSON.parse(fs.readFileSync(file, 'utf8'));
+    intent.args[field] = false;
+    intent.requestFingerprint = createHash('sha256').update(JSON.stringify(intent.args)).digest('hex');
+    fs.writeFileSync(file, JSON.stringify(intent));
+    const before = e.calls.length;
+    assert.equal((await runAcceptance(options, { invoke: e.invoke })).exitCode, 1);
+    assert.equal(e.calls.slice(before).some(call => ['publish_create_campaign', 'publish_execute'].includes(call.command)), false);
+  }
+});
+
 test('phone-only observe rejects a foreign Sheet-enabled campaign despite the CLI flag', async t => {
   const e = environment(t);
   for (const row of e.detail.assignments) {
@@ -709,6 +748,17 @@ test('acceptance needs matching canonical proof, durable receipt and authenticat
   assert.equal(result.exitCode, 0);
   assert.equal(result.report.acceptance, 'passed');
   assert.equal(result.report.counts.urlReadback, 2);
+  e.detail.campaign.cleanupPolicy = 'deleteImportedAssetsAfterVerified';
+  const pendingCleanup = await runAcceptance(e.options('observe', ['--campaign-id', 'campaign-fixture']), { invoke });
+  assert.equal(pendingCleanup.exitCode, 2);
+  assert.equal(pendingCleanup.report.acceptance, 'pendingCleanup');
+  for (const row of e.detail.assignments) {
+    row.evidenceJson = JSON.stringify({ post: { postUrl, publicationVerified: true, state: 'posted', importId: `import-${row.id}` },
+      cleanup: { state: 'cleaned', importId: `import-${row.id}` } });
+  }
+  const cleaned = await runAcceptance(e.options('observe', ['--campaign-id', 'campaign-fixture']), { invoke });
+  assert.equal(cleaned.exitCode, 0);
+  assert.equal(cleaned.report.counts.mediaCleaned, 2);
   const wrongAccount = async (command, args) => {
     const value = await invoke(command, args);
     if (command === 'list_device_metas') for (const row of value) row.handle = 'different.account';

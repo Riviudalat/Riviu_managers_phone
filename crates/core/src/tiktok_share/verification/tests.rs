@@ -164,6 +164,7 @@ fn short_ellipsized_caption_requests_expansion_without_accepting_a_prefix() {
             navigation_enabled: 0,
             navigation_clickable: 0,
             screen_state: String::new(),
+            unknown_screen_shape: None,
         },
     };
     let truncated = format!("{}...", CAPTION.chars().take(35).collect::<String>());
@@ -304,6 +305,7 @@ async fn comments_recovery_observes_post_before_grid_and_never_backs_from_compos
                 navigation_enabled: 0,
                 navigation_clickable: 0,
                 screen_state: String::new(),
+                unknown_screen_shape: None,
             },
         };
         assert_eq!(
@@ -319,7 +321,38 @@ async fn comments_recovery_observes_post_before_grid_and_never_backs_from_compos
         assert!(session.writes.lock().is_empty());
         if target == "post" {
             assert_eq!(*session.page.lock(), "profile");
+        } else if target == "unknown" {
+            let value = serde_json::to_value(&capture.diagnostic).unwrap();
+            assert_eq!(value["unknownScreenShape"]["totalNodes"], 2);
+            assert_eq!(value["unknownScreenShape"]["targetVisibleNodes"], 1);
+            assert_eq!(value["unknownScreenShape"]["targetClickableNodes"], 0);
+            assert_eq!(value["unknownScreenShape"]["hasPostCaption"], false);
+            assert_eq!(value["unknownScreenShape"]["hasShareControl"], false);
+            assert!(!value.to_string().contains("No recognized screen"));
         }
+    }
+}
+
+#[test]
+fn unknown_screen_shape_keeps_only_counts_and_measured_control_presence() {
+    let plan = PublishVerificationPlan::for_build(TRILL, "en", "38.3.2").unwrap();
+    let xml = format!(
+        r#"<hierarchy><node package="{TRILL}" text="private-caption-and-account" content-desc="private-link" resource-id="{TRILL}:id/private" bounds="[0,0][200,200]" enabled="true" clickable="true" displayed="true"/><node package="android" text="private-overlay" bounds="[0,0][100,100]" displayed="true"/></hierarchy>"#
+    );
+    let shape = UnknownScreenShape::from_tree(&tree(xml), &plan);
+    let serialized = serde_json::to_string(&shape).unwrap();
+    assert_eq!(shape.total_nodes, 3);
+    assert_eq!(shape.target_visible_nodes, 1);
+    assert_eq!(shape.target_clickable_nodes, 1);
+    assert_eq!(shape.foreign_visible_nodes, 1);
+    assert!(!shape.has_post_caption && !shape.has_share_control && !shape.has_copy_control);
+    for private in [
+        "private-caption-and-account",
+        "private-link",
+        "private-overlay",
+        ":id/private",
+    ] {
+        assert!(!serialized.contains(private));
     }
 }
 
@@ -338,6 +371,7 @@ fn identity() -> SubmissionIdentity {
 struct Session {
     trill: bool,
     global_45_7_3: bool,
+    repeated_grid: bool,
     comments_back_target: &'static str,
     page: Mutex<&'static str>,
     page_number: Mutex<u32>,
@@ -370,6 +404,7 @@ impl Default for Session {
         Self {
             trill: false,
             global_45_7_3: false,
+            repeated_grid: false,
             comments_back_target: "post",
             page: Mutex::new("feed"),
             page_number: Mutex::new(0),
@@ -443,7 +478,26 @@ impl Session {
             "profile" => {
                 // Account controls reproduce the already retained 46.2.1 fixture;
                 // the scroll container is an explicit synthetic observation.
-                format!("{}{}{}<node package=\"{PACKAGE}\" enabled=\"true\" scrollable=\"true\" bounds=\"[0,500][900,1750]\">{}{}</node>", node("", "Edit", "", "[600,100][750,150]", true), node(if self.global_45_7_3 { ":id/s0v" } else { ":id/scn" }, "@fixture.account", "", "[300,160][600,210]", true), node("", "", "Profile menu", "[800,100][900,150]", true), node(":id/cover", "", "", "[0,550][400,1000]", true), node(":id/cover", "", "", "[0,1050][400,1500]", true))
+                let covers = if self.repeated_grid {
+                    [
+                        "[0,550][295,1000]",
+                        "[300,550][595,1000]",
+                        "[600,550][895,1000]",
+                        "[0,1050][295,1500]",
+                        "[300,1050][595,1500]",
+                        "[600,1050][895,1500]",
+                    ]
+                    .into_iter()
+                    .map(|bounds| node(":id/cover", "", "", bounds, true))
+                    .collect::<String>()
+                } else {
+                    format!(
+                        "{}{}",
+                        node(":id/cover", "", "", "[0,550][400,1000]", true),
+                        node(":id/cover", "", "", "[0,1050][400,1500]", true)
+                    )
+                };
+                format!("{}{}{}<node package=\"{PACKAGE}\" enabled=\"true\" scrollable=\"true\" bounds=\"[0,500][900,1750]\">{covers}</node>", node("", "Edit", "", "[600,100][750,150]", true), node(if self.global_45_7_3 { ":id/s0v" } else { ":id/scn" }, "@fixture.account", "", "[300,160][600,210]", true), node("", "", "Profile menu", "[800,100][900,150]", true))
             }
             "post" => format!(
                 "{}{}{}{}{}",
@@ -551,7 +605,11 @@ impl UiSession for Session {
                 if self.tile_opens_later {
                     self.pending_post_reads.store(1, Ordering::Relaxed);
                 }
-                *self.current_tile.lock() = u32::from(point.y > 1000.0);
+                *self.current_tile.lock() = if self.repeated_grid {
+                    u32::from(point.y > 1000.0) * 3 + (point.x / 300.0) as u32
+                } else {
+                    u32::from(point.y > 1000.0)
+                };
                 *self.expanded.lock() = false;
                 "post"
             }
@@ -1115,6 +1173,58 @@ async fn global_45_7_3_candidate_trace_records_rejections_without_copying() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn global_45_7_3_repeated_grid_can_reach_matching_third_viewport() {
+    let session = Session {
+        global_45_7_3: true,
+        repeated_grid: true,
+        matching_page: 2,
+        ..Default::default()
+    };
+    let plan = PublishVerificationPlan::for_build(PACKAGE, "en", "45.7.3").unwrap();
+    let captured = capture_submission_link(&session, &plan, CAPTION, &identity()).await;
+    assert_eq!(captured.outcome, OwnPostLink::Captured(URL.into()));
+    assert_eq!(captured.diagnostic.viewports_visited, 3);
+    assert_eq!(captured.diagnostic.candidates_visited, 18);
+    assert_eq!(captured.diagnostic.copy_attempts, 1);
+}
+
+#[test]
+fn global_45_7_3_repeated_mismatches_do_not_exhaust_unique_search_budget() {
+    let global = PublishVerificationPlan::for_build(PACKAGE, "en", "45.7.3").unwrap();
+    let older = PublishVerificationPlan::for_build(PACKAGE, "en", "45.4.3").unwrap();
+    let mut trace = Vec::new();
+    for index in 0..12 {
+        let unique = index % 6;
+        trace.push(VerificationCandidateTrace {
+            viewport: index / 6 + 1,
+            index: index % 6 + 1,
+            profile_snapshot_generation: u64::from(index) + 1,
+            post_snapshot_generation: Some(u64::from(index) + 2),
+            tile_bounds: [0.0; 4],
+            caption_digest: Some(format!("caption-{unique}")),
+            time_digest: Some(format!("time-{unique}")),
+            reason_code: Some(VerificationReason::CaptionMismatch),
+        });
+    }
+    assert!(!candidate_budget_exhausted(&global, &trace, 12));
+    assert!(candidate_budget_exhausted(&older, &trace, 12));
+    for index in 12..18 {
+        trace.push(VerificationCandidateTrace {
+            caption_digest: Some(format!("caption-{index}")),
+            time_digest: Some(format!("time-{index}")),
+            ..trace[0].clone()
+        });
+    }
+    assert!(candidate_budget_exhausted(&global, &trace, 18));
+    for entry in trace.iter_mut().skip(12) {
+        entry.caption_digest = Some("caption-0".into());
+        entry.time_digest = Some("time-0".into());
+    }
+    assert!(!candidate_budget_exhausted(&global, &trace, 18));
+    assert!(candidate_budget_exhausted(&global, &trace, 24));
+}
+
+#[tokio::test(start_paused = true)]
 async fn ambiguous_caption_or_unmeasured_time_never_reaches_share() {
     for (duplicate_caption, malformed_time, reason) in [
         (true, false, VerificationReason::CaptionAmbiguous),
@@ -1294,6 +1404,7 @@ fn a_changed_post_snapshot_cannot_combine_prior_caption_with_new_time() {
             navigation_enabled: 0,
             navigation_clickable: 0,
             screen_state: String::new(),
+            unknown_screen_shape: None,
             contract_version: 1,
             package: PACKAGE.into(),
             locale: "en".into(),

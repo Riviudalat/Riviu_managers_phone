@@ -3,8 +3,8 @@ import { expect, test, type Page, type Locator } from "@playwright/test";
 import AxeBuilder from "@axe-core/playwright";
 import { installTauriMock } from "./fixtures/tauriMock";
 
-async function fixture(page: Page, count = 10, fleetSize = 10) {
-  await installTauriMock(page, { androidRoster: true, fleetSize });
+async function fixture(page: Page, count = 10, fleetSize = 10, publishSheetReady = true) {
+  await installTauriMock(page, { androidRoster: true, fleetSize, publishSheetReady });
   await page.addInitScript(({ count }) => {
     const w = window as unknown as { __TAURI_INTERNALS__: { invoke: (command: string, args: Record<string, unknown>) => Promise<unknown> }; scheduleCalls: { command: string; args: Record<string, unknown> }[] };
     const original = w.__TAURI_INTERNALS__.invoke;
@@ -190,10 +190,9 @@ test("after quick selection a direct drag moves only its origin and reveals matc
   expect(await page.evaluate(() => (window as unknown as { scheduleCalls: unknown[] }).scheduleCalls)).toEqual([]);
 });
 test("footer takes the operator to the Google connection in Setup", async ({ page }) => {
-  await page.setViewportSize({ width: 820, height: 560 }); await fixture(page, 3, 3);
+  await page.setViewportSize({ width: 820, height: 560 }); await fixture(page, 3, 3, false);
   await page.getByRole("tab", { name: "Thiết lập", exact: true }).click();
-  await page.locator(".pq-run-options > summary").click();
-  await page.getByRole("checkbox", { name: "Ghi kết quả lên Sheet", exact: true }).check();
+  await expect(page.locator(".pq-run-options")).toHaveText("Sheet bật · Dọn bản chuyển bật");
   await page.getByRole("tab", { name: "Hẹn giờ", exact: true }).click();
   await page.getByRole("button", { name: "Chọn nhanh", exact: true }).click();
   await page.getByLabel("Ngày đăng", { exact: true }).fill("2099-09-10");

@@ -517,9 +517,9 @@ trước đăng; nhãn trung tính **Đã liên kết Google Sheet** chưa phả
 ghi hiện tại. Backend kiểm tra lại bảng, tab và quyền ghi trong preflight; lỗi tại
 đó chặn đăng. Nút **Kiểm tra kết nối** vẫn dùng để đối chiếu ngay khi cần.
 Trên màn hẹp, bấm **Thiết lập Google Sheet** để mở các control kết nối; Escape đóng
-phần này và trả focus. Trạng thái kết nối/lỗi thật vẫn hiển thị khi thu gọn. Các
-lựa chọn **Ghi kết quả lên Sheet / Xóa bản chuyển** nằm trong **Tùy chọn** ở thanh
-cuối, kèm tóm tắt trạng thái đã chọn; thu gọn không đổi lựa chọn.
+phần này và trả focus. Trạng thái kết nối/lỗi thật vẫn hiển thị khi thu gọn.
+Lượt đăng mới luôn ghi kết quả lên Sheet và dọn bản media đã chuyển sang điện thoại
+sau khi xác minh bài; Bàn đăng nhanh không có công tắc tắt hai việc này.
 
 Kết nối kiểm tra trực tiếp bảng và tab trong link, không mở Google Picker.
 Khi đăng nhập, cấp quyền Google Sheets cho tài khoản có quyền sửa bảng đó; phiên
@@ -557,10 +557,11 @@ Sheet hoặc cho rằng chờ lâu là được chiếm khóa; cần đối chi�
 năng reset cũ không hỗ trợ tab giao thức mới (schema 2), sẽ từ chối trước sao lưu
 hoặc xóa. Đây là quy trình và giới hạn giao thức, không phải xác nhận đã nghiệm thu
 ghi đồng thời trên nhiều PC thật.
-Khi đã nhập link, preflight phải xác minh thành công trước khi đăng hoặc lưu lịch
-có bật ghi Sheet. Có thể tắt **Ghi kết quả lên Sheet** để chạy lượt không ghi bảng.
-Khi kiểm tra trước đăng hoặc lưu lịch, Riviu chốt đúng bảng/tab và chế độ báo cáo
-của lượt đó. Đổi kết nối cho lượt mới không chuyển các bài cũ sang bảng khác.
+Preflight phải xác minh thành công bảng, tab và quyền ghi trước khi đăng ngay hoặc
+lưu lịch mới. Không có đường đăng mới bỏ qua Sheet. Khi kiểm tra trước đăng hoặc
+lưu lịch, Riviu chốt đúng bảng/tab và chính sách dọn media của lượt đó. Đổi kết nối
+cho lượt mới không chuyển các bài cũ sang bảng khác; chiến dịch cũ giữ nguyên
+chính sách Sheet/dọn media đã lưu, không bị thay đổi hồi tố.
 Hộp **Kiểm tra đợt đăng** tách pha chuẩn bị thiết bị và kiểm tra từng máy. Khi chờ,
 danh sách bài–máy chỉ ghi **Chờ kết quả**, chưa coi máy là đạt. Khi có kết quả,
 điều kiện Sheet chung và máy cần xử lý xuất hiện trước; bộ lọc chuyển giữa
@@ -584,7 +585,7 @@ Nếu nguồn, phân công hoặc trạng thái máy đổi trong lúc xác nh�
 định cũ. Máy đã ghép bị offline/ra phạm vi vẫn được giữ để chỉ rõ lỗi, không âm thầm
 bỏ cặp. Bài đang gán bị bộ lọc ẩn sẽ khóa Gán/Đổi ở khung phải và có **Hiện bài**;
 không tự gán sang bài khác. **Bỏ chọn toàn bộ bài/máy** tác động cả phần bị tìm kiếm ẩn.
-Dòng tổng kết và hộp kiểm tra ghi rõ Sheet đang bật hay tắt. Có thể Hủy khi đang
+Dòng tổng kết và hộp kiểm tra ghi rõ đích Sheet bắt buộc. Có thể Hủy khi đang
 chuyển nội dung trước Đăng. Theo dõi tự đọc lại kết quả mỗi5giây khi đang mở.
 Đăng nhiều máy chạy theo từng máy: máy nào tải đủ và xác nhận ảnh xong sẽ bắt đầu
 đăng ngay khi có lượt điều khiển, trong lúc máy khác tiếp tục tải. Một máy lỗi
@@ -608,9 +609,13 @@ cần kiểm tra. App không tự bấm Đăng lần nữa để giải quyết 
 Sau Đăng, Theo dõi hiển thị lý do chưa xác minh, lần kiểm gần nhất và lần kiểm
 kế tiếp. Trên Android, sau khi nhận kết quả đã gửi và máy rảnh, app tắt hẳn đúng
 TikTok rồi mở lại trước khi lấy link. Nếu chưa có link, chu kỳ tắt/mở và kiểm tra
-lặp sau 5 phút, tính từ cuối lần kiểm trước. Media được giữ; link xác minh xong
-được gửi Sheet ngay. Không đăng lại, không restart khi máy đang bận, tác vụ đã dừng
-hoặc link đã xác minh. Tắt/mở lỗi cũng giữ bài và chờ lần kiểm kế tiếp.
+lặp sau 5 phút, tính từ cuối lần kiểm trước. Media được giữ khi còn chờ link; link
+xác minh xong được gửi Sheet ngay. Chỉ sau khi bài và liên kết chính tắc được xác
+minh, app mới xóa bản media đã nhập vào điện thoại; ảnh/video nguồn trên PC không
+bị xóa. Lỗi dọn media được theo dõi riêng và không biến thành yêu cầu Đăng lại.
+Không đăng lại bài để lấy link. Không restart khi máy đang bận, tác vụ đã dừng
+hoặc link đã xác minh.
+Tắt/mở lỗi cũng giữ bài và chờ lần kiểm kế tiếp.
 Lỗi đọc clipboard được hiển thị riêng với trường hợp đọc thành công nhưng chưa
 có link mới. Thông báo TikTok đang xử lý có ảnh đối chiếu sau Copy; trạng thái
 này vẫn là chờ, chưa tính là xuất bản hoặc ghi link thành công.
@@ -718,8 +723,9 @@ riêng cùng **Thử lưu nháp lại**, không bị thông báo đã gán bài 
 
 Lịch đã lưu xuất hiện từng lượt trong **Theo dõi**, kèm ngày giờ và nút hủy.
 Giờ dùng múi giờ máy tính và là thời điểm bắt đầu xử lý, không phải thời điểm
-TikTok hoàn tất tải bài. Giữ Riviu và máy tính đang chạy, điện thoại kết nối mạng.
-Mở lại app sau giờ hẹn sẽ đánh dấu lượt đó **Lỡ lịch**, không tự đăng bù.
+TikTok hoàn tất tải bài. Phải giữ Riviu/controller và máy tính đang chạy đến giờ
+hẹn, điện thoại kết nối mạng. Mở lại app sau giờ hẹn sẽ đánh dấu lượt đó
+**Lỡ lịch**, không tự đăng bù hoặc gửi lại Post.
 Muốn ngày khác, tạo một lịch mới với ngày khác; tính năng này không tự lặp hằng ngày.
 
 Cách chạy một lượt trong Bàn đăng nhanh:
@@ -742,11 +748,12 @@ Cách chạy một lượt trong Bàn đăng nhanh:
 3. Chọn máy và bấm **Ghép bài với máy đã chọn**. Dòng cuối phải đủ `N/N bài có máy`.
    Chọn 10 bài chỉ cần 10 máy dù đang kết nối 20 máy. Nếu chọn riêng ít hơn số bài,
    thêm máy hoặc giảm số bài rồi ghép lại.
-4. Chọn **Ghi kết quả lên Sheet** và giữ/xóa bản chuyển, rồi bấm **Kiểm tra & đăng**.
+4. Kiểm tra đúng link/tab Google Sheet đã xác minh, rồi bấm **Kiểm tra & đăng**.
    Đọc kết quả từng máy, bấm **Xác nhận đăng N bài** và xác nhận công khai. Nhạc được
    chọn và đọc lại trong TikTok sau khi mở máy; kiểm tra đầu vào chưa có nghĩa đã chọn
-   nhạc. Các máy có thể dùng trùng nhạc. Bài chưa xác minh giữ nội dung trên điện thoại;
-   trạng thái dọn được hiển thị riêng trong chi tiết.
+   nhạc. Các máy có thể dùng trùng nhạc. Bài chưa xác minh giữ media đã chuyển trên
+   điện thoại; sau khi xác minh liên kết, app dọn bản chuyển và hiển thị kết quả dọn
+   riêng trong chi tiết. Thư mục nguồn trên PC được giữ nguyên.
 
 Rời trang hoặc mở lại app khôi phục bài, caption và ghép máy đã lưu trong bản nháp.
 Kết quả kiểm tra và quyền xác nhận đăng không được khôi phục; phải kiểm tra lại trước lượt mới.
@@ -769,13 +776,14 @@ sớm, chỉ lấy liên kết/ghi Sheet, không đăng lại bài hay đăng c�
 Giữ Riviu chạy, máy tính không ngủ và điện thoại có mạng. Không có thời gian hoàn tất cố định
 vì TikTok còn xử lý/xét duyệt. **Chưa chắc chắn** giữ bằng chứng riêng và không cho đăng lại.
 
-**Hoàn tất** chỉ xuất hiện khi có liên kết đã xác minh và Sheet đã xác nhận nếu bật ghi.
+Với lượt mới, **Hoàn tất** chỉ xuất hiện khi có liên kết đã xác minh và Sheet đã
+xác nhận.
 Còn nợ Sheet thì hiển thị **Hoàn tất một phần**, với **Ghi lại Sheet** khi phù hợp.
 Máy chờ xác minh không được tính vào số máy hoàn tất hoặc hiển thị tiến độ 100%.
-`Ghi kết quả lên Sheet` là lựa chọn riêng cho từng chiến dịch: tắt thì không
-tạo hàng chờ hoặc gửi webhook. Bật thì phải kết nối thành công trước lượt mới;
-nếu kết nối mất sau khi đăng, link đã xác minh được giữ để gửi lại đúng bảng/tab.
-Đổi lựa chọn phải chạy preflight lại. Nhạc được chọn ngẫu nhiên có seed từ tối đa
+Mọi chiến dịch mới cần kết nối Sheet đã xác minh; nếu kết nối mất sau khi đăng,
+link đã xác minh được giữ để gửi lại đúng bảng/tab, không phát lại Post. Chiến dịch
+cũ giữ chính sách Sheet và dọn media đã lưu lúc tạo, kể cả khi chính sách mặc định
+cho lượt mới thay đổi. Nhạc được chọn ngẫu nhiên có seed từ tối đa
 năm đề xuất/thịnh hành đang hiện trên tài khoản, không lấy danh sách ngoài TikTok.
 
 Nếu bước kiểm tra báo chưa hỗ trợ, xem **phiên bản TikTok và ngôn ngữ của từng máy**.
@@ -842,6 +850,11 @@ qua Post. Khi backend báo pipeline còn chạy, máy bận hoặc chưa đọc 
 lại, nút bị khoá kèm lý do; chờ/đọc lại chi tiết, không tạo campaign khác để né guard.
 Thao tác này khác tiếp tục xác minh, kiểm tra link và ghi lại Sheet.
 
+Khi xác nhận thử lại, nhạc tự chọn chưa xác minh được chọn lại theo cấu hình đã
+lưu của bài nếu danh sách Hot đã đổi; binding cũ được giữ trong audit. Retry tự
+động trong cùng lần chạy không đổi nhạc. Nhạc đã xác minh và bài đã qua Post
+không được reset hay gửi lại bằng thao tác này.
+
 ### Đọc cảnh báo nguồn trước khi xác nhận
 
 Trong Bàn đăng nhanh, mở **Cảnh báo nguồn (N)** để đọc thông báo và đường dẫn bài/file
@@ -870,7 +883,8 @@ phải nhập hash xác nhận của chính preflight. Không lấy số máy l�
 đủ roster và danh sách máy không nằm trong yêu cầu, không tự bỏ máy lỗi để đổi mẫu số.
 Xem lệnh và tham số trong [hướng dẫn phát triển](developer-guide.md#nghiệm-thu-publish-qua-ứng-dụng-đang-chạy).
 
-Canary kỹ thuật có thể bật Sheet-disabled rõ ràng cho tối đa hai máy. Harness phải
+Báo cáo canary kỹ thuật cô lập trước đây có thể mang nhãn Sheet-disabled; đó không
+phải đường tạo lượt đăng mới trong ứng dụng và không chứng minh ghi Sheet. Harness phải
 nhả tác vụ cũ trước Create, scope dev phải có activation ngẫu nhiên khớp process,
 và kết quả chỉ được gọi `phoneOnly/sheetDisabled`, không phải nghiệm thu end-to-end
 Sheet. Mất ACK handoff/Create/Execute đều giữ intent và không tự phát lại.

@@ -14,7 +14,7 @@ import "../../styles/publish-schedule.css";
 
 type Props = {
   sourceRoot: string; bundles: PublishBundle[]; devices: DeviceInfo[]; metas: Map<string, DeviceMeta>;
-  captions: Record<string, string>; sound: PublishSoundPolicy; sheet: boolean; cleanup: boolean;
+  captions: Record<string, string>; sound: PublishSoundPolicy;
   selectedIds?: string[]; assignments?: Record<string, string>; eligible?: string[];
   active?: boolean; sourceReady?: boolean; blockingReason?: string;
   limitsRevision?: number;
@@ -98,7 +98,7 @@ export function PublishSchedulePlanner(p: Props) {
   const request: PublishScheduleRequest = { requestId: draft.requestId, sourceRoot: p.sourceRoot,
     slots: draft.rows.map(r => ({ bundleId: r.bundleId, udid: r.udid, runAt: `${draft.date}T${scheduleTime(r, draft.commonTime)}` })),
     captionOverrides: Object.fromEntries(draft.rows.filter(r => p.captions[r.bundleId] !== undefined).map(r => [r.bundleId, p.captions[r.bundleId]])),
-    soundPolicy: p.sound, sheetEnabled: p.sheet, deleteAfterPublish: p.cleanup };
+    soundPolicy: p.sound, sheetEnabled: true, deleteAfterPublish: true };
   const key = JSON.stringify({ request,
     readiness: draft.rows.map(row => [row.udid, readyIds.includes(row.udid), p.deviceGuards?.[row.udid]?.blocking]),
     source: draft.rows.map(row => p.bundles.find(bundle => bundle.id === row.bundleId) ?? null),

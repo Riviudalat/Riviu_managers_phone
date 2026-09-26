@@ -17,7 +17,7 @@ async fn read_snapshot(
     session: &dyn UiSession,
     deadline: Instant,
     recoveries: &mut u32,
-) -> anyhow::Result<Option<String>> {
+) -> anyhow::Result<Option<crate::HierarchySourceSnapshot>> {
     let started = Instant::now();
     check_wait()?;
     anyhow::ensure!(
@@ -29,7 +29,7 @@ async fn read_snapshot(
             .await
             .context("đọc bảng nhạc hết thời gian chờ 3 phút; chưa bấm Đăng")?;
     match observed {
-        Ok(snapshot) => Ok(Some(snapshot.xml)),
+        Ok(snapshot) => Ok(Some(snapshot)),
         Err(error) if transient_sound_read(&error) && Instant::now() + POLL < deadline => {
             *recoveries += 1;
             tracing::warn!(elapsed_ms = started.elapsed().as_millis() as u64,
@@ -122,7 +122,7 @@ pub(super) async fn select_section_tab(
     let mut recovery_used = 0;
     let mut observation = "sound sheet not yet observed".to_string();
     loop {
-        let xml = read_snapshot(session, deadline, &mut recovery_used)
+        let source = read_snapshot(session, deadline, &mut recovery_used)
             .await
             .with_context(|| {
                 format!(
@@ -130,7 +130,10 @@ pub(super) async fn select_section_tab(
                     plan.section_label
                 )
             })?;
-        let parsed = xml.as_deref().map(|xml| parse(xml, plan)).transpose()?;
+        let parsed = source
+            .as_ref()
+            .map(|source| parse(&source.xml, plan))
+            .transpose()?;
         let Some(parsed) = parsed.filter(|nodes| !nodes.is_empty()) else {
             previous = None;
             // 45.7.3 can render all four tabs while returning no accessibility
@@ -425,25 +428,28 @@ async fn observe_inner(
     retry_unavailable: bool,
 ) -> anyhow::Result<ObservedSoundPool> {
     let deadline = phase_deadline(SNAPSHOT_POOL_WINDOW);
-    let mut previous: Option<ObservedSoundPool> = None;
+    let mut previous: Option<(u64, ObservedSoundPool)> = None;
     let mut recovery_used = 0;
     loop {
-        let xml = if retry_unavailable {
-            let Some(xml) = read_snapshot(session, deadline, &mut recovery_used).await? else {
+        let source = if retry_unavailable {
+            let Some(source) = read_snapshot(session, deadline, &mut recovery_used).await? else {
                 previous = None;
                 continue;
             };
-            xml
+            source
         } else {
-            read_sound(session.hierarchy_source_snapshot()).await?.xml
+            read_sound(session.hierarchy_source_snapshot()).await?
         };
-        let observed = pool(&xml, plan, maximum);
+        let observed = pool(&source.xml, plan, maximum);
         match observed {
             Ok(current) => {
-                if previous.as_ref().is_some_and(|p| p.stable_with(&current)) {
+                if previous.as_ref().is_some_and(|(generation, prior)| {
+                    (!selection_recovery::measured(plan) || source.generation > *generation)
+                        && prior.stable_with(&current)
+                }) {
                     return Ok(current);
                 }
-                previous = Some(current);
+                previous = Some((source.generation, current));
             }
             Err(error) => {
                 previous = None;

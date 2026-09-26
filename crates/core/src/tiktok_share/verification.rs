@@ -12,6 +12,7 @@ const RECOVERY_WINDOW: Duration = Duration::from_secs(60);
 const CAPTURE_WINDOW: Duration = Duration::from_secs(180);
 const MAX_RECOVERY_ACTIONS: u32 = 5;
 const MAX_CANDIDATES: u32 = 12;
+const MAX_GLOBAL_45_7_3_TAPS: u32 = 24;
 const MAX_VIEWPORTS: u32 = 3;
 
 #[derive(Debug, Clone, Copy)]
@@ -284,9 +285,88 @@ pub struct VerificationDiagnostic {
     pub navigation_enabled: usize,
     pub navigation_clickable: usize,
     pub screen_state: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    unknown_screen_shape: Option<UnknownScreenShape>,
     pub expanded_photo_error: Option<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub(crate) candidate_trace: Vec<VerificationCandidateTrace>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct UnknownScreenShape {
+    total_nodes: usize,
+    target_visible_nodes: usize,
+    target_clickable_nodes: usize,
+    foreign_visible_nodes: usize,
+    has_profile_tab: bool,
+    has_feed_tab: bool,
+    has_post_tile: bool,
+    has_post_caption: bool,
+    has_share_control: bool,
+    has_comments_control: bool,
+    has_copy_control: bool,
+    has_back_control: bool,
+}
+
+impl UnknownScreenShape {
+    fn from_tree(tree: &Tree, plan: &PublishVerificationPlan) -> Self {
+        let package = plan.labels.package();
+        let has = |control| {
+            plan.labels
+                .label(control)
+                .is_some_and(|label| !tree.matching(package, label.to_query()).is_empty())
+        };
+        let mut target_visible_nodes = 0;
+        let mut target_clickable_nodes = 0;
+        let mut foreign_visible_nodes = 0;
+        for (index, node) in tree.nodes.iter().enumerate() {
+            if !tree.ancestors_visible(index) {
+                continue;
+            }
+            if node.visible(package) {
+                target_visible_nodes += 1;
+                if node
+                    .rect()
+                    .is_some_and(|rect| rect.enabled && rect.clickable)
+                {
+                    target_clickable_nodes += 1;
+                }
+            } else if !node.attr("package").is_empty()
+                && node.attr("displayed") != "false"
+                && node.attr("visible-to-user") != "false"
+            {
+                foreign_visible_nodes += 1;
+            }
+        }
+        Self {
+            total_nodes: tree.nodes.len(),
+            target_visible_nodes,
+            target_clickable_nodes,
+            foreign_visible_nodes,
+            has_profile_tab: has(TikTokControl::ProfileTab),
+            has_feed_tab: has(TikTokControl::FeedTab),
+            has_post_tile: plan
+                .labels
+                .post_tile_id()
+                .is_some_and(|label| !tree.matching(package, label.to_query()).is_empty()),
+            has_post_caption: !tree
+                .matching(package, ElementQuery::ResourceIdSuffix(plan.caption_id))
+                .is_empty(),
+            has_share_control: has(TikTokControl::Share),
+            has_comments_control: has(TikTokControl::Comments),
+            has_copy_control: tree.copy_control(package).is_ok_and(|row| row.is_some()),
+            has_back_control: !tree
+                .matching(
+                    package,
+                    ElementQuery::Description {
+                        value: "Back",
+                        exact: true,
+                    },
+                )
+                .is_empty(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -300,6 +380,37 @@ pub(crate) struct VerificationCandidateTrace {
     pub(crate) caption_digest: Option<String>,
     pub(crate) time_digest: Option<String>,
     pub(crate) reason_code: Option<VerificationReason>,
+}
+
+fn candidate_budget_exhausted(
+    plan: &PublishVerificationPlan,
+    trace: &[VerificationCandidateTrace],
+    attempts: u32,
+) -> bool {
+    if plan.labels.package() != "com.zhiliaoapp.musically"
+        || plan.labels.resource_version() != Some("45.7.3")
+    {
+        return attempts >= MAX_CANDIDATES;
+    }
+    if attempts >= MAX_GLOBAL_45_7_3_TAPS {
+        return true;
+    }
+    let mut rejected = HashSet::new();
+    let mut distinct = attempts.saturating_sub(trace.len() as u32);
+    for candidate in trace {
+        if candidate.reason_code == Some(VerificationReason::CaptionMismatch) {
+            if let (Some(caption), Some(time)) = (
+                candidate.caption_digest.as_deref(),
+                candidate.time_digest.as_deref(),
+            ) {
+                if !rejected.insert((caption, time)) {
+                    continue;
+                }
+            }
+        }
+        distinct += 1;
+    }
+    distinct >= MAX_CANDIDATES
 }
 
 #[derive(Debug)]
@@ -648,6 +759,10 @@ impl Capture<'_> {
             let tree = self.read().await?;
             let screen = classify(&tree, self.plan);
             self.diagnostic.screen_state = format!("{screen:?}");
+            if screen == Screen::Unknown && self.diagnostic.unknown_screen_shape.is_none() {
+                self.diagnostic.unknown_screen_shape =
+                    Some(UnknownScreenShape::from_tree(&tree, self.plan));
+            }
             if screen == Screen::Profile {
                 self.account(restoring).await?;
                 let fresh = self.read().await?;
@@ -1123,7 +1238,13 @@ impl Capture<'_> {
             let mut unresolved_candidate = None;
             let mut page_index = 0;
             loop {
-                if self.expired() || self.diagnostic.candidates_visited >= MAX_CANDIDATES {
+                if self.expired()
+                    || candidate_budget_exhausted(
+                        self.plan,
+                        &self.diagnostic.candidate_trace,
+                        self.diagnostic.candidates_visited,
+                    )
+                {
                     return Err(VerificationReason::SearchBudgetExhausted);
                 }
                 let tiles = tree.grid(self.plan);
@@ -1373,6 +1494,7 @@ pub async fn capture_submission_link(
             navigation_enabled: 0,
             navigation_clickable: 0,
             screen_state: String::new(),
+            unknown_screen_shape: None,
         },
     };
     let result = if !submission_identity_valid(identity) || caption.trim().is_empty() {

@@ -644,7 +644,9 @@ fn missing_submission_identity_cannot_enter_manual_link_observer() {
         capability.check_link.reason.as_deref(),
         Some("submissionIdentityMissing")
     );
-    assert!(super::verification::eligible_check_candidate(&capability, &candidates).is_none());
+    assert!(
+        super::verification::eligible_check_candidate(&capability, &candidates, true).is_none()
+    );
 
     raw.execute(
         "UPDATE publish_assignments SET effect_intent=?2 WHERE id=?1",
@@ -662,7 +664,40 @@ fn missing_submission_identity_cannot_enter_manual_link_observer() {
         .unwrap()
         .remove(0);
     assert!(capability.check_link.allowed);
-    assert!(super::verification::eligible_check_candidate(&capability, &candidates).is_some());
+    assert!(
+        super::verification::eligible_check_candidate(&capability, &candidates, true).is_some()
+    );
+    assert!(
+        super::verification::eligible_check_candidate(&capability, &candidates, false).is_none(),
+        "an in-scope recovery capability cannot override a denied manual acceptance scope"
+    );
+}
+
+#[test]
+fn manual_recovery_scope_checks_assignment_identity_before_a_revision_changes() {
+    let (db, _, campaign, assignment_id) = stopped_resume_fixture();
+    let revision = db.publish_assignment_revision(&assignment_id).unwrap();
+    let mut observed = None;
+    let denied = super::verification::ensure_assignment_allowed(&db, &assignment_id, |id, udid| {
+        observed = Some((id.to_owned(), udid.to_owned()));
+        false
+    })
+    .expect_err("a denied scope must stop the command before resume or retry");
+    assert_eq!(denied.code, "AcceptanceScopeDenied");
+    assert_eq!(observed, Some((campaign.clone(), "phone".into())));
+    assert_eq!(
+        db.publish_assignment_revision(&assignment_id).unwrap(),
+        revision
+    );
+    assert!(
+        super::verification::ensure_assignment_allowed(&db, &assignment_id, |id, udid| id
+            == campaign
+            && udid == "phone",)
+        .is_ok()
+    );
+    let absent = super::verification::ensure_assignment_allowed(&db, "absent", |_, _| true)
+        .expect_err("a missing assignment has no scope identity");
+    assert_ne!(absent.code, "AcceptanceScopeDenied");
 }
 
 #[test]
@@ -2493,4 +2528,28 @@ fn account_lock_alert_is_rejected_in_english() {
 #[test]
 fn ordinary_post_confirmation_is_not_account_lock() {
     assert!(!account_status_text_is_locked("đăng công khai xác nhận"));
+}
+#[test]
+fn new_publications_require_sheet_and_verified_import_cleanup() {
+    assert!(super::preflight::require_new_publish_delivery(true, true).is_ok());
+    for (sheet, cleanup) in [(false, true), (true, false), (false, false)] {
+        assert!(super::preflight::require_new_publish_delivery(sheet, cleanup).is_err());
+    }
+    let preflight = code_of("pub async fn publish_preflight(").join("\n");
+    assert!(preflight.contains(
+        "require_new_publish_delivery(request.sheet_enabled, request.delete_after_publish)"
+    ));
+    let create = code_of("pub async fn publish_create_campaign(").join("\n");
+    assert!(create.contains("preflight::require_new_publish_delivery("));
+    assert!(
+        create.find("replay_publish_create(")
+            < create.find("preflight::require_new_publish_delivery(")
+    );
+    let schedule = code_of("async fn prepare_schedule(").join("\n");
+    assert!(schedule.contains("preflight::require_new_publish_delivery(request.sheet_enabled, request.delete_after_publish)"));
+    let schedule_create = code_of("pub async fn publish_schedule_create(").join("\n");
+    assert!(
+        schedule_create.find("replay_schedule(")
+            < schedule_create.find("prepare_schedule(&state, &request)")
+    );
 }

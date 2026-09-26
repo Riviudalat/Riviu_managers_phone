@@ -54,7 +54,7 @@ pub async fn publish_device_guards(
         .map_err(preflight::err)
 }
 
-pub(crate) use verified_cleanup::cleanup_verified_assignments;
+pub use verified_cleanup::*;
 mod progress;
 mod retry;
 mod schedule;

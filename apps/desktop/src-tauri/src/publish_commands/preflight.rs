@@ -116,6 +116,17 @@ pub(crate) struct PreparedPublishPreflight {
     pub(crate) bundles: Vec<riviu_core::PublishBundle>,
 }
 
+pub(super) fn require_new_publish_delivery(
+    sheet_enabled: bool,
+    delete_after_publish: bool,
+) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        sheet_enabled && delete_after_publish,
+        "Bài đăng mới phải ghi Sheet và xóa bản media đã nhập trên máy sau khi xác minh bài"
+    );
+    Ok(())
+}
+
 pub(super) fn resolve_preflight_target(
     request: &riviu_core::PublishPreflightRequest,
     fleet_order: &[String],
@@ -178,6 +189,8 @@ pub async fn publish_preflight(
     request: riviu_core::PublishPreflightRequest,
 ) -> Result<riviu_core::PublishPreflightReport, CommandError> {
     let _admission = state.ensure_accepting_work()?;
+    require_new_publish_delivery(request.sheet_enabled, request.delete_after_publish)
+        .map_err(err)?;
     build_publish_preflight(&state.control, &state.registry, &state.db, request)
         .await
         .map(|prepared| prepared.report)

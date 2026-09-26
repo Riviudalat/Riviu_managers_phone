@@ -306,6 +306,11 @@ pub async fn publish_create_campaign(
     {
         return Ok(prior);
     }
+    preflight::require_new_publish_delivery(
+        preflight_request.sheet_enabled,
+        preflight_request.delete_after_publish,
+    )
+    .map_err(err)?;
     if let Some(handoff) = handoff.as_ref() {
         let result =
             crate::commands::prepare_manual_devices(&app, &state, udids.clone(), handoff).await?;

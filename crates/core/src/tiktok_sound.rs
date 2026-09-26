@@ -966,6 +966,18 @@ pub async fn choose_and_confirm_sound(
                 Err(error)
                     if transient_sound_read(&error) && selection_recovery::measured(plan) =>
                 {
+                    // Some measured builds close the inline sheet themselves after
+                    // selection. An exact, stable editor chip proves completion;
+                    // otherwise the still-open sheet must be proven before Back.
+                    let editor = tokio::time::timeout_at(
+                        phase_deadline(READBACK_WINDOW),
+                        selection_recovery::confirm_editor(session, plan, &candidate.title),
+                    )
+                    .await;
+                    check_wait()?;
+                    if matches!(editor, Ok(Ok(()))) {
+                        return Ok(());
+                    }
                     selection_recovery::prove_sheet(session, plan)
                         .await
                         .with_context(|| format!("sound selection read unavailable: {error}"))?;
@@ -1116,7 +1128,7 @@ fn assemble_pool(
     let mut unique_targets = Vec::new();
     let mut unique_selected = None;
     for (index, (candidate, target)) in candidates.into_iter().zip(targets).enumerate() {
-        if counts[&candidate.title] != 1 {
+        if counts[&candidate.title] != 1 || !complete_sound_title(&candidate.title) {
             continue;
         }
         if selected_index == Some(index) {
@@ -1137,6 +1149,22 @@ fn assemble_pool(
         targets,
         selected_index,
     })
+}
+
+fn complete_sound_title(title: &str) -> bool {
+    if title.contains('\u{2026}') || title.ends_with("...") {
+        return false;
+    }
+    let mut brackets = Vec::new();
+    for character in title.chars() {
+        match character {
+            '(' | '[' => brackets.push(character),
+            ')' if brackets.pop() != Some('(') => return false,
+            ']' if brackets.pop() != Some('[') => return false,
+            _ => {}
+        }
+    }
+    brackets.is_empty()
 }
 
 fn inside(row: &ElementBox, values: &[ElementBox]) -> Vec<ElementBox> {

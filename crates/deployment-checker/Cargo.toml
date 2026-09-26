@@ -1,6 +1,6 @@
 [package]
 name = "riviu-deployment-checker"
-version = "0.2.51"
+version = "0.2.54"
 edition.workspace = true
 publish = false
 

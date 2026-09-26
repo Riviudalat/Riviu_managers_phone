@@ -146,12 +146,9 @@ fn pool_from_image(
     let mut selected_index = None;
     for title in titles.into_iter().take(maximum) {
         let selected = red_fraction(image, title.bounds) > 0.5;
-        anyhow::ensure!(
-            !title.text.contains('…')
-                && !title.text.ends_with("...")
-                && title.text.chars().count() >= 3,
-            "visual sound title clipped"
-        );
+        if !complete_sound_title(&title.text) || title.text.chars().count() < 3 {
+            continue;
+        }
         let bottom = title.bounds.y + title.bounds.height;
         let artists: Vec<_> = text
             .iter()
@@ -645,6 +642,21 @@ mod tests {
         assert_eq!(pool.candidates[0].title, "Thương Nhau Đến Thế");
         assert_eq!(pool.selected_index, None);
         assert!(pool.targets.iter().all(|t| t.x >= 250. && t.y >= 1300.));
+    }
+
+    #[test]
+    fn clipped_ocr_title_without_ellipsis_does_not_hide_complete_alternative_rows() {
+        for title in ["Song (Afternoon Ra", "Song...", "Song\u{2026}"] {
+            let (img, mut lines, tabs, plan) = fixture();
+            lines[0].text = title.into();
+            let pool = pool_from_image(&img, &lines, &tabs, plan, 5).unwrap();
+            assert_eq!(pool.candidates.len(), 2);
+            assert!(pool
+                .candidates
+                .iter()
+                .all(|candidate| candidate.title != title));
+            assert_eq!(pool.maximum_visible, 5);
+        }
     }
 
     #[test]

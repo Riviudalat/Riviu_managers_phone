@@ -686,6 +686,7 @@ pub fn run() {
             publish_commands::publish_execute,
             publish_commands::publish_retry_assignment,
             publish_commands::publish_retry_sheet_assignment,
+            publish_commands::publish_cleanup_verified_assignment,
             publish_commands::publish_readiness,
             publish_commands::publish_sheet_get_config,
             gui_service::gui_service_status,
@@ -1250,6 +1251,10 @@ mod tests {
         (
             "publish_commands/retry.rs",
             include_str!("publish_commands/retry.rs"),
+        ),
+        (
+            "publish_commands/verified_cleanup.rs",
+            include_str!("publish_commands/verified_cleanup.rs"),
         ),
         (
             "publish_commands/sheet.rs",

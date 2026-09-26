@@ -93,6 +93,7 @@ export function PublishQuickSetup(p: QuickProps) {
   const locked = p.busy || p.scanning || p.preflightLoading;
   const complete = selection.ready;
   const checkReason = p.scanning ? "Đang quét và xác nhận nội dung…" : p.preflightLoading ? "Đang kiểm tra đợt đăng…" : p.busy ? "Đang xử lý tác vụ…" : selection.reason;
+  const showBlockingNotice = p.blockingReason && !pendingBlock && p.blockingReason !== checkReason;
   const mappingKey = JSON.stringify([p.selectedIds, p.selectedIds.map(id => p.assignments[id] ?? "")]);
   // Chỉ snapshot đã commit được phép cấp quyền cho handler/continuation sau await.
   const assignmentKey = JSON.stringify([p.sourceRoot, p.manifest, p.selectedIds, p.assignments, p.eligible,
@@ -214,8 +215,8 @@ export function PublishQuickSetup(p: QuickProps) {
           <div id="publish-google-settings" className="pq-settings-content">{p.settings}</div>
         </div>
       </div>
-      {(sourceWarnings.length > 0 || duplicateCaptions > 0 || p.blockingReason || error || p.notices) && <div className="pq-messages" tabIndex={0} aria-label="Thông báo thiết lập đăng bài">
-        {p.blockingReason && !pendingBlock && <p className="pq-blocking-reason" role="status">{p.blockingReason}</p>}
+      {(sourceWarnings.length > 0 || duplicateCaptions > 0 || showBlockingNotice || error || p.notices) && <div className="pq-messages" tabIndex={0} aria-label="Thông báo thiết lập đăng bài">
+        {showBlockingNotice && <p className="pq-blocking-reason" role="status">{p.blockingReason}</p>}
         {error && <div className="pq-error" role="alert">{error}<button type="button" aria-label="Đóng lỗi" onClick={() => setError("")}><X size={14}/></button></div>}
         {sourceWarnings.length > 0 && <details className="pq-hint"><summary>Cảnh báo nguồn ({sourceWarnings.length})</summary>
           <ul>{sourceWarnings.map((warning, index) => <li key={`${warning.path}:${index}`}><span>{warning.message}</span><br/><small>{warning.path}</small></li>)}</ul>
@@ -289,7 +290,7 @@ export function PublishQuickSetup(p: QuickProps) {
         </section>
       </div>
     </div>
-    <footer className="pq-footer"><div><strong>{selected.length} bài đã chọn</strong><span>{mapped}/{selected.length} bài có máy · mỗi máy một bài · Sheet {p.sheet ? "bật" : "tắt"}</span><details className="pq-run-options" onKeyDown={e => { if (e.key === "Escape") { e.currentTarget.open = false; e.currentTarget.querySelector("summary")?.focus(); } }}><summary>Tùy chọn · Sheet {p.sheet ? "bật" : "tắt"} · {p.cleanup ? "Xóa bản chuyển" : "Giữ bản chuyển"}</summary><div className="pq-options"><label><input type="checkbox" checked={p.sheet} disabled={locked} onChange={e => { if (!locked) p.onSheet(e.target.checked); }}/> Ghi kết quả lên Sheet</label><label><input type="checkbox" checked={p.cleanup} disabled={locked} onChange={e => { if (!locked) p.onCleanup(e.target.checked); }}/> Xóa bản chuyển sau khi đăng thành công</label></div></details>{notice && <details className="pq-assignment-notice"><summary title={notice}><span role="status">{notice}</span></summary><p>{notice}</p></details>}{checkReason && <small id="publish-check-reason" role="status">{selectedBlockedDevice ? `${label(selectedBlockedDevice)}: ${checkReason}` : checkReason}</small>}{selectedPending && p.onPendingPublication && <button type="button" className="pq-pending-action" disabled={locked} onClick={() => { if (!locked) p.onPendingPublication?.(selectedPending.campaignId); }}>Xem bài đang chờ</button>}</div><button type="button" className="primary" aria-describedby={checkReason ? "publish-check-reason" : undefined} disabled={locked || !complete} onClick={() => { if (!locked && complete) { setReportPage(0); setDialog("check"); void p.onPreflight(); } }}>{p.preflightLoading ? "Đang kiểm tra…" : "Kiểm tra & đăng"}<ArrowRight size={16}/></button></footer>
+    <footer className="pq-footer"><div><strong>{selected.length} bài đã chọn</strong><span>{mapped}/{selected.length} bài có máy · mỗi máy một bài</span><span className="pq-run-options">Sheet bật · Dọn bản chuyển bật</span>{notice && <details className="pq-assignment-notice"><summary title={notice}><span role="status">{notice}</span></summary><p>{notice}</p></details>}{checkReason && <small id="publish-check-reason" role="status">{selectedBlockedDevice ? `${label(selectedBlockedDevice)}: ${checkReason}` : checkReason}</small>}{selectedPending && p.onPendingPublication && <button type="button" className="pq-pending-action" disabled={locked} onClick={() => { if (!locked) p.onPendingPublication?.(selectedPending.campaignId); }}>Xem bài đang chờ</button>}</div><button type="button" className="primary" aria-describedby={checkReason ? "publish-check-reason" : undefined} disabled={locked || !complete} onClick={() => { if (!locked && complete) { setReportPage(0); setDialog("check"); void p.onPreflight(); } }}>{p.preflightLoading ? "Đang kiểm tra…" : "Kiểm tra & đăng"}<ArrowRight size={16}/></button></footer>
     {captionContext && captionBundle && <PublishDialog title={`Ảnh & caption · ${captionBundle.name}`} wide returnFocus={captionReturnTarget} fallbackFocus={() => linksRef.current} onClose={() => setCaptionContext(null)} actions={<button type="button" onClick={() => setCaptionContext(null)}>Đóng · giữ bản nháp</button>}>
       <div className="pq-caption-editor"><div className="pq-caption-media"><div className="pq-large-preview"><PublishMedia bundle={captionBundle} index={Math.min(photo, Math.max(0, captionBundle.images.length - 1))} expanded/></div>
         {captionBundle.mediaKind === "image" && captionBundle.images.length > 0 && <div className="pq-photo-nav"><button type="button" aria-label="Ảnh trước" disabled={photo === 0} onClick={() => setPhoto(n => n - 1)}><ArrowLeft size={16}/></button><span>{Math.min(photo + 1, captionBundle.images.length)} / {captionBundle.images.length}</span><button type="button" aria-label="Ảnh tiếp" disabled={photo + 1 >= captionBundle.images.length} onClick={() => setPhoto(n => n + 1)}><ArrowRight size={16}/></button></div>}
@@ -310,7 +311,7 @@ export function PublishQuickSetup(p: QuickProps) {
           {selected.map(bundle => { const udid = p.assignments[bundle.id]; return <div key={bundle.id}><strong>{udid ? label(udid) : "Chưa ghép máy"}</strong><span>{bundle.name}</span><small>Chờ kết quả</small></div>; })}
         </div>
       </div> : p.preflightError ? <p role="alert">{p.preflightError}</p> : p.preflight ? <PublishPreflightResult report={p.preflight} machineName={label} bundleName={id => bundles.find(bundle => bundle.id === id)?.name ?? id} page={reportPage} onPage={setReportPage} onRetry={() => void p.onPreflight()} busy={locked} hideRetry/> : <p>Chưa có kết quả kiểm tra.</p>}
-      <p className="pq-hint">Nhạc được chọn sau khi mở TikTok. {p.sheet ? "Ghi Sheet đang bật; link được ghi sau khi xác nhận bài đăng thành công." : "Ghi Sheet đang tắt; kết quả chỉ lưu trong ứng dụng."}</p>
+      <p className="pq-hint">Nhạc được chọn sau khi mở TikTok. Link được ghi Sheet sau khi xác nhận bài đăng thành công.</p>
     </PublishDialog>}
   </div>;
 }

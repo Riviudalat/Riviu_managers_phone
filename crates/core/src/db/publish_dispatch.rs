@@ -207,6 +207,36 @@ impl Database {
             recovery.expected_account == current_account,
             "Tài khoản đã đổi; không thử lại bài cũ"
         );
+        if let Some((_, request_id)) = request {
+            if recovery.step == "sound"
+                && recovery
+                    .sound
+                    .as_ref()
+                    .is_some_and(|sound| !sound.confirmed)
+            {
+                let json: String = tx.query_row(
+                    "SELECT request_json FROM publish_campaigns WHERE id=?1",
+                    [&run.campaign_id],
+                    |row| row.get(0),
+                )?;
+                let frozen: crate::publish::PublishCampaignRequest = serde_json::from_str(&json)?;
+                if matches!(
+                    frozen.sound_policy,
+                    crate::publish::PublishSoundPolicy::Default
+                        | crate::publish::PublishSoundPolicy::TrendingAny { .. }
+                ) {
+                    let prior = recovery.sound.take();
+                    tx.execute("INSERT INTO operation_device_events(source_kind,source_id,udid,action,state,recorded_at,text,detail)
+                        VALUES('publish',?1,?2,'publishSoundRebind','retrying',?3,?4,?5)",
+                        params![run.campaign_id, udid, now.to_rfc3339(),
+                            "Chọn lại nhạc tự chọn chưa xác minh trong lượt thử lại trước Post",
+                            serde_json::to_string(&serde_json::json!({
+                            "assignmentId": assignment_id, "requestId": request_id,
+                            "source": "confirmed_operator_retry_before_post", "priorSound": prior,
+                        }))?])?;
+                }
+            }
+        }
         // The operator grants a new pre-Post attempt, including bounded retries
         // inside a step. `manual` still forbids requeueing the whole job.
         recovery.max_retries = 3;
