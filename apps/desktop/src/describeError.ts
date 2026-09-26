@@ -11,9 +11,14 @@ const GENERIC_CODES = new Set(["OperationFailed"]);
 
 function readableMessage(message: string): string {
   if (message.includes("device_reconnect_timeout")) return "Máy mất kết nối quá 2 phút. Kết nối lại đúng điện thoại rồi bấm Thử lại.";
-  if (/adb(?:\.exe)?.*device[^\n]*not found/i.test(message) || /device offline|no devices\/emulators found/i.test(message)) {
-    const serial=message.match(/device ['"]([^'"]+)['"]/i)?.[1];
-    return `Không tìm thấy ${serial ? `máy ${serial}` : "thiết bị"} trong ADB. Kiểm tra kết nối USB; tác vụ đăng sẽ chờ đúng máy kết nối lại tối đa 2 phút.`;
+  if (/\bdevice offline\b/i.test(message)) {
+    const serial = message.match(/\badb(?:\.exe)?\s+-s\s+([^\s;]+)/i)?.[1];
+    return `ADB thấy ${serial ? `máy ${serial}` : "thiết bị"} nhưng đang offline. Kiểm tra nguồn box và cáp USB; đợi ADB báo device rồi thử lại.`;
+  }
+  if (/adb(?:\.exe)?.*device[^\n]*not found|no devices\/emulators found/i.test(message)) {
+    const serial = message.match(/device ['"]([^'"]+)['"]/i)?.[1]
+      ?? message.match(/\badb(?:\.exe)?\s+-s\s+([^\s;]+)/i)?.[1];
+    return `ADB không thấy ${serial ? `máy ${serial}` : "thiết bị"}. Kiểm tra nguồn box và cáp USB; đợi máy xuất hiện ở trạng thái device rồi thử lại.`;
   }
   if (message.includes("typesafe_http_401")) {
     return "Khóa TypeSafe không được chấp nhận (401). Kiểm tra khóa của tài khoản TypeSafe, bấm Lưu khóa TypeSafe rồi kiểm tra lại. Lượt bình luận chưa được gửi.";

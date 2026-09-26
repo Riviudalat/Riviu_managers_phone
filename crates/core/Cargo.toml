@@ -30,6 +30,7 @@ reqwest = { workspace = true }
 base64 = { workspace = true }
 rand = "0.8"
 regex = "1.13.1"
+unicode-normalization = "=0.1.25"
 async-trait = "0.1"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
 futures-util = "0.3"

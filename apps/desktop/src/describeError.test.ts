@@ -12,6 +12,15 @@ import { describeError } from "./describeError";
  * here.
  */
 describe("describeError", () => {
+  it("does not promise publish reconnect for an offline preview", () => {
+    const message = describeError({
+      code: "OperationFailed",
+      message: "adb -s ce11171beb408a1501 get-state failed: error: device offline",
+    });
+    expect(message).toContain("ADB thấy máy ce11171beb408a1501 nhưng đang offline");
+    expect(message).not.toContain("tác vụ đăng");
+    expect(message).not.toContain("2 phút");
+  });
   it("explains a TypeSafe rejected key without suggesting a device retry", () => {
     for (const error of ["typesafe_http_401", new Error("typesafe_http_401"), { code: "OperationFailed", message: "typesafe_http_401" }]) {
       expect(describeError(error)).toContain("Khóa TypeSafe không được chấp nhận");

@@ -3,6 +3,7 @@ use super::*;
 use crate::ui_automation::{OcrImage, OcrLine, OcrRect, OcrRequest};
 use base64::Engine;
 use sha2::{Digest, Sha256};
+use unicode_normalization::{char::is_combining_mark, UnicodeNormalization};
 
 async fn tap_native_image(session: &dyn UiSession, point: crate::TapPoint) -> anyhow::Result<()> {
     tap_native_image_armed(session, point, &mut || {}).await
@@ -144,6 +145,7 @@ fn pool_from_image(
     let mut candidates = Vec::new();
     let mut targets = Vec::new();
     let mut selected_index = None;
+    let mut title_folds = std::collections::HashSet::new();
     for title in titles.into_iter().take(maximum) {
         let selected = red_fraction(image, title.bounds) > 0.5;
         if !complete_sound_title(&title.text) || title.text.chars().count() < 3 {
@@ -181,6 +183,10 @@ fn pool_from_image(
                 && !candidates
                     .iter()
                     .any(|c: &SoundCandidate| c.title == title.text),
+            "visual sound identity ambiguous"
+        );
+        anyhow::ensure!(
+            title_folds.insert(fold_sound_title(&title.text)),
             "visual sound identity ambiguous"
         );
         candidates.push(SoundCandidate {
@@ -227,6 +233,53 @@ fn visual_rejection_code(error: &anyhow::Error) -> &'static str {
         "visual sound selected row ambiguous" => "selected_row_ambiguous",
         "visual sound has no complete unselected row" => "no_complete_row",
         _ => "other",
+    }
+}
+
+fn fold_sound_title(value: &str) -> String {
+    value
+        .nfd()
+        .filter(|character| !is_combining_mark(*character))
+        .map(|character| match character {
+            'đ' => 'd',
+            'Đ' => 'D',
+            other => other,
+        })
+        .collect()
+}
+
+fn accent_count(value: &str) -> usize {
+    value
+        .nfd()
+        .filter(|character| is_combining_mark(*character) || matches!(character, 'đ' | 'Đ'))
+        .count()
+}
+
+fn enrich_title_lines(lines: &mut [OcrLine], vietnamese: &[OcrLine]) {
+    for line in lines.iter_mut().filter(|line| {
+        line.confidence >= 0.9
+            && line.bounds.x >= 250
+            && (1320..1900).contains(&line.bounds.y)
+            && line.bounds.width >= 80
+            && line.bounds.height >= 28
+    }) {
+        let original_fold = fold_sound_title(&line.text);
+        let original_accents = accent_count(&line.text);
+        let matching = vietnamese
+            .iter()
+            .filter(|candidate| {
+                candidate.confidence >= 0.9
+                    && line.bounds.x.abs_diff(candidate.bounds.x) <= 4
+                    && line.bounds.y.abs_diff(candidate.bounds.y) <= 4
+                    && line.bounds.width.abs_diff(candidate.bounds.width) <= 4
+                    && line.bounds.height.abs_diff(candidate.bounds.height) <= 4
+                    && fold_sound_title(&candidate.text) == original_fold
+                    && accent_count(&candidate.text) > original_accents
+            })
+            .collect::<Vec<_>>();
+        if let [candidate] = matching.as_slice() {
+            line.text = candidate.text.nfc().collect();
+        }
     }
 }
 
@@ -287,6 +340,24 @@ async fn capture_sheet(
         .context("visual sound local OCR missing")?;
     let response = read_sound(reasoner.ocr(request.clone())).await?;
     response.validate_binding(&request)?;
+    let tabs = selection_recovery::tabs(&response).unwrap_or_default();
+    let mut lines = response.lines;
+    if tabs.len() == 4
+        && !network_unavailable(&lines, &tabs)
+        && lines
+            .iter()
+            .any(|line| line.bounds.x >= 250 && (1320..1900).contains(&line.bounds.y))
+    {
+        let mut vietnamese_request = request.clone();
+        vietnamese_request.request_id = uuid::Uuid::new_v4().to_string();
+        vietnamese_request.observation_id = uuid::Uuid::new_v4().to_string();
+        vietnamese_request.languages = vec!["vi".into()];
+        if let Ok(vietnamese) = read_sound(reasoner.ocr(vietnamese_request.clone())).await {
+            if vietnamese.validate_binding(&vietnamese_request).is_ok() {
+                enrich_title_lines(&mut lines, &vietnamese.lines);
+            }
+        }
+    }
     anyhow::ensure!(
         epoch == session.gui_session_epoch()
             && read_sound(session.active_app_bundle()).await? == plan.package,
@@ -295,8 +366,7 @@ async fn capture_sheet(
     check_wait()?;
     // The first frame after opening the sheet can contain only the video.
     // This is a pending observation, never permission to tap or an adapter error.
-    let tabs = selection_recovery::tabs(&response).unwrap_or_default();
-    Ok((image, response.lines, tabs, epoch))
+    Ok((image, lines, tabs, epoch))
 }
 
 pub(super) async fn retry_network(
@@ -642,6 +712,9 @@ mod tests {
         assert_eq!(pool.candidates[0].title, "Thương Nhau Đến Thế");
         assert_eq!(pool.selected_index, None);
         assert!(pool.targets.iter().all(|t| t.x >= 250. && t.y >= 1300.));
+        let mut ambiguous = lines;
+        ambiguous[2].text = "Thuong Nhau Den The".into();
+        assert!(pool_from_image(&img, &ambiguous, &tabs, plan, 5).is_err());
     }
 
     #[test]
@@ -819,7 +892,9 @@ mod tests {
         assert_eq!(pool.candidates[0].title, "Thương Nhau Đến Thế");
     }
 
-    struct Ocr;
+    struct Ocr {
+        accent_loss: bool,
+    }
     #[async_trait::async_trait]
     impl GuiReasoner for Ocr {
         async fn resolve(&self, _: GuiRequest) -> anyhow::Result<GuiResponse> {
@@ -827,6 +902,9 @@ mod tests {
         }
         async fn ocr(&self, r: OcrRequest) -> anyhow::Result<OcrResponse> {
             let (_, mut rows, tabs, _) = fixture();
+            if self.accent_loss && r.languages == ["vi", "en"] {
+                rows[0].text = "Thuong Nhau Den The".into();
+            }
             let selected_hash = format!(
                 "{:x}",
                 Sha256::digest(include_bytes!(
@@ -873,6 +951,7 @@ mod tests {
         selection_reads: AtomicUsize,
         loading_frames: usize,
         initially_selected: bool,
+        accent_loss: bool,
     }
     #[async_trait::async_trait]
     impl UiSession for Session {
@@ -883,7 +962,9 @@ mod tests {
             "visual-session".into()
         }
         fn gui_reasoner(&self) -> Option<crate::ui_automation::SharedReasoner> {
-            Some(Arc::new(Ocr))
+            Some(Arc::new(Ocr {
+                accent_loss: self.accent_loss,
+            }))
         }
         async fn active_app_bundle(&self) -> anyhow::Result<String> {
             Ok("com.zhiliaoapp.musically".into())
@@ -953,7 +1034,11 @@ mod tests {
     }
     #[tokio::test(start_paused = true)]
     async fn visual_selection_requires_exact_editor_title_without_replaying_the_pick() {
-        for wrong_title in [false, true] {
+        for (wrong_title, accent_loss, expected_success) in [
+            (false, false, true),
+            (true, false, false),
+            (false, true, true),
+        ] {
             let s = Session {
                 taps: AtomicUsize::new(0),
                 backs: AtomicUsize::new(0),
@@ -962,11 +1047,12 @@ mod tests {
                 selection_reads: AtomicUsize::new(0),
                 loading_frames: 0,
                 initially_selected: false,
+                accent_loss,
             };
             let plan = fixture().3;
             let pool = observe(&s, plan, 5, false).await.unwrap();
             let result = choose(&s, plan, &pool, 0).await;
-            assert_eq!(result.is_ok(), !wrong_title);
+            assert_eq!(result.is_ok(), expected_success);
             assert_eq!(s.taps.load(Ordering::Relaxed), 1);
             assert_eq!(s.backs.load(Ordering::Relaxed), 1);
             assert!(s.reads.load(Ordering::Relaxed) >= 2);
@@ -982,6 +1068,7 @@ mod tests {
             selection_reads: AtomicUsize::new(0),
             loading_frames: 3,
             initially_selected: false,
+            accent_loss: false,
         };
         let plan = fixture().3;
         let pool = observe(&session, plan, 5, false).await.unwrap();
@@ -1001,6 +1088,7 @@ mod tests {
             selection_reads: AtomicUsize::new(0),
             loading_frames: 0,
             initially_selected: false,
+            accent_loss: false,
         };
         let plan = fixture().3;
         let pool = observe(&session, plan, 5, false).await.unwrap();
@@ -1021,6 +1109,7 @@ mod tests {
             selection_reads: AtomicUsize::new(0),
             loading_frames: 0,
             initially_selected: true,
+            accent_loss: false,
         };
         let plan = fixture().3;
         let pool = observe(&session, plan, 5, false).await.unwrap();
