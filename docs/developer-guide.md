@@ -733,16 +733,20 @@ nhận máy thật. Cờ được ghim trong fingerprint của preflight và sub
 | Mode | Hành vi | Điều không thực hiện |
 |---|---|---|
 | `inspect` (mặc định) | Đọc roster + device metadata; nếu có campaign ID/receipt thì đọc `publish_get` | Không preflight, quét nguồn, Sheet check, mở thiết bị hoặc mutate |
-| `preflight` | Kiểm OAuth writer/target/epoch và gọi `publish_preflight`; lưu hash xác nhận | Không create/execute/Post |
-| `submit` | Dùng hash đã duyệt; persist request trước create và intent trước Execute | Không tự replay Execute khi intent đã tồn tại |
+| `preflight` | Kiểm OAuth writer/target/epoch và gọi `publish_preflight`; máy chưa gán nick thì đọc username trên điện thoại, khóa vào hash xác nhận | Không create/execute/Post |
+| `submit` | Đọc lại đúng account đã duyệt trên từng máy; persist request trước create và intent trước Execute | Không tự replay Execute khi intent đã tồn tại |
 | `observe` | Poll `publish_get` đến hạn báo cáo | Không gọi kiểm link chủ động, retry, resume, terminate hoặc Post |
 
 `publish_sheet_check` có thể lưu cấu hình kết nối đã xác minh và làm network I/O;
 chỉ gọi trong preflight/submit, **không** thuộc inspect read-only. Script không chuẩn
 bị/reset Sheet, đổi writer hay lấy token. OAuth direct phải active và đúng file,
 check phải xác minh đúng gid/epoch, preflight phải có Sheet enabled + target v2.
-Lượt harness mới luôn giữ media (`deleteAfterPublish=false`), nhạc trending pool5;
-đây không phải công cụ sửa caption, lịch hoặc cấu hình fleet.
+Username gán sẵn là ràng buộc bổ sung, không bắt buộc để Đăng. Nếu metadata trống,
+preflight đọc username trên máy; không đọc rõ thì dừng, không tự điền metadata.
+Submit chỉ Create/Execute nếu username đọc lại khớp snapshot đã duyệt. Lượt harness
+mới yêu cầu dọn media nhập tạm sau khi xác minh bài và Sheet; nguồn gốc vẫn giữ.
+Nhạc/caption lấy từ `--content-snapshot` và bundle, không tự sửa nội dung hoặc cấu
+hình fleet.
 
 Ví dụ dưới dùng biến do người vận hành điền từ roster và nguồn đã quét trong UI;
 `$udids` và `$bundleIds` là chuỗi ID phân cách dấu phẩy **cùng thứ tự một-một**, không

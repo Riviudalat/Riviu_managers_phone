@@ -881,6 +881,9 @@ thoại có mạng. Không restart app đang giữ upload chỉ để mở cổn
 đăng thật, chỉ dùng sau khi bạn duyệt đúng nguồn, cặp bài–UDID, số bài và Sheet/tab;
 phải nhập hash xác nhận của chính preflight. Không lấy số máy làm ID. Báo cáo giữ
 đủ roster và danh sách máy không nằm trong yêu cầu, không tự bỏ máy lỗi để đổi mẫu số.
+Máy chưa gán username vẫn có thể tham gia nếu preflight đọc được username từ hồ sơ
+đang đăng nhập; Submit sẽ đọc lại đúng username đó trước khi tạo lượt. Không đọc
+được hoặc tài khoản đã đổi thì dừng, không tự gán nick hay thử đăng bằng tài khoản khác.
 Xem lệnh và tham số trong [hướng dẫn phát triển](developer-guide.md#nghiệm-thu-publish-qua-ứng-dụng-đang-chạy).
 
 Báo cáo canary kỹ thuật cô lập trước đây có thể mang nhãn Sheet-disabled; đó không

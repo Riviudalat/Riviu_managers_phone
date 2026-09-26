@@ -258,6 +258,16 @@ function parseEvidence(raw) {
   if (!raw) return {};
   try { return JSON.parse(raw); } catch { return {}; }
 }
+function priorNativeImport(evidence) {
+  let current = evidence;
+  for (let depth = 0; depth <= 3 && plainObject(current); depth++) {
+    const native = current.nativeImport?.value ?? current.nativeImport;
+    if (typeof native?.importId === 'string' && native.importId) return native.importId;
+    const prior = current.priorEvidenceJson;
+    current = typeof prior === 'string' ? parseEvidence(prior) : prior;
+  }
+  return null;
+}
 async function summarize(detail, options, invoke, accounts) {
   check(detail?.campaign?.id && Array.isArray(detail.assignments), 'Không đọc được campaign');
   const sheetDisabled = options.sheetDisabled === true;
@@ -265,7 +275,10 @@ async function summarize(detail, options, invoke, accounts) {
     const evidence = parseEvidence(a.evidenceJson), post = evidence.post ?? evidence;
     const cleanup = evidence.cleanup ?? null;
     const cleanedImport = cleanup?.importId ?? cleanup?.value?.importId;
-    const mediaCleaned = post.importId && cleanedImport === post.importId
+    const priorImport = priorNativeImport(evidence);
+    const importId = post.importId ?? priorImport;
+    const mediaCleaned = importId && (!post.importId || !priorImport || post.importId === priorImport)
+      && cleanedImport === importId
       && (cleanup?.state === 'cleaned' || cleanup?.value?.state === 'cleaned');
     const canonical = typeof post.postUrl === 'string'
       && /^https:\/\/www\.tiktok\.com\/@[A-Za-z0-9_.]+\/(photo|video)\/\d+$/.test(post.postUrl);
@@ -377,10 +390,11 @@ export async function runAcceptance(options, { invoke, sleep = delay, now = Date
       report.realAndroidRoster = 'verified';
     }
     const currentAccounts = Object.fromEntries(report.roster.selected.map(r => [r.udid, r.assignedHandle ?? '']));
-    const accounts = prepared?.approval.accounts ?? currentAccounts;
+    const accounts = prepared?.approval.accounts ?? { ...currentAccounts };
     report.accountSnapshot = prepared?.approval.accounts ? 'approvedPreflight' : 'currentMetadata';
     if (options.mode === 'submit' && prepared?.approval.accounts) {
-      check(options.udids.every(id => handle(accounts[id]) === currentAccounts[id]),
+      const approvedMetadata = prepared.approval.metadataAccounts ?? accounts;
+      check(options.udids.every(id => handle(approvedMetadata[id]) === currentAccounts[id]),
         'Nick gán đã đổi sau preflight; không Create/Execute');
     }
     let campaign = read(file('campaign.json'));
@@ -406,8 +420,19 @@ export async function runAcceptance(options, { invoke, sleep = delay, now = Date
         && target.reportingEpoch === writer.reportingEpoch, 'Preflight bị chặn hoặc sai đích Sheet/epoch');
       check(preflight.assignments?.length === options.udids.length && preflight.assignments.every((a, i) =>
         a.udid === options.udids[i] && a.bundleId === options.bundleIds[i] && a.ordinal === i), 'Preflight thay đổi mapping đã yêu cầu');
-      check(options.udids.every(id => /^[a-z0-9_.]{1,24}$/.test(currentAccounts[id])), 'Thiếu nick gán trong roster nghiệm thu');
-      const approval = { scope: scope(options), devScope, accounts: currentAccounts, request,
+      for (const udid of options.udids.filter(id => !currentAccounts[id])) {
+        const reading = await invoke('interaction_read_account', { udid });
+        check(reading?.udid === udid && reading.status === 'unassigned'
+          && !handle(reading.expectedHandle)
+          && /^[a-z0-9_.]{1,24}$/.test(handle(reading.observedHandle))
+          && /^[a-f0-9]{64}$/.test(reading.snapshotSha256 ?? ''),
+        `Không đọc được username trên máy ${udid}; chưa tạo lượt đăng`);
+        accounts[udid] = handle(reading.observedHandle);
+      }
+      check(options.udids.every(id => /^[a-z0-9_.]{1,24}$/.test(handle(accounts[id]))),
+        'Chưa có username hợp lệ để xác minh bài đăng');
+      report.accountSnapshot = options.udids.some(id => !currentAccounts[id]) ? 'approvedDeviceReadback' : 'currentMetadata';
+      const approval = { scope: scope(options), devScope, accounts, metadataAccounts: currentAccounts, request,
         inputDigest: preflight.inputDigest, sheetDelivery: target, writer };
       report.confirmation = hash(approval);
       write(file('preflight.json'), { approval, confirmation: report.confirmation });
@@ -452,11 +477,12 @@ export async function runAcceptance(options, { invoke, sleep = delay, now = Date
             const readings = [];
             for (const udid of options.udids) {
               const reading = await invoke('interaction_read_account', { udid });
-              check(reading?.udid === udid && reading.status === 'matched'
-                && handle(reading.expectedHandle) === handle(accounts[udid])
+              const assigned = handle((prepared.approval.metadataAccounts ?? accounts)[udid]);
+              check(reading?.udid === udid && reading.status === (assigned ? 'matched' : 'unassigned')
+                && handle(reading.expectedHandle) === assigned
                 && handle(reading.observedHandle) === handle(accounts[udid])
-                && reading.snapshotSha256,
-              `Account preflight did not match approved metadata for ${udid}`);
+                && /^[a-f0-9]{64}$/.test(reading.snapshotSha256 ?? ''),
+              `Account preflight did not match approved device identity for ${udid}`);
               readings.push({ udid, expectedHandle: handle(reading.expectedHandle),
                 observedHandle: handle(reading.observedHandle), status: reading.status,
                 checkedAt: reading.checkedAt, snapshotSha256: reading.snapshotSha256 });
@@ -467,7 +493,9 @@ export async function runAcceptance(options, { invoke, sleep = delay, now = Date
           check(accountProof.scopeFingerprint === hash(scope(options))
             && accountProof.readings?.length === options.udids.length
             && options.udids.every(udid => accountProof.readings.some(reading => reading.udid === udid
-              && reading.status === 'matched' && reading.observedHandle === handle(accounts[udid]))),
+              && reading.status === (handle((prepared.approval.metadataAccounts ?? accounts)[udid]) ? 'matched' : 'unassigned')
+              && reading.expectedHandle === handle((prepared.approval.metadataAccounts ?? accounts)[udid])
+              && reading.observedHandle === handle(accounts[udid]))),
           'Persisted account proof does not match the approved scope');
         }
         const args = { ...prepared.approval.request, requestId: randomUUID(), confirmed: true,

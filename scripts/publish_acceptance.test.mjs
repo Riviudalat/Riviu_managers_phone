@@ -194,6 +194,33 @@ test('Sheet-enabled scoped acceptance keeps handoff, cleanup and Sheet delivery 
     < e.calls.findIndex(c => c.command === 'publish_create_campaign'));
 });
 
+test('an unassigned phone freezes its observed account and refuses a changed account before Create', async t => {
+  for (const changedAfterApproval of [false, true]) {
+    const e = environment(t);
+    let changed = false;
+    const invoke = async (command, args) => {
+      const value = await e.invoke(command, args);
+      if (command === 'list_device_metas') value.find(row => row.udid === 'phone-b').handle = '';
+      if (command === 'interaction_read_account' && args.udid === 'phone-b') {
+        return { ...value, expectedHandle: '', observedHandle: changed ? 'other' : 'fixture', status: 'unassigned' };
+      }
+      return value;
+    };
+    const prepared = await runAcceptance(e.options('preflight'), { invoke });
+    assert.equal(prepared.exitCode, 0, prepared.report.error);
+    const approved = JSON.parse(fs.readFileSync(path.join(e.dir, 'preflight.json'), 'utf8')).approval;
+    assert.equal(approved.accounts['phone-b'], 'fixture');
+    assert.equal(approved.metadataAccounts['phone-b'], '');
+    assert.equal(e.calls.some(call => call.command === 'publish_create_campaign'), false);
+
+    changed = changedAfterApproval;
+    const submitted = await runAcceptance(e.options('submit', ['--confirm', prepared.report.confirmation]), { invoke });
+    assert.equal(submitted.exitCode, changed ? 1 : 2);
+    assert.equal(e.calls.filter(call => call.command === 'publish_create_campaign').length, changed ? 0 : 1);
+    assert.equal(e.calls.filter(call => call.command === 'publish_execute').length, changed ? 0 : 1);
+  }
+});
+
 test('real Android inspect refuses mock or absent devices before any effect command', async t => {
   const e = environment(t);
   const options = e.options('inspect', ['--real-android', 'true']);
@@ -759,6 +786,12 @@ test('acceptance needs matching canonical proof, durable receipt and authenticat
   const cleaned = await runAcceptance(e.options('observe', ['--campaign-id', 'campaign-fixture']), { invoke });
   assert.equal(cleaned.exitCode, 0);
   assert.equal(cleaned.report.counts.mediaCleaned, 2);
+  e.detail.assignments[0].evidenceJson = JSON.stringify({ postUrl, publicationVerified: true, state: 'posted',
+    priorEvidenceJson: JSON.stringify({ nativeImport: { state: 'imported', importId: 'import-assignment-0' } }),
+    cleanup: { state: 'cleaned', importId: 'import-assignment-0', source: 'verified_deferred' } });
+  const recovered = await runAcceptance(e.options('observe', ['--campaign-id', 'campaign-fixture']), { invoke });
+  assert.equal(recovered.exitCode, 0, 'verified deferred cleanup from an uncertain Post keeps its native import proof');
+  assert.equal(recovered.report.counts.mediaCleaned, 2);
   const wrongAccount = async (command, args) => {
     const value = await invoke(command, args);
     if (command === 'list_device_metas') for (const row of value) row.handle = 'different.account';
