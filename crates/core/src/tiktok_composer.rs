@@ -4326,13 +4326,13 @@ mod tests {
             picker_real("riviu-abc", None, Some(false)).leaving_by(grid_area()),
             picker_real("riviu-abc", Some(":id/q4g"), Some(true)),
             // The edit step, carrying exactly what the measured screen carries: its own
-            // `Next` (`:id/kl7`, whose only text child reads `Next` — measured 30/08/2026).
+            // `Next` (`:id/kl_`, the measured text child of `:id/kl7`).
             // With `composer_next` in the catalogue, `advance_to_edit_step` proves arrival
             // by this marker *appearing* — and the measuring walk still never taps it, which
             // is what the on-screen assertion below holds the fake to.
             scene(
                 vec![(
-                    "Next",
+                    ":id/kl_",
                     ElementBox {
                         clickable: true,
                         ..box_at(545.0, 1954.0)

@@ -1596,6 +1596,16 @@ impl TikTokControls {
                 Some(LabelMatch::Exact("Profile"))
             }
 
+            // The caption IME can retain its own "Next" while returning to
+            // this measured Trill editor. Its child resource ID is unique.
+            TikTokControl::ComposerNext
+                if self.package() == "com.ss.android.ugc.trill"
+                    && self.translated.language == "en"
+                    && self.resource_version() == Some("38.3.2") =>
+            {
+                Some(LabelMatch::ResourceId(":id/kl_"))
+            }
+
             // The caption field reads the version table first for the reason its field there
             // documents: on 38.3.2 the post screen carries TWO `EditText`s, so a class can
             // resolve the wrong one and a placeholder string stops matching once typed. The
@@ -2383,11 +2393,9 @@ pub const TIKTOK_LABEL_SETS: &[TikTokLabels] = &[
         // `LinearLayout …:id/kl7 [545,1954][1048,2070]`, whose only text child reads `Next`
         // (`…:id/kl_ [755,1985][849,2038]`). Measured 30/08/2026 on ce051715ac247a3f01 via
         // `composer_scout --album Camera --images 3`, standing on the edit step; `Next` is
-        // the only node carrying that text on the whole screen (counted in the dump, not
-        // assumed). The neighbour matters more than the target: bottom-LEFT of the same bar
-        // is `Your Story` (`…:id/mw4`) — a one-tap publish. Text rather than the id for the
-        // same reason `picker_next` is text: this build renders the string, and the id table
-        // is reserved for controls whose strings cannot work.
+        // the only node carrying that text on the measured edit screen. During a
+        // caption roundtrip the IME can add another Next, so 38.3.2 uses the
+        // measured :id/kl_ child through the version-specific label override.
         composer_next: Some(LabelMatch::Text("Next")),
         // `Button desc="Post" …:id/mr_ [550,1946][1048,2062]` (its text child `…:id/ms9`
         // also reads `Post`). Measured 30/08/2026 on ce051715ac247a3f01 via
@@ -3169,9 +3177,10 @@ mod tests {
 
     /// **The measured publish tail lives where each locator's nature demands.**
     ///
-    /// The strings (`Next`, `Post`) are rendered by the build and language-stable, so they
-    /// sit in the language set like `picker_next` does. The caption field is the opposite:
-    /// its screen carries a second `EditText` (the title) and its own text is a placeholder
+    /// The post-screen `Post` string is rendered by the build and language-stable.
+    /// The editor's `Next` needs its measured build ID because the caption IME also
+    /// renders `Next` while returning from sound reproof. The caption screen
+    /// carries a second `EditText` (the title) and the caption text is a placeholder
     /// that mutates when typed, so only the build-keyed id can name it — and ids must never
     /// sit in a language set, which serves every version of the package.
     #[test]
@@ -3180,7 +3189,7 @@ mod tests {
             .expect("the fleet's build is catalogued");
         assert_eq!(
             controls.label(TikTokControl::ComposerNext),
-            Some(LabelMatch::Text("Next"))
+            Some(LabelMatch::ResourceId(":id/kl_"))
         );
         assert_eq!(
             controls.label(TikTokControl::PostButton),

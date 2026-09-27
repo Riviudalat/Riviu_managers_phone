@@ -170,6 +170,7 @@ fn explicit_retry_restores_three_sound_retries_without_reopening_post() {
 fn checked_pre_post_retry_rebinds_only_unconfirmed_random_sound_and_audits_prior_choice() {
     for (confirmed, step, reset) in [
         (false, "sound", true),
+        (false, "prePost", true),
         (true, "sound", false),
         (false, "caption", false),
     ] {

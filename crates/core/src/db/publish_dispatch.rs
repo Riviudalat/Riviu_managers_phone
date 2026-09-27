@@ -208,7 +208,7 @@ impl Database {
             "Tài khoản đã đổi; không thử lại bài cũ"
         );
         if let Some((_, request_id)) = request {
-            if recovery.step == "sound"
+            if matches!(recovery.step.as_str(), "sound" | "prePost")
                 && recovery
                     .sound
                     .as_ref()
