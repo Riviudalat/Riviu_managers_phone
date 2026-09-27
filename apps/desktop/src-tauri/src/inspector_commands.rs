@@ -260,6 +260,138 @@ pub async fn inspector_tap(
 }
 
 #[tauri::command]
+pub async fn inspector_tap_gallery_cell(
+    state: State<'_, AppState>,
+    udid: String,
+    snapshot_id: String,
+    element_index: usize,
+) -> Result<InspectorSnapshot, CommandError> {
+    let _admission = state.ensure_accepting_work()?;
+    tap_gallery_cell(&state, udid, snapshot_id, element_index).await
+}
+
+fn gallery_cell_rect(
+    snapshot: &InspectorSnapshot,
+    index: usize,
+) -> anyhow::Result<riviu_core::ElementBox> {
+    anyhow::ensure!(
+        snapshot.package == riviu_core::threads_publish::ANDROID_PACKAGE,
+        "inspector_wrong_app"
+    );
+    let tree = Tree::parse(riviu_core::HierarchySourceSnapshot {
+        generation: 1,
+        xml: snapshot.hierarchy_xml.clone(),
+    })?;
+    let node = tree
+        .nodes
+        .get(index)
+        .ok_or_else(|| anyhow::anyhow!("inspector_gallery_cell_missing"))?;
+    anyhow::ensure!(
+        node.attr("resource-id") == "com.instagram.barcelona:id/gallery_picker_grid_item_container"
+            && node.attr("clickable") == "true"
+            && node.attr("enabled") == "true",
+        "inspector_gallery_cell_invalid"
+    );
+    let mut parent = node.parent;
+    let mut in_grid = false;
+    while let Some(index) = parent {
+        let ancestor = &tree.nodes[index];
+        if ancestor.attr("class") == "android.widget.GridView" {
+            in_grid = true;
+            break;
+        }
+        parent = ancestor.parent;
+    }
+    anyhow::ensure!(in_grid, "inspector_gallery_grid_missing");
+    node.rect()
+        .ok_or_else(|| anyhow::anyhow!("inspector_gallery_cell_bounds_missing"))
+}
+
+fn same_gallery_thumbnail(
+    before: &[u8],
+    current: &[u8],
+    rect: &riviu_core::ElementBox,
+) -> anyhow::Result<bool> {
+    let before = image::load_from_memory(before)?.to_rgb8();
+    let current = image::load_from_memory(current)?.to_rgb8();
+    anyhow::ensure!(
+        before.dimensions() == current.dimensions(),
+        "inspector_gallery_screen_changed"
+    );
+    let (x, y, width, height) = (
+        rect.x as u32,
+        rect.y as u32,
+        rect.width as u32,
+        rect.height as u32,
+    );
+    anyhow::ensure!(
+        width > 0 && height > 0 && x + width <= before.width() && y + height <= before.height(),
+        "inspector_gallery_cell_out_of_screen"
+    );
+    Ok(
+        image::imageops::crop_imm(&before, x, y, width, height).to_image()
+            == image::imageops::crop_imm(&current, x, y, width, height).to_image(),
+    )
+}
+
+pub async fn tap_gallery_cell(
+    state: &AppState,
+    udid: String,
+    snapshot_id: String,
+    element_index: usize,
+) -> Result<InspectorSnapshot, CommandError> {
+    let _admission = state.ensure_accepting_work()?;
+    let _lock = RECORD_LOCK.lock().await;
+    if recording(state, &udid)?.is_some_and(|record| record.active) {
+        return Err(err(
+            "Dừng ghi Flow trước khi chọn ô ảnh; vị trí ảnh không thể phát lại an toàn",
+        ));
+    }
+    let observed = read_observation(state, &snapshot_id)?;
+    if observed.udid != udid {
+        return Err(err("Bằng chứng màn hình không thuộc đúng máy"));
+    }
+    let rect = gallery_cell_rect(&observed, element_index).map_err(err)?;
+    let before_png = STANDARD.decode(&observed.png_base64).map_err(err)?;
+    let id = udid.clone();
+    let after = with_manual_session(
+        state,
+        &udid,
+        DeviceWorkOwner::ManualControl,
+        move |session| async move {
+            anyhow::ensure!(
+                session.active_app_bundle().await? == observed.package,
+                "inspector_wrong_app"
+            );
+            let current = capture(session.as_ref(), &id).await?;
+            anyhow::ensure!(
+                current.tree_sha256 == observed.tree_sha256,
+                "inspector_gallery_changed_read_again"
+            );
+            let current_rect = gallery_cell_rect(&current, element_index)?;
+            anyhow::ensure!(
+                current_rect.x == rect.x
+                    && current_rect.y == rect.y
+                    && current_rect.width == rect.width
+                    && current_rect.height == rect.height,
+                "inspector_gallery_changed_read_again"
+            );
+            let current_png = STANDARD.decode(&current.png_base64)?;
+            anyhow::ensure!(
+                same_gallery_thumbnail(&before_png, &current_png, &rect)?,
+                "inspector_gallery_thumbnail_changed_read_again"
+            );
+            session.tap(rect.centre()).await?;
+            tokio::time::sleep(std::time::Duration::from_millis(350)).await;
+            capture(session.as_ref(), &id).await
+        },
+    )
+    .await?;
+    save_observation(state, &after)?;
+    Ok(after)
+}
+
+#[tauri::command]
 pub fn inspector_confirm_postcondition(
     state: State<'_, AppState>,
     udid: String,
@@ -425,6 +557,81 @@ pub async fn tap(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn png(color: image::Rgb<u8>, changed: Option<(u32, u32)>) -> Vec<u8> {
+        let mut bitmap = image::RgbImage::from_pixel(4, 4, color);
+        if let Some((x, y)) = changed {
+            bitmap.put_pixel(x, y, image::Rgb([0, 0, 0]));
+        }
+        let mut output = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgb8(bitmap)
+            .write_to(&mut output, image::ImageFormat::Png)
+            .unwrap();
+        output.into_inner()
+    }
+
+    #[test]
+    fn gallery_cell_requires_a_clickable_threads_grid_item() {
+        let xml = concat!(
+            "<hierarchy><node package=\"com.instagram.barcelona\" class=\"android.widget.GridView\" bounds=\"[0,0][4,4]\">",
+            "<node package=\"com.instagram.barcelona\" resource-id=\"com.instagram.barcelona:id/gallery_picker_grid_item_container\" ",
+            "clickable=\"true\" enabled=\"true\" bounds=\"[1,1][3,3]\"/>",
+            "</node></hierarchy>"
+        );
+        let snapshot = InspectorSnapshot {
+            id: "fixture".into(),
+            udid: "phone".into(),
+            package: "com.instagram.barcelona".into(),
+            version: "446".into(),
+            locale: "vi".into(),
+            width: 4.0,
+            height: 4.0,
+            png_base64: String::new(),
+            tree_sha256: String::new(),
+            hierarchy_xml: xml.into(),
+            elements: vec![],
+        };
+        let rect = gallery_cell_rect(&snapshot, 2).unwrap();
+        assert_eq!(
+            (rect.x, rect.y, rect.width, rect.height),
+            (1.0, 1.0, 2.0, 2.0)
+        );
+        assert!(gallery_cell_rect(&snapshot, 1).is_err());
+        assert!(gallery_cell_rect(
+            &InspectorSnapshot {
+                package: "other".into(),
+                ..snapshot
+            },
+            2
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn gallery_thumbnail_change_inside_the_selected_cell_refuses() {
+        let rect = riviu_core::ElementBox {
+            x: 1.0,
+            y: 1.0,
+            width: 2.0,
+            height: 2.0,
+            description: None,
+            enabled: true,
+            clickable: true,
+        };
+        let original = png(image::Rgb([255, 255, 255]), None);
+        assert!(same_gallery_thumbnail(
+            &original,
+            &png(image::Rgb([255, 255, 255]), Some((0, 0))),
+            &rect
+        )
+        .unwrap());
+        assert!(!same_gallery_thumbnail(
+            &original,
+            &png(image::Rgb([255, 255, 255]), Some((1, 1))),
+            &rect
+        )
+        .unwrap());
+    }
 
     fn selector(text: &str) -> ElementSelector {
         ElementSelector {

@@ -8,6 +8,7 @@ import {
   inspectorRecord,
   inspectorRecording,
   inspectorTap,
+  inspectorTapGalleryCell,
 } from "../inspectorApi";
 import type { InspectorElement, InspectorRecording, InspectorSnapshot } from "../inspectorApi";
 import { flowSaveRevision } from "../api";
@@ -196,6 +197,21 @@ export function DeviceInspector({ udid, onClose }: { udid: string; onClose: () =
     catch (reason) { setError(describeError(reason)); }
     finally { setBusy(false); }
   };
+  const galleryCell = useMemo(() => {
+    let current = element;
+    while (current) {
+      if (current.resourceId === "com.instagram.barcelona:id/gallery_picker_grid_item_container") return current;
+      current = current.parent === null ? undefined : hierarchy.byIndex.get(current.parent);
+    }
+    return undefined;
+  }, [element, hierarchy]);
+  const tapGalleryCell = async () => {
+    if (!snapshot || !galleryCell) return;
+    setBusy(true); setError("");
+    try { setSnapshot(await inspectorTapGalleryCell(udid, snapshot.id, galleryCell.index)); setSelected(null); }
+    catch (reason) { setError(describeError(reason)); }
+    finally { setBusy(false); }
+  };
   const downloadSnapshot = () => {
     if (!snapshot) return;
     setError("");
@@ -271,6 +287,7 @@ export function DeviceInspector({ udid, onClose }: { udid: string; onClose: () =
               <div className="inspector-action-buttons">
                 {element.parent !== null && hierarchy.byIndex.has(element.parent) && <button type="button" onClick={() => selectElement(element.parent)}><ChevronUp size={15}/>Chọn phần tử cha</button>}
                 <button type="button" className="primary" disabled={busy || !actionable || !element.selector || awaitingPostcondition} onClick={() => void tap()}>{record?.active ? "Bấm và kiểm tra kết quả" : "Bấm phần tử"}</button>
+                {galleryCell && <button type="button" disabled={busy || Boolean(record?.active)} title="Chọn ô ảnh đang thấy; cần Đọc lại nếu Gallery thay đổi" onClick={() => void tapGalleryCell()}>Chọn ô ảnh này</button>}
                 {awaitingPostcondition && <button type="button" className="primary" disabled={busy || !element.selector} onClick={() => void confirmPostcondition()}>Dùng làm kết quả của bước vừa bấm</button>}
               </div>
               <details><summary>Selector</summary><pre>{JSON.stringify(element.selector, null, 2)}</pre></details>

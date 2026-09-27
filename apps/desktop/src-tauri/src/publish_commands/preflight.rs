@@ -1152,6 +1152,7 @@ mod bounded_device_observation_tests {
             })
             .collect::<Vec<_>>();
         let request = riviu_core::PublishPreflightRequest {
+            network: riviu_core::SocialNetwork::TikTok,
             source_root: "fixture".into(),
             bundle_ids: bundles.iter().map(|bundle| bundle.id.clone()).collect(),
             udids: ids.iter().map(|udid| (*udid).into()).collect(),

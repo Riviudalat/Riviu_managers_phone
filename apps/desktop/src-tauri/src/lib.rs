@@ -595,6 +595,7 @@ pub fn run() {
             flow_commands::flow_coordinate_frame,
             inspector_commands::inspector_observe,
             inspector_commands::inspector_tap,
+            inspector_commands::inspector_tap_gallery_cell,
             inspector_commands::inspector_confirm_postcondition,
             inspector_commands::inspector_record,
             inspector_commands::inspector_recording,

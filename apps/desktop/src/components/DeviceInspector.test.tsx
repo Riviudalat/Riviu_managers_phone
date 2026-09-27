@@ -7,11 +7,13 @@ import {
   inspectorObserve,
   inspectorRecording,
   inspectorTap,
+  inspectorTapGalleryCell,
 } from "../inspectorApi";
 
 vi.mock("../inspectorApi", () => ({
   inspectorObserve: vi.fn(),
   inspectorTap: vi.fn(),
+  inspectorTapGalleryCell: vi.fn(),
   inspectorRecord: vi.fn(),
   inspectorRecording: vi.fn(),
   inspectorConfirmPostcondition: vi.fn(),
@@ -145,4 +147,22 @@ it("exports the same screenshot and hierarchy with the detected app build", asyn
     revokeObjectURL.mockRestore();
     click.mockRestore();
   }
+});
+
+it("selects an explicitly chosen gallery cell outside a recording", async () => {
+  vi.mocked(inspectorObserve).mockResolvedValue({
+    ...snapshot,
+    package: "com.instagram.barcelona",
+    elements: [
+      { ...snapshot.elements[0], index: 10, parent: null, resourceId: "com.instagram.barcelona:id/gallery_picker_grid_item_container", clickable: true, selector: null },
+      { ...snapshot.elements[1], index: 11, parent: 10, resourceId: "", clickable: false, selector: null },
+    ],
+  });
+  vi.mocked(inspectorRecording).mockResolvedValue(null);
+  vi.mocked(inspectorTapGalleryCell).mockResolvedValue(snapshot);
+  render(<DeviceInspector udid="phone-a" onClose={vi.fn()} />);
+  fireEvent.click(await screen.findByRole("treeitem", { name: /Profile/ }));
+  fireEvent.click(screen.getByRole("button", { name: "Chọn ô ảnh này" }));
+  await waitFor(() => expect(inspectorTapGalleryCell).toHaveBeenCalledWith("phone-a", "after", 10));
+  expect(inspectorTap).not.toHaveBeenCalled();
 });
