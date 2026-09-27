@@ -46,7 +46,7 @@ function exportSnapshot(snapshot: InspectorSnapshot) {
   try {
     const anchor = document.createElement("a");
     anchor.href = url;
-    anchor.download = `riviu-screen-${snapshot.package}-${snapshot.version}-${snapshot.udid}.json`.replace(/[^a-zA-Z0-9._-]/g, "_");
+    anchor.download = `riviu-screen-${snapshot.package}-${snapshot.version}-${snapshot.udid}-${snapshot.id}.json`.replace(/[^a-zA-Z0-9._-]/g, "_");
     anchor.click();
   } finally {
     URL.revokeObjectURL(url);
@@ -287,7 +287,7 @@ export function DeviceInspector({ udid, onClose }: { udid: string; onClose: () =
               <div className="inspector-action-buttons">
                 {element.parent !== null && hierarchy.byIndex.has(element.parent) && <button type="button" onClick={() => selectElement(element.parent)}><ChevronUp size={15}/>Chọn phần tử cha</button>}
                 <button type="button" className="primary" disabled={busy || !actionable || !element.selector || awaitingPostcondition} onClick={() => void tap()}>{record?.active ? "Bấm và kiểm tra kết quả" : "Bấm phần tử"}</button>
-                {galleryCell && <button type="button" disabled={busy || Boolean(record?.active)} title="Chọn ô ảnh đang thấy; cần Đọc lại nếu Gallery thay đổi" onClick={() => void tapGalleryCell()}>Chọn ô ảnh này</button>}
+                {galleryCell && <button type="button" disabled={busy || Boolean(record?.active)} title={record?.active ? "Dừng ghi Flow trước khi chọn ảnh" : "Chọn ô ảnh đang thấy; cần Đọc lại nếu Gallery thay đổi"} onClick={() => void tapGalleryCell()}>{record?.active ? "Dừng ghi để chọn ảnh" : "Chọn ô ảnh này"}</button>}
                 {awaitingPostcondition && <button type="button" className="primary" disabled={busy || !element.selector} onClick={() => void confirmPostcondition()}>Dùng làm kết quả của bước vừa bấm</button>}
               </div>
               <details><summary>Selector</summary><pre>{JSON.stringify(element.selector, null, 2)}</pre></details>

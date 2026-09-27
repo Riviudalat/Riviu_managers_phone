@@ -170,7 +170,7 @@ bên phải. Inspector đặt ảnh màn hình, bảng thuộc tính và cây gi
 riêng; trên cửa sổ hẹp, bảng thuộc tính và cây xếp cạnh ảnh. Rê chuột để tô phần tử;
 chọn trên ảnh hoặc trong cây sẽ đồng bộ vùng tô và bảng thuộc tính. Cây giữ cả node
 không bấm được, có tìm kiếm và bung/thu nhánh; bảng phân biệt giá trị `false` với thuộc
-tính không có trong cây XML. Có thể sao chép nguyên XML của lần quan sát hiện tại. Nút **Xuất dữ liệu màn hình** tải một file JSON chứa ảnh PNG, XML và package/version/locale của cùng lần quan sát. Khi cần đo màn soạn bài Threads trên máy khác, mở từng màn cần đo trên điện thoại, bấm **Đọc lại** rồi xuất file; tránh đưa ảnh hoặc XML có thông tin tài khoản riêng tư cho người không tin cậy.
+tính không có trong cây XML. Có thể sao chép nguyên XML của lần quan sát hiện tại. Nút **Xuất dữ liệu màn hình** tải một file JSON chứa ảnh PNG, XML và package/version/locale của cùng lần quan sát; mỗi file mang mã lần chụp riêng để không ghi đè. Khi cần đo màn soạn bài Threads trên máy khác, mở từng màn cần đo trên điện thoại, bấm **Đọc lại** rồi xuất file; tránh đưa ảnh hoặc XML có thông tin tài khoản riêng tư cho người không tin cậy.
 Nhãn có số động được lưu bằng phần ổn định khi vẫn xác định duy nhất. Với node mang
 nghĩa nhưng không nhận tap, Inspector chỉ dùng cha clickable khi quan hệ gần và có
 định danh rõ; node trang trí không tự leo lên khung lớn. **Bấm phần tử** mới gửi thao

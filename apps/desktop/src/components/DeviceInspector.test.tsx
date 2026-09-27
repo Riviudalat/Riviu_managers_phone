@@ -118,7 +118,8 @@ it("selects the smallest element on the screenshot and copies the exact XML", as
 it("exports the same screenshot and hierarchy with the detected app build", async () => {
   const createObjectURL = vi.spyOn(URL, "createObjectURL").mockReturnValue("blob:screen");
   const revokeObjectURL = vi.spyOn(URL, "revokeObjectURL").mockImplementation(() => undefined);
-  const click = vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => undefined);
+  let downloadedName = "";
+  const click = vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(function (this: HTMLAnchorElement) { downloadedName = this.download; });
   try {
     render(<DeviceInspector udid="phone-a" onClose={vi.fn()} />);
     fireEvent.click(await screen.findByRole("button", { name: "Xuất dữ liệu màn hình" }));
@@ -141,6 +142,7 @@ it("exports the same screenshot and hierarchy with the detected app build", asyn
       treeSha256: snapshot.treeSha256,
     });
     expect(click).toHaveBeenCalledOnce();
+    expect(downloadedName).toBe("riviu-screen-app.fixture-1.0-phone-a-after.json");
     expect(revokeObjectURL).toHaveBeenCalledWith("blob:screen");
   } finally {
     createObjectURL.mockRestore();
@@ -165,4 +167,15 @@ it("selects an explicitly chosen gallery cell outside a recording", async () => 
   fireEvent.click(screen.getByRole("button", { name: "Chọn ô ảnh này" }));
   await waitFor(() => expect(inspectorTapGalleryCell).toHaveBeenCalledWith("phone-a", "after", 10));
   expect(inspectorTap).not.toHaveBeenCalled();
+});
+
+it("explains why gallery selection is unavailable during recording", async () => {
+  vi.mocked(inspectorObserve).mockResolvedValue({
+    ...snapshot,
+    package: "com.instagram.barcelona",
+    elements: [{ ...snapshot.elements[0], resourceId: "com.instagram.barcelona:id/gallery_picker_grid_item_container", clickable: true, selector: null }],
+  });
+  render(<DeviceInspector udid="phone-a" onClose={vi.fn()} />);
+  fireEvent.click(await screen.findByRole("treeitem", { name: /Favorites/ }));
+  expect(screen.getByRole("button", { name: "Dừng ghi để chọn ảnh" })).toBeDisabled();
 });
