@@ -147,6 +147,10 @@ Username hiện thêm dưới tên máy, không thay số máy, tên máy hay tr
 Máy đọc lỗi, mất kết nối, username trùng hoặc vừa được sửa sẽ báo riêng và giữ nick cũ;
 các máy còn lại vẫn tiếp tục. Android đang mở điều khiển dùng lại phiên hiện có;
 máy còn bài đăng cần giữ chưa được mở Hồ sơ để đọc nick. iOS chưa hỗ trợ thao tác này.
+Đọc nick và preflight dùng chung bước khôi phục đầu trang Hồ sơ. Popup đã đo có
+nút **Not now** được từ chối trước khi đọc lại account; app không bấm **Save login**
+hoặc đổi tài khoản. Không đọc được cùng username qua hai lần quan sát thì vẫn báo
+chưa xác định, không tạo lượt đăng từ nội dung popup.
 Lệnh **Sửa Riviu Agent** nằm trong **Bảo trì**; hộp xác nhận nêu rõ số máy và việc
 khởi động lại stream. Nút quét thiết bị nằm bên phải toolbar. Trạng thái **Toàn hệ
 thống** trên header khác phạm vi **Máy thực hiện** của từng tác vụ.

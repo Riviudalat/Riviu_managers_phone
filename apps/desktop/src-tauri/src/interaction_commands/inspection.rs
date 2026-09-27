@@ -200,7 +200,8 @@ pub(super) async fn read_account_from_session(
     riviu_core::tiktok_share::navigate_own_profile(session, &labels).await?;
     let deadline = tokio::time::Instant::now() + Duration::from_secs(4);
     let observed = loop {
-        let observed = riviu_core::tiktok_account::observe_own_account(session, labels).await?;
+        let observed =
+            riviu_core::tiktok_account::restore_own_profile_header(session, labels).await?;
         if observed.is_some() || tokio::time::Instant::now() >= deadline {
             break observed;
         }
