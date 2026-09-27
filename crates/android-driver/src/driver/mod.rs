@@ -1947,6 +1947,16 @@ impl DeviceDriver for AndroidDriver {
     }
 
     async fn launch_app(&self, udid: &str, bundle_id: &str) -> anyhow::Result<()> {
+        if riviu_core::tiktok_target::is_measured_android_tiktok(bundle_id) {
+            let guard = self.screen_guard_state(udid).await?;
+            if guard.locked == Some(true) {
+                let blocker = guard.blocker().unwrap_or("lock screen");
+                anyhow::ensure!(
+                    self.dismiss_keyguard(udid).await?,
+                    "{udid} vẫn bị khóa ({blocker}); cần mở PIN/pattern trên máy trước khi lấy link"
+                );
+            }
+        }
         self.adb.launch_foreground_checked(udid, bundle_id).await
     }
 

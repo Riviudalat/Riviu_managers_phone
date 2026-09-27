@@ -630,6 +630,9 @@ Bài đã gửi nhưng chưa có link, kể cả **đăng ngay**,
 được kiểm tra lại mỗi 5 phút đến khi xác minh được link. Nhịp chờ tính từ lúc kết
 thúc lần kiểm tra trước; lỗi đọc/kết nối vẫn chờ 5 phút. Mở lại app giữ mốc Đăng và
 lần kiểm tra tiếp theo. Máy mất kết nối hoặc đang bận được kiểm khi sẵn sàng.
+Trước khi mở TikTok để đọc link trên Android, app thử gỡ màn khóa chỉ vuốt và
+đọc lại trạng thái khóa. Máy dùng PIN/pattern vẫn phải mở bằng tay; không coi
+ACK mở app là bằng chứng TikTok đã lên foreground.
 Bài từng dừng vì giới hạn 30 phút/4 giờ tự tiếp tục nếu còn đủ tài khoản và thời
 điểm gửi đã ghi nhận. Bài thiếu bằng chứng hoặc cần kiểm tra vì lý do khác vẫn
 hiển thị Cần kiểm tra. Việc tìm link không bấm Đăng lại.
