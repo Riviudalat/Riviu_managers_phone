@@ -4,7 +4,7 @@ use std::{env, fs, path::PathBuf};
 const CONFIG_ENV: &str = "RIVIU_GOOGLE_OAUTH_CONFIG_JSON";
 const CONFIG_FILE_ENV: &str = "RIVIU_GOOGLE_OAUTH_CONFIG_FILE";
 const REQUIRED_ENV: &str = "RIVIU_REQUIRE_GOOGLE_CONFIG";
-const INVALID: &str = "Google build config invalid: provide Desktop clientId, pickerApiKey and numeric projectNumber; clientSecret is optional. Account tokens are not allowed.";
+const INVALID: &str = "Google build config invalid: provide Desktop clientId; clientSecret, pickerApiKey and numeric projectNumber are optional. Account tokens are not allowed.";
 
 pub fn validate(raw: &str, required: bool) -> Result<String, &'static str> {
     if raw.trim().is_empty() {
@@ -47,17 +47,19 @@ pub fn validate(raw: &str, required: bool) -> Result<String, &'static str> {
     }
     let valid_key =
         |s: &str| !s.trim().is_empty() && s.len() <= 4096 && !s.chars().any(char::is_control);
-    if !valid_key(text("pickerApiKey")?) {
-        return Err(INVALID);
-    }
-    if let Some(secret) = object.get("clientSecret").filter(|v| !v.is_null()) {
-        if !secret.as_str().is_some_and(valid_key) {
-            return Err(INVALID);
+    for key in ["clientSecret", "pickerApiKey"] {
+        if let Some(value) = object.get(key).filter(|v| !v.is_null()) {
+            if !value.as_str().is_some_and(valid_key) {
+                return Err(INVALID);
+            }
         }
     }
-    let project = text("projectNumber")?;
-    if project.is_empty() || project.len() > 32 || !project.bytes().all(|b| b.is_ascii_digit()) {
-        return Err(INVALID);
+    if let Some(project) = object.get("projectNumber").filter(|v| !v.is_null()) {
+        let project = project.as_str().ok_or(INVALID)?;
+        if project.is_empty() || project.len() > 32 || !project.bytes().all(|b| b.is_ascii_digit())
+        {
+            return Err(INVALID);
+        }
     }
     serde_json::to_string(&value).map_err(|_| INVALID)
 }
@@ -102,14 +104,14 @@ pub fn stage() -> Result<(), &'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    const COMPLETE: &str = r#"{"clientId":"fixture.apps.googleusercontent.com","pickerApiKey":"fixture-key","projectNumber":"12345"}"#;
+    const COMPLETE: &str = r#"{"clientId":"fixture.apps.googleusercontent.com"}"#;
     #[test]
     fn required_builds_reject_missing_incomplete_and_account_tokens() {
         assert!(validate("", true).is_err());
         assert_eq!(validate("", false).unwrap(), "");
         for raw in [
             "broken",
-            r#"{"clientId":"fixture.apps.googleusercontent.com"}"#,
+            r#"{"clientId":"invalid"}"#,
             r#"{"clientId":"fixture.apps.googleusercontent.com","pickerApiKey":"key","projectNumber":"123","refreshToken":"secret-value"}"#,
         ] {
             let error = validate(raw, true).unwrap_err();
@@ -121,10 +123,14 @@ mod tests {
         assert!(validate(COMPLETE, true).is_ok());
         let mut value: serde_json::Value = serde_json::from_str(COMPLETE).unwrap();
         value["clientSecret"] = "fixture-secret".into();
+        value["pickerApiKey"] = "picker-key".into();
+        value["projectNumber"] = "12345".into();
         assert_eq!(
             serde_json::from_str::<serde_json::Value>(&validate(&value.to_string(), true).unwrap())
                 .unwrap(),
             value
         );
+        value["projectNumber"] = "not-a-number".into();
+        assert!(validate(&value.to_string(), true).is_err());
     }
 }

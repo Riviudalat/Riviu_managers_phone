@@ -1,5 +1,6 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { ArrowLeft, ArrowRight, Check, FolderOpen, ListFilter, LoaderCircle, Music2, Pencil, Search, Undo2, Zap, X } from "lucide-react";
+import { AppWindow, ArrowLeft, ArrowRight, Check, FolderOpen, ListFilter, LoaderCircle, Music2, Pencil, Search, Undo2, Zap, X } from "lucide-react";
+import { launchDeviceApp } from "../../api";
 import type { PublishWizardProps } from "./PublishWizard";
 import { PublishMedia } from "./PublishMedia";
 import { PublishDialog } from "./PublishDialog";
@@ -8,6 +9,7 @@ import { MachineChoice } from "../MachineChoice";
 import { orderDevicesByNumber, tileName, tileNumber } from "../../deviceNaming";
 import { pickDirectory } from "../../pickFile";
 import { describeError } from "../../describeError";
+import { pushToast, toastError } from "../../toastStore";
 import { requestConfirm } from "../../confirmStore";
 import { assignDevice } from "./publishAssignments";
 import "../../styles/publish-quick.css";
@@ -60,6 +62,7 @@ export function PublishQuickSetup(p: QuickProps) {
   const [undo, setUndo] = useState<{ source: string; ids: string[]; assignments: Record<string, string>; picked: string[]; after: string } | null>(null);
   const [reportPage, setReportPage] = useState(0);
   const [confirming, setConfirming] = useState(false);
+  const [openingUdid, setOpeningUdid] = useState<string | null>(null);
   const latest = useRef<AssignmentSnapshot | null>(null);
   const pendingAssignment = useRef(false);
   const rootRef = useRef<HTMLDivElement>(null);
@@ -190,6 +193,18 @@ export function PublishQuickSetup(p: QuickProps) {
     if (locked || confirming) return;
     p.onAssign(Object.fromEntries(Object.entries(p.assignments).filter(([, id]) => id !== udid)));
   };
+  const openThreads = async (udid: string) => {
+    if (openingUdid || locked || p.active === false) return;
+    setOpeningUdid(udid);
+    try {
+      await launchDeviceApp(udid, "com.instagram.barcelona");
+      pushToast("ok", "Đã mở Threads", label(udid));
+    } catch (cause) {
+      toastError(`Không mở được Threads trên ${label(udid)}`, cause);
+    } finally {
+      setOpeningUdid(null);
+    }
+  };
   const openCaption = (id: string, origin: HTMLButtonElement) => {
     setPhoto(0); setCaptionContext({ id, source: p.sourceRoot, origin });
   };
@@ -285,6 +300,7 @@ export function PublishQuickSetup(p: QuickProps) {
                 </div>}
               </>}/>
               <button type="button" className="pq-assign-button" aria-label={`${action} ${active?.name ?? "bài"} · ${label(d.udid)}`} disabled={locked || confirming || !assignable || current} title={!activeVisible ? "Hiện lại bài đang gán trước khi phân công" : block ?? (!p.eligible.includes(d.udid) ? "Máy ngoài phạm vi" : action)} onClick={() => { if (active) void assign(active.id, d.udid, true); }}>{action}</button>
+              {p.network === "threads" && d.platform === "android" && <div className="pq-device-open-app"><button type="button" aria-label={`Mở Threads trên ${label(d.udid)}`} disabled={locked || openingUdid !== null || !p.eligible.includes(d.udid) || !["ready", "connected"].includes(d.status)} onClick={() => void openThreads(d.udid)}>{openingUdid === d.udid ? <LoaderCircle size={14} className="spin" aria-hidden="true"/> : <AppWindow size={14} aria-hidden="true"/>}{openingUdid === d.udid ? "Đang mở Threads…" : "Mở Threads"}</button></div>}
             </div>;
           })}{!filteredDevices.length && <p className="pq-list-empty">{devices.length ? "Không có máy khớp bộ lọc." : "Chưa có thiết bị. Kết nối máy để ghép bài."}</p>}</div>
         </section>

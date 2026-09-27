@@ -490,6 +490,7 @@ yêu cầu preflight và lịch, không đổi tab bằng cách chỉ thay nhãn
 rồi báo riêng các bước composer/xác minh chưa được đo. Threads không dùng bộ chọn nhạc TikTok.
 Hiện preflight Threads vẫn khóa thao tác **Đăng bài** vì chưa đo ứng dụng Threads trên thiết bị và chưa có cách xác minh
 liên kết sau khi gửi. Không có bài nào được gửi từ tab Threads cho tới khi đủ hai điều kiện này.
+Trong **Thiết lập**, nút **Mở Threads** trên từng dòng máy Android đưa ứng dụng Threads lên màn hình máy đó để đăng tay hoặc kiểm tra tài khoản. Máy cần kết nối, nằm trong phạm vi đã chọn và không có tác vụ điều khiển đang giữ máy. Thao tác này không chọn media, nhập caption hoặc gửi bài; kết quả preflight vẫn khóa **Đăng bài**.
 
 Mỗi thư mục bài Threads dùng cấu trúc nguồn sau (tên phần sau dấu `-` có thể thay đổi):
 

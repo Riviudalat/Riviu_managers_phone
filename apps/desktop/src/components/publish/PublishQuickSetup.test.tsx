@@ -1,9 +1,10 @@
-import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import { launchDeviceApp } from "../../api";
 import { PublishQuickSetup } from "./PublishQuickSetup";
 import type { PublishWizardProps } from "./PublishWizard";
 import type { PublishDeviceGuards } from "../../types";
-vi.mock("../../api", () => ({ publishImagePreview: vi.fn() }));
+vi.mock("../../api", () => ({ publishImagePreview: vi.fn(), launchDeviceApp: vi.fn() }));
 const row = { assignmentId: "pending-a", campaignId: "campaign-a", updatedAt: "2026-09-15T12:00:00Z", reason: "TikTok báo bài đang được xử lý" };
 const guards: PublishDeviceGuards = { a: { blocking: [row], linkReview: [] }, b: { blocking: [], linkReview: [] } };
 function props(): PublishWizardProps {
@@ -17,6 +18,17 @@ beforeEach(() => {
   vi.spyOn(HTMLDialogElement.prototype, "close").mockImplementation(function (this: HTMLDialogElement) { this.removeAttribute("open"); });
 });
 afterEach(() => { cleanup(); vi.restoreAllMocks(); });
+it("opens Threads only on the chosen Android device without starting publication", async () => {
+  vi.mocked(launchDeviceApp).mockResolvedValue(undefined);
+  const p = props();
+  const view = render(<PublishQuickSetup {...p} network="threads" />);
+  fireEvent.click(screen.getByRole("button", { name: "Mở Threads trên Máy 2 · b" }));
+  await waitFor(() => expect(launchDeviceApp).toHaveBeenCalledExactlyOnceWith("b", "com.instagram.barcelona"));
+  expect(p.onPreflight).not.toHaveBeenCalled();
+  expect(p.onExecute).not.toHaveBeenCalled();
+  view.rerender(<PublishQuickSetup {...p} network="tiktok" />);
+  expect(screen.queryByRole("button", { name: /Mở Threads trên/ })).toBeNull();
+});
 it("shows source partner warnings without blocking valid publishing or changing source data", () => {
   const p = props();
   p.manifest!.notices = [{ severity: "warning", path: "fixture/one/partners.xlsx", message: "File đối tác rỗng; bài vẫn có thể đăng" }];
