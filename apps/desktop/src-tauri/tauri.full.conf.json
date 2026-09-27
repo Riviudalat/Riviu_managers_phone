@@ -1,7 +1,7 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "Riviu Manager Full",
-  "version": "0.2.60",
+  "version": "0.2.61",
   "identifier": "com.riviu.manager.full",
   "build": {
     "frontendDist": "../dist",
@@ -10,7 +10,7 @@
   "app": {
     "windows": [
       {
-        "create": true,
+        "create": false,
         "title": "Riviu Manager Full",
         "width": 1440,
         "height": 900,

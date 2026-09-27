@@ -305,8 +305,15 @@ pub fn run() {
             let deployment_smoke = DeploymentSmokeState::from_process_args();
             let smoke_active = deployment_smoke.active();
             let background_dev = cfg!(debug_assertions) && std::env::var("RIVIU_DEV_BACKGROUND").as_deref() == Ok("1");
+            let smoke_cdp_port = smoke_active
+                .then(|| std::env::var("RIVIU_DEPLOYMENT_SMOKE_CDP_PORT").ok())
+                .flatten()
+                .and_then(|value| value.parse::<u16>().ok())
+                .filter(|port| *port >= 1024);
             let dev_browser_args = if background_dev {
                 let port = std::env::var("RIVIU_DEV_CDP_PORT").ok().and_then(|value| value.parse::<u16>().ok()).filter(|port| *port >= 1024).unwrap_or(9229);
+                format!("--remote-debugging-address=127.0.0.1 --remote-debugging-port={port} --disable-background-timer-throttling --disable-renderer-backgrounding --disable-backgrounding-occluded-windows")
+            } else if let Some(port) = smoke_cdp_port {
                 format!("--remote-debugging-address=127.0.0.1 --remote-debugging-port={port} --disable-background-timer-throttling --disable-renderer-backgrounding --disable-backgrounding-occluded-windows")
             } else { String::new() };
             let window = if let Some(window) = app.get_webview_window("main") {
@@ -316,14 +323,16 @@ pub fn run() {
                 window
             } else {
                 let builder = WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
-                    .title("Riviu Manager")
+                    .title(app.config().product_name.as_deref().unwrap_or("Riviu Manager"))
                     .inner_size(1440.0, 900.0)
                     .min_inner_size(820.0, 560.0)
                     .resizable(true)
                     .visible(false)
                     .focused(!background_dev);
-                let builder = if background_dev { builder.additional_browser_args(&dev_browser_args) } else { builder };
-                let builder = if let Some(directory) = policy.webview_directory() {
+                let builder = if background_dev || smoke_cdp_port.is_some() { builder.additional_browser_args(&dev_browser_args) } else { builder };
+                let builder = if let Some(args) = deployment_smoke.args.as_ref() {
+                    builder.data_directory(args.data_dir.join("webview"))
+                } else if let Some(directory) = policy.webview_directory() {
                     builder.data_directory(directory)
                         .on_new_window(|_, _| tauri::webview::NewWindowResponse::Deny)
                         .on_navigation(|url| matches!(url.host_str(), Some("localhost" | "127.0.0.1" | "tauri.localhost")) || url.scheme() == "tauri")
@@ -859,6 +868,10 @@ mod tests {
             let config: serde_json::Value =
                 serde_json::from_str(source).expect("the Tauri config remains valid JSON");
             let window = &config["app"]["windows"][0];
+            assert_eq!(
+                window["create"], false,
+                "{name} must not load React before setup manages IPC state"
+            );
             assert_eq!(window["minWidth"], 820, "{name} minWidth drifted");
             assert_eq!(window["minHeight"], 560, "{name} minHeight drifted");
         }
