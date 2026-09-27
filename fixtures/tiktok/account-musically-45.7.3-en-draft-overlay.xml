@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Sanitized 27/09/2026 Global 45.7.3/en own Profile snapshot.
+     The Continue editing banner hides Edit/Profile menu from accessibility. -->
+<hierarchy rotation="0" width="1080" height="2094">
+  <android.widget.Button package="com.zhiliaoapp.musically" class="android.widget.Button" text="@fixture.account" resource-id="com.zhiliaoapp.musically:id/s0v" clickable="true" enabled="true" bounds="[356,510][724,549]" displayed="true" />
+  <android.widget.Button package="com.zhiliaoapp.musically" class="android.widget.Button" text="Add bio" content-desc="Add bio" resource-id="com.zhiliaoapp.musically:id/rv2" clickable="true" enabled="true" bounds="[195,709][884,782]" displayed="true" />
+  <android.widget.FrameLayout package="com.zhiliaoapp.musically" class="android.widget.FrameLayout" text="" content-desc="Profile" resource-id="com.zhiliaoapp.musically:id/nrb" clickable="true" enabled="true" selected="true" bounds="[864,1965][1080,2094]" displayed="true" />
+</hierarchy>

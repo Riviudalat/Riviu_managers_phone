@@ -64,14 +64,35 @@ fn global_profile_from_snapshot_with_id(
     })?;
     let mut edits = 0;
     let mut menus = 0;
+    let mut bio_edits = 0;
+    let mut selected_profiles = 0;
     let mut usernames = Vec::new();
     for (index, node) in tree.nodes.iter().enumerate() {
         if !node.visible("com.zhiliaoapp.musically")
             || !tree.ancestors_visible(index)
-            || node.attr("class") != "android.widget.Button"
             || node.attr("enabled") != "true"
             || node.attr("clickable") != "true"
         {
+            continue;
+        }
+        if username_id == "s0v" {
+            let bio = node.attr("class") == "android.widget.Button"
+                && node.attr("resource-id") == "com.zhiliaoapp.musically:id/rv2"
+                && node.attr("text") == "Add bio"
+                && node.attr("content-desc") == "Add bio";
+            let selected_profile = node.attr("class") == "android.widget.FrameLayout"
+                && node.attr("resource-id") == "com.zhiliaoapp.musically:id/nrb"
+                && node.attr("content-desc") == "Profile"
+                && node.attr("selected") == "true";
+            if bio || selected_profile {
+                if node.rect().is_none() {
+                    return Ok(None);
+                }
+                bio_edits += usize::from(bio);
+                selected_profiles += usize::from(selected_profile);
+            }
+        }
+        if node.attr("class") != "android.widget.Button" {
             continue;
         }
         let description = node.attr("content-desc");
@@ -90,7 +111,8 @@ fn global_profile_from_snapshot_with_id(
             }
         }
     }
-    Ok((edits == 1 && menus == 1)
+    Ok(((edits == 1 && menus == 1)
+        || (username_id == "s0v" && bio_edits == 1 && selected_profiles == 1))
         .then(|| single_username(&usernames))
         .flatten())
 }
@@ -561,6 +583,23 @@ mod tests {
             assert_eq!(global_profile_from_snapshot(&changed).unwrap(), None);
         }
         assert!(global_profile_from_snapshot(&PROFILE.replace("</hierarchy>", "")).is_err());
+    }
+
+    #[test]
+    fn measured_global_draft_overlay_keeps_own_profile_proof_without_edit_menu() {
+        const OVERLAY: &str =
+            include_str!("../../../fixtures/tiktok/account-musically-45.7.3-en-draft-overlay.xml");
+        assert_eq!(
+            global_profile_from_snapshot(OVERLAY).unwrap().as_deref(),
+            Some("fixture.account")
+        );
+        for changed in [
+            OVERLAY.replace("selected=\"true\"", "selected=\"false\""),
+            OVERLAY.replace("text=\"Add bio\"", "text=\"Other\""),
+            OVERLAY.replace(":id/rv2", ":id/other"),
+        ] {
+            assert_eq!(global_profile_from_snapshot(&changed).unwrap(), None);
+        }
     }
 
     #[tokio::test]
