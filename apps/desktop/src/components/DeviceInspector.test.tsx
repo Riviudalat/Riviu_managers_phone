@@ -156,16 +156,18 @@ it("selects an explicitly chosen gallery cell outside a recording", async () => 
     ...snapshot,
     package: "com.instagram.barcelona",
     elements: [
-      { ...snapshot.elements[0], index: 10, parent: null, resourceId: "com.instagram.barcelona:id/gallery_picker_grid_item_container", clickable: true, selector: null },
-      { ...snapshot.elements[1], index: 11, parent: 10, resourceId: "", clickable: false, selector: null },
+      { ...snapshot.elements[0], index: 9, parent: null, className: "android.widget.GridView", resourceId: "", clickable: false, selector: null },
+      { ...snapshot.elements[0], index: 10, parent: 9, resourceId: "com.instagram.barcelona:id/gallery_picker_grid_item_container", clickable: true, selector: null },
+      { ...snapshot.elements[1], index: 11, parent: 9, description: "Hình nhỏ ảnh", resourceId: "", clickable: true, selector: null },
+      { ...snapshot.elements[1], index: 12, parent: 11, resourceId: "", clickable: false, selector: null },
     ],
   });
   vi.mocked(inspectorRecording).mockResolvedValue(null);
   vi.mocked(inspectorTapGalleryCell).mockResolvedValue(snapshot);
   render(<DeviceInspector udid="phone-a" onClose={vi.fn()} />);
-  fireEvent.click(await screen.findByRole("treeitem", { name: /Profile/ }));
+  fireEvent.click(await screen.findByRole("treeitem", { name: /Hình nhỏ ảnh/ }));
   fireEvent.click(screen.getByRole("button", { name: "Chọn ô ảnh này" }));
-  await waitFor(() => expect(inspectorTapGalleryCell).toHaveBeenCalledWith("phone-a", "after", 10));
+  await waitFor(() => expect(inspectorTapGalleryCell).toHaveBeenCalledWith("phone-a", "after", 11));
   expect(inspectorTap).not.toHaveBeenCalled();
 });
 
@@ -173,9 +175,13 @@ it("explains why gallery selection is unavailable during recording", async () =>
   vi.mocked(inspectorObserve).mockResolvedValue({
     ...snapshot,
     package: "com.instagram.barcelona",
-    elements: [{ ...snapshot.elements[0], resourceId: "com.instagram.barcelona:id/gallery_picker_grid_item_container", clickable: true, selector: null }],
+    elements: [
+      { ...snapshot.elements[0], index: 9, parent: null, className: "android.widget.GridView", resourceId: "", clickable: false, selector: null },
+      { ...snapshot.elements[0], index: 10, parent: 9, resourceId: "com.instagram.barcelona:id/gallery_picker_grid_item_container", clickable: true, selector: null },
+      { ...snapshot.elements[0], index: 11, parent: 9, resourceId: "", description: "Hình nhỏ ảnh", clickable: true, selector: null },
+    ],
   });
   render(<DeviceInspector udid="phone-a" onClose={vi.fn()} />);
-  fireEvent.click(await screen.findByRole("treeitem", { name: /Favorites/ }));
+  fireEvent.click(await screen.findByRole("treeitem", { name: /Hình nhỏ ảnh/ }));
   expect(screen.getByRole("button", { name: "Dừng ghi để chọn ảnh" })).toBeDisabled();
 });

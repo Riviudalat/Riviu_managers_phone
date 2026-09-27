@@ -200,7 +200,12 @@ export function DeviceInspector({ udid, onClose }: { udid: string; onClose: () =
   const galleryCell = useMemo(() => {
     let current = element;
     while (current) {
-      if (current.resourceId === "com.instagram.barcelona:id/gallery_picker_grid_item_container") return current;
+      const parent = current.parent === null ? undefined : hierarchy.byIndex.get(current.parent);
+      if (parent?.className === "android.widget.GridView" && current.clickable && current.enabled) {
+        const cells = hierarchy.elements.filter((candidate) => candidate.parent === parent.index);
+        if (cells[0]?.resourceId === "com.instagram.barcelona:id/gallery_picker_grid_item_container"
+          && cells[0].index !== current.index) return current;
+      }
       current = current.parent === null ? undefined : hierarchy.byIndex.get(current.parent);
     }
     return undefined;

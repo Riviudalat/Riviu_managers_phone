@@ -180,7 +180,7 @@ gọi là thành công. **Dừng ghi** rồi **Lưu thành Flow**. Mở Flow thi
 chạy. Phiên còn bước chờ xác minh không được lưu.
 Macro tọa độ bên dưới vẫn dùng cho thao tác cử chỉ; Flow Inspector tìm lại phần tử.
 
-Trong Thư viện ảnh Threads, nhiều ô có cùng `resource-id`, nên **Bấm phần tử** không thể phân biệt ảnh nào. Khi đã **Dừng ghi**, chọn ô ảnh trên hình hoặc trong cây rồi bấm **Chọn ô ảnh này**. Inspector so lại cây giao diện và thumbnail của đúng ô trước khi bấm; nếu Thư viện đổi, bấm **Đọc lại** rồi chọn lại. Thao tác chọn ô ảnh này không được ghi thành bước Flow, vì thứ tự ảnh trong Thư viện có thể thay đổi giữa các lần chạy.
+Trong Thư viện ảnh Threads, ô camera có `gallery_picker_grid_item_container`, còn các ô ảnh ở các node kế tiếp trong `GridView`. Khi đã **Dừng ghi**, chọn một thumbnail ảnh trên hình hoặc trong cây rồi bấm **Chọn ô ảnh này**. Inspector so lại vị trí và thumbnail của đúng ô trước khi bấm; nếu Thư viện đổi, bấm **Đọc lại** rồi chọn lại. Thao tác chọn ô ảnh này không được ghi thành bước Flow, vì thứ tự ảnh trong Thư viện có thể thay đổi giữa các lần chạy.
 
 Agent có thể dùng MCP Riviu khi API cục bộ đã bật. Chạy `npm run agent-mcp` trong
 apps/desktop với `RIVIU_API_TOKEN` và `RIVIU_API_URL` từ cấu hình API. Các tool

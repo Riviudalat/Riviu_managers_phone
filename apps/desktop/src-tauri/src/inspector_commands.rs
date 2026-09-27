@@ -282,29 +282,42 @@ fn gallery_cell_rect(
         generation: 1,
         xml: snapshot.hierarchy_xml.clone(),
     })?;
-    let node = tree
-        .nodes
-        .get(index)
-        .ok_or_else(|| anyhow::anyhow!("inspector_gallery_cell_missing"))?;
-    anyhow::ensure!(
-        node.attr("resource-id") == "com.instagram.barcelona:id/gallery_picker_grid_item_container"
-            && node.attr("clickable") == "true"
-            && node.attr("enabled") == "true",
-        "inspector_gallery_cell_invalid"
-    );
-    let mut parent = node.parent;
-    let mut in_grid = false;
-    while let Some(index) = parent {
-        let ancestor = &tree.nodes[index];
-        if ancestor.attr("class") == "android.widget.GridView" {
-            in_grid = true;
-            break;
-        }
-        parent = ancestor.parent;
-    }
-    anyhow::ensure!(in_grid, "inspector_gallery_grid_missing");
-    node.rect()
+    let cell_index = gallery_photo_cell_index(&tree, index)
+        .ok_or_else(|| anyhow::anyhow!("inspector_gallery_cell_invalid"))?;
+    tree.nodes[cell_index]
+        .rect()
         .ok_or_else(|| anyhow::anyhow!("inspector_gallery_cell_bounds_missing"))
+}
+
+fn gallery_photo_cell_index(tree: &Tree, index: usize) -> Option<usize> {
+    let mut cell_index = index;
+    loop {
+        let parent = tree.nodes.get(cell_index)?.parent?;
+        if tree.nodes[parent].attr("class") == "android.widget.GridView" {
+            let cells: Vec<usize> = tree
+                .nodes
+                .iter()
+                .enumerate()
+                .filter_map(|(index, node)| (node.parent == Some(parent)).then_some(index))
+                .collect();
+            let camera = *cells.first()?;
+            if tree.nodes[camera].attr("resource-id")
+                != "com.instagram.barcelona:id/gallery_picker_grid_item_container"
+                || cell_index == camera
+            {
+                return None;
+            }
+            let cell = &tree.nodes[cell_index];
+            return (cell.attr("package") == riviu_core::threads_publish::ANDROID_PACKAGE
+                && cell.attr("clickable") == "true"
+                && cell.attr("enabled") == "true"
+                && cell.visible(riviu_core::threads_publish::ANDROID_PACKAGE)
+                && tree.ancestors_visible(cell_index)
+                && cell.rect().is_some())
+            .then_some(cell_index);
+        }
+        cell_index = parent;
+    }
 }
 
 fn same_gallery_thumbnail(
@@ -364,10 +377,6 @@ pub async fn tap_gallery_cell(
                 "inspector_wrong_app"
             );
             let current = capture(session.as_ref(), &id).await?;
-            anyhow::ensure!(
-                current.tree_sha256 == observed.tree_sha256,
-                "inspector_gallery_changed_read_again"
-            );
             let current_rect = gallery_cell_rect(&current, element_index)?;
             anyhow::ensure!(
                 current_rect.x == rect.x
@@ -571,11 +580,15 @@ mod tests {
     }
 
     #[test]
-    fn gallery_cell_requires_a_clickable_threads_grid_item() {
+    fn gallery_cell_accepts_photo_and_rejects_camera() {
         let xml = concat!(
-            "<hierarchy><node package=\"com.instagram.barcelona\" class=\"android.widget.GridView\" bounds=\"[0,0][4,4]\">",
+            "<hierarchy><node package=\"com.instagram.barcelona\" class=\"android.widget.GridView\" bounds=\"[0,0][8,4]\">",
             "<node package=\"com.instagram.barcelona\" resource-id=\"com.instagram.barcelona:id/gallery_picker_grid_item_container\" ",
             "clickable=\"true\" enabled=\"true\" bounds=\"[1,1][3,3]\"/>",
+            "<node package=\"com.instagram.barcelona\" class=\"android.view.ViewGroup\" content-desc=\"Hình nhỏ ảnh\" ",
+            "clickable=\"true\" enabled=\"true\" bounds=\"[4,1][6,3]\">",
+            "<node package=\"com.instagram.barcelona\" class=\"android.widget.ImageView\" bounds=\"[4,1][6,3]\"/>",
+            "</node>",
             "</node></hierarchy>"
         );
         let snapshot = InspectorSnapshot {
@@ -584,25 +597,27 @@ mod tests {
             package: "com.instagram.barcelona".into(),
             version: "446".into(),
             locale: "vi".into(),
-            width: 4.0,
+            width: 8.0,
             height: 4.0,
             png_base64: String::new(),
             tree_sha256: String::new(),
             hierarchy_xml: xml.into(),
             elements: vec![],
         };
-        let rect = gallery_cell_rect(&snapshot, 2).unwrap();
+        let rect = gallery_cell_rect(&snapshot, 3).unwrap();
         assert_eq!(
             (rect.x, rect.y, rect.width, rect.height),
-            (1.0, 1.0, 2.0, 2.0)
+            (4.0, 1.0, 2.0, 2.0)
         );
+        assert_eq!(gallery_cell_rect(&snapshot, 4).unwrap().x, 4.0);
+        assert!(gallery_cell_rect(&snapshot, 2).is_err());
         assert!(gallery_cell_rect(&snapshot, 1).is_err());
         assert!(gallery_cell_rect(
             &InspectorSnapshot {
                 package: "other".into(),
                 ..snapshot
             },
-            2
+            3
         )
         .is_err());
     }
