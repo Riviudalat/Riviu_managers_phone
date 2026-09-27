@@ -297,9 +297,9 @@ pub(super) async fn capture_visible_video_link_counted(
         "video viewer foreground changed"
     );
     let tree = Tree::parse(session.hierarchy_source_snapshot().await?)?;
-    let (caption_id, share) = video_viewer_caption(&tree, package, caption)?;
-    let _ = caption_id;
     let version = session.app_version(package).await.unwrap_or_default();
+    let (caption_id, share) = video_viewer_caption(&tree, package, &version, caption)?;
+    let _ = caption_id;
     let photo_counter = measured_photo_counter(&tree, package, &version);
     let mut opened = false;
     anyhow::ensure!(
@@ -407,6 +407,7 @@ fn measured_photo_counter(tree: &Tree, package: &str, version: &str) -> bool {
 fn video_viewer_caption(
     tree: &Tree,
     package: &str,
+    version: &str,
     caption: &str,
 ) -> anyhow::Result<(&'static str, ElementQuery<'static>)> {
     anyhow::ensure!(!tree.publication_removed(package), "video removed");
@@ -458,9 +459,24 @@ fn video_viewer_caption(
                 .flatten()
         })
         .map(str::trim_end);
+    // Trill 38.3.2 on S8 renders a supplementary scalar as '?' in a folded
+    // caption while oEmbed retains it. This admits Copy, never publication:
+    // the complete public caption/account/ID/time still must match exactly.
+    let scalar_placeholder = package == "com.ss.android.ugc.trill"
+        && version == "38.3.2"
+        && measured_photo_counter(tree, package, version)
+        && prefix.is_some_and(|p| {
+            p.strip_suffix('?')
+                .or_else(|| p.strip_suffix('\u{fffd}'))
+                .filter(|stem| stem.chars().count() >= 20)
+                .and_then(|stem| expected.strip_prefix(stem))
+                .and_then(|tail| tail.chars().next())
+                .is_some_and(|scalar| u32::from(scalar) > 0xffff)
+        });
     anyhow::ensure!(
         visible == expected
-            || prefix.is_some_and(|p| p.chars().count() >= 20 && expected.starts_with(p)),
+            || prefix.is_some_and(|p| p.chars().count() >= 20 && expected.starts_with(p))
+            || scalar_placeholder,
         "video caption differs"
     );
     anyhow::ensure!(
@@ -559,8 +575,11 @@ mod tests {
         })
         .unwrap();
         let caption = "A complete matching caption with the required suffix";
-        assert!(video_viewer_caption(&tree, package, caption).is_ok());
-        assert!(video_viewer_caption(&tree, package, "A totally different publication").is_err());
+        assert!(video_viewer_caption(&tree, package, "38.3.2", caption).is_ok());
+        assert!(
+            video_viewer_caption(&tree, package, "38.3.2", "A totally different publication")
+                .is_err()
+        );
         let embed = serde_json::json!({"title":"A complete matching caption with DIFFERENT suffix","author_url":"https://www.tiktok.com/@fixture","html":"<blockquote data-video-id=\"123\">"});
         assert!(validate_public_metadata(&embed, caption, "fixture", "123").is_err());
     }
@@ -586,23 +605,34 @@ mod tests {
             format!(" \u{200e}{observed}\u{200f} "),
             observed.replace("...", "…"),
         ] {
-            assert!(
-                video_viewer_caption(&parse(xml(&caption, "Video")), package, expected).is_ok()
-            );
+            assert!(video_viewer_caption(
+                &parse(xml(&caption, "Video")),
+                package,
+                "38.3.2",
+                expected
+            )
+            .is_ok());
         }
         for caption in [
             "Lưu list ...",
             "Lưu list này rồi đi Đà Lạt nhưng nội dung khác...",
             "Lưu list này rồi đi Đà Lạt cho đỡ mò từng nơi nhé. Lưu list ...more",
         ] {
-            assert!(
-                video_viewer_caption(&parse(xml(caption, "Video")), package, expected).is_err()
-            );
+            assert!(video_viewer_caption(
+                &parse(xml(caption, "Video")),
+                package,
+                "38.3.2",
+                expected
+            )
+            .is_err());
         }
-        assert!(video_viewer_caption(&parse(xml(observed, "Videos")), package, expected).is_err());
+        assert!(
+            video_viewer_caption(&parse(xml(observed, "Videos")), package, "38.3.2", expected)
+                .is_err()
+        );
         let good = xml(observed, "Video");
         let duplicate=good.replace("</hierarchy>",&format!(r#"<node package="{package}" resource-id="{package}:id/dmk" text="{observed}" bounds="[10,1200][900,1400]" displayed="true"/></hierarchy>"#));
-        assert!(video_viewer_caption(&parse(duplicate), package, expected).is_err());
+        assert!(video_viewer_caption(&parse(duplicate), package, "38.3.2", expected).is_err());
     }
     #[test]
     fn global_video_literal_more_suffix_only_authorizes_copy_not_publication_proof() {
@@ -617,8 +647,10 @@ mod tests {
         </hierarchy>"#
         );
         let tree = Tree::parse(crate::HierarchySourceSnapshot { generation: 1, xml }).unwrap();
-        assert!(video_viewer_caption(&tree, package, caption).is_ok());
-        assert!(video_viewer_caption(&tree, package, "Một bài khác cùng tài khoản").is_err());
+        assert!(video_viewer_caption(&tree, package, "45.7.3", caption).is_ok());
+        assert!(
+            video_viewer_caption(&tree, package, "45.7.3", "Một bài khác cùng tài khoản").is_err()
+        );
         let embed = serde_json::json!({"title":visible,"author_url":"https://www.tiktok.com/@fixture","html":"<blockquote data-video-id=\"123\">"});
         assert!(validate_public_metadata(&embed, caption, "fixture", "123").is_err());
         let mut full = embed;
@@ -626,6 +658,54 @@ mod tests {
         assert!(validate_public_metadata(&full, caption, "fixture", "123").is_ok());
         full["author_url"] = "https://www.tiktok.com/@different".into();
         assert!(validate_public_metadata(&full, caption, "fixture", "123").is_err());
+    }
+    #[test]
+    fn trill_replacement_at_supplementary_scalar_only_admits_public_metadata_check() {
+        let package = "com.ss.android.ugc.trill";
+        let expected =
+            "A complete measured caption before the emoji \u{1f970} and the rest #fixture";
+        let visible = "A complete measured caption before the emoji ?...";
+        let xml = |text: &str| {
+            format!(
+                r#"<hierarchy>
+          <node package="{package}" content-desc="Video" bounds="[0,0][1080,1965]" displayed="true"/>
+          <node package="{package}" resource-id="{package}:id/dmk" text="{text}" bounds="[10,1500][900,1700]" displayed="true"/>
+          <node package="{package}" content-desc="Share video.  shares" bounds="[950,1200][1030,1300]" displayed="true" clickable="true" enabled="true"/>
+          <node package="{package}" resource-id="{package}:id/llz" class="android.widget.LinearLayout" bounds="[900,100][1050,160]" displayed="true">
+            <node package="{package}" class="android.widget.TextView" text="1" bounds="[900,100][950,160]"/>
+            <node package="{package}" class="android.widget.TextView" text=" / " bounds="[950,100][1000,160]"/>
+            <node package="{package}" class="android.widget.TextView" text="8" bounds="[1000,100][1050,160]"/>
+          </node>
+        </hierarchy>"#
+            )
+        };
+        let parse = |text: &str| {
+            Tree::parse(crate::HierarchySourceSnapshot {
+                generation: 1,
+                xml: xml(text),
+            })
+            .unwrap()
+        };
+        assert!(video_viewer_caption(&parse(visible), package, "38.3.2", expected).is_ok());
+        assert!(video_viewer_caption(&parse(visible), package, "38.3.3", expected).is_err());
+        let without_counter = Tree::parse(crate::HierarchySourceSnapshot {
+            generation: 1,
+            xml: xml(visible).replace(":id/llz", ":id/other"),
+        })
+        .unwrap();
+        assert!(video_viewer_caption(&without_counter, package, "38.3.2", expected).is_err());
+        for rejected in [
+            visible.replace("measured", "changed"),
+            visible.replace("?...", "?"),
+            visible.replace("emoji", "emoj?"),
+        ] {
+            assert!(video_viewer_caption(&parse(&rejected), package, "38.3.2", expected).is_err());
+        }
+        let mut embed = serde_json::json!({"title":expected.replace('\u{1f970}', "?"),
+            "author_url":"https://www.tiktok.com/@fixture","html":"<blockquote data-video-id=\"123\">"});
+        assert!(validate_public_metadata(&embed, expected, "fixture", "123").is_err());
+        embed["title"] = expected.into();
+        assert!(validate_public_metadata(&embed, expected, "fixture", "123").is_ok());
     }
     #[test]
     fn measured_global_46_0_41_expanded_photo_matches_caption_and_share() {

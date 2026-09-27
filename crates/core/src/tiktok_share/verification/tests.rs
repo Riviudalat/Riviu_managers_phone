@@ -392,6 +392,7 @@ struct Session {
     other_caption_same_but_old: bool,
     rendered_caption: Option<String>,
     video_surface: bool,
+    photo_counter: bool,
     tile_opens_later: bool,
     pending_post_reads: AtomicU64,
     expand_to: Option<String>,
@@ -425,6 +426,7 @@ impl Default for Session {
             other_caption_same_but_old: false,
             rendered_caption: None,
             video_surface: false,
+            photo_counter: false,
             tile_opens_later: false,
             pending_post_reads: AtomicU64::new(0),
             expand_to: None,
@@ -543,7 +545,18 @@ impl Session {
             ),
             _ => node("", "No recognized screen", "", "[0,0][500,500]", false),
         };
-        let xml = format!("<hierarchy>{content}</hierarchy>");
+        let counter = if page == "post" && self.photo_counter {
+            format!(
+                r#"<node package="{PACKAGE}" resource-id="{PACKAGE}:id/llz" class="android.widget.LinearLayout" bounds="[900,100][1050,160]" displayed="true">
+                <node package="{PACKAGE}" class="android.widget.TextView" text="1" bounds="[900,100][950,160]"/>
+                <node package="{PACKAGE}" class="android.widget.TextView" text=" / " bounds="[950,100][1000,160]"/>
+                <node package="{PACKAGE}" class="android.widget.TextView" text="8" bounds="[1000,100][1050,160]"/>
+            </node>"#
+            )
+        } else {
+            String::new()
+        };
+        let xml = format!("<hierarchy>{content}{counter}</hierarchy>");
         if self.trill {
             xml.replace(PACKAGE, TRILL)
                 .replace(":id/scn", ":id/mjf")
@@ -678,6 +691,9 @@ impl UiSession for Session {
     async fn active_app_bundle(&self) -> anyhow::Result<String> {
         Ok(self.package().into())
     }
+    async fn app_version(&self, _: &str) -> Option<String> {
+        self.photo_counter.then(|| "38.3.2".into())
+    }
     async fn hierarchy_source_snapshot(&self) -> anyhow::Result<crate::HierarchySourceSnapshot> {
         tokio::time::sleep(self.snapshot_delay).await;
         let pending = self
@@ -720,44 +736,55 @@ impl UiSession for Session {
 
 #[tokio::test(start_paused = true)]
 async fn delayed_video_viewer_copies_before_caption_drawer_and_preserves_copy_failure() {
-    let session = Session {
-        trill: true,
-        video_surface: true,
-        tile_opens_later: true,
-        rendered_caption: Some(format!(
-            "{}...",
-            CAPTION.chars().take(35).collect::<String>()
-        )),
-        caption_clickable: true,
-        copy_misses: u32::MAX,
-        ..Default::default()
-    };
-    let plan = PublishVerificationPlan::for_build(TRILL, "en", "38.3.2").unwrap();
-    let captured = capture_submission_link(&session, &plan, CAPTION, &identity()).await;
-    assert_eq!(
-        captured.diagnostic.reason_code,
-        VerificationReason::ClipboardUnchanged,
-        "diagnostic={:?}, actions={:?}",
-        captured.diagnostic,
-        session.actions.lock()
-    );
-    assert_eq!(captured.diagnostic.candidates_visited, 1);
-    assert_eq!(session.copies.load(Ordering::Relaxed), 1);
-    assert_eq!(captured.diagnostic.copy_attempts, 1);
-    assert!(!session
-        .actions
-        .lock()
-        .iter()
-        .any(|action| action == "expandCaption" || action == "scroll"));
-    assert_eq!(
-        session
+    for (caption, rendered, photo_counter) in [
+        (
+            CAPTION.to_owned(),
+            format!("{}...", CAPTION.chars().take(35).collect::<String>()),
+            false,
+        ),
+        (
+            "A complete measured caption before the emoji \u{1f970} and the rest #fixture".into(),
+            "A complete measured caption before the emoji ?...".into(),
+            true,
+        ),
+    ] {
+        let session = Session {
+            trill: true,
+            video_surface: true,
+            photo_counter,
+            tile_opens_later: true,
+            rendered_caption: Some(rendered),
+            caption_clickable: true,
+            copy_misses: u32::MAX,
+            ..Default::default()
+        };
+        let plan = PublishVerificationPlan::for_build(TRILL, "en", "38.3.2").unwrap();
+        let captured = capture_submission_link(&session, &plan, &caption, &identity()).await;
+        assert_eq!(
+            captured.diagnostic.reason_code,
+            VerificationReason::ClipboardUnchanged,
+            "diagnostic={:?}, actions={:?}",
+            captured.diagnostic,
+            session.actions.lock()
+        );
+        assert_eq!(captured.diagnostic.candidates_visited, 1);
+        assert_eq!(session.copies.load(Ordering::Relaxed), 1);
+        assert_eq!(captured.diagnostic.copy_attempts, 1);
+        assert!(!session
             .actions
             .lock()
             .iter()
-            .filter(|action| action.as_str() == "tap:post")
-            .count(),
-        2
-    );
+            .any(|action| action == "expandCaption" || action == "scroll"));
+        assert_eq!(
+            session
+                .actions
+                .lock()
+                .iter()
+                .filter(|action| action.as_str() == "tap:post")
+                .count(),
+            2
+        );
+    }
 }
 
 #[tokio::test(start_paused = true)]

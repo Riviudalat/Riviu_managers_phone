@@ -996,9 +996,13 @@ impl Capture<'_> {
             // A tile tap can first return the profile while the viewer opens.
             // Recheck the settled video before expanding its caption into the
             // comments drawer. Only the full public proof may populate this link.
+            // A measured truncated Unicode placeholder looks like a mismatch
+            // here; the candidate filter and exact public metadata decide it.
             if matches!(
                 proof,
-                Err(VerificationReason::CaptionTruncated | VerificationReason::TimestampMissing)
+                Err(VerificationReason::CaptionTruncated
+                    | VerificationReason::CaptionMismatch
+                    | VerificationReason::TimestampMissing)
             ) && tree.nodes.iter().any(|node| {
                 node.visible(self.plan.labels.package()) && node.attr("content-desc") == "Video"
             }) {
