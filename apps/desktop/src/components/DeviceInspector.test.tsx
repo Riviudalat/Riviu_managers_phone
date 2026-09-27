@@ -27,7 +27,7 @@ const snapshot = {
   locale: "en",
   width: 1080,
   height: 2220,
-  pngBase64: "",
+  pngBase64: "cG5n",
   treeSha256: "a".repeat(64),
   hierarchyXml: "<hierarchy><node content-desc=\"Profile\"/></hierarchy>",
   elements: [
@@ -111,4 +111,38 @@ it("selects the smallest element on the screenshot and copies the exact XML", as
 
   fireEvent.click(screen.getByRole("button", { name: "Sao chép XML" }));
   expect(writeText).toHaveBeenCalledWith(snapshot.hierarchyXml);
+});
+
+it("exports the same screenshot and hierarchy with the detected app build", async () => {
+  const createObjectURL = vi.spyOn(URL, "createObjectURL").mockReturnValue("blob:screen");
+  const revokeObjectURL = vi.spyOn(URL, "revokeObjectURL").mockImplementation(() => undefined);
+  const click = vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => undefined);
+  try {
+    render(<DeviceInspector udid="phone-a" onClose={vi.fn()} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Xuất dữ liệu màn hình" }));
+    const blob = createObjectURL.mock.calls[0][0] as Blob;
+    const body = await new Promise<string>((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(String(reader.result));
+      reader.onerror = () => reject(reader.error);
+      reader.readAsText(blob);
+    });
+    const evidence = JSON.parse(body);
+    expect(evidence).toMatchObject({
+      schemaVersion: 1,
+      udid: "phone-a",
+      package: "app.fixture",
+      version: "1.0",
+      locale: "en",
+      hierarchyXml: snapshot.hierarchyXml,
+      pngBase64: snapshot.pngBase64,
+      treeSha256: snapshot.treeSha256,
+    });
+    expect(click).toHaveBeenCalledOnce();
+    expect(revokeObjectURL).toHaveBeenCalledWith("blob:screen");
+  } finally {
+    createObjectURL.mockRestore();
+    revokeObjectURL.mockRestore();
+    click.mockRestore();
+  }
 });

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { ChevronDown, ChevronRight, ChevronUp, Circle, Copy, RefreshCw, Save, Scan, Square, X } from "lucide-react";
+import { ChevronDown, ChevronRight, ChevronUp, Circle, Copy, Download, RefreshCw, Save, Scan, Square, X } from "lucide-react";
 import { createPortal } from "react-dom";
 
 import {
@@ -24,6 +24,32 @@ function elementLabel(element: InspectorElement) {
 
 function describeBoolean(value: boolean | null | undefined) {
   return value == null ? "—" : value ? "true" : "false";
+}
+
+function exportSnapshot(snapshot: InspectorSnapshot) {
+  if (!snapshot.hierarchyXml || !snapshot.pngBase64) throw Error("Chưa có đủ XML và ảnh màn hình để xuất.");
+  const evidence = {
+    schemaVersion: 1,
+    capturedAt: new Date().toISOString(),
+    udid: snapshot.udid,
+    package: snapshot.package,
+    version: snapshot.version,
+    locale: snapshot.locale,
+    width: snapshot.width,
+    height: snapshot.height,
+    treeSha256: snapshot.treeSha256,
+    hierarchyXml: snapshot.hierarchyXml,
+    pngBase64: snapshot.pngBase64,
+  };
+  const url = URL.createObjectURL(new Blob([JSON.stringify(evidence)], { type: "application/json" }));
+  try {
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = `riviu-screen-${snapshot.package}-${snapshot.version}-${snapshot.udid}.json`.replace(/[^a-zA-Z0-9._-]/g, "_");
+    anchor.click();
+  } finally {
+    URL.revokeObjectURL(url);
+  }
 }
 
 export function DeviceInspector({ udid, onClose }: { udid: string; onClose: () => void }) {
@@ -170,6 +196,12 @@ export function DeviceInspector({ udid, onClose }: { udid: string; onClose: () =
     catch (reason) { setError(describeError(reason)); }
     finally { setBusy(false); }
   };
+  const downloadSnapshot = () => {
+    if (!snapshot) return;
+    setError("");
+    try { exportSnapshot(snapshot); }
+    catch (reason) { setError(describeError(reason)); }
+  };
   const save = async () => {
     if (!record || record.active || !record.steps.length) return;
     setBusy(true); setError("");
@@ -219,7 +251,7 @@ export function DeviceInspector({ udid, onClose }: { udid: string; onClose: () =
   return createPortal(<div className={`modal-backdrop inspector-backdrop${closing ? " is-closing" : ""}`}>
     <div ref={ref} tabIndex={-1} className="modal device-inspector" role="dialog" aria-label="Bắt thuộc tính và ghi Flow" aria-modal="true">
       <header><div><h2><Scan size={18}/>Bắt thuộc tính & ghi Flow</h2><small>{snapshot ? `${snapshot.package} · ${snapshot.version} · ${snapshot.locale}` : udid}</small></div><button className="icon-btn" aria-label="Đóng Inspector" onClick={close}><X size={18}/></button></header>
-      <div className="inspector-toolbar"><input aria-label="Tên quy trình" value={name} disabled={record?.active} onChange={(event) => setName(event.target.value)}/><button disabled={busy} onClick={() => void observe()}><RefreshCw size={15}/>Đọc lại</button><button disabled={busy} onClick={() => void toggleRecord()}>{record?.active ? <Square size={14}/> : <Circle size={14}/>} {record?.active ? "Dừng ghi" : "Bắt đầu ghi"}</button><button disabled={busy || !record || record.active || !record.steps.length} onClick={() => void save()}><Save size={15}/>Lưu thành Flow</button></div>
+      <div className="inspector-toolbar"><input aria-label="Tên quy trình" value={name} disabled={record?.active} onChange={(event) => setName(event.target.value)}/><button disabled={busy} onClick={() => void observe()}><RefreshCw size={15}/>Đọc lại</button><button type="button" disabled={busy || !snapshot?.hierarchyXml || !snapshot.pngBase64} onClick={downloadSnapshot}><Download size={15}/>Xuất dữ liệu màn hình</button><button disabled={busy} onClick={() => void toggleRecord()}>{record?.active ? <Square size={14}/> : <Circle size={14}/>} {record?.active ? "Dừng ghi" : "Bắt đầu ghi"}</button><button disabled={busy || !record || record.active || !record.steps.length} onClick={() => void save()}><Save size={15}/>Lưu thành Flow</button></div>
       {error && <p role="alert">{error}</p>}{saved && <p role="status">{saved}</p>}
       <div className="inspector-body">
         <section className="inspector-screen" aria-label="Ảnh màn hình thiết bị">
