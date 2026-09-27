@@ -105,6 +105,49 @@ fn dialog_over_app(observed: &str) -> bool {
     // an error message, so this compares against the name Android gives it.
     observed == "Select input method"
 }
+
+const TIKTOK_RUNTIME_PERMISSIONS: [&str; 4] = [
+    "android.permission.CAMERA",
+    "android.permission.RECORD_AUDIO",
+    "android.permission.READ_EXTERNAL_STORAGE",
+    "android.permission.WRITE_EXTERNAL_STORAGE",
+];
+
+fn missing_tiktok_runtime_permissions(dump: &str) -> anyhow::Result<Vec<&'static str>> {
+    let user = dump
+        .split_once("User 0:")
+        .map(|(_, body)| body)
+        .ok_or_else(|| anyhow!("cannot read TikTok permissions for Android user 0"))?;
+    let user = user
+        .lines()
+        .take_while(|line| !line.trim_start().starts_with("User "))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let runtime = user
+        .split_once("runtime permissions:")
+        .map(|(_, body)| body)
+        .ok_or_else(|| anyhow!("cannot read TikTok runtime permissions for Android user 0"))?;
+    let runtime = runtime
+        .split_once("disabledComponents:")
+        .map(|(body, _)| body)
+        .unwrap_or(runtime);
+    let mut missing = Vec::new();
+    for permission in TIKTOK_RUNTIME_PERMISSIONS {
+        let prefix = format!("{permission}: granted=");
+        if let Some(state) = runtime
+            .lines()
+            .map(str::trim)
+            .find_map(|line| line.strip_prefix(&prefix))
+        {
+            if state.starts_with("false") {
+                missing.push(permission);
+            } else if !state.starts_with("true") {
+                anyhow::bail!("unreadable TikTok runtime permission state for {permission}");
+            }
+        }
+    }
+    Ok(missing)
+}
 #[cfg(test)]
 mod dialog_tests {
     use super::dialog_over_app;
@@ -128,6 +171,24 @@ mod dialog_tests {
     fn an_app_in_the_foreground_is_not_a_dialog() {
         assert!(!dialog_over_app("com.ss.android.ugc.trill"));
         assert!(!dialog_over_app("com.example.inputmethod.keyboard"));
+    }
+}
+
+#[cfg(test)]
+mod tiktok_permission_tests {
+    use super::missing_tiktok_runtime_permissions;
+
+    #[test]
+    fn only_missing_user_zero_runtime_permissions_are_granted() {
+        let dump = "User 0: installed=true\n  runtime permissions:\n    android.permission.CAMERA: granted=false\n    android.permission.RECORD_AUDIO: granted=true\n    android.permission.READ_EXTERNAL_STORAGE: granted=true\n    android.permission.WRITE_EXTERNAL_STORAGE: granted=true\n  disabledComponents:\nUser 10: installed=true\n  runtime permissions:\n    android.permission.CAMERA: granted=true\n";
+        assert_eq!(
+            missing_tiktok_runtime_permissions(dump).expect("User 0 runtime state"),
+            vec!["android.permission.CAMERA"]
+        );
+        let other_user_only = "User 0: installed=true\n  runtime permissions:\n    android.permission.RECORD_AUDIO: granted=true\n    User 10: installed=true\n  runtime permissions:\n    android.permission.CAMERA: granted=false\n";
+        assert!(missing_tiktok_runtime_permissions(other_user_only)
+            .expect("User 0 runtime state")
+            .is_empty());
     }
 }
 
@@ -1025,6 +1086,66 @@ impl AndroidDriver {
     /// and an error here should not hide the package that DID resolve.
     pub async fn tiktok_build(&self, serial: &str) -> anyhow::Result<(String, String, String)> {
         self.tiktok_build_with_preference(serial, None).await
+    }
+
+    async fn ensure_tiktok_runtime_permissions(
+        &self,
+        serial: &str,
+        package: &str,
+    ) -> anyhow::Result<()> {
+        if !riviu_core::tiktok_target::is_measured_android_tiktok(package) {
+            return Ok(());
+        }
+        let package = adb::validate_package_name(package)?;
+        let script = format!("dumpsys package {package}");
+        let before = self
+            .adb
+            .shell_output(serial, &script, adb::DEFAULT_TIMEOUT)
+            .await?;
+        anyhow::ensure!(
+            before.exit_code == 0,
+            "cannot read TikTok permissions on {serial}: {}",
+            before.stderr.trim()
+        );
+        let missing = missing_tiktok_runtime_permissions(&before.stdout)?;
+        if !missing.is_empty() {
+            let current_user = self.adb.shell(serial, "am get-current-user").await?;
+            anyhow::ensure!(
+                current_user.trim() == "0",
+                "TikTok permission preflight on {serial} requires Android user 0; current user is {}",
+                current_user.trim()
+            );
+        }
+        for permission in &missing {
+            let command = format!("pm grant --user 0 {package} {permission}");
+            let grant = self
+                .adb
+                .shell_output(serial, &command, adb::DEFAULT_TIMEOUT)
+                .await?;
+            anyhow::ensure!(
+                grant.exit_code == 0,
+                "Android refused {permission} for {package} on {serial}: {}",
+                grant.stderr.trim()
+            );
+        }
+        if !missing.is_empty() {
+            let after = self
+                .adb
+                .shell_output(serial, &script, adb::DEFAULT_TIMEOUT)
+                .await?;
+            anyhow::ensure!(
+                after.exit_code == 0,
+                "cannot verify TikTok permissions on {serial}"
+            );
+            let still_missing = missing_tiktok_runtime_permissions(&after.stdout)?;
+            anyhow::ensure!(
+                still_missing.is_empty(),
+                "TikTok permissions remain denied on {serial}: {}",
+                still_missing.join(", ")
+            );
+            tracing::info!(serial, package, granted = ?missing, "TikTok runtime permissions verified");
+        }
+        Ok(())
     }
 
     async fn tiktok_build_with_preference(
@@ -2345,6 +2466,14 @@ impl DeviceDriver for AndroidDriver {
         let sink = self.sink()?;
         let generation = sink.generation(udid);
         let reservation = self.interaction.begin_session(udid, generation, kind)?;
+
+        if let Err(error) = self
+            .ensure_tiktok_runtime_permissions(udid, &bundle_id)
+            .await
+        {
+            self.interaction.clear(udid);
+            return Err(error.context("TikTok permission preflight failed"));
+        }
 
         let session = self.open_session(udid).await?;
         riviu_core::driver::UiSession::launch_app_foreground(&session, &bundle_id).await?;

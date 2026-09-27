@@ -673,6 +673,11 @@ tiếp tục bước đang lỗi, giữ bài, caption và nhạc đã chọn; n�
 lại từ bản đã duyệt. Media còn đúng hash và MediaStore được dùng lại.
 Máy mất kết nối được chờ đúng serial tối đa **2 phút**, không giữ slot của máy khác.
 Sai account, chưa cho phép USB, thiếu quyền hoặc phiên bản chưa hỗ trợ cần xử lý trước.
+Khi mở phiên TikTok trên Android user 0, app tự cấp các quyền runtime còn thiếu trong
+danh sách Camera, Microphone, đọc và ghi bộ nhớ nếu TikTok đã khai báo chúng; app đọc
+lại trạng thái quyền trước khi tiếp tục. Android từ chối hoặc không đọc được trạng thái
+thì máy báo lỗi, không tự bấm hộp thoại và không tiếp tục thao tác đăng. Cơ chế này
+không cấp quyền cho ứng dụng khác và không thay thế bước cho phép USB debugging.
 
 Trong **Theo dõi tiến trình**, mỗi máy lỗi có nút **Thử lại**. Bấm nút này chỉ chạy
 thêm **một lượt bài**; trong lượt đó lỗi tạm thời trước Đăng vẫn được thử lại tối đa
