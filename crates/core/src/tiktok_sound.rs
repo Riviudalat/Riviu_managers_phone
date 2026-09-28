@@ -137,7 +137,7 @@ pub(crate) fn check_wait() -> anyhow::Result<()> {
             if Instant::now() >= b.deadline {
                 return Err(crate::publish_recovery::retryable_error(
                     "sound_load_timeout",
-                    "TikTok chưa tải hoặc xác nhận được nhạc sau 3 phút; chưa bấm Đăng",
+                    "Hết thời gian chờ tải hoặc xác nhận nhạc ở bước hiện tại; chưa bấm Đăng",
                 ));
             }
             Ok(())
@@ -156,7 +156,7 @@ pub(crate) async fn read_sound<T>(
             tokio::select! {
                 r=&mut task => break r.map_err(|_|crate::publish_recovery::retryable_error(
                     "sound_load_timeout",
-                    "TikTok chưa tải hoặc xác nhận được nhạc sau 3 phút; chưa bấm Đăng",
+                    "Hết thời gian chờ tải hoặc xác nhận nhạc ở bước hiện tại; chưa bấm Đăng",
                 ))??,
                 _=poll.tick()=>check_wait()?,
             }

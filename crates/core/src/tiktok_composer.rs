@@ -1678,6 +1678,15 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
             .map(|_| Instant::now() + Duration::from_secs(8));
         let reproof_epoch = self.session.gui_session_epoch();
         if let Some((sound_plan, expected_title)) = self.pending_sound_proof.clone() {
+            // Record the failing read/navigation phase before leave() changes the screen.
+            // Action trace images are cached frames, not proof of the failure screen.
+            let started = Instant::now();
+            let mut phase = "start";
+            let mut phases = Vec::new();
+            let mut mark = |next: &'static str| {
+                phase = next;
+                phases.push((next, started.elapsed().as_millis()));
+            };
             let reproof = crate::tiktok_sound::with_deadline_budget(
                 stop,
                 reproof_deadline.context("sound reproof deadline missing")?,
@@ -1685,7 +1694,9 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
                     if let Some(back_query) = sound_plan.post_back_query() {
                         // Trill's caption page has no sound chip. Revisit its editor and
                         // return without typing again; both caption readbacks must agree.
+                        mark("captionBeforeBack");
                         Box::pin(self.require_caption_unchanged(caption, stop)).await?;
+                        mark("locateCaptionBack");
                         let back =
                             crate::tiktok_sound::read_sound(self.session.locate_all(back_query))
                                 .await?;
@@ -1694,22 +1705,27 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
                                 "sound reproof: caption back control missing or ambiguous"
                             );
                         };
+                        mark("tapCaptionBack");
                         self.tap_inside(back).await?;
+                        mark("inspectEditor");
                         use crate::tiktok_sound::observation::{inspect, EditorState};
                         match inspect(self.session, sound_plan, &expected_title, false).await? {
-                            EditorState::Confirmed => {}
+                            EditorState::Confirmed => { mark("editorConfirmed"); }
                             EditorState::Loading => {
+                                mark("editorLoading");
                                 // A positively loading editor permits reads, never Back.
                                 Box::pin(confirm_sound(self.session, sound_plan, &expected_title))
                                     .await?;
                             }
                             EditorState::Unknown => {
+                                mark("unknownEditorCaptionRetryProof");
                                 // Fresh exact caption/IME predicate is the ONLY retry authority.
                                 // Unknown transition trees retain the read-only recovery route.
                                 if Box::pin(self.require_caption_unchanged(caption, stop))
                                     .await
                                     .is_ok()
                                 {
+                                    mark("locateCaptionBackRetry");
                                     let fresh_back = crate::tiktok_sound::read_sound(
                                         self.session.locate_all(back_query),
                                     )
@@ -1719,8 +1735,10 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
                                             "sound reproof: caption Back retry ambiguous"
                                         );
                                     };
+                                    mark("tapCaptionBackRetry");
                                     self.tap_inside(fresh_back).await?;
                                 }
+                                mark("confirmEditorTransition");
                                 crate::tiktok_sound::confirm_sound_after_transition(
                                     self.session,
                                     sound_plan,
@@ -1731,21 +1749,34 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
                                 .context("final sound editor reproof")?;
                             }
                         }
+                        mark("returnToCaption");
                         anyhow::ensure!(
                             Box::pin(self.advance_to_post_screen(stop)).await?,
                             "sound reproof: caption page did not return"
                         );
+                        mark("restoreCaptionIfCleared");
                         self.restore_caption_cleared_by_editor(caption, stop)
                             .await?;
+                        mark("captionAfterReturn");
                         Box::pin(self.require_caption_unchanged(caption, stop)).await?;
                     } else {
+                        mark("confirmInlineSound");
                         Box::pin(confirm_sound(self.session, sound_plan, &expected_title)).await?;
                     }
+                    mark("finalBudgetCheck");
                     crate::tiktok_sound::check_wait()?;
                     Ok(())
                 },
             )
             .await;
+            tracing::info!(
+                session = %reproof_epoch, package = self.plan.package, phase,
+                elapsed_ms = started.elapsed().as_millis() as u64,
+                remaining_ms = reproof_deadline.map(|d| d.saturating_duration_since(Instant::now()).as_millis() as u64),
+                phases = ?phases,
+                error = ?reproof.as_ref().err().map(|error| format!("{error:#}")),
+                "final sound reproof before cleanup"
+            );
             if stop.load(Ordering::Relaxed) {
                 return Ok(ComposerVerdict::Stopped);
             }
@@ -1754,12 +1785,20 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
         // Resolve after all sound/continuity reads even without a sound policy.
         // A changed caption or disappearing text-only toolbar cannot reuse a prior target.
         let button = if let Some(deadline) = reproof_deadline {
-            crate::tiktok_sound::with_deadline_budget(
+            let started = Instant::now();
+            let result = crate::tiktok_sound::with_deadline_budget(
                 stop,
                 deadline,
                 Box::pin(self.await_final_post_button(caption, stop)),
             )
-            .await?
+            .await;
+            tracing::info!(session = %reproof_epoch, package = self.plan.package,
+                phase = "finalPostButton", elapsed_ms = started.elapsed().as_millis() as u64,
+                remaining_ms = deadline.saturating_duration_since(Instant::now()).as_millis() as u64,
+                found = result.as_ref().is_ok_and(|button| button.is_some()),
+                error = ?result.as_ref().err().map(|error| format!("{error:#}")),
+                "final sound reproof before cleanup");
+            result?
         } else {
             Box::pin(self.await_final_post_button(caption, stop)).await?
         };
