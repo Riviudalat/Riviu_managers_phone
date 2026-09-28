@@ -402,6 +402,72 @@ fn warm_surface(
     None
 }
 
+/// Global 45.7.3/en own-post viewer measured in two fresh captures on 29/09.
+/// Admission only: account, complete caption, submission time and canonical URL still
+/// belong to the existing verifier. No Global feed/profile or overlay is admitted here.
+fn global_warm_viewer(tree: &riviu_core::ui_automation::tree::Tree) -> Option<&'static str> {
+    use riviu_core::ElementQuery as Q;
+    const PACKAGE: &str = "com.zhiliaoapp.musically";
+    let labels = riviu_core::tiktok_labels::controls_for_runtime(PACKAGE, "en", "45.7.3")?;
+    for control in [
+        riviu_core::tiktok_labels::TikTokControl::ComposerCaption,
+        riviu_core::tiktok_labels::TikTokControl::PostButton,
+        riviu_core::tiktok_labels::TikTokControl::ComposerShutter,
+    ] {
+        if labels.label(control).is_some_and(|label| !tree.matching(PACKAGE, label.to_query()).is_empty()) {
+            return None;
+        }
+    }
+    for (index, node) in tree.nodes.iter().enumerate() {
+        // The XML hierarchy wrapper is not a UI node. All actual visible nodes in
+        // both measured captures belong to TikTok; no Samsung edge exception exists.
+        if index == 0 && node.parent.is_none() && node.attr("class") == "hierarchy"
+            && node.attr("package").is_empty() && node.attribute("resource-id").is_none()
+        {
+            continue;
+        }
+        if node.visibility() == Some(false) || !tree.ancestors_visible(index) {
+            continue;
+        }
+        if node.visibility() != Some(true) || node.attr("package") != PACKAGE
+            || matches!(node.attr("class"), "android.widget.EditText" | "android.widget.ProgressBar")
+        {
+            return None;
+        }
+        let text = format!("{} {}", node.attr("text"), node.attr("content-desc")).to_lowercase();
+        if ["uploading", "processing", "posting", "đang tải", "đang đăng", "đang xử lý"]
+            .iter().any(|token| text.contains(token))
+        {
+            return None;
+        }
+    }
+    let one = |suffix| {
+        let indices = tree.matching(PACKAGE, Q::ResourceIdSuffix(suffix));
+        let [index] = indices.as_slice() else { return None };
+        let node = &tree.nodes[*index];
+        (node.visibility() == Some(true) && node.attr("enabled") == "true").then_some(node)
+    };
+    let back = one(":id/bj1")?;
+    let caption = one(":id/desc")?;
+    let time = one(":id/zwj")?;
+    let privacy = one(":id/ror")?;
+    // fpv is shared with Like in these captures: uniqueness must use Share semantics,
+    // not the resource ID alone, before checking the measured ID and class.
+    let shares = tree.matching(PACKAGE, Q::Description { value: "Share video.", exact: false });
+    let [share] = shares.as_slice() else { return None };
+    let share = &tree.nodes[*share];
+    (back.attr("class") == "android.widget.ImageView" && back.attr("content-desc") == "Back"
+        && back.attr("clickable") == "true"
+        && caption.attr("class") == "X.18oX" && !caption.attr("text").trim().is_empty()
+        && time.attr("class") == "android.widget.TextView" && !time.attr("text").trim().is_empty()
+        && privacy.attr("class") == "android.widget.Button" && privacy.attr("text") == "Privacy settings"
+        && privacy.attr("clickable") == "true"
+        && share.attr("resource-id") == "com.zhiliaoapp.musically:id/fpv"
+        && share.attr("class") == "android.widget.Button" && share.visibility() == Some(true)
+        && share.rect().is_some_and(|rect| rect.enabled && rect.clickable))
+        .then_some("ownPostViewer")
+}
+
 /// Read-only admission, not proof that either pending publication succeeded.
 pub(super) async fn admit_warm(
     session: &dyn riviu_core::UiSession,
@@ -411,7 +477,9 @@ pub(super) async fn admit_warm(
     account: &str,
 ) -> anyhow::Result<serde_json::Value> {
     anyhow::ensure!(
-        (package, locale, version) == ("com.ss.android.ugc.trill", "en", "38.3.2"),
+        matches!((package, locale, version),
+            ("com.ss.android.ugc.trill", "en", "38.3.2")
+                | ("com.zhiliaoapp.musically", "en", "45.7.3")),
         "shared-debt warm surface not measured for this build"
     );
     let epoch = session.gui_session_epoch();
@@ -426,7 +494,11 @@ pub(super) async fn admit_warm(
         let snapshot = session.hierarchy_source_snapshot().await?;
         let tree = riviu_core::ui_automation::tree::Tree::parse(snapshot)?;
         anyhow::ensure!(session.gui_session_epoch() == epoch, "warm session changed");
-        let surface = warm_surface(&tree, account).ok_or_else(|| {
+        let surface = if package == "com.zhiliaoapp.musically" {
+            global_warm_viewer(&tree)
+        } else {
+            warm_surface(&tree, account)
+        }.ok_or_else(|| {
             anyhow::anyhow!("composer/upload or unmeasured warm screen; keep unchanged")
         })?;
         if let Some((generation, before)) = previous {
