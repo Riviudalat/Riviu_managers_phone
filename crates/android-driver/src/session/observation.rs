@@ -26,6 +26,12 @@ impl AndroidUiSession {
             .checked_add(Duration::from_millis(request.remaining_ms))
             .ok_or_else(|| anyhow!("observation_budget_invalid"))?;
         let session_epoch = self.gui_session_epoch();
+        let package = tokio::time::timeout_at(
+            tokio::time::Instant::from_std(deadline),
+            self.observation_foreground(deadline),
+        )
+        .await
+        .map_err(|_| anyhow!("observation_deadline_exceeded"))??;
         let generation = self
             .hierarchy_generation
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
@@ -71,13 +77,8 @@ impl AndroidUiSession {
         let tree = Tree::parse(riviu_core::HierarchySourceSnapshot { generation, xml })
             .map_err(|_| anyhow!("observation_tree_invalid"))?;
         let nodes = semantic_nodes(&tree);
-        let mut packages = nodes.iter().filter_map(|node| node.package.as_deref());
-        let package = packages
-            .next()
-            .filter(|first| packages.all(|other| other == *first))
-            .map(str::to_owned);
         let app = ObservedAppContext {
-            package,
+            package: Some(package.clone()),
             ..Default::default()
         };
         let mut resolution = resolve_observation(&tree, request)?;
@@ -106,6 +107,14 @@ impl AndroidUiSession {
         } else {
             ObservationCompleteness::Unknown
         };
+        anyhow::ensure!(Instant::now() < deadline, "observation_deadline_exceeded");
+        let ended_package = tokio::time::timeout_at(
+            tokio::time::Instant::from_std(deadline),
+            self.observation_foreground(deadline),
+        )
+        .await
+        .map_err(|_| anyhow!("observation_deadline_exceeded"))??;
+        anyhow::ensure!(package == ended_package, "observation_foreground_changed");
         anyhow::ensure!(
             session_epoch == self.gui_session_epoch(),
             "observation_session_changed"
@@ -126,6 +135,20 @@ impl AndroidUiSession {
         // Synchronous parsing/projection can finish after the timer would have fired.
         anyhow::ensure!(Instant::now() < deadline, "observation_deadline_exceeded");
         Ok(observation)
+    }
+
+    async fn observation_foreground(&self, deadline: Instant) -> anyhow::Result<String> {
+        crate::adb::read_foreground_package_with(|source| async move {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            anyhow::ensure!(!remaining.is_zero(), "observation_deadline_exceeded");
+            let output = self
+                .adb
+                .shell_output(&self.serial, source, remaining)
+                .await?;
+            anyhow::ensure!(output.exit_code == 0, "observation_foreground_read_failed");
+            Ok(output.stdout)
+        })
+        .await
     }
 }
 
