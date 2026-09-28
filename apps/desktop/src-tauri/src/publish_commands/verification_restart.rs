@@ -365,6 +365,25 @@ fn warm_surface(
     {
         return Some("postFeed");
     }
+    let for_you = tree.matching(
+        PACKAGE,
+        Q::Text {
+            value: "For You",
+            exact: true,
+        },
+    );
+    let video = one(Q::ResourceIdSuffix(":id/long_press_layout"));
+    if home.is_some_and(|n| {
+        n.attr("content-desc") == "Home"
+            && n.attr("selected") == "true"
+            && n.attr("clickable") == "true"
+    }) && profile_tab
+        .is_some_and(|n| n.attr("content-desc") == "Profile" && n.attr("clickable") == "true")
+        && video.is_some_and(|n| n.attr("content-desc") == "Video")
+        && matches!(for_you.as_slice(), [i] if tree.nodes[*i].visibility() == Some(true))
+    {
+        return Some("homeFeed");
+    }
     let profile = one(Q::Text {
         value: "Edit profile",
         exact: true,
