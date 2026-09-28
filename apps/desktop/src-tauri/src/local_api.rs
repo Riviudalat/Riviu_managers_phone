@@ -17,6 +17,7 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use tauri::{AppHandle, Manager, State};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpListener;
@@ -318,6 +319,19 @@ impl ApiError {
 impl From<CommandError> for ApiError {
     fn from(error: CommandError) -> Self {
         let status = match error.code.as_str() {
+            "InspectorSessionRequired" | "InspectorRefRequired" => 400,
+            "InspectorOwnerMismatch" => 403,
+            "InspectorSessionUnavailable"
+            | "InspectorSessionExpired"
+            | "InspectorStaleRef"
+            | "InspectorStaleObservation"
+            | "InspectorAmbiguousTarget"
+            | "InspectorNotActionable"
+            | "InspectorExactFocusRequired"
+            | "InspectorEngineRequired"
+            | "InspectorActionUncertain" => 409,
+            "InspectorUnsupported" => 422,
+            "InspectorDeadlineExceeded" => 408,
             "InvalidArgument" | "EmptySelection" | "DuplicateDevice" => 400,
             "FlowNotFound" | "FlowRunNotFound" | "FlowAttemptNotFound" | "UnknownDevice" => 404,
             "DeviceBusy"
@@ -368,6 +382,12 @@ pub enum Command {
 
 /// Map method + path + JSON body to a [`Command`]. Pure; the executor performs it.
 pub fn route(method: &str, path: &str, body: &Value) -> Result<Command, ApiError> {
+    if method == "POST" && path == "/v2/inspector" {
+        return Ok(Command::Inspector {
+            operation: "v2".into(),
+            body: body.clone(),
+        });
+    }
     if method == "POST"
         && [
             "/v1/inspector/observe",
@@ -483,9 +503,12 @@ pub fn render_response(status: u16, body: &Value) -> Vec<u8> {
         200 => "OK",
         400 => "Bad Request",
         401 => "Unauthorized",
+        403 => "Forbidden",
         404 => "Not Found",
         405 => "Method Not Allowed",
+        408 => "Request Timeout",
         409 => "Conflict",
+        422 => "Unprocessable Content",
         500 => "Internal Server Error",
         503 => "Service Unavailable",
         _ => "OK",
@@ -554,7 +577,9 @@ pub async fn serve(app: AppHandle, port: u16, token: String) -> anyhow::Result<(
         let token = token.clone();
         tokio::spawn(async move {
             let _slot = slot;
-            if let Err(error) = handle_conn(stream, &token, |command| execute(&app, command)).await
+            let caller = format!("api:{:x}", Sha256::digest(token.as_bytes()));
+            if let Err(error) =
+                handle_conn(stream, &token, |command| execute(&app, command, &caller)).await
             {
                 log::debug!("local API connection ended: {error}");
             }
@@ -678,7 +703,7 @@ async fn write_response<S: AsyncWrite + Unpin>(
     Ok(())
 }
 
-async fn execute(app: &AppHandle, command: Command) -> Result<Value, ApiError> {
+async fn execute(app: &AppHandle, command: Command, caller: &str) -> Result<Value, ApiError> {
     if let Command::Task(task) = command {
         return tasks::execute(app, task).await;
     }
@@ -692,6 +717,13 @@ async fn execute(app: &AppHandle, command: Command) -> Result<Value, ApiError> {
             Ok(serde_json::to_value(state.registry.list()).unwrap_or(Value::Null))
         }
         Command::Inspector { operation, body } => {
+            if operation == "v2" {
+                let request = serde_json::from_value(body)
+                    .map_err(|_| ApiError::new(400, "Invalid semantic Inspector request"))?;
+                return crate::inspector_commands::semantic::execute(&state, caller, request)
+                    .await
+                    .map_err(ApiError::from);
+            }
             let udid = body["udid"]
                 .as_str()
                 .filter(|s| !s.is_empty())

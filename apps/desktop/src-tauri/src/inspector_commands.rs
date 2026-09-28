@@ -1,4 +1,5 @@
 //! One inspection/recording path for UI and MCP. All device work shares Riviu leases.
+pub mod semantic;
 use crate::{command_error::CommandError, commands::with_manual_session, state::AppState};
 use base64::{engine::general_purpose::STANDARD, Engine};
 use riviu_core::{
@@ -8,6 +9,16 @@ use riviu_core::{
     },
     DeviceWorkOwner,
 };
+pub use semantic::SemanticRequest;
+
+#[tauri::command]
+pub async fn inspector_v2(
+    window: tauri::Window,
+    state: tauri::State<'_, AppState>,
+    request: SemanticRequest,
+) -> Result<serde_json::Value, CommandError> {
+    semantic::execute(&state, &format!("ipc:{}", window.label()), request).await
+}
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tauri::State;
@@ -173,6 +184,7 @@ fn save_observation(state: &AppState, snapshot: &InspectorSnapshot) -> Result<()
 }
 pub async fn observe(state: &AppState, udid: String) -> Result<InspectorSnapshot, CommandError> {
     let _admission = state.ensure_accepting_work()?;
+    semantic::invalidate(&udid).await;
     let id = udid.clone();
     let snapshot = with_manual_session(
         state,
@@ -348,6 +360,7 @@ pub async fn tap(
     selector: ElementSelector,
 ) -> Result<InspectorSnapshot, CommandError> {
     let _admission = state.ensure_accepting_work()?;
+    semantic::invalidate(&udid).await;
     let _lock = RECORD_LOCK.lock().await;
     let id = udid.clone();
     let selected = selector.clone();

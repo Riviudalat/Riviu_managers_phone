@@ -2636,3 +2636,53 @@ export interface GoogleSheetVerification {
 }
 
 export type GoogleSheetsReadonlyVerification = GoogleSheetVerification;
+/** Semantic Inspector v2 preserves unknown evidence as null; refs are opaque and ephemeral. */
+export interface SemanticLocator {
+  role?: string; name?: string; text?: string; id?: string; exact?: boolean;
+}
+export interface SemanticScope { package?: string; root?: SemanticLocator; }
+export interface SemanticFields {
+  identity?: boolean; semantics?: boolean; states?: boolean; bounds?: boolean; rawAttributes?: boolean;
+}
+export type SemanticExpectation =
+  | { kind: "exists" | "absent" | "visible" | "hidden" | "enabled" | "disabled" }
+  | { kind: "selected" | "checked" | "focused"; value: boolean }
+  | { kind: "value" | "text"; value: string; exact?: boolean };
+export type SemanticOperation = "begin" | "end" | "observe" | "tap" | "type" | "swipe" | "press" | "wait_for" | "expect" | "screenshot";
+export interface SemanticInspectorRequest {
+  operation: SemanticOperation; udid: string; sessionToken?: string; timeoutMs?: number;
+  query?: SemanticLocator; scope?: SemanticScope; fields?: SemanticFields;
+  ref?: string; navigationTarget?: string; text?: string;
+  direction?: "up" | "down" | "left" | "right"; key?: "back" | "home";
+  expected?: SemanticExpectation;
+}
+export interface SemanticNode {
+  nodeId: number; parent: number | null;
+  id: string | null; className: string | null; package: string | null;
+  role: string | null; name: string | null; text: string | null; value: string | null;
+  password: boolean | null; showingHint: boolean | null; checkable: boolean | null;
+  scrollable: boolean | null; longClickable: boolean | null; focusable: boolean | null;
+  enabled: boolean | null; clickable: boolean | null; visible: boolean | null;
+  focused: boolean | null; selected: boolean | null; checked: boolean | null;
+  bounds: { x: number; y: number; width: number; height: number } | null;
+  rawAttributes: Record<string, string> | null;
+}
+export interface SemanticObservation {
+  deviceId: string; sessionEpoch: string; observationId: string; generation: number;
+  startedAtMs: number; endedAtMs: number;
+  source: "accessibilityHierarchy" | "nativeQuery";
+  completeness: "complete" | "partial" | "unknown"; unknownMatchCount: number;
+  app: { package: string | null; activity: string | null; version: string | null;
+    systemLocale: string | null; width: number | null; height: number | null };
+  matches: SemanticNode[];
+}
+export type SemanticVerdict = "satisfied" | "notSatisfied" | "unknown" | "ambiguous";
+export type SemanticInspectorResult =
+  | { status: "begun"; sessionToken: string; idleTimeoutMs: number }
+  | { status: "ended" }
+  | { status: "observed" | "checked"; observation: SemanticObservation; refs: Record<string, string>; refExpiryMs: number; verdict?: SemanticVerdict }
+  | { status: "satisfied" | "deadlineExceeded" | "cancelled" | "unsupported"; verdict: SemanticVerdict; observation: SemanticObservation | null }
+  | { status: "dispatched"; verified: false }
+  | { status: "verified"; verified: true; readback: "exactValueAndFocus" }
+  | { status: "captured"; atomic: false; captureOrder: ["semanticObservation", "screenshot"];
+      observationId: string; generation: number; sessionEpoch: string; pngBase64: string };

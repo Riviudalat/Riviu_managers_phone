@@ -1,4 +1,8 @@
 import { invoke } from "@tauri-apps/api/core";
+import type { SemanticInspectorRequest, SemanticInspectorResult } from "./types";
+/** No retry or cache: sessions/refs are owned by the calling window and expire. */
+export const inspectorV2 = (request: SemanticInspectorRequest) =>
+  invoke<SemanticInspectorResult>("inspector_v2", { request });
 import { invalidateReadScope, readQueryClient } from "./readQuery";
 export interface GuiServiceConfig { enabled:boolean; baseUrl:string; model:string; maxRequests:number; }
 export interface GuiServiceStatus { config:GuiServiceConfig; running:boolean; providerReady:boolean; protocolVersion:number; lastError?:string|null; }
