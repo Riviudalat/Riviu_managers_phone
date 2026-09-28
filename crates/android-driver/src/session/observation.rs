@@ -141,6 +141,8 @@ impl AndroidUiSession {
         crate::adb::read_foreground_package_with(|source| async move {
             let remaining = deadline.saturating_duration_since(Instant::now());
             anyhow::ensure!(!remaining.is_zero(), "observation_deadline_exceeded");
+            tracing::debug!(serial = %self.serial, transport = "adb", command = source,
+                "observation read command");
             let output = self
                 .adb
                 .shell_output(&self.serial, source, remaining)
@@ -161,6 +163,9 @@ fn native_locator(request: &ObservationRequest) -> Option<Locator> {
         .as_ref()
         .and_then(|scope| scope.package.as_deref());
     if query.role.is_some()
+        // Name fallback/precedence is owned by the shared resolver. A native
+        // description-only predicate would omit nodes named by their text.
+        || query.name.is_some()
         || request
             .scope
             .as_ref()

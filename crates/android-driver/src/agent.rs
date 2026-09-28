@@ -499,6 +499,8 @@ impl AgentClient {
             request = request.json(&locator.to_body());
         }
         let read = async {
+            tracing::debug!(serial = %self.serial, transport = "http", route = suffix,
+                "observation read command");
             let mut response = request.send().await.context("observation transport")?;
             anyhow::ensure!(
                 response.status().is_success(),
