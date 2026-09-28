@@ -11,6 +11,8 @@ use crate::adb::AdbProgram;
 use crate::agent::{AgentClient, Locator};
 use crate::riviu_agent::HelperClient;
 
+mod observation;
+
 /// `KEYCODE_HOME`.
 const KEYCODE_HOME: i64 = 3;
 /// `KEYCODE_BACK`.
@@ -375,6 +377,13 @@ fn to_locator(locator: &QualifiedElementLocator) -> Locator {
 
 #[async_trait]
 impl UiSession for AndroidUiSession {
+    async fn observe(
+        &self,
+        request: &riviu_core::ui_automation::ObservationRequest,
+    ) -> anyhow::Result<riviu_core::ui_automation::UiObservation> {
+        self.observe_bounded(request).await
+    }
+
     fn set_gui_scope(&self, scope: riviu_core::ui_automation::GuiScope) {
         *self.gui_scope.lock() = Some(scope);
     }

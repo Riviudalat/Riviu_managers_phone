@@ -37,6 +37,24 @@ const W3C_ELEMENT_KEY: &str = "element-6066-11e4-a52e-4f735466cecf";
 /// delays the restart that fixes it.
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// Selected once when connecting; changing observation mode requires a new client.
+/// Legacy remains the default until paired live evidence approves enriched reads.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum AndroidObservationMode {
+    #[default]
+    Legacy,
+    Enriched,
+}
+
+// Appium uiautomator2-server v10.6.2 BaseElement.toModel keeps the attribute/ prefix.
+// Unsupported attributes (including showing-hint on some versions) are omitted.
+const OBSERVATION_ATTRIBUTES: &str = concat!(
+    "name,text,rect,enabled,displayed,selected,",
+    "attribute/checked,attribute/checkable,attribute/focused,attribute/password,",
+    "attribute/showing-hint,attribute/scrollable,attribute/class,attribute/resource-id,",
+    "attribute/package,attribute/clickable,attribute/long-clickable,attribute/focusable"
+);
+
 /// How an element is addressed on screen.
 ///
 /// `Description` is the primary strategy and `ResourceId` deliberately is not.
@@ -181,7 +199,7 @@ pub fn escape_java_regex(value: &str) -> String {
 }
 
 /// Quote a Java string literal for embedding in a `UiSelector` expression.
-fn quote_java(value: &str) -> String {
+pub(crate) fn quote_java(value: &str) -> String {
     let mut out = String::with_capacity(value.len() + 2);
     out.push('"');
     for ch in value.chars() {
@@ -286,6 +304,7 @@ pub struct AgentClient {
     /// Shared and swappable, so recycling a degraded session fixes **every** clone —
     /// including the `AndroidUiSession` already handed to a running loop.
     session_id: Arc<Mutex<String>>,
+    observation_mode: AndroidObservationMode,
 }
 
 impl AgentClient {
@@ -293,6 +312,23 @@ impl AgentClient {
     pub async fn connect(
         serial: impl Into<String>,
         base: impl Into<String>,
+    ) -> anyhow::Result<Self> {
+        let mode = match std::env::var("RIVIU_ANDROID_OBSERVATION_MODE") {
+            Ok(value) if value == "enriched" => AndroidObservationMode::Enriched,
+            Ok(value) if value == "legacy" => AndroidObservationMode::Legacy,
+            Err(std::env::VarError::NotPresent) => AndroidObservationMode::Legacy,
+            _ => {
+                anyhow::bail!("invalid RIVIU_ANDROID_OBSERVATION_MODE; expected legacy or enriched")
+            }
+        };
+        Self::connect_with_observation_mode(serial, base, mode).await
+    }
+
+    /// Opt in before setup, so response settings remain stable across reads and recovery.
+    pub async fn connect_with_observation_mode(
+        serial: impl Into<String>,
+        base: impl Into<String>,
+        observation_mode: AndroidObservationMode,
     ) -> anyhow::Result<Self> {
         let base = base.into().trim_end_matches('/').to_string();
         // 30 s, from measurements rather than from caution. The slowest *legitimate*
@@ -330,8 +366,11 @@ impl AgentClient {
             base,
             serial: serial.into(),
             session_id: Arc::new(Mutex::new(session_id)),
+            observation_mode,
         };
         client.prime_session().await?;
+        tracing::info!(serial = %client.serial, mode = ?client.observation_mode,
+            "Android observation mode selected at session setup");
         Ok(client)
     }
 
@@ -354,10 +393,15 @@ impl AgentClient {
     /// *just* created, so a recycle here would be a loop, and a fresh session having
     /// a rotten tree is not a case that recycling can fix.
     async fn prime_session(&self) -> anyhow::Result<()> {
+        let mut settings = json!({ "waitForIdleTimeout": 0 });
+        if self.observation_mode == AndroidObservationMode::Enriched {
+            settings["shouldUseCompactResponses"] = json!(false);
+            settings["elementResponseAttributes"] = json!(OBSERVATION_ATTRIBUTES);
+        }
         self.send_once(
             reqwest::Method::POST,
             "/appium/settings",
-            Some(json!({ "settings": { "waitForIdleTimeout": 0 } })),
+            Some(json!({ "settings": settings })),
         )
         .await
         .map(|_| ())
@@ -427,6 +471,74 @@ impl AgentClient {
     }
     pub(crate) fn session_identity(&self) -> String {
         self.session_id.lock().clone()
+    }
+
+    pub fn observation_mode(&self) -> AndroidObservationMode {
+        self.observation_mode
+    }
+
+    /// One bounded read with no retries, session recreation, or response-body diagnostics.
+    /// The absolute deadline covers headers, every body chunk, and JSON decoding.
+    pub(crate) async fn observation_read(
+        &self,
+        locator: Option<&Locator>,
+        deadline: std::time::Instant,
+    ) -> anyhow::Result<Value> {
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        anyhow::ensure!(!remaining.is_zero(), "observation_deadline_exceeded");
+        let (method, suffix) = if locator.is_some() {
+            (reqwest::Method::POST, "/elements")
+        } else {
+            (reqwest::Method::GET, "/source")
+        };
+        let mut request = self
+            .http
+            .request(method, self.url(suffix))
+            .timeout(remaining);
+        if let Some(locator) = locator {
+            request = request.json(&locator.to_body());
+        }
+        let read = async {
+            let mut response = request.send().await.context("observation transport")?;
+            anyhow::ensure!(
+                response.status().is_success(),
+                "observation_http_status_{}",
+                response.status()
+            );
+            let mut bytes = Vec::new();
+            loop {
+                anyhow::ensure!(
+                    std::time::Instant::now() < deadline,
+                    "observation_deadline_exceeded"
+                );
+                let Some(chunk) = response
+                    .chunk()
+                    .await
+                    .context("observation body transport")?
+                else {
+                    break;
+                };
+                anyhow::ensure!(
+                    bytes.len().saturating_add(chunk.len()) <= 16 * 1024 * 1024,
+                    "observation_response_size_limit"
+                );
+                bytes.extend_from_slice(&chunk);
+            }
+            let value: Value =
+                serde_json::from_slice(&bytes).context("observation_invalid_json")?;
+            anyhow::ensure!(
+                value.pointer("/value/error").is_none(),
+                "observation_remote_error"
+            );
+            anyhow::ensure!(
+                std::time::Instant::now() < deadline,
+                "observation_deadline_exceeded"
+            );
+            Ok(value)
+        };
+        tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), read)
+            .await
+            .map_err(|_| anyhow!("observation_deadline_exceeded"))?
     }
 
     /// Replace a degraded session with a fresh one, in place.
@@ -1028,6 +1140,7 @@ mod tests {
             base,
             serial: "fixture".into(),
             session_id: Arc::new(Mutex::new("fixed".into())),
+            observation_mode: AndroidObservationMode::Legacy,
         };
         let (id, rect) = client
             .find_with_rect(&Locator::Description("Create".into()))
@@ -1099,6 +1212,7 @@ mod tests {
             base,
             serial: "fixture".into(),
             session_id: Arc::new(Mutex::new("fixed".into())),
+            observation_mode: AndroidObservationMode::Legacy,
         };
         let result = client.find_with_rect(&Locator::Text("Next".into())).await;
         server.abort();
@@ -1234,6 +1348,7 @@ mod tests {
             base,
             serial: "fixture-device".into(),
             session_id: Arc::new(Mutex::new("fixture".into())),
+            observation_mode: AndroidObservationMode::Legacy,
         };
         (client, routes, server)
     }
@@ -1421,6 +1536,7 @@ mod tests {
             base,
             serial: "fixture-device".into(),
             session_id: Arc::new(Mutex::new("old".into())),
+            observation_mode: AndroidObservationMode::Legacy,
         };
         (client, routes, server)
     }
@@ -1522,6 +1638,7 @@ mod tests {
             base,
             serial: "fixture-device".to_owned(),
             session_id: Arc::new(Mutex::new("fixture-session".to_owned())),
+            observation_mode: AndroidObservationMode::Legacy,
         };
 
         let error = client
