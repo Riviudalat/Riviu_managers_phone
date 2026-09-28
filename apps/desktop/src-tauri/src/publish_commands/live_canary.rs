@@ -256,7 +256,7 @@ async fn live_publish_canary() -> anyhow::Result<()> {
                 save(&out, "sound.json", &selection)?;
                 anyhow::bail!("canary rehearsal: stop before public Post")
             };
-            let outcome = post_through_the_composer(&control, &db, &assignment.id, session.as_ref(), &campaign.id, serial.as_str(), bundle, &import, &campaign_request.sound_policy, false, &mut before_post, &|_| {}, &|_| {}).await;
+            let outcome = post_through_the_composer(&control, &db, &assignment.id, session.as_ref(), &campaign.id, serial.as_str(), bundle, &import, &campaign_request.sound_policy, false, &mut before_post, &|_| {}, &|_| {}, &mut None).await;
             let definitely_not_posted = matches!(&outcome, PostOutcome::NothingPublished(_));
             let description = match outcome { PostOutcome::NothingPublished(reason) => reason, PostOutcome::Unknown(reason) => format!("UNCERTAIN {reason}"), PostOutcome::Posted(_) | PostOutcome::Submitted(_) => "UNEXPECTED POST".into() };
             let artifacts: anyhow::Result<()> = async {

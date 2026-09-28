@@ -86,6 +86,14 @@ pub struct RecoveryFailure {
     pub message: String,
 }
 
+impl std::fmt::Display for RecoveryFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for RecoveryFailure {}
+
 impl RecoveryFailure {
     pub fn new(code: impl Into<String>, kind: FailureKind, message: impl Into<String>) -> Self {
         Self {
@@ -162,6 +170,9 @@ pub fn retryable_error(code: &'static str, message: impl Into<String>) -> anyhow
 }
 
 pub fn describe(error: &anyhow::Error) -> RecoveryFailure {
+    if let Some(failure) = error.downcast_ref::<RecoveryFailure>() {
+        return failure.clone();
+    }
     if let Some(diagnostic) = error.downcast_ref::<crate::tiktok_account::AccountDiagnostic>() {
         if let Some(failure) = diagnostic.failure() {
             return failure;

@@ -1672,6 +1672,14 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
                 .await;
             return Ok(ComposerVerdict::NoPostButton);
         };
+        let prepared_epoch = self.session.gui_session_epoch();
+        if self.pending_sound_proof.as_ref().is_some_and(|(plan, _)| plan.post_back_query().is_some()) {
+            // Normalize the positively observed IME before starting sound freshness time.
+            // This is a separate bounded navigation step, never a reset of final proof.
+            self.prepare_caption_keyboard(caption, stop).await?;
+        }
+        anyhow::ensure!(self.session.gui_session_epoch() == prepared_epoch,
+            "caption preparation session changed");
         let reproof_deadline = self
             .pending_sound_proof
             .as_ref()
@@ -1755,10 +1763,11 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
                             "sound reproof: caption page did not return"
                         );
                         mark("restoreCaptionIfCleared");
-                        self.restore_caption_cleared_by_editor(caption, stop)
+                        let caption_proof = self.restore_caption_cleared_by_editor(caption, stop)
                             .await?;
+                        anyhow::ensure!(caption_proof == CaptionOutcome::Typed,
+                            "sound reproof: caption readback was not confirmed");
                         mark("captionAfterReturn");
-                        Box::pin(self.require_caption_unchanged(caption, stop)).await?;
                     } else {
                         mark("confirmInlineSound");
                         Box::pin(confirm_sound(self.session, sound_plan, &expected_title)).await?;
@@ -1906,17 +1915,49 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
         }
     }
 
+    async fn prepare_caption_keyboard(&self, caption: &str, stop: &AtomicBool) -> anyhow::Result<()> {
+        crate::tiktok_sound::with_observation_budget(stop, Duration::from_secs(8), async {
+            let epoch = self.session.gui_session_epoch();
+            let started = Instant::now();
+            let shown = match crate::tiktok_sound::read_sound(self.session.keyboard_shown()).await {
+                Ok(shown) => shown,
+                Err(error) if error.downcast_ref::<crate::driver::UnsupportedCapability>()
+                    .is_some_and(|unsupported| unsupported.capability == "keyboardShown") => return Ok(()),
+                Err(error) => return Err(error),
+            };
+            if shown {
+                Box::pin(self.require_caption_unchanged(caption, stop)).await?;
+                // Re-read the positive predicate immediately before the one allowed Back.
+                let still_shown = crate::tiktok_sound::read_sound(self.session.keyboard_shown()).await?;
+                observation::check_session(self.session)?;
+                anyhow::ensure!(self.session.gui_session_epoch() == epoch, "keyboard preparation session changed");
+                crate::tiktok_sound::check_wait()?;
+                if still_shown {
+                    self.session.back().await?; // never cancel an in-flight gesture
+                }
+                while crate::tiktok_sound::read_sound(self.session.keyboard_shown()).await? {
+                    crate::tiktok_sound::check_wait()?;
+                    sleep(POLL, stop).await;
+                }
+                Box::pin(self.require_caption_unchanged(caption, stop)).await?;
+            }
+            anyhow::ensure!(self.session.gui_session_epoch() == epoch, "keyboard preparation session changed");
+            tracing::info!(session = %epoch, was_shown = shown,
+                elapsed_ms = started.elapsed().as_millis() as u64,
+                "caption keyboard preparation before fresh sound proof");
+            Ok(())
+        }).await
+    }
+
     async fn restore_caption_cleared_by_editor(
         &mut self,
         caption: &str,
         stop: &AtomicBool,
-    ) -> anyhow::Result<()> {
-        if caption.trim().is_empty()
-            || Box::pin(self.require_caption_unchanged(caption, stop))
-                .await
-                .is_ok()
-        {
-            return Ok(());
+    ) -> anyhow::Result<CaptionOutcome> {
+        // Both successful branches already perform an exact readback. Return that proof
+        // explicitly instead of spending the final sound budget reading it a second time.
+        if Box::pin(self.require_caption_unchanged(caption, stop)).await.is_ok() {
+            return Ok(CaptionOutcome::Typed);
         }
         anyhow::ensure!(
             !stop.load(Ordering::Relaxed),
@@ -1943,7 +1984,7 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
             ),
             "caption restore was not confirmed; chưa bấm Đăng"
         );
-        Ok(())
+        Ok(CaptionOutcome::Typed)
     }
 
     async fn require_caption_unchanged(

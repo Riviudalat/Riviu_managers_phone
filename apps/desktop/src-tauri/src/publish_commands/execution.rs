@@ -19,6 +19,7 @@ pub(super) enum PhoneFailure {
     /// This campaign holds no bundle for this assignment. Nothing was opened.
     NoBundle,
     AccountProof(riviu_core::tiktok_account::AccountDiagnostic),
+    Recovery(riviu_core::publish_recovery::RecoveryFailure),
     /// The run stopped and **nothing reached TikTok**.
     NothingPublished(String),
     /// A tap may have gone out and the result is unknown.
@@ -223,6 +224,9 @@ pub(super) async fn post_one_phone(
     if matches!(&outcome, PostOutcome::NothingPublished(_)) {
         if let Some(diagnostic) = attempt.account_diagnostic.filter(|d| d.failure().is_some()) {
             return Err(PhoneFailure::AccountProof(diagnostic));
+        }
+        if let Some(failure) = attempt.recovery_failure {
+            return Err(PhoneFailure::Recovery(failure));
         }
     }
     match (message, &outcome) {
@@ -2394,6 +2398,7 @@ pub(crate) async fn post_publish_campaign_inner(
             }
             Ok(Err(PhoneFailure::NothingPublished(reason))) => failures.push(reason),
             Ok(Err(PhoneFailure::AccountProof(diagnostic))) => failures.push(diagnostic.message),
+            Ok(Err(PhoneFailure::Recovery(failure))) => failures.push(failure.message),
             Ok(Err(PhoneFailure::MayBeLive(reason))) => {
                 may_be_live = true;
                 failures.push(reason);
@@ -2691,6 +2696,7 @@ async fn post_one_assignment_owned(
     let mut effect_claimed = false;
     let mut claim_refused = false;
     let mut submitted_at = None;
+    let mut composer_failure = None;
     let (action_result, mut account_diagnostic) = riviu_core::tiktok_account::with_account_diagnostic(async {
         let mut before_post = |sound_selection: Option<&riviu_core::SoundSelectionEvidence>,
                                identity: Option<
@@ -2778,6 +2784,7 @@ async fn post_one_assignment_owned(
                 &mut before_post,
                 &progress,
                 &diagnostics,
+                &mut composer_failure,
             ))
             .await
         } else {
@@ -2854,7 +2861,7 @@ async fn post_one_assignment_owned(
         recovery_failure: if effect_claimed {
             None
         } else {
-            account_diagnostic.as_ref().and_then(|d| d.failure())
+            account_diagnostic.as_ref().and_then(|d| d.failure()).or(composer_failure)
         },
         account_diagnostic,
     }
@@ -3663,7 +3670,9 @@ pub(super) async fn post_through_the_composer(
     before_post: &mut BeforePublish<'_>,
     progress: &riviu_core::tiktok_composer::PublishProgressObserver<'_>,
     diagnostics: &(dyn Fn(&riviu_core::tiktok_composer::SelectionDiagnostic) + Send + Sync),
+    recovery_failure: &mut Option<riviu_core::publish_recovery::RecoveryFailure>,
 ) -> PostOutcome {
+    *recovery_failure = None;
     use riviu_core::tiktok_composer::{
         publish_carousel_with_sound_effect_intent_and_diagnostics, CarouselRequest, ComposerPlan,
         ComposerVerdict, Screen,
@@ -3915,7 +3924,12 @@ pub(super) async fn post_through_the_composer(
         Err(error) if crossed_effect_boundary => {
             return PostOutcome::Unknown(format!("{udid}: {error}"))
         }
-        Err(error) => return PostOutcome::NothingPublished(format!("{udid}: {error:#}")),
+        Err(error) => {
+            // Preserve the typed pre-effect refusal before the display-only outcome loses
+            // its anyhow chain. After an intent, the Unknown arm above never grants retry.
+            *recovery_failure = Some(riviu_core::publish_recovery::describe(&error));
+            return PostOutcome::NothingPublished(format!("{udid}: {error:#}"));
+        },
     };
     let mut evidence = serde_json::json!({
         "state": if verdict.is_submitted() { "submitted" } else if verdict.may_retry() { "not_posted" } else { "unknown" },

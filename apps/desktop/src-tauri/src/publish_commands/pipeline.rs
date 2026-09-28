@@ -215,6 +215,7 @@ impl Runtime {
             Ok(()) => Ok(()),
             Err(PhoneFailure::NoBundle) => anyhow::bail!("bundle missing"),
             Err(PhoneFailure::AccountProof(diagnostic)) => Err(diagnostic.into()),
+            Err(PhoneFailure::Recovery(failure)) => Err(failure.into()),
             Err(PhoneFailure::NothingPublished(reason) | PhoneFailure::MayBeLive(reason)) => {
                 anyhow::bail!("{reason}")
             }

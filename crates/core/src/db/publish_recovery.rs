@@ -252,7 +252,15 @@ impl Database {
         job: &PublishDispatchJob,
         error: &str,
     ) -> anyhow::Result<bool> {
-        let failure = RecoveryFailure::legacy(error);
+        self.requeue_publish_recovery_failure(job, &RecoveryFailure::legacy(error))
+    }
+
+    pub fn requeue_publish_recovery_failure(
+        &self,
+        job: &PublishDispatchJob,
+        failure: &RecoveryFailure,
+    ) -> anyhow::Result<bool> {
+        let error = failure.message.as_str();
         let kind = failure.kind;
         if kind == FailureKind::Terminal {
             return Ok(false);
@@ -276,7 +284,7 @@ impl Database {
             return Ok(false);
         }
         let now = Utc::now().timestamp_millis();
-        record_failure(&mut s, &failure);
+        record_failure(&mut s, failure);
         if kind == FailureKind::Disconnected {
             if *s.counts.get(&s.step).unwrap_or(&0) >= s.max_retries {
                 s.state = "exhausted".into();
@@ -289,7 +297,7 @@ impl Database {
             s.reconnect_deadline.get_or_insert((now + 120_000) as f64);
             s.state = "waitingDevice".into();
             s.next_retry_at = Some((now + 2000) as f64);
-        } else if spend(&mut s, &failure, now).is_none() {
+        } else if spend(&mut s, failure, now).is_none() {
             write(&tx, &job.assignment_id, &job.run.token, &s)?;
             tx.commit()?;
             return Ok(false);

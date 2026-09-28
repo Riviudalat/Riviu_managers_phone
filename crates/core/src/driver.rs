@@ -851,6 +851,10 @@ pub trait UiSession: Send + Sync {
     async fn back(&self) -> anyhow::Result<()> {
         unsupported("back")
     }
+    /// Read the platform's current input visibility; unknown is an error, not false.
+    async fn keyboard_shown(&self) -> anyhow::Result<bool> {
+        unsupported("keyboardShown")
+    }
     async fn find_and_tap(&self, accessibility_id: &str) -> anyhow::Result<()>;
     async fn assert_visible(&self, accessibility_id: &str) -> anyhow::Result<()>;
     /// Dismiss a visible iOS system alert if present. Default: unsupported.

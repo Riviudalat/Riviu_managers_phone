@@ -605,6 +605,27 @@ impl UiSession for AndroidUiSession {
             .await
     }
 
+    async fn keyboard_shown(&self) -> anyhow::Result<bool> {
+        let epoch = self.gui_session_epoch();
+        let dump = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            self.adb.shell(&self.serial, "dumpsys input_method"),
+        ).await.context("keyboard visibility read timed out")??;
+        anyhow::ensure!(self.gui_session_epoch() == epoch, "keyboard visibility session changed");
+        // Measured Samsung IME: mIsInputViewShown remains true after dismissal. Only
+        // the unique InputMethodManager mInputShown token tracks the actual transition.
+        anyhow::ensure!(dump.starts_with("Current Input Method Manager state:"),
+            "keyboard visibility dump unrecognized");
+        let mut values = dump.split_whitespace().filter_map(|token| token.strip_prefix("mInputShown="));
+        let shown = match values.next() {
+            Some("true") => true,
+            Some("false") => false,
+            _ => anyhow::bail!("keyboard visibility unknown"),
+        };
+        anyhow::ensure!(values.next().is_none(), "keyboard visibility ambiguous");
+        Ok(shown)
+    }
+
     async fn press_hardware_key(&self, key: HardwareKey) -> anyhow::Result<()> {
         self.traced("press_hardware_key", async {
             self.agent.press_key(hardware_keycode(key)).await

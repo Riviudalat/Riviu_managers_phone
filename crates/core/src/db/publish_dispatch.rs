@@ -493,9 +493,8 @@ impl Database {
         error: Option<&str>,
         failure: Option<&crate::publish_recovery::RecoveryFailure>,
     ) -> anyhow::Result<bool> {
-        if let Some(error) = error {
-            if failure.is_some_and(|f| f.kind != crate::publish_recovery::FailureKind::Terminal)
-                && self.requeue_publish_recovery(job, error)?
+        if let Some(typed_failure) = failure.filter(|f| error.is_some() && f.kind != crate::publish_recovery::FailureKind::Terminal) {
+            if self.requeue_publish_recovery_failure(job, typed_failure)?
             {
                 if let Some(failure) = failure.filter(|f| f.code.starts_with("account_")) {
                     let conn = self.conn()?;
