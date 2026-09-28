@@ -7,6 +7,21 @@ import {ProgressBar} from "../../components/ProgressBar";
 import type {PublishExcludeResult,PublishRecoveryCapability} from "../../types";
 
 const stepLabel:Record<string,string>={device:"Chuẩn bị máy",transfer:"Chuyển nội dung",media:"Chọn ảnh/video",sound:"Chọn nhạc",caption:"Nhập caption"};
+const accountGuidance: Record<string, string> = {
+ account_login_required: "TikTok ?ang y?u c?u ??ng nh?p. M? ??ng t?i kho?n tr?n m?y r?i ki?m tra l?i; ch?a b?m ??ng.",
+ account_security_prompt: "L?i nh?c b?o m?t ?ang che h? s?. X? l? tr?n ?i?n tho?i r?i ki?m tra l?i; ch?a b?m ??ng.",
+ account_unreadable: "Ch?a ??c ?? th?ng tin h? s?. Ki?m tra m?n h?nh ?i?n tho?i r?i th? l?i; ch?a k?t lu?n t?i kho?n ?? ??i.",
+ account_mismatch: "T?i kho?n ?ang m? kh?c t?i kho?n c?a l??t n?y. M? l?i ??ng t?i kho?n; kh?ng t? ??i t?i kho?n ?? g?n v?i b?i.",
+ account_read_failed: "Kh?ng ??c ???c h? s? do k?t n?i ho?c phi?n ?i?u khi?n. Ki?m tra k?t n?i m?y r?i th? l?i.",
+};
+function accountFailureCode(evidenceJson: string | null | undefined): string | null {
+ try {
+  const value: unknown = JSON.parse(evidenceJson ?? "null");
+  if (!value || typeof value !== "object" || !("recoveryFailure" in value)) return null;
+  const failure = value.recoveryFailure;
+  return failure && typeof failure === "object" && "code" in failure && typeof failure.code === "string" ? failure.code : null;
+ } catch { return null; }
+}
 type PublishProgressCapability = PublishRecoveryCapability & {
  exclusion?: PublishExcludeResult | null;
  sheetRequired?: boolean;
@@ -55,6 +70,8 @@ export function PublishDeviceRecovery({campaignId,udid}:{campaignId:string;udid:
    const receipt=exclusions[a.id];
    const durable=c?.exclusion?.assignmentId===a.id?c.exclusion:null;
    const exclusion=durable&&(!receipt||durable.revision>=receipt.revision)?durable:receipt;
+   const accountCode = c?.recovery?.lastErrorCode ?? accountFailureCode(a.evidenceJson) ?? a.errorCode;
+   const guidance = accountCode ? accountGuidance[accountCode] : undefined;
    const r=c?.recovery;const waiting=r&&["retryWaiting","waitingDevice"].includes(r.state)&&!a.effectIntent;
    const text=r?.state==="waitingDevice"?`Mất kết nối · chờ máy, còn ${Math.max(0,Math.ceil(((r.reconnectDeadline??0)-now)/1000))} giây`:r?.state==="retryWaiting"?`Thử lại ${r.retriesUsed}/${r.maxRetries} · ${stepLabel[r.step]??r.step}`:r?.state==="exhausted"?`Đã hết lượt tự thử · ${stepLabel[r.step]??r.step}`:null;
    const events=log.value?.entries.filter(event=>event.at&&Number.isFinite(Date.parse(event.at)))??[];
@@ -83,7 +100,8 @@ export function PublishDeviceRecovery({campaignId,udid}:{campaignId:string;udid:
     {c&&!["succeeded","cancelled","missed"].includes(a.state)&&<button type="button" disabled={busy||!!exclusion} title="Chỉ dừng máy này trong lượt đăng; giữ nguyên bài đã gửi và nghĩa vụ xác minh" onClick={()=>void exclude(c)}>Loại khỏi lượt này</button>}
 
     {text&&<small role="status">{text}</small>}
-    {r?.lastError&&["failed","exhausted","interrupted"].includes(r.state)&&<small>{describeError(r.lastError)}</small>}
+    {guidance&&<small role="status">{guidance}</small>}
+    {!guidance&&r?.lastError&&["failed","exhausted","interrupted"].includes(r.state)&&<small>{describeError(r.lastError)}</small>}
     {!c&&<small>Chưa đọc được quyền thao tác cho máy này.</small>}
     {c&&!a.effectIntent&&(a.state==="failedBeforeDispatch"||waiting)&&<><button type="button" disabled={busy||!!exclusion||!!waiting||!online||!c.retryBeforePost.allowed} title={!online?"Máy chưa kết nối":c.retryBeforePost.allowed?"Chạy thêm đúng một lần; giữ nguyên bài và máy":c.retryBeforePost.reason??"Đang phục hồi"} onClick={()=>void act(c,"retry")}>Thử lại</button>{!online&&<small>Máy chưa kết nối</small>}</>}
     {a.effectIntent&&c?.resumeVerification.allowed&&<button type="button" disabled={busy} onClick={()=>void act(c,"resume")}>Tiếp tục kiểm tra link</button>}
