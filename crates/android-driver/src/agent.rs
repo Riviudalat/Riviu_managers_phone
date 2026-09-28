@@ -484,19 +484,38 @@ impl AgentClient {
         locator: Option<&Locator>,
         deadline: std::time::Instant,
     ) -> anyhow::Result<Value> {
-        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
-        anyhow::ensure!(!remaining.is_zero(), "observation_deadline_exceeded");
         let (method, suffix) = if locator.is_some() {
             (reqwest::Method::POST, "/elements")
         } else {
             (reqwest::Method::GET, "/source")
         };
+        self.observation_request(method, suffix, locator.map(Locator::to_body), deadline)
+            .await
+    }
+
+    pub(crate) async fn observation_window_size(
+        &self,
+        deadline: std::time::Instant,
+    ) -> anyhow::Result<Value> {
+        self.observation_request(reqwest::Method::GET, "/window/current/size", None, deadline)
+            .await
+    }
+
+    async fn observation_request(
+        &self,
+        method: reqwest::Method,
+        suffix: &str,
+        body: Option<Value>,
+        deadline: std::time::Instant,
+    ) -> anyhow::Result<Value> {
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        anyhow::ensure!(!remaining.is_zero(), "observation_deadline_exceeded");
         let mut request = self
             .http
             .request(method, self.url(suffix))
             .timeout(remaining);
-        if let Some(locator) = locator {
-            request = request.json(&locator.to_body());
+        if let Some(body) = body {
+            request = request.json(&body);
         }
         let read = async {
             tracing::debug!(serial = %self.serial, transport = "http", route = suffix,

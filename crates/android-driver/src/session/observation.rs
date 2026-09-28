@@ -77,10 +77,30 @@ impl AndroidUiSession {
         let tree = Tree::parse(riviu_core::HierarchySourceSnapshot { generation, xml })
             .map_err(|_| anyhow!("observation_tree_invalid"))?;
         let nodes = semantic_nodes(&tree);
-        let app = ObservedAppContext {
+        let mut app = ObservedAppContext {
             package: Some(package.clone()),
             ..Default::default()
         };
+        if request.fields.bounds {
+            let size = self.agent.observation_window_size(deadline).await?;
+            let dimension = |key| -> anyhow::Result<u32> {
+                let value = size
+                    .get("value")
+                    .and_then(|v| v.get(key))
+                    .and_then(Value::as_f64)
+                    .ok_or_else(|| anyhow!("observation_window_size_invalid"))?;
+                anyhow::ensure!(
+                    value.is_finite()
+                        && value > 0.0
+                        && value <= u32::MAX as f64
+                        && value.fract() == 0.0,
+                    "observation_window_size_invalid"
+                );
+                Ok(value as u32)
+            };
+            app.width = Some(dimension("width")?);
+            app.height = Some(dimension("height")?);
+        }
         let mut resolution = resolve_observation(&tree, request)?;
         // A compact/malformed element object is not evidence of absence. The core
         // projection skips XML wrappers, so account explicitly for omitted elements.
