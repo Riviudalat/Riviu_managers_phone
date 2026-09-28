@@ -108,7 +108,7 @@ pub fn semantic_nodes(tree: &Tree) -> Vec<super::SemanticNode> {
                 }
                 parent = ancestor.parent;
             }
-        let mut semantic = super::SemanticNode {
+            let mut semantic = super::SemanticNode {
                 node_id,
                 parent: node.parent,
                 id: value("resource-id"),
@@ -116,14 +116,14 @@ pub fn semantic_nodes(tree: &Tree) -> Vec<super::SemanticNode> {
                 package,
                 role: semantic_role(node),
                 name: value("content-desc"),
-            text: value("text"),
-            value: value("value"),
-            password: boolean("password"),
-            showing_hint: boolean("showing-hint").or_else(|| boolean("showing-hint-text")),
-            checkable: boolean("checkable"),
-            scrollable: boolean("scrollable"),
-            long_clickable: boolean("long-clickable"),
-            focusable: boolean("focusable"),
+                text: value("text"),
+                value: value("value"),
+                password: boolean("password"),
+                showing_hint: boolean("showing-hint").or_else(|| boolean("showing-hint-text")),
+                checkable: boolean("checkable"),
+                scrollable: boolean("scrollable"),
+                long_clickable: boolean("long-clickable"),
+                focusable: boolean("focusable"),
                 enabled: boolean("enabled"),
                 clickable: boolean("clickable"),
                 visible,
@@ -137,10 +137,10 @@ pub fn semantic_nodes(tree: &Tree) -> Vec<super::SemanticNode> {
                         .map(|(key, value)| (key.clone(), value.clone()))
                         .collect(),
                 ),
-            })
-        };
-        semantic.redact_sensitive();
-        Some(semantic)
+            };
+            semantic.redact_sensitive();
+            Some(semantic)
+        })
         .collect()
 }
 
