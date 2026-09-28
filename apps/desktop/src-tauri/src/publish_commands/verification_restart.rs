@@ -345,6 +345,26 @@ fn warm_surface(
     {
         return Some("ownPostViewer");
     }
+    // Measured 28/09: after a second publication, Trill can remain on the
+    // Home feed's own-photo card instead of the dedicated post viewer.
+    // This only admits read-only navigation; it never proves publication identity.
+    let home = one(Q::ResourceIdSuffix(":id/jmk"));
+    let profile_tab = one(Q::ResourceIdSuffix(":id/jmm"));
+    let feed_caption = one(Q::ResourceIdSuffix(":id/desc"));
+    let feed_time = one(Q::ResourceIdSuffix(":id/sby"));
+    if home.is_some_and(|n| {
+        n.attr("content-desc") == "Home"
+            && n.attr("selected") == "true"
+            && n.attr("clickable") == "true"
+    }) && profile_tab
+        .is_some_and(|n| n.attr("content-desc") == "Profile" && n.attr("clickable") == "true")
+        && feed_caption.is_some_and(|n| !n.attr("text").trim().is_empty())
+        && feed_time.is_some_and(|n| !n.attr("text").trim().is_empty())
+        && matches!(shares.as_slice(), [i] if tree.nodes[*i].visibility() == Some(true)
+            && tree.nodes[*i].rect().is_some_and(|r| r.enabled && r.clickable))
+    {
+        return Some("postFeed");
+    }
     let profile = one(Q::Text {
         value: "Edit profile",
         exact: true,
