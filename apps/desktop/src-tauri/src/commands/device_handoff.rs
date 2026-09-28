@@ -236,23 +236,21 @@ pub(crate) async fn prepare_manual_devices(
     // and all results are drained before handing any device to new work.
     // Ordinals index the full sorted, deduplicated request, including blocked
     // and disconnected devices, so filtering readiness never renumbers them.
-    let mut device_order: Vec<_> = selected.iter().collect();
+    let mut device_order: Vec<_> = selected.iter().cloned().collect();
     device_order.sort();
-    let mut pending = futures_util::stream::iter(
-        device_order
-            .into_iter()
-            .enumerate()
-            .filter(|(_, id)| active.contains(*id) && !not_released.contains(*id))
-            .map(|(slot, id)| {
-                let stopped = &stopped;
-                let device_timing = timing.phase("total", Some(slot));
-                async move {
-                    let result =
-                        close_handoff_device(state, id, stopped, deadline, device_timing).await;
-                    (id.clone(), result)
-                }
-            }),
-    )
+    let ready: Vec<_> = device_order
+        .into_iter()
+        .enumerate()
+        .filter(|(_, id)| active.contains(id) && !not_released.contains(id))
+        .collect();
+    let mut pending = futures_util::stream::iter(ready.into_iter().map(|(slot, id)| {
+        let stopped = &stopped;
+        let device_timing = timing.phase("total", Some(slot));
+        async move {
+            let result = close_handoff_device(state, &id, stopped, deadline, device_timing).await;
+            (id.clone(), result)
+        }
+    }))
     .buffer_unordered(2);
     let mut close_results = std::collections::HashMap::new();
     while let Some((id, result)) = pending.next().await {
