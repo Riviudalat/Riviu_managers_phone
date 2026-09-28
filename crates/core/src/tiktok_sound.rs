@@ -92,7 +92,7 @@ pub(crate) async fn with_deadline_budget<T>(
 ) -> anyhow::Result<T> {
     if SOUND_BUDGET.try_with(|_| ()).is_ok() {
         check_wait()?;
-        let result = work.await;
+        let result = Box::pin(work).await;
         check_wait()?;
         return result;
     }
@@ -105,7 +105,7 @@ pub(crate) async fn with_deadline_budget<T>(
         budget,
         crate::tiktok_composer::observation::with_binding(async {
             check_wait()?;
-            let result = work.await;
+            let result = Box::pin(work).await;
             check_wait()?;
             result
         }),

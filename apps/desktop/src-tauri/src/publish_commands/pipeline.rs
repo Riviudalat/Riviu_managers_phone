@@ -479,7 +479,7 @@ pub(crate) async fn run_dispatcher(
                         });
                         return riviu_core::publish_recovery::scope(
                             journal,
-                            runtime.post(a, bundle),
+                            Box::pin(runtime.post(a, bundle)),
                         )
                         .await;
                     }
@@ -490,7 +490,7 @@ pub(crate) async fn run_dispatcher(
                         None,
                     )?;
                     let mut revision = runtime.db.publish_assignment_revision(&a.id)?;
-                    let result = runtime.transfer(&a, &bundle, &mut revision).await;
+                    let result = Box::pin(runtime.transfer(&a, &bundle, &mut revision)).await;
                     if let Err(error) = &result {
                         if let Some(current) = runtime
                             .db

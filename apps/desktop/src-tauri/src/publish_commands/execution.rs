@@ -411,7 +411,7 @@ pub async fn publish_create_campaign(
                 }
                 Err(error) => {
                     let _ = fs::remove_dir_all(&copy_root);
-                    return Err(error.into());
+                    return Err(error);
                 }
             }
         }
@@ -2758,7 +2758,7 @@ async fn post_one_assignment_owned(
             }
         };
         if session.supports_element_bounds() {
-            post_through_the_composer(
+            Box::pin(post_through_the_composer(
                 control,
                 db,
                 &assignment.id,
@@ -2772,11 +2772,11 @@ async fn post_one_assignment_owned(
                 &mut before_post,
                 &progress,
                 &diagnostics,
-            )
+            ))
             .await
         } else {
             let mut before_pixel_post = || before_post(None, None);
-            post_through_the_pixel_grid(
+            Box::pin(post_through_the_pixel_grid(
                 frames,
                 session.as_ref(),
                 campaign_id,
@@ -2784,7 +2784,7 @@ async fn post_one_assignment_owned(
                 bundle,
                 &import,
                 &mut before_pixel_post,
-            )
+            ))
             .await
         }
     }).await;
@@ -3848,7 +3848,7 @@ pub(super) async fn post_through_the_composer(
                         caption: &bundle.caption,
                         screen,
                     };
-                    publish_carousel_with_sound_effect_intent_and_diagnostics(
+                    Box::pin(publish_carousel_with_sound_effect_intent_and_diagnostics(
                         session,
                         plan,
                         sound_plan,
@@ -3859,7 +3859,7 @@ pub(super) async fn post_through_the_composer(
                         &mut record_effect_intent,
                         progress,
                         diagnostics,
-                    )
+                    ))
                     .await
                 }
                 riviu_core::PublishMediaKind::Video => {
@@ -3871,7 +3871,7 @@ pub(super) async fn post_through_the_composer(
                         caption: &bundle.caption,
                         screen,
                     };
-                    publish_video_with_sound_effect_intent_and_diagnostics(
+                    Box::pin(publish_video_with_sound_effect_intent_and_diagnostics(
                         session,
                         plan,
                         video_plan.expect("video branch resolves its tuple before the first tap"),
@@ -3883,7 +3883,7 @@ pub(super) async fn post_through_the_composer(
                         &mut record_effect_intent,
                         progress,
                         diagnostics,
-                    )
+                    ))
                     .await
                 }
             }

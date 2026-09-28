@@ -105,7 +105,7 @@ pub async fn with_account_diagnostic<T>(
 ) -> (T, Option<AccountDiagnostic>) {
     ACCOUNT_DIAGNOSTIC
         .scope(std::cell::RefCell::new(None), async {
-            let result = future.await;
+            let result = Box::pin(future).await;
             (
                 result,
                 ACCOUNT_DIAGNOSTIC.with(|slot| slot.borrow().clone()),

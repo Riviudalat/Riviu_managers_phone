@@ -1531,7 +1531,7 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
             return crate::tiktok_sound::with_observation_budget(
                 stop,
                 COMPOSER_WINDOW,
-                self.type_caption_inner(caption, stop),
+                Box::pin(self.type_caption_inner(caption, stop)),
             )
             .await;
         }
@@ -1685,7 +1685,7 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
                     if let Some(back_query) = sound_plan.post_back_query() {
                         // Trill's caption page has no sound chip. Revisit its editor and
                         // return without typing again; both caption readbacks must agree.
-                        self.require_caption_unchanged(caption, stop).await?;
+                        Box::pin(self.require_caption_unchanged(caption, stop)).await?;
                         let back =
                             crate::tiktok_sound::read_sound(self.session.locate_all(back_query))
                                 .await?;
@@ -1700,12 +1700,16 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
                             EditorState::Confirmed => {}
                             EditorState::Loading => {
                                 // A positively loading editor permits reads, never Back.
-                                confirm_sound(self.session, sound_plan, &expected_title).await?;
+                                Box::pin(confirm_sound(self.session, sound_plan, &expected_title))
+                                    .await?;
                             }
                             EditorState::Unknown => {
                                 // Fresh exact caption/IME predicate is the ONLY retry authority.
                                 // Unknown transition trees retain the read-only recovery route.
-                                if self.require_caption_unchanged(caption, stop).await.is_ok() {
+                                if Box::pin(self.require_caption_unchanged(caption, stop))
+                                    .await
+                                    .is_ok()
+                                {
                                     let fresh_back = crate::tiktok_sound::read_sound(
                                         self.session.locate_all(back_query),
                                     )
@@ -1728,14 +1732,14 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
                             }
                         }
                         anyhow::ensure!(
-                            self.advance_to_post_screen(stop).await?,
+                            Box::pin(self.advance_to_post_screen(stop)).await?,
                             "sound reproof: caption page did not return"
                         );
                         self.restore_caption_cleared_by_editor(caption, stop)
                             .await?;
-                        self.require_caption_unchanged(caption, stop).await?;
+                        Box::pin(self.require_caption_unchanged(caption, stop)).await?;
                     } else {
-                        confirm_sound(self.session, sound_plan, &expected_title).await?;
+                        Box::pin(confirm_sound(self.session, sound_plan, &expected_title)).await?;
                     }
                     crate::tiktok_sound::check_wait()?;
                     Ok(())
@@ -1753,11 +1757,11 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
             crate::tiktok_sound::with_deadline_budget(
                 stop,
                 deadline,
-                self.await_final_post_button(caption, stop),
+                Box::pin(self.await_final_post_button(caption, stop)),
             )
             .await?
         } else {
-            self.await_final_post_button(caption, stop).await?
+            Box::pin(self.await_final_post_button(caption, stop)).await?
         };
         let Some(button) = button else {
             #[cfg(debug_assertions)]
@@ -1846,7 +1850,7 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
                 // After any wait, reprove caption and resolve once more so
                 // neither text nor geometry comes from before that transition.
                 let button = if waited {
-                    self.require_caption_unchanged(caption, stop).await?;
+                    Box::pin(self.require_caption_unchanged(caption, stop)).await?;
                     self.resolve_post_button(caption).await?
                 } else {
                     Some(button)
@@ -1868,7 +1872,10 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
         caption: &str,
         stop: &AtomicBool,
     ) -> anyhow::Result<()> {
-        if caption.trim().is_empty() || self.require_caption_unchanged(caption, stop).await.is_ok()
+        if caption.trim().is_empty()
+            || Box::pin(self.require_caption_unchanged(caption, stop))
+                .await
+                .is_ok()
         {
             return Ok(());
         }
@@ -1892,7 +1899,7 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
         // effect boundary, after the editor cleared an otherwise proved draft.
         anyhow::ensure!(
             matches!(
-                self.type_caption(caption, stop).await?,
+                Box::pin(self.type_caption(caption, stop)).await?,
                 CaptionOutcome::Typed
             ),
             "caption restore was not confirmed; chưa bấm Đăng"
@@ -2346,7 +2353,7 @@ pub async fn publish_carousel_with_sound_effect_intent_and_diagnostics<F>(
 where
     F: FnMut(&SoundSelectionEvidence) -> anyhow::Result<()>,
 {
-    publish_selected_media_with_sound_effect_intent(
+    Box::pin(publish_selected_media_with_sound_effect_intent(
         session,
         plan,
         sound_plan,
@@ -2358,7 +2365,7 @@ where
         before_post,
         progress,
         diagnostics,
-    )
+    ))
     .await
 }
 
@@ -2448,7 +2455,7 @@ where
     F: FnMut(&SoundSelectionEvidence) -> anyhow::Result<()>,
 {
     let _measured_video_tuple = video_plan.provenance();
-    publish_selected_media_with_sound_effect_intent(
+    Box::pin(publish_selected_media_with_sound_effect_intent(
         session,
         plan,
         sound_plan,
@@ -2460,7 +2467,7 @@ where
         before_post,
         progress,
         diagnostics,
-    )
+    ))
     .await
 }
 
@@ -2573,7 +2580,13 @@ where
                     )
                     .await?;
                 } else {
-                    choose_and_confirm_sound(session, sound_plan, pool, current_index).await?;
+                    Box::pin(choose_and_confirm_sound(
+                        session,
+                        sound_plan,
+                        pool,
+                        current_index,
+                    ))
+                    .await?;
                 }
                 Ok((sound_plan, selection))
             })

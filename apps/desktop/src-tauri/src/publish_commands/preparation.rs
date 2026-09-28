@@ -298,10 +298,7 @@ fn identity(device: &riviu_core::DeviceInfo) -> String {
 }
 impl PreparationCache {
     fn drain(&mut self) {
-        loop {
-            let Some(receiver) = &mut self.receiver else {
-                break;
-            };
+        while let Some(receiver) = &mut self.receiver {
             match receiver.try_recv() {
                 Ok(riviu_core::AppEvent::DevicesUpdated { devices }) => {
                     let next: HashMap<_, _> = devices
