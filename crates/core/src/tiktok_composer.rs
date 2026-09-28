@@ -2088,6 +2088,17 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
         stop: &AtomicBool,
         ready: impl Fn(&ElementBox) -> bool,
     ) -> anyhow::Result<Option<ElementBox>> {
+        // ZERO is the existing one-shot probe contract, not an already-expired poll.
+        if window.is_zero() {
+            if stop.load(Ordering::Relaxed) {
+                return Ok(None);
+            }
+            let element = crate::tiktok_sound::read_sound(self.session.locate(query)).await?;
+            if stop.load(Ordering::Relaxed) {
+                return Ok(None);
+            }
+            return Ok(element.filter(|element| ready(element)));
+        }
         let deadline = crate::tiktok_sound::phase_deadline(window);
         loop {
             // **Stop first.** With the order reversed a control that happened to be on screen
