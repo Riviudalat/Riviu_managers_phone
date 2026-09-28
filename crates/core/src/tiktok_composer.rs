@@ -1673,10 +1673,15 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
             return Ok(ComposerVerdict::NoPostButton);
         };
         let prepared_epoch = self.session.gui_session_epoch();
-        if self.pending_sound_proof.as_ref().is_some_and(|(plan, _)| plan.post_back_query().is_some()) {
-            // Normalize the positively observed IME before starting sound freshness time.
-            // This is a separate bounded navigation step, never a reset of final proof.
+        if let Some((sound_plan, expected_title)) = self.pending_sound_proof.clone()
+            .filter(|(plan, _)| plan.post_back_query().is_some())
+        {
+            // Normalize IME and reach a positively observed editor in bounded preparation.
+            // Neither preparation supplies the final sound proof: it is read afresh below.
             self.prepare_caption_keyboard(caption, stop).await?;
+            anyhow::ensure!(self.session.gui_session_epoch() == prepared_epoch,
+                "caption preparation session changed");
+            self.prepare_sound_editor(sound_plan, &expected_title, caption, stop).await?;
         }
         anyhow::ensure!(self.session.gui_session_epoch() == prepared_epoch,
             "caption preparation session changed");
@@ -1699,64 +1704,11 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
                 stop,
                 reproof_deadline.context("sound reproof deadline missing")?,
                 async {
-                    if let Some(back_query) = sound_plan.post_back_query() {
-                        // Trill's caption page has no sound chip. Revisit its editor and
-                        // return without typing again; both caption readbacks must agree.
-                        mark("captionBeforeBack");
-                        Box::pin(self.require_caption_unchanged(caption, stop)).await?;
-                        mark("locateCaptionBack");
-                        let back =
-                            crate::tiktok_sound::read_sound(self.session.locate_all(back_query))
-                                .await?;
-                        let [back] = back.as_slice() else {
-                            anyhow::bail!(
-                                "sound reproof: caption back control missing or ambiguous"
-                            );
-                        };
-                        mark("tapCaptionBack");
-                        self.tap_inside(back).await?;
-                        mark("inspectEditor");
-                        use crate::tiktok_sound::observation::{inspect, EditorState};
-                        match inspect(self.session, sound_plan, &expected_title, false).await? {
-                            EditorState::Confirmed => { mark("editorConfirmed"); }
-                            EditorState::Loading => {
-                                mark("editorLoading");
-                                // A positively loading editor permits reads, never Back.
-                                Box::pin(confirm_sound(self.session, sound_plan, &expected_title))
-                                    .await?;
-                            }
-                            EditorState::Unknown => {
-                                mark("unknownEditorCaptionRetryProof");
-                                // Fresh exact caption/IME predicate is the ONLY retry authority.
-                                // Unknown transition trees retain the read-only recovery route.
-                                if Box::pin(self.require_caption_unchanged(caption, stop))
-                                    .await
-                                    .is_ok()
-                                {
-                                    mark("locateCaptionBackRetry");
-                                    let fresh_back = crate::tiktok_sound::read_sound(
-                                        self.session.locate_all(back_query),
-                                    )
-                                    .await?;
-                                    let [fresh_back] = fresh_back.as_slice() else {
-                                        anyhow::bail!(
-                                            "sound reproof: caption Back retry ambiguous"
-                                        );
-                                    };
-                                    mark("tapCaptionBackRetry");
-                                    self.tap_inside(fresh_back).await?;
-                                }
-                                mark("confirmEditorTransition");
-                                crate::tiktok_sound::confirm_sound_after_transition(
-                                    self.session,
-                                    sound_plan,
-                                    &expected_title,
-                                    stop,
-                                )
-                                .await
-                                .context("final sound editor reproof")?;
-                            }
-                        }
+                    // Preparation never authorizes Post. Re-read the exact selected sound
+                    // under this fresh deadline, including when preparation just confirmed it.
+                    mark("freshSoundReadback");
+                    Box::pin(confirm_sound(self.session, sound_plan, &expected_title)).await?;
+                    if sound_plan.post_back_query().is_some() {
                         mark("returnToCaption");
                         anyhow::ensure!(
                             Box::pin(self.advance_to_post_screen(stop)).await?,
@@ -1768,9 +1720,6 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
                         anyhow::ensure!(caption_proof == CaptionOutcome::Typed,
                             "sound reproof: caption readback was not confirmed");
                         mark("captionAfterReturn");
-                    } else {
-                        mark("confirmInlineSound");
-                        Box::pin(confirm_sound(self.session, sound_plan, &expected_title)).await?;
                     }
                     mark("finalBudgetCheck");
                     crate::tiktok_sound::check_wait()?;
@@ -1913,6 +1862,65 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
             waited = true;
             sleep(POLL, stop).await;
         }
+    }
+
+    async fn prepare_sound_editor(
+        &mut self,
+        sound_plan: SoundPickerPlan,
+        expected_title: &str,
+        caption: &str,
+        stop: &AtomicBool,
+    ) -> anyhow::Result<()> {
+        let epoch = self.session.gui_session_epoch();
+        let started = Instant::now();
+        let mut phase = "captionBeforeBack";
+        let result = crate::tiktok_sound::with_observation_budget(stop, Duration::from_secs(8), async {
+            let back_query = sound_plan.post_back_query().context("sound preparation back query missing")?;
+            Box::pin(self.require_caption_unchanged(caption, stop)).await?;
+            phase = "locateCaptionBack";
+            let back = crate::tiktok_sound::read_sound(self.session.locate_all(back_query)).await?;
+            let [back] = back.as_slice() else {
+                anyhow::bail!("sound preparation: caption back control missing or ambiguous");
+            };
+            phase = "tapCaptionBack";
+            self.tap_inside(back).await?;
+            phase = "inspectEditor";
+            use crate::tiktok_sound::observation::{inspect, EditorState};
+            match inspect(self.session, sound_plan, expected_title, false).await? {
+                EditorState::Confirmed => {}
+                EditorState::Loading => {
+                    phase = "editorLoading";
+                    // Positive loading authorizes reads only, not a second Back.
+                    Box::pin(confirm_sound(self.session, sound_plan, expected_title)).await?;
+                }
+                EditorState::Unknown => {
+                    phase = "captionRetryProof";
+                    // Retain the measured conditional retry: unknown alone never authorizes Back.
+                    if Box::pin(self.require_caption_unchanged(caption, stop)).await.is_ok() {
+                        phase = "locateCaptionBackRetry";
+                        let fresh_back = crate::tiktok_sound::read_sound(self.session.locate_all(back_query)).await?;
+                        let [fresh_back] = fresh_back.as_slice() else {
+                            anyhow::bail!("sound preparation: caption Back retry ambiguous");
+                        };
+                        phase = "tapCaptionBackRetry";
+                        self.tap_inside(fresh_back).await?;
+                    }
+                    phase = "confirmEditorTransition";
+                    crate::tiktok_sound::confirm_sound_after_transition(
+                        self.session, sound_plan, expected_title, stop,
+                    ).await.context("sound editor navigation preparation")?;
+                }
+            }
+            crate::tiktok_sound::check_wait()?;
+            anyhow::ensure!(self.session.gui_session_epoch() == epoch, "sound preparation session changed");
+            phase = "editorConfirmed";
+            Ok(())
+        }).await;
+        tracing::info!(session = %epoch, package = self.plan.package, phase,
+            elapsed_ms = started.elapsed().as_millis() as u64,
+            error = ?result.as_ref().err().map(|error| format!("{error:#}")),
+            "sound editor navigation before fresh proof");
+        result
     }
 
     async fn prepare_caption_keyboard(&self, caption: &str, stop: &AtomicBool) -> anyhow::Result<()> {
