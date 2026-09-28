@@ -69,6 +69,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 mod editor_recovery;
 #[cfg(test)]
 mod editor_recovery_tests;
+pub(crate) mod observation;
 mod progress;
 mod selection;
 pub use progress::{PublishProgress, PublishProgressObserver};
@@ -357,6 +358,7 @@ impl std::error::Error for ComposerUnready {}
 /// Every locator the publish path needs, resolved before anything is opened.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ComposerPlan {
+    package: &'static str,
     wait_rendered_editor: bool,
     open: ElementQuery<'static>,
     shutter: ElementQuery<'static>,
@@ -473,6 +475,7 @@ impl ComposerPlan {
             |control: TikTokControl| labels.label(control).expect("checked above").to_query();
         let optional = |control: TikTokControl| labels.label(control).map(|label| label.to_query());
         Ok(Self {
+            package: labels.package(),
             wait_rendered_editor: labels.package() == "com.zhiliaoapp.musically"
                 && labels.resource_version() == Some("45.7.3")
                 && labels.language() == "en",
@@ -572,6 +575,7 @@ impl ComposerPlan {
         let query =
             |control: TikTokControl| labels.label(control).expect("checked above").to_query();
         Ok(Self {
+            package: labels.package(),
             wait_rendered_editor: false,
             open: query(TikTokControl::ComposerOpen),
             shutter: query(TikTokControl::ComposerShutter),
@@ -991,8 +995,11 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
     }
 
     async fn tap_inside(&mut self, element: &ElementBox) -> anyhow::Result<()> {
+        crate::tiktok_sound::check_wait()?;
+        observation::check_session(self.session)?;
         let point = (self.plan_tap)(element);
-        self.session.tap(point).await
+        self.session.tap(point).await?;
+        crate::tiktok_sound::check_wait()
     }
 
     /// Tap the composer tab and **wait until the bottom bar is gone**.
@@ -1515,6 +1522,27 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
         caption: &str,
         stop: &AtomicBool,
     ) -> anyhow::Result<CaptionOutcome> {
+        if observation::android(self.plan.package)
+            && self
+                .plan
+                .publish
+                .is_some_and(|tail| matches!(tail.caption, ElementQuery::ResourceIdSuffix(_)))
+        {
+            return crate::tiktok_sound::with_observation_budget(
+                stop,
+                COMPOSER_WINDOW,
+                self.type_caption_inner(caption, stop),
+            )
+            .await;
+        }
+        self.type_caption_inner(caption, stop).await
+    }
+
+    async fn type_caption_inner(
+        &mut self,
+        caption: &str,
+        stop: &AtomicBool,
+    ) -> anyhow::Result<CaptionOutcome> {
         let Some(query) = self.plan.publish.map(|tail| tail.caption) else {
             return Ok(CaptionOutcome::Unmeasured);
         };
@@ -1529,7 +1557,9 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
         };
         // Focusing is not optional: `type_text` writes into whichever field has focus.
         self.tap_inside(&field).await?;
+        crate::tiktok_sound::check_wait()?;
         self.session.type_text(caption).await?;
+        crate::tiktok_sound::check_wait()?;
 
         // **Equality on exactly one field, not a prefix on any field.**
         //
@@ -1545,27 +1575,29 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
         // So: exactly one node must match the locator, and its text must equal the caption.
         // A build that reformats what it stores fails closed here — which is a measurement to
         // take, not a post to publish on a guess.
-        let wanted = caption.trim();
-        let deadline = Instant::now() + COMPOSER_WINDOW;
+        let deadline = crate::tiktok_sound::phase_deadline(COMPOSER_WINDOW);
+        let mut cursor = observation::Cursor::default();
         loop {
-            let rows = self
-                .session
-                .locate_all_described(query)
-                .await
-                .unwrap_or_default();
-            if let [only] = rows.as_slice() {
-                if only
-                    .description
-                    .as_deref()
-                    .is_some_and(|text| text.trim() == wanted)
-                {
-                    return Ok(CaptionOutcome::Typed);
-                }
-            }
-            if Instant::now() >= deadline || stop.load(Ordering::Relaxed) {
+            if stop.load(Ordering::Relaxed) || Instant::now() >= deadline {
                 return Ok(CaptionOutcome::NotConfirmed);
             }
-            sleep(POLL, stop).await;
+            let values = observation::caption(
+                self.session,
+                self.plan.package,
+                query,
+                deadline,
+                stop,
+                &mut cursor,
+            )
+            .await?;
+            if matches!(values.as_deref(), Some([only]) if only.trim() == caption.trim()) {
+                return Ok(CaptionOutcome::Typed);
+            }
+            sleep(
+                POLL.min(deadline.saturating_duration_since(Instant::now())),
+                stop,
+            )
+            .await;
         }
     }
 
@@ -1640,70 +1672,94 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
                 .await;
             return Ok(ComposerVerdict::NoPostButton);
         };
+        let reproof_deadline = self
+            .pending_sound_proof
+            .as_ref()
+            .map(|_| Instant::now() + Duration::from_secs(8));
+        let reproof_epoch = self.session.gui_session_epoch();
         if let Some((sound_plan, expected_title)) = self.pending_sound_proof.clone() {
-            if let Some(back_query) = sound_plan.post_back_query() {
-                // Trill's caption page has no sound chip. Revisit its editor and
-                // return without typing again; both caption readbacks must agree.
-                self.require_caption_unchanged(caption).await?;
-                let back = self.session.locate_all(back_query).await?;
-                let [back] = back.as_slice() else {
-                    anyhow::bail!("sound reproof: caption back control missing or ambiguous");
-                };
-                self.tap_inside(back).await?;
-                if let Err(first_error) =
-                    confirm_sound(self.session, sound_plan, &expected_title).await
-                {
-                    // A missed Back leaves the exact caption page visible (live S8+, 10/09).
-                    // Re-observe before one bounded retry; an editor mismatch, unreadable
-                    // caption or unknown screen never authorizes another navigation tap.
-                    if stop.load(Ordering::Relaxed) {
-                        return Ok(ComposerVerdict::Stopped);
-                    }
-                    if self.require_caption_unchanged(caption).await.is_err() {
-                        // Trill 38.3.2, ce031713dd735a1103, 28/09/2026:
-                        // Back can expose a partial caption-layout tree while the
-                        // editor is already visible; a later read restores so9.
-                        // Unknown UI authorizes observations, never another Back.
-                        let proof = crate::tiktok_sound::confirm_sound_after_transition(
-                            self.session,
-                            sound_plan,
-                            &expected_title,
-                            stop,
-                        )
-                        .await;
-                        if stop.load(Ordering::Relaxed) {
-                            return Ok(ComposerVerdict::Stopped);
-                        }
-                        if proof.is_err() {
-                            return Err(first_error.context("final sound editor reproof"));
-                        }
-                    } else {
-                        let fresh_back = self.session.locate_all(back_query).await?;
-                        let [fresh_back] = fresh_back.as_slice() else {
-                            return Err(
-                                first_error.context("sound reproof: caption Back retry ambiguous")
+            let reproof = crate::tiktok_sound::with_deadline_budget(
+                stop,
+                reproof_deadline.context("sound reproof deadline missing")?,
+                async {
+                    if let Some(back_query) = sound_plan.post_back_query() {
+                        // Trill's caption page has no sound chip. Revisit its editor and
+                        // return without typing again; both caption readbacks must agree.
+                        self.require_caption_unchanged(caption, stop).await?;
+                        let back =
+                            crate::tiktok_sound::read_sound(self.session.locate_all(back_query))
+                                .await?;
+                        let [back] = back.as_slice() else {
+                            anyhow::bail!(
+                                "sound reproof: caption back control missing or ambiguous"
                             );
                         };
-                        self.tap_inside(fresh_back).await?;
-                        confirm_sound(self.session, sound_plan, &expected_title)
-                            .await
-                            .context("final sound editor reproof after caption Back retry")?;
+                        self.tap_inside(back).await?;
+                        use crate::tiktok_sound::observation::{inspect, EditorState};
+                        match inspect(self.session, sound_plan, &expected_title, false).await? {
+                            EditorState::Confirmed => {}
+                            EditorState::Loading => {
+                                // A positively loading editor permits reads, never Back.
+                                confirm_sound(self.session, sound_plan, &expected_title).await?;
+                            }
+                            EditorState::Unknown => {
+                                // Fresh exact caption/IME predicate is the ONLY retry authority.
+                                // Unknown transition trees retain the read-only recovery route.
+                                if self.require_caption_unchanged(caption, stop).await.is_ok() {
+                                    let fresh_back = crate::tiktok_sound::read_sound(
+                                        self.session.locate_all(back_query),
+                                    )
+                                    .await?;
+                                    let [fresh_back] = fresh_back.as_slice() else {
+                                        anyhow::bail!(
+                                            "sound reproof: caption Back retry ambiguous"
+                                        );
+                                    };
+                                    self.tap_inside(fresh_back).await?;
+                                }
+                                crate::tiktok_sound::confirm_sound_after_transition(
+                                    self.session,
+                                    sound_plan,
+                                    &expected_title,
+                                    stop,
+                                )
+                                .await
+                                .context("final sound editor reproof")?;
+                            }
+                        }
+                        anyhow::ensure!(
+                            self.advance_to_post_screen(stop).await?,
+                            "sound reproof: caption page did not return"
+                        );
+                        self.restore_caption_cleared_by_editor(caption, stop)
+                            .await?;
+                        self.require_caption_unchanged(caption, stop).await?;
+                    } else {
+                        confirm_sound(self.session, sound_plan, &expected_title).await?;
                     }
-                }
-                anyhow::ensure!(
-                    self.advance_to_post_screen(stop).await?,
-                    "sound reproof: caption page did not return"
-                );
-                self.restore_caption_cleared_by_editor(caption, stop)
-                    .await?;
-                self.require_caption_unchanged(caption).await?;
-            } else {
-                confirm_sound(self.session, sound_plan, &expected_title).await?;
+                    crate::tiktok_sound::check_wait()?;
+                    Ok(())
+                },
+            )
+            .await;
+            if stop.load(Ordering::Relaxed) {
+                return Ok(ComposerVerdict::Stopped);
             }
+            reproof?;
         }
         // Resolve after all sound/continuity reads even without a sound policy.
         // A changed caption or disappearing text-only toolbar cannot reuse a prior target.
-        let Some(button) = self.await_final_post_button(caption, stop).await? else {
+        let button = if let Some(deadline) = reproof_deadline {
+            crate::tiktok_sound::with_deadline_budget(
+                stop,
+                deadline,
+                self.await_final_post_button(caption, stop),
+            )
+            .await?
+        } else {
+            self.await_final_post_button(caption, stop).await?
+        };
+        let Some(button) = button else {
             #[cfg(debug_assertions)]
             self.trace_missing_post_button("after-sound-reproof", caption)
                 .await;
@@ -1712,6 +1768,13 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
         // The last point at which stopping is still free.
         if stop.load(Ordering::Relaxed) {
             return Ok(ComposerVerdict::Stopped);
+        }
+        if let Some(deadline) = reproof_deadline {
+            observation::check(deadline, Some(stop))?;
+            anyhow::ensure!(
+                self.session.gui_session_epoch() == reproof_epoch,
+                "sound reproof session changed"
+            );
         }
         before_post()?;
         (self.progress)(PublishProgress::SubmittingPost);
@@ -1741,17 +1804,18 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
         let Some(tail) = self.plan.publish else {
             return Ok(None);
         };
-        let normal = self.session.locate_all(tail.post_button).await?;
+        let normal =
+            crate::tiktok_sound::read_sound(self.session.locate_all(tail.post_button)).await?;
         match normal.as_slice() {
             [_] => {
                 // Android's list API deliberately leaves clickable=false because
                 // it reads geometry only. The list proves uniqueness; locate()
                 // reads actual enabled/clickable flags and current geometry.
-                return Ok(self
-                    .session
-                    .locate(tail.post_button)
-                    .await?
-                    .filter(|button| button.enabled && button.clickable));
+                return Ok(
+                    crate::tiktok_sound::read_sound(self.session.locate(tail.post_button))
+                        .await?
+                        .filter(|button| button.enabled && button.clickable),
+                );
             }
             [] => {}
             _ => return Ok(None),
@@ -1760,7 +1824,7 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
             return Ok(None);
         }
         let tree = crate::ui_automation::tree::Tree::parse(
-            self.session.hierarchy_source_snapshot().await?,
+            crate::tiktok_sound::read_sound(self.session.hierarchy_source_snapshot()).await?,
         )?;
         Ok(trill_text_post_button(&tree, caption))
     }
@@ -1770,7 +1834,7 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
         caption: &str,
         stop: &AtomicBool,
     ) -> anyhow::Result<Option<ElementBox>> {
-        let deadline = Instant::now() + COMPOSER_WINDOW;
+        let deadline = crate::tiktok_sound::phase_deadline(COMPOSER_WINDOW);
         let mut waited = false;
         loop {
             if stop.load(Ordering::Relaxed) || Instant::now() >= deadline {
@@ -1782,7 +1846,7 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
                 // After any wait, reprove caption and resolve once more so
                 // neither text nor geometry comes from before that transition.
                 let button = if waited {
-                    self.require_caption_unchanged(caption).await?;
+                    self.require_caption_unchanged(caption, stop).await?;
                     self.resolve_post_button(caption).await?
                 } else {
                     Some(button)
@@ -1804,7 +1868,8 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
         caption: &str,
         stop: &AtomicBool,
     ) -> anyhow::Result<()> {
-        if caption.trim().is_empty() || self.require_caption_unchanged(caption).await.is_ok() {
+        if caption.trim().is_empty() || self.require_caption_unchanged(caption, stop).await.is_ok()
+        {
             return Ok(());
         }
         anyhow::ensure!(
@@ -1812,12 +1877,15 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
             "Đã dừng; không nhập lại caption"
         );
         let query = self.plan.publish.context("caption plan missing")?.caption;
-        let package = self.session.active_app_bundle().await?;
-        let tree = crate::ui_automation::tree::Tree::parse(
-            self.session.hierarchy_source_snapshot().await?,
-        )?;
         anyhow::ensure!(
-            caption_is_empty_after_editor(&tree, &package, query),
+            observation::caption_cleared(
+                self.session,
+                self.plan.package,
+                query,
+                crate::tiktok_sound::phase_deadline(Duration::from_secs(8)),
+                stop
+            )
+            .await?,
             "sound reproof: caption changed or unreadable"
         );
         // Only the previously approved caption may be restored, before the
@@ -1832,79 +1900,27 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
         Ok(())
     }
 
-    async fn require_caption_unchanged(&self, caption: &str) -> anyhow::Result<()> {
+    async fn require_caption_unchanged(
+        &self,
+        caption: &str,
+        stop: &AtomicBool,
+    ) -> anyhow::Result<()> {
         let query = self.plan.publish.context("caption plan missing")?.caption;
-        let observed = self.session.locate_all_described(query).await;
-        #[cfg(debug_assertions)]
-        if !matches!(&observed, Ok(rows) if matches!(rows.as_slice(), [only] if only.description.as_deref().is_some_and(|value| caption_readback_matches(value, caption))))
-        {
-            // Keep the actual failed read separately: the following hierarchy
-            // snapshot is a later observation and may already have changed.
-            self.trace_caption_readback(query, caption, &observed);
-            self.trace_missing_post_button("caption-reproof-mismatch", caption)
-                .await;
-        }
-        let rows = observed?;
+        let deadline = crate::tiktok_sound::phase_deadline(Duration::from_secs(8));
+        let values = observation::caption(
+            self.session,
+            self.plan.package,
+            query,
+            deadline,
+            stop,
+            &mut observation::Cursor::default(),
+        )
+        .await?;
         anyhow::ensure!(
-            matches!(rows.as_slice(), [only] if only.description.as_deref().is_some_and(|value| caption_readback_matches(value, caption))),
-            "sound reproof: caption changed or unreadable"
+            matches!(values.as_deref(), Some([only]) if caption_readback_matches(only, caption)),
+            "sound reproof: caption changed, ambiguous or unreadable"
         );
         Ok(())
-    }
-
-    #[cfg(debug_assertions)]
-    fn trace_caption_readback(
-        &self,
-        query: ElementQuery<'_>,
-        caption: &str,
-        observed: &anyhow::Result<Vec<ElementBox>>,
-    ) {
-        let Some(folder) = std::env::var_os("RIVIU_PUBLISH_PICKER_TRACE") else {
-            return;
-        };
-        let result = (|| {
-            use sha2::{Digest, Sha256};
-            let folder = std::path::PathBuf::from(folder);
-            anyhow::ensure!(
-                folder.is_absolute(),
-                "Caption trace directory must be absolute"
-            );
-            let scope = self.session.gui_scope();
-            let device = scope
-                .as_ref()
-                .map(|scope| scope.device_id.as_str())
-                .unwrap_or("unscoped");
-            let rows = observed.as_ref().ok().map(|rows| {
-                rows.iter()
-                    .map(|row| {
-                        serde_json::json!({
-                            "text":row.description,
-                            "x":row.x,"y":row.y,"width":row.width,"height":row.height,
-                            "enabled":row.enabled,"clickable":row.clickable,
-                        })
-                    })
-                    .collect::<Vec<_>>()
-            });
-            let metadata = serde_json::json!({
-                "stage":"caption-reproof-mismatch",
-                "scope":scope,
-                "sessionEpoch":self.session.gui_session_epoch(),
-                "captionQuery":format!("{query:?}"),
-                "captionSha256":format!("{:x}",Sha256::digest(caption.as_bytes())),
-                "observedRows":rows,
-                "readError":observed.as_ref().err().map(|error| format!("{error:#}")),
-            });
-            let name = format!(
-                "caption-readback-{:x}.json",
-                Sha256::digest(device.as_bytes())
-            );
-            std::fs::create_dir_all(&folder)?;
-            std::fs::write(folder.join(name), serde_json::to_vec_pretty(&metadata)?)?;
-            Ok::<_, anyhow::Error>(())
-        })();
-        if let Err(error) = result {
-            tracing::warn!(%error, "could not capture failed caption readback");
-        }
     }
 
     /// Back out until the bottom tab bar is visible again.
@@ -2065,15 +2081,17 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
         stop: &AtomicBool,
         ready: impl Fn(&ElementBox) -> bool,
     ) -> anyhow::Result<Option<ElementBox>> {
-        let deadline = Instant::now() + window;
+        let deadline = crate::tiktok_sound::phase_deadline(window);
         loop {
             // **Stop first.** With the order reversed a control that happened to be on screen
             // won over an already-set stop flag, so asking the run to stop while the Post
             // button was rendered handed that button straight back to the caller.
-            if stop.load(Ordering::Relaxed) {
+            if stop.load(Ordering::Relaxed) || Instant::now() >= deadline {
                 return Ok(None);
             }
-            if let Some(element) = self.session.locate(query).await? {
+            if let Some(element) =
+                crate::tiktok_sound::read_sound(self.session.locate(query)).await?
+            {
                 if ready(&element) {
                     return Ok(Some(element));
                 }
@@ -2747,35 +2765,54 @@ where
     if !caption.trim().is_empty() {
         (composer.progress)(PublishProgress::EnteringCaption);
     }
-    loop {
-        if crate::publish_recovery::active()
-            && composer.require_caption_unchanged(caption).await.is_ok()
-        {
+    let bounded_caption = observation::android(composer.plan.package)
+        && composer
+            .plan
+            .publish
+            .is_some_and(|tail| matches!(tail.caption, ElementQuery::ResourceIdSuffix(_)));
+    let caption_work = async {
+        loop {
+            if crate::publish_recovery::active()
+                && composer
+                    .require_caption_unchanged(caption, stop)
+                    .await
+                    .is_ok()
+            {
+                break;
+            }
+            match composer.type_caption(caption, stop).await {
+                Err(error) if crate::publish_recovery::retry(&error, stop).await? => continue,
+                Err(error) => return Err(error),
+                Ok(CaptionOutcome::NotConfirmed) => {
+                    if crate::publish_recovery::retry(
+                        &crate::publish_recovery::retryable_error(
+                            "caption_readback_timeout",
+                            "caption readback timeout before Post",
+                        ),
+                        stop,
+                    )
+                    .await?
+                    {
+                        continue;
+                    }
+                    return Ok(Some(ComposerVerdict::CaptionNotConfirmed));
+                }
+                Ok(CaptionOutcome::Typed) => (composer.progress)(PublishProgress::CaptionConfirmed),
+                Ok(CaptionOutcome::NothingToSay) => {}
+                Ok(CaptionOutcome::Unmeasured) => return Ok(Some(ComposerVerdict::PostUnmeasured)),
+                Ok(CaptionOutcome::NoField) => return Ok(Some(ComposerVerdict::NoCaptionField)),
+            }
             break;
         }
-        match composer.type_caption(caption, stop).await {
-            Err(error) if crate::publish_recovery::retry(&error, stop).await? => continue,
-            Err(error) => return Err(error),
-            Ok(CaptionOutcome::NotConfirmed) => {
-                if crate::publish_recovery::retry(
-                    &crate::publish_recovery::retryable_error(
-                        "caption_readback_timeout",
-                        "caption readback timeout before Post",
-                    ),
-                    stop,
-                )
-                .await?
-                {
-                    continue;
-                }
-                return Ok(ComposerVerdict::CaptionNotConfirmed);
-            }
-            Ok(CaptionOutcome::Typed) => (composer.progress)(PublishProgress::CaptionConfirmed),
-            Ok(CaptionOutcome::NothingToSay) => {}
-            Ok(CaptionOutcome::Unmeasured) => return Ok(ComposerVerdict::PostUnmeasured),
-            Ok(CaptionOutcome::NoField) => return Ok(ComposerVerdict::NoCaptionField),
-        }
-        break;
+        Ok(None)
+    };
+    let caption_verdict = if bounded_caption {
+        crate::tiktok_sound::with_observation_budget(stop, COMPOSER_WINDOW, caption_work).await?
+    } else {
+        caption_work.await?
+    };
+    if let Some(verdict) = caption_verdict {
+        return Ok(verdict);
     }
     crate::publish_recovery::step("prePost", Some("captionConfirmed"))?;
     (composer.progress)(PublishProgress::CheckingBeforePost);

@@ -17,6 +17,7 @@ use tokio::time::Instant;
 use crate::driver::{ElementBox, ElementQuery, UiSession};
 use crate::publish::SoundCandidate;
 
+pub(crate) mod observation;
 mod recent;
 mod selection_recovery;
 #[cfg(test)]
@@ -66,28 +67,68 @@ pub(crate) async fn with_sound_budget<T>(
     stop: &AtomicBool,
     work: impl std::future::Future<Output = anyhow::Result<T>>,
 ) -> anyhow::Result<T> {
+    with_observation_budget(stop, SOUND_WINDOW, work).await
+}
+
+pub(crate) async fn with_readback_budget<T>(
+    stop: &AtomicBool,
+    work: impl std::future::Future<Output = anyhow::Result<T>>,
+) -> anyhow::Result<T> {
+    with_observation_budget(stop, READBACK_WINDOW, work).await
+}
+
+pub(crate) async fn with_observation_budget<T>(
+    stop: &AtomicBool,
+    window: Duration,
+    work: impl std::future::Future<Output = anyhow::Result<T>>,
+) -> anyhow::Result<T> {
+    with_deadline_budget(stop, Instant::now() + window, work).await
+}
+
+pub(crate) async fn with_deadline_budget<T>(
+    stop: &AtomicBool,
+    deadline: Instant,
+    work: impl std::future::Future<Output = anyhow::Result<T>>,
+) -> anyhow::Result<T> {
+    if SOUND_BUDGET.try_with(|_| ()).is_ok() {
+        check_wait()?;
+        let result = work.await;
+        check_wait()?;
+        return result;
+    }
     let stopped = Arc::new(AtomicBool::new(stop.load(Ordering::Relaxed)));
     let budget = SoundBudget {
-        deadline: Instant::now() + SOUND_WINDOW,
+        deadline,
         stopped: stopped.clone(),
     };
-    let task = SOUND_BUDGET.scope(budget, work);
+    let task = SOUND_BUDGET.scope(
+        budget,
+        crate::tiktok_composer::observation::with_binding(async {
+            check_wait()?;
+            let result = work.await;
+            check_wait()?;
+            result
+        }),
+    );
     tokio::pin!(task);
     let mut poll = tokio::time::interval(POLL);
     loop {
         tokio::select! {
-            result=&mut task => return result,
+            result=&mut task => {
+                if stop.load(Ordering::Relaxed) { return Err(SoundStopped.into()); }
+                return result;
+            },
             _=poll.tick()=>stopped.store(stop.load(Ordering::Relaxed),Ordering::Relaxed),
         }
     }
 }
 
-fn phase_deadline(window: Duration) -> Instant {
+pub(crate) fn phase_deadline(window: Duration) -> Instant {
     SOUND_BUDGET
         .try_with(|b| b.deadline)
         .unwrap_or_else(|_| Instant::now() + window)
 }
-fn check_wait() -> anyhow::Result<()> {
+pub(crate) fn check_wait() -> anyhow::Result<()> {
     SOUND_BUDGET
         .try_with(|b| {
             if b.stopped.load(Ordering::Relaxed) {
@@ -103,7 +144,7 @@ fn check_wait() -> anyhow::Result<()> {
         })
         .unwrap_or(Ok(()))
 }
-async fn read_sound<T>(
+pub(crate) async fn read_sound<T>(
     work: impl std::future::Future<Output = anyhow::Result<T>>,
 ) -> anyhow::Result<T> {
     check_wait()?;
@@ -135,6 +176,7 @@ async fn sound_tap_armed(
     before_tap: &mut (dyn FnMut() + Send),
 ) -> anyhow::Result<()> {
     check_wait()?;
+    crate::tiktok_composer::observation::check_session(session)?;
     before_tap();
     session.tap(point).await?;
     check_wait()
@@ -1117,21 +1159,7 @@ pub(crate) async fn confirm_sound_after_transition(
     expected_title: &str,
     stop: &AtomicBool,
 ) -> anyhow::Result<()> {
-    let proof = tokio::time::timeout(
-        READBACK_WINDOW,
-        confirm_sound(session, plan, expected_title),
-    );
-    tokio::pin!(proof);
-    let mut poll = tokio::time::interval(POLL);
-    loop {
-        if stop.load(Ordering::Relaxed) {
-            return Err(SoundStopped.into());
-        }
-        tokio::select! {
-            result = &mut proof => return result.context("sound transition readback timed out")?,
-            _ = poll.tick() => {},
-        }
-    }
+    with_readback_budget(stop, confirm_sound(session, plan, expected_title)).await
 }
 
 /// Re-read the editor chip. The exact title and exactly one node are both required.
@@ -1140,43 +1168,7 @@ pub async fn confirm_sound(
     plan: SoundPickerPlan,
     expected_title: &str,
 ) -> anyhow::Result<()> {
-    let expected = expected_title.trim();
-    anyhow::ensure!(!expected.is_empty(), "selected sound title is empty");
-    let deadline = phase_deadline(READBACK_WINDOW);
-    loop {
-        check_wait()?;
-        let rows = if plan.dynamic {
-            let mut observed = Vec::new();
-            let mut ids = std::collections::HashSet::new();
-            for candidate in MEASURED_SOUND_PICKERS
-                .iter()
-                .filter(|p| p.plan.package == plan.package)
-            {
-                if ids.insert(candidate.plan.current_title_id) {
-                    observed.extend(
-                        read_sound(session.locate_all_described(ElementQuery::ResourceIdSuffix(
-                            candidate.plan.current_title_id,
-                        )))
-                        .await?,
-                    );
-                }
-            }
-            observed
-        } else {
-            read_sound(
-                session.locate_all_described(ElementQuery::ResourceIdSuffix(plan.current_title_id)),
-            )
-            .await?
-        };
-        if matches!(rows.as_slice(), [only] if only.description.as_deref().is_some_and(|value| value.trim() == expected))
-        {
-            return Ok(());
-        }
-        if Instant::now() >= deadline {
-            anyhow::bail!("selected sound was not confirmed on the editor: expected {expected:?}, observed {:?}", rows.iter().map(|row| row.description.as_deref()).collect::<Vec<_>>());
-        }
-        tokio::time::sleep(POLL).await;
-    }
+    observation::confirm(session, plan, expected_title).await
 }
 
 fn assemble_pool(
