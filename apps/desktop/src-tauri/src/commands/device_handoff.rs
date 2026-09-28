@@ -1,5 +1,7 @@
 //! Manual replacement of old runs uses their existing Stop owners and receipts.
+use super::operation_stop::StopTiming;
 use super::*;
+use futures_util::StreamExt;
 use std::collections::HashSet;
 use tauri::Manager;
 
@@ -60,10 +62,12 @@ pub(crate) async fn prepare_manual_devices(
     udids: Vec<String>,
     _handoff: &tokio::sync::MutexGuard<'static, ()>,
 ) -> Result<OperationStopResult, CommandError> {
+    let timing = StopTiming::new("handoff");
     if udids.is_empty() || udids.len() > 500 {
         return Err(CommandError::invalid_argument("Chọn từ 1 đến 500 thiết bị"));
     }
     let selected: HashSet<_> = udids.into_iter().collect();
+    let source_timing = timing.phase("source", None);
     let roster = state
         .control
         .list_devices()
@@ -142,6 +146,7 @@ pub(crate) async fn prepare_manual_devices(
         }
     }
     log::info!("handoff source scan: active_sources={} held_publish={} candidates={} selected_operations={} elapsed_ms={}", active_source_count, held_count, candidate_count, operations.len(), sources_started.elapsed().as_millis());
+    drop(source_timing);
     operations.sort();
     // Request every relevant cancellation before waiting for any closer. Runs
     // with interdependent steps are cancelled as a unit by their original owner.
@@ -150,6 +155,7 @@ pub(crate) async fn prepare_manual_devices(
         operation_devices,
         ..Default::default()
     };
+    let revoke_timing = timing.phase("revoke", None);
     for id in &stopped.operations {
         // A handoff owns all selected old runs. Reuse their still-current
         // revocation even when individual closers blocked one another; starting
@@ -187,6 +193,8 @@ pub(crate) async fn prepare_manual_devices(
         state.nurture.stop(id);
         state.end_overlay_session(id).await?;
     }
+    drop(revoke_timing);
+    let wait_timing = timing.phase("wait", None);
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(125);
     let mut not_released = HashSet::new();
     loop {
@@ -222,12 +230,28 @@ pub(crate) async fn prepare_manual_devices(
         }
         tokio::time::sleep(std::time::Duration::from_millis(250)).await;
     }
+    drop(wait_timing);
+    let close_timing = timing.phase("close", None);
+    // Only settled devices enter this stream. A unique device has one closer,
+    // and all results are drained before handing any device to new work.
+    let mut ready: Vec<_> = active.difference(&not_released).collect();
+    ready.sort();
+    let mut pending =
+        futures_util::stream::iter(ready.into_iter().enumerate().map(|(slot, id)| {
+            let stopped = &stopped;
+            let device_timing = timing.phase("total", Some(slot));
+            async move {
+                let result = close_handoff_device(state, id, stopped, device_timing).await;
+                (id.clone(), result)
+            }
+        }))
+        .buffer_unordered(2);
     let mut close_results = std::collections::HashMap::new();
-    for id in active.difference(&not_released) {
-        // Multiple stopped publications can block each other's individual
-        // closer. The explicit handoff owns all of these old stop generations.
-        close_results.insert(id.clone(), close_handoff_device(state, id, &stopped).await);
+    while let Some((id, result)) = pending.next().await {
+        close_results.insert(id, result);
     }
+    drop(pending);
+    drop(close_timing);
     let mut devices: Vec<_> = selected
         .into_iter()
         .map(|udid| {
@@ -270,13 +294,24 @@ async fn close_handoff_device(
     state: &AppState,
     udid: &str,
     authorized: &HandoffStops,
+    timing: StopTiming,
 ) -> Result<(), CommandError> {
+    let wait_timing = timing.phase("wait", None);
     let context = state
         .control
         .try_acquire_exclusive_keeping_stream(udid, DeviceWorkOwner::ManualControl)
         .await
         .map_err(CommandError::from)?;
+    drop(wait_timing);
     let result = async {
+        let queue_timing = timing.phase("closeQueue", None);
+        let _permit = super::operation_stop::PHYSICAL_CLOSES
+            .acquire()
+            .await
+            .map_err(CommandError::operation)?;
+        drop(queue_timing);
+        let _close_timing = timing.phase("close", None);
+        // Recheck every owner/marker after queueing with the lease still held.
         if state
             .nurture
             .list_status()
@@ -287,6 +322,7 @@ async fn close_handoff_device(
                 "Có phiên nuôi mới xuất hiện trong lúc nhả máy",
             ));
         }
+        let source_timing = timing.phase("source", None);
         let source_ids = state
             .db
             .active_operation_source_ids()
@@ -317,6 +353,7 @@ async fn close_handoff_device(
             }
         }
         drop(scan_timing);
+        drop(source_timing);
         let mut proofs = Vec::new();
         for hold in state
             .db

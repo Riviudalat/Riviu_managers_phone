@@ -3,6 +3,52 @@ use std::collections::HashSet;
 use tauri::Manager;
 static ACTIVE_STOPS: std::sync::LazyLock<parking_lot::Mutex<HashSet<String>>> =
     std::sync::LazyLock::new(|| parking_lot::Mutex::new(HashSet::new()));
+// Share the physical-close budget across Stop and manual handoff. Lease waiters
+// do not consume slots, so a busy device cannot block independent closures.
+pub(super) static PHYSICAL_CLOSES: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(2);
+
+/// Correlate phases using a fresh trace ID and request-local device ordinal only.
+/// Never log serials, operation payloads, stop generations or error text here.
+pub(super) struct StopTiming {
+    scope: &'static str,
+    phase: &'static str,
+    trace: uuid::Uuid,
+    device_slot: Option<usize>,
+    started: std::time::Instant,
+}
+impl StopTiming {
+    pub(super) fn new(scope: &'static str) -> Self {
+        Self {
+            scope,
+            phase: "total",
+            trace: uuid::Uuid::new_v4(),
+            device_slot: None,
+            started: std::time::Instant::now(),
+        }
+    }
+
+    pub(super) fn phase(&self, phase: &'static str, device_slot: Option<usize>) -> Self {
+        Self {
+            scope: self.scope,
+            phase,
+            trace: self.trace,
+            device_slot: device_slot.or(self.device_slot),
+            started: std::time::Instant::now(),
+        }
+    }
+}
+impl Drop for StopTiming {
+    fn drop(&mut self) {
+        log::info!(
+            "stop timing: scope={} trace={} phase={} device_slot={:?} elapsed_ms={}",
+            self.scope,
+            self.trace,
+            self.phase,
+            self.device_slot,
+            self.started.elapsed().as_millis()
+        );
+    }
+}
 struct StopGuard(String);
 impl Drop for StopGuard {
     fn drop(&mut self) {
@@ -441,12 +487,15 @@ pub async fn operation_stop(
     state: State<'_, AppState>,
     operation_id: String,
 ) -> Result<OperationStopResult, CommandError> {
+    let timing = StopTiming::new("operationStop");
     let admission = state.ensure_accepting_work()?;
+    let source_timing = timing.phase("source", None);
     let detail = super::jobs::read_operation_run(&state, &operation_id)?
         .ok_or_else(|| err("Không tìm thấy tác vụ"))?;
     use riviu_core::OperationRunKind as Kind;
     let source = detail.summary.source_id.clone();
     let udids = source_devices(&state.db, &detail).map_err(err)?;
+    drop(source_timing);
     let result = OperationStopResult {
         operation_id: operation_id.clone(),
         state: "stopping".into(),
@@ -461,6 +510,7 @@ pub async fn operation_stop(
             .collect(),
     };
     // Claim before spawning. Repeated clicks share the current stop request.
+    let revoke_timing = timing.phase("revoke", None);
     let (result, claimed) = claim_stop_result(
         &state.db,
         detail.summary.kind,
@@ -536,6 +586,7 @@ pub async fn operation_stop(
             Ok(())
         }
         .await;
+        drop(revoke_timing);
         if let Err(error) = cancelled {
             result.state = "failed".into();
             for device in &mut result.devices {
@@ -543,8 +594,14 @@ pub async fn operation_stop(
             }
         } else {
             let stop_marker = result.stop_marker.clone();
-            let futures = udids.iter().map(|udid| {
-                close_stopped_device(&state, &operation_id, udid, stop_marker.as_deref())
+            let futures = udids.iter().enumerate().map(|(slot, udid)| {
+                close_stopped_device(
+                    &state,
+                    &operation_id,
+                    udid,
+                    stop_marker.as_deref(),
+                    timing.phase("total", Some(slot)),
+                )
             });
             use futures_util::StreamExt;
             let mut pending: futures_util::stream::FuturesUnordered<_> = futures.collect();
@@ -566,6 +623,7 @@ pub async fn operation_stop(
         if let Ok(raw) = serde_json::to_string(&result) {
             let _ = state.db.set_setting(&key(&operation_id), &raw);
         }
+        drop(timing);
     });
     Ok(initial)
 }
@@ -575,10 +633,12 @@ async fn close_stopped_device(
     operation_id: &str,
     udid: &str,
     expected_publish_marker: Option<&str>,
+    timing: StopTiming,
 ) -> StopDeviceResult {
     let control = &state.control;
     let db = &state.db;
     let result: Result<(), String> = async {
+        let wait_timing = timing.phase("wait", None);
         let publish_marker = expected_publish_marker;
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
         loop {
@@ -587,7 +647,14 @@ async fn close_stopped_device(
                 .await
             {
                 Ok(context) => {
+                    drop(wait_timing);
                     let closed: Result<(), String> = async {
+                        let queue_timing = timing.phase("closeQueue", None);
+                        let _permit = PHYSICAL_CLOSES.acquire().await.map_err(|e| e.to_string())?;
+                        drop(queue_timing);
+                        let _close_timing = timing.phase("close", None);
+                        // Revalidate after waiting for capacity while retaining the
+                        // exclusive context; no receipt is released by the queue.
                         if state
                             .nurture
                             .list_status()
@@ -612,6 +679,7 @@ async fn close_stopped_device(
                         }
                         // A queued or newly started operation after cancellation still owns
                         // its target scope even during a gap between device leases.
+                        let source_timing = timing.phase("source", None);
                         let source_ids = db
                             .active_operation_source_ids()
                             .map_err(|e| e.to_string())?;
@@ -637,6 +705,7 @@ async fn close_stopped_device(
                             }
                         }
                         drop(scan_timing);
+                        drop(source_timing);
                         // Other campaigns' unresolved uploads are never part of this cancellation.
                         let guard = db.publish_device_guard(udid).map_err(|e| e.to_string())?;
                         let own = operation_id.strip_prefix("publish:");
